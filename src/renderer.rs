@@ -6,6 +6,7 @@ const WINDOW_POS_Y: i32 = 96;
 const WINDOW_STEP_X: i32 = 14;
 const WINDOW_STEP_Y: i32 = 10;
 const STATUS_BAR_HEIGHT: i32 = 28;
+const TITLE_BAR_HEIGHT: i32 = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowLayer {
@@ -140,6 +141,60 @@ impl Renderer {
             .map(|w| w.layer)
     }
 
+    pub fn cursor_pos(&self) -> (i32, i32) {
+        (self.cursor_x, self.cursor_y)
+    }
+
+    pub fn hit_test_top_window(&self, x: i32, y: i32) -> Option<u32> {
+        for w in self.windows.iter().rev() {
+            let right = w.x + w.width as i32;
+            let bottom = w.y + w.height as i32;
+            if x >= w.x && y >= w.y && x < right && y < bottom {
+                return Some(w.id);
+            }
+        }
+        None
+    }
+
+    pub fn is_title_bar_hit(&self, id: u32, x: i32, y: i32) -> bool {
+        let Some(w) = self.windows.iter().find(|w| w.id == id) else {
+            return false;
+        };
+        if w.layer != WindowLayer::App {
+            return false;
+        }
+        let right = w.x + w.width as i32;
+        let title_bottom = w.y + TITLE_BAR_HEIGHT;
+        x >= w.x && y >= w.y && x < right && y < title_bottom
+    }
+
+    pub fn window_pos(&self, id: u32) -> Option<(i32, i32)> {
+        self.windows.iter().find(|w| w.id == id).map(|w| (w.x, w.y))
+    }
+
+    pub fn bring_to_front(&mut self, id: u32) {
+        let new_z = self.next_z();
+        if let Some(w) = self.windows.iter_mut().find(|w| w.id == id) {
+            w.z = new_z;
+            self.sort_windows_by_z();
+            self.render_full();
+        }
+    }
+
+    pub fn move_window_to(&mut self, id: u32, x: i32, y: i32) {
+        if let Some(w) = self.windows.iter_mut().find(|w| w.id == id) {
+            let max_x = self.width.saturating_sub(w.width as i32);
+            let mut min_y = 0;
+            if w.layer == WindowLayer::App {
+                min_y = STATUS_BAR_HEIGHT;
+            }
+            let max_y = self.height.saturating_sub(w.height as i32);
+            w.x = clamp_i32(x, 0, max_x);
+            w.y = clamp_i32(y, min_y, max_y.max(min_y));
+            self.render_full();
+        }
+    }
+
     pub fn move_cursor_by(&mut self, dx: i32, dy: i32) {
         let next_x = clamp_i32(self.cursor_x + dx, 0, self.width - 1);
         let next_y = clamp_i32(self.cursor_y - dy, 0, self.height - 1);
@@ -192,7 +247,19 @@ impl Renderer {
                         continue;
                     }
                     let bb_idx = (y * self.stride + x) as usize;
-                    let src = surface.pixels[sy * surface.width + sx];
+                    let mut src = surface.pixels[sy * surface.width + sx];
+                    if surface.layer == WindowLayer::App {
+                        if sy < TITLE_BAR_HEIGHT as usize {
+                            src = blend_argb(src | 0xFF00_0000, 0xFF20_2430);
+                        }
+                        if sy == 0
+                            || sx == 0
+                            || sy + 1 == surface.height
+                            || sx + 1 == surface.width
+                        {
+                            src = 0xFFAA_AFC5;
+                        }
+                    }
                     self.back_buffer[bb_idx] = src | 0xFF00_0000;
                 }
             }

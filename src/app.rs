@@ -7,6 +7,13 @@ use crate::ipc_proto::{
 };
 use crate::renderer::{Renderer, WindowLayer};
 
+#[derive(Clone, Copy)]
+struct DragState {
+    window_id: u32,
+    grab_dx: i32,
+    grab_dy: i32,
+}
+
 pub struct KagamiApp {
     renderer: Renderer,
     input: InputState,
@@ -15,6 +22,8 @@ pub struct KagamiApp {
     next_window_id: u32,
     demo_windows_created: bool,
     secure_input_mode: bool,
+    prev_left_down: bool,
+    drag_state: Option<DragState>,
 }
 
 impl KagamiApp {
@@ -27,6 +36,8 @@ impl KagamiApp {
             next_window_id: 1,
             demo_windows_created: false,
             secure_input_mode: false,
+            prev_left_down: false,
+            drag_state: None,
         }
     }
 
@@ -63,6 +74,7 @@ impl KagamiApp {
                     if let Some((dx, dy)) = self.input.consume_mouse(packet) {
                         self.renderer.move_cursor_by(dx, dy);
                     }
+                    self.handle_pointer_buttons(packet.left());
                 }
                 Ok(None) => {}
                 Err(err) => {
@@ -182,6 +194,30 @@ impl KagamiApp {
                 println!("[KAGAMI] secure input mode: OFF");
             }
         }
+    }
+
+    fn handle_pointer_buttons(&mut self, left_down: bool) {
+        let (cx, cy) = self.renderer.cursor_pos();
+        if !self.prev_left_down && left_down {
+            if let Some(window_id) = self.renderer.hit_test_top_window(cx, cy) {
+                self.renderer.bring_to_front(window_id);
+                if self.renderer.is_title_bar_hit(window_id, cx, cy)
+                    && let Some((wx, wy)) = self.renderer.window_pos(window_id)
+                {
+                    self.drag_state = Some(DragState {
+                        window_id,
+                        grab_dx: cx - wx,
+                        grab_dy: cy - wy,
+                    });
+                }
+            }
+        } else if self.prev_left_down && !left_down {
+            self.drag_state = None;
+        } else if left_down && let Some(drag) = self.drag_state {
+            self.renderer
+                .move_window_to(drag.window_id, cx - drag.grab_dx, cy - drag.grab_dy);
+        }
+        self.prev_left_down = left_down;
     }
 
     fn inject_demo_ipc(&mut self) {
