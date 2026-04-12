@@ -1,11 +1,29 @@
 use swiftlib::vga;
-use crate::theme::Theme;
 
+const BG_COLOR: u32 = 0x001E_1E2E;
 const WINDOW_POS_X: i32 = 96;
 const WINDOW_POS_Y: i32 = 96;
 const WINDOW_STEP_X: i32 = 14;
 const WINDOW_STEP_Y: i32 = 10;
 const STATUS_BAR_HEIGHT: i32 = 28;
+const TITLE_BAR_HEIGHT: usize = 18;
+const WINDOW_CORNER_RADIUS: usize = 4;
+const STATUS_BAR_COLOR: u32 = 0xFF1A_1A24;
+const WINDOW_BORDER_COLOR: u32 = 0xFFB9_BDCB;
+const TITLE_TOP_COLOR: u32 = 0xFFE9_EAF1;
+const TITLE_BOTTOM_COLOR: u32 = 0xFFD7_DAE5;
+const TITLE_SEPARATOR_COLOR: u32 = 0xFFB6_BAC8;
+const TRAFFIC_RED: u32 = 0xFFFF_5F57;
+const TRAFFIC_YELLOW: u32 = 0xFFFEB_C2E;
+const TRAFFIC_GREEN: u32 = 0xFF28_C840;
+const TRAFFIC_RING: u32 = 0xFF95_95A2;
+const TRAFFIC_DIAMETER: isize = 8;
+const TRAFFIC_GAP: isize = 8;
+const TRAFFIC_OFFSET_X: isize = 7;
+const TRAFFIC_OFFSET_Y: isize = 8;
+const TRAFFIC_RING_WIDTH: isize = 1;
+const SHADOW_NEAR_ALPHA: u32 = 56;
+const SHADOW_FAR_ALPHA: u32 = 28;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowLayer {
@@ -65,11 +83,10 @@ pub struct Renderer {
     cursor_y: i32,
     cursor_sprite: CursorSprite,
     windows: Vec<WindowSurface>,
-    theme: Theme,
 }
 
 impl Renderer {
-    pub fn new(fb_ptr: *mut u32, info: vga::FbInfo, theme: Theme) -> Self {
+    pub fn new(fb_ptr: *mut u32, info: vga::FbInfo) -> Self {
         Self {
             fb_ptr,
             width: info.width as i32,
@@ -80,7 +97,6 @@ impl Renderer {
             cursor_y: (info.height / 2) as i32,
             cursor_sprite: CursorSprite::from_generated(),
             windows: Vec::new(),
-            theme,
         }
     }
 
@@ -223,7 +239,7 @@ impl Renderer {
             return false;
         }
         let right = w.x + w.width as i32;
-        let title_bottom = w.y + self.theme.title_bar_height as i32;
+        let title_bottom = w.y + TITLE_BAR_HEIGHT as i32;
         x >= w.x && y >= w.y && x < right && y < title_bottom
     }
 
@@ -266,7 +282,7 @@ impl Renderer {
     }
 
     fn render_full(&mut self) {
-        self.clear_back_buffer(self.theme.background_color);
+        self.clear_back_buffer(BG_COLOR);
         self.draw_status_bar_base();
         self.draw_windows_to_back_buffer();
         self.draw_cursor_to_back_buffer(self.cursor_x, self.cursor_y);
@@ -287,7 +303,7 @@ impl Renderer {
             }
             for x in 0..self.width {
                 let idx = (y * self.stride + x) as usize;
-                self.back_buffer[idx] = self.theme.status_bar_color;
+                self.back_buffer[idx] = STATUS_BAR_COLOR;
             }
         }
     }
@@ -301,7 +317,6 @@ impl Renderer {
                     self.height,
                     self.stride,
                     surface,
-                    &self.theme,
                 );
             }
             for sy in 0..surface.height {
@@ -316,15 +331,14 @@ impl Renderer {
                         continue;
                     }
                     if surface.layer == WindowLayer::App
-                        && is_rounded_corner_pixel(sx, sy, surface.width, self.theme.corner_radius)
+                        && is_rounded_corner_pixel(sx, sy, surface.width, WINDOW_CORNER_RADIUS)
                     {
                         continue;
                     }
                     let bb_idx = (y * self.stride + x) as usize;
                     let mut src = surface.pixels[sy * surface.width + sx];
                     if surface.layer == WindowLayer::App {
-                        if let Some(chrome) =
-                            app_chrome_pixel(sx, sy, surface.width, surface.height, &self.theme)
+                        if let Some(chrome) = app_chrome_pixel(sx, sy, surface.width, surface.height)
                         {
                             src = chrome;
                         }
@@ -402,7 +416,6 @@ fn draw_app_window_shadow(
     screen_h: i32,
     stride: i32,
     surface: &WindowSurface,
-    theme: &Theme,
 ) {
     let right = surface.x + surface.width as i32;
     let bottom = surface.y + surface.height as i32;
@@ -423,33 +436,29 @@ fn draw_app_window_shadow(
             }
             let near_h = x >= surface.x - 1 && x <= right;
             let near_v = y >= surface.y - 1 && y <= bottom;
-            let alpha = if near_h && near_v {
-                theme.shadow_near_alpha as u32
-            } else {
-                theme.shadow_far_alpha as u32
-            };
+            let alpha = if near_h && near_v { SHADOW_NEAR_ALPHA } else { SHADOW_FAR_ALPHA };
             let bb_idx = (y * stride + x) as usize;
             back_buffer[bb_idx] = blend_argb(back_buffer[bb_idx], (alpha << 24) | 0x0000_0000);
         }
     }
 }
 
-fn app_chrome_pixel(sx: usize, sy: usize, width: usize, height: usize, theme: &Theme) -> Option<u32> {
+fn app_chrome_pixel(sx: usize, sy: usize, width: usize, height: usize) -> Option<u32> {
     if sy == 0 || sx == 0 || sy + 1 == height || sx + 1 == width {
-        return Some(theme.window_border_color);
+        return Some(WINDOW_BORDER_COLOR);
     }
-    if sy < theme.title_bar_height {
-        if sy + 1 == theme.title_bar_height {
-            return Some(theme.title_separator_color);
+    if sy < TITLE_BAR_HEIGHT {
+        if sy + 1 == TITLE_BAR_HEIGHT {
+            return Some(TITLE_SEPARATOR_COLOR);
         }
-        let top = theme.title_top_color;
-        let bottom = theme.title_bottom_color;
+        let top = TITLE_TOP_COLOR;
+        let bottom = TITLE_BOTTOM_COLOR;
         let t = sy as u32;
-        let h = theme.title_bar_height as u32;
+        let h = TITLE_BAR_HEIGHT as u32;
         let r = lerp_channel((top >> 16) & 0xFF, (bottom >> 16) & 0xFF, t, h);
         let g = lerp_channel((top >> 8) & 0xFF, (bottom >> 8) & 0xFF, t, h);
         let b = lerp_channel(top & 0xFF, bottom & 0xFF, t, h);
-        if let Some(c) = traffic_light_pixel(sx, sy, theme) {
+        if let Some(c) = traffic_light_pixel(sx, sy) {
             return Some(c);
         }
         return Some(0xFF00_0000 | (r << 16) | (g << 8) | b);
@@ -457,18 +466,18 @@ fn app_chrome_pixel(sx: usize, sy: usize, width: usize, height: usize, theme: &T
     None
 }
 
-fn traffic_light_pixel(sx: usize, sy: usize, theme: &Theme) -> Option<u32> {
-    let radius = (theme.traffic_diameter as isize).max(2) / 2;
-    let step = theme.traffic_diameter as isize + theme.traffic_gap as isize;
-    let cx0 = theme.traffic_offset_x as isize + radius;
-    let cy = theme.traffic_offset_y as isize;
-    let ring_outer = radius + theme.traffic_ring_width as isize;
+fn traffic_light_pixel(sx: usize, sy: usize) -> Option<u32> {
+    let radius = TRAFFIC_DIAMETER.max(2) / 2;
+    let step = TRAFFIC_DIAMETER + TRAFFIC_GAP;
+    let cx0 = TRAFFIC_OFFSET_X + radius;
+    let cy = TRAFFIC_OFFSET_Y;
+    let ring_outer = radius + TRAFFIC_RING_WIDTH;
     let fill_r2 = radius * radius;
     let ring_r2 = ring_outer * ring_outer;
     let buttons = [
-        (cx0, cy, theme.traffic_red),
-        (cx0 + step, cy, theme.traffic_yellow),
-        (cx0 + step * 2, cy, theme.traffic_green),
+        (cx0, cy, TRAFFIC_RED),
+        (cx0 + step, cy, TRAFFIC_YELLOW),
+        (cx0 + step * 2, cy, TRAFFIC_GREEN),
     ];
     let px = sx as isize;
     let py = sy as isize;
@@ -480,7 +489,7 @@ fn traffic_light_pixel(sx: usize, sy: usize, theme: &Theme) -> Option<u32> {
             return Some(color);
         }
         if d2 <= ring_r2 {
-            return Some(theme.traffic_ring);
+            return Some(TRAFFIC_RING);
         }
     }
     None
