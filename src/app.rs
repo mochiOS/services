@@ -12,6 +12,7 @@ const FLUSH_FULL_HEADER_SIZE: usize = 12;
 const FLUSH_CHUNK_HEADER_SIZE: usize = 20;
 const IPC_MAX_PIXELS_FULL: usize = (IPC_BUF_SIZE - FLUSH_FULL_HEADER_SIZE) / 4;
 const IPC_MAX_PIXELS_CHUNK: usize = (IPC_BUF_SIZE - FLUSH_CHUNK_HEADER_SIZE) / 4;
+const MOUSE_BURST_LIMIT: usize = 8;
 
 #[derive(Clone, Copy)]
 struct DragState {
@@ -69,6 +70,10 @@ impl KagamiApp {
         loop {
             let mut did_work = false;
 
+            if self.process_mouse_events_prioritized() {
+                did_work = true;
+            }
+
             let sc_opt = match keyboard::read_scancode_tap() {
                 Ok(Some(sc)) => Some(sc),
                 Ok(None) => keyboard::read_scancode(),
@@ -93,23 +98,6 @@ impl KagamiApp {
                 }
             }
 
-            match mouse::read_packet_raw() {
-                Ok(Some(packet)) => {
-                    did_work = true;
-                    if let Some((dx, dy)) = self.input.consume_mouse(packet) {
-                        self.renderer.move_cursor_by(dx, dy);
-                    }
-                    self.handle_pointer_buttons(packet.left());
-                }
-                Ok(None) => {}
-                Err(err) => {
-                    if !self.warned_mouse_err {
-                        eprintln!("[KAGAMI] mouse read error: {}", err as i64);
-                        self.warned_mouse_err = true;
-                    }
-                }
-            }
-
             if self.process_ipc_messages() {
                 did_work = true;
             }
@@ -120,6 +108,42 @@ impl KagamiApp {
                 task::yield_now();
             }
         }
+    }
+
+    fn process_mouse_events_prioritized(&mut self) -> bool {
+        let mut handled = false;
+        let mut sum_dx = 0i32;
+        let mut sum_dy = 0i32;
+        let mut latest_left: Option<bool> = None;
+        for _ in 0..MOUSE_BURST_LIMIT {
+            match mouse::read_packet_raw() {
+                Ok(Some(packet)) => {
+                    handled = true;
+                    if let Some((dx, dy)) = self.input.consume_mouse(packet) {
+                        sum_dx = sum_dx.saturating_add(dx);
+                        sum_dy = sum_dy.saturating_add(dy);
+                    }
+                    latest_left = Some(packet.left());
+                }
+                Ok(None) => break,
+                Err(err) => {
+                    if !self.warned_mouse_err {
+                        eprintln!("[KAGAMI] mouse read error: {}", err as i64);
+                        self.warned_mouse_err = true;
+                    }
+                    break;
+                }
+            }
+        }
+        if handled {
+            if sum_dx != 0 || sum_dy != 0 {
+                self.renderer.move_cursor_by(sum_dx, sum_dy);
+            }
+            if let Some(left) = latest_left {
+                self.handle_pointer_buttons(left);
+            }
+        }
+        handled
     }
 
     fn process_ipc_messages(&mut self) -> bool {
