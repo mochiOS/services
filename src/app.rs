@@ -1,4 +1,4 @@
-use swiftlib::{ipc, keyboard, mouse, task};
+use swiftlib::{ipc, keyboard, process, mouse, task};
 
 use crate::input::InputState;
 use crate::ipc_proto::{
@@ -49,7 +49,7 @@ impl KagamiApp {
     pub fn run(&mut self) {
         self.renderer.initialize();
         println!(
-            "[KAGAMI] started (ESC to exit, D to inject demo frame) tid={}",
+            "[KAGAMI] started (ESC to exit, D demo, V ViewKit) tid={}",
             task::gettid()
         );
 
@@ -70,6 +70,9 @@ impl KagamiApp {
                 }
                 if sc == 0x20 || sc == 0xA0 {
                     self.inject_demo_ipc();
+                }
+                if sc == 0x2F {
+                    self.launch_viewkit_ui_test();
                 }
             }
 
@@ -338,6 +341,13 @@ impl KagamiApp {
                 x0 += w;
             }
             y0 += h;
+        }
+    }
+
+    fn launch_viewkit_ui_test(&self) {
+        match process::exec("/Applications/ViewKit.app/entry.elf") {
+            Ok(pid) => println!("[KAGAMI] launched ViewKit ui_test pid={}", pid),
+            Err(_) => eprintln!("[KAGAMI] failed to launch ViewKit ui_test"),
         }
     }
 }
