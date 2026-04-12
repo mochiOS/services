@@ -29,6 +29,7 @@ pub struct KagamiApp {
     secure_input_mode: bool,
     prev_left_down: bool,
     drag_state: Option<DragState>,
+    viewkit_key_down: bool,
 }
 
 impl KagamiApp {
@@ -43,6 +44,7 @@ impl KagamiApp {
             secure_input_mode: false,
             prev_left_down: false,
             drag_state: None,
+            viewkit_key_down: false,
         }
     }
 
@@ -71,8 +73,12 @@ impl KagamiApp {
                 if sc == 0x20 || sc == 0xA0 {
                     self.inject_demo_ipc();
                 }
-                if sc == 0x2F {
+                if sc == 0x2F && !self.viewkit_key_down {
+                    self.viewkit_key_down = true;
                     self.launch_viewkit_ui_test();
+                }
+                if sc == 0xAF {
+                    self.viewkit_key_down = false;
                 }
             }
 
@@ -345,7 +351,10 @@ impl KagamiApp {
     }
 
     fn launch_viewkit_ui_test(&self) {
-        match process::exec("/Applications/ViewKit.app/entry.elf") {
+        let kagami_tid = task::gettid();
+        let arg_tid = format!("--kagami-tid={}", kagami_tid);
+        let args = [arg_tid.as_str()];
+        match process::exec_with_args("/Applications/ViewKit.app/entry.elf", &args) {
             Ok(pid) => println!("[KAGAMI] launched ViewKit ui_test pid={}", pid),
             Err(_) => eprintln!("[KAGAMI] failed to launch ViewKit ui_test"),
         }
