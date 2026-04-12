@@ -3,7 +3,8 @@ use swiftlib::{ipc, keyboard, process, mouse, task};
 use crate::input::InputState;
 use crate::ipc_proto::{
     IPC_BUF_SIZE, LAYER_APP, LAYER_STATUS, LAYER_SYSTEM, LAYER_WALLPAPER, OP_REQ_CREATE_WINDOW,
-    OP_REQ_FLUSH, OP_REQ_FLUSH_CHUNK, OP_RES_WINDOW_CREATED,
+    OP_REQ_ATTACH_SHARED, OP_REQ_FLUSH, OP_REQ_FLUSH_CHUNK, OP_REQ_PRESENT_SHARED,
+    OP_RES_WINDOW_CREATED,
 };
 use crate::renderer::{Renderer, WindowLayer};
 
@@ -237,6 +238,61 @@ impl KagamiApp {
                 self.renderer.update_window_chunk_pixels(
                     window_id, width, height, chunk_x, chunk_y, chunk_w, chunk_h, &pixels,
                 );
+            }
+            OP_REQ_ATTACH_SHARED => {
+                if len < 16 {
+                    return;
+                }
+                let window_id = u32::from_le_bytes([
+                    self.ipc_buf[4],
+                    self.ipc_buf[5],
+                    self.ipc_buf[6],
+                    self.ipc_buf[7],
+                ]);
+                let width = u16::from_le_bytes([self.ipc_buf[8], self.ipc_buf[9]]) as usize;
+                let height = u16::from_le_bytes([self.ipc_buf[10], self.ipc_buf[11]]) as usize;
+                let page_count = u16::from_le_bytes([self.ipc_buf[12], self.ipc_buf[13]]) as usize;
+                if page_count == 0 || page_count > 128 {
+                    return;
+                }
+                let needed = 16usize.saturating_add(page_count.saturating_mul(8));
+                if len < needed {
+                    return;
+                }
+                let mut phys_pages = Vec::with_capacity(page_count);
+                let mut off = 16usize;
+                for _ in 0..page_count {
+                    let p = u64::from_le_bytes([
+                        self.ipc_buf[off],
+                        self.ipc_buf[off + 1],
+                        self.ipc_buf[off + 2],
+                        self.ipc_buf[off + 3],
+                        self.ipc_buf[off + 4],
+                        self.ipc_buf[off + 5],
+                        self.ipc_buf[off + 6],
+                        self.ipc_buf[off + 7],
+                    ]);
+                    phys_pages.push(p);
+                    off += 8;
+                }
+                if !self
+                    .renderer
+                    .attach_shared_surface(window_id, width, height, &phys_pages)
+                {
+                    eprintln!("[KAGAMI] attach_shared_surface failed window={}", window_id);
+                }
+            }
+            OP_REQ_PRESENT_SHARED => {
+                if len < 8 {
+                    return;
+                }
+                let window_id = u32::from_le_bytes([
+                    self.ipc_buf[4],
+                    self.ipc_buf[5],
+                    self.ipc_buf[6],
+                    self.ipc_buf[7],
+                ]);
+                self.renderer.present_shared_surface(window_id);
             }
             _ => {}
         }

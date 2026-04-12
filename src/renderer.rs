@@ -1,4 +1,5 @@
 use swiftlib::vga;
+use swiftlib::privileged;
 
 const BG_COLOR: u32 = 0x001E_1E2E;
 const WINDOW_POS_X: i32 = 96;
@@ -71,6 +72,12 @@ pub struct WindowSurface {
     pub width: usize,
     pub height: usize,
     pub pixels: Vec<u32>,
+    shared: Option<SharedSurface>,
+}
+
+struct SharedSurface {
+    virt_addr: u64,
+    page_count: u64,
 }
 
 pub struct Renderer {
@@ -128,6 +135,7 @@ impl Renderer {
             width,
             height,
             pixels,
+            shared: None,
         });
         self.sort_windows_by_z();
         self.render_full();
@@ -139,6 +147,7 @@ impl Renderer {
             win.width = width;
             win.height = height;
             win.pixels = pixels;
+            win.shared = None;
             win.z = new_z;
             self.sort_windows_by_z();
             self.render_full();
@@ -180,6 +189,7 @@ impl Renderer {
                 win.width = width;
                 win.height = height;
                 win.pixels = vec![0xFF30_3048; width * height];
+                win.shared = None;
             }
             for row in 0..chunk_h {
                 let src_start = row * chunk_w;
@@ -203,6 +213,95 @@ impl Renderer {
             full[dst_start..dst_end].copy_from_slice(&pixels[src_start..src_end]);
         }
         self.create_window(id, WindowLayer::App, width, height, full);
+    }
+
+    pub fn attach_shared_surface(
+        &mut self,
+        id: u32,
+        width: usize,
+        height: usize,
+        phys_pages: &[u64],
+    ) -> bool {
+        if width == 0 || height == 0 || phys_pages.is_empty() {
+            return false;
+        }
+        let total_bytes = match width.checked_mul(height).and_then(|v| v.checked_mul(4)) {
+            Some(v) => v as u64,
+            None => return false,
+        };
+        let mapped_bytes = (phys_pages.len() as u64).saturating_mul(4096);
+        if mapped_bytes < total_bytes {
+            return false;
+        }
+
+        let self_tid = swiftlib::task::gettid();
+        let virt_addr = unsafe { privileged::map_physical_pages(self_tid, phys_pages, 0) };
+        if (virt_addr as i64) < 0 || virt_addr == 0 {
+            return false;
+        }
+        let page_count = phys_pages.len() as u64;
+
+        if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
+            win.width = width;
+            win.height = height;
+            if win.pixels.len() != width * height {
+                win.pixels = vec![0xFF30_3048; width * height];
+            }
+            win.shared = Some(SharedSurface {
+                virt_addr,
+                page_count,
+            });
+            return true;
+        }
+
+        let mut pixels = vec![0xFF30_3048; width * height];
+        if let Some(first) = pixels.get_mut(0) {
+            *first = 0xFF22_2233;
+        }
+        let z = self.next_z();
+        let x = WINDOW_POS_X + ((id as i32 - 1) * WINDOW_STEP_X);
+        let y = WINDOW_POS_Y + ((id as i32 - 1) * WINDOW_STEP_Y);
+        self.windows.push(WindowSurface {
+            id,
+            x,
+            y,
+            z,
+            layer: WindowLayer::App,
+            width,
+            height,
+            pixels,
+            shared: Some(SharedSurface {
+                virt_addr,
+                page_count,
+            }),
+        });
+        self.sort_windows_by_z();
+        true
+    }
+
+    pub fn present_shared_surface(&mut self, id: u32) {
+        let new_z = self.next_z();
+        let Some(win) = self.windows.iter_mut().find(|w| w.id == id) else {
+            return;
+        };
+        let Some(shared) = win.shared.as_ref() else {
+            return;
+        };
+        let total_pixels = win.width.saturating_mul(win.height);
+        let mapped_pixels = (shared.page_count as usize).saturating_mul(4096) / 4;
+        if mapped_pixels < total_pixels {
+            return;
+        }
+        let src = unsafe { core::slice::from_raw_parts(shared.virt_addr as *const u32, total_pixels) };
+        if win.pixels.len() != total_pixels {
+            win.pixels.resize(total_pixels, 0xFF30_3048);
+        }
+        for (dst, s) in win.pixels.iter_mut().zip(src.iter()) {
+            *dst = *s | 0xFF00_0000;
+        }
+        win.z = new_z;
+        self.sort_windows_by_z();
+        self.render_full();
     }
 
     pub fn layer_of_window(&self, id: u32) -> Option<WindowLayer> {
