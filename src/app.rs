@@ -3,9 +3,14 @@ use swiftlib::{ipc, keyboard, mouse, task};
 use crate::input::InputState;
 use crate::ipc_proto::{
     IPC_BUF_SIZE, LAYER_APP, LAYER_STATUS, LAYER_SYSTEM, LAYER_WALLPAPER, OP_REQ_CREATE_WINDOW,
-    OP_REQ_FLUSH, OP_RES_WINDOW_CREATED,
+    OP_REQ_FLUSH, OP_REQ_FLUSH_CHUNK, OP_RES_WINDOW_CREATED,
 };
 use crate::renderer::{Renderer, WindowLayer};
+
+const FLUSH_FULL_HEADER_SIZE: usize = 12;
+const FLUSH_CHUNK_HEADER_SIZE: usize = 20;
+const IPC_MAX_PIXELS_FULL: usize = (IPC_BUF_SIZE - FLUSH_FULL_HEADER_SIZE) / 4;
+const IPC_MAX_PIXELS_CHUNK: usize = (IPC_BUF_SIZE - FLUSH_CHUNK_HEADER_SIZE) / 4;
 
 #[derive(Clone, Copy)]
 struct DragState {
@@ -129,8 +134,8 @@ impl KagamiApp {
                 let req_w = u16::from_le_bytes([self.ipc_buf[4], self.ipc_buf[5]]) as usize;
                 let req_h = u16::from_le_bytes([self.ipc_buf[6], self.ipc_buf[7]]) as usize;
                 let requested_layer = if len >= 9 { self.ipc_buf[8] } else { LAYER_APP };
-                let width = req_w.clamp(8, 96);
-                let height = req_h.clamp(8, 96);
+                let width = req_w.clamp(8, 1024);
+                let height = req_h.clamp(8, 1024);
                 let privilege = task::get_thread_privilege(sender_tid);
                 let layer = sanitize_layer_request(requested_layer, privilege);
                 let window_id = self.next_window_id;
@@ -161,8 +166,7 @@ impl KagamiApp {
                 let height = u16::from_le_bytes([self.ipc_buf[10], self.ipc_buf[11]]) as usize;
                 let pixel_count = width.saturating_mul(height);
                 let needed = 12usize.saturating_add(pixel_count.saturating_mul(4));
-                let max_pixels = (IPC_BUF_SIZE.saturating_sub(12)) / 4;
-                if width == 0 || height == 0 || pixel_count > max_pixels || len < needed {
+                if width == 0 || height == 0 || pixel_count > IPC_MAX_PIXELS_FULL || len < needed {
                     return;
                 }
                 let mut pixels = Vec::with_capacity(pixel_count);
@@ -179,6 +183,51 @@ impl KagamiApp {
                 }
                 self.renderer
                     .update_window_pixels(window_id, width, height, pixels);
+            }
+            OP_REQ_FLUSH_CHUNK => {
+                if len < FLUSH_CHUNK_HEADER_SIZE {
+                    return;
+                }
+                let window_id = u32::from_le_bytes([
+                    self.ipc_buf[4],
+                    self.ipc_buf[5],
+                    self.ipc_buf[6],
+                    self.ipc_buf[7],
+                ]);
+                let width = u16::from_le_bytes([self.ipc_buf[8], self.ipc_buf[9]]) as usize;
+                let height = u16::from_le_bytes([self.ipc_buf[10], self.ipc_buf[11]]) as usize;
+                let chunk_x = u16::from_le_bytes([self.ipc_buf[12], self.ipc_buf[13]]) as usize;
+                let chunk_y = u16::from_le_bytes([self.ipc_buf[14], self.ipc_buf[15]]) as usize;
+                let chunk_w = u16::from_le_bytes([self.ipc_buf[16], self.ipc_buf[17]]) as usize;
+                let chunk_h = u16::from_le_bytes([self.ipc_buf[18], self.ipc_buf[19]]) as usize;
+                let pixel_count = chunk_w.saturating_mul(chunk_h);
+                let needed = FLUSH_CHUNK_HEADER_SIZE.saturating_add(pixel_count.saturating_mul(4));
+                if width == 0
+                    || height == 0
+                    || chunk_w == 0
+                    || chunk_h == 0
+                    || pixel_count > IPC_MAX_PIXELS_CHUNK
+                    || chunk_x.saturating_add(chunk_w) > width
+                    || chunk_y.saturating_add(chunk_h) > height
+                    || len < needed
+                {
+                    return;
+                }
+                let mut pixels = Vec::with_capacity(pixel_count);
+                let mut off = FLUSH_CHUNK_HEADER_SIZE;
+                for _ in 0..pixel_count {
+                    let px = u32::from_le_bytes([
+                        self.ipc_buf[off],
+                        self.ipc_buf[off + 1],
+                        self.ipc_buf[off + 2],
+                        self.ipc_buf[off + 3],
+                    ]);
+                    pixels.push(px | 0xFF00_0000);
+                    off += 4;
+                }
+                self.renderer.update_window_chunk_pixels(
+                    window_id, width, height, chunk_x, chunk_y, chunk_w, chunk_h, &pixels,
+                );
             }
             _ => {}
         }
@@ -223,10 +272,10 @@ impl KagamiApp {
 
     fn inject_demo_ipc(&mut self) {
         let self_tid = task::gettid();
-        let width_a: u16 = 46;
-        let height_a: u16 = 22;
-        let width_b: u16 = 44;
-        let height_b: u16 = 22;
+        let width_a: u16 = 120;
+        let height_a: u16 = 80;
+        let width_b: u16 = 104;
+        let height_b: u16 = 72;
 
         if !self.demo_windows_created {
             let mut create_a = [0u8; 9];
@@ -245,37 +294,51 @@ impl KagamiApp {
             self.demo_windows_created = true;
         }
 
-        let mut flush_a = vec![0u8; 12 + (width_a as usize * height_a as usize * 4)];
-        flush_a[0..4].copy_from_slice(&OP_REQ_FLUSH.to_le_bytes());
-        flush_a[4..8].copy_from_slice(&1u32.to_le_bytes());
-        flush_a[8..10].copy_from_slice(&width_a.to_le_bytes());
-        flush_a[10..12].copy_from_slice(&height_a.to_le_bytes());
-        let mut off_a = 12usize;
-        for y in 0..height_a as usize {
-            for x in 0..width_a as usize {
-                let checker = ((x / 2) + (y / 2)) & 1;
-                let c: u32 = if checker == 0 { 0x0066_CCFF } else { 0x0022_3344 };
-                flush_a[off_a..off_a + 4].copy_from_slice(&(c | 0xFF00_0000).to_le_bytes());
-                off_a += 4;
-            }
-        }
-        let _ = ipc::ipc_send(self_tid, &flush_a);
+        self.send_checkerboard_chunked(self_tid, 1, width_a as usize, height_a as usize, 0x0066_CCFF, 0x0022_3344);
+        self.send_checkerboard_chunked(self_tid, 2, width_b as usize, height_b as usize, 0x00FF_8866, 0x0055_2233);
+    }
 
-        let mut flush_b = vec![0u8; 12 + (width_b as usize * height_b as usize * 4)];
-        flush_b[0..4].copy_from_slice(&OP_REQ_FLUSH.to_le_bytes());
-        flush_b[4..8].copy_from_slice(&2u32.to_le_bytes());
-        flush_b[8..10].copy_from_slice(&width_b.to_le_bytes());
-        flush_b[10..12].copy_from_slice(&height_b.to_le_bytes());
-        let mut off_b = 12usize;
-        for y in 0..height_b as usize {
-            for x in 0..width_b as usize {
-                let checker = ((x / 2) + (y / 2)) & 1;
-                let c: u32 = if checker == 0 { 0x00FF_8866 } else { 0x0055_2233 };
-                flush_b[off_b..off_b + 4].copy_from_slice(&(c | 0xFF00_0000).to_le_bytes());
-                off_b += 4;
+    fn send_checkerboard_chunked(
+        &self,
+        target_tid: u64,
+        window_id: u32,
+        width: usize,
+        height: usize,
+        c0: u32,
+        c1: u32,
+    ) {
+        let max_chunk_pixels = IPC_MAX_PIXELS_CHUNK.max(1);
+        let chunk_w = width.min(64).max(1);
+        let chunk_h = (max_chunk_pixels / chunk_w).max(1);
+        let mut y0 = 0usize;
+        while y0 < height {
+            let h = (height - y0).min(chunk_h);
+            let mut x0 = 0usize;
+            while x0 < width {
+                let w = (width - x0).min(chunk_w);
+                let mut msg = vec![0u8; FLUSH_CHUNK_HEADER_SIZE + (w * h * 4)];
+                msg[0..4].copy_from_slice(&OP_REQ_FLUSH_CHUNK.to_le_bytes());
+                msg[4..8].copy_from_slice(&window_id.to_le_bytes());
+                msg[8..10].copy_from_slice(&(width as u16).to_le_bytes());
+                msg[10..12].copy_from_slice(&(height as u16).to_le_bytes());
+                msg[12..14].copy_from_slice(&(x0 as u16).to_le_bytes());
+                msg[14..16].copy_from_slice(&(y0 as u16).to_le_bytes());
+                msg[16..18].copy_from_slice(&(w as u16).to_le_bytes());
+                msg[18..20].copy_from_slice(&(h as u16).to_le_bytes());
+                let mut off = FLUSH_CHUNK_HEADER_SIZE;
+                for y in 0..h {
+                    for x in 0..w {
+                        let checker = (((x0 + x) / 2) + ((y0 + y) / 2)) & 1;
+                        let c: u32 = if checker == 0 { c0 } else { c1 };
+                        msg[off..off + 4].copy_from_slice(&(c | 0xFF00_0000).to_le_bytes());
+                        off += 4;
+                    }
+                }
+                let _ = ipc::ipc_send(target_tid, &msg);
+                x0 += w;
             }
+            y0 += h;
         }
-        let _ = ipc::ipc_send(self_tid, &flush_b);
     }
 }
 

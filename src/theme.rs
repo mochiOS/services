@@ -15,6 +15,11 @@ pub struct Theme {
     pub traffic_yellow: u32,
     pub traffic_green: u32,
     pub traffic_ring: u32,
+    pub traffic_diameter: usize,
+    pub traffic_gap: usize,
+    pub traffic_offset_x: usize,
+    pub traffic_offset_y: usize,
+    pub traffic_ring_width: usize,
     pub shadow_near_alpha: u8,
     pub shadow_far_alpha: u8,
     pub title_bar_height: usize,
@@ -34,6 +39,11 @@ impl Default for Theme {
             traffic_yellow: 0xFFFEB_C2E,
             traffic_green: 0xFF28_C840,
             traffic_ring: 0xFF95_95A2,
+            traffic_diameter: 8,
+            traffic_gap: 8,
+            traffic_offset_x: 7,
+            traffic_offset_y: 8,
+            traffic_ring_width: 1,
             shadow_near_alpha: 56,
             shadow_far_alpha: 28,
             title_bar_height: 18,
@@ -90,6 +100,11 @@ fn apply_theme_text(theme: &mut Theme, text: &str) {
             "traffic_yellow" => apply_u32(value, &mut theme.traffic_yellow),
             "traffic_green" => apply_u32(value, &mut theme.traffic_green),
             "traffic_ring" => apply_u32(value, &mut theme.traffic_ring),
+            "traffic_diameter" => apply_usize_min(value, &mut theme.traffic_diameter, 2),
+            "traffic_gap" => apply_usize(value, &mut theme.traffic_gap),
+            "traffic_offset_x" => apply_usize(value, &mut theme.traffic_offset_x),
+            "traffic_offset_y" => apply_usize(value, &mut theme.traffic_offset_y),
+            "traffic_ring_width" => apply_usize(value, &mut theme.traffic_ring_width),
             "shadow_near_alpha" => apply_u8(value, &mut theme.shadow_near_alpha),
             "shadow_far_alpha" => apply_u8(value, &mut theme.shadow_far_alpha),
             "title_bar_height" => apply_usize(value, &mut theme.title_bar_height),
@@ -108,6 +123,12 @@ fn apply_u32(src: &str, dst: &mut u32) {
 fn apply_usize(src: &str, dst: &mut usize) {
     if let Some(v) = parse_u32(src) {
         *dst = v as usize;
+    }
+}
+
+fn apply_usize_min(src: &str, dst: &mut usize, min: usize) {
+    if let Some(v) = parse_u32(src) {
+        *dst = (v as usize).max(min);
     }
 }
 

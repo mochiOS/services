@@ -8,6 +8,18 @@ traffic_red = 0xFF5F57
 traffic_yellow = 0xFEBC2E
 traffic_green = 0x28C840
 traffic_ring = 0x9595A2
+
+# traffic controls
+# - diameter: 丸の直径(px)
+# - gap: 丸と丸の間隔(px)
+# - offset_x, offset_y: 1個目(赤)の中心位置
+# - ring_width: 外周リング太さ
+traffic_diameter = 8
+traffic_gap = 8
+traffic_offset_x = 7
+traffic_offset_y = 8
+traffic_ring_width = 1
+
 shadow_near_alpha = 56
 shadow_far_alpha = 28
 title_bar_height = 18

@@ -131,6 +131,64 @@ impl Renderer {
         self.create_window(id, WindowLayer::App, width, height, pixels);
     }
 
+    pub fn update_window_chunk_pixels(
+        &mut self,
+        id: u32,
+        width: usize,
+        height: usize,
+        chunk_x: usize,
+        chunk_y: usize,
+        chunk_w: usize,
+        chunk_h: usize,
+        pixels: &[u32],
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        if chunk_w == 0 || chunk_h == 0 {
+            return;
+        }
+        if chunk_x >= width || chunk_y >= height {
+            return;
+        }
+        if chunk_x.saturating_add(chunk_w) > width || chunk_y.saturating_add(chunk_h) > height {
+            return;
+        }
+        if pixels.len() != chunk_w.saturating_mul(chunk_h) {
+            return;
+        }
+
+        let new_z = self.next_z();
+        if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
+            if win.width != width || win.height != height {
+                win.width = width;
+                win.height = height;
+                win.pixels = vec![0xFF30_3048; width * height];
+            }
+            for row in 0..chunk_h {
+                let src_start = row * chunk_w;
+                let src_end = src_start + chunk_w;
+                let dst_start = (chunk_y + row) * width + chunk_x;
+                let dst_end = dst_start + chunk_w;
+                win.pixels[dst_start..dst_end].copy_from_slice(&pixels[src_start..src_end]);
+            }
+            win.z = new_z;
+            self.sort_windows_by_z();
+            self.render_full();
+            return;
+        }
+
+        let mut full = vec![0xFF30_3048; width * height];
+        for row in 0..chunk_h {
+            let src_start = row * chunk_w;
+            let src_end = src_start + chunk_w;
+            let dst_start = (chunk_y + row) * width + chunk_x;
+            let dst_end = dst_start + chunk_w;
+            full[dst_start..dst_end].copy_from_slice(&pixels[src_start..src_end]);
+        }
+        self.create_window(id, WindowLayer::App, width, height, full);
+    }
+
     pub fn layer_of_window(&self, id: u32) -> Option<WindowLayer> {
         self.windows.iter().find(|w| w.id == id).map(|w| w.layer)
     }
@@ -400,10 +458,17 @@ fn app_chrome_pixel(sx: usize, sy: usize, width: usize, height: usize, theme: &T
 }
 
 fn traffic_light_pixel(sx: usize, sy: usize, theme: &Theme) -> Option<u32> {
+    let radius = (theme.traffic_diameter as isize).max(2) / 2;
+    let step = theme.traffic_diameter as isize + theme.traffic_gap as isize;
+    let cx0 = theme.traffic_offset_x as isize + radius;
+    let cy = theme.traffic_offset_y as isize;
+    let ring_outer = radius + theme.traffic_ring_width as isize;
+    let fill_r2 = radius * radius;
+    let ring_r2 = ring_outer * ring_outer;
     let buttons = [
-        (8isize, 8isize, theme.traffic_red),
-        (14isize, 8isize, theme.traffic_yellow),
-        (20isize, 8isize, theme.traffic_green),
+        (cx0, cy, theme.traffic_red),
+        (cx0 + step, cy, theme.traffic_yellow),
+        (cx0 + step * 2, cy, theme.traffic_green),
     ];
     let px = sx as isize;
     let py = sy as isize;
@@ -411,10 +476,10 @@ fn traffic_light_pixel(sx: usize, sy: usize, theme: &Theme) -> Option<u32> {
         let dx = px - cx;
         let dy = py - cy;
         let d2 = dx * dx + dy * dy;
-        if d2 <= 7 {
+        if d2 <= fill_r2 {
             return Some(color);
         }
-        if d2 <= 10 {
+        if d2 <= ring_r2 {
             return Some(theme.traffic_ring);
         }
     }
