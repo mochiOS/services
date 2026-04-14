@@ -1,4 +1,4 @@
-use swiftlib::{ipc, keyboard, mouse, process, task};
+use swiftlib::{ipc, keyboard, mouse, privileged, process, task};
 
 use crate::input::InputState;
 use crate::ipc_proto::{
@@ -356,12 +356,50 @@ impl KagamiApp {
                 if width == 0 || height == 0 {
                     return;
                 }
-                self.pending_shared_attach = Some(PendingSharedAttach {
-                    sender_tid,
-                    window_id,
-                    width,
-                    height,
-                });
+                let sender_priv = task::get_thread_privilege(sender_tid);
+                if sender_priv <= 1 {
+                    // Service/Core 側は従来どおり「送信元がページを用意して送る」方式
+                    self.pending_shared_attach = Some(PendingSharedAttach {
+                        sender_tid,
+                        window_id,
+                        width,
+                        height,
+                    });
+                } else {
+                    // User 側は Kagami が共有面を確保し、ipc_send_pages でユーザーへ配布する
+                    let total_bytes = match width.checked_mul(height).and_then(|v| v.checked_mul(4)) {
+                        Some(v) => v,
+                        None => return,
+                    };
+                    let page_count = total_bytes.div_ceil(4096);
+                    if page_count == 0 {
+                        return;
+                    }
+                    let mut phys_pages = vec![0u64; page_count];
+                    let mapped = unsafe {
+                        privileged::alloc_shared_pages(page_count as u64, Some(phys_pages.as_mut_slice()), 0)
+                    };
+                    if (mapped as i64) < 0 || mapped == 0 {
+                        return;
+                    }
+                    if !self.renderer.attach_mapped_shared_surface(
+                        window_id,
+                        width,
+                        height,
+                        mapped,
+                        (page_count * 4096) as u64,
+                    ) {
+                        return;
+                    }
+                    let send_ret = unsafe { privileged::ipc_send_pages(sender_tid, phys_pages.as_slice(), 0) };
+                    if (send_ret as i64) < 0 {
+                        return;
+                    }
+                    let mut res = [0u8; 8];
+                    res[0..4].copy_from_slice(&OP_RES_SHARED_ATTACHED.to_le_bytes());
+                    res[4..8].copy_from_slice(&window_id.to_le_bytes());
+                    let _ = ipc::ipc_send(sender_tid, &res);
+                }
             }
             OP_REQ_PRESENT_SHARED => {
                 if len < 8 {
