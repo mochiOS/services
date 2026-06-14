@@ -1,5 +1,74 @@
 # とぅーどぅー
 
+## mnu移植メモ
+- 現状の `mnu` と mochiOS core は、Rust ソースだけ見るとほぼ同系統だが完全一致ではない
+- ざっくり差分は `mnu` 側 77 files / mochiOS core 側 75 files
+- `mnu` にだけあるもの: `policy`, `cext`, `plugkit`
+- mochiOS core にだけあるもの: `kmod`, `task/elf.rs`
+- 共通ファイルもかなり編集されていて、特に `kernel`, `init`, `syscall`, `task`, `fd_table`, `process` が設計差の中心
+
+### まず mochiOS に作るべきもの
+- [ ] `policy` 層を mochiOS 側に用意する
+  - 対象: `src/core/src/syscall/exec.rs`, `src/core/src/kernel.rs`, `src/core/src/task/process.rs`
+  - 内容:
+    - `service manager` の PID 登録/解放を exec 側に閉じ込めず、起動ポリシーとして分離する
+    - manifest の role から `privilege` / `priority` / `foreground` を決める経路を作る
+    - `.service` 起動可否と capability 付与可否を共通化する
+  - 完了条件:
+    - 起動経路の認可ロジックが syscall 実装に散らばらず、1 箇所で追える
+
+- [ ] `cext` 相当の拡張境界を再導入する
+  - 対象: `src/core/src/kmod/*`, `src/core/src/init/mod.rs`, `src/core/src/syscall/fs.rs`, `src/core/src/elf/*`
+  - 内容:
+    - disk/fs のような基盤機能を「カーネル内実装」ではなく拡張境界として扱えるようにする
+    - モジュールハッシュ検証、登録レジストリ、endpoint/loaded 状態、再登録/失効を持たせる
+    - `ResourceLimits` を拡張インスタンスに紐づけられるようにする
+  - 完了条件:
+    - `/Modules` 配下の拡張が hash 検証付きでロードされ、fs/disk の差し替えを追跡できる
+
+- [ ] `plugkit` 相当の driver/package レジストリを作る
+  - 対象: `src/core/src/cpu.rs`, `src/core/src/init/mod.rs`, `src/core/src/task/process.rs`
+  - 内容:
+    - device match rule、driver manifest、package manifest、binding 状態を持つ
+    - driver の選定と device->driver の割り当てを registry 化する
+    - driver パッケージの entry path / about path を扱えるようにする
+  - 完了条件:
+    - ドライバ選択がハードコードでなく、manifest から決まる
+
+- [ ] `ResourceLimits` と `FileHandleCap` を復活させる
+  - 対象: `src/core/src/task/process.rs`, `src/core/src/task/fd_table.rs`, `src/core/src/syscall/fs.rs`, `src/core/src/syscall/pipe.rs`
+  - 内容:
+    - プロセスごとの thread / fd / ipc / mmio / irq などの上限を保持する
+    - FD ごとの read/write/seek/stat/close などの権限を持たせる
+    - `open` フラグだけでなく、操作ごとの検査を syscall 層で行う
+  - 完了条件:
+    - 一度開いた FD でも、許可されていない操作ができない
+
+- [ ] syscall の権限制御を mochiOS に戻す
+  - 対象: `src/core/src/syscall/mod.rs`, `src/core/src/syscall/time.rs`, `src/core/src/syscall/keyboard.rs`, `src/core/src/syscall/vga.rs`, `src/core/src/syscall/process.rs`
+  - 内容:
+    - `ClockGettime` / `GetTicks` / `KeyboardReadWait` / 一部デバイス系 syscall を capability or service 権限で絞る
+    - `core.service` 以外の主体が触れる API を明示する
+  - 完了条件:
+    - time / keyboard / device 系 syscall の許可条件が曖昧でなくなる
+
+- [ ] exec / syscall エントリの復帰経路を整える
+  - 対象: `src/core/src/syscall/syscall_entry.rs`, `src/core/src/syscall/exec.rs`, `src/core/src/task/elf.rs`
+  - 内容:
+    - user CR3 の取得/復帰を syscall return 側で明示する
+    - FS_BASE / SYSRET 前の canonical check / KPTI 系の手順を整理する
+    - `load_elf` と service spawn の責務分離をはっきりさせる
+  - 完了条件:
+    - exec 後の復帰経路がアーキ依存のまま放置されない
+
+- [ ] mochiOS の既存 `kmod` と mnu の `cext` を統合方針で決める
+  - 対象: `src/core/src/kmod/*`, `src/core/src/init/mod.rs`
+  - 内容:
+    - `kmod` を残すなら `cext` の役割を吸収した名前に寄せる
+    - もしくは `cext` に寄せて `disk/fs` だけでなく他の拡張も同じレジストリで扱う
+  - 完了条件:
+    - モジュール機構が二重実装にならず、責務が一本化される
+
 ## セキュリティてきなとぅーどぅー
 #### 最優先
 - [ ] サービス監視・自動復旧を実装
