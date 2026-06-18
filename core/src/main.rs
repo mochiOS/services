@@ -1,11 +1,6 @@
 #![no_std]
 #![no_main]
 
-extern crate alloc;
-
-use alloc::string::String;
-use alloc::vec::Vec;
-
 use mochi_user_platform as platform;
 
 #[unsafe(no_mangle)]
@@ -15,11 +10,7 @@ pub extern "C" fn _start() -> ! {
 }
 
 fn main() {
-    let mut parts = Vec::new();
-    parts.push(String::from("core.service"));
-    parts.push(String::from("started"));
-
-    platform::println!("{}: {}", parts[0], parts[1]);
+    platform::println!("Hello, from user!");
 
     loop {
         platform::thread::yield_now();
