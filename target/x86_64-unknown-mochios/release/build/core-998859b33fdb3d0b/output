@@ -1,0 +1,2 @@
+cargo:rustc-link-arg=-T/home/jine/Develop/mochiOS/src/services/core/linker.ld
+cargo:rerun-if-changed=/home/jine/Develop/mochiOS/src/services/core/linker.ld
