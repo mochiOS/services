@@ -5,9 +5,16 @@ description = "mochiOS core service"
 autostart = true
 order = 0
 
+[capability.service]
+dir = "capability"
+fs = "rootfs"
+description = "mochiOS capability and delegation service"
+autostart = false
+order = 1
+
 [drivers.service]
 dir = "drivers"
 fs = "rootfs"
 description = "mochiOS driver manager service"
 autostart = false
-order = 1
+order = 2

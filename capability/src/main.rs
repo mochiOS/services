@@ -18,38 +18,31 @@ _start:
 "#
 );
 
-static CAPABILITY_SERVICE: &[u8] = b"/system/services/capability.service\0";
+static DRIVERS_SERVICE: &[u8] = b"/system/services/drivers.service\0";
 
-fn spawn_capability_service() -> Result<u64, syscall::SysError> {
+fn spawn_drivers_service() -> Result<u64, syscall::SysError> {
     syscall::call1(
         syscall::SyscallNumber::ServiceSpawn,
-        CAPABILITY_SERVICE.as_ptr() as u64,
+        DRIVERS_SERVICE.as_ptr() as u64,
     )
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn service_main() -> ! {
-    main();
-    platform::process::exit(0)
-}
-
-fn main() {
-    platform::println!("core.service: start");
-    match spawn_capability_service() {
+    platform::println!("capability.service: start");
+    match spawn_drivers_service() {
         Ok(pid) => {
-            platform::println!("core.service: capability.service spawned pid={}", pid);
+            platform::println!("capability.service: drivers.service spawned pid={}", pid);
             match platform::service::register_delegate(
-                platform::service::DELEGATE_SERVICE_SPAWN,
+                platform::service::DELEGATE_DRIVER_SPAWN,
                 pid,
             ) {
                 Ok(_) => {
-                    platform::println!(
-                        "core.service: registered capability.service as service delegate"
-                    );
+                    platform::println!("capability.service: registered drivers.service as driver delegate");
                 }
                 Err(err) => {
                     platform::println!(
-                        "core.service: capability delegate registration failed errno={}",
+                        "capability.service: delegate registration failed errno={}",
                         err.errno().unwrap_or(0)
                     );
                     platform::process::exit(1);
@@ -58,13 +51,12 @@ fn main() {
         }
         Err(err) => {
             platform::println!(
-                "core.service: capability.service spawn failed errno={}",
+                "capability.service: drivers.service spawn failed errno={}",
                 err.errno().unwrap_or(0)
             );
             platform::process::exit(1);
         }
     }
-
     loop {
         platform::thread::yield_now();
     }

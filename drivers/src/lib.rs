@@ -109,7 +109,9 @@ fn parse_about(text: &str) -> Option<BundleManifest> {
             section = line;
             continue;
         }
-        let (key, value) = split_kv(line)?;
+        let Some((key, value)) = split_kv(line) else {
+            continue;
+        };
         match section {
             "[driver]" => match key {
                 "id" => manifest.package_id = unquote(value).unwrap_or_else(|| value.to_string()),
@@ -245,18 +247,12 @@ fn read_file_bytes(path: &str) -> Option<Vec<u8>> {
 
 fn read_dir_names(path: &str) -> Vec<String> {
     let mut out = Vec::new();
-    platform::println!("drivers.service: open dir {}", path);
-    platform::println!("drivers.service: before open_path");
     let Some(fd) = open_path(path) else {
         platform::println!("drivers.service: open dir failed {}", path);
         return out;
     };
-    platform::println!("drivers.service: after open_path");
-    platform::println!("drivers.service: open dir ok fd={}", fd);
-    let mut buf = Vec::with_capacity(4096);
-    buf.resize(4096, 0);
+    let mut buf = [0u8; 4096];
     loop {
-        platform::println!("drivers.service: readdir fd={}", fd);
         let read = syscall::call3(
             syscall::SyscallNumber::FileReadDir,
             fd,
@@ -268,16 +264,15 @@ fn read_dir_names(path: &str) -> Vec<String> {
             break;
         };
         if read == 0 {
-            platform::println!("drivers.service: readdir eof fd={}", fd);
             break;
         }
-        platform::println!("drivers.service: readdir read={} fd={}", read, fd);
         let bytes = &buf[..read as usize];
-        for raw in bytes.split(|&b| b == b'\n') {
+        for raw in bytes.split(|&b| b == 0 || b == b'\n') {
             if raw.is_empty() {
                 continue;
             }
             if let Ok(name) = core::str::from_utf8(raw) {
+                let name = name.trim_matches(|ch: char| ch.is_ascii_control() || ch.is_ascii_whitespace());
                 if !name.is_empty() {
                     out.push(name.to_string());
                 }
@@ -329,7 +324,7 @@ fn verify_bundle(entry_path: &str) -> bool {
 }
 
 fn spawn_bundle(entry_path: &str) -> Option<u64> {
-    platform::service::spawn(entry_path).ok()
+    platform::service::spawn_driver(entry_path).ok()
 }
 
 fn maybe_spawn_bundle(bundle_root: &str) {
@@ -375,12 +370,6 @@ fn maybe_spawn_bundle(bundle_root: &str) {
 pub fn run() -> ! {
     platform::println!("drivers.service: start");
     let bundle_roots = read_dir_names(USB_BUNDLE_ROOT);
-    platform::println!("drivers.service: after read_dir_names");
-    platform::println!(
-        "drivers.service: bundle root count={} path={}",
-        bundle_roots.len(),
-        USB_BUNDLE_ROOT
-    );
     if bundle_roots.is_empty() {
         platform::println!("drivers.service: no usb bundles in {}", USB_BUNDLE_ROOT);
     }
