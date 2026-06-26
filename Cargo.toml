@@ -1,3 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core"]
+members = ["core", "drivers", "usb-driver"]
+
+[patch."https://github.com/mochiOS/mnu"]
+plugkit = { path = "../core/crates/PlugKit/plugkit" }

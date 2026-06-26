@@ -4,3 +4,10 @@ fs = "initfs"
 description = "mochiOS core service"
 autostart = true
 order = 0
+
+[drivers.service]
+dir = "drivers"
+fs = "rootfs"
+description = "mochiOS driver manager service"
+autostart = false
+order = 1
