@@ -10,7 +10,6 @@ use plugkit::prelude::*;
 
 const PCI_CFG_ADDR: u16 = 0xCF8;
 const PCI_CFG_DATA: u16 = 0xCFC;
-
 const XHCI_PROG_IF: u8 = 0x30;
 
 const PROT_READ: u64 = 0x1;
@@ -253,6 +252,14 @@ fn xhci_port_speed_name(speed_id: u32) -> &'static str {
     }
 }
 
+fn looks_like_xhci(mmio: &MmioRegion) -> bool {
+    let cap_length = mmio.read_u8(XHCI_CAP_CAPLENGTH) as usize;
+    let hci_version = mmio.read_u16(XHCI_CAP_HCIVERSION);
+    let hcsparams1 = mmio.read_u32(XHCI_CAP_HCSPARAMS1);
+    let max_slots = hcsparams1 & 0xff;
+    cap_length >= 0x20 && hci_version >= 0x0100 && max_slots > 0
+}
+
 fn enumerate_xhci_controller(loc: PciLocation, bar: XhciBar, vendor: u16, device: u16) {
     pci_command_enable_memory_and_bus_master(loc);
 
@@ -369,19 +376,21 @@ fn pci_scan() {
                 let class = (class_reg >> 24) as u8;
                 let subclass = (class_reg >> 16) as u8;
                 let prog_if = (class_reg >> 8) as u8;
-                if class != 0x0C || subclass != 0x03 || prog_if != XHCI_PROG_IF {
+                if class != 0x0C || subclass != 0x03 {
                     continue;
                 }
 
                 let Some(bar) = find_xhci_bar(loc) else {
-                    platform::println!(
-                        "usb-driver: xhci controller without MMIO BAR bus={:02x} dev={:02x} func={}",
-                        bus,
-                        device,
-                        function
-                    );
                     continue;
                 };
+
+                let Ok(mmio_probe) = MmioRegion::map(bar.phys_base, core::cmp::min(bar.size, 0x1000))
+                else {
+                    continue;
+                };
+                if !looks_like_xhci(&mmio_probe) {
+                    continue;
+                }
 
                 let mut spec = DeviceSpec::new(
                     format!("/pci/{:02x}:{:02x}.{}", bus, device, function),
