@@ -1,8 +1,8 @@
 [driver]
 id = "com.mochios.usb.qemu"
-name = "QEMU USB Controller Driver"
+name = "QEMU xHCI Controller Driver"
 version = "0.1.0"
-description = "User-space USB controller enumerator for QEMU."
+description = "User-space xHCI controller enumerator for QEMU."
 developer = "mochiOS"
 entry = "entry.elf"
 
@@ -17,6 +17,7 @@ class = "usb"
 [capabilities]
 requires = [
     "usb.access",
+    "memory.phys.map",
 ]
 
 [provides]
