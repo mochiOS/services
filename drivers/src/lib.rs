@@ -12,7 +12,7 @@ use mochi_user_syscall as syscall;
 use sha2::{Digest, Sha256};
 
 const SIGNATURE_DB_PATH: &str = "/signature.db";
-const USB_BUNDLE_ROOT: &str = "/bin/drivers/usb";
+const DRIVER_BUNDLE_ROOTS: &[&str] = &["/bin/drivers/usb", "/bin/drivers/ps2"];
 
 #[derive(Clone, Debug, Default)]
 struct BundleManifest {
@@ -359,7 +359,7 @@ fn maybe_spawn_bundle(bundle_root: &str) {
     platform::println!("drivers.service: bundle verified {}", entry_path);
     match spawn_bundle(&entry_path) {
         Some(pid) => {
-            platform::println!("drivers.service: spawned usb driver pid={}", pid);
+            platform::println!("drivers.service: spawned driver pid={}", pid);
         }
         None => {
             platform::println!("drivers.service: spawn failed {}", entry_path);
@@ -369,17 +369,15 @@ fn maybe_spawn_bundle(bundle_root: &str) {
 
 pub fn run() -> ! {
     platform::println!("drivers.service: start");
-    let bundle_roots = read_dir_names(USB_BUNDLE_ROOT);
-    if bundle_roots.is_empty() {
-        platform::println!("drivers.service: no usb bundles in {}", USB_BUNDLE_ROOT);
-    }
-
-    for bundle in bundle_roots {
-        if !bundle.ends_with(".driver") {
-            continue;
+    for bundle_root_path in DRIVER_BUNDLE_ROOTS {
+        let bundle_roots = read_dir_names(bundle_root_path);
+        for bundle in bundle_roots {
+            if !bundle.ends_with(".driver") {
+                continue;
+            }
+            let bundle_root = alloc::format!("{}/{}", bundle_root_path, bundle);
+            maybe_spawn_bundle(&bundle_root);
         }
-        let bundle_root = alloc::format!("{}/{}", USB_BUNDLE_ROOT, bundle);
-        maybe_spawn_bundle(&bundle_root);
     }
 
     loop {
