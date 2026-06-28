@@ -1,0 +1,15 @@
+[service]
+id = "com.mochios.capability"
+name = "Capability Service"
+version = "1"
+entry = "capability.service"
+
+[capabilities]
+requires = [
+    "process.spawn",
+    "service.register",
+    "usb.access",
+    "ps2.access",
+    "dma.allocate",
+    "memory.phys.map",
+]

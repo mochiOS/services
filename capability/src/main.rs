@@ -1,9 +1,12 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use core::arch::global_asm;
 use mochi_user_platform as platform;
-use mochi_user_syscall as syscall;
 
 global_asm!(
     r#"
@@ -18,12 +21,72 @@ _start:
 "#
 );
 
-static DRIVERS_SERVICE: &[u8] = b"/system/services/drivers.service\0";
+const DRIVERS_SERVICE_PATH: &str = "/system/services/drivers.service";
+const DRIVERS_SERVICE_MANIFEST_PATH: &str = "/system/services/drivers.service.toml";
 
-fn spawn_drivers_service() -> Result<u64, syscall::SysError> {
-    syscall::call1(
-        syscall::SyscallNumber::ServiceSpawn,
-        DRIVERS_SERVICE.as_ptr() as u64,
+fn parse_capability_requires(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_caps = false;
+    let mut collecting = false;
+
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            in_caps = line == "[capabilities]";
+            collecting = false;
+            continue;
+        }
+        if !in_caps {
+            continue;
+        }
+        if let Some((key, rest)) = line.split_once('=') {
+            if key.trim() != "requires" {
+                continue;
+            }
+            collecting = true;
+            collect_capability_line(&mut out, rest);
+            continue;
+        }
+        if collecting {
+            collect_capability_line(&mut out, line);
+        }
+    }
+
+    out
+}
+
+fn collect_capability_line(out: &mut Vec<String>, line: &str) {
+    for part in line.split(',') {
+        let item = part.trim().trim_matches(|ch| ch == '[' || ch == ']' || ch == '"');
+        if !item.is_empty() {
+            out.push(item.to_string());
+        }
+    }
+}
+
+fn encode_nul_list(items: &[String]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for item in items {
+        out.extend_from_slice(item.as_bytes());
+        out.push(0);
+    }
+    out
+}
+
+fn spawn_drivers_service() -> Result<u64, mochi_user_syscall::SysError> {
+    let manifest = platform::file::read_to_end_path(DRIVERS_SERVICE_MANIFEST_PATH)?;
+    let text = core::str::from_utf8(&manifest)
+        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    let caps = parse_capability_requires(text);
+    let caps_nul = encode_nul_list(&caps);
+    platform::service::spawn_manifest(
+        DRIVERS_SERVICE_PATH,
+        platform::service::ROLE_SERVICE,
+        None,
+        Some(caps_nul.as_slice()),
     )
 }
 

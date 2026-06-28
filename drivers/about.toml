@@ -1,0 +1,14 @@
+[service]
+id = "com.mochios.drivers"
+name = "Drivers Service"
+version = "1"
+entry = "drivers.service"
+
+[capabilities]
+requires = [
+    "process.spawn",
+    "usb.access",
+    "ps2.access",
+    "dma.allocate",
+    "memory.phys.map",
+]

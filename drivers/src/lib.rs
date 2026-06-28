@@ -24,6 +24,7 @@ struct BundleManifest {
     driver_class: String,
     match_bus: String,
     match_class: String,
+    capabilities: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -99,6 +100,7 @@ fn parse_u32_like(value: &str) -> Option<u32> {
 fn parse_about(text: &str) -> Option<BundleManifest> {
     let mut manifest = BundleManifest::default();
     let mut section = "";
+    let mut collecting_caps = false;
 
     for raw_line in text.lines() {
         let line = trim_comment(raw_line).trim();
@@ -107,9 +109,13 @@ fn parse_about(text: &str) -> Option<BundleManifest> {
         }
         if line.starts_with('[') && line.ends_with(']') {
             section = line;
+            collecting_caps = false;
             continue;
         }
         let Some((key, value)) = split_kv(line) else {
+            if section == "[capabilities]" && collecting_caps {
+                collect_capability_line(&mut manifest.capabilities, line);
+            }
             continue;
         };
         match section {
@@ -136,6 +142,12 @@ fn parse_about(text: &str) -> Option<BundleManifest> {
                 }
                 _ => {}
             },
+            "[capabilities]" => {
+                if key == "requires" {
+                    collecting_caps = true;
+                    collect_capability_line(&mut manifest.capabilities, value);
+                }
+            }
             _ => {}
         }
     }
@@ -147,6 +159,17 @@ fn parse_about(text: &str) -> Option<BundleManifest> {
         manifest.entry = "entry.elf".to_string();
     }
     Some(manifest)
+}
+
+fn collect_capability_line(out: &mut Vec<String>, line: &str) {
+    for part in line.split(',') {
+        let item = part
+            .trim()
+            .trim_matches(|ch| ch == '[' || ch == ']' || ch == '"');
+        if !item.is_empty() {
+            out.push(item.to_string());
+        }
+    }
 }
 
 fn hex_val(byte: u8) -> Option<u8> {
@@ -323,8 +346,24 @@ fn verify_bundle(entry_path: &str) -> bool {
     false
 }
 
-fn spawn_bundle(entry_path: &str) -> Option<u64> {
-    platform::service::spawn_driver(entry_path).ok()
+fn encode_nul_list(items: &[String]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for item in items {
+        out.extend_from_slice(item.as_bytes());
+        out.push(0);
+    }
+    out
+}
+
+fn spawn_bundle(entry_path: &str, capabilities: &[String]) -> Option<u64> {
+    let caps_nul = encode_nul_list(capabilities);
+    platform::service::spawn_manifest(
+        entry_path,
+        platform::service::ROLE_DRIVER,
+        None,
+        Some(caps_nul.as_slice()),
+    )
+    .ok()
 }
 
 fn maybe_spawn_bundle(bundle_root: &str) {
@@ -357,7 +396,7 @@ fn maybe_spawn_bundle(bundle_root: &str) {
         return;
     }
     platform::println!("drivers.service: bundle verified {}", entry_path);
-    match spawn_bundle(&entry_path) {
+    match spawn_bundle(&entry_path, &manifest.capabilities) {
         Some(pid) => {
             platform::println!("drivers.service: spawned driver pid={}", pid);
         }
