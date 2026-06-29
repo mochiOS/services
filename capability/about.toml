@@ -10,6 +10,7 @@ requires = [
     "process.spawn",
     "service.register",
     "device.input",
+    "ipc.client",
     "ipc.server",
     "usb.access",
 ]

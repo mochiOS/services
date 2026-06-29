@@ -9,6 +9,7 @@ requires = [
     "fs.read.all",
     "process.spawn",
     "device.input",
+    "ipc.client",
     "ipc.server",
     "usb.access",
 ]
