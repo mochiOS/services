@@ -13,6 +13,9 @@ use sha2::{Digest, Sha256};
 
 const SIGNATURE_DB_PATH: &str = "/signature.db";
 const DRIVER_BUNDLE_ROOTS: &[&str] = &["/bin/drivers/usb", "/bin/drivers/ps2"];
+const INPUT_SERVICE_PATH: &str = "/system/services/input.service";
+const INPUT_SERVICE_MANIFEST_PATH: &str = "/system/services/input.service.toml";
+const I8042_DRIVER_ID: &str = "com.mochios.ps2.i8042";
 
 #[derive(Clone, Debug, Default)]
 struct BundleManifest {
@@ -170,6 +173,39 @@ fn collect_capability_line(out: &mut Vec<String>, line: &str) {
             out.push(item.to_string());
         }
     }
+}
+
+fn parse_capability_requires(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_caps = false;
+    let mut collecting = false;
+
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            in_caps = line == "[capabilities]";
+            collecting = false;
+            continue;
+        }
+        if !in_caps {
+            continue;
+        }
+        let Some((key, value)) = split_kv(line) else {
+            if collecting {
+                collect_capability_line(&mut out, line);
+            }
+            continue;
+        };
+        if key == "requires" {
+            collecting = true;
+            collect_capability_line(&mut out, value);
+        }
+    }
+
+    out
 }
 
 fn hex_val(byte: u8) -> Option<u8> {
@@ -355,18 +391,51 @@ fn encode_nul_list(items: &[String]) -> Vec<u8> {
     out
 }
 
-fn spawn_bundle(entry_path: &str, capabilities: &[String]) -> Option<u64> {
+fn encode_spawn_args(items: &[String]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(512);
+    out.resize(512, 0);
+    let mut cursor = 0usize;
+    for item in items {
+        let bytes = item.as_bytes();
+        if cursor + bytes.len() + 2 > out.len() {
+            break;
+        }
+        out[cursor..cursor + bytes.len()].copy_from_slice(bytes);
+        cursor += bytes.len();
+        out[cursor] = 0;
+        cursor += 1;
+    }
+    out
+}
+
+fn spawn_bundle(entry_path: &str, args: Option<&[u8]>, capabilities: &[String]) -> Option<u64> {
     let caps_nul = encode_nul_list(capabilities);
     platform::service::spawn_manifest(
         entry_path,
         platform::service::ROLE_DRIVER,
-        None,
+        args,
+        Some(caps_nul.as_slice()),
+    )
+        .ok()
+}
+
+fn spawn_input_service(endpoint_handle: u64) -> Option<u64> {
+    let manifest_text = read_text_file(INPUT_SERVICE_MANIFEST_PATH)?;
+    let caps = parse_capability_requires(&manifest_text);
+    let endpoint_arg = endpoint_handle.to_string();
+    let args = [endpoint_arg];
+    let args_nul = encode_spawn_args(&args);
+    let caps_nul = encode_nul_list(&caps);
+    platform::service::spawn_manifest(
+        INPUT_SERVICE_PATH,
+        platform::service::ROLE_SERVICE,
+        Some(args_nul.as_slice()),
         Some(caps_nul.as_slice()),
     )
     .ok()
 }
 
-fn maybe_spawn_bundle(bundle_root: &str) {
+fn maybe_spawn_bundle(bundle_root: &str, input_endpoint_handle: u64) {
     let about_path = alloc::format!("{}/about.toml", bundle_root);
     let Some(about_text) = read_text_file(&about_path) else {
         platform::println!("drivers.service: missing {}", about_path);
@@ -396,7 +465,14 @@ fn maybe_spawn_bundle(bundle_root: &str) {
         return;
     }
     platform::println!("drivers.service: bundle verified {}", entry_path);
-    match spawn_bundle(&entry_path, &manifest.capabilities) {
+    let args = if manifest.package_id == I8042_DRIVER_ID && input_endpoint_handle != 0 {
+        let endpoint_arg = input_endpoint_handle.to_string();
+        let args = [endpoint_arg];
+        Some(encode_spawn_args(&args))
+    } else {
+        None
+    };
+    match spawn_bundle(&entry_path, args.as_deref(), &manifest.capabilities) {
         Some(pid) => {
             platform::println!("drivers.service: spawned driver pid={}", pid);
         }
@@ -408,6 +484,15 @@ fn maybe_spawn_bundle(bundle_root: &str) {
 
 pub fn run() -> ! {
     platform::println!("drivers.service: start");
+    let input_endpoint_handle = platform::ipc::create().ok().unwrap_or(0);
+    if input_endpoint_handle != 0 {
+        match spawn_input_service(input_endpoint_handle) {
+            Some(pid) => platform::println!("drivers.service: input.service spawned pid={}", pid),
+            None => platform::println!("drivers.service: input.service spawn failed"),
+        }
+    } else {
+        platform::println!("drivers.service: input endpoint create failed");
+    }
     for bundle_root_path in DRIVER_BUNDLE_ROOTS {
         let bundle_roots = read_dir_names(bundle_root_path);
         for bundle in bundle_roots {
@@ -415,7 +500,7 @@ pub fn run() -> ! {
                 continue;
             }
             let bundle_root = alloc::format!("{}/{}", bundle_root_path, bundle);
-            maybe_spawn_bundle(&bundle_root);
+            maybe_spawn_bundle(&bundle_root, input_endpoint_handle);
         }
     }
 

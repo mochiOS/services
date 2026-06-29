@@ -18,3 +18,10 @@ fs = "rootfs"
 description = "mochiOS driver manager service"
 autostart = false
 order = 2
+
+[input.service]
+dir = "input"
+fs = "rootfs"
+description = "mochiOS input event service"
+autostart = false
+order = 3
