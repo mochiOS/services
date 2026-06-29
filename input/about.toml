@@ -1,0 +1,10 @@
+[service]
+id = "com.mochios.input"
+name = "Input Service"
+version = "1"
+entry = "input.service"
+
+[capabilities]
+requires = [
+    "ipc.server",
+]
