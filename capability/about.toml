@@ -6,10 +6,9 @@ entry = "capability.service"
 
 [capabilities]
 requires = [
+    "fs.read.all",
     "process.spawn",
     "service.register",
+    "device.input",
     "usb.access",
-    "ps2.access",
-    "dma.allocate",
-    "memory.phys.map",
 ]

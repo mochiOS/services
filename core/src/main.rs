@@ -76,11 +76,34 @@ fn encode_nul_list(items: &[String]) -> Vec<u8> {
     out
 }
 
+fn register_delegate_with_retry(kind: u64, pid: u64) -> Result<(), mochi_user_syscall::SysError> {
+    let mut last_err = None;
+    for _ in 0..32 {
+        match platform::service::register_delegate(kind, pid) {
+            Ok(_) => return Ok(()),
+            Err(err) => {
+                last_err = Some(err);
+                if err.errno().unwrap_or(0) != mochi_user_syscall::ESRCH {
+                    return Err(err);
+                }
+                platform::thread::yield_now();
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ESRCH as i64)
+    }))
+}
+
 fn spawn_capability_service() -> Result<u64, mochi_user_syscall::SysError> {
     let manifest = platform::file::read_to_end_path(CAPABILITY_SERVICE_MANIFEST_PATH)?;
     let text = core::str::from_utf8(&manifest)
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     let caps = parse_capability_requires(text);
+    platform::println!(
+        "core.service: parsed capability.service manifest caps={}",
+        caps.len()
+    );
     let caps_nul = encode_nul_list(&caps);
     platform::service::spawn_manifest(
         CAPABILITY_SERVICE_PATH,
@@ -101,10 +124,7 @@ fn main() {
     match spawn_capability_service() {
         Ok(pid) => {
             platform::println!("core.service: capability.service spawned pid={}", pid);
-            match platform::service::register_delegate(
-                platform::service::DELEGATE_SERVICE_SPAWN,
-                pid,
-            ) {
+            match register_delegate_with_retry(platform::service::DELEGATE_SERVICE_SPAWN, pid) {
                 Ok(_) => {
                     platform::println!(
                         "core.service: registered capability.service as service delegate"
