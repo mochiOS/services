@@ -6,5 +6,6 @@ entry = "input.service"
 
 [capabilities]
 requires = [
+    "ipc.client",
     "ipc.server",
 ]

@@ -1,0 +1,192 @@
+#![no_std]
+#![no_main]
+
+extern crate alloc;
+
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::arch::global_asm;
+use mochi_user_platform as platform;
+
+global_asm!(
+    r#"
+    .global _start
+_start:
+    xor rbp, rbp
+    mov rdi, rsp
+    and rsp, -16
+    call service_main
+1:
+    hlt
+    jmp 1b
+"#
+);
+
+const MSH_PATH: &str = "/bin/msh";
+const MSH_MANIFEST_PATH: &str = "/bin/msh.toml";
+fn parse_decimal_u64(bytes: &[u8]) -> Option<u64> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut out = 0u64;
+    for &b in bytes {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        out = out.checked_mul(10)?;
+        out = out.checked_add(u64::from(b - b'0'))?;
+    }
+    Some(out)
+}
+
+unsafe fn c_string_len(ptr: *const u8) -> usize {
+    let mut len = 0usize;
+    loop {
+        let ch = unsafe { core::ptr::read_volatile(ptr.add(len)) };
+        if ch == 0 {
+            return len;
+        }
+        len += 1;
+    }
+}
+
+unsafe fn parse_endpoint_arg(sp: *const usize) -> Option<u64> {
+    let stack = unsafe { platform::runtime::InitialStack::parse(sp) };
+    for &arg_ptr in stack.argv {
+        if arg_ptr.is_null() {
+            continue;
+        }
+        let len = unsafe { c_string_len(arg_ptr) };
+        let arg = unsafe { core::slice::from_raw_parts(arg_ptr, len) };
+        if let Some(value) = parse_decimal_u64(arg) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn parse_capability_requires(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_caps = false;
+    let mut collecting = false;
+
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            in_caps = line == "[capabilities]";
+            collecting = false;
+            continue;
+        }
+        if !in_caps {
+            continue;
+        }
+        if let Some((key, rest)) = line.split_once('=') {
+            if key.trim() != "requires" {
+                continue;
+            }
+            collecting = true;
+            collect_capability_line(&mut out, rest);
+            continue;
+        }
+        if collecting {
+            collect_capability_line(&mut out, line);
+        }
+    }
+
+    out
+}
+
+fn collect_capability_line(out: &mut Vec<String>, line: &str) {
+    for part in line.split(',') {
+        let item = part.trim().trim_matches(|ch| ch == '[' || ch == ']' || ch == '"');
+        if !item.is_empty() {
+            out.push(item.to_string());
+        }
+    }
+}
+
+fn encode_nul_list(items: &[String]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for item in items {
+        out.extend_from_slice(item.as_bytes());
+        out.push(0);
+    }
+    out
+}
+
+fn encode_spawn_args(items: &[String]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(256);
+    out.resize(256, 0);
+    let mut cursor = 0usize;
+    for item in items {
+        let bytes = item.as_bytes();
+        if cursor + bytes.len() + 2 > out.len() {
+            break;
+        }
+        out[cursor..cursor + bytes.len()].copy_from_slice(bytes);
+        cursor += bytes.len();
+        out[cursor] = 0;
+        cursor += 1;
+    }
+    out
+}
+
+fn spawn_msh(shell_endpoint: u64) -> Result<u64, mochi_user_syscall::SysError> {
+    let manifest = platform::file::read_to_end_path(MSH_MANIFEST_PATH)?;
+    let text = core::str::from_utf8(&manifest)
+        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    let caps = parse_capability_requires(text);
+    let caps_nul = encode_nul_list(&caps);
+    let arg = shell_endpoint.to_string();
+    let args = [arg];
+    let args_nul = encode_spawn_args(&args);
+    platform::service::spawn_manifest(
+        MSH_PATH,
+        platform::service::ROLE_APPLICATION,
+        Some(args_nul.as_slice()),
+        Some(caps_nul.as_slice()),
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn service_main(sp: *const usize) -> ! {
+    let Some(control_endpoint) = (unsafe { parse_endpoint_arg(sp) }) else {
+        platform::process::exit(1);
+    };
+
+    let input_endpoint = match platform::ipc::create() {
+        Ok(handle) => handle,
+        Err(_) => platform::process::exit(1),
+    };
+    let shell_endpoint = match platform::ipc::create() {
+        Ok(handle) => handle,
+        Err(_) => platform::process::exit(1),
+    };
+
+    let subscribe = platform::input::SubscribeRequest {
+        opcode: platform::input::SUBSCRIBE_OPCODE,
+        reserved: 0,
+        endpoint: input_endpoint,
+    };
+    let _ = platform::ipc::send(control_endpoint, platform::input::bytes_of(&subscribe));
+
+    if spawn_msh(shell_endpoint).is_err() {
+        platform::process::exit(1);
+    }
+
+    let mut buf = [0u8; core::mem::size_of::<platform::input::InputEvent>()];
+    loop {
+        let Ok(msg) = platform::ipc::wait(input_endpoint, &mut buf) else {
+            platform::thread::yield_now();
+            continue;
+        };
+        let len = (msg & 0xffff_ffff) as usize;
+        if len < buf.len() {
+            continue;
+        }
+        let _ = platform::ipc::send(shell_endpoint, &buf);
+    }
+}

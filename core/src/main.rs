@@ -23,8 +23,6 @@ _start:
 
 const CAPABILITY_SERVICE_PATH: &str = "/system/services/capability.service";
 const CAPABILITY_SERVICE_MANIFEST_PATH: &str = "/system/services/capability.service.toml";
-const RUST_STD_DEMO_PATH: &str = "/bin/rust-std-demo";
-const RUST_STD_DEMO_MANIFEST_PATH: &str = "/bin/rust-std-demo.toml";
 
 fn parse_capability_requires(text: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -115,20 +113,6 @@ fn spawn_capability_service() -> Result<u64, mochi_user_syscall::SysError> {
     )
 }
 
-fn spawn_rust_std_demo() -> Result<u64, mochi_user_syscall::SysError> {
-    let manifest = platform::file::read_to_end_path(RUST_STD_DEMO_MANIFEST_PATH)?;
-    let text = core::str::from_utf8(&manifest)
-        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
-    let caps = parse_capability_requires(text);
-    let caps_nul = encode_nul_list(&caps);
-    platform::service::spawn_manifest(
-        RUST_STD_DEMO_PATH,
-        platform::service::ROLE_APPLICATION,
-        None,
-        Some(caps_nul.as_slice()),
-    )
-}
-
 #[unsafe(no_mangle)]
 pub extern "C" fn service_main() -> ! {
     main();
@@ -161,18 +145,6 @@ fn main() {
                 err.errno().unwrap_or(0)
             );
             platform::process::exit(1);
-        }
-    }
-
-    match spawn_rust_std_demo() {
-        Ok(pid) => {
-            platform::println!("core.service: rust-std-demo spawned pid={}", pid);
-        }
-        Err(err) => {
-            platform::println!(
-                "core.service: rust-std-demo spawn failed errno={}",
-                err.errno().unwrap_or(0)
-            );
         }
     }
 

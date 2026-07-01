@@ -1,0 +1,13 @@
+[service]
+id = "com.mochios.tty"
+name = "TTY Service"
+version = "1"
+entry = "tty.service"
+
+[capabilities]
+requires = [
+    "fs.read.all",
+    "process.spawn",
+    "ipc.client",
+    "ipc.server",
+]

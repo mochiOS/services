@@ -25,3 +25,10 @@ fs = "rootfs"
 description = "mochiOS input event service"
 autostart = false
 order = 3
+
+[tty.service]
+dir = "tty"
+fs = "rootfs"
+description = "mochiOS tty service"
+autostart = false
+order = 4

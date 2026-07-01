@@ -15,6 +15,8 @@ const SIGNATURE_DB_PATH: &str = "/signature.db";
 const DRIVER_BUNDLE_ROOTS: &[&str] = &["/bin/drivers/usb", "/bin/drivers/ps2"];
 const INPUT_SERVICE_PATH: &str = "/system/services/input.service";
 const INPUT_SERVICE_MANIFEST_PATH: &str = "/system/services/input.service.toml";
+const TTY_SERVICE_PATH: &str = "/system/services/tty.service";
+const TTY_SERVICE_MANIFEST_PATH: &str = "/system/services/tty.service.toml";
 const I8042_DRIVER_ID: &str = "com.mochios.ps2.i8042";
 
 #[derive(Clone, Debug, Default)]
@@ -419,11 +421,13 @@ fn spawn_bundle(entry_path: &str, args: Option<&[u8]>, capabilities: &[String]) 
         .ok()
 }
 
-fn spawn_input_service(endpoint_handle: u64) -> Option<u64> {
+fn spawn_input_service(raw_endpoint_handle: u64, control_endpoint_handle: u64) -> Option<u64> {
     let manifest_text = read_text_file(INPUT_SERVICE_MANIFEST_PATH)?;
     let caps = parse_capability_requires(&manifest_text);
-    let endpoint_arg = endpoint_handle.to_string();
-    let args = [endpoint_arg];
+    let args = [
+        raw_endpoint_handle.to_string(),
+        control_endpoint_handle.to_string(),
+    ];
     let args_nul = encode_spawn_args(&args);
     let caps_nul = encode_nul_list(&caps);
     platform::service::spawn_manifest(
@@ -435,7 +439,22 @@ fn spawn_input_service(endpoint_handle: u64) -> Option<u64> {
     .ok()
 }
 
-fn maybe_spawn_bundle(bundle_root: &str, input_endpoint_handle: u64) {
+fn spawn_tty_service(control_endpoint_handle: u64) -> Option<u64> {
+    let manifest_text = read_text_file(TTY_SERVICE_MANIFEST_PATH)?;
+    let caps = parse_capability_requires(&manifest_text);
+    let args = [control_endpoint_handle.to_string()];
+    let args_nul = encode_spawn_args(&args);
+    let caps_nul = encode_nul_list(&caps);
+    platform::service::spawn_manifest(
+        TTY_SERVICE_PATH,
+        platform::service::ROLE_SERVICE,
+        Some(args_nul.as_slice()),
+        Some(caps_nul.as_slice()),
+    )
+        .ok()
+}
+
+fn maybe_spawn_bundle(bundle_root: &str, raw_input_endpoint_handle: u64) {
     let about_path = alloc::format!("{}/about.toml", bundle_root);
     let Some(about_text) = read_text_file(&about_path) else {
         platform::println!("drivers.service: missing {}", about_path);
@@ -465,8 +484,8 @@ fn maybe_spawn_bundle(bundle_root: &str, input_endpoint_handle: u64) {
         return;
     }
     platform::println!("drivers.service: bundle verified {}", entry_path);
-    let args = if manifest.package_id == I8042_DRIVER_ID && input_endpoint_handle != 0 {
-        let endpoint_arg = input_endpoint_handle.to_string();
+    let args = if manifest.package_id == I8042_DRIVER_ID && raw_input_endpoint_handle != 0 {
+        let endpoint_arg = raw_input_endpoint_handle.to_string();
         let args = [endpoint_arg];
         Some(encode_spawn_args(&args))
     } else {
@@ -484,11 +503,16 @@ fn maybe_spawn_bundle(bundle_root: &str, input_endpoint_handle: u64) {
 
 pub fn run() -> ! {
     platform::println!("drivers.service: start");
-    let input_endpoint_handle = platform::ipc::create().ok().unwrap_or(0);
-    if input_endpoint_handle != 0 {
-        match spawn_input_service(input_endpoint_handle) {
+    let raw_input_endpoint_handle = platform::ipc::create().ok().unwrap_or(0);
+    let input_control_endpoint_handle = platform::ipc::create().ok().unwrap_or(0);
+    if raw_input_endpoint_handle != 0 && input_control_endpoint_handle != 0 {
+        match spawn_input_service(raw_input_endpoint_handle, input_control_endpoint_handle) {
             Some(pid) => platform::println!("drivers.service: input.service spawned pid={}", pid),
             None => platform::println!("drivers.service: input.service spawn failed"),
+        }
+        match spawn_tty_service(input_control_endpoint_handle) {
+            Some(pid) => platform::println!("drivers.service: tty.service spawned pid={}", pid),
+            None => platform::println!("drivers.service: tty.service spawn failed"),
         }
     } else {
         platform::println!("drivers.service: input endpoint create failed");
@@ -500,7 +524,7 @@ pub fn run() -> ! {
                 continue;
             }
             let bundle_root = alloc::format!("{}/{}", bundle_root_path, bundle);
-            maybe_spawn_bundle(&bundle_root, input_endpoint_handle);
+            maybe_spawn_bundle(&bundle_root, raw_input_endpoint_handle);
         }
     }
 
