@@ -25,6 +25,10 @@ _start:
 
 const DRIVERS_SERVICE_PATH: &str = "/system/services/drivers.service";
 const DRIVERS_PACKAGE_MANIFEST_PATH: &str = "/system/packages/drivers/manifest.toml";
+const SIGNATURE_SERVICE_PATH: &str = "/system/services/signature.service";
+const SIGNATURE_PACKAGE_MANIFEST_PATH: &str = "/system/packages/signature/manifest.toml";
+const PACKAGE_SERVICE_PATH: &str = "/system/services/package.service";
+const PACKAGE_PACKAGE_MANIFEST_PATH: &str = "/system/packages/package/manifest.toml";
 
 #[derive(Default)]
 struct PackageIndex {
@@ -143,6 +147,56 @@ fn spawn_drivers_service(index: &PackageIndex) -> Result<u64, mochi_user_syscall
     )
 }
 
+fn spawn_signature_service(index: &PackageIndex) -> Result<u64, mochi_user_syscall::SysError> {
+    if index.duplicate {
+        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+    }
+    let manifest_path = index
+        .by_binary
+        .get(SIGNATURE_SERVICE_PATH)
+        .cloned()
+        .unwrap_or_else(|| SIGNATURE_PACKAGE_MANIFEST_PATH.to_string());
+    let manifest = platform::package::read_manifest(&manifest_path)
+        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    let caps = manifest.binary_requires(SIGNATURE_SERVICE_PATH).unwrap_or(&[]);
+    platform::println!("capability.service: parsed signature.service package caps={}", caps.len());
+    let caps_nul = encode_nul_list(&caps);
+    let logger_endpoint = platform::logger::endpoint().unwrap_or(0);
+    let args = [logger_endpoint.to_string()];
+    let args_nul = encode_spawn_args(&args);
+    platform::service::spawn_manifest(
+        SIGNATURE_SERVICE_PATH,
+        platform::service::ROLE_SERVICE,
+        Some(args_nul.as_slice()),
+        Some(caps_nul.as_slice()),
+    )
+}
+
+fn spawn_package_service(index: &PackageIndex) -> Result<u64, mochi_user_syscall::SysError> {
+    if index.duplicate {
+        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+    }
+    let manifest_path = index
+        .by_binary
+        .get(PACKAGE_SERVICE_PATH)
+        .cloned()
+        .unwrap_or_else(|| PACKAGE_PACKAGE_MANIFEST_PATH.to_string());
+    let manifest = platform::package::read_manifest(&manifest_path)
+        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    let caps = manifest.binary_requires(PACKAGE_SERVICE_PATH).unwrap_or(&[]);
+    platform::println!("capability.service: parsed package.service package caps={}", caps.len());
+    let caps_nul = encode_nul_list(&caps);
+    let logger_endpoint = platform::logger::endpoint().unwrap_or(0);
+    let args = [logger_endpoint.to_string()];
+    let args_nul = encode_spawn_args(&args);
+    platform::service::spawn_manifest(
+        PACKAGE_SERVICE_PATH,
+        platform::service::ROLE_SERVICE,
+        Some(args_nul.as_slice()),
+        Some(caps_nul.as_slice()),
+    )
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn service_main(sp: *const usize) -> ! {
     unsafe {
@@ -150,6 +204,30 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
     }
     platform::println!("capability.service: start");
     let package_index = build_package_index();
+    match spawn_signature_service(&package_index) {
+        Ok(pid) => {
+            platform::println!("capability.service: signature.service spawned pid={}", pid);
+        }
+        Err(err) => {
+            platform::println!(
+                "capability.service: signature.service spawn failed errno={}",
+                err.errno().unwrap_or(0)
+            );
+            platform::process::exit(1);
+        }
+    }
+    match spawn_package_service(&package_index) {
+        Ok(pid) => {
+            platform::println!("capability.service: package.service spawned pid={}", pid);
+        }
+        Err(err) => {
+            platform::println!(
+                "capability.service: package.service spawn failed errno={}",
+                err.errno().unwrap_or(0)
+            );
+            platform::process::exit(1);
+        }
+    }
     match spawn_drivers_service(&package_index) {
         Ok(pid) => {
             platform::println!("capability.service: drivers.service spawned pid={}", pid);

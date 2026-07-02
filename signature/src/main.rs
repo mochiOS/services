@@ -26,6 +26,9 @@ _start:
 "#
 );
 
+const VERIFY_PACKAGE_OPCODE: u32 = 0x5645_5246;
+const REPLY_OK: u64 = 0;
+
 #[derive(Clone)]
 struct MpkgHeader {
     header_size: usize,
@@ -36,7 +39,6 @@ struct MpkgHeader {
 #[derive(Clone)]
 struct TarEntry {
     path: String,
-    kind: u8,
     data: Vec<u8>,
 }
 
@@ -68,8 +70,13 @@ unsafe fn c_string_len(ptr: *const u8) -> usize {
 
 unsafe fn parse_initial_arg(sp: *const usize) -> Option<String> {
     let stack = unsafe { platform::runtime::InitialStack::parse(sp) };
+    let mut seen_argv0 = false;
     for &arg_ptr in stack.argv {
         if arg_ptr.is_null() {
+            continue;
+        }
+        if !seen_argv0 {
+            seen_argv0 = true;
             continue;
         }
         let len = unsafe { c_string_len(arg_ptr) };
@@ -189,7 +196,6 @@ fn parse_tar_stream(bytes: &[u8]) -> Option<Vec<TarEntry>> {
         }
         entries.push(TarEntry {
             path,
-            kind,
             data: bytes[payload_start..payload_end].to_vec(),
         });
         offset = payload_end.div_ceil(512) * 512;
@@ -270,11 +276,69 @@ fn verify_package(mpkg_path: &str) -> Result<(), mochi_user_syscall::SysError> {
     Ok(())
 }
 
+fn parse_verify_request(buf: &[u8]) -> Result<String, mochi_user_syscall::SysError> {
+    if buf.len() < 4 {
+        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+    }
+    let opcode = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    if opcode != VERIFY_PACKAGE_OPCODE {
+        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+    }
+    let path_bytes = &buf[4..];
+    if path_bytes.is_empty() || path_bytes.contains(&0) {
+        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+    }
+    let path = core::str::from_utf8(path_bytes)
+        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    if !path.starts_with('/') {
+        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+    }
+    Ok(path.to_string())
+}
+
+fn reply_status(sender: u64, result: Result<(), mochi_user_syscall::SysError>) {
+    let status = match result {
+        Ok(_) => REPLY_OK,
+        Err(err) => err.errno().unwrap_or(mochi_user_syscall::EIO),
+    };
+    let _ = platform::ipc::reply(sender, &status.to_le_bytes());
+}
+
+fn run_server() -> ! {
+    platform::println!("signature.service: ready");
+    let endpoint = match platform::ipc::create() {
+        Ok(endpoint) => endpoint,
+        Err(err) => {
+            platform::println!(
+                "signature.service: endpoint create failed errno={}",
+                err.errno().unwrap_or(0)
+            );
+            platform::process::exit(1);
+        }
+    };
+    let mut buf = [0u8; 512];
+    loop {
+        let msg = match platform::ipc::wait(endpoint, &mut buf) {
+            Ok(msg) => msg,
+            Err(_) => {
+                platform::thread::yield_now();
+                continue;
+            }
+        };
+        let sender = msg >> 32;
+        let len = (msg & 0xffff_ffff) as usize;
+        let result = parse_verify_request(&buf[..len]).and_then(|path| verify_package(&path));
+        reply_status(sender, result);
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn service_main(sp: *const usize) -> ! {
+    unsafe {
+        let _ = platform::logger::init_from_initial_stack(sp);
+    }
     let Some(mpkg_path) = (unsafe { parse_initial_arg(sp) }) else {
-        platform::println!("signature.service: missing mpkg path");
-        platform::process::exit(1);
+        run_server();
     };
 
     platform::println!("signature.service: start {}", mpkg_path);

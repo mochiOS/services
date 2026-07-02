@@ -7,4 +7,5 @@ entry = "signature.service"
 [capabilities]
 requires = [
     "fs.read.all",
+    "ipc.server",
 ]

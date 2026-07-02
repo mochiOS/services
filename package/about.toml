@@ -8,5 +8,6 @@ entry = "package.service"
 requires = [
     "fs.read.all",
     "fs.write.all",
-    "process.spawn",
+    "ipc.client",
+    "ipc.server",
 ]

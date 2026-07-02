@@ -22,8 +22,10 @@ _start:
 "#
 );
 
-const SIG_SERVICE_PATH: &str = "/system/services/signature.service";
-const SIG_SERVICE_MANIFEST_PATH: &str = "/system/packages/signature/manifest.toml";
+const SIG_SERVICE_NAME: &str = "signature.service";
+const VERIFY_PACKAGE_OPCODE: u32 = 0x5645_5246;
+const INSTALL_REQUEST_OPCODE: u32 = 0x494e_5354;
+const REPLY_OK: u64 = 0;
 const O_WRONLY: u64 = 0o1;
 const O_CREAT: u64 = 0o100;
 const O_TRUNC: u64 = 0o1000;
@@ -73,8 +75,13 @@ unsafe fn c_string_len(ptr: *const u8) -> usize {
 
 unsafe fn parse_initial_arg(sp: *const usize) -> Option<String> {
     let stack = unsafe { platform::runtime::InitialStack::parse(sp) };
+    let mut seen_argv0 = false;
     for &arg_ptr in stack.argv {
         if arg_ptr.is_null() {
+            continue;
+        }
+        if !seen_argv0 {
+            seen_argv0 = true;
             continue;
         }
         let len = unsafe { c_string_len(arg_ptr) };
@@ -227,36 +234,29 @@ fn entry_by_path<'a>(entries: &'a [TarEntry], path: &str) -> Option<&'a TarEntry
     entries.iter().find(|entry| entry.path == path)
 }
 
-fn spawn_signature_service(mpkg_path: &str) -> Result<(), mochi_user_syscall::SysError> {
-    let manifest = platform::package::read_manifest(SIG_SERVICE_MANIFEST_PATH)
-        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
-    let caps = manifest.binary_requires(SIG_SERVICE_PATH).unwrap_or(&[]);
-    let mut caps_nul = Vec::new();
-    for cap in caps {
-        caps_nul.extend_from_slice(cap.as_bytes());
-        caps_nul.push(0);
-    }
-    let args = [mpkg_path.to_string()];
-    let mut args_nul = Vec::new();
-    for arg in args {
-        args_nul.extend_from_slice(arg.as_bytes());
-        args_nul.push(0);
-    }
-    let pid = platform::service::spawn_manifest(
-        SIG_SERVICE_PATH,
-        platform::service::ROLE_SERVICE,
-        Some(args_nul.as_slice()),
-        Some(caps_nul.as_slice()),
-    )?;
-    let mut status = 0i32;
-    let waited = platform::process::wait(pid as i64, &mut status as *mut i32 as u64, 0)?;
-    if waited != pid {
+fn verify_with_signature_service(mpkg_path: &str) -> Result<(), mochi_user_syscall::SysError> {
+    if !mpkg_path.starts_with('/') || mpkg_path.as_bytes().contains(&0) {
         return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
     }
-    if (status & 0xff00) != 0 {
-        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64));
+    let service_tid = platform::process::find_by_name(SIG_SERVICE_NAME)?;
+    if service_tid == 0 {
+        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOENT as i64));
     }
-    Ok(())
+    let mut request = Vec::with_capacity(4 + mpkg_path.len());
+    request.extend_from_slice(&VERIFY_PACKAGE_OPCODE.to_le_bytes());
+    request.extend_from_slice(mpkg_path.as_bytes());
+    let mut reply = [0u8; 8];
+    let msg = platform::ipc::call(service_tid, &request, &mut reply)?;
+    let len = (msg & 0xffff_ffff) as usize;
+    if len < 8 {
+        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EIO as i64));
+    }
+    let status = u64::from_le_bytes(reply);
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(mochi_user_syscall::SysError::from_raw(status as i64))
+    }
 }
 
 fn write_file(path: &str, data: &[u8], mode: u64) -> Result<(), mochi_user_syscall::SysError> {
@@ -298,7 +298,7 @@ fn write_file(path: &str, data: &[u8], mode: u64) -> Result<(), mochi_user_sysca
 }
 
 fn install_package(mpkg_path: &str) -> Result<(), mochi_user_syscall::SysError> {
-    spawn_signature_service(mpkg_path)?;
+    verify_with_signature_service(mpkg_path)?;
 
     let bytes = platform::file::read_to_end_path(mpkg_path)?;
     let header = parse_header(&bytes).ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
@@ -377,25 +377,83 @@ fn install_package(mpkg_path: &str) -> Result<(), mochi_user_syscall::SysError> 
     Ok(())
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn service_main(sp: *const usize) -> ! {
-    let Some(mpkg_path) = (unsafe { parse_initial_arg(sp) }) else {
-        platform::println!("package.service: missing mpkg path");
-        platform::process::exit(1);
-    };
+fn parse_install_request(buf: &[u8]) -> Result<String, mochi_user_syscall::SysError> {
+    if buf.len() < 4 {
+        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+    }
+    let opcode = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    if opcode != INSTALL_REQUEST_OPCODE {
+        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+    }
+    let path_bytes = &buf[4..];
+    if path_bytes.is_empty() || path_bytes.contains(&0) {
+        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+    }
+    let path = core::str::from_utf8(path_bytes)
+        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    if !path.starts_with('/') {
+        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+    }
+    Ok(path.to_string())
+}
 
-    platform::println!("package.service: start {}", mpkg_path);
-    match install_package(&mpkg_path) {
-        Ok(_) => {
-            platform::println!("package.service: installed {}", mpkg_path);
-            platform::process::exit(0);
-        }
+fn reply_status(sender: u64, result: Result<(), mochi_user_syscall::SysError>) {
+    let status = match result {
+        Ok(_) => REPLY_OK,
+        Err(err) => err.errno().unwrap_or(mochi_user_syscall::EIO),
+    };
+    let _ = platform::ipc::reply(sender, &status.to_le_bytes());
+}
+
+fn run_server() -> ! {
+    platform::println!("package.service: ready");
+    let endpoint = match platform::ipc::create() {
+        Ok(endpoint) => endpoint,
         Err(err) => {
             platform::println!(
-                "package.service: install failed errno={}",
+                "package.service: endpoint create failed errno={}",
                 err.errno().unwrap_or(0)
             );
             platform::process::exit(1);
         }
+    };
+    let mut buf = [0u8; 512];
+    loop {
+        let msg = match platform::ipc::wait(endpoint, &mut buf) {
+            Ok(msg) => msg,
+            Err(_) => {
+                platform::thread::yield_now();
+                continue;
+            }
+        };
+        let sender = msg >> 32;
+        let len = (msg & 0xffff_ffff) as usize;
+        let request = parse_install_request(&buf[..len]).and_then(|path| install_package(&path));
+        reply_status(sender, request);
     }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn service_main(sp: *const usize) -> ! {
+    unsafe {
+        let _ = platform::logger::init_from_initial_stack(sp);
+    }
+    if let Some(mpkg_path) = unsafe { parse_initial_arg(sp) } {
+        platform::println!("package.service: start {}", mpkg_path);
+        match install_package(&mpkg_path) {
+            Ok(_) => {
+                platform::println!("package.service: installed {}", mpkg_path);
+                platform::process::exit(0);
+            }
+            Err(err) => {
+                platform::println!(
+                    "package.service: install failed errno={}",
+                    err.errno().unwrap_or(0)
+                );
+                platform::process::exit(1);
+            }
+        }
+    }
+
+    run_server()
 }
