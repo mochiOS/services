@@ -86,6 +86,123 @@ fn encode_nul_list(items: &[String]) -> Vec<u8> {
     out
 }
 
+fn is_known_capability(name: &str) -> bool {
+    matches!(
+        name,
+        "fs.read.user.documents"
+            | "fs.write.user.documents"
+            | "fs.read.user.downloads"
+            | "fs.write.user.downloads"
+            | "fs.read.user.desktop"
+            | "fs.write.user.desktop"
+            | "fs.read.user.pictures"
+            | "fs.write.user.pictures"
+            | "fs.read.user.music"
+            | "fs.write.user.music"
+            | "fs.read.user.videos"
+            | "fs.write.user.videos"
+            | "fs.read.user"
+            | "fs.write.user"
+            | "fs.read.tmp"
+            | "fs.write.tmp"
+            | "fs.read.removable"
+            | "fs.write.removable"
+            | "fs.read.all"
+            | "fs.write.all"
+            | "net.connect"
+            | "net.listen"
+            | "net.raw"
+            | "ipc.client"
+            | "ipc.server"
+            | "process.spawn"
+            | "process.inspect"
+            | "process.kill"
+            | "window.create"
+            | "window.overlay"
+            | "window.capture"
+            | "display.read"
+            | "display.capture"
+            | "input.keyboard"
+            | "input.keyboard.global"
+            | "input.pointer"
+            | "input.pointer.global"
+            | "input.gamepad"
+            | "audio.playback"
+            | "audio.record"
+            | "clipboard.read"
+            | "clipboard.write"
+            | "notification.send"
+            | "camera.access"
+            | "microphone.access"
+            | "location.access"
+            | "bluetooth.access"
+            | "usb.access"
+            | "serial.access"
+            | "power.shutdown"
+            | "power.reboot"
+            | "power.suspend"
+            | "system.time.read"
+            | "system.time.set"
+            | "system.info.read"
+            | "system.logs.read"
+            | "package.install"
+            | "package.remove"
+            | "package.update"
+            | "service.register"
+            | "service.control"
+            | "vm.create"
+            | "vm.control"
+            | "dma.allocate"
+            | "memory.phys.map"
+            | "memory.phys.translate"
+            | "kernel.module.load"
+            | "kernel.debug"
+            | "device.gpu"
+            | "device.audio"
+            | "device.input"
+            | "device.storage"
+            | "device.net"
+            | "account.self.read"
+            | "account.self.modify"
+            | "account.other.read"
+            | "account.other.modify"
+            | "settings.read"
+            | "settings.write"
+            | "capabilities.manage"
+            | "unsandboxed"
+            | "developer.debug"
+            | "developer.profile"
+            | "developer.tracing"
+            | "signature.db.read"
+            | "signature.db.write"
+    )
+}
+
+fn validate_capabilities(binary_path: &str, caps: &[String]) -> Result<(), mochi_user_syscall::SysError> {
+    for cap in caps {
+        if !is_known_capability(cap.as_str()) {
+            platform::println!(
+                "capability.service: unknown capability {} requested by {}",
+                cap,
+                binary_path
+            );
+            return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+        }
+    }
+    Ok(())
+}
+
+fn binary_caps<'a>(
+    manifest: &'a platform::package::PackageManifest,
+    binary_path: &str,
+) -> Result<&'a [String], mochi_user_syscall::SysError> {
+    let caps = manifest
+        .binary_requires(binary_path)
+        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    validate_capabilities(binary_path, caps)?;
+    Ok(caps)
+}
+
 fn encode_spawn_args(items: &[String]) -> Vec<u8> {
     let mut out = Vec::with_capacity(256);
     out.resize(256, 0);
@@ -133,7 +250,7 @@ fn spawn_drivers_service(index: &PackageIndex) -> Result<u64, mochi_user_syscall
         .unwrap_or_else(|| DRIVERS_PACKAGE_MANIFEST_PATH.to_string());
     let manifest = platform::package::read_manifest(&manifest_path)
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
-    let caps = manifest.binary_requires(DRIVERS_SERVICE_PATH).unwrap_or(&[]);
+    let caps = binary_caps(&manifest, DRIVERS_SERVICE_PATH)?;
     platform::println!("capability.service: parsed drivers.service package caps={}", caps.len());
     let caps_nul = encode_nul_list(&caps);
     let logger_endpoint = platform::logger::endpoint().unwrap_or(0);
@@ -158,7 +275,7 @@ fn spawn_signature_service(index: &PackageIndex) -> Result<u64, mochi_user_sysca
         .unwrap_or_else(|| SIGNATURE_PACKAGE_MANIFEST_PATH.to_string());
     let manifest = platform::package::read_manifest(&manifest_path)
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
-    let caps = manifest.binary_requires(SIGNATURE_SERVICE_PATH).unwrap_or(&[]);
+    let caps = binary_caps(&manifest, SIGNATURE_SERVICE_PATH)?;
     platform::println!("capability.service: parsed signature.service package caps={}", caps.len());
     let caps_nul = encode_nul_list(&caps);
     let logger_endpoint = platform::logger::endpoint().unwrap_or(0);
@@ -183,7 +300,7 @@ fn spawn_package_service(index: &PackageIndex) -> Result<u64, mochi_user_syscall
         .unwrap_or_else(|| PACKAGE_PACKAGE_MANIFEST_PATH.to_string());
     let manifest = platform::package::read_manifest(&manifest_path)
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
-    let caps = manifest.binary_requires(PACKAGE_SERVICE_PATH).unwrap_or(&[]);
+    let caps = binary_caps(&manifest, PACKAGE_SERVICE_PATH)?;
     platform::println!("capability.service: parsed package.service package caps={}", caps.len());
     let caps_nul = encode_nul_list(&caps);
     let logger_endpoint = platform::logger::endpoint().unwrap_or(0);

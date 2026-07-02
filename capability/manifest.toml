@@ -9,6 +9,7 @@ path = "/system/services/capability.service"
 kind = "service"
 requires = [
     "fs.read.all",
+    "fs.write.all",
     "process.spawn",
     "service.register",
     "device.input",
