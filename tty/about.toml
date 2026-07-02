@@ -1,5 +1,5 @@
 [service]
-id = "com.mochios.tty"
+id = "org.mochios.tty"
 name = "TTY Service"
 version = "1"
 entry = "tty.service"

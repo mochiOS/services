@@ -18,7 +18,7 @@ const INPUT_SERVICE_PATH: &str = "/system/services/input.service";
 const INPUT_SERVICE_MANIFEST_PATH: &str = "/system/services/input.service.toml";
 const TTY_SERVICE_PATH: &str = "/system/services/tty.service";
 const TTY_SERVICE_MANIFEST_PATH: &str = "/system/services/tty.service.toml";
-const I8042_DRIVER_ID: &str = "com.mochios.ps2.i8042";
+const I8042_DRIVER_ID: &str = "org.mochios.ps2.i8042";
 
 #[derive(Clone, Debug, Default)]
 struct BundleManifest {

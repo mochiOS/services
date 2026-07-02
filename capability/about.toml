@@ -1,5 +1,5 @@
 [service]
-id = "com.mochios.capability"
+id = "org.mochios.capability"
 name = "Capability Service"
 version = "1"
 entry = "capability.service"
