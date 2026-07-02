@@ -1,0 +1,21 @@
+[package]
+name = "signature"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[dependencies]
+ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
+mochi-user-platform = { path = "../../user/crates/platform" }
+mochi-user-runtime = { path = "../../user/crates/runtime" }
+mochi-user-syscall = { path = "../../user/crates/syscall" }
+sha2 = { version = "0.10", default-features = false }
+
+[build-dependencies]
+
+[[bin]]
+name = "signature"
+path = "src/main.rs"
+test = false
+bench = false
+harness = false

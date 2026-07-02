@@ -1,0 +1,14 @@
+[package]
+id = "org.mochios.package"
+name = "Package Service"
+version = "1"
+vendor = "mochiOS"
+
+[[binary]]
+path = "/system/services/package.service"
+kind = "service"
+requires = [
+    "fs.read.all",
+    "fs.write.all",
+    "process.spawn",
+]

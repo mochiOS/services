@@ -26,9 +26,23 @@ description = "mochiOS input event service"
 autostart = false
 order = 3
 
+[package.service]
+dir = "package"
+fs = "rootfs"
+description = "mochiOS package installation service"
+autostart = false
+order = 4
+
+[signature.service]
+dir = "signature"
+fs = "rootfs"
+description = "mochiOS package signature verification service"
+autostart = false
+order = 5
+
 [tty.service]
 dir = "tty"
 fs = "rootfs"
 description = "mochiOS tty service"
 autostart = false
-order = 4
+order = 6

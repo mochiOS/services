@@ -1,0 +1,12 @@
+[package]
+id = "org.mochios.signature"
+name = "Signature Service"
+version = "1"
+vendor = "mochiOS"
+
+[[binary]]
+path = "/system/services/signature.service"
+kind = "service"
+requires = [
+    "fs.read.all",
+]

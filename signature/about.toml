@@ -1,0 +1,10 @@
+[service]
+id = "org.mochios.signature"
+name = "Signature Service"
+version = "1"
+entry = "signature.service"
+
+[capabilities]
+requires = [
+    "fs.read.all",
+]

@@ -1,0 +1,12 @@
+[service]
+id = "org.mochios.package"
+name = "Package Service"
+version = "1"
+entry = "package.service"
+
+[capabilities]
+requires = [
+    "fs.read.all",
+    "fs.write.all",
+    "process.spawn",
+]

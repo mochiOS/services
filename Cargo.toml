@@ -1,6 +1,15 @@
 [workspace]
 resolver = "2"
-members = ["capability", "core", "drivers", "input", "logger", "tty"]
+members = [
+    "capability",
+    "core",
+    "drivers",
+    "input",
+    "logger",
+    "package",
+    "signature",
+    "tty",
+]
 
 [patch."https://github.com/mochiOS/mnu"]
 plugkit = { path = "../core/crates/PlugKit/plugkit" }
