@@ -1,0 +1,14 @@
+[package]
+id = "org.mochios.logger"
+name = "Logger Service"
+version = "1"
+vendor = "mochiOS"
+
+[[binary]]
+path = "/system/services/logger.service"
+kind = "service"
+requires = [
+    "fs.write.all",
+    "ipc.client",
+    "ipc.server",
+]

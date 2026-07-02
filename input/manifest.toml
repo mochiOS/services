@@ -1,0 +1,13 @@
+[package]
+id = "org.mochios.input"
+name = "Input Service"
+version = "1"
+vendor = "mochiOS"
+
+[[binary]]
+path = "/system/services/input.service"
+kind = "service"
+requires = [
+    "ipc.client",
+    "ipc.server",
+]

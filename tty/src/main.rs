@@ -23,7 +23,7 @@ _start:
 );
 
 const MSH_PATH: &str = "/bin/msh";
-const MSH_MANIFEST_PATH: &str = "/bin/msh.toml";
+const MSH_PACKAGE_MANIFEST_PATH: &str = "/system/packages/msh/manifest.toml";
 fn parse_decimal_u64(bytes: &[u8]) -> Option<u64> {
     if bytes.is_empty() {
         return None;
@@ -65,49 +65,6 @@ unsafe fn parse_endpoint_arg(sp: *const usize) -> Option<u64> {
     None
 }
 
-fn parse_capability_requires(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut in_caps = false;
-    let mut collecting = false;
-
-    for raw_line in text.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if line.starts_with('[') && line.ends_with(']') {
-            in_caps = line == "[capabilities]";
-            collecting = false;
-            continue;
-        }
-        if !in_caps {
-            continue;
-        }
-        if let Some((key, rest)) = line.split_once('=') {
-            if key.trim() != "requires" {
-                continue;
-            }
-            collecting = true;
-            collect_capability_line(&mut out, rest);
-            continue;
-        }
-        if collecting {
-            collect_capability_line(&mut out, line);
-        }
-    }
-
-    out
-}
-
-fn collect_capability_line(out: &mut Vec<String>, line: &str) {
-    for part in line.split(',') {
-        let item = part.trim().trim_matches(|ch| ch == '[' || ch == ']' || ch == '"');
-        if !item.is_empty() {
-            out.push(item.to_string());
-        }
-    }
-}
-
 fn encode_nul_list(items: &[String]) -> Vec<u8> {
     let mut out = Vec::new();
     for item in items {
@@ -135,10 +92,9 @@ fn encode_spawn_args(items: &[String]) -> Vec<u8> {
 }
 
 fn spawn_msh(shell_endpoint: u64) -> Result<u64, mochi_user_syscall::SysError> {
-    let manifest = platform::file::read_to_end_path(MSH_MANIFEST_PATH)?;
-    let text = core::str::from_utf8(&manifest)
-        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
-    let caps = parse_capability_requires(text);
+    let manifest = platform::package::read_manifest(MSH_PACKAGE_MANIFEST_PATH)
+        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    let caps = manifest.binary_requires(MSH_PATH).unwrap_or(&[]);
     let caps_nul = encode_nul_list(&caps);
     let arg = shell_endpoint.to_string();
     let args = [arg];

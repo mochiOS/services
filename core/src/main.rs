@@ -23,52 +23,9 @@ _start:
 );
 
 const LOGGER_SERVICE_PATH: &str = "/system/services/logger.service";
-const LOGGER_SERVICE_MANIFEST_PATH: &str = "/system/services/logger.service.toml";
+const LOGGER_PACKAGE_MANIFEST_PATH: &str = "/system/packages/logger/manifest.toml";
 const CAPABILITY_SERVICE_PATH: &str = "/system/services/capability.service";
-const CAPABILITY_SERVICE_MANIFEST_PATH: &str = "/system/services/capability.service.toml";
-
-fn parse_capability_requires(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut in_caps = false;
-    let mut collecting = false;
-
-    for raw_line in text.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if line.starts_with('[') && line.ends_with(']') {
-            in_caps = line == "[capabilities]";
-            collecting = false;
-            continue;
-        }
-        if !in_caps {
-            continue;
-        }
-        if let Some((key, rest)) = line.split_once('=') {
-            if key.trim() != "requires" {
-                continue;
-            }
-            collecting = true;
-            collect_capability_line(&mut out, rest);
-            continue;
-        }
-        if collecting {
-            collect_capability_line(&mut out, line);
-        }
-    }
-
-    out
-}
-
-fn collect_capability_line(out: &mut Vec<String>, line: &str) {
-    for part in line.split(',') {
-        let item = part.trim().trim_matches(|ch| ch == '[' || ch == ']' || ch == '"');
-        if !item.is_empty() {
-            out.push(item.to_string());
-        }
-    }
-}
+const CAPABILITY_PACKAGE_MANIFEST_PATH: &str = "/system/packages/capability/manifest.toml";
 
 fn encode_nul_list(items: &[String]) -> Vec<u8> {
     let mut out = Vec::new();
@@ -117,10 +74,9 @@ fn register_delegate_with_retry(kind: u64, pid: u64) -> Result<(), mochi_user_sy
 
 fn spawn_logger_service() -> Result<u64, mochi_user_syscall::SysError> {
     let bootstrap = platform::ipc::create()?;
-    let manifest = platform::file::read_to_end_path(LOGGER_SERVICE_MANIFEST_PATH)?;
-    let text = core::str::from_utf8(&manifest)
-        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
-    let caps = parse_capability_requires(text);
+    let manifest = platform::package::read_manifest(LOGGER_PACKAGE_MANIFEST_PATH)
+        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    let caps = manifest.binary_requires(LOGGER_SERVICE_PATH).unwrap_or(&[]);
     let caps_nul = encode_nul_list(&caps);
     let args = [bootstrap.to_string()];
     let args_nul = encode_spawn_args(&args);
@@ -144,12 +100,11 @@ fn spawn_logger_service() -> Result<u64, mochi_user_syscall::SysError> {
 }
 
 fn spawn_capability_service() -> Result<u64, mochi_user_syscall::SysError> {
-    let manifest = platform::file::read_to_end_path(CAPABILITY_SERVICE_MANIFEST_PATH)?;
-    let text = core::str::from_utf8(&manifest)
-        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
-    let caps = parse_capability_requires(text);
+    let manifest = platform::package::read_manifest(CAPABILITY_PACKAGE_MANIFEST_PATH)
+        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    let caps = manifest.binary_requires(CAPABILITY_SERVICE_PATH).unwrap_or(&[]);
     platform::println!(
-        "core.service: parsed capability.service manifest caps={}",
+        "core.service: parsed capability.service package caps={}",
         caps.len()
     );
     let caps_nul = encode_nul_list(&caps);

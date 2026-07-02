@@ -1,0 +1,18 @@
+[package]
+id = "org.mochios.capability"
+name = "Capability Service"
+version = "1"
+vendor = "mochiOS"
+
+[[binary]]
+path = "/system/services/capability.service"
+kind = "service"
+requires = [
+    "fs.read.all",
+    "process.spawn",
+    "service.register",
+    "device.input",
+    "ipc.client",
+    "ipc.server",
+    "usb.access",
+]

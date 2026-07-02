@@ -15,9 +15,9 @@ use sha2::{Digest, Sha256};
 const SIGNATURE_DB_PATH: &str = "/signature.db";
 const DRIVER_BUNDLE_ROOTS: &[&str] = &["/bin/drivers/usb", "/bin/drivers/ps2"];
 const INPUT_SERVICE_PATH: &str = "/system/services/input.service";
-const INPUT_SERVICE_MANIFEST_PATH: &str = "/system/services/input.service.toml";
+const INPUT_PACKAGE_MANIFEST_PATH: &str = "/system/packages/input/manifest.toml";
 const TTY_SERVICE_PATH: &str = "/system/services/tty.service";
-const TTY_SERVICE_MANIFEST_PATH: &str = "/system/services/tty.service.toml";
+const TTY_PACKAGE_MANIFEST_PATH: &str = "/system/packages/tty/manifest.toml";
 const I8042_DRIVER_ID: &str = "org.mochios.ps2.i8042";
 
 #[derive(Clone, Debug, Default)]
@@ -445,8 +445,8 @@ fn spawn_input_service(
     control_endpoint_handle: u64,
     logger_endpoint: u64,
 ) -> Option<u64> {
-    let manifest_text = read_text_file(INPUT_SERVICE_MANIFEST_PATH)?;
-    let caps = parse_capability_requires(&manifest_text);
+    let manifest = platform::package::read_manifest(INPUT_PACKAGE_MANIFEST_PATH)?;
+    let caps = manifest.binary_requires(INPUT_SERVICE_PATH).unwrap_or(&[]);
     let args = vec![
         raw_endpoint_handle.to_string(),
         control_endpoint_handle.to_string(),
@@ -464,8 +464,8 @@ fn spawn_input_service(
 }
 
 fn spawn_tty_service(control_endpoint_handle: u64, logger_endpoint: u64) -> Option<u64> {
-    let manifest_text = read_text_file(TTY_SERVICE_MANIFEST_PATH)?;
-    let caps = parse_capability_requires(&manifest_text);
+    let manifest = platform::package::read_manifest(TTY_PACKAGE_MANIFEST_PATH)?;
+    let caps = manifest.binary_requires(TTY_SERVICE_PATH).unwrap_or(&[]);
     let args = vec![control_endpoint_handle.to_string(), logger_endpoint.to_string()];
     let args_nul = encode_spawn_args(&args);
     let caps_nul = encode_nul_list(&caps);
@@ -478,36 +478,39 @@ fn spawn_tty_service(control_endpoint_handle: u64, logger_endpoint: u64) -> Opti
         .ok()
 }
 
+fn bundle_manifest_path(bundle_root: &str) -> String {
+    alloc::format!(
+        "/system/packages{}/manifest.toml",
+        bundle_root.trim_start_matches("/bin")
+    )
+}
+
 fn maybe_spawn_bundle(bundle_root: &str, raw_input_endpoint_handle: u64, logger_endpoint: u64) {
-    let about_path = alloc::format!("{}/about.toml", bundle_root);
-    let Some(about_text) = read_text_file(&about_path) else {
-        platform::println!("drivers.service: missing {}", about_path);
+    let package_manifest_path = bundle_manifest_path(bundle_root);
+    let Some(manifest) = platform::package::read_manifest(&package_manifest_path) else {
+        platform::println!("drivers.service: missing {}", package_manifest_path);
         return;
     };
-    let Some(manifest) = parse_about(&about_text) else {
-        platform::println!("drivers.service: invalid {}", about_path);
+    let entry_path = alloc::format!("{}/entry.elf", bundle_root);
+    let Some(binary) = manifest.binary(&entry_path) else {
+        platform::println!(
+            "drivers.service: missing binary entry {} in {}",
+            entry_path,
+            package_manifest_path
+        );
         return;
-    };
-    let entry_path = if manifest.entry.starts_with('/') {
-        manifest.entry.clone()
-    } else {
-        alloc::format!("{}/{}", bundle_root, manifest.entry)
     };
 
     platform::println!(
         "drivers.service: bundle {} {} api={} class={} match={}/{}",
         manifest.package_id,
         manifest.package_name,
-        manifest.api_version,
-        manifest.driver_class,
-        manifest.match_bus,
-        manifest.match_class
+        binary.api_version.unwrap_or(0),
+        binary.driver_class.as_deref().unwrap_or(""),
+        binary.match_bus.as_deref().unwrap_or(""),
+        binary.match_class.as_deref().unwrap_or("")
     );
 
-    if !verify_bundle(&entry_path) {
-        return;
-    }
-    platform::println!("drivers.service: bundle verified {}", entry_path);
     let args = if manifest.package_id == I8042_DRIVER_ID && raw_input_endpoint_handle != 0 {
         let args = vec![raw_input_endpoint_handle.to_string()];
         Some(encode_spawn_args(&args))
@@ -517,7 +520,7 @@ fn maybe_spawn_bundle(bundle_root: &str, raw_input_endpoint_handle: u64, logger_
     match spawn_bundle(
         &entry_path,
         args.as_deref(),
-        &manifest.capabilities,
+        &binary.requires,
         logger_endpoint,
     ) {
         Some(pid) => {

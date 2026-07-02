@@ -1,0 +1,17 @@
+[package]
+id = "org.mochios.drivers"
+name = "Drivers Service"
+version = "1"
+vendor = "mochiOS"
+
+[[binary]]
+path = "/system/services/drivers.service"
+kind = "service"
+requires = [
+    "fs.read.all",
+    "process.spawn",
+    "device.input",
+    "ipc.client",
+    "ipc.server",
+    "usb.access",
+]
