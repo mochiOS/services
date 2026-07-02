@@ -153,6 +153,9 @@ fn spawn_msh(shell_endpoint: u64) -> Result<u64, mochi_user_syscall::SysError> {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn service_main(sp: *const usize) -> ! {
+    unsafe {
+        let _ = platform::logger::init_from_initial_stack(sp);
+    }
     let Some(control_endpoint) = (unsafe { parse_endpoint_arg(sp) }) else {
         platform::process::exit(1);
     };

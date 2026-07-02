@@ -13,6 +13,7 @@ global_asm!(
     .global _start
 _start:
     xor rbp, rbp
+    mov rdi, rsp
     and rsp, -16
     call service_main
 1:
@@ -76,6 +77,23 @@ fn encode_nul_list(items: &[String]) -> Vec<u8> {
     out
 }
 
+fn encode_spawn_args(items: &[String]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(256);
+    out.resize(256, 0);
+    let mut cursor = 0usize;
+    for item in items {
+        let bytes = item.as_bytes();
+        if cursor + bytes.len() + 2 > out.len() {
+            break;
+        }
+        out[cursor..cursor + bytes.len()].copy_from_slice(bytes);
+        cursor += bytes.len();
+        out[cursor] = 0;
+        cursor += 1;
+    }
+    out
+}
+
 fn register_delegate_with_retry(kind: u64, pid: u64) -> Result<(), mochi_user_syscall::SysError> {
     let mut last_err = None;
     for _ in 0..32 {
@@ -105,16 +123,22 @@ fn spawn_drivers_service() -> Result<u64, mochi_user_syscall::SysError> {
         caps.len()
     );
     let caps_nul = encode_nul_list(&caps);
+    let logger_endpoint = platform::logger::endpoint().unwrap_or(0);
+    let args = [logger_endpoint.to_string()];
+    let args_nul = encode_spawn_args(&args);
     platform::service::spawn_manifest(
         DRIVERS_SERVICE_PATH,
         platform::service::ROLE_SERVICE,
-        None,
+        Some(args_nul.as_slice()),
         Some(caps_nul.as_slice()),
     )
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn service_main() -> ! {
+pub extern "C" fn service_main(sp: *const usize) -> ! {
+    unsafe {
+        let _ = platform::logger::init_from_initial_stack(sp);
+    }
     platform::println!("capability.service: start");
     match spawn_drivers_service() {
         Ok(pid) => {

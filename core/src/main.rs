@@ -13,6 +13,7 @@ global_asm!(
     .global _start
 _start:
     xor rbp, rbp
+    mov rdi, rsp
     and rsp, -16
     call service_main
 1:
@@ -21,6 +22,8 @@ _start:
 "#
 );
 
+const LOGGER_SERVICE_PATH: &str = "/system/services/logger.service";
+const LOGGER_SERVICE_MANIFEST_PATH: &str = "/system/services/logger.service.toml";
 const CAPABILITY_SERVICE_PATH: &str = "/system/services/capability.service";
 const CAPABILITY_SERVICE_MANIFEST_PATH: &str = "/system/services/capability.service.toml";
 
@@ -76,6 +79,23 @@ fn encode_nul_list(items: &[String]) -> Vec<u8> {
     out
 }
 
+fn encode_spawn_args(items: &[String]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(256);
+    out.resize(256, 0);
+    let mut cursor = 0usize;
+    for item in items {
+        let bytes = item.as_bytes();
+        if cursor + bytes.len() + 2 > out.len() {
+            break;
+        }
+        out[cursor..cursor + bytes.len()].copy_from_slice(bytes);
+        cursor += bytes.len();
+        out[cursor] = 0;
+        cursor += 1;
+    }
+    out
+}
+
 fn register_delegate_with_retry(kind: u64, pid: u64) -> Result<(), mochi_user_syscall::SysError> {
     let mut last_err = None;
     for _ in 0..32 {
@@ -95,6 +115,34 @@ fn register_delegate_with_retry(kind: u64, pid: u64) -> Result<(), mochi_user_sy
     }))
 }
 
+fn spawn_logger_service() -> Result<u64, mochi_user_syscall::SysError> {
+    let bootstrap = platform::ipc::create()?;
+    let manifest = platform::file::read_to_end_path(LOGGER_SERVICE_MANIFEST_PATH)?;
+    let text = core::str::from_utf8(&manifest)
+        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    let caps = parse_capability_requires(text);
+    let caps_nul = encode_nul_list(&caps);
+    let args = [bootstrap.to_string()];
+    let args_nul = encode_spawn_args(&args);
+    let pid = platform::service::spawn_manifest(
+        LOGGER_SERVICE_PATH,
+        platform::service::ROLE_SERVICE,
+        Some(args_nul.as_slice()),
+        Some(caps_nul.as_slice()),
+    )?;
+    let mut buf = [0u8; 16];
+    let msg = platform::ipc::wait(bootstrap, &mut buf)?;
+    let len = (msg & 0xffff_ffff) as usize;
+    if len < 8 {
+        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+    }
+    let logger_endpoint = u64::from_le_bytes([
+        buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+    ]);
+    platform::logger::init(logger_endpoint);
+    Ok(pid)
+}
+
 fn spawn_capability_service() -> Result<u64, mochi_user_syscall::SysError> {
     let manifest = platform::file::read_to_end_path(CAPABILITY_SERVICE_MANIFEST_PATH)?;
     let text = core::str::from_utf8(&manifest)
@@ -105,16 +153,30 @@ fn spawn_capability_service() -> Result<u64, mochi_user_syscall::SysError> {
         caps.len()
     );
     let caps_nul = encode_nul_list(&caps);
+    let logger_endpoint = platform::logger::endpoint().unwrap_or(0);
+    let args = [logger_endpoint.to_string()];
+    let args_nul = encode_spawn_args(&args);
     platform::service::spawn_manifest(
         CAPABILITY_SERVICE_PATH,
         platform::service::ROLE_SERVICE,
-        None,
+        Some(args_nul.as_slice()),
         Some(caps_nul.as_slice()),
     )
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn service_main() -> ! {
+pub extern "C" fn service_main(_sp: *const usize) -> ! {
+    let _logger_pid = match spawn_logger_service() {
+        Ok(pid) => pid,
+        Err(err) => {
+            platform::println!(
+                "core.service: logger.service spawn failed errno={}",
+                err.errno().unwrap_or(0)
+            );
+            platform::process::exit(1);
+        }
+    };
+
     main();
     platform::process::exit(0)
 }

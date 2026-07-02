@@ -1,0 +1,12 @@
+[service]
+id = "com.mochios.logger"
+name = "Logger Service"
+version = "1"
+entry = "logger.service"
+
+[capabilities]
+requires = [
+    "fs.write.all",
+    "ipc.client",
+    "ipc.server",
+]

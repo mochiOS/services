@@ -338,6 +338,9 @@ fn handle_subscribe_message(subscriber: &mut u64, buf: &[u8]) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn service_main(sp: *const usize) -> ! {
+    unsafe {
+        let _ = platform::logger::init_from_initial_stack(sp);
+    }
     platform::println!("input.service: start");
 
     let [raw_endpoint, control_endpoint] = unsafe { parse_endpoint_args(sp) };

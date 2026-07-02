@@ -8,6 +8,7 @@ global_asm!(
     .global _start
 _start:
     xor rbp, rbp
+    mov rdi, rsp
     and rsp, -16
     call service_main
 1:
@@ -17,6 +18,6 @@ _start:
 );
 
 #[unsafe(no_mangle)]
-pub extern "C" fn service_main() -> ! {
-    drivers::run()
+pub extern "C" fn service_main(sp: *const usize) -> ! {
+    drivers::run(sp)
 }
