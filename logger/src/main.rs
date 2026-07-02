@@ -87,11 +87,19 @@ fn log_path_for_line(line: &str) -> String {
     alloc::format!("/system/services/{}/service.log", key)
 }
 
+fn ensure_log_parent(path: &str) {
+    let Some((parent, _)) = path.rsplit_once('/') else {
+        return;
+    };
+    let _ = platform::file::create_dir(parent, 0o755);
+}
+
 fn append_log_line(line: &[u8]) {
     let Ok(text) = core::str::from_utf8(line) else {
         return;
     };
     let path = log_path_for_line(text);
+    ensure_log_parent(&path);
     let flags = 0o1 | 0o100 | 0o2000;
     let Ok(fd) = platform::file::open_path(&path, flags) else {
         return;
