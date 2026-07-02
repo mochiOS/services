@@ -39,6 +39,7 @@ struct MpkgHeader {
 #[derive(Clone)]
 struct TarEntry {
     path: String,
+    kind: u8,
     data: Vec<u8>,
 }
 
@@ -196,6 +197,7 @@ fn parse_tar_stream(bytes: &[u8]) -> Option<Vec<TarEntry>> {
         }
         entries.push(TarEntry {
             path,
+            kind,
             data: bytes[payload_start..payload_end].to_vec(),
         });
         offset = payload_end.div_ceil(512) * 512;
@@ -226,18 +228,102 @@ fn decode_cert(bytes: &[u8]) -> Option<VerifyingKey> {
     VerifyingKey::from_bytes(&key).ok()
 }
 
+fn decode_sha256_digest(text: &str) -> Option<[u8; 32]> {
+    let hex = text.strip_prefix("sha256:")?;
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for idx in 0..32 {
+        let hi = u8::from_str_radix(&hex[idx * 2..idx * 2 + 1], 16).ok()?;
+        let lo = u8::from_str_radix(&hex[idx * 2 + 1..idx * 2 + 2], 16).ok()?;
+        out[idx] = (hi << 4) | lo;
+    }
+    Some(out)
+}
+
+fn manifest_payload_path(kind: Option<&str>, path: &str) -> Option<String> {
+    if path.starts_with('/') {
+        return Some(alloc::format!("payload/root{}", path));
+    }
+    let rel = path.strip_prefix("$/")?;
+    match kind {
+        Some("application") => Some(alloc::format!("payload/bundle/{}", rel)),
+        None | Some("binary") => Some(alloc::format!("payload/root/bin/{}", rel)),
+        _ => None,
+    }
+}
+
+fn verify_payload_files(
+    manifest: &platform::package::PackageManifest,
+    entries: &[TarEntry],
+) -> Result<(), mochi_user_syscall::SysError> {
+    if manifest.files.is_empty() {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
+    }
+
+    let mut expected_paths = Vec::new();
+    for file in &manifest.files {
+        let payload_path = manifest_payload_path(manifest.package_kind.as_deref(), &file.path)
+            .ok_or_else(|| {
+                mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
+            })?;
+        let entry = entry_by_path(entries, &payload_path).ok_or_else(|| {
+            mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOENT as i64)
+        })?;
+        if entry.kind != b'0' && entry.kind != 0 {
+            return Err(mochi_user_syscall::SysError::from_raw(
+                mochi_user_syscall::EINVAL as i64,
+            ));
+        }
+        if entry.data.len() as u64 != file.size {
+            return Err(mochi_user_syscall::SysError::from_raw(
+                mochi_user_syscall::EINVAL as i64,
+            ));
+        }
+        let expected = decode_sha256_digest(&file.digest).ok_or_else(|| {
+            mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
+        })?;
+        let actual = Sha256::digest(&entry.data);
+        if actual.as_slice() != expected {
+            return Err(mochi_user_syscall::SysError::from_raw(
+                mochi_user_syscall::EACCES as i64,
+            ));
+        }
+        expected_paths.push(payload_path);
+    }
+
+    for entry in entries {
+        if !entry.path.starts_with("payload/") || entry.kind == b'5' {
+            continue;
+        }
+        if !expected_paths.iter().any(|path| path == &entry.path) {
+            return Err(mochi_user_syscall::SysError::from_raw(
+                mochi_user_syscall::EINVAL as i64,
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn verify_package(mpkg_path: &str) -> Result<(), mochi_user_syscall::SysError> {
     let bytes = platform::file::read_to_end_path(mpkg_path)?;
     let header = parse_header(&bytes)
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     if header.compression != 0 {
-        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOTSUP as i64));
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::ENOTSUP as i64,
+        ));
     }
     let tar = bytes
         .get(header.header_size..)
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     if tar.len() != header.expanded_size {
-        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
     }
     let entries = parse_tar_stream(tar)
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
@@ -253,18 +339,23 @@ fn verify_package(mpkg_path: &str) -> Result<(), mochi_user_syscall::SysError> {
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     match manifest.package_kind.as_deref() {
         None | Some("binary") | Some("application") => {}
-        _ => return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)),
+        _ => {
+            return Err(mochi_user_syscall::SysError::from_raw(
+                mochi_user_syscall::EINVAL as i64,
+            ));
+        }
     }
     if manifest.package_id.is_empty() {
-        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
     }
     let verifier = decode_cert(&cert.data)
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
-    let signature_bytes: [u8; 64] = sig
-        .data
-        .as_slice()
-        .try_into()
-        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    let signature_bytes: [u8; 64] =
+        sig.data.as_slice().try_into().map_err(|_| {
+            mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
+        })?;
     let signature = Signature::from_bytes(&signature_bytes);
     let digest = Sha256::digest(manifest_text.as_bytes());
     let mut msg = Vec::with_capacity(32 + digest.len());
@@ -273,25 +364,34 @@ fn verify_package(mpkg_path: &str) -> Result<(), mochi_user_syscall::SysError> {
     verifier
         .verify_strict(&msg, &signature)
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64))?;
+    verify_payload_files(&manifest, &entries)?;
     Ok(())
 }
 
 fn parse_verify_request(buf: &[u8]) -> Result<String, mochi_user_syscall::SysError> {
     if buf.len() < 4 {
-        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
     }
     let opcode = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
     if opcode != VERIFY_PACKAGE_OPCODE {
-        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
     }
     let path_bytes = &buf[4..];
     if path_bytes.is_empty() || path_bytes.contains(&0) {
-        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
     }
     let path = core::str::from_utf8(path_bytes)
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     if !path.starts_with('/') {
-        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
     }
     Ok(path.to_string())
 }

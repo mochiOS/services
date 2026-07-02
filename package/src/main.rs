@@ -153,7 +153,38 @@ fn join_path(prefix: &str, suffix: &str) -> String {
     if suffix.is_empty() {
         return prefix.to_string();
     }
-    alloc::format!("{}/{}", prefix.trim_end_matches('/'), suffix.trim_start_matches('/'))
+    alloc::format!(
+        "{}/{}",
+        prefix.trim_end_matches('/'),
+        suffix.trim_start_matches('/')
+    )
+}
+
+fn manifest_payload_path(kind: Option<&str>, path: &str) -> Option<String> {
+    if path.starts_with('/') {
+        return Some(alloc::format!("payload/root{}", path));
+    }
+    let rel = path.strip_prefix("$/")?;
+    match kind {
+        Some("application") => Some(alloc::format!("payload/bundle/{}", rel)),
+        None | Some("binary") => Some(alloc::format!("payload/root/bin/{}", rel)),
+        _ => None,
+    }
+}
+
+fn manifest_target_path(kind: Option<&str>, package_name: &str, path: &str) -> Option<String> {
+    if path.starts_with('/') {
+        return Some(path.to_string());
+    }
+    let rel = path.strip_prefix("$/")?;
+    match kind {
+        Some("application") => Some(join_path(
+            &alloc::format!("/applications/{}.app", package_name),
+            rel,
+        )),
+        None | Some("binary") => Some(join_path("/bin", rel)),
+        _ => None,
+    }
 }
 
 fn parse_header(bytes: &[u8]) -> Option<MpkgHeader> {
@@ -236,11 +267,15 @@ fn entry_by_path<'a>(entries: &'a [TarEntry], path: &str) -> Option<&'a TarEntry
 
 fn verify_with_signature_service(mpkg_path: &str) -> Result<(), mochi_user_syscall::SysError> {
     if !mpkg_path.starts_with('/') || mpkg_path.as_bytes().contains(&0) {
-        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
     }
     let service_tid = platform::process::find_by_name(SIG_SERVICE_NAME)?;
     if service_tid == 0 {
-        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOENT as i64));
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::ENOENT as i64,
+        ));
     }
     let mut request = Vec::with_capacity(4 + mpkg_path.len());
     request.extend_from_slice(&VERIFY_PACKAGE_OPCODE.to_le_bytes());
@@ -249,7 +284,9 @@ fn verify_with_signature_service(mpkg_path: &str) -> Result<(), mochi_user_sysca
     let msg = platform::ipc::call(service_tid, &request, &mut reply)?;
     let len = (msg & 0xffff_ffff) as usize;
     if len < 8 {
-        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EIO as i64));
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EIO as i64,
+        ));
     }
     let status = u64::from_le_bytes(reply);
     if status == 0 {
@@ -276,15 +313,14 @@ fn write_file(path: &str, data: &[u8], mode: u64) -> Result<(), mochi_user_sysca
             }
         }
     }
-    let fd = platform::file::openat_path(
-        -100,
-        path,
-        O_WRONLY | O_CREAT | O_TRUNC,
-        mode,
-    )?;
+    let fd = platform::file::openat_path(-100, path, O_WRONLY | O_CREAT | O_TRUNC, mode)?;
     let mut offset = 0usize;
     while offset < data.len() {
-        let wrote = platform::file::write(fd, data[offset..].as_ptr() as u64, (data.len() - offset) as u64)?;
+        let wrote = platform::file::write(
+            fd,
+            data[offset..].as_ptr() as u64,
+            (data.len() - offset) as u64,
+        )?;
         if wrote == 0 {
             break;
         }
@@ -292,7 +328,9 @@ fn write_file(path: &str, data: &[u8], mode: u64) -> Result<(), mochi_user_sysca
     }
     let _ = platform::file::close(fd);
     if offset != data.len() {
-        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EIO as i64));
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EIO as i64,
+        ));
     }
     Ok(())
 }
@@ -301,98 +339,126 @@ fn install_package(mpkg_path: &str) -> Result<(), mochi_user_syscall::SysError> 
     verify_with_signature_service(mpkg_path)?;
 
     let bytes = platform::file::read_to_end_path(mpkg_path)?;
-    let header = parse_header(&bytes).ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    let header = parse_header(&bytes)
+        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     if header.compression != 0 {
-        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOTSUP as i64));
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::ENOTSUP as i64,
+        ));
     }
-    let tar = bytes.get(header.header_size..).ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    let tar = bytes
+        .get(header.header_size..)
+        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     if tar.len() != header.expanded_size {
-        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
     }
-    let entries = parse_tar_stream(tar).ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    let entries = parse_tar_stream(tar)
+        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     let manifest_entry = entry_by_path(&entries, "manifest.toml")
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOENT as i64))?;
-    let manifest_text = core::str::from_utf8(&manifest_entry.data).map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    let manifest_text = core::str::from_utf8(&manifest_entry.data)
+        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     let manifest = platform::package::parse_manifest(manifest_text)
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     match manifest.package_kind.as_deref() {
         None | Some("binary") | Some("application") => {}
-        _ => return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)),
+        _ => {
+            return Err(mochi_user_syscall::SysError::from_raw(
+                mochi_user_syscall::EINVAL as i64,
+            ));
+        }
     }
 
     let package_root = alloc::format!("/system/packages/{}", manifest.package_id);
     let manifest_path = alloc::format!("{}/manifest.toml", package_root);
     write_file(&manifest_path, &manifest_entry.data, FILE_MODE_644)?;
 
-    let install_root = if manifest.package_kind.as_deref() == Some("application") {
-        alloc::format!("/applications/{}.app", manifest.package_name)
-    } else {
-        String::new()
-    };
+    if manifest.files.is_empty() {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
+    }
 
-    for entry in entries {
-        if entry.path == "manifest.toml" || entry.path.starts_with("signatures/") {
-            continue;
+    let mut installed_payloads = Vec::new();
+    for file in &manifest.files {
+        let payload_path = manifest_payload_path(manifest.package_kind.as_deref(), &file.path)
+            .ok_or_else(|| {
+                mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
+            })?;
+        let target = manifest_target_path(
+            manifest.package_kind.as_deref(),
+            &manifest.package_name,
+            &file.path,
+        )
+        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+        let entry = entry_by_path(&entries, &payload_path).ok_or_else(|| {
+            mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOENT as i64)
+        })?;
+        if entry.kind != b'0' && entry.kind != 0 {
+            return Err(mochi_user_syscall::SysError::from_raw(
+                mochi_user_syscall::EINVAL as i64,
+            ));
         }
-        if entry.kind != b'0' && entry.kind != 0 && entry.kind != b'5' {
-            return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
-        }
-        if entry.kind == b'5' {
-            continue;
-        }
-        let target = if let Some(rel) = entry.path.strip_prefix("payload/root/") {
-            join_path("/", rel)
-        } else if let Some(rel) = entry.path.strip_prefix("payload/bundle/") {
-            if install_root.is_empty() {
-                return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
-            }
-            join_path(&install_root, rel)
-        } else {
-            return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
-        };
         if !target.starts_with('/') {
-            return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+            return Err(mochi_user_syscall::SysError::from_raw(
+                mochi_user_syscall::EINVAL as i64,
+            ));
         }
         let allowed = target.starts_with("/bin/")
             || target.starts_with("/libraries/")
             || target.starts_with("/binary/services/")
             || target.starts_with("/binary/resources/")
             || target.starts_with("/system/services/")
-            || (target.starts_with("/applications/") && install_root.starts_with("/applications/"));
+            || (target.starts_with("/applications/")
+                && manifest.package_kind.as_deref() == Some("application"));
         if !allowed {
-            return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+            return Err(mochi_user_syscall::SysError::from_raw(
+                mochi_user_syscall::EINVAL as i64,
+            ));
         }
-        let mode = if target.ends_with(".toml")
-            || target.ends_with(".txt")
-            || target.ends_with(".bdf")
-            || target.ends_with(".png")
-            || target.ends_with(".json")
-        {
-            FILE_MODE_644
-        } else {
-            FILE_MODE_755
-        };
-        write_file(&target, &entry.data, mode)?;
+        write_file(&target, &entry.data, file.mode as u64)?;
+        installed_payloads.push(payload_path);
+    }
+
+    for entry in entries {
+        if entry.kind == b'5' || !entry.path.starts_with("payload/") {
+            continue;
+        }
+        if !installed_payloads.iter().any(|path| path == &entry.path) {
+            return Err(mochi_user_syscall::SysError::from_raw(
+                mochi_user_syscall::EINVAL as i64,
+            ));
+        }
     }
     Ok(())
 }
 
 fn parse_install_request(buf: &[u8]) -> Result<String, mochi_user_syscall::SysError> {
     if buf.len() < 4 {
-        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
     }
     let opcode = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
     if opcode != INSTALL_REQUEST_OPCODE {
-        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
     }
     let path_bytes = &buf[4..];
     if path_bytes.is_empty() || path_bytes.contains(&0) {
-        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
     }
     let path = core::str::from_utf8(path_bytes)
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     if !path.starts_with('/') {
-        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
     }
     Ok(path.to_string())
 }

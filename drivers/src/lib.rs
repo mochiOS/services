@@ -47,7 +47,8 @@ fn read_dir_names(path: &str) -> Vec<String> {
                 continue;
             }
             if let Ok(name) = core::str::from_utf8(raw) {
-                let name = name.trim_matches(|ch: char| ch.is_ascii_control() || ch.is_ascii_whitespace());
+                let name =
+                    name.trim_matches(|ch: char| ch.is_ascii_control() || ch.is_ascii_whitespace());
                 if !name.is_empty() {
                     out.push(name.to_string());
                 }
@@ -113,7 +114,7 @@ fn spawn_bundle(
         Some(args_nul.as_slice()),
         Some(caps_nul.as_slice()),
     )
-        .ok()
+    .ok()
 }
 
 fn spawn_input_service(
@@ -142,7 +143,10 @@ fn spawn_input_service(
 fn spawn_tty_service(control_endpoint_handle: u64, logger_endpoint: u64) -> Option<u64> {
     let manifest = platform::package::read_manifest(TTY_PACKAGE_MANIFEST_PATH)?;
     let caps = manifest.binary_requires(TTY_SERVICE_PATH).unwrap_or(&[]);
-    let args = vec![control_endpoint_handle.to_string(), logger_endpoint.to_string()];
+    let args = vec![
+        control_endpoint_handle.to_string(),
+        logger_endpoint.to_string(),
+    ];
     let args_nul = encode_spawn_args(&args);
     let caps_nul = encode_nul_list(&caps);
     platform::service::spawn_manifest(
@@ -151,7 +155,7 @@ fn spawn_tty_service(control_endpoint_handle: u64, logger_endpoint: u64) -> Opti
         Some(args_nul.as_slice()),
         Some(caps_nul.as_slice()),
     )
-        .ok()
+    .ok()
 }
 
 fn bundle_manifest_path(bundle_root: &str) -> String {

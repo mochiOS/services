@@ -90,7 +90,9 @@ fn spawn_logger_service() -> Result<u64, mochi_user_syscall::SysError> {
     let msg = platform::ipc::wait(bootstrap, &mut buf)?;
     let len = (msg & 0xffff_ffff) as usize;
     if len < 8 {
-        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
     }
     let logger_endpoint = u64::from_le_bytes([
         buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
@@ -102,7 +104,9 @@ fn spawn_logger_service() -> Result<u64, mochi_user_syscall::SysError> {
 fn spawn_capability_service() -> Result<u64, mochi_user_syscall::SysError> {
     let manifest = platform::package::read_manifest(CAPABILITY_PACKAGE_MANIFEST_PATH)
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
-    let caps = manifest.binary_requires(CAPABILITY_SERVICE_PATH).unwrap_or(&[]);
+    let caps = manifest
+        .binary_requires(CAPABILITY_SERVICE_PATH)
+        .unwrap_or(&[]);
     platform::println!(
         "core.service: parsed capability.service package caps={}",
         caps.len()

@@ -56,7 +56,10 @@ fn build_package_index() -> PackageIndex {
     let mut index = PackageIndex::default();
     for manifest_path in manifest_paths {
         let Some(manifest) = platform::package::read_manifest(&manifest_path) else {
-            platform::println!("capability.service: invalid package manifest {}", manifest_path);
+            platform::println!(
+                "capability.service: invalid package manifest {}",
+                manifest_path
+            );
             continue;
         };
         for binary in manifest.binaries {
@@ -178,7 +181,10 @@ fn is_known_capability(name: &str) -> bool {
     )
 }
 
-fn validate_capabilities(binary_path: &str, caps: &[String]) -> Result<(), mochi_user_syscall::SysError> {
+fn validate_capabilities(
+    binary_path: &str,
+    caps: &[String],
+) -> Result<(), mochi_user_syscall::SysError> {
     for cap in caps {
         if !is_known_capability(cap.as_str()) {
             platform::println!(
@@ -186,7 +192,9 @@ fn validate_capabilities(binary_path: &str, caps: &[String]) -> Result<(), mochi
                 cap,
                 binary_path
             );
-            return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+            return Err(mochi_user_syscall::SysError::from_raw(
+                mochi_user_syscall::EINVAL as i64,
+            ));
         }
     }
     Ok(())
@@ -241,7 +249,9 @@ fn register_delegate_with_retry(kind: u64, pid: u64) -> Result<(), mochi_user_sy
 
 fn spawn_drivers_service(index: &PackageIndex) -> Result<u64, mochi_user_syscall::SysError> {
     if index.duplicate {
-        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
     }
     let manifest_path = index
         .by_binary
@@ -251,7 +261,10 @@ fn spawn_drivers_service(index: &PackageIndex) -> Result<u64, mochi_user_syscall
     let manifest = platform::package::read_manifest(&manifest_path)
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     let caps = binary_caps(&manifest, DRIVERS_SERVICE_PATH)?;
-    platform::println!("capability.service: parsed drivers.service package caps={}", caps.len());
+    platform::println!(
+        "capability.service: parsed drivers.service package caps={}",
+        caps.len()
+    );
     let caps_nul = encode_nul_list(&caps);
     let logger_endpoint = platform::logger::endpoint().unwrap_or(0);
     let args = [logger_endpoint.to_string()];
@@ -266,7 +279,9 @@ fn spawn_drivers_service(index: &PackageIndex) -> Result<u64, mochi_user_syscall
 
 fn spawn_signature_service(index: &PackageIndex) -> Result<u64, mochi_user_syscall::SysError> {
     if index.duplicate {
-        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
     }
     let manifest_path = index
         .by_binary
@@ -276,7 +291,10 @@ fn spawn_signature_service(index: &PackageIndex) -> Result<u64, mochi_user_sysca
     let manifest = platform::package::read_manifest(&manifest_path)
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     let caps = binary_caps(&manifest, SIGNATURE_SERVICE_PATH)?;
-    platform::println!("capability.service: parsed signature.service package caps={}", caps.len());
+    platform::println!(
+        "capability.service: parsed signature.service package caps={}",
+        caps.len()
+    );
     let caps_nul = encode_nul_list(&caps);
     let logger_endpoint = platform::logger::endpoint().unwrap_or(0);
     let args = [logger_endpoint.to_string()];
@@ -291,7 +309,9 @@ fn spawn_signature_service(index: &PackageIndex) -> Result<u64, mochi_user_sysca
 
 fn spawn_package_service(index: &PackageIndex) -> Result<u64, mochi_user_syscall::SysError> {
     if index.duplicate {
-        return Err(mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64));
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
     }
     let manifest_path = index
         .by_binary
@@ -301,7 +321,10 @@ fn spawn_package_service(index: &PackageIndex) -> Result<u64, mochi_user_syscall
     let manifest = platform::package::read_manifest(&manifest_path)
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     let caps = binary_caps(&manifest, PACKAGE_SERVICE_PATH)?;
-    platform::println!("capability.service: parsed package.service package caps={}", caps.len());
+    platform::println!(
+        "capability.service: parsed package.service package caps={}",
+        caps.len()
+    );
     let caps_nul = encode_nul_list(&caps);
     let logger_endpoint = platform::logger::endpoint().unwrap_or(0);
     let args = [logger_endpoint.to_string()];
@@ -350,7 +373,9 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             platform::println!("capability.service: drivers.service spawned pid={}", pid);
             match register_delegate_with_retry(platform::service::DELEGATE_DRIVER_SPAWN, pid) {
                 Ok(_) => {
-                    platform::println!("capability.service: registered drivers.service as driver delegate");
+                    platform::println!(
+                        "capability.service: registered drivers.service as driver delegate"
+                    );
                 }
                 Err(err) => {
                     platform::println!(
