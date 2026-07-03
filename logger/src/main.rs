@@ -7,7 +7,7 @@ use alloc::string::String;
 use core::arch::global_asm;
 use mochi_user_platform as platform;
 
-const LOG_ROOT: &str = "/system/logs/services";
+const LOG_ROOT: &str = "/tmp/logs/services";
 
 global_asm!(
     r#"
@@ -114,10 +114,11 @@ fn append_log_line(line: &[u8]) {
     };
     let path = log_path_for_line(text);
     ensure_log_parent(&path);
-    let flags = 0o1 | 0o100 | 0o2000;
+    let flags = 0o1 | 0o100;
     let Ok(fd) = platform::file::open_path(&path, flags) else {
         return;
     };
+    let _ = platform::file::seek(fd, 0, 2);
     let mut offset = 0usize;
     while offset < line.len() {
         match platform::file::write(
