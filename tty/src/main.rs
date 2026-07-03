@@ -112,9 +112,9 @@ fn resolve_capabilities(entry_path: &str) -> Result<Vec<u8>, mochi_user_syscall:
     Ok(reply[8..len].to_vec())
 }
 
-fn spawn_msh(shell_endpoint: u64) -> Result<u64, mochi_user_syscall::SysError> {
+fn spawn_msh(tty_endpoint: u64) -> Result<u64, mochi_user_syscall::SysError> {
     let caps_nul = resolve_capabilities(MSH_PATH)?;
-    let arg = shell_endpoint.to_string();
+    let arg = tty_endpoint.to_string();
     let args = [arg];
     let args_nul = encode_spawn_args(&args);
     platform::service::spawn_manifest(
@@ -144,11 +144,7 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
     }
     let _ = unsafe { parse_endpoint_arg(sp) };
 
-    let input_endpoint = match platform::ipc::create() {
-        Ok(handle) => handle,
-        Err(_) => platform::process::exit(1),
-    };
-    let shell_endpoint = match platform::ipc::create() {
+    let tty_endpoint = match platform::ipc::create() {
         Ok(handle) => handle,
         Err(_) => platform::process::exit(1),
     };
@@ -156,32 +152,37 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
     let subscribe = platform::input::SubscribeRequest {
         opcode: platform::input::SUBSCRIBE_OPCODE,
         reserved: 0,
-        endpoint: input_endpoint,
+        endpoint: tty_endpoint,
     };
     let Some(input_tid) = find_input_service() else {
         platform::process::exit(1);
     };
     let mut reply = [0u8; 8];
-    let _ = platform::ipc::call(
-        input_tid,
-        platform::input::bytes_of(&subscribe),
-        &mut reply,
-    );
+    let _ = platform::ipc::call(input_tid, platform::input::bytes_of(&subscribe), &mut reply);
 
-    if spawn_msh(shell_endpoint).is_err() {
+    if spawn_msh(tty_endpoint).is_err() {
         platform::process::exit(1);
     }
 
     let mut buf = [0u8; core::mem::size_of::<platform::input::InputEvent>()];
+    let mut shell_endpoint = 0u64;
     loop {
-        let Ok(msg) = platform::ipc::wait(input_endpoint, &mut buf) else {
+        let Ok(msg) = platform::ipc::wait(tty_endpoint, &mut buf) else {
             platform::thread::yield_now();
             continue;
         };
         let len = (msg & 0xffff_ffff) as usize;
+        if len == core::mem::size_of::<u64>() {
+            shell_endpoint = u64::from_le_bytes([
+                buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+            ]);
+            continue;
+        }
         if len < buf.len() {
             continue;
         }
-        let _ = platform::ipc::send(shell_endpoint, &buf);
+        if shell_endpoint != 0 {
+            let _ = platform::ipc::send(shell_endpoint, &buf);
+        }
     }
 }
