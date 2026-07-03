@@ -7,7 +7,7 @@ use alloc::string::String;
 use core::arch::global_asm;
 use mochi_user_platform as platform;
 
-const LOG_ROOT: &str = "/tmp/logs/services";
+const LOG_ROOT: &str = "/system/logs/services";
 
 global_asm!(
     r#"
