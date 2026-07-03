@@ -23,7 +23,8 @@ _start:
 );
 
 const MSH_PATH: &str = "/bin/msh";
-const MSH_PACKAGE_MANIFEST_PATH: &str = "/system/packages/msh/manifest.toml";
+const CAPABILITY_SERVICE_NAME: &str = "capability.service";
+const RESOLVE_CAPS_OPCODE: u32 = 0x4341_5053;
 fn parse_decimal_u64(bytes: &[u8]) -> Option<u64> {
     if bytes.is_empty() {
         return None;
@@ -65,15 +66,6 @@ unsafe fn parse_endpoint_arg(sp: *const usize) -> Option<u64> {
     None
 }
 
-fn encode_nul_list(items: &[String]) -> Vec<u8> {
-    let mut out = Vec::new();
-    for item in items {
-        out.extend_from_slice(item.as_bytes());
-        out.push(0);
-    }
-    out
-}
-
 fn encode_spawn_args(items: &[String]) -> Vec<u8> {
     let mut out = Vec::with_capacity(256);
     out.resize(256, 0);
@@ -91,11 +83,36 @@ fn encode_spawn_args(items: &[String]) -> Vec<u8> {
     out
 }
 
+fn resolve_capabilities(entry_path: &str) -> Result<Vec<u8>, mochi_user_syscall::SysError> {
+    let service_tid = platform::process::find_by_name(CAPABILITY_SERVICE_NAME)?;
+    if service_tid == 0 {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::ENOENT as i64,
+        ));
+    }
+    let mut request = Vec::with_capacity(4 + entry_path.len());
+    request.extend_from_slice(&RESOLVE_CAPS_OPCODE.to_le_bytes());
+    request.extend_from_slice(entry_path.as_bytes());
+    let mut reply = [0u8; 1024];
+    let msg = platform::ipc::call(service_tid, &request, &mut reply)?;
+    let len = (msg & 0xffff_ffff) as usize;
+    if len < 8 || len > reply.len() {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EIO as i64,
+        ));
+    }
+    let status =
+        u64::from_le_bytes(reply[..8].try_into().map_err(|_| {
+            mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
+        })?);
+    if status != 0 {
+        return Err(mochi_user_syscall::SysError::from_raw(status as i64));
+    }
+    Ok(reply[8..len].to_vec())
+}
+
 fn spawn_msh(shell_endpoint: u64) -> Result<u64, mochi_user_syscall::SysError> {
-    let manifest = platform::package::read_manifest(MSH_PACKAGE_MANIFEST_PATH)
-        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
-    let caps = manifest.binary_requires(MSH_PATH).unwrap_or(&[]);
-    let caps_nul = encode_nul_list(&caps);
+    let caps_nul = resolve_capabilities(MSH_PATH)?;
     let arg = shell_endpoint.to_string();
     let args = [arg];
     let args_nul = encode_spawn_args(&args);
