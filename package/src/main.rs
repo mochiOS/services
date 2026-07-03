@@ -7,6 +7,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::arch::global_asm;
 use mochi_user_platform as platform;
+use sha2::{Digest, Sha256};
 
 global_asm!(
     r#"
@@ -265,7 +266,10 @@ fn entry_by_path<'a>(entries: &'a [TarEntry], path: &str) -> Option<&'a TarEntry
     entries.iter().find(|entry| entry.path == path)
 }
 
-fn verify_with_signature_service(mpkg_path: &str) -> Result<(), mochi_user_syscall::SysError> {
+fn verify_with_signature_service(
+    mpkg_path: &str,
+    package_digest: &[u8; 32],
+) -> Result<(), mochi_user_syscall::SysError> {
     if !mpkg_path.starts_with('/') || mpkg_path.as_bytes().contains(&0) {
         return Err(mochi_user_syscall::SysError::from_raw(
             mochi_user_syscall::EINVAL as i64,
@@ -277,8 +281,9 @@ fn verify_with_signature_service(mpkg_path: &str) -> Result<(), mochi_user_sysca
             mochi_user_syscall::ENOENT as i64,
         ));
     }
-    let mut request = Vec::with_capacity(4 + mpkg_path.len());
+    let mut request = Vec::with_capacity(4 + package_digest.len() + mpkg_path.len());
     request.extend_from_slice(&VERIFY_PACKAGE_OPCODE.to_le_bytes());
+    request.extend_from_slice(package_digest);
     request.extend_from_slice(mpkg_path.as_bytes());
     let mut reply = [0u8; 8];
     let msg = platform::ipc::call(service_tid, &request, &mut reply)?;
@@ -336,9 +341,12 @@ fn write_file(path: &str, data: &[u8], mode: u64) -> Result<(), mochi_user_sysca
 }
 
 fn install_package(mpkg_path: &str) -> Result<(), mochi_user_syscall::SysError> {
-    verify_with_signature_service(mpkg_path)?;
-
     let bytes = platform::file::read_to_end_path(mpkg_path)?;
+    let digest = Sha256::digest(&bytes);
+    let mut digest_bytes = [0u8; 32];
+    digest_bytes.copy_from_slice(&digest);
+    verify_with_signature_service(mpkg_path, &digest_bytes)?;
+
     let header = parse_header(&bytes)
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     if header.compression != 0 {

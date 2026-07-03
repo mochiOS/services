@@ -310,6 +310,13 @@ fn verify_payload_files(
 
 fn verify_package(mpkg_path: &str) -> Result<(), mochi_user_syscall::SysError> {
     let bytes = platform::file::read_to_end_path(mpkg_path)?;
+    verify_package_bytes(mpkg_path, &bytes)
+}
+
+fn verify_package_bytes(
+    _mpkg_path: &str,
+    bytes: &[u8],
+) -> Result<(), mochi_user_syscall::SysError> {
     let header = parse_header(&bytes)
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     if header.compression != 0 {
@@ -368,8 +375,8 @@ fn verify_package(mpkg_path: &str) -> Result<(), mochi_user_syscall::SysError> {
     Ok(())
 }
 
-fn parse_verify_request(buf: &[u8]) -> Result<String, mochi_user_syscall::SysError> {
-    if buf.len() < 4 {
+fn verify_package_request(buf: &[u8]) -> Result<(), mochi_user_syscall::SysError> {
+    if buf.len() <= 36 {
         return Err(mochi_user_syscall::SysError::from_raw(
             mochi_user_syscall::EINVAL as i64,
         ));
@@ -380,7 +387,9 @@ fn parse_verify_request(buf: &[u8]) -> Result<String, mochi_user_syscall::SysErr
             mochi_user_syscall::EINVAL as i64,
         ));
     }
-    let path_bytes = &buf[4..];
+    let mut expected_digest = [0u8; 32];
+    expected_digest.copy_from_slice(&buf[4..36]);
+    let path_bytes = &buf[36..];
     if path_bytes.is_empty() || path_bytes.contains(&0) {
         return Err(mochi_user_syscall::SysError::from_raw(
             mochi_user_syscall::EINVAL as i64,
@@ -393,7 +402,14 @@ fn parse_verify_request(buf: &[u8]) -> Result<String, mochi_user_syscall::SysErr
             mochi_user_syscall::EINVAL as i64,
         ));
     }
-    Ok(path.to_string())
+    let bytes = platform::file::read_to_end_path(path)?;
+    let actual_digest = Sha256::digest(&bytes);
+    if actual_digest.as_slice() != expected_digest {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EACCES as i64,
+        ));
+    }
+    verify_package_bytes(path, &bytes)
 }
 
 fn reply_status(sender: u64, result: Result<(), mochi_user_syscall::SysError>) {
@@ -427,7 +443,7 @@ fn run_server() -> ! {
         };
         let sender = msg >> 32;
         let len = (msg & 0xffff_ffff) as usize;
-        let result = parse_verify_request(&buf[..len]).and_then(|path| verify_package(&path));
+        let result = verify_package_request(&buf[..len]);
         reply_status(sender, result);
     }
 }
