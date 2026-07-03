@@ -12,6 +12,7 @@ requires = [
     "fs.write.all",
     "process.spawn",
     "service.register",
+    "capabilities.manage",
     "device.input",
     "ipc.client",
     "ipc.server",

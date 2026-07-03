@@ -343,8 +343,15 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
     }
     platform::println!("input.service: start");
 
-    let [raw_endpoint, control_endpoint] = unsafe { parse_endpoint_args(sp) };
-    if raw_endpoint == 0 || control_endpoint == 0 {
+    let endpoint = match platform::ipc::create() {
+        Ok(endpoint) => endpoint,
+        Err(_) => {
+            platform::println!("input.service: endpoint create failed");
+            platform::process::exit(1);
+        }
+    };
+    let _ = unsafe { parse_endpoint_args(sp) };
+    if endpoint == 0 {
         platform::println!("input.service: missing endpoint");
         platform::process::exit(1);
     }
@@ -352,44 +359,42 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
     let mut keyboard = KeyboardState::default();
     let mut subscriber = 0u64;
     let mut keyboard_log_budget = 8usize;
-    let mut control_buf = [0u8; 32];
+    let mut buf = [0u8; 32];
 
     loop {
-        let Ok(msg) = platform::ipc::wait(control_endpoint, &mut control_buf) else {
+        let Ok(msg) = platform::ipc::wait(endpoint, &mut buf) else {
             platform::thread::yield_now();
             continue;
         };
+        let sender = msg >> 32;
         let len = (msg & 0xffff_ffff) as usize;
-        if len == 0 {
+        if len == 0 || len > buf.len() {
+            let _ = platform::ipc::reply(sender, &[0]);
             continue;
         }
-        handle_subscribe_message(&mut subscriber, &control_buf[..len]);
-        if subscriber != 0 {
-            break;
-        }
-    }
 
-    let mut raw_buf = [0u8; 8];
-
-    loop {
-        let Ok(msg) = platform::ipc::wait(raw_endpoint, &mut raw_buf) else {
-            platform::thread::yield_now();
-            continue;
-        };
-        let len = (msg & 0xffff_ffff) as usize;
-        if len < 8 {
+        if len >= 16
+            && u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])
+                == platform::input::SUBSCRIBE_OPCODE
+        {
+            handle_subscribe_message(&mut subscriber, &buf[..len]);
+            let _ = platform::ipc::reply(sender, &[0]);
             continue;
         }
-        match raw_buf[0] {
-            platform::input::RAW_KIND_KEYBOARD => {
-                if keyboard_log_budget > 0 {
-                    platform::println!("input.service: raw key=0x{:02x}", raw_buf[4]);
-                    keyboard_log_budget -= 1;
+
+        if len >= 8 {
+            match buf[0] {
+                platform::input::RAW_KIND_KEYBOARD => {
+                    if keyboard_log_budget > 0 {
+                        platform::println!("input.service: raw key=0x{:02x}", buf[4]);
+                        keyboard_log_budget -= 1;
+                    }
+                    process_keyboard_byte(buf[4], &mut keyboard, subscriber);
                 }
-                process_keyboard_byte(raw_buf[4], &mut keyboard, subscriber);
+                platform::input::RAW_KIND_MOUSE_PACKET => {}
+                _ => {}
             }
-            platform::input::RAW_KIND_MOUSE_PACKET => {}
-            _ => {}
         }
+        let _ = platform::ipc::reply(sender, &[0]);
     }
 }

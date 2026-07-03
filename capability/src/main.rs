@@ -29,6 +29,10 @@ const PACKAGE_PACKAGE_ID: &str = "org.mochios.package";
 const RESOLVE_CAPS_OPCODE: u32 = 0x4341_5053;
 const REPLY_OK: u64 = 0;
 
+fn capability_reply(sender: u64, status: u64) {
+    let _ = platform::ipc::reply(sender, &status.to_le_bytes());
+}
+
 #[derive(Default)]
 struct PackageIndex {
     by_binary: BTreeMap<String, String>,
@@ -320,6 +324,91 @@ fn reply_capabilities(sender: u64, result: Result<Vec<String>, mochi_user_syscal
     let _ = platform::ipc::reply(sender, &reply);
 }
 
+fn read_request_str(bytes: &[u8], len: u16) -> Result<&str, mochi_user_syscall::SysError> {
+    let len = len as usize;
+    if len > bytes.len() {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
+    }
+    core::str::from_utf8(&bytes[..len])
+        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))
+}
+
+fn authorize_dynamic_capability(
+    index: &PackageIndex,
+    decision: platform::capability::CapabilityDecision,
+    requester_thread: u64,
+    request: &platform::capability::CapabilityRequest,
+) -> Result<(), mochi_user_syscall::SysError> {
+    if request.opcode != platform::capability::CAPABILITY_PROMPT_OPCODE
+        || request.process_id == 0
+        || requester_thread == 0
+        || request.interactive == 0
+    {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
+    }
+    if decision == platform::capability::CapabilityDecision::Deny {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EACCES as i64,
+        ));
+    }
+    if request.capability_class != platform::capability::CapabilityClass::UserGrantable {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EACCES as i64,
+        ));
+    }
+
+    let executable = read_request_str(&request.executable.path, request.executable.path_len)?;
+    if index.by_binary.contains_key(executable) {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EACCES as i64,
+        ));
+    }
+
+    let capability = read_request_str(&request.capability, request.capability_len)?;
+    if !is_known_capability(capability)
+        || platform::capability::capability_from_string(capability)
+            != platform::capability::CapabilityClass::UserGrantable
+    {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EACCES as i64,
+        ));
+    }
+
+    platform::syscall::call3(
+        platform::syscall::SyscallNumber::CapTransfer,
+        requester_thread,
+        capability.as_ptr() as u64,
+        capability.len() as u64,
+    )
+    .map(|_| ())
+}
+
+fn parse_decision_request(
+    buf: &[u8],
+) -> Result<platform::capability::CapabilityDecisionRequest, mochi_user_syscall::SysError> {
+    if buf.len() < core::mem::size_of::<platform::capability::CapabilityDecisionRequest>() {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
+    }
+    let request = unsafe {
+        core::ptr::read_unaligned(
+            buf.as_ptr()
+                .cast::<platform::capability::CapabilityDecisionRequest>(),
+        )
+    };
+    if request.opcode != platform::capability::CAPABILITY_DECISION_OPCODE {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
+    }
+    Ok(request)
+}
+
 fn serve_capability_requests() -> ! {
     let endpoint = match platform::ipc::create() {
         Ok(endpoint) => endpoint,
@@ -332,7 +421,8 @@ fn serve_capability_requests() -> ! {
         }
     };
     platform::println!("capability.service: ready");
-    let mut buf = [0u8; 512];
+    let index = build_package_index();
+    let mut buf = [0u8; 1024];
     loop {
         let msg = match platform::ipc::wait(endpoint, &mut buf) {
             Ok(msg) => msg,
@@ -343,15 +433,40 @@ fn serve_capability_requests() -> ! {
         };
         let sender = msg >> 32;
         let len = (msg & 0xffff_ffff) as usize;
-        let result = parse_resolve_caps_request(&buf[..len])
-            .and_then(|path| resolve_capabilities_for_path(&path));
-        reply_capabilities(sender, result);
+        let slice = &buf[..len.min(buf.len())];
+        let opcode = if slice.len() >= 4 {
+            u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]])
+        } else {
+            0
+        };
+        if opcode == RESOLVE_CAPS_OPCODE {
+            let result = parse_resolve_caps_request(slice)
+                .and_then(|path| resolve_capabilities_for_path(&path));
+            reply_capabilities(sender, result);
+            continue;
+        }
+        if opcode == platform::capability::CAPABILITY_DECISION_OPCODE {
+            let status = parse_decision_request(slice)
+                .and_then(|decision| {
+                    authorize_dynamic_capability(
+                        &index,
+                        decision.decision,
+                        decision.reserved,
+                        &decision.request,
+                    )
+                })
+                .map(|_| REPLY_OK)
+                .unwrap_or_else(|err| err.errno().unwrap_or(mochi_user_syscall::EIO));
+            capability_reply(sender, status);
+            continue;
+        }
+        capability_reply(sender, mochi_user_syscall::EINVAL);
     }
 }
 
 fn encode_spawn_args(items: &[String]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(256);
-    out.resize(256, 0);
+    let mut out = Vec::with_capacity(512);
+    out.resize(512, 0);
     let mut cursor = 0usize;
     for item in items {
         let bytes = item.as_bytes();

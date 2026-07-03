@@ -37,8 +37,8 @@ fn encode_nul_list(items: &[String]) -> Vec<u8> {
 }
 
 fn encode_spawn_args(items: &[String]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(256);
-    out.resize(256, 0);
+    let mut out = Vec::with_capacity(512);
+    out.resize(512, 0);
     let mut cursor = 0usize;
     for item in items {
         let bytes = item.as_bytes();
@@ -73,19 +73,61 @@ fn register_delegate_with_retry(kind: u64, pid: u64) -> Result<(), mochi_user_sy
 }
 
 fn spawn_logger_service() -> Result<u64, mochi_user_syscall::SysError> {
-    let bootstrap = platform::ipc::create()?;
-    let manifest = platform::package::read_manifest(LOGGER_PACKAGE_MANIFEST_PATH)
-        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
-    let caps = manifest.binary_requires(LOGGER_SERVICE_PATH).unwrap_or(&[]);
+    let bootstrap = match platform::ipc::create() {
+        Ok(endpoint) => endpoint,
+        Err(err) => {
+            platform::println!(
+                "core.service: logger bootstrap endpoint create failed errno={}",
+                err.errno().unwrap_or(0)
+            );
+            return Err(err);
+        }
+    };
+    let manifest = match platform::package::read_manifest(LOGGER_PACKAGE_MANIFEST_PATH) {
+        Some(manifest) => manifest,
+        None => {
+            platform::println!(
+                "core.service: logger manifest read failed {}",
+                LOGGER_PACKAGE_MANIFEST_PATH
+            );
+            return Err(mochi_user_syscall::SysError::from_raw(
+                mochi_user_syscall::EINVAL as i64,
+            ));
+        }
+    };
+    let caps = match manifest.binary_requires(LOGGER_SERVICE_PATH) {
+        Some(caps) => caps,
+        None => {
+            platform::println!(
+                "core.service: logger manifest missing binary {}",
+                LOGGER_SERVICE_PATH
+            );
+            return Err(mochi_user_syscall::SysError::from_raw(
+                mochi_user_syscall::EINVAL as i64,
+            ));
+        }
+    };
     let caps_nul = encode_nul_list(&caps);
     let args = [bootstrap.to_string()];
     let args_nul = encode_spawn_args(&args);
-    let pid = platform::service::spawn_manifest(
+    let pid = match platform::service::spawn_manifest(
         LOGGER_SERVICE_PATH,
         platform::service::ROLE_SERVICE,
         Some(args_nul.as_slice()),
         Some(caps_nul.as_slice()),
-    )?;
+    ) {
+        Ok(pid) => pid,
+        Err(err) => {
+            platform::println!(
+                "core.service: logger exec failed caps={} args_len={} caps_len={} errno={}",
+                caps.len(),
+                args_nul.len(),
+                caps_nul.len(),
+                err.errno().unwrap_or(0)
+            );
+            return Err(err);
+        }
+    };
     let mut buf = [0u8; 16];
     let msg = platform::ipc::wait(bootstrap, &mut buf)?;
     let len = (msg & 0xffff_ffff) as usize;

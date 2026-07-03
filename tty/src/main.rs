@@ -24,6 +24,7 @@ _start:
 
 const MSH_PATH: &str = "/bin/msh";
 const CAPABILITY_SERVICE_NAME: &str = "capability.service";
+const INPUT_SERVICE_NAME: &str = "input.service";
 const RESOLVE_CAPS_OPCODE: u32 = 0x4341_5053;
 fn parse_decimal_u64(bytes: &[u8]) -> Option<u64> {
     if bytes.is_empty() {
@@ -67,8 +68,8 @@ unsafe fn parse_endpoint_arg(sp: *const usize) -> Option<u64> {
 }
 
 fn encode_spawn_args(items: &[String]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(256);
-    out.resize(256, 0);
+    let mut out = Vec::with_capacity(512);
+    out.resize(512, 0);
     let mut cursor = 0usize;
     for item in items {
         let bytes = item.as_bytes();
@@ -124,14 +125,24 @@ fn spawn_msh(shell_endpoint: u64) -> Result<u64, mochi_user_syscall::SysError> {
     )
 }
 
+fn find_input_service() -> Option<u64> {
+    for _ in 0..64 {
+        if let Ok(tid) = platform::process::find_by_name(INPUT_SERVICE_NAME) {
+            if tid != 0 {
+                return Some(tid);
+            }
+        }
+        platform::thread::yield_now();
+    }
+    None
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn service_main(sp: *const usize) -> ! {
     unsafe {
         let _ = platform::logger::init_from_initial_stack(sp);
     }
-    let Some(control_endpoint) = (unsafe { parse_endpoint_arg(sp) }) else {
-        platform::process::exit(1);
-    };
+    let _ = unsafe { parse_endpoint_arg(sp) };
 
     let input_endpoint = match platform::ipc::create() {
         Ok(handle) => handle,
@@ -147,7 +158,15 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         reserved: 0,
         endpoint: input_endpoint,
     };
-    let _ = platform::ipc::send(control_endpoint, platform::input::bytes_of(&subscribe));
+    let Some(input_tid) = find_input_service() else {
+        platform::process::exit(1);
+    };
+    let mut reply = [0u8; 8];
+    let _ = platform::ipc::call(
+        input_tid,
+        platform::input::bytes_of(&subscribe),
+        &mut reply,
+    );
 
     if spawn_msh(shell_endpoint).is_err() {
         platform::process::exit(1);
