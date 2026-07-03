@@ -99,6 +99,74 @@ fn append_persistent_grant(
     write_file(GRANTS_PATH, &data)
 }
 
+fn transfer_user_grant(
+    requester_thread: u64,
+    capability: &str,
+    executable: &str,
+) -> Result<(), mochi_user_syscall::SysError> {
+    let mut payload = Vec::with_capacity(capability.len() + 1 + executable.len());
+    payload.extend_from_slice(capability.as_bytes());
+    payload.push(0x1f);
+    payload.extend_from_slice(executable.as_bytes());
+    platform::syscall::call3(
+        platform::syscall::SyscallNumber::CapTransfer,
+        requester_thread,
+        payload.as_ptr() as u64,
+        payload.len() as u64,
+    )
+    .map(|_| ())
+}
+
+fn grant_db_matches(
+    executable: &str,
+    digest: &[u8; 32],
+    capability: &str,
+    resource: Option<&str>,
+) -> bool {
+    let Ok(data) = platform::file::read_to_end_path(GRANTS_PATH) else {
+        return false;
+    };
+    let digest_hex = hex_digest(digest);
+    for line in data.split(|b| *b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let mut fields = line.split(|b| *b == b'\t');
+        let Some(path) = fields.next().and_then(|v| core::str::from_utf8(v).ok()) else {
+            continue;
+        };
+        let Some(hash) = fields.next().and_then(|v| core::str::from_utf8(v).ok()) else {
+            continue;
+        };
+        let Some(grant_cap) = fields.next().and_then(|v| core::str::from_utf8(v).ok()) else {
+            continue;
+        };
+        let Some(scope) = fields.next().and_then(|v| core::str::from_utf8(v).ok()) else {
+            continue;
+        };
+        let grant_resource = fields
+            .next()
+            .and_then(|v| core::str::from_utf8(v).ok())
+            .unwrap_or("");
+        if path != executable || hash != digest_hex {
+            continue;
+        }
+        if scope == "all-user" {
+            return true;
+        }
+        if scope == "single" && grant_cap == capability {
+            let resource_matches = match resource {
+                Some(resource) => grant_resource == resource,
+                None => grant_resource.is_empty(),
+            };
+            if resource_matches {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[derive(Default)]
 struct PackageIndex {
     by_binary: BTreeMap<String, String>,
@@ -474,13 +542,68 @@ fn authorize_dynamic_capability(
         )?;
     }
 
-    platform::syscall::call3(
-        platform::syscall::SyscallNumber::CapTransfer,
-        requester_thread,
-        capability.as_ptr() as u64,
-        capability.len() as u64,
-    )
-    .map(|_| ())
+    transfer_user_grant(requester_thread, capability, executable)
+}
+
+fn authorize_persistent_capability(
+    index: &PackageIndex,
+    requester_thread: u64,
+    request: &platform::capability::CapabilityRequest,
+) -> Result<(), mochi_user_syscall::SysError> {
+    if request.opcode != platform::capability::CAPABILITY_PERSISTENT_QUERY_OPCODE
+        || request.process_id == 0
+        || requester_thread == 0
+    {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
+    }
+    if request.capability_class != platform::capability::CapabilityClass::UserGrantable {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EACCES as i64,
+        ));
+    }
+
+    let executable = read_request_str(&request.executable.path, request.executable.path_len)?;
+    if index.by_binary.contains_key(executable) {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EACCES as i64,
+        ));
+    }
+    let executable_bytes = platform::file::read_to_end_path(executable)?;
+    let actual_digest = Sha256::digest(&executable_bytes);
+    let mut digest = [0u8; 32];
+    digest.copy_from_slice(&actual_digest);
+    if request.executable.digest != [0; 32] && request.executable.digest != digest {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EACCES as i64,
+        ));
+    }
+
+    let capability = read_request_str(&request.capability, request.capability_len)?;
+    if !is_known_capability(capability)
+        || platform::capability::capability_from_string(capability)
+            != platform::capability::CapabilityClass::UserGrantable
+    {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EACCES as i64,
+        ));
+    }
+    let resource = if request.resource.path_len == 0 {
+        None
+    } else {
+        Some(read_request_str(
+            &request.resource.path,
+            request.resource.path_len,
+        )?)
+    };
+    if !grant_db_matches(executable, &digest, capability, resource) {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EACCES as i64,
+        ));
+    }
+
+    transfer_user_grant(requester_thread, capability, executable)
 }
 
 fn parse_decision_request(
@@ -498,6 +621,25 @@ fn parse_decision_request(
         )
     };
     if request.opcode != platform::capability::CAPABILITY_DECISION_OPCODE {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
+    }
+    Ok(request)
+}
+
+fn parse_persistent_query(
+    buf: &[u8],
+) -> Result<platform::capability::CapabilityRequest, mochi_user_syscall::SysError> {
+    if buf.len() < core::mem::size_of::<platform::capability::CapabilityRequest>() {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
+    }
+    let request = unsafe {
+        core::ptr::read_unaligned(buf.as_ptr().cast::<platform::capability::CapabilityRequest>())
+    };
+    if request.opcode != platform::capability::CAPABILITY_PERSISTENT_QUERY_OPCODE {
         return Err(mochi_user_syscall::SysError::from_raw(
             mochi_user_syscall::EINVAL as i64,
         ));
@@ -551,6 +693,14 @@ fn serve_capability_requests() -> ! {
                         &decision.request,
                     )
                 })
+                .map(|_| REPLY_OK)
+                .unwrap_or_else(|err| err.errno().unwrap_or(mochi_user_syscall::EIO));
+            capability_reply(sender, status);
+            continue;
+        }
+        if opcode == platform::capability::CAPABILITY_PERSISTENT_QUERY_OPCODE {
+            let status = parse_persistent_query(slice)
+                .and_then(|request| authorize_persistent_capability(&index, sender, &request))
                 .map(|_| REPLY_OK)
                 .unwrap_or_else(|err| err.errno().unwrap_or(mochi_user_syscall::EIO));
             capability_reply(sender, status);
