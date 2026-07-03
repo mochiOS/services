@@ -26,6 +26,8 @@ _start:
 const DRIVERS_PACKAGE_ID: &str = "org.mochios.drivers";
 const SIGNATURE_PACKAGE_ID: &str = "org.mochios.signature";
 const PACKAGE_PACKAGE_ID: &str = "org.mochios.package";
+const RESOLVE_CAPS_OPCODE: u32 = 0x4341_5053;
+const REPLY_OK: u64 = 0;
 
 #[derive(Default)]
 struct PackageIndex {
@@ -229,6 +231,97 @@ fn service_binary_path(manifest: &platform::package::PackageManifest) -> Option<
         .map(|binary| binary.path.as_str())
 }
 
+fn resolve_capabilities_for_path(
+    binary_path: &str,
+) -> Result<Vec<String>, mochi_user_syscall::SysError> {
+    let index = build_package_index();
+    if index.duplicate {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
+    }
+    let manifest_path = index
+        .by_binary
+        .get(binary_path)
+        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOENT as i64))?;
+    let manifest = platform::package::read_manifest(manifest_path)
+        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    let caps = binary_caps(&manifest, binary_path)?;
+    Ok(caps.to_vec())
+}
+
+fn parse_resolve_caps_request(buf: &[u8]) -> Result<String, mochi_user_syscall::SysError> {
+    if buf.len() <= 4 {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
+    }
+    let opcode = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    if opcode != RESOLVE_CAPS_OPCODE {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
+    }
+    let path_bytes = &buf[4..];
+    if path_bytes.is_empty() || path_bytes.contains(&0) {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
+    }
+    let path = core::str::from_utf8(path_bytes)
+        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    if !path.starts_with('/') {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
+    }
+    Ok(path.to_string())
+}
+
+fn reply_capabilities(sender: u64, result: Result<Vec<String>, mochi_user_syscall::SysError>) {
+    let mut reply = Vec::new();
+    match result {
+        Ok(caps) => {
+            reply.extend_from_slice(&REPLY_OK.to_le_bytes());
+            reply.extend_from_slice(&encode_nul_list(&caps));
+        }
+        Err(err) => {
+            let status = err.errno().unwrap_or(mochi_user_syscall::EIO);
+            reply.extend_from_slice(&status.to_le_bytes());
+        }
+    }
+    let _ = platform::ipc::reply(sender, &reply);
+}
+
+fn serve_capability_requests() -> ! {
+    let endpoint = match platform::ipc::create() {
+        Ok(endpoint) => endpoint,
+        Err(err) => {
+            platform::println!(
+                "capability.service: endpoint create failed errno={}",
+                err.errno().unwrap_or(0)
+            );
+            platform::process::exit(1);
+        }
+    };
+    platform::println!("capability.service: ready");
+    let mut buf = [0u8; 512];
+    loop {
+        let msg = match platform::ipc::wait(endpoint, &mut buf) {
+            Ok(msg) => msg,
+            Err(_) => {
+                platform::thread::yield_now();
+                continue;
+            }
+        };
+        let sender = msg >> 32;
+        let len = (msg & 0xffff_ffff) as usize;
+        let result = parse_resolve_caps_request(&buf[..len])
+            .and_then(|path| resolve_capabilities_for_path(&path));
+        reply_capabilities(sender, result);
+    }
+}
+
 fn encode_spawn_args(items: &[String]) -> Vec<u8> {
     let mut out = Vec::with_capacity(256);
     out.resize(256, 0);
@@ -357,7 +450,5 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             platform::process::exit(1);
         }
     }
-    loop {
-        platform::thread::yield_now();
-    }
+    serve_capability_requests();
 }

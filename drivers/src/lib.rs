@@ -15,6 +15,8 @@ const INPUT_PACKAGE_MANIFEST_PATH: &str = "/system/packages/input/manifest.toml"
 const TTY_SERVICE_PATH: &str = "/system/services/tty.service";
 const TTY_PACKAGE_MANIFEST_PATH: &str = "/system/packages/tty/manifest.toml";
 const I8042_DRIVER_ID: &str = "org.mochios.ps2.i8042";
+const CAPABILITY_SERVICE_NAME: &str = "capability.service";
+const RESOLVE_CAPS_OPCODE: u32 = 0x4341_5053;
 
 fn open_path(path: &str) -> Option<u64> {
     platform::file::open_path(path, 0).ok()
@@ -62,15 +64,6 @@ fn read_dir_names(path: &str) -> Vec<String> {
     out
 }
 
-fn encode_nul_list(items: &[String]) -> Vec<u8> {
-    let mut out = Vec::new();
-    for item in items {
-        out.extend_from_slice(item.as_bytes());
-        out.push(0);
-    }
-    out
-}
-
 fn encode_spawn_args(items: &[String]) -> Vec<u8> {
     let mut out = Vec::with_capacity(512);
     out.resize(512, 0);
@@ -88,13 +81,29 @@ fn encode_spawn_args(items: &[String]) -> Vec<u8> {
     out
 }
 
-fn spawn_bundle(
-    entry_path: &str,
-    args: Option<&[u8]>,
-    capabilities: &[String],
-    logger_endpoint: u64,
-) -> Option<u64> {
-    let caps_nul = encode_nul_list(capabilities);
+fn resolve_capabilities(entry_path: &str) -> Option<Vec<u8>> {
+    let service_tid = platform::process::find_by_name(CAPABILITY_SERVICE_NAME).ok()?;
+    if service_tid == 0 {
+        return None;
+    }
+    let mut request = Vec::with_capacity(4 + entry_path.len());
+    request.extend_from_slice(&RESOLVE_CAPS_OPCODE.to_le_bytes());
+    request.extend_from_slice(entry_path.as_bytes());
+    let mut reply = [0u8; 1024];
+    let msg = platform::ipc::call(service_tid, &request, &mut reply).ok()?;
+    let len = (msg & 0xffff_ffff) as usize;
+    if len < 8 || len > reply.len() {
+        return None;
+    }
+    let status = u64::from_le_bytes(reply[..8].try_into().ok()?);
+    if status != 0 {
+        return None;
+    }
+    Some(reply[8..len].to_vec())
+}
+
+fn spawn_bundle(entry_path: &str, args: Option<&[u8]>, logger_endpoint: u64) -> Option<u64> {
+    let caps_nul = resolve_capabilities(entry_path)?;
     let mut spawn_args = Vec::new();
     if let Some(args) = args {
         let text = core::str::from_utf8(args).ok()?;
@@ -122,15 +131,14 @@ fn spawn_input_service(
     control_endpoint_handle: u64,
     logger_endpoint: u64,
 ) -> Option<u64> {
-    let manifest = platform::package::read_manifest(INPUT_PACKAGE_MANIFEST_PATH)?;
-    let caps = manifest.binary_requires(INPUT_SERVICE_PATH).unwrap_or(&[]);
+    let _manifest = platform::package::read_manifest(INPUT_PACKAGE_MANIFEST_PATH)?;
     let args = vec![
         raw_endpoint_handle.to_string(),
         control_endpoint_handle.to_string(),
         logger_endpoint.to_string(),
     ];
     let args_nul = encode_spawn_args(&args);
-    let caps_nul = encode_nul_list(&caps);
+    let caps_nul = resolve_capabilities(INPUT_SERVICE_PATH)?;
     platform::service::spawn_manifest(
         INPUT_SERVICE_PATH,
         platform::service::ROLE_SERVICE,
@@ -141,14 +149,13 @@ fn spawn_input_service(
 }
 
 fn spawn_tty_service(control_endpoint_handle: u64, logger_endpoint: u64) -> Option<u64> {
-    let manifest = platform::package::read_manifest(TTY_PACKAGE_MANIFEST_PATH)?;
-    let caps = manifest.binary_requires(TTY_SERVICE_PATH).unwrap_or(&[]);
+    let _manifest = platform::package::read_manifest(TTY_PACKAGE_MANIFEST_PATH)?;
     let args = vec![
         control_endpoint_handle.to_string(),
         logger_endpoint.to_string(),
     ];
     let args_nul = encode_spawn_args(&args);
-    let caps_nul = encode_nul_list(&caps);
+    let caps_nul = resolve_capabilities(TTY_SERVICE_PATH)?;
     platform::service::spawn_manifest(
         TTY_SERVICE_PATH,
         platform::service::ROLE_SERVICE,
@@ -197,12 +204,7 @@ fn maybe_spawn_bundle(bundle_root: &str, raw_input_endpoint_handle: u64, logger_
     } else {
         None
     };
-    match spawn_bundle(
-        &entry_path,
-        args.as_deref(),
-        &binary.requires,
-        logger_endpoint,
-    ) {
+    match spawn_bundle(&entry_path, args.as_deref(), logger_endpoint) {
         Some(pid) => {
             platform::println!("drivers.service: spawned driver pid={}", pid);
         }
