@@ -231,6 +231,33 @@ fn service_binary_path(manifest: &platform::package::PackageManifest) -> Option<
         .map(|binary| binary.path.as_str())
 }
 
+fn package_manifest_by_id(
+    index: &PackageIndex,
+    package_id: &str,
+) -> Result<platform::package::PackageManifest, mochi_user_syscall::SysError> {
+    if let Some(manifest_path) = index.by_package.get(package_id) {
+        return platform::package::read_manifest(manifest_path).ok_or_else(|| {
+            mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
+        });
+    }
+
+    let Some(package_dir) = package_id.rsplit('.').next() else {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::ENOENT as i64,
+        ));
+    };
+    let fallback_path = alloc::format!("/system/packages/{}/manifest.toml", package_dir);
+    let manifest = platform::package::read_manifest(&fallback_path).ok_or_else(|| {
+        mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOENT as i64)
+    })?;
+    if manifest.package_id != package_id {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
+    }
+    Ok(manifest)
+}
+
 fn resolve_capabilities_for_path(
     binary_path: &str,
 ) -> Result<Vec<String>, mochi_user_syscall::SysError> {
@@ -367,12 +394,7 @@ fn spawn_service_by_package(
             mochi_user_syscall::EINVAL as i64,
         ));
     }
-    let manifest_path = index
-        .by_package
-        .get(package_id)
-        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOENT as i64))?;
-    let manifest = platform::package::read_manifest(&manifest_path)
-        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    let manifest = package_manifest_by_id(index, package_id)?;
     let service_path = service_binary_path(&manifest)
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     let caps = binary_caps(&manifest, service_path)?;
