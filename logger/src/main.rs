@@ -7,6 +7,8 @@ use alloc::string::String;
 use core::arch::global_asm;
 use mochi_user_platform as platform;
 
+const LOG_ROOT: &str = "/system/logs/services";
+
 global_asm!(
     r#"
     .global _start
@@ -87,14 +89,23 @@ fn log_path_for_line(line: &str) -> String {
         .map(|(prefix, _)| prefix)
         .unwrap_or("misc");
     let key = service_key_from_prefix(prefix);
-    alloc::format!("/system/services/{}/service.log", key)
+    alloc::format!("{}/{}.log", LOG_ROOT, key)
+}
+
+fn ensure_dir_tree(path: &str) {
+    let mut current = String::new();
+    for segment in path.split('/').filter(|segment| !segment.is_empty()) {
+        current.push('/');
+        current.push_str(segment);
+        let _ = platform::file::create_dir(&current, 0o755);
+    }
 }
 
 fn ensure_log_parent(path: &str) {
     let Some((parent, _)) = path.rsplit_once('/') else {
         return;
     };
-    let _ = platform::file::create_dir(parent, 0o755);
+    ensure_dir_tree(parent);
 }
 
 fn append_log_line(line: &[u8]) {
