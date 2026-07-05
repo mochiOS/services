@@ -88,35 +88,36 @@ fn present(info: &platform::memory::FramebufferInfo, request: &[u8]) -> u32 {
     } else {
         info.width
     };
-    let Some(last_row) = (info.height as usize).checked_sub(1) else {
-        return mochi_user_syscall::EINVAL as u32;
-    };
-    let Some(last_row_pixels) = last_row.checked_mul(dest_stride as usize) else {
+    let dest_stride = dest_stride as usize;
+    let target_width = core::cmp::min(info.width as usize, dest_stride);
+    let Some(row_capacity_bytes) = dest_stride.checked_mul(4) else {
         return mochi_user_syscall::ERANGE as u32;
     };
-    let Some(total_pixels) = last_row_pixels.checked_add(info.width as usize) else {
-        return mochi_user_syscall::ERANGE as u32;
-    };
-    let Some(write_bytes) = total_pixels.checked_mul(4) else {
-        return mochi_user_syscall::ERANGE as u32;
-    };
-    if write_bytes > info.size as usize {
+    if target_width == 0 || row_capacity_bytes == 0 {
         return mochi_user_syscall::ERANGE as u32;
     }
+    let target_height = core::cmp::min(
+        info.height as usize,
+        info.size as usize / row_capacity_bytes,
+    );
+    if target_height == 0 {
+        return mochi_user_syscall::ERANGE as u32;
+    }
+    let target_width = core::cmp::min(target_width, info.size as usize / 4);
 
     let fb_offset = (info.addr & 0xfff) as usize;
     let fb = (FB_VIRT as usize + fb_offset) as *mut u32;
     let pixels = &request[20..20 + needed];
-    for y in 0..info.height as usize {
-        let src_y = y * height as usize / info.height as usize;
+    for y in 0..target_height {
+        let src_y = y * height as usize / target_height;
         let src_row = &pixels[src_y * row_bytes..src_y * row_bytes + stride as usize * 4];
-        for x in 0..info.width as usize {
-            let src_x = x * width as usize / info.width as usize;
+        for x in 0..target_width {
+            let src_x = x * width as usize / target_width;
             let i = src_x * 4;
             let pixel =
                 u32::from_le_bytes([src_row[i], src_row[i + 1], src_row[i + 2], src_row[i + 3]]);
             unsafe {
-                fb.add(y * dest_stride as usize + x).write_volatile(pixel);
+                fb.add(y * dest_stride + x).write_volatile(pixel);
             }
         }
     }
