@@ -26,6 +26,7 @@ const LOGGER_SERVICE_PATH: &str = "/system/services/logger.service";
 const LOGGER_PACKAGE_MANIFEST_PATH: &str = "/system/packages/logger/manifest.toml";
 const CAPABILITY_SERVICE_PATH: &str = "/system/services/capability.service";
 const CAPABILITY_PACKAGE_MANIFEST_PATH: &str = "/system/packages/capability/manifest.toml";
+const ROOTFS_READY_RETRIES: usize = 16;
 
 fn encode_nul_list(items: &[String]) -> Vec<u8> {
     let mut out = Vec::new();
@@ -72,6 +73,64 @@ fn register_delegate_with_retry(kind: u64, pid: u64) -> Result<(), mochi_user_sy
     }))
 }
 
+fn stderr_line(message: &str) {
+    let _ = platform::io::stderr(message.as_bytes());
+    let _ = platform::io::stderr(b"\n");
+}
+
+fn bytes_preview(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    for byte in bytes.iter().take(96).copied() {
+        match byte {
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            b'\t' => out.push_str("\\t"),
+            0x20..=0x7e => out.push(byte as char),
+            _ => out.push('.'),
+        }
+    }
+    out
+}
+
+fn read_manifest_with_retry(
+    path: &str,
+) -> Result<platform::package::PackageManifest, mochi_user_syscall::SysError> {
+    let mut last_errno = mochi_user_syscall::ENOENT;
+    let mut last_len = 0usize;
+    let mut last_preview = String::new();
+    for _ in 0..ROOTFS_READY_RETRIES {
+        match platform::file::read_to_end_path(path) {
+            Ok(bytes) => {
+                last_len = bytes.len();
+                last_preview = bytes_preview(&bytes);
+                match core::str::from_utf8(&bytes) {
+                    Ok(text) => {
+                        if let Some(manifest) = platform::package::parse_manifest(text) {
+                            return Ok(manifest);
+                        }
+                        last_errno = mochi_user_syscall::EINVAL;
+                    }
+                    Err(_) => {
+                        last_errno = mochi_user_syscall::EINVAL;
+                    }
+                }
+            }
+            Err(err) => {
+                last_errno = err.errno().unwrap_or(mochi_user_syscall::EIO);
+            }
+        }
+        platform::thread::yield_now();
+    }
+    stderr_line(&alloc::format!(
+        "core.service: manifest read timed out path={} errno={} len={} first={}",
+        path,
+        last_errno,
+        last_len,
+        last_preview
+    ));
+    Err(mochi_user_syscall::SysError::from_raw(last_errno as i64))
+}
+
 fn spawn_logger_service() -> Result<u64, mochi_user_syscall::SysError> {
     let bootstrap = match platform::ipc::create() {
         Ok(endpoint) => endpoint,
@@ -83,25 +142,14 @@ fn spawn_logger_service() -> Result<u64, mochi_user_syscall::SysError> {
             return Err(err);
         }
     };
-    let manifest = match platform::package::read_manifest(LOGGER_PACKAGE_MANIFEST_PATH) {
-        Some(manifest) => manifest,
-        None => {
-            platform::println!(
-                "core.service: logger manifest read failed {}",
-                LOGGER_PACKAGE_MANIFEST_PATH
-            );
-            return Err(mochi_user_syscall::SysError::from_raw(
-                mochi_user_syscall::EINVAL as i64,
-            ));
-        }
-    };
+    let manifest = read_manifest_with_retry(LOGGER_PACKAGE_MANIFEST_PATH)?;
     let caps = match manifest.binary_requires(LOGGER_SERVICE_PATH) {
         Some(caps) => caps,
         None => {
-            platform::println!(
+            stderr_line(&alloc::format!(
                 "core.service: logger manifest missing binary {}",
                 LOGGER_SERVICE_PATH
-            );
+            ));
             return Err(mochi_user_syscall::SysError::from_raw(
                 mochi_user_syscall::EINVAL as i64,
             ));
@@ -118,13 +166,13 @@ fn spawn_logger_service() -> Result<u64, mochi_user_syscall::SysError> {
     ) {
         Ok(pid) => pid,
         Err(err) => {
-            platform::println!(
+            stderr_line(&alloc::format!(
                 "core.service: logger exec failed caps={} args_len={} caps_len={} errno={}",
                 caps.len(),
                 args_nul.len(),
                 caps_nul.len(),
                 err.errno().unwrap_or(0)
-            );
+            ));
             return Err(err);
         }
     };
@@ -144,8 +192,7 @@ fn spawn_logger_service() -> Result<u64, mochi_user_syscall::SysError> {
 }
 
 fn spawn_capability_service() -> Result<u64, mochi_user_syscall::SysError> {
-    let manifest = platform::package::read_manifest(CAPABILITY_PACKAGE_MANIFEST_PATH)
-        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    let manifest = read_manifest_with_retry(CAPABILITY_PACKAGE_MANIFEST_PATH)?;
     let caps = manifest
         .binary_requires(CAPABILITY_SERVICE_PATH)
         .unwrap_or(&[]);
@@ -157,12 +204,17 @@ fn spawn_capability_service() -> Result<u64, mochi_user_syscall::SysError> {
     let logger_endpoint = platform::logger::endpoint().unwrap_or(0);
     let args = [logger_endpoint.to_string()];
     let args_nul = encode_spawn_args(&args);
-    platform::service::spawn_manifest(
+    match platform::service::spawn_manifest(
         CAPABILITY_SERVICE_PATH,
         platform::service::ROLE_SERVICE,
         Some(args_nul.as_slice()),
         Some(caps_nul.as_slice()),
-    )
+    ) {
+        Ok(pid) => Ok(pid),
+        Err(err) => {
+            Err(err)
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
