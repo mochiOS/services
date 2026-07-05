@@ -125,7 +125,7 @@ fn surface_index_for(surfaces: &[Surface], owner: u64, token: u64) -> Option<usi
         .position(|surface| surface.live && surface.owner == owner && surface.token == token)
 }
 
-fn composite_and_present(surfaces: &[Surface], display_tid: u64) {
+fn composite_and_present(surfaces: &[Surface], display_tid: u64) -> u32 {
     let mut frame = vec![0u32; FRAME_W * FRAME_H];
     for y in 0..FRAME_H {
         for x in 0..FRAME_W {
@@ -161,7 +161,13 @@ fn composite_and_present(surfaces: &[Surface], display_tid: u64) {
         request[20 + i * 4..24 + i * 4].copy_from_slice(&pixel.to_le_bytes());
     }
     let mut reply = [0u8; 8];
-    let _ = platform::ipc::call(display_tid, &request, &mut reply);
+    let Ok(msg) = platform::ipc::call(display_tid, &request, &mut reply) else {
+        return mochi_user_syscall::EIO as u32;
+    };
+    if (msg & 0xffff_ffff) < 4 {
+        return mochi_user_syscall::EIO as u32;
+    }
+    read_u32(&reply, 0).unwrap_or(mochi_user_syscall::EIO as u32)
 }
 
 fn handle_request(
@@ -290,8 +296,8 @@ fn handle_request(
             for i in 0..surface.pending_len {
                 surface.current[i] = surface.pending[i];
             }
-            composite_and_present(surfaces, display_tid);
-            put_u32(&mut reply, 0, 0);
+            let status = composite_and_present(surfaces, display_tid);
+            put_u32(&mut reply, 0, status);
         }
         OP_SET_POSITION => {
             put_u32(&mut reply, 0, mochi_user_syscall::EACCES as u32);
@@ -300,8 +306,8 @@ fn handle_request(
             let token = read_u64(request, 4).unwrap_or(0);
             if let Some(index) = surface_index_for(surfaces, sender, token) {
                 surfaces[index] = Surface::empty();
-                composite_and_present(surfaces, display_tid);
-                put_u32(&mut reply, 0, 0);
+                let status = composite_and_present(surfaces, display_tid);
+                put_u32(&mut reply, 0, status);
             } else {
                 put_u32(&mut reply, 0, mochi_user_syscall::EACCES as u32);
             }
