@@ -80,26 +80,20 @@ fn present(info: &platform::memory::FramebufferInfo, request: &[u8]) -> u32 {
     if !map_framebuffer(info) {
         return mochi_user_syscall::EIO as u32;
     }
-    let dest_stride = if info.stride >= info.width
-        && info.stride <= info.width.saturating_add(4096)
-        && ((info.stride as usize) * 4) <= info.size as usize
-    {
-        info.stride
+    let visible_width = if info.width > 0 && info.width <= 4096 {
+        info.width as usize
     } else {
-        info.width
+        640
     };
-    let dest_stride = dest_stride as usize;
-    let target_width = core::cmp::min(info.width as usize, dest_stride);
+    let dest_stride = visible_width;
+    let target_width = core::cmp::min(visible_width, 640);
     let Some(row_capacity_bytes) = dest_stride.checked_mul(4) else {
         return mochi_user_syscall::ERANGE as u32;
     };
     if target_width == 0 || row_capacity_bytes == 0 {
         return mochi_user_syscall::ERANGE as u32;
     }
-    let target_height = core::cmp::min(
-        info.height as usize,
-        info.size as usize / row_capacity_bytes,
-    );
+    let target_height = core::cmp::min(480, info.size as usize / row_capacity_bytes);
     if target_height == 0 {
         return mochi_user_syscall::ERANGE as u32;
     }
