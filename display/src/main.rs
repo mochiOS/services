@@ -25,6 +25,7 @@ const OP_GET_INFO: u32 = 1;
 const OP_PRESENT: u32 = 2;
 const PIXEL_FORMAT_XRGB8888: u32 = 1;
 const FB_VIRT: u64 = 0x0000_6000_0000_0000;
+const MAX_DIMENSION: usize = 4096;
 
 fn put_u32(out: &mut [u8], offset: usize, value: u32) {
     out[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
@@ -80,24 +81,40 @@ fn present(info: &platform::memory::FramebufferInfo, request: &[u8]) -> u32 {
     if !map_framebuffer(info) {
         return mochi_user_syscall::EIO as u32;
     }
-    let visible_width = if info.width > 0 && info.width <= 4096 {
-        info.width as usize
-    } else {
-        640
-    };
-    let dest_stride = visible_width;
-    let target_width = core::cmp::min(visible_width, 640);
-    let Some(row_capacity_bytes) = dest_stride.checked_mul(4) else {
-        return mochi_user_syscall::ERANGE as u32;
-    };
-    if target_width == 0 || row_capacity_bytes == 0 {
+    let dest_width = info.width as usize;
+    let dest_height = info.height as usize;
+    let dest_stride = info.stride as usize;
+    if dest_width == 0
+        || dest_height == 0
+        || dest_width > MAX_DIMENSION
+        || dest_height > MAX_DIMENSION
+        || dest_stride < dest_width
+        || dest_stride > MAX_DIMENSION
+    {
+        platform::println!(
+            "display.driver: invalid framebuffer geometry width={} height={} stride={} size={}",
+            info.width,
+            info.height,
+            info.stride,
+            info.size
+        );
         return mochi_user_syscall::ERANGE as u32;
     }
-    let target_height = core::cmp::min(480, info.size as usize / row_capacity_bytes);
-    if target_height == 0 {
+    let Some(dest_row_bytes) = dest_stride.checked_mul(4) else {
+        return mochi_user_syscall::ERANGE as u32;
+    };
+    let max_rows = info.size as usize / dest_row_bytes;
+    if max_rows < dest_height {
+        platform::println!(
+            "display.driver: framebuffer too small size={} row_bytes={} height={}",
+            info.size,
+            dest_row_bytes,
+            dest_height
+        );
         return mochi_user_syscall::ERANGE as u32;
     }
-    let target_width = core::cmp::min(target_width, info.size as usize / 4);
+    let target_width = dest_width;
+    let target_height = dest_height;
 
     let fb_offset = (info.addr & 0xfff) as usize;
     let fb = (FB_VIRT as usize + fb_offset) as *mut u32;
