@@ -39,6 +39,11 @@ fn capability_reply(sender: u64, status: u64) {
     let _ = platform::ipc::reply(sender, &status.to_le_bytes());
 }
 
+fn stderr_line(message: &str) {
+    let _ = platform::io::stderr(message.as_bytes());
+    let _ = platform::io::stderr(b"\n");
+}
+
 fn hex_digest(digest: &[u8; 32]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(64);
@@ -90,7 +95,11 @@ fn append_persistent_grant(
     data.push(b'\t');
     data.extend_from_slice(capability.as_bytes());
     data.push(b'\t');
-    data.extend_from_slice(if all_user_grantable { b"all-user" } else { b"single" });
+    data.extend_from_slice(if all_user_grantable {
+        b"all-user"
+    } else {
+        b"single"
+    });
     data.push(b'\t');
     if let Some(resource) = resource {
         data.extend_from_slice(resource.as_bytes());
@@ -169,9 +178,23 @@ fn grant_db_matches(
 
 #[derive(Default)]
 struct PackageIndex {
-    by_binary: BTreeMap<String, String>,
-    by_package: BTreeMap<String, String>,
+    by_binary: BTreeMap<String, PackageRecord>,
+    by_package: BTreeMap<String, PackageRecord>,
     duplicate: bool,
+}
+
+#[derive(Clone)]
+struct PackageRecord {
+    manifest_path: String,
+    manifest_hash: [u8; 32],
+}
+
+fn manifest_hash(path: &str) -> Result<[u8; 32], mochi_user_syscall::SysError> {
+    let bytes = platform::file::read_to_end_path(path)?;
+    let digest = Sha256::digest(&bytes);
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&digest);
+    Ok(hash)
 }
 
 fn walk_package_tree(path: &str, out: &mut Vec<String>) {
@@ -200,30 +223,47 @@ fn build_package_index() -> PackageIndex {
             );
             continue;
         };
-        if let Some(previous) = index
-            .by_package
-            .insert(manifest.package_id.clone(), manifest_path.clone())
-        {
+        let Ok(hash) = manifest_hash(&manifest_path) else {
             platform::println!(
-                "capability.service: duplicate package {} in {} and {}",
-                manifest.package_id,
-                previous,
+                "capability.service: failed to hash manifest {}",
                 manifest_path
             );
             index.duplicate = true;
-        }
-        for binary in manifest.binaries {
-            if let Some(previous) = index
-                .by_binary
-                .insert(binary.path.clone(), manifest_path.clone())
-            {
+            continue;
+        };
+        let record = PackageRecord {
+            manifest_path: manifest_path.clone(),
+            manifest_hash: hash,
+        };
+        if let Some(previous) = index.by_package.get(&manifest.package_id) {
+            if previous.manifest_hash != record.manifest_hash {
                 platform::println!(
-                    "capability.service: duplicate binary {} in {} and {}",
-                    binary.path,
-                    previous,
+                    "capability.service: duplicate package {} in {} and {}",
+                    manifest.package_id,
+                    previous.manifest_path,
                     manifest_path
                 );
                 index.duplicate = true;
+                continue;
+            }
+        } else {
+            index
+                .by_package
+                .insert(manifest.package_id.clone(), record.clone());
+        }
+        for binary in manifest.binaries {
+            if let Some(previous) = index.by_binary.get(&binary.path) {
+                if previous.manifest_hash != record.manifest_hash {
+                    platform::println!(
+                        "capability.service: duplicate binary {} in {} and {}",
+                        binary.path,
+                        previous.manifest_path,
+                        manifest_path
+                    );
+                    index.duplicate = true;
+                }
+            } else {
+                index.by_binary.insert(binary.path.clone(), record.clone());
             }
         }
     }
@@ -374,26 +414,26 @@ fn package_manifest_by_id(
     package_id: &str,
 ) -> Result<platform::package::PackageManifest, mochi_user_syscall::SysError> {
     if let Some(manifest_path) = index.by_package.get(package_id) {
-        return platform::package::read_manifest(manifest_path).ok_or_else(|| {
+        return platform::package::read_manifest(&manifest_path.manifest_path).ok_or_else(|| {
             mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
         });
     }
 
-    let Some(package_dir) = package_id.rsplit('.').next() else {
-        return Err(mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::ENOENT as i64,
-        ));
-    };
-    let fallback_path = alloc::format!("/system/packages/{}/manifest.toml", package_dir);
-    let manifest = platform::package::read_manifest(&fallback_path).ok_or_else(|| {
-        mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOENT as i64)
-    })?;
-    if manifest.package_id != package_id {
-        return Err(mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::EINVAL as i64,
-        ));
+    if let Some(package_dir) = package_id.rsplit('.').next() {
+        let fallback_path = alloc::format!("/system/packages/{}/manifest.toml", package_dir);
+        if let Some(manifest) = platform::package::read_manifest(&fallback_path) {
+            if manifest.package_id == package_id {
+                return Ok(manifest);
+            }
+            return Err(mochi_user_syscall::SysError::from_raw(
+                mochi_user_syscall::EINVAL as i64,
+            ));
+        }
     }
-    Ok(manifest)
+
+    Err(mochi_user_syscall::SysError::from_raw(
+        mochi_user_syscall::ENOENT as i64,
+    ))
 }
 
 fn resolve_capabilities_for_path(
@@ -409,7 +449,7 @@ fn resolve_capabilities_for_path(
         .by_binary
         .get(binary_path)
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOENT as i64))?;
-    let manifest = platform::package::read_manifest(manifest_path)
+    let manifest = platform::package::read_manifest(&manifest_path.manifest_path)
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     let caps = binary_caps(&manifest, binary_path)?;
     Ok(caps.to_vec())
@@ -637,7 +677,10 @@ fn parse_persistent_query(
         ));
     }
     let request = unsafe {
-        core::ptr::read_unaligned(buf.as_ptr().cast::<platform::capability::CapabilityRequest>())
+        core::ptr::read_unaligned(
+            buf.as_ptr()
+                .cast::<platform::capability::CapabilityRequest>(),
+        )
     };
     if request.opcode != platform::capability::CAPABILITY_PERSISTENT_QUERY_OPCODE {
         return Err(mochi_user_syscall::SysError::from_raw(
@@ -788,6 +831,10 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             platform::println!("capability.service: signature.service spawned pid={}", pid);
         }
         Err(err) => {
+            stderr_line(&alloc::format!(
+                "capability.service: signature.service spawn failed errno={}",
+                err.errno().unwrap_or(0)
+            ));
             platform::println!(
                 "capability.service: signature.service spawn failed errno={}",
                 err.errno().unwrap_or(0)
@@ -800,6 +847,10 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             platform::println!("capability.service: package.service spawned pid={}", pid);
         }
         Err(err) => {
+            stderr_line(&alloc::format!(
+                "capability.service: package.service spawn failed errno={}",
+                err.errno().unwrap_or(0)
+            ));
             platform::println!(
                 "capability.service: package.service spawn failed errno={}",
                 err.errno().unwrap_or(0)
@@ -817,6 +868,10 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
                     );
                 }
                 Err(err) => {
+                    stderr_line(&alloc::format!(
+                        "capability.service: delegate registration failed errno={}",
+                        err.errno().unwrap_or(0)
+                    ));
                     platform::println!(
                         "capability.service: delegate registration failed errno={}",
                         err.errno().unwrap_or(0)
@@ -826,6 +881,10 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             }
         }
         Err(err) => {
+            stderr_line(&alloc::format!(
+                "capability.service: drivers.service spawn failed errno={}",
+                err.errno().unwrap_or(0)
+            ));
             platform::println!(
                 "capability.service: drivers.service spawn failed errno={}",
                 err.errno().unwrap_or(0)
