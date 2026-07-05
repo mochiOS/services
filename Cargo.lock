@@ -34,6 +34,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "compositor"
+version = "0.1.0"
+dependencies = [
+ "mochi-user-platform",
+ "mochi-user-runtime",
+ "mochi-user-syscall",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -112,6 +121,15 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
  "crypto-common",
+]
+
+[[package]]
+name = "display"
+version = "0.1.0"
+dependencies = [
+ "mochi-user-platform",
+ "mochi-user-runtime",
+ "mochi-user-syscall",
 ]
 
 [[package]]

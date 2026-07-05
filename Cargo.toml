@@ -2,7 +2,9 @@
 resolver = "2"
 members = [
     "capability",
+    "compositor",
     "core",
+    "display",
     "drivers",
     "input",
     "logger",

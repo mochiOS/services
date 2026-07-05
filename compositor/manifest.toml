@@ -1,20 +1,17 @@
 [package]
-id = "org.mochios.drivers"
-name = "Drivers Service"
+id = "org.mochios.compositor"
+name = "Compositor Service"
 version = "1"
 vendor = "mochiOS"
 
 [[binary]]
-path = "/system/services/drivers.service"
+path = "/system/services/compositor.service"
 kind = "service"
 requires = [
-    "fs.read.all",
-    "process.spawn",
-    "device.input",
     "display.read",
     "input.keyboard",
     "input.pointer",
     "ipc.client",
     "ipc.server",
-    "usb.access",
 ]
+

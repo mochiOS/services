@@ -1,0 +1,15 @@
+[package]
+id = "org.mochios.display"
+name = "Display Driver"
+version = "1"
+vendor = "mochiOS"
+
+[[binary]]
+path = "/system/services/display.driver"
+kind = "service"
+requires = [
+    "display.read",
+    "ipc.client",
+    "ipc.server",
+]
+

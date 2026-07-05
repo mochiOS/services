@@ -1,0 +1,13 @@
+[service]
+id = "org.mochios.display"
+name = "Display Driver"
+version = "1"
+entry = "display.driver"
+
+[capabilities]
+requires = [
+    "display.read",
+    "ipc.client",
+    "ipc.server",
+]
+

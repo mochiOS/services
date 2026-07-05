@@ -1,0 +1,18 @@
+[package]
+name = "display"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[dependencies]
+mochi-user-platform = { path = "../../user/crates/platform" }
+mochi-user-runtime = { path = "../../user/crates/runtime" }
+mochi-user-syscall = { path = "../../user/crates/syscall" }
+
+[[bin]]
+name = "display"
+path = "src/main.rs"
+test = false
+bench = false
+harness = false
+

@@ -1,0 +1,15 @@
+[service]
+id = "org.mochios.compositor"
+name = "Compositor Service"
+version = "1"
+entry = "compositor.service"
+
+[capabilities]
+requires = [
+    "display.read",
+    "input.keyboard",
+    "input.pointer",
+    "ipc.client",
+    "ipc.server",
+]
+

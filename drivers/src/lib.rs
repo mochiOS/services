@@ -11,6 +11,10 @@ use mochi_user_platform as platform;
 const DRIVER_BUNDLE_ROOTS: &[&str] = &["/bin/drivers/usb", "/bin/drivers/ps2"];
 const INPUT_SERVICE_PATH: &str = "/system/services/input.service";
 const INPUT_PACKAGE_MANIFEST_PATH: &str = "/system/packages/input/manifest.toml";
+const DISPLAY_SERVICE_PATH: &str = "/system/services/display.driver";
+const DISPLAY_PACKAGE_MANIFEST_PATH: &str = "/system/packages/display/manifest.toml";
+const COMPOSITOR_SERVICE_PATH: &str = "/system/services/compositor.service";
+const COMPOSITOR_PACKAGE_MANIFEST_PATH: &str = "/system/packages/compositor/manifest.toml";
 const TTY_SERVICE_PATH: &str = "/system/services/tty.service";
 const TTY_PACKAGE_MANIFEST_PATH: &str = "/system/packages/tty/manifest.toml";
 const I8042_DRIVER_ID: &str = "org.mochios.ps2.i8042";
@@ -115,8 +119,7 @@ fn spawn_bundle(
     let caps_nul = resolve_capabilities(entry_path)?;
     let mut spawn_args = Vec::new();
     if let Some(args) = args {
-        let text =
-            core::str::from_utf8(args).map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
+        let text = core::str::from_utf8(args).map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
         for part in text.split('\0') {
             if !part.is_empty() {
                 spawn_args.push(part.to_string());
@@ -135,9 +138,7 @@ fn spawn_bundle(
     )
 }
 
-fn spawn_input_service(
-    logger_endpoint: u64,
-) -> Result<u64, mochi_user_syscall::SysError> {
+fn spawn_input_service(logger_endpoint: u64) -> Result<u64, mochi_user_syscall::SysError> {
     let _manifest = platform::package::read_manifest(INPUT_PACKAGE_MANIFEST_PATH)
         .ok_or_else(|| sys_error(mochi_user_syscall::ENOENT))?;
     let args = vec![logger_endpoint.to_string()];
@@ -151,9 +152,25 @@ fn spawn_input_service(
     )
 }
 
-fn spawn_tty_service(
+fn spawn_named_service(
+    service_path: &str,
+    manifest_path: &str,
     logger_endpoint: u64,
 ) -> Result<u64, mochi_user_syscall::SysError> {
+    let _manifest = platform::package::read_manifest(manifest_path)
+        .ok_or_else(|| sys_error(mochi_user_syscall::ENOENT))?;
+    let args = vec![logger_endpoint.to_string()];
+    let args_nul = encode_spawn_args(&args);
+    let caps_nul = resolve_capabilities(service_path)?;
+    platform::service::spawn_manifest(
+        service_path,
+        platform::service::ROLE_SERVICE,
+        Some(args_nul.as_slice()),
+        Some(caps_nul.as_slice()),
+    )
+}
+
+fn spawn_tty_service(logger_endpoint: u64) -> Result<u64, mochi_user_syscall::SysError> {
     let _manifest = platform::package::read_manifest(TTY_PACKAGE_MANIFEST_PATH)
         .ok_or_else(|| sys_error(mochi_user_syscall::ENOENT))?;
     let args = vec![logger_endpoint.to_string()];
@@ -225,6 +242,28 @@ pub fn run(sp: *const usize) -> ! {
         Ok(pid) => platform::println!("drivers.service: input.service spawned pid={}", pid),
         Err(err) => platform::println!(
             "drivers.service: input.service spawn failed errno={}",
+            err.errno().unwrap_or(0)
+        ),
+    }
+    match spawn_named_service(
+        DISPLAY_SERVICE_PATH,
+        DISPLAY_PACKAGE_MANIFEST_PATH,
+        logger_endpoint,
+    ) {
+        Ok(pid) => platform::println!("drivers.service: display.driver spawned pid={}", pid),
+        Err(err) => platform::println!(
+            "drivers.service: display.driver spawn failed errno={}",
+            err.errno().unwrap_or(0)
+        ),
+    }
+    match spawn_named_service(
+        COMPOSITOR_SERVICE_PATH,
+        COMPOSITOR_PACKAGE_MANIFEST_PATH,
+        logger_endpoint,
+    ) {
+        Ok(pid) => platform::println!("drivers.service: compositor.service spawned pid={}", pid),
+        Err(err) => platform::println!(
+            "drivers.service: compositor.service spawn failed errno={}",
             err.errno().unwrap_or(0)
         ),
     }
