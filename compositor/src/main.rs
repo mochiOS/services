@@ -509,6 +509,9 @@ fn composite_and_present(
             }
         }
     }
+    if let Err(err) = platform::ipc::send_page_count(display_tid, page_count, virt) {
+        return errno_from_platform(err);
+    }
     let mut request = [0u8; 20];
     put_u32(&mut request, 0, OP_DISPLAY_PRESENT);
     put_u32(&mut request, 4, frame_w as u32);
@@ -523,13 +526,7 @@ fn composite_and_present(
         return mochi_user_syscall::EIO as u32;
     }
     let status = read_u32(&reply, 0).unwrap_or(mochi_user_syscall::EIO as u32);
-    if status != 0 {
-        return status;
-    }
-    match platform::ipc::send_page_count(display_tid, page_count, virt) {
-        Ok(_) => 0,
-        Err(err) => errno_from_platform(err),
-    }
+    status
 }
 
 fn handle_request(

@@ -44,14 +44,6 @@ fn map_framebuffer(info: &platform::memory::FramebufferInfo) -> bool {
     platform::memory::map_framebuffer(FB_VIRT, size).is_ok()
 }
 
-fn framebuffer_stride_pixels(info: &platform::memory::FramebufferInfo) -> Option<usize> {
-    let stride_bytes = info.stride as usize;
-    if stride_bytes == 0 || (stride_bytes & 3) != 0 {
-        return None;
-    }
-    Some(stride_bytes / 4)
-}
-
 fn present_pixels(
     info: &platform::memory::FramebufferInfo,
     width: u32,
@@ -80,23 +72,13 @@ fn present_pixels(
     }
     let dest_width = info.width as usize;
     let dest_height = info.height as usize;
-    let dest_stride_bytes = info.stride as usize;
-    let Some(dest_stride_pixels) = framebuffer_stride_pixels(info) else {
-        platform::println!(
-            "display.driver: invalid framebuffer stride width={} height={} stride={} size={}",
-            info.width,
-            info.height,
-            info.stride,
-            info.size
-        );
-        return mochi_user_syscall::ERANGE as u32;
-    };
+    let dest_stride = info.stride as usize;
     if dest_width == 0
         || dest_height == 0
         || dest_width > MAX_DIMENSION
         || dest_height > MAX_DIMENSION
-        || dest_stride_pixels < dest_width
-        || dest_stride_pixels > MAX_DIMENSION
+        || dest_stride < dest_width
+        || dest_stride > MAX_DIMENSION
     {
         platform::println!(
             "display.driver: invalid framebuffer geometry width={} height={} stride={} size={}",
@@ -107,12 +89,15 @@ fn present_pixels(
         );
         return mochi_user_syscall::ERANGE as u32;
     }
-    let max_rows = info.size as usize / dest_stride_bytes;
+    let Some(dest_row_bytes) = dest_stride.checked_mul(4) else {
+        return mochi_user_syscall::ERANGE as u32;
+    };
+    let max_rows = info.size as usize / dest_row_bytes;
     if max_rows < dest_height {
         platform::println!(
             "display.driver: framebuffer too small size={} row_bytes={} height={}",
             info.size,
-            dest_stride_bytes,
+            dest_row_bytes,
             dest_height
         );
         return mochi_user_syscall::ERANGE as u32;
@@ -132,7 +117,7 @@ fn present_pixels(
             let pixel =
                 u32::from_le_bytes([src_row[i], src_row[i + 1], src_row[i + 2], src_row[i + 3]]);
             unsafe {
-                fb.add(y * dest_stride_pixels + x).write_volatile(pixel);
+                fb.add(y * dest_stride + x).write_volatile(pixel);
             }
         }
     }
@@ -204,7 +189,7 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         Err(_) => platform::process::exit(1),
     };
     let mut buf = [0u8; 4128];
-    let mut pending_present: Option<(u64, u32, u32, u32, u32)> = None;
+    let mut shared_buffer: Option<(u64, u64)> = None;
     loop {
         let Ok(msg) = platform::ipc::wait(endpoint, &mut buf) else {
             platform::thread::yield_now();
@@ -213,18 +198,14 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         let sender = msg >> 32;
         let len = (msg & 0xffff_ffff) as usize;
         if len == 16 {
-            if let Some((_owner, width, height, stride, format)) = pending_present {
-                let mapped_addr = u64::from_le_bytes([
-                    buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
-                ]);
-                let total = u64::from_le_bytes([
-                    buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
-                ]);
-                let info = platform::memory::framebuffer_info().unwrap_or_default();
-                let _ = present_shared(&info, mapped_addr, total, width, height, stride, format);
-                pending_present = None;
-                continue;
-            }
+            let mapped_addr = u64::from_le_bytes([
+                buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+            ]);
+            let total = u64::from_le_bytes([
+                buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
+            ]);
+            shared_buffer = Some((mapped_addr, total));
+            continue;
         }
         if len < 4 || len > buf.len() {
             let _ = platform::ipc::reply(sender, &mochi_user_syscall::EINVAL.to_le_bytes());
@@ -235,11 +216,10 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         let mut reply = [0u8; 32];
         match opcode {
             OP_GET_INFO => {
-                let stride = framebuffer_stride_pixels(&info).unwrap_or(0) as u32;
                 put_u32(&mut reply, 0, 0);
                 put_u32(&mut reply, 4, info.width);
                 put_u32(&mut reply, 8, info.height);
-                put_u32(&mut reply, 12, stride);
+                put_u32(&mut reply, 12, info.stride);
                 put_u32(&mut reply, 16, PIXEL_FORMAT_XRGB8888);
                 let _ = platform::ipc::reply(sender, &reply[..20]);
             }
@@ -249,8 +229,12 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
                     let height = read_u32(&buf, 8).unwrap_or(0);
                     let stride = read_u32(&buf, 12).unwrap_or(0);
                     let format = read_u32(&buf, 16).unwrap_or(0);
-                    pending_present = Some((sender, width, height, stride, format));
-                    0
+                    match shared_buffer.take() {
+                        Some((mapped_addr, total)) => {
+                            present_shared(&info, mapped_addr, total, width, height, stride, format)
+                        }
+                        None => mochi_user_syscall::EINVAL as u32,
+                    }
                 } else {
                     present_inline(&info, &buf[..len])
                 };
