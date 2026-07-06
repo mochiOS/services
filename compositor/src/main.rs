@@ -523,7 +523,7 @@ fn composite_and_present(
     if status != 0 {
         return status;
     }
-    match platform::ipc::send_pages(display_tid, &vec![0u64; page_count], virt) {
+    match platform::ipc::send_page_count(display_tid, page_count, virt) {
         Ok(_) => 0,
         Err(err) => errno_from_platform(err),
     }
