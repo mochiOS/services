@@ -198,20 +198,17 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         let sender = msg >> 32;
         let len = (msg & 0xffff_ffff) as usize;
         if len == 16 {
-            if let Some((owner, width, height, stride, format)) = pending_present {
-                if sender == owner {
-                    let mapped_addr = u64::from_le_bytes([
-                        buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
-                    ]);
-                    let total = u64::from_le_bytes([
-                        buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
-                    ]);
-                    let info = platform::memory::framebuffer_info().unwrap_or_default();
-                    let _ =
-                        present_shared(&info, mapped_addr, total, width, height, stride, format);
-                    pending_present = None;
-                    continue;
-                }
+            if let Some((_owner, width, height, stride, format)) = pending_present {
+                let mapped_addr = u64::from_le_bytes([
+                    buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+                ]);
+                let total = u64::from_le_bytes([
+                    buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
+                ]);
+                let info = platform::memory::framebuffer_info().unwrap_or_default();
+                let _ = present_shared(&info, mapped_addr, total, width, height, stride, format);
+                pending_present = None;
+                continue;
             }
         }
         if len < 4 || len > buf.len() {
