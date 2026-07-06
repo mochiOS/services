@@ -45,7 +45,11 @@ const ROLE_TOPLEVEL: u32 = 1;
 const ROLE_POPUP: u32 = 2;
 const PIXEL_FORMAT_XRGB8888: u32 = 1;
 const MAX_SURFACES: usize = 8;
-const MAX_DISPLAY_DIMENSION: usize = 4096;
+const FRAME_W: usize = 32;
+const FRAME_H: usize = 24;
+const FRAME_BYTES: usize = FRAME_W * FRAME_H * 4;
+const MAX_SURFACE_W: u32 = FRAME_W as u32;
+const MAX_SURFACE_H: u32 = FRAME_H as u32;
 
 #[allow(dead_code)]
 #[derive(Clone, Copy, Default)]
@@ -376,34 +380,19 @@ fn handle_input_event(
 fn composite_and_present(
     surfaces: &[Surface],
     display_tid: u64,
-    display_width: u32,
-    display_height: u32,
-    display_stride: u32,
+    _display_width: u32,
+    _display_height: u32,
+    _display_stride: u32,
     display_format: u32,
 ) -> u32 {
     if display_format != PIXEL_FORMAT_XRGB8888 {
         return mochi_user_syscall::ENOTSUP as u32;
     }
-    let display_w = display_width as usize;
-    let display_h = display_height as usize;
-    let display_s = display_stride as usize;
-    if display_w == 0
-        || display_h == 0
-        || display_w > MAX_DISPLAY_DIMENSION
-        || display_h > MAX_DISPLAY_DIMENSION
-        || display_s < display_w
-        || display_s > MAX_DISPLAY_DIMENSION
-    {
-        return mochi_user_syscall::ERANGE as u32;
-    }
-    let Some(frame_len) = display_w.checked_mul(display_h) else {
-        return mochi_user_syscall::ERANGE as u32;
-    };
-    let mut frame = vec![0u32; frame_len];
-    for y in 0..display_h {
-        for x in 0..display_w {
+    let mut frame = vec![0u32; FRAME_W * FRAME_H];
+    for y in 0..FRAME_H {
+        for x in 0..FRAME_W {
             let shade = 0x0020_2630u32 + (((x as u32) ^ (y as u32)) & 0x7);
-            frame[y * display_w + x] = 0xff00_0000 | shade;
+            frame[y * FRAME_W + x] = 0xff00_0000 | shade;
         }
     }
     for surface in surfaces.iter().filter(|s| s.live) {
@@ -417,29 +406,26 @@ fn composite_and_present(
         }
         for sy in 0..surface.current_height as usize {
             let dy = surface.y + sy as i32;
-            if dy < 0 || dy >= display_h as i32 {
+            if dy < 0 || dy >= FRAME_H as i32 {
                 continue;
             }
             for sx in 0..surface.current_width as usize {
                 let dx = surface.x + sx as i32;
-                if dx < 0 || dx >= display_w as i32 {
+                if dx < 0 || dx >= FRAME_W as i32 {
                     continue;
                 }
                 let src = sy * surface.current_stride as usize + sx;
                 if src < surface.current.len() {
-                    frame[dy as usize * display_w + dx as usize] = surface.current[src];
+                    frame[dy as usize * FRAME_W + dx as usize] = surface.current[src];
                 }
             }
         }
     }
-    let Some(payload_bytes) = frame_len.checked_mul(4) else {
-        return mochi_user_syscall::ERANGE as u32;
-    };
-    let mut request = vec![0u8; 20 + payload_bytes];
+    let mut request = vec![0u8; 20 + FRAME_BYTES];
     put_u32(&mut request, 0, OP_DISPLAY_PRESENT);
-    put_u32(&mut request, 4, display_width);
-    put_u32(&mut request, 8, display_height);
-    put_u32(&mut request, 12, display_width);
+    put_u32(&mut request, 4, FRAME_W as u32);
+    put_u32(&mut request, 8, FRAME_H as u32);
+    put_u32(&mut request, 12, FRAME_W as u32);
     put_u32(&mut request, 16, PIXEL_FORMAT_XRGB8888);
     for (i, pixel) in frame.iter().enumerate() {
         request[20 + i * 4..24 + i * 4].copy_from_slice(&pixel.to_le_bytes());
@@ -482,8 +468,8 @@ fn handle_request(
             if !matches!(role, ROLE_TOPLEVEL | ROLE_POPUP)
                 || width == 0
                 || height == 0
-                || width as usize > MAX_DISPLAY_DIMENSION
-                || height as usize > MAX_DISPLAY_DIMENSION
+                || width > MAX_SURFACE_W
+                || height > MAX_SURFACE_H
             {
                 put_u32(&mut reply, 0, mochi_user_syscall::EACCES as u32);
                 return reply;
@@ -535,8 +521,8 @@ fn handle_request(
                 || width == 0
                 || height == 0
                 || stride < width
-                || width as usize > MAX_DISPLAY_DIMENSION
-                || height as usize > MAX_DISPLAY_DIMENSION
+                || width > MAX_SURFACE_W
+                || height > MAX_SURFACE_H
             {
                 put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32);
                 return reply;
