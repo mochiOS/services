@@ -44,6 +44,14 @@ fn map_framebuffer(info: &platform::memory::FramebufferInfo) -> bool {
     platform::memory::map_framebuffer(FB_VIRT, size).is_ok()
 }
 
+fn framebuffer_stride_pixels(info: &platform::memory::FramebufferInfo) -> Option<usize> {
+    let stride_bytes = info.stride as usize;
+    if stride_bytes == 0 || (stride_bytes & 3) != 0 {
+        return None;
+    }
+    Some(stride_bytes / 4)
+}
+
 fn present_pixels(
     info: &platform::memory::FramebufferInfo,
     width: u32,
@@ -72,13 +80,23 @@ fn present_pixels(
     }
     let dest_width = info.width as usize;
     let dest_height = info.height as usize;
-    let dest_stride = info.stride as usize;
+    let dest_stride_bytes = info.stride as usize;
+    let Some(dest_stride_pixels) = framebuffer_stride_pixels(info) else {
+        platform::println!(
+            "display.driver: invalid framebuffer stride width={} height={} stride={} size={}",
+            info.width,
+            info.height,
+            info.stride,
+            info.size
+        );
+        return mochi_user_syscall::ERANGE as u32;
+    };
     if dest_width == 0
         || dest_height == 0
         || dest_width > MAX_DIMENSION
         || dest_height > MAX_DIMENSION
-        || dest_stride < dest_width
-        || dest_stride > MAX_DIMENSION
+        || dest_stride_pixels < dest_width
+        || dest_stride_pixels > MAX_DIMENSION
     {
         platform::println!(
             "display.driver: invalid framebuffer geometry width={} height={} stride={} size={}",
@@ -89,15 +107,12 @@ fn present_pixels(
         );
         return mochi_user_syscall::ERANGE as u32;
     }
-    let Some(dest_row_bytes) = dest_stride.checked_mul(4) else {
-        return mochi_user_syscall::ERANGE as u32;
-    };
-    let max_rows = info.size as usize / dest_row_bytes;
+    let max_rows = info.size as usize / dest_stride_bytes;
     if max_rows < dest_height {
         platform::println!(
             "display.driver: framebuffer too small size={} row_bytes={} height={}",
             info.size,
-            dest_row_bytes,
+            dest_stride_bytes,
             dest_height
         );
         return mochi_user_syscall::ERANGE as u32;
@@ -117,7 +132,7 @@ fn present_pixels(
             let pixel =
                 u32::from_le_bytes([src_row[i], src_row[i + 1], src_row[i + 2], src_row[i + 3]]);
             unsafe {
-                fb.add(y * dest_stride + x).write_volatile(pixel);
+                fb.add(y * dest_stride_pixels + x).write_volatile(pixel);
             }
         }
     }
@@ -220,10 +235,11 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         let mut reply = [0u8; 32];
         match opcode {
             OP_GET_INFO => {
+                let stride = framebuffer_stride_pixels(&info).unwrap_or(0) as u32;
                 put_u32(&mut reply, 0, 0);
                 put_u32(&mut reply, 4, info.width);
                 put_u32(&mut reply, 8, info.height);
-                put_u32(&mut reply, 12, info.stride);
+                put_u32(&mut reply, 12, stride);
                 put_u32(&mut reply, 16, PIXEL_FORMAT_XRGB8888);
                 let _ = platform::ipc::reply(sender, &reply[..20]);
             }
