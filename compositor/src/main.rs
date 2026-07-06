@@ -37,7 +37,6 @@ const EVENT_POINTER_LEAVE: u32 = 3;
 const EVENT_POINTER_MOTION: u32 = 4;
 const EVENT_POINTER_BUTTON: u32 = 5;
 const EVENT_KEY: u32 = 6;
-const EVENT_CONFIGURE: u32 = 7;
 const EVENT_FOCUS_GAINED: u32 = 8;
 const EVENT_FOCUS_LOST: u32 = 9;
 const EVENT_FRAME_DONE: u32 = 10;
@@ -236,19 +235,6 @@ fn choose_frame_size(display_width: u32, display_height: u32) -> Option<(usize, 
 
 fn errno_from_platform(err: mochi_user_syscall::SysError) -> u32 {
     err.errno().unwrap_or(mochi_user_syscall::EIO) as u32
-}
-
-fn send_configure(surface: &Surface) {
-    if surface.event_endpoint == 0 {
-        return;
-    }
-    let mut event = [0u8; 20];
-    put_u32(&mut event, 0, EVENT_CONFIGURE);
-    put_i32(&mut event, 4, surface.x);
-    put_i32(&mut event, 8, surface.y);
-    put_u32(&mut event, 12, surface.width);
-    put_u32(&mut event, 16, surface.height);
-    let _ = platform::ipc::send(surface.event_endpoint, &event);
 }
 
 fn send_frame_done(surface: &Surface) {
@@ -606,7 +592,6 @@ fn handle_request(
             surfaces[index].pending_len = (width as usize) * (height as usize);
             surfaces[index].pending_damage = Some(Rect::full(width, height));
             surfaces[index].z = *next_z;
-            send_configure(&surfaces[index]);
             put_u32(&mut reply, 0, 0);
             reply[4..12].copy_from_slice(&token.to_le_bytes());
         }
@@ -786,7 +771,6 @@ fn handle_request(
                 surfaces[index].x = x;
                 surfaces[index].y = y;
             }
-            send_configure(&surfaces[index]);
             let status = composite_and_present(
                 surfaces,
                 display_tid,
