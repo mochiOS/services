@@ -128,6 +128,11 @@ fn read_u32(buf: &[u8], offset: usize) -> Option<u32> {
     Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
+fn read_pixel(buf: &[u8], offset: usize) -> Option<u32> {
+    let bytes = buf.get(offset..offset.checked_add(4)?)?;
+    Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
 fn read_u64(buf: &[u8], offset: usize) -> Option<u64> {
     let bytes = buf.get(offset..offset + 8)?;
     Some(u64::from_le_bytes([
@@ -281,6 +286,10 @@ fn handle_shared_buffer(
         surface.awaiting_buffer = false;
         return true;
     }
+    if mapped_addr == 0 {
+        surface.awaiting_buffer = false;
+        return true;
+    }
     let Some(pixels) = (width as usize).checked_mul(height as usize) else {
         surface.awaiting_buffer = false;
         return true;
@@ -291,10 +300,32 @@ fn handle_shared_buffer(
     }
     let bytes = unsafe { core::slice::from_raw_parts(mapped_addr as *const u8, needed_bytes) };
     for y in 0..height as usize {
+        let Some(src_row) = y.checked_mul(row_bytes) else {
+            surface.awaiting_buffer = false;
+            return true;
+        };
+        let Some(dst_row) = y.checked_mul(width as usize) else {
+            surface.awaiting_buffer = false;
+            return true;
+        };
         for x in 0..width as usize {
-            let src = y * row_bytes + x * 4;
-            surface.pending[y * width as usize + x] =
-                u32::from_le_bytes([bytes[src], bytes[src + 1], bytes[src + 2], bytes[src + 3]]);
+            let Some(src) = src_row.checked_add(x.saturating_mul(4)) else {
+                surface.awaiting_buffer = false;
+                return true;
+            };
+            let Some(pixel) = read_pixel(bytes, src) else {
+                surface.awaiting_buffer = false;
+                return true;
+            };
+            let Some(dst) = dst_row.checked_add(x) else {
+                surface.awaiting_buffer = false;
+                return true;
+            };
+            let Some(slot) = surface.pending.get_mut(dst) else {
+                surface.awaiting_buffer = false;
+                return true;
+            };
+            *slot = pixel;
         }
     }
     surface.pending_len = pixels;
@@ -476,11 +507,20 @@ fn composite_and_present(
         Ok(virt) => virt,
         Err(err) => return errno_from_platform(err),
     };
+    if virt == 0 || (virt as usize) & (PAGE_SIZE - 1) != 0 {
+        return mochi_user_syscall::EIO as u32;
+    }
     let frame = unsafe { core::slice::from_raw_parts_mut(virt as *mut u32, frame_pixels) };
     for y in 0..frame_h {
+        let Some(row) = y.checked_mul(frame_w) else {
+            return mochi_user_syscall::ERANGE as u32;
+        };
         for x in 0..frame_w {
             let shade = 0x0020_2630u32 + (((x as u32) ^ (y as u32)) & 0x7);
-            frame[y * frame_w + x] = 0xff00_0000 | shade;
+            let Some(pixel) = frame.get_mut(row + x) else {
+                return mochi_user_syscall::ERANGE as u32;
+            };
+            *pixel = 0xff00_0000 | shade;
         }
     }
     for surface in surfaces.iter().filter(|s| s.live) {
@@ -504,7 +544,19 @@ fn composite_and_present(
                 }
                 let src = sy * surface.current_stride as usize + sx;
                 if src < surface.current.len() {
-                    frame[dy as usize * frame_w + dx as usize] = surface.current[src];
+                    let Some(dst) = (dy as usize)
+                        .checked_mul(frame_w)
+                        .and_then(|row| row.checked_add(dx as usize))
+                    else {
+                        return mochi_user_syscall::ERANGE as u32;
+                    };
+                    let Some(pixel) = surface.current.get(src).copied() else {
+                        continue;
+                    };
+                    let Some(slot) = frame.get_mut(dst) else {
+                        return mochi_user_syscall::ERANGE as u32;
+                    };
+                    *slot = pixel;
                 }
             }
         }
@@ -651,14 +703,35 @@ fn handle_request(
                 }
                 surface.awaiting_buffer = false;
                 for y in 0..height as usize {
+                    let Some(src_row) = y.checked_mul(row_bytes) else {
+                        put_u32(&mut reply, 0, mochi_user_syscall::ERANGE as u32);
+                        return reply;
+                    };
+                    let Some(dst_row) = y.checked_mul(width as usize) else {
+                        put_u32(&mut reply, 0, mochi_user_syscall::ERANGE as u32);
+                        return reply;
+                    };
                     for x in 0..width as usize {
-                        let src = 28 + y * row_bytes + x * 4;
-                        surface.pending[y * width as usize + x] = u32::from_le_bytes([
-                            request[src],
-                            request[src + 1],
-                            request[src + 2],
-                            request[src + 3],
-                        ]);
+                        let Some(src) = src_row
+                            .checked_add(x.saturating_mul(4))
+                            .and_then(|offset| offset.checked_add(28))
+                        else {
+                            put_u32(&mut reply, 0, mochi_user_syscall::ERANGE as u32);
+                            return reply;
+                        };
+                        let Some(pixel) = read_pixel(request, src) else {
+                            put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32);
+                            return reply;
+                        };
+                        let Some(dst) = dst_row.checked_add(x) else {
+                            put_u32(&mut reply, 0, mochi_user_syscall::ERANGE as u32);
+                            return reply;
+                        };
+                        let Some(slot) = surface.pending.get_mut(dst) else {
+                            put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32);
+                            return reply;
+                        };
+                        *slot = pixel;
                     }
                 }
             }

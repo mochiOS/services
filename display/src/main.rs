@@ -33,6 +33,11 @@ fn read_u32(buf: &[u8], offset: usize) -> Option<u32> {
     Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
+fn read_pixel(buf: &[u8], offset: usize) -> Option<u32> {
+    let bytes = buf.get(offset..offset.checked_add(4)?)?;
+    Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
 fn page_align_up(value: u64) -> Option<u64> {
     value.checked_add(0xfff).map(|v| v & !0xfff)
 }
@@ -107,17 +112,36 @@ fn present_pixels(
 
     let fb_offset = (info.addr & 0xfff) as usize;
     let fb = (FB_VIRT as usize + fb_offset) as *mut u32;
-    let pixels = &pixels[..needed];
+    let Some(pixels) = pixels.get(..needed) else {
+        return mochi_user_syscall::EINVAL as u32;
+    };
     for y in 0..target_height {
-        let src_y = y * height as usize / target_height;
-        let src_row = &pixels[src_y * row_bytes..src_y * row_bytes + stride as usize * 4];
+        let Some(scaled_y) = y.checked_mul(height as usize) else {
+            return mochi_user_syscall::ERANGE as u32;
+        };
+        let src_y = scaled_y / target_height;
+        let Some(src_row) = src_y.checked_mul(row_bytes) else {
+            return mochi_user_syscall::ERANGE as u32;
+        };
+        let Some(dest_row) = y.checked_mul(dest_stride) else {
+            return mochi_user_syscall::ERANGE as u32;
+        };
         for x in 0..target_width {
-            let src_x = x * width as usize / target_width;
-            let i = src_x * 4;
-            let pixel =
-                u32::from_le_bytes([src_row[i], src_row[i + 1], src_row[i + 2], src_row[i + 3]]);
+            let Some(scaled_x) = x.checked_mul(width as usize) else {
+                return mochi_user_syscall::ERANGE as u32;
+            };
+            let src_x = scaled_x / target_width;
+            let Some(src_offset) = src_row.checked_add(src_x.saturating_mul(4)) else {
+                return mochi_user_syscall::ERANGE as u32;
+            };
+            let Some(pixel) = read_pixel(pixels, src_offset) else {
+                return mochi_user_syscall::EINVAL as u32;
+            };
+            let Some(dest_offset) = dest_row.checked_add(x) else {
+                return mochi_user_syscall::ERANGE as u32;
+            };
             unsafe {
-                fb.add(y * dest_stride + x).write_volatile(pixel);
+                fb.add(dest_offset).write_volatile(pixel);
             }
         }
     }
