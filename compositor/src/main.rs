@@ -209,6 +209,9 @@ fn resize_buffer(buffer: &mut Vec<u32>, width: u32, height: u32) -> bool {
         return false;
     };
     buffer.clear();
+    if buffer.capacity() < len && buffer.try_reserve_exact(len - buffer.capacity()).is_err() {
+        return false;
+    }
     buffer.resize(len, 0);
     true
 }
@@ -582,15 +585,6 @@ fn handle_request(
             surfaces[index].y = y;
             surfaces[index].width = width;
             surfaces[index].height = height;
-            if !resize_buffer(&mut surfaces[index].pending, width, height)
-                || !resize_buffer(&mut surfaces[index].current, width, height)
-            {
-                surfaces[index] = Surface::empty();
-                put_u32(&mut reply, 0, mochi_user_syscall::ENOMEM as u32);
-                return reply;
-            }
-            surfaces[index].pending_len = (width as usize) * (height as usize);
-            surfaces[index].pending_damage = Some(Rect::full(width, height));
             surfaces[index].z = *next_z;
             put_u32(&mut reply, 0, 0);
             reply[4..12].copy_from_slice(&token.to_le_bytes());
@@ -645,15 +639,15 @@ fn handle_request(
             surface.pending_stride = stride;
             surface.pending_len = pixels;
             surface.pending_damage = Some(Rect::full(width, height));
-            if surface.pending.len() != pixels {
-                if !resize_buffer(&mut surface.pending, width, height) {
-                    put_u32(&mut reply, 0, mochi_user_syscall::ENOMEM as u32);
-                    return reply;
-                }
-            }
             if request.len() == 28 {
                 surface.awaiting_buffer = true;
             } else {
+                if surface.pending.len() != pixels
+                    && !resize_buffer(&mut surface.pending, width, height)
+                {
+                    put_u32(&mut reply, 0, mochi_user_syscall::ENOMEM as u32);
+                    return reply;
+                }
                 if request.len() < 28 + needed {
                     put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32);
                     return reply;
