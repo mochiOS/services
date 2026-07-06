@@ -560,7 +560,7 @@ fn handle_request(
                 || width > MAX_DIMENSION
                 || height > MAX_DIMENSION
             {
-                put_u32(&mut reply, 0, mochi_user_syscall::EACCES as u32);
+                put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32);
                 return reply;
             }
             let Some(index) = surfaces.iter().position(|s| !s.live) else {
