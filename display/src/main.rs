@@ -1,9 +1,6 @@
 #![no_std]
 #![no_main]
 
-extern crate alloc;
-
-use alloc::vec;
 use core::arch::global_asm;
 use mochi_user_platform as platform;
 
@@ -146,6 +143,41 @@ fn present_inline(info: &platform::memory::FramebufferInfo, request: &[u8]) -> u
     present_pixels(info, width, height, stride, format, &request[20..])
 }
 
+fn present_shared(
+    info: &platform::memory::FramebufferInfo,
+    mapped_addr: u64,
+    total: u64,
+    width: u32,
+    height: u32,
+    stride: u32,
+    format: u32,
+) -> u32 {
+    if mapped_addr == 0
+        || format != PIXEL_FORMAT_XRGB8888
+        || width == 0
+        || height == 0
+        || stride < width
+        || width > info.width
+        || height > info.height
+    {
+        return mochi_user_syscall::EINVAL as u32;
+    }
+    let Some(row_bytes) = (stride as usize).checked_mul(4) else {
+        return mochi_user_syscall::EINVAL as u32;
+    };
+    let Some(needed) = row_bytes.checked_mul(height as usize) else {
+        return mochi_user_syscall::EINVAL as u32;
+    };
+    let Ok(total) = usize::try_from(total) else {
+        return mochi_user_syscall::EINVAL as u32;
+    };
+    if total < needed {
+        return mochi_user_syscall::EINVAL as u32;
+    }
+    let pixels = unsafe { core::slice::from_raw_parts(mapped_addr as *const u8, needed) };
+    present_pixels(info, width, height, stride, format, pixels)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn service_main(sp: *const usize) -> ! {
     unsafe {
@@ -156,7 +188,7 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         Ok(endpoint) => endpoint,
         Err(_) => platform::process::exit(1),
     };
-    let mut buf = vec![0u8; 4128];
+    let mut buf = [0u8; 4128];
     let mut pending_present: Option<(u64, u32, u32, u32, u32)> = None;
     loop {
         let Ok(msg) = platform::ipc::wait(endpoint, &mut buf) else {
@@ -175,10 +207,8 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
                         buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
                     ]);
                     let info = platform::memory::framebuffer_info().unwrap_or_default();
-                    let pixels = unsafe {
-                        core::slice::from_raw_parts(mapped_addr as *const u8, total as usize)
-                    };
-                    let _ = present_pixels(&info, width, height, stride, format, pixels);
+                    let _ =
+                        present_shared(&info, mapped_addr, total, width, height, stride, format);
                     pending_present = None;
                     continue;
                 }
