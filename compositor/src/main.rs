@@ -53,6 +53,7 @@ const MAX_SHARED_PAGES: usize = 128;
 const MAX_SHARED_BYTES: usize = MAX_SHARED_PAGES * PAGE_SIZE;
 const MAX_SHARED_PIXELS: usize = MAX_SHARED_BYTES / 4;
 const MAX_DIMENSION: u32 = 4096;
+const IDLE_CLEANUP_YIELDS: u32 = 64;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct ClientId(u64);
@@ -242,6 +243,26 @@ fn read_u64(buf: &[u8], offset: usize) -> Option<u64> {
     ]))
 }
 
+fn getrandom_u64() -> Option<u64> {
+    let mut bytes = [0u8; 8];
+    let len = mochi_user_syscall::call3(
+        mochi_user_syscall::SyscallNumber::Getrandom,
+        bytes.as_mut_ptr() as u64,
+        bytes.len() as u64,
+        0,
+    )
+    .ok()?;
+    if len == bytes.len() as u64 {
+        Some(u64::from_ne_bytes(bytes))
+    } else {
+        None
+    }
+}
+
+fn sleep_one_tick() {
+    let _ = mochi_user_syscall::call1(mochi_user_syscall::SyscallNumber::Sleep, 1);
+}
+
 fn put_u32(out: &mut [u8], offset: usize, value: u32) {
     out[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
@@ -408,6 +429,39 @@ fn cleanup_client(
     {
         *record = Client::default();
     }
+}
+
+fn cleanup_dead_clients(
+    clients: &mut [Client],
+    surfaces: &mut [Surface],
+    pointer_focus: &mut Option<usize>,
+    keyboard_focus: &mut Option<usize>,
+) -> bool {
+    let mut changed = false;
+    for index in 0..clients.len() {
+        let client = clients[index];
+        if client.live && !platform::ipc::endpoint_alive(client.sender) {
+            cleanup_client(clients, surfaces, client.id, pointer_focus, keyboard_focus);
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn generate_surface_token(surfaces: &[Surface]) -> Result<u64, u32> {
+    for _ in 0..16 {
+        let Some(token) = getrandom_u64() else {
+            return Err(errno_status(mochi_user_syscall::EIO));
+        };
+        if token != 0
+            && surfaces
+                .iter()
+                .all(|surface| !surface.live || surface.token != token)
+        {
+            return Ok(token);
+        }
+    }
+    Err(errno_status(mochi_user_syscall::EAGAIN))
 }
 
 fn surface_extent(surface: &Surface) -> (u32, u32) {
@@ -877,7 +931,6 @@ fn composite_and_present(
 
 fn handle_request(
     surfaces: &mut [Surface],
-    next_token: &mut u64,
     next_z: &mut u32,
     next_window_index: &mut u32,
     pointer_focus: &mut Option<usize>,
@@ -966,9 +1019,14 @@ fn handle_request(
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ENOSPC));
                 return reply;
             };
-            *next_token = next_token.wrapping_add(0x9e37_79b9_7f4a_7c15);
             *next_z = next_z.wrapping_add(1);
-            let token = *next_token ^ client.0.rotate_left(17);
+            let token = match generate_surface_token(surfaces) {
+                Ok(token) => token,
+                Err(status) => {
+                    put_u32(&mut reply, 0, status);
+                    return reply;
+                }
+            };
             let handle = SurfaceHandle(token);
             let (x, y) = if let Some(parent_handle) = parent {
                 let Some(parent_index) = surfaces
@@ -1287,20 +1345,45 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
     let mut clients = [Client::default(); MAX_CLIENTS];
     let mut next_client_id = 0u64;
     let mut surfaces: Vec<Surface> = vec![Surface::empty(); MAX_SURFACES];
-    let mut next_token = 0x434f_4d50_5355_5246u64;
     let mut next_z = 0u32;
     let mut next_window_index = 0u32;
     let mut pointer_x = 0i32;
     let mut pointer_y = 0i32;
     let mut pointer_focus = None;
     let mut keyboard_focus = None;
+    let mut idle_cleanup_ticks = 0u32;
     loop {
         let buf = unsafe {
             core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(IPC_BUF).cast::<u8>(), 4128)
         };
-        let Ok(msg) = platform::ipc::wait(endpoint, buf) else {
-            platform::thread::yield_now();
-            continue;
+        let msg = match platform::ipc::try_wait(buf) {
+            Ok(msg) => {
+                idle_cleanup_ticks = 0;
+                msg
+            }
+            Err(_) => {
+                idle_cleanup_ticks = idle_cleanup_ticks.wrapping_add(1);
+                if idle_cleanup_ticks >= IDLE_CLEANUP_YIELDS {
+                    idle_cleanup_ticks = 0;
+                    if cleanup_dead_clients(
+                        &mut clients,
+                        &mut surfaces,
+                        &mut pointer_focus,
+                        &mut keyboard_focus,
+                    ) {
+                        let _ = composite_and_present(
+                            &surfaces,
+                            display_tid,
+                            display_width,
+                            display_height,
+                            display_stride,
+                            display_format,
+                        );
+                    }
+                }
+                sleep_one_tick();
+                continue;
+            }
         };
         let sender = msg >> 32;
         let len = (msg & 0xffff_ffff) as usize;
@@ -1360,7 +1443,6 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         }
         let reply = handle_request(
             &mut surfaces,
-            &mut next_token,
             &mut next_z,
             &mut next_window_index,
             &mut pointer_focus,
