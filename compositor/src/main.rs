@@ -230,7 +230,6 @@ fn read_pixel(buf: &[u8], offset: usize) -> Option<u32> {
 static mut DISPLAY_REQ_BUF: [u8; 20] = [0; 20];
 static mut DISPLAY_REP_BUF: [u8; 32] = [0; 32];
 static mut DISPLAY_PRESENT_REQ: [u8; 20] = [0; 20];
-static mut DISPLAY_PRESENT_REP: [u8; 8] = [0; 8];
 static mut INPUT_SUBSCRIBE_REQ: [u8; 16] = [0; 16];
 static mut INPUT_SUBSCRIBE_REP: [u8; 8] = [0; 8];
 static mut CLIENT_REPLY_BUF: [u8; 16] = [0; 16];
@@ -917,30 +916,11 @@ fn composite_and_present(
     put_u32(request, 8, frame_h as u32);
     put_u32(request, 12, frame_w as u32);
     put_u32(request, 16, PIXEL_FORMAT_XRGB8888);
-    let reply = unsafe {
-        core::slice::from_raw_parts_mut(
-            core::ptr::addr_of_mut!(DISPLAY_PRESENT_REP).cast::<u8>(),
-            8,
-        )
-    };
-    reply.fill(0);
-    let Ok(msg) = platform::ipc::call(display_tid, request, reply) else {
+    let reply = &mut [];
+    let Ok(_msg) = platform::ipc::call(display_tid, request, reply) else {
         return errno_status(mochi_user_syscall::EIO);
     };
-    if (msg & 0xffff_ffff) < 4 {
-        return errno_status(mochi_user_syscall::EIO);
-    }
-    let status = read_u32(reply, 0).unwrap_or(errno_status(mochi_user_syscall::EIO));
-    if status != 0 {
-        platform::println!(
-            "compositor.service: display present failed status={} frame={}x{} pages={}",
-            status,
-            frame_w,
-            frame_h,
-            page_count
-        );
-    }
-    status
+    0
 }
 
 fn handle_request(
