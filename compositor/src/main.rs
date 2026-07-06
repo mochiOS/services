@@ -483,8 +483,7 @@ fn composite_and_present(
     if page_count == 0 || page_count > MAX_SHARED_PAGES {
         return mochi_user_syscall::ERANGE as u32;
     }
-    let mut phys_pages = vec![0u64; page_count];
-    let virt = match platform::memory::alloc_shared_pages(&mut phys_pages) {
+    let virt = match platform::memory::alloc_shared_page_count(page_count) {
         Ok(virt) => virt,
         Err(err) => return errno_from_platform(err),
     };
@@ -538,7 +537,7 @@ fn composite_and_present(
     if status != 0 {
         return status;
     }
-    match platform::ipc::send_pages(display_tid, &phys_pages, virt) {
+    match platform::ipc::send_pages(display_tid, &vec![0u64; page_count], virt) {
         Ok(_) => 0,
         Err(err) => errno_from_platform(err),
     }
