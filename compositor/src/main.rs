@@ -234,6 +234,7 @@ static mut DISPLAY_PRESENT_REP: [u8; 8] = [0; 8];
 static mut INPUT_SUBSCRIBE_REQ: [u8; 16] = [0; 16];
 static mut INPUT_SUBSCRIBE_REP: [u8; 8] = [0; 8];
 static mut CLIENT_REPLY_BUF: [u8; 16] = [0; 16];
+static mut TOKEN_RANDOM_BUF: [u8; 8] = [0; 8];
 static mut IPC_BUF: [u8; 4128] = [0; 4128];
 
 fn read_u64(buf: &[u8], offset: usize) -> Option<u64> {
@@ -244,17 +245,30 @@ fn read_u64(buf: &[u8], offset: usize) -> Option<u64> {
 }
 
 fn getrandom_u64() -> Option<u64> {
-    let mut bytes = [0u8; 8];
-    let len = mochi_user_syscall::call3(
+    let bytes = unsafe {
+        core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(TOKEN_RANDOM_BUF).cast::<u8>(), 8)
+    };
+    let len = match mochi_user_syscall::call3(
         mochi_user_syscall::SyscallNumber::Getrandom,
         bytes.as_mut_ptr() as u64,
         bytes.len() as u64,
         0,
-    )
-    .ok()?;
+    ) {
+        Ok(len) => len,
+        Err(err) => {
+            platform::println!(
+                "compositor.service: getrandom failed errno={}",
+                err.errno().unwrap_or(0)
+            );
+            return None;
+        }
+    };
     if len == bytes.len() as u64 {
-        Some(u64::from_ne_bytes(bytes))
+        Some(u64::from_ne_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]))
     } else {
+        platform::println!("compositor.service: getrandom short read len={}", len);
         None
     }
 }
