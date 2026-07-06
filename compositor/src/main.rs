@@ -45,11 +45,11 @@ const ROLE_TOPLEVEL: u32 = 1;
 const ROLE_POPUP: u32 = 2;
 const PIXEL_FORMAT_XRGB8888: u32 = 1;
 const MAX_SURFACES: usize = 8;
-const FRAME_W: usize = 32;
-const FRAME_H: usize = 24;
-const FRAME_BYTES: usize = FRAME_W * FRAME_H * 4;
-const MAX_SURFACE_W: u32 = FRAME_W as u32;
-const MAX_SURFACE_H: u32 = FRAME_H as u32;
+const PAGE_SIZE: usize = 4096;
+const MAX_SHARED_PAGES: usize = 128;
+const MAX_SHARED_BYTES: usize = MAX_SHARED_PAGES * PAGE_SIZE;
+const MAX_SHARED_PIXELS: usize = MAX_SHARED_BYTES / 4;
+const MAX_DIMENSION: u32 = 4096;
 
 #[allow(dead_code)]
 #[derive(Clone, Copy, Default)]
@@ -86,6 +86,7 @@ struct Surface {
     pending_height: u32,
     pending_stride: u32,
     pending_len: usize,
+    awaiting_buffer: bool,
     pending_damage: Option<Rect>,
     pending: Vec<u32>,
     current_width: u32,
@@ -111,6 +112,7 @@ impl Surface {
             pending_height: 0,
             pending_stride: 0,
             pending_len: 0,
+            awaiting_buffer: false,
             pending_damage: None,
             pending: Vec::new(),
             current_width: 0,
@@ -212,6 +214,30 @@ fn resize_buffer(buffer: &mut Vec<u32>, width: u32, height: u32) -> bool {
     true
 }
 
+fn shared_page_count(byte_len: usize) -> Option<usize> {
+    byte_len
+        .checked_add(PAGE_SIZE - 1)
+        .map(|len| len / PAGE_SIZE)
+}
+
+fn choose_frame_size(display_width: u32, display_height: u32) -> Option<(usize, usize)> {
+    if display_width == 0 || display_height == 0 {
+        return None;
+    }
+    let width = display_width.min(MAX_DIMENSION) as usize;
+    let height = display_height.min(MAX_DIMENSION) as usize;
+    if width.checked_mul(height)? <= MAX_SHARED_PIXELS {
+        return Some((width, height));
+    }
+    let width = width.min(512);
+    let height = height.min(MAX_SHARED_PIXELS / width).max(1);
+    Some((width, height))
+}
+
+fn errno_from_platform(err: mochi_user_syscall::SysError) -> u32 {
+    err.errno().unwrap_or(mochi_user_syscall::EIO) as u32
+}
+
 fn send_configure(surface: &Surface) {
     if surface.event_endpoint == 0 {
         return;
@@ -232,6 +258,60 @@ fn send_frame_done(surface: &Surface) {
     let mut event = [0u8; 20];
     put_u32(&mut event, 0, EVENT_FRAME_DONE);
     let _ = platform::ipc::send(surface.event_endpoint, &event);
+}
+
+fn handle_shared_buffer(
+    surfaces: &mut [Surface],
+    sender: u64,
+    mapped_addr: u64,
+    total: u64,
+) -> bool {
+    let Some(index) = surfaces
+        .iter()
+        .position(|surface| surface.live && surface.owner == sender && surface.awaiting_buffer)
+    else {
+        return false;
+    };
+    let surface = &mut surfaces[index];
+    let width = surface.pending_width;
+    let height = surface.pending_height;
+    let stride = surface.pending_stride;
+    if width == 0 || height == 0 || stride < width {
+        surface.awaiting_buffer = false;
+        return true;
+    }
+    let Some(row_bytes) = (stride as usize).checked_mul(4) else {
+        surface.awaiting_buffer = false;
+        return true;
+    };
+    let Some(needed_bytes) = row_bytes.checked_mul(height as usize) else {
+        surface.awaiting_buffer = false;
+        return true;
+    };
+    if total as usize > MAX_SHARED_BYTES || (total as usize) < needed_bytes {
+        surface.awaiting_buffer = false;
+        return true;
+    }
+    let Some(pixels) = (width as usize).checked_mul(height as usize) else {
+        surface.awaiting_buffer = false;
+        return true;
+    };
+    if surface.pending.len() != pixels && !resize_buffer(&mut surface.pending, width, height) {
+        surface.awaiting_buffer = false;
+        return true;
+    }
+    let bytes = unsafe { core::slice::from_raw_parts(mapped_addr as *const u8, needed_bytes) };
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            let src = y * row_bytes + x * 4;
+            surface.pending[y * width as usize + x] =
+                u32::from_le_bytes([bytes[src], bytes[src + 1], bytes[src + 2], bytes[src + 3]]);
+        }
+    }
+    surface.pending_len = pixels;
+    surface.pending_damage = Some(Rect::full(width, height));
+    surface.awaiting_buffer = false;
+    true
 }
 
 fn hit_test(surfaces: &[Surface], x: i32, y: i32) -> Option<usize> {
@@ -380,19 +460,39 @@ fn handle_input_event(
 fn composite_and_present(
     surfaces: &[Surface],
     display_tid: u64,
-    _display_width: u32,
-    _display_height: u32,
+    display_width: u32,
+    display_height: u32,
     _display_stride: u32,
     display_format: u32,
 ) -> u32 {
     if display_format != PIXEL_FORMAT_XRGB8888 {
         return mochi_user_syscall::ENOTSUP as u32;
     }
-    let mut frame = vec![0u32; FRAME_W * FRAME_H];
-    for y in 0..FRAME_H {
-        for x in 0..FRAME_W {
+    let Some((frame_w, frame_h)) = choose_frame_size(display_width, display_height) else {
+        return mochi_user_syscall::ERANGE as u32;
+    };
+    let Some(frame_pixels) = frame_w.checked_mul(frame_h) else {
+        return mochi_user_syscall::ERANGE as u32;
+    };
+    let Some(frame_bytes) = frame_pixels.checked_mul(4) else {
+        return mochi_user_syscall::ERANGE as u32;
+    };
+    let Some(page_count) = shared_page_count(frame_bytes) else {
+        return mochi_user_syscall::ERANGE as u32;
+    };
+    if page_count == 0 || page_count > MAX_SHARED_PAGES {
+        return mochi_user_syscall::ERANGE as u32;
+    }
+    let mut phys_pages = vec![0u64; page_count];
+    let virt = match platform::memory::alloc_shared_pages(&mut phys_pages) {
+        Ok(virt) => virt,
+        Err(err) => return errno_from_platform(err),
+    };
+    let frame = unsafe { core::slice::from_raw_parts_mut(virt as *mut u32, frame_pixels) };
+    for y in 0..frame_h {
+        for x in 0..frame_w {
             let shade = 0x0020_2630u32 + (((x as u32) ^ (y as u32)) & 0x7);
-            frame[y * FRAME_W + x] = 0xff00_0000 | shade;
+            frame[y * frame_w + x] = 0xff00_0000 | shade;
         }
     }
     for surface in surfaces.iter().filter(|s| s.live) {
@@ -406,30 +506,27 @@ fn composite_and_present(
         }
         for sy in 0..surface.current_height as usize {
             let dy = surface.y + sy as i32;
-            if dy < 0 || dy >= FRAME_H as i32 {
+            if dy < 0 || dy >= frame_h as i32 {
                 continue;
             }
             for sx in 0..surface.current_width as usize {
                 let dx = surface.x + sx as i32;
-                if dx < 0 || dx >= FRAME_W as i32 {
+                if dx < 0 || dx >= frame_w as i32 {
                     continue;
                 }
                 let src = sy * surface.current_stride as usize + sx;
                 if src < surface.current.len() {
-                    frame[dy as usize * FRAME_W + dx as usize] = surface.current[src];
+                    frame[dy as usize * frame_w + dx as usize] = surface.current[src];
                 }
             }
         }
     }
-    let mut request = vec![0u8; 20 + FRAME_BYTES];
+    let mut request = [0u8; 20];
     put_u32(&mut request, 0, OP_DISPLAY_PRESENT);
-    put_u32(&mut request, 4, FRAME_W as u32);
-    put_u32(&mut request, 8, FRAME_H as u32);
-    put_u32(&mut request, 12, FRAME_W as u32);
+    put_u32(&mut request, 4, frame_w as u32);
+    put_u32(&mut request, 8, frame_h as u32);
+    put_u32(&mut request, 12, frame_w as u32);
     put_u32(&mut request, 16, PIXEL_FORMAT_XRGB8888);
-    for (i, pixel) in frame.iter().enumerate() {
-        request[20 + i * 4..24 + i * 4].copy_from_slice(&pixel.to_le_bytes());
-    }
     let mut reply = [0u8; 8];
     let Ok(msg) = platform::ipc::call(display_tid, &request, &mut reply) else {
         return mochi_user_syscall::EIO as u32;
@@ -437,7 +534,14 @@ fn composite_and_present(
     if (msg & 0xffff_ffff) < 4 {
         return mochi_user_syscall::EIO as u32;
     }
-    read_u32(&reply, 0).unwrap_or(mochi_user_syscall::EIO as u32)
+    let status = read_u32(&reply, 0).unwrap_or(mochi_user_syscall::EIO as u32);
+    if status != 0 {
+        return status;
+    }
+    match platform::ipc::send_pages(display_tid, &phys_pages, virt) {
+        Ok(_) => 0,
+        Err(err) => errno_from_platform(err),
+    }
 }
 
 fn handle_request(
@@ -468,8 +572,8 @@ fn handle_request(
             if !matches!(role, ROLE_TOPLEVEL | ROLE_POPUP)
                 || width == 0
                 || height == 0
-                || width > MAX_SURFACE_W
-                || height > MAX_SURFACE_H
+                || width > MAX_DIMENSION
+                || height > MAX_DIMENSION
             {
                 put_u32(&mut reply, 0, mochi_user_syscall::EACCES as u32);
                 return reply;
@@ -521,8 +625,8 @@ fn handle_request(
                 || width == 0
                 || height == 0
                 || stride < width
-                || width > MAX_SURFACE_W
-                || height > MAX_SURFACE_H
+                || width > MAX_DIMENSION
+                || height > MAX_DIMENSION
             {
                 put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32);
                 return reply;
@@ -547,10 +651,6 @@ fn handle_request(
                 put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32);
                 return reply;
             };
-            if request.len() < 28 + needed {
-                put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32);
-                return reply;
-            }
             let Some(pixels) = (width as usize).checked_mul(height as usize) else {
                 put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32);
                 return reply;
@@ -567,15 +667,24 @@ fn handle_request(
                     return reply;
                 }
             }
-            for y in 0..height as usize {
-                for x in 0..width as usize {
-                    let src = 28 + y * row_bytes + x * 4;
-                    surface.pending[y * width as usize + x] = u32::from_le_bytes([
-                        request[src],
-                        request[src + 1],
-                        request[src + 2],
-                        request[src + 3],
-                    ]);
+            if request.len() == 28 {
+                surface.awaiting_buffer = true;
+            } else {
+                if request.len() < 28 + needed {
+                    put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32);
+                    return reply;
+                }
+                surface.awaiting_buffer = false;
+                for y in 0..height as usize {
+                    for x in 0..width as usize {
+                        let src = 28 + y * row_bytes + x * 4;
+                        surface.pending[y * width as usize + x] = u32::from_le_bytes([
+                            request[src],
+                            request[src + 1],
+                            request[src + 2],
+                            request[src + 3],
+                        ]);
+                    }
                 }
             }
             put_u32(&mut reply, 0, 0);
@@ -761,6 +870,17 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         };
         let sender = msg >> 32;
         let len = (msg & 0xffff_ffff) as usize;
+        if len == 16 {
+            let mapped_addr = u64::from_le_bytes([
+                buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+            ]);
+            let total = u64::from_le_bytes([
+                buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
+            ]);
+            if handle_shared_buffer(&mut surfaces, sender, mapped_addr, total) {
+                continue;
+            }
+        }
         if len == core::mem::size_of::<platform::input::InputEvent>() {
             let event = unsafe {
                 core::ptr::read_unaligned(buf.as_ptr().cast::<platform::input::InputEvent>())
