@@ -862,14 +862,19 @@ fn handle_request(
                 surfaces[index].x = x;
                 surfaces[index].y = y;
             }
-            let status = composite_and_present(
-                surfaces,
-                display_tid,
-                display_width,
-                display_height,
-                display_stride,
-                display_format,
-            );
+            let status =
+                if surfaces[index].current_width != 0 && surfaces[index].current_height != 0 {
+                    composite_and_present(
+                        surfaces,
+                        display_tid,
+                        display_width,
+                        display_height,
+                        display_stride,
+                        display_format,
+                    )
+                } else {
+                    0
+                };
             put_u32(&mut reply, 0, status);
         }
         OP_DESTROY_SURFACE => {

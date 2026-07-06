@@ -239,7 +239,10 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         }
         if len < 4 || len > buf.len() {
             let reply = unsafe {
-                core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(IPC_REPLY_4).cast::<u8>(), 4)
+                core::slice::from_raw_parts_mut(
+                    core::ptr::addr_of_mut!(IPC_REPLY_4).cast::<u8>(),
+                    4,
+                )
             };
             put_u32(reply, 0, mochi_user_syscall::EINVAL as u32);
             let _ = platform::ipc::reply(sender, reply);
@@ -278,14 +281,20 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
                     present_inline(&info, &buf[..len])
                 };
                 let reply = unsafe {
-                    core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(IPC_REPLY_4).cast::<u8>(), 4)
+                    core::slice::from_raw_parts_mut(
+                        core::ptr::addr_of_mut!(IPC_REPLY_4).cast::<u8>(),
+                        4,
+                    )
                 };
                 put_u32(reply, 0, status);
                 let _ = platform::ipc::reply(sender, reply);
             }
             _ => {
                 let reply = unsafe {
-                    core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(IPC_REPLY_4).cast::<u8>(), 4)
+                    core::slice::from_raw_parts_mut(
+                        core::ptr::addr_of_mut!(IPC_REPLY_4).cast::<u8>(),
+                        4,
+                    )
                 };
                 put_u32(reply, 0, mochi_user_syscall::EINVAL as u32);
                 let _ = platform::ipc::reply(sender, reply);
