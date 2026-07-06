@@ -1,6 +1,9 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+use alloc::vec;
 use core::arch::global_asm;
 use mochi_user_platform as platform;
 
@@ -212,7 +215,7 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         Ok(endpoint) => endpoint,
         Err(_) => platform::process::exit(1),
     };
-    let mut buf = [0u8; 4128];
+    let mut buf = vec![0u8; 4128];
     let mut shared_buffer: Option<(u64, u64)> = None;
     loop {
         let Ok(msg) = platform::ipc::wait(endpoint, &mut buf) else {
@@ -232,20 +235,22 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             continue;
         }
         if len < 4 || len > buf.len() {
-            let _ = platform::ipc::reply(sender, &mochi_user_syscall::EINVAL.to_le_bytes());
+            let mut reply = vec![0u8; 4];
+            put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32);
+            let _ = platform::ipc::reply(sender, &reply);
             continue;
         }
         let opcode = read_u32(&buf, 0).unwrap_or(0);
         let info = platform::memory::framebuffer_info().unwrap_or_default();
-        let mut reply = [0u8; 32];
         match opcode {
             OP_GET_INFO => {
+                let mut reply = vec![0u8; 20];
                 put_u32(&mut reply, 0, 0);
                 put_u32(&mut reply, 4, info.width);
                 put_u32(&mut reply, 8, info.height);
                 put_u32(&mut reply, 12, info.stride);
                 put_u32(&mut reply, 16, PIXEL_FORMAT_XRGB8888);
-                let _ = platform::ipc::reply(sender, &reply[..20]);
+                let _ = platform::ipc::reply(sender, &reply);
             }
             OP_PRESENT => {
                 let status = if len == 20 {
@@ -262,10 +267,14 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
                 } else {
                     present_inline(&info, &buf[..len])
                 };
-                let _ = platform::ipc::reply(sender, &status.to_le_bytes());
+                let mut reply = vec![0u8; 4];
+                put_u32(&mut reply, 0, status);
+                let _ = platform::ipc::reply(sender, &reply);
             }
             _ => {
-                let _ = platform::ipc::reply(sender, &mochi_user_syscall::EINVAL.to_le_bytes());
+                let mut reply = vec![0u8; 4];
+                put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32);
+                let _ = platform::ipc::reply(sender, &reply);
             }
         }
     }

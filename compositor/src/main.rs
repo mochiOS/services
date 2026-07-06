@@ -165,9 +165,9 @@ fn decode_display_info(reply: &[u8]) -> Option<(u32, u32, u32, u32)> {
 }
 
 fn display_request_info(display_tid: u64) -> (u32, u32, u32, u32) {
-    let mut req = [0u8; 4];
+    let mut req = vec![0u8; 4];
     put_u32(&mut req, 0, OP_DISPLAY_GET_INFO);
-    let mut reply = [0u8; 32];
+    let mut reply = vec![0u8; 32];
     if let Ok(msg) = platform::ipc::call(display_tid, &req, &mut reply) {
         let len = (msg & 0xffff_ffff) as usize;
         if let Some(info) = decode_display_info(&reply[..len.min(reply.len())]) {
@@ -564,13 +564,13 @@ fn composite_and_present(
     if let Err(err) = platform::ipc::send_page_count(display_tid, page_count, virt) {
         return errno_from_platform(err);
     }
-    let mut request = [0u8; 20];
+    let mut request = vec![0u8; 20];
     put_u32(&mut request, 0, OP_DISPLAY_PRESENT);
     put_u32(&mut request, 4, frame_w as u32);
     put_u32(&mut request, 8, frame_h as u32);
     put_u32(&mut request, 12, frame_w as u32);
     put_u32(&mut request, 16, PIXEL_FORMAT_XRGB8888);
-    let mut reply = [0u8; 8];
+    let mut reply = vec![0u8; 8];
     let Ok(msg) = platform::ipc::call(display_tid, &request, &mut reply) else {
         return mochi_user_syscall::EIO as u32;
     };
@@ -891,13 +891,11 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         platform::process::exit(1);
     };
     if let Some(input_tid) = find_service(INPUT_SERVICE_NAME) {
-        let subscribe = platform::input::SubscribeRequest {
-            opcode: platform::input::SUBSCRIBE_OPCODE,
-            reserved: 0,
-            endpoint,
-        };
-        let mut reply = [0u8; 8];
-        let _ = platform::ipc::call(input_tid, platform::input::bytes_of(&subscribe), &mut reply);
+        let mut subscribe = vec![0u8; 16];
+        put_u32(&mut subscribe, 0, platform::input::SUBSCRIBE_OPCODE);
+        subscribe[8..16].copy_from_slice(&endpoint.to_le_bytes());
+        let mut reply = vec![0u8; 8];
+        let _ = platform::ipc::call(input_tid, &subscribe, &mut reply);
     }
     let (display_width, display_height, display_stride, display_format) =
         display_request_info(display_tid);
@@ -943,7 +941,9 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             continue;
         }
         if len == 0 || len > buf.len() {
-            let _ = platform::ipc::reply(sender, &mochi_user_syscall::EINVAL.to_le_bytes());
+            let mut reply = vec![0u8; 4];
+            put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32);
+            let _ = platform::ipc::reply(sender, &reply);
             continue;
         }
         let reply = handle_request(
@@ -960,6 +960,8 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             display_stride,
             display_format,
         );
-        let _ = platform::ipc::reply(sender, &reply);
+        let mut reply_buf = vec![0u8; reply.len()];
+        reply_buf.copy_from_slice(&reply);
+        let _ = platform::ipc::reply(sender, &reply_buf);
     }
 }
