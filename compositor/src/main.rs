@@ -153,6 +153,15 @@ fn put_u32(out: &mut [u8], offset: usize, value: u32) {
     out[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
 
+fn errno_status(errno: u64) -> u32 {
+    let signed = errno as i64;
+    if signed < 0 {
+        signed.wrapping_neg() as u32
+    } else {
+        errno as u32
+    }
+}
+
 fn put_i32(out: &mut [u8], offset: usize, value: i32) {
     out[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
@@ -257,7 +266,7 @@ fn choose_frame_size(display_width: u32, display_height: u32) -> Option<(usize, 
 }
 
 fn errno_from_platform(err: mochi_user_syscall::SysError) -> u32 {
-    err.errno().unwrap_or(mochi_user_syscall::EIO) as u32
+    errno_status(err.errno().unwrap_or(mochi_user_syscall::EIO))
 }
 
 fn send_frame_done(surface: &Surface) {
@@ -501,39 +510,39 @@ fn composite_and_present(
     display_format: u32,
 ) -> u32 {
     if display_format != PIXEL_FORMAT_XRGB8888 {
-        return mochi_user_syscall::ENOTSUP as u32;
+        return errno_status(mochi_user_syscall::ENOTSUP);
     }
     let Some((frame_w, frame_h)) = choose_frame_size(display_width, display_height) else {
-        return mochi_user_syscall::ERANGE as u32;
+        return errno_status(mochi_user_syscall::ERANGE);
     };
     let Some(frame_pixels) = frame_w.checked_mul(frame_h) else {
-        return mochi_user_syscall::ERANGE as u32;
+        return errno_status(mochi_user_syscall::ERANGE);
     };
     let Some(frame_bytes) = frame_pixels.checked_mul(4) else {
-        return mochi_user_syscall::ERANGE as u32;
+        return errno_status(mochi_user_syscall::ERANGE);
     };
     let Some(page_count) = shared_page_count(frame_bytes) else {
-        return mochi_user_syscall::ERANGE as u32;
+        return errno_status(mochi_user_syscall::ERANGE);
     };
     if page_count == 0 || page_count > MAX_SHARED_PAGES {
-        return mochi_user_syscall::ERANGE as u32;
+        return errno_status(mochi_user_syscall::ERANGE);
     }
     let virt = match platform::memory::alloc_shared_page_count(page_count) {
         Ok(virt) => virt,
         Err(err) => return errno_from_platform(err),
     };
     if virt == 0 || (virt as usize) & (PAGE_SIZE - 1) != 0 {
-        return mochi_user_syscall::EIO as u32;
+        return errno_status(mochi_user_syscall::EIO);
     }
     let frame = unsafe { core::slice::from_raw_parts_mut(virt as *mut u32, frame_pixels) };
     for y in 0..frame_h {
         let Some(row) = y.checked_mul(frame_w) else {
-            return mochi_user_syscall::ERANGE as u32;
+            return errno_status(mochi_user_syscall::ERANGE);
         };
         for x in 0..frame_w {
             let shade = 0x0020_2630u32 + (((x as u32) ^ (y as u32)) & 0x7);
             let Some(pixel) = frame.get_mut(row + x) else {
-                return mochi_user_syscall::ERANGE as u32;
+                return errno_status(mochi_user_syscall::ERANGE);
             };
             *pixel = 0xff00_0000 | shade;
         }
@@ -563,13 +572,13 @@ fn composite_and_present(
                         .checked_mul(frame_w)
                         .and_then(|row| row.checked_add(dx as usize))
                     else {
-                        return mochi_user_syscall::ERANGE as u32;
+                        return errno_status(mochi_user_syscall::ERANGE);
                     };
                     let Some(pixel) = surface.current.get(src).copied() else {
                         continue;
                     };
                     let Some(slot) = frame.get_mut(dst) else {
-                        return mochi_user_syscall::ERANGE as u32;
+                        return errno_status(mochi_user_syscall::ERANGE);
                     };
                     *slot = pixel;
                 }
@@ -599,12 +608,21 @@ fn composite_and_present(
     };
     reply.fill(0);
     let Ok(msg) = platform::ipc::call(display_tid, request, reply) else {
-        return mochi_user_syscall::EIO as u32;
+        return errno_status(mochi_user_syscall::EIO);
     };
     if (msg & 0xffff_ffff) < 4 {
-        return mochi_user_syscall::EIO as u32;
+        return errno_status(mochi_user_syscall::EIO);
     }
-    let status = read_u32(reply, 0).unwrap_or(mochi_user_syscall::EIO as u32);
+    let status = read_u32(reply, 0).unwrap_or(errno_status(mochi_user_syscall::EIO));
+    if status != 0 {
+        platform::println!(
+            "compositor.service: display present failed status={} frame={}x{} pages={}",
+            status,
+            frame_w,
+            frame_h,
+            page_count
+        );
+    }
     status
 }
 
@@ -624,7 +642,7 @@ fn handle_request(
 ) -> [u8; 16] {
     let mut reply = [0u8; 16];
     let Some(opcode) = read_u32(request, 0) else {
-        put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32);
+        put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
         return reply;
     };
     match opcode {
@@ -639,11 +657,11 @@ fn handle_request(
                 || width > MAX_DIMENSION
                 || height > MAX_DIMENSION
             {
-                put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32);
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                 return reply;
             }
             let Some(index) = surfaces.iter().position(|s| !s.live) else {
-                put_u32(&mut reply, 0, mochi_user_syscall::ENOSPC as u32);
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ENOSPC));
                 return reply;
             };
             *next_token = next_token.wrapping_add(0x9e37_79b9_7f4a_7c15);
@@ -672,7 +690,7 @@ fn handle_request(
             let stride = read_u32(request, 20).unwrap_or(0);
             let format = read_u32(request, 24).unwrap_or(0);
             let Some(index) = surface_index_for(surfaces, sender, token) else {
-                put_u32(&mut reply, 0, mochi_user_syscall::EACCES as u32);
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
                 return reply;
             };
             if format != PIXEL_FORMAT_XRGB8888
@@ -682,31 +700,31 @@ fn handle_request(
                 || width > MAX_DIMENSION
                 || height > MAX_DIMENSION
             {
-                put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32);
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                 return reply;
             }
             let Some(index_width) = surfaces.get(index).map(|surface| surface.width) else {
-                put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32);
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                 return reply;
             };
             let Some(index_height) = surfaces.get(index).map(|surface| surface.height) else {
-                put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32);
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                 return reply;
             };
             if width != index_width || height != index_height {
-                put_u32(&mut reply, 0, mochi_user_syscall::ERANGE as u32);
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ERANGE));
                 return reply;
             }
             let Some(row_bytes) = (stride as usize).checked_mul(4) else {
-                put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32);
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                 return reply;
             };
             let Some(needed) = row_bytes.checked_mul(height as usize) else {
-                put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32);
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                 return reply;
             };
             let Some(pixels) = (width as usize).checked_mul(height as usize) else {
-                put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32);
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                 return reply;
             };
             let surface = &mut surfaces[index];
@@ -721,21 +739,21 @@ fn handle_request(
                 if surface.pending.len() != pixels
                     && !resize_buffer(&mut surface.pending, width, height)
                 {
-                    put_u32(&mut reply, 0, mochi_user_syscall::ENOMEM as u32);
+                    put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ENOMEM));
                     return reply;
                 }
                 if request.len() < 28 + needed {
-                    put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32);
+                    put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                     return reply;
                 }
                 surface.awaiting_buffer = false;
                 for y in 0..height as usize {
                     let Some(src_row) = y.checked_mul(row_bytes) else {
-                        put_u32(&mut reply, 0, mochi_user_syscall::ERANGE as u32);
+                        put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ERANGE));
                         return reply;
                     };
                     let Some(dst_row) = y.checked_mul(width as usize) else {
-                        put_u32(&mut reply, 0, mochi_user_syscall::ERANGE as u32);
+                        put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ERANGE));
                         return reply;
                     };
                     for x in 0..width as usize {
@@ -743,19 +761,19 @@ fn handle_request(
                             .checked_add(x.saturating_mul(4))
                             .and_then(|offset| offset.checked_add(28))
                         else {
-                            put_u32(&mut reply, 0, mochi_user_syscall::ERANGE as u32);
+                            put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ERANGE));
                             return reply;
                         };
                         let Some(pixel) = read_pixel(request, src) else {
-                            put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32);
+                            put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                             return reply;
                         };
                         let Some(dst) = dst_row.checked_add(x) else {
-                            put_u32(&mut reply, 0, mochi_user_syscall::ERANGE as u32);
+                            put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ERANGE));
                             return reply;
                         };
                         let Some(slot) = surface.pending.get_mut(dst) else {
-                            put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32);
+                            put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                             return reply;
                         };
                         *slot = pixel;
@@ -784,13 +802,13 @@ fn handle_request(
                 surfaces[index].pending_damage = damage;
                 put_u32(&mut reply, 0, 0);
             } else {
-                put_u32(&mut reply, 0, mochi_user_syscall::EACCES as u32);
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
             }
         }
         OP_COMMIT => {
             let token = read_u64(request, 4).unwrap_or(0);
             let Some(index) = surface_index_for(surfaces, sender, token) else {
-                put_u32(&mut reply, 0, mochi_user_syscall::EACCES as u32);
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
                 return reply;
             };
             let (pending_width, pending_height, pending_len, pending_stride) = {
@@ -803,19 +821,19 @@ fn handle_request(
                 )
             };
             if pending_width == 0 || pending_len == 0 {
-                put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32);
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                 return reply;
             }
             let Some(needed) = (pending_width as usize).checked_mul(pending_height as usize) else {
-                put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32);
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                 return reply;
             };
             if pending_stride < pending_width {
-                put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32);
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                 return reply;
             }
             if surfaces[index].pending.len() < needed {
-                put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32);
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                 return reply;
             }
             {
@@ -823,7 +841,7 @@ fn handle_request(
                 if surface.current.len() != needed
                     && !resize_buffer(&mut surface.current, pending_width, pending_height)
                 {
-                    put_u32(&mut reply, 0, mochi_user_syscall::ENOMEM as u32);
+                    put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ENOMEM));
                     return reply;
                 }
                 surface.current_width = pending_width;
@@ -843,17 +861,24 @@ fn handle_request(
                 for surface in surfaces.iter().filter(|surface| surface.live) {
                     send_frame_done(surface);
                 }
+            } else {
+                platform::println!(
+                    "compositor.service: commit present failed status={} surface={}x{}",
+                    status,
+                    pending_width,
+                    pending_height
+                );
             }
             put_u32(&mut reply, 0, status);
         }
         OP_SET_POSITION => {
             if request.len() < 12 {
-                put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32);
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                 return reply;
             }
             let token = read_u64(request, 4).unwrap_or(0);
             let Some(index) = surface_index_for(surfaces, sender, token) else {
-                put_u32(&mut reply, 0, mochi_user_syscall::EACCES as u32);
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
                 return reply;
             };
             if request.len() >= 20 {
@@ -900,10 +925,10 @@ fn handle_request(
                 );
                 put_u32(&mut reply, 0, status);
             } else {
-                put_u32(&mut reply, 0, mochi_user_syscall::EACCES as u32);
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
             }
         }
-        _ => put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32),
+        _ => put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL)),
     }
     reply
 }
@@ -994,7 +1019,7 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
                 )
             };
             reply.fill(0);
-            put_u32(reply, 0, mochi_user_syscall::EINVAL as u32);
+            put_u32(reply, 0, errno_status(mochi_user_syscall::EINVAL));
             let _ = platform::ipc::reply(sender, reply);
             continue;
         }

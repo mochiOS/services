@@ -28,6 +28,15 @@ fn put_u32(out: &mut [u8], offset: usize, value: u32) {
     out[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
 
+fn errno_status(errno: u64) -> u32 {
+    let signed = errno as i64;
+    if signed < 0 {
+        signed.wrapping_neg() as u32
+    } else {
+        errno as u32
+    }
+}
+
 fn read_u32(buf: &[u8], offset: usize) -> Option<u32> {
     let bytes = buf.get(offset..offset + 4)?;
     Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
@@ -62,22 +71,19 @@ fn present_pixels(
     pixels: &[u8],
 ) -> u32 {
     if format != PIXEL_FORMAT_XRGB8888 || width == 0 || height == 0 || stride < width {
-        return mochi_user_syscall::EINVAL as u32;
-    }
-    if width > info.width || height > info.height {
-        return mochi_user_syscall::ERANGE as u32;
+        return errno_status(mochi_user_syscall::EINVAL);
     }
     let Some(row_bytes) = (stride as usize).checked_mul(4) else {
-        return mochi_user_syscall::EINVAL as u32;
+        return errno_status(mochi_user_syscall::EINVAL);
     };
     let Some(needed) = row_bytes.checked_mul(height as usize) else {
-        return mochi_user_syscall::EINVAL as u32;
+        return errno_status(mochi_user_syscall::EINVAL);
     };
     if pixels.len() < needed {
-        return mochi_user_syscall::EINVAL as u32;
+        return errno_status(mochi_user_syscall::EINVAL);
     }
     if !map_framebuffer(info) {
-        return mochi_user_syscall::EIO as u32;
+        return errno_status(mochi_user_syscall::EIO);
     }
     let dest_width = info.width as usize;
     let dest_height = info.height as usize;
@@ -96,10 +102,10 @@ fn present_pixels(
             info.stride,
             info.size
         );
-        return mochi_user_syscall::ERANGE as u32;
+        return errno_status(mochi_user_syscall::ERANGE);
     }
     let Some(dest_row_bytes) = dest_stride.checked_mul(4) else {
-        return mochi_user_syscall::ERANGE as u32;
+        return errno_status(mochi_user_syscall::ERANGE);
     };
     let max_rows = info.size as usize / dest_row_bytes;
     if max_rows < dest_height {
@@ -109,7 +115,7 @@ fn present_pixels(
             dest_row_bytes,
             dest_height
         );
-        return mochi_user_syscall::ERANGE as u32;
+        return errno_status(mochi_user_syscall::ERANGE);
     }
     let target_width = dest_width;
     let target_height = dest_height;
@@ -117,32 +123,32 @@ fn present_pixels(
     let fb_offset = (info.addr & 0xfff) as usize;
     let fb = (FB_VIRT as usize + fb_offset) as *mut u32;
     let Some(pixels) = pixels.get(..needed) else {
-        return mochi_user_syscall::EINVAL as u32;
+        return errno_status(mochi_user_syscall::EINVAL);
     };
     for y in 0..target_height {
         let Some(scaled_y) = y.checked_mul(height as usize) else {
-            return mochi_user_syscall::ERANGE as u32;
+            return errno_status(mochi_user_syscall::ERANGE);
         };
         let src_y = scaled_y / target_height;
         let Some(src_row) = src_y.checked_mul(row_bytes) else {
-            return mochi_user_syscall::ERANGE as u32;
+            return errno_status(mochi_user_syscall::ERANGE);
         };
         let Some(dest_row) = y.checked_mul(dest_stride) else {
-            return mochi_user_syscall::ERANGE as u32;
+            return errno_status(mochi_user_syscall::ERANGE);
         };
         for x in 0..target_width {
             let Some(scaled_x) = x.checked_mul(width as usize) else {
-                return mochi_user_syscall::ERANGE as u32;
+                return errno_status(mochi_user_syscall::ERANGE);
             };
             let src_x = scaled_x / target_width;
             let Some(src_offset) = src_row.checked_add(src_x.saturating_mul(4)) else {
-                return mochi_user_syscall::ERANGE as u32;
+                return errno_status(mochi_user_syscall::ERANGE);
             };
             let Some(pixel) = read_pixel(pixels, src_offset) else {
-                return mochi_user_syscall::EINVAL as u32;
+                return errno_status(mochi_user_syscall::EINVAL);
             };
             let Some(dest_offset) = dest_row.checked_add(x) else {
-                return mochi_user_syscall::ERANGE as u32;
+                return errno_status(mochi_user_syscall::ERANGE);
             };
             unsafe {
                 fb.add(dest_offset).write_volatile(pixel);
@@ -154,19 +160,19 @@ fn present_pixels(
 
 fn present_inline(info: &platform::memory::FramebufferInfo, request: &[u8]) -> u32 {
     if request.len() < 20 {
-        return mochi_user_syscall::EINVAL as u32;
+        return errno_status(mochi_user_syscall::EINVAL);
     }
     let Some(width) = read_u32(request, 4) else {
-        return mochi_user_syscall::EINVAL as u32;
+        return errno_status(mochi_user_syscall::EINVAL);
     };
     let Some(height) = read_u32(request, 8) else {
-        return mochi_user_syscall::EINVAL as u32;
+        return errno_status(mochi_user_syscall::EINVAL);
     };
     let Some(stride) = read_u32(request, 12) else {
-        return mochi_user_syscall::EINVAL as u32;
+        return errno_status(mochi_user_syscall::EINVAL);
     };
     let Some(format) = read_u32(request, 16) else {
-        return mochi_user_syscall::EINVAL as u32;
+        return errno_status(mochi_user_syscall::EINVAL);
     };
     present_pixels(info, width, height, stride, format, &request[20..])
 }
@@ -185,22 +191,20 @@ fn present_shared(
         || width == 0
         || height == 0
         || stride < width
-        || width > info.width
-        || height > info.height
     {
-        return mochi_user_syscall::EINVAL as u32;
+        return errno_status(mochi_user_syscall::EINVAL);
     }
     let Some(row_bytes) = (stride as usize).checked_mul(4) else {
-        return mochi_user_syscall::EINVAL as u32;
+        return errno_status(mochi_user_syscall::EINVAL);
     };
     let Some(needed) = row_bytes.checked_mul(height as usize) else {
-        return mochi_user_syscall::EINVAL as u32;
+        return errno_status(mochi_user_syscall::EINVAL);
     };
     let Ok(total) = usize::try_from(total) else {
-        return mochi_user_syscall::EINVAL as u32;
+        return errno_status(mochi_user_syscall::EINVAL);
     };
     if total < needed {
-        return mochi_user_syscall::EINVAL as u32;
+        return errno_status(mochi_user_syscall::EINVAL);
     }
     let pixels = unsafe { core::slice::from_raw_parts(mapped_addr as *const u8, needed) };
     present_pixels(info, width, height, stride, format, pixels)
@@ -244,7 +248,7 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
                     4,
                 )
             };
-            put_u32(reply, 0, mochi_user_syscall::EINVAL as u32);
+            put_u32(reply, 0, errno_status(mochi_user_syscall::EINVAL));
             let _ = platform::ipc::reply(sender, reply);
             continue;
         }
@@ -275,11 +279,21 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
                         Some((mapped_addr, total)) => {
                             present_shared(&info, mapped_addr, total, width, height, stride, format)
                         }
-                        None => mochi_user_syscall::EINVAL as u32,
+                        None => errno_status(mochi_user_syscall::EINVAL),
                     }
                 } else {
                     present_inline(&info, &buf[..len])
                 };
+                if status != 0 {
+                    platform::println!(
+                        "display.driver: present failed status={} fb={}x{} stride={} size={}",
+                        status,
+                        info.width,
+                        info.height,
+                        info.stride,
+                        info.size
+                    );
+                }
                 let reply = unsafe {
                     core::slice::from_raw_parts_mut(
                         core::ptr::addr_of_mut!(IPC_REPLY_4).cast::<u8>(),
@@ -296,7 +310,7 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
                         4,
                     )
                 };
-                put_u32(reply, 0, mochi_user_syscall::EINVAL as u32);
+                put_u32(reply, 0, errno_status(mochi_user_syscall::EINVAL));
                 let _ = platform::ipc::reply(sender, reply);
             }
         }
