@@ -42,13 +42,86 @@ const EVENT_FOCUS_LOST: u32 = 9;
 const EVENT_FRAME_DONE: u32 = 10;
 const ROLE_TOPLEVEL: u32 = 1;
 const ROLE_POPUP: u32 = 2;
+const ROLE_BACKGROUND: u32 = 3;
+const ROLE_PANEL: u32 = 4;
+const ROLE_SECURE_OVERLAY: u32 = 5;
 const PIXEL_FORMAT_XRGB8888: u32 = 1;
 const MAX_SURFACES: usize = 8;
+const MAX_CLIENTS: usize = 16;
 const PAGE_SIZE: usize = 4096;
 const MAX_SHARED_PAGES: usize = 128;
 const MAX_SHARED_BYTES: usize = MAX_SHARED_PAGES * PAGE_SIZE;
 const MAX_SHARED_PIXELS: usize = MAX_SHARED_BYTES / 4;
 const MAX_DIMENSION: u32 = 4096;
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct ClientId(u64);
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct SurfaceHandle(u64);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SurfaceRole {
+    Toplevel,
+    Popup,
+    Background,
+    Panel,
+    SecureOverlay,
+}
+
+impl SurfaceRole {
+    fn from_wire(value: u32) -> Result<Self, u32> {
+        match value {
+            ROLE_TOPLEVEL => Ok(Self::Toplevel),
+            ROLE_POPUP => Ok(Self::Popup),
+            ROLE_BACKGROUND => Ok(Self::Background),
+            ROLE_PANEL => Ok(Self::Panel),
+            ROLE_SECURE_OVERLAY => Ok(Self::SecureOverlay),
+            _ => Err(errno_status(mochi_user_syscall::EINVAL)),
+        }
+    }
+
+    fn general_client_rights(self) -> Result<SurfaceRights, u32> {
+        match self {
+            Self::Toplevel | Self::Popup => Ok(SurfaceRights::GENERAL_CLIENT),
+            Self::Background | Self::Panel | Self::SecureOverlay => {
+                Err(errno_status(mochi_user_syscall::EACCES))
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct SurfaceRights {
+    bits: u32,
+}
+
+impl SurfaceRights {
+    const ATTACH_BUFFER: Self = Self { bits: 1 << 0 };
+    const DAMAGE: Self = Self { bits: 1 << 1 };
+    const COMMIT: Self = Self { bits: 1 << 2 };
+    const DESTROY: Self = Self { bits: 1 << 3 };
+    #[allow(dead_code)]
+    const SET_POSITION: Self = Self { bits: 1 << 4 };
+    #[allow(dead_code)]
+    const SET_Z_ORDER: Self = Self { bits: 1 << 5 };
+    #[allow(dead_code)]
+    const FOCUS_CONTROL: Self = Self { bits: 1 << 6 };
+    const GENERAL_CLIENT: Self = Self {
+        bits: Self::ATTACH_BUFFER.bits | Self::DAMAGE.bits | Self::COMMIT.bits | Self::DESTROY.bits,
+    };
+
+    const fn contains(self, required: Self) -> bool {
+        (self.bits & required.bits) == required.bits
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct Client {
+    live: bool,
+    sender: u64,
+    id: ClientId,
+}
 
 #[allow(dead_code)]
 #[derive(Clone, Copy, Default)]
@@ -70,13 +143,30 @@ impl Rect {
     }
 }
 
+#[allow(dead_code)]
+#[derive(Clone, Copy, Default)]
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Default)]
+struct PopupPlacement {
+    anchor_rect: Rect,
+    offset: Point,
+}
+
 #[derive(Clone)]
 struct Surface {
     live: bool,
-    owner: u64,
+    owner: ClientId,
     event_endpoint: u64,
+    handle: SurfaceHandle,
     token: u64,
-    role: u32,
+    role: SurfaceRole,
+    rights: SurfaceRights,
+    parent: Option<SurfaceHandle>,
     x: i32,
     y: i32,
     width: u32,
@@ -99,10 +189,13 @@ impl Surface {
     fn empty() -> Self {
         Self {
             live: false,
-            owner: 0,
+            owner: ClientId(0),
             event_endpoint: 0,
+            handle: SurfaceHandle(0),
             token: 0,
-            role: 0,
+            role: SurfaceRole::Toplevel,
+            rights: SurfaceRights::default(),
+            parent: None,
             x: 0,
             y: 0,
             width: 0,
@@ -213,10 +306,108 @@ fn find_service(name: &str) -> Option<u64> {
     None
 }
 
-fn surface_index_for(surfaces: &[Surface], owner: u64, token: u64) -> Option<usize> {
+fn client_id_for_sender(clients: &mut [Client], sender: u64, next_client_id: &mut u64) -> ClientId {
+    if let Some(client) = clients
+        .iter()
+        .find(|client| client.live && client.sender == sender)
+    {
+        return client.id;
+    }
+    if let Some(client) = clients.iter_mut().find(|client| !client.live) {
+        *next_client_id = next_client_id.wrapping_add(1).max(1);
+        let id = ClientId(*next_client_id);
+        *client = Client {
+            live: true,
+            sender,
+            id,
+        };
+        return id;
+    }
+    ClientId(0)
+}
+
+fn surface_index_for(
+    surfaces: &[Surface],
+    client: ClientId,
+    handle: SurfaceHandle,
+    required: SurfaceRights,
+) -> Option<usize> {
+    surfaces.iter().position(|surface| {
+        surface.live
+            && surface.owner == client
+            && surface.handle == handle
+            && surface.token == handle.0
+            && surface.rights.contains(required)
+    })
+}
+
+fn surface_index_for_child(surfaces: &[Surface], parent: SurfaceHandle) -> Option<usize> {
     surfaces
         .iter()
-        .position(|surface| surface.live && surface.owner == owner && surface.token == token)
+        .position(|surface| surface.live && surface.parent == Some(parent))
+}
+
+fn clear_focus_for_surface(
+    surfaces: &[Surface],
+    index: usize,
+    pointer_focus: &mut Option<usize>,
+    keyboard_focus: &mut Option<usize>,
+) {
+    if pointer_focus.is_some_and(|focus| focus == index) {
+        if let Some(surface) = surfaces.get(index)
+            && surface.live
+        {
+            send_event(surface.event_endpoint, EVENT_POINTER_LEAVE, 0, 0, 0);
+        }
+        *pointer_focus = None;
+    }
+    if keyboard_focus.is_some_and(|focus| focus == index) {
+        update_keyboard_focus(surfaces, keyboard_focus, None);
+    }
+}
+
+fn destroy_surface_tree(
+    surfaces: &mut [Surface],
+    index: usize,
+    pointer_focus: &mut Option<usize>,
+    keyboard_focus: &mut Option<usize>,
+) {
+    let Some(handle) = surfaces
+        .get(index)
+        .filter(|surface| surface.live)
+        .map(|s| s.handle)
+    else {
+        return;
+    };
+    while let Some(child) = surface_index_for_child(surfaces, handle) {
+        destroy_surface_tree(surfaces, child, pointer_focus, keyboard_focus);
+    }
+    clear_focus_for_surface(surfaces, index, pointer_focus, keyboard_focus);
+    surfaces[index] = Surface::empty();
+}
+
+fn cleanup_client(
+    clients: &mut [Client],
+    surfaces: &mut [Surface],
+    client: ClientId,
+    pointer_focus: &mut Option<usize>,
+    keyboard_focus: &mut Option<usize>,
+) {
+    if client == ClientId(0) {
+        return;
+    }
+    while let Some(index) = surfaces
+        .iter()
+        .position(|surface| surface.live && surface.owner == client)
+    {
+        destroy_surface_tree(surfaces, index, pointer_focus, keyboard_focus);
+    }
+    if let Some(record) = clients
+        .iter_mut()
+        .find(|record| record.live && record.id == client)
+    {
+        *record = Client::default();
+    }
 }
 
 fn surface_extent(surface: &Surface) -> (u32, u32) {
@@ -251,6 +442,61 @@ fn shared_page_count(byte_len: usize) -> Option<usize> {
         .map(|len| len / PAGE_SIZE)
 }
 
+fn validate_buffer_layout(
+    width: u32,
+    height: u32,
+    stride: u32,
+    format: u32,
+    expected_width: u32,
+    expected_height: u32,
+) -> Result<(usize, usize, usize), u32> {
+    if format != PIXEL_FORMAT_XRGB8888
+        || width == 0
+        || height == 0
+        || stride < width
+        || width > MAX_DIMENSION
+        || height > MAX_DIMENSION
+        || width != expected_width
+        || height != expected_height
+    {
+        return Err(errno_status(mochi_user_syscall::EINVAL));
+    }
+    let row_pixels =
+        usize::try_from(stride).map_err(|_| errno_status(mochi_user_syscall::EINVAL))?;
+    let row_bytes = row_pixels
+        .checked_mul(4)
+        .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+    let height_usize =
+        usize::try_from(height).map_err(|_| errno_status(mochi_user_syscall::EINVAL))?;
+    let needed_bytes = row_bytes
+        .checked_mul(height_usize)
+        .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+    let width_usize =
+        usize::try_from(width).map_err(|_| errno_status(mochi_user_syscall::EINVAL))?;
+    let pixels = width_usize
+        .checked_mul(height_usize)
+        .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+    Ok((row_bytes, needed_bytes, pixels))
+}
+
+fn validate_damage_rect(rect: Rect, surface_width: u32, surface_height: u32) -> Result<Rect, u32> {
+    if rect.width == 0 || rect.height == 0 || rect.x < 0 || rect.y < 0 {
+        return Err(errno_status(mochi_user_syscall::EINVAL));
+    }
+    let x = u32::try_from(rect.x).map_err(|_| errno_status(mochi_user_syscall::EINVAL))?;
+    let y = u32::try_from(rect.y).map_err(|_| errno_status(mochi_user_syscall::EINVAL))?;
+    let right = x
+        .checked_add(rect.width)
+        .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+    let bottom = y
+        .checked_add(rect.height)
+        .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+    if right > surface_width || bottom > surface_height {
+        return Err(errno_status(mochi_user_syscall::ERANGE));
+    }
+    Ok(rect)
+}
+
 fn choose_frame_size(display_width: u32, display_height: u32) -> Option<(usize, usize)> {
     if display_width == 0 || display_height == 0 {
         return None;
@@ -280,13 +526,13 @@ fn send_frame_done(surface: &Surface) {
 
 fn handle_shared_buffer(
     surfaces: &mut [Surface],
-    sender: u64,
+    client: ClientId,
     mapped_addr: u64,
     total: u64,
 ) -> bool {
     let Some(index) = surfaces
         .iter()
-        .position(|surface| surface.live && surface.owner == sender && surface.awaiting_buffer)
+        .position(|surface| surface.live && surface.owner == client && surface.awaiting_buffer)
     else {
         return false;
     };
@@ -298,15 +544,22 @@ fn handle_shared_buffer(
         surface.awaiting_buffer = false;
         return true;
     }
-    let Some(row_bytes) = (stride as usize).checked_mul(4) else {
+    let Ok((row_bytes, needed_bytes, pixels)) = validate_buffer_layout(
+        width,
+        height,
+        stride,
+        PIXEL_FORMAT_XRGB8888,
+        surface.width,
+        surface.height,
+    ) else {
         surface.awaiting_buffer = false;
         return true;
     };
-    let Some(needed_bytes) = row_bytes.checked_mul(height as usize) else {
+    let Ok(total) = usize::try_from(total) else {
         surface.awaiting_buffer = false;
         return true;
     };
-    if total as usize > MAX_SHARED_BYTES || (total as usize) < needed_bytes {
+    if total > MAX_SHARED_BYTES || total < needed_bytes {
         surface.awaiting_buffer = false;
         return true;
     }
@@ -314,10 +567,6 @@ fn handle_shared_buffer(
         surface.awaiting_buffer = false;
         return true;
     }
-    let Some(pixels) = (width as usize).checked_mul(height as usize) else {
-        surface.awaiting_buffer = false;
-        return true;
-    };
     if surface.pending.len() != pixels && !resize_buffer(&mut surface.pending, width, height) {
         surface.awaiting_buffer = false;
         return true;
@@ -630,9 +879,10 @@ fn handle_request(
     surfaces: &mut [Surface],
     next_token: &mut u64,
     next_z: &mut u32,
+    next_window_index: &mut u32,
     pointer_focus: &mut Option<usize>,
     keyboard_focus: &mut Option<usize>,
-    sender: u64,
+    client: ClientId,
     request: &[u8],
     display_tid: u64,
     display_width: u32,
@@ -647,34 +897,114 @@ fn handle_request(
     };
     match opcode {
         OP_CREATE_SURFACE => {
-            let role = read_u32(request, 4).unwrap_or(0);
+            let role_raw = read_u32(request, 4).unwrap_or(0);
+            let role = match SurfaceRole::from_wire(role_raw) {
+                Ok(role) => role,
+                Err(status) => {
+                    put_u32(&mut reply, 0, status);
+                    return reply;
+                }
+            };
+            let rights = match role.general_client_rights() {
+                Ok(rights) => rights,
+                Err(status) => {
+                    put_u32(&mut reply, 0, status);
+                    return reply;
+                }
+            };
             let width = read_u32(request, 8).unwrap_or(0);
             let height = read_u32(request, 12).unwrap_or(0);
             let event_endpoint = read_u64(request, 16).unwrap_or(0);
-            if !matches!(role, ROLE_TOPLEVEL | ROLE_POPUP)
-                || width == 0
-                || height == 0
-                || width > MAX_DIMENSION
-                || height > MAX_DIMENSION
-            {
+            if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION {
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                 return reply;
             }
+            let (parent, placement) = if role == SurfaceRole::Popup {
+                let Some(parent_token) = read_u64(request, 24) else {
+                    put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
+                    return reply;
+                };
+                let parent_handle = SurfaceHandle(parent_token);
+                let Some(parent_index) =
+                    surface_index_for(surfaces, client, parent_handle, SurfaceRights::COMMIT)
+                else {
+                    put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                    return reply;
+                };
+                let parent_role = surfaces[parent_index].role;
+                if !matches!(parent_role, SurfaceRole::Toplevel | SurfaceRole::Popup) {
+                    put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                    return reply;
+                }
+                let placement = PopupPlacement {
+                    anchor_rect: Rect {
+                        x: read_u32(request, 32).unwrap_or(0) as i32,
+                        y: read_u32(request, 36).unwrap_or(0) as i32,
+                        width: read_u32(request, 40).unwrap_or(1),
+                        height: read_u32(request, 44).unwrap_or(1),
+                    },
+                    offset: Point {
+                        x: read_u32(request, 48).unwrap_or(0) as i32,
+                        y: read_u32(request, 52).unwrap_or(0) as i32,
+                    },
+                };
+                if validate_damage_rect(
+                    placement.anchor_rect,
+                    surfaces[parent_index].width,
+                    surfaces[parent_index].height,
+                )
+                .is_err()
+                {
+                    put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
+                    return reply;
+                }
+                (Some(parent_handle), placement)
+            } else {
+                (None, PopupPlacement::default())
+            };
             let Some(index) = surfaces.iter().position(|s| !s.live) else {
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ENOSPC));
                 return reply;
             };
             *next_token = next_token.wrapping_add(0x9e37_79b9_7f4a_7c15);
             *next_z = next_z.wrapping_add(1);
-            let token = *next_token ^ sender.rotate_left(17);
-            let x = 2 + (index as i32 * 3);
-            let y = 2 + (index as i32 * 2);
+            let token = *next_token ^ client.0.rotate_left(17);
+            let handle = SurfaceHandle(token);
+            let (x, y) = if let Some(parent_handle) = parent {
+                let Some(parent_index) = surfaces
+                    .iter()
+                    .position(|surface| surface.live && surface.handle == parent_handle)
+                else {
+                    put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                    return reply;
+                };
+                (
+                    surfaces[parent_index]
+                        .x
+                        .saturating_add(placement.anchor_rect.x)
+                        .saturating_add(placement.offset.x),
+                    surfaces[parent_index]
+                        .y
+                        .saturating_add(placement.anchor_rect.y)
+                        .saturating_add(placement.offset.y),
+                )
+            } else {
+                let cascade = *next_window_index % 8;
+                *next_window_index = next_window_index.wrapping_add(1);
+                (
+                    32i32.saturating_add((cascade as i32).saturating_mul(24)),
+                    48i32.saturating_add((cascade as i32).saturating_mul(24)),
+                )
+            };
             surfaces[index] = Surface::empty();
             surfaces[index].live = true;
-            surfaces[index].owner = sender;
+            surfaces[index].owner = client;
             surfaces[index].event_endpoint = event_endpoint;
+            surfaces[index].handle = handle;
             surfaces[index].token = token;
             surfaces[index].role = role;
+            surfaces[index].rights = rights;
+            surfaces[index].parent = parent;
             surfaces[index].x = x;
             surfaces[index].y = y;
             surfaces[index].width = width;
@@ -689,20 +1019,13 @@ fn handle_request(
             let height = read_u32(request, 16).unwrap_or(0);
             let stride = read_u32(request, 20).unwrap_or(0);
             let format = read_u32(request, 24).unwrap_or(0);
-            let Some(index) = surface_index_for(surfaces, sender, token) else {
+            let handle = SurfaceHandle(token);
+            let Some(index) =
+                surface_index_for(surfaces, client, handle, SurfaceRights::ATTACH_BUFFER)
+            else {
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
                 return reply;
             };
-            if format != PIXEL_FORMAT_XRGB8888
-                || width == 0
-                || height == 0
-                || stride < width
-                || width > MAX_DIMENSION
-                || height > MAX_DIMENSION
-            {
-                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
-                return reply;
-            }
             let Some(index_width) = surfaces.get(index).map(|surface| surface.width) else {
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                 return reply;
@@ -711,42 +1034,42 @@ fn handle_request(
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                 return reply;
             };
-            if width != index_width || height != index_height {
+            let (row_bytes, needed, pixels) = match validate_buffer_layout(
+                width,
+                height,
+                stride,
+                format,
+                index_width,
+                index_height,
+            ) {
+                Ok(layout) => layout,
+                Err(status) => {
+                    put_u32(&mut reply, 0, status);
+                    return reply;
+                }
+            };
+            if needed > MAX_SHARED_BYTES {
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ERANGE));
                 return reply;
             }
-            let Some(row_bytes) = (stride as usize).checked_mul(4) else {
-                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
-                return reply;
-            };
-            let Some(needed) = row_bytes.checked_mul(height as usize) else {
-                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
-                return reply;
-            };
-            let Some(pixels) = (width as usize).checked_mul(height as usize) else {
-                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
-                return reply;
-            };
-            let surface = &mut surfaces[index];
-            surface.pending_width = width;
-            surface.pending_height = height;
-            surface.pending_stride = stride;
-            surface.pending_len = pixels;
-            surface.pending_damage = Some(Rect::full(width, height));
             if request.len() == 28 {
+                let surface = &mut surfaces[index];
+                surface.pending_width = width;
+                surface.pending_height = height;
+                surface.pending_stride = stride;
+                surface.pending_len = pixels;
+                surface.pending_damage = Some(Rect::full(width, height));
                 surface.awaiting_buffer = true;
             } else {
-                if surface.pending.len() != pixels
-                    && !resize_buffer(&mut surface.pending, width, height)
-                {
-                    put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ENOMEM));
-                    return reply;
-                }
                 if request.len() < 28 + needed {
                     put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                     return reply;
                 }
-                surface.awaiting_buffer = false;
+                let mut pending = Vec::new();
+                if !resize_buffer(&mut pending, width, height) {
+                    put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ENOMEM));
+                    return reply;
+                }
                 for y in 0..height as usize {
                     let Some(src_row) = y.checked_mul(row_bytes) else {
                         put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ERANGE));
@@ -772,42 +1095,57 @@ fn handle_request(
                             put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ERANGE));
                             return reply;
                         };
-                        let Some(slot) = surface.pending.get_mut(dst) else {
+                        let Some(slot) = pending.get_mut(dst) else {
                             put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                             return reply;
                         };
                         *slot = pixel;
                     }
                 }
+                let surface = &mut surfaces[index];
+                surface.pending = pending;
+                surface.pending_width = width;
+                surface.pending_height = height;
+                surface.pending_stride = stride;
+                surface.pending_len = pixels;
+                surface.pending_damage = Some(Rect::full(width, height));
+                surface.awaiting_buffer = false;
             }
             put_u32(&mut reply, 0, 0);
         }
         OP_DAMAGE => {
             let token = read_u64(request, 4).unwrap_or(0);
-            if let Some(index) = surface_index_for(surfaces, sender, token) {
-                let damage = if request.len() >= 28 {
-                    let x = read_u32(request, 12).unwrap_or(0);
-                    let y = read_u32(request, 16).unwrap_or(0);
-                    let width = read_u32(request, 20).unwrap_or(0);
-                    let height = read_u32(request, 24).unwrap_or(0);
-                    Some(Rect {
-                        x: x as i32,
-                        y: y as i32,
-                        width,
-                        height,
-                    })
-                } else {
-                    Some(Rect::full(surfaces[index].width, surfaces[index].height))
-                };
-                surfaces[index].pending_damage = damage;
-                put_u32(&mut reply, 0, 0);
-            } else {
+            let handle = SurfaceHandle(token);
+            let Some(index) = surface_index_for(surfaces, client, handle, SurfaceRights::DAMAGE)
+            else {
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
-            }
+                return reply;
+            };
+            let damage = if request.len() >= 28 {
+                let rect = Rect {
+                    x: read_u32(request, 12).unwrap_or(0) as i32,
+                    y: read_u32(request, 16).unwrap_or(0) as i32,
+                    width: read_u32(request, 20).unwrap_or(0),
+                    height: read_u32(request, 24).unwrap_or(0),
+                };
+                match validate_damage_rect(rect, surfaces[index].width, surfaces[index].height) {
+                    Ok(rect) => Some(rect),
+                    Err(status) => {
+                        put_u32(&mut reply, 0, status);
+                        return reply;
+                    }
+                }
+            } else {
+                Some(Rect::full(surfaces[index].width, surfaces[index].height))
+            };
+            surfaces[index].pending_damage = damage;
+            put_u32(&mut reply, 0, 0);
         }
         OP_COMMIT => {
             let token = read_u64(request, 4).unwrap_or(0);
-            let Some(index) = surface_index_for(surfaces, sender, token) else {
+            let handle = SurfaceHandle(token);
+            let Some(index) = surface_index_for(surfaces, client, handle, SurfaceRights::COMMIT)
+            else {
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
                 return reply;
             };
@@ -836,18 +1174,25 @@ fn handle_request(
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                 return reply;
             }
+            let old_current;
+            let old_current_width;
+            let old_current_height;
+            let old_current_stride;
             {
                 let surface = &mut surfaces[index];
-                if surface.current.len() != needed
-                    && !resize_buffer(&mut surface.current, pending_width, pending_height)
-                {
+                let mut next_current = Vec::new();
+                if !resize_buffer(&mut next_current, pending_width, pending_height) {
                     put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ENOMEM));
                     return reply;
                 }
+                next_current[..needed].copy_from_slice(&surface.pending[..needed]);
+                old_current = core::mem::replace(&mut surface.current, next_current);
+                old_current_width = surface.current_width;
+                old_current_height = surface.current_height;
+                old_current_stride = surface.current_stride;
                 surface.current_width = pending_width;
                 surface.current_height = pending_height;
                 surface.current_stride = pending_width;
-                surface.current[..needed].copy_from_slice(&surface.pending[..needed]);
             }
             let status = composite_and_present(
                 surfaces,
@@ -868,53 +1213,23 @@ fn handle_request(
                     pending_width,
                     pending_height
                 );
+                let surface = &mut surfaces[index];
+                surface.current = old_current;
+                surface.current_width = old_current_width;
+                surface.current_height = old_current_height;
+                surface.current_stride = old_current_stride;
             }
             put_u32(&mut reply, 0, status);
         }
         OP_SET_POSITION => {
-            if request.len() < 12 {
-                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
-                return reply;
-            }
-            let token = read_u64(request, 4).unwrap_or(0);
-            let Some(index) = surface_index_for(surfaces, sender, token) else {
-                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
-                return reply;
-            };
-            if request.len() >= 20 {
-                let x = read_u32(request, 12).unwrap_or(0) as i32;
-                let y = read_u32(request, 16).unwrap_or(0) as i32;
-                surfaces[index].x = x;
-                surfaces[index].y = y;
-            }
-            let status =
-                if surfaces[index].current_width != 0 && surfaces[index].current_height != 0 {
-                    composite_and_present(
-                        surfaces,
-                        display_tid,
-                        display_width,
-                        display_height,
-                        display_stride,
-                        display_format,
-                    )
-                } else {
-                    0
-                };
-            put_u32(&mut reply, 0, status);
+            put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
         }
         OP_DESTROY_SURFACE => {
             let token = read_u64(request, 4).unwrap_or(0);
-            if let Some(index) = surface_index_for(surfaces, sender, token) {
-                if pointer_focus.is_some_and(|focus| focus == index) {
-                    if let Some(surface) = surfaces.get(index) {
-                        send_event(surface.event_endpoint, EVENT_POINTER_LEAVE, 0, 0, 0);
-                    }
-                    *pointer_focus = None;
-                }
-                if keyboard_focus.is_some_and(|focus| focus == index) {
-                    update_keyboard_focus(surfaces, keyboard_focus, None);
-                }
-                surfaces[index] = Surface::empty();
+            let handle = SurfaceHandle(token);
+            if let Some(index) = surface_index_for(surfaces, client, handle, SurfaceRights::DESTROY)
+            {
+                destroy_surface_tree(surfaces, index, pointer_focus, keyboard_focus);
                 let status = composite_and_present(
                     surfaces,
                     display_tid,
@@ -969,9 +1284,12 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
     let (display_width, display_height, display_stride, display_format) =
         display_request_info(display_tid);
 
+    let mut clients = [Client::default(); MAX_CLIENTS];
+    let mut next_client_id = 0u64;
     let mut surfaces: Vec<Surface> = vec![Surface::empty(); MAX_SURFACES];
     let mut next_token = 0x434f_4d50_5355_5246u64;
     let mut next_z = 0u32;
+    let mut next_window_index = 0u32;
     let mut pointer_x = 0i32;
     let mut pointer_y = 0i32;
     let mut pointer_focus = None;
@@ -987,13 +1305,17 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         let sender = msg >> 32;
         let len = (msg & 0xffff_ffff) as usize;
         if len == 16 {
+            let client = client_id_for_sender(&mut clients, sender, &mut next_client_id);
+            if client == ClientId(0) {
+                continue;
+            }
             let mapped_addr = u64::from_le_bytes([
                 buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
             ]);
             let total = u64::from_le_bytes([
                 buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
             ]);
-            if handle_shared_buffer(&mut surfaces, sender, mapped_addr, total) {
+            if handle_shared_buffer(&mut surfaces, client, mapped_addr, total) {
                 continue;
             }
         }
@@ -1023,13 +1345,27 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             let _ = platform::ipc::reply(sender, reply);
             continue;
         }
+        let client = client_id_for_sender(&mut clients, sender, &mut next_client_id);
+        if client == ClientId(0) {
+            let reply = unsafe {
+                core::slice::from_raw_parts_mut(
+                    core::ptr::addr_of_mut!(CLIENT_REPLY_BUF).cast::<u8>(),
+                    16,
+                )
+            };
+            reply.fill(0);
+            put_u32(reply, 0, errno_status(mochi_user_syscall::ENOSPC));
+            let _ = platform::ipc::reply(sender, reply);
+            continue;
+        }
         let reply = handle_request(
             &mut surfaces,
             &mut next_token,
             &mut next_z,
+            &mut next_window_index,
             &mut pointer_focus,
             &mut keyboard_focus,
-            sender,
+            client,
             &buf[..len],
             display_tid,
             display_width,
@@ -1045,6 +1381,14 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         };
         reply_buf.fill(0);
         reply_buf[..reply.len()].copy_from_slice(&reply);
-        let _ = platform::ipc::reply(sender, &reply_buf[..reply.len()]);
+        if platform::ipc::reply(sender, &reply_buf[..reply.len()]).is_err() {
+            cleanup_client(
+                &mut clients,
+                &mut surfaces,
+                client,
+                &mut pointer_focus,
+                &mut keyboard_focus,
+            );
+        }
     }
 }
