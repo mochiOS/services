@@ -133,6 +133,15 @@ fn read_pixel(buf: &[u8], offset: usize) -> Option<u32> {
     Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
+static mut DISPLAY_REQ_BUF: [u8; 20] = [0; 20];
+static mut DISPLAY_REP_BUF: [u8; 32] = [0; 32];
+static mut DISPLAY_PRESENT_REQ: [u8; 20] = [0; 20];
+static mut DISPLAY_PRESENT_REP: [u8; 8] = [0; 8];
+static mut INPUT_SUBSCRIBE_REQ: [u8; 16] = [0; 16];
+static mut INPUT_SUBSCRIBE_REP: [u8; 8] = [0; 8];
+static mut CLIENT_REPLY_BUF: [u8; 16] = [0; 16];
+static mut IPC_BUF: [u8; 4128] = [0; 4128];
+
 fn read_u64(buf: &[u8], offset: usize) -> Option<u64> {
     let bytes = buf.get(offset..offset + 8)?;
     Some(u64::from_le_bytes([
@@ -165,10 +174,16 @@ fn decode_display_info(reply: &[u8]) -> Option<(u32, u32, u32, u32)> {
 }
 
 fn display_request_info(display_tid: u64) -> (u32, u32, u32, u32) {
-    let mut req = vec![0u8; 4];
-    put_u32(&mut req, 0, OP_DISPLAY_GET_INFO);
-    let mut reply = vec![0u8; 32];
-    if let Ok(msg) = platform::ipc::call(display_tid, &req, &mut reply) {
+    let req = unsafe {
+        core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(DISPLAY_REQ_BUF).cast::<u8>(), 20)
+    };
+    req.fill(0);
+    put_u32(req, 0, OP_DISPLAY_GET_INFO);
+    let reply = unsafe {
+        core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(DISPLAY_REP_BUF).cast::<u8>(), 32)
+    };
+    reply.fill(0);
+    if let Ok(msg) = platform::ipc::call(display_tid, req, reply) {
         let len = (msg & 0xffff_ffff) as usize;
         if let Some(info) = decode_display_info(&reply[..len.min(reply.len())]) {
             return info;
@@ -564,20 +579,32 @@ fn composite_and_present(
     if let Err(err) = platform::ipc::send_page_count(display_tid, page_count, virt) {
         return errno_from_platform(err);
     }
-    let mut request = vec![0u8; 20];
-    put_u32(&mut request, 0, OP_DISPLAY_PRESENT);
-    put_u32(&mut request, 4, frame_w as u32);
-    put_u32(&mut request, 8, frame_h as u32);
-    put_u32(&mut request, 12, frame_w as u32);
-    put_u32(&mut request, 16, PIXEL_FORMAT_XRGB8888);
-    let mut reply = vec![0u8; 8];
-    let Ok(msg) = platform::ipc::call(display_tid, &request, &mut reply) else {
+    let request = unsafe {
+        core::slice::from_raw_parts_mut(
+            core::ptr::addr_of_mut!(DISPLAY_PRESENT_REQ).cast::<u8>(),
+            20,
+        )
+    };
+    request.fill(0);
+    put_u32(request, 0, OP_DISPLAY_PRESENT);
+    put_u32(request, 4, frame_w as u32);
+    put_u32(request, 8, frame_h as u32);
+    put_u32(request, 12, frame_w as u32);
+    put_u32(request, 16, PIXEL_FORMAT_XRGB8888);
+    let reply = unsafe {
+        core::slice::from_raw_parts_mut(
+            core::ptr::addr_of_mut!(DISPLAY_PRESENT_REP).cast::<u8>(),
+            8,
+        )
+    };
+    reply.fill(0);
+    let Ok(msg) = platform::ipc::call(display_tid, request, reply) else {
         return mochi_user_syscall::EIO as u32;
     };
     if (msg & 0xffff_ffff) < 4 {
         return mochi_user_syscall::EIO as u32;
     }
-    let status = read_u32(&reply, 0).unwrap_or(mochi_user_syscall::EIO as u32);
+    let status = read_u32(reply, 0).unwrap_or(mochi_user_syscall::EIO as u32);
     status
 }
 
@@ -891,11 +918,23 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         platform::process::exit(1);
     };
     if let Some(input_tid) = find_service(INPUT_SERVICE_NAME) {
-        let mut subscribe = vec![0u8; 16];
-        put_u32(&mut subscribe, 0, platform::input::SUBSCRIBE_OPCODE);
+        let subscribe = unsafe {
+            core::slice::from_raw_parts_mut(
+                core::ptr::addr_of_mut!(INPUT_SUBSCRIBE_REQ).cast::<u8>(),
+                16,
+            )
+        };
+        subscribe.fill(0);
+        put_u32(subscribe, 0, platform::input::SUBSCRIBE_OPCODE);
         subscribe[8..16].copy_from_slice(&endpoint.to_le_bytes());
-        let mut reply = vec![0u8; 8];
-        let _ = platform::ipc::call(input_tid, &subscribe, &mut reply);
+        let reply = unsafe {
+            core::slice::from_raw_parts_mut(
+                core::ptr::addr_of_mut!(INPUT_SUBSCRIBE_REP).cast::<u8>(),
+                8,
+            )
+        };
+        reply.fill(0);
+        let _ = platform::ipc::call(input_tid, subscribe, reply);
     }
     let (display_width, display_height, display_stride, display_format) =
         display_request_info(display_tid);
@@ -907,9 +946,11 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
     let mut pointer_y = 0i32;
     let mut pointer_focus = None;
     let mut keyboard_focus = None;
-    let mut buf = vec![0u8; 4128];
     loop {
-        let Ok(msg) = platform::ipc::wait(endpoint, &mut buf) else {
+        let buf = unsafe {
+            core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(IPC_BUF).cast::<u8>(), 4128)
+        };
+        let Ok(msg) = platform::ipc::wait(endpoint, buf) else {
             platform::thread::yield_now();
             continue;
         };
@@ -941,9 +982,15 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             continue;
         }
         if len == 0 || len > buf.len() {
-            let mut reply = vec![0u8; 4];
-            put_u32(&mut reply, 0, mochi_user_syscall::EINVAL as u32);
-            let _ = platform::ipc::reply(sender, &reply);
+            let reply = unsafe {
+                core::slice::from_raw_parts_mut(
+                    core::ptr::addr_of_mut!(CLIENT_REPLY_BUF).cast::<u8>(),
+                    16,
+                )
+            };
+            reply.fill(0);
+            put_u32(reply, 0, mochi_user_syscall::EINVAL as u32);
+            let _ = platform::ipc::reply(sender, reply);
             continue;
         }
         let reply = handle_request(
@@ -960,8 +1007,14 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             display_stride,
             display_format,
         );
-        let mut reply_buf = vec![0u8; reply.len()];
-        reply_buf.copy_from_slice(&reply);
-        let _ = platform::ipc::reply(sender, &reply_buf);
+        let reply_buf = unsafe {
+            core::slice::from_raw_parts_mut(
+                core::ptr::addr_of_mut!(CLIENT_REPLY_BUF).cast::<u8>(),
+                16,
+            )
+        };
+        reply_buf.fill(0);
+        reply_buf[..reply.len()].copy_from_slice(&reply);
+        let _ = platform::ipc::reply(sender, &reply_buf[..reply.len()]);
     }
 }
