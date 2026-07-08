@@ -537,14 +537,22 @@ fn authorize_dynamic_capability(
     }
 
     let executable = read_request_str(&request.executable.path, request.executable.path_len)?;
-    let executable_bytes = platform::file::read_to_end_path(executable)?;
-    let actual_digest = Sha256::digest(&executable_bytes);
     let mut digest = [0u8; 32];
-    digest.copy_from_slice(&actual_digest);
-    if request.executable.digest != [0; 32] && request.executable.digest != digest {
-        return Err(mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::EACCES as i64,
-        ));
+    let needs_digest = request.executable.digest != [0; 32]
+        || matches!(
+            decision,
+            platform::capability::CapabilityDecision::AllowPersistently
+                | platform::capability::CapabilityDecision::AllowAllUserGrantable
+        );
+    if needs_digest {
+        let executable_bytes = platform::file::read_to_end_path(executable)?;
+        let actual_digest = Sha256::digest(&executable_bytes);
+        digest.copy_from_slice(&actual_digest);
+        if request.executable.digest != [0; 32] && request.executable.digest != digest {
+            return Err(mochi_user_syscall::SysError::from_raw(
+                mochi_user_syscall::EACCES as i64,
+            ));
+        }
     }
 
     let capability = read_request_str(&request.capability, request.capability_len)?;
