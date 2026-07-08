@@ -30,8 +30,19 @@ const OP_DAMAGE: u32 = 3;
 const OP_COMMIT: u32 = 4;
 const OP_SET_POSITION: u32 = 5;
 const OP_DESTROY_SURFACE: u32 = 6;
+const OP_DECOR_SUBSCRIBE: u32 = 100;
+const OP_DECOR_CREATE_SURFACE: u32 = 101;
+const OP_DECOR_ATTACH: u32 = 102;
+const OP_DECOR_DETACH: u32 = 103;
+const OP_DECOR_UPDATE_INSETS: u32 = 104;
+const OP_DECOR_BEGIN_MOVE: u32 = 105;
+const OP_DECOR_BEGIN_RESIZE: u32 = 106;
+const OP_DECOR_MINIMIZE: u32 = 107;
+const OP_DECOR_TOGGLE_MAXIMIZE: u32 = 108;
+const OP_DECOR_CLOSE_REQUEST: u32 = 109;
 const OP_DISPLAY_GET_INFO: u32 = 1;
 const OP_DISPLAY_PRESENT: u32 = 2;
+const DECOR_EVENT_WINDOW: u32 = 0x5749_4e44;
 const EVENT_POINTER_ENTER: u32 = 2;
 const EVENT_POINTER_LEAVE: u32 = 3;
 const EVENT_POINTER_MOTION: u32 = 4;
@@ -46,7 +57,8 @@ const ROLE_BACKGROUND: u32 = 3;
 const ROLE_PANEL: u32 = 4;
 const ROLE_SECURE_OVERLAY: u32 = 5;
 const PIXEL_FORMAT_XRGB8888: u32 = 1;
-const MAX_SURFACES: usize = 8;
+const MAX_SURFACES: usize = 16;
+const MAX_WINDOWS: usize = 8;
 const MAX_CLIENTS: usize = 16;
 const PAGE_SIZE: usize = 4096;
 const MAX_SHARED_PAGES: usize = 128;
@@ -54,12 +66,21 @@ const MAX_SHARED_BYTES: usize = MAX_SHARED_PAGES * PAGE_SIZE;
 const MAX_SHARED_PIXELS: usize = MAX_SHARED_BYTES / 4;
 const MAX_DIMENSION: u32 = 4096;
 const IDLE_CLEANUP_YIELDS: u32 = 64;
+const DECORATE_CAPABILITY: &str = "window.decorate";
+const DECORATE_COMPAT_CAPABILITY: &str = "window.overlay";
+const WINDOW_STATE_NORMAL: u32 = 0;
+const WINDOW_STATE_MINIMIZED: u32 = 1;
+const WINDOW_STATE_MAXIMIZED: u32 = 2;
+const DECOR_TITLE_BAR_HEIGHT: u32 = 28;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct ClientId(u64);
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct SurfaceHandle(u64);
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct WindowId(u64);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SurfaceRole {
@@ -122,6 +143,61 @@ struct Client {
     live: bool,
     sender: u64,
     id: ClientId,
+    decoration_endpoint: u64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Insets {
+    left: u32,
+    top: u32,
+    right: u32,
+    bottom: u32,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Window {
+    live: bool,
+    id: WindowId,
+    token: u64,
+    content: SurfaceHandle,
+    decoration: Option<SurfaceHandle>,
+    decorator: ClientId,
+    decorator_endpoint: u64,
+    insets: Insets,
+    state: u32,
+    resizable: bool,
+    close_requested: bool,
+}
+
+impl Window {
+    const fn empty() -> Self {
+        Self {
+            live: false,
+            id: WindowId(0),
+            token: 0,
+            content: SurfaceHandle(0),
+            decoration: None,
+            decorator: ClientId(0),
+            decorator_endpoint: 0,
+            insets: Insets {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            },
+            state: WINDOW_STATE_NORMAL,
+            resizable: true,
+            close_requested: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct PointerSerial {
+    serial: u64,
+    window: WindowId,
+    decoration: SurfaceHandle,
+    used: bool,
 }
 
 #[allow(dead_code)]
@@ -168,6 +244,9 @@ struct Surface {
     role: SurfaceRole,
     rights: SurfaceRights,
     parent: Option<SurfaceHandle>,
+    window: WindowId,
+    is_decoration: bool,
+    visible: bool,
     x: i32,
     y: i32,
     width: u32,
@@ -197,6 +276,9 @@ impl Surface {
             role: SurfaceRole::Toplevel,
             rights: SurfaceRights::default(),
             parent: None,
+            window: WindowId(0),
+            is_decoration: false,
+            visible: true,
             x: 0,
             y: 0,
             width: 0,
@@ -214,6 +296,36 @@ impl Surface {
             current: Vec::new(),
             z: 0,
         }
+    }
+
+    fn reset(&mut self) {
+        self.live = false;
+        self.owner = ClientId(0);
+        self.event_endpoint = 0;
+        self.handle = SurfaceHandle(0);
+        self.token = 0;
+        self.role = SurfaceRole::Toplevel;
+        self.rights = SurfaceRights::default();
+        self.parent = None;
+        self.window = WindowId(0);
+        self.is_decoration = false;
+        self.visible = true;
+        self.x = 0;
+        self.y = 0;
+        self.width = 0;
+        self.height = 0;
+        self.pending_width = 0;
+        self.pending_height = 0;
+        self.pending_stride = 0;
+        self.pending_len = 0;
+        self.awaiting_buffer = false;
+        self.pending_damage = None;
+        self.pending.clear();
+        self.current_width = 0;
+        self.current_height = 0;
+        self.current_stride = 0;
+        self.current.clear();
+        self.z = 0;
     }
 }
 
@@ -280,6 +392,10 @@ fn put_u32(out: &mut [u8], offset: usize, value: u32) {
     out[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
 
+fn put_u64(out: &mut [u8], offset: usize, value: u64) {
+    out[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
 fn errno_status(errno: u64) -> u32 {
     let signed = errno as i64;
     if signed < 0 {
@@ -291,6 +407,16 @@ fn errno_status(errno: u64) -> u32 {
 
 fn put_i32(out: &mut [u8], offset: usize, value: i32) {
     out[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn sender_has_decorate_capability(sender: u64) -> bool {
+    matches!(
+        platform::capability::check_thread(sender, DECORATE_CAPABILITY),
+        Ok(1)
+    ) || matches!(
+        platform::capability::check_thread(sender, DECORATE_COMPAT_CAPABILITY),
+        Ok(1)
+    )
 }
 
 fn decode_display_info(reply: &[u8]) -> Option<(u32, u32, u32, u32)> {
@@ -354,6 +480,7 @@ fn client_id_for_sender(clients: &mut [Client], sender: u64, next_client_id: &mu
             live: true,
             sender,
             id,
+            decoration_endpoint: 0,
         };
         return id;
     }
@@ -402,6 +529,7 @@ fn clear_focus_for_surface(
 
 fn destroy_surface_tree(
     surfaces: &mut [Surface],
+    windows: &mut [Window],
     index: usize,
     pointer_focus: &mut Option<usize>,
     keyboard_focus: &mut Option<usize>,
@@ -414,15 +542,32 @@ fn destroy_surface_tree(
         return;
     };
     while let Some(child) = surface_index_for_child(surfaces, handle) {
-        destroy_surface_tree(surfaces, child, pointer_focus, keyboard_focus);
+        destroy_surface_tree(surfaces, windows, child, pointer_focus, keyboard_focus);
+    }
+    let window_id = surfaces[index].window;
+    if surfaces[index].is_decoration {
+        if let Some(window_index) = window_index_by_id(windows, window_id) {
+            windows[window_index].decoration = None;
+            windows[window_index].decorator = ClientId(0);
+            windows[window_index].decorator_endpoint = 0;
+        }
+    } else if let Some(window_index) = window_index_by_id(windows, window_id) {
+        if let Some(decoration) = windows[window_index].decoration
+            && let Some(decoration_index) = surface_index_by_handle(surfaces, decoration)
+        {
+            clear_focus_for_surface(surfaces, decoration_index, pointer_focus, keyboard_focus);
+            surfaces[decoration_index].reset();
+        }
+        windows[window_index] = Window::empty();
     }
     clear_focus_for_surface(surfaces, index, pointer_focus, keyboard_focus);
-    surfaces[index] = Surface::empty();
+    surfaces[index].reset();
 }
 
 fn cleanup_client(
     clients: &mut [Client],
     surfaces: &mut [Surface],
+    windows: &mut [Window],
     client: ClientId,
     pointer_focus: &mut Option<usize>,
     keyboard_focus: &mut Option<usize>,
@@ -432,9 +577,22 @@ fn cleanup_client(
     }
     while let Some(index) = surfaces
         .iter()
-        .position(|surface| surface.live && surface.owner == client)
+        .position(|surface| surface.live && surface.owner == client && !surface.is_decoration)
     {
-        destroy_surface_tree(surfaces, index, pointer_focus, keyboard_focus);
+        destroy_surface_tree(surfaces, windows, index, pointer_focus, keyboard_focus);
+    }
+    while let Some(index) = surfaces
+        .iter()
+        .position(|surface| surface.live && surface.owner == client && surface.is_decoration)
+    {
+        destroy_surface_tree(surfaces, windows, index, pointer_focus, keyboard_focus);
+    }
+    for window in windows
+        .iter_mut()
+        .filter(|window| window.live && window.decorator == client)
+    {
+        window.decorator = ClientId(0);
+        window.decorator_endpoint = 0;
     }
     if let Some(record) = clients
         .iter_mut()
@@ -447,6 +605,7 @@ fn cleanup_client(
 fn cleanup_dead_clients(
     clients: &mut [Client],
     surfaces: &mut [Surface],
+    windows: &mut [Window],
     pointer_focus: &mut Option<usize>,
     keyboard_focus: &mut Option<usize>,
 ) -> bool {
@@ -454,7 +613,14 @@ fn cleanup_dead_clients(
     for index in 0..clients.len() {
         let client = clients[index];
         if client.live && !platform::ipc::endpoint_alive(client.sender) {
-            cleanup_client(clients, surfaces, client.id, pointer_focus, keyboard_focus);
+            cleanup_client(
+                clients,
+                surfaces,
+                windows,
+                client.id,
+                pointer_focus,
+                keyboard_focus,
+            );
             changed = true;
         }
     }
@@ -475,6 +641,102 @@ fn generate_surface_token(surfaces: &[Surface]) -> Result<u64, u32> {
         }
     }
     Err(errno_status(mochi_user_syscall::EAGAIN))
+}
+
+fn generate_window_token(windows: &[Window]) -> Result<u64, u32> {
+    for _ in 0..16 {
+        let Some(token) = getrandom_u64() else {
+            return Err(errno_status(mochi_user_syscall::EIO));
+        };
+        if token != 0
+            && windows
+                .iter()
+                .all(|window| !window.live || window.token != token)
+        {
+            return Ok(token);
+        }
+    }
+    Err(errno_status(mochi_user_syscall::EAGAIN))
+}
+
+fn window_index_by_token(windows: &[Window], token: u64) -> Option<usize> {
+    windows
+        .iter()
+        .position(|window| window.live && window.token == token)
+}
+
+fn window_index_by_id(windows: &[Window], id: WindowId) -> Option<usize> {
+    windows
+        .iter()
+        .position(|window| window.live && window.id == id)
+}
+
+fn surface_index_by_handle(surfaces: &[Surface], handle: SurfaceHandle) -> Option<usize> {
+    surfaces
+        .iter()
+        .position(|surface| surface.live && surface.handle == handle && surface.token == handle.0)
+}
+
+fn content_surface_index_for_window(surfaces: &[Surface], window: &Window) -> Option<usize> {
+    surface_index_by_handle(surfaces, window.content)
+}
+
+fn decoration_surface_index_for_window(surfaces: &[Surface], window: &Window) -> Option<usize> {
+    surface_index_by_handle(surfaces, window.decoration?)
+}
+
+fn send_window_metadata(window: &Window, surfaces: &[Surface], endpoint: u64) {
+    if endpoint == 0 || !window.live {
+        return;
+    }
+    let Some(content_index) = content_surface_index_for_window(surfaces, window) else {
+        return;
+    };
+    let content = &surfaces[content_index];
+    let mut event = [0u8; 80];
+    put_u32(&mut event, 0, DECOR_EVENT_WINDOW);
+    put_u64(&mut event, 4, window.token);
+    put_u32(&mut event, 12, content.width);
+    put_u32(&mut event, 16, content.height);
+    put_u32(&mut event, 20, u32::from(window.resizable));
+    put_u32(&mut event, 24, window.state);
+    put_u32(&mut event, 28, window.insets.left);
+    put_u32(&mut event, 32, window.insets.top);
+    put_u32(&mut event, 36, window.insets.right);
+    put_u32(&mut event, 40, window.insets.bottom);
+    let title = b"mochiOS window";
+    put_u32(&mut event, 44, title.len() as u32);
+    event[48..48 + title.len()].copy_from_slice(title);
+    let _ = platform::ipc::send(endpoint, &event);
+}
+
+fn notify_decorators(
+    clients: &[Client],
+    windows: &[Window],
+    surfaces: &[Surface],
+    window_index: usize,
+) {
+    let Some(window) = windows.get(window_index) else {
+        return;
+    };
+    for client in clients
+        .iter()
+        .filter(|client| client.live && client.decoration_endpoint != 0)
+    {
+        send_window_metadata(window, surfaces, client.decoration_endpoint);
+    }
+}
+
+fn reposition_window_surfaces(surfaces: &mut [Surface], window: &Window) {
+    let Some(content_index) = content_surface_index_for_window(surfaces, window) else {
+        return;
+    };
+    let content_x = surfaces[content_index].x;
+    let content_y = surfaces[content_index].y;
+    if let Some(decor_index) = decoration_surface_index_for_window(surfaces, window) {
+        surfaces[decor_index].x = content_x.saturating_sub(window.insets.left as i32);
+        surfaces[decor_index].y = content_y.saturating_sub(window.insets.top as i32);
+    }
 }
 
 fn surface_extent(surface: &Surface) -> (u32, u32) {
@@ -678,7 +940,7 @@ fn hit_test(surfaces: &[Surface], x: i32, y: i32) -> Option<usize> {
     let mut hit = None;
     let mut best_z = 0u32;
     for (index, surface) in surfaces.iter().enumerate() {
-        if !surface.live {
+        if !surface.live || !surface.visible {
             continue;
         }
         let (width, height) = surface_extent(surface);
@@ -731,6 +993,9 @@ fn update_keyboard_focus(
 
 fn handle_input_event(
     surfaces: &[Surface],
+    windows: &[Window],
+    next_pointer_serial: &mut u64,
+    pointer_serials: &mut [PointerSerial],
     pointer_x: &mut i32,
     pointer_y: &mut i32,
     pointer_focus: &mut Option<usize>,
@@ -785,16 +1050,41 @@ fn handle_input_event(
         platform::input::EVENT_KIND_POINTER_BUTTON => {
             let target = hit_test(surfaces, *pointer_x, *pointer_y);
             if event.flags & platform::input::FLAG_PRESS != 0 {
-                update_keyboard_focus(surfaces, keyboard_focus, target);
+                let focus = target.and_then(|index| {
+                    let surface = &surfaces[index];
+                    if surface.is_decoration {
+                        let window_index = window_index_by_id(windows, surface.window)?;
+                        content_surface_index_for_window(surfaces, &windows[window_index])
+                    } else {
+                        Some(index)
+                    }
+                });
+                update_keyboard_focus(surfaces, keyboard_focus, focus);
             }
             if let Some(index) = target {
                 let surface = &surfaces[index];
+                let mut detail = u32::from(event.detail);
+                if event.flags & platform::input::FLAG_PRESS != 0 && surface.is_decoration {
+                    *next_pointer_serial = next_pointer_serial.wrapping_add(1).max(1);
+                    detail = (*next_pointer_serial & 0xffff_ffff) as u32;
+                    if let Some(slot) = pointer_serials
+                        .iter_mut()
+                        .find(|record| record.used || record.serial == 0)
+                    {
+                        *slot = PointerSerial {
+                            serial: *next_pointer_serial,
+                            window: surface.window,
+                            decoration: surface.handle,
+                            used: false,
+                        };
+                    }
+                }
                 send_event(
                     surface.event_endpoint,
                     EVENT_POINTER_BUTTON,
                     *pointer_x - surface.x,
                     *pointer_y - surface.y,
-                    u32::from(event.detail),
+                    detail,
                 );
             }
         }
@@ -863,7 +1153,7 @@ fn composite_and_present(
             *pixel = 0xff00_0000 | shade;
         }
     }
-    for surface in surfaces.iter().filter(|s| s.live) {
+    for surface in surfaces.iter().filter(|s| s.live && s.visible) {
         let Some(surface_len) =
             (surface.current_width as usize).checked_mul(surface.current_height as usize)
         else {
@@ -924,12 +1214,18 @@ fn composite_and_present(
 }
 
 fn handle_request(
+    clients: &mut [Client],
     surfaces: &mut [Surface],
+    windows: &mut [Window],
     next_z: &mut u32,
     next_window_index: &mut u32,
+    next_window_id: &mut u64,
+    _next_pointer_serial: &mut u64,
+    pointer_serials: &mut [PointerSerial],
     pointer_focus: &mut Option<usize>,
     keyboard_focus: &mut Option<usize>,
     client: ClientId,
+    sender: u64,
     request: &[u8],
     display_tid: u64,
     display_width: u32,
@@ -1022,6 +1318,23 @@ fn handle_request(
                 }
             };
             let handle = SurfaceHandle(token);
+            let (window_id, window_token, window_slot) = if role == SurfaceRole::Toplevel {
+                let Some(slot) = windows.iter().position(|window| !window.live) else {
+                    put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ENOSPC));
+                    return reply;
+                };
+                *next_window_id = next_window_id.wrapping_add(1).max(1);
+                let window_token = match generate_window_token(windows) {
+                    Ok(token) => token,
+                    Err(status) => {
+                        put_u32(&mut reply, 0, status);
+                        return reply;
+                    }
+                };
+                (WindowId(*next_window_id), window_token, Some(slot))
+            } else {
+                (WindowId(0), 0, None)
+            };
             let (x, y) = if let Some(parent_handle) = parent {
                 let Some(parent_index) = surfaces
                     .iter()
@@ -1048,7 +1361,7 @@ fn handle_request(
                     48i32.saturating_add((cascade as i32).saturating_mul(24)),
                 )
             };
-            surfaces[index] = Surface::empty();
+            surfaces[index].reset();
             surfaces[index].live = true;
             surfaces[index].owner = client;
             surfaces[index].event_endpoint = event_endpoint;
@@ -1057,11 +1370,23 @@ fn handle_request(
             surfaces[index].role = role;
             surfaces[index].rights = rights;
             surfaces[index].parent = parent;
+            surfaces[index].window = window_id;
+            surfaces[index].is_decoration = false;
+            surfaces[index].visible = true;
             surfaces[index].x = x;
             surfaces[index].y = y;
             surfaces[index].width = width;
             surfaces[index].height = height;
             surfaces[index].z = *next_z;
+            if let Some(slot) = window_slot {
+                windows[slot] = Window::empty();
+                windows[slot].live = true;
+                windows[slot].id = window_id;
+                windows[slot].token = window_token;
+                windows[slot].content = handle;
+                windows[slot].resizable = true;
+                notify_decorators(clients, windows, surfaces, slot);
+            }
             put_u32(&mut reply, 0, 0);
             reply[4..12].copy_from_slice(&token.to_le_bytes());
         }
@@ -1281,7 +1606,7 @@ fn handle_request(
             let handle = SurfaceHandle(token);
             if let Some(index) = surface_index_for(surfaces, client, handle, SurfaceRights::DESTROY)
             {
-                destroy_surface_tree(surfaces, index, pointer_focus, keyboard_focus);
+                destroy_surface_tree(surfaces, windows, index, pointer_focus, keyboard_focus);
                 let status = composite_and_present(
                     surfaces,
                     display_tid,
@@ -1294,6 +1619,305 @@ fn handle_request(
             } else {
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
             }
+        }
+        OP_DECOR_SUBSCRIBE => {
+            if !sender_has_decorate_capability(sender) {
+                platform::println!("compositor.service: decoration subscribe denied");
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            }
+            let endpoint = read_u64(request, 4).unwrap_or(0);
+            if endpoint == 0 {
+                platform::println!("compositor.service: decoration subscribe invalid endpoint");
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
+                return reply;
+            }
+            if let Some(record) = clients
+                .iter_mut()
+                .find(|record| record.live && record.id == client)
+            {
+                record.decoration_endpoint = endpoint;
+            }
+            for window in windows.iter_mut().filter(|window| window.live) {
+                window.decorator = client;
+                window.decorator_endpoint = endpoint;
+                send_window_metadata(window, surfaces, endpoint);
+            }
+            platform::println!("compositor.service: decoration manager subscribed");
+            put_u32(&mut reply, 0, 0);
+        }
+        OP_DECOR_CREATE_SURFACE => {
+            if !sender_has_decorate_capability(sender) {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            }
+            let window_token = read_u64(request, 4).unwrap_or(0);
+            let width = read_u32(request, 12).unwrap_or(0);
+            let height = read_u32(request, 16).unwrap_or(0);
+            let event_endpoint = read_u64(request, 20).unwrap_or(0);
+            if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
+                return reply;
+            }
+            let Some(window_index) = window_index_by_token(windows, window_token) else {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            };
+            let Some(content_index) =
+                content_surface_index_for_window(surfaces, &windows[window_index])
+            else {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            };
+            let Some(index) = surfaces.iter().position(|surface| !surface.live) else {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ENOSPC));
+                return reply;
+            };
+            let token = match generate_surface_token(surfaces) {
+                Ok(token) => token,
+                Err(status) => {
+                    put_u32(&mut reply, 0, status);
+                    return reply;
+                }
+            };
+            *next_z = next_z.wrapping_add(1);
+            let handle = SurfaceHandle(token);
+            surfaces[index].reset();
+            surfaces[index].live = true;
+            surfaces[index].owner = client;
+            surfaces[index].event_endpoint = event_endpoint;
+            surfaces[index].handle = handle;
+            surfaces[index].token = token;
+            surfaces[index].role = SurfaceRole::Popup;
+            surfaces[index].rights = SurfaceRights::GENERAL_CLIENT;
+            surfaces[index].window = windows[window_index].id;
+            surfaces[index].is_decoration = true;
+            surfaces[index].visible = true;
+            surfaces[index].x = surfaces[content_index].x;
+            surfaces[index].y = surfaces[content_index]
+                .y
+                .saturating_sub(DECOR_TITLE_BAR_HEIGHT as i32);
+            surfaces[index].width = width;
+            surfaces[index].height = height;
+            surfaces[index].z = *next_z;
+            put_u32(&mut reply, 0, 0);
+            reply[4..12].copy_from_slice(&token.to_le_bytes());
+        }
+        OP_DECOR_ATTACH => {
+            if !sender_has_decorate_capability(sender) {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            }
+            let window_token = read_u64(request, 4).unwrap_or(0);
+            let decoration_token = read_u64(request, 12).unwrap_or(0);
+            let insets = Insets {
+                left: read_u32(request, 20).unwrap_or(0),
+                top: read_u32(request, 24).unwrap_or(0),
+                right: read_u32(request, 28).unwrap_or(0),
+                bottom: read_u32(request, 32).unwrap_or(0),
+            };
+            if insets.left > MAX_DIMENSION
+                || insets.top > MAX_DIMENSION
+                || insets.right > MAX_DIMENSION
+                || insets.bottom > MAX_DIMENSION
+            {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
+                return reply;
+            }
+            let Some(window_index) = window_index_by_token(windows, window_token) else {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            };
+            let handle = SurfaceHandle(decoration_token);
+            let Some(decoration_index) =
+                surface_index_for(surfaces, client, handle, SurfaceRights::COMMIT)
+            else {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            };
+            if !surfaces[decoration_index].is_decoration
+                || surfaces[decoration_index].window != windows[window_index].id
+            {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            }
+            windows[window_index].decoration = Some(handle);
+            windows[window_index].decorator = client;
+            windows[window_index].decorator_endpoint = surfaces[decoration_index].event_endpoint;
+            windows[window_index].insets = insets;
+            reposition_window_surfaces(surfaces, &windows[window_index]);
+            put_u32(&mut reply, 0, 0);
+        }
+        OP_DECOR_DETACH => {
+            if !sender_has_decorate_capability(sender) {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            }
+            let window_token = read_u64(request, 4).unwrap_or(0);
+            let Some(window_index) = window_index_by_token(windows, window_token) else {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            };
+            if windows[window_index].decorator != client {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            }
+            windows[window_index].decoration = None;
+            windows[window_index].decorator = ClientId(0);
+            windows[window_index].decorator_endpoint = 0;
+            put_u32(&mut reply, 0, 0);
+        }
+        OP_DECOR_UPDATE_INSETS => {
+            if !sender_has_decorate_capability(sender) {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            }
+            let window_token = read_u64(request, 4).unwrap_or(0);
+            let Some(window_index) = window_index_by_token(windows, window_token) else {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            };
+            if windows[window_index].decorator != client {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            }
+            windows[window_index].insets = Insets {
+                left: read_u32(request, 12).unwrap_or(0).min(MAX_DIMENSION),
+                top: read_u32(request, 16).unwrap_or(0).min(MAX_DIMENSION),
+                right: read_u32(request, 20).unwrap_or(0).min(MAX_DIMENSION),
+                bottom: read_u32(request, 24).unwrap_or(0).min(MAX_DIMENSION),
+            };
+            reposition_window_surfaces(surfaces, &windows[window_index]);
+            put_u32(&mut reply, 0, 0);
+        }
+        OP_DECOR_BEGIN_MOVE | OP_DECOR_BEGIN_RESIZE => {
+            if !sender_has_decorate_capability(sender) {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            }
+            let window_token = read_u64(request, 4).unwrap_or(0);
+            let serial = read_u64(request, 12).unwrap_or(0);
+            let dx = read_u32(request, 20).unwrap_or(0) as i32;
+            let dy = read_u32(request, 24).unwrap_or(0) as i32;
+            let Some(window_index) = window_index_by_token(windows, window_token) else {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            };
+            if windows[window_index].decorator != client {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            }
+            let Some(serial_index) = pointer_serials.iter().position(|record| {
+                record.serial == serial
+                    && record.window == windows[window_index].id
+                    && !record.used
+                    && Some(record.decoration) == windows[window_index].decoration
+            }) else {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            };
+            pointer_serials[serial_index].used = true;
+            if opcode == OP_DECOR_BEGIN_MOVE {
+                if let Some(content_index) =
+                    content_surface_index_for_window(surfaces, &windows[window_index])
+                {
+                    surfaces[content_index].x = surfaces[content_index].x.saturating_add(dx);
+                    surfaces[content_index].y = surfaces[content_index].y.saturating_add(dy);
+                }
+                reposition_window_surfaces(surfaces, &windows[window_index]);
+                let status = composite_and_present(
+                    surfaces,
+                    display_tid,
+                    display_width,
+                    display_height,
+                    display_stride,
+                    display_format,
+                );
+                put_u32(&mut reply, 0, status);
+            } else {
+                put_u32(&mut reply, 0, 0);
+            }
+        }
+        OP_DECOR_MINIMIZE | OP_DECOR_TOGGLE_MAXIMIZE => {
+            if !sender_has_decorate_capability(sender) {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            }
+            let window_token = read_u64(request, 4).unwrap_or(0);
+            let Some(window_index) = window_index_by_token(windows, window_token) else {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            };
+            if windows[window_index].decorator != client {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            }
+            if opcode == OP_DECOR_MINIMIZE {
+                windows[window_index].state = WINDOW_STATE_MINIMIZED;
+            } else {
+                windows[window_index].state =
+                    if windows[window_index].state == WINDOW_STATE_MAXIMIZED {
+                        WINDOW_STATE_NORMAL
+                    } else {
+                        WINDOW_STATE_MAXIMIZED
+                    };
+            }
+            let visible = windows[window_index].state != WINDOW_STATE_MINIMIZED;
+            if let Some(content_index) =
+                content_surface_index_for_window(surfaces, &windows[window_index])
+            {
+                surfaces[content_index].visible = visible;
+            }
+            if let Some(decoration_index) =
+                decoration_surface_index_for_window(surfaces, &windows[window_index])
+            {
+                surfaces[decoration_index].visible = visible;
+            }
+            let status = composite_and_present(
+                surfaces,
+                display_tid,
+                display_width,
+                display_height,
+                display_stride,
+                display_format,
+            );
+            put_u32(&mut reply, 0, status);
+        }
+        OP_DECOR_CLOSE_REQUEST => {
+            if !sender_has_decorate_capability(sender) {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            }
+            let window_token = read_u64(request, 4).unwrap_or(0);
+            let Some(window_index) = window_index_by_token(windows, window_token) else {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            };
+            if windows[window_index].decorator != client {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            }
+            windows[window_index].close_requested = true;
+            if let Some(content_index) =
+                content_surface_index_for_window(surfaces, &windows[window_index])
+            {
+                destroy_surface_tree(
+                    surfaces,
+                    windows,
+                    content_index,
+                    pointer_focus,
+                    keyboard_focus,
+                );
+            }
+            let status = composite_and_present(
+                surfaces,
+                display_tid,
+                display_width,
+                display_height,
+                display_stride,
+                display_format,
+            );
+            put_u32(&mut reply, 0, status);
         }
         _ => put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL)),
     }
@@ -1339,8 +1963,12 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
     let mut clients = [Client::default(); MAX_CLIENTS];
     let mut next_client_id = 0u64;
     let mut surfaces: Vec<Surface> = vec![Surface::empty(); MAX_SURFACES];
+    let mut windows = [Window::empty(); MAX_WINDOWS];
     let mut next_z = 0u32;
     let mut next_window_index = 0u32;
+    let mut next_window_id = 0u64;
+    let mut next_pointer_serial = 0u64;
+    let mut pointer_serials = [PointerSerial::default(); 32];
     let mut pointer_x = 0i32;
     let mut pointer_y = 0i32;
     let mut pointer_focus = None;
@@ -1362,6 +1990,7 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
                     if cleanup_dead_clients(
                         &mut clients,
                         &mut surfaces,
+                        &mut windows,
                         &mut pointer_focus,
                         &mut keyboard_focus,
                     ) {
@@ -1402,6 +2031,9 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             };
             handle_input_event(
                 &surfaces,
+                &windows,
+                &mut next_pointer_serial,
+                &mut pointer_serials,
                 &mut pointer_x,
                 &mut pointer_y,
                 &mut pointer_focus,
@@ -1436,12 +2068,18 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             continue;
         }
         let reply = handle_request(
+            &mut clients,
             &mut surfaces,
+            &mut windows,
             &mut next_z,
             &mut next_window_index,
+            &mut next_window_id,
+            &mut next_pointer_serial,
+            &mut pointer_serials,
             &mut pointer_focus,
             &mut keyboard_focus,
             client,
+            sender,
             &buf[..len],
             display_tid,
             display_width,
@@ -1461,6 +2099,7 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             cleanup_client(
                 &mut clients,
                 &mut surfaces,
+                &mut windows,
                 client,
                 &mut pointer_focus,
                 &mut keyboard_focus,

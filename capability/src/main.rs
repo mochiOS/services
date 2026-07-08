@@ -312,6 +312,7 @@ fn is_known_capability(name: &str) -> bool {
             | "process.kill"
             | "window.create"
             | "window.overlay"
+            | "window.decorate"
             | "window.capture"
             | "display.read"
             | "display.capture"
@@ -536,11 +537,6 @@ fn authorize_dynamic_capability(
     }
 
     let executable = read_request_str(&request.executable.path, request.executable.path_len)?;
-    if index.by_binary.contains_key(executable) {
-        return Err(mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::EACCES as i64,
-        ));
-    }
     let executable_bytes = platform::file::read_to_end_path(executable)?;
     let actual_digest = Sha256::digest(&executable_bytes);
     let mut digest = [0u8; 32];
@@ -559,6 +555,18 @@ fn authorize_dynamic_capability(
         return Err(mochi_user_syscall::SysError::from_raw(
             mochi_user_syscall::EACCES as i64,
         ));
+    }
+    if let Some(record) = index.by_binary.get(executable) {
+        let manifest =
+            platform::package::read_manifest(&record.manifest_path).ok_or_else(|| {
+                mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
+            })?;
+        let declared_caps = binary_caps(&manifest, executable)?;
+        if !declared_caps.iter().any(|cap| cap.as_str() == capability) {
+            return Err(mochi_user_syscall::SysError::from_raw(
+                mochi_user_syscall::EACCES as i64,
+            ));
+        }
     }
     if matches!(
         decision,
