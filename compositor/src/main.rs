@@ -167,6 +167,7 @@ struct Window {
     state: u32,
     resizable: bool,
     close_requested: bool,
+    metadata_sent: bool,
 }
 
 impl Window {
@@ -188,6 +189,7 @@ impl Window {
             state: WINDOW_STATE_NORMAL,
             resizable: true,
             close_requested: false,
+            metadata_sent: false,
         }
     }
 }
@@ -344,7 +346,6 @@ static mut DISPLAY_REP_BUF: [u8; 32] = [0; 32];
 static mut DISPLAY_PRESENT_REQ: [u8; 20] = [0; 20];
 static mut INPUT_SUBSCRIBE_REQ: [u8; 16] = [0; 16];
 static mut INPUT_SUBSCRIBE_REP: [u8; 8] = [0; 8];
-static mut CLIENT_REPLY_BUF: [u8; 16] = [0; 16];
 static mut TOKEN_RANDOM_BUF: [u8; 8] = [0; 8];
 static mut IPC_BUF: [u8; 4128] = [0; 4128];
 
@@ -687,17 +688,31 @@ fn decoration_surface_index_for_window(surfaces: &[Surface], window: &Window) ->
 
 fn send_window_metadata(window: &Window, surfaces: &[Surface], endpoint: u64) {
     if endpoint == 0 || !window.live {
+        platform::println!("compositor: decor metadata skip endpoint/window");
         return;
     }
     let Some(content_index) = content_surface_index_for_window(surfaces, window) else {
+        platform::println!("compositor: decor metadata skip no content");
         return;
     };
     let content = &surfaces[content_index];
+    let (content_width, content_height) = surface_extent(content);
+    if content_width == 0 || content_height == 0 {
+        platform::println!("compositor: decor metadata skip no size");
+        return;
+    }
+    platform::println!(
+        "compositor: decor metadata send endpoint={} window=0x{:016x} size={}x{}",
+        endpoint,
+        window.token,
+        content_width,
+        content_height
+    );
     let mut event = [0u8; 80];
     put_u32(&mut event, 0, DECOR_EVENT_WINDOW);
     put_u64(&mut event, 4, window.token);
-    put_u32(&mut event, 12, content.width);
-    put_u32(&mut event, 16, content.height);
+    put_u32(&mut event, 12, content_width);
+    put_u32(&mut event, 16, content_height);
     put_u32(&mut event, 20, u32::from(window.resizable));
     put_u32(&mut event, 24, window.state);
     put_u32(&mut event, 28, window.insets.left);
@@ -717,14 +732,25 @@ fn notify_decorators(
     window_index: usize,
 ) {
     let Some(window) = windows.get(window_index) else {
+        platform::println!(
+            "compositor: decor notify skip no window index={}",
+            window_index
+        );
         return;
     };
+    let mut count = 0usize;
     for client in clients
         .iter()
         .filter(|client| client.live && client.decoration_endpoint != 0)
     {
+        count += 1;
         send_window_metadata(window, surfaces, client.decoration_endpoint);
     }
+    platform::println!(
+        "compositor: decor notify window=0x{:016x} decorators={}",
+        window.token,
+        count
+    );
 }
 
 fn reposition_window_surfaces(surfaces: &mut [Surface], window: &Window) {
@@ -845,7 +871,7 @@ fn errno_from_platform(err: mochi_user_syscall::SysError) -> u32 {
 }
 
 fn send_frame_done(surface: &Surface) {
-    if surface.event_endpoint == 0 {
+    if surface.event_endpoint == 0 || surface.is_decoration {
         return;
     }
     let mut event = [0u8; 20];
@@ -1227,11 +1253,12 @@ fn handle_request(
     client: ClientId,
     sender: u64,
     request: &[u8],
-    display_tid: u64,
-    display_width: u32,
-    display_height: u32,
-    display_stride: u32,
-    display_format: u32,
+    needs_present: &mut bool,
+    _display_tid: u64,
+    _display_width: u32,
+    _display_height: u32,
+    _display_stride: u32,
+    _display_format: u32,
 ) -> [u8; 16] {
     let mut reply = [0u8; 16];
     let Some(opcode) = read_u32(request, 0) else {
@@ -1385,7 +1412,6 @@ fn handle_request(
                 windows[slot].token = window_token;
                 windows[slot].content = handle;
                 windows[slot].resizable = true;
-                notify_decorators(clients, windows, surfaces, slot);
             }
             put_u32(&mut reply, 0, 0);
             reply[4..12].copy_from_slice(&token.to_le_bytes());
@@ -1551,52 +1577,41 @@ fn handle_request(
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                 return reply;
             }
-            let old_current;
-            let old_current_width;
-            let old_current_height;
-            let old_current_stride;
             {
                 let surface = &mut surfaces[index];
-                let mut next_current = Vec::new();
-                if !resize_buffer(&mut next_current, pending_width, pending_height) {
-                    put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ENOMEM));
-                    return reply;
-                }
-                next_current[..needed].copy_from_slice(&surface.pending[..needed]);
-                old_current = core::mem::replace(&mut surface.current, next_current);
-                old_current_width = surface.current_width;
-                old_current_height = surface.current_height;
-                old_current_stride = surface.current_stride;
+                core::mem::swap(&mut surface.current, &mut surface.pending);
                 surface.current_width = pending_width;
                 surface.current_height = pending_height;
-                surface.current_stride = pending_width;
+                surface.current_stride = pending_stride;
+                surface.pending_width = 0;
+                surface.pending_height = 0;
+                surface.pending_stride = 0;
+                surface.pending_len = 0;
+                surface.pending_damage = None;
+                surface.awaiting_buffer = false;
             }
-            let status = composite_and_present(
-                surfaces,
-                display_tid,
-                display_width,
-                display_height,
-                display_stride,
-                display_format,
-            );
-            if status == 0 {
-                for surface in surfaces.iter().filter(|surface| surface.live) {
-                    send_frame_done(surface);
+            *needs_present = !surfaces[index].is_decoration;
+            if !surfaces[index].is_decoration {
+                let window_id = surfaces[index].window;
+                if let Some(window_index) = window_index_by_id(windows, window_id) {
+                    if !windows[window_index].metadata_sent {
+                        platform::println!(
+                            "compositor: decor notify on commit window=0x{:016x}",
+                            windows[window_index].token
+                        );
+                        windows[window_index].metadata_sent = true;
+                        notify_decorators(clients, windows, surfaces, window_index);
+                    } else {
+                        platform::println!("compositor: decor notify skip already sent");
+                    }
+                } else {
+                    platform::println!(
+                        "compositor: decor notify skip no window id={}",
+                        window_id.0
+                    );
                 }
-            } else {
-                platform::println!(
-                    "compositor.service: commit present failed status={} surface={}x{}",
-                    status,
-                    pending_width,
-                    pending_height
-                );
-                let surface = &mut surfaces[index];
-                surface.current = old_current;
-                surface.current_width = old_current_width;
-                surface.current_height = old_current_height;
-                surface.current_stride = old_current_stride;
             }
-            put_u32(&mut reply, 0, status);
+            put_u32(&mut reply, 0, 0);
         }
         OP_SET_POSITION => {
             put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
@@ -1607,28 +1622,19 @@ fn handle_request(
             if let Some(index) = surface_index_for(surfaces, client, handle, SurfaceRights::DESTROY)
             {
                 destroy_surface_tree(surfaces, windows, index, pointer_focus, keyboard_focus);
-                let status = composite_and_present(
-                    surfaces,
-                    display_tid,
-                    display_width,
-                    display_height,
-                    display_stride,
-                    display_format,
-                );
-                put_u32(&mut reply, 0, status);
+                *needs_present = true;
+                put_u32(&mut reply, 0, 0);
             } else {
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
             }
         }
         OP_DECOR_SUBSCRIBE => {
             if !sender_has_decorate_capability(sender) {
-                platform::println!("compositor.service: decoration subscribe denied");
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
                 return reply;
             }
             let endpoint = read_u64(request, 4).unwrap_or(0);
             if endpoint == 0 {
-                platform::println!("compositor.service: decoration subscribe invalid endpoint");
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                 return reply;
             }
@@ -1637,13 +1643,18 @@ fn handle_request(
                 .find(|record| record.live && record.id == client)
             {
                 record.decoration_endpoint = endpoint;
+                platform::println!(
+                    "compositor: decor subscribe client={} endpoint={}",
+                    client.0,
+                    endpoint
+                );
             }
-            for window in windows.iter_mut().filter(|window| window.live) {
-                window.decorator = client;
-                window.decorator_endpoint = endpoint;
+            for window in windows
+                .iter()
+                .filter(|window| window.live && window.metadata_sent)
+            {
                 send_window_metadata(window, surfaces, endpoint);
             }
-            platform::println!("compositor.service: decoration manager subscribed");
             put_u32(&mut reply, 0, 0);
         }
         OP_DECOR_CREATE_SURFACE => {
@@ -1741,8 +1752,29 @@ fn handle_request(
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
                 return reply;
             }
+            if surfaces[decoration_index].current.is_empty()
+                && !surfaces[decoration_index].pending.is_empty()
+                && surfaces[decoration_index].pending_width != 0
+                && surfaces[decoration_index].pending_height != 0
+            {
+                let surface = &mut surfaces[decoration_index];
+                let pending_width = surface.pending_width;
+                let pending_height = surface.pending_height;
+                let pending_stride = surface.pending_stride;
+                core::mem::swap(&mut surface.current, &mut surface.pending);
+                surface.current_width = pending_width;
+                surface.current_height = pending_height;
+                surface.current_stride = pending_stride;
+                surface.pending_width = 0;
+                surface.pending_height = 0;
+                surface.pending_stride = 0;
+                surface.pending_len = 0;
+                surface.pending_damage = None;
+                surface.awaiting_buffer = false;
+            }
             windows[window_index].decoration = Some(handle);
             windows[window_index].decorator = client;
+            *needs_present = true;
             windows[window_index].decorator_endpoint = surfaces[decoration_index].event_endpoint;
             windows[window_index].insets = insets;
             reposition_window_surfaces(surfaces, &windows[window_index]);
@@ -1825,15 +1857,8 @@ fn handle_request(
                     surfaces[content_index].y = surfaces[content_index].y.saturating_add(dy);
                 }
                 reposition_window_surfaces(surfaces, &windows[window_index]);
-                let status = composite_and_present(
-                    surfaces,
-                    display_tid,
-                    display_width,
-                    display_height,
-                    display_stride,
-                    display_format,
-                );
-                put_u32(&mut reply, 0, status);
+                *needs_present = true;
+                put_u32(&mut reply, 0, 0);
             } else {
                 put_u32(&mut reply, 0, 0);
             }
@@ -1873,15 +1898,8 @@ fn handle_request(
             {
                 surfaces[decoration_index].visible = visible;
             }
-            let status = composite_and_present(
-                surfaces,
-                display_tid,
-                display_width,
-                display_height,
-                display_stride,
-                display_format,
-            );
-            put_u32(&mut reply, 0, status);
+            *needs_present = true;
+            put_u32(&mut reply, 0, 0);
         }
         OP_DECOR_CLOSE_REQUEST => {
             if !sender_has_decorate_capability(sender) {
@@ -1909,15 +1927,8 @@ fn handle_request(
                     keyboard_focus,
                 );
             }
-            let status = composite_and_present(
-                surfaces,
-                display_tid,
-                display_width,
-                display_height,
-                display_stride,
-                display_format,
-            );
-            put_u32(&mut reply, 0, status);
+            *needs_present = true;
+            put_u32(&mut reply, 0, 0);
         }
         _ => put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL)),
     }
@@ -2043,30 +2054,19 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             continue;
         }
         if len == 0 || len > buf.len() {
-            let reply = unsafe {
-                core::slice::from_raw_parts_mut(
-                    core::ptr::addr_of_mut!(CLIENT_REPLY_BUF).cast::<u8>(),
-                    16,
-                )
-            };
-            reply.fill(0);
-            put_u32(reply, 0, errno_status(mochi_user_syscall::EINVAL));
-            let _ = platform::ipc::reply(sender, reply);
+            let mut reply = [0u8; 16];
+            put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
+            let _ = platform::ipc::reply(sender, &reply);
             continue;
         }
         let client = client_id_for_sender(&mut clients, sender, &mut next_client_id);
         if client == ClientId(0) {
-            let reply = unsafe {
-                core::slice::from_raw_parts_mut(
-                    core::ptr::addr_of_mut!(CLIENT_REPLY_BUF).cast::<u8>(),
-                    16,
-                )
-            };
-            reply.fill(0);
-            put_u32(reply, 0, errno_status(mochi_user_syscall::ENOSPC));
-            let _ = platform::ipc::reply(sender, reply);
+            let mut reply = [0u8; 16];
+            put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ENOSPC));
+            let _ = platform::ipc::reply(sender, &reply);
             continue;
         }
+        let mut needs_present = false;
         let reply = handle_request(
             &mut clients,
             &mut surfaces,
@@ -2081,21 +2081,14 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             client,
             sender,
             &buf[..len],
+            &mut needs_present,
             display_tid,
             display_width,
             display_height,
             display_stride,
             display_format,
         );
-        let reply_buf = unsafe {
-            core::slice::from_raw_parts_mut(
-                core::ptr::addr_of_mut!(CLIENT_REPLY_BUF).cast::<u8>(),
-                16,
-            )
-        };
-        reply_buf.fill(0);
-        reply_buf[..reply.len()].copy_from_slice(&reply);
-        if platform::ipc::reply(sender, &reply_buf[..reply.len()]).is_err() {
+        if platform::ipc::reply(sender, &reply).is_err() {
             cleanup_client(
                 &mut clients,
                 &mut surfaces,
@@ -2104,6 +2097,24 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
                 &mut pointer_focus,
                 &mut keyboard_focus,
             );
+        } else {
+            if needs_present {
+                let status = composite_and_present(
+                    &surfaces,
+                    display_tid,
+                    display_width,
+                    display_height,
+                    display_stride,
+                    display_format,
+                );
+                if status == 0 {
+                    for surface in surfaces.iter().filter(|surface| surface.live) {
+                        send_frame_done(surface);
+                    }
+                } else {
+                    platform::println!("compositor.service: present deferred status={}", status);
+                }
+            }
         }
     }
 }
