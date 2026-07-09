@@ -257,6 +257,7 @@ struct Surface {
     pending_height: u32,
     pending_stride: u32,
     pending_len: usize,
+    pending_bytes_received: usize,
     awaiting_buffer: bool,
     pending_damage: Option<Rect>,
     pending: Vec<u32>,
@@ -289,6 +290,7 @@ impl Surface {
             pending_height: 0,
             pending_stride: 0,
             pending_len: 0,
+            pending_bytes_received: 0,
             awaiting_buffer: false,
             pending_damage: None,
             pending: Vec::new(),
@@ -320,6 +322,7 @@ impl Surface {
         self.pending_height = 0;
         self.pending_stride = 0;
         self.pending_len = 0;
+        self.pending_bytes_received = 0;
         self.awaiting_buffer = false;
         self.pending_damage = None;
         self.pending.clear();
@@ -899,7 +902,7 @@ fn handle_shared_buffer(
         surface.awaiting_buffer = false;
         return true;
     }
-    let Ok((row_bytes, needed_bytes, pixels)) = validate_buffer_layout(
+    let Ok((_row_bytes, needed_bytes, pixels)) = validate_buffer_layout(
         width,
         height,
         stride,
@@ -914,7 +917,7 @@ fn handle_shared_buffer(
         surface.awaiting_buffer = false;
         return true;
     };
-    if total > MAX_SHARED_BYTES || total < needed_bytes {
+    if total == 0 || total > MAX_SHARED_BYTES {
         surface.awaiting_buffer = false;
         return true;
     }
@@ -926,39 +929,31 @@ fn handle_shared_buffer(
         surface.awaiting_buffer = false;
         return true;
     }
-    let bytes = unsafe { core::slice::from_raw_parts(mapped_addr as *const u8, needed_bytes) };
-    for y in 0..height as usize {
-        let Some(src_row) = y.checked_mul(row_bytes) else {
-            surface.awaiting_buffer = false;
-            return true;
-        };
-        let Some(dst_row) = y.checked_mul(width as usize) else {
-            surface.awaiting_buffer = false;
-            return true;
-        };
-        for x in 0..width as usize {
-            let Some(src) = src_row.checked_add(x.saturating_mul(4)) else {
-                surface.awaiting_buffer = false;
-                return true;
-            };
-            let Some(pixel) = read_pixel(bytes, src) else {
-                surface.awaiting_buffer = false;
-                return true;
-            };
-            let Some(dst) = dst_row.checked_add(x) else {
-                surface.awaiting_buffer = false;
-                return true;
-            };
-            let Some(slot) = surface.pending.get_mut(dst) else {
-                surface.awaiting_buffer = false;
-                return true;
-            };
-            *slot = pixel;
-        }
+    if surface.pending_bytes_received >= needed_bytes {
+        surface.awaiting_buffer = false;
+        return true;
     }
+    let remaining = needed_bytes - surface.pending_bytes_received;
+    let copy_len = total.min(remaining);
+    let bytes = unsafe { core::slice::from_raw_parts(mapped_addr as *const u8, copy_len) };
+    let pending_bytes =
+        unsafe { core::slice::from_raw_parts_mut(surface.pending.as_mut_ptr().cast::<u8>(), pixels * 4) };
+    let start = surface.pending_bytes_received;
+    let Some(end) = start.checked_add(copy_len) else {
+        surface.awaiting_buffer = false;
+        return true;
+    };
+    let Some(dst) = pending_bytes.get_mut(start..end) else {
+        surface.awaiting_buffer = false;
+        return true;
+    };
+    dst.copy_from_slice(bytes);
+    surface.pending_bytes_received = end;
     surface.pending_len = pixels;
     surface.pending_damage = Some(Rect::full(width, height));
-    surface.awaiting_buffer = false;
+    if surface.pending_bytes_received >= needed_bytes {
+        surface.awaiting_buffer = false;
+    }
     true
 }
 
@@ -1451,19 +1446,21 @@ fn handle_request(
                     return reply;
                 }
             };
-            if needed > MAX_SHARED_BYTES {
-                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ERANGE));
-                return reply;
-            }
             if request.len() == 28 {
                 let surface = &mut surfaces[index];
                 surface.pending_width = width;
                 surface.pending_height = height;
                 surface.pending_stride = stride;
                 surface.pending_len = pixels;
+                surface.pending_bytes_received = 0;
+                surface.pending.clear();
                 surface.pending_damage = Some(Rect::full(width, height));
                 surface.awaiting_buffer = true;
             } else {
+                if needed > MAX_SHARED_BYTES {
+                    put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ERANGE));
+                    return reply;
+                }
                 if request.len() < 28 + needed {
                     put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                     return reply;
@@ -1511,6 +1508,7 @@ fn handle_request(
                 surface.pending_height = height;
                 surface.pending_stride = stride;
                 surface.pending_len = pixels;
+                surface.pending_bytes_received = needed;
                 surface.pending_damage = Some(Rect::full(width, height));
                 surface.awaiting_buffer = false;
             }
@@ -1552,16 +1550,17 @@ fn handle_request(
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
                 return reply;
             };
-            let (pending_width, pending_height, pending_len, pending_stride) = {
+            let (pending_width, pending_height, pending_len, pending_stride, awaiting_buffer) = {
                 let surface = &surfaces[index];
                 (
                     surface.pending_width,
                     surface.pending_height,
                     surface.pending_len,
                     surface.pending_stride,
+                    surface.awaiting_buffer,
                 )
             };
-            if pending_width == 0 || pending_len == 0 {
+            if awaiting_buffer || pending_width == 0 || pending_len == 0 {
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                 return reply;
             }
@@ -1587,6 +1586,7 @@ fn handle_request(
                 surface.pending_height = 0;
                 surface.pending_stride = 0;
                 surface.pending_len = 0;
+                surface.pending_bytes_received = 0;
                 surface.pending_damage = None;
                 surface.awaiting_buffer = false;
             }
