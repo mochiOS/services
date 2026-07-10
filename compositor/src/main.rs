@@ -936,8 +936,9 @@ fn handle_shared_buffer(
     let remaining = needed_bytes - surface.pending_bytes_received;
     let copy_len = total.min(remaining);
     let bytes = unsafe { core::slice::from_raw_parts(mapped_addr as *const u8, copy_len) };
-    let pending_bytes =
-        unsafe { core::slice::from_raw_parts_mut(surface.pending.as_mut_ptr().cast::<u8>(), pixels * 4) };
+    let pending_bytes = unsafe {
+        core::slice::from_raw_parts_mut(surface.pending.as_mut_ptr().cast::<u8>(), pixels * 4)
+    };
     let start = surface.pending_bytes_received;
     let Some(end) = start.checked_add(copy_len) else {
         surface.awaiting_buffer = false;
@@ -1084,7 +1085,11 @@ fn handle_input_event(
             }
             if let Some(index) = target {
                 let surface = &surfaces[index];
-                let mut detail = u32::from(event.detail);
+                let mut detail = if surface.is_decoration {
+                    u32::from(event.detail)
+                } else {
+                    (u32::from(event.flags) << 16) | u32::from(event.detail)
+                };
                 if event.flags & platform::input::FLAG_PRESS != 0 && surface.is_decoration {
                     *next_pointer_serial = next_pointer_serial.wrapping_add(1).max(1);
                     detail = (*next_pointer_serial & 0xffff_ffff) as u32;

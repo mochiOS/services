@@ -210,6 +210,14 @@ fn keycode_for_scancode(scancode: u8, extended: bool) -> Option<u16> {
         (0x33, false) => KEY_COMMA,
         (0x34, false) => KEY_DOT,
         (0x35, false) => KEY_SLASH,
+        (0x47, true) => KEY_HOME,
+        (0x49, true) => KEY_PAGE_UP,
+        (0x4b, true) => KEY_LEFT,
+        (0x4d, true) => KEY_RIGHT,
+        (0x4f, true) => KEY_END,
+        (0x50, true) => KEY_DOWN,
+        (0x51, true) => KEY_PAGE_DOWN,
+        (0x53, true) => KEY_DELETE,
         _ => return None,
     })
 }
