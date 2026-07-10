@@ -61,10 +61,10 @@ const MAX_SURFACES: usize = 16;
 const MAX_WINDOWS: usize = 8;
 const MAX_CLIENTS: usize = 16;
 const PAGE_SIZE: usize = 4096;
-const MAX_SHARED_PAGES: usize = 128;
+const MAX_SHARED_PAGES: usize = 262_144;
 const MAX_SHARED_BYTES: usize = MAX_SHARED_PAGES * PAGE_SIZE;
 const MAX_SHARED_PIXELS: usize = MAX_SHARED_BYTES / 4;
-const MAX_DIMENSION: u32 = 4096;
+const MAX_DIMENSION: u32 = 16_384;
 const IDLE_CLEANUP_YIELDS: u32 = 64;
 const DECORATE_CAPABILITY: &str = "window.decorate";
 const DECORATE_COMPAT_CAPABILITY: &str = "window.overlay";
@@ -237,6 +237,16 @@ struct PopupPlacement {
 }
 
 #[derive(Clone)]
+struct SurfaceBuffer {
+    mapped_addr: u64,
+    byte_len: usize,
+    width: u32,
+    height: u32,
+    stride: u32,
+    pixels: usize,
+}
+
+#[derive(Clone)]
 struct Surface {
     live: bool,
     owner: ClientId,
@@ -260,10 +270,12 @@ struct Surface {
     pending_bytes_received: usize,
     awaiting_buffer: bool,
     pending_damage: Option<Rect>,
+    pending_buffer: Option<SurfaceBuffer>,
     pending: Vec<u32>,
     current_width: u32,
     current_height: u32,
     current_stride: u32,
+    current_buffer: Option<SurfaceBuffer>,
     current: Vec<u32>,
     z: u32,
 }
@@ -293,10 +305,12 @@ impl Surface {
             pending_bytes_received: 0,
             awaiting_buffer: false,
             pending_damage: None,
+            pending_buffer: None,
             pending: Vec::new(),
             current_width: 0,
             current_height: 0,
             current_stride: 0,
+            current_buffer: None,
             current: Vec::new(),
             z: 0,
         }
@@ -325,10 +339,12 @@ impl Surface {
         self.pending_bytes_received = 0;
         self.awaiting_buffer = false;
         self.pending_damage = None;
+        self.pending_buffer = None;
         self.pending.clear();
         self.current_width = 0;
         self.current_height = 0;
         self.current_stride = 0;
+        self.current_buffer = None;
         self.current.clear();
         self.z = 0;
     }
@@ -794,6 +810,39 @@ fn resize_buffer(buffer: &mut Vec<u32>, width: u32, height: u32) -> bool {
     true
 }
 
+fn surface_has_current_pixels(surface: &Surface) -> bool {
+    if let Some(buffer) = &surface.current_buffer {
+        return buffer.width == surface.current_width
+            && buffer.height == surface.current_height
+            && buffer.stride >= buffer.width
+            && buffer.byte_len >= buffer.pixels.saturating_mul(4);
+    }
+    let Some(surface_len) =
+        (surface.current_width as usize).checked_mul(surface.current_height as usize)
+    else {
+        return false;
+    };
+    surface.current.len() >= surface_len
+}
+
+fn read_current_pixel(surface: &Surface, sx: usize, sy: usize) -> Option<u32> {
+    if let Some(buffer) = &surface.current_buffer {
+        let stride = usize::try_from(buffer.stride).ok()?;
+        let src = sy.checked_mul(stride)?.checked_add(sx)?;
+        let byte_offset = src.checked_mul(4)?;
+        if byte_offset.checked_add(4)? > buffer.byte_len {
+            return None;
+        }
+        let ptr = (buffer.mapped_addr as *const u8).wrapping_add(byte_offset);
+        let bytes = unsafe { core::slice::from_raw_parts(ptr, 4) };
+        return Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+    }
+    let src = sy
+        .checked_mul(surface.current_stride as usize)?
+        .checked_add(sx)?;
+    surface.current.get(src).copied()
+}
+
 fn shared_page_count(byte_len: usize) -> Option<usize> {
     byte_len
         .checked_add(PAGE_SIZE - 1)
@@ -917,7 +966,7 @@ fn handle_shared_buffer(
         surface.awaiting_buffer = false;
         return true;
     };
-    if total == 0 || total > MAX_SHARED_BYTES {
+    if total == 0 || total > MAX_SHARED_BYTES || total < needed_bytes {
         surface.awaiting_buffer = false;
         return true;
     }
@@ -925,36 +974,19 @@ fn handle_shared_buffer(
         surface.awaiting_buffer = false;
         return true;
     }
-    if surface.pending.len() != pixels && !resize_buffer(&mut surface.pending, width, height) {
-        surface.awaiting_buffer = false;
-        return true;
-    }
-    if surface.pending_bytes_received >= needed_bytes {
-        surface.awaiting_buffer = false;
-        return true;
-    }
-    let remaining = needed_bytes - surface.pending_bytes_received;
-    let copy_len = total.min(remaining);
-    let bytes = unsafe { core::slice::from_raw_parts(mapped_addr as *const u8, copy_len) };
-    let pending_bytes = unsafe {
-        core::slice::from_raw_parts_mut(surface.pending.as_mut_ptr().cast::<u8>(), pixels * 4)
-    };
-    let start = surface.pending_bytes_received;
-    let Some(end) = start.checked_add(copy_len) else {
-        surface.awaiting_buffer = false;
-        return true;
-    };
-    let Some(dst) = pending_bytes.get_mut(start..end) else {
-        surface.awaiting_buffer = false;
-        return true;
-    };
-    dst.copy_from_slice(bytes);
-    surface.pending_bytes_received = end;
+    surface.pending.clear();
+    surface.pending_buffer = Some(SurfaceBuffer {
+        mapped_addr,
+        byte_len: needed_bytes,
+        width,
+        height,
+        stride,
+        pixels,
+    });
+    surface.pending_bytes_received = needed_bytes;
     surface.pending_len = pixels;
     surface.pending_damage = Some(Rect::full(width, height));
-    if surface.pending_bytes_received >= needed_bytes {
-        surface.awaiting_buffer = false;
-    }
+    surface.awaiting_buffer = false;
     true
 }
 
@@ -1180,12 +1212,7 @@ fn composite_and_present(
         }
     }
     for surface in surfaces.iter().filter(|s| s.live && s.visible) {
-        let Some(surface_len) =
-            (surface.current_width as usize).checked_mul(surface.current_height as usize)
-        else {
-            continue;
-        };
-        if surface.current.len() < surface_len {
+        if !surface_has_current_pixels(surface) {
             continue;
         }
         for sy in 0..surface.current_height as usize {
@@ -1198,22 +1225,19 @@ fn composite_and_present(
                 if dx < 0 || dx >= frame_w as i32 {
                     continue;
                 }
-                let src = sy * surface.current_stride as usize + sx;
-                if src < surface.current.len() {
-                    let Some(dst) = (dy as usize)
-                        .checked_mul(frame_w)
-                        .and_then(|row| row.checked_add(dx as usize))
-                    else {
-                        return errno_status(mochi_user_syscall::ERANGE);
-                    };
-                    let Some(pixel) = surface.current.get(src).copied() else {
-                        continue;
-                    };
-                    let Some(slot) = frame.get_mut(dst) else {
-                        return errno_status(mochi_user_syscall::ERANGE);
-                    };
-                    *slot = pixel;
-                }
+                let Some(dst) = (dy as usize)
+                    .checked_mul(frame_w)
+                    .and_then(|row| row.checked_add(dx as usize))
+                else {
+                    return errno_status(mochi_user_syscall::ERANGE);
+                };
+                let Some(pixel) = read_current_pixel(surface, sx, sy) else {
+                    continue;
+                };
+                let Some(slot) = frame.get_mut(dst) else {
+                    return errno_status(mochi_user_syscall::ERANGE);
+                };
+                *slot = pixel;
             }
         }
     }
@@ -1459,6 +1483,7 @@ fn handle_request(
                 surface.pending_len = pixels;
                 surface.pending_bytes_received = 0;
                 surface.pending.clear();
+                surface.pending_buffer = None;
                 surface.pending_damage = Some(Rect::full(width, height));
                 surface.awaiting_buffer = true;
             } else {
@@ -1514,6 +1539,7 @@ fn handle_request(
                 surface.pending_stride = stride;
                 surface.pending_len = pixels;
                 surface.pending_bytes_received = needed;
+                surface.pending_buffer = None;
                 surface.pending_damage = Some(Rect::full(width, height));
                 surface.awaiting_buffer = false;
             }
@@ -1577,13 +1603,18 @@ fn handle_request(
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                 return reply;
             }
-            if surfaces[index].pending.len() < needed {
+            if surfaces[index].pending_buffer.is_none() && surfaces[index].pending.len() < needed {
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                 return reply;
             }
             {
                 let surface = &mut surfaces[index];
-                core::mem::swap(&mut surface.current, &mut surface.pending);
+                surface.current_buffer = surface.pending_buffer.take();
+                if surface.current_buffer.is_some() {
+                    surface.current.clear();
+                } else {
+                    core::mem::swap(&mut surface.current, &mut surface.pending);
+                }
                 surface.current_width = pending_width;
                 surface.current_height = pending_height;
                 surface.current_stride = pending_stride;
@@ -1593,6 +1624,7 @@ fn handle_request(
                 surface.pending_len = 0;
                 surface.pending_bytes_received = 0;
                 surface.pending_damage = None;
+                surface.pending_buffer = None;
                 surface.awaiting_buffer = false;
             }
             *needs_present = !surfaces[index].is_decoration;
@@ -1757,8 +1789,10 @@ fn handle_request(
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
                 return reply;
             }
-            if surfaces[decoration_index].current.is_empty()
-                && !surfaces[decoration_index].pending.is_empty()
+            if surfaces[decoration_index].current_buffer.is_none()
+                && surfaces[decoration_index].current.is_empty()
+                && (surfaces[decoration_index].pending_buffer.is_some()
+                    || !surfaces[decoration_index].pending.is_empty())
                 && surfaces[decoration_index].pending_width != 0
                 && surfaces[decoration_index].pending_height != 0
             {
@@ -1766,7 +1800,12 @@ fn handle_request(
                 let pending_width = surface.pending_width;
                 let pending_height = surface.pending_height;
                 let pending_stride = surface.pending_stride;
-                core::mem::swap(&mut surface.current, &mut surface.pending);
+                surface.current_buffer = surface.pending_buffer.take();
+                if surface.current_buffer.is_some() {
+                    surface.current.clear();
+                } else {
+                    core::mem::swap(&mut surface.current, &mut surface.pending);
+                }
                 surface.current_width = pending_width;
                 surface.current_height = pending_height;
                 surface.current_stride = pending_stride;
@@ -1775,6 +1814,7 @@ fn handle_request(
                 surface.pending_stride = 0;
                 surface.pending_len = 0;
                 surface.pending_damage = None;
+                surface.pending_buffer = None;
                 surface.awaiting_buffer = false;
             }
             windows[window_index].decoration = Some(handle);

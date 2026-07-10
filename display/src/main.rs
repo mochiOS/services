@@ -117,31 +117,22 @@ fn present_pixels(
         );
         return errno_status(mochi_user_syscall::ERANGE);
     }
-    let target_width = dest_width;
-    let target_height = dest_height;
-
     let fb_offset = (info.addr & 0xfff) as usize;
     let fb = (FB_VIRT as usize + fb_offset) as *mut u32;
     let Some(pixels) = pixels.get(..needed) else {
         return errno_status(mochi_user_syscall::EINVAL);
     };
-    for y in 0..target_height {
-        let Some(scaled_y) = y.checked_mul(height as usize) else {
-            return errno_status(mochi_user_syscall::ERANGE);
-        };
-        let src_y = scaled_y / target_height;
-        let Some(src_row) = src_y.checked_mul(row_bytes) else {
+    let copy_width = dest_width.min(width as usize);
+    let copy_height = dest_height.min(height as usize);
+    for y in 0..copy_height {
+        let Some(src_row) = y.checked_mul(row_bytes) else {
             return errno_status(mochi_user_syscall::ERANGE);
         };
         let Some(dest_row) = y.checked_mul(dest_stride) else {
             return errno_status(mochi_user_syscall::ERANGE);
         };
-        for x in 0..target_width {
-            let Some(scaled_x) = x.checked_mul(width as usize) else {
-                return errno_status(mochi_user_syscall::ERANGE);
-            };
-            let src_x = scaled_x / target_width;
-            let Some(src_offset) = src_row.checked_add(src_x.saturating_mul(4)) else {
+        for x in 0..copy_width {
+            let Some(src_offset) = src_row.checked_add(x.saturating_mul(4)) else {
                 return errno_status(mochi_user_syscall::ERANGE);
             };
             let Some(pixel) = read_pixel(pixels, src_offset) else {
