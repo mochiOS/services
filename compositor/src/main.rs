@@ -68,6 +68,9 @@ const MAX_DIMENSION: u32 = 16_384;
 const IDLE_CLEANUP_YIELDS: u32 = 64;
 const DECORATE_CAPABILITY: &str = "window.decorate";
 const DECORATE_COMPAT_CAPABILITY: &str = "window.overlay";
+const CURSOR_ICON_PATH: &str = "/system/icons/cursor.svg";
+const DEFAULT_CURSOR_WIDTH: u32 = 24;
+const DEFAULT_CURSOR_HEIGHT: u32 = 24;
 const WINDOW_STATE_NORMAL: u32 = 0;
 const WINDOW_STATE_MINIMIZED: u32 = 1;
 const WINDOW_STATE_MAXIMIZED: u32 = 2;
@@ -280,6 +283,14 @@ struct Surface {
     z: u32,
 }
 
+struct CursorImage {
+    width: u32,
+    height: u32,
+    hotspot_x: i32,
+    hotspot_y: i32,
+    pixels: Vec<u32>,
+}
+
 impl Surface {
     fn empty() -> Self {
         Self {
@@ -472,6 +483,226 @@ fn display_request_info(display_tid: u64) -> (u32, u32, u32, u32) {
         }
     }
     (640, 480, 640, PIXEL_FORMAT_XRGB8888)
+}
+
+fn ascii_ws(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\n' | b'\r' | b'\t')
+}
+
+fn find_byte(bytes: &[u8], needle: u8) -> Option<usize> {
+    bytes.iter().position(|&byte| byte == needle)
+}
+
+fn attr_value<'a>(tag: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
+    let mut pos = 0usize;
+    while pos < tag.len() {
+        while pos < tag.len() && !ascii_ws(tag[pos]) {
+            pos += 1;
+        }
+        while pos < tag.len() && ascii_ws(tag[pos]) {
+            pos += 1;
+        }
+        if pos >= tag.len() {
+            break;
+        }
+        let key_start = pos;
+        while pos < tag.len() && tag[pos] != b'=' && !ascii_ws(tag[pos]) && tag[pos] != b'/' {
+            pos += 1;
+        }
+        let key_end = pos;
+        while pos < tag.len() && ascii_ws(tag[pos]) {
+            pos += 1;
+        }
+        if pos >= tag.len() || tag[pos] != b'=' {
+            continue;
+        }
+        pos += 1;
+        while pos < tag.len() && ascii_ws(tag[pos]) {
+            pos += 1;
+        }
+        if pos >= tag.len() || (tag[pos] != b'"' && tag[pos] != b'\'') {
+            continue;
+        }
+        let quote = tag[pos];
+        pos += 1;
+        let value_start = pos;
+        while pos < tag.len() && tag[pos] != quote {
+            pos += 1;
+        }
+        let value_end = pos;
+        if pos < tag.len() {
+            pos += 1;
+        }
+        if &tag[key_start..key_end] == name {
+            return Some(&tag[value_start..value_end]);
+        }
+    }
+    None
+}
+
+fn parse_u32_attr(tag: &[u8], name: &[u8]) -> Option<u32> {
+    let value = attr_value(tag, name)?;
+    let mut out = 0u32;
+    let mut saw_digit = false;
+    for &byte in value {
+        if byte == b'.' {
+            break;
+        }
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        saw_digit = true;
+        out = out.checked_mul(10)?.checked_add(u32::from(byte - b'0'))?;
+    }
+    saw_digit.then_some(out)
+}
+
+fn parse_hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn parse_fill(tag: &[u8]) -> Option<u32> {
+    let value = attr_value(tag, b"fill")?;
+    if value.len() != 7 || value[0] != b'#' {
+        return None;
+    }
+    let r = parse_hex_digit(value[1])? << 4 | parse_hex_digit(value[2])?;
+    let g = parse_hex_digit(value[3])? << 4 | parse_hex_digit(value[4])?;
+    let b = parse_hex_digit(value[5])? << 4 | parse_hex_digit(value[6])?;
+    Some(u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b))
+}
+
+fn parse_opacity_permille(value: &[u8]) -> Option<u32> {
+    if value == b"1" || value == b"1.0" || value == b"1.00" {
+        return Some(1000);
+    }
+    if value == b"0" {
+        return Some(0);
+    }
+    if !value.starts_with(b"0.") {
+        return None;
+    }
+    let mut out = 0u32;
+    let mut scale = 100u32;
+    for &byte in &value[2..] {
+        if !byte.is_ascii_digit() || scale == 0 {
+            break;
+        }
+        out = out.checked_add(u32::from(byte - b'0').checked_mul(scale)?)?;
+        scale /= 10;
+    }
+    Some(out.min(1000))
+}
+
+fn parse_alpha(tag: &[u8]) -> u32 {
+    let opacity = attr_value(tag, b"fill-opacity")
+        .or_else(|| attr_value(tag, b"opacity"))
+        .and_then(parse_opacity_permille)
+        .unwrap_or(1000);
+    ((opacity * 255) / 1000).min(255)
+}
+
+fn rasterize_svg_rects(svg: &[u8]) -> Option<CursorImage> {
+    let width = parse_u32_attr(svg, b"width").unwrap_or(DEFAULT_CURSOR_WIDTH);
+    let height = parse_u32_attr(svg, b"height").unwrap_or(DEFAULT_CURSOR_HEIGHT);
+    if width == 0 || height == 0 || width > 128 || height > 128 {
+        return None;
+    }
+    let pixels_len = (width as usize).checked_mul(height as usize)?;
+    let mut pixels = Vec::new();
+    pixels.try_reserve_exact(pixels_len).ok()?;
+    pixels.resize(pixels_len, 0);
+
+    let mut pos = 0usize;
+    while let Some(rel_start) = svg[pos..].windows(5).position(|window| window == b"<rect") {
+        let start = pos.checked_add(rel_start)?;
+        let end = start.checked_add(find_byte(&svg[start..], b'>')?)?;
+        let tag = &svg[start..=end];
+        let x = parse_u32_attr(tag, b"x").unwrap_or(0);
+        let y = parse_u32_attr(tag, b"y").unwrap_or(0);
+        let rect_w = parse_u32_attr(tag, b"width").unwrap_or(0);
+        let rect_h = parse_u32_attr(tag, b"height").unwrap_or(0);
+        let Some(rgb) = parse_fill(tag) else {
+            pos = end.saturating_add(1);
+            continue;
+        };
+        let alpha = parse_alpha(tag);
+        if rect_w == 0 || rect_h == 0 || alpha == 0 {
+            pos = end.saturating_add(1);
+            continue;
+        }
+        let max_y = y.saturating_add(rect_h).min(height);
+        let max_x = x.saturating_add(rect_w).min(width);
+        for py in y..max_y {
+            let row = (py as usize).checked_mul(width as usize)?;
+            for px in x..max_x {
+                let index = row.checked_add(px as usize)?;
+                if let Some(slot) = pixels.get_mut(index) {
+                    *slot = (alpha << 24) | rgb;
+                }
+            }
+        }
+        pos = end.saturating_add(1);
+    }
+
+    if pixels.iter().all(|&pixel| pixel == 0) {
+        return None;
+    }
+
+    Some(CursorImage {
+        width,
+        height,
+        hotspot_x: parse_u32_attr(svg, b"data-hotspot-x").unwrap_or(1) as i32,
+        hotspot_y: parse_u32_attr(svg, b"data-hotspot-y").unwrap_or(1) as i32,
+        pixels,
+    })
+}
+
+fn fallback_cursor_image() -> CursorImage {
+    let width = DEFAULT_CURSOR_WIDTH;
+    let height = DEFAULT_CURSOR_HEIGHT;
+    let mut pixels = Vec::new();
+    let len = (width as usize)
+        .checked_mul(height as usize)
+        .unwrap_or(DEFAULT_CURSOR_WIDTH as usize * DEFAULT_CURSOR_HEIGHT as usize);
+    pixels.resize(len, 0);
+    for y in 0..height {
+        for x in 0..width {
+            let inside = x <= y / 2 && y < 20 || (x >= 7 && x <= 10 && y >= 14 && y <= 22);
+            if !inside {
+                continue;
+            }
+            let edge =
+                x == 0 || x == y / 2 || y == 19 || (x == 7 && y >= 14) || (x == 10 && y >= 14);
+            let color = if edge { 0xff00_0000 } else { 0xffff_ffff };
+            let index = (y as usize)
+                .checked_mul(width as usize)
+                .and_then(|row| row.checked_add(x as usize))
+                .unwrap_or(0);
+            if let Some(slot) = pixels.get_mut(index) {
+                *slot = color;
+            }
+        }
+    }
+    CursorImage {
+        width,
+        height,
+        hotspot_x: 1,
+        hotspot_y: 1,
+        pixels,
+    }
+}
+
+fn load_cursor_image() -> CursorImage {
+    platform::file::read_to_end_path(CURSOR_ICON_PATH)
+        .ok()
+        .and_then(|bytes| rasterize_svg_rects(&bytes))
+        .unwrap_or_else(fallback_cursor_image)
 }
 
 fn find_service(name: &str) -> Option<u64> {
@@ -707,26 +938,16 @@ fn decoration_surface_index_for_window(surfaces: &[Surface], window: &Window) ->
 
 fn send_window_metadata(window: &Window, surfaces: &[Surface], endpoint: u64) {
     if endpoint == 0 || !window.live {
-        platform::println!("compositor: decor metadata skip endpoint/window");
         return;
     }
     let Some(content_index) = content_surface_index_for_window(surfaces, window) else {
-        platform::println!("compositor: decor metadata skip no content");
         return;
     };
     let content = &surfaces[content_index];
     let (content_width, content_height) = surface_extent(content);
     if content_width == 0 || content_height == 0 {
-        platform::println!("compositor: decor metadata skip no size");
         return;
     }
-    platform::println!(
-        "compositor: decor metadata send endpoint={} window=0x{:016x} size={}x{}",
-        endpoint,
-        window.token,
-        content_width,
-        content_height
-    );
     let mut event = [0u8; 80];
     put_u32(&mut event, 0, DECOR_EVENT_WINDOW);
     put_u64(&mut event, 4, window.token);
@@ -751,25 +972,14 @@ fn notify_decorators(
     window_index: usize,
 ) {
     let Some(window) = windows.get(window_index) else {
-        platform::println!(
-            "compositor: decor notify skip no window index={}",
-            window_index
-        );
         return;
     };
-    let mut count = 0usize;
     for client in clients
         .iter()
         .filter(|client| client.live && client.decoration_endpoint != 0)
     {
-        count += 1;
         send_window_metadata(window, surfaces, client.decoration_endpoint);
     }
-    platform::println!(
-        "compositor: decor notify window=0x{:016x} decorators={}",
-        window.token,
-        count
-    );
 }
 
 fn reposition_window_surfaces(surfaces: &mut [Surface], window: &Window) {
@@ -1052,10 +1262,12 @@ fn handle_input_event(
     pointer_serials: &mut [PointerSerial],
     pointer_x: &mut i32,
     pointer_y: &mut i32,
+    display_width: u32,
+    display_height: u32,
     pointer_focus: &mut Option<usize>,
     keyboard_focus: &mut Option<usize>,
     event: &platform::input::InputEvent,
-) {
+) -> bool {
     match event.kind {
         platform::input::EVENT_KIND_POINTER_MOVE => {
             *pointer_x = pointer_x.saturating_add(event.value_x);
@@ -1065,6 +1277,14 @@ fn handle_input_event(
             }
             if *pointer_y < 0 {
                 *pointer_y = 0;
+            }
+            let max_x = display_width.saturating_sub(1).min(MAX_DIMENSION) as i32;
+            let max_y = display_height.saturating_sub(1).min(MAX_DIMENSION) as i32;
+            if *pointer_x > max_x {
+                *pointer_x = max_x;
+            }
+            if *pointer_y > max_y {
+                *pointer_y = max_y;
             }
             let next = hit_test(surfaces, *pointer_x, *pointer_y);
             if *pointer_focus != next {
@@ -1100,6 +1320,7 @@ fn handle_input_event(
                     );
                 }
             }
+            true
         }
         platform::input::EVENT_KIND_POINTER_BUTTON => {
             let target = hit_test(surfaces, *pointer_x, *pointer_y);
@@ -1145,6 +1366,7 @@ fn handle_input_event(
                     detail,
                 );
             }
+            false
         }
         platform::input::EVENT_KIND_KEY => {
             if let Some(index) = *keyboard_focus {
@@ -1160,13 +1382,85 @@ fn handle_input_event(
                     );
                 }
             }
+            false
         }
-        _ => {}
+        _ => false,
     }
+}
+
+fn blend_argb_over_xrgb(dst: u32, src: u32) -> u32 {
+    let alpha = (src >> 24) & 0xff;
+    if alpha == 0 {
+        return dst;
+    }
+    if alpha == 0xff {
+        return 0xff00_0000 | (src & 0x00ff_ffff);
+    }
+    let inv = 255 - alpha;
+    let sr = (src >> 16) & 0xff;
+    let sg = (src >> 8) & 0xff;
+    let sb = src & 0xff;
+    let dr = (dst >> 16) & 0xff;
+    let dg = (dst >> 8) & 0xff;
+    let db = dst & 0xff;
+    let r = (sr * alpha + dr * inv + 127) / 255;
+    let g = (sg * alpha + dg * inv + 127) / 255;
+    let b = (sb * alpha + db * inv + 127) / 255;
+    0xff00_0000 | (r << 16) | (g << 8) | b
+}
+
+fn composite_cursor(
+    frame: &mut [u32],
+    frame_w: usize,
+    frame_h: usize,
+    cursor: &CursorImage,
+    pointer_x: i32,
+    pointer_y: i32,
+) -> Result<(), u32> {
+    let origin_x = pointer_x.saturating_sub(cursor.hotspot_x);
+    let origin_y = pointer_y.saturating_sub(cursor.hotspot_y);
+    for cy in 0..cursor.height as usize {
+        let dy = origin_y.saturating_add(cy as i32);
+        if dy < 0 || dy >= frame_h as i32 {
+            continue;
+        }
+        let Some(src_row) = cy.checked_mul(cursor.width as usize) else {
+            return Err(errno_status(mochi_user_syscall::ERANGE));
+        };
+        let Some(dst_row) = (dy as usize).checked_mul(frame_w) else {
+            return Err(errno_status(mochi_user_syscall::ERANGE));
+        };
+        for cx in 0..cursor.width as usize {
+            let dx = origin_x.saturating_add(cx as i32);
+            if dx < 0 || dx >= frame_w as i32 {
+                continue;
+            }
+            let Some(src_index) = src_row.checked_add(cx) else {
+                return Err(errno_status(mochi_user_syscall::ERANGE));
+            };
+            let Some(src) = cursor.pixels.get(src_index).copied() else {
+                return Err(errno_status(mochi_user_syscall::ERANGE));
+            };
+            if (src >> 24) == 0 {
+                continue;
+            }
+            let Some(dst_index) = dst_row.checked_add(dx as usize) else {
+                return Err(errno_status(mochi_user_syscall::ERANGE));
+            };
+            let Some(slot) = frame.get_mut(dst_index) else {
+                return Err(errno_status(mochi_user_syscall::ERANGE));
+            };
+            *slot = blend_argb_over_xrgb(*slot, src);
+        }
+    }
+    Ok(())
 }
 
 fn composite_and_present(
     surfaces: &[Surface],
+    cursor: &CursorImage,
+    pointer_x: i32,
+    pointer_y: i32,
     display_tid: u64,
     display_width: u32,
     display_height: u32,
@@ -1240,6 +1534,9 @@ fn composite_and_present(
                 *slot = pixel;
             }
         }
+    }
+    if let Err(status) = composite_cursor(frame, frame_w, frame_h, cursor, pointer_x, pointer_y) {
+        return status;
     }
     if let Err(err) = platform::ipc::send_page_count(display_tid, page_count, virt) {
         return errno_from_platform(err);
@@ -1632,20 +1929,9 @@ fn handle_request(
                 let window_id = surfaces[index].window;
                 if let Some(window_index) = window_index_by_id(windows, window_id) {
                     if !windows[window_index].metadata_sent {
-                        platform::println!(
-                            "compositor: decor notify on commit window=0x{:016x}",
-                            windows[window_index].token
-                        );
                         windows[window_index].metadata_sent = true;
                         notify_decorators(clients, windows, surfaces, window_index);
-                    } else {
-                        platform::println!("compositor: decor notify skip already sent");
                     }
-                } else {
-                    platform::println!(
-                        "compositor: decor notify skip no window id={}",
-                        window_id.0
-                    );
                 }
             }
             put_u32(&mut reply, 0, 0);
@@ -1680,11 +1966,6 @@ fn handle_request(
                 .find(|record| record.live && record.id == client)
             {
                 record.decoration_endpoint = endpoint;
-                platform::println!(
-                    "compositor: decor subscribe client={} endpoint={}",
-                    client.0,
-                    endpoint
-                );
             }
             for window in windows
                 .iter()
@@ -2030,6 +2311,7 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
     let mut pointer_focus = None;
     let mut keyboard_focus = None;
     let mut idle_cleanup_ticks = 0u32;
+    let cursor = load_cursor_image();
     loop {
         let buf = unsafe {
             core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(IPC_BUF).cast::<u8>(), 4128)
@@ -2052,6 +2334,9 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
                     ) {
                         let _ = composite_and_present(
                             &surfaces,
+                            &cursor,
+                            pointer_x,
+                            pointer_y,
                             display_tid,
                             display_width,
                             display_height,
@@ -2085,17 +2370,32 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             let event = unsafe {
                 core::ptr::read_unaligned(buf.as_ptr().cast::<platform::input::InputEvent>())
             };
-            handle_input_event(
+            let needs_present = handle_input_event(
                 &surfaces,
                 &windows,
                 &mut next_pointer_serial,
                 &mut pointer_serials,
                 &mut pointer_x,
                 &mut pointer_y,
+                display_width,
+                display_height,
                 &mut pointer_focus,
                 &mut keyboard_focus,
                 &event,
             );
+            if needs_present {
+                let _ = composite_and_present(
+                    &surfaces,
+                    &cursor,
+                    pointer_x,
+                    pointer_y,
+                    display_tid,
+                    display_width,
+                    display_height,
+                    display_stride,
+                    display_format,
+                );
+            }
             continue;
         }
         if len == 0 || len > buf.len() {
@@ -2146,6 +2446,9 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             if needs_present {
                 let status = composite_and_present(
                     &surfaces,
+                    &cursor,
+                    pointer_x,
+                    pointer_y,
                     display_tid,
                     display_width,
                     display_height,

@@ -9,9 +9,9 @@ path = "/system/services/compositor.service"
 kind = "service"
 requires = [
     "display.read",
+    "fs.read.all",
     "input.keyboard",
     "input.pointer",
     "ipc.client",
     "ipc.server",
 ]
-

@@ -250,6 +250,11 @@ impl KeyboardState {
     }
 }
 
+#[derive(Clone, Copy, Default)]
+struct MouseState {
+    buttons: u8,
+}
+
 const INPUT_EVENT_SIZE: usize = core::mem::size_of::<platform::input::InputEvent>();
 
 fn encode_input_event(
@@ -280,6 +285,62 @@ fn send_event(subscriber: u64, bytes: &[u8]) {
     if subscriber != 0 {
         let _ = platform::ipc::send(subscriber, bytes);
     }
+}
+
+fn sign_extend_mouse_delta(delta: u8, sign: bool) -> i32 {
+    if sign {
+        i32::from(delta) - 256
+    } else {
+        i32::from(delta)
+    }
+}
+
+fn process_mouse_packet(packet: &[u8], state: &mut MouseState, subscriber: u64) {
+    use platform::input::*;
+
+    if packet.len() < 3 {
+        return;
+    }
+    let b0 = packet[0];
+    if (b0 & 0x08) == 0 || (b0 & 0xc0) != 0 {
+        return;
+    }
+
+    let dx = sign_extend_mouse_delta(packet[1], (b0 & 0x10) != 0);
+    let dy = -sign_extend_mouse_delta(packet[2], (b0 & 0x20) != 0);
+    if dx != 0 || dy != 0 {
+        let event = encode_input_event(EVENT_KIND_POINTER_MOVE, 0, 0, 0, 0, dx, dy, 0, 0);
+        send_event(subscriber, &event);
+    }
+
+    let buttons = b0 & 0x07;
+    let changed = state.buttons ^ buttons;
+    if changed == 0 {
+        return;
+    }
+    for (mask, button) in [
+        (0x01, POINTER_BUTTON_LEFT),
+        (0x02, POINTER_BUTTON_RIGHT),
+        (0x04, POINTER_BUTTON_MIDDLE),
+    ] {
+        if (changed & mask) == 0 {
+            continue;
+        }
+        let pressed = (buttons & mask) != 0;
+        let event = encode_input_event(
+            EVENT_KIND_POINTER_BUTTON,
+            if pressed { FLAG_PRESS } else { FLAG_RELEASE },
+            0,
+            button,
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
+        send_event(subscriber, &event);
+    }
+    state.buttons = buttons;
 }
 
 fn process_keyboard_byte(byte: u8, state: &mut KeyboardState, subscriber: u64) {
@@ -365,8 +426,8 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
     }
 
     let mut keyboard = KeyboardState::default();
+    let mut mouse = MouseState::default();
     let mut subscriber = 0u64;
-    let mut keyboard_log_budget = 8usize;
     let mut buf = [0u8; 32];
 
     loop {
@@ -393,13 +454,11 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         if len >= 8 {
             match buf[0] {
                 platform::input::RAW_KIND_KEYBOARD => {
-                    if keyboard_log_budget > 0 {
-                        platform::println!("input.service: raw key=0x{:02x}", buf[4]);
-                        keyboard_log_budget -= 1;
-                    }
                     process_keyboard_byte(buf[4], &mut keyboard, subscriber);
                 }
-                platform::input::RAW_KIND_MOUSE_PACKET => {}
+                platform::input::RAW_KIND_MOUSE_PACKET => {
+                    process_mouse_packet(&buf[4..7], &mut mouse, subscriber);
+                }
                 _ => {}
             }
         }
