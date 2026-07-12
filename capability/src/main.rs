@@ -3,11 +3,13 @@
 
 extern crate alloc;
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::arch::global_asm;
+use core::convert::TryInto;
 use mochi_user_platform as platform;
+use mochi_user_syscall as syscall;
 use sha2::{Digest, Sha256};
 
 global_asm!(
@@ -27,6 +29,7 @@ _start:
 const DRIVERS_PACKAGE_ID: &str = "org.mochios.drivers";
 const SIGNATURE_PACKAGE_ID: &str = "org.mochios.signature";
 const PACKAGE_PACKAGE_ID: &str = "org.mochios.package";
+const CAPABILITY_PACKAGE_ID: &str = "org.mochios.capability";
 const RESOLVE_CAPS_OPCODE: u32 = 0x4341_5053;
 const SPAWN_APP_OPCODE: u32 = 0x4150_5053;
 const REPLY_OK: u64 = 0;
@@ -35,6 +38,20 @@ const O_WRONLY: u64 = 0o1;
 const O_CREAT: u64 = 0o100;
 const O_TRUNC: u64 = 0o1000;
 const FILE_MODE_644: u64 = 0o644;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SpawnAppRequestHeader {
+    opcode: u32,
+    shell_endpoint: u64,
+    interactive: u8,
+    reserved: [u8; 7],
+}
+
+#[derive(Default)]
+struct AppPromptPolicy {
+    interactive: BTreeSet<String>,
+}
 
 fn capability_reply(sender: u64, status: u64) {
     let _ = platform::ipc::reply(sender, &status.to_le_bytes());
@@ -53,6 +70,139 @@ fn hex_digest(digest: &[u8; 32]) -> String {
         out.push(HEX[(byte & 0x0f) as usize] as char);
     }
     out
+}
+
+fn parse_toml_string_array(value: &str) -> Option<Vec<String>> {
+    let value = value.trim();
+    let inner = value.strip_prefix('[')?.strip_suffix(']')?.trim();
+    if inner.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut out = Vec::new();
+    for item in inner.split(',') {
+        let trimmed = item.trim();
+        let unquoted = trimmed.strip_prefix('"')?.strip_suffix('"')?;
+        out.push(unquoted.to_string());
+    }
+    Some(out)
+}
+
+fn load_app_prompt_policy(index: &PackageIndex) -> AppPromptPolicy {
+    let Some(record) = index.by_package.get(CAPABILITY_PACKAGE_ID) else {
+        return AppPromptPolicy::default();
+    };
+    let Ok(bytes) = platform::file::read_to_end_path(&record.manifest_path) else {
+        return AppPromptPolicy::default();
+    };
+    let Ok(text) = core::str::from_utf8(&bytes) else {
+        return AppPromptPolicy::default();
+    };
+
+    let mut policy = AppPromptPolicy::default();
+    let mut section = "";
+    for raw in text.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            section = &line[1..line.len() - 1];
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if section != "prompt" || key.trim() != "interactive_capabilities" {
+            continue;
+        }
+        let Some(items) = parse_toml_string_array(value) else {
+            continue;
+        };
+        for item in items {
+            if platform::capability::capability_from_string(item.as_str())
+                == platform::capability::CapabilityClass::UserGrantable
+            {
+                policy.interactive.insert(item);
+            }
+        }
+    }
+
+    policy
+}
+
+fn interactive_capability_policy(policy: &AppPromptPolicy, capability: &str) -> bool {
+    policy.interactive.contains(capability)
+}
+
+fn current_process_id() -> Result<u64, mochi_user_syscall::SysError> {
+    syscall::call0(syscall::SyscallNumber::GetPid)
+}
+
+fn prompt_shell_for_capability(
+    shell_endpoint: u64,
+    executable: &str,
+    capability: &str,
+    reason: &str,
+) -> Result<(), mochi_user_syscall::SysError> {
+    if shell_endpoint == 0 {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EACCES as i64,
+        ));
+    }
+    if executable.len() > 256 || capability.len() > 64 || reason.len() > 128 {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
+    }
+
+    let process_id = current_process_id()?;
+    let mut request = platform::capability::CapabilityRequest {
+        opcode: platform::capability::CAPABILITY_PROMPT_OPCODE,
+        process_id,
+        executable: platform::capability::ExecutableIdentity::default(),
+        capability_class: platform::capability::CapabilityClass::UserGrantable,
+        capability_len: capability.len() as u16,
+        resource: platform::capability::ResourceDescriptor::default(),
+        reason_len: reason.len() as u16,
+        interactive: 1,
+        decision_scope: 0,
+        reserved0: 0,
+        capability: [0; 64],
+        reason: [0; 128],
+    };
+    request.executable.path_len = executable.len() as u16;
+    request.executable.path[..executable.len()].copy_from_slice(executable.as_bytes());
+    request.capability[..capability.len()].copy_from_slice(capability.as_bytes());
+    request.reason[..reason.len()].copy_from_slice(reason.as_bytes());
+
+    let mut reply = [0u8; 8];
+    let msg = syscall::call5(
+        syscall::SyscallNumber::IpcCall,
+        shell_endpoint,
+        (&request as *const platform::capability::CapabilityRequest) as u64,
+        core::mem::size_of::<platform::capability::CapabilityRequest>() as u64,
+        reply.as_mut_ptr() as u64,
+        reply.len() as u64,
+    )?;
+    if (msg & 0xffff_ffff) < 4 {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
+    }
+    let decision = u32::from_le_bytes(reply[..4].try_into().map_err(|_| {
+        mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
+    })?);
+    if decision == platform::capability::CapabilityDecision::AllowOnce as u32
+        || decision == platform::capability::CapabilityDecision::AllowForProcess as u32
+        || decision == platform::capability::CapabilityDecision::AllowPersistently as u32
+        || decision == platform::capability::CapabilityDecision::AllowAllUserGrantable as u32
+    {
+        Ok(())
+    } else {
+        Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EACCES as i64,
+        ))
+    }
 }
 
 fn ensure_policy_dir() {
@@ -403,6 +553,10 @@ fn binary_caps<'a>(
     Ok(caps)
 }
 
+fn needs_app_prompt(policy: &AppPromptPolicy, capability: &str) -> bool {
+    interactive_capability_policy(policy, capability)
+}
+
 fn service_binary_path(manifest: &platform::package::PackageManifest) -> Option<&str> {
     manifest
         .binaries
@@ -539,10 +693,11 @@ fn parse_nul_list(
 
 fn spawn_application_from_manifest(
     index: &PackageIndex,
+    policy: &AppPromptPolicy,
     sender: u64,
     buf: &[u8],
 ) -> Result<u64, mochi_user_syscall::SysError> {
-    if buf.len() <= 4 || index.duplicate {
+    if buf.len() <= core::mem::size_of::<SpawnAppRequestHeader>() || index.duplicate {
         return Err(mochi_user_syscall::SysError::from_raw(
             mochi_user_syscall::EINVAL as i64,
         ));
@@ -553,7 +708,15 @@ fn spawn_application_from_manifest(
         ));
     }
 
-    let items = parse_nul_list(&buf[4..], 64)?;
+    let header = unsafe {
+        core::ptr::read_unaligned(buf.as_ptr().cast::<SpawnAppRequestHeader>())
+    };
+    if header.opcode != SPAWN_APP_OPCODE {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
+    }
+    let items = parse_nul_list(&buf[core::mem::size_of::<SpawnAppRequestHeader>()..], 64)?;
     let Some(entry_path) = items.first() else {
         return Err(mochi_user_syscall::SysError::from_raw(
             mochi_user_syscall::EINVAL as i64,
@@ -581,6 +744,35 @@ fn spawn_application_from_manifest(
     }
 
     let caps = binary_caps(&manifest, entry_path)?;
+    let mut prompted = false;
+    for cap in caps {
+        if platform::capability::capability_from_string(cap.as_str())
+            != platform::capability::CapabilityClass::UserGrantable
+        {
+            continue;
+        }
+        if !needs_app_prompt(policy, cap) {
+            continue;
+        }
+        prompted = true;
+        if header.interactive == 0 || header.shell_endpoint == 0 {
+            return Err(mochi_user_syscall::SysError::from_raw(
+                mochi_user_syscall::EACCES as i64,
+            ));
+        }
+        prompt_shell_for_capability(
+            header.shell_endpoint,
+            entry_path,
+            cap,
+            "application launch",
+        )?;
+    }
+    if prompted {
+        platform::println!(
+            "capability.service: interactive app launch approved path={}",
+            entry_path
+        );
+    }
     let caps_nul = encode_nul_list(&caps);
     let args_nul = encode_spawn_args(&items[1..]);
     platform::service::spawn_manifest(
@@ -798,7 +990,7 @@ fn parse_persistent_query(
     Ok(request)
 }
 
-fn serve_capability_requests() -> ! {
+fn serve_capability_requests(index: PackageIndex, app_prompt_policy: AppPromptPolicy) -> ! {
     let endpoint = match platform::ipc::create() {
         Ok(endpoint) => endpoint,
         Err(err) => {
@@ -810,7 +1002,6 @@ fn serve_capability_requests() -> ! {
         }
     };
     platform::println!("capability.service: ready");
-    let index = build_package_index();
     let mut buf = [0u8; 1024];
     loop {
         let msg = match platform::ipc::wait(endpoint, &mut buf) {
@@ -835,7 +1026,7 @@ fn serve_capability_requests() -> ! {
             continue;
         }
         if opcode == SPAWN_APP_OPCODE {
-            let result = spawn_application_from_manifest(&index, sender, slice);
+            let result = spawn_application_from_manifest(&index, &app_prompt_policy, sender, slice);
             reply_spawn(sender, result);
             continue;
         }
@@ -939,6 +1130,7 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
     }
     platform::println!("capability.service: start");
     let package_index = build_package_index();
+    let app_prompt_policy = load_app_prompt_policy(&package_index);
     match spawn_service_by_package(&package_index, SIGNATURE_PACKAGE_ID) {
         Ok(pid) => {
             platform::println!("capability.service: signature.service spawned pid={}", pid);
@@ -1005,5 +1197,5 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             platform::process::exit(1);
         }
     }
-    serve_capability_requests();
+    serve_capability_requests(package_index, app_prompt_policy);
 }

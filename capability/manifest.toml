@@ -21,3 +21,10 @@ requires = [
     "ipc.server",
     "usb.access",
 ]
+
+[prompt]
+interactive_capabilities = [
+    "window.overlay",
+    "input.pointer",
+    "input.keyboard",
+]
