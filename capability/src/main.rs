@@ -4,6 +4,7 @@
 extern crate alloc;
 
 use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::arch::global_asm;
@@ -100,6 +101,8 @@ fn load_app_prompt_policy(index: &PackageIndex) -> AppPromptPolicy {
 
     let mut policy = AppPromptPolicy::default();
     let mut section = "";
+    let mut collecting = false;
+    let mut array_body = String::new();
     for raw in text.lines() {
         let line = raw.split('#').next().unwrap_or("").trim();
         if line.is_empty() {
@@ -107,6 +110,33 @@ fn load_app_prompt_policy(index: &PackageIndex) -> AppPromptPolicy {
         }
         if line.starts_with('[') && line.ends_with(']') {
             section = &line[1..line.len() - 1];
+            collecting = false;
+            array_body.clear();
+            continue;
+        }
+        if collecting {
+            if let Some(end) = line.find(']') {
+                if !array_body.is_empty() {
+                    array_body.push(' ');
+                }
+                array_body.push_str(line[..end].trim());
+                if let Some(items) = parse_toml_string_array(&format!("[{}]", array_body)) {
+                    for item in items {
+                        if platform::capability::capability_from_string(item.as_str())
+                            == platform::capability::CapabilityClass::UserGrantable
+                        {
+                            policy.interactive.insert(item);
+                        }
+                    }
+                }
+                collecting = false;
+                array_body.clear();
+                continue;
+            }
+            if !array_body.is_empty() {
+                array_body.push(' ');
+            }
+            array_body.push_str(line);
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
@@ -115,15 +145,21 @@ fn load_app_prompt_policy(index: &PackageIndex) -> AppPromptPolicy {
         if section != "prompt" || key.trim() != "interactive_capabilities" {
             continue;
         }
-        let Some(items) = parse_toml_string_array(value) else {
-            continue;
-        };
-        for item in items {
-            if platform::capability::capability_from_string(item.as_str())
-                == platform::capability::CapabilityClass::UserGrantable
-            {
-                policy.interactive.insert(item);
+        let value = value.trim();
+        if value.contains(']') {
+            if let Some(items) = parse_toml_string_array(value) {
+                for item in items {
+                    if platform::capability::capability_from_string(item.as_str())
+                        == platform::capability::CapabilityClass::UserGrantable
+                    {
+                        policy.interactive.insert(item);
+                    }
+                }
             }
+        } else if let Some(start) = value.find('[') {
+            collecting = true;
+            array_body.clear();
+            array_body.push_str(value[start + 1..].trim());
         }
     }
 
