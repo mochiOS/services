@@ -256,6 +256,15 @@ struct MouseState {
 }
 
 const INPUT_EVENT_SIZE: usize = core::mem::size_of::<platform::input::InputEvent>();
+const MAX_SUBSCRIBERS: usize = 8;
+
+static mut INPUT_WAIT_BUF: [u8; 32] = [0; 32];
+
+fn input_wait_buf() -> &'static mut [u8] {
+    unsafe {
+        core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(INPUT_WAIT_BUF).cast::<u8>(), 32)
+    }
+}
 
 fn encode_input_event(
     kind: u16,
@@ -281,8 +290,12 @@ fn encode_input_event(
     out
 }
 
-fn send_event(subscriber: u64, bytes: &[u8]) {
-    if subscriber != 0 {
+fn send_event(subscribers: &[u64; MAX_SUBSCRIBERS], bytes: &[u8]) {
+    for subscriber in subscribers
+        .iter()
+        .copied()
+        .filter(|subscriber| *subscriber != 0)
+    {
         let _ = platform::ipc::send(subscriber, bytes);
     }
 }
@@ -295,7 +308,11 @@ fn sign_extend_mouse_delta(delta: u8, sign: bool) -> i32 {
     }
 }
 
-fn process_mouse_packet(packet: &[u8], state: &mut MouseState, subscriber: u64) {
+fn process_mouse_packet(
+    packet: &[u8],
+    state: &mut MouseState,
+    subscribers: &[u64; MAX_SUBSCRIBERS],
+) {
     use platform::input::*;
 
     if packet.len() < 3 {
@@ -310,7 +327,7 @@ fn process_mouse_packet(packet: &[u8], state: &mut MouseState, subscriber: u64) 
     let dy = -sign_extend_mouse_delta(packet[2], (b0 & 0x20) != 0);
     if dx != 0 || dy != 0 {
         let event = encode_input_event(EVENT_KIND_POINTER_MOVE, 0, 0, 0, 0, dx, dy, 0, 0);
-        send_event(subscriber, &event);
+        send_event(subscribers, &event);
     }
 
     let buttons = b0 & 0x07;
@@ -338,12 +355,16 @@ fn process_mouse_packet(packet: &[u8], state: &mut MouseState, subscriber: u64) 
             0,
             0,
         );
-        send_event(subscriber, &event);
+        send_event(subscribers, &event);
     }
     state.buttons = buttons;
 }
 
-fn process_keyboard_byte(byte: u8, state: &mut KeyboardState, subscriber: u64) {
+fn process_keyboard_byte(
+    byte: u8,
+    state: &mut KeyboardState,
+    subscribers: &[u64; MAX_SUBSCRIBERS],
+) {
     use platform::input::*;
 
     if byte == 0xe0 {
@@ -389,10 +410,10 @@ fn process_keyboard_byte(byte: u8, state: &mut KeyboardState, subscriber: u64) {
         0,
         state.modifiers(),
     );
-    send_event(subscriber, &event);
+    send_event(subscribers, &event);
 }
 
-fn handle_subscribe_message(subscriber: &mut u64, buf: &[u8]) {
+fn handle_subscribe_message(subscribers: &mut [u64; MAX_SUBSCRIBERS], buf: &[u8]) {
     if buf.len() < 16 {
         return;
     }
@@ -400,9 +421,15 @@ fn handle_subscribe_message(subscriber: &mut u64, buf: &[u8]) {
     if opcode != platform::input::SUBSCRIBE_OPCODE {
         return;
     }
-    *subscriber = u64::from_le_bytes([
+    let subscriber = u64::from_le_bytes([
         buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
     ]);
+    if subscriber == 0 || subscribers.iter().any(|current| *current == subscriber) {
+        return;
+    }
+    if let Some(slot) = subscribers.iter_mut().find(|current| **current == 0) {
+        *slot = subscriber;
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -427,11 +454,12 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
 
     let mut keyboard = KeyboardState::default();
     let mut mouse = MouseState::default();
-    let mut subscriber = 0u64;
-    let mut buf = [0u8; 32];
+    let mut subscribers = [0u64; MAX_SUBSCRIBERS];
 
     loop {
-        let Ok(msg) = platform::ipc::wait(endpoint, &mut buf) else {
+        let buf = input_wait_buf();
+        buf.fill(0);
+        let Ok(msg) = platform::ipc::wait(endpoint, buf) else {
             platform::thread::yield_now();
             continue;
         };
@@ -446,7 +474,7 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             && u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])
                 == platform::input::SUBSCRIBE_OPCODE
         {
-            handle_subscribe_message(&mut subscriber, &buf[..len]);
+            handle_subscribe_message(&mut subscribers, &buf[..len]);
             let _ = platform::ipc::reply(sender, &[0]);
             continue;
         }
@@ -454,10 +482,10 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         if len >= 8 {
             match buf[0] {
                 platform::input::RAW_KIND_KEYBOARD => {
-                    process_keyboard_byte(buf[4], &mut keyboard, subscriber);
+                    process_keyboard_byte(buf[4], &mut keyboard, &subscribers);
                 }
                 platform::input::RAW_KIND_MOUSE_PACKET => {
-                    process_mouse_packet(&buf[4..7], &mut mouse, subscriber);
+                    process_mouse_packet(&buf[4..7], &mut mouse, &subscribers);
                 }
                 _ => {}
             }

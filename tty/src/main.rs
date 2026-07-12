@@ -26,6 +26,39 @@ const MSH_PATH: &str = "/bin/msh";
 const CAPABILITY_SERVICE_NAME: &str = "capability.service";
 const INPUT_SERVICE_NAME: &str = "input.service";
 const RESOLVE_CAPS_OPCODE: u32 = 0x4341_5053;
+const INPUT_EVENT_SIZE: usize = core::mem::size_of::<platform::input::InputEvent>();
+
+static mut CAPABILITY_REPLY_BUF: [u8; 1024] = [0; 1024];
+static mut INPUT_SUBSCRIBE_REPLY_BUF: [u8; 8] = [0; 8];
+static mut TTY_IPC_BUF: [u8; INPUT_EVENT_SIZE] = [0; INPUT_EVENT_SIZE];
+
+fn capability_reply_buf() -> &'static mut [u8] {
+    unsafe {
+        core::slice::from_raw_parts_mut(
+            core::ptr::addr_of_mut!(CAPABILITY_REPLY_BUF).cast::<u8>(),
+            core::mem::size_of::<[u8; 1024]>(),
+        )
+    }
+}
+
+fn input_subscribe_reply_buf() -> &'static mut [u8] {
+    unsafe {
+        core::slice::from_raw_parts_mut(
+            core::ptr::addr_of_mut!(INPUT_SUBSCRIBE_REPLY_BUF).cast::<u8>(),
+            core::mem::size_of::<[u8; 8]>(),
+        )
+    }
+}
+
+fn tty_ipc_buf() -> &'static mut [u8] {
+    unsafe {
+        core::slice::from_raw_parts_mut(
+            core::ptr::addr_of_mut!(TTY_IPC_BUF).cast::<u8>(),
+            INPUT_EVENT_SIZE,
+        )
+    }
+}
+
 fn parse_decimal_u64(bytes: &[u8]) -> Option<u64> {
     if bytes.is_empty() {
         return None;
@@ -94,8 +127,9 @@ fn resolve_capabilities(entry_path: &str) -> Result<Vec<u8>, mochi_user_syscall:
     let mut request = Vec::with_capacity(4 + entry_path.len());
     request.extend_from_slice(&RESOLVE_CAPS_OPCODE.to_le_bytes());
     request.extend_from_slice(entry_path.as_bytes());
-    let mut reply = [0u8; 1024];
-    let msg = platform::ipc::call(service_tid, &request, &mut reply)?;
+    let reply = capability_reply_buf();
+    reply.fill(0);
+    let msg = platform::ipc::call(service_tid, &request, reply)?;
     let len = (msg & 0xffff_ffff) as usize;
     if len < 8 || len > reply.len() {
         return Err(mochi_user_syscall::SysError::from_raw(
@@ -157,17 +191,24 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
     let Some(input_tid) = find_input_service() else {
         platform::process::exit(1);
     };
-    let mut reply = [0u8; 8];
-    let _ = platform::ipc::call(input_tid, platform::input::bytes_of(&subscribe), &mut reply);
+    let subscribe_reply = input_subscribe_reply_buf();
+    subscribe_reply.fill(0);
+    let _ = platform::ipc::call(
+        input_tid,
+        platform::input::bytes_of(&subscribe),
+        subscribe_reply,
+    );
 
     if spawn_msh(tty_endpoint).is_err() {
         platform::process::exit(1);
     }
 
-    let mut buf = [0u8; core::mem::size_of::<platform::input::InputEvent>()];
     let mut shell_endpoint = 0u64;
+    let mut shell_thread = 0u64;
     loop {
-        let Ok(msg) = platform::ipc::wait(tty_endpoint, &mut buf) else {
+        let buf = tty_ipc_buf();
+        buf.fill(0);
+        let Ok(msg) = platform::ipc::wait(tty_endpoint, buf) else {
             platform::thread::yield_now();
             continue;
         };
@@ -178,11 +219,23 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             ]);
             continue;
         }
+        if len == core::mem::size_of::<u64>() * 2 {
+            shell_endpoint = u64::from_le_bytes([
+                buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+            ]);
+            shell_thread = u64::from_le_bytes([
+                buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
+            ]);
+            continue;
+        }
         if len < buf.len() {
             continue;
         }
         if shell_endpoint != 0 {
             let _ = platform::ipc::send(shell_endpoint, &buf);
+        }
+        if shell_thread != 0 && shell_thread != shell_endpoint {
+            let _ = platform::ipc::send(shell_thread, &buf);
         }
     }
 }

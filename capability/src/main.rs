@@ -28,6 +28,7 @@ const DRIVERS_PACKAGE_ID: &str = "org.mochios.drivers";
 const SIGNATURE_PACKAGE_ID: &str = "org.mochios.signature";
 const PACKAGE_PACKAGE_ID: &str = "org.mochios.package";
 const RESOLVE_CAPS_OPCODE: u32 = 0x4341_5053;
+const SPAWN_APP_OPCODE: u32 = 0x4150_5053;
 const REPLY_OK: u64 = 0;
 const GRANTS_PATH: &str = "/system/policy/capability-grants.db";
 const O_WRONLY: u64 = 0o1;
@@ -499,6 +500,97 @@ fn reply_capabilities(sender: u64, result: Result<Vec<String>, mochi_user_syscal
     let _ = platform::ipc::reply(sender, &reply);
 }
 
+fn reply_spawn(sender: u64, result: Result<u64, mochi_user_syscall::SysError>) {
+    let mut reply = [0u8; 16];
+    match result {
+        Ok(pid) => {
+            reply[..8].copy_from_slice(&0u64.to_le_bytes());
+            reply[8..16].copy_from_slice(&pid.to_le_bytes());
+        }
+        Err(err) => {
+            reply[..8]
+                .copy_from_slice(&err.errno().unwrap_or(mochi_user_syscall::EIO).to_le_bytes());
+        }
+    }
+    let _ = platform::ipc::reply(sender, &reply);
+}
+
+fn parse_nul_list(
+    bytes: &[u8],
+    max_items: usize,
+) -> Result<Vec<String>, mochi_user_syscall::SysError> {
+    let mut out = Vec::new();
+    for part in bytes.split(|byte| *byte == 0) {
+        if part.is_empty() {
+            continue;
+        }
+        let text = core::str::from_utf8(part).map_err(|_| {
+            mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
+        })?;
+        out.push(text.to_string());
+        if out.len() > max_items {
+            return Err(mochi_user_syscall::SysError::from_raw(
+                mochi_user_syscall::EINVAL as i64,
+            ));
+        }
+    }
+    Ok(out)
+}
+
+fn spawn_application_from_manifest(
+    index: &PackageIndex,
+    sender: u64,
+    buf: &[u8],
+) -> Result<u64, mochi_user_syscall::SysError> {
+    if buf.len() <= 4 || index.duplicate {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
+    }
+    if platform::capability::check_thread(sender, "process.spawn")? == 0 {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EACCES as i64,
+        ));
+    }
+
+    let items = parse_nul_list(&buf[4..], 64)?;
+    let Some(entry_path) = items.first() else {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
+    };
+    if !entry_path.starts_with('/') {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
+    }
+
+    let manifest_record = index
+        .by_binary
+        .get(entry_path)
+        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOENT as i64))?;
+    let manifest = platform::package::read_manifest(&manifest_record.manifest_path)
+        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    let binary = manifest
+        .binary(entry_path)
+        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    if binary.kind.as_deref() != Some("application") {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EACCES as i64,
+        ));
+    }
+
+    let caps = binary_caps(&manifest, entry_path)?;
+    let caps_nul = encode_nul_list(&caps);
+    let args_nul = encode_spawn_args(&items[1..]);
+    platform::service::spawn_manifest(
+        entry_path,
+        platform::service::ROLE_APPLICATION,
+        Some(args_nul.as_slice()),
+        Some(caps_nul.as_slice()),
+    )
+}
+
 fn read_request_str(bytes: &[u8], len: u16) -> Result<&str, mochi_user_syscall::SysError> {
     let len = len as usize;
     if len > bytes.len() {
@@ -740,6 +832,11 @@ fn serve_capability_requests() -> ! {
             let result = parse_resolve_caps_request(slice)
                 .and_then(|path| resolve_capabilities_for_path(&path));
             reply_capabilities(sender, result);
+            continue;
+        }
+        if opcode == SPAWN_APP_OPCODE {
+            let result = spawn_application_from_manifest(&index, sender, slice);
+            reply_spawn(sender, result);
             continue;
         }
         if opcode == platform::capability::CAPABILITY_DECISION_OPCODE {
