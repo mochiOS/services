@@ -828,7 +828,7 @@ fn spawn_application_from_manifest(
         }
     ));
     spawn_items.extend(items[1..].iter().cloned());
-    let args_nul = encode_nul_list(&spawn_items);
+    let args_nul = encode_spawn_args(&spawn_items);
     platform::service::spawn_manifest(
         entry_path,
         platform::service::ROLE_APPLICATION,
