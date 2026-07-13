@@ -33,6 +33,7 @@ const PACKAGE_PACKAGE_ID: &str = "org.mochios.package";
 const CAPABILITY_PACKAGE_ID: &str = "org.mochios.capability";
 const RESOLVE_CAPS_OPCODE: u32 = 0x4341_5053;
 const SPAWN_APP_OPCODE: u32 = 0x4150_5053;
+const EXEC_MANIFEST_ENV_PREFIX: &str = "__MOCHI_EXEC_ENV=";
 const REPLY_OK: u64 = 0;
 const GRANTS_PATH: &str = "/system/policy/capability-grants.db";
 const O_WRONLY: u64 = 0o1;
@@ -804,7 +805,30 @@ fn spawn_application_from_manifest(
         );
     }
     let caps_nul = encode_nul_list(&caps);
-    let args_nul = encode_spawn_args(&items[1..]);
+    let mut spawn_items = Vec::new();
+    spawn_items.push(format!(
+        "{}MOCHI_EXECUTABLE_PATH={}",
+        EXEC_MANIFEST_ENV_PREFIX, entry_path
+    ));
+    spawn_items.push(format!(
+        "{}MOCHI_SHELL_ENDPOINT={}",
+        EXEC_MANIFEST_ENV_PREFIX, header.shell_endpoint
+    ));
+    spawn_items.push(format!(
+        "{}MOCHI_STDIO_ENDPOINT={}",
+        EXEC_MANIFEST_ENV_PREFIX, header.shell_endpoint
+    ));
+    spawn_items.push(format!(
+        "{}MOCHI_PROMPT_MODE={}",
+        EXEC_MANIFEST_ENV_PREFIX,
+        if header.interactive == 0 {
+            "deny"
+        } else {
+            "interactive"
+        }
+    ));
+    spawn_items.extend(items[1..].iter().cloned());
+    let args_nul = encode_nul_list(&spawn_items);
     platform::service::spawn_manifest(
         entry_path,
         platform::service::ROLE_APPLICATION,
