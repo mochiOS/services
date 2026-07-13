@@ -913,6 +913,14 @@ fn resize_buffer(buffer: &mut Vec<u32>, width: u32, height: u32) -> bool {
 }
 
 fn surface_has_current_pixels(surface: &Surface) -> bool {
+    if surface.role == SurfaceRole::Background {
+        let Some(surface_len) =
+            (surface.current_width as usize).checked_mul(surface.current_height as usize)
+        else {
+            return false;
+        };
+        return surface.current.len() >= surface_len;
+    }
     if let Some(buffer) = &surface.current_buffer {
         return buffer.width == surface.current_width
             && buffer.height == surface.current_height
@@ -928,6 +936,11 @@ fn surface_has_current_pixels(surface: &Surface) -> bool {
 }
 
 fn read_current_pixel(surface: &Surface, sx: usize, sy: usize) -> Option<u32> {
+    if surface.role == SurfaceRole::Background {
+        let width = usize::try_from(surface.current_width).ok()?;
+        let index = sy.checked_mul(width)?.checked_add(sx)?;
+        return surface.current.get(index).copied();
+    }
     if let Some(buffer) = &surface.current_buffer {
         let stride = usize::try_from(buffer.stride).ok()?;
         let src = sy.checked_mul(stride)?.checked_add(sx)?;
@@ -2061,12 +2074,12 @@ fn handle_request(
                                 put_u32(&mut reply, 0, status);
                                 return reply;
                             }
-                            surface.current_buffer = None;
+                            surface.current_buffer = Some(buffer);
                         } else {
                             match copy_surface_buffer(&buffer) {
                                 Ok(pixels) => {
                                     surface.current = pixels;
-                                    surface.current_buffer = None;
+                                    surface.current_buffer = Some(buffer);
                                 }
                                 Err(status) => {
                                     put_u32(&mut reply, 0, status);
