@@ -20,6 +20,7 @@ _start:
 
 const OP_GET_INFO: u32 = 1;
 const OP_PRESENT: u32 = 2;
+const OP_CLAIM_PRESENT_OWNER: u32 = 3;
 const PIXEL_FORMAT_XRGB8888: u32 = 1;
 const FB_VIRT: u64 = 0x0000_6000_0000_0000;
 const MAX_DIMENSION: usize = 4096;
@@ -228,7 +229,8 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         Ok(endpoint) => endpoint,
         Err(_) => platform::process::exit(1),
     };
-    let mut shared_buffer: Option<(u64, u64)> = None;
+    let mut shared_buffer: Option<(u64, u64, u64)> = None;
+    let mut present_owner = 0u64;
     loop {
         let buf = unsafe {
             core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(IPC_BUF).cast::<u8>(), 4128)
@@ -240,13 +242,16 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         let sender = msg >> 32;
         let len = (msg & 0xffff_ffff) as usize;
         if len == 16 {
+            if present_owner != 0 && sender != present_owner {
+                continue;
+            }
             let mapped_addr = u64::from_le_bytes([
                 buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
             ]);
             let total = u64::from_le_bytes([
                 buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
             ]);
-            shared_buffer = Some((mapped_addr, total));
+            shared_buffer = Some((sender, mapped_addr, total));
             continue;
         }
         if len < 4 || len > buf.len() {
@@ -277,22 +282,40 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
                 put_u32(reply, 16, PIXEL_FORMAT_XRGB8888);
                 let _ = platform::ipc::reply(sender, reply);
             }
+            OP_CLAIM_PRESENT_OWNER => {
+                present_owner = sender;
+                let reply = unsafe {
+                    core::slice::from_raw_parts_mut(
+                        core::ptr::addr_of_mut!(IPC_REPLY_4).cast::<u8>(),
+                        4,
+                    )
+                };
+                put_u32(reply, 0, 0);
+                let _ = platform::ipc::reply(sender, reply);
+            }
             OP_PRESENT => {
-                let status = if len == 20 {
+                let status = if present_owner != 0 && sender != present_owner {
+                    errno_status(mochi_user_syscall::EACCES)
+                } else if len == 20 {
                     let width = read_u32(&buf, 4).unwrap_or(0);
                     let height = read_u32(&buf, 8).unwrap_or(0);
                     let stride = read_u32(&buf, 12).unwrap_or(0);
                     let format = read_u32(&buf, 16).unwrap_or(0);
-                    match shared_buffer.take() {
-                        Some((mapped_addr, total)) => {
+                    match shared_buffer {
+                        Some((buffer_sender, mapped_addr, total)) if buffer_sender == sender => {
+                            shared_buffer = None;
                             present_shared(&info, mapped_addr, total, width, height, stride, format)
                         }
                         None => errno_status(mochi_user_syscall::EINVAL),
+                        Some(_) => {
+                            shared_buffer = None;
+                            errno_status(mochi_user_syscall::EINVAL)
+                        }
                     }
                 } else {
                     present_inline(&info, &buf[..len])
                 };
-                if status != 0 {
+                if status != 0 && status != errno_status(mochi_user_syscall::EACCES) {
                     platform::println!(
                         "display.driver: present failed status={} fb={}x{} stride={} size={}",
                         status,

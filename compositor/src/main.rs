@@ -6,7 +6,6 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::arch::global_asm;
-use core::convert::TryInto;
 use mochi_user_platform as platform;
 
 global_asm!(
@@ -25,9 +24,6 @@ _start:
 
 const DISPLAY_SERVICE_NAME: &str = "display.driver";
 const INPUT_SERVICE_NAME: &str = "input.service";
-const CAPABILITY_SERVICE_NAME: &str = "capability.service";
-const BINDER_APP_PATH: &str = "/applications/Binder.app/entry.elf";
-const RESOLVE_CAPS_OPCODE: u32 = 0x4341_5053;
 const OP_CREATE_SURFACE: u32 = 1;
 const OP_ATTACH_BUFFER: u32 = 2;
 const OP_DAMAGE: u32 = 3;
@@ -46,6 +42,7 @@ const OP_DECOR_TOGGLE_MAXIMIZE: u32 = 108;
 const OP_DECOR_CLOSE_REQUEST: u32 = 109;
 const OP_DISPLAY_GET_INFO: u32 = 1;
 const OP_DISPLAY_PRESENT: u32 = 2;
+const OP_DISPLAY_CLAIM_PRESENT_OWNER: u32 = 3;
 const DECOR_EVENT_WINDOW: u32 = 0x5749_4e44;
 const EVENT_POINTER_ENTER: u32 = 2;
 const EVENT_POINTER_LEAVE: u32 = 3;
@@ -72,9 +69,6 @@ const MAX_DIMENSION: u32 = 16_384;
 const IDLE_CLEANUP_YIELDS: u32 = 64;
 const DECORATE_CAPABILITY: &str = "window.decorate";
 const DECORATE_COMPAT_CAPABILITY: &str = "window.overlay";
-const CURSOR_ICON_PATH: &str = "/system/icons/cursor.svg";
-const DEFAULT_CURSOR_WIDTH: u32 = 24;
-const DEFAULT_CURSOR_HEIGHT: u32 = 24;
 const WINDOW_STATE_NORMAL: u32 = 0;
 const WINDOW_STATE_MINIMIZED: u32 = 1;
 const WINDOW_STATE_MAXIMIZED: u32 = 2;
@@ -116,6 +110,15 @@ impl SurfaceRole {
             Self::Background | Self::Panel | Self::SecureOverlay => {
                 Err(errno_status(mochi_user_syscall::EACCES))
             }
+        }
+    }
+
+    fn privileged_overlay_rights(self) -> Result<SurfaceRights, u32> {
+        match self {
+            Self::Background | Self::Panel | Self::Toplevel | Self::Popup => {
+                Ok(SurfaceRights::GENERAL_CLIENT)
+            }
+            Self::SecureOverlay => Err(errno_status(mochi_user_syscall::EACCES)),
         }
     }
 }
@@ -287,15 +290,6 @@ struct Surface {
     z: u32,
 }
 
-#[allow(dead_code)]
-struct CursorImage {
-    width: u32,
-    height: u32,
-    hotspot_x: i32,
-    hotspot_y: i32,
-    pixels: Vec<u32>,
-}
-
 #[derive(Default)]
 struct PresentFrame {
     virt: u64,
@@ -328,12 +322,6 @@ impl PresentFrame {
         }
         Ok(unsafe { core::slice::from_raw_parts_mut(self.virt as *mut u32, pixel_count) })
     }
-}
-
-#[derive(Clone, Copy, Default)]
-struct SvgPoint {
-    x: i32,
-    y: i32,
 }
 
 impl Surface {
@@ -481,10 +469,6 @@ fn errno_status(errno: u64) -> u32 {
     }
 }
 
-fn sys_error(errno: u64) -> mochi_user_syscall::SysError {
-    mochi_user_syscall::SysError::from_raw(-(errno as i64))
-}
-
 fn put_i32(out: &mut [u8], offset: usize, value: i32) {
     out[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
@@ -541,542 +525,24 @@ fn display_request_info(display_tid: u64) -> (u32, u32, u32, u32) {
     (640, 480, 640, PIXEL_FORMAT_XRGB8888)
 }
 
-fn ascii_ws(byte: u8) -> bool {
-    matches!(byte, b' ' | b'\n' | b'\r' | b'\t')
-}
-
-fn find_byte(bytes: &[u8], needle: u8) -> Option<usize> {
-    bytes.iter().position(|&byte| byte == needle)
-}
-
-fn attr_value<'a>(tag: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
-    let mut pos = 0usize;
-    while pos < tag.len() {
-        while pos < tag.len() && !ascii_ws(tag[pos]) {
-            pos += 1;
-        }
-        while pos < tag.len() && ascii_ws(tag[pos]) {
-            pos += 1;
-        }
-        if pos >= tag.len() {
-            break;
-        }
-        let key_start = pos;
-        while pos < tag.len() && tag[pos] != b'=' && !ascii_ws(tag[pos]) && tag[pos] != b'/' {
-            pos += 1;
-        }
-        let key_end = pos;
-        while pos < tag.len() && ascii_ws(tag[pos]) {
-            pos += 1;
-        }
-        if pos >= tag.len() || tag[pos] != b'=' {
-            continue;
-        }
-        pos += 1;
-        while pos < tag.len() && ascii_ws(tag[pos]) {
-            pos += 1;
-        }
-        if pos >= tag.len() || (tag[pos] != b'"' && tag[pos] != b'\'') {
-            continue;
-        }
-        let quote = tag[pos];
-        pos += 1;
-        let value_start = pos;
-        while pos < tag.len() && tag[pos] != quote {
-            pos += 1;
-        }
-        let value_end = pos;
-        if pos < tag.len() {
-            pos += 1;
-        }
-        if &tag[key_start..key_end] == name {
-            return Some(&tag[value_start..value_end]);
-        }
+fn display_claim_present_owner(display_tid: u64) -> u32 {
+    let req = unsafe {
+        core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(DISPLAY_REQ_BUF).cast::<u8>(), 20)
+    };
+    req.fill(0);
+    put_u32(req, 0, OP_DISPLAY_CLAIM_PRESENT_OWNER);
+    let reply = unsafe {
+        core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(DISPLAY_REP_BUF).cast::<u8>(), 32)
+    };
+    reply.fill(0);
+    let Ok(msg) = platform::ipc::call(display_tid, req, reply) else {
+        return errno_status(mochi_user_syscall::EIO);
+    };
+    let len = (msg & 0xffff_ffff) as usize;
+    if len < 4 {
+        return errno_status(mochi_user_syscall::EIO);
     }
-    None
-}
-
-fn parse_u32_attr(tag: &[u8], name: &[u8]) -> Option<u32> {
-    let value = attr_value(tag, name)?;
-    let mut out = 0u32;
-    let mut saw_digit = false;
-    for &byte in value {
-        if byte == b'.' {
-            break;
-        }
-        if !byte.is_ascii_digit() {
-            return None;
-        }
-        saw_digit = true;
-        out = out.checked_mul(10)?.checked_add(u32::from(byte - b'0'))?;
-    }
-    saw_digit.then_some(out)
-}
-
-fn parse_fixed(value: &[u8]) -> Option<i32> {
-    if value.is_empty() {
-        return None;
-    }
-    let mut pos = 0usize;
-    let mut sign = 1i32;
-    if value[pos] == b'-' {
-        sign = -1;
-        pos += 1;
-    } else if value[pos] == b'+' {
-        pos += 1;
-    }
-    let mut int = 0i32;
-    let mut saw_digit = false;
-    while pos < value.len() && value[pos].is_ascii_digit() {
-        saw_digit = true;
-        int = int
-            .checked_mul(10)?
-            .checked_add(i32::from(value[pos] - b'0'))?;
-        pos += 1;
-    }
-    let mut frac = 0i32;
-    let mut scale = 100i32;
-    if pos < value.len() && value[pos] == b'.' {
-        pos += 1;
-        while pos < value.len() && value[pos].is_ascii_digit() && scale > 0 {
-            saw_digit = true;
-            frac = frac.checked_add(i32::from(value[pos] - b'0').checked_mul(scale)?)?;
-            scale /= 10;
-            pos += 1;
-        }
-        while pos < value.len() && value[pos].is_ascii_digit() {
-            pos += 1;
-        }
-    }
-    if !saw_digit {
-        return None;
-    }
-    let fixed = int
-        .checked_mul(1024)?
-        .checked_add((frac * 1024 + 500) / 1000)?;
-    Some(fixed.checked_mul(sign)?)
-}
-
-fn parse_fixed_attr(tag: &[u8], name: &[u8]) -> Option<i32> {
-    parse_fixed(attr_value(tag, name)?)
-}
-
-fn parse_hex_digit(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
-
-fn parse_color_value(value: &[u8]) -> Option<u32> {
-    if value == b"none" {
-        return None;
-    }
-    if value == b"white" {
-        return Some(0x00ff_ffff);
-    }
-    if value == b"black" {
-        return Some(0);
-    }
-    if value.len() != 7 || value[0] != b'#' {
-        return None;
-    }
-    let r = parse_hex_digit(value[1])? << 4 | parse_hex_digit(value[2])?;
-    let g = parse_hex_digit(value[3])? << 4 | parse_hex_digit(value[4])?;
-    let b = parse_hex_digit(value[5])? << 4 | parse_hex_digit(value[6])?;
-    Some(u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b))
-}
-
-fn parse_color_attr(tag: &[u8], name: &[u8]) -> Option<u32> {
-    parse_color_value(attr_value(tag, name)?)
-}
-
-fn parse_fill(tag: &[u8]) -> Option<u32> {
-    parse_color_attr(tag, b"fill")
-}
-
-fn parse_opacity_permille(value: &[u8]) -> Option<u32> {
-    if value == b"1" || value == b"1.0" || value == b"1.00" {
-        return Some(1000);
-    }
-    if value == b"0" {
-        return Some(0);
-    }
-    if !value.starts_with(b"0.") {
-        return None;
-    }
-    let mut out = 0u32;
-    let mut scale = 100u32;
-    for &byte in &value[2..] {
-        if !byte.is_ascii_digit() || scale == 0 {
-            break;
-        }
-        out = out.checked_add(u32::from(byte - b'0').checked_mul(scale)?)?;
-        scale /= 10;
-    }
-    Some(out.min(1000))
-}
-
-fn parse_alpha(tag: &[u8]) -> u32 {
-    let opacity = attr_value(tag, b"fill-opacity")
-        .or_else(|| attr_value(tag, b"opacity"))
-        .and_then(parse_opacity_permille)
-        .unwrap_or(1000);
-    ((opacity * 255) / 1000).min(255)
-}
-
-fn skip_path_separators(bytes: &[u8], pos: &mut usize) {
-    while *pos < bytes.len() && (ascii_ws(bytes[*pos]) || bytes[*pos] == b',') {
-        *pos += 1;
-    }
-}
-
-fn parse_path_number(bytes: &[u8], pos: &mut usize) -> Option<i32> {
-    skip_path_separators(bytes, pos);
-    let start = *pos;
-    if *pos < bytes.len() && matches!(bytes[*pos], b'-' | b'+') {
-        *pos += 1;
-    }
-    while *pos < bytes.len() && bytes[*pos].is_ascii_digit() {
-        *pos += 1;
-    }
-    if *pos < bytes.len() && bytes[*pos] == b'.' {
-        *pos += 1;
-        while *pos < bytes.len() && bytes[*pos].is_ascii_digit() {
-            *pos += 1;
-        }
-    }
-    if start == *pos || (start + 1 == *pos && matches!(bytes[start], b'-' | b'+')) {
-        return None;
-    }
-    parse_fixed(&bytes[start..*pos])
-}
-
-fn parse_svg_path_points(d: &[u8]) -> Option<Vec<SvgPoint>> {
-    let mut points = Vec::new();
-    let mut pos = 0usize;
-    let mut current = SvgPoint::default();
-    let mut command = 0u8;
-    while pos < d.len() {
-        skip_path_separators(d, &mut pos);
-        if pos >= d.len() {
-            break;
-        }
-        if d[pos].is_ascii_alphabetic() {
-            command = d[pos];
-            pos += 1;
-        }
-        match command {
-            b'M' | b'L' => {
-                let x = parse_path_number(d, &mut pos)?;
-                let y = parse_path_number(d, &mut pos)?;
-                current = SvgPoint { x, y };
-                points.push(current);
-                if command == b'M' {
-                    command = b'L';
-                }
-            }
-            b'H' => {
-                current.x = parse_path_number(d, &mut pos)?;
-                points.push(current);
-            }
-            b'V' => {
-                current.y = parse_path_number(d, &mut pos)?;
-                points.push(current);
-            }
-            b'Z' | b'z' => break,
-            _ => return None,
-        }
-    }
-    (points.len() >= 2).then_some(points)
-}
-
-fn blend_argb_over_argb(dst: u32, src: u32) -> u32 {
-    let sa = (src >> 24) & 0xff;
-    if sa == 0 {
-        return dst;
-    }
-    let da = (dst >> 24) & 0xff;
-    if da == 0 || sa == 0xff {
-        return src;
-    }
-    let out_a = sa + (da * (255 - sa) + 127) / 255;
-    if out_a == 0 {
-        return 0;
-    }
-    let sr = (src >> 16) & 0xff;
-    let sg = (src >> 8) & 0xff;
-    let sb = src & 0xff;
-    let dr = (dst >> 16) & 0xff;
-    let dg = (dst >> 8) & 0xff;
-    let db = dst & 0xff;
-    let dst_weight = (da * (255 - sa) + 127) / 255;
-    let r = (sr * sa + dr * dst_weight + out_a / 2) / out_a;
-    let g = (sg * sa + dg * dst_weight + out_a / 2) / out_a;
-    let b = (sb * sa + db * dst_weight + out_a / 2) / out_a;
-    (out_a << 24) | (r << 16) | (g << 8) | b
-}
-
-fn put_cursor_pixel(pixels: &mut [u32], width: u32, x: u32, y: u32, argb: u32) -> Option<()> {
-    let index = (y as usize)
-        .checked_mul(width as usize)?
-        .checked_add(x as usize)?;
-    let slot = pixels.get_mut(index)?;
-    *slot = blend_argb_over_argb(*slot, argb);
-    Some(())
-}
-
-fn draw_rect(pixels: &mut [u32], width: u32, height: u32, tag: &[u8]) -> Option<()> {
-    let x = parse_u32_attr(tag, b"x").unwrap_or(0);
-    let y = parse_u32_attr(tag, b"y").unwrap_or(0);
-    let rect_w = parse_u32_attr(tag, b"width").unwrap_or(0);
-    let rect_h = parse_u32_attr(tag, b"height").unwrap_or(0);
-    let rgb = parse_fill(tag)?;
-    let alpha = parse_alpha(tag);
-    if rect_w == 0 || rect_h == 0 || alpha == 0 {
-        return Some(());
-    }
-    let argb = (alpha << 24) | rgb;
-    let max_y = y.saturating_add(rect_h).min(height);
-    let max_x = x.saturating_add(rect_w).min(width);
-    for py in y..max_y {
-        for px in x..max_x {
-            put_cursor_pixel(pixels, width, px, py, argb)?;
-        }
-    }
-    Some(())
-}
-
-fn point_in_polygon(px: i32, py: i32, points: &[SvgPoint]) -> bool {
-    let mut inside = false;
-    let mut j = points.len() - 1;
-    for i in 0..points.len() {
-        let pi = points[i];
-        let pj = points[j];
-        let crosses = (pi.y > py) != (pj.y > py);
-        if crosses {
-            let dy = i64::from(pj.y - pi.y);
-            if dy != 0 {
-                let x_at_y = i64::from(pi.x) + (i64::from(py - pi.y) * i64::from(pj.x - pi.x)) / dy;
-                if i64::from(px) < x_at_y {
-                    inside = !inside;
-                }
-            }
-        }
-        j = i;
-    }
-    inside
-}
-
-fn draw_polygon_fill(
-    pixels: &mut [u32],
-    width: u32,
-    height: u32,
-    points: &[SvgPoint],
-    argb: u32,
-) -> Option<()> {
-    for y in 0..height {
-        let py = ((y as i32) << 10) + 512;
-        for x in 0..width {
-            let px = ((x as i32) << 10) + 512;
-            if point_in_polygon(px, py, points) {
-                put_cursor_pixel(pixels, width, x, y, argb)?;
-            }
-        }
-    }
-    Some(())
-}
-
-fn distance_sq_to_segment(px: i32, py: i32, a: SvgPoint, b: SvgPoint) -> i64 {
-    let ax = i64::from(a.x);
-    let ay = i64::from(a.y);
-    let bx = i64::from(b.x);
-    let by = i64::from(b.y);
-    let vx = bx - ax;
-    let vy = by - ay;
-    let wx = i64::from(px) - ax;
-    let wy = i64::from(py) - ay;
-    let len_sq = vx * vx + vy * vy;
-    if len_sq == 0 {
-        let dx = i64::from(px) - ax;
-        let dy = i64::from(py) - ay;
-        return dx * dx + dy * dy;
-    }
-    let t_num = (wx * vx + wy * vy).clamp(0, len_sq);
-    let proj_x = ax + (vx * t_num) / len_sq;
-    let proj_y = ay + (vy * t_num) / len_sq;
-    let dx = i64::from(px) - proj_x;
-    let dy = i64::from(py) - proj_y;
-    dx * dx + dy * dy
-}
-
-fn draw_polyline_stroke(
-    pixels: &mut [u32],
-    width: u32,
-    height: u32,
-    points: &[SvgPoint],
-    stroke_width: i32,
-    closed: bool,
-    argb: u32,
-) -> Option<()> {
-    let radius = (stroke_width.max(1024) + 1) / 2;
-    let threshold = i64::from(radius) * i64::from(radius);
-    for y in 0..height {
-        let py = ((y as i32) << 10) + 512;
-        for x in 0..width {
-            let px = ((x as i32) << 10) + 512;
-            let mut hit = false;
-            for segment in points.windows(2) {
-                if distance_sq_to_segment(px, py, segment[0], segment[1]) <= threshold {
-                    hit = true;
-                    break;
-                }
-            }
-            if !hit && closed && points.len() > 1 {
-                hit = distance_sq_to_segment(px, py, points[points.len() - 1], points[0])
-                    <= threshold;
-            }
-            if hit {
-                put_cursor_pixel(pixels, width, x, y, argb)?;
-            }
-        }
-    }
-    Some(())
-}
-
-fn draw_line(pixels: &mut [u32], width: u32, height: u32, tag: &[u8]) -> Option<()> {
-    let stroke = parse_color_attr(tag, b"stroke")?;
-    let alpha = parse_alpha(tag);
-    let stroke_width = parse_fixed_attr(tag, b"stroke-width").unwrap_or(1024);
-    let points = [
-        SvgPoint {
-            x: parse_fixed_attr(tag, b"x1")?,
-            y: parse_fixed_attr(tag, b"y1")?,
-        },
-        SvgPoint {
-            x: parse_fixed_attr(tag, b"x2")?,
-            y: parse_fixed_attr(tag, b"y2")?,
-        },
-    ];
-    draw_polyline_stroke(
-        pixels,
-        width,
-        height,
-        &points,
-        stroke_width,
-        false,
-        (alpha << 24) | stroke,
-    )
-}
-
-fn draw_path(pixels: &mut [u32], width: u32, height: u32, tag: &[u8]) -> Option<()> {
-    let d = attr_value(tag, b"d")?;
-    let points = parse_svg_path_points(d)?;
-    if let Some(fill) = parse_fill(tag) {
-        let alpha = parse_alpha(tag);
-        if alpha != 0 {
-            draw_polygon_fill(pixels, width, height, &points, (alpha << 24) | fill)?;
-        }
-    }
-    if let Some(stroke) = parse_color_attr(tag, b"stroke") {
-        let alpha = parse_alpha(tag);
-        if alpha != 0 {
-            let stroke_width = parse_fixed_attr(tag, b"stroke-width").unwrap_or(1024);
-            draw_polyline_stroke(
-                pixels,
-                width,
-                height,
-                &points,
-                stroke_width,
-                true,
-                (alpha << 24) | stroke,
-            )?;
-        }
-    }
-    Some(())
-}
-
-fn rasterize_svg_rects(svg: &[u8]) -> Option<CursorImage> {
-    let width = parse_u32_attr(svg, b"width").unwrap_or(DEFAULT_CURSOR_WIDTH);
-    let height = parse_u32_attr(svg, b"height").unwrap_or(DEFAULT_CURSOR_HEIGHT);
-    if width == 0 || height == 0 || width > 128 || height > 128 {
-        return None;
-    }
-    let pixels_len = (width as usize).checked_mul(height as usize)?;
-    let mut pixels = Vec::new();
-    pixels.try_reserve_exact(pixels_len).ok()?;
-    pixels.resize(pixels_len, 0);
-
-    let mut pos = 0usize;
-    while let Some(rel_start) = svg[pos..].iter().position(|&byte| byte == b'<') {
-        let start = pos.checked_add(rel_start)?;
-        let end = start.checked_add(find_byte(&svg[start..], b'>')?)?;
-        let tag = &svg[start..=end];
-        if tag.starts_with(b"<rect") {
-            draw_rect(&mut pixels, width, height, tag)?;
-        } else if tag.starts_with(b"<line") {
-            draw_line(&mut pixels, width, height, tag)?;
-        } else if tag.starts_with(b"<path") {
-            draw_path(&mut pixels, width, height, tag)?;
-        }
-        pos = end.saturating_add(1);
-    }
-
-    if pixels.iter().all(|&pixel| pixel == 0) {
-        return None;
-    }
-
-    Some(CursorImage {
-        width,
-        height,
-        hotspot_x: parse_u32_attr(svg, b"data-hotspot-x").unwrap_or(0) as i32,
-        hotspot_y: parse_u32_attr(svg, b"data-hotspot-y").unwrap_or(0) as i32,
-        pixels,
-    })
-}
-
-fn fallback_cursor_image() -> CursorImage {
-    let width = DEFAULT_CURSOR_WIDTH;
-    let height = DEFAULT_CURSOR_HEIGHT;
-    let mut pixels = Vec::new();
-    let len = (width as usize)
-        .checked_mul(height as usize)
-        .unwrap_or(DEFAULT_CURSOR_WIDTH as usize * DEFAULT_CURSOR_HEIGHT as usize);
-    pixels.resize(len, 0);
-    for y in 0..height {
-        for x in 0..width {
-            let inside = x <= y / 2 && y < 20 || (x >= 7 && x <= 10 && y >= 14 && y <= 22);
-            if !inside {
-                continue;
-            }
-            let edge =
-                x == 0 || x == y / 2 || y == 19 || (x == 7 && y >= 14) || (x == 10 && y >= 14);
-            let color = if edge { 0xff00_0000 } else { 0xffff_ffff };
-            let index = (y as usize)
-                .checked_mul(width as usize)
-                .and_then(|row| row.checked_add(x as usize))
-                .unwrap_or(0);
-            if let Some(slot) = pixels.get_mut(index) {
-                *slot = color;
-            }
-        }
-    }
-    CursorImage {
-        width,
-        height,
-        hotspot_x: 0,
-        hotspot_y: 0,
-        pixels,
-    }
-}
-
-fn load_cursor_image() -> CursorImage {
-    platform::file::read_to_end_path(CURSOR_ICON_PATH)
-        .ok()
-        .and_then(|bytes| rasterize_svg_rects(&bytes))
-        .unwrap_or_else(fallback_cursor_image)
+    read_u32(reply, 0).unwrap_or(errno_status(mochi_user_syscall::EIO))
 }
 
 fn find_service(name: &str) -> Option<u64> {
@@ -1124,47 +590,6 @@ fn subscribe_input_events(endpoint: u64) -> bool {
     };
     reply.fill(0);
     platform::ipc::call(input_tid, subscribe, reply).is_ok()
-}
-
-fn resolve_capabilities(entry_path: &str) -> Result<Vec<u8>, mochi_user_syscall::SysError> {
-    let Some(capability_tid) = wait_for_service(CAPABILITY_SERVICE_NAME, 1024) else {
-        return Err(sys_error(mochi_user_syscall::ENOENT));
-    };
-    let mut request = Vec::with_capacity(4 + entry_path.len());
-    request.extend_from_slice(&RESOLVE_CAPS_OPCODE.to_le_bytes());
-    request.extend_from_slice(entry_path.as_bytes());
-    let mut reply = [0u8; 1024];
-    let msg = platform::ipc::call(capability_tid, &request, &mut reply)?;
-    let len = (msg & 0xffff_ffff) as usize;
-    if len < 8 || len > reply.len() {
-        return Err(sys_error(mochi_user_syscall::EINVAL));
-    }
-    let status = u64::from_le_bytes(
-        reply[..8]
-            .try_into()
-            .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?,
-    );
-    if status != 0 {
-        return Err(sys_error(status));
-    }
-    Ok(reply[8..len].to_vec())
-}
-
-fn empty_spawn_args() -> Vec<u8> {
-    let mut out = Vec::with_capacity(512);
-    out.resize(512, 0);
-    out
-}
-
-fn spawn_binder_app() -> Result<u64, mochi_user_syscall::SysError> {
-    let caps_nul = resolve_capabilities(BINDER_APP_PATH)?;
-    let args_nul = empty_spawn_args();
-    platform::service::spawn_manifest(
-        BINDER_APP_PATH,
-        platform::service::ROLE_APPLICATION,
-        Some(args_nul.as_slice()),
-        Some(caps_nul.as_slice()),
-    )
 }
 
 fn client_id_for_sender(clients: &mut [Client], sender: u64, next_client_id: &mut u64) -> ClientId {
@@ -1316,12 +741,9 @@ fn cleanup_dead_clients(
         if !client.live {
             continue;
         }
-        let has_live_surface_endpoint = surfaces.iter().any(|surface| {
-            surface.live
-                && surface.owner == client.id
-                && surface.event_endpoint != 0
-                && platform::ipc::endpoint_alive(surface.event_endpoint)
-        });
+        let has_live_surface = surfaces
+            .iter()
+            .any(|surface| surface.live && surface.owner == client.id);
         let has_live_decoration_endpoint = client.decoration_endpoint != 0
             && platform::ipc::endpoint_alive(client.decoration_endpoint);
         let has_live_window_decorator_endpoint = windows.iter().any(|window| {
@@ -1331,9 +753,7 @@ fn cleanup_dead_clients(
                 && platform::ipc::endpoint_alive(window.decorator_endpoint)
         });
 
-        if !has_live_surface_endpoint
-            && !has_live_decoration_endpoint
-            && !has_live_window_decorator_endpoint
+        if !has_live_surface && !has_live_decoration_endpoint && !has_live_window_decorator_endpoint
         {
             cleanup_client(
                 clients,
@@ -1524,6 +944,55 @@ fn read_current_pixel(surface: &Surface, sx: usize, sy: usize) -> Option<u32> {
     surface.current.get(src).copied()
 }
 
+fn copy_surface_buffer(buffer: &SurfaceBuffer) -> Result<Vec<u32>, u32> {
+    let mut pixels = Vec::new();
+    if !resize_buffer(&mut pixels, buffer.width, buffer.height) {
+        return Err(errno_status(mochi_user_syscall::ENOMEM));
+    }
+    let stride =
+        usize::try_from(buffer.stride).map_err(|_| errno_status(mochi_user_syscall::EINVAL))?;
+    let width =
+        usize::try_from(buffer.width).map_err(|_| errno_status(mochi_user_syscall::EINVAL))?;
+    let height =
+        usize::try_from(buffer.height).map_err(|_| errno_status(mochi_user_syscall::EINVAL))?;
+    let row_bytes = stride
+        .checked_mul(4)
+        .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+    let needed = row_bytes
+        .checked_mul(height)
+        .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+    if buffer.byte_len < needed {
+        return Err(errno_status(mochi_user_syscall::EINVAL));
+    }
+    let source =
+        unsafe { core::slice::from_raw_parts(buffer.mapped_addr as *const u8, buffer.byte_len) };
+    for y in 0..height {
+        let src_row = y
+            .checked_mul(stride)
+            .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+        let dst_row = y
+            .checked_mul(width)
+            .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+        for x in 0..width {
+            let src = src_row
+                .checked_add(x)
+                .and_then(|offset| offset.checked_mul(4))
+                .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+            let Some(pixel) = read_pixel(source, src) else {
+                return Err(errno_status(mochi_user_syscall::EINVAL));
+            };
+            let dst = dst_row
+                .checked_add(x)
+                .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+            let Some(slot) = pixels.get_mut(dst) else {
+                return Err(errno_status(mochi_user_syscall::EINVAL));
+            };
+            *slot = pixel;
+        }
+    }
+    Ok(pixels)
+}
+
 fn shared_page_count(byte_len: usize) -> Option<usize> {
     byte_len
         .checked_add(PAGE_SIZE - 1)
@@ -1583,29 +1052,6 @@ fn validate_damage_rect(rect: Rect, surface_width: u32, surface_height: u32) -> 
         return Err(errno_status(mochi_user_syscall::ERANGE));
     }
     Ok(rect)
-}
-
-fn clip_rect_to_frame(rect: Rect, frame_width: usize, frame_height: usize) -> Option<Rect> {
-    if rect.width == 0 || rect.height == 0 {
-        return None;
-    }
-    let left = rect.x.max(0) as usize;
-    let top = rect.y.max(0) as usize;
-    let right = (rect.x as i64)
-        .saturating_add(rect.width as i64)
-        .clamp(0, frame_width as i64) as usize;
-    let bottom = (rect.y as i64)
-        .saturating_add(rect.height as i64)
-        .clamp(0, frame_height as i64) as usize;
-    if right <= left || bottom <= top {
-        return None;
-    }
-    Some(Rect {
-        x: left as i32,
-        y: top as i32,
-        width: (right - left) as u32,
-        height: (bottom - top) as u32,
-    })
 }
 
 fn merge_damage(first: Option<Rect>, second: Rect) -> Option<Rect> {
@@ -1843,7 +1289,7 @@ fn handle_input_event(
                 *pointer_y = max_y;
             }
             dispatch_pointer_motion(surfaces, *pointer_x, *pointer_y, pointer_focus);
-            true
+            false
         }
         platform::input::EVENT_KIND_POINTER_ABSOLUTE => {
             let max_x = display_width.saturating_sub(1).min(MAX_DIMENSION);
@@ -1861,7 +1307,7 @@ fn handle_input_event(
                 ((u64::from(y) * u64::from(max_y)) / 32_767) as i32
             };
             dispatch_pointer_motion(surfaces, *pointer_x, *pointer_y, pointer_focus);
-            true
+            false
         }
         platform::input::EVENT_KIND_POINTER_BUTTON => {
             let target = hit_test(surfaces, *pointer_x, *pointer_y);
@@ -1951,72 +1397,6 @@ fn blend_argb_over_xrgb(dst: u32, src: u32) -> u32 {
     0xff00_0000 | (r << 16) | (g << 8) | b
 }
 
-#[allow(dead_code)]
-fn composite_cursor(
-    frame: &mut [u32],
-    frame_w: usize,
-    frame_h: usize,
-    cursor: &CursorImage,
-    pointer_x: i32,
-    pointer_y: i32,
-) -> Result<(), u32> {
-    let origin_x = pointer_x.saturating_sub(cursor.hotspot_x);
-    let origin_y = pointer_y.saturating_sub(cursor.hotspot_y);
-    for cy in 0..cursor.height as usize {
-        let dy = origin_y.saturating_add(cy as i32);
-        if dy < 0 || dy >= frame_h as i32 {
-            continue;
-        }
-        let Some(src_row) = cy.checked_mul(cursor.width as usize) else {
-            return Err(errno_status(mochi_user_syscall::ERANGE));
-        };
-        let Some(dst_row) = (dy as usize).checked_mul(frame_w) else {
-            return Err(errno_status(mochi_user_syscall::ERANGE));
-        };
-        for cx in 0..cursor.width as usize {
-            let dx = origin_x.saturating_add(cx as i32);
-            if dx < 0 || dx >= frame_w as i32 {
-                continue;
-            }
-            let Some(src_index) = src_row.checked_add(cx) else {
-                return Err(errno_status(mochi_user_syscall::ERANGE));
-            };
-            let Some(src) = cursor.pixels.get(src_index).copied() else {
-                return Err(errno_status(mochi_user_syscall::ERANGE));
-            };
-            if (src >> 24) == 0 {
-                continue;
-            }
-            let shadow_x = dx.saturating_add(1);
-            let shadow_y = dy.saturating_add(1);
-            if shadow_x >= 0
-                && shadow_x < frame_w as i32
-                && shadow_y >= 0
-                && shadow_y < frame_h as i32
-            {
-                let Some(shadow_index) = (shadow_y as usize)
-                    .checked_mul(frame_w)
-                    .and_then(|row| row.checked_add(shadow_x as usize))
-                else {
-                    return Err(errno_status(mochi_user_syscall::ERANGE));
-                };
-                let Some(slot) = frame.get_mut(shadow_index) else {
-                    return Err(errno_status(mochi_user_syscall::ERANGE));
-                };
-                *slot = blend_argb_over_xrgb(*slot, 0x9000_0000);
-            }
-            let Some(dst_index) = dst_row.checked_add(dx as usize) else {
-                return Err(errno_status(mochi_user_syscall::ERANGE));
-            };
-            let Some(slot) = frame.get_mut(dst_index) else {
-                return Err(errno_status(mochi_user_syscall::ERANGE));
-            };
-            *slot = blend_argb_over_xrgb(*slot, src);
-        }
-    }
-    Ok(())
-}
-
 fn composite_and_present(
     surfaces: &[Surface],
     present_frame: &mut PresentFrame,
@@ -2039,55 +1419,85 @@ fn composite_and_present(
     let Some(frame_bytes) = frame_pixels.checked_mul(4) else {
         return errno_status(mochi_user_syscall::ERANGE);
     };
-    let frame = match present_frame.pixels(frame_pixels, frame_bytes) {
-        Ok(frame) => frame,
-        Err(status) => return status,
-    };
-    for y in 0..frame_h {
-        let Some(row) = y.checked_mul(frame_w) else {
-            return errno_status(mochi_user_syscall::ERANGE);
+    let (copied_surfaces, copied_pixels, first_pixel) = {
+        let frame = match present_frame.pixels(frame_pixels, frame_bytes) {
+            Ok(frame) => frame,
+            Err(status) => return status,
         };
-        for x in 0..frame_w {
-            let shade = 0x0020_2630u32 + (((x as u32) ^ (y as u32)) & 0x7);
-            let Some(pixel) = frame.get_mut(row + x) else {
+        let mut copied_surfaces = 0u32;
+        let mut copied_pixels = 0u32;
+        for y in 0..frame_h {
+            let Some(row) = y.checked_mul(frame_w) else {
                 return errno_status(mochi_user_syscall::ERANGE);
             };
-            *pixel = 0xff00_0000 | shade;
-        }
-    }
-    for surface in surfaces.iter().filter(|s| s.live && s.visible) {
-        if !surface_has_current_pixels(surface) {
-            continue;
-        }
-        for sy in 0..surface.current_height as usize {
-            let dy = surface.y + sy as i32;
-            if dy < 0 || dy >= frame_h as i32 {
-                continue;
+            for x in 0..frame_w {
+                let shade = 0x0020_2630u32 + (((x as u32) ^ (y as u32)) & 0x7);
+                let Some(pixel) = frame.get_mut(row + x) else {
+                    return errno_status(mochi_user_syscall::ERANGE);
+                };
+                *pixel = 0xff00_0000 | shade;
             }
-            for sx in 0..surface.current_width as usize {
-                let dx = surface.x + sx as i32;
-                if dx < 0 || dx >= frame_w as i32 {
+        }
+        let mut drawn = [false; MAX_SURFACES];
+        for _ in 0..surfaces.len() {
+            let mut selected: Option<usize> = None;
+            for (index, surface) in surfaces.iter().enumerate() {
+                if drawn[index] || !surface.live || !surface.visible {
                     continue;
                 }
-                let Some(dst) = (dy as usize)
-                    .checked_mul(frame_w)
-                    .and_then(|row| row.checked_add(dx as usize))
-                else {
-                    return errno_status(mochi_user_syscall::ERANGE);
-                };
-                let Some(pixel) = read_current_pixel(surface, sx, sy) else {
+                if selected.is_none_or(|selected_index| surface.z < surfaces[selected_index].z) {
+                    selected = Some(index);
+                }
+            }
+            let Some(index) = selected else {
+                break;
+            };
+            drawn[index] = true;
+            let surface = &surfaces[index];
+            if !surface_has_current_pixels(surface) {
+                continue;
+            }
+            let mut copied_this_surface = 0u32;
+            for sy in 0..surface.current_height as usize {
+                let dy = surface.y + sy as i32;
+                if dy < 0 || dy >= frame_h as i32 {
                     continue;
-                };
-                let Some(slot) = frame.get_mut(dst) else {
-                    return errno_status(mochi_user_syscall::ERANGE);
-                };
-                *slot = pixel;
+                }
+                for sx in 0..surface.current_width as usize {
+                    let dx = surface.x + sx as i32;
+                    if dx < 0 || dx >= frame_w as i32 {
+                        continue;
+                    }
+                    let Some(dst) = (dy as usize)
+                        .checked_mul(frame_w)
+                        .and_then(|row| row.checked_add(dx as usize))
+                    else {
+                        return errno_status(mochi_user_syscall::ERANGE);
+                    };
+                    let Some(pixel) = read_current_pixel(surface, sx, sy) else {
+                        continue;
+                    };
+                    let Some(slot) = frame.get_mut(dst) else {
+                        return errno_status(mochi_user_syscall::ERANGE);
+                    };
+                    *slot = pixel;
+                    copied_this_surface = copied_this_surface.saturating_add(1);
+                }
+            }
+            if copied_this_surface != 0 {
+                copied_surfaces = copied_surfaces.saturating_add(1);
+                copied_pixels = copied_pixels.saturating_add(copied_this_surface);
             }
         }
-    }
-    if let Err(err) =
-        platform::ipc::send_page_count(display_tid, present_frame.page_count, present_frame.virt)
-    {
+        (
+            copied_surfaces,
+            copied_pixels,
+            frame.first().copied().unwrap_or(0),
+        )
+    };
+    let page_count = present_frame.page_count;
+    let virt = present_frame.virt;
+    if let Err(err) = platform::ipc::send_page_count(display_tid, page_count, virt) {
         return errno_from_platform(err);
     }
     let request = unsafe {
@@ -2102,10 +1512,29 @@ fn composite_and_present(
     put_u32(request, 8, frame_h as u32);
     put_u32(request, 12, frame_w as u32);
     put_u32(request, 16, PIXEL_FORMAT_XRGB8888);
-    let reply = &mut [];
-    let Ok(_msg) = platform::ipc::call(display_tid, request, reply) else {
+    let reply = unsafe {
+        core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(DISPLAY_REP_BUF).cast::<u8>(), 32)
+    };
+    reply.fill(0);
+    let Ok(msg) = platform::ipc::call(display_tid, request, reply) else {
         return errno_status(mochi_user_syscall::EIO);
     };
+    let len = (msg & 0xffff_ffff) as usize;
+    if len < 4 {
+        return errno_status(mochi_user_syscall::EIO);
+    }
+    let status = read_u32(reply, 0).unwrap_or(errno_status(mochi_user_syscall::EIO));
+    if status != 0 {
+        return status;
+    }
+    if copied_surfaces != 0 {
+        platform::println!(
+            "compositor.service: present surfaces={} pixels={} first=0x{:08x}",
+            copied_surfaces,
+            copied_pixels,
+            first_pixel
+        );
+    }
     0
 }
 
@@ -2146,11 +1575,21 @@ fn handle_request(
                     return reply;
                 }
             };
-            let rights = match role.general_client_rights() {
-                Ok(rights) => rights,
-                Err(status) => {
-                    put_u32(&mut reply, 0, status);
-                    return reply;
+            let rights = if sender_has_overlay_compat_capability(sender) {
+                match role.privileged_overlay_rights() {
+                    Ok(rights) => rights,
+                    Err(status) => {
+                        put_u32(&mut reply, 0, status);
+                        return reply;
+                    }
+                }
+            } else {
+                match role.general_client_rights() {
+                    Ok(rights) => rights,
+                    Err(status) => {
+                        put_u32(&mut reply, 0, status);
+                        return reply;
+                    }
                 }
             };
             let width = read_u32(request, 8).unwrap_or(0);
@@ -2207,7 +1646,12 @@ fn handle_request(
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ENOSPC));
                 return reply;
             };
-            *next_z = next_z.wrapping_add(1);
+            let z = if role == SurfaceRole::Background {
+                0
+            } else {
+                *next_z = next_z.wrapping_add(1);
+                *next_z
+            };
             let token = match generate_surface_token(surfaces) {
                 Ok(token) => token,
                 Err(status) => {
@@ -2277,7 +1721,7 @@ fn handle_request(
             surfaces[index].y = y;
             surfaces[index].width = width;
             surfaces[index].height = height;
-            surfaces[index].z = *next_z;
+            surfaces[index].z = z;
             platform::println!(
                 "compositor.service: create surface role={} size={}x{} pos={},{} endpoint={}",
                 role_raw,
@@ -2494,15 +1938,40 @@ fn handle_request(
             }
             {
                 let surface = &mut surfaces[index];
-                surface.current_buffer = surface.pending_buffer.take();
-                if surface.current_buffer.is_some() {
-                    surface.current.clear();
+                if surface.role == SurfaceRole::Background {
+                    if let Some(buffer) = surface.pending_buffer.take() {
+                        match copy_surface_buffer(&buffer) {
+                            Ok(pixels) => {
+                                platform::println!(
+                                    "compositor.service: background commit {}x{} first=0x{:08x}",
+                                    pending_width,
+                                    pending_height,
+                                    pixels.first().copied().unwrap_or(0)
+                                );
+                                surface.current = pixels;
+                                surface.current_buffer = None;
+                            }
+                            Err(status) => {
+                                put_u32(&mut reply, 0, status);
+                                return reply;
+                            }
+                        }
+                    } else {
+                        surface.current_buffer = None;
+                        core::mem::swap(&mut surface.current, &mut surface.pending);
+                    }
+                    surface.current_stride = pending_width;
                 } else {
-                    core::mem::swap(&mut surface.current, &mut surface.pending);
+                    surface.current_buffer = surface.pending_buffer.take();
+                    if surface.current_buffer.is_some() {
+                        surface.current.clear();
+                    } else {
+                        core::mem::swap(&mut surface.current, &mut surface.pending);
+                    }
+                    surface.current_stride = pending_stride;
                 }
                 surface.current_width = pending_width;
                 surface.current_height = pending_height;
-                surface.current_stride = pending_stride;
                 surface.pending_width = 0;
                 surface.pending_height = 0;
                 surface.pending_stride = 0;
@@ -2871,6 +2340,13 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         platform::process::exit(1);
     };
     let mut input_subscribed = subscribe_input_events(endpoint);
+    let claim_status = display_claim_present_owner(display_tid);
+    if claim_status != 0 {
+        platform::println!(
+            "compositor.service: display claim failed status={}",
+            claim_status
+        );
+    }
     let (display_width, display_height, display_stride, display_format) =
         display_request_info(display_tid);
 
@@ -2900,13 +2376,6 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         display_format,
         None,
     );
-    match spawn_binder_app() {
-        Ok(pid) => platform::println!("compositor.service: Binder.app spawned pid={}", pid),
-        Err(err) => platform::println!(
-            "compositor.service: Binder.app spawn failed errno={}",
-            err.errno().unwrap_or(mochi_user_syscall::EIO)
-        ),
-    }
     loop {
         let buf = unsafe {
             core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(IPC_BUF).cast::<u8>(), 4128)
