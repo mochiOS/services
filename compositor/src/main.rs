@@ -1419,13 +1419,11 @@ fn composite_and_present(
     let Some(frame_bytes) = frame_pixels.checked_mul(4) else {
         return errno_status(mochi_user_syscall::ERANGE);
     };
-    let (copied_surfaces, copied_pixels, first_pixel) = {
+    {
         let frame = match present_frame.pixels(frame_pixels, frame_bytes) {
             Ok(frame) => frame,
             Err(status) => return status,
         };
-        let mut copied_surfaces = 0u32;
-        let mut copied_pixels = 0u32;
         for y in 0..frame_h {
             let Some(row) = y.checked_mul(frame_w) else {
                 return errno_status(mochi_user_syscall::ERANGE);
@@ -1457,7 +1455,6 @@ fn composite_and_present(
             if !surface_has_current_pixels(surface) {
                 continue;
             }
-            let mut copied_this_surface = 0u32;
             for sy in 0..surface.current_height as usize {
                 let dy = surface.y + sy as i32;
                 if dy < 0 || dy >= frame_h as i32 {
@@ -1481,20 +1478,10 @@ fn composite_and_present(
                         return errno_status(mochi_user_syscall::ERANGE);
                     };
                     *slot = pixel;
-                    copied_this_surface = copied_this_surface.saturating_add(1);
                 }
             }
-            if copied_this_surface != 0 {
-                copied_surfaces = copied_surfaces.saturating_add(1);
-                copied_pixels = copied_pixels.saturating_add(copied_this_surface);
-            }
         }
-        (
-            copied_surfaces,
-            copied_pixels,
-            frame.first().copied().unwrap_or(0),
-        )
-    };
+    }
     let page_count = present_frame.page_count;
     let virt = present_frame.virt;
     if let Err(err) = platform::ipc::send_page_count(display_tid, page_count, virt) {
@@ -1526,14 +1513,6 @@ fn composite_and_present(
     let status = read_u32(reply, 0).unwrap_or(errno_status(mochi_user_syscall::EIO));
     if status != 0 {
         return status;
-    }
-    if copied_surfaces != 0 {
-        platform::println!(
-            "compositor.service: present surfaces={} pixels={} first=0x{:08x}",
-            copied_surfaces,
-            copied_pixels,
-            first_pixel
-        );
     }
     0
 }
@@ -1722,15 +1701,6 @@ fn handle_request(
             surfaces[index].width = width;
             surfaces[index].height = height;
             surfaces[index].z = z;
-            platform::println!(
-                "compositor.service: create surface role={} size={}x{} pos={},{} endpoint={}",
-                role_raw,
-                width,
-                height,
-                x,
-                y,
-                event_endpoint
-            );
             if let Some(slot) = window_slot {
                 windows[slot] = Window::empty();
                 windows[slot].live = true;
@@ -1942,12 +1912,6 @@ fn handle_request(
                     if let Some(buffer) = surface.pending_buffer.take() {
                         match copy_surface_buffer(&buffer) {
                             Ok(pixels) => {
-                                platform::println!(
-                                    "compositor.service: background commit {}x{} first=0x{:08x}",
-                                    pending_width,
-                                    pending_height,
-                                    pixels.first().copied().unwrap_or(0)
-                                );
                                 surface.current = pixels;
                                 surface.current_buffer = None;
                             }
