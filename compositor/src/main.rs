@@ -2021,6 +2021,18 @@ fn handle_request(
             } else {
                 Some(Rect::full(surfaces[index].width, surfaces[index].height))
             };
+            if surfaces[index].pending_width == 0 {
+                if let Some(buffer) = surfaces[index].current_buffer.clone() {
+                    let surface = &mut surfaces[index];
+                    surface.pending_width = buffer.width;
+                    surface.pending_height = buffer.height;
+                    surface.pending_stride = buffer.stride;
+                    surface.pending_len = buffer.pixels;
+                    surface.pending_bytes_received = buffer.byte_len;
+                    surface.pending_buffer = Some(buffer);
+                    surface.awaiting_buffer = false;
+                }
+            }
             surfaces[index].pending_damage = damage;
             put_u32(&mut reply, 0, 0);
         }
