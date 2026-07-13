@@ -418,6 +418,7 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             }
             OP_CLAIM_PRESENT_OWNER => {
                 present_owner = sender;
+                shared_buffer = None;
                 let reply = unsafe {
                     core::slice::from_raw_parts_mut(
                         core::ptr::addr_of_mut!(IPC_REPLY_4).cast::<u8>(),
@@ -437,14 +438,10 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
                     let format = read_u32(&buf, 16).unwrap_or(0);
                     match shared_buffer {
                         Some((buffer_sender, mapped_addr, total)) if buffer_sender == sender => {
-                            shared_buffer = None;
                             present_shared(&info, mapped_addr, total, width, height, stride, format)
                         }
                         None => errno_status(mochi_user_syscall::EINVAL),
-                        Some(_) => {
-                            shared_buffer = None;
-                            errno_status(mochi_user_syscall::EINVAL)
-                        }
+                        Some(_) => errno_status(mochi_user_syscall::EINVAL),
                     }
                 } else {
                     present_inline(&info, &buf[..len])
@@ -482,7 +479,6 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
                     let rect_height = read_u32(&buf, 32).unwrap_or(0);
                     match shared_buffer {
                         Some((buffer_sender, mapped_addr, total)) if buffer_sender == sender => {
-                            shared_buffer = None;
                             present_shared_rect(
                                 &info,
                                 mapped_addr,
@@ -498,10 +494,7 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
                             )
                         }
                         None => errno_status(mochi_user_syscall::EINVAL),
-                        Some(_) => {
-                            shared_buffer = None;
-                            errno_status(mochi_user_syscall::EINVAL)
-                        }
+                        Some(_) => errno_status(mochi_user_syscall::EINVAL),
                     }
                 } else {
                     errno_status(mochi_user_syscall::EINVAL)

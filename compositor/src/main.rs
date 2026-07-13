@@ -296,6 +296,7 @@ struct PresentFrame {
     virt: u64,
     page_count: usize,
     pixel_capacity: usize,
+    sent_to_display: bool,
 }
 
 impl PresentFrame {
@@ -313,6 +314,7 @@ impl PresentFrame {
             }
             self.virt = virt;
             self.page_count = page_count;
+            self.sent_to_display = false;
             self.pixel_capacity = page_count
                 .checked_mul(PAGE_SIZE)
                 .and_then(|bytes| bytes.checked_div(4))
@@ -1609,10 +1611,13 @@ fn composite_and_present(
             }
         }
     }
-    let page_count = present_frame.page_count;
-    let virt = present_frame.virt;
-    if let Err(err) = platform::ipc::send_page_count(display_tid, page_count, virt) {
-        return errno_from_platform(err);
+    if !present_frame.sent_to_display {
+        let page_count = present_frame.page_count;
+        let virt = present_frame.virt;
+        if let Err(err) = platform::ipc::send_page_count(display_tid, page_count, virt) {
+            return errno_from_platform(err);
+        }
+        present_frame.sent_to_display = true;
     }
     let request = unsafe {
         core::slice::from_raw_parts_mut(
@@ -1661,6 +1666,7 @@ fn composite_and_present(
     }
     let status = read_u32(reply, 0).unwrap_or(errno_status(mochi_user_syscall::EIO));
     if status != 0 {
+        present_frame.sent_to_display = false;
         return status;
     }
     0
