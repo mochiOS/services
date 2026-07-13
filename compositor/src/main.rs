@@ -493,7 +493,7 @@ fn sender_has_overlay_compat_capability(sender: u64) -> bool {
     )
 }
 
-fn decode_display_info(reply: &[u8]) -> Option<(u32, u32, u32, u32)> {
+fn decode_display_info(reply: &[u8]) -> Option<(u32, u32, u32, u32, u64)> {
     if reply.len() < 20 {
         return None;
     }
@@ -501,15 +501,21 @@ fn decode_display_info(reply: &[u8]) -> Option<(u32, u32, u32, u32)> {
     if status != 0 {
         return None;
     }
+    let endpoint = if reply.len() >= 28 {
+        read_u64(reply, 20).unwrap_or(0)
+    } else {
+        0
+    };
     Some((
         read_u32(reply, 4)?,
         read_u32(reply, 8)?,
         read_u32(reply, 12)?,
         read_u32(reply, 16)?,
+        endpoint,
     ))
 }
 
-fn display_request_info(display_tid: u64) -> (u32, u32, u32, u32) {
+fn display_request_info(display_tid: u64) -> (u32, u32, u32, u32, u64) {
     let req = unsafe {
         core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(DISPLAY_REQ_BUF).cast::<u8>(), 20)
     };
@@ -525,7 +531,7 @@ fn display_request_info(display_tid: u64) -> (u32, u32, u32, u32) {
             return info;
         }
     }
-    (640, 480, 640, PIXEL_FORMAT_XRGB8888)
+    (640, 480, 640, PIXEL_FORMAT_XRGB8888, 0)
 }
 
 fn display_claim_present_owner(display_tid: u64) -> u32 {
@@ -1512,6 +1518,7 @@ fn composite_and_present(
     surfaces: &[Surface],
     present_frame: &mut PresentFrame,
     display_tid: u64,
+    display_endpoint: u64,
     display_width: u32,
     display_height: u32,
     _display_stride: u32,
@@ -1653,21 +1660,30 @@ fn composite_and_present(
     } else {
         20
     };
-    let reply = unsafe {
-        core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(DISPLAY_REP_BUF).cast::<u8>(), 32)
-    };
-    reply.fill(0);
-    let Ok(msg) = platform::ipc::call(display_tid, &request[..request_len], reply) else {
-        return errno_status(mochi_user_syscall::EIO);
-    };
-    let len = (msg & 0xffff_ffff) as usize;
-    if len < 4 {
-        return errno_status(mochi_user_syscall::EIO);
-    }
-    let status = read_u32(reply, 0).unwrap_or(errno_status(mochi_user_syscall::EIO));
-    if status != 0 {
-        present_frame.sent_to_display = false;
-        return status;
+    if display_endpoint != 0 {
+        if let Err(err) = platform::ipc::send(display_endpoint, &request[..request_len]) {
+            return errno_from_platform(err);
+        }
+    } else {
+        let reply = unsafe {
+            core::slice::from_raw_parts_mut(
+                core::ptr::addr_of_mut!(DISPLAY_REP_BUF).cast::<u8>(),
+                32,
+            )
+        };
+        reply.fill(0);
+        let Ok(msg) = platform::ipc::call(display_tid, &request[..request_len], reply) else {
+            return errno_status(mochi_user_syscall::EIO);
+        };
+        let len = (msg & 0xffff_ffff) as usize;
+        if len < 4 {
+            return errno_status(mochi_user_syscall::EIO);
+        }
+        let status = read_u32(reply, 0).unwrap_or(errno_status(mochi_user_syscall::EIO));
+        if status != 0 {
+            present_frame.sent_to_display = false;
+            return status;
+        }
     }
     0
 }
@@ -2496,7 +2512,7 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             claim_status
         );
     }
-    let (display_width, display_height, display_stride, display_format) =
+    let (display_width, display_height, display_stride, display_format, display_endpoint) =
         display_request_info(display_tid);
 
     let mut clients = [Client::default(); MAX_CLIENTS];
@@ -2519,6 +2535,7 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         &surfaces,
         &mut present_frame,
         display_tid,
+        display_endpoint,
         display_width,
         display_height,
         display_stride,
@@ -2554,6 +2571,7 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
                             &surfaces,
                             &mut present_frame,
                             display_tid,
+                            display_endpoint,
                             display_width,
                             display_height,
                             display_stride,
@@ -2605,6 +2623,7 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
                     &surfaces,
                     &mut present_frame,
                     display_tid,
+                    display_endpoint,
                     display_width,
                     display_height,
                     display_stride,
@@ -2666,6 +2685,7 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
                     &surfaces,
                     &mut present_frame,
                     display_tid,
+                    display_endpoint,
                     display_width,
                     display_height,
                     display_stride,

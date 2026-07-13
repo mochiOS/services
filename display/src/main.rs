@@ -30,6 +30,10 @@ fn put_u32(out: &mut [u8], offset: usize, value: u32) {
     out[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
 
+fn put_u64(out: &mut [u8], offset: usize, value: u64) {
+    out[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
 fn errno_status(errno: u64) -> u32 {
     let signed = errno as i64;
     if signed < 0 {
@@ -45,7 +49,7 @@ fn read_u32(buf: &[u8], offset: usize) -> Option<u32> {
 }
 
 static mut IPC_BUF: [u8; 4128] = [0; 4128];
-static mut IPC_REPLY_20: [u8; 20] = [0; 20];
+static mut IPC_REPLY_INFO: [u8; 28] = [0; 28];
 static mut IPC_REPLY_4: [u8; 4] = [0; 4];
 
 fn page_align_up(value: u64) -> Option<u64> {
@@ -417,8 +421,8 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             OP_GET_INFO => {
                 let reply = unsafe {
                     core::slice::from_raw_parts_mut(
-                        core::ptr::addr_of_mut!(IPC_REPLY_20).cast::<u8>(),
-                        20,
+                        core::ptr::addr_of_mut!(IPC_REPLY_INFO).cast::<u8>(),
+                        28,
                     )
                 };
                 put_u32(reply, 0, 0);
@@ -426,6 +430,7 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
                 put_u32(reply, 8, framebuffer_visible_height(&info) as u32);
                 put_u32(reply, 12, info.stride);
                 put_u32(reply, 16, PIXEL_FORMAT_XRGB8888);
+                put_u64(reply, 20, endpoint);
                 let _ = platform::ipc::reply(sender, reply);
             }
             OP_CLAIM_PRESENT_OWNER => {
