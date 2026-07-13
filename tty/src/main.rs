@@ -27,10 +27,12 @@ const CAPABILITY_SERVICE_NAME: &str = "capability.service";
 const INPUT_SERVICE_NAME: &str = "input.service";
 const RESOLVE_CAPS_OPCODE: u32 = 0x4341_5053;
 const INPUT_EVENT_SIZE: usize = core::mem::size_of::<platform::input::InputEvent>();
+const TTY_IPC_BUFFER_SIZE: usize = 2048;
+const TTY_OUTPUT_MAGIC: &[u8; 4] = b"TOUT";
 
 static mut CAPABILITY_REPLY_BUF: [u8; 1024] = [0; 1024];
 static mut INPUT_SUBSCRIBE_REPLY_BUF: [u8; 8] = [0; 8];
-static mut TTY_IPC_BUF: [u8; INPUT_EVENT_SIZE] = [0; INPUT_EVENT_SIZE];
+static mut TTY_IPC_BUF: [u8; TTY_IPC_BUFFER_SIZE] = [0; TTY_IPC_BUFFER_SIZE];
 
 fn capability_reply_buf() -> &'static mut [u8] {
     unsafe {
@@ -54,9 +56,13 @@ fn tty_ipc_buf() -> &'static mut [u8] {
     unsafe {
         core::slice::from_raw_parts_mut(
             core::ptr::addr_of_mut!(TTY_IPC_BUF).cast::<u8>(),
-            INPUT_EVENT_SIZE,
+            TTY_IPC_BUFFER_SIZE,
         )
     }
+}
+
+fn is_tty_output(bytes: &[u8]) -> bool {
+    bytes.len() >= TTY_OUTPUT_MAGIC.len() && &bytes[..TTY_OUTPUT_MAGIC.len()] == TTY_OUTPUT_MAGIC
 }
 
 fn parse_decimal_u64(bytes: &[u8]) -> Option<u64> {
@@ -187,7 +193,7 @@ fn subscribe_input_events(tty_endpoint: u64) -> bool {
         platform::input::bytes_of(&subscribe),
         subscribe_reply,
     )
-        .is_ok()
+    .is_ok()
 }
 
 #[unsafe(no_mangle)]
@@ -220,6 +226,8 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             continue;
         };
         let len = (msg & 0xffff_ffff) as usize;
+        let sender = msg >> 32;
+        let len = len.min(buf.len());
         if len == core::mem::size_of::<u64>() {
             shell_endpoint = u64::from_le_bytes([
                 buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
@@ -235,14 +243,25 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             ]);
             continue;
         }
-        if len < buf.len() {
+        if is_tty_output(&buf[..len]) {
+            if shell_endpoint != 0 {
+                let _ = platform::ipc::send(shell_endpoint, &buf[..len]);
+            }
+            if shell_thread != 0 && shell_thread != shell_endpoint {
+                let _ = platform::ipc::send(shell_thread, &buf[..len]);
+            }
+            let status = 0u64;
+            let _ = platform::ipc::reply(sender, &status.to_le_bytes());
+            continue;
+        }
+        if len != INPUT_EVENT_SIZE {
             continue;
         }
         if shell_endpoint != 0 {
-            let _ = platform::ipc::send(shell_endpoint, &buf);
+            let _ = platform::ipc::send(shell_endpoint, &buf[..len]);
         }
         if shell_thread != 0 && shell_thread != shell_endpoint {
-            let _ = platform::ipc::send(shell_thread, &buf);
+            let _ = platform::ipc::send(shell_thread, &buf[..len]);
         }
     }
 }
