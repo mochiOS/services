@@ -21,6 +21,7 @@ _start:
 const OP_GET_INFO: u32 = 1;
 const OP_PRESENT: u32 = 2;
 const OP_CLAIM_PRESENT_OWNER: u32 = 3;
+const OP_PRESENT_RECT: u32 = 4;
 const PIXEL_FORMAT_XRGB8888: u32 = 1;
 const FB_VIRT: u64 = 0x0000_6000_0000_0000;
 const MAX_DIMENSION: usize = 4096;
@@ -167,6 +168,96 @@ fn present_pixels(
     0
 }
 
+fn present_pixels_rect(
+    info: &platform::memory::FramebufferInfo,
+    width: u32,
+    height: u32,
+    stride: u32,
+    format: u32,
+    rect_x: u32,
+    rect_y: u32,
+    rect_width: u32,
+    rect_height: u32,
+    pixels: &[u8],
+) -> u32 {
+    if format != PIXEL_FORMAT_XRGB8888
+        || width == 0
+        || height == 0
+        || stride < width
+        || rect_width == 0
+        || rect_height == 0
+    {
+        return errno_status(mochi_user_syscall::EINVAL);
+    }
+    let Some(rect_right) = rect_x.checked_add(rect_width) else {
+        return errno_status(mochi_user_syscall::ERANGE);
+    };
+    let Some(rect_bottom) = rect_y.checked_add(rect_height) else {
+        return errno_status(mochi_user_syscall::ERANGE);
+    };
+    if rect_right > width || rect_bottom > height {
+        return errno_status(mochi_user_syscall::EINVAL);
+    }
+    let Some(row_bytes) = (stride as usize).checked_mul(4) else {
+        return errno_status(mochi_user_syscall::EINVAL);
+    };
+    let Some(needed) = row_bytes.checked_mul(height as usize) else {
+        return errno_status(mochi_user_syscall::EINVAL);
+    };
+    if pixels.len() < needed {
+        return errno_status(mochi_user_syscall::EINVAL);
+    }
+    if !map_framebuffer(info) {
+        return errno_status(mochi_user_syscall::EIO);
+    }
+    let dest_width = info.width as usize;
+    let dest_height = framebuffer_visible_height(info);
+    let dest_stride = info.stride as usize;
+    if dest_width == 0
+        || dest_height == 0
+        || dest_width > MAX_DIMENSION
+        || dest_height > MAX_DIMENSION
+        || dest_stride < dest_width
+        || dest_stride > MAX_DIMENSION
+    {
+        return errno_status(mochi_user_syscall::ERANGE);
+    }
+    let Some(dest_row_bytes) = dest_stride.checked_mul(4) else {
+        return errno_status(mochi_user_syscall::ERANGE);
+    };
+    let max_rows = info.size as usize / dest_row_bytes;
+    if max_rows < dest_height {
+        return errno_status(mochi_user_syscall::ERANGE);
+    }
+    let fb_offset = (info.addr & 0xfff) as usize;
+    let fb = (FB_VIRT as usize + fb_offset) as *mut u32;
+    let copy_right = (rect_right as usize).min(dest_width);
+    let copy_bottom = (rect_bottom as usize).min(dest_height);
+    for y in rect_y as usize..copy_bottom {
+        let Some(src_row) = y.checked_mul(row_bytes) else {
+            return errno_status(mochi_user_syscall::ERANGE);
+        };
+        let Some(dest_row) = y.checked_mul(dest_stride) else {
+            return errno_status(mochi_user_syscall::ERANGE);
+        };
+        for x in rect_x as usize..copy_right {
+            let Some(src_offset) = src_row.checked_add(x.saturating_mul(4)) else {
+                return errno_status(mochi_user_syscall::ERANGE);
+            };
+            let Some(pixel) = read_pixel(pixels, src_offset) else {
+                return errno_status(mochi_user_syscall::EINVAL);
+            };
+            let Some(dest_offset) = dest_row.checked_add(x) else {
+                return errno_status(mochi_user_syscall::ERANGE);
+            };
+            unsafe {
+                fb.add(dest_offset).write_volatile(pixel);
+            }
+        }
+    }
+    0
+}
+
 fn present_inline(info: &platform::memory::FramebufferInfo, request: &[u8]) -> u32 {
     if request.len() < 20 {
         return errno_status(mochi_user_syscall::EINVAL);
@@ -217,6 +308,49 @@ fn present_shared(
     }
     let pixels = unsafe { core::slice::from_raw_parts(mapped_addr as *const u8, needed) };
     present_pixels(info, width, height, stride, format, pixels)
+}
+
+fn present_shared_rect(
+    info: &platform::memory::FramebufferInfo,
+    mapped_addr: u64,
+    total: u64,
+    width: u32,
+    height: u32,
+    stride: u32,
+    format: u32,
+    rect_x: u32,
+    rect_y: u32,
+    rect_width: u32,
+    rect_height: u32,
+) -> u32 {
+    if mapped_addr == 0 {
+        return errno_status(mochi_user_syscall::EINVAL);
+    }
+    let Some(row_bytes) = (stride as usize).checked_mul(4) else {
+        return errno_status(mochi_user_syscall::EINVAL);
+    };
+    let Some(needed) = row_bytes.checked_mul(height as usize) else {
+        return errno_status(mochi_user_syscall::EINVAL);
+    };
+    let Ok(total) = usize::try_from(total) else {
+        return errno_status(mochi_user_syscall::EINVAL);
+    };
+    if total < needed {
+        return errno_status(mochi_user_syscall::EINVAL);
+    }
+    let pixels = unsafe { core::slice::from_raw_parts(mapped_addr as *const u8, needed) };
+    present_pixels_rect(
+        info,
+        width,
+        height,
+        stride,
+        format,
+        rect_x,
+        rect_y,
+        rect_width,
+        rect_height,
+        pixels,
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -318,6 +452,63 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
                 if status != 0 && status != errno_status(mochi_user_syscall::EACCES) {
                     platform::println!(
                         "display.driver: present failed status={} fb={}x{} stride={} size={}",
+                        status,
+                        info.width,
+                        framebuffer_visible_height(&info) as u32,
+                        info.stride,
+                        info.size
+                    );
+                }
+                let reply = unsafe {
+                    core::slice::from_raw_parts_mut(
+                        core::ptr::addr_of_mut!(IPC_REPLY_4).cast::<u8>(),
+                        4,
+                    )
+                };
+                put_u32(reply, 0, status);
+                let _ = platform::ipc::reply(sender, reply);
+            }
+            OP_PRESENT_RECT => {
+                let status = if present_owner != 0 && sender != present_owner {
+                    errno_status(mochi_user_syscall::EACCES)
+                } else if len == 36 {
+                    let width = read_u32(&buf, 4).unwrap_or(0);
+                    let height = read_u32(&buf, 8).unwrap_or(0);
+                    let stride = read_u32(&buf, 12).unwrap_or(0);
+                    let format = read_u32(&buf, 16).unwrap_or(0);
+                    let rect_x = read_u32(&buf, 20).unwrap_or(0);
+                    let rect_y = read_u32(&buf, 24).unwrap_or(0);
+                    let rect_width = read_u32(&buf, 28).unwrap_or(0);
+                    let rect_height = read_u32(&buf, 32).unwrap_or(0);
+                    match shared_buffer {
+                        Some((buffer_sender, mapped_addr, total)) if buffer_sender == sender => {
+                            shared_buffer = None;
+                            present_shared_rect(
+                                &info,
+                                mapped_addr,
+                                total,
+                                width,
+                                height,
+                                stride,
+                                format,
+                                rect_x,
+                                rect_y,
+                                rect_width,
+                                rect_height,
+                            )
+                        }
+                        None => errno_status(mochi_user_syscall::EINVAL),
+                        Some(_) => {
+                            shared_buffer = None;
+                            errno_status(mochi_user_syscall::EINVAL)
+                        }
+                    }
+                } else {
+                    errno_status(mochi_user_syscall::EINVAL)
+                };
+                if status != 0 && status != errno_status(mochi_user_syscall::EACCES) {
+                    platform::println!(
+                        "display.driver: present rect failed status={} fb={}x{} stride={} size={}",
                         status,
                         info.width,
                         framebuffer_visible_height(&info) as u32,

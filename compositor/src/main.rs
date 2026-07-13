@@ -43,6 +43,7 @@ const OP_DECOR_CLOSE_REQUEST: u32 = 109;
 const OP_DISPLAY_GET_INFO: u32 = 1;
 const OP_DISPLAY_PRESENT: u32 = 2;
 const OP_DISPLAY_CLAIM_PRESENT_OWNER: u32 = 3;
+const OP_DISPLAY_PRESENT_RECT: u32 = 4;
 const DECOR_EVENT_WINDOW: u32 = 0x5749_4e44;
 const EVENT_POINTER_ENTER: u32 = 2;
 const EVENT_POINTER_LEAVE: u32 = 3;
@@ -406,7 +407,7 @@ fn read_pixel(buf: &[u8], offset: usize) -> Option<u32> {
 
 static mut DISPLAY_REQ_BUF: [u8; 20] = [0; 20];
 static mut DISPLAY_REP_BUF: [u8; 32] = [0; 32];
-static mut DISPLAY_PRESENT_REQ: [u8; 20] = [0; 20];
+static mut DISPLAY_PRESENT_REQ: [u8; 36] = [0; 36];
 static mut INPUT_SUBSCRIBE_REQ: [u8; 16] = [0; 16];
 static mut INPUT_SUBSCRIBE_REP: [u8; 8] = [0; 8];
 static mut TOKEN_RANDOM_BUF: [u8; 8] = [0; 8];
@@ -993,6 +994,65 @@ fn copy_surface_buffer(buffer: &SurfaceBuffer) -> Result<Vec<u32>, u32> {
     Ok(pixels)
 }
 
+fn copy_surface_buffer_rect(
+    buffer: &SurfaceBuffer,
+    rect: Rect,
+    destination: &mut [u32],
+    destination_width: u32,
+    destination_height: u32,
+) -> Result<(), u32> {
+    let rect = validate_damage_rect(rect, destination_width, destination_height)?;
+    if buffer.width != destination_width || buffer.height != destination_height {
+        return Err(errno_status(mochi_user_syscall::EINVAL));
+    }
+    let stride =
+        usize::try_from(buffer.stride).map_err(|_| errno_status(mochi_user_syscall::EINVAL))?;
+    let width =
+        usize::try_from(destination_width).map_err(|_| errno_status(mochi_user_syscall::EINVAL))?;
+    let height = usize::try_from(destination_height)
+        .map_err(|_| errno_status(mochi_user_syscall::EINVAL))?;
+    let row_bytes = stride
+        .checked_mul(4)
+        .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+    let needed = row_bytes
+        .checked_mul(height)
+        .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+    if buffer.byte_len < needed || destination.len() < width.saturating_mul(height) {
+        return Err(errno_status(mochi_user_syscall::EINVAL));
+    }
+    let source =
+        unsafe { core::slice::from_raw_parts(buffer.mapped_addr as *const u8, buffer.byte_len) };
+    let left = rect.x as usize;
+    let top = rect.y as usize;
+    let right = left.saturating_add(rect.width as usize);
+    let bottom = top.saturating_add(rect.height as usize);
+    for y in top..bottom {
+        let src_row = y
+            .checked_mul(stride)
+            .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+        let dst_row = y
+            .checked_mul(width)
+            .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+        for x in left..right {
+            let src = src_row
+                .checked_add(x)
+                .and_then(|offset| offset.checked_mul(4))
+                .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+            let Some(pixel) = read_pixel(source, src) else {
+                return Err(errno_status(mochi_user_syscall::EINVAL));
+            };
+            let dst = dst_row
+                .checked_add(x)
+                .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+            let Some(slot) = destination.get_mut(dst) else {
+                return Err(errno_status(mochi_user_syscall::EINVAL));
+            };
+            *slot = pixel;
+        }
+    }
+    Ok(())
+}
+
 fn shared_page_count(byte_len: usize) -> Option<usize> {
     byte_len
         .checked_add(PAGE_SIZE - 1)
@@ -1086,6 +1146,42 @@ fn choose_frame_size(display_width: u32, display_height: u32) -> Option<(usize, 
         return None;
     }
     Some((width, height))
+}
+
+fn clip_present_rect(damage: Option<Rect>, frame_w: usize, frame_h: usize) -> Option<Rect> {
+    if frame_w == 0 || frame_h == 0 {
+        return None;
+    }
+    let Some(damage) = damage else {
+        return Some(Rect {
+            x: 0,
+            y: 0,
+            width: frame_w as u32,
+            height: frame_h as u32,
+        });
+    };
+    if damage.width == 0 || damage.height == 0 {
+        return None;
+    }
+    let left = damage.x.max(0) as i64;
+    let top = damage.y.max(0) as i64;
+    let right = (damage.x as i64)
+        .saturating_add(damage.width as i64)
+        .min(frame_w as i64)
+        .max(0);
+    let bottom = (damage.y as i64)
+        .saturating_add(damage.height as i64)
+        .min(frame_h as i64)
+        .max(0);
+    if right <= left || bottom <= top {
+        return None;
+    }
+    Some(Rect {
+        x: left as i32,
+        y: top as i32,
+        width: right.saturating_sub(left) as u32,
+        height: bottom.saturating_sub(top) as u32,
+    })
 }
 
 fn errno_from_platform(err: mochi_user_syscall::SysError) -> u32 {
@@ -1405,7 +1501,7 @@ fn composite_and_present(
     display_height: u32,
     _display_stride: u32,
     display_format: u32,
-    _damage: Option<Rect>,
+    damage: Option<Rect>,
 ) -> u32 {
     if display_format != PIXEL_FORMAT_XRGB8888 {
         return errno_status(mochi_user_syscall::ENOTSUP);
@@ -1419,16 +1515,23 @@ fn composite_and_present(
     let Some(frame_bytes) = frame_pixels.checked_mul(4) else {
         return errno_status(mochi_user_syscall::ERANGE);
     };
+    let Some(present_rect) = clip_present_rect(damage, frame_w, frame_h) else {
+        return 0;
+    };
+    let rect_left = present_rect.x as usize;
+    let rect_top = present_rect.y as usize;
+    let rect_right = rect_left.saturating_add(present_rect.width as usize);
+    let rect_bottom = rect_top.saturating_add(present_rect.height as usize);
     {
         let frame = match present_frame.pixels(frame_pixels, frame_bytes) {
             Ok(frame) => frame,
             Err(status) => return status,
         };
-        for y in 0..frame_h {
+        for y in rect_top..rect_bottom {
             let Some(row) = y.checked_mul(frame_w) else {
                 return errno_status(mochi_user_syscall::ERANGE);
             };
-            for x in 0..frame_w {
+            for x in rect_left..rect_right {
                 let shade = 0x0020_2630u32 + (((x as u32) ^ (y as u32)) & 0x7);
                 let Some(pixel) = frame.get_mut(row + x) else {
                     return errno_status(mochi_user_syscall::ERANGE);
@@ -1455,16 +1558,27 @@ fn composite_and_present(
             if !surface_has_current_pixels(surface) {
                 continue;
             }
-            for sy in 0..surface.current_height as usize {
-                let dy = surface.y + sy as i32;
-                if dy < 0 || dy >= frame_h as i32 {
-                    continue;
-                }
-                for sx in 0..surface.current_width as usize {
-                    let dx = surface.x + sx as i32;
-                    if dx < 0 || dx >= frame_w as i32 {
-                        continue;
-                    }
+            let surface_left = surface.x.max(0) as i64;
+            let surface_top = surface.y.max(0) as i64;
+            let surface_right = (surface.x as i64)
+                .saturating_add(surface.current_width as i64)
+                .min(frame_w as i64)
+                .max(0);
+            let surface_bottom = (surface.y as i64)
+                .saturating_add(surface.current_height as i64)
+                .min(frame_h as i64)
+                .max(0);
+            let copy_left = surface_left.max(rect_left as i64);
+            let copy_top = surface_top.max(rect_top as i64);
+            let copy_right = surface_right.min(rect_right as i64);
+            let copy_bottom = surface_bottom.min(rect_bottom as i64);
+            if copy_right <= copy_left || copy_bottom <= copy_top {
+                continue;
+            }
+            for dy in copy_top as usize..copy_bottom as usize {
+                let sy = (dy as i64).saturating_sub(surface.y as i64) as usize;
+                for dx in copy_left as usize..copy_right as usize {
+                    let sx = (dx as i64).saturating_sub(surface.x as i64) as usize;
                     let Some(dst) = (dy as usize)
                         .checked_mul(frame_w)
                         .and_then(|row| row.checked_add(dx as usize))
@@ -1490,20 +1604,42 @@ fn composite_and_present(
     let request = unsafe {
         core::slice::from_raw_parts_mut(
             core::ptr::addr_of_mut!(DISPLAY_PRESENT_REQ).cast::<u8>(),
-            20,
+            36,
         )
     };
     request.fill(0);
-    put_u32(request, 0, OP_DISPLAY_PRESENT);
+    let partial_present = damage.is_some()
+        && (present_rect.x != 0
+            || present_rect.y != 0
+            || present_rect.width as usize != frame_w
+            || present_rect.height as usize != frame_h);
+    put_u32(
+        request,
+        0,
+        if partial_present {
+            OP_DISPLAY_PRESENT_RECT
+        } else {
+            OP_DISPLAY_PRESENT
+        },
+    );
     put_u32(request, 4, frame_w as u32);
     put_u32(request, 8, frame_h as u32);
     put_u32(request, 12, frame_w as u32);
     put_u32(request, 16, PIXEL_FORMAT_XRGB8888);
+    let request_len = if partial_present {
+        put_u32(request, 20, present_rect.x as u32);
+        put_u32(request, 24, present_rect.y as u32);
+        put_u32(request, 28, present_rect.width);
+        put_u32(request, 32, present_rect.height);
+        36
+    } else {
+        20
+    };
     let reply = unsafe {
         core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(DISPLAY_REP_BUF).cast::<u8>(), 32)
     };
     reply.fill(0);
-    let Ok(msg) = platform::ipc::call(display_tid, request, reply) else {
+    let Ok(msg) = platform::ipc::call(display_tid, &request[..request_len], reply) else {
         return errno_status(mochi_user_syscall::EIO);
     };
     let len = (msg & 0xffff_ffff) as usize;
@@ -1910,14 +2046,32 @@ fn handle_request(
                 let surface = &mut surfaces[index];
                 if surface.role == SurfaceRole::Background {
                     if let Some(buffer) = surface.pending_buffer.take() {
-                        match copy_surface_buffer(&buffer) {
-                            Ok(pixels) => {
-                                surface.current = pixels;
-                                surface.current_buffer = None;
-                            }
-                            Err(status) => {
+                        let can_patch_current = surface.current_width == pending_width
+                            && surface.current_height == pending_height
+                            && surface.current_stride == pending_width
+                            && surface.current.len() >= needed;
+                        if can_patch_current {
+                            if let Err(status) = copy_surface_buffer_rect(
+                                &buffer,
+                                pending_damage,
+                                &mut surface.current,
+                                pending_width,
+                                pending_height,
+                            ) {
                                 put_u32(&mut reply, 0, status);
                                 return reply;
+                            }
+                            surface.current_buffer = None;
+                        } else {
+                            match copy_surface_buffer(&buffer) {
+                                Ok(pixels) => {
+                                    surface.current = pixels;
+                                    surface.current_buffer = None;
+                                }
+                                Err(status) => {
+                                    put_u32(&mut reply, 0, status);
+                                    return reply;
+                                }
                             }
                         }
                     } else {
