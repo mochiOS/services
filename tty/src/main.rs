@@ -155,7 +155,7 @@ fn resolve_capabilities(entry_path: &str) -> Result<Vec<u8>, mochi_user_syscall:
 fn spawn_msh(tty_endpoint: u64) -> Result<u64, mochi_user_syscall::SysError> {
     let caps_nul = resolve_capabilities(MSH_PATH)?;
     let arg = tty_endpoint.to_string();
-    let args = ["__MOCHI_EXEC_ENV=MOCHI_STDIO_DIRECT=1".to_string(), arg];
+    let args = [arg];
     let args_nul = encode_spawn_args(&args);
     platform::service::spawn_manifest(
         MSH_PATH,
