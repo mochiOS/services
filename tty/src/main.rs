@@ -160,7 +160,7 @@ fn spawn_msh(tty_endpoint: u64) -> Result<u64, mochi_user_syscall::SysError> {
 }
 
 fn find_input_service() -> Option<u64> {
-    for _ in 0..64 {
+    for _ in 0..4096 {
         if let Ok(tid) = platform::process::find_by_name(INPUT_SERVICE_NAME) {
             if tid != 0 {
                 return Some(tid);
@@ -169,6 +169,25 @@ fn find_input_service() -> Option<u64> {
         platform::thread::yield_now();
     }
     None
+}
+
+fn subscribe_input_events(tty_endpoint: u64) -> bool {
+    let Some(input_tid) = find_input_service() else {
+        return false;
+    };
+    let subscribe = platform::input::SubscribeRequest {
+        opcode: platform::input::SUBSCRIBE_OPCODE,
+        reserved: 0,
+        endpoint: tty_endpoint,
+    };
+    let subscribe_reply = input_subscribe_reply_buf();
+    subscribe_reply.fill(0);
+    platform::ipc::call(
+        input_tid,
+        platform::input::bytes_of(&subscribe),
+        subscribe_reply,
+    )
+        .is_ok()
 }
 
 #[unsafe(no_mangle)]
@@ -183,21 +202,9 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         Err(_) => platform::process::exit(1),
     };
 
-    let subscribe = platform::input::SubscribeRequest {
-        opcode: platform::input::SUBSCRIBE_OPCODE,
-        reserved: 0,
-        endpoint: tty_endpoint,
-    };
-    let Some(input_tid) = find_input_service() else {
-        platform::process::exit(1);
-    };
-    let subscribe_reply = input_subscribe_reply_buf();
-    subscribe_reply.fill(0);
-    let _ = platform::ipc::call(
-        input_tid,
-        platform::input::bytes_of(&subscribe),
-        subscribe_reply,
-    );
+    while !subscribe_input_events(tty_endpoint) {
+        platform::thread::yield_now();
+    }
 
     if spawn_msh(tty_endpoint).is_err() {
         platform::process::exit(1);

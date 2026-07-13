@@ -10,8 +10,10 @@ use mochi_user_platform as platform;
 
 const DRIVER_BUNDLE_ROOTS: &[&str] = &["/bin/drivers/usb", "/bin/drivers/ps2"];
 const INPUT_SERVICE_PATH: &str = "/system/services/input.service";
+const INPUT_SERVICE_NAME: &str = "input.service";
 const INPUT_PACKAGE_MANIFEST_PATH: &str = "/system/packages/input/manifest.toml";
 const DISPLAY_SERVICE_PATH: &str = "/system/services/display.driver";
+const DISPLAY_SERVICE_NAME: &str = "display.driver";
 const DISPLAY_PACKAGE_MANIFEST_PATH: &str = "/system/packages/display/manifest.toml";
 const COMPOSITOR_SERVICE_PATH: &str = "/system/services/compositor.service";
 const COMPOSITOR_PACKAGE_MANIFEST_PATH: &str = "/system/packages/compositor/manifest.toml";
@@ -184,6 +186,18 @@ fn spawn_tty_service(logger_endpoint: u64) -> Result<u64, mochi_user_syscall::Sy
     )
 }
 
+fn wait_for_process(name: &str, attempts: usize) -> bool {
+    for _ in 0..attempts {
+        if let Ok(tid) = platform::process::find_by_name(name)
+            && tid != 0
+        {
+            return true;
+        }
+        platform::thread::yield_now();
+    }
+    false
+}
+
 fn bundle_manifest_path(bundle_root: &str) -> String {
     alloc::format!(
         "/system/packages{}/manifest.toml",
@@ -255,6 +269,18 @@ pub fn run(sp: *const usize) -> ! {
             "drivers.service: display.driver spawn failed errno={}",
             err.errno().unwrap_or(0)
         ),
+    }
+    if !wait_for_process(DISPLAY_SERVICE_NAME, 4096) {
+        platform::println!(
+            "drivers.service: {} not registered before compositor spawn",
+            DISPLAY_SERVICE_NAME
+        );
+    }
+    if !wait_for_process(INPUT_SERVICE_NAME, 4096) {
+        platform::println!(
+            "drivers.service: {} not registered before compositor spawn",
+            INPUT_SERVICE_NAME
+        );
     }
     match spawn_named_service(
         COMPOSITOR_SERVICE_PATH,

@@ -253,6 +253,9 @@ impl KeyboardState {
 #[derive(Clone, Copy, Default)]
 struct MouseState {
     buttons: u8,
+    absolute_x: u16,
+    absolute_y: u16,
+    has_absolute: bool,
 }
 
 const INPUT_EVENT_SIZE: usize = core::mem::size_of::<platform::input::InputEvent>();
@@ -357,6 +360,74 @@ fn process_mouse_packet(
         );
         send_event(subscribers, &event);
     }
+    state.buttons = buttons;
+}
+
+fn send_pointer_button_changes(previous: u8, current: u8, subscribers: &[u64; MAX_SUBSCRIBERS]) {
+    use platform::input::*;
+
+    let changed = previous ^ current;
+    if changed == 0 {
+        return;
+    }
+    for (mask, button) in [
+        (0x01, POINTER_BUTTON_LEFT),
+        (0x02, POINTER_BUTTON_RIGHT),
+        (0x04, POINTER_BUTTON_MIDDLE),
+    ] {
+        if (changed & mask) == 0 {
+            continue;
+        }
+        let pressed = (current & mask) != 0;
+        let event = encode_input_event(
+            EVENT_KIND_POINTER_BUTTON,
+            if pressed { FLAG_PRESS } else { FLAG_RELEASE },
+            0,
+            button,
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
+        send_event(subscribers, &event);
+    }
+}
+
+fn process_absolute_pointer(
+    packet: &[u8],
+    state: &mut MouseState,
+    subscribers: &[u64; MAX_SUBSCRIBERS],
+) {
+    use platform::input::*;
+
+    if packet.len() < 6 {
+        return;
+    }
+
+    let buttons = packet[0] & 0x07;
+    let x = u16::from_le_bytes([packet[2], packet[3]]);
+    let y = u16::from_le_bytes([packet[4], packet[5]]);
+
+    if !state.has_absolute || state.absolute_x != x || state.absolute_y != y {
+        let event = encode_input_event(
+            EVENT_KIND_POINTER_ABSOLUTE,
+            0,
+            0,
+            0,
+            0,
+            i32::from(x),
+            i32::from(y),
+            0,
+            0,
+        );
+        send_event(subscribers, &event);
+        state.absolute_x = x;
+        state.absolute_y = y;
+        state.has_absolute = true;
+    }
+
+    send_pointer_button_changes(state.buttons, buttons, subscribers);
     state.buttons = buttons;
 }
 
@@ -486,6 +557,9 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
                 }
                 platform::input::RAW_KIND_MOUSE_PACKET => {
                     process_mouse_packet(&buf[4..7], &mut mouse, &subscribers);
+                }
+                platform::input::RAW_KIND_POINTER_ABSOLUTE => {
+                    process_absolute_pointer(&buf[4..len], &mut mouse, &subscribers);
                 }
                 _ => {}
             }

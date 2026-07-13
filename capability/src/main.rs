@@ -225,9 +225,10 @@ fn prompt_shell_for_capability(
             mochi_user_syscall::EINVAL as i64,
         ));
     }
-    let decision = u32::from_le_bytes(reply[..4].try_into().map_err(|_| {
-        mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
-    })?);
+    let decision =
+        u32::from_le_bytes(reply[..4].try_into().map_err(|_| {
+            mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
+        })?);
     if decision == platform::capability::CapabilityDecision::AllowOnce as u32
         || decision == platform::capability::CapabilityDecision::AllowForProcess as u32
         || decision == platform::capability::CapabilityDecision::AllowPersistently as u32
@@ -744,9 +745,7 @@ fn spawn_application_from_manifest(
         ));
     }
 
-    let header = unsafe {
-        core::ptr::read_unaligned(buf.as_ptr().cast::<SpawnAppRequestHeader>())
-    };
+    let header = unsafe { core::ptr::read_unaligned(buf.as_ptr().cast::<SpawnAppRequestHeader>()) };
     if header.opcode != SPAWN_APP_OPCODE {
         return Err(mochi_user_syscall::SysError::from_raw(
             mochi_user_syscall::EINVAL as i64,
@@ -796,12 +795,7 @@ fn spawn_application_from_manifest(
                 mochi_user_syscall::EACCES as i64,
             ));
         }
-        prompt_shell_for_capability(
-            header.shell_endpoint,
-            entry_path,
-            cap,
-            "application launch",
-        )?;
+        prompt_shell_for_capability(header.shell_endpoint, entry_path, cap, "application launch")?;
     }
     if prompted {
         platform::println!(

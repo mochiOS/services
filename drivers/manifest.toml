@@ -17,4 +17,6 @@ requires = [
     "ipc.client",
     "ipc.server",
     "usb.access",
+    "window.create",
+    "window.overlay",
 ]

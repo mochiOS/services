@@ -62,6 +62,23 @@ fn map_framebuffer(info: &platform::memory::FramebufferInfo) -> bool {
     platform::memory::map_framebuffer(FB_VIRT, size).is_ok()
 }
 
+fn framebuffer_visible_height(info: &platform::memory::FramebufferInfo) -> usize {
+    let height = info.height as usize;
+    let stride = info.stride as usize;
+    let Some(row_bytes) = stride.checked_mul(4) else {
+        return height;
+    };
+    if row_bytes == 0 {
+        return height;
+    }
+    let rows_from_size = info.size as usize / row_bytes;
+    if rows_from_size > height && rows_from_size <= MAX_DIMENSION {
+        rows_from_size
+    } else {
+        height
+    }
+}
+
 fn present_pixels(
     info: &platform::memory::FramebufferInfo,
     width: u32,
@@ -86,7 +103,7 @@ fn present_pixels(
         return errno_status(mochi_user_syscall::EIO);
     }
     let dest_width = info.width as usize;
-    let dest_height = info.height as usize;
+    let dest_height = framebuffer_visible_height(info);
     let dest_stride = info.stride as usize;
     if dest_width == 0
         || dest_height == 0
@@ -255,7 +272,7 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
                 };
                 put_u32(reply, 0, 0);
                 put_u32(reply, 4, info.width);
-                put_u32(reply, 8, info.height);
+                put_u32(reply, 8, framebuffer_visible_height(&info) as u32);
                 put_u32(reply, 12, info.stride);
                 put_u32(reply, 16, PIXEL_FORMAT_XRGB8888);
                 let _ = platform::ipc::reply(sender, reply);
@@ -280,7 +297,7 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
                         "display.driver: present failed status={} fb={}x{} stride={} size={}",
                         status,
                         info.width,
-                        info.height,
+                        framebuffer_visible_height(&info) as u32,
                         info.stride,
                         info.size
                     );

@@ -6,6 +6,7 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::arch::global_asm;
+use core::convert::TryInto;
 use mochi_user_platform as platform;
 
 global_asm!(
@@ -24,6 +25,9 @@ _start:
 
 const DISPLAY_SERVICE_NAME: &str = "display.driver";
 const INPUT_SERVICE_NAME: &str = "input.service";
+const CAPABILITY_SERVICE_NAME: &str = "capability.service";
+const BINDER_APP_PATH: &str = "/applications/Binder.app/entry.elf";
+const RESOLVE_CAPS_OPCODE: u32 = 0x4341_5053;
 const OP_CREATE_SURFACE: u32 = 1;
 const OP_ATTACH_BUFFER: u32 = 2;
 const OP_DAMAGE: u32 = 3;
@@ -283,12 +287,47 @@ struct Surface {
     z: u32,
 }
 
+#[allow(dead_code)]
 struct CursorImage {
     width: u32,
     height: u32,
     hotspot_x: i32,
     hotspot_y: i32,
     pixels: Vec<u32>,
+}
+
+#[derive(Default)]
+struct PresentFrame {
+    virt: u64,
+    page_count: usize,
+    pixel_capacity: usize,
+}
+
+impl PresentFrame {
+    fn pixels(&mut self, pixel_count: usize, byte_count: usize) -> Result<&mut [u32], u32> {
+        let page_count = shared_page_count(byte_count)
+            .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+        if page_count == 0 || page_count > MAX_SHARED_PAGES {
+            return Err(errno_status(mochi_user_syscall::ERANGE));
+        }
+        if self.virt == 0 || self.page_count < page_count {
+            let virt = platform::memory::alloc_shared_page_count(page_count)
+                .map_err(errno_from_platform)?;
+            if virt == 0 || (virt as usize) & (PAGE_SIZE - 1) != 0 {
+                return Err(errno_status(mochi_user_syscall::EIO));
+            }
+            self.virt = virt;
+            self.page_count = page_count;
+            self.pixel_capacity = page_count
+                .checked_mul(PAGE_SIZE)
+                .and_then(|bytes| bytes.checked_div(4))
+                .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+        }
+        if self.pixel_capacity < pixel_count {
+            return Err(errno_status(mochi_user_syscall::ERANGE));
+        }
+        Ok(unsafe { core::slice::from_raw_parts_mut(self.virt as *mut u32, pixel_count) })
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -440,6 +479,10 @@ fn errno_status(errno: u64) -> u32 {
     } else {
         errno as u32
     }
+}
+
+fn sys_error(errno: u64) -> mochi_user_syscall::SysError {
+    mochi_user_syscall::SysError::from_raw(-(errno as i64))
 }
 
 fn put_i32(out: &mut [u8], offset: usize, value: i32) {
@@ -1048,6 +1091,82 @@ fn find_service(name: &str) -> Option<u64> {
     None
 }
 
+fn wait_for_service(name: &str, attempts: usize) -> Option<u64> {
+    for _ in 0..attempts {
+        if let Ok(tid) = platform::process::find_by_name(name)
+            && tid != 0
+        {
+            return Some(tid);
+        }
+        sleep_one_tick();
+    }
+    None
+}
+
+fn subscribe_input_events(endpoint: u64) -> bool {
+    let Some(input_tid) = find_service(INPUT_SERVICE_NAME) else {
+        return false;
+    };
+    let subscribe = unsafe {
+        core::slice::from_raw_parts_mut(
+            core::ptr::addr_of_mut!(INPUT_SUBSCRIBE_REQ).cast::<u8>(),
+            16,
+        )
+    };
+    subscribe.fill(0);
+    put_u32(subscribe, 0, platform::input::SUBSCRIBE_OPCODE);
+    subscribe[8..16].copy_from_slice(&endpoint.to_le_bytes());
+    let reply = unsafe {
+        core::slice::from_raw_parts_mut(
+            core::ptr::addr_of_mut!(INPUT_SUBSCRIBE_REP).cast::<u8>(),
+            8,
+        )
+    };
+    reply.fill(0);
+    platform::ipc::call(input_tid, subscribe, reply).is_ok()
+}
+
+fn resolve_capabilities(entry_path: &str) -> Result<Vec<u8>, mochi_user_syscall::SysError> {
+    let Some(capability_tid) = wait_for_service(CAPABILITY_SERVICE_NAME, 1024) else {
+        return Err(sys_error(mochi_user_syscall::ENOENT));
+    };
+    let mut request = Vec::with_capacity(4 + entry_path.len());
+    request.extend_from_slice(&RESOLVE_CAPS_OPCODE.to_le_bytes());
+    request.extend_from_slice(entry_path.as_bytes());
+    let mut reply = [0u8; 1024];
+    let msg = platform::ipc::call(capability_tid, &request, &mut reply)?;
+    let len = (msg & 0xffff_ffff) as usize;
+    if len < 8 || len > reply.len() {
+        return Err(sys_error(mochi_user_syscall::EINVAL));
+    }
+    let status = u64::from_le_bytes(
+        reply[..8]
+            .try_into()
+            .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?,
+    );
+    if status != 0 {
+        return Err(sys_error(status));
+    }
+    Ok(reply[8..len].to_vec())
+}
+
+fn empty_spawn_args() -> Vec<u8> {
+    let mut out = Vec::with_capacity(512);
+    out.resize(512, 0);
+    out
+}
+
+fn spawn_binder_app() -> Result<u64, mochi_user_syscall::SysError> {
+    let caps_nul = resolve_capabilities(BINDER_APP_PATH)?;
+    let args_nul = empty_spawn_args();
+    platform::service::spawn_manifest(
+        BINDER_APP_PATH,
+        platform::service::ROLE_APPLICATION,
+        Some(args_nul.as_slice()),
+        Some(caps_nul.as_slice()),
+    )
+}
+
 fn client_id_for_sender(clients: &mut [Client], sender: u64, next_client_id: &mut u64) -> ClientId {
     if let Some(client) = clients
         .iter()
@@ -1194,7 +1313,28 @@ fn cleanup_dead_clients(
     let mut changed = false;
     for index in 0..clients.len() {
         let client = clients[index];
-        if client.live && !platform::ipc::endpoint_alive(client.sender) {
+        if !client.live {
+            continue;
+        }
+        let has_live_surface_endpoint = surfaces.iter().any(|surface| {
+            surface.live
+                && surface.owner == client.id
+                && surface.event_endpoint != 0
+                && platform::ipc::endpoint_alive(surface.event_endpoint)
+        });
+        let has_live_decoration_endpoint = client.decoration_endpoint != 0
+            && platform::ipc::endpoint_alive(client.decoration_endpoint);
+        let has_live_window_decorator_endpoint = windows.iter().any(|window| {
+            window.live
+                && window.decorator == client.id
+                && window.decorator_endpoint != 0
+                && platform::ipc::endpoint_alive(window.decorator_endpoint)
+        });
+
+        if !has_live_surface_endpoint
+            && !has_live_decoration_endpoint
+            && !has_live_window_decorator_endpoint
+        {
             cleanup_client(
                 clients,
                 surfaces,
@@ -1445,17 +1585,60 @@ fn validate_damage_rect(rect: Rect, surface_width: u32, surface_height: u32) -> 
     Ok(rect)
 }
 
+fn clip_rect_to_frame(rect: Rect, frame_width: usize, frame_height: usize) -> Option<Rect> {
+    if rect.width == 0 || rect.height == 0 {
+        return None;
+    }
+    let left = rect.x.max(0) as usize;
+    let top = rect.y.max(0) as usize;
+    let right = (rect.x as i64)
+        .saturating_add(rect.width as i64)
+        .clamp(0, frame_width as i64) as usize;
+    let bottom = (rect.y as i64)
+        .saturating_add(rect.height as i64)
+        .clamp(0, frame_height as i64) as usize;
+    if right <= left || bottom <= top {
+        return None;
+    }
+    Some(Rect {
+        x: left as i32,
+        y: top as i32,
+        width: (right - left) as u32,
+        height: (bottom - top) as u32,
+    })
+}
+
+fn merge_damage(first: Option<Rect>, second: Rect) -> Option<Rect> {
+    match first {
+        Some(first) => {
+            let left = first.x.min(second.x);
+            let top = first.y.min(second.y);
+            let right = (first.x as i64)
+                .saturating_add(first.width as i64)
+                .max((second.x as i64).saturating_add(second.width as i64));
+            let bottom = (first.y as i64)
+                .saturating_add(first.height as i64)
+                .max((second.y as i64).saturating_add(second.height as i64));
+            Some(Rect {
+                x: left,
+                y: top,
+                width: right.saturating_sub(left as i64) as u32,
+                height: bottom.saturating_sub(top as i64) as u32,
+            })
+        }
+        None => Some(second),
+    }
+}
+
 fn choose_frame_size(display_width: u32, display_height: u32) -> Option<(usize, usize)> {
     if display_width == 0 || display_height == 0 {
         return None;
     }
     let width = display_width.min(MAX_DIMENSION) as usize;
     let height = display_height.min(MAX_DIMENSION) as usize;
-    if width.checked_mul(height)? <= MAX_SHARED_PIXELS {
-        return Some((width, height));
+    if width.checked_mul(height)? > MAX_SHARED_PIXELS {
+        return None;
     }
-    let width = width.min(512);
-    let height = height.min(MAX_SHARED_PIXELS / width).max(1);
     Some((width, height))
 }
 
@@ -1561,6 +1744,48 @@ fn send_event(endpoint: u64, kind: u32, a: i32, b: i32, c: u32) {
     let _ = platform::ipc::send(endpoint, &event);
 }
 
+fn dispatch_pointer_motion(
+    surfaces: &[Surface],
+    pointer_x: i32,
+    pointer_y: i32,
+    pointer_focus: &mut Option<usize>,
+) {
+    let next = hit_test(surfaces, pointer_x, pointer_y);
+    if *pointer_focus != next {
+        if let Some(index) = *pointer_focus {
+            if let Some(surface) = surfaces.get(index)
+                && surface.live
+            {
+                send_event(surface.event_endpoint, EVENT_POINTER_LEAVE, 0, 0, 0);
+            }
+        }
+        *pointer_focus = next;
+        if let Some(index) = next {
+            let surface = &surfaces[index];
+            send_event(
+                surface.event_endpoint,
+                EVENT_POINTER_ENTER,
+                pointer_x - surface.x,
+                pointer_y - surface.y,
+                0,
+            );
+        }
+    }
+    if let Some(index) = *pointer_focus {
+        if let Some(surface) = surfaces.get(index)
+            && surface.live
+        {
+            send_event(
+                surface.event_endpoint,
+                EVENT_POINTER_MOTION,
+                pointer_x - surface.x,
+                pointer_y - surface.y,
+                0,
+            );
+        }
+    }
+}
+
 fn update_keyboard_focus(
     surfaces: &[Surface],
     keyboard_focus: &mut Option<usize>,
@@ -1617,40 +1842,25 @@ fn handle_input_event(
             if *pointer_y > max_y {
                 *pointer_y = max_y;
             }
-            let next = hit_test(surfaces, *pointer_x, *pointer_y);
-            if *pointer_focus != next {
-                if let Some(index) = *pointer_focus {
-                    if let Some(surface) = surfaces.get(index)
-                        && surface.live
-                    {
-                        send_event(surface.event_endpoint, EVENT_POINTER_LEAVE, 0, 0, 0);
-                    }
-                }
-                *pointer_focus = next;
-                if let Some(index) = next {
-                    let surface = &surfaces[index];
-                    send_event(
-                        surface.event_endpoint,
-                        EVENT_POINTER_ENTER,
-                        *pointer_x - surface.x,
-                        *pointer_y - surface.y,
-                        0,
-                    );
-                }
-            }
-            if let Some(index) = *pointer_focus {
-                if let Some(surface) = surfaces.get(index)
-                    && surface.live
-                {
-                    send_event(
-                        surface.event_endpoint,
-                        EVENT_POINTER_MOTION,
-                        *pointer_x - surface.x,
-                        *pointer_y - surface.y,
-                        0,
-                    );
-                }
-            }
+            dispatch_pointer_motion(surfaces, *pointer_x, *pointer_y, pointer_focus);
+            true
+        }
+        platform::input::EVENT_KIND_POINTER_ABSOLUTE => {
+            let max_x = display_width.saturating_sub(1).min(MAX_DIMENSION);
+            let max_y = display_height.saturating_sub(1).min(MAX_DIMENSION);
+            let x = event.value_x.clamp(0, 32_767) as u32;
+            let y = event.value_y.clamp(0, 32_767) as u32;
+            *pointer_x = if max_x == 0 {
+                0
+            } else {
+                ((u64::from(x) * u64::from(max_x)) / 32_767) as i32
+            };
+            *pointer_y = if max_y == 0 {
+                0
+            } else {
+                ((u64::from(y) * u64::from(max_y)) / 32_767) as i32
+            };
+            dispatch_pointer_motion(surfaces, *pointer_x, *pointer_y, pointer_focus);
             true
         }
         platform::input::EVENT_KIND_POINTER_BUTTON => {
@@ -1719,6 +1929,7 @@ fn handle_input_event(
     }
 }
 
+#[allow(dead_code)]
 fn blend_argb_over_xrgb(dst: u32, src: u32) -> u32 {
     let alpha = (src >> 24) & 0xff;
     if alpha == 0 {
@@ -1740,6 +1951,7 @@ fn blend_argb_over_xrgb(dst: u32, src: u32) -> u32 {
     0xff00_0000 | (r << 16) | (g << 8) | b
 }
 
+#[allow(dead_code)]
 fn composite_cursor(
     frame: &mut [u32],
     frame_w: usize,
@@ -1775,6 +1987,24 @@ fn composite_cursor(
             if (src >> 24) == 0 {
                 continue;
             }
+            let shadow_x = dx.saturating_add(1);
+            let shadow_y = dy.saturating_add(1);
+            if shadow_x >= 0
+                && shadow_x < frame_w as i32
+                && shadow_y >= 0
+                && shadow_y < frame_h as i32
+            {
+                let Some(shadow_index) = (shadow_y as usize)
+                    .checked_mul(frame_w)
+                    .and_then(|row| row.checked_add(shadow_x as usize))
+                else {
+                    return Err(errno_status(mochi_user_syscall::ERANGE));
+                };
+                let Some(slot) = frame.get_mut(shadow_index) else {
+                    return Err(errno_status(mochi_user_syscall::ERANGE));
+                };
+                *slot = blend_argb_over_xrgb(*slot, 0x9000_0000);
+            }
             let Some(dst_index) = dst_row.checked_add(dx as usize) else {
                 return Err(errno_status(mochi_user_syscall::ERANGE));
             };
@@ -1789,14 +2019,13 @@ fn composite_cursor(
 
 fn composite_and_present(
     surfaces: &[Surface],
-    cursor: &CursorImage,
-    pointer_x: i32,
-    pointer_y: i32,
+    present_frame: &mut PresentFrame,
     display_tid: u64,
     display_width: u32,
     display_height: u32,
     _display_stride: u32,
     display_format: u32,
+    _damage: Option<Rect>,
 ) -> u32 {
     if display_format != PIXEL_FORMAT_XRGB8888 {
         return errno_status(mochi_user_syscall::ENOTSUP);
@@ -1810,20 +2039,10 @@ fn composite_and_present(
     let Some(frame_bytes) = frame_pixels.checked_mul(4) else {
         return errno_status(mochi_user_syscall::ERANGE);
     };
-    let Some(page_count) = shared_page_count(frame_bytes) else {
-        return errno_status(mochi_user_syscall::ERANGE);
+    let frame = match present_frame.pixels(frame_pixels, frame_bytes) {
+        Ok(frame) => frame,
+        Err(status) => return status,
     };
-    if page_count == 0 || page_count > MAX_SHARED_PAGES {
-        return errno_status(mochi_user_syscall::ERANGE);
-    }
-    let virt = match platform::memory::alloc_shared_page_count(page_count) {
-        Ok(virt) => virt,
-        Err(err) => return errno_from_platform(err),
-    };
-    if virt == 0 || (virt as usize) & (PAGE_SIZE - 1) != 0 {
-        return errno_status(mochi_user_syscall::EIO);
-    }
-    let frame = unsafe { core::slice::from_raw_parts_mut(virt as *mut u32, frame_pixels) };
     for y in 0..frame_h {
         let Some(row) = y.checked_mul(frame_w) else {
             return errno_status(mochi_user_syscall::ERANGE);
@@ -1866,10 +2085,9 @@ fn composite_and_present(
             }
         }
     }
-    if let Err(status) = composite_cursor(frame, frame_w, frame_h, cursor, pointer_x, pointer_y) {
-        return status;
-    }
-    if let Err(err) = platform::ipc::send_page_count(display_tid, page_count, virt) {
+    if let Err(err) =
+        platform::ipc::send_page_count(display_tid, present_frame.page_count, present_frame.virt)
+    {
         return errno_from_platform(err);
     }
     let request = unsafe {
@@ -1906,6 +2124,7 @@ fn handle_request(
     sender: u64,
     request: &[u8],
     needs_present: &mut bool,
+    present_damage: &mut Option<Rect>,
     _display_tid: u64,
     _display_width: u32,
     _display_height: u32,
@@ -2059,6 +2278,15 @@ fn handle_request(
             surfaces[index].width = width;
             surfaces[index].height = height;
             surfaces[index].z = *next_z;
+            platform::println!(
+                "compositor.service: create surface role={} size={}x{} pos={},{} endpoint={}",
+                role_raw,
+                width,
+                height,
+                x,
+                y,
+                event_endpoint
+            );
             if let Some(slot) = window_slot {
                 windows[slot] = Window::empty();
                 windows[slot].live = true;
@@ -2083,30 +2311,38 @@ fn handle_request(
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
                 return reply;
             };
-            let Some(index_width) = surfaces.get(index).map(|surface| surface.width) else {
+            let attach_reject_reason = if format != PIXEL_FORMAT_XRGB8888 {
+                Some(1)
+            } else if width == 0 {
+                Some(2)
+            } else if height == 0 {
+                Some(3)
+            } else if stride < width {
+                Some(4)
+            } else if width > MAX_DIMENSION || height > MAX_DIMENSION {
+                Some(5)
+            } else {
+                None
+            };
+            if let Some(reason) = attach_reject_reason {
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
+                put_u32(&mut reply, 4, reason);
+                put_u32(&mut reply, 8, height);
+                put_u32(&mut reply, 12, height);
                 return reply;
-            };
-            let Some(index_height) = surfaces.get(index).map(|surface| surface.height) else {
-                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
-                return reply;
-            };
-            let (row_bytes, needed, pixels) = match validate_buffer_layout(
-                width,
-                height,
-                stride,
-                format,
-                index_width,
-                index_height,
-            ) {
-                Ok(layout) => layout,
-                Err(status) => {
-                    put_u32(&mut reply, 0, status);
-                    return reply;
-                }
-            };
+            }
+            let (row_bytes, needed, pixels) =
+                match validate_buffer_layout(width, height, stride, format, width, height) {
+                    Ok(layout) => layout,
+                    Err(status) => {
+                        put_u32(&mut reply, 0, status);
+                        return reply;
+                    }
+                };
             if request.len() == 28 {
                 let surface = &mut surfaces[index];
+                surface.width = width;
+                surface.height = height;
                 surface.pending_width = width;
                 surface.pending_height = height;
                 surface.pending_stride = stride;
@@ -2115,7 +2351,21 @@ fn handle_request(
                 surface.pending.clear();
                 surface.pending_buffer = None;
                 surface.pending_damage = Some(Rect::full(width, height));
-                surface.awaiting_buffer = true;
+                if let Some(buffer) = surface.current_buffer.as_ref() {
+                    if buffer.width == width
+                        && buffer.height == height
+                        && buffer.stride == stride
+                        && buffer.pixels == pixels
+                    {
+                        surface.pending_buffer = Some(buffer.clone());
+                        surface.pending_bytes_received = buffer.byte_len;
+                        surface.awaiting_buffer = false;
+                    } else {
+                        surface.awaiting_buffer = true;
+                    }
+                } else {
+                    surface.awaiting_buffer = true;
+                }
             } else {
                 if needed > MAX_SHARED_BYTES {
                     put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ERANGE));
@@ -2163,6 +2413,8 @@ fn handle_request(
                     }
                 }
                 let surface = &mut surfaces[index];
+                surface.width = width;
+                surface.height = height;
                 surface.pending = pending;
                 surface.pending_width = width;
                 surface.pending_height = height;
@@ -2221,6 +2473,9 @@ fn handle_request(
                     surface.awaiting_buffer,
                 )
             };
+            let pending_damage = surfaces[index]
+                .pending_damage
+                .unwrap_or(Rect::full(pending_width, pending_height));
             if awaiting_buffer || pending_width == 0 || pending_len == 0 {
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                 return reply;
@@ -2257,7 +2512,14 @@ fn handle_request(
                 surface.pending_buffer = None;
                 surface.awaiting_buffer = false;
             }
-            *needs_present = !surfaces[index].is_decoration;
+            *needs_present = true;
+            let screen_damage = Rect {
+                x: surfaces[index].x.saturating_add(pending_damage.x),
+                y: surfaces[index].y.saturating_add(pending_damage.y),
+                width: pending_damage.width,
+                height: pending_damage.height,
+            };
+            *present_damage = merge_damage(*present_damage, screen_damage);
             if !surfaces[index].is_decoration {
                 let window_id = surfaces[index].window;
                 if let Some(window_index) = window_index_by_id(windows, window_id) {
@@ -2604,29 +2866,11 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         Ok(endpoint) => endpoint,
         Err(_) => platform::process::exit(1),
     };
-    let Some(display_tid) = find_service(DISPLAY_SERVICE_NAME) else {
+    let Some(display_tid) = wait_for_service(DISPLAY_SERVICE_NAME, 4096) else {
         platform::println!("compositor.service: display.driver not found");
         platform::process::exit(1);
     };
-    if let Some(input_tid) = find_service(INPUT_SERVICE_NAME) {
-        let subscribe = unsafe {
-            core::slice::from_raw_parts_mut(
-                core::ptr::addr_of_mut!(INPUT_SUBSCRIBE_REQ).cast::<u8>(),
-                16,
-            )
-        };
-        subscribe.fill(0);
-        put_u32(subscribe, 0, platform::input::SUBSCRIBE_OPCODE);
-        subscribe[8..16].copy_from_slice(&endpoint.to_le_bytes());
-        let reply = unsafe {
-            core::slice::from_raw_parts_mut(
-                core::ptr::addr_of_mut!(INPUT_SUBSCRIBE_REP).cast::<u8>(),
-                8,
-            )
-        };
-        reply.fill(0);
-        let _ = platform::ipc::call(input_tid, subscribe, reply);
-    }
+    let mut input_subscribed = subscribe_input_events(endpoint);
     let (display_width, display_height, display_stride, display_format) =
         display_request_info(display_tid);
 
@@ -2639,12 +2883,30 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
     let mut next_window_id = 0u64;
     let mut next_pointer_serial = 0u64;
     let mut pointer_serials = [PointerSerial::default(); 32];
-    let mut pointer_x = 0i32;
-    let mut pointer_y = 0i32;
+    let mut pointer_x = (display_width / 2).min(display_width.saturating_sub(1)) as i32;
+    let mut pointer_y = (display_height / 2).min(display_height.saturating_sub(1)) as i32;
     let mut pointer_focus = None;
     let mut keyboard_focus = None;
     let mut idle_cleanup_ticks = 0u32;
-    let cursor = load_cursor_image();
+    let mut input_subscribe_retry_ticks = 0u32;
+    let mut present_frame = PresentFrame::default();
+    let _ = composite_and_present(
+        &surfaces,
+        &mut present_frame,
+        display_tid,
+        display_width,
+        display_height,
+        display_stride,
+        display_format,
+        None,
+    );
+    match spawn_binder_app() {
+        Ok(pid) => platform::println!("compositor.service: Binder.app spawned pid={}", pid),
+        Err(err) => platform::println!(
+            "compositor.service: Binder.app spawn failed errno={}",
+            err.errno().unwrap_or(mochi_user_syscall::EIO)
+        ),
+    }
     loop {
         let buf = unsafe {
             core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(IPC_BUF).cast::<u8>(), 4128)
@@ -2656,6 +2918,11 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             }
             Err(_) => {
                 idle_cleanup_ticks = idle_cleanup_ticks.wrapping_add(1);
+                input_subscribe_retry_ticks = input_subscribe_retry_ticks.wrapping_add(1);
+                if !input_subscribed && input_subscribe_retry_ticks >= IDLE_CLEANUP_YIELDS {
+                    input_subscribe_retry_ticks = 0;
+                    input_subscribed = subscribe_input_events(endpoint);
+                }
                 if idle_cleanup_ticks >= IDLE_CLEANUP_YIELDS {
                     idle_cleanup_ticks = 0;
                     if cleanup_dead_clients(
@@ -2667,14 +2934,13 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
                     ) {
                         let _ = composite_and_present(
                             &surfaces,
-                            &cursor,
-                            pointer_x,
-                            pointer_y,
+                            &mut present_frame,
                             display_tid,
                             display_width,
                             display_height,
                             display_stride,
                             display_format,
+                            None,
                         );
                     }
                 }
@@ -2719,14 +2985,13 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             if needs_present {
                 let _ = composite_and_present(
                     &surfaces,
-                    &cursor,
-                    pointer_x,
-                    pointer_y,
+                    &mut present_frame,
                     display_tid,
                     display_width,
                     display_height,
                     display_stride,
                     display_format,
+                    None,
                 );
             }
             continue;
@@ -2745,6 +3010,7 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             continue;
         }
         let mut needs_present = false;
+        let mut present_damage = None;
         let reply = handle_request(
             &mut clients,
             &mut surfaces,
@@ -2760,6 +3026,7 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             sender,
             &buf[..len],
             &mut needs_present,
+            &mut present_damage,
             display_tid,
             display_width,
             display_height,
@@ -2779,14 +3046,13 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             if needs_present {
                 let status = composite_and_present(
                     &surfaces,
-                    &cursor,
-                    pointer_x,
-                    pointer_y,
+                    &mut present_frame,
                     display_tid,
                     display_width,
                     display_height,
                     display_stride,
                     display_format,
+                    present_damage,
                 );
                 if status == 0 {
                     for surface in surfaces.iter().filter(|surface| surface.live) {
