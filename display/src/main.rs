@@ -44,11 +44,6 @@ fn read_u32(buf: &[u8], offset: usize) -> Option<u32> {
     Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
-fn read_pixel(buf: &[u8], offset: usize) -> Option<u32> {
-    let bytes = buf.get(offset..offset.checked_add(4)?)?;
-    Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-}
-
 static mut IPC_BUF: [u8; 4128] = [0; 4128];
 static mut IPC_REPLY_20: [u8; 20] = [0; 20];
 static mut IPC_REPLY_4: [u8; 4] = [0; 4];
@@ -143,6 +138,9 @@ fn present_pixels(
     };
     let copy_width = dest_width.min(width as usize);
     let copy_height = dest_height.min(height as usize);
+    let Some(copy_row_bytes) = copy_width.checked_mul(4) else {
+        return errno_status(mochi_user_syscall::ERANGE);
+    };
     for y in 0..copy_height {
         let Some(src_row) = y.checked_mul(row_bytes) else {
             return errno_status(mochi_user_syscall::ERANGE);
@@ -150,19 +148,18 @@ fn present_pixels(
         let Some(dest_row) = y.checked_mul(dest_stride) else {
             return errno_status(mochi_user_syscall::ERANGE);
         };
-        for x in 0..copy_width {
-            let Some(src_offset) = src_row.checked_add(x.saturating_mul(4)) else {
-                return errno_status(mochi_user_syscall::ERANGE);
-            };
-            let Some(pixel) = read_pixel(pixels, src_offset) else {
-                return errno_status(mochi_user_syscall::EINVAL);
-            };
-            let Some(dest_offset) = dest_row.checked_add(x) else {
-                return errno_status(mochi_user_syscall::ERANGE);
-            };
-            unsafe {
-                fb.add(dest_offset).write_volatile(pixel);
-            }
+        let Some(src_end) = src_row.checked_add(copy_row_bytes) else {
+            return errno_status(mochi_user_syscall::ERANGE);
+        };
+        if src_end > pixels.len() {
+            return errno_status(mochi_user_syscall::EINVAL);
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                pixels.as_ptr().add(src_row),
+                fb.add(dest_row).cast::<u8>(),
+                copy_row_bytes,
+            );
         }
     }
     0
@@ -233,6 +230,16 @@ fn present_pixels_rect(
     let fb = (FB_VIRT as usize + fb_offset) as *mut u32;
     let copy_right = (rect_right as usize).min(dest_width);
     let copy_bottom = (rect_bottom as usize).min(dest_height);
+    let copy_left = rect_x as usize;
+    if copy_right <= copy_left || copy_bottom <= rect_y as usize {
+        return 0;
+    }
+    let Some(copy_row_bytes) = copy_right
+        .checked_sub(copy_left)
+        .and_then(|width| width.checked_mul(4))
+    else {
+        return errno_status(mochi_user_syscall::ERANGE);
+    };
     for y in rect_y as usize..copy_bottom {
         let Some(src_row) = y.checked_mul(row_bytes) else {
             return errno_status(mochi_user_syscall::ERANGE);
@@ -240,19 +247,24 @@ fn present_pixels_rect(
         let Some(dest_row) = y.checked_mul(dest_stride) else {
             return errno_status(mochi_user_syscall::ERANGE);
         };
-        for x in rect_x as usize..copy_right {
-            let Some(src_offset) = src_row.checked_add(x.saturating_mul(4)) else {
-                return errno_status(mochi_user_syscall::ERANGE);
-            };
-            let Some(pixel) = read_pixel(pixels, src_offset) else {
-                return errno_status(mochi_user_syscall::EINVAL);
-            };
-            let Some(dest_offset) = dest_row.checked_add(x) else {
-                return errno_status(mochi_user_syscall::ERANGE);
-            };
-            unsafe {
-                fb.add(dest_offset).write_volatile(pixel);
-            }
+        let Some(src_offset) = src_row.checked_add(copy_left.saturating_mul(4)) else {
+            return errno_status(mochi_user_syscall::ERANGE);
+        };
+        let Some(src_end) = src_offset.checked_add(copy_row_bytes) else {
+            return errno_status(mochi_user_syscall::ERANGE);
+        };
+        if src_end > pixels.len() {
+            return errno_status(mochi_user_syscall::EINVAL);
+        }
+        let Some(dest_offset) = dest_row.checked_add(copy_left) else {
+            return errno_status(mochi_user_syscall::ERANGE);
+        };
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                pixels.as_ptr().add(src_offset),
+                fb.add(dest_offset).cast::<u8>(),
+                copy_row_bytes,
+            );
         }
     }
     0
