@@ -152,10 +152,11 @@ fn resolve_capabilities(entry_path: &str) -> Result<Vec<u8>, mochi_user_syscall:
     Ok(reply[8..len].to_vec())
 }
 
-fn spawn_msh(tty_endpoint: u64) -> Result<u64, mochi_user_syscall::SysError> {
+fn spawn_msh(tty_endpoint: u64, logger_endpoint: u64) -> Result<u64, mochi_user_syscall::SysError> {
     let caps_nul = resolve_capabilities(MSH_PATH)?;
-    let arg = tty_endpoint.to_string();
-    let args = [arg];
+    let tty_arg = tty_endpoint.to_string();
+    let logger_arg = logger_endpoint.to_string();
+    let args = [tty_arg, logger_arg];
     let args_nul = encode_spawn_args(&args);
     platform::service::spawn_manifest(
         MSH_PATH,
@@ -207,17 +208,17 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         Ok(handle) => handle,
         Err(_) => platform::process::exit(1),
     };
+    let logger_endpoint = platform::logger::endpoint().unwrap_or(0);
 
     while !subscribe_input_events(tty_endpoint) {
         platform::thread::yield_now();
     }
 
-    if spawn_msh(tty_endpoint).is_err() {
+    if spawn_msh(tty_endpoint, logger_endpoint).is_err() {
         platform::process::exit(1);
     }
 
     let mut shell_endpoint = 0u64;
-    let mut shell_thread = 0u64;
     loop {
         let buf = tty_ipc_buf();
         buf.fill(0);
@@ -238,17 +239,11 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             shell_endpoint = u64::from_le_bytes([
                 buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
             ]);
-            shell_thread = u64::from_le_bytes([
-                buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
-            ]);
             continue;
         }
         if is_tty_output(&buf[..len]) {
             if shell_endpoint != 0 {
                 let _ = platform::ipc::send(shell_endpoint, &buf[..len]);
-            }
-            if shell_thread != 0 && shell_thread != shell_endpoint {
-                let _ = platform::ipc::send(shell_thread, &buf[..len]);
             }
             let status = 0u64;
             let _ = platform::ipc::reply(sender, &status.to_le_bytes());
@@ -259,9 +254,6 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         }
         if shell_endpoint != 0 {
             let _ = platform::ipc::send(shell_endpoint, &buf[..len]);
-        }
-        if shell_thread != 0 && shell_thread != shell_endpoint {
-            let _ = platform::ipc::send(shell_thread, &buf[..len]);
         }
     }
 }
