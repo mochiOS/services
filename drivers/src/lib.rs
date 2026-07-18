@@ -22,6 +22,7 @@ const TTY_PACKAGE_MANIFEST_PATH: &str = "/system/packages/tty/manifest.toml";
 const I8042_DRIVER_ID: &str = "org.mochios.ps2.i8042";
 const CAPABILITY_SERVICE_NAME: &str = "capability.service";
 const RESOLVE_CAPS_OPCODE: u32 = 0x4341_5053;
+const SERVICE_READY_YIELDS: usize = 64;
 
 fn read_dir_names(path: &str) -> Vec<String> {
     match platform::file::read_dir_names(path) {
@@ -270,13 +271,13 @@ pub fn run(sp: *const usize) -> ! {
             err.errno().unwrap_or(0)
         ),
     }
-    if !wait_for_process(DISPLAY_SERVICE_NAME, 4096) {
+    if !wait_for_process(DISPLAY_SERVICE_NAME, SERVICE_READY_YIELDS) {
         platform::println!(
             "drivers.service: {} not registered before compositor spawn",
             DISPLAY_SERVICE_NAME
         );
     }
-    if !wait_for_process(INPUT_SERVICE_NAME, 4096) {
+    if !wait_for_process(INPUT_SERVICE_NAME, SERVICE_READY_YIELDS) {
         platform::println!(
             "drivers.service: {} not registered before compositor spawn",
             INPUT_SERVICE_NAME

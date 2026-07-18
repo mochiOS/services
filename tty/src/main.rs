@@ -167,13 +167,10 @@ fn spawn_msh(tty_endpoint: u64, logger_endpoint: u64) -> Result<u64, mochi_user_
 }
 
 fn find_input_service() -> Option<u64> {
-    for _ in 0..4096 {
-        if let Ok(tid) = platform::process::find_by_name(INPUT_SERVICE_NAME) {
-            if tid != 0 {
-                return Some(tid);
-            }
+    if let Ok(tid) = platform::process::find_by_name(INPUT_SERVICE_NAME) {
+        if tid != 0 {
+            return Some(tid);
         }
-        platform::thread::yield_now();
     }
     None
 }
