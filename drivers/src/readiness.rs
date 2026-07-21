@@ -34,12 +34,15 @@ fn decode_reply(msg: u64, reply: &[u8]) -> Result<(), ReadyError> {
     let Some(message) = reply.get(..len) else {
         return Err(ReadyError::InvalidMessage);
     };
-    let status = platform::service_ready::decode_result(message)
-        .map_err(|_| ReadyError::InvalidMessage)?;
-    if status != 0 {
-        return Err(ReadyError::Failed(status));
+    match platform::service_ready::validate_result(message) {
+        Ok(()) => Ok(()),
+        Err(platform::service_ready::ResultError::InvalidMessage(_)) => {
+            Err(ReadyError::InvalidMessage)
+        }
+        Err(platform::service_ready::ResultError::Failed(status)) => {
+            Err(ReadyError::Failed(status))
+        }
     }
-    Ok(())
 }
 
 fn process_exit_status(process_id: u64) -> Result<Option<i32>, ReadyError> {
