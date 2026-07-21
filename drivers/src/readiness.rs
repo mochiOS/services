@@ -33,8 +33,8 @@ pub(crate) struct ReadyHandshake {
     endpoint: u64,
     input_token: u64,
     display_token: u64,
-    input_status: Option<i32>,
-    display_status: Option<i32>,
+    input_status: platform::service_ready::OneShotStatus,
+    display_status: platform::service_ready::OneShotStatus,
 }
 
 impl ReadyHandshake {
@@ -55,8 +55,8 @@ impl ReadyHandshake {
             endpoint,
             input_token,
             display_token,
-            input_status: None,
-            display_status: None,
+            input_status: platform::service_ready::OneShotStatus::new(),
+            display_status: platform::service_ready::OneShotStatus::new(),
         })
     }
 
@@ -73,8 +73,8 @@ impl ReadyHandshake {
 
     fn status(&self, service: ServiceKind) -> Option<i32> {
         match service {
-            ServiceKind::Input => self.input_status,
-            ServiceKind::Display => self.display_status,
+            ServiceKind::Input => self.input_status.get(),
+            ServiceKind::Display => self.display_status.get(),
         }
     }
 
@@ -86,9 +86,7 @@ impl ReadyHandshake {
         } else {
             return Err(ReadyError::InvalidMessage);
         };
-        if slot.is_none() {
-            *slot = Some(status);
-        }
+        let _ = slot.record(status);
         Ok(())
     }
 
