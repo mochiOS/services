@@ -3,15 +3,18 @@
 
 extern crate alloc;
 
+mod client;
 mod display;
 mod geometry;
 mod protocol;
+mod surface;
 
 use alloc::vec;
 use alloc::vec::Vec;
 use core::arch::global_asm;
 use mochi_user_platform as platform;
 
+use client::{Client, ClientId, client_id_for_sender};
 use display::{
     DISPLAY_PRESENT_REQ, DISPLAY_REP_BUF, display_claim_present_owner, display_request_info,
     wait_for_service,
@@ -21,6 +24,7 @@ use geometry::{
     validate_damage_rect,
 };
 use protocol::*;
+use surface::{Surface, SurfaceBuffer, SurfaceHandle, SurfaceRights, SurfaceRole};
 
 global_asm!(
     r#"
@@ -51,86 +55,7 @@ const DECORATE_COMPAT_CAPABILITY: &str = "window.overlay";
 const DECOR_TITLE_BAR_HEIGHT: u32 = 28;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
-struct ClientId(u64);
-
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-struct SurfaceHandle(u64);
-
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct WindowId(u64);
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SurfaceRole {
-    Toplevel,
-    Popup,
-    Background,
-    Panel,
-    SecureOverlay,
-}
-
-impl SurfaceRole {
-    fn from_wire(value: u32) -> Result<Self, u32> {
-        match value {
-            ROLE_TOPLEVEL => Ok(Self::Toplevel),
-            ROLE_POPUP => Ok(Self::Popup),
-            ROLE_BACKGROUND => Ok(Self::Background),
-            ROLE_PANEL => Ok(Self::Panel),
-            ROLE_SECURE_OVERLAY => Ok(Self::SecureOverlay),
-            _ => Err(errno_status(mochi_user_syscall::EINVAL)),
-        }
-    }
-
-    fn general_client_rights(self) -> Result<SurfaceRights, u32> {
-        match self {
-            Self::Toplevel | Self::Popup => Ok(SurfaceRights::GENERAL_CLIENT),
-            Self::Background | Self::Panel | Self::SecureOverlay => {
-                Err(errno_status(mochi_user_syscall::EACCES))
-            }
-        }
-    }
-
-    fn privileged_overlay_rights(self) -> Result<SurfaceRights, u32> {
-        match self {
-            Self::Background | Self::Panel | Self::Toplevel | Self::Popup => {
-                Ok(SurfaceRights::GENERAL_CLIENT)
-            }
-            Self::SecureOverlay => Err(errno_status(mochi_user_syscall::EACCES)),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Default)]
-struct SurfaceRights {
-    bits: u32,
-}
-
-impl SurfaceRights {
-    const ATTACH_BUFFER: Self = Self { bits: 1 << 0 };
-    const DAMAGE: Self = Self { bits: 1 << 1 };
-    const COMMIT: Self = Self { bits: 1 << 2 };
-    const DESTROY: Self = Self { bits: 1 << 3 };
-    #[allow(dead_code)]
-    const SET_POSITION: Self = Self { bits: 1 << 4 };
-    #[allow(dead_code)]
-    const SET_Z_ORDER: Self = Self { bits: 1 << 5 };
-    #[allow(dead_code)]
-    const FOCUS_CONTROL: Self = Self { bits: 1 << 6 };
-    const GENERAL_CLIENT: Self = Self {
-        bits: Self::ATTACH_BUFFER.bits | Self::DAMAGE.bits | Self::COMMIT.bits | Self::DESTROY.bits,
-    };
-
-    const fn contains(self, required: Self) -> bool {
-        (self.bits & required.bits) == required.bits
-    }
-}
-
-#[derive(Clone, Copy, Default)]
-struct Client {
-    live: bool,
-    sender: u64,
-    id: ClientId,
-    decoration_endpoint: u64,
-}
 
 #[derive(Clone, Copy, Default)]
 struct Insets {
@@ -188,50 +113,6 @@ struct PointerSerial {
     used: bool,
 }
 
-#[derive(Clone)]
-struct SurfaceBuffer {
-    mapped_addr: u64,
-    byte_len: usize,
-    width: u32,
-    height: u32,
-    stride: u32,
-    pixels: usize,
-}
-
-#[derive(Clone)]
-struct Surface {
-    live: bool,
-    owner: ClientId,
-    event_endpoint: u64,
-    handle: SurfaceHandle,
-    token: u64,
-    role: SurfaceRole,
-    rights: SurfaceRights,
-    parent: Option<SurfaceHandle>,
-    window: WindowId,
-    is_decoration: bool,
-    visible: bool,
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-    pending_width: u32,
-    pending_height: u32,
-    pending_stride: u32,
-    pending_len: usize,
-    pending_bytes_received: usize,
-    awaiting_buffer: bool,
-    pending_damage: Option<Rect>,
-    pending_buffer: Option<SurfaceBuffer>,
-    pending: Vec<u32>,
-    current_width: u32,
-    current_height: u32,
-    current_stride: u32,
-    current_buffer: Option<SurfaceBuffer>,
-    current: Vec<u32>,
-    z: u32,
-}
-
 #[derive(Default)]
 struct PresentFrame {
     virt: u64,
@@ -265,76 +146,6 @@ impl PresentFrame {
             return Err(errno_status(mochi_user_syscall::ERANGE));
         }
         Ok(unsafe { core::slice::from_raw_parts_mut(self.virt as *mut u32, pixel_count) })
-    }
-}
-
-impl Surface {
-    fn empty() -> Self {
-        Self {
-            live: false,
-            owner: ClientId(0),
-            event_endpoint: 0,
-            handle: SurfaceHandle(0),
-            token: 0,
-            role: SurfaceRole::Toplevel,
-            rights: SurfaceRights::default(),
-            parent: None,
-            window: WindowId(0),
-            is_decoration: false,
-            visible: true,
-            x: 0,
-            y: 0,
-            width: 0,
-            height: 0,
-            pending_width: 0,
-            pending_height: 0,
-            pending_stride: 0,
-            pending_len: 0,
-            pending_bytes_received: 0,
-            awaiting_buffer: false,
-            pending_damage: None,
-            pending_buffer: None,
-            pending: Vec::new(),
-            current_width: 0,
-            current_height: 0,
-            current_stride: 0,
-            current_buffer: None,
-            current: Vec::new(),
-            z: 0,
-        }
-    }
-
-    fn reset(&mut self) {
-        self.live = false;
-        self.owner = ClientId(0);
-        self.event_endpoint = 0;
-        self.handle = SurfaceHandle(0);
-        self.token = 0;
-        self.role = SurfaceRole::Toplevel;
-        self.rights = SurfaceRights::default();
-        self.parent = None;
-        self.window = WindowId(0);
-        self.is_decoration = false;
-        self.visible = true;
-        self.x = 0;
-        self.y = 0;
-        self.width = 0;
-        self.height = 0;
-        self.pending_width = 0;
-        self.pending_height = 0;
-        self.pending_stride = 0;
-        self.pending_len = 0;
-        self.pending_bytes_received = 0;
-        self.awaiting_buffer = false;
-        self.pending_damage = None;
-        self.pending_buffer = None;
-        self.pending.clear();
-        self.current_width = 0;
-        self.current_height = 0;
-        self.current_stride = 0;
-        self.current_buffer = None;
-        self.current.clear();
-        self.z = 0;
     }
 }
 
@@ -426,27 +237,6 @@ fn subscribe_input_events(endpoint: u64) -> bool {
     };
     reply.fill(0);
     platform::ipc::call(input_tid, subscribe, reply).is_ok()
-}
-
-fn client_id_for_sender(clients: &mut [Client], sender: u64, next_client_id: &mut u64) -> ClientId {
-    if let Some(client) = clients
-        .iter()
-        .find(|client| client.live && client.sender == sender)
-    {
-        return client.id;
-    }
-    if let Some(client) = clients.iter_mut().find(|client| !client.live) {
-        *next_client_id = next_client_id.wrapping_add(1).max(1);
-        let id = ClientId(*next_client_id);
-        *client = Client {
-            live: true,
-            sender,
-            id,
-            decoration_endpoint: 0,
-        };
-        return id;
-    }
-    ClientId(0)
 }
 
 fn surface_index_for(
