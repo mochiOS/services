@@ -2,6 +2,8 @@
 
 extern crate alloc;
 
+mod driver_manifest;
+
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -199,26 +201,13 @@ fn wait_for_process(name: &str, attempts: usize) -> bool {
     false
 }
 
-fn bundle_manifest_path(bundle_root: &str) -> String {
-    alloc::format!(
-        "/system/packages{}/manifest.toml",
-        bundle_root.trim_start_matches("/bin")
-    )
-}
-
 fn maybe_spawn_bundle(bundle_root: &str, logger_endpoint: u64) {
-    let package_manifest_path = bundle_manifest_path(bundle_root);
-    let Some(manifest) = platform::package::read_manifest(&package_manifest_path) else {
-        platform::println!("drivers.service: missing {}", package_manifest_path);
+    let Some(bundle) = driver_manifest::load(bundle_root) else {
         return;
     };
-    let entry_path = alloc::format!("{}/entry.elf", bundle_root);
-    let Some(binary) = manifest.binary(&entry_path) else {
-        platform::println!(
-            "drivers.service: missing binary entry {} in {}",
-            entry_path,
-            package_manifest_path
-        );
+    let manifest = &bundle.manifest;
+    let entry_path = &bundle.entry_path;
+    let Some(binary) = manifest.binary(entry_path) else {
         return;
     };
 
@@ -233,7 +222,7 @@ fn maybe_spawn_bundle(bundle_root: &str, logger_endpoint: u64) {
     );
 
     let _ = manifest.package_id == I8042_DRIVER_ID;
-    match spawn_bundle(&entry_path, None, logger_endpoint) {
+    match spawn_bundle(entry_path, None, logger_endpoint) {
         Ok(pid) => {
             platform::println!("drivers.service: spawned driver pid={}", pid);
         }
