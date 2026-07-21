@@ -2,6 +2,7 @@
 
 extern crate alloc;
 
+mod driver_discovery;
 mod driver_manifest;
 
 use alloc::string::{String, ToString};
@@ -10,7 +11,6 @@ use alloc::vec::Vec;
 
 use mochi_user_platform as platform;
 
-const DRIVER_BUNDLE_ROOTS: &[&str] = &["/bin/drivers/usb", "/bin/drivers/ps2"];
 const INPUT_SERVICE_PATH: &str = "/system/services/input.service";
 const INPUT_SERVICE_NAME: &str = "input.service";
 const INPUT_PACKAGE_MANIFEST_PATH: &str = "/system/packages/input/manifest.toml";
@@ -25,20 +25,6 @@ const I8042_DRIVER_ID: &str = "org.mochios.ps2.i8042";
 const CAPABILITY_SERVICE_NAME: &str = "capability.service";
 const RESOLVE_CAPS_OPCODE: u32 = 0x4341_5053;
 const SERVICE_READY_YIELDS: usize = 64;
-
-fn read_dir_names(path: &str) -> Vec<String> {
-    match platform::file::read_dir_names(path) {
-        Ok(names) => names,
-        Err(err) => {
-            platform::println!(
-                "drivers.service: open dir failed {} errno={}",
-                path,
-                err.errno().unwrap_or(0)
-            );
-            Vec::new()
-        }
-    }
-}
 
 fn encode_spawn_args(items: &[String]) -> Vec<u8> {
     let mut out = Vec::with_capacity(512);
@@ -283,15 +269,10 @@ pub fn run(sp: *const usize) -> ! {
             err.errno().unwrap_or(0)
         ),
     }
-    for bundle_root_path in DRIVER_BUNDLE_ROOTS {
-        let bundle_roots = read_dir_names(bundle_root_path);
-        for bundle in bundle_roots {
-            if !bundle.ends_with(".driver") {
-                continue;
-            }
-            let bundle_root = alloc::format!("{}/{}", bundle_root_path, bundle);
-            maybe_spawn_bundle(&bundle_root, logger_endpoint);
-        }
+    for bundle_root_path in driver_discovery::roots() {
+        driver_discovery::visit_bundles(bundle_root_path, |bundle_root| {
+            maybe_spawn_bundle(bundle_root, logger_endpoint);
+        });
     }
     match spawn_tty_service(logger_endpoint) {
         Ok(pid) => platform::println!("drivers.service: tty.service spawned pid={}", pid),
