@@ -2,8 +2,9 @@ use mochi_user_platform as platform;
 
 use crate::client::{Client, ClientId};
 use crate::protocol::{DECOR_EVENT_WINDOW, WINDOW_STATE_NORMAL, errno_status, put_u32, put_u64};
+use crate::state::getrandom_u64;
 use crate::surface::{Surface, SurfaceHandle};
-use crate::{getrandom_u64, surface_extent, surface_index_by_handle};
+use crate::surface::{surface_extent, surface_index_by_handle};
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct WindowId(pub(crate) u64);

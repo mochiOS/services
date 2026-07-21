@@ -6,7 +6,46 @@ use crate::input::PointerSerial;
 use crate::renderer::PresentFrame;
 use crate::surface::Surface;
 use crate::window::Window;
-use crate::{MAX_CLIENTS, MAX_SURFACES, MAX_WINDOWS};
+
+pub(crate) const MAX_SURFACES: usize = 16;
+pub(crate) const MAX_WINDOWS: usize = 8;
+pub(crate) const MAX_CLIENTS: usize = 16;
+pub(crate) const PAGE_SIZE: usize = 4096;
+pub(crate) const MAX_SHARED_PAGES: usize = 262_144;
+pub(crate) const MAX_SHARED_BYTES: usize = MAX_SHARED_PAGES * PAGE_SIZE;
+pub(crate) const MAX_SHARED_PIXELS: usize = MAX_SHARED_BYTES / 4;
+pub(crate) const MAX_DIMENSION: u32 = 16_384;
+
+static mut TOKEN_RANDOM_BUF: [u8; 8] = [0; 8];
+
+pub(crate) fn getrandom_u64() -> Option<u64> {
+    let bytes = unsafe {
+        core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(TOKEN_RANDOM_BUF).cast::<u8>(), 8)
+    };
+    let len = match mochi_user_syscall::call3(
+        mochi_user_syscall::SyscallNumber::Getrandom,
+        bytes.as_mut_ptr() as u64,
+        bytes.len() as u64,
+        0,
+    ) {
+        Ok(len) => len,
+        Err(err) => {
+            mochi_user_platform::println!(
+                "compositor.service: getrandom failed errno={}",
+                err.errno().unwrap_or(0)
+            );
+            return None;
+        }
+    };
+    if len == bytes.len() as u64 {
+        Some(u64::from_ne_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]))
+    } else {
+        mochi_user_platform::println!("compositor.service: getrandom short read len={}", len);
+        None
+    }
+}
 
 pub(crate) struct CompositorState {
     pub(crate) clients: [Client; MAX_CLIENTS],

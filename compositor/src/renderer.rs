@@ -6,11 +6,8 @@ use crate::protocol::{
     OP_DISPLAY_PRESENT, OP_DISPLAY_PRESENT_RECT, PIXEL_FORMAT_XRGB8888, errno_status, put_u32,
     read_u32,
 };
-use crate::surface::Surface;
-use crate::{
-    MAX_SHARED_PAGES, MAX_SURFACES, PAGE_SIZE, read_current_pixel, shared_page_count,
-    surface_has_current_pixels,
-};
+use crate::state::{MAX_SHARED_PAGES, MAX_SURFACES, PAGE_SIZE};
+use crate::surface::{Surface, read_current_pixel, shared_page_count, surface_has_current_pixels};
 
 #[derive(Default)]
 pub(crate) struct PresentFrame {

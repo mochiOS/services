@@ -1,7 +1,9 @@
 use mochi_user_platform as platform;
 
 use crate::client::{Client, ClientId, cleanup_client, cleanup_dead_clients, client_id_for_sender};
-use crate::display::{display_claim_present_owner, display_request_info, wait_for_service};
+use crate::display::{
+    display_claim_present_owner, display_request_info, sleep_one_tick, wait_for_service,
+};
 use crate::geometry::Rect;
 use crate::input::{PointerSerial, handle_input_event, subscribe_input_events};
 use crate::protocol::*;
@@ -10,50 +12,8 @@ use crate::state::CompositorState;
 use crate::surface::{Surface, handle_shared_buffer, send_frame_done};
 use crate::window::Window;
 
-pub(crate) const MAX_SURFACES: usize = 16;
-pub(crate) const MAX_WINDOWS: usize = 8;
-pub(crate) const MAX_CLIENTS: usize = 16;
-pub(crate) const PAGE_SIZE: usize = 4096;
-pub(crate) const MAX_SHARED_PAGES: usize = 262_144;
-pub(crate) const MAX_SHARED_BYTES: usize = MAX_SHARED_PAGES * PAGE_SIZE;
-pub(crate) const MAX_SHARED_PIXELS: usize = MAX_SHARED_BYTES / 4;
-pub(crate) const MAX_DIMENSION: u32 = 16_384;
 const IDLE_CLEANUP_YIELDS: u32 = 64;
-static mut TOKEN_RANDOM_BUF: [u8; 8] = [0; 8];
 static mut IPC_BUF: [u8; 4128] = [0; 4128];
-
-pub(crate) fn getrandom_u64() -> Option<u64> {
-    let bytes = unsafe {
-        core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(TOKEN_RANDOM_BUF).cast::<u8>(), 8)
-    };
-    let len = match mochi_user_syscall::call3(
-        mochi_user_syscall::SyscallNumber::Getrandom,
-        bytes.as_mut_ptr() as u64,
-        bytes.len() as u64,
-        0,
-    ) {
-        Ok(len) => len,
-        Err(err) => {
-            platform::println!(
-                "compositor.service: getrandom failed errno={}",
-                err.errno().unwrap_or(0)
-            );
-            return None;
-        }
-    };
-    if len == bytes.len() as u64 {
-        Some(u64::from_ne_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-        ]))
-    } else {
-        platform::println!("compositor.service: getrandom short read len={}", len);
-        None
-    }
-}
-
-pub(crate) fn sleep_one_tick() {
-    let _ = mochi_user_syscall::call1(mochi_user_syscall::SyscallNumber::Sleep, 1);
-}
 
 fn handle_request(
     clients: &mut [Client],

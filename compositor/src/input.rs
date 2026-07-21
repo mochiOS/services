@@ -1,12 +1,12 @@
 use mochi_user_platform as platform;
 
-use crate::MAX_DIMENSION;
 use crate::protocol::{
     EVENT_FOCUS_GAINED, EVENT_FOCUS_LOST, EVENT_KEY, EVENT_POINTER_BUTTON, EVENT_POINTER_ENTER,
     EVENT_POINTER_LEAVE, EVENT_POINTER_MOTION, put_i32, put_u32,
 };
+use crate::state::MAX_DIMENSION;
+use crate::surface::surface_extent;
 use crate::surface::{Surface, SurfaceHandle};
-use crate::surface_extent;
 use crate::window::{Window, WindowId, content_surface_index_for_window, window_index_by_id};
 
 const INPUT_SERVICE_NAME: &str = "input.service";

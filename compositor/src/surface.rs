@@ -2,14 +2,15 @@ use alloc::vec::Vec;
 
 use mochi_user_platform as platform;
 
-use crate::WindowId;
 use crate::client::{Client, ClientId};
 use crate::decoration::sender_has_overlay_compat_capability;
 use crate::geometry::{Point, PopupPlacement, Rect, merge_damage, validate_damage_rect};
 use crate::input::clear_focus_for_surface;
 use crate::protocol::*;
-use crate::window::{Window, generate_window_token, notify_decorators, window_index_by_id};
-use crate::{MAX_DIMENSION, MAX_SHARED_BYTES, PAGE_SIZE, getrandom_u64};
+use crate::state::{MAX_DIMENSION, MAX_SHARED_BYTES, PAGE_SIZE, getrandom_u64};
+use crate::window::{
+    Window, WindowId, generate_window_token, notify_decorators, window_index_by_id,
+};
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct SurfaceHandle(pub(crate) u64);

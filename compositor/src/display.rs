@@ -4,7 +4,10 @@ use crate::protocol::{
     OP_DISPLAY_CLAIM_PRESENT_OWNER, OP_DISPLAY_GET_INFO, PIXEL_FORMAT_XRGB8888, errno_status,
     put_u32, read_u32,
 };
-use crate::sleep_one_tick;
+
+pub(crate) fn sleep_one_tick() {
+    let _ = mochi_user_syscall::call1(mochi_user_syscall::SyscallNumber::Sleep, 1);
+}
 
 const DISPLAY_SERVICE_NAME: &str = "display.driver";
 

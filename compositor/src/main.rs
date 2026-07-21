@@ -18,17 +18,6 @@ mod window;
 use core::arch::global_asm;
 use mochi_user_platform as platform;
 
-pub(crate) use protocol::errno_status;
-pub(crate) use server::{
-    MAX_CLIENTS, MAX_DIMENSION, MAX_SHARED_BYTES, MAX_SHARED_PAGES, MAX_SHARED_PIXELS,
-    MAX_SURFACES, MAX_WINDOWS, PAGE_SIZE, getrandom_u64, sleep_one_tick,
-};
-pub(crate) use surface::{
-    read_current_pixel, shared_page_count, surface_extent, surface_has_current_pixels,
-    surface_index_by_handle,
-};
-pub(crate) use window::WindowId;
-
 global_asm!(
     r#"
     .global _start

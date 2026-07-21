@@ -3,7 +3,7 @@ use mochi_user_platform as platform;
 use crate::client::{Client, ClientId};
 use crate::input::PointerSerial;
 use crate::protocol::*;
-use crate::server::MAX_DIMENSION;
+use crate::state::MAX_DIMENSION;
 use crate::surface::{
     Surface, SurfaceHandle, SurfaceRights, SurfaceRole, destroy_surface_tree,
     generate_surface_token, surface_index_for,

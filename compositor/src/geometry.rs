@@ -1,4 +1,5 @@
-use crate::{MAX_DIMENSION, MAX_SHARED_PIXELS, errno_status};
+use crate::protocol::errno_status;
+use crate::state::{MAX_DIMENSION, MAX_SHARED_PIXELS};
 
 #[allow(dead_code)]
 #[derive(Clone, Copy, Default)]
