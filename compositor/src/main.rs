@@ -4,6 +4,7 @@
 extern crate alloc;
 
 mod client;
+mod decoration;
 mod display;
 mod geometry;
 mod input;
