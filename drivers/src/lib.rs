@@ -6,6 +6,7 @@ mod bootstrap;
 mod driver_discovery;
 mod driver_manifest;
 mod driver_matcher;
+mod driver_registry;
 mod driver_spawn;
 mod readiness;
 mod service_launcher;

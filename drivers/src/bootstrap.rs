@@ -1,13 +1,15 @@
 use mochi_user_platform as platform;
 
 use crate::{
-    driver_discovery, driver_manifest, driver_matcher, driver_spawn, readiness, service_launcher,
+    driver_discovery, driver_manifest, driver_matcher, driver_registry, driver_spawn, readiness,
+    service_launcher,
 };
 
 fn maybe_spawn_bundle(
     root: driver_matcher::DriverSearchRoot,
     bundle_root: &str,
     logger_endpoint: u64,
+    started_drivers: &mut driver_registry::StartedDrivers,
 ) {
     let Some(bundle) = driver_manifest::load(bundle_root) else {
         return;
@@ -50,7 +52,17 @@ fn maybe_spawn_bundle(
         manifest.package_id,
         root.path()
     );
-    driver_spawn::spawn(entry_path, None, logger_endpoint);
+    if started_drivers.contains(&manifest.package_id) {
+        platform::println!(
+            "drivers.service: skipped duplicate bundle={} package={}",
+            bundle_root,
+            manifest.package_id
+        );
+        return;
+    }
+    if driver_spawn::spawn(entry_path, None, logger_endpoint) {
+        started_drivers.record(manifest.package_id.clone());
+    }
 }
 
 pub(crate) fn run() -> ! {
@@ -71,9 +83,10 @@ pub(crate) fn run() -> ! {
         );
     }
     service_launcher::launch_compositor_service(logger_endpoint);
+    let mut started_drivers = driver_registry::StartedDrivers::new();
     for &root in driver_discovery::roots() {
         driver_discovery::visit_bundles(root, |bundle_root| {
-            maybe_spawn_bundle(root, bundle_root, logger_endpoint);
+            maybe_spawn_bundle(root, bundle_root, logger_endpoint, &mut started_drivers);
         });
     }
     service_launcher::launch_tty_service(logger_endpoint);

@@ -2,6 +2,10 @@ extern crate alloc;
 
 #[path = "../src/driver_matcher.rs"]
 mod driver_matcher;
+#[path = "../src/driver_registry.rs"]
+mod driver_registry;
+
+use alloc::string::ToString;
 
 use driver_matcher::{DriverSearchRoot, MatchResult};
 
@@ -94,4 +98,19 @@ fn required_match_fields_are_enforced_in_order() {
         ),
         MatchResult::MatchClassMismatch
     );
+}
+
+#[test]
+fn duplicate_package_is_started_only_once() {
+    let mut started = driver_registry::StartedDrivers::new();
+    let mut spawn_count = 0;
+
+    for _ in 0..2 {
+        if !started.contains("org.mochios.ps2.i8042") {
+            spawn_count += 1;
+            started.record("org.mochios.ps2.i8042".to_string());
+        }
+    }
+
+    assert_eq!(spawn_count, 1);
 }

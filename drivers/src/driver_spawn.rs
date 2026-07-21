@@ -32,10 +32,11 @@ fn spawn_bundle(
     )
 }
 
-pub(crate) fn spawn(entry_path: &str, args: Option<&[u8]>, logger_endpoint: u64) {
+pub(crate) fn spawn(entry_path: &str, args: Option<&[u8]>, logger_endpoint: u64) -> bool {
     match spawn_bundle(entry_path, args, logger_endpoint) {
         Ok(pid) => {
             platform::println!("drivers.service: spawned driver pid={}", pid);
+            true
         }
         Err(err) => {
             platform::println!(
@@ -43,6 +44,7 @@ pub(crate) fn spawn(entry_path: &str, args: Option<&[u8]>, logger_endpoint: u64)
                 entry_path,
                 err.errno().unwrap_or(0)
             );
+            false
         }
     }
 }
