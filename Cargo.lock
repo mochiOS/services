@@ -222,6 +222,7 @@ dependencies = [
  "mnu-abi 0.1.0",
  "mochi-user-runtime",
  "mochi-user-syscall",
+ "mochios-capability-protocol",
 ]
 
 [[package]]
@@ -237,6 +238,10 @@ version = "0.1.0"
 dependencies = [
  "mnu-abi 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
+
+[[package]]
+name = "mochios-capability-protocol"
+version = "0.1.0"
 
 [[package]]
 name = "package"
