@@ -371,12 +371,23 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         let _ = platform::logger::init_from_initial_stack(sp);
     }
     platform::println!("display.driver: start");
+    let Some(ready_target) = platform::service_ready::take_bootstrap_target() else {
+        platform::println!("display.driver: missing ready target");
+        platform::process::exit(1);
+    };
     let endpoint = match platform::ipc::create() {
         Ok(endpoint) => endpoint,
-        Err(_) => platform::process::exit(1),
+        Err(_) => {
+            let _ = platform::service_ready::notify(ready_target, 1);
+            platform::process::exit(1);
+        }
     };
     let mut shared_buffer: Option<(u64, u64, u64)> = None;
     let mut present_owner = 0u64;
+    if platform::service_ready::notify(ready_target, 0).is_err() {
+        platform::println!("display.driver: ready notification failed");
+        platform::process::exit(1);
+    }
     loop {
         let buf = unsafe {
             core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(IPC_BUF).cast::<u8>(), 4128)
@@ -387,14 +398,6 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         };
         let sender = msg >> 32;
         let len = (msg & 0xffff_ffff) as usize;
-        if len <= buf.len() && platform::service_ready::is_query(&buf[..len]) {
-            let ready = platform::service_ready::result(0);
-            if platform::ipc::reply(sender, &ready).is_err() {
-                platform::println!("display.driver: ready reply failed");
-                platform::process::exit(1);
-            }
-            continue;
-        }
         if len == 16 {
             if present_owner != 0 && sender != present_owner {
                 continue;

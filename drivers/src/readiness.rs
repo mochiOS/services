@@ -29,18 +29,118 @@ pub(crate) enum ReadyError {
     ProcessWait(u64),
 }
 
-fn decode_reply(msg: u64, reply: &[u8]) -> Result<(), ReadyError> {
-    let len = (msg & 0xffff_ffff) as usize;
-    let Some(message) = reply.get(..len) else {
-        return Err(ReadyError::InvalidMessage);
-    };
-    match platform::service_ready::validate_result(message) {
-        Ok(()) => Ok(()),
-        Err(platform::service_ready::ResultError::InvalidMessage(_)) => {
-            Err(ReadyError::InvalidMessage)
+pub(crate) struct ReadyHandshake {
+    endpoint: u64,
+    input_token: u64,
+    display_token: u64,
+    input_status: Option<i32>,
+    display_status: Option<i32>,
+}
+
+impl ReadyHandshake {
+    pub(crate) fn create() -> Result<Self, ReadyError> {
+        let endpoint = platform::ipc::create()
+            .map_err(|err| ReadyError::Ipc(err.raw().unsigned_abs()))?;
+        let input_token = platform::service_ready::generate_token()
+            .map_err(|err| ReadyError::Ipc(err.raw().unsigned_abs()))?;
+        let mut display_token = platform::service_ready::generate_token()
+            .map_err(|err| ReadyError::Ipc(err.raw().unsigned_abs()))?;
+        if display_token == input_token {
+            display_token ^= 0xa5a5_5a5a_d3c3_3c3c;
+            if display_token == 0 {
+                display_token = 1;
+            }
         }
-        Err(platform::service_ready::ResultError::Failed(status)) => {
-            Err(ReadyError::Failed(status))
+        Ok(Self {
+            endpoint,
+            input_token,
+            display_token,
+            input_status: None,
+            display_status: None,
+        })
+    }
+
+    pub(crate) const fn target(&self, service: ServiceKind) -> platform::service_ready::Target {
+        let token = match service {
+            ServiceKind::Input => self.input_token,
+            ServiceKind::Display => self.display_token,
+        };
+        platform::service_ready::Target {
+            endpoint: self.endpoint,
+            token,
+        }
+    }
+
+    fn status(&self, service: ServiceKind) -> Option<i32> {
+        match service {
+            ServiceKind::Input => self.input_status,
+            ServiceKind::Display => self.display_status,
+        }
+    }
+
+    fn record(&mut self, token: u64, status: i32) -> Result<(), ReadyError> {
+        let slot = if token == self.input_token {
+            &mut self.input_status
+        } else if token == self.display_token {
+            &mut self.display_status
+        } else {
+            return Err(ReadyError::InvalidMessage);
+        };
+        if slot.is_none() {
+            *slot = Some(status);
+        }
+        Ok(())
+    }
+
+    fn receive_one(&mut self) -> Result<bool, ReadyError> {
+        let mut message = [0u8; platform::service_ready::MESSAGE_LEN];
+        let msg = match platform::ipc::try_wait(&mut message) {
+            Ok(msg) => msg,
+            Err(err) if err.raw() == mochi_user_syscall::EAGAIN as i64 => return Ok(false),
+            Err(err) => return Err(ReadyError::Ipc(err.raw().unsigned_abs())),
+        };
+        let len = (msg & 0xffff_ffff) as usize;
+        let Some(message) = message.get(..len) else {
+            return Err(ReadyError::InvalidMessage);
+        };
+        let (token, status) = platform::service_ready::decode_notification(message)
+            .map_err(|_| ReadyError::InvalidMessage)?;
+        self.record(token, status)?;
+        Ok(true)
+    }
+
+    pub(crate) fn wait_for_service_ready(
+        &mut self,
+        service: ServiceKind,
+        process_id: u64,
+    ) -> Result<(), ReadyError> {
+        let started = platform::time::ticks()
+            .map_err(|err| ReadyError::Clock(err.raw().unsigned_abs()))?;
+        loop {
+            if let Some(status) = self.status(service) {
+                return if status == 0 {
+                    Ok(())
+                } else {
+                    Err(ReadyError::Failed(status))
+                };
+            }
+            let _ = self.receive_one()?;
+            if let Some(status) = self.status(service) {
+                return if status == 0 {
+                    Ok(())
+                } else {
+                    Err(ReadyError::Failed(status))
+                };
+            }
+            if let Some(status) = process_exit_status(process_id)? {
+                return Err(ReadyError::ProcessExited(status));
+            }
+            let now = platform::time::ticks()
+                .map_err(|err| ReadyError::Clock(err.raw().unsigned_abs()))?;
+            if now.saturating_sub(started) >= SERVICE_READY_TIMEOUT_TICKS {
+                return Err(ReadyError::TimedOut);
+            }
+            platform::thread::yield_now();
         }
     }
 }
@@ -55,38 +155,6 @@ fn process_exit_status(process_id: u64) -> Result<Option<i32>, ReadyError> {
         Ok(0) => Ok(None),
         Ok(_) => Ok(Some(status)),
         Err(err) => Err(ReadyError::ProcessWait(err.raw().unsigned_abs())),
-    }
-}
-
-pub(crate) fn wait_for_service_ready(
-    _service: ServiceKind,
-    process_id: u64,
-) -> Result<(), ReadyError> {
-    let started = platform::time::ticks()
-        .map_err(|err| ReadyError::Clock(err.raw().unsigned_abs()))?;
-    let request = platform::service_ready::query();
-    let mut reply = [0u8; platform::service_ready::MESSAGE_LEN];
-    match platform::ipc::call(process_id, &request, &mut reply) {
-        Ok(msg) => return decode_reply(msg, &reply),
-        Err(err) if err.raw() == mochi_user_syscall::EAGAIN as i64 => {}
-        Err(err) => return Err(ReadyError::Ipc(err.raw().unsigned_abs())),
-    }
-
-    loop {
-        match platform::ipc::try_wait(&mut reply) {
-            Ok(msg) => return decode_reply(msg, &reply),
-            Err(err) if err.raw() == mochi_user_syscall::EAGAIN as i64 => {}
-            Err(err) => return Err(ReadyError::Ipc(err.raw().unsigned_abs())),
-        }
-        if let Some(status) = process_exit_status(process_id)? {
-            return Err(ReadyError::ProcessExited(status));
-        }
-        let now = platform::time::ticks()
-            .map_err(|err| ReadyError::Clock(err.raw().unsigned_abs()))?;
-        if now.saturating_sub(started) >= SERVICE_READY_TIMEOUT_TICKS {
-            return Err(ReadyError::TimedOut);
-        }
-        platform::thread::yield_now();
     }
 }
 

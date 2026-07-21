@@ -14,10 +14,17 @@ const COMPOSITOR_PACKAGE_MANIFEST_PATH: &str = "/system/packages/compositor/mani
 const TTY_SERVICE_PATH: &str = "/system/services/tty.service";
 const TTY_PACKAGE_MANIFEST_PATH: &str = "/system/packages/tty/manifest.toml";
 
-fn spawn_input_service(logger_endpoint: u64) -> Result<u64, mochi_user_syscall::SysError> {
+fn ready_argument(target: platform::service_ready::Target) -> alloc::string::String {
+    alloc::format!("--service-ready={}:{}", target.endpoint, target.token)
+}
+
+fn spawn_input_service(
+    logger_endpoint: u64,
+    ready_target: platform::service_ready::Target,
+) -> Result<u64, mochi_user_syscall::SysError> {
     let _manifest = platform::package::read_manifest(INPUT_PACKAGE_MANIFEST_PATH)
         .ok_or_else(|| sys_error(mochi_user_syscall::ENOENT))?;
-    let args = vec![logger_endpoint.to_string()];
+    let args = vec![logger_endpoint.to_string(), ready_argument(ready_target)];
     let args_nul = encode_spawn_args(&args);
     let caps_nul = resolve_capabilities(INPUT_SERVICE_PATH)?;
     platform::service::spawn_manifest(
@@ -32,10 +39,14 @@ fn spawn_named_service(
     service_path: &str,
     manifest_path: &str,
     logger_endpoint: u64,
+    ready_target: Option<platform::service_ready::Target>,
 ) -> Result<u64, mochi_user_syscall::SysError> {
     let _manifest = platform::package::read_manifest(manifest_path)
         .ok_or_else(|| sys_error(mochi_user_syscall::ENOENT))?;
-    let args = vec![logger_endpoint.to_string()];
+    let mut args = vec![logger_endpoint.to_string()];
+    if let Some(target) = ready_target {
+        args.push(ready_argument(target));
+    }
     let args_nul = encode_spawn_args(&args);
     let caps_nul = resolve_capabilities(service_path)?;
     platform::service::spawn_manifest(
@@ -46,11 +57,15 @@ fn spawn_named_service(
     )
 }
 
-fn spawn_display_service(logger_endpoint: u64) -> Result<u64, mochi_user_syscall::SysError> {
+fn spawn_display_service(
+    logger_endpoint: u64,
+    ready_target: platform::service_ready::Target,
+) -> Result<u64, mochi_user_syscall::SysError> {
     spawn_named_service(
         DISPLAY_SERVICE_PATH,
         DISPLAY_PACKAGE_MANIFEST_PATH,
         logger_endpoint,
+        Some(ready_target),
     )
 }
 
@@ -59,6 +74,7 @@ fn spawn_compositor_service(logger_endpoint: u64) -> Result<u64, mochi_user_sysc
         COMPOSITOR_SERVICE_PATH,
         COMPOSITOR_PACKAGE_MANIFEST_PATH,
         logger_endpoint,
+        None,
     )
 }
 
@@ -76,8 +92,11 @@ fn spawn_tty_service(logger_endpoint: u64) -> Result<u64, mochi_user_syscall::Sy
     )
 }
 
-pub(crate) fn launch_input_service(logger_endpoint: u64) -> Option<u64> {
-    match spawn_input_service(logger_endpoint) {
+pub(crate) fn launch_input_service(
+    logger_endpoint: u64,
+    ready_target: platform::service_ready::Target,
+) -> Option<u64> {
+    match spawn_input_service(logger_endpoint, ready_target) {
         Ok(pid) => {
             platform::println!("drivers.service: input.service spawned pid={}", pid);
             Some(pid)
@@ -92,8 +111,11 @@ pub(crate) fn launch_input_service(logger_endpoint: u64) -> Option<u64> {
     }
 }
 
-pub(crate) fn launch_display_service(logger_endpoint: u64) -> Option<u64> {
-    match spawn_display_service(logger_endpoint) {
+pub(crate) fn launch_display_service(
+    logger_endpoint: u64,
+    ready_target: platform::service_ready::Target,
+) -> Option<u64> {
+    match spawn_display_service(logger_endpoint, ready_target) {
         Ok(pid) => {
             platform::println!("drivers.service: display.driver spawned pid={}", pid);
             Some(pid)

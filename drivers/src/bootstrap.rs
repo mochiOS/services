@@ -65,9 +65,13 @@ fn maybe_spawn_bundle(
     }
 }
 
-fn wait_for_ready(service: readiness::ServiceKind, process_id: u64) -> bool {
+fn wait_for_ready(
+    handshake: &mut readiness::ReadyHandshake,
+    service: readiness::ServiceKind,
+    process_id: u64,
+) -> bool {
     platform::println!("drivers.service: waiting for {} ready", service.name());
-    match readiness::wait_for_service_ready(service, process_id) {
+    match handshake.wait_for_service_ready(service, process_id) {
         Ok(()) => {
             platform::println!("drivers.service: {} ready", service.name());
             true
@@ -129,16 +133,40 @@ fn wait_for_ready(service: readiness::ServiceKind, process_id: u64) -> bool {
 pub(crate) fn run() -> ! {
     platform::println!("drivers.service: start");
     let logger_endpoint = platform::logger::endpoint().unwrap_or(0);
-    let Some(input_process) = service_launcher::launch_input_service(logger_endpoint) else {
+    let mut handshake = match readiness::ReadyHandshake::create() {
+        Ok(handshake) => handshake,
+        Err(err) => {
+            platform::println!(
+                "drivers.service: ready handshake create failed error={:?}",
+                err
+            );
+            readiness::idle();
+        }
+    };
+    let Some(input_process) = service_launcher::launch_input_service(
+        logger_endpoint,
+        handshake.target(readiness::ServiceKind::Input),
+    ) else {
         readiness::idle();
     };
-    let Some(display_process) = service_launcher::launch_display_service(logger_endpoint) else {
+    let Some(display_process) = service_launcher::launch_display_service(
+        logger_endpoint,
+        handshake.target(readiness::ServiceKind::Display),
+    ) else {
         readiness::idle();
     };
-    if !wait_for_ready(readiness::ServiceKind::Display, display_process) {
+    if !wait_for_ready(
+        &mut handshake,
+        readiness::ServiceKind::Display,
+        display_process,
+    ) {
         readiness::idle();
     }
-    if !wait_for_ready(readiness::ServiceKind::Input, input_process) {
+    if !wait_for_ready(
+        &mut handshake,
+        readiness::ServiceKind::Input,
+        input_process,
+    ) {
         readiness::idle();
     }
     service_launcher::launch_compositor_service(logger_endpoint);

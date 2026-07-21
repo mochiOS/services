@@ -510,9 +510,15 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
     }
     platform::println!("input.service: start");
 
+    let Some(ready_target) = platform::service_ready::take_bootstrap_target() else {
+        platform::println!("input.service: missing ready target");
+        platform::process::exit(1);
+    };
+
     let endpoint = match platform::ipc::create() {
         Ok(endpoint) => endpoint,
         Err(_) => {
+            let _ = platform::service_ready::notify(ready_target, 1);
             platform::println!("input.service: endpoint create failed");
             platform::process::exit(1);
         }
@@ -526,6 +532,10 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
     let mut keyboard = KeyboardState::default();
     let mut mouse = MouseState::default();
     let mut subscribers = [0u64; MAX_SUBSCRIBERS];
+    if platform::service_ready::notify(ready_target, 0).is_err() {
+        platform::println!("input.service: ready notification failed");
+        platform::process::exit(1);
+    }
 
     loop {
         let buf = input_wait_buf();
@@ -536,14 +546,6 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         };
         let sender = msg >> 32;
         let len = (msg & 0xffff_ffff) as usize;
-        if len <= buf.len() && platform::service_ready::is_query(&buf[..len]) {
-            let ready = platform::service_ready::result(0);
-            if platform::ipc::reply(sender, &ready).is_err() {
-                platform::println!("input.service: ready reply failed");
-                platform::process::exit(1);
-            }
-            continue;
-        }
         if len == 0 || len > buf.len() {
             let _ = platform::ipc::reply(sender, &[0]);
             continue;
