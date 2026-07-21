@@ -1,3 +1,8 @@
+use mochi_user_platform as platform;
+
+use crate::surface::{Surface, destroy_surface_tree};
+use crate::window::Window;
+
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct ClientId(pub(crate) u64);
 
@@ -32,4 +37,83 @@ pub(crate) fn client_id_for_sender(
         return id;
     }
     ClientId(0)
+}
+
+pub(crate) fn cleanup_client(
+    clients: &mut [Client],
+    surfaces: &mut [Surface],
+    windows: &mut [Window],
+    client: ClientId,
+    pointer_focus: &mut Option<usize>,
+    keyboard_focus: &mut Option<usize>,
+) {
+    if client == ClientId(0) {
+        return;
+    }
+    while let Some(index) = surfaces
+        .iter()
+        .position(|surface| surface.live && surface.owner == client && !surface.is_decoration)
+    {
+        destroy_surface_tree(surfaces, windows, index, pointer_focus, keyboard_focus);
+    }
+    while let Some(index) = surfaces
+        .iter()
+        .position(|surface| surface.live && surface.owner == client && surface.is_decoration)
+    {
+        destroy_surface_tree(surfaces, windows, index, pointer_focus, keyboard_focus);
+    }
+    for window in windows
+        .iter_mut()
+        .filter(|window| window.live && window.decorator == client)
+    {
+        window.decorator = ClientId(0);
+        window.decorator_endpoint = 0;
+    }
+    if let Some(record) = clients
+        .iter_mut()
+        .find(|record| record.live && record.id == client)
+    {
+        *record = Client::default();
+    }
+}
+
+pub(crate) fn cleanup_dead_clients(
+    clients: &mut [Client],
+    surfaces: &mut [Surface],
+    windows: &mut [Window],
+    pointer_focus: &mut Option<usize>,
+    keyboard_focus: &mut Option<usize>,
+) -> bool {
+    let mut changed = false;
+    for index in 0..clients.len() {
+        let client = clients[index];
+        if !client.live {
+            continue;
+        }
+        let has_live_surface = surfaces
+            .iter()
+            .any(|surface| surface.live && surface.owner == client.id);
+        let has_live_decoration_endpoint = client.decoration_endpoint != 0
+            && platform::ipc::endpoint_alive(client.decoration_endpoint);
+        let has_live_window_decorator_endpoint = windows.iter().any(|window| {
+            window.live
+                && window.decorator == client.id
+                && window.decorator_endpoint != 0
+                && platform::ipc::endpoint_alive(window.decorator_endpoint)
+        });
+
+        if !has_live_surface && !has_live_decoration_endpoint && !has_live_window_decorator_endpoint
+        {
+            cleanup_client(
+                clients,
+                surfaces,
+                windows,
+                client.id,
+                pointer_focus,
+                keyboard_focus,
+            );
+            changed = true;
+        }
+    }
+    changed
 }

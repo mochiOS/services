@@ -3,10 +3,11 @@ use mochi_user_platform as platform;
 use crate::client::{Client, ClientId};
 use crate::input::PointerSerial;
 use crate::protocol::*;
-use crate::server::{
-    MAX_DIMENSION, destroy_surface_tree, generate_surface_token, surface_index_for,
+use crate::server::MAX_DIMENSION;
+use crate::surface::{
+    Surface, SurfaceHandle, SurfaceRights, SurfaceRole, destroy_surface_tree,
+    generate_surface_token, surface_index_for,
 };
-use crate::surface::{Surface, SurfaceHandle, SurfaceRights, SurfaceRole};
 use crate::window::{
     Insets, Window, content_surface_index_for_window, decoration_surface_index_for_window,
     reposition_window_surfaces, send_window_metadata, window_index_by_token,
