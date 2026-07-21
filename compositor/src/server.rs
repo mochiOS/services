@@ -1,4 +1,3 @@
-use alloc::vec;
 use alloc::vec::Vec;
 use mochi_user_platform as platform;
 
@@ -9,7 +8,8 @@ use crate::input::{
     PointerSerial, clear_focus_for_surface, handle_input_event, subscribe_input_events,
 };
 use crate::protocol::*;
-use crate::renderer::{PresentFrame, composite_and_present};
+use crate::renderer::composite_and_present;
+use crate::state::CompositorState;
 use crate::surface::{Surface, SurfaceBuffer, SurfaceHandle, SurfaceRights, SurfaceRole};
 use crate::window::{
     Insets, Window, WindowId, content_surface_index_for_window,
@@ -18,8 +18,8 @@ use crate::window::{
 };
 
 pub(crate) const MAX_SURFACES: usize = 16;
-const MAX_WINDOWS: usize = 8;
-const MAX_CLIENTS: usize = 16;
+pub(crate) const MAX_WINDOWS: usize = 8;
+pub(crate) const MAX_CLIENTS: usize = 16;
 pub(crate) const PAGE_SIZE: usize = 4096;
 pub(crate) const MAX_SHARED_PAGES: usize = 262_144;
 const MAX_SHARED_BYTES: usize = MAX_SHARED_PAGES * PAGE_SIZE;
@@ -1348,7 +1348,7 @@ pub(crate) fn run() -> ! {
         platform::println!("compositor.service: display.driver not found");
         platform::process::exit(1);
     };
-    let mut input_subscribed = subscribe_input_events(endpoint);
+    let input_subscribed = subscribe_input_events(endpoint);
     let claim_status = display_claim_present_owner(display_tid);
     if claim_status != 0 {
         platform::println!(
@@ -1359,30 +1359,22 @@ pub(crate) fn run() -> ! {
     let (display_width, display_height, display_stride, display_format) =
         display_request_info(display_tid);
 
-    let mut clients = [Client::default(); MAX_CLIENTS];
-    let mut next_client_id = 0u64;
-    let mut surfaces: Vec<Surface> = vec![Surface::empty(); MAX_SURFACES];
-    let mut windows = [Window::empty(); MAX_WINDOWS];
-    let mut next_z = 0u32;
-    let mut next_window_index = 0u32;
-    let mut next_window_id = 0u64;
-    let mut next_pointer_serial = 0u64;
-    let mut pointer_serials = [PointerSerial::default(); 32];
-    let mut pointer_x = (display_width / 2).min(display_width.saturating_sub(1)) as i32;
-    let mut pointer_y = (display_height / 2).min(display_height.saturating_sub(1)) as i32;
-    let mut pointer_focus = None;
-    let mut keyboard_focus = None;
-    let mut idle_cleanup_ticks = 0u32;
-    let mut input_subscribe_retry_ticks = 0u32;
-    let mut present_frame = PresentFrame::default();
-    let _ = composite_and_present(
-        &surfaces,
-        &mut present_frame,
+    let mut state = CompositorState::new(
         display_tid,
         display_width,
         display_height,
         display_stride,
         display_format,
+        input_subscribed,
+    );
+    let _ = composite_and_present(
+        &state.surfaces,
+        &mut state.present_frame,
+        state.display_tid,
+        state.display_width,
+        state.display_height,
+        state.display_stride,
+        state.display_format,
         None,
     );
     loop {
@@ -1391,33 +1383,36 @@ pub(crate) fn run() -> ! {
         };
         let msg = match platform::ipc::try_wait(buf) {
             Ok(msg) => {
-                idle_cleanup_ticks = 0;
+                state.idle_cleanup_ticks = 0;
                 msg
             }
             Err(_) => {
-                idle_cleanup_ticks = idle_cleanup_ticks.wrapping_add(1);
-                input_subscribe_retry_ticks = input_subscribe_retry_ticks.wrapping_add(1);
-                if !input_subscribed && input_subscribe_retry_ticks >= IDLE_CLEANUP_YIELDS {
-                    input_subscribe_retry_ticks = 0;
-                    input_subscribed = subscribe_input_events(endpoint);
+                state.idle_cleanup_ticks = state.idle_cleanup_ticks.wrapping_add(1);
+                state.input_subscribe_retry_ticks =
+                    state.input_subscribe_retry_ticks.wrapping_add(1);
+                if !state.input_subscribed
+                    && state.input_subscribe_retry_ticks >= IDLE_CLEANUP_YIELDS
+                {
+                    state.input_subscribe_retry_ticks = 0;
+                    state.input_subscribed = subscribe_input_events(endpoint);
                 }
-                if idle_cleanup_ticks >= IDLE_CLEANUP_YIELDS {
-                    idle_cleanup_ticks = 0;
+                if state.idle_cleanup_ticks >= IDLE_CLEANUP_YIELDS {
+                    state.idle_cleanup_ticks = 0;
                     if cleanup_dead_clients(
-                        &mut clients,
-                        &mut surfaces,
-                        &mut windows,
-                        &mut pointer_focus,
-                        &mut keyboard_focus,
+                        &mut state.clients,
+                        &mut state.surfaces,
+                        &mut state.windows,
+                        &mut state.pointer_focus,
+                        &mut state.keyboard_focus,
                     ) {
                         let _ = composite_and_present(
-                            &surfaces,
-                            &mut present_frame,
-                            display_tid,
-                            display_width,
-                            display_height,
-                            display_stride,
-                            display_format,
+                            &state.surfaces,
+                            &mut state.present_frame,
+                            state.display_tid,
+                            state.display_width,
+                            state.display_height,
+                            state.display_stride,
+                            state.display_format,
                             None,
                         );
                     }
@@ -1429,7 +1424,8 @@ pub(crate) fn run() -> ! {
         let sender = msg >> 32;
         let len = (msg & 0xffff_ffff) as usize;
         if len == 16 {
-            let client = client_id_for_sender(&mut clients, sender, &mut next_client_id);
+            let client =
+                client_id_for_sender(&mut state.clients, sender, &mut state.next_client_id);
             if client == ClientId(0) {
                 continue;
             }
@@ -1439,7 +1435,7 @@ pub(crate) fn run() -> ! {
             let total = u64::from_le_bytes([
                 buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
             ]);
-            if handle_shared_buffer(&mut surfaces, client, mapped_addr, total) {
+            if handle_shared_buffer(&mut state.surfaces, client, mapped_addr, total) {
                 continue;
             }
         }
@@ -1448,27 +1444,27 @@ pub(crate) fn run() -> ! {
                 core::ptr::read_unaligned(buf.as_ptr().cast::<platform::input::InputEvent>())
             };
             let needs_present = handle_input_event(
-                &surfaces,
-                &windows,
-                &mut next_pointer_serial,
-                &mut pointer_serials,
-                &mut pointer_x,
-                &mut pointer_y,
-                display_width,
-                display_height,
-                &mut pointer_focus,
-                &mut keyboard_focus,
+                &state.surfaces,
+                &state.windows,
+                &mut state.next_pointer_serial,
+                &mut state.pointer_serials,
+                &mut state.pointer_x,
+                &mut state.pointer_y,
+                state.display_width,
+                state.display_height,
+                &mut state.pointer_focus,
+                &mut state.keyboard_focus,
                 &event,
             );
             if needs_present {
                 let _ = composite_and_present(
-                    &surfaces,
-                    &mut present_frame,
-                    display_tid,
-                    display_width,
-                    display_height,
-                    display_stride,
-                    display_format,
+                    &state.surfaces,
+                    &mut state.present_frame,
+                    state.display_tid,
+                    state.display_width,
+                    state.display_height,
+                    state.display_stride,
+                    state.display_format,
                     None,
                 );
             }
@@ -1480,7 +1476,7 @@ pub(crate) fn run() -> ! {
             let _ = platform::ipc::reply(sender, &reply);
             continue;
         }
-        let client = client_id_for_sender(&mut clients, sender, &mut next_client_id);
+        let client = client_id_for_sender(&mut state.clients, sender, &mut state.next_client_id);
         if client == ClientId(0) {
             let mut reply = [0u8; 16];
             put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ENOSPC));
@@ -1490,50 +1486,50 @@ pub(crate) fn run() -> ! {
         let mut needs_present = false;
         let mut present_damage = None;
         let reply = handle_request(
-            &mut clients,
-            &mut surfaces,
-            &mut windows,
-            &mut next_z,
-            &mut next_window_index,
-            &mut next_window_id,
-            &mut next_pointer_serial,
-            &mut pointer_serials,
-            &mut pointer_focus,
-            &mut keyboard_focus,
+            &mut state.clients,
+            &mut state.surfaces,
+            &mut state.windows,
+            &mut state.next_z,
+            &mut state.next_window_index,
+            &mut state.next_window_id,
+            &mut state.next_pointer_serial,
+            &mut state.pointer_serials,
+            &mut state.pointer_focus,
+            &mut state.keyboard_focus,
             client,
             sender,
             &buf[..len],
             &mut needs_present,
             &mut present_damage,
-            display_tid,
-            display_width,
-            display_height,
-            display_stride,
-            display_format,
+            state.display_tid,
+            state.display_width,
+            state.display_height,
+            state.display_stride,
+            state.display_format,
         );
         if platform::ipc::reply(sender, &reply).is_err() {
             cleanup_client(
-                &mut clients,
-                &mut surfaces,
-                &mut windows,
+                &mut state.clients,
+                &mut state.surfaces,
+                &mut state.windows,
                 client,
-                &mut pointer_focus,
-                &mut keyboard_focus,
+                &mut state.pointer_focus,
+                &mut state.keyboard_focus,
             );
         } else {
             if needs_present {
                 let status = composite_and_present(
-                    &surfaces,
-                    &mut present_frame,
-                    display_tid,
-                    display_width,
-                    display_height,
-                    display_stride,
-                    display_format,
+                    &state.surfaces,
+                    &mut state.present_frame,
+                    state.display_tid,
+                    state.display_width,
+                    state.display_height,
+                    state.display_stride,
+                    state.display_format,
                     present_damage,
                 );
                 if status == 0 {
-                    for surface in surfaces.iter().filter(|surface| surface.live) {
+                    for surface in state.surfaces.iter().filter(|surface| surface.live) {
                         send_frame_done(surface);
                     }
                 } else {

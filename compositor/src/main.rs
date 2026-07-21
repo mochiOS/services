@@ -10,6 +10,7 @@ mod input;
 mod protocol;
 mod renderer;
 mod server;
+mod state;
 mod surface;
 mod window;
 
@@ -18,9 +19,9 @@ use mochi_user_platform as platform;
 
 pub(crate) use protocol::errno_status;
 pub(crate) use server::{
-    MAX_DIMENSION, MAX_SHARED_PAGES, MAX_SHARED_PIXELS, MAX_SURFACES, PAGE_SIZE, getrandom_u64,
-    read_current_pixel, shared_page_count, sleep_one_tick, surface_extent,
-    surface_has_current_pixels, surface_index_by_handle,
+    MAX_CLIENTS, MAX_DIMENSION, MAX_SHARED_PAGES, MAX_SHARED_PIXELS, MAX_SURFACES, MAX_WINDOWS,
+    PAGE_SIZE, getrandom_u64, read_current_pixel, shared_page_count, sleep_one_tick,
+    surface_extent, surface_has_current_pixels, surface_index_by_handle,
 };
 pub(crate) use window::WindowId;
 
