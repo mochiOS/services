@@ -5,42 +5,12 @@ extern crate alloc;
 mod driver_discovery;
 mod driver_manifest;
 mod driver_matcher;
+mod driver_spawn;
 mod readiness;
 mod service_launcher;
 mod spawn_support;
 
-use alloc::string::ToString;
-
 use mochi_user_platform as platform;
-
-use spawn_support::sys_error;
-
-fn spawn_bundle(
-    entry_path: &str,
-    args: Option<&[u8]>,
-    logger_endpoint: u64,
-) -> Result<u64, mochi_user_syscall::SysError> {
-    let caps_nul = spawn_support::resolve_capabilities(entry_path)?;
-    let mut spawn_args = alloc::vec::Vec::new();
-    if let Some(args) = args {
-        let text = core::str::from_utf8(args).map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
-        for part in text.split('\0') {
-            if !part.is_empty() {
-                spawn_args.push(part.to_string());
-            }
-        }
-    }
-    if logger_endpoint != 0 {
-        spawn_args.push(logger_endpoint.to_string());
-    }
-    let args_nul = spawn_support::encode_spawn_args(&spawn_args);
-    platform::service::spawn_manifest(
-        entry_path,
-        platform::service::ROLE_DRIVER,
-        Some(args_nul.as_slice()),
-        Some(caps_nul.as_slice()),
-    )
-}
 
 fn maybe_spawn_bundle(bundle_root: &str, logger_endpoint: u64) {
     let Some(bundle) = driver_manifest::load(bundle_root) else {
@@ -53,18 +23,7 @@ fn maybe_spawn_bundle(bundle_root: &str, logger_endpoint: u64) {
     };
 
     let _ = driver_matcher::matches(manifest, binary);
-    match spawn_bundle(entry_path, None, logger_endpoint) {
-        Ok(pid) => {
-            platform::println!("drivers.service: spawned driver pid={}", pid);
-        }
-        Err(err) => {
-            platform::println!(
-                "drivers.service: spawn failed {} errno={}",
-                entry_path,
-                err.errno().unwrap_or(0)
-            );
-        }
-    }
+    driver_spawn::spawn(entry_path, None, logger_endpoint);
 }
 
 pub fn run(sp: *const usize) -> ! {
