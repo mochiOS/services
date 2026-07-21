@@ -6,10 +6,8 @@ use mochi_user_platform as platform;
 use crate::spawn_support::{encode_spawn_args, resolve_capabilities, sys_error};
 
 const INPUT_SERVICE_PATH: &str = "/system/services/input.service";
-pub(crate) const INPUT_SERVICE_NAME: &str = "input.service";
 const INPUT_PACKAGE_MANIFEST_PATH: &str = "/system/packages/input/manifest.toml";
 const DISPLAY_SERVICE_PATH: &str = "/system/services/display.driver";
-pub(crate) const DISPLAY_SERVICE_NAME: &str = "display.driver";
 const DISPLAY_PACKAGE_MANIFEST_PATH: &str = "/system/packages/display/manifest.toml";
 const COMPOSITOR_SERVICE_PATH: &str = "/system/services/compositor.service";
 const COMPOSITOR_PACKAGE_MANIFEST_PATH: &str = "/system/packages/compositor/manifest.toml";
@@ -78,23 +76,35 @@ fn spawn_tty_service(logger_endpoint: u64) -> Result<u64, mochi_user_syscall::Sy
     )
 }
 
-pub(crate) fn launch_input_service(logger_endpoint: u64) {
+pub(crate) fn launch_input_service(logger_endpoint: u64) -> Option<u64> {
     match spawn_input_service(logger_endpoint) {
-        Ok(pid) => platform::println!("drivers.service: input.service spawned pid={}", pid),
-        Err(err) => platform::println!(
-            "drivers.service: input.service spawn failed errno={}",
-            err.errno().unwrap_or(0)
-        ),
+        Ok(pid) => {
+            platform::println!("drivers.service: input.service spawned pid={}", pid);
+            Some(pid)
+        }
+        Err(err) => {
+            platform::println!(
+                "drivers.service: input.service spawn failed errno={}",
+                err.errno().unwrap_or(0)
+            );
+            None
+        }
     }
 }
 
-pub(crate) fn launch_display_service(logger_endpoint: u64) {
+pub(crate) fn launch_display_service(logger_endpoint: u64) -> Option<u64> {
     match spawn_display_service(logger_endpoint) {
-        Ok(pid) => platform::println!("drivers.service: display.driver spawned pid={}", pid),
-        Err(err) => platform::println!(
-            "drivers.service: display.driver spawn failed errno={}",
-            err.errno().unwrap_or(0)
-        ),
+        Ok(pid) => {
+            platform::println!("drivers.service: display.driver spawned pid={}", pid);
+            Some(pid)
+        }
+        Err(err) => {
+            platform::println!(
+                "drivers.service: display.driver spawn failed errno={}",
+                err.errno().unwrap_or(0)
+            );
+            None
+        }
     }
 }
 

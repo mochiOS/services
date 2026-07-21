@@ -65,22 +65,81 @@ fn maybe_spawn_bundle(
     }
 }
 
+fn wait_for_ready(service: readiness::ServiceKind, process_id: u64) -> bool {
+    platform::println!("drivers.service: waiting for {} ready", service.name());
+    match readiness::wait_for_service_ready(service, process_id) {
+        Ok(()) => {
+            platform::println!("drivers.service: {} ready", service.name());
+            true
+        }
+        Err(readiness::ReadyError::InvalidMessage) => {
+            platform::println!(
+                "drivers.service: invalid ready message from {}",
+                service.name()
+            );
+            false
+        }
+        Err(readiness::ReadyError::Failed(status)) => {
+            platform::println!(
+                "drivers.service: {} ready failed status={}",
+                service.name(),
+                status
+            );
+            false
+        }
+        Err(readiness::ReadyError::TimedOut) => {
+            platform::println!("drivers.service: {} ready timeout", service.name());
+            false
+        }
+        Err(readiness::ReadyError::ProcessExited(status)) => {
+            platform::println!(
+                "drivers.service: {} exited before ready status={}",
+                service.name(),
+                status
+            );
+            false
+        }
+        Err(readiness::ReadyError::Ipc(errno)) => {
+            platform::println!(
+                "drivers.service: {} ready IPC failed errno={}",
+                service.name(),
+                errno
+            );
+            false
+        }
+        Err(readiness::ReadyError::Clock(errno)) => {
+            platform::println!(
+                "drivers.service: {} ready clock failed errno={}",
+                service.name(),
+                errno
+            );
+            false
+        }
+        Err(readiness::ReadyError::ProcessWait(errno)) => {
+            platform::println!(
+                "drivers.service: {} ready process wait failed errno={}",
+                service.name(),
+                errno
+            );
+            false
+        }
+    }
+}
+
 pub(crate) fn run() -> ! {
     platform::println!("drivers.service: start");
     let logger_endpoint = platform::logger::endpoint().unwrap_or(0);
-    service_launcher::launch_input_service(logger_endpoint);
-    service_launcher::launch_display_service(logger_endpoint);
-    if !readiness::wait_for_process(service_launcher::DISPLAY_SERVICE_NAME) {
-        platform::println!(
-            "drivers.service: {} not registered before compositor spawn",
-            service_launcher::DISPLAY_SERVICE_NAME
-        );
+    let Some(input_process) = service_launcher::launch_input_service(logger_endpoint) else {
+        readiness::idle();
+    };
+    let Some(display_process) = service_launcher::launch_display_service(logger_endpoint) else {
+        readiness::idle();
+    };
+    if !wait_for_ready(readiness::ServiceKind::Display, display_process) {
+        readiness::idle();
     }
-    if !readiness::wait_for_process(service_launcher::INPUT_SERVICE_NAME) {
-        platform::println!(
-            "drivers.service: {} not registered before compositor spawn",
-            service_launcher::INPUT_SERVICE_NAME
-        );
+    if !wait_for_ready(readiness::ServiceKind::Input, input_process) {
+        readiness::idle();
     }
     service_launcher::launch_compositor_service(logger_endpoint);
     let mut started_drivers = driver_registry::StartedDrivers::new();

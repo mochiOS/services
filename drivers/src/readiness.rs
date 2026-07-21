@@ -1,6 +1,5 @@
 use mochi_user_platform as platform;
 
-const SERVICE_READY_YIELDS: usize = 64;
 const SERVICE_READY_TIMEOUT_TICKS: u64 = 5_000;
 const WAIT_NO_HANG: u64 = 1;
 
@@ -25,9 +24,9 @@ pub(crate) enum ReadyError {
     Failed(i32),
     TimedOut,
     ProcessExited(i32),
-    Ipc(i64),
-    Clock(i64),
-    ProcessWait(i64),
+    Ipc(u64),
+    Clock(u64),
+    ProcessWait(u64),
 }
 
 fn decode_reply(msg: u64, reply: &[u8]) -> Result<(), ReadyError> {
@@ -52,7 +51,7 @@ fn process_exit_status(process_id: u64) -> Result<Option<i32>, ReadyError> {
     ) {
         Ok(0) => Ok(None),
         Ok(_) => Ok(Some(status)),
-        Err(err) => Err(ReadyError::ProcessWait(err.raw())),
+        Err(err) => Err(ReadyError::ProcessWait(err.raw().unsigned_abs())),
     }
 }
 
@@ -60,42 +59,32 @@ pub(crate) fn wait_for_service_ready(
     _service: ServiceKind,
     process_id: u64,
 ) -> Result<(), ReadyError> {
-    let started = platform::time::ticks().map_err(|err| ReadyError::Clock(err.raw()))?;
+    let started = platform::time::ticks()
+        .map_err(|err| ReadyError::Clock(err.raw().unsigned_abs()))?;
     let request = platform::service_ready::query();
     let mut reply = [0u8; platform::service_ready::MESSAGE_LEN];
     match platform::ipc::call(process_id, &request, &mut reply) {
         Ok(msg) => return decode_reply(msg, &reply),
         Err(err) if err.raw() == mochi_user_syscall::EAGAIN as i64 => {}
-        Err(err) => return Err(ReadyError::Ipc(err.raw())),
+        Err(err) => return Err(ReadyError::Ipc(err.raw().unsigned_abs())),
     }
 
     loop {
         match platform::ipc::try_wait(&mut reply) {
             Ok(msg) => return decode_reply(msg, &reply),
             Err(err) if err.raw() == mochi_user_syscall::EAGAIN as i64 => {}
-            Err(err) => return Err(ReadyError::Ipc(err.raw())),
+            Err(err) => return Err(ReadyError::Ipc(err.raw().unsigned_abs())),
         }
         if let Some(status) = process_exit_status(process_id)? {
             return Err(ReadyError::ProcessExited(status));
         }
-        let now = platform::time::ticks().map_err(|err| ReadyError::Clock(err.raw()))?;
+        let now = platform::time::ticks()
+            .map_err(|err| ReadyError::Clock(err.raw().unsigned_abs()))?;
         if now.saturating_sub(started) >= SERVICE_READY_TIMEOUT_TICKS {
             return Err(ReadyError::TimedOut);
         }
         platform::thread::yield_now();
     }
-}
-
-pub(crate) fn wait_for_process(name: &str) -> bool {
-    for _ in 0..SERVICE_READY_YIELDS {
-        if let Ok(tid) = platform::process::find_by_name(name)
-            && tid != 0
-        {
-            return true;
-        }
-        platform::thread::yield_now();
-    }
-    false
 }
 
 pub(crate) fn idle() -> ! {
