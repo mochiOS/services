@@ -169,6 +169,7 @@ pub(crate) fn run() -> ! {
     ) {
         readiness::idle();
     }
+    drop(handshake);
     service_launcher::launch_compositor_service(logger_endpoint);
     let mut started_drivers = driver_registry::StartedDrivers::new();
     for &root in driver_discovery::roots() {
