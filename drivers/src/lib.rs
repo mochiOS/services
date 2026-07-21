@@ -4,6 +4,7 @@ extern crate alloc;
 
 mod driver_discovery;
 mod driver_manifest;
+mod driver_matcher;
 
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -21,7 +22,6 @@ const COMPOSITOR_SERVICE_PATH: &str = "/system/services/compositor.service";
 const COMPOSITOR_PACKAGE_MANIFEST_PATH: &str = "/system/packages/compositor/manifest.toml";
 const TTY_SERVICE_PATH: &str = "/system/services/tty.service";
 const TTY_PACKAGE_MANIFEST_PATH: &str = "/system/packages/tty/manifest.toml";
-const I8042_DRIVER_ID: &str = "org.mochios.ps2.i8042";
 const CAPABILITY_SERVICE_NAME: &str = "capability.service";
 const RESOLVE_CAPS_OPCODE: u32 = 0x4341_5053;
 const SERVICE_READY_YIELDS: usize = 64;
@@ -197,17 +197,7 @@ fn maybe_spawn_bundle(bundle_root: &str, logger_endpoint: u64) {
         return;
     };
 
-    platform::println!(
-        "drivers.service: bundle {} {} api={} class={} match={}/{}",
-        manifest.package_id,
-        manifest.package_name,
-        binary.api_version.unwrap_or(0),
-        binary.driver_class.as_deref().unwrap_or(""),
-        binary.match_bus.as_deref().unwrap_or(""),
-        binary.match_class.as_deref().unwrap_or("")
-    );
-
-    let _ = manifest.package_id == I8042_DRIVER_ID;
+    let _ = driver_matcher::matches(manifest, binary);
     match spawn_bundle(entry_path, None, logger_endpoint) {
         Ok(pid) => {
             platform::println!("drivers.service: spawned driver pid={}", pid);
