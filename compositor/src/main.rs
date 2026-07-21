@@ -4,6 +4,7 @@
 extern crate alloc;
 
 mod geometry;
+mod protocol;
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -14,6 +15,7 @@ use geometry::{
     Point, PopupPlacement, Rect, choose_frame_size, clip_present_rect, merge_damage,
     validate_damage_rect,
 };
+use protocol::*;
 
 global_asm!(
     r#"
@@ -31,41 +33,6 @@ _start:
 
 const DISPLAY_SERVICE_NAME: &str = "display.driver";
 const INPUT_SERVICE_NAME: &str = "input.service";
-const OP_CREATE_SURFACE: u32 = 1;
-const OP_ATTACH_BUFFER: u32 = 2;
-const OP_DAMAGE: u32 = 3;
-const OP_COMMIT: u32 = 4;
-const OP_SET_POSITION: u32 = 5;
-const OP_DESTROY_SURFACE: u32 = 6;
-const OP_DECOR_SUBSCRIBE: u32 = 100;
-const OP_DECOR_CREATE_SURFACE: u32 = 101;
-const OP_DECOR_ATTACH: u32 = 102;
-const OP_DECOR_DETACH: u32 = 103;
-const OP_DECOR_UPDATE_INSETS: u32 = 104;
-const OP_DECOR_BEGIN_MOVE: u32 = 105;
-const OP_DECOR_BEGIN_RESIZE: u32 = 106;
-const OP_DECOR_MINIMIZE: u32 = 107;
-const OP_DECOR_TOGGLE_MAXIMIZE: u32 = 108;
-const OP_DECOR_CLOSE_REQUEST: u32 = 109;
-const OP_DISPLAY_GET_INFO: u32 = 1;
-const OP_DISPLAY_PRESENT: u32 = 2;
-const OP_DISPLAY_CLAIM_PRESENT_OWNER: u32 = 3;
-const OP_DISPLAY_PRESENT_RECT: u32 = 4;
-const DECOR_EVENT_WINDOW: u32 = 0x5749_4e44;
-const EVENT_POINTER_ENTER: u32 = 2;
-const EVENT_POINTER_LEAVE: u32 = 3;
-const EVENT_POINTER_MOTION: u32 = 4;
-const EVENT_POINTER_BUTTON: u32 = 5;
-const EVENT_KEY: u32 = 6;
-const EVENT_FOCUS_GAINED: u32 = 8;
-const EVENT_FOCUS_LOST: u32 = 9;
-const EVENT_FRAME_DONE: u32 = 10;
-const ROLE_TOPLEVEL: u32 = 1;
-const ROLE_POPUP: u32 = 2;
-const ROLE_BACKGROUND: u32 = 3;
-const ROLE_PANEL: u32 = 4;
-const ROLE_SECURE_OVERLAY: u32 = 5;
-const PIXEL_FORMAT_XRGB8888: u32 = 1;
 const MAX_SURFACES: usize = 16;
 const MAX_WINDOWS: usize = 8;
 const MAX_CLIENTS: usize = 16;
@@ -77,9 +44,6 @@ const MAX_DIMENSION: u32 = 16_384;
 const IDLE_CLEANUP_YIELDS: u32 = 64;
 const DECORATE_CAPABILITY: &str = "window.decorate";
 const DECORATE_COMPAT_CAPABILITY: &str = "window.overlay";
-const WINDOW_STATE_NORMAL: u32 = 0;
-const WINDOW_STATE_MINIMIZED: u32 = 1;
-const WINDOW_STATE_MAXIMIZED: u32 = 2;
 const DECOR_TITLE_BAR_HEIGHT: u32 = 28;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -370,16 +334,6 @@ impl Surface {
     }
 }
 
-fn read_u32(buf: &[u8], offset: usize) -> Option<u32> {
-    let bytes = buf.get(offset..offset + 4)?;
-    Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-}
-
-fn read_pixel(buf: &[u8], offset: usize) -> Option<u32> {
-    let bytes = buf.get(offset..offset.checked_add(4)?)?;
-    Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-}
-
 static mut DISPLAY_REQ_BUF: [u8; 20] = [0; 20];
 static mut DISPLAY_REP_BUF: [u8; 32] = [0; 32];
 static mut DISPLAY_PRESENT_REQ: [u8; 36] = [0; 36];
@@ -387,13 +341,6 @@ static mut INPUT_SUBSCRIBE_REQ: [u8; 16] = [0; 16];
 static mut INPUT_SUBSCRIBE_REP: [u8; 8] = [0; 8];
 static mut TOKEN_RANDOM_BUF: [u8; 8] = [0; 8];
 static mut IPC_BUF: [u8; 4128] = [0; 4128];
-
-fn read_u64(buf: &[u8], offset: usize) -> Option<u64> {
-    let bytes = buf.get(offset..offset + 8)?;
-    Some(u64::from_le_bytes([
-        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-    ]))
-}
 
 fn getrandom_u64() -> Option<u64> {
     let bytes = unsafe {
@@ -426,27 +373,6 @@ fn getrandom_u64() -> Option<u64> {
 
 fn sleep_one_tick() {
     let _ = mochi_user_syscall::call1(mochi_user_syscall::SyscallNumber::Sleep, 1);
-}
-
-fn put_u32(out: &mut [u8], offset: usize, value: u32) {
-    out[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-}
-
-fn put_u64(out: &mut [u8], offset: usize, value: u64) {
-    out[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
-}
-
-fn errno_status(errno: u64) -> u32 {
-    let signed = errno as i64;
-    if signed < 0 {
-        signed.wrapping_neg() as u32
-    } else {
-        errno as u32
-    }
-}
-
-fn put_i32(out: &mut [u8], offset: usize, value: i32) {
-    out[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
 
 fn sender_has_decorate_capability(sender: u64) -> bool {
