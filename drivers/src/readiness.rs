@@ -92,30 +92,12 @@ impl ReadyHandshake {
         Ok(())
     }
 
-    fn receive_one(&mut self) -> Result<bool, ReadyError> {
-        let mut message = [0u8; platform::service_ready::MESSAGE_LEN];
-        let msg = match platform::ipc::try_wait(&mut message) {
-            Ok(msg) => msg,
-            Err(err) if err.raw() == mochi_user_syscall::EAGAIN as i64 => return Ok(false),
-            Err(err) => return Err(ReadyError::Ipc(err.raw().unsigned_abs())),
-        };
-        let len = (msg & 0xffff_ffff) as usize;
-        let Some(message) = message.get(..len) else {
-            return Err(ReadyError::InvalidMessage);
-        };
-        let (token, status) = platform::service_ready::decode_notification(message)
-            .map_err(|_| ReadyError::InvalidMessage)?;
-        self.record(token, status)?;
-        Ok(true)
-    }
-
     pub(crate) fn wait_for_service_ready(
         &mut self,
         service: ServiceKind,
         process_id: u64,
     ) -> Result<(), ReadyError> {
-        let started = platform::time::ticks()
-            .map_err(|err| ReadyError::Clock(err.raw().unsigned_abs()))?;
+        let started = current_ticks()?;
         loop {
             if let Some(status) = self.status(service) {
                 return if status == 0 {
@@ -124,7 +106,9 @@ impl ReadyHandshake {
                     Err(ReadyError::Failed(status))
                 };
             }
-            let _ = self.receive_one()?;
+            if let Some((token, status)) = receive_notification()? {
+                self.record(token, status)?;
+            }
             if let Some(status) = self.status(service) {
                 return if status == 0 {
                     Ok(())
@@ -135,8 +119,7 @@ impl ReadyHandshake {
             if let Some(status) = process_exit_status(process_id)? {
                 return Err(ReadyError::ProcessExited(status));
             }
-            let now = platform::time::ticks()
-                .map_err(|err| ReadyError::Clock(err.raw().unsigned_abs()))?;
+            let now = current_ticks()?;
             if now.saturating_sub(started) >= SERVICE_READY_TIMEOUT_TICKS {
                 return Err(ReadyError::TimedOut);
             }
@@ -145,6 +128,29 @@ impl ReadyHandshake {
     }
 }
 
+#[inline(never)]
+fn receive_notification() -> Result<Option<(u64, i32)>, ReadyError> {
+    let mut message = [0u8; platform::service_ready::MESSAGE_LEN];
+    let msg = match platform::ipc::try_wait(&mut message) {
+        Ok(msg) => msg,
+        Err(err) if err.raw() == mochi_user_syscall::EAGAIN as i64 => return Ok(None),
+        Err(err) => return Err(ReadyError::Ipc(err.raw().unsigned_abs())),
+    };
+    let len = (msg & 0xffff_ffff) as usize;
+    let Some(message) = message.get(..len) else {
+        return Err(ReadyError::InvalidMessage);
+    };
+    let notification = platform::service_ready::decode_notification(message)
+        .map_err(|_| ReadyError::InvalidMessage)?;
+    Ok(Some(notification))
+}
+
+#[inline(never)]
+fn current_ticks() -> Result<u64, ReadyError> {
+    platform::time::ticks().map_err(|err| ReadyError::Clock(err.raw().unsigned_abs()))
+}
+
+#[inline(never)]
 fn process_exit_status(process_id: u64) -> Result<Option<i32>, ReadyError> {
     let mut status = 0i32;
     match platform::process::wait(
