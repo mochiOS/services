@@ -5,6 +5,7 @@ extern crate alloc;
 mod driver_discovery;
 mod driver_manifest;
 mod driver_matcher;
+mod readiness;
 
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -24,7 +25,6 @@ const TTY_SERVICE_PATH: &str = "/system/services/tty.service";
 const TTY_PACKAGE_MANIFEST_PATH: &str = "/system/packages/tty/manifest.toml";
 const CAPABILITY_SERVICE_NAME: &str = "capability.service";
 const RESOLVE_CAPS_OPCODE: u32 = 0x4341_5053;
-const SERVICE_READY_YIELDS: usize = 64;
 
 fn encode_spawn_args(items: &[String]) -> Vec<u8> {
     let mut out = Vec::with_capacity(512);
@@ -175,18 +175,6 @@ fn spawn_tty_service(logger_endpoint: u64) -> Result<u64, mochi_user_syscall::Sy
     )
 }
 
-fn wait_for_process(name: &str, attempts: usize) -> bool {
-    for _ in 0..attempts {
-        if let Ok(tid) = platform::process::find_by_name(name)
-            && tid != 0
-        {
-            return true;
-        }
-        platform::thread::yield_now();
-    }
-    false
-}
-
 fn maybe_spawn_bundle(bundle_root: &str, logger_endpoint: u64) {
     let Some(bundle) = driver_manifest::load(bundle_root) else {
         return;
@@ -236,13 +224,13 @@ pub fn run(sp: *const usize) -> ! {
             err.errno().unwrap_or(0)
         ),
     }
-    if !wait_for_process(DISPLAY_SERVICE_NAME, SERVICE_READY_YIELDS) {
+    if !readiness::wait_for_process(DISPLAY_SERVICE_NAME) {
         platform::println!(
             "drivers.service: {} not registered before compositor spawn",
             DISPLAY_SERVICE_NAME
         );
     }
-    if !wait_for_process(INPUT_SERVICE_NAME, SERVICE_READY_YIELDS) {
+    if !readiness::wait_for_process(INPUT_SERVICE_NAME) {
         platform::println!(
             "drivers.service: {} not registered before compositor spawn",
             INPUT_SERVICE_NAME
@@ -272,7 +260,5 @@ pub fn run(sp: *const usize) -> ! {
         ),
     }
 
-    loop {
-        platform::thread::yield_now();
-    }
+    readiness::idle()
 }
