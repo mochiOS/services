@@ -3,10 +3,17 @@
 
 extern crate alloc;
 
+mod geometry;
+
 use alloc::vec;
 use alloc::vec::Vec;
 use core::arch::global_asm;
 use mochi_user_platform as platform;
+
+use geometry::{
+    Point, PopupPlacement, Rect, choose_frame_size, clip_present_rect, merge_damage,
+    validate_damage_rect,
+};
 
 global_asm!(
     r#"
@@ -211,40 +218,6 @@ struct PointerSerial {
     window: WindowId,
     decoration: SurfaceHandle,
     used: bool,
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Copy, Default)]
-struct Rect {
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-}
-
-impl Rect {
-    const fn full(width: u32, height: u32) -> Self {
-        Self {
-            x: 0,
-            y: 0,
-            width,
-            height,
-        }
-    }
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Copy, Default)]
-struct Point {
-    x: i32,
-    y: i32,
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Copy, Default)]
-struct PopupPlacement {
-    anchor_rect: Rect,
-    offset: Point,
 }
 
 #[derive(Clone)]
@@ -1109,94 +1082,6 @@ fn validate_buffer_layout(
         .checked_mul(height_usize)
         .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
     Ok((row_bytes, needed_bytes, pixels))
-}
-
-fn validate_damage_rect(rect: Rect, surface_width: u32, surface_height: u32) -> Result<Rect, u32> {
-    if rect.width == 0 || rect.height == 0 || rect.x < 0 || rect.y < 0 {
-        return Err(errno_status(mochi_user_syscall::EINVAL));
-    }
-    let x = u32::try_from(rect.x).map_err(|_| errno_status(mochi_user_syscall::EINVAL))?;
-    let y = u32::try_from(rect.y).map_err(|_| errno_status(mochi_user_syscall::EINVAL))?;
-    let right = x
-        .checked_add(rect.width)
-        .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
-    let bottom = y
-        .checked_add(rect.height)
-        .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
-    if right > surface_width || bottom > surface_height {
-        return Err(errno_status(mochi_user_syscall::ERANGE));
-    }
-    Ok(rect)
-}
-
-fn merge_damage(first: Option<Rect>, second: Rect) -> Option<Rect> {
-    match first {
-        Some(first) => {
-            let left = first.x.min(second.x);
-            let top = first.y.min(second.y);
-            let right = (first.x as i64)
-                .saturating_add(first.width as i64)
-                .max((second.x as i64).saturating_add(second.width as i64));
-            let bottom = (first.y as i64)
-                .saturating_add(first.height as i64)
-                .max((second.y as i64).saturating_add(second.height as i64));
-            Some(Rect {
-                x: left,
-                y: top,
-                width: right.saturating_sub(left as i64) as u32,
-                height: bottom.saturating_sub(top as i64) as u32,
-            })
-        }
-        None => Some(second),
-    }
-}
-
-fn choose_frame_size(display_width: u32, display_height: u32) -> Option<(usize, usize)> {
-    if display_width == 0 || display_height == 0 {
-        return None;
-    }
-    let width = display_width.min(MAX_DIMENSION) as usize;
-    let height = display_height.min(MAX_DIMENSION) as usize;
-    if width.checked_mul(height)? > MAX_SHARED_PIXELS {
-        return None;
-    }
-    Some((width, height))
-}
-
-fn clip_present_rect(damage: Option<Rect>, frame_w: usize, frame_h: usize) -> Option<Rect> {
-    if frame_w == 0 || frame_h == 0 {
-        return None;
-    }
-    let Some(damage) = damage else {
-        return Some(Rect {
-            x: 0,
-            y: 0,
-            width: frame_w as u32,
-            height: frame_h as u32,
-        });
-    };
-    if damage.width == 0 || damage.height == 0 {
-        return None;
-    }
-    let left = damage.x.max(0) as i64;
-    let top = damage.y.max(0) as i64;
-    let right = (damage.x as i64)
-        .saturating_add(damage.width as i64)
-        .min(frame_w as i64)
-        .max(0);
-    let bottom = (damage.y as i64)
-        .saturating_add(damage.height as i64)
-        .min(frame_h as i64)
-        .max(0);
-    if right <= left || bottom <= top {
-        return None;
-    }
-    Some(Rect {
-        x: left as i32,
-        y: top as i32,
-        width: right.saturating_sub(left) as u32,
-        height: bottom.saturating_sub(top) as u32,
-    })
 }
 
 fn errno_from_platform(err: mochi_user_syscall::SysError) -> u32 {
