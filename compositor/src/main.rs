@@ -3,6 +3,7 @@
 
 extern crate alloc;
 
+mod display;
 mod geometry;
 mod protocol;
 
@@ -11,6 +12,10 @@ use alloc::vec::Vec;
 use core::arch::global_asm;
 use mochi_user_platform as platform;
 
+use display::{
+    DISPLAY_PRESENT_REQ, DISPLAY_REP_BUF, display_claim_present_owner, display_request_info,
+    wait_for_service,
+};
 use geometry::{
     Point, PopupPlacement, Rect, choose_frame_size, clip_present_rect, merge_damage,
     validate_damage_rect,
@@ -31,7 +36,6 @@ _start:
 "#
 );
 
-const DISPLAY_SERVICE_NAME: &str = "display.driver";
 const INPUT_SERVICE_NAME: &str = "input.service";
 const MAX_SURFACES: usize = 16;
 const MAX_WINDOWS: usize = 8;
@@ -334,9 +338,6 @@ impl Surface {
     }
 }
 
-static mut DISPLAY_REQ_BUF: [u8; 20] = [0; 20];
-static mut DISPLAY_REP_BUF: [u8; 32] = [0; 32];
-static mut DISPLAY_PRESENT_REQ: [u8; 36] = [0; 36];
 static mut INPUT_SUBSCRIBE_REQ: [u8; 16] = [0; 16];
 static mut INPUT_SUBSCRIBE_REP: [u8; 8] = [0; 8];
 static mut TOKEN_RANDOM_BUF: [u8; 8] = [0; 8];
@@ -392,61 +393,6 @@ fn sender_has_overlay_compat_capability(sender: u64) -> bool {
     )
 }
 
-fn decode_display_info(reply: &[u8]) -> Option<(u32, u32, u32, u32)> {
-    if reply.len() < 20 {
-        return None;
-    }
-    let status = read_u32(reply, 0)?;
-    if status != 0 {
-        return None;
-    }
-    Some((
-        read_u32(reply, 4)?,
-        read_u32(reply, 8)?,
-        read_u32(reply, 12)?,
-        read_u32(reply, 16)?,
-    ))
-}
-
-fn display_request_info(display_tid: u64) -> (u32, u32, u32, u32) {
-    let req = unsafe {
-        core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(DISPLAY_REQ_BUF).cast::<u8>(), 20)
-    };
-    req.fill(0);
-    put_u32(req, 0, OP_DISPLAY_GET_INFO);
-    let reply = unsafe {
-        core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(DISPLAY_REP_BUF).cast::<u8>(), 32)
-    };
-    reply.fill(0);
-    if let Ok(msg) = platform::ipc::call(display_tid, req, reply) {
-        let len = (msg & 0xffff_ffff) as usize;
-        if let Some(info) = decode_display_info(&reply[..len.min(reply.len())]) {
-            return info;
-        }
-    }
-    (640, 480, 640, PIXEL_FORMAT_XRGB8888)
-}
-
-fn display_claim_present_owner(display_tid: u64) -> u32 {
-    let req = unsafe {
-        core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(DISPLAY_REQ_BUF).cast::<u8>(), 20)
-    };
-    req.fill(0);
-    put_u32(req, 0, OP_DISPLAY_CLAIM_PRESENT_OWNER);
-    let reply = unsafe {
-        core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(DISPLAY_REP_BUF).cast::<u8>(), 32)
-    };
-    reply.fill(0);
-    let Ok(msg) = platform::ipc::call(display_tid, req, reply) else {
-        return errno_status(mochi_user_syscall::EIO);
-    };
-    let len = (msg & 0xffff_ffff) as usize;
-    if len < 4 {
-        return errno_status(mochi_user_syscall::EIO);
-    }
-    read_u32(reply, 0).unwrap_or(errno_status(mochi_user_syscall::EIO))
-}
-
 fn find_service(name: &str) -> Option<u64> {
     for _ in 0..64 {
         if let Ok(tid) = platform::process::find_by_name(name)
@@ -455,18 +401,6 @@ fn find_service(name: &str) -> Option<u64> {
             return Some(tid);
         }
         platform::thread::yield_now();
-    }
-    None
-}
-
-fn wait_for_service(name: &str, attempts: usize) -> Option<u64> {
-    for _ in 0..attempts {
-        if let Ok(tid) = platform::process::find_by_name(name)
-            && tid != 0
-        {
-            return Some(tid);
-        }
-        sleep_one_tick();
     }
     None
 }
@@ -2295,7 +2229,7 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         Ok(endpoint) => endpoint,
         Err(_) => platform::process::exit(1),
     };
-    let Some(display_tid) = wait_for_service(DISPLAY_SERVICE_NAME, 4096) else {
+    let Some(display_tid) = wait_for_service(4096) else {
         platform::println!("compositor.service: display.driver not found");
         platform::process::exit(1);
     };
