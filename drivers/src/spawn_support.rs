@@ -27,6 +27,26 @@ pub(crate) fn sys_error(errno: u64) -> mochi_user_syscall::SysError {
     mochi_user_syscall::SysError::from_raw(-(errno as i64))
 }
 
+fn call_capability_service(
+    service_tid: u64,
+    request: &[u8],
+    reply: &mut [u8],
+) -> Result<u64, mochi_user_syscall::SysError> {
+    match platform::ipc::call(service_tid, request, reply) {
+        Ok(msg) => Ok(msg),
+        Err(err) if err.raw() == mochi_user_syscall::EAGAIN as i64 => loop {
+            match platform::ipc::try_wait(reply) {
+                Ok(msg) => break Ok(msg),
+                Err(err) if err.raw() == mochi_user_syscall::EAGAIN as i64 => {
+                    platform::thread::yield_now();
+                }
+                Err(err) => break Err(err),
+            }
+        },
+        Err(err) => Err(err),
+    }
+}
+
 pub(crate) fn resolve_capabilities(
     entry_path: &str,
 ) -> Result<Vec<u8>, mochi_user_syscall::SysError> {
@@ -48,7 +68,7 @@ pub(crate) fn resolve_capabilities(
     request.extend_from_slice(&RESOLVE_CAPS_OPCODE.to_le_bytes());
     request.extend_from_slice(entry_path.as_bytes());
     let mut reply = [0u8; 1024];
-    let msg = match platform::ipc::call(service_tid, &request, &mut reply) {
+    let msg = match call_capability_service(service_tid, &request, &mut reply) {
         Ok(msg) => msg,
         Err(err) => {
             platform::println!(
