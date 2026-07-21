@@ -536,6 +536,14 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         };
         let sender = msg >> 32;
         let len = (msg & 0xffff_ffff) as usize;
+        if len <= buf.len() && platform::service_ready::is_query(&buf[..len]) {
+            let ready = platform::service_ready::result(0);
+            if platform::ipc::reply(sender, &ready).is_err() {
+                platform::println!("input.service: ready reply failed");
+                platform::process::exit(1);
+            }
+            continue;
+        }
         if len == 0 || len > buf.len() {
             let _ = platform::ipc::reply(sender, &[0]);
             continue;
