@@ -27,7 +27,10 @@ match_class = "i8042"
 "#;
 
 fn valid_manifest_contains_expected_entry() {
-    let manifest = package::parse_manifest(VALID_MANIFEST).expect("valid manifest");
+    let manifest = match package::parse_manifest(VALID_MANIFEST) {
+        Some(manifest) => manifest,
+        None => panic!("valid manifest was rejected"),
+    };
     assert!(
         manifest
             .binary("/bin/drivers/ps2/i8042.driver/entry.elf")
@@ -49,7 +52,10 @@ fn missing_required_manifest_field_is_rejected() {
 }
 
 fn missing_entry_is_rejected_by_entry_lookup() {
-    let manifest = package::parse_manifest(VALID_MANIFEST).expect("valid manifest");
+    let manifest = match package::parse_manifest(VALID_MANIFEST) {
+        Some(manifest) => manifest,
+        None => panic!("valid manifest was rejected"),
+    };
     assert!(
         manifest
             .binary("/bin/drivers/ps2/missing.driver/entry.elf")
