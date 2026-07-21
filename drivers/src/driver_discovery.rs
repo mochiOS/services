@@ -3,9 +3,11 @@ use alloc::vec::Vec;
 
 use mochi_user_platform as platform;
 
-const DRIVER_BUNDLE_ROOTS: &[&str] = &["/bin/drivers/usb", "/bin/drivers/ps2"];
+use crate::driver_matcher::DriverSearchRoot;
 
-pub(crate) fn roots() -> &'static [&'static str] {
+const DRIVER_BUNDLE_ROOTS: &[DriverSearchRoot] = &[DriverSearchRoot::Usb, DriverSearchRoot::Ps2];
+
+pub(crate) fn roots() -> &'static [DriverSearchRoot] {
     DRIVER_BUNDLE_ROOTS
 }
 
@@ -23,7 +25,8 @@ fn read_dir_names(path: &str) -> Vec<String> {
     }
 }
 
-pub(crate) fn visit_bundles(bundle_root_path: &str, mut visit: impl FnMut(&str)) {
+pub(crate) fn visit_bundles(root: DriverSearchRoot, mut visit: impl FnMut(&str)) {
+    let bundle_root_path = root.path();
     let bundle_roots = read_dir_names(bundle_root_path);
     for bundle in bundle_roots {
         if !bundle.ends_with(".driver") {

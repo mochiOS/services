@@ -4,7 +4,11 @@ use crate::{
     driver_discovery, driver_manifest, driver_matcher, driver_spawn, readiness, service_launcher,
 };
 
-fn maybe_spawn_bundle(bundle_root: &str, logger_endpoint: u64) {
+fn maybe_spawn_bundle(
+    root: driver_matcher::DriverSearchRoot,
+    bundle_root: &str,
+    logger_endpoint: u64,
+) {
     let Some(bundle) = driver_manifest::load(bundle_root) else {
         return;
     };
@@ -14,7 +18,38 @@ fn maybe_spawn_bundle(bundle_root: &str, logger_endpoint: u64) {
         return;
     };
 
-    let _ = driver_matcher::matches(manifest, binary);
+    platform::println!(
+        "drivers.service: bundle {} {} api={} class={} match={}/{}",
+        manifest.package_id,
+        manifest.package_name,
+        binary.api_version.unwrap_or(0),
+        binary.driver_class.as_deref().unwrap_or(""),
+        binary.match_bus.as_deref().unwrap_or(""),
+        binary.match_class.as_deref().unwrap_or("")
+    );
+    let match_result = driver_matcher::matches(
+        root,
+        &manifest.package_id,
+        binary.driver_class.as_deref(),
+        binary.match_bus.as_deref(),
+        binary.match_class.as_deref(),
+    );
+    if match_result != driver_matcher::MatchResult::Matched {
+        platform::println!(
+            "drivers.service: rejected bundle={} package={} root={} reason={}",
+            bundle_root,
+            manifest.package_id,
+            root.path(),
+            match_result.reason()
+        );
+        return;
+    }
+    platform::println!(
+        "drivers.service: matched bundle={} package={} root={}",
+        bundle_root,
+        manifest.package_id,
+        root.path()
+    );
     driver_spawn::spawn(entry_path, None, logger_endpoint);
 }
 
@@ -36,9 +71,9 @@ pub(crate) fn run() -> ! {
         );
     }
     service_launcher::launch_compositor_service(logger_endpoint);
-    for bundle_root_path in driver_discovery::roots() {
-        driver_discovery::visit_bundles(bundle_root_path, |bundle_root| {
-            maybe_spawn_bundle(bundle_root, logger_endpoint);
+    for &root in driver_discovery::roots() {
+        driver_discovery::visit_bundles(root, |bundle_root| {
+            maybe_spawn_bundle(root, bundle_root, logger_endpoint);
         });
     }
     service_launcher::launch_tty_service(logger_endpoint);
