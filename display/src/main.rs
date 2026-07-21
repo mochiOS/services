@@ -387,6 +387,14 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
         };
         let sender = msg >> 32;
         let len = (msg & 0xffff_ffff) as usize;
+        if len <= buf.len() && platform::service_ready::is_query(&buf[..len]) {
+            let ready = platform::service_ready::result(0);
+            if platform::ipc::reply(sender, &ready).is_err() {
+                platform::println!("display.driver: ready reply failed");
+                platform::process::exit(1);
+            }
+            continue;
+        }
         if len == 16 {
             if present_owner != 0 && sender != present_owner {
                 continue;
