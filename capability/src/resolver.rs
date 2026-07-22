@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 
 use mochi_user_platform as platform;
 
-use crate::package_index::build_package_index;
+use crate::package_index::PackageIndex;
 use crate::policy::validate_capabilities;
 
 pub(crate) fn encode_nul_list(items: &[String]) -> Vec<u8> {
@@ -27,9 +27,9 @@ pub(crate) fn binary_caps<'a>(
 }
 
 pub(crate) fn resolve_capabilities_for_path(
+    index: &PackageIndex,
     binary_path: &str,
 ) -> Result<Vec<String>, mochi_user_syscall::SysError> {
-    let index = build_package_index();
     if index.duplicate {
         return Err(mochi_user_syscall::SysError::from_raw(
             mochi_user_syscall::EINVAL as i64,
@@ -39,8 +39,6 @@ pub(crate) fn resolve_capabilities_for_path(
         .by_binary
         .get(binary_path)
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOENT as i64))?;
-    let manifest = platform::package::read_manifest(&manifest_path.manifest_path)
-        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
-    let caps = binary_caps(&manifest, binary_path)?;
+    let caps = binary_caps(&manifest_path.manifest, binary_path)?;
     Ok(caps.to_vec())
 }

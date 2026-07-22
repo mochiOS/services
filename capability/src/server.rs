@@ -119,7 +119,7 @@ pub(crate) fn serve_capability_requests(state: CapabilityServiceState) -> ! {
         };
         if opcode == RESOLVE_CAPS_OPCODE {
             let result = parse_resolve_caps_request(slice)
-                .and_then(|path| resolve_capabilities_for_path(&path));
+                .and_then(|path| resolve_capabilities_for_path(&state.package_index, &path));
             reply_capabilities(sender, result);
             continue;
         }

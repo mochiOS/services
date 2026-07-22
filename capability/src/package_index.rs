@@ -16,15 +16,8 @@ pub(crate) struct PackageIndex {
 #[derive(Clone)]
 pub(crate) struct PackageRecord {
     pub(crate) manifest_path: String,
+    pub(crate) manifest: platform::package::PackageManifest,
     manifest_hash: [u8; 32],
-}
-
-fn manifest_hash(path: &str) -> Result<[u8; 32], mochi_user_syscall::SysError> {
-    let bytes = platform::file::read_to_end_path(path)?;
-    let digest = Sha256::digest(&bytes);
-    let mut hash = [0u8; 32];
-    hash.copy_from_slice(&digest);
-    Ok(hash)
 }
 
 fn walk_package_tree(path: &str, out: &mut Vec<String>) {
@@ -46,23 +39,33 @@ pub(crate) fn build_package_index() -> PackageIndex {
     walk_package_tree("/system/packages", &mut manifest_paths);
     let mut index = PackageIndex::default();
     for manifest_path in manifest_paths {
-        let Some(manifest) = platform::package::read_manifest(&manifest_path) else {
+        let Ok(bytes) = platform::file::read_to_end_path(&manifest_path) else {
             platform::println!(
                 "capability.service: invalid package manifest {}",
                 manifest_path
             );
             continue;
         };
-        let Ok(hash) = manifest_hash(&manifest_path) else {
+        let Ok(text) = core::str::from_utf8(&bytes) else {
             platform::println!(
-                "capability.service: failed to hash manifest {}",
+                "capability.service: invalid package manifest {}",
                 manifest_path
             );
-            index.duplicate = true;
             continue;
         };
+        let Some(manifest) = platform::package::parse_manifest(text) else {
+            platform::println!(
+                "capability.service: invalid package manifest {}",
+                manifest_path
+            );
+            continue;
+        };
+        let digest = Sha256::digest(&bytes);
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&digest);
         let record = PackageRecord {
             manifest_path: manifest_path.clone(),
+            manifest: manifest.clone(),
             manifest_hash: hash,
         };
         if let Some(previous) = index.by_package.get(&manifest.package_id) {
@@ -113,9 +116,7 @@ pub(crate) fn package_manifest_by_id(
     package_id: &str,
 ) -> Result<platform::package::PackageManifest, mochi_user_syscall::SysError> {
     if let Some(manifest_path) = index.by_package.get(package_id) {
-        return platform::package::read_manifest(&manifest_path.manifest_path).ok_or_else(|| {
-            mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
-        });
+        return Ok(manifest_path.manifest.clone());
     }
 
     if let Some(package_dir) = package_id.rsplit('.').next() {
