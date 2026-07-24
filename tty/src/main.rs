@@ -25,7 +25,6 @@ _start:
 const MSH_PATH: &str = "/bin/msh";
 const CAPABILITY_SERVICE_NAME: &str = "capability.service";
 const INPUT_SERVICE_NAME: &str = "input.service";
-const RESOLVE_CAPS_OPCODE: u32 = 0x4341_5053;
 const INPUT_EVENT_SIZE: usize = core::mem::size_of::<platform::input::InputEvent>();
 const TTY_IPC_BUFFER_SIZE: usize = 2048;
 const TTY_OUTPUT_MAGIC: &[u8; 4] = b"TOUT";
@@ -130,26 +129,25 @@ fn resolve_capabilities(entry_path: &str) -> Result<Vec<u8>, mochi_user_syscall:
             mochi_user_syscall::ENOENT as i64,
         ));
     }
-    let mut request = Vec::with_capacity(4 + entry_path.len());
-    request.extend_from_slice(&RESOLVE_CAPS_OPCODE.to_le_bytes());
-    request.extend_from_slice(entry_path.as_bytes());
+    let request = platform::capability::encode_resolve_capabilities_request(entry_path)
+        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     let reply = capability_reply_buf();
     reply.fill(0);
     let msg = platform::ipc::call(service_tid, &request, reply)?;
     let len = (msg & 0xffff_ffff) as usize;
-    if len < 8 || len > reply.len() {
+    if len > reply.len() {
         return Err(mochi_user_syscall::SysError::from_raw(
             mochi_user_syscall::EIO as i64,
         ));
     }
-    let status =
-        u64::from_le_bytes(reply[..8].try_into().map_err(|_| {
-            mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
-        })?);
-    if status != 0 {
-        return Err(mochi_user_syscall::SysError::from_raw(status as i64));
+    let response = platform::capability::decode_resolve_capabilities_reply(&reply[..len])
+        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EIO as i64))?;
+    if response.status != 0 {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            response.status as i64,
+        ));
     }
-    Ok(reply[8..len].to_vec())
+    Ok(response.capabilities.to_vec())
 }
 
 fn spawn_msh(tty_endpoint: u64, logger_endpoint: u64) -> Result<u64, mochi_user_syscall::SysError> {

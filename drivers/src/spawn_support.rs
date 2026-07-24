@@ -4,7 +4,6 @@ use alloc::vec::Vec;
 use mochi_user_platform as platform;
 
 const CAPABILITY_SERVICE_NAME: &str = "capability.service";
-const RESOLVE_CAPS_OPCODE: u32 = 0x4341_5053;
 
 pub(crate) fn encode_spawn_args(items: &[String]) -> Vec<u8> {
     let mut out = Vec::with_capacity(512);
@@ -64,9 +63,8 @@ pub(crate) fn resolve_capabilities(
         platform::println!("drivers.service: capability.service not found");
         return Err(sys_error(mochi_user_syscall::ENOENT));
     }
-    let mut request = Vec::with_capacity(4 + entry_path.len());
-    request.extend_from_slice(&RESOLVE_CAPS_OPCODE.to_le_bytes());
-    request.extend_from_slice(entry_path.as_bytes());
+    let request = platform::capability::encode_resolve_capabilities_request(entry_path)
+        .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
     let mut reply = [0u8; 1024];
     let msg = match call_capability_service(service_tid, &request, &mut reply) {
         Ok(msg) => msg,
@@ -80,7 +78,7 @@ pub(crate) fn resolve_capabilities(
         }
     };
     let len = (msg & 0xffff_ffff) as usize;
-    if len < 8 || len > reply.len() {
+    if len > reply.len() {
         platform::println!(
             "drivers.service: capability reply invalid {} len={}",
             entry_path,
@@ -88,18 +86,15 @@ pub(crate) fn resolve_capabilities(
         );
         return Err(sys_error(mochi_user_syscall::EINVAL));
     }
-    let status = u64::from_le_bytes(
-        reply[..8]
-            .try_into()
-            .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?,
-    );
-    if status != 0 {
+    let response = platform::capability::decode_resolve_capabilities_reply(&reply[..len])
+        .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
+    if response.status != 0 {
         platform::println!(
             "drivers.service: capability denied {} errno={}",
             entry_path,
-            status
+            response.status
         );
-        return Err(sys_error(status));
+        return Err(sys_error(response.status));
     }
-    Ok(reply[8..len].to_vec())
+    Ok(response.capabilities.to_vec())
 }

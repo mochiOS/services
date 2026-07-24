@@ -1,4 +1,4 @@
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use mochi_user_platform as platform;
@@ -9,53 +9,21 @@ use crate::persistent_grant::authorize_persistent_capability;
 use crate::resolver::{encode_nul_list, resolve_capabilities_for_path};
 use crate::state::CapabilityServiceState;
 
-const RESOLVE_CAPS_OPCODE: u32 = 0x4341_5053;
 const REPLY_OK: u64 = 0;
 
 fn capability_reply(sender: u64, status: u64) {
     let _ = platform::ipc::reply(sender, &status.to_le_bytes());
 }
 
-fn parse_resolve_caps_request(buf: &[u8]) -> Result<String, mochi_user_syscall::SysError> {
-    if buf.len() <= 4 {
-        return Err(mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::EINVAL as i64,
-        ));
-    }
-    let opcode = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
-    if opcode != RESOLVE_CAPS_OPCODE {
-        return Err(mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::EINVAL as i64,
-        ));
-    }
-    let path_bytes = &buf[4..];
-    if path_bytes.is_empty() || path_bytes.contains(&0) {
-        return Err(mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::EINVAL as i64,
-        ));
-    }
-    let path = core::str::from_utf8(path_bytes)
-        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
-    if !path.starts_with('/') {
-        return Err(mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::EINVAL as i64,
-        ));
-    }
-    Ok(path.to_string())
-}
-
 fn reply_capabilities(sender: u64, result: Result<Vec<String>, mochi_user_syscall::SysError>) {
-    let mut reply = Vec::new();
-    match result {
-        Ok(caps) => {
-            reply.extend_from_slice(&REPLY_OK.to_le_bytes());
-            reply.extend_from_slice(&encode_nul_list(&caps));
-        }
+    let (status, capabilities) = match result {
+        Ok(caps) => (REPLY_OK, encode_nul_list(&caps)),
         Err(err) => {
             let status = err.errno().unwrap_or(mochi_user_syscall::EIO);
-            reply.extend_from_slice(&status.to_le_bytes());
+            (status, Vec::new())
         }
-    }
+    };
+    let reply = platform::capability::encode_resolve_capabilities_reply(status, &capabilities);
     let _ = platform::ipc::reply(sender, &reply);
 }
 
@@ -117,9 +85,12 @@ pub(crate) fn serve_capability_requests(state: CapabilityServiceState) -> ! {
         } else {
             0
         };
-        if opcode == RESOLVE_CAPS_OPCODE {
-            let result = parse_resolve_caps_request(slice)
-                .and_then(|path| resolve_capabilities_for_path(&state.package_index, &path));
+        if opcode == platform::capability::RESOLVE_CAPABILITIES_OPCODE {
+            let result = platform::capability::decode_resolve_capabilities_request(slice)
+                .map_err(|_| {
+                    mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
+                })
+                .and_then(|path| resolve_capabilities_for_path(&state.package_index, path));
             reply_capabilities(sender, result);
             continue;
         }
