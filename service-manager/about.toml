@@ -1,0 +1,20 @@
+[service]
+id = "org.mochios.service-manager"
+name = "Service Manager"
+version = "1"
+entry = "service-manager.service"
+
+[capabilities]
+requires = [
+    "fs.read.all",
+    "process.spawn",
+    "device.input",
+    "display.read",
+    "input.keyboard",
+    "input.pointer",
+    "ipc.client",
+    "ipc.server",
+    "usb.access",
+    "window.create",
+    "window.overlay",
+]

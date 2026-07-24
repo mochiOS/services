@@ -9,6 +9,7 @@ members = [
     "input",
     "logger",
     "package",
+    "service-manager",
     "signature",
     "tty",
 ]
