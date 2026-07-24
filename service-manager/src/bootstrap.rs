@@ -5,7 +5,9 @@ use crate::fixed_service_launcher;
 use crate::orchestration::{BootstrapOperations, BootstrapOutcome, orchestrate};
 use crate::readiness::{ReadyError, ReadyHandshake, ReadyService};
 use crate::service_config::FixedService;
-use crate::spawn_support::errno;
+use crate::spawn_support::{errno, sys_error};
+
+const DELEGATE_REGISTER_ATTEMPTS: usize = 32;
 
 struct Runtime {
     logger_endpoint: u64,
@@ -87,6 +89,35 @@ impl BootstrapOperations for Runtime {
                 None
             }
         }
+    }
+
+    fn register_driver_delegate(&mut self, process_id: u64) -> bool {
+        let mut last_error = sys_error(mochi_user_syscall::ESRCH);
+        for _ in 0..DELEGATE_REGISTER_ATTEMPTS {
+            match platform::service::register_delegate(
+                platform::service::DELEGATE_DRIVER_SPAWN,
+                process_id,
+            ) {
+                Ok(_) => {
+                    platform::println!(
+                        "service-manager.service: registered drivers.service as driver delegate"
+                    );
+                    return true;
+                }
+                Err(error) => {
+                    last_error = error;
+                    if errno(error) != mochi_user_syscall::ESRCH {
+                        break;
+                    }
+                    platform::thread::yield_now();
+                }
+            }
+        }
+        platform::println!(
+            "service-manager.service: driver delegate registration failed errno={}",
+            errno(last_error)
+        );
+        false
     }
 
     fn wait_driver_hello(&mut self, process_id: u64) -> bool {

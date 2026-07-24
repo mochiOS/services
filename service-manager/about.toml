@@ -8,6 +8,7 @@ entry = "service-manager.service"
 requires = [
     "fs.read.all",
     "process.spawn",
+    "service.register",
     "device.input",
     "display.read",
     "input.keyboard",

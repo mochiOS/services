@@ -92,7 +92,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn paths_roles_and_manifest_paths_match_compatibility_bootstrap() {
+    fn paths_roles_and_manifest_paths_match_fixed_service_policy() {
         assert_eq!(DRIVERS.path, "/system/services/drivers.service");
         assert_eq!(
             DRIVERS.manifest_path,
@@ -152,7 +152,7 @@ mod tests {
     }
 
     #[test]
-    fn ready_timeout_matches_compatibility_bootstrap() {
+    fn ready_timeout_matches_fixed_service_policy() {
         assert_eq!(SERVICE_READY_TIMEOUT_TICKS, 5_000);
     }
 }

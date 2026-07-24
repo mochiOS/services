@@ -8,13 +8,8 @@ pub(crate) struct DriverManagerConfig {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum LaunchMode {
-    Compatibility,
-    Controlled(DriverManagerConfig),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DriverManagerArgError {
+    Missing,
     Duplicate,
     MissingEndpoint,
     MissingToken,
@@ -67,10 +62,10 @@ impl DriverManagerArgParser {
         Ok(())
     }
 
-    pub(crate) const fn finish(self) -> Result<LaunchMode, DriverManagerArgError> {
+    pub(crate) const fn finish(self) -> Result<DriverManagerConfig, DriverManagerArgError> {
         match self.config {
-            Some(config) => Ok(LaunchMode::Controlled(config)),
-            None => Ok(LaunchMode::Compatibility),
+            Some(config) => Ok(config),
+            None => Err(DriverManagerArgError::Missing),
         }
     }
 }

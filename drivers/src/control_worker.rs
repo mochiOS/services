@@ -3,9 +3,8 @@ use mochios_driver_control_protocol::{
     DISCOVERY_COMPLETE_LEN, DRIVER_HELLO_LEN, DiscoveryComplete, EncodeError,
 };
 
-use crate::bootstrap;
 use crate::control_state::{ControlAction, DiscoveryController, driver_hello};
-use crate::readiness;
+use crate::discovery;
 use crate::startup_args::DriverManagerConfig;
 
 const CONTROL_BUFFER_LEN: usize = DRIVER_HELLO_LEN;
@@ -27,7 +26,7 @@ pub(crate) fn run(config: DriverManagerConfig) -> ! {
                 "drivers.service: control endpoint create failed errno={}",
                 errno
             );
-            readiness::idle()
+            idle()
         }
     };
     let request_id = match platform::service_ready::generate_token() {
@@ -41,12 +40,12 @@ pub(crate) fn run(config: DriverManagerConfig) -> ! {
                 "drivers.service: hello request id generation failed errno={}",
                 errno
             );
-            readiness::idle()
+            idle()
         }
     };
     if let Err(error) = send_hello(config, control_endpoint, request_id) {
         log_send_error("hello", error);
-        readiness::idle()
+        idle()
     }
 
     let mut controller = DiscoveryController::new(config.token);
@@ -70,9 +69,8 @@ pub(crate) fn run(config: DriverManagerConfig) -> ! {
                 message,
             } => send_complete(response_endpoint, message),
             ControlAction::Run(pending) => {
-                let result = bootstrap::run_driver_discovery(logger_endpoint, || {
-                    drain_running_requests(&mut controller)
-                });
+                let result =
+                    discovery::run(logger_endpoint, || drain_running_requests(&mut controller));
                 drain_running_requests(&mut controller);
                 if let ControlAction::Reply {
                     response_endpoint,
@@ -83,6 +81,12 @@ pub(crate) fn run(config: DriverManagerConfig) -> ! {
                 }
             }
         }
+    }
+}
+
+pub(crate) fn idle() -> ! {
+    loop {
+        platform::thread::yield_now();
     }
 }
 

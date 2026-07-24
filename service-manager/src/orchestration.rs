@@ -14,6 +14,7 @@ pub(crate) enum StopReason {
     Running,
     DriverControlInitializationFailed,
     DriversSpawnFailed,
+    DriverDelegateRegistrationFailed,
     DriverHelloFailed,
     InputSpawnFailed,
     DisplaySpawnFailed,
@@ -47,6 +48,7 @@ impl BootstrapOutcome {
 
 pub(crate) trait BootstrapOperations {
     fn spawn_drivers(&mut self) -> Option<u64>;
+    fn register_driver_delegate(&mut self, process_id: u64) -> bool;
     fn wait_driver_hello(&mut self, process_id: u64) -> bool;
     fn spawn_fixed(&mut self, service: FixedService) -> Option<u64>;
     fn wait_display_ready(&mut self, process_id: u64) -> bool;
@@ -62,6 +64,9 @@ pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> Bootstra
         return outcome(children, StopReason::DriversSpawnFailed);
     };
     children.drivers = Some(drivers);
+    if !operations.register_driver_delegate(drivers) {
+        return outcome(children, StopReason::DriverDelegateRegistrationFailed);
+    }
     if !operations.wait_driver_hello(drivers) {
         return outcome(children, StopReason::DriverHelloFailed);
     }
@@ -109,6 +114,7 @@ mod tests {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Event {
         SpawnDrivers,
+        RegisterDriverDelegate,
         WaitHello,
         Spawn(FixedService),
         WaitDisplay,
@@ -121,6 +127,7 @@ mod tests {
     enum Failure {
         None,
         SpawnDrivers,
+        RegisterDriverDelegate,
         Hello,
         Spawn(FixedService),
         DisplayReady,
@@ -147,6 +154,11 @@ mod tests {
         fn spawn_drivers(&mut self) -> Option<u64> {
             self.events.push(Event::SpawnDrivers);
             (self.failure != Failure::SpawnDrivers).then_some(10)
+        }
+
+        fn register_driver_delegate(&mut self, _process_id: u64) -> bool {
+            self.events.push(Event::RegisterDriverDelegate);
+            self.failure != Failure::RegisterDriverDelegate
         }
 
         fn wait_driver_hello(&mut self, _process_id: u64) -> bool {
@@ -191,6 +203,7 @@ mod tests {
     fn expected_success_events() -> Vec<Event> {
         alloc::vec![
             Event::SpawnDrivers,
+            Event::RegisterDriverDelegate,
             Event::WaitHello,
             Event::Spawn(FixedService::Input),
             Event::Spawn(FixedService::Display),
@@ -220,6 +233,10 @@ mod tests {
     fn driver_input_and_display_failures_stop_following_services() {
         let cases = [
             (Failure::SpawnDrivers, StopReason::DriversSpawnFailed),
+            (
+                Failure::RegisterDriverDelegate,
+                StopReason::DriverDelegateRegistrationFailed,
+            ),
             (Failure::Hello, StopReason::DriverHelloFailed),
             (
                 Failure::Spawn(FixedService::Input),

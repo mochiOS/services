@@ -14,6 +14,7 @@ mod file {
 mod package;
 
 const SERVICE_MANAGER_MANIFEST: &str = include_str!("../manifest.toml");
+const CAPABILITY_MANIFEST: &str = include_str!("../../capability/manifest.toml");
 const DRIVERS_MANIFEST: &str = include_str!("../../drivers/manifest.toml");
 const INPUT_MANIFEST: &str = include_str!("../../input/manifest.toml");
 const DISPLAY_MANIFEST: &str = include_str!("../../display/manifest.toml");
@@ -58,7 +59,34 @@ fn main() {
         Some(binary) => binary,
         None => panic!("drivers binary is missing"),
     };
-    assert_eq!(manager_binary.requires, drivers_binary.requires);
+    assert_eq!(
+        manager_binary.requires.len(),
+        drivers_binary.requires.len() + 1
+    );
+    for capability in &drivers_binary.requires {
+        assert!(manager_binary.requires.contains(capability));
+    }
+    assert!(
+        manager_binary
+            .requires
+            .iter()
+            .any(|capability| capability == "service.register")
+    );
+
+    let capability = match package::parse_manifest(CAPABILITY_MANIFEST) {
+        Some(manifest) => manifest,
+        None => panic!("capability manifest was rejected"),
+    };
+    let capability_binary = match capability.binary("/system/services/capability.service") {
+        Some(binary) => binary,
+        None => panic!("capability binary is missing"),
+    };
+    assert!(
+        capability_binary
+            .requires
+            .iter()
+            .any(|capability| capability == "capabilities.manage")
+    );
 
     assert_capabilities(
         INPUT_MANIFEST,

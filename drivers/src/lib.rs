@@ -2,21 +2,19 @@
 
 extern crate alloc;
 
-mod bootstrap;
 mod control_state;
 mod control_worker;
+mod discovery;
 mod driver_discovery;
 mod driver_manifest;
 mod driver_matcher;
 mod driver_registry;
 mod driver_spawn;
-mod readiness;
-mod service_launcher;
 mod spawn_support;
 mod startup_args;
 
 pub fn run(sp: *const usize) -> ! {
-    let launch_mode = unsafe {
+    let config = unsafe {
         let _ = mochi_user_platform::logger::init_from_initial_stack(sp);
         let stack = mochi_user_platform::runtime::InitialStack::parse(sp);
         let mut parser = startup_args::DriverManagerArgParser::new();
@@ -41,15 +39,14 @@ pub fn run(sp: *const usize) -> ! {
         }
     };
 
-    match launch_mode {
-        Ok(startup_args::LaunchMode::Compatibility) => bootstrap::run(),
-        Ok(startup_args::LaunchMode::Controlled(config)) => control_worker::run(config),
+    match config {
+        Ok(config) => control_worker::run(config),
         Err(error) => {
             mochi_user_platform::println!(
                 "drivers.service: invalid --driver-manager argument error={:?}",
                 error
             );
-            readiness::idle()
+            control_worker::idle()
         }
     }
 }

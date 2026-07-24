@@ -7,11 +7,9 @@ use control_state::{ControlAction, DiscoveryController, DiscoveryState, driver_h
 use mochios_driver_control_protocol::{
     DISCOVERY_COMPLETE_LEN, DRIVER_HELLO_LEN, DiscoveryResult, Message, StartDiscovery,
 };
-use startup_args::{
-    DriverManagerArgError, DriverManagerArgParser, DriverManagerConfig, LaunchMode,
-};
+use startup_args::{DriverManagerArgError, DriverManagerArgParser, DriverManagerConfig};
 
-fn parse(arguments: &[&[u8]]) -> Result<LaunchMode, DriverManagerArgError> {
+fn parse(arguments: &[&[u8]]) -> Result<DriverManagerConfig, DriverManagerArgError> {
     let mut parser = DriverManagerArgParser::new();
     for &argument in arguments {
         parser.push(argument)?;
@@ -42,14 +40,14 @@ fn parses_driver_manager_argument_and_preserves_other_arguments() {
             b"--service-ready=9:10",
             b"--driver-manager=123:456",
         ]),
-        Ok(LaunchMode::Controlled(DriverManagerConfig {
+        Ok(DriverManagerConfig {
             endpoint: 123,
             token: 456,
-        }))
+        })
     );
     assert_eq!(
         parse(&[b"drivers.service", b"42"]),
-        Ok(LaunchMode::Compatibility)
+        Err(DriverManagerArgError::Missing)
     );
 }
 
