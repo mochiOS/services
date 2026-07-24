@@ -139,6 +139,7 @@ dependencies = [
  "mochi-user-platform",
  "mochi-user-runtime",
  "mochi-user-syscall",
+ "mochios-driver-control-protocol",
 ]
 
 [[package]]
@@ -241,6 +242,10 @@ dependencies = [
 
 [[package]]
 name = "mochios-capability-protocol"
+version = "0.1.0"
+
+[[package]]
+name = "mochios-driver-control-protocol"
 version = "0.1.0"
 
 [[package]]

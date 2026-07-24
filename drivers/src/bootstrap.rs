@@ -1,4 +1,5 @@
 use mochi_user_platform as platform;
+use mochios_driver_control_protocol::DiscoveryResult;
 
 use crate::{
     driver_discovery, driver_manifest, driver_matcher, driver_registry, driver_spawn, readiness,
@@ -171,13 +172,23 @@ pub(crate) fn run() -> ! {
     }
     drop(handshake);
     service_launcher::launch_compositor_service(logger_endpoint);
+    let _ = run_driver_discovery(logger_endpoint, || {});
+    service_launcher::launch_tty_service(logger_endpoint);
+
+    readiness::idle()
+}
+
+pub(crate) fn run_driver_discovery(
+    logger_endpoint: u64,
+    mut progress: impl FnMut(),
+) -> DiscoveryResult {
     let mut started_drivers = driver_registry::StartedDrivers::new();
     for &root in driver_discovery::roots() {
         driver_discovery::visit_bundles(root, |bundle_root| {
             maybe_spawn_bundle(root, bundle_root, logger_endpoint, &mut started_drivers);
+            progress();
         });
+        progress();
     }
-    service_launcher::launch_tty_service(logger_endpoint);
-
-    readiness::idle()
+    DiscoveryResult { status: 0 }
 }
