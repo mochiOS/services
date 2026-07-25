@@ -100,7 +100,15 @@ pub(crate) fn composite_and_present(
     let Some(frame_bytes) = frame_pixels.checked_mul(4) else {
         return errno_status(mochi_user_syscall::ERANGE);
     };
-    let Some(present_rect) = clip_present_rect(damage, frame_w, frame_h) else {
+    // A newly allocated shared frame has no preserved pixels outside the damage
+    // rectangle. Rebuild the complete image before its first transfer, and also
+    // after a failed present marks the display mapping for re-establishment.
+    let effective_damage = if present_frame.sent_to_display {
+        damage
+    } else {
+        None
+    };
+    let Some(present_rect) = clip_present_rect(effective_damage, frame_w, frame_h) else {
         return 0;
     };
     let rect_left = present_rect.x as usize;
@@ -226,7 +234,7 @@ pub(crate) fn composite_and_present(
         )
     };
     request.fill(0);
-    let partial_present = damage.is_some()
+    let partial_present = effective_damage.is_some()
         && (present_rect.x != 0
             || present_rect.y != 0
             || present_rect.width as usize != frame_w
