@@ -242,47 +242,16 @@ pub(crate) fn handle_input_event(
     event: &platform::input::InputEvent,
 ) -> Option<Rect> {
     match event.kind {
-        platform::input::EVENT_KIND_POINTER_MOVE => {
-            *pointer_x = pointer_x.saturating_add(event.value_x);
-            *pointer_y = pointer_y.saturating_add(event.value_y);
-            if *pointer_x < 0 {
-                *pointer_x = 0;
-            }
-            if *pointer_y < 0 {
-                *pointer_y = 0;
-            }
-            let max_x = display_width.saturating_sub(1).min(MAX_DIMENSION) as i32;
-            let max_y = display_height.saturating_sub(1).min(MAX_DIMENSION) as i32;
-            if *pointer_x > max_x {
-                *pointer_x = max_x;
-            }
-            if *pointer_y > max_y {
-                *pointer_y = max_y;
-            }
-            let damage =
-                apply_pointer_grab(surfaces, windows, pointer_grab, *pointer_x, *pointer_y);
-            dispatch_pointer_motion(surfaces, windows, *pointer_x, *pointer_y, pointer_focus);
-            damage
-        }
-        platform::input::EVENT_KIND_POINTER_ABSOLUTE => {
-            let max_x = display_width.saturating_sub(1).min(MAX_DIMENSION);
-            let max_y = display_height.saturating_sub(1).min(MAX_DIMENSION);
-            let x = event.value_x.clamp(0, 32_767) as u32;
-            let y = event.value_y.clamp(0, 32_767) as u32;
-            *pointer_x = if max_x == 0 {
-                0
-            } else {
-                ((u64::from(x) * u64::from(max_x)) / 32_767) as i32
-            };
-            *pointer_y = if max_y == 0 {
-                0
-            } else {
-                ((u64::from(y) * u64::from(max_y)) / 32_767) as i32
-            };
-            let damage =
-                apply_pointer_grab(surfaces, windows, pointer_grab, *pointer_x, *pointer_y);
-            dispatch_pointer_motion(surfaces, windows, *pointer_x, *pointer_y, pointer_focus);
-            damage
+        platform::input::EVENT_KIND_POINTER_MOVE | platform::input::EVENT_KIND_POINTER_ABSOLUTE => {
+            update_pointer_position(pointer_x, pointer_y, display_width, display_height, event);
+            finish_pointer_motion(
+                surfaces,
+                windows,
+                pointer_grab,
+                *pointer_x,
+                *pointer_y,
+                pointer_focus,
+            )
         }
         platform::input::EVENT_KIND_POINTER_BUTTON => {
             let target = hit_test(surfaces, windows, *pointer_x, *pointer_y);
@@ -366,6 +335,51 @@ pub(crate) fn handle_input_event(
         }
         _ => None,
     }
+}
+
+pub(crate) fn update_pointer_position(
+    pointer_x: &mut i32,
+    pointer_y: &mut i32,
+    display_width: u32,
+    display_height: u32,
+    event: &platform::input::InputEvent,
+) {
+    let max_x = display_width.saturating_sub(1).min(MAX_DIMENSION);
+    let max_y = display_height.saturating_sub(1).min(MAX_DIMENSION);
+    if event.kind == platform::input::EVENT_KIND_POINTER_MOVE {
+        *pointer_x = pointer_x
+            .saturating_add(event.value_x)
+            .clamp(0, max_x as i32);
+        *pointer_y = pointer_y
+            .saturating_add(event.value_y)
+            .clamp(0, max_y as i32);
+    } else if event.kind == platform::input::EVENT_KIND_POINTER_ABSOLUTE {
+        let x = event.value_x.clamp(0, 32_767) as u32;
+        let y = event.value_y.clamp(0, 32_767) as u32;
+        *pointer_x = if max_x == 0 {
+            0
+        } else {
+            ((u64::from(x) * u64::from(max_x)) / 32_767) as i32
+        };
+        *pointer_y = if max_y == 0 {
+            0
+        } else {
+            ((u64::from(y) * u64::from(max_y)) / 32_767) as i32
+        };
+    }
+}
+
+pub(crate) fn finish_pointer_motion(
+    surfaces: &mut [Surface],
+    windows: &[Window],
+    pointer_grab: &Option<PointerGrab>,
+    pointer_x: i32,
+    pointer_y: i32,
+    pointer_focus: &mut Option<usize>,
+) -> Option<Rect> {
+    let damage = apply_pointer_grab(surfaces, windows, pointer_grab, pointer_x, pointer_y);
+    dispatch_pointer_motion(surfaces, windows, pointer_x, pointer_y, pointer_focus);
+    damage
 }
 
 fn raise_window(

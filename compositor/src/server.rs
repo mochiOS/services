@@ -7,7 +7,10 @@ use crate::display::{
     display_claim_present_owner, display_request_info, sleep_one_tick, wait_for_service,
 };
 use crate::geometry::{Rect, merge_damage};
-use crate::input::{PointerGrab, PointerSerial, handle_input_event, subscribe_input_events};
+use crate::input::{
+    PointerGrab, PointerSerial, finish_pointer_motion, handle_input_event, subscribe_input_events,
+    update_pointer_position,
+};
 use crate::protocol::*;
 use crate::renderer::composite_and_present;
 use crate::state::CompositorState;
@@ -47,6 +50,32 @@ fn process_input_event(
         damage = merge_damage(damage, event_damage);
     }
     if is_pointer_motion(event) && !state.cursor_image.is_empty() {
+        let old = state
+            .cursor_visible
+            .then_some((state.cursor_x, state.cursor_y));
+        state.cursor_x = state.pointer_x;
+        state.cursor_y = state.pointer_y;
+        state.cursor_visible = true;
+        damage = merge_damage(
+            damage,
+            state
+                .cursor_image
+                .movement_damage(old, state.cursor_x, state.cursor_y),
+        );
+    }
+    damage
+}
+
+fn finish_coalesced_pointer_motion(state: &mut CompositorState) -> Option<Rect> {
+    let mut damage = finish_pointer_motion(
+        &mut state.surfaces,
+        &state.windows,
+        &state.pointer_grab,
+        state.pointer_x,
+        state.pointer_y,
+        &mut state.pointer_focus,
+    );
+    if !state.cursor_image.is_empty() {
         let old = state
             .cursor_visible
             .then_some((state.cursor_x, state.cursor_y));
@@ -314,8 +343,17 @@ pub(crate) fn run() -> ! {
             let event = unsafe {
                 core::ptr::read_unaligned(buf.as_ptr().cast::<platform::input::InputEvent>())
             };
-            let mut input_damage = process_input_event(&mut state, &event, None);
-            if is_pointer_motion(&event) {
+            let input_damage = if is_pointer_motion(&event) {
+                update_pointer_position(
+                    &mut state.pointer_x,
+                    &mut state.pointer_y,
+                    state.display_width,
+                    state.display_height,
+                    &event,
+                );
+                // Give the input pipeline one scheduling turn to accumulate motion
+                // before the synchronous display transfer starts.
+                platform::thread::yield_now();
                 while let Ok(next_msg) = platform::ipc::try_wait(buf) {
                     let next_len = (next_msg & 0xffff_ffff) as usize;
                     if next_len == core::mem::size_of::<platform::input::InputEvent>() {
@@ -325,8 +363,13 @@ pub(crate) fn run() -> ! {
                             )
                         };
                         if is_pointer_motion(&next_event) {
-                            input_damage =
-                                process_input_event(&mut state, &next_event, input_damage);
+                            update_pointer_position(
+                                &mut state.pointer_x,
+                                &mut state.pointer_y,
+                                state.display_width,
+                                state.display_height,
+                                &next_event,
+                            );
                             continue;
                         }
                     }
@@ -335,7 +378,10 @@ pub(crate) fn run() -> ! {
                     pending_msg = Some(next_msg);
                     break;
                 }
-            }
+                finish_coalesced_pointer_motion(&mut state)
+            } else {
+                process_input_event(&mut state, &event, None)
+            };
             if input_damage.is_some() {
                 let _ = composite_and_present(
                     &state.surfaces,
