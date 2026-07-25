@@ -3,7 +3,7 @@ use mochi_user_platform as platform;
 use crate::client::{Client, ClientId};
 use crate::protocol::{DECOR_EVENT_WINDOW, WINDOW_STATE_NORMAL, errno_status, put_u32, put_u64};
 use crate::state::getrandom_u64;
-use crate::surface::{Surface, SurfaceHandle};
+use crate::surface::{Surface, SurfaceHandle, SurfaceRole};
 use crate::surface::{surface_extent, surface_index_by_handle};
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -137,6 +137,12 @@ pub(crate) fn notify_decorators(
     let Some(window) = windows.get(window_index) else {
         return;
     };
+    let Some(content_index) = content_surface_index_for_window(surfaces, window) else {
+        return;
+    };
+    if surfaces[content_index].role != SurfaceRole::Toplevel {
+        return;
+    }
     for client in clients
         .iter()
         .filter(|client| client.live && client.decoration_endpoint != 0)
