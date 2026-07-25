@@ -6,8 +6,9 @@ entry = "display.driver"
 
 [capabilities]
 requires = [
+    "device.gpu",
     "display.read",
+    "dma.allocate",
     "ipc.client",
     "ipc.server",
 ]
-

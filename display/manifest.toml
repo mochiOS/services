@@ -8,7 +8,9 @@ vendor = "mochiOS"
 path = "/system/services/display.driver"
 kind = "service"
 requires = [
+    "device.gpu",
     "display.read",
+    "dma.allocate",
     "ipc.client",
     "ipc.server",
 ]

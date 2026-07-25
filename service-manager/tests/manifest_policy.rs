@@ -51,21 +51,21 @@ fn main() {
     };
     assert_eq!(manager_binary.kind.as_deref(), Some("service"));
 
-    let drivers = match package::parse_manifest(DRIVERS_MANIFEST) {
-        Some(manifest) => manifest,
-        None => panic!("drivers manifest was rejected"),
-    };
-    let drivers_binary = match drivers.binary("/system/services/drivers.service") {
-        Some(binary) => binary,
-        None => panic!("drivers binary is missing"),
-    };
     assert_eq!(
-        manager_binary.requires.len(),
-        drivers_binary.requires.len() + 1
+        manager_binary
+            .requires
+            .iter()
+            .map(alloc::string::String::as_str)
+            .collect::<alloc::vec::Vec<_>>(),
+        [
+            "fs.read.all",
+            "process.spawn",
+            "service.register",
+            "capabilities.manage",
+            "ipc.client",
+            "ipc.server",
+        ]
     );
-    for capability in &drivers_binary.requires {
-        assert!(manager_binary.requires.contains(capability));
-    }
     assert!(
         manager_binary
             .requires
@@ -96,7 +96,13 @@ fn main() {
     assert_capabilities(
         DISPLAY_MANIFEST,
         "/system/services/display.driver",
-        &["display.read", "ipc.client", "ipc.server"],
+        &[
+            "device.gpu",
+            "display.read",
+            "dma.allocate",
+            "ipc.client",
+            "ipc.server",
+        ],
     );
     assert_capabilities(
         COMPOSITOR_MANIFEST,
