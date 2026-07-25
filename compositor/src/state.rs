@@ -2,7 +2,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::client::Client;
-use crate::input::PointerSerial;
+use crate::cursor::CursorImage;
+use crate::input::{PointerGrab, PointerSerial};
 use crate::renderer::PresentFrame;
 use crate::surface::Surface;
 use crate::window::Window;
@@ -59,7 +60,12 @@ pub(crate) struct CompositorState {
     pub(crate) pointer_serials: [PointerSerial; 32],
     pub(crate) pointer_x: i32,
     pub(crate) pointer_y: i32,
+    pub(crate) cursor_x: i32,
+    pub(crate) cursor_y: i32,
+    pub(crate) cursor_visible: bool,
+    pub(crate) cursor_image: CursorImage,
     pub(crate) pointer_focus: Option<usize>,
+    pub(crate) pointer_grab: Option<PointerGrab>,
     pub(crate) keyboard_focus: Option<usize>,
     pub(crate) idle_cleanup_ticks: u32,
     pub(crate) input_subscribe_retry_ticks: u32,
@@ -93,7 +99,12 @@ impl CompositorState {
             pointer_serials: [PointerSerial::default(); 32],
             pointer_x: (display_width / 2).min(display_width.saturating_sub(1)) as i32,
             pointer_y: (display_height / 2).min(display_height.saturating_sub(1)) as i32,
+            cursor_x: 0,
+            cursor_y: 0,
+            cursor_visible: false,
+            cursor_image: CursorImage::default(),
             pointer_focus: None,
+            pointer_grab: None,
             keyboard_focus: None,
             idle_cleanup_ticks: 0,
             input_subscribe_retry_ticks: 0,

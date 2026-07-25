@@ -1,7 +1,11 @@
 use mochi_user_platform as platform;
 
 use crate::client::{Client, ClientId};
-use crate::protocol::{DECOR_EVENT_WINDOW, WINDOW_STATE_NORMAL, errno_status, put_u32, put_u64};
+use crate::geometry::{Rect, rounded_rect_contains};
+use crate::protocol::{
+    DECOR_EVENT_WINDOW, EVENT_CONFIGURE, WINDOW_STATE_NORMAL, errno_status, put_i32, put_u32,
+    put_u64,
+};
 use crate::state::getrandom_u64;
 use crate::surface::{Surface, SurfaceHandle, SurfaceRole};
 use crate::surface::{surface_extent, surface_index_by_handle};
@@ -31,6 +35,12 @@ pub(crate) struct Window {
     pub(crate) resizable: bool,
     pub(crate) close_requested: bool,
     pub(crate) metadata_sent: bool,
+    pub(crate) configured_width: u32,
+    pub(crate) configured_height: u32,
+    pub(crate) normal_x: i32,
+    pub(crate) normal_y: i32,
+    pub(crate) normal_width: u32,
+    pub(crate) normal_height: u32,
 }
 
 impl Window {
@@ -53,6 +63,12 @@ impl Window {
             resizable: true,
             close_requested: false,
             metadata_sent: false,
+            configured_width: 0,
+            configured_height: 0,
+            normal_x: 0,
+            normal_y: 0,
+            normal_width: 0,
+            normal_height: 0,
         }
     }
 }
@@ -107,7 +123,17 @@ pub(crate) fn send_window_metadata(window: &Window, surfaces: &[Surface], endpoi
         return;
     };
     let content = &surfaces[content_index];
-    let (content_width, content_height) = surface_extent(content);
+    let (current_width, current_height) = surface_extent(content);
+    let content_width = if window.configured_width == 0 {
+        current_width
+    } else {
+        window.configured_width
+    };
+    let content_height = if window.configured_height == 0 {
+        current_height
+    } else {
+        window.configured_height
+    };
     if content_width == 0 || content_height == 0 {
         return;
     }
@@ -126,6 +152,17 @@ pub(crate) fn send_window_metadata(window: &Window, surfaces: &[Surface], endpoi
     put_u32(&mut event, 44, title.len() as u32);
     event[48..48 + title.len()].copy_from_slice(title);
     let _ = platform::ipc::send(endpoint, &event);
+}
+
+pub(crate) fn send_window_configure(surface: &Surface, width: u32, height: u32) {
+    if surface.event_endpoint == 0 || width == 0 || height == 0 {
+        return;
+    }
+    let mut event = [0u8; 20];
+    put_u32(&mut event, 0, EVENT_CONFIGURE);
+    put_i32(&mut event, 4, width as i32);
+    put_i32(&mut event, 8, height as i32);
+    let _ = platform::ipc::send(surface.event_endpoint, &event);
 }
 
 pub(crate) fn notify_decorators(
@@ -161,4 +198,38 @@ pub(crate) fn reposition_window_surfaces(surfaces: &mut [Surface], window: &Wind
         surfaces[decor_index].x = content_x.saturating_sub(window.insets.left as i32);
         surfaces[decor_index].y = content_y.saturating_sub(window.insets.top as i32);
     }
+}
+
+pub(crate) fn point_inside_window_frame(
+    surfaces: &[Surface],
+    windows: &[Window],
+    surface: &Surface,
+    x: i32,
+    y: i32,
+) -> bool {
+    const CORNER_RADIUS: u32 = 14;
+
+    let Some(window_index) = window_index_by_id(windows, surface.window) else {
+        return true;
+    };
+    let window = &windows[window_index];
+    if window.decoration.is_none() {
+        return true;
+    }
+    let Some(content_index) = content_surface_index_for_window(surfaces, window) else {
+        return true;
+    };
+    let content = &surfaces[content_index];
+    let (width, height) = surface_extent(content);
+    let frame = Rect {
+        x: content.x.saturating_sub(window.insets.left as i32),
+        y: content.y.saturating_sub(window.insets.top as i32),
+        width: width
+            .saturating_add(window.insets.left)
+            .saturating_add(window.insets.right),
+        height: height
+            .saturating_add(window.insets.top)
+            .saturating_add(window.insets.bottom),
+    };
+    rounded_rect_contains(frame, CORNER_RADIUS, x, y)
 }

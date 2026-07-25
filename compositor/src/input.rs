@@ -1,13 +1,18 @@
 use mochi_user_platform as platform;
 
+use crate::geometry::{Rect, merge_damage};
 use crate::protocol::{
-    EVENT_FOCUS_GAINED, EVENT_FOCUS_LOST, EVENT_KEY, EVENT_POINTER_BUTTON, EVENT_POINTER_ENTER,
-    EVENT_POINTER_LEAVE, EVENT_POINTER_MOTION, put_i32, put_u32,
+    DECOR_EVENT_POINTER_BUTTON, EVENT_FOCUS_GAINED, EVENT_FOCUS_LOST, EVENT_KEY,
+    EVENT_POINTER_BUTTON, EVENT_POINTER_ENTER, EVENT_POINTER_LEAVE, EVENT_POINTER_MOTION, put_i32,
+    put_u32, put_u64,
 };
 use crate::state::MAX_DIMENSION;
 use crate::surface::surface_extent;
-use crate::surface::{Surface, SurfaceHandle};
-use crate::window::{Window, WindowId, content_surface_index_for_window, window_index_by_id};
+use crate::surface::{Surface, SurfaceHandle, SurfaceRole, read_current_pixel};
+use crate::window::{
+    Window, WindowId, content_surface_index_for_window, point_inside_window_frame,
+    window_index_by_id,
+};
 
 const INPUT_SERVICE_NAME: &str = "input.service";
 
@@ -20,6 +25,15 @@ pub(crate) struct PointerSerial {
     pub(crate) window: WindowId,
     pub(crate) decoration: SurfaceHandle,
     pub(crate) used: bool,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct PointerGrab {
+    pub(crate) window: WindowId,
+    pub(crate) pointer_x: i32,
+    pub(crate) pointer_y: i32,
+    pub(crate) content_x: i32,
+    pub(crate) content_y: i32,
 }
 
 fn find_service(name: &str) -> Option<u64> {
@@ -76,9 +90,9 @@ pub(crate) fn clear_focus_for_surface(
     }
 }
 
-fn hit_test(surfaces: &[Surface], x: i32, y: i32) -> Option<usize> {
+fn hit_test(surfaces: &[Surface], windows: &[Window], x: i32, y: i32) -> Option<usize> {
     let mut hit = None;
-    let mut best_z = 0u32;
+    let mut best_stack = (0u8, 0u32);
     for (index, surface) in surfaces.iter().enumerate() {
         if !surface.live || !surface.visible {
             continue;
@@ -86,9 +100,22 @@ fn hit_test(surfaces: &[Surface], x: i32, y: i32) -> Option<usize> {
         let (width, height) = surface_extent(surface);
         let right = surface.x.saturating_add(width as i32);
         let bottom = surface.y.saturating_add(height as i32);
-        if x >= surface.x && x < right && y >= surface.y && y < bottom && surface.z >= best_z {
+        if x >= surface.x
+            && x < right
+            && y >= surface.y
+            && y < bottom
+            && (surface.role.stack_layer(), surface.z) >= best_stack
+            && point_inside_window_frame(surfaces, windows, surface, x, y)
+        {
+            if surface.role == SurfaceRole::Panel {
+                let sx = x.saturating_sub(surface.x) as usize;
+                let sy = y.saturating_sub(surface.y) as usize;
+                if read_current_pixel(surface, sx, sy).is_none_or(|pixel| pixel >> 24 == 0) {
+                    continue;
+                }
+            }
             hit = Some(index);
-            best_z = surface.z;
+            best_stack = (surface.role.stack_layer(), surface.z);
         }
     }
     hit
@@ -106,17 +133,40 @@ pub(crate) fn send_event(endpoint: u64, kind: u32, a: i32, b: i32, c: u32) {
     let _ = platform::ipc::send(endpoint, &event);
 }
 
+fn send_decoration_button_event(
+    endpoint: u64,
+    window_token: u64,
+    x: i32,
+    y: i32,
+    detail: u32,
+    serial: u64,
+) {
+    if endpoint == 0 {
+        return;
+    }
+    let mut event = [0u8; 32];
+    put_u32(&mut event, 0, DECOR_EVENT_POINTER_BUTTON);
+    put_i32(&mut event, 4, x);
+    put_i32(&mut event, 8, y);
+    put_u32(&mut event, 12, detail);
+    put_u64(&mut event, 16, window_token);
+    put_u64(&mut event, 24, serial);
+    let _ = platform::ipc::send(endpoint, &event);
+}
+
 fn dispatch_pointer_motion(
     surfaces: &[Surface],
+    windows: &[Window],
     pointer_x: i32,
     pointer_y: i32,
     pointer_focus: &mut Option<usize>,
 ) {
-    let next = hit_test(surfaces, pointer_x, pointer_y);
+    let next = hit_test(surfaces, windows, pointer_x, pointer_y);
     if *pointer_focus != next {
         if let Some(index) = *pointer_focus {
             if let Some(surface) = surfaces.get(index)
                 && surface.live
+                && !surface.is_decoration
             {
                 send_event(surface.event_endpoint, EVENT_POINTER_LEAVE, 0, 0, 0);
             }
@@ -124,18 +174,21 @@ fn dispatch_pointer_motion(
         *pointer_focus = next;
         if let Some(index) = next {
             let surface = &surfaces[index];
-            send_event(
-                surface.event_endpoint,
-                EVENT_POINTER_ENTER,
-                pointer_x - surface.x,
-                pointer_y - surface.y,
-                0,
-            );
+            if !surface.is_decoration {
+                send_event(
+                    surface.event_endpoint,
+                    EVENT_POINTER_ENTER,
+                    pointer_x - surface.x,
+                    pointer_y - surface.y,
+                    0,
+                );
+            }
         }
     }
     if let Some(index) = *pointer_focus {
         if let Some(surface) = surfaces.get(index)
             && surface.live
+            && !surface.is_decoration
         {
             send_event(
                 surface.event_endpoint,
@@ -174,8 +227,9 @@ pub(crate) fn update_keyboard_focus(
 }
 
 pub(crate) fn handle_input_event(
-    surfaces: &[Surface],
-    windows: &[Window],
+    surfaces: &mut [Surface],
+    windows: &mut [Window],
+    next_z: &mut u32,
     next_pointer_serial: &mut u64,
     pointer_serials: &mut [PointerSerial],
     pointer_x: &mut i32,
@@ -184,8 +238,9 @@ pub(crate) fn handle_input_event(
     display_height: u32,
     pointer_focus: &mut Option<usize>,
     keyboard_focus: &mut Option<usize>,
+    pointer_grab: &mut Option<PointerGrab>,
     event: &platform::input::InputEvent,
-) -> bool {
+) -> Option<Rect> {
     match event.kind {
         platform::input::EVENT_KIND_POINTER_MOVE => {
             *pointer_x = pointer_x.saturating_add(event.value_x);
@@ -204,8 +259,10 @@ pub(crate) fn handle_input_event(
             if *pointer_y > max_y {
                 *pointer_y = max_y;
             }
-            dispatch_pointer_motion(surfaces, *pointer_x, *pointer_y, pointer_focus);
-            false
+            let damage =
+                apply_pointer_grab(surfaces, windows, pointer_grab, *pointer_x, *pointer_y);
+            dispatch_pointer_motion(surfaces, windows, *pointer_x, *pointer_y, pointer_focus);
+            damage
         }
         platform::input::EVENT_KIND_POINTER_ABSOLUTE => {
             let max_x = display_width.saturating_sub(1).min(MAX_DIMENSION);
@@ -222,11 +279,13 @@ pub(crate) fn handle_input_event(
             } else {
                 ((u64::from(y) * u64::from(max_y)) / 32_767) as i32
             };
-            dispatch_pointer_motion(surfaces, *pointer_x, *pointer_y, pointer_focus);
-            false
+            let damage =
+                apply_pointer_grab(surfaces, windows, pointer_grab, *pointer_x, *pointer_y);
+            dispatch_pointer_motion(surfaces, windows, *pointer_x, *pointer_y, pointer_focus);
+            damage
         }
         platform::input::EVENT_KIND_POINTER_BUTTON => {
-            let target = hit_test(surfaces, *pointer_x, *pointer_y);
+            let target = hit_test(surfaces, windows, *pointer_x, *pointer_y);
             if event.flags & platform::input::FLAG_PRESS != 0 {
                 let focus = target.and_then(|index| {
                     let surface = &surfaces[index];
@@ -238,17 +297,18 @@ pub(crate) fn handle_input_event(
                     }
                 });
                 update_keyboard_focus(surfaces, keyboard_focus, focus);
+                if let Some(index) = target {
+                    let window = surfaces[index].window;
+                    raise_window(surfaces, windows, next_z, window);
+                }
             }
             if let Some(index) = target {
                 let surface = &surfaces[index];
-                let mut detail = if surface.is_decoration {
-                    u32::from(event.detail)
-                } else {
-                    (u32::from(event.flags) << 16) | u32::from(event.detail)
-                };
+                let detail = (u32::from(event.flags) << 16) | u32::from(event.detail);
+                let mut serial = 0;
                 if event.flags & platform::input::FLAG_PRESS != 0 && surface.is_decoration {
                     *next_pointer_serial = next_pointer_serial.wrapping_add(1).max(1);
-                    detail = (*next_pointer_serial & 0xffff_ffff) as u32;
+                    serial = *next_pointer_serial;
                     if let Some(slot) = pointer_serials
                         .iter_mut()
                         .find(|record| record.used || record.serial == 0)
@@ -261,15 +321,32 @@ pub(crate) fn handle_input_event(
                         };
                     }
                 }
-                send_event(
-                    surface.event_endpoint,
-                    EVENT_POINTER_BUTTON,
-                    *pointer_x - surface.x,
-                    *pointer_y - surface.y,
-                    detail,
-                );
+                if surface.is_decoration {
+                    let window_token = window_index_by_id(windows, surface.window)
+                        .map(|index| windows[index].token)
+                        .unwrap_or(0);
+                    send_decoration_button_event(
+                        surface.event_endpoint,
+                        window_token,
+                        *pointer_x - surface.x,
+                        *pointer_y - surface.y,
+                        detail,
+                        serial,
+                    );
+                } else {
+                    send_event(
+                        surface.event_endpoint,
+                        EVENT_POINTER_BUTTON,
+                        *pointer_x - surface.x,
+                        *pointer_y - surface.y,
+                        detail,
+                    );
+                }
             }
-            false
+            if event.flags & platform::input::FLAG_RELEASE != 0 {
+                *pointer_grab = None;
+            }
+            None
         }
         platform::input::EVENT_KIND_KEY => {
             if let Some(index) = *keyboard_focus {
@@ -285,8 +362,83 @@ pub(crate) fn handle_input_event(
                     );
                 }
             }
-            false
+            None
         }
-        _ => false,
+        _ => None,
+    }
+}
+
+fn raise_window(
+    surfaces: &mut [Surface],
+    windows: &[Window],
+    next_z: &mut u32,
+    window_id: WindowId,
+) {
+    let Some(window_index) = window_index_by_id(windows, window_id) else {
+        return;
+    };
+    *next_z = next_z.wrapping_add(2).max(2);
+    if let Some(content_index) = content_surface_index_for_window(surfaces, &windows[window_index])
+    {
+        surfaces[content_index].z = next_z.saturating_sub(1);
+    }
+    if let Some(decoration) = windows[window_index].decoration
+        && let Some(index) = surfaces
+            .iter()
+            .position(|surface| surface.live && surface.handle == decoration)
+    {
+        surfaces[index].z = *next_z;
+    }
+}
+
+fn apply_pointer_grab(
+    surfaces: &mut [Surface],
+    windows: &[Window],
+    pointer_grab: &Option<PointerGrab>,
+    pointer_x: i32,
+    pointer_y: i32,
+) -> Option<Rect> {
+    const WORK_AREA_TOP: i32 = 40;
+
+    let Some(grab) = *pointer_grab else {
+        return None;
+    };
+    let Some(window_index) = window_index_by_id(windows, grab.window) else {
+        return None;
+    };
+    let Some(content_index) = content_surface_index_for_window(surfaces, &windows[window_index])
+    else {
+        return None;
+    };
+    let window = &windows[window_index];
+    let next_x = grab
+        .content_x
+        .saturating_add(pointer_x.saturating_sub(grab.pointer_x));
+    let next_y = grab
+        .content_y
+        .saturating_add(pointer_y.saturating_sub(grab.pointer_y))
+        .max(WORK_AREA_TOP.saturating_add(window.insets.top as i32));
+    if surfaces[content_index].x == next_x && surfaces[content_index].y == next_y {
+        return None;
+    }
+    let old_frame = window_frame_rect(&surfaces[content_index], window);
+    surfaces[content_index].x = next_x;
+    surfaces[content_index].y = next_y;
+    crate::window::reposition_window_surfaces(surfaces, window);
+    let new_frame = window_frame_rect(&surfaces[content_index], window);
+    merge_damage(Some(old_frame), new_frame)
+}
+
+fn window_frame_rect(content: &Surface, window: &Window) -> Rect {
+    let (width, height) = surface_extent(content);
+    Rect {
+        x: content.x.saturating_sub(window.insets.left as i32),
+        y: content.y.saturating_sub(window.insets.top as i32),
+        width: width
+            .saturating_add(window.insets.left)
+            .saturating_add(window.insets.right),
+        height: height
+            .saturating_add(window.insets.top)
+            .saturating_add(window.insets.bottom),
     }
 }

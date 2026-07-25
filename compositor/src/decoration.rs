@@ -1,7 +1,7 @@
 use mochi_user_platform as platform;
 
 use crate::client::{Client, ClientId};
-use crate::input::PointerSerial;
+use crate::input::{PointerGrab, PointerSerial};
 use crate::protocol::*;
 use crate::state::MAX_DIMENSION;
 use crate::surface::{
@@ -10,7 +10,8 @@ use crate::surface::{
 };
 use crate::window::{
     Insets, Window, content_surface_index_for_window, decoration_surface_index_for_window,
-    reposition_window_surfaces, send_window_metadata, window_index_by_token,
+    notify_decorators, reposition_window_surfaces, send_window_configure, send_window_metadata,
+    window_index_by_token,
 };
 
 const DECORATE_CAPABILITY: &str = "window.decorate";
@@ -42,10 +43,15 @@ pub(crate) fn handle_request(
     pointer_serials: &mut [PointerSerial],
     pointer_focus: &mut Option<usize>,
     keyboard_focus: &mut Option<usize>,
+    pointer_grab: &mut Option<PointerGrab>,
+    pointer_x: i32,
+    pointer_y: i32,
     client: ClientId,
     sender: u64,
     request: &[u8],
     needs_present: &mut bool,
+    display_width: u32,
+    display_height: u32,
 ) -> [u8; 16] {
     let mut reply = [0u8; 16];
     let Some(opcode) = read_u32(request, 0) else {
@@ -192,9 +198,11 @@ pub(crate) fn handle_request(
                 surface.current_width = pending_width;
                 surface.current_height = pending_height;
                 surface.current_stride = pending_stride;
+                surface.current_format = surface.pending_format;
                 surface.pending_width = 0;
                 surface.pending_height = 0;
                 surface.pending_stride = 0;
+                surface.pending_format = PIXEL_FORMAT_XRGB8888;
                 surface.pending_len = 0;
                 surface.pending_damage = None;
                 surface.pending_buffer = None;
@@ -205,6 +213,13 @@ pub(crate) fn handle_request(
             *needs_present = true;
             windows[window_index].decorator_endpoint = surfaces[decoration_index].event_endpoint;
             windows[window_index].insets = insets;
+            if let Some(content_index) =
+                content_surface_index_for_window(surfaces, &windows[window_index])
+            {
+                surfaces[content_index].y = surfaces[content_index]
+                    .y
+                    .max(40i32.saturating_add(insets.top as i32));
+            }
             reposition_window_surfaces(surfaces, &windows[window_index]);
             put_u32(&mut reply, 0, 0);
         }
@@ -281,11 +296,14 @@ pub(crate) fn handle_request(
                 if let Some(content_index) =
                     content_surface_index_for_window(surfaces, &windows[window_index])
                 {
-                    surfaces[content_index].x = surfaces[content_index].x.saturating_add(dx);
-                    surfaces[content_index].y = surfaces[content_index].y.saturating_add(dy);
+                    *pointer_grab = Some(PointerGrab {
+                        window: windows[window_index].id,
+                        pointer_x: pointer_x.saturating_sub(dx),
+                        pointer_y: pointer_y.saturating_sub(dy),
+                        content_x: surfaces[content_index].x,
+                        content_y: surfaces[content_index].y,
+                    });
                 }
-                reposition_window_surfaces(surfaces, &windows[window_index]);
-                *needs_present = true;
                 put_u32(&mut reply, 0, 0);
             } else {
                 put_u32(&mut reply, 0, 0);
@@ -308,12 +326,46 @@ pub(crate) fn handle_request(
             if opcode == OP_DECOR_MINIMIZE {
                 windows[window_index].state = WINDOW_STATE_MINIMIZED;
             } else {
-                windows[window_index].state =
-                    if windows[window_index].state == WINDOW_STATE_MAXIMIZED {
-                        WINDOW_STATE_NORMAL
+                let maximizing = windows[window_index].state != WINDOW_STATE_MAXIMIZED;
+                if let Some(content_index) =
+                    content_surface_index_for_window(surfaces, &windows[window_index])
+                {
+                    let (current_width, current_height) =
+                        crate::surface::surface_extent(&surfaces[content_index]);
+                    if maximizing {
+                        windows[window_index].normal_x = surfaces[content_index].x;
+                        windows[window_index].normal_y = surfaces[content_index].y;
+                        windows[window_index].normal_width = current_width;
+                        windows[window_index].normal_height = current_height;
+                        let insets = windows[window_index].insets;
+                        let width = display_width
+                            .saturating_sub(insets.left)
+                            .saturating_sub(insets.right)
+                            .max(1);
+                        let height = display_height
+                            .saturating_sub(40)
+                            .saturating_sub(insets.top)
+                            .saturating_sub(insets.bottom)
+                            .max(1);
+                        surfaces[content_index].x = insets.left as i32;
+                        surfaces[content_index].y = 40i32.saturating_add(insets.top as i32);
+                        windows[window_index].configured_width = width;
+                        windows[window_index].configured_height = height;
+                        send_window_configure(&surfaces[content_index], width, height);
+                        windows[window_index].state = WINDOW_STATE_MAXIMIZED;
                     } else {
-                        WINDOW_STATE_MAXIMIZED
-                    };
+                        let width = windows[window_index].normal_width.max(1);
+                        let height = windows[window_index].normal_height.max(1);
+                        surfaces[content_index].x = windows[window_index].normal_x;
+                        surfaces[content_index].y = windows[window_index].normal_y;
+                        windows[window_index].configured_width = width;
+                        windows[window_index].configured_height = height;
+                        send_window_configure(&surfaces[content_index], width, height);
+                        windows[window_index].state = WINDOW_STATE_NORMAL;
+                    }
+                    reposition_window_surfaces(surfaces, &windows[window_index]);
+                    notify_decorators(clients, windows, surfaces, window_index);
+                }
             }
             let visible = windows[window_index].state != WINDOW_STATE_MINIMIZED;
             if let Some(content_index) =

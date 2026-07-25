@@ -1,11 +1,13 @@
 use mochi_user_platform as platform;
 
 use crate::client::{Client, ClientId, cleanup_client, cleanup_dead_clients, client_id_for_sender};
+use crate::cursor::CursorImage;
+use crate::decoration::sender_has_overlay_compat_capability;
 use crate::display::{
     display_claim_present_owner, display_request_info, sleep_one_tick, wait_for_service,
 };
-use crate::geometry::Rect;
-use crate::input::{PointerSerial, handle_input_event, subscribe_input_events};
+use crate::geometry::{Rect, merge_damage};
+use crate::input::{PointerGrab, PointerSerial, handle_input_event, subscribe_input_events};
 use crate::protocol::*;
 use crate::renderer::composite_and_present;
 use crate::state::CompositorState;
@@ -14,6 +16,52 @@ use crate::window::Window;
 
 const IDLE_CLEANUP_YIELDS: u32 = 64;
 static mut IPC_BUF: [u8; 4128] = [0; 4128];
+
+fn is_pointer_motion(event: &platform::input::InputEvent) -> bool {
+    matches!(
+        event.kind,
+        platform::input::EVENT_KIND_POINTER_MOVE | platform::input::EVENT_KIND_POINTER_ABSOLUTE
+    )
+}
+
+fn process_input_event(
+    state: &mut CompositorState,
+    event: &platform::input::InputEvent,
+    mut damage: Option<Rect>,
+) -> Option<Rect> {
+    if let Some(event_damage) = handle_input_event(
+        &mut state.surfaces,
+        &mut state.windows,
+        &mut state.next_z,
+        &mut state.next_pointer_serial,
+        &mut state.pointer_serials,
+        &mut state.pointer_x,
+        &mut state.pointer_y,
+        state.display_width,
+        state.display_height,
+        &mut state.pointer_focus,
+        &mut state.keyboard_focus,
+        &mut state.pointer_grab,
+        event,
+    ) {
+        damage = merge_damage(damage, event_damage);
+    }
+    if is_pointer_motion(event) && !state.cursor_image.is_empty() {
+        let old = state
+            .cursor_visible
+            .then_some((state.cursor_x, state.cursor_y));
+        state.cursor_x = state.pointer_x;
+        state.cursor_y = state.pointer_y;
+        state.cursor_visible = true;
+        damage = merge_damage(
+            damage,
+            state
+                .cursor_image
+                .movement_damage(old, state.cursor_x, state.cursor_y),
+        );
+    }
+    damage
+}
 
 fn handle_request(
     clients: &mut [Client],
@@ -26,14 +74,21 @@ fn handle_request(
     pointer_serials: &mut [PointerSerial],
     pointer_focus: &mut Option<usize>,
     keyboard_focus: &mut Option<usize>,
+    pointer_grab: &mut Option<PointerGrab>,
+    pointer_x: i32,
+    pointer_y: i32,
     client: ClientId,
     sender: u64,
     request: &[u8],
     needs_present: &mut bool,
     present_damage: &mut Option<Rect>,
+    cursor_x: &mut i32,
+    cursor_y: &mut i32,
+    cursor_visible: &mut bool,
+    cursor_image: &mut CursorImage,
     _display_tid: u64,
-    _display_width: u32,
-    _display_height: u32,
+    display_width: u32,
+    display_height: u32,
     _display_stride: u32,
     _display_format: u32,
 ) -> [u8; 16] {
@@ -79,11 +134,57 @@ fn handle_request(
                 pointer_serials,
                 pointer_focus,
                 keyboard_focus,
+                pointer_grab,
+                pointer_x,
+                pointer_y,
                 client,
                 sender,
                 request,
                 needs_present,
+                display_width,
+                display_height,
             );
+        }
+        OP_SET_CURSOR_POSITION => {
+            if request.len() != 16 || !sender_has_overlay_compat_capability(sender) {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            }
+            let x = read_u32(request, 4).unwrap_or(0) as i32;
+            let y = read_u32(request, 8).unwrap_or(0) as i32;
+            let visible = read_u32(request, 12).unwrap_or(0) == 1;
+            if (visible && cursor_image.is_empty()) || read_u32(request, 12).unwrap_or(2) > 1 {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
+                return reply;
+            }
+            let old = (*cursor_visible).then_some((*cursor_x, *cursor_y));
+            *present_damage = Some(cursor_image.movement_damage(old, x, y));
+            *cursor_x = x;
+            *cursor_y = y;
+            *cursor_visible = visible;
+            *needs_present = true;
+            put_u32(&mut reply, 0, 0);
+        }
+        OP_SET_CURSOR_IMAGE => {
+            if request.len() < 20 || !sender_has_overlay_compat_capability(sender) {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            }
+            let width = read_u32(request, 4).unwrap_or(0);
+            let height = read_u32(request, 8).unwrap_or(0);
+            let hotspot_x = read_u32(request, 12).unwrap_or(u32::MAX) as i32;
+            let hotspot_y = read_u32(request, 16).unwrap_or(u32::MAX) as i32;
+            if !cursor_image.set_premultiplied_rgba(
+                width,
+                height,
+                hotspot_x,
+                hotspot_y,
+                &request[20..],
+            ) {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
+                return reply;
+            }
+            put_u32(&mut reply, 0, 0);
         }
         _ => put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL)),
     }
@@ -121,56 +222,74 @@ pub(crate) fn run() -> ! {
     );
     let _ = composite_and_present(
         &state.surfaces,
+        &state.windows,
         &mut state.present_frame,
         state.display_tid,
         state.display_width,
         state.display_height,
         state.display_stride,
         state.display_format,
+        state.cursor_x,
+        state.cursor_y,
+        state.cursor_visible,
+        &state.cursor_image,
         None,
     );
+    let mut pending_msg: Option<u64> = None;
+    let mut pending_buf = [0u8; 4128];
     loop {
         let buf = unsafe {
             core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(IPC_BUF).cast::<u8>(), 4128)
         };
-        let msg = match platform::ipc::try_wait(buf) {
-            Ok(msg) => {
-                state.idle_cleanup_ticks = 0;
-                msg
-            }
-            Err(_) => {
-                state.idle_cleanup_ticks = state.idle_cleanup_ticks.wrapping_add(1);
-                state.input_subscribe_retry_ticks =
-                    state.input_subscribe_retry_ticks.wrapping_add(1);
-                if !state.input_subscribed
-                    && state.input_subscribe_retry_ticks >= IDLE_CLEANUP_YIELDS
-                {
-                    state.input_subscribe_retry_ticks = 0;
-                    state.input_subscribed = subscribe_input_events(endpoint);
-                }
-                if state.idle_cleanup_ticks >= IDLE_CLEANUP_YIELDS {
+        let msg = if let Some(msg) = pending_msg.take() {
+            let len = ((msg & 0xffff_ffff) as usize).min(buf.len());
+            buf[..len].copy_from_slice(&pending_buf[..len]);
+            msg
+        } else {
+            match platform::ipc::try_wait(buf) {
+                Ok(msg) => {
                     state.idle_cleanup_ticks = 0;
-                    if cleanup_dead_clients(
-                        &mut state.clients,
-                        &mut state.surfaces,
-                        &mut state.windows,
-                        &mut state.pointer_focus,
-                        &mut state.keyboard_focus,
-                    ) {
-                        let _ = composite_and_present(
-                            &state.surfaces,
-                            &mut state.present_frame,
-                            state.display_tid,
-                            state.display_width,
-                            state.display_height,
-                            state.display_stride,
-                            state.display_format,
-                            None,
-                        );
-                    }
+                    msg
                 }
-                sleep_one_tick();
-                continue;
+                Err(_) => {
+                    state.idle_cleanup_ticks = state.idle_cleanup_ticks.wrapping_add(1);
+                    state.input_subscribe_retry_ticks =
+                        state.input_subscribe_retry_ticks.wrapping_add(1);
+                    if !state.input_subscribed
+                        && state.input_subscribe_retry_ticks >= IDLE_CLEANUP_YIELDS
+                    {
+                        state.input_subscribe_retry_ticks = 0;
+                        state.input_subscribed = subscribe_input_events(endpoint);
+                    }
+                    if state.idle_cleanup_ticks >= IDLE_CLEANUP_YIELDS {
+                        state.idle_cleanup_ticks = 0;
+                        if cleanup_dead_clients(
+                            &mut state.clients,
+                            &mut state.surfaces,
+                            &mut state.windows,
+                            &mut state.pointer_focus,
+                            &mut state.keyboard_focus,
+                        ) {
+                            let _ = composite_and_present(
+                                &state.surfaces,
+                                &state.windows,
+                                &mut state.present_frame,
+                                state.display_tid,
+                                state.display_width,
+                                state.display_height,
+                                state.display_stride,
+                                state.display_format,
+                                state.cursor_x,
+                                state.cursor_y,
+                                state.cursor_visible,
+                                &state.cursor_image,
+                                None,
+                            );
+                        }
+                    }
+                    sleep_one_tick();
+                    continue;
+                }
             }
         };
         let sender = msg >> 32;
@@ -195,29 +314,43 @@ pub(crate) fn run() -> ! {
             let event = unsafe {
                 core::ptr::read_unaligned(buf.as_ptr().cast::<platform::input::InputEvent>())
             };
-            let needs_present = handle_input_event(
-                &state.surfaces,
-                &state.windows,
-                &mut state.next_pointer_serial,
-                &mut state.pointer_serials,
-                &mut state.pointer_x,
-                &mut state.pointer_y,
-                state.display_width,
-                state.display_height,
-                &mut state.pointer_focus,
-                &mut state.keyboard_focus,
-                &event,
-            );
-            if needs_present {
+            let mut input_damage = process_input_event(&mut state, &event, None);
+            if is_pointer_motion(&event) {
+                while let Ok(next_msg) = platform::ipc::try_wait(buf) {
+                    let next_len = (next_msg & 0xffff_ffff) as usize;
+                    if next_len == core::mem::size_of::<platform::input::InputEvent>() {
+                        let next_event = unsafe {
+                            core::ptr::read_unaligned(
+                                buf.as_ptr().cast::<platform::input::InputEvent>(),
+                            )
+                        };
+                        if is_pointer_motion(&next_event) {
+                            input_damage =
+                                process_input_event(&mut state, &next_event, input_damage);
+                            continue;
+                        }
+                    }
+                    let copy_len = next_len.min(buf.len());
+                    pending_buf[..copy_len].copy_from_slice(&buf[..copy_len]);
+                    pending_msg = Some(next_msg);
+                    break;
+                }
+            }
+            if input_damage.is_some() {
                 let _ = composite_and_present(
                     &state.surfaces,
+                    &state.windows,
                     &mut state.present_frame,
                     state.display_tid,
                     state.display_width,
                     state.display_height,
                     state.display_stride,
                     state.display_format,
-                    None,
+                    state.cursor_x,
+                    state.cursor_y,
+                    state.cursor_visible,
+                    &state.cursor_image,
+                    input_damage,
                 );
             }
             continue;
@@ -248,11 +381,18 @@ pub(crate) fn run() -> ! {
             &mut state.pointer_serials,
             &mut state.pointer_focus,
             &mut state.keyboard_focus,
+            &mut state.pointer_grab,
+            state.pointer_x,
+            state.pointer_y,
             client,
             sender,
             &buf[..len],
             &mut needs_present,
             &mut present_damage,
+            &mut state.cursor_x,
+            &mut state.cursor_y,
+            &mut state.cursor_visible,
+            &mut state.cursor_image,
             state.display_tid,
             state.display_width,
             state.display_height,
@@ -272,12 +412,17 @@ pub(crate) fn run() -> ! {
             if needs_present {
                 let status = composite_and_present(
                     &state.surfaces,
+                    &state.windows,
                     &mut state.present_frame,
                     state.display_tid,
                     state.display_width,
                     state.display_height,
                     state.display_stride,
                     state.display_format,
+                    state.cursor_x,
+                    state.cursor_y,
+                    state.cursor_visible,
+                    &state.cursor_image,
                     present_damage,
                 );
                 if status == 0 {

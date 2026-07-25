@@ -53,6 +53,15 @@ impl SurfaceRole {
             Self::SecureOverlay => Err(errno_status(mochi_user_syscall::EACCES)),
         }
     }
+
+    pub(crate) const fn stack_layer(self) -> u8 {
+        match self {
+            Self::Background => 0,
+            Self::Toplevel | Self::Popup => 1,
+            Self::Panel => 2,
+            Self::SecureOverlay => 3,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -88,6 +97,7 @@ pub(crate) struct SurfaceBuffer {
     pub(crate) height: u32,
     pub(crate) stride: u32,
     pub(crate) pixels: usize,
+    pub(crate) format: u32,
 }
 
 #[derive(Clone)]
@@ -110,6 +120,7 @@ pub(crate) struct Surface {
     pub(crate) pending_width: u32,
     pub(crate) pending_height: u32,
     pub(crate) pending_stride: u32,
+    pub(crate) pending_format: u32,
     pub(crate) pending_len: usize,
     pub(crate) pending_bytes_received: usize,
     pub(crate) awaiting_buffer: bool,
@@ -119,6 +130,7 @@ pub(crate) struct Surface {
     pub(crate) current_width: u32,
     pub(crate) current_height: u32,
     pub(crate) current_stride: u32,
+    pub(crate) current_format: u32,
     pub(crate) current_buffer: Option<SurfaceBuffer>,
     pub(crate) current: Vec<u32>,
     pub(crate) z: u32,
@@ -145,6 +157,7 @@ impl Surface {
             pending_width: 0,
             pending_height: 0,
             pending_stride: 0,
+            pending_format: PIXEL_FORMAT_XRGB8888,
             pending_len: 0,
             pending_bytes_received: 0,
             awaiting_buffer: false,
@@ -154,6 +167,7 @@ impl Surface {
             current_width: 0,
             current_height: 0,
             current_stride: 0,
+            current_format: PIXEL_FORMAT_XRGB8888,
             current_buffer: None,
             current: Vec::new(),
             z: 0,
@@ -179,6 +193,7 @@ impl Surface {
         self.pending_width = 0;
         self.pending_height = 0;
         self.pending_stride = 0;
+        self.pending_format = PIXEL_FORMAT_XRGB8888;
         self.pending_len = 0;
         self.pending_bytes_received = 0;
         self.awaiting_buffer = false;
@@ -188,6 +203,7 @@ impl Surface {
         self.current_width = 0;
         self.current_height = 0;
         self.current_stride = 0;
+        self.current_format = PIXEL_FORMAT_XRGB8888;
         self.current_buffer = None;
         self.current.clear();
         self.z = 0;
@@ -304,7 +320,7 @@ fn resize_buffer(buffer: &mut Vec<u32>, width: u32, height: u32) -> bool {
 }
 
 pub(crate) fn surface_has_current_pixels(surface: &Surface) -> bool {
-    if surface.role == SurfaceRole::Background {
+    if matches!(surface.role, SurfaceRole::Background | SurfaceRole::Panel) {
         let Some(surface_len) =
             (surface.current_width as usize).checked_mul(surface.current_height as usize)
         else {
@@ -327,7 +343,7 @@ pub(crate) fn surface_has_current_pixels(surface: &Surface) -> bool {
 }
 
 pub(crate) fn read_current_pixel(surface: &Surface, sx: usize, sy: usize) -> Option<u32> {
-    if surface.role == SurfaceRole::Background {
+    if matches!(surface.role, SurfaceRole::Background | SurfaceRole::Panel) {
         let width = usize::try_from(surface.current_width).ok()?;
         let index = sy.checked_mul(width)?.checked_add(sx)?;
         return surface.current.get(index).copied();
@@ -471,8 +487,10 @@ fn validate_buffer_layout(
     expected_width: u32,
     expected_height: u32,
 ) -> Result<(usize, usize, usize), u32> {
-    if format != PIXEL_FORMAT_XRGB8888
-        || width == 0
+    if !matches!(
+        format,
+        PIXEL_FORMAT_XRGB8888 | PIXEL_FORMAT_ARGB8888_PREMULTIPLIED
+    ) || width == 0
         || height == 0
         || stride < width
         || width > MAX_DIMENSION
@@ -533,7 +551,7 @@ pub(crate) fn handle_shared_buffer(
         width,
         height,
         stride,
-        PIXEL_FORMAT_XRGB8888,
+        surface.pending_format,
         surface.width,
         surface.height,
     ) else {
@@ -560,6 +578,7 @@ pub(crate) fn handle_shared_buffer(
         height,
         stride,
         pixels,
+        format: surface.pending_format,
     });
     surface.pending_bytes_received = needed_bytes;
     surface.pending_len = pixels;
@@ -769,7 +788,14 @@ pub(crate) fn handle_request(
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
                 return reply;
             };
-            let attach_reject_reason = if format != PIXEL_FORMAT_XRGB8888 {
+            let attach_reject_reason = if !matches!(
+                format,
+                PIXEL_FORMAT_XRGB8888 | PIXEL_FORMAT_ARGB8888_PREMULTIPLIED
+            ) {
+                Some(1)
+            } else if format == PIXEL_FORMAT_ARGB8888_PREMULTIPLIED
+                && surfaces[index].role != SurfaceRole::Panel
+            {
                 Some(1)
             } else if width == 0 {
                 Some(2)
@@ -804,6 +830,7 @@ pub(crate) fn handle_request(
                 surface.pending_width = width;
                 surface.pending_height = height;
                 surface.pending_stride = stride;
+                surface.pending_format = format;
                 surface.pending_len = pixels;
                 surface.pending_bytes_received = 0;
                 surface.pending.clear();
@@ -814,6 +841,7 @@ pub(crate) fn handle_request(
                         && buffer.height == height
                         && buffer.stride == stride
                         && buffer.pixels == pixels
+                        && buffer.format == format
                     {
                         surface.pending_buffer = Some(buffer.clone());
                         surface.pending_bytes_received = buffer.byte_len;
@@ -877,6 +905,7 @@ pub(crate) fn handle_request(
                 surface.pending_width = width;
                 surface.pending_height = height;
                 surface.pending_stride = stride;
+                surface.pending_format = format;
                 surface.pending_len = pixels;
                 surface.pending_bytes_received = needed;
                 surface.pending_buffer = None;
@@ -916,6 +945,7 @@ pub(crate) fn handle_request(
                     surface.pending_width = buffer.width;
                     surface.pending_height = buffer.height;
                     surface.pending_stride = buffer.stride;
+                    surface.pending_format = buffer.format;
                     surface.pending_len = buffer.pixels;
                     surface.pending_bytes_received = buffer.byte_len;
                     surface.pending_buffer = Some(buffer);
@@ -933,13 +963,21 @@ pub(crate) fn handle_request(
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
                 return reply;
             };
-            let (pending_width, pending_height, pending_len, pending_stride, awaiting_buffer) = {
+            let (
+                pending_width,
+                pending_height,
+                pending_len,
+                pending_stride,
+                pending_format,
+                awaiting_buffer,
+            ) = {
                 let surface = &surfaces[index];
                 (
                     surface.pending_width,
                     surface.pending_height,
                     surface.pending_len,
                     surface.pending_stride,
+                    surface.pending_format,
                     surface.awaiting_buffer,
                 )
             };
@@ -964,7 +1002,7 @@ pub(crate) fn handle_request(
             }
             {
                 let surface = &mut surfaces[index];
-                if surface.role == SurfaceRole::Background {
+                if matches!(surface.role, SurfaceRole::Background | SurfaceRole::Panel) {
                     if let Some(buffer) = surface.pending_buffer.take() {
                         let can_patch_current = surface.current_width == pending_width
                             && surface.current_height == pending_height
@@ -1010,9 +1048,11 @@ pub(crate) fn handle_request(
                 }
                 surface.current_width = pending_width;
                 surface.current_height = pending_height;
+                surface.current_format = pending_format;
                 surface.pending_width = 0;
                 surface.pending_height = 0;
                 surface.pending_stride = 0;
+                surface.pending_format = PIXEL_FORMAT_XRGB8888;
                 surface.pending_len = 0;
                 surface.pending_bytes_received = 0;
                 surface.pending_damage = None;
