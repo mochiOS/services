@@ -5,9 +5,11 @@ edition = "2024"
 build = "build.rs"
 
 [dependencies]
+mochios-virtio-gpu-protocol = { path = "../../user/crates/virtio-gpu-protocol" }
 mochi-user-platform = { path = "../../user/crates/platform" }
 mochi-user-runtime = { path = "../../user/crates/runtime" }
 mochi-user-syscall = { path = "../../user/crates/syscall" }
+plugkit = { path = "../../core/crates/PlugKit/plugkit" }
 
 [[bin]]
 name = "display"
@@ -15,4 +17,3 @@ path = "src/main.rs"
 test = false
 bench = false
 harness = false
-
