@@ -32,7 +32,7 @@ const INSTALL_REQUEST_OPCODE: u32 = 0x494e_5354;
 const REPLY_OK: u64 = 0;
 const O_WRONLY: u64 = 0o1;
 const O_CREAT: u64 = 0o100;
-const O_TRUNC: u64 = 0o1000;
+const O_EXCL: u64 = 0o200;
 const FILE_MODE_644: u64 = 0o644;
 const FILE_MODE_755: u64 = 0o755;
 const SIGNATURE_CHUNK_LEN: usize = 4096;
@@ -469,7 +469,7 @@ fn write_file(path: &str, data: &[u8], mode: u64) -> Result<(), mochi_user_sysca
             }
         }
     }
-    let fd = platform::file::openat_path(-100, path, O_WRONLY | O_CREAT | O_TRUNC, mode).map_err(
+    let fd = platform::file::openat_path(-100, path, O_WRONLY | O_CREAT | O_EXCL, mode).map_err(
         |error| {
             diagnostic(&alloc::format!(
                 "package.service: open for write failed path={} errno={}",
@@ -481,20 +481,23 @@ fn write_file(path: &str, data: &[u8], mode: u64) -> Result<(), mochi_user_sysca
     )?;
     let mut offset = 0usize;
     while offset < data.len() {
-        let wrote = platform::file::write(
+        let wrote = match platform::file::write(
             fd,
             data[offset..].as_ptr() as u64,
             (data.len() - offset) as u64,
-        )
-        .map_err(|error| {
-            diagnostic(&alloc::format!(
-                "package.service: write failed path={} offset={} errno={}",
-                path,
-                offset,
-                error.errno().unwrap_or(0)
-            ));
-            error
-        })?;
+        ) {
+            Ok(wrote) => wrote,
+            Err(error) => {
+                diagnostic(&alloc::format!(
+                    "package.service: write failed path={} offset={} errno={}",
+                    path,
+                    offset,
+                    error.errno().unwrap_or(0)
+                ));
+                let _ = platform::file::close(fd);
+                return Err(error);
+            }
+        };
         if wrote == 0 {
             diagnostic(&alloc::format!(
                 "package.service: zero-byte write path={} offset={} requested={}",
@@ -506,13 +509,27 @@ fn write_file(path: &str, data: &[u8], mode: u64) -> Result<(), mochi_user_sysca
         }
         offset += wrote as usize;
     }
-    let _ = platform::file::close(fd);
+    let close_result = platform::file::close(fd);
     if offset != data.len() {
         return Err(mochi_user_syscall::SysError::from_raw(
             mochi_user_syscall::EIO as i64,
         ));
     }
-    Ok(())
+    close_result.map(|_| ())
+}
+
+fn rollback_created_files(paths: &[String]) {
+    for path in paths.iter().rev() {
+        if let Err(error) = platform::file::remove(path) {
+            if error.errno() != Some(mochi_user_syscall::ENOENT.wrapping_neg()) {
+                diagnostic(&alloc::format!(
+                    "package.service: rollback failed path={} errno={}",
+                    path,
+                    error.errno().unwrap_or(0)
+                ));
+            }
+        }
+    }
 }
 
 fn require_path_absent(path: &str) -> Result<(), mochi_user_syscall::SysError> {
@@ -668,30 +685,39 @@ fn install_package(mpkg_path: &str) -> Result<(), mochi_user_syscall::SysError> 
     }
     require_path_absent(&verification_path)?;
     require_path_absent(&manifest_path)?;
+    let mut created_paths = Vec::new();
     for (target, data, mode) in install_files {
-        write_file(&target, data, mode).map_err(|error| {
+        if let Err(error) = write_file(&target, data, mode) {
+            let _ = platform::file::remove(&target);
+            rollback_created_files(&created_paths);
             diagnostic(&alloc::format!(
                 "package.service: payload write failed path={} errno={}",
                 target,
                 error.errno().unwrap_or(0)
             ));
-            error
-        })?;
+            return Err(error);
+        }
+        created_paths.push(target);
     }
-    write_file(&verification_path, &verification_bytes, FILE_MODE_644).map_err(|error| {
+    if let Err(error) = write_file(&verification_path, &verification_bytes, FILE_MODE_644) {
+        let _ = platform::file::remove(&verification_path);
+        rollback_created_files(&created_paths);
         diagnostic(&alloc::format!(
             "package.service: verification record write failed errno={}",
             error.errno().unwrap_or(0)
         ));
-        error
-    })?;
-    write_file(&manifest_path, &manifest_entry.data, FILE_MODE_644).map_err(|error| {
+        return Err(error);
+    }
+    created_paths.push(verification_path.clone());
+    if let Err(error) = write_file(&manifest_path, &manifest_entry.data, FILE_MODE_644) {
+        let _ = platform::file::remove(&manifest_path);
+        rollback_created_files(&created_paths);
         diagnostic(&alloc::format!(
             "package.service: manifest write failed errno={}",
             error.errno().unwrap_or(0)
         ));
-        error
-    })?;
+        return Err(error);
+    }
     Ok(())
 }
 

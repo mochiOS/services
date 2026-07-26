@@ -33,6 +33,7 @@ _start:
 
 const MAX_PACKAGE_LEN: usize = 256 * 1024 * 1024;
 const IPC_BUFFER_LEN: usize = 4128;
+const PACKAGE_VERIFY_CAPABILITY: &str = "package.install";
 
 include!(concat!(env!("OUT_DIR"), "/trust_anchor.rs"));
 
@@ -433,16 +434,19 @@ fn reply_transfer_status(sender: u64, request_id: u64, status: i32) {
 }
 
 fn reply_error(sender: u64, request_id: u64, status: u64) {
+    let raw_status = status as i64;
+    let status = if raw_status > 0 {
+        -(raw_status as i32)
+    } else {
+        raw_status as i32
+    };
     diagnostic(&alloc::format!(
         "signature.service: request failed id={} status={}",
         request_id,
-        status as i64
+        status
     ));
     let mut buffer = [0; mochios_signature_protocol::ERROR_LEN];
-    let response = ErrorResponse {
-        request_id,
-        status: status as i64 as i32,
-    };
+    let response = ErrorResponse { request_id, status };
     if let Ok(length) = response.encode(&mut buffer) {
         let _ = platform::ipc::reply(sender, &buffer[..length]);
     }
@@ -502,6 +506,10 @@ fn run_server() -> ! {
         let sender = msg >> 32;
         let len = (msg & 0xffff_ffff) as usize;
         let request = &buf[..len];
+        if platform::capability::check_thread(sender, PACKAGE_VERIFY_CAPABILITY) != Ok(1) {
+            reply_error(sender, 0, mochi_user_syscall::EACCES);
+            continue;
+        }
         match decode_opcode(request) {
             Ok(Opcode::VerifyBegin) => match VerifyBegin::decode(request) {
                 Ok(begin) => {
@@ -569,14 +577,7 @@ fn run_server() -> ! {
                         Ok(verification) => {
                             reply_verified(sender, finish.request_id, &verification)
                         }
-                        Err(error) => reply_error(
-                            sender,
-                            finish.request_id,
-                            error
-                                .errno()
-                                .unwrap_or(mochi_user_syscall::EIO.wrapping_neg())
-                                .wrapping_neg(),
-                        ),
+                        Err(error) => reply_error(sender, finish.request_id, error.raw() as u64),
                     }
                 }
                 Err(_) => reply_error(sender, 0, mochi_user_syscall::EINVAL),
