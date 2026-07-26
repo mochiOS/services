@@ -25,10 +25,29 @@ fn spawn_service_by_package(
             mochi_user_syscall::EINVAL as i64,
         ));
     }
-    let manifest = package_manifest_by_id(index, package_id)?;
-    let service_path = service_binary_path(&manifest)
-        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
-    let caps = binary_caps(&manifest, service_path)?;
+    let manifest = package_manifest_by_id(index, package_id).map_err(|error| {
+        stderr_line(&format!(
+            "capability.service: package lookup failed id={} errno={}",
+            package_id,
+            error.errno().unwrap_or(0)
+        ));
+        error
+    })?;
+    let service_path = service_binary_path(&manifest).ok_or_else(|| {
+        stderr_line(&format!(
+            "capability.service: service binary missing id={}",
+            package_id
+        ));
+        mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
+    })?;
+    let caps = binary_caps(&manifest, service_path).map_err(|error| {
+        stderr_line(&format!(
+            "capability.service: capability resolution failed path={} errno={}",
+            service_path,
+            error.errno().unwrap_or(0)
+        ));
+        error
+    })?;
     platform::println!(
         "capability.service: parsed {} caps={}",
         service_path,
@@ -44,6 +63,14 @@ fn spawn_service_by_package(
         Some(args_nul.as_slice()),
         Some(caps_nul.as_slice()),
     )
+    .map_err(|error| {
+        stderr_line(&format!(
+            "capability.service: kernel spawn failed path={} errno={}",
+            service_path,
+            error.errno().unwrap_or(0)
+        ));
+        error
+    })
 }
 
 pub(crate) fn start_required_services(package_index: &PackageIndex) {

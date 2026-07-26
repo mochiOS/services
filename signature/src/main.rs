@@ -10,6 +10,11 @@ use core::arch::global_asm;
 use core::convert::TryInto;
 use ed25519_dalek::{Signature, VerifyingKey};
 use mochi_user_platform as platform;
+use mochios_certificate::{DeveloperCertificate, key_id};
+use mochios_signature_protocol::{
+    ErrorResponse, Opcode, StatusResponse, VerifiedResponse, VerifyBegin, VerifyChunk,
+    VerifyFinish, decode_opcode,
+};
 use sha2::{Digest, Sha256};
 
 global_asm!(
@@ -26,8 +31,10 @@ _start:
 "#
 );
 
-const VERIFY_PACKAGE_OPCODE: u32 = 0x5645_5246;
-const REPLY_OK: u64 = 0;
+const MAX_PACKAGE_LEN: usize = 256 * 1024 * 1024;
+const IPC_BUFFER_LEN: usize = 4128;
+
+include!(concat!(env!("OUT_DIR"), "/trust_anchor.rs"));
 
 #[derive(Clone)]
 struct MpkgHeader {
@@ -41,6 +48,30 @@ struct TarEntry {
     path: String,
     kind: u8,
     data: Vec<u8>,
+}
+
+struct Verification {
+    developer_id: String,
+    certificate_serial: u64,
+    subject_key_id: [u8; 32],
+    verified_package_id: String,
+    allowed_capabilities: Vec<String>,
+    manifest_digest: [u8; 32],
+    package_digest: [u8; 32],
+}
+
+struct Transfer {
+    sender: u64,
+    request_id: u64,
+    expected_len: usize,
+    expected_digest: [u8; 32],
+    bytes: Vec<u8>,
+}
+
+fn diagnostic(message: &str) {
+    platform::println!("{}", message);
+    let _ = platform::io::stderr(message.as_bytes());
+    let _ = platform::io::stderr(b"\n");
 }
 
 fn parse_decimal_u64(bytes: &[u8]) -> Option<u64> {
@@ -138,13 +169,14 @@ fn parse_header(bytes: &[u8]) -> Option<MpkgHeader> {
         return None;
     }
     let major = u16::from_le_bytes([bytes[4], bytes[5]]);
+    let minor = u16::from_le_bytes([bytes[6], bytes[7]]);
     let header_size = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
     let compression = bytes[10];
     let flags = bytes[11];
     let expanded_size = u64::from_le_bytes([
         bytes[12], bytes[13], bytes[14], bytes[15], bytes[16], bytes[17], bytes[18], bytes[19],
     ]) as usize;
-    if major != 1 || header_size != 32 || flags != 0 || compression > 1 {
+    if major != 1 || minor != 0 || header_size != 32 || flags != 0 || compression > 1 {
         return None;
     }
     if bytes[20..32].iter().any(|&b| b != 0) {
@@ -207,25 +239,6 @@ fn parse_tar_stream(bytes: &[u8]) -> Option<Vec<TarEntry>> {
 
 fn entry_by_path<'a>(entries: &'a [TarEntry], path: &str) -> Option<&'a TarEntry> {
     entries.iter().find(|entry| entry.path == path)
-}
-
-fn decode_cert(bytes: &[u8]) -> Option<VerifyingKey> {
-    if bytes.len() == 32 {
-        let mut key = [0u8; 32];
-        key.copy_from_slice(bytes);
-        return VerifyingKey::from_bytes(&key).ok();
-    }
-    let text = core::str::from_utf8(bytes).ok()?.trim();
-    if text.len() != 64 {
-        return None;
-    }
-    let mut key = [0u8; 32];
-    for idx in 0..32 {
-        let hi = u8::from_str_radix(&text[idx * 2..idx * 2 + 1], 16).ok()?;
-        let lo = u8::from_str_radix(&text[idx * 2 + 1..idx * 2 + 2], 16).ok()?;
-        key[idx] = (hi << 4) | lo;
-    }
-    VerifyingKey::from_bytes(&key).ok()
 }
 
 fn decode_sha256_digest(text: &str) -> Option<[u8; 32]> {
@@ -308,15 +321,12 @@ fn verify_payload_files(
     Ok(())
 }
 
-fn verify_package(mpkg_path: &str) -> Result<(), mochi_user_syscall::SysError> {
+fn verify_package(mpkg_path: &str) -> Result<Verification, mochi_user_syscall::SysError> {
     let bytes = platform::file::read_to_end_path(mpkg_path)?;
-    verify_package_bytes(mpkg_path, &bytes)
+    verify_package_bytes(&bytes)
 }
 
-fn verify_package_bytes(
-    _mpkg_path: &str,
-    bytes: &[u8],
-) -> Result<(), mochi_user_syscall::SysError> {
+fn verify_package_bytes(bytes: &[u8]) -> Result<Verification, mochi_user_syscall::SysError> {
     let header = parse_header(&bytes)
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     if header.compression != 0 {
@@ -334,6 +344,16 @@ fn verify_package_bytes(
     }
     let entries = parse_tar_stream(tar)
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    if entries.iter().any(|entry| {
+        entry.path.starts_with("signatures/chain/")
+            || (entry.path.starts_with("signatures/")
+                && entry.path != "signatures/manifest.sig"
+                && entry.path != "signatures/developer.cert")
+    }) {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
+    }
     let manifest = entry_by_path(&entries, "manifest.toml")
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOENT as i64))?;
     let sig = entry_by_path(&entries, "signatures/manifest.sig")
@@ -357,67 +377,104 @@ fn verify_package_bytes(
             mochi_user_syscall::EINVAL as i64,
         ));
     }
-    let verifier = decode_cert(&cert.data)
-        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    let certificate = DeveloperCertificate::decode(&cert.data)
+        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    let root_public_key = ROOT_PUBLIC_KEYS
+        .iter()
+        .find(|public_key| key_id(public_key) == certificate.issuer_key_id)
+        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64))?;
+    certificate
+        .verify(root_public_key, BUILD_UNIX_TIME, &manifest.package_id)
+        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64))?;
+    if REVOKED_CERTIFICATE_SERIALS
+        .binary_search(&certificate.serial_number)
+        .is_ok()
+    {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EACCES as i64,
+        ));
+    }
+    let verifier = VerifyingKey::from_bytes(&certificate.subject_public_key)
+        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     let signature_bytes: [u8; 64] =
         sig.data.as_slice().try_into().map_err(|_| {
             mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
         })?;
     let signature = Signature::from_bytes(&signature_bytes);
-    let digest = Sha256::digest(manifest_text.as_bytes());
-    let mut msg = Vec::with_capacity(32 + digest.len());
+    let manifest_hash = Sha256::digest(manifest_text.as_bytes());
+    let mut msg = Vec::with_capacity(32 + manifest_hash.len());
     msg.extend_from_slice(b"mochios-mpkg-manifest-v1\0");
-    msg.extend_from_slice(&digest);
+    msg.extend_from_slice(&manifest_hash);
     verifier
         .verify_strict(&msg, &signature)
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64))?;
     verify_payload_files(&manifest, &entries)?;
-    Ok(())
+    let mut manifest_digest = [0; 32];
+    manifest_digest.copy_from_slice(&manifest_hash);
+    let mut package_digest = [0; 32];
+    package_digest.copy_from_slice(&Sha256::digest(bytes));
+    Ok(Verification {
+        developer_id: certificate.developer_id,
+        certificate_serial: certificate.serial_number,
+        subject_key_id: certificate.subject_key_id,
+        verified_package_id: manifest.package_id,
+        allowed_capabilities: certificate.allowed_capabilities,
+        manifest_digest,
+        package_digest,
+    })
 }
 
-fn verify_package_request(buf: &[u8]) -> Result<(), mochi_user_syscall::SysError> {
-    if buf.len() <= 36 {
-        return Err(mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::EINVAL as i64,
-        ));
+fn reply_transfer_status(sender: u64, request_id: u64, status: i32) {
+    let mut buffer = [0; mochios_signature_protocol::ERROR_LEN];
+    let response = StatusResponse { request_id, status };
+    if let Ok(length) = response.encode(&mut buffer) {
+        let _ = platform::ipc::reply(sender, &buffer[..length]);
     }
-    let opcode = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
-    if opcode != VERIFY_PACKAGE_OPCODE {
-        return Err(mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::EINVAL as i64,
-        ));
-    }
-    let mut expected_digest = [0u8; 32];
-    expected_digest.copy_from_slice(&buf[4..36]);
-    let path_bytes = &buf[36..];
-    if path_bytes.is_empty() || path_bytes.contains(&0) {
-        return Err(mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::EINVAL as i64,
-        ));
-    }
-    let path = core::str::from_utf8(path_bytes)
-        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
-    if !path.starts_with('/') {
-        return Err(mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::EINVAL as i64,
-        ));
-    }
-    let bytes = platform::file::read_to_end_path(path)?;
-    let actual_digest = Sha256::digest(&bytes);
-    if actual_digest.as_slice() != expected_digest {
-        return Err(mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::EACCES as i64,
-        ));
-    }
-    verify_package_bytes(path, &bytes)
 }
 
-fn reply_status(sender: u64, result: Result<(), mochi_user_syscall::SysError>) {
-    let status = match result {
-        Ok(_) => REPLY_OK,
-        Err(err) => err.errno().unwrap_or(mochi_user_syscall::EIO),
+fn reply_error(sender: u64, request_id: u64, status: u64) {
+    diagnostic(&alloc::format!(
+        "signature.service: request failed id={} status={}",
+        request_id,
+        status as i64
+    ));
+    let mut buffer = [0; mochios_signature_protocol::ERROR_LEN];
+    let response = ErrorResponse {
+        request_id,
+        status: status as i64 as i32,
     };
-    let _ = platform::ipc::reply(sender, &status.to_le_bytes());
+    if let Ok(length) = response.encode(&mut buffer) {
+        let _ = platform::ipc::reply(sender, &buffer[..length]);
+    }
+}
+
+fn reply_verified(sender: u64, request_id: u64, verification: &Verification) {
+    let mut capabilities = Vec::new();
+    if capabilities
+        .try_reserve_exact(verification.allowed_capabilities.len())
+        .is_err()
+    {
+        reply_error(sender, request_id, mochi_user_syscall::ENOMEM);
+        return;
+    }
+    capabilities.extend(verification.allowed_capabilities.iter().map(String::as_str));
+    let response = VerifiedResponse {
+        request_id,
+        certificate_serial: verification.certificate_serial,
+        subject_key_id: verification.subject_key_id,
+        manifest_digest: verification.manifest_digest,
+        package_digest: verification.package_digest,
+        developer_id: &verification.developer_id,
+        verified_package_id: &verification.verified_package_id,
+        allowed_capabilities: &capabilities,
+    };
+    let mut buffer = [0; IPC_BUFFER_LEN];
+    match response.encode(&mut buffer) {
+        Ok(length) => {
+            let _ = platform::ipc::reply(sender, &buffer[..length]);
+        }
+        Err(_) => reply_error(sender, request_id, mochi_user_syscall::ERANGE),
+    }
 }
 
 fn run_server() -> ! {
@@ -432,7 +489,8 @@ fn run_server() -> ! {
             platform::process::exit(1);
         }
     };
-    let mut buf = [0u8; 512];
+    let mut transfer: Option<Transfer> = None;
+    let mut buf = [0u8; IPC_BUFFER_LEN];
     loop {
         let msg = match platform::ipc::wait(endpoint, &mut buf) {
             Ok(msg) => msg,
@@ -443,8 +501,88 @@ fn run_server() -> ! {
         };
         let sender = msg >> 32;
         let len = (msg & 0xffff_ffff) as usize;
-        let result = verify_package_request(&buf[..len]);
-        reply_status(sender, result);
+        let request = &buf[..len];
+        match decode_opcode(request) {
+            Ok(Opcode::VerifyBegin) => match VerifyBegin::decode(request) {
+                Ok(begin) => {
+                    let expected_len = usize::try_from(begin.package_len).unwrap_or(usize::MAX);
+                    if expected_len == 0 || expected_len > MAX_PACKAGE_LEN {
+                        reply_error(sender, begin.request_id, mochi_user_syscall::ERANGE);
+                        continue;
+                    }
+                    let mut bytes = Vec::new();
+                    if bytes.try_reserve_exact(expected_len).is_err() {
+                        reply_error(sender, begin.request_id, mochi_user_syscall::ENOMEM);
+                        continue;
+                    }
+                    transfer = Some(Transfer {
+                        sender,
+                        request_id: begin.request_id,
+                        expected_len,
+                        expected_digest: begin.package_digest,
+                        bytes,
+                    });
+                    reply_transfer_status(sender, begin.request_id, 0);
+                }
+                Err(_) => reply_error(sender, 0, mochi_user_syscall::EINVAL),
+            },
+            Ok(Opcode::VerifyChunk) => match VerifyChunk::decode(request) {
+                Ok(chunk) => {
+                    let Some(active) = transfer.as_mut() else {
+                        reply_error(sender, chunk.request_id, mochi_user_syscall::EINVAL);
+                        continue;
+                    };
+                    let offset = usize::try_from(chunk.offset).unwrap_or(usize::MAX);
+                    let valid = active.sender == sender
+                        && active.request_id == chunk.request_id
+                        && offset == active.bytes.len()
+                        && active
+                            .bytes
+                            .len()
+                            .checked_add(chunk.bytes.len())
+                            .is_some_and(|length| length <= active.expected_len);
+                    if !valid {
+                        transfer = None;
+                        reply_error(sender, chunk.request_id, mochi_user_syscall::EINVAL);
+                        continue;
+                    }
+                    active.bytes.extend_from_slice(chunk.bytes);
+                    reply_transfer_status(sender, chunk.request_id, 0);
+                }
+                Err(_) => reply_error(sender, 0, mochi_user_syscall::EINVAL),
+            },
+            Ok(Opcode::VerifyFinish) => match VerifyFinish::decode(request) {
+                Ok(finish) => {
+                    let Some(active) = transfer.take() else {
+                        reply_error(sender, finish.request_id, mochi_user_syscall::EINVAL);
+                        continue;
+                    };
+                    if active.sender != sender
+                        || active.request_id != finish.request_id
+                        || active.bytes.len() != active.expected_len
+                        || Sha256::digest(&active.bytes).as_slice() != active.expected_digest
+                    {
+                        reply_error(sender, finish.request_id, mochi_user_syscall::EACCES);
+                        continue;
+                    }
+                    match verify_package_bytes(&active.bytes) {
+                        Ok(verification) => {
+                            reply_verified(sender, finish.request_id, &verification)
+                        }
+                        Err(error) => reply_error(
+                            sender,
+                            finish.request_id,
+                            error
+                                .errno()
+                                .unwrap_or(mochi_user_syscall::EIO.wrapping_neg())
+                                .wrapping_neg(),
+                        ),
+                    }
+                }
+                Err(_) => reply_error(sender, 0, mochi_user_syscall::EINVAL),
+            },
+            _ => reply_error(sender, 0, mochi_user_syscall::EINVAL),
+        }
     }
 }
 
@@ -453,6 +591,7 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
     unsafe {
         let _ = platform::logger::init_from_initial_stack(sp);
     }
+    platform::println!("signature.service: trust domain {}", TRUST_DOMAIN);
     let Some(mpkg_path) = (unsafe { parse_initial_arg(sp) }) else {
         run_server();
     };

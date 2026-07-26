@@ -7,6 +7,10 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::arch::global_asm;
 use mochi_user_platform as platform;
+use mochios_signature_protocol::{
+    ErrorResponse, Opcode, StatusResponse, VerifiedResponse, VerifiedView, VerifyBegin,
+    VerifyChunk, VerifyFinish, decode_opcode,
+};
 use sha2::{Digest, Sha256};
 
 global_asm!(
@@ -24,7 +28,6 @@ _start:
 );
 
 const SIG_SERVICE_NAME: &str = "signature.service";
-const VERIFY_PACKAGE_OPCODE: u32 = 0x5645_5246;
 const INSTALL_REQUEST_OPCODE: u32 = 0x494e_5354;
 const REPLY_OK: u64 = 0;
 const O_WRONLY: u64 = 0o1;
@@ -32,6 +35,8 @@ const O_CREAT: u64 = 0o100;
 const O_TRUNC: u64 = 0o1000;
 const FILE_MODE_644: u64 = 0o644;
 const FILE_MODE_755: u64 = 0o755;
+const SIGNATURE_CHUNK_LEN: usize = 4096;
+const SIGNATURE_REPLY_LEN: usize = 4128;
 
 #[derive(Clone)]
 struct MpkgHeader {
@@ -46,6 +51,22 @@ struct TarEntry {
     path: String,
     kind: u8,
     data: Vec<u8>,
+}
+
+struct VerifiedPackage {
+    developer_id: String,
+    certificate_serial: u64,
+    subject_key_id: [u8; 32],
+    verified_package_id: String,
+    allowed_capabilities: Vec<String>,
+    manifest_digest: [u8; 32],
+    package_digest: [u8; 32],
+}
+
+fn diagnostic(message: &str) {
+    platform::println!("{}", message);
+    let _ = platform::io::stderr(message.as_bytes());
+    let _ = platform::io::stderr(b"\n");
 }
 
 fn parse_decimal_u64(bytes: &[u8]) -> Option<u64> {
@@ -147,6 +168,17 @@ fn is_valid_rel_path(path: &str) -> bool {
     !path.ends_with('/')
 }
 
+fn is_valid_abs_path(path: &str) -> bool {
+    path.starts_with('/')
+        && !path.contains('\\')
+        && !path.contains('\0')
+        && !path.contains("//")
+        && !path.ends_with('/')
+        && path[1..]
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+}
+
 fn join_path(prefix: &str, suffix: &str) -> String {
     if prefix.is_empty() {
         return suffix.to_string();
@@ -196,14 +228,14 @@ fn parse_header(bytes: &[u8]) -> Option<MpkgHeader> {
         return None;
     }
     let major = u16::from_le_bytes([bytes[4], bytes[5]]);
-    let _minor = u16::from_le_bytes([bytes[6], bytes[7]]);
+    let minor = u16::from_le_bytes([bytes[6], bytes[7]]);
     let header_size = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
     let compression = bytes[10];
     let flags = bytes[11];
     let expanded_size = u64::from_le_bytes([
         bytes[12], bytes[13], bytes[14], bytes[15], bytes[16], bytes[17], bytes[18], bytes[19],
     ]) as usize;
-    if major != 1 || header_size != 32 || flags != 0 || compression > 1 {
+    if major != 1 || minor != 0 || header_size != 32 || flags != 0 || compression > 1 {
         return None;
     }
     if bytes[20..32].iter().any(|&b| b != 0) {
@@ -267,37 +299,149 @@ fn entry_by_path<'a>(entries: &'a [TarEntry], path: &str) -> Option<&'a TarEntry
 }
 
 fn verify_with_signature_service(
-    mpkg_path: &str,
+    package_bytes: &[u8],
     package_digest: &[u8; 32],
-) -> Result<(), mochi_user_syscall::SysError> {
-    if !mpkg_path.starts_with('/') || mpkg_path.as_bytes().contains(&0) {
-        return Err(mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::EINVAL as i64,
-        ));
-    }
+) -> Result<VerifiedPackage, mochi_user_syscall::SysError> {
     let service_tid = platform::process::find_by_name(SIG_SERVICE_NAME)?;
     if service_tid == 0 {
         return Err(mochi_user_syscall::SysError::from_raw(
             mochi_user_syscall::ENOENT as i64,
         ));
     }
-    let mut request = Vec::with_capacity(4 + package_digest.len() + mpkg_path.len());
-    request.extend_from_slice(&VERIFY_PACKAGE_OPCODE.to_le_bytes());
-    request.extend_from_slice(package_digest);
-    request.extend_from_slice(mpkg_path.as_bytes());
-    let mut reply = [0u8; 8];
-    let msg = platform::ipc::call(service_tid, &request, &mut reply)?;
-    let len = (msg & 0xffff_ffff) as usize;
-    if len < 8 {
-        return Err(mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::EIO as i64,
-        ));
+    let request_id = platform::time::ticks().unwrap_or(0)
+        ^ u64::from_le_bytes(package_digest[..8].try_into().unwrap_or([0; 8]));
+    let begin = VerifyBegin {
+        request_id,
+        package_len: u64::try_from(package_bytes.len()).map_err(|_| {
+            mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ERANGE as i64)
+        })?,
+        package_digest: *package_digest,
+    };
+    let mut request = [0; SIGNATURE_REPLY_LEN];
+    let mut reply = [0; SIGNATURE_REPLY_LEN];
+    let begin_len = begin
+        .encode(&mut request)
+        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    call_for_status(service_tid, request_id, &request[..begin_len], &mut reply)?;
+
+    let mut offset = 0usize;
+    while offset < package_bytes.len() {
+        let end = core::cmp::min(offset + SIGNATURE_CHUNK_LEN, package_bytes.len());
+        let chunk = VerifyChunk {
+            request_id,
+            offset: offset as u64,
+            bytes: &package_bytes[offset..end],
+        };
+        let length = chunk.encode(&mut request).map_err(|_| {
+            mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
+        })?;
+        call_for_status(service_tid, request_id, &request[..length], &mut reply)?;
+        offset = end;
     }
-    let status = u64::from_le_bytes(reply);
-    if status == 0 {
-        Ok(())
-    } else {
-        Err(mochi_user_syscall::SysError::from_raw(status as i64))
+
+    let finish = VerifyFinish { request_id };
+    let finish_len = finish
+        .encode(&mut request)
+        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    let message = platform::ipc::call(service_tid, &request[..finish_len], &mut reply)?;
+    let reply_len = (message & 0xffff_ffff) as usize;
+    let response = reply
+        .get(..reply_len)
+        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EIO as i64))?;
+    match decode_opcode(response) {
+        Ok(Opcode::Verified) => {
+            let verified = VerifiedView::decode(response).map_err(|_| {
+                mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
+            })?;
+            if verified.request_id != request_id || verified.package_digest != *package_digest {
+                return Err(mochi_user_syscall::SysError::from_raw(
+                    mochi_user_syscall::EACCES as i64,
+                ));
+            }
+            let mut allowed_capabilities = Vec::new();
+            for capability in verified.allowed_capabilities() {
+                allowed_capabilities.push(
+                    capability
+                        .map_err(|_| {
+                            mochi_user_syscall::SysError::from_raw(
+                                mochi_user_syscall::EINVAL as i64,
+                            )
+                        })?
+                        .to_string(),
+                );
+            }
+            Ok(VerifiedPackage {
+                developer_id: verified.developer_id.to_string(),
+                certificate_serial: verified.certificate_serial,
+                subject_key_id: verified.subject_key_id,
+                verified_package_id: verified.verified_package_id.to_string(),
+                allowed_capabilities,
+                manifest_digest: verified.manifest_digest,
+                package_digest: verified.package_digest,
+            })
+        }
+        Ok(Opcode::Error) => {
+            let error = ErrorResponse::decode(response).map_err(|_| {
+                mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
+            })?;
+            Err(mochi_user_syscall::SysError::from_raw(error.status as i64))
+        }
+        other => {
+            diagnostic(&alloc::format!(
+                "package.service: invalid signature finish response len={} opcode={:?}",
+                reply_len,
+                other
+            ));
+            Err(mochi_user_syscall::SysError::from_raw(
+                mochi_user_syscall::EINVAL as i64,
+            ))
+        }
+    }
+}
+
+fn call_for_status(
+    service_tid: u64,
+    request_id: u64,
+    request: &[u8],
+    reply: &mut [u8],
+) -> Result<(), mochi_user_syscall::SysError> {
+    let message = platform::ipc::call(service_tid, request, reply).map_err(|error| {
+        diagnostic(&alloc::format!(
+            "package.service: signature IPC call failed errno={}",
+            error.errno().unwrap_or(0)
+        ));
+        error
+    })?;
+    let length = (message & 0xffff_ffff) as usize;
+    let response = reply
+        .get(..length)
+        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EIO as i64))?;
+    match decode_opcode(response) {
+        Ok(Opcode::Status) => {
+            let status = StatusResponse::decode(response).map_err(|_| {
+                mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
+            })?;
+            if status.request_id != request_id || status.status != 0 {
+                return Err(mochi_user_syscall::SysError::from_raw(status.status as i64));
+            }
+            Ok(())
+        }
+        Ok(Opcode::Error) => {
+            let error = ErrorResponse::decode(response).map_err(|_| {
+                mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
+            })?;
+            Err(mochi_user_syscall::SysError::from_raw(error.status as i64))
+        }
+        other => {
+            diagnostic(&alloc::format!(
+                "package.service: invalid signature status response len={} opcode={:?}",
+                length,
+                other
+            ));
+            Err(mochi_user_syscall::SysError::from_raw(
+                mochi_user_syscall::EINVAL as i64,
+            ))
+        }
     }
 }
 
@@ -312,21 +456,52 @@ fn write_file(path: &str, data: &[u8], mode: u64) -> Result<(), mochi_user_sysca
                 current.push_str(seg);
                 match platform::file::create_dir(&current, FILE_MODE_755) {
                     Ok(_) => {}
-                    Err(err) if err.errno() == Some(mochi_user_syscall::EEXIST) => {}
-                    Err(err) => return Err(err),
+                    Err(err) if err.errno() == Some(mochi_user_syscall::EEXIST.wrapping_neg()) => {}
+                    Err(err) => {
+                        diagnostic(&alloc::format!(
+                            "package.service: parent directory create failed path={} errno={}",
+                            current,
+                            err.errno().unwrap_or(0)
+                        ));
+                        return Err(err);
+                    }
                 }
             }
         }
     }
-    let fd = platform::file::openat_path(-100, path, O_WRONLY | O_CREAT | O_TRUNC, mode)?;
+    let fd = platform::file::openat_path(-100, path, O_WRONLY | O_CREAT | O_TRUNC, mode).map_err(
+        |error| {
+            diagnostic(&alloc::format!(
+                "package.service: open for write failed path={} errno={}",
+                path,
+                error.errno().unwrap_or(0)
+            ));
+            error
+        },
+    )?;
     let mut offset = 0usize;
     while offset < data.len() {
         let wrote = platform::file::write(
             fd,
             data[offset..].as_ptr() as u64,
             (data.len() - offset) as u64,
-        )?;
+        )
+        .map_err(|error| {
+            diagnostic(&alloc::format!(
+                "package.service: write failed path={} offset={} errno={}",
+                path,
+                offset,
+                error.errno().unwrap_or(0)
+            ));
+            error
+        })?;
         if wrote == 0 {
+            diagnostic(&alloc::format!(
+                "package.service: zero-byte write path={} offset={} requested={}",
+                path,
+                offset,
+                data.len() - offset
+            ));
             break;
         }
         offset += wrote as usize;
@@ -340,12 +515,25 @@ fn write_file(path: &str, data: &[u8], mode: u64) -> Result<(), mochi_user_sysca
     Ok(())
 }
 
+fn require_path_absent(path: &str) -> Result<(), mochi_user_syscall::SysError> {
+    match platform::file::open_path(path, 0) {
+        Ok(fd) => {
+            let _ = platform::file::close(fd);
+            Err(mochi_user_syscall::SysError::from_raw(
+                mochi_user_syscall::EEXIST as i64,
+            ))
+        }
+        Err(error) if error.errno() == Some(mochi_user_syscall::ENOENT.wrapping_neg()) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 fn install_package(mpkg_path: &str) -> Result<(), mochi_user_syscall::SysError> {
     let bytes = platform::file::read_to_end_path(mpkg_path)?;
     let digest = Sha256::digest(&bytes);
     let mut digest_bytes = [0u8; 32];
     digest_bytes.copy_from_slice(&digest);
-    verify_with_signature_service(mpkg_path, &digest_bytes)?;
+    let verification = verify_with_signature_service(&bytes, &digest_bytes)?;
 
     let header = parse_header(&bytes)
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
@@ -378,11 +566,40 @@ fn install_package(mpkg_path: &str) -> Result<(), mochi_user_syscall::SysError> 
             ));
         }
     }
+    if verification.verified_package_id != manifest.package_id
+        || verification.package_digest != digest_bytes
+    {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EACCES as i64,
+        ));
+    }
 
     let package_root = alloc::format!("/system/packages/{}", manifest.package_id);
     let manifest_path = alloc::format!("{}/manifest.toml", package_root);
-    write_file(&manifest_path, &manifest_entry.data, FILE_MODE_644)?;
-
+    let verification_path = alloc::format!("{}/verification.bin", package_root);
+    let capability_refs = verification
+        .allowed_capabilities
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let verification_record = VerifiedResponse {
+        request_id: 0,
+        certificate_serial: verification.certificate_serial,
+        subject_key_id: verification.subject_key_id,
+        manifest_digest: verification.manifest_digest,
+        package_digest: verification.package_digest,
+        developer_id: &verification.developer_id,
+        verified_package_id: &verification.verified_package_id,
+        allowed_capabilities: &capability_refs,
+    };
+    let mut verification_bytes = Vec::new();
+    verification_bytes
+        .try_reserve_exact(verification_record.encoded_len())
+        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOMEM as i64))?;
+    verification_bytes.resize(verification_record.encoded_len(), 0);
+    verification_record
+        .encode(&mut verification_bytes)
+        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     if manifest.files.is_empty() {
         return Err(mochi_user_syscall::SysError::from_raw(
             mochi_user_syscall::EINVAL as i64,
@@ -390,6 +607,7 @@ fn install_package(mpkg_path: &str) -> Result<(), mochi_user_syscall::SysError> 
     }
 
     let mut installed_payloads = Vec::new();
+    let mut install_files = Vec::new();
     for file in &manifest.files {
         let payload_path = manifest_payload_path(manifest.package_kind.as_deref(), &file.path)
             .ok_or_else(|| {
@@ -409,7 +627,7 @@ fn install_package(mpkg_path: &str) -> Result<(), mochi_user_syscall::SysError> 
                 mochi_user_syscall::EINVAL as i64,
             ));
         }
-        if !target.starts_with('/') {
+        if !is_valid_abs_path(&target) {
             return Err(mochi_user_syscall::SysError::from_raw(
                 mochi_user_syscall::EINVAL as i64,
             ));
@@ -426,11 +644,16 @@ fn install_package(mpkg_path: &str) -> Result<(), mochi_user_syscall::SysError> 
                 mochi_user_syscall::EINVAL as i64,
             ));
         }
-        write_file(&target, &entry.data, file.mode as u64)?;
-        installed_payloads.push(payload_path);
+        if file.mode & !0o777 != 0 {
+            return Err(mochi_user_syscall::SysError::from_raw(
+                mochi_user_syscall::EINVAL as i64,
+            ));
+        }
+        installed_payloads.push(payload_path.clone());
+        install_files.push((target, entry.data.as_slice(), file.mode as u64));
     }
 
-    for entry in entries {
+    for entry in &entries {
         if entry.kind == b'5' || !entry.path.starts_with("payload/") {
             continue;
         }
@@ -440,6 +663,35 @@ fn install_package(mpkg_path: &str) -> Result<(), mochi_user_syscall::SysError> 
             ));
         }
     }
+    for (target, _, _) in &install_files {
+        require_path_absent(target)?;
+    }
+    require_path_absent(&verification_path)?;
+    require_path_absent(&manifest_path)?;
+    for (target, data, mode) in install_files {
+        write_file(&target, data, mode).map_err(|error| {
+            diagnostic(&alloc::format!(
+                "package.service: payload write failed path={} errno={}",
+                target,
+                error.errno().unwrap_or(0)
+            ));
+            error
+        })?;
+    }
+    write_file(&verification_path, &verification_bytes, FILE_MODE_644).map_err(|error| {
+        diagnostic(&alloc::format!(
+            "package.service: verification record write failed errno={}",
+            error.errno().unwrap_or(0)
+        ));
+        error
+    })?;
+    write_file(&manifest_path, &manifest_entry.data, FILE_MODE_644).map_err(|error| {
+        diagnostic(&alloc::format!(
+            "package.service: manifest write failed errno={}",
+            error.errno().unwrap_or(0)
+        ));
+        error
+    })?;
     Ok(())
 }
 
@@ -503,6 +755,12 @@ fn run_server() -> ! {
         let sender = msg >> 32;
         let len = (msg & 0xffff_ffff) as usize;
         let request = parse_install_request(&buf[..len]).and_then(|path| install_package(&path));
+        if let Err(error) = request {
+            diagnostic(&alloc::format!(
+                "package.service: install request failed errno={}",
+                error.errno().unwrap_or(0)
+            ));
+        }
         reply_status(sender, request);
     }
 }

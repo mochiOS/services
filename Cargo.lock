@@ -24,6 +24,7 @@ dependencies = [
  "mochi-user-platform",
  "mochi-user-runtime",
  "mochi-user-syscall",
+ "mochios-signature-protocol",
  "sha2",
 ]
 
@@ -258,7 +259,19 @@ name = "mochios-capability-protocol"
 version = "0.1.0"
 
 [[package]]
+name = "mochios-certificate"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "sha2",
+]
+
+[[package]]
 name = "mochios-driver-control-protocol"
+version = "0.1.0"
+
+[[package]]
+name = "mochios-signature-protocol"
 version = "0.1.0"
 
 [[package]]
@@ -276,6 +289,7 @@ dependencies = [
  "mochi-user-platform",
  "mochi-user-runtime",
  "mochi-user-syscall",
+ "mochios-signature-protocol",
  "sha2",
 ]
 
@@ -405,6 +419,8 @@ dependencies = [
  "mochi-user-platform",
  "mochi-user-runtime",
  "mochi-user-syscall",
+ "mochios-certificate",
+ "mochios-signature-protocol",
  "sha2",
 ]
 

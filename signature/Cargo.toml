@@ -6,6 +6,8 @@ build = "build.rs"
 
 [dependencies]
 ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
+mochios-certificate = { path = "../../user/crates/certificate", default-features = false, features = ["alloc"] }
+mochios-signature-protocol = { path = "../../user/crates/signature-protocol" }
 mochi-user-platform = { path = "../../user/crates/platform" }
 mochi-user-runtime = { path = "../../user/crates/runtime" }
 mochi-user-syscall = { path = "../../user/crates/syscall" }
