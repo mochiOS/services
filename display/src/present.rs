@@ -81,3 +81,97 @@ impl PresentFrame<'_> {
         self.damage.validate(self.geometry)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const GEOMETRY: DisplayGeometry = DisplayGeometry {
+        width: 4,
+        height: 3,
+        stride: 6,
+        format: PIXEL_FORMAT_XRGB8888,
+    };
+
+    #[test]
+    fn geometry_requires_explicit_valid_stride_and_format() {
+        assert_eq!(GEOMETRY.byte_len(), Ok(72));
+        for invalid in [
+            DisplayGeometry {
+                width: 0,
+                ..GEOMETRY
+            },
+            DisplayGeometry {
+                height: 0,
+                ..GEOMETRY
+            },
+            DisplayGeometry {
+                stride: 3,
+                ..GEOMETRY
+            },
+            DisplayGeometry {
+                format: 2,
+                ..GEOMETRY
+            },
+            DisplayGeometry {
+                width: MAX_DIMENSION + 1,
+                ..GEOMETRY
+            },
+        ] {
+            assert_eq!(invalid.byte_len(), Err(EINVAL));
+        }
+    }
+
+    #[test]
+    fn damage_rejects_overflow_and_out_of_bounds_rectangles() {
+        assert_eq!(DamageRect::default().validate(GEOMETRY), Ok(()));
+        assert_eq!(DamageRect::full(GEOMETRY).validate(GEOMETRY), Ok(()));
+        assert_eq!(
+            DamageRect {
+                x: 3,
+                y: 0,
+                width: 2,
+                height: 1,
+            }
+            .validate(GEOMETRY),
+            Err(EINVAL)
+        );
+        assert_eq!(
+            DamageRect {
+                x: u32::MAX,
+                y: 0,
+                width: 2,
+                height: 1,
+            }
+            .validate(GEOMETRY),
+            Err(ERANGE)
+        );
+    }
+
+    #[test]
+    fn frame_requires_complete_storage_and_accepts_extra_capacity() {
+        let exact = [0u8; 72];
+        let extra = [0u8; 76];
+        let short = [0u8; 71];
+        for pixels in [&exact[..], &extra[..]] {
+            assert_eq!(
+                PresentFrame {
+                    geometry: GEOMETRY,
+                    pixels,
+                    damage: DamageRect::full(GEOMETRY),
+                }
+                .validate(),
+                Ok(())
+            );
+        }
+        assert_eq!(
+            PresentFrame {
+                geometry: GEOMETRY,
+                pixels: &short,
+                damage: DamageRect::full(GEOMETRY),
+            }
+            .validate(),
+            Err(EINVAL)
+        );
+    }
+}
