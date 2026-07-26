@@ -1,5 +1,5 @@
 use mochios_virtio_gpu_protocol::{
-    AttachBacking, Command, PixelFormat, Rect, ResourceCreate2d, ResourceOperation, SetScanout,
+    AttachBacking, Command, PixelFormat, ResourceCreate2d, ResourceOperation,
 };
 
 use crate::present::DisplayGeometry;
@@ -14,7 +14,6 @@ pub(super) const RESOURCE_ID: u32 = 1;
 pub(super) struct ResourceState {
     created: bool,
     backing_attached: bool,
-    scanout_set: bool,
 }
 
 impl ResourceState {
@@ -23,7 +22,6 @@ impl ResourceState {
         channel: &mut ControlChannel,
         backing: &BackingStore,
         geometry: DisplayGeometry,
-        scanout_id: u32,
     ) -> Result<(), GpuError> {
         channel.submit_no_data(Command::ResourceCreate2d(ResourceCreate2d {
             resource_id: RESOURCE_ID,
@@ -32,34 +30,18 @@ impl ResourceState {
             height: geometry.height,
         }))?;
         self.created = true;
-        channel.submit_no_data(Command::ResourceAttachBacking(AttachBacking {
+        if let Err(error) = channel.submit_no_data(Command::ResourceAttachBacking(AttachBacking {
             resource_id: RESOURCE_ID,
             entries: backing.entries(),
-        }))?;
+        })) {
+            self.cleanup(channel);
+            return Err(error);
+        }
         self.backing_attached = true;
-        channel.submit_no_data(Command::SetScanout(SetScanout {
-            rect: Rect {
-                x: 0,
-                y: 0,
-                width: geometry.width,
-                height: geometry.height,
-            },
-            scanout_id,
-            resource_id: RESOURCE_ID,
-        }))?;
-        self.scanout_set = true;
         Ok(())
     }
 
-    pub(super) fn cleanup(&mut self, channel: &mut ControlChannel, scanout_id: u32) {
-        if self.scanout_set {
-            let _ = channel.submit_no_data(Command::SetScanout(SetScanout {
-                rect: Rect::default(),
-                scanout_id,
-                resource_id: 0,
-            }));
-            self.scanout_set = false;
-        }
+    pub(super) fn cleanup(&mut self, channel: &mut ControlChannel) {
         if self.backing_attached {
             let _ = channel.submit_no_data(Command::ResourceDetachBacking(ResourceOperation {
                 resource_id: RESOURCE_ID,

@@ -6,6 +6,7 @@ use super::dma::BackingStore;
 use super::error::GpuError;
 use super::presenter;
 use super::resource::ResourceState;
+use super::scanout::ScanoutState;
 
 pub(crate) struct VirtioGpuBackend {
     control: ControlChannel,
@@ -13,6 +14,7 @@ pub(crate) struct VirtioGpuBackend {
     geometry: DisplayGeometry,
     scanout_id: u32,
     resource: ResourceState,
+    scanout: ScanoutState,
 }
 
 impl VirtioGpuBackend {
@@ -28,14 +30,24 @@ impl VirtioGpuBackend {
         let framebuffer_size = geometry.byte_len().map_err(GpuError::System)?;
         let backing = BackingStore::allocate(framebuffer_size).map_err(GpuError::System)?;
         let mut resource = ResourceState::default();
-        resource.create(&mut control, &backing, geometry, scanout_id)?;
-        presenter::present_initial(&mut control, geometry)?;
+        resource.create(&mut control, &backing, geometry)?;
+        let mut scanout = ScanoutState::default();
+        if let Err(error) = scanout.enable(&mut control, scanout_id, geometry) {
+            resource.cleanup(&mut control);
+            return Err(error);
+        }
+        if let Err(error) = presenter::present_initial(&mut control, geometry) {
+            scanout.cleanup(&mut control, scanout_id);
+            resource.cleanup(&mut control);
+            return Err(error);
+        }
         Ok(Self {
             control,
             backing: Some(backing),
             geometry,
             scanout_id,
             resource,
+            scanout,
         })
     }
 
@@ -49,7 +61,8 @@ impl VirtioGpuBackend {
     }
 
     fn cleanup(&mut self) {
-        self.resource.cleanup(&mut self.control, self.scanout_id);
+        self.scanout.cleanup(&mut self.control, self.scanout_id);
+        self.resource.cleanup(&mut self.control);
         self.backing = None;
     }
 }
