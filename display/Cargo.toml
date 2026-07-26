@@ -6,6 +6,7 @@ build = "build.rs"
 
 [dependencies]
 mochios-virtio-gpu-protocol = { path = "../../user/crates/virtio-gpu-protocol" }
+mochios-viewkit-gpu-protocol = { path = "../../user/crates/viewkit-gpu-protocol" }
 mochi-user-platform = { path = "../../user/crates/platform" }
 mochi-user-runtime = { path = "../../user/crates/runtime" }
 mochi-user-syscall = { path = "../../user/crates/syscall" }

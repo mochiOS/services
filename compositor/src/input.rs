@@ -2,9 +2,9 @@ use mochi_user_platform as platform;
 
 use crate::geometry::{Rect, merge_damage};
 use crate::protocol::{
-    DECOR_EVENT_POINTER_BUTTON, EVENT_FOCUS_GAINED, EVENT_FOCUS_LOST, EVENT_KEY,
-    EVENT_POINTER_BUTTON, EVENT_POINTER_ENTER, EVENT_POINTER_LEAVE, EVENT_POINTER_MOTION, put_i32,
-    put_u32, put_u64,
+    DECOR_EVENT_POINTER_BUTTON, DECOR_EVENT_POINTER_LEAVE, DECOR_EVENT_POINTER_MOTION,
+    EVENT_FOCUS_GAINED, EVENT_FOCUS_LOST, EVENT_KEY, EVENT_POINTER_BUTTON, EVENT_POINTER_ENTER,
+    EVENT_POINTER_LEAVE, EVENT_POINTER_MOTION, put_i32, put_u32, put_u64,
 };
 use crate::state::MAX_DIMENSION;
 use crate::surface::surface_extent;
@@ -154,6 +154,18 @@ fn send_decoration_button_event(
     let _ = platform::ipc::send(endpoint, &event);
 }
 
+fn send_decoration_pointer_event(endpoint: u64, kind: u32, window_token: u64, x: i32, y: i32) {
+    if endpoint == 0 {
+        return;
+    }
+    let mut event = [0u8; 24];
+    put_u32(&mut event, 0, kind);
+    put_i32(&mut event, 4, x);
+    put_i32(&mut event, 8, y);
+    put_u64(&mut event, 16, window_token);
+    let _ = platform::ipc::send(endpoint, &event);
+}
+
 fn dispatch_pointer_motion(
     surfaces: &[Surface],
     windows: &[Window],
@@ -166,9 +178,21 @@ fn dispatch_pointer_motion(
         if let Some(index) = *pointer_focus {
             if let Some(surface) = surfaces.get(index)
                 && surface.live
-                && !surface.is_decoration
             {
-                send_event(surface.event_endpoint, EVENT_POINTER_LEAVE, 0, 0, 0);
+                if surface.is_decoration {
+                    let window_token = window_index_by_id(windows, surface.window)
+                        .map(|index| windows[index].token)
+                        .unwrap_or(0);
+                    send_decoration_pointer_event(
+                        surface.event_endpoint,
+                        DECOR_EVENT_POINTER_LEAVE,
+                        window_token,
+                        0,
+                        0,
+                    );
+                } else {
+                    send_event(surface.event_endpoint, EVENT_POINTER_LEAVE, 0, 0, 0);
+                }
             }
         }
         *pointer_focus = next;
@@ -188,15 +212,27 @@ fn dispatch_pointer_motion(
     if let Some(index) = *pointer_focus {
         if let Some(surface) = surfaces.get(index)
             && surface.live
-            && !surface.is_decoration
         {
-            send_event(
-                surface.event_endpoint,
-                EVENT_POINTER_MOTION,
-                pointer_x - surface.x,
-                pointer_y - surface.y,
-                0,
-            );
+            if surface.is_decoration {
+                let window_token = window_index_by_id(windows, surface.window)
+                    .map(|index| windows[index].token)
+                    .unwrap_or(0);
+                send_decoration_pointer_event(
+                    surface.event_endpoint,
+                    DECOR_EVENT_POINTER_MOTION,
+                    window_token,
+                    pointer_x - surface.x,
+                    pointer_y - surface.y,
+                );
+            } else {
+                send_event(
+                    surface.event_endpoint,
+                    EVENT_POINTER_MOTION,
+                    pointer_x - surface.x,
+                    pointer_y - surface.y,
+                    0,
+                );
+            }
         }
     }
 }

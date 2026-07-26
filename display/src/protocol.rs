@@ -4,6 +4,12 @@ pub(crate) const OP_GET_INFO: u32 = 1;
 pub(crate) const OP_PRESENT: u32 = 2;
 pub(crate) const OP_CLAIM_PRESENT_OWNER: u32 = 3;
 pub(crate) const OP_PRESENT_RECT: u32 = 4;
+pub(crate) const OP_SET_CURSOR_IMAGE: u32 = 5;
+pub(crate) const OP_SET_CURSOR_POSITION: u32 = 6;
+pub(crate) const OP_PRESENT_GPU_PANEL: u32 = 7;
+pub(crate) const OP_GET_RENDERER_CAPS: u32 = 8;
+pub(crate) const OP_PRESENT_GPU_SCENE: u32 = 9;
+pub(crate) const RENDERER_CAP_GPU_SCENE: u32 = 1;
 
 pub(crate) fn read_u32(buffer: &[u8], offset: usize) -> Option<u32> {
     let bytes = buffer.get(offset..offset.checked_add(4)?)?;

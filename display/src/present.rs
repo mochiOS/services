@@ -1,6 +1,7 @@
 use mochi_user_syscall::{EINVAL, ERANGE};
 
 pub(crate) const PIXEL_FORMAT_XRGB8888: u32 = 1;
+pub(crate) const PIXEL_FORMAT_ARGB8888_PREMULTIPLIED: u32 = 2;
 pub(crate) const BYTES_PER_PIXEL: usize = 4;
 pub(crate) const MAX_DIMENSION: u32 = 4096;
 
@@ -28,6 +29,32 @@ impl DisplayGeometry {
             .checked_mul(BYTES_PER_PIXEL)
             .and_then(|row| row.checked_mul(self.height as usize))
             .ok_or(ERANGE)
+    }
+
+    pub(crate) fn panel_byte_len(self) -> Result<usize, u64> {
+        if self.format != PIXEL_FORMAT_ARGB8888_PREMULTIPLIED {
+            return Err(EINVAL);
+        }
+        let mut xrgb = self;
+        xrgb.format = PIXEL_FORMAT_XRGB8888;
+        xrgb.byte_len()
+    }
+}
+
+pub(crate) struct PanelFrame<'a> {
+    pub(crate) geometry: DisplayGeometry,
+    pub(crate) pixels: &'a [u8],
+    pub(crate) damage: DamageRect,
+    pub(crate) background: u32,
+}
+
+impl PanelFrame<'_> {
+    pub(crate) fn validate(&self) -> Result<(), u64> {
+        let required = self.geometry.panel_byte_len()?;
+        if self.pixels.len() < required || self.background & 0xff00_0000 != 0xff00_0000 {
+            return Err(EINVAL);
+        }
+        self.damage.validate(self.geometry)
     }
 }
 

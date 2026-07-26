@@ -7,12 +7,16 @@ use super::dma::BackingStore;
 use super::error::GpuError;
 use super::resource::RESOURCE_ID;
 
-pub(super) fn present(
-    channel: &mut ControlChannel,
+pub(crate) struct PendingPresent {
+    rect: Rect,
+    offset: u64,
+}
+
+pub(super) fn stage(
     backing: &mut BackingStore,
     geometry: DisplayGeometry,
     frame: &PresentFrame<'_>,
-) -> Result<(), GpuError> {
+) -> Result<Option<PendingPresent>, GpuError> {
     frame.validate().map_err(GpuError::System)?;
     if frame.geometry.width != geometry.width
         || frame.geometry.height != geometry.height
@@ -21,7 +25,7 @@ pub(super) fn present(
         return Err(GpuError::InvalidFrame);
     }
     if frame.damage.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     backing
         .copy_rect(
@@ -42,7 +46,11 @@ pub(super) fn present(
         .and_then(|pixels| pixels.checked_add(u64::from(frame.damage.x)))
         .and_then(|pixels| pixels.checked_mul(4))
         .ok_or(GpuError::InvalidFrame)?;
-    transfer_and_flush(channel, rect, offset)
+    Ok(Some(PendingPresent { rect, offset }))
+}
+
+pub(super) fn flush(channel: &mut ControlChannel, pending: PendingPresent) -> Result<(), GpuError> {
+    transfer_and_flush(channel, pending.rect, pending.offset)
 }
 
 pub(super) fn present_initial(
@@ -63,13 +71,15 @@ fn transfer_and_flush(
     rect: Rect,
     offset: u64,
 ) -> Result<(), GpuError> {
-    channel.submit_no_data(Command::TransferToHost2d(TransferToHost2d {
-        rect,
-        offset,
-        resource_id: RESOURCE_ID,
-    }))?;
-    channel.submit_no_data(Command::ResourceFlush {
-        rect,
-        resource_id: RESOURCE_ID,
-    })
+    channel.submit_pair_no_data(
+        Command::TransferToHost2d(TransferToHost2d {
+            rect,
+            offset,
+            resource_id: RESOURCE_ID,
+        }),
+        Command::ResourceFlush {
+            rect,
+            resource_id: RESOURCE_ID,
+        },
+    )
 }

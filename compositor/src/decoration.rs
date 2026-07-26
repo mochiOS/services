@@ -16,7 +16,7 @@ use crate::window::{
 
 const DECORATE_CAPABILITY: &str = "window.decorate";
 const DECORATE_COMPAT_CAPABILITY: &str = "window.overlay";
-const DECOR_TITLE_BAR_HEIGHT: u32 = 28;
+const DECOR_TITLE_BAR_HEIGHT: u32 = 40;
 
 fn sender_has_decorate_capability(sender: u64) -> bool {
     matches!(

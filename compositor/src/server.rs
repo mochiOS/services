@@ -4,7 +4,8 @@ use crate::client::{Client, ClientId, cleanup_client, cleanup_dead_clients, clie
 use crate::cursor::CursorImage;
 use crate::decoration::sender_has_overlay_compat_capability;
 use crate::display::{
-    display_claim_present_owner, display_request_info, sleep_one_tick, wait_for_service,
+    display_claim_present_owner, display_renderer_caps, display_request_info,
+    display_set_cursor_image, display_set_cursor_position, sleep_one_tick, wait_for_service,
 };
 use crate::geometry::{Rect, merge_damage};
 use crate::input::{
@@ -56,12 +57,18 @@ fn process_input_event(
         state.cursor_x = state.pointer_x;
         state.cursor_y = state.pointer_y;
         state.cursor_visible = true;
-        damage = merge_damage(
-            damage,
-            state
-                .cursor_image
-                .movement_damage(old, state.cursor_x, state.cursor_y),
-        );
+        if !state.hardware_cursor
+            || display_set_cursor_position(state.display_tid, state.cursor_x, state.cursor_y, true)
+                != 0
+        {
+            state.hardware_cursor = false;
+            damage = merge_damage(
+                damage,
+                state
+                    .cursor_image
+                    .movement_damage(old, state.cursor_x, state.cursor_y),
+            );
+        }
     }
     damage
 }
@@ -82,12 +89,18 @@ fn finish_coalesced_pointer_motion(state: &mut CompositorState) -> Option<Rect> 
         state.cursor_x = state.pointer_x;
         state.cursor_y = state.pointer_y;
         state.cursor_visible = true;
-        damage = merge_damage(
-            damage,
-            state
-                .cursor_image
-                .movement_damage(old, state.cursor_x, state.cursor_y),
-        );
+        if !state.hardware_cursor
+            || display_set_cursor_position(state.display_tid, state.cursor_x, state.cursor_y, true)
+                != 0
+        {
+            state.hardware_cursor = false;
+            damage = merge_damage(
+                damage,
+                state
+                    .cursor_image
+                    .movement_damage(old, state.cursor_x, state.cursor_y),
+            );
+        }
     }
     damage
 }
@@ -115,11 +128,13 @@ fn handle_request(
     cursor_y: &mut i32,
     cursor_visible: &mut bool,
     cursor_image: &mut CursorImage,
-    _display_tid: u64,
+    hardware_cursor: &mut bool,
+    display_tid: u64,
     display_width: u32,
     display_height: u32,
     _display_stride: u32,
     _display_format: u32,
+    renderer_caps: u32,
 ) -> [u8; 16] {
     let mut reply = [0u8; 16];
     let Some(opcode) = read_u32(request, 0) else {
@@ -127,6 +142,10 @@ fn handle_request(
         return reply;
     };
     match opcode {
+        OP_GET_RENDERER_CAPS => {
+            put_u32(&mut reply, 0, 0);
+            put_u32(&mut reply, 4, renderer_caps);
+        }
         OP_CREATE_SURFACE | OP_ATTACH_BUFFER | OP_DAMAGE | OP_COMMIT | OP_SET_POSITION
         | OP_DESTROY_SURFACE => {
             return crate::surface::handle_request(
@@ -187,11 +206,14 @@ fn handle_request(
                 return reply;
             }
             let old = (*cursor_visible).then_some((*cursor_x, *cursor_y));
-            *present_damage = Some(cursor_image.movement_damage(old, x, y));
             *cursor_x = x;
             *cursor_y = y;
             *cursor_visible = visible;
-            *needs_present = true;
+            if !*hardware_cursor || display_set_cursor_position(display_tid, x, y, visible) != 0 {
+                *hardware_cursor = false;
+                *present_damage = Some(cursor_image.movement_damage(old, x, y));
+                *needs_present = true;
+            }
             put_u32(&mut reply, 0, 0);
         }
         OP_SET_CURSOR_IMAGE => {
@@ -212,6 +234,11 @@ fn handle_request(
             ) {
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                 return reply;
+            }
+            let was_hardware = *hardware_cursor;
+            *hardware_cursor = display_set_cursor_image(display_tid, request) == 0;
+            if *hardware_cursor && !was_hardware {
+                platform::println!("compositor.service: hardware cursor enabled");
             }
             put_u32(&mut reply, 0, 0);
         }
@@ -240,6 +267,7 @@ pub(crate) fn run() -> ! {
     }
     let (display_width, display_height, display_stride, display_format) =
         display_request_info(display_tid);
+    let renderer_caps = display_renderer_caps(display_tid);
 
     let mut state = CompositorState::new(
         display_tid,
@@ -248,6 +276,7 @@ pub(crate) fn run() -> ! {
         display_stride,
         display_format,
         input_subscribed,
+        renderer_caps,
     );
     let _ = composite_and_present(
         &state.surfaces,
@@ -261,7 +290,7 @@ pub(crate) fn run() -> ! {
         state.display_format,
         state.cursor_x,
         state.cursor_y,
-        state.cursor_visible,
+        state.cursor_visible && !state.hardware_cursor,
         &state.cursor_image,
         None,
     );
@@ -312,7 +341,7 @@ pub(crate) fn run() -> ! {
                                 state.display_format,
                                 state.cursor_x,
                                 state.cursor_y,
-                                state.cursor_visible,
+                                state.cursor_visible && !state.hardware_cursor,
                                 &state.cursor_image,
                                 None,
                             );
@@ -397,7 +426,7 @@ pub(crate) fn run() -> ! {
                     state.display_format,
                     state.cursor_x,
                     state.cursor_y,
-                    state.cursor_visible,
+                    state.cursor_visible && !state.hardware_cursor,
                     &state.cursor_image,
                     input_damage,
                 );
@@ -442,11 +471,13 @@ pub(crate) fn run() -> ! {
             &mut state.cursor_y,
             &mut state.cursor_visible,
             &mut state.cursor_image,
+            &mut state.hardware_cursor,
             state.display_tid,
             state.display_width,
             state.display_height,
             state.display_stride,
             state.display_format,
+            state.renderer_caps,
         );
         if platform::ipc::reply(sender, &reply).is_err() {
             cleanup_client(
@@ -471,7 +502,7 @@ pub(crate) fn run() -> ! {
                     state.display_format,
                     state.cursor_x,
                     state.cursor_y,
-                    state.cursor_visible,
+                    state.cursor_visible && !state.hardware_cursor,
                     &state.cursor_image,
                     present_damage,
                 );

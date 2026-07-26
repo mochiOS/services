@@ -64,6 +64,7 @@ pub(crate) struct CompositorState {
     pub(crate) cursor_y: i32,
     pub(crate) cursor_visible: bool,
     pub(crate) cursor_image: CursorImage,
+    pub(crate) hardware_cursor: bool,
     pub(crate) pointer_focus: Option<usize>,
     pub(crate) pointer_grab: Option<PointerGrab>,
     pub(crate) keyboard_focus: Option<usize>,
@@ -76,6 +77,7 @@ pub(crate) struct CompositorState {
     pub(crate) display_stride: u32,
     pub(crate) display_format: u32,
     pub(crate) input_subscribed: bool,
+    pub(crate) renderer_caps: u32,
 }
 
 impl CompositorState {
@@ -86,6 +88,7 @@ impl CompositorState {
         display_stride: u32,
         display_format: u32,
         input_subscribed: bool,
+        renderer_caps: u32,
     ) -> Self {
         Self {
             clients: [Client::default(); MAX_CLIENTS],
@@ -103,6 +106,7 @@ impl CompositorState {
             cursor_y: 0,
             cursor_visible: false,
             cursor_image: CursorImage::default(),
+            hardware_cursor: false,
             pointer_focus: None,
             pointer_grab: None,
             keyboard_focus: None,
@@ -115,6 +119,7 @@ impl CompositorState {
             display_stride,
             display_format,
             input_subscribed,
+            renderer_caps,
         }
     }
 }

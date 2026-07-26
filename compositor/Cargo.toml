@@ -8,6 +8,7 @@ build = "build.rs"
 mochi-user-platform = { path = "../../user/crates/platform" }
 mochi-user-runtime = { path = "../../user/crates/runtime" }
 mochi-user-syscall = { path = "../../user/crates/syscall" }
+mochios-viewkit-gpu-protocol = { path = "../../user/crates/viewkit-gpu-protocol" }
 
 [[bin]]
 name = "compositor"
@@ -15,4 +16,3 @@ path = "src/main.rs"
 test = false
 bench = false
 harness = false
-

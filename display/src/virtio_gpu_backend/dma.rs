@@ -108,6 +108,43 @@ impl BackingStore {
         &self.entries
     }
 
+    pub(super) fn write_cursor_rgba(&mut self, rgba: &[u8]) -> Result<(), u64> {
+        if rgba.len() > self.length || rgba.len() % 4 != 0 {
+            return Err(mochi_user_syscall::EINVAL);
+        }
+        for (index, pixel) in rgba.chunks_exact(4).enumerate() {
+            let bgra = [pixel[2], pixel[1], pixel[0], pixel[3]];
+            self.write_at(index * 4, &bgra)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn write_all(&mut self, bytes: &[u8]) -> Result<(), u64> {
+        if bytes.len() > self.length {
+            return Err(mochi_user_syscall::ERANGE);
+        }
+        self.write_at(0, bytes)
+    }
+
+    pub(super) fn read_u32_at(&mut self, mut offset: usize) -> Result<u32, u64> {
+        if offset.checked_add(4).is_none_or(|end| end > self.length) {
+            return Err(mochi_user_syscall::ERANGE);
+        }
+        for region in &mut self.regions {
+            region.sync_for_cpu().map_err(|_| mochi_user_syscall::EIO)?;
+            if offset >= region.len() {
+                offset -= region.len();
+                continue;
+            }
+            let bytes = region
+                .bytes()
+                .get(offset..offset + 4)
+                .ok_or(mochi_user_syscall::ERANGE)?;
+            return Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+        }
+        Err(mochi_user_syscall::ERANGE)
+    }
+
     pub(super) fn copy_rect(
         &mut self,
         source: &[u8],
@@ -151,7 +188,7 @@ impl BackingStore {
         Ok(())
     }
 
-    fn write_at(&mut self, mut offset: usize, mut bytes: &[u8]) -> Result<(), u64> {
+    pub(super) fn write_at(&mut self, mut offset: usize, mut bytes: &[u8]) -> Result<(), u64> {
         if offset
             .checked_add(bytes.len())
             .is_none_or(|end| end > self.length)

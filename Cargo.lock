@@ -40,6 +40,7 @@ dependencies = [
  "mochi-user-platform",
  "mochi-user-runtime",
  "mochi-user-syscall",
+ "mochios-viewkit-gpu-protocol",
 ]
 
 [[package]]
@@ -130,6 +131,7 @@ dependencies = [
  "mochi-user-platform",
  "mochi-user-runtime",
  "mochi-user-syscall",
+ "mochios-viewkit-gpu-protocol",
  "mochios-virtio-gpu-protocol",
  "plugkit",
 ]
@@ -257,6 +259,10 @@ version = "0.1.0"
 
 [[package]]
 name = "mochios-driver-control-protocol"
+version = "0.1.0"
+
+[[package]]
+name = "mochios-viewkit-gpu-protocol"
 version = "0.1.0"
 
 [[package]]

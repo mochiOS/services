@@ -320,6 +320,16 @@ fn resize_buffer(buffer: &mut Vec<u32>, width: u32, height: u32) -> bool {
 }
 
 pub(crate) fn surface_has_current_pixels(surface: &Surface) -> bool {
+    if surface.current_format == PIXEL_FORMAT_GPU_SCENE {
+        return surface.current_buffer.as_ref().is_some_and(|buffer| {
+            let bytes = unsafe {
+                core::slice::from_raw_parts(buffer.mapped_addr as *const u8, buffer.byte_len)
+            };
+            mochios_viewkit_gpu_protocol::decode_prefix(bytes).is_ok_and(|(scene, _)| {
+                scene.width == surface.current_width && scene.height == surface.current_height
+            })
+        });
+    }
     if matches!(surface.role, SurfaceRole::Background | SurfaceRole::Panel) {
         let Some(surface_len) =
             (surface.current_width as usize).checked_mul(surface.current_height as usize)
@@ -489,7 +499,7 @@ fn validate_buffer_layout(
 ) -> Result<(usize, usize, usize), u32> {
     if !matches!(
         format,
-        PIXEL_FORMAT_XRGB8888 | PIXEL_FORMAT_ARGB8888_PREMULTIPLIED
+        PIXEL_FORMAT_XRGB8888 | PIXEL_FORMAT_ARGB8888_PREMULTIPLIED | PIXEL_FORMAT_GPU_SCENE
     ) || width == 0
         || height == 0
         || stride < width
@@ -790,11 +800,15 @@ pub(crate) fn handle_request(
             };
             let attach_reject_reason = if !matches!(
                 format,
-                PIXEL_FORMAT_XRGB8888 | PIXEL_FORMAT_ARGB8888_PREMULTIPLIED
+                PIXEL_FORMAT_XRGB8888
+                    | PIXEL_FORMAT_ARGB8888_PREMULTIPLIED
+                    | PIXEL_FORMAT_GPU_SCENE
             ) {
                 Some(1)
-            } else if format == PIXEL_FORMAT_ARGB8888_PREMULTIPLIED
-                && surfaces[index].role != SurfaceRole::Panel
+            } else if matches!(
+                format,
+                PIXEL_FORMAT_ARGB8888_PREMULTIPLIED | PIXEL_FORMAT_GPU_SCENE
+            ) && surfaces[index].role != SurfaceRole::Panel
             {
                 Some(1)
             } else if width == 0 {
@@ -1002,7 +1016,11 @@ pub(crate) fn handle_request(
             }
             {
                 let surface = &mut surfaces[index];
-                if matches!(surface.role, SurfaceRole::Background | SurfaceRole::Panel) {
+                if pending_format == PIXEL_FORMAT_GPU_SCENE {
+                    surface.current_buffer = surface.pending_buffer.take();
+                    surface.current.clear();
+                    surface.current_stride = pending_stride;
+                } else if matches!(surface.role, SurfaceRole::Background | SurfaceRole::Panel) {
                     if let Some(buffer) = surface.pending_buffer.take() {
                         let can_patch_current = surface.current_width == pending_width
                             && surface.current_height == pending_height
