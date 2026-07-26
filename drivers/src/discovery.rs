@@ -59,6 +59,7 @@ fn maybe_spawn_bundle(
         return;
     }
     if driver_spawn::spawn(entry_path, None, logger_endpoint) {
+        platform::println!("drivers.service: active bundle={}", bundle_root);
         started_drivers.record(manifest.package_id.clone());
     }
 }

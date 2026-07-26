@@ -47,16 +47,20 @@ pub(crate) fn load(bundle_root: &str) -> Option<DriverManifest> {
         );
         return None;
     };
-    let entry_path = alloc::format!("{}/entry.elf", bundle_root);
-    if manifest.binary(&entry_path).is_none() {
+    let prefix = alloc::format!("{}/", bundle_root);
+    let mut entries = manifest.binaries.iter().filter(|binary| {
+        binary.kind.as_deref() == Some("driver") && binary.path.starts_with(&prefix)
+    });
+    let entry_path = entries.next().map(|binary| binary.path.clone());
+    if entry_path.is_none() || entries.next().is_some() {
         platform::println!(
-            "drivers.service: rejected bundle={} reason=missing-entry entry={} manifest={}",
+            "drivers.service: rejected bundle={} reason=invalid-driver-entry manifest={}",
             bundle_root,
-            entry_path,
             package_manifest_path
         );
         return None;
     }
+    let entry_path = entry_path?;
     Some(DriverManifest {
         manifest,
         entry_path,

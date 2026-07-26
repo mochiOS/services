@@ -7,6 +7,7 @@ const WAIT_NO_HANG: u64 = 1;
 pub(crate) enum ReadyService {
     Input,
     Display,
+    Network,
 }
 
 impl ReadyService {
@@ -14,6 +15,7 @@ impl ReadyService {
         match self {
             Self::Input => "input.service",
             Self::Display => "display.driver",
+            Self::Network => "network.service",
         }
     }
 }
@@ -33,8 +35,10 @@ pub(crate) struct ReadyHandshake {
     endpoint: u64,
     input_token: u64,
     display_token: u64,
+    network_token: u64,
     input_status: platform::service_ready::OneShotStatus,
     display_status: platform::service_ready::OneShotStatus,
+    network_status: platform::service_ready::OneShotStatus,
 }
 
 impl ReadyHandshake {
@@ -51,12 +55,22 @@ impl ReadyHandshake {
                 display_token = 1;
             }
         }
+        let mut network_token = platform::service_ready::generate_token()
+            .map_err(|error| ReadyError::Ipc(error.raw().unsigned_abs()))?;
+        if network_token == input_token || network_token == display_token {
+            network_token ^= 0x3c3c_c3c3_5a5a_a5a5;
+            if network_token == 0 {
+                network_token = 1;
+            }
+        }
         Ok(Self {
             endpoint,
             input_token,
             display_token,
+            network_token,
             input_status: platform::service_ready::OneShotStatus::new(),
             display_status: platform::service_ready::OneShotStatus::new(),
+            network_status: platform::service_ready::OneShotStatus::new(),
         })
     }
 
@@ -64,6 +78,7 @@ impl ReadyHandshake {
         let token = match service {
             ReadyService::Input => self.input_token,
             ReadyService::Display => self.display_token,
+            ReadyService::Network => self.network_token,
         };
         platform::service_ready::Target {
             endpoint: self.endpoint,
@@ -75,6 +90,7 @@ impl ReadyHandshake {
         match service {
             ReadyService::Input => self.input_status.get(),
             ReadyService::Display => self.display_status.get(),
+            ReadyService::Network => self.network_status.get(),
         }
     }
 
@@ -83,6 +99,8 @@ impl ReadyHandshake {
             &mut self.input_status
         } else if token == self.display_token {
             &mut self.display_status
+        } else if token == self.network_token {
+            &mut self.network_status
         } else {
             return Err(ReadyError::InvalidMessage);
         };

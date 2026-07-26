@@ -52,7 +52,7 @@ impl Runtime {
             Some(handshake) => handshake.wait_for_service_ready(service, process_id),
             None => Err(ReadyError::InvalidMessage),
         };
-        if service == ReadyService::Input {
+        if service == ReadyService::Network {
             self.ready = None;
         }
         match result {
@@ -151,6 +151,14 @@ impl BootstrapOperations for Runtime {
                 .ready
                 .as_ref()
                 .map(|handshake| handshake.target(ReadyService::Display)),
+            FixedService::Network => {
+                if !self.ensure_ready_handshake() {
+                    return None;
+                }
+                self.ready
+                    .as_ref()
+                    .map(|handshake| handshake.target(ReadyService::Network))
+            }
             FixedService::Compositor | FixedService::Tty => None,
         };
         if matches!(service, FixedService::Display) && ready_target.is_none() {
@@ -222,6 +230,10 @@ impl BootstrapOperations for Runtime {
             }
         }
     }
+
+    fn wait_network_ready(&mut self, process_id: u64) -> bool {
+        self.wait_ready(ReadyService::Network, process_id)
+    }
 }
 
 pub(crate) fn run() -> ! {
@@ -255,6 +267,7 @@ fn service_name(service: FixedService) -> &'static str {
         FixedService::Input => "input.service",
         FixedService::Display => "display.driver",
         FixedService::Compositor => "compositor.service",
+        FixedService::Network => "network.service",
         FixedService::Tty => "tty.service",
     }
 }

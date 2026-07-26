@@ -33,6 +33,13 @@ description = "mochiOS package installation service"
 autostart = false
 order = 4
 
+[network.service]
+dir = "network"
+fs = "rootfs"
+description = "mochiOS IPv4 network service"
+autostart = false
+order = 8
+
 [signature.service]
 dir = "signature"
 fs = "rootfs"

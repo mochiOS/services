@@ -1,0 +1,19 @@
+[package]
+name = "network"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[dependencies]
+mochi-user-platform = { path = "../../user/crates/platform" }
+mochi-user-runtime = { path = "../../user/crates/runtime" }
+mochi-user-syscall = { path = "../../user/crates/syscall" }
+mochios-net-device-protocol = { path = "../../user/crates/net-device-protocol" }
+mochios-network-stack = { path = "../../user/crates/network-stack" }
+
+[[bin]]
+name = "network"
+path = "src/main.rs"
+test = false
+bench = false
+harness = false

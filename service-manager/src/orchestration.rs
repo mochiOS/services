@@ -6,6 +6,7 @@ pub(crate) struct ChildProcesses {
     pub(crate) input: Option<u64>,
     pub(crate) display: Option<u64>,
     pub(crate) compositor: Option<u64>,
+    pub(crate) network: Option<u64>,
     pub(crate) tty: Option<u64>,
 }
 
@@ -39,6 +40,7 @@ impl BootstrapOutcome {
                 input: None,
                 display: None,
                 compositor: None,
+                network: None,
                 tty: None,
             },
             reason: StopReason::DriverControlInitializationFailed,
@@ -55,6 +57,7 @@ pub(crate) trait BootstrapOperations {
     fn wait_input_ready(&mut self, process_id: u64) -> bool;
     fn start_discovery(&mut self) -> bool;
     fn wait_discovery_complete(&mut self, process_id: u64) -> bool;
+    fn wait_network_ready(&mut self, process_id: u64) -> bool;
 }
 
 pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> BootstrapOutcome {
@@ -95,10 +98,15 @@ pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> Bootstra
         return outcome(children, StopReason::DiscoveryCompleteFailed);
     }
 
+    children.network = operations.spawn_fixed(FixedService::Network);
+
     let Some(tty) = operations.spawn_fixed(FixedService::Tty) else {
         return outcome(children, StopReason::TtySpawnFailed);
     };
     children.tty = Some(tty);
+    if let Some(network) = children.network {
+        let _ = operations.wait_network_ready(network);
+    }
     outcome(children, StopReason::Running)
 }
 
@@ -121,6 +129,7 @@ mod tests {
         WaitInput,
         StartDiscovery,
         WaitDiscovery,
+        WaitNetwork,
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -175,7 +184,8 @@ mod tests {
                 FixedService::Input => 11,
                 FixedService::Display => 12,
                 FixedService::Compositor => 13,
-                FixedService::Tty => 14,
+                FixedService::Network => 14,
+                FixedService::Tty => 15,
             })
         }
 
@@ -198,6 +208,11 @@ mod tests {
             self.events.push(Event::WaitDiscovery);
             self.failure != Failure::DiscoveryComplete
         }
+
+        fn wait_network_ready(&mut self, _process_id: u64) -> bool {
+            self.events.push(Event::WaitNetwork);
+            true
+        }
     }
 
     fn expected_success_events() -> Vec<Event> {
@@ -212,7 +227,9 @@ mod tests {
             Event::Spawn(FixedService::Compositor),
             Event::StartDiscovery,
             Event::WaitDiscovery,
+            Event::Spawn(FixedService::Network),
             Event::Spawn(FixedService::Tty),
+            Event::WaitNetwork,
         ]
     }
 
@@ -226,7 +243,8 @@ mod tests {
         assert_eq!(outcome.children.input, Some(11));
         assert_eq!(outcome.children.display, Some(12));
         assert_eq!(outcome.children.compositor, Some(13));
-        assert_eq!(outcome.children.tty, Some(14));
+        assert_eq!(outcome.children.network, Some(14));
+        assert_eq!(outcome.children.tty, Some(15));
     }
 
     #[test]

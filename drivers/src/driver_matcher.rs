@@ -1,10 +1,12 @@
 const QEMU_USB_DRIVER_ID: &str = "org.mochios.usb.qemu";
 const I8042_DRIVER_ID: &str = "org.mochios.ps2.i8042";
+const VIRTIO_NET_DRIVER_ID: &str = "org.mochios.network.virtio-net";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DriverSearchRoot {
     Usb,
     Ps2,
+    Network,
 }
 
 impl DriverSearchRoot {
@@ -12,6 +14,7 @@ impl DriverSearchRoot {
         match self {
             Self::Usb => "/bin/drivers/usb",
             Self::Ps2 => "/bin/drivers/ps2",
+            Self::Network => "/bin/drivers/network",
         }
     }
 }
@@ -47,6 +50,7 @@ pub(crate) fn matches(
     let (expected_package_id, expected_driver_class, expected_bus, expected_class) = match root {
         DriverSearchRoot::Usb => (QEMU_USB_DRIVER_ID, "usb", "pci", "usb"),
         DriverSearchRoot::Ps2 => (I8042_DRIVER_ID, "input", "platform", "i8042"),
+        DriverSearchRoot::Network => (VIRTIO_NET_DRIVER_ID, "network", "pci", "network"),
     };
 
     if package_id != expected_package_id {

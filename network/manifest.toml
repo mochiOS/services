@@ -1,0 +1,15 @@
+[package]
+id = "org.mochios.network"
+name = "Network Service"
+version = "1"
+vendor = "mochiOS"
+
+[[binary]]
+path = "/system/services/network.service"
+kind = "service"
+requires = [
+    "ipc.client",
+    "ipc.server",
+    "net.raw",
+    "system.time.read",
+]

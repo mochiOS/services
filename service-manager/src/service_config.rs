@@ -9,6 +9,7 @@ pub(crate) enum FixedService {
     Input,
     Display,
     Compositor,
+    Network,
     Tty,
 }
 
@@ -46,6 +47,11 @@ pub(crate) const fn fixed_service_spec(service: FixedService) -> ServiceSpec {
         FixedService::Compositor => ServiceSpec {
             path: "/system/services/compositor.service",
             manifest_path: "/system/packages/compositor/manifest.toml",
+            role: ROLE_SERVICE,
+        },
+        FixedService::Network => ServiceSpec {
+            path: "/system/services/network.service",
+            manifest_path: "/system/packages/network/manifest.toml",
             role: ROLE_SERVICE,
         },
         FixedService::Tty => ServiceSpec {
@@ -119,6 +125,11 @@ mod tests {
                 FixedService::Tty,
                 "/system/services/tty.service",
                 "/system/packages/tty/manifest.toml",
+            ),
+            (
+                FixedService::Network,
+                "/system/services/network.service",
+                "/system/packages/network/manifest.toml",
             ),
         ];
         for (service, path, manifest_path) in expected {

@@ -5,7 +5,11 @@ use mochi_user_platform as platform;
 
 use crate::driver_matcher::DriverSearchRoot;
 
-const DRIVER_BUNDLE_ROOTS: &[DriverSearchRoot] = &[DriverSearchRoot::Usb, DriverSearchRoot::Ps2];
+const DRIVER_BUNDLE_ROOTS: &[DriverSearchRoot] = &[
+    DriverSearchRoot::Usb,
+    DriverSearchRoot::Ps2,
+    DriverSearchRoot::Network,
+];
 
 pub(crate) fn roots() -> &'static [DriverSearchRoot] {
     DRIVER_BUNDLE_ROOTS
