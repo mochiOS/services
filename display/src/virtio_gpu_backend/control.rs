@@ -1,10 +1,10 @@
 use core::cmp;
 
 use mochi_user_platform as platform;
-use mochios_virtio_gpu_protocol::{Command, Response};
+use mochios_virtio_gpu_protocol::{Command, Response, VIRTIO_GPU_F_VIRGL};
 use plugkit::virtio::{
-    Descriptor, DmaMemory, FeatureSet, SplitVirtqueue, VIRTIO_F_VERSION_1, VirtioDevice,
-    VirtioError, VirtioPciTransport, VirtqueueLayout,
+    Descriptor, DmaMemory, FeatureSet, PciTransportAccess, SplitVirtqueue, VIRTIO_F_VERSION_1,
+    VirtioDevice, VirtioError, VirtioPciTransport, VirtqueueLayout,
 };
 
 use super::dma::DmaRegion;
@@ -23,6 +23,8 @@ pub(super) struct ControlChannel {
     notify_offset: u16,
     command: DmaRegion,
     response: DmaRegion,
+    virgl_supported: bool,
+    capset_count: u32,
 }
 
 impl ControlChannel {
@@ -31,10 +33,16 @@ impl ControlChannel {
         let transport = VirtioPciTransport::new(capabilities, mapped_bars);
         let mut device = VirtioDevice::new(transport);
         device.begin_initialization()?;
-        device.negotiate_features(
-            FeatureSet::new(VIRTIO_F_VERSION_1),
+        let negotiated = device.negotiate_features(
+            FeatureSet::new(VIRTIO_F_VERSION_1 | VIRTIO_GPU_F_VIRGL),
             FeatureSet::new(VIRTIO_F_VERSION_1),
         )?;
+        let virgl_supported = negotiated.contains_all(FeatureSet::new(VIRTIO_GPU_F_VIRGL));
+        let capset_count = if virgl_supported {
+            read_capset_count(&mut device)?
+        } else {
+            0
+        };
 
         let maximum = device.transport_mut().queue_max_size(CONTROL_QUEUE_INDEX)?;
         let queue_size = queue_size(maximum).ok_or(VirtioError::InvalidQueueSize)?;
@@ -56,7 +64,17 @@ impl ControlChannel {
             notify_offset,
             command: DmaRegion::allocate(COMMAND_BUFFER_SIZE).map_err(GpuError::System)?,
             response: DmaRegion::allocate(RESPONSE_BUFFER_SIZE).map_err(GpuError::System)?,
+            virgl_supported,
+            capset_count,
         })
+    }
+
+    pub(super) const fn virgl_supported(&self) -> bool {
+        self.virgl_supported
+    }
+
+    pub(super) const fn capset_count(&self) -> u32 {
+        self.capset_count
     }
 
     pub(super) fn submit_no_data(&mut self, command: Command<'_>) -> Result<(), GpuError> {
@@ -64,7 +82,9 @@ impl ControlChannel {
         match Response::decode(&self.response.bytes()[..length])? {
             Response::NoData => Ok(()),
             Response::Error(error) => Err(GpuError::DeviceResponse(error)),
-            Response::DisplayInfo(_) => Err(GpuError::InvalidDisplayInfo),
+            Response::DisplayInfo(_) | Response::CapsetInfo(_) | Response::Capset(_) => {
+                Err(GpuError::InvalidDisplayInfo)
+            }
         }
     }
 
@@ -109,6 +129,27 @@ impl ControlChannel {
     pub(super) fn response(&self, length: usize) -> &[u8] {
         &self.response.bytes()[..length]
     }
+}
+
+fn read_capset_count(device: &mut VirtioDevice<MappedBars>) -> Result<u32, GpuError> {
+    const NUM_CAPSETS_OFFSET: u32 = 12;
+    let region = device
+        .transport_mut()
+        .capabilities()
+        .device
+        .ok_or(VirtioError::RegisterOutOfBounds)?;
+    if region.length < NUM_CAPSETS_OFFSET + 4 {
+        return Err(VirtioError::RegisterOutOfBounds.into());
+    }
+    let offset = region
+        .offset
+        .checked_add(NUM_CAPSETS_OFFSET)
+        .ok_or(VirtioError::RegionOverflow)?;
+    device
+        .transport_mut()
+        .access_mut()
+        .read_u32(region.bar, offset)
+        .map_err(Into::into)
 }
 
 fn queue_size(maximum: u16) -> Option<u16> {

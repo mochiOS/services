@@ -7,6 +7,7 @@ mod pci;
 mod presenter;
 mod resource;
 mod scanout;
+mod virgl;
 
 pub(crate) use driver::VirtioGpuBackend;
 pub(crate) use error::GpuError;

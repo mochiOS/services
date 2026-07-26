@@ -8,7 +8,9 @@ pub(super) fn query(channel: &mut ControlChannel) -> Result<(u32, u32, u32), Gpu
     match Response::decode(channel.response(length))? {
         Response::DisplayInfo(view) => select_scanout(view),
         Response::Error(error) => Err(GpuError::DeviceResponse(error)),
-        Response::NoData => Err(GpuError::InvalidDisplayInfo),
+        Response::NoData | Response::CapsetInfo(_) | Response::Capset(_) => {
+            Err(GpuError::InvalidDisplayInfo)
+        }
     }
 }
 

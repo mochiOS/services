@@ -7,6 +7,7 @@ use super::error::GpuError;
 use super::presenter;
 use super::resource::ResourceState;
 use super::scanout::ScanoutState;
+use super::virgl::{self, VirglState};
 
 pub(crate) struct VirtioGpuBackend {
     control: ControlChannel,
@@ -15,11 +16,13 @@ pub(crate) struct VirtioGpuBackend {
     scanout_id: u32,
     resource: ResourceState,
     scanout: ScanoutState,
+    virgl: Option<VirglState>,
 }
 
 impl VirtioGpuBackend {
     pub(crate) fn initialize() -> Result<Self, GpuError> {
         let mut control = ControlChannel::initialize()?;
+        let virgl_capability = virgl::query(&mut control)?;
         let (scanout_id, width, height) = display_info::query(&mut control)?;
         let geometry = DisplayGeometry {
             width,
@@ -41,6 +44,18 @@ impl VirtioGpuBackend {
             resource.cleanup(&mut control);
             return Err(error);
         }
+        let virgl = if let Some(capability) = virgl_capability {
+            match VirglState::initialize(&mut control, capability) {
+                Ok(virgl) => Some(virgl),
+                Err(error) => {
+                    scanout.cleanup(&mut control, scanout_id);
+                    resource.cleanup(&mut control);
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
         Ok(Self {
             control,
             backing: Some(backing),
@@ -48,11 +63,22 @@ impl VirtioGpuBackend {
             scanout_id,
             resource,
             scanout,
+            virgl,
         })
     }
 
     pub(crate) const fn geometry(&self) -> DisplayGeometry {
         self.geometry
+    }
+
+    pub(crate) const fn virgl_capability(&self) -> Option<(u32, u32, u32)> {
+        match &self.virgl {
+            Some(state) => {
+                let capability = state.capability();
+                Some((capability.id, capability.version, capability.maximum_size))
+            }
+            None => None,
+        }
     }
 
     pub(crate) fn present(&mut self, frame: &PresentFrame<'_>) -> Result<(), GpuError> {
@@ -61,6 +87,10 @@ impl VirtioGpuBackend {
     }
 
     fn cleanup(&mut self) {
+        if let Some(virgl) = &mut self.virgl {
+            virgl.cleanup(&mut self.control);
+        }
+        self.virgl = None;
         self.scanout.cleanup(&mut self.control, self.scanout_id);
         self.resource.cleanup(&mut self.control);
         self.backing = None;
