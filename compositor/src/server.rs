@@ -252,6 +252,7 @@ pub(crate) fn run() -> ! {
     let _ = composite_and_present(
         &state.surfaces,
         &state.windows,
+        state.keyboard_focus,
         &mut state.present_frame,
         state.display_tid,
         state.display_width,
@@ -302,6 +303,7 @@ pub(crate) fn run() -> ! {
                             let _ = composite_and_present(
                                 &state.surfaces,
                                 &state.windows,
+                                state.keyboard_focus,
                                 &mut state.present_frame,
                                 state.display_tid,
                                 state.display_width,
@@ -386,6 +388,7 @@ pub(crate) fn run() -> ! {
                 let _ = composite_and_present(
                     &state.surfaces,
                     &state.windows,
+                    state.keyboard_focus,
                     &mut state.present_frame,
                     state.display_tid,
                     state.display_width,
@@ -459,6 +462,7 @@ pub(crate) fn run() -> ! {
                 let status = composite_and_present(
                     &state.surfaces,
                     &state.windows,
+                    state.keyboard_focus,
                     &mut state.present_frame,
                     state.display_tid,
                     state.display_width,

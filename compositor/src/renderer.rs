@@ -7,9 +7,12 @@ use crate::protocol::{
     OP_DISPLAY_PRESENT, OP_DISPLAY_PRESENT_RECT, PIXEL_FORMAT_ARGB8888_PREMULTIPLIED,
     PIXEL_FORMAT_XRGB8888, errno_status, put_u32, read_u32,
 };
-use crate::state::{MAX_SHARED_PAGES, MAX_SURFACES, PAGE_SIZE};
+use crate::state::{MAX_SHARED_PAGES, MAX_SURFACES, MAX_WINDOWS, PAGE_SIZE};
 use crate::surface::{Surface, read_current_pixel, shared_page_count, surface_has_current_pixels};
-use crate::window::{Window, point_inside_window_frame};
+use crate::window::{
+    ACTIVE_WINDOW_BORDER_ALPHA, WINDOW_CORNER_RADIUS, Window, WindowId,
+    content_surface_index_for_window, window_frame_rect, window_index_by_id,
+};
 
 #[derive(Default)]
 pub(crate) struct PresentFrame {
@@ -76,6 +79,7 @@ fn blend_argb_over_xrgb(dst: u32, src: u32) -> u32 {
 pub(crate) fn composite_and_present(
     surfaces: &[Surface],
     windows: &[Window],
+    keyboard_focus: Option<usize>,
     present_frame: &mut PresentFrame,
     display_tid: u64,
     display_width: u32,
@@ -132,7 +136,13 @@ pub(crate) fn composite_and_present(
                 *pixel = 0xff00_0000 | shade;
             }
         }
+        let active_window = keyboard_focus
+            .and_then(|index| surfaces.get(index))
+            .filter(|surface| surface.live)
+            .map(|surface| surface.window)
+            .filter(|window| *window != WindowId(0));
         let mut drawn = [false; MAX_SURFACES];
+        let mut shadow_drawn = [false; MAX_WINDOWS];
         for _ in 0..surfaces.len() {
             let mut selected: Option<usize> = None;
             for (index, surface) in surfaces.iter().enumerate() {
@@ -154,6 +164,22 @@ pub(crate) fn composite_and_present(
             let surface = &surfaces[index];
             if !surface_has_current_pixels(surface) {
                 continue;
+            }
+            let window_style =
+                window_index_by_id(windows, surface.window).and_then(|window_index| {
+                    let window = &windows[window_index];
+                    let content_index = content_surface_index_for_window(surfaces, window)?;
+                    (window.decoration.is_some() && surfaces[content_index].visible).then_some((
+                        window_index,
+                        window_frame_rect(&surfaces[content_index], window),
+                        active_window == Some(window.id),
+                    ))
+                });
+            if let Some((window_index, frame_rect, active)) = window_style
+                && !shadow_drawn[window_index]
+            {
+                draw_window_shadow(frame, frame_w, frame_h, present_rect, frame_rect, active);
+                shadow_drawn[window_index] = true;
             }
             let surface_left = surface.x.max(0) as i64;
             let surface_top = surface.y.max(0) as i64;
@@ -185,17 +211,32 @@ pub(crate) fn composite_and_present(
                     let Some(pixel) = read_current_pixel(surface, sx, sy) else {
                         continue;
                     };
-                    if !point_inside_window_frame(surfaces, windows, surface, dx as i32, dy as i32)
-                    {
+                    let coverage = window_style.map_or(255, |(_, frame, _)| {
+                        rounded_rect_coverage(frame, WINDOW_CORNER_RADIUS, dx as i32, dy as i32)
+                    });
+                    if coverage == 0 {
                         continue;
                     }
                     let Some(slot) = frame.get_mut(dst) else {
                         return errno_status(mochi_user_syscall::ERANGE);
                     };
-                    if surface.current_format == PIXEL_FORMAT_ARGB8888_PREMULTIPLIED {
-                        *slot = blend_premultiplied_argb_over_xrgb(*slot, pixel);
-                    } else {
-                        *slot = pixel;
+                    *slot = blend_surface_pixel(*slot, pixel, surface.current_format, coverage);
+                    if let Some((_, window_frame, true)) = window_style {
+                        let inner = inset_rect(window_frame, 1);
+                        let inner_coverage = rounded_rect_coverage(
+                            inner,
+                            WINDOW_CORNER_RADIUS.saturating_sub(1),
+                            dx as i32,
+                            dy as i32,
+                        );
+                        let border_coverage = coverage.saturating_sub(inner_coverage);
+                        if border_coverage != 0 {
+                            let alpha = ((u32::from(ACTIVE_WINDOW_BORDER_ALPHA)
+                                * u32::from(border_coverage)
+                                + 127)
+                                / 255) as u8;
+                            *slot = blend_black_over_xrgb(*slot, alpha);
+                        }
                     }
                 }
             }
@@ -278,6 +319,318 @@ pub(crate) fn composite_and_present(
         return status;
     }
     0
+}
+
+#[derive(Clone, Copy)]
+struct WindowShadow {
+    alpha: u8,
+    offset_y: i32,
+    blur_radius: u32,
+    spread: u32,
+}
+
+const INACTIVE_WINDOW_SHADOW: [WindowShadow; 1] = [WindowShadow {
+    alpha: 8,
+    offset_y: 2,
+    blur_radius: 5,
+    spread: 1,
+}];
+
+const ACTIVE_WINDOW_SHADOW: [WindowShadow; 2] = [
+    WindowShadow {
+        alpha: 20,
+        offset_y: 2,
+        blur_radius: 5,
+        spread: 0,
+    },
+    WindowShadow {
+        alpha: 28,
+        offset_y: 5,
+        blur_radius: 14,
+        spread: 0,
+    },
+];
+
+fn draw_window_shadow(
+    frame: &mut [u32],
+    frame_width: usize,
+    frame_height: usize,
+    damage: Rect,
+    window_frame: Rect,
+    active: bool,
+) {
+    let layers: &[WindowShadow] = if active {
+        &ACTIVE_WINDOW_SHADOW
+    } else {
+        &INACTIVE_WINDOW_SHADOW
+    };
+    for shadow in layers.iter().rev() {
+        draw_shadow(
+            frame,
+            frame_width,
+            frame_height,
+            damage,
+            window_frame,
+            *shadow,
+        );
+    }
+}
+
+fn draw_shadow(
+    frame: &mut [u32],
+    frame_width: usize,
+    frame_height: usize,
+    damage: Rect,
+    window_frame: Rect,
+    shadow: WindowShadow,
+) {
+    let layer_count = shadow.blur_radius.max(2).min(u32::from(shadow.alpha));
+    let weight_sum = (1..=layer_count)
+        .map(|layer| {
+            layer_count
+                .saturating_mul(4)
+                .saturating_sub(layer.saturating_mul(3))
+        })
+        .sum::<u32>();
+    let mut remaining_alpha = u32::from(shadow.alpha);
+    for layer in (1..=layer_count).rev() {
+        let expansion = shadow.spread.saturating_add(
+            shadow
+                .blur_radius
+                .saturating_mul(layer)
+                .saturating_add(layer_count - 1)
+                / layer_count,
+        );
+        let weight = layer_count
+            .saturating_mul(4)
+            .saturating_sub(layer.saturating_mul(3));
+        let mut alpha = u32::from(shadow.alpha)
+            .saturating_mul(weight)
+            .saturating_add(weight_sum / 2)
+            / weight_sum;
+        alpha = alpha.min(remaining_alpha);
+        if layer == 1 {
+            alpha = remaining_alpha;
+        }
+        remaining_alpha = remaining_alpha.saturating_sub(alpha);
+        if alpha == 0 {
+            continue;
+        }
+        let mut shadow_rect = window_frame.expanded(expansion);
+        shadow_rect.y = shadow_rect.y.saturating_add(shadow.offset_y);
+        fill_rounded_black(
+            frame,
+            frame_width,
+            frame_height,
+            damage,
+            shadow_rect,
+            WINDOW_CORNER_RADIUS.saturating_add(expansion),
+            alpha as u8,
+            window_frame,
+            WINDOW_CORNER_RADIUS,
+        );
+    }
+}
+
+fn fill_rounded_black(
+    frame: &mut [u32],
+    frame_width: usize,
+    frame_height: usize,
+    damage: Rect,
+    rect: Rect,
+    radius: u32,
+    alpha: u8,
+    occluder: Rect,
+    occluder_radius: u32,
+) {
+    let left = rect.x.max(damage.x).max(0) as usize;
+    let top = rect.y.max(damage.y).max(0) as usize;
+    let right = (i64::from(rect.x) + i64::from(rect.width))
+        .min(i64::from(damage.x) + i64::from(damage.width))
+        .min(frame_width as i64)
+        .max(0) as usize;
+    let bottom = (i64::from(rect.y) + i64::from(rect.height))
+        .min(i64::from(damage.y) + i64::from(damage.height))
+        .min(frame_height as i64)
+        .max(0) as usize;
+    let occluder_left = occluder.x.max(0) as usize;
+    let occluder_top = occluder.y.max(0) as usize;
+    let occluder_right = (i64::from(occluder.x) + i64::from(occluder.width))
+        .min(frame_width as i64)
+        .max(0) as usize;
+    let occluder_bottom = (i64::from(occluder.y) + i64::from(occluder.height))
+        .min(frame_height as i64)
+        .max(0) as usize;
+    let occluder_radius = occluder_radius
+        .min(occluder.width / 2)
+        .min(occluder.height / 2) as usize;
+    for y in top..bottom {
+        if y < occluder_top || y >= occluder_bottom {
+            fill_shadow_range(frame, frame_width, rect, radius, alpha, y, left, right);
+            continue;
+        }
+        let in_corner_row = y < occluder_top.saturating_add(occluder_radius)
+            || y >= occluder_bottom.saturating_sub(occluder_radius);
+        let left_end = if in_corner_row {
+            occluder_left.saturating_add(occluder_radius)
+        } else {
+            occluder_left
+        };
+        let right_start = if in_corner_row {
+            occluder_right.saturating_sub(occluder_radius)
+        } else {
+            occluder_right
+        };
+        fill_shadow_range(
+            frame,
+            frame_width,
+            rect,
+            radius,
+            alpha,
+            y,
+            left,
+            right.min(left_end),
+        );
+        fill_shadow_range(
+            frame,
+            frame_width,
+            rect,
+            radius,
+            alpha,
+            y,
+            left.max(right_start),
+            right,
+        );
+    }
+}
+
+fn fill_shadow_range(
+    frame: &mut [u32],
+    frame_width: usize,
+    rect: Rect,
+    radius: u32,
+    alpha: u8,
+    y: usize,
+    left: usize,
+    right: usize,
+) {
+    for x in left..right {
+        let coverage = rounded_rect_coverage(rect, radius, x as i32, y as i32);
+        if coverage == 0 {
+            continue;
+        }
+        let effective_alpha = ((u32::from(alpha) * u32::from(coverage) + 127) / 255) as u8;
+        if let Some(pixel) = frame.get_mut(y * frame_width + x) {
+            *pixel = blend_black_over_xrgb(*pixel, effective_alpha);
+        }
+    }
+}
+
+fn inset_rect(rect: Rect, amount: u32) -> Rect {
+    let offset = amount.min(i32::MAX as u32) as i32;
+    Rect {
+        x: rect.x.saturating_add(offset),
+        y: rect.y.saturating_add(offset),
+        width: rect.width.saturating_sub(amount.saturating_mul(2)),
+        height: rect.height.saturating_sub(amount.saturating_mul(2)),
+    }
+}
+
+fn rounded_rect_coverage(rect: Rect, radius: u32, x: i32, y: i32) -> u8 {
+    if rect.width == 0 || rect.height == 0 {
+        return 0;
+    }
+    let right = i64::from(rect.x) + i64::from(rect.width);
+    let bottom = i64::from(rect.y) + i64::from(rect.height);
+    if i64::from(x) < i64::from(rect.x)
+        || i64::from(y) < i64::from(rect.y)
+        || i64::from(x) >= right
+        || i64::from(y) >= bottom
+    {
+        return 0;
+    }
+    let radius = radius.min(rect.width / 2).min(rect.height / 2);
+    if radius == 0 {
+        return 255;
+    }
+    let radius_i64 = i64::from(radius);
+    if i64::from(x) >= i64::from(rect.x) + radius_i64 && i64::from(x) < right - radius_i64
+        || i64::from(y) >= i64::from(rect.y) + radius_i64 && i64::from(y) < bottom - radius_i64
+    {
+        return 255;
+    }
+    const SAMPLE_OFFSETS: [i64; 4] = [1, 3, 5, 7];
+    const SCALE: i64 = 8;
+    let left = i64::from(rect.x) * SCALE;
+    let top = i64::from(rect.y) * SCALE;
+    let right = (i64::from(rect.x) + i64::from(rect.width)) * SCALE;
+    let bottom = (i64::from(rect.y) + i64::from(rect.height)) * SCALE;
+    let radius = i64::from(radius) * SCALE;
+    let mut inside = 0u32;
+    for sample_y in SAMPLE_OFFSETS {
+        let py = i64::from(y) * SCALE + sample_y;
+        for sample_x in SAMPLE_OFFSETS {
+            let px = i64::from(x) * SCALE + sample_x;
+            if px < left || px >= right || py < top || py >= bottom {
+                continue;
+            }
+            let center_x = if px < left + radius {
+                left + radius
+            } else if px >= right - radius {
+                right - radius
+            } else {
+                px
+            };
+            let center_y = if py < top + radius {
+                top + radius
+            } else if py >= bottom - radius {
+                bottom - radius
+            } else {
+                py
+            };
+            let dx = px - center_x;
+            let dy = py - center_y;
+            if dx * dx + dy * dy <= radius * radius {
+                inside += 1;
+            }
+        }
+    }
+    ((inside * 255 + 8) / 16) as u8
+}
+
+fn blend_surface_pixel(dst: u32, src: u32, format: u32, coverage: u8) -> u32 {
+    if coverage == 255 {
+        return if format == PIXEL_FORMAT_ARGB8888_PREMULTIPLIED {
+            blend_premultiplied_argb_over_xrgb(dst, src)
+        } else {
+            0xff00_0000 | (src & 0x00ff_ffff)
+        };
+    }
+    let coverage = u32::from(coverage);
+    let premultiplied = if format == PIXEL_FORMAT_ARGB8888_PREMULTIPLIED {
+        let alpha = ((src >> 24) & 0xff) * coverage / 255;
+        let red = ((src >> 16) & 0xff) * coverage / 255;
+        let green = ((src >> 8) & 0xff) * coverage / 255;
+        let blue = (src & 0xff) * coverage / 255;
+        (alpha << 24) | (red << 16) | (green << 8) | blue
+    } else {
+        let red = ((src >> 16) & 0xff) * coverage / 255;
+        let green = ((src >> 8) & 0xff) * coverage / 255;
+        let blue = (src & 0xff) * coverage / 255;
+        (coverage << 24) | (red << 16) | (green << 8) | blue
+    };
+    blend_premultiplied_argb_over_xrgb(dst, premultiplied)
+}
+
+fn blend_black_over_xrgb(dst: u32, alpha: u8) -> u32 {
+    if alpha == 0 {
+        return dst;
+    }
+    let inverse = 255 - u32::from(alpha);
+    let red = ((dst >> 16) & 0xff) * inverse / 255;
+    let green = ((dst >> 8) & 0xff) * inverse / 255;
+    let blue = (dst & 0xff) * inverse / 255;
+    0xff00_0000 | (red << 16) | (green << 8) | blue
 }
 
 fn blend_premultiplied_argb_over_xrgb(dst: u32, src: u32) -> u32 {

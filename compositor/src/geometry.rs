@@ -19,6 +19,16 @@ impl Rect {
             height,
         }
     }
+
+    pub(crate) fn expanded(self, amount: u32) -> Self {
+        let amount_i32 = amount.min(i32::MAX as u32) as i32;
+        Self {
+            x: self.x.saturating_sub(amount_i32),
+            y: self.y.saturating_sub(amount_i32),
+            width: self.width.saturating_add(amount.saturating_mul(2)),
+            height: self.height.saturating_add(amount.saturating_mul(2)),
+        }
+    }
 }
 
 pub(crate) fn rounded_rect_contains(rect: Rect, radius: u32, x: i32, y: i32) -> bool {

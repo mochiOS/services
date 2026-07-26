@@ -10,6 +10,10 @@ use crate::state::getrandom_u64;
 use crate::surface::{Surface, SurfaceHandle, SurfaceRole};
 use crate::surface::{surface_extent, surface_index_by_handle};
 
+pub(crate) const WINDOW_CORNER_RADIUS: u32 = 14;
+pub(crate) const WINDOW_SHADOW_MARGIN: u32 = 20;
+pub(crate) const ACTIVE_WINDOW_BORDER_ALPHA: u8 = 31;
+
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct WindowId(pub(crate) u64);
 
@@ -207,8 +211,6 @@ pub(crate) fn point_inside_window_frame(
     x: i32,
     y: i32,
 ) -> bool {
-    const CORNER_RADIUS: u32 = 14;
-
     let Some(window_index) = window_index_by_id(windows, surface.window) else {
         return true;
     };
@@ -219,9 +221,13 @@ pub(crate) fn point_inside_window_frame(
     let Some(content_index) = content_surface_index_for_window(surfaces, window) else {
         return true;
     };
-    let content = &surfaces[content_index];
+    let frame = window_frame_rect(&surfaces[content_index], window);
+    rounded_rect_contains(frame, WINDOW_CORNER_RADIUS, x, y)
+}
+
+pub(crate) fn window_frame_rect(content: &Surface, window: &Window) -> Rect {
     let (width, height) = surface_extent(content);
-    let frame = Rect {
+    Rect {
         x: content.x.saturating_sub(window.insets.left as i32),
         y: content.y.saturating_sub(window.insets.top as i32),
         width: width
@@ -230,6 +236,5 @@ pub(crate) fn point_inside_window_frame(
         height: height
             .saturating_add(window.insets.top)
             .saturating_add(window.insets.bottom),
-    };
-    rounded_rect_contains(frame, CORNER_RADIUS, x, y)
+    }
 }

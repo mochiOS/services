@@ -10,8 +10,8 @@ use crate::state::MAX_DIMENSION;
 use crate::surface::surface_extent;
 use crate::surface::{Surface, SurfaceHandle, SurfaceRole, read_current_pixel};
 use crate::window::{
-    Window, WindowId, content_surface_index_for_window, point_inside_window_frame,
-    window_index_by_id,
+    WINDOW_SHADOW_MARGIN, Window, WindowId, content_surface_index_for_window,
+    point_inside_window_frame, window_frame_rect, window_index_by_id,
 };
 
 const INPUT_SERVICE_NAME: &str = "input.service";
@@ -255,6 +255,7 @@ pub(crate) fn handle_input_event(
         }
         platform::input::EVENT_KIND_POINTER_BUTTON => {
             let target = hit_test(surfaces, windows, *pointer_x, *pointer_y);
+            let mut needs_window_redraw = false;
             if event.flags & platform::input::FLAG_PRESS != 0 {
                 let focus = target.and_then(|index| {
                     let surface = &surfaces[index];
@@ -265,10 +266,13 @@ pub(crate) fn handle_input_event(
                         Some(index)
                     }
                 });
+                let previous_focus = *keyboard_focus;
                 update_keyboard_focus(surfaces, keyboard_focus, focus);
+                needs_window_redraw = previous_focus != *keyboard_focus;
                 if let Some(index) = target {
                     let window = surfaces[index].window;
                     raise_window(surfaces, windows, next_z, window);
+                    needs_window_redraw |= window != WindowId(0);
                 }
             }
             if let Some(index) = target {
@@ -315,7 +319,7 @@ pub(crate) fn handle_input_event(
             if event.flags & platform::input::FLAG_RELEASE != 0 {
                 *pointer_grab = None;
             }
-            None
+            needs_window_redraw.then_some(Rect::full(display_width, display_height))
         }
         platform::input::EVENT_KIND_KEY => {
             if let Some(index) = *keyboard_focus {
@@ -435,24 +439,12 @@ fn apply_pointer_grab(
     if surfaces[content_index].x == next_x && surfaces[content_index].y == next_y {
         return None;
     }
-    let old_frame = window_frame_rect(&surfaces[content_index], window);
+    let old_frame =
+        window_frame_rect(&surfaces[content_index], window).expanded(WINDOW_SHADOW_MARGIN);
     surfaces[content_index].x = next_x;
     surfaces[content_index].y = next_y;
     crate::window::reposition_window_surfaces(surfaces, window);
-    let new_frame = window_frame_rect(&surfaces[content_index], window);
+    let new_frame =
+        window_frame_rect(&surfaces[content_index], window).expanded(WINDOW_SHADOW_MARGIN);
     merge_damage(Some(old_frame), new_frame)
-}
-
-fn window_frame_rect(content: &Surface, window: &Window) -> Rect {
-    let (width, height) = surface_extent(content);
-    Rect {
-        x: content.x.saturating_sub(window.insets.left as i32),
-        y: content.y.saturating_sub(window.insets.top as i32),
-        width: width
-            .saturating_add(window.insets.left)
-            .saturating_add(window.insets.right),
-        height: height
-            .saturating_add(window.insets.top)
-            .saturating_add(window.insets.bottom),
-    }
 }
