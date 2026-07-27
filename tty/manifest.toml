@@ -12,4 +12,5 @@ requires = [
     "process.spawn",
     "ipc.client",
     "ipc.server",
+    "net.connect",
 ]

@@ -64,6 +64,7 @@ fn main() {
             "capabilities.manage",
             "ipc.client",
             "ipc.server",
+            "net.connect",
         ]
     );
     assert!(
@@ -86,6 +87,12 @@ fn main() {
             .requires
             .iter()
             .any(|capability| capability == "capabilities.manage")
+    );
+    assert!(
+        capability_binary
+            .requires
+            .iter()
+            .any(|capability| capability == "net.connect")
     );
 
     assert_capabilities(
@@ -122,7 +129,13 @@ fn main() {
     assert_capabilities(
         TTY_MANIFEST,
         "/system/services/tty.service",
-        &["fs.read.all", "process.spawn", "ipc.client", "ipc.server"],
+        &[
+            "fs.read.all",
+            "process.spawn",
+            "ipc.client",
+            "ipc.server",
+            "net.connect",
+        ],
     );
 
     let manager_index = match SERVICE_INDEX.split("[service-manager.service]").nth(1) {
