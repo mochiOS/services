@@ -11,5 +11,6 @@ requires = [
     "ipc.client",
     "ipc.server",
     "net.raw",
+    "system.random.read",
     "system.time.read",
 ]

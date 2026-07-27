@@ -135,6 +135,8 @@ fn main() {
             "ipc.client",
             "ipc.server",
             "net.connect",
+            "net.tls.connect",
+            "net.http.request",
         ],
     );
 
