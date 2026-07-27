@@ -37,8 +37,15 @@ pub(crate) fn run() -> ! {
         }
     };
     let info = stack.info();
+    let driver_name_length = info
+        .driver_name
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(info.driver_name.len());
+    let driver_name =
+        core::str::from_utf8(&info.driver_name[..driver_name_length]).unwrap_or("invalid");
     platform::println!(
-        "network.service: interface id={} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} link={} mtu={}",
+        "network.service: interface id={} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} link={} mtu={} driver={} device={:#x}",
         info.interface_id,
         info.mac[0],
         info.mac[1],
@@ -47,7 +54,9 @@ pub(crate) fn run() -> ! {
         info.mac[4],
         info.mac[5],
         info.link_up,
-        info.mtu
+        info.mtu,
+        driver_name,
+        info.device_id
     );
     if stack.start(now).is_err() {
         platform::println!("network.service: DHCP startup failed");

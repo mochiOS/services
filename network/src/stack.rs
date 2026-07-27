@@ -1,3 +1,6 @@
+use alloc::collections::VecDeque;
+use alloc::vec::Vec;
+
 use crate::driver::DriverClient;
 use mochi_user_platform as platform;
 use mochios_net_device_protocol::{InterfaceInfo, StackStatistics};
@@ -5,18 +8,31 @@ use mochios_network_stack::{
     ARP_LEN, ARP_REPLY, ARP_REQUEST, ArpCache, ArpEntry, ArpPacket, BROADCAST_MAC,
     DHCP_CLIENT_PORT, DHCP_SERVER_PORT, DhcpClient, DhcpMessageType, DhcpState, ETHERTYPE_ARP,
     ETHERTYPE_IPV4, EchoPacket, EthernetHeader, Ipv4Config, Ipv4Header, PacketError, UdpDatagram,
-    decode_reply, encode_request, next_hop,
+    UdpSocketTable, decode_reply, encode_request, next_hop,
 };
 
 const ARP_TTL: u64 = 60_000;
 const RETRY_TICKS: u64 = 1_000;
 const MAX_RETRIES: u8 = 5;
+const UDP_SOCKET_LIMIT: usize = 8;
+const UDP_QUEUE_LIMIT: usize = 8;
+const UDP_PAYLOAD_LIMIT: usize = 1_472;
+const PENDING_IPV4_LIMIT: usize = 8;
 const ICMP_IDENTIFIER: u16 = 0x4d4f;
+
+struct PendingIpv4 {
+    next_hop: [u8; 4],
+    destination: [u8; 4],
+    protocol: u8,
+    payload: Vec<u8>,
+}
+
 pub(crate) struct NetworkStack {
     driver: DriverClient,
     info: InterfaceInfo,
     config: Option<Ipv4Config>,
     dhcp: DhcpClient,
+    udp: UdpSocketTable,
     arp: ArpCache,
     stats: StackStatistics,
     ready: Option<platform::service_ready::Target>,
@@ -24,12 +40,11 @@ pub(crate) struct NetworkStack {
     arp_pending: Option<[u8; 4]>,
     arp_last: u64,
     arp_retries: u8,
+    pending_ipv4: VecDeque<PendingIpv4>,
     next_ip_id: u16,
     ping_sequence: u16,
     ping_sent: Option<([u8; 4], u16, u64)>,
     ping_reply: Option<([u8; 4], u16, u64)>,
-    dhcp_successes: u64,
-    dhcp_failures: u64,
 }
 impl NetworkStack {
     pub(crate) fn new(
@@ -38,11 +53,15 @@ impl NetworkStack {
         xid: u32,
     ) -> Result<Self, u64> {
         let info = driver.info()?;
+        let mut udp = UdpSocketTable::new(UDP_SOCKET_LIMIT, UDP_QUEUE_LIMIT, UDP_PAYLOAD_LIMIT);
+        udp.bind(DHCP_CLIENT_PORT)
+            .map_err(|_| mochi_user_syscall::EINVAL)?;
         Ok(Self {
             driver,
             info,
             config: None,
             dhcp: DhcpClient::new(xid, info.mac),
+            udp,
             arp: ArpCache::new(32),
             stats: StackStatistics::default(),
             ready,
@@ -50,12 +69,11 @@ impl NetworkStack {
             arp_pending: None,
             arp_last: 0,
             arp_retries: 0,
+            pending_ipv4: VecDeque::with_capacity(PENDING_IPV4_LIMIT),
             next_ip_id: 1,
             ping_sequence: 1,
             ping_sent: None,
             ping_reply: None,
-            dhcp_successes: 0,
-            dhcp_failures: 0,
         })
     }
     pub(crate) fn start(&mut self, now: u64) -> Result<(), u64> {
@@ -69,7 +87,12 @@ impl NetworkStack {
         self.stats
     }
     pub(crate) fn tick(&mut self, now: u64) {
+        let previous_dhcp_state = self.dhcp.state;
         self.dhcp.tick(now);
+        if previous_dhcp_state != DhcpState::Failed && self.dhcp.state == DhcpState::Failed {
+            self.stats.dhcp_failures = self.stats.dhcp_failures.saturating_add(1);
+            self.config = None;
+        }
         if matches!(
             self.dhcp.state,
             DhcpState::Selecting
@@ -92,7 +115,7 @@ impl NetworkStack {
         {
             if self.arp_retries >= MAX_RETRIES {
                 self.arp_pending = None;
-                self.stats.tx_dropped += 1
+                self.drop_pending_for(ip);
             } else {
                 let _ = self.send_arp_request(ip, now);
             }
@@ -118,13 +141,28 @@ impl NetworkStack {
             return Err(PacketError::Mismatch);
         }
         match header.ethertype {
-            ETHERTYPE_ARP => self.handle_arp(payload, now),
+            ETHERTYPE_ARP => self.handle_arp(header.source, payload, now),
             ETHERTYPE_IPV4 => self.handle_ipv4(payload, now),
             _ => Err(PacketError::Unsupported),
         }
     }
-    fn handle_arp(&mut self, payload: &[u8], now: u64) -> Result<(), PacketError> {
+    fn handle_arp(
+        &mut self,
+        ethernet_source: [u8; 6],
+        payload: &[u8],
+        now: u64,
+    ) -> Result<(), PacketError> {
         let packet = ArpPacket::decode(payload)?;
+        if packet.sender_mac != ethernet_source {
+            return Err(PacketError::Mismatch);
+        }
+        let config = self.config.ok_or(PacketError::Mismatch)?;
+        if packet.sender_ip == [0; 4]
+            || packet.target_ip != config.address
+            || (packet.operation == ARP_REPLY && packet.target_mac != self.info.mac)
+        {
+            return Err(PacketError::Mismatch);
+        }
         self.arp.insert(ArpEntry {
             ip: packet.sender_ip,
             mac: packet.sender_mac,
@@ -145,24 +183,18 @@ impl NetworkStack {
                 packet.sender_mac[4],
                 packet.sender_mac[5]
             );
-            if self.config.is_some_and(|c| c.gateway == packet.sender_ip) {
-                let _ = self.send_echo(packet.sender_ip, now);
-            }
+            self.flush_pending(packet.sender_ip, packet.sender_mac);
         }
-        if packet.operation == ARP_REQUEST {
-            if let Some(config) = self.config
-                && packet.target_ip == config.address
-            {
-                let reply = ArpPacket {
-                    operation: ARP_REPLY,
-                    sender_mac: self.info.mac,
-                    sender_ip: config.address,
-                    target_mac: packet.sender_mac,
-                    target_ip: packet.sender_ip,
-                };
-                self.send_arp(reply, packet.sender_mac)
-                    .map_err(|_| PacketError::Capacity)?;
-            }
+        if packet.operation == ARP_REQUEST && packet.target_ip == config.address {
+            let reply = ArpPacket {
+                operation: ARP_REPLY,
+                sender_mac: self.info.mac,
+                sender_ip: config.address,
+                target_mac: packet.sender_mac,
+                target_ip: packet.sender_ip,
+            };
+            self.send_arp(reply, packet.sender_mac)
+                .map_err(|_| PacketError::Capacity)?;
         }
         Ok(())
     }
@@ -170,8 +202,11 @@ impl NetworkStack {
         let (header, payload) = Ipv4Header::decode(payload)?;
         if header.protocol == 17 {
             let udp = UdpDatagram::decode(header.source, header.destination, payload)?;
-            if udp.source_port == DHCP_SERVER_PORT && udp.destination_port == DHCP_CLIENT_PORT {
-                return self.handle_dhcp(udp.payload, now);
+            self.udp.enqueue(header.source, header.destination, udp)?;
+            if let Some(packet) = self.udp.receive(DHCP_CLIENT_PORT)
+                && packet.source_port == DHCP_SERVER_PORT
+            {
+                return self.handle_dhcp(&packet.payload, now);
             }
         } else if header.protocol == 1
             && self.config.is_some_and(|c| c.address == header.destination)
@@ -226,7 +261,7 @@ impl NetworkStack {
                     gateway: offer.gateway,
                     dns: offer.dns,
                 });
-                self.dhcp_successes += 1;
+                self.stats.dhcp_successes = self.stats.dhcp_successes.saturating_add(1);
                 platform::println!("network.service: DHCPACK received");
                 platform::println!(
                     "network.service: configured ip={}.{}.{}.{} mask={}.{}.{}.{} gateway={}.{}.{}.{} dns={}.{}.{}.{}",
@@ -250,13 +285,13 @@ impl NetworkStack {
                 if let Some(target) = self.ready.take() {
                     let _ = platform::service_ready::notify(target, 0);
                 }
-                self.resolve(offer.gateway, now)
-                    .map(|_| ())
+                self.send_echo(offer.gateway, now)
                     .map_err(|_| PacketError::Capacity)
             }
             DhcpMessageType::Nak => {
                 self.dhcp.accept(message, now)?;
-                self.dhcp_failures += 1;
+                self.stats.dhcp_failures = self.stats.dhcp_failures.saturating_add(1);
+                self.config = None;
                 Err(PacketError::Mismatch)
             }
             _ => Err(PacketError::Mismatch),
@@ -339,6 +374,60 @@ impl NetworkStack {
             Ok(None)
         }
     }
+
+    fn send_routed_ipv4(
+        &mut self,
+        destination: [u8; 4],
+        protocol: u8,
+        payload: &[u8],
+        now: u64,
+    ) -> Result<(), u64> {
+        let config = self.config.ok_or(mochi_user_syscall::ENXIO)?;
+        let hop = next_hop(config, destination).ok_or(mochi_user_syscall::ENXIO)?;
+        if let Some(mac) = self.resolve(hop, now)? {
+            return self.send_ipv4(destination, protocol, payload, mac);
+        }
+        if self.pending_ipv4.len() >= PENDING_IPV4_LIMIT {
+            self.stats.tx_dropped = self.stats.tx_dropped.saturating_add(1);
+            return Err(mochi_user_syscall::EAGAIN);
+        }
+        self.pending_ipv4.push_back(PendingIpv4 {
+            next_hop: hop,
+            destination,
+            protocol,
+            payload: payload.to_vec(),
+        });
+        Ok(())
+    }
+
+    fn flush_pending(&mut self, next_hop: [u8; 4], mac: [u8; 6]) {
+        let count = self.pending_ipv4.len();
+        for _ in 0..count {
+            let Some(packet) = self.pending_ipv4.pop_front() else {
+                break;
+            };
+            if packet.next_hop == next_hop {
+                if self
+                    .send_ipv4(packet.destination, packet.protocol, &packet.payload, mac)
+                    .is_err()
+                {
+                    self.stats.tx_dropped = self.stats.tx_dropped.saturating_add(1);
+                }
+            } else {
+                self.pending_ipv4.push_back(packet);
+            }
+        }
+    }
+
+    fn drop_pending_for(&mut self, next_hop: [u8; 4]) {
+        let before = self.pending_ipv4.len();
+        self.pending_ipv4
+            .retain(|packet| packet.next_hop != next_hop);
+        self.stats.tx_dropped = self
+            .stats
+            .tx_dropped
+            .saturating_add(before.saturating_sub(self.pending_ipv4.len()) as u64);
+    }
     fn send_ipv4(
         &mut self,
         destination: [u8; 4],
@@ -382,11 +471,6 @@ impl NetworkStack {
         }
     }
     fn send_echo(&mut self, target: [u8; 4], now: u64) -> Result<(), u64> {
-        let config = self.config.ok_or(mochi_user_syscall::ENXIO)?;
-        let hop = next_hop(config, target).ok_or(mochi_user_syscall::ENXIO)?;
-        let Some(mac) = self.resolve(hop, now)? else {
-            return Ok(());
-        };
         let sequence = self.ping_sequence;
         self.ping_sequence = self.ping_sequence.wrapping_add(1);
         let mut icmp = [0u8; 32];
@@ -398,7 +482,7 @@ impl NetworkStack {
         }
         .encode(&mut icmp)
         .map_err(|_| mochi_user_syscall::EINVAL)?;
-        self.send_ipv4(target, 1, &icmp[..n], mac)?;
+        self.send_routed_ipv4(target, 1, &icmp[..n], now)?;
         self.ping_sent = Some((target, sequence, now));
         Ok(())
     }
@@ -408,11 +492,6 @@ impl NetworkStack {
         echo: EchoPacket<'_>,
         now: u64,
     ) -> Result<(), u64> {
-        let config = self.config.ok_or(mochi_user_syscall::ENXIO)?;
-        let hop = next_hop(config, target).ok_or(mochi_user_syscall::ENXIO)?;
-        let Some(mac) = self.resolve(hop, now)? else {
-            return Ok(());
-        };
         let mut icmp = [0u8; 1500];
         let n = EchoPacket {
             reply: true,
@@ -422,7 +501,7 @@ impl NetworkStack {
         }
         .encode(&mut icmp)
         .map_err(|_| mochi_user_syscall::EINVAL)?;
-        self.send_ipv4(target, 1, &icmp[..n], mac)
+        self.send_routed_ipv4(target, 1, &icmp[..n], now)
     }
     pub(crate) fn ping(&mut self, target: [u8; 4], started: u64) -> Result<u64, u64> {
         self.ping_reply = None;

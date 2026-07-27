@@ -24,6 +24,7 @@ _start:
 );
 
 #[unsafe(no_mangle)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn network_service_main(sp: *const usize) -> ! {
     unsafe {
         let _ = mochi_user_platform::logger::init_from_initial_stack(sp);

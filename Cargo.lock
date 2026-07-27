@@ -271,6 +271,14 @@ name = "mochios-driver-control-protocol"
 version = "0.1.0"
 
 [[package]]
+name = "mochios-net-device-protocol"
+version = "0.1.0"
+
+[[package]]
+name = "mochios-network-stack"
+version = "0.1.0"
+
+[[package]]
 name = "mochios-signature-protocol"
 version = "0.1.0"
 
@@ -281,6 +289,17 @@ version = "0.1.0"
 [[package]]
 name = "mochios-virtio-gpu-protocol"
 version = "0.1.0"
+
+[[package]]
+name = "network"
+version = "0.1.0"
+dependencies = [
+ "mochi-user-platform",
+ "mochi-user-runtime",
+ "mochi-user-syscall",
+ "mochios-net-device-protocol",
+ "mochios-network-stack",
+]
 
 [[package]]
 name = "package"
