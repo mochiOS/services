@@ -10,7 +10,9 @@ kind = "service"
 requires = [
     "fs.read.all",
     "process.spawn",
+    "dma.allocate",
     "device.input",
+    "device.net",
     "display.read",
     "input.keyboard",
     "input.pointer",
