@@ -6,8 +6,12 @@ extern crate alloc;
 use core::arch::global_asm;
 
 mod driver;
+mod http;
 mod service;
 mod stack;
+mod tls;
+
+getrandom::register_custom_getrandom!(mochios_tls_client::platform_getrandom);
 
 global_asm!(
     r#"

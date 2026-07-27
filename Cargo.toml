@@ -17,3 +17,6 @@ members = [
 
 [patch."https://github.com/mochiOS/mnu"]
 plugkit = { path = "../core/crates/PlugKit/plugkit" }
+
+[patch.crates-io]
+mnu-abi = { path = "../core/crates/abi" }

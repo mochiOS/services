@@ -999,6 +999,10 @@ impl NetworkStack {
         self.tcp.remove(handle, owner);
     }
 
+    pub(crate) fn tcp_discard(&mut self, owner: u64, handle: u64) {
+        self.remove_tcp_connection(handle, owner);
+    }
+
     fn send_tcp(&mut self, tuple: TcpTuple, transmit: TcpTransmit, now: u64) -> Result<(), u64> {
         let mut segment = [0u8; 1_500];
         let length = TcpSegment {

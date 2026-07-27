@@ -21,7 +21,6 @@
   "no-default-libraries": true,
   "main-needs-argc-argv": false,
   "has-thread-local": false,
-  "target-family": "unix",
   "binary-format": "elf",
   "max-atomic-width": 64
 }
