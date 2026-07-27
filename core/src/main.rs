@@ -211,9 +211,7 @@ fn spawn_capability_service() -> Result<u64, mochi_user_syscall::SysError> {
         Some(caps_nul.as_slice()),
     ) {
         Ok(pid) => Ok(pid),
-        Err(err) => {
-            Err(err)
-        }
+        Err(err) => Err(err),
     }
 }
 
