@@ -148,6 +148,20 @@ fn trim_cstr(bytes: &[u8]) -> &[u8] {
     &bytes[..len]
 }
 
+fn tar_header_checksum(block: &[u8]) -> u64 {
+    block
+        .iter()
+        .enumerate()
+        .map(|(index, byte)| {
+            if (148..156).contains(&index) {
+                u64::from(b' ')
+            } else {
+                u64::from(*byte)
+            }
+        })
+        .sum()
+}
+
 fn is_valid_rel_path(path: &str) -> bool {
     if path.is_empty()
         || path.starts_with('/')
@@ -196,7 +210,18 @@ fn parse_tar_stream(bytes: &[u8]) -> Option<Vec<TarEntry>> {
     while offset + 512 <= bytes.len() {
         let block = &bytes[offset..offset + 512];
         if block.iter().all(|&b| b == 0) {
-            break;
+            return if bytes[offset..].iter().all(|&b| b == 0) {
+                Some(entries)
+            } else {
+                None
+            };
+        }
+        if &block[257..263] != b"ustar\0" || &block[263..265] != b"00" {
+            return None;
+        }
+        let expected_checksum = parse_octal(&block[148..156])? as u64;
+        if expected_checksum != tar_header_checksum(block) {
+            return None;
         }
         let name = trim_cstr(&block[0..100]);
         let prefix = trim_cstr(&block[345..500]);
@@ -234,6 +259,9 @@ fn parse_tar_stream(bytes: &[u8]) -> Option<Vec<TarEntry>> {
             data: bytes[payload_start..payload_end].to_vec(),
         });
         offset = payload_end.div_ceil(512) * 512;
+    }
+    if offset != bytes.len() && bytes[offset..].iter().any(|&b| b != 0) {
+        return None;
     }
     Some(entries)
 }
