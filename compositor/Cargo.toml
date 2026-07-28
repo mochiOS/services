@@ -5,10 +5,10 @@ edition = "2024"
 build = "build.rs"
 
 [dependencies]
-mochi-user-platform = { path = "../../user/crates/platform" }
-mochi-user-runtime = { path = "../../user/crates/runtime" }
-mochi-user-syscall = { path = "../../user/crates/syscall" }
-mochios-viewkit-gpu-protocol = { path = "../../user/crates/viewkit-gpu-protocol" }
+mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform" }
+mochi-user-runtime = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-runtime" }
+mochi-user-syscall = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-syscall" }
+mochios-viewkit-gpu-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-viewkit-gpu-protocol" }
 
 [[bin]]
 name = "compositor"

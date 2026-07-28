@@ -15,8 +15,5 @@ members = [
     "tty",
 ]
 
-[patch."https://github.com/mochiOS/mnu"]
-plugkit = { path = "../core/crates/PlugKit/plugkit" }
-
 [patch.crates-io]
-mnu-abi = { path = "../core/crates/abi" }
+mnu-abi = { git = "https://github.com/mochiOS/mnu", package = "mnu-abi" }
