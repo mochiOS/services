@@ -33,7 +33,7 @@ pub struct ActiveDatabase {
 
 impl ActiveDatabase {
     pub fn load(root_public_keys: &[[u8; 32]]) -> Result<Self, DatabaseError> {
-        let backend = FileBackend::system().map_err(|_| DatabaseError::Storage)?;
+        let backend = FileBackend::system_read_only();
         Self::load_from(backend, root_public_keys)
     }
 

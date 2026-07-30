@@ -590,10 +590,9 @@ fn load_active_database() -> Option<ActiveDatabase> {
             Some(database)
         }
         Err(error) => {
-            platform::println!(
-                "signature.service: certificate database unavailable error={:?}",
-                error
-            );
+            diagnostic(&alloc::format!(
+                "signature.service: certificate database unavailable error={error:?}"
+            ));
             None
         }
     }
