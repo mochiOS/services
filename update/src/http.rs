@@ -9,7 +9,13 @@ use std::string::{String, ToString};
 use std::vec;
 use std::vec::Vec;
 
+use crate::coordinator::SnapshotFetcher;
+use crate::scheduler::SnapshotKind;
+
 pub const REQUEST_TIMEOUT_MS: u32 = 30_000;
+pub const DEVELOPER_CA_BASE_URL: &str = "https://ca.mochios.org";
+pub const TRUST_URL: &str = "https://ca.mochios.org/v1/trust-store";
+pub const REVOCATIONS_URL: &str = "https://ca.mochios.org/v1/revocations";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Response {
@@ -37,6 +43,47 @@ pub enum FetchError {
 
 pub trait Transport {
     fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, FetchError>;
+}
+
+pub struct DeveloperCaFetcher<T> {
+    transport: T,
+}
+
+impl<T> DeveloperCaFetcher<T> {
+    pub const fn new(transport: T) -> Self {
+        Self { transport }
+    }
+
+    pub fn into_transport(self) -> T {
+        self.transport
+    }
+}
+
+impl<T: Transport> SnapshotFetcher for DeveloperCaFetcher<T> {
+    fn fetch(
+        &mut self,
+        kind: SnapshotKind,
+        request_id: u64,
+        if_none_match: &str,
+    ) -> Result<Response, FetchError> {
+        get(
+            &mut self.transport,
+            request_id,
+            snapshot_url(kind),
+            if_none_match,
+        )
+    }
+}
+
+pub const fn snapshot_url(kind: SnapshotKind) -> &'static str {
+    match kind {
+        SnapshotKind::Trust => TRUST_URL,
+        SnapshotKind::Revocations => REVOCATIONS_URL,
+    }
+}
+
+pub fn version_url(kind: SnapshotKind, snapshot_version: u64) -> String {
+    format!("{}/{snapshot_version}", snapshot_url(kind))
 }
 
 pub fn get<T: Transport>(

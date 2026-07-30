@@ -4,7 +4,10 @@ use mochios_http_client::MAX_BODY_BYTES;
 use mochios_net_device_protocol::{
     HttpFailure, Opcode, decode_http_request, encode_http_read_result, encode_http_request_result,
 };
+use update::coordinator::SnapshotFetcher;
+use update::http::{DeveloperCaFetcher, REVOCATIONS_URL, TRUST_URL, snapshot_url, version_url};
 use update::http::{FetchError, Response, Transport, get};
+use update::scheduler::SnapshotKind;
 
 const REQUEST_ID: u64 = 71;
 const HANDLE: u64 = 99;
@@ -259,4 +262,27 @@ fn empty_success_body_does_not_require_a_read_call() {
     .unwrap();
     assert!(response.body.is_empty());
     assert_eq!(transport.requests.len(), 3);
+}
+
+#[test]
+fn fetcher_routes_each_snapshot_kind_to_the_fixed_https_endpoint() {
+    for (kind, expected_url) in [
+        (SnapshotKind::Trust, TRUST_URL),
+        (SnapshotKind::Revocations, REVOCATIONS_URL),
+    ] {
+        let headers = b"ETag: \"snapshot\"\r\n";
+        let transport = ScriptedTransport::with_replies(vec![
+            request_result(200, "application/json", headers, b"{}"),
+            stream(headers),
+            stream(b"{}"),
+            close_result(),
+        ]);
+        let mut fetcher = DeveloperCaFetcher::new(transport);
+        fetcher.fetch(kind, REQUEST_ID, "").unwrap();
+        let transport = fetcher.into_transport();
+        let request = decode_http_request(&transport.requests[0]).unwrap();
+        assert_eq!(request.url, expected_url);
+        assert_eq!(snapshot_url(kind), expected_url);
+        assert_eq!(version_url(kind, 42), format!("{expected_url}/42"));
+    }
 }
