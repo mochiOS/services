@@ -1,6 +1,3 @@
-use alloc::string::{String, ToString};
-use alloc::vec;
-use alloc::vec::Vec;
 use mochios_http_client::{MAX_BODY_BYTES, MAX_HEADER_BYTES};
 use mochios_net_device_protocol::{
     HTTP_CLOSE_REQUEST_LEN, HTTP_READ_REQUEST_LEN, HTTP_READ_RESULT_BASE_LEN,
@@ -8,6 +5,9 @@ use mochios_net_device_protocol::{
     MAX_HTTP_IPC_DATA_LEN, Opcode, decode_http_read_result, decode_http_request_result,
     encode_http_close, encode_http_read, encode_http_request,
 };
+use std::string::{String, ToString};
+use std::vec;
+use std::vec::Vec;
 
 pub const REQUEST_TIMEOUT_MS: u32 = 30_000;
 

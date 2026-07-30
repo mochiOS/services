@@ -1,4 +1,4 @@
-use alloc::string::ToString;
+use std::string::ToString;
 
 use crate::http::{FetchError, Response};
 use crate::scheduler::{FailureClass, Scheduler, SnapshotKind};

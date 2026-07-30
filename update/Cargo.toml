@@ -2,7 +2,9 @@
 name = "update"
 version = "0.1.0"
 edition = "2024"
-build = "build.rs"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mochios"))'] }
 
 [dependencies]
 mochios-http-client = { git = "https://github.com/mochiOS/syscalls", package = "mochios-http-client" }
