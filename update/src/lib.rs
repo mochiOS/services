@@ -1,5 +1,7 @@
 #![no_std]
 
+pub mod scheduler;
+
 #[cfg(target_os = "mochios")]
 pub fn run(sp: *const usize) -> ! {
     unsafe {
