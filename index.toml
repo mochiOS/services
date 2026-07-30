@@ -60,3 +60,10 @@ fs = "rootfs"
 description = "mochiOS fixed service orchestration service"
 autostart = false
 order = 7
+
+[update.service]
+dir = "update"
+fs = "rootfs"
+description = "mochiOS Developer PKI synchronization service"
+autostart = false
+order = 9
