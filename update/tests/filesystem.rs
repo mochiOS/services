@@ -45,6 +45,14 @@ fn creates_database_directory_and_round_trips_known_files() {
 }
 
 #[test]
+fn accepts_an_existing_database_directory() {
+    let root = TestRoot::new();
+    fs::create_dir_all(root.0.join("libraries/certificate")).unwrap();
+
+    FileBackend::for_root(&root.0).unwrap();
+}
+
+#[test]
 fn rejects_unknown_paths_and_invalid_state_lengths() {
     let root = TestRoot::new();
     let mut backend = FileBackend::for_root(&root.0).unwrap();
