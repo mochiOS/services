@@ -1103,12 +1103,15 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 name = "signature"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "ed25519-dalek",
  "mochi-user-platform",
- "mochi-user-runtime",
  "mochi-user-syscall",
  "mochios-certificate",
+ "mochios-certificate-database",
+ "mochios-developer-ca-trust",
  "mochios-signature-protocol",
+ "serde_json",
  "sha2",
 ]
 
@@ -1212,6 +1215,7 @@ dependencies = [
  "mochios-developer-ca-trust",
  "mochios-http-client",
  "mochios-net-device-protocol",
+ "mochios-signature-protocol",
  "serde",
  "serde_json",
 ]

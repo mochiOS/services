@@ -10,4 +10,5 @@ kind = "service"
 requires = [
     "fs.read.all",
     "ipc.server",
+    "system.time.read",
 ]

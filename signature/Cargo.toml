@@ -7,13 +7,18 @@ build = "build.rs"
 [dependencies]
 ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
 mochios-certificate = { git = "https://github.com/mochiOS/syscalls", package = "mochios-certificate", default-features = false, features = ["alloc"] }
+mochios-certificate-database = { git = "https://github.com/mochiOS/syscalls", package = "mochios-certificate-database", features = ["std"] }
+mochios-developer-ca-trust = { git = "https://github.com/mochiOS/DeveloperCA", rev = "71f9487a3abe29046e827784502516c9a296c509", package = "mochios-developer-ca-trust" }
 mochios-signature-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-signature-protocol" }
-mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform" }
-mochi-user-runtime = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-runtime" }
+mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }
 mochi-user-syscall = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-syscall" }
 sha2 = { version = "0.10", default-features = false }
+serde_json = "1"
 
 [build-dependencies]
+
+[dev-dependencies]
+base64 = "0.22"
 
 [[bin]]
 name = "signature"

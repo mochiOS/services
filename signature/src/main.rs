@@ -1,39 +1,23 @@
-#![no_std]
-#![no_main]
-
 extern crate alloc;
 
 use alloc::string::String;
-use alloc::string::ToString;
 use alloc::vec::Vec;
-use core::arch::global_asm;
 use core::convert::TryInto;
 use ed25519_dalek::{Signature, VerifyingKey};
 use mochi_user_platform as platform;
-use mochios_certificate::{DeveloperCertificate, key_id};
+use mochios_certificate::DeveloperCertificate;
 use mochios_signature_protocol::{
-    ErrorResponse, Opcode, StatusResponse, VerifiedResponse, VerifyBegin, VerifyChunk,
-    VerifyFinish, decode_opcode,
+    ErrorResponse, Opcode, StatusResponse, UpdateNotification, VerifiedResponse, VerifyBegin,
+    VerifyChunk, VerifyFinish, decode_opcode,
 };
 use sha2::{Digest, Sha256};
 
-global_asm!(
-    r#"
-    .global _start
-_start:
-    xor rbp, rbp
-    mov rdi, rsp
-    and rsp, -16
-    call service_main
-1:
-    hlt
-    jmp 1b
-"#
-);
+use signature::database::{ActiveDatabase, DatabaseError};
 
 const MAX_PACKAGE_LEN: usize = 256 * 1024 * 1024;
 const IPC_BUFFER_LEN: usize = 4128;
 const PACKAGE_VERIFY_CAPABILITY: &str = "package.install";
+const DATABASE_UPDATE_CAPABILITY: &str = "signature.db.write";
 
 include!(concat!(env!("OUT_DIR"), "/trust_anchor.rs"));
 
@@ -73,57 +57,6 @@ fn diagnostic(message: &str) {
     platform::println!("{}", message);
     let _ = platform::io::stderr(message.as_bytes());
     let _ = platform::io::stderr(b"\n");
-}
-
-fn parse_decimal_u64(bytes: &[u8]) -> Option<u64> {
-    if bytes.is_empty() {
-        return None;
-    }
-    let mut out = 0u64;
-    for &b in bytes {
-        if !b.is_ascii_digit() {
-            return None;
-        }
-        out = out.checked_mul(10)?;
-        out = out.checked_add(u64::from(b - b'0'))?;
-    }
-    Some(out)
-}
-
-unsafe fn c_string_len(ptr: *const u8) -> usize {
-    let mut len = 0usize;
-    loop {
-        let ch = unsafe { core::ptr::read_volatile(ptr.add(len)) };
-        if ch == 0 {
-            return len;
-        }
-        len += 1;
-    }
-}
-
-unsafe fn parse_initial_arg(sp: *const usize) -> Option<String> {
-    let stack = unsafe { platform::runtime::InitialStack::parse(sp) };
-    let mut seen_argv0 = false;
-    for &arg_ptr in stack.argv {
-        if arg_ptr.is_null() {
-            continue;
-        }
-        if !seen_argv0 {
-            seen_argv0 = true;
-            continue;
-        }
-        let len = unsafe { c_string_len(arg_ptr) };
-        let arg = unsafe { core::slice::from_raw_parts(arg_ptr, len) };
-        if parse_decimal_u64(arg).is_some() {
-            continue;
-        }
-        if let Ok(text) = core::str::from_utf8(arg) {
-            if !text.is_empty() {
-                return Some(text.to_string());
-            }
-        }
-    }
-    None
 }
 
 fn parse_octal(bytes: &[u8]) -> Option<usize> {
@@ -350,12 +283,20 @@ fn verify_payload_files(
     Ok(())
 }
 
-fn verify_package(mpkg_path: &str) -> Result<Verification, mochi_user_syscall::SysError> {
+fn verify_package(
+    mpkg_path: &str,
+    database: &ActiveDatabase,
+    now_utc: u64,
+) -> Result<Verification, mochi_user_syscall::SysError> {
     let bytes = platform::file::read_to_end_path(mpkg_path)?;
-    verify_package_bytes(&bytes)
+    verify_package_bytes(&bytes, database, now_utc)
 }
 
-fn verify_package_bytes(bytes: &[u8]) -> Result<Verification, mochi_user_syscall::SysError> {
+fn verify_package_bytes(
+    bytes: &[u8],
+    database: &ActiveDatabase,
+    now_utc: u64,
+) -> Result<Verification, mochi_user_syscall::SysError> {
     let header = parse_header(&bytes)
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     if header.compression != 0 {
@@ -408,21 +349,12 @@ fn verify_package_bytes(bytes: &[u8]) -> Result<Verification, mochi_user_syscall
     }
     let certificate = DeveloperCertificate::decode(&cert.data)
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
-    let root_public_key = ROOT_PUBLIC_KEYS
-        .iter()
-        .find(|public_key| key_id(public_key) == certificate.issuer_key_id)
-        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64))?;
+    let issuer_public_key = database
+        .issuer_public_key(&certificate, now_utc)
+        .map_err(database_verify_error)?;
     certificate
-        .verify(root_public_key, BUILD_UNIX_TIME, &manifest.package_id)
+        .verify(&issuer_public_key, now_utc, &manifest.package_id)
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64))?;
-    if REVOKED_CERTIFICATE_SERIALS
-        .binary_search(&certificate.serial_number)
-        .is_ok()
-    {
-        return Err(mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::EACCES as i64,
-        ));
-    }
     let verifier = VerifyingKey::from_bytes(&certificate.subject_public_key)
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     let signature_bytes: [u8; 64] =
@@ -451,6 +383,16 @@ fn verify_package_bytes(bytes: &[u8]) -> Result<Verification, mochi_user_syscall
         manifest_digest,
         package_digest,
     })
+}
+
+fn database_verify_error(error: DatabaseError) -> mochi_user_syscall::SysError {
+    let errno = match error {
+        DatabaseError::Expired
+        | DatabaseError::MissingTrust
+        | DatabaseError::MissingRevocations => mochi_user_syscall::EAGAIN,
+        _ => mochi_user_syscall::EACCES,
+    };
+    mochi_user_syscall::SysError::from_raw(errno as i64)
 }
 
 fn reply_transfer_status(sender: u64, request_id: u64, status: i32) {
@@ -510,7 +452,6 @@ fn reply_verified(sender: u64, request_id: u64, verification: &Verification) {
 }
 
 fn run_server() -> ! {
-    platform::println!("signature.service: ready");
     let endpoint = match platform::ipc::create() {
         Ok(endpoint) => endpoint,
         Err(err) => {
@@ -521,6 +462,8 @@ fn run_server() -> ! {
             platform::process::exit(1);
         }
     };
+    let mut database = load_active_database();
+    platform::println!("signature.service: ready");
     let mut transfer: Option<Transfer> = None;
     let mut buf = [0u8; IPC_BUFFER_LEN];
     loop {
@@ -534,6 +477,13 @@ fn run_server() -> ! {
         let sender = msg >> 32;
         let len = (msg & 0xffff_ffff) as usize;
         let request = &buf[..len];
+        if matches!(
+            decode_opcode(request),
+            Ok(Opcode::TrustUpdated | Opcode::RevocationsUpdated)
+        ) {
+            handle_update_notification(sender, request, &mut database);
+            continue;
+        }
         if platform::capability::check_thread(sender, PACKAGE_VERIFY_CAPABILITY) != Ok(1) {
             reply_error(sender, 0, mochi_user_syscall::EACCES);
             continue;
@@ -601,7 +551,18 @@ fn run_server() -> ! {
                         reply_error(sender, finish.request_id, mochi_user_syscall::EACCES);
                         continue;
                     }
-                    match verify_package_bytes(&active.bytes) {
+                    let Some(database) = database.as_ref() else {
+                        reply_error(sender, finish.request_id, mochi_user_syscall::EAGAIN);
+                        continue;
+                    };
+                    let now_utc = match platform::time::utc_seconds() {
+                        Ok(now) => now,
+                        Err(_) => {
+                            reply_error(sender, finish.request_id, mochi_user_syscall::EAGAIN);
+                            continue;
+                        }
+                    };
+                    match verify_package_bytes(&active.bytes, database, now_utc) {
                         Ok(verification) => {
                             reply_verified(sender, finish.request_id, &verification)
                         }
@@ -615,18 +576,104 @@ fn run_server() -> ! {
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn service_main(sp: *const usize) -> ! {
-    unsafe {
-        let _ = platform::logger::init_from_initial_stack(sp);
+fn load_active_database() -> Option<ActiveDatabase> {
+    match ActiveDatabase::load(ROOT_PUBLIC_KEYS) {
+        Ok(database) => {
+            let state = database.state();
+            platform::println!(
+                "signature.service: certificate database trust={} revocations={} generation={} recovered={}",
+                state.trust.snapshot_version,
+                state.revocations.snapshot_version,
+                state.generation,
+                database.recovered()
+            );
+            Some(database)
+        }
+        Err(error) => {
+            platform::println!(
+                "signature.service: certificate database unavailable error={:?}",
+                error
+            );
+            None
+        }
+    }
+}
+
+fn handle_update_notification(sender: u64, request: &[u8], database: &mut Option<ActiveDatabase>) {
+    if platform::capability::check_thread(sender, DATABASE_UPDATE_CAPABILITY) != Ok(1) {
+        platform::println!("signature.service: update notification denied");
+        return;
+    }
+    let notification = match UpdateNotification::decode(request) {
+        Ok(notification) => notification,
+        Err(error) => {
+            platform::println!(
+                "signature.service: invalid update notification error={:?}",
+                error
+            );
+            return;
+        }
+    };
+    let Some(reloaded) = load_active_database() else {
+        platform::println!("signature.service: update reload rejected");
+        return;
+    };
+    let state = reloaded.state();
+    let generation = state.generation;
+    let snapshot_version = match notification.opcode {
+        Opcode::TrustUpdated => state.trust.snapshot_version,
+        Opcode::RevocationsUpdated => state.revocations.snapshot_version,
+        _ => return,
+    };
+    if generation < notification.generation || snapshot_version < notification.snapshot_version {
+        platform::println!(
+            "signature.service: update notification state mismatch opcode={:?}",
+            notification.opcode
+        );
+        return;
+    }
+    *database = Some(reloaded);
+    platform::println!(
+        "signature.service: certificate database reloaded opcode={:?} version={} generation={}",
+        notification.opcode,
+        snapshot_version,
+        generation
+    );
+}
+
+fn main() {
+    let mut mpkg_path = None;
+    for argument in std::env::args().skip(1) {
+        if let Ok(endpoint) = argument.parse::<u64>() {
+            platform::logger::init(endpoint);
+        } else if !argument.is_empty() && mpkg_path.is_none() {
+            mpkg_path = Some(argument);
+        }
     }
     platform::println!("signature.service: trust domain {}", TRUST_DOMAIN);
-    let Some(mpkg_path) = (unsafe { parse_initial_arg(sp) }) else {
+    let Some(mpkg_path) = mpkg_path else {
         run_server();
     };
 
     platform::println!("signature.service: start {}", mpkg_path);
-    match verify_package(&mpkg_path) {
+    let Some(database) = load_active_database() else {
+        platform::println!(
+            "signature.service: verify failed errno={}",
+            mochi_user_syscall::EAGAIN
+        );
+        platform::process::exit(1);
+    };
+    let now_utc = match platform::time::utc_seconds() {
+        Ok(now) => now,
+        Err(_) => {
+            platform::println!(
+                "signature.service: verify failed errno={}",
+                mochi_user_syscall::EAGAIN
+            );
+            platform::process::exit(1);
+        }
+    };
+    match verify_package(&mpkg_path, &database, now_utc) {
         Ok(_) => {
             platform::println!("signature.service: verified {}", mpkg_path);
             platform::process::exit(0);
