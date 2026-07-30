@@ -383,13 +383,27 @@ pub(crate) fn handle_input_event(
                         EVENT_KEY,
                         i32::from(event.keycode),
                         event.codepoint as i32,
-                        u32::from(event.flags),
+                        encode_key_event_detail(event.flags, event.modifiers),
                     );
                 }
             }
             None
         }
         _ => None,
+    }
+}
+
+fn encode_key_event_detail(flags: u16, modifiers: u32) -> u32 {
+    u32::from(flags) | ((modifiers & 0xffff) << 16)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_key_event_detail;
+
+    #[test]
+    fn key_event_detail_preserves_flags_and_modifiers() {
+        assert_eq!(encode_key_event_detail(0x0003, 0x000b), 0x000b_0003);
     }
 }
 
