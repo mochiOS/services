@@ -8,6 +8,7 @@ pub(crate) struct ChildProcesses {
     pub(crate) compositor: Option<u64>,
     pub(crate) network: Option<u64>,
     pub(crate) tty: Option<u64>,
+    pub(crate) update: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,6 +43,7 @@ impl BootstrapOutcome {
                 compositor: None,
                 network: None,
                 tty: None,
+                update: None,
             },
             reason: StopReason::DriverControlInitializationFailed,
         }
@@ -104,8 +106,10 @@ pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> Bootstra
         return outcome(children, StopReason::TtySpawnFailed);
     };
     children.tty = Some(tty);
-    if let Some(network) = children.network {
-        let _ = operations.wait_network_ready(network);
+    if let Some(network) = children.network
+        && operations.wait_network_ready(network)
+    {
+        children.update = operations.spawn_fixed(FixedService::Update);
     }
     outcome(children, StopReason::Running)
 }
@@ -143,6 +147,7 @@ mod tests {
         InputReady,
         StartDiscovery,
         DiscoveryComplete,
+        NetworkReady,
     }
 
     struct FakeOperations {
@@ -186,6 +191,7 @@ mod tests {
                 FixedService::Compositor => 13,
                 FixedService::Network => 14,
                 FixedService::Tty => 15,
+                FixedService::Update => 16,
             })
         }
 
@@ -211,7 +217,7 @@ mod tests {
 
         fn wait_network_ready(&mut self, _process_id: u64) -> bool {
             self.events.push(Event::WaitNetwork);
-            true
+            self.failure != Failure::NetworkReady
         }
     }
 
@@ -230,6 +236,7 @@ mod tests {
             Event::Spawn(FixedService::Network),
             Event::Spawn(FixedService::Tty),
             Event::WaitNetwork,
+            Event::Spawn(FixedService::Update),
         ]
     }
 
@@ -245,6 +252,7 @@ mod tests {
         assert_eq!(outcome.children.compositor, Some(13));
         assert_eq!(outcome.children.network, Some(14));
         assert_eq!(outcome.children.tty, Some(15));
+        assert_eq!(outcome.children.update, Some(16));
     }
 
     #[test]
@@ -312,6 +320,28 @@ mod tests {
         assert_eq!(
             operations.events.last(),
             Some(&Event::Spawn(FixedService::Tty))
+        );
+    }
+
+    #[test]
+    fn update_is_best_effort_and_requires_network_ready() {
+        let mut network_failure = FakeOperations::new(Failure::NetworkReady);
+        let outcome = orchestrate(&mut network_failure);
+        assert_eq!(outcome.reason, StopReason::Running);
+        assert_eq!(outcome.children.update, None);
+        assert!(
+            !network_failure
+                .events
+                .contains(&Event::Spawn(FixedService::Update))
+        );
+
+        let mut update_failure = FakeOperations::new(Failure::Spawn(FixedService::Update));
+        let outcome = orchestrate(&mut update_failure);
+        assert_eq!(outcome.reason, StopReason::Running);
+        assert_eq!(outcome.children.update, None);
+        assert_eq!(
+            update_failure.events.last(),
+            Some(&Event::Spawn(FixedService::Update))
         );
     }
 }

@@ -20,6 +20,7 @@ const INPUT_MANIFEST: &str = include_str!("../../input/manifest.toml");
 const DISPLAY_MANIFEST: &str = include_str!("../../display/manifest.toml");
 const COMPOSITOR_MANIFEST: &str = include_str!("../../compositor/manifest.toml");
 const TTY_MANIFEST: &str = include_str!("../../tty/manifest.toml");
+const UPDATE_MANIFEST: &str = include_str!("../../update/manifest.toml");
 const SERVICE_INDEX: &str = include_str!("../../index.toml");
 
 fn assert_capabilities(manifest: &str, path: &str, expected: &[&str]) {
@@ -137,6 +138,18 @@ fn main() {
             "net.connect",
             "net.tls.connect",
             "net.http.request",
+        ],
+    );
+    assert_capabilities(
+        UPDATE_MANIFEST,
+        "/system/services/update.service",
+        &[
+            "fs.read.all",
+            "fs.write.all",
+            "ipc.client",
+            "ipc.server",
+            "net.http.request",
+            "system.time.read",
         ],
     );
 
