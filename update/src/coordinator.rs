@@ -221,7 +221,7 @@ impl Coordinator {
                 }
                 Ok(times) => {
                     self.increment_not_modified(kind);
-                    self.scheduler.record_success(
+                    self.scheduler.record_not_modified(
                         kind,
                         now_ms,
                         now_utc,

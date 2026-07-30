@@ -1,6 +1,7 @@
 pub const TRUST_PERIOD_MS: u64 = 24 * 60 * 60 * 1_000;
 pub const REVOCATION_PERIOD_MS: u64 = 6 * 60 * 60 * 1_000;
 pub const MAX_RETRY_AFTER_SECONDS: u64 = 6 * 60 * 60;
+pub const EXPIRY_REVALIDATION_MS: u64 = 60 * 1_000;
 pub const RETRY_BACKOFF_MS: [u64; 5] = [
     60 * 1_000,
     5 * 60 * 1_000,
@@ -69,6 +70,23 @@ impl Scheduler {
             next_attempt_ms: period_deadline.min(expiry_deadline),
             transient_failures: 0,
         };
+    }
+
+    pub fn record_not_modified(
+        &mut self,
+        kind: SnapshotKind,
+        now_ms: u64,
+        now_utc: u64,
+        generated_at: u64,
+        expires_at: u64,
+    ) {
+        self.record_success(kind, now_ms, now_utc, generated_at, expires_at);
+        let deadline = self.deadline_mut(kind);
+        if deadline.next_attempt_ms <= now_ms {
+            let until_expiry_ms = expires_at.saturating_sub(now_utc).saturating_mul(1_000);
+            deadline.next_attempt_ms =
+                now_ms.saturating_add(EXPIRY_REVALIDATION_MS.min(until_expiry_ms).max(1));
+        }
     }
 
     pub fn record_failure(&mut self, kind: SnapshotKind, now_ms: u64, failure: FailureClass) {
@@ -163,6 +181,22 @@ mod tests {
         );
         scheduler.record_success(SnapshotKind::Trust, 7_000, 450, 100, 500);
         assert_eq!(scheduler.next_attempt_ms(SnapshotKind::Trust), 7_000);
+    }
+
+    #[test]
+    fn not_modified_near_expiry_does_not_create_a_busy_loop() {
+        let mut scheduler = Scheduler::network_ready(0);
+        scheduler.record_not_modified(SnapshotKind::Trust, 7_000, 450, 100, 500);
+        assert_eq!(
+            scheduler.next_attempt_ms(SnapshotKind::Trust),
+            7_000 + 50_000
+        );
+
+        scheduler.record_not_modified(SnapshotKind::Trust, 60_000, 800, 100, 1_000);
+        assert_eq!(
+            scheduler.next_attempt_ms(SnapshotKind::Trust),
+            60_000 + EXPIRY_REVALIDATION_MS
+        );
     }
 
     #[test]

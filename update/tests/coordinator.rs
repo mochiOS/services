@@ -6,7 +6,7 @@ use update::coordinator::{
     ApplyError, Coordinator, SnapshotFetcher, SnapshotRepository, SnapshotTimes, SyncResult,
 };
 use update::http::{FetchError, Response};
-use update::scheduler::{SnapshotKind, TRUST_PERIOD_MS};
+use update::scheduler::{EXPIRY_REVALIDATION_MS, SnapshotKind, TRUST_PERIOD_MS};
 
 type Events = Rc<RefCell<Vec<String>>>;
 
@@ -181,6 +181,32 @@ fn not_modified_does_not_accept_an_expired_local_snapshot() {
     assert_eq!(
         coordinator.scheduler().next_attempt_ms(SnapshotKind::Trust),
         TRUST_PERIOD_MS
+    );
+}
+
+#[test]
+fn not_modified_near_expiry_schedules_bounded_revalidation() {
+    let near_expiry = SnapshotTimes {
+        generated_at: 100,
+        expires_at: 500,
+    };
+    let (mut coordinator, mut fetcher, mut repository, _) = setup(
+        vec![
+            Ok(response(304, Some("\"trust-old\""), None)),
+            Ok(response(304, Some("\"rev-old\""), None)),
+        ],
+        vec![],
+        vec![Ok(near_expiry), Ok(times())],
+    );
+
+    coordinator.synchronize_due(&mut fetcher, &mut repository, 10, 450);
+
+    assert_eq!(
+        coordinator.scheduler().next_attempt_ms(SnapshotKind::Trust),
+        10 + 50_000
+    );
+    assert!(
+        coordinator.scheduler().next_attempt_ms(SnapshotKind::Trust) <= 10 + EXPIRY_REVALIDATION_MS
     );
 }
 
