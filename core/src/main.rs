@@ -1,26 +1,8 @@
-#![no_std]
-#![no_main]
-
 extern crate alloc;
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::arch::global_asm;
 use mochi_user_platform as platform;
-
-global_asm!(
-    r#"
-    .global _start
-_start:
-    xor rbp, rbp
-    mov rdi, rsp
-    and rsp, -16
-    call service_main
-1:
-    hlt
-    jmp 1b
-"#
-);
 
 const LOGGER_SERVICE_PATH: &str = "/system/services/logger.service";
 const LOGGER_PACKAGE_MANIFEST_PATH: &str = "/system/packages/logger/manifest.toml";
@@ -215,8 +197,7 @@ fn spawn_capability_service() -> Result<u64, mochi_user_syscall::SysError> {
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn service_main(_sp: *const usize) -> ! {
+fn main() {
     let _logger_pid = match spawn_logger_service() {
         Ok(pid) => pid,
         Err(err) => {
@@ -228,11 +209,11 @@ pub extern "C" fn service_main(_sp: *const usize) -> ! {
         }
     };
 
-    main();
+    run();
     platform::process::exit(0)
 }
 
-fn main() {
+fn run() {
     platform::println!("core.service: start");
     match spawn_capability_service() {
         Ok(pid) => {

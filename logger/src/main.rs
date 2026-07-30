@@ -1,27 +1,9 @@
-#![no_std]
-#![no_main]
-
 extern crate alloc;
 
 use alloc::string::String;
-use core::arch::global_asm;
 use mochi_user_platform as platform;
 
 const LOG_ROOT: &str = "/system/logs/services";
-
-global_asm!(
-    r#"
-    .global _start
-_start:
-    xor rbp, rbp
-    mov rdi, rsp
-    and rsp, -16
-    call service_main
-1:
-    hlt
-    jmp 1b
-"#
-);
 
 fn parse_decimal_u64(bytes: &[u8]) -> Option<u64> {
     if bytes.is_empty() {
@@ -38,26 +20,9 @@ fn parse_decimal_u64(bytes: &[u8]) -> Option<u64> {
     Some(out)
 }
 
-unsafe fn c_string_len(ptr: *const u8) -> usize {
-    let mut len = 0usize;
-    loop {
-        let ch = unsafe { core::ptr::read_volatile(ptr.add(len)) };
-        if ch == 0 {
-            return len;
-        }
-        len += 1;
-    }
-}
-
-unsafe fn parse_bootstrap_endpoint(sp: *const usize) -> Option<u64> {
-    let stack = unsafe { platform::runtime::InitialStack::parse(sp) };
-    for &arg_ptr in stack.argv {
-        if arg_ptr.is_null() {
-            continue;
-        }
-        let len = unsafe { c_string_len(arg_ptr) };
-        let arg = unsafe { core::slice::from_raw_parts(arg_ptr, len) };
-        if let Some(value) = parse_decimal_u64(arg) {
+fn parse_bootstrap_endpoint() -> Option<u64> {
+    for argument in std::env::args() {
+        if let Some(value) = parse_decimal_u64(argument.as_bytes()) {
             return Some(value);
         }
     }
@@ -133,9 +98,8 @@ fn append_log_line(line: &[u8]) {
     let _ = platform::file::close(fd);
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn service_main(sp: *const usize) -> ! {
-    let Some(bootstrap_endpoint) = (unsafe { parse_bootstrap_endpoint(sp) }) else {
+fn main() {
+    let Some(bootstrap_endpoint) = parse_bootstrap_endpoint() else {
         platform::process::exit(1);
     };
 

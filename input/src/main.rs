@@ -1,66 +1,4 @@
-#![no_std]
-#![no_main]
-
-use core::arch::global_asm;
 use mochi_user_platform as platform;
-
-global_asm!(
-    r#"
-    .global _start
-_start:
-    xor rbp, rbp
-    mov rdi, rsp
-    and rsp, -16
-    call service_main
-1:
-    hlt
-    jmp 1b
-"#
-);
-
-fn parse_decimal_u64(bytes: &[u8]) -> Option<u64> {
-    if bytes.is_empty() {
-        return None;
-    }
-    let mut out = 0u64;
-    for &b in bytes {
-        if !b.is_ascii_digit() {
-            return None;
-        }
-        out = out.checked_mul(10)?;
-        out = out.checked_add(u64::from(b - b'0'))?;
-    }
-    Some(out)
-}
-
-unsafe fn c_string_len(ptr: *const u8) -> usize {
-    let mut len = 0usize;
-    loop {
-        let ch = unsafe { core::ptr::read_volatile(ptr.add(len)) };
-        if ch == 0 {
-            return len;
-        }
-        len += 1;
-    }
-}
-
-unsafe fn parse_endpoint_args(sp: *const usize) -> [u64; 2] {
-    let stack = unsafe { platform::runtime::InitialStack::parse(sp) };
-    let mut out = [0u64; 2];
-    let mut idx = 0usize;
-    for &arg_ptr in stack.argv {
-        if idx >= out.len() || arg_ptr.is_null() {
-            continue;
-        }
-        let len = unsafe { c_string_len(arg_ptr) };
-        let arg = unsafe { core::slice::from_raw_parts(arg_ptr, len) };
-        if let Some(value) = parse_decimal_u64(arg) {
-            out[idx] = value;
-            idx += 1;
-        }
-    }
-    out
-}
 
 fn decode_alpha(scancode: u8, shift: bool, caps: bool) -> Option<char> {
     let ch = match scancode {
@@ -503,11 +441,8 @@ fn handle_subscribe_message(subscribers: &mut [u64; MAX_SUBSCRIBERS], buf: &[u8]
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn service_main(sp: *const usize) -> ! {
-    unsafe {
-        let _ = platform::logger::init_from_initial_stack(sp);
-    }
+fn main() {
+    let _ = platform::logger::init_from_env();
     platform::println!("input.service: start");
 
     let Some(ready_target) = platform::service_ready::take_bootstrap_target() else {
@@ -523,7 +458,6 @@ pub extern "C" fn service_main(sp: *const usize) -> ! {
             platform::process::exit(1);
         }
     };
-    let _ = unsafe { parse_endpoint_args(sp) };
     if endpoint == 0 {
         platform::println!("input.service: missing endpoint");
         platform::process::exit(1);

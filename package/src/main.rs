@@ -1,31 +1,13 @@
-#![no_std]
-#![no_main]
-
 extern crate alloc;
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::arch::global_asm;
 use mochi_user_platform as platform;
 use mochios_signature_protocol::{
     ErrorResponse, Opcode, StatusResponse, VerifiedResponse, VerifiedView, VerifyBegin,
     VerifyChunk, VerifyFinish, decode_opcode,
 };
 use sha2::{Digest, Sha256};
-
-global_asm!(
-    r#"
-    .global _start
-_start:
-    xor rbp, rbp
-    mov rdi, rsp
-    and rsp, -16
-    call service_main
-1:
-    hlt
-    jmp 1b
-"#
-);
 
 const SIG_SERVICE_NAME: &str = "signature.service";
 const INSTALL_REQUEST_OPCODE: u32 = 0x494e_5354;
@@ -84,37 +66,13 @@ fn parse_decimal_u64(bytes: &[u8]) -> Option<u64> {
     Some(out)
 }
 
-unsafe fn c_string_len(ptr: *const u8) -> usize {
-    let mut len = 0usize;
-    loop {
-        let ch = unsafe { core::ptr::read_volatile(ptr.add(len)) };
-        if ch == 0 {
-            return len;
-        }
-        len += 1;
-    }
-}
-
-unsafe fn parse_initial_arg(sp: *const usize) -> Option<String> {
-    let stack = unsafe { platform::runtime::InitialStack::parse(sp) };
-    let mut seen_argv0 = false;
-    for &arg_ptr in stack.argv {
-        if arg_ptr.is_null() {
+fn parse_initial_arg() -> Option<String> {
+    for argument in std::env::args().skip(1) {
+        if parse_decimal_u64(argument.as_bytes()).is_some() {
             continue;
         }
-        if !seen_argv0 {
-            seen_argv0 = true;
-            continue;
-        }
-        let len = unsafe { c_string_len(arg_ptr) };
-        let arg = unsafe { core::slice::from_raw_parts(arg_ptr, len) };
-        if parse_decimal_u64(arg).is_some() {
-            continue;
-        }
-        if let Ok(text) = core::str::from_utf8(arg) {
-            if !text.is_empty() {
-                return Some(text.to_string());
-            }
+        if !argument.is_empty() {
+            return Some(argument);
         }
     }
     None
@@ -819,12 +777,9 @@ fn run_server() -> ! {
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn service_main(sp: *const usize) -> ! {
-    unsafe {
-        let _ = platform::logger::init_from_initial_stack(sp);
-    }
-    if let Some(mpkg_path) = unsafe { parse_initial_arg(sp) } {
+fn main() {
+    let _ = platform::logger::init_from_env();
+    if let Some(mpkg_path) = parse_initial_arg() {
         platform::println!("package.service: start {}", mpkg_path);
         match install_package(&mpkg_path) {
             Ok(_) => {

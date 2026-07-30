@@ -1,5 +1,3 @@
-#![no_std]
-
 extern crate alloc;
 
 mod control_state;
@@ -13,30 +11,19 @@ mod driver_spawn;
 mod spawn_support;
 mod startup_args;
 
-pub fn run(sp: *const usize) -> ! {
-    let config = unsafe {
-        let _ = mochi_user_platform::logger::init_from_initial_stack(sp);
-        let stack = mochi_user_platform::runtime::InitialStack::parse(sp);
-        let mut parser = startup_args::DriverManagerArgParser::new();
-        let mut parse_error = None;
-        for &arg_ptr in stack.argv {
-            if arg_ptr.is_null() {
-                continue;
-            }
-            let mut len = 0usize;
-            while core::ptr::read_volatile(arg_ptr.add(len)) != 0 {
-                len += 1;
-            }
-            let argument = core::slice::from_raw_parts(arg_ptr, len);
-            if let Err(error) = parser.push(argument) {
-                parse_error = Some(error);
-                break;
-            }
+pub fn run() -> ! {
+    let _ = mochi_user_platform::logger::init_from_env();
+    let mut parser = startup_args::DriverManagerArgParser::new();
+    let mut parse_error = None;
+    for argument in std::env::args() {
+        if let Err(error) = parser.push(argument.as_bytes()) {
+            parse_error = Some(error);
+            break;
         }
-        match parse_error {
-            Some(error) => Err(error),
-            None => parser.finish(),
-        }
+    }
+    let config = match parse_error {
+        Some(error) => Err(error),
+        None => parser.finish(),
     };
 
     match config {

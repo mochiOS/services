@@ -1,26 +1,8 @@
-#![no_std]
-#![no_main]
-
 extern crate alloc;
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::arch::global_asm;
 use mochi_user_platform as platform;
-
-global_asm!(
-    r#"
-    .global _start
-_start:
-    xor rbp, rbp
-    mov rdi, rsp
-    and rsp, -16
-    call service_main
-1:
-    hlt
-    jmp 1b
-"#
-);
 
 const MSH_PATH: &str = "/bin/msh";
 const CAPABILITY_SERVICE_NAME: &str = "capability.service";
@@ -79,26 +61,9 @@ fn parse_decimal_u64(bytes: &[u8]) -> Option<u64> {
     Some(out)
 }
 
-unsafe fn c_string_len(ptr: *const u8) -> usize {
-    let mut len = 0usize;
-    loop {
-        let ch = unsafe { core::ptr::read_volatile(ptr.add(len)) };
-        if ch == 0 {
-            return len;
-        }
-        len += 1;
-    }
-}
-
-unsafe fn parse_endpoint_arg(sp: *const usize) -> Option<u64> {
-    let stack = unsafe { platform::runtime::InitialStack::parse(sp) };
-    for &arg_ptr in stack.argv {
-        if arg_ptr.is_null() {
-            continue;
-        }
-        let len = unsafe { c_string_len(arg_ptr) };
-        let arg = unsafe { core::slice::from_raw_parts(arg_ptr, len) };
-        if let Some(value) = parse_decimal_u64(arg) {
+fn parse_endpoint_arg() -> Option<u64> {
+    for argument in std::env::args() {
+        if let Some(value) = parse_decimal_u64(argument.as_bytes()) {
             return Some(value);
         }
     }
@@ -192,12 +157,9 @@ fn subscribe_input_events(tty_endpoint: u64) -> bool {
     .is_ok()
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn service_main(sp: *const usize) -> ! {
-    unsafe {
-        let _ = platform::logger::init_from_initial_stack(sp);
-    }
-    let _ = unsafe { parse_endpoint_arg(sp) };
+fn main() {
+    let _ = platform::logger::init_from_env();
+    let _ = parse_endpoint_arg();
 
     let tty_endpoint = match platform::ipc::create() {
         Ok(handle) => handle,

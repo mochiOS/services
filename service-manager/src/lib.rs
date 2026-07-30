@@ -1,5 +1,3 @@
-#![no_std]
-
 extern crate alloc;
 
 mod bootstrap;
@@ -10,9 +8,7 @@ mod readiness;
 mod service_config;
 mod spawn_support;
 
-pub fn run(sp: *const usize) -> ! {
-    unsafe {
-        let _ = mochi_user_platform::logger::init_from_initial_stack(sp);
-    }
+pub fn run() -> ! {
+    let _ = mochi_user_platform::logger::init_from_env();
     bootstrap::run()
 }

@@ -5,8 +5,7 @@ edition = "2024"
 build = "build.rs"
 
 [dependencies]
-mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform" }
-mochi-user-runtime = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-runtime" }
+mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }
 mochi-user-syscall = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-syscall" }
 mochios-driver-control-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-driver-control-protocol" }
 

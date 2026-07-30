@@ -6,8 +6,7 @@ build = "build.rs"
 
 [dependencies]
 mochios-signature-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-signature-protocol" }
-mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform" }
-mochi-user-runtime = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-runtime" }
+mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }
 mochi-user-syscall = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-syscall" }
 sha2 = { version = "0.10", default-features = false }
 
