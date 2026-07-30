@@ -75,7 +75,6 @@ name = "capability"
 version = "0.1.0"
 dependencies = [
  "mochi-user-platform",
- "mochi-user-runtime",
  "mochi-user-syscall",
  "mochios-signature-protocol",
  "sha2",
@@ -137,7 +136,6 @@ name = "compositor"
 version = "0.1.0"
 dependencies = [
  "mochi-user-platform",
- "mochi-user-runtime",
  "mochi-user-syscall",
  "mochios-viewkit-gpu-protocol",
 ]
@@ -153,7 +151,6 @@ name = "core"
 version = "0.1.0"
 dependencies = [
  "mochi-user-platform",
- "mochi-user-runtime",
  "mochi-user-syscall",
 ]
 
@@ -265,7 +262,6 @@ name = "display"
 version = "0.1.0"
 dependencies = [
  "mochi-user-platform",
- "mochi-user-runtime",
  "mochi-user-syscall",
  "mochios-viewkit-gpu-protocol",
  "mochios-virtio-gpu-protocol",
@@ -277,7 +273,6 @@ name = "drivers"
 version = "0.1.0"
 dependencies = [
  "mochi-user-platform",
- "mochi-user-runtime",
  "mochi-user-syscall",
  "mochios-driver-control-protocol",
 ]
@@ -444,7 +439,6 @@ name = "input"
 version = "0.1.0"
 dependencies = [
  "mochi-user-platform",
- "mochi-user-runtime",
  "mochi-user-syscall",
 ]
 
@@ -489,7 +483,6 @@ name = "logger"
 version = "0.1.0"
 dependencies = [
  "mochi-user-platform",
- "mochi-user-runtime",
  "mochi-user-syscall",
 ]
 
@@ -618,7 +611,6 @@ version = "0.1.0"
 dependencies = [
  "getrandom",
  "mochi-user-platform",
- "mochi-user-runtime",
  "mochi-user-syscall",
  "mochios-http-client",
  "mochios-net-device-protocol",
@@ -712,7 +704,6 @@ name = "package"
 version = "0.1.0"
 dependencies = [
  "mochi-user-platform",
- "mochi-user-runtime",
  "mochi-user-syscall",
  "mochios-signature-protocol",
  "sha2",
@@ -1077,7 +1068,6 @@ name = "service-manager"
 version = "0.1.0"
 dependencies = [
  "mochi-user-platform",
- "mochi-user-runtime",
  "mochi-user-syscall",
  "mochios-driver-control-protocol",
 ]
@@ -1172,7 +1162,6 @@ name = "tty"
 version = "0.1.0"
 dependencies = [
  "mochi-user-platform",
- "mochi-user-runtime",
  "mochi-user-syscall",
 ]
 
