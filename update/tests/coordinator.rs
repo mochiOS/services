@@ -160,6 +160,31 @@ fn not_modified_updates_checked_state_and_statistics() {
 }
 
 #[test]
+fn not_modified_does_not_accept_an_expired_local_snapshot() {
+    let expired = SnapshotTimes {
+        generated_at: 100,
+        expires_at: 200,
+    };
+    let (mut coordinator, mut fetcher, mut repository, _) = setup(
+        vec![
+            Ok(response(304, Some("\"trust-old\""), None)),
+            Ok(response(304, Some("\"rev-old\""), None)),
+        ],
+        vec![],
+        vec![Ok(expired), Ok(times())],
+    );
+
+    coordinator.synchronize_due(&mut fetcher, &mut repository, 0, 200);
+
+    assert_eq!(coordinator.statistics().trust_sync_not_modified, 0);
+    assert_eq!(coordinator.statistics().snapshot_expiration_failures, 1);
+    assert_eq!(
+        coordinator.scheduler().next_attempt_ms(SnapshotKind::Trust),
+        TRUST_PERIOD_MS
+    );
+}
+
+#[test]
 fn transient_status_uses_retry_after_and_does_not_apply() {
     let (mut coordinator, mut fetcher, mut repository, _) = setup(
         vec![

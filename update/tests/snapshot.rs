@@ -146,6 +146,43 @@ fn rejects_expired_and_future_trust_snapshots() {
 }
 
 #[test]
+fn stored_expired_snapshots_remain_cryptographically_loadable() {
+    let root = key(1);
+    let issuer = key(2);
+    let trust = issue_trust(&root, &issuer, 1, IssuerStatus::Active);
+    let revocations = revocations(&issuer, 1, vec![]);
+    let roots = [root.verifying_key().to_bytes()];
+    let verifier = SnapshotVerifier::new(&roots);
+
+    let stored_trust = verifier.verify_stored_trust(&json(&trust)).unwrap();
+    assert!(
+        verifier
+            .verify_stored_revocations(&json(&revocations), &stored_trust)
+            .is_ok()
+    );
+    assert_eq!(
+        verifier.verify_trust(&json(&trust), None, trust.content.expires_at),
+        Err(ApplyError::Expired)
+    );
+    assert_eq!(
+        verifier.verify_revocations(
+            &json(&revocations),
+            &stored_trust,
+            None,
+            revocations.content.expires_at,
+        ),
+        Err(ApplyError::Expired)
+    );
+
+    let mut tampered = trust;
+    tamper_signature(&mut tampered.root_signature);
+    assert_eq!(
+        verifier.verify_stored_trust(&json(&tampered)),
+        Err(ApplyError::InvalidSignature)
+    );
+}
+
+#[test]
 fn rejects_unknown_json_fields_and_oversized_bodies() {
     let root = key(1);
     let issuer = key(2);

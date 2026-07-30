@@ -21,10 +21,10 @@ impl<'a, B: StorageBackend> CertificateRepository<'a, B> {
     pub fn load(
         mut backend: B,
         root_public_keys: &'a [[u8; 32]],
-        now_utc: u64,
+        _now_utc: u64,
     ) -> Result<Self, StorageError> {
         let verifier = SnapshotVerifier::new(root_public_keys);
-        let mut recovery = RecoveryValidator::new(verifier, now_utc);
+        let mut recovery = RecoveryValidator::new(verifier);
         let LoadedDatabase {
             state, recovered, ..
         } = load_database(&mut backend, &mut recovery)?;
@@ -162,16 +162,14 @@ impl<B: StorageBackend> SnapshotRepository for CertificateRepository<'_, B> {
 
 struct RecoveryValidator<'a> {
     verifier: SnapshotVerifier<'a>,
-    now_utc: u64,
     trust: Option<VerifiedTrust>,
     revocations: Option<VerifiedRevocations>,
 }
 
 impl<'a> RecoveryValidator<'a> {
-    const fn new(verifier: SnapshotVerifier<'a>, now_utc: u64) -> Self {
+    const fn new(verifier: SnapshotVerifier<'a>) -> Self {
         Self {
             verifier,
-            now_utc,
             trust: None,
             revocations: None,
         }
@@ -187,7 +185,7 @@ impl SnapshotValidator for RecoveryValidator<'_> {
         match kind {
             StorageKind::Trust => self
                 .verifier
-                .verify_trust(bytes, None, self.now_utc)
+                .verify_stored_trust(bytes)
                 .map(|verified| storage_metadata(verified.metadata()))
                 .map_err(|_| StorageError::InvalidSnapshot),
             StorageKind::Revocations => self
@@ -196,7 +194,7 @@ impl SnapshotValidator for RecoveryValidator<'_> {
                 .ok_or(StorageError::InvalidSnapshot)
                 .and_then(|trust| {
                     self.verifier
-                        .verify_revocations(bytes, trust, None, self.now_utc)
+                        .verify_stored_revocations(bytes, trust)
                         .map(|verified| storage_metadata(verified.metadata()))
                         .map_err(|_| StorageError::InvalidSnapshot)
                 }),
@@ -208,7 +206,7 @@ impl SnapshotValidator for RecoveryValidator<'_> {
             StorageKind::Trust => {
                 self.trust = Some(
                     self.verifier
-                        .verify_trust(bytes, None, self.now_utc)
+                        .verify_stored_trust(bytes)
                         .map_err(|_| StorageError::InvalidSnapshot)?,
                 );
             }
@@ -216,7 +214,7 @@ impl SnapshotValidator for RecoveryValidator<'_> {
                 let trust = self.trust.as_ref().ok_or(StorageError::InvalidSnapshot)?;
                 self.revocations = Some(
                     self.verifier
-                        .verify_revocations(bytes, trust, None, self.now_utc)
+                        .verify_stored_revocations(bytes, trust)
                         .map_err(|_| StorageError::InvalidSnapshot)?,
                 );
             }

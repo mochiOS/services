@@ -216,6 +216,9 @@ impl Coordinator {
                 }
             }
             304 => match repository.mark_checked(kind, now_utc) {
+                Ok(times) if times.expires_at <= now_utc => {
+                    self.reject(kind, ApplyError::Expired, now_ms);
+                }
                 Ok(times) => {
                     self.increment_not_modified(kind);
                     self.scheduler.record_success(

@@ -71,15 +71,23 @@ impl<'a> SnapshotVerifier<'a> {
         check_size(bytes)?;
         let snapshot: TrustSnapshot =
             serde_json::from_slice(bytes).map_err(|_| ApplyError::InvalidSnapshot)?;
-        let root = self
-            .root_public_keys
-            .iter()
-            .find(|public_key| key_id(public_key) == snapshot.content.root_key_id)
-            .ok_or(ApplyError::InvalidSignature)?;
+        let root = self.root_for(&snapshot)?;
         snapshot.verify(root, now_utc).map_err(map_trust_error)?;
         if let Some(current) = current {
             validate_trust_successor(current, &snapshot).map_err(map_trust_error)?;
         }
+        Ok(VerifiedTrust { snapshot })
+    }
+
+    pub fn verify_stored_trust(&self, bytes: &[u8]) -> Result<VerifiedTrust, ApplyError> {
+        check_size(bytes)?;
+        let snapshot: TrustSnapshot =
+            serde_json::from_slice(bytes).map_err(|_| ApplyError::InvalidSnapshot)?;
+        let verification_time = snapshot.content.generated_at;
+        let root = self.root_for(&snapshot)?;
+        snapshot
+            .verify(root, verification_time)
+            .map_err(map_trust_error)?;
         Ok(VerifiedTrust { snapshot })
     }
 
@@ -93,23 +101,51 @@ impl<'a> SnapshotVerifier<'a> {
         check_size(bytes)?;
         let snapshot: RevocationSnapshot =
             serde_json::from_slice(bytes).map_err(|_| ApplyError::InvalidSnapshot)?;
-        let issuer = trust
-            .snapshot
-            .content
-            .issuers
-            .iter()
-            .find(|issuer| issuer.issuer_key_id == snapshot.content.issuer_key_id)
-            .ok_or(ApplyError::UnknownIssuer)?;
-        validate_revocation_issuer(issuer, now_utc)?;
-        let public_key = decode_public_key(&issuer.public_key).map_err(map_trust_error)?;
-        snapshot
-            .verify(&public_key, now_utc)
-            .map_err(map_trust_error)?;
+        verify_revocation_snapshot(&snapshot, trust, now_utc)?;
         if let Some(current) = current {
             validate_revocation_successor(current, &snapshot).map_err(map_trust_error)?;
         }
         Ok(VerifiedRevocations { snapshot })
     }
+
+    pub fn verify_stored_revocations(
+        &self,
+        bytes: &[u8],
+        trust: &VerifiedTrust,
+    ) -> Result<VerifiedRevocations, ApplyError> {
+        check_size(bytes)?;
+        let snapshot: RevocationSnapshot =
+            serde_json::from_slice(bytes).map_err(|_| ApplyError::InvalidSnapshot)?;
+        let verification_time = snapshot.content.generated_at;
+        verify_revocation_snapshot(&snapshot, trust, verification_time)?;
+        Ok(VerifiedRevocations { snapshot })
+    }
+
+    fn root_for(&self, snapshot: &TrustSnapshot) -> Result<&[u8; 32], ApplyError> {
+        self.root_public_keys
+            .iter()
+            .find(|public_key| key_id(public_key) == snapshot.content.root_key_id)
+            .ok_or(ApplyError::InvalidSignature)
+    }
+}
+
+fn verify_revocation_snapshot(
+    snapshot: &RevocationSnapshot,
+    trust: &VerifiedTrust,
+    now_utc: u64,
+) -> Result<(), ApplyError> {
+    let issuer = trust
+        .snapshot
+        .content
+        .issuers
+        .iter()
+        .find(|issuer| issuer.issuer_key_id == snapshot.content.issuer_key_id)
+        .ok_or(ApplyError::UnknownIssuer)?;
+    validate_revocation_issuer(issuer, now_utc)?;
+    let public_key = decode_public_key(&issuer.public_key).map_err(map_trust_error)?;
+    snapshot
+        .verify(&public_key, now_utc)
+        .map_err(map_trust_error)
 }
 
 fn check_size(bytes: &[u8]) -> Result<(), ApplyError> {
