@@ -1,8 +1,10 @@
 #[cfg(not(test))]
 use mochi_user_platform as platform;
 use mochios_driver_control_protocol::{
-    DRIVER_HELLO_LEN, DecodeError, EncodeError, Message, START_DISCOVERY_LEN, StartDiscovery,
+    DRIVER_HELLO_LEN, DecodeError, EncodeError, Message, StartDiscovery,
 };
+#[cfg(not(test))]
+use mochios_driver_control_protocol::START_DISCOVERY_LEN;
 
 #[cfg(not(test))]
 use crate::fixed_service_launcher::DriverManagerTarget;
