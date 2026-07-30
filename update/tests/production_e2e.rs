@@ -61,11 +61,16 @@ fn fetch(directory: &Path, name: &str, url: &str, etag: &str) -> HttpResponse {
             response_etag = Some(value.trim().to_string());
         }
     }
+    let body = match fs::read(&body_path) {
+        Ok(body) => body,
+        Err(error) if status == 304 && error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("failed to read curl response body: {error}"),
+    };
     HttpResponse {
         status,
         content_type,
         etag: response_etag,
-        body: fs::read(body_path).unwrap(),
+        body,
     }
 }
 
