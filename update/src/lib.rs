@@ -2,6 +2,7 @@
 
 extern crate alloc;
 
+pub mod coordinator;
 pub mod http;
 pub mod scheduler;
 
