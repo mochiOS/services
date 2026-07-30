@@ -1,6 +1,7 @@
 use crate::coordinator::{Coordinator, Statistics};
 use crate::filesystem::FileBackend;
 use crate::http::{DeveloperCaFetcher, NetworkTransport};
+use crate::notifier::{Notifier, SignatureTransport};
 use crate::repository::CertificateRepository;
 use crate::scheduler::SnapshotKind;
 use crate::{DEVELOPER_ROOT_PUBLIC_KEYS, DEVELOPER_TRUST_DOMAIN};
@@ -23,6 +24,7 @@ pub fn run() -> ! {
     log_database(&repository);
 
     let mut fetcher = DeveloperCaFetcher::new(NetworkTransport);
+    let mut notifier = Notifier::new(SignatureTransport);
     loop {
         let now_ms = monotonic_milliseconds();
         let now_utc = match mochi_user_platform::time::utc_seconds() {
@@ -37,7 +39,14 @@ pub fn run() -> ! {
             }
         };
         let attempts_before = total_attempts(coordinator.statistics());
+        let state_before = repository.state().clone();
         coordinator.synchronize_due(&mut fetcher, &mut repository, now_ms, now_utc);
+        if let Err(error) = notifier.notify_changes(&state_before, repository.state()) {
+            mochi_user_platform::println!(
+                "update.service: signature notification failed errno={}",
+                errno(error)
+            );
+        }
         if total_attempts(coordinator.statistics()) != attempts_before {
             log_sync(&coordinator, &repository);
         }

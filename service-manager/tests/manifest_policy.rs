@@ -149,6 +149,7 @@ fn main() {
             "ipc.client",
             "ipc.server",
             "net.http.request",
+            "signature.db.write",
             "system.time.read",
         ],
     );
