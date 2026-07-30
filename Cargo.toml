@@ -13,6 +13,7 @@ members = [
     "service-manager",
     "signature",
     "tty",
+    "update",
 ]
 
 [patch.crates-io]

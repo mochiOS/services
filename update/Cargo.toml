@@ -1,0 +1,18 @@
+[package]
+name = "update"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[target.'cfg(target_os = "mochios")'.dependencies]
+mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform" }
+
+[[bin]]
+name = "update"
+path = "src/main.rs"
+test = false
+bench = false
+harness = false
+
+[lib]
+path = "src/lib.rs"

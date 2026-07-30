@@ -1,0 +1,17 @@
+[package]
+id = "org.mochios.update"
+name = "Update Service"
+version = "1"
+vendor = "mochiOS"
+
+[[binary]]
+path = "/system/services/update.service"
+kind = "service"
+requires = [
+    "fs.read.all",
+    "fs.write.all",
+    "ipc.client",
+    "ipc.server",
+    "net.http.request",
+    "system.time.read",
+]
