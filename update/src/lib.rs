@@ -1,6 +1,7 @@
 pub mod coordinator;
 pub mod http;
 pub mod scheduler;
+pub mod snapshot;
 
 #[cfg(target_os = "mochios")]
 pub fn run() -> ! {
