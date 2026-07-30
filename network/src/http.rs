@@ -12,7 +12,7 @@ use crate::tls::TlsManager;
 
 const MAX_HTTP_RESPONSES: usize = 8;
 const RECEIVE_CHUNK: usize = 4_096;
-const MAX_RECEIVE_STEPS: usize = 512;
+const MAX_RECEIVE_STEPS: usize = 1_032;
 
 pub(crate) struct HttpRequestSuccess {
     pub(crate) handle: u64,
@@ -59,6 +59,7 @@ impl HttpManager {
         method: HttpMethod,
         raw_url: &str,
         content_type: &str,
+        if_none_match: &str,
         body: &[u8],
         started: u64,
         timeout: u64,
@@ -71,6 +72,7 @@ impl HttpManager {
             method,
             raw_url,
             content_type,
+            if_none_match,
             body,
             started,
             timeout,
@@ -114,6 +116,7 @@ impl HttpManager {
         method: HttpMethod,
         raw_url: &str,
         content_type: &str,
+        if_none_match: &str,
         body: &[u8],
         started: u64,
         timeout: u64,
@@ -129,16 +132,20 @@ impl HttpManager {
             HttpMethod::Get => Method::Get,
             HttpMethod::Post => Method::Post,
         };
-        let content_header = Header {
-            name: "Content-Type",
-            value: content_type,
-        };
-        let headers = if method == Method::Post && !content_type.is_empty() {
-            core::slice::from_ref(&content_header)
-        } else {
-            &[]
-        };
-        let request = encode_request(method, &url, headers, body).map_err(http_error)?;
+        let mut headers = Vec::with_capacity(2);
+        if method == Method::Post && !content_type.is_empty() {
+            headers.push(Header {
+                name: "Content-Type",
+                value: content_type,
+            });
+        }
+        if !if_none_match.is_empty() {
+            headers.push(Header {
+                name: "If-None-Match",
+                value: if_none_match,
+            });
+        }
+        let request = encode_request(method, &url, &headers, body).map_err(http_error)?;
         let connection = tls
             .connect(stack, owner, url.hostname(), url.port(), started, timeout)
             .map_err(|operation| {
