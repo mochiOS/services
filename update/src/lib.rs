@@ -5,6 +5,9 @@ pub mod repository;
 pub mod scheduler;
 pub mod snapshot;
 
+#[cfg(target_os = "mochios")]
+mod service;
+
 include!(concat!(env!("OUT_DIR"), "/developer_root_keys.rs"));
 
 #[cfg(target_os = "mochios")]
@@ -16,9 +19,7 @@ pub fn run() -> ! {
         mochi_user_platform::logger::init(endpoint);
     }
     mochi_user_platform::println!("update.service: start");
-    loop {
-        mochi_user_platform::thread::yield_now();
-    }
+    service::run()
 }
 
 #[cfg(not(target_os = "mochios"))]
