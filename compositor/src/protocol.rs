@@ -39,6 +39,7 @@ pub(crate) const EVENT_FOCUS_GAINED: u32 = 8;
 pub(crate) const EVENT_FOCUS_LOST: u32 = 9;
 pub(crate) const EVENT_FRAME_DONE: u32 = 10;
 pub(crate) const EVENT_CONFIGURE: u32 = 11;
+pub(crate) const EVENT_POINTER_SCROLL: u32 = 12;
 pub(crate) const ROLE_TOPLEVEL: u32 = 1;
 pub(crate) const ROLE_POPUP: u32 = 2;
 pub(crate) const ROLE_BACKGROUND: u32 = 3;

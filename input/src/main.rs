@@ -249,6 +249,10 @@ fn sign_extend_mouse_delta(delta: u8, sign: bool) -> i32 {
     }
 }
 
+fn decode_mouse_wheel(byte: u8) -> i32 {
+    i32::from((byte << 4) as i8 >> 4)
+}
+
 fn process_mouse_packet(
     packet: &[u8],
     state: &mut MouseState,
@@ -268,6 +272,23 @@ fn process_mouse_packet(
     let dy = -sign_extend_mouse_delta(packet[2], (b0 & 0x20) != 0);
     if dx != 0 || dy != 0 {
         let event = encode_input_event(EVENT_KIND_POINTER_MOVE, 0, 0, 0, 0, dx, dy, 0, 0);
+        send_event(subscribers, &event);
+    }
+
+    if let Some(wheel) = packet.get(3).copied().map(decode_mouse_wheel)
+        && wheel != 0
+    {
+        let event = encode_input_event(
+            EVENT_KIND_POINTER_WHEEL,
+            0,
+            0,
+            0,
+            0,
+            0,
+            wheel.saturating_mul(40),
+            0,
+            0,
+        );
         send_event(subscribers, &event);
     }
 
@@ -500,7 +521,7 @@ fn main() {
                     process_keyboard_byte(buf[4], &mut keyboard, &subscribers);
                 }
                 platform::input::RAW_KIND_MOUSE_PACKET => {
-                    process_mouse_packet(&buf[4..7], &mut mouse, &subscribers);
+                    process_mouse_packet(&buf[4..8], &mut mouse, &subscribers);
                 }
                 platform::input::RAW_KIND_POINTER_ABSOLUTE => {
                     process_absolute_pointer(&buf[4..len], &mut mouse, &subscribers);

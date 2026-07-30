@@ -4,7 +4,7 @@ use crate::geometry::{Rect, merge_damage};
 use crate::protocol::{
     DECOR_EVENT_POINTER_BUTTON, DECOR_EVENT_POINTER_LEAVE, DECOR_EVENT_POINTER_MOTION,
     EVENT_FOCUS_GAINED, EVENT_FOCUS_LOST, EVENT_KEY, EVENT_POINTER_BUTTON, EVENT_POINTER_ENTER,
-    EVENT_POINTER_LEAVE, EVENT_POINTER_MOTION, put_i32, put_u32, put_u64,
+    EVENT_POINTER_LEAVE, EVENT_POINTER_MOTION, EVENT_POINTER_SCROLL, put_i32, put_u32, put_u64,
 };
 use crate::state::MAX_DIMENSION;
 use crate::surface::surface_extent;
@@ -356,6 +356,22 @@ pub(crate) fn handle_input_event(
                 *pointer_grab = None;
             }
             needs_window_redraw.then_some(Rect::full(display_width, display_height))
+        }
+        platform::input::EVENT_KIND_POINTER_WHEEL => {
+            if let Some(index) = *pointer_focus
+                && let Some(surface) = surfaces.get(index)
+                && surface.live
+                && !surface.is_decoration
+            {
+                send_event(
+                    surface.event_endpoint,
+                    EVENT_POINTER_SCROLL,
+                    event.value_x,
+                    event.value_y,
+                    0,
+                );
+            }
+            None
         }
         platform::input::EVENT_KIND_KEY => {
             if let Some(index) = *keyboard_focus {
