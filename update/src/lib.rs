@@ -1,5 +1,8 @@
 #![no_std]
 
+extern crate alloc;
+
+pub mod http;
 pub mod scheduler;
 
 #[cfg(target_os = "mochios")]

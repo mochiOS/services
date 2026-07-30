@@ -1155,6 +1155,8 @@ name = "update"
 version = "0.1.0"
 dependencies = [
  "mochi-user-platform",
+ "mochios-http-client",
+ "mochios-net-device-protocol",
 ]
 
 [[package]]

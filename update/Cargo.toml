@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 build = "build.rs"
 
+[dependencies]
+mochios-http-client = { git = "https://github.com/mochiOS/syscalls", package = "mochios-http-client" }
+mochios-net-device-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-net-device-protocol" }
+
 [target.'cfg(target_os = "mochios")'.dependencies]
 mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform" }
 
