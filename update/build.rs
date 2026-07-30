@@ -4,7 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 const DEVELOPMENT_ROOT_PUBLIC_KEY_HEX: &str =
-    "65b3316dbc41b1fdc9a644155e3cc1eda8bd6926a6f33ec1ba2d8570abfbde27";
+    "fa28925b7ff0727ba081679e31af05a87f1b3cda98dda5900c1371695cdef56b";
 
 fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-env-changed=MOCHIOS_DEVELOPER_ROOT_PUBLIC_KEYS_HEX");

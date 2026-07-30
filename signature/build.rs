@@ -1,7 +1,7 @@
 use std::{env, fs, path::PathBuf};
 
 const DEVELOPMENT_ROOT_PUBLIC_KEY_HEX: &str =
-    "65b3316dbc41b1fdc9a644155e3cc1eda8bd6926a6f33ec1ba2d8570abfbde27";
+    "fa28925b7ff0727ba081679e31af05a87f1b3cda98dda5900c1371695cdef56b";
 
 fn decode_public_key(value: &str) -> [u8; 32] {
     assert_eq!(
