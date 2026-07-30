@@ -163,8 +163,9 @@ fn log_sync(coordinator: &Coordinator, repository: &CertificateRepository<'_, Fi
     let statistics = coordinator.statistics();
     let scheduler = coordinator.scheduler();
     mochi_user_platform::println!(
-        "update.service: sync result={:?} next_trust_ms={} next_revocations_ms={}",
+        "update.service: sync result={:?} last_error={:?} next_trust_ms={} next_revocations_ms={}",
         coordinator.last_result(),
+        coordinator.last_error(),
         scheduler.next_attempt_ms(SnapshotKind::Trust),
         scheduler.next_attempt_ms(SnapshotKind::Revocations)
     );

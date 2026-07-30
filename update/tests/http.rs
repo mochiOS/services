@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use mochios_http_client::MAX_BODY_BYTES;
+use mochios_http_client::{MAX_BODY_BYTES, MAX_HEADER_COUNT};
 use mochios_net_device_protocol::{
     HttpFailure, Opcode, decode_http_request, encode_http_read_result, encode_http_request_result,
 };
@@ -191,6 +191,30 @@ fn duplicate_etag_and_invalid_content_type_are_rejected_and_closed() {
             "",
         ),
         Err(FetchError::InvalidContentType)
+    );
+    assert!(transport.replies.is_empty());
+}
+
+#[test]
+fn excessive_header_count_is_rejected_and_closed() {
+    let mut headers = String::from("ETag: \"a\"\r\n");
+    for _ in 0..MAX_HEADER_COUNT {
+        headers.push_str("X-Test: value\r\n");
+    }
+    let mut transport = ScriptedTransport::with_replies(vec![
+        request_result(200, "application/json", headers.as_bytes(), b"x"),
+        stream(headers.as_bytes()),
+        close_result(),
+    ]);
+
+    assert_eq!(
+        get(
+            &mut transport,
+            REQUEST_ID,
+            "https://ca.mochios.org/v1/trust-store",
+            "",
+        ),
+        Err(FetchError::InvalidHeaders)
     );
     assert!(transport.replies.is_empty());
 }

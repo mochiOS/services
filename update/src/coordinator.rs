@@ -72,11 +72,19 @@ pub enum SyncResult {
     Rejected(SnapshotKind, ApplyError),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SyncError {
+    Fetch(FetchError),
+    HttpStatus(u16),
+    Apply(ApplyError),
+}
+
 pub struct Coordinator {
     scheduler: Scheduler,
     statistics: Statistics,
     request_id: u64,
     last_result: SyncResult,
+    last_error: Option<SyncError>,
 }
 
 impl Coordinator {
@@ -100,6 +108,7 @@ impl Coordinator {
             },
             request_id: 0,
             last_result: SyncResult::Never,
+            last_error: None,
         }
     }
 
@@ -113,6 +122,10 @@ impl Coordinator {
 
     pub const fn last_result(&self) -> SyncResult {
         self.last_result
+    }
+
+    pub const fn last_error(&self) -> Option<SyncError> {
+        self.last_error
     }
 
     pub fn record_recovery(&mut self) {
@@ -181,15 +194,20 @@ impl Coordinator {
         let etag = repository.etag(kind).to_string();
         let response = match fetcher.fetch(kind, request_id, &etag) {
             Ok(response) => response,
-            Err(_) => {
-                self.retry(kind, now_ms, None);
+            Err(error) => {
+                self.retry(kind, now_ms, None, SyncError::Fetch(error));
                 return OneResult::Finished;
             }
         };
         match response.status_code {
             200 => {
                 let Some(etag) = response.etag.as_deref() else {
-                    self.retry(kind, now_ms, None);
+                    self.retry(
+                        kind,
+                        now_ms,
+                        None,
+                        SyncError::Fetch(FetchError::MissingEtag),
+                    );
                     return OneResult::Finished;
                 };
                 match repository.apply(kind, &response.body, etag, now_utc) {
@@ -210,7 +228,7 @@ impl Coordinator {
                     Err(ApplyError::Storage) => {
                         self.statistics.snapshot_storage_failures =
                             self.statistics.snapshot_storage_failures.saturating_add(1);
-                        self.retry(kind, now_ms, None);
+                        self.retry(kind, now_ms, None, SyncError::Apply(ApplyError::Storage));
                     }
                     Err(error) => self.reject(kind, error, now_ms),
                 }
@@ -233,11 +251,16 @@ impl Coordinator {
                 Err(ApplyError::Storage) => {
                     self.statistics.snapshot_storage_failures =
                         self.statistics.snapshot_storage_failures.saturating_add(1);
-                    self.retry(kind, now_ms, None);
+                    self.retry(kind, now_ms, None, SyncError::Apply(ApplyError::Storage));
                 }
                 Err(error) => self.reject(kind, error, now_ms),
             },
-            429 | 500 | 502 | 503 | 504 => self.retry(kind, now_ms, response.retry_after_seconds),
+            429 | 500 | 502 | 503 | 504 => self.retry(
+                kind,
+                now_ms,
+                response.retry_after_seconds,
+                SyncError::HttpStatus(response.status_code),
+            ),
             _ => self.reject(kind, ApplyError::InvalidSnapshot, now_ms),
         }
         OneResult::Finished
@@ -251,7 +274,13 @@ impl Coordinator {
         self.request_id
     }
 
-    fn retry(&mut self, kind: SnapshotKind, now_ms: u64, retry_after_seconds: Option<u64>) {
+    fn retry(
+        &mut self,
+        kind: SnapshotKind,
+        now_ms: u64,
+        retry_after_seconds: Option<u64>,
+        error: SyncError,
+    ) {
         self.increment_failure(kind);
         self.scheduler.record_failure(
             kind,
@@ -261,6 +290,7 @@ impl Coordinator {
             },
         );
         self.last_result = SyncResult::RetryScheduled(kind);
+        self.last_error = Some(error);
     }
 
     fn reject(&mut self, kind: SnapshotKind, error: ApplyError, now_ms: u64) {
@@ -289,6 +319,7 @@ impl Coordinator {
         self.scheduler
             .record_failure(kind, now_ms, FailureClass::Security);
         self.last_result = SyncResult::Rejected(kind, error);
+        self.last_error = Some(SyncError::Apply(error));
     }
 
     fn increment_attempt(&mut self, kind: SnapshotKind) {

@@ -3,7 +3,8 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use update::coordinator::{
-    ApplyError, Coordinator, SnapshotFetcher, SnapshotRepository, SnapshotTimes, SyncResult,
+    ApplyError, Coordinator, SnapshotFetcher, SnapshotRepository, SnapshotTimes, SyncError,
+    SyncResult,
 };
 use update::http::{FetchError, Response};
 use update::scheduler::{EXPIRY_REVALIDATION_MS, SnapshotKind, TRUST_PERIOD_MS};
@@ -233,6 +234,10 @@ fn transient_status_uses_retry_after_and_does_not_apply() {
     );
     assert_eq!(coordinator.statistics().trust_sync_failures, 1);
     assert_eq!(coordinator.statistics().revocation_sync_failures, 1);
+    assert_eq!(
+        coordinator.last_error(),
+        Some(SyncError::Fetch(FetchError::Transport(5)))
+    );
 }
 
 #[test]
@@ -256,6 +261,26 @@ fn signature_and_rollback_failures_are_security_rejections() {
         coordinator.last_result(),
         SyncResult::Rejected(SnapshotKind::Revocations, ApplyError::Rollback)
     );
+    assert_eq!(
+        coordinator.last_error(),
+        Some(SyncError::Apply(ApplyError::Rollback))
+    );
+}
+
+#[test]
+fn retry_records_the_http_status_for_diagnostics() {
+    let (mut coordinator, mut fetcher, mut repository, _) = setup(
+        vec![
+            Ok(response(503, None, Some(600))),
+            Ok(response(304, Some("\"rev-old\""), None)),
+        ],
+        vec![],
+        vec![Ok(times())],
+    );
+
+    coordinator.synchronize_due(&mut fetcher, &mut repository, 0, 200);
+
+    assert_eq!(coordinator.last_error(), Some(SyncError::HttpStatus(503)));
 }
 
 #[test]

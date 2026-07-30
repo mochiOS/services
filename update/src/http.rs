@@ -1,4 +1,4 @@
-use mochios_http_client::{MAX_BODY_BYTES, MAX_HEADER_BYTES};
+use mochios_http_client::{MAX_BODY_BYTES, MAX_HEADER_BYTES, MAX_HEADER_COUNT};
 use mochios_net_device_protocol::{
     HTTP_CLOSE_REQUEST_LEN, HTTP_READ_REQUEST_LEN, HTTP_READ_RESULT_BASE_LEN,
     HTTP_REQUEST_RESULT_BASE_LEN, HttpFailure, HttpMethod, HttpStream, MAX_HTTP_CONTENT_TYPE_LEN,
@@ -279,9 +279,14 @@ impl ParsedHeaders {
         let text = core::str::from_utf8(bytes).map_err(|_| FetchError::InvalidHeaders)?;
         let mut etag = None;
         let mut retry_after_seconds = None;
+        let mut header_count = 0usize;
         for line in text.split("\r\n") {
             if line.is_empty() {
                 continue;
+            }
+            header_count = header_count.saturating_add(1);
+            if header_count > MAX_HEADER_COUNT {
+                return Err(FetchError::InvalidHeaders);
             }
             let (name, value) = line.split_once(':').ok_or(FetchError::InvalidHeaders)?;
             let value = value.trim_matches([' ', '\t']);
