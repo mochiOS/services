@@ -297,7 +297,7 @@ fn verify_package_bytes(
     database: &ActiveDatabase,
     now_utc: u64,
 ) -> Result<Verification, mochi_user_syscall::SysError> {
-    let header = parse_header(&bytes)
+    let header = parse_header(bytes)
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     if header.compression != 0 {
         return Err(mochi_user_syscall::SysError::from_raw(
