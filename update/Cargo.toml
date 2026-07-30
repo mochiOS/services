@@ -11,7 +11,7 @@ mochios-http-client = { git = "https://github.com/mochiOS/syscalls", package = "
 mochios-net-device-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-net-device-protocol" }
 
 [target.'cfg(target_os = "mochios")'.dependencies]
-mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform" }
+mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }
 
 [[bin]]
 name = "update"
