@@ -5,6 +5,8 @@ pub mod repository;
 pub mod scheduler;
 pub mod snapshot;
 
+include!(concat!(env!("OUT_DIR"), "/developer_root_keys.rs"));
+
 #[cfg(target_os = "mochios")]
 pub fn run() -> ! {
     if let Some(endpoint) = std::env::args()
