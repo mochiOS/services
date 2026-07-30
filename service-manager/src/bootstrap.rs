@@ -238,10 +238,7 @@ impl BootstrapOperations for Runtime {
 
 pub(crate) fn run() -> ! {
     platform::println!("service-manager.service: start");
-    let logger_endpoint = match platform::logger::endpoint() {
-        Some(endpoint) => endpoint,
-        None => 0,
-    };
+    let logger_endpoint = platform::logger::endpoint().map_or(0, |endpoint| endpoint);
     let (outcome, runtime) = match Runtime::create(logger_endpoint) {
         Ok(mut runtime) => {
             let outcome = orchestrate(&mut runtime);

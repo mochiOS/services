@@ -40,7 +40,8 @@ fn assert_capabilities(manifest: &str, path: &str, expected: &[&str]) {
     assert_eq!(actual, expected);
 }
 
-fn main() {
+#[test]
+fn service_manifests_match_policy() {
     let manager = match package::parse_manifest(SERVICE_MANAGER_MANIFEST) {
         Some(manifest) => manifest,
         None => panic!("service-manager manifest was rejected"),
