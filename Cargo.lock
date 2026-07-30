@@ -507,7 +507,7 @@ source = "git+https://github.com/mochiOS/mnu#7460aa5cf1a12f4c69735644601775c38dc
 [[package]]
 name = "mochi-user-platform"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e41ac7909a7ee11e9f89172d2e18db9a5a171f6f"
+source = "git+https://github.com/mochiOS/syscalls#7bf2cbefb54c0f8bb9fd508b2af1122cf80702e4"
 dependencies = [
  "mnu-abi",
  "mochi-user-runtime",
@@ -518,7 +518,7 @@ dependencies = [
 [[package]]
 name = "mochi-user-runtime"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e41ac7909a7ee11e9f89172d2e18db9a5a171f6f"
+source = "git+https://github.com/mochiOS/syscalls#7bf2cbefb54c0f8bb9fd508b2af1122cf80702e4"
 dependencies = [
  "mochi-user-syscall",
 ]
@@ -526,7 +526,7 @@ dependencies = [
 [[package]]
 name = "mochi-user-syscall"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e41ac7909a7ee11e9f89172d2e18db9a5a171f6f"
+source = "git+https://github.com/mochiOS/syscalls#7bf2cbefb54c0f8bb9fd508b2af1122cf80702e4"
 dependencies = [
  "mnu-abi",
 ]
@@ -534,12 +534,12 @@ dependencies = [
 [[package]]
 name = "mochios-capability-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e41ac7909a7ee11e9f89172d2e18db9a5a171f6f"
+source = "git+https://github.com/mochiOS/syscalls#7bf2cbefb54c0f8bb9fd508b2af1122cf80702e4"
 
 [[package]]
 name = "mochios-certificate"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e41ac7909a7ee11e9f89172d2e18db9a5a171f6f"
+source = "git+https://github.com/mochiOS/syscalls#7bf2cbefb54c0f8bb9fd508b2af1122cf80702e4"
 dependencies = [
  "ed25519-dalek",
  "sha2",
@@ -548,7 +548,7 @@ dependencies = [
 [[package]]
 name = "mochios-certificate-database"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#8672fe89536f9ab75eedb267ff64392e1a4654a3"
+source = "git+https://github.com/mochiOS/syscalls#7bf2cbefb54c0f8bb9fd508b2af1122cf80702e4"
 dependencies = [
  "sha2",
 ]
@@ -567,32 +567,32 @@ dependencies = [
 [[package]]
 name = "mochios-driver-control-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e41ac7909a7ee11e9f89172d2e18db9a5a171f6f"
+source = "git+https://github.com/mochiOS/syscalls#7bf2cbefb54c0f8bb9fd508b2af1122cf80702e4"
 
 [[package]]
 name = "mochios-http-client"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e41ac7909a7ee11e9f89172d2e18db9a5a171f6f"
+source = "git+https://github.com/mochiOS/syscalls#7bf2cbefb54c0f8bb9fd508b2af1122cf80702e4"
 
 [[package]]
 name = "mochios-net-device-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e41ac7909a7ee11e9f89172d2e18db9a5a171f6f"
+source = "git+https://github.com/mochiOS/syscalls#7bf2cbefb54c0f8bb9fd508b2af1122cf80702e4"
 
 [[package]]
 name = "mochios-network-stack"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e41ac7909a7ee11e9f89172d2e18db9a5a171f6f"
+source = "git+https://github.com/mochiOS/syscalls#7bf2cbefb54c0f8bb9fd508b2af1122cf80702e4"
 
 [[package]]
 name = "mochios-signature-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e41ac7909a7ee11e9f89172d2e18db9a5a171f6f"
+source = "git+https://github.com/mochiOS/syscalls#7bf2cbefb54c0f8bb9fd508b2af1122cf80702e4"
 
 [[package]]
 name = "mochios-tls-client"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e41ac7909a7ee11e9f89172d2e18db9a5a171f6f"
+source = "git+https://github.com/mochiOS/syscalls#7bf2cbefb54c0f8bb9fd508b2af1122cf80702e4"
 dependencies = [
  "getrandom",
  "mochi-user-platform",
@@ -605,12 +605,12 @@ dependencies = [
 [[package]]
 name = "mochios-viewkit-gpu-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e41ac7909a7ee11e9f89172d2e18db9a5a171f6f"
+source = "git+https://github.com/mochiOS/syscalls#7bf2cbefb54c0f8bb9fd508b2af1122cf80702e4"
 
 [[package]]
 name = "mochios-virtio-gpu-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e41ac7909a7ee11e9f89172d2e18db9a5a171f6f"
+source = "git+https://github.com/mochiOS/syscalls#7bf2cbefb54c0f8bb9fd508b2af1122cf80702e4"
 
 [[package]]
 name = "network"
