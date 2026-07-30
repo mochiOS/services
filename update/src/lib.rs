@@ -1,5 +1,6 @@
 pub mod coordinator;
 pub mod http;
+pub mod repository;
 pub mod scheduler;
 pub mod snapshot;
 

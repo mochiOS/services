@@ -546,6 +546,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mochios-certificate-database"
+version = "0.1.0"
+source = "git+https://github.com/mochiOS/syscalls#8672fe89536f9ab75eedb267ff64392e1a4654a3"
+dependencies = [
+ "sha2",
+]
+
+[[package]]
 name = "mochios-developer-ca-trust"
 version = "0.1.0"
 source = "git+https://github.com/mochiOS/DeveloperCA?rev=71f9487a3abe29046e827784502516c9a296c509#71f9487a3abe29046e827784502516c9a296c509"
@@ -1200,6 +1208,7 @@ dependencies = [
  "base64",
  "ed25519-dalek",
  "mochi-user-platform",
+ "mochios-certificate-database",
  "mochios-developer-ca-trust",
  "mochios-http-client",
  "mochios-net-device-protocol",

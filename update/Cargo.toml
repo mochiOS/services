@@ -7,6 +7,7 @@ edition = "2024"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mochios"))'] }
 
 [dependencies]
+mochios-certificate-database = { git = "https://github.com/mochiOS/syscalls", package = "mochios-certificate-database", features = ["alloc"] }
 mochios-developer-ca-trust = { git = "https://github.com/mochiOS/DeveloperCA", rev = "71f9487a3abe29046e827784502516c9a296c509", package = "mochios-developer-ca-trust" }
 mochios-http-client = { git = "https://github.com/mochiOS/syscalls", package = "mochios-http-client" }
 mochios-net-device-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-net-device-protocol" }
