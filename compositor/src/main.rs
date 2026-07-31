@@ -5,6 +5,7 @@ mod cursor;
 mod decoration;
 mod display;
 mod geometry;
+mod gpu_compositor;
 mod input;
 mod protocol;
 mod renderer;

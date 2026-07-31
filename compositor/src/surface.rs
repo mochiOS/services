@@ -100,6 +100,18 @@ pub(crate) struct SurfaceBuffer {
     pub(crate) format: u32,
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct GpuSurfaceState {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) atlas_width: u32,
+    pub(crate) atlas_height: u32,
+    pub(crate) vertices: Vec<u8>,
+    pub(crate) atlas: Vec<u8>,
+    pub(crate) generation: u64,
+    pub(crate) atlas_generation: u64,
+}
+
 #[derive(Clone)]
 pub(crate) struct Surface {
     pub(crate) live: bool,
@@ -133,6 +145,8 @@ pub(crate) struct Surface {
     pub(crate) current_format: u32,
     pub(crate) current_buffer: Option<SurfaceBuffer>,
     pub(crate) current: Vec<u32>,
+    pub(crate) gpu: Option<GpuSurfaceState>,
+    pub(crate) content_generation: u64,
     pub(crate) z: u32,
 }
 
@@ -170,6 +184,8 @@ impl Surface {
             current_format: PIXEL_FORMAT_XRGB8888,
             current_buffer: None,
             current: Vec::new(),
+            gpu: None,
+            content_generation: 0,
             z: 0,
         }
     }
@@ -206,6 +222,8 @@ impl Surface {
         self.current_format = PIXEL_FORMAT_XRGB8888;
         self.current_buffer = None;
         self.current.clear();
+        self.gpu = None;
+        self.content_generation = 0;
         self.z = 0;
     }
 }
@@ -321,13 +339,11 @@ fn resize_buffer(buffer: &mut Vec<u32>, width: u32, height: u32) -> bool {
 
 pub(crate) fn surface_has_current_pixels(surface: &Surface) -> bool {
     if surface.current_format == PIXEL_FORMAT_GPU_SCENE {
-        return surface.current_buffer.as_ref().is_some_and(|buffer| {
-            let bytes = unsafe {
-                core::slice::from_raw_parts(buffer.mapped_addr as *const u8, buffer.byte_len)
-            };
-            mochios_viewkit_gpu_protocol::decode_prefix(bytes).is_ok_and(|(scene, _)| {
-                scene.width == surface.current_width && scene.height == surface.current_height
-            })
+        return surface.gpu.as_ref().is_some_and(|gpu| {
+            gpu.width == surface.current_width
+                && gpu.height == surface.current_height
+                && !gpu.vertices.is_empty()
+                && !gpu.atlas.is_empty()
         });
     }
     if matches!(surface.role, SurfaceRole::Background | SurfaceRole::Panel) {
@@ -350,6 +366,82 @@ pub(crate) fn surface_has_current_pixels(surface: &Surface) -> bool {
         return false;
     };
     surface.current.len() >= surface_len
+}
+
+fn update_gpu_surface_state(
+    current: Option<GpuSurfaceState>,
+    buffer: &SurfaceBuffer,
+    damage: Rect,
+) -> Result<GpuSurfaceState, u32> {
+    let source =
+        unsafe { core::slice::from_raw_parts(buffer.mapped_addr as *const u8, buffer.byte_len) };
+    let (scene, _) = mochios_viewkit_gpu_protocol::decode_prefix(source)
+        .map_err(|_| errno_status(mochi_user_syscall::EINVAL))?;
+    if scene.width != buffer.width || scene.height != buffer.height {
+        return Err(errno_status(mochi_user_syscall::EINVAL));
+    }
+    let atlas_len = usize::try_from(scene.atlas_width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(scene.atlas_height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+    let mut gpu = current.unwrap_or_default();
+    let atlas_reallocated = gpu.atlas_width != scene.atlas_width
+        || gpu.atlas_height != scene.atlas_height
+        || gpu.atlas.len() != atlas_len;
+    if atlas_reallocated {
+        gpu.atlas.clear();
+        gpu.atlas
+            .try_reserve_exact(atlas_len)
+            .map_err(|_| errno_status(mochi_user_syscall::ENOMEM))?;
+        gpu.atlas.resize(atlas_len, 0);
+    }
+    let row_bytes = usize::try_from(scene.atlas_width)
+        .ok()
+        .and_then(|width| width.checked_mul(4))
+        .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+    let atlas_offset = usize::try_from(scene.atlas_data_y)
+        .ok()
+        .and_then(|y| y.checked_mul(row_bytes))
+        .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+    let atlas_end = atlas_offset
+        .checked_add(scene.atlas.len())
+        .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+    let Some(destination) = gpu.atlas.get_mut(atlas_offset..atlas_end) else {
+        return Err(errno_status(mochi_user_syscall::EINVAL));
+    };
+    destination.copy_from_slice(scene.atlas);
+    let mut vertices = Vec::new();
+    if gpu.width == scene.width && gpu.height == scene.height {
+        crate::gpu_compositor::merge_surface_vertices(
+            &gpu.vertices,
+            scene.vertices,
+            scene.width,
+            scene.height,
+            damage,
+            &mut vertices,
+        )
+        .ok_or_else(|| errno_status(mochi_user_syscall::ENOMEM))?;
+    } else {
+        vertices
+            .try_reserve_exact(scene.vertices.len())
+            .map_err(|_| errno_status(mochi_user_syscall::ENOMEM))?;
+        vertices.extend_from_slice(scene.vertices);
+    }
+    gpu.vertices = vertices;
+    gpu.width = scene.width;
+    gpu.height = scene.height;
+    gpu.atlas_width = scene.atlas_width;
+    gpu.atlas_height = scene.atlas_height;
+    gpu.generation = gpu.generation.wrapping_add(1).max(1);
+    if atlas_reallocated || !scene.atlas.is_empty() {
+        gpu.atlas_generation = gpu.atlas_generation.wrapping_add(1).max(1);
+    }
+    Ok(gpu)
 }
 
 pub(crate) fn read_current_pixel(surface: &Surface, sx: usize, sy: usize) -> Option<u32> {
@@ -1017,6 +1109,20 @@ pub(crate) fn handle_request(
             {
                 let surface = &mut surfaces[index];
                 if pending_format == PIXEL_FORMAT_GPU_SCENE {
+                    let Some(buffer) = surface.pending_buffer.as_ref().cloned() else {
+                        put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
+                        return reply;
+                    };
+                    let gpu =
+                        match update_gpu_surface_state(surface.gpu.take(), &buffer, pending_damage)
+                        {
+                            Ok(gpu) => gpu,
+                            Err(status) => {
+                                put_u32(&mut reply, 0, status);
+                                return reply;
+                            }
+                        };
+                    surface.gpu = Some(gpu);
                     surface.current_buffer = surface.pending_buffer.take();
                     surface.current.clear();
                     surface.current_stride = pending_stride;
@@ -1067,6 +1173,10 @@ pub(crate) fn handle_request(
                 surface.current_width = pending_width;
                 surface.current_height = pending_height;
                 surface.current_format = pending_format;
+                if pending_format != PIXEL_FORMAT_GPU_SCENE {
+                    surface.gpu = None;
+                }
+                surface.content_generation = surface.content_generation.wrapping_add(1).max(1);
                 surface.pending_width = 0;
                 surface.pending_height = 0;
                 surface.pending_stride = 0;

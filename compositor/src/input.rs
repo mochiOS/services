@@ -15,6 +15,7 @@ use crate::window::{
 };
 
 const INPUT_SERVICE_NAME: &str = "input.service";
+const RELIABLE_SEND_RETRIES: usize = 256;
 
 static mut INPUT_SUBSCRIBE_REQ: [u8; 16] = [0; 16];
 static mut INPUT_SUBSCRIBE_REP: [u8; 8] = [0; 8];
@@ -130,7 +131,19 @@ pub(crate) fn send_event(endpoint: u64, kind: u32, a: i32, b: i32, c: u32) {
     put_i32(&mut event, 4, a);
     put_i32(&mut event, 8, b);
     put_u32(&mut event, 12, c);
-    let _ = platform::ipc::send(endpoint, &event);
+    if kind != EVENT_KEY {
+        let _ = platform::ipc::send(endpoint, &event);
+        return;
+    }
+    for _ in 0..RELIABLE_SEND_RETRIES {
+        match platform::ipc::send(endpoint, &event) {
+            Ok(_) => break,
+            Err(error) if error.errno() == Some(mochi_user_syscall::EAGAIN) => {
+                platform::thread::yield_now();
+            }
+            Err(_) => break,
+        }
+    }
 }
 
 fn send_decoration_button_event(

@@ -1,8 +1,6 @@
 use alloc::vec::Vec;
 
-use mochios_viewkit_gpu_protocol::{
-    ATLAS_HEIGHT, ATLAS_WIDTH, CLEAR_VERTEX_COUNT, MAX_VERTICES, VERTEX_STRIDE,
-};
+use mochios_viewkit_gpu_protocol::{ATLAS_WIDTH, CLEAR_VERTEX_COUNT, MAX_VERTICES, VERTEX_STRIDE};
 use mochios_virtio_gpu_protocol::{
     AttachBacking, Box3d, Command, ContextResource, Rect, ResourceCreate3d, ResourceOperation,
     SetScanout, Submit3d, TransferHost3d,
@@ -98,7 +96,7 @@ impl SceneRenderer {
     ) -> Result<Self, GpuError> {
         let render_bytes = geometry.byte_len().map_err(GpuError::System)?;
         let texture_bytes = (ATLAS_WIDTH as usize)
-            .checked_mul(ATLAS_HEIGHT as usize)
+            .checked_mul(ATLAS_WIDTH as usize)
             .and_then(|pixels| pixels.checked_mul(4))
             .ok_or(GpuError::InvalidFrame)?;
         let vertex_bytes = (MAX_VERTICES as usize)
@@ -139,7 +137,7 @@ impl SceneRenderer {
             FORMAT_B8G8R8A8_UNORM,
             BIND_SAMPLER_VIEW,
             ATLAS_WIDTH,
-            ATLAS_HEIGHT,
+            ATLAS_WIDTH,
             &self.texture,
         )?;
         self.resources_created += 1;
@@ -172,11 +170,11 @@ impl SceneRenderer {
         if scene.width != self.geometry.width
             || scene.height != self.geometry.height
             || scene.atlas_width != ATLAS_WIDTH
-            || scene.atlas_height != ATLAS_HEIGHT
+            || scene.atlas_height != ATLAS_WIDTH
             || scene
                 .atlas_data_y
                 .checked_add(scene.atlas_data_height)
-                .is_none_or(|end| end > ATLAS_HEIGHT)
+                .is_none_or(|end| end > ATLAS_WIDTH)
             || scene.vertices.len() > MAX_VERTICES as usize * VERTEX_STRIDE
         {
             return Err(GpuError::InvalidFrame);
@@ -203,7 +201,7 @@ impl SceneRenderer {
                 resource_id: TEXTURE_ID,
                 level: 0,
                 stride: ATLAS_WIDTH.saturating_mul(4),
-                layer_stride: ATLAS_WIDTH.saturating_mul(ATLAS_HEIGHT).saturating_mul(4),
+                layer_stride: ATLAS_WIDTH.saturating_mul(ATLAS_WIDTH).saturating_mul(4),
             }))?;
         }
         let vertex_transfer = Command::TransferToHost3d(TransferHost3d {

@@ -5,9 +5,10 @@ use crate::display::{
     DISPLAY_PRESENT_REQ, DISPLAY_REP_BUF, display_present_gpu_panel, display_present_gpu_scene,
 };
 use crate::geometry::{Rect, choose_frame_size, clip_present_rect};
+use crate::gpu_compositor::GpuCompositor;
 use crate::protocol::{
     OP_DISPLAY_PRESENT, OP_DISPLAY_PRESENT_RECT, PIXEL_FORMAT_ARGB8888_PREMULTIPLIED,
-    PIXEL_FORMAT_GPU_SCENE, PIXEL_FORMAT_XRGB8888, errno_status, put_u32, read_u32,
+    PIXEL_FORMAT_XRGB8888, errno_status, put_u32, read_u32,
 };
 use crate::state::{MAX_SHARED_PAGES, MAX_SURFACES, MAX_WINDOWS, PAGE_SIZE};
 use crate::surface::{Surface, read_current_pixel, shared_page_count, surface_has_current_pixels};
@@ -25,6 +26,19 @@ pub(crate) struct PresentFrame {
     cpu_contents_valid: bool,
     gpu_contents_valid: bool,
     gpu_panel_disabled: bool,
+    gpu_compositor: GpuCompositor,
+    metrics: RendererMetrics,
+}
+
+#[derive(Default)]
+struct RendererMetrics {
+    next_report_tick: u64,
+    frames: u64,
+    gpu_frames: u64,
+    cpu_frames: u64,
+    composition_millis: u64,
+    present_millis: u64,
+    scene_bytes: u64,
 }
 
 impl PresentFrame {
@@ -66,40 +80,97 @@ impl PresentFrame {
             core::slice::from_raw_parts_mut(pixels.as_mut_ptr().cast::<u8>(), pixel_count * 4)
         })
     }
+
+    fn record_metrics(
+        &mut self,
+        gpu: bool,
+        composition_millis: u64,
+        present_millis: u64,
+        scene_bytes: usize,
+    ) {
+        self.metrics.frames = self.metrics.frames.saturating_add(1);
+        if gpu {
+            self.metrics.gpu_frames = self.metrics.gpu_frames.saturating_add(1);
+        } else {
+            self.metrics.cpu_frames = self.metrics.cpu_frames.saturating_add(1);
+        }
+        self.metrics.composition_millis = self
+            .metrics
+            .composition_millis
+            .saturating_add(composition_millis);
+        self.metrics.present_millis = self.metrics.present_millis.saturating_add(present_millis);
+        self.metrics.scene_bytes = self.metrics.scene_bytes.saturating_add(scene_bytes as u64);
+        let now = platform::time::ticks().unwrap_or(0);
+        if self.metrics.next_report_tick == 0 {
+            self.metrics.next_report_tick = now.saturating_add(500);
+            platform::println!(
+                "compositor.service: render metrics enabled mode={}",
+                if gpu { "gpu" } else { "cpu" }
+            );
+        } else if now >= self.metrics.next_report_tick {
+            platform::println!(
+                "compositor.service: render stats frames={} gpu={} cpu={} compose={}ms present={}ms scene_bytes={}",
+                self.metrics.frames,
+                self.metrics.gpu_frames,
+                self.metrics.cpu_frames,
+                self.metrics.composition_millis,
+                self.metrics.present_millis,
+                self.metrics.scene_bytes,
+            );
+            self.metrics = RendererMetrics {
+                next_report_tick: now.saturating_add(500),
+                ..RendererMetrics::default()
+            };
+        }
+    }
 }
 
+fn perf_counter() -> u64 {
+    platform::time::monotonic_milliseconds().unwrap_or(0)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn try_gpu_scene_present(
     surfaces: &[Surface],
     present_frame: &mut PresentFrame,
     display_tid: u64,
     display_width: u32,
     display_height: u32,
+    damage: Option<Rect>,
+    cursor_x: i32,
+    cursor_y: i32,
+    cursor_visible: bool,
+    cursor_image: &CursorImage,
 ) -> Option<u32> {
     if present_frame.gpu_panel_disabled {
         return None;
     }
-    let mut candidate = None;
-    for (index, surface) in surfaces.iter().enumerate() {
-        if !surface.live || !surface.visible || !surface_has_current_pixels(surface) {
-            continue;
-        }
-        let eligible = surface.role == crate::surface::SurfaceRole::Panel
-            && surface.x == 0
-            && surface.y == 0
-            && surface.current_width == display_width
-            && surface.current_height == display_height
-            && surface.current_format == PIXEL_FORMAT_GPU_SCENE;
-        if !eligible || candidate.replace(index).is_some() {
-            return None;
-        }
+    let force_atlas_upload = !present_frame.gpu_contents_valid;
+    let mut gpu_compositor = core::mem::take(&mut present_frame.gpu_compositor);
+    if force_atlas_upload {
+        gpu_compositor.invalidate_atlas();
     }
-    let surface = &surfaces[candidate?];
-    let buffer = surface.current_buffer.as_ref()?;
-    let source =
-        unsafe { core::slice::from_raw_parts(buffer.mapped_addr as *const u8, buffer.byte_len) };
-    let (_scene, byte_len) = mochios_viewkit_gpu_protocol::decode_prefix(source).ok()?;
-    let destination = present_frame.bytes(byte_len).ok()?;
-    destination[..byte_len].copy_from_slice(&source[..byte_len]);
+    let composition_start = perf_counter();
+    let copy_result = (|| {
+        let scene = gpu_compositor.compose(
+            surfaces,
+            display_width,
+            display_height,
+            damage,
+            cursor_x,
+            cursor_y,
+            cursor_visible,
+            cursor_image,
+        )?;
+        let byte_len = scene.len();
+        let destination = present_frame.bytes(byte_len).ok()?;
+        destination[..byte_len].copy_from_slice(scene);
+        Some(byte_len)
+    })();
+    present_frame.gpu_compositor = gpu_compositor;
+    let byte_len = copy_result?;
+    let composition_millis = perf_counter().saturating_sub(composition_start);
+    let present_start = perf_counter();
     if !present_frame.sent_to_display {
         if platform::ipc::send_page_count(display_tid, present_frame.page_count, present_frame.virt)
             .is_err()
@@ -110,9 +181,11 @@ fn try_gpu_scene_present(
         present_frame.sent_to_display = true;
     }
     let status = display_present_gpu_scene(display_tid, byte_len);
+    let present_millis = perf_counter().saturating_sub(present_start);
     if status == 0 {
         present_frame.gpu_contents_valid = true;
         present_frame.cpu_contents_valid = false;
+        present_frame.record_metrics(true, composition_millis, present_millis, byte_len);
         Some(0)
     } else {
         platform::println!(
@@ -264,6 +337,11 @@ pub(crate) fn composite_and_present(
         display_tid,
         display_width,
         display_height,
+        damage,
+        cursor_x,
+        cursor_y,
+        cursor_visible,
+        cursor_image,
     ) {
         return status;
     }
@@ -301,6 +379,7 @@ pub(crate) fn composite_and_present(
     let rect_top = present_rect.y as usize;
     let rect_right = rect_left.saturating_add(present_rect.width as usize);
     let rect_bottom = rect_top.saturating_add(present_rect.height as usize);
+    let composition_start = perf_counter();
     {
         let frame = match present_frame.pixels(frame_pixels, frame_bytes) {
             Ok(frame) => frame,
@@ -442,6 +521,8 @@ pub(crate) fn composite_and_present(
             }
         }
     }
+    let composition_millis = perf_counter().saturating_sub(composition_start);
+    let present_start = perf_counter();
     if !present_frame.sent_to_display {
         let page_count = present_frame.page_count;
         let virt = present_frame.virt;
@@ -503,6 +584,12 @@ pub(crate) fn composite_and_present(
     }
     present_frame.cpu_contents_valid = true;
     present_frame.gpu_contents_valid = false;
+    present_frame.record_metrics(
+        false,
+        composition_millis,
+        perf_counter().saturating_sub(present_start),
+        frame_bytes,
+    );
     0
 }
 

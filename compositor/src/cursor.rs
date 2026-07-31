@@ -11,6 +11,7 @@ pub(crate) struct CursorImage {
     hotspot_x: i32,
     hotspot_y: i32,
     pixels: Vec<u32>,
+    generation: u64,
 }
 
 impl CursorImage {
@@ -55,11 +56,21 @@ impl CursorImage {
         self.height = height;
         self.hotspot_x = hotspot_x;
         self.hotspot_y = hotspot_y;
+        self.generation = self.generation.wrapping_add(1).max(1);
         true
     }
 
     pub(crate) fn is_empty(&self) -> bool {
         self.pixels.is_empty()
+    }
+
+    pub(crate) fn texture(&self) -> Option<(u32, u32, &[u32], u64)> {
+        (!self.pixels.is_empty()).then_some((
+            self.width,
+            self.height,
+            self.pixels.as_slice(),
+            self.generation,
+        ))
     }
 
     pub(crate) fn bounds(&self, x: i32, y: i32) -> Rect {

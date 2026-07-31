@@ -198,6 +198,7 @@ struct MouseState {
 
 const INPUT_EVENT_SIZE: usize = core::mem::size_of::<platform::input::InputEvent>();
 const MAX_SUBSCRIBERS: usize = 8;
+const RELIABLE_SEND_RETRIES: usize = 256;
 
 static mut INPUT_WAIT_BUF: [u8; 32] = [0; 32];
 
@@ -238,6 +239,24 @@ fn send_event(subscribers: &[u64; MAX_SUBSCRIBERS], bytes: &[u8]) {
         .filter(|subscriber| *subscriber != 0)
     {
         let _ = platform::ipc::send(subscriber, bytes);
+    }
+}
+
+fn send_event_reliably(subscribers: &[u64; MAX_SUBSCRIBERS], bytes: &[u8]) {
+    for subscriber in subscribers
+        .iter()
+        .copied()
+        .filter(|subscriber| *subscriber != 0)
+    {
+        for _ in 0..RELIABLE_SEND_RETRIES {
+            match platform::ipc::send(subscriber, bytes) {
+                Ok(_) => break,
+                Err(error) if error.errno() == Some(mochi_user_syscall::EAGAIN) => {
+                    platform::thread::yield_now();
+                }
+                Err(_) => break,
+            }
+        }
     }
 }
 
@@ -440,7 +459,7 @@ fn process_keyboard_byte(
         0,
         state.modifiers(),
     );
-    send_event(subscribers, &event);
+    send_event_reliably(subscribers, &event);
 }
 
 fn handle_subscribe_message(subscribers: &mut [u64; MAX_SUBSCRIBERS], buf: &[u8]) {
