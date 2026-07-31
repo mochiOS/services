@@ -2,6 +2,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 pub(crate) const ROLE_SERVICE: u64 = 2;
+pub(crate) const ROLE_APPLICATION: u64 = 3;
 pub(crate) const SERVICE_READY_TIMEOUT_TICKS: u64 = 5_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -10,7 +11,7 @@ pub(crate) enum FixedService {
     Display,
     Compositor,
     Network,
-    Tty,
+    Binder,
     Update,
 }
 
@@ -55,10 +56,10 @@ pub(crate) const fn fixed_service_spec(service: FixedService) -> ServiceSpec {
             manifest_path: "/system/packages/network/manifest.toml",
             role: ROLE_SERVICE,
         },
-        FixedService::Tty => ServiceSpec {
-            path: "/system/services/tty.service",
-            manifest_path: "/system/packages/tty/manifest.toml",
-            role: ROLE_SERVICE,
+        FixedService::Binder => ServiceSpec {
+            path: "/applications/Binder.app/entry.elf",
+            manifest_path: "/system/packages/binder/manifest.toml",
+            role: ROLE_APPLICATION,
         },
         FixedService::Update => ServiceSpec {
             path: "/system/services/update.service",
@@ -84,9 +85,13 @@ pub(crate) fn driver_arguments(
 }
 
 pub(crate) fn fixed_service_arguments(
+    service: FixedService,
     logger_endpoint: u64,
     ready_target: Option<ReadyTarget>,
 ) -> Vec<String> {
+    if service == FixedService::Binder {
+        return Vec::new();
+    }
     let mut arguments = Vec::with_capacity(2);
     arguments.push(logger_endpoint.to_string());
     if let Some(target) = ready_target {
@@ -116,38 +121,44 @@ mod tests {
                 FixedService::Input,
                 "/system/services/input.service",
                 "/system/packages/input/manifest.toml",
+                ROLE_SERVICE,
             ),
             (
                 FixedService::Display,
                 "/system/services/display.driver",
                 "/system/packages/display/manifest.toml",
+                ROLE_SERVICE,
             ),
             (
                 FixedService::Compositor,
                 "/system/services/compositor.service",
                 "/system/packages/compositor/manifest.toml",
+                ROLE_SERVICE,
             ),
             (
-                FixedService::Tty,
-                "/system/services/tty.service",
-                "/system/packages/tty/manifest.toml",
+                FixedService::Binder,
+                "/applications/Binder.app/entry.elf",
+                "/system/packages/binder/manifest.toml",
+                ROLE_APPLICATION,
             ),
             (
                 FixedService::Network,
                 "/system/services/network.service",
                 "/system/packages/network/manifest.toml",
+                ROLE_SERVICE,
             ),
             (
                 FixedService::Update,
                 "/system/services/update.service",
                 "/system/packages/update/manifest.toml",
+                ROLE_SERVICE,
             ),
         ];
-        for (service, path, manifest_path) in expected {
+        for (service, path, manifest_path, role) in expected {
             let spec = fixed_service_spec(service);
             assert_eq!(spec.path, path);
             assert_eq!(spec.manifest_path, manifest_path);
-            assert_eq!(spec.role, ROLE_SERVICE);
+            assert_eq!(spec.role, role);
         }
     }
 
@@ -159,6 +170,7 @@ mod tests {
         );
         assert_eq!(
             fixed_service_arguments(
+                FixedService::Input,
                 7,
                 Some(ReadyTarget {
                     endpoint: 8,
@@ -168,9 +180,10 @@ mod tests {
             alloc::vec!["7".to_string(), "--service-ready=8:9".to_string()]
         );
         assert_eq!(
-            fixed_service_arguments(7, None),
+            fixed_service_arguments(FixedService::Compositor, 7, None),
             alloc::vec!["7".to_string()]
         );
+        assert!(fixed_service_arguments(FixedService::Binder, 7, None).is_empty());
     }
 
     #[test]

@@ -47,8 +47,6 @@ pub(crate) fn spawn_fixed_service(
         endpoint: target.endpoint,
         token: target.token,
     });
-    spawn(
-        fixed_service_spec(service),
-        &fixed_service_arguments(logger_endpoint, ready_target),
-    )
+    let arguments = fixed_service_arguments(service, logger_endpoint, ready_target);
+    spawn(fixed_service_spec(service), &arguments)
 }

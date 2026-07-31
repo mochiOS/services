@@ -159,7 +159,7 @@ impl BootstrapOperations for Runtime {
                     .as_ref()
                     .map(|handshake| handshake.target(ReadyService::Network))
             }
-            FixedService::Compositor | FixedService::Tty | FixedService::Update => None,
+            FixedService::Compositor | FixedService::Binder | FixedService::Update => None,
         };
         if matches!(service, FixedService::Display) && ready_target.is_none() {
             platform::println!(
@@ -265,7 +265,7 @@ fn service_name(service: FixedService) -> &'static str {
         FixedService::Display => "display.driver",
         FixedService::Compositor => "compositor.service",
         FixedService::Network => "network.service",
-        FixedService::Tty => "tty.service",
+        FixedService::Binder => "Binder.app",
         FixedService::Update => "update.service",
     }
 }

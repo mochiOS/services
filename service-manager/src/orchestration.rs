@@ -7,7 +7,7 @@ pub(crate) struct ChildProcesses {
     pub(crate) display: Option<u64>,
     pub(crate) compositor: Option<u64>,
     pub(crate) network: Option<u64>,
-    pub(crate) tty: Option<u64>,
+    pub(crate) binder: Option<u64>,
     pub(crate) update: Option<u64>,
 }
 
@@ -24,7 +24,7 @@ pub(crate) enum StopReason {
     InputReadyFailed,
     StartDiscoveryFailed,
     DiscoveryCompleteFailed,
-    TtySpawnFailed,
+    BinderSpawnFailed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,7 +42,7 @@ impl BootstrapOutcome {
                 display: None,
                 compositor: None,
                 network: None,
-                tty: None,
+                binder: None,
                 update: None,
             },
             reason: StopReason::DriverControlInitializationFailed,
@@ -102,10 +102,10 @@ pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> Bootstra
 
     children.network = operations.spawn_fixed(FixedService::Network);
 
-    let Some(tty) = operations.spawn_fixed(FixedService::Tty) else {
-        return outcome(children, StopReason::TtySpawnFailed);
+    let Some(binder) = operations.spawn_fixed(FixedService::Binder) else {
+        return outcome(children, StopReason::BinderSpawnFailed);
     };
-    children.tty = Some(tty);
+    children.binder = Some(binder);
     if let Some(network) = children.network
         && operations.wait_network_ready(network)
     {
@@ -190,7 +190,7 @@ mod tests {
                 FixedService::Display => 12,
                 FixedService::Compositor => 13,
                 FixedService::Network => 14,
-                FixedService::Tty => 15,
+                FixedService::Binder => 15,
                 FixedService::Update => 16,
             })
         }
@@ -234,7 +234,7 @@ mod tests {
             Event::StartDiscovery,
             Event::WaitDiscovery,
             Event::Spawn(FixedService::Network),
-            Event::Spawn(FixedService::Tty),
+            Event::Spawn(FixedService::Binder),
             Event::WaitNetwork,
             Event::Spawn(FixedService::Update),
         ]
@@ -251,7 +251,7 @@ mod tests {
         assert_eq!(outcome.children.display, Some(12));
         assert_eq!(outcome.children.compositor, Some(13));
         assert_eq!(outcome.children.network, Some(14));
-        assert_eq!(outcome.children.tty, Some(15));
+        assert_eq!(outcome.children.binder, Some(15));
         assert_eq!(outcome.children.update, Some(16));
     }
 
@@ -280,7 +280,7 @@ mod tests {
             let outcome = orchestrate(&mut operations);
             assert_eq!(outcome.reason, reason);
             assert!(!operations.events.contains(&Event::StartDiscovery));
-            assert!(!operations.events.contains(&Event::Spawn(FixedService::Tty)));
+            assert!(!operations.events.contains(&Event::Spawn(FixedService::Binder)));
         }
     }
 
@@ -292,11 +292,11 @@ mod tests {
         assert_eq!(outcome.children.compositor, None);
         assert!(operations.events.contains(&Event::StartDiscovery));
         assert!(operations.events.contains(&Event::WaitDiscovery));
-        assert!(operations.events.contains(&Event::Spawn(FixedService::Tty)));
+        assert!(operations.events.contains(&Event::Spawn(FixedService::Binder)));
     }
 
     #[test]
-    fn driver_protocol_failure_prevents_tty_start() {
+    fn driver_protocol_failure_prevents_binder_start() {
         for (failure, reason) in [
             (Failure::StartDiscovery, StopReason::StartDiscoveryFailed),
             (
@@ -307,19 +307,19 @@ mod tests {
             let mut operations = FakeOperations::new(failure);
             let outcome = orchestrate(&mut operations);
             assert_eq!(outcome.reason, reason);
-            assert!(!operations.events.contains(&Event::Spawn(FixedService::Tty)));
+            assert!(!operations.events.contains(&Event::Spawn(FixedService::Binder)));
         }
     }
 
     #[test]
-    fn tty_failure_enters_resident_outcome_without_tty_pid() {
-        let mut operations = FakeOperations::new(Failure::Spawn(FixedService::Tty));
+    fn binder_failure_enters_resident_outcome_without_binder_pid() {
+        let mut operations = FakeOperations::new(Failure::Spawn(FixedService::Binder));
         let outcome = orchestrate(&mut operations);
-        assert_eq!(outcome.reason, StopReason::TtySpawnFailed);
-        assert_eq!(outcome.children.tty, None);
+        assert_eq!(outcome.reason, StopReason::BinderSpawnFailed);
+        assert_eq!(outcome.children.binder, None);
         assert_eq!(
             operations.events.last(),
-            Some(&Event::Spawn(FixedService::Tty))
+            Some(&Event::Spawn(FixedService::Binder))
         );
     }
 

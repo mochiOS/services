@@ -35,6 +35,7 @@ pub(crate) const EVENT_POINTER_LEAVE: u32 = 3;
 pub(crate) const EVENT_POINTER_MOTION: u32 = 4;
 pub(crate) const EVENT_POINTER_BUTTON: u32 = 5;
 pub(crate) const EVENT_KEY: u32 = 6;
+pub(crate) const EVENT_CLOSE_REQUESTED: u32 = 7;
 pub(crate) const EVENT_FOCUS_GAINED: u32 = 8;
 pub(crate) const EVENT_FOCUS_LOST: u32 = 9;
 pub(crate) const EVENT_FRAME_DONE: u32 = 10;

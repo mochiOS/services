@@ -1,12 +1,11 @@
 use mochi_user_platform as platform;
 
 use crate::client::{Client, ClientId};
-use crate::input::{PointerGrab, PointerSerial};
+use crate::input::{PointerGrab, PointerSerial, send_event};
 use crate::protocol::*;
 use crate::state::MAX_DIMENSION;
 use crate::surface::{
-    Surface, SurfaceHandle, SurfaceRights, SurfaceRole, destroy_surface_tree,
-    generate_surface_token, surface_index_for,
+    Surface, SurfaceHandle, SurfaceRights, SurfaceRole, generate_surface_token, surface_index_for,
 };
 use crate::window::{
     Insets, Window, content_surface_index_for_window, decoration_surface_index_for_window,
@@ -41,8 +40,8 @@ pub(crate) fn handle_request(
     windows: &mut [Window],
     next_z: &mut u32,
     pointer_serials: &mut [PointerSerial],
-    pointer_focus: &mut Option<usize>,
-    keyboard_focus: &mut Option<usize>,
+    _pointer_focus: &mut Option<usize>,
+    _keyboard_focus: &mut Option<usize>,
     pointer_grab: &mut Option<PointerGrab>,
     pointer_x: i32,
     pointer_y: i32,
@@ -395,19 +394,20 @@ pub(crate) fn handle_request(
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
                 return reply;
             }
-            windows[window_index].close_requested = true;
-            if let Some(content_index) =
-                content_surface_index_for_window(surfaces, &windows[window_index])
-            {
-                destroy_surface_tree(
-                    surfaces,
-                    windows,
-                    content_index,
-                    pointer_focus,
-                    keyboard_focus,
-                );
+            if !windows[window_index].close_requested {
+                windows[window_index].close_requested = true;
+                if let Some(content_index) =
+                    content_surface_index_for_window(surfaces, &windows[window_index])
+                {
+                    send_event(
+                        surfaces[content_index].event_endpoint,
+                        EVENT_CLOSE_REQUESTED,
+                        0,
+                        0,
+                        0,
+                    );
+                }
             }
-            *needs_present = true;
             put_u32(&mut reply, 0, 0);
         }
         _ => put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL)),

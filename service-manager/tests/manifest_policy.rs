@@ -20,6 +20,7 @@ const INPUT_MANIFEST: &str = include_str!("../../input/manifest.toml");
 const DISPLAY_MANIFEST: &str = include_str!("../../display/manifest.toml");
 const COMPOSITOR_MANIFEST: &str = include_str!("../../compositor/manifest.toml");
 const TTY_MANIFEST: &str = include_str!("../../tty/manifest.toml");
+const BINDER_MANIFEST: &str = include_str!("../../../applications/binder/manifest.toml");
 const UPDATE_MANIFEST: &str = include_str!("../../update/manifest.toml");
 const SERVICE_INDEX: &str = include_str!("../../index.toml");
 
@@ -139,6 +140,19 @@ fn service_manifests_match_policy() {
             "net.connect",
             "net.tls.connect",
             "net.http.request",
+        ],
+    );
+    assert_capabilities(
+        BINDER_MANIFEST,
+        "/applications/Binder.app/entry.elf",
+        &[
+            "fs.read.all",
+            "ipc.client",
+            "ipc.server",
+            "process.inspect",
+            "process.spawn",
+            "window.create",
+            "window.overlay",
         ],
     );
     assert_capabilities(
