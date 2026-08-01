@@ -151,6 +151,7 @@ fn service_manifests_match_policy() {
             "ipc.server",
             "process.inspect",
             "process.spawn",
+            "system.time.read",
             "window.create",
             "window.overlay",
         ],
