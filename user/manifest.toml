@@ -1,0 +1,15 @@
+[package]
+id = "org.mochios.user"
+name = "User Service"
+version = "1"
+vendor = "mochiOS"
+
+[[binary]]
+path = "/system/services/user.service"
+kind = "service"
+requires = [
+    "fs.read.all",
+    "fs.write.all",
+    "ipc.client",
+    "ipc.server",
+]

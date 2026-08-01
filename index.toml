@@ -67,3 +67,10 @@ fs = "rootfs"
 description = "mochiOS Developer PKI synchronization service"
 autostart = false
 order = 9
+
+[user.service]
+dir = "user"
+fs = "rootfs"
+description = "mochiOS user database service"
+autostart = false
+order = 10

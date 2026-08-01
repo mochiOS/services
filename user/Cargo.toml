@@ -1,0 +1,20 @@
+[package]
+name = "user-service"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mochios-user-database = { git = "https://github.com/mochiOS/syscalls", package = "mochios-user-database", features = ["std"] }
+mochios-user-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-user-protocol" }
+mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }
+mochi-user-syscall = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-syscall" }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "user-service"
+path = "src/main.rs"
+test = false
+bench = false
+harness = false

@@ -7,6 +7,7 @@ pub(crate) struct ChildProcesses {
     pub(crate) display: Option<u64>,
     pub(crate) compositor: Option<u64>,
     pub(crate) network: Option<u64>,
+    pub(crate) user: Option<u64>,
     pub(crate) binder: Option<u64>,
     pub(crate) update: Option<u64>,
 }
@@ -42,6 +43,7 @@ impl BootstrapOutcome {
                 display: None,
                 compositor: None,
                 network: None,
+                user: None,
                 binder: None,
                 update: None,
             },
@@ -60,6 +62,7 @@ pub(crate) trait BootstrapOperations {
     fn start_discovery(&mut self) -> bool;
     fn wait_discovery_complete(&mut self, process_id: u64) -> bool;
     fn wait_network_ready(&mut self, process_id: u64) -> bool;
+    fn wait_user_ready(&mut self, process_id: u64) -> bool;
 }
 
 pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> BootstrapOutcome {
@@ -101,6 +104,11 @@ pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> Bootstra
     }
 
     children.network = operations.spawn_fixed(FixedService::Network);
+    if let Some(user) = operations.spawn_fixed(FixedService::User)
+        && operations.wait_user_ready(user)
+    {
+        children.user = Some(user);
+    }
 
     let Some(binder) = operations.spawn_fixed(FixedService::Binder) else {
         return outcome(children, StopReason::BinderSpawnFailed);
@@ -134,6 +142,7 @@ mod tests {
         StartDiscovery,
         WaitDiscovery,
         WaitNetwork,
+        WaitUser,
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,6 +157,7 @@ mod tests {
         StartDiscovery,
         DiscoveryComplete,
         NetworkReady,
+        UserReady,
     }
 
     struct FakeOperations {
@@ -190,8 +200,9 @@ mod tests {
                 FixedService::Display => 12,
                 FixedService::Compositor => 13,
                 FixedService::Network => 14,
-                FixedService::Binder => 15,
-                FixedService::Update => 16,
+                FixedService::User => 15,
+                FixedService::Binder => 16,
+                FixedService::Update => 17,
             })
         }
 
@@ -219,6 +230,11 @@ mod tests {
             self.events.push(Event::WaitNetwork);
             self.failure != Failure::NetworkReady
         }
+
+        fn wait_user_ready(&mut self, _process_id: u64) -> bool {
+            self.events.push(Event::WaitUser);
+            self.failure != Failure::UserReady
+        }
     }
 
     fn expected_success_events() -> Vec<Event> {
@@ -234,6 +250,8 @@ mod tests {
             Event::StartDiscovery,
             Event::WaitDiscovery,
             Event::Spawn(FixedService::Network),
+            Event::Spawn(FixedService::User),
+            Event::WaitUser,
             Event::Spawn(FixedService::Binder),
             Event::WaitNetwork,
             Event::Spawn(FixedService::Update),
@@ -251,8 +269,9 @@ mod tests {
         assert_eq!(outcome.children.display, Some(12));
         assert_eq!(outcome.children.compositor, Some(13));
         assert_eq!(outcome.children.network, Some(14));
-        assert_eq!(outcome.children.binder, Some(15));
-        assert_eq!(outcome.children.update, Some(16));
+        assert_eq!(outcome.children.user, Some(15));
+        assert_eq!(outcome.children.binder, Some(16));
+        assert_eq!(outcome.children.update, Some(17));
     }
 
     #[test]
@@ -280,7 +299,11 @@ mod tests {
             let outcome = orchestrate(&mut operations);
             assert_eq!(outcome.reason, reason);
             assert!(!operations.events.contains(&Event::StartDiscovery));
-            assert!(!operations.events.contains(&Event::Spawn(FixedService::Binder)));
+            assert!(
+                !operations
+                    .events
+                    .contains(&Event::Spawn(FixedService::Binder))
+            );
         }
     }
 
@@ -292,7 +315,27 @@ mod tests {
         assert_eq!(outcome.children.compositor, None);
         assert!(operations.events.contains(&Event::StartDiscovery));
         assert!(operations.events.contains(&Event::WaitDiscovery));
-        assert!(operations.events.contains(&Event::Spawn(FixedService::Binder)));
+        assert!(
+            operations
+                .events
+                .contains(&Event::Spawn(FixedService::Binder))
+        );
+    }
+
+    #[test]
+    fn user_failure_is_best_effort_and_does_not_prevent_binder() {
+        for failure in [Failure::Spawn(FixedService::User), Failure::UserReady] {
+            let mut operations = FakeOperations::new(failure);
+            let outcome = orchestrate(&mut operations);
+            assert_eq!(outcome.reason, StopReason::Running);
+            assert_eq!(outcome.children.user, None);
+            assert_eq!(outcome.children.binder, Some(16));
+            assert!(
+                operations
+                    .events
+                    .contains(&Event::Spawn(FixedService::Binder))
+            );
+        }
     }
 
     #[test]
@@ -307,7 +350,11 @@ mod tests {
             let mut operations = FakeOperations::new(failure);
             let outcome = orchestrate(&mut operations);
             assert_eq!(outcome.reason, reason);
-            assert!(!operations.events.contains(&Event::Spawn(FixedService::Binder)));
+            assert!(
+                !operations
+                    .events
+                    .contains(&Event::Spawn(FixedService::Binder))
+            );
         }
     }
 

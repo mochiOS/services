@@ -11,6 +11,7 @@ pub(crate) enum FixedService {
     Display,
     Compositor,
     Network,
+    User,
     Binder,
     Update,
 }
@@ -54,6 +55,11 @@ pub(crate) const fn fixed_service_spec(service: FixedService) -> ServiceSpec {
         FixedService::Network => ServiceSpec {
             path: "/system/services/network.service",
             manifest_path: "/system/packages/network/manifest.toml",
+            role: ROLE_SERVICE,
+        },
+        FixedService::User => ServiceSpec {
+            path: "/system/services/user.service",
+            manifest_path: "/system/packages/user/manifest.toml",
             role: ROLE_SERVICE,
         },
         FixedService::Binder => ServiceSpec {
@@ -145,6 +151,12 @@ mod tests {
                 FixedService::Network,
                 "/system/services/network.service",
                 "/system/packages/network/manifest.toml",
+                ROLE_SERVICE,
+            ),
+            (
+                FixedService::User,
+                "/system/services/user.service",
+                "/system/packages/user/manifest.toml",
                 ROLE_SERVICE,
             ),
             (

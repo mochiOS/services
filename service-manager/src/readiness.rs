@@ -8,6 +8,7 @@ pub(crate) enum ReadyService {
     Input,
     Display,
     Network,
+    User,
 }
 
 impl ReadyService {
@@ -16,6 +17,7 @@ impl ReadyService {
             Self::Input => "input.service",
             Self::Display => "display.driver",
             Self::Network => "network.service",
+            Self::User => "user.service",
         }
     }
 }
@@ -36,9 +38,11 @@ pub(crate) struct ReadyHandshake {
     input_token: u64,
     display_token: u64,
     network_token: u64,
+    user_token: u64,
     input_status: platform::service_ready::OneShotStatus,
     display_status: platform::service_ready::OneShotStatus,
     network_status: platform::service_ready::OneShotStatus,
+    user_status: platform::service_ready::OneShotStatus,
 }
 
 impl ReadyHandshake {
@@ -63,14 +67,24 @@ impl ReadyHandshake {
                 network_token = 1;
             }
         }
+        let mut user_token = platform::service_ready::generate_token()
+            .map_err(|error| ReadyError::Ipc(error.raw().unsigned_abs()))?;
+        if user_token == input_token || user_token == display_token || user_token == network_token {
+            user_token ^= 0x9696_6969_c3c3_3c3c;
+            if user_token == 0 {
+                user_token = 1;
+            }
+        }
         Ok(Self {
             endpoint,
             input_token,
             display_token,
             network_token,
+            user_token,
             input_status: platform::service_ready::OneShotStatus::new(),
             display_status: platform::service_ready::OneShotStatus::new(),
             network_status: platform::service_ready::OneShotStatus::new(),
+            user_status: platform::service_ready::OneShotStatus::new(),
         })
     }
 
@@ -79,6 +93,7 @@ impl ReadyHandshake {
             ReadyService::Input => self.input_token,
             ReadyService::Display => self.display_token,
             ReadyService::Network => self.network_token,
+            ReadyService::User => self.user_token,
         };
         platform::service_ready::Target {
             endpoint: self.endpoint,
@@ -91,6 +106,7 @@ impl ReadyHandshake {
             ReadyService::Input => self.input_status.get(),
             ReadyService::Display => self.display_status.get(),
             ReadyService::Network => self.network_status.get(),
+            ReadyService::User => self.user_status.get(),
         }
     }
 
@@ -101,6 +117,8 @@ impl ReadyHandshake {
             &mut self.display_status
         } else if token == self.network_token {
             &mut self.network_status
+        } else if token == self.user_token {
+            &mut self.user_status
         } else {
             return Err(ReadyError::InvalidMessage);
         };

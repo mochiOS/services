@@ -159,6 +159,14 @@ impl BootstrapOperations for Runtime {
                     .as_ref()
                     .map(|handshake| handshake.target(ReadyService::Network))
             }
+            FixedService::User => {
+                if !self.ensure_ready_handshake() {
+                    return None;
+                }
+                self.ready
+                    .as_ref()
+                    .map(|handshake| handshake.target(ReadyService::User))
+            }
             FixedService::Compositor | FixedService::Binder | FixedService::Update => None,
         };
         if matches!(service, FixedService::Display) && ready_target.is_none() {
@@ -197,6 +205,10 @@ impl BootstrapOperations for Runtime {
 
     fn wait_input_ready(&mut self, process_id: u64) -> bool {
         self.wait_ready(ReadyService::Input, process_id)
+    }
+
+    fn wait_user_ready(&mut self, process_id: u64) -> bool {
+        self.wait_ready(ReadyService::User, process_id)
     }
 
     fn start_discovery(&mut self) -> bool {
@@ -265,6 +277,7 @@ fn service_name(service: FixedService) -> &'static str {
         FixedService::Display => "display.driver",
         FixedService::Compositor => "compositor.service",
         FixedService::Network => "network.service",
+        FixedService::User => "user.service",
         FixedService::Binder => "Binder.app",
         FixedService::Update => "update.service",
     }
