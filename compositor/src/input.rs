@@ -1,5 +1,6 @@
 use mochi_user_platform as platform;
 
+use crate::context_menu::ContextMenuBroker;
 use crate::geometry::{Rect, merge_damage};
 use crate::protocol::{
     DECOR_EVENT_POINTER_BUTTON, DECOR_EVENT_POINTER_LEAVE, DECOR_EVENT_POINTER_MOTION,
@@ -288,6 +289,7 @@ pub(crate) fn handle_input_event(
     pointer_focus: &mut Option<usize>,
     keyboard_focus: &mut Option<usize>,
     pointer_grab: &mut Option<PointerGrab>,
+    context_menu: &mut ContextMenuBroker,
     event: &platform::input::InputEvent,
 ) -> Option<Rect> {
     match event.kind {
@@ -304,6 +306,12 @@ pub(crate) fn handle_input_event(
         }
         platform::input::EVENT_KIND_POINTER_BUTTON => {
             let target = hit_test(surfaces, windows, *pointer_x, *pointer_y);
+            if context_menu.capture_pointer_button(
+                target.map(|index| surfaces[index].owner),
+                event.flags & platform::input::FLAG_PRESS != 0,
+            ) {
+                return None;
+            }
             let mut needs_window_redraw = false;
             if event.flags & platform::input::FLAG_PRESS != 0 {
                 let focus = target.and_then(|index| {
@@ -387,6 +395,12 @@ pub(crate) fn handle_input_event(
             None
         }
         platform::input::EVENT_KIND_KEY => {
+            if context_menu.capture_key(
+                event.keycode,
+                event.flags & platform::input::FLAG_PRESS != 0,
+            ) {
+                return None;
+            }
             if let Some(index) = *keyboard_focus {
                 if let Some(surface) = surfaces.get(index)
                     && surface.live

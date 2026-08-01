@@ -1,6 +1,7 @@
 use mochi_user_platform as platform;
 
 use crate::client::{Client, ClientId, cleanup_client, cleanup_dead_clients, client_id_for_sender};
+use crate::context_menu::ContextMenuBroker;
 use crate::cursor::CursorImage;
 use crate::decoration::sender_has_overlay_compat_capability;
 use crate::display::{
@@ -46,6 +47,7 @@ fn process_input_event(
         &mut state.pointer_focus,
         &mut state.keyboard_focus,
         &mut state.pointer_grab,
+        &mut state.context_menu,
         event,
     ) {
         damage = merge_damage(damage, event_damage);
@@ -135,6 +137,7 @@ fn handle_request(
     _display_stride: u32,
     _display_format: u32,
     renderer_caps: u32,
+    context_menu: &mut ContextMenuBroker,
 ) -> [u8; 16] {
     let mut reply = [0u8; 16];
     let Some(opcode) = read_u32(request, 0) else {
@@ -192,6 +195,9 @@ fn handle_request(
                 display_width,
                 display_height,
             );
+        }
+        OP_CONTEXT_MENU_SUBSCRIBE | OP_CONTEXT_MENU_SHOW | OP_CONTEXT_MENU_COMPLETE => {
+            return context_menu.handle_request(surfaces, keyboard_focus, client, sender, request);
         }
         OP_SET_CURSOR_POSITION => {
             if request.len() != 16 || !sender_has_overlay_compat_capability(sender) {
@@ -478,6 +484,7 @@ pub(crate) fn run() -> ! {
             state.display_stride,
             state.display_format,
             state.renderer_caps,
+            &mut state.context_menu,
         );
         if platform::ipc::reply(sender, &reply).is_err() {
             cleanup_client(
@@ -488,6 +495,7 @@ pub(crate) fn run() -> ! {
                 &mut state.pointer_focus,
                 &mut state.keyboard_focus,
             );
+            state.context_menu.cleanup_client(client);
         } else {
             if needs_present {
                 let status = composite_and_present(

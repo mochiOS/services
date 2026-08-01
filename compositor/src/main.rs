@@ -1,6 +1,7 @@
 extern crate alloc;
 
 mod client;
+mod context_menu;
 mod cursor;
 mod decoration;
 mod display;

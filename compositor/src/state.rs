@@ -2,6 +2,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::client::Client;
+use crate::context_menu::ContextMenuBroker;
 use crate::cursor::CursorImage;
 use crate::input::{PointerGrab, PointerSerial};
 use crate::renderer::PresentFrame;
@@ -78,6 +79,7 @@ pub(crate) struct CompositorState {
     pub(crate) display_format: u32,
     pub(crate) input_subscribed: bool,
     pub(crate) renderer_caps: u32,
+    pub(crate) context_menu: ContextMenuBroker,
 }
 
 impl CompositorState {
@@ -120,6 +122,7 @@ impl CompositorState {
             display_format,
             input_subscribed,
             renderer_caps,
+            context_menu: ContextMenuBroker::default(),
         }
     }
 }
