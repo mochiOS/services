@@ -9,6 +9,7 @@ pub(crate) enum ReadyService {
     Display,
     Network,
     User,
+    SecureUi,
 }
 
 impl ReadyService {
@@ -18,6 +19,7 @@ impl ReadyService {
             Self::Display => "display.driver",
             Self::Network => "network.service",
             Self::User => "user.service",
+            Self::SecureUi => "secure-ui.service",
         }
     }
 }
@@ -39,10 +41,12 @@ pub(crate) struct ReadyHandshake {
     display_token: u64,
     network_token: u64,
     user_token: u64,
+    secure_ui_token: u64,
     input_status: platform::service_ready::OneShotStatus,
     display_status: platform::service_ready::OneShotStatus,
     network_status: platform::service_ready::OneShotStatus,
     user_status: platform::service_ready::OneShotStatus,
+    secure_ui_status: platform::service_ready::OneShotStatus,
 }
 
 impl ReadyHandshake {
@@ -75,16 +79,30 @@ impl ReadyHandshake {
                 user_token = 1;
             }
         }
+        let mut secure_ui_token = platform::service_ready::generate_token()
+            .map_err(|error| ReadyError::Ipc(error.raw().unsigned_abs()))?;
+        if secure_ui_token == input_token
+            || secure_ui_token == display_token
+            || secure_ui_token == network_token
+            || secure_ui_token == user_token
+        {
+            secure_ui_token ^= 0x5a5a_a5a5_9696_6969;
+            if secure_ui_token == 0 {
+                secure_ui_token = 1;
+            }
+        }
         Ok(Self {
             endpoint,
             input_token,
             display_token,
             network_token,
             user_token,
+            secure_ui_token,
             input_status: platform::service_ready::OneShotStatus::new(),
             display_status: platform::service_ready::OneShotStatus::new(),
             network_status: platform::service_ready::OneShotStatus::new(),
             user_status: platform::service_ready::OneShotStatus::new(),
+            secure_ui_status: platform::service_ready::OneShotStatus::new(),
         })
     }
 
@@ -94,6 +112,7 @@ impl ReadyHandshake {
             ReadyService::Display => self.display_token,
             ReadyService::Network => self.network_token,
             ReadyService::User => self.user_token,
+            ReadyService::SecureUi => self.secure_ui_token,
         };
         platform::service_ready::Target {
             endpoint: self.endpoint,
@@ -107,6 +126,7 @@ impl ReadyHandshake {
             ReadyService::Display => self.display_status.get(),
             ReadyService::Network => self.network_status.get(),
             ReadyService::User => self.user_status.get(),
+            ReadyService::SecureUi => self.secure_ui_status.get(),
         }
     }
 
@@ -119,6 +139,8 @@ impl ReadyHandshake {
             &mut self.network_status
         } else if token == self.user_token {
             &mut self.user_status
+        } else if token == self.secure_ui_token {
+            &mut self.secure_ui_status
         } else {
             return Err(ReadyError::InvalidMessage);
         };
@@ -131,7 +153,20 @@ impl ReadyHandshake {
         service: ReadyService,
         process_id: u64,
     ) -> Result<(), ReadyError> {
-        let started = current_ticks()?;
+        self.wait(service, process_id, true)
+    }
+
+    pub(crate) fn wait_for_login_complete(&mut self, process_id: u64) -> Result<(), ReadyError> {
+        self.wait(ReadyService::SecureUi, process_id, false)
+    }
+
+    fn wait(
+        &mut self,
+        service: ReadyService,
+        process_id: u64,
+        has_timeout: bool,
+    ) -> Result<(), ReadyError> {
+        let started = has_timeout.then(current_ticks).transpose()?;
         loop {
             if let Some(status) = self.status(service) {
                 return ready_result(status);
@@ -145,9 +180,11 @@ impl ReadyHandshake {
             if let Some(status) = process_exit_status(process_id)? {
                 return Err(ReadyError::ProcessExited(status));
             }
-            let now = current_ticks()?;
-            if now.saturating_sub(started) >= SERVICE_READY_TIMEOUT_TICKS {
-                return Err(ReadyError::TimedOut);
+            if let Some(started) = started {
+                let now = current_ticks()?;
+                if now.saturating_sub(started) >= SERVICE_READY_TIMEOUT_TICKS {
+                    return Err(ReadyError::TimedOut);
+                }
             }
             platform::thread::yield_now();
         }

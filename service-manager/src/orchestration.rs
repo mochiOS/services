@@ -8,6 +8,7 @@ pub(crate) struct ChildProcesses {
     pub(crate) compositor: Option<u64>,
     pub(crate) network: Option<u64>,
     pub(crate) user: Option<u64>,
+    pub(crate) secure_ui: Option<u64>,
     pub(crate) binder: Option<u64>,
     pub(crate) update: Option<u64>,
 }
@@ -25,6 +26,10 @@ pub(crate) enum StopReason {
     InputReadyFailed,
     StartDiscoveryFailed,
     DiscoveryCompleteFailed,
+    UserSpawnFailed,
+    UserReadyFailed,
+    SecureUiSpawnFailed,
+    SecureUiLoginFailed,
     BinderSpawnFailed,
 }
 
@@ -44,6 +49,7 @@ impl BootstrapOutcome {
                 compositor: None,
                 network: None,
                 user: None,
+                secure_ui: None,
                 binder: None,
                 update: None,
             },
@@ -63,6 +69,7 @@ pub(crate) trait BootstrapOperations {
     fn wait_discovery_complete(&mut self, process_id: u64) -> bool;
     fn wait_network_ready(&mut self, process_id: u64) -> bool;
     fn wait_user_ready(&mut self, process_id: u64) -> bool;
+    fn wait_secure_ui_login(&mut self, process_id: u64) -> bool;
 }
 
 pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> BootstrapOutcome {
@@ -104,10 +111,20 @@ pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> Bootstra
     }
 
     children.network = operations.spawn_fixed(FixedService::Network);
-    if let Some(user) = operations.spawn_fixed(FixedService::User)
-        && operations.wait_user_ready(user)
-    {
-        children.user = Some(user);
+    let Some(user) = operations.spawn_fixed(FixedService::User) else {
+        return outcome(children, StopReason::UserSpawnFailed);
+    };
+    children.user = Some(user);
+    if !operations.wait_user_ready(user) {
+        return outcome(children, StopReason::UserReadyFailed);
+    }
+
+    let Some(secure_ui) = operations.spawn_fixed(FixedService::SecureUi) else {
+        return outcome(children, StopReason::SecureUiSpawnFailed);
+    };
+    children.secure_ui = Some(secure_ui);
+    if !operations.wait_secure_ui_login(secure_ui) {
+        return outcome(children, StopReason::SecureUiLoginFailed);
     }
 
     let Some(binder) = operations.spawn_fixed(FixedService::Binder) else {
@@ -143,6 +160,7 @@ mod tests {
         WaitDiscovery,
         WaitNetwork,
         WaitUser,
+        WaitSecureUiLogin,
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,6 +176,7 @@ mod tests {
         DiscoveryComplete,
         NetworkReady,
         UserReady,
+        SecureUiLogin,
     }
 
     struct FakeOperations {
@@ -201,8 +220,9 @@ mod tests {
                 FixedService::Compositor => 13,
                 FixedService::Network => 14,
                 FixedService::User => 15,
-                FixedService::Binder => 16,
-                FixedService::Update => 17,
+                FixedService::SecureUi => 16,
+                FixedService::Binder => 17,
+                FixedService::Update => 18,
             })
         }
 
@@ -235,6 +255,11 @@ mod tests {
             self.events.push(Event::WaitUser);
             self.failure != Failure::UserReady
         }
+
+        fn wait_secure_ui_login(&mut self, _process_id: u64) -> bool {
+            self.events.push(Event::WaitSecureUiLogin);
+            self.failure != Failure::SecureUiLogin
+        }
     }
 
     fn expected_success_events() -> Vec<Event> {
@@ -252,6 +277,8 @@ mod tests {
             Event::Spawn(FixedService::Network),
             Event::Spawn(FixedService::User),
             Event::WaitUser,
+            Event::Spawn(FixedService::SecureUi),
+            Event::WaitSecureUiLogin,
             Event::Spawn(FixedService::Binder),
             Event::WaitNetwork,
             Event::Spawn(FixedService::Update),
@@ -270,8 +297,9 @@ mod tests {
         assert_eq!(outcome.children.compositor, Some(13));
         assert_eq!(outcome.children.network, Some(14));
         assert_eq!(outcome.children.user, Some(15));
-        assert_eq!(outcome.children.binder, Some(16));
-        assert_eq!(outcome.children.update, Some(17));
+        assert_eq!(outcome.children.secure_ui, Some(16));
+        assert_eq!(outcome.children.binder, Some(17));
+        assert_eq!(outcome.children.update, Some(18));
     }
 
     #[test]
@@ -323,15 +351,25 @@ mod tests {
     }
 
     #[test]
-    fn user_failure_is_best_effort_and_does_not_prevent_binder() {
-        for failure in [Failure::Spawn(FixedService::User), Failure::UserReady] {
+    fn user_and_login_failures_prevent_binder() {
+        for (failure, reason) in [
+            (
+                Failure::Spawn(FixedService::User),
+                StopReason::UserSpawnFailed,
+            ),
+            (Failure::UserReady, StopReason::UserReadyFailed),
+            (
+                Failure::Spawn(FixedService::SecureUi),
+                StopReason::SecureUiSpawnFailed,
+            ),
+            (Failure::SecureUiLogin, StopReason::SecureUiLoginFailed),
+        ] {
             let mut operations = FakeOperations::new(failure);
             let outcome = orchestrate(&mut operations);
-            assert_eq!(outcome.reason, StopReason::Running);
-            assert_eq!(outcome.children.user, None);
-            assert_eq!(outcome.children.binder, Some(16));
+            assert_eq!(outcome.reason, reason);
+            assert_eq!(outcome.children.binder, None);
             assert!(
-                operations
+                !operations
                     .events
                     .contains(&Event::Spawn(FixedService::Binder))
             );

@@ -23,6 +23,7 @@ const TTY_MANIFEST: &str = include_str!("../../tty/manifest.toml");
 const BINDER_MANIFEST: &str = include_str!("../../../applications/binder/manifest.toml");
 const UPDATE_MANIFEST: &str = include_str!("../../update/manifest.toml");
 const USER_MANIFEST: &str = include_str!("../../user/manifest.toml");
+const SECURE_UI_MANIFEST: &str = include_str!("../../secure-ui/manifest.toml");
 const SERVICE_INDEX: &str = include_str!("../../index.toml");
 
 fn assert_capabilities(manifest: &str, path: &str, expected: &[&str]) {
@@ -173,7 +174,26 @@ fn service_manifests_match_policy() {
     assert_capabilities(
         USER_MANIFEST,
         "/system/services/user.service",
-        &["fs.read.all", "fs.write.all", "ipc.client", "ipc.server"],
+        &[
+            "fs.read.all",
+            "fs.write.all",
+            "ipc.client",
+            "ipc.server",
+            "system.random.read",
+        ],
+    );
+    assert_capabilities(
+        SECURE_UI_MANIFEST,
+        "/system/services/secure-ui.service",
+        &[
+            "account.authenticate",
+            "account.other.read",
+            "fs.read.all",
+            "ipc.client",
+            "ipc.server",
+            "system.time.read",
+            "window.secure-overlay",
+        ],
     );
 
     let manager_index = match SERVICE_INDEX.split("[service-manager.service]").nth(1) {

@@ -3,7 +3,7 @@ use mochi_user_platform as platform;
 use crate::client::{Client, ClientId, cleanup_client, cleanup_dead_clients, client_id_for_sender};
 use crate::context_menu::ContextMenuBroker;
 use crate::cursor::CursorImage;
-use crate::decoration::sender_has_overlay_compat_capability;
+use crate::decoration::sender_can_control_cursor;
 use crate::display::{
     display_claim_present_owner, display_renderer_caps, display_request_info,
     display_set_cursor_image, display_set_cursor_position, sleep_one_tick, wait_for_service,
@@ -200,7 +200,7 @@ fn handle_request(
             return context_menu.handle_request(surfaces, keyboard_focus, client, sender, request);
         }
         OP_SET_CURSOR_POSITION => {
-            if request.len() != 16 || !sender_has_overlay_compat_capability(sender) {
+            if request.len() != 16 || !sender_can_control_cursor(sender) {
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
                 return reply;
             }
@@ -223,7 +223,7 @@ fn handle_request(
             put_u32(&mut reply, 0, 0);
         }
         OP_SET_CURSOR_IMAGE => {
-            if request.len() < 20 || !sender_has_overlay_compat_capability(sender) {
+            if request.len() < 20 || !sender_can_control_cursor(sender) {
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
                 return reply;
             }

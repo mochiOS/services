@@ -167,6 +167,14 @@ impl BootstrapOperations for Runtime {
                     .as_ref()
                     .map(|handshake| handshake.target(ReadyService::User))
             }
+            FixedService::SecureUi => {
+                if !self.ensure_ready_handshake() {
+                    return None;
+                }
+                self.ready
+                    .as_ref()
+                    .map(|handshake| handshake.target(ReadyService::SecureUi))
+            }
             FixedService::Compositor | FixedService::Binder | FixedService::Update => None,
         };
         if matches!(service, FixedService::Display) && ready_target.is_none() {
@@ -209,6 +217,24 @@ impl BootstrapOperations for Runtime {
 
     fn wait_user_ready(&mut self, process_id: u64) -> bool {
         self.wait_ready(ReadyService::User, process_id)
+    }
+
+    fn wait_secure_ui_login(&mut self, process_id: u64) -> bool {
+        platform::println!("service-manager.service: waiting for secure-ui.service login");
+        let result = match self.ready.as_mut() {
+            Some(handshake) => handshake.wait_for_login_complete(process_id),
+            None => Err(ReadyError::InvalidMessage),
+        };
+        match result {
+            Ok(()) => {
+                platform::println!("service-manager.service: secure-ui.service login complete");
+                true
+            }
+            Err(error) => {
+                log_ready_error(ReadyService::SecureUi, error);
+                false
+            }
+        }
     }
 
     fn start_discovery(&mut self) -> bool {
@@ -278,6 +304,7 @@ fn service_name(service: FixedService) -> &'static str {
         FixedService::Compositor => "compositor.service",
         FixedService::Network => "network.service",
         FixedService::User => "user.service",
+        FixedService::SecureUi => "secure-ui.service",
         FixedService::Binder => "Binder.app",
         FixedService::Update => "update.service",
     }

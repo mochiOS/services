@@ -42,6 +42,10 @@ pub(crate) fn sender_has_secure_overlay_capability(sender: u64) -> bool {
     )
 }
 
+pub(crate) fn sender_can_control_cursor(sender: u64) -> bool {
+    sender_has_overlay_compat_capability(sender) || sender_has_secure_overlay_capability(sender)
+}
+
 pub(crate) fn handle_request(
     clients: &mut [Client],
     surfaces: &mut [Surface],

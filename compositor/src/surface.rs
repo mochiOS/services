@@ -7,7 +7,7 @@ use crate::decoration::{
     sender_has_overlay_compat_capability, sender_has_secure_overlay_capability,
 };
 use crate::geometry::{Point, PopupPlacement, Rect, merge_damage, validate_damage_rect};
-use crate::input::clear_focus_for_surface;
+use crate::input::{clear_focus_for_surface, update_keyboard_focus};
 use crate::protocol::*;
 use crate::state::{MAX_DIMENSION, MAX_SHARED_BYTES, PAGE_SIZE, getrandom_u64};
 use crate::window::{
@@ -886,6 +886,9 @@ pub(crate) fn handle_request(
                 windows[slot].content = handle;
                 windows[slot].resizable = true;
             }
+            if role == SurfaceRole::SecureOverlay {
+                update_keyboard_focus(surfaces, keyboard_focus, Some(index));
+            }
             put_u32(&mut reply, 0, 0);
             reply[4..12].copy_from_slice(&token.to_le_bytes());
         }
@@ -912,8 +915,10 @@ pub(crate) fn handle_request(
             } else if matches!(
                 format,
                 PIXEL_FORMAT_ARGB8888_PREMULTIPLIED | PIXEL_FORMAT_GPU_SCENE
-            ) && surfaces[index].role != SurfaceRole::Panel
-            {
+            ) && !matches!(
+                surfaces[index].role,
+                SurfaceRole::Panel | SurfaceRole::SecureOverlay
+            ) {
                 Some(1)
             } else if width == 0 {
                 Some(2)

@@ -12,6 +12,7 @@ pub(crate) enum FixedService {
     Compositor,
     Network,
     User,
+    SecureUi,
     Binder,
     Update,
 }
@@ -60,6 +61,11 @@ pub(crate) const fn fixed_service_spec(service: FixedService) -> ServiceSpec {
         FixedService::User => ServiceSpec {
             path: "/system/services/user.service",
             manifest_path: "/system/packages/user/manifest.toml",
+            role: ROLE_SERVICE,
+        },
+        FixedService::SecureUi => ServiceSpec {
+            path: "/system/services/secure-ui.service",
+            manifest_path: "/system/packages/secure-ui/manifest.toml",
             role: ROLE_SERVICE,
         },
         FixedService::Binder => ServiceSpec {
@@ -160,6 +166,12 @@ mod tests {
                 ROLE_SERVICE,
             ),
             (
+                FixedService::SecureUi,
+                "/system/services/secure-ui.service",
+                "/system/packages/secure-ui/manifest.toml",
+                ROLE_SERVICE,
+            ),
+            (
                 FixedService::Update,
                 "/system/services/update.service",
                 "/system/packages/update/manifest.toml",
@@ -194,6 +206,17 @@ mod tests {
         assert_eq!(
             fixed_service_arguments(FixedService::Compositor, 7, None),
             alloc::vec!["7".to_string()]
+        );
+        assert_eq!(
+            fixed_service_arguments(
+                FixedService::SecureUi,
+                7,
+                Some(ReadyTarget {
+                    endpoint: 8,
+                    token: 9,
+                }),
+            ),
+            alloc::vec!["7".to_string(), "--service-ready=8:9".to_string()]
         );
         assert!(fixed_service_arguments(FixedService::Binder, 7, None).is_empty());
     }

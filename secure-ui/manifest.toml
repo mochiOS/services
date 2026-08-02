@@ -9,8 +9,10 @@ path = "/system/services/secure-ui.service"
 kind = "service"
 requires = [
     "account.authenticate",
+    "account.other.read",
     "fs.read.all",
     "ipc.client",
+    "ipc.server",
     "system.time.read",
     "window.secure-overlay",
 ]
