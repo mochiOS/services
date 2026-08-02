@@ -3,13 +3,15 @@ use std::path::Path;
 use mochi_user_platform as platform;
 use mochios_user_database::{DATABASE_PATH, UserDatabase, UserRecord};
 use mochios_user_protocol::{
-    AddUser, MAX_CHUNK_LEN, MAX_MESSAGE_LEN, Opcode, RemoveUser, SnapshotChunk,
-    SnapshotChunkRequest, SnapshotInfo, SnapshotRequest, Status, decode_opcode,
+    AddUser, Authenticate, AuthenticationResult, MAX_CHUNK_LEN, MAX_MESSAGE_LEN, Opcode,
+    RemoveUser, SetPassword, SnapshotChunk, SnapshotChunkRequest, SnapshotInfo, SnapshotRequest,
+    Status, decode_opcode,
 };
-use user_service::storage;
+use user_service::{password, storage};
 
 const READ_CAPABILITY: &str = "account.other.read";
 const MODIFY_CAPABILITY: &str = "account.other.modify";
+const AUTHENTICATE_CAPABILITY: &str = "account.authenticate";
 
 fn diagnostic(message: &str) {
     platform::println!("{}", message);
@@ -137,6 +139,69 @@ impl UserService {
         let status = self.save_candidate(candidate).err().unwrap_or(0);
         self.reply_status(sender, request.request_id, status);
     }
+
+    fn handle_set_password(&mut self, sender: u64, request: &[u8]) {
+        let Ok(request) = SetPassword::decode(request) else {
+            self.reply_status(sender, 0, mochi_user_syscall::EINVAL);
+            return;
+        };
+        let Some(existing) = self.database.find_name(request.name) else {
+            self.reply_status(sender, request.request_id, mochi_user_syscall::ENOENT);
+            return;
+        };
+        let password_hash = match password::hash(request.password) {
+            Ok(password_hash) => password_hash,
+            Err(_) => {
+                self.reply_status(sender, request.request_id, mochi_user_syscall::EIO);
+                return;
+            }
+        };
+        let mut candidate = self.database.clone();
+        let Some(user) = candidate.find_name_mut(&existing.name) else {
+            self.reply_status(sender, request.request_id, mochi_user_syscall::ENOENT);
+            return;
+        };
+        user.password_hash = password_hash;
+        user.locked = false;
+        let status = match self.save_candidate(candidate) {
+            Ok(()) => 0,
+            Err(status) => status,
+        };
+        self.reply_status(sender, request.request_id, status);
+    }
+
+    fn handle_authenticate(&self, sender: u64, request: &[u8]) {
+        let Ok(request) = Authenticate::decode(request) else {
+            self.reply_status(sender, 0, mochi_user_syscall::EINVAL);
+            return;
+        };
+        let user = self.database.find_name(request.name);
+        let stored_hash = match user {
+            Some(user) if !user.locked => user.password_hash.as_str(),
+            _ => "!",
+        };
+        let verified = password::verify(request.password, stored_hash);
+        let Some(user) = user else {
+            self.reply_status(sender, request.request_id, mochi_user_syscall::EACCES);
+            return;
+        };
+        if user.locked || !verified {
+            self.reply_status(sender, request.request_id, mochi_user_syscall::EACCES);
+            return;
+        }
+        let response = AuthenticationResult {
+            request_id: request.request_id,
+            uid: user.uid,
+            gid: user.gid,
+            name: &user.name,
+            home: &user.home,
+            shell: &user.shell,
+        };
+        let mut buffer = [0u8; MAX_MESSAGE_LEN];
+        if let Ok(length) = response.encode(&mut buffer) {
+            let _ = platform::ipc::reply(sender, &buffer[..length]);
+        }
+    }
 }
 
 fn errno(error: std::io::Error) -> u64 {
@@ -197,7 +262,8 @@ fn main() {
         let opcode = decode_opcode(request);
         let required_capability = match opcode {
             Ok(Opcode::SnapshotBegin | Opcode::SnapshotChunk) => READ_CAPABILITY,
-            Ok(Opcode::AddUser | Opcode::RemoveUser) => MODIFY_CAPABILITY,
+            Ok(Opcode::AddUser | Opcode::RemoveUser | Opcode::SetPassword) => MODIFY_CAPABILITY,
+            Ok(Opcode::Authenticate) => AUTHENTICATE_CAPABILITY,
             _ => {
                 service.reply_status(sender, 0, mochi_user_syscall::EINVAL);
                 continue;
@@ -212,7 +278,11 @@ fn main() {
             Ok(Opcode::SnapshotChunk) => service.handle_snapshot_chunk(sender, request),
             Ok(Opcode::AddUser) => service.handle_add(sender, request),
             Ok(Opcode::RemoveUser) => service.handle_remove(sender, request),
+            Ok(Opcode::SetPassword) => service.handle_set_password(sender, request),
+            Ok(Opcode::Authenticate) => service.handle_authenticate(sender, request),
             _ => service.reply_status(sender, 0, mochi_user_syscall::EINVAL),
         }
+        let used_length = length.min(buffer.len());
+        buffer[..used_length].fill(0);
     }
 }

@@ -11,6 +11,7 @@ members = [
     "network",
     "package",
     "service-manager",
+    "secure-ui",
     "signature",
     "tty",
     "update",

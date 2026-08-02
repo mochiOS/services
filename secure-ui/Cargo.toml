@@ -1,0 +1,21 @@
+[package]
+name = "secure-ui"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }
+mochi-user-syscall = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-syscall" }
+mochios-user-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-user-protocol" }
+viewkit = { git = "https://github.com/mochiOS/viewkit", package = "viewkit" }
+
+[[bin]]
+name = "secure-ui"
+path = "src/main.rs"
+test = false
+bench = false
+harness = false
+
+[lib]
+path = "src/lib.rs"

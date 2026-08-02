@@ -12,4 +12,5 @@ requires = [
     "fs.write.all",
     "ipc.client",
     "ipc.server",
+    "system.random.read",
 ]

@@ -74,3 +74,10 @@ fs = "rootfs"
 description = "mochiOS user database service"
 autostart = false
 order = 10
+
+[secure-ui.service]
+dir = "secure-ui"
+fs = "rootfs"
+description = "mochiOS trusted login and authorization UI service"
+autostart = false
+order = 11

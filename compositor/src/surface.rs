@@ -3,7 +3,9 @@ use alloc::vec::Vec;
 use mochi_user_platform as platform;
 
 use crate::client::{Client, ClientId};
-use crate::decoration::sender_has_overlay_compat_capability;
+use crate::decoration::{
+    sender_has_overlay_compat_capability, sender_has_secure_overlay_capability,
+};
 use crate::geometry::{Point, PopupPlacement, Rect, merge_damage, validate_damage_rect};
 use crate::input::clear_focus_for_surface;
 use crate::protocol::*;
@@ -719,7 +721,14 @@ pub(crate) fn handle_request(
                     return reply;
                 }
             };
-            let rights = if sender_has_overlay_compat_capability(sender) {
+            let rights = if role == SurfaceRole::SecureOverlay {
+                if sender_has_secure_overlay_capability(sender) {
+                    SurfaceRights::GENERAL_CLIENT
+                } else {
+                    put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                    return reply;
+                }
+            } else if sender_has_overlay_compat_capability(sender) {
                 match role.privileged_overlay_rights() {
                     Ok(rights) => rights,
                     Err(status) => {
@@ -839,7 +848,10 @@ pub(crate) fn handle_request(
                         .saturating_add(placement.anchor_rect.y)
                         .saturating_add(placement.offset.y),
                 )
-            } else if sender_has_overlay_compat_capability(sender) {
+            } else if matches!(
+                role,
+                SurfaceRole::Background | SurfaceRole::Panel | SurfaceRole::SecureOverlay
+            ) {
                 (0, 0)
             } else {
                 let cascade = *next_window_index % 8;

@@ -1,0 +1,16 @@
+[package]
+id = "org.mochios.secure-ui"
+name = "Secure UI Service"
+version = "1"
+vendor = "mochiOS"
+
+[[binary]]
+path = "/system/services/secure-ui.service"
+kind = "service"
+requires = [
+    "account.authenticate",
+    "fs.read.all",
+    "ipc.client",
+    "system.time.read",
+    "window.secure-overlay",
+]

@@ -15,6 +15,7 @@ use crate::window::{
 
 const DECORATE_CAPABILITY: &str = "window.decorate";
 const DECORATE_COMPAT_CAPABILITY: &str = "window.overlay";
+const SECURE_OVERLAY_CAPABILITY: &str = "window.secure-overlay";
 const DECOR_TITLE_BAR_HEIGHT: u32 = 40;
 
 fn sender_has_decorate_capability(sender: u64) -> bool {
@@ -30,6 +31,13 @@ fn sender_has_decorate_capability(sender: u64) -> bool {
 pub(crate) fn sender_has_overlay_compat_capability(sender: u64) -> bool {
     matches!(
         platform::capability::check_thread(sender, DECORATE_COMPAT_CAPABILITY),
+        Ok(1)
+    )
+}
+
+pub(crate) fn sender_has_secure_overlay_capability(sender: u64) -> bool {
+    matches!(
+        platform::capability::check_thread(sender, SECURE_OVERLAY_CAPABILITY),
         Ok(1)
     )
 }
