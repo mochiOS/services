@@ -5,6 +5,7 @@ use viewkit::prelude::*;
 
 use crate::authentication::{self, AuthenticationError};
 use crate::clock::LoginClock;
+use crate::setup::AccountSetup;
 use crate::wallpaper::Wallpaper;
 
 const FORM_WIDTH: f32 = 320.0;
@@ -17,20 +18,26 @@ pub(crate) struct LoginApp {
     next_request_id: Rc<Cell<u64>>,
     login_target: Option<mochi_user_platform::service_ready::Target>,
     wallpaper: Wallpaper,
+    account_setup: Option<AccountSetup>,
 }
 
 impl App for LoginApp {
     type Body = Box<dyn View + 'static>;
 
     fn new() -> Self {
-        let (users, initial_status) = match authentication::list_users(1) {
-            Ok(users) => (users, String::new()),
-            Err(AuthenticationError::ServiceUnavailable) => {
-                (Vec::new(), "Account service is unavailable.".to_owned())
-            }
-            Err(AuthenticationError::InvalidCredentials | AuthenticationError::Protocol) => {
-                (Vec::new(), "The user list could not be loaded.".to_owned())
-            }
+        let (users, initial_status, account_setup) = match authentication::list_users(1) {
+            Ok(result) if result.has_regular_account => (result.users, String::new(), None),
+            Ok(_) => (Vec::new(), String::new(), Some(AccountSetup::new())),
+            Err(AuthenticationError::ServiceUnavailable) => (
+                Vec::new(),
+                "Account service is unavailable.".to_owned(),
+                None,
+            ),
+            Err(AuthenticationError::InvalidCredentials | AuthenticationError::Protocol) => (
+                Vec::new(),
+                "The user list could not be loaded.".to_owned(),
+                None,
+            ),
         };
         let selected_username = users
             .first()
@@ -46,6 +53,7 @@ impl App for LoginApp {
             next_request_id: Rc::new(Cell::new(2)),
             login_target: mochi_user_platform::service_ready::take_bootstrap_target(),
             wallpaper: Wallpaper::load_default(),
+            account_setup,
         }
     }
 
@@ -56,6 +64,12 @@ impl App for LoginApp {
     }
 
     fn body(&self, _context: &ViewContext) -> Self::Body {
+        if let Some(account_setup) = &self.account_setup {
+            return self.screen(
+                account_setup.body(Rc::clone(&self.next_request_id), self.login_target),
+                false,
+            );
+        }
         let password_submit = submit_callback(
             self.selected_username.clone(),
             self.password.clone(),
@@ -162,6 +176,16 @@ impl App for LoginApp {
                     .frame(FORM_WIDTH, 24.0),
             );
 
+        self.screen(Box::new(form), true)
+    }
+}
+
+impl LoginApp {
+    fn screen(
+        &self,
+        content: Box<dyn View + 'static>,
+        shows_clock: bool,
+    ) -> Box<dyn View + 'static> {
         let clock = Padding::only(42.0, 28.0, 54.0, 28.0).content(
             VStack::new()
                 .alignment(StackAlignment::Center)
@@ -174,17 +198,17 @@ impl App for LoginApp {
                 .alignment(StackAlignment::Center)
                 .gap(StackGap::None)
                 .child(Spacer::new())
-                .child(form)
+                .child(content)
                 .child(Spacer::new()),
         );
 
-        Box::new(
-            ZStack::new()
-                .alignment(ZStackAlignment::Center)
-                .child(self.wallpaper.clone())
-                .child(clock)
-                .child(centered_form),
-        )
+        let mut screen = ZStack::new()
+            .alignment(ZStackAlignment::Center)
+            .child(self.wallpaper.clone());
+        if shows_clock {
+            screen = screen.child(clock);
+        }
+        Box::new(screen.child(centered_form))
     }
 }
 

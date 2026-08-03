@@ -187,8 +187,10 @@ fn service_manifests_match_policy() {
         "/system/services/secure-ui.service",
         &[
             "account.authenticate",
+            "account.other.modify",
             "account.other.read",
             "fs.read.all",
+            "fs.write.all",
             "ipc.client",
             "ipc.server",
             "system.time.read",

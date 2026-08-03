@@ -1,5 +1,5 @@
 use mochi_user_platform as platform;
-use mochios_user_database::UserDatabase;
+use mochios_user_database::{FIRST_REGULAR_UID, UserDatabase};
 use mochios_user_protocol::{
     Authenticate, AuthenticationResult, MAX_CHUNK_LEN, MAX_MESSAGE_LEN, SnapshotChunk,
     SnapshotChunkRequest, SnapshotInfo, SnapshotRequest, Status, decode_opcode,
@@ -13,6 +13,11 @@ const MAX_DATABASE_LEN: usize = 1024 * 1024;
 pub(crate) struct LoginUser {
     pub(crate) name: String,
     pub(crate) display_name: String,
+}
+
+pub(crate) struct LoginUsers {
+    pub(crate) users: Vec<LoginUser>,
+    pub(crate) has_regular_account: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,7 +36,32 @@ pub(crate) enum AuthenticationError {
     Protocol,
 }
 
-pub(crate) fn list_users(request_id: u64) -> Result<Vec<LoginUser>, AuthenticationError> {
+pub(crate) fn list_users(request_id: u64) -> Result<LoginUsers, AuthenticationError> {
+    let database = load_database(request_id)?;
+    Ok(login_users(&database))
+}
+
+fn login_users(database: &UserDatabase) -> LoginUsers {
+    let has_regular_account = database
+        .users()
+        .iter()
+        .any(|user| user.uid >= FIRST_REGULAR_UID);
+    let users = database
+        .users()
+        .iter()
+        .filter(|user| user.uid >= FIRST_REGULAR_UID && !user.locked)
+        .map(|user| LoginUser {
+            name: user.name.clone(),
+            display_name: user.display_name.clone(),
+        })
+        .collect();
+    LoginUsers {
+        users,
+        has_regular_account,
+    }
+}
+
+pub(crate) fn load_database(request_id: u64) -> Result<UserDatabase, AuthenticationError> {
     let service = find_user_service().ok_or(AuthenticationError::ServiceUnavailable)?;
     let request = SnapshotRequest { request_id };
     let mut request_bytes = [0u8; MAX_MESSAGE_LEN];
@@ -74,17 +104,7 @@ pub(crate) fn list_users(request_id: u64) -> Result<Vec<LoginUser>, Authenticati
         database_bytes.extend_from_slice(chunk.bytes);
     }
 
-    let database =
-        UserDatabase::parse(&database_bytes).map_err(|_| AuthenticationError::Protocol)?;
-    Ok(database
-        .users()
-        .iter()
-        .filter(|user| !user.locked)
-        .map(|user| LoginUser {
-            name: user.name.clone(),
-            display_name: user.display_name.clone(),
-        })
-        .collect())
+    UserDatabase::parse(&database_bytes).map_err(|_| AuthenticationError::Protocol)
 }
 
 pub(crate) fn authenticate(
@@ -141,7 +161,11 @@ pub(crate) fn authenticate(
     }
 }
 
-fn call(service: u64, request: &[u8], reply: &mut [u8]) -> Result<usize, AuthenticationError> {
+pub(crate) fn call(
+    service: u64,
+    request: &[u8],
+    reply: &mut [u8],
+) -> Result<usize, AuthenticationError> {
     let result = platform::ipc::call(service, request, reply)
         .map_err(|_| AuthenticationError::ServiceUnavailable)?;
     let reply_len = (result & 0xffff_ffff) as usize;
@@ -151,7 +175,7 @@ fn call(service: u64, request: &[u8], reply: &mut [u8]) -> Result<usize, Authent
     Ok(reply_len)
 }
 
-fn find_user_service() -> Option<u64> {
+pub(crate) fn find_user_service() -> Option<u64> {
     for _ in 0..SERVICE_LOOKUP_ATTEMPTS {
         if let Ok(endpoint) = platform::process::find_by_name(USER_SERVICE_NAME)
             && endpoint != 0
@@ -161,4 +185,48 @@ fn find_user_service() -> Option<u64> {
         platform::thread::yield_now();
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mochios_user_database::UserRecord;
+
+    #[test]
+    fn root_only_database_requires_initial_setup() {
+        let users = login_users(&UserDatabase::with_root());
+        assert!(!users.has_regular_account);
+        assert!(users.users.is_empty());
+    }
+
+    #[test]
+    fn locked_regular_account_prevents_initial_setup_but_is_not_selectable() {
+        let mut database = UserDatabase::with_root();
+        assert!(
+            database
+                .add(UserRecord::regular(
+                    "alice",
+                    FIRST_REGULAR_UID,
+                    FIRST_REGULAR_UID,
+                ))
+                .is_ok()
+        );
+        let users = login_users(&database);
+        assert!(users.has_regular_account);
+        assert!(users.users.is_empty());
+    }
+
+    #[test]
+    fn unlocked_regular_account_is_selectable() {
+        let mut database = UserDatabase::with_root();
+        let mut alice = UserRecord::regular("alice", FIRST_REGULAR_UID, FIRST_REGULAR_UID);
+        alice.display_name = "Alice".to_owned();
+        alice.locked = false;
+        assert!(database.add(alice).is_ok());
+        let users = login_users(&database);
+        assert!(users.has_regular_account);
+        assert_eq!(users.users.len(), 1);
+        assert_eq!(users.users[0].name, "alice");
+        assert_eq!(users.users[0].display_name, "Alice");
+    }
 }

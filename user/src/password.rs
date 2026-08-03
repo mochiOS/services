@@ -145,4 +145,11 @@ mod tests {
         assert!(!verify(b"secret", "!"));
         assert!(!verify(b"secret", "pbkdf2-sha256$0$00$00"));
     }
+
+    #[test]
+    fn empty_password_is_hashed_and_verified() {
+        let encoded = encode_hash(b"", &[0x5a; SALT_LEN], ITERATIONS);
+        assert!(verify(b"", &encoded));
+        assert!(!verify(b"non-empty", &encoded));
+    }
 }
