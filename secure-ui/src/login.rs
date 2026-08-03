@@ -128,9 +128,18 @@ impl App for LoginApp {
                     )
                     .child(
                         Button::new("")
-                            .content(Icon::new(IconName::ChevronRight).size(20.0))
-                            .color(ButtonColor::Accent)
-                            .radius(CornerRadius::Full)
+                            .content(
+                                Icon::new(IconName::ChevronRight)
+                                    .size(20.0)
+                                    .color(Color::WHITE),
+                            )
+                            .style(ButtonStyle::Custom {
+                                background: Color::TRANSPARENT,
+                                hovered_background: Color::TRANSPARENT,
+                                border: Color::TRANSPARENT,
+                                hovered_border: Color::TRANSPARENT,
+                                foreground: Color::WHITE,
+                            })
                             .enabled(!selected_username.is_empty())
                             .on_click(submit_callback(
                                 self.selected_username.clone(),
