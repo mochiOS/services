@@ -143,9 +143,10 @@ pub(crate) fn spawn_application_from_manifest(
     ));
     spawn_items.extend(items[1..].iter().cloned());
     let args_nul = encode_spawn_args(&spawn_items);
-    platform::service::spawn_manifest(
+    platform::service::spawn_manifest_for_requester(
         entry_path,
         platform::service::ROLE_APPLICATION,
+        sender,
         Some(args_nul.as_slice()),
         Some(caps_nul.as_slice()),
     )

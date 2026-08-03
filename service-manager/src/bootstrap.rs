@@ -207,6 +207,31 @@ impl BootstrapOperations for Runtime {
         }
     }
 
+    fn spawn_user_session(
+        &mut self,
+        service: FixedService,
+        identity: platform::service_ready::SessionIdentity,
+    ) -> Option<u64> {
+        match fixed_service_launcher::spawn_user_session(service, self.logger_endpoint, identity) {
+            Ok(process_id) => {
+                platform::println!(
+                    "service-manager.service: {} spawned pid={}",
+                    service_name(service),
+                    process_id
+                );
+                Some(process_id)
+            }
+            Err(error) => {
+                platform::println!(
+                    "service-manager.service: {} spawn failed errno={}",
+                    service_name(service),
+                    errno(error)
+                );
+                None
+            }
+        }
+    }
+
     fn wait_display_ready(&mut self, process_id: u64) -> bool {
         self.wait_ready(ReadyService::Display, process_id)
     }
@@ -219,20 +244,23 @@ impl BootstrapOperations for Runtime {
         self.wait_ready(ReadyService::User, process_id)
     }
 
-    fn wait_secure_ui_login(&mut self, process_id: u64) -> bool {
+    fn wait_secure_ui_login(
+        &mut self,
+        process_id: u64,
+    ) -> Option<platform::service_ready::SessionIdentity> {
         platform::println!("service-manager.service: waiting for secure-ui.service login");
         let result = match self.ready.as_mut() {
             Some(handshake) => handshake.wait_for_login_complete(process_id),
             None => Err(ReadyError::InvalidMessage),
         };
         match result {
-            Ok(()) => {
+            Ok(identity) => {
                 platform::println!("service-manager.service: secure-ui.service login complete");
-                true
+                Some(identity)
             }
             Err(error) => {
                 log_ready_error(ReadyService::SecureUi, error);
-                false
+                None
             }
         }
     }

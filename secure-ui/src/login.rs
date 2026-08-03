@@ -222,8 +222,8 @@ fn submit_callback(
     move || {
         let name = selected_username.get();
         let mut secret = password.value();
-        if name.is_empty() || secret.is_empty() {
-            status.set("Select a user and enter the password.".to_owned());
+        if name.is_empty() {
+            status.set("Select a user.".to_owned());
             clear_string(&mut secret);
             password.clear();
             return;
@@ -240,8 +240,12 @@ fn submit_callback(
                     status.set("Login completion channel is unavailable.".to_owned());
                     return;
                 };
-                match mochi_user_platform::service_ready::notify(target, 0) {
-                    Ok(_) => mochi_user_platform::process::exit(0),
+                let identity = mochi_user_platform::service_ready::SessionIdentity {
+                    uid: user.uid,
+                    gid: user.gid,
+                };
+                match mochi_user_platform::service_ready::notify_session(target, 0, identity) {
+                    Ok(_) => viewkit::request_exit(),
                     Err(_) => status.set(format!("Could not start the session for {}.", user.name)),
                 }
             }

@@ -1,4 +1,5 @@
 fn main() -> Result<(), viewkit::ViewKitError> {
+    let _ = mochi_user_platform::logger::init_from_env();
     report_missing_capability("account.authenticate");
     report_missing_capability("account.other.modify");
     report_missing_capability("account.other.read");

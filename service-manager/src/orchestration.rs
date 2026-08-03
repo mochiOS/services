@@ -1,4 +1,5 @@
 use crate::service_config::FixedService;
+use mochi_user_platform::service_ready::SessionIdentity;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ChildProcesses {
@@ -63,13 +64,18 @@ pub(crate) trait BootstrapOperations {
     fn register_driver_delegate(&mut self, process_id: u64) -> bool;
     fn wait_driver_hello(&mut self, process_id: u64) -> bool;
     fn spawn_fixed(&mut self, service: FixedService) -> Option<u64>;
+    fn spawn_user_session(
+        &mut self,
+        service: FixedService,
+        identity: SessionIdentity,
+    ) -> Option<u64>;
     fn wait_display_ready(&mut self, process_id: u64) -> bool;
     fn wait_input_ready(&mut self, process_id: u64) -> bool;
     fn start_discovery(&mut self) -> bool;
     fn wait_discovery_complete(&mut self, process_id: u64) -> bool;
     fn wait_network_ready(&mut self, process_id: u64) -> bool;
     fn wait_user_ready(&mut self, process_id: u64) -> bool;
-    fn wait_secure_ui_login(&mut self, process_id: u64) -> bool;
+    fn wait_secure_ui_login(&mut self, process_id: u64) -> Option<SessionIdentity>;
 }
 
 pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> BootstrapOutcome {
@@ -123,11 +129,11 @@ pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> Bootstra
         return outcome(children, StopReason::SecureUiSpawnFailed);
     };
     children.secure_ui = Some(secure_ui);
-    if !operations.wait_secure_ui_login(secure_ui) {
+    let Some(identity) = operations.wait_secure_ui_login(secure_ui) else {
         return outcome(children, StopReason::SecureUiLoginFailed);
-    }
+    };
 
-    let Some(binder) = operations.spawn_fixed(FixedService::Binder) else {
+    let Some(binder) = operations.spawn_user_session(FixedService::Binder, identity) else {
         return outcome(children, StopReason::BinderSpawnFailed);
     };
     children.binder = Some(binder);
@@ -148,12 +154,15 @@ mod tests {
     use super::*;
     use alloc::vec::Vec;
 
+    const TEST_IDENTITY: SessionIdentity = SessionIdentity { uid: 1000, gid: 20 };
+
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Event {
         SpawnDrivers,
         RegisterDriverDelegate,
         WaitHello,
         Spawn(FixedService),
+        SpawnUserSession(FixedService, SessionIdentity),
         WaitDisplay,
         WaitInput,
         StartDiscovery,
@@ -226,6 +235,15 @@ mod tests {
             })
         }
 
+        fn spawn_user_session(
+            &mut self,
+            service: FixedService,
+            identity: SessionIdentity,
+        ) -> Option<u64> {
+            self.events.push(Event::SpawnUserSession(service, identity));
+            (self.failure != Failure::Spawn(service)).then_some(17)
+        }
+
         fn wait_display_ready(&mut self, _process_id: u64) -> bool {
             self.events.push(Event::WaitDisplay);
             self.failure != Failure::DisplayReady
@@ -256,9 +274,9 @@ mod tests {
             self.failure != Failure::UserReady
         }
 
-        fn wait_secure_ui_login(&mut self, _process_id: u64) -> bool {
+        fn wait_secure_ui_login(&mut self, _process_id: u64) -> Option<SessionIdentity> {
             self.events.push(Event::WaitSecureUiLogin);
-            self.failure != Failure::SecureUiLogin
+            (self.failure != Failure::SecureUiLogin).then_some(TEST_IDENTITY)
         }
     }
 
@@ -279,7 +297,7 @@ mod tests {
             Event::WaitUser,
             Event::Spawn(FixedService::SecureUi),
             Event::WaitSecureUiLogin,
-            Event::Spawn(FixedService::Binder),
+            Event::SpawnUserSession(FixedService::Binder, TEST_IDENTITY),
             Event::WaitNetwork,
             Event::Spawn(FixedService::Update),
         ]
@@ -327,11 +345,10 @@ mod tests {
             let outcome = orchestrate(&mut operations);
             assert_eq!(outcome.reason, reason);
             assert!(!operations.events.contains(&Event::StartDiscovery));
-            assert!(
-                !operations
-                    .events
-                    .contains(&Event::Spawn(FixedService::Binder))
-            );
+            assert!(!operations.events.contains(&Event::SpawnUserSession(
+                FixedService::Binder,
+                TEST_IDENTITY
+            )));
         }
     }
 
@@ -343,11 +360,10 @@ mod tests {
         assert_eq!(outcome.children.compositor, None);
         assert!(operations.events.contains(&Event::StartDiscovery));
         assert!(operations.events.contains(&Event::WaitDiscovery));
-        assert!(
-            operations
-                .events
-                .contains(&Event::Spawn(FixedService::Binder))
-        );
+        assert!(operations.events.contains(&Event::SpawnUserSession(
+            FixedService::Binder,
+            TEST_IDENTITY
+        )));
     }
 
     #[test]
@@ -368,11 +384,10 @@ mod tests {
             let outcome = orchestrate(&mut operations);
             assert_eq!(outcome.reason, reason);
             assert_eq!(outcome.children.binder, None);
-            assert!(
-                !operations
-                    .events
-                    .contains(&Event::Spawn(FixedService::Binder))
-            );
+            assert!(!operations.events.contains(&Event::SpawnUserSession(
+                FixedService::Binder,
+                TEST_IDENTITY
+            )));
         }
     }
 
@@ -388,11 +403,10 @@ mod tests {
             let mut operations = FakeOperations::new(failure);
             let outcome = orchestrate(&mut operations);
             assert_eq!(outcome.reason, reason);
-            assert!(
-                !operations
-                    .events
-                    .contains(&Event::Spawn(FixedService::Binder))
-            );
+            assert!(!operations.events.contains(&Event::SpawnUserSession(
+                FixedService::Binder,
+                TEST_IDENTITY
+            )));
         }
     }
 
@@ -404,7 +418,10 @@ mod tests {
         assert_eq!(outcome.children.binder, None);
         assert_eq!(
             operations.events.last(),
-            Some(&Event::Spawn(FixedService::Binder))
+            Some(&Event::SpawnUserSession(
+                FixedService::Binder,
+                TEST_IDENTITY
+            ))
         );
     }
 

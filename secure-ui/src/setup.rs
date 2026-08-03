@@ -32,6 +32,7 @@ pub(crate) struct AccountSetup {
     password_confirmation: TextFieldInteractionState,
     status: State<String>,
     created_display_name: State<String>,
+    created_identity: State<Option<mochi_user_platform::service_ready::SessionIdentity>>,
     privacy_qr: Option<ImageData>,
     terms_qr: Option<ImageData>,
 }
@@ -46,6 +47,7 @@ impl AccountSetup {
             password_confirmation: TextFieldInteractionState::new(),
             status: State::new(String::new()),
             created_display_name: State::new(String::new()),
+            created_identity: State::new(None),
             privacy_qr: ImageData::from_path(PRIVACY_QR_PATH).ok(),
             terms_qr: ImageData::from_path(TERMS_QR_PATH).ok(),
         }
@@ -109,14 +111,12 @@ impl AccountSetup {
                     "Let's prepare this device for you",
                 ))
                 .child(
-                    Text::new(
-                        "Review the mochiOS policies, then create the account you will use on this device.",
-                    )
-                    .font_size(12.0)
-                    .line_height(19.0)
-                    .alignment(TextAlignment::Center)
-                    .color(Color::rgba(255, 255, 255, 216))
-                    .frame(CONTENT_WIDTH, 48.0),
+                    Text::new("Let’s get your device ready!")
+                        .font_size(12.0)
+                        .line_height(19.0)
+                        .alignment(TextAlignment::Center)
+                        .color(Color::rgba(255, 255, 255, 216))
+                        .frame(CONTENT_WIDTH, 48.0),
                 )
                 .child(
                     Button::new("Start Setup")
@@ -190,6 +190,7 @@ impl AccountSetup {
             self.password_confirmation.clone(),
             self.status.clone(),
             self.created_display_name.clone(),
+            self.created_identity.clone(),
             self.page.clone(),
             Rc::clone(&next_request_id),
         );
@@ -220,6 +221,7 @@ impl AccountSetup {
                             self.password_confirmation.clone(),
                             self.status.clone(),
                             self.created_display_name.clone(),
+                            self.created_identity.clone(),
                             self.page.clone(),
                             next_request_id,
                         ))
@@ -249,6 +251,7 @@ impl AccountSetup {
         login_target: Option<mochi_user_platform::service_ready::Target>,
     ) -> Box<dyn View + 'static> {
         let status = self.status.clone();
+        let identity = self.created_identity.get();
         let display_name = self.created_display_name.get();
         let message = if display_name.is_empty() {
             "Your account is ready.".to_owned()
@@ -285,9 +288,9 @@ impl AccountSetup {
                         .color(Color::WHITE),
                 )
                 .child(
-                    Button::new("Get Started")
+                    Button::new("Get Started!")
                         .style(ButtonStyle::Accent)
-                        .on_click(move || finish_setup(login_target, &status))
+                        .on_click(move || finish_setup(login_target, identity, &status))
                         .frame(CONTENT_WIDTH, 44.0),
                 )
                 .child(status_text(self.status.get()))
@@ -314,7 +317,7 @@ fn qr_card(image: Option<ImageData>, title: &'static str, address: &'static str)
         Some(image) => Image::new(image)
             .content_mode(ImageContentMode::Fit)
             .frame(QR_IMAGE_SIZE, QR_IMAGE_SIZE),
-        None => Text::new("QR code unavailable")
+        None => Text::new("QR code unavailable. please report this issue to the mochiOS team.")
             .font_size(11.0)
             .alignment(TextAlignment::Center)
             .color(Color::from_rgb_hex(0x6e6e73))
@@ -377,6 +380,7 @@ fn submit_callback(
     password_confirmation: TextFieldInteractionState,
     status: State<String>,
     created_display_name: State<String>,
+    created_identity: State<Option<mochi_user_platform::service_ready::SessionIdentity>>,
     page: State<usize>,
     next_request_id: Rc<Cell<u64>>,
 ) -> impl FnMut() {
@@ -404,8 +408,9 @@ fn submit_callback(
         password_confirmation.clear();
 
         match result {
-            Ok(()) => {
+            Ok(identity) => {
                 created_display_name.set(display_name);
+                created_identity.set(Some(identity));
                 status.set(String::new());
                 page.set(3);
             }
@@ -428,14 +433,19 @@ fn submit_callback(
 
 fn finish_setup(
     login_target: Option<mochi_user_platform::service_ready::Target>,
+    identity: Option<mochi_user_platform::service_ready::SessionIdentity>,
     status: &State<String>,
 ) {
     let Some(target) = login_target else {
         status.set("The login channel is unavailable.".to_owned());
         return;
     };
-    match mochi_user_platform::service_ready::notify(target, 0) {
-        Ok(_) => mochi_user_platform::process::exit(0),
+    let Some(identity) = identity else {
+        status.set("The account identity is unavailable.".to_owned());
+        return;
+    };
+    match mochi_user_platform::service_ready::notify_session(target, 0, identity) {
+        Ok(_) => viewkit::request_exit(),
         Err(_) => status.set("The session could not start.".to_owned()),
     }
 }
@@ -482,7 +492,7 @@ fn create_first_account(
     display_name: &str,
     name: &str,
     password: &[u8],
-) -> Result<(), SetupError> {
+) -> Result<mochi_user_platform::service_ready::SessionIdentity, SetupError> {
     let database = authentication::load_database(request_id).map_err(map_authentication_error)?;
     if database
         .users()
@@ -515,7 +525,10 @@ fn create_first_account(
         remove_home(&user);
         return Err(error);
     }
-    Ok(())
+    Ok(mochi_user_platform::service_ready::SessionIdentity {
+        uid: user.uid,
+        gid: user.gid,
+    })
 }
 
 fn add_user(service: u64, request_id: u64, encoded: &[u8]) -> Result<(), SetupError> {

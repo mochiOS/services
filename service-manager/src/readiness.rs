@@ -156,8 +156,34 @@ impl ReadyHandshake {
         self.wait(service, process_id, true)
     }
 
-    pub(crate) fn wait_for_login_complete(&mut self, process_id: u64) -> Result<(), ReadyError> {
-        self.wait(ReadyService::SecureUi, process_id, false)
+    pub(crate) fn wait_for_login_complete(
+        &mut self,
+        process_id: u64,
+    ) -> Result<platform::service_ready::SessionIdentity, ReadyError> {
+        loop {
+            if let Some(notification) = receive_notification()? {
+                match notification {
+                    ReceivedNotification::Ready { token, status } => {
+                        self.record(token, status)?;
+                    }
+                    ReceivedNotification::Session {
+                        token,
+                        status,
+                        identity,
+                    } => {
+                        if token != self.secure_ui_token {
+                            return Err(ReadyError::InvalidMessage);
+                        }
+                        ready_result(status)?;
+                        return Ok(identity);
+                    }
+                }
+            }
+            if let Some(status) = process_exit_status(process_id)? {
+                return Err(ReadyError::ProcessExited(status));
+            }
+            platform::thread::yield_now();
+        }
     }
 
     fn wait(
@@ -171,8 +197,15 @@ impl ReadyHandshake {
             if let Some(status) = self.status(service) {
                 return ready_result(status);
             }
-            if let Some((token, status)) = receive_notification()? {
-                self.record(token, status)?;
+            if let Some(notification) = receive_notification()? {
+                match notification {
+                    ReceivedNotification::Ready { token, status } => {
+                        self.record(token, status)?;
+                    }
+                    ReceivedNotification::Session { .. } => {
+                        return Err(ReadyError::InvalidMessage);
+                    }
+                }
             }
             if let Some(status) = self.status(service) {
                 return ready_result(status);
@@ -199,9 +232,21 @@ fn ready_result(status: i32) -> Result<(), ReadyError> {
     }
 }
 
+enum ReceivedNotification {
+    Ready {
+        token: u64,
+        status: i32,
+    },
+    Session {
+        token: u64,
+        status: i32,
+        identity: platform::service_ready::SessionIdentity,
+    },
+}
+
 #[inline(never)]
-fn receive_notification() -> Result<Option<(u64, i32)>, ReadyError> {
-    let mut message = [0u8; platform::service_ready::MESSAGE_LEN];
+fn receive_notification() -> Result<Option<ReceivedNotification>, ReadyError> {
+    let mut message = [0u8; platform::service_ready::MAX_MESSAGE_LEN];
     let received = match platform::ipc::try_wait(&mut message) {
         Ok(received) => received,
         Err(error) if error.raw() == mochi_user_syscall::EAGAIN as i64 => return Ok(None),
@@ -211,9 +256,24 @@ fn receive_notification() -> Result<Option<(u64, i32)>, ReadyError> {
     let Some(message) = message.get(..length) else {
         return Err(ReadyError::InvalidMessage);
     };
-    let notification = platform::service_ready::decode_notification(message)
-        .map_err(|_| ReadyError::InvalidMessage)?;
-    Ok(Some(notification))
+    match length {
+        platform::service_ready::MESSAGE_LEN => {
+            let (token, status) = platform::service_ready::decode_notification(message)
+                .map_err(|_| ReadyError::InvalidMessage)?;
+            Ok(Some(ReceivedNotification::Ready { token, status }))
+        }
+        platform::service_ready::SESSION_MESSAGE_LEN => {
+            let (token, status, identity) =
+                platform::service_ready::decode_session_notification(message)
+                    .map_err(|_| ReadyError::InvalidMessage)?;
+            Ok(Some(ReceivedNotification::Session {
+                token,
+                status,
+                identity,
+            }))
+        }
+        _ => Err(ReadyError::InvalidMessage),
+    }
 }
 
 #[inline(never)]

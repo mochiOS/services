@@ -2393,6 +2393,7 @@ dependencies = [
  "mochi-user-platform",
  "mochi-user-syscall",
  "mochios-driver-control-protocol",
+ "mochios-user-database",
 ]
 
 [[package]]
