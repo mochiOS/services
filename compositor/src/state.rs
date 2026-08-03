@@ -31,20 +31,13 @@ pub(crate) fn getrandom_u64() -> Option<u64> {
         0,
     ) {
         Ok(len) => len,
-        Err(err) => {
-            mochi_user_platform::println!(
-                "compositor.service: getrandom failed errno={}",
-                err.errno().unwrap_or(0)
-            );
-            return None;
-        }
+        Err(_) => return None,
     };
     if len == bytes.len() as u64 {
         Some(u64::from_ne_bytes([
             bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         ]))
     } else {
-        mochi_user_platform::println!("compositor.service: getrandom short read len={}", len);
         None
     }
 }

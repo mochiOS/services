@@ -241,11 +241,7 @@ fn handle_request(
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                 return reply;
             }
-            let was_hardware = *hardware_cursor;
             *hardware_cursor = display_set_cursor_image(display_tid, request) == 0;
-            if *hardware_cursor && !was_hardware {
-                platform::println!("compositor.service: hardware cursor enabled");
-            }
             put_u32(&mut reply, 0, 0);
         }
         _ => put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL)),
@@ -254,23 +250,15 @@ fn handle_request(
 }
 
 pub(crate) fn run() -> ! {
-    platform::println!("compositor.service: start");
     let endpoint = match platform::ipc::create() {
         Ok(endpoint) => endpoint,
         Err(_) => platform::process::exit(1),
     };
     let Some(display_tid) = wait_for_service(4096) else {
-        platform::println!("compositor.service: display.driver not found");
         platform::process::exit(1);
     };
     let input_subscribed = subscribe_input_events(endpoint);
-    let claim_status = display_claim_present_owner(display_tid);
-    if claim_status != 0 {
-        platform::println!(
-            "compositor.service: display claim failed status={}",
-            claim_status
-        );
-    }
+    let _ = display_claim_present_owner(display_tid);
     let (display_width, display_height, display_stride, display_format) =
         display_request_info(display_tid);
     let renderer_caps = display_renderer_caps(display_tid);
@@ -518,8 +506,6 @@ pub(crate) fn run() -> ! {
                     for surface in state.surfaces.iter().filter(|surface| surface.live) {
                         send_frame_done(surface);
                     }
-                } else {
-                    platform::println!("compositor.service: present deferred status={}", status);
                 }
             }
         }

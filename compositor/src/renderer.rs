@@ -103,20 +103,7 @@ impl PresentFrame {
         let now = platform::time::ticks().unwrap_or(0);
         if self.metrics.next_report_tick == 0 {
             self.metrics.next_report_tick = now.saturating_add(500);
-            platform::println!(
-                "compositor.service: render metrics enabled mode={}",
-                if gpu { "gpu" } else { "cpu" }
-            );
         } else if now >= self.metrics.next_report_tick {
-            platform::println!(
-                "compositor.service: render stats frames={} gpu={} cpu={} compose={}ms present={}ms scene_bytes={}",
-                self.metrics.frames,
-                self.metrics.gpu_frames,
-                self.metrics.cpu_frames,
-                self.metrics.composition_millis,
-                self.metrics.present_millis,
-                self.metrics.scene_bytes,
-            );
             self.metrics = RendererMetrics {
                 next_report_tick: now.saturating_add(500),
                 ..RendererMetrics::default()
@@ -188,10 +175,6 @@ fn try_gpu_scene_present(
         present_frame.record_metrics(true, composition_millis, present_millis, byte_len);
         Some(0)
     } else {
-        platform::println!(
-            "compositor.service: ViewKit GPU scene failed status={}",
-            status
-        );
         present_frame.gpu_panel_disabled = true;
         None
     }
@@ -279,7 +262,6 @@ fn try_gpu_panel_present(
         present_frame.cpu_contents_valid = false;
         Some(0)
     } else {
-        platform::println!("compositor.service: virgl panel fallback status={}", status);
         present_frame.gpu_panel_disabled = true;
         present_frame.gpu_contents_valid = false;
         None
