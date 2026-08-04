@@ -9,6 +9,7 @@ use crate::setup::AccountSetup;
 use crate::wallpaper::Wallpaper;
 
 const FORM_WIDTH: f32 = 320.0;
+const LOCK_USER_ARG_PREFIX: &str = "--lock-user=";
 
 pub(crate) struct LoginApp {
     users: Vec<authentication::LoginUser>,
@@ -25,7 +26,12 @@ impl App for LoginApp {
     type Body = Box<dyn View + 'static>;
 
     fn new() -> Self {
-        let (users, initial_status, account_setup) = match authentication::list_users(1) {
+        let lock_user = std::env::args().find_map(|argument| {
+            argument
+                .strip_prefix(LOCK_USER_ARG_PREFIX)
+                .map(str::to_owned)
+        });
+        let (mut users, initial_status, mut account_setup) = match authentication::list_users(1) {
             Ok(result) if result.has_regular_account => (result.users, String::new(), None),
             Ok(_) => (Vec::new(), String::new(), Some(AccountSetup::new())),
             Err(AuthenticationError::ServiceUnavailable) => (
@@ -39,6 +45,10 @@ impl App for LoginApp {
                 None,
             ),
         };
+        if let Some(lock_user) = lock_user {
+            users.retain(|user| user.name == lock_user);
+            account_setup = None;
+        }
         let selected_username = users
             .first()
             .map(|user| user.name.clone())

@@ -64,6 +64,8 @@ fn service_manifests_match_policy() {
             .collect::<alloc::vec::Vec<_>>(),
         [
             "fs.read.all",
+            "process.inspect",
+            "process.kill",
             "process.spawn",
             "service.register",
             "capabilities.manage",

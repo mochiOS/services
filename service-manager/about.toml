@@ -7,6 +7,8 @@ entry = "service-manager.service"
 [capabilities]
 requires = [
     "fs.read.all",
+    "process.inspect",
+    "process.kill",
     "process.spawn",
     "service.register",
     "capabilities.manage",

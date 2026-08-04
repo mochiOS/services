@@ -9,6 +9,7 @@ mod fixed_service_launcher;
 mod orchestration;
 mod readiness;
 mod service_config;
+mod session;
 mod spawn_support;
 
 #[cfg(not(test))]

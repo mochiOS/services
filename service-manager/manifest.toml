@@ -9,6 +9,8 @@ path = "/system/services/service-manager.service"
 kind = "service"
 requires = [
     "fs.read.all",
+    "process.inspect",
+    "process.kill",
     "process.spawn",
     "service.register",
     "capabilities.manage",

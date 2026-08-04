@@ -38,6 +38,8 @@ pub(crate) enum StopReason {
 pub(crate) struct BootstrapOutcome {
     pub(crate) children: ChildProcesses,
     pub(crate) reason: StopReason,
+    pub(crate) identity: Option<SessionIdentity>,
+    pub(crate) session_id: u64,
 }
 
 impl BootstrapOutcome {
@@ -55,6 +57,8 @@ impl BootstrapOutcome {
                 update: None,
             },
             reason: StopReason::DriverControlInitializationFailed,
+            identity: None,
+            session_id: 0,
         }
     }
 }
@@ -68,6 +72,7 @@ pub(crate) trait BootstrapOperations {
         &mut self,
         service: FixedService,
         identity: SessionIdentity,
+        session_id: u64,
     ) -> Option<u64>;
     fn wait_display_ready(&mut self, process_id: u64) -> bool;
     fn wait_input_ready(&mut self, process_id: u64) -> bool;
@@ -133,7 +138,9 @@ pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> Bootstra
         return outcome(children, StopReason::SecureUiLoginFailed);
     };
 
-    let Some(binder) = operations.spawn_user_session(FixedService::Binder, identity) else {
+    let session_id = 1;
+    let Some(binder) = operations.spawn_user_session(FixedService::Binder, identity, session_id)
+    else {
         return outcome(children, StopReason::BinderSpawnFailed);
     };
     children.binder = Some(binder);
@@ -142,11 +149,21 @@ pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> Bootstra
     {
         children.update = operations.spawn_fixed(FixedService::Update);
     }
-    outcome(children, StopReason::Running)
+    BootstrapOutcome {
+        children,
+        reason: StopReason::Running,
+        identity: Some(identity),
+        session_id,
+    }
 }
 
 const fn outcome(children: ChildProcesses, reason: StopReason) -> BootstrapOutcome {
-    BootstrapOutcome { children, reason }
+    BootstrapOutcome {
+        children,
+        reason,
+        identity: None,
+        session_id: 0,
+    }
 }
 
 #[cfg(test)]
@@ -239,6 +256,7 @@ mod tests {
             &mut self,
             service: FixedService,
             identity: SessionIdentity,
+            _session_id: u64,
         ) -> Option<u64> {
             self.events.push(Event::SpawnUserSession(service, identity));
             (self.failure != Failure::Spawn(service)).then_some(17)
@@ -318,6 +336,8 @@ mod tests {
         assert_eq!(outcome.children.secure_ui, Some(16));
         assert_eq!(outcome.children.binder, Some(17));
         assert_eq!(outcome.children.update, Some(18));
+        assert_eq!(outcome.identity, Some(TEST_IDENTITY));
+        assert_eq!(outcome.session_id, 1);
     }
 
     #[test]

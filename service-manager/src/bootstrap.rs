@@ -5,6 +5,7 @@ use crate::fixed_service_launcher;
 use crate::orchestration::{BootstrapOperations, BootstrapOutcome, orchestrate};
 use crate::readiness::{ReadyError, ReadyHandshake, ReadyService};
 use crate::service_config::FixedService;
+use crate::session::{ActiveSession, terminate_process_tree};
 use crate::spawn_support::{errno, sys_error};
 
 const DELEGATE_REGISTER_ATTEMPTS: usize = 32;
@@ -63,6 +64,41 @@ impl Runtime {
             Err(error) => {
                 log_ready_error(service, error);
                 false
+            }
+        }
+    }
+
+    fn authenticate_session(
+        &mut self,
+        lock_uid: Option<u32>,
+    ) -> Option<platform::service_ready::SessionIdentity> {
+        let mut handshake = match ReadyHandshake::create() {
+            Ok(handshake) => handshake,
+            Err(error) => {
+                platform::println!(
+                    "service-manager.service: secure UI handshake create failed error={:?}",
+                    error
+                );
+                return None;
+            }
+        };
+        let target = handshake.target(ReadyService::SecureUi);
+        let process_id =
+            match fixed_service_launcher::spawn_secure_ui(self.logger_endpoint, target, lock_uid) {
+                Ok(process_id) => process_id,
+                Err(error) => {
+                    platform::println!(
+                        "service-manager.service: secure-ui.service spawn failed errno={}",
+                        errno(error)
+                    );
+                    return None;
+                }
+            };
+        match handshake.wait_for_login_complete(process_id) {
+            Ok(identity) => Some(identity),
+            Err(error) => {
+                log_ready_error(ReadyService::SecureUi, error);
+                None
             }
         }
     }
@@ -211,8 +247,14 @@ impl BootstrapOperations for Runtime {
         &mut self,
         service: FixedService,
         identity: platform::service_ready::SessionIdentity,
+        session_id: u64,
     ) -> Option<u64> {
-        match fixed_service_launcher::spawn_user_session(service, self.logger_endpoint, identity) {
+        match fixed_service_launcher::spawn_user_session(
+            service,
+            self.logger_endpoint,
+            identity,
+            session_id,
+        ) {
             Ok(process_id) => {
                 platform::println!(
                     "service-manager.service: {} spawned pid={}",
@@ -375,8 +417,129 @@ fn log_ready_error(service: ReadyService, error: ReadyError) {
     }
 }
 
-fn resident(_outcome: BootstrapOutcome, _runtime: Option<Runtime>) -> ! {
+fn resident(outcome: BootstrapOutcome, runtime: Option<Runtime>) -> ! {
+    let mut runtime = runtime;
+    let mut active_session =
+        outcome
+            .identity
+            .zip(outcome.children.binder)
+            .map(|(identity, binder_pid)| ActiveSession {
+                id: outcome.session_id,
+                identity,
+                binder_pid,
+            });
+    let mut request_bytes = [0u8; platform::session_control::REQUEST_LEN];
     loop {
-        platform::thread::yield_now();
+        let received = match platform::ipc::try_wait(&mut request_bytes) {
+            Ok(received) => received,
+            Err(error) if error.raw() == mochi_user_syscall::EAGAIN as i64 => {
+                platform::thread::yield_now();
+                continue;
+            }
+            Err(_) => {
+                platform::thread::yield_now();
+                continue;
+            }
+        };
+        let sender = received >> 32;
+        let length = (received & 0xffff_ffff) as usize;
+        let request = request_bytes
+            .get(..length)
+            .ok_or(())
+            .and_then(|bytes| platform::session_control::decode_request(bytes).map_err(|_| ()));
+        let Ok(request) = request else {
+            reply_session_status(
+                sender,
+                platform::session_control::Action::Lock,
+                1,
+                -(mochi_user_syscall::EINVAL as i32),
+            );
+            continue;
+        };
+        let Some(session) = active_session else {
+            reply_session_status(
+                sender,
+                request.action,
+                request.session_id,
+                -(mochi_user_syscall::EPERM as i32),
+            );
+            continue;
+        };
+        let sender_process = platform::ipc::endpoint_owner_process(sender).ok();
+        if sender_process != Some(session.binder_pid) || request.session_id != session.id {
+            reply_session_status(
+                sender,
+                request.action,
+                request.session_id,
+                -(mochi_user_syscall::EPERM as i32),
+            );
+            continue;
+        }
+        let Some(runtime) = runtime.as_mut() else {
+            reply_session_status(
+                sender,
+                request.action,
+                request.session_id,
+                -(mochi_user_syscall::EIO as i32),
+            );
+            continue;
+        };
+        match request.action {
+            platform::session_control::Action::Lock => {
+                let status = match runtime.authenticate_session(Some(session.identity.uid)) {
+                    Some(identity) if identity == session.identity => 0,
+                    Some(_) => -(mochi_user_syscall::EACCES as i32),
+                    None => -(mochi_user_syscall::EIO as i32),
+                };
+                reply_session_status(sender, request.action, session.id, status);
+            }
+            platform::session_control::Action::LogOut => {
+                reply_session_status(sender, request.action, session.id, 0);
+                active_session = None;
+                if let Err(error) = terminate_process_tree(session.binder_pid) {
+                    platform::println!(
+                        "service-manager.service: session termination failed errno={}",
+                        errno(error)
+                    );
+                }
+                let Some(identity) = runtime.authenticate_session(None) else {
+                    continue;
+                };
+                let session_id = session.next_id();
+                match fixed_service_launcher::spawn_user_session(
+                    FixedService::Binder,
+                    runtime.logger_endpoint,
+                    identity,
+                    session_id,
+                ) {
+                    Ok(binder_pid) => {
+                        active_session = Some(ActiveSession {
+                            id: session_id,
+                            identity,
+                            binder_pid,
+                        });
+                    }
+                    Err(error) => platform::println!(
+                        "service-manager.service: Binder.app spawn failed errno={}",
+                        errno(error)
+                    ),
+                }
+            }
+        }
     }
+}
+
+fn reply_session_status(
+    sender: u64,
+    action: platform::session_control::Action,
+    session_id: u64,
+    status: i32,
+) {
+    let response =
+        platform::session_control::encode_response(platform::session_control::Response {
+            action,
+            session_id,
+            status,
+        });
+    let _ = platform::ipc::reply(sender, &response);
 }
