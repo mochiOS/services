@@ -92,6 +92,7 @@ pub(crate) fn display_claim_present_owner(display_tid: u64) -> u32 {
     read_u32(reply, 0).unwrap_or(errno_status(mochi_user_syscall::EIO))
 }
 
+#[allow(dead_code)]
 pub(crate) fn display_set_cursor_image(display_tid: u64, request: &[u8]) -> u32 {
     if request.len() > 4128 || request.len() < 20 {
         return errno_status(mochi_user_syscall::EINVAL);
