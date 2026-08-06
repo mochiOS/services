@@ -2,7 +2,7 @@ use mochi_user_platform as platform;
 
 use crate::service_config::{
     DRIVERS, FixedService, ReadyTarget, ServiceSpec, driver_arguments, fixed_service_arguments,
-    fixed_service_spec,
+    fixed_service_spec, mboot_agent_arguments,
 };
 use crate::spawn_support::{encode_spawn_args, resolve_capabilities, sys_error};
 
@@ -72,6 +72,16 @@ pub(crate) fn spawn_fixed_service(
     });
     let arguments = fixed_service_arguments(service, logger_endpoint, ready_target);
     spawn(fixed_service_spec(service), &arguments)
+}
+
+pub(crate) fn spawn_mboot_agent(
+    logger_endpoint: u64,
+    stage_token: u64,
+) -> Result<u64, mochi_user_syscall::SysError> {
+    spawn(
+        fixed_service_spec(FixedService::MbootAgent),
+        &mboot_agent_arguments(logger_endpoint, stage_token),
+    )
 }
 
 pub(crate) fn spawn_user_session(

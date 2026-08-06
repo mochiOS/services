@@ -4,6 +4,7 @@ use mochi_user_platform::service_ready::SessionIdentity;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ChildProcesses {
     pub(crate) drivers: Option<u64>,
+    pub(crate) mboot_agent: Option<u64>,
     pub(crate) input: Option<u64>,
     pub(crate) display: Option<u64>,
     pub(crate) compositor: Option<u64>,
@@ -47,6 +48,7 @@ impl BootstrapOutcome {
         Self {
             children: ChildProcesses {
                 drivers: None,
+                mboot_agent: None,
                 input: None,
                 display: None,
                 compositor: None,
@@ -67,6 +69,8 @@ pub(crate) trait BootstrapOperations {
     fn spawn_drivers(&mut self) -> Option<u64>;
     fn register_driver_delegate(&mut self, process_id: u64) -> bool;
     fn wait_driver_hello(&mut self, process_id: u64) -> bool;
+    fn spawn_mboot_agent(&mut self) -> Option<u64>;
+    fn notify_mboot_stage(&mut self, stage: MbootStage);
     fn spawn_fixed(&mut self, service: FixedService) -> Option<u64>;
     fn spawn_user_session(
         &mut self,
@@ -83,6 +87,13 @@ pub(crate) trait BootstrapOperations {
     fn wait_secure_ui_login(&mut self, process_id: u64) -> Option<SessionIdentity>;
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MbootStage {
+    Userspace = 1,
+    Display = 2,
+    Desktop = 3,
+}
+
 pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> BootstrapOutcome {
     let mut children = ChildProcesses::default();
 
@@ -96,6 +107,8 @@ pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> Bootstra
     if !operations.wait_driver_hello(drivers) {
         return outcome(children, StopReason::DriverHelloFailed);
     }
+    children.mboot_agent = operations.spawn_mboot_agent();
+    operations.notify_mboot_stage(MbootStage::Userspace);
 
     let Some(input) = operations.spawn_fixed(FixedService::Input) else {
         return outcome(children, StopReason::InputSpawnFailed);
@@ -114,6 +127,9 @@ pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> Bootstra
     }
 
     children.compositor = operations.spawn_fixed(FixedService::Compositor);
+    if children.compositor.is_some() {
+        operations.notify_mboot_stage(MbootStage::Display);
+    }
     if !operations.start_discovery() {
         return outcome(children, StopReason::StartDiscoveryFailed);
     }
@@ -144,6 +160,7 @@ pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> Bootstra
         return outcome(children, StopReason::BinderSpawnFailed);
     };
     children.binder = Some(binder);
+    operations.notify_mboot_stage(MbootStage::Desktop);
     if let Some(network) = children.network
         && operations.wait_network_ready(network)
     {
@@ -178,6 +195,8 @@ mod tests {
         SpawnDrivers,
         RegisterDriverDelegate,
         WaitHello,
+        SpawnMbootAgent,
+        NotifyMbootStage(MbootStage),
         Spawn(FixedService),
         SpawnUserSession(FixedService, SessionIdentity),
         WaitDisplay,
@@ -235,12 +254,22 @@ mod tests {
             self.failure != Failure::Hello
         }
 
+        fn spawn_mboot_agent(&mut self) -> Option<u64> {
+            self.events.push(Event::SpawnMbootAgent);
+            Some(11)
+        }
+
+        fn notify_mboot_stage(&mut self, stage: MbootStage) {
+            self.events.push(Event::NotifyMbootStage(stage));
+        }
+
         fn spawn_fixed(&mut self, service: FixedService) -> Option<u64> {
             self.events.push(Event::Spawn(service));
             if self.failure == Failure::Spawn(service) {
                 return None;
             }
             Some(match service {
+                FixedService::MbootAgent => 19,
                 FixedService::Input => 11,
                 FixedService::Display => 12,
                 FixedService::Compositor => 13,
@@ -303,11 +332,14 @@ mod tests {
             Event::SpawnDrivers,
             Event::RegisterDriverDelegate,
             Event::WaitHello,
+            Event::SpawnMbootAgent,
+            Event::NotifyMbootStage(MbootStage::Userspace),
             Event::Spawn(FixedService::Input),
             Event::Spawn(FixedService::Display),
             Event::WaitDisplay,
             Event::WaitInput,
             Event::Spawn(FixedService::Compositor),
+            Event::NotifyMbootStage(MbootStage::Display),
             Event::StartDiscovery,
             Event::WaitDiscovery,
             Event::Spawn(FixedService::Network),
@@ -316,6 +348,7 @@ mod tests {
             Event::Spawn(FixedService::SecureUi),
             Event::WaitSecureUiLogin,
             Event::SpawnUserSession(FixedService::Binder, TEST_IDENTITY),
+            Event::NotifyMbootStage(MbootStage::Desktop),
             Event::WaitNetwork,
             Event::Spawn(FixedService::Update),
         ]
@@ -328,6 +361,7 @@ mod tests {
         assert_eq!(operations.events, expected_success_events());
         assert_eq!(outcome.reason, StopReason::Running);
         assert_eq!(outcome.children.drivers, Some(10));
+        assert_eq!(outcome.children.mboot_agent, Some(11));
         assert_eq!(outcome.children.input, Some(11));
         assert_eq!(outcome.children.display, Some(12));
         assert_eq!(outcome.children.compositor, Some(13));

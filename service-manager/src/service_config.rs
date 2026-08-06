@@ -7,6 +7,7 @@ pub(crate) const SERVICE_READY_TIMEOUT_TICKS: u64 = 5_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FixedService {
+    MbootAgent,
     Input,
     Display,
     Compositor,
@@ -38,6 +39,11 @@ pub(crate) const DRIVERS: ServiceSpec = ServiceSpec {
 
 pub(crate) const fn fixed_service_spec(service: FixedService) -> ServiceSpec {
     match service {
+        FixedService::MbootAgent => ServiceSpec {
+            path: "/system/services/mboot-agent.service",
+            manifest_path: "/system/packages/mboot-agent/manifest.toml",
+            role: ROLE_SERVICE,
+        },
         FixedService::Input => ServiceSpec {
             path: "/system/services/input.service",
             manifest_path: "/system/packages/input/manifest.toml",
@@ -116,6 +122,13 @@ pub(crate) fn fixed_service_arguments(
     arguments
 }
 
+pub(crate) fn mboot_agent_arguments(logger_endpoint: u64, stage_token: u64) -> Vec<String> {
+    alloc::vec![
+        logger_endpoint.to_string(),
+        alloc::format!("--mboot-stage-token={stage_token}"),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,6 +142,12 @@ mod tests {
         );
         assert_eq!(DRIVERS.role, ROLE_SERVICE);
         let expected = [
+            (
+                FixedService::MbootAgent,
+                "/system/services/mboot-agent.service",
+                "/system/packages/mboot-agent/manifest.toml",
+                ROLE_SERVICE,
+            ),
             (
                 FixedService::Input,
                 "/system/services/input.service",
@@ -188,6 +207,10 @@ mod tests {
 
     #[test]
     fn arguments_preserve_logger_and_add_only_required_control_target() {
+        assert_eq!(
+            mboot_agent_arguments(7, 9),
+            alloc::vec!["7".to_string(), "--mboot-stage-token=9".to_string()]
+        );
         assert_eq!(
             driver_arguments(7, 8, 9),
             alloc::vec!["7".to_string(), "--driver-manager=8:9".to_string(),]

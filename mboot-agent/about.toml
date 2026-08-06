@@ -1,0 +1,14 @@
+[service]
+id = "org.mochios.mboot-agent"
+name = "mBoot Agent"
+version = "1"
+entry = "mboot-agent.service"
+
+[capabilities]
+requires = [
+    "dma.allocate",
+    "ipc.server",
+    "serial.access",
+    "system.random.read",
+    "system.time.read",
+]

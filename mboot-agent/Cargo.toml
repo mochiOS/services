@@ -1,0 +1,26 @@
+[package]
+name = "mboot-agent"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mochios"))'] }
+
+[dependencies]
+mboot-protocol = { git = "https://github.com/mochiOS/mBoot", rev = "9918aef4f74a795022534e6c663df9c9a8bbbc3a", package = "mboot-protocol" }
+
+[target.'cfg(target_os = "mochios")'.dependencies]
+mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }
+mochi-user-syscall = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-syscall" }
+plugkit = { git = "https://github.com/mochiOS/mnu", package = "plugkit" }
+
+[[bin]]
+name = "mboot-agent"
+path = "src/main.rs"
+test = false
+bench = false
+harness = false
+
+[lib]
+path = "src/lib.rs"

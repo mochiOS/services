@@ -30,7 +30,7 @@ pub(crate) fn sys_error(errno: u64) -> mochi_user_syscall::SysError {
     mochi_user_syscall::SysError::from_raw(-(errno as i64))
 }
 
-fn call_capability_service(
+pub(crate) fn call_with_wait(
     service_tid: u64,
     request: &[u8],
     reply: &mut [u8],
@@ -70,7 +70,7 @@ pub(crate) fn resolve_capabilities(
     let request = platform::capability::encode_resolve_capabilities_request(entry_path)
         .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
     let mut reply = [0u8; 1024];
-    let message = match call_capability_service(service_tid, &request, &mut reply) {
+    let message = match call_with_wait(service_tid, &request, &mut reply) {
         Ok(message) => message,
         Err(error) => {
             platform::println!(

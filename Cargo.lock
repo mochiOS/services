@@ -1163,6 +1163,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mboot-agent"
+version = "0.1.0"
+dependencies = [
+ "mboot-protocol",
+ "mochi-user-platform",
+ "mochi-user-syscall",
+ "plugkit",
+]
+
+[[package]]
+name = "mboot-protocol"
+version = "0.1.0"
+source = "git+https://github.com/mochiOS/mBoot?rev=9918aef4f74a795022534e6c663df9c9a8bbbc3a#9918aef4f74a795022534e6c663df9c9a8bbbc3a"
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

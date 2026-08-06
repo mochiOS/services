@@ -1,0 +1,16 @@
+[package]
+id = "org.mochios.mboot-agent"
+name = "mBoot Agent"
+version = "1"
+vendor = "mochiOS"
+
+[[binary]]
+path = "/system/services/mboot-agent.service"
+kind = "service"
+requires = [
+    "dma.allocate",
+    "ipc.server",
+    "serial.access",
+    "system.random.read",
+    "system.time.read",
+]

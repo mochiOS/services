@@ -2,7 +2,7 @@ use mochi_user_platform as platform;
 
 use crate::driver_controller::{DriverControlError, DriverController};
 use crate::fixed_service_launcher;
-use crate::orchestration::{BootstrapOperations, BootstrapOutcome, orchestrate};
+use crate::orchestration::{BootstrapOperations, BootstrapOutcome, MbootStage, orchestrate};
 use crate::readiness::{ReadyError, ReadyHandshake, ReadyService};
 use crate::service_config::FixedService;
 use crate::session::{ActiveSession, terminate_process_tree};
@@ -14,6 +14,7 @@ struct Runtime {
     logger_endpoint: u64,
     driver_controller: DriverController,
     ready: Option<ReadyHandshake>,
+    mboot_agent: Option<(u64, u64)>,
 }
 
 impl Runtime {
@@ -22,6 +23,7 @@ impl Runtime {
             logger_endpoint,
             driver_controller: DriverController::create()?,
             ready: None,
+            mboot_agent: None,
         })
     }
 
@@ -173,6 +175,54 @@ impl BootstrapOperations for Runtime {
         }
     }
 
+    fn spawn_mboot_agent(&mut self) -> Option<u64> {
+        let token = match platform::service_ready::generate_token() {
+            Ok(token) => token,
+            Err(error) => {
+                platform::println!(
+                    "service-manager.service: mboot-agent token generation failed errno={}",
+                    errno(error)
+                );
+                return None;
+            }
+        };
+        match fixed_service_launcher::spawn_mboot_agent(self.logger_endpoint, token) {
+            Ok(process_id) => {
+                self.mboot_agent = Some((process_id, token));
+                platform::println!(
+                    "service-manager.service: mboot-agent.service spawned pid={}",
+                    process_id
+                );
+                Some(process_id)
+            }
+            Err(error) => {
+                platform::println!(
+                    "service-manager.service: mboot-agent.service spawn failed errno={}",
+                    errno(error)
+                );
+                None
+            }
+        }
+    }
+
+    fn notify_mboot_stage(&mut self, stage: MbootStage) {
+        let Some((process_id, token)) = self.mboot_agent else {
+            return;
+        };
+        let request = platform::service_ready::notification(token, stage as i32);
+        let mut reply = [0u8; 4];
+        let result = crate::spawn_support::call_with_wait(process_id, &request, &mut reply);
+        let valid = result.is_ok_and(|message| {
+            (message & 0xffff_ffff) as usize == reply.len() && i32::from_le_bytes(reply) == 0
+        });
+        if !valid {
+            platform::println!(
+                "service-manager.service: mboot-agent stage notification failed stage={}",
+                stage as i32
+            );
+        }
+    }
+
     fn spawn_fixed(&mut self, service: FixedService) -> Option<u64> {
         let ready_target = match service {
             FixedService::Input => {
@@ -211,7 +261,10 @@ impl BootstrapOperations for Runtime {
                     .as_ref()
                     .map(|handshake| handshake.target(ReadyService::SecureUi))
             }
-            FixedService::Compositor | FixedService::Binder | FixedService::Update => None,
+            FixedService::MbootAgent
+            | FixedService::Compositor
+            | FixedService::Binder
+            | FixedService::Update => None,
         };
         if matches!(service, FixedService::Display) && ready_target.is_none() {
             platform::println!(
@@ -369,6 +422,7 @@ pub(crate) fn run() -> ! {
 
 fn service_name(service: FixedService) -> &'static str {
     match service {
+        FixedService::MbootAgent => "mboot-agent.service",
         FixedService::Input => "input.service",
         FixedService::Display => "display.driver",
         FixedService::Compositor => "compositor.service",
