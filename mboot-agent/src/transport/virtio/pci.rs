@@ -5,10 +5,10 @@ use plugkit::virtio::{
     VirtioPciCapabilities, VirtioResult, find_pci_device,
 };
 
+use super::super::model::{VIRTIO_CONSOLE_DEVICE_ID, VIRTIO_VENDOR_ID};
+
 const PCI_CONFIG_ADDRESS: u16 = 0x0cf8;
 const PCI_CONFIG_DATA: u16 = 0x0cfc;
-const VIRTIO_VENDOR_ID: u16 = 0x1af4;
-const VIRTIO_CONSOLE_DEVICE_ID: u16 = 0x1043;
 const MMIO_VIRTUAL_BASE: u64 = 0x0000_6300_0000_0000;
 const MMIO_BAR_SPACING: u64 = 0x0200_0000;
 const MAX_MAPPED_BAR_SIZE: u64 = 0x0100_0000;

@@ -214,7 +214,7 @@ impl Agent {
 
     fn handle_message(&mut self, message: Message, now_ms: u64) -> Result<(), AgentError> {
         if message.message_type == MessageType::Request {
-            return self.handle_request(message);
+            return self.handle_request(message, now_ms);
         }
         let Some(pending) = self.pending else {
             return Ok(());
@@ -279,7 +279,7 @@ impl Agent {
                 .is_some_and(|interval| interval > 0 && interval <= MAX_HEARTBEAT_MS)
     }
 
-    fn handle_request(&mut self, request: Message) -> Result<(), AgentError> {
+    fn handle_request(&mut self, request: Message, now_ms: u64) -> Result<(), AgentError> {
         if request.destination != Destination::Mochios || request.request_id == 0 {
             return Ok(());
         }
@@ -287,6 +287,17 @@ impl Agent {
             Some(KnownCommand::ProtocolPing | KnownCommand::ProtocolSync) => {
                 Message::ok(Destination::Mboot, request.request_id, Vec::new())
             }
+            Some(KnownCommand::GuestStatus) => Message::ok(
+                Destination::Mboot,
+                request.request_id,
+                vec![
+                    Argument::new("stage", self.achieved_stage.as_str()),
+                    Argument::new(
+                        "uptime_ms",
+                        now_ms.saturating_sub(self.boot_started_ms).to_string(),
+                    ),
+                ],
+            ),
             _ => Message::error(
                 Destination::Mboot,
                 request.request_id,
@@ -367,12 +378,7 @@ impl Agent {
     ) -> Result<T, AgentError> {
         transport.reset_connection();
         self.reset_session();
-        match error {
-            TransportError::Disconnected | TransportError::WouldBlock => {
-                Err(AgentError::Transport(error))
-            }
-            _ => Err(AgentError::Transport(error)),
-        }
+        Err(AgentError::Transport(error))
     }
 
     fn reset_session(&mut self) {
@@ -623,5 +629,114 @@ mod tests {
         agent.tick(&mut transport, 5).unwrap();
         assert!(!agent.is_negotiated());
         assert_eq!(agent.session(), None);
+    }
+
+    #[test]
+    fn welcome_requires_the_expected_shape_and_success_status() {
+        let mut agent = Agent::new("26.0.0", "boot-a", 0);
+        let mut transport = MockTransport::connected();
+        agent.tick(&mut transport, 1).unwrap();
+        let sync = transport.lines().pop().unwrap();
+        transport.push(&response(Message::ok(
+            Destination::Mochios,
+            sync.request_id,
+            Vec::new(),
+        )));
+        agent.tick(&mut transport, 2).unwrap();
+        let hello = transport.lines().pop().unwrap();
+
+        let valid = Message::command(
+            Destination::Mochios,
+            MessageType::Response,
+            hello.request_id,
+            KnownCommand::ProtocolWelcome,
+            vec![
+                Argument::new("version", "1"),
+                Argument::new("session", "session-a"),
+                Argument::new("heartbeat_ms", "25"),
+            ],
+        );
+        let mut invalid_messages = Vec::new();
+        let mut wrong_destination = valid.clone();
+        wrong_destination.destination = Destination::Mboot;
+        invalid_messages.push(wrong_destination);
+        let mut wrong_type = valid.clone();
+        wrong_type.message_type = MessageType::Event;
+        wrong_type.request_id = 0;
+        invalid_messages.push(wrong_type);
+        let mut failed = valid.clone();
+        failed.body = Body::Error(ErrorCode::Internal);
+        invalid_messages.push(failed);
+        let mut missing_session = valid.clone();
+        missing_session
+            .arguments
+            .retain(|argument| argument.key != "session");
+        invalid_messages.push(missing_session);
+
+        for message in invalid_messages {
+            agent.handle_message(message, 3).unwrap();
+            assert!(!agent.is_negotiated());
+        }
+        agent.handle_message(valid, 3).unwrap();
+        assert!(agent.is_negotiated());
+    }
+
+    #[test]
+    fn guest_status_reports_stage_and_monotonic_uptime() {
+        let mut agent = Agent::new("26.0.0", "boot-a", 10);
+        agent.mark_ready(ReadyStage::Userspace).unwrap();
+        let mut transport = MockTransport::connected();
+        negotiate(&mut agent, &mut transport, 20);
+        transport.push(&response(Message::command(
+            Destination::Mochios,
+            MessageType::Request,
+            77,
+            KnownCommand::GuestStatus,
+            Vec::new(),
+        )));
+        agent.tick(&mut transport, 45).unwrap();
+        let status = transport
+            .lines()
+            .into_iter()
+            .find(|message| message.request_id == 77)
+            .unwrap();
+        assert!(matches!(status.body, Body::Ok));
+        assert_eq!(status.argument("stage"), Some("userspace"));
+        assert_eq!(status.argument("uptime_ms"), Some("35"));
+    }
+
+    #[test]
+    fn power_requests_return_unsupported_without_executing_actions() {
+        let mut agent = Agent::new("26.0.0", "boot-a", 0);
+        let mut transport = MockTransport::connected();
+        negotiate(&mut agent, &mut transport, 1);
+        for (request_id, command) in [
+            (81, KnownCommand::GuestShutdown),
+            (82, KnownCommand::GuestReboot),
+        ] {
+            transport.push(&response(Message::command(
+                Destination::Mochios,
+                MessageType::Request,
+                request_id,
+                command,
+                Vec::new(),
+            )));
+        }
+        agent.tick(&mut transport, 10).unwrap();
+        for request_id in 81..=82 {
+            assert!(transport.lines().iter().any(|message| {
+                message.request_id == request_id
+                    && matches!(message.body, Body::Error(ErrorCode::Unsupported))
+            }));
+        }
+    }
+
+    #[test]
+    fn request_ids_wrap_without_using_zero() {
+        let mut agent = Agent::new("26.0.0", "boot-a", 0);
+        agent.next_request_id = u64::MAX;
+        assert_eq!(agent.allocate_request_id(), u64::MAX);
+        assert_eq!(agent.allocate_request_id(), 1);
+        assert_eq!(agent.allocate_request_id(), 2);
     }
 }

@@ -2,7 +2,8 @@ use std::fmt::Write;
 
 use mochi_user_platform as platform;
 
-use crate::agent::{Agent, ReadyStage};
+use crate::agent::{Agent, AgentError, ReadyStage};
+use crate::transport::TransportError;
 use crate::transport::virtio::VirtioSerialTransport;
 
 const STAGE_TOKEN_PREFIX: &str = "--mboot-stage-token=";
@@ -49,7 +50,21 @@ pub fn run() -> ! {
             }
         }
         if let Some(active) = transport.as_mut() {
-            let _ = agent.tick(active, current_ticks());
+            match agent.tick(active, current_ticks()) {
+                Ok(()) | Err(AgentError::Transport(TransportError::Disconnected)) => {}
+                Err(AgentError::Transport(TransportError::WouldBlock)) => {}
+                Err(AgentError::Transport(
+                    TransportError::InvalidDevice | TransportError::Io(_),
+                )) => {
+                    platform::println!(
+                        "mboot-agent.service: control transport reset; reinitializing"
+                    );
+                    transport = None;
+                }
+                Err(error) => {
+                    platform::println!("mboot-agent.service: protocol error={:?}", error);
+                }
+            }
         }
         let _ = platform::thread::sleep_milliseconds(POLL_DELAY_MS);
     }

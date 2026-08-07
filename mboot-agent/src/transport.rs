@@ -14,5 +14,8 @@ pub trait ControlTransport {
     fn reset_connection(&mut self);
 }
 
+#[cfg(any(target_os = "mochios", test))]
+pub(crate) mod model;
+
 #[cfg(target_os = "mochios")]
 pub mod virtio;

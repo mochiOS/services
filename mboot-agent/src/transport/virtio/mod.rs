@@ -5,17 +5,18 @@ use std::collections::VecDeque;
 
 use plugkit::virtio::{
     Descriptor, DeviceStatus, DmaMemory, FeatureSet, PciTransportAccess, SplitVirtqueue,
-    VIRTIO_F_VERSION_1, VirtioDevice, VirtioError, VirtioPciTransport, VirtqueueLayout,
+    VirtioDevice, VirtioError, VirtioPciTransport, VirtqueueLayout,
 };
 
+use super::model::{
+    PortStatus, REQUIRED_FEATURES, drain_received, is_target_name, port_queue_indices,
+    write_chunk_length,
+};
 use super::{ControlTransport, TransportError};
 use dma::DmaRegion;
 use pci::MappedBars;
 
-const TARGET_PORT_NAME: &[u8] = b"org.mochios.mboot.control";
-const VIRTIO_CONSOLE_F_MULTIPORT: u64 = 1 << 1;
-const REQUESTED_FEATURES: u64 = VIRTIO_F_VERSION_1 | VIRTIO_CONSOLE_F_MULTIPORT;
-const REQUIRED_FEATURES: u64 = REQUESTED_FEATURES;
+const REQUESTED_FEATURES: u64 = REQUIRED_FEATURES;
 const CONTROL_RX_QUEUE: u16 = 2;
 const CONTROL_TX_QUEUE: u16 = 3;
 const MAX_PORTS: usize = 32;
@@ -48,9 +49,7 @@ struct PortQueues {
     transmit: Queue,
     receive_buffers: Vec<BufferSlot>,
     transmit_buffers: Vec<BufferSlot>,
-    added: bool,
-    name_matches: bool,
-    host_open: bool,
+    status: PortStatus,
 }
 
 pub struct VirtioSerialTransport {
@@ -97,9 +96,7 @@ impl VirtioSerialTransport {
                 transmit: make_queue(&mut device, transmit_index)?,
                 receive_buffers: Vec::new(),
                 transmit_buffers: Vec::new(),
-                added: false,
-                name_matches: false,
-                host_open: false,
+                status: PortStatus::default(),
             });
         }
         let mut transport = Self {
@@ -221,9 +218,7 @@ impl VirtioSerialTransport {
             }
             PORT_REMOVE if port_id < self.ports.len() => {
                 let port = &mut self.ports[port_id];
-                port.added = false;
-                port.name_matches = false;
-                port.host_open = false;
+                port.status.remove();
                 if self.target_port == Some(port_id) {
                     self.target_port = None;
                     self.received.clear();
@@ -231,13 +226,18 @@ impl VirtioSerialTransport {
             }
             PORT_NAME if port_id < self.ports.len() => {
                 let matches = is_target_name(&event.payload);
-                self.ports[port_id].name_matches = matches;
+                self.ports[port_id].status.set_name(&event.payload);
                 if matches {
+                    self.send_control(event.id, PORT_OPEN, 1)?;
+                    self.ports[port_id].status.set_guest_open(true);
                     self.target_port = Some(port_id);
+                } else if self.target_port == Some(port_id) {
+                    self.target_port = None;
+                    self.received.clear();
                 }
             }
             PORT_OPEN if port_id < self.ports.len() => {
-                self.ports[port_id].host_open = event.value != 0;
+                self.ports[port_id].status.set_open(event.value != 0);
                 if self.target_port == Some(port_id) && event.value == 0 {
                     self.received.clear();
                 }
@@ -248,7 +248,7 @@ impl VirtioSerialTransport {
     }
 
     fn activate_port(&mut self, port_id: usize) -> Result<(), TransportError> {
-        if self.ports[port_id].added {
+        if self.ports[port_id].status.added {
             return Ok(());
         }
         let receive_count =
@@ -257,7 +257,7 @@ impl VirtioSerialTransport {
             DATA_BUFFER_COUNT.min(usize::from(self.ports[port_id].transmit.ring.size()));
         self.ports[port_id].receive_buffers = allocate_buffers(receive_count, DATA_BUFFER_LEN)?;
         self.ports[port_id].transmit_buffers = allocate_buffers(transmit_count, DATA_BUFFER_LEN)?;
-        self.ports[port_id].added = true;
+        self.ports[port_id].status.add();
         for slot in 0..receive_count {
             self.post_port_receive(port_id, slot)?;
         }
@@ -293,7 +293,7 @@ impl VirtioSerialTransport {
 
     fn poll_ports(&mut self) -> Result<(), TransportError> {
         for port_id in 0..self.ports.len() {
-            if !self.ports[port_id].added {
+            if !self.ports[port_id].status.added {
                 continue;
             }
             while let Some(used) = self.ports[port_id]
@@ -313,7 +313,7 @@ impl VirtioSerialTransport {
                     .sync_for_cpu()
                     .map_err(virtio_error)?;
                 let length = (used.written as usize).min(DATA_BUFFER_LEN);
-                if self.target_port == Some(port_id) && self.ports[port_id].host_open {
+                if self.target_port == Some(port_id) && self.ports[port_id].status.host_open {
                     let available = RECEIVED_LIMIT.saturating_sub(self.received.len());
                     let length = length.min(available);
                     self.received.extend(
@@ -375,13 +375,7 @@ impl ControlTransport for VirtioSerialTransport {
         if !self.is_connected() {
             return Err(TransportError::Disconnected);
         }
-        let length = buffer.len().min(self.received.len());
-        for destination in &mut buffer[..length] {
-            *destination = self
-                .received
-                .pop_front()
-                .ok_or(TransportError::InvalidDevice)?;
-        }
+        let length = drain_received(&mut self.received, buffer);
         if length == 0 {
             Err(TransportError::WouldBlock)
         } else {
@@ -391,7 +385,7 @@ impl ControlTransport for VirtioSerialTransport {
 
     fn write(&mut self, buffer: &[u8]) -> Result<usize, TransportError> {
         let port_id = self.target_port.ok_or(TransportError::Disconnected)?;
-        if !self.ports[port_id].host_open {
+        if !self.ports[port_id].status.host_open {
             return Err(TransportError::Disconnected);
         }
         self.poll_ports()?;
@@ -400,7 +394,7 @@ impl ControlTransport for VirtioSerialTransport {
             .iter()
             .position(|buffer| buffer.head.is_none())
             .ok_or(TransportError::WouldBlock)?;
-        let length = buffer.len().min(DATA_BUFFER_LEN);
+        let length = write_chunk_length(buffer.len(), DATA_BUFFER_LEN);
         if length == 0 {
             return Ok(0);
         }
@@ -430,7 +424,7 @@ impl ControlTransport for VirtioSerialTransport {
     fn is_connected(&self) -> bool {
         self.target_port
             .and_then(|port| self.ports.get(port))
-            .is_some_and(|port| port.name_matches && port.host_open)
+            .is_some_and(|port| port.status.connected())
     }
 
     fn reset_connection(&mut self) {
@@ -456,19 +450,6 @@ impl ControlEvent {
             payload: bytes[8..].to_vec(),
         })
     }
-}
-
-fn is_target_name(payload: &[u8]) -> bool {
-    payload.strip_suffix(&[0]).unwrap_or(payload) == TARGET_PORT_NAME
-}
-
-fn port_queue_indices(port_id: u32) -> Option<(u16, u16)> {
-    if port_id == 0 {
-        return Some((0, 1));
-    }
-    let receive = port_id.checked_mul(2)?.checked_add(2)?;
-    let transmit = receive.checked_add(1)?;
-    Some((u16::try_from(receive).ok()?, u16::try_from(transmit).ok()?))
 }
 
 fn make_queue(device: &mut VirtioDevice<MappedBars>, index: u16) -> Result<Queue, TransportError> {
@@ -518,7 +499,7 @@ mod tests {
 
     #[test]
     fn modern_and_multiport_features_are_required() {
-        assert_eq!(REQUESTED_FEATURES, VIRTIO_F_VERSION_1 | (1 << 1));
+        assert_eq!(REQUESTED_FEATURES, (1 << 32) | (1 << 1));
         assert_eq!(REQUIRED_FEATURES, REQUESTED_FEATURES);
     }
 
