@@ -336,7 +336,7 @@ fn process_mouse_packet(
             0,
             0,
         );
-        send_event(subscribers, &event);
+        send_event_reliably(subscribers, &event);
     }
     state.buttons = buttons;
 }
@@ -368,7 +368,7 @@ fn send_pointer_button_changes(previous: u8, current: u8, subscribers: &[u64; MA
             0,
             0,
         );
-        send_event(subscribers, &event);
+        send_event_reliably(subscribers, &event);
     }
 }
 

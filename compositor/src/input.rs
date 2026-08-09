@@ -132,7 +132,7 @@ pub(crate) fn send_event(endpoint: u64, kind: u32, a: i32, b: i32, c: u32) {
     put_i32(&mut event, 4, a);
     put_i32(&mut event, 8, b);
     put_u32(&mut event, 12, c);
-    if kind != EVENT_KEY {
+    if kind != EVENT_KEY && kind != EVENT_POINTER_BUTTON {
         let _ = platform::ipc::send(endpoint, &event);
         return;
     }
