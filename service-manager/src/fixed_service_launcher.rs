@@ -9,6 +9,7 @@ use crate::spawn_support::{encode_spawn_args, resolve_capabilities, sys_error};
 const SESSION_USER_ARG_PREFIX: &str = "--session-user=";
 const LOCK_USER_ARG_PREFIX: &str = "--lock-user=";
 const EXEC_MANIFEST_ENV_PREFIX: &str = "__MOCHI_EXEC_ENV=";
+const EXEC_MANIFEST_APP_ID_PREFIX: &str = "__MOCHI_EXEC_APP_ID=";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DriverManagerTarget {
@@ -20,9 +21,16 @@ fn spawn(
     spec: ServiceSpec,
     arguments: &[alloc::string::String],
 ) -> Result<u64, mochi_user_syscall::SysError> {
-    let _manifest = platform::package::read_manifest(spec.manifest_path)
+    let manifest = platform::package::read_manifest(spec.manifest_path)
         .ok_or_else(|| sys_error(mochi_user_syscall::ENOENT))?;
-    let arguments = encode_spawn_args(arguments);
+    let mut arguments = arguments.to_vec();
+    if spec.role == crate::service_config::ROLE_APPLICATION {
+        arguments.insert(
+            0,
+            alloc::format!("{EXEC_MANIFEST_APP_ID_PREFIX}{}", manifest.package_id),
+        );
+    }
+    let arguments = encode_spawn_args(&arguments);
     let capabilities = resolve_capabilities(spec.path)?;
     platform::service::spawn_manifest(
         spec.path,
@@ -37,9 +45,16 @@ fn spawn_with_credentials(
     arguments: &[alloc::string::String],
     identity: platform::service_ready::SessionIdentity,
 ) -> Result<u64, mochi_user_syscall::SysError> {
-    let _manifest = platform::package::read_manifest(spec.manifest_path)
+    let manifest = platform::package::read_manifest(spec.manifest_path)
         .ok_or_else(|| sys_error(mochi_user_syscall::ENOENT))?;
-    let arguments = encode_spawn_args(arguments);
+    let mut arguments = arguments.to_vec();
+    if spec.role == crate::service_config::ROLE_APPLICATION {
+        arguments.insert(
+            0,
+            alloc::format!("{EXEC_MANIFEST_APP_ID_PREFIX}{}", manifest.package_id),
+        );
+    }
+    let arguments = encode_spawn_args(&arguments);
     let capabilities = resolve_capabilities(spec.path)?;
     platform::service::spawn_manifest_with_credentials(
         spec.path,

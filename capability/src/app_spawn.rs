@@ -11,6 +11,7 @@ use crate::resolver::{binary_caps, encode_nul_list};
 
 pub(crate) const SPAWN_APP_OPCODE: u32 = 0x4150_5053;
 const EXEC_MANIFEST_ENV_PREFIX: &str = "__MOCHI_EXEC_ENV=";
+const EXEC_MANIFEST_APP_ID_PREFIX: &str = "__MOCHI_EXEC_APP_ID=";
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -120,6 +121,10 @@ pub(crate) fn spawn_application_from_manifest(
     }
     let caps_nul = encode_nul_list(&caps);
     let mut spawn_items = Vec::new();
+    spawn_items.push(format!(
+        "{EXEC_MANIFEST_APP_ID_PREFIX}{}",
+        manifest.package_id
+    ));
     spawn_items.push(format!(
         "{}MOCHI_EXECUTABLE_PATH={}",
         EXEC_MANIFEST_ENV_PREFIX, entry_path
