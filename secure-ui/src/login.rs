@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::fs;
 use std::rc::Rc;
 
 use viewkit::prelude::*;
@@ -10,6 +11,7 @@ use crate::wallpaper::Wallpaper;
 
 const FORM_WIDTH: f32 = 320.0;
 const LOCK_USER_ARG_PREFIX: &str = "--lock-user=";
+const SETTINGS_PATH: &str = "/libraries/system/settings.conf";
 
 pub(crate) struct LoginApp {
     users: Vec<authentication::LoginUser>,
@@ -20,6 +22,8 @@ pub(crate) struct LoginApp {
     login_target: Option<mochi_user_platform::service_ready::Target>,
     wallpaper: Wallpaper,
     account_setup: Option<AccountSetup>,
+    auto_login_user: Option<String>,
+    auto_login_attempted: Cell<bool>,
 }
 
 impl App for LoginApp {
@@ -31,6 +35,7 @@ impl App for LoginApp {
                 .strip_prefix(LOCK_USER_ARG_PREFIX)
                 .map(str::to_owned)
         });
+        let is_lock_screen = lock_user.is_some();
         let (mut users, initial_status, mut account_setup) = match authentication::list_users(1) {
             Ok(result) if result.has_regular_account => (result.users, String::new(), None),
             Ok(_) => (Vec::new(), String::new(), Some(AccountSetup::new())),
@@ -55,6 +60,11 @@ impl App for LoginApp {
             .unwrap_or_default();
         let password = TextFieldInteractionState::new();
         password.set_focused(!selected_username.is_empty());
+        let auto_login_user = if is_lock_screen {
+            None
+        } else {
+            configured_auto_login_user().filter(|name| users.iter().any(|user| user.name == *name))
+        };
         Self {
             users,
             selected_username: State::new(selected_username),
@@ -64,6 +74,8 @@ impl App for LoginApp {
             login_target: mochi_user_platform::service_ready::take_bootstrap_target(),
             wallpaper: Wallpaper::load_default(),
             account_setup,
+            auto_login_user,
+            auto_login_attempted: Cell::new(false),
         }
     }
 
@@ -74,6 +86,31 @@ impl App for LoginApp {
     }
 
     fn body(&self, _context: &ViewContext) -> Self::Body {
+        if !self.auto_login_attempted.replace(true)
+            && let Some(name) = self.auto_login_user.as_deref()
+        {
+            let request_id = self.next_request_id.get();
+            self.next_request_id.set(request_id.wrapping_add(1).max(1));
+            match (
+                authentication::session_identity(request_id, name),
+                self.login_target,
+            ) {
+                (Ok(identity), Some(target)) => {
+                    match mochi_user_platform::service_ready::notify_session(target, 0, identity) {
+                        Ok(_) => viewkit::request_exit(),
+                        Err(_) => self
+                            .status
+                            .set(format!("Could not start the session for {name}.")),
+                    }
+                }
+                (Ok(_), None) => self
+                    .status
+                    .set("Login completion channel is unavailable.".to_owned()),
+                (Err(_), _) => self
+                    .status
+                    .set(format!("Automatic sign-in failed for {name}.")),
+            }
+        }
         if let Some(account_setup) = &self.account_setup {
             return self.screen(
                 account_setup.body(Rc::clone(&self.next_request_id), self.login_target),
@@ -187,6 +224,48 @@ impl App for LoginApp {
             );
 
         self.screen(Box::new(form), true)
+    }
+}
+
+fn configured_auto_login_user() -> Option<String> {
+    let text = fs::read_to_string(SETTINGS_PATH).ok()?;
+    auto_login_user_from_settings(&text)
+}
+
+fn auto_login_user_from_settings(text: &str) -> Option<String> {
+    let enabled = setting_value(&text, "auto_login")? == "true";
+    if !enabled {
+        return None;
+    }
+    let user = setting_value(&text, "auto_login_user")?.trim();
+    (!user.is_empty()).then(|| user.to_owned())
+}
+
+fn setting_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    text.lines().find_map(|line| {
+        let (candidate, value) = line.split_once('=')?;
+        (candidate.trim() == key).then(|| value.trim())
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::auto_login_user_from_settings;
+
+    #[test]
+    fn automatic_login_requires_an_enabled_named_user() {
+        assert_eq!(
+            auto_login_user_from_settings("auto_login=true\nauto_login_user=tas0\n"),
+            Some("tas0".to_owned())
+        );
+        assert_eq!(
+            auto_login_user_from_settings("auto_login=false\nauto_login_user=tas0\n"),
+            None
+        );
+        assert_eq!(
+            auto_login_user_from_settings("auto_login=true\nauto_login_user=\n"),
+            None
+        );
     }
 }
 

@@ -1,4 +1,57 @@
+use std::fs;
+
 use mochi_user_platform as platform;
+
+const SETTINGS_PATH: &str = "/libraries/system/settings.conf";
+
+#[derive(Clone, Copy)]
+struct InputPreferences {
+    mouse_speed: f32,
+    natural_scrolling: bool,
+}
+
+impl InputPreferences {
+    fn load() -> Self {
+        let mut preferences = Self {
+            mouse_speed: 1.0,
+            natural_scrolling: true,
+        };
+        let Ok(text) = fs::read_to_string(SETTINGS_PATH) else {
+            return preferences;
+        };
+        for line in text.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            match key.trim() {
+                "mouse_speed" => {
+                    if let Ok(value) = value.trim().parse::<f32>()
+                        && value.is_finite()
+                    {
+                        preferences.mouse_speed = value.clamp(0.25, 3.0);
+                    }
+                }
+                "natural_scrolling" => {
+                    preferences.natural_scrolling = value.trim() == "true";
+                }
+                _ => {}
+            }
+        }
+        preferences
+    }
+
+    fn pointer_delta(self, delta: i32) -> i32 {
+        ((delta as f32) * self.mouse_speed).round() as i32
+    }
+
+    fn wheel_delta(self, delta: i32) -> i32 {
+        if self.natural_scrolling {
+            delta
+        } else {
+            -delta
+        }
+    }
+}
 
 fn decode_alpha(scancode: u8, shift: bool, caps: bool) -> Option<char> {
     let ch = match scancode {
@@ -276,6 +329,7 @@ fn process_mouse_packet(
     packet: &[u8],
     state: &mut MouseState,
     subscribers: &[u64; MAX_SUBSCRIBERS],
+    preferences: InputPreferences,
 ) {
     use platform::input::*;
 
@@ -287,8 +341,8 @@ fn process_mouse_packet(
         return;
     }
 
-    let dx = sign_extend_mouse_delta(packet[1], (b0 & 0x10) != 0);
-    let dy = -sign_extend_mouse_delta(packet[2], (b0 & 0x20) != 0);
+    let dx = preferences.pointer_delta(sign_extend_mouse_delta(packet[1], (b0 & 0x10) != 0));
+    let dy = preferences.pointer_delta(-sign_extend_mouse_delta(packet[2], (b0 & 0x20) != 0));
     if dx != 0 || dy != 0 {
         let event = encode_input_event(EVENT_KIND_POINTER_MOVE, 0, 0, 0, 0, dx, dy, 0, 0);
         send_event(subscribers, &event);
@@ -304,7 +358,7 @@ fn process_mouse_packet(
             0,
             0,
             0,
-            wheel.saturating_mul(40),
+            preferences.wheel_delta(wheel).saturating_mul(40),
             0,
             0,
         );
@@ -505,6 +559,7 @@ fn main() {
 
     let mut keyboard = KeyboardState::default();
     let mut mouse = MouseState::default();
+    let input_preferences = InputPreferences::load();
     let mut subscribers = [0u64; MAX_SUBSCRIBERS];
     if platform::service_ready::notify(ready_target, 0).is_err() {
         platform::println!("input.service: ready notification failed");
@@ -540,7 +595,7 @@ fn main() {
                     process_keyboard_byte(buf[4], &mut keyboard, &subscribers);
                 }
                 platform::input::RAW_KIND_MOUSE_PACKET => {
-                    process_mouse_packet(&buf[4..8], &mut mouse, &subscribers);
+                    process_mouse_packet(&buf[4..8], &mut mouse, &subscribers, input_preferences);
                 }
                 platform::input::RAW_KIND_POINTER_ABSOLUTE => {
                     process_absolute_pointer(&buf[4..len], &mut mouse, &subscribers);

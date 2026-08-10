@@ -2,6 +2,7 @@ use viewkit::draw_command::ImageSampling;
 use viewkit::prelude::*;
 use viewkit::view::{Constraints, MeasureContext, PaintContext};
 
+const SETTINGS_PATH: &str = "/libraries/system/settings.conf";
 const WALLPAPER_PATHS: [&str; 2] = [
     "/libraries/wallpapers/default.png",
     "/libraries/wallpapers/default.jpeg",
@@ -14,11 +15,24 @@ pub(crate) struct Wallpaper {
 
 impl Wallpaper {
     pub(crate) fn load_default() -> Self {
-        let image = WALLPAPER_PATHS
-            .iter()
-            .find_map(|path| ImageData::from_path(path).ok());
+        let image = configured_wallpaper_path()
+            .and_then(|path| ImageData::from_path(path).ok())
+            .or_else(|| {
+                WALLPAPER_PATHS
+                    .iter()
+                    .find_map(|path| ImageData::from_path(path).ok())
+            });
         Self { image }
     }
+}
+
+fn configured_wallpaper_path() -> Option<String> {
+    let text = std::fs::read_to_string(SETTINGS_PATH).ok()?;
+    text.lines().find_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        let value = value.trim();
+        (key.trim() == "wallpaper" && !value.is_empty()).then(|| value.to_owned())
+    })
 }
 
 impl View for Wallpaper {

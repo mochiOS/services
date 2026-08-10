@@ -41,6 +41,22 @@ pub(crate) fn list_users(request_id: u64) -> Result<LoginUsers, AuthenticationEr
     Ok(login_users(&database))
 }
 
+pub(crate) fn session_identity(
+    request_id: u64,
+    name: &str,
+) -> Result<mochi_user_platform::service_ready::SessionIdentity, AuthenticationError> {
+    let database = load_database(request_id)?;
+    let user = database
+        .users()
+        .iter()
+        .find(|user| user.name == name && user.uid >= FIRST_REGULAR_UID && !user.locked)
+        .ok_or(AuthenticationError::InvalidCredentials)?;
+    Ok(mochi_user_platform::service_ready::SessionIdentity {
+        uid: user.uid,
+        gid: user.gid,
+    })
+}
+
 fn login_users(database: &UserDatabase) -> LoginUsers {
     let has_regular_account = database
         .users()

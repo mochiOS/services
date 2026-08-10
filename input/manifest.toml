@@ -8,6 +8,7 @@ vendor = "mochiOS"
 path = "/system/services/input.service"
 kind = "service"
 requires = [
+    "fs.read.all",
     "ipc.client",
     "ipc.server",
 ]
