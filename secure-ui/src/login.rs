@@ -11,7 +11,7 @@ use crate::wallpaper::Wallpaper;
 
 const FORM_WIDTH: f32 = 320.0;
 const LOCK_USER_ARG_PREFIX: &str = "--lock-user=";
-const SETTINGS_PATH: &str = "/libraries/system/settings.conf";
+const SETTINGS_PATH: &str = "/var/config/account/settings.conf";
 
 pub(crate) struct LoginApp {
     users: Vec<authentication::LoginUser>,

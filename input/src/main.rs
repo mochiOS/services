@@ -2,7 +2,7 @@ use std::fs;
 
 use mochi_user_platform as platform;
 
-const SETTINGS_PATH: &str = "/libraries/system/settings.conf";
+const SETTINGS_PATH: &str = "/var/config/input/settings.conf";
 
 #[derive(Clone, Copy)]
 struct InputPreferences {
