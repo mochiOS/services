@@ -10,8 +10,8 @@ use crate::display::{
 };
 use crate::geometry::{Rect, merge_damage};
 use crate::input::{
-    PointerGrab, PointerSerial, finish_pointer_motion, handle_input_event, subscribe_input_events,
-    update_pointer_position,
+    PointerGrab, PointerSerial, finish_pointer_motion, handle_input_event, send_event,
+    subscribe_input_events, update_pointer_position,
 };
 use crate::protocol::*;
 use crate::renderer::composite_and_present;
@@ -198,6 +198,33 @@ fn handle_request(
         }
         OP_CONTEXT_MENU_SUBSCRIBE | OP_CONTEXT_MENU_SHOW | OP_CONTEXT_MENU_COMPLETE => {
             return context_menu.handle_request(surfaces, keyboard_focus, client, sender, request);
+        }
+        OP_APPEARANCE_CHANGED => {
+            if request.len() != 4 {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
+                return reply;
+            }
+            if !matches!(
+                platform::capability::check_thread(sender, "settings.write"),
+                Ok(1)
+            ) {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            }
+            for (index, surface) in surfaces.iter().enumerate() {
+                if !surface.live || surface.is_decoration || surface.event_endpoint == 0 {
+                    continue;
+                }
+                let already_notified = surfaces[..index].iter().any(|previous| {
+                    previous.live
+                        && !previous.is_decoration
+                        && previous.event_endpoint == surface.event_endpoint
+                });
+                if !already_notified {
+                    send_event(surface.event_endpoint, EVENT_APPEARANCE_CHANGED, 0, 0, 0);
+                }
+            }
+            put_u32(&mut reply, 0, 0);
         }
         OP_SET_CURSOR_POSITION => {
             if request.len() != 16 || !sender_can_control_cursor(sender) {
