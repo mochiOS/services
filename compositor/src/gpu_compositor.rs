@@ -4,6 +4,7 @@ use crate::cursor::CursorImage;
 use crate::geometry::{Rect, clip_present_rect};
 use crate::protocol::{PIXEL_FORMAT_GPU_SCENE, PIXEL_FORMAT_XRGB8888};
 use crate::surface::{Surface, read_current_pixel, surface_has_current_pixels};
+use crate::window::{WINDOW_CORNER_RADIUS, Window, window_frame_rect, window_index_by_id};
 
 const ATLAS_EXTENT: u32 = mochios_viewkit_gpu_protocol::ATLAS_WIDTH;
 const ATLAS_BYTES_PER_PIXEL: usize = 4;
@@ -178,6 +179,7 @@ impl GpuCompositor {
     pub(crate) fn compose(
         &mut self,
         surfaces: &[Surface],
+        windows: &[Window],
         display_width: u32,
         display_height: u32,
         damage: Option<Rect>,
@@ -245,15 +247,28 @@ impl GpuCompositor {
         });
         for index in indices {
             let surface = &surfaces[index];
+            let window_clip = window_clip_polygon(surfaces, windows, surface);
             let entry = self
                 .entries
                 .iter()
                 .find(|entry| entry.requirement.surface_index == Some(index))
                 .copied()?;
             if surface.current_format == PIXEL_FORMAT_GPU_SCENE {
-                append_gpu_surface(&mut self.vertices, surface, entry, damage)?;
+                append_gpu_surface(
+                    &mut self.vertices,
+                    surface,
+                    entry,
+                    damage,
+                    window_clip.as_deref(),
+                )?;
             } else {
-                append_cpu_surface(&mut self.vertices, surface, entry, damage);
+                append_cpu_surface(
+                    &mut self.vertices,
+                    surface,
+                    entry,
+                    damage,
+                    window_clip.as_deref(),
+                );
             }
         }
         if cursor_visible {
@@ -519,6 +534,7 @@ fn append_gpu_surface(
     surface: &Surface,
     entry: AtlasEntry,
     damage: Rect,
+    window_clip: Option<&[(f32, f32)]>,
 ) -> Option<()> {
     let gpu = surface.gpu.as_ref()?;
     for triangle in gpu
@@ -553,7 +569,7 @@ fn append_gpu_surface(
                 ],
             };
         }
-        append_clipped_triangle(output, vertices, damage);
+        append_window_clipped_triangle(output, vertices, damage, window_clip);
     }
     Some(())
 }
@@ -563,8 +579,9 @@ fn append_cpu_surface(
     surface: &Surface,
     entry: AtlasEntry,
     damage: Rect,
+    window_clip: Option<&[(f32, f32)]>,
 ) {
-    append_textured_quad(
+    append_textured_quad_clipped(
         output,
         Rect {
             x: surface.x,
@@ -576,7 +593,51 @@ fn append_cpu_surface(
         surface.current_width,
         surface.current_height,
         damage,
+        window_clip,
     );
+}
+
+fn window_clip_polygon(
+    surfaces: &[Surface],
+    windows: &[Window],
+    surface: &Surface,
+) -> Option<Vec<(f32, f32)>> {
+    let window = windows.get(window_index_by_id(windows, surface.window)?)?;
+    let content = surfaces
+        .iter()
+        .find(|candidate| candidate.live && candidate.handle == window.content)?;
+    let frame = window_frame_rect(content, window);
+    Some(rounded_rect_polygon(frame, WINDOW_CORNER_RADIUS as f32))
+}
+
+fn rounded_rect_polygon(rect: Rect, radius: f32) -> Vec<(f32, f32)> {
+    const CORNER_SEGMENTS: usize = 8;
+    let radius = radius
+        .max(0.0)
+        .min(rect.width.min(rect.height) as f32 * 0.5);
+    let left = rect.x as f32;
+    let top = rect.y as f32;
+    let right = left + rect.width as f32;
+    let bottom = top + rect.height as f32;
+    if radius == 0.0 {
+        return vec![(left, top), (right, top), (right, bottom), (left, bottom)];
+    }
+    let mut points = Vec::with_capacity(CORNER_SEGMENTS * 4 + 4);
+    for (center_x, center_y, start) in [
+        (right - radius, top + radius, -core::f32::consts::FRAC_PI_2),
+        (right - radius, bottom - radius, 0.0),
+        (left + radius, bottom - radius, core::f32::consts::FRAC_PI_2),
+        (left + radius, top + radius, core::f32::consts::PI),
+    ] {
+        for step in 0..=CORNER_SEGMENTS {
+            let angle = start + core::f32::consts::FRAC_PI_2 * step as f32 / CORNER_SEGMENTS as f32;
+            points.push((
+                center_x + angle.cos() * radius,
+                center_y + angle.sin() * radius,
+            ));
+        }
+    }
+    points
 }
 
 fn append_textured_quad(
@@ -586,6 +647,18 @@ fn append_textured_quad(
     width: u32,
     height: u32,
     damage: Rect,
+) {
+    append_textured_quad_clipped(output, bounds, entry, width, height, damage, None);
+}
+
+fn append_textured_quad_clipped(
+    output: &mut Vec<Vertex>,
+    bounds: Rect,
+    entry: AtlasEntry,
+    width: u32,
+    height: u32,
+    damage: Rect,
+    window_clip: Option<&[(f32, f32)]>,
 ) {
     let left = bounds.x as f32;
     let top = bounds.y as f32;
@@ -644,8 +717,71 @@ fn append_textured_quad(
             },
         ],
     ] {
-        append_clipped_triangle(output, triangle, damage);
+        append_window_clipped_triangle(output, triangle, damage, window_clip);
     }
+}
+
+fn append_window_clipped_triangle(
+    output: &mut Vec<Vertex>,
+    triangle: [Vertex; 3],
+    damage: Rect,
+    window_clip: Option<&[(f32, f32)]>,
+) {
+    let Some(window_clip) = window_clip else {
+        append_clipped_triangle(output, triangle, damage);
+        return;
+    };
+    let mut damage_clipped = Vec::new();
+    append_clipped_triangle(&mut damage_clipped, triangle, damage);
+    for triangle in damage_clipped.chunks_exact(3) {
+        let mut polygon = triangle.to_vec();
+        for index in 0..window_clip.len() {
+            let edge_start = window_clip[index];
+            let edge_end = window_clip[(index + 1) % window_clip.len()];
+            polygon = clip_convex_edge(&polygon, edge_start, edge_end);
+            if polygon.len() < 3 {
+                break;
+            }
+        }
+        if polygon.len() < 3 {
+            continue;
+        }
+        for index in 1..polygon.len() - 1 {
+            output.extend_from_slice(&[polygon[0], polygon[index], polygon[index + 1]]);
+        }
+    }
+}
+
+fn clip_convex_edge(input: &[Vertex], edge_start: (f32, f32), edge_end: (f32, f32)) -> Vec<Vertex> {
+    let signed_distance = |vertex: Vertex| {
+        (edge_end.0 - edge_start.0) * (vertex.y - edge_start.1)
+            - (edge_end.1 - edge_start.1) * (vertex.x - edge_start.0)
+    };
+    let mut output = Vec::new();
+    let Some(mut previous) = input.last().copied() else {
+        return output;
+    };
+    let mut previous_distance = signed_distance(previous);
+    for current in input.iter().copied() {
+        let current_distance = signed_distance(current);
+        let previous_inside = previous_distance >= -0.001;
+        let current_inside = current_distance >= -0.001;
+        if previous_inside != current_inside {
+            let denominator = previous_distance - current_distance;
+            let amount = if denominator.abs() <= f32::EPSILON {
+                0.0
+            } else {
+                previous_distance / denominator
+            };
+            output.push(interpolate(previous, current, amount));
+        }
+        if current_inside {
+            output.push(current);
+        }
+        previous = current;
+        previous_distance = current_distance;
+    }
+    output
 }
 
 fn push_solid_quad(output: &mut Vec<Vertex>, bounds: Rect, color: [f32; 4]) {
@@ -925,5 +1061,61 @@ mod tests {
             && vertex.x <= 10.0
             && vertex.y >= 0.0
             && vertex.y <= 10.0));
+    }
+
+    #[test]
+    fn window_clip_removes_square_corners() {
+        let clip = rounded_rect_polygon(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 100,
+            },
+            20.0,
+        );
+        let mut output = Vec::new();
+        append_textured_quad_clipped(
+            &mut output,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 100,
+            },
+            AtlasEntry {
+                requirement: TextureRequirement {
+                    key: 1,
+                    width: 100,
+                    height: 100,
+                    generation: 1,
+                    surface_index: Some(0),
+                },
+                x: 0,
+                y: 0,
+            },
+            100,
+            100,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 100,
+            },
+            Some(&clip),
+        );
+        assert!(!output.is_empty());
+        assert!(output.iter().all(|vertex| {
+            let nearest_x = vertex.x.clamp(20.0, 80.0);
+            let nearest_y = vertex.y.clamp(20.0, 80.0);
+            let dx = vertex.x - nearest_x;
+            let dy = vertex.y - nearest_y;
+            dx * dx + dy * dy <= 20.5 * 20.5
+        }));
+        assert!(
+            !output
+                .iter()
+                .any(|vertex| vertex.x == 0.0 && vertex.y == 0.0)
+        );
     }
 }

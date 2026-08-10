@@ -447,6 +447,9 @@ fn update_gpu_surface_state(
 }
 
 pub(crate) fn read_current_pixel(surface: &Surface, sx: usize, sy: usize) -> Option<u32> {
+    if surface.current_format == PIXEL_FORMAT_GPU_SCENE {
+        return read_gpu_scene_pixel(surface, sx, sy);
+    }
     if matches!(surface.role, SurfaceRole::Background | SurfaceRole::Panel) {
         let width = usize::try_from(surface.current_width).ok()?;
         let index = sy.checked_mul(width)?.checked_add(sx)?;
@@ -467,6 +470,154 @@ pub(crate) fn read_current_pixel(surface: &Surface, sx: usize, sy: usize) -> Opt
         .checked_mul(surface.current_stride as usize)?
         .checked_add(sx)?;
     surface.current.get(src).copied()
+}
+
+fn read_gpu_scene_pixel(surface: &Surface, sx: usize, sy: usize) -> Option<u32> {
+    let gpu = surface.gpu.as_ref()?;
+    if sx >= gpu.width as usize || sy >= gpu.height as usize {
+        return None;
+    }
+    let point_x = sx as f32 / gpu.width as f32 * 2.0 - 1.0;
+    let point_y = sy as f32 / gpu.height as f32 * 2.0 - 1.0;
+    let mut alpha = 0.0f32;
+    for triangle in gpu
+        .vertices
+        .chunks_exact(mochios_viewkit_gpu_protocol::VERTEX_STRIDE * 3)
+    {
+        let first =
+            decode_gpu_hit_vertex(&triangle[0..mochios_viewkit_gpu_protocol::VERTEX_STRIDE])?;
+        let second = decode_gpu_hit_vertex(
+            &triangle[mochios_viewkit_gpu_protocol::VERTEX_STRIDE
+                ..mochios_viewkit_gpu_protocol::VERTEX_STRIDE * 2],
+        )?;
+        let third = decode_gpu_hit_vertex(
+            &triangle[mochios_viewkit_gpu_protocol::VERTEX_STRIDE * 2
+                ..mochios_viewkit_gpu_protocol::VERTEX_STRIDE * 3],
+        )?;
+        let Some(weights) = barycentric_weights(point_x, point_y, first, second, third) else {
+            continue;
+        };
+        let interpolate = |a: f32, b: f32, c: f32| a * weights[0] + b * weights[1] + c * weights[2];
+        let u = interpolate(first.u, second.u, third.u).clamp(0.0, 1.0);
+        let v = interpolate(first.v, second.v, third.v).clamp(0.0, 1.0);
+        let vertex_alpha = interpolate(first.alpha, second.alpha, third.alpha).clamp(0.0, 1.0);
+        let atlas_x = (u * gpu.atlas_width as f32)
+            .floor()
+            .min(gpu.atlas_width.saturating_sub(1) as f32) as usize;
+        let atlas_y = (v * gpu.atlas_height as f32)
+            .floor()
+            .min(gpu.atlas_height.saturating_sub(1) as f32) as usize;
+        let atlas_alpha = gpu
+            .atlas
+            .get(
+                atlas_y
+                    .checked_mul(gpu.atlas_width as usize)?
+                    .checked_add(atlas_x)?
+                    .checked_mul(4)?
+                    .checked_add(3)?,
+            )
+            .copied()? as f32
+            / 255.0;
+        let source_alpha = vertex_alpha * atlas_alpha;
+        alpha = source_alpha + alpha * (1.0 - source_alpha);
+    }
+    Some(((alpha * 255.0).round() as u32) << 24)
+}
+
+#[derive(Clone, Copy)]
+struct GpuHitVertex {
+    x: f32,
+    y: f32,
+    u: f32,
+    v: f32,
+    alpha: f32,
+}
+
+fn decode_gpu_hit_vertex(bytes: &[u8]) -> Option<GpuHitVertex> {
+    Some(GpuHitVertex {
+        x: read_f32(bytes, 0)?,
+        y: read_f32(bytes, 4)?,
+        u: read_f32(bytes, 12)?,
+        v: read_f32(bytes, 16)?,
+        alpha: read_f32(bytes, 32)?,
+    })
+}
+
+fn read_f32(bytes: &[u8], offset: usize) -> Option<f32> {
+    let bytes = bytes.get(offset..offset.checked_add(4)?)?;
+    let value = f32::from_bits(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+    value.is_finite().then_some(value)
+}
+
+fn barycentric_weights(
+    x: f32,
+    y: f32,
+    first: GpuHitVertex,
+    second: GpuHitVertex,
+    third: GpuHitVertex,
+) -> Option<[f32; 3]> {
+    let denominator =
+        (second.y - third.y) * (first.x - third.x) + (third.x - second.x) * (first.y - third.y);
+    if denominator.abs() <= f32::EPSILON {
+        return None;
+    }
+    let first_weight =
+        ((second.y - third.y) * (x - third.x) + (third.x - second.x) * (y - third.y)) / denominator;
+    let second_weight =
+        ((third.y - first.y) * (x - third.x) + (first.x - third.x) * (y - third.y)) / denominator;
+    let third_weight = 1.0 - first_weight - second_weight;
+    const EDGE_TOLERANCE: f32 = -0.0001;
+    (first_weight >= EDGE_TOLERANCE
+        && second_weight >= EDGE_TOLERANCE
+        && third_weight >= EDGE_TOLERANCE)
+        .then_some([first_weight, second_weight, third_weight])
+}
+
+#[cfg(test)]
+mod gpu_hit_tests {
+    use super::*;
+
+    fn push_vertex(vertices: &mut Vec<u8>, x: f32, y: f32, u: f32, v: f32, alpha: f32) {
+        for value in [x, y, 0.0, u, v, 1.0, 1.0, 1.0, alpha] {
+            vertices.extend_from_slice(&value.to_bits().to_le_bytes());
+        }
+    }
+
+    fn scene_surface(alpha: f32) -> Surface {
+        let mut vertices = Vec::new();
+        for (x, y) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0)] {
+            push_vertex(&mut vertices, x, y, 0.25, 0.25, alpha);
+        }
+        let mut surface = Surface::empty();
+        surface.current_format = PIXEL_FORMAT_GPU_SCENE;
+        surface.current_width = 100;
+        surface.current_height = 100;
+        surface.gpu = Some(GpuSurfaceState {
+            width: 100,
+            height: 100,
+            atlas_width: 1,
+            atlas_height: 1,
+            vertices,
+            atlas: vec![255, 255, 255, 255],
+            generation: 1,
+            atlas_generation: 1,
+        });
+        surface
+    }
+
+    #[test]
+    fn gpu_scene_hit_test_observes_vertex_alpha() {
+        assert_eq!(
+            read_current_pixel(&scene_surface(1.0), 10, 10),
+            Some(0xff00_0000)
+        );
+        assert_eq!(read_current_pixel(&scene_surface(0.0), 10, 10), Some(0));
+    }
+
+    #[test]
+    fn gpu_scene_hit_test_rejects_points_outside_geometry() {
+        assert_eq!(read_current_pixel(&scene_surface(1.0), 90, 90), Some(0));
+    }
 }
 
 fn copy_surface_buffer(buffer: &SurfaceBuffer) -> Result<Vec<u32>, u32> {

@@ -119,6 +119,7 @@ fn perf_counter() -> u64 {
 #[allow(clippy::too_many_arguments)]
 fn try_gpu_scene_present(
     surfaces: &[Surface],
+    windows: &[Window],
     present_frame: &mut PresentFrame,
     display_tid: u64,
     display_width: u32,
@@ -141,6 +142,7 @@ fn try_gpu_scene_present(
     let copy_result = (|| {
         let scene = gpu_compositor.compose(
             surfaces,
+            windows,
             display_width,
             display_height,
             damage,
@@ -315,6 +317,7 @@ pub(crate) fn composite_and_present(
     }
     if let Some(status) = try_gpu_scene_present(
         surfaces,
+        windows,
         present_frame,
         display_tid,
         display_width,
