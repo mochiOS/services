@@ -10,6 +10,7 @@ const PROCESS_STATE_TERMINATED: u64 = 4;
 pub(crate) struct ActiveSession {
     pub(crate) id: u64,
     pub(crate) identity: platform::service_ready::SessionIdentity,
+    pub(crate) linux_pid: Option<u64>,
     pub(crate) binder_pid: u64,
 }
 
@@ -81,6 +82,7 @@ mod tests {
         let session = ActiveSession {
             id: u64::MAX,
             identity: platform::service_ready::SessionIdentity { uid: 1, gid: 1 },
+            linux_pid: Some(3),
             binder_pid: 2,
         };
         assert_eq!(session.next_id(), 1);

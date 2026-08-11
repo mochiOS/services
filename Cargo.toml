@@ -8,6 +8,7 @@ members = [
     "drivers",
     "input",
     "logger",
+    "linux",
     "mboot-agent",
     "network",
     "package",

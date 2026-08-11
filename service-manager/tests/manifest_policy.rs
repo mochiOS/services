@@ -24,6 +24,8 @@ const BINDER_MANIFEST: &str = include_str!("../../../applications/binder/manifes
 const UPDATE_MANIFEST: &str = include_str!("../../update/manifest.toml");
 const USER_MANIFEST: &str = include_str!("../../user/manifest.toml");
 const SECURE_UI_MANIFEST: &str = include_str!("../../secure-ui/manifest.toml");
+const LINUX_MANIFEST: &str = include_str!("../../linux/manifest.toml");
+const MBOOT_AGENT_MANIFEST: &str = include_str!("../../mboot-agent/manifest.toml");
 const SERVICE_INDEX: &str = include_str!("../../index.toml");
 
 fn assert_capabilities(manifest: &str, path: &str, expected: &[&str]) {
@@ -197,6 +199,28 @@ fn service_manifests_match_policy() {
             "ipc.server",
             "system.time.read",
             "window.secure-overlay",
+        ],
+    );
+    assert_capabilities(
+        LINUX_MANIFEST,
+        "/system/services/linux.service",
+        &[
+            "ipc.client",
+            "ipc.server",
+            "process.inspect",
+            "window.create",
+        ],
+    );
+    assert_capabilities(
+        MBOOT_AGENT_MANIFEST,
+        "/system/services/mboot-agent.service",
+        &[
+            "dma.allocate",
+            "ipc.server",
+            "process.inspect",
+            "serial.access",
+            "system.random.read",
+            "system.time.read",
         ],
     );
 

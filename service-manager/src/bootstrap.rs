@@ -263,6 +263,7 @@ impl BootstrapOperations for Runtime {
             }
             FixedService::MbootAgent
             | FixedService::Compositor
+            | FixedService::Linux
             | FixedService::Binder
             | FixedService::Update => None,
         };
@@ -429,6 +430,7 @@ fn service_name(service: FixedService) -> &'static str {
         FixedService::Network => "network.service",
         FixedService::User => "user.service",
         FixedService::SecureUi => "secure-ui.service",
+        FixedService::Linux => "linux.service",
         FixedService::Binder => "Binder.app",
         FixedService::Update => "update.service",
     }
@@ -480,6 +482,7 @@ fn resident(outcome: BootstrapOutcome, runtime: Option<Runtime>) -> ! {
             .map(|(identity, binder_pid)| ActiveSession {
                 id: outcome.session_id,
                 identity,
+                linux_pid: outcome.children.linux,
                 binder_pid,
             });
     let mut request_bytes = [0u8; platform::session_control::REQUEST_LEN];
@@ -556,10 +559,20 @@ fn resident(outcome: BootstrapOutcome, runtime: Option<Runtime>) -> ! {
                         errno(error)
                     );
                 }
+                if let Some(linux_pid) = session.linux_pid {
+                    let _ = terminate_process_tree(linux_pid);
+                }
                 let Some(identity) = runtime.authenticate_session(None) else {
                     continue;
                 };
                 let session_id = session.next_id();
+                let linux_pid = fixed_service_launcher::spawn_user_session(
+                    FixedService::Linux,
+                    runtime.logger_endpoint,
+                    identity,
+                    session_id,
+                )
+                .ok();
                 match fixed_service_launcher::spawn_user_session(
                     FixedService::Binder,
                     runtime.logger_endpoint,
@@ -570,6 +583,7 @@ fn resident(outcome: BootstrapOutcome, runtime: Option<Runtime>) -> ! {
                         active_session = Some(ActiveSession {
                             id: session_id,
                             identity,
+                            linux_pid,
                             binder_pid,
                         });
                     }

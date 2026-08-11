@@ -149,6 +149,13 @@ impl Agent {
                         | KnownCommand::DeveloperCompile
                         | KnownCommand::DeveloperRead
                         | KnownCommand::DeveloperCancel
+                        | KnownCommand::LinuxLaunch
+                        | KnownCommand::LinuxWindows
+                        | KnownCommand::LinuxWindowInfo
+                        | KnownCommand::LinuxFrame
+                        | KnownCommand::LinuxInput
+                        | KnownCommand::LinuxConfigure
+                        | KnownCommand::LinuxClose
                 )
             )
         {
@@ -317,7 +324,7 @@ impl Agent {
                         Argument::new("system", "mochios"),
                         Argument::new("version", self.version.clone()),
                         Argument::new("boot_id", self.boot_id.clone()),
-                        Argument::new("capabilities", "ready,heartbeat,status"),
+                        Argument::new("capabilities", "ready,heartbeat,status,linux.x11"),
                     ],
                 ))?;
                 self.pending = Some(PendingRequest {
@@ -561,7 +568,7 @@ mod tests {
         assert_eq!(hello.known_command(), Some(KnownCommand::ProtocolHello));
         assert_eq!(
             hello.argument("capabilities"),
-            Some("ready,heartbeat,status")
+            Some("ready,heartbeat,status,linux.x11")
         );
         transport.push(&response(Message::command(
             Destination::Mochios,
@@ -862,5 +869,45 @@ mod tests {
         assert_eq!(restored.request_id, 91);
         assert!(matches!(restored.body, Body::Ok));
         assert!(!agent.external_request_pending());
+    }
+
+    #[test]
+    fn linux_request_is_forwarded_without_expanding_the_host_command_boundary() {
+        let mut agent = Agent::new("26.0.0", "boot-a", 0);
+        let mut transport = MockTransport::connected();
+        negotiate(&mut agent, &mut transport, 1);
+        transport.output.clear();
+
+        agent
+            .queue_external_request(Message::command(
+                Destination::Mboot,
+                MessageType::Request,
+                92,
+                KnownCommand::LinuxWindows,
+                vec![Argument::new("instance", "7")],
+            ))
+            .unwrap();
+        agent.tick(&mut transport, 5).unwrap();
+        let forwarded = transport.lines().pop().unwrap();
+        assert_eq!(forwarded.known_command(), Some(KnownCommand::LinuxWindows));
+        assert_eq!(forwarded.argument("instance"), Some("7"));
+        transport.push(&response(Message::ok(
+            Destination::Mochios,
+            forwarded.request_id,
+            Vec::new(),
+        )));
+        agent.tick(&mut transport, 6).unwrap();
+        assert!(agent.take_external_response().is_some());
+
+        assert_eq!(
+            agent.queue_external_request(Message::command(
+                Destination::Mboot,
+                MessageType::Request,
+                93,
+                KnownCommand::HostPoweroff,
+                Vec::new(),
+            )),
+            Err(ExternalRequestError::InvalidRequest)
+        );
     }
 }

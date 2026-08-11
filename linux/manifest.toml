@@ -1,0 +1,15 @@
+[package]
+id = "org.mochios.linux"
+name = "Linux GUI Service"
+version = "1"
+vendor = "mochiOS"
+
+[[binary]]
+path = "/system/services/linux.service"
+kind = "service"
+requires = [
+    "ipc.client",
+    "ipc.server",
+    "process.inspect",
+    "window.create",
+]

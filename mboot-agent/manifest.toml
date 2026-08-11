@@ -10,6 +10,7 @@ kind = "service"
 requires = [
     "dma.allocate",
     "ipc.server",
+    "process.inspect",
     "serial.access",
     "system.random.read",
     "system.time.read",

@@ -1,0 +1,4 @@
+name = "Linux GUI Service"
+bundle-id = "org.mochios.linux"
+version = "1.0.0"
+description = "Bridges approved Linux X11 applications into mochiOS windows"

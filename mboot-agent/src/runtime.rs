@@ -1,6 +1,8 @@
 use std::fmt::Write;
 
-use mboot_protocol::{Destination, ErrorCode, Message, decode_line, encode_to_string};
+use mboot_protocol::{
+    Destination, ErrorCode, KnownCommand, Message, decode_line, encode_to_string,
+};
 use mochi_user_platform as platform;
 
 use crate::agent::{Agent, AgentError, ExternalRequestError, ReadyStage};
@@ -125,6 +127,10 @@ fn receive_ipc_request(
         }
     };
     let client_request_id = decoded.request_id;
+    if decoded.known_command().is_some_and(is_linux_command) && !linux_service_owns_sender(sender) {
+        reply_protocol_error(sender, client_request_id, ErrorCode::PermissionDenied);
+        return;
+    }
     match agent.queue_external_request(decoded) {
         Ok(()) => {
             *pending_developer_sender = Some(PendingDeveloperRequest {
@@ -134,6 +140,25 @@ fn receive_ipc_request(
         }
         Err(error) => reply_protocol_error(sender, request_id(message), external_error(error)),
     }
+}
+
+fn is_linux_command(command: KnownCommand) -> bool {
+    matches!(
+        command,
+        KnownCommand::LinuxLaunch
+            | KnownCommand::LinuxWindows
+            | KnownCommand::LinuxWindowInfo
+            | KnownCommand::LinuxFrame
+            | KnownCommand::LinuxInput
+            | KnownCommand::LinuxConfigure
+            | KnownCommand::LinuxClose
+    )
+}
+
+fn linux_service_owns_sender(sender: u64) -> bool {
+    let owner = platform::ipc::endpoint_owner_process(sender).ok();
+    let linux_service = platform::process::find_by_name("linux.service").ok();
+    owner.is_some() && owner == linux_service
 }
 
 fn complete_developer_request(

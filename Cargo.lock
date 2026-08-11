@@ -1128,6 +1128,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4a5ff6bcca6c4867b1c4fd4ef63e4db7436ef363e0ad7531d1558856bae64f4"
 
 [[package]]
+name = "linux"
+version = "0.1.0"
+dependencies = [
+ "mboot-protocol",
+ "mochi-user-platform",
+ "mochi-user-syscall",
+ "mochios-linux-gui-protocol",
+]
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1175,7 +1185,7 @@ dependencies = [
 [[package]]
 name = "mboot-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/mBoot?rev=54d223a845c0b97a9c5d6fc5c2908c04ffec1f68#54d223a845c0b97a9c5d6fc5c2908c04ffec1f68"
+source = "git+https://github.com/mochiOS/mBoot?rev=cf9de6b17377eb671a98b21120cf9c22e8aecf03#cf9de6b17377eb671a98b21120cf9c22e8aecf03"
 
 [[package]]
 name = "memchr"
@@ -1267,6 +1277,11 @@ source = "git+https://github.com/mochiOS/syscalls#e00e535b543a462f89ba77a9353273
 name = "mochios-http-client"
 version = "0.1.0"
 source = "git+https://github.com/mochiOS/syscalls#e00e535b543a462f89ba77a935327328ad775161"
+
+[[package]]
+name = "mochios-linux-gui-protocol"
+version = "0.1.0"
+source = "git+https://github.com/mochiOS/syscalls?rev=62028feef0ea1720c777a338a22e28140fb57876#62028feef0ea1720c777a338a22e28140fb57876"
 
 [[package]]
 name = "mochios-net-device-protocol"

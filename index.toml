@@ -81,3 +81,10 @@ fs = "rootfs"
 description = "mochiOS trusted login and authorization UI service"
 autostart = false
 order = 11
+
+[linux.service]
+dir = "linux"
+fs = "rootfs"
+description = "mochiOS Linux GUI bridge service"
+autostart = false
+order = 12
