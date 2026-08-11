@@ -1,14 +1,22 @@
 use std::fmt::Write;
 
+use mboot_protocol::{Destination, ErrorCode, Message, decode_line, encode_to_string};
 use mochi_user_platform as platform;
 
-use crate::agent::{Agent, AgentError, ReadyStage};
+use crate::agent::{Agent, AgentError, ExternalRequestError, ReadyStage};
 use crate::transport::TransportError;
 use crate::transport::virtio::VirtioSerialTransport;
 
 const STAGE_TOKEN_PREFIX: &str = "--mboot-stage-token=";
 const RETRY_DELAY_MS: u64 = 1_000;
 const POLL_DELAY_MS: u64 = 10;
+const IPC_MESSAGE_LEN: usize = mboot_protocol::MAX_MESSAGE_LEN;
+
+#[derive(Clone, Copy)]
+struct PendingDeveloperRequest {
+    sender: u64,
+    request_id: u64,
+}
 
 pub fn run() -> ! {
     let _ = platform::logger::init_from_env();
@@ -25,10 +33,11 @@ pub fn run() -> ! {
     };
     let mut agent = Agent::new(env!("MOCHIOS_VERSION"), boot_id, started);
     let mut transport = None;
+    let mut pending_developer_sender = None;
     let mut initialization_error_reported = false;
 
     loop {
-        receive_stage_notifications(&mut agent, stage_token);
+        receive_ipc_request(&mut agent, stage_token, &mut pending_developer_sender);
         if transport.is_none() {
             match VirtioSerialTransport::initialize() {
                 Ok(initialized) => {
@@ -66,25 +75,35 @@ pub fn run() -> ! {
                 }
             }
         }
+        complete_developer_request(&mut agent, &mut pending_developer_sender);
         let _ = platform::thread::sleep_milliseconds(POLL_DELAY_MS);
     }
 }
 
-fn receive_stage_notifications(agent: &mut Agent, expected_token: Option<u64>) {
-    let mut request = [0u8; platform::service_ready::MESSAGE_LEN];
-    loop {
-        let received = match platform::ipc::try_wait(&mut request) {
-            Ok(received) => received,
-            Err(error) if error.raw() == mochi_user_syscall::EAGAIN as i64 => break,
-            Err(_) => break,
-        };
-        let sender = received >> 32;
-        let length = (received & 0xffff_ffff) as usize;
-        let status = request
-            .get(..length)
-            .and_then(|message| platform::service_ready::decode_notification(message).ok())
-            .filter(|(token, _)| Some(*token) == expected_token)
-            .and_then(|(_, stage)| match stage {
+fn receive_ipc_request(
+    agent: &mut Agent,
+    expected_token: Option<u64>,
+    pending_developer_sender: &mut Option<PendingDeveloperRequest>,
+) {
+    if pending_developer_sender.is_some() {
+        return;
+    }
+    let mut request = [0u8; IPC_MESSAGE_LEN];
+    let received = match platform::ipc::try_wait(&mut request) {
+        Ok(received) => received,
+        Err(error) if error.raw() == mochi_user_syscall::EAGAIN as i64 => return,
+        Err(_) => return,
+    };
+    let sender = received >> 32;
+    let length = (received & 0xffff_ffff) as usize;
+    let Some(message) = request.get(..length) else {
+        reply_errno(sender, mochi_user_syscall::EINVAL);
+        return;
+    };
+    if let Ok((token, stage)) = platform::service_ready::decode_notification(message) {
+        let status = (Some(token) == expected_token)
+            .then_some(stage)
+            .and_then(|stage| match stage {
                 1 => Some(ReadyStage::Userspace),
                 2 => Some(ReadyStage::Display),
                 3 => Some(ReadyStage::Desktop),
@@ -96,7 +115,87 @@ fn receive_stage_notifications(agent: &mut Agent, expected_token: Option<u64>) {
                     .map_or(-(mochi_user_syscall::EINVAL as i32), |()| 0)
             });
         let _ = platform::ipc::reply(sender, &status.to_le_bytes());
+        return;
     }
+    let decoded = match decode_line(message) {
+        Ok(decoded) => decoded,
+        Err(_) => {
+            reply_errno(sender, mochi_user_syscall::EINVAL);
+            return;
+        }
+    };
+    if !matches!(
+        platform::capability::check_thread(sender, "developer.compile"),
+        Ok(1)
+    ) {
+        reply_protocol_error(sender, decoded.request_id, ErrorCode::PermissionDenied);
+        return;
+    }
+    let client_request_id = decoded.request_id;
+    match agent.queue_external_request(decoded) {
+        Ok(()) => {
+            *pending_developer_sender = Some(PendingDeveloperRequest {
+                sender,
+                request_id: client_request_id,
+            });
+        }
+        Err(error) => reply_protocol_error(sender, request_id(message), external_error(error)),
+    }
+}
+
+fn complete_developer_request(
+    agent: &mut Agent,
+    pending_sender: &mut Option<PendingDeveloperRequest>,
+) {
+    let response = agent.take_external_response();
+    if response.is_none() && agent.external_request_pending() {
+        return;
+    }
+    let Some(pending) = pending_sender.take() else {
+        return;
+    };
+    let Some(response) = response else {
+        reply_protocol_error(pending.sender, pending.request_id, ErrorCode::InvalidState);
+        return;
+    };
+    match encode_to_string(&response) {
+        Ok(encoded) => {
+            let _ = platform::ipc::reply(pending.sender, encoded.as_bytes());
+        }
+        Err(_) => reply_errno(pending.sender, mochi_user_syscall::EIO),
+    }
+}
+
+fn reply_protocol_error(sender: u64, request_id: u64, error: ErrorCode) {
+    if request_id == 0 {
+        reply_errno(sender, mochi_user_syscall::EINVAL);
+        return;
+    }
+    let response = Message::error(Destination::Mochios, request_id, error, Vec::new());
+    match encode_to_string(&response) {
+        Ok(encoded) => {
+            let _ = platform::ipc::reply(sender, encoded.as_bytes());
+        }
+        Err(_) => reply_errno(sender, mochi_user_syscall::EIO),
+    }
+}
+
+fn reply_errno(sender: u64, errno: u64) {
+    let status = -(errno as i32);
+    let _ = platform::ipc::reply(sender, &status.to_le_bytes());
+}
+
+fn external_error(error: ExternalRequestError) -> ErrorCode {
+    match error {
+        ExternalRequestError::NotNegotiated => ErrorCode::InvalidState,
+        ExternalRequestError::Busy => ErrorCode::Busy,
+        ExternalRequestError::InvalidRequest => ErrorCode::InvalidArgument,
+        ExternalRequestError::Encode => ErrorCode::Internal,
+    }
+}
+
+fn request_id(message: &[u8]) -> u64 {
+    decode_line(message).map_or(0, |message| message.request_id)
 }
 
 fn current_ticks() -> u64 {

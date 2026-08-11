@@ -1175,7 +1175,7 @@ dependencies = [
 [[package]]
 name = "mboot-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/mBoot?rev=9918aef4f74a795022534e6c663df9c9a8bbbc3a#9918aef4f74a795022534e6c663df9c9a8bbbc3a"
+source = "git+https://github.com/mochiOS/mBoot?rev=54d223a845c0b97a9c5d6fc5c2908c04ffec1f68#54d223a845c0b97a9c5d6fc5c2908c04ffec1f68"
 
 [[package]]
 name = "memchr"

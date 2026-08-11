@@ -65,6 +65,20 @@ pub enum AgentError {
     Transport(TransportError),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExternalRequestError {
+    NotNegotiated,
+    Busy,
+    InvalidRequest,
+    Encode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ExternalRequest {
+    host_request_id: u64,
+    client_request_id: u64,
+}
+
 pub struct Agent {
     version: String,
     boot_id: String,
@@ -74,6 +88,8 @@ pub struct Agent {
     outbound: VecDeque<u8>,
     next_request_id: u64,
     pending: Option<PendingRequest>,
+    external_pending: Option<ExternalRequest>,
+    external_response: Option<Message>,
     handshake_deadline_ms: Option<u64>,
     session: Option<String>,
     heartbeat_ms: Option<u64>,
@@ -93,6 +109,8 @@ impl Agent {
             outbound: VecDeque::new(),
             next_request_id: 1,
             pending: None,
+            external_pending: None,
+            external_response: None,
             handshake_deadline_ms: None,
             session: None,
             heartbeat_ms: None,
@@ -112,6 +130,56 @@ impl Agent {
 
     pub const fn achieved_stage(&self) -> ReadyStage {
         self.achieved_stage
+    }
+
+    pub fn queue_external_request(&mut self, message: Message) -> Result<(), ExternalRequestError> {
+        if !self.is_negotiated() {
+            return Err(ExternalRequestError::NotNegotiated);
+        }
+        if self.external_pending.is_some() {
+            return Err(ExternalRequestError::Busy);
+        }
+        if message.destination != Destination::Mboot
+            || message.message_type != MessageType::Request
+            || !matches!(
+                message.known_command(),
+                Some(
+                    KnownCommand::DeveloperBegin
+                        | KnownCommand::DeveloperChunk
+                        | KnownCommand::DeveloperCompile
+                        | KnownCommand::DeveloperRead
+                        | KnownCommand::DeveloperCancel
+                )
+            )
+        {
+            return Err(ExternalRequestError::InvalidRequest);
+        }
+        let host_request_id = self.allocate_request_id();
+        let client_request_id = message.request_id;
+        let command = message
+            .known_command()
+            .ok_or(ExternalRequestError::InvalidRequest)?;
+        self.queue_message(Message::command(
+            Destination::Mboot,
+            MessageType::Request,
+            host_request_id,
+            command,
+            message.arguments,
+        ))
+        .map_err(|_| ExternalRequestError::Encode)?;
+        self.external_pending = Some(ExternalRequest {
+            host_request_id,
+            client_request_id,
+        });
+        Ok(())
+    }
+
+    pub fn take_external_response(&mut self) -> Option<Message> {
+        self.external_response.take()
+    }
+
+    pub const fn external_request_pending(&self) -> bool {
+        self.external_pending.is_some()
     }
 
     pub fn mark_ready(&mut self, stage: ReadyStage) -> Result<(), AgentError> {
@@ -216,6 +284,17 @@ impl Agent {
         if message.message_type == MessageType::Request {
             return self.handle_request(message, now_ms);
         }
+        if let Some(external) = self.external_pending
+            && message.destination == Destination::Mochios
+            && message.message_type == MessageType::Response
+            && message.request_id == external.host_request_id
+        {
+            let mut response = message;
+            response.request_id = external.client_request_id;
+            self.external_pending = None;
+            self.external_response = Some(response);
+            return Ok(());
+        }
         let Some(pending) = self.pending else {
             return Ok(());
         };
@@ -238,7 +317,7 @@ impl Agent {
                         Argument::new("system", "mochios"),
                         Argument::new("version", self.version.clone()),
                         Argument::new("boot_id", self.boot_id.clone()),
-                        Argument::new("capabilities", "ready,heartbeat,status"),
+                        Argument::new("capabilities", "ready,heartbeat,status,developer.compile"),
                     ],
                 ))?;
                 self.pending = Some(PendingRequest {
@@ -386,6 +465,8 @@ impl Agent {
         self.decoder.reset();
         self.outbound.clear();
         self.pending = None;
+        self.external_pending = None;
+        self.external_response = None;
         self.handshake_deadline_ms = None;
         self.session = None;
         self.heartbeat_ms = None;
@@ -478,6 +559,10 @@ mod tests {
         agent.tick(transport, now + 1).unwrap();
         let hello = transport.lines().pop().unwrap();
         assert_eq!(hello.known_command(), Some(KnownCommand::ProtocolHello));
+        assert_eq!(
+            hello.argument("capabilities"),
+            Some("ready,heartbeat,status,developer.compile")
+        );
         transport.push(&response(Message::command(
             Destination::Mochios,
             MessageType::Response,
@@ -738,5 +823,44 @@ mod tests {
         assert_eq!(agent.allocate_request_id(), u64::MAX);
         assert_eq!(agent.allocate_request_id(), 1);
         assert_eq!(agent.allocate_request_id(), 2);
+    }
+
+    #[test]
+    fn external_request_is_forwarded_and_response_id_is_restored() {
+        let mut agent = Agent::new("26.0.0", "boot-a", 0);
+        let mut transport = MockTransport::connected();
+        negotiate(&mut agent, &mut transport, 1);
+        transport.output.clear();
+
+        agent
+            .queue_external_request(Message::command(
+                Destination::Mboot,
+                MessageType::Request,
+                91,
+                KnownCommand::DeveloperBegin,
+                vec![
+                    Argument::new("transaction", "7"),
+                    Argument::new("size", "12"),
+                ],
+            ))
+            .unwrap();
+        agent.tick(&mut transport, 5).unwrap();
+        let forwarded = transport.lines().pop().unwrap();
+        assert_ne!(forwarded.request_id, 91);
+        assert_eq!(
+            forwarded.known_command(),
+            Some(KnownCommand::DeveloperBegin)
+        );
+
+        transport.push(&response(Message::ok(
+            Destination::Mochios,
+            forwarded.request_id,
+            Vec::new(),
+        )));
+        agent.tick(&mut transport, 6).unwrap();
+        let restored = agent.take_external_response().unwrap();
+        assert_eq!(restored.request_id, 91);
+        assert!(matches!(restored.body, Body::Ok));
+        assert!(!agent.external_request_pending());
     }
 }

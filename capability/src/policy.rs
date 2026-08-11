@@ -201,6 +201,7 @@ pub(crate) fn is_known_capability(name: &str) -> bool {
             | "settings.write"
             | "capabilities.manage"
             | "unsandboxed"
+            | "developer.compile"
             | "developer.debug"
             | "developer.profile"
             | "developer.tracing"
