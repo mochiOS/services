@@ -3,6 +3,7 @@ mod codec;
 mod compositor;
 #[cfg(target_os = "mochios")]
 mod host;
+mod input;
 #[cfg(target_os = "mochios")]
 mod runtime;
 

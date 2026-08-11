@@ -11,7 +11,8 @@ use crate::input::{clear_focus_for_surface, update_keyboard_focus};
 use crate::protocol::*;
 use crate::state::{MAX_DIMENSION, MAX_SHARED_BYTES, PAGE_SIZE, getrandom_u64};
 use crate::window::{
-    Window, WindowId, generate_window_token, notify_decorators, window_index_by_id,
+    MAX_WINDOW_TITLE_BYTES, Window, WindowId, generate_window_token, notify_decorators,
+    window_index_by_id,
 };
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -777,8 +778,9 @@ pub(crate) fn send_frame_done(surface: &Surface) {
     if surface.event_endpoint == 0 || surface.is_decoration {
         return;
     }
-    let mut event = [0u8; 20];
+    let mut event = [0u8; 24];
     put_u32(&mut event, 0, EVENT_FRAME_DONE);
+    put_u64(&mut event, 16, surface.token);
     let _ = platform::ipc::send(surface.event_endpoint, &event);
 }
 
@@ -1376,6 +1378,39 @@ pub(crate) fn handle_request(
         }
         OP_SET_POSITION => {
             put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+        }
+        OP_SET_TITLE => {
+            let token = read_u64(request, 4).unwrap_or(0);
+            let title_len = read_u32(request, 12).unwrap_or(u32::MAX) as usize;
+            if title_len > MAX_WINDOW_TITLE_BYTES || request.len() != 16 + title_len {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
+                return reply;
+            }
+            let handle = SurfaceHandle(token);
+            let Some(surface_index) =
+                surface_index_for(surfaces, client, handle, SurfaceRights::COMMIT)
+            else {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            };
+            if surfaces[surface_index].role != SurfaceRole::Toplevel
+                || core::str::from_utf8(&request[16..]).is_err()
+            {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
+                return reply;
+            }
+            let Some(window_index) = window_index_by_id(windows, surfaces[surface_index].window)
+            else {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
+                return reply;
+            };
+            windows[window_index].title.fill(0);
+            windows[window_index].title[..title_len].copy_from_slice(&request[16..]);
+            windows[window_index].title_len = title_len as u8;
+            if windows[window_index].metadata_sent {
+                notify_decorators(clients, windows, surfaces, window_index);
+            }
+            put_u32(&mut reply, 0, 0);
         }
         OP_DESTROY_SURFACE => {
             let token = read_u64(request, 4).unwrap_or(0);

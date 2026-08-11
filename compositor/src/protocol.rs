@@ -7,6 +7,7 @@ pub(crate) const OP_DESTROY_SURFACE: u32 = 6;
 pub(crate) const OP_SET_CURSOR_POSITION: u32 = 7;
 pub(crate) const OP_SET_CURSOR_IMAGE: u32 = 8;
 pub(crate) const OP_GET_RENDERER_CAPS: u32 = 9;
+pub(crate) const OP_SET_TITLE: u32 = 10;
 pub(crate) const OP_DECOR_SUBSCRIBE: u32 = 100;
 pub(crate) const OP_DECOR_CREATE_SURFACE: u32 = 101;
 pub(crate) const OP_DECOR_ATTACH: u32 = 102;

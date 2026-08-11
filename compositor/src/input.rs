@@ -84,7 +84,14 @@ pub(crate) fn clear_focus_for_surface(
         if let Some(surface) = surfaces.get(index)
             && surface.live
         {
-            send_event(surface.event_endpoint, EVENT_POINTER_LEAVE, 0, 0, 0);
+            send_event(
+                surface.event_endpoint,
+                surface.token,
+                EVENT_POINTER_LEAVE,
+                0,
+                0,
+                0,
+            );
         }
         *pointer_focus = None;
     }
@@ -124,15 +131,11 @@ fn hit_test(surfaces: &[Surface], windows: &[Window], x: i32, y: i32) -> Option<
     hit
 }
 
-pub(crate) fn send_event(endpoint: u64, kind: u32, a: i32, b: i32, c: u32) {
+pub(crate) fn send_event(endpoint: u64, surface_token: u64, kind: u32, a: i32, b: i32, c: u32) {
     if endpoint == 0 {
         return;
     }
-    let mut event = [0u8; 20];
-    put_u32(&mut event, 0, kind);
-    put_i32(&mut event, 4, a);
-    put_i32(&mut event, 8, b);
-    put_u32(&mut event, 12, c);
+    let event = encode_surface_event(surface_token, kind, a, b, c);
     if kind != EVENT_KEY
         && kind != EVENT_POINTER_BUTTON
         && kind != EVENT_POINTER_SCROLL
@@ -150,6 +153,16 @@ pub(crate) fn send_event(endpoint: u64, kind: u32, a: i32, b: i32, c: u32) {
             Err(_) => break,
         }
     }
+}
+
+fn encode_surface_event(surface_token: u64, kind: u32, a: i32, b: i32, c: u32) -> [u8; 24] {
+    let mut event = [0u8; 24];
+    put_u32(&mut event, 0, kind);
+    put_i32(&mut event, 4, a);
+    put_i32(&mut event, 8, b);
+    put_u32(&mut event, 12, c);
+    put_u64(&mut event, 16, surface_token);
+    event
 }
 
 fn send_decoration_button_event(
@@ -210,7 +223,14 @@ fn dispatch_pointer_motion(
                         0,
                     );
                 } else {
-                    send_event(surface.event_endpoint, EVENT_POINTER_LEAVE, 0, 0, 0);
+                    send_event(
+                        surface.event_endpoint,
+                        surface.token,
+                        EVENT_POINTER_LEAVE,
+                        0,
+                        0,
+                        0,
+                    );
                 }
             }
         }
@@ -220,6 +240,7 @@ fn dispatch_pointer_motion(
             if !surface.is_decoration {
                 send_event(
                     surface.event_endpoint,
+                    surface.token,
                     EVENT_POINTER_ENTER,
                     pointer_x - surface.x,
                     pointer_y - surface.y,
@@ -246,6 +267,7 @@ fn dispatch_pointer_motion(
             } else {
                 send_event(
                     surface.event_endpoint,
+                    surface.token,
                     EVENT_POINTER_MOTION,
                     pointer_x - surface.x,
                     pointer_y - surface.y,
@@ -268,7 +290,14 @@ pub(crate) fn update_keyboard_focus(
         if let Some(surface) = surfaces.get(index)
             && surface.live
         {
-            send_event(surface.event_endpoint, EVENT_FOCUS_LOST, 0, 0, 0);
+            send_event(
+                surface.event_endpoint,
+                surface.token,
+                EVENT_FOCUS_LOST,
+                0,
+                0,
+                0,
+            );
         }
     }
     *keyboard_focus = next;
@@ -276,7 +305,14 @@ pub(crate) fn update_keyboard_focus(
         if let Some(surface) = surfaces.get(index)
             && surface.live
         {
-            send_event(surface.event_endpoint, EVENT_FOCUS_GAINED, 0, 0, 0);
+            send_event(
+                surface.event_endpoint,
+                surface.token,
+                EVENT_FOCUS_GAINED,
+                0,
+                0,
+                0,
+            );
         }
     }
 }
@@ -371,6 +407,7 @@ pub(crate) fn handle_input_event(
                 } else {
                     send_event(
                         surface.event_endpoint,
+                        surface.token,
                         EVENT_POINTER_BUTTON,
                         *pointer_x - surface.x,
                         *pointer_y - surface.y,
@@ -391,6 +428,7 @@ pub(crate) fn handle_input_event(
             {
                 send_event(
                     surface.event_endpoint,
+                    surface.token,
                     EVENT_POINTER_SCROLL,
                     event.value_x,
                     event.value_y,
@@ -412,6 +450,7 @@ pub(crate) fn handle_input_event(
                 {
                     send_event(
                         surface.event_endpoint,
+                        surface.token,
                         EVENT_KEY,
                         i32::from(event.keycode),
                         event.codepoint as i32,
@@ -431,11 +470,21 @@ fn encode_key_event_detail(flags: u16, modifiers: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::encode_key_event_detail;
+    use super::{encode_key_event_detail, encode_surface_event};
 
     #[test]
     fn key_event_detail_preserves_flags_and_modifiers() {
         assert_eq!(encode_key_event_detail(0x0003, 0x000b), 0x000b_0003);
+    }
+
+    #[test]
+    fn surface_event_appends_target_token_without_changing_legacy_prefix() {
+        let event = encode_surface_event(0x0102_0304_0506_0708, 5, -2, 3, 4);
+        assert_eq!(&event[..4], &5u32.to_le_bytes());
+        assert_eq!(&event[4..8], &(-2i32).to_le_bytes());
+        assert_eq!(&event[8..12], &3i32.to_le_bytes());
+        assert_eq!(&event[12..16], &4u32.to_le_bytes());
+        assert_eq!(&event[16..24], &0x0102_0304_0506_0708u64.to_le_bytes());
     }
 }
 

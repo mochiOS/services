@@ -150,7 +150,7 @@ fn handle_request(
             put_u32(&mut reply, 4, renderer_caps);
         }
         OP_CREATE_SURFACE | OP_ATTACH_BUFFER | OP_DAMAGE | OP_COMMIT | OP_SET_POSITION
-        | OP_DESTROY_SURFACE => {
+        | OP_DESTROY_SURFACE | OP_SET_TITLE => {
             return crate::surface::handle_request(
                 clients,
                 surfaces,
@@ -221,7 +221,14 @@ fn handle_request(
                         && previous.event_endpoint == surface.event_endpoint
                 });
                 if !already_notified {
-                    send_event(surface.event_endpoint, EVENT_APPEARANCE_CHANGED, 0, 0, 0);
+                    send_event(
+                        surface.event_endpoint,
+                        surface.token,
+                        EVENT_APPEARANCE_CHANGED,
+                        0,
+                        0,
+                        0,
+                    );
                 }
             }
             put_u32(&mut reply, 0, 0);

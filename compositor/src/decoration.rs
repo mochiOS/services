@@ -413,6 +413,7 @@ pub(crate) fn handle_request(
                 {
                     send_event(
                         surfaces[content_index].event_endpoint,
+                        surfaces[content_index].token,
                         EVENT_CLOSE_REQUESTED,
                         0,
                         0,

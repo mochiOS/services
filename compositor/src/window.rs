@@ -13,6 +13,7 @@ use crate::surface::{surface_extent, surface_index_by_handle};
 pub(crate) const WINDOW_CORNER_RADIUS: u32 = 14;
 pub(crate) const WINDOW_SHADOW_MARGIN: u32 = 20;
 pub(crate) const ACTIVE_WINDOW_BORDER_ALPHA: u8 = 31;
+pub(crate) const MAX_WINDOW_TITLE_BYTES: usize = 64;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct WindowId(pub(crate) u64);
@@ -25,7 +26,7 @@ pub(crate) struct Insets {
     pub(crate) bottom: u32,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub(crate) struct Window {
     pub(crate) live: bool,
     pub(crate) id: WindowId,
@@ -45,6 +46,14 @@ pub(crate) struct Window {
     pub(crate) normal_y: i32,
     pub(crate) normal_width: u32,
     pub(crate) normal_height: u32,
+    pub(crate) title_len: u8,
+    pub(crate) title: [u8; MAX_WINDOW_TITLE_BYTES],
+}
+
+impl Default for Window {
+    fn default() -> Self {
+        Self::empty()
+    }
 }
 
 impl Window {
@@ -73,6 +82,8 @@ impl Window {
             normal_y: 0,
             normal_width: 0,
             normal_height: 0,
+            title_len: 0,
+            title: [0; MAX_WINDOW_TITLE_BYTES],
         }
     }
 }
@@ -141,7 +152,7 @@ pub(crate) fn send_window_metadata(window: &Window, surfaces: &[Surface], endpoi
     if content_width == 0 || content_height == 0 {
         return;
     }
-    let mut event = [0u8; 80];
+    let mut event = [0u8; 112];
     put_u32(&mut event, 0, DECOR_EVENT_WINDOW);
     put_u64(&mut event, 4, window.token);
     put_u32(&mut event, 12, content_width);
@@ -152,7 +163,12 @@ pub(crate) fn send_window_metadata(window: &Window, surfaces: &[Surface], endpoi
     put_u32(&mut event, 32, window.insets.top);
     put_u32(&mut event, 36, window.insets.right);
     put_u32(&mut event, 40, window.insets.bottom);
-    let title = b"mochiOS window";
+    let configured_title = &window.title[..usize::from(window.title_len)];
+    let title = if configured_title.is_empty() {
+        b"mochiOS window".as_slice()
+    } else {
+        configured_title
+    };
     put_u32(&mut event, 44, title.len() as u32);
     event[48..48 + title.len()].copy_from_slice(title);
     let _ = platform::ipc::send(endpoint, &event);
@@ -162,10 +178,11 @@ pub(crate) fn send_window_configure(surface: &Surface, width: u32, height: u32) 
     if surface.event_endpoint == 0 || width == 0 || height == 0 {
         return;
     }
-    let mut event = [0u8; 20];
+    let mut event = [0u8; 24];
     put_u32(&mut event, 0, EVENT_CONFIGURE);
     put_i32(&mut event, 4, width as i32);
     put_i32(&mut event, 8, height as i32);
+    put_u64(&mut event, 16, surface.token);
     let _ = platform::ipc::send(surface.event_endpoint, &event);
 }
 

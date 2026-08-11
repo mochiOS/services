@@ -1,6 +1,6 @@
 use mboot_protocol::{
-    Argument, Body, Destination, KnownCommand, MAX_MESSAGE_LEN, Message, MessageType, decode_line,
-    encode_to_string,
+    Argument, Body, Destination, ErrorCode, KnownCommand, MAX_MESSAGE_LEN, Message, MessageType,
+    decode_line, encode_to_string,
 };
 use mochi_user_platform as platform;
 
@@ -13,7 +13,7 @@ const FRAME_CHUNK_BYTES: u64 = 1536;
 pub(crate) enum HostError {
     Unavailable,
     InvalidReply,
-    Rejected,
+    Rejected(ErrorCode),
 }
 
 pub(crate) struct WindowInfo {
@@ -22,6 +22,7 @@ pub(crate) struct WindowInfo {
     pub(crate) generation: u64,
     pub(crate) frame_size: usize,
     pub(crate) encoded_size: usize,
+    pub(crate) title: String,
 }
 
 pub(crate) struct HostClient {
@@ -82,12 +83,16 @@ impl HostClient {
         if response.argument("encoding") != Some("rle32") {
             return Err(HostError::InvalidReply);
         }
+        let title = decode_hex(response.argument("title").ok_or(HostError::InvalidReply)?)
+            .map_err(|_| HostError::InvalidReply)?;
+        let title = String::from_utf8(title).map_err(|_| HostError::InvalidReply)?;
         Ok(WindowInfo {
             width: parse_argument(&response, "width")?,
             height: parse_argument(&response, "height")?,
             generation: parse_argument(&response, "generation")?,
             frame_size: parse_argument(&response, "frame_size")?,
             encoded_size: parse_argument(&response, "encoded_size")?,
+            title,
         })
     }
 
@@ -197,7 +202,7 @@ impl HostClient {
         }
         match response.body {
             Body::Ok => Ok(response),
-            Body::Error(_) => Err(HostError::Rejected),
+            Body::Error(error) => Err(HostError::Rejected(error)),
             Body::Command(_) => Err(HostError::InvalidReply),
         }
     }

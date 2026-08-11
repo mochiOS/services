@@ -1,14 +1,17 @@
 use mochi_user_platform as platform;
 use mochios_linux_gui_protocol::{
-    LAUNCH_REQUEST_LEN, LAUNCH_RESPONSE_LEN, LaunchRequest, LaunchResponse, MAGIC,
+    LAUNCH_RESPONSE_LEN, LaunchRequest, LaunchResponse, Opcode, STATUS_RESPONSE_LEN, StatusRequest,
+    StatusResponse, decode_opcode,
 };
 
 use crate::compositor::Surface;
 use crate::host::{HostClient, HostError};
+use crate::input::x11_keycode;
 
 const FRAME_INTERVAL_MS: u64 = 100;
 const DISCOVERY_INTERVAL_MS: u64 = 25;
 const EVENT_BUFFER_LEN: usize = 64;
+const MAX_INSTANCES: usize = 16;
 const EVENT_POINTER_MOTION: u32 = 4;
 const EVENT_POINTER_BUTTON: u32 = 5;
 const EVENT_KEY: u32 = 6;
@@ -19,20 +22,26 @@ const EVENT_CONFIGURE: u32 = 11;
 const EVENT_POINTER_SCROLL: u32 = 12;
 const INPUT_FLAG_PRESS: u32 = 1;
 const INPUT_FLAG_RELEASE: u32 = 2;
-const EBUSY_ERRNO: i32 = 16;
+
+struct LinuxInstance {
+    id: u64,
+    windows: Vec<ActiveWindow>,
+    next_discovery: u64,
+}
 
 struct ActiveWindow {
-    instance: u64,
-    host_window: Option<u32>,
+    host_window: u32,
     surface: Option<Surface>,
     next_update: u64,
-    close_requested: bool,
+    last_generation: u64,
+    closing: bool,
+    title: String,
 }
 
 pub(crate) fn run() -> ! {
     platform::println!("linux.service: start");
     let mut host = connect_host();
-    let mut active = None;
+    let mut instances = Vec::new();
     let mut next_instance = 1u64;
     let mut event = [0u8; EVENT_BUFFER_LEN];
 
@@ -41,28 +50,26 @@ pub(crate) fn run() -> ! {
             Ok(raw) => {
                 let sender = raw >> 32;
                 let length = raw as u32 as usize;
-                if is_launch_request(&event, length) {
-                    handle_launch(
-                        &event[..length],
+                let message = &event[..length.min(event.len())];
+                match decode_opcode(message) {
+                    Ok(Opcode::Launch) => handle_launch(
+                        message,
                         sender,
                         &mut host,
-                        &mut active,
+                        &mut instances,
                         &mut next_instance,
-                    );
-                } else if let Some(window) = active.as_mut() {
-                    handle_event(&event[..length.min(event.len())], window, &mut host);
+                    ),
+                    Ok(Opcode::Status) => handle_status(message, sender, &instances),
+                    Ok(Opcode::LaunchResponse | Opcode::StatusResponse) => {}
+                    Err(_) => handle_event(message, &mut instances, &mut host),
                 }
             }
             Err(error) if error.raw() == mochi_user_syscall::EAGAIN as i64 => {}
             Err(_) => {}
         }
 
-        if let Some(window) = active.as_mut() {
-            update_window(window, &mut host);
-        }
-        if active.as_ref().is_some_and(|window| window.close_requested) {
-            active = None;
-        }
+        let now = platform::time::ticks().unwrap_or_default();
+        instances.retain_mut(|instance| update_instance(instance, &mut host, now));
         platform::thread::yield_now();
     }
 }
@@ -76,18 +83,11 @@ fn connect_host() -> HostClient {
     }
 }
 
-fn is_launch_request(buffer: &[u8], length: usize) -> bool {
-    length == LAUNCH_REQUEST_LEN
-        && buffer
-            .get(..4)
-            .is_some_and(|bytes| bytes == MAGIC.to_le_bytes())
-}
-
 fn handle_launch(
     request: &[u8],
     sender: u64,
     host: &mut HostClient,
-    active: &mut Option<ActiveWindow>,
+    instances: &mut Vec<LinuxInstance>,
     next_instance: &mut u64,
 ) {
     let decoded = LaunchRequest::decode(request);
@@ -98,22 +98,19 @@ fn handle_launch(
     );
     let result = if !authorized {
         Err(-(mochi_user_syscall::EPERM as i32))
+    } else if instances.len() >= MAX_INSTANCES {
+        Err(-(mochi_user_syscall::ENOSPC as i32))
     } else {
         decoded
             .map_err(|_| -(mochi_user_syscall::EINVAL as i32))
             .and_then(|request| {
-                if active.is_some() {
-                    return Err(-EBUSY_ERRNO);
-                }
                 let instance = allocate_instance(next_instance);
                 host.launch(instance, request.application.host_name())
                     .map_err(host_status)?;
-                *active = Some(ActiveWindow {
-                    instance,
-                    host_window: None,
-                    surface: None,
-                    next_update: 0,
-                    close_requested: false,
+                instances.push(LinuxInstance {
+                    id: instance,
+                    windows: Vec::new(),
+                    next_discovery: 0,
                 });
                 Ok(instance)
             })
@@ -129,51 +126,127 @@ fn handle_launch(
     }
 }
 
+fn handle_status(request: &[u8], sender: u64, instances: &[LinuxInstance]) {
+    let decoded = StatusRequest::decode(request);
+    let request_id = decoded.as_ref().map_or(0, StatusRequest::request_id);
+    let authorized = matches!(
+        platform::capability::check_thread(sender, "process.inspect"),
+        Ok(1)
+    );
+    let (status, instance, running) = if !authorized {
+        (-(mochi_user_syscall::EPERM as i32), 0, false)
+    } else {
+        match decoded {
+            Ok(request) => (
+                0,
+                request.instance,
+                instances
+                    .iter()
+                    .any(|instance| instance.id == request.instance),
+            ),
+            Err(_) => (-(mochi_user_syscall::EINVAL as i32), 0, false),
+        }
+    };
+    let response = StatusResponse {
+        request_id,
+        status,
+        running,
+        instance,
+    };
+    let mut encoded = [0u8; STATUS_RESPONSE_LEN];
+    if response.encode(&mut encoded).is_ok() {
+        let _ = platform::ipc::reply(sender, &encoded);
+    }
+}
+
 fn allocate_instance(next: &mut u64) -> u64 {
     let instance = (*next).max(1);
     *next = instance.wrapping_add(1).max(1);
     instance
 }
 
-fn update_window(active: &mut ActiveWindow, host: &mut HostClient) {
-    let now = platform::time::ticks().unwrap_or_default();
-    if now < active.next_update {
-        return;
-    }
-    active.next_update = now.saturating_add(if active.host_window.is_some() {
-        FRAME_INTERVAL_MS
-    } else {
-        DISCOVERY_INTERVAL_MS
-    });
-
-    if active.host_window.is_none() {
-        match host.windows(active.instance) {
-            Ok(windows) => active.host_window = windows.first().copied(),
-            Err(_) => return,
+fn update_instance(instance: &mut LinuxInstance, host: &mut HostClient, now: u64) -> bool {
+    if now >= instance.next_discovery {
+        instance.next_discovery = now.saturating_add(DISCOVERY_INTERVAL_MS);
+        let host_windows = match host.windows(instance.id) {
+            Ok(windows) => windows,
+            Err(HostError::Rejected(mboot_protocol::ErrorCode::InvalidState)) => return false,
+            Err(_) => return true,
+        };
+        instance
+            .windows
+            .retain(|window| host_windows.contains(&window.host_window));
+        for host_window in host_windows {
+            if !instance
+                .windows
+                .iter()
+                .any(|window| window.host_window == host_window)
+            {
+                instance.windows.push(ActiveWindow {
+                    host_window,
+                    surface: None,
+                    next_update: 0,
+                    last_generation: 0,
+                    closing: false,
+                    title: String::new(),
+                });
+            }
         }
     }
-    let Some(window) = active.host_window else {
+
+    for window in &mut instance.windows {
+        update_window(instance.id, window, host, now);
+    }
+    true
+}
+
+fn update_window(instance: u64, active: &mut ActiveWindow, host: &mut HostClient, now: u64) {
+    if active.closing || now < active.next_update {
         return;
-    };
-    let Ok(info) = host.window_info(active.instance, window) else {
-        return;
-    };
-    let Ok(frame) = host.frame(active.instance, window, &info) else {
+    }
+    active.next_update = now.saturating_add(FRAME_INTERVAL_MS);
+    let Ok(info) = host.window_info(instance, active.host_window) else {
         return;
     };
     if active.surface.is_none() {
         active.surface = Surface::create(info.width, info.height).ok();
     }
-    if let Some(surface) = active.surface.as_mut() {
-        let _ = surface.present(info.width, info.height, &frame);
+    if active.title != info.title {
+        if let Some(surface) = active.surface.as_ref() {
+            let _ = surface.set_title(&info.title);
+        }
+        active.title = info.title.clone();
+    }
+    if info.generation == active.last_generation {
+        return;
+    }
+    let Ok(frame) = host.frame(instance, active.host_window, &info) else {
+        return;
+    };
+    if let Some(surface) = active.surface.as_mut()
+        && surface.present(info.width, info.height, &frame).is_ok()
+    {
+        active.last_generation = info.generation;
     }
 }
 
-fn handle_event(event: &[u8], active: &mut ActiveWindow, host: &mut HostClient) {
-    if event.len() < 16 {
+fn handle_event(event: &[u8], instances: &mut [LinuxInstance], host: &mut HostClient) {
+    if event.len() < 24 {
         return;
     }
-    let Some(window) = active.host_window else {
+    let surface_token = read_u64(event, 16);
+    let Some((instance, active)) = instances.iter_mut().find_map(|instance| {
+        instance
+            .windows
+            .iter_mut()
+            .find(|window| {
+                window
+                    .surface
+                    .as_ref()
+                    .is_some_and(|surface| surface.token() == surface_token)
+            })
+            .map(|window| (instance.id, window))
+    }) else {
         return;
     };
     let kind = read_u32(event, 0);
@@ -182,7 +255,16 @@ fn handle_event(event: &[u8], active: &mut ActiveWindow, host: &mut HostClient) 
     let c = read_u32(event, 12);
     match kind {
         EVENT_POINTER_MOTION => {
-            let _ = host.input(active.instance, window, "motion", 0, 0, i16(a), i16(b), 0);
+            let _ = host.input(
+                instance,
+                active.host_window,
+                "motion",
+                0,
+                0,
+                i16(a),
+                i16(b),
+                0,
+            );
         }
         EVENT_POINTER_BUTTON => {
             let mochi_button = (c & 0xffff) as u8;
@@ -200,8 +282,8 @@ fn handle_event(event: &[u8], active: &mut ActiveWindow, host: &mut HostClient) 
                 return;
             };
             let _ = host.input(
-                active.instance,
-                window,
+                instance,
+                active.host_window,
                 "button",
                 button,
                 value,
@@ -211,7 +293,7 @@ fn handle_event(event: &[u8], active: &mut ActiveWindow, host: &mut HostClient) 
             );
         }
         EVENT_POINTER_SCROLL => {
-            let _ = host.input(active.instance, window, "scroll", 0, b, 0, 0, 0);
+            let _ = host.input(instance, active.host_window, "scroll", 0, b, 0, 0, 0);
         }
         EVENT_KEY => {
             let flags = c & 0xffff;
@@ -220,10 +302,15 @@ fn handle_event(event: &[u8], active: &mut ActiveWindow, host: &mut HostClient) 
             } else {
                 1
             };
-            let keycode = u8::try_from(a).unwrap_or_default().saturating_add(8);
+            let Ok(key) = u16::try_from(a) else {
+                return;
+            };
+            let Some(keycode) = x11_keycode(key) else {
+                return;
+            };
             let _ = host.input(
-                active.instance,
-                window,
+                instance,
+                active.host_window,
                 "key",
                 keycode,
                 value,
@@ -234,8 +321,8 @@ fn handle_event(event: &[u8], active: &mut ActiveWindow, host: &mut HostClient) 
         }
         EVENT_FOCUS_GAINED | EVENT_FOCUS_LOST => {
             let _ = host.input(
-                active.instance,
-                window,
+                instance,
+                active.host_window,
                 "focus",
                 0,
                 if kind == EVENT_FOCUS_GAINED { 1 } else { 0 },
@@ -246,14 +333,14 @@ fn handle_event(event: &[u8], active: &mut ActiveWindow, host: &mut HostClient) 
         }
         EVENT_CONFIGURE => {
             if let (Ok(width), Ok(height)) = (u16::try_from(a), u16::try_from(b)) {
-                let _ = host.configure(active.instance, window, width, height);
+                let _ = host.configure(instance, active.host_window, width, height);
+                active.next_update = 0;
             }
         }
         EVENT_CLOSE_REQUESTED => {
-            let _ = host.close(active.instance, window);
-            active.host_window = None;
+            let _ = host.close(instance, active.host_window);
             active.surface = None;
-            active.close_requested = true;
+            active.closing = true;
         }
         _ => {}
     }
@@ -261,7 +348,11 @@ fn handle_event(event: &[u8], active: &mut ActiveWindow, host: &mut HostClient) 
 
 fn host_status(error: HostError) -> i32 {
     match error {
-        HostError::Rejected => -(mochi_user_syscall::EACCES as i32),
+        HostError::Rejected(mboot_protocol::ErrorCode::PermissionDenied) => {
+            -(mochi_user_syscall::EACCES as i32)
+        }
+        HostError::Rejected(mboot_protocol::ErrorCode::Busy) => -16,
+        HostError::Rejected(_) => -(mochi_user_syscall::EINVAL as i32),
         HostError::Unavailable => -(mochi_user_syscall::EAGAIN as i32),
         HostError::InvalidReply => -(mochi_user_syscall::EIO as i32),
     }
@@ -286,5 +377,18 @@ fn read_i32(buffer: &[u8], offset: usize) -> i32 {
         buffer[offset + 1],
         buffer[offset + 2],
         buffer[offset + 3],
+    ])
+}
+
+fn read_u64(buffer: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes([
+        buffer[offset],
+        buffer[offset + 1],
+        buffer[offset + 2],
+        buffer[offset + 3],
+        buffer[offset + 4],
+        buffer[offset + 5],
+        buffer[offset + 6],
+        buffer[offset + 7],
     ])
 }

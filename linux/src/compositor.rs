@@ -9,6 +9,8 @@ const OP_COMMIT: u32 = 4;
 const OP_DESTROY_SURFACE: u32 = 6;
 const ROLE_TOPLEVEL: u32 = 1;
 const PIXEL_FORMAT_XRGB8888: u32 = 1;
+const OP_SET_TITLE: u32 = 10;
+const MAX_WINDOW_TITLE_BYTES: usize = 64;
 
 #[derive(Debug)]
 pub(crate) enum CompositorError {
@@ -93,6 +95,24 @@ impl Surface {
         put_u32(&mut commit, 0, OP_COMMIT);
         put_u64(&mut commit, 4, self.token);
         call(self.compositor, &commit)?;
+        Ok(())
+    }
+
+    pub(crate) const fn token(&self) -> u64 {
+        self.token
+    }
+
+    pub(crate) fn set_title(&self, title: &str) -> Result<(), CompositorError> {
+        let title = title.as_bytes();
+        if title.len() > MAX_WINDOW_TITLE_BYTES {
+            return Err(CompositorError::InvalidSize);
+        }
+        let mut request = [0u8; 16 + MAX_WINDOW_TITLE_BYTES];
+        put_u32(&mut request, 0, OP_SET_TITLE);
+        put_u64(&mut request, 4, self.token);
+        put_u32(&mut request, 12, title.len() as u32);
+        request[16..16 + title.len()].copy_from_slice(title);
+        call(self.compositor, &request[..16 + title.len()])?;
         Ok(())
     }
 }
