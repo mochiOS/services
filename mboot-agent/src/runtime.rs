@@ -124,13 +124,6 @@ fn receive_ipc_request(
             return;
         }
     };
-    if !matches!(
-        platform::capability::check_thread(sender, "developer.compile"),
-        Ok(1)
-    ) {
-        reply_protocol_error(sender, decoded.request_id, ErrorCode::PermissionDenied);
-        return;
-    }
     let client_request_id = decoded.request_id;
     match agent.queue_external_request(decoded) {
         Ok(()) => {

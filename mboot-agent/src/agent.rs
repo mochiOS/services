@@ -317,7 +317,7 @@ impl Agent {
                         Argument::new("system", "mochios"),
                         Argument::new("version", self.version.clone()),
                         Argument::new("boot_id", self.boot_id.clone()),
-                        Argument::new("capabilities", "ready,heartbeat,status,developer.compile"),
+                        Argument::new("capabilities", "ready,heartbeat,status"),
                     ],
                 ))?;
                 self.pending = Some(PendingRequest {
@@ -561,7 +561,7 @@ mod tests {
         assert_eq!(hello.known_command(), Some(KnownCommand::ProtocolHello));
         assert_eq!(
             hello.argument("capabilities"),
-            Some("ready,heartbeat,status,developer.compile")
+            Some("ready,heartbeat,status")
         );
         transport.push(&response(Message::command(
             Destination::Mochios,
