@@ -142,6 +142,28 @@ pub(crate) fn spawn_secure_ui(
     spawn(fixed_service_spec(FixedService::SecureUi), &arguments)
 }
 
+pub(crate) fn spawn_portal_prompt(
+    logger_endpoint: u64,
+    target: platform::service_ready::Target,
+    application: &str,
+    path: &str,
+    writable: bool,
+) -> Result<u64, mochi_user_syscall::SysError> {
+    let mut arguments = fixed_service_arguments(FixedService::SecureUi, logger_endpoint, None);
+    arguments.push(alloc::format!(
+        "--portal-target={}:{}",
+        target.endpoint,
+        target.token
+    ));
+    arguments.push(alloc::format!("--portal-application={application}"));
+    arguments.push(alloc::format!("--portal-path={path}"));
+    arguments.push(alloc::format!(
+        "--portal-access={}",
+        if writable { "read-write" } else { "read" }
+    ));
+    spawn(fixed_service_spec(FixedService::SecureUi), &arguments)
+}
+
 fn session_user(uid: u32) -> Option<mochios_user_database::UserRecord> {
     use mochios_user_database::{DATABASE_PATH, UserDatabase};
 

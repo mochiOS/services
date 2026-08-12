@@ -485,7 +485,7 @@ fn resident(outcome: BootstrapOutcome, runtime: Option<Runtime>) -> ! {
                 linux_pid: outcome.children.linux,
                 binder_pid,
             });
-    let mut request_bytes = [0u8; platform::session_control::REQUEST_LEN];
+    let mut request_bytes = [0u8; 1024];
     loop {
         let received = match platform::ipc::try_wait(&mut request_bytes) {
             Ok(received) => received,
@@ -500,6 +500,18 @@ fn resident(outcome: BootstrapOutcome, runtime: Option<Runtime>) -> ! {
         };
         let sender = received >> 32;
         let length = (received & 0xffff_ffff) as usize;
+        let Some(message) = request_bytes.get(..length) else {
+            continue;
+        };
+        if message.starts_with(&mochios_linux_portal_protocol::MAGIC.to_le_bytes()) {
+            crate::portal::handle(
+                message,
+                sender,
+                active_session,
+                runtime.as_ref().map_or(0, |runtime| runtime.logger_endpoint),
+            );
+            continue;
+        }
         let request = request_bytes
             .get(..length)
             .ok_or(())

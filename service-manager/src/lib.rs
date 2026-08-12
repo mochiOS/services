@@ -7,6 +7,7 @@ mod bootstrap;
 mod driver_controller;
 mod fixed_service_launcher;
 mod orchestration;
+mod portal;
 mod readiness;
 mod service_config;
 mod session;

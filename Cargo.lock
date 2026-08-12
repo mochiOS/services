@@ -1185,7 +1185,6 @@ dependencies = [
 [[package]]
 name = "mboot-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/mBoot?rev=cf9de6b17377eb671a98b21120cf9c22e8aecf03#cf9de6b17377eb671a98b21120cf9c22e8aecf03"
 
 [[package]]
 name = "memchr"
@@ -1215,12 +1214,12 @@ dependencies = [
 [[package]]
 name = "mnu-abi"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/mnu#26fda999d6a2162b39bd51100ec00145ace585b4"
+source = "git+https://github.com/mochiOS/mnu#4673bae786ef94d4cce112ad2f4f110db42db6ed"
 
 [[package]]
 name = "mochi-user-platform"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e00e535b543a462f89ba77a935327328ad775161"
+source = "git+https://github.com/mochiOS/syscalls#7bd1fe3b9a53ce915a1a6f938ab9648db3157232"
 dependencies = [
  "mnu-abi",
  "mochi-user-syscall",
@@ -1230,7 +1229,7 @@ dependencies = [
 [[package]]
 name = "mochi-user-syscall"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e00e535b543a462f89ba77a935327328ad775161"
+source = "git+https://github.com/mochiOS/syscalls#7bd1fe3b9a53ce915a1a6f938ab9648db3157232"
 dependencies = [
  "mnu-abi",
 ]
@@ -1238,12 +1237,12 @@ dependencies = [
 [[package]]
 name = "mochios-capability-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e00e535b543a462f89ba77a935327328ad775161"
+source = "git+https://github.com/mochiOS/syscalls#7bd1fe3b9a53ce915a1a6f938ab9648db3157232"
 
 [[package]]
 name = "mochios-certificate"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e00e535b543a462f89ba77a935327328ad775161"
+source = "git+https://github.com/mochiOS/syscalls#7bd1fe3b9a53ce915a1a6f938ab9648db3157232"
 dependencies = [
  "ed25519-dalek",
  "sha2",
@@ -1252,7 +1251,7 @@ dependencies = [
 [[package]]
 name = "mochios-certificate-database"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e00e535b543a462f89ba77a935327328ad775161"
+source = "git+https://github.com/mochiOS/syscalls#7bd1fe3b9a53ce915a1a6f938ab9648db3157232"
 dependencies = [
  "sha2",
 ]
@@ -1271,37 +1270,40 @@ dependencies = [
 [[package]]
 name = "mochios-driver-control-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e00e535b543a462f89ba77a935327328ad775161"
+source = "git+https://github.com/mochiOS/syscalls#7bd1fe3b9a53ce915a1a6f938ab9648db3157232"
 
 [[package]]
 name = "mochios-http-client"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e00e535b543a462f89ba77a935327328ad775161"
+source = "git+https://github.com/mochiOS/syscalls#7bd1fe3b9a53ce915a1a6f938ab9648db3157232"
 
 [[package]]
 name = "mochios-linux-gui-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls?rev=814cb3f1f5e0dab5fc199f1de5a443bd61fe566e#814cb3f1f5e0dab5fc199f1de5a443bd61fe566e"
+
+[[package]]
+name = "mochios-linux-portal-protocol"
+version = "0.1.0"
 
 [[package]]
 name = "mochios-net-device-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e00e535b543a462f89ba77a935327328ad775161"
+source = "git+https://github.com/mochiOS/syscalls#7bd1fe3b9a53ce915a1a6f938ab9648db3157232"
 
 [[package]]
 name = "mochios-network-stack"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e00e535b543a462f89ba77a935327328ad775161"
+source = "git+https://github.com/mochiOS/syscalls#7bd1fe3b9a53ce915a1a6f938ab9648db3157232"
 
 [[package]]
 name = "mochios-signature-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e00e535b543a462f89ba77a935327328ad775161"
+source = "git+https://github.com/mochiOS/syscalls#7bd1fe3b9a53ce915a1a6f938ab9648db3157232"
 
 [[package]]
 name = "mochios-tls-client"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e00e535b543a462f89ba77a935327328ad775161"
+source = "git+https://github.com/mochiOS/syscalls#7bd1fe3b9a53ce915a1a6f938ab9648db3157232"
 dependencies = [
  "getrandom 0.2.17",
  "mochi-user-platform",
@@ -1314,22 +1316,22 @@ dependencies = [
 [[package]]
 name = "mochios-user-database"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e00e535b543a462f89ba77a935327328ad775161"
+source = "git+https://github.com/mochiOS/syscalls#7bd1fe3b9a53ce915a1a6f938ab9648db3157232"
 
 [[package]]
 name = "mochios-user-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e00e535b543a462f89ba77a935327328ad775161"
+source = "git+https://github.com/mochiOS/syscalls#7bd1fe3b9a53ce915a1a6f938ab9648db3157232"
 
 [[package]]
 name = "mochios-viewkit-gpu-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e00e535b543a462f89ba77a935327328ad775161"
+source = "git+https://github.com/mochiOS/syscalls#7bd1fe3b9a53ce915a1a6f938ab9648db3157232"
 
 [[package]]
 name = "mochios-virtio-gpu-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e00e535b543a462f89ba77a935327328ad775161"
+source = "git+https://github.com/mochiOS/syscalls#7bd1fe3b9a53ce915a1a6f938ab9648db3157232"
 
 [[package]]
 name = "moxcms"
@@ -2356,6 +2358,7 @@ version = "0.1.0"
 dependencies = [
  "mochi-user-platform",
  "mochi-user-syscall",
+ "mochios-linux-portal-protocol",
  "mochios-user-database",
  "mochios-user-protocol",
  "viewkit",
@@ -2423,6 +2426,7 @@ dependencies = [
  "mochi-user-platform",
  "mochi-user-syscall",
  "mochios-driver-control-protocol",
+ "mochios-linux-portal-protocol",
  "mochios-user-database",
 ]
 
