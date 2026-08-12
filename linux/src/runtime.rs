@@ -1,7 +1,7 @@
 use mochi_user_platform as platform;
 use mochios_linux_gui_protocol::{
-    LAUNCH_RESPONSE_LEN, LaunchRequest, LaunchResponse, Opcode, STATUS_RESPONSE_LEN, StatusRequest,
-    StatusResponse, decode_opcode,
+    BundleLaunchRequest, BundleLaunchResponse, LAUNCH_RESPONSE_LEN, LaunchRequest, LaunchResponse,
+    Opcode, STATUS_RESPONSE_LEN, StatusRequest, StatusResponse, decode_opcode,
 };
 
 use crate::compositor::Surface;
@@ -10,7 +10,7 @@ use crate::input::x11_keycode;
 
 const FRAME_INTERVAL_MS: u64 = 100;
 const DISCOVERY_INTERVAL_MS: u64 = 25;
-const EVENT_BUFFER_LEN: usize = 64;
+const EVENT_BUFFER_LEN: usize = 256;
 const MAX_INSTANCES: usize = 16;
 const EVENT_POINTER_MOTION: u32 = 4;
 const EVENT_POINTER_BUTTON: u32 = 5;
@@ -59,8 +59,19 @@ pub(crate) fn run() -> ! {
                         &mut instances,
                         &mut next_instance,
                     ),
+                    Ok(Opcode::LaunchBundle) => handle_bundle_launch(
+                        message,
+                        sender,
+                        &mut host,
+                        &mut instances,
+                        &mut next_instance,
+                    ),
                     Ok(Opcode::Status) => handle_status(message, sender, &instances),
-                    Ok(Opcode::LaunchResponse | Opcode::StatusResponse) => {}
+                    Ok(
+                        Opcode::LaunchResponse
+                        | Opcode::LaunchBundleResponse
+                        | Opcode::StatusResponse,
+                    ) => {}
                     Err(_) => handle_event(message, &mut instances, &mut host),
                 }
             }
@@ -72,6 +83,111 @@ pub(crate) fn run() -> ! {
         instances.retain_mut(|instance| update_instance(instance, &mut host, now));
         platform::thread::yield_now();
     }
+}
+
+struct BundleSpec {
+    bundle_id: String,
+    rootfs_path: String,
+    rootfs_size: u64,
+    rootfs_digest: String,
+    entrypoint: String,
+    writable_paths: Vec<String>,
+    user: String,
+}
+
+fn handle_bundle_launch(
+    request: &[u8],
+    sender: u64,
+    host: &mut HostClient,
+    instances: &mut Vec<LinuxInstance>,
+    next_instance: &mut u64,
+) {
+    let decoded = BundleLaunchRequest::decode(request);
+    let request_id = decoded.as_ref().map_or(0, BundleLaunchRequest::request_id);
+    let authorized = matches!(
+        platform::capability::check_thread(sender, "process.spawn"),
+        Ok(1)
+    );
+    let result = if !authorized {
+        Err(-(mochi_user_syscall::EPERM as i32))
+    } else if instances.len() >= MAX_INSTANCES {
+        Err(-(mochi_user_syscall::ENOSPC as i32))
+    } else {
+        decoded
+            .map_err(|_| -(mochi_user_syscall::EINVAL as i32))
+            .and_then(|request| load_bundle_spec(request.bundle_id, request.user))
+            .and_then(|spec| {
+                let instance = allocate_instance(next_instance);
+                host.stage_bundle(
+                    instance,
+                    &spec.bundle_id,
+                    &spec.rootfs_path,
+                    spec.rootfs_size,
+                    &spec.rootfs_digest,
+                )
+                .map_err(host_status)?;
+                host.launch_bundle(
+                    instance,
+                    &spec.bundle_id,
+                    &spec.entrypoint,
+                    &spec.user,
+                    &spec.writable_paths,
+                )
+                .map_err(host_status)?;
+                instances.push(LinuxInstance {
+                    id: instance,
+                    windows: Vec::new(),
+                    next_discovery: 0,
+                });
+                Ok(instance)
+            })
+    };
+    let response = BundleLaunchResponse {
+        request_id,
+        status: result.as_ref().map_or_else(|status| *status, |_| 0),
+        instance: result.unwrap_or_default(),
+    };
+    let mut encoded = [0u8; LAUNCH_RESPONSE_LEN];
+    if response.encode(&mut encoded).is_ok() {
+        let _ = platform::ipc::reply(sender, &encoded);
+    }
+}
+
+fn load_bundle_spec(bundle_id: &str, user: &str) -> Result<BundleSpec, i32> {
+    let manifest_path = format!("/system/packages/{bundle_id}/manifest.toml");
+    let manifest = platform::package::read_manifest(&manifest_path)
+        .ok_or(-(mochi_user_syscall::ENOENT as i32))?;
+    if manifest.package_id != bundle_id
+        || manifest.package_kind.as_deref() != Some("application")
+        || manifest.package_architecture.as_deref() != Some("x86_64")
+        || manifest.package_abi.as_deref() != Some("mboot-linux-1")
+    {
+        return Err(-(mochi_user_syscall::EINVAL as i32));
+    }
+    let linux = manifest.linux.ok_or(-(mochi_user_syscall::EINVAL as i32))?;
+    let rootfs = manifest
+        .files
+        .iter()
+        .find(|file| file.id == linux.rootfs_file)
+        .ok_or(-(mochi_user_syscall::EINVAL as i32))?;
+    let relative = rootfs
+        .path
+        .strip_prefix("$/")
+        .ok_or(-(mochi_user_syscall::EINVAL as i32))?;
+    let digest = rootfs
+        .digest
+        .strip_prefix("sha256:")
+        .filter(|digest| digest.len() == 64)
+        .ok_or(-(mochi_user_syscall::EINVAL as i32))?;
+    Ok(BundleSpec {
+        bundle_id: bundle_id.to_string(),
+        rootfs_path: format!("/applications/{}.app/{}", manifest.package_name, relative),
+        rootfs_size: rootfs.size,
+        rootfs_digest: digest.to_string(),
+        entrypoint: linux.entrypoint,
+        writable_paths: linux.writable_paths,
+        user: user.to_string(),
+    })
 }
 
 fn connect_host() -> HostClient {

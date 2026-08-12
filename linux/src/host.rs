@@ -8,6 +8,7 @@ use crate::codec::{decode_hex, decode_rle32};
 
 const AGENT_NAME: &str = "mboot-agent.service";
 const FRAME_CHUNK_BYTES: u64 = 1536;
+const STAGE_CHUNK_BYTES: usize = 1536;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HostError {
@@ -52,6 +53,112 @@ impl HostClient {
             ],
         )?;
         Ok(())
+    }
+
+    pub(crate) fn stage_bundle(
+        &mut self,
+        instance: u64,
+        bundle: &str,
+        path: &str,
+        size: u64,
+        digest: &str,
+    ) -> Result<(), HostError> {
+        let response = self.call(
+            KnownCommand::LinuxStageBegin,
+            vec![
+                Argument::new("instance", instance.to_string()),
+                Argument::new("bundle", bundle),
+                Argument::new("size", size.to_string()),
+                Argument::new("digest", digest),
+            ],
+        )?;
+        if response.argument("cached") == Some("1") {
+            return Ok(());
+        }
+        if response.argument("cached") != Some("0") {
+            return Err(HostError::InvalidReply);
+        }
+        let result = self.send_stage_file(instance, path, size);
+        if result.is_err() {
+            let _ = self.call(
+                KnownCommand::LinuxStageCancel,
+                vec![Argument::new("instance", instance.to_string())],
+            );
+            return result;
+        }
+        self.call(
+            KnownCommand::LinuxStageCommit,
+            vec![Argument::new("instance", instance.to_string())],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn launch_bundle(
+        &mut self,
+        instance: u64,
+        bundle: &str,
+        entrypoint: &str,
+        user: &str,
+        writable_paths: &[String],
+    ) -> Result<(), HostError> {
+        let writable = if writable_paths.is_empty() {
+            String::from("none")
+        } else {
+            writable_paths.join(",")
+        };
+        self.call(
+            KnownCommand::LinuxBundleLaunch,
+            vec![
+                Argument::new("instance", instance.to_string()),
+                Argument::new("bundle", bundle),
+                Argument::new("entry", entrypoint),
+                Argument::new("user", user),
+                Argument::new("writable", writable),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn send_stage_file(
+        &mut self,
+        instance: u64,
+        path: &str,
+        expected_size: u64,
+    ) -> Result<(), HostError> {
+        let fd = platform::file::open_path(path, 0).map_err(|_| HostError::Unavailable)?;
+        let mut offset = 0u64;
+        let mut buffer = [0u8; STAGE_CHUNK_BYTES];
+        let result = loop {
+            let read =
+                match platform::file::read(fd, buffer.as_mut_ptr() as u64, buffer.len() as u64) {
+                    Ok(read) => read as usize,
+                    Err(_) => break Err(HostError::Unavailable),
+                };
+            if read == 0 {
+                break if offset == expected_size {
+                    Ok(())
+                } else {
+                    Err(HostError::InvalidReply)
+                };
+            }
+            if offset.saturating_add(read as u64) > expected_size {
+                break Err(HostError::InvalidReply);
+            }
+            let response = self.call(
+                KnownCommand::LinuxStageChunk,
+                vec![
+                    Argument::new("instance", instance.to_string()),
+                    Argument::new("offset", offset.to_string()),
+                    Argument::new("data", encode_hex(&buffer[..read])),
+                ],
+            );
+            if let Err(error) = response {
+                break Err(error);
+            }
+            offset += read as u64;
+        };
+        let _ = platform::file::close(fd);
+        result
     }
 
     pub(crate) fn windows(&mut self, instance: u64) -> Result<Vec<u32>, HostError> {
@@ -212,6 +319,16 @@ impl HostClient {
         self.next_request_id = current.wrapping_add(1).max(1);
         current
     }
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(DIGITS[(byte >> 4) as usize] as char);
+        output.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    output
 }
 
 fn window_arguments(instance: u64, window: u32) -> Vec<Argument> {

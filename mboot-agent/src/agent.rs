@@ -150,6 +150,11 @@ impl Agent {
                         | KnownCommand::DeveloperRead
                         | KnownCommand::DeveloperCancel
                         | KnownCommand::LinuxLaunch
+                        | KnownCommand::LinuxStageBegin
+                        | KnownCommand::LinuxStageChunk
+                        | KnownCommand::LinuxStageCommit
+                        | KnownCommand::LinuxStageCancel
+                        | KnownCommand::LinuxBundleLaunch
                         | KnownCommand::LinuxWindows
                         | KnownCommand::LinuxWindowInfo
                         | KnownCommand::LinuxFrame
@@ -909,5 +914,35 @@ mod tests {
             )),
             Err(ExternalRequestError::InvalidRequest)
         );
+    }
+
+    #[test]
+    fn linux_bundle_staging_commands_cross_only_the_external_boundary() {
+        for command in [
+            KnownCommand::LinuxStageBegin,
+            KnownCommand::LinuxStageChunk,
+            KnownCommand::LinuxStageCommit,
+            KnownCommand::LinuxStageCancel,
+            KnownCommand::LinuxBundleLaunch,
+        ] {
+            let mut agent = Agent::new("26.0.0", "boot-a", 0);
+            let mut transport = MockTransport::connected();
+            negotiate(&mut agent, &mut transport, 1);
+            transport.output.clear();
+            agent
+                .queue_external_request(Message::command(
+                    Destination::Mboot,
+                    MessageType::Request,
+                    94,
+                    command,
+                    Vec::new(),
+                ))
+                .unwrap();
+            agent.tick(&mut transport, 5).unwrap();
+            assert_eq!(
+                transport.lines().pop().unwrap().known_command(),
+                Some(command)
+            );
+        }
     }
 }

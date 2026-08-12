@@ -78,7 +78,11 @@ pub fn run() -> ! {
             }
         }
         complete_developer_request(&mut agent, &mut pending_developer_sender);
-        let _ = platform::thread::sleep_milliseconds(POLL_DELAY_MS);
+        if agent.external_request_pending() || pending_developer_sender.is_some() {
+            platform::thread::yield_now();
+        } else {
+            let _ = platform::thread::sleep_milliseconds(POLL_DELAY_MS);
+        }
     }
 }
 
@@ -146,6 +150,11 @@ fn is_linux_command(command: KnownCommand) -> bool {
     matches!(
         command,
         KnownCommand::LinuxLaunch
+            | KnownCommand::LinuxStageBegin
+            | KnownCommand::LinuxStageChunk
+            | KnownCommand::LinuxStageCommit
+            | KnownCommand::LinuxStageCancel
+            | KnownCommand::LinuxBundleLaunch
             | KnownCommand::LinuxWindows
             | KnownCommand::LinuxWindowInfo
             | KnownCommand::LinuxFrame
