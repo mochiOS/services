@@ -161,6 +161,11 @@ impl Agent {
                         | KnownCommand::LinuxPortalFileChunk
                         | KnownCommand::LinuxPortalFileCommit
                         | KnownCommand::LinuxPortalFileCancel
+                        | KnownCommand::LinuxPortalRelease
+                        | KnownCommand::LinuxPortalExportBegin
+                        | KnownCommand::LinuxPortalExportEntry
+                        | KnownCommand::LinuxPortalExportChunk
+                        | KnownCommand::LinuxPortalExportEnd
                         | KnownCommand::LinuxBundleLaunch
                         | KnownCommand::LinuxWindows
                         | KnownCommand::LinuxWindowInfo
@@ -937,6 +942,7 @@ mod tests {
                     Argument::new("grant", "8"),
                     Argument::new("access", "read"),
                     Argument::new("path", "2f6170706c69636174696f6e73"),
+                    Argument::new("mode", "493"),
                 ],
             ),
             (
@@ -945,6 +951,7 @@ mod tests {
                     Argument::new("instance", "7"),
                     Argument::new("grant", "8"),
                     Argument::new("path", "2f6170706c69636174696f6e732f4578616d706c65"),
+                    Argument::new("mode", "493"),
                 ],
             ),
             (
@@ -954,6 +961,7 @@ mod tests {
                     Argument::new("grant", "8"),
                     Argument::new("path", "2f6170706c69636174696f6e732f612e747874"),
                     Argument::new("size", "1"),
+                    Argument::new("mode", "420"),
                 ],
             ),
             (
@@ -970,6 +978,31 @@ mod tests {
             ),
             (
                 KnownCommand::LinuxPortalFileCancel,
+                vec![Argument::new("instance", "7")],
+            ),
+            (
+                KnownCommand::LinuxPortalRelease,
+                vec![Argument::new("instance", "7")],
+            ),
+            (
+                KnownCommand::LinuxPortalExportBegin,
+                vec![Argument::new("instance", "7"), Argument::new("grant", "8")],
+            ),
+            (
+                KnownCommand::LinuxPortalExportEntry,
+                vec![Argument::new("instance", "7"), Argument::new("index", "0")],
+            ),
+            (
+                KnownCommand::LinuxPortalExportChunk,
+                vec![
+                    Argument::new("instance", "7"),
+                    Argument::new("index", "0"),
+                    Argument::new("offset", "0"),
+                    Argument::new("maximum", "1024"),
+                ],
+            ),
+            (
+                KnownCommand::LinuxPortalExportEnd,
                 vec![Argument::new("instance", "7")],
             ),
         ] {

@@ -10,6 +10,7 @@ const AGENT_NAME: &str = "mboot-agent.service";
 const FRAME_CHUNK_BYTES: u64 = 1536;
 const STAGE_CHUNK_BYTES: usize = 1536;
 const PORTAL_CHUNK_BYTES: usize = 1536;
+const PORTAL_EXPORT_CHUNK_BYTES: usize = 1536;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HostError {
@@ -25,6 +26,18 @@ pub(crate) struct WindowInfo {
     pub(crate) frame_size: usize,
     pub(crate) encoded_size: usize,
     pub(crate) title: String,
+}
+
+pub(crate) enum PortalEntryKind {
+    Directory,
+    File,
+}
+
+pub(crate) struct PortalEntry {
+    pub(crate) kind: PortalEntryKind,
+    pub(crate) path: String,
+    pub(crate) size: u64,
+    pub(crate) mode: u32,
 }
 
 pub(crate) struct HostClient {
@@ -133,14 +146,17 @@ impl HostClient {
         instance: u64,
         grant: u64,
         path: &str,
+        writable: bool,
+        mode: u32,
     ) -> Result<(), HostError> {
         self.call(
             KnownCommand::LinuxPortalGrant,
             vec![
                 Argument::new("instance", instance.to_string()),
                 Argument::new("grant", grant.to_string()),
-                Argument::new("access", "read"),
+                Argument::new("access", if writable { "write" } else { "read" }),
                 Argument::new("path", encode_hex(path.as_bytes())),
+                Argument::new("mode", mode.to_string()),
             ],
         )?;
         Ok(())
@@ -151,6 +167,7 @@ impl HostClient {
         instance: u64,
         grant: u64,
         path: &str,
+        mode: u32,
     ) -> Result<(), HostError> {
         self.call(
             KnownCommand::LinuxPortalMkdir,
@@ -158,6 +175,7 @@ impl HostClient {
                 Argument::new("instance", instance.to_string()),
                 Argument::new("grant", grant.to_string()),
                 Argument::new("path", encode_hex(path.as_bytes())),
+                Argument::new("mode", mode.to_string()),
             ],
         )?;
         Ok(())
@@ -170,6 +188,7 @@ impl HostClient {
         path: &str,
         source: &str,
         size: u64,
+        mode: u32,
     ) -> Result<(), HostError> {
         self.call(
             KnownCommand::LinuxPortalFileBegin,
@@ -178,6 +197,7 @@ impl HostClient {
                 Argument::new("grant", grant.to_string()),
                 Argument::new("path", encode_hex(path.as_bytes())),
                 Argument::new("size", size.to_string()),
+                Argument::new("mode", mode.to_string()),
             ],
         )?;
         let result = self.send_portal_file(instance, source, size);
@@ -234,6 +254,92 @@ impl HostClient {
         };
         let _ = platform::file::close(fd);
         result
+    }
+
+    pub(crate) fn portal_export_begin(
+        &mut self,
+        instance: u64,
+        grant: u64,
+    ) -> Result<(usize, u32), HostError> {
+        let response = self.call(
+            KnownCommand::LinuxPortalExportBegin,
+            vec![
+                Argument::new("instance", instance.to_string()),
+                Argument::new("grant", grant.to_string()),
+            ],
+        )?;
+        Ok((
+            parse_argument(&response, "entries")?,
+            parse_argument(&response, "mode")?,
+        ))
+    }
+
+    pub(crate) fn portal_export_entry(
+        &mut self,
+        instance: u64,
+        index: usize,
+    ) -> Result<PortalEntry, HostError> {
+        let response = self.call(
+            KnownCommand::LinuxPortalExportEntry,
+            vec![
+                Argument::new("instance", instance.to_string()),
+                Argument::new("index", index.to_string()),
+            ],
+        )?;
+        let kind = match response.argument("kind") {
+            Some("directory") => PortalEntryKind::Directory,
+            Some("file") => PortalEntryKind::File,
+            _ => return Err(HostError::InvalidReply),
+        };
+        let path = decode_hex(response.argument("path").ok_or(HostError::InvalidReply)?)
+            .map_err(|_| HostError::InvalidReply)?;
+        let path = String::from_utf8(path).map_err(|_| HostError::InvalidReply)?;
+        Ok(PortalEntry {
+            kind,
+            path,
+            size: parse_argument(&response, "size")?,
+            mode: parse_argument(&response, "mode")?,
+        })
+    }
+
+    pub(crate) fn portal_export_chunk(
+        &mut self,
+        instance: u64,
+        index: usize,
+        offset: u64,
+    ) -> Result<(u64, Vec<u8>), HostError> {
+        let response = self.call(
+            KnownCommand::LinuxPortalExportChunk,
+            vec![
+                Argument::new("instance", instance.to_string()),
+                Argument::new("index", index.to_string()),
+                Argument::new("offset", offset.to_string()),
+                Argument::new("maximum", PORTAL_EXPORT_CHUNK_BYTES.to_string()),
+            ],
+        )?;
+        let total = parse_argument(&response, "total_size")?;
+        let data = match response.argument("data") {
+            Some("none") => Vec::new(),
+            Some(encoded) => decode_hex(encoded).map_err(|_| HostError::InvalidReply)?,
+            None => return Err(HostError::InvalidReply),
+        };
+        Ok((total, data))
+    }
+
+    pub(crate) fn portal_export_end(&mut self, instance: u64) -> Result<(), HostError> {
+        self.call(
+            KnownCommand::LinuxPortalExportEnd,
+            vec![Argument::new("instance", instance.to_string())],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn portal_release(&mut self, instance: u64) -> Result<(), HostError> {
+        self.call(
+            KnownCommand::LinuxPortalRelease,
+            vec![Argument::new("instance", instance.to_string())],
+        )?;
+        Ok(())
     }
 
     fn send_stage_file(

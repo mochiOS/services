@@ -27,6 +27,8 @@ struct LinuxInstance {
     id: u64,
     windows: Vec<ActiveWindow>,
     next_discovery: u64,
+    next_writeback: u64,
+    write_grants: Vec<crate::portal::WriteGrant>,
 }
 
 struct ActiveWindow {
@@ -128,7 +130,7 @@ fn handle_bundle_launch(
                     &spec.rootfs_digest,
                 )
                 .map_err(host_status)?;
-                crate::portal::prepare_read_only(
+                let write_grants = crate::portal::prepare(
                     host,
                     instance,
                     &spec.bundle_id,
@@ -148,6 +150,8 @@ fn handle_bundle_launch(
                     id: instance,
                     windows: Vec::new(),
                     next_discovery: 0,
+                    next_writeback: 0,
+                    write_grants,
                 });
                 Ok(instance)
             })
@@ -239,6 +243,8 @@ fn handle_launch(
                     id: instance,
                     windows: Vec::new(),
                     next_discovery: 0,
+                    next_writeback: 0,
+                    write_grants: Vec::new(),
                 });
                 Ok(instance)
             })
@@ -298,7 +304,14 @@ fn update_instance(instance: &mut LinuxInstance, host: &mut HostClient, now: u64
         instance.next_discovery = now.saturating_add(DISCOVERY_INTERVAL_MS);
         let host_windows = match host.windows(instance.id) {
             Ok(windows) => windows,
-            Err(HostError::Rejected(mboot_protocol::ErrorCode::InvalidState)) => return false,
+            Err(HostError::Rejected(mboot_protocol::ErrorCode::InvalidState)) => {
+                if now < instance.next_writeback {
+                    return true;
+                }
+                instance.next_writeback = now.saturating_add(1_000);
+                return crate::portal::write_back(host, instance.id, &instance.write_grants)
+                    .is_err();
+            }
             Err(_) => return true,
         };
         instance

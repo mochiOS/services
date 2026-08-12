@@ -161,6 +161,11 @@ fn is_linux_command(command: KnownCommand) -> bool {
             | KnownCommand::LinuxPortalFileChunk
             | KnownCommand::LinuxPortalFileCommit
             | KnownCommand::LinuxPortalFileCancel
+            | KnownCommand::LinuxPortalRelease
+            | KnownCommand::LinuxPortalExportBegin
+            | KnownCommand::LinuxPortalExportEntry
+            | KnownCommand::LinuxPortalExportChunk
+            | KnownCommand::LinuxPortalExportEnd
             | KnownCommand::LinuxBundleLaunch
             | KnownCommand::LinuxWindows
             | KnownCommand::LinuxWindowInfo
