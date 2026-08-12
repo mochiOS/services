@@ -154,6 +154,13 @@ impl Agent {
                         | KnownCommand::LinuxStageChunk
                         | KnownCommand::LinuxStageCommit
                         | KnownCommand::LinuxStageCancel
+                        | KnownCommand::LinuxPortalReset
+                        | KnownCommand::LinuxPortalGrant
+                        | KnownCommand::LinuxPortalMkdir
+                        | KnownCommand::LinuxPortalFileBegin
+                        | KnownCommand::LinuxPortalFileChunk
+                        | KnownCommand::LinuxPortalFileCommit
+                        | KnownCommand::LinuxPortalFileCancel
                         | KnownCommand::LinuxBundleLaunch
                         | KnownCommand::LinuxWindows
                         | KnownCommand::LinuxWindowInfo
@@ -918,12 +925,53 @@ mod tests {
 
     #[test]
     fn linux_bundle_staging_commands_cross_only_the_external_boundary() {
-        for command in [
-            KnownCommand::LinuxStageBegin,
-            KnownCommand::LinuxStageChunk,
-            KnownCommand::LinuxStageCommit,
-            KnownCommand::LinuxStageCancel,
-            KnownCommand::LinuxBundleLaunch,
+        for (command, arguments) in [
+            (
+                KnownCommand::LinuxPortalReset,
+                vec![Argument::new("instance", "7")],
+            ),
+            (
+                KnownCommand::LinuxPortalGrant,
+                vec![
+                    Argument::new("instance", "7"),
+                    Argument::new("grant", "8"),
+                    Argument::new("access", "read"),
+                    Argument::new("path", "2f6170706c69636174696f6e73"),
+                ],
+            ),
+            (
+                KnownCommand::LinuxPortalMkdir,
+                vec![
+                    Argument::new("instance", "7"),
+                    Argument::new("grant", "8"),
+                    Argument::new("path", "2f6170706c69636174696f6e732f4578616d706c65"),
+                ],
+            ),
+            (
+                KnownCommand::LinuxPortalFileBegin,
+                vec![
+                    Argument::new("instance", "7"),
+                    Argument::new("grant", "8"),
+                    Argument::new("path", "2f6170706c69636174696f6e732f612e747874"),
+                    Argument::new("size", "1"),
+                ],
+            ),
+            (
+                KnownCommand::LinuxPortalFileChunk,
+                vec![
+                    Argument::new("instance", "7"),
+                    Argument::new("offset", "0"),
+                    Argument::new("data", "61"),
+                ],
+            ),
+            (
+                KnownCommand::LinuxPortalFileCommit,
+                vec![Argument::new("instance", "7")],
+            ),
+            (
+                KnownCommand::LinuxPortalFileCancel,
+                vec![Argument::new("instance", "7")],
+            ),
         ] {
             let mut agent = Agent::new("26.0.0", "boot-a", 0);
             let mut transport = MockTransport::connected();
@@ -935,7 +983,7 @@ mod tests {
                     MessageType::Request,
                     94,
                     command,
-                    Vec::new(),
+                    arguments,
                 ))
                 .unwrap();
             agent.tick(&mut transport, 5).unwrap();

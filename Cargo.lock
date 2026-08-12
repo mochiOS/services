@@ -1135,6 +1135,7 @@ dependencies = [
  "mochi-user-platform",
  "mochi-user-syscall",
  "mochios-linux-gui-protocol",
+ "mochios-linux-portal-protocol",
 ]
 
 [[package]]

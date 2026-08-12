@@ -9,6 +9,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mochios
 [dependencies]
 mboot-protocol = { git = "https://github.com/mochiOS/mBoot", rev = "cf9de6b17377eb671a98b21120cf9c22e8aecf03", package = "mboot-protocol" }
 mochios-linux-gui-protocol = { git = "https://github.com/mochiOS/syscalls", rev = "814cb3f1f5e0dab5fc199f1de5a443bd61fe566e", package = "mochios-linux-gui-protocol" }
+mochios-linux-portal-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-linux-portal-protocol" }
 
 [target.'cfg(target_os = "mochios")'.dependencies]
 mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }

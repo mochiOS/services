@@ -92,6 +92,8 @@ struct BundleSpec {
     rootfs_digest: String,
     entrypoint: String,
     writable_paths: Vec<String>,
+    portal_read_paths: Vec<String>,
+    portal_write_paths: Vec<String>,
     user: String,
 }
 
@@ -126,6 +128,14 @@ fn handle_bundle_launch(
                     &spec.rootfs_digest,
                 )
                 .map_err(host_status)?;
+                crate::portal::prepare_read_only(
+                    host,
+                    instance,
+                    &spec.bundle_id,
+                    &spec.user,
+                    &spec.portal_read_paths,
+                    &spec.portal_write_paths,
+                )?;
                 host.launch_bundle(
                     instance,
                     &spec.bundle_id,
@@ -186,6 +196,8 @@ fn load_bundle_spec(bundle_id: &str, user: &str) -> Result<BundleSpec, i32> {
         rootfs_digest: digest.to_string(),
         entrypoint: linux.entrypoint,
         writable_paths: linux.writable_paths,
+        portal_read_paths: linux.portal_read_paths,
+        portal_write_paths: linux.portal_write_paths,
         user: user.to_string(),
     })
 }

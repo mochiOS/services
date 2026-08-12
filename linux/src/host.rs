@@ -9,6 +9,7 @@ use crate::codec::{decode_hex, decode_rle32};
 const AGENT_NAME: &str = "mboot-agent.service";
 const FRAME_CHUNK_BYTES: u64 = 1536;
 const STAGE_CHUNK_BYTES: usize = 1536;
+const PORTAL_CHUNK_BYTES: usize = 1536;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HostError {
@@ -117,6 +118,122 @@ impl HostClient {
             ],
         )?;
         Ok(())
+    }
+
+    pub(crate) fn portal_reset(&mut self, instance: u64) -> Result<(), HostError> {
+        self.call(
+            KnownCommand::LinuxPortalReset,
+            vec![Argument::new("instance", instance.to_string())],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn portal_grant(
+        &mut self,
+        instance: u64,
+        grant: u64,
+        path: &str,
+    ) -> Result<(), HostError> {
+        self.call(
+            KnownCommand::LinuxPortalGrant,
+            vec![
+                Argument::new("instance", instance.to_string()),
+                Argument::new("grant", grant.to_string()),
+                Argument::new("access", "read"),
+                Argument::new("path", encode_hex(path.as_bytes())),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn portal_mkdir(
+        &mut self,
+        instance: u64,
+        grant: u64,
+        path: &str,
+    ) -> Result<(), HostError> {
+        self.call(
+            KnownCommand::LinuxPortalMkdir,
+            vec![
+                Argument::new("instance", instance.to_string()),
+                Argument::new("grant", grant.to_string()),
+                Argument::new("path", encode_hex(path.as_bytes())),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn portal_file(
+        &mut self,
+        instance: u64,
+        grant: u64,
+        path: &str,
+        source: &str,
+        size: u64,
+    ) -> Result<(), HostError> {
+        self.call(
+            KnownCommand::LinuxPortalFileBegin,
+            vec![
+                Argument::new("instance", instance.to_string()),
+                Argument::new("grant", grant.to_string()),
+                Argument::new("path", encode_hex(path.as_bytes())),
+                Argument::new("size", size.to_string()),
+            ],
+        )?;
+        let result = self.send_portal_file(instance, source, size);
+        if result.is_err() {
+            let _ = self.call(
+                KnownCommand::LinuxPortalFileCancel,
+                vec![Argument::new("instance", instance.to_string())],
+            );
+            return result;
+        }
+        self.call(
+            KnownCommand::LinuxPortalFileCommit,
+            vec![Argument::new("instance", instance.to_string())],
+        )?;
+        Ok(())
+    }
+
+    fn send_portal_file(
+        &mut self,
+        instance: u64,
+        path: &str,
+        expected_size: u64,
+    ) -> Result<(), HostError> {
+        let fd = platform::file::open_path(path, 0).map_err(|_| HostError::Unavailable)?;
+        let mut offset = 0u64;
+        let mut buffer = [0u8; PORTAL_CHUNK_BYTES];
+        let result = loop {
+            let read =
+                match platform::file::read(fd, buffer.as_mut_ptr() as u64, buffer.len() as u64) {
+                    Ok(read) => read as usize,
+                    Err(_) => break Err(HostError::Unavailable),
+                };
+            if read == 0 {
+                break if offset == expected_size {
+                    Ok(())
+                } else {
+                    Err(HostError::InvalidReply)
+                };
+            }
+            if offset.saturating_add(read as u64) > expected_size {
+                break Err(HostError::InvalidReply);
+            }
+            if let Err(error) = self.call(
+                KnownCommand::LinuxPortalFileChunk,
+                vec![
+                    Argument::new("instance", instance.to_string()),
+                    Argument::new("offset", offset.to_string()),
+                    Argument::new("data", encode_hex(&buffer[..read])),
+                ],
+            ) {
+                break Err(error);
+            }
+            offset += read as u64;
+        };
+        let _ = platform::file::close(fd);
+        result
     }
 
     fn send_stage_file(

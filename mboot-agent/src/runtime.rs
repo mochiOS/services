@@ -154,6 +154,13 @@ fn is_linux_command(command: KnownCommand) -> bool {
             | KnownCommand::LinuxStageChunk
             | KnownCommand::LinuxStageCommit
             | KnownCommand::LinuxStageCancel
+            | KnownCommand::LinuxPortalReset
+            | KnownCommand::LinuxPortalGrant
+            | KnownCommand::LinuxPortalMkdir
+            | KnownCommand::LinuxPortalFileBegin
+            | KnownCommand::LinuxPortalFileChunk
+            | KnownCommand::LinuxPortalFileCommit
+            | KnownCommand::LinuxPortalFileCancel
             | KnownCommand::LinuxBundleLaunch
             | KnownCommand::LinuxWindows
             | KnownCommand::LinuxWindowInfo
