@@ -292,7 +292,11 @@ mod tests {
             _session_id: u64,
         ) -> Option<u64> {
             self.events.push(Event::SpawnUserSession(service, identity));
-            (self.failure != Failure::Spawn(service)).then_some(17)
+            (self.failure != Failure::Spawn(service)).then_some(match service {
+                FixedService::Linux => 20,
+                FixedService::Binder => 17,
+                _ => unreachable!("only user-session services are accepted"),
+            })
         }
 
         fn wait_display_ready(&mut self, _process_id: u64) -> bool {

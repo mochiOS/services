@@ -107,7 +107,7 @@ fn service_manifests_match_policy() {
     assert_capabilities(
         INPUT_MANIFEST,
         "/system/services/input.service",
-        &["ipc.client", "ipc.server"],
+        &["fs.read.all", "ipc.client", "ipc.server"],
     );
     assert_capabilities(
         DISPLAY_MANIFEST,
