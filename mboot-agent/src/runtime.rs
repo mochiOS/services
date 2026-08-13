@@ -135,7 +135,7 @@ fn receive_ipc_request(
         reply_protocol_error(sender, client_request_id, ErrorCode::PermissionDenied);
         return;
     }
-    match agent.queue_external_request(decoded) {
+    match agent.queue_external_request(decoded, current_ticks()) {
         Ok(()) => {
             *pending_developer_sender = Some(PendingDeveloperRequest {
                 sender,

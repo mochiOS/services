@@ -9,6 +9,7 @@ use crate::decoder::LineDecoder;
 use crate::transport::{ControlTransport, TransportError};
 
 const HANDSHAKE_TIMEOUT_MS: u64 = 10_000;
+const EXTERNAL_REQUEST_TIMEOUT_MS: u64 = 5_000;
 const MAX_HEARTBEAT_MS: u64 = 3_600_000;
 const READ_CHUNK: usize = 1024;
 const MAX_READS_PER_TICK: usize = 32;
@@ -77,6 +78,7 @@ pub enum ExternalRequestError {
 struct ExternalRequest {
     host_request_id: u64,
     client_request_id: u64,
+    deadline_ms: u64,
 }
 
 pub struct Agent {
@@ -132,7 +134,11 @@ impl Agent {
         self.achieved_stage
     }
 
-    pub fn queue_external_request(&mut self, message: Message) -> Result<(), ExternalRequestError> {
+    pub fn queue_external_request(
+        &mut self,
+        message: Message,
+        now_ms: u64,
+    ) -> Result<(), ExternalRequestError> {
         if !self.is_negotiated() {
             return Err(ExternalRequestError::NotNegotiated);
         }
@@ -194,6 +200,7 @@ impl Agent {
         self.external_pending = Some(ExternalRequest {
             host_request_id,
             client_request_id,
+            deadline_ms: now_ms.saturating_add(EXTERNAL_REQUEST_TIMEOUT_MS),
         });
         Ok(())
     }
@@ -242,6 +249,7 @@ impl Agent {
 
         self.flush(transport)?;
         self.receive(transport, now_ms)?;
+        self.expire_external_request(now_ms);
         if self.phase == Phase::Negotiated {
             self.queue_ready_stages()?;
             if self
@@ -252,6 +260,22 @@ impl Agent {
             }
         }
         self.flush(transport)
+    }
+
+    fn expire_external_request(&mut self, now_ms: u64) {
+        let Some(pending) = self
+            .external_pending
+            .filter(|pending| now_ms >= pending.deadline_ms)
+        else {
+            return;
+        };
+        self.external_pending = None;
+        self.external_response = Some(Message::error(
+            Destination::Mochios,
+            pending.client_request_id,
+            ErrorCode::Timeout,
+            Vec::new(),
+        ));
     }
 
     fn begin_handshake(&mut self, now_ms: u64) -> Result<(), AgentError> {
@@ -857,16 +881,19 @@ mod tests {
         transport.output.clear();
 
         agent
-            .queue_external_request(Message::command(
-                Destination::Mboot,
-                MessageType::Request,
-                91,
-                KnownCommand::DeveloperBegin,
-                vec![
-                    Argument::new("transaction", "7"),
-                    Argument::new("size", "12"),
-                ],
-            ))
+            .queue_external_request(
+                Message::command(
+                    Destination::Mboot,
+                    MessageType::Request,
+                    91,
+                    KnownCommand::DeveloperBegin,
+                    vec![
+                        Argument::new("transaction", "7"),
+                        Argument::new("size", "12"),
+                    ],
+                ),
+                4,
+            )
             .unwrap();
         agent.tick(&mut transport, 5).unwrap();
         let forwarded = transport.lines().pop().unwrap();
@@ -889,6 +916,37 @@ mod tests {
     }
 
     #[test]
+    fn external_request_timeout_releases_the_waiting_client() {
+        let mut agent = Agent::new("26.0.0", "boot-a", 0);
+        let mut transport = MockTransport::connected();
+        negotiate(&mut agent, &mut transport, 1);
+        transport.output.clear();
+
+        agent
+            .queue_external_request(
+                Message::command(
+                    Destination::Mboot,
+                    MessageType::Request,
+                    95,
+                    KnownCommand::LinuxWindows,
+                    vec![Argument::new("instance", "1")],
+                ),
+                10,
+            )
+            .unwrap();
+        agent.tick(&mut transport, 10).unwrap();
+        assert!(agent.external_request_pending());
+
+        agent
+            .tick(&mut transport, 10 + EXTERNAL_REQUEST_TIMEOUT_MS)
+            .unwrap();
+        let response = agent.take_external_response().unwrap();
+        assert_eq!(response.request_id, 95);
+        assert!(matches!(response.body, Body::Error(ErrorCode::Timeout)));
+        assert!(!agent.external_request_pending());
+    }
+
+    #[test]
     fn linux_request_is_forwarded_without_expanding_the_host_command_boundary() {
         let mut agent = Agent::new("26.0.0", "boot-a", 0);
         let mut transport = MockTransport::connected();
@@ -896,13 +954,16 @@ mod tests {
         transport.output.clear();
 
         agent
-            .queue_external_request(Message::command(
-                Destination::Mboot,
-                MessageType::Request,
-                92,
-                KnownCommand::LinuxWindows,
-                vec![Argument::new("instance", "7")],
-            ))
+            .queue_external_request(
+                Message::command(
+                    Destination::Mboot,
+                    MessageType::Request,
+                    92,
+                    KnownCommand::LinuxWindows,
+                    vec![Argument::new("instance", "7")],
+                ),
+                4,
+            )
             .unwrap();
         agent.tick(&mut transport, 5).unwrap();
         let forwarded = transport.lines().pop().unwrap();
@@ -917,13 +978,16 @@ mod tests {
         assert!(agent.take_external_response().is_some());
 
         assert_eq!(
-            agent.queue_external_request(Message::command(
-                Destination::Mboot,
-                MessageType::Request,
-                93,
-                KnownCommand::HostPoweroff,
-                Vec::new(),
-            )),
+            agent.queue_external_request(
+                Message::command(
+                    Destination::Mboot,
+                    MessageType::Request,
+                    93,
+                    KnownCommand::HostPoweroff,
+                    Vec::new(),
+                ),
+                7,
+            ),
             Err(ExternalRequestError::InvalidRequest)
         );
     }
@@ -1011,13 +1075,16 @@ mod tests {
             negotiate(&mut agent, &mut transport, 1);
             transport.output.clear();
             agent
-                .queue_external_request(Message::command(
-                    Destination::Mboot,
-                    MessageType::Request,
-                    94,
-                    command,
-                    arguments,
-                ))
+                .queue_external_request(
+                    Message::command(
+                        Destination::Mboot,
+                        MessageType::Request,
+                        94,
+                        command,
+                        arguments,
+                    ),
+                    4,
+                )
                 .unwrap();
             agent.tick(&mut transport, 5).unwrap();
             assert_eq!(
