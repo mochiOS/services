@@ -1220,7 +1220,6 @@ source = "git+https://github.com/mochiOS/mnu#4673bae786ef94d4cce112ad2f4f110db42
 [[package]]
 name = "mochi-user-platform"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#7bd1fe3b9a53ce915a1a6f938ab9648db3157232"
 dependencies = [
  "mnu-abi",
  "mochi-user-syscall",
@@ -1230,7 +1229,6 @@ dependencies = [
 [[package]]
 name = "mochi-user-syscall"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#7bd1fe3b9a53ce915a1a6f938ab9648db3157232"
 dependencies = [
  "mnu-abi",
 ]

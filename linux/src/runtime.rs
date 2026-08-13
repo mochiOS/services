@@ -5,7 +5,7 @@ use mochios_linux_gui_protocol::{
 };
 
 use crate::compositor::Surface;
-use crate::host::{HostClient, HostError};
+use crate::host::{HostClient, HostError, decode_frame};
 use crate::input::x11_keycode;
 
 const FRAME_INTERVAL_MS: u64 = 100;
@@ -38,6 +38,16 @@ struct ActiveWindow {
     last_generation: u64,
     closing: bool,
     title: String,
+    pending_frame: Option<PendingFrame>,
+}
+
+struct PendingFrame {
+    width: u16,
+    height: u16,
+    generation: u64,
+    frame_size: usize,
+    encoded_size: usize,
+    encoded: Vec<u8>,
 }
 
 pub(crate) fn run() -> ! {
@@ -330,6 +340,7 @@ fn update_instance(instance: &mut LinuxInstance, host: &mut HostClient, now: u64
                     last_generation: 0,
                     closing: false,
                     title: String::new(),
+                    pending_frame: None,
                 });
             }
         }
@@ -342,7 +353,14 @@ fn update_instance(instance: &mut LinuxInstance, host: &mut HostClient, now: u64
 }
 
 fn update_window(instance: u64, active: &mut ActiveWindow, host: &mut HostClient, now: u64) {
-    if active.closing || now < active.next_update {
+    if active.closing {
+        return;
+    }
+    if active.pending_frame.is_some() {
+        advance_pending_frame(instance, active, host, now);
+        return;
+    }
+    if now < active.next_update {
         return;
     }
     active.next_update = now.saturating_add(FRAME_INTERVAL_MS);
@@ -361,13 +379,60 @@ fn update_window(instance: u64, active: &mut ActiveWindow, host: &mut HostClient
     if info.generation == active.last_generation {
         return;
     }
-    let Ok(frame) = host.frame(instance, active.host_window, &info) else {
+    let mut encoded = Vec::new();
+    if info.encoded_size == 0 || encoded.try_reserve_exact(info.encoded_size).is_err() {
+        return;
+    }
+    active.pending_frame = Some(PendingFrame {
+        width: info.width,
+        height: info.height,
+        generation: info.generation,
+        frame_size: info.frame_size,
+        encoded_size: info.encoded_size,
+        encoded,
+    });
+    advance_pending_frame(instance, active, host, now);
+}
+
+fn advance_pending_frame(
+    instance: u64,
+    active: &mut ActiveWindow,
+    host: &mut HostClient,
+    now: u64,
+) {
+    let Some(pending) = active.pending_frame.as_mut() else {
+        return;
+    };
+    let offset = pending.encoded.len();
+    let Ok(chunk) = host.frame_chunk(instance, active.host_window, pending.generation, offset)
+    else {
+        active.pending_frame = None;
+        active.next_update = now.saturating_add(FRAME_INTERVAL_MS);
+        return;
+    };
+    if chunk.total != pending.encoded_size
+        || offset.saturating_add(chunk.bytes.len()) > pending.encoded_size
+    {
+        active.pending_frame = None;
+        return;
+    }
+    pending.encoded.extend_from_slice(&chunk.bytes);
+    if pending.encoded.len() != pending.encoded_size {
+        return;
+    }
+
+    let Some(pending) = active.pending_frame.take() else {
+        return;
+    };
+    let Ok(frame) = decode_frame(&pending.encoded, pending.frame_size) else {
         return;
     };
     if let Some(surface) = active.surface.as_mut()
-        && surface.present(info.width, info.height, &frame).is_ok()
+        && surface
+            .present(pending.width, pending.height, &frame)
+            .is_ok()
     {
-        active.last_generation = info.generation;
+        active.last_generation = pending.generation;
     }
 }
 

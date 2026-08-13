@@ -28,6 +28,11 @@ pub(crate) struct WindowInfo {
     pub(crate) title: String,
 }
 
+pub(crate) struct FrameChunk {
+    pub(crate) total: usize,
+    pub(crate) bytes: Vec<u8>,
+}
+
 pub(crate) enum PortalEntryKind {
     Directory,
     File,
@@ -426,36 +431,27 @@ impl HostClient {
         })
     }
 
-    pub(crate) fn frame(
+    pub(crate) fn frame_chunk(
         &mut self,
         instance: u64,
         window: u32,
-        info: &WindowInfo,
-    ) -> Result<Vec<u8>, HostError> {
-        let mut frame = Vec::new();
-        frame
-            .try_reserve_exact(info.encoded_size)
+        generation: u64,
+        offset: usize,
+    ) -> Result<FrameChunk, HostError> {
+        let mut arguments = window_arguments(instance, window);
+        arguments.extend([
+            Argument::new("generation", generation.to_string()),
+            Argument::new("offset", offset.to_string()),
+            Argument::new("maximum", FRAME_CHUNK_BYTES.to_string()),
+        ]);
+        let response = self.call(KnownCommand::LinuxFrame, arguments)?;
+        let total = parse_argument(&response, "total_size")?;
+        let bytes = decode_hex(response.argument("data").ok_or(HostError::InvalidReply)?)
             .map_err(|_| HostError::InvalidReply)?;
-        while frame.len() < info.encoded_size {
-            let mut arguments = window_arguments(instance, window);
-            arguments.extend([
-                Argument::new("generation", info.generation.to_string()),
-                Argument::new("offset", frame.len().to_string()),
-                Argument::new("maximum", FRAME_CHUNK_BYTES.to_string()),
-            ]);
-            let response = self.call(KnownCommand::LinuxFrame, arguments)?;
-            let total: usize = parse_argument(&response, "total_size")?;
-            if total != info.encoded_size {
-                return Err(HostError::InvalidReply);
-            }
-            let bytes = decode_hex(response.argument("data").ok_or(HostError::InvalidReply)?)
-                .map_err(|_| HostError::InvalidReply)?;
-            if bytes.is_empty() || frame.len().saturating_add(bytes.len()) > info.encoded_size {
-                return Err(HostError::InvalidReply);
-            }
-            frame.extend_from_slice(&bytes);
+        if bytes.is_empty() || bytes.len() > FRAME_CHUNK_BYTES as usize {
+            return Err(HostError::InvalidReply);
         }
-        decode_rle32(&frame, info.frame_size).map_err(|_| HostError::InvalidReply)
+        Ok(FrameChunk { total, bytes })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -542,6 +538,10 @@ impl HostClient {
         self.next_request_id = current.wrapping_add(1).max(1);
         current
     }
+}
+
+pub(crate) fn decode_frame(encoded: &[u8], expected: usize) -> Result<Vec<u8>, HostError> {
+    decode_rle32(encoded, expected).map_err(|_| HostError::InvalidReply)
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
