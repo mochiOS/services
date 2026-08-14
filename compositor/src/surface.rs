@@ -578,6 +578,26 @@ fn barycentric_weights(
 mod gpu_hit_tests {
     use super::*;
 
+    #[test]
+    fn toplevel_surfaces_accept_gpu_scenes() {
+        assert!(surface_role_accepts_format(
+            SurfaceRole::Toplevel,
+            PIXEL_FORMAT_GPU_SCENE
+        ));
+    }
+
+    #[test]
+    fn non_window_surfaces_do_not_gain_gpu_scene_access() {
+        assert!(!surface_role_accepts_format(
+            SurfaceRole::Background,
+            PIXEL_FORMAT_GPU_SCENE
+        ));
+        assert!(!surface_role_accepts_format(
+            SurfaceRole::Popup,
+            PIXEL_FORMAT_GPU_SCENE
+        ));
+    }
+
     fn push_vertex(vertices: &mut Vec<u8>, x: f32, y: f32, u: f32, v: f32, alpha: f32) {
         for value in [x, y, 0.0, u, v, 1.0, 1.0, 1.0, alpha] {
             vertices.extend_from_slice(&value.to_bits().to_le_bytes());
@@ -772,6 +792,20 @@ fn validate_buffer_layout(
         .checked_mul(height_usize)
         .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
     Ok((row_bytes, needed_bytes, pixels))
+}
+
+fn surface_role_accepts_format(role: SurfaceRole, format: u32) -> bool {
+    match format {
+        PIXEL_FORMAT_XRGB8888 => true,
+        PIXEL_FORMAT_ARGB8888_PREMULTIPLIED => {
+            matches!(role, SurfaceRole::Panel | SurfaceRole::SecureOverlay)
+        }
+        PIXEL_FORMAT_GPU_SCENE => matches!(
+            role,
+            SurfaceRole::Toplevel | SurfaceRole::Panel | SurfaceRole::SecureOverlay
+        ),
+        _ => false,
+    }
 }
 
 pub(crate) fn send_frame_done(surface: &Surface) {
@@ -1058,19 +1092,9 @@ pub(crate) fn handle_request(
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
                 return reply;
             };
-            let attach_reject_reason = if !matches!(
-                format,
-                PIXEL_FORMAT_XRGB8888
-                    | PIXEL_FORMAT_ARGB8888_PREMULTIPLIED
-                    | PIXEL_FORMAT_GPU_SCENE
-            ) {
-                Some(1)
-            } else if matches!(
-                format,
-                PIXEL_FORMAT_ARGB8888_PREMULTIPLIED | PIXEL_FORMAT_GPU_SCENE
-            ) && !matches!(
+            let attach_reject_reason = if !surface_role_accepts_format(
                 surfaces[index].role,
-                SurfaceRole::Panel | SurfaceRole::SecureOverlay
+                format,
             ) {
                 Some(1)
             } else if width == 0 {
