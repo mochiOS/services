@@ -4,6 +4,7 @@ use alloc::vec::Vec;
 pub(crate) const ROLE_SERVICE: u64 = 2;
 pub(crate) const ROLE_APPLICATION: u64 = 3;
 pub(crate) const SERVICE_READY_TIMEOUT_TICKS: u64 = 5_000;
+pub(crate) const NETWORK_READY_TIMEOUT_TICKS: u64 = 30_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FixedService {
@@ -259,5 +260,6 @@ mod tests {
     #[test]
     fn ready_timeout_matches_fixed_service_policy() {
         assert_eq!(SERVICE_READY_TIMEOUT_TICKS, 5_000);
+        assert_eq!(NETWORK_READY_TIMEOUT_TICKS, 30_000);
     }
 }

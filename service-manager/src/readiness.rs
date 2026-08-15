@@ -1,6 +1,6 @@
 use mochi_user_platform as platform;
 
-use crate::service_config::SERVICE_READY_TIMEOUT_TICKS;
+use crate::service_config::{NETWORK_READY_TIMEOUT_TICKS, SERVICE_READY_TIMEOUT_TICKS};
 const WAIT_NO_HANG: u64 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -193,6 +193,7 @@ impl ReadyHandshake {
         has_timeout: bool,
     ) -> Result<(), ReadyError> {
         let started = has_timeout.then(current_ticks).transpose()?;
+        let timeout = ready_timeout(service);
         loop {
             if let Some(status) = self.status(service) {
                 return ready_result(status);
@@ -215,12 +216,19 @@ impl ReadyHandshake {
             }
             if let Some(started) = started {
                 let now = current_ticks()?;
-                if now.saturating_sub(started) >= SERVICE_READY_TIMEOUT_TICKS {
+                if now.saturating_sub(started) >= timeout {
                     return Err(ReadyError::TimedOut);
                 }
             }
             platform::thread::yield_now();
         }
+    }
+}
+
+const fn ready_timeout(service: ReadyService) -> u64 {
+    match service {
+        ReadyService::Network => NETWORK_READY_TIMEOUT_TICKS,
+        _ => SERVICE_READY_TIMEOUT_TICKS,
     }
 }
 
@@ -292,5 +300,19 @@ fn process_exit_status(process_id: u64) -> Result<Option<i32>, ReadyError> {
         Ok(0) => Ok(None),
         Ok(_) => Ok(Some(status)),
         Err(error) => Err(ReadyError::ProcessWait(error.raw().unsigned_abs())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn network_allows_for_dhcp_retries_without_extending_other_services() {
+        assert_eq!(ready_timeout(ReadyService::Network), 30_000);
+        assert_eq!(ready_timeout(ReadyService::Input), 5_000);
+        assert_eq!(ready_timeout(ReadyService::Display), 5_000);
+        assert_eq!(ready_timeout(ReadyService::User), 5_000);
+        assert_eq!(ready_timeout(ReadyService::SecureUi), 5_000);
     }
 }
