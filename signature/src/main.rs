@@ -491,6 +491,14 @@ fn run_server() -> ! {
         match decode_opcode(request) {
             Ok(Opcode::VerifyBegin) => match VerifyBegin::decode(request) {
                 Ok(begin) => {
+                    let database_current = database.as_ref().is_some_and(|database| {
+                        platform::time::utc_seconds()
+                            .is_ok_and(|now_utc| database.is_current(now_utc))
+                    });
+                    if !database_current {
+                        reply_error(sender, begin.request_id, mochi_user_syscall::EAGAIN);
+                        continue;
+                    }
                     let expected_len = usize::try_from(begin.package_len).unwrap_or(usize::MAX);
                     if expected_len == 0 || expected_len > MAX_PACKAGE_LEN {
                         reply_error(sender, begin.request_id, mochi_user_syscall::ERANGE);

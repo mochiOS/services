@@ -131,6 +131,14 @@ fn active_and_retired_issuers_are_accepted() {
 }
 
 #[test]
+fn database_currentness_requires_both_snapshot_windows() {
+    let (database, _) = database(IssuerStatus::Active, false);
+    assert!(!database.is_current(899));
+    assert!(database.is_current(950));
+    assert!(!database.is_current(1_200));
+}
+
+#[test]
 fn future_revoked_and_unknown_issuers_are_rejected() {
     for status in [IssuerStatus::Future, IssuerStatus::Revoked] {
         let (database, certificate) = database(status, false);

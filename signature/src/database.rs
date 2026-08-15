@@ -62,16 +62,19 @@ impl ActiveDatabase {
         self.recovered
     }
 
+    pub fn is_current(&self, now_utc: u64) -> bool {
+        now_utc >= self.trust.content.generated_at
+            && now_utc < self.trust.content.expires_at
+            && now_utc >= self.revocations.content.generated_at
+            && now_utc < self.revocations.content.expires_at
+    }
+
     pub fn issuer_public_key(
         &self,
         certificate: &DeveloperCertificate,
         now_utc: u64,
     ) -> Result<[u8; 32], DatabaseError> {
-        if now_utc < self.trust.content.generated_at
-            || now_utc >= self.trust.content.expires_at
-            || now_utc < self.revocations.content.generated_at
-            || now_utc >= self.revocations.content.expires_at
-        {
+        if !self.is_current(now_utc) {
             return Err(DatabaseError::Expired);
         }
         if self
