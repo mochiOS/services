@@ -136,7 +136,7 @@ fn try_gpu_scene_present(
     let force_atlas_upload = !present_frame.gpu_contents_valid;
     let mut gpu_compositor = core::mem::take(&mut present_frame.gpu_compositor);
     if force_atlas_upload {
-        gpu_compositor.invalidate_atlas();
+        gpu_compositor.invalidate_textures();
     }
     let composition_start = perf_counter();
     let copy_result = (|| {

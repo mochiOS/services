@@ -383,6 +383,11 @@ fn update_gpu_surface_state(
     if scene.width != buffer.width || scene.height != buffer.height {
         return Err(errno_status(mochi_user_syscall::EINVAL));
     }
+    if scene.atlas_width != mochios_viewkit_gpu_protocol::ATLAS_WIDTH
+        || scene.atlas_height != mochios_viewkit_gpu_protocol::ATLAS_HEIGHT
+    {
+        return Err(errno_status(mochi_user_syscall::EINVAL));
+    }
     let atlas_len = usize::try_from(scene.atlas_width)
         .ok()
         .and_then(|width| {
@@ -1092,10 +1097,8 @@ pub(crate) fn handle_request(
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
                 return reply;
             };
-            let attach_reject_reason = if !surface_role_accepts_format(
-                surfaces[index].role,
-                format,
-            ) {
+            let attach_reject_reason = if !surface_role_accepts_format(surfaces[index].role, format)
+            {
                 Some(1)
             } else if width == 0 {
                 Some(2)

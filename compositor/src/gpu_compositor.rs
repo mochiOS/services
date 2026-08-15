@@ -6,9 +6,8 @@ use crate::protocol::{PIXEL_FORMAT_GPU_SCENE, PIXEL_FORMAT_XRGB8888};
 use crate::surface::{Surface, read_current_pixel, surface_has_current_pixels};
 use crate::window::{WINDOW_CORNER_RADIUS, Window, window_frame_rect, window_index_by_id};
 
-const ATLAS_EXTENT: u32 = mochios_viewkit_gpu_protocol::ATLAS_WIDTH;
-const ATLAS_BYTES_PER_PIXEL: usize = 4;
 const CURSOR_TEXTURE_KEY: u64 = u64::MAX;
+const WHITE_TEXTURE_KEY: u64 = u64::MAX - 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TextureRequirement {
@@ -19,11 +18,10 @@ struct TextureRequirement {
     surface_index: Option<usize>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct AtlasEntry {
-    requirement: TextureRequirement,
-    x: u32,
-    y: u32,
+#[derive(Debug)]
+struct TextureUpload {
+    key: u64,
+    pixels: Vec<u8>,
 }
 
 #[derive(Clone, Copy)]
@@ -168,8 +166,9 @@ fn encode_local_vertices(
 
 #[derive(Default)]
 pub(crate) struct GpuCompositor {
-    atlas: Vec<u8>,
-    entries: Vec<AtlasEntry>,
+    textures: Vec<TextureRequirement>,
+    uploads: Vec<TextureUpload>,
+    batches: Vec<mochios_viewkit_gpu_protocol::compositor::Batch>,
     vertices: Vec<Vertex>,
     output: Vec<u8>,
 }
@@ -194,43 +193,35 @@ impl GpuCompositor {
             usize::try_from(display_height).ok()?,
         )?;
         let requirements = texture_requirements(surfaces, cursor_visible, cursor);
-        let layout = pack_requirements(&requirements)?;
-        let layout_changed = !same_layout(&self.entries, &layout);
-        if !self.prepare_atlas() {
-            return None;
-        }
-        let mut dirty_rows = if layout_changed {
-            self.atlas.fill(0);
-            if let Some(white) = self.atlas.get_mut(..4) {
-                white.copy_from_slice(&[255; 4]);
-            }
-            Some((0, 1))
-        } else {
-            None
-        };
-        for entry in &layout {
-            let previous_generation = self
-                .entries
-                .iter()
-                .find(|current| current.requirement.key == entry.requirement.key)
-                .map(|current| current.requirement.generation);
-            if layout_changed || previous_generation != Some(entry.requirement.generation) {
-                if !copy_texture_to_atlas(&mut self.atlas, *entry, surfaces, cursor) {
-                    return None;
-                }
-                dirty_rows = merge_rows(
-                    dirty_rows,
-                    entry.y,
-                    entry.y.saturating_add(entry.requirement.height),
-                );
+        self.uploads.clear();
+        for requirement in &requirements {
+            let cached = self.textures.iter().find(|cached| {
+                cached.key == requirement.key
+                    && cached.width == requirement.width
+                    && cached.height == requirement.height
+                    && cached.generation == requirement.generation
+            });
+            if cached.is_none() {
+                self.uploads.push(TextureUpload {
+                    key: requirement.key,
+                    pixels: texture_pixels(*requirement, surfaces, cursor)?,
+                });
             }
         }
-        self.entries = layout;
+        self.textures = requirements;
         self.vertices.clear();
+        self.batches.clear();
+        let first = self.vertices.len() as u32;
         push_solid_quad(
             &mut self.vertices,
             damage,
             [200.0 / 255.0, 200.0 / 255.0, 200.0 / 255.0, 1.0],
+        );
+        push_batch(
+            &mut self.batches,
+            WHITE_TEXTURE_KEY,
+            first,
+            self.vertices.len() as u32,
         );
 
         let mut indices: Vec<usize> = surfaces
@@ -248,48 +239,41 @@ impl GpuCompositor {
         for index in indices {
             let surface = &surfaces[index];
             let window_clip = window_clip_polygon(surfaces, windows, surface);
-            let entry = self
-                .entries
-                .iter()
-                .find(|entry| entry.requirement.surface_index == Some(index))
-                .copied()?;
+            let first = self.vertices.len() as u32;
             if surface.current_format == PIXEL_FORMAT_GPU_SCENE {
-                append_gpu_surface(
-                    &mut self.vertices,
-                    surface,
-                    entry,
-                    damage,
-                    window_clip.as_deref(),
-                )?;
+                append_gpu_surface(&mut self.vertices, surface, damage, window_clip.as_deref())?;
             } else {
-                append_cpu_surface(
-                    &mut self.vertices,
-                    surface,
-                    entry,
-                    damage,
-                    window_clip.as_deref(),
-                );
+                append_cpu_surface(&mut self.vertices, surface, damage, window_clip.as_deref());
             }
+            push_batch(
+                &mut self.batches,
+                surface.handle.0,
+                first,
+                self.vertices.len() as u32,
+            );
         }
         if cursor_visible {
-            let entry = self
-                .entries
-                .iter()
-                .find(|entry| entry.requirement.key == CURSOR_TEXTURE_KEY)
-                .copied();
-            if let (Some(entry), Some((width, height, _, _))) = (entry, cursor.texture()) {
+            if let Some((width, height, _, _)) = cursor.texture() {
+                let first = self.vertices.len() as u32;
                 let bounds = cursor.bounds(cursor_x, cursor_y);
-                append_textured_quad(&mut self.vertices, bounds, entry, width, height, damage);
+                append_textured_quad(&mut self.vertices, bounds, width, height, damage);
+                push_batch(
+                    &mut self.batches,
+                    CURSOR_TEXTURE_KEY,
+                    first,
+                    self.vertices.len() as u32,
+                );
             }
         }
         for vertex in &mut self.vertices {
             vertex.x = vertex.x / display_width as f32 * 2.0 - 1.0;
             vertex.y = vertex.y / display_height as f32 * 2.0 - 1.0;
         }
-        encode_scene(
+        encode_compositor_scene(
             &self.vertices,
-            &self.atlas,
-            dirty_rows,
+            &self.textures,
+            &self.uploads,
+            &self.batches,
             display_width,
             display_height,
             &mut self.output,
@@ -297,30 +281,8 @@ impl GpuCompositor {
         Some(self.output.as_slice())
     }
 
-    pub(crate) fn invalidate_atlas(&mut self) {
-        self.entries.clear();
-    }
-
-    fn prepare_atlas(&mut self) -> bool {
-        let Some(length) = usize::try_from(ATLAS_EXTENT)
-            .ok()
-            .and_then(|extent| extent.checked_mul(extent))
-            .and_then(|pixels| pixels.checked_mul(ATLAS_BYTES_PER_PIXEL))
-        else {
-            return false;
-        };
-        if self.atlas.len() == length {
-            return true;
-        }
-        self.atlas.clear();
-        if self.atlas.try_reserve_exact(length).is_err() {
-            return false;
-        }
-        self.atlas.resize(length, 0);
-        if let Some(white) = self.atlas.get_mut(..4) {
-            white.copy_from_slice(&[255; 4]);
-        }
-        true
+    pub(crate) fn invalidate_textures(&mut self) {
+        self.textures.clear();
     }
 }
 
@@ -330,6 +292,13 @@ fn texture_requirements(
     cursor: &CursorImage,
 ) -> Vec<TextureRequirement> {
     let mut requirements = Vec::new();
+    requirements.push(TextureRequirement {
+        key: WHITE_TEXTURE_KEY,
+        width: 1,
+        height: 1,
+        generation: 1,
+        surface_index: None,
+    });
     for (index, surface) in surfaces.iter().enumerate() {
         if !surface.live || !surface.visible || !surface_has_current_pixels(surface) {
             continue;
@@ -338,10 +307,7 @@ fn texture_requirements(
             let Some(gpu) = surface.gpu.as_ref() else {
                 continue;
             };
-            let Some((used_width, used_height)) = gpu_texture_extent(gpu) else {
-                continue;
-            };
-            (used_width, used_height, gpu.atlas_generation)
+            (gpu.atlas_width, gpu.atlas_height, gpu.atlas_generation)
         } else {
             (
                 surface.current_width,
@@ -369,170 +335,80 @@ fn texture_requirements(
     requirements
 }
 
-fn pack_requirements(requirements: &[TextureRequirement]) -> Option<Vec<AtlasEntry>> {
-    let mut entries = Vec::new();
-    let mut x = 1u32;
-    let mut y = 0u32;
-    let mut row_height = 1u32;
-    for requirement in requirements {
-        if requirement.width == 0
-            || requirement.height == 0
-            || requirement.width > ATLAS_EXTENT
-            || requirement.height > ATLAS_EXTENT
-        {
-            return None;
-        }
-        if x.saturating_add(requirement.width) > ATLAS_EXTENT {
-            x = 0;
-            y = y.saturating_add(row_height);
-            row_height = 0;
-        }
-        if y.saturating_add(requirement.height) > ATLAS_EXTENT {
-            return None;
-        }
-        entries.push(AtlasEntry {
-            requirement: *requirement,
-            x,
-            y,
-        });
-        x = x.saturating_add(requirement.width).saturating_add(1);
-        row_height = row_height.max(requirement.height.saturating_add(1));
-    }
-    Some(entries)
-}
-
-fn same_layout(first: &[AtlasEntry], second: &[AtlasEntry]) -> bool {
-    first.len() == second.len()
-        && first.iter().zip(second).all(|(first, second)| {
-            first.requirement.key == second.requirement.key
-                && first.requirement.width == second.requirement.width
-                && first.requirement.height == second.requirement.height
-                && first.x == second.x
-                && first.y == second.y
-        })
-}
-
-fn merge_rows(current: Option<(u32, u32)>, start: u32, end: u32) -> Option<(u32, u32)> {
-    if start >= end {
-        return current;
-    }
-    Some(current.map_or((start, end), |(old_start, old_end)| {
-        (old_start.min(start), old_end.max(end))
-    }))
-}
-
-fn copy_texture_to_atlas(
-    atlas: &mut [u8],
-    entry: AtlasEntry,
+fn texture_pixels(
+    requirement: TextureRequirement,
     surfaces: &[Surface],
     cursor: &CursorImage,
-) -> bool {
-    if entry.requirement.key == CURSOR_TEXTURE_KEY {
+) -> Option<Vec<u8>> {
+    if requirement.key == WHITE_TEXTURE_KEY {
+        return Some(vec![255; 4]);
+    }
+    if requirement.key == CURSOR_TEXTURE_KEY {
         let Some((width, height, pixels, _)) = cursor.texture() else {
-            return false;
+            return None;
         };
-        return copy_pixels(atlas, entry, width, height, |x, y| {
+        return collect_pixels(width, height, |x, y| {
             pixels
                 .get(y.saturating_mul(width as usize).saturating_add(x))
                 .copied()
         });
     }
-    let Some(index) = entry.requirement.surface_index else {
-        return false;
-    };
-    let Some(surface) = surfaces.get(index) else {
-        return false;
-    };
+    let surface = surfaces.get(requirement.surface_index?)?;
     if surface.current_format == PIXEL_FORMAT_GPU_SCENE {
-        let Some(gpu) = surface.gpu.as_ref() else {
-            return false;
-        };
-        return copy_bytes(atlas, entry, gpu.atlas_width, &gpu.atlas);
+        let gpu = surface.gpu.as_ref()?;
+        return collect_bytes(
+            requirement.width,
+            requirement.height,
+            gpu.atlas_width,
+            &gpu.atlas,
+        );
     }
-    copy_pixels(
-        atlas,
-        entry,
-        surface.current_width,
-        surface.current_height,
-        |x, y| {
-            let mut pixel = read_current_pixel(surface, x, y)?;
-            if surface.current_format == PIXEL_FORMAT_XRGB8888 {
-                pixel |= 0xff00_0000;
-            }
-            Some(pixel)
-        },
-    )
+    collect_pixels(surface.current_width, surface.current_height, |x, y| {
+        let mut pixel = read_current_pixel(surface, x, y)?;
+        if surface.current_format == PIXEL_FORMAT_XRGB8888 {
+            pixel |= 0xff00_0000;
+        }
+        Some(pixel)
+    })
 }
 
-fn copy_bytes(atlas: &mut [u8], entry: AtlasEntry, source_width: u32, source: &[u8]) -> bool {
-    let row_bytes = entry.requirement.width as usize * 4;
+fn collect_bytes(width: u32, height: u32, source_width: u32, source: &[u8]) -> Option<Vec<u8>> {
+    let row_bytes = width as usize * 4;
     let source_row_bytes = source_width as usize * 4;
-    if source.len() < source_row_bytes.saturating_mul(entry.requirement.height as usize) {
-        return false;
+    if source.len() < source_row_bytes.saturating_mul(height as usize) {
+        return None;
     }
-    for y in 0..entry.requirement.height as usize {
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(row_bytes.checked_mul(height as usize)?)
+        .ok()?;
+    for y in 0..height as usize {
         let source_start = y.saturating_mul(source_row_bytes);
-        let destination_start = ((entry.y as usize + y)
-            .saturating_mul(ATLAS_EXTENT as usize)
-            .saturating_add(entry.x as usize))
-        .saturating_mul(4);
-        let Some(destination) = atlas.get_mut(destination_start..destination_start + row_bytes)
-        else {
-            return false;
-        };
-        destination.copy_from_slice(&source[source_start..source_start + row_bytes]);
+        output.extend_from_slice(source.get(source_start..source_start + row_bytes)?);
     }
-    true
+    Some(output)
 }
 
-fn gpu_texture_extent(gpu: &crate::surface::GpuSurfaceState) -> Option<(u32, u32)> {
-    let mut max_u = 0.0f32;
-    let mut max_v = 0.0f32;
-    for vertex in gpu
-        .vertices
-        .chunks_exact(mochios_viewkit_gpu_protocol::VERTEX_STRIDE)
-    {
-        max_u = max_u.max(read_f32(vertex, 12)?.clamp(0.0, 1.0));
-        max_v = max_v.max(read_f32(vertex, 16)?.clamp(0.0, 1.0));
-    }
-    let width = ((max_u * gpu.atlas_width as f32).ceil() as u32)
-        .saturating_add(1)
-        .clamp(1, gpu.atlas_width);
-    let height = ((max_v * gpu.atlas_height as f32).ceil() as u32)
-        .saturating_add(1)
-        .clamp(1, gpu.atlas_height);
-    Some((width, height))
-}
-
-fn copy_pixels(
-    atlas: &mut [u8],
-    entry: AtlasEntry,
+fn collect_pixels(
     width: u32,
     height: u32,
     mut pixel: impl FnMut(usize, usize) -> Option<u32>,
-) -> bool {
-    if width != entry.requirement.width || height != entry.requirement.height {
-        return false;
-    }
+) -> Option<Vec<u8>> {
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(width as usize * height as usize * 4)
+        .ok()?;
     for y in 0..height as usize {
         for x in 0..width as usize {
-            let destination = ((entry.y as usize + y)
-                .saturating_mul(ATLAS_EXTENT as usize)
-                .saturating_add(entry.x as usize + x))
-            .saturating_mul(4);
-            let Some(bytes) = atlas.get_mut(destination..destination + 4) else {
-                return false;
-            };
-            bytes.copy_from_slice(&pixel(x, y).unwrap_or(0).to_le_bytes());
+            output.extend_from_slice(&pixel(x, y).unwrap_or(0).to_le_bytes());
         }
     }
-    true
+    Some(output)
 }
 
 fn append_gpu_surface(
     output: &mut Vec<Vertex>,
     surface: &Surface,
-    entry: AtlasEntry,
     damage: Rect,
     window_clip: Option<&[(f32, f32)]>,
 ) -> Option<()> {
@@ -554,13 +430,11 @@ fn append_gpu_surface(
         {
             let local_x = (read_f32(source, 0)? + 1.0) * 0.5 * gpu.width as f32;
             let local_y = (read_f32(source, 4)? + 1.0) * 0.5 * gpu.height as f32;
-            let source_u = read_f32(source, 12)? * gpu.atlas_width as f32;
-            let source_v = read_f32(source, 16)? * gpu.atlas_height as f32;
             vertices[index] = Vertex {
                 x: surface.x as f32 + local_x,
                 y: surface.y as f32 + local_y,
-                u: (entry.x as f32 + source_u) / ATLAS_EXTENT as f32,
-                v: (entry.y as f32 + source_v) / ATLAS_EXTENT as f32,
+                u: read_f32(source, 12)?,
+                v: read_f32(source, 16)?,
                 color: [
                     read_f32(source, 20)?,
                     read_f32(source, 24)?,
@@ -577,7 +451,6 @@ fn append_gpu_surface(
 fn append_cpu_surface(
     output: &mut Vec<Vertex>,
     surface: &Surface,
-    entry: AtlasEntry,
     damage: Rect,
     window_clip: Option<&[(f32, f32)]>,
 ) {
@@ -589,9 +462,6 @@ fn append_cpu_surface(
             width: surface.current_width,
             height: surface.current_height,
         },
-        entry,
-        surface.current_width,
-        surface.current_height,
         damage,
         window_clip,
     );
@@ -643,20 +513,16 @@ fn rounded_rect_polygon(rect: Rect, radius: f32) -> Vec<(f32, f32)> {
 fn append_textured_quad(
     output: &mut Vec<Vertex>,
     bounds: Rect,
-    entry: AtlasEntry,
-    width: u32,
-    height: u32,
+    _width: u32,
+    _height: u32,
     damage: Rect,
 ) {
-    append_textured_quad_clipped(output, bounds, entry, width, height, damage, None);
+    append_textured_quad_clipped(output, bounds, damage, None);
 }
 
 fn append_textured_quad_clipped(
     output: &mut Vec<Vertex>,
     bounds: Rect,
-    entry: AtlasEntry,
-    width: u32,
-    height: u32,
     damage: Rect,
     window_clip: Option<&[(f32, f32)]>,
 ) {
@@ -664,10 +530,10 @@ fn append_textured_quad_clipped(
     let top = bounds.y as f32;
     let right = left + bounds.width as f32;
     let bottom = top + bounds.height as f32;
-    let u0 = entry.x as f32 / ATLAS_EXTENT as f32;
-    let v0 = entry.y as f32 / ATLAS_EXTENT as f32;
-    let u1 = (entry.x + width) as f32 / ATLAS_EXTENT as f32;
-    let v1 = (entry.y + height) as f32 / ATLAS_EXTENT as f32;
+    let u0 = 0.0;
+    let v0 = 0.0;
+    let u1 = 1.0;
+    let v1 = 1.0;
     let color = [1.0; 4];
     for triangle in [
         [
@@ -789,7 +655,7 @@ fn push_solid_quad(output: &mut Vec<Vertex>, bounds: Rect, color: [f32; 4]) {
     let top = bounds.y as f32;
     let right = left + bounds.width as f32;
     let bottom = top + bounds.height as f32;
-    let uv = 0.25 / ATLAS_EXTENT as f32;
+    let uv = 0.5;
     output.extend_from_slice(&[
         Vertex {
             x: left,
@@ -943,10 +809,27 @@ fn read_f32(bytes: &[u8], offset: usize) -> Option<f32> {
     value.is_finite().then_some(value)
 }
 
-fn encode_scene(
+fn push_batch(
+    batches: &mut Vec<mochios_viewkit_gpu_protocol::compositor::Batch>,
+    texture_key: u64,
+    first_vertex: u32,
+    end_vertex: u32,
+) {
+    let vertex_count = end_vertex.saturating_sub(first_vertex);
+    if vertex_count != 0 {
+        batches.push(mochios_viewkit_gpu_protocol::compositor::Batch {
+            texture_key,
+            first_vertex,
+            vertex_count,
+        });
+    }
+}
+
+fn encode_compositor_scene(
     vertices: &[Vertex],
-    atlas: &[u8],
-    dirty_rows: Option<(u32, u32)>,
+    textures: &[TextureRequirement],
+    uploads: &[TextureUpload],
+    batches: &[mochios_viewkit_gpu_protocol::compositor::Batch],
     width: u32,
     height: u32,
     output: &mut Vec<u8>,
@@ -954,30 +837,69 @@ fn encode_scene(
     if vertices.len() > mochios_viewkit_gpu_protocol::MAX_VERTICES as usize {
         return None;
     }
-    let vertex_bytes = vertices
-        .len()
-        .checked_mul(mochios_viewkit_gpu_protocol::VERTEX_STRIDE)?;
-    let (atlas_y, atlas_end) = dirty_rows.unwrap_or((0, 0));
-    let atlas_height = atlas_end.saturating_sub(atlas_y);
-    let atlas_row_bytes = ATLAS_EXTENT as usize * 4;
-    let atlas_bytes = atlas_height as usize * atlas_row_bytes;
-    let total = mochios_viewkit_gpu_protocol::HEADER_LEN
-        .checked_add(vertex_bytes)?
-        .checked_add(atlas_bytes)?;
+    let data_bytes = uploads.iter().try_fold(0usize, |length, upload| {
+        length.checked_add(upload.pixels.len())
+    })?;
+    let total = mochios_viewkit_gpu_protocol::compositor::encoded_len(
+        vertices.len() as u32,
+        textures.len() as u32,
+        batches.len() as u32,
+        data_bytes,
+    )
+    .ok()?;
     output.clear();
     output.resize(total, 0);
-    mochios_viewkit_gpu_protocol::encode_header(
+    mochios_viewkit_gpu_protocol::compositor::encode_header(
         output,
         width,
         height,
         vertices.len() as u32,
-        ATLAS_EXTENT,
-        ATLAS_EXTENT,
-        atlas_y,
-        atlas_height,
+        textures.len() as u32,
+        batches.len() as u32,
+        data_bytes,
     )
     .ok()?;
-    let mut offset = mochios_viewkit_gpu_protocol::HEADER_LEN;
+    let batch_offset = mochios_viewkit_gpu_protocol::compositor::HEADER_LEN
+        + textures.len() * mochios_viewkit_gpu_protocol::compositor::TEXTURE_DESC_LEN;
+    let vertex_offset =
+        batch_offset + batches.len() * mochios_viewkit_gpu_protocol::compositor::BATCH_DESC_LEN;
+    let mut data_offset =
+        vertex_offset + vertices.len() * mochios_viewkit_gpu_protocol::VERTEX_STRIDE;
+    for (index, texture) in textures.iter().enumerate() {
+        let upload = uploads.iter().find(|upload| upload.key == texture.key);
+        let (encoded_offset, data_len, data_height) = upload.map_or((0, 0, 0), |upload| {
+            (data_offset, upload.pixels.len(), texture.height)
+        });
+        mochios_viewkit_gpu_protocol::compositor::encode_texture(
+            output,
+            index as u32,
+            texture.key,
+            texture.width,
+            texture.height,
+            0,
+            data_height,
+            encoded_offset,
+            data_len,
+            texture.generation,
+        )
+        .ok()?;
+        if let Some(upload) = upload {
+            output
+                .get_mut(data_offset..data_offset.checked_add(upload.pixels.len())?)?
+                .copy_from_slice(&upload.pixels);
+            data_offset += upload.pixels.len();
+        }
+    }
+    for (index, batch) in batches.iter().copied().enumerate() {
+        mochios_viewkit_gpu_protocol::compositor::encode_batch(
+            output,
+            batch_offset,
+            index as u32,
+            batch,
+        )
+        .ok()?;
+    }
+    let mut offset = vertex_offset;
     for vertex in vertices {
         for value in [
             vertex.x,
@@ -994,9 +916,8 @@ fn encode_scene(
             offset += 4;
         }
     }
-    let atlas_start = atlas_y as usize * atlas_row_bytes;
-    output[offset..].copy_from_slice(&atlas[atlas_start..atlas_start + atlas_bytes]);
-    Some(())
+    (offset == vertex_offset + vertices.len() * mochios_viewkit_gpu_protocol::VERTEX_STRIDE)
+        .then_some(())
 }
 
 #[cfg(test)]
@@ -1004,36 +925,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn atlas_layout_is_stable_and_rejects_overflow() {
-        let requirements = [
-            TextureRequirement {
-                key: 1,
-                width: 1024,
-                height: 512,
-                generation: 1,
-                surface_index: Some(0),
-            },
-            TextureRequirement {
-                key: 2,
-                width: 1024,
-                height: 512,
-                generation: 1,
-                surface_index: Some(1),
-            },
-        ];
-        let first = pack_requirements(&requirements).expect("two ViewKit atlases fit");
-        let second = pack_requirements(&requirements).expect("layout remains available");
-        assert!(same_layout(&first, &second));
-        assert!(
-            pack_requirements(&[TextureRequirement {
-                key: 3,
-                width: ATLAS_EXTENT + 1,
-                height: 1,
-                generation: 1,
-                surface_index: None
-            }])
-            .is_none()
-        );
+    fn batches_keep_independent_surface_textures() {
+        let mut batches = Vec::new();
+        push_batch(&mut batches, 10, 6, 12);
+        push_batch(&mut batches, 11, 12, 18);
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].texture_key, 10);
+        assert_eq!(batches[1].texture_key, 11);
     }
 
     #[test]
@@ -1083,19 +981,6 @@ mod tests {
                 width: 100,
                 height: 100,
             },
-            AtlasEntry {
-                requirement: TextureRequirement {
-                    key: 1,
-                    width: 100,
-                    height: 100,
-                    generation: 1,
-                    surface_index: Some(0),
-                },
-                x: 0,
-                y: 0,
-            },
-            100,
-            100,
             Rect {
                 x: 0,
                 y: 0,

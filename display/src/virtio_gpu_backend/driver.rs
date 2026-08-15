@@ -120,7 +120,7 @@ impl VirtioGpuBackend {
 
     pub(crate) fn present_gpu_scene(
         &mut self,
-        scene: &mochios_viewkit_gpu_protocol::Scene<'_>,
+        scene: &mochios_viewkit_gpu_protocol::compositor::Scene<'_>,
     ) -> Result<(), GpuError> {
         let virgl = self.virgl.as_mut().ok_or(GpuError::InvalidFrame)?;
         virgl.present_scene(&mut self.control, self.scanout_id, scene)?;

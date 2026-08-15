@@ -86,7 +86,7 @@ impl DisplayBackend {
 
     pub(crate) fn present_gpu_scene(
         &mut self,
-        scene: &mochios_viewkit_gpu_protocol::Scene<'_>,
+        scene: &mochios_viewkit_gpu_protocol::compositor::Scene<'_>,
     ) -> Result<(), u64> {
         match self {
             Self::VirtioGpu(backend) => backend.present_gpu_scene(scene).map_err(|error| {

@@ -1,6 +1,9 @@
 use alloc::vec::Vec;
 
-use mochios_viewkit_gpu_protocol::{ATLAS_WIDTH, CLEAR_VERTEX_COUNT, MAX_VERTICES, VERTEX_STRIDE};
+use mochios_viewkit_gpu_protocol::{
+    MAX_VERTICES, VERTEX_STRIDE,
+    compositor::{Scene, Texture},
+};
 use mochios_virtio_gpu_protocol::{
     AttachBacking, Box3d, Command, ContextResource, Rect, ResourceCreate3d, ResourceOperation,
     SetScanout, Submit3d, TransferHost3d,
@@ -14,8 +17,9 @@ use super::error::GpuError;
 
 const CONTEXT_ID: u32 = 1;
 const RENDER_TARGET_ID: u32 = 6;
-const TEXTURE_ID: u32 = 7;
 const VERTEX_BUFFER_ID: u32 = 8;
+const FIRST_TEXTURE_ID: u32 = 100;
+const FIRST_SAMPLER_VIEW_HANDLE: u32 = 1_000;
 const PIPE_BUFFER: u32 = 0;
 const PIPE_TEXTURE_2D: u32 = 2;
 const FORMAT_B8G8R8A8_UNORM: u32 = 1;
@@ -27,6 +31,7 @@ const BIND_SAMPLER_VIEW: u32 = 1 << 3;
 const BIND_VERTEX_BUFFER: u32 = 1 << 4;
 const CMD_CREATE_OBJECT: u32 = 1;
 const CMD_BIND_OBJECT: u32 = 2;
+const CMD_DESTROY_OBJECT: u32 = 3;
 const CMD_SET_VIEWPORT: u32 = 4;
 const CMD_SET_FRAMEBUFFER: u32 = 5;
 const CMD_SET_VERTEX_BUFFERS: u32 = 6;
@@ -53,7 +58,6 @@ const RASTERIZER_HANDLE: u32 = 34;
 const BLEND_HANDLE: u32 = 35;
 const NO_BLEND_HANDLE: u32 = 39;
 const DSA_HANDLE: u32 = 36;
-const SAMPLER_VIEW_HANDLE: u32 = 37;
 const SAMPLER_STATE_HANDLE: u32 = 38;
 const SHADER_TOKEN_BUDGET: u32 = 4096;
 
@@ -83,10 +87,22 @@ END\n";
 pub(super) struct SceneRenderer {
     geometry: DisplayGeometry,
     render_target: BackingStore,
-    texture: BackingStore,
     vertices: BackingStore,
+    textures: Vec<CachedTexture>,
+    next_texture_id: u32,
+    next_sampler_view_handle: u32,
     resources_created: usize,
     resources_attached: usize,
+}
+
+struct CachedTexture {
+    key: u64,
+    width: u32,
+    height: u32,
+    generation: u64,
+    resource_id: u32,
+    sampler_view_handle: u32,
+    backing: BackingStore,
 }
 
 impl SceneRenderer {
@@ -95,18 +111,16 @@ impl SceneRenderer {
         geometry: DisplayGeometry,
     ) -> Result<Self, GpuError> {
         let render_bytes = geometry.byte_len().map_err(GpuError::System)?;
-        let texture_bytes = (ATLAS_WIDTH as usize)
-            .checked_mul(ATLAS_WIDTH as usize)
-            .and_then(|pixels| pixels.checked_mul(4))
-            .ok_or(GpuError::InvalidFrame)?;
         let vertex_bytes = (MAX_VERTICES as usize)
             .checked_mul(VERTEX_STRIDE)
             .ok_or(GpuError::InvalidFrame)?;
         let mut renderer = Self {
             geometry,
             render_target: BackingStore::allocate(render_bytes).map_err(GpuError::System)?,
-            texture: BackingStore::allocate(texture_bytes).map_err(GpuError::System)?,
             vertices: BackingStore::allocate(vertex_bytes).map_err(GpuError::System)?,
+            textures: Vec::new(),
+            next_texture_id: FIRST_TEXTURE_ID,
+            next_sampler_view_handle: FIRST_SAMPLER_VIEW_HANDLE,
             resources_created: 0,
             resources_attached: 0,
         };
@@ -127,18 +141,6 @@ impl SceneRenderer {
             self.geometry.width,
             self.geometry.height,
             &self.render_target,
-        )?;
-        self.resources_created += 1;
-        self.resources_attached += 1;
-        create_resource(
-            channel,
-            TEXTURE_ID,
-            PIPE_TEXTURE_2D,
-            FORMAT_B8G8R8A8_UNORM,
-            BIND_SAMPLER_VIEW,
-            ATLAS_WIDTH,
-            ATLAS_WIDTH,
-            &self.texture,
         )?;
         self.resources_created += 1;
         self.resources_attached += 1;
@@ -165,45 +167,18 @@ impl SceneRenderer {
         &mut self,
         channel: &mut ControlChannel,
         scanout_id: u32,
-        scene: &mochios_viewkit_gpu_protocol::Scene<'_>,
+        scene: &Scene<'_>,
     ) -> Result<(), GpuError> {
         if scene.width != self.geometry.width
             || scene.height != self.geometry.height
-            || scene.atlas_width != ATLAS_WIDTH
-            || scene.atlas_height != ATLAS_WIDTH
-            || scene
-                .atlas_data_y
-                .checked_add(scene.atlas_data_height)
-                .is_none_or(|end| end > ATLAS_WIDTH)
             || scene.vertices.len() > MAX_VERTICES as usize * VERTEX_STRIDE
         {
             return Err(GpuError::InvalidFrame);
         }
-        let atlas_offset = scene.atlas_data_y as usize * ATLAS_WIDTH as usize * 4;
-        self.texture
-            .write_at(atlas_offset, scene.atlas)
-            .map_err(GpuError::System)?;
+        self.sync_textures(channel, scene)?;
         self.vertices
             .write_all(scene.vertices)
             .map_err(GpuError::System)?;
-        if scene.atlas_data_height != 0 {
-            channel.submit_no_data(Command::TransferToHost3d(TransferHost3d {
-                context_id: CONTEXT_ID,
-                box_3d: Box3d {
-                    x: 0,
-                    y: scene.atlas_data_y,
-                    z: 0,
-                    width: ATLAS_WIDTH,
-                    height: scene.atlas_data_height,
-                    depth: 1,
-                },
-                offset: atlas_offset as u64,
-                resource_id: TEXTURE_ID,
-                level: 0,
-                stride: ATLAS_WIDTH.saturating_mul(4),
-                layer_stride: ATLAS_WIDTH.saturating_mul(ATLAS_WIDTH).saturating_mul(4),
-            }))?;
-        }
         let vertex_transfer = Command::TransferToHost3d(TransferHost3d {
             context_id: CONTEXT_ID,
             box_3d: Box3d {
@@ -220,7 +195,7 @@ impl SceneRenderer {
             stride: 0,
             layer_stride: 0,
         });
-        let frame = frame_commands(scene.vertex_count());
+        let frame = frame_commands(scene, &self.textures)?;
         channel.submit_pair_no_data(
             vertex_transfer,
             Command::Submit3d(Submit3d {
@@ -247,8 +222,133 @@ impl SceneRenderer {
         )
     }
 
+    fn sync_textures(
+        &mut self,
+        channel: &mut ControlChannel,
+        scene: &Scene<'_>,
+    ) -> Result<(), GpuError> {
+        for index in (0..self.textures.len()).rev() {
+            let key = self.textures[index].key;
+            let active = (0..scene.texture_count()).any(|item| {
+                scene
+                    .texture(item)
+                    .is_some_and(|texture| texture.key == key)
+            });
+            if !active {
+                let texture = self.textures.remove(index);
+                destroy_texture(channel, texture);
+            }
+        }
+        for index in 0..scene.texture_count() {
+            let texture = scene.texture(index).ok_or(GpuError::InvalidFrame)?;
+            if let Some(position) = self
+                .textures
+                .iter()
+                .position(|cached| cached.key == texture.key)
+                && (self.textures[position].width != texture.width
+                    || self.textures[position].height != texture.height)
+            {
+                let stale = self.textures.remove(position);
+                destroy_texture(channel, stale);
+            }
+            let position = if let Some(position) = self
+                .textures
+                .iter()
+                .position(|cached| cached.key == texture.key)
+            {
+                position
+            } else {
+                if texture.data_y != 0 || texture.data_height != texture.height {
+                    return Err(GpuError::InvalidFrame);
+                }
+                let created = self.create_texture(channel, texture)?;
+                self.textures.push(created);
+                self.textures.len() - 1
+            };
+            let cached = &mut self.textures[position];
+            if texture.data.is_empty() {
+                if cached.generation != texture.generation {
+                    return Err(GpuError::InvalidFrame);
+                }
+                continue;
+            }
+            let offset = texture.data_y as usize * texture.width as usize * 4;
+            cached
+                .backing
+                .write_at(offset, texture.data)
+                .map_err(GpuError::System)?;
+            channel.submit_no_data(Command::TransferToHost3d(TransferHost3d {
+                context_id: CONTEXT_ID,
+                box_3d: Box3d {
+                    x: 0,
+                    y: texture.data_y,
+                    z: 0,
+                    width: texture.width,
+                    height: texture.data_height,
+                    depth: 1,
+                },
+                offset: offset as u64,
+                resource_id: cached.resource_id,
+                level: 0,
+                stride: texture.width.saturating_mul(4),
+                layer_stride: texture
+                    .width
+                    .saturating_mul(texture.height)
+                    .saturating_mul(4),
+            }))?;
+            cached.generation = texture.generation;
+        }
+        Ok(())
+    }
+
+    fn create_texture(
+        &mut self,
+        channel: &mut ControlChannel,
+        texture: Texture<'_>,
+    ) -> Result<CachedTexture, GpuError> {
+        let length = texture.width as usize * texture.height as usize * 4;
+        let backing = BackingStore::allocate(length).map_err(GpuError::System)?;
+        let resource_id = self.next_texture_id;
+        let sampler_view_handle = self.next_sampler_view_handle;
+        self.next_texture_id = self
+            .next_texture_id
+            .checked_add(1)
+            .ok_or(GpuError::InvalidFrame)?;
+        self.next_sampler_view_handle = self
+            .next_sampler_view_handle
+            .checked_add(1)
+            .ok_or(GpuError::InvalidFrame)?;
+        create_resource(
+            channel,
+            resource_id,
+            PIPE_TEXTURE_2D,
+            FORMAT_B8G8R8A8_UNORM,
+            BIND_SAMPLER_VIEW,
+            texture.width,
+            texture.height,
+            &backing,
+        )?;
+        let commands = create_sampler_view_commands(sampler_view_handle, resource_id);
+        channel.submit_no_data(Command::Submit3d(Submit3d {
+            context_id: CONTEXT_ID,
+            commands: &commands,
+        }))?;
+        Ok(CachedTexture {
+            key: texture.key,
+            width: texture.width,
+            height: texture.height,
+            generation: 0,
+            resource_id,
+            sampler_view_handle,
+            backing,
+        })
+    }
+
     pub(super) fn cleanup(&mut self, channel: &mut ControlChannel) {
-        let ids = [RENDER_TARGET_ID, TEXTURE_ID, VERTEX_BUFFER_ID];
+        while let Some(texture) = self.textures.pop() {
+            destroy_texture(channel, texture);
+        }
+        let ids = [RENDER_TARGET_ID, VERTEX_BUFFER_ID];
         for resource_id in ids[..self.resources_attached].iter().rev().copied() {
             let _ = channel.submit_no_data(Command::ContextDetachResource(ContextResource {
                 context_id: CONTEXT_ID,
@@ -301,6 +401,27 @@ fn create_resource(
     }))
 }
 
+fn destroy_texture(channel: &mut ControlChannel, texture: CachedTexture) {
+    let mut builder = Builder::new();
+    builder.command(CMD_DESTROY_OBJECT, OBJECT_SAMPLER_VIEW, 1);
+    builder.word(texture.sampler_view_handle);
+    let commands = builder.finish();
+    let _ = channel.submit_no_data(Command::Submit3d(Submit3d {
+        context_id: CONTEXT_ID,
+        commands: &commands,
+    }));
+    let _ = channel.submit_no_data(Command::ContextDetachResource(ContextResource {
+        context_id: CONTEXT_ID,
+        resource_id: texture.resource_id,
+    }));
+    let _ = channel.submit_no_data(Command::ResourceDetachBacking(ResourceOperation {
+        resource_id: texture.resource_id,
+    }));
+    let _ = channel.submit_no_data(Command::ResourceUnref(ResourceOperation {
+        resource_id: texture.resource_id,
+    }));
+}
+
 struct Builder {
     words: Vec<u32>,
 }
@@ -321,6 +442,12 @@ impl Builder {
     fn bind_object(&mut self, object: u32, handle: u32) {
         self.command(CMD_BIND_OBJECT, object, 1);
         self.word(handle);
+    }
+    fn bind_sampler_view(&mut self, handle: u32) {
+        self.command(CMD_SET_SAMPLER_VIEWS, 0, 3);
+        for value in [SHADER_FRAGMENT, 0, handle] {
+            self.word(value);
+        }
     }
     fn draw(&mut self, start: u32, count: u32) {
         self.command(CMD_DRAW_VBO, 0, 12);
@@ -432,27 +559,12 @@ fn setup_commands(width: u32, height: u32) -> Vec<u8> {
         b.word(value);
     }
     b.bind_object(OBJECT_DSA, DSA_HANDLE);
-    b.command(CMD_CREATE_OBJECT, OBJECT_SAMPLER_VIEW, 6);
-    for value in [
-        SAMPLER_VIEW_HANDLE,
-        TEXTURE_ID,
-        FORMAT_B8G8R8A8_UNORM,
-        0,
-        0,
-        0x688,
-    ] {
-        b.word(value);
-    }
     b.command(CMD_CREATE_OBJECT, OBJECT_SAMPLER_STATE, 9);
     let sampler = (2 << 0) | (2 << 3) | (2 << 6) | (1 << 9) | (2 << 11) | (1 << 13);
     b.word(SAMPLER_STATE_HANDLE);
     b.word(sampler);
     for _ in 0..7 {
         b.word(0);
-    }
-    b.command(CMD_SET_SAMPLER_VIEWS, 0, 3);
-    for value in [SHADER_FRAGMENT, 0, SAMPLER_VIEW_HANDLE] {
-        b.word(value);
     }
     b.command(CMD_BIND_SAMPLER_STATES, 0, 3);
     for value in [SHADER_FRAGMENT, 0, SAMPLER_STATE_HANDLE] {
@@ -476,18 +588,35 @@ fn setup_commands(width: u32, height: u32) -> Vec<u8> {
     b.finish()
 }
 
-fn frame_commands(vertex_count: u32) -> Vec<u8> {
+fn create_sampler_view_commands(handle: u32, resource_id: u32) -> Vec<u8> {
     let mut b = Builder::new();
-    b.bind_object(OBJECT_BLEND, NO_BLEND_HANDLE);
-    b.draw(0, CLEAR_VERTEX_COUNT);
-    b.bind_object(OBJECT_BLEND, BLEND_HANDLE);
-    if vertex_count > CLEAR_VERTEX_COUNT {
-        b.draw(
-            CLEAR_VERTEX_COUNT,
-            vertex_count.saturating_sub(CLEAR_VERTEX_COUNT),
-        );
+    b.command(CMD_CREATE_OBJECT, OBJECT_SAMPLER_VIEW, 6);
+    for value in [handle, resource_id, FORMAT_B8G8R8A8_UNORM, 0, 0, 0x688] {
+        b.word(value);
     }
     b.finish()
+}
+
+fn frame_commands(scene: &Scene<'_>, textures: &[CachedTexture]) -> Result<Vec<u8>, GpuError> {
+    let mut b = Builder::new();
+    for index in 0..scene.batch_count() {
+        let batch = scene.batch(index).ok_or(GpuError::InvalidFrame)?;
+        let texture = textures
+            .iter()
+            .find(|texture| texture.key == batch.texture_key)
+            .ok_or(GpuError::InvalidFrame)?;
+        b.bind_sampler_view(texture.sampler_view_handle);
+        b.bind_object(
+            OBJECT_BLEND,
+            if index == 0 {
+                NO_BLEND_HANDLE
+            } else {
+                BLEND_HANDLE
+            },
+        );
+        b.draw(batch.first_vertex, batch.vertex_count);
+    }
+    Ok(b.finish())
 }
 
 #[cfg(test)]
@@ -498,8 +627,6 @@ mod tests {
     fn scene_pipeline_uses_complete_vertex_layout() {
         let commands = setup_commands(1280, 800);
         assert_eq!(commands.len() % 4, 0);
-        assert_eq!(frame_commands(6).len(), (2 + 13 + 2) * 4);
-        assert_eq!(frame_commands(9).len(), (2 + 13 + 2 + 13) * 4);
         assert!(
             commands
                 .windows(4)

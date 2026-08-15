@@ -239,7 +239,7 @@ fn present_gpu_scene_request(
         return errno_status(EINVAL);
     }
     let bytes = unsafe { core::slice::from_raw_parts(address as *const u8, byte_len) };
-    let Ok(scene) = mochios_viewkit_gpu_protocol::decode(bytes) else {
+    let Ok(scene) = mochios_viewkit_gpu_protocol::compositor::decode(bytes) else {
         return errno_status(EINVAL);
     };
     backend

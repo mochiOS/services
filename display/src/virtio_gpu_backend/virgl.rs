@@ -86,7 +86,7 @@ impl VirglState {
         &mut self,
         channel: &mut ControlChannel,
         scanout_id: u32,
-        scene: &mochios_viewkit_gpu_protocol::Scene<'_>,
+        scene: &mochios_viewkit_gpu_protocol::compositor::Scene<'_>,
     ) -> Result<(), GpuError> {
         self.scene
             .as_mut()
