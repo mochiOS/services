@@ -8,7 +8,7 @@ use mochi_user_platform as platform;
 use mochios_certificate::DeveloperCertificate;
 use mochios_signature_protocol::{
     ErrorResponse, Opcode, StatusResponse, UpdateNotification, VerifiedResponse, VerifyBegin,
-    VerifyChunk, VerifyFinish, decode_opcode,
+    VerifyChunk, VerifyFile, VerifyFinish, decode_opcode,
 };
 use sha2::{Digest, Sha256};
 
@@ -29,10 +29,10 @@ struct MpkgHeader {
 }
 
 #[derive(Clone)]
-struct TarEntry {
+struct TarEntry<'a> {
     path: String,
     kind: u8,
-    data: Vec<u8>,
+    data: &'a [u8],
 }
 
 struct Verification {
@@ -137,7 +137,7 @@ fn parse_header(bytes: &[u8]) -> Option<MpkgHeader> {
     })
 }
 
-fn parse_tar_stream(bytes: &[u8]) -> Option<Vec<TarEntry>> {
+fn parse_tar_stream(bytes: &[u8]) -> Option<Vec<TarEntry<'_>>> {
     let mut entries = Vec::new();
     let mut offset = 0usize;
     while offset + 512 <= bytes.len() {
@@ -177,7 +177,10 @@ fn parse_tar_stream(bytes: &[u8]) -> Option<Vec<TarEntry>> {
         if kind != b'0' && kind != 0 && kind != b'5' {
             return None;
         }
-        if entries.iter().any(|entry: &TarEntry| entry.path == path) {
+        if entries
+            .iter()
+            .any(|entry: &TarEntry<'_>| entry.path == path)
+        {
             return None;
         }
         if path != "manifest.toml"
@@ -189,7 +192,7 @@ fn parse_tar_stream(bytes: &[u8]) -> Option<Vec<TarEntry>> {
         entries.push(TarEntry {
             path,
             kind,
-            data: bytes[payload_start..payload_end].to_vec(),
+            data: &bytes[payload_start..payload_end],
         });
         offset = payload_end.div_ceil(512) * 512;
     }
@@ -199,7 +202,10 @@ fn parse_tar_stream(bytes: &[u8]) -> Option<Vec<TarEntry>> {
     Some(entries)
 }
 
-fn entry_by_path<'a>(entries: &'a [TarEntry], path: &str) -> Option<&'a TarEntry> {
+fn entry_by_path<'entries, 'data>(
+    entries: &'entries [TarEntry<'data>],
+    path: &str,
+) -> Option<&'entries TarEntry<'data>> {
     entries.iter().find(|entry| entry.path == path)
 }
 
@@ -231,7 +237,7 @@ fn manifest_payload_path(kind: Option<&str>, path: &str) -> Option<String> {
 
 fn verify_payload_files(
     manifest: &platform::package::PackageManifest,
-    entries: &[TarEntry],
+    entries: &[TarEntry<'_>],
 ) -> Result<(), mochi_user_syscall::SysError> {
     if manifest.files.is_empty() {
         return Err(mochi_user_syscall::SysError::from_raw(
@@ -261,7 +267,7 @@ fn verify_payload_files(
         let expected = decode_sha256_digest(&file.digest).ok_or_else(|| {
             mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
         })?;
-        let actual = Sha256::digest(&entry.data);
+        let actual = Sha256::digest(entry.data);
         if actual.as_slice() != expected {
             return Err(mochi_user_syscall::SysError::from_raw(
                 mochi_user_syscall::EACCES as i64,
@@ -330,7 +336,7 @@ fn verify_package_bytes(
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOENT as i64))?;
     let cert = entry_by_path(&entries, "signatures/developer.cert")
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOENT as i64))?;
-    let manifest_text = core::str::from_utf8(&manifest.data)
+    let manifest_text = core::str::from_utf8(manifest.data)
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     let manifest = platform::package::parse_manifest(manifest_text)
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
@@ -347,7 +353,7 @@ fn verify_package_bytes(
             mochi_user_syscall::EINVAL as i64,
         ));
     }
-    let certificate = DeveloperCertificate::decode(&cert.data)
+    let certificate = DeveloperCertificate::decode(cert.data)
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     let issuer_public_key = database
         .issuer_public_key(&certificate, now_utc)
@@ -357,10 +363,10 @@ fn verify_package_bytes(
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64))?;
     let verifier = VerifyingKey::from_bytes(&certificate.subject_public_key)
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
-    let signature_bytes: [u8; 64] =
-        sig.data.as_slice().try_into().map_err(|_| {
-            mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
-        })?;
+    let signature_bytes: [u8; 64] = sig
+        .data
+        .try_into()
+        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     let signature = Signature::from_bytes(&signature_bytes);
     let manifest_hash = Sha256::digest(manifest_text.as_bytes());
     let mut msg = Vec::with_capacity(32 + manifest_hash.len());
@@ -575,6 +581,51 @@ fn run_server() -> ! {
                             reply_verified(sender, finish.request_id, &verification)
                         }
                         Err(error) => reply_error(sender, finish.request_id, error.raw() as u64),
+                    }
+                }
+                Err(_) => reply_error(sender, 0, mochi_user_syscall::EINVAL),
+            },
+            Ok(Opcode::VerifyFile) => match VerifyFile::decode(request) {
+                Ok(file) => {
+                    let expected_len = usize::try_from(file.package_len).unwrap_or(usize::MAX);
+                    if expected_len == 0 || expected_len > MAX_PACKAGE_LEN {
+                        reply_error(sender, file.request_id, mochi_user_syscall::ERANGE);
+                        continue;
+                    }
+                    let Some(database) = database.as_ref() else {
+                        reply_error(sender, file.request_id, mochi_user_syscall::EAGAIN);
+                        continue;
+                    };
+                    let now_utc = match platform::time::utc_seconds() {
+                        Ok(now) if database.is_current(now) => now,
+                        _ => {
+                            reply_error(sender, file.request_id, mochi_user_syscall::EAGAIN);
+                            continue;
+                        }
+                    };
+                    let bytes = match platform::file::read_to_end_path(file.path) {
+                        Ok(bytes) => bytes,
+                        Err(error) => {
+                            reply_error(sender, file.request_id, error.raw() as u64);
+                            continue;
+                        }
+                    };
+                    diagnostic(&alloc::format!(
+                        "signature.service: package read complete bytes={}",
+                        bytes.len()
+                    ));
+                    if bytes.len() != expected_len
+                        || Sha256::digest(&bytes).as_slice() != file.package_digest
+                    {
+                        reply_error(sender, file.request_id, mochi_user_syscall::EACCES);
+                        continue;
+                    }
+                    match verify_package_bytes(&bytes, database, now_utc) {
+                        Ok(verification) => {
+                            diagnostic("signature.service: package verification complete");
+                            reply_verified(sender, file.request_id, &verification)
+                        }
+                        Err(error) => reply_error(sender, file.request_id, error.raw() as u64),
                     }
                 }
                 Err(_) => reply_error(sender, 0, mochi_user_syscall::EINVAL),
