@@ -21,6 +21,8 @@ struct TextureRequirement {
 #[derive(Debug)]
 struct TextureUpload {
     key: u64,
+    data_y: u32,
+    data_height: u32,
     pixels: Vec<u8>,
 }
 
@@ -202,9 +204,13 @@ impl GpuCompositor {
                     && cached.generation == requirement.generation
             });
             if cached.is_none() {
+                let (data_y, data_height) =
+                    texture_upload_range(*requirement, self.textures.as_slice(), surfaces)?;
                 self.uploads.push(TextureUpload {
                     key: requirement.key,
-                    pixels: texture_pixels(*requirement, surfaces, cursor)?,
+                    data_y,
+                    data_height,
+                    pixels: texture_pixels(*requirement, data_y, data_height, surfaces, cursor)?,
                 });
             }
         }
@@ -337,6 +343,8 @@ fn texture_requirements(
 
 fn texture_pixels(
     requirement: TextureRequirement,
+    data_y: u32,
+    data_height: u32,
     surfaces: &[Surface],
     cursor: &CursorImage,
 ) -> Option<Vec<u8>> {
@@ -356,11 +364,15 @@ fn texture_pixels(
     let surface = surfaces.get(requirement.surface_index?)?;
     if surface.current_format == PIXEL_FORMAT_GPU_SCENE {
         let gpu = surface.gpu.as_ref()?;
+        let source_row_bytes = usize::try_from(gpu.atlas_width).ok()?.checked_mul(4)?;
+        let source_start = usize::try_from(data_y)
+            .ok()?
+            .checked_mul(source_row_bytes)?;
         return collect_bytes(
             requirement.width,
-            requirement.height,
+            data_height,
             gpu.atlas_width,
-            &gpu.atlas,
+            gpu.atlas.get(source_start..)?,
         );
     }
     collect_pixels(surface.current_width, surface.current_height, |x, y| {
@@ -370,6 +382,36 @@ fn texture_pixels(
         }
         Some(pixel)
     })
+}
+
+fn texture_upload_range(
+    requirement: TextureRequirement,
+    cached_textures: &[TextureRequirement],
+    surfaces: &[Surface],
+) -> Option<(u32, u32)> {
+    let Some(surface_index) = requirement.surface_index else {
+        return Some((0, requirement.height));
+    };
+    let surface = surfaces.get(surface_index)?;
+    if surface.current_format != PIXEL_FORMAT_GPU_SCENE {
+        return Some((0, requirement.height));
+    }
+    let gpu = surface.gpu.as_ref()?;
+    let Some(cached) = cached_textures.iter().find(|cached| {
+        cached.key == requirement.key
+            && cached.width == requirement.width
+            && cached.height == requirement.height
+    }) else {
+        return Some((0, requirement.height));
+    };
+    let next_generation = cached.generation.wrapping_add(1).max(1);
+    if next_generation != requirement.generation
+        || gpu.atlas_dirty_height == 0
+        || gpu.atlas_dirty_y.checked_add(gpu.atlas_dirty_height)? > requirement.height
+    {
+        return Some((0, requirement.height));
+    }
+    Some((gpu.atlas_dirty_y, gpu.atlas_dirty_height))
 }
 
 fn collect_bytes(width: u32, height: u32, source_width: u32, source: &[u8]) -> Option<Vec<u8>> {
@@ -867,16 +909,22 @@ fn encode_compositor_scene(
         vertex_offset + vertices.len() * mochios_viewkit_gpu_protocol::VERTEX_STRIDE;
     for (index, texture) in textures.iter().enumerate() {
         let upload = uploads.iter().find(|upload| upload.key == texture.key);
-        let (encoded_offset, data_len, data_height) = upload.map_or((0, 0, 0), |upload| {
-            (data_offset, upload.pixels.len(), texture.height)
-        });
+        let (encoded_offset, data_len, data_y, data_height) =
+            upload.map_or((0, 0, 0, 0), |upload| {
+                (
+                    data_offset,
+                    upload.pixels.len(),
+                    upload.data_y,
+                    upload.data_height,
+                )
+            });
         mochios_viewkit_gpu_protocol::compositor::encode_texture(
             output,
             index as u32,
             texture.key,
             texture.width,
             texture.height,
-            0,
+            data_y,
             data_height,
             encoded_offset,
             data_len,
@@ -924,6 +972,21 @@ fn encode_compositor_scene(
 mod tests {
     use super::*;
 
+    fn gpu_surface(atlas_generation: u64, dirty_y: u32, dirty_height: u32) -> Surface {
+        let mut surface = Surface::empty();
+        surface.current_format = PIXEL_FORMAT_GPU_SCENE;
+        surface.gpu = Some(crate::surface::GpuSurfaceState {
+            atlas_width: 2,
+            atlas_height: 3,
+            atlas: (0..24).collect(),
+            atlas_generation,
+            atlas_dirty_y: dirty_y,
+            atlas_dirty_height: dirty_height,
+            ..crate::surface::GpuSurfaceState::default()
+        });
+        surface
+    }
+
     #[test]
     fn batches_keep_independent_surface_textures() {
         let mut batches = Vec::new();
@@ -932,6 +995,94 @@ mod tests {
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0].texture_key, 10);
         assert_eq!(batches[1].texture_key, 11);
+    }
+
+    #[test]
+    fn consecutive_gpu_atlas_generation_uploads_only_dirty_rows() {
+        let surfaces = [gpu_surface(7, 1, 1)];
+        let requirement = TextureRequirement {
+            key: 10,
+            width: 2,
+            height: 3,
+            generation: 7,
+            surface_index: Some(0),
+        };
+        let cached = [TextureRequirement {
+            generation: 6,
+            ..requirement
+        }];
+        assert_eq!(
+            texture_upload_range(requirement, &cached, &surfaces),
+            Some((1, 1))
+        );
+        assert_eq!(
+            texture_pixels(requirement, 1, 1, &surfaces, &CursorImage::default()),
+            Some((8..16).collect())
+        );
+    }
+
+    #[test]
+    fn skipped_gpu_atlas_generation_falls_back_to_full_upload() {
+        let surfaces = [gpu_surface(7, 1, 1)];
+        let requirement = TextureRequirement {
+            key: 10,
+            width: 2,
+            height: 3,
+            generation: 7,
+            surface_index: Some(0),
+        };
+        let cached = [TextureRequirement {
+            generation: 5,
+            ..requirement
+        }];
+        assert_eq!(
+            texture_upload_range(requirement, &cached, &surfaces),
+            Some((0, 3))
+        );
+    }
+
+    #[test]
+    fn compositor_scene_encodes_partial_texture_rows() {
+        let textures = [TextureRequirement {
+            key: 10,
+            width: 2,
+            height: 3,
+            generation: 7,
+            surface_index: Some(0),
+        }];
+        let uploads = [TextureUpload {
+            key: 10,
+            data_y: 1,
+            data_height: 1,
+            pixels: vec![1; 8],
+        }];
+        let vertices = [Vertex {
+            x: 0.0,
+            y: 0.0,
+            u: 0.0,
+            v: 0.0,
+            color: [1.0; 4],
+        }; 3];
+        let batches = [mochios_viewkit_gpu_protocol::compositor::Batch {
+            texture_key: 10,
+            first_vertex: 0,
+            vertex_count: 3,
+        }];
+        let mut output = Vec::new();
+        encode_compositor_scene(
+            &vertices,
+            &textures,
+            &uploads,
+            &batches,
+            100,
+            100,
+            &mut output,
+        )
+        .unwrap();
+        let scene = mochios_viewkit_gpu_protocol::compositor::decode(&output).unwrap();
+        let texture = scene.texture(0).unwrap();
+        assert_eq!((texture.data_y, texture.data_height), (1, 1));
+        assert_eq!(texture.data, &[1; 8]);
     }
 
     #[test]

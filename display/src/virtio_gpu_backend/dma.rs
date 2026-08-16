@@ -108,15 +108,18 @@ impl BackingStore {
         &self.entries
     }
 
-    pub(super) fn write_cursor_rgba(&mut self, rgba: &[u8]) -> Result<(), u64> {
-        if rgba.len() > self.length || rgba.len() % 4 != 0 {
+    pub(super) fn write_cursor_rgba(
+        &mut self,
+        width: u32,
+        height: u32,
+        row_pixels: u32,
+        rgba: &[u8],
+    ) -> Result<(), u64> {
+        let pixels = cursor_bgra(width, height, row_pixels, rgba)?;
+        if pixels.len() > self.length {
             return Err(mochi_user_syscall::EINVAL);
         }
-        for (index, pixel) in rgba.chunks_exact(4).enumerate() {
-            let bgra = [pixel[2], pixel[1], pixel[0], pixel[3]];
-            self.write_at(index * 4, &bgra)?;
-        }
-        Ok(())
+        self.write_all(&pixels)
     }
 
     pub(super) fn write_all(&mut self, bytes: &[u8]) -> Result<(), u64> {
@@ -210,5 +213,76 @@ impl BackingStore {
             }
         }
         Err(mochi_user_syscall::ERANGE)
+    }
+}
+
+fn cursor_bgra(width: u32, height: u32, row_pixels: u32, rgba: &[u8]) -> Result<Vec<u8>, u64> {
+    let source_len = usize::try_from(width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or(mochi_user_syscall::ERANGE)?;
+    let destination_len = usize::try_from(row_pixels)
+        .ok()
+        .and_then(|width| width.checked_mul(width))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or(mochi_user_syscall::ERANGE)?;
+    if width == 0
+        || height == 0
+        || width > row_pixels
+        || height > row_pixels
+        || rgba.len() != source_len
+    {
+        return Err(mochi_user_syscall::EINVAL);
+    }
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(destination_len)
+        .map_err(|_| mochi_user_syscall::ENOMEM)?;
+    output.resize(destination_len, 0);
+    let width = width as usize;
+    let row_pixels = row_pixels as usize;
+    for (index, pixel) in rgba.chunks_exact(4).enumerate() {
+        let x = index % width;
+        let y = index / width;
+        let offset = (y * row_pixels + x) * 4;
+        output[offset..offset + 4].copy_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+    }
+    Ok(output)
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+
+    #[test]
+    fn cursor_pixels_are_swizzled_and_use_the_resource_stride() {
+        let pixels = cursor_bgra(
+            2,
+            2,
+            64,
+            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+        )
+        .unwrap();
+        assert_eq!(pixels.len(), 64 * 64 * 4);
+        assert_eq!(&pixels[0..8], &[3, 2, 1, 4, 7, 6, 5, 8]);
+        assert!(pixels[8..64 * 4].iter().all(|byte| *byte == 0));
+        assert_eq!(
+            &pixels[64 * 4..64 * 4 + 8],
+            &[11, 10, 9, 12, 15, 14, 13, 16]
+        );
+    }
+
+    #[test]
+    fn cursor_pixels_reject_invalid_dimensions() {
+        assert_eq!(
+            cursor_bgra(65, 1, 64, &[0; 65 * 4]),
+            Err(mochi_user_syscall::EINVAL)
+        );
+        assert_eq!(cursor_bgra(1, 1, 64, &[]), Err(mochi_user_syscall::EINVAL));
     }
 }

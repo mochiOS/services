@@ -6,7 +6,7 @@ use crate::cursor::CursorImage;
 use crate::decoration::sender_can_control_cursor;
 use crate::display::{
     display_claim_present_owner, display_renderer_caps, display_request_info,
-    display_set_cursor_position, sleep_one_tick, wait_for_service,
+    display_set_cursor_image, display_set_cursor_position, sleep_one_tick, wait_for_service,
 };
 use crate::geometry::{Rect, merge_damage};
 use crate::input::{
@@ -275,7 +275,12 @@ fn handle_request(
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                 return reply;
             }
-            *hardware_cursor = false;
+            let was_hardware_cursor = *hardware_cursor;
+            *hardware_cursor = display_set_cursor_image(display_tid, request) == 0;
+            if *hardware_cursor && !was_hardware_cursor && *cursor_visible {
+                *present_damage = Some(cursor_image.movement_damage(None, *cursor_x, *cursor_y));
+                *needs_present = true;
+            }
             put_u32(&mut reply, 0, 0);
         }
         _ => put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL)),

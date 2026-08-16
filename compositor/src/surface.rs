@@ -113,6 +113,8 @@ pub(crate) struct GpuSurfaceState {
     pub(crate) atlas: Vec<u8>,
     pub(crate) generation: u64,
     pub(crate) atlas_generation: u64,
+    pub(crate) atlas_dirty_y: u32,
+    pub(crate) atlas_dirty_height: u32,
 }
 
 #[derive(Clone)]
@@ -448,6 +450,13 @@ fn update_gpu_surface_state(
     gpu.generation = gpu.generation.wrapping_add(1).max(1);
     if atlas_reallocated || !scene.atlas.is_empty() {
         gpu.atlas_generation = gpu.atlas_generation.wrapping_add(1).max(1);
+        if atlas_reallocated {
+            gpu.atlas_dirty_y = 0;
+            gpu.atlas_dirty_height = scene.atlas_height;
+        } else {
+            gpu.atlas_dirty_y = scene.atlas_data_y;
+            gpu.atlas_dirty_height = scene.atlas_data_height;
+        }
     }
     Ok(gpu)
 }
@@ -627,6 +636,8 @@ mod gpu_hit_tests {
             atlas: vec![255, 255, 255, 255],
             generation: 1,
             atlas_generation: 1,
+            atlas_dirty_y: 0,
+            atlas_dirty_height: 1,
         });
         surface
     }

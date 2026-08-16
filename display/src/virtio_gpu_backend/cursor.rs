@@ -58,12 +58,14 @@ impl CursorState {
 
         self.cleanup_resource(channel);
         let backing = self.backing.as_mut().ok_or(GpuError::InvalidFrame)?;
-        backing.write_cursor_rgba(rgba).map_err(GpuError::System)?;
+        backing
+            .write_cursor_rgba(width, height, MAX_CURSOR_EXTENT, rgba)
+            .map_err(GpuError::System)?;
         channel.submit_no_data(Command::ResourceCreate2d(ResourceCreate2d {
             resource_id: CURSOR_RESOURCE_ID,
             format: PixelFormat::B8G8R8A8_UNORM,
-            width,
-            height,
+            width: MAX_CURSOR_EXTENT,
+            height: MAX_CURSOR_EXTENT,
         }))?;
         self.created = true;
         if let Err(error) = channel.submit_no_data(Command::ResourceAttachBacking(AttachBacking {
@@ -77,8 +79,8 @@ impl CursorState {
         let rect = Rect {
             x: 0,
             y: 0,
-            width,
-            height,
+            width: MAX_CURSOR_EXTENT,
+            height: MAX_CURSOR_EXTENT,
         };
         if let Err(error) = channel.submit_no_data(Command::TransferToHost2d(TransferToHost2d {
             rect,
