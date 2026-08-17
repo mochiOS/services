@@ -10,6 +10,7 @@ use crate::transport::{ControlTransport, TransportError};
 
 const HANDSHAKE_TIMEOUT_MS: u64 = 10_000;
 const EXTERNAL_REQUEST_TIMEOUT_MS: u64 = 5_000;
+const WIFI_REQUEST_TIMEOUT_MS: u64 = 15_000;
 const MAX_HEARTBEAT_MS: u64 = 3_600_000;
 const READ_CHUNK: usize = 1024;
 const MAX_READS_PER_TICK: usize = 32;
@@ -179,6 +180,11 @@ impl Agent {
                         | KnownCommand::LinuxInput
                         | KnownCommand::LinuxConfigure
                         | KnownCommand::LinuxClose
+                        | KnownCommand::WifiStatus
+                        | KnownCommand::WifiScan
+                        | KnownCommand::WifiSetEnabled
+                        | KnownCommand::WifiConnect
+                        | KnownCommand::WifiDisconnect
                 )
             )
         {
@@ -200,7 +206,7 @@ impl Agent {
         self.external_pending = Some(ExternalRequest {
             host_request_id,
             client_request_id,
-            deadline_ms: now_ms.saturating_add(EXTERNAL_REQUEST_TIMEOUT_MS),
+            deadline_ms: now_ms.saturating_add(external_request_timeout_ms(command)),
         });
         Ok(())
     }
@@ -365,7 +371,7 @@ impl Agent {
                         Argument::new("system", "mochios"),
                         Argument::new("version", self.version.clone()),
                         Argument::new("boot_id", self.boot_id.clone()),
-                        Argument::new("capabilities", "ready,heartbeat,status,linux.x11"),
+                        Argument::new("capabilities", "ready,heartbeat,status,linux.x11,wifi"),
                     ],
                 ))?;
                 self.pending = Some(PendingRequest {
@@ -523,6 +529,17 @@ impl Agent {
     }
 }
 
+const fn external_request_timeout_ms(command: KnownCommand) -> u64 {
+    match command {
+        KnownCommand::WifiStatus
+        | KnownCommand::WifiScan
+        | KnownCommand::WifiSetEnabled
+        | KnownCommand::WifiConnect
+        | KnownCommand::WifiDisconnect => WIFI_REQUEST_TIMEOUT_MS,
+        _ => EXTERNAL_REQUEST_TIMEOUT_MS,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -609,7 +626,7 @@ mod tests {
         assert_eq!(hello.known_command(), Some(KnownCommand::ProtocolHello));
         assert_eq!(
             hello.argument("capabilities"),
-            Some("ready,heartbeat,status,linux.x11")
+            Some("ready,heartbeat,status,linux.x11,wifi")
         );
         transport.push(&response(Message::command(
             Destination::Mochios,

@@ -3,9 +3,9 @@ pub const REVOCATION_PERIOD_MS: u64 = 6 * 60 * 60 * 1_000;
 pub const MAX_RETRY_AFTER_SECONDS: u64 = 6 * 60 * 60;
 pub const EXPIRY_REVALIDATION_MS: u64 = 60 * 1_000;
 pub const RETRY_BACKOFF_MS: [u64; 5] = [
+    1_000,
+    5 * 1_000,
     60 * 1_000,
-    5 * 60 * 1_000,
-    15 * 60 * 1_000,
     60 * 60 * 1_000,
     6 * 60 * 60 * 1_000,
 ];
@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn transient_failures_follow_bounded_exponential_policy() {
         let mut scheduler = Scheduler::network_ready(0);
-        for (index, delay) in [60, 300, 900, 3_600, 21_600, 21_600]
+        for (index, delay) in [1, 5, 60, 3_600, 21_600, 21_600]
             .into_iter()
             .enumerate()
         {
@@ -283,6 +283,6 @@ mod tests {
                 retry_after_seconds: None,
             },
         );
-        assert_eq!(scheduler.next_attempt_ms(SnapshotKind::Trust), 60_003);
+        assert_eq!(scheduler.next_attempt_ms(SnapshotKind::Trust), 1_003);
     }
 }

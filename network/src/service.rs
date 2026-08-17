@@ -42,10 +42,13 @@ pub(crate) fn run() -> ! {
     let xid = platform::service_ready::generate_token()
         .map(|value| value as u32)
         .unwrap_or(0x4d4f_4348);
-    let mut stack = match NetworkStack::new(driver, ready, xid) {
+    let mut stack = match NetworkStack::new(driver, xid) {
         Ok(stack) => stack,
         Err(errno) => {
             platform::println!("network.service: interface query failed errno={}", errno);
+            if let Some(target) = ready {
+                let _ = platform::service_ready::notify(target, -(errno as i32));
+            }
             idle()
         }
     };
@@ -71,8 +74,11 @@ pub(crate) fn run() -> ! {
         driver_name,
         info.device_id
     );
-    if stack.start(now).is_err() {
-        platform::println!("network.service: DHCP startup failed");
+    if let Err(errno) = stack.start(now) {
+        platform::println!("network.service: DHCP startup deferred errno={}", errno);
+    }
+    if let Some(target) = ready {
+        let _ = platform::service_ready::notify(target, 0);
     }
     let mut tls = TlsManager::new();
     let mut http = HttpManager::new();

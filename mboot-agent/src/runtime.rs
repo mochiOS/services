@@ -135,6 +135,12 @@ fn receive_ipc_request(
         reply_protocol_error(sender, client_request_id, ErrorCode::PermissionDenied);
         return;
     }
+    if decoded.known_command().is_some_and(is_wifi_command)
+        && platform::capability::check_thread(sender, "settings.write") != Ok(1)
+    {
+        reply_protocol_error(sender, client_request_id, ErrorCode::PermissionDenied);
+        return;
+    }
     match agent.queue_external_request(decoded, current_ticks()) {
         Ok(()) => {
             *pending_developer_sender = Some(PendingDeveloperRequest {
@@ -144,6 +150,17 @@ fn receive_ipc_request(
         }
         Err(error) => reply_protocol_error(sender, request_id(message), external_error(error)),
     }
+}
+
+fn is_wifi_command(command: KnownCommand) -> bool {
+    matches!(
+        command,
+        KnownCommand::WifiStatus
+            | KnownCommand::WifiScan
+            | KnownCommand::WifiSetEnabled
+            | KnownCommand::WifiConnect
+            | KnownCommand::WifiDisconnect
+    )
 }
 
 fn is_linux_command(command: KnownCommand) -> bool {

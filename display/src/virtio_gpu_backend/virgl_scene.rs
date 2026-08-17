@@ -410,7 +410,7 @@ fn destroy_texture(channel: &mut ControlChannel, texture: CachedTexture) {
         context_id: CONTEXT_ID,
         commands: &commands,
     }));
-    let _ = channel.submit_no_data(Command::ContextDetachResource(ContextResource {
+    let _ = channel.submit_fenced_no_data(Command::ContextDetachResource(ContextResource {
         context_id: CONTEXT_ID,
         resource_id: texture.resource_id,
     }));

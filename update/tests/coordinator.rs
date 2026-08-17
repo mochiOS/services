@@ -230,7 +230,7 @@ fn transient_status_uses_retry_after_and_does_not_apply() {
         coordinator
             .scheduler()
             .next_attempt_ms(SnapshotKind::Revocations),
-        60_000
+        1_000
     );
     assert_eq!(coordinator.statistics().trust_sync_failures, 1);
     assert_eq!(coordinator.statistics().revocation_sync_failures, 1);
@@ -334,6 +334,6 @@ fn storage_failure_is_counted_and_retried() {
     assert_eq!(coordinator.statistics().trust_sync_failures, 1);
     assert_eq!(
         coordinator.scheduler().next_attempt_ms(SnapshotKind::Trust),
-        60_000
+        1_000
     );
 }

@@ -32,6 +32,7 @@ pub(super) struct ControlChannel {
     cursor_command: DmaRegion,
     virgl_supported: bool,
     capset_count: u32,
+    next_fence_id: u64,
 }
 
 impl ControlChannel {
@@ -91,6 +92,7 @@ impl ControlChannel {
             cursor_command: DmaRegion::allocate(COMMAND_BUFFER_SIZE).map_err(GpuError::System)?,
             virgl_supported,
             capset_count,
+            next_fence_id: 1,
         })
     }
 
@@ -105,6 +107,22 @@ impl ControlChannel {
     pub(super) fn submit_no_data(&mut self, command: Command<'_>) -> Result<(), GpuError> {
         let length = self.execute(command)?;
         decode_no_data(&self.response.bytes()[..length])
+    }
+
+    pub(super) fn submit_fenced_no_data(
+        &mut self,
+        command: Command<'_>,
+    ) -> Result<(), GpuError> {
+        let fence_id = self.next_fence_id;
+        self.next_fence_id = self.next_fence_id.checked_add(1).unwrap_or(1);
+        let context_id = command.context_id();
+        let command_length = command.encode_fenced(self.command.bytes_mut(), fence_id)?;
+        let length = self.execute_encoded(command_length)?;
+        match Response::decode_fenced(self.response(length), fence_id, context_id)? {
+            Response::NoData => Ok(()),
+            Response::Error(error) => Err(GpuError::DeviceResponse(error)),
+            _ => Err(GpuError::InvalidDisplayInfo),
+        }
     }
 
     pub(super) fn submit_cursor(&mut self, command: Command<'_>) -> Result<(), GpuError> {
@@ -240,6 +258,10 @@ impl ControlChannel {
 
     pub(super) fn execute(&mut self, command: Command<'_>) -> Result<usize, GpuError> {
         let command_length = command.encode(self.command.bytes_mut())?;
+        self.execute_encoded(command_length)
+    }
+
+    fn execute_encoded(&mut self, command_length: usize) -> Result<usize, GpuError> {
         self.response.bytes_mut().fill(0);
         let descriptors = [
             Descriptor {

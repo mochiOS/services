@@ -49,7 +49,6 @@ pub(crate) struct NetworkStack {
     tcp: TcpConnectionTable,
     arp: ArpCache,
     stats: StackStatistics,
-    ready: Option<platform::service_ready::Target>,
     last_dhcp_send: u64,
     arp_pending: Option<[u8; 4]>,
     arp_last: u64,
@@ -63,7 +62,6 @@ pub(crate) struct NetworkStack {
 impl NetworkStack {
     pub(crate) fn new(
         mut driver: DriverClient,
-        ready: Option<platform::service_ready::Target>,
         xid: u32,
     ) -> Result<Self, u64> {
         let info = driver.info()?;
@@ -80,7 +78,6 @@ impl NetworkStack {
             tcp: TcpConnectionTable::new(TCP_CONNECTION_LIMIT),
             arp: ArpCache::new(32),
             stats: StackStatistics::default(),
-            ready,
             last_dhcp_send: 0,
             arp_pending: None,
             arp_last: 0,
@@ -383,9 +380,6 @@ impl NetworkStack {
                     offer.dns[2],
                     offer.dns[3]
                 );
-                if let Some(target) = self.ready.take() {
-                    let _ = platform::service_ready::notify(target, 0);
-                }
                 self.send_echo(offer.gateway, now)
                     .map_err(|_| PacketError::Capacity)
             }

@@ -18,6 +18,8 @@ const FILE_MODE_644: u64 = 0o644;
 const FILE_MODE_755: u64 = 0o755;
 const FILE_WRITE_CHUNK_LEN: usize = 256 * 1024;
 const SIGNATURE_REPLY_LEN: usize = 4128;
+const SIGNATURE_SYNC_RETRY_DELAY_MS: u64 = 250;
+const SIGNATURE_SYNC_RETRY_ATTEMPTS: usize = 120;
 
 #[derive(Clone)]
 struct MpkgHeader {
@@ -371,6 +373,27 @@ fn verify_with_signature_service(
     }
 }
 
+fn verify_when_database_ready(
+    package_path: &str,
+    package_bytes: &[u8],
+    package_digest: &[u8; 32],
+) -> Result<VerifiedPackage, mochi_user_syscall::SysError> {
+    for attempt in 0..=SIGNATURE_SYNC_RETRY_ATTEMPTS {
+        match verify_with_signature_service(package_path, package_bytes, package_digest) {
+            Err(error) if error.errno() == Some(mochi_user_syscall::EAGAIN) => {
+                if attempt == SIGNATURE_SYNC_RETRY_ATTEMPTS {
+                    return Err(error);
+                }
+                let _ = platform::thread::sleep_milliseconds(SIGNATURE_SYNC_RETRY_DELAY_MS);
+            }
+            result => return result,
+        }
+    }
+    Err(mochi_user_syscall::SysError::from_raw(
+        mochi_user_syscall::EAGAIN as i64,
+    ))
+}
+
 fn write_file(path: &str, data: &[u8], mode: u64) -> Result<(), mochi_user_syscall::SysError> {
     if let Some(parent) = path.rsplit_once('/').map(|(parent, _)| parent) {
         if !parent.is_empty() {
@@ -481,7 +504,7 @@ fn install_package(mpkg_path: &str) -> Result<(), mochi_user_syscall::SysError> 
     let digest = Sha256::digest(&bytes);
     let mut digest_bytes = [0u8; 32];
     digest_bytes.copy_from_slice(&digest);
-    let verification = verify_with_signature_service(mpkg_path, &bytes, &digest_bytes)?;
+    let verification = verify_when_database_ready(mpkg_path, &bytes, &digest_bytes)?;
     diagnostic("package.service: signature verification complete");
 
     let header = parse_header(&bytes)
