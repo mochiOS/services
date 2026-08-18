@@ -4,11 +4,13 @@ use std::io;
 use std::os::unix::fs::{PermissionsExt, chown};
 use std::path::Path;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use mochi_user_platform::mboot_wifi::{self as wifi, WifiNetwork, WifiStatus};
 use mochios_user_database::{FIRST_REGULAR_UID, UserRecord};
 use mochios_user_protocol::{AddUser, MAX_MESSAGE_LEN, RemoveUser, SetPassword, Status};
 use viewkit::prelude::*;
+use viewkit::view::{Constraints, MeasureContext, PaintContext};
 
 use crate::authentication::{self, AuthenticationError};
 
@@ -16,6 +18,8 @@ const CONTENT_WIDTH: f32 = 420.0;
 const QR_IMAGE_SIZE: f32 = 152.0;
 const PRIVACY_QR_PATH: &str = "/system/resources/startup/qr-privacy.png";
 const TERMS_QR_PATH: &str = "/system/resources/startup/qr-terms.png";
+const WIFI_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const WIFI_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const HOME_DIRECTORIES: [&str; 6] = [
     "Desktop",
     "Documents",
@@ -35,6 +39,7 @@ pub(crate) struct AccountSetup {
     wifi_status: State<WifiStatus>,
     wifi_networks: State<Vec<WifiNetwork>>,
     wifi_selected: State<usize>,
+    wifi_connect_started_at: State<Option<Instant>>,
     network_message: State<String>,
     status: State<String>,
     created_display_name: State<String>,
@@ -55,6 +60,7 @@ impl AccountSetup {
             wifi_status: State::new(wifi::status().unwrap_or_default()),
             wifi_networks: State::new(Vec::new()),
             wifi_selected: State::new(0),
+            wifi_connect_started_at: State::new(None),
             network_message: State::new(String::new()),
             status: State::new(String::new()),
             created_display_name: State::new(String::new()),
@@ -221,6 +227,7 @@ impl AccountSetup {
             for (index, network) in networks.iter().enumerate() {
                 let selection = self.wifi_selected.clone();
                 let password = self.wifi_password.clone();
+                let connect_started_at = self.wifi_connect_started_at.clone();
                 let secured = network.secured;
                 rows = rows.child(
                     Button::new(network.ssid.clone())
@@ -253,6 +260,7 @@ impl AccountSetup {
                         .alignment(ZStackAlignment::Leading)
                         .on_click(move || {
                             selection.set(index);
+                            connect_started_at.set(None);
                             password.clear();
                             password.set_focused(secured);
                         })
@@ -264,9 +272,13 @@ impl AccountSetup {
         let refresh_host = self.wifi_status.clone();
         let refresh_networks = self.wifi_networks.clone();
         let refresh_message = self.network_message.clone();
+        let refresh_started_at = self.wifi_connect_started_at.clone();
         let scan = Button::new("Scan")
             .style(ButtonStyle::Standard)
-            .on_click(move || refresh_wifi(&refresh_host, &refresh_networks, &refresh_message))
+            .on_click(move || {
+                refresh_started_at.set(None);
+                refresh_wifi(&refresh_host, &refresh_networks, &refresh_message);
+            })
             .frame(76.0, 36.0);
 
         let connect_networks = self.wifi_networks.clone();
@@ -274,6 +286,7 @@ impl AccountSetup {
         let connect_password = self.wifi_password.clone();
         let connect_host = self.wifi_status.clone();
         let connect_message = self.network_message.clone();
+        let connect_started_at = self.wifi_connect_started_at.clone();
         let connect = Button::new("Connect")
             .style(ButtonStyle::Accent)
             .enabled(selected_network.is_some())
@@ -293,11 +306,15 @@ impl AccountSetup {
                     Ok(()) => {
                         connect_password.clear();
                         connect_message.set(format!("Connecting to {}...", network.ssid));
+                        connect_started_at.set(Some(Instant::now()));
                         if let Ok(status) = wifi::status() {
                             connect_host.set(status);
                         }
                     }
-                    Err(error) => connect_message.set(format!("Unable to connect: {error}")),
+                    Err(error) => {
+                        connect_started_at.set(None);
+                        connect_message.set(format!("Unable to connect: {error}"));
+                    }
                 }
                 clear_string(&mut password);
             })
@@ -305,6 +322,7 @@ impl AccountSetup {
 
         let page = self.page.clone();
         let full_name = self.full_name.clone();
+        let continue_started_at = self.wifi_connect_started_at.clone();
         let status_summary = if host.connected {
             format!("Connected to {}", host.ssid)
         } else if host.available {
@@ -362,7 +380,14 @@ impl AccountSetup {
                         .child(connect)
                         .frame(CONTENT_WIDTH, 36.0),
                 )
-                .child(status_text(self.network_message.get()))
+                .child(
+                    WifiConnectionStatus::new(
+                        self.wifi_status.clone(),
+                        self.network_message.clone(),
+                        self.wifi_connect_started_at.clone(),
+                    )
+                    .frame(CONTENT_WIDTH, 22.0),
+                )
                 .child(
                     Button::new(if host.connected {
                         "Continue"
@@ -371,6 +396,7 @@ impl AccountSetup {
                     })
                     .style(ButtonStyle::Accent)
                     .on_click(move || {
+                        continue_started_at.set(None);
                         page.set(3);
                         full_name.set_focused(true);
                     })
@@ -499,6 +525,118 @@ impl AccountSetup {
                 .child(status_text(self.status.get()))
                 .child(self.progress()),
         )
+    }
+}
+
+struct WifiConnectionStatus {
+    status: State<WifiStatus>,
+    message: State<String>,
+    started_at: State<Option<Instant>>,
+}
+
+impl WifiConnectionStatus {
+    fn new(
+        status: State<WifiStatus>,
+        message: State<String>,
+        started_at: State<Option<Instant>>,
+    ) -> Self {
+        Self {
+            status,
+            message,
+            started_at,
+        }
+    }
+
+    fn update_connection(&self, now: Instant) -> bool {
+        let Some(started_at) = self.started_at.get() else {
+            return false;
+        };
+        let elapsed = now.saturating_duration_since(started_at);
+        match wifi::status() {
+            Ok(current) => {
+                if current != self.status.get() {
+                    self.status.set(current.clone());
+                }
+                match connection_progress(&current, elapsed) {
+                    WifiConnectionProgress::Connected => {
+                        self.message.set(format!("Connected to {}.", current.ssid));
+                        self.started_at.set(None);
+                        false
+                    }
+                    WifiConnectionProgress::TimedOut if current.connected => {
+                        self.message.set(
+                            "Connected, but no IP address was assigned. Retry or continue."
+                                .to_owned(),
+                        );
+                        self.started_at.set(None);
+                        false
+                    }
+                    WifiConnectionProgress::TimedOut => {
+                        self.message
+                            .set("Connection failed. Check the password and try again.".to_owned());
+                        self.started_at.set(None);
+                        false
+                    }
+                    WifiConnectionProgress::Waiting => {
+                        if current.connected {
+                            let waiting = "Connected; waiting for an IP address...".to_owned();
+                            if self.message.get() != waiting {
+                                self.message.set(waiting);
+                            }
+                        }
+                        true
+                    }
+                }
+            }
+            Err(error) if elapsed >= WIFI_CONNECT_TIMEOUT => {
+                self.message
+                    .set(format!("Could not confirm Wi-Fi status: {error}"));
+                self.started_at.set(None);
+                false
+            }
+            Err(_) => true,
+        }
+    }
+}
+
+impl View for WifiConnectionStatus {
+    fn measure(&self, constraints: Constraints, _context: &mut MeasureContext<'_>) -> Size {
+        constraints.constrain(Size::new(CONTENT_WIDTH, 22.0))
+    }
+
+    fn paint(&self, bounds: Rect, context: &mut PaintContext<'_>) {
+        let now = Instant::now();
+        let was_connecting = self.started_at.get().is_some();
+        let keep_polling = self.update_connection(now);
+        Text::new(self.message.get())
+            .font_size(12.0)
+            .line_height(18.0)
+            .weight(500)
+            .alignment(TextAlignment::Center)
+            .color(Color::WHITE)
+            .paint(bounds, context);
+        if keep_polling {
+            context.request_redraw_in_at(bounds, now + WIFI_STATUS_POLL_INTERVAL);
+        } else if was_connecting {
+            context.request_redraw_in_at(bounds, now);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WifiConnectionProgress {
+    Waiting,
+    Connected,
+    TimedOut,
+}
+
+fn connection_progress(status: &WifiStatus, elapsed: Duration) -> WifiConnectionProgress {
+    if status.connected && !status.address.is_empty() {
+        WifiConnectionProgress::Connected
+    } else if elapsed >= WIFI_CONNECT_TIMEOUT {
+        WifiConnectionProgress::TimedOut
+    } else {
+        WifiConnectionProgress::Waiting
     }
 }
 
@@ -925,5 +1063,40 @@ mod tests {
         assert_eq!(validate_input("Alice", "alice", "", ""), Ok(()));
         assert!(validate_input("Alice", "Alice", "password", "password").is_err());
         assert!(validate_input("Alice", "alice", "password", "different").is_err());
+    }
+
+    #[test]
+    fn wifi_connection_waits_for_an_address_and_times_out() {
+        let mut status = WifiStatus {
+            available: true,
+            enabled: true,
+            connected: false,
+            interface: "wlan0".to_owned(),
+            ssid: "mochi".to_owned(),
+            address: String::new(),
+        };
+        assert_eq!(
+            connection_progress(&status, Duration::from_secs(1)),
+            WifiConnectionProgress::Waiting
+        );
+
+        status.connected = true;
+        assert_eq!(
+            connection_progress(&status, Duration::from_secs(1)),
+            WifiConnectionProgress::Waiting
+        );
+
+        status.address = "192.0.2.1".to_owned();
+        assert_eq!(
+            connection_progress(&status, Duration::from_secs(1)),
+            WifiConnectionProgress::Connected
+        );
+
+        status.connected = false;
+        status.address.clear();
+        assert_eq!(
+            connection_progress(&status, WIFI_CONNECT_TIMEOUT),
+            WifiConnectionProgress::TimedOut
+        );
     }
 }
