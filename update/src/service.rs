@@ -1,4 +1,4 @@
-use crate::coordinator::{Coordinator, Statistics};
+use crate::coordinator::{Coordinator, Statistics, network_access_unavailable};
 use crate::filesystem::FileBackend;
 use crate::http::{DeveloperCaFetcher, NetworkTransport};
 use crate::notifier::{Notifier, SignatureTransport};
@@ -25,6 +25,7 @@ pub fn run() -> ! {
 
     let mut fetcher = DeveloperCaFetcher::new(NetworkTransport);
     let mut notifier = Notifier::new(SignatureTransport);
+    let mut reported_missing_database_offline = false;
     loop {
         let now_ms = monotonic_milliseconds();
         let now_utc = match mochi_user_platform::time::utc_seconds() {
@@ -49,6 +50,14 @@ pub fn run() -> ! {
         }
         if total_attempts(coordinator.statistics()) != attempts_before {
             log_sync(&coordinator, &repository);
+            let missing_database_offline = certificate_database_absent(&repository)
+                && network_access_unavailable(coordinator.last_error());
+            if missing_database_offline && !reported_missing_database_offline {
+                mochi_user_platform::println!(
+                    "update.service: no local Developer trust or revocation data is available and the network is not connected; connect to a network to enable package signature verification"
+                );
+            }
+            reported_missing_database_offline = missing_database_offline;
         }
         let next = coordinator
             .scheduler()
@@ -60,6 +69,10 @@ pub fn run() -> ! {
             );
         sleep(next.saturating_sub(now_ms).clamp(1, MAX_IDLE_SLEEP_MS));
     }
+}
+
+fn certificate_database_absent(repository: &CertificateRepository<'_, FileBackend>) -> bool {
+    repository.trust().is_none() && repository.revocations().is_none()
 }
 
 fn load_repository() -> CertificateRepository<'static, FileBackend> {

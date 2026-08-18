@@ -79,6 +79,18 @@ pub enum SyncError {
     Apply(ApplyError),
 }
 
+pub(crate) const fn network_access_unavailable(error: Option<SyncError>) -> bool {
+    matches!(
+        error,
+        Some(SyncError::Fetch(FetchError::Transport(_)))
+            | Some(SyncError::Fetch(FetchError::ServiceFailure {
+                failure: mochios_net_device_protocol::HttpFailure::Timeout
+                    | mochios_net_device_protocol::HttpFailure::InvalidState,
+                ..
+            }))
+    )
+}
+
 pub struct Coordinator {
     scheduler: Scheduler,
     statistics: Statistics,
@@ -381,4 +393,33 @@ impl Coordinator {
 enum OneResult {
     Finished,
     UnknownIssuer,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SyncError, network_access_unavailable};
+    use crate::http::FetchError;
+    use mochios_net_device_protocol::HttpFailure;
+
+    #[test]
+    fn identifies_network_unavailability_without_masking_security_failures() {
+        assert!(network_access_unavailable(Some(SyncError::Fetch(
+            FetchError::Transport(2),
+        ))));
+        assert!(network_access_unavailable(Some(SyncError::Fetch(
+            FetchError::ServiceFailure {
+                status: -11,
+                failure: HttpFailure::Timeout,
+            },
+        ))));
+        assert!(!network_access_unavailable(Some(SyncError::Fetch(
+            FetchError::ServiceFailure {
+                status: -5,
+                failure: HttpFailure::Tls,
+            },
+        ))));
+        assert!(!network_access_unavailable(Some(SyncError::HttpStatus(
+            503
+        ))));
+    }
 }
