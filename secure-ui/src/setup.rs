@@ -5,6 +5,7 @@ use std::os::unix::fs::{PermissionsExt, chown};
 use std::path::Path;
 use std::rc::Rc;
 
+use mochi_user_platform::mboot_wifi::{self as wifi, WifiNetwork, WifiStatus};
 use mochios_user_database::{FIRST_REGULAR_UID, UserRecord};
 use mochios_user_protocol::{AddUser, MAX_MESSAGE_LEN, RemoveUser, SetPassword, Status};
 use viewkit::prelude::*;
@@ -30,6 +31,11 @@ pub(crate) struct AccountSetup {
     account_name: TextFieldInteractionState,
     password: TextFieldInteractionState,
     password_confirmation: TextFieldInteractionState,
+    wifi_password: TextFieldInteractionState,
+    wifi_status: State<WifiStatus>,
+    wifi_networks: State<Vec<WifiNetwork>>,
+    wifi_selected: State<usize>,
+    network_message: State<String>,
     status: State<String>,
     created_display_name: State<String>,
     created_identity: State<Option<mochi_user_platform::service_ready::SessionIdentity>>,
@@ -45,6 +51,11 @@ impl AccountSetup {
             account_name: TextFieldInteractionState::new(),
             password: TextFieldInteractionState::new(),
             password_confirmation: TextFieldInteractionState::new(),
+            wifi_password: TextFieldInteractionState::new(),
+            wifi_status: State::new(wifi::status().unwrap_or_default()),
+            wifi_networks: State::new(Vec::new()),
+            wifi_selected: State::new(0),
+            network_message: State::new(String::new()),
             status: State::new(String::new()),
             created_display_name: State::new(String::new()),
             created_identity: State::new(None),
@@ -61,7 +72,8 @@ impl AccountSetup {
         match self.page.get() {
             0 => self.welcome_page(),
             1 => self.terms_page(),
-            2 => self.account_page(next_request_id),
+            2 => self.network_page(),
+            3 => self.account_page(next_request_id),
             _ => self.completed_page(login_target),
         }
     }
@@ -96,7 +108,8 @@ impl AccountSetup {
             .child(progress_dot(page == 0))
             .child(progress_dot(page == 1))
             .child(progress_dot(page == 2))
-            .child(progress_dot(page >= 3))
+            .child(progress_dot(page == 3))
+            .child(progress_dot(page >= 4))
             .frame(CONTENT_WIDTH, 12.0)
     }
 
@@ -130,7 +143,9 @@ impl AccountSetup {
 
     fn terms_page(&self) -> Box<dyn View + 'static> {
         let page = self.page.clone();
-        let full_name = self.full_name.clone();
+        let wifi_status = self.wifi_status.clone();
+        let wifi_networks = self.wifi_networks.clone();
+        let network_message = self.network_message.clone();
         Box::new(
             VStack::new()
                 .alignment(StackAlignment::Center)
@@ -169,9 +184,197 @@ impl AccountSetup {
                         .style(ButtonStyle::Accent)
                         .on_click(move || {
                             page.set(2);
-                            full_name.set_focused(true);
+                            refresh_wifi(&wifi_status, &wifi_networks, &network_message);
                         })
                         .frame(CONTENT_WIDTH, 44.0),
+                )
+                .child(self.progress()),
+        )
+    }
+
+    fn network_page(&self) -> Box<dyn View + 'static> {
+        let host = self.wifi_status.get();
+        let networks = self.wifi_networks.get();
+        let selected_index = self
+            .wifi_selected
+            .get()
+            .min(networks.len().saturating_sub(1));
+        let selected_network = networks.get(selected_index).cloned();
+
+        let mut rows = VStack::new()
+            .alignment(StackAlignment::Stretch)
+            .gap(StackGap::ExtraSmall);
+        if networks.is_empty() {
+            rows = rows.child(
+                Text::new(if host.available {
+                    "No Wi-Fi networks found. Select Scan to try again."
+                } else {
+                    "Wi-Fi is unavailable. You can continue using Ethernet or configure it later."
+                })
+                .font_size(12.0)
+                .line_height(19.0)
+                .alignment(TextAlignment::Center)
+                .color(Color::rgba(255, 255, 255, 216))
+                .frame(CONTENT_WIDTH, 72.0),
+            );
+        } else {
+            for (index, network) in networks.iter().enumerate() {
+                let selection = self.wifi_selected.clone();
+                let password = self.wifi_password.clone();
+                let secured = network.secured;
+                rows = rows.child(
+                    Button::new(network.ssid.clone())
+                        .content(
+                            HStack::new()
+                                .alignment(StackAlignment::Center)
+                                .distribution(StackDistribution::SpaceBetween)
+                                .child(
+                                    Text::new(network.ssid.clone())
+                                        .font_size(13.0)
+                                        .line_height(20.0)
+                                        .weight(600),
+                                )
+                                .child(
+                                    Text::new(format!(
+                                        "{} · {} dBm",
+                                        if network.secured { "Secured" } else { "Open" },
+                                        network.signal
+                                    ))
+                                    .font_size(10.0)
+                                    .line_height(16.0)
+                                    .color(Theme::current().colors.text_secondary),
+                                ),
+                        )
+                        .style(if index == selected_index {
+                            ButtonStyle::Standard
+                        } else {
+                            ButtonStyle::Ghost
+                        })
+                        .alignment(ZStackAlignment::Leading)
+                        .on_click(move || {
+                            selection.set(index);
+                            password.clear();
+                            password.set_focused(secured);
+                        })
+                        .height(40.0),
+                );
+            }
+        }
+
+        let refresh_host = self.wifi_status.clone();
+        let refresh_networks = self.wifi_networks.clone();
+        let refresh_message = self.network_message.clone();
+        let scan = Button::new("Scan")
+            .style(ButtonStyle::Standard)
+            .on_click(move || refresh_wifi(&refresh_host, &refresh_networks, &refresh_message))
+            .frame(76.0, 36.0);
+
+        let connect_networks = self.wifi_networks.clone();
+        let connect_selection = self.wifi_selected.clone();
+        let connect_password = self.wifi_password.clone();
+        let connect_host = self.wifi_status.clone();
+        let connect_message = self.network_message.clone();
+        let connect = Button::new("Connect")
+            .style(ButtonStyle::Accent)
+            .enabled(selected_network.is_some())
+            .on_click(move || {
+                let networks = connect_networks.get();
+                let Some(network) = networks.get(connect_selection.get()) else {
+                    connect_message.set("Select a Wi-Fi network.".to_owned());
+                    return;
+                };
+                let mut password = connect_password.value();
+                if network.secured && !(8..=63).contains(&password.len()) {
+                    connect_message.set("Wi-Fi passwords must be 8 to 63 bytes.".to_owned());
+                    clear_string(&mut password);
+                    return;
+                }
+                match wifi::connect(network, &password) {
+                    Ok(()) => {
+                        connect_password.clear();
+                        connect_message.set(format!("Connecting to {}...", network.ssid));
+                        if let Ok(status) = wifi::status() {
+                            connect_host.set(status);
+                        }
+                    }
+                    Err(error) => connect_message.set(format!("Unable to connect: {error}")),
+                }
+                clear_string(&mut password);
+            })
+            .frame(96.0, 36.0);
+
+        let page = self.page.clone();
+        let full_name = self.full_name.clone();
+        let status_summary = if host.connected {
+            format!("Connected to {}", host.ssid)
+        } else if host.available {
+            "Choose a Wi-Fi network or continue without one.".to_owned()
+        } else {
+            "No wireless adapter is available. Network setup can be completed later.".to_owned()
+        };
+
+        Box::new(
+            VStack::new()
+                .alignment(StackAlignment::Center)
+                .gap(StackGap::Small)
+                .child(Self::page_header(
+                    "Connect to a Network",
+                    "Internet access keeps trust data and system services up to date",
+                ))
+                .child(
+                    Text::new(status_summary)
+                        .font_size(11.0)
+                        .line_height(18.0)
+                        .alignment(TextAlignment::Center)
+                        .color(Color::rgba(255, 255, 255, 216))
+                        .frame(CONTENT_WIDTH, 24.0),
+                )
+                .child(
+                    Card::new()
+                        .content(Scroll::vertical(rows))
+                        .frame(CONTENT_WIDTH, 194.0),
+                )
+                .child(
+                    HStack::new()
+                        .alignment(StackAlignment::Center)
+                        .gap(StackGap::Small)
+                        .child(
+                            TextField::with_interaction(self.wifi_password.clone())
+                                .placeholder(
+                                    if selected_network
+                                        .as_ref()
+                                        .is_some_and(|network| network.secured)
+                                    {
+                                        "Wi-Fi Password"
+                                    } else {
+                                        "No password required"
+                                    },
+                                )
+                                .secure(true)
+                                .enabled(
+                                    selected_network
+                                        .as_ref()
+                                        .is_some_and(|network| network.secured),
+                                )
+                                .frame(240.0, 36.0),
+                        )
+                        .child(scan)
+                        .child(connect)
+                        .frame(CONTENT_WIDTH, 36.0),
+                )
+                .child(status_text(self.network_message.get()))
+                .child(
+                    Button::new(if host.connected {
+                        "Continue"
+                    } else {
+                        "Continue Without Network"
+                    })
+                    .style(ButtonStyle::Accent)
+                    .on_click(move || {
+                        page.set(3);
+                        full_name.set_focused(true);
+                    })
+                    .frame(CONTENT_WIDTH, 44.0),
                 )
                 .child(self.progress()),
         )
@@ -312,6 +515,54 @@ fn progress_dot(active: bool) -> StackChild {
         )
 }
 
+fn refresh_wifi(
+    status: &State<WifiStatus>,
+    networks: &State<Vec<WifiNetwork>>,
+    message: &State<String>,
+) {
+    let mut current = match wifi::status() {
+        Ok(current) => current,
+        Err(error) => {
+            networks.set(Vec::new());
+            message.set(format!("Wi-Fi setup is unavailable: {error}"));
+            return;
+        }
+    };
+    if !current.available {
+        status.set(current);
+        networks.set(Vec::new());
+        message.set("No supported wireless adapter was detected.".to_owned());
+        return;
+    }
+    if !current.enabled {
+        if let Err(error) = wifi::set_enabled(true) {
+            status.set(current);
+            networks.set(Vec::new());
+            message.set(format!("Unable to enable Wi-Fi: {error}"));
+            return;
+        }
+        if let Ok(updated) = wifi::status() {
+            current = updated;
+        }
+    }
+    status.set(current);
+    match wifi::scan() {
+        Ok(found) => {
+            let count = found.len();
+            networks.set(found);
+            message.set(if count == 0 {
+                "No Wi-Fi networks were found.".to_owned()
+            } else {
+                format!("Found {count} Wi-Fi networks.")
+            });
+        }
+        Err(error) => {
+            networks.set(Vec::new());
+            message.set(format!("Unable to scan for Wi-Fi: {error}"));
+        }
+    }
+}
+
 fn qr_card(image: Option<ImageData>, title: &'static str, address: &'static str) -> StackChild {
     let qr = match image {
         Some(image) => Image::new(image)
@@ -412,7 +663,7 @@ fn submit_callback(
                 created_display_name.set(display_name);
                 created_identity.set(Some(identity));
                 status.set(String::new());
-                page.set(3);
+                page.set(4);
             }
             Err(SetupError::InvalidInput) => {
                 status.set("Check the account information and try again.".to_owned())

@@ -197,6 +197,7 @@ fn service_manifests_match_policy() {
             "fs.write.all",
             "ipc.client",
             "ipc.server",
+            "settings.write",
             "system.time.read",
             "window.secure-overlay",
         ],

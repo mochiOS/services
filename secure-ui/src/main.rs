@@ -5,6 +5,7 @@ fn main() -> Result<(), viewkit::ViewKitError> {
     report_missing_capability("account.other.read");
     report_missing_capability("fs.write.all");
     report_missing_capability("ipc.server");
+    report_missing_capability("settings.write");
     report_missing_capability("window.secure-overlay");
     secure_ui::run()
 }

@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }
+mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std", "mboot-wifi"] }
 mochi-user-syscall = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-syscall" }
 mochios-user-database = { git = "https://github.com/mochiOS/syscalls", package = "mochios-user-database", features = ["std"] }
 mochios-user-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-user-protocol" }
