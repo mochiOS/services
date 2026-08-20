@@ -19,7 +19,7 @@ const FILE_MODE_755: u64 = 0o755;
 const FILE_WRITE_CHUNK_LEN: usize = 256 * 1024;
 const SIGNATURE_REPLY_LEN: usize = 4128;
 const SIGNATURE_SYNC_RETRY_DELAY_MS: u64 = 250;
-const SIGNATURE_SYNC_RETRY_ATTEMPTS: usize = 120;
+const SIGNATURE_SYNC_RETRY_ATTEMPTS: usize = 480;
 
 #[derive(Clone)]
 struct MpkgHeader {
@@ -496,7 +496,18 @@ fn require_path_absent(path: &str) -> Result<(), mochi_user_syscall::SysError> {
 }
 
 fn install_package(mpkg_path: &str) -> Result<(), mochi_user_syscall::SysError> {
-    let bytes = platform::file::read_to_end_path(mpkg_path)?;
+    diagnostic(&alloc::format!(
+        "package.service: package read start path={}",
+        mpkg_path
+    ));
+    let bytes = platform::file::read_to_end_path(mpkg_path).map_err(|error| {
+        diagnostic(&alloc::format!(
+            "package.service: package read failed path={} errno={}",
+            mpkg_path,
+            error.errno().unwrap_or(0)
+        ));
+        error
+    })?;
     diagnostic(&alloc::format!(
         "package.service: package read complete bytes={}",
         bytes.len()

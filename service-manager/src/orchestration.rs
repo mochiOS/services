@@ -140,6 +140,9 @@ pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> Bootstra
     }
 
     children.network = operations.spawn_fixed(FixedService::Network);
+    if children.network.is_some() {
+        children.update = operations.spawn_fixed(FixedService::Update);
+    }
     let Some(user) = operations.spawn_fixed(FixedService::User) else {
         return outcome(children, StopReason::UserSpawnFailed);
     };
@@ -164,10 +167,8 @@ pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> Bootstra
     };
     children.binder = Some(binder);
     operations.notify_mboot_stage(MbootStage::Desktop);
-    if let Some(network) = children.network
-        && operations.wait_network_ready(network)
-    {
-        children.update = operations.spawn_fixed(FixedService::Update);
+    if let Some(network) = children.network {
+        let _ = operations.wait_network_ready(network);
     }
     BootstrapOutcome {
         children,
@@ -351,6 +352,7 @@ mod tests {
             Event::StartDiscovery,
             Event::WaitDiscovery,
             Event::Spawn(FixedService::Network),
+            Event::Spawn(FixedService::Update),
             Event::Spawn(FixedService::User),
             Event::WaitUser,
             Event::Spawn(FixedService::SecureUi),
@@ -359,7 +361,6 @@ mod tests {
             Event::SpawnUserSession(FixedService::Binder, TEST_IDENTITY),
             Event::NotifyMbootStage(MbootStage::Desktop),
             Event::WaitNetwork,
-            Event::Spawn(FixedService::Update),
         ]
     }
 
@@ -499,16 +500,24 @@ mod tests {
     }
 
     #[test]
-    fn update_is_best_effort_and_requires_network_ready() {
+    fn update_starts_before_waiting_for_network_and_is_best_effort() {
         let mut network_failure = FakeOperations::new(Failure::NetworkReady);
         let outcome = orchestrate(&mut network_failure);
         assert_eq!(outcome.reason, StopReason::Running);
-        assert_eq!(outcome.children.update, None);
-        assert!(
-            !network_failure
-                .events
-                .contains(&Event::Spawn(FixedService::Update))
+        assert_eq!(outcome.children.update, Some(18));
+        assert_eq!(
+            network_failure.events.last(),
+            Some(&Event::WaitNetwork)
         );
+        let update = network_failure
+            .events
+            .iter()
+            .position(|event| *event == Event::Spawn(FixedService::Update));
+        let wait = network_failure
+            .events
+            .iter()
+            .position(|event| *event == Event::WaitNetwork);
+        assert!(matches!((update, wait), (Some(update), Some(wait)) if update < wait));
 
         let mut update_failure = FakeOperations::new(Failure::Spawn(FixedService::Update));
         let outcome = orchestrate(&mut update_failure);
@@ -516,7 +525,7 @@ mod tests {
         assert_eq!(outcome.children.update, None);
         assert_eq!(
             update_failure.events.last(),
-            Some(&Event::Spawn(FixedService::Update))
+            Some(&Event::WaitNetwork)
         );
     }
 }
