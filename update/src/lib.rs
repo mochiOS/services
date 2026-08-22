@@ -19,7 +19,7 @@ pub fn run() -> ! {
     {
         mochi_user_platform::logger::init(endpoint);
     }
-    mochi_user_platform::println!("update.service: start");
+    mochi_user_platform::logln!("update.service: start");
     service::run()
 }
 

@@ -19,7 +19,7 @@ pub(crate) fn load(bundle_root: &str) -> Option<DriverManifest> {
     let bytes = match platform::file::read_to_end_path(&package_manifest_path) {
         Ok(bytes) => bytes,
         Err(err) => {
-            platform::println!(
+            platform::logln!(
                 "drivers.service: rejected bundle={} reason=manifest-read path={} errno={}",
                 bundle_root,
                 package_manifest_path,
@@ -31,7 +31,7 @@ pub(crate) fn load(bundle_root: &str) -> Option<DriverManifest> {
     let text = match core::str::from_utf8(&bytes) {
         Ok(text) => text,
         Err(_) => {
-            platform::println!(
+            platform::logln!(
                 "drivers.service: rejected bundle={} reason=manifest-encoding path={}",
                 bundle_root,
                 package_manifest_path
@@ -40,7 +40,7 @@ pub(crate) fn load(bundle_root: &str) -> Option<DriverManifest> {
         }
     };
     let Some(manifest) = platform::package::parse_manifest(text) else {
-        platform::println!(
+        platform::logln!(
             "drivers.service: rejected bundle={} reason=manifest-invalid path={}",
             bundle_root,
             package_manifest_path
@@ -53,7 +53,7 @@ pub(crate) fn load(bundle_root: &str) -> Option<DriverManifest> {
     });
     let entry_path = entries.next().map(|binary| binary.path.clone());
     if entry_path.is_none() || entries.next().is_some() {
-        platform::println!(
+        platform::logln!(
             "drivers.service: rejected bundle={} reason=invalid-driver-entry manifest={}",
             bundle_root,
             package_manifest_path

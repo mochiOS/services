@@ -114,7 +114,7 @@ pub(crate) fn spawn_application_from_manifest(
         prompt_shell_for_capability(header.shell_endpoint, entry_path, cap, "application launch")?;
     }
     if prompted {
-        platform::println!(
+        platform::logln!(
             "capability.service: interactive app launch approved path={}",
             entry_path
         );

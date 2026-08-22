@@ -1,10 +1,11 @@
+use alloc::collections::VecDeque;
 use mochi_user_platform as platform;
 
 use crate::driver_controller::{DriverControlError, DriverController};
-use crate::fixed_service_launcher;
 use crate::orchestration::{BootstrapOperations, BootstrapOutcome, MbootStage, orchestrate};
-use crate::readiness::{ReadyError, ReadyHandshake, ReadyService};
+use crate::readiness::{DeferredMessage, ReadyError, ReadyHandshake, ReadyService};
 use crate::service_config::FixedService;
+use crate::service_launcher;
 use crate::session::{ActiveSession, terminate_process_tree};
 use crate::spawn_support::{errno, sys_error};
 
@@ -15,6 +16,7 @@ struct Runtime {
     driver_controller: DriverController,
     ready: Option<ReadyHandshake>,
     mboot_agent: Option<(u64, u64)>,
+    deferred_requests: VecDeque<DeferredMessage>,
 }
 
 impl Runtime {
@@ -24,6 +26,7 @@ impl Runtime {
             driver_controller: DriverController::create()?,
             ready: None,
             mboot_agent: None,
+            deferred_requests: VecDeque::new(),
         })
     }
 
@@ -37,7 +40,7 @@ impl Runtime {
                 true
             }
             Err(error) => {
-                platform::println!(
+                platform::logln!(
                     "service-manager.service: ready handshake create failed error={:?}",
                     error
                 );
@@ -47,7 +50,7 @@ impl Runtime {
     }
 
     fn wait_ready(&mut self, service: ReadyService, process_id: u64) -> bool {
-        platform::println!(
+        platform::logln!(
             "service-manager.service: waiting for {} ready",
             service.name()
         );
@@ -56,11 +59,14 @@ impl Runtime {
             None => Err(ReadyError::InvalidMessage),
         };
         if service == ReadyService::Network {
+            if let Some(handshake) = self.ready.as_mut() {
+                self.deferred_requests.extend(handshake.take_deferred());
+            }
             self.ready = None;
         }
         match result {
             Ok(()) => {
-                platform::println!("service-manager.service: {} ready", service.name());
+                platform::logln!("service-manager.service: {} ready", service.name());
                 true
             }
             Err(error) => {
@@ -77,7 +83,7 @@ impl Runtime {
         let mut handshake = match ReadyHandshake::create() {
             Ok(handshake) => handshake,
             Err(error) => {
-                platform::println!(
+                platform::logln!(
                     "service-manager.service: secure UI handshake create failed error={:?}",
                     error
                 );
@@ -86,10 +92,10 @@ impl Runtime {
         };
         let target = handshake.target(ReadyService::SecureUi);
         let process_id =
-            match fixed_service_launcher::spawn_secure_ui(self.logger_endpoint, target, lock_uid) {
+            match service_launcher::spawn_secure_ui(self.logger_endpoint, target, lock_uid) {
                 Ok(process_id) => process_id,
                 Err(error) => {
-                    platform::println!(
+                    platform::logln!(
                         "service-manager.service: secure-ui.service spawn failed errno={}",
                         errno(error)
                     );
@@ -108,19 +114,17 @@ impl Runtime {
 
 impl BootstrapOperations for Runtime {
     fn spawn_drivers(&mut self) -> Option<u64> {
-        match fixed_service_launcher::spawn_drivers(
-            self.logger_endpoint,
-            self.driver_controller.target(),
-        ) {
+        match service_launcher::spawn_drivers(self.logger_endpoint, self.driver_controller.target())
+        {
             Ok(process_id) => {
-                platform::println!(
+                platform::logln!(
                     "service-manager.service: drivers.service spawned pid={}",
                     process_id
                 );
                 Some(process_id)
             }
             Err(error) => {
-                platform::println!(
+                platform::logln!(
                     "service-manager.service: drivers.service spawn failed errno={}",
                     errno(error)
                 );
@@ -137,7 +141,7 @@ impl BootstrapOperations for Runtime {
                 process_id,
             ) {
                 Ok(_) => {
-                    platform::println!(
+                    platform::logln!(
                         "service-manager.service: registered drivers.service as driver delegate"
                     );
                     return true;
@@ -151,7 +155,7 @@ impl BootstrapOperations for Runtime {
                 }
             }
         }
-        platform::println!(
+        platform::logln!(
             "service-manager.service: driver delegate registration failed errno={}",
             errno(last_error)
         );
@@ -159,14 +163,14 @@ impl BootstrapOperations for Runtime {
     }
 
     fn wait_driver_hello(&mut self, process_id: u64) -> bool {
-        platform::println!("service-manager.service: waiting for drivers.service hello");
+        platform::logln!("service-manager.service: waiting for drivers.service hello");
         match self.driver_controller.wait_for_hello(process_id) {
             Ok(_) => {
-                platform::println!("service-manager.service: drivers.service hello received");
+                platform::logln!("service-manager.service: drivers.service hello received");
                 true
             }
             Err(error) => {
-                platform::println!(
+                platform::logln!(
                     "service-manager.service: drivers.service hello failed error={:?}",
                     error
                 );
@@ -179,24 +183,24 @@ impl BootstrapOperations for Runtime {
         let token = match platform::service_ready::generate_token() {
             Ok(token) => token,
             Err(error) => {
-                platform::println!(
+                platform::logln!(
                     "service-manager.service: mboot-agent token generation failed errno={}",
                     errno(error)
                 );
                 return None;
             }
         };
-        match fixed_service_launcher::spawn_mboot_agent(self.logger_endpoint, token) {
+        match service_launcher::spawn_mboot_agent(self.logger_endpoint, token) {
             Ok(process_id) => {
                 self.mboot_agent = Some((process_id, token));
-                platform::println!(
+                platform::logln!(
                     "service-manager.service: mboot-agent.service spawned pid={}",
                     process_id
                 );
                 Some(process_id)
             }
             Err(error) => {
-                platform::println!(
+                platform::logln!(
                     "service-manager.service: mboot-agent.service spawn failed errno={}",
                     errno(error)
                 );
@@ -216,7 +220,7 @@ impl BootstrapOperations for Runtime {
             (message & 0xffff_ffff) as usize == reply.len() && i32::from_le_bytes(reply) == 0
         });
         if !valid {
-            platform::println!(
+            platform::logln!(
                 "service-manager.service: mboot-agent stage notification failed stage={}",
                 stage as i32
             );
@@ -268,18 +272,14 @@ impl BootstrapOperations for Runtime {
             | FixedService::Update => None,
         };
         if matches!(service, FixedService::Display) && ready_target.is_none() {
-            platform::println!(
+            platform::logln!(
                 "service-manager.service: display.driver spawn failed no ready target"
             );
             return None;
         }
-        match fixed_service_launcher::spawn_fixed_service(
-            service,
-            self.logger_endpoint,
-            ready_target,
-        ) {
+        match service_launcher::spawn_fixed_service(service, self.logger_endpoint, ready_target) {
             Ok(process_id) => {
-                platform::println!(
+                platform::logln!(
                     "service-manager.service: {} spawned pid={}",
                     service_name(service),
                     process_id
@@ -287,7 +287,7 @@ impl BootstrapOperations for Runtime {
                 Some(process_id)
             }
             Err(error) => {
-                platform::println!(
+                platform::logln!(
                     "service-manager.service: {} spawn failed errno={}",
                     service_name(service),
                     errno(error)
@@ -303,14 +303,14 @@ impl BootstrapOperations for Runtime {
         identity: platform::service_ready::SessionIdentity,
         session_id: u64,
     ) -> Option<u64> {
-        match fixed_service_launcher::spawn_user_session(
+        match service_launcher::spawn_user_session(
             service,
             self.logger_endpoint,
             identity,
             session_id,
         ) {
             Ok(process_id) => {
-                platform::println!(
+                platform::logln!(
                     "service-manager.service: {} spawned pid={}",
                     service_name(service),
                     process_id
@@ -318,7 +318,7 @@ impl BootstrapOperations for Runtime {
                 Some(process_id)
             }
             Err(error) => {
-                platform::println!(
+                platform::logln!(
                     "service-manager.service: {} spawn failed errno={}",
                     service_name(service),
                     errno(error)
@@ -344,14 +344,14 @@ impl BootstrapOperations for Runtime {
         &mut self,
         process_id: u64,
     ) -> Option<platform::service_ready::SessionIdentity> {
-        platform::println!("service-manager.service: waiting for secure-ui.service login");
+        platform::logln!("service-manager.service: waiting for secure-ui.service login");
         let result = match self.ready.as_mut() {
             Some(handshake) => handshake.wait_for_login_complete(process_id),
             None => Err(ReadyError::InvalidMessage),
         };
         match result {
             Ok(identity) => {
-                platform::println!("service-manager.service: secure-ui.service login complete");
+                platform::logln!("service-manager.service: secure-ui.service login complete");
                 Some(identity)
             }
             Err(error) => {
@@ -364,11 +364,11 @@ impl BootstrapOperations for Runtime {
     fn start_discovery(&mut self) -> bool {
         match self.driver_controller.start_discovery() {
             Ok(()) => {
-                platform::println!("service-manager.service: driver discovery requested");
+                platform::logln!("service-manager.service: driver discovery requested");
                 true
             }
             Err(error) => {
-                platform::println!(
+                platform::logln!(
                     "service-manager.service: driver discovery request failed error={:?}",
                     error
                 );
@@ -380,11 +380,11 @@ impl BootstrapOperations for Runtime {
     fn wait_discovery_complete(&mut self, process_id: u64) -> bool {
         match self.driver_controller.wait_for_complete(process_id) {
             Ok(()) => {
-                platform::println!("service-manager.service: driver discovery complete");
+                platform::logln!("service-manager.service: driver discovery complete");
                 true
             }
             Err(error) => {
-                platform::println!(
+                platform::logln!(
                     "service-manager.service: driver discovery failed error={:?}",
                     error
                 );
@@ -399,7 +399,7 @@ impl BootstrapOperations for Runtime {
 }
 
 pub(crate) fn run() -> ! {
-    platform::println!("service-manager.service: start");
+    platform::logln!("service-manager.service: start");
     let logger_endpoint = platform::logger::endpoint().map_or(0, |endpoint| endpoint);
     let (outcome, runtime) = match Runtime::create(logger_endpoint) {
         Ok(mut runtime) => {
@@ -407,14 +407,14 @@ pub(crate) fn run() -> ! {
             (outcome, Some(runtime))
         }
         Err(error) => {
-            platform::println!(
+            platform::logln!(
                 "service-manager.service: driver controller create failed error={:?}",
                 error
             );
             (BootstrapOutcome::initialization_failed(), None)
         }
     };
-    platform::println!(
+    platform::logln!(
         "service-manager.service: resident phase reason={:?}",
         outcome.reason
     );
@@ -438,34 +438,34 @@ fn service_name(service: FixedService) -> &'static str {
 
 fn log_ready_error(service: ReadyService, error: ReadyError) {
     match error {
-        ReadyError::InvalidMessage => platform::println!(
+        ReadyError::InvalidMessage => platform::logln!(
             "service-manager.service: invalid ready message from {}",
             service.name()
         ),
-        ReadyError::Failed(status) => platform::println!(
+        ReadyError::Failed(status) => platform::logln!(
             "service-manager.service: {} ready failed status={}",
             service.name(),
             status
         ),
         ReadyError::TimedOut => {
-            platform::println!("service-manager.service: {} ready timeout", service.name())
+            platform::logln!("service-manager.service: {} ready timeout", service.name())
         }
-        ReadyError::ProcessExited(status) => platform::println!(
+        ReadyError::ProcessExited(status) => platform::logln!(
             "service-manager.service: {} exited before ready status={}",
             service.name(),
             status
         ),
-        ReadyError::Ipc(errno) => platform::println!(
+        ReadyError::Ipc(errno) => platform::logln!(
             "service-manager.service: {} ready IPC failed errno={}",
             service.name(),
             errno
         ),
-        ReadyError::Clock(errno) => platform::println!(
+        ReadyError::Clock(errno) => platform::logln!(
             "service-manager.service: {} ready clock failed errno={}",
             service.name(),
             errno
         ),
-        ReadyError::ProcessWait(errno) => platform::println!(
+        ReadyError::ProcessWait(errno) => platform::logln!(
             "service-manager.service: {} ready process wait failed errno={}",
             service.name(),
             errno
@@ -487,15 +487,24 @@ fn resident(outcome: BootstrapOutcome, runtime: Option<Runtime>) -> ! {
             });
     let mut request_bytes = [0u8; 1024];
     loop {
-        let received = match platform::ipc::try_wait(&mut request_bytes) {
-            Ok(received) => received,
-            Err(error) if error.raw() == mochi_user_syscall::EAGAIN as i64 => {
-                platform::thread::yield_now();
-                continue;
-            }
-            Err(_) => {
-                platform::thread::yield_now();
-                continue;
+        let received = if let Some(deferred) = runtime
+            .as_mut()
+            .and_then(|runtime| runtime.deferred_requests.pop_front())
+        {
+            let length = deferred.bytes.len().min(request_bytes.len());
+            request_bytes[..length].copy_from_slice(&deferred.bytes[..length]);
+            (deferred.sender << 32) | length as u64
+        } else {
+            match platform::ipc::try_wait(&mut request_bytes) {
+                Ok(received) => received,
+                Err(error) if error.raw() == mochi_user_syscall::EAGAIN as i64 => {
+                    platform::thread::yield_now();
+                    continue;
+                }
+                Err(_) => {
+                    platform::thread::yield_now();
+                    continue;
+                }
             }
         };
         let sender = received >> 32;
@@ -508,7 +517,9 @@ fn resident(outcome: BootstrapOutcome, runtime: Option<Runtime>) -> ! {
                 message,
                 sender,
                 active_session,
-                runtime.as_ref().map_or(0, |runtime| runtime.logger_endpoint),
+                runtime
+                    .as_ref()
+                    .map_or(0, |runtime| runtime.logger_endpoint),
             );
             continue;
         }
@@ -566,7 +577,7 @@ fn resident(outcome: BootstrapOutcome, runtime: Option<Runtime>) -> ! {
                 reply_session_status(sender, request.action, session.id, 0);
                 active_session = None;
                 if let Err(error) = terminate_process_tree(session.binder_pid) {
-                    platform::println!(
+                    platform::logln!(
                         "service-manager.service: session termination failed errno={}",
                         errno(error)
                     );
@@ -578,14 +589,14 @@ fn resident(outcome: BootstrapOutcome, runtime: Option<Runtime>) -> ! {
                     continue;
                 };
                 let session_id = session.next_id();
-                let linux_pid = fixed_service_launcher::spawn_user_session(
+                let linux_pid = service_launcher::spawn_user_session(
                     FixedService::Linux,
                     runtime.logger_endpoint,
                     identity,
                     session_id,
                 )
                 .ok();
-                match fixed_service_launcher::spawn_user_session(
+                match service_launcher::spawn_user_session(
                     FixedService::Binder,
                     runtime.logger_endpoint,
                     identity,
@@ -599,7 +610,7 @@ fn resident(outcome: BootstrapOutcome, runtime: Option<Runtime>) -> ! {
                             binder_pid,
                         });
                     }
-                    Err(error) => platform::println!(
+                    Err(error) => platform::logln!(
                         "service-manager.service: Binder.app spawn failed errno={}",
                         errno(error)
                     ),

@@ -51,7 +51,7 @@ struct PendingFrame {
 }
 
 pub(crate) fn run() -> ! {
-    platform::println!("linux.service: start");
+    platform::logln!("linux.service: start");
     let mut host = connect_host();
     let mut instances = Vec::new();
     let mut next_instance = 1u64;
@@ -106,6 +106,7 @@ struct BundleSpec {
     writable_paths: Vec<String>,
     portal_read_paths: Vec<String>,
     portal_write_paths: Vec<String>,
+    network: bool,
     user: String,
 }
 
@@ -132,6 +133,14 @@ fn handle_bundle_launch(
             .and_then(|request| load_bundle_spec(request.bundle_id, request.user))
             .and_then(|spec| {
                 let instance = allocate_instance(next_instance);
+                if spec.network {
+                    crate::portal::request_network(instance, &spec.bundle_id, &spec.user)?;
+                }
+                platform::logln!(
+                    "linux.service: staging bundle={} instance={}",
+                    spec.bundle_id,
+                    instance
+                );
                 host.stage_bundle(
                     instance,
                     &spec.bundle_id,
@@ -140,6 +149,11 @@ fn handle_bundle_launch(
                     &spec.rootfs_digest,
                 )
                 .map_err(host_status)?;
+                platform::logln!(
+                    "linux.service: preparing portal bundle={} instance={}",
+                    spec.bundle_id,
+                    instance
+                );
                 let write_grants = crate::portal::prepare(
                     host,
                     instance,
@@ -148,12 +162,18 @@ fn handle_bundle_launch(
                     &spec.portal_read_paths,
                     &spec.portal_write_paths,
                 )?;
+                platform::logln!(
+                    "linux.service: launching bundle={} instance={}",
+                    spec.bundle_id,
+                    instance
+                );
                 host.launch_bundle(
                     instance,
                     &spec.bundle_id,
                     &spec.entrypoint,
                     &spec.user,
                     &spec.writable_paths,
+                    spec.network,
                 )
                 .map_err(host_status)?;
                 instances.push(LinuxInstance {
@@ -212,6 +232,7 @@ fn load_bundle_spec(bundle_id: &str, user: &str) -> Result<BundleSpec, i32> {
         writable_paths: linux.writable_paths,
         portal_read_paths: linux.portal_read_paths,
         portal_write_paths: linux.portal_write_paths,
+        network: linux.network.as_deref() == Some("client"),
         user: user.to_string(),
     })
 }

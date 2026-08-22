@@ -202,10 +202,7 @@ mod tests {
     #[test]
     fn transient_failures_follow_bounded_exponential_policy() {
         let mut scheduler = Scheduler::network_ready(0);
-        for (index, delay) in [1, 5, 60, 3_600, 21_600, 21_600]
-            .into_iter()
-            .enumerate()
-        {
+        for (index, delay) in [1, 5, 60, 3_600, 21_600, 21_600].into_iter().enumerate() {
             let now = index as u64 * 100;
             scheduler.record_failure(
                 SnapshotKind::Trust,

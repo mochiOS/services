@@ -48,7 +48,7 @@ fn spawn_service_by_package(
         ));
         error
     })?;
-    platform::println!(
+    platform::logln!(
         "capability.service: parsed {} caps={}",
         service_path,
         caps.len()
@@ -76,14 +76,14 @@ fn spawn_service_by_package(
 pub(crate) fn start_required_services(package_index: &PackageIndex) {
     match spawn_service_by_package(package_index, SIGNATURE_PACKAGE_ID) {
         Ok(pid) => {
-            platform::println!("capability.service: signature.service spawned pid={}", pid);
+            platform::logln!("capability.service: signature.service spawned pid={}", pid);
         }
         Err(err) => {
             stderr_line(&format!(
                 "capability.service: signature.service spawn failed errno={}",
                 err.errno().unwrap_or(0)
             ));
-            platform::println!(
+            platform::logln!(
                 "capability.service: signature.service spawn failed errno={}",
                 err.errno().unwrap_or(0)
             );
@@ -92,14 +92,14 @@ pub(crate) fn start_required_services(package_index: &PackageIndex) {
     }
     match spawn_service_by_package(package_index, PACKAGE_PACKAGE_ID) {
         Ok(pid) => {
-            platform::println!("capability.service: package.service spawned pid={}", pid);
+            platform::logln!("capability.service: package.service spawned pid={}", pid);
         }
         Err(err) => {
             stderr_line(&format!(
                 "capability.service: package.service spawn failed errno={}",
                 err.errno().unwrap_or(0)
             ));
-            platform::println!(
+            platform::logln!(
                 "capability.service: package.service spawn failed errno={}",
                 err.errno().unwrap_or(0)
             );
@@ -108,7 +108,7 @@ pub(crate) fn start_required_services(package_index: &PackageIndex) {
     }
     match spawn_service_by_package(package_index, SERVICE_MANAGER_PACKAGE_ID) {
         Ok(pid) => {
-            platform::println!(
+            platform::logln!(
                 "capability.service: service-manager.service spawned pid={}",
                 pid
             );
@@ -118,7 +118,7 @@ pub(crate) fn start_required_services(package_index: &PackageIndex) {
                 "capability.service: service-manager.service spawn failed errno={}",
                 err.errno().unwrap_or(0)
             ));
-            platform::println!(
+            platform::logln!(
                 "capability.service: service-manager.service spawn failed errno={}",
                 err.errno().unwrap_or(0)
             );

@@ -215,7 +215,7 @@ pub(crate) fn validate_capabilities(
 ) -> Result<(), mochi_user_syscall::SysError> {
     for cap in caps {
         if !is_known_capability(cap.as_str()) {
-            platform::println!(
+            platform::logln!(
                 "capability.service: unknown capability {} requested by {}",
                 cap,
                 binary_path

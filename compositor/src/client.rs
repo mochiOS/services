@@ -93,6 +93,15 @@ pub(crate) fn cleanup_dead_clients(
         let has_live_surface = surfaces
             .iter()
             .any(|surface| surface.live && surface.owner == client.id);
+        let has_surface_event_endpoint = surfaces.iter().any(|surface| {
+            surface.live && surface.owner == client.id && surface.event_endpoint != 0
+        });
+        let has_live_surface_event_endpoint = surfaces.iter().any(|surface| {
+            surface.live
+                && surface.owner == client.id
+                && surface.event_endpoint != 0
+                && platform::ipc::endpoint_alive(surface.event_endpoint)
+        });
         let has_live_decoration_endpoint = client.decoration_endpoint != 0
             && platform::ipc::endpoint_alive(client.decoration_endpoint);
         let has_live_window_decorator_endpoint = windows.iter().any(|window| {
@@ -102,7 +111,12 @@ pub(crate) fn cleanup_dead_clients(
                 && platform::ipc::endpoint_alive(window.decorator_endpoint)
         });
 
-        if !has_live_surface && !has_live_decoration_endpoint && !has_live_window_decorator_endpoint
+        let abandoned_surface =
+            has_live_surface && has_surface_event_endpoint && !has_live_surface_event_endpoint;
+        if abandoned_surface
+            || (!has_live_surface
+                && !has_live_decoration_endpoint
+                && !has_live_window_decorator_endpoint)
         {
             cleanup_client(
                 clients,

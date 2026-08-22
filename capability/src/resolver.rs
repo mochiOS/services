@@ -68,7 +68,7 @@ fn validate_certificate_capabilities(
             }
         }
         if !allowed {
-            platform::println!(
+            platform::logln!(
                 "capability.service: certificate denies required capability {} for {}",
                 capability,
                 manifest.package_id

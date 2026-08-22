@@ -18,7 +18,7 @@ fn maybe_spawn_bundle(
         return;
     };
 
-    platform::println!(
+    platform::logln!(
         "drivers.service: bundle {} {} api={} class={} match={}/{}",
         manifest.package_id,
         manifest.package_name,
@@ -35,7 +35,7 @@ fn maybe_spawn_bundle(
         binary.match_class.as_deref(),
     );
     if match_result != driver_matcher::MatchResult::Matched {
-        platform::println!(
+        platform::logln!(
             "drivers.service: rejected bundle={} package={} root={} reason={}",
             bundle_root,
             manifest.package_id,
@@ -44,14 +44,14 @@ fn maybe_spawn_bundle(
         );
         return;
     }
-    platform::println!(
+    platform::logln!(
         "drivers.service: matched bundle={} package={} root={}",
         bundle_root,
         manifest.package_id,
         root.path()
     );
     if started_drivers.contains(&manifest.package_id) {
-        platform::println!(
+        platform::logln!(
             "drivers.service: skipped duplicate bundle={} package={}",
             bundle_root,
             manifest.package_id
@@ -59,7 +59,7 @@ fn maybe_spawn_bundle(
         return;
     }
     if driver_spawn::spawn(entry_path, None, logger_endpoint) {
-        platform::println!("drivers.service: active bundle={}", bundle_root);
+        platform::logln!("drivers.service: active bundle={}", bundle_root);
         started_drivers.record(manifest.package_id.clone());
     }
 }

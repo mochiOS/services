@@ -1,18 +1,17 @@
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicI8, Ordering};
 
 use mochios_linux_portal_protocol::Access;
 use viewkit::prelude::*;
 
-const TARGET_PREFIX: &str = "--portal-target=";
 const APP_PREFIX: &str = "--portal-application=";
 const PATH_PREFIX: &str = "--portal-path=";
 const ACCESS_PREFIX: &str = "--portal-access=";
 static CONFIGURATION: OnceLock<PromptConfiguration> = OnceLock::new();
+static DECISION: AtomicI8 = AtomicI8::new(0);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PromptConfiguration {
-    endpoint: u64,
-    token: u64,
     application: String,
     path: String,
     writable: bool,
@@ -20,17 +19,11 @@ pub(crate) struct PromptConfiguration {
 
 impl PromptConfiguration {
     pub(crate) fn from_arguments() -> Option<Self> {
-        let mut endpoint = None;
-        let mut token = None;
         let mut application = None;
         let mut path = None;
         let mut writable = None;
         for argument in std::env::args() {
-            if let Some(value) = argument.strip_prefix(TARGET_PREFIX) {
-                let (raw_endpoint, raw_token) = value.split_once(':')?;
-                endpoint = raw_endpoint.parse().ok();
-                token = raw_token.parse().ok();
-            } else if let Some(value) = argument.strip_prefix(APP_PREFIX) {
+            if let Some(value) = argument.strip_prefix(APP_PREFIX) {
                 application = Some(value.to_owned());
             } else if let Some(value) = argument.strip_prefix(PATH_PREFIX) {
                 path = Some(value.to_owned());
@@ -43,8 +36,6 @@ impl PromptConfiguration {
             }
         }
         let configuration = Self {
-            endpoint: endpoint.filter(|value| *value != 0)?,
-            token: token.filter(|value| *value != 0)?,
             application: application.filter(|value| !value.is_empty())?,
             path: path.filter(|value| mochios_linux_portal_protocol::valid_portal_path(value))?,
             writable: writable?,
@@ -63,7 +54,15 @@ impl PromptConfiguration {
 
 pub(crate) fn run(configuration: PromptConfiguration) -> Result<(), ViewKitError> {
     let _ = CONFIGURATION.set(configuration);
-    viewkit::run::<PortalPromptApp>()
+    DECISION.store(0, Ordering::Release);
+    viewkit::run::<PortalPromptApp>()?;
+    if DECISION.load(Ordering::Acquire) > 0 {
+        Ok(())
+    } else {
+        // ViewKit has already destroyed the secure-overlay surface here. Exit
+        // afterwards so the service manager still receives a denied status.
+        std::process::exit(1)
+    }
 }
 
 struct PortalPromptApp;
@@ -93,28 +92,33 @@ impl App for PortalPromptApp {
         } else {
             "read files in"
         };
-        Box::new(
-            Background::new()
-                .background(Rectangle::new().color(RectangleColor::Surface))
-                .content(Padding::all(32.0).content(
+        let prompt = Card::new()
+            .content(
+                Padding::all(32.0).content(
                     VStack::new()
                         .alignment(StackAlignment::Center)
                         .distribution(StackDistribution::Center)
                         .gap(StackGap::Large)
                         .child(Icon::new(IconName::FolderOpen).size(44.0))
                         .child(
-                            Text::new(format!("Allow {} to access this folder?", configuration.application))
-                                .font_size(20.0)
-                                .line_height(28.0)
-                                .weight(600)
-                                .alignment(TextAlignment::Center),
+                            Text::new(format!(
+                                "Allow {} to access this folder?",
+                                configuration.application
+                            ))
+                            .font_size(20.0)
+                            .line_height(28.0)
+                            .weight(600)
+                            .alignment(TextAlignment::Center),
                         )
                         .child(
-                            Text::new(format!("This application wants to {action}:\n{}", configuration.path))
-                                .font_size(13.0)
-                                .line_height(20.0)
-                                .alignment(TextAlignment::Center)
-                                .color(Theme::DEFAULT.colors.text_secondary),
+                            Text::new(format!(
+                                "This application wants to {action}:\n{}",
+                                configuration.path
+                            ))
+                            .font_size(13.0)
+                            .line_height(20.0)
+                            .alignment(TextAlignment::Center)
+                            .color(Theme::DEFAULT.colors.text_secondary),
                         )
                         .child(
                             HStack::new()
@@ -134,15 +138,20 @@ impl App for PortalPromptApp {
                                         .frame(132.0, 38.0),
                                 ),
                         ),
-                )),
+                ),
+            )
+            .frame(520.0, 330.0);
+        Box::new(
+            ZStack::new()
+                .alignment(ZStackAlignment::Center)
+                .child(Rectangle::new().color(RectangleColor::Custom(Color::rgba(0, 0, 0, 36))))
+                .child(prompt),
         )
     }
 }
 
-fn finish(configuration: &PromptConfiguration, allowed: bool) {
-    let status = if allowed { 0 } else { -(mochi_user_syscall::EACCES as i32) };
-    let message = mochi_user_platform::service_ready::notification(configuration.token, status);
-    let _ = mochi_user_platform::ipc::send(configuration.endpoint, &message);
+fn finish(_configuration: &PromptConfiguration, allowed: bool) {
+    DECISION.store(if allowed { 1 } else { -1 }, Ordering::Release);
     viewkit::request_exit();
 }
 
@@ -153,13 +162,18 @@ mod tests {
     #[test]
     fn access_mode_matches_prompt_semantics() {
         let read = PromptConfiguration {
-            endpoint: 1,
-            token: 2,
             application: "Editor".to_owned(),
             path: "/home/alice/Develop".to_owned(),
             writable: false,
         };
         assert_eq!(read.access(), Access::READ);
-        assert_eq!(PromptConfiguration { writable: true, ..read }.access(), Access::READ_WRITE);
+        assert_eq!(
+            PromptConfiguration {
+                writable: true,
+                ..read
+            }
+            .access(),
+            Access::READ_WRITE
+        );
     }
 }

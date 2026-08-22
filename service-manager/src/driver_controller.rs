@@ -7,7 +7,7 @@ use mochios_driver_control_protocol::{
 };
 
 #[cfg(not(test))]
-use crate::fixed_service_launcher::DriverManagerTarget;
+use crate::service_launcher::DriverManagerTarget;
 
 pub(crate) const DRIVER_CONTROL_TIMEOUT_TICKS: u64 = 5_000;
 #[cfg(not(test))]

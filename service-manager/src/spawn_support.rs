@@ -56,7 +56,7 @@ pub(crate) fn resolve_capabilities(
     let service_tid = match platform::process::find_by_name(CAPABILITY_SERVICE_NAME) {
         Ok(tid) => tid,
         Err(error) => {
-            platform::println!(
+            platform::logln!(
                 "service-manager.service: capability.service lookup failed errno={}",
                 errno(error)
             );
@@ -64,7 +64,7 @@ pub(crate) fn resolve_capabilities(
         }
     };
     if service_tid == 0 {
-        platform::println!("service-manager.service: capability.service not found");
+        platform::logln!("service-manager.service: capability.service not found");
         return Err(sys_error(mochi_user_syscall::ENOENT));
     }
     let request = platform::capability::encode_resolve_capabilities_request(entry_path)
@@ -73,7 +73,7 @@ pub(crate) fn resolve_capabilities(
     let message = match call_with_wait(service_tid, &request, &mut reply) {
         Ok(message) => message,
         Err(error) => {
-            platform::println!(
+            platform::logln!(
                 "service-manager.service: capability request failed {} errno={}",
                 entry_path,
                 errno(error)
@@ -83,7 +83,7 @@ pub(crate) fn resolve_capabilities(
     };
     let length = (message & 0xffff_ffff) as usize;
     if length > reply.len() {
-        platform::println!(
+        platform::logln!(
             "service-manager.service: capability reply invalid {} len={}",
             entry_path,
             length
@@ -93,7 +93,7 @@ pub(crate) fn resolve_capabilities(
     let response = platform::capability::decode_resolve_capabilities_reply(&reply[..length])
         .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
     if response.status != 0 {
-        platform::println!(
+        platform::logln!(
             "service-manager.service: capability denied {} errno={}",
             entry_path,
             response.status

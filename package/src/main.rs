@@ -47,7 +47,7 @@ struct VerifiedPackage {
 }
 
 fn diagnostic(message: &str) {
-    platform::println!("{}", message);
+    platform::logln!("{}", message);
     let _ = platform::io::stderr(message.as_bytes());
     let _ = platform::io::stderr(b"\n");
 }
@@ -724,11 +724,11 @@ fn reply_status(sender: u64, result: Result<(), mochi_user_syscall::SysError>) {
 }
 
 fn run_server() -> ! {
-    platform::println!("package.service: ready");
+    platform::logln!("package.service: ready");
     let endpoint = match platform::ipc::create() {
         Ok(endpoint) => endpoint,
         Err(err) => {
-            platform::println!(
+            platform::logln!(
                 "package.service: endpoint create failed errno={}",
                 err.errno().unwrap_or(0)
             );

@@ -6,13 +6,37 @@ use std::path::Path;
 
 use mochi_user_platform as platform;
 use mochios_linux_portal_protocol::{
-    Access, GRANT_RESPONSE_LEN, GrantDirectoryRequest, GrantDirectoryResponse,
+    Access, GRANT_RESPONSE_LEN, NETWORK_RESPONSE_LEN, GrantDirectoryRequest,
+    GrantDirectoryResponse, RequestNetworkRequest, RequestNetworkResponse,
 };
 
 use crate::host::{HostClient, HostError, PortalEntryKind};
 
 const SERVICE_MANAGER_NAME: &str = "service-manager.service";
 const REQUEST_BUFFER_LEN: usize = 1024;
+
+pub(crate) fn request_network(
+    instance: u64,
+    bundle_id: &str,
+    user: &str,
+) -> Result<(), i32> {
+    let session_id = session_id()?;
+    let service = service_manager()?;
+    let request_id = instance.wrapping_mul(257).wrapping_add(0x80).max(1);
+    let request = RequestNetworkRequest { request_id, session_id, bundle_id, user };
+    let mut encoded = [0u8; REQUEST_BUFFER_LEN];
+    let length = request.encode(&mut encoded).map_err(|_| -(mochi_user_syscall::EINVAL as i32))?;
+    let mut reply = [0u8; NETWORK_RESPONSE_LEN];
+    let received = platform::ipc::call(service, &encoded[..length], &mut reply)
+        .map_err(|_| -(mochi_user_syscall::EIO as i32))?;
+    let response = RequestNetworkResponse::decode(
+        reply.get(..(received as u32 as usize)).ok_or(-(mochi_user_syscall::EINVAL as i32))?
+    ).map_err(|_| -(mochi_user_syscall::EINVAL as i32))?;
+    if response.request_id != request_id {
+        return Err(-(mochi_user_syscall::EPERM as i32));
+    }
+    (response.status == 0).then_some(()).ok_or(response.status)
+}
 
 pub(crate) struct WriteGrant {
     id: u64,
@@ -37,11 +61,7 @@ pub(crate) fn prepare(
     if requested.is_empty() {
         return Ok(Vec::new());
     }
-    let session_id = std::env::var("MOCHI_SESSION_ID")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .filter(|value| *value != 0)
-        .ok_or(-(mochi_user_syscall::EPERM as i32))?;
+    let session_id = session_id()?;
     let mut write_grants = Vec::new();
     for (index, requested) in requested.iter().enumerate() {
         let request_id = instance
@@ -288,11 +308,7 @@ fn request_grant(
     path: &str,
     access: Access,
 ) -> Result<u64, i32> {
-    let service = platform::process::find_by_name(SERVICE_MANAGER_NAME)
-        .map_err(|_| -(mochi_user_syscall::ENOENT as i32))?;
-    if service == 0 {
-        return Err(-(mochi_user_syscall::ENOENT as i32));
-    }
+    let service = service_manager()?;
     let request = GrantDirectoryRequest {
         request_id,
         session_id,
@@ -324,6 +340,22 @@ fn request_grant(
     Ok(response.grant_id)
 }
 
+fn session_id() -> Result<u64, i32> {
+    std::env::var("MOCHI_SESSION_ID")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value != 0)
+        .ok_or(-(mochi_user_syscall::EPERM as i32))
+}
+
+fn service_manager() -> Result<u64, i32> {
+    platform::process::find_by_name(SERVICE_MANAGER_NAME)
+        .map_err(|_| -(mochi_user_syscall::ENOENT as i32))?
+        .checked_sub(0)
+        .filter(|service| *service != 0)
+        .ok_or(-(mochi_user_syscall::ENOENT as i32))
+}
+
 fn copy_directory(
     host: &mut HostClient,
     instance: u64,
@@ -336,13 +368,11 @@ fn copy_directory(
     }
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
-        let mut entries = fs::read_dir(&directory)
-            .map_err(io_status)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(io_status)?;
-        entries.sort_by_key(|entry| entry.file_name());
+        let mut entries = platform::file::read_dir_names(path_text(&directory)?)
+            .map_err(|error| -(error.raw().unsigned_abs().min(i32::MAX as u64) as i32))?;
+        entries.sort();
         for entry in entries {
-            let path = entry.path();
+            let path = directory.join(entry);
             let metadata = fs::symlink_metadata(&path).map_err(io_status)?;
             let target = path_text(&path)?;
             if metadata.file_type().is_symlink() {

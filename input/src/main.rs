@@ -537,10 +537,10 @@ fn handle_subscribe_message(subscribers: &mut [u64; MAX_SUBSCRIBERS], buf: &[u8]
 
 fn main() {
     let _ = platform::logger::init_from_env();
-    platform::println!("input.service: start");
+    platform::logln!("input.service: start");
 
     let Some(ready_target) = platform::service_ready::take_bootstrap_target() else {
-        platform::println!("input.service: missing ready target");
+        platform::logln!("input.service: missing ready target");
         platform::process::exit(1);
     };
 
@@ -548,12 +548,12 @@ fn main() {
         Ok(endpoint) => endpoint,
         Err(_) => {
             let _ = platform::service_ready::notify(ready_target, 1);
-            platform::println!("input.service: endpoint create failed");
+            platform::logln!("input.service: endpoint create failed");
             platform::process::exit(1);
         }
     };
     if endpoint == 0 {
-        platform::println!("input.service: missing endpoint");
+        platform::logln!("input.service: missing endpoint");
         platform::process::exit(1);
     }
 
@@ -562,7 +562,7 @@ fn main() {
     let input_preferences = InputPreferences::load();
     let mut subscribers = [0u64; MAX_SUBSCRIBERS];
     if platform::service_ready::notify(ready_target, 0).is_err() {
-        platform::println!("input.service: ready notification failed");
+        platform::logln!("input.service: ready notification failed");
         platform::process::exit(1);
     }
 

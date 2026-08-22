@@ -117,7 +117,7 @@ fn spawn_logger_service() -> Result<u64, mochi_user_syscall::SysError> {
     let bootstrap = match platform::ipc::create() {
         Ok(endpoint) => endpoint,
         Err(err) => {
-            platform::println!(
+            platform::logln!(
                 "core.service: logger bootstrap endpoint create failed errno={}",
                 err.errno().unwrap_or(0)
             );
@@ -178,7 +178,7 @@ fn spawn_capability_service() -> Result<u64, mochi_user_syscall::SysError> {
     let caps = manifest
         .binary_requires(CAPABILITY_SERVICE_PATH)
         .unwrap_or(&[]);
-    platform::println!(
+    platform::logln!(
         "core.service: parsed capability.service package caps={}",
         caps.len()
     );
@@ -201,7 +201,7 @@ fn main() {
     let _logger_pid = match spawn_logger_service() {
         Ok(pid) => pid,
         Err(err) => {
-            platform::println!(
+            platform::logln!(
                 "core.service: logger.service spawn failed errno={}",
                 err.errno().unwrap_or(0)
             );
@@ -214,18 +214,18 @@ fn main() {
 }
 
 fn run() {
-    platform::println!("core.service: start");
+    platform::logln!("core.service: start");
     match spawn_capability_service() {
         Ok(pid) => {
-            platform::println!("core.service: capability.service spawned pid={}", pid);
+            platform::logln!("core.service: capability.service spawned pid={}", pid);
             match register_delegate_with_retry(platform::service::DELEGATE_SERVICE_SPAWN, pid) {
                 Ok(_) => {
-                    platform::println!(
+                    platform::logln!(
                         "core.service: registered capability.service as service delegate"
                     );
                 }
                 Err(err) => {
-                    platform::println!(
+                    platform::logln!(
                         "core.service: capability delegate registration failed errno={}",
                         err.errno().unwrap_or(0)
                     );
@@ -234,7 +234,7 @@ fn run() {
             }
         }
         Err(err) => {
-            platform::println!(
+            platform::logln!(
                 "core.service: capability.service spawn failed errno={}",
                 err.errno().unwrap_or(0)
             );

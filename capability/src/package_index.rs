@@ -40,21 +40,21 @@ pub(crate) fn build_package_index() -> PackageIndex {
     let mut index = PackageIndex::default();
     for manifest_path in manifest_paths {
         let Ok(bytes) = platform::file::read_to_end_path(&manifest_path) else {
-            platform::println!(
+            platform::logln!(
                 "capability.service: invalid package manifest {}",
                 manifest_path
             );
             continue;
         };
         let Ok(text) = core::str::from_utf8(&bytes) else {
-            platform::println!(
+            platform::logln!(
                 "capability.service: invalid package manifest {}",
                 manifest_path
             );
             continue;
         };
         let Some(manifest) = platform::package::parse_manifest(text) else {
-            platform::println!(
+            platform::logln!(
                 "capability.service: invalid package manifest {}",
                 manifest_path
             );
@@ -70,7 +70,7 @@ pub(crate) fn build_package_index() -> PackageIndex {
         };
         if let Some(previous) = index.by_package.get(&manifest.package_id) {
             if previous.manifest_hash != record.manifest_hash {
-                platform::println!(
+                platform::logln!(
                     "capability.service: duplicate package {} in {} and {}",
                     manifest.package_id,
                     previous.manifest_path,
@@ -87,7 +87,7 @@ pub(crate) fn build_package_index() -> PackageIndex {
         for binary in manifest.binaries {
             if let Some(previous) = index.by_binary.get(&binary.path) {
                 if previous.manifest_hash != record.manifest_hash {
-                    platform::println!(
+                    platform::logln!(
                         "capability.service: duplicate binary {} in {} and {}",
                         binary.path,
                         previous.manifest_path,

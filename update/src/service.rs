@@ -10,7 +10,7 @@ const INITIALIZATION_RETRY_MS: u64 = 60_000;
 const MAX_IDLE_SLEEP_MS: u64 = 60_000;
 
 pub fn run() -> ! {
-    mochi_user_platform::println!(
+    mochi_user_platform::logln!(
         "update.service: Developer Trust domain={}",
         DEVELOPER_TRUST_DOMAIN
     );
@@ -19,7 +19,7 @@ pub fn run() -> ! {
     let mut coordinator = Coordinator::network_ready(start_ms);
     if repository.recovered() {
         coordinator.record_recovery();
-        mochi_user_platform::println!("update.service: certificate database recovered");
+        mochi_user_platform::logln!("update.service: certificate database recovered");
     }
     log_database(&repository);
 
@@ -31,7 +31,7 @@ pub fn run() -> ! {
         let now_utc = match mochi_user_platform::time::utc_seconds() {
             Ok(now) => now,
             Err(error) => {
-                mochi_user_platform::println!(
+                mochi_user_platform::logln!(
                     "update.service: UTC unavailable errno={}",
                     errno(error)
                 );
@@ -43,7 +43,7 @@ pub fn run() -> ! {
         let state_before = repository.state().clone();
         coordinator.synchronize_due(&mut fetcher, &mut repository, now_ms, now_utc);
         if let Err(error) = notifier.notify_changes(&state_before, repository.state()) {
-            mochi_user_platform::println!(
+            mochi_user_platform::logln!(
                 "update.service: signature notification failed errno={}",
                 errno(error)
             );
@@ -53,7 +53,7 @@ pub fn run() -> ! {
             let missing_database_offline = certificate_database_absent(&repository)
                 && network_access_unavailable(coordinator.last_error());
             if missing_database_offline && !reported_missing_database_offline {
-                mochi_user_platform::println!(
+                mochi_user_platform::logln!(
                     "update.service: no local Developer trust or revocation data is available and the network is not connected; connect to a network to enable package signature verification"
                 );
             }
@@ -80,7 +80,7 @@ fn load_repository() -> CertificateRepository<'static, FileBackend> {
         let now_utc = match mochi_user_platform::time::utc_seconds() {
             Ok(now) => now,
             Err(error) => {
-                mochi_user_platform::println!(
+                mochi_user_platform::logln!(
                     "update.service: UTC unavailable during database load errno={}",
                     errno(error)
                 );
@@ -91,7 +91,7 @@ fn load_repository() -> CertificateRepository<'static, FileBackend> {
         let backend = match FileBackend::system() {
             Ok(backend) => backend,
             Err(error) => {
-                mochi_user_platform::println!(
+                mochi_user_platform::logln!(
                     "update.service: certificate directory unavailable error={:?}",
                     error
                 );
@@ -102,7 +102,7 @@ fn load_repository() -> CertificateRepository<'static, FileBackend> {
         match CertificateRepository::load(backend, DEVELOPER_ROOT_PUBLIC_KEYS, now_utc) {
             Ok(repository) => return repository,
             Err(error) => {
-                mochi_user_platform::println!(
+                mochi_user_platform::logln!(
                     "update.service: certificate database load failed error={:?}",
                     error
                 );
@@ -117,7 +117,7 @@ fn monotonic_milliseconds() -> u64 {
         match mochi_user_platform::time::monotonic_milliseconds() {
             Ok(now) => return now,
             Err(error) => {
-                mochi_user_platform::println!(
+                mochi_user_platform::logln!(
                     "update.service: monotonic clock unavailable errno={}",
                     errno(error)
                 );
@@ -148,7 +148,7 @@ fn total_attempts(statistics: &Statistics) -> u64 {
 
 fn log_database(repository: &CertificateRepository<'_, FileBackend>) {
     let state = repository.state();
-    mochi_user_platform::println!(
+    mochi_user_platform::logln!(
         "update.service: trust version={} generated_at={} expires_at={} last_checked={} etag={} slot={:?}",
         state.trust.snapshot_version,
         state.trust.generated_at,
@@ -160,7 +160,7 @@ fn log_database(repository: &CertificateRepository<'_, FileBackend>) {
     let revocation_count = repository
         .revocations()
         .map_or(0, |snapshot| snapshot.snapshot().content.revocations.len());
-    mochi_user_platform::println!(
+    mochi_user_platform::logln!(
         "update.service: revocations version={} generated_at={} expires_at={} count={} last_checked={} etag={} slot={:?}",
         state.revocations.snapshot_version,
         state.revocations.generated_at,
@@ -175,14 +175,14 @@ fn log_database(repository: &CertificateRepository<'_, FileBackend>) {
 fn log_sync(coordinator: &Coordinator, repository: &CertificateRepository<'_, FileBackend>) {
     let statistics = coordinator.statistics();
     let scheduler = coordinator.scheduler();
-    mochi_user_platform::println!(
+    mochi_user_platform::logln!(
         "update.service: sync result={:?} last_error={:?} next_trust_ms={} next_revocations_ms={}",
         coordinator.last_result(),
         coordinator.last_error(),
         scheduler.next_attempt_ms(SnapshotKind::Trust),
         scheduler.next_attempt_ms(SnapshotKind::Revocations)
     );
-    mochi_user_platform::println!(
+    mochi_user_platform::logln!(
         "update.service: stats trust={}/{}/{} failures={} revocations={}/{}/{} failures={} signature_failures={} rollback_rejections={} expiration_failures={} storage_failures={} recoveries={}",
         statistics.trust_sync_attempts,
         statistics.trust_sync_updated,

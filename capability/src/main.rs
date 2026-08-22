@@ -18,7 +18,7 @@ use state::CapabilityServiceState;
 
 fn main() {
     let _ = platform::logger::init_from_env();
-    platform::println!("capability.service: start");
+    platform::logln!("capability.service: start");
     let state = CapabilityServiceState::new();
     start_required_services(&state.package_index);
     serve_capability_requests(state);

@@ -30,7 +30,7 @@ pub fn run() -> ! {
         if let Some(boot_id) = generate_boot_id() {
             break boot_id;
         }
-        platform::println!("mboot-agent.service: boot ID generation failed; retrying");
+        platform::logln!("mboot-agent.service: boot ID generation failed; retrying");
         let _ = platform::thread::sleep_milliseconds(RETRY_DELAY_MS);
     };
     let mut agent = Agent::new(env!("MOCHIOS_VERSION"), boot_id, started);
@@ -43,13 +43,13 @@ pub fn run() -> ! {
         if transport.is_none() {
             match VirtioSerialTransport::initialize() {
                 Ok(initialized) => {
-                    platform::println!("mboot-agent.service: virtio control transport initialized");
+                    platform::logln!("mboot-agent.service: virtio control transport initialized");
                     transport = Some(initialized);
                     initialization_error_reported = false;
                 }
                 Err(error) => {
                     if !initialization_error_reported {
-                        platform::println!(
+                        platform::logln!(
                             "mboot-agent.service: control transport unavailable error={:?}",
                             error
                         );
@@ -67,13 +67,13 @@ pub fn run() -> ! {
                 Err(AgentError::Transport(
                     TransportError::InvalidDevice | TransportError::Io(_),
                 )) => {
-                    platform::println!(
+                    platform::logln!(
                         "mboot-agent.service: control transport reset; reinitializing"
                     );
                     transport = None;
                 }
                 Err(error) => {
-                    platform::println!("mboot-agent.service: protocol error={:?}", error);
+                    platform::logln!("mboot-agent.service: protocol error={:?}", error);
                 }
             }
         }

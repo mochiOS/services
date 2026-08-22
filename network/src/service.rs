@@ -23,13 +23,13 @@ const IPC_BUFFER_LEN: usize =
     48 + MAX_HTTP_URL_LEN + MAX_HTTP_CONTENT_TYPE_LEN + MAX_HTTP_IPC_DATA_LEN;
 
 pub(crate) fn run() -> ! {
-    platform::println!("network.service: start");
+    platform::logln!("network.service: start");
     let ready = platform::service_ready::take_bootstrap_target();
     let now = platform::time::ticks().unwrap_or(0);
     let driver = match DriverClient::connect(now.saturating_add(START_TIMEOUT)) {
         Ok(driver) => driver,
         Err(errno) => {
-            platform::println!(
+            platform::logln!(
                 "network.service: virtio-net driver unavailable errno={}",
                 errno
             );
@@ -45,7 +45,7 @@ pub(crate) fn run() -> ! {
     let mut stack = match NetworkStack::new(driver, xid) {
         Ok(stack) => stack,
         Err(errno) => {
-            platform::println!("network.service: interface query failed errno={}", errno);
+            platform::logln!("network.service: interface query failed errno={}", errno);
             if let Some(target) = ready {
                 let _ = platform::service_ready::notify(target, -(errno as i32));
             }
@@ -60,7 +60,7 @@ pub(crate) fn run() -> ! {
         .unwrap_or(info.driver_name.len());
     let driver_name =
         core::str::from_utf8(&info.driver_name[..driver_name_length]).unwrap_or("invalid");
-    platform::println!(
+    platform::logln!(
         "network.service: interface id={} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} link={} mtu={} driver={} device={:#x}",
         info.interface_id,
         info.mac[0],
@@ -75,7 +75,7 @@ pub(crate) fn run() -> ! {
         info.device_id
     );
     if let Err(errno) = stack.start(now) {
-        platform::println!("network.service: DHCP startup deferred errno={}", errno);
+        platform::logln!("network.service: DHCP startup deferred errno={}", errno);
     }
     if let Some(target) = ready {
         let _ = platform::service_ready::notify(target, 0);
@@ -254,7 +254,7 @@ fn handle(
             let (request_id, timeout, port, hostname) = decode_tls_connect(request).ok()?;
             match tls.connect(stack, sender, hostname, port, now, u64::from(timeout)) {
                 Ok(connection) => {
-                    platform::println!(
+                    platform::logln!(
                         "network.service: TLS established host={} version={:#06x} cipher={:#06x}",
                         connection.hostname,
                         connection.protocol_version,
@@ -279,7 +279,7 @@ fn handle(
                     .ok()
                 }
                 Err(error) => {
-                    platform::println!(
+                    platform::logln!(
                         "network.service: TLS connect failed host={} failure={:?}",
                         hostname,
                         error.failure

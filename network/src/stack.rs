@@ -60,10 +60,7 @@ pub(crate) struct NetworkStack {
     ping_reply: Option<([u8; 4], u16, u64)>,
 }
 impl NetworkStack {
-    pub(crate) fn new(
-        mut driver: DriverClient,
-        xid: u32,
-    ) -> Result<Self, u64> {
+    pub(crate) fn new(mut driver: DriverClient, xid: u32) -> Result<Self, u64> {
         let info = driver.info()?;
         let mut udp = UdpSocketTable::new(UDP_SOCKET_LIMIT, UDP_QUEUE_LIMIT, UDP_PAYLOAD_LIMIT);
         udp.bind(DHCP_CLIENT_PORT)
@@ -192,7 +189,7 @@ impl NetworkStack {
         });
         if packet.operation == ARP_REPLY && self.arp_pending == Some(packet.sender_ip) {
             self.arp_pending = None;
-            platform::println!(
+            platform::logln!(
                 "network.service: gateway ARP resolved ip={}.{}.{}.{} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                 packet.sender_ip[0],
                 packet.sender_ip[1],
@@ -250,7 +247,7 @@ impl NetworkStack {
                     let rtt = now.saturating_sub(sent);
                     self.ping_reply = Some((target, sequence, rtt));
                     self.ping_sent = None;
-                    platform::println!(
+                    platform::logln!(
                         "network.service: ICMP Echo Reply from {}.{}.{}.{} seq={} rtt={}ms",
                         target[0],
                         target[1],
@@ -322,7 +319,7 @@ impl NetworkStack {
             == mochios_network_stack::TCP_FLAG_SYN | mochios_network_stack::TCP_FLAG_ACK
             && result == TcpReceiveResult::Acknowledge
         {
-            platform::println!("network.service: TCP SYN+ACK received");
+            platform::logln!("network.service: TCP SYN+ACK received");
         }
         if let Some(acknowledgment) = acknowledgment {
             self.send_tcp(tuple, acknowledgment, now)
@@ -345,7 +342,7 @@ impl NetworkStack {
                 if self.dhcp.state != DhcpState::Selecting {
                     return Err(PacketError::Mismatch);
                 }
-                platform::println!("network.service: DHCPOFFER received");
+                platform::logln!("network.service: DHCPOFFER received");
                 self.dhcp.accept(message, now)?;
                 self.send_dhcp(DhcpMessageType::Request, now)
                     .map_err(|_| PacketError::Capacity)
@@ -360,8 +357,8 @@ impl NetworkStack {
                     dns: offer.dns,
                 });
                 self.stats.dhcp_successes = self.stats.dhcp_successes.saturating_add(1);
-                platform::println!("network.service: DHCPACK received");
-                platform::println!(
+                platform::logln!("network.service: DHCPACK received");
+                platform::logln!(
                     "network.service: configured ip={}.{}.{}.{} mask={}.{}.{}.{} gateway={}.{}.{}.{} dns={}.{}.{}.{}",
                     offer.address[0],
                     offer.address[1],
@@ -415,7 +412,7 @@ impl NetworkStack {
         self.send_ipv4([255; 4], 17, &udp[..n], BROADCAST_MAC)?;
         self.last_dhcp_send = now;
         self.stats.dhcp_attempts += 1;
-        platform::println!(
+        platform::logln!(
             "network.service: DHCP{} sent",
             if kind == DhcpMessageType::Discover {
                 "DISCOVER"
@@ -657,7 +654,7 @@ impl NetworkStack {
                         now,
                     )?;
                     self.stats.dns_queries = self.stats.dns_queries.saturating_add(1);
-                    platform::println!(
+                    platform::logln!(
                         "network.service: DNS query sent name={} attempt={}",
                         name.as_str(),
                         retry.attempts()
@@ -684,14 +681,14 @@ impl NetworkStack {
                 }
                 match decode_dns_response(&packet.payload, transaction_id, name) {
                     Ok(answer) => {
-                        platform::println!(
+                        platform::logln!(
                             "network.service: DNS response received name={}",
                             name.as_str()
                         );
                         self.dns_cache
                             .insert(name, answer.address, answer.ttl_seconds, now)
                             .map_err(dns_errno)?;
-                        platform::println!(
+                        platform::logln!(
                             "network.service: DNS resolved name={} address={}.{}.{}.{}",
                             name.as_str(),
                             answer.address[0],
@@ -791,7 +788,7 @@ impl NetworkStack {
             if state == TcpState::Established {
                 self.stats.tcp_connections_established =
                     self.stats.tcp_connections_established.saturating_add(1);
-                platform::println!(
+                platform::logln!(
                     "network.service: TCP Established remote={}.{}.{}.{}:{}",
                     remote_address[0],
                     remote_address[1],
@@ -846,7 +843,7 @@ impl NetworkStack {
             while self.poll_receive(now)? {}
             let connection = self.tcp.get_mut(handle, owner).map_err(tcp_errno)?;
             if connection.queued_send_len() == 0 && !connection.has_unacknowledged() {
-                platform::println!(
+                platform::logln!(
                     "network.service: TCP payload acknowledged bytes={}",
                     data.len()
                 );
@@ -903,7 +900,7 @@ impl NetworkStack {
             }
             if length != 0 || closed {
                 if length != 0 {
-                    platform::println!("network.service: TCP payload received bytes={}", length);
+                    platform::logln!("network.service: TCP payload received bytes={}", length);
                 }
                 return Ok((length, closed));
             }
@@ -936,7 +933,7 @@ impl NetworkStack {
             while self.poll_receive(now)? {}
             let connection = self.tcp.get_mut(handle, owner).map_err(tcp_errno)?;
             if matches!(connection.state, TcpState::TimeWait | TcpState::Closed) {
-                platform::println!("network.service: TCP FIN close complete");
+                platform::logln!("network.service: TCP FIN close complete");
                 return Ok(());
             }
             if connection.state == TcpState::Reset {
@@ -1015,7 +1012,7 @@ impl NetworkStack {
         self.send_routed_ipv4(tuple.remote_address, TCP_PROTOCOL, &segment[..length], now)?;
         self.stats.tcp_segments_sent = self.stats.tcp_segments_sent.saturating_add(1);
         if transmit.flags & mochios_network_stack::TCP_FLAG_SYN != 0 && !transmit.retransmission {
-            platform::println!("network.service: TCP SYN sent");
+            platform::logln!("network.service: TCP SYN sent");
         }
         Ok(())
     }

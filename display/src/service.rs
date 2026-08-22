@@ -9,9 +9,9 @@ static mut IPC_BUFFER: [u8; 4128] = [0; 4128];
 static mut REPLY: [u8; 20] = [0; 20];
 
 pub(crate) fn run() -> ! {
-    platform::println!("display.driver: start");
+    platform::logln!("display.driver: start");
     let Some(ready_target) = platform::service_ready::take_bootstrap_target() else {
-        platform::println!("display.driver: missing ready target");
+        platform::logln!("display.driver: missing ready target");
         platform::process::exit(1);
     };
     let mut backend = match DisplayBackend::initialize() {
@@ -32,7 +32,7 @@ pub(crate) fn run() -> ! {
         }
     };
     if platform::service_ready::notify(ready_target, 0).is_err() {
-        platform::println!("display.driver: ready notification failed");
+        platform::logln!("display.driver: ready notification failed");
         platform::process::exit(1);
     }
 
@@ -103,7 +103,7 @@ pub(crate) fn run() -> ! {
                         if let Some(pending) = pending
                             && let Err(errno) = backend.finish_present(pending)
                         {
-                            platform::println!(
+                            platform::logln!(
                                 "display.driver: deferred present failed errno={}",
                                 errno
                             );
@@ -121,10 +121,10 @@ pub(crate) fn run() -> ! {
                 let status =
                     present_gpu_panel_request(&mut backend, request, sender, shared_buffer);
                 if status == 0 && !gpu_panel_logged {
-                    platform::println!("display.driver: virgl panel composition enabled");
+                    platform::logln!("display.driver: virgl panel composition enabled");
                     gpu_panel_logged = true;
                 } else if status != 0 && !gpu_panel_logged {
-                    platform::println!(
+                    platform::logln!(
                         "display.driver: virgl panel composition failed status={}",
                         status
                     );
@@ -140,10 +140,10 @@ pub(crate) fn run() -> ! {
                 let status =
                     present_gpu_scene_request(&mut backend, request, sender, shared_buffer);
                 if status == 0 && !gpu_scene_logged {
-                    platform::println!("display.driver: ViewKit GPU rendering enabled");
+                    platform::logln!("display.driver: ViewKit GPU rendering enabled");
                     gpu_scene_logged = true;
                 } else if status != 0 && !gpu_scene_logged {
-                    platform::println!(
+                    platform::logln!(
                         "display.driver: ViewKit GPU rendering failed status={}",
                         status
                     );
@@ -158,9 +158,9 @@ pub(crate) fn run() -> ! {
                     set_cursor_image(&mut backend, request)
                 };
                 if status == 0 {
-                    platform::println!("display.driver: hardware cursor enabled");
+                    platform::logln!("display.driver: hardware cursor enabled");
                 } else {
-                    platform::println!(
+                    platform::logln!(
                         "display.driver: hardware cursor image failed status={} width={} height={} hotspot=({}, {}) bytes={}",
                         status,
                         read_u32(request, 4).unwrap_or(0),

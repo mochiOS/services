@@ -14,7 +14,7 @@ const MODIFY_CAPABILITY: &str = "account.other.modify";
 const AUTHENTICATE_CAPABILITY: &str = "account.authenticate";
 
 fn diagnostic(message: &str) {
-    platform::println!("{}", message);
+    platform::logln!("{}", message);
     let _ = platform::io::stderr(message.as_bytes());
     let _ = platform::io::stderr(b"\n");
 }
@@ -212,7 +212,7 @@ fn errno(error: std::io::Error) -> u64 {
 
 fn main() {
     let _ = platform::logger::init_from_env();
-    platform::println!("user.service: start");
+    platform::logln!("user.service: start");
     let Some(ready_target) = platform::service_ready::take_bootstrap_target() else {
         diagnostic("user.service: missing ready target");
         platform::process::exit(1);
@@ -243,7 +243,7 @@ fn main() {
         diagnostic("user.service: ready notification failed");
         platform::process::exit(1);
     }
-    platform::println!(
+    platform::logln!(
         "user.service: ready users={}",
         service.database.users().len()
     );

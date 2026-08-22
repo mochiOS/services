@@ -5,7 +5,7 @@ extern crate alloc;
 #[cfg(not(test))]
 mod bootstrap;
 mod driver_controller;
-mod fixed_service_launcher;
+mod service_launcher;
 mod orchestration;
 mod portal;
 mod readiness;

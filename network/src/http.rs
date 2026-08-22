@@ -321,7 +321,7 @@ fn exchange(
 }
 
 fn log_tls_failure(stage: &str, operation: crate::tls::TlsOperationError) {
-    platform::println!(
+    platform::logln!(
         "network.service: HTTP TLS {stage} failed failure={:?} errno={}",
         operation.failure,
         operation.errno

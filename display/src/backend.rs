@@ -24,9 +24,9 @@ impl DisplayBackend {
     pub(crate) fn initialize() -> Result<Self, u64> {
         match VirtioGpuBackend::initialize() {
             Ok(backend) => {
-                mochi_user_platform::println!("display.driver: backend=virtio-gpu");
+                mochi_user_platform::logln!("display.driver: backend=virtio-gpu");
                 if let Some((capset, version, size)) = backend.virgl_capability() {
-                    mochi_user_platform::println!(
+                    mochi_user_platform::logln!(
                         "display.driver: virgl capset={} version={} size={}",
                         capset,
                         version,
@@ -74,7 +74,7 @@ impl DisplayBackend {
     pub(crate) fn present_gpu_panel(&mut self, frame: &PanelFrame<'_>) -> Result<(), u64> {
         match self {
             Self::VirtioGpu(backend) => backend.present_gpu_panel(frame).map_err(|error| {
-                mochi_user_platform::println!(
+                mochi_user_platform::logln!(
                     "display.driver: virgl panel backend error={:?}",
                     error
                 );
@@ -90,7 +90,7 @@ impl DisplayBackend {
     ) -> Result<(), u64> {
         match self {
             Self::VirtioGpu(backend) => backend.present_gpu_scene(scene).map_err(|error| {
-                mochi_user_platform::println!(
+                mochi_user_platform::logln!(
                     "display.driver: ViewKit GPU backend error={:?}",
                     error
                 );
@@ -112,7 +112,7 @@ impl DisplayBackend {
             Self::VirtioGpu(backend) => backend
                 .set_cursor_image(width, height, hotspot_x, hotspot_y, rgba)
                 .map_err(|error| {
-                    mochi_user_platform::println!(
+                    mochi_user_platform::logln!(
                         "display.driver: hardware cursor backend error={:?}",
                         error
                     );
@@ -133,7 +133,7 @@ impl DisplayBackend {
 }
 
 fn log_fallback_once(error: GpuError) {
-    mochi_user_platform::println!(
+    mochi_user_platform::logln!(
         "display.driver: virtio-gpu unavailable, using framebuffer fallback reason={:?}",
         error
     );

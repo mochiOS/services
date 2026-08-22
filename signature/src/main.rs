@@ -54,7 +54,7 @@ struct Transfer {
 }
 
 fn diagnostic(message: &str) {
-    platform::println!("{}", message);
+    platform::logln!("{}", message);
     let _ = platform::io::stderr(message.as_bytes());
     let _ = platform::io::stderr(b"\n");
 }
@@ -461,7 +461,7 @@ fn run_server() -> ! {
     let endpoint = match platform::ipc::create() {
         Ok(endpoint) => endpoint,
         Err(err) => {
-            platform::println!(
+            platform::logln!(
                 "signature.service: endpoint create failed errno={}",
                 err.errno().unwrap_or(0)
             );
@@ -469,7 +469,7 @@ fn run_server() -> ! {
         }
     };
     let mut database = load_active_database();
-    platform::println!("signature.service: ready");
+    platform::logln!("signature.service: ready");
     let mut transfer: Option<Transfer> = None;
     let mut buf = [0u8; IPC_BUFFER_LEN];
     loop {
@@ -639,7 +639,7 @@ fn load_active_database() -> Option<ActiveDatabase> {
     match ActiveDatabase::load(ROOT_PUBLIC_KEYS) {
         Ok(database) => {
             let state = database.state();
-            platform::println!(
+            platform::logln!(
                 "signature.service: certificate database trust={} revocations={} generation={} recovered={}",
                 state.trust.snapshot_version,
                 state.revocations.snapshot_version,
@@ -659,13 +659,13 @@ fn load_active_database() -> Option<ActiveDatabase> {
 
 fn handle_update_notification(sender: u64, request: &[u8], database: &mut Option<ActiveDatabase>) {
     if platform::capability::check_thread(sender, DATABASE_UPDATE_CAPABILITY) != Ok(1) {
-        platform::println!("signature.service: update notification denied");
+        platform::logln!("signature.service: update notification denied");
         return;
     }
     let notification = match UpdateNotification::decode(request) {
         Ok(notification) => notification,
         Err(error) => {
-            platform::println!(
+            platform::logln!(
                 "signature.service: invalid update notification error={:?}",
                 error
             );
@@ -673,7 +673,7 @@ fn handle_update_notification(sender: u64, request: &[u8], database: &mut Option
         }
     };
     let Some(reloaded) = load_active_database() else {
-        platform::println!("signature.service: update reload rejected");
+        platform::logln!("signature.service: update reload rejected");
         return;
     };
     let state = reloaded.state();
@@ -684,14 +684,14 @@ fn handle_update_notification(sender: u64, request: &[u8], database: &mut Option
         _ => return,
     };
     if generation < notification.generation || snapshot_version < notification.snapshot_version {
-        platform::println!(
+        platform::logln!(
             "signature.service: update notification state mismatch opcode={:?}",
             notification.opcode
         );
         return;
     }
     *database = Some(reloaded);
-    platform::println!(
+    platform::logln!(
         "signature.service: certificate database reloaded opcode={:?} version={} generation={}",
         notification.opcode,
         snapshot_version,
@@ -708,14 +708,14 @@ fn main() {
             mpkg_path = Some(argument);
         }
     }
-    platform::println!("signature.service: trust domain {}", TRUST_DOMAIN);
+    platform::logln!("signature.service: trust domain {}", TRUST_DOMAIN);
     let Some(mpkg_path) = mpkg_path else {
         run_server();
     };
 
-    platform::println!("signature.service: start {}", mpkg_path);
+    platform::logln!("signature.service: start {}", mpkg_path);
     let Some(database) = load_active_database() else {
-        platform::println!(
+        platform::logln!(
             "signature.service: verify failed errno={}",
             mochi_user_syscall::EAGAIN
         );
@@ -724,7 +724,7 @@ fn main() {
     let now_utc = match platform::time::utc_seconds() {
         Ok(now) => now,
         Err(_) => {
-            platform::println!(
+            platform::logln!(
                 "signature.service: verify failed errno={}",
                 mochi_user_syscall::EAGAIN
             );
@@ -733,11 +733,11 @@ fn main() {
     };
     match verify_package(&mpkg_path, &database, now_utc) {
         Ok(_) => {
-            platform::println!("signature.service: verified {}", mpkg_path);
+            platform::logln!("signature.service: verified {}", mpkg_path);
             platform::process::exit(0);
         }
         Err(err) => {
-            platform::println!(
+            platform::logln!(
                 "signature.service: verify failed errno={}",
                 err.errno().unwrap_or(0)
             );

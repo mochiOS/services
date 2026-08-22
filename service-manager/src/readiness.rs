@@ -1,7 +1,15 @@
+use alloc::collections::VecDeque;
+use alloc::vec::Vec;
 use mochi_user_platform as platform;
 
 use crate::service_config::{NETWORK_READY_TIMEOUT_TICKS, SERVICE_READY_TIMEOUT_TICKS};
 const WAIT_NO_HANG: u64 = 1;
+const BOOTSTRAP_MESSAGE_LEN: usize = 1024;
+
+pub(crate) struct DeferredMessage {
+    pub(crate) sender: u64,
+    pub(crate) bytes: Vec<u8>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReadyService {
@@ -47,6 +55,7 @@ pub(crate) struct ReadyHandshake {
     network_status: platform::service_ready::OneShotStatus,
     user_status: platform::service_ready::OneShotStatus,
     secure_ui_status: platform::service_ready::OneShotStatus,
+    deferred: VecDeque<DeferredMessage>,
 }
 
 impl ReadyHandshake {
@@ -103,7 +112,12 @@ impl ReadyHandshake {
             network_status: platform::service_ready::OneShotStatus::new(),
             user_status: platform::service_ready::OneShotStatus::new(),
             secure_ui_status: platform::service_ready::OneShotStatus::new(),
+            deferred: VecDeque::new(),
         })
+    }
+
+    pub(crate) fn take_deferred(&mut self) -> VecDeque<DeferredMessage> {
+        core::mem::take(&mut self.deferred)
     }
 
     pub(crate) const fn target(&self, service: ReadyService) -> platform::service_ready::Target {
@@ -177,6 +191,9 @@ impl ReadyHandshake {
                         ready_result(status)?;
                         return Ok(identity);
                     }
+                    ReceivedNotification::Deferred(message) => {
+                        self.deferred.push_back(message);
+                    }
                 }
             }
             if let Some(status) = process_exit_status(process_id)? {
@@ -205,6 +222,9 @@ impl ReadyHandshake {
                     }
                     ReceivedNotification::Session { .. } => {
                         return Err(ReadyError::InvalidMessage);
+                    }
+                    ReceivedNotification::Deferred(message) => {
+                        self.deferred.push_back(message);
                     }
                 }
             }
@@ -250,38 +270,48 @@ enum ReceivedNotification {
         status: i32,
         identity: platform::service_ready::SessionIdentity,
     },
+    Deferred(DeferredMessage),
 }
 
 #[inline(never)]
 fn receive_notification() -> Result<Option<ReceivedNotification>, ReadyError> {
-    let mut message = [0u8; platform::service_ready::MAX_MESSAGE_LEN];
+    let mut message = [0u8; BOOTSTRAP_MESSAGE_LEN];
     let received = match platform::ipc::try_wait(&mut message) {
         Ok(received) => received,
         Err(error) if error.raw() == mochi_user_syscall::EAGAIN as i64 => return Ok(None),
         Err(error) => return Err(ReadyError::Ipc(error.raw().unsigned_abs())),
     };
     let length = (received & 0xffff_ffff) as usize;
+    let sender = received >> 32;
     let Some(message) = message.get(..length) else {
         return Err(ReadyError::InvalidMessage);
     };
     match length {
         platform::service_ready::MESSAGE_LEN => {
-            let (token, status) = platform::service_ready::decode_notification(message)
-                .map_err(|_| ReadyError::InvalidMessage)?;
-            Ok(Some(ReceivedNotification::Ready { token, status }))
+            match platform::service_ready::decode_notification(message) {
+                Ok((token, status)) => Ok(Some(ReceivedNotification::Ready { token, status })),
+                Err(_) => Ok(Some(deferred_message(sender, message))),
+            }
         }
         platform::service_ready::SESSION_MESSAGE_LEN => {
-            let (token, status, identity) =
-                platform::service_ready::decode_session_notification(message)
-                    .map_err(|_| ReadyError::InvalidMessage)?;
-            Ok(Some(ReceivedNotification::Session {
-                token,
-                status,
-                identity,
-            }))
+            match platform::service_ready::decode_session_notification(message) {
+                Ok((token, status, identity)) => Ok(Some(ReceivedNotification::Session {
+                    token,
+                    status,
+                    identity,
+                })),
+                Err(_) => Ok(Some(deferred_message(sender, message))),
+            }
         }
-        _ => Err(ReadyError::InvalidMessage),
+        _ => Ok(Some(deferred_message(sender, message))),
     }
+}
+
+fn deferred_message(sender: u64, message: &[u8]) -> ReceivedNotification {
+    ReceivedNotification::Deferred(DeferredMessage {
+        sender,
+        bytes: message.to_vec(),
+    })
 }
 
 #[inline(never)]

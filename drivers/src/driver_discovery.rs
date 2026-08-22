@@ -19,7 +19,7 @@ fn read_dir_names(path: &str) -> Vec<String> {
     match platform::file::read_dir_names(path) {
         Ok(names) => names,
         Err(err) => {
-            platform::println!(
+            platform::logln!(
                 "drivers.service: open dir failed {} errno={}",
                 path,
                 err.errno().unwrap_or(0)

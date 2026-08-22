@@ -16,6 +16,6 @@ fn report_missing_capability(capability: &str) {
         mochi_user_platform::capability::query(bytes.as_ptr() as u64, bytes.len() as u64),
         Ok(1)
     ) {
-        eprintln!("secure-ui.service: missing runtime capability {capability}");
+        mochi_user_platform::logln!("secure-ui.service: missing runtime capability {capability}");
     }
 }

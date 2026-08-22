@@ -52,7 +52,7 @@ pub(crate) fn resolve_capabilities(
     let service_tid = match platform::process::find_by_name(CAPABILITY_SERVICE_NAME) {
         Ok(tid) => tid,
         Err(err) => {
-            platform::println!(
+            platform::logln!(
                 "drivers.service: capability.service lookup failed errno={}",
                 err.errno().unwrap_or(0)
             );
@@ -60,7 +60,7 @@ pub(crate) fn resolve_capabilities(
         }
     };
     if service_tid == 0 {
-        platform::println!("drivers.service: capability.service not found");
+        platform::logln!("drivers.service: capability.service not found");
         return Err(sys_error(mochi_user_syscall::ENOENT));
     }
     let request = platform::capability::encode_resolve_capabilities_request(entry_path)
@@ -69,7 +69,7 @@ pub(crate) fn resolve_capabilities(
     let msg = match call_capability_service(service_tid, &request, &mut reply) {
         Ok(msg) => msg,
         Err(err) => {
-            platform::println!(
+            platform::logln!(
                 "drivers.service: capability request failed {} errno={}",
                 entry_path,
                 err.errno().unwrap_or(0)
@@ -79,7 +79,7 @@ pub(crate) fn resolve_capabilities(
     };
     let len = (msg & 0xffff_ffff) as usize;
     if len > reply.len() {
-        platform::println!(
+        platform::logln!(
             "drivers.service: capability reply invalid {} len={}",
             entry_path,
             len
@@ -89,7 +89,7 @@ pub(crate) fn resolve_capabilities(
     let response = platform::capability::decode_resolve_capabilities_reply(&reply[..len])
         .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
     if response.status != 0 {
-        platform::println!(
+        platform::logln!(
             "drivers.service: capability denied {} errno={}",
             entry_path,
             response.status

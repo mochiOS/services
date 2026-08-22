@@ -49,7 +49,7 @@ impl VirglState {
         let panel = match PanelRenderer::initialize(channel, geometry) {
             Ok(panel) => Some(panel),
             Err(error) => {
-                mochi_user_platform::println!(
+                mochi_user_platform::logln!(
                     "display.driver: virgl panel initialization failed error={:?}",
                     error
                 );
@@ -59,7 +59,7 @@ impl VirglState {
         let scene = match SceneRenderer::initialize(channel, geometry) {
             Ok(scene) => Some(scene),
             Err(error) => {
-                mochi_user_platform::println!(
+                mochi_user_platform::logln!(
                     "display.driver: ViewKit GPU initialization failed error={:?}",
                     error
                 );

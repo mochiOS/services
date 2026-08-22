@@ -29,7 +29,7 @@ pub fn run() -> ! {
     match config {
         Ok(config) => control_worker::run(config),
         Err(error) => {
-            mochi_user_platform::println!(
+            mochi_user_platform::logln!(
                 "drivers.service: invalid --driver-manager argument error={:?}",
                 error
             );

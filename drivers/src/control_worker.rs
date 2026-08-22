@@ -10,7 +10,7 @@ use crate::startup_args::DriverManagerConfig;
 const CONTROL_BUFFER_LEN: usize = DRIVER_HELLO_LEN;
 
 pub(crate) fn run(config: DriverManagerConfig) -> ! {
-    platform::println!("drivers.service: start");
+    platform::logln!("drivers.service: start");
     let logger_endpoint = match platform::logger::endpoint() {
         Some(endpoint) => endpoint,
         None => 0,
@@ -22,7 +22,7 @@ pub(crate) fn run(config: DriverManagerConfig) -> ! {
                 Some(errno) => errno,
                 None => 0,
             };
-            platform::println!(
+            platform::logln!(
                 "drivers.service: control endpoint create failed errno={}",
                 errno
             );
@@ -36,7 +36,7 @@ pub(crate) fn run(config: DriverManagerConfig) -> ! {
                 Some(errno) => errno,
                 None => 0,
             };
-            platform::println!(
+            platform::logln!(
                 "drivers.service: hello request id generation failed errno={}",
                 errno
             );
@@ -151,10 +151,10 @@ enum SendError {
 fn log_send_error(operation: &str, error: SendError) {
     match error {
         SendError::Encode(error) => {
-            platform::println!("drivers.service: {} failed error={:?}", operation, error)
+            platform::logln!("drivers.service: {} failed error={:?}", operation, error)
         }
         SendError::Ipc(errno) => {
-            platform::println!("drivers.service: {} failed errno={}", operation, errno)
+            platform::logln!("drivers.service: {} failed errno={}", operation, errno)
         }
     }
 }

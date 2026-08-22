@@ -60,14 +60,14 @@ pub(crate) fn serve_capability_requests(state: CapabilityServiceState) -> ! {
     let endpoint = match platform::ipc::create() {
         Ok(endpoint) => endpoint,
         Err(err) => {
-            platform::println!(
+            platform::logln!(
                 "capability.service: endpoint create failed errno={}",
                 err.errno().unwrap_or(0)
             );
             platform::process::exit(1);
         }
     };
-    platform::println!("capability.service: ready");
+    platform::logln!("capability.service: ready");
     let mut buf = [0u8; 1024];
     loop {
         let msg = match platform::ipc::wait(endpoint, &mut buf) {

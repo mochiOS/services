@@ -119,6 +119,7 @@ impl HostClient {
         entrypoint: &str,
         user: &str,
         writable_paths: &[String],
+        network: bool,
     ) -> Result<(), HostError> {
         let writable = if writable_paths.is_empty() {
             String::from("none")
@@ -133,6 +134,7 @@ impl HostClient {
                 Argument::new("entry", entrypoint),
                 Argument::new("user", user),
                 Argument::new("writable", writable),
+                Argument::new("network", if network { "client" } else { "none" }),
             ],
         )?;
         Ok(())
