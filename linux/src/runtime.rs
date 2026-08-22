@@ -1,7 +1,8 @@
 use mochi_user_platform as platform;
 use mochios_linux_gui_protocol::{
     BundleLaunchRequest, BundleLaunchResponse, LAUNCH_RESPONSE_LEN, LaunchRequest, LaunchResponse,
-    Opcode, STATUS_RESPONSE_LEN, StatusRequest, StatusResponse, decode_opcode,
+    Opcode, PREPARE_BUNDLE_RESPONSE_LEN, PrepareBundleRequest, PrepareBundleResponse,
+    STATUS_RESPONSE_LEN, StatusRequest, StatusResponse, decode_opcode,
 };
 
 use crate::compositor::Surface;
@@ -78,10 +79,14 @@ pub(crate) fn run() -> ! {
                         &mut instances,
                         &mut next_instance,
                     ),
+                    Ok(Opcode::PrepareBundle) => {
+                        handle_prepare_bundle(message, sender, &mut host, &mut next_instance)
+                    }
                     Ok(Opcode::Status) => handle_status(message, sender, &instances),
                     Ok(
                         Opcode::LaunchResponse
                         | Opcode::LaunchBundleResponse
+                        | Opcode::PrepareBundleResponse
                         | Opcode::StatusResponse,
                     ) => {}
                     Err(_) => handle_event(message, &mut instances, &mut host),
@@ -94,6 +99,55 @@ pub(crate) fn run() -> ! {
         let now = platform::time::ticks().unwrap_or_default();
         instances.retain_mut(|instance| update_instance(instance, &mut host, now));
         platform::thread::yield_now();
+    }
+}
+
+fn handle_prepare_bundle(
+    request: &[u8],
+    sender: u64,
+    host: &mut HostClient,
+    next_instance: &mut u64,
+) {
+    let decoded = PrepareBundleRequest::decode(request);
+    let request_id = decoded.as_ref().map_or(0, |request| request.request_id);
+    let owner = platform::ipc::endpoint_owner_process(sender).ok();
+    let package_service = platform::process::find_by_name("package.service").ok();
+    let authorized = owner.is_some() && owner == package_service;
+    let status = if !authorized {
+        -(mochi_user_syscall::EPERM as i32)
+    } else {
+        decoded
+            .map_err(|_| -(mochi_user_syscall::EINVAL as i32))
+            .and_then(|request| {
+                let instance = allocate_instance(next_instance);
+                platform::logln!(
+                    "linux.service: install-time staging bundle={} instance={} bytes={}",
+                    request.bundle_id,
+                    instance,
+                    request.rootfs_size
+                );
+                host.stage_bundle_range(
+                    instance,
+                    request.bundle_id,
+                    request.source_path,
+                    request.rootfs_offset,
+                    request.rootfs_size,
+                    request.rootfs_digest,
+                )
+                .map_err(|error| {
+                    platform::logln!(
+                        "linux.service: install-time staging failed bundle={} error={error:?}",
+                        request.bundle_id
+                    );
+                    host_status(error)
+                })
+            })
+            .map_or_else(|error| error, |_| 0)
+    };
+    let response = PrepareBundleResponse { request_id, status };
+    let mut encoded = [0u8; PREPARE_BUNDLE_RESPONSE_LEN];
+    if let Ok(length) = response.encode(&mut encoded) {
+        let _ = platform::ipc::reply(sender, &encoded[..length]);
     }
 }
 

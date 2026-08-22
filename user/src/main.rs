@@ -172,6 +172,7 @@ impl UserService {
 
     fn handle_authenticate(&self, sender: u64, request: &[u8]) {
         let Ok(request) = Authenticate::decode(request) else {
+            platform::logln!("user.service: rejected malformed authentication request");
             self.reply_status(sender, 0, mochi_user_syscall::EINVAL);
             return;
         };
@@ -182,10 +183,19 @@ impl UserService {
         };
         let verified = password::verify(request.password, stored_hash);
         let Some(user) = user else {
+            platform::logln!(
+                "user.service: authentication denied request={} reason=unknown-user",
+                request.request_id
+            );
             self.reply_status(sender, request.request_id, mochi_user_syscall::EACCES);
             return;
         };
         if user.locked || !verified {
+            platform::logln!(
+                "user.service: authentication denied request={} reason={}",
+                request.request_id,
+                if user.locked { "locked" } else { "credential" }
+            );
             self.reply_status(sender, request.request_id, mochi_user_syscall::EACCES);
             return;
         }
@@ -198,8 +208,22 @@ impl UserService {
             shell: &user.shell,
         };
         let mut buffer = [0u8; MAX_MESSAGE_LEN];
-        if let Ok(length) = response.encode(&mut buffer) {
-            let _ = platform::ipc::reply(sender, &buffer[..length]);
+        match response.encode(&mut buffer) {
+            Ok(length) => {
+                platform::logln!(
+                    "user.service: authentication accepted request={} response_bytes={}",
+                    request.request_id,
+                    length
+                );
+                let _ = platform::ipc::reply(sender, &buffer[..length]);
+            }
+            Err(_) => {
+                platform::logln!(
+                    "user.service: authentication response encode failed request={}",
+                    request.request_id
+                );
+                self.reply_status(sender, request.request_id, mochi_user_syscall::EIO);
+            }
         }
     }
 }
@@ -270,6 +294,10 @@ fn main() {
             }
         };
         if platform::capability::check_thread(sender, required_capability) != Ok(1) {
+            platform::logln!(
+                "user.service: request denied missing capability={}",
+                required_capability
+            );
             service.reply_status(sender, 0, mochi_user_syscall::EACCES);
             continue;
         }

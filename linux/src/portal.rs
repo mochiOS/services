@@ -6,8 +6,8 @@ use std::path::Path;
 
 use mochi_user_platform as platform;
 use mochios_linux_portal_protocol::{
-    Access, GRANT_RESPONSE_LEN, NETWORK_RESPONSE_LEN, GrantDirectoryRequest,
-    GrantDirectoryResponse, RequestNetworkRequest, RequestNetworkResponse,
+    Access, GRANT_RESPONSE_LEN, GrantDirectoryRequest, GrantDirectoryResponse,
+    NETWORK_RESPONSE_LEN, RequestNetworkRequest, RequestNetworkResponse,
 };
 
 use crate::host::{HostClient, HostError, PortalEntryKind};
@@ -15,23 +15,29 @@ use crate::host::{HostClient, HostError, PortalEntryKind};
 const SERVICE_MANAGER_NAME: &str = "service-manager.service";
 const REQUEST_BUFFER_LEN: usize = 1024;
 
-pub(crate) fn request_network(
-    instance: u64,
-    bundle_id: &str,
-    user: &str,
-) -> Result<(), i32> {
+pub(crate) fn request_network(instance: u64, bundle_id: &str, user: &str) -> Result<(), i32> {
     let session_id = session_id()?;
     let service = service_manager()?;
     let request_id = instance.wrapping_mul(257).wrapping_add(0x80).max(1);
-    let request = RequestNetworkRequest { request_id, session_id, bundle_id, user };
+    let request = RequestNetworkRequest {
+        request_id,
+        session_id,
+        bundle_id,
+        user,
+    };
     let mut encoded = [0u8; REQUEST_BUFFER_LEN];
-    let length = request.encode(&mut encoded).map_err(|_| -(mochi_user_syscall::EINVAL as i32))?;
+    let length = request
+        .encode(&mut encoded)
+        .map_err(|_| -(mochi_user_syscall::EINVAL as i32))?;
     let mut reply = [0u8; NETWORK_RESPONSE_LEN];
     let received = platform::ipc::call(service, &encoded[..length], &mut reply)
         .map_err(|_| -(mochi_user_syscall::EIO as i32))?;
     let response = RequestNetworkResponse::decode(
-        reply.get(..(received as u32 as usize)).ok_or(-(mochi_user_syscall::EINVAL as i32))?
-    ).map_err(|_| -(mochi_user_syscall::EINVAL as i32))?;
+        reply
+            .get(..(received as u32 as usize))
+            .ok_or(-(mochi_user_syscall::EINVAL as i32))?,
+    )
+    .map_err(|_| -(mochi_user_syscall::EINVAL as i32))?;
     if response.request_id != request_id {
         return Err(-(mochi_user_syscall::EPERM as i32));
     }

@@ -167,6 +167,16 @@ pub(crate) fn spawn_network_prompt(
     spawn(fixed_service_spec(FixedService::SecureUi), &arguments)
 }
 
+pub(crate) fn spawn_permission_prompt_server(
+    logger_endpoint: u64,
+    token: u64,
+) -> Result<u64, mochi_user_syscall::SysError> {
+    let mut arguments = fixed_service_arguments(FixedService::SecureUi, logger_endpoint, None);
+    arguments.push("--permission-prompt-server".to_owned());
+    arguments.push(alloc::format!("--permission-prompt-token={token}"));
+    spawn(fixed_service_spec(FixedService::SecureUi), &arguments)
+}
+
 fn session_user(uid: u32) -> Option<mochios_user_database::UserRecord> {
     use mochios_user_database::{DATABASE_PATH, UserDatabase};
 

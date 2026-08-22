@@ -12,6 +12,7 @@ members = [
     "mboot-agent",
     "network",
     "package",
+    "permission-prompt-protocol",
     "service-manager",
     "secure-ui",
     "signature",

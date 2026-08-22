@@ -14,14 +14,18 @@ pub(crate) fn from_arguments() -> Option<String> {
 }
 
 pub(crate) fn run(application: String) -> Result<(), ViewKitError> {
-    let _ = APPLICATION.set(application);
-    DECISION.store(0, Ordering::Release);
-    viewkit::run::<NetworkPromptApp>()?;
-    if DECISION.load(Ordering::Acquire) > 0 {
+    if decide(application)? {
         Ok(())
     } else {
         std::process::exit(1)
     }
+}
+
+pub(crate) fn decide(application: String) -> Result<bool, ViewKitError> {
+    let _ = APPLICATION.set(application);
+    DECISION.store(0, Ordering::Release);
+    viewkit::run::<NetworkPromptApp>()?;
+    Ok(DECISION.load(Ordering::Acquire) > 0)
 }
 
 struct NetworkPromptApp;
@@ -29,17 +33,23 @@ struct NetworkPromptApp;
 impl App for NetworkPromptApp {
     type Body = Box<dyn View + 'static>;
 
-    fn new() -> Self { Self }
+    fn new() -> Self {
+        Self
+    }
 
     fn window(&self) -> WindowOptions {
         WindowOptions::new("Network Access")
             .size(520.0, 330.0)
             .resizable(false)
             .secure_overlay(true)
+            .fullscreen(false)
     }
 
     fn body(&self, _context: &ViewContext) -> Self::Body {
-        let application = APPLICATION.get().cloned().unwrap_or_else(|| "This application".to_owned());
+        let application = APPLICATION
+            .get()
+            .cloned()
+            .unwrap_or_else(|| "This application".to_owned());
         Box::new(
             ZStack::new()
                 .alignment(ZStackAlignment::Center)
@@ -63,8 +73,8 @@ impl App for NetworkPromptApp {
                                     .alignment(StackAlignment::Center)
                                     .distribution(StackDistribution::Center)
                                     .gap(StackGap::Medium)
-                                    .child(Button::new("Don't Allow").style(ButtonStyle::Standard).on_click(|| finish(false)).frame(132.0, 38.0))
-                                    .child(Button::new("Allow").style(ButtonStyle::Accent).on_click(|| finish(true)).frame(132.0, 38.0)))
+                                    .child(Button::new("Don't Allow").style(ButtonStyle::Standard).radius(CornerRadius::Full).on_click(|| finish(false)).frame(132.0, 38.0))
+                                    .child(Button::new("Allow").style(ButtonStyle::Accent).radius(CornerRadius::Full).on_click(|| finish(true)).frame(132.0, 38.0)))
                         )
                     ).frame(520.0, 330.0)
                 )

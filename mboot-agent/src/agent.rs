@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 
 use mboot_protocol::{
-    Argument, Body, Destination, ErrorCode, KnownCommand, Message, MessageType, VERSION,
-    decode_line, encode_to_string,
+    Argument, BULK_STAGE_HEADER_LEN, BULK_STAGE_MAGIC, Body, Destination, ErrorCode, KnownCommand,
+    MAX_BULK_STAGE_BYTES, Message, MessageType, VERSION, decode_line, encode_to_string,
 };
 
 use crate::decoder::LineDecoder;
@@ -14,6 +14,8 @@ const WIFI_REQUEST_TIMEOUT_MS: u64 = 15_000;
 const MAX_HEARTBEAT_MS: u64 = 3_600_000;
 const READ_CHUNK: usize = 1024;
 const MAX_READS_PER_TICK: usize = 32;
+const STAGE_BATCH_BYTES: usize = MAX_BULK_STAGE_BYTES;
+const MAX_EXTERNAL_OUTBOUND_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ReadyStage {
@@ -82,6 +84,12 @@ struct ExternalRequest {
     deadline_ms: u64,
 }
 
+struct StageBatch {
+    instance: u64,
+    offset: u64,
+    bytes: Vec<u8>,
+}
+
 pub struct Agent {
     version: String,
     boot_id: String,
@@ -93,6 +101,7 @@ pub struct Agent {
     pending: Option<PendingRequest>,
     external_pending: Option<ExternalRequest>,
     external_response: Option<Message>,
+    stage_batch: Option<StageBatch>,
     handshake_deadline_ms: Option<u64>,
     session: Option<String>,
     heartbeat_ms: Option<u64>,
@@ -114,6 +123,7 @@ impl Agent {
             pending: None,
             external_pending: None,
             external_response: None,
+            stage_batch: None,
             handshake_deadline_ms: None,
             session: None,
             heartbeat_ms: None,
@@ -190,6 +200,8 @@ impl Agent {
         {
             return Err(ExternalRequestError::InvalidRequest);
         }
+        self.flush_stage_batch()
+            .map_err(|_| ExternalRequestError::Encode)?;
         let host_request_id = self.allocate_request_id();
         let client_request_id = message.request_id;
         let command = message
@@ -213,6 +225,79 @@ impl Agent {
 
     pub fn take_external_response(&mut self) -> Option<Message> {
         self.external_response.take()
+    }
+
+    pub fn queue_external_event(&mut self, message: Message) -> Result<(), ExternalRequestError> {
+        if !self.is_negotiated() {
+            return Err(ExternalRequestError::NotNegotiated);
+        }
+        if message.destination != Destination::Mboot
+            || message.message_type != MessageType::Event
+            || message.request_id != 0
+            || message.known_command() != Some(KnownCommand::LinuxStageChunk)
+        {
+            return Err(ExternalRequestError::InvalidRequest);
+        }
+        let instance = message
+            .argument("instance")
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or(ExternalRequestError::InvalidRequest)?;
+        let offset = message
+            .argument("offset")
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or(ExternalRequestError::InvalidRequest)?;
+        if message.argument("encoding") != Some("base64") {
+            return Err(ExternalRequestError::InvalidRequest);
+        }
+        let bytes = decode_base64(
+            message
+                .argument("data")
+                .ok_or(ExternalRequestError::InvalidRequest)?,
+        )?;
+        if bytes.is_empty() {
+            return Err(ExternalRequestError::InvalidRequest);
+        }
+        self.queue_external_stage_bytes(instance, offset, &bytes)
+    }
+
+    pub fn queue_external_stage_bytes(
+        &mut self,
+        instance: u64,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<(), ExternalRequestError> {
+        if !self.is_negotiated() || bytes.is_empty() {
+            return Err(ExternalRequestError::InvalidRequest);
+        }
+        match self.stage_batch.as_mut() {
+            Some(batch)
+                if batch.instance == instance
+                    && offset == batch.offset.saturating_add(batch.bytes.len() as u64) =>
+            {
+                batch.bytes.extend_from_slice(bytes);
+            }
+            None => {
+                self.stage_batch = Some(StageBatch {
+                    instance,
+                    offset,
+                    bytes: bytes.to_vec(),
+                });
+            }
+            Some(_) => return Err(ExternalRequestError::InvalidRequest),
+        }
+        if self
+            .stage_batch
+            .as_ref()
+            .is_some_and(|batch| batch.bytes.len() >= STAGE_BATCH_BYTES)
+        {
+            self.flush_stage_batch()
+                .map_err(|_| ExternalRequestError::Encode)?;
+        }
+        Ok(())
+    }
+
+    pub fn can_accept_external_event(&self) -> bool {
+        self.outbound.len() < MAX_EXTERNAL_OUTBOUND_BYTES
     }
 
     pub const fn external_request_pending(&self) -> bool {
@@ -482,6 +567,23 @@ impl Agent {
         Ok(())
     }
 
+    fn flush_stage_batch(&mut self) -> Result<(), AgentError> {
+        let Some(batch) = self.stage_batch.take() else {
+            return Ok(());
+        };
+        if batch.bytes.len() > MAX_BULK_STAGE_BYTES {
+            return Err(AgentError::Encode);
+        }
+        let mut header = [0u8; BULK_STAGE_HEADER_LEN];
+        header[..8].copy_from_slice(&BULK_STAGE_MAGIC);
+        header[8..16].copy_from_slice(&batch.instance.to_le_bytes());
+        header[16..24].copy_from_slice(&batch.offset.to_le_bytes());
+        header[24..32].copy_from_slice(&(batch.bytes.len() as u64).to_le_bytes());
+        self.outbound.extend(header);
+        self.outbound.extend(batch.bytes);
+        Ok(())
+    }
+
     fn flush(&mut self, transport: &mut impl ControlTransport) -> Result<(), AgentError> {
         while !self.outbound.is_empty() {
             let contiguous = self.outbound.make_contiguous();
@@ -521,11 +623,58 @@ impl Agent {
         self.pending = None;
         self.external_pending = None;
         self.external_response = None;
+        self.stage_batch = None;
         self.handshake_deadline_ms = None;
         self.session = None;
         self.heartbeat_ms = None;
         self.next_heartbeat_ms = None;
         self.sent_stage = 0;
+    }
+}
+
+fn decode_base64(encoded: &str) -> Result<Vec<u8>, ExternalRequestError> {
+    if encoded.is_empty() || encoded.len() % 4 == 1 {
+        return Err(ExternalRequestError::InvalidRequest);
+    }
+    let mut decoded = Vec::with_capacity(encoded.len() / 4 * 3 + 2);
+    for chunk in encoded.as_bytes().chunks(4) {
+        if chunk.len() < 2 {
+            return Err(ExternalRequestError::InvalidRequest);
+        }
+        let a = base64_digit(chunk[0])?;
+        let b = base64_digit(chunk[1])?;
+        let c = chunk
+            .get(2)
+            .copied()
+            .map(base64_digit)
+            .transpose()?
+            .unwrap_or(0);
+        let d = chunk
+            .get(3)
+            .copied()
+            .map(base64_digit)
+            .transpose()?
+            .unwrap_or(0);
+        let bits = (u32::from(a) << 18) | (u32::from(b) << 12) | (u32::from(c) << 6) | u32::from(d);
+        decoded.push((bits >> 16) as u8);
+        if chunk.len() > 2 {
+            decoded.push((bits >> 8) as u8);
+        }
+        if chunk.len() > 3 {
+            decoded.push(bits as u8);
+        }
+    }
+    Ok(decoded)
+}
+
+fn base64_digit(byte: u8) -> Result<u8, ExternalRequestError> {
+    match byte {
+        b'A'..=b'Z' => Ok(byte - b'A'),
+        b'a'..=b'z' => Ok(byte - b'a' + 26),
+        b'0'..=b'9' => Ok(byte - b'0' + 52),
+        b'+' => Ok(62),
+        b'/' => Ok(63),
+        _ => Err(ExternalRequestError::InvalidRequest),
     }
 }
 

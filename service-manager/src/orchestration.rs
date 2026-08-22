@@ -505,10 +505,7 @@ mod tests {
         let outcome = orchestrate(&mut network_failure);
         assert_eq!(outcome.reason, StopReason::Running);
         assert_eq!(outcome.children.update, Some(18));
-        assert_eq!(
-            network_failure.events.last(),
-            Some(&Event::WaitNetwork)
-        );
+        assert_eq!(network_failure.events.last(), Some(&Event::WaitNetwork));
         let update = network_failure
             .events
             .iter()
@@ -523,9 +520,6 @@ mod tests {
         let outcome = orchestrate(&mut update_failure);
         assert_eq!(outcome.reason, StopReason::Running);
         assert_eq!(outcome.children.update, None);
-        assert_eq!(
-            update_failure.events.last(),
-            Some(&Event::WaitNetwork)
-        );
+        assert_eq!(update_failure.events.last(), Some(&Event::WaitNetwork));
     }
 }

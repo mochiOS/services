@@ -55,8 +55,6 @@ struct Transfer {
 
 fn diagnostic(message: &str) {
     platform::logln!("{}", message);
-    let _ = platform::io::stderr(message.as_bytes());
-    let _ = platform::io::stderr(b"\n");
 }
 
 fn parse_octal(bytes: &[u8]) -> Option<usize> {
@@ -296,6 +294,112 @@ fn verify_package(
 ) -> Result<Verification, mochi_user_syscall::SysError> {
     let bytes = platform::file::read_to_end_path(mpkg_path)?;
     verify_package_bytes(&bytes, database, now_utc)
+}
+
+fn verify_package_metadata(
+    mpkg_path: &str,
+    database: &ActiveDatabase,
+    now_utc: u64,
+) -> Result<Verification, mochi_user_syscall::SysError> {
+    let index = platform::package::index_mpkg(mpkg_path)?;
+    if index.entries.iter().any(|entry| {
+        entry.path.starts_with("signatures/chain/")
+            || (entry.path.starts_with("signatures/")
+                && entry.path != "signatures/manifest.sig"
+                && entry.path != "signatures/developer.cert")
+    }) {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
+    }
+    let sig_entry = index
+        .entry("signatures/manifest.sig")
+        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOENT as i64))?;
+    let cert_entry = index
+        .entry("signatures/developer.cert")
+        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOENT as i64))?;
+    let signature_data =
+        platform::package::read_mpkg_range(mpkg_path, sig_entry.offset, sig_entry.size)?;
+    let certificate_data =
+        platform::package::read_mpkg_range(mpkg_path, cert_entry.offset, cert_entry.size)?;
+    let manifest_text = core::str::from_utf8(&index.manifest)
+        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    let manifest = platform::package::parse_manifest(manifest_text)
+        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    if manifest.package_id.is_empty()
+        || !matches!(
+            manifest.package_kind.as_deref(),
+            None | Some("binary") | Some("application")
+        )
+    {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
+    }
+    let certificate = DeveloperCertificate::decode(&certificate_data)
+        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    let issuer_public_key = database
+        .issuer_public_key(&certificate, now_utc)
+        .map_err(database_verify_error)?;
+    certificate
+        .verify(&issuer_public_key, now_utc, &manifest.package_id)
+        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64))?;
+    let verifier = VerifyingKey::from_bytes(&certificate.subject_public_key)
+        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    let signature_bytes: [u8; 64] = signature_data
+        .as_slice()
+        .try_into()
+        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    let manifest_hash = Sha256::digest(&index.manifest);
+    let mut signing_message = Vec::with_capacity(32 + manifest_hash.len());
+    signing_message.extend_from_slice(b"mochios-mpkg-manifest-v1\0");
+    signing_message.extend_from_slice(&manifest_hash);
+    verifier
+        .verify_strict(&signing_message, &Signature::from_bytes(&signature_bytes))
+        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64))?;
+
+    let mut expected_paths = Vec::new();
+    for file in &manifest.files {
+        let path = manifest_payload_path(manifest.package_kind.as_deref(), &file.path).ok_or_else(
+            || mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64),
+        )?;
+        let entry = index
+            .entry(&path)
+            .filter(|entry| entry.kind == 0 || entry.kind == b'0')
+            .ok_or_else(|| {
+                mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOENT as i64)
+            })?;
+        if entry.size != file.size || decode_sha256_digest(&file.digest).is_none() {
+            return Err(mochi_user_syscall::SysError::from_raw(
+                mochi_user_syscall::EINVAL as i64,
+            ));
+        }
+        expected_paths.push(path);
+    }
+    if manifest.files.is_empty()
+        || index.entries.iter().any(|entry| {
+            entry.path.starts_with("payload/")
+                && entry.kind != b'5'
+                && !expected_paths.iter().any(|path| path == &entry.path)
+        })
+    {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
+    }
+    let mut manifest_digest = [0u8; 32];
+    manifest_digest.copy_from_slice(&manifest_hash);
+    Ok(Verification {
+        developer_id: certificate.developer_id,
+        certificate_serial: certificate.serial_number,
+        subject_key_id: certificate.subject_key_id,
+        verified_package_id: manifest.package_id,
+        allowed_capabilities: certificate.allowed_capabilities,
+        manifest_digest,
+        // The signed manifest commits to every payload digest, making its hash
+        // the canonical identity for metadata-only streaming verification.
+        package_digest: manifest_digest,
+    })
 }
 
 fn verify_package_bytes(
@@ -588,7 +692,8 @@ fn run_server() -> ! {
             Ok(Opcode::VerifyFile) => match VerifyFile::decode(request) {
                 Ok(file) => {
                     let expected_len = usize::try_from(file.package_len).unwrap_or(usize::MAX);
-                    if expected_len == 0 || expected_len > MAX_PACKAGE_LEN {
+                    let metadata_only = expected_len == 0 && file.package_digest == [0; 32];
+                    if (!metadata_only && expected_len == 0) || expected_len > MAX_PACKAGE_LEN {
                         reply_error(sender, file.request_id, mochi_user_syscall::ERANGE);
                         continue;
                     }
@@ -603,6 +708,16 @@ fn run_server() -> ! {
                             continue;
                         }
                     };
+                    if metadata_only {
+                        match verify_package_metadata(file.path, database, now_utc) {
+                            Ok(verification) => {
+                                diagnostic("signature.service: metadata verification complete");
+                                reply_verified(sender, file.request_id, &verification)
+                            }
+                            Err(error) => reply_error(sender, file.request_id, error.raw() as u64),
+                        }
+                        continue;
+                    }
                     let bytes = match platform::file::read_to_end_path(file.path) {
                         Ok(bytes) => bytes,
                         Err(error) => {

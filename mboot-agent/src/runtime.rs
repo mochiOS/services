@@ -1,7 +1,8 @@
 use std::fmt::Write;
 
 use mboot_protocol::{
-    Destination, ErrorCode, KnownCommand, Message, decode_line, encode_to_string,
+    Destination, ErrorCode, KnownCommand, Message, STAGE_SHARED_CHUNK_LEN,
+    STAGE_SHARED_CHUNK_MAGIC, decode_line, encode_to_string,
 };
 use mochi_user_platform as platform;
 
@@ -12,12 +13,19 @@ use crate::transport::virtio::VirtioSerialTransport;
 const STAGE_TOKEN_PREFIX: &str = "--mboot-stage-token=";
 const RETRY_DELAY_MS: u64 = 1_000;
 const POLL_DELAY_MS: u64 = 10;
-const IPC_MESSAGE_LEN: usize = mboot_protocol::MAX_MESSAGE_LEN;
+const IPC_MESSAGE_LEN: usize = mboot_protocol::MAX_IPC_MESSAGE_LEN;
 
 #[derive(Clone, Copy)]
 struct PendingDeveloperRequest {
     sender: u64,
     request_id: u64,
+}
+
+#[derive(Clone, Copy)]
+struct SharedStageMapping {
+    address: u64,
+    length: usize,
+    owner: u64,
 }
 
 pub fn run() -> ! {
@@ -36,10 +44,18 @@ pub fn run() -> ! {
     let mut agent = Agent::new(env!("MOCHIOS_VERSION"), boot_id, started);
     let mut transport = None;
     let mut pending_developer_sender = None;
+    let mut streaming_stage = false;
+    let mut shared_stage_mapping = None;
     let mut initialization_error_reported = false;
 
     loop {
-        receive_ipc_request(&mut agent, stage_token, &mut pending_developer_sender);
+        receive_ipc_request(
+            &mut agent,
+            stage_token,
+            &mut pending_developer_sender,
+            &mut streaming_stage,
+            &mut shared_stage_mapping,
+        );
         if transport.is_none() {
             match VirtioSerialTransport::initialize() {
                 Ok(initialized) => {
@@ -78,7 +94,8 @@ pub fn run() -> ! {
             }
         }
         complete_developer_request(&mut agent, &mut pending_developer_sender);
-        if agent.external_request_pending() || pending_developer_sender.is_some() {
+        if streaming_stage || agent.external_request_pending() || pending_developer_sender.is_some()
+        {
             platform::thread::yield_now();
         } else {
             let _ = platform::thread::sleep_milliseconds(POLL_DELAY_MS);
@@ -90,8 +107,13 @@ fn receive_ipc_request(
     agent: &mut Agent,
     expected_token: Option<u64>,
     pending_developer_sender: &mut Option<PendingDeveloperRequest>,
+    streaming_stage: &mut bool,
+    shared_stage_mapping: &mut Option<SharedStageMapping>,
 ) {
     if pending_developer_sender.is_some() {
+        return;
+    }
+    if *streaming_stage && !agent.can_accept_external_event() {
         return;
     }
     let mut request = [0u8; IPC_MESSAGE_LEN];
@@ -106,6 +128,15 @@ fn receive_ipc_request(
         reply_errno(sender, mochi_user_syscall::EINVAL);
         return;
     };
+    if handle_shared_stage_ipc(
+        agent,
+        sender,
+        message,
+        streaming_stage,
+        shared_stage_mapping,
+    ) {
+        return;
+    }
     if let Ok((token, stage)) = platform::service_ready::decode_notification(message) {
         let status = (Some(token) == expected_token)
             .then_some(stage)
@@ -131,6 +162,15 @@ fn receive_ipc_request(
         }
     };
     let client_request_id = decoded.request_id;
+    match decoded.known_command() {
+        Some(KnownCommand::LinuxStageChunk) => {
+            *streaming_stage = true;
+        }
+        Some(KnownCommand::LinuxStageCommit | KnownCommand::LinuxStageCancel) => {
+            *streaming_stage = false;
+        }
+        _ => {}
+    }
     if decoded.known_command().is_some_and(is_linux_command) && !linux_service_owns_sender(sender) {
         reply_protocol_error(sender, client_request_id, ErrorCode::PermissionDenied);
         return;
@@ -139,6 +179,15 @@ fn receive_ipc_request(
         && platform::capability::check_thread(sender, "settings.write") != Ok(1)
     {
         reply_protocol_error(sender, client_request_id, ErrorCode::PermissionDenied);
+        return;
+    }
+    if decoded.message_type == mboot_protocol::MessageType::Event {
+        match agent.queue_external_event(decoded) {
+            Ok(()) => {
+                let _ = platform::ipc::reply(sender, &0i32.to_le_bytes());
+            }
+            Err(error) => reply_errno(sender, external_errno(error)),
+        }
         return;
     }
     match agent.queue_external_request(decoded, current_ticks()) {
@@ -150,6 +199,61 @@ fn receive_ipc_request(
         }
         Err(error) => reply_protocol_error(sender, request_id(message), external_error(error)),
     }
+}
+
+fn handle_shared_stage_ipc(
+    agent: &mut Agent,
+    sender: u64,
+    message: &[u8],
+    streaming_stage: &mut bool,
+    mapping: &mut Option<SharedStageMapping>,
+) -> bool {
+    if message.len() == 16 && linux_service_owns_sender(sender) {
+        let address = u64::from_le_bytes(message[..8].try_into().unwrap());
+        let length = u64::from_le_bytes(message[8..16].try_into().unwrap());
+        if address & 0xfff == 0
+            && length > 0
+            && let Ok(length) = usize::try_from(length)
+        {
+            *mapping = Some(SharedStageMapping {
+                address,
+                length,
+                owner: sender,
+            });
+        }
+        return true;
+    }
+    if message.len() != STAGE_SHARED_CHUNK_LEN || message[..8] != STAGE_SHARED_CHUNK_MAGIC {
+        return false;
+    }
+    if !linux_service_owns_sender(sender) {
+        reply_errno(sender, mochi_user_syscall::EACCES);
+        return true;
+    }
+    let instance = u64::from_le_bytes(message[8..16].try_into().unwrap());
+    let offset = u64::from_le_bytes(message[16..24].try_into().unwrap());
+    let length = u64::from_le_bytes(message[24..32].try_into().unwrap());
+    let Some(shared) = *mapping else {
+        reply_errno(sender, mochi_user_syscall::EINVAL);
+        return true;
+    };
+    let Ok(length) = usize::try_from(length) else {
+        reply_errno(sender, mochi_user_syscall::EINVAL);
+        return true;
+    };
+    if shared.owner != sender || length == 0 || length > shared.length {
+        reply_errno(sender, mochi_user_syscall::EINVAL);
+        return true;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(shared.address as *const u8, length) };
+    match agent.queue_external_stage_bytes(instance, offset, bytes) {
+        Ok(()) => {
+            *streaming_stage = true;
+            let _ = platform::ipc::reply(sender, &0i32.to_le_bytes());
+        }
+        Err(error) => reply_errno(sender, external_errno(error)),
+    }
+    true
 }
 
 fn is_wifi_command(command: KnownCommand) -> bool {
@@ -247,6 +351,16 @@ fn external_error(error: ExternalRequestError) -> ErrorCode {
         ExternalRequestError::Busy => ErrorCode::Busy,
         ExternalRequestError::InvalidRequest => ErrorCode::InvalidArgument,
         ExternalRequestError::Encode => ErrorCode::Internal,
+    }
+}
+
+fn external_errno(error: ExternalRequestError) -> u64 {
+    match error {
+        ExternalRequestError::NotNegotiated | ExternalRequestError::Busy => {
+            mochi_user_syscall::EAGAIN
+        }
+        ExternalRequestError::InvalidRequest => mochi_user_syscall::EINVAL,
+        ExternalRequestError::Encode => mochi_user_syscall::EIO,
     }
 }
 

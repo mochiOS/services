@@ -109,10 +109,7 @@ impl ControlChannel {
         decode_no_data(&self.response.bytes()[..length])
     }
 
-    pub(super) fn submit_fenced_no_data(
-        &mut self,
-        command: Command<'_>,
-    ) -> Result<(), GpuError> {
+    pub(super) fn submit_fenced_no_data(&mut self, command: Command<'_>) -> Result<(), GpuError> {
         let fence_id = self.next_fence_id;
         self.next_fence_id = self.next_fence_id.checked_add(1).unwrap_or(1);
         let context_id = command.context_id();

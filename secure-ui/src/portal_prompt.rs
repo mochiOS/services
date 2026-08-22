@@ -12,9 +12,9 @@ static DECISION: AtomicI8 = AtomicI8::new(0);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PromptConfiguration {
-    application: String,
-    path: String,
-    writable: bool,
+    pub(crate) application: String,
+    pub(crate) path: String,
+    pub(crate) writable: bool,
 }
 
 impl PromptConfiguration {
@@ -53,16 +53,18 @@ impl PromptConfiguration {
 }
 
 pub(crate) fn run(configuration: PromptConfiguration) -> Result<(), ViewKitError> {
+    if decide(configuration)? {
+        Ok(())
+    } else {
+        std::process::exit(1)
+    }
+}
+
+pub(crate) fn decide(configuration: PromptConfiguration) -> Result<bool, ViewKitError> {
     let _ = CONFIGURATION.set(configuration);
     DECISION.store(0, Ordering::Release);
     viewkit::run::<PortalPromptApp>()?;
-    if DECISION.load(Ordering::Acquire) > 0 {
-        Ok(())
-    } else {
-        // ViewKit has already destroyed the secure-overlay surface here. Exit
-        // afterwards so the service manager still receives a denied status.
-        std::process::exit(1)
-    }
+    Ok(DECISION.load(Ordering::Acquire) > 0)
 }
 
 struct PortalPromptApp;
@@ -79,6 +81,7 @@ impl App for PortalPromptApp {
             .size(520.0, 330.0)
             .resizable(false)
             .secure_overlay(true)
+            .fullscreen(false)
     }
 
     fn body(&self, _context: &ViewContext) -> Self::Body {
@@ -128,12 +131,14 @@ impl App for PortalPromptApp {
                                 .child(
                                     Button::new("Don't Allow")
                                         .style(ButtonStyle::Standard)
+                                        .radius(CornerRadius::Full)
                                         .on_click(move || finish(&deny, false))
                                         .frame(132.0, 38.0),
                                 )
                                 .child(
                                     Button::new("Allow")
                                         .style(ButtonStyle::Accent)
+                                        .radius(CornerRadius::Full)
                                         .on_click(move || finish(&allow, true))
                                         .frame(132.0, 38.0),
                                 ),

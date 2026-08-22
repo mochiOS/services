@@ -144,14 +144,40 @@ pub(crate) fn authenticate(
     let result = call_result.map_err(|_| AuthenticationError::ServiceUnavailable)?;
     let reply_len = (result & 0xffff_ffff) as usize;
     if reply_len > reply.len() {
+        platform::logln!(
+            "secure-ui.service: authentication reply too large request={} bytes={}",
+            request_id,
+            reply_len
+        );
         return Err(AuthenticationError::Protocol);
     }
     let reply = &reply[..reply_len];
-    match decode_opcode(reply).map_err(|_| AuthenticationError::Protocol)? {
+    let opcode = decode_opcode(reply).map_err(|error| {
+        platform::logln!(
+            "secure-ui.service: authentication opcode decode failed request={} bytes={} error={:?}",
+            request_id,
+            reply_len,
+            error
+        );
+        AuthenticationError::Protocol
+    })?;
+    match opcode {
         mochios_user_protocol::Opcode::AuthenticationResult => {
-            let result =
-                AuthenticationResult::decode(reply).map_err(|_| AuthenticationError::Protocol)?;
+            let result = AuthenticationResult::decode(reply).map_err(|error| {
+                platform::logln!(
+                    "secure-ui.service: authentication result decode failed request={} bytes={} error={:?}",
+                    request_id,
+                    reply_len,
+                    error
+                );
+                AuthenticationError::Protocol
+            })?;
             if result.request_id != request_id {
+                platform::logln!(
+                    "secure-ui.service: authentication result ID mismatch expected={} actual={}",
+                    request_id,
+                    result.request_id
+                );
                 return Err(AuthenticationError::Protocol);
             }
             Ok(AuthenticatedUser {
@@ -165,6 +191,12 @@ pub(crate) fn authenticate(
         mochios_user_protocol::Opcode::Status => {
             let status = Status::decode(reply).map_err(|_| AuthenticationError::Protocol)?;
             if status.request_id != request_id {
+                platform::logln!(
+                    "secure-ui.service: authentication status ID mismatch expected={} actual={} status={}",
+                    request_id,
+                    status.request_id,
+                    status.status
+                );
                 return Err(AuthenticationError::Protocol);
             }
             if status.status == -(mochi_user_syscall::EACCES as i32) {

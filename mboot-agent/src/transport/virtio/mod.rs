@@ -24,7 +24,7 @@ const MAX_QUEUE_SIZE: u16 = 16;
 const CONTROL_BUFFER_COUNT: usize = 8;
 const CONTROL_BUFFER_LEN: usize = 256;
 const DATA_BUFFER_COUNT: usize = 8;
-const DATA_BUFFER_LEN: usize = 1024;
+const DATA_BUFFER_LEN: usize = 256 * 1024;
 const RECEIVED_LIMIT: usize = 16 * 1024;
 
 const DEVICE_READY: u16 = 0;

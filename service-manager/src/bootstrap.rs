@@ -17,6 +17,7 @@ struct Runtime {
     ready: Option<ReadyHandshake>,
     mboot_agent: Option<(u64, u64)>,
     deferred_requests: VecDeque<DeferredMessage>,
+    permission_prompt: Option<crate::portal::PermissionPromptProcess>,
 }
 
 impl Runtime {
@@ -27,6 +28,7 @@ impl Runtime {
             ready: None,
             mboot_agent: None,
             deferred_requests: VecDeque::new(),
+            permission_prompt: None,
         })
     }
 
@@ -485,6 +487,11 @@ fn resident(outcome: BootstrapOutcome, runtime: Option<Runtime>) -> ! {
                 linux_pid: outcome.children.linux,
                 binder_pid,
             });
+    if active_session.is_some()
+        && let Some(runtime) = runtime.as_mut()
+    {
+        crate::portal::prewarm(&mut runtime.permission_prompt, runtime.logger_endpoint);
+    }
     let mut request_bytes = [0u8; 1024];
     loop {
         let received = if let Some(deferred) = runtime
@@ -513,14 +520,18 @@ fn resident(outcome: BootstrapOutcome, runtime: Option<Runtime>) -> ! {
             continue;
         };
         if message.starts_with(&mochios_linux_portal_protocol::MAGIC.to_le_bytes()) {
-            crate::portal::handle(
-                message,
-                sender,
-                active_session,
-                runtime
-                    .as_ref()
-                    .map_or(0, |runtime| runtime.logger_endpoint),
-            );
+            if let Some(runtime) = runtime.as_mut() {
+                crate::portal::handle(
+                    message,
+                    sender,
+                    active_session,
+                    runtime.logger_endpoint,
+                    &mut runtime.permission_prompt,
+                );
+            } else {
+                let mut prompt = None;
+                crate::portal::handle(message, sender, active_session, 0, &mut prompt);
+            }
             continue;
         }
         let request = request_bytes

@@ -10,6 +10,7 @@ mochi-user-syscall = { git = "https://github.com/mochiOS/syscalls", package = "m
 mochios-driver-control-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-driver-control-protocol" }
 mochios-linux-portal-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-linux-portal-protocol" }
 mochios-user-database = { git = "https://github.com/mochiOS/syscalls", package = "mochios-user-database", features = ["std"] }
+mochios-permission-prompt-protocol = { path = "../permission-prompt-protocol" }
 
 [[bin]]
 name = "service-manager"

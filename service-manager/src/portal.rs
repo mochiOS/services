@@ -3,27 +3,40 @@ use mochios_linux_portal_protocol::{
     Access, GRANT_RESPONSE_LEN, GrantDirectoryRequest, GrantDirectoryResponse,
     NETWORK_RESPONSE_LEN, Opcode, RequestNetworkRequest, RequestNetworkResponse, decode_opcode,
 };
+use mochios_permission_prompt_protocol::{MAX_MESSAGE_LEN, PromptRequest};
 
 use crate::service_launcher;
 use crate::session::ActiveSession;
 use crate::spawn_support::errno;
 
-const WAIT_NO_HANG: u64 = 1;
-const PROMPT_TIMEOUT_TICKS: u64 = 30_000;
+#[derive(Clone, Copy)]
+pub(crate) struct PermissionPromptProcess {
+    process: u64,
+    token: u64,
+}
 
 pub(crate) fn handle(
     request_bytes: &[u8],
     sender: u64,
     session: Option<ActiveSession>,
     logger_endpoint: u64,
+    prompt_process: &mut Option<PermissionPromptProcess>,
 ) {
     match decode_opcode(request_bytes) {
-        Ok(Opcode::GrantDirectory) => {
-            handle_directory(request_bytes, sender, session, logger_endpoint)
-        }
-        Ok(Opcode::RequestNetwork) => {
-            handle_network(request_bytes, sender, session, logger_endpoint)
-        }
+        Ok(Opcode::GrantDirectory) => handle_directory(
+            request_bytes,
+            sender,
+            session,
+            logger_endpoint,
+            prompt_process,
+        ),
+        Ok(Opcode::RequestNetwork) => handle_network(
+            request_bytes,
+            sender,
+            session,
+            logger_endpoint,
+            prompt_process,
+        ),
         _ => reply_invalid(request_bytes, sender),
     }
 }
@@ -33,6 +46,7 @@ fn handle_directory(
     sender: u64,
     session: Option<ActiveSession>,
     logger_endpoint: u64,
+    prompt_process: &mut Option<PermissionPromptProcess>,
 ) {
     let request_id = request_bytes
         .get(8..16)
@@ -44,7 +58,7 @@ fn handle_directory(
         .and_then(|request| {
             let session = session.ok_or(mochi_user_syscall::EPERM)?;
             authorize_request(sender, session, &request)?;
-            prompt(logger_endpoint, &request)
+            prompt(logger_endpoint, prompt_process, &request)
         });
     let (status, grant_id) = match result {
         Ok(grant_id) => (0, grant_id),
@@ -66,6 +80,7 @@ fn handle_network(
     sender: u64,
     session: Option<ActiveSession>,
     logger_endpoint: u64,
+    prompt_process: &mut Option<PermissionPromptProcess>,
 ) {
     let request_id = request_id(request_bytes);
     let result = RequestNetworkRequest::decode(request_bytes)
@@ -73,7 +88,7 @@ fn handle_network(
         .and_then(|request| {
             let session = session.ok_or(mochi_user_syscall::EPERM)?;
             authorize_network(sender, session, &request)?;
-            prompt_network(logger_endpoint, request.bundle_id)
+            prompt_network(logger_endpoint, prompt_process, request.bundle_id)
         });
     let response = RequestNetworkResponse {
         request_id,
@@ -100,11 +115,21 @@ fn authorize_network(
         .ok_or(mochi_user_syscall::EPERM)
 }
 
-fn prompt_network(logger_endpoint: u64, application: &str) -> Result<(), u64> {
+fn prompt_network(
+    logger_endpoint: u64,
+    prompt_process: &mut Option<PermissionPromptProcess>,
+    bundle_id: &str,
+) -> Result<(), u64> {
+    let application = application_name(bundle_id);
     platform::logln!("service-manager.service: network prompt application={application}");
-    let process =
-        service_launcher::spawn_network_prompt(logger_endpoint, application).map_err(errno)?;
-    wait_for_prompt(process).map(|_| ())
+    run_prompt(
+        logger_endpoint,
+        prompt_process,
+        PromptRequest::Network {
+            token: 1,
+            application: &application,
+        },
+    )
 }
 
 fn reply_invalid(request: &[u8], sender: u64) {
@@ -161,49 +186,136 @@ fn authorize_request(
     Ok(())
 }
 
-fn prompt(logger_endpoint: u64, request: &GrantDirectoryRequest<'_>) -> Result<u64, u64> {
+fn prompt(
+    logger_endpoint: u64,
+    prompt_process: &mut Option<PermissionPromptProcess>,
+    request: &GrantDirectoryRequest<'_>,
+) -> Result<u64, u64> {
+    let application = application_name(request.bundle_id);
     platform::logln!(
         "service-manager.service: portal prompt application={} path={}",
-        request.bundle_id,
+        application,
         request.path
     );
-    let process = service_launcher::spawn_portal_prompt(
+    run_prompt(
         logger_endpoint,
-        request.bundle_id,
-        request.path,
-        request.access == Access::READ_WRITE,
-    )
-    .map_err(errno)?;
-    platform::logln!(
-        "service-manager.service: portal prompt spawned process={}",
-        process
-    );
-    wait_for_prompt(process)?;
+        prompt_process,
+        PromptRequest::Directory {
+            token: 1,
+            application: &application,
+            path: request.path,
+            writable: request.access == Access::READ_WRITE,
+        },
+    )?;
     platform::service_ready::generate_token().map_err(errno)
 }
 
-fn wait_for_prompt(process: u64) -> Result<(), u64> {
-    let started = platform::time::ticks().map_err(errno)?;
-    loop {
-        let mut exit_status = 0i32;
-        match platform::process::wait(
-            process as i64,
-            core::ptr::addr_of_mut!(exit_status) as u64,
-            WAIT_NO_HANG,
-        ) {
-            Ok(0) => {}
-            Ok(_) if exit_status == 0 => {
-                return Ok(());
-            }
-            Ok(_) => return Err(mochi_user_syscall::EACCES),
-            Err(error) => return Err(errno(error)),
-        }
-        let now = platform::time::ticks().map_err(errno)?;
-        if now.saturating_sub(started) >= PROMPT_TIMEOUT_TICKS {
-            return Err(mochi_user_syscall::EAGAIN);
-        }
-        platform::thread::yield_now();
+pub(crate) fn prewarm(prompt_process: &mut Option<PermissionPromptProcess>, logger_endpoint: u64) {
+    if prompt_process.is_some() {
+        return;
     }
+    let token = match platform::service_ready::generate_token() {
+        Ok(token) => token,
+        Err(error) => {
+            platform::logln!(
+                "service-manager.service: permission prompt token failed errno={}",
+                errno(error)
+            );
+            return;
+        }
+    };
+    *prompt_process = service_launcher::spawn_permission_prompt_server(logger_endpoint, token)
+        .map_err(|error| {
+            platform::logln!(
+                "service-manager.service: permission prompt prewarm failed errno={}",
+                errno(error)
+            );
+            error
+        })
+        .ok()
+        .map(|process| PermissionPromptProcess { process, token });
+}
+
+fn run_prompt(
+    logger_endpoint: u64,
+    prompt_process: &mut Option<PermissionPromptProcess>,
+    request: PromptRequest<'_>,
+) -> Result<(), u64> {
+    prewarm(prompt_process, logger_endpoint);
+    let prompt = prompt_process.take().ok_or(mochi_user_syscall::EIO)?;
+    let request = match request {
+        PromptRequest::Network { application, .. } => PromptRequest::Network {
+            token: prompt.token,
+            application,
+        },
+        PromptRequest::Directory {
+            application,
+            path,
+            writable,
+            ..
+        } => PromptRequest::Directory {
+            token: prompt.token,
+            application,
+            path,
+            writable,
+        },
+    };
+    let mut encoded = [0u8; MAX_MESSAGE_LEN];
+    let length = request
+        .encode(&mut encoded)
+        .map_err(|_| mochi_user_syscall::EINVAL)?;
+    let mut reply = [0u8; 4];
+    let result = crate::spawn_support::call_with_wait(
+        prompt.process,
+        &encoded[..length],
+        &mut reply,
+    )
+    .map_err(|error| {
+        platform::logln!(
+            "service-manager.service: permission prompt IPC failed process={} errno={}",
+            prompt.process,
+            errno(error)
+        );
+        errno(error)
+    })
+    .and_then(|message| {
+        let length = (message & 0xffff_ffff) as usize;
+        if length != reply.len() {
+            platform::logln!(
+                "service-manager.service: permission prompt reply invalid process={} bytes={}",
+                prompt.process,
+                length
+            );
+            return Err(mochi_user_syscall::EIO);
+        }
+        let status = i32::from_le_bytes(reply);
+        platform::logln!(
+            "service-manager.service: permission prompt reply process={} status={}",
+            prompt.process,
+            status
+        );
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(status.unsigned_abs() as u64)
+        }
+    });
+    prewarm(prompt_process, logger_endpoint);
+    result
+}
+
+fn application_name(bundle_id: &str) -> alloc::string::String {
+    let manifest_path = alloc::format!("/system/packages/{bundle_id}/manifest.toml");
+    platform::package::read_manifest(&manifest_path)
+        .filter(|manifest| manifest.package_id == bundle_id)
+        .map(|manifest| {
+            if manifest.package_name.ends_with(".app") {
+                manifest.package_name
+            } else {
+                alloc::format!("{}.app", manifest.package_name)
+            }
+        })
+        .unwrap_or_else(|| "Application".to_owned())
 }
 
 fn sender_process(sender: u64) -> Option<u64> {

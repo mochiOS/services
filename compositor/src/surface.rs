@@ -1051,10 +1051,18 @@ pub(crate) fn handle_request(
                         .saturating_add(placement.anchor_rect.y)
                         .saturating_add(placement.offset.y),
                 )
-            } else if matches!(
-                role,
-                SurfaceRole::Background | SurfaceRole::Panel | SurfaceRole::SecureOverlay
-            ) {
+            } else if role == SurfaceRole::SecureOverlay {
+                surfaces
+                    .iter()
+                    .find(|surface| surface.live && surface.role == SurfaceRole::Background)
+                    .map(|background| {
+                        (
+                            background.width.saturating_sub(width).saturating_div(2) as i32,
+                            background.height.saturating_sub(height).saturating_div(2) as i32,
+                        )
+                    })
+                    .unwrap_or((0, 0))
+            } else if matches!(role, SurfaceRole::Background | SurfaceRole::Panel) {
                 (0, 0)
             } else {
                 let cascade = *next_window_index % 8;

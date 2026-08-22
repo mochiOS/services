@@ -1,6 +1,6 @@
 use mboot_protocol::{
-    Argument, Body, Destination, ErrorCode, KnownCommand, MAX_MESSAGE_LEN, Message, MessageType,
-    decode_line, encode_to_string,
+    Argument, Body, Destination, ErrorCode, KnownCommand, MAX_IPC_MESSAGE_LEN, Message,
+    MessageType, STAGE_SHARED_CHUNK_LEN, STAGE_SHARED_CHUNK_MAGIC, decode_line, encode_to_string,
 };
 use mochi_user_platform as platform;
 
@@ -8,7 +8,8 @@ use crate::codec::{decode_hex, decode_rle32};
 
 const AGENT_NAME: &str = "mboot-agent.service";
 const FRAME_CHUNK_BYTES: u64 = 1536;
-const STAGE_CHUNK_BYTES: usize = 1536;
+const STAGE_CHUNK_BYTES: usize = mboot_protocol::MAX_BULK_STAGE_BYTES;
+const PAGE_SIZE: usize = 4096;
 const PORTAL_CHUNK_BYTES: usize = 1536;
 const PORTAL_EXPORT_CHUNK_BYTES: usize = 1536;
 
@@ -48,6 +49,12 @@ pub(crate) struct PortalEntry {
 pub(crate) struct HostClient {
     agent: u64,
     next_request_id: u64,
+    stage_buffer: Option<SharedStageBuffer>,
+}
+
+struct SharedStageBuffer {
+    address: u64,
+    capacity: usize,
 }
 
 impl HostClient {
@@ -60,6 +67,7 @@ impl HostClient {
         Ok(Self {
             agent,
             next_request_id: 1,
+            stage_buffer: None,
         })
     }
 
@@ -97,7 +105,46 @@ impl HostClient {
         if response.argument("cached") != Some("0") {
             return Err(HostError::InvalidReply);
         }
-        let result = self.send_stage_file(instance, path, size);
+        let result = self.send_stage_file(instance, path, 0, size);
+        if result.is_err() {
+            let _ = self.call(
+                KnownCommand::LinuxStageCancel,
+                vec![Argument::new("instance", instance.to_string())],
+            );
+            return result;
+        }
+        self.call(
+            KnownCommand::LinuxStageCommit,
+            vec![Argument::new("instance", instance.to_string())],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn stage_bundle_range(
+        &mut self,
+        instance: u64,
+        bundle: &str,
+        source_path: &str,
+        source_offset: u64,
+        size: u64,
+        digest: &str,
+    ) -> Result<(), HostError> {
+        let response = self.call(
+            KnownCommand::LinuxStageBegin,
+            vec![
+                Argument::new("instance", instance.to_string()),
+                Argument::new("bundle", bundle),
+                Argument::new("size", size.to_string()),
+                Argument::new("digest", digest),
+            ],
+        )?;
+        if response.argument("cached") == Some("1") {
+            return Ok(());
+        }
+        if response.argument("cached") != Some("0") {
+            return Err(HostError::InvalidReply);
+        }
+        let result = self.send_stage_file(instance, source_path, source_offset, size);
         if result.is_err() {
             let _ = self.call(
                 KnownCommand::LinuxStageCancel,
@@ -353,42 +400,84 @@ impl HostClient {
         &mut self,
         instance: u64,
         path: &str,
+        source_offset: u64,
         expected_size: u64,
     ) -> Result<(), HostError> {
         let fd = platform::file::open_path(path, 0).map_err(|_| HostError::Unavailable)?;
+        if platform::file::seek(
+            fd,
+            i64::try_from(source_offset).map_err(|_| HostError::InvalidReply)?,
+            0,
+        )
+        .is_err()
+        {
+            let _ = platform::file::close(fd);
+            return Err(HostError::Unavailable);
+        }
+        self.ensure_stage_buffer()?;
+        let (buffer_address, buffer_capacity) = self
+            .stage_buffer
+            .as_ref()
+            .map(|buffer| (buffer.address, buffer.capacity))
+            .ok_or(HostError::Unavailable)?;
         let mut offset = 0u64;
-        let mut buffer = [0u8; STAGE_CHUNK_BYTES];
         let result = loop {
-            let read =
-                match platform::file::read(fd, buffer.as_mut_ptr() as u64, buffer.len() as u64) {
-                    Ok(read) => read as usize,
-                    Err(_) => break Err(HostError::Unavailable),
-                };
-            if read == 0 {
-                break if offset == expected_size {
-                    Ok(())
-                } else {
-                    Err(HostError::InvalidReply)
-                };
+            if offset == expected_size {
+                break Ok(());
             }
-            if offset.saturating_add(read as u64) > expected_size {
+            let remaining = expected_size - offset;
+            let requested = core::cmp::min(remaining, buffer_capacity as u64);
+            let read = match platform::file::read(fd, buffer_address, requested) {
+                Ok(read) => read as usize,
+                Err(_) => break Err(HostError::Unavailable),
+            };
+            if read == 0 {
                 break Err(HostError::InvalidReply);
             }
-            let response = self.call(
-                KnownCommand::LinuxStageChunk,
-                vec![
-                    Argument::new("instance", instance.to_string()),
-                    Argument::new("offset", offset.to_string()),
-                    Argument::new("data", encode_hex(&buffer[..read])),
-                ],
-            );
-            if let Err(error) = response {
+            if let Err(error) = self.send_shared_stage_chunk(instance, offset, read) {
                 break Err(error);
             }
             offset += read as u64;
         };
         let _ = platform::file::close(fd);
         result
+    }
+
+    fn ensure_stage_buffer(&mut self) -> Result<(), HostError> {
+        if self.stage_buffer.is_some() {
+            return Ok(());
+        }
+        let page_count = STAGE_CHUNK_BYTES.div_ceil(PAGE_SIZE);
+        let address = platform::memory::alloc_shared_page_count(page_count)
+            .map_err(|_| HostError::Unavailable)?;
+        platform::ipc::send_page_count(self.agent, page_count, address)
+            .map_err(|_| HostError::Unavailable)?;
+        self.stage_buffer = Some(SharedStageBuffer {
+            address,
+            capacity: page_count * PAGE_SIZE,
+        });
+        Ok(())
+    }
+
+    fn send_shared_stage_chunk(
+        &mut self,
+        instance: u64,
+        offset: u64,
+        length: usize,
+    ) -> Result<(), HostError> {
+        let mut request = [0u8; STAGE_SHARED_CHUNK_LEN];
+        request[..8].copy_from_slice(&STAGE_SHARED_CHUNK_MAGIC);
+        request[8..16].copy_from_slice(&instance.to_le_bytes());
+        request[16..24].copy_from_slice(&offset.to_le_bytes());
+        request[24..32].copy_from_slice(&(length as u64).to_le_bytes());
+        let mut reply = [0u8; 4];
+        let raw = platform::ipc::call(self.agent, &request, &mut reply)
+            .map_err(|_| HostError::Unavailable)?;
+        let reply_length = (raw & 0xffff_ffff) as usize;
+        if reply_length != reply.len() || i32::from_le_bytes(reply) != 0 {
+            return Err(HostError::Unavailable);
+        }
+        Ok(())
     }
 
     pub(crate) fn windows(&mut self, instance: u64) -> Result<Vec<u32>, HostError> {
@@ -516,7 +605,7 @@ impl HostClient {
             arguments,
         );
         let encoded = encode_to_string(&request).map_err(|_| HostError::InvalidReply)?;
-        let mut reply = [0u8; MAX_MESSAGE_LEN];
+        let mut reply = [0u8; MAX_IPC_MESSAGE_LEN];
         let raw = platform::ipc::call(self.agent, encoded.as_bytes(), &mut reply)
             .map_err(|_| HostError::Unavailable)?;
         let length = (raw & 0xffff_ffff) as usize;
