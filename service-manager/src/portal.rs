@@ -1,9 +1,11 @@
 use mochi_user_platform as platform;
 use mochios_linux_portal_protocol::{
-    Access, GRANT_RESPONSE_LEN, GrantDirectoryRequest, GrantDirectoryResponse,
-    NETWORK_RESPONSE_LEN, Opcode, RequestNetworkRequest, RequestNetworkResponse, decode_opcode,
+    Access, AuthorizeStorageRequest, AuthorizeStorageResponse, GRANT_RESPONSE_LEN,
+    GrantDirectoryRequest, GrantDirectoryResponse, NETWORK_RESPONSE_LEN, Opcode,
+    RequestNetworkRequest, RequestNetworkResponse, STORAGE_RESPONSE_LEN,
+    StorageAction as PortalStorageAction, decode_opcode,
 };
-use mochios_permission_prompt_protocol::{MAX_MESSAGE_LEN, PromptRequest};
+use mochios_permission_prompt_protocol::{MAX_MESSAGE_LEN, PromptRequest, StorageAction};
 
 use crate::service_launcher;
 use crate::session::ActiveSession;
@@ -37,8 +39,75 @@ pub(crate) fn handle(
             logger_endpoint,
             prompt_process,
         ),
+        Ok(Opcode::AuthorizeStorage) => handle_storage(
+            request_bytes,
+            sender,
+            session,
+            logger_endpoint,
+            prompt_process,
+        ),
         _ => reply_invalid(request_bytes, sender),
     }
+}
+
+fn handle_storage(
+    request_bytes: &[u8],
+    sender: u64,
+    session: Option<ActiveSession>,
+    logger_endpoint: u64,
+    prompt_process: &mut Option<PermissionPromptProcess>,
+) {
+    let request_id = request_id(request_bytes);
+    let result = AuthorizeStorageRequest::decode(request_bytes)
+        .map_err(|_| mochi_user_syscall::EINVAL)
+        .and_then(|request| {
+            let session = session.ok_or(mochi_user_syscall::EPERM)?;
+            authorize_storage(sender, session, &request)?;
+            let action = match request.action {
+                PortalStorageAction::Use => StorageAction::Use,
+                PortalStorageAction::Create => StorageAction::Create,
+                PortalStorageAction::Delete => StorageAction::Delete,
+            };
+            platform::logln!(
+                "service-manager.service: storage prompt action={:?} target={}",
+                action,
+                request.target
+            );
+            run_prompt(
+                logger_endpoint,
+                prompt_process,
+                PromptRequest::Storage {
+                    token: 1,
+                    application: "Installer.app",
+                    action,
+                    target: request.target,
+                },
+            )
+        });
+    let response = AuthorizeStorageResponse {
+        request_id,
+        status: result.map_or_else(|error| -(error as i32), |_| 0),
+    };
+    let mut output = [0u8; STORAGE_RESPONSE_LEN];
+    if let Ok(length) = response.encode(&mut output) {
+        let _ = platform::ipc::reply(sender, &output[..length]);
+    }
+}
+
+fn authorize_storage(
+    sender: u64,
+    session: ActiveSession,
+    request: &AuthorizeStorageRequest<'_>,
+) -> Result<(), u64> {
+    if request.session_id != session.id || request.bundle_id != "org.mochios.installer" {
+        return Err(mochi_user_syscall::EPERM);
+    }
+    if sender_process(sender).is_none()
+        || platform::capability::check_thread(sender, "device.storage") != Ok(1)
+    {
+        return Err(mochi_user_syscall::EACCES);
+    }
+    Ok(())
 }
 
 fn handle_directory(
