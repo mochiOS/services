@@ -5,6 +5,7 @@ mod network_prompt;
 mod permission_server;
 mod portal_prompt;
 mod setup;
+mod storage_prompt;
 mod wallpaper;
 
 pub fn run() -> Result<(), viewkit::ViewKitError> {

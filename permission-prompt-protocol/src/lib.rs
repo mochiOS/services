@@ -16,6 +16,20 @@ pub enum PromptRequest<'a> {
         path: &'a str,
         writable: bool,
     },
+    Storage {
+        token: u64,
+        application: &'a str,
+        action: StorageAction,
+        target: &'a str,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum StorageAction {
+    Use = 1,
+    Create = 2,
+    Delete = 3,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -26,7 +40,7 @@ pub enum ProtocolError {
 
 impl<'a> PromptRequest<'a> {
     pub fn encode(&self, output: &mut [u8]) -> Result<usize, ProtocolError> {
-        let (kind, writable, token, application, path) = match self {
+        let (kind, detail, token, application, path) = match self {
             Self::Network { token, application } => (1u8, 0u8, *token, *application, ""),
             Self::Directory {
                 token,
@@ -34,6 +48,12 @@ impl<'a> PromptRequest<'a> {
                 path,
                 writable,
             } => (2u8, u8::from(*writable), *token, *application, *path),
+            Self::Storage {
+                token,
+                application,
+                action,
+                target,
+            } => (3u8, *action as u8, *token, *application, *target),
         };
         if token == 0
             || application.is_empty()
@@ -50,7 +70,7 @@ impl<'a> PromptRequest<'a> {
         }
         output[..8].copy_from_slice(&MAGIC);
         output[8] = kind;
-        output[9] = writable;
+        output[9] = detail;
         output[10..12].copy_from_slice(&(application.len() as u16).to_le_bytes());
         output[12..14].copy_from_slice(&(path.len() as u16).to_le_bytes());
         output[14..16].fill(0);
@@ -92,6 +112,17 @@ impl<'a> PromptRequest<'a> {
                 path,
                 writable: writable == 1,
             }),
+            (3, action @ 1..=3) if !path.is_empty() => Ok(Self::Storage {
+                token,
+                application,
+                action: match action {
+                    1 => StorageAction::Use,
+                    2 => StorageAction::Create,
+                    3 => StorageAction::Delete,
+                    _ => return Err(ProtocolError::Invalid),
+                },
+                target: path,
+            }),
             _ => Err(ProtocolError::Invalid),
         }
     }
@@ -102,7 +133,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn round_trips_both_prompt_kinds() {
+    fn round_trips_prompt_kinds() {
         let requests = [
             PromptRequest::Network {
                 token: 42,
@@ -113,6 +144,12 @@ mod tests {
                 application: "Chromium.app",
                 path: "/home/user/Downloads",
                 writable: true,
+            },
+            PromptRequest::Storage {
+                token: 44,
+                application: "Install mochiOS.app",
+                action: StorageAction::Delete,
+                target: "Samsung SSD / Windows / 476 GB",
             },
         ];
         for request in requests {

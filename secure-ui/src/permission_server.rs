@@ -40,9 +40,9 @@ pub(crate) fn run() -> Result<(), viewkit::ViewKitError> {
         .as_ref()
         .zip(expected_token)
         .is_some_and(|(request, expected)| match request {
-            PromptRequest::Network { token, .. } | PromptRequest::Directory { token, .. } => {
-                *token == expected
-            }
+            PromptRequest::Network { token, .. }
+            | PromptRequest::Directory { token, .. }
+            | PromptRequest::Storage { token, .. } => *token == expected,
         });
     platform::logln!(
         "secure-ui.service: permission prompt request sender={} bytes={} authorized={}",
@@ -68,6 +68,16 @@ pub(crate) fn run() -> Result<(), viewkit::ViewKitError> {
                     application: application.to_owned(),
                     path: path.to_owned(),
                     writable,
+                }),
+                PromptRequest::Storage {
+                    application,
+                    action,
+                    target,
+                    ..
+                } => crate::storage_prompt::decide(crate::storage_prompt::PromptConfiguration {
+                    application: application.to_owned(),
+                    action,
+                    target: target.to_owned(),
                 }),
             })
             .transpose()

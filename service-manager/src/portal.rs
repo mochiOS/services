@@ -259,6 +259,17 @@ fn run_prompt(
             path,
             writable,
         },
+        PromptRequest::Storage {
+            application,
+            action,
+            target,
+            ..
+        } => PromptRequest::Storage {
+            token: prompt.token,
+            application,
+            action,
+            target,
+        },
     };
     let mut encoded = [0u8; MAX_MESSAGE_LEN];
     let length = request
