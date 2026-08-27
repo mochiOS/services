@@ -8,7 +8,7 @@ build = "build.rs"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mochios"))'] }
 
 [dependencies]
-mboot-protocol = { git = "https://github.com/mochiOS/mBoot", rev = "cf9de6b17377eb671a98b21120cf9c22e8aecf03", package = "mboot-protocol" }
+mboot-protocol = { path = "../mboot-protocol" }
 
 [target.'cfg(target_os = "mochios")'.dependencies]
 mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }

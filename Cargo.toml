@@ -9,6 +9,7 @@ members = [
     "input",
     "logger",
     "linux",
+    "mboot-protocol",
     "mboot-agent",
     "network",
     "package",
@@ -23,3 +24,6 @@ members = [
 
 [patch.crates-io]
 mnu-abi = { git = "https://github.com/mochiOS/mnu", package = "mnu-abi" }
+
+[patch."https://github.com/mochiOS/mBoot"]
+mboot-protocol = { path = "mboot-protocol" }
