@@ -1246,6 +1246,7 @@ dependencies = [
 [[package]]
 name = "mnu-abi"
 version = "0.1.0"
+source = "git+https://github.com/mochiOS/mnu#e1693fde7917edec005852be0c1d6b30370c99ba"
 
 [[package]]
 name = "mochi-user-platform"
@@ -3030,6 +3031,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "viewkit"
 version = "1.0.1"
+source = "git+https://github.com/mochiOS/viewkit#c4f1ebf675acd4f7e38330c9f9d64cd5718da239"
 dependencies = [
  "cosmic-text",
  "image",
@@ -3581,8 +3583,3 @@ checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
 ]
-
-[[patch.unused]]
-name = "mnu-abi"
-version = "0.1.0"
-source = "git+https://github.com/mochiOS/mnu#4673bae786ef94d4cce112ad2f4f110db42db6ed"
