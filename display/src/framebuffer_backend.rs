@@ -9,6 +9,7 @@ pub(crate) struct FramebufferBackend {
     geometry: DisplayGeometry,
     pixels: *mut u8,
     mapped_size: u64,
+    mdriver: bool,
 }
 
 impl FramebufferBackend {
@@ -22,6 +23,15 @@ impl FramebufferBackend {
             format: crate::present::PIXEL_FORMAT_XRGB8888,
         };
         let _ = geometry.byte_len()?;
+        if info.addr == 0 {
+            platform::logln!("display.driver: backend=mDriver-display");
+            return Ok(Self {
+                geometry,
+                pixels: core::ptr::null_mut(),
+                mapped_size: 0,
+                mdriver: true,
+            });
+        }
         let offset = info.addr & 0xfff;
         let mapped_size = page_align_up(info.size.checked_add(offset).ok_or(ERANGE)?)?;
         platform::memory::map_framebuffer(FB_VIRT, mapped_size).map_err(|_| EIO)?;
@@ -29,6 +39,7 @@ impl FramebufferBackend {
             geometry,
             pixels: (FB_VIRT + offset) as *mut u8,
             mapped_size,
+            mdriver: false,
         })
     }
 
@@ -71,6 +82,37 @@ impl FramebufferBackend {
         let x_offset = (frame.damage.x as usize)
             .checked_mul(BYTES_PER_PIXEL)
             .ok_or(ERANGE)?;
+        if self.mdriver {
+            for y in frame.damage.y as usize..copy_bottom as usize {
+                let mut x = frame.damage.x as usize;
+                while x < copy_right as usize {
+                    let tile_width = core::cmp::min(
+                        copy_right as usize - x,
+                        4096 / BYTES_PER_PIXEL,
+                    );
+                    let source = y
+                        .checked_mul(source_row)
+                        .and_then(|offset| {
+                            x.checked_mul(BYTES_PER_PIXEL)
+                                .and_then(|x_offset| offset.checked_add(x_offset))
+                        })
+                        .ok_or(ERANGE)?;
+                    let tile_bytes = tile_width.checked_mul(BYTES_PER_PIXEL).ok_or(ERANGE)?;
+                    let source_end = source.checked_add(tile_bytes).ok_or(ERANGE)?;
+                    let pixels = frame.pixels.get(source..source_end).ok_or(ERANGE)?;
+                    platform::memory::present_framebuffer(
+                        x as u32,
+                        y as u32,
+                        tile_width as u32,
+                        1,
+                        pixels,
+                    )
+                    .map_err(|error| error.errno().unwrap_or(EIO))?;
+                    x += tile_width;
+                }
+            }
+            return Ok(());
+        }
         for y in frame.damage.y as usize..copy_bottom as usize {
             let source = y
                 .checked_mul(source_row)
@@ -96,7 +138,9 @@ impl FramebufferBackend {
 
 impl Drop for FramebufferBackend {
     fn drop(&mut self) {
-        let _ = platform::memory::munmap(FB_VIRT, self.mapped_size);
+        if self.mapped_size != 0 {
+            let _ = platform::memory::munmap(FB_VIRT, self.mapped_size);
+        }
     }
 }
 

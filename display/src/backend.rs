@@ -22,6 +22,12 @@ impl DisplayBackend {
     }
 
     pub(crate) fn initialize() -> Result<Self, u64> {
+        // A zero framebuffer address identifies mDriver's mediated display.
+        // In that configuration the physical GPU belongs exclusively to the
+        // Hardware Domain, so probing its PCI BARs from mochiOS is invalid.
+        if mochi_user_platform::memory::framebuffer_info().is_ok_and(|info| info.addr == 0) {
+            return FramebufferBackend::initialize().map(Self::Framebuffer);
+        }
         match VirtioGpuBackend::initialize() {
             Ok(backend) => {
                 mochi_user_platform::logln!("display.driver: backend=virtio-gpu");

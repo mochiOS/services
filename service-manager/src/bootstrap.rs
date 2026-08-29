@@ -216,12 +216,7 @@ impl BootstrapOperations for Runtime {
             return;
         };
         let request = platform::service_ready::notification(token, stage as i32);
-        let mut reply = [0u8; 4];
-        let result = crate::spawn_support::call_with_wait(process_id, &request, &mut reply);
-        let valid = result.is_ok_and(|message| {
-            (message & 0xffff_ffff) as usize == reply.len() && i32::from_le_bytes(reply) == 0
-        });
-        if !valid {
+        if platform::ipc::send(process_id, &request).is_err() {
             platform::logln!(
                 "service-manager.service: mboot-agent stage notification failed stage={}",
                 stage as i32

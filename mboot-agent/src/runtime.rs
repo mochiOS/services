@@ -47,6 +47,7 @@ pub fn run() -> ! {
     let mut streaming_stage = false;
     let mut shared_stage_mapping = None;
     let mut initialization_error_reported = false;
+    let mut next_transport_retry = 0;
 
     loop {
         receive_ipc_request(
@@ -56,7 +57,8 @@ pub fn run() -> ! {
             &mut streaming_stage,
             &mut shared_stage_mapping,
         );
-        if transport.is_none() {
+        let now = current_ticks();
+        if transport.is_none() && now >= next_transport_retry {
             match VirtioSerialTransport::initialize() {
                 Ok(initialized) => {
                     platform::logln!("mboot-agent.service: virtio control transport initialized");
@@ -71,8 +73,7 @@ pub fn run() -> ! {
                         );
                         initialization_error_reported = true;
                     }
-                    let _ = platform::thread::sleep_milliseconds(RETRY_DELAY_MS);
-                    continue;
+                    next_transport_retry = now.saturating_add(RETRY_DELAY_MS);
                 }
             }
         }
