@@ -13,6 +13,7 @@ pub(crate) struct ChildProcesses {
     pub(crate) secure_ui: Option<u64>,
     pub(crate) linux: Option<u64>,
     pub(crate) binder: Option<u64>,
+    pub(crate) installer: Option<u64>,
     pub(crate) update: Option<u64>,
 }
 
@@ -34,6 +35,7 @@ pub(crate) enum StopReason {
     SecureUiSpawnFailed,
     SecureUiLoginFailed,
     BinderSpawnFailed,
+    InstallerSpawnFailed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,6 +60,7 @@ impl BootstrapOutcome {
                 secure_ui: None,
                 linux: None,
                 binder: None,
+                installer: None,
                 update: None,
             },
             reason: StopReason::DriverControlInitializationFailed,
@@ -80,6 +83,7 @@ pub(crate) trait BootstrapOperations {
         identity: SessionIdentity,
         session_id: u64,
     ) -> Option<u64>;
+    fn installation_required(&self) -> bool;
     fn wait_display_ready(&mut self, process_id: u64) -> bool;
     fn wait_input_ready(&mut self, process_id: u64) -> bool;
     fn start_discovery(&mut self) -> bool;
@@ -95,6 +99,8 @@ pub(crate) enum MbootStage {
     Display = 2,
     Desktop = 3,
 }
+
+const FIRST_BOOT_IDENTITY: SessionIdentity = SessionIdentity { uid: 0, gid: 0 };
 
 pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> BootstrapOutcome {
     let mut children = ChildProcesses::default();
@@ -151,12 +157,18 @@ pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> Bootstra
         return outcome(children, StopReason::UserReadyFailed);
     }
 
-    let Some(secure_ui) = operations.spawn_fixed(FixedService::SecureUi) else {
-        return outcome(children, StopReason::SecureUiSpawnFailed);
-    };
-    children.secure_ui = Some(secure_ui);
-    let Some(identity) = operations.wait_secure_ui_login(secure_ui) else {
-        return outcome(children, StopReason::SecureUiLoginFailed);
+    let installation_required = operations.installation_required();
+    let identity = if installation_required {
+        FIRST_BOOT_IDENTITY
+    } else {
+        let Some(secure_ui) = operations.spawn_fixed(FixedService::SecureUi) else {
+            return outcome(children, StopReason::SecureUiSpawnFailed);
+        };
+        children.secure_ui = Some(secure_ui);
+        let Some(identity) = operations.wait_secure_ui_login(secure_ui) else {
+            return outcome(children, StopReason::SecureUiLoginFailed);
+        };
+        identity
     };
 
     let session_id = 1;
@@ -166,6 +178,14 @@ pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> Bootstra
         return outcome(children, StopReason::BinderSpawnFailed);
     };
     children.binder = Some(binder);
+    if installation_required {
+        let Some(installer) =
+            operations.spawn_user_session(FixedService::Installer, identity, session_id)
+        else {
+            return outcome(children, StopReason::InstallerSpawnFailed);
+        };
+        children.installer = Some(installer);
+    }
     operations.notify_mboot_stage(MbootStage::Desktop);
     if let Some(network) = children.network {
         let _ = operations.wait_network_ready(network);
@@ -231,6 +251,7 @@ mod tests {
     struct FakeOperations {
         events: Vec<Event>,
         failure: Failure,
+        installation_required: bool,
     }
 
     impl FakeOperations {
@@ -238,6 +259,15 @@ mod tests {
             Self {
                 events: Vec::new(),
                 failure,
+                installation_required: false,
+            }
+        }
+
+        fn first_boot() -> Self {
+            Self {
+                events: Vec::new(),
+                failure: Failure::None,
+                installation_required: true,
             }
         }
     }
@@ -282,6 +312,7 @@ mod tests {
                 FixedService::SecureUi => 16,
                 FixedService::Linux => 20,
                 FixedService::Binder => 17,
+                FixedService::Installer => 21,
                 FixedService::Update => 18,
             })
         }
@@ -296,8 +327,13 @@ mod tests {
             (self.failure != Failure::Spawn(service)).then_some(match service {
                 FixedService::Linux => 20,
                 FixedService::Binder => 17,
+                FixedService::Installer => 21,
                 _ => unreachable!("only user-session services are accepted"),
             })
+        }
+
+        fn installation_required(&self) -> bool {
+            self.installation_required
         }
 
         fn wait_display_ready(&mut self, _process_id: u64) -> bool {
@@ -380,9 +416,28 @@ mod tests {
         assert_eq!(outcome.children.secure_ui, Some(16));
         assert_eq!(outcome.children.linux, Some(20));
         assert_eq!(outcome.children.binder, Some(17));
+        assert_eq!(outcome.children.installer, None);
         assert_eq!(outcome.children.update, Some(18));
         assert_eq!(outcome.identity, Some(TEST_IDENTITY));
         assert_eq!(outcome.session_id, 1);
+    }
+
+    #[test]
+    fn first_boot_opens_installer_after_binder() {
+        let mut operations = FakeOperations::first_boot();
+        let outcome = orchestrate(&mut operations);
+        assert_eq!(outcome.reason, StopReason::Running);
+        assert_eq!(outcome.children.binder, Some(17));
+        assert_eq!(outcome.children.installer, Some(21));
+        assert_eq!(outcome.children.secure_ui, None);
+        assert!(!operations.events.contains(&Event::WaitSecureUiLogin));
+        let binder = operations.events.iter().position(|event| {
+            *event == Event::SpawnUserSession(FixedService::Binder, FIRST_BOOT_IDENTITY)
+        });
+        let installer = operations.events.iter().position(|event| {
+            *event == Event::SpawnUserSession(FixedService::Installer, FIRST_BOOT_IDENTITY)
+        });
+        assert!(matches!((binder, installer), (Some(binder), Some(installer)) if binder < installer));
     }
 
     #[test]

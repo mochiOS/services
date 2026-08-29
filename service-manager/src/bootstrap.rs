@@ -266,6 +266,7 @@ impl BootstrapOperations for Runtime {
             | FixedService::Compositor
             | FixedService::Linux
             | FixedService::Binder
+            | FixedService::Installer
             | FixedService::Update => None,
         };
         if matches!(service, FixedService::Display) && ready_target.is_none() {
@@ -393,6 +394,10 @@ impl BootstrapOperations for Runtime {
     fn wait_network_ready(&mut self, process_id: u64) -> bool {
         self.wait_ready(ReadyService::Network, process_id)
     }
+
+    fn installation_required(&self) -> bool {
+        std::fs::metadata("/system/.installed").is_err()
+    }
 }
 
 pub(crate) fn run() -> ! {
@@ -429,6 +434,7 @@ fn service_name(service: FixedService) -> &'static str {
         FixedService::SecureUi => "secure-ui.service",
         FixedService::Linux => "linux.service",
         FixedService::Binder => "Binder.app",
+        FixedService::Installer => "Installer.app",
         FixedService::Update => "update.service",
     }
 }

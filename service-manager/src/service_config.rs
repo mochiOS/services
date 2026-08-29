@@ -17,6 +17,7 @@ pub(crate) enum FixedService {
     SecureUi,
     Linux,
     Binder,
+    Installer,
     Update,
 }
 
@@ -86,6 +87,11 @@ pub(crate) const fn fixed_service_spec(service: FixedService) -> ServiceSpec {
             manifest_path: "/system/packages/binder/manifest.toml",
             role: ROLE_APPLICATION,
         },
+        FixedService::Installer => ServiceSpec {
+            path: "/applications/Installer.app/entry.elf",
+            manifest_path: "/system/packages/installer/manifest.toml",
+            role: ROLE_APPLICATION,
+        },
         FixedService::Update => ServiceSpec {
             path: "/system/services/update.service",
             manifest_path: "/system/packages/update/manifest.toml",
@@ -114,7 +120,7 @@ pub(crate) fn fixed_service_arguments(
     logger_endpoint: u64,
     ready_target: Option<ReadyTarget>,
 ) -> Vec<String> {
-    if service == FixedService::Binder {
+    if matches!(service, FixedService::Binder | FixedService::Installer) {
         return Vec::new();
     }
     let mut arguments = Vec::with_capacity(2);
@@ -183,6 +189,12 @@ mod tests {
                 FixedService::Binder,
                 "/applications/Binder.app/entry.elf",
                 "/system/packages/binder/manifest.toml",
+                ROLE_APPLICATION,
+            ),
+            (
+                FixedService::Installer,
+                "/applications/Installer.app/entry.elf",
+                "/system/packages/installer/manifest.toml",
                 ROLE_APPLICATION,
             ),
             (
