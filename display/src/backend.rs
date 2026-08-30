@@ -22,10 +22,12 @@ impl DisplayBackend {
     }
 
     pub(crate) fn initialize() -> Result<Self, u64> {
-        // A zero framebuffer address identifies mDriver's mediated display.
-        // In that configuration the physical GPU belongs exclusively to the
-        // Hardware Domain, so probing its PCI BARs from mochiOS is invalid.
-        if mochi_user_platform::memory::framebuffer_info().is_ok_and(|info| info.addr == 0) {
+        // A framebuffer reported by the kernel is already the selected display
+        // path. It is either mediated by mDriver (address zero) or the firmware
+        // framebuffer retained for a system without an IOMMU (non-zero). In
+        // both cases PCI probing from mochiOS is invalid and may never complete
+        // because mBoot deliberately exposes no PCI functions.
+        if mochi_user_platform::memory::framebuffer_info().is_ok() {
             return FramebufferBackend::initialize().map(Self::Framebuffer);
         }
         match VirtioGpuBackend::initialize() {
