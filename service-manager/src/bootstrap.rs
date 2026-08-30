@@ -420,7 +420,37 @@ pub(crate) fn run() -> ! {
         "service-manager.service: resident phase reason={:?}",
         outcome.reason
     );
+    if outcome.children.binder.is_some()
+        && platform::memory::framebuffer_info().is_ok_and(|info| info.addr != 0)
+    {
+        let vendor = cpu_iommu_vendor();
+        match service_launcher::spawn_iommu_warning(logger_endpoint, vendor) {
+            Ok(process_id) => platform::logln!(
+                "service-manager.service: hardware acceleration warning spawned pid={}",
+                process_id
+            ),
+            Err(error) => platform::logln!(
+                "service-manager.service: hardware acceleration warning spawn failed errno={}",
+                errno(error)
+            ),
+        }
+    }
     resident(outcome, runtime)
+}
+
+fn cpu_iommu_vendor() -> &'static str {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let leaf = core::arch::x86_64::__cpuid(0);
+        let mut vendor = [0u8; 12];
+        vendor[0..4].copy_from_slice(&leaf.ebx.to_le_bytes());
+        vendor[4..8].copy_from_slice(&leaf.edx.to_le_bytes());
+        vendor[8..12].copy_from_slice(&leaf.ecx.to_le_bytes());
+        if &vendor == b"AuthenticAMD" {
+            return "amd";
+        }
+    }
+    "intel"
 }
 
 fn service_name(service: FixedService) -> &'static str {

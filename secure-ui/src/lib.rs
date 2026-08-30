@@ -6,6 +6,7 @@ mod permission_server;
 mod portal_prompt;
 mod setup;
 mod storage_prompt;
+mod virtualization_warning;
 mod wallpaper;
 
 pub fn run() -> Result<(), viewkit::ViewKitError> {
@@ -17,6 +18,9 @@ pub fn run() -> Result<(), viewkit::ViewKitError> {
     }
     if let Some(prompt) = portal_prompt::PromptConfiguration::from_arguments() {
         return portal_prompt::run(prompt);
+    }
+    if let Some(technology) = virtualization_warning::from_arguments() {
+        return virtualization_warning::run(technology);
     }
     viewkit::run::<login::LoginApp>()
 }

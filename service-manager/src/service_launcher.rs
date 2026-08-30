@@ -167,6 +167,15 @@ pub(crate) fn spawn_network_prompt(
     spawn(fixed_service_spec(FixedService::SecureUi), &arguments)
 }
 
+pub(crate) fn spawn_iommu_warning(
+    logger_endpoint: u64,
+    vendor: &str,
+) -> Result<u64, mochi_user_syscall::SysError> {
+    let mut arguments = fixed_service_arguments(FixedService::SecureUi, logger_endpoint, None);
+    arguments.push(alloc::format!("--iommu-warning={vendor}"));
+    spawn(fixed_service_spec(FixedService::SecureUi), &arguments)
+}
+
 pub(crate) fn spawn_permission_prompt_server(
     logger_endpoint: u64,
     token: u64,
