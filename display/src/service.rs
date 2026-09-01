@@ -21,6 +21,12 @@ pub(crate) fn run() -> ! {
             platform::process::exit(1);
         }
     };
+    if let Err(errno) = backend.present_startup_frame() {
+        platform::logln!("display.driver: startup frame failed errno={}", errno);
+        let _ = platform::service_ready::notify(ready_target, ready_status(errno));
+        platform::process::exit(1);
+    }
+    platform::logln!("display.driver: startup frame presented");
     let endpoint = match platform::ipc::create() {
         Ok(endpoint) => endpoint,
         Err(error) => {

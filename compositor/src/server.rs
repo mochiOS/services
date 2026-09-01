@@ -1,12 +1,12 @@
 use mochi_user_platform as platform;
 
-use crate::client::{Client, ClientId, cleanup_client, cleanup_dead_clients, client_id_for_sender};
+use crate::client::{Client, ClientId, cleanup_client, client_id_for_sender};
 use crate::context_menu::ContextMenuBroker;
 use crate::cursor::CursorImage;
 use crate::decoration::sender_can_control_cursor;
 use crate::display::{
     display_claim_present_owner, display_renderer_caps, display_request_info,
-    display_set_cursor_position, sleep_one_tick, wait_for_service,
+    display_set_cursor_position, wait_for_service,
 };
 use crate::geometry::{Rect, merge_damage};
 use crate::input::{
@@ -19,7 +19,6 @@ use crate::state::CompositorState;
 use crate::surface::{Surface, handle_shared_buffer, send_frame_done};
 use crate::window::Window;
 
-const IDLE_CLEANUP_YIELDS: u32 = 64;
 static mut IPC_BUF: [u8; 4128] = [0; 4128];
 
 fn is_pointer_motion(event: &platform::input::InputEvent) -> bool {
@@ -337,49 +336,12 @@ pub(crate) fn run() -> ! {
             buf[..len].copy_from_slice(&pending_buf[..len]);
             msg
         } else {
-            match platform::ipc::try_wait(buf) {
+            match platform::ipc::wait(endpoint, buf) {
                 Ok(msg) => {
-                    state.idle_cleanup_ticks = 0;
                     msg
                 }
                 Err(_) => {
-                    state.idle_cleanup_ticks = state.idle_cleanup_ticks.wrapping_add(1);
-                    state.input_subscribe_retry_ticks =
-                        state.input_subscribe_retry_ticks.wrapping_add(1);
-                    if !state.input_subscribed
-                        && state.input_subscribe_retry_ticks >= IDLE_CLEANUP_YIELDS
-                    {
-                        state.input_subscribe_retry_ticks = 0;
-                        state.input_subscribed = subscribe_input_events(endpoint);
-                    }
-                    if state.idle_cleanup_ticks >= IDLE_CLEANUP_YIELDS {
-                        state.idle_cleanup_ticks = 0;
-                        if cleanup_dead_clients(
-                            &mut state.clients,
-                            &mut state.surfaces,
-                            &mut state.windows,
-                            &mut state.pointer_focus,
-                            &mut state.keyboard_focus,
-                        ) {
-                            let _ = composite_and_present(
-                                &state.surfaces,
-                                &state.windows,
-                                state.keyboard_focus,
-                                &mut state.present_frame,
-                                state.display_tid,
-                                state.display_width,
-                                state.display_height,
-                                state.display_stride,
-                                state.display_format,
-                                state.cursor_x,
-                                state.cursor_y,
-                                state.cursor_visible && !state.hardware_cursor,
-                                &state.cursor_image,
-                                None,
-                            );
-                        }
-                    }
-                    sleep_one_tick();
+                    platform::thread::yield_now();
                     continue;
                 }
             }

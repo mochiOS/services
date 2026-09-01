@@ -4,12 +4,15 @@ use mochi_user_syscall::{EIO, ERANGE};
 use crate::present::{BYTES_PER_PIXEL, DisplayGeometry, PresentFrame};
 
 const FB_VIRT: u64 = 0x0000_6000_0000_0000;
+const FORMAT_MEDIATED_FIRMWARE: u32 = 1 << 31;
+const FIRMWARE_MAX_TRANSFER: usize = 64 * 1024;
 
 pub(crate) struct FramebufferBackend {
     geometry: DisplayGeometry,
     pixels: *mut u8,
     mapped_size: u64,
     mdriver: bool,
+    firmware_mediated: bool,
 }
 
 impl FramebufferBackend {
@@ -24,12 +27,21 @@ impl FramebufferBackend {
         };
         let _ = geometry.byte_len()?;
         if info.addr == 0 {
-            platform::logln!("display.driver: backend=mDriver-display");
+            let firmware_mediated = info.format & FORMAT_MEDIATED_FIRMWARE != 0;
+            platform::logln!(
+                "display.driver: backend={}",
+                if firmware_mediated {
+                    "mBoot-firmware-display"
+                } else {
+                    "mDriver-display"
+                }
+            );
             return Ok(Self {
                 geometry,
                 pixels: core::ptr::null_mut(),
                 mapped_size: 0,
-                mdriver: true,
+                mdriver: !firmware_mediated,
+                firmware_mediated,
             });
         }
         let offset = info.addr & 0xfff;
@@ -40,11 +52,77 @@ impl FramebufferBackend {
             pixels: (FB_VIRT + offset) as *mut u8,
             mapped_size,
             mdriver: false,
+            firmware_mediated: false,
         })
     }
 
     pub(crate) const fn geometry(&self) -> DisplayGeometry {
         self.geometry
+    }
+
+    /// Replaces the firmware boot screen as soon as the mediated display is
+    /// usable.  This also verifies the complete mDriver display path before
+    /// the service announces readiness to the compositor.
+    pub(crate) fn present_startup_frame(&mut self, color: u32) -> Result<(), u64> {
+        const MARKER_WIDTH: u32 = 512;
+        const MARKER_HEIGHT: u32 = 128;
+        let width = self.geometry.width.min(MARKER_WIDTH);
+        let height = self.geometry.height.min(MARKER_HEIGHT);
+        let origin_x = self.geometry.width.saturating_sub(width) / 2;
+        let origin_y = self.geometry.height.saturating_sub(height) / 2;
+
+        if self.mdriver || self.firmware_mediated {
+            let pixel = color.to_le_bytes();
+            let transfer_size = if self.firmware_mediated {
+                FIRMWARE_MAX_TRANSFER
+            } else {
+                4096
+            };
+            let mut tile = vec![0u8; transfer_size];
+            for chunk in tile.chunks_exact_mut(BYTES_PER_PIXEL) {
+                chunk.copy_from_slice(&pixel);
+            }
+            let row_bytes = usize::try_from(width)
+                .ok()
+                .and_then(|width| width.checked_mul(BYTES_PER_PIXEL))
+                .ok_or(ERANGE)?;
+            let rows_per_tile = u32::try_from(tile.len() / row_bytes)
+                .map_err(|_| ERANGE)?
+                .max(1);
+            let mut y = 0u32;
+            while y < height {
+                let rows = (height - y).min(rows_per_tile);
+                let byte_len = row_bytes
+                    .checked_mul(usize::try_from(rows).map_err(|_| ERANGE)?)
+                    .ok_or(ERANGE)?;
+                platform::memory::present_framebuffer(
+                    origin_x,
+                    origin_y + y,
+                    width,
+                    rows,
+                    &tile[..byte_len],
+                )
+                .map_err(|error| error.errno().unwrap_or(EIO))?;
+                y += rows;
+            }
+            return Ok(());
+        }
+
+        for y in origin_y as usize..(origin_y + height) as usize {
+            let row = y
+                .checked_mul(self.geometry.stride as usize)
+                .and_then(|pixels| pixels.checked_mul(BYTES_PER_PIXEL))
+                .ok_or(ERANGE)?;
+            for x in origin_x as usize..(origin_x + width) as usize {
+                unsafe {
+                    self.pixels
+                        .add(row + x * BYTES_PER_PIXEL)
+                        .cast::<u32>()
+                        .write_volatile(color)
+                };
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn present(&mut self, frame: &PresentFrame<'_>) -> Result<(), u64> {
@@ -82,14 +160,40 @@ impl FramebufferBackend {
         let x_offset = (frame.damage.x as usize)
             .checked_mul(BYTES_PER_PIXEL)
             .ok_or(ERANGE)?;
+        if self.firmware_mediated {
+            let rows_per_transfer = (FIRMWARE_MAX_TRANSFER / bytes).max(1);
+            let mut y = frame.damage.y as usize;
+            while y < copy_bottom as usize {
+                let rows = if bytes == source_row {
+                    core::cmp::min(copy_bottom as usize - y, rows_per_transfer)
+                } else {
+                    1
+                };
+                let source = y
+                    .checked_mul(source_row)
+                    .and_then(|offset| offset.checked_add(x_offset))
+                    .ok_or(ERANGE)?;
+                let byte_len = bytes.checked_mul(rows).ok_or(ERANGE)?;
+                let source_end = source.checked_add(byte_len).ok_or(ERANGE)?;
+                let pixels = frame.pixels.get(source..source_end).ok_or(ERANGE)?;
+                platform::memory::present_framebuffer(
+                    frame.damage.x,
+                    y as u32,
+                    copy_width,
+                    rows as u32,
+                    pixels,
+                )
+                .map_err(|error| error.errno().unwrap_or(EIO))?;
+                y += rows;
+            }
+            return Ok(());
+        }
         if self.mdriver {
             for y in frame.damage.y as usize..copy_bottom as usize {
                 let mut x = frame.damage.x as usize;
                 while x < copy_right as usize {
-                    let tile_width = core::cmp::min(
-                        copy_right as usize - x,
-                        4096 / BYTES_PER_PIXEL,
-                    );
+                    let tile_width =
+                        core::cmp::min(copy_right as usize - x, 4096 / BYTES_PER_PIXEL);
                     let source = y
                         .checked_mul(source_row)
                         .and_then(|offset| {

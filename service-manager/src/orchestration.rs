@@ -138,12 +138,10 @@ pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> Bootstra
     if children.compositor.is_some() {
         operations.notify_mboot_stage(MbootStage::Display);
     }
-    if !operations.start_discovery() {
-        return outcome(children, StopReason::StartDiscoveryFailed);
-    }
-    if !operations.wait_discovery_complete(drivers) {
-        return outcome(children, StopReason::DiscoveryCompleteFailed);
-    }
+    // Driver discovery is best-effort after the display and input paths are
+    // already usable. Slow or failed optional hardware must not prevent the
+    // desktop and Installer from starting.
+    let discovery_started = operations.start_discovery();
 
     children.network = operations.spawn_fixed(FixedService::Network);
     if children.network.is_some() {
@@ -187,6 +185,9 @@ pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> Bootstra
         children.installer = Some(installer);
     }
     operations.notify_mboot_stage(MbootStage::Desktop);
+    if discovery_started {
+        let _ = operations.wait_discovery_complete(drivers);
+    }
     if let Some(network) = children.network {
         let _ = operations.wait_network_ready(network);
     }
@@ -386,7 +387,6 @@ mod tests {
             Event::Spawn(FixedService::Compositor),
             Event::NotifyMbootStage(MbootStage::Display),
             Event::StartDiscovery,
-            Event::WaitDiscovery,
             Event::Spawn(FixedService::Network),
             Event::Spawn(FixedService::Update),
             Event::Spawn(FixedService::User),
@@ -396,6 +396,7 @@ mod tests {
             Event::SpawnUserSession(FixedService::Linux, TEST_IDENTITY),
             Event::SpawnUserSession(FixedService::Binder, TEST_IDENTITY),
             Event::NotifyMbootStage(MbootStage::Desktop),
+            Event::WaitDiscovery,
             Event::WaitNetwork,
         ]
     }
@@ -512,18 +513,12 @@ mod tests {
     }
 
     #[test]
-    fn driver_protocol_failure_prevents_binder_start() {
-        for (failure, reason) in [
-            (Failure::StartDiscovery, StopReason::StartDiscoveryFailed),
-            (
-                Failure::DiscoveryComplete,
-                StopReason::DiscoveryCompleteFailed,
-            ),
-        ] {
+    fn driver_protocol_failure_does_not_prevent_binder_start() {
+        for failure in [Failure::StartDiscovery, Failure::DiscoveryComplete] {
             let mut operations = FakeOperations::new(failure);
             let outcome = orchestrate(&mut operations);
-            assert_eq!(outcome.reason, reason);
-            assert!(!operations.events.contains(&Event::SpawnUserSession(
+            assert_eq!(outcome.reason, StopReason::Running);
+            assert!(operations.events.contains(&Event::SpawnUserSession(
                 FixedService::Binder,
                 TEST_IDENTITY
             )));

@@ -12,6 +12,16 @@ pub(crate) enum PendingPresent {
 }
 
 impl DisplayBackend {
+    pub(crate) fn present_startup_frame(&mut self) -> Result<(), u64> {
+        // ViewKit's mochiOS accent. Binder replaces this frame as soon as the
+        // compositor publishes the desktop.
+        const STARTUP_COLOR: u32 = 0x0076_51c9;
+        match self {
+            Self::Framebuffer(backend) => backend.present_startup_frame(STARTUP_COLOR),
+            Self::VirtioGpu(_) => Ok(()),
+        }
+    }
+
     pub(crate) fn renderer_caps(&self) -> u32 {
         match self {
             Self::VirtioGpu(backend) if backend.gpu_scene_supported() => {
