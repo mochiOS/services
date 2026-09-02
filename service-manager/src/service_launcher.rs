@@ -8,8 +8,7 @@ use crate::spawn_support::{encode_spawn_args, resolve_capabilities, sys_error};
 
 const SESSION_USER_ARG_PREFIX: &str = "--session-user=";
 const LOCK_USER_ARG_PREFIX: &str = "--lock-user=";
-const EXEC_MANIFEST_ENV_PREFIX: &str = "__MNU_EXEC_ENV=";
-const EXEC_MANIFEST_APP_ID_PREFIX: &str = "__MNU_EXEC_APP_ID=";
+use mnu_abi::exec::{ENVIRONMENT_PREFIX, SECURITY_IDENTITY_PREFIX};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DriverManagerTarget {
@@ -27,7 +26,7 @@ fn spawn(
     if spec.role == crate::service_config::ROLE_APPLICATION {
         arguments.insert(
             0,
-            alloc::format!("{EXEC_MANIFEST_APP_ID_PREFIX}{}", manifest.package_id),
+            alloc::format!("{SECURITY_IDENTITY_PREFIX}{}", manifest.package_id),
         );
     }
     let arguments = encode_spawn_args(&arguments);
@@ -51,7 +50,7 @@ fn spawn_with_credentials(
     if spec.role == crate::service_config::ROLE_APPLICATION {
         arguments.insert(
             0,
-            alloc::format!("{EXEC_MANIFEST_APP_ID_PREFIX}{}", manifest.package_id),
+            alloc::format!("{SECURITY_IDENTITY_PREFIX}{}", manifest.package_id),
         );
     }
     let arguments = encode_spawn_args(&arguments);
@@ -114,10 +113,10 @@ pub(crate) fn spawn_user_session(
             ("LOGNAME", user.name.as_str()),
             ("SHELL", "/bin/msh"),
         ] {
-            arguments.push(alloc::format!("{EXEC_MANIFEST_ENV_PREFIX}{name}={value}"));
+            arguments.push(alloc::format!("{ENVIRONMENT_PREFIX}{name}={value}"));
         }
         arguments.push(alloc::format!(
-            "{EXEC_MANIFEST_ENV_PREFIX}MOCHI_SESSION_ID={session_id}"
+            "{ENVIRONMENT_PREFIX}MOCHI_SESSION_ID={session_id}"
         ));
     }
     spawn_with_credentials(fixed_service_spec(service), &arguments, identity)

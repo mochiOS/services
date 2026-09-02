@@ -227,6 +227,7 @@ dependencies = [
 name = "capability"
 version = "0.1.0"
 dependencies = [
+ "mnu-abi",
  "mochi-user-platform",
  "mochi-user-syscall",
  "mochios-signature-protocol",
@@ -2464,6 +2465,7 @@ dependencies = [
 name = "service-manager"
 version = "0.1.0"
 dependencies = [
+ "mnu-abi",
  "mochi-user-platform",
  "mochi-user-syscall",
  "mochios-driver-control-protocol",

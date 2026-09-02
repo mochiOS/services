@@ -5,6 +5,7 @@ edition = "2024"
 build = "build.rs"
 
 [dependencies]
+mnu-abi = { git = "https://github.com/mochiOS/mnu", package = "mnu-abi" }
 mochios-signature-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-signature-protocol" }
 mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }
 mochi-user-syscall = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-syscall" }
