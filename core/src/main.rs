@@ -4,11 +4,25 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use mochi_user_platform as platform;
 
+#[cfg(feature = "performance-benchmark")]
+use std::fs::OpenOptions;
+#[cfg(feature = "performance-benchmark")]
+use std::io::{Read, Seek, SeekFrom, Write};
+
 const LOGGER_SERVICE_PATH: &str = "/system/services/logger.service";
 const LOGGER_PACKAGE_MANIFEST_PATH: &str = "/system/packages/logger/manifest.toml";
 const CAPABILITY_SERVICE_PATH: &str = "/system/services/capability.service";
 const CAPABILITY_PACKAGE_MANIFEST_PATH: &str = "/system/packages/capability/manifest.toml";
 const ROOTFS_READY_RETRIES: usize = 16;
+
+#[cfg(feature = "performance-benchmark")]
+const VFS_BENCHMARK_PATH: &str = "/tmp/mochios-vfs-benchmark";
+#[cfg(feature = "performance-benchmark")]
+const VFS_BENCHMARK_WARMUP_ITERATIONS: usize = 16;
+#[cfg(feature = "performance-benchmark")]
+const VFS_BENCHMARK_ITERATIONS: usize = 256;
+#[cfg(feature = "performance-benchmark")]
+const VFS_BENCHMARK_BUFFER_BYTES: usize = 4 * 1024;
 
 fn encode_nul_list(items: &[String]) -> Vec<u8> {
     let mut out = Vec::new();
@@ -58,6 +72,101 @@ fn register_delegate_with_retry(kind: u64, pid: u64) -> Result<(), mochi_user_sy
 fn stderr_line(message: &str) {
     let _ = platform::io::stderr(message.as_bytes());
     let _ = platform::io::stderr(b"\n");
+}
+
+#[cfg(feature = "performance-benchmark")]
+fn vfs_benchmark_iteration(buffer: &mut [u8]) -> std::io::Result<()> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(VFS_BENCHMARK_PATH)?;
+    file.write_all(buffer)?;
+    file.seek(SeekFrom::Start(0))?;
+    file.read_exact(buffer)?;
+    let _ = file.metadata()?;
+    Ok(())
+}
+
+#[cfg(feature = "performance-benchmark")]
+fn run_vfs_benchmark() {
+    let mut buffer = [0x5au8; VFS_BENCHMARK_BUFFER_BYTES];
+    for _ in 0..VFS_BENCHMARK_WARMUP_ITERATIONS {
+        if let Err(error) = vfs_benchmark_iteration(&mut buffer) {
+            platform::logln!("VFS_BENCHMARK error=warmup detail={}", error);
+            return;
+        }
+    }
+
+    let before = match platform::performance::snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            platform::logln!(
+                "VFS_BENCHMARK error=snapshot-before errno={}",
+                error.errno().unwrap_or(0)
+            );
+            return;
+        }
+    };
+    for _ in 0..VFS_BENCHMARK_ITERATIONS {
+        if let Err(error) = vfs_benchmark_iteration(&mut buffer) {
+            platform::logln!("VFS_BENCHMARK error=workload detail={}", error);
+            return;
+        }
+    }
+    let after = match platform::performance::snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            platform::logln!(
+                "VFS_BENCHMARK error=snapshot-after errno={}",
+                error.errno().unwrap_or(0)
+            );
+            return;
+        }
+    };
+    let _ = std::fs::remove_file(VFS_BENCHMARK_PATH);
+
+    let activity = after.vfs_activity.saturating_sub(before.vfs_activity);
+    let open = after.latencies[platform::performance::LatencyMetric::VfsOpen as usize];
+    let read = after.latencies[platform::performance::LatencyMetric::VfsRead as usize];
+    let write = after.latencies[platform::performance::LatencyMetric::VfsWrite as usize];
+    let close = after.latencies[platform::performance::LatencyMetric::VfsClose as usize];
+    let stat = after.latencies[platform::performance::LatencyMetric::VfsStat as usize];
+    platform::logln!(
+        "VFS_BENCHMARK_ACTIVITY iterations={} bytes={} metadata={} read_ranges={} write_ranges={} read_requested={} read_transferred={} write_requested={} write_transferred={} temp_allocations={} temp_bytes={} path_clones={} path_clone_bytes={}",
+        VFS_BENCHMARK_ITERATIONS,
+        VFS_BENCHMARK_BUFFER_BYTES,
+        activity.metadata_queries,
+        activity.read_range_calls,
+        activity.write_range_calls,
+        activity.read_requested_bytes,
+        activity.read_transferred_bytes,
+        activity.write_requested_bytes,
+        activity.write_transferred_bytes,
+        activity.temporary_buffer_allocations,
+        activity.temporary_buffer_bytes,
+        activity.path_clone_allocations,
+        activity.path_clone_bytes,
+    );
+    platform::logln!(
+        "VFS_BENCHMARK_LATENCY open_p50={} open_p95={} open_p99={} read_p50={} read_p95={} read_p99={} write_p50={} write_p95={} write_p99={} close_p50={} close_p95={} close_p99={} stat_p50={} stat_p95={} stat_p99={}",
+        open.p50_cycles,
+        open.p95_cycles,
+        open.p99_cycles,
+        read.p50_cycles,
+        read.p95_cycles,
+        read.p99_cycles,
+        write.p50_cycles,
+        write.p95_cycles,
+        write.p99_cycles,
+        close.p50_cycles,
+        close.p95_cycles,
+        close.p99_cycles,
+        stat.p50_cycles,
+        stat.p95_cycles,
+        stat.p99_cycles,
+    );
 }
 
 fn bytes_preview(bytes: &[u8]) -> String {
@@ -208,6 +317,9 @@ fn main() {
             platform::process::exit(1);
         }
     };
+
+    #[cfg(feature = "performance-benchmark")]
+    run_vfs_benchmark();
 
     run();
     platform::process::exit(0)

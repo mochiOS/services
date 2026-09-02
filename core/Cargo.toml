@@ -8,6 +8,9 @@ build = "build.rs"
 mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }
 mochi-user-syscall = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-syscall" }
 
+[features]
+performance-benchmark = []
+
 [build-dependencies]
 
 [[bin]]
