@@ -8,8 +8,8 @@ use crate::spawn_support::{encode_spawn_args, resolve_capabilities, sys_error};
 
 const SESSION_USER_ARG_PREFIX: &str = "--session-user=";
 const LOCK_USER_ARG_PREFIX: &str = "--lock-user=";
-const EXEC_MANIFEST_ENV_PREFIX: &str = "__MOCHI_EXEC_ENV=";
-const EXEC_MANIFEST_APP_ID_PREFIX: &str = "__MOCHI_EXEC_APP_ID=";
+const EXEC_MANIFEST_ENV_PREFIX: &str = "__MNU_EXEC_ENV=";
+const EXEC_MANIFEST_APP_ID_PREFIX: &str = "__MNU_EXEC_APP_ID=";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DriverManagerTarget {

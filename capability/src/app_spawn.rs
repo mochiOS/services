@@ -10,8 +10,8 @@ use crate::policy::{AppPromptPolicy, needs_app_prompt};
 use crate::resolver::{binary_caps, encode_nul_list};
 
 pub(crate) const SPAWN_APP_OPCODE: u32 = 0x4150_5053;
-const EXEC_MANIFEST_ENV_PREFIX: &str = "__MOCHI_EXEC_ENV=";
-const EXEC_MANIFEST_APP_ID_PREFIX: &str = "__MOCHI_EXEC_APP_ID=";
+const EXEC_MANIFEST_ENV_PREFIX: &str = "__MNU_EXEC_ENV=";
+const EXEC_MANIFEST_APP_ID_PREFIX: &str = "__MNU_EXEC_APP_ID=";
 
 #[repr(C)]
 #[derive(Clone, Copy)]
