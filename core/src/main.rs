@@ -50,25 +50,6 @@ fn encode_spawn_args(items: &[String]) -> Vec<u8> {
     out
 }
 
-fn register_delegate_with_retry(kind: u64, pid: u64) -> Result<(), mochi_user_syscall::SysError> {
-    let mut last_err = None;
-    for _ in 0..32 {
-        match platform::service::register_delegate(kind, pid) {
-            Ok(_) => return Ok(()),
-            Err(err) => {
-                last_err = Some(err);
-                if err.errno().unwrap_or(0) != mochi_user_syscall::ESRCH {
-                    return Err(err);
-                }
-                platform::thread::yield_now();
-            }
-        }
-    }
-    Err(last_err.unwrap_or_else(|| {
-        mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ESRCH as i64)
-    }))
-}
-
 fn stderr_line(message: &str) {
     let _ = platform::io::stderr(message.as_bytes());
     let _ = platform::io::stderr(b"\n");
@@ -251,7 +232,7 @@ fn spawn_logger_service() -> Result<u64, mochi_user_syscall::SysError> {
     let args_nul = encode_spawn_args(&args);
     let pid = match platform::service::spawn_manifest(
         LOGGER_SERVICE_PATH,
-        platform::service::ROLE_SERVICE,
+        platform::service::ExecutionClass::Privileged,
         Some(args_nul.as_slice()),
         Some(caps_nul.as_slice()),
     ) {
@@ -297,7 +278,7 @@ fn spawn_capability_service() -> Result<u64, mochi_user_syscall::SysError> {
     let args_nul = encode_spawn_args(&args);
     match platform::service::spawn_manifest(
         CAPABILITY_SERVICE_PATH,
-        platform::service::ROLE_SERVICE,
+        platform::service::ExecutionClass::Privileged,
         Some(args_nul.as_slice()),
         Some(caps_nul.as_slice()),
     ) {
@@ -330,20 +311,6 @@ fn run() {
     match spawn_capability_service() {
         Ok(pid) => {
             platform::logln!("core.service: capability.service spawned pid={}", pid);
-            match register_delegate_with_retry(platform::service::DELEGATE_SERVICE_SPAWN, pid) {
-                Ok(_) => {
-                    platform::logln!(
-                        "core.service: registered capability.service as service delegate"
-                    );
-                }
-                Err(err) => {
-                    platform::logln!(
-                        "core.service: capability delegate registration failed errno={}",
-                        err.errno().unwrap_or(0)
-                    );
-                    platform::process::exit(1);
-                }
-            }
         }
         Err(err) => {
             platform::logln!(

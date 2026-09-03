@@ -20,10 +20,10 @@ fn spawn(
     spec: ServiceSpec,
     arguments: &[alloc::string::String],
 ) -> Result<u64, mochi_user_syscall::SysError> {
-    let manifest = platform::package::read_manifest(spec.manifest_path)
-        .ok_or_else(|| sys_error(mochi_user_syscall::ENOENT))?;
     let mut arguments = arguments.to_vec();
-    if spec.role == crate::service_config::ROLE_APPLICATION {
+    if spec.security_identity {
+        let manifest = platform::package::read_manifest(spec.manifest_path)
+            .ok_or_else(|| sys_error(mochi_user_syscall::ENOENT))?;
         arguments.insert(
             0,
             alloc::format!("{SECURITY_IDENTITY_PREFIX}{}", manifest.package_id),
@@ -33,7 +33,7 @@ fn spawn(
     let capabilities = resolve_capabilities(spec.path)?;
     platform::service::spawn_manifest(
         spec.path,
-        spec.role,
+        spec.execution_class,
         Some(arguments.as_slice()),
         Some(capabilities.as_slice()),
     )
@@ -44,10 +44,10 @@ fn spawn_with_credentials(
     arguments: &[alloc::string::String],
     identity: platform::service_ready::SessionIdentity,
 ) -> Result<u64, mochi_user_syscall::SysError> {
-    let manifest = platform::package::read_manifest(spec.manifest_path)
-        .ok_or_else(|| sys_error(mochi_user_syscall::ENOENT))?;
     let mut arguments = arguments.to_vec();
-    if spec.role == crate::service_config::ROLE_APPLICATION {
+    if spec.security_identity {
+        let manifest = platform::package::read_manifest(spec.manifest_path)
+            .ok_or_else(|| sys_error(mochi_user_syscall::ENOENT))?;
         arguments.insert(
             0,
             alloc::format!("{SECURITY_IDENTITY_PREFIX}{}", manifest.package_id),
@@ -57,7 +57,7 @@ fn spawn_with_credentials(
     let capabilities = resolve_capabilities(spec.path)?;
     platform::service::spawn_manifest_with_credentials(
         spec.path,
-        spec.role,
+        spec.execution_class,
         identity.uid,
         identity.gid,
         Some(arguments.as_slice()),

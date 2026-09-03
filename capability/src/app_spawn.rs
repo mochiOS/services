@@ -146,7 +146,7 @@ pub(crate) fn spawn_application_from_manifest(
     let args_nul = encode_spawn_args(&spawn_items);
     platform::service::spawn_manifest_for_requester(
         entry_path,
-        platform::service::ROLE_APPLICATION,
+        platform::service::ExecutionClass::Unprivileged,
         sender,
         Some(args_nul.as_slice()),
         Some(caps_nul.as_slice()),

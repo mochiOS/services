@@ -1,8 +1,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use mochi_user_platform::service::ExecutionClass;
 
-pub(crate) const ROLE_SERVICE: u64 = 2;
-pub(crate) const ROLE_APPLICATION: u64 = 3;
 pub(crate) const SERVICE_READY_TIMEOUT_TICKS: u64 = 5_000;
 pub(crate) const NETWORK_READY_TIMEOUT_TICKS: u64 = 30_000;
 
@@ -25,7 +24,28 @@ pub(crate) enum FixedService {
 pub(crate) struct ServiceSpec {
     pub(crate) path: &'static str,
     pub(crate) manifest_path: &'static str,
-    pub(crate) role: u64,
+    pub(crate) execution_class: ExecutionClass,
+    pub(crate) security_identity: bool,
+}
+
+impl ServiceSpec {
+    const fn privileged(path: &'static str, manifest_path: &'static str) -> Self {
+        Self {
+            path,
+            manifest_path,
+            execution_class: ExecutionClass::Privileged,
+            security_identity: false,
+        }
+    }
+
+    const fn isolated(path: &'static str, manifest_path: &'static str) -> Self {
+        Self {
+            path,
+            manifest_path,
+            execution_class: ExecutionClass::Unprivileged,
+            security_identity: true,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,69 +54,57 @@ pub(crate) struct ReadyTarget {
     pub(crate) token: u64,
 }
 
-pub(crate) const DRIVERS: ServiceSpec = ServiceSpec {
-    path: "/system/services/drivers.service",
-    manifest_path: "/system/packages/drivers/manifest.toml",
-    role: ROLE_SERVICE,
-};
+pub(crate) const DRIVERS: ServiceSpec = ServiceSpec::privileged(
+    "/system/services/drivers.service",
+    "/system/packages/drivers/manifest.toml",
+);
 
 pub(crate) const fn fixed_service_spec(service: FixedService) -> ServiceSpec {
     match service {
-        FixedService::MbootAgent => ServiceSpec {
-            path: "/system/services/mboot-agent.service",
-            manifest_path: "/system/packages/mboot-agent/manifest.toml",
-            role: ROLE_SERVICE,
-        },
-        FixedService::Input => ServiceSpec {
-            path: "/system/services/input.service",
-            manifest_path: "/system/packages/input/manifest.toml",
-            role: ROLE_SERVICE,
-        },
-        FixedService::Display => ServiceSpec {
-            path: "/system/services/display.driver",
-            manifest_path: "/system/packages/display/manifest.toml",
-            role: ROLE_SERVICE,
-        },
-        FixedService::Compositor => ServiceSpec {
-            path: "/system/services/compositor.service",
-            manifest_path: "/system/packages/compositor/manifest.toml",
-            role: ROLE_SERVICE,
-        },
-        FixedService::Network => ServiceSpec {
-            path: "/system/services/network.service",
-            manifest_path: "/system/packages/network/manifest.toml",
-            role: ROLE_SERVICE,
-        },
-        FixedService::User => ServiceSpec {
-            path: "/system/services/user.service",
-            manifest_path: "/system/packages/user/manifest.toml",
-            role: ROLE_SERVICE,
-        },
-        FixedService::SecureUi => ServiceSpec {
-            path: "/system/services/secure-ui.service",
-            manifest_path: "/system/packages/secure-ui/manifest.toml",
-            role: ROLE_SERVICE,
-        },
-        FixedService::Linux => ServiceSpec {
-            path: "/system/services/linux.service",
-            manifest_path: "/system/packages/linux/manifest.toml",
-            role: ROLE_SERVICE,
-        },
-        FixedService::Binder => ServiceSpec {
-            path: "/applications/Binder.app/entry.elf",
-            manifest_path: "/system/packages/binder/manifest.toml",
-            role: ROLE_APPLICATION,
-        },
-        FixedService::Installer => ServiceSpec {
-            path: "/applications/Installer.app/entry.elf",
-            manifest_path: "/system/packages/installer/manifest.toml",
-            role: ROLE_APPLICATION,
-        },
-        FixedService::Update => ServiceSpec {
-            path: "/system/services/update.service",
-            manifest_path: "/system/packages/update/manifest.toml",
-            role: ROLE_SERVICE,
-        },
+        FixedService::MbootAgent => ServiceSpec::privileged(
+            "/system/services/mboot-agent.service",
+            "/system/packages/mboot-agent/manifest.toml",
+        ),
+        FixedService::Input => ServiceSpec::privileged(
+            "/system/services/input.service",
+            "/system/packages/input/manifest.toml",
+        ),
+        FixedService::Display => ServiceSpec::privileged(
+            "/system/services/display.driver",
+            "/system/packages/display/manifest.toml",
+        ),
+        FixedService::Compositor => ServiceSpec::privileged(
+            "/system/services/compositor.service",
+            "/system/packages/compositor/manifest.toml",
+        ),
+        FixedService::Network => ServiceSpec::privileged(
+            "/system/services/network.service",
+            "/system/packages/network/manifest.toml",
+        ),
+        FixedService::User => ServiceSpec::privileged(
+            "/system/services/user.service",
+            "/system/packages/user/manifest.toml",
+        ),
+        FixedService::SecureUi => ServiceSpec::privileged(
+            "/system/services/secure-ui.service",
+            "/system/packages/secure-ui/manifest.toml",
+        ),
+        FixedService::Linux => ServiceSpec::privileged(
+            "/system/services/linux.service",
+            "/system/packages/linux/manifest.toml",
+        ),
+        FixedService::Binder => ServiceSpec::isolated(
+            "/applications/Binder.app/entry.elf",
+            "/system/packages/binder/manifest.toml",
+        ),
+        FixedService::Installer => ServiceSpec::isolated(
+            "/applications/Installer.app/entry.elf",
+            "/system/packages/installer/manifest.toml",
+        ),
+        FixedService::Update => ServiceSpec::privileged(
+            "/system/services/update.service",
+            "/system/packages/update/manifest.toml",
+        ),
     }
 }
 
@@ -147,86 +155,99 @@ mod tests {
     use super::*;
 
     #[test]
-    fn paths_roles_and_manifest_paths_match_fixed_service_policy() {
+    fn paths_classes_and_manifest_paths_match_fixed_service_policy() {
         assert_eq!(DRIVERS.path, "/system/services/drivers.service");
         assert_eq!(
             DRIVERS.manifest_path,
             "/system/packages/drivers/manifest.toml"
         );
-        assert_eq!(DRIVERS.role, ROLE_SERVICE);
+        assert_eq!(DRIVERS.execution_class, ExecutionClass::Privileged);
+        assert!(!DRIVERS.security_identity);
         let expected = [
             (
                 FixedService::MbootAgent,
                 "/system/services/mboot-agent.service",
                 "/system/packages/mboot-agent/manifest.toml",
-                ROLE_SERVICE,
+                ExecutionClass::Privileged,
+                false,
             ),
             (
                 FixedService::Input,
                 "/system/services/input.service",
                 "/system/packages/input/manifest.toml",
-                ROLE_SERVICE,
+                ExecutionClass::Privileged,
+                false,
             ),
             (
                 FixedService::Display,
                 "/system/services/display.driver",
                 "/system/packages/display/manifest.toml",
-                ROLE_SERVICE,
+                ExecutionClass::Privileged,
+                false,
             ),
             (
                 FixedService::Compositor,
                 "/system/services/compositor.service",
                 "/system/packages/compositor/manifest.toml",
-                ROLE_SERVICE,
+                ExecutionClass::Privileged,
+                false,
             ),
             (
                 FixedService::Linux,
                 "/system/services/linux.service",
                 "/system/packages/linux/manifest.toml",
-                ROLE_SERVICE,
+                ExecutionClass::Privileged,
+                false,
             ),
             (
                 FixedService::Binder,
                 "/applications/Binder.app/entry.elf",
                 "/system/packages/binder/manifest.toml",
-                ROLE_APPLICATION,
+                ExecutionClass::Unprivileged,
+                true,
             ),
             (
                 FixedService::Installer,
                 "/applications/Installer.app/entry.elf",
                 "/system/packages/installer/manifest.toml",
-                ROLE_APPLICATION,
+                ExecutionClass::Unprivileged,
+                true,
             ),
             (
                 FixedService::Network,
                 "/system/services/network.service",
                 "/system/packages/network/manifest.toml",
-                ROLE_SERVICE,
+                ExecutionClass::Privileged,
+                false,
             ),
             (
                 FixedService::User,
                 "/system/services/user.service",
                 "/system/packages/user/manifest.toml",
-                ROLE_SERVICE,
+                ExecutionClass::Privileged,
+                false,
             ),
             (
                 FixedService::SecureUi,
                 "/system/services/secure-ui.service",
                 "/system/packages/secure-ui/manifest.toml",
-                ROLE_SERVICE,
+                ExecutionClass::Privileged,
+                false,
             ),
             (
                 FixedService::Update,
                 "/system/services/update.service",
                 "/system/packages/update/manifest.toml",
-                ROLE_SERVICE,
+                ExecutionClass::Privileged,
+                false,
             ),
         ];
-        for (service, path, manifest_path, role) in expected {
+        for (service, path, manifest_path, execution_class, security_identity) in expected {
             let spec = fixed_service_spec(service);
             assert_eq!(spec.path, path);
             assert_eq!(spec.manifest_path, manifest_path);
-            assert_eq!(spec.role, role);
+            assert_eq!(spec.execution_class, execution_class);
+            assert_eq!(spec.security_identity, security_identity);
         }
     }
 

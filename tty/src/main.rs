@@ -123,7 +123,7 @@ fn spawn_msh(tty_endpoint: u64, logger_endpoint: u64) -> Result<u64, mochi_user_
     let args_nul = encode_spawn_args(&args);
     platform::service::spawn_manifest(
         MSH_PATH,
-        platform::service::ROLE_APPLICATION,
+        platform::service::ExecutionClass::Unprivileged,
         Some(args_nul.as_slice()),
         Some(caps_nul.as_slice()),
     )

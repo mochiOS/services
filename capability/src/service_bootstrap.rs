@@ -59,7 +59,7 @@ fn spawn_service_by_package(
     let args_nul = encode_spawn_args(&args);
     platform::service::spawn_manifest(
         service_path,
-        platform::service::ROLE_SERVICE,
+        platform::service::ExecutionClass::Privileged,
         Some(args_nul.as_slice()),
         Some(caps_nul.as_slice()),
     )

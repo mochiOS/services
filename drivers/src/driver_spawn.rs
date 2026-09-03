@@ -26,7 +26,7 @@ fn spawn_bundle(
     let args_nul = encode_spawn_args(&spawn_args);
     platform::service::spawn_manifest(
         entry_path,
-        platform::service::ROLE_DRIVER,
+        platform::service::ExecutionClass::Unprivileged,
         Some(args_nul.as_slice()),
         Some(caps_nul.as_slice()),
     )
