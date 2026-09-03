@@ -5,7 +5,6 @@ use crate::present::{BYTES_PER_PIXEL, DisplayGeometry, PresentFrame};
 
 const FB_VIRT: u64 = 0x0000_6000_0000_0000;
 const FORMAT_MEDIATED_FIRMWARE: u32 = 1 << 31;
-const FIRMWARE_MAX_TRANSFER: usize = 64 * 1024;
 
 pub(crate) struct FramebufferBackend {
     geometry: DisplayGeometry,
@@ -13,6 +12,8 @@ pub(crate) struct FramebufferBackend {
     mapped_size: u64,
     mdriver: bool,
     firmware_mediated: bool,
+    transfer_limit: usize,
+    transfer_buffer: Vec<u8>,
 }
 
 impl FramebufferBackend {
@@ -28,6 +29,11 @@ impl FramebufferBackend {
         let _ = geometry.byte_len()?;
         if info.addr == 0 {
             let firmware_mediated = info.format & FORMAT_MEDIATED_FIRMWARE != 0;
+            let transfer_limit = platform::memory::framebuffer_transfer_limit()
+                .map_err(|error| error.errno().unwrap_or(EIO))?;
+            if transfer_limit < BYTES_PER_PIXEL {
+                return Err(ERANGE);
+            }
             platform::logln!(
                 "display.driver: backend={}",
                 if firmware_mediated {
@@ -42,6 +48,8 @@ impl FramebufferBackend {
                 mapped_size: 0,
                 mdriver: !firmware_mediated,
                 firmware_mediated,
+                transfer_limit,
+                transfer_buffer: Vec::new(),
             });
         }
         let offset = info.addr & 0xfff;
@@ -53,6 +61,8 @@ impl FramebufferBackend {
             mapped_size,
             mdriver: false,
             firmware_mediated: false,
+            transfer_limit: 0,
+            transfer_buffer: Vec::new(),
         })
     }
 
@@ -73,20 +83,15 @@ impl FramebufferBackend {
 
         if self.mdriver || self.firmware_mediated {
             let pixel = color.to_le_bytes();
-            let transfer_size = if self.firmware_mediated {
-                FIRMWARE_MAX_TRANSFER
-            } else {
-                4096
-            };
-            let mut tile = vec![0u8; transfer_size];
-            for chunk in tile.chunks_exact_mut(BYTES_PER_PIXEL) {
+            self.transfer_buffer.resize(self.transfer_limit, 0);
+            for chunk in self.transfer_buffer.chunks_exact_mut(BYTES_PER_PIXEL) {
                 chunk.copy_from_slice(&pixel);
             }
             let row_bytes = usize::try_from(width)
                 .ok()
                 .and_then(|width| width.checked_mul(BYTES_PER_PIXEL))
                 .ok_or(ERANGE)?;
-            let rows_per_tile = u32::try_from(tile.len() / row_bytes)
+            let rows_per_tile = u32::try_from(self.transfer_buffer.len() / row_bytes)
                 .map_err(|_| ERANGE)?
                 .max(1);
             let mut y = 0u32;
@@ -100,7 +105,7 @@ impl FramebufferBackend {
                     origin_y + y,
                     width,
                     rows,
-                    &tile[..byte_len],
+                    &self.transfer_buffer[..byte_len],
                 )
                 .map_err(|error| error.errno().unwrap_or(EIO))?;
                 y += rows;
@@ -160,62 +165,8 @@ impl FramebufferBackend {
         let x_offset = (frame.damage.x as usize)
             .checked_mul(BYTES_PER_PIXEL)
             .ok_or(ERANGE)?;
-        if self.firmware_mediated {
-            let rows_per_transfer = (FIRMWARE_MAX_TRANSFER / bytes).max(1);
-            let mut y = frame.damage.y as usize;
-            while y < copy_bottom as usize {
-                let rows = if bytes == source_row {
-                    core::cmp::min(copy_bottom as usize - y, rows_per_transfer)
-                } else {
-                    1
-                };
-                let source = y
-                    .checked_mul(source_row)
-                    .and_then(|offset| offset.checked_add(x_offset))
-                    .ok_or(ERANGE)?;
-                let byte_len = bytes.checked_mul(rows).ok_or(ERANGE)?;
-                let source_end = source.checked_add(byte_len).ok_or(ERANGE)?;
-                let pixels = frame.pixels.get(source..source_end).ok_or(ERANGE)?;
-                platform::memory::present_framebuffer(
-                    frame.damage.x,
-                    y as u32,
-                    copy_width,
-                    rows as u32,
-                    pixels,
-                )
-                .map_err(|error| error.errno().unwrap_or(EIO))?;
-                y += rows;
-            }
-            return Ok(());
-        }
-        if self.mdriver {
-            for y in frame.damage.y as usize..copy_bottom as usize {
-                let mut x = frame.damage.x as usize;
-                while x < copy_right as usize {
-                    let tile_width =
-                        core::cmp::min(copy_right as usize - x, 4096 / BYTES_PER_PIXEL);
-                    let source = y
-                        .checked_mul(source_row)
-                        .and_then(|offset| {
-                            x.checked_mul(BYTES_PER_PIXEL)
-                                .and_then(|x_offset| offset.checked_add(x_offset))
-                        })
-                        .ok_or(ERANGE)?;
-                    let tile_bytes = tile_width.checked_mul(BYTES_PER_PIXEL).ok_or(ERANGE)?;
-                    let source_end = source.checked_add(tile_bytes).ok_or(ERANGE)?;
-                    let pixels = frame.pixels.get(source..source_end).ok_or(ERANGE)?;
-                    platform::memory::present_framebuffer(
-                        x as u32,
-                        y as u32,
-                        tile_width as u32,
-                        1,
-                        pixels,
-                    )
-                    .map_err(|error| error.errno().unwrap_or(EIO))?;
-                    x += tile_width;
-                }
-            }
-            return Ok(());
+        if self.mdriver || self.firmware_mediated {
+            return self.present_mediated(frame, copy_right, copy_bottom, source_row);
         }
         for y in frame.damage.y as usize..copy_bottom as usize {
             let source = y
@@ -235,6 +186,73 @@ impl FramebufferBackend {
                     bytes,
                 );
             }
+        }
+        Ok(())
+    }
+
+    fn present_mediated(
+        &mut self,
+        frame: &PresentFrame<'_>,
+        copy_right: u32,
+        copy_bottom: u32,
+        source_row: usize,
+    ) -> Result<(), u64> {
+        let max_width = self.transfer_limit / BYTES_PER_PIXEL;
+        if max_width == 0 {
+            return Err(ERANGE);
+        }
+        let mut x = frame.damage.x as usize;
+        while x < copy_right as usize {
+            let tile_width = core::cmp::min(copy_right as usize - x, max_width);
+            let tile_bytes = tile_width.checked_mul(BYTES_PER_PIXEL).ok_or(ERANGE)?;
+            let rows_per_transfer = (self.transfer_limit / tile_bytes).max(1);
+            let mut y = frame.damage.y as usize;
+            while y < copy_bottom as usize {
+                let rows = core::cmp::min(copy_bottom as usize - y, rows_per_transfer);
+                let byte_len = tile_bytes.checked_mul(rows).ok_or(ERANGE)?;
+                let source = y
+                    .checked_mul(source_row)
+                    .and_then(|offset| {
+                        x.checked_mul(BYTES_PER_PIXEL)
+                            .and_then(|x_offset| offset.checked_add(x_offset))
+                    })
+                    .ok_or(ERANGE)?;
+                if tile_bytes == source_row {
+                    let source_end = source.checked_add(byte_len).ok_or(ERANGE)?;
+                    let pixels = frame.pixels.get(source..source_end).ok_or(ERANGE)?;
+                    platform::memory::present_framebuffer(
+                        x as u32,
+                        y as u32,
+                        tile_width as u32,
+                        rows as u32,
+                        pixels,
+                    )
+                    .map_err(|error| error.errno().unwrap_or(EIO))?;
+                } else {
+                    self.transfer_buffer.resize(byte_len, 0);
+                    for row in 0..rows {
+                        let source_start = source
+                            .checked_add(row.checked_mul(source_row).ok_or(ERANGE)?)
+                            .ok_or(ERANGE)?;
+                        let source_end = source_start.checked_add(tile_bytes).ok_or(ERANGE)?;
+                        let destination = row.checked_mul(tile_bytes).ok_or(ERANGE)?;
+                        self.transfer_buffer[destination..destination + tile_bytes]
+                            .copy_from_slice(
+                                frame.pixels.get(source_start..source_end).ok_or(ERANGE)?,
+                            );
+                    }
+                    platform::memory::present_framebuffer(
+                        x as u32,
+                        y as u32,
+                        tile_width as u32,
+                        rows as u32,
+                        &self.transfer_buffer,
+                    )
+                    .map_err(|error| error.errno().unwrap_or(EIO))?;
+                }
+                y += rows;
+            }
+            x += tile_width;
         }
         Ok(())
     }
