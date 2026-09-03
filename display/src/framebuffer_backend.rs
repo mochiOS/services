@@ -5,6 +5,7 @@ use crate::present::{BYTES_PER_PIXEL, DisplayGeometry, PresentFrame};
 
 const FB_VIRT: u64 = 0x0000_6000_0000_0000;
 const FORMAT_MEDIATED_FIRMWARE: u32 = 1 << 31;
+const FORMAT_SHARED_SURFACE: u32 = 1 << 30;
 
 pub(crate) struct FramebufferBackend {
     geometry: DisplayGeometry,
@@ -12,6 +13,7 @@ pub(crate) struct FramebufferBackend {
     mapped_size: u64,
     mdriver: bool,
     firmware_mediated: bool,
+    shared_surface: bool,
     transfer_limit: usize,
     transfer_buffer: Vec<u8>,
 }
@@ -48,6 +50,7 @@ impl FramebufferBackend {
                 mapped_size: 0,
                 mdriver: !firmware_mediated,
                 firmware_mediated,
+                shared_surface: false,
                 transfer_limit,
                 transfer_buffer: Vec::new(),
             });
@@ -61,6 +64,7 @@ impl FramebufferBackend {
             mapped_size,
             mdriver: false,
             firmware_mediated: false,
+            shared_surface: info.format & FORMAT_SHARED_SURFACE != 0,
             transfer_limit: 0,
             transfer_buffer: Vec::new(),
         })
@@ -127,6 +131,10 @@ impl FramebufferBackend {
                 };
             }
         }
+        if self.shared_surface {
+            platform::memory::commit_framebuffer(origin_x, origin_y, width, height)
+                .map_err(|error| error.errno().unwrap_or(EIO))?;
+        }
         Ok(())
     }
 
@@ -186,6 +194,15 @@ impl FramebufferBackend {
                     bytes,
                 );
             }
+        }
+        if self.shared_surface {
+            platform::memory::commit_framebuffer(
+                frame.damage.x,
+                frame.damage.y,
+                copy_width,
+                copy_bottom - frame.damage.y,
+            )
+            .map_err(|error| error.errno().unwrap_or(EIO))?;
         }
         Ok(())
     }
