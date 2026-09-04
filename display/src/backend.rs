@@ -27,6 +27,9 @@ impl DisplayBackend {
             Self::VirtioGpu(backend) if backend.gpu_scene_supported() => {
                 crate::protocol::RENDERER_CAP_GPU_SCENE
             }
+            Self::Framebuffer(backend) if backend.gpu_scene_supported() => {
+                crate::protocol::RENDERER_CAP_GPU_SCENE
+            }
             _ => 0,
         }
     }
@@ -105,6 +108,7 @@ impl DisplayBackend {
     pub(crate) fn present_gpu_scene(
         &mut self,
         scene: &mochios_viewkit_gpu_protocol::compositor::Scene<'_>,
+        bytes: &[u8],
     ) -> Result<(), u64> {
         match self {
             Self::VirtioGpu(backend) => backend.present_gpu_scene(scene).map_err(|error| {
@@ -114,7 +118,7 @@ impl DisplayBackend {
                 );
                 error.errno()
             }),
-            Self::Framebuffer(_) => Err(mochi_user_syscall::ENOSYS),
+            Self::Framebuffer(backend) => backend.present_gpu_scene(bytes),
         }
     }
 

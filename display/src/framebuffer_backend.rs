@@ -6,6 +6,8 @@ use crate::present::{BYTES_PER_PIXEL, DisplayGeometry, PresentFrame};
 const FB_VIRT: u64 = 0x0000_6000_0000_0000;
 const FORMAT_MEDIATED_FIRMWARE: u32 = 1 << 31;
 const FORMAT_SHARED_SURFACE: u32 = 1 << 30;
+const GPU_SCENE_COMMIT_X: u32 = u32::from_le_bytes(*b"VKGS");
+const GPU_SCENE_COMMIT_WIDTH: u32 = u32::from_le_bytes(*b"GPU1");
 
 pub(crate) struct FramebufferBackend {
     geometry: DisplayGeometry,
@@ -72,6 +74,30 @@ impl FramebufferBackend {
 
     pub(crate) const fn geometry(&self) -> DisplayGeometry {
         self.geometry
+    }
+
+    pub(crate) const fn gpu_scene_supported(&self) -> bool {
+        self.shared_surface
+    }
+
+    pub(crate) fn present_gpu_scene(&mut self, bytes: &[u8]) -> Result<(), u64> {
+        if !self.shared_surface || self.pixels.is_null() || bytes.is_empty() {
+            return Err(mochi_user_syscall::ENOSYS);
+        }
+        if bytes.len() as u64 > self.mapped_size || bytes.len() > u32::MAX as usize {
+            return Err(ERANGE);
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), self.pixels, bytes.len());
+        }
+        platform::memory::commit_framebuffer(
+            GPU_SCENE_COMMIT_X,
+            bytes.len() as u32,
+            GPU_SCENE_COMMIT_WIDTH,
+            1,
+        )
+        .map(|_| ())
+        .map_err(|error| error.errno().unwrap_or(EIO))
     }
 
     /// Replaces the firmware boot screen as soon as the mediated display is
@@ -290,14 +316,14 @@ fn visible_height(info: &platform::memory::FramebufferInfo) -> Result<u32, u64> 
     if row_bytes == 0 {
         return Err(ERANGE);
     }
-    let rows = (info.size as usize) / row_bytes;
-    let reported = info.height as usize;
-    let visible = if rows > reported && rows <= crate::present::MAX_DIMENSION as usize {
-        rows
-    } else {
-        reported
-    };
-    u32::try_from(visible).map_err(|_| ERANGE)
+    let reported = usize::try_from(info.height).map_err(|_| ERANGE)?;
+    if reported == 0
+        || reported > crate::present::MAX_DIMENSION as usize
+        || row_bytes.checked_mul(reported).ok_or(ERANGE)? > info.size as usize
+    {
+        return Err(ERANGE);
+    }
+    Ok(info.height)
 }
 
 fn page_align_up(value: u64) -> Result<u64, u64> {

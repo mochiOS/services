@@ -249,7 +249,7 @@ fn present_gpu_scene_request(
         return errno_status(EINVAL);
     };
     backend
-        .present_gpu_scene(&scene)
+        .present_gpu_scene(&scene, bytes)
         .map_or_else(errno_status, |_| 0)
 }
 
