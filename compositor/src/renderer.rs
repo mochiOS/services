@@ -82,6 +82,10 @@ fn perf_counter() -> u64 {
     platform::time::monotonic_milliseconds().unwrap_or(0)
 }
 
+fn gpu_damage(contents_valid: bool, damage: Option<Rect>) -> Option<Rect> {
+    contents_valid.then_some(damage).flatten()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn try_gpu_scene_present(
     surfaces: &[Surface],
@@ -96,7 +100,9 @@ fn try_gpu_scene_present(
     cursor_visible: bool,
     cursor_image: &CursorImage,
 ) -> Option<u32> {
-    let force_atlas_upload = !present_frame.gpu_contents_valid;
+    let contents_valid = present_frame.gpu_contents_valid;
+    let force_atlas_upload = !contents_valid;
+    let damage = gpu_damage(contents_valid, damage);
     let mut gpu_compositor = core::mem::take(&mut present_frame.gpu_compositor);
     if force_atlas_upload {
         gpu_compositor.invalidate_textures();
@@ -214,5 +220,12 @@ mod tests {
             ),
             errno_status(mochi_user_syscall::ENOTSUP)
         );
+    }
+
+    #[test]
+    fn invalid_gpu_contents_force_a_full_frame() {
+        let damage = Rect::new(10, 20, 30, 40);
+        assert_eq!(gpu_damage(false, Some(damage)), None);
+        assert_eq!(gpu_damage(true, Some(damage)), Some(damage));
     }
 }
