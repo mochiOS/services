@@ -9,7 +9,6 @@ static mut IPC_BUFFER: [u8; 4128] = [0; 4128];
 static mut REPLY: [u8; 20] = [0; 20];
 
 pub(crate) fn run() -> ! {
-    platform::logln!("display.driver: start");
     let Some(ready_target) = platform::service_ready::take_bootstrap_target() else {
         platform::logln!("display.driver: missing ready target");
         platform::process::exit(1);
@@ -26,7 +25,6 @@ pub(crate) fn run() -> ! {
         let _ = platform::service_ready::notify(ready_target, ready_status(errno));
         platform::process::exit(1);
     }
-    platform::logln!("display.driver: startup frame presented");
     let endpoint = match platform::ipc::create() {
         Ok(endpoint) => endpoint,
         Err(error) => {

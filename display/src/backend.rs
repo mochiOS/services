@@ -17,7 +17,10 @@ impl DisplayBackend {
         // compositor publishes the desktop.
         const STARTUP_COLOR: u32 = 0x0076_51c9;
         match self {
-            Self::Framebuffer(backend) => backend.present_startup_frame(STARTUP_COLOR),
+            Self::Framebuffer(backend) if !backend.gpu_scene_supported() => {
+                backend.present_startup_frame(STARTUP_COLOR)
+            }
+            Self::Framebuffer(_) => Ok(()),
             Self::VirtioGpu(_) => Ok(()),
         }
     }

@@ -164,7 +164,7 @@ fn try_gpu_scene_present(
         if platform::ipc::send_page_count(display_tid, present_frame.page_count, present_frame.virt)
             .is_err()
         {
-            present_frame.gpu_panel_disabled = true;
+            present_frame.gpu_contents_valid = false;
             return None;
         }
         present_frame.sent_to_display = true;
@@ -177,7 +177,7 @@ fn try_gpu_scene_present(
         present_frame.record_metrics(true, composition_millis, present_millis, byte_len);
         Some(0)
     } else {
-        present_frame.gpu_panel_disabled = true;
+        present_frame.gpu_contents_valid = false;
         None
     }
 }
@@ -299,23 +299,26 @@ fn blend_argb_over_xrgb(dst: u32, src: u32) -> u32 {
 pub(crate) fn composite_and_present(
     surfaces: &[Surface],
     windows: &[Window],
-    keyboard_focus: Option<usize>,
+    _keyboard_focus: Option<usize>,
     present_frame: &mut PresentFrame,
     display_tid: u64,
     display_width: u32,
     display_height: u32,
     _display_stride: u32,
     display_format: u32,
+    renderer_caps: u32,
     cursor_x: i32,
     cursor_y: i32,
     cursor_visible: bool,
     cursor_image: &CursorImage,
     damage: Option<Rect>,
 ) -> u32 {
-    if display_format != PIXEL_FORMAT_XRGB8888 {
+    if display_format != PIXEL_FORMAT_XRGB8888
+        || renderer_caps & crate::protocol::RENDERER_CAP_GPU_SCENE == 0
+    {
         return errno_status(mochi_user_syscall::ENOTSUP);
     }
-    if let Some(status) = try_gpu_scene_present(
+    try_gpu_scene_present(
         surfaces,
         windows,
         present_frame,
@@ -327,8 +330,47 @@ pub(crate) fn composite_and_present(
         cursor_y,
         cursor_visible,
         cursor_image,
-    ) {
-        return status;
+    )
+    .unwrap_or_else(|| errno_status(mochi_user_syscall::EIO))
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn composite_and_present_legacy_cpu(
+    surfaces: &[Surface],
+    windows: &[Window],
+    keyboard_focus: Option<usize>,
+    present_frame: &mut PresentFrame,
+    display_tid: u64,
+    display_width: u32,
+    display_height: u32,
+    _display_stride: u32,
+    display_format: u32,
+    renderer_caps: u32,
+    cursor_x: i32,
+    cursor_y: i32,
+    cursor_visible: bool,
+    cursor_image: &CursorImage,
+    damage: Option<Rect>,
+) -> u32 {
+    if display_format != PIXEL_FORMAT_XRGB8888 {
+        return errno_status(mochi_user_syscall::ENOTSUP);
+    }
+    if renderer_caps & crate::protocol::RENDERER_CAP_GPU_SCENE != 0 {
+        return try_gpu_scene_present(
+            surfaces,
+            windows,
+            present_frame,
+            display_tid,
+            display_width,
+            display_height,
+            damage,
+            cursor_x,
+            cursor_y,
+            cursor_visible,
+            cursor_image,
+        )
+        .unwrap_or_else(|| errno_status(mochi_user_syscall::EIO));
     }
     if let Some(status) = try_gpu_panel_present(
         surfaces,
@@ -906,4 +948,35 @@ fn blend_premultiplied_argb_over_xrgb(dst: u32, src: u32) -> u32 {
     let g = sg + (dg * inv + 127) / 255;
     let b = sb + (db * inv + 127) / 255;
     0xff00_0000 | (r.min(255) << 16) | (g.min(255) << 8) | b.min(255)
+}
+
+#[cfg(test)]
+mod gpu_required_tests {
+    use super::*;
+
+    #[test]
+    fn compositor_refuses_to_fall_back_when_gpu_scene_is_unavailable() {
+        let mut present = PresentFrame::default();
+        let cursor = CursorImage::default();
+        assert_eq!(
+            composite_and_present(
+                &[],
+                &[],
+                None,
+                &mut present,
+                0,
+                640,
+                480,
+                640,
+                PIXEL_FORMAT_XRGB8888,
+                0,
+                0,
+                0,
+                false,
+                &cursor,
+                None,
+            ),
+            errno_status(mochi_user_syscall::ENOTSUP)
+        );
+    }
 }

@@ -593,23 +593,16 @@ mod gpu_hit_tests {
     use super::*;
 
     #[test]
-    fn toplevel_surfaces_accept_gpu_scenes() {
-        assert!(surface_role_accepts_format(
+    fn every_composited_role_accepts_gpu_scenes() {
+        for role in [
             SurfaceRole::Toplevel,
-            PIXEL_FORMAT_GPU_SCENE
-        ));
-    }
-
-    #[test]
-    fn non_window_surfaces_do_not_gain_gpu_scene_access() {
-        assert!(!surface_role_accepts_format(
-            SurfaceRole::Background,
-            PIXEL_FORMAT_GPU_SCENE
-        ));
-        assert!(!surface_role_accepts_format(
             SurfaceRole::Popup,
-            PIXEL_FORMAT_GPU_SCENE
-        ));
+            SurfaceRole::Background,
+            SurfaceRole::Panel,
+            SurfaceRole::SecureOverlay,
+        ] {
+            assert!(surface_role_accepts_format(role, PIXEL_FORMAT_GPU_SCENE));
+        }
     }
 
     fn push_vertex(vertices: &mut Vec<u8>, x: f32, y: f32, u: f32, v: f32, alpha: f32) {
@@ -818,7 +811,11 @@ fn surface_role_accepts_format(role: SurfaceRole, format: u32) -> bool {
         }
         PIXEL_FORMAT_GPU_SCENE => matches!(
             role,
-            SurfaceRole::Toplevel | SurfaceRole::Panel | SurfaceRole::SecureOverlay
+            SurfaceRole::Toplevel
+                | SurfaceRole::Popup
+                | SurfaceRole::Background
+                | SurfaceRole::Panel
+                | SurfaceRole::SecureOverlay
         ),
         _ => false,
     }

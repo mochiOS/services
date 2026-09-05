@@ -319,6 +319,7 @@ pub(crate) fn run() -> ! {
         state.display_height,
         state.display_stride,
         state.display_format,
+        state.renderer_caps,
         state.cursor_x,
         state.cursor_y,
         state.cursor_visible && !state.hardware_cursor,
@@ -337,9 +338,7 @@ pub(crate) fn run() -> ! {
             msg
         } else {
             match platform::ipc::wait(endpoint, buf) {
-                Ok(msg) => {
-                    msg
-                }
+                Ok(msg) => msg,
                 Err(_) => {
                     platform::thread::yield_now();
                     continue;
@@ -418,6 +417,7 @@ pub(crate) fn run() -> ! {
                     state.display_height,
                     state.display_stride,
                     state.display_format,
+                    state.renderer_caps,
                     state.cursor_x,
                     state.cursor_y,
                     state.cursor_visible && !state.hardware_cursor,
@@ -496,6 +496,7 @@ pub(crate) fn run() -> ! {
                     state.display_height,
                     state.display_stride,
                     state.display_format,
+                    state.renderer_caps,
                     state.cursor_x,
                     state.cursor_y,
                     state.cursor_visible && !state.hardware_cursor,
