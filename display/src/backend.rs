@@ -30,9 +30,14 @@ impl DisplayBackend {
             Self::VirtioGpu(backend) if backend.gpu_scene_supported() => {
                 crate::protocol::RENDERER_CAP_GPU_SCENE
             }
-            Self::Framebuffer(backend) if backend.gpu_scene_supported() => {
-                crate::protocol::RENDERER_CAP_GPU_SCENE
-            }
+            // mDriver's shared framebuffer transport only proves that a Linux
+            // framebuffer exists.  It does not prove that the separate KMS/EGL
+            // renderer owns a working scanout.  Advertising GPU scenes here
+            // made every client discard its CPU buffer before that renderer
+            // was ready, leaving no visible fallback when KMS setup failed.
+            // Keep physical displays on the framebuffer path until mDriver
+            // provides an explicit renderer-ready handshake.
+            Self::Framebuffer(_) => 0,
             _ => 0,
         }
     }
