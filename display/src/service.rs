@@ -16,6 +16,7 @@ pub(crate) fn run() -> ! {
     let mut backend = match DisplayBackend::initialize() {
         Ok(backend) => backend,
         Err(errno) => {
+            platform::logln!("display.driver: backend initialization failed errno={}", errno_status(errno));
             let _ = platform::service_ready::notify(ready_target, ready_status(errno));
             platform::process::exit(1);
         }
@@ -365,5 +366,5 @@ fn reply_buffer(length: usize) -> &'static mut [u8] {
 }
 
 fn ready_status(errno: u64) -> i32 {
-    i32::try_from(errno).unwrap_or(i32::MAX)
+    i32::try_from(errno_status(errno)).unwrap_or(i32::MAX)
 }

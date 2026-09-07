@@ -183,14 +183,14 @@ impl GpuCompositor {
         windows: &[Window],
         display_width: u32,
         display_height: u32,
-        damage: Option<Rect>,
         cursor_x: i32,
         cursor_y: i32,
         cursor_visible: bool,
         cursor: &CursorImage,
     ) -> Option<&[u8]> {
         let damage = clip_present_rect(
-            damage,
+            // Scene consumers clear their render target before drawing.
+            None,
             usize::try_from(display_width).ok()?,
             usize::try_from(display_height).ok()?,
         )?;
@@ -214,14 +214,14 @@ impl GpuCompositor {
                 });
             }
         }
-        self.textures = requirements;
         self.vertices.clear();
         self.batches.clear();
         let first = self.vertices.len() as u32;
         push_solid_quad(
             &mut self.vertices,
             damage,
-            [200.0 / 255.0, 200.0 / 255.0, 200.0 / 255.0, 1.0],
+            // Distinguish compositor scenes from mDriver's gray startup frame.
+            [0.0, 0.0, 1.0, 1.0],
         );
         push_batch(
             &mut self.batches,
@@ -277,13 +277,14 @@ impl GpuCompositor {
         }
         encode_compositor_scene(
             &self.vertices,
-            &self.textures,
+            &requirements,
             &self.uploads,
             &self.batches,
             display_width,
             display_height,
             &mut self.output,
         )?;
+        self.textures = requirements;
         Some(self.output.as_slice())
     }
 
@@ -971,6 +972,31 @@ fn encode_compositor_scene(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_composition_does_not_cache_unsent_textures() {
+        let mut compositor = GpuCompositor::default();
+        let mut surface = gpu_surface(1, 0, 3);
+        surface.live = true;
+        surface.visible = true;
+        surface.handle = crate::surface::SurfaceHandle(10);
+        let gpu = surface.gpu.as_mut().unwrap();
+        gpu.vertices = vec![0; mochios_viewkit_gpu_protocol::VERTEX_STRIDE * 3];
+        gpu.vertices[..4].copy_from_slice(&f32::NAN.to_le_bytes());
+        assert!(compositor.compose(
+            &[surface], &[], 100, 100, 0, 0, false, &CursorImage::default(),
+        ).is_none());
+        assert!(compositor.textures.is_empty());
+    }
+
+    #[test]
+    fn scene_background_always_covers_the_display() {
+        let mut compositor = GpuCompositor::default();
+        compositor.compose(&[], &[], 1920, 1080, 0, 0, false, &CursorImage::default()).unwrap();
+        for (x, y) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+            assert!(compositor.vertices.iter().any(|vertex| vertex.x == x && vertex.y == y));
+        }
+    }
 
     fn gpu_surface(atlas_generation: u64, dirty_y: u32, dirty_height: u32) -> Surface {
         let mut surface = Surface::empty();

@@ -124,7 +124,6 @@ fn try_gpu_scene_present(
     display_tid: u64,
     display_width: u32,
     display_height: u32,
-    damage: Option<Rect>,
     cursor_x: i32,
     cursor_y: i32,
     cursor_visible: bool,
@@ -145,7 +144,6 @@ fn try_gpu_scene_present(
             windows,
             display_width,
             display_height,
-            damage,
             cursor_x,
             cursor_y,
             cursor_visible,
@@ -157,7 +155,10 @@ fn try_gpu_scene_present(
         Some(byte_len)
     })();
     present_frame.gpu_compositor = gpu_compositor;
-    let byte_len = copy_result?;
+    let Some(byte_len) = copy_result else {
+        present_frame.gpu_contents_valid = false;
+        return None;
+    };
     let composition_millis = perf_counter().saturating_sub(composition_start);
     let present_start = perf_counter();
     if !present_frame.sent_to_display {
@@ -324,7 +325,6 @@ pub(crate) fn composite_and_present(
             display_tid,
             display_width,
             display_height,
-            damage,
             cursor_x,
             cursor_y,
             cursor_visible,

@@ -390,7 +390,10 @@ pub(crate) fn run() -> ! {
         outcome.reason
     );
     if outcome.children.binder.is_some()
-        && platform::memory::framebuffer_info().is_ok_and(|info| info.addr != 0)
+        && platform::memory::framebuffer_info().is_ok_and(|info| {
+            info.addr != 0
+                && info.format & mnu_abi::hypervisor::FRAMEBUFFER_FORMAT_SHARED_SURFACE == 0
+        })
     {
         let vendor = cpu_iommu_vendor();
         match service_launcher::spawn_iommu_warning(logger_endpoint, vendor) {
