@@ -51,9 +51,9 @@ fn find_service(name: &str) -> Option<u64> {
     None
 }
 
-pub(crate) fn subscribe_input_events(endpoint: u64) -> bool {
+pub(crate) fn subscribe_input_events(endpoint: u64) -> Result<(), u32> {
     let Some(input_tid) = find_service(INPUT_SERVICE_NAME) else {
-        return false;
+        return Err(crate::protocol::errno_status(mochi_user_syscall::ENOENT));
     };
     let subscribe = unsafe {
         core::slice::from_raw_parts_mut(
@@ -71,7 +71,13 @@ pub(crate) fn subscribe_input_events(endpoint: u64) -> bool {
         )
     };
     reply.fill(0);
-    platform::ipc::call(input_tid, subscribe, reply).is_ok()
+    let message = platform::ipc::call(input_tid, subscribe, reply)
+        .map_err(|error| crate::protocol::errno_status(error.errno().unwrap_or(mochi_user_syscall::EIO)))?;
+    let length = message as u32 as usize;
+    let bytes = reply.get(..length).ok_or(crate::protocol::errno_status(mochi_user_syscall::EIO))?;
+    let [status] = bytes else { return Err(crate::protocol::errno_status(mochi_user_syscall::EIO)); };
+    let status = u32::from(*status);
+    if status == 0 { Ok(()) } else { Err(status) }
 }
 
 pub(crate) fn clear_focus_for_surface(

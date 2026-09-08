@@ -128,11 +128,17 @@ fn try_gpu_scene_present(
     cursor_y: i32,
     cursor_visible: bool,
     cursor_image: &CursorImage,
+    damage: Option<Rect>,
 ) -> Option<u32> {
     if present_frame.gpu_panel_disabled {
         return None;
     }
     let force_atlas_upload = !present_frame.gpu_contents_valid;
+    if !force_atlas_upload && damage.is_some()
+        && clip_present_rect(damage, display_width as usize, display_height as usize).is_none()
+    {
+        return Some(0);
+    }
     let mut gpu_compositor = core::mem::take(&mut present_frame.gpu_compositor);
     if force_atlas_upload {
         gpu_compositor.invalidate_textures();
@@ -148,6 +154,7 @@ fn try_gpu_scene_present(
             cursor_y,
             cursor_visible,
             cursor_image,
+            if force_atlas_upload { None } else { damage },
         )?;
         let byte_len = scene.len();
         let destination = present_frame.bytes(byte_len).ok()?;
@@ -179,7 +186,7 @@ fn try_gpu_scene_present(
         Some(0)
     } else {
         present_frame.gpu_contents_valid = false;
-        None
+        Some(status)
     }
 }
 
@@ -329,6 +336,7 @@ pub(crate) fn composite_and_present(
             cursor_y,
             cursor_visible,
             cursor_image,
+            damage,
         )
         .unwrap_or_else(|| errno_status(mochi_user_syscall::EIO));
     }

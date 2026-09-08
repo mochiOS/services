@@ -11,6 +11,17 @@ pub(crate) const OP_GET_RENDERER_CAPS: u32 = 8;
 pub(crate) const OP_PRESENT_GPU_SCENE: u32 = 9;
 pub(crate) const RENDERER_CAP_GPU_SCENE: u32 = 1;
 
+pub(crate) fn shared_buffer_notification(message: &[u8]) -> Option<(u64, u64)> {
+    if message.len() != 16 {
+        return None;
+    }
+    let address = u64::from_le_bytes(message[..8].try_into().ok()?);
+    let size = u64::from_le_bytes(message[8..].try_into().ok()?);
+    // IpcSendPages delivers page-aligned mappings, not an opcode packet.
+    (address != 0 && size != 0 && (address | size) & 4095 == 0)
+        .then_some((address, size))
+}
+
 pub(crate) fn read_u32(buffer: &[u8], offset: usize) -> Option<u32> {
     let bytes = buffer.get(offset..offset.checked_add(4)?)?;
     Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
@@ -54,6 +65,29 @@ pub(crate) fn errno_status(errno: u64) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cursor_position_is_not_a_shared_buffer_notification() {
+        for (x, y, visible) in [(0, 0, 0), (0, 0, 1), (1920, 1080, 1)] {
+            let mut message = [0u8; 16];
+            for (offset, value) in [(0, OP_SET_CURSOR_POSITION), (4, x), (8, y), (12, visible)] {
+                assert!(put_u32(&mut message, offset, value));
+            }
+            assert_eq!(shared_buffer_notification(&message), None);
+        }
+    }
+
+    #[test]
+    fn shared_buffer_notification_requires_whole_pages() {
+        let mut message = [0u8; 16];
+        message[..8].copy_from_slice(&0x6000_0000_0000u64.to_le_bytes());
+        message[8..].copy_from_slice(&8192u64.to_le_bytes());
+        assert_eq!(shared_buffer_notification(&message), Some((0x6000_0000_0000, 8192)));
+        assert_eq!(shared_buffer_notification(&message[..15]), None);
+        message[8] = 1;
+        assert_eq!(shared_buffer_notification(&message), None);
+        assert_eq!(shared_buffer_notification(&[0; 16]), None);
+    }
 
     fn request() -> [u8; 36] {
         let mut request = [0u8; 36];

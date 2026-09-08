@@ -149,7 +149,7 @@ impl DisplayBackend {
                     );
                     error.errno()
                 }),
-            Self::Framebuffer(_) => Err(mochi_user_syscall::ENOSYS),
+            Self::Framebuffer(backend) => backend.set_cursor_image(width, height, hotspot_x, hotspot_y, rgba),
         }
     }
 
@@ -158,7 +158,7 @@ impl DisplayBackend {
             Self::VirtioGpu(backend) => backend
                 .set_cursor_position(x, y, visible)
                 .map_err(GpuError::errno),
-            Self::Framebuffer(_) => Err(mochi_user_syscall::ENOSYS),
+            Self::Framebuffer(backend) => backend.set_cursor_position(x, y, visible),
         }
     }
 }

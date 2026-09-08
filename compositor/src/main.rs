@@ -12,6 +12,7 @@ mod protocol;
 mod renderer;
 mod server;
 mod state;
+mod startup;
 mod surface;
 mod window;
 

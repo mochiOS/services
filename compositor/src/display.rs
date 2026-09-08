@@ -33,7 +33,7 @@ fn decode_display_info(reply: &[u8]) -> Option<(u32, u32, u32, u32)> {
     ))
 }
 
-pub(crate) fn display_request_info(display_tid: u64) -> (u32, u32, u32, u32) {
+pub(crate) fn display_request_info(display_tid: u64) -> Result<(u32, u32, u32, u32), u32> {
     let req = unsafe {
         core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(DISPLAY_REQ_BUF).cast::<u8>(), 20)
     };
@@ -43,16 +43,39 @@ pub(crate) fn display_request_info(display_tid: u64) -> (u32, u32, u32, u32) {
         core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(DISPLAY_REP_BUF).cast::<u8>(), 32)
     };
     reply.fill(0);
-    if let Ok(msg) = platform::ipc::call(display_tid, req, reply) {
-        let len = (msg & 0xffff_ffff) as usize;
-        if let Some(info) = decode_display_info(&reply[..len.min(reply.len())]) {
-            return info;
-        }
-    }
-    (640, 480, 640, PIXEL_FORMAT_XRGB8888)
+    let message = platform::ipc::call(display_tid, req, reply)
+        .map_err(|error| errno_status(error.errno().unwrap_or(mochi_user_syscall::EIO)))?;
+    let bytes = checked_reply(reply, message as u32 as usize, 20)?;
+    decode_display_info(bytes).ok_or_else(|| errno_status(mochi_user_syscall::EIO))
 }
 
-pub(crate) fn display_renderer_caps(display_tid: u64) -> u32 {
+fn checked_reply(reply: &[u8], length: usize, minimum: usize) -> Result<&[u8], u32> {
+    let bytes = reply.get(..length).ok_or(crate::protocol::errno_status(mochi_user_syscall::EIO))?;
+    let status = read_u32(bytes, 0).ok_or(crate::protocol::errno_status(mochi_user_syscall::EIO))?;
+    if status != 0 { return Err(status); }
+    if bytes.len() < minimum { return Err(crate::protocol::errno_status(mochi_user_syscall::EIO)); }
+    Ok(bytes)
+}
+
+#[cfg(test)]
+mod reply_tests {
+    use super::checked_reply;
+
+    #[test]
+    fn preserves_error_reply_even_without_success_payload() {
+        assert_eq!(checked_reply(&19u32.to_le_bytes(), 4, 20), Err(19));
+        assert!(checked_reply(&[0; 20], 20, 20).is_ok());
+    }
+
+    #[test]
+    fn rejects_truncated_and_oversized_success_replies() {
+        assert_eq!(checked_reply(&[0; 20], 4, 20), Err(5));
+        assert_eq!(checked_reply(&[0; 20], 21, 20), Err(5));
+        assert_eq!(checked_reply(&[0; 20], 3, 20), Err(5));
+    }
+}
+
+pub(crate) fn display_renderer_caps(display_tid: u64) -> Result<u32, u32> {
     let req = unsafe {
         core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(DISPLAY_REQ_BUF).cast::<u8>(), 4)
     };
@@ -62,14 +85,10 @@ pub(crate) fn display_renderer_caps(display_tid: u64) -> u32 {
         core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(DISPLAY_REP_BUF).cast::<u8>(), 32)
     };
     reply.fill(0);
-    let Ok(message) = platform::ipc::call(display_tid, req, reply) else {
-        return 0;
-    };
-    let length = (message & 0xffff_ffff) as usize;
-    if length < 8 || read_u32(reply, 0) != Some(0) {
-        return 0;
-    }
-    read_u32(reply, 4).unwrap_or(0)
+    let message = platform::ipc::call(display_tid, req, reply)
+        .map_err(|error| errno_status(error.errno().unwrap_or(mochi_user_syscall::EIO)))?;
+    let bytes = checked_reply(reply, message as u32 as usize, 8)?;
+    read_u32(bytes, 4).ok_or_else(|| errno_status(mochi_user_syscall::EIO))
 }
 
 pub(crate) fn display_claim_present_owner(display_tid: u64) -> u32 {
@@ -82,14 +101,11 @@ pub(crate) fn display_claim_present_owner(display_tid: u64) -> u32 {
         core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(DISPLAY_REP_BUF).cast::<u8>(), 32)
     };
     reply.fill(0);
-    let Ok(msg) = platform::ipc::call(display_tid, req, reply) else {
-        return errno_status(mochi_user_syscall::EIO);
-    };
-    let len = (msg & 0xffff_ffff) as usize;
-    if len < 4 {
-        return errno_status(mochi_user_syscall::EIO);
+    match platform::ipc::call(display_tid, req, reply) {
+        Ok(message) => checked_reply(reply, message as u32 as usize, 4)
+            .map(|_| 0).unwrap_or_else(|status| status),
+        Err(error) => errno_status(error.errno().unwrap_or(mochi_user_syscall::EIO)),
     }
-    read_u32(reply, 0).unwrap_or(errno_status(mochi_user_syscall::EIO))
 }
 
 #[allow(dead_code)]

@@ -6,7 +6,7 @@ use crate::cursor::CursorImage;
 use crate::decoration::sender_can_control_cursor;
 use crate::display::{
     display_claim_present_owner, display_renderer_caps, display_request_info,
-    display_set_cursor_position, wait_for_service,
+    display_set_cursor_image, display_set_cursor_position, wait_for_service,
 };
 use crate::geometry::{Rect, merge_damage};
 use crate::input::{
@@ -264,6 +264,7 @@ fn handle_request(
             let height = read_u32(request, 8).unwrap_or(0);
             let hotspot_x = read_u32(request, 12).unwrap_or(u32::MAX) as i32;
             let hotspot_y = read_u32(request, 16).unwrap_or(u32::MAX) as i32;
+            let old_bounds = (*cursor_visible).then(|| cursor_image.bounds(*cursor_x, *cursor_y));
             if !cursor_image.set_premultiplied_rgba(
                 width,
                 height,
@@ -274,9 +275,13 @@ fn handle_request(
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                 return reply;
             }
-            *hardware_cursor = false;
+            *hardware_cursor = display_set_cursor_image(display_tid, request) == 0;
+            if *hardware_cursor && display_set_cursor_position(
+                display_tid, *cursor_x, *cursor_y, *cursor_visible) != 0 {
+                *hardware_cursor = false;
+            }
             if *cursor_visible {
-                *present_damage = Some(cursor_image.movement_damage(None, *cursor_x, *cursor_y));
+                *present_damage = merge_damage(old_bounds, cursor_image.bounds(*cursor_x, *cursor_y));
                 *needs_present = true;
             }
             put_u32(&mut reply, 0, 0);
@@ -286,19 +291,67 @@ fn handle_request(
     reply
 }
 
+fn present(state: &mut CompositorState, damage: Option<Rect>) -> u32 {
+    composite_and_present(
+        &state.surfaces, &state.windows, state.keyboard_focus,
+        &mut state.present_frame, state.display_tid, state.display_width,
+        state.display_height, state.display_stride, state.display_format,
+        state.renderer_caps, state.cursor_x, state.cursor_y,
+        state.cursor_visible && !state.hardware_cursor, &state.cursor_image, damage,
+    )
+}
+
+#[derive(Default)]
+struct PendingPresent {
+    // None: no update; Some(None): full redraw; Some(Some(rect)): damage.
+    damage: Option<Option<Rect>>,
+    notify: bool,
+    messages: usize,
+}
+
+impl PendingPresent {
+    fn queue(&mut self, damage: Option<Rect>, notify: bool) {
+        if self.damage.is_none() {
+            self.messages = 1;
+        }
+        self.damage = Some(match (self.damage, damage) {
+            (None, damage) => damage,
+            (Some(Some(old)), Some(new)) => merge_damage(Some(old), new),
+            _ => None,
+        });
+        self.notify |= notify;
+    }
+
+    fn flush(&mut self, state: &mut CompositorState) {
+        if let Some(damage) = self.damage.take() {
+            if present(state, damage) == 0 && self.notify {
+                for surface in state.surfaces.iter().filter(|surface| surface.live) {
+                    send_frame_done(surface);
+                }
+            }
+        }
+        self.notify = false;
+        self.messages = 0;
+    }
+}
+
 pub(crate) fn run() -> ! {
-    let endpoint = match platform::ipc::create() {
-        Ok(endpoint) => endpoint,
-        Err(_) => platform::process::exit(1),
-    };
-    let Some(display_tid) = wait_for_service(4096) else {
-        platform::process::exit(1);
-    };
-    let input_subscribed = subscribe_input_events(endpoint);
-    let _ = display_claim_present_owner(display_tid);
+    let endpoint = crate::startup::required("endpoint", || {
+        platform::ipc::create().map_err(|error| crate::protocol::errno_status(error.errno().unwrap_or(mochi_user_syscall::EIO)))
+    });
+    let display_tid = crate::startup::required("display-discovery", || {
+        wait_for_service(4096).ok_or(crate::protocol::errno_status(mochi_user_syscall::ENOENT))
+    });
+    let input_subscribed = crate::startup::check("input-subscribe", || {
+        subscribe_input_events(endpoint)
+    }).is_ok();
+    crate::startup::required("display-owner", || {
+        let status = display_claim_present_owner(display_tid);
+        if status == 0 { Ok(()) } else { Err(status) }
+    });
     let (display_width, display_height, display_stride, display_format) =
-        display_request_info(display_tid);
-    let renderer_caps = display_renderer_caps(display_tid);
+        crate::startup::required("display-info", || display_request_info(display_tid));
+    let renderer_caps = crate::startup::required("display-caps", || display_renderer_caps(display_tid));
 
     let mut state = CompositorState::new(
         display_tid,
@@ -309,26 +362,26 @@ pub(crate) fn run() -> ! {
         input_subscribed,
         renderer_caps,
     );
-    let _ = composite_and_present(
-        &state.surfaces,
-        &state.windows,
-        state.keyboard_focus,
-        &mut state.present_frame,
-        state.display_tid,
-        state.display_width,
-        state.display_height,
-        state.display_stride,
-        state.display_format,
-        state.renderer_caps,
-        state.cursor_x,
-        state.cursor_y,
-        state.cursor_visible && !state.hardware_cursor,
-        &state.cursor_image,
-        None,
-    );
+    crate::startup::required("first-present", || {
+    let status = present(&mut state, None);
+    if status == 0 { Ok(()) } else { Err(status) }
+    });
     let mut pending_msg: Option<u64> = None;
     let mut pending_buf = [0u8; 4128];
+    let mut frame = PendingPresent::default();
     loop {
+        // Reply to queued requests before waiting for scanout. Bound the batch
+        // so a continuous IPC stream cannot starve display updates.
+        if frame.damage.is_some() {
+            if frame.messages >= 32 {
+                frame.flush(&mut state);
+            } else if pending_msg.is_none() {
+                match platform::ipc::try_wait(&mut pending_buf) {
+                    Ok(msg) => pending_msg = Some(msg),
+                    Err(_) => frame.flush(&mut state),
+                }
+            }
+        }
         let buf = unsafe {
             core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(IPC_BUF).cast::<u8>(), 4128)
         };
@@ -346,6 +399,7 @@ pub(crate) fn run() -> ! {
             }
         };
         let sender = msg >> 32;
+        frame.messages = frame.messages.saturating_add(1);
         let len = (msg & 0xffff_ffff) as usize;
         if len == 16 {
             let client =
@@ -375,10 +429,8 @@ pub(crate) fn run() -> ! {
                     state.display_height,
                     &event,
                 );
-                // Give the input pipeline one scheduling turn to accumulate motion
-                // before the synchronous display transfer starts.
-                platform::thread::yield_now();
-                while let Ok(next_msg) = platform::ipc::try_wait(buf) {
+                for _ in 0..32 {
+                    let Ok(next_msg) = platform::ipc::try_wait(buf) else { break; };
                     let next_len = (next_msg & 0xffff_ffff) as usize;
                     if next_len == core::mem::size_of::<platform::input::InputEvent>() {
                         let next_event = unsafe {
@@ -407,23 +459,7 @@ pub(crate) fn run() -> ! {
                 process_input_event(&mut state, &event, None)
             };
             if input_damage.is_some() {
-                let _ = composite_and_present(
-                    &state.surfaces,
-                    &state.windows,
-                    state.keyboard_focus,
-                    &mut state.present_frame,
-                    state.display_tid,
-                    state.display_width,
-                    state.display_height,
-                    state.display_stride,
-                    state.display_format,
-                    state.renderer_caps,
-                    state.cursor_x,
-                    state.cursor_y,
-                    state.cursor_visible && !state.hardware_cursor,
-                    &state.cursor_image,
-                    input_damage,
-                );
+                frame.queue(input_damage, false);
             }
             continue;
         }
@@ -484,31 +520,9 @@ pub(crate) fn run() -> ! {
                 &mut state.keyboard_focus,
             );
             state.context_menu.cleanup_client(client);
-        } else {
-            if needs_present {
-                let status = composite_and_present(
-                    &state.surfaces,
-                    &state.windows,
-                    state.keyboard_focus,
-                    &mut state.present_frame,
-                    state.display_tid,
-                    state.display_width,
-                    state.display_height,
-                    state.display_stride,
-                    state.display_format,
-                    state.renderer_caps,
-                    state.cursor_x,
-                    state.cursor_y,
-                    state.cursor_visible && !state.hardware_cursor,
-                    &state.cursor_image,
-                    present_damage,
-                );
-                if status == 0 {
-                    for surface in state.surfaces.iter().filter(|surface| surface.live) {
-                        send_frame_done(surface);
-                    }
-                }
-            }
+            frame.queue(None, false);
+        } else if needs_present {
+            frame.queue(present_damage, true);
         }
     }
 }

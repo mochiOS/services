@@ -21,6 +21,25 @@ pub(crate) struct FramebufferBackend {
 }
 
 impl FramebufferBackend {
+    fn cursor_command(&mut self, operation: u32, arguments: [u32; 4], pixels: &[u8]) -> Result<(), u64> {
+        let mut packet = Vec::with_capacity(24 + pixels.len());
+        for value in [u32::from_le_bytes(*b"VKCU"), operation,
+                      arguments[0], arguments[1], arguments[2], arguments[3]] {
+            packet.extend_from_slice(&value.to_le_bytes());
+        }
+        packet.extend_from_slice(pixels);
+        self.present_gpu_scene(&packet)
+    }
+
+    pub(crate) fn set_cursor_image(&mut self, width: u32, height: u32,
+        hotspot_x: u32, hotspot_y: u32, rgba: &[u8]) -> Result<(), u64> {
+        self.cursor_command(1, [width, height, hotspot_x, hotspot_y], rgba)
+    }
+
+    pub(crate) fn set_cursor_position(&mut self, x: u32, y: u32, visible: bool) -> Result<(), u64> {
+        self.cursor_command(2, [x, y, u32::from(visible), 0], &[])
+    }
+
     pub(crate) fn initialize() -> Result<Self, u64> {
         let info = platform::memory::framebuffer_info().map_err(|_| EIO)?;
         let visible_height = visible_height(&info)?;

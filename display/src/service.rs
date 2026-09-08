@@ -59,25 +59,17 @@ pub(crate) fn run() -> ! {
         };
         let sender = message >> 32;
         let length = (message & 0xffff_ffff) as usize;
-        if length == 16 {
-            if present_owner == 0 || sender == present_owner {
-                let address = u64::from_le_bytes([
-                    buffer[0], buffer[1], buffer[2], buffer[3], buffer[4], buffer[5], buffer[6],
-                    buffer[7],
-                ]);
-                let size = u64::from_le_bytes([
-                    buffer[8], buffer[9], buffer[10], buffer[11], buffer[12], buffer[13],
-                    buffer[14], buffer[15],
-                ]);
-                shared_buffer = Some((sender, address, size));
-            }
-            continue;
-        }
         if length < 4 || length > buffer.len() {
             reply_status(sender, errno_status(EINVAL));
             continue;
         }
         let request = &buffer[..length];
+        if let Some((address, size)) = shared_buffer_notification(request) {
+            if present_owner == 0 || sender == present_owner {
+                shared_buffer = Some((sender, address, size));
+            }
+            continue;
+        }
         match read_u32(request, 0).unwrap_or(0) {
             OP_GET_INFO => reply_info(sender, backend.geometry()),
             OP_GET_RENDERER_CAPS => reply_caps(sender, backend.renderer_caps()),

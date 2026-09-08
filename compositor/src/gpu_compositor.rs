@@ -83,6 +83,15 @@ pub(crate) fn merge_surface_vertices(
     ];
     for triangle in previous.chunks_exact(mochios_viewkit_gpu_protocol::VERTEX_STRIDE * 3) {
         let triangle = decode_local_triangle(triangle, width, height)?;
+        let (outside, inside) = triangle_rect_bounds(&triangle, damage);
+        if outside {
+            // Do not split unchanged geometry at the extended damage edges.
+            retained.extend_from_slice(&triangle);
+            continue;
+        }
+        if inside {
+            continue;
+        }
         for strip in strips
             .iter()
             .copied()
@@ -166,6 +175,28 @@ fn encode_local_vertices(
     Some(())
 }
 
+#[derive(Clone, PartialEq)]
+struct SurfaceGeometryKey {
+    handle: u64,
+    generation: u64,
+    position: (i32, i32),
+    size: (u32, u32),
+    format: u32,
+    window_clip: Option<Vec<(f32, f32)>>,
+}
+
+#[derive(PartialEq)]
+struct DesktopGeometryKey {
+    size: (u32, u32),
+    surfaces: Vec<SurfaceGeometryKey>,
+}
+
+struct SurfaceGeometry {
+    key: SurfaceGeometryKey,
+    display_size: (u32, u32),
+    vertices: Vec<Vertex>,
+}
+
 #[derive(Default)]
 pub(crate) struct GpuCompositor {
     textures: Vec<TextureRequirement>,
@@ -173,6 +204,12 @@ pub(crate) struct GpuCompositor {
     batches: Vec<mochios_viewkit_gpu_protocol::compositor::Batch>,
     vertices: Vec<Vertex>,
     output: Vec<u8>,
+    desktop_key: Option<DesktopGeometryKey>,
+    desktop_vertices: usize,
+    desktop_batches: usize,
+    dirty_vertices: Vec<Vertex>,
+    dirty_batches: Vec<mochios_viewkit_gpu_protocol::compositor::Batch>,
+    surface_geometry: Vec<SurfaceGeometry>,
 }
 
 impl GpuCompositor {
@@ -187,6 +224,7 @@ impl GpuCompositor {
         cursor_y: i32,
         cursor_visible: bool,
         cursor: &CursorImage,
+        dirty: Option<Rect>,
     ) -> Option<&[u8]> {
         let damage = clip_present_rect(
             // Scene consumers clear their render target before drawing.
@@ -214,22 +252,6 @@ impl GpuCompositor {
                 });
             }
         }
-        self.vertices.clear();
-        self.batches.clear();
-        let first = self.vertices.len() as u32;
-        push_solid_quad(
-            &mut self.vertices,
-            damage,
-            // Distinguish compositor scenes from mDriver's gray startup frame.
-            [0.0, 0.0, 1.0, 1.0],
-        );
-        push_batch(
-            &mut self.batches,
-            WHITE_TEXTURE_KEY,
-            first,
-            self.vertices.len() as u32,
-        );
-
         let mut indices: Vec<usize> = surfaces
             .iter()
             .enumerate()
@@ -242,22 +264,78 @@ impl GpuCompositor {
             let surface = &surfaces[*index];
             (surface.role.stack_layer(), surface.z)
         });
-        for index in indices {
-            let surface = &surfaces[index];
-            let window_clip = window_clip_polygon(surfaces, windows, surface);
-            let first = self.vertices.len() as u32;
-            if surface.current_format == PIXEL_FORMAT_GPU_SCENE {
-                append_gpu_surface(&mut self.vertices, surface, damage, window_clip.as_deref())?;
-            } else {
-                append_cpu_surface(&mut self.vertices, surface, damage, window_clip.as_deref());
+        let desktop_key = DesktopGeometryKey {
+            size: (display_width, display_height),
+            surfaces: indices.iter().map(|&index| {
+                let surface = &surfaces[index];
+                SurfaceGeometryKey {
+                    handle: surface.handle.0,
+                    generation: surface.content_generation,
+                    position: (surface.x, surface.y),
+                    size: if surface.current_format == PIXEL_FORMAT_GPU_SCENE {
+                        surface.gpu.as_ref().map(|gpu| (gpu.width, gpu.height)).unwrap_or_default()
+                    } else {
+                        (surface.current_width, surface.current_height)
+                    },
+                    format: surface.current_format,
+                    window_clip: window_clip_polygon(surfaces, windows, surface),
+                }
+            }).collect(),
+        };
+        self.surface_geometry.retain(|cached| {
+            desktop_key.surfaces.iter().any(|key| key.handle == cached.key.handle)
+        });
+        // Only a successfully encoded scene may supply reusable geometry.
+        let reuse_desktop = self.desktop_key.take().as_ref() == Some(&desktop_key);
+        let normalize_from;
+        if reuse_desktop {
+            self.vertices.truncate(self.desktop_vertices);
+            self.batches.truncate(self.desktop_batches);
+            normalize_from = self.vertices.len();
+        } else {
+            self.vertices.clear();
+            self.batches.clear();
+            normalize_from = 0;
+            push_solid_quad(&mut self.vertices, damage, [0.0, 0.0, 1.0, 1.0]);
+            push_batch(&mut self.batches, WHITE_TEXTURE_KEY, 0, self.vertices.len() as u32);
+            for (index, key) in indices.into_iter().zip(&desktop_key.surfaces) {
+                let surface = &surfaces[index];
+                let first = self.vertices.len() as u32;
+                let cached_index = self.surface_geometry.iter()
+                    .position(|cached| cached.key.handle == key.handle);
+                let valid = cached_index.is_some_and(|index| {
+                    let cached = &self.surface_geometry[index];
+                    cached.key == *key && cached.display_size == desktop_key.size
+                });
+                if !valid {
+                    let mut vertices = Vec::new();
+                    if surface.current_format == PIXEL_FORMAT_GPU_SCENE {
+                        append_gpu_surface(&mut vertices, surface, damage, key.window_clip.as_deref())?;
+                    } else {
+                        append_cpu_surface(&mut vertices, surface, damage, key.window_clip.as_deref());
+                    }
+                    let geometry = SurfaceGeometry {
+                        key: key.clone(), display_size: desktop_key.size, vertices,
+                    };
+                    if let Some(index) = cached_index {
+                        self.surface_geometry[index] = geometry;
+                    } else {
+                        self.surface_geometry.push(geometry);
+                    }
+                }
+                let cached = &self.surface_geometry[cached_index
+                    .unwrap_or(self.surface_geometry.len() - 1)];
+                self.vertices.extend_from_slice(&cached.vertices);
+                push_batch(
+                    &mut self.batches,
+                    surface.handle.0,
+                    first,
+                    self.vertices.len() as u32,
+                );
             }
-            push_batch(
-                &mut self.batches,
-                surface.handle.0,
-                first,
-                self.vertices.len() as u32,
-            );
         }
+        self.desktop_vertices = self.vertices.len();
+        self.desktop_batches = self.batches.len();
         if cursor_visible {
             if let Some((width, height, _, _)) = cursor.texture() {
                 let first = self.vertices.len() as u32;
@@ -271,20 +349,56 @@ impl GpuCompositor {
                 );
             }
         }
-        for vertex in &mut self.vertices {
+        for vertex in &mut self.vertices[normalize_from..] {
             vertex.x = vertex.x / display_width as f32 * 2.0 - 1.0;
             vertex.y = vertex.y / display_height as f32 * 2.0 - 1.0;
         }
+        // The first opaque quad describes the replacement region. The v1
+        // packet layout stays unchanged; a full-screen quad still means full redraw.
+        let dirty = clip_present_rect(dirty, display_width as usize, display_height as usize)?;
+        for (destination, mut vertex) in self.vertices[..6].iter_mut()
+            .zip(solid_quad(dirty, [0.0, 0.0, 1.0, 1.0]))
+        {
+            vertex.x = vertex.x / display_width as f32 * 2.0 - 1.0;
+            vertex.y = vertex.y / display_height as f32 * 2.0 - 1.0;
+            *destination = vertex;
+        }
+        self.dirty_vertices.clear();
+        self.dirty_batches.clear();
+        let left = dirty.x as f32 / display_width as f32 * 2.0 - 1.0;
+        let top = dirty.y as f32 / display_height as f32 * 2.0 - 1.0;
+        let right = left + dirty.width as f32 / display_width as f32 * 2.0;
+        let bottom = top + dirty.height as f32 / display_height as f32 * 2.0;
+        // Preserve painter order and whole triangles. The retained target's
+        // scissor clips boundary triangles; unrelated geometry need not cross IPC.
+        for batch in &self.batches {
+            let first = self.dirty_vertices.len() as u32;
+            let start = batch.first_vertex as usize;
+            let end = start + batch.vertex_count as usize;
+            for triangle in self.vertices[start..end].chunks_exact(3) {
+                if triangle.iter().all(|v| v.x < left)
+                    || triangle.iter().all(|v| v.x > right)
+                    || triangle.iter().all(|v| v.y < top)
+                    || triangle.iter().all(|v| v.y > bottom)
+                {
+                    continue;
+                }
+                self.dirty_vertices.extend_from_slice(triangle);
+            }
+            push_batch(&mut self.dirty_batches, batch.texture_key, first,
+                       self.dirty_vertices.len() as u32);
+        }
         encode_compositor_scene(
-            &self.vertices,
+            &self.dirty_vertices,
             &requirements,
             &self.uploads,
-            &self.batches,
+            &self.dirty_batches,
             display_width,
             display_height,
             &mut self.output,
         )?;
         self.textures = requirements;
+        self.desktop_key = Some(desktop_key);
         Some(self.output.as_slice())
     }
 
@@ -636,10 +750,24 @@ fn append_window_clipped_triangle(
     damage: Rect,
     window_clip: Option<&[(f32, f32)]>,
 ) {
+    let (outside, inside) = triangle_rect_bounds(&triangle, damage);
+    if outside { return; }
     let Some(window_clip) = window_clip else {
         append_clipped_triangle(output, triangle, damage);
         return;
     };
+    let mut window_inside = true;
+    for index in 0..window_clip.len() {
+        let start = window_clip[index];
+        let end = window_clip[(index + 1) % window_clip.len()];
+        let count = triangle.iter().filter(|vertex| edge_distance(**vertex, start, end) >= -0.001).count();
+        if count == 0 { return; }
+        window_inside &= count == 3;
+    }
+    if inside && window_inside {
+        output.extend_from_slice(&triangle);
+        return;
+    }
     let mut damage_clipped = Vec::new();
     append_clipped_triangle(&mut damage_clipped, triangle, damage);
     for triangle in damage_clipped.chunks_exact(3) {
@@ -661,11 +789,13 @@ fn append_window_clipped_triangle(
     }
 }
 
+fn edge_distance(vertex: Vertex, start: (f32, f32), end: (f32, f32)) -> f32 {
+    (end.0 - start.0) * (vertex.y - start.1)
+        - (end.1 - start.1) * (vertex.x - start.0)
+}
+
 fn clip_convex_edge(input: &[Vertex], edge_start: (f32, f32), edge_end: (f32, f32)) -> Vec<Vertex> {
-    let signed_distance = |vertex: Vertex| {
-        (edge_end.0 - edge_start.0) * (vertex.y - edge_start.1)
-            - (edge_end.1 - edge_start.1) * (vertex.x - edge_start.0)
-    };
+    let signed_distance = |vertex| edge_distance(vertex, edge_start, edge_end);
     let mut output = Vec::new();
     let Some(mut previous) = input.last().copied() else {
         return output;
@@ -694,12 +824,16 @@ fn clip_convex_edge(input: &[Vertex], edge_start: (f32, f32), edge_end: (f32, f3
 }
 
 fn push_solid_quad(output: &mut Vec<Vertex>, bounds: Rect, color: [f32; 4]) {
+    output.extend_from_slice(&solid_quad(bounds, color));
+}
+
+fn solid_quad(bounds: Rect, color: [f32; 4]) -> [Vertex; 6] {
     let left = bounds.x as f32;
     let top = bounds.y as f32;
     let right = left + bounds.width as f32;
     let bottom = top + bounds.height as f32;
     let uv = 0.5;
-    output.extend_from_slice(&[
+    [
         Vertex {
             x: left,
             y: top,
@@ -742,10 +876,34 @@ fn push_solid_quad(output: &mut Vec<Vertex>, bounds: Rect, color: [f32; 4]) {
             v: uv,
             color,
         },
-    ]);
+    ]
+}
+
+// Common-plane rejection and complete containment need no polygon allocation.
+fn triangle_rect_bounds(triangle: &[Vertex; 3], rect: Rect) -> (bool, bool) {
+    let left = rect.x as f32;
+    let top = rect.y as f32;
+    let right = left + rect.width as f32;
+    let bottom = top + rect.height as f32;
+    let (mut any, mut all) = (0u8, 15u8);
+    for vertex in triangle {
+        let code = u8::from(vertex.x < left)
+            | (u8::from(vertex.x > right) << 1)
+            | (u8::from(vertex.y < top) << 2)
+            | (u8::from(vertex.y > bottom) << 3);
+        any |= code;
+        all &= code;
+    }
+    (all != 0, any == 0)
 }
 
 fn append_clipped_triangle(output: &mut Vec<Vertex>, triangle: [Vertex; 3], rect: Rect) {
+    let (outside, inside) = triangle_rect_bounds(&triangle, rect);
+    if outside { return; }
+    if inside {
+        output.extend_from_slice(&triangle);
+        return;
+    }
     let left = rect.x as f32;
     let top = rect.y as f32;
     let right = left + rect.width as f32;
@@ -974,6 +1132,58 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cached_desktop_matches_rebuilt_scene_across_changes() {
+        let mut surfaces: Vec<_> = (1..=2).map(|handle| {
+            let mut surface = gpu_surface(1, 0, 3);
+            surface.live = true;
+            surface.visible = true;
+            surface.handle = crate::surface::SurfaceHandle(handle);
+            surface.current_width = 50;
+            surface.current_height = 50;
+            surface.content_generation = 1;
+            let gpu = surface.gpu.as_mut().unwrap();
+            gpu.width = 50;
+            gpu.height = 50;
+            let mut vertices = Vec::new();
+            push_solid_quad(&mut vertices, Rect { x: 0, y: 0, width: 50, height: 50 }, [1.0; 4]);
+            encode_local_vertices(&vertices, 50, 50, &mut gpu.vertices).unwrap();
+            surface
+        }).collect();
+        let mut window = Window::empty();
+        window.live = true;
+        window.id = crate::window::WindowId(1);
+        window.content = surfaces[0].handle;
+        surfaces[0].window = window.id;
+        let mut windows = [window];
+        let mut cursor = CursorImage::default();
+        assert!(cursor.set_premultiplied_rgba(1, 1, 0, 0, &[255; 4]));
+        let mut cached = GpuCompositor::default();
+        for step in 0..12 {
+            match step {
+                2 => surfaces[0].x = -10,
+                3 => surfaces[0].z = 9,
+                4 => windows[0].insets.left = 4,
+                5 => {
+                    surfaces[0].content_generation += 1;
+                    surfaces[0].gpu.as_mut().unwrap().vertices.truncate(3 * mochios_viewkit_gpu_protocol::VERTEX_STRIDE);
+                }
+                6 => surfaces[1].visible = false,
+                7 => surfaces[1].visible = true,
+                8 => surfaces[0].live = false,
+                _ => {}
+            }
+            let width = if step >= 9 { 200 } else { 100 };
+            let mut rebuilt = GpuCompositor {
+                textures: cached.textures.clone(),
+                ..Default::default()
+            };
+            let expected = rebuilt.compose(&surfaces, &windows, width, 100, step, step, step % 2 == 0, &cursor, None).unwrap();
+            let actual = cached.compose(&surfaces, &windows, width, 100, step, step, step % 2 == 0, &cursor, None).unwrap();
+            assert_eq!(actual, expected, "step {step}");
+        }
+    }
+
+    #[test]
     fn failed_composition_does_not_cache_unsent_textures() {
         let mut compositor = GpuCompositor::default();
         let mut surface = gpu_surface(1, 0, 3);
@@ -984,7 +1194,7 @@ mod tests {
         gpu.vertices = vec![0; mochios_viewkit_gpu_protocol::VERTEX_STRIDE * 3];
         gpu.vertices[..4].copy_from_slice(&f32::NAN.to_le_bytes());
         assert!(compositor.compose(
-            &[surface], &[], 100, 100, 0, 0, false, &CursorImage::default(),
+            &[surface], &[], 100, 100, 0, 0, false, &CursorImage::default(), None,
         ).is_none());
         assert!(compositor.textures.is_empty());
     }
@@ -992,9 +1202,26 @@ mod tests {
     #[test]
     fn scene_background_always_covers_the_display() {
         let mut compositor = GpuCompositor::default();
-        compositor.compose(&[], &[], 1920, 1080, 0, 0, false, &CursorImage::default()).unwrap();
+        compositor.compose(&[], &[], 1920, 1080, 0, 0, false, &CursorImage::default(), None).unwrap();
         for (x, y) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
             assert!(compositor.vertices.iter().any(|vertex| vertex.x == x && vertex.y == y));
+        }
+    }
+
+    #[test]
+    fn dirty_quad_preserves_v1_packet_and_resets_on_full_redraw() {
+        let mut compositor = GpuCompositor::default();
+        for dirty in [Some(Rect { x: 20, y: 30, width: 40, height: 50 }), None] {
+            let bytes = compositor.compose(&[], &[], 100, 100, 0, 0, false,
+                &CursorImage::default(), dirty).unwrap();
+            let scene = mochios_viewkit_gpu_protocol::compositor::decode(bytes).unwrap();
+            assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), 1);
+            assert_eq!(scene.batch(0).unwrap().vertex_count, 6);
+            let expected = dirty.unwrap_or(Rect::full(100, 100));
+            assert!((read_f32(scene.vertices, 0).unwrap() - (expected.x as f32 / 50.0 - 1.0)).abs() < 0.00001);
+            assert!((read_f32(scene.vertices, 4).unwrap() - (expected.y as f32 / 50.0 - 1.0)).abs() < 0.00001);
+            assert!((read_f32(scene.vertices, 72).unwrap() - ((expected.x as f32 + expected.width as f32) / 50.0 - 1.0)).abs() < 0.00001);
+            assert!((read_f32(scene.vertices, 76).unwrap() - ((expected.y as f32 + expected.height as f32) / 50.0 - 1.0)).abs() < 0.00001);
         }
     }
 
@@ -1136,6 +1363,26 @@ mod tests {
             && vertex.x <= 10.0
             && vertex.y >= 0.0
             && vertex.y <= 10.0));
+    }
+
+    #[test]
+    fn contained_triangles_preserve_attributes_and_exterior_triangles_are_rejected() {
+        let rect = Rect { x: 0, y: 0, width: 100, height: 100 };
+        let clip = rounded_rect_polygon(rect, 20.0);
+        let triangle = [(40.0, 40.0), (60.0, 40.0), (50.0, 60.0)].map(|(x, y)| Vertex {
+            x, y, u: x / 100.0, v: y / 100.0, color: [0.25, 0.5, 0.75, 1.0],
+        });
+        let mut output = Vec::with_capacity(3);
+        append_window_clipped_triangle(&mut output, triangle, rect, Some(&clip));
+        assert_eq!(output.len(), 3);
+        for (actual, expected) in output.iter().zip(triangle) {
+            assert_eq!((actual.x, actual.y, actual.u, actual.v, actual.color),
+                (expected.x, expected.y, expected.u, expected.v, expected.color));
+        }
+        output.clear();
+        let exterior = triangle.map(|vertex| Vertex { x: vertex.x - 200.0, ..vertex });
+        append_window_clipped_triangle(&mut output, exterior, rect, Some(&clip));
+        assert!(output.is_empty());
     }
 
     #[test]

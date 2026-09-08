@@ -3,6 +3,35 @@ use std::fs;
 use mochi_user_platform as platform;
 
 const SETTINGS_PATH: &str = "/var/config/input/settings.conf";
+fn poll_pointer() -> Result<Option<[i32; 4]>, ()> {
+    use mochios_mdriver_protocol::control::{
+        MDRIVER_CONTROL_READ_POINTER, MDRIVER_CONTROL_STATUS_END, MDRIVER_CONTROL_STATUS_OK,
+    };
+    let response = platform::device::control(
+        "device.input",
+        platform::device::DeviceControlRequest {
+            operation: MDRIVER_CONTROL_READ_POINTER,
+            ..Default::default()
+        },
+    );
+    match response {
+        Ok(response) if response.status == MDRIVER_CONTROL_STATUS_OK => {
+            Ok(Some(response.values.map(|value| value as u32 as i32)))
+        }
+        Ok(response) if response.status == MDRIVER_CONTROL_STATUS_END => Ok(None),
+        Ok(response) => {
+            platform::logln!("input.service: mDriver input status={}", response.status);
+            Err(())
+        }
+        Err(error) => {
+            platform::logln!(
+                "input.service: mDriver input unavailable errno={:?}",
+                error.errno()
+            );
+            Err(())
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 struct InputPreferences {
@@ -331,8 +360,6 @@ fn process_mouse_packet(
     subscribers: &[u64; MAX_SUBSCRIBERS],
     preferences: InputPreferences,
 ) {
-    use platform::input::*;
-
     if packet.len() < 3 {
         return;
     }
@@ -341,16 +368,91 @@ fn process_mouse_packet(
         return;
     }
 
-    let dx = preferences.pointer_delta(sign_extend_mouse_delta(packet[1], (b0 & 0x10) != 0));
-    let dy = preferences.pointer_delta(-sign_extend_mouse_delta(packet[2], (b0 & 0x20) != 0));
+    process_relative_pointer(
+        sign_extend_mouse_delta(packet[1], (b0 & 0x10) != 0),
+        -sign_extend_mouse_delta(packet[2], (b0 & 0x20) != 0),
+        packet.get(3).copied().map(decode_mouse_wheel).unwrap_or(0),
+        b0 & 0x07,
+        state,
+        subscribers,
+        preferences,
+    );
+}
+
+#[cfg(test)]
+mod pointer_tests {
+    use super::*;
+
+    #[test]
+    fn relative_reports_preserve_buttons_and_large_signed_motion() {
+        let mut mouse = MouseState::default();
+        let preferences = InputPreferences {
+            mouse_speed: 1.0,
+            natural_scrolling: true,
+        };
+        process_relative_pointer(
+            -2048,
+            4096,
+            -1,
+            5,
+            &mut mouse,
+            &[0; MAX_SUBSCRIBERS],
+            preferences,
+        );
+        assert_eq!(mouse.buttons, 5);
+        process_relative_pointer(0, 0, 0, 0, &mut mouse, &[0; MAX_SUBSCRIBERS], preferences);
+        assert_eq!(mouse.buttons, 0);
+        let event = encode_input_event(
+            platform::input::EVENT_KIND_POINTER_MOVE,
+            0,
+            0,
+            0,
+            0,
+            -2048,
+            4096,
+            0,
+            0,
+        );
+        assert_eq!(i32::from_le_bytes(event[12..16].try_into().unwrap()), -2048);
+        assert_eq!(i32::from_le_bytes(event[16..20].try_into().unwrap()), 4096);
+    }
+
+    #[test]
+    fn legacy_mouse_packet_keeps_sign_and_wheel_conventions() {
+        assert_eq!(sign_extend_mouse_delta(255, true), -1);
+        assert_eq!(decode_mouse_wheel(15), -1);
+        let mut mouse = MouseState::default();
+        process_mouse_packet(
+            &[9, 0, 0, 15],
+            &mut mouse,
+            &[0; MAX_SUBSCRIBERS],
+            InputPreferences {
+                mouse_speed: 1.0,
+                natural_scrolling: true,
+            },
+        );
+        assert_eq!(mouse.buttons, 1);
+    }
+}
+
+fn process_relative_pointer(
+    dx: i32,
+    dy: i32,
+    wheel: i32,
+    buttons: u8,
+    state: &mut MouseState,
+    subscribers: &[u64; MAX_SUBSCRIBERS],
+    preferences: InputPreferences,
+) {
+    use platform::input::*;
+    let dx = preferences.pointer_delta(dx);
+    let dy = preferences.pointer_delta(dy);
     if dx != 0 || dy != 0 {
         let event = encode_input_event(EVENT_KIND_POINTER_MOVE, 0, 0, 0, 0, dx, dy, 0, 0);
         send_event(subscribers, &event);
     }
 
-    if let Some(wheel) = packet.get(3).copied().map(decode_mouse_wheel)
-        && wheel != 0
-    {
+    if wheel != 0 {
         let event = encode_input_event(
             EVENT_KIND_POINTER_WHEEL,
             0,
@@ -365,7 +467,6 @@ fn process_mouse_packet(
         send_event(subscribers, &event);
     }
 
-    let buttons = b0 & 0x07;
     let changed = state.buttons ^ buttons;
     if changed == 0 {
         return;
@@ -558,6 +659,7 @@ fn main() {
     }
 
     let mut keyboard = KeyboardState::default();
+    let mut hardware_input = true;
     let mut mouse = MouseState::default();
     let input_preferences = InputPreferences::load();
     let mut subscribers = [0u64; MAX_SUBSCRIBERS];
@@ -567,10 +669,38 @@ fn main() {
     }
 
     loop {
+        let mut pointer_received = false;
+        if hardware_input {
+            match poll_pointer() {
+                Ok(Some([dx, dy, wheel, buttons])) => {
+                    process_relative_pointer(
+                        dx,
+                        dy,
+                        wheel,
+                        buttons as u8 & 7,
+                        &mut mouse,
+                        &subscribers,
+                        input_preferences,
+                    );
+                    pointer_received = true;
+                }
+                Ok(None) => {}
+                Err(()) => hardware_input = false,
+            }
+        }
         let buf = input_wait_buf();
         buf.fill(0);
-        let Ok(msg) = platform::ipc::wait(endpoint, buf) else {
-            platform::thread::yield_now();
+        let message = if hardware_input {
+            platform::ipc::try_wait(buf)
+        } else {
+            platform::ipc::wait(endpoint, buf)
+        };
+        let Ok(msg) = message else {
+            if hardware_input && !pointer_received {
+                let _ = platform::thread::sleep_milliseconds(8);
+            } else {
+                platform::thread::yield_now();
+            }
             continue;
         };
         let sender = msg >> 32;

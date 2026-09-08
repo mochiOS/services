@@ -23,6 +23,7 @@ members = [
 ]
 
 [patch.crates-io]
+mochios-mdriver-protocol = { path = "../boot/crates/mdriver-protocol" }
 mnu-abi = { git = "https://github.com/mochiOS/mnu", package = "mnu-abi" }
 
 [patch."https://github.com/mochiOS/mBoot"]

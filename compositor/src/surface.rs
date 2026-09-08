@@ -1303,6 +1303,13 @@ pub(crate) fn handle_request(
             let pending_damage = surfaces[index]
                 .pending_damage
                 .unwrap_or(Rect::full(pending_width, pending_height));
+            let old_bounds = (surfaces[index].current_width != pending_width
+                || surfaces[index].current_height != pending_height).then(|| Rect {
+                    x: surfaces[index].x,
+                    y: surfaces[index].y,
+                    width: surfaces[index].current_width,
+                    height: surfaces[index].current_height,
+                });
             if awaiting_buffer || pending_width == 0 || pending_len == 0 {
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                 return reply;
@@ -1408,6 +1415,9 @@ pub(crate) fn handle_request(
                 height: pending_damage.height,
             };
             *present_damage = merge_damage(*present_damage, screen_damage);
+            if let Some(old_bounds) = old_bounds {
+                *present_damage = merge_damage(*present_damage, old_bounds);
+            }
             if !surfaces[index].is_decoration {
                 let window_id = surfaces[index].window;
                 if let Some(window_index) = window_index_by_id(windows, window_id) {
