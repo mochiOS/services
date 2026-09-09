@@ -51,7 +51,7 @@ fn find_service(name: &str) -> Option<u64> {
     None
 }
 
-pub(crate) fn subscribe_input_events(endpoint: u64) -> Result<(), u32> {
+pub(crate) fn subscribe_input_events(endpoint: u64) -> Result<u64, u32> {
     let Some(input_tid) = find_service(INPUT_SERVICE_NAME) else {
         return Err(crate::protocol::errno_status(mochi_user_syscall::ENOENT));
     };
@@ -77,7 +77,26 @@ pub(crate) fn subscribe_input_events(endpoint: u64) -> Result<(), u32> {
     let bytes = reply.get(..length).ok_or(crate::protocol::errno_status(mochi_user_syscall::EIO))?;
     let [status] = bytes else { return Err(crate::protocol::errno_status(mochi_user_syscall::EIO)); };
     let status = u32::from(*status);
-    if status == 0 { Ok(()) } else { Err(status) }
+    if status == 0 { Ok(message >> 32) } else { Err(status) }
+}
+
+pub(crate) fn is_input_message(message: u64, input_sender: Option<u64>) -> bool {
+    input_sender.is_some_and(|sender| sender != 0 && message >> 32 == sender)
+        && message as u32 as usize == core::mem::size_of::<platform::input::InputEvent>()
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::is_input_message;
+
+    #[test]
+    fn equal_length_rpc_is_not_an_input_event() {
+        let event = (42u64 << 32) | 32;
+        assert!(is_input_message(event, Some(42)));
+        assert!(!is_input_message(event, Some(43)));
+        assert!(!is_input_message(event, None));
+        assert!(!is_input_message((42u64 << 32) | 16, Some(42)));
+    }
 }
 
 pub(crate) fn clear_focus_for_surface(

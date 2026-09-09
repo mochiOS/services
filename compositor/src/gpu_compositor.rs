@@ -83,6 +83,11 @@ pub(crate) fn merge_surface_vertices(
     ];
     for triangle in previous.chunks_exact(mochios_viewkit_gpu_protocol::VERTEX_STRIDE * 3) {
         let triangle = decode_local_triangle(triangle, width, height)?;
+        // Clipping and coordinate round trips can collapse a triangle to an
+        // edge. Keeping it lets later damage cuts multiply invisible geometry.
+        if !triangle_has_area(&triangle) {
+            continue;
+        }
         let (outside, inside) = triangle_rect_bounds(&triangle, damage);
         if outside {
             // Do not split unchanged geometry at the extended damage edges.
@@ -775,7 +780,7 @@ fn append_window_clipped_triangle(
         for index in 0..window_clip.len() {
             let edge_start = window_clip[index];
             let edge_end = window_clip[(index + 1) % window_clip.len()];
-            polygon = clip_convex_edge(&polygon, edge_start, edge_end);
+            polygon = clip_convex_edge(polygon, edge_start, edge_end);
             if polygon.len() < 3 {
                 break;
             }
@@ -794,9 +799,19 @@ fn edge_distance(vertex: Vertex, start: (f32, f32), end: (f32, f32)) -> f32 {
         - (end.1 - start.1) * (vertex.x - start.0)
 }
 
-fn clip_convex_edge(input: &[Vertex], edge_start: (f32, f32), edge_end: (f32, f32)) -> Vec<Vertex> {
+fn clip_convex_edge(mut input: Vec<Vertex>, edge_start: (f32, f32), edge_end: (f32, f32)) -> Vec<Vertex> {
     let signed_distance = |vertex| edge_distance(vertex, edge_start, edge_end);
-    let mut output = Vec::new();
+    // Most edges do not cut this polygon. Keep its allocation and attributes
+    // instead of copying it once for every edge of a rounded window.
+    let inside_count = input.iter().filter(|&&vertex| signed_distance(vertex) >= -0.001).count();
+    if inside_count == input.len() {
+        return input;
+    }
+    if inside_count == 0 {
+        input.clear();
+        return input;
+    }
+    let mut output = Vec::with_capacity(input.len() + 1);
     let Some(mut previous) = input.last().copied() else {
         return output;
     };
@@ -897,7 +912,15 @@ fn triangle_rect_bounds(triangle: &[Vertex; 3], rect: Rect) -> (bool, bool) {
     (all != 0, any == 0)
 }
 
+fn triangle_has_area(triangle: &[Vertex; 3]) -> bool {
+    let [a, b, c] = *triangle;
+    (b.x - a.x) * (c.y - a.y) != (b.y - a.y) * (c.x - a.x)
+}
+
 fn append_clipped_triangle(output: &mut Vec<Vertex>, triangle: [Vertex; 3], rect: Rect) {
+    if !triangle_has_area(&triangle) {
+        return;
+    }
     let (outside, inside) = triangle_rect_bounds(&triangle, rect);
     if outside { return; }
     if inside {
@@ -933,7 +956,10 @@ fn append_clipped_triangle(output: &mut Vec<Vertex>, triangle: [Vertex; 3], rect
         return;
     }
     for index in 1..polygon.len() - 1 {
-        output.extend_from_slice(&[polygon[0], polygon[index], polygon[index + 1]]);
+        let triangle = [polygon[0], polygon[index], polygon[index + 1]];
+        if triangle_has_area(&triangle) {
+            output.extend_from_slice(&triangle);
+        }
     }
 }
 
@@ -1130,6 +1156,43 @@ fn encode_compositor_scene(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_damage_does_not_multiply_collapsed_triangles() {
+        let full = Rect { x: 0, y: 0, width: 1920, height: 1080 };
+        let mut scene = Vec::new();
+        encode_local_vertices(&solid_quad(full, [1.0; 4]), 1920, 1080, &mut scene).unwrap();
+        for i in 0..200 {
+            let damage = Rect { x: 100 + (i % 100) * 3, y: 100 + (i / 100) * 3,
+                width: 40, height: 40 };
+            let mut replacement = Vec::new();
+            encode_local_vertices(&solid_quad(damage, [0.5; 4]), 1920, 1080,
+                &mut replacement).unwrap();
+            let mut output = Vec::new();
+            merge_surface_vertices(&scene, &replacement, 1920, 1080, damage,
+                &mut output).unwrap();
+            scene = output;
+        }
+        // Previously exceeded the protocol limit before completing this sequence.
+        assert!(scene.len() / mochios_viewkit_gpu_protocol::VERTEX_STRIDE < 10_000);
+    }
+
+    #[test]
+    fn clipping_discards_only_zero_area_triangles() {
+        let vertex = |x, y| Vertex { x, y, u: x, v: y, color: [1.0; 4] };
+        let rect = Rect { x: 0, y: 0, width: 10, height: 10 };
+        let mut output = Vec::new();
+        append_clipped_triangle(&mut output,
+            [vertex(1.0, 1.0), vertex(2.0, 2.0), vertex(3.0, 3.0)], rect);
+        assert!(output.is_empty());
+        let thin = [vertex(1.0, 1.0), vertex(2.0, 1.0), vertex(1.0, 1.000001)];
+        append_clipped_triangle(&mut output, thin, rect);
+        assert_eq!(output.len(), 3);
+        for (actual, expected) in output.iter().zip(thin) {
+            assert_eq!((actual.x, actual.y, actual.u, actual.v, actual.color),
+                (expected.x, expected.y, expected.u, expected.v, expected.color));
+        }
+    }
 
     #[test]
     fn cached_desktop_matches_rebuilt_scene_across_changes() {
@@ -1383,6 +1446,25 @@ mod tests {
         let exterior = triangle.map(|vertex| Vertex { x: vertex.x - 200.0, ..vertex });
         append_window_clipped_triangle(&mut output, exterior, rect, Some(&clip));
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn convex_clip_reuses_uncut_storage() {
+        let vertices = [(1.0, 1.0), (3.0, 1.0), (2.0, 3.0)].map(|(x, y)| Vertex {
+            x, y, u: x, v: y, color: [0.5; 4],
+        });
+        let polygon = vertices.to_vec();
+        let allocation = polygon.as_ptr();
+        let polygon = clip_convex_edge(polygon, (0.0, 0.0), (4.0, 0.0));
+        assert_eq!(polygon.as_ptr(), allocation);
+        assert_eq!(polygon.len(), vertices.len());
+        for (actual, expected) in polygon.iter().zip(vertices) {
+            assert_eq!((actual.x, actual.y, actual.u, actual.v, actual.color),
+                (expected.x, expected.y, expected.u, expected.v, expected.color));
+        }
+        let polygon = clip_convex_edge(polygon, (0.0, 4.0), (4.0, 4.0));
+        assert_eq!(polygon.as_ptr(), allocation);
+        assert!(polygon.is_empty());
     }
 
     #[test]

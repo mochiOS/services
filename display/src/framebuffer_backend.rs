@@ -18,6 +18,7 @@ pub(crate) struct FramebufferBackend {
     shared_surface: bool,
     transfer_limit: usize,
     transfer_buffer: Vec<u8>,
+    last_control_ms: u32,
 }
 
 impl FramebufferBackend {
@@ -74,6 +75,7 @@ impl FramebufferBackend {
                 shared_surface: false,
                 transfer_limit,
                 transfer_buffer: Vec::new(),
+                last_control_ms: 0,
             });
         }
         let offset = info.addr & 0xfff;
@@ -88,6 +90,7 @@ impl FramebufferBackend {
             shared_surface: info.format & FORMAT_SHARED_SURFACE != 0,
             transfer_limit: 0,
             transfer_buffer: Vec::new(),
+            last_control_ms: 0,
         })
     }
 
@@ -109,14 +112,29 @@ impl FramebufferBackend {
         unsafe {
             core::ptr::copy_nonoverlapping(bytes.as_ptr(), self.pixels, bytes.len());
         }
-        platform::memory::commit_framebuffer(
+        let timing = mochios_viewkit_gpu_protocol::compositor::frame_timing(bytes);
+        if let Some(mut timing) = timing {
+            timing.control_ms = self.last_control_ms;
+            // The copy above owns at least a validated complete scene header.
+            let header = unsafe { core::slice::from_raw_parts_mut(self.pixels,
+                mochios_viewkit_gpu_protocol::compositor::HEADER_LEN) };
+            mochios_viewkit_gpu_protocol::compositor::set_frame_timing(header, timing)
+                .map_err(|_| EIO)?;
+        }
+        let start = timing.and_then(|_| platform::time::monotonic_milliseconds().ok());
+        let result = platform::memory::commit_framebuffer(
             GPU_SCENE_COMMIT_X,
             bytes.len() as u32,
             GPU_SCENE_COMMIT_WIDTH,
             1,
         )
         .map(|_| ())
-        .map_err(|error| error.errno().unwrap_or(EIO))
+        .map_err(|error| error.errno().unwrap_or(EIO));
+        if let Some(start) = start {
+            self.last_control_ms = platform::time::monotonic_milliseconds().unwrap_or(start)
+                .saturating_sub(start).min(u32::MAX as u64) as u32;
+        }
+        result
     }
 
     /// Replaces the firmware boot screen as soon as the mediated display is

@@ -307,12 +307,14 @@ struct PendingPresent {
     damage: Option<Option<Rect>>,
     notify: bool,
     messages: usize,
+    queued_at: Option<u64>,
 }
 
 impl PendingPresent {
     fn queue(&mut self, damage: Option<Rect>, notify: bool) {
         if self.damage.is_none() {
             self.messages = 1;
+            self.queued_at = platform::time::monotonic_milliseconds().ok();
         }
         self.damage = Some(match (self.damage, damage) {
             (None, damage) => damage,
@@ -320,6 +322,16 @@ impl PendingPresent {
             _ => None,
         });
         self.notify |= notify;
+    }
+
+    fn due(&self) -> bool {
+        // Message handlers can block on cursor/display IPC. A count alone
+        // can therefore postpone an already dirty frame for many refreshes.
+        self.messages >= 32
+            || match (self.queued_at, platform::time::monotonic_milliseconds().ok()) {
+                (Some(start), Some(now)) => now.saturating_sub(start) >= 8,
+                _ => true,
+            }
     }
 
     fn flush(&mut self, state: &mut CompositorState) {
@@ -332,6 +344,7 @@ impl PendingPresent {
         }
         self.notify = false;
         self.messages = 0;
+        self.queued_at = None;
     }
 }
 
@@ -342,9 +355,9 @@ pub(crate) fn run() -> ! {
     let display_tid = crate::startup::required("display-discovery", || {
         wait_for_service(4096).ok_or(crate::protocol::errno_status(mochi_user_syscall::ENOENT))
     });
-    let input_subscribed = crate::startup::check("input-subscribe", || {
+    let input_sender = crate::startup::check("input-subscribe", || {
         subscribe_input_events(endpoint)
-    }).is_ok();
+    }).ok();
     crate::startup::required("display-owner", || {
         let status = display_claim_present_owner(display_tid);
         if status == 0 { Ok(()) } else { Err(status) }
@@ -359,7 +372,7 @@ pub(crate) fn run() -> ! {
         display_height,
         display_stride,
         display_format,
-        input_subscribed,
+        input_sender.is_some(),
         renderer_caps,
     );
     crate::startup::required("first-present", || {
@@ -370,10 +383,9 @@ pub(crate) fn run() -> ! {
     let mut pending_buf = [0u8; 4128];
     let mut frame = PendingPresent::default();
     loop {
-        // Reply to queued requests before waiting for scanout. Bound the batch
-        // so a continuous IPC stream cannot starve display updates.
+        // Reply before scanout, but bound batching by both time and count.
         if frame.damage.is_some() {
-            if frame.messages >= 32 {
+            if frame.due() {
                 frame.flush(&mut state);
             } else if pending_msg.is_none() {
                 match platform::ipc::try_wait(&mut pending_buf) {
@@ -417,7 +429,7 @@ pub(crate) fn run() -> ! {
                 continue;
             }
         }
-        if len == core::mem::size_of::<platform::input::InputEvent>() {
+        if crate::input::is_input_message(msg, input_sender) {
             let event = unsafe {
                 core::ptr::read_unaligned(buf.as_ptr().cast::<platform::input::InputEvent>())
             };
@@ -432,7 +444,7 @@ pub(crate) fn run() -> ! {
                 for _ in 0..32 {
                     let Ok(next_msg) = platform::ipc::try_wait(buf) else { break; };
                     let next_len = (next_msg & 0xffff_ffff) as usize;
-                    if next_len == core::mem::size_of::<platform::input::InputEvent>() {
+                    if crate::input::is_input_message(next_msg, input_sender) {
                         let next_event = unsafe {
                             core::ptr::read_unaligned(
                                 buf.as_ptr().cast::<platform::input::InputEvent>(),

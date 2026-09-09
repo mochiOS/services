@@ -28,6 +28,7 @@ pub(crate) struct PresentFrame {
     gpu_panel_disabled: bool,
     gpu_compositor: GpuCompositor,
     metrics: RendererMetrics,
+    last_present_ms: u32,
 }
 
 #[derive(Default)]
@@ -167,6 +168,16 @@ fn try_gpu_scene_present(
         return None;
     };
     let composition_millis = perf_counter().saturating_sub(composition_start);
+    let timing = mochios_viewkit_gpu_protocol::compositor::FrameTiming {
+        compose_ms: composition_millis.min(u32::MAX as u64) as u32,
+        ipc_ms: present_frame.last_present_ms,
+        control_ms: 0,
+    };
+    if present_frame.bytes(byte_len).ok().and_then(|bytes|
+        mochios_viewkit_gpu_protocol::compositor::set_frame_timing(bytes, timing).ok()).is_none() {
+        present_frame.gpu_contents_valid = false;
+        return None;
+    }
     let present_start = perf_counter();
     if !present_frame.sent_to_display {
         if platform::ipc::send_page_count(display_tid, present_frame.page_count, present_frame.virt)
@@ -179,6 +190,7 @@ fn try_gpu_scene_present(
     }
     let status = display_present_gpu_scene(display_tid, byte_len);
     let present_millis = perf_counter().saturating_sub(present_start);
+    present_frame.last_present_ms = present_millis.min(u32::MAX as u64) as u32;
     if status == 0 {
         present_frame.gpu_contents_valid = true;
         present_frame.cpu_contents_valid = false;

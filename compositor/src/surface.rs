@@ -495,9 +495,7 @@ fn read_gpu_scene_pixel(surface: &Surface, sx: usize, sy: usize) -> Option<u32> 
     let point_x = sx as f32 / gpu.width as f32 * 2.0 - 1.0;
     let point_y = sy as f32 / gpu.height as f32 * 2.0 - 1.0;
     let mut alpha = 0.0f32;
-    for triangle in gpu
-        .vertices
-        .chunks_exact(mochios_viewkit_gpu_protocol::VERTEX_STRIDE * 3)
+    for triangle in gpu.vertices.chunks_exact(mochios_viewkit_gpu_protocol::VERTEX_STRIDE * 3)
     {
         let first =
             decode_gpu_hit_vertex(&triangle[0..mochios_viewkit_gpu_protocol::VERTEX_STRIDE])?;
@@ -535,6 +533,11 @@ fn read_gpu_scene_pixel(surface: &Surface, sx: usize, sy: usize) -> Option<u32> 
             / 255.0;
         let source_alpha = vertex_alpha * atlas_alpha;
         alpha = source_alpha + alpha * (1.0 - source_alpha);
+        // Source-over cannot make an opaque pixel transparent again.
+        // Pointer hit testing needs only alpha, not the final RGB value.
+        if alpha >= 1.0 {
+            return Some(0xff00_0000);
+        }
     }
     Some(((alpha * 255.0).round() as u32) << 24)
 }
@@ -648,6 +651,19 @@ mod gpu_hit_tests {
     fn gpu_scene_hit_test_rejects_points_outside_geometry() {
         assert_eq!(read_current_pixel(&scene_surface(1.0), 90, 90), Some(0));
     }
+
+    #[test]
+    fn opaque_hit_stays_opaque_under_translucent_layers() {
+        let mut surface = scene_surface(1.0);
+        let overlay = scene_surface(0.25);
+        let gpu = surface.gpu.as_mut().unwrap();
+        for _ in 0..100 {
+            gpu.vertices.extend_from_slice(&overlay.gpu.as_ref().unwrap().vertices);
+        }
+        assert_eq!(read_current_pixel(&surface, 10, 10), Some(0xff00_0000));
+        assert_eq!(read_current_pixel(&surface, 90, 90), Some(0));
+    }
+
 }
 
 fn copy_surface_buffer(buffer: &SurfaceBuffer) -> Result<Vec<u32>, u32> {
