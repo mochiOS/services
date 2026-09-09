@@ -187,7 +187,14 @@ struct SurfaceGeometryKey {
     position: (i32, i32),
     size: (u32, u32),
     format: u32,
-    window_clip: Option<Vec<(f32, f32)>>,
+    window_clip: Option<WindowClip>,
+}
+
+#[derive(Clone, PartialEq)]
+struct WindowClip {
+    polygon: Vec<(f32, f32)>,
+    bounds: [f32; 4],
+    interior: [f32; 4],
 }
 
 #[derive(PartialEq)]
@@ -315,9 +322,9 @@ impl GpuCompositor {
                 if !valid {
                     let mut vertices = Vec::new();
                     if surface.current_format == PIXEL_FORMAT_GPU_SCENE {
-                        append_gpu_surface(&mut vertices, surface, damage, key.window_clip.as_deref())?;
+                        append_gpu_surface(&mut vertices, surface, damage, key.window_clip.as_ref())?;
                     } else {
-                        append_cpu_surface(&mut vertices, surface, damage, key.window_clip.as_deref());
+                        append_cpu_surface(&mut vertices, surface, damage, key.window_clip.as_ref());
                     }
                     let geometry = SurfaceGeometry {
                         key: key.clone(), display_size: desktop_key.size, vertices,
@@ -572,7 +579,7 @@ fn append_gpu_surface(
     output: &mut Vec<Vertex>,
     surface: &Surface,
     damage: Rect,
-    window_clip: Option<&[(f32, f32)]>,
+    window_clip: Option<&WindowClip>,
 ) -> Option<()> {
     let gpu = surface.gpu.as_ref()?;
     for triangle in gpu
@@ -614,7 +621,7 @@ fn append_cpu_surface(
     output: &mut Vec<Vertex>,
     surface: &Surface,
     damage: Rect,
-    window_clip: Option<&[(f32, f32)]>,
+    window_clip: Option<&WindowClip>,
 ) {
     append_textured_quad_clipped(
         output,
@@ -633,7 +640,7 @@ fn window_clip_polygon(
     surfaces: &[Surface],
     windows: &[Window],
     surface: &Surface,
-) -> Option<Vec<(f32, f32)>> {
+) -> Option<WindowClip> {
     let window = windows.get(window_index_by_id(windows, surface.window)?)?;
     let content = surfaces
         .iter()
@@ -642,7 +649,7 @@ fn window_clip_polygon(
     Some(rounded_rect_polygon(frame, WINDOW_CORNER_RADIUS as f32))
 }
 
-fn rounded_rect_polygon(rect: Rect, radius: f32) -> Vec<(f32, f32)> {
+fn rounded_rect_polygon(rect: Rect, radius: f32) -> WindowClip {
     const CORNER_SEGMENTS: usize = 8;
     let radius = radius
         .max(0.0)
@@ -651,8 +658,14 @@ fn rounded_rect_polygon(rect: Rect, radius: f32) -> Vec<(f32, f32)> {
     let top = rect.y as f32;
     let right = left + rect.width as f32;
     let bottom = top + rect.height as f32;
+    let bounds = [left, top, right, bottom];
+    let interior = [left + radius, top + radius, right - radius, bottom - radius];
     if radius == 0.0 {
-        return vec![(left, top), (right, top), (right, bottom), (left, bottom)];
+        return WindowClip {
+            polygon: vec![(left, top), (right, top), (right, bottom), (left, bottom)],
+            bounds,
+            interior,
+        };
     }
     let mut points = Vec::with_capacity(CORNER_SEGMENTS * 4 + 4);
     for (center_x, center_y, start) in [
@@ -669,7 +682,7 @@ fn rounded_rect_polygon(rect: Rect, radius: f32) -> Vec<(f32, f32)> {
             ));
         }
     }
-    points
+    WindowClip { polygon: points, bounds, interior }
 }
 
 fn append_textured_quad(
@@ -686,7 +699,7 @@ fn append_textured_quad_clipped(
     output: &mut Vec<Vertex>,
     bounds: Rect,
     damage: Rect,
-    window_clip: Option<&[(f32, f32)]>,
+    window_clip: Option<&WindowClip>,
 ) {
     let left = bounds.x as f32;
     let top = bounds.y as f32;
@@ -753,7 +766,7 @@ fn append_window_clipped_triangle(
     output: &mut Vec<Vertex>,
     triangle: [Vertex; 3],
     damage: Rect,
-    window_clip: Option<&[(f32, f32)]>,
+    window_clip: Option<&WindowClip>,
 ) {
     let (outside, inside) = triangle_rect_bounds(&triangle, damage);
     if outside { return; }
@@ -761,6 +774,27 @@ fn append_window_clipped_triangle(
         append_clipped_triangle(output, triangle, damage);
         return;
     };
+    // A rounded rectangle differs from its bounds only in the four corner
+    // squares. Its full horizontal and vertical interior strips therefore
+    // need no per-edge polygon clipping.
+    let (mut min_x, mut min_y, mut max_x, mut max_y) =
+        (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for vertex in triangle {
+        min_x = min_x.min(vertex.x);
+        min_y = min_y.min(vertex.y);
+        max_x = max_x.max(vertex.x);
+        max_y = max_y.max(vertex.y);
+    }
+    let [left, top, right, bottom] = window_clip.bounds;
+    let [inner_left, inner_top, inner_right, inner_bottom] = window_clip.interior;
+    let inside_bounds = min_x >= left && min_y >= top && max_x <= right && max_y <= bottom;
+    let inside_core = min_x >= inner_left && max_x <= inner_right
+        || min_y >= inner_top && max_y <= inner_bottom;
+    if inside_bounds && inside_core {
+        append_clipped_triangle(output, triangle, damage);
+        return;
+    }
+    let window_clip = &window_clip.polygon;
     let mut window_inside = true;
     for index in 0..window_clip.len() {
         let start = window_clip[index];
@@ -1446,6 +1480,48 @@ mod tests {
         let exterior = triangle.map(|vertex| Vertex { x: vertex.x - 200.0, ..vertex });
         append_window_clipped_triangle(&mut output, exterior, rect, Some(&clip));
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn interior_fast_path_still_clips_damage() {
+        let frame = Rect { x: 0, y: 0, width: 100, height: 100 };
+        let clip = rounded_rect_polygon(frame, 20.0);
+        let triangle = [(30.0, 30.0), (70.0, 30.0), (50.0, 70.0)].map(|(x, y)| Vertex {
+            x, y, u: x, v: y, color: [0.5; 4],
+        });
+        let damage = Rect { x: 40, y: 40, width: 20, height: 20 };
+        let mut expected = Vec::new();
+        let mut actual = Vec::new();
+        append_clipped_triangle(&mut expected, triangle, damage);
+        append_window_clipped_triangle(&mut actual, triangle, damage, Some(&clip));
+        assert!(!actual.is_empty());
+        assert_eq!(actual.len(), expected.len());
+        for (a, b) in actual.iter().zip(expected) {
+            assert_eq!((a.x, a.y, a.u, a.v, a.color), (b.x, b.y, b.u, b.v, b.color));
+        }
+    }
+
+    #[test]
+    fn rounded_rect_side_strips_skip_polygon_clipping() {
+        let clip = rounded_rect_polygon(Rect { x: 0, y: 0, width: 100, height: 100 }, 20.0);
+        for triangle in [
+            [(2.0, 30.0), (18.0, 35.0), (2.0, 70.0)],
+            [(30.0, 2.0), (70.0, 2.0), (35.0, 18.0)],
+        ] {
+            let triangle = triangle.map(|(x, y)| Vertex {
+                x, y, u: x, v: y, color: [0.5; 4],
+            });
+            let mut expected = Vec::new();
+            let mut actual = Vec::new();
+            append_clipped_triangle(&mut expected, triangle, Rect::full(100, 100));
+            append_window_clipped_triangle(
+                &mut actual,
+                triangle,
+                Rect::full(100, 100),
+                Some(&clip),
+            );
+            assert_eq!(actual.len(), expected.len());
+        }
     }
 
     #[test]
