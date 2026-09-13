@@ -16,5 +16,4 @@ requires = [
     "capabilities.manage",
     "ipc.client",
     "ipc.server",
-    "net.connect",
 ]
