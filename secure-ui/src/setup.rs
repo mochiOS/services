@@ -970,18 +970,22 @@ fn mutate_sensitive(
 }
 
 fn call_status(service: u64, request_id: u64, request: &[u8]) -> Result<(), SetupError> {
-    let mut reply = [0u8; mochios_user_protocol::STATUS_LEN];
-    let reply_len =
-        authentication::call(service, request, &mut reply).map_err(map_authentication_error)?;
-    let status = Status::decode(&reply[..reply_len]).map_err(|_| SetupError::Protocol)?;
-    if status.request_id != request_id {
-        return Err(SetupError::Protocol);
-    }
-    if status.status == 0 {
-        Ok(())
-    } else {
-        Err(SetupError::Storage)
-    }
+	let mut reply = [0u8; mochios_user_protocol::STATUS_LEN];
+	let reply_len =
+		authentication::call(service, request, &mut reply).map_err(map_authentication_error)?;
+	let status = Status::decode(&reply[..reply_len]).map_err(|_| SetupError::Protocol)?;
+	if status.request_id != request_id {
+		return Err(SetupError::Protocol);
+	}
+	if status.status == 0 {
+		Ok(())
+	} else {
+		eprintln!(
+			"secure-ui: account mutation failed status={}",
+			status.status
+		);
+		Err(SetupError::Storage)
+	}
 }
 
 fn create_home(user: &UserRecord) -> Result<(), SetupError> {

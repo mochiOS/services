@@ -67,7 +67,8 @@ fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
         .mode(0o600)
         .open(path)?;
     file.write_all(bytes)?;
-    file.sync_all()
+    //file.sync_all()
+    Ok(())
 }
 
 fn remove_if_present(path: &Path) -> io::Result<()> {

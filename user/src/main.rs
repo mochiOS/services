@@ -33,7 +33,14 @@ impl UserService {
     }
 
     fn save_candidate(&mut self, candidate: UserDatabase) -> Result<(), u64> {
-        storage::save(Path::new(DATABASE_PATH), &candidate).map_err(errno)?;
+        storage::save(Path::new(DATABASE_PATH), &candidate).map_err(|error| {
+            platform::logln!(
+                "user.service: database save failed error={}",
+                error
+            );
+            errno(error)
+        })?;
+
         self.database = candidate;
         self.generation = self.generation.wrapping_add(1).max(1);
         Ok(())
