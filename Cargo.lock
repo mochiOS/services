@@ -1011,6 +1011,7 @@ version = "0.1.0"
 dependencies = [
  "mochi-user-platform",
  "mochi-user-syscall",
+ "mochios-mdriver-protocol",
 ]
 
 [[package]]
@@ -1121,9 +1122,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.186"
+version = "0.2.185"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+checksum = "52ff2c0fe9bc6cb6b14a0592c2ff4fa9ceb83eea9db979b0487cd054946a2b8f"
 
 [[package]]
 name = "libloading"
@@ -1320,6 +1321,10 @@ source = "git+https://github.com/mochiOS/syscalls?rev=814cb3f1f5e0dab5fc199f1de5
 name = "mochios-linux-portal-protocol"
 version = "0.1.0"
 source = "git+https://github.com/mochiOS/syscalls#81bc83a0196faba3cf605472a45558ea026f4a40"
+
+[[package]]
+name = "mochios-mdriver-protocol"
+version = "0.1.0"
 
 [[package]]
 name = "mochios-net-device-protocol"
