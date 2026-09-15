@@ -32,13 +32,17 @@ impl UserService {
         })
     }
 
-    fn save_candidate(&mut self, candidate: UserDatabase) -> Result<(), u64> {
+    fn save_candidate(&mut self, operation: &str, candidate: UserDatabase) -> Result<(), u64> {
         storage::save(Path::new(DATABASE_PATH), &candidate).map_err(|error| {
-            platform::logln!(
-                "user.service: database save failed error={}",
-                error
-            );
-            errno(error)
+            let errno = error.errno();
+            diagnostic(&format!(
+                "user.service: database save failed operation={} storage_operation={} errno={} error={}",
+                operation,
+                error.operation(),
+                errno,
+                error,
+            ));
+            errno
         })?;
 
         self.database = candidate;
@@ -129,7 +133,10 @@ impl UserService {
             self.reply_status(sender, request.request_id, mochi_user_syscall::EINVAL);
             return;
         }
-        let status = self.save_candidate(candidate).err().unwrap_or(0);
+        let status = self
+            .save_candidate("add-user", candidate)
+            .err()
+            .unwrap_or(0);
         self.reply_status(sender, request.request_id, status);
     }
 
@@ -143,7 +150,10 @@ impl UserService {
             self.reply_status(sender, request.request_id, mochi_user_syscall::EINVAL);
             return;
         }
-        let status = self.save_candidate(candidate).err().unwrap_or(0);
+        let status = self
+            .save_candidate("remove-user", candidate)
+            .err()
+            .unwrap_or(0);
         self.reply_status(sender, request.request_id, status);
     }
 
@@ -170,7 +180,7 @@ impl UserService {
         };
         user.password_hash = password_hash;
         user.locked = false;
-        let status = match self.save_candidate(candidate) {
+        let status = match self.save_candidate("set-password", candidate) {
             Ok(()) => 0,
             Err(status) => status,
         };
@@ -235,7 +245,7 @@ impl UserService {
     }
 }
 
-fn errno(error: std::io::Error) -> u64 {
+fn errno(error: &std::io::Error) -> u64 {
     error
         .raw_os_error()
         .unwrap_or(mochi_user_syscall::EIO as i32) as u64
@@ -255,7 +265,7 @@ fn main() {
                 "user.service: database load failed error={}",
                 error
             ));
-            let _ = platform::service_ready::notify(ready_target, -(errno(error) as i32));
+            let _ = platform::service_ready::notify(ready_target, -(errno(&error) as i32));
             platform::process::exit(1);
         }
     };

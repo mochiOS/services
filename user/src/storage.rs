@@ -1,9 +1,44 @@
 use std::fs::{self, OpenOptions};
+use std::fmt;
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use mochios_user_database::UserDatabase;
+
+#[derive(Debug)]
+pub struct SaveError {
+    operation: &'static str,
+    source: io::Error,
+}
+
+impl SaveError {
+    fn new(operation: &'static str, source: io::Error) -> Self {
+        Self { operation, source }
+    }
+
+    pub fn operation(&self) -> &'static str {
+        self.operation
+    }
+
+    pub fn errno(&self) -> u64 {
+        self.source
+            .raw_os_error()
+            .unwrap_or(mochi_user_syscall::EIO as i32) as u64
+    }
+}
+
+impl fmt::Display for SaveError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}: {}", self.operation, self.source)
+    }
+}
+
+impl std::error::Error for SaveError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
 
 pub fn load(path: &Path) -> io::Result<UserDatabase> {
     match fs::read(path) {
@@ -22,36 +57,40 @@ pub fn load(path: &Path) -> io::Result<UserDatabase> {
     }
 }
 
-pub fn save(path: &Path, database: &UserDatabase) -> io::Result<()> {
+pub fn save(path: &Path, database: &UserDatabase) -> Result<(), SaveError> {
     let bytes = database
         .encode()
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        .map_err(|error| SaveError::new("encode", io::Error::new(io::ErrorKind::InvalidData, error)))?;
     let parent = path.parent().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "user database has no parent")
+        SaveError::new(
+            "validate-path",
+            io::Error::new(io::ErrorKind::InvalidInput, "user database has no parent"),
+        )
     })?;
-    fs::create_dir_all(parent)?;
+    fs::create_dir_all(parent).map_err(|error| SaveError::new("create-parent", error))?;
 
     let temporary = temporary_path(path);
     let backup = backup_path(path);
-    remove_if_present(&temporary)?;
+    remove_if_present(&temporary).map_err(|error| SaveError::new("remove-temporary", error))?;
     write_synced(&temporary, &bytes)?;
-    remove_if_present(&backup)?;
+    remove_if_present(&backup).map_err(|error| SaveError::new("remove-backup", error))?;
     let had_database = match fs::rename(path, &backup) {
         Ok(()) => true,
         Err(error) if error.kind() == io::ErrorKind::NotFound => false,
         Err(error) => {
-            remove_if_present(&temporary)?;
-            return Err(error);
+            remove_if_present(&temporary)
+                .map_err(|cleanup| SaveError::new("cleanup-temporary", cleanup))?;
+            return Err(SaveError::new("backup-database", error));
         }
     };
     if let Err(error) = fs::rename(&temporary, path) {
         if had_database {
             let _ = fs::rename(&backup, path);
         }
-        return Err(error);
+        return Err(SaveError::new("install-database", error));
     }
     if had_database {
-        remove_if_present(&backup)?;
+        remove_if_present(&backup).map_err(|error| SaveError::new("remove-backup", error))?;
     }
     Ok(())
 }
@@ -60,15 +99,17 @@ fn parse(bytes: &[u8]) -> io::Result<UserDatabase> {
     UserDatabase::parse(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
-fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
+fn write_synced(path: &Path, bytes: &[u8]) -> Result<(), SaveError> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(path)?;
-    file.write_all(bytes)?;
-    //file.sync_all()
-    Ok(())
+        .open(path)
+        .map_err(|error| SaveError::new("create-temporary", error))?;
+    file.write_all(bytes)
+        .map_err(|error| SaveError::new("write-temporary", error))?;
+    file.sync_all()
+        .map_err(|error| SaveError::new("sync-temporary", error))
 }
 
 fn remove_if_present(path: &Path) -> io::Result<()> {

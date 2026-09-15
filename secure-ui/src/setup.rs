@@ -812,7 +812,10 @@ fn submit_callback(
             Err(SetupError::ServiceUnavailable) => {
                 status.set("Account service is unavailable.".to_owned())
             }
-            Err(SetupError::Storage) => status.set("The account could not be saved.".to_owned()),
+            Err(SetupError::Storage(errno)) => {
+                eprintln!("secure-ui: account setup storage failure errno={errno}");
+                status.set("The account could not be saved.".to_owned());
+            }
             Err(SetupError::Protocol) => {
                 status.set("Account setup could not be completed.".to_owned())
             }
@@ -872,7 +875,7 @@ enum SetupError {
     InvalidInput,
     AccountAlreadyExists,
     ServiceUnavailable,
-    Storage,
+    Storage(i32),
     Protocol,
 }
 
@@ -925,7 +928,7 @@ fn add_user(service: u64, request_id: u64, encoded: &[u8]) -> Result<(), SetupEr
         request_id,
         encoded_record: encoded,
     };
-    mutate(service, request_id, |output| request.encode(output))
+    mutate("add-user", service, request_id, |output| request.encode(output))
 }
 
 fn set_password(
@@ -939,37 +942,44 @@ fn set_password(
         name,
         password,
     };
-    mutate_sensitive(service, request_id, |output| request.encode(output))
+    mutate_sensitive("set-password", service, request_id, |output| request.encode(output))
 }
 
 fn remove_user(service: u64, request_id: u64, name: &str) -> Result<(), SetupError> {
     let request = RemoveUser { request_id, name };
-    mutate(service, request_id, |output| request.encode(output))
+    mutate("remove-user", service, request_id, |output| request.encode(output))
 }
 
 fn mutate(
+    operation: &str,
     service: u64,
     request_id: u64,
     encode: impl FnOnce(&mut [u8]) -> Result<usize, mochios_user_protocol::EncodeError>,
 ) -> Result<(), SetupError> {
     let mut request = [0u8; MAX_MESSAGE_LEN];
     let request_len = encode(&mut request).map_err(|_| SetupError::InvalidInput)?;
-    call_status(service, request_id, &request[..request_len])
+    call_status(operation, service, request_id, &request[..request_len])
 }
 
 fn mutate_sensitive(
+    operation: &str,
     service: u64,
     request_id: u64,
     encode: impl FnOnce(&mut [u8]) -> Result<usize, mochios_user_protocol::EncodeError>,
 ) -> Result<(), SetupError> {
     let mut request = [0u8; MAX_MESSAGE_LEN];
     let request_len = encode(&mut request).map_err(|_| SetupError::InvalidInput)?;
-    let result = call_status(service, request_id, &request[..request_len]);
+    let result = call_status(operation, service, request_id, &request[..request_len]);
     request[..request_len].fill(0);
     result
 }
 
-fn call_status(service: u64, request_id: u64, request: &[u8]) -> Result<(), SetupError> {
+fn call_status(
+	operation: &str,
+	service: u64,
+	request_id: u64,
+	request: &[u8],
+) -> Result<(), SetupError> {
 	let mut reply = [0u8; mochios_user_protocol::STATUS_LEN];
 	let reply_len =
 		authentication::call(service, request, &mut reply).map_err(map_authentication_error)?;
@@ -981,50 +991,64 @@ fn call_status(service: u64, request_id: u64, request: &[u8]) -> Result<(), Setu
 		Ok(())
 	} else {
 		eprintln!(
-			"secure-ui: account mutation failed status={}",
+			"secure-ui: account mutation failed operation={} status={}",
+			operation,
 			status.status
 		);
-		Err(SetupError::Storage)
+		Err(SetupError::Storage(status.status))
 	}
 }
 
 fn create_home(user: &UserRecord) -> Result<(), SetupError> {
     let home = Path::new(&user.home);
     match fs::symlink_metadata(home) {
-        Ok(_) => return Err(SetupError::Storage),
+        Ok(_) => {
+            return Err(SetupError::Storage(
+                -(mochi_user_syscall::EEXIST as i32),
+            ));
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(_) => return Err(SetupError::Storage),
+        Err(error) => return Err(storage_error(error)),
     }
-    if fs::create_dir_all(home).is_err() {
-        return Err(SetupError::Storage);
+    if let Err(error) = fs::create_dir_all(home) {
+        return Err(storage_error(error));
     }
     for directory in HOME_DIRECTORIES {
-        if fs::create_dir(home.join(directory)).is_err() {
+        if let Err(error) = fs::create_dir(home.join(directory)) {
             remove_home(user);
-            return Err(SetupError::Storage);
+            return Err(storage_error(error));
         }
     }
-    if fs::set_permissions(home, fs::Permissions::from_mode(0o700)).is_err() {
+    if let Err(error) = fs::set_permissions(home, fs::Permissions::from_mode(0o700)) {
         remove_home(user);
-        return Err(SetupError::Storage);
+        return Err(storage_error(error));
     }
     for directory in HOME_DIRECTORIES {
-        if fs::set_permissions(home.join(directory), fs::Permissions::from_mode(0o700)).is_err() {
+        if let Err(error) =
+            fs::set_permissions(home.join(directory), fs::Permissions::from_mode(0o700))
+        {
             remove_home(user);
-            return Err(SetupError::Storage);
+            return Err(storage_error(error));
         }
     }
-    if chown(home, Some(user.uid), Some(user.gid)).is_err() {
+    if let Err(error) = chown(home, Some(user.uid), Some(user.gid)) {
         remove_home(user);
-        return Err(SetupError::Storage);
+        return Err(storage_error(error));
     }
     for directory in HOME_DIRECTORIES {
-        if chown(home.join(directory), Some(user.uid), Some(user.gid)).is_err() {
+        if let Err(error) = chown(home.join(directory), Some(user.uid), Some(user.gid)) {
             remove_home(user);
-            return Err(SetupError::Storage);
+            return Err(storage_error(error));
         }
     }
     Ok(())
+}
+
+fn storage_error(error: io::Error) -> SetupError {
+    let errno = error
+        .raw_os_error()
+        .unwrap_or(mochi_user_syscall::EIO as i32);
+    SetupError::Storage(-errno.abs())
 }
 
 fn remove_home(user: &UserRecord) {
