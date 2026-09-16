@@ -53,30 +53,38 @@ impl App for NetworkPromptApp {
         Box::new(
             ZStack::new()
                 .alignment(ZStackAlignment::Center)
-                .child(Rectangle::new().color(RectangleColor::Custom(Color::rgba(0, 0, 0, 36))))
                 .child(
-                    Card::new().content(
-                        Padding::all(32.0).content(
+                    Rectangle::new()
+                        .color(RectangleColor::Custom(Theme::current().shell.scrim)),
+                )
+                .child(
+                    Dialog::new()
+                        .accessibility_label("Network access permission")
+                        .content(
                             VStack::new()
                                 .alignment(StackAlignment::Center)
                                 .distribution(StackDistribution::Center)
                                 .gap(StackGap::Large)
                                 .child(Icon::new(IconName::ExternalLink).size(44.0))
-                                .child(Text::new(format!("Allow {application} to access the network?"))
-                                    .font_size(20.0).line_height(28.0).weight(600)
+                                .child(Text::styled(
+                                    format!("Allow {application} to access the network?"),
+                                    TextRole::TitleMedium,
+                                )
                                     .alignment(TextAlignment::Center))
-                                .child(Text::new("The application can connect to public Internet services. Access to this device and private local networks remains blocked.")
-                                    .font_size(13.0).line_height(20.0)
+                                .child(Text::styled(
+                                    "The application can connect to public Internet services. Access to this device and private local networks remains blocked.",
+                                    TextRole::Body,
+                                )
                                     .alignment(TextAlignment::Center)
-                                    .color(Theme::DEFAULT.colors.text_secondary))
+                                    .tone(TextTone::Secondary))
                                 .child(HStack::new()
                                     .alignment(StackAlignment::Center)
                                     .distribution(StackDistribution::Center)
                                     .gap(StackGap::Medium)
-                                    .child(Button::new("Don't Allow").style(ButtonStyle::Standard).radius(CornerRadius::Full).on_click(|| finish(false)).frame(132.0, 38.0))
-                                    .child(Button::new("Allow").style(ButtonStyle::Accent).radius(CornerRadius::Full).on_click(|| finish(true)).frame(132.0, 38.0)))
+                                    .child(Button::new("Don't Allow").style(ButtonStyle::Standard).size(ButtonSize::Medium).on_click(|| finish(false)).width(132.0))
+                                    .child(Button::new("Allow").style(ButtonStyle::Accent).size(ButtonSize::Medium).on_click(|| finish(true)).width(132.0)))
                         )
-                    ).frame(520.0, 330.0)
+                        .frame(520.0, 330.0)
                 )
         )
     }

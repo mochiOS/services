@@ -89,17 +89,12 @@ impl AccountSetup {
             .alignment(StackAlignment::Center)
             .gap(StackGap::ExtraSmall)
             .child(
-                Text::new(title)
-                    .font_size(28.0)
-                    .line_height(36.0)
-                    .weight(700)
+                Text::styled(title, TextRole::TitleLarge)
                     .alignment(TextAlignment::Center)
                     .color(Color::WHITE),
             )
             .child(
-                Text::new(subtitle)
-                    .font_size(13.0)
-                    .line_height(20.0)
+                Text::styled(subtitle, TextRole::Body)
                     .alignment(TextAlignment::Center)
                     .color(Color::rgba(255, 255, 255, 216)),
             )
@@ -130,9 +125,7 @@ impl AccountSetup {
                     "Let's prepare this device for you",
                 ))
                 .child(
-                    Text::new("Let’s get your device ready!")
-                        .font_size(12.0)
-                        .line_height(19.0)
+                    Text::styled("Let’s get your device ready!", TextRole::Caption)
                         .alignment(TextAlignment::Center)
                         .color(Color::rgba(255, 255, 255, 216))
                         .frame(CONTENT_WIDTH, 48.0),
@@ -140,8 +133,9 @@ impl AccountSetup {
                 .child(
                     Button::new("Start Setup")
                         .style(ButtonStyle::Accent)
+                        .size(ButtonSize::Large)
                         .on_click(move || page.set(1))
-                        .frame(CONTENT_WIDTH, 44.0),
+                        .width(CONTENT_WIDTH),
                 )
                 .child(self.progress()),
         )
@@ -176,11 +170,10 @@ impl AccountSetup {
                         )),
                 )
                 .child(
-                    Text::new(
+                    Text::styled(
                         "Selecting Agree confirms that you have reviewed and accepted both documents.",
+                        TextRole::Caption,
                     )
-                    .font_size(11.0)
-                    .line_height(18.0)
                     .alignment(TextAlignment::Center)
                     .color(Color::rgba(255, 255, 255, 216))
                     .frame(500.0, 38.0),
@@ -188,11 +181,12 @@ impl AccountSetup {
                 .child(
                     Button::new("Agree and Continue")
                         .style(ButtonStyle::Accent)
+                        .size(ButtonSize::Large)
                         .on_click(move || {
                             page.set(2);
                             refresh_wifi(&wifi_status, &wifi_networks, &network_message);
                         })
-                        .frame(CONTENT_WIDTH, 44.0),
+                        .width(CONTENT_WIDTH),
                 )
                 .child(self.progress()),
         )
@@ -212,13 +206,14 @@ impl AccountSetup {
             .gap(StackGap::ExtraSmall);
         if networks.is_empty() {
             rows = rows.child(
-                Text::new(if host.available {
-                    "No Wi-Fi networks found. Select Scan to try again."
-                } else {
-                    "Wi-Fi is unavailable. You can continue using Ethernet or configure it later."
-                })
-                .font_size(12.0)
-                .line_height(19.0)
+                Text::styled(
+                    if host.available {
+                        "No Wi-Fi networks found. Select Scan to try again."
+                    } else {
+                        "Wi-Fi is unavailable. You can continue using Ethernet or configure it later."
+                    },
+                    TextRole::Caption,
+                )
                 .alignment(TextAlignment::Center)
                 .color(Color::rgba(255, 255, 255, 216))
                 .frame(CONTENT_WIDTH, 72.0),
@@ -236,20 +231,18 @@ impl AccountSetup {
                                 .alignment(StackAlignment::Center)
                                 .distribution(StackDistribution::SpaceBetween)
                                 .child(
-                                    Text::new(network.ssid.clone())
-                                        .font_size(13.0)
-                                        .line_height(20.0)
-                                        .weight(600),
+                                    Text::styled(network.ssid.clone(), TextRole::Label),
                                 )
                                 .child(
-                                    Text::new(format!(
-                                        "{} · {} dBm",
-                                        if network.secured { "Secured" } else { "Open" },
-                                        network.signal
-                                    ))
-                                    .font_size(10.0)
-                                    .line_height(16.0)
-                                    .color(Theme::current().colors.text_secondary),
+                                    Text::styled(
+                                        format!(
+                                            "{} · {} dBm",
+                                            if network.secured { "Secured" } else { "Open" },
+                                            network.signal
+                                        ),
+                                        TextRole::Caption,
+                                    )
+                                    .tone(TextTone::Secondary),
                                 ),
                         )
                         .style(if index == selected_index {
@@ -340,9 +333,7 @@ impl AccountSetup {
                     "Internet access keeps trust data and system services up to date",
                 ))
                 .child(
-                    Text::new(status_summary)
-                        .font_size(11.0)
-                        .line_height(18.0)
+                    Text::styled(status_summary, TextRole::Caption)
                         .alignment(TextAlignment::Center)
                         .color(Color::rgba(255, 255, 255, 216))
                         .frame(CONTENT_WIDTH, 24.0),
@@ -395,12 +386,13 @@ impl AccountSetup {
                         "Continue Without Network"
                     })
                     .style(ButtonStyle::Accent)
+                    .size(ButtonSize::Large)
                     .on_click(move || {
                         continue_started_at.set(None);
                         page.set(3);
                         full_name.set_focused(true);
                     })
-                    .frame(CONTENT_WIDTH, 44.0),
+                    .width(CONTENT_WIDTH),
                 )
                 .child(self.progress()),
         )
@@ -457,9 +449,7 @@ impl AccountSetup {
                         .frame(CONTENT_WIDTH, 44.0),
                 )
                 .child(
-                    Text::new(password_notice)
-                        .font_size(10.0)
-                        .line_height(16.0)
+                    Text::styled(password_notice, TextRole::Caption)
                         .alignment(TextAlignment::Center)
                         .color(Color::from_rgb_hex(0xffcf70))
                         .frame(CONTENT_WIDTH, 18.0),
@@ -467,8 +457,9 @@ impl AccountSetup {
                 .child(
                     Button::new("Create Account")
                         .style(ButtonStyle::Accent)
+                        .size(ButtonSize::Large)
                         .on_click(submit)
-                        .frame(CONTENT_WIDTH, 44.0),
+                        .width(CONTENT_WIDTH),
                 )
                 .child(status_text(self.status.get()))
                 .child(self.progress()),
@@ -510,17 +501,16 @@ impl AccountSetup {
                     "mochiOS is ready to use",
                 ))
                 .child(
-                    Text::new(message)
-                        .font_size(13.0)
-                        .line_height(20.0)
+                    Text::styled(message, TextRole::Body)
                         .alignment(TextAlignment::Center)
                         .color(Color::WHITE),
                 )
                 .child(
                     Button::new("Get Started!")
                         .style(ButtonStyle::Accent)
+                        .size(ButtonSize::Large)
                         .on_click(move || finish_setup(login_target, identity, &status))
-                        .frame(CONTENT_WIDTH, 44.0),
+                        .width(CONTENT_WIDTH),
                 )
                 .child(status_text(self.status.get()))
                 .child(self.progress()),
@@ -608,10 +598,7 @@ impl View for WifiConnectionStatus {
         let now = Instant::now();
         let was_connecting = self.started_at.get().is_some();
         let keep_polling = self.update_connection(now);
-        Text::new(self.message.get())
-            .font_size(12.0)
-            .line_height(18.0)
-            .weight(500)
+        Text::styled(self.message.get(), TextRole::Label)
             .alignment(TextAlignment::Center)
             .color(Color::WHITE)
             .paint(bounds, context);
@@ -706,8 +693,10 @@ fn qr_card(image: Option<ImageData>, title: &'static str, address: &'static str)
         Some(image) => Image::new(image)
             .content_mode(ImageContentMode::Fit)
             .frame(QR_IMAGE_SIZE, QR_IMAGE_SIZE),
-        None => Text::new("QR code unavailable. please report this issue to the mochiOS team.")
-            .font_size(11.0)
+        None => Text::styled(
+            "QR code unavailable. please report this issue to the mochiOS team.",
+            TextRole::Caption,
+        )
             .alignment(TextAlignment::Center)
             .color(Color::from_rgb_hex(0x6e6e73))
             .frame(QR_IMAGE_SIZE, QR_IMAGE_SIZE),
@@ -721,17 +710,12 @@ fn qr_card(image: Option<ImageData>, title: &'static str, address: &'static str)
                     .gap(StackGap::ExtraSmall)
                     .child(qr)
                     .child(
-                        Text::new(title)
-                            .font_size(14.0)
-                            .line_height(20.0)
-                            .weight(700)
+                        Text::styled(title, TextRole::Label)
                             .alignment(TextAlignment::Center)
                             .color(Color::from_rgb_hex(0x151518)),
                     )
                     .child(
-                        Text::new(address)
-                            .font_size(9.0)
-                            .line_height(14.0)
+                        Text::styled(address, TextRole::Caption)
                             .alignment(TextAlignment::Center)
                             .color(Color::from_rgb_hex(0x6e6e73)),
                     ),
@@ -749,14 +733,11 @@ fn setup_field(
         .placeholder(placeholder)
         .size(TextFieldSize::Large)
         .secure(secure)
-        .frame(CONTENT_WIDTH, 44.0)
+        .width(CONTENT_WIDTH)
 }
 
 fn status_text(status: String) -> StackChild {
-    Text::new(status)
-        .font_size(12.0)
-        .line_height(18.0)
-        .weight(500)
+    Text::styled(status, TextRole::Label)
         .alignment(TextAlignment::Center)
         .color(Color::WHITE)
         .frame(CONTENT_WIDTH, 22.0)

@@ -62,62 +62,53 @@ impl App for StoragePromptApp {
                 ButtonStyle::Danger,
             ),
         };
-        let prompt = Card::new()
+        let prompt = Dialog::new()
+            .accessibility_label("Storage confirmation")
             .content(
-                Padding::all(32.0).content(
-                    VStack::new()
-                        .alignment(StackAlignment::Center)
-                        .distribution(StackDistribution::Center)
-                        .gap(StackGap::Large)
-                        .child(Icon::new(IconName::HardDrive).size(44.0))
-                        .child(
-                            Text::new(title)
-                                .font_size(20.0)
-                                .line_height(28.0)
-                                .weight(600)
-                                .alignment(TextAlignment::Center),
-                        )
-                        .child(
-                            Text::new(configuration.target.clone())
-                                .font_size(12.0)
-                                .line_height(20.0)
-                                .weight(600)
-                                .alignment(TextAlignment::Center),
-                        )
-                        .child(
-                            Text::new(message)
-                                .font_size(13.0)
-                                .line_height(20.0)
-                                .alignment(TextAlignment::Center)
-                                .color(Theme::current().colors.text_secondary),
-                        )
-                        .child(
-                            HStack::new()
-                                .alignment(StackAlignment::Center)
-                                .distribution(StackDistribution::Center)
-                                .gap(StackGap::Medium)
-                                .child(
-                                    Button::new("Cancel")
-                                        .style(ButtonStyle::Standard)
-                                        .radius(CornerRadius::Full)
-                                        .on_click(|| finish(false))
-                                        .frame(132.0, 38.0),
-                                )
-                                .child(
-                                    Button::new(action_label)
-                                        .style(action_style)
-                                        .radius(CornerRadius::Full)
-                                        .on_click(|| finish(true))
-                                        .frame(148.0, 38.0),
-                                ),
-                        ),
-                ),
+                VStack::new()
+                    .alignment(StackAlignment::Center)
+                    .distribution(StackDistribution::Center)
+                    .gap(StackGap::Large)
+                    .child(Icon::new(IconName::HardDrive).size(44.0))
+                    .child(
+                        Text::styled(title, TextRole::TitleMedium).alignment(TextAlignment::Center),
+                    )
+                    .child(
+                        Text::styled(configuration.target.clone(), TextRole::Code)
+                            .tone(TextTone::Secondary)
+                            .alignment(TextAlignment::Center),
+                    )
+                    .child(
+                        Text::styled(message, TextRole::Body)
+                            .alignment(TextAlignment::Center)
+                            .tone(TextTone::Secondary),
+                    )
+                    .child(
+                        HStack::new()
+                            .alignment(StackAlignment::Center)
+                            .distribution(StackDistribution::Center)
+                            .gap(StackGap::Medium)
+                            .child(
+                                Button::new("Cancel")
+                                    .style(ButtonStyle::Standard)
+                                    .size(ButtonSize::Medium)
+                                    .on_click(|| finish(false))
+                                    .width(132.0),
+                            )
+                            .child(
+                                Button::new(action_label)
+                                    .style(action_style)
+                                    .size(ButtonSize::Medium)
+                                    .on_click(|| finish(true))
+                                    .width(148.0),
+                            ),
+                    ),
             )
             .frame(540.0, 360.0);
         Box::new(
             ZStack::new()
                 .alignment(ZStackAlignment::Center)
-                .child(Rectangle::new().color(RectangleColor::Custom(Color::rgba(0, 0, 0, 36))))
+                .child(Rectangle::new().color(RectangleColor::Custom(Theme::current().shell.scrim)))
                 .child(prompt),
         )
     }

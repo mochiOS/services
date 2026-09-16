@@ -95,61 +95,58 @@ impl App for PortalPromptApp {
         } else {
             "read files in"
         };
-        let prompt = Card::new()
+        let prompt = Dialog::new()
+            .accessibility_label("File access permission")
             .content(
-                Padding::all(32.0).content(
-                    VStack::new()
-                        .alignment(StackAlignment::Center)
-                        .distribution(StackDistribution::Center)
-                        .gap(StackGap::Large)
-                        .child(Icon::new(IconName::FolderOpen).size(44.0))
-                        .child(
-                            Text::new(format!(
-                                "Allow {} to access this folder?",
-                                configuration.application
-                            ))
-                            .font_size(20.0)
-                            .line_height(28.0)
-                            .weight(600)
-                            .alignment(TextAlignment::Center),
+                VStack::new()
+                    .alignment(StackAlignment::Center)
+                    .distribution(StackDistribution::Center)
+                    .gap(StackGap::Large)
+                    .child(Icon::new(IconName::FolderOpen).size(44.0))
+                    .child(
+                        Text::styled(
+                            format!("Allow {} to access this folder?", configuration.application),
+                            TextRole::TitleMedium,
                         )
-                        .child(
-                            Text::new(format!(
+                        .alignment(TextAlignment::Center),
+                    )
+                    .child(
+                        Text::styled(
+                            format!(
                                 "This application wants to {action}:\n{}",
                                 configuration.path
-                            ))
-                            .font_size(13.0)
-                            .line_height(20.0)
-                            .alignment(TextAlignment::Center)
-                            .color(Theme::DEFAULT.colors.text_secondary),
+                            ),
+                            TextRole::Body,
                         )
-                        .child(
-                            HStack::new()
-                                .alignment(StackAlignment::Center)
-                                .distribution(StackDistribution::Center)
-                                .gap(StackGap::Medium)
-                                .child(
-                                    Button::new("Don't Allow")
-                                        .style(ButtonStyle::Standard)
-                                        .radius(CornerRadius::Full)
-                                        .on_click(move || finish(&deny, false))
-                                        .frame(132.0, 38.0),
-                                )
-                                .child(
-                                    Button::new("Allow")
-                                        .style(ButtonStyle::Accent)
-                                        .radius(CornerRadius::Full)
-                                        .on_click(move || finish(&allow, true))
-                                        .frame(132.0, 38.0),
-                                ),
-                        ),
-                ),
+                        .alignment(TextAlignment::Center)
+                        .tone(TextTone::Secondary),
+                    )
+                    .child(
+                        HStack::new()
+                            .alignment(StackAlignment::Center)
+                            .distribution(StackDistribution::Center)
+                            .gap(StackGap::Medium)
+                            .child(
+                                Button::new("Don't Allow")
+                                    .style(ButtonStyle::Standard)
+                                    .size(ButtonSize::Medium)
+                                    .on_click(move || finish(&deny, false))
+                                    .width(132.0),
+                            )
+                            .child(
+                                Button::new("Allow")
+                                    .style(ButtonStyle::Accent)
+                                    .size(ButtonSize::Medium)
+                                    .on_click(move || finish(&allow, true))
+                                    .width(132.0),
+                            ),
+                    ),
             )
             .frame(520.0, 330.0);
         Box::new(
             ZStack::new()
                 .alignment(ZStackAlignment::Center)
-                .child(Rectangle::new().color(RectangleColor::Custom(Color::rgba(0, 0, 0, 36))))
+                .child(Rectangle::new().color(RectangleColor::Custom(Theme::current().shell.scrim)))
                 .child(prompt),
         )
     }

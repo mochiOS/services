@@ -53,38 +53,41 @@ impl App for VirtualizationWarningApp {
     fn body(&self, _context: &ViewContext) -> Self::Body {
         let technology = TECHNOLOGY.get().copied().unwrap_or(Technology::IntelVtd);
         let name = technology.name();
-        Box::new(Card::new().content(
-            Padding::all(32.0).content(
+        Box::new(
+            Dialog::new()
+                .accessibility_label("Hardware acceleration unavailable")
+                .content(
                 VStack::new()
                     .alignment(StackAlignment::Center)
                     .distribution(StackDistribution::Center)
                     .gap(StackGap::Large)
                     .child(Icon::new(IconName::Settings).size(44.0))
                     .child(
-                        Text::new(format!("{name} is unavailable."))
-                            .font_size(21.0)
-                            .line_height(29.0)
-                            .weight(600)
+                        Text::styled(
+                            format!("{name} is unavailable."),
+                            TextRole::TitleMedium,
+                        )
                             .alignment(TextAlignment::Center),
                     )
                     .child(
-                        Text::new(format!(
-                            "Hardware acceleration has been disabled because {name} is not available on this CPU or in firmware."
-                        ))
-                        .font_size(13.0)
-                        .line_height(20.0)
+                        Text::styled(
+                            format!(
+                                "Hardware acceleration has been disabled because {name} is not available on this CPU or in firmware."
+                            ),
+                            TextRole::Body,
+                        )
                         .alignment(TextAlignment::Center)
-                        .color(Theme::current().colors.text_secondary),
+                        .tone(TextTone::Secondary),
                     )
                     .child(
                         Button::new("OK")
                             .style(ButtonStyle::Accent)
-                            .radius(CornerRadius::Full)
+                            .size(ButtonSize::Medium)
                             .on_click(viewkit::request_exit)
-                            .frame(120.0, 38.0),
+                            .width(120.0),
                     ),
-            ),
-        ))
+                ),
+        )
     }
 }
 

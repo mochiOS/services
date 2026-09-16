@@ -134,19 +134,19 @@ impl App for LoginApp {
             let status = self.status.clone();
             Button::new(user.display_name.clone())
                 .style(user_button_style(selected))
+                .size(ButtonSize::Large)
                 .on_click(move || {
                     selection.set(name.clone());
                     password.clear();
                     password.set_focused(true);
                     status.set(String::new());
                 })
-                .frame(FORM_WIDTH, 44.0)
+                .width(FORM_WIDTH)
         });
         let user_list_height = (self.users.len().clamp(1, 3) as f32) * 50.0;
         let user_content_height = (self.users.len().max(1) as f32) * 50.0;
         let user_list: StackChild = if self.users.is_empty() {
-            Text::new("No users are available.")
-                .font_size(14.0)
+            Text::styled("No users are available.", TextRole::Label)
                 .alignment(TextAlignment::Center)
                 .color(Color::WHITE)
                 .frame(FORM_WIDTH, 44.0)
@@ -166,10 +166,7 @@ impl App for LoginApp {
             .alignment(StackAlignment::Center)
             .gap(StackGap::Small)
             .child(
-                Text::new("Sign in")
-                    .font_size(24.0)
-                    .line_height(32.0)
-                    .weight(600)
+                Text::styled("Sign in", TextRole::TitleLarge)
                     .alignment(TextAlignment::Center)
                     .color(Color::WHITE)
                     .frame(FORM_WIDTH, 36.0),
@@ -185,7 +182,7 @@ impl App for LoginApp {
                             .size(TextFieldSize::Large)
                             .secure(true)
                             .on_submit(password_submit)
-                            .frame(FORM_WIDTH - 52.0, 44.0),
+                            .width(FORM_WIDTH - 52.0),
                     )
                     .child(
                         Button::new("")
@@ -214,10 +211,7 @@ impl App for LoginApp {
                     .frame(FORM_WIDTH, 44.0),
             )
             .child(
-                Text::new(status)
-                    .font_size(13.0)
-                    .line_height(20.0)
-                    .weight(500)
+                Text::styled(status, TextRole::Label)
                     .alignment(TextAlignment::Center)
                     .color(Color::WHITE)
                     .frame(FORM_WIDTH, 24.0),
