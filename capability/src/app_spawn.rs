@@ -4,13 +4,17 @@ use alloc::vec::Vec;
 
 use mochi_user_platform as platform;
 
-use crate::dynamic_grant::prompt_shell_for_capability;
+use crate::dynamic_grant::{is_trusted_prompt_broker, prompt_shell_for_capability};
 use crate::package_index::PackageIndex;
+use crate::persistent_grant::{append_persistent_grant, has_persistent_grant};
 use crate::policy::{AppPromptPolicy, needs_app_prompt};
-use crate::resolver::{binary_caps, encode_nul_list};
+use crate::resolver::{
+    CapabilityDenyReason, application_identity, decide_binary_capabilities,
+    authorize_spawn, encode_identity_args, encode_nul_list,
+};
 
 pub(crate) const SPAWN_APP_OPCODE: u32 = 0x4150_5053;
-use mnu_abi::exec::{ENVIRONMENT_PREFIX, SECURITY_IDENTITY_PREFIX};
+use mnu_abi::exec::ENVIRONMENT_PREFIX;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -93,15 +97,43 @@ pub(crate) fn spawn_application_from_manifest(
         ));
     }
 
-    let caps = binary_caps(&manifest, entry_path)?;
+    let mut capability_decision = decide_binary_capabilities(&manifest, entry_path)?;
+    let requested_caps = capability_decision.requested.clone();
+    let identity = application_identity(&manifest)?;
+    let requester_context = platform::process::thread_security_context(sender)?;
+    let mut grant_context = mochi_user_syscall::ThreadSecurityContext::default();
+    grant_context.effective_uid = requester_context.effective_uid;
+    grant_context.effective_gid = requester_context.effective_gid;
+    grant_context.subject_key_id = identity.subject_key_id;
+    grant_context.provenance = identity.provenance as u8;
+    let package_id = identity.package_id.as_bytes();
+    let developer_id = identity.developer_id.as_bytes();
+    if package_id.len() > grant_context.package_id.len()
+        || developer_id.len() > grant_context.developer_id.len()
+    {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
+    }
+    grant_context.package_id_len = package_id.len() as u16;
+    grant_context.developer_id_len = developer_id.len() as u16;
+    grant_context.package_id[..package_id.len()].copy_from_slice(package_id);
+    grant_context.developer_id[..developer_id.len()].copy_from_slice(developer_id);
     let mut prompted = false;
-    for cap in caps {
+    let mut user_allowed = Vec::new();
+    for cap in &requested_caps {
         if platform::capability::capability_from_string(cap.as_str())
             != platform::capability::CapabilityClass::UserGrantable
         {
+            user_allowed.push(cap.clone());
             continue;
         }
         if !needs_app_prompt(policy, cap) {
+            user_allowed.push(cap.clone());
+            continue;
+        }
+        if has_persistent_grant(&grant_context, cap, None) {
+            user_allowed.push(cap.clone());
             continue;
         }
         prompted = true;
@@ -110,8 +142,58 @@ pub(crate) fn spawn_application_from_manifest(
                 mochi_user_syscall::EACCES as i64,
             ));
         }
-        prompt_shell_for_capability(header.shell_endpoint, entry_path, cap, "application launch")?;
+        if !is_trusted_prompt_broker(header.shell_endpoint) {
+            return Err(mochi_user_syscall::SysError::from_raw(
+                mochi_user_syscall::EACCES as i64,
+            ));
+        }
+        let decision = prompt_shell_for_capability(
+            header.shell_endpoint,
+            entry_path,
+            cap,
+            "application launch",
+        )?;
+        match decision {
+            platform::capability::CapabilityDecision::AllowPersistently => {
+                append_persistent_grant(&grant_context, cap, None, false)?;
+            }
+            platform::capability::CapabilityDecision::AllowAllUserGrantable => {
+                append_persistent_grant(&grant_context, cap, None, true)?;
+            }
+            platform::capability::CapabilityDecision::AllowOnce
+            | platform::capability::CapabilityDecision::AllowForProcess => {}
+            platform::capability::CapabilityDecision::Deny => {
+                return Err(mochi_user_syscall::SysError::from_raw(
+                    mochi_user_syscall::EACCES as i64,
+                ));
+            }
+        }
+        user_allowed.push(cap.clone());
     }
+    // A caller holding process.spawn delegates launch policy to this service;
+    // it is not required to possess every capability of the application it
+    // launches.  The earlier process.spawn check is therefore the explicit
+    // caller ceiling for this path.
+    let caller_allowed = requested_caps.clone();
+    capability_decision =
+        capability_decision.apply_runtime_constraints(&user_allowed, &caller_allowed);
+    if !capability_decision.is_allowed() {
+        platform::logln!(
+            "capability.service: app launch denied path={} reason={:?} denied={:?}",
+            entry_path,
+            capability_decision.deny_reason,
+            capability_decision.denied
+        );
+        let errno = if capability_decision.deny_reason
+            == Some(CapabilityDenyReason::UnknownCapability)
+        {
+            mochi_user_syscall::EINVAL
+        } else {
+            mochi_user_syscall::EACCES
+        };
+        return Err(mochi_user_syscall::SysError::from_raw(errno as i64));
+    }
+    let caps = capability_decision.effective;
     if prompted {
         platform::logln!(
             "capability.service: interactive app launch approved path={}",
@@ -119,8 +201,15 @@ pub(crate) fn spawn_application_from_manifest(
         );
     }
     let caps_nul = encode_nul_list(&caps);
+    authorize_spawn(
+        sender,
+        entry_path,
+        &identity,
+        &caps,
+        platform::service::ExecutionClass::Unprivileged,
+    )?;
     let mut spawn_items = Vec::new();
-    spawn_items.push(format!("{SECURITY_IDENTITY_PREFIX}{}", manifest.package_id));
+    encode_identity_args(&identity, &mut spawn_items);
     spawn_items.push(format!(
         "{}MOCHI_EXECUTABLE_PATH={}",
         ENVIRONMENT_PREFIX, entry_path

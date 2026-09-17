@@ -87,14 +87,20 @@ fn encode_spawn_args(items: &[String]) -> Vec<u8> {
     out
 }
 
-fn resolve_capabilities(entry_path: &str) -> Result<Vec<u8>, mochi_user_syscall::SysError> {
+fn resolve_execution_security(
+    entry_path: &str,
+    execution_class: platform::service::ExecutionClass,
+) -> Result<(Vec<String>, Vec<u8>), mochi_user_syscall::SysError> {
     let service_tid = platform::process::find_by_name(CAPABILITY_SERVICE_NAME)?;
     if service_tid == 0 {
         return Err(mochi_user_syscall::SysError::from_raw(
             mochi_user_syscall::ENOENT as i64,
         ));
     }
-    let request = platform::capability::encode_resolve_capabilities_request(entry_path)
+    let request = platform::capability::encode_resolve_execution_security_request(
+        execution_class.as_raw(),
+        entry_path,
+    )
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     let reply = capability_reply_buf();
     reply.fill(0);
@@ -105,25 +111,45 @@ fn resolve_capabilities(entry_path: &str) -> Result<Vec<u8>, mochi_user_syscall:
             mochi_user_syscall::EIO as i64,
         ));
     }
-    let response = platform::capability::decode_resolve_capabilities_reply(&reply[..len])
+    let response = platform::capability::decode_resolve_execution_security_reply(&reply[..len])
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EIO as i64))?;
     if response.status != 0 {
         return Err(mochi_user_syscall::SysError::from_raw(
             response.status as i64,
         ));
     }
-    Ok(response.capabilities.to_vec())
+    if !response.identity.is_empty() && response.identity.last() != Some(&0) {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
+    }
+    let mut identity = Vec::new();
+    for item in response.identity.split(|byte| *byte == 0) {
+        if item.is_empty() {
+            continue;
+        }
+        identity.push(
+            core::str::from_utf8(item)
+                .map_err(|_| {
+                    mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
+                })?
+                .to_string(),
+        );
+    }
+    Ok((identity, response.capabilities.to_vec()))
 }
 
 fn spawn_msh(tty_endpoint: u64, logger_endpoint: u64) -> Result<u64, mochi_user_syscall::SysError> {
-    let caps_nul = resolve_capabilities(MSH_PATH)?;
+    let execution_class = platform::service::ExecutionClass::Unprivileged;
+    let (mut identity, caps_nul) = resolve_execution_security(MSH_PATH, execution_class)?;
     let tty_arg = tty_endpoint.to_string();
     let logger_arg = logger_endpoint.to_string();
-    let args = [tty_arg, logger_arg];
-    let args_nul = encode_spawn_args(&args);
+    identity.push(tty_arg);
+    identity.push(logger_arg);
+    let args_nul = encode_spawn_args(&identity);
     platform::service::spawn_manifest(
         MSH_PATH,
-        platform::service::ExecutionClass::Unprivileged,
+        execution_class,
         Some(args_nul.as_slice()),
         Some(caps_nul.as_slice()),
     )

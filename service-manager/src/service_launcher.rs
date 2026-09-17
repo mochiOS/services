@@ -4,11 +4,11 @@ use crate::service_config::{
     DRIVERS, FixedService, ReadyTarget, ServiceSpec, driver_arguments, fixed_service_arguments,
     fixed_service_spec, mboot_agent_arguments,
 };
-use crate::spawn_support::{encode_spawn_args, resolve_capabilities, sys_error};
+use crate::spawn_support::{encode_spawn_args, resolve_execution_security};
 
 const SESSION_USER_ARG_PREFIX: &str = "--session-user=";
 const LOCK_USER_ARG_PREFIX: &str = "--lock-user=";
-use mnu_abi::exec::{ENVIRONMENT_PREFIX, SECURITY_IDENTITY_PREFIX};
+use mnu_abi::exec::ENVIRONMENT_PREFIX;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DriverManagerTarget {
@@ -21,21 +21,18 @@ fn spawn(
     arguments: &[alloc::string::String],
 ) -> Result<u64, mochi_user_syscall::SysError> {
     let mut arguments = arguments.to_vec();
+    let security = resolve_execution_security(spec.path, spec.execution_class)?;
     if spec.security_identity {
-        let manifest = platform::package::read_manifest(spec.manifest_path)
-            .ok_or_else(|| sys_error(mochi_user_syscall::ENOENT))?;
-        arguments.insert(
-            0,
-            alloc::format!("{SECURITY_IDENTITY_PREFIX}{}", manifest.package_id),
-        );
+        for identity_item in security.identity.into_iter().rev() {
+            arguments.insert(0, identity_item);
+        }
     }
     let arguments = encode_spawn_args(&arguments);
-    let capabilities = resolve_capabilities(spec.path)?;
     platform::service::spawn_manifest(
         spec.path,
         spec.execution_class,
         Some(arguments.as_slice()),
-        Some(capabilities.as_slice()),
+        Some(security.capabilities.as_slice()),
     )
 }
 
@@ -45,23 +42,20 @@ fn spawn_with_credentials(
     identity: platform::service_ready::SessionIdentity,
 ) -> Result<u64, mochi_user_syscall::SysError> {
     let mut arguments = arguments.to_vec();
+    let security = resolve_execution_security(spec.path, spec.execution_class)?;
     if spec.security_identity {
-        let manifest = platform::package::read_manifest(spec.manifest_path)
-            .ok_or_else(|| sys_error(mochi_user_syscall::ENOENT))?;
-        arguments.insert(
-            0,
-            alloc::format!("{SECURITY_IDENTITY_PREFIX}{}", manifest.package_id),
-        );
+        for identity_item in security.identity.into_iter().rev() {
+            arguments.insert(0, identity_item);
+        }
     }
     let arguments = encode_spawn_args(&arguments);
-    let capabilities = resolve_capabilities(spec.path)?;
     platform::service::spawn_manifest_with_credentials(
         spec.path,
         spec.execution_class,
         identity.uid,
         identity.gid,
         Some(arguments.as_slice()),
-        Some(capabilities.as_slice()),
+        Some(security.capabilities.as_slice()),
     )
 }
 

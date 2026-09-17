@@ -1,4 +1,5 @@
 use mochios_certificate::DeveloperCertificate;
+use mochios_signature_protocol::InstallProvenance;
 use mochios_certificate_database::DatabaseState;
 use mochios_certificate_database::std_file::FileBackend;
 use mochios_certificate_database::storage::{
@@ -10,7 +11,14 @@ use mochios_developer_ca_trust::{
 };
 
 const CERTIFICATE_SIGNING_USAGE: &str = "developer-certificate-signing";
+const DEVELOPMENT_SIGNING_USAGE: &str = "development-package-signing";
 const REVOCATION_SIGNING_USAGE: &str = "revocation-signing";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TrustedIssuer {
+    pub public_key: [u8; 32],
+    pub provenance: InstallProvenance,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DatabaseError {
@@ -73,7 +81,7 @@ impl ActiveDatabase {
         &self,
         certificate: &DeveloperCertificate,
         now_utc: u64,
-    ) -> Result<[u8; 32], DatabaseError> {
+    ) -> Result<TrustedIssuer, DatabaseError> {
         if !self.is_current(now_utc) {
             return Err(DatabaseError::Expired);
         }
@@ -103,7 +111,21 @@ impl ActiveDatabase {
         {
             return Err(DatabaseError::UnknownIssuer);
         }
-        decode_public_key(&issuer.public_key).map_err(|_| DatabaseError::UnknownIssuer)
+        let public_key =
+            decode_public_key(&issuer.public_key).map_err(|_| DatabaseError::UnknownIssuer)?;
+        let provenance = if issuer
+            .allowed_key_usages
+            .iter()
+            .any(|usage| usage == DEVELOPMENT_SIGNING_USAGE)
+        {
+            InstallProvenance::Development
+        } else {
+            InstallProvenance::VerifiedPackage
+        };
+        Ok(TrustedIssuer {
+            public_key,
+            provenance,
+        })
     }
 }
 

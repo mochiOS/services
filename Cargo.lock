@@ -367,8 +367,11 @@ checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 name = "core"
 version = "0.1.0"
 dependencies = [
+ "mnu-abi",
  "mochi-user-platform",
  "mochi-user-syscall",
+ "mochios-signature-protocol",
+ "sha2",
 ]
 
 [[package]]
@@ -1406,7 +1409,6 @@ dependencies = [
 [[package]]
 name = "mochios-capability-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#5ecc8a19f932099e72fe9747ac479828d7ecda94"
 
 [[package]]
 name = "mochios-certificate"

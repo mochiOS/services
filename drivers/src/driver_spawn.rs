@@ -3,15 +3,16 @@ use alloc::vec::Vec;
 
 use mochi_user_platform as platform;
 
-use crate::spawn_support::{encode_spawn_args, resolve_capabilities, sys_error};
+use crate::spawn_support::{encode_spawn_args, resolve_execution_security, sys_error};
 
 fn spawn_bundle(
     entry_path: &str,
     args: Option<&[u8]>,
     logger_endpoint: u64,
 ) -> Result<u64, mochi_user_syscall::SysError> {
-    let caps_nul = resolve_capabilities(entry_path)?;
-    let mut spawn_args = Vec::new();
+    let execution_class = platform::service::ExecutionClass::Unprivileged;
+    let security = resolve_execution_security(entry_path, execution_class)?;
+    let mut spawn_args = security.identity;
     if let Some(args) = args {
         let text = core::str::from_utf8(args).map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
         for part in text.split('\0') {
@@ -26,9 +27,9 @@ fn spawn_bundle(
     let args_nul = encode_spawn_args(&spawn_args);
     platform::service::spawn_manifest(
         entry_path,
-        platform::service::ExecutionClass::Unprivileged,
+        execution_class,
         Some(args_nul.as_slice()),
-        Some(caps_nul.as_slice()),
+        Some(security.capabilities.as_slice()),
     )
 }
 

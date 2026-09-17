@@ -34,7 +34,7 @@ impl ServiceSpec {
             path,
             manifest_path,
             execution_class: ExecutionClass::Privileged,
-            security_identity: false,
+            security_identity: true,
         }
     }
 
@@ -162,42 +162,42 @@ mod tests {
             "/system/packages/drivers/manifest.toml"
         );
         assert_eq!(DRIVERS.execution_class, ExecutionClass::Privileged);
-        assert!(!DRIVERS.security_identity);
+        assert!(DRIVERS.security_identity);
         let expected = [
             (
                 FixedService::MbootAgent,
                 "/system/services/mboot-agent.service",
                 "/system/packages/mboot-agent/manifest.toml",
                 ExecutionClass::Privileged,
-                false,
+                true,
             ),
             (
                 FixedService::Input,
                 "/system/services/input.service",
                 "/system/packages/input/manifest.toml",
                 ExecutionClass::Privileged,
-                false,
+                true,
             ),
             (
                 FixedService::Display,
                 "/system/services/display.driver",
                 "/system/packages/display/manifest.toml",
                 ExecutionClass::Privileged,
-                false,
+                true,
             ),
             (
                 FixedService::Compositor,
                 "/system/services/compositor.service",
                 "/system/packages/compositor/manifest.toml",
                 ExecutionClass::Privileged,
-                false,
+                true,
             ),
             (
                 FixedService::Linux,
                 "/system/services/linux.service",
                 "/system/packages/linux/manifest.toml",
                 ExecutionClass::Privileged,
-                false,
+                true,
             ),
             (
                 FixedService::Binder,
@@ -218,28 +218,28 @@ mod tests {
                 "/system/services/network.service",
                 "/system/packages/network/manifest.toml",
                 ExecutionClass::Privileged,
-                false,
+                true,
             ),
             (
                 FixedService::User,
                 "/system/services/user.service",
                 "/system/packages/user/manifest.toml",
                 ExecutionClass::Privileged,
-                false,
+                true,
             ),
             (
                 FixedService::SecureUi,
                 "/system/services/secure-ui.service",
                 "/system/packages/secure-ui/manifest.toml",
                 ExecutionClass::Privileged,
-                false,
+                true,
             ),
             (
                 FixedService::Update,
                 "/system/services/update.service",
                 "/system/packages/update/manifest.toml",
                 ExecutionClass::Privileged,
-                false,
+                true,
             ),
         ];
         for (service, path, manifest_path, execution_class, security_identity) in expected {

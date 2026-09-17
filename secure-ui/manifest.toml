@@ -1,4 +1,5 @@
 [package]
+provenance = "built-in"
 id = "org.mochios.secure-ui"
 name = "Secure UI Service"
 version = "1"

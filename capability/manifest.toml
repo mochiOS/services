@@ -1,4 +1,5 @@
 [package]
+provenance = "built-in"
 id = "org.mochios.capability"
 name = "Capability Service"
 version = "1"

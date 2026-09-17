@@ -3,6 +3,8 @@ extern crate alloc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use mochi_user_platform as platform;
+use mochios_signature_protocol::{InstallProvenance, InstallRecordView};
+use sha2::{Digest, Sha256};
 
 #[cfg(feature = "performance-benchmark")]
 use std::fs::OpenOptions;
@@ -14,6 +16,7 @@ const LOGGER_PACKAGE_MANIFEST_PATH: &str = "/system/packages/logger/manifest.tom
 const CAPABILITY_SERVICE_PATH: &str = "/system/services/capability.service";
 const CAPABILITY_PACKAGE_MANIFEST_PATH: &str = "/system/packages/capability/manifest.toml";
 const ROOTFS_READY_RETRIES: usize = 16;
+const BUILT_IN_DEVELOPER_ID: &str = "org.mochios.system";
 
 #[cfg(feature = "performance-benchmark")]
 const VFS_BENCHMARK_PATH: &str = "/tmp/mochios-vfs-benchmark";
@@ -48,6 +51,75 @@ fn encode_spawn_args(items: &[String]) -> Vec<u8> {
         cursor += 1;
     }
     out
+}
+
+fn load_builtin_execution_security(
+    manifest_path: &str,
+    binary_path: &str,
+) -> Result<(Vec<String>, Vec<String>), mochi_user_syscall::SysError> {
+    use mnu_abi::exec::{
+        APPLICATION_DEVELOPER_ID_PREFIX, APPLICATION_PACKAGE_ID_PREFIX,
+        APPLICATION_PROVENANCE_PREFIX, APPLICATION_SUBJECT_KEY_ID_PREFIX,
+    };
+
+    let manifest = read_manifest_with_retry(manifest_path)?;
+    if manifest.install_provenance.as_deref() != Some("built-in") {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EACCES as i64,
+        ));
+    }
+    let manifest_bytes = platform::file::read_to_end_path(manifest_path)?;
+    let package_root = manifest_path.rsplit_once('/').map(|(root, _)| root).ok_or_else(|| {
+        mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
+    })?;
+    let verification_path = alloc::format!("{package_root}/verification.bin");
+    let verification_bytes = platform::file::read_to_end_path(&verification_path)?;
+    let record = InstallRecordView::decode(&verification_bytes)
+        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64))?;
+    let verified = record.verification;
+    if record.provenance != InstallProvenance::BuiltIn
+        || verified.provenance != InstallProvenance::BuiltIn
+        || verified.request_id != 0
+        || verified.certificate_serial != 0
+        || verified.subject_key_id != [0; 32]
+        || verified.developer_id != BUILT_IN_DEVELOPER_ID
+        || verified.verified_package_id != manifest.package_id
+        || verified.package_digest != verified.manifest_digest
+        || Sha256::digest(&manifest_bytes).as_slice() != verified.manifest_digest
+    {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EACCES as i64,
+        ));
+    }
+    let capabilities = manifest.binary_requires(binary_path).ok_or_else(|| {
+        mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
+    })?;
+    for capability in capabilities {
+        let mut allowed = false;
+        for record_capability in verified.allowed_capabilities() {
+            if record_capability
+                .map_err(|_| {
+                    mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64)
+                })?
+                == capability
+            {
+                allowed = true;
+                break;
+            }
+        }
+        if !allowed {
+            return Err(mochi_user_syscall::SysError::from_raw(
+                mochi_user_syscall::EACCES as i64,
+            ));
+        }
+    }
+    let identity = alloc::vec![
+        alloc::format!("{APPLICATION_PACKAGE_ID_PREFIX}{}", manifest.package_id),
+        alloc::format!("{APPLICATION_DEVELOPER_ID_PREFIX}{BUILT_IN_DEVELOPER_ID}"),
+        alloc::format!("{APPLICATION_SUBJECT_KEY_ID_PREFIX}{}", "0".repeat(64)),
+        alloc::format!("{APPLICATION_PROVENANCE_PREFIX}built-in"),
+    ];
+    Ok((identity, capabilities.to_vec()))
 }
 
 fn stderr_line(message: &str) {
@@ -214,21 +286,10 @@ fn spawn_logger_service() -> Result<u64, mochi_user_syscall::SysError> {
             return Err(err);
         }
     };
-    let manifest = read_manifest_with_retry(LOGGER_PACKAGE_MANIFEST_PATH)?;
-    let caps = match manifest.binary_requires(LOGGER_SERVICE_PATH) {
-        Some(caps) => caps,
-        None => {
-            stderr_line(&alloc::format!(
-                "core.service: logger manifest missing binary {}",
-                LOGGER_SERVICE_PATH
-            ));
-            return Err(mochi_user_syscall::SysError::from_raw(
-                mochi_user_syscall::EINVAL as i64,
-            ));
-        }
-    };
+    let (mut args, caps) =
+        load_builtin_execution_security(LOGGER_PACKAGE_MANIFEST_PATH, LOGGER_SERVICE_PATH)?;
     let caps_nul = encode_nul_list(&caps);
-    let args = [bootstrap.to_string()];
+    args.push(bootstrap.to_string());
     let args_nul = encode_spawn_args(&args);
     let pid = match platform::service::spawn_manifest(
         LOGGER_SERVICE_PATH,
@@ -264,17 +325,17 @@ fn spawn_logger_service() -> Result<u64, mochi_user_syscall::SysError> {
 }
 
 fn spawn_capability_service() -> Result<u64, mochi_user_syscall::SysError> {
-    let manifest = read_manifest_with_retry(CAPABILITY_PACKAGE_MANIFEST_PATH)?;
-    let caps = manifest
-        .binary_requires(CAPABILITY_SERVICE_PATH)
-        .unwrap_or(&[]);
+    let (mut args, caps) = load_builtin_execution_security(
+        CAPABILITY_PACKAGE_MANIFEST_PATH,
+        CAPABILITY_SERVICE_PATH,
+    )?;
     platform::logln!(
         "core.service: parsed capability.service package caps={}",
         caps.len()
     );
     let caps_nul = encode_nul_list(&caps);
     let logger_endpoint = platform::logger::endpoint().unwrap_or(0);
-    let args = [logger_endpoint.to_string()];
+    args.push(logger_endpoint.to_string());
     let args_nul = encode_spawn_args(&args);
     match platform::service::spawn_manifest(
         CAPABILITY_SERVICE_PATH,

@@ -7,8 +7,8 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use mochi_user_platform as platform;
 use mochios_certificate::DeveloperCertificate;
 use mochios_signature_protocol::{
-    ErrorResponse, Opcode, StatusResponse, UpdateNotification, VerifiedResponse, VerifyBegin,
-    VerifyChunk, VerifyFile, VerifyFinish, decode_opcode,
+    ErrorResponse, InstallProvenance, Opcode, StatusResponse, UpdateNotification,
+    VerifiedResponse, VerifyBegin, VerifyChunk, VerifyFile, VerifyFinish, decode_opcode,
 };
 use sha2::{Digest, Sha256};
 
@@ -36,6 +36,7 @@ struct TarEntry<'a> {
 }
 
 struct Verification {
+    provenance: InstallProvenance,
     developer_id: String,
     certificate_serial: u64,
     subject_key_id: [u8; 32],
@@ -338,11 +339,11 @@ fn verify_package_metadata(
     }
     let certificate = DeveloperCertificate::decode(&certificate_data)
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
-    let issuer_public_key = database
+    let issuer = database
         .issuer_public_key(&certificate, now_utc)
         .map_err(database_verify_error)?;
     certificate
-        .verify(&issuer_public_key, now_utc, &manifest.package_id)
+        .verify(&issuer.public_key, now_utc, &manifest.package_id)
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64))?;
     let verifier = VerifyingKey::from_bytes(&certificate.subject_public_key)
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
@@ -390,6 +391,7 @@ fn verify_package_metadata(
     let mut manifest_digest = [0u8; 32];
     manifest_digest.copy_from_slice(&manifest_hash);
     Ok(Verification {
+        provenance: issuer.provenance,
         developer_id: certificate.developer_id,
         certificate_serial: certificate.serial_number,
         subject_key_id: certificate.subject_key_id,
@@ -459,11 +461,11 @@ fn verify_package_bytes(
     }
     let certificate = DeveloperCertificate::decode(cert.data)
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
-    let issuer_public_key = database
+    let issuer = database
         .issuer_public_key(&certificate, now_utc)
         .map_err(database_verify_error)?;
     certificate
-        .verify(&issuer_public_key, now_utc, &manifest.package_id)
+        .verify(&issuer.public_key, now_utc, &manifest.package_id)
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64))?;
     let verifier = VerifyingKey::from_bytes(&certificate.subject_public_key)
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
@@ -485,6 +487,7 @@ fn verify_package_bytes(
     let mut package_digest = [0; 32];
     package_digest.copy_from_slice(&Sha256::digest(bytes));
     Ok(Verification {
+        provenance: issuer.provenance,
         developer_id: certificate.developer_id,
         certificate_serial: certificate.serial_number,
         subject_key_id: certificate.subject_key_id,
@@ -544,6 +547,7 @@ fn reply_verified(sender: u64, request_id: u64, verification: &Verification) {
     capabilities.extend(verification.allowed_capabilities.iter().map(String::as_str));
     let response = VerifiedResponse {
         request_id,
+        provenance: verification.provenance,
         certificate_serial: verification.certificate_serial,
         subject_key_id: verification.subject_key_id,
         manifest_digest: verification.manifest_digest,

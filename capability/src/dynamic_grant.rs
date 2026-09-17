@@ -10,6 +10,24 @@ use crate::persistent_grant::append_persistent_grant;
 use crate::policy::is_known_capability;
 use crate::resolver::binary_caps;
 
+const TRUSTED_PROMPT_PACKAGE_ID: &[u8] = b"org.mochios.msh";
+const BUILT_IN_DEVELOPER_ID: &[u8] = b"org.mochios.system";
+const BUILT_IN_PROVENANCE: u8 = 1;
+
+pub(crate) fn is_trusted_prompt_broker(endpoint: u64) -> bool {
+    let Ok(context) = platform::process::thread_security_context(endpoint) else {
+        return false;
+    };
+    let package_len = context.package_id_len as usize;
+    let developer_len = context.developer_id_len as usize;
+    package_len <= context.package_id.len()
+        && developer_len <= context.developer_id.len()
+        && &context.package_id[..package_len] == TRUSTED_PROMPT_PACKAGE_ID
+        && &context.developer_id[..developer_len] == BUILT_IN_DEVELOPER_ID
+        && context.subject_key_id == [0; 32]
+        && context.provenance == BUILT_IN_PROVENANCE
+}
+
 fn current_process_id() -> Result<u64, mochi_user_syscall::SysError> {
     syscall::call0(syscall::SyscallNumber::GetPid)
 }
@@ -19,7 +37,7 @@ pub(crate) fn prompt_shell_for_capability(
     executable: &str,
     capability: &str,
     reason: &str,
-) -> Result<(), mochi_user_syscall::SysError> {
+) -> Result<platform::capability::CapabilityDecision, mochi_user_syscall::SysError> {
     if shell_endpoint == 0 {
         return Err(mochi_user_syscall::SysError::from_raw(
             mochi_user_syscall::EACCES as i64,
@@ -62,16 +80,24 @@ pub(crate) fn prompt_shell_for_capability(
         u32::from_le_bytes(reply[..4].try_into().map_err(|_| {
             mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
         })?);
-    if decision == platform::capability::CapabilityDecision::AllowOnce as u32
-        || decision == platform::capability::CapabilityDecision::AllowForProcess as u32
-        || decision == platform::capability::CapabilityDecision::AllowPersistently as u32
-        || decision == platform::capability::CapabilityDecision::AllowAllUserGrantable as u32
-    {
-        Ok(())
-    } else {
-        Err(mochi_user_syscall::SysError::from_raw(
+    match decision {
+        value if value == platform::capability::CapabilityDecision::AllowOnce as u32 => {
+            Ok(platform::capability::CapabilityDecision::AllowOnce)
+        }
+        value if value == platform::capability::CapabilityDecision::AllowForProcess as u32 => {
+            Ok(platform::capability::CapabilityDecision::AllowForProcess)
+        }
+        value if value == platform::capability::CapabilityDecision::AllowPersistently as u32 => {
+            Ok(platform::capability::CapabilityDecision::AllowPersistently)
+        }
+        value if value
+            == platform::capability::CapabilityDecision::AllowAllUserGrantable as u32 =>
+        {
+            Ok(platform::capability::CapabilityDecision::AllowAllUserGrantable)
+        }
+        _ => Err(mochi_user_syscall::SysError::from_raw(
             mochi_user_syscall::EACCES as i64,
-        ))
+        )),
     }
 }
 
@@ -122,9 +148,24 @@ pub(crate) fn authorize_dynamic_capability(
             mochi_user_syscall::EINVAL as i64,
         ));
     }
+    let context = platform::process::thread_security_context(requester_thread)?;
+    if context.process_id != request.process_id {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EACCES as i64,
+        ));
+    }
     if decision == platform::capability::CapabilityDecision::Deny {
         return Err(mochi_user_syscall::SysError::from_raw(
             mochi_user_syscall::EACCES as i64,
+        ));
+    }
+    // A named process capability has no single-operation consumption point.
+    // Treating AllowOnce as a process-lifetime transfer would silently widen
+    // the user's decision. One-shot grants are therefore valid only for the
+    // launch gate or for a future operation-specific authority protocol.
+    if decision == platform::capability::CapabilityDecision::AllowOnce {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::ENOTSUP as i64,
         ));
     }
     if request.capability_class != platform::capability::CapabilityClass::UserGrantable {
@@ -161,17 +202,17 @@ pub(crate) fn authorize_dynamic_capability(
             mochi_user_syscall::EACCES as i64,
         ));
     }
-    if let Some(record) = index.by_binary.get(executable) {
-        let manifest =
-            platform::package::read_manifest(&record.manifest_path).ok_or_else(|| {
-                mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
-            })?;
-        let declared_caps = binary_caps(&manifest, executable)?;
-        if !declared_caps.iter().any(|cap| cap.as_str() == capability) {
-            return Err(mochi_user_syscall::SysError::from_raw(
-                mochi_user_syscall::EACCES as i64,
-            ));
-        }
+    let record = index.by_binary.get(executable).ok_or_else(|| {
+        mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64)
+    })?;
+    let manifest = platform::package::read_manifest(&record.manifest_path).ok_or_else(|| {
+        mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
+    })?;
+    let declared_caps = binary_caps(&manifest, executable)?;
+    if !declared_caps.iter().any(|cap| cap.as_str() == capability) {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EACCES as i64,
+        ));
     }
     if matches!(
         decision,
@@ -187,8 +228,7 @@ pub(crate) fn authorize_dynamic_capability(
             )?)
         };
         append_persistent_grant(
-            executable,
-            &digest,
+            &context,
             capability,
             resource,
             decision == platform::capability::CapabilityDecision::AllowAllUserGrantable,

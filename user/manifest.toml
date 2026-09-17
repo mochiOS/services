@@ -1,4 +1,5 @@
 [package]
+provenance = "built-in"
 id = "org.mochios.user"
 name = "User Service"
 version = "1"

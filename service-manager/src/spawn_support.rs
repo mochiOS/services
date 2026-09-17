@@ -102,3 +102,54 @@ pub(crate) fn resolve_capabilities(
     }
     Ok(response.capabilities.to_vec())
 }
+
+pub(crate) struct ExecutionSecurity {
+    pub(crate) identity: Vec<String>,
+    pub(crate) capabilities: Vec<u8>,
+}
+
+fn decode_nul_list(bytes: &[u8]) -> Result<Vec<String>, mochi_user_syscall::SysError> {
+    if !bytes.is_empty() && bytes.last() != Some(&0) {
+        return Err(sys_error(mochi_user_syscall::EINVAL));
+    }
+    let mut items = Vec::new();
+    for item in bytes.split(|byte| *byte == 0) {
+        if item.is_empty() {
+            continue;
+        }
+        let item = core::str::from_utf8(item)
+            .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
+        items.push(item.into());
+    }
+    Ok(items)
+}
+
+pub(crate) fn resolve_execution_security(
+    entry_path: &str,
+    execution_class: platform::service::ExecutionClass,
+) -> Result<ExecutionSecurity, mochi_user_syscall::SysError> {
+    let service_tid = platform::process::find_by_name(CAPABILITY_SERVICE_NAME)?;
+    if service_tid == 0 {
+        return Err(sys_error(mochi_user_syscall::ENOENT));
+    }
+    let request = platform::capability::encode_resolve_execution_security_request(
+        execution_class.as_raw(),
+        entry_path,
+    )
+        .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
+    let mut reply = [0u8; 1024];
+    let message = call_with_wait(service_tid, &request, &mut reply)?;
+    let length = (message & 0xffff_ffff) as usize;
+    let bytes = reply
+        .get(..length)
+        .ok_or_else(|| sys_error(mochi_user_syscall::EINVAL))?;
+    let response = platform::capability::decode_resolve_execution_security_reply(bytes)
+        .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
+    if response.status != 0 {
+        return Err(sys_error(response.status));
+    }
+    Ok(ExecutionSecurity {
+        identity: decode_nul_list(response.identity)?,
+        capabilities: response.capabilities.to_vec(),
+    })
+}
