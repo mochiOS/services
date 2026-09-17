@@ -114,16 +114,16 @@ pub(crate) fn service_binary_path(manifest: &platform::package::PackageManifest)
 pub(crate) fn package_manifest_by_id(
     index: &PackageIndex,
     package_id: &str,
-) -> Result<platform::package::PackageManifest, mochi_user_syscall::SysError> {
-    if let Some(manifest_path) = index.by_package.get(package_id) {
-        return Ok(manifest_path.manifest.clone());
+) -> Result<(platform::package::PackageManifest, String), mochi_user_syscall::SysError> {
+    if let Some(record) = index.by_package.get(package_id) {
+        return Ok((record.manifest.clone(), record.manifest_path.clone()));
     }
 
     if let Some(package_dir) = package_id.rsplit('.').next() {
         let fallback_path = format!("/system/packages/{}/manifest.toml", package_dir);
         if let Some(manifest) = platform::package::read_manifest(&fallback_path) {
             if manifest.package_id == package_id {
-                return Ok(manifest);
+                return Ok((manifest, fallback_path));
             }
             return Err(mochi_user_syscall::SysError::from_raw(
                 mochi_user_syscall::EINVAL as i64,

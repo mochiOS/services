@@ -97,9 +97,10 @@ pub(crate) fn spawn_application_from_manifest(
         ));
     }
 
-    let mut capability_decision = decide_binary_capabilities(&manifest, entry_path)?;
+    let mut capability_decision =
+        decide_binary_capabilities(&manifest, &manifest_record.manifest_path, entry_path)?;
     let requested_caps = capability_decision.requested.clone();
-    let identity = application_identity(&manifest)?;
+    let identity = application_identity(&manifest, &manifest_record.manifest_path)?;
     let requester_context = platform::process::thread_security_context(sender)?;
     let mut grant_context = mochi_user_syscall::ThreadSecurityContext::default();
     grant_context.effective_uid = requester_context.effective_uid;

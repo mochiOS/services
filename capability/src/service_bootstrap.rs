@@ -27,7 +27,7 @@ fn spawn_service_by_package(
             mochi_user_syscall::EINVAL as i64,
         ));
     }
-    let manifest = package_manifest_by_id(index, package_id).map_err(|error| {
+    let (manifest, manifest_path) = package_manifest_by_id(index, package_id).map_err(|error| {
         stderr_line(&format!(
             "capability.service: package lookup failed id={} errno={}",
             package_id,
@@ -42,7 +42,7 @@ fn spawn_service_by_package(
         ));
         mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
     })?;
-    let caps = binary_caps(&manifest, service_path).map_err(|error| {
+    let caps = binary_caps(&manifest, &manifest_path, service_path).map_err(|error| {
         stderr_line(&format!(
             "capability.service: capability resolution failed path={} errno={}",
             service_path,
@@ -57,7 +57,7 @@ fn spawn_service_by_package(
     );
     let caps_nul = encode_nul_list(&caps);
     let logger_endpoint = platform::logger::endpoint().unwrap_or(0);
-    let identity = application_identity(&manifest)?;
+    let identity = application_identity(&manifest, &manifest_path)?;
     let mut args = alloc::vec::Vec::new();
     encode_identity_args(&identity, &mut args);
     args.push(logger_endpoint.to_string());

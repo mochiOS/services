@@ -35,6 +35,15 @@ fn install_record_matches_manifest(
     }
 }
 
+fn package_root_from_manifest_path(
+    manifest_path: &str,
+) -> Result<&str, mochi_user_syscall::SysError> {
+    manifest_path
+        .strip_suffix("/manifest.toml")
+        .filter(|root| root.starts_with("/system/packages/") && root.len() > 17)
+        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))
+}
+
 #[derive(Clone)]
 pub(crate) struct ApplicationIdentity {
     pub(crate) package_id: String,
@@ -128,6 +137,7 @@ impl EffectiveCapabilityDecision {
 
 pub(crate) fn decide_binary_capabilities(
     manifest: &platform::package::PackageManifest,
+    manifest_path: &str,
     binary_path: &str,
 ) -> Result<EffectiveCapabilityDecision, mochi_user_syscall::SysError> {
     let requested = manifest
@@ -144,7 +154,7 @@ pub(crate) fn decide_binary_capabilities(
     let mut deny_reason = (system_allowed.len() != requested.len())
         .then_some(CapabilityDenyReason::UnknownCapability);
 
-    let package_root = alloc::format!("/system/packages/{}", manifest.package_id);
+    let package_root = package_root_from_manifest_path(manifest_path)?;
     let verification_path = alloc::format!("{package_root}/verification.bin");
     let mut certificate_allowed = Vec::new();
     match platform::file::read_to_end_path(&verification_path) {
@@ -154,8 +164,7 @@ pub(crate) fn decide_binary_capabilities(
                 if !install_record_matches_manifest(manifest, &record) {
                     deny_reason.get_or_insert(CapabilityDenyReason::InvalidInstallRecord);
                 } else {
-                    let manifest_path = alloc::format!("{package_root}/manifest.toml");
-                    let manifest_bytes = platform::file::read_to_end_path(&manifest_path)?;
+                    let manifest_bytes = platform::file::read_to_end_path(manifest_path)?;
                     if Sha256::digest(&manifest_bytes).as_slice() != verified.manifest_digest {
                         deny_reason.get_or_insert(CapabilityDenyReason::ManifestMismatch);
                     }
@@ -204,8 +213,9 @@ pub(crate) fn decide_binary_capabilities(
 
 pub(crate) fn application_identity(
     manifest: &platform::package::PackageManifest,
+    manifest_path: &str,
 ) -> Result<ApplicationIdentity, mochi_user_syscall::SysError> {
-    let package_root = alloc::format!("/system/packages/{}", manifest.package_id);
+    let package_root = package_root_from_manifest_path(manifest_path)?;
     let verification_path = alloc::format!("{package_root}/verification.bin");
     let verification_bytes = platform::file::read_to_end_path(&verification_path)?;
     let record = InstallRecordView::decode(&verification_bytes)
@@ -215,8 +225,7 @@ pub(crate) fn application_identity(
             mochi_user_syscall::EACCES as i64,
         ));
     }
-    let manifest_path = alloc::format!("{package_root}/manifest.toml");
-    let manifest_bytes = platform::file::read_to_end_path(&manifest_path)?;
+    let manifest_bytes = platform::file::read_to_end_path(manifest_path)?;
     if Sha256::digest(&manifest_bytes).as_slice() != record.verification.manifest_digest {
         return Err(mochi_user_syscall::SysError::from_raw(
             mochi_user_syscall::EACCES as i64,
@@ -338,12 +347,13 @@ pub(crate) fn encode_exec_authorization_args(
 
 pub(crate) fn binary_caps<'a>(
     manifest: &'a platform::package::PackageManifest,
+    manifest_path: &str,
     binary_path: &str,
 ) -> Result<&'a [String], mochi_user_syscall::SysError> {
     let caps = manifest.binary_requires(binary_path).ok_or_else(|| {
         mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
     })?;
-    let decision = decide_binary_capabilities(manifest, binary_path)?;
+    let decision = decide_binary_capabilities(manifest, manifest_path, binary_path)?;
     if !decision.is_allowed() {
         platform::logln!(
             "capability.service: capability decision denied path={} reason={:?}",
@@ -362,9 +372,10 @@ pub(crate) fn binary_caps<'a>(
 
 fn validate_certificate_capabilities(
     manifest: &platform::package::PackageManifest,
+    manifest_path: &str,
     requested: &[String],
 ) -> Result<(), mochi_user_syscall::SysError> {
-    let package_root = alloc::format!("/system/packages/{}", manifest.package_id);
+    let package_root = package_root_from_manifest_path(manifest_path)?;
     let verification_path = alloc::format!("{package_root}/verification.bin");
     let verification_bytes = platform::file::read_to_end_path(&verification_path).map_err(|error| {
         if error.errno() == Some(mochi_user_syscall::ENOENT.wrapping_neg()) {
@@ -383,8 +394,7 @@ fn validate_certificate_capabilities(
         ));
     }
     let verified = install_record.verification;
-    let manifest_path = alloc::format!("{package_root}/manifest.toml");
-    let manifest_bytes = platform::file::read_to_end_path(&manifest_path)?;
+    let manifest_bytes = platform::file::read_to_end_path(manifest_path)?;
     if Sha256::digest(&manifest_bytes).as_slice() != verified.manifest_digest {
         return Err(mochi_user_syscall::SysError::from_raw(
             mochi_user_syscall::EACCES as i64,
@@ -428,6 +438,10 @@ pub(crate) fn resolve_capabilities_for_path(
         .by_binary
         .get(binary_path)
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOENT as i64))?;
-    let caps = binary_caps(&manifest_path.manifest, binary_path)?;
+    let caps = binary_caps(
+        &manifest_path.manifest,
+        &manifest_path.manifest_path,
+        binary_path,
+    )?;
     Ok(caps.to_vec())
 }

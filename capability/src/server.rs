@@ -143,8 +143,10 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                     let record = state.package_index.by_binary.get(path).ok_or_else(|| {
                         mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOENT as i64)
                     })?;
-                    let caps = binary_caps(&record.manifest, path)?.to_vec();
-                    let identity = application_identity(&record.manifest)?;
+                    let caps =
+                        binary_caps(&record.manifest, &record.manifest_path, path)?.to_vec();
+                    let identity =
+                        application_identity(&record.manifest, &record.manifest_path)?;
                     let mut identity_items = Vec::new();
                     encode_identity_args(&identity, &mut identity_items);
                     authorize_spawn(sender, path, &identity, &caps, execution_class)?;
@@ -162,9 +164,13 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                     let record = state.package_index.by_binary.get(path).ok_or_else(|| {
                         mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64)
                     })?;
-                    let mut capability_decision =
-                        decide_binary_capabilities(&record.manifest, path)?;
-                    let identity = application_identity(&record.manifest)?;
+                    let mut capability_decision = decide_binary_capabilities(
+                        &record.manifest,
+                        &record.manifest_path,
+                        path,
+                    )?;
+                    let identity =
+                        application_identity(&record.manifest, &record.manifest_path)?;
                     let requester_context =
                         platform::process::thread_security_context(sender)?;
                     let package_id = identity.package_id.as_bytes();

@@ -272,7 +272,7 @@ pub(crate) fn authorize_persistent_capability(
     let record = index.by_binary.get(executable).ok_or_else(|| {
         mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64)
     })?;
-    let expected = application_identity(&record.manifest)?;
+    let expected = application_identity(&record.manifest, &record.manifest_path)?;
     if context.package_id_len as usize != expected.package_id.len()
         || context.developer_id_len as usize != expected.developer_id.len()
         || &context.package_id[..context.package_id_len as usize] != expected.package_id.as_bytes()
