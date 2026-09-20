@@ -1,4 +1,5 @@
 use crate::coordinator::{Coordinator, Statistics, network_access_unavailable};
+use crate::diagnostics::Agent as DiagnosticsAgent;
 use crate::filesystem::FileBackend;
 use crate::http::{DeveloperCaFetcher, NetworkTransport};
 use crate::notifier::{Notifier, SignatureTransport};
@@ -10,6 +11,15 @@ const INITIALIZATION_RETRY_MS: u64 = 60_000;
 const MAX_IDLE_SLEEP_MS: u64 = 60_000;
 
 pub fn run() -> ! {
+    let boot_slot = match mochi_user_platform::boot::system_slot() {
+        Ok(slot) if slot == u64::from(mochi_user_platform::boot::BOOT_SYSTEM_SLOT_LEGACY) => "legacy",
+        Ok(slot) if slot == u64::from(mochi_user_platform::boot::BOOT_SYSTEM_SLOT_A) => "A",
+        Ok(slot) if slot == u64::from(mochi_user_platform::boot::BOOT_SYSTEM_SLOT_B) => "B",
+        _ => "unavailable",
+    };
+    let _ = mochi_user_platform::logger::write_status_fmt(format_args!(
+        "update.service: boot system slot={boot_slot}; install_enabled=false\n"
+    ));
     mochi_user_platform::logln!(
         "update.service: Developer Trust domain={}",
         DEVELOPER_TRUST_DOMAIN
@@ -17,6 +27,7 @@ pub fn run() -> ! {
     let mut repository = load_repository();
     let start_ms = monotonic_milliseconds();
     let mut coordinator = Coordinator::network_ready(start_ms);
+    let mut diagnostics = DiagnosticsAgent::new(start_ms);
     if repository.recovered() {
         coordinator.record_recovery();
         mochi_user_platform::logln!("update.service: certificate database recovered");
@@ -42,6 +53,7 @@ pub fn run() -> ! {
         let attempts_before = total_attempts(coordinator.statistics());
         let state_before = repository.state().clone();
         coordinator.synchronize_due(&mut fetcher, &mut repository, now_ms, now_utc);
+        diagnostics.tick(&mut NetworkTransport, now_ms, now_utc);
         if let Err(error) = notifier.notify_changes(&state_before, repository.state()) {
             mochi_user_platform::logln!(
                 "update.service: signature notification failed errno={}",
@@ -66,7 +78,8 @@ pub fn run() -> ! {
                 coordinator
                     .scheduler()
                     .next_attempt_ms(SnapshotKind::Revocations),
-            );
+            )
+            .min(diagnostics.next_due_ms());
         sleep(next.saturating_sub(now_ms).clamp(1, MAX_IDLE_SLEEP_MS));
     }
 }

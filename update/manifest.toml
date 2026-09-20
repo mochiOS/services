@@ -15,5 +15,6 @@ requires = [
     "ipc.server",
     "net.http.request",
     "signature.db.write",
+    "system.random.read",
     "system.time.read",
 ]

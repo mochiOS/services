@@ -1258,7 +1258,7 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "libc"
-version = "0.2.185"
+version = "0.2.189"
 
 [[package]]
 name = "libloading"
@@ -1407,13 +1407,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mochios-boot-selection"
+version = "0.1.0"
+
+[[package]]
 name = "mochios-capability-protocol"
 version = "0.1.0"
 
 [[package]]
 name = "mochios-certificate"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#5ecc8a19f932099e72fe9747ac479828d7ecda94"
+source = "git+https://github.com/mochiOS/syscalls#843a45bac8513e09db401c8456dd6e5348656e33"
 dependencies = [
  "ed25519-dalek",
  "sha2",
@@ -1422,7 +1426,7 @@ dependencies = [
 [[package]]
 name = "mochios-certificate-database"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#5ecc8a19f932099e72fe9747ac479828d7ecda94"
+source = "git+https://github.com/mochiOS/syscalls#843a45bac8513e09db401c8456dd6e5348656e33"
 dependencies = [
  "sha2",
 ]
@@ -1441,12 +1445,12 @@ dependencies = [
 [[package]]
 name = "mochios-driver-control-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#5ecc8a19f932099e72fe9747ac479828d7ecda94"
+source = "git+https://github.com/mochiOS/syscalls#843a45bac8513e09db401c8456dd6e5348656e33"
 
 [[package]]
 name = "mochios-http-client"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#5ecc8a19f932099e72fe9747ac479828d7ecda94"
+source = "git+https://github.com/mochiOS/syscalls#843a45bac8513e09db401c8456dd6e5348656e33"
 
 [[package]]
 name = "mochios-linux-gui-protocol"
@@ -1463,12 +1467,12 @@ version = "0.1.0"
 [[package]]
 name = "mochios-net-device-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#5ecc8a19f932099e72fe9747ac479828d7ecda94"
+source = "git+https://github.com/mochiOS/syscalls#843a45bac8513e09db401c8456dd6e5348656e33"
 
 [[package]]
 name = "mochios-network-stack"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#5ecc8a19f932099e72fe9747ac479828d7ecda94"
+source = "git+https://github.com/mochiOS/syscalls#843a45bac8513e09db401c8456dd6e5348656e33"
 
 [[package]]
 name = "mochios-permission-prompt-protocol"
@@ -2122,7 +2126,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 [[package]]
 name = "plugkit"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/mnu#a5dc118db84c4a303ac74457c0feb78f4cd6dcba"
+source = "git+https://github.com/mochiOS/mnu#291cbd9b709d1222be22fbffa0881399c246ec67"
 dependencies = [
  "plugkit-macros",
  "plugkit-sys",
@@ -2131,12 +2135,12 @@ dependencies = [
 [[package]]
 name = "plugkit-macros"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/mnu#a5dc118db84c4a303ac74457c0feb78f4cd6dcba"
+source = "git+https://github.com/mochiOS/mnu#291cbd9b709d1222be22fbffa0881399c246ec67"
 
 [[package]]
 name = "plugkit-sys"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/mnu#a5dc118db84c4a303ac74457c0feb78f4cd6dcba"
+source = "git+https://github.com/mochiOS/mnu#291cbd9b709d1222be22fbffa0881399c246ec67"
 dependencies = [
  "spin",
 ]
@@ -3261,6 +3265,7 @@ dependencies = [
  "base64",
  "ed25519-dalek",
  "mochi-user-platform",
+ "mochios-boot-selection",
  "mochios-certificate-database",
  "mochios-developer-ca-trust",
  "mochios-http-client",
@@ -3268,6 +3273,7 @@ dependencies = [
  "mochios-signature-protocol",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -4241,4 +4247,4 @@ version = "1.99.0"
 [[patch.unused]]
 name = "mnu-abi"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/mnu#a5dc118db84c4a303ac74457c0feb78f4cd6dcba"
+source = "git+https://github.com/mochiOS/mnu#291cbd9b709d1222be22fbffa0881399c246ec67"

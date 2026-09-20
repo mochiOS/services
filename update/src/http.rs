@@ -201,7 +201,7 @@ fn read_response<T: Transport>(
     }
 }
 
-fn read_stream<T: Transport>(
+pub(crate) fn read_stream<T: Transport>(
     transport: &mut T,
     request_id: u64,
     handle: u64,
@@ -247,7 +247,7 @@ fn read_stream<T: Transport>(
     Ok(output)
 }
 
-fn close<T: Transport>(transport: &mut T, request_id: u64, handle: u64) -> Result<(), FetchError> {
+pub(crate) fn close<T: Transport>(transport: &mut T, request_id: u64, handle: u64) -> Result<(), FetchError> {
     let mut request = [0; HTTP_CLOSE_REQUEST_LEN];
     encode_http_close(request_id, handle, &mut request).map_err(|_| FetchError::Wire)?;
     let mut reply = [0; HTTP_READ_RESULT_BASE_LEN];
