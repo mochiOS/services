@@ -156,7 +156,32 @@ fn install_offer(running: Slot, offer: &crate::os_update::VerifiedManifest, requ
                 offer.build_number(),
             );
         }
-        Err(error) => mochi_user_platform::logln!("update.service: update installation failed error={error:?}"),
+        Err(error) => {
+            let error_code = installation_error_code(&error);
+            if let Err(record_error) = crate::diagnostics::record_failed_update(
+                &current_version, current_build, offer, error_code,
+            ) {
+                mochi_user_platform::logln!("update.service: failed update result metadata unavailable kind={:?}", record_error.kind());
+            }
+            mochi_user_platform::logln!("update.service: update installation failed error={error:?}");
+        }
+    }
+}
+
+fn installation_error_code<DiskError, FetchError>(
+    error: &crate::installer::InstallError<DiskError, FetchError>,
+) -> &'static str {
+    use crate::installer::InstallError;
+    match error {
+        InstallError::Disk(_) => "storage_io",
+        InstallError::Fetch(_) => "download_failed",
+        InstallError::InvalidLayout => "invalid_layout",
+        InstallError::InvalidPayload => "invalid_payload",
+        InstallError::WrongArchitecture => "wrong_architecture",
+        InstallError::WrongRelease => "wrong_release",
+        InstallError::ArtifactChecksum => "artifact_checksum",
+        InstallError::SlotVerification => "slot_verification",
+        InstallError::State(_) => "boot_state",
     }
 }
 

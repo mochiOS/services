@@ -229,7 +229,20 @@ fn update_result_body(
         return None;
     }
     let outcome = pending.get("outcome")?.as_str()?;
-    if !matches!(outcome, "first_boot_succeeded" | "rolled_back") { return None; }
+    if !matches!(outcome, "first_boot_succeeded" | "failed" | "rolled_back") { return None; }
+    let error_code = pending.get("error_code").unwrap_or(&Value::Null);
+    match outcome {
+        "failed" => {
+            let code = error_code.as_str()?;
+            if code.is_empty() || code.len() > 64
+                || !code.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            {
+                return None;
+            }
+        }
+        _ if !error_code.is_null() => return None,
+        _ => {}
+    }
     Some(json!({
         "event_id": event_id,
         "device_id": device,
@@ -238,7 +251,7 @@ fn update_result_body(
         "source": source,
         "target": target,
         "outcome": outcome,
-        "error_code": null,
+        "error_code": error_code,
     }))
 }
 
@@ -381,6 +394,37 @@ pub fn record_staged_update(
 }
 
 #[cfg(target_os = "mochios")]
+pub fn record_failed_update(
+    source_version: &str,
+    source_build: u64,
+    target: &os_update::VerifiedManifest,
+    error_code: &str,
+) -> io::Result<()> {
+    if Version::parse(source_version).is_none() || source_build == 0 || error_code.is_empty()
+        || error_code.len() > 64
+        || !error_code.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid failed update result"));
+    }
+    fs::create_dir_all(UPDATE_ROOT)?;
+    let pending = json!({
+        "source": {
+            "version": source_version,
+            "build_number": source_build,
+            "architecture": std::env::consts::ARCH,
+        },
+        "target": {
+            "version": target.version(),
+            "build_number": target.build_number(),
+            "architecture": target.architecture(),
+        },
+        "outcome": "failed",
+        "error_code": error_code,
+    });
+    save_atomic(Path::new(PENDING_UPDATE_PATH), &serde_json::to_vec(&pending)?)
+}
+
+#[cfg(target_os = "mochios")]
 pub fn record_boot_outcome(running: mochios_boot_selection::Slot, confirmed: bool) -> io::Result<()> {
     recover_atomic(Path::new(PENDING_UPDATE_PATH))?;
     let Ok(bytes) = fs::read(PENDING_UPDATE_PATH) else { return Ok(()) };
@@ -393,6 +437,7 @@ pub fn record_boot_outcome(running: mochios_boot_selection::Slot, confirmed: boo
         return Err(io::Error::new(io::ErrorKind::InvalidData, "confirmed wrong target slot"));
     }
     pending["outcome"] = json!(if target == running { "first_boot_succeeded" } else { "rolled_back" });
+    pending["error_code"] = Value::Null;
     save_atomic(Path::new(PENDING_UPDATE_PATH), &serde_json::to_vec(&pending)?)
 }
 
@@ -691,6 +736,7 @@ mod tests {
             "source":{"version":"26.9","build_number":1234,"architecture":"x86_64"},
             "target":{"version":"26.10","build_number":1300,"architecture":"x86_64"},
             "outcome":"first_boot_succeeded",
+            "error_code":null,
         });
         let body = update_result_body(
             &pending,
@@ -708,5 +754,18 @@ mod tests {
             "2e71caf1-2182-49c7-a817-1a6ceacde381",
             "2026-09-21",
         ).is_none());
+
+        let failed = json!({
+            "source":{"version":"26.9","build_number":1234,"architecture":"x86_64"},
+            "target":{"version":"26.10","build_number":1300,"architecture":"x86_64"},
+            "outcome":"failed",
+            "error_code":"artifact_checksum",
+        });
+        assert_eq!(update_result_body(
+            &failed,
+            "5e614437-c6e2-49a1-a94a-6240057ff9a7",
+            "2e71caf1-2182-49c7-a817-1a6ceacde381",
+            "2026-09-21",
+        ).unwrap()["error_code"], "artifact_checksum");
     }
 }
