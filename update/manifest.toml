@@ -11,6 +11,7 @@ kind = "service"
 requires = [
     "fs.read.all",
     "fs.write.all",
+    "device.storage",
     "ipc.client",
     "ipc.server",
     "net.http.request",

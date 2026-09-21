@@ -375,6 +375,7 @@ fn handle(
                 request.url,
                 request.content_type,
                 request.if_none_match,
+                request.range,
                 request.body,
                 now,
                 u64::from(request.timeout_ms),

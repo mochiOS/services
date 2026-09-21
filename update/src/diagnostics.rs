@@ -78,7 +78,7 @@ fn date_from_unix(seconds: u64) -> Option<String> {
     valid_date(&result).then_some(result)
 }
 
-fn release_identity() -> Option<(String, u64)> {
+pub(crate) fn release_identity() -> Option<(String, u64)> {
     let mut version = None;
     let mut build = None;
     for line in VERSION_TOML.lines() {
@@ -329,7 +329,12 @@ impl Agent {
         self.request_id
     }
 
-    pub fn tick<T: Transport>(&mut self, transport: &mut T, now_ms: u64, now_utc: u64) {
+    pub fn tick<T: Transport>(
+        &mut self,
+        transport: &mut T,
+        now_ms: u64,
+        now_utc: u64,
+    ) -> Option<os_update::VerifiedManifest> {
         let allowed = fs::read_to_string(CONFIG_PATH)
             .map(|contents| consent_enabled(&contents))
             .unwrap_or(false);
@@ -355,22 +360,21 @@ impl Agent {
                 }
             }
         }
-        if now_ms >= self.next_poll_ms {
-            self.poll(transport, now_ms);
-        }
+        let offer = if now_ms >= self.next_poll_ms { self.poll(transport, now_ms) } else { None };
         if allowed { self.flush(transport, now_utc); }
+        offer
     }
 
-    fn poll<T: Transport>(&mut self, transport: &mut T, now_ms: u64) {
+    fn poll<T: Transport>(&mut self, transport: &mut T, now_ms: u64) -> Option<os_update::VerifiedManifest> {
         let health = self.get(transport, "/health");
         if !matches!(health.as_ref(), Ok(response) if response.status == 200) {
             self.next_poll_ms = now_ms.saturating_add(CONSENT_CHECK_MS);
-            return;
+            return None;
         }
         let distribution = self.get(transport, "/distribution/status");
         if !matches!(distribution.as_ref(), Ok(response) if response.status == 200) {
             self.next_poll_ms = now_ms.saturating_add(CONSENT_CHECK_MS);
-            return;
+            return None;
         }
         let stopped = distribution.ok()
             .and_then(|response| serde_json::from_slice::<Value>(&response.body).ok())
@@ -384,26 +388,31 @@ impl Agent {
                     std::env::consts::ARCH,
                     os_update::TRUSTED_RELEASE_KEYS,
                 );
-                // A signed offer is information only until rollback-capable
-                // slots and a separate normal-update payload are deployed.
                 mochi_user_platform::logln!(
-                    "update.service: public update check status={:?} distribution_stopped={} request_id={:?} install_enabled=false",
+                    "update.service: public update check status={:?} distribution_stopped={} request_id={:?}",
                     status.as_ref().map(os_update::CheckStatus::name), stopped, response.request_id,
                 );
                 if let Err(os_update::CheckError::RateLimited(seconds)) = &status {
                     self.next_poll_ms = now_ms.saturating_add((*seconds).max(60).saturating_mul(1_000));
-                    return;
+                    return None;
                 }
                 if status == Err(os_update::CheckError::ServiceUnavailable) {
                     self.next_poll_ms = now_ms.saturating_add(CONSENT_CHECK_MS);
-                    return;
+                    return None;
+                }
+                if !stopped {
+                    if let Ok(os_update::CheckStatus::Available(manifest)) = status {
+                        self.next_poll_ms = now_ms.saturating_add(POLL_PERIOD_MS - 900_000 + poll_jitter_ms());
+                        return Some(manifest);
+                    }
                 }
             } else {
                 self.next_poll_ms = now_ms.saturating_add(CONSENT_CHECK_MS);
-                return;
+                return None;
             }
         }
         self.next_poll_ms = now_ms.saturating_add(POLL_PERIOD_MS - 900_000 + poll_jitter_ms());
+        None
     }
 
     fn get<T: Transport>(&mut self, transport: &mut T, path: &str) -> Result<Response, public_api::ApiError> {

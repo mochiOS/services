@@ -60,6 +60,7 @@ impl HttpManager {
         raw_url: &str,
         content_type: &str,
         if_none_match: &str,
+        range: &str,
         body: &[u8],
         started: u64,
         timeout: u64,
@@ -73,6 +74,7 @@ impl HttpManager {
             raw_url,
             content_type,
             if_none_match,
+            range,
             body,
             started,
             timeout,
@@ -117,6 +119,7 @@ impl HttpManager {
         raw_url: &str,
         content_type: &str,
         if_none_match: &str,
+        range: &str,
         body: &[u8],
         started: u64,
         timeout: u64,
@@ -132,7 +135,7 @@ impl HttpManager {
             HttpMethod::Get => Method::Get,
             HttpMethod::Post => Method::Post,
         };
-        let mut headers = Vec::with_capacity(2);
+        let mut headers = Vec::with_capacity(3);
         if method == Method::Post && !content_type.is_empty() {
             headers.push(Header {
                 name: "Content-Type",
@@ -144,6 +147,9 @@ impl HttpManager {
                 name: "If-None-Match",
                 value: if_none_match,
             });
+        }
+        if !range.is_empty() {
+            headers.push(Header { name: "Range", value: range });
         }
         let request = encode_request(method, &url, &headers, body).map_err(http_error)?;
         let connection = tls

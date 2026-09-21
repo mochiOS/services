@@ -1483,6 +1483,14 @@ name = "mochios-signature-protocol"
 version = "0.1.0"
 
 [[package]]
+name = "mochios-system-image"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "sha2",
+]
+
+[[package]]
 name = "mochios-tls-client"
 version = "0.1.0"
 dependencies = [
@@ -3271,6 +3279,7 @@ dependencies = [
  "mochios-http-client",
  "mochios-net-device-protocol",
  "mochios-signature-protocol",
+ "mochios-system-image",
  "serde",
  "serde_json",
  "sha2",

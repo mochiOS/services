@@ -67,6 +67,23 @@ impl VerifiedManifest {
     pub const fn size_bytes(&self) -> u64 { self.size_bytes }
     pub fn filename(&self) -> &str { &self.filename }
     pub fn key_id(&self) -> &str { &self.key_id }
+
+    #[cfg(test)]
+    pub(crate) fn fixture(version: &str, build_number: u64, bytes: &[u8]) -> Self {
+        use sha2::{Digest, Sha256};
+        Self {
+            release_id: "test-release".to_owned(),
+            version: version.to_owned(),
+            build_number,
+            channel: "developer_preview".to_owned(),
+            architecture: std::env::consts::ARCH.to_owned(),
+            url: "https://storage.mochios.org/test.moupdate".to_owned(),
+            sha256: Sha256::digest(bytes).into(),
+            size_bytes: bytes.len() as u64,
+            filename: "test.moupdate".to_owned(),
+            key_id: "test".to_owned(),
+        }
+    }
 }
 
 impl core::fmt::Debug for VerifiedManifest {
@@ -180,6 +197,7 @@ fn verify_available(
         || !matches!(artifact_arch, "x86_64" | "aarch64")
         || algorithm != "Ed25519" || size == 0
         || filename.is_empty() || filename == "." || filename == ".."
+        || !filename.ends_with(".moupdate")
         || filename.contains('/') || filename.contains('\\')
         || filename.bytes().any(|byte| byte.is_ascii_control())
         || parsed_url.hostname() != "storage.mochios.org" || parsed_url.port() != 443
@@ -252,10 +270,10 @@ mod tests {
         let key = TrustedKey { key_id: "test-only", public_key: signing.verifying_key().to_bytes() };
         let mut value = json!({"status":"available","release":{
             "id":"release-test", "version":"26.13", "build_number":1300, "channel":"beta",
-            "artifact":{"url":"https://storage.mochios.org/update-payload.bin", "sha256":"a".repeat(64),
-                "size_bytes":123, "filename":"update-payload.bin", "architecture":"x86_64",
+            "artifact":{"url":"https://storage.mochios.org/update-payload.moupdate", "sha256":"a".repeat(64),
+                "size_bytes":123, "filename":"update-payload.moupdate", "architecture":"x86_64",
                 "signature":"", "signature_algorithm":"Ed25519", "key_id":"test-only"}}});
-        let canonical = format!("mochios-update-manifest-v1\nrelease_id=release-test\nversion=26.13\nbuild_number=1300\nchannel=beta\narchitecture=x86_64\nartifact_url=https://storage.mochios.org/update-payload.bin\nartifact_sha256={}\nartifact_size_bytes=123\nartifact_filename=update-payload.bin\n", "a".repeat(64));
+        let canonical = format!("mochios-update-manifest-v1\nrelease_id=release-test\nversion=26.13\nbuild_number=1300\nchannel=beta\narchitecture=x86_64\nartifact_url=https://storage.mochios.org/update-payload.moupdate\nartifact_sha256={}\nartifact_size_bytes=123\nartifact_filename=update-payload.moupdate\n", "a".repeat(64));
         value["release"]["artifact"]["signature"] = json!(URL_SAFE_NO_PAD.encode(signing.sign(canonical.as_bytes()).to_bytes()));
         let body = value.to_string();
         let offer = check_response(body.as_bytes(), "x86_64", &[key]).unwrap();
@@ -265,10 +283,10 @@ mod tests {
         assert_eq!(manifest.build_number(), 1300);
         assert_eq!(manifest.channel(), "beta");
         assert_eq!(manifest.architecture(), "x86_64");
-        assert_eq!(manifest.url(), "https://storage.mochios.org/update-payload.bin");
+        assert_eq!(manifest.url(), "https://storage.mochios.org/update-payload.moupdate");
         assert_eq!(manifest.sha256(), &[0xaa; 32]);
         assert_eq!(manifest.size_bytes(), 123);
-        assert_eq!(manifest.filename(), "update-payload.bin");
+        assert_eq!(manifest.filename(), "update-payload.moupdate");
         assert_eq!(manifest.key_id(), "test-only");
         assert_eq!(check_response(body.as_bytes(), "x86_64", &[]), Err(CheckError::UntrustedKey));
         assert_eq!(check_response(body.as_bytes(), "aarch64", &[key]), Err(CheckError::WrongArchitecture));
@@ -279,7 +297,7 @@ mod tests {
         assert_eq!(check_response(value.to_string().as_bytes(), "x86_64", &[key]), Err(CheckError::InvalidSignature));
         value["release"]["artifact"]["url"] = json!("https://api.mochios.org/releases/release-test/artifact");
         assert_eq!(check_response(value.to_string().as_bytes(), "x86_64", &[key]), Err(CheckError::InvalidMetadata));
-        value["release"]["artifact"]["url"] = json!("https://storage.mochios.org/update-payload.bin");
+        value["release"]["artifact"]["url"] = json!("https://storage.mochios.org/update-payload.moupdate");
         value["release"]["id"] = json!("release-test\nversion=26.13");
         assert_eq!(check_response(value.to_string().as_bytes(), "x86_64", &[key]), Err(CheckError::InvalidMetadata));
     }
@@ -293,12 +311,12 @@ mod tests {
         let sha = digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
         let size = bytes.len();
         let canonical = format!(
-            "mochios-update-manifest-v1\nrelease_id=release-test\nversion=26.13\nbuild_number=1300\nchannel=beta\narchitecture=x86_64\nartifact_url=https://storage.mochios.org/normal-update.bin\nartifact_sha256={sha}\nartifact_size_bytes={size}\nartifact_filename=normal-update.bin\n"
+            "mochios-update-manifest-v1\nrelease_id=release-test\nversion=26.13\nbuild_number=1300\nchannel=beta\narchitecture=x86_64\nartifact_url=https://storage.mochios.org/normal-update.moupdate\nartifact_sha256={sha}\nartifact_size_bytes={size}\nartifact_filename=normal-update.moupdate\n"
         );
         let body = json!({"status":"available","release":{
             "id":"release-test", "version":"26.13", "build_number":1300, "channel":"beta",
-            "artifact":{"url":"https://storage.mochios.org/normal-update.bin", "sha256":sha,
-                "size_bytes":size, "filename":"normal-update.bin", "architecture":"x86_64",
+            "artifact":{"url":"https://storage.mochios.org/normal-update.moupdate", "sha256":sha,
+                "size_bytes":size, "filename":"normal-update.moupdate", "architecture":"x86_64",
                 "signature":URL_SAFE_NO_PAD.encode(signing.sign(canonical.as_bytes()).to_bytes()),
                 "signature_algorithm":"Ed25519", "key_id":"test-only"}}}).to_string();
         let CheckStatus::Available(manifest) = check_response(body.as_bytes(), "x86_64", &[key]).unwrap()

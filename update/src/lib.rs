@@ -1,7 +1,9 @@
 pub mod coordinator;
 pub mod diagnostics;
+pub mod download;
 pub mod filesystem;
 pub mod http;
+pub mod installer;
 pub mod notifier;
 pub mod os_update;
 pub mod payload;
@@ -17,6 +19,14 @@ mod service;
 
 include!(concat!(env!("OUT_DIR"), "/developer_root_keys.rs"));
 include!(concat!(env!("OUT_DIR"), "/release_public_keys.rs"));
+
+#[cfg(feature = "development-system-key")]
+pub const SYSTEM_PUBLIC_KEYS: &[[u8; 32]] = &[
+    mochios_system_image::RELEASE_PUBLIC_KEY,
+    mochios_system_image::DEVELOPMENT_PUBLIC_KEY,
+];
+#[cfg(not(feature = "development-system-key"))]
+pub const SYSTEM_PUBLIC_KEYS: &[[u8; 32]] = &[mochios_system_image::RELEASE_PUBLIC_KEY];
 
 #[cfg(target_os = "mochios")]
 pub fn run() -> ! {

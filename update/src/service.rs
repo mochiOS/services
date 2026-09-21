@@ -1,25 +1,30 @@
 use crate::coordinator::{Coordinator, Statistics, network_access_unavailable};
 use crate::diagnostics::Agent as DiagnosticsAgent;
+use crate::download::RangeDownloader;
 use crate::filesystem::FileBackend;
 use crate::http::{DeveloperCaFetcher, NetworkTransport};
 use crate::notifier::{Notifier, SignatureTransport};
 use crate::repository::CertificateRepository;
 use crate::scheduler::SnapshotKind;
 use crate::{DEVELOPER_ROOT_PUBLIC_KEYS, DEVELOPER_TRUST_DOMAIN};
+use mochios_boot_selection::Slot;
 
 const INITIALIZATION_RETRY_MS: u64 = 60_000;
 const MAX_IDLE_SLEEP_MS: u64 = 60_000;
 
 pub fn run() -> ! {
-    let boot_slot = match mochi_user_platform::boot::system_slot() {
-        Ok(slot) if slot == u64::from(mochi_user_platform::boot::BOOT_SYSTEM_SLOT_LEGACY) => "legacy",
-        Ok(slot) if slot == u64::from(mochi_user_platform::boot::BOOT_SYSTEM_SLOT_A) => "A",
-        Ok(slot) if slot == u64::from(mochi_user_platform::boot::BOOT_SYSTEM_SLOT_B) => "B",
-        _ => "unavailable",
+    let (boot_slot, running_slot) = match mochi_user_platform::boot::system_slot() {
+        Ok(slot) if slot == u64::from(mochi_user_platform::boot::BOOT_SYSTEM_SLOT_LEGACY) => ("legacy", None),
+        Ok(slot) if slot == u64::from(mochi_user_platform::boot::BOOT_SYSTEM_SLOT_A) => ("A", Some(Slot::A)),
+        Ok(slot) if slot == u64::from(mochi_user_platform::boot::BOOT_SYSTEM_SLOT_B) => ("B", Some(Slot::B)),
+        _ => ("unavailable", None),
     };
     let _ = mochi_user_platform::logger::write_status_fmt(format_args!(
-        "update.service: boot system slot={boot_slot}; install_enabled=false\n"
+        "update.service: boot system slot={boot_slot}\n"
     ));
+    if let Some(slot) = running_slot {
+        confirm_trial(slot);
+    }
     mochi_user_platform::logln!(
         "update.service: Developer Trust domain={}",
         DEVELOPER_TRUST_DOMAIN
@@ -53,7 +58,10 @@ pub fn run() -> ! {
         let attempts_before = total_attempts(coordinator.statistics());
         let state_before = repository.state().clone();
         coordinator.synchronize_due(&mut fetcher, &mut repository, now_ms, now_utc);
-        diagnostics.tick(&mut NetworkTransport, now_ms, now_utc);
+        let offer = diagnostics.tick(&mut NetworkTransport, now_ms, now_utc);
+        if let (Some(slot), Some(offer)) = (running_slot, offer) {
+            install_offer(slot, &offer, now_ms);
+        }
         if let Err(error) = notifier.notify_changes(&state_before, repository.state()) {
             mochi_user_platform::logln!(
                 "update.service: signature notification failed errno={}",
@@ -81,6 +89,44 @@ pub fn run() -> ! {
             )
             .min(diagnostics.next_due_ms());
         sleep(next.saturating_sub(now_ms).clamp(1, MAX_IDLE_SLEEP_MS));
+    }
+}
+
+fn confirm_trial(running: Slot) {
+    let mut disk = crate::installer::SystemDisk::boot_disk();
+    let result = crate::installer::discover_layout(&mut disk).and_then(|layout| {
+        crate::installer::confirm_running(&mut disk, layout, running)
+            .map_err(|_| crate::installer::DiscoveryError::InvalidGpt)
+    });
+    match result {
+        Ok(true) => mochi_user_platform::logln!("update.service: confirmed first boot of slot {:?}", running),
+        Ok(false) => {}
+        Err(error) => mochi_user_platform::logln!("update.service: boot confirmation unavailable error={error:?}"),
+    }
+}
+
+fn install_offer(running: Slot, offer: &crate::os_update::VerifiedManifest, request_id: u64) {
+    let Some((_, current_build)) = crate::diagnostics::release_identity() else {
+        mochi_user_platform::logln!("update.service: local release identity is unavailable");
+        return;
+    };
+    let mut disk = crate::installer::SystemDisk::boot_disk();
+    let layout = match crate::installer::discover_layout(&mut disk) {
+        Ok(layout) => layout,
+        Err(error) => {
+            mochi_user_platform::logln!("update.service: update layout rejected error={error:?}");
+            return;
+        }
+    };
+    let mut source = RangeDownloader::new(NetworkTransport, offer.url(), offer.size_bytes(), request_id.max(1));
+    match crate::installer::install(
+        &mut disk, &mut source, layout, running, current_build, offer, crate::SYSTEM_PUBLIC_KEYS,
+    ) {
+        Ok(target) => mochi_user_platform::logln!(
+            "update.service: update verified and staged target={target:?} build={}; reboot required",
+            offer.build_number(),
+        ),
+        Err(error) => mochi_user_platform::logln!("update.service: update installation failed error={error:?}"),
     }
 }
 
