@@ -600,7 +600,8 @@ fn install_package(
         ));
     }
 
-    let package_root = alloc::format!("/system/packages/{}", manifest.package_id);
+    require_path_absent(&alloc::format!("/system/packages/{}/manifest.toml", manifest.package_id))?;
+    let package_root = alloc::format!("/var/lib/packages/{}", manifest.package_id);
     let manifest_path = alloc::format!("{}/manifest.toml", package_root);
     let verification_path = alloc::format!("{}/verification.bin", package_root);
     let signer_continuity = validate_update_owner(&verification_path, &verification)?;
@@ -695,7 +696,6 @@ fn install_package(
             || target.starts_with("/libraries/")
             || target.starts_with("/binary/services/")
             || target.starts_with("/binary/resources/")
-            || target.starts_with("/system/services/")
             || (target.starts_with("/applications/")
                 && manifest.package_kind.as_deref() == Some("application"));
         if !allowed {
@@ -970,7 +970,7 @@ fn rollback_removal(staged: &[(String, String)]) {
 }
 
 fn remove_package(package_id: &str) -> Result<(), mochi_user_syscall::SysError> {
-    let package_root = alloc::format!("/system/packages/{package_id}");
+    let package_root = alloc::format!("/var/lib/packages/{package_id}");
     let manifest_path = alloc::format!("{package_root}/manifest.toml");
     let verification_path = alloc::format!("{package_root}/verification.bin");
     let manifest_bytes = platform::file::read_to_end_path(&manifest_path)?;

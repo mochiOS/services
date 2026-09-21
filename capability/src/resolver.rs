@@ -40,7 +40,8 @@ fn package_root_from_manifest_path(
 ) -> Result<&str, mochi_user_syscall::SysError> {
     manifest_path
         .strip_suffix("/manifest.toml")
-        .filter(|root| root.starts_with("/system/packages/") && root.len() > 17)
+        .filter(|root| (root.starts_with("/system/packages/") && root.len() > 17)
+            || (root.starts_with("/var/lib/packages/") && root.len() > 18))
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))
 }
 

@@ -4,8 +4,8 @@ use viewkit::view::{Constraints, MeasureContext, PaintContext};
 
 const SETTINGS_PATH: &str = "/var/config/appearance/settings.conf";
 const WALLPAPER_PATHS: [&str; 2] = [
-    "/libraries/wallpapers/default.png",
-    "/libraries/wallpapers/default.jpeg",
+    "/system/libraries/wallpapers/default.png",
+    "/system/libraries/wallpapers/default.jpeg",
 ];
 
 #[derive(Clone, Default)]

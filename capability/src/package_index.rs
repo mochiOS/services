@@ -37,6 +37,7 @@ fn walk_package_tree(path: &str, out: &mut Vec<String>) {
 pub(crate) fn build_package_index() -> PackageIndex {
     let mut manifest_paths = Vec::new();
     walk_package_tree("/system/packages", &mut manifest_paths);
+    walk_package_tree("/var/lib/packages", &mut manifest_paths);
     let mut index = PackageIndex::default();
     for manifest_path in manifest_paths {
         let Ok(bytes) = platform::file::read_to_end_path(&manifest_path) else {
@@ -120,14 +121,16 @@ pub(crate) fn package_manifest_by_id(
     }
 
     if let Some(package_dir) = package_id.rsplit('.').next() {
-        let fallback_path = format!("/system/packages/{}/manifest.toml", package_dir);
-        if let Some(manifest) = platform::package::read_manifest(&fallback_path) {
-            if manifest.package_id == package_id {
-                return Ok((manifest, fallback_path));
+        for root in ["/system/packages", "/var/lib/packages"] {
+            let fallback_path = format!("{root}/{package_dir}/manifest.toml");
+            if let Some(manifest) = platform::package::read_manifest(&fallback_path) {
+                if manifest.package_id == package_id {
+                    return Ok((manifest, fallback_path));
+                }
+                return Err(mochi_user_syscall::SysError::from_raw(
+                    mochi_user_syscall::EINVAL as i64,
+                ));
             }
-            return Err(mochi_user_syscall::SysError::from_raw(
-                mochi_user_syscall::EINVAL as i64,
-            ));
         }
     }
 

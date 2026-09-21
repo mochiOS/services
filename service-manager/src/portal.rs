@@ -385,8 +385,10 @@ fn run_prompt(
 }
 
 fn application_name(bundle_id: &str) -> alloc::string::String {
-    let manifest_path = alloc::format!("/system/packages/{bundle_id}/manifest.toml");
-    platform::package::read_manifest(&manifest_path)
+    let user_manifest = alloc::format!("/var/lib/packages/{bundle_id}/manifest.toml");
+    let system_manifest = alloc::format!("/system/packages/{bundle_id}/manifest.toml");
+    platform::package::read_manifest(&system_manifest)
+        .or_else(|| platform::package::read_manifest(&user_manifest))
         .filter(|manifest| manifest.package_id == bundle_id)
         .map(|manifest| {
             if manifest.package_name.ends_with(".app") {

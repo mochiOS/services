@@ -3,7 +3,7 @@ extern crate alloc;
 use alloc::string::String;
 use mochi_user_platform as platform;
 
-const LOG_ROOT: &str = "/system/logs/services";
+const LOG_ROOT: &str = "/var/log/services";
 
 fn parse_decimal_u64(bytes: &[u8]) -> Option<u64> {
     if bytes.is_empty() {

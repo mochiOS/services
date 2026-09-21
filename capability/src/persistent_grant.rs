@@ -6,10 +6,10 @@ use crate::package_index::PackageIndex;
 use crate::policy::is_known_capability;
 use crate::resolver::application_identity;
 
-const GRANTS_PATH: &str = "/system/policy/capability-grants.db";
-const GRANTS_NEW_PATH: &str = "/system/policy/capability-grants.db.new";
-const GRANTS_OLD_PATH: &str = "/system/policy/capability-grants.db.old";
-const POLICY_DIR: &str = "/system/policy";
+const GRANTS_PATH: &str = "/var/lib/security/capability-grants.db";
+const GRANTS_NEW_PATH: &str = "/var/lib/security/capability-grants.db.new";
+const GRANTS_OLD_PATH: &str = "/var/lib/security/capability-grants.db.old";
+const POLICY_DIR: &str = "/var/lib/security";
 const O_WRONLY: u64 = 0o1;
 const O_CREAT: u64 = 0o100;
 const O_TRUNC: u64 = 0o1000;
@@ -26,8 +26,9 @@ fn hex_digest(digest: &[u8; 32]) -> String {
 }
 
 fn ensure_policy_dir() {
-    let _ = platform::file::create_dir("/system", 0o755);
-    let _ = platform::file::create_dir("/system/policy", 0o755);
+    let _ = platform::file::create_dir("/var", 0o755);
+    let _ = platform::file::create_dir("/var/lib", 0o755);
+    let _ = platform::file::create_dir("/var/lib/security", 0o755);
 }
 
 fn write_file(path: &str, bytes: &[u8]) -> Result<(), mochi_user_syscall::SysError> {

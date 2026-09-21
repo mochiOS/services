@@ -252,7 +252,7 @@ fn handle_bundle_launch(
 }
 
 fn load_bundle_spec(bundle_id: &str, user: &str) -> Result<BundleSpec, i32> {
-    let manifest_path = format!("/system/packages/{bundle_id}/manifest.toml");
+    let manifest_path = format!("/var/lib/packages/{bundle_id}/manifest.toml");
     let manifest = platform::package::read_manifest(&manifest_path)
         .ok_or(-(mochi_user_syscall::ENOENT as i32))?;
     if manifest.package_id != bundle_id
