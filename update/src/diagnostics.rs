@@ -17,6 +17,8 @@ const DATA_ROOT: &str = "/var/lib/diagnostics";
 const INSTALL_DATE_PATH: &str = "/var/lib/diagnostics/install_date";
 const DEVICE_ID_PATH: &str = "/var/lib/diagnostics/device_id";
 const QUEUE_ROOT: &str = "/var/lib/diagnostics/queue";
+const UPDATE_ROOT: &str = "/var/lib/update";
+const PENDING_UPDATE_PATH: &str = "/var/lib/update/pending-result.json";
 const POLL_PERIOD_MS: u64 = 6 * 60 * 60 * 1_000;
 const CONSENT_CHECK_MS: u64 = 60_000;
 const RETRY_SECONDS: [u64; 5] = [60, 300, 900, 3_600, 21_600];
@@ -147,6 +149,16 @@ fn purge_queue() -> io::Result<()> {
     Ok(())
 }
 
+fn purge_reportable_update_result() -> io::Result<()> {
+    recover_atomic(Path::new(PENDING_UPDATE_PATH))?;
+    let Ok(bytes) = fs::read(PENDING_UPDATE_PATH) else { return Ok(()) };
+    let pending: Value = serde_json::from_slice(&bytes)?;
+    if pending.get("outcome").is_some() {
+        fs::remove_file(PENDING_UPDATE_PATH)?;
+    }
+    Ok(())
+}
+
 fn recover_atomic(path: &Path) -> io::Result<()> {
     let backup = path.with_extension("backup");
     if backup.exists() {
@@ -193,6 +205,41 @@ fn mark_daily_sent(path: &Path) -> io::Result<()> {
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+fn update_result_body(
+    pending: &Value,
+    event_id: &str,
+    device: &str,
+    occurred_on: &str,
+) -> Option<Value> {
+    if !valid_id(event_id, 16, 64) || !valid_id(device, 16, 128) || !valid_date(occurred_on) {
+        return None;
+    }
+    let source = pending.get("source")?;
+    let target = pending.get("target")?;
+    let valid_release = |release: &Value| {
+        release.get("version").and_then(Value::as_str).and_then(Version::parse).is_some()
+            && release.get("build_number").and_then(Value::as_u64).is_some_and(|build| build > 0)
+            && matches!(release.get("architecture").and_then(Value::as_str), Some("x86_64" | "aarch64"))
+    };
+    if !valid_release(source) || !valid_release(target)
+        || source.get("architecture") != target.get("architecture")
+    {
+        return None;
+    }
+    let outcome = pending.get("outcome")?.as_str()?;
+    if !matches!(outcome, "first_boot_succeeded" | "rolled_back") { return None; }
+    Some(json!({
+        "event_id": event_id,
+        "device_id": device,
+        "basic_diagnostics_consent": true,
+        "occurred_on": occurred_on,
+        "source": source,
+        "target": target,
+        "outcome": outcome,
+        "error_code": null,
+    }))
 }
 
 #[cfg(target_os = "mochios")]
@@ -304,6 +351,83 @@ fn queue_basic(now_utc: u64, device: &str) -> io::Result<()> {
 }
 
 #[cfg(target_os = "mochios")]
+pub fn record_staged_update(
+    source_version: &str,
+    source_build: u64,
+    target: &os_update::VerifiedManifest,
+    target_slot: mochios_boot_selection::Slot,
+) -> io::Result<()> {
+    if Version::parse(source_version).is_none() || source_build == 0 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid source release"));
+    }
+    fs::create_dir_all(UPDATE_ROOT)?;
+    let pending = json!({
+        "source": {
+            "version": source_version,
+            "build_number": source_build,
+            "architecture": std::env::consts::ARCH,
+        },
+        "target": {
+            "version": target.version(),
+            "build_number": target.build_number(),
+            "architecture": target.architecture(),
+        },
+        "target_slot": match target_slot {
+            mochios_boot_selection::Slot::A => "A",
+            mochios_boot_selection::Slot::B => "B",
+        },
+    });
+    save_atomic(Path::new(PENDING_UPDATE_PATH), &serde_json::to_vec(&pending)?)
+}
+
+#[cfg(target_os = "mochios")]
+pub fn record_boot_outcome(running: mochios_boot_selection::Slot, confirmed: bool) -> io::Result<()> {
+    recover_atomic(Path::new(PENDING_UPDATE_PATH))?;
+    let Ok(bytes) = fs::read(PENDING_UPDATE_PATH) else { return Ok(()) };
+    let mut pending: Value = serde_json::from_slice(&bytes)?;
+    if pending.get("outcome").is_some() { return Ok(()); }
+    let running = match running { mochios_boot_selection::Slot::A => "A", mochios_boot_selection::Slot::B => "B" };
+    let target = pending.get("target_slot").and_then(Value::as_str)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing target slot"))?;
+    if confirmed && target != running {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "confirmed wrong target slot"));
+    }
+    pending["outcome"] = json!(if target == running { "first_boot_succeeded" } else { "rolled_back" });
+    save_atomic(Path::new(PENDING_UPDATE_PATH), &serde_json::to_vec(&pending)?)
+}
+
+#[cfg(target_os = "mochios")]
+fn queue_update_result(now_utc: u64, device: &str) -> io::Result<()> {
+    recover_atomic(Path::new(PENDING_UPDATE_PATH))?;
+    let Ok(bytes) = fs::read(PENDING_UPDATE_PATH) else { return Ok(()) };
+    let mut pending: Value = serde_json::from_slice(&bytes)?;
+    if pending.get("outcome").is_none() { return Ok(()); }
+    let occurred_on = date_from_unix(now_utc)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid UTC date"))?;
+    let event_id = match pending.get("event_id").and_then(Value::as_str) {
+        Some(event_id) if valid_id(event_id, 16, 64) => event_id.to_owned(),
+        Some(_) => return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid update event ID")),
+        None => {
+            let event_id = uuid_v4()?;
+            pending["event_id"] = json!(event_id);
+            pending["occurred_on"] = json!(occurred_on);
+            save_atomic(Path::new(PENDING_UPDATE_PATH), &serde_json::to_vec(&pending)?)?;
+            event_id
+        }
+    };
+    let occurred_on = pending.get("occurred_on").and_then(Value::as_str).unwrap_or(&occurred_on);
+    let body = update_result_body(&pending, &event_id, device, occurred_on)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid update result"))?;
+    fs::create_dir_all(QUEUE_ROOT)?;
+    let path = Path::new(QUEUE_ROOT).join(format!("update-{event_id}.json"));
+    if !path.exists() {
+        let record = json!({"endpoint":"/update-results", "body":body, "attempts":0, "next_attempt_utc":now_utc});
+        save_atomic(&path, &serde_json::to_vec(&record)?)?;
+    }
+    fs::remove_file(PENDING_UPDATE_PATH)
+}
+
+#[cfg(target_os = "mochios")]
 pub struct Agent {
     next_poll_ms: u64,
     next_consent_check_ms: u64,
@@ -346,6 +470,9 @@ impl Agent {
             if let Err(error) = purge_queue() {
                 mochi_user_platform::logln!("update.service: diagnostics queue purge failed kind={:?}", error.kind());
             }
+            if let Err(error) = purge_reportable_update_result() {
+                mochi_user_platform::logln!("update.service: pending update result purge failed kind={:?}", error.kind());
+            }
         }
         self.next_consent_check_ms = now_ms.saturating_add(CONSENT_CHECK_MS);
         if allowed {
@@ -353,6 +480,9 @@ impl Agent {
                 Ok(device) => {
                     if let Err(error) = queue_basic(now_utc, &device) {
                         mochi_user_platform::logln!("update.service: daily diagnostics not queued kind={:?}", error.kind());
+                    }
+                    if let Err(error) = queue_update_result(now_utc, &device) {
+                        mochi_user_platform::logln!("update.service: update result not queued kind={:?}", error.kind());
                     }
                 }
                 Err(error) => {
@@ -440,9 +570,8 @@ impl Agent {
             let Ok(bytes) = fs::read(&path) else { continue; };
             let Ok(mut record) = serde_json::from_slice::<Value>(&bytes) else { continue; };
             let Some(endpoint) = record.get("endpoint").and_then(Value::as_str) else { continue; };
-            // Crash reports need a separate, per-crash confirmation path. Update
-            // results require a real installer outcome; neither producer exists yet.
-            if endpoint != "/diagnostics" { continue; }
+            // Crash reports need a separate, per-crash confirmation path.
+            if !matches!(endpoint, "/diagnostics" | "/update-results") { continue; }
             let endpoint = endpoint.to_owned();
             let next_attempt = record.get("next_attempt_utc").and_then(Value::as_u64).unwrap_or(0);
             if next_attempt > now_utc { continue; }
@@ -554,5 +683,30 @@ mod tests {
         let (version, build) = release_identity().expect("release metadata");
         assert!(!version.is_empty());
         assert!(build > 0);
+    }
+
+    #[test]
+    fn update_result_is_bound_to_source_target_and_outcome() {
+        let pending = json!({
+            "source":{"version":"26.9","build_number":1234,"architecture":"x86_64"},
+            "target":{"version":"26.10","build_number":1300,"architecture":"x86_64"},
+            "outcome":"first_boot_succeeded",
+        });
+        let body = update_result_body(
+            &pending,
+            "5e614437-c6e2-49a1-a94a-6240057ff9a7",
+            "2e71caf1-2182-49c7-a817-1a6ceacde381",
+            "2026-09-21",
+        ).unwrap();
+        assert_eq!(body["target"]["build_number"], 1300);
+        assert_eq!(body["outcome"], "first_boot_succeeded");
+        let mut wrong_architecture = pending;
+        wrong_architecture["target"]["architecture"] = json!("aarch64");
+        assert!(update_result_body(
+            &wrong_architecture,
+            "5e614437-c6e2-49a1-a94a-6240057ff9a7",
+            "2e71caf1-2182-49c7-a817-1a6ceacde381",
+            "2026-09-21",
+        ).is_none());
     }
 }

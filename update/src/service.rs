@@ -112,11 +112,14 @@ fn confirm_trial(running: Slot, boot_slot: &str) {
     let result = crate::installer::confirm_running(&mut disk, layout, running);
     match result {
         Ok(true) => {
+            let _ = crate::diagnostics::record_boot_outcome(running, true);
             let _ = mochi_user_platform::logger::write_status_fmt(format_args!(
                 "update.service: boot system slot={boot_slot}; confirmed first boot of slot {running:?}\n"
             ));
         }
-        Ok(false) => {}
+        Ok(false) => {
+            let _ = crate::diagnostics::record_boot_outcome(running, false);
+        }
         Err(error) => {
             let _ = mochi_user_platform::logger::write_status_fmt(format_args!(
                 "update.service: boot system slot={boot_slot}; boot confirmation unavailable error={error:?}\n"
@@ -126,7 +129,7 @@ fn confirm_trial(running: Slot, boot_slot: &str) {
 }
 
 fn install_offer(running: Slot, offer: &crate::os_update::VerifiedManifest, request_id: u64) {
-    let Some((_, current_build)) = crate::diagnostics::release_identity() else {
+    let Some((current_version, current_build)) = crate::diagnostics::release_identity() else {
         mochi_user_platform::logln!("update.service: local release identity is unavailable");
         return;
     };
@@ -142,10 +145,17 @@ fn install_offer(running: Slot, offer: &crate::os_update::VerifiedManifest, requ
     match crate::installer::install(
         &mut disk, &mut source, layout, running, current_build, offer, crate::SYSTEM_PUBLIC_KEYS,
     ) {
-        Ok(target) => mochi_user_platform::logln!(
-            "update.service: update verified and staged target={target:?} build={}; reboot required",
-            offer.build_number(),
-        ),
+        Ok(target) => {
+            if let Err(error) = crate::diagnostics::record_staged_update(
+                &current_version, current_build, offer, target,
+            ) {
+                mochi_user_platform::logln!("update.service: staged update result metadata unavailable kind={:?}", error.kind());
+            }
+            mochi_user_platform::logln!(
+                "update.service: update verified and staged target={target:?} build={}; reboot required",
+                offer.build_number(),
+            );
+        }
         Err(error) => mochi_user_platform::logln!("update.service: update installation failed error={error:?}"),
     }
 }
