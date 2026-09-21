@@ -11,7 +11,7 @@ use mochios_boot_selection::Slot;
 
 const INITIALIZATION_RETRY_MS: u64 = 60_000;
 const MAX_IDLE_SLEEP_MS: u64 = 60_000;
-const TRIAL_CONFIRMATION_DELAY_MS: u64 = 5_000;
+const TRIAL_CONFIRMATION_DELAY_MS: u64 = 30_000;
 
 pub fn run() -> ! {
     let (boot_slot, running_slot) = match mochi_user_platform::boot::system_slot() {
