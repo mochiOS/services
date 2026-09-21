@@ -251,11 +251,21 @@ impl BlockDevice for SystemDisk {
     type Error = mochi_user_platform::syscall::SysError;
 
     fn read(&mut self, lba: u64, bytes: &mut [u8]) -> Result<(), Self::Error> {
-        mochi_user_platform::storage::block_read(self.disk_id, lba, bytes).map(|_| ())
+        for (index, chunk) in bytes.chunks_mut(256 * 1024).enumerate() {
+            mochi_user_platform::storage::block_read(
+                self.disk_id, lba + (index * 256 * 1024 / SECTOR_BYTES) as u64, chunk,
+            )?;
+        }
+        Ok(())
     }
 
     fn write(&mut self, lba: u64, bytes: &[u8]) -> Result<(), Self::Error> {
-        mochi_user_platform::storage::block_write(self.disk_id, lba, bytes).map(|_| ())
+        for (index, chunk) in bytes.chunks(256 * 1024).enumerate() {
+            mochi_user_platform::storage::block_write(
+                self.disk_id, lba + (index * 256 * 1024 / SECTOR_BYTES) as u64, chunk,
+            )?;
+        }
+        Ok(())
     }
 
     fn flush(&mut self) -> Result<(), Self::Error> {

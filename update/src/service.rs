@@ -11,6 +11,7 @@ use mochios_boot_selection::Slot;
 
 const INITIALIZATION_RETRY_MS: u64 = 60_000;
 const MAX_IDLE_SLEEP_MS: u64 = 60_000;
+const TRIAL_CONFIRMATION_DELAY_MS: u64 = 5_000;
 
 pub fn run() -> ! {
     let (boot_slot, running_slot) = match mochi_user_platform::boot::system_slot() {
@@ -19,11 +20,16 @@ pub fn run() -> ! {
         Ok(slot) if slot == u64::from(mochi_user_platform::boot::BOOT_SYSTEM_SLOT_B) => ("B", Some(Slot::B)),
         _ => ("unavailable", None),
     };
-    let _ = mochi_user_platform::logger::write_status_fmt(format_args!(
-        "update.service: boot system slot={boot_slot}\n"
-    ));
     if let Some(slot) = running_slot {
-        confirm_trial(slot);
+        // Reaching update.service is necessary but not sufficient evidence of a
+        // healthy boot. Give the mounted System/Data filesystems and the core
+        // service set time to settle before making the trial permanent.
+        sleep(TRIAL_CONFIRMATION_DELAY_MS);
+        confirm_trial(slot, boot_slot);
+    } else {
+        let _ = mochi_user_platform::logger::write_status_fmt(format_args!(
+            "update.service: boot system slot={boot_slot}\n"
+        ));
     }
     mochi_user_platform::logln!(
         "update.service: Developer Trust domain={}",
@@ -92,16 +98,30 @@ pub fn run() -> ! {
     }
 }
 
-fn confirm_trial(running: Slot) {
+fn confirm_trial(running: Slot, boot_slot: &str) {
     let mut disk = crate::installer::SystemDisk::boot_disk();
-    let result = crate::installer::discover_layout(&mut disk).and_then(|layout| {
-        crate::installer::confirm_running(&mut disk, layout, running)
-            .map_err(|_| crate::installer::DiscoveryError::InvalidGpt)
-    });
+    let layout = match crate::installer::discover_layout(&mut disk) {
+        Ok(layout) => layout,
+        Err(error) => {
+            let _ = mochi_user_platform::logger::write_status_fmt(format_args!(
+                "update.service: boot system slot={boot_slot}; boot-state layout unavailable error={error:?}\n"
+            ));
+            return;
+        }
+    };
+    let result = crate::installer::confirm_running(&mut disk, layout, running);
     match result {
-        Ok(true) => mochi_user_platform::logln!("update.service: confirmed first boot of slot {:?}", running),
+        Ok(true) => {
+            let _ = mochi_user_platform::logger::write_status_fmt(format_args!(
+                "update.service: boot system slot={boot_slot}; confirmed first boot of slot {running:?}\n"
+            ));
+        }
         Ok(false) => {}
-        Err(error) => mochi_user_platform::logln!("update.service: boot confirmation unavailable error={error:?}"),
+        Err(error) => {
+            let _ = mochi_user_platform::logger::write_status_fmt(format_args!(
+                "update.service: boot system slot={boot_slot}; boot confirmation unavailable error={error:?}\n"
+            ));
+        }
     }
 }
 
