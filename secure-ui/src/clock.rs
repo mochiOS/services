@@ -79,7 +79,7 @@ impl ClockValue {
     }
 }
 
-fn civil_date(days: i64) -> Option<(i64, i64, i64)> {
+pub(crate) fn civil_date(days: i64) -> Option<(i64, i64, i64)> {
     let shifted = days.checked_add(719_468)?;
     let era = if shifted >= 0 {
         shifted

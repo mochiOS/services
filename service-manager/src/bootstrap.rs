@@ -390,6 +390,9 @@ pub(crate) fn run() -> ! {
         outcome.reason
     );
     if outcome.children.binder.is_some()
+        // KVM accelerates the CPU but does not imply an emulated VT-d/AMD-Vi
+        // device. Do not show a physical-firmware warning inside a VM.
+        && !running_under_hypervisor()
         && platform::memory::framebuffer_info().is_ok_and(|info| {
             info.addr != 0
                 && info.format & mnu_abi::hypervisor::FRAMEBUFFER_FORMAT_SHARED_SURFACE == 0
@@ -408,6 +411,17 @@ pub(crate) fn run() -> ! {
         }
     }
     resident(outcome, runtime)
+}
+
+fn running_under_hypervisor() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        core::arch::x86_64::__cpuid(1).ecx & (1 << 31) != 0
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
 }
 
 fn cpu_iommu_vendor() -> &'static str {

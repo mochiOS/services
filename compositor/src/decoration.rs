@@ -1,6 +1,7 @@
 use mochi_user_platform as platform;
 
 use crate::client::{Client, ClientId};
+use crate::geometry::Rect;
 use crate::input::{PointerGrab, PointerSerial, send_event};
 use crate::protocol::*;
 use crate::state::MAX_DIMENSION;
@@ -46,6 +47,35 @@ pub(crate) fn sender_can_control_cursor(sender: u64) -> bool {
     sender_has_overlay_compat_capability(sender) || sender_has_secure_overlay_capability(sender)
 }
 
+fn rectangles_overlap(first: Rect, second: Rect) -> bool {
+    let left = i64::from(first.x).max(i64::from(second.x));
+    let top = i64::from(first.y).max(i64::from(second.y));
+    let right = (i64::from(first.x) + i64::from(first.width))
+        .min(i64::from(second.x) + i64::from(second.width));
+    let bottom = (i64::from(first.y) + i64::from(first.height))
+        .min(i64::from(second.y) + i64::from(second.height));
+    right > left && bottom > top
+}
+
+fn native_window_overlaps(windows: &[Window], surfaces: &[Surface], area: Rect) -> bool {
+    windows.iter().any(|window| {
+        if !window.live || window.state == WINDOW_STATE_MINIMIZED {
+            return false;
+        }
+        let Some(content_index) = content_surface_index_for_window(surfaces, window) else {
+            return false;
+        };
+        let content = &surfaces[content_index];
+        if content.role != SurfaceRole::Toplevel || !content.visible {
+            return false;
+        }
+        if window.state == WINDOW_STATE_MAXIMIZED {
+            return true;
+        }
+        rectangles_overlap(crate::window::window_frame_rect(content, window), area)
+    })
+}
+
 pub(crate) fn handle_request(
     clients: &mut [Client],
     surfaces: &mut [Surface],
@@ -70,6 +100,26 @@ pub(crate) fn handle_request(
         return reply;
     };
     match opcode {
+        OP_DECOR_QUERY_OVERLAP => {
+            if !sender_has_decorate_capability(sender) {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            }
+            let area = Rect {
+                x: read_u32(request, 4).unwrap_or(0) as i32,
+                y: read_u32(request, 8).unwrap_or(0) as i32,
+                width: read_u32(request, 12).unwrap_or(0),
+                height: read_u32(request, 16).unwrap_or(0),
+            };
+            if request.len() != 20 || area.width == 0 || area.height == 0
+                || area.width > MAX_DIMENSION || area.height > MAX_DIMENSION
+            {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
+                return reply;
+            }
+            put_u32(&mut reply, 0, 0);
+            put_u32(&mut reply, 4, u32::from(native_window_overlaps(windows, surfaces, area)));
+        }
         OP_DECOR_SUBSCRIBE => {
             if !sender_has_decorate_capability(sender) {
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));

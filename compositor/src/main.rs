@@ -5,6 +5,7 @@ mod context_menu;
 mod cursor;
 mod decoration;
 mod display;
+mod fps_overlay;
 mod geometry;
 mod gpu_compositor;
 mod input;

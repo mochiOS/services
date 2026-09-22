@@ -4,6 +4,7 @@ use alloc::vec::Vec;
 use crate::client::Client;
 use crate::context_menu::ContextMenuBroker;
 use crate::cursor::CursorImage;
+use crate::fps_overlay::FpsOverlay;
 use crate::input::{PointerGrab, PointerSerial};
 use crate::renderer::PresentFrame;
 use crate::surface::Surface;
@@ -54,6 +55,7 @@ pub(crate) struct CompositorState {
     pub(crate) pointer_serials: [PointerSerial; 32],
     pub(crate) pointer_x: i32,
     pub(crate) pointer_y: i32,
+    pub(crate) panel_edge_tracking: bool,
     pub(crate) cursor_x: i32,
     pub(crate) cursor_y: i32,
     pub(crate) cursor_visible: bool,
@@ -63,6 +65,7 @@ pub(crate) struct CompositorState {
     pub(crate) pointer_grab: Option<PointerGrab>,
     pub(crate) keyboard_focus: Option<usize>,
     pub(crate) present_frame: PresentFrame,
+    pub(crate) fps_overlay: FpsOverlay,
     pub(crate) display_tid: u64,
     pub(crate) display_width: u32,
     pub(crate) display_height: u32,
@@ -95,6 +98,7 @@ impl CompositorState {
             pointer_serials: [PointerSerial::default(); 32],
             pointer_x: (display_width / 2).min(display_width.saturating_sub(1)) as i32,
             pointer_y: (display_height / 2).min(display_height.saturating_sub(1)) as i32,
+            panel_edge_tracking: false,
             cursor_x: 0,
             cursor_y: 0,
             cursor_visible: false,
@@ -104,6 +108,7 @@ impl CompositorState {
             pointer_grab: None,
             keyboard_focus: None,
             present_frame: PresentFrame::default(),
+            fps_overlay: FpsOverlay::default(),
             display_tid,
             display_width,
             display_height,

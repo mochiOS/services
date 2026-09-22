@@ -5,6 +5,7 @@ use crate::display::{
     DISPLAY_PRESENT_REQ, DISPLAY_REP_BUF, display_present_gpu_panel, display_present_gpu_scene,
 };
 use crate::geometry::{Rect, choose_frame_size, clip_present_rect};
+use crate::fps_overlay;
 use crate::gpu_compositor::GpuCompositor;
 use crate::protocol::{
     OP_DISPLAY_PRESENT, OP_DISPLAY_PRESENT_RECT, PIXEL_FORMAT_ARGB8888_PREMULTIPLIED,
@@ -129,6 +130,7 @@ fn try_gpu_scene_present(
     cursor_y: i32,
     cursor_visible: bool,
     cursor_image: &CursorImage,
+    fps: Option<u32>,
     damage: Option<Rect>,
 ) -> Option<u32> {
     if present_frame.gpu_panel_disabled {
@@ -155,6 +157,7 @@ fn try_gpu_scene_present(
             cursor_y,
             cursor_visible,
             cursor_image,
+            fps,
             if force_atlas_upload { None } else { damage },
         )?;
         let byte_len = scene.len();
@@ -331,6 +334,7 @@ pub(crate) fn composite_and_present(
     cursor_y: i32,
     cursor_visible: bool,
     cursor_image: &CursorImage,
+    fps: Option<u32>,
     damage: Option<Rect>,
 ) -> u32 {
     if display_format != PIXEL_FORMAT_XRGB8888 {
@@ -348,19 +352,22 @@ pub(crate) fn composite_and_present(
             cursor_y,
             cursor_visible,
             cursor_image,
+            fps,
             damage,
         )
         .unwrap_or_else(|| errno_status(mochi_user_syscall::EIO));
     }
-    if let Some(status) = try_gpu_panel_present(
-        surfaces,
-        present_frame,
-        display_tid,
-        display_width,
-        display_height,
-        damage,
-    ) {
-        return status;
+    if fps.is_none() {
+        if let Some(status) = try_gpu_panel_present(
+            surfaces,
+            present_frame,
+            display_tid,
+            display_width,
+            display_height,
+            damage,
+        ) {
+            return status;
+        }
     }
     let Some((frame_w, frame_h)) = choose_frame_size(display_width, display_height) else {
         return errno_status(mochi_user_syscall::ERANGE);
@@ -508,6 +515,21 @@ pub(crate) fn composite_and_present(
                     }
                 }
             }
+        }
+        if let Some(fps) = fps {
+            fps_overlay::draw(fps, |rect, color| {
+                let left = rect.x.max(present_rect.x) as usize;
+                let top = rect.y.max(present_rect.y) as usize;
+                let right = (rect.x + rect.width as i32)
+                    .min(present_rect.x + present_rect.width as i32) as usize;
+                let bottom = (rect.y + rect.height as i32)
+                    .min(present_rect.y + present_rect.height as i32) as usize;
+                for y in top..bottom {
+                    for x in left..right {
+                        frame[y * frame_w + x] = color;
+                    }
+                }
+            });
         }
         if cursor_visible {
             for dy in rect_top..rect_bottom {

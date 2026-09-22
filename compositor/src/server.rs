@@ -9,6 +9,7 @@ use crate::display::{
     display_set_cursor_image, display_set_cursor_position, wait_for_service,
 };
 use crate::geometry::{Rect, merge_damage};
+use crate::fps_overlay;
 use crate::input::{
     PointerGrab, PointerSerial, finish_pointer_motion, handle_input_event, send_event,
     subscribe_input_events, update_pointer_position,
@@ -17,6 +18,7 @@ use crate::protocol::*;
 use crate::renderer::composite_and_present;
 use crate::state::CompositorState;
 use crate::surface::{Surface, handle_shared_buffer, send_frame_done};
+use crate::surface::{SurfaceRole, surface_extent};
 use crate::window::Window;
 
 static mut IPC_BUF: [u8; 4128] = [0; 4128];
@@ -26,6 +28,37 @@ fn is_pointer_motion(event: &platform::input::InputEvent) -> bool {
         event.kind,
         platform::input::EVENT_KIND_POINTER_MOVE | platform::input::EVENT_KIND_POINTER_ABSOLUTE
     )
+}
+
+const PANEL_EDGE_TRACK_HEIGHT: i32 = 160;
+const PANEL_REVEAL_EDGE_HEIGHT: i32 = 9;
+
+fn mirror_panel_edge_motion(state: &mut CompositorState) {
+    let edge_top = (state.display_height as i32).saturating_sub(PANEL_EDGE_TRACK_HEIGHT);
+    let reveal_top = (state.display_height as i32).saturating_sub(PANEL_REVEAL_EDGE_HEIGHT);
+    let was_tracking = state.panel_edge_tracking;
+    state.panel_edge_tracking = state.pointer_y >= reveal_top
+        || (was_tracking && state.pointer_y >= edge_top);
+    if !was_tracking && !state.panel_edge_tracking {
+        return;
+    }
+    for (index, surface) in state.surfaces.iter().enumerate() {
+        if !surface.live || !surface.visible || surface.role != SurfaceRole::Panel
+            || surface.x != 0 || surface.y != 0 || surface.event_endpoint == 0
+            || state.pointer_focus == Some(index)
+            || surface_extent(surface) != (state.display_width, state.display_height)
+        {
+            continue;
+        }
+        send_event(
+            surface.event_endpoint,
+            surface.token,
+            EVENT_POINTER_MOTION,
+            state.pointer_x,
+            state.pointer_y,
+            0,
+        );
+    }
 }
 
 fn process_input_event(
@@ -50,6 +83,9 @@ fn process_input_event(
         event,
     ) {
         damage = merge_damage(damage, event_damage);
+    }
+    if is_pointer_motion(event) {
+        mirror_panel_edge_motion(state);
     }
     if is_pointer_motion(event) && !state.cursor_image.is_empty() {
         let old = state
@@ -83,6 +119,7 @@ fn finish_coalesced_pointer_motion(state: &mut CompositorState) -> Option<Rect> 
         state.pointer_y,
         &mut state.pointer_focus,
     );
+    mirror_panel_edge_motion(state);
     if !state.cursor_image.is_empty() {
         let old = state
             .cursor_visible
@@ -175,7 +212,8 @@ fn handle_request(
         | OP_DECOR_BEGIN_RESIZE
         | OP_DECOR_MINIMIZE
         | OP_DECOR_TOGGLE_MAXIMIZE
-        | OP_DECOR_CLOSE_REQUEST => {
+        | OP_DECOR_CLOSE_REQUEST
+        | OP_DECOR_QUERY_OVERLAP => {
             return crate::decoration::handle_request(
                 clients,
                 surfaces,
@@ -292,13 +330,28 @@ fn handle_request(
 }
 
 fn present(state: &mut CompositorState, damage: Option<Rect>) -> u32 {
-    composite_and_present(
+    let fps = state.fps_overlay.value();
+    // None means a requested full redraw. Preserve it; only widen an actual
+    // partial update when the number shown in the overlay has changed.
+    let damage = match (damage, state.fps_overlay.needs_damage()) {
+        (Some(rect), true) => merge_damage(Some(rect), fps_overlay::BOUNDS),
+        (other, _) => other,
+    };
+    let status = composite_and_present(
         &state.surfaces, &state.windows, state.keyboard_focus,
         &mut state.present_frame, state.display_tid, state.display_width,
         state.display_height, state.display_stride, state.display_format,
         state.renderer_caps, state.cursor_x, state.cursor_y,
-        state.cursor_visible && !state.hardware_cursor, &state.cursor_image, damage,
-    )
+        state.cursor_visible && !state.hardware_cursor, &state.cursor_image,
+        fps, damage,
+    );
+    if status == 0 {
+        state.fps_overlay.mark_drawn(fps);
+        if let Ok(now) = platform::time::monotonic_milliseconds() {
+            state.fps_overlay.presented(now);
+        }
+    }
+    status
 }
 
 #[derive(Default)]
@@ -433,6 +486,9 @@ pub(crate) fn run() -> ! {
             let event = unsafe {
                 core::ptr::read_unaligned(buf.as_ptr().cast::<platform::input::InputEvent>())
             };
+            if state.fps_overlay.handle_key(&event) {
+                frame.queue(None, false);
+            }
             let input_damage = if is_pointer_motion(&event) {
                 update_pointer_position(
                     &mut state.pointer_x,

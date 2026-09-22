@@ -1,6 +1,7 @@
 use alloc::vec::Vec;
 
 use crate::cursor::CursorImage;
+use crate::fps_overlay;
 use crate::geometry::{Rect, clip_present_rect};
 use crate::protocol::{PIXEL_FORMAT_GPU_SCENE, PIXEL_FORMAT_XRGB8888};
 use crate::surface::{Surface, read_current_pixel, surface_has_current_pixels};
@@ -236,6 +237,7 @@ impl GpuCompositor {
         cursor_y: i32,
         cursor_visible: bool,
         cursor: &CursorImage,
+        fps: Option<u32>,
         dirty: Option<Rect>,
     ) -> Option<&[u8]> {
         let damage = clip_present_rect(
@@ -348,6 +350,19 @@ impl GpuCompositor {
         }
         self.desktop_vertices = self.vertices.len();
         self.desktop_batches = self.batches.len();
+        if let Some(fps) = fps {
+            let first = self.vertices.len() as u32;
+            fps_overlay::draw(fps, |bounds, argb| {
+                let color = [
+                    ((argb >> 16) & 255) as f32 / 255.0,
+                    ((argb >> 8) & 255) as f32 / 255.0,
+                    (argb & 255) as f32 / 255.0,
+                    1.0,
+                ];
+                push_solid_quad(&mut self.vertices, bounds, color);
+            });
+            push_batch(&mut self.batches, WHITE_TEXTURE_KEY, first, self.vertices.len() as u32);
+        }
         if cursor_visible {
             if let Some((width, height, _, _)) = cursor.texture() {
                 let first = self.vertices.len() as u32;

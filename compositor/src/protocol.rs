@@ -18,6 +18,7 @@ pub(crate) const OP_DECOR_BEGIN_RESIZE: u32 = 106;
 pub(crate) const OP_DECOR_MINIMIZE: u32 = 107;
 pub(crate) const OP_DECOR_TOGGLE_MAXIMIZE: u32 = 108;
 pub(crate) const OP_DECOR_CLOSE_REQUEST: u32 = 109;
+pub(crate) const OP_DECOR_QUERY_OVERLAP: u32 = 110;
 pub(crate) const OP_CONTEXT_MENU_SUBSCRIBE: u32 = 120;
 pub(crate) const OP_CONTEXT_MENU_SHOW: u32 = 121;
 pub(crate) const OP_CONTEXT_MENU_COMPLETE: u32 = 122;
