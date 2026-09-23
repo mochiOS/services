@@ -592,6 +592,18 @@ fn install_package(
             ));
         }
     }
+    if manifest.linux.is_none()
+        && (manifest.package_architecture.as_deref() != Some("x86_64")
+            || manifest.package_abi.as_deref() != Some("mochios-1"))
+    {
+        diagnostic(&alloc::format!(
+            "package.service: incompatible native package architecture={:?} abi={:?}",
+            manifest.package_architecture, manifest.package_abi
+        ));
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::ENOTSUP as i64,
+        ));
+    }
     if verification.verified_package_id != manifest.package_id
         || verification.package_digest != verification.manifest_digest
     {

@@ -3,7 +3,8 @@ use alloc::vec::Vec;
 
 use mochi_user_platform as platform;
 use mochios_http_client::{
-    Header, HttpError, HttpResponse, HttpsUrl, Method, ResponseDecoder, encode_request,
+    Header, HttpError, HttpResponse, HttpsUrl, Method, RedirectTracker, ResponseDecoder,
+    encode_request,
 };
 use mochios_net_device_protocol::{HttpFailure, HttpMethod, HttpStream, SecurityStatistics};
 
@@ -130,52 +131,69 @@ impl HttpManager {
                 HttpFailure::ConnectionLimit,
             ));
         }
-        let url = HttpsUrl::parse(raw_url).map_err(http_error)?;
+        let mut url = HttpsUrl::parse(raw_url).map_err(http_error)?;
         let method = match method {
             HttpMethod::Get => Method::Get,
             HttpMethod::Post => Method::Post,
         };
-        let mut headers = Vec::with_capacity(3);
-        if method == Method::Post && !content_type.is_empty() {
-            headers.push(Header {
-                name: "Content-Type",
-                value: content_type,
-            });
-        }
-        if !if_none_match.is_empty() {
-            headers.push(Header {
-                name: "If-None-Match",
-                value: if_none_match,
-            });
-        }
-        if !range.is_empty() {
-            headers.push(Header { name: "Range", value: range });
-        }
-        let request = encode_request(method, &url, &headers, body).map_err(http_error)?;
-        let connection = tls
-            .connect(stack, owner, url.hostname(), url.port(), started, timeout)
-            .map_err(|operation| {
-                log_tls_failure("connect", operation);
-                http_tls_error(operation)
+        let mut redirects = RedirectTracker::new();
+        let response = loop {
+            let mut headers = Vec::with_capacity(3);
+            if method == Method::Post && !content_type.is_empty() {
+                headers.push(Header {
+                    name: "Content-Type",
+                    value: content_type,
+                });
+            }
+            if !if_none_match.is_empty() {
+                headers.push(Header {
+                    name: "If-None-Match",
+                    value: if_none_match,
+                });
+            }
+            if !range.is_empty() {
+                headers.push(Header {
+                    name: "Range",
+                    value: range,
+                });
+            }
+            let request = encode_request(method, &url, &headers, body).map_err(http_error)?;
+            let connection = tls
+                .connect(stack, owner, url.hostname(), url.port(), started, timeout)
+                .map_err(|operation| {
+                    log_tls_failure("connect", operation);
+                    http_tls_error(operation)
+                })?;
+            let tls_handle = connection.handle;
+            let result = exchange(stack, tls, owner, tls_handle, &request, started, timeout);
+            if result.is_err() {
+                let _ = tls.close(stack, owner, tls_handle, started, timeout);
+            }
+            let response = result?;
+            tls.close(stack, owner, tls_handle, started, timeout)
+                .map_err(|operation| {
+                    log_tls_failure("close", operation);
+                    http_tls_error(operation)
+                })?;
+
+            if !matches!(response.status_code, 301 | 302 | 303 | 307 | 308) {
+                break response;
+            }
+            if method != Method::Get {
+                return Err(error(
+                    mochi_user_syscall::EACCES,
+                    HttpFailure::RedirectRejected,
+                ));
+            }
+            let location = response.header("location").ok_or_else(|| {
+                error(
+                    mochi_user_syscall::EINVAL,
+                    HttpFailure::RedirectRejected,
+                )
             })?;
-        let tls_handle = connection.handle;
-        let result = exchange(stack, tls, owner, tls_handle, &request, started, timeout);
-        if result.is_err() {
-            let _ = tls.close(stack, owner, tls_handle, started, timeout);
-        }
-        let response = result?;
-        if matches!(response.status_code, 301 | 302 | 303 | 307 | 308) {
-            let _ = tls.close(stack, owner, tls_handle, started, timeout);
-            return Err(error(
-                mochi_user_syscall::EACCES,
-                HttpFailure::RedirectRejected,
-            ));
-        }
-        tls.close(stack, owner, tls_handle, started, timeout)
-            .map_err(|operation| {
-                log_tls_failure("close", operation);
-                http_tls_error(operation)
-            })?;
+            url = redirects.follow(&url, location).map_err(http_error)?;
+            self.statistics.http_redirects = self.statistics.http_redirects.saturating_add(1);
+        };
         let headers = serialize_headers(&response)?;
         let content_type = response.header("content-type").unwrap_or("").into();
         let handle = self.allocate_handle()?;
