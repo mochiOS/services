@@ -1,0 +1,17 @@
+[package]
+provenance = "built-in"
+id = "org.mochios.workspace"
+name = "Workspace Service"
+version = "1"
+vendor = "mochiOS"
+
+[[binary]]
+path = "/system/services/workspace.service"
+kind = "service"
+requires = [
+    "fs.read.all",
+    "fs.write.all",
+    "ipc.client",
+    "ipc.server",
+]
+

@@ -18,6 +18,7 @@ pub(crate) enum FixedService {
     Binder,
     Installer,
     Update,
+    Workspace,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,6 +105,10 @@ pub(crate) const fn fixed_service_spec(service: FixedService) -> ServiceSpec {
         FixedService::Update => ServiceSpec::privileged(
             "/system/services/update.service",
             "/system/packages/update/manifest.toml",
+        ),
+        FixedService::Workspace => ServiceSpec::privileged(
+            "/system/services/workspace.service",
+            "/system/packages/workspace/manifest.toml",
         ),
     }
 }
@@ -238,6 +243,13 @@ mod tests {
                 FixedService::Update,
                 "/system/services/update.service",
                 "/system/packages/update/manifest.toml",
+                ExecutionClass::Privileged,
+                true,
+            ),
+            (
+                FixedService::Workspace,
+                "/system/services/workspace.service",
+                "/system/packages/workspace/manifest.toml",
                 ExecutionClass::Privileged,
                 true,
             ),

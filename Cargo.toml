@@ -20,6 +20,7 @@ members = [
     "tty",
     "update",
     "user",
+    "workspace",
 ]
 
 [patch.crates-io]
@@ -28,3 +29,6 @@ mnu-abi = { git = "https://github.com/mochiOS/mnu", package = "mnu-abi" }
 
 [patch."https://github.com/mochiOS/mBoot"]
 mboot-protocol = { path = "mboot-protocol" }
+
+[patch."https://github.com/mochiOS/syscalls"]
+mochios-workspace-protocol = { path = "../user/crates/workspace-protocol" }

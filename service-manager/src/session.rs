@@ -11,6 +11,7 @@ pub(crate) struct ActiveSession {
     pub(crate) id: u64,
     pub(crate) identity: platform::service_ready::SessionIdentity,
     pub(crate) linux_pid: Option<u64>,
+    pub(crate) workspace_pid: u64,
     pub(crate) binder_pid: u64,
 }
 
@@ -83,6 +84,7 @@ mod tests {
             id: u64::MAX,
             identity: platform::service_ready::SessionIdentity { uid: 1, gid: 1 },
             linux_pid: Some(3),
+            workspace_pid: 4,
             binder_pid: 2,
         };
         assert_eq!(session.next_id(), 1);

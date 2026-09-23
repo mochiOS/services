@@ -18,6 +18,7 @@ pub(crate) enum ReadyService {
     Network,
     User,
     SecureUi,
+    Workspace,
 }
 
 impl ReadyService {
@@ -28,6 +29,7 @@ impl ReadyService {
             Self::Network => "network.service",
             Self::User => "user.service",
             Self::SecureUi => "secure-ui.service",
+            Self::Workspace => "workspace.service",
         }
     }
 }
@@ -50,11 +52,13 @@ pub(crate) struct ReadyHandshake {
     network_token: u64,
     user_token: u64,
     secure_ui_token: u64,
+    workspace_token: u64,
     input_status: platform::service_ready::OneShotStatus,
     display_status: platform::service_ready::OneShotStatus,
     network_status: platform::service_ready::OneShotStatus,
     user_status: platform::service_ready::OneShotStatus,
     secure_ui_status: platform::service_ready::OneShotStatus,
+    workspace_status: platform::service_ready::OneShotStatus,
     deferred: VecDeque<DeferredMessage>,
 }
 
@@ -100,6 +104,16 @@ impl ReadyHandshake {
                 secure_ui_token = 1;
             }
         }
+        let mut workspace_token = platform::service_ready::generate_token()
+            .map_err(|error| ReadyError::Ipc(error.raw().unsigned_abs()))?;
+        if [input_token, display_token, network_token, user_token, secure_ui_token]
+            .contains(&workspace_token)
+        {
+            workspace_token ^= 0xc3c3_3c3c_a5a5_5a5a;
+            if workspace_token == 0 {
+                workspace_token = 1;
+            }
+        }
         Ok(Self {
             endpoint,
             input_token,
@@ -107,11 +121,13 @@ impl ReadyHandshake {
             network_token,
             user_token,
             secure_ui_token,
+            workspace_token,
             input_status: platform::service_ready::OneShotStatus::new(),
             display_status: platform::service_ready::OneShotStatus::new(),
             network_status: platform::service_ready::OneShotStatus::new(),
             user_status: platform::service_ready::OneShotStatus::new(),
             secure_ui_status: platform::service_ready::OneShotStatus::new(),
+            workspace_status: platform::service_ready::OneShotStatus::new(),
             deferred: VecDeque::new(),
         })
     }
@@ -127,6 +143,7 @@ impl ReadyHandshake {
             ReadyService::Network => self.network_token,
             ReadyService::User => self.user_token,
             ReadyService::SecureUi => self.secure_ui_token,
+            ReadyService::Workspace => self.workspace_token,
         };
         platform::service_ready::Target {
             endpoint: self.endpoint,
@@ -141,6 +158,7 @@ impl ReadyHandshake {
             ReadyService::Network => self.network_status.get(),
             ReadyService::User => self.user_status.get(),
             ReadyService::SecureUi => self.secure_ui_status.get(),
+            ReadyService::Workspace => self.workspace_status.get(),
         }
     }
 
@@ -155,6 +173,8 @@ impl ReadyHandshake {
             &mut self.user_status
         } else if token == self.secure_ui_token {
             &mut self.secure_ui_status
+        } else if token == self.workspace_token {
+            &mut self.workspace_status
         } else {
             return Err(ReadyError::InvalidMessage);
         };
@@ -344,5 +364,6 @@ mod tests {
         assert_eq!(ready_timeout(ReadyService::Display), 5_000);
         assert_eq!(ready_timeout(ReadyService::User), 5_000);
         assert_eq!(ready_timeout(ReadyService::SecureUi), 5_000);
+        assert_eq!(ready_timeout(ReadyService::Workspace), 5_000);
     }
 }

@@ -76,6 +76,49 @@ impl Runtime {
         }
     }
 
+    fn spawn_workspace_session(
+        &mut self,
+        identity: platform::service_ready::SessionIdentity,
+        session_id: u64,
+    ) -> Option<u64> {
+        let owns_handshake = self.ready.is_none();
+        if !self.ensure_ready_handshake() {
+            return None;
+        }
+        let target = self
+            .ready
+            .as_ref()
+            .map(|handshake| handshake.target(ReadyService::Workspace))?;
+        let process_id = match service_launcher::spawn_user_session(
+            FixedService::Workspace,
+            self.logger_endpoint,
+            identity,
+            session_id,
+            Some(target),
+        ) {
+            Ok(process_id) => process_id,
+            Err(error) => {
+                platform::logln!(
+                    "service-manager.service: workspace.service spawn failed errno={}",
+                    errno(error)
+                );
+                return None;
+            }
+        };
+        platform::logln!(
+            "service-manager.service: workspace.service spawned pid={}",
+            process_id
+        );
+        let ready = self.wait_ready(ReadyService::Workspace, process_id);
+        if owns_handshake {
+            if let Some(handshake) = self.ready.as_mut() {
+                self.deferred_requests.extend(handshake.take_deferred());
+            }
+            self.ready = None;
+        }
+        ready.then_some(process_id)
+    }
+
     fn authenticate_session(
         &mut self,
         lock_uid: Option<u32>,
@@ -236,7 +279,8 @@ impl BootstrapOperations for Runtime {
             | FixedService::Linux
             | FixedService::Binder
             | FixedService::Installer
-            | FixedService::Update => None,
+            | FixedService::Update
+            | FixedService::Workspace => None,
         };
         if matches!(service, FixedService::Display) && ready_target.is_none() {
             platform::logln!(
@@ -270,11 +314,15 @@ impl BootstrapOperations for Runtime {
         identity: platform::service_ready::SessionIdentity,
         session_id: u64,
     ) -> Option<u64> {
+        if service == FixedService::Workspace {
+            return self.spawn_workspace_session(identity, session_id);
+        }
         match service_launcher::spawn_user_session(
             service,
             self.logger_endpoint,
             identity,
             session_id,
+            None,
         ) {
             Ok(process_id) => {
                 platform::logln!(
@@ -452,6 +500,7 @@ fn service_name(service: FixedService) -> &'static str {
         FixedService::Binder => "Binder.app",
         FixedService::Installer => "Installer.app",
         FixedService::Update => "update.service",
+        FixedService::Workspace => "workspace.service",
     }
 }
 
@@ -494,14 +543,15 @@ fn log_ready_error(service: ReadyService, error: ReadyError) {
 
 fn resident(outcome: BootstrapOutcome, runtime: Option<Runtime>) -> ! {
     let mut runtime = runtime;
-    let mut active_session =
-        outcome
-            .identity
-            .zip(outcome.children.binder)
-            .map(|(identity, binder_pid)| ActiveSession {
+    let mut active_session = outcome
+        .identity
+        .zip(outcome.children.binder)
+        .zip(outcome.children.workspace)
+        .map(|((identity, binder_pid), workspace_pid)| ActiveSession {
                 id: outcome.session_id,
                 identity,
                 linux_pid: outcome.children.linux,
+                workspace_pid,
                 binder_pid,
             });
     if active_session.is_some()
@@ -613,15 +663,21 @@ fn resident(outcome: BootstrapOutcome, runtime: Option<Runtime>) -> ! {
                 if let Some(linux_pid) = session.linux_pid {
                     let _ = terminate_process_tree(linux_pid);
                 }
+                let _ = terminate_process_tree(session.workspace_pid);
                 let Some(identity) = runtime.authenticate_session(None) else {
                     continue;
                 };
                 let session_id = session.next_id();
+                let Some(workspace_pid) = runtime.spawn_workspace_session(identity, session_id)
+                else {
+                    continue;
+                };
                 let linux_pid = service_launcher::spawn_user_session(
                     FixedService::Linux,
                     runtime.logger_endpoint,
                     identity,
                     session_id,
+                    None,
                 )
                 .ok();
                 match service_launcher::spawn_user_session(
@@ -629,12 +685,14 @@ fn resident(outcome: BootstrapOutcome, runtime: Option<Runtime>) -> ! {
                     runtime.logger_endpoint,
                     identity,
                     session_id,
+                    None,
                 ) {
                     Ok(binder_pid) => {
                         active_session = Some(ActiveSession {
                             id: session_id,
                             identity,
                             linux_pid,
+                            workspace_pid,
                             binder_pid,
                         });
                     }

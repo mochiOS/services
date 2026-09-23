@@ -97,8 +97,13 @@ pub(crate) fn spawn_user_session(
     logger_endpoint: u64,
     identity: platform::service_ready::SessionIdentity,
     session_id: u64,
+    ready_target: Option<platform::service_ready::Target>,
 ) -> Result<u64, mochi_user_syscall::SysError> {
-    let mut arguments = fixed_service_arguments(service, logger_endpoint, None);
+    let ready_target = ready_target.map(|target| ReadyTarget {
+        endpoint: target.endpoint,
+        token: target.token,
+    });
+    let mut arguments = fixed_service_arguments(service, logger_endpoint, ready_target);
     if let Some(user) = session_user(identity.uid) {
         arguments.push(alloc::format!("{SESSION_USER_ARG_PREFIX}{}", user.name));
         for (name, value) in [

@@ -15,6 +15,7 @@ pub(crate) struct ChildProcesses {
     pub(crate) binder: Option<u64>,
     pub(crate) installer: Option<u64>,
     pub(crate) update: Option<u64>,
+    pub(crate) workspace: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,6 +34,7 @@ pub(crate) enum StopReason {
     SecureUiLoginFailed,
     BinderSpawnFailed,
     InstallerSpawnFailed,
+    WorkspaceSpawnFailed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,6 +61,7 @@ impl BootstrapOutcome {
                 binder: None,
                 installer: None,
                 update: None,
+                workspace: None,
             },
             reason: StopReason::DriverControlInitializationFailed,
             identity: None,
@@ -163,6 +166,11 @@ pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> Bootstra
     };
 
     let session_id = 1;
+    let Some(workspace) = operations.spawn_user_session(FixedService::Workspace, identity, session_id)
+    else {
+        return outcome(children, StopReason::WorkspaceSpawnFailed);
+    };
+    children.workspace = Some(workspace);
     children.linux = operations.spawn_user_session(FixedService::Linux, identity, session_id);
     let Some(binder) = operations.spawn_user_session(FixedService::Binder, identity, session_id)
     else {
@@ -301,6 +309,7 @@ mod tests {
                 FixedService::Binder => 17,
                 FixedService::Installer => 21,
                 FixedService::Update => 18,
+                FixedService::Workspace => 22,
             })
         }
 
@@ -315,6 +324,7 @@ mod tests {
                 FixedService::Linux => 20,
                 FixedService::Binder => 17,
                 FixedService::Installer => 21,
+                FixedService::Workspace => 22,
                 _ => unreachable!("only user-session services are accepted"),
             })
         }
@@ -378,6 +388,7 @@ mod tests {
             Event::WaitUser,
             Event::Spawn(FixedService::SecureUi),
             Event::WaitSecureUiLogin,
+            Event::SpawnUserSession(FixedService::Workspace, TEST_IDENTITY),
             Event::SpawnUserSession(FixedService::Linux, TEST_IDENTITY),
             Event::SpawnUserSession(FixedService::Binder, TEST_IDENTITY),
             Event::NotifyMbootStage(MbootStage::Desktop),
@@ -400,6 +411,7 @@ mod tests {
         assert_eq!(outcome.children.network, Some(14));
         assert_eq!(outcome.children.user, Some(15));
         assert_eq!(outcome.children.secure_ui, Some(16));
+        assert_eq!(outcome.children.workspace, Some(22));
         assert_eq!(outcome.children.linux, Some(20));
         assert_eq!(outcome.children.binder, Some(17));
         assert_eq!(outcome.children.installer, None);

@@ -88,3 +88,10 @@ fs = "rootfs"
 description = "mochiOS Linux GUI bridge service"
 autostart = false
 order = 12
+
+[workspace.service]
+dir = "workspace"
+fs = "rootfs"
+description = "mochiOS user workspace service"
+autostart = false
+order = 13

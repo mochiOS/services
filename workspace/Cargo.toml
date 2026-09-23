@@ -1,0 +1,17 @@
+[package]
+name = "workspace-service"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mochios-workspace-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-workspace-protocol" }
+mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }
+mochi-user-syscall = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-syscall" }
+
+[[bin]]
+name = "workspace-service"
+path = "src/main.rs"
+bench = false
+
+[lib]
+path = "src/lib.rs"

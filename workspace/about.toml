@@ -1,0 +1,5 @@
+name = "Workspace Service"
+bundle-id = "org.mochios.workspace"
+version = "1.0.0"
+description = "Provides session clipboard and application association services"
+
