@@ -13,5 +13,5 @@ requires = [
     "fs.write.all",
     "ipc.client",
     "ipc.server",
+    "process.spawn",
 ]
-
