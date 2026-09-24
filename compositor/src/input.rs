@@ -165,6 +165,8 @@ pub(crate) fn send_event(endpoint: u64, surface_token: u64, kind: u32, a: i32, b
         && kind != EVENT_POINTER_BUTTON
         && kind != EVENT_POINTER_SCROLL
         && kind != EVENT_APPEARANCE_CHANGED
+        && kind != EVENT_FOCUS_GAINED
+        && kind != EVENT_FOCUS_LOST
     {
         let _ = platform::ipc::send(endpoint, &event);
         return;
@@ -342,6 +344,26 @@ pub(crate) fn update_keyboard_focus(
     }
 }
 
+fn pointer_keyboard_focus_target(
+    surfaces: &[Surface],
+    windows: &[Window],
+    target: Option<usize>,
+    current: Option<usize>,
+) -> Option<usize> {
+    let index = target?;
+    let surface = surfaces.get(index)?;
+    if surface.is_decoration {
+        let window_index = window_index_by_id(windows, surface.window)?;
+        return content_surface_index_for_window(surfaces, &windows[window_index]);
+    }
+    match surface.role {
+        SurfaceRole::Toplevel | SurfaceRole::Popup | SurfaceRole::SecureOverlay => Some(index),
+        // The desktop, menu bar, and Dock are shell chrome. Clicking them must
+        // not redirect application keyboard input to Binder's panel surface.
+        SurfaceRole::Background | SurfaceRole::Panel => current,
+    }
+}
+
 pub(crate) fn handle_input_event(
     surfaces: &mut [Surface],
     windows: &mut [Window],
@@ -380,17 +402,33 @@ pub(crate) fn handle_input_event(
             }
             let mut needs_window_redraw = false;
             if event.flags & platform::input::FLAG_PRESS != 0 {
-                let focus = target.and_then(|index| {
-                    let surface = &surfaces[index];
-                    if surface.is_decoration {
-                        let window_index = window_index_by_id(windows, surface.window)?;
-                        content_surface_index_for_window(surfaces, &windows[window_index])
-                    } else {
-                        Some(index)
-                    }
-                });
                 let previous_focus = *keyboard_focus;
-                update_keyboard_focus(surfaces, keyboard_focus, focus);
+                let focus = pointer_keyboard_focus_target(
+                    surfaces,
+                    windows,
+                    target,
+                    previous_focus,
+                );
+                if focus == previous_focus {
+                    // Focus notifications have no acknowledgement. Reaffirm
+                    // focus on an explicit press so a client can recover when
+                    // its initial focus event arrived before its event loop.
+                    if let Some(index) = focus
+                        && let Some(surface) = surfaces.get(index)
+                        && surface.live
+                    {
+                        send_event(
+                            surface.event_endpoint,
+                            surface.token,
+                            EVENT_FOCUS_GAINED,
+                            0,
+                            0,
+                            0,
+                        );
+                    }
+                } else {
+                    update_keyboard_focus(surfaces, keyboard_focus, focus);
+                }
                 needs_window_redraw = previous_focus != *keyboard_focus;
                 if let Some(index) = target {
                     let window = surfaces[index].window;
@@ -495,7 +533,11 @@ fn encode_key_event_detail(flags: u16, modifiers: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_key_event_detail, encode_surface_event};
+    use super::{
+        encode_key_event_detail, encode_surface_event, pointer_keyboard_focus_target,
+    };
+    use crate::surface::{Surface, SurfaceHandle, SurfaceRole};
+    use crate::window::{Window, WindowId};
 
     #[test]
     fn key_event_detail_preserves_flags_and_modifiers() {
@@ -510,6 +552,50 @@ mod tests {
         assert_eq!(&event[8..12], &3i32.to_le_bytes());
         assert_eq!(&event[12..16], &4u32.to_le_bytes());
         assert_eq!(&event[16..24], &0x0102_0304_0506_0708u64.to_le_bytes());
+    }
+
+    #[test]
+    fn shell_surfaces_do_not_steal_application_keyboard_focus() {
+        let mut application = Surface::empty();
+        application.live = true;
+        application.role = SurfaceRole::Toplevel;
+        let mut panel = Surface::empty();
+        panel.live = true;
+        panel.role = SurfaceRole::Panel;
+
+        assert_eq!(
+            pointer_keyboard_focus_target(&[application, panel], &[], Some(1), Some(0)),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn decoration_press_focuses_its_window_content() {
+        let content_handle = SurfaceHandle(41);
+        let window_id = WindowId(7);
+        let mut content = Surface::empty();
+        content.live = true;
+        content.handle = content_handle;
+        content.token = content_handle.0;
+        content.window = window_id;
+        let mut decoration = Surface::empty();
+        decoration.live = true;
+        decoration.is_decoration = true;
+        decoration.window = window_id;
+        let mut window = Window::empty();
+        window.live = true;
+        window.id = window_id;
+        window.content = content_handle;
+
+        assert_eq!(
+            pointer_keyboard_focus_target(
+                &[content, decoration],
+                &[window],
+                Some(1),
+                None,
+            ),
+            Some(0)
+        );
     }
 }
 
