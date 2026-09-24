@@ -67,6 +67,10 @@ impl SurfaceRole {
     }
 }
 
+const fn takes_keyboard_focus_on_create(role: SurfaceRole) -> bool {
+    matches!(role, SurfaceRole::Toplevel | SurfaceRole::SecureOverlay)
+}
+
 #[derive(Clone, Copy, Default)]
 pub(crate) struct SurfaceRights {
     bits: u32,
@@ -1110,7 +1114,7 @@ pub(crate) fn handle_request(
                 windows[slot].content = handle;
                 windows[slot].resizable = true;
             }
-            if role == SurfaceRole::SecureOverlay {
+            if takes_keyboard_focus_on_create(role) {
                 update_keyboard_focus(surfaces, keyboard_focus, Some(index));
             }
             put_u32(&mut reply, 0, 0);
@@ -1496,4 +1500,18 @@ pub(crate) fn handle_request(
         _ => put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL)),
     }
     reply
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SurfaceRole, takes_keyboard_focus_on_create};
+
+    #[test]
+    fn new_toplevel_windows_take_keyboard_focus() {
+        assert!(takes_keyboard_focus_on_create(SurfaceRole::Toplevel));
+        assert!(takes_keyboard_focus_on_create(SurfaceRole::SecureOverlay));
+        assert!(!takes_keyboard_focus_on_create(SurfaceRole::Popup));
+        assert!(!takes_keyboard_focus_on_create(SurfaceRole::Panel));
+        assert!(!takes_keyboard_focus_on_create(SurfaceRole::Background));
+    }
 }
