@@ -358,9 +358,12 @@ fn pointer_keyboard_focus_target(
     }
     match surface.role {
         SurfaceRole::Toplevel | SurfaceRole::Popup | SurfaceRole::SecureOverlay => Some(index),
-        // The desktop, menu bar, and Dock are shell chrome. Clicking them must
-        // not redirect application keyboard input to Binder's panel surface.
-        SurfaceRole::Background | SurfaceRole::Panel => current,
+        // The menu bar and Dock are shell chrome, so interacting with them
+        // does not redirect keyboard input to Binder's panel surface. The
+        // desktop background is different: clicking it deactivates the
+        // application window and clears keyboard focus.
+        SurfaceRole::Panel => current,
+        SurfaceRole::Background => None,
     }
 }
 
@@ -566,6 +569,21 @@ mod tests {
         assert_eq!(
             pointer_keyboard_focus_target(&[application, panel], &[], Some(1), Some(0)),
             Some(0)
+        );
+    }
+
+    #[test]
+    fn desktop_background_clears_application_keyboard_focus() {
+        let mut application = Surface::empty();
+        application.live = true;
+        application.role = SurfaceRole::Toplevel;
+        let mut background = Surface::empty();
+        background.live = true;
+        background.role = SurfaceRole::Background;
+
+        assert_eq!(
+            pointer_keyboard_focus_target(&[application, background], &[], Some(1), Some(0)),
+            None
         );
     }
 
