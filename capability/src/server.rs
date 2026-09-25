@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use crate::app_spawn::{SPAWN_APP_OPCODE, spawn_application_from_manifest};
 use crate::dynamic_grant::{authorize_dynamic_capability, is_trusted_prompt_broker};
 use crate::persistent_grant::{authorize_persistent_capability, has_persistent_grant};
+use crate::policy::needs_app_prompt;
 use crate::resolver::{
     CapabilityDenyReason, application_identity, binary_caps, decide_binary_capabilities,
     authorize_spawn, encode_exec_authorization_args, encode_identity_args, encode_nul_list,
@@ -204,14 +205,21 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                     let mut user_allowed = Vec::new();
                     let mut caller_allowed = Vec::new();
                     for capability in &capability_decision.requested {
-                        if platform::capability::check_thread(sender, capability) == Ok(1) {
-                            caller_allowed.push(capability.clone());
-                        }
-                        if platform::capability::capability_from_string(capability)
-                            != platform::capability::CapabilityClass::UserGrantable
+                        let already_held =
+                            platform::capability::check_thread(sender, capability) == Ok(1);
+                        let user_grantable = platform::capability::capability_from_string(capability)
+                            == platform::capability::CapabilityClass::UserGrantable;
+                        let policy_allows = user_grantable
+                            && !needs_app_prompt(&state.app_prompt_policy, capability);
+                        let user_authorized = !user_grantable
                             || same_identity
                             || has_persistent_grant(&target_context, capability, None)
-                        {
+                            || policy_allows;
+
+                        if already_held {
+                            caller_allowed.push(capability.clone());
+                        }
+                        if user_authorized {
                             user_allowed.push(capability.clone());
                         }
                     }
