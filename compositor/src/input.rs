@@ -8,7 +8,7 @@ use crate::protocol::{
     EVENT_POINTER_BUTTON, EVENT_POINTER_ENTER, EVENT_POINTER_LEAVE, EVENT_POINTER_MOTION,
     EVENT_POINTER_SCROLL, put_i32, put_u32, put_u64,
 };
-use crate::state::MAX_DIMENSION;
+use crate::state::{MAX_DIMENSION, ModalSession};
 use crate::surface::surface_extent;
 use crate::surface::{Surface, SurfaceHandle, SurfaceRole, read_current_pixel};
 use crate::window::{
@@ -156,6 +156,70 @@ fn hit_test(surfaces: &[Surface], windows: &[Window], x: i32, y: i32) -> Option<
     hit
 }
 
+pub(crate) fn surface_process(
+    surfaces: &[Surface],
+    windows: &[Window],
+    index: usize,
+) -> Option<u64> {
+    let surface = surfaces.get(index)?;
+    if !surface.live {
+        return None;
+    }
+    if !surface.is_decoration {
+        return (surface.owner_process != 0).then_some(surface.owner_process);
+    }
+    let window_index = window_index_by_id(windows, surface.window)?;
+    let content_index = content_surface_index_for_window(surfaces, &windows[window_index])?;
+    let process = surfaces.get(content_index)?.owner_process;
+    (process != 0).then_some(process)
+}
+
+fn blocking_modal_process(sessions: &[ModalSession], process: u64) -> Option<u64> {
+    sessions
+        .iter()
+        .rev()
+        .find(|session| session.owner_process == process)
+        .map(|session| session.modal_process)
+}
+
+pub(crate) fn frontmost_process_surface(
+    surfaces: &[Surface],
+    process: u64,
+) -> Option<usize> {
+    surfaces
+        .iter()
+        .enumerate()
+        .filter(|(_, surface)| {
+            surface.live
+                && surface.visible
+                && !surface.is_decoration
+                && surface.owner_process == process
+                && matches!(
+                    surface.role,
+                    SurfaceRole::Toplevel
+                        | SurfaceRole::SecureOverlay
+                        | SurfaceRole::SystemModal
+                )
+        })
+        .max_by_key(|(_, surface)| (surface.role.stack_layer(), surface.z))
+        .map(|(index, _)| index)
+}
+
+fn modal_filtered_target(
+    surfaces: &[Surface],
+    windows: &[Window],
+    sessions: &[ModalSession],
+    target: Option<usize>,
+) -> Option<usize> {
+    let index = target?;
+    let Some(process) = surface_process(surfaces, windows, index) else {
+        return Some(index);
+    };
+    blocking_modal_process(sessions, process)
+        .is_none()
+        .then_some(index)
+}
+
 pub(crate) fn send_event(endpoint: u64, surface_token: u64, kind: u32, a: i32, b: i32, c: u32) {
     if endpoint == 0 {
         return;
@@ -228,11 +292,17 @@ fn send_decoration_pointer_event(endpoint: u64, kind: u32, window_token: u64, x:
 fn dispatch_pointer_motion(
     surfaces: &[Surface],
     windows: &[Window],
+    modal_sessions: &[ModalSession],
     pointer_x: i32,
     pointer_y: i32,
     pointer_focus: &mut Option<usize>,
 ) {
-    let next = hit_test(surfaces, windows, pointer_x, pointer_y);
+    let next = modal_filtered_target(
+        surfaces,
+        windows,
+        modal_sessions,
+        hit_test(surfaces, windows, pointer_x, pointer_y),
+    );
     if *pointer_focus != next {
         if let Some(index) = *pointer_focus {
             if let Some(surface) = surfaces.get(index)
@@ -344,6 +414,34 @@ pub(crate) fn update_keyboard_focus(
     }
 }
 
+/// Restores focus to the frontmost remaining application window after the
+/// focused client closes a window. Shell chrome is deliberately excluded.
+pub(crate) fn restore_keyboard_focus(
+    surfaces: &[Surface],
+    keyboard_focus: &mut Option<usize>,
+) {
+    if keyboard_focus.is_some() {
+        return;
+    }
+    let next = surfaces
+        .iter()
+        .enumerate()
+        .filter(|(_, surface)| {
+            surface.live
+                && surface.visible
+                && !surface.is_decoration
+                && matches!(
+                    surface.role,
+                    SurfaceRole::Toplevel
+                        | SurfaceRole::SecureOverlay
+                        | SurfaceRole::SystemModal
+                )
+        })
+        .max_by_key(|(_, surface)| (surface.role.stack_layer(), surface.z))
+        .map(|(index, _)| index);
+    update_keyboard_focus(surfaces, keyboard_focus, next);
+}
+
 fn pointer_keyboard_focus_target(
     surfaces: &[Surface],
     windows: &[Window],
@@ -357,7 +455,10 @@ fn pointer_keyboard_focus_target(
         return content_surface_index_for_window(surfaces, &windows[window_index]);
     }
     match surface.role {
-        SurfaceRole::Toplevel | SurfaceRole::Popup | SurfaceRole::SecureOverlay => Some(index),
+        SurfaceRole::Toplevel
+        | SurfaceRole::Popup
+        | SurfaceRole::SecureOverlay
+        | SurfaceRole::SystemModal => Some(index),
         // The menu bar and Dock are shell chrome, so interacting with them
         // does not redirect keyboard input to Binder's panel surface. The
         // desktop background is different: clicking it deactivates the
@@ -380,6 +481,7 @@ pub(crate) fn handle_input_event(
     pointer_focus: &mut Option<usize>,
     keyboard_focus: &mut Option<usize>,
     pointer_grab: &mut Option<PointerGrab>,
+    modal_sessions: &[ModalSession],
     context_menu: &mut ContextMenuBroker,
     event: &platform::input::InputEvent,
 ) -> Option<Rect> {
@@ -390,13 +492,29 @@ pub(crate) fn handle_input_event(
                 surfaces,
                 windows,
                 pointer_grab,
+                modal_sessions,
                 *pointer_x,
                 *pointer_y,
                 pointer_focus,
             )
         }
         platform::input::EVENT_KIND_POINTER_BUTTON => {
-            let target = hit_test(surfaces, windows, *pointer_x, *pointer_y);
+            let raw_target = hit_test(surfaces, windows, *pointer_x, *pointer_y);
+            let blocked_modal = raw_target
+                .and_then(|index| surface_process(surfaces, windows, index))
+                .and_then(|process| blocking_modal_process(modal_sessions, process));
+            if let Some(modal_process) = blocked_modal {
+                if event.flags & platform::input::FLAG_PRESS != 0
+                    && let Some(index) = frontmost_process_surface(surfaces, modal_process)
+                {
+                    let window = surfaces[index].window;
+                    raise_window(surfaces, windows, next_z, window);
+                    update_keyboard_focus(surfaces, keyboard_focus, Some(index));
+                    return Some(Rect::full(display_width, display_height));
+                }
+                return None;
+            }
+            let target = raw_target;
             if context_menu.capture_pointer_button(
                 target.map(|index| surfaces[index].owner),
                 event.flags & platform::input::FLAG_PRESS != 0,
@@ -510,7 +628,18 @@ pub(crate) fn handle_input_event(
             ) {
                 return None;
             }
-            if let Some(index) = *keyboard_focus {
+            let target = keyboard_focus.map(|index| {
+                let Some(process) = surface_process(surfaces, windows, index) else {
+                    return index;
+                };
+                blocking_modal_process(modal_sessions, process)
+                    .and_then(|modal| frontmost_process_surface(surfaces, modal))
+                    .unwrap_or(index)
+            });
+            if target != *keyboard_focus {
+                update_keyboard_focus(surfaces, keyboard_focus, target);
+            }
+            if let Some(index) = target {
                 if let Some(surface) = surfaces.get(index)
                     && surface.live
                 {
@@ -537,8 +666,10 @@ fn encode_key_event_detail(flags: u16, modifiers: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        encode_key_event_detail, encode_surface_event, pointer_keyboard_focus_target,
+        encode_key_event_detail, encode_surface_event, modal_filtered_target,
+        pointer_keyboard_focus_target, surface_process,
     };
+    use crate::state::ModalSession;
     use crate::surface::{Surface, SurfaceHandle, SurfaceRole};
     use crate::window::{Window, WindowId};
 
@@ -596,6 +727,7 @@ mod tests {
         content.handle = content_handle;
         content.token = content_handle.0;
         content.window = window_id;
+        content.owner_process = 42;
         let mut decoration = Surface::empty();
         decoration.live = true;
         decoration.is_decoration = true;
@@ -604,14 +736,43 @@ mod tests {
         window.live = true;
         window.id = window_id;
         window.content = content_handle;
+        let surfaces = [content, decoration];
+        let windows = [window];
 
         assert_eq!(
-            pointer_keyboard_focus_target(
-                &[content, decoration],
-                &[window],
-                Some(1),
-                None,
-            ),
+            pointer_keyboard_focus_target(&surfaces, &windows, Some(1), None),
+            Some(0)
+        );
+        assert_eq!(surface_process(&surfaces, &windows, 1), Some(42));
+    }
+
+    #[test]
+    fn process_modal_blocks_only_its_owner() {
+        let mut owner = Surface::empty();
+        owner.live = true;
+        owner.owner_process = 10;
+        let mut modal = Surface::empty();
+        modal.live = true;
+        modal.owner_process = 20;
+        let surfaces = [owner, modal];
+        let sessions = [ModalSession {
+            owner_process: 10,
+            modal_process: 20,
+        }];
+
+        assert_eq!(
+            modal_filtered_target(&surfaces, &[], &sessions, Some(0)),
+            None
+        );
+        assert_eq!(
+            modal_filtered_target(&surfaces, &[], &sessions, Some(1)),
+            Some(1)
+        );
+
+        let mut unattributed = Surface::empty();
+        unattributed.live = true;
+        assert_eq!(
+            modal_filtered_target(&[unattributed], &[], &sessions, Some(0)),
             Some(0)
         );
     }
@@ -653,16 +814,24 @@ pub(crate) fn finish_pointer_motion(
     surfaces: &mut [Surface],
     windows: &[Window],
     pointer_grab: &Option<PointerGrab>,
+    modal_sessions: &[ModalSession],
     pointer_x: i32,
     pointer_y: i32,
     pointer_focus: &mut Option<usize>,
 ) -> Option<Rect> {
     let damage = apply_pointer_grab(surfaces, windows, pointer_grab, pointer_x, pointer_y);
-    dispatch_pointer_motion(surfaces, windows, pointer_x, pointer_y, pointer_focus);
+    dispatch_pointer_motion(
+        surfaces,
+        windows,
+        modal_sessions,
+        pointer_x,
+        pointer_y,
+        pointer_focus,
+    );
     damage
 }
 
-fn raise_window(
+pub(crate) fn raise_window(
     surfaces: &mut [Surface],
     windows: &[Window],
     next_z: &mut u32,

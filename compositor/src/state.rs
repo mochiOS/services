@@ -13,6 +13,7 @@ use crate::window::Window;
 pub(crate) const MAX_SURFACES: usize = 16;
 pub(crate) const MAX_WINDOWS: usize = 8;
 pub(crate) const MAX_CLIENTS: usize = 16;
+pub(crate) const MAX_MODAL_SESSIONS: usize = 16;
 pub(crate) const PAGE_SIZE: usize = 4096;
 pub(crate) const MAX_SHARED_PAGES: usize = 262_144;
 pub(crate) const MAX_SHARED_BYTES: usize = MAX_SHARED_PAGES * PAGE_SIZE;
@@ -20,6 +21,12 @@ pub(crate) const MAX_SHARED_PIXELS: usize = MAX_SHARED_BYTES / 4;
 pub(crate) const MAX_DIMENSION: u32 = 16_384;
 
 static mut TOKEN_RANDOM_BUF: [u8; 8] = [0; 8];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ModalSession {
+    pub(crate) owner_process: u64,
+    pub(crate) modal_process: u64,
+}
 
 pub(crate) fn getrandom_u64() -> Option<u64> {
     let bytes = unsafe {
@@ -64,6 +71,7 @@ pub(crate) struct CompositorState {
     pub(crate) pointer_focus: Option<usize>,
     pub(crate) pointer_grab: Option<PointerGrab>,
     pub(crate) keyboard_focus: Option<usize>,
+    pub(crate) modal_sessions: Vec<ModalSession>,
     pub(crate) present_frame: PresentFrame,
     pub(crate) fps_overlay: FpsOverlay,
     pub(crate) display_tid: u64,
@@ -107,6 +115,7 @@ impl CompositorState {
             pointer_focus: None,
             pointer_grab: None,
             keyboard_focus: None,
+            modal_sessions: Vec::new(),
             present_frame: PresentFrame::default(),
             fps_overlay: FpsOverlay::default(),
             display_tid,

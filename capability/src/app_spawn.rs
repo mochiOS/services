@@ -233,7 +233,7 @@ pub(crate) fn spawn_application_from_manifest(
         }
     ));
     spawn_items.extend(items[1..].iter().cloned());
-    let args_nul = encode_spawn_args(&spawn_items);
+    let args_nul = encode_spawn_args(&spawn_items)?;
     platform::service::spawn_manifest_for_requester(
         entry_path,
         platform::service::ExecutionClass::Unprivileged,
@@ -243,19 +243,23 @@ pub(crate) fn spawn_application_from_manifest(
     )
 }
 
-pub(crate) fn encode_spawn_args(items: &[String]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(512);
-    out.resize(512, 0);
+pub(crate) fn encode_spawn_args(
+    items: &[String],
+) -> Result<Vec<u8>, mochi_user_syscall::SysError> {
+    let mut out = Vec::with_capacity(4096);
+    out.resize(4096, 0);
     let mut cursor = 0usize;
     for item in items {
         let bytes = item.as_bytes();
         if cursor + bytes.len() + 2 > out.len() {
-            break;
+            return Err(mochi_user_syscall::SysError::from_raw(
+                mochi_user_syscall::EINVAL as i64,
+            ));
         }
         out[cursor..cursor + bytes.len()].copy_from_slice(bytes);
         cursor += bytes.len();
         out[cursor] = 0;
         cursor += 1;
     }
-    out
+    Ok(out)
 }

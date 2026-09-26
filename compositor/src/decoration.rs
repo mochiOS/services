@@ -456,20 +456,17 @@ pub(crate) fn handle_request(
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
                 return reply;
             }
-            if !windows[window_index].close_requested {
-                windows[window_index].close_requested = true;
-                if let Some(content_index) =
-                    content_surface_index_for_window(surfaces, &windows[window_index])
-                {
-                    send_event(
-                        surfaces[content_index].event_endpoint,
-                        surfaces[content_index].token,
-                        EVENT_CLOSE_REQUESTED,
-                        0,
-                        0,
-                        0,
-                    );
-                }
+            if let Some(content_index) =
+                content_surface_index_for_window(surfaces, &windows[window_index])
+            {
+                send_event(
+                    surfaces[content_index].event_endpoint,
+                    surfaces[content_index].token,
+                    EVENT_CLOSE_REQUESTED,
+                    0,
+                    0,
+                    0,
+                );
             }
             put_u32(&mut reply, 0, 0);
         }

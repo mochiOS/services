@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -14,10 +14,15 @@ const ASSOCIATIONS_WRITE: &str = "file-association.write";
 const DATABASE_MAGIC: &[u8; 8] = b"MWASSOC1";
 const APPLICATIONS_ROOT: &str = "/applications";
 const CAPABILITY_SERVICE_NAME: &str = "capability.service";
+const COMPOSITOR_SERVICE_NAME: &str = "compositor.service";
+const FILES_ENTRY_PATH: &str = "/applications/Files.app/entry.elf";
+const COMPOSITOR_BEGIN_PROCESS_MODAL: u32 = 124;
+const COMPOSITOR_END_PROCESS_MODAL: u32 = 125;
 const SPAWN_APP_OPCODE: u32 = 0x4150_5053;
 const SPAWN_APP_HEADER_LEN: usize = 24;
 const EXEC_MANIFEST_ENV_PREFIX: &str = "__MNU_EXEC_ENV=";
 const SESSION_ENVIRONMENT_NAMES: [&str; 4] = ["HOME", "USER", "LOGNAME", "SHELL"];
+const MAX_PENDING_FILE_PANELS: usize = 64;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Association {
@@ -45,7 +50,23 @@ struct ClipboardTransaction {
 }
 
 #[derive(Debug)]
+struct PendingFilePanel {
+    requester_endpoint: Option<u64>,
+    grant_endpoint: u64,
+    requester_process: u64,
+    request_id: u64,
+    picker_endpoint: Option<u64>,
+    picker_request_id: u64,
+    picker_process: u64,
+    token: [u8; protocol::FILE_PANEL_TOKEN_LEN],
+    mode: u16,
+    executable: String,
+    allowed_content_types: String,
+}
+
+#[derive(Debug)]
 struct WorkspaceService {
+    endpoint: u64,
     clipboard_generation: u64,
     clipboard_content_type: String,
     clipboard: Vec<u8>,
@@ -53,16 +74,20 @@ struct WorkspaceService {
     next_transaction: u64,
     associations: Vec<Association>,
     association_path: PathBuf,
+    pending_file_panels: Vec<PendingFilePanel>,
+    next_file_panel_token: u64,
+    application_endpoints: BTreeMap<u64, u64>,
 }
 
 impl WorkspaceService {
-    fn load() -> Self {
+    fn load(endpoint: u64) -> Self {
         let association_path = association_path();
         let associations = fs::read(&association_path)
             .ok()
             .and_then(|bytes| decode_associations(&bytes).ok())
             .unwrap_or_default();
         Self {
+            endpoint,
             clipboard_generation: 0,
             clipboard_content_type: String::new(),
             clipboard: Vec::new(),
@@ -70,6 +95,9 @@ impl WorkspaceService {
             next_transaction: 1,
             associations,
             association_path,
+            pending_file_panels: Vec::new(),
+            next_file_panel_token: 1,
+            application_endpoints: BTreeMap::new(),
         }
     }
 
@@ -82,6 +110,12 @@ impl WorkspaceService {
             protocol::OP_ASSOCIATION_RESOLVE
             | protocol::OP_ASSOCIATION_HANDLERS
             | protocol::OP_DOCUMENT_OPEN => ASSOCIATIONS_READ,
+            protocol::OP_FILE_PANEL
+            | protocol::OP_FILE_PANEL_COMPLETE
+            | protocol::OP_FILE_PANEL_FINISH
+            | protocol::OP_FILE_PANEL_RETRY
+            | protocol::OP_APPLICATION_REGISTER
+            | protocol::OP_APPLICATION_ACTIVATE => "ipc.client",
             protocol::OP_ASSOCIATION_SET | protocol::OP_ASSOCIATION_REMOVE => ASSOCIATIONS_WRITE,
             _ => {
                 self.reply_status(
@@ -114,8 +148,84 @@ impl WorkspaceService {
             protocol::OP_ASSOCIATION_RESOLVE => self.association_resolve(sender, request),
             protocol::OP_ASSOCIATION_HANDLERS => self.association_handlers(sender, request),
             protocol::OP_DOCUMENT_OPEN => self.document_open(sender, request),
+            protocol::OP_FILE_PANEL => self.file_panel(sender, request),
+            protocol::OP_FILE_PANEL_COMPLETE => self.file_panel_complete(sender, request),
+            protocol::OP_FILE_PANEL_FINISH => self.file_panel_finish(sender, request),
+            protocol::OP_FILE_PANEL_RETRY => self.file_panel_retry(sender, request),
+            protocol::OP_APPLICATION_REGISTER => self.application_register(sender, request),
+            protocol::OP_APPLICATION_ACTIVATE => self.application_activate(sender, request),
             _ => unreachable!(),
         }
+    }
+
+    fn application_register(&mut self, sender: u64, request: protocol::Message<'_>) {
+        if request.payload.len() != 8 {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EINVAL as i32),
+                0,
+            );
+            return;
+        }
+        let endpoint = protocol::read_u64(request.payload, 0).ok();
+        let sender_process = platform::ipc::endpoint_owner_process(sender).ok();
+        let endpoint_process =
+            endpoint.and_then(|value| platform::ipc::endpoint_owner_process(value).ok());
+        match (endpoint, sender_process, endpoint_process) {
+            (Some(endpoint), Some(process), Some(owner))
+                if endpoint != 0 && process != 0 && process == owner =>
+            {
+                self.application_endpoints.insert(process, endpoint);
+                self.reply_status(sender, request.request_id, 0, 0);
+            }
+            _ => self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EACCES as i32),
+                0,
+            ),
+        }
+    }
+
+    fn application_activate(&mut self, sender: u64, request: protocol::Message<'_>) {
+        if request.payload.len() != 8 {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EINVAL as i32),
+                0,
+            );
+            return;
+        }
+        let Ok(process) = protocol::read_u64(request.payload, 0) else {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EINVAL as i32),
+                0,
+            );
+            return;
+        };
+        match self.signal_application_reopen(process) {
+            Ok(_) => self.reply_status(sender, request.request_id, 0, 0),
+            Err(status) => {
+                self.reply_status(sender, request.request_id, -(status as i32), 0);
+            }
+        }
+    }
+
+    fn signal_application_reopen(&mut self, process: u64) -> Result<(), u64> {
+        let Some(endpoint) = self.application_endpoints.get(&process).copied() else {
+            return Err(mochi_user_syscall::ENOENT as u64);
+        };
+        const REOPEN: [u8; 16] = *b"MAPPREOPEN\0\0\0\0\0\0";
+        platform::ipc::send(endpoint, &REOPEN)
+            .map(|_| ())
+            .map_err(|error| {
+                self.application_endpoints.remove(&process);
+                error.errno().unwrap_or(mochi_user_syscall::EIO as u64)
+            })
     }
 
     fn clipboard_begin(&mut self, sender: u64, request: protocol::Message<'_>) {
@@ -522,6 +632,325 @@ impl WorkspaceService {
         }
     }
 
+    fn file_panel(&mut self, sender: u64, request: protocol::Message<'_>) {
+        let Ok(options) = protocol::decode_file_panel_request(request.payload) else {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EINVAL as i32),
+                0,
+            );
+            return;
+        };
+        let Ok(context) = platform::process::thread_security_context(sender) else {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EPERM as i32),
+                0,
+            );
+            return;
+        };
+        if context.process_id == 0
+            || !options.executable.starts_with('/')
+            || options.executable.as_bytes().contains(&0)
+            || (!options.initial_directory.is_empty()
+                && !options.initial_directory.starts_with('/'))
+            || options.title.chars().any(char::is_control)
+            || options.suggested_name.contains(['/', '\0'])
+            || !valid_file_panel_content_types(options.allowed_content_types)
+        {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EINVAL as i32),
+                0,
+            );
+            return;
+        }
+        if self.pending_file_panels.len() >= MAX_PENDING_FILE_PANELS
+            || self
+                .pending_file_panels
+                .iter()
+                .any(|pending| pending.requester_process == context.process_id)
+        {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::ENOSPC as i32),
+                0,
+            );
+            return;
+        }
+        let token_counter = self.next_file_panel_token;
+        self.next_file_panel_token = self.next_file_panel_token.wrapping_add(1).max(1);
+        let mut token = [0u8; protocol::FILE_PANEL_TOKEN_LEN];
+        token[..8].copy_from_slice(&token_counter.to_le_bytes());
+        token[8..].copy_from_slice(&(sender ^ context.process_id).to_le_bytes());
+        let mut launch_payload = vec![0u8; protocol::MAX_MESSAGE_LEN - protocol::HEADER_LEN];
+        let launch_length = match protocol::encode_file_panel_request(options, &mut launch_payload)
+        {
+            Ok(length) => length,
+            Err(_) => {
+                self.reply_status(
+                    sender,
+                    request.request_id,
+                    -(mochi_user_syscall::EINVAL as i32),
+                    0,
+                );
+                return;
+            }
+        };
+        let argument = format!(
+            "--system-file-panel={}:{}:{}",
+            self.endpoint,
+            hex_encode(&token),
+            hex_encode(&launch_payload[..launch_length])
+        );
+        let picker_process = match launch_executable(FILES_ENTRY_PATH, &[argument]) {
+            Ok(process) => process,
+            Err(status) => {
+                self.reply_status(sender, request.request_id, -(status as i32), 0);
+                return;
+            }
+        };
+        if let Err(status) = set_process_modal(
+            COMPOSITOR_BEGIN_PROCESS_MODAL,
+            context.process_id,
+            picker_process,
+        ) {
+            let _ = platform::process::kill(picker_process, 9);
+            self.reply_status(sender, request.request_id, -(status as i32), 0);
+            return;
+        }
+        self.pending_file_panels.push(PendingFilePanel {
+            requester_endpoint: Some(sender),
+            grant_endpoint: sender,
+            requester_process: context.process_id,
+            request_id: request.request_id,
+            picker_endpoint: None,
+            picker_request_id: 0,
+            picker_process,
+            token,
+            mode: options.mode,
+            executable: options.executable.to_owned(),
+            allowed_content_types: options.allowed_content_types.to_owned(),
+        });
+        // The request intentionally remains unanswered until the trusted picker
+        // reports a selection or cancellation.
+    }
+
+    fn file_panel_complete(&mut self, sender: u64, request: protocol::Message<'_>) {
+        let Ok(result) = protocol::decode_file_panel_result(request.payload) else {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EINVAL as i32),
+                0,
+            );
+            return;
+        };
+        let sender_process = platform::ipc::endpoint_owner_process(sender).ok();
+        let Some(index) = self.pending_file_panels.iter().position(|pending| {
+            pending.token == result.token && sender_process == Some(pending.picker_process)
+        }) else {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EACCES as i32),
+                0,
+            );
+            return;
+        };
+        if result.status == 1 {
+            let pending = self.pending_file_panels.remove(index);
+            if let Some(endpoint) = pending.requester_endpoint {
+                self.reply_file_panel_result(endpoint, pending.request_id, 1, pending.token, "");
+            }
+            self.reply_status(sender, request.request_id, 0, 0);
+            let _ = set_process_modal(
+                COMPOSITOR_END_PROCESS_MODAL,
+                pending.requester_process,
+                pending.picker_process,
+            );
+            let _ = self.signal_application_reopen(pending.requester_process);
+            return;
+        }
+        if result.status != 0 {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EINVAL as i32),
+                0,
+            );
+            return;
+        }
+
+        if self.pending_file_panels[index].requester_endpoint.is_none()
+            || self.pending_file_panels[index].picker_endpoint.is_some()
+        {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EAGAIN as i32),
+                0,
+            );
+            return;
+        }
+        let outcome = {
+            let pending = &self.pending_file_panels[index];
+            validate_panel_selection(pending, result.path).and_then(|path| {
+                grant_selected_path(pending, &path)?;
+                Ok(path)
+            })
+        };
+        let path = match outcome {
+            Ok(path) => path,
+            Err(status) => {
+                // Keep both the requesting application and its picker alive so
+                // the user can correct the selection and try again.
+                self.reply_status(sender, request.request_id, -(status as i32), 0);
+                return;
+            }
+        };
+        let pending = &mut self.pending_file_panels[index];
+        let requester_endpoint = pending
+            .requester_endpoint
+            .take()
+            .expect("file panel requester checked above");
+        let requester_request_id = pending.request_id;
+        let token = pending.token;
+        pending.picker_endpoint = Some(sender);
+        pending.picker_request_id = request.request_id;
+        self.reply_file_panel_result(requester_endpoint, requester_request_id, 0, token, &path);
+        // The picker call remains blocked until the requesting application
+        // confirms that it actually completed the open/save operation.
+    }
+
+    fn file_panel_finish(&mut self, sender: u64, request: protocol::Message<'_>) {
+        let Ok(finish) = protocol::decode_file_panel_finish(request.payload) else {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EINVAL as i32),
+                0,
+            );
+            return;
+        };
+        let sender_process = platform::ipc::endpoint_owner_process(sender).ok();
+        let Some(index) = self.pending_file_panels.iter().position(|pending| {
+            pending.token == finish.token
+                && sender_process == Some(pending.requester_process)
+                && pending.requester_endpoint.is_none()
+                && pending.picker_endpoint.is_some()
+        }) else {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EACCES as i32),
+                0,
+            );
+            return;
+        };
+
+        if finish.status == 1 {
+            let pending = &mut self.pending_file_panels[index];
+            let picker_endpoint = pending
+                .picker_endpoint
+                .take()
+                .expect("file panel picker checked above");
+            let picker_request_id = pending.picker_request_id;
+            pending.picker_request_id = 0;
+            self.reply_status(
+                picker_endpoint,
+                picker_request_id,
+                -(mochi_user_syscall::EIO as i32),
+                0,
+            );
+            self.reply_status(sender, request.request_id, 0, 0);
+            return;
+        }
+
+        let pending = self.pending_file_panels.remove(index);
+        let picker_endpoint = pending
+            .picker_endpoint
+            .expect("file panel picker checked above");
+        self.reply_status(picker_endpoint, pending.picker_request_id, 0, 0);
+        self.reply_status(sender, request.request_id, 0, 0);
+        let _ = set_process_modal(
+            COMPOSITOR_END_PROCESS_MODAL,
+            pending.requester_process,
+            pending.picker_process,
+        );
+        let _ = self.signal_application_reopen(pending.requester_process);
+    }
+
+    fn file_panel_retry(&mut self, sender: u64, request: protocol::Message<'_>) {
+        if request.payload.len() != protocol::FILE_PANEL_TOKEN_LEN {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EINVAL as i32),
+                0,
+            );
+            return;
+        }
+        let sender_process = platform::ipc::endpoint_owner_process(sender).ok();
+        let Some(pending) = self.pending_file_panels.iter_mut().find(|pending| {
+            pending.token.as_slice() == request.payload
+                && sender_process == Some(pending.requester_process)
+        }) else {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EACCES as i32),
+                0,
+            );
+            return;
+        };
+        if pending.requester_endpoint.is_some() || pending.picker_endpoint.is_some() {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EAGAIN as i32),
+                0,
+            );
+            return;
+        }
+        pending.requester_endpoint = Some(sender);
+        pending.request_id = request.request_id;
+        // This retry request remains unanswered until the picker submits a new
+        // selection or is cancelled.
+    }
+
+    fn reply_file_panel_result(
+        &self,
+        sender: u64,
+        request_id: u64,
+        status: i32,
+        token: [u8; protocol::FILE_PANEL_TOKEN_LEN],
+        path: &str,
+    ) {
+        let mut payload = vec![0u8; protocol::FILE_PANEL_RESULT_PREFIX_LEN + path.len()];
+        let Ok(length) = protocol::encode_file_panel_result(
+            protocol::FilePanelResult {
+                status,
+                token,
+                path,
+            },
+            &mut payload,
+        ) else {
+            self.reply_status(sender, request_id, -(mochi_user_syscall::EINVAL as i32), 0);
+            return;
+        };
+        self.reply(
+            sender,
+            protocol::OP_FILE_PANEL_RESULT,
+            request_id,
+            &payload[..length],
+        );
+    }
+
     fn reply_status(&self, sender: u64, request_id: u64, status: i32, value: u64) {
         let mut output = [0u8; protocol::HEADER_LEN + 24];
         if let Ok(length) = protocol::encode_status(
@@ -549,6 +978,178 @@ fn valid_content_type(value: &str) -> bool {
         && value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'+' | b'-' | b'.' | b';' | b'=')
         })
+}
+
+fn valid_file_panel_content_types(value: &str) -> bool {
+    value.is_empty()
+        || value.split('\x1f').all(|content_type| {
+            content_type.len() <= protocol::MAX_CONTENT_TYPE_LEN && valid_content_type(content_type)
+        })
+}
+
+fn validate_panel_selection(pending: &PendingFilePanel, selected: &str) -> Result<String, u64> {
+    if selected.is_empty() || !selected.starts_with('/') || selected.as_bytes().contains(&0) {
+        return Err(mochi_user_syscall::EINVAL as u64);
+    }
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .and_then(|path| fs::canonicalize(path).ok())
+        .ok_or(mochi_user_syscall::EACCES as u64)?;
+    let path = Path::new(selected);
+    let validated = if pending.mode == protocol::FILE_PANEL_MODE_OPEN {
+        let canonical = fs::canonicalize(path).map_err(errno)?;
+        if !canonical.is_file() {
+            return Err(mochi_user_syscall::EISDIR as u64);
+        }
+        canonical
+    } else {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty() && *name != "." && *name != "..")
+            .ok_or(mochi_user_syscall::EINVAL as u64)?;
+        let parent = path.parent().ok_or(mochi_user_syscall::EINVAL as u64)?;
+        let parent = fs::canonicalize(parent).map_err(errno)?;
+        if !parent.is_dir() {
+            return Err(mochi_user_syscall::ENOTDIR as u64);
+        }
+        let destination = parent.join(name);
+        if destination.is_dir() {
+            return Err(mochi_user_syscall::EISDIR as u64);
+        }
+        destination
+    };
+    if !validated.starts_with(&home) {
+        return Err(mochi_user_syscall::EACCES as u64);
+    }
+    if !selection_matches_content_types(&validated, &pending.allowed_content_types) {
+        return Err(mochi_user_syscall::EINVAL as u64);
+    }
+    validated
+        .to_str()
+        .map(str::to_owned)
+        .ok_or(mochi_user_syscall::EINVAL as u64)
+}
+
+fn selection_matches_content_types(path: &Path, allowed: &str) -> bool {
+    if allowed.is_empty() {
+        return true;
+    }
+    let actual = match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "txt" | "text" | "log" => "text/plain;charset=utf-8",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "html" | "htm" => "text/html",
+        "css" => "text/css",
+        "js" | "mjs" | "cjs" => "text/javascript",
+        "md" | "markdown" => "text/markdown",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        _ => "application/octet-stream",
+    };
+    allowed.split('\x1f').any(|candidate| {
+        candidate == actual
+            || candidate == "application/octet-stream"
+            || (candidate == "text/plain" && actual.starts_with("text/plain;"))
+    })
+}
+
+fn grant_selected_path(pending: &PendingFilePanel, path: &str) -> Result<(), u64> {
+    let service = platform::process::find_by_name(CAPABILITY_SERVICE_NAME)
+        .map_err(|error| error.errno().unwrap_or(mochi_user_syscall::ENOENT as u64))?;
+    if service == 0 {
+        return Err(mochi_user_syscall::ENOENT as u64);
+    }
+    let capability = if pending.mode == protocol::FILE_PANEL_MODE_SAVE {
+        "fs.write.user"
+    } else {
+        "fs.read.user"
+    };
+    let request = platform::capability::CapabilityRequest::new_prompt(
+        pending.requester_process,
+        &pending.executable,
+        [0; 32],
+        capability,
+        Some(path),
+        Some(if pending.mode == protocol::FILE_PANEL_MODE_SAVE {
+            "Save the selected file"
+        } else {
+            "Open the selected file"
+        }),
+        true,
+        platform::capability::CapabilityClass::UserGrantable,
+    )
+    .map_err(|_| mochi_user_syscall::EINVAL as u64)?;
+    let mut decision = platform::capability::CapabilityDecisionRequest::new(
+        platform::capability::CapabilityDecision::AllowForProcess,
+        request,
+    );
+    decision.reserved = pending.grant_endpoint;
+    let mut encoded =
+        vec![0u8; core::mem::size_of::<platform::capability::CapabilityDecisionRequest>()];
+    let length = platform::capability::encode_decision_request(&decision, &mut encoded)
+        .map_err(|_| mochi_user_syscall::EINVAL as u64)?;
+    let mut reply = [0u8; 8];
+    let message = platform::ipc::call(service, &encoded[..length], &mut reply)
+        .map_err(|error| error.errno().unwrap_or(mochi_user_syscall::EIO as u64))?;
+    if (message & 0xffff_ffff) as usize != reply.len() {
+        return Err(mochi_user_syscall::EINVAL as u64);
+    }
+    let status = u64::from_le_bytes(reply);
+    if status == 0 { Ok(()) } else { Err(status) }
+}
+
+fn set_process_modal(opcode: u32, owner_process: u64, modal_process: u64) -> Result<(), u64> {
+    if !matches!(
+        opcode,
+        COMPOSITOR_BEGIN_PROCESS_MODAL | COMPOSITOR_END_PROCESS_MODAL
+    ) || owner_process == 0
+        || modal_process == 0
+        || owner_process == modal_process
+    {
+        return Err(mochi_user_syscall::EINVAL as u64);
+    }
+    let compositor = platform::process::find_by_name(COMPOSITOR_SERVICE_NAME)
+        .map_err(|error| error.errno().unwrap_or(mochi_user_syscall::ENOENT as u64))?;
+    if compositor == 0 {
+        return Err(mochi_user_syscall::ENOENT as u64);
+    }
+    let mut request = [0u8; 20];
+    request[..4].copy_from_slice(&opcode.to_le_bytes());
+    request[4..12].copy_from_slice(&owner_process.to_le_bytes());
+    request[12..20].copy_from_slice(&modal_process.to_le_bytes());
+    let mut reply = [0u8; 16];
+    let message = platform::ipc::call(compositor, &request, &mut reply)
+        .map_err(|error| error.errno().unwrap_or(mochi_user_syscall::EIO as u64))?;
+    let length = (message & 0xffff_ffff) as usize;
+    let status = reply
+        .get(..length)
+        .and_then(|bytes| bytes.get(..4))
+        .map(|bytes| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        .ok_or(mochi_user_syscall::EIO as u64)?;
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(u64::from(status))
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
 }
 
 fn decode_clipboard_begin(payload: &[u8]) -> Option<(usize, String)> {
@@ -947,12 +1548,18 @@ fn parse_string_literals(text: &str) -> Vec<String> {
 }
 
 fn launch_application(application: &InstalledApplication, document: &str) -> Result<u64, u64> {
+    launch_executable(&application.entry_path, &[document.to_owned()])
+}
+
+fn launch_executable(executable: &str, arguments: &[String]) -> Result<u64, u64> {
     let service = platform::process::find_by_name(CAPABILITY_SERVICE_NAME)
         .map_err(|error| error.errno().unwrap_or(mochi_user_syscall::ENOENT as u64))?;
     if service == 0 {
         return Err(mochi_user_syscall::ENOENT as u64);
     }
-    let mut items = vec![application.entry_path.clone(), document.to_owned()];
+    let mut items = Vec::with_capacity(1 + arguments.len() + SESSION_ENVIRONMENT_NAMES.len());
+    items.push(executable.to_owned());
+    items.extend(arguments.iter().cloned());
     for name in SESSION_ENVIRONMENT_NAMES {
         if let Ok(value) = std::env::var(name)
             && !value.as_bytes().contains(&0)
@@ -1124,7 +1731,7 @@ fn main() {
             platform::process::exit(1)
         }
     };
-    let mut service = WorkspaceService::load();
+    let mut service = WorkspaceService::load(endpoint);
     if platform::service_ready::notify(ready_target, 0).is_err() {
         platform::logln!("workspace.service: ready notification failed");
         platform::process::exit(1);
@@ -1295,6 +1902,26 @@ mod tests {
         assert!(decode_document_open(&encode("/home/user/note.txt", "text/plain")).is_some());
         assert!(decode_document_open(&encode("note.txt", "text/plain")).is_none());
         assert!(decode_document_open(&encode("/home/user/note.txt", "not a type")).is_none());
+    }
+
+    #[test]
+    fn file_panel_content_filters_match_appkit_inference() {
+        assert!(selection_matches_content_types(
+            Path::new("/home/user/note.txt"),
+            "text/plain"
+        ));
+        assert!(selection_matches_content_types(
+            Path::new("/home/user/data.json"),
+            "text/plain\x1fapplication/json"
+        ));
+        assert!(!selection_matches_content_types(
+            Path::new("/home/user/image.png"),
+            "text/plain"
+        ));
+        assert!(selection_matches_content_types(
+            Path::new("/home/user/unknown.bin"),
+            "application/octet-stream"
+        ));
     }
 
     #[test]

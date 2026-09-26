@@ -26,6 +26,7 @@ const USER_MANIFEST: &str = include_str!("../../user/manifest.toml");
 const SECURE_UI_MANIFEST: &str = include_str!("../../secure-ui/manifest.toml");
 const LINUX_MANIFEST: &str = include_str!("../../linux/manifest.toml");
 const MBOOT_AGENT_MANIFEST: &str = include_str!("../../mboot-agent/manifest.toml");
+const WORKSPACE_MANIFEST: &str = include_str!("../../workspace/manifest.toml");
 const SERVICE_INDEX: &str = include_str!("../../index.toml");
 
 fn assert_capabilities(manifest: &str, path: &str, expected: &[&str]) {
@@ -222,6 +223,18 @@ fn service_manifests_match_policy() {
             "serial.access",
             "system.random.read",
             "system.time.read",
+        ],
+    );
+    assert_capabilities(
+        WORKSPACE_MANIFEST,
+        "/system/services/workspace.service",
+        &[
+            "fs.read.all",
+            "fs.write.all",
+            "ipc.client",
+            "ipc.server",
+            "process.inspect",
+            "process.spawn",
         ],
     );
 

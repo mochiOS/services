@@ -27,6 +27,7 @@ struct PendingMenu {
     owner: ClientId,
     event_endpoint: u64,
     request_id: u64,
+    surface_token: u64,
 }
 
 #[derive(Default)]
@@ -134,6 +135,7 @@ impl ContextMenuBroker {
             owner: client,
             event_endpoint: surface.event_endpoint,
             request_id,
+            surface_token,
         });
         self.dismiss_sent = false;
         0
@@ -161,11 +163,12 @@ impl ContextMenuBroker {
         if pending.request_id != request_id {
             return mochios_errno(mochi_user_syscall::EINVAL);
         }
-        let mut event = [0u8; 24];
+        let mut event = [0u8; 32];
         put_u32(&mut event, 0, EVENT_CONTEXT_MENU_RESULT);
         put_u32(&mut event, 4, status);
         put_u64(&mut event, 8, request_id);
         put_u32(&mut event, 16, command_id);
+        put_u64(&mut event, 24, pending.surface_token);
         let _ = platform::ipc::send(pending.event_endpoint, &event);
         let owner_surface = surfaces.iter().position(|surface| {
             surface.live

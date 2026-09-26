@@ -44,14 +44,12 @@ impl DisplayBackend {
     }
 
     pub(crate) fn initialize() -> Result<Self, u64> {
-        // An address-zero framebuffer is mediated by mBoot or mDriver. Those
-        // environments deliberately expose no PCI functions to mochiOS, so the
-        // mediated path must remain authoritative. A directly mapped firmware
-        // framebuffer can coexist with a native virtio-gpu device in QEMU;
-        // prefer that device and retain the firmware buffer as the fallback.
-        if mochi_user_platform::memory::framebuffer_info()
-            .is_ok_and(|info| info.addr == 0)
-        {
+        // A framebuffer reported by the kernel is already the selected display
+        // path. It is either mediated by mDriver (address zero) or owned by the
+        // firmware GOP (non-zero). Re-probing the same PCI display can disturb
+        // its active scanout before initialization fails, leaving the fallback
+        // framebuffer valid in memory but no longer visible.
+        if mochi_user_platform::memory::framebuffer_info().is_ok() {
             return FramebufferBackend::initialize().map(Self::Framebuffer);
         }
         match VirtioGpuBackend::initialize() {

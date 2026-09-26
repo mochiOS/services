@@ -1,5 +1,6 @@
 use mochi_user_platform as platform;
 
+use crate::input::restore_keyboard_focus;
 use crate::surface::{Surface, destroy_surface_tree};
 use crate::window::Window;
 
@@ -62,6 +63,7 @@ pub(crate) fn cleanup_client(
     {
         destroy_surface_tree(surfaces, windows, index, pointer_focus, keyboard_focus);
     }
+    restore_keyboard_focus(surfaces, keyboard_focus);
     for window in windows
         .iter_mut()
         .filter(|window| window.live && window.decorator == client)

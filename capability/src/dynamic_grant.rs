@@ -11,21 +11,40 @@ use crate::policy::is_known_capability;
 use crate::resolver::binary_caps;
 
 const TRUSTED_PROMPT_PACKAGE_ID: &[u8] = b"org.mochios.msh";
+const TRUSTED_WORKSPACE_PACKAGE_ID: &[u8] = b"org.mochios.workspace";
 const BUILT_IN_DEVELOPER_ID: &[u8] = b"org.mochios.system";
 const BUILT_IN_PROVENANCE: u8 = 1;
 
 pub(crate) fn is_trusted_prompt_broker(endpoint: u64) -> bool {
+    trusted_broker_package(endpoint).is_some()
+}
+
+pub(crate) fn is_trusted_workspace(endpoint: u64) -> bool {
+    trusted_broker_package(endpoint) == Some(TRUSTED_WORKSPACE_PACKAGE_ID)
+}
+
+fn trusted_broker_package(endpoint: u64) -> Option<&'static [u8]> {
     let Ok(context) = platform::process::thread_security_context(endpoint) else {
-        return false;
+        return None;
     };
     let package_len = context.package_id_len as usize;
     let developer_len = context.developer_id_len as usize;
-    package_len <= context.package_id.len()
+    let trusted_identity = package_len <= context.package_id.len()
         && developer_len <= context.developer_id.len()
-        && &context.package_id[..package_len] == TRUSTED_PROMPT_PACKAGE_ID
         && &context.developer_id[..developer_len] == BUILT_IN_DEVELOPER_ID
         && context.subject_key_id == [0; 32]
-        && context.provenance == BUILT_IN_PROVENANCE
+        && context.provenance == BUILT_IN_PROVENANCE;
+    if !trusted_identity {
+        return None;
+    }
+    let package = &context.package_id[..package_len];
+    if package == TRUSTED_PROMPT_PACKAGE_ID {
+        Some(TRUSTED_PROMPT_PACKAGE_ID)
+    } else if package == TRUSTED_WORKSPACE_PACKAGE_ID {
+        Some(TRUSTED_WORKSPACE_PACKAGE_ID)
+    } else {
+        None
+    }
 }
 
 fn current_process_id() -> Result<u64, mochi_user_syscall::SysError> {
@@ -108,6 +127,34 @@ pub(crate) fn transfer_user_grant(
 ) -> Result<(), mochi_user_syscall::SysError> {
     let mut payload = Vec::with_capacity(capability.len() + 1 + executable.len());
     payload.extend_from_slice(capability.as_bytes());
+    payload.push(0x1f);
+    payload.extend_from_slice(executable.as_bytes());
+    platform::syscall::call3(
+        platform::syscall::SyscallNumber::CapTransfer,
+        requester_thread,
+        payload.as_ptr() as u64,
+        payload.len() as u64,
+    )
+    .map(|_| ())
+}
+
+pub(crate) fn transfer_scoped_path_grant(
+    requester_thread: u64,
+    path: &str,
+    writable: bool,
+    executable: &str,
+) -> Result<(), mochi_user_syscall::SysError> {
+    if path.is_empty() || path.len() > 4095 || path.as_bytes().contains(&0) {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EINVAL as i64,
+        ));
+    }
+    let mode = if writable { "read-write" } else { "read" };
+    let mut payload = Vec::with_capacity(16 + path.len() + executable.len());
+    payload.extend_from_slice(b"fs.scope.");
+    payload.extend_from_slice(mode.as_bytes());
+    payload.push(b'@');
+    payload.extend_from_slice(path.as_bytes());
     payload.push(0x1f);
     payload.extend_from_slice(executable.as_bytes());
     platform::syscall::call3(
@@ -235,5 +282,21 @@ pub(crate) fn authorize_dynamic_capability(
         )?;
     }
 
-    transfer_user_grant(requester_thread, capability, executable)
+    let resource = if request.resource.path_len == 0 {
+        None
+    } else {
+        Some(read_request_str(
+            &request.resource.path,
+            request.resource.path_len,
+        )?)
+    };
+    match (capability, resource) {
+        ("fs.read.user", Some(path)) => {
+            transfer_scoped_path_grant(requester_thread, path, false, executable)
+        }
+        ("fs.write.user", Some(path)) => {
+            transfer_scoped_path_grant(requester_thread, path, true, executable)
+        }
+        _ => transfer_user_grant(requester_thread, capability, executable),
+    }
 }

@@ -11,12 +11,13 @@ use crate::display::{
 use crate::geometry::{Rect, merge_damage};
 use crate::fps_overlay;
 use crate::input::{
-    PointerGrab, PointerSerial, finish_pointer_motion, handle_input_event, send_event,
-    subscribe_input_events, update_pointer_position,
+    PointerGrab, PointerSerial, clear_focus_for_surface, finish_pointer_motion,
+    frontmost_process_surface, handle_input_event, raise_window, send_event, subscribe_input_events,
+    surface_process, update_keyboard_focus, update_pointer_position,
 };
 use crate::protocol::*;
 use crate::renderer::composite_and_present;
-use crate::state::CompositorState;
+use crate::state::{CompositorState, MAX_MODAL_SESSIONS, ModalSession};
 use crate::surface::{Surface, handle_shared_buffer, send_frame_done};
 use crate::surface::{SurfaceRole, surface_extent};
 use crate::window::Window;
@@ -79,6 +80,7 @@ fn process_input_event(
         &mut state.pointer_focus,
         &mut state.keyboard_focus,
         &mut state.pointer_grab,
+        &state.modal_sessions,
         &mut state.context_menu,
         event,
     ) {
@@ -115,6 +117,7 @@ fn finish_coalesced_pointer_motion(state: &mut CompositorState) -> Option<Rect> 
         &mut state.surfaces,
         &state.windows,
         &state.pointer_grab,
+        &state.modal_sessions,
         state.pointer_x,
         state.pointer_y,
         &mut state.pointer_focus,
@@ -143,6 +146,37 @@ fn finish_coalesced_pointer_motion(state: &mut CompositorState) -> Option<Rect> 
     damage
 }
 
+fn activate_process_window(
+    surfaces: &mut [Surface],
+    windows: &mut [Window],
+    next_z: &mut u32,
+    keyboard_focus: &mut Option<usize>,
+    process: u64,
+) -> bool {
+    let Some(index) = frontmost_process_surface(surfaces, process) else {
+        return false;
+    };
+    let window = surfaces[index].window;
+    if let Some(window_index) = crate::window::window_index_by_id(windows, window) {
+        windows[window_index].state = WINDOW_STATE_NORMAL;
+        if let Some(content) = crate::window::content_surface_index_for_window(
+            surfaces,
+            &windows[window_index],
+        ) {
+            surfaces[content].visible = true;
+        }
+        if let Some(decoration) = crate::window::decoration_surface_index_for_window(
+            surfaces,
+            &windows[window_index],
+        ) {
+            surfaces[decoration].visible = true;
+        }
+    }
+    raise_window(surfaces, windows, next_z, window);
+    update_keyboard_focus(surfaces, keyboard_focus, Some(index));
+    true
+}
+
 fn handle_request(
     clients: &mut [Client],
     surfaces: &mut [Surface],
@@ -155,6 +189,7 @@ fn handle_request(
     pointer_focus: &mut Option<usize>,
     keyboard_focus: &mut Option<usize>,
     pointer_grab: &mut Option<PointerGrab>,
+    modal_sessions: &mut Vec<ModalSession>,
     pointer_x: i32,
     pointer_y: i32,
     client: ClientId,
@@ -184,6 +219,41 @@ fn handle_request(
         OP_GET_RENDERER_CAPS => {
             put_u32(&mut reply, 0, 0);
             put_u32(&mut reply, 4, renderer_caps);
+        }
+        OP_ACTIVATE_SURFACE => {
+            let process = platform::ipc::endpoint_owner_process(sender).unwrap_or(0);
+            if let Some(modal_process) = modal_sessions
+                .iter()
+                .rev()
+                .find(|session| session.owner_process == process)
+                .map(|session| session.modal_process)
+            {
+                let _ = activate_process_window(
+                    surfaces,
+                    windows,
+                    next_z,
+                    keyboard_focus,
+                    modal_process,
+                );
+                *needs_present = true;
+                put_u32(&mut reply, 0, 0);
+                return reply;
+            }
+            return crate::surface::handle_request(
+                clients,
+                surfaces,
+                windows,
+                next_z,
+                next_window_index,
+                next_window_id,
+                pointer_focus,
+                keyboard_focus,
+                client,
+                sender,
+                request,
+                needs_present,
+                present_damage,
+            );
         }
         OP_CREATE_SURFACE | OP_ATTACH_BUFFER | OP_DAMAGE | OP_COMMIT | OP_SET_POSITION
         | OP_DESTROY_SURFACE | OP_SET_TITLE => {
@@ -235,6 +305,84 @@ fn handle_request(
         }
         OP_CONTEXT_MENU_SUBSCRIBE | OP_CONTEXT_MENU_SHOW | OP_CONTEXT_MENU_COMPLETE => {
             return context_menu.handle_request(surfaces, keyboard_focus, client, sender, request);
+        }
+        OP_BEGIN_PROCESS_MODAL | OP_END_PROCESS_MODAL => {
+            if request.len() != 20 {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
+                return reply;
+            }
+            if !matches!(
+                platform::capability::check_thread(sender, "window.modal.control"),
+                Ok(1)
+            ) {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            }
+            let owner_process = read_u64(request, 4).unwrap_or(0);
+            let modal_process = read_u64(request, 12).unwrap_or(0);
+            if owner_process == 0 || modal_process == 0 || owner_process == modal_process {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
+                return reply;
+            }
+            if opcode == OP_BEGIN_PROCESS_MODAL {
+                if let Some(session) = modal_sessions
+                    .iter_mut()
+                    .find(|session| session.owner_process == owner_process)
+                {
+                    session.modal_process = modal_process;
+                } else if modal_sessions.len() < MAX_MODAL_SESSIONS {
+                    modal_sessions.push(ModalSession {
+                        owner_process,
+                        modal_process,
+                    });
+                } else {
+                    put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ENOSPC));
+                    return reply;
+                }
+                *pointer_grab = None;
+                if let Some(index) = *pointer_focus
+                    && surface_process(surfaces, windows, index) == Some(owner_process)
+                {
+                    clear_focus_for_surface(
+                        surfaces,
+                        index,
+                        pointer_focus,
+                        keyboard_focus,
+                    );
+                }
+                if !activate_process_window(
+                    surfaces,
+                    windows,
+                    next_z,
+                    keyboard_focus,
+                    modal_process,
+                ) && keyboard_focus.is_some_and(|index| {
+                    surface_process(surfaces, windows, index) == Some(owner_process)
+                }) {
+                    update_keyboard_focus(surfaces, keyboard_focus, None);
+                }
+                *needs_present = true;
+                put_u32(&mut reply, 0, 0);
+            } else {
+                let Some(index) = modal_sessions.iter().position(|session| {
+                    session.owner_process == owner_process
+                        && session.modal_process == modal_process
+                }) else {
+                    put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ENOENT));
+                    return reply;
+                };
+                modal_sessions.remove(index);
+                *pointer_grab = None;
+                let _ = activate_process_window(
+                    surfaces,
+                    windows,
+                    next_z,
+                    keyboard_focus,
+                    owner_process,
+                );
+                *needs_present = true;
+                put_u32(&mut reply, 0, 0);
+            }
         }
         OP_APPEARANCE_CHANGED => {
             if request.len() != 4 {
@@ -558,6 +706,7 @@ pub(crate) fn run() -> ! {
             &mut state.pointer_focus,
             &mut state.keyboard_focus,
             &mut state.pointer_grab,
+            &mut state.modal_sessions,
             state.pointer_x,
             state.pointer_y,
             client,

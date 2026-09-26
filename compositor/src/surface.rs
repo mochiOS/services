@@ -7,11 +7,14 @@ use crate::decoration::{
     sender_has_overlay_compat_capability, sender_has_secure_overlay_capability,
 };
 use crate::geometry::{Point, PopupPlacement, Rect, merge_damage, validate_damage_rect};
-use crate::input::{clear_focus_for_surface, update_keyboard_focus};
+use crate::input::{
+    clear_focus_for_surface, raise_window, restore_keyboard_focus, update_keyboard_focus,
+};
 use crate::protocol::*;
 use crate::state::{MAX_DIMENSION, MAX_SHARED_BYTES, PAGE_SIZE, getrandom_u64};
 use crate::window::{
-    MAX_WINDOW_TITLE_BYTES, Window, WindowId, generate_window_token, notify_decorators,
+    MAX_WINDOW_TITLE_BYTES, Window, WindowId, content_surface_index_for_window,
+    decoration_surface_index_for_window, generate_window_token, notify_decorators,
     window_index_by_id,
 };
 
@@ -25,6 +28,7 @@ pub(crate) enum SurfaceRole {
     Background,
     Panel,
     SecureOverlay,
+    SystemModal,
 }
 
 impl SurfaceRole {
@@ -35,6 +39,7 @@ impl SurfaceRole {
             ROLE_BACKGROUND => Ok(Self::Background),
             ROLE_PANEL => Ok(Self::Panel),
             ROLE_SECURE_OVERLAY => Ok(Self::SecureOverlay),
+            ROLE_SYSTEM_MODAL => Ok(Self::SystemModal),
             _ => Err(errno_status(mochi_user_syscall::EINVAL)),
         }
     }
@@ -42,7 +47,7 @@ impl SurfaceRole {
     pub(crate) fn general_client_rights(self) -> Result<SurfaceRights, u32> {
         match self {
             Self::Toplevel | Self::Popup => Ok(SurfaceRights::GENERAL_CLIENT),
-            Self::Background | Self::Panel | Self::SecureOverlay => {
+            Self::Background | Self::Panel | Self::SecureOverlay | Self::SystemModal => {
                 Err(errno_status(mochi_user_syscall::EACCES))
             }
         }
@@ -50,7 +55,7 @@ impl SurfaceRole {
 
     pub(crate) fn privileged_overlay_rights(self) -> Result<SurfaceRights, u32> {
         match self {
-            Self::Background | Self::Panel | Self::Toplevel | Self::Popup => {
+            Self::Background | Self::Panel | Self::Toplevel | Self::Popup | Self::SystemModal => {
                 Ok(SurfaceRights::GENERAL_CLIENT)
             }
             Self::SecureOverlay => Err(errno_status(mochi_user_syscall::EACCES)),
@@ -62,13 +67,17 @@ impl SurfaceRole {
             Self::Background => 0,
             Self::Toplevel | Self::Popup => 1,
             Self::Panel => 2,
-            Self::SecureOverlay => 3,
+            Self::SystemModal => 3,
+            Self::SecureOverlay => 4,
         }
     }
 }
 
 const fn takes_keyboard_focus_on_create(role: SurfaceRole) -> bool {
-    matches!(role, SurfaceRole::Toplevel | SurfaceRole::SecureOverlay)
+    matches!(
+        role,
+        SurfaceRole::Toplevel | SurfaceRole::SecureOverlay | SurfaceRole::SystemModal
+    )
 }
 
 #[derive(Clone, Copy, Default)]
@@ -125,6 +134,7 @@ pub(crate) struct GpuSurfaceState {
 pub(crate) struct Surface {
     pub(crate) live: bool,
     pub(crate) owner: ClientId,
+    pub(crate) owner_process: u64,
     pub(crate) event_endpoint: u64,
     pub(crate) handle: SurfaceHandle,
     pub(crate) token: u64,
@@ -164,6 +174,7 @@ impl Surface {
         Self {
             live: false,
             owner: ClientId(0),
+            owner_process: 0,
             event_endpoint: 0,
             handle: SurfaceHandle(0),
             token: 0,
@@ -202,6 +213,7 @@ impl Surface {
     pub(crate) fn reset(&mut self) {
         self.live = false;
         self.owner = ClientId(0);
+        self.owner_process = 0;
         self.event_endpoint = 0;
         self.handle = SurfaceHandle(0);
         self.token = 0;
@@ -607,6 +619,7 @@ mod gpu_hit_tests {
             SurfaceRole::Background,
             SurfaceRole::Panel,
             SurfaceRole::SecureOverlay,
+            SurfaceRole::SystemModal,
         ] {
             assert!(surface_role_accepts_format(role, PIXEL_FORMAT_GPU_SCENE));
         }
@@ -836,6 +849,7 @@ fn surface_role_accepts_format(role: SurfaceRole, format: u32) -> bool {
                 | SurfaceRole::Background
                 | SurfaceRole::Panel
                 | SurfaceRole::SecureOverlay
+                | SurfaceRole::SystemModal
         ),
         _ => false,
     }
@@ -1068,7 +1082,7 @@ pub(crate) fn handle_request(
                         .saturating_add(placement.anchor_rect.y)
                         .saturating_add(placement.offset.y),
                 )
-            } else if role == SurfaceRole::SecureOverlay {
+            } else if matches!(role, SurfaceRole::SecureOverlay | SurfaceRole::SystemModal) {
                 surfaces
                     .iter()
                     .find(|surface| surface.live && surface.role == SurfaceRole::Background)
@@ -1092,6 +1106,8 @@ pub(crate) fn handle_request(
             surfaces[index].reset();
             surfaces[index].live = true;
             surfaces[index].owner = client;
+            surfaces[index].owner_process =
+                platform::ipc::endpoint_owner_process(event_endpoint).unwrap_or(0);
             surfaces[index].event_endpoint = event_endpoint;
             surfaces[index].handle = handle;
             surfaces[index].token = token;
@@ -1485,12 +1501,47 @@ pub(crate) fn handle_request(
             }
             put_u32(&mut reply, 0, 0);
         }
+        OP_ACTIVATE_SURFACE => {
+            let token = read_u64(request, 4).unwrap_or(0);
+            let handle = SurfaceHandle(token);
+            let Some(index) =
+                surface_index_for(surfaces, client, handle, SurfaceRights::COMMIT)
+            else {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            };
+            if surfaces[index].role != SurfaceRole::Toplevel {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
+                return reply;
+            }
+            let window = surfaces[index].window;
+            if let Some(window_index) = window_index_by_id(windows, window) {
+                windows[window_index].state = WINDOW_STATE_NORMAL;
+                if let Some(content) =
+                    content_surface_index_for_window(surfaces, &windows[window_index])
+                {
+                    surfaces[content].visible = true;
+                }
+                if let Some(decoration) =
+                    decoration_surface_index_for_window(surfaces, &windows[window_index])
+                {
+                    surfaces[decoration].visible = true;
+                }
+                raise_window(surfaces, windows, next_z, window);
+                update_keyboard_focus(surfaces, keyboard_focus, Some(index));
+                *needs_present = true;
+                put_u32(&mut reply, 0, 0);
+            } else {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
+            }
+        }
         OP_DESTROY_SURFACE => {
             let token = read_u64(request, 4).unwrap_or(0);
             let handle = SurfaceHandle(token);
             if let Some(index) = surface_index_for(surfaces, client, handle, SurfaceRights::DESTROY)
             {
                 destroy_surface_tree(surfaces, windows, index, pointer_focus, keyboard_focus);
+                restore_keyboard_focus(surfaces, keyboard_focus);
                 *needs_present = true;
                 put_u32(&mut reply, 0, 0);
             } else {
@@ -1510,8 +1561,17 @@ mod tests {
     fn new_toplevel_windows_take_keyboard_focus() {
         assert!(takes_keyboard_focus_on_create(SurfaceRole::Toplevel));
         assert!(takes_keyboard_focus_on_create(SurfaceRole::SecureOverlay));
+        assert!(takes_keyboard_focus_on_create(SurfaceRole::SystemModal));
         assert!(!takes_keyboard_focus_on_create(SurfaceRole::Popup));
         assert!(!takes_keyboard_focus_on_create(SurfaceRole::Panel));
         assert!(!takes_keyboard_focus_on_create(SurfaceRole::Background));
+    }
+
+    #[test]
+    fn system_modals_stack_above_shell_panels_but_below_secure_overlays() {
+        assert!(SurfaceRole::SystemModal.stack_layer() > SurfaceRole::Panel.stack_layer());
+        assert!(
+            SurfaceRole::SystemModal.stack_layer() < SurfaceRole::SecureOverlay.stack_layer()
+        );
     }
 }

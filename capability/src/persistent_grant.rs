@@ -1,7 +1,8 @@
 use alloc::string::{String, ToString};
 
 use mochi_user_platform as platform;
-use crate::dynamic_grant::{read_request_str, transfer_user_grant};
+
+use crate::dynamic_grant::{read_request_str, transfer_scoped_path_grant, transfer_user_grant};
 use crate::package_index::PackageIndex;
 use crate::policy::is_known_capability;
 use crate::resolver::application_identity;
@@ -310,5 +311,13 @@ pub(crate) fn authorize_persistent_capability(
         ));
     }
 
-    transfer_user_grant(requester_thread, capability, executable)
+    match (capability, resource) {
+        ("fs.read.user", Some(path)) => {
+            transfer_scoped_path_grant(requester_thread, path, false, executable)
+        }
+        ("fs.write.user", Some(path)) => {
+            transfer_scoped_path_grant(requester_thread, path, true, executable)
+        }
+        _ => transfer_user_grant(requester_thread, capability, executable),
+    }
 }

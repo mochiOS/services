@@ -61,7 +61,7 @@ fn spawn_service_by_package(
     let mut args = alloc::vec::Vec::new();
     encode_identity_args(&identity, &mut args);
     args.push(logger_endpoint.to_string());
-    let args_nul = encode_spawn_args(&args);
+    let args_nul = encode_spawn_args(&args)?;
     authorize_spawn(
         0,
         service_path,
