@@ -668,12 +668,25 @@ impl WorkspaceService {
             );
             return;
         }
-        if self.pending_file_panels.len() >= MAX_PENDING_FILE_PANELS
-            || self
-                .pending_file_panels
-                .iter()
-                .any(|pending| pending.requester_process == context.process_id)
+        if let Some(picker_process) = self
+            .pending_file_panels
+            .iter()
+            .find(|pending| pending.requester_process == context.process_id)
+            .map(|pending| pending.picker_process)
         {
+            // A menu command can be delivered twice while its first synchronous
+            // request is still settling. Keep the original transaction and
+            // bring its trusted picker back instead of launching an orphan.
+            let _ = self.signal_application_reopen(picker_process);
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::ENOSPC as i32),
+                0,
+            );
+            return;
+        }
+        if self.pending_file_panels.len() >= MAX_PENDING_FILE_PANELS {
             self.reply_status(
                 sender,
                 request.request_id,
@@ -714,15 +727,16 @@ impl WorkspaceService {
                 return;
             }
         };
-        if let Err(status) = set_process_modal(
+        // The file transaction remains valid even when the compositor cannot
+        // establish process modality. The picker has already been launched;
+        // failing the request here would strand that visible window and make
+        // the application report that no panel was opened. The trusted picker
+        // and scoped capability grant still enforce the security boundary.
+        let _ = set_process_modal(
             COMPOSITOR_BEGIN_PROCESS_MODAL,
             context.process_id,
             picker_process,
-        ) {
-            let _ = platform::process::kill(picker_process, 9);
-            self.reply_status(sender, request.request_id, -(status as i32), 0);
-            return;
-        }
+        );
         self.pending_file_panels.push(PendingFilePanel {
             requester_endpoint: Some(sender),
             grant_endpoint: sender,
