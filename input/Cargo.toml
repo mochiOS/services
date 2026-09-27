@@ -5,11 +5,15 @@ edition = "2024"
 build = "build.rs"
 
 [dependencies]
+mochios-ime-engine = { git = "https://github.com/mochiOS/ime", rev = "0aef038024b3a0338f4be221710c702c4259e4e9", package = "engine" }
 mochios-mdriver-protocol = "0.1.0"
 mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }
 mochi-user-syscall = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-syscall" }
 
 [build-dependencies]
+
+[lib]
+path = "src/lib.rs"
 
 [[bin]]
 name = "input"

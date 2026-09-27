@@ -1,5 +1,6 @@
 use std::fs;
 
+use input::ime;
 use mochi_user_platform as platform;
 
 const SETTINGS_PATH: &str = "/var/config/input/settings.conf";
@@ -282,11 +283,14 @@ const INPUT_EVENT_SIZE: usize = core::mem::size_of::<platform::input::InputEvent
 const MAX_SUBSCRIBERS: usize = 8;
 const RELIABLE_SEND_RETRIES: usize = 256;
 
-static mut INPUT_WAIT_BUF: [u8; 32] = [0; 32];
+static mut INPUT_WAIT_BUF: [u8; ime::MAX_REQUEST_LEN] = [0; ime::MAX_REQUEST_LEN];
 
 fn input_wait_buf() -> &'static mut [u8] {
     unsafe {
-        core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(INPUT_WAIT_BUF).cast::<u8>(), 32)
+        core::slice::from_raw_parts_mut(
+            core::ptr::addr_of_mut!(INPUT_WAIT_BUF).cast::<u8>(),
+            ime::MAX_REQUEST_LEN,
+        )
     }
 }
 
@@ -659,6 +663,15 @@ fn main() {
     }
 
     let mut keyboard = KeyboardState::default();
+    let input_method = ime::InputMethod::open_system_dictionary();
+    if input_method.is_available() {
+        platform::logln!("input.service: Japanese IME dictionary loaded");
+    } else {
+        platform::logln!(
+            "input.service: Japanese IME unavailable path={}",
+            ime::DICTIONARY_PATH
+        );
+    }
     let mut hardware_input = true;
     let mut mouse = MouseState::default();
     let input_preferences = InputPreferences::load();
@@ -707,6 +720,12 @@ fn main() {
         let len = (msg & 0xffff_ffff) as usize;
         if len == 0 || len > buf.len() {
             let _ = platform::ipc::reply(sender, &[0]);
+            continue;
+        }
+
+        if ime::is_convert_request(&buf[..len]) {
+            let response = input_method.handle(&buf[..len]);
+            let _ = platform::ipc::reply(sender, &response);
             continue;
         }
 

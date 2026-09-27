@@ -727,6 +727,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine"
+version = "0.1.0"
+source = "git+https://github.com/mochiOS/ime?rev=0aef038024b3a0338f4be221710c702c4259e4e9#0aef038024b3a0338f4be221710c702c4259e4e9"
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1169,6 +1174,7 @@ dependencies = [
 name = "input"
 version = "0.1.0"
 dependencies = [
+ "engine",
  "mochi-user-platform",
  "mochi-user-syscall",
  "mochios-mdriver-protocol",
