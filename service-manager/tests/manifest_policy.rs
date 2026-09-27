@@ -153,6 +153,7 @@ fn service_manifests_match_policy() {
         BINDER_MANIFEST,
         "/applications/Binder.app/entry.elf",
         &[
+            "control-center.read",
             "fs.read.all",
             "ipc.client",
             "ipc.server",
