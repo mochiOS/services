@@ -55,8 +55,7 @@ struct PendingFilePanel {
     grant_endpoint: u64,
     requester_process: u64,
     request_id: u64,
-    picker_endpoint: Option<u64>,
-    picker_request_id: u64,
+    selection_delivered: bool,
     picker_process: u64,
     token: [u8; protocol::FILE_PANEL_TOKEN_LEN],
     mode: u16,
@@ -742,8 +741,7 @@ impl WorkspaceService {
             grant_endpoint: sender,
             requester_process: context.process_id,
             request_id: request.request_id,
-            picker_endpoint: None,
-            picker_request_id: 0,
+            selection_delivered: false,
             picker_process,
             token,
             mode: options.mode,
@@ -801,7 +799,7 @@ impl WorkspaceService {
         }
 
         if self.pending_file_panels[index].requester_endpoint.is_none()
-            || self.pending_file_panels[index].picker_endpoint.is_some()
+            || self.pending_file_panels[index].selection_delivered
         {
             self.reply_status(
                 sender,
@@ -834,11 +832,22 @@ impl WorkspaceService {
             .expect("file panel requester checked above");
         let requester_request_id = pending.request_id;
         let token = pending.token;
-        pending.picker_endpoint = Some(sender);
-        pending.picker_request_id = request.request_id;
+        let requester_process = pending.requester_process;
+        let picker_process = pending.picker_process;
+        pending.selection_delivered = true;
         self.reply_file_panel_result(requester_endpoint, requester_request_id, 0, token, &path);
-        // The picker call remains blocked until the requesting application
-        // confirms that it actually completed the open/save operation.
+        // Dismiss the picker as soon as the user confirms a destination. Its
+        // event loop must not remain synchronously blocked while the requesting
+        // application performs I/O; otherwise every control in the visible
+        // picker appears dead. Operation failures are presented by AppKit in
+        // the requesting application, just like a native document workflow.
+        self.reply_status(sender, request.request_id, 0, 0);
+        let _ = set_process_modal(
+            COMPOSITOR_END_PROCESS_MODAL,
+            requester_process,
+            picker_process,
+        );
+        let _ = self.signal_application_reopen(requester_process);
     }
 
     fn file_panel_finish(&mut self, sender: u64, request: protocol::Message<'_>) {
@@ -856,7 +865,7 @@ impl WorkspaceService {
             pending.token == finish.token
                 && sender_process == Some(pending.requester_process)
                 && pending.requester_endpoint.is_none()
-                && pending.picker_endpoint.is_some()
+                && pending.selection_delivered
         }) else {
             self.reply_status(
                 sender,
@@ -867,33 +876,7 @@ impl WorkspaceService {
             return;
         };
 
-        if finish.status == 1 {
-            let pending = self.pending_file_panels.remove(index);
-            let picker_endpoint = pending
-                .picker_endpoint
-                .expect("file panel picker checked above");
-            self.reply_status(picker_endpoint, pending.picker_request_id, 0, 0);
-            let _ = set_process_modal(
-                COMPOSITOR_END_PROCESS_MODAL,
-                pending.requester_process,
-                pending.picker_process,
-            );
-            let _ = self.signal_application_reopen(pending.requester_process);
-            self.reply_status(sender, request.request_id, 0, 0);
-            return;
-        }
-
-        let pending = self.pending_file_panels.remove(index);
-        let picker_endpoint = pending
-            .picker_endpoint
-            .expect("file panel picker checked above");
-        self.reply_status(picker_endpoint, pending.picker_request_id, 0, 0);
-        let _ = set_process_modal(
-            COMPOSITOR_END_PROCESS_MODAL,
-            pending.requester_process,
-            pending.picker_process,
-        );
-        let _ = self.signal_application_reopen(pending.requester_process);
+        self.pending_file_panels.remove(index);
         self.reply_status(sender, request.request_id, 0, 0);
     }
 
@@ -908,7 +891,7 @@ impl WorkspaceService {
             return;
         }
         let sender_process = platform::ipc::endpoint_owner_process(sender).ok();
-        let Some(pending) = self.pending_file_panels.iter_mut().find(|pending| {
+        let Some(_pending) = self.pending_file_panels.iter().find(|pending| {
             pending.token.as_slice() == request.payload
                 && sender_process == Some(pending.requester_process)
         }) else {
@@ -920,19 +903,15 @@ impl WorkspaceService {
             );
             return;
         };
-        if pending.requester_endpoint.is_some() || pending.picker_endpoint.is_some() {
-            self.reply_status(
-                sender,
-                request.request_id,
-                -(mochi_user_syscall::EAGAIN as i32),
-                0,
-            );
-            return;
-        }
-        pending.requester_endpoint = Some(sender);
-        pending.request_id = request.request_id;
-        // This retry request remains unanswered until the picker submits a new
-        // selection or is cancelled.
+        // The picker is dismissed once a selection is delivered, so there is
+        // no live panel that could satisfy a retry request. Callers should
+        // present a new panel instead.
+        self.reply_status(
+            sender,
+            request.request_id,
+            -(mochi_user_syscall::EAGAIN as i32),
+            0,
+        );
     }
 
     fn reply_file_panel_result(

@@ -15,6 +15,7 @@ requires = [
     "input.pointer",
     "ipc.client",
     "ipc.server",
+    "process.inspect",
     "process.spawn",
     "window.create",
     "window.overlay",
