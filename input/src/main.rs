@@ -572,6 +572,7 @@ fn process_keyboard_byte(
     byte: u8,
     state: &mut KeyboardState,
     subscribers: &[u64; MAX_SUBSCRIBERS],
+    input_method: &mut ime::InputMethod,
 ) {
     use platform::input::*;
 
@@ -585,11 +586,18 @@ fn process_keyboard_byte(
     let extended = state.extended_prefix;
     state.extended_prefix = false;
 
+    let pressed_caps_lock = matches!((scancode, extended, is_break), (0x3a, false, false));
+    if pressed_caps_lock {
+        if state.shift {
+            state.caps_lock = !state.caps_lock;
+        } else {
+            input_method.toggle();
+        }
+    }
     match (scancode, extended) {
         (0x2a | 0x36, false) => state.shift = !is_break,
         (0x1d, _) => state.ctrl = !is_break,
         (0x38, _) => state.alt = !is_break,
-        (0x3a, false) if !is_break => state.caps_lock = !state.caps_lock,
         _ => {}
     }
 
@@ -663,7 +671,7 @@ fn main() {
     }
 
     let mut keyboard = KeyboardState::default();
-    let input_method = ime::InputMethod::open_system_dictionary();
+    let mut input_method = ime::InputMethod::open_system_dictionary();
     if input_method.is_available() {
         platform::logln!("input.service: Japanese IME dictionary loaded");
     } else {
@@ -729,6 +737,17 @@ fn main() {
             continue;
         }
 
+        if ime::is_status_request(&buf[..len]) {
+            let _ = platform::ipc::reply(sender, &input_method.state_response());
+            continue;
+        }
+
+        if ime::is_toggle_request(&buf[..len]) {
+            input_method.toggle();
+            let _ = platform::ipc::reply(sender, &input_method.state_response());
+            continue;
+        }
+
         if len >= 16
             && u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])
                 == platform::input::SUBSCRIBE_OPCODE
@@ -741,7 +760,7 @@ fn main() {
         if len >= 8 {
             match buf[0] {
                 platform::input::RAW_KIND_KEYBOARD => {
-                    process_keyboard_byte(buf[4], &mut keyboard, &subscribers);
+                    process_keyboard_byte(buf[4], &mut keyboard, &subscribers, &mut input_method);
                 }
                 platform::input::RAW_KIND_MOUSE_PACKET => {
                     process_mouse_packet(&buf[4..8], &mut mouse, &subscribers, input_preferences);

@@ -2,6 +2,8 @@ use mochios_ime_engine::Engine;
 
 pub const DICTIONARY_PATH: &str = "/system/libraries/ime/ja.mime";
 pub const CONVERT_OPCODE: u32 = u32::from_le_bytes(*b"IMEC");
+pub const STATUS_OPCODE: u32 = u32::from_le_bytes(*b"IMES");
+pub const TOGGLE_OPCODE: u32 = u32::from_le_bytes(*b"IMET");
 pub const REQUEST_HEADER_LEN: usize = 12;
 pub const RESPONSE_HEADER_LEN: usize = 8;
 pub const MAX_REQUEST_LEN: usize = 4096;
@@ -14,12 +16,14 @@ const STATUS_INVALID_REQUEST: i32 = -2;
 
 pub struct InputMethod {
     engine: Option<Engine>,
+    enabled: bool,
 }
 
 impl InputMethod {
     pub fn open_system_dictionary() -> Self {
         Self {
             engine: Engine::open(DICTIONARY_PATH).ok(),
+            enabled: false,
         }
     }
 
@@ -41,12 +45,33 @@ impl InputMethod {
                 .map(|candidate| candidate.text),
         )
     }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn toggle(&mut self) -> bool {
+        self.enabled = !self.enabled;
+        self.enabled
+    }
+
+    pub fn state_response(&self) -> Vec<u8> {
+        vec![self.enabled as u8]
+    }
 }
 
 pub fn is_convert_request(request: &[u8]) -> bool {
     request
         .get(..4)
         .is_some_and(|bytes| bytes == CONVERT_OPCODE.to_le_bytes())
+}
+
+pub fn is_status_request(request: &[u8]) -> bool {
+    request == STATUS_OPCODE.to_le_bytes()
+}
+
+pub fn is_toggle_request(request: &[u8]) -> bool {
+    request == TOGGLE_OPCODE.to_le_bytes()
 }
 
 fn decode_request(request: &[u8]) -> Option<(&str, usize)> {
@@ -130,5 +155,18 @@ mod tests {
         assert_eq!(u16::from_le_bytes(response[4..6].try_into().unwrap()), 2);
         let first_len = u16::from_le_bytes(response[8..10].try_into().unwrap()) as usize;
         assert_eq!(&response[10..10 + first_len], "今日".as_bytes());
+    }
+
+    #[test]
+    fn input_mode_toggle_is_reported_to_clients() {
+        let mut input_method = InputMethod {
+            engine: None,
+            enabled: false,
+        };
+        assert!(!input_method.enabled());
+        assert_eq!(input_method.state_response(), vec![0]);
+        assert!(input_method.toggle());
+        assert!(input_method.enabled());
+        assert_eq!(input_method.state_response(), vec![1]);
     }
 }
