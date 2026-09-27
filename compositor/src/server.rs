@@ -79,6 +79,7 @@ fn process_input_event(
         state.display_height,
         &mut state.pointer_focus,
         &mut state.keyboard_focus,
+        &mut state.app_switcher_active,
         &mut state.pointer_grab,
         &state.modal_sessions,
         &mut state.context_menu,

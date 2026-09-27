@@ -480,6 +480,7 @@ pub(crate) fn handle_input_event(
     display_height: u32,
     pointer_focus: &mut Option<usize>,
     keyboard_focus: &mut Option<usize>,
+    app_switcher_active: &mut bool,
     pointer_grab: &mut Option<PointerGrab>,
     modal_sessions: &[ModalSession],
     context_menu: &mut ContextMenuBroker,
@@ -622,6 +623,40 @@ pub(crate) fn handle_input_event(
             None
         }
         platform::input::EVENT_KIND_KEY => {
+            let pressed = event.flags & platform::input::FLAG_PRESS != 0;
+            let released = event.flags & platform::input::FLAG_RELEASE != 0;
+            let alt_tab = pressed
+                && event.keycode == platform::input::KEY_TAB
+                && event.modifiers & platform::input::MOD_ALT != 0;
+            let alt_released = released
+                && matches!(
+                    event.keycode,
+                    platform::input::KEY_LEFT_ALT | platform::input::KEY_RIGHT_ALT
+                );
+            let escape = pressed && event.keycode == platform::input::KEY_ESC;
+            if alt_tab || *app_switcher_active {
+                *app_switcher_active = !alt_released && !escape;
+                if let Some(panel) = surfaces
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, surface)| {
+                        surface.live && surface.visible && surface.role == SurfaceRole::Panel
+                    })
+                    .max_by_key(|(_, surface)| surface.z)
+                    .map(|(index, _)| index)
+                {
+                    let surface = &surfaces[panel];
+                    send_event(
+                        surface.event_endpoint,
+                        surface.token,
+                        EVENT_KEY,
+                        i32::from(event.keycode),
+                        event.codepoint as i32,
+                        encode_key_event_detail(event.flags, event.modifiers),
+                    );
+                }
+                return None;
+            }
             if context_menu.capture_key(
                 event.keycode,
                 event.flags & platform::input::FLAG_PRESS != 0,
