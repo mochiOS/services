@@ -64,6 +64,15 @@ struct PendingFilePanel {
 }
 
 #[derive(Debug)]
+struct RegisteredControlCenterCard {
+    owner_process: u64,
+    bundle_id: String,
+    item_id: String,
+    title: String,
+    body: String,
+}
+
+#[derive(Debug)]
 struct WorkspaceService {
     endpoint: u64,
     clipboard_generation: u64,
@@ -76,6 +85,7 @@ struct WorkspaceService {
     pending_file_panels: Vec<PendingFilePanel>,
     next_file_panel_token: u64,
     application_endpoints: BTreeMap<u64, u64>,
+    control_center_cards: BTreeMap<(String, String), RegisteredControlCenterCard>,
 }
 
 impl WorkspaceService {
@@ -97,6 +107,7 @@ impl WorkspaceService {
             pending_file_panels: Vec::new(),
             next_file_panel_token: 1,
             application_endpoints: BTreeMap::new(),
+            control_center_cards: BTreeMap::new(),
         }
     }
 
@@ -115,6 +126,8 @@ impl WorkspaceService {
             | protocol::OP_FILE_PANEL_RETRY
             | protocol::OP_APPLICATION_REGISTER
             | protocol::OP_APPLICATION_ACTIVATE => "ipc.client",
+            protocol::OP_CONTROL_CENTER_CARD_REGISTER => "control-center.register",
+            protocol::OP_CONTROL_CENTER_CARD_SNAPSHOT => "control-center.read",
             protocol::OP_ASSOCIATION_SET | protocol::OP_ASSOCIATION_REMOVE => ASSOCIATIONS_WRITE,
             _ => {
                 self.reply_status(
@@ -153,8 +166,117 @@ impl WorkspaceService {
             protocol::OP_FILE_PANEL_RETRY => self.file_panel_retry(sender, request),
             protocol::OP_APPLICATION_REGISTER => self.application_register(sender, request),
             protocol::OP_APPLICATION_ACTIVATE => self.application_activate(sender, request),
+            protocol::OP_CONTROL_CENTER_CARD_REGISTER => {
+                self.control_center_card_register(sender, request)
+            }
+            protocol::OP_CONTROL_CENTER_CARD_SNAPSHOT => {
+                self.control_center_card_snapshot(sender, request)
+            }
             _ => unreachable!(),
         }
+    }
+
+    fn control_center_card_register(&mut self, sender: u64, request: protocol::Message<'_>) {
+        let Ok(card) = protocol::decode_control_center_card(request.payload) else {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EINVAL as i32),
+                0,
+            );
+            return;
+        };
+        if !valid_control_center_card(card) {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EINVAL as i32),
+                0,
+            );
+            return;
+        }
+        let Some(owner_process) = platform::ipc::endpoint_owner_process(sender).ok() else {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EACCES as i32),
+                0,
+            );
+            return;
+        };
+        let key = (card.bundle_id.to_owned(), card.item_id.to_owned());
+        if self
+            .control_center_cards
+            .get(&key)
+            .is_some_and(|existing| existing.owner_process != owner_process)
+        {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EACCES as i32),
+                0,
+            );
+            return;
+        }
+        let registered = RegisteredControlCenterCard {
+            owner_process,
+            bundle_id: key.0.clone(),
+            item_id: key.1.clone(),
+            title: card.title.to_owned(),
+            body: card.body.to_owned(),
+        };
+        self.control_center_cards.insert(key, registered);
+        self.reply_status(sender, request.request_id, 0, 0);
+    }
+
+    fn control_center_card_snapshot(&self, sender: u64, request: protocol::Message<'_>) {
+        if !request.payload.is_empty() {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EINVAL as i32),
+                0,
+            );
+            return;
+        }
+        let mut payload = vec![0u8; 4];
+        let mut encoded_count = 0u16;
+        for card in self
+            .control_center_cards
+            .values()
+            .take(protocol::MAX_CONTROL_CENTER_CARDS)
+        {
+            let mut encoded = vec![0u8; protocol::MAX_MESSAGE_LEN - protocol::HEADER_LEN];
+            let Ok(length) = protocol::encode_control_center_card(
+                protocol::ControlCenterCard {
+                    bundle_id: &card.bundle_id,
+                    item_id: &card.item_id,
+                    title: &card.title,
+                    body: &card.body,
+                },
+                &mut encoded,
+            ) else {
+                continue;
+            };
+            let Ok(length_u32) = u32::try_from(length) else {
+                continue;
+            };
+            if payload.len().saturating_add(4).saturating_add(length)
+                > protocol::MAX_MESSAGE_LEN - protocol::HEADER_LEN
+            {
+                break;
+            }
+            payload.extend_from_slice(&length_u32.to_le_bytes());
+            payload.extend_from_slice(&encoded[..length]);
+            encoded_count = encoded_count.saturating_add(1);
+        }
+        payload[..2].copy_from_slice(&encoded_count.to_le_bytes());
+        self.reply(
+            sender,
+            protocol::OP_CONTROL_CENTER_CARD_SNAPSHOT_RESULT,
+            request.request_id,
+            &payload,
+        );
     }
 
     fn application_register(&mut self, sender: u64, request: protocol::Message<'_>) {
@@ -1168,6 +1290,30 @@ fn valid_identifier(value: &str, maximum: usize) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
 }
 
+fn valid_control_center_card(card: protocol::ControlCenterCard<'_>) -> bool {
+    let valid_item_id = !card.item_id.is_empty()
+        && card.item_id.len() <= protocol::MAX_CONTROL_CENTER_ITEM_ID_LEN
+        && card
+            .item_id
+            .bytes()
+            .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'-'));
+    let rows = card.body.lines().collect::<Vec<_>>();
+    valid_identifier(card.bundle_id, protocol::MAX_BUNDLE_ID_LEN)
+        && valid_item_id
+        && !card.title.chars().any(char::is_control)
+        && (1..=4).contains(&rows.len())
+        && rows.iter().all(|row| {
+            let mut fields = row.split('\x1f');
+            let label = fields.next().unwrap_or_default();
+            let value = fields.next().unwrap_or_default();
+            !label.is_empty()
+                && !value.is_empty()
+                && fields.next().is_none()
+                && !label.chars().any(char::is_control)
+                && !value.chars().any(char::is_control)
+        })
+}
+
 fn decode_association_request(payload: &[u8]) -> Option<Association> {
     let roles = protocol::read_u16(payload, 0).ok()?;
     let extension_len = protocol::read_u16(payload, 2).ok()? as usize;
@@ -1786,6 +1932,21 @@ mod tests {
         payload.extend_from_slice(&10u16.to_le_bytes());
         payload.extend_from_slice(b"txttext/plainbad bundle");
         assert!(decode_association_request(&payload).is_none());
+    }
+
+    #[test]
+    fn control_center_card_rejects_malformed_rows() {
+        let card = |body| protocol::ControlCenterCard {
+            bundle_id: "org.example.app",
+            item_id: "status",
+            title: "Status",
+            body,
+        };
+        assert!(valid_control_center_card(card("State\x1fReady")));
+        assert!(!valid_control_center_card(card("missing separator")));
+        assert!(!valid_control_center_card(card(
+            "1\x1fa\n2\x1fb\n3\x1fc\n4\x1fd\n5\x1fe"
+        )));
     }
 
     fn application(
