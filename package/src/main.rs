@@ -133,6 +133,17 @@ fn manifest_target_path(kind: Option<&str>, package_name: &str, path: &str) -> O
     }
 }
 
+fn application_manifest_path(
+    manifest: &platform::package::PackageManifest,
+) -> Option<String> {
+    (manifest.package_kind.as_deref() == Some("application")).then(|| {
+        alloc::format!(
+            "/applications/{}.app/manifest.toml",
+            manifest.package_name
+        )
+    })
+}
+
 fn verify_with_signature_service(
     package_path: &str,
 ) -> Result<VerifiedPackage, mochi_user_syscall::SysError> {
@@ -392,6 +403,9 @@ fn manifest_physical_targets(
         })?;
         targets.push(target);
     }
+    if let Some(path) = application_manifest_path(manifest) {
+        targets.push(path);
+    }
     targets.sort();
     Ok(targets)
 }
@@ -460,6 +474,9 @@ fn update_package_files(
         manifest_bytes,
         FILE_MODE_644,
     )?;
+    if let Some(path) = application_manifest_path(manifest) {
+        stage_update_file(&mut staged, &path, manifest_bytes, FILE_MODE_644)?;
+    }
 
     let mut committed = 0usize;
     for entry in &staged {
@@ -615,6 +632,7 @@ fn install_package(
     require_path_absent(&alloc::format!("/system/packages/{}/manifest.toml", manifest.package_id))?;
     let package_root = alloc::format!("/var/lib/packages/{}", manifest.package_id);
     let manifest_path = alloc::format!("{}/manifest.toml", package_root);
+    let bundle_manifest_path = application_manifest_path(&manifest);
     let verification_path = alloc::format!("{}/verification.bin", package_root);
     let signer_continuity = validate_update_owner(&verification_path, &verification)?;
     match (mutation, signer_continuity) {
@@ -773,6 +791,9 @@ fn install_package(
     for target in &install_targets {
         require_path_absent(target)?;
     }
+    if let Some(path) = bundle_manifest_path.as_deref() {
+        require_path_absent(path)?;
+    }
     require_path_absent(&verification_path)?;
     require_path_absent(&manifest_path)?;
     let mut created_paths = Vec::new();
@@ -819,6 +840,18 @@ fn install_package(
         return Err(error);
     }
     created_paths.push(manifest_path.clone());
+    if let Some(path) = bundle_manifest_path {
+        if let Err(error) = write_file(&path, &index.manifest, FILE_MODE_644) {
+            let _ = platform::file::remove(&path);
+            rollback_created_files(&created_paths);
+            diagnostic(&alloc::format!(
+                "package.service: application manifest write failed errno={}",
+                error.errno().unwrap_or(0)
+            ));
+            return Err(error);
+        }
+        created_paths.push(path);
+    }
     if let Some((offset, size, digest)) = linux_stage
         && let Err(error) =
             prepare_linux_bundle(&manifest.package_id, mpkg_path, offset, size, &digest)

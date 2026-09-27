@@ -1399,11 +1399,10 @@ fn read_installed_application(root: &Path) -> Option<InstalledApplication> {
     if !root.is_dir() {
         return None;
     }
-    let about = fs::read_to_string(root.join("about.toml")).ok()?;
-    let name = parse_string_field(&about, "name")?;
-    let bundle_id = parse_string_field(&about, "bundle_id")
-        .or_else(|| parse_string_field(&about, "bundle-id"))?;
-    let entry = parse_string_field(&about, "entry")?;
+    let manifest = fs::read_to_string(root.join("manifest.toml")).ok()?;
+    let name = parse_string_field(&manifest, "name")?;
+    let bundle_id = parse_string_field(&manifest, "id")?;
+    let entry = parse_string_field(&manifest, "entry")?;
     if name.is_empty()
         || name.len() > protocol::MAX_HANDLER_NAME_LEN
         || name.chars().any(char::is_control)
@@ -1416,13 +1415,13 @@ fn read_installed_application(root: &Path) -> Option<InstalledApplication> {
     if !Path::new(&entry_path).is_file() {
         return None;
     }
-    let roles = parse_document_roles(&parse_string_array_field(&about, "document_roles"));
+    let roles = parse_document_roles(&parse_string_array_field(&manifest, "document_roles"));
     if roles == 0 {
         return None;
     }
     let mut associations = Vec::new();
     let mut seen = BTreeSet::new();
-    for extension in parse_string_array_field(&about, "document_extensions") {
+    for extension in parse_string_array_field(&manifest, "document_extensions") {
         let extension = extension.trim_start_matches('.').to_ascii_lowercase();
         if valid_identifier(&extension, protocol::MAX_EXTENSION_LEN)
             && seen.insert((extension.clone(), String::new()))
@@ -1435,7 +1434,7 @@ fn read_installed_application(root: &Path) -> Option<InstalledApplication> {
             });
         }
     }
-    for content_type in parse_string_array_field(&about, "document_content_types") {
+    for content_type in parse_string_array_field(&manifest, "document_content_types") {
         let content_type = content_type.to_ascii_lowercase();
         if valid_content_type(&content_type) && seen.insert((String::new(), content_type.clone())) {
             associations.push(Association {
