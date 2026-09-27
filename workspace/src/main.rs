@@ -764,16 +764,16 @@ impl WorkspaceService {
         };
         if result.status == 1 {
             let pending = self.pending_file_panels.remove(index);
-            if let Some(endpoint) = pending.requester_endpoint {
-                self.reply_file_panel_result(endpoint, pending.request_id, 1, pending.token, "");
-            }
-            self.reply_status(sender, request.request_id, 0, 0);
             let _ = set_process_modal(
                 COMPOSITOR_END_PROCESS_MODAL,
                 pending.requester_process,
                 pending.picker_process,
             );
             let _ = self.signal_application_reopen(pending.requester_process);
+            if let Some(endpoint) = pending.requester_endpoint {
+                self.reply_file_panel_result(endpoint, pending.request_id, 1, pending.token, "");
+            }
+            self.reply_status(sender, request.request_id, 0, 0);
             return;
         }
         if result.status != 0 {
@@ -861,11 +861,11 @@ impl WorkspaceService {
                 .expect("file panel picker checked above");
             let picker_request_id = pending.picker_request_id;
             pending.picker_request_id = 0;
-            self.reply_status(
+            self.reply_file_panel_operation_error(
                 picker_endpoint,
                 picker_request_id,
-                -(mochi_user_syscall::EIO as i32),
-                0,
+                finish.token,
+                finish.error,
             );
             self.reply_status(sender, request.request_id, 0, 0);
             return;
@@ -876,13 +876,13 @@ impl WorkspaceService {
             .picker_endpoint
             .expect("file panel picker checked above");
         self.reply_status(picker_endpoint, pending.picker_request_id, 0, 0);
-        self.reply_status(sender, request.request_id, 0, 0);
         let _ = set_process_modal(
             COMPOSITOR_END_PROCESS_MODAL,
             pending.requester_process,
             pending.picker_process,
         );
         let _ = self.signal_application_reopen(pending.requester_process);
+        self.reply_status(sender, request.request_id, 0, 0);
     }
 
     fn file_panel_retry(&mut self, sender: u64, request: protocol::Message<'_>) {
@@ -946,6 +946,33 @@ impl WorkspaceService {
         self.reply(
             sender,
             protocol::OP_FILE_PANEL_RESULT,
+            request_id,
+            &payload[..length],
+        );
+    }
+
+    fn reply_file_panel_operation_error(
+        &self,
+        sender: u64,
+        request_id: u64,
+        token: [u8; protocol::FILE_PANEL_TOKEN_LEN],
+        error: &str,
+    ) {
+        let mut payload = vec![0u8; protocol::FILE_PANEL_FINISH_PREFIX_LEN + error.len()];
+        let Ok(length) = protocol::encode_file_panel_finish(
+            protocol::FilePanelFinish {
+                token,
+                status: 1,
+                error,
+            },
+            &mut payload,
+        ) else {
+            self.reply_status(sender, request_id, -(mochi_user_syscall::EIO as i32), 0);
+            return;
+        };
+        self.reply(
+            sender,
+            protocol::OP_FILE_PANEL_OPERATION_ERROR,
             request_id,
             &payload[..length],
         );
