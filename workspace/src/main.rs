@@ -1171,7 +1171,7 @@ impl WorkspaceService {
         // Dismiss the picker as soon as the user confirms a destination. Its
         // event loop must not remain synchronously blocked while the requesting
         // application performs I/O; otherwise every control in the visible
-        // picker appears dead. Operation failures are presented by AppKit in
+        // picker appears dead. Operation failures are presented by AppCore in
         // the requesting application, just like a native document workflow.
         self.reply_status(sender, request.request_id, 0, 0);
         let _ = set_process_modal(
@@ -2386,7 +2386,7 @@ mod tests {
     }
 
     #[test]
-    fn file_panel_content_filters_match_appkit_inference() {
+    fn file_panel_content_filters_match_appcore_inference() {
         assert!(selection_matches_content_types(
             Path::new("/home/user/note.txt"),
             "text/plain"
