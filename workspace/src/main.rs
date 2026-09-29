@@ -100,6 +100,9 @@ struct WorkspaceService {
     notifications: Vec<NotificationRecord>,
     next_notification_id: u64,
     notification_path: PathBuf,
+    notification_settings_path: PathBuf,
+    notification_focus_enabled: bool,
+    notification_disabled_applications: BTreeSet<String>,
 }
 
 impl WorkspaceService {
@@ -114,6 +117,22 @@ impl WorkspaceService {
             .ok()
             .and_then(|bytes| decode_notifications(&bytes).ok())
             .unwrap_or_default();
+        let notification_settings_path = workspace_user_path("notification-settings.db");
+        let (notification_focus_enabled, notification_disabled_applications) =
+            fs::read(&notification_settings_path)
+                .ok()
+                .and_then(|bytes| {
+                    let settings = protocol::decode_notification_settings(&bytes).ok()?;
+                    Some((
+                        settings.focus_enabled,
+                        settings
+                            .disabled_bundle_ids
+                            .lines()
+                            .map(str::to_owned)
+                            .collect(),
+                    ))
+                })
+                .unwrap_or_default();
         let next_notification_id = notifications
             .iter()
             .map(|notification| notification.id)
@@ -137,6 +156,9 @@ impl WorkspaceService {
             notifications,
             next_notification_id,
             notification_path,
+            notification_settings_path,
+            notification_focus_enabled,
+            notification_disabled_applications,
         }
     }
 
@@ -161,7 +183,10 @@ impl WorkspaceService {
             protocol::OP_NOTIFICATION_SNAPSHOT
             | protocol::OP_NOTIFICATION_MARK_ALL_READ
             | protocol::OP_NOTIFICATION_REMOVE
-            | protocol::OP_NOTIFICATION_CLEAR => "control-center.read",
+            | protocol::OP_NOTIFICATION_CLEAR
+            | protocol::OP_NOTIFICATION_SETTINGS_SNAPSHOT
+            | protocol::OP_NOTIFICATION_FOCUS_SET
+            | protocol::OP_NOTIFICATION_APPLICATION_SET => "control-center.read",
             protocol::OP_ASSOCIATION_SET | protocol::OP_ASSOCIATION_REMOVE => ASSOCIATIONS_WRITE,
             _ => {
                 self.reply_status(
@@ -213,6 +238,13 @@ impl WorkspaceService {
             }
             protocol::OP_NOTIFICATION_REMOVE => self.notification_remove(sender, request),
             protocol::OP_NOTIFICATION_CLEAR => self.notification_clear(sender, request),
+            protocol::OP_NOTIFICATION_SETTINGS_SNAPSHOT => {
+                self.notification_settings_snapshot(sender, request)
+            }
+            protocol::OP_NOTIFICATION_FOCUS_SET => self.notification_focus_set(sender, request),
+            protocol::OP_NOTIFICATION_APPLICATION_SET => {
+                self.notification_application_set(sender, request)
+            }
             _ => unreachable!(),
         }
     }
@@ -362,6 +394,13 @@ impl WorkspaceService {
             );
             return;
         }
+        if self
+            .notification_disabled_applications
+            .contains(notification.bundle_id)
+        {
+            self.reply_status(sender, request.request_id, 0, 0);
+            return;
+        }
 
         let id = self.next_notification_id.max(1);
         self.next_notification_id = id.saturating_add(1).max(1);
@@ -478,6 +517,130 @@ impl WorkspaceService {
         }
         self.notifications.clear();
         self.finish_notification_mutation(sender, request.request_id);
+    }
+
+    fn notification_settings_snapshot(&self, sender: u64, request: protocol::Message<'_>) {
+        if !request.payload.is_empty() {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EINVAL as i32),
+                0,
+            );
+            return;
+        }
+        let disabled_bundle_ids = self
+            .notification_disabled_applications
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut payload = vec![0u8; protocol::MAX_NOTIFICATION_SETTINGS_LEN];
+        let Ok(length) = protocol::encode_notification_settings(
+            protocol::NotificationSettings {
+                focus_enabled: self.notification_focus_enabled,
+                disabled_bundle_ids: &disabled_bundle_ids,
+            },
+            &mut payload,
+        ) else {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EIO as i32),
+                0,
+            );
+            return;
+        };
+        self.reply(
+            sender,
+            protocol::OP_NOTIFICATION_SETTINGS_SNAPSHOT_RESULT,
+            request.request_id,
+            &payload[..length],
+        );
+    }
+
+    fn notification_focus_set(&mut self, sender: u64, request: protocol::Message<'_>) {
+        let Ok([enabled]) = <[u8; 1]>::try_from(request.payload) else {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EINVAL as i32),
+                0,
+            );
+            return;
+        };
+        if enabled > 1 {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EINVAL as i32),
+                0,
+            );
+            return;
+        }
+        let previous = self.notification_focus_enabled;
+        self.notification_focus_enabled = enabled != 0;
+        let status = if self.save_notification_settings().is_ok() {
+            0
+        } else {
+            self.notification_focus_enabled = previous;
+            -(mochi_user_syscall::EIO as i32)
+        };
+        self.reply_status(sender, request.request_id, status, 0);
+    }
+
+    fn notification_application_set(&mut self, sender: u64, request: protocol::Message<'_>) {
+        let Ok(setting) = protocol::decode_notification_application_setting(request.payload) else {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EINVAL as i32),
+                0,
+            );
+            return;
+        };
+        let was_disabled = self
+            .notification_disabled_applications
+            .contains(setting.bundle_id);
+        if setting.enabled {
+            self.notification_disabled_applications
+                .remove(setting.bundle_id);
+        } else {
+            self.notification_disabled_applications
+                .insert(setting.bundle_id.to_owned());
+        }
+        let status = if self.save_notification_settings().is_ok() {
+            0
+        } else {
+            if was_disabled {
+                self.notification_disabled_applications
+                    .insert(setting.bundle_id.to_owned());
+            } else {
+                self.notification_disabled_applications
+                    .remove(setting.bundle_id);
+            }
+            -(mochi_user_syscall::EIO as i32)
+        };
+        self.reply_status(sender, request.request_id, status, 0);
+    }
+
+    fn save_notification_settings(&self) -> io::Result<()> {
+        let disabled_bundle_ids = self
+            .notification_disabled_applications
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut bytes = vec![0u8; protocol::MAX_NOTIFICATION_SETTINGS_LEN];
+        let length = protocol::encode_notification_settings(
+            protocol::NotificationSettings {
+                focus_enabled: self.notification_focus_enabled,
+                disabled_bundle_ids: &disabled_bundle_ids,
+            },
+            &mut bytes,
+        )
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "notification settings"))?;
+        persist_private_file(&self.notification_settings_path, &bytes[..length])
     }
 
     fn finish_notification_mutation(&self, sender: u64, request_id: u64) {
@@ -2135,9 +2298,13 @@ fn decode_notifications(bytes: &[u8]) -> io::Result<Vec<NotificationRecord>> {
 
 fn save_notifications(path: &Path, notifications: &[NotificationRecord]) -> io::Result<()> {
     let bytes = encode_notifications(notifications)?;
+    persist_private_file(path, &bytes)
+}
+
+fn persist_private_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = path
         .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "notification parent"))?;
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "private file parent"))?;
     fs::create_dir_all(parent)?;
     fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
     let temporary = path.with_extension("db.new");
@@ -2148,7 +2315,7 @@ fn save_notifications(path: &Path, notifications: &[NotificationRecord]) -> io::
         .write(true)
         .mode(0o600)
         .open(&temporary)?;
-    file.write_all(&bytes)?;
+    file.write_all(bytes)?;
     file.sync_all()?;
     let _ = fs::remove_file(&backup);
     let had_database = fs::rename(path, &backup).is_ok();
