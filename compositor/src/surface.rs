@@ -511,7 +511,9 @@ fn read_gpu_scene_pixel(surface: &Surface, sx: usize, sy: usize) -> Option<u32> 
     let point_x = sx as f32 / gpu.width as f32 * 2.0 - 1.0;
     let point_y = sy as f32 / gpu.height as f32 * 2.0 - 1.0;
     let mut alpha = 0.0f32;
-    for triangle in gpu.vertices.chunks_exact(mochios_viewkit_gpu_protocol::VERTEX_STRIDE * 3)
+    for triangle in gpu
+        .vertices
+        .chunks_exact(mochios_viewkit_gpu_protocol::VERTEX_STRIDE * 3)
     {
         let first =
             decode_gpu_hit_vertex(&triangle[0..mochios_viewkit_gpu_protocol::VERTEX_STRIDE])?;
@@ -675,12 +677,12 @@ mod gpu_hit_tests {
         let overlay = scene_surface(0.25);
         let gpu = surface.gpu.as_mut().unwrap();
         for _ in 0..100 {
-            gpu.vertices.extend_from_slice(&overlay.gpu.as_ref().unwrap().vertices);
+            gpu.vertices
+                .extend_from_slice(&overlay.gpu.as_ref().unwrap().vertices);
         }
         assert_eq!(read_current_pixel(&surface, 10, 10), Some(0xff00_0000));
         assert_eq!(read_current_pixel(&surface, 90, 90), Some(0));
     }
-
 }
 
 fn copy_surface_buffer(buffer: &SurfaceBuffer) -> Result<Vec<u32>, u32> {
@@ -1340,7 +1342,8 @@ pub(crate) fn handle_request(
                 .pending_damage
                 .unwrap_or(Rect::full(pending_width, pending_height));
             let old_bounds = (surfaces[index].current_width != pending_width
-                || surfaces[index].current_height != pending_height).then(|| Rect {
+                || surfaces[index].current_height != pending_height)
+                .then(|| Rect {
                     x: surfaces[index].x,
                     y: surfaces[index].y,
                     width: surfaces[index].current_width,
@@ -1504,8 +1507,7 @@ pub(crate) fn handle_request(
         OP_ACTIVATE_SURFACE => {
             let token = read_u64(request, 4).unwrap_or(0);
             let handle = SurfaceHandle(token);
-            let Some(index) =
-                surface_index_for(surfaces, client, handle, SurfaceRights::COMMIT)
+            let Some(index) = surface_index_for(surfaces, client, handle, SurfaceRights::COMMIT)
             else {
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
                 return reply;
@@ -1570,8 +1572,6 @@ mod tests {
     #[test]
     fn system_modals_stack_above_shell_panels_but_below_secure_overlays() {
         assert!(SurfaceRole::SystemModal.stack_layer() > SurfaceRole::Panel.stack_layer());
-        assert!(
-            SurfaceRole::SystemModal.stack_layer() < SurfaceRole::SecureOverlay.stack_layer()
-        );
+        assert!(SurfaceRole::SystemModal.stack_layer() < SurfaceRole::SecureOverlay.stack_layer());
     }
 }

@@ -4,8 +4,8 @@ use crate::cursor::CursorImage;
 use crate::display::{
     DISPLAY_PRESENT_REQ, DISPLAY_REP_BUF, display_present_gpu_panel, display_present_gpu_scene,
 };
-use crate::geometry::{Rect, choose_frame_size, clip_present_rect};
 use crate::fps_overlay;
+use crate::geometry::{Rect, choose_frame_size, clip_present_rect};
 use crate::gpu_compositor::GpuCompositor;
 use crate::protocol::{
     OP_DISPLAY_PRESENT, OP_DISPLAY_PRESENT_RECT, PIXEL_FORMAT_ARGB8888_PREMULTIPLIED,
@@ -137,7 +137,8 @@ fn try_gpu_scene_present(
         return None;
     }
     let force_atlas_upload = !present_frame.gpu_contents_valid;
-    if !force_atlas_upload && damage.is_some()
+    if !force_atlas_upload
+        && damage.is_some()
         && clip_present_rect(damage, display_width as usize, display_height as usize).is_none()
     {
         return Some(0);
@@ -176,8 +177,14 @@ fn try_gpu_scene_present(
         ipc_ms: present_frame.last_present_ms,
         control_ms: 0,
     };
-    if present_frame.bytes(byte_len).ok().and_then(|bytes|
-        mochios_viewkit_gpu_protocol::compositor::set_frame_timing(bytes, timing).ok()).is_none() {
+    if present_frame
+        .bytes(byte_len)
+        .ok()
+        .and_then(|bytes| {
+            mochios_viewkit_gpu_protocol::compositor::set_frame_timing(bytes, timing).ok()
+        })
+        .is_none()
+    {
         present_frame.gpu_contents_valid = false;
         return None;
     }
@@ -521,9 +528,11 @@ pub(crate) fn composite_and_present(
                 let left = rect.x.max(present_rect.x) as usize;
                 let top = rect.y.max(present_rect.y) as usize;
                 let right = (rect.x + rect.width as i32)
-                    .min(present_rect.x + present_rect.width as i32) as usize;
+                    .min(present_rect.x + present_rect.width as i32)
+                    as usize;
                 let bottom = (rect.y + rect.height as i32)
-                    .min(present_rect.y + present_rect.height as i32) as usize;
+                    .min(present_rect.y + present_rect.height as i32)
+                    as usize;
                 for y in top..bottom {
                     for x in left..right {
                         frame[y * frame_w + x] = color;

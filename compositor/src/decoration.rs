@@ -111,14 +111,21 @@ pub(crate) fn handle_request(
                 width: read_u32(request, 12).unwrap_or(0),
                 height: read_u32(request, 16).unwrap_or(0),
             };
-            if request.len() != 20 || area.width == 0 || area.height == 0
-                || area.width > MAX_DIMENSION || area.height > MAX_DIMENSION
+            if request.len() != 20
+                || area.width == 0
+                || area.height == 0
+                || area.width > MAX_DIMENSION
+                || area.height > MAX_DIMENSION
             {
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                 return reply;
             }
             put_u32(&mut reply, 0, 0);
-            put_u32(&mut reply, 4, u32::from(native_window_overlaps(windows, surfaces, area)));
+            put_u32(
+                &mut reply,
+                4,
+                u32::from(native_window_overlaps(windows, surfaces, area)),
+            );
         }
         OP_DECOR_SUBSCRIBE => {
             if !sender_has_decorate_capability(sender) {

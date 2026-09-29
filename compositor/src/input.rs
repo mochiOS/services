@@ -71,13 +71,22 @@ pub(crate) fn subscribe_input_events(endpoint: u64) -> Result<u64, u32> {
         )
     };
     reply.fill(0);
-    let message = platform::ipc::call(input_tid, subscribe, reply)
-        .map_err(|error| crate::protocol::errno_status(error.errno().unwrap_or(mochi_user_syscall::EIO)))?;
+    let message = platform::ipc::call(input_tid, subscribe, reply).map_err(|error| {
+        crate::protocol::errno_status(error.errno().unwrap_or(mochi_user_syscall::EIO))
+    })?;
     let length = message as u32 as usize;
-    let bytes = reply.get(..length).ok_or(crate::protocol::errno_status(mochi_user_syscall::EIO))?;
-    let [status] = bytes else { return Err(crate::protocol::errno_status(mochi_user_syscall::EIO)); };
+    let bytes = reply
+        .get(..length)
+        .ok_or(crate::protocol::errno_status(mochi_user_syscall::EIO))?;
+    let [status] = bytes else {
+        return Err(crate::protocol::errno_status(mochi_user_syscall::EIO));
+    };
     let status = u32::from(*status);
-    if status == 0 { Ok(message >> 32) } else { Err(status) }
+    if status == 0 {
+        Ok(message >> 32)
+    } else {
+        Err(status)
+    }
 }
 
 pub(crate) fn is_input_message(message: u64, input_sender: Option<u64>) -> bool {
@@ -182,10 +191,7 @@ fn blocking_modal_process(sessions: &[ModalSession], process: u64) -> Option<u64
         .map(|session| session.modal_process)
 }
 
-pub(crate) fn frontmost_process_surface(
-    surfaces: &[Surface],
-    process: u64,
-) -> Option<usize> {
+pub(crate) fn frontmost_process_surface(surfaces: &[Surface], process: u64) -> Option<usize> {
     surfaces
         .iter()
         .enumerate()
@@ -196,9 +202,7 @@ pub(crate) fn frontmost_process_surface(
                 && surface.owner_process == process
                 && matches!(
                     surface.role,
-                    SurfaceRole::Toplevel
-                        | SurfaceRole::SecureOverlay
-                        | SurfaceRole::SystemModal
+                    SurfaceRole::Toplevel | SurfaceRole::SecureOverlay | SurfaceRole::SystemModal
                 )
         })
         .max_by_key(|(_, surface)| (surface.role.stack_layer(), surface.z))
@@ -416,10 +420,7 @@ pub(crate) fn update_keyboard_focus(
 
 /// Restores focus to the frontmost remaining application window after the
 /// focused client closes a window. Shell chrome is deliberately excluded.
-pub(crate) fn restore_keyboard_focus(
-    surfaces: &[Surface],
-    keyboard_focus: &mut Option<usize>,
-) {
+pub(crate) fn restore_keyboard_focus(surfaces: &[Surface], keyboard_focus: &mut Option<usize>) {
     if keyboard_focus.is_some() {
         return;
     }
@@ -432,9 +433,7 @@ pub(crate) fn restore_keyboard_focus(
                 && !surface.is_decoration
                 && matches!(
                     surface.role,
-                    SurfaceRole::Toplevel
-                        | SurfaceRole::SecureOverlay
-                        | SurfaceRole::SystemModal
+                    SurfaceRole::Toplevel | SurfaceRole::SecureOverlay | SurfaceRole::SystemModal
                 )
         })
         .max_by_key(|(_, surface)| (surface.role.stack_layer(), surface.z))
@@ -525,12 +524,8 @@ pub(crate) fn handle_input_event(
             let mut needs_window_redraw = false;
             if event.flags & platform::input::FLAG_PRESS != 0 {
                 let previous_focus = *keyboard_focus;
-                let focus = pointer_keyboard_focus_target(
-                    surfaces,
-                    windows,
-                    target,
-                    previous_focus,
-                );
+                let focus =
+                    pointer_keyboard_focus_target(surfaces, windows, target, previous_focus);
                 if focus == previous_focus {
                     // Focus notifications have no acknowledgement. Reaffirm
                     // focus on an explicit press so a client can recover when
@@ -628,6 +623,9 @@ pub(crate) fn handle_input_event(
             let alt_tab = pressed
                 && event.keycode == platform::input::KEY_TAB
                 && event.modifiers & platform::input::MOD_ALT != 0;
+            let alt_space = pressed
+                && event.keycode == platform::input::KEY_SPACE
+                && event.modifiers & platform::input::MOD_ALT != 0;
             let alt_released = released
                 && matches!(
                     event.keycode,
@@ -636,6 +634,28 @@ pub(crate) fn handle_input_event(
             let escape = pressed && event.keycode == platform::input::KEY_ESC;
             if alt_tab || *app_switcher_active {
                 *app_switcher_active = !alt_released && !escape;
+                if let Some(panel) = surfaces
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, surface)| {
+                        surface.live && surface.visible && surface.role == SurfaceRole::Panel
+                    })
+                    .max_by_key(|(_, surface)| surface.z)
+                    .map(|(index, _)| index)
+                {
+                    let surface = &surfaces[panel];
+                    send_event(
+                        surface.event_endpoint,
+                        surface.token,
+                        EVENT_KEY,
+                        i32::from(event.keycode),
+                        event.codepoint as i32,
+                        encode_key_event_detail(event.flags, event.modifiers),
+                    );
+                }
+                return None;
+            }
+            if alt_space {
                 if let Some(panel) = surfaces
                     .iter()
                     .enumerate()

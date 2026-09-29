@@ -8,12 +8,12 @@ use crate::display::{
     display_claim_present_owner, display_renderer_caps, display_request_info,
     display_set_cursor_image, display_set_cursor_position, wait_for_service,
 };
-use crate::geometry::{Rect, merge_damage};
 use crate::fps_overlay;
+use crate::geometry::{Rect, merge_damage};
 use crate::input::{
     PointerGrab, PointerSerial, clear_focus_for_surface, finish_pointer_motion,
-    frontmost_process_surface, handle_input_event, raise_window, send_event, subscribe_input_events,
-    surface_process, update_keyboard_focus, update_pointer_position,
+    frontmost_process_surface, handle_input_event, raise_window, send_event,
+    subscribe_input_events, surface_process, update_keyboard_focus, update_pointer_position,
 };
 use crate::protocol::*;
 use crate::renderer::composite_and_present;
@@ -38,14 +38,18 @@ fn mirror_panel_edge_motion(state: &mut CompositorState) {
     let edge_top = (state.display_height as i32).saturating_sub(PANEL_EDGE_TRACK_HEIGHT);
     let reveal_top = (state.display_height as i32).saturating_sub(PANEL_REVEAL_EDGE_HEIGHT);
     let was_tracking = state.panel_edge_tracking;
-    state.panel_edge_tracking = state.pointer_y >= reveal_top
-        || (was_tracking && state.pointer_y >= edge_top);
+    state.panel_edge_tracking =
+        state.pointer_y >= reveal_top || (was_tracking && state.pointer_y >= edge_top);
     if !was_tracking && !state.panel_edge_tracking {
         return;
     }
     for (index, surface) in state.surfaces.iter().enumerate() {
-        if !surface.live || !surface.visible || surface.role != SurfaceRole::Panel
-            || surface.x != 0 || surface.y != 0 || surface.event_endpoint == 0
+        if !surface.live
+            || !surface.visible
+            || surface.role != SurfaceRole::Panel
+            || surface.x != 0
+            || surface.y != 0
+            || surface.event_endpoint == 0
             || state.pointer_focus == Some(index)
             || surface_extent(surface) != (state.display_width, state.display_height)
         {
@@ -160,16 +164,14 @@ fn activate_process_window(
     let window = surfaces[index].window;
     if let Some(window_index) = crate::window::window_index_by_id(windows, window) {
         windows[window_index].state = WINDOW_STATE_NORMAL;
-        if let Some(content) = crate::window::content_surface_index_for_window(
-            surfaces,
-            &windows[window_index],
-        ) {
+        if let Some(content) =
+            crate::window::content_surface_index_for_window(surfaces, &windows[window_index])
+        {
             surfaces[content].visible = true;
         }
-        if let Some(decoration) = crate::window::decoration_surface_index_for_window(
-            surfaces,
-            &windows[window_index],
-        ) {
+        if let Some(decoration) =
+            crate::window::decoration_surface_index_for_window(surfaces, &windows[window_index])
+        {
             surfaces[decoration].visible = true;
         }
     }
@@ -344,12 +346,7 @@ fn handle_request(
                 if let Some(index) = *pointer_focus
                     && surface_process(surfaces, windows, index) == Some(owner_process)
                 {
-                    clear_focus_for_surface(
-                        surfaces,
-                        index,
-                        pointer_focus,
-                        keyboard_focus,
-                    );
+                    clear_focus_for_surface(surfaces, index, pointer_focus, keyboard_focus);
                 }
                 if !activate_process_window(
                     surfaces,
@@ -366,8 +363,7 @@ fn handle_request(
                 put_u32(&mut reply, 0, 0);
             } else {
                 let Some(index) = modal_sessions.iter().position(|session| {
-                    session.owner_process == owner_process
-                        && session.modal_process == modal_process
+                    session.owner_process == owner_process && session.modal_process == modal_process
                 }) else {
                     put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ENOENT));
                     return reply;
@@ -463,12 +459,15 @@ fn handle_request(
                 return reply;
             }
             *hardware_cursor = display_set_cursor_image(display_tid, request) == 0;
-            if *hardware_cursor && display_set_cursor_position(
-                display_tid, *cursor_x, *cursor_y, *cursor_visible) != 0 {
+            if *hardware_cursor
+                && display_set_cursor_position(display_tid, *cursor_x, *cursor_y, *cursor_visible)
+                    != 0
+            {
                 *hardware_cursor = false;
             }
             if *cursor_visible {
-                *present_damage = merge_damage(old_bounds, cursor_image.bounds(*cursor_x, *cursor_y));
+                *present_damage =
+                    merge_damage(old_bounds, cursor_image.bounds(*cursor_x, *cursor_y));
                 *needs_present = true;
             }
             put_u32(&mut reply, 0, 0);
@@ -487,12 +486,22 @@ fn present(state: &mut CompositorState, damage: Option<Rect>) -> u32 {
         (other, _) => other,
     };
     let status = composite_and_present(
-        &state.surfaces, &state.windows, state.keyboard_focus,
-        &mut state.present_frame, state.display_tid, state.display_width,
-        state.display_height, state.display_stride, state.display_format,
-        state.renderer_caps, state.cursor_x, state.cursor_y,
-        state.cursor_visible && !state.hardware_cursor, &state.cursor_image,
-        fps, damage,
+        &state.surfaces,
+        &state.windows,
+        state.keyboard_focus,
+        &mut state.present_frame,
+        state.display_tid,
+        state.display_width,
+        state.display_height,
+        state.display_stride,
+        state.display_format,
+        state.renderer_caps,
+        state.cursor_x,
+        state.cursor_y,
+        state.cursor_visible && !state.hardware_cursor,
+        &state.cursor_image,
+        fps,
+        damage,
     );
     if status == 0 {
         state.fps_overlay.mark_drawn(fps);
@@ -530,7 +539,10 @@ impl PendingPresent {
         // Message handlers can block on cursor/display IPC. A count alone
         // can therefore postpone an already dirty frame for many refreshes.
         self.messages >= 32
-            || match (self.queued_at, platform::time::monotonic_milliseconds().ok()) {
+            || match (
+                self.queued_at,
+                platform::time::monotonic_milliseconds().ok(),
+            ) {
                 (Some(start), Some(now)) => now.saturating_sub(start) >= 8,
                 _ => true,
             }
@@ -552,21 +564,23 @@ impl PendingPresent {
 
 pub(crate) fn run() -> ! {
     let endpoint = crate::startup::required("endpoint", || {
-        platform::ipc::create().map_err(|error| crate::protocol::errno_status(error.errno().unwrap_or(mochi_user_syscall::EIO)))
+        platform::ipc::create().map_err(|error| {
+            crate::protocol::errno_status(error.errno().unwrap_or(mochi_user_syscall::EIO))
+        })
     });
     let display_tid = crate::startup::required("display-discovery", || {
         wait_for_service(4096).ok_or(crate::protocol::errno_status(mochi_user_syscall::ENOENT))
     });
-    let input_sender = crate::startup::check("input-subscribe", || {
-        subscribe_input_events(endpoint)
-    }).ok();
+    let input_sender =
+        crate::startup::check("input-subscribe", || subscribe_input_events(endpoint)).ok();
     crate::startup::required("display-owner", || {
         let status = display_claim_present_owner(display_tid);
         if status == 0 { Ok(()) } else { Err(status) }
     });
     let (display_width, display_height, display_stride, display_format) =
         crate::startup::required("display-info", || display_request_info(display_tid));
-    let renderer_caps = crate::startup::required("display-caps", || display_renderer_caps(display_tid));
+    let renderer_caps =
+        crate::startup::required("display-caps", || display_renderer_caps(display_tid));
 
     let mut state = CompositorState::new(
         display_tid,
@@ -578,8 +592,8 @@ pub(crate) fn run() -> ! {
         renderer_caps,
     );
     crate::startup::required("first-present", || {
-    let status = present(&mut state, None);
-    if status == 0 { Ok(()) } else { Err(status) }
+        let status = present(&mut state, None);
+        if status == 0 { Ok(()) } else { Err(status) }
     });
     let mut pending_msg: Option<u64> = None;
     let mut pending_buf = [0u8; 4128];
@@ -647,7 +661,9 @@ pub(crate) fn run() -> ! {
                     &event,
                 );
                 for _ in 0..32 {
-                    let Ok(next_msg) = platform::ipc::try_wait(buf) else { break; };
+                    let Ok(next_msg) = platform::ipc::try_wait(buf) else {
+                        break;
+                    };
                     let next_len = (next_msg & 0xffff_ffff) as usize;
                     if crate::input::is_input_message(next_msg, input_sender) {
                         let next_event = unsafe {

@@ -5,9 +5,13 @@ pub(crate) fn check<T>(stage: &str, action: impl FnOnce() -> Result<T, u32>) -> 
         let phase = if result.is_none() { "enter" } else { "return" };
         platform::logger::write_status_fmt(format_args!(
             "compositor.service: startup stage={} phase={} status={}\n",
-            stage, phase, result.unwrap_or(0),
+            stage,
+            phase,
+            result.unwrap_or(0),
         ))
-        .map_err(|error| crate::protocol::errno_status(error.errno().unwrap_or(mochi_user_syscall::EIO)))
+        .map_err(|error| {
+            crate::protocol::errno_status(error.errno().unwrap_or(mochi_user_syscall::EIO))
+        })
     })
 }
 
@@ -35,10 +39,17 @@ mod tests {
     #[test]
     fn records_enter_before_action_and_preserves_failure() {
         let events = RefCell::new(Vec::new());
-        let result: Result<(), u32> = trace("present", || {
-            assert_eq!(*events.borrow(), vec![None]);
-            Err(5)
-        }, |_, value| { events.borrow_mut().push(value); Ok(()) });
+        let result: Result<(), u32> = trace(
+            "present",
+            || {
+                assert_eq!(*events.borrow(), vec![None]);
+                Err(5)
+            },
+            |_, value| {
+                events.borrow_mut().push(value);
+                Ok(())
+            },
+        );
         assert_eq!(result, Err(5));
         assert_eq!(*events.borrow(), vec![None, Some(5)]);
     }

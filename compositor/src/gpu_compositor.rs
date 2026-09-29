@@ -280,24 +280,34 @@ impl GpuCompositor {
         });
         let desktop_key = DesktopGeometryKey {
             size: (display_width, display_height),
-            surfaces: indices.iter().map(|&index| {
-                let surface = &surfaces[index];
-                SurfaceGeometryKey {
-                    handle: surface.handle.0,
-                    generation: surface.content_generation,
-                    position: (surface.x, surface.y),
-                    size: if surface.current_format == PIXEL_FORMAT_GPU_SCENE {
-                        surface.gpu.as_ref().map(|gpu| (gpu.width, gpu.height)).unwrap_or_default()
-                    } else {
-                        (surface.current_width, surface.current_height)
-                    },
-                    format: surface.current_format,
-                    window_clip: window_clip_polygon(surfaces, windows, surface),
-                }
-            }).collect(),
+            surfaces: indices
+                .iter()
+                .map(|&index| {
+                    let surface = &surfaces[index];
+                    SurfaceGeometryKey {
+                        handle: surface.handle.0,
+                        generation: surface.content_generation,
+                        position: (surface.x, surface.y),
+                        size: if surface.current_format == PIXEL_FORMAT_GPU_SCENE {
+                            surface
+                                .gpu
+                                .as_ref()
+                                .map(|gpu| (gpu.width, gpu.height))
+                                .unwrap_or_default()
+                        } else {
+                            (surface.current_width, surface.current_height)
+                        },
+                        format: surface.current_format,
+                        window_clip: window_clip_polygon(surfaces, windows, surface),
+                    }
+                })
+                .collect(),
         };
         self.surface_geometry.retain(|cached| {
-            desktop_key.surfaces.iter().any(|key| key.handle == cached.key.handle)
+            desktop_key
+                .surfaces
+                .iter()
+                .any(|key| key.handle == cached.key.handle)
         });
         // Only a successfully encoded scene may supply reusable geometry.
         let reuse_desktop = self.desktop_key.take().as_ref() == Some(&desktop_key);
@@ -311,11 +321,18 @@ impl GpuCompositor {
             self.batches.clear();
             normalize_from = 0;
             push_solid_quad(&mut self.vertices, damage, [0.0, 0.0, 1.0, 1.0]);
-            push_batch(&mut self.batches, WHITE_TEXTURE_KEY, 0, self.vertices.len() as u32);
+            push_batch(
+                &mut self.batches,
+                WHITE_TEXTURE_KEY,
+                0,
+                self.vertices.len() as u32,
+            );
             for (index, key) in indices.into_iter().zip(&desktop_key.surfaces) {
                 let surface = &surfaces[index];
                 let first = self.vertices.len() as u32;
-                let cached_index = self.surface_geometry.iter()
+                let cached_index = self
+                    .surface_geometry
+                    .iter()
                     .position(|cached| cached.key.handle == key.handle);
                 let valid = cached_index.is_some_and(|index| {
                     let cached = &self.surface_geometry[index];
@@ -324,12 +341,24 @@ impl GpuCompositor {
                 if !valid {
                     let mut vertices = Vec::new();
                     if surface.current_format == PIXEL_FORMAT_GPU_SCENE {
-                        append_gpu_surface(&mut vertices, surface, damage, key.window_clip.as_ref())?;
+                        append_gpu_surface(
+                            &mut vertices,
+                            surface,
+                            damage,
+                            key.window_clip.as_ref(),
+                        )?;
                     } else {
-                        append_cpu_surface(&mut vertices, surface, damage, key.window_clip.as_ref());
+                        append_cpu_surface(
+                            &mut vertices,
+                            surface,
+                            damage,
+                            key.window_clip.as_ref(),
+                        );
                     }
                     let geometry = SurfaceGeometry {
-                        key: key.clone(), display_size: desktop_key.size, vertices,
+                        key: key.clone(),
+                        display_size: desktop_key.size,
+                        vertices,
                     };
                     if let Some(index) = cached_index {
                         self.surface_geometry[index] = geometry;
@@ -337,8 +366,8 @@ impl GpuCompositor {
                         self.surface_geometry.push(geometry);
                     }
                 }
-                let cached = &self.surface_geometry[cached_index
-                    .unwrap_or(self.surface_geometry.len() - 1)];
+                let cached =
+                    &self.surface_geometry[cached_index.unwrap_or(self.surface_geometry.len() - 1)];
                 self.vertices.extend_from_slice(&cached.vertices);
                 push_batch(
                     &mut self.batches,
@@ -361,7 +390,12 @@ impl GpuCompositor {
                 ];
                 push_solid_quad(&mut self.vertices, bounds, color);
             });
-            push_batch(&mut self.batches, WHITE_TEXTURE_KEY, first, self.vertices.len() as u32);
+            push_batch(
+                &mut self.batches,
+                WHITE_TEXTURE_KEY,
+                first,
+                self.vertices.len() as u32,
+            );
         }
         if cursor_visible {
             if let Some((width, height, _, _)) = cursor.texture() {
@@ -383,7 +417,8 @@ impl GpuCompositor {
         // The first opaque quad describes the replacement region. The v1
         // packet layout stays unchanged; a full-screen quad still means full redraw.
         let dirty = clip_present_rect(dirty, display_width as usize, display_height as usize)?;
-        for (destination, mut vertex) in self.vertices[..6].iter_mut()
+        for (destination, mut vertex) in self.vertices[..6]
+            .iter_mut()
             .zip(solid_quad(dirty, [0.0, 0.0, 1.0, 1.0]))
         {
             vertex.x = vertex.x / display_width as f32 * 2.0 - 1.0;
@@ -412,8 +447,12 @@ impl GpuCompositor {
                 }
                 self.dirty_vertices.extend_from_slice(triangle);
             }
-            push_batch(&mut self.dirty_batches, batch.texture_key, first,
-                       self.dirty_vertices.len() as u32);
+            push_batch(
+                &mut self.dirty_batches,
+                batch.texture_key,
+                first,
+                self.dirty_vertices.len() as u32,
+            );
         }
         encode_compositor_scene(
             &self.dirty_vertices,
@@ -697,7 +736,11 @@ fn rounded_rect_polygon(rect: Rect, radius: f32) -> WindowClip {
             ));
         }
     }
-    WindowClip { polygon: points, bounds, interior }
+    WindowClip {
+        polygon: points,
+        bounds,
+        interior,
+    }
 }
 
 fn append_textured_quad(
@@ -784,7 +827,9 @@ fn append_window_clipped_triangle(
     window_clip: Option<&WindowClip>,
 ) {
     let (outside, inside) = triangle_rect_bounds(&triangle, damage);
-    if outside { return; }
+    if outside {
+        return;
+    }
     let Some(window_clip) = window_clip else {
         append_clipped_triangle(output, triangle, damage);
         return;
@@ -792,8 +837,12 @@ fn append_window_clipped_triangle(
     // A rounded rectangle differs from its bounds only in the four corner
     // squares. Its full horizontal and vertical interior strips therefore
     // need no per-edge polygon clipping.
-    let (mut min_x, mut min_y, mut max_x, mut max_y) =
-        (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (
+        f32::INFINITY,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NEG_INFINITY,
+    );
     for vertex in triangle {
         min_x = min_x.min(vertex.x);
         min_y = min_y.min(vertex.y);
@@ -803,8 +852,8 @@ fn append_window_clipped_triangle(
     let [left, top, right, bottom] = window_clip.bounds;
     let [inner_left, inner_top, inner_right, inner_bottom] = window_clip.interior;
     let inside_bounds = min_x >= left && min_y >= top && max_x <= right && max_y <= bottom;
-    let inside_core = min_x >= inner_left && max_x <= inner_right
-        || min_y >= inner_top && max_y <= inner_bottom;
+    let inside_core =
+        min_x >= inner_left && max_x <= inner_right || min_y >= inner_top && max_y <= inner_bottom;
     if inside_bounds && inside_core {
         append_clipped_triangle(output, triangle, damage);
         return;
@@ -814,8 +863,13 @@ fn append_window_clipped_triangle(
     for index in 0..window_clip.len() {
         let start = window_clip[index];
         let end = window_clip[(index + 1) % window_clip.len()];
-        let count = triangle.iter().filter(|vertex| edge_distance(**vertex, start, end) >= -0.001).count();
-        if count == 0 { return; }
+        let count = triangle
+            .iter()
+            .filter(|vertex| edge_distance(**vertex, start, end) >= -0.001)
+            .count();
+        if count == 0 {
+            return;
+        }
         window_inside &= count == 3;
     }
     if inside && window_inside {
@@ -844,15 +898,21 @@ fn append_window_clipped_triangle(
 }
 
 fn edge_distance(vertex: Vertex, start: (f32, f32), end: (f32, f32)) -> f32 {
-    (end.0 - start.0) * (vertex.y - start.1)
-        - (end.1 - start.1) * (vertex.x - start.0)
+    (end.0 - start.0) * (vertex.y - start.1) - (end.1 - start.1) * (vertex.x - start.0)
 }
 
-fn clip_convex_edge(mut input: Vec<Vertex>, edge_start: (f32, f32), edge_end: (f32, f32)) -> Vec<Vertex> {
+fn clip_convex_edge(
+    mut input: Vec<Vertex>,
+    edge_start: (f32, f32),
+    edge_end: (f32, f32),
+) -> Vec<Vertex> {
     let signed_distance = |vertex| edge_distance(vertex, edge_start, edge_end);
     // Most edges do not cut this polygon. Keep its allocation and attributes
     // instead of copying it once for every edge of a rounded window.
-    let inside_count = input.iter().filter(|&&vertex| signed_distance(vertex) >= -0.001).count();
+    let inside_count = input
+        .iter()
+        .filter(|&&vertex| signed_distance(vertex) >= -0.001)
+        .count();
     if inside_count == input.len() {
         return input;
     }
@@ -971,7 +1031,9 @@ fn append_clipped_triangle(output: &mut Vec<Vertex>, triangle: [Vertex; 3], rect
         return;
     }
     let (outside, inside) = triangle_rect_bounds(&triangle, rect);
-    if outside { return; }
+    if outside {
+        return;
+    }
     if inside {
         output.extend_from_slice(&triangle);
         return;
@@ -1208,18 +1270,26 @@ mod tests {
 
     #[test]
     fn repeated_damage_does_not_multiply_collapsed_triangles() {
-        let full = Rect { x: 0, y: 0, width: 1920, height: 1080 };
+        let full = Rect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
         let mut scene = Vec::new();
         encode_local_vertices(&solid_quad(full, [1.0; 4]), 1920, 1080, &mut scene).unwrap();
         for i in 0..200 {
-            let damage = Rect { x: 100 + (i % 100) * 3, y: 100 + (i / 100) * 3,
-                width: 40, height: 40 };
+            let damage = Rect {
+                x: 100 + (i % 100) * 3,
+                y: 100 + (i / 100) * 3,
+                width: 40,
+                height: 40,
+            };
             let mut replacement = Vec::new();
-            encode_local_vertices(&solid_quad(damage, [0.5; 4]), 1920, 1080,
-                &mut replacement).unwrap();
+            encode_local_vertices(&solid_quad(damage, [0.5; 4]), 1920, 1080, &mut replacement)
+                .unwrap();
             let mut output = Vec::new();
-            merge_surface_vertices(&scene, &replacement, 1920, 1080, damage,
-                &mut output).unwrap();
+            merge_surface_vertices(&scene, &replacement, 1920, 1080, damage, &mut output).unwrap();
             scene = output;
         }
         // Previously exceeded the protocol limit before completing this sequence.
@@ -1228,39 +1298,72 @@ mod tests {
 
     #[test]
     fn clipping_discards_only_zero_area_triangles() {
-        let vertex = |x, y| Vertex { x, y, u: x, v: y, color: [1.0; 4] };
-        let rect = Rect { x: 0, y: 0, width: 10, height: 10 };
+        let vertex = |x, y| Vertex {
+            x,
+            y,
+            u: x,
+            v: y,
+            color: [1.0; 4],
+        };
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 10,
+        };
         let mut output = Vec::new();
-        append_clipped_triangle(&mut output,
-            [vertex(1.0, 1.0), vertex(2.0, 2.0), vertex(3.0, 3.0)], rect);
+        append_clipped_triangle(
+            &mut output,
+            [vertex(1.0, 1.0), vertex(2.0, 2.0), vertex(3.0, 3.0)],
+            rect,
+        );
         assert!(output.is_empty());
         let thin = [vertex(1.0, 1.0), vertex(2.0, 1.0), vertex(1.0, 1.000001)];
         append_clipped_triangle(&mut output, thin, rect);
         assert_eq!(output.len(), 3);
         for (actual, expected) in output.iter().zip(thin) {
-            assert_eq!((actual.x, actual.y, actual.u, actual.v, actual.color),
-                (expected.x, expected.y, expected.u, expected.v, expected.color));
+            assert_eq!(
+                (actual.x, actual.y, actual.u, actual.v, actual.color),
+                (
+                    expected.x,
+                    expected.y,
+                    expected.u,
+                    expected.v,
+                    expected.color
+                )
+            );
         }
     }
 
     #[test]
     fn cached_desktop_matches_rebuilt_scene_across_changes() {
-        let mut surfaces: Vec<_> = (1..=2).map(|handle| {
-            let mut surface = gpu_surface(1, 0, 3);
-            surface.live = true;
-            surface.visible = true;
-            surface.handle = crate::surface::SurfaceHandle(handle);
-            surface.current_width = 50;
-            surface.current_height = 50;
-            surface.content_generation = 1;
-            let gpu = surface.gpu.as_mut().unwrap();
-            gpu.width = 50;
-            gpu.height = 50;
-            let mut vertices = Vec::new();
-            push_solid_quad(&mut vertices, Rect { x: 0, y: 0, width: 50, height: 50 }, [1.0; 4]);
-            encode_local_vertices(&vertices, 50, 50, &mut gpu.vertices).unwrap();
-            surface
-        }).collect();
+        let mut surfaces: Vec<_> = (1..=2)
+            .map(|handle| {
+                let mut surface = gpu_surface(1, 0, 3);
+                surface.live = true;
+                surface.visible = true;
+                surface.handle = crate::surface::SurfaceHandle(handle);
+                surface.current_width = 50;
+                surface.current_height = 50;
+                surface.content_generation = 1;
+                let gpu = surface.gpu.as_mut().unwrap();
+                gpu.width = 50;
+                gpu.height = 50;
+                let mut vertices = Vec::new();
+                push_solid_quad(
+                    &mut vertices,
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        width: 50,
+                        height: 50,
+                    },
+                    [1.0; 4],
+                );
+                encode_local_vertices(&vertices, 50, 50, &mut gpu.vertices).unwrap();
+                surface
+            })
+            .collect();
         let mut window = Window::empty();
         window.live = true;
         window.id = crate::window::WindowId(1);
@@ -1277,7 +1380,12 @@ mod tests {
                 4 => windows[0].insets.left = 4,
                 5 => {
                     surfaces[0].content_generation += 1;
-                    surfaces[0].gpu.as_mut().unwrap().vertices.truncate(3 * mochios_viewkit_gpu_protocol::VERTEX_STRIDE);
+                    surfaces[0]
+                        .gpu
+                        .as_mut()
+                        .unwrap()
+                        .vertices
+                        .truncate(3 * mochios_viewkit_gpu_protocol::VERTEX_STRIDE);
                 }
                 6 => surfaces[1].visible = false,
                 7 => surfaces[1].visible = true,
@@ -1289,8 +1397,32 @@ mod tests {
                 textures: cached.textures.clone(),
                 ..Default::default()
             };
-            let expected = rebuilt.compose(&surfaces, &windows, width, 100, step, step, step % 2 == 0, &cursor, None).unwrap();
-            let actual = cached.compose(&surfaces, &windows, width, 100, step, step, step % 2 == 0, &cursor, None).unwrap();
+            let expected = rebuilt
+                .compose(
+                    &surfaces,
+                    &windows,
+                    width,
+                    100,
+                    step,
+                    step,
+                    step % 2 == 0,
+                    &cursor,
+                    None,
+                )
+                .unwrap();
+            let actual = cached
+                .compose(
+                    &surfaces,
+                    &windows,
+                    width,
+                    100,
+                    step,
+                    step,
+                    step % 2 == 0,
+                    &cursor,
+                    None,
+                )
+                .unwrap();
             assert_eq!(actual, expected, "step {step}");
         }
     }
@@ -1305,35 +1437,99 @@ mod tests {
         let gpu = surface.gpu.as_mut().unwrap();
         gpu.vertices = vec![0; mochios_viewkit_gpu_protocol::VERTEX_STRIDE * 3];
         gpu.vertices[..4].copy_from_slice(&f32::NAN.to_le_bytes());
-        assert!(compositor.compose(
-            &[surface], &[], 100, 100, 0, 0, false, &CursorImage::default(), None,
-        ).is_none());
+        assert!(
+            compositor
+                .compose(
+                    &[surface],
+                    &[],
+                    100,
+                    100,
+                    0,
+                    0,
+                    false,
+                    &CursorImage::default(),
+                    None,
+                )
+                .is_none()
+        );
         assert!(compositor.textures.is_empty());
     }
 
     #[test]
     fn scene_background_always_covers_the_display() {
         let mut compositor = GpuCompositor::default();
-        compositor.compose(&[], &[], 1920, 1080, 0, 0, false, &CursorImage::default(), None).unwrap();
+        compositor
+            .compose(
+                &[],
+                &[],
+                1920,
+                1080,
+                0,
+                0,
+                false,
+                &CursorImage::default(),
+                None,
+            )
+            .unwrap();
         for (x, y) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
-            assert!(compositor.vertices.iter().any(|vertex| vertex.x == x && vertex.y == y));
+            assert!(
+                compositor
+                    .vertices
+                    .iter()
+                    .any(|vertex| vertex.x == x && vertex.y == y)
+            );
         }
     }
 
     #[test]
     fn dirty_quad_preserves_v1_packet_and_resets_on_full_redraw() {
         let mut compositor = GpuCompositor::default();
-        for dirty in [Some(Rect { x: 20, y: 30, width: 40, height: 50 }), None] {
-            let bytes = compositor.compose(&[], &[], 100, 100, 0, 0, false,
-                &CursorImage::default(), dirty).unwrap();
+        for dirty in [
+            Some(Rect {
+                x: 20,
+                y: 30,
+                width: 40,
+                height: 50,
+            }),
+            None,
+        ] {
+            let bytes = compositor
+                .compose(
+                    &[],
+                    &[],
+                    100,
+                    100,
+                    0,
+                    0,
+                    false,
+                    &CursorImage::default(),
+                    dirty,
+                )
+                .unwrap();
             let scene = mochios_viewkit_gpu_protocol::compositor::decode(bytes).unwrap();
             assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), 1);
             assert_eq!(scene.batch(0).unwrap().vertex_count, 6);
             let expected = dirty.unwrap_or(Rect::full(100, 100));
-            assert!((read_f32(scene.vertices, 0).unwrap() - (expected.x as f32 / 50.0 - 1.0)).abs() < 0.00001);
-            assert!((read_f32(scene.vertices, 4).unwrap() - (expected.y as f32 / 50.0 - 1.0)).abs() < 0.00001);
-            assert!((read_f32(scene.vertices, 72).unwrap() - ((expected.x as f32 + expected.width as f32) / 50.0 - 1.0)).abs() < 0.00001);
-            assert!((read_f32(scene.vertices, 76).unwrap() - ((expected.y as f32 + expected.height as f32) / 50.0 - 1.0)).abs() < 0.00001);
+            assert!(
+                (read_f32(scene.vertices, 0).unwrap() - (expected.x as f32 / 50.0 - 1.0)).abs()
+                    < 0.00001
+            );
+            assert!(
+                (read_f32(scene.vertices, 4).unwrap() - (expected.y as f32 / 50.0 - 1.0)).abs()
+                    < 0.00001
+            );
+            assert!(
+                (read_f32(scene.vertices, 72).unwrap()
+                    - ((expected.x as f32 + expected.width as f32) / 50.0 - 1.0))
+                    .abs()
+                    < 0.00001
+            );
+            assert!(
+                (read_f32(scene.vertices, 76).unwrap()
+                    - ((expected.y as f32 + expected.height as f32) / 50.0 - 1.0))
+                    .abs()
+                    < 0.00001
+            );
         }
     }
 
@@ -1479,32 +1675,66 @@ mod tests {
 
     #[test]
     fn contained_triangles_preserve_attributes_and_exterior_triangles_are_rejected() {
-        let rect = Rect { x: 0, y: 0, width: 100, height: 100 };
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
         let clip = rounded_rect_polygon(rect, 20.0);
         let triangle = [(40.0, 40.0), (60.0, 40.0), (50.0, 60.0)].map(|(x, y)| Vertex {
-            x, y, u: x / 100.0, v: y / 100.0, color: [0.25, 0.5, 0.75, 1.0],
+            x,
+            y,
+            u: x / 100.0,
+            v: y / 100.0,
+            color: [0.25, 0.5, 0.75, 1.0],
         });
         let mut output = Vec::with_capacity(3);
         append_window_clipped_triangle(&mut output, triangle, rect, Some(&clip));
         assert_eq!(output.len(), 3);
         for (actual, expected) in output.iter().zip(triangle) {
-            assert_eq!((actual.x, actual.y, actual.u, actual.v, actual.color),
-                (expected.x, expected.y, expected.u, expected.v, expected.color));
+            assert_eq!(
+                (actual.x, actual.y, actual.u, actual.v, actual.color),
+                (
+                    expected.x,
+                    expected.y,
+                    expected.u,
+                    expected.v,
+                    expected.color
+                )
+            );
         }
         output.clear();
-        let exterior = triangle.map(|vertex| Vertex { x: vertex.x - 200.0, ..vertex });
+        let exterior = triangle.map(|vertex| Vertex {
+            x: vertex.x - 200.0,
+            ..vertex
+        });
         append_window_clipped_triangle(&mut output, exterior, rect, Some(&clip));
         assert!(output.is_empty());
     }
 
     #[test]
     fn interior_fast_path_still_clips_damage() {
-        let frame = Rect { x: 0, y: 0, width: 100, height: 100 };
+        let frame = Rect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
         let clip = rounded_rect_polygon(frame, 20.0);
         let triangle = [(30.0, 30.0), (70.0, 30.0), (50.0, 70.0)].map(|(x, y)| Vertex {
-            x, y, u: x, v: y, color: [0.5; 4],
+            x,
+            y,
+            u: x,
+            v: y,
+            color: [0.5; 4],
         });
-        let damage = Rect { x: 40, y: 40, width: 20, height: 20 };
+        let damage = Rect {
+            x: 40,
+            y: 40,
+            width: 20,
+            height: 20,
+        };
         let mut expected = Vec::new();
         let mut actual = Vec::new();
         append_clipped_triangle(&mut expected, triangle, damage);
@@ -1518,13 +1748,25 @@ mod tests {
 
     #[test]
     fn rounded_rect_side_strips_skip_polygon_clipping() {
-        let clip = rounded_rect_polygon(Rect { x: 0, y: 0, width: 100, height: 100 }, 20.0);
+        let clip = rounded_rect_polygon(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 100,
+            },
+            20.0,
+        );
         for triangle in [
             [(2.0, 30.0), (18.0, 35.0), (2.0, 70.0)],
             [(30.0, 2.0), (70.0, 2.0), (35.0, 18.0)],
         ] {
             let triangle = triangle.map(|(x, y)| Vertex {
-                x, y, u: x, v: y, color: [0.5; 4],
+                x,
+                y,
+                u: x,
+                v: y,
+                color: [0.5; 4],
             });
             let mut expected = Vec::new();
             let mut actual = Vec::new();
@@ -1542,7 +1784,11 @@ mod tests {
     #[test]
     fn convex_clip_reuses_uncut_storage() {
         let vertices = [(1.0, 1.0), (3.0, 1.0), (2.0, 3.0)].map(|(x, y)| Vertex {
-            x, y, u: x, v: y, color: [0.5; 4],
+            x,
+            y,
+            u: x,
+            v: y,
+            color: [0.5; 4],
         });
         let polygon = vertices.to_vec();
         let allocation = polygon.as_ptr();
@@ -1550,8 +1796,16 @@ mod tests {
         assert_eq!(polygon.as_ptr(), allocation);
         assert_eq!(polygon.len(), vertices.len());
         for (actual, expected) in polygon.iter().zip(vertices) {
-            assert_eq!((actual.x, actual.y, actual.u, actual.v, actual.color),
-                (expected.x, expected.y, expected.u, expected.v, expected.color));
+            assert_eq!(
+                (actual.x, actual.y, actual.u, actual.v, actual.color),
+                (
+                    expected.x,
+                    expected.y,
+                    expected.u,
+                    expected.v,
+                    expected.color
+                )
+            );
         }
         let polygon = clip_convex_edge(polygon, (0.0, 4.0), (4.0, 4.0));
         assert_eq!(polygon.as_ptr(), allocation);

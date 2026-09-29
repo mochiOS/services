@@ -50,10 +50,17 @@ pub(crate) fn display_request_info(display_tid: u64) -> Result<(u32, u32, u32, u
 }
 
 fn checked_reply(reply: &[u8], length: usize, minimum: usize) -> Result<&[u8], u32> {
-    let bytes = reply.get(..length).ok_or(crate::protocol::errno_status(mochi_user_syscall::EIO))?;
-    let status = read_u32(bytes, 0).ok_or(crate::protocol::errno_status(mochi_user_syscall::EIO))?;
-    if status != 0 { return Err(status); }
-    if bytes.len() < minimum { return Err(crate::protocol::errno_status(mochi_user_syscall::EIO)); }
+    let bytes = reply
+        .get(..length)
+        .ok_or(crate::protocol::errno_status(mochi_user_syscall::EIO))?;
+    let status =
+        read_u32(bytes, 0).ok_or(crate::protocol::errno_status(mochi_user_syscall::EIO))?;
+    if status != 0 {
+        return Err(status);
+    }
+    if bytes.len() < minimum {
+        return Err(crate::protocol::errno_status(mochi_user_syscall::EIO));
+    }
     Ok(bytes)
 }
 
@@ -103,7 +110,8 @@ pub(crate) fn display_claim_present_owner(display_tid: u64) -> u32 {
     reply.fill(0);
     match platform::ipc::call(display_tid, req, reply) {
         Ok(message) => checked_reply(reply, message as u32 as usize, 4)
-            .map(|_| 0).unwrap_or_else(|status| status),
+            .map(|_| 0)
+            .unwrap_or_else(|status| status),
         Err(error) => errno_status(error.errno().unwrap_or(mochi_user_syscall::EIO)),
     }
 }
