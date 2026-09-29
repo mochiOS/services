@@ -23,6 +23,7 @@ const SPAWN_APP_HEADER_LEN: usize = 24;
 const EXEC_MANIFEST_ENV_PREFIX: &str = "__MNU_EXEC_ENV=";
 const SESSION_ENVIRONMENT_NAMES: [&str; 4] = ["HOME", "USER", "LOGNAME", "SHELL"];
 const MAX_PENDING_FILE_PANELS: usize = 64;
+const NOTIFICATIONS_MAGIC: &[u8; 8] = b"MWNOTI1\0";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Association {
@@ -72,6 +73,16 @@ struct RegisteredControlCenterCard {
     body: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NotificationRecord {
+    id: u64,
+    created_at: u64,
+    read: bool,
+    bundle_id: String,
+    title: String,
+    body: String,
+}
+
 #[derive(Debug)]
 struct WorkspaceService {
     endpoint: u64,
@@ -86,6 +97,9 @@ struct WorkspaceService {
     next_file_panel_token: u64,
     application_endpoints: BTreeMap<u64, u64>,
     control_center_cards: BTreeMap<(String, String), RegisteredControlCenterCard>,
+    notifications: Vec<NotificationRecord>,
+    next_notification_id: u64,
+    notification_path: PathBuf,
 }
 
 impl WorkspaceService {
@@ -95,6 +109,18 @@ impl WorkspaceService {
             .ok()
             .and_then(|bytes| decode_associations(&bytes).ok())
             .unwrap_or_default();
+        let notification_path = workspace_user_path("notifications.db");
+        let notifications = fs::read(&notification_path)
+            .ok()
+            .and_then(|bytes| decode_notifications(&bytes).ok())
+            .unwrap_or_default();
+        let next_notification_id = notifications
+            .iter()
+            .map(|notification| notification.id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+            .max(1);
         Self {
             endpoint,
             clipboard_generation: 0,
@@ -108,6 +134,9 @@ impl WorkspaceService {
             next_file_panel_token: 1,
             application_endpoints: BTreeMap::new(),
             control_center_cards: BTreeMap::new(),
+            notifications,
+            next_notification_id,
+            notification_path,
         }
     }
 
@@ -128,6 +157,11 @@ impl WorkspaceService {
             | protocol::OP_APPLICATION_ACTIVATE => "ipc.client",
             protocol::OP_CONTROL_CENTER_CARD_REGISTER => "control-center.register",
             protocol::OP_CONTROL_CENTER_CARD_SNAPSHOT => "control-center.read",
+            protocol::OP_NOTIFICATION_POST => "ipc.client",
+            protocol::OP_NOTIFICATION_SNAPSHOT
+            | protocol::OP_NOTIFICATION_MARK_ALL_READ
+            | protocol::OP_NOTIFICATION_REMOVE
+            | protocol::OP_NOTIFICATION_CLEAR => "control-center.read",
             protocol::OP_ASSOCIATION_SET | protocol::OP_ASSOCIATION_REMOVE => ASSOCIATIONS_WRITE,
             _ => {
                 self.reply_status(
@@ -172,6 +206,13 @@ impl WorkspaceService {
             protocol::OP_CONTROL_CENTER_CARD_SNAPSHOT => {
                 self.control_center_card_snapshot(sender, request)
             }
+            protocol::OP_NOTIFICATION_POST => self.notification_post(sender, request),
+            protocol::OP_NOTIFICATION_SNAPSHOT => self.notification_snapshot(sender, request),
+            protocol::OP_NOTIFICATION_MARK_ALL_READ => {
+                self.notification_mark_all_read(sender, request)
+            }
+            protocol::OP_NOTIFICATION_REMOVE => self.notification_remove(sender, request),
+            protocol::OP_NOTIFICATION_CLEAR => self.notification_clear(sender, request),
             _ => unreachable!(),
         }
     }
@@ -277,6 +318,175 @@ impl WorkspaceService {
             request.request_id,
             &payload,
         );
+    }
+
+    fn notification_post(&mut self, sender: u64, request: protocol::Message<'_>) {
+        let Ok(notification) = protocol::decode_notification(request.payload) else {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EINVAL as i32),
+                0,
+            );
+            return;
+        };
+        let Ok(context) = platform::process::thread_security_context(sender) else {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EACCES as i32),
+                0,
+            );
+            return;
+        };
+        let package_len = context.package_id_len as usize;
+        let package = context
+            .package_id
+            .get(..package_len)
+            .and_then(|bytes| core::str::from_utf8(bytes).ok());
+        if notification.id != 0
+            || notification.created_at != 0
+            || notification.read
+            || package != Some(notification.bundle_id)
+            || notification.title.chars().any(char::is_control)
+            || notification
+                .body
+                .chars()
+                .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+        {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EINVAL as i32),
+                0,
+            );
+            return;
+        }
+
+        let id = self.next_notification_id.max(1);
+        self.next_notification_id = id.saturating_add(1).max(1);
+        self.notifications.push(NotificationRecord {
+            id,
+            created_at: platform::time::ticks().unwrap_or(0),
+            read: false,
+            bundle_id: notification.bundle_id.to_owned(),
+            title: notification.title.to_owned(),
+            body: notification.body.to_owned(),
+        });
+        if self.notifications.len() > protocol::MAX_NOTIFICATIONS {
+            let excess = self.notifications.len() - protocol::MAX_NOTIFICATIONS;
+            self.notifications.drain(..excess);
+        }
+        if save_notifications(&self.notification_path, &self.notifications).is_err() {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EIO as i32),
+                0,
+            );
+            return;
+        }
+        self.reply_status(sender, request.request_id, 0, id);
+    }
+
+    fn notification_snapshot(&self, sender: u64, request: protocol::Message<'_>) {
+        if !request.payload.is_empty() {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EINVAL as i32),
+                0,
+            );
+            return;
+        }
+        let mut payload = vec![0u8; 4];
+        let mut encoded_count = 0u16;
+        for notification in self.notifications.iter().rev() {
+            let mut encoded = vec![0u8; protocol::MAX_MESSAGE_LEN - protocol::HEADER_LEN];
+            let Ok(length) = protocol::encode_notification(
+                protocol::Notification {
+                    id: notification.id,
+                    created_at: notification.created_at,
+                    read: notification.read,
+                    bundle_id: &notification.bundle_id,
+                    title: &notification.title,
+                    body: &notification.body,
+                },
+                &mut encoded,
+            ) else {
+                continue;
+            };
+            if payload.len().saturating_add(4).saturating_add(length)
+                > protocol::MAX_MESSAGE_LEN - protocol::HEADER_LEN
+            {
+                break;
+            }
+            payload.extend_from_slice(&(length as u32).to_le_bytes());
+            payload.extend_from_slice(&encoded[..length]);
+            encoded_count = encoded_count.saturating_add(1);
+        }
+        payload[..2].copy_from_slice(&encoded_count.to_le_bytes());
+        self.reply(
+            sender,
+            protocol::OP_NOTIFICATION_SNAPSHOT_RESULT,
+            request.request_id,
+            &payload,
+        );
+    }
+
+    fn notification_mark_all_read(&mut self, sender: u64, request: protocol::Message<'_>) {
+        if !request.payload.is_empty() {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EINVAL as i32),
+                0,
+            );
+            return;
+        }
+        for notification in &mut self.notifications {
+            notification.read = true;
+        }
+        self.finish_notification_mutation(sender, request.request_id);
+    }
+
+    fn notification_remove(&mut self, sender: u64, request: protocol::Message<'_>) {
+        let Ok(bytes) = <[u8; 8]>::try_from(request.payload) else {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EINVAL as i32),
+                0,
+            );
+            return;
+        };
+        let id = u64::from_le_bytes(bytes);
+        self.notifications
+            .retain(|notification| notification.id != id);
+        self.finish_notification_mutation(sender, request.request_id);
+    }
+
+    fn notification_clear(&mut self, sender: u64, request: protocol::Message<'_>) {
+        if !request.payload.is_empty() {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EINVAL as i32),
+                0,
+            );
+            return;
+        }
+        self.notifications.clear();
+        self.finish_notification_mutation(sender, request.request_id);
+    }
+
+    fn finish_notification_mutation(&self, sender: u64, request_id: u64) {
+        let status = if save_notifications(&self.notification_path, &self.notifications).is_ok() {
+            0
+        } else {
+            -(mochi_user_syscall::EIO as i32)
+        };
+        self.reply_status(sender, request_id, status, 0);
     }
 
     fn application_register(&mut self, sender: u64, request: protocol::Message<'_>) {
@@ -1732,13 +1942,15 @@ fn launch_executable(executable: &str, arguments: &[String]) -> Result<u64, u64>
 }
 
 fn association_path() -> PathBuf {
+    workspace_user_path("associations.db")
+}
+
+fn workspace_user_path(name: &str) -> PathBuf {
     let user = std::env::var("USER")
         .ok()
         .filter(|value| valid_identifier(value, 64))
         .unwrap_or_else(|| "unknown".to_owned());
-    Path::new("/var/config/workspace")
-        .join(user)
-        .join("associations.db")
+    Path::new("/var/config/workspace").join(user).join(name)
 }
 
 fn encode_associations(associations: &[Association]) -> io::Result<Vec<u8>> {
@@ -1822,6 +2034,110 @@ fn persist_associations(path: &Path, associations: &[Association]) -> io::Result
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "association parent"))?;
+    fs::create_dir_all(parent)?;
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+    let temporary = path.with_extension("db.new");
+    let backup = path.with_extension("db.old");
+    let _ = fs::remove_file(&temporary);
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&temporary)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    let _ = fs::remove_file(&backup);
+    let had_database = fs::rename(path, &backup).is_ok();
+    if let Err(error) = fs::rename(&temporary, path) {
+        if had_database {
+            let _ = fs::rename(&backup, path);
+        }
+        return Err(error);
+    }
+    let _ = fs::remove_file(&backup);
+    Ok(())
+}
+
+fn encode_notifications(notifications: &[NotificationRecord]) -> io::Result<Vec<u8>> {
+    let mut output = Vec::new();
+    output.extend_from_slice(NOTIFICATIONS_MAGIC);
+    output.extend_from_slice(&(notifications.len() as u32).to_le_bytes());
+    output.extend_from_slice(&0u32.to_le_bytes());
+    for notification in notifications {
+        let mut encoded = vec![0u8; protocol::MAX_MESSAGE_LEN - protocol::HEADER_LEN];
+        let length = protocol::encode_notification(
+            protocol::Notification {
+                id: notification.id,
+                created_at: notification.created_at,
+                read: notification.read,
+                bundle_id: &notification.bundle_id,
+                title: &notification.title,
+                body: &notification.body,
+            },
+            &mut encoded,
+        )
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "notification record"))?;
+        output.extend_from_slice(&(length as u32).to_le_bytes());
+        output.extend_from_slice(&encoded[..length]);
+    }
+    Ok(output)
+}
+
+fn decode_notifications(bytes: &[u8]) -> io::Result<Vec<NotificationRecord>> {
+    if bytes.len() < 16 || bytes.get(..8) != Some(NOTIFICATIONS_MAGIC) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "notification database header",
+        ));
+    }
+    let count = u32::from_le_bytes(bytes[8..12].try_into().unwrap_or_default()) as usize;
+    if count > protocol::MAX_NOTIFICATIONS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "notification count",
+        ));
+    }
+    let mut offset = 16usize;
+    let mut notifications = Vec::with_capacity(count);
+    for _ in 0..count {
+        let length_bytes = bytes
+            .get(offset..offset + 4)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "notification length"))?;
+        let length = u32::from_le_bytes(length_bytes.try_into().unwrap_or_default()) as usize;
+        offset = offset.saturating_add(4);
+        let end = offset
+            .checked_add(length)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "notification length"))?;
+        let wire = protocol::decode_notification(
+            bytes
+                .get(offset..end)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "notification"))?,
+        )
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "notification record"))?;
+        notifications.push(NotificationRecord {
+            id: wire.id,
+            created_at: wire.created_at,
+            read: wire.read,
+            bundle_id: wire.bundle_id.to_owned(),
+            title: wire.title.to_owned(),
+            body: wire.body.to_owned(),
+        });
+        offset = end;
+    }
+    if offset != bytes.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "notification trailing data",
+        ));
+    }
+    Ok(notifications)
+}
+
+fn save_notifications(path: &Path, notifications: &[NotificationRecord]) -> io::Result<()> {
+    let bytes = encode_notifications(notifications)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "notification parent"))?;
     fs::create_dir_all(parent)?;
     fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
     let temporary = path.with_extension("db.new");
@@ -1947,6 +2263,20 @@ mod tests {
         assert!(!valid_control_center_card(card(
             "1\x1fa\n2\x1fb\n3\x1fc\n4\x1fd\n5\x1fe"
         )));
+    }
+
+    #[test]
+    fn notification_history_round_trips() {
+        let notifications = vec![NotificationRecord {
+            id: 7,
+            created_at: 99,
+            read: false,
+            bundle_id: "org.mochios.edit".into(),
+            title: "Saved".into(),
+            body: "The document was saved.".into(),
+        }];
+        let encoded = encode_notifications(&notifications).unwrap();
+        assert_eq!(decode_notifications(&encoded).unwrap(), notifications);
     }
 
     fn application(
