@@ -152,7 +152,9 @@ impl FilesystemService {
     }
 
     fn create(&mut self, request: protocol::Header, payload: &[u8]) -> Result<Response, i32> {
-        if request.flags != protocol::NODE_TYPE_REGULAR {
+        if request.flags != protocol::NODE_TYPE_REGULAR
+            && request.flags != protocol::NODE_TYPE_DIRECTORY
+        {
             return Err(ENOSYS);
         }
         let path = decode_path(payload)?;
@@ -171,23 +173,50 @@ impl FilesystemService {
             .map_err(errno)?;
         let mut parent = Dir::open_inode(&self.fs, parent_inode).map_err(errno)?;
         let permissions = InodeMode::from_bits_truncate((request.mode as u16) & 0x0fff);
+        let (file_type, type_mode) = if request.flags == protocol::NODE_TYPE_DIRECTORY {
+            (FileType::Directory, InodeMode::S_IFDIR)
+        } else {
+            (FileType::Regular, InodeMode::S_IFREG)
+        };
         let mut inode = self
             .fs
             .create_inode(InodeCreationOptions {
-                file_type: FileType::Regular,
-                mode: permissions | InodeMode::S_IFREG,
+                file_type,
+                mode: permissions | type_mode,
                 uid: 0,
                 gid: 0,
                 time: Duration::default(),
                 flags: InodeFlags::empty(),
             })
             .map_err(errno)?;
-        parent
-            .link(
-                DirEntryName::try_from(name).map_err(|_| EINVAL)?,
-                &mut inode,
-            )
-            .map_err(errno)?;
+        if file_type == FileType::Directory {
+            // ext4plus keeps the InodeIndex type private, but the public `.`
+            // entry can be passed directly to the directory initializer.
+            let parent_index = parent
+                .read_dir()
+                .map_err(errno)?
+                .find_map(|entry| match entry {
+                    Ok(entry) if entry.file_name() == "." => Some(Ok(entry.inode)),
+                    Ok(_) => None,
+                    Err(error) => Some(Err(errno(error))),
+                })
+                .ok_or(EIO)??;
+            let mut directory = Dir::init(self.fs.clone(), inode, parent_index).map_err(errno)?;
+            parent
+                .link(
+                    DirEntryName::try_from(name).map_err(|_| EINVAL)?,
+                    directory.inode_mut(),
+                )
+                .map_err(errno)?;
+            inode = directory.inode().clone();
+        } else {
+            parent
+                .link(
+                    DirEntryName::try_from(name).map_err(|_| EINVAL)?,
+                    &mut inode,
+                )
+                .map_err(errno)?;
+        }
         let node_id = self.remember_node(path)?;
         Ok(self.metadata_response(request, node_id, inode.metadata()))
     }
