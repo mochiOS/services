@@ -1,8 +1,11 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
+use ext4plus::dir::Dir;
 use ext4plus::error::Ext4Error;
 use ext4plus::file::File;
-use ext4plus::{Ext4, FileType, Metadata};
+use ext4plus::inode::{InodeCreationOptions, InodeFlags, InodeMode};
+use ext4plus::{DirEntryName, Ext4, FileType, FollowSymlinks, Metadata};
 use mochios_filesystem_protocol as protocol;
 
 const EIO: i32 = 5;
@@ -56,6 +59,7 @@ impl FilesystemService {
             protocol::OP_READ => self.read(request),
             protocol::OP_WRITE => self.write(request, payload),
             protocol::OP_STAT => self.stat(request),
+            protocol::OP_CREATE => self.create(request, payload),
             protocol::OP_TRUNCATE => self.truncate(request),
             protocol::OP_READLINK => self.read_link(request),
             protocol::OP_SYNC => Ok(self.success(request)),
@@ -72,15 +76,7 @@ impl FilesystemService {
     fn lookup(&mut self, request: protocol::Header, payload: &[u8]) -> Result<Response, i32> {
         let path = decode_path(payload)?;
         let metadata = self.fs.symlink_metadata(path).map_err(errno)?;
-        let node_id = if let Some(node_id) = self.node_ids.get(path) {
-            *node_id
-        } else {
-            let node_id = self.next_node_id;
-            self.next_node_id = self.next_node_id.checked_add(1).ok_or(EIO)?;
-            self.nodes.insert(node_id, path.to_owned());
-            self.node_ids.insert(path.to_owned(), node_id);
-            node_id
-        };
+        let node_id = self.remember_node(path)?;
         Ok(self.metadata_response(request, node_id, metadata))
     }
 
@@ -155,6 +151,47 @@ impl FilesystemService {
         Ok(self.metadata_response(request, node_id, metadata))
     }
 
+    fn create(&mut self, request: protocol::Header, payload: &[u8]) -> Result<Response, i32> {
+        if request.flags != protocol::NODE_TYPE_REGULAR {
+            return Err(ENOSYS);
+        }
+        let path = decode_path(payload)?;
+        let (parent_path, name) = split_parent(path)?;
+        match self.fs.symlink_metadata(path) {
+            Ok(_) => return Err(EEXIST),
+            Err(Ext4Error::NotFound) => {}
+            Err(error) => return Err(errno(error)),
+        }
+        let parent_inode = self
+            .fs
+            .path_to_inode(
+                parent_path.try_into().map_err(|_| EINVAL)?,
+                FollowSymlinks::All,
+            )
+            .map_err(errno)?;
+        let mut parent = Dir::open_inode(&self.fs, parent_inode).map_err(errno)?;
+        let permissions = InodeMode::from_bits_truncate((request.mode as u16) & 0x0fff);
+        let mut inode = self
+            .fs
+            .create_inode(InodeCreationOptions {
+                file_type: FileType::Regular,
+                mode: permissions | InodeMode::S_IFREG,
+                uid: 0,
+                gid: 0,
+                time: Duration::default(),
+                flags: InodeFlags::empty(),
+            })
+            .map_err(errno)?;
+        parent
+            .link(
+                DirEntryName::try_from(name).map_err(|_| EINVAL)?,
+                &mut inode,
+            )
+            .map_err(errno)?;
+        let node_id = self.remember_node(path)?;
+        Ok(self.metadata_response(request, node_id, inode.metadata()))
+    }
+
     fn truncate(&mut self, request: protocol::Header) -> Result<Response, i32> {
         self.opens
             .get_mut(&request.open_id)
@@ -209,6 +246,17 @@ impl FilesystemService {
         response.header.status = -errno;
         response
     }
+
+    fn remember_node(&mut self, path: &str) -> Result<u64, i32> {
+        if let Some(node_id) = self.node_ids.get(path) {
+            return Ok(*node_id);
+        }
+        let node_id = self.next_node_id;
+        self.next_node_id = self.next_node_id.checked_add(1).ok_or(EIO)?;
+        self.nodes.insert(node_id, path.to_owned());
+        self.node_ids.insert(path.to_owned(), node_id);
+        Ok(node_id)
+    }
 }
 
 fn decode_path(payload: &[u8]) -> Result<&str, i32> {
@@ -220,6 +268,24 @@ fn decode_path(payload: &[u8]) -> Result<&str, i32> {
         return Err(EINVAL);
     }
     Ok(path)
+}
+
+fn split_parent(path: &str) -> Result<(&str, &str), i32> {
+    let trimmed = path.strip_suffix('/').unwrap_or(path);
+    if trimmed.is_empty() || trimmed == "/" {
+        return Err(EINVAL);
+    }
+    let separator = trimmed.rfind('/').ok_or(EINVAL)?;
+    let name = &trimmed[separator + 1..];
+    if name.is_empty() || name == "." || name == ".." {
+        return Err(EINVAL);
+    }
+    let parent = if separator == 0 {
+        "/"
+    } else {
+        &trimmed[..separator]
+    };
+    Ok((parent, name))
 }
 
 fn node_type(file_type: FileType) -> u32 {
