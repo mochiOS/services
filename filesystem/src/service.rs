@@ -95,7 +95,15 @@ impl FilesystemService {
 
     fn lookup(&mut self, request: protocol::Header, payload: &[u8]) -> Result<Response, i32> {
         let path = decode_path(payload)?;
-        let metadata = self.fs.symlink_metadata(path).map_err(errno)?;
+        if request.flags & !protocol::LOOKUP_FOLLOW_SYMLINKS != 0 {
+            return Err(EINVAL);
+        }
+        let metadata = if request.flags & protocol::LOOKUP_FOLLOW_SYMLINKS != 0 {
+            self.fs.metadata(path)
+        } else {
+            self.fs.symlink_metadata(path)
+        }
+        .map_err(errno)?;
         let node_id = self.remember_node(path)?;
         Ok(self.metadata_response(request, node_id, metadata))
     }
