@@ -603,6 +603,16 @@ impl FilesystemService {
         response.header.offset = metadata.len();
         response.header.mode = u32::from(metadata.mode());
         response.header.flags = node_type(metadata.file_type());
+        response.payload.resize(protocol::METADATA_LEN, 0);
+        protocol::encode_metadata(
+            protocol::NodeMetadata {
+                uid: metadata.uid(),
+                gid: metadata.gid(),
+            },
+            &mut response.payload,
+        )
+        .expect("fixed-size metadata response");
+        response.header.length = response.payload.len() as u32;
         response
     }
 
