@@ -59,6 +59,7 @@ impl FilesystemService {
             protocol::OP_READ => self.read(request),
             protocol::OP_WRITE => self.write(request, payload),
             protocol::OP_STAT => self.stat(request),
+            protocol::OP_READDIR => self.read_dir(request),
             protocol::OP_CREATE => self.create(request, payload),
             protocol::OP_TRUNCATE => self.truncate(request),
             protocol::OP_READLINK => self.read_link(request),
@@ -221,6 +222,43 @@ impl FilesystemService {
         Ok(self.metadata_response(request, node_id, inode.metadata()))
     }
 
+    fn read_dir(&mut self, request: protocol::Header) -> Result<Response, i32> {
+        let path = self.nodes.get(&request.node_id).ok_or(ENOENT)?.clone();
+        let max_length = (request.flags as usize).min(protocol::MAX_IO_LEN);
+        let start_entry = usize::try_from(request.offset).map_err(|_| EINVAL)?;
+        let mut payload = Vec::new();
+        let mut next_entry = start_entry;
+        for entry in self
+            .fs
+            .read_dir(path.as_str())
+            .map_err(errno)?
+            .skip(start_entry)
+        {
+            let entry = entry.map_err(errno)?;
+            let name = entry.file_name().as_str().map_err(|_| EIO)?;
+            let child_path = joined_path(&path, name);
+            let node_id = self.remember_node(&child_path)?;
+            let kind = node_type(entry.file_type().map_err(errno)?);
+            let record_length = protocol::DIRENT_HEADER_LEN + name.len();
+            if payload.len().saturating_add(record_length) > max_length {
+                if payload.is_empty() {
+                    return Err(ENOSPC);
+                }
+                break;
+            }
+            let offset = payload.len();
+            payload.resize(offset + record_length, 0);
+            protocol::encode_dir_entry(node_id, kind, name.as_bytes(), &mut payload[offset..])
+                .map_err(|_| EIO)?;
+            next_entry = next_entry.checked_add(1).ok_or(EIO)?;
+        }
+        let mut response = self.success(request);
+        response.header.offset = next_entry as u64;
+        response.header.length = payload.len() as u32;
+        response.payload = payload;
+        Ok(response)
+    }
+
     fn truncate(&mut self, request: protocol::Header) -> Result<Response, i32> {
         self.opens
             .get_mut(&request.open_id)
@@ -315,6 +353,17 @@ fn split_parent(path: &str) -> Result<(&str, &str), i32> {
         &trimmed[..separator]
     };
     Ok((parent, name))
+}
+
+fn joined_path(parent: &str, name: &str) -> String {
+    match name {
+        "." => parent.to_owned(),
+        ".." => split_parent(parent)
+            .map(|(grandparent, _)| grandparent.to_owned())
+            .unwrap_or_else(|_| "/".to_owned()),
+        _ if parent == "/" => format!("/{name}"),
+        _ => format!("{}/{name}", parent.trim_end_matches('/')),
+    }
 }
 
 fn node_type(file_type: FileType) -> u32 {
