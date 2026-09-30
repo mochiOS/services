@@ -82,6 +82,7 @@ impl FilesystemService {
             protocol::OP_TRUNCATE => self.truncate(request),
             protocol::OP_READLINK => self.read_link(request),
             protocol::OP_SYNC => Ok(self.success(request)),
+            protocol::OP_SETATTR => self.set_attr(request, payload),
             _ => Err(ENOSYS),
         };
         result.unwrap_or_else(|errno| self.error(request, errno))
@@ -590,6 +591,40 @@ impl FilesystemService {
         response.header.length = payload.len() as u32;
         response.payload = payload;
         Ok(response)
+    }
+
+    fn set_attr(
+        &self,
+        request: protocol::Header,
+        payload: &[u8],
+    ) -> Result<Response, i32> {
+        let path = decode_path(payload)?;
+        let supported = protocol::SETATTR_MODE | protocol::SETATTR_UID | protocol::SETATTR_GID;
+        if request.flags == 0 || request.flags & !supported != 0 {
+            return Err(EINVAL);
+        }
+        let mut inode = self
+            .fs
+            .path_to_inode(
+                path.try_into().map_err(|_| EINVAL)?,
+                FollowSymlinks::All,
+            )
+            .map_err(errno)?;
+        if request.flags & protocol::SETATTR_MODE != 0 {
+            let file_type = inode.mode().bits() & 0xf000;
+            let permissions = (request.mode as u16) & 0x0fff;
+            inode
+                .set_mode(InodeMode::from_bits_retain(file_type | permissions))
+                .map_err(errno)?;
+        }
+        if request.flags & protocol::SETATTR_UID != 0 {
+            inode.set_uid(request.offset as u32);
+        }
+        if request.flags & protocol::SETATTR_GID != 0 {
+            inode.set_gid((request.offset >> 32) as u32);
+        }
+        inode.write(&self.fs).map_err(errno)?;
+        Ok(self.metadata_response(request, request.node_id, inode.metadata()))
     }
 
     fn metadata_response(
