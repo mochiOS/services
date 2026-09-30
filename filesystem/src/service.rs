@@ -5,6 +5,7 @@ use ext4plus::dir::Dir;
 use ext4plus::error::Ext4Error;
 use ext4plus::file::File;
 use ext4plus::inode::{InodeCreationOptions, InodeFlags, InodeMode};
+use ext4plus::path::PathBuf;
 use ext4plus::{DirEntryName, Ext4, FileType, FollowSymlinks, Metadata};
 use mochios_filesystem_protocol as protocol;
 
@@ -75,6 +76,7 @@ impl FilesystemService {
             protocol::OP_READDIR => self.read_dir(request),
             protocol::OP_CREATE => self.create(request, payload),
             protocol::OP_UNLINK => self.unlink(request, payload),
+            protocol::OP_SYMLINK => self.symlink(request, payload),
             protocol::OP_TRUNCATE => self.truncate(request),
             protocol::OP_READLINK => self.read_link(request),
             protocol::OP_SYNC => Ok(self.success(request)),
@@ -365,6 +367,43 @@ impl FilesystemService {
             self.nodes.remove(&node_id);
         }
         Ok(self.success(request))
+    }
+
+    fn symlink(&mut self, request: protocol::Header, payload: &[u8]) -> Result<Response, i32> {
+        let split = usize::try_from(request.offset).map_err(|_| EINVAL)?;
+        let (target, link_path) = payload.split_at_checked(split).ok_or(EINVAL)?;
+        if target.is_empty() || target.len() > protocol::MAX_PATH_LEN || target.contains(&0) {
+            return Err(EINVAL);
+        }
+        let target = std::str::from_utf8(target).map_err(|_| EINVAL)?;
+        let link_path = decode_path(link_path)?;
+        let (parent_path, name) = split_parent(link_path)?;
+        match self.fs.symlink_metadata(link_path) {
+            Ok(_) => return Err(EEXIST),
+            Err(Ext4Error::NotFound) => {}
+            Err(error) => return Err(errno(error)),
+        }
+        let parent_inode = self
+            .fs
+            .path_to_inode(
+                parent_path.try_into().map_err(|_| EINVAL)?,
+                FollowSymlinks::All,
+            )
+            .map_err(errno)?;
+        let mut parent = Dir::open_inode(&self.fs, parent_inode).map_err(errno)?;
+        let inode = self
+            .fs
+            .symlink(
+                &mut parent,
+                DirEntryName::try_from(name).map_err(|_| EINVAL)?,
+                PathBuf::try_from(target).map_err(|_| EINVAL)?,
+                0,
+                0,
+                Duration::default(),
+            )
+            .map_err(errno)?;
+        let node_id = self.remember_node(link_path)?;
+        Ok(self.metadata_response(request, node_id, inode.metadata()))
     }
 
     fn truncate(&mut self, request: protocol::Header) -> Result<Response, i32> {
