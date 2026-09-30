@@ -6,6 +6,7 @@ members = [
     "core",
     "display",
     "drivers",
+    "filesystem",
     "input",
     "logger",
     "linux",
