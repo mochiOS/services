@@ -30,6 +30,7 @@ pub struct FilesystemService {
     nodes: HashMap<u64, String>,
     node_ids: HashMap<String, u64>,
     opens: HashMap<u64, OpenFile>,
+    orphans: HashMap<u64, Orphan>,
     next_node_id: u64,
     next_open_id: u64,
 }
@@ -37,6 +38,12 @@ pub struct FilesystemService {
 struct OpenFile {
     node_id: u64,
     file: File,
+}
+
+#[derive(Clone)]
+struct Orphan {
+    parent_path: String,
+    name: String,
 }
 
 impl FilesystemService {
@@ -50,6 +57,7 @@ impl FilesystemService {
             nodes,
             node_ids,
             opens: HashMap::new(),
+            orphans: HashMap::new(),
             next_node_id: 2,
             next_open_id: 1,
         }
@@ -66,6 +74,7 @@ impl FilesystemService {
             protocol::OP_STAT => self.stat(request),
             protocol::OP_READDIR => self.read_dir(request),
             protocol::OP_CREATE => self.create(request, payload),
+            protocol::OP_UNLINK => self.unlink(request, payload),
             protocol::OP_TRUNCATE => self.truncate(request),
             protocol::OP_READLINK => self.read_link(request),
             protocol::OP_SYNC => Ok(self.success(request)),
@@ -104,7 +113,36 @@ impl FilesystemService {
     }
 
     fn close(&mut self, request: protocol::Header) -> Result<Response, i32> {
-        self.opens.remove(&request.open_id).ok_or(EBADF)?;
+        let open = self.opens.get(&request.open_id).ok_or(EBADF)?;
+        let node_id = open.node_id;
+        let inode = open.file.inode().clone();
+        let is_last_open = self
+            .opens
+            .values()
+            .filter(|other| other.node_id == node_id)
+            .count()
+            == 1;
+        if is_last_open {
+            if let Some(orphan) = self.orphans.get(&node_id).cloned() {
+                let parent_inode = self
+                    .fs
+                    .path_to_inode(
+                        orphan.parent_path.as_str().try_into().map_err(|_| EIO)?,
+                        FollowSymlinks::All,
+                    )
+                    .map_err(errno)?;
+                let mut parent = Dir::open_inode(&self.fs, parent_inode).map_err(errno)?;
+                parent
+                    .unlink(
+                        DirEntryName::try_from(orphan.name.as_str()).map_err(|_| EIO)?,
+                        inode,
+                    )
+                    .map_err(errno)?;
+                self.orphans.remove(&node_id);
+                self.nodes.remove(&node_id);
+            }
+        }
+        self.opens.remove(&request.open_id);
         Ok(self.success(request))
     }
 
@@ -247,6 +285,10 @@ impl FilesystemService {
         {
             let entry = entry.map_err(errno)?;
             let name = entry.file_name().as_str().map_err(|_| EIO)?;
+            if name.starts_with(".mochios-orphan-") {
+                next_entry = next_entry.checked_add(1).ok_or(EIO)?;
+                continue;
+            }
             let child_path = joined_path(&path, name);
             let node_id = self.remember_node(&child_path)?;
             let kind = node_type(entry.file_type().map_err(errno)?);
@@ -268,6 +310,61 @@ impl FilesystemService {
         response.header.length = payload.len() as u32;
         response.payload = payload;
         Ok(response)
+    }
+
+    fn unlink(&mut self, request: protocol::Header, payload: &[u8]) -> Result<Response, i32> {
+        let path = decode_path(payload)?;
+        let (parent_path, name) = split_parent(path)?;
+        let parent_inode = self
+            .fs
+            .path_to_inode(
+                parent_path.try_into().map_err(|_| EINVAL)?,
+                FollowSymlinks::All,
+            )
+            .map_err(errno)?;
+        let mut parent = Dir::open_inode(&self.fs, parent_inode).map_err(errno)?;
+        let mut inode = parent
+            .get_entry(DirEntryName::try_from(name).map_err(|_| EINVAL)?)
+            .map_err(errno)?;
+        if inode.file_type().is_dir() {
+            return Err(EISDIR);
+        }
+        let node_id = self.remember_node(path)?;
+        let is_open = self.opens.values().any(|open| open.node_id == node_id);
+        let orphan_name = format!(".mochios-orphan-{node_id}");
+        if is_open {
+            parent
+                .link(
+                    DirEntryName::try_from(orphan_name.as_str()).map_err(|_| EIO)?,
+                    &mut inode,
+                )
+                .map_err(errno)?;
+        }
+        if let Err(error) = parent.unlink(
+            DirEntryName::try_from(name).map_err(|_| EINVAL)?,
+            inode.clone(),
+        ) {
+            if is_open {
+                let _ = parent.unlink(
+                    DirEntryName::try_from(orphan_name.as_str()).map_err(|_| EIO)?,
+                    inode,
+                );
+            }
+            return Err(errno(error));
+        }
+        self.node_ids.remove(path);
+        if is_open {
+            self.orphans.insert(
+                node_id,
+                Orphan {
+                    parent_path: parent_path.to_owned(),
+                    name: orphan_name,
+                },
+            );
+        } else {
+            self.nodes.remove(&node_id);
+        }
+        Ok(self.success(request))
     }
 
     fn truncate(&mut self, request: protocol::Header) -> Result<Response, i32> {
