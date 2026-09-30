@@ -1,0 +1,16 @@
+[package]
+provenance = "built-in"
+id = "org.mochios.filesystem"
+name = "Filesystem Service"
+version = "1"
+vendor = "mochiOS"
+
+[[binary]]
+path = "/system/services/filesystem.service"
+kind = "service"
+requires = [
+    "device.storage",
+    "ipc.client",
+    "ipc.server",
+]
+

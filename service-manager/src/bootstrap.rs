@@ -238,6 +238,14 @@ impl BootstrapOperations for Runtime {
 
     fn spawn_fixed(&mut self, service: FixedService) -> Option<u64> {
         let ready_target = match service {
+            FixedService::Filesystem => {
+                if !self.ensure_ready_handshake() {
+                    return None;
+                }
+                self.ready
+                    .as_ref()
+                    .map(|handshake| handshake.target(ReadyService::Filesystem))
+            }
             FixedService::Input => {
                 if !self.ensure_ready_handshake() {
                     return None;
@@ -345,6 +353,10 @@ impl BootstrapOperations for Runtime {
 
     fn wait_display_ready(&mut self, process_id: u64) -> bool {
         self.wait_ready(ReadyService::Display, process_id)
+    }
+
+    fn wait_filesystem_ready(&mut self, process_id: u64) -> bool {
+        self.wait_ready(ReadyService::Filesystem, process_id)
     }
 
     fn wait_input_ready(&mut self, process_id: u64) -> bool {
@@ -490,6 +502,7 @@ fn cpu_iommu_vendor() -> &'static str {
 fn service_name(service: FixedService) -> &'static str {
     match service {
         FixedService::MbootAgent => "mboot-agent.service",
+        FixedService::Filesystem => "filesystem.service",
         FixedService::Input => "input.service",
         FixedService::Display => "display.driver",
         FixedService::Compositor => "compositor.service",
@@ -548,12 +561,12 @@ fn resident(outcome: BootstrapOutcome, runtime: Option<Runtime>) -> ! {
         .zip(outcome.children.binder)
         .zip(outcome.children.workspace)
         .map(|((identity, binder_pid), workspace_pid)| ActiveSession {
-                id: outcome.session_id,
-                identity,
-                linux_pid: outcome.children.linux,
-                workspace_pid,
-                binder_pid,
-            });
+            id: outcome.session_id,
+            identity,
+            linux_pid: outcome.children.linux,
+            workspace_pid,
+            binder_pid,
+        });
     if active_session.is_some()
         && let Some(runtime) = runtime.as_mut()
     {

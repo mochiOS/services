@@ -5,6 +5,7 @@ use mochi_user_platform::service_ready::SessionIdentity;
 pub(crate) struct ChildProcesses {
     pub(crate) drivers: Option<u64>,
     pub(crate) mboot_agent: Option<u64>,
+    pub(crate) filesystem: Option<u64>,
     pub(crate) input: Option<u64>,
     pub(crate) display: Option<u64>,
     pub(crate) compositor: Option<u64>,
@@ -24,6 +25,8 @@ pub(crate) enum StopReason {
     DriverControlInitializationFailed,
     DriversSpawnFailed,
     DriverHelloFailed,
+    FilesystemSpawnFailed,
+    FilesystemReadyFailed,
     InputSpawnFailed,
     DisplaySpawnFailed,
     DisplayReadyFailed,
@@ -51,6 +54,7 @@ impl BootstrapOutcome {
             children: ChildProcesses {
                 drivers: None,
                 mboot_agent: None,
+                filesystem: None,
                 input: None,
                 display: None,
                 compositor: None,
@@ -84,6 +88,7 @@ pub(crate) trait BootstrapOperations {
     ) -> Option<u64>;
     fn installation_required(&self) -> bool;
     fn wait_display_ready(&mut self, process_id: u64) -> bool;
+    fn wait_filesystem_ready(&mut self, process_id: u64) -> bool;
     fn wait_input_ready(&mut self, process_id: u64) -> bool;
     fn start_discovery(&mut self) -> bool;
     fn wait_discovery_complete(&mut self, process_id: u64) -> bool;
@@ -110,6 +115,13 @@ pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> Bootstra
     children.drivers = Some(drivers);
     if !operations.wait_driver_hello(drivers) {
         return outcome(children, StopReason::DriverHelloFailed);
+    }
+    let Some(filesystem) = operations.spawn_fixed(FixedService::Filesystem) else {
+        return outcome(children, StopReason::FilesystemSpawnFailed);
+    };
+    children.filesystem = Some(filesystem);
+    if !operations.wait_filesystem_ready(filesystem) {
+        return outcome(children, StopReason::FilesystemReadyFailed);
     }
     children.mboot_agent = operations.spawn_mboot_agent();
     operations.notify_mboot_stage(MbootStage::Userspace);
@@ -166,7 +178,8 @@ pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> Bootstra
     };
 
     let session_id = 1;
-    let Some(workspace) = operations.spawn_user_session(FixedService::Workspace, identity, session_id)
+    let Some(workspace) =
+        operations.spawn_user_session(FixedService::Workspace, identity, session_id)
     else {
         return outcome(children, StopReason::WorkspaceSpawnFailed);
     };
@@ -224,6 +237,7 @@ mod tests {
         NotifyMbootStage(MbootStage),
         Spawn(FixedService),
         SpawnUserSession(FixedService, SessionIdentity),
+        WaitFilesystem,
         WaitDisplay,
         WaitInput,
         StartDiscovery,
@@ -239,6 +253,7 @@ mod tests {
         SpawnDrivers,
         Hello,
         Spawn(FixedService),
+        FilesystemReady,
         DisplayReady,
         InputReady,
         StartDiscovery,
@@ -299,6 +314,7 @@ mod tests {
             }
             Some(match service {
                 FixedService::MbootAgent => 19,
+                FixedService::Filesystem => 23,
                 FixedService::Input => 11,
                 FixedService::Display => 12,
                 FixedService::Compositor => 13,
@@ -327,6 +343,11 @@ mod tests {
                 FixedService::Workspace => 22,
                 _ => unreachable!("only user-session services are accepted"),
             })
+        }
+
+        fn wait_filesystem_ready(&mut self, _process_id: u64) -> bool {
+            self.events.push(Event::WaitFilesystem);
+            self.failure != Failure::FilesystemReady
         }
 
         fn installation_required(&self) -> bool {
@@ -373,6 +394,8 @@ mod tests {
         alloc::vec![
             Event::SpawnDrivers,
             Event::WaitHello,
+            Event::Spawn(FixedService::Filesystem),
+            Event::WaitFilesystem,
             Event::SpawnMbootAgent,
             Event::NotifyMbootStage(MbootStage::Userspace),
             Event::Spawn(FixedService::Input),

@@ -19,79 +19,86 @@ description = "mochiOS driver manager service"
 autostart = false
 order = 2
 
+[filesystem.service]
+dir = "filesystem"
+fs = "rootfs"
+description = "mochiOS userspace ext4 filesystem service"
+autostart = false
+order = 3
+
 [input.service]
 dir = "input"
 fs = "rootfs"
 description = "mochiOS input event service"
 autostart = false
-order = 3
+order = 4
 
 [package.service]
 dir = "package"
 fs = "rootfs"
 description = "mochiOS package installation service"
 autostart = false
-order = 4
+order = 5
 
 [network.service]
 dir = "network"
 fs = "rootfs"
 description = "mochiOS IPv4 network service"
 autostart = false
-order = 8
+order = 9
 
 [signature.service]
 dir = "signature"
 fs = "rootfs"
 description = "mochiOS package signature verification service"
 autostart = false
-order = 5
+order = 6
 
 [tty.service]
 dir = "tty"
 fs = "rootfs"
 description = "mochiOS tty service"
 autostart = false
-order = 6
+order = 7
 
 [service-manager.service]
 dir = "service-manager"
 fs = "rootfs"
 description = "mochiOS fixed service orchestration service"
 autostart = false
-order = 7
+order = 8
 
 [update.service]
 dir = "update"
 fs = "rootfs"
 description = "mochiOS Developer PKI synchronization service"
 autostart = false
-order = 9
+order = 10
 
 [user.service]
 dir = "user"
 fs = "rootfs"
 description = "mochiOS user database service"
 autostart = false
-order = 10
+order = 11
 
 [secure-ui.service]
 dir = "secure-ui"
 fs = "rootfs"
 description = "mochiOS trusted login and authorization UI service"
 autostart = false
-order = 11
+order = 12
 
 [linux.service]
 dir = "linux"
 fs = "rootfs"
 description = "mochiOS Linux GUI bridge service"
 autostart = false
-order = 12
+order = 13
 
 [workspace.service]
 dir = "workspace"
 fs = "rootfs"
 description = "mochiOS user workspace service"
 autostart = false
-order = 13
+order = 14

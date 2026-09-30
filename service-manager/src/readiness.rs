@@ -13,6 +13,7 @@ pub(crate) struct DeferredMessage {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReadyService {
+    Filesystem,
     Input,
     Display,
     Network,
@@ -24,6 +25,7 @@ pub(crate) enum ReadyService {
 impl ReadyService {
     pub(crate) const fn name(self) -> &'static str {
         match self {
+            Self::Filesystem => "filesystem.service",
             Self::Input => "input.service",
             Self::Display => "display.driver",
             Self::Network => "network.service",
@@ -47,12 +49,14 @@ pub(crate) enum ReadyError {
 
 pub(crate) struct ReadyHandshake {
     endpoint: u64,
+    filesystem_token: u64,
     input_token: u64,
     display_token: u64,
     network_token: u64,
     user_token: u64,
     secure_ui_token: u64,
     workspace_token: u64,
+    filesystem_status: platform::service_ready::OneShotStatus,
     input_status: platform::service_ready::OneShotStatus,
     display_status: platform::service_ready::OneShotStatus,
     network_status: platform::service_ready::OneShotStatus,
@@ -68,9 +72,17 @@ impl ReadyHandshake {
             platform::ipc::create().map_err(|error| ReadyError::Ipc(error.raw().unsigned_abs()))?;
         let input_token = platform::service_ready::generate_token()
             .map_err(|error| ReadyError::Ipc(error.raw().unsigned_abs()))?;
+        let mut filesystem_token = platform::service_ready::generate_token()
+            .map_err(|error| ReadyError::Ipc(error.raw().unsigned_abs()))?;
+        if filesystem_token == input_token {
+            filesystem_token ^= 0x6d66_7331_a5a5_5a5a;
+            if filesystem_token == 0 {
+                filesystem_token = 1;
+            }
+        }
         let mut display_token = platform::service_ready::generate_token()
             .map_err(|error| ReadyError::Ipc(error.raw().unsigned_abs()))?;
-        if display_token == input_token {
+        if display_token == input_token || display_token == filesystem_token {
             display_token ^= 0xa5a5_5a5a_d3c3_3c3c;
             if display_token == 0 {
                 display_token = 1;
@@ -78,7 +90,10 @@ impl ReadyHandshake {
         }
         let mut network_token = platform::service_ready::generate_token()
             .map_err(|error| ReadyError::Ipc(error.raw().unsigned_abs()))?;
-        if network_token == input_token || network_token == display_token {
+        if network_token == input_token
+            || network_token == filesystem_token
+            || network_token == display_token
+        {
             network_token ^= 0x3c3c_c3c3_5a5a_a5a5;
             if network_token == 0 {
                 network_token = 1;
@@ -86,7 +101,11 @@ impl ReadyHandshake {
         }
         let mut user_token = platform::service_ready::generate_token()
             .map_err(|error| ReadyError::Ipc(error.raw().unsigned_abs()))?;
-        if user_token == input_token || user_token == display_token || user_token == network_token {
+        if user_token == input_token
+            || user_token == filesystem_token
+            || user_token == display_token
+            || user_token == network_token
+        {
             user_token ^= 0x9696_6969_c3c3_3c3c;
             if user_token == 0 {
                 user_token = 1;
@@ -95,6 +114,7 @@ impl ReadyHandshake {
         let mut secure_ui_token = platform::service_ready::generate_token()
             .map_err(|error| ReadyError::Ipc(error.raw().unsigned_abs()))?;
         if secure_ui_token == input_token
+            || secure_ui_token == filesystem_token
             || secure_ui_token == display_token
             || secure_ui_token == network_token
             || secure_ui_token == user_token
@@ -106,8 +126,15 @@ impl ReadyHandshake {
         }
         let mut workspace_token = platform::service_ready::generate_token()
             .map_err(|error| ReadyError::Ipc(error.raw().unsigned_abs()))?;
-        if [input_token, display_token, network_token, user_token, secure_ui_token]
-            .contains(&workspace_token)
+        if [
+            filesystem_token,
+            input_token,
+            display_token,
+            network_token,
+            user_token,
+            secure_ui_token,
+        ]
+        .contains(&workspace_token)
         {
             workspace_token ^= 0xc3c3_3c3c_a5a5_5a5a;
             if workspace_token == 0 {
@@ -116,12 +143,14 @@ impl ReadyHandshake {
         }
         Ok(Self {
             endpoint,
+            filesystem_token,
             input_token,
             display_token,
             network_token,
             user_token,
             secure_ui_token,
             workspace_token,
+            filesystem_status: platform::service_ready::OneShotStatus::new(),
             input_status: platform::service_ready::OneShotStatus::new(),
             display_status: platform::service_ready::OneShotStatus::new(),
             network_status: platform::service_ready::OneShotStatus::new(),
@@ -138,6 +167,7 @@ impl ReadyHandshake {
 
     pub(crate) const fn target(&self, service: ReadyService) -> platform::service_ready::Target {
         let token = match service {
+            ReadyService::Filesystem => self.filesystem_token,
             ReadyService::Input => self.input_token,
             ReadyService::Display => self.display_token,
             ReadyService::Network => self.network_token,
@@ -153,6 +183,7 @@ impl ReadyHandshake {
 
     fn status(&self, service: ReadyService) -> Option<i32> {
         match service {
+            ReadyService::Filesystem => self.filesystem_status.get(),
             ReadyService::Input => self.input_status.get(),
             ReadyService::Display => self.display_status.get(),
             ReadyService::Network => self.network_status.get(),
@@ -163,7 +194,9 @@ impl ReadyHandshake {
     }
 
     fn record(&mut self, token: u64, status: i32) -> Result<(), ReadyError> {
-        let slot = if token == self.input_token {
+        let slot = if token == self.filesystem_token {
+            &mut self.filesystem_status
+        } else if token == self.input_token {
             &mut self.input_status
         } else if token == self.display_token {
             &mut self.display_status

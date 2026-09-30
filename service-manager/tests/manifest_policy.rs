@@ -16,6 +16,7 @@ mod package;
 const SERVICE_MANAGER_MANIFEST: &str = include_str!("../manifest.toml");
 const CAPABILITY_MANIFEST: &str = include_str!("../../capability/manifest.toml");
 const DRIVERS_MANIFEST: &str = include_str!("../../drivers/manifest.toml");
+const FILESYSTEM_MANIFEST: &str = include_str!("../../filesystem/manifest.toml");
 const INPUT_MANIFEST: &str = include_str!("../../input/manifest.toml");
 const DISPLAY_MANIFEST: &str = include_str!("../../display/manifest.toml");
 const COMPOSITOR_MANIFEST: &str = include_str!("../../compositor/manifest.toml");
@@ -105,6 +106,11 @@ fn service_manifests_match_policy() {
             .any(|capability| capability == "net.connect")
     );
 
+    assert_capabilities(
+        FILESYSTEM_MANIFEST,
+        "/system/services/filesystem.service",
+        &["device.storage", "ipc.client", "ipc.server"],
+    );
     assert_capabilities(
         INPUT_MANIFEST,
         "/system/services/input.service",
