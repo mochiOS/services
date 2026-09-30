@@ -41,6 +41,28 @@ fn main() {
             platform::process::exit(1);
         }
     };
+    let filesystem_id = match register_filesystem(endpoint) {
+        Ok(filesystem_id) => filesystem_id,
+        Err(_) => {
+            platform::logln!("filesystem.service: registration failed");
+            let _ = platform::service_ready::notify(ready_target, -1);
+            platform::process::exit(1);
+        }
+    };
+    for path in [
+        "/bin",
+        "/applications",
+        "/libraries",
+        "/home",
+        "/var",
+        "/tmp",
+    ] {
+        if mount_filesystem(filesystem_id, path, path).is_err() {
+            platform::logln!("filesystem.service: mount failed: {path}");
+            let _ = platform::service_ready::notify(ready_target, -1);
+            platform::process::exit(1);
+        }
+    }
     let mut service = FilesystemService::new(fs);
     if platform::service_ready::notify(ready_target, 0).is_err() {
         platform::process::exit(1);
@@ -98,6 +120,41 @@ fn main() {
         {
             let _ = platform::ipc::reply(sender, &response_bytes[..length]);
         }
+    }
+}
+
+#[cfg(target_os = "mochios")]
+fn register_filesystem(endpoint: u64) -> Result<u64, ()> {
+    let raw = unsafe {
+        mochi_user_platform::syscall::syscall1(
+            mochios_filesystem_protocol::SYS_FILESYSTEM_REGISTER,
+            endpoint,
+        )
+    };
+    syscall_result(raw)
+}
+
+#[cfg(target_os = "mochios")]
+fn mount_filesystem(filesystem_id: u64, target: &str, source: &str) -> Result<u64, ()> {
+    let raw = unsafe {
+        mochi_user_platform::syscall::syscall5(
+            mochios_filesystem_protocol::SYS_FILESYSTEM_MOUNT,
+            filesystem_id,
+            target.as_ptr() as u64,
+            target.len() as u64,
+            source.as_ptr() as u64,
+            source.len() as u64,
+        )
+    };
+    syscall_result(raw)
+}
+
+#[cfg(target_os = "mochios")]
+fn syscall_result(raw: u64) -> Result<u64, ()> {
+    if (raw as i64) < 0 {
+        Err(())
+    } else {
+        Ok(raw)
     }
 }
 
