@@ -76,6 +76,7 @@ impl FilesystemService {
             protocol::OP_READDIR => self.read_dir(request),
             protocol::OP_CREATE => self.create(request, payload),
             protocol::OP_UNLINK => self.unlink(request, payload),
+            protocol::OP_RENAME => self.rename(request, payload),
             protocol::OP_SYMLINK => self.symlink(request, payload),
             protocol::OP_TRUNCATE => self.truncate(request),
             protocol::OP_READLINK => self.read_link(request),
@@ -404,6 +405,140 @@ impl FilesystemService {
             .map_err(errno)?;
         let node_id = self.remember_node(link_path)?;
         Ok(self.metadata_response(request, node_id, inode.metadata()))
+    }
+
+    fn rename(&mut self, request: protocol::Header, payload: &[u8]) -> Result<Response, i32> {
+        let split = usize::try_from(request.offset).map_err(|_| EINVAL)?;
+        let (old_path, new_path) = payload.split_at_checked(split).ok_or(EINVAL)?;
+        let old_path = decode_path(old_path)?;
+        let new_path = decode_path(new_path)?;
+        if old_path == new_path {
+            return Ok(self.success(request));
+        }
+        let (old_parent_path, old_name) = split_parent(old_path)?;
+        let (new_parent_path, new_name) = split_parent(new_path)?;
+        let old_parent_inode = self
+            .fs
+            .path_to_inode(
+                old_parent_path.try_into().map_err(|_| EINVAL)?,
+                FollowSymlinks::All,
+            )
+            .map_err(errno)?;
+        let new_parent_inode = self
+            .fs
+            .path_to_inode(
+                new_parent_path.try_into().map_err(|_| EINVAL)?,
+                FollowSymlinks::All,
+            )
+            .map_err(errno)?;
+        let mut old_parent = Dir::open_inode(&self.fs, old_parent_inode).map_err(errno)?;
+        let mut new_parent = Dir::open_inode(&self.fs, new_parent_inode).map_err(errno)?;
+        let mut source_inode = old_parent
+            .get_entry(DirEntryName::try_from(old_name).map_err(|_| EINVAL)?)
+            .map_err(errno)?;
+        if source_inode.file_type().is_dir() {
+            return Err(ENOSYS);
+        }
+        let source_node_id = self.remember_node(old_path)?;
+
+        let destination =
+            match new_parent.get_entry(DirEntryName::try_from(new_name).map_err(|_| EINVAL)?) {
+                Ok(inode) if inode.file_type().is_dir() => return Err(EISDIR),
+                Ok(inode) => {
+                    let node_id = self.remember_node(new_path)?;
+                    Some((node_id, inode))
+                }
+                Err(Ext4Error::NotFound) => None,
+                Err(error) => return Err(errno(error)),
+            };
+        let backup_name = format!(".mochios-orphan-rename-{}", request.request_id);
+        if let Some((_, mut destination_inode)) = destination.clone() {
+            new_parent
+                .link(
+                    DirEntryName::try_from(backup_name.as_str()).map_err(|_| EIO)?,
+                    &mut destination_inode,
+                )
+                .map_err(errno)?;
+            if let Err(error) = new_parent.unlink(
+                DirEntryName::try_from(new_name).map_err(|_| EINVAL)?,
+                destination_inode.clone(),
+            ) {
+                let _ = new_parent.unlink(
+                    DirEntryName::try_from(backup_name.as_str()).map_err(|_| EIO)?,
+                    destination_inode,
+                );
+                return Err(errno(error));
+            }
+        }
+
+        if let Err(error) = new_parent.link(
+            DirEntryName::try_from(new_name).map_err(|_| EINVAL)?,
+            &mut source_inode,
+        ) {
+            self.restore_rename_destination(&mut new_parent, new_name, &backup_name, destination);
+            return Err(errno(error));
+        }
+        if let Err(error) = old_parent.unlink(
+            DirEntryName::try_from(old_name).map_err(|_| EINVAL)?,
+            source_inode.clone(),
+        ) {
+            let _ = new_parent.unlink(
+                DirEntryName::try_from(new_name).map_err(|_| EINVAL)?,
+                source_inode,
+            );
+            self.restore_rename_destination(&mut new_parent, new_name, &backup_name, destination);
+            return Err(errno(error));
+        }
+
+        if let Some((destination_node_id, destination_inode)) = destination {
+            self.node_ids.remove(new_path);
+            if self
+                .opens
+                .values()
+                .any(|open| open.node_id == destination_node_id)
+            {
+                self.orphans.insert(
+                    destination_node_id,
+                    Orphan {
+                        parent_path: new_parent_path.to_owned(),
+                        name: backup_name,
+                    },
+                );
+            } else {
+                new_parent
+                    .unlink(
+                        DirEntryName::try_from(backup_name.as_str()).map_err(|_| EIO)?,
+                        destination_inode,
+                    )
+                    .map_err(errno)?;
+                self.nodes.remove(&destination_node_id);
+            }
+        }
+        self.node_ids.remove(old_path);
+        self.node_ids.insert(new_path.to_owned(), source_node_id);
+        self.nodes.insert(source_node_id, new_path.to_owned());
+        Ok(self.success(request))
+    }
+
+    fn restore_rename_destination(
+        &self,
+        parent: &mut Dir,
+        name: &str,
+        backup_name: &str,
+        destination: Option<(u64, ext4plus::inode::Inode)>,
+    ) {
+        let Some((_, mut inode)) = destination else {
+            return;
+        };
+        let (Ok(name), Ok(backup_name)) = (
+            DirEntryName::try_from(name),
+            DirEntryName::try_from(backup_name),
+        ) else {
+            return;
+        };
+        if parent.link(name, &mut inode).is_ok() {
+            let _ = parent.unlink(backup_name, inode);
+        }
     }
 
     fn truncate(&mut self, request: protocol::Header) -> Result<Response, i32> {
