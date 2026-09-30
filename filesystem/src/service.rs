@@ -19,6 +19,7 @@ const ENOSPC: i32 = 28;
 const EISDIR: i32 = 21;
 const ENOTDIR: i32 = 20;
 const ENOSYS: i32 = 38;
+const ENOTEMPTY: i32 = 39;
 const EFBIG: i32 = 27;
 
 pub struct Response {
@@ -330,7 +331,34 @@ impl FilesystemService {
             .get_entry(DirEntryName::try_from(name).map_err(|_| EINVAL)?)
             .map_err(errno)?;
         if inode.file_type().is_dir() {
-            return Err(EISDIR);
+            if request.flags != protocol::NODE_TYPE_DIRECTORY {
+                return Err(EISDIR);
+            }
+            let directory = Dir::open_inode(&self.fs, inode.clone()).map_err(errno)?;
+            for entry in directory.read_dir().map_err(errno)? {
+                let entry = entry.map_err(errno)?;
+                if entry.file_name() != "." && entry.file_name() != ".." {
+                    return Err(ENOTEMPTY);
+                }
+            }
+            let original_links = inode.links_count();
+            inode.set_links_count(1);
+            inode.write(&self.fs).map_err(errno)?;
+            if let Err(error) = parent.unlink(
+                DirEntryName::try_from(name).map_err(|_| EINVAL)?,
+                inode.clone(),
+            ) {
+                inode.set_links_count(original_links);
+                let _ = inode.write(&self.fs);
+                return Err(errno(error));
+            }
+            if let Some(node_id) = self.node_ids.remove(path) {
+                self.nodes.remove(&node_id);
+            }
+            return Ok(self.success(request));
+        }
+        if request.flags == protocol::NODE_TYPE_DIRECTORY {
+            return Err(ENOTDIR);
         }
         let node_id = self.remember_node(path)?;
         let is_open = self.opens.values().any(|open| open.node_id == node_id);
