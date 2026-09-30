@@ -61,7 +61,26 @@ fn main() {
         let response = match protocol::decode(&request_bytes[..length.min(request_bytes.len())]) {
             Ok((header, payload)) => {
                 if header.opcode == protocol::OP_SYNC {
-                    let _ = partition.flush();
+                    if partition.flush().is_err() {
+                        let response = filesystem_service::service::Response {
+                            header: protocol::Header {
+                                opcode: protocol::OP_STATUS,
+                                request_id: header.request_id,
+                                mount_id: header.mount_id,
+                                status: -5,
+                                ..protocol::Header::default()
+                            },
+                            payload: Vec::new(),
+                        };
+                        if let Ok(length) = protocol::encode(
+                            response.header,
+                            &response.payload,
+                            &mut response_bytes,
+                        ) {
+                            let _ = platform::ipc::reply(sender, &response_bytes[..length]);
+                        }
+                        continue;
+                    }
                 }
                 service.handle(header, payload)
             }
