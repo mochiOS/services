@@ -29,9 +29,14 @@ pub struct FilesystemService {
     fs: Ext4,
     nodes: HashMap<u64, String>,
     node_ids: HashMap<String, u64>,
-    opens: HashMap<u64, File>,
+    opens: HashMap<u64, OpenFile>,
     next_node_id: u64,
     next_open_id: u64,
+}
+
+struct OpenFile {
+    node_id: u64,
+    file: File,
 }
 
 impl FilesystemService {
@@ -86,7 +91,13 @@ impl FilesystemService {
         let file = self.fs.open(path.as_str()).map_err(errno)?;
         let open_id = self.next_open_id;
         self.next_open_id = self.next_open_id.checked_add(1).ok_or(EIO)?;
-        self.opens.insert(open_id, file);
+        self.opens.insert(
+            open_id,
+            OpenFile {
+                node_id: request.node_id,
+                file,
+            },
+        );
         let mut response = self.success(request);
         response.header.open_id = open_id;
         Ok(response)
@@ -99,7 +110,7 @@ impl FilesystemService {
 
     fn read(&mut self, request: protocol::Header) -> Result<Response, i32> {
         let length = (request.flags as usize).min(protocol::MAX_IO_LEN);
-        let file = self.opens.get_mut(&request.open_id).ok_or(EBADF)?;
+        let file = &mut self.opens.get_mut(&request.open_id).ok_or(EBADF)?.file;
         let mut payload = vec![0u8; length];
         let mut done = 0;
         while done < payload.len() {
@@ -122,7 +133,7 @@ impl FilesystemService {
         if payload.len() > protocol::MAX_IO_LEN {
             return Err(EINVAL);
         }
-        let file = self.opens.get_mut(&request.open_id).ok_or(EBADF)?;
+        let file = &mut self.opens.get_mut(&request.open_id).ok_or(EBADF)?.file;
         let mut done = 0;
         while done < payload.len() {
             let count = file
@@ -140,8 +151,8 @@ impl FilesystemService {
 
     fn stat(&self, request: protocol::Header) -> Result<Response, i32> {
         let (node_id, metadata) = if request.open_id != 0 {
-            let file = self.opens.get(&request.open_id).ok_or(EBADF)?;
-            (request.node_id, file.inode().metadata())
+            let open = self.opens.get(&request.open_id).ok_or(EBADF)?;
+            (open.node_id, open.file.inode().metadata())
         } else {
             let path = self.nodes.get(&request.node_id).ok_or(ENOENT)?;
             (
@@ -263,6 +274,7 @@ impl FilesystemService {
         self.opens
             .get_mut(&request.open_id)
             .ok_or(EBADF)?
+            .file
             .truncate(request.offset)
             .map_err(errno)?;
         Ok(self.success(request))
