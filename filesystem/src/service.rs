@@ -473,13 +473,15 @@ impl FilesystemService {
         let mut source_inode = old_parent
             .get_entry(DirEntryName::try_from(old_name).map_err(|_| EINVAL)?)
             .map_err(errno)?;
-        if source_inode.file_type().is_dir() {
-            return Err(ENOSYS);
-        }
-        let source_node_id = self.remember_node(old_path)?;
+        let source_is_directory = source_inode.file_type().is_dir();
+        self.remember_node(old_path)?;
 
         let destination =
             match new_parent.get_entry(DirEntryName::try_from(new_name).map_err(|_| EINVAL)?) {
+                Ok(inode) if source_is_directory && inode.file_type().is_dir() => {
+                    return Err(ENOTEMPTY);
+                }
+                Ok(_) if source_is_directory => return Err(ENOTDIR),
                 Ok(inode) if inode.file_type().is_dir() => return Err(EISDIR),
                 Ok(inode) => {
                     let node_id = self.remember_node(new_path)?;
@@ -488,6 +490,40 @@ impl FilesystemService {
                 Err(Ext4Error::NotFound) => None,
                 Err(error) => return Err(errno(error)),
             };
+        if source_is_directory {
+            if old_parent_path != new_parent_path {
+                return Err(ENOSYS);
+            }
+            let parent_links = new_parent.inode().links_count();
+            new_parent
+                .link(
+                    DirEntryName::try_from(new_name).map_err(|_| EINVAL)?,
+                    &mut source_inode,
+                )
+                .map_err(errno)?;
+            new_parent.inode_mut().set_links_count(parent_links);
+            if let Err(error) = new_parent.inode_mut().write(&self.fs) {
+                let _ = new_parent.unlink(
+                    DirEntryName::try_from(new_name).map_err(|_| EINVAL)?,
+                    source_inode,
+                );
+                new_parent.inode_mut().set_links_count(parent_links);
+                let _ = new_parent.inode_mut().write(&self.fs);
+                return Err(errno(error));
+            }
+            if let Err(error) = old_parent.unlink(
+                DirEntryName::try_from(old_name).map_err(|_| EINVAL)?,
+                source_inode.clone(),
+            ) {
+                let _ = new_parent.unlink(
+                    DirEntryName::try_from(new_name).map_err(|_| EINVAL)?,
+                    source_inode,
+                );
+                return Err(errno(error));
+            }
+            self.rename_node_paths(old_path, new_path);
+            return Ok(self.success(request));
+        }
         let backup_name = format!(".mochios-orphan-rename-{}", request.request_id);
         if let Some((_, mut destination_inode)) = destination.clone() {
             new_parent
@@ -551,9 +587,7 @@ impl FilesystemService {
                 self.nodes.remove(&destination_node_id);
             }
         }
-        self.node_ids.remove(old_path);
-        self.node_ids.insert(new_path.to_owned(), source_node_id);
-        self.nodes.insert(source_node_id, new_path.to_owned());
+        self.rename_node_paths(old_path, new_path);
         Ok(self.success(request))
     }
 
@@ -687,6 +721,25 @@ impl FilesystemService {
         self.nodes.insert(node_id, path.to_owned());
         self.node_ids.insert(path.to_owned(), node_id);
         Ok(node_id)
+    }
+
+    fn rename_node_paths(&mut self, old_path: &str, new_path: &str) {
+        let updates: Vec<(String, String, u64)> = self
+            .node_ids
+            .iter()
+            .filter_map(|(path, node_id)| {
+                let suffix = path.strip_prefix(old_path)?;
+                if !suffix.is_empty() && !suffix.starts_with('/') {
+                    return None;
+                }
+                Some((path.clone(), format!("{new_path}{suffix}"), *node_id))
+            })
+            .collect();
+        for (old, new, node_id) in updates {
+            self.node_ids.remove(&old);
+            self.node_ids.insert(new.clone(), node_id);
+            self.nodes.insert(node_id, new);
+        }
     }
 }
 
