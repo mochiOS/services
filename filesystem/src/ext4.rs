@@ -5,9 +5,16 @@ use ext4plus::{Ext4Read, Ext4Write};
 
 use crate::storage::{PartitionIo, SectorDevice};
 
-#[derive(Clone)]
 pub struct Ext4Storage<D> {
     partition: Arc<PartitionIo<D>>,
+}
+
+impl<D> Clone for Ext4Storage<D> {
+    fn clone(&self) -> Self {
+        Self {
+            partition: self.partition.clone(),
+        }
+    }
 }
 
 impl<D> Ext4Storage<D> {

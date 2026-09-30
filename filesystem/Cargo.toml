@@ -3,11 +3,20 @@ name = "filesystem-service"
 version = "0.1.0"
 edition = "2024"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mochios"))'] }
+
 [dependencies]
 ext4plus = { git = "https://github.com/arihant2math/ext4plus", rev = "382b9e0a65a4b5155015992aee74ff2a798764f8", default-features = false, features = ["multi-threaded", "sync"] }
-
-[target.'cfg(target_os = "mochios")'.dependencies]
 mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }
+mochios-filesystem-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-filesystem-protocol" }
 
 [lib]
 path = "src/lib.rs"
+
+[[bin]]
+name = "filesystem-service"
+path = "src/main.rs"
+test = false
+bench = false
+harness = false

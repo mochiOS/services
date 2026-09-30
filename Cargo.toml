@@ -32,4 +32,5 @@ mnu-abi = { git = "https://github.com/mochiOS/mnu", package = "mnu-abi" }
 mboot-protocol = { path = "mboot-protocol" }
 
 [patch."https://github.com/mochiOS/syscalls"]
+mochios-filesystem-protocol = { path = "../user/crates/filesystem-protocol" }
 mochios-workspace-protocol = { path = "../user/crates/workspace-protocol" }

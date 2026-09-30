@@ -856,6 +856,7 @@ version = "0.1.0"
 dependencies = [
  "ext4plus",
  "mochi-user-platform",
+ "mochios-filesystem-protocol",
 ]
 
 [[package]]
@@ -1594,6 +1595,10 @@ dependencies = [
 name = "mochios-driver-control-protocol"
 version = "0.1.0"
 source = "git+https://github.com/mochiOS/syscalls#f3d47473a53e605fcc4deff1b42df8f5b578e6c9"
+
+[[package]]
+name = "mochios-filesystem-protocol"
+version = "0.1.0"
 
 [[package]]
 name = "mochios-http-client"
