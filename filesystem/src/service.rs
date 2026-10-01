@@ -4,7 +4,7 @@ use std::time::Duration;
 use ext4plus::dir::Dir;
 use ext4plus::error::Ext4Error;
 use ext4plus::file::File;
-use ext4plus::inode::{InodeCreationOptions, InodeFlags, InodeMode};
+use ext4plus::inode::{Inode, InodeCreationOptions, InodeFlags, InodeMode};
 use ext4plus::path::PathBuf;
 use ext4plus::{DirEntryName, Ext4, FileType, FollowSymlinks, Metadata};
 use mochios_filesystem_protocol as protocol;
@@ -469,7 +469,7 @@ impl FilesystemService {
             )
             .map_err(errno)?;
         let mut old_parent = Dir::open_inode(&self.fs, old_parent_inode).map_err(errno)?;
-        let mut new_parent = Dir::open_inode(&self.fs, new_parent_inode).map_err(errno)?;
+        let mut new_parent = Dir::open_inode(&self.fs, new_parent_inode.clone()).map_err(errno)?;
         let mut source_inode = old_parent
             .get_entry(DirEntryName::try_from(old_name).map_err(|_| EINVAL)?)
             .map_err(errno)?;
@@ -491,8 +491,60 @@ impl FilesystemService {
                 Err(error) => return Err(errno(error)),
             };
         if source_is_directory {
+            if self.directory_is_at_or_below(&source_inode, new_parent_inode)? {
+                return Err(EINVAL);
+            }
             if old_parent_path != new_parent_path {
-                return Err(ENOSYS);
+                if source_inode.links_count() < 2 {
+                    return Err(EIO);
+                }
+                let old_parent_links = old_parent.inode().links_count();
+                let new_parent_links = new_parent.inode().links_count();
+                let new_name = DirEntryName::try_from(new_name).map_err(|_| EINVAL)?;
+                let old_name = DirEntryName::try_from(old_name).map_err(|_| EINVAL)?;
+
+                new_parent
+                    .link(new_name, &mut source_inode)
+                    .map_err(errno)?;
+                let mut moved_directory =
+                    Dir::open_inode(&self.fs, source_inode.clone()).map_err(errno)?;
+                if let Err(error) = moved_directory.set_parent(new_parent.inode()) {
+                    let _ = new_parent.unlink(new_name, source_inode);
+                    new_parent.inode_mut().set_links_count(new_parent_links);
+                    let _ = new_parent.inode_mut().write(&self.fs);
+                    return Err(errno(error));
+                }
+
+                let mut moved_inode = match old_parent.unlink(old_name, source_inode.clone()) {
+                    Ok(Some(inode)) => inode,
+                    Ok(None) => return Err(EIO),
+                    Err(error) => {
+                        let _ = moved_directory.set_parent(old_parent.inode());
+                        let _ = new_parent.unlink(new_name, source_inode);
+                        new_parent.inode_mut().set_links_count(new_parent_links);
+                        let _ = new_parent.inode_mut().write(&self.fs);
+                        return Err(errno(error));
+                    }
+                };
+                let Some(old_parent_links) = old_parent_links.checked_sub(1) else {
+                    let _ = old_parent.link(old_name, &mut moved_inode);
+                    let _ = moved_directory.set_parent(old_parent.inode());
+                    let _ = new_parent.unlink(new_name, moved_inode);
+                    new_parent.inode_mut().set_links_count(new_parent_links);
+                    let _ = new_parent.inode_mut().write(&self.fs);
+                    return Err(EIO);
+                };
+                old_parent.inode_mut().set_links_count(old_parent_links);
+                if let Err(error) = old_parent.inode_mut().write(&self.fs) {
+                    let _ = old_parent.link(old_name, &mut moved_inode);
+                    let _ = moved_directory.set_parent(old_parent.inode());
+                    let _ = new_parent.unlink(new_name, moved_inode);
+                    new_parent.inode_mut().set_links_count(new_parent_links);
+                    let _ = new_parent.inode_mut().write(&self.fs);
+                    return Err(errno(error));
+                }
+                self.rename_node_paths(old_path, new_path);
+                return Ok(self.success(request));
             }
             let parent_links = new_parent.inode().links_count();
             new_parent
@@ -610,6 +662,27 @@ impl FilesystemService {
         if parent.link(name, &mut inode).is_ok() {
             let _ = parent.unlink(backup_name, inode);
         }
+    }
+
+    fn directory_is_at_or_below(
+        &self,
+        ancestor: &Inode,
+        mut directory: Inode,
+    ) -> Result<bool, i32> {
+        for _ in 0..protocol::MAX_PATH_LEN {
+            if directory.index == ancestor.index {
+                return Ok(true);
+            }
+            let parent = Dir::open_inode(&self.fs, directory.clone())
+                .map_err(errno)?
+                .get_entry(DirEntryName::try_from("..").map_err(|_| EIO)?)
+                .map_err(errno)?;
+            if parent.index == directory.index {
+                return Ok(false);
+            }
+            directory = parent;
+        }
+        Err(EIO)
     }
 
     fn truncate(&mut self, request: protocol::Header) -> Result<Response, i32> {
