@@ -350,15 +350,25 @@ impl FilesystemService {
                     return Err(ENOTEMPTY);
                 }
             }
+            let original_parent_links = parent.inode().links_count();
+            let parent_links = original_parent_links.checked_sub(1).ok_or(EIO)?;
+            parent.inode_mut().set_links_count(parent_links);
+            parent.inode_mut().write(&self.fs).map_err(errno)?;
             let original_links = inode.links_count();
             inode.set_links_count(1);
-            inode.write(&self.fs).map_err(errno)?;
+            if let Err(error) = inode.write(&self.fs) {
+                parent.inode_mut().set_links_count(original_parent_links);
+                let _ = parent.inode_mut().write(&self.fs);
+                return Err(errno(error));
+            }
             if let Err(error) = parent.unlink(
                 DirEntryName::try_from(name).map_err(|_| EINVAL)?,
                 inode.clone(),
             ) {
                 inode.set_links_count(original_links);
                 let _ = inode.write(&self.fs);
+                parent.inode_mut().set_links_count(original_parent_links);
+                let _ = parent.inode_mut().write(&self.fs);
                 return Err(errno(error));
             }
             if let Some(node_id) = self.node_ids.remove(path) {
