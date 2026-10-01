@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt;
 
-use mochi_user_platform::storage::{self, StorageControlRequest};
+use mochi_user_platform::storage;
 
 use crate::storage::SectorDevice;
 
@@ -15,6 +15,12 @@ pub struct MochiStorageError(i64);
 impl fmt::Display for MochiStorageError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "mochiOS storage error {}", self.0)
+    }
+}
+
+impl MochiStorageError {
+    pub const fn is_not_found(self) -> bool {
+        self.0 == -2
     }
 }
 
@@ -57,37 +63,62 @@ impl SectorDevice for MochiDisk {
 }
 
 pub fn find_data_partition(disk_id: u32) -> Result<(u64, u64), MochiStorageError> {
-    for ordinal in 0..128 {
-        let guids = storage::control(StorageControlRequest {
-            operation: storage::STORAGE_CONTROL_INSPECT,
-            device_id: disk_id,
-            arguments: [storage::STORAGE_QUERY_PARTITION_GUIDS, ordinal, 0, 0],
-            ..Default::default()
-        })
-        .map_err(|error| MochiStorageError(error.raw()))?;
-        if guids.status == storage::STORAGE_STATUS_END {
+    const GPT_SIGNATURE: &[u8; 8] = b"EFI PART";
+    const MAX_PARTITIONS: u32 = 128;
+
+    let mut disk = MochiDisk::new(disk_id);
+    let mut header = [0u8; 512];
+    disk.read_sectors(1, &mut header)?;
+    if &header[..8] != GPT_SIGNATURE {
+        return Err(MochiStorageError(-22));
+    }
+    let entries_lba = read_u64(&header, 72).ok_or(MochiStorageError(-22))?;
+    let entry_count = read_u32(&header, 80).ok_or(MochiStorageError(-22))?;
+    let entry_size = read_u32(&header, 84).ok_or(MochiStorageError(-22))?;
+    if entries_lba == 0 || entry_count == 0 || !(128..=512).contains(&entry_size) {
+        return Err(MochiStorageError(-22));
+    }
+
+    let mut sectors = [0u8; 1024];
+    for ordinal in 0..entry_count.min(MAX_PARTITIONS) {
+        let byte_offset = u64::from(ordinal)
+            .checked_mul(u64::from(entry_size))
+            .ok_or(MochiStorageError(-22))?;
+        let sector_offset = byte_offset / 512;
+        let offset_in_sector = (byte_offset % 512) as usize;
+        disk.read_sectors(
+            entries_lba
+                .checked_add(sector_offset)
+                .ok_or(MochiStorageError(-22))?,
+            &mut sectors,
+        )?;
+        let end = offset_in_sector
+            .checked_add(entry_size as usize)
+            .filter(|end| *end <= sectors.len())
+            .ok_or(MochiStorageError(-22))?;
+        let entry = &sectors[offset_in_sector..end];
+        if entry[..16].iter().all(|byte| *byte == 0) {
             break;
         }
-        if guids.status != storage::STORAGE_STATUS_OK {
-            return Err(MochiStorageError(-(guids.status as i64)));
-        }
-        let mut partition_type = [0u8; 16];
-        partition_type[..8].copy_from_slice(&guids.values[0].to_le_bytes());
-        partition_type[8..].copy_from_slice(&guids.values[1].to_le_bytes());
-        if partition_type != DATA_PARTITION_TYPE {
+        if entry[..16] != DATA_PARTITION_TYPE {
             continue;
         }
-        let range = storage::control(StorageControlRequest {
-            operation: storage::STORAGE_CONTROL_INSPECT,
-            device_id: disk_id,
-            arguments: [storage::STORAGE_QUERY_PARTITION_RANGE, ordinal, 0, 0],
-            ..Default::default()
-        })
-        .map_err(|error| MochiStorageError(error.raw()))?;
-        if range.status != storage::STORAGE_STATUS_OK || range.values[1] == 0 {
-            return Err(MochiStorageError(-(range.status as i64)));
-        }
-        return Ok((range.values[0], range.values[1]));
+        let first_lba = read_u64(entry, 32).ok_or(MochiStorageError(-22))?;
+        let last_lba = read_u64(entry, 40).ok_or(MochiStorageError(-22))?;
+        let sector_count = last_lba
+            .checked_sub(first_lba)
+            .and_then(|span| span.checked_add(1))
+            .filter(|count| *count != 0)
+            .ok_or(MochiStorageError(-22))?;
+        return Ok((first_lba, sector_count));
     }
     Err(MochiStorageError(-2))
+}
+
+fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(bytes.get(offset..offset + 4)?.try_into().ok()?))
+}
+
+fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(bytes.get(offset..offset + 8)?.try_into().ok()?))
 }

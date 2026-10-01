@@ -18,6 +18,18 @@ fn main() {
     };
     let (first_lba, sector_count) = match find_data_partition(0) {
         Ok(range) => range,
+        Err(error)
+            if error.is_not_found()
+                && platform::boot::system_slot().ok().is_none_or(|slot| slot == 0) =>
+        {
+            platform::logln!(
+                "filesystem.service: legacy image has no Data partition; retaining CExt root"
+            );
+            let _ = platform::service_ready::notify(ready_target, 0);
+            loop {
+                platform::thread::yield_now();
+            }
+        }
         Err(error) => {
             platform::logln!("filesystem.service: Data partition discovery failed: {error}");
             let _ = platform::service_ready::notify(ready_target, -1);
