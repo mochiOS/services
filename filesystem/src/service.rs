@@ -495,7 +495,7 @@ impl FilesystemService {
                 return Err(EINVAL);
             }
             if old_parent_path != new_parent_path {
-                if source_inode.links_count() < 2 {
+                if source_inode.links_count() == 0 {
                     return Err(EIO);
                 }
                 let old_parent_links = old_parent.inode().links_count();
