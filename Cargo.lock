@@ -1531,12 +1531,12 @@ dependencies = [
 [[package]]
 name = "mnu-abi"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/mnu#c6c7df8a4e3d244da33a3022a7522aff1982d941"
+source = "git+https://github.com/mochiOS/mnu#624b32ddef0eccf129c579f48586e9e1944b2472"
 
 [[package]]
 name = "mochi-user-platform"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#f3d47473a53e605fcc4deff1b42df8f5b578e6c9"
+source = "git+https://github.com/mochiOS/syscalls#2b416dde916687d7496d80961375a705472858f6"
 dependencies = [
  "mboot-protocol",
  "mnu-abi",
@@ -1548,7 +1548,7 @@ dependencies = [
 [[package]]
 name = "mochi-user-syscall"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#f3d47473a53e605fcc4deff1b42df8f5b578e6c9"
+source = "git+https://github.com/mochiOS/syscalls#2b416dde916687d7496d80961375a705472858f6"
 dependencies = [
  "mnu-abi",
 ]
@@ -1560,12 +1560,12 @@ version = "0.1.0"
 [[package]]
 name = "mochios-capability-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#f3d47473a53e605fcc4deff1b42df8f5b578e6c9"
+source = "git+https://github.com/mochiOS/syscalls#2b416dde916687d7496d80961375a705472858f6"
 
 [[package]]
 name = "mochios-certificate"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#f3d47473a53e605fcc4deff1b42df8f5b578e6c9"
+source = "git+https://github.com/mochiOS/syscalls#2b416dde916687d7496d80961375a705472858f6"
 dependencies = [
  "ed25519-dalek",
  "sha2",
@@ -1574,7 +1574,7 @@ dependencies = [
 [[package]]
 name = "mochios-certificate-database"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#f3d47473a53e605fcc4deff1b42df8f5b578e6c9"
+source = "git+https://github.com/mochiOS/syscalls#2b416dde916687d7496d80961375a705472858f6"
 dependencies = [
  "sha2",
 ]
@@ -1593,7 +1593,7 @@ dependencies = [
 [[package]]
 name = "mochios-driver-control-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#f3d47473a53e605fcc4deff1b42df8f5b578e6c9"
+source = "git+https://github.com/mochiOS/syscalls#2b416dde916687d7496d80961375a705472858f6"
 
 [[package]]
 name = "mochios-filesystem-protocol"
@@ -1602,7 +1602,7 @@ version = "0.1.0"
 [[package]]
 name = "mochios-http-client"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#f3d47473a53e605fcc4deff1b42df8f5b578e6c9"
+source = "git+https://github.com/mochiOS/syscalls#2b416dde916687d7496d80961375a705472858f6"
 
 [[package]]
 name = "mochios-linux-gui-protocol"
@@ -1612,7 +1612,7 @@ source = "git+https://github.com/mochiOS/syscalls?rev=814cb3f1f5e0dab5fc199f1de5
 [[package]]
 name = "mochios-linux-portal-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#f3d47473a53e605fcc4deff1b42df8f5b578e6c9"
+source = "git+https://github.com/mochiOS/syscalls#2b416dde916687d7496d80961375a705472858f6"
 
 [[package]]
 name = "mochios-mdriver-protocol"
@@ -1621,12 +1621,12 @@ version = "0.1.0"
 [[package]]
 name = "mochios-net-device-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#f3d47473a53e605fcc4deff1b42df8f5b578e6c9"
+source = "git+https://github.com/mochiOS/syscalls#2b416dde916687d7496d80961375a705472858f6"
 
 [[package]]
 name = "mochios-network-stack"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#f3d47473a53e605fcc4deff1b42df8f5b578e6c9"
+source = "git+https://github.com/mochiOS/syscalls#2b416dde916687d7496d80961375a705472858f6"
 
 [[package]]
 name = "mochios-permission-prompt-protocol"
@@ -1639,7 +1639,7 @@ version = "0.1.0"
 [[package]]
 name = "mochios-signature-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#f3d47473a53e605fcc4deff1b42df8f5b578e6c9"
+source = "git+https://github.com/mochiOS/syscalls#2b416dde916687d7496d80961375a705472858f6"
 
 [[package]]
 name = "mochios-system-image"
@@ -1652,7 +1652,7 @@ dependencies = [
 [[package]]
 name = "mochios-tls-client"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#f3d47473a53e605fcc4deff1b42df8f5b578e6c9"
+source = "git+https://github.com/mochiOS/syscalls#2b416dde916687d7496d80961375a705472858f6"
 dependencies = [
  "getrandom 0.2.17",
  "mochi-user-platform",
@@ -1665,22 +1665,22 @@ dependencies = [
 [[package]]
 name = "mochios-user-database"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#f3d47473a53e605fcc4deff1b42df8f5b578e6c9"
+source = "git+https://github.com/mochiOS/syscalls#2b416dde916687d7496d80961375a705472858f6"
 
 [[package]]
 name = "mochios-user-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#f3d47473a53e605fcc4deff1b42df8f5b578e6c9"
+source = "git+https://github.com/mochiOS/syscalls#2b416dde916687d7496d80961375a705472858f6"
 
 [[package]]
 name = "mochios-viewkit-gpu-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#f3d47473a53e605fcc4deff1b42df8f5b578e6c9"
+source = "git+https://github.com/mochiOS/syscalls#2b416dde916687d7496d80961375a705472858f6"
 
 [[package]]
 name = "mochios-virtio-gpu-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#f3d47473a53e605fcc4deff1b42df8f5b578e6c9"
+source = "git+https://github.com/mochiOS/syscalls#2b416dde916687d7496d80961375a705472858f6"
 
 [[package]]
 name = "mochios-workspace-protocol"
@@ -2315,7 +2315,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 [[package]]
 name = "plugkit"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/mnu#c6c7df8a4e3d244da33a3022a7522aff1982d941"
+source = "git+https://github.com/mochiOS/mnu#624b32ddef0eccf129c579f48586e9e1944b2472"
 dependencies = [
  "plugkit-macros",
  "plugkit-sys",
@@ -2324,12 +2324,12 @@ dependencies = [
 [[package]]
 name = "plugkit-macros"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/mnu#c6c7df8a4e3d244da33a3022a7522aff1982d941"
+source = "git+https://github.com/mochiOS/mnu#624b32ddef0eccf129c579f48586e9e1944b2472"
 
 [[package]]
 name = "plugkit-sys"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/mnu#c6c7df8a4e3d244da33a3022a7522aff1982d941"
+source = "git+https://github.com/mochiOS/mnu#624b32ddef0eccf129c579f48586e9e1944b2472"
 dependencies = [
  "spin 0.9.9",
 ]
@@ -3518,7 +3518,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "viewkit"
 version = "2.0.0"
-source = "git+https://github.com/mochiOS/viewkit#dc3a1eda921b2607a30a206537e8c4d8a9578e9b"
+source = "git+https://github.com/mochiOS/viewkit#c445daf62ba6cda32f1cd5b22305536fbb8a2cf0"
 dependencies = [
  "bytemuck",
  "cosmic-text",
