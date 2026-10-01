@@ -815,7 +815,6 @@ dependencies = [
 [[package]]
 name = "ext4plus"
 version = "0.1.0-rc.2"
-source = "git+https://github.com/arihant2math/ext4plus?rev=382b9e0a65a4b5155015992aee74ff2a798764f8#382b9e0a65a4b5155015992aee74ff2a798764f8"
 dependencies = [
  "async-lock",
  "async-trait",
