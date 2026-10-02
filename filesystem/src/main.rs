@@ -61,19 +61,16 @@ fn main() {
             platform::process::exit(1);
         }
     };
-    for path in [
-        "/bin",
-        "/applications",
-        "/libraries",
-        "/home",
-        "/var",
-        "/tmp",
-    ] {
-        if mount_filesystem(filesystem_id, path, path).is_err() {
-            platform::logln!("filesystem.service: mount failed: {path}");
-            let _ = platform::service_ready::notify(ready_target, -1);
-            platform::process::exit(1);
-        }
+    const COMPATIBILITY_ROOT_FILESYSTEM_ID: u64 = 1;
+    if mount_filesystem(COMPATIBILITY_ROOT_FILESYSTEM_ID, "/system", "/system").is_err() {
+        platform::logln!("filesystem.service: System mount failed");
+        let _ = platform::service_ready::notify(ready_target, -1);
+        platform::process::exit(1);
+    }
+    if mount_filesystem(filesystem_id, "/", "/").is_err() {
+        platform::logln!("filesystem.service: Data root mount failed");
+        let _ = platform::service_ready::notify(ready_target, -1);
+        platform::process::exit(1);
     }
     let mut service = FilesystemService::new(fs);
     if platform::service_ready::notify(ready_target, 0).is_err() {
