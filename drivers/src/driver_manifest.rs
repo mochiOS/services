@@ -7,15 +7,15 @@ pub(crate) struct DriverManifest {
     pub(crate) entry_path: String,
 }
 
-fn bundle_manifest_path(bundle_root: &str) -> String {
-    alloc::format!(
-        "/system/packages{}/manifest.toml",
-        bundle_root.trim_start_matches("/bin")
-    )
+fn bundle_manifest_path(bundle_root: &str) -> Option<String> {
+    let package_path = bundle_root.strip_prefix("/system/bin")?;
+    Some(alloc::format!(
+        "/system/packages{package_path}/manifest.toml"
+    ))
 }
 
 pub(crate) fn load(bundle_root: &str) -> Option<DriverManifest> {
-    let package_manifest_path = bundle_manifest_path(bundle_root);
+    let package_manifest_path = bundle_manifest_path(bundle_root)?;
     let bytes = match platform::file::read_to_end_path(&package_manifest_path) {
         Ok(bytes) => bytes,
         Err(err) => {

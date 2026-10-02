@@ -18,7 +18,7 @@ name = "i8042 Driver"
 version = "1"
 
 [[binary]]
-path = "/bin/drivers/ps2/i8042.driver/entry.elf"
+path = "/system/bin/drivers/ps2/i8042.driver/entry.elf"
 kind = "driver"
 driver_class = "input"
 api_version = 1
@@ -33,7 +33,7 @@ fn valid_manifest_contains_expected_entry() {
     };
     assert!(
         manifest
-            .binary("/bin/drivers/ps2/i8042.driver/entry.elf")
+            .binary("/system/bin/drivers/ps2/i8042.driver/entry.elf")
             .is_some()
     );
 }
@@ -58,7 +58,7 @@ fn missing_entry_is_rejected_by_entry_lookup() {
     };
     assert!(
         manifest
-            .binary("/bin/drivers/ps2/missing.driver/entry.elf")
+            .binary("/system/bin/drivers/ps2/missing.driver/entry.elf")
             .is_none()
     );
 }

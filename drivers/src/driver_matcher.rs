@@ -12,9 +12,9 @@ pub(crate) enum DriverSearchRoot {
 impl DriverSearchRoot {
     pub(crate) const fn path(self) -> &'static str {
         match self {
-            Self::Usb => "/bin/drivers/usb",
-            Self::Ps2 => "/bin/drivers/ps2",
-            Self::Network => "/bin/drivers/network",
+            Self::Usb => "/system/bin/drivers/usb",
+            Self::Ps2 => "/system/bin/drivers/ps2",
+            Self::Network => "/system/bin/drivers/network",
         }
     }
 }

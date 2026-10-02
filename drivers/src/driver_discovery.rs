@@ -17,8 +17,22 @@ pub(crate) fn roots() -> &'static [DriverSearchRoot] {
 
 fn read_dir_names(path: &str) -> Vec<String> {
     match platform::file::read_dir_names(path) {
-        Ok(names) => names,
+        Ok(names) => {
+            let message = alloc::format!(
+                "drivers.service: discovery root={} entries={}\n",
+                path,
+                names.len()
+            );
+            let _ = platform::io::stderr(message.as_bytes());
+            names
+        }
         Err(err) => {
+            let message = alloc::format!(
+                "drivers.service: discovery root={} errno={}\n",
+                path,
+                err.errno().unwrap_or(0)
+            );
+            let _ = platform::io::stderr(message.as_bytes());
             platform::logln!(
                 "drivers.service: open dir failed {} errno={}",
                 path,
