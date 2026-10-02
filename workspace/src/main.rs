@@ -13,6 +13,7 @@ const ASSOCIATIONS_READ: &str = "file-association.read";
 const ASSOCIATIONS_WRITE: &str = "file-association.write";
 const DATABASE_MAGIC: &[u8; 8] = b"MWASSOC1";
 const APPLICATIONS_ROOT: &str = "/applications";
+const SYSTEM_APPLICATIONS_ROOT: &str = "/system/applications";
 const CAPABILITY_SERVICE_NAME: &str = "capability.service";
 const COMPOSITOR_SERVICE_NAME: &str = "compositor.service";
 const FILES_ENTRY_PATH: &str = "/system/applications/Files.app/entry.elf";
@@ -1894,7 +1895,34 @@ fn matching_handlers<'a>(
 }
 
 fn installed_applications() -> Vec<InstalledApplication> {
-    let mut applications = fs::read_dir(APPLICATIONS_ROOT)
+    installed_applications_from(
+        Path::new(SYSTEM_APPLICATIONS_ROOT),
+        Path::new(APPLICATIONS_ROOT),
+    )
+}
+
+fn installed_applications_from(system_root: &Path, data_root: &Path) -> Vec<InstalledApplication> {
+    let mut applications = applications_from(system_root);
+    let mut bundle_ids = applications
+        .iter()
+        .map(|application| application.bundle_id.clone())
+        .collect::<BTreeSet<_>>();
+    applications.extend(
+        applications_from(data_root)
+            .into_iter()
+            .filter(|application| bundle_ids.insert(application.bundle_id.clone())),
+    );
+    applications.sort_by(|left, right| {
+        left.name
+            .to_ascii_lowercase()
+            .cmp(&right.name.to_ascii_lowercase())
+            .then_with(|| left.bundle_id.cmp(&right.bundle_id))
+    });
+    applications
+}
+
+fn applications_from(root: &Path) -> Vec<InstalledApplication> {
+    let mut applications = fs::read_dir(root)
         .ok()
         .into_iter()
         .flat_map(|entries| entries.filter_map(Result::ok))
@@ -1908,12 +1936,6 @@ fn installed_applications() -> Vec<InstalledApplication> {
         }
     }
     applications.retain(|application| !duplicates.contains(&application.bundle_id));
-    applications.sort_by(|left, right| {
-        left.name
-            .to_ascii_lowercase()
-            .cmp(&right.name.to_ascii_lowercase())
-            .then_with(|| left.bundle_id.cmp(&right.bundle_id))
-    });
     applications
 }
 
@@ -2466,6 +2488,60 @@ mod tests {
                 roles: protocol::ASSOCIATION_ROLE_EDIT,
             }],
         }
+    }
+
+    #[test]
+    fn system_applications_are_discovered_before_data_applications() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!(
+            "workspace-application-discovery-{}-{unique}",
+            std::process::id()
+        ));
+        let system_root = root.join("system");
+        let data_root = root.join("data");
+        let viewer = system_root.join("Viewer.app");
+        let duplicate = data_root.join("OtherViewer.app");
+        let editor = data_root.join("Editor.app");
+        for application in [&viewer, &duplicate, &editor] {
+            fs::create_dir_all(application).unwrap();
+            fs::write(application.join("entry.elf"), []).unwrap();
+        }
+        let manifest = |name: &str, bundle_id: &str, extension: &str| {
+            format!(
+                "[package]\nname = \"{name}\"\nid = \"{bundle_id}\"\n\
+                 [application]\nentry = \"entry.elf\"\ndocument_roles = [\"view\"]\n\
+                 document_extensions = [\"{extension}\"]\n"
+            )
+        };
+        fs::write(
+            viewer.join("manifest.toml"),
+            manifest("Viewer", "org.mochios.viewer", "png"),
+        )
+        .unwrap();
+        fs::write(
+            duplicate.join("manifest.toml"),
+            manifest("Other Viewer", "org.mochios.viewer", "png"),
+        )
+        .unwrap();
+        fs::write(
+            editor.join("manifest.toml"),
+            manifest("Editor", "org.example.editor", "txt"),
+        )
+        .unwrap();
+
+        let applications = installed_applications_from(&system_root, &data_root);
+        assert_eq!(applications.len(), 2);
+        assert_eq!(
+            application_by_bundle(&applications, "org.mochios.viewer")
+                .map(|application| application.entry_path.as_str()),
+            viewer.join("entry.elf").to_str()
+        );
+        assert!(application_by_bundle(&applications, "org.example.editor").is_some());
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
