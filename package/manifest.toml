@@ -14,7 +14,4 @@ requires = [
     "ipc.client",
     "ipc.server",
     "package.install",
-    "package.inspect",
-    "package.remove",
-    "package.update",
 ]
