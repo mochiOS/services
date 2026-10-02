@@ -1,11 +1,13 @@
 extern crate alloc;
 
+use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use mochi_user_platform as platform;
 use mochios_linux_gui_protocol::{
     PREPARE_BUNDLE_RESPONSE_LEN, PrepareBundleRequest, PrepareBundleResponse,
 };
+use mochios_package_protocol as package_protocol;
 use mochios_signature_protocol::{
     ErrorResponse, InstallProvenance, InstallRecord, InstallRecordView, Opcode, VerifiedResponse,
     VerifiedView, VerifyFile, decode_opcode,
@@ -18,7 +20,6 @@ const CAPABILITY_SERVICE_NAME: &str = "capability.service";
 const INSTALL_REQUEST_OPCODE: u32 = 0x494e_5354;
 const UPDATE_REQUEST_OPCODE: u32 = 0x5550_4454;
 const REMOVE_REQUEST_OPCODE: u32 = 0x524d_4f56;
-const REPLY_OK: u64 = 0;
 const O_WRONLY: u64 = 0o1;
 const O_CREAT: u64 = 0o100;
 const O_EXCL: u64 = 0o200;
@@ -133,15 +134,9 @@ fn manifest_target_path(kind: Option<&str>, package_name: &str, path: &str) -> O
     }
 }
 
-fn application_manifest_path(
-    manifest: &platform::package::PackageManifest,
-) -> Option<String> {
-    (manifest.package_kind.as_deref() == Some("application")).then(|| {
-        alloc::format!(
-            "/applications/{}.app/manifest.toml",
-            manifest.package_name
-        )
-    })
+fn application_manifest_path(manifest: &platform::package::PackageManifest) -> Option<String> {
+    (manifest.package_kind.as_deref() == Some("application"))
+        .then(|| alloc::format!("/applications/{}.app/manifest.toml", manifest.package_name))
 }
 
 fn verify_with_signature_service(
@@ -398,9 +393,7 @@ fn manifest_physical_targets(
             &manifest.package_name,
             &file.path,
         )
-        .ok_or_else(|| {
-            mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
-        })?;
+        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
         targets.push(target);
     }
     if let Some(path) = application_manifest_path(manifest) {
@@ -439,9 +432,7 @@ fn update_package_files(
     let existing_manifest_text = core::str::from_utf8(&existing_manifest_bytes)
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64))?;
     let existing_manifest = platform::package::parse_manifest(existing_manifest_text)
-        .ok_or_else(|| {
-            mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64)
-        })?;
+        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64))?;
     if manifest_physical_targets(&existing_manifest)? != manifest_physical_targets(manifest)? {
         return Err(mochi_user_syscall::SysError::from_raw(
             mochi_user_syscall::EACCES as i64,
@@ -468,12 +459,7 @@ fn update_package_files(
         verification_bytes,
         FILE_MODE_644,
     )?;
-    stage_update_file(
-        &mut staged,
-        manifest_path,
-        manifest_bytes,
-        FILE_MODE_644,
-    )?;
+    stage_update_file(&mut staged, manifest_path, manifest_bytes, FILE_MODE_644)?;
     if let Some(path) = application_manifest_path(manifest) {
         stage_update_file(&mut staged, &path, manifest_bytes, FILE_MODE_644)?;
     }
@@ -615,7 +601,8 @@ fn install_package(
     {
         diagnostic(&alloc::format!(
             "package.service: incompatible native package architecture={:?} abi={:?}",
-            manifest.package_architecture, manifest.package_abi
+            manifest.package_architecture,
+            manifest.package_abi
         ));
         return Err(mochi_user_syscall::SysError::from_raw(
             mochi_user_syscall::ENOTSUP as i64,
@@ -629,7 +616,10 @@ fn install_package(
         ));
     }
 
-    require_path_absent(&alloc::format!("/system/packages/{}/manifest.toml", manifest.package_id))?;
+    require_path_absent(&alloc::format!(
+        "/system/packages/{}/manifest.toml",
+        manifest.package_id
+    ))?;
     let package_root = alloc::format!("/var/lib/packages/{}", manifest.package_id);
     let manifest_path = alloc::format!("{}/manifest.toml", package_root);
     let bundle_manifest_path = application_manifest_path(&manifest);
@@ -942,64 +932,171 @@ enum PackageRequest {
     Install(String),
     Update(String),
     Remove(String),
+    List,
 }
 
-fn parse_package_request(buf: &[u8]) -> Result<PackageRequest, mochi_user_syscall::SysError> {
+fn invalid_request() -> mochi_user_syscall::SysError {
+    mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
+}
+
+fn parse_package_request(
+    buf: &[u8],
+) -> Result<(u64, PackageRequest, bool), mochi_user_syscall::SysError> {
+    if buf.starts_with(&package_protocol::MAGIC) {
+        let (request_id, request) =
+            package_protocol::decode_request(buf).map_err(|_| invalid_request())?;
+        let request = match request {
+            package_protocol::Request::Install(path) => PackageRequest::Install(path.to_string()),
+            package_protocol::Request::Update(path) => PackageRequest::Update(path.to_string()),
+            package_protocol::Request::Remove(package_id) => {
+                PackageRequest::Remove(package_id.to_string())
+            }
+            package_protocol::Request::List => PackageRequest::List,
+        };
+        return Ok((request_id, request, false));
+    }
     if buf.len() < 4 {
-        return Err(mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::EINVAL as i64,
-        ));
+        return Err(invalid_request());
     }
     let opcode = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
     let is_remove = match opcode {
         INSTALL_REQUEST_OPCODE | UPDATE_REQUEST_OPCODE => false,
         REMOVE_REQUEST_OPCODE => true,
         _ => {
-            return Err(mochi_user_syscall::SysError::from_raw(
-                mochi_user_syscall::EINVAL as i64,
-            ));
+            return Err(invalid_request());
         }
     };
     let value_bytes = &buf[4..];
     if value_bytes.is_empty() || value_bytes.contains(&0) {
-        return Err(mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::EINVAL as i64,
-        ));
+        return Err(invalid_request());
     }
-    let value = core::str::from_utf8(value_bytes)
-        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    let value = core::str::from_utf8(value_bytes).map_err(|_| invalid_request())?;
     if is_remove {
         if value.len() > 128
             || value == "."
             || value == ".."
-            || value.bytes().any(|byte| {
-                !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
-            })
+            || value
+                .bytes()
+                .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_')))
         {
-            return Err(mochi_user_syscall::SysError::from_raw(
-                mochi_user_syscall::EINVAL as i64,
-            ));
+            return Err(invalid_request());
         }
-        return Ok(PackageRequest::Remove(value.to_string()));
+        return Ok((0, PackageRequest::Remove(value.to_string()), true));
     }
     if !value.starts_with('/') {
-        return Err(mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::EINVAL as i64,
-        ));
+        return Err(invalid_request());
     }
     if opcode == INSTALL_REQUEST_OPCODE {
-        Ok(PackageRequest::Install(value.to_string()))
+        Ok((0, PackageRequest::Install(value.to_string()), true))
     } else {
-        Ok(PackageRequest::Update(value.to_string()))
+        Ok((0, PackageRequest::Update(value.to_string()), true))
     }
 }
 
-fn reply_status(sender: u64, result: Result<(), mochi_user_syscall::SysError>) {
-    let status = match result {
-        Ok(_) => REPLY_OK,
+fn reply_status(
+    sender: u64,
+    request_id: u64,
+    legacy: bool,
+    result: Result<(), mochi_user_syscall::SysError>,
+) {
+    let errno = match result {
+        Ok(_) => 0,
         Err(err) => err.errno().unwrap_or(mochi_user_syscall::EIO),
     };
-    let _ = platform::ipc::reply(sender, &status.to_le_bytes());
+    if legacy {
+        let _ = platform::ipc::reply(sender, &errno.to_le_bytes());
+        return;
+    }
+    let status = -i32::try_from(errno).unwrap_or(mochi_user_syscall::EIO as i32);
+    let mut reply = [0u8; package_protocol::HEADER_LEN];
+    if let Ok(length) = package_protocol::encode_status(request_id, status, &mut reply) {
+        let _ = platform::ipc::reply(sender, &reply[..length]);
+    }
+}
+
+fn collect_package_manifests(
+    path: &str,
+    built_in: bool,
+    packages: &mut BTreeMap<String, (platform::package::PackageManifest, bool)>,
+) {
+    let Ok(entries) = platform::file::read_dir_names(path) else {
+        return;
+    };
+    for name in entries {
+        let child = join_path(path, &name);
+        if name == "manifest.toml" {
+            let Ok(manifest_bytes) = platform::file::read_to_end_path(&child) else {
+                diagnostic(&alloc::format!(
+                    "package.service: ignoring invalid manifest {child}"
+                ));
+                continue;
+            };
+            let Some(manifest) = core::str::from_utf8(&manifest_bytes)
+                .ok()
+                .and_then(platform::package::parse_manifest)
+            else {
+                diagnostic(&alloc::format!(
+                    "package.service: ignoring invalid manifest {child}"
+                ));
+                continue;
+            };
+            if !built_in {
+                let verification = join_path(path, "verification.bin");
+                let verified = platform::file::read_to_end_path(&verification)
+                    .ok()
+                    .is_some_and(|bytes| {
+                        InstallRecordView::decode(&bytes).is_ok_and(|record| {
+                            record.verification.verified_package_id == manifest.package_id
+                                && record.verification.manifest_digest
+                                    == Sha256::digest(&manifest_bytes).as_slice()
+                        })
+                    });
+                if !verified {
+                    diagnostic(&alloc::format!(
+                        "package.service: ignoring inactive package {}",
+                        manifest.package_id
+                    ));
+                    continue;
+                }
+            }
+            packages
+                .entry(manifest.package_id.clone())
+                .or_insert((manifest, built_in));
+            continue;
+        }
+        collect_package_manifests(&child, built_in, packages);
+    }
+}
+
+fn reply_package_list(sender: u64, request_id: u64) -> Result<(), mochi_user_syscall::SysError> {
+    let mut packages = BTreeMap::new();
+    collect_package_manifests("/system/packages", true, &mut packages);
+    collect_package_manifests("/var/lib/packages", false, &mut packages);
+    let mut reply = Vec::new();
+    reply.resize(package_protocol::MAX_MESSAGE_LEN, 0);
+    let mut encoder = package_protocol::ListEncoder::new(request_id, &mut reply)
+        .map_err(|_| invalid_request())?;
+    for (_, (manifest, built_in)) in &packages {
+        let mut flags = 0;
+        if *built_in {
+            flags |= package_protocol::PACKAGE_FLAG_BUILT_IN;
+        } else if manifest.linux.is_none() {
+            flags |= package_protocol::PACKAGE_FLAG_REMOVABLE;
+        }
+        encoder
+            .push(package_protocol::PackageRecord {
+                package_id: &manifest.package_id,
+                name: &manifest.package_name,
+                version: &manifest.package_version,
+                kind: manifest.package_kind.as_deref().unwrap_or(""),
+                flags,
+            })
+            .map_err(|_| {
+                mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ERANGE as i64)
+            })?;
+    }
+    let length = encoder.finish().map_err(|_| invalid_request())?;
+    platform::ipc::reply(sender, &reply[..length]).map(|_| ())
 }
 
 fn rollback_removal(staged: &[(String, String)]) {
@@ -1099,7 +1196,7 @@ fn run_server() -> ! {
             platform::process::exit(1);
         }
     };
-    let mut buf = [0u8; 512];
+    let mut buf = [0u8; 8192];
     loop {
         let msg = match platform::ipc::wait(endpoint, &mut buf) {
             Ok(msg) => msg,
@@ -1110,34 +1207,54 @@ fn run_server() -> ! {
         };
         let sender = msg >> 32;
         let len = (msg & 0xffff_ffff) as usize;
-        let request = parse_package_request(&buf[..len]).and_then(|request| {
-            let required = match &request {
-                PackageRequest::Install(_) => "package.install",
-                PackageRequest::Update(_) => "package.update",
-                PackageRequest::Remove(_) => "package.remove",
-            };
-            if platform::capability::check_thread(sender, required) != Ok(1) {
-                return Err(mochi_user_syscall::SysError::from_raw(
-                    mochi_user_syscall::EACCES as i64,
+        let parsed = parse_package_request(&buf[..len]);
+        let (request_id, request, legacy) = match parsed {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                diagnostic(&alloc::format!(
+                    "package.service: invalid request errno={}",
+                    error.errno().unwrap_or(0)
                 ));
+                reply_status(sender, 0, true, Err(error));
+                continue;
             }
-            match request {
-                PackageRequest::Install(path) => {
-                    install_package(&path, PackageMutation::Install)
-                }
-                PackageRequest::Update(path) => {
-                    install_package(&path, PackageMutation::Update)
-                }
-                PackageRequest::Remove(package_id) => remove_package(&package_id),
+        };
+        let required = match &request {
+            PackageRequest::Install(_) => "package.install",
+            PackageRequest::Update(_) => "package.update",
+            PackageRequest::Remove(_) => "package.remove",
+            PackageRequest::List => "package.inspect",
+        };
+        if platform::capability::check_thread(sender, required) != Ok(1) {
+            reply_status(
+                sender,
+                request_id,
+                legacy,
+                Err(mochi_user_syscall::SysError::from_raw(
+                    mochi_user_syscall::EACCES as i64,
+                )),
+            );
+            continue;
+        }
+        if matches!(&request, PackageRequest::List) {
+            if let Err(error) = reply_package_list(sender, request_id) {
+                reply_status(sender, request_id, legacy, Err(error));
             }
-        });
+            continue;
+        }
+        let request = (|| match request {
+            PackageRequest::Install(path) => install_package(&path, PackageMutation::Install),
+            PackageRequest::Update(path) => install_package(&path, PackageMutation::Update),
+            PackageRequest::Remove(package_id) => remove_package(&package_id),
+            PackageRequest::List => unreachable!(),
+        })();
         if let Err(error) = request {
             diagnostic(&alloc::format!(
                 "package.service: install request failed errno={}",
                 error.errno().unwrap_or(0)
             ));
         }
-        reply_status(sender, request);
+        reply_status(sender, request_id, legacy, request);
     }
 }
 
