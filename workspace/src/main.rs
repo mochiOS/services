@@ -1537,6 +1537,9 @@ fn selection_matches_content_types(path: &Path, allowed: &str) -> bool {
         "md" | "markdown" => "text/markdown",
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
         "svg" => "image/svg+xml",
         "pdf" => "application/pdf",
         _ => "application/octet-stream",
@@ -2565,6 +2568,18 @@ mod tests {
         assert!(!selection_matches_content_types(
             Path::new("/home/user/image.png"),
             "text/plain"
+        ));
+        assert!(selection_matches_content_types(
+            Path::new("/home/user/photo.webp"),
+            "image/webp"
+        ));
+        assert!(selection_matches_content_types(
+            Path::new("/home/user/animation.GIF"),
+            "image/gif"
+        ));
+        assert!(selection_matches_content_types(
+            Path::new("/home/user/scan.bmp"),
+            "image/bmp"
         ));
         assert!(selection_matches_content_types(
             Path::new("/home/user/unknown.bin"),
