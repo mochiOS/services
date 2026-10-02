@@ -100,11 +100,11 @@ pub(crate) const fn fixed_service_spec(service: FixedService) -> ServiceSpec {
             "/system/packages/linux/manifest.toml",
         ),
         FixedService::Binder => ServiceSpec::isolated(
-            "/applications/Binder.app/entry.elf",
+            "/system/applications/Binder.app/entry.elf",
             "/system/packages/binder/manifest.toml",
         ),
         FixedService::Installer => ServiceSpec::isolated(
-            "/applications/Installer.app/entry.elf",
+            "/system/applications/Installer.app/entry.elf",
             "/system/packages/installer/manifest.toml",
         ),
         FixedService::Update => ServiceSpec::privileged(
@@ -218,14 +218,14 @@ mod tests {
             ),
             (
                 FixedService::Binder,
-                "/applications/Binder.app/entry.elf",
+                "/system/applications/Binder.app/entry.elf",
                 "/system/packages/binder/manifest.toml",
                 ExecutionClass::Unprivileged,
                 true,
             ),
             (
                 FixedService::Installer,
-                "/applications/Installer.app/entry.elf",
+                "/system/applications/Installer.app/entry.elf",
                 "/system/packages/installer/manifest.toml",
                 ExecutionClass::Unprivileged,
                 true,

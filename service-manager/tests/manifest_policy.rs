@@ -157,7 +157,7 @@ fn service_manifests_match_policy() {
     );
     assert_capabilities(
         BINDER_MANIFEST,
-        "/applications/Binder.app/entry.elf",
+        "/system/applications/Binder.app/entry.elf",
         &[
             "control-center.read",
             "fs.read.all",
