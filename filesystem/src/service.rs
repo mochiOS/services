@@ -236,6 +236,8 @@ impl FilesystemService {
             .map_err(errno)?;
         let mut parent = Dir::open_inode(&self.fs, parent_inode).map_err(errno)?;
         let permissions = InodeMode::from_bits_truncate((request.mode as u16) & 0x0fff);
+        let uid = request.offset as u32;
+        let gid = (request.offset >> 32) as u32;
         let (file_type, type_mode) = if request.flags == protocol::NODE_TYPE_DIRECTORY {
             (FileType::Directory, InodeMode::S_IFDIR)
         } else {
@@ -246,8 +248,8 @@ impl FilesystemService {
             .create_inode(InodeCreationOptions {
                 file_type,
                 mode: permissions | type_mode,
-                uid: 0,
-                gid: 0,
+                uid,
+                gid,
                 time: Duration::default(),
                 flags: InodeFlags::empty(),
             })
@@ -425,6 +427,8 @@ impl FilesystemService {
         }
         let target = std::str::from_utf8(target).map_err(|_| EINVAL)?;
         let link_path = decode_path(link_path)?;
+        let uid = u32::try_from(request.node_id).map_err(|_| EINVAL)?;
+        let gid = u32::try_from(request.open_id).map_err(|_| EINVAL)?;
         let (parent_path, name) = split_parent(link_path)?;
         match self.fs.symlink_metadata(link_path) {
             Ok(_) => return Err(EEXIST),
@@ -445,8 +449,8 @@ impl FilesystemService {
                 &mut parent,
                 DirEntryName::try_from(name).map_err(|_| EINVAL)?,
                 PathBuf::try_from(target).map_err(|_| EINVAL)?,
-                0,
-                0,
+                uid,
+                gid,
                 Duration::default(),
             )
             .map_err(errno)?;
@@ -532,11 +536,7 @@ impl FilesystemService {
                 return Err(error);
             }
             if let Some((destination_node_id, destination_inode)) = destination {
-                self.remove_replaced_directory(
-                    &mut new_parent,
-                    &backup_name,
-                    destination_inode,
-                )?;
+                self.remove_replaced_directory(&mut new_parent, &backup_name, destination_inode)?;
                 self.node_ids.remove(new_path);
                 self.nodes.remove(&destination_node_id);
             }
@@ -716,8 +716,7 @@ impl FilesystemService {
         new_parent
             .link(new_name, &mut source_inode)
             .map_err(errno)?;
-        let mut moved_directory =
-            Dir::open_inode(&self.fs, source_inode.clone()).map_err(errno)?;
+        let mut moved_directory = Dir::open_inode(&self.fs, source_inode.clone()).map_err(errno)?;
         if let Err(error) = moved_directory.set_parent(new_parent.inode()) {
             let _ = new_parent.unlink(new_name, source_inode);
             new_parent.inode_mut().set_links_count(new_parent_links);
@@ -841,11 +840,7 @@ impl FilesystemService {
         Ok(response)
     }
 
-    fn set_attr(
-        &self,
-        request: protocol::Header,
-        payload: &[u8],
-    ) -> Result<Response, i32> {
+    fn set_attr(&self, request: protocol::Header, payload: &[u8]) -> Result<Response, i32> {
         let path = decode_path(payload)?;
         let supported = protocol::SETATTR_MODE | protocol::SETATTR_UID | protocol::SETATTR_GID;
         if request.flags == 0 || request.flags & !supported != 0 {
@@ -853,10 +848,7 @@ impl FilesystemService {
         }
         let mut inode = self
             .fs
-            .path_to_inode(
-                path.try_into().map_err(|_| EINVAL)?,
-                FollowSymlinks::All,
-            )
+            .path_to_inode(path.try_into().map_err(|_| EINVAL)?, FollowSymlinks::All)
             .map_err(errno)?;
         if request.flags & protocol::SETATTR_MODE != 0 {
             let file_type = inode.mode().bits() & 0xf000;
