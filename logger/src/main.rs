@@ -1,9 +1,65 @@
 extern crate alloc;
 
-use alloc::string::String;
+use alloc::{collections::VecDeque, string::String, vec::Vec};
 use mochi_user_platform as platform;
 
 const LOG_ROOT: &str = "/var/log/services";
+const MAX_PENDING_BYTES: usize = 256 * 1024;
+
+struct PendingLogs {
+    lines: VecDeque<Vec<u8>>,
+    bytes: usize,
+    last_error: Option<i64>,
+    overflow_reported: bool,
+}
+
+impl PendingLogs {
+    const fn new() -> Self {
+        Self {
+            lines: VecDeque::new(),
+            bytes: 0,
+            last_error: None,
+            overflow_reported: false,
+        }
+    }
+
+    fn push(&mut self, line: &[u8]) {
+        while self.bytes.saturating_add(line.len()) > MAX_PENDING_BYTES {
+            let Some(discarded) = self.lines.pop_front() else {
+                break;
+            };
+            self.bytes = self.bytes.saturating_sub(discarded.len());
+            if !self.overflow_reported {
+                let _ = platform::write_fmt(
+                    platform::io::STDERR,
+                    format_args!("logger.service: pending log buffer overflow\n"),
+                );
+                self.overflow_reported = true;
+            }
+        }
+        if line.len() <= MAX_PENDING_BYTES {
+            self.bytes += line.len();
+            self.lines.push_back(line.to_vec());
+        }
+    }
+
+    fn persist(&mut self) {
+        while let Some(line) = self.lines.front() {
+            if let Err(error) = append_log_line(line) {
+                let raw = error.raw();
+                if self.last_error != Some(raw) {
+                    report_persistence_error(error);
+                    self.last_error = Some(raw);
+                }
+                return;
+            }
+            self.bytes = self.bytes.saturating_sub(line.len());
+            self.lines.pop_front();
+            self.last_error = None;
+            self.overflow_reported = false;
+        }
+    }
+}
 
 fn parse_decimal_u64(bytes: &[u8]) -> Option<u64> {
     if bytes.is_empty() {
@@ -139,17 +195,23 @@ fn main() {
     let _ = platform::ipc::send(bootstrap_endpoint, &bytes);
 
     let mut buf = [0u8; 512];
+    let mut pending = PendingLogs::new();
     loop {
         let Ok(msg) = platform::ipc::wait(log_endpoint, &mut buf) else {
             platform::thread::yield_now();
             continue;
         };
         let len = (msg & 0xffff_ffff) as usize;
-        if len == 0 {
+        if len == 0 || len > buf.len() {
             continue;
         }
-        if let Err(error) = append_log_line(&buf[..len]) {
-            report_persistence_error(error);
+        if core::str::from_utf8(&buf[..len]).is_err() {
+            report_persistence_error(platform::syscall::SysError::from_raw(
+                platform::syscall::EINVAL as i64,
+            ));
+            continue;
         }
+        pending.push(&buf[..len]);
+        pending.persist();
     }
 }
