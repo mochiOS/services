@@ -6,6 +6,10 @@ fn main() {
 
     let _ = platform::logger::init_from_env();
     platform::logln!("posix.service: start");
+    let Some(ready_target) = platform::service_ready::take_bootstrap_target() else {
+        platform::logln!("posix.service: missing ready target");
+        platform::process::exit(1);
+    };
     let endpoint = match platform::ipc::create() {
         Ok(endpoint) => endpoint,
         Err(error) => {
@@ -13,6 +17,13 @@ fn main() {
             platform::process::exit(1);
         }
     };
+    if let Err(error) = platform::service_ready::notify_endpoint(ready_target, 0, endpoint) {
+        platform::logln!(
+            "posix.service: endpoint publication failed errno={}",
+            error.raw()
+        );
+        platform::process::exit(1);
+    }
     platform::logln!("posix.service: endpoint={endpoint}");
 
     let mut service = PosixService::new();

@@ -1554,7 +1554,6 @@ source = "git+https://github.com/mochiOS/mnu#829522f5737b96a50140961cdede2845180
 [[package]]
 name = "mochi-user-platform"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#49f2103e4dfa44caf331b6eaf426e4e5175b45a9"
 dependencies = [
  "mboot-protocol",
  "mnu-abi",
