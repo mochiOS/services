@@ -69,6 +69,7 @@ impl Runtime {
                 platform::logln!("service-manager.service: {} ready", service.name());
                 if service == ReadyService::Binder {
                     eprintln!("service-manager.service: Binder.app ready");
+                    let _ = platform::logger::flush_pending();
                 }
                 true
             }

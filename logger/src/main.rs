@@ -221,6 +221,7 @@ fn main() {
 
     let mut buf = [0u8; 512];
     let mut pending = PendingLogs::new();
+    let mut persistence_enabled = false;
     loop {
         let Ok(msg) = platform::ipc::wait(log_endpoint, &mut buf) else {
             platform::thread::yield_now();
@@ -230,6 +231,11 @@ fn main() {
         if len == 0 || len > buf.len() {
             continue;
         }
+        if len == 1 && buf[0] == 0 {
+            persistence_enabled = true;
+            pending.persist();
+            continue;
+        }
         if core::str::from_utf8(&buf[..len]).is_err() {
             report_persistence_error(platform::syscall::SysError::from_raw(
                 platform::syscall::EINVAL as i64,
@@ -237,6 +243,8 @@ fn main() {
             continue;
         }
         pending.push(&buf[..len]);
-        pending.persist();
+        if persistence_enabled {
+            pending.persist();
+        }
     }
 }
