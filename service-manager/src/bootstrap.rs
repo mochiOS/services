@@ -67,6 +67,9 @@ impl Runtime {
         match result {
             Ok(()) => {
                 platform::logln!("service-manager.service: {} ready", service.name());
+                if service == ReadyService::Binder {
+                    eprintln!("service-manager.service: Binder.app ready");
+                }
                 true
             }
             Err(error) => {
@@ -325,12 +328,22 @@ impl BootstrapOperations for Runtime {
         if service == FixedService::Workspace {
             return self.spawn_workspace_session(identity, session_id);
         }
+        let ready_target = if service == FixedService::Binder {
+            if !self.ensure_ready_handshake() {
+                return None;
+            }
+            self.ready
+                .as_ref()
+                .map(|handshake| handshake.target(ReadyService::Binder))
+        } else {
+            None
+        };
         match service_launcher::spawn_user_session(
             service,
             self.logger_endpoint,
             identity,
             session_id,
-            None,
+            ready_target,
         ) {
             Ok(process_id) => {
                 platform::logln!(
@@ -353,6 +366,10 @@ impl BootstrapOperations for Runtime {
 
     fn wait_display_ready(&mut self, process_id: u64) -> bool {
         self.wait_ready(ReadyService::Display, process_id)
+    }
+
+    fn wait_binder_ready(&mut self, process_id: u64) -> bool {
+        self.wait_ready(ReadyService::Binder, process_id)
     }
 
     fn wait_filesystem_ready(&mut self, process_id: u64) -> bool {

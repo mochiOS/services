@@ -20,6 +20,7 @@ pub(crate) enum ReadyService {
     User,
     SecureUi,
     Workspace,
+    Binder,
 }
 
 impl ReadyService {
@@ -32,6 +33,7 @@ impl ReadyService {
             Self::User => "user.service",
             Self::SecureUi => "secure-ui.service",
             Self::Workspace => "workspace.service",
+            Self::Binder => "Binder.app",
         }
     }
 }
@@ -56,6 +58,7 @@ pub(crate) struct ReadyHandshake {
     user_token: u64,
     secure_ui_token: u64,
     workspace_token: u64,
+    binder_token: u64,
     filesystem_status: platform::service_ready::OneShotStatus,
     input_status: platform::service_ready::OneShotStatus,
     display_status: platform::service_ready::OneShotStatus,
@@ -63,6 +66,7 @@ pub(crate) struct ReadyHandshake {
     user_status: platform::service_ready::OneShotStatus,
     secure_ui_status: platform::service_ready::OneShotStatus,
     workspace_status: platform::service_ready::OneShotStatus,
+    binder_status: platform::service_ready::OneShotStatus,
     deferred: VecDeque<DeferredMessage>,
 }
 
@@ -141,6 +145,24 @@ impl ReadyHandshake {
                 workspace_token = 1;
             }
         }
+        let mut binder_token = platform::service_ready::generate_token()
+            .map_err(|error| ReadyError::Ipc(error.raw().unsigned_abs()))?;
+        if [
+            filesystem_token,
+            input_token,
+            display_token,
+            network_token,
+            user_token,
+            secure_ui_token,
+            workspace_token,
+        ]
+        .contains(&binder_token)
+        {
+            binder_token ^= 0x6969_9696_3c3c_c3c3;
+            if binder_token == 0 {
+                binder_token = 1;
+            }
+        }
         Ok(Self {
             endpoint,
             filesystem_token,
@@ -150,6 +172,7 @@ impl ReadyHandshake {
             user_token,
             secure_ui_token,
             workspace_token,
+            binder_token,
             filesystem_status: platform::service_ready::OneShotStatus::new(),
             input_status: platform::service_ready::OneShotStatus::new(),
             display_status: platform::service_ready::OneShotStatus::new(),
@@ -157,6 +180,7 @@ impl ReadyHandshake {
             user_status: platform::service_ready::OneShotStatus::new(),
             secure_ui_status: platform::service_ready::OneShotStatus::new(),
             workspace_status: platform::service_ready::OneShotStatus::new(),
+            binder_status: platform::service_ready::OneShotStatus::new(),
             deferred: VecDeque::new(),
         })
     }
@@ -174,6 +198,7 @@ impl ReadyHandshake {
             ReadyService::User => self.user_token,
             ReadyService::SecureUi => self.secure_ui_token,
             ReadyService::Workspace => self.workspace_token,
+            ReadyService::Binder => self.binder_token,
         };
         platform::service_ready::Target {
             endpoint: self.endpoint,
@@ -190,6 +215,7 @@ impl ReadyHandshake {
             ReadyService::User => self.user_status.get(),
             ReadyService::SecureUi => self.secure_ui_status.get(),
             ReadyService::Workspace => self.workspace_status.get(),
+            ReadyService::Binder => self.binder_status.get(),
         }
     }
 
@@ -208,6 +234,8 @@ impl ReadyHandshake {
             &mut self.secure_ui_status
         } else if token == self.workspace_token {
             &mut self.workspace_status
+        } else if token == self.binder_token {
+            &mut self.binder_status
         } else {
             return Err(ReadyError::InvalidMessage);
         };

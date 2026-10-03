@@ -36,6 +36,7 @@ pub(crate) enum StopReason {
     SecureUiSpawnFailed,
     SecureUiLoginFailed,
     BinderSpawnFailed,
+    BinderReadyFailed,
     InstallerSpawnFailed,
     WorkspaceSpawnFailed,
 }
@@ -95,6 +96,7 @@ pub(crate) trait BootstrapOperations {
     fn wait_network_ready(&mut self, process_id: u64) -> bool;
     fn wait_user_ready(&mut self, process_id: u64) -> bool;
     fn wait_secure_ui_login(&mut self, process_id: u64) -> Option<SessionIdentity>;
+    fn wait_binder_ready(&mut self, process_id: u64) -> bool;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -190,6 +192,9 @@ pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> Bootstra
         return outcome(children, StopReason::BinderSpawnFailed);
     };
     children.binder = Some(binder);
+    if !operations.wait_binder_ready(binder) {
+        return outcome(children, StopReason::BinderReadyFailed);
+    }
     if installation_required {
         let Some(installer) =
             operations.spawn_user_session(FixedService::Installer, identity, session_id)
@@ -245,6 +250,7 @@ mod tests {
         WaitNetwork,
         WaitUser,
         WaitSecureUiLogin,
+        WaitBinder,
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -261,6 +267,7 @@ mod tests {
         NetworkReady,
         UserReady,
         SecureUiLogin,
+        BinderReady,
     }
 
     struct FakeOperations {
@@ -388,6 +395,11 @@ mod tests {
             self.events.push(Event::WaitSecureUiLogin);
             (self.failure != Failure::SecureUiLogin).then_some(TEST_IDENTITY)
         }
+
+        fn wait_binder_ready(&mut self, _process_id: u64) -> bool {
+            self.events.push(Event::WaitBinder);
+            self.failure != Failure::BinderReady
+        }
     }
 
     fn expected_success_events() -> Vec<Event> {
@@ -414,6 +426,7 @@ mod tests {
             Event::SpawnUserSession(FixedService::Workspace, TEST_IDENTITY),
             Event::SpawnUserSession(FixedService::Linux, TEST_IDENTITY),
             Event::SpawnUserSession(FixedService::Binder, TEST_IDENTITY),
+            Event::WaitBinder,
             Event::NotifyMbootStage(MbootStage::Desktop),
             Event::WaitDiscovery,
             Event::WaitNetwork,
@@ -555,6 +568,20 @@ mod tests {
                 FixedService::Binder,
                 TEST_IDENTITY
             ))
+        );
+    }
+
+    #[test]
+    fn binder_must_present_before_desktop_is_ready() {
+        let mut operations = FakeOperations::new(Failure::BinderReady);
+        let outcome = orchestrate(&mut operations);
+        assert_eq!(outcome.reason, StopReason::BinderReadyFailed);
+        assert_eq!(outcome.children.binder, Some(17));
+        assert_eq!(operations.events.last(), Some(&Event::WaitBinder));
+        assert!(
+            !operations
+                .events
+                .contains(&Event::NotifyMbootStage(MbootStage::Desktop))
         );
     }
 
