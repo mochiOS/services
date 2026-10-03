@@ -1655,6 +1655,17 @@ name = "mochios-permission-prompt-protocol"
 version = "0.1.0"
 
 [[package]]
+name = "mochios-posix-client"
+version = "0.1.0"
+dependencies = [
+ "mochios-posix-protocol",
+]
+
+[[package]]
+name = "mochios-posix-protocol"
+version = "0.1.0"
+
+[[package]]
 name = "mochios-signature-protocol"
 version = "0.1.0"
 
@@ -2435,6 +2446,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10ab3eb7f3becc3a1cbc4f2c6f20267996cfc1a6467a873763411b136a122715"
 dependencies = [
  "portable-atomic",
+]
+
+[[package]]
+name = "posix-service"
+version = "0.1.0"
+dependencies = [
+ "mochi-user-platform",
+ "mochios-posix-client",
+ "mochios-posix-protocol",
 ]
 
 [[package]]

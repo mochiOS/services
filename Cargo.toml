@@ -15,6 +15,7 @@ members = [
     "network",
     "package",
     "permission-prompt-protocol",
+    "posix",
     "service-manager",
     "secure-ui",
     "signature",
@@ -34,6 +35,8 @@ mboot-protocol = { path = "mboot-protocol" }
 [patch."https://github.com/mochiOS/syscalls"]
 mochios-filesystem-protocol = { path = "../user/crates/filesystem-protocol" }
 mochios-workspace-protocol = { path = "../user/crates/workspace-protocol" }
+mochios-posix-protocol = { path = "../user/crates/posix-protocol" }
+mochios-posix-client = { path = "../user/crates/posix-client" }
 
 [patch."https://github.com/arihant2math/ext4plus"]
 ext4plus = { path = "third_party/ext4plus" }

@@ -1,0 +1,24 @@
+[package]
+name = "posix-service"
+version = "0.1.0"
+edition = "2024"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mochios"))'] }
+
+[dependencies]
+mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }
+mochios-posix-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-posix-protocol" }
+
+[dev-dependencies]
+mochios-posix-client = { git = "https://github.com/mochiOS/syscalls", package = "mochios-posix-client", default-features = false }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "posix-service"
+path = "src/main.rs"
+test = false
+bench = false
+harness = false

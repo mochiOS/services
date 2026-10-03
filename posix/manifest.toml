@@ -1,0 +1,16 @@
+[package]
+provenance = "built-in"
+id = "org.mochios.posix"
+name = "POSIX Service"
+version = "1"
+vendor = "mochiOS"
+
+[[binary]]
+path = "/system/services/posix.service"
+kind = "service"
+requires = [
+    "capabilities.manage",
+    "ipc.client",
+    "ipc.server",
+    "process.inspect",
+]
