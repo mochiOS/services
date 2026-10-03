@@ -75,8 +75,26 @@ struct RegisteredControlCenterCard {
 }
 
 #[derive(Debug)]
+struct OwnedFileDescriptor(i32);
+
+impl OwnedFileDescriptor {
+    fn raw(&self) -> i32 {
+        self.0
+    }
+}
+
+impl Drop for OwnedFileDescriptor {
+    fn drop(&mut self) {
+        if self.0 >= 0 {
+            let _ = platform::file::close(self.0 as u64);
+            self.0 = -1;
+        }
+    }
+}
+
+#[derive(Debug)]
 struct PendingDocument {
-    fd: i32,
+    handle: OwnedFileDescriptor,
     path: String,
     content_type: String,
 }
@@ -716,22 +734,24 @@ impl WorkspaceService {
             &document.content_type,
             &mut message,
         ) else {
+            platform::logln!("workspace.service: dropping invalid document delivery pid={process}");
+            self.pending_documents.remove(&process);
             return;
         };
         let mut handles = platform::ipc::IpcFileHandles::default();
         handles.count = 1;
         handles.handles[0] = platform::ipc::IpcFileHandle {
-            fd: document.fd,
+            fd: document.handle.raw(),
             rights: mochi_user_syscall::FILE_HANDLE_RIGHT_READ
                 | mochi_user_syscall::FILE_HANDLE_RIGHT_SEEK
-                | mochi_user_syscall::FILE_HANDLE_RIGHT_STAT,
+                | mochi_user_syscall::FILE_HANDLE_RIGHT_STAT
+                | mochi_user_syscall::IPC_FILE_HANDLE_FLAG_FRESH_OFFSET,
         };
         if platform::ipc::send_handles(endpoint, &message[..length], &handles).is_ok() {
-            if let Some(document) = self.pending_documents.remove(&process) {
-                let _ = platform::file::close(document.fd as u64);
-            }
+            self.pending_documents.remove(&process);
         } else {
             self.application_endpoints.remove(&process);
+            self.pending_documents.remove(&process);
         }
     }
 
@@ -1132,9 +1152,9 @@ impl WorkspaceService {
             );
             return;
         }
-        let canonical = match fs::canonicalize(&path) {
-            Ok(path) if path.is_file() => path,
-            Ok(_) => {
+        match platform::file::metadata(handles.handles[0].fd as u64) {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(metadata) if metadata.is_directory() => {
                 self.reply_status(
                     sender,
                     request.request_id,
@@ -1144,20 +1164,23 @@ impl WorkspaceService {
                 return;
             }
             Err(error) => {
-                self.reply_status(sender, request.request_id, -(errno(error) as i32), 0);
+                let status = error.raw().unsigned_abs();
+                self.reply_status(sender, request.request_id, -(status as i32), 0);
                 return;
             }
-        };
-        let Some(path) = canonical.to_str() else {
-            self.reply_status(
-                sender,
-                request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
-                0,
-            );
-            return;
-        };
-        let extension = canonical
+            Ok(_) => {
+                self.reply_status(
+                    sender,
+                    request.request_id,
+                    -(mochi_user_syscall::EINVAL as i32),
+                    0,
+                );
+                return;
+            }
+        }
+        // The path is display and association metadata only. The attached
+        // handle is the sole authority and remains valid across rename/unlink.
+        let extension = Path::new(&path)
             .extension()
             .and_then(|value| value.to_str())
             .unwrap_or_default()
@@ -1202,8 +1225,8 @@ impl WorkspaceService {
                 self.pending_documents.insert(
                     process_id,
                     PendingDocument {
-                        fd,
-                        path: path.to_owned(),
+                        handle: OwnedFileDescriptor(fd),
+                        path,
                         content_type,
                     },
                 );
