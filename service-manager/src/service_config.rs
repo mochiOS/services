@@ -138,7 +138,7 @@ pub(crate) fn fixed_service_arguments(
     logger_endpoint: u64,
     ready_target: Option<ReadyTarget>,
 ) -> Vec<String> {
-    if matches!(service, FixedService::Binder | FixedService::Installer) {
+    if matches!(service, FixedService::Installer) {
         return Vec::new();
     }
     let mut arguments = Vec::with_capacity(2);
@@ -311,7 +311,10 @@ mod tests {
             ),
             alloc::vec!["7".to_string(), "--service-ready=8:9".to_string()]
         );
-        assert!(fixed_service_arguments(FixedService::Binder, 7, None).is_empty());
+        assert_eq!(
+            fixed_service_arguments(FixedService::Binder, 7, None),
+            alloc::vec!["7".to_string()]
+        );
     }
 
     #[test]
