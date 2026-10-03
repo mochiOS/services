@@ -16,6 +16,7 @@ struct Runtime {
     mboot_agent: Option<(u64, u64)>,
     deferred_requests: VecDeque<DeferredMessage>,
     permission_prompt: Option<crate::portal::PermissionPromptProcess>,
+    posix_endpoint: Option<u64>,
 }
 
 impl Runtime {
@@ -27,6 +28,7 @@ impl Runtime {
             mboot_agent: None,
             deferred_requests: VecDeque::new(),
             permission_prompt: None,
+            posix_endpoint: None,
         })
     }
 
@@ -99,6 +101,7 @@ impl Runtime {
             identity,
             session_id,
             Some(target),
+            self.posix_endpoint,
         ) {
             Ok(process_id) => process_id,
             Err(error) => {
@@ -250,6 +253,14 @@ impl BootstrapOperations for Runtime {
                     .as_ref()
                     .map(|handshake| handshake.target(ReadyService::Filesystem))
             }
+            FixedService::Posix => {
+                if !self.ensure_ready_handshake() {
+                    return None;
+                }
+                self.ready
+                    .as_ref()
+                    .map(|handshake| handshake.target(ReadyService::Posix))
+            }
             FixedService::Input => {
                 if !self.ensure_ready_handshake() {
                     return None;
@@ -300,7 +311,12 @@ impl BootstrapOperations for Runtime {
             );
             return None;
         }
-        match service_launcher::spawn_fixed_service(service, self.logger_endpoint, ready_target) {
+        match service_launcher::spawn_fixed_service(
+            service,
+            self.logger_endpoint,
+            ready_target,
+            self.posix_endpoint,
+        ) {
             Ok(process_id) => {
                 platform::logln!(
                     "service-manager.service: {} spawned pid={}",
@@ -345,6 +361,7 @@ impl BootstrapOperations for Runtime {
             identity,
             session_id,
             ready_target,
+            self.posix_endpoint,
         ) {
             Ok(process_id) => {
                 platform::logln!(
@@ -375,6 +392,31 @@ impl BootstrapOperations for Runtime {
 
     fn wait_filesystem_ready(&mut self, process_id: u64) -> bool {
         self.wait_ready(ReadyService::Filesystem, process_id)
+    }
+
+    fn wait_posix_ready(&mut self, process_id: u64) -> bool {
+        platform::logln!("service-manager.service: waiting for posix.service ready");
+        let result = self
+            .ready
+            .as_mut()
+            .ok_or(ReadyError::InvalidMessage)
+            .and_then(|handshake| {
+                handshake.wait_for_endpoint_ready(ReadyService::Posix, process_id)
+            });
+        match result {
+            Ok(endpoint) => {
+                self.posix_endpoint = Some(endpoint);
+                platform::logln!(
+                    "service-manager.service: posix.service ready endpoint={}",
+                    endpoint
+                );
+                true
+            }
+            Err(error) => {
+                log_ready_error(ReadyService::Posix, error);
+                false
+            }
+        }
     }
 
     fn wait_input_ready(&mut self, process_id: u64) -> bool {
@@ -521,6 +563,7 @@ fn service_name(service: FixedService) -> &'static str {
     match service {
         FixedService::MbootAgent => "mboot-agent.service",
         FixedService::Filesystem => "filesystem.service",
+        FixedService::Posix => "posix.service",
         FixedService::Input => "input.service",
         FixedService::Display => "display.driver",
         FixedService::Compositor => "compositor.service",
@@ -709,6 +752,7 @@ fn resident(outcome: BootstrapOutcome, runtime: Option<Runtime>) -> ! {
                     identity,
                     session_id,
                     None,
+                    runtime.posix_endpoint,
                 )
                 .ok();
                 match service_launcher::spawn_user_session(
@@ -717,6 +761,7 @@ fn resident(outcome: BootstrapOutcome, runtime: Option<Runtime>) -> ! {
                     identity,
                     session_id,
                     None,
+                    runtime.posix_endpoint,
                 ) {
                     Ok(binder_pid) => {
                         active_session = Some(ActiveSession {

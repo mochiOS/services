@@ -14,6 +14,7 @@ pub(crate) struct DeferredMessage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReadyService {
     Filesystem,
+    Posix,
     Input,
     Display,
     Network,
@@ -27,6 +28,7 @@ impl ReadyService {
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Filesystem => "filesystem.service",
+            Self::Posix => "posix.service",
             Self::Input => "input.service",
             Self::Display => "display.driver",
             Self::Network => "network.service",
@@ -52,6 +54,7 @@ pub(crate) enum ReadyError {
 pub(crate) struct ReadyHandshake {
     endpoint: u64,
     filesystem_token: u64,
+    posix_token: u64,
     input_token: u64,
     display_token: u64,
     network_token: u64,
@@ -60,6 +63,8 @@ pub(crate) struct ReadyHandshake {
     workspace_token: u64,
     binder_token: u64,
     filesystem_status: platform::service_ready::OneShotStatus,
+    posix_status: platform::service_ready::OneShotStatus,
+    posix_endpoint: Option<u64>,
     input_status: platform::service_ready::OneShotStatus,
     display_status: platform::service_ready::OneShotStatus,
     network_status: platform::service_ready::OneShotStatus,
@@ -92,11 +97,20 @@ impl ReadyHandshake {
                 display_token = 1;
             }
         }
+        let mut posix_token = platform::service_ready::generate_token()
+            .map_err(|error| ReadyError::Ipc(error.raw().unsigned_abs()))?;
+        if [input_token, filesystem_token, display_token].contains(&posix_token) {
+            posix_token ^= 0x706f_7369_785f_7376;
+            if posix_token == 0 {
+                posix_token = 1;
+            }
+        }
         let mut network_token = platform::service_ready::generate_token()
             .map_err(|error| ReadyError::Ipc(error.raw().unsigned_abs()))?;
         if network_token == input_token
             || network_token == filesystem_token
             || network_token == display_token
+            || network_token == posix_token
         {
             network_token ^= 0x3c3c_c3c3_5a5a_a5a5;
             if network_token == 0 {
@@ -109,6 +123,7 @@ impl ReadyHandshake {
             || user_token == filesystem_token
             || user_token == display_token
             || user_token == network_token
+            || user_token == posix_token
         {
             user_token ^= 0x9696_6969_c3c3_3c3c;
             if user_token == 0 {
@@ -122,6 +137,7 @@ impl ReadyHandshake {
             || secure_ui_token == display_token
             || secure_ui_token == network_token
             || secure_ui_token == user_token
+            || secure_ui_token == posix_token
         {
             secure_ui_token ^= 0x5a5a_a5a5_9696_6969;
             if secure_ui_token == 0 {
@@ -132,6 +148,7 @@ impl ReadyHandshake {
             .map_err(|error| ReadyError::Ipc(error.raw().unsigned_abs()))?;
         if [
             filesystem_token,
+            posix_token,
             input_token,
             display_token,
             network_token,
@@ -149,6 +166,7 @@ impl ReadyHandshake {
             .map_err(|error| ReadyError::Ipc(error.raw().unsigned_abs()))?;
         if [
             filesystem_token,
+            posix_token,
             input_token,
             display_token,
             network_token,
@@ -166,6 +184,7 @@ impl ReadyHandshake {
         Ok(Self {
             endpoint,
             filesystem_token,
+            posix_token,
             input_token,
             display_token,
             network_token,
@@ -174,6 +193,8 @@ impl ReadyHandshake {
             workspace_token,
             binder_token,
             filesystem_status: platform::service_ready::OneShotStatus::new(),
+            posix_status: platform::service_ready::OneShotStatus::new(),
+            posix_endpoint: None,
             input_status: platform::service_ready::OneShotStatus::new(),
             display_status: platform::service_ready::OneShotStatus::new(),
             network_status: platform::service_ready::OneShotStatus::new(),
@@ -192,6 +213,7 @@ impl ReadyHandshake {
     pub(crate) const fn target(&self, service: ReadyService) -> platform::service_ready::Target {
         let token = match service {
             ReadyService::Filesystem => self.filesystem_token,
+            ReadyService::Posix => self.posix_token,
             ReadyService::Input => self.input_token,
             ReadyService::Display => self.display_token,
             ReadyService::Network => self.network_token,
@@ -209,6 +231,7 @@ impl ReadyHandshake {
     fn status(&self, service: ReadyService) -> Option<i32> {
         match service {
             ReadyService::Filesystem => self.filesystem_status.get(),
+            ReadyService::Posix => self.posix_status.get(),
             ReadyService::Input => self.input_status.get(),
             ReadyService::Display => self.display_status.get(),
             ReadyService::Network => self.network_status.get(),
@@ -222,6 +245,8 @@ impl ReadyHandshake {
     fn record(&mut self, token: u64, status: i32) -> Result<(), ReadyError> {
         let slot = if token == self.filesystem_token {
             &mut self.filesystem_status
+        } else if token == self.posix_token {
+            &mut self.posix_status
         } else if token == self.input_token {
             &mut self.input_status
         } else if token == self.display_token {
@@ -251,6 +276,54 @@ impl ReadyHandshake {
         self.wait(service, process_id, true)
     }
 
+    pub(crate) fn wait_for_endpoint_ready(
+        &mut self,
+        service: ReadyService,
+        process_id: u64,
+    ) -> Result<u64, ReadyError> {
+        if service != ReadyService::Posix {
+            return Err(ReadyError::InvalidMessage);
+        }
+        let started = current_ticks()?;
+        loop {
+            if let Some(status) = self.status(service) {
+                ready_result(status)?;
+                return self.posix_endpoint.ok_or(ReadyError::InvalidMessage);
+            }
+            if let Some(notification) = receive_notification()? {
+                match notification {
+                    ReceivedNotification::Ready { token, status } => {
+                        self.record(token, status)?;
+                    }
+                    ReceivedNotification::Endpoint {
+                        token,
+                        status,
+                        endpoint,
+                    } => {
+                        if token != self.posix_token || endpoint == 0 {
+                            return Err(ReadyError::InvalidMessage);
+                        }
+                        self.posix_endpoint = Some(endpoint);
+                        self.record(token, status)?;
+                    }
+                    ReceivedNotification::Session { .. } => {
+                        return Err(ReadyError::InvalidMessage);
+                    }
+                    ReceivedNotification::Deferred(message) => {
+                        self.deferred.push_back(message);
+                    }
+                }
+            }
+            if let Some(status) = process_exit_status(process_id)? {
+                return Err(ReadyError::ProcessExited(status));
+            }
+            if current_ticks()?.saturating_sub(started) >= ready_timeout(service) {
+                return Err(ReadyError::TimedOut);
+            }
+            platform::thread::yield_now();
+        }
+    }
+
     pub(crate) fn wait_for_login_complete(
         &mut self,
         process_id: u64,
@@ -271,6 +344,9 @@ impl ReadyHandshake {
                         }
                         ready_result(status)?;
                         return Ok(identity);
+                    }
+                    ReceivedNotification::Endpoint { .. } => {
+                        return Err(ReadyError::InvalidMessage);
                     }
                     ReceivedNotification::Deferred(message) => {
                         self.deferred.push_back(message);
@@ -303,6 +379,13 @@ impl ReadyHandshake {
                     }
                     ReceivedNotification::Session { .. } => {
                         return Err(ReadyError::InvalidMessage);
+                    }
+                    ReceivedNotification::Endpoint { token, status, endpoint } => {
+                        if token != self.posix_token || endpoint == 0 {
+                            return Err(ReadyError::InvalidMessage);
+                        }
+                        self.posix_endpoint = Some(endpoint);
+                        self.record(token, status)?;
                     }
                     ReceivedNotification::Deferred(message) => {
                         self.deferred.push_back(message);
@@ -351,6 +434,11 @@ enum ReceivedNotification {
         status: i32,
         identity: platform::service_ready::SessionIdentity,
     },
+    Endpoint {
+        token: u64,
+        status: i32,
+        endpoint: u64,
+    },
     Deferred(DeferredMessage),
 }
 
@@ -375,13 +463,26 @@ fn receive_notification() -> Result<Option<ReceivedNotification>, ReadyError> {
             }
         }
         platform::service_ready::SESSION_MESSAGE_LEN => {
-            match platform::service_ready::decode_session_notification(message) {
-                Ok((token, status, identity)) => Ok(Some(ReceivedNotification::Session {
+            if let Ok((token, status, identity)) =
+                platform::service_ready::decode_session_notification(message)
+            {
+                Ok(Some(ReceivedNotification::Session {
                     token,
                     status,
                     identity,
-                })),
-                Err(_) => Ok(Some(deferred_message(sender, message))),
+                }))
+            } else if let Ok((token, status, _advertised_endpoint)) =
+                platform::service_ready::decode_endpoint_notification(message)
+            {
+                Ok(Some(ReceivedNotification::Endpoint {
+                    token,
+                    status,
+                    // The IPC layer authenticates the sender endpoint.  Never
+                    // treat a handle claimed inside the payload as authority.
+                    endpoint: sender,
+                }))
+            } else {
+                Ok(Some(deferred_message(sender, message)))
             }
         }
         _ => Ok(Some(deferred_message(sender, message))),

@@ -6,6 +6,7 @@ pub(crate) struct ChildProcesses {
     pub(crate) drivers: Option<u64>,
     pub(crate) mboot_agent: Option<u64>,
     pub(crate) filesystem: Option<u64>,
+    pub(crate) posix: Option<u64>,
     pub(crate) input: Option<u64>,
     pub(crate) display: Option<u64>,
     pub(crate) compositor: Option<u64>,
@@ -27,6 +28,8 @@ pub(crate) enum StopReason {
     DriverHelloFailed,
     FilesystemSpawnFailed,
     FilesystemReadyFailed,
+    PosixSpawnFailed,
+    PosixReadyFailed,
     InputSpawnFailed,
     DisplaySpawnFailed,
     DisplayReadyFailed,
@@ -56,6 +59,7 @@ impl BootstrapOutcome {
                 drivers: None,
                 mboot_agent: None,
                 filesystem: None,
+                posix: None,
                 input: None,
                 display: None,
                 compositor: None,
@@ -90,6 +94,7 @@ pub(crate) trait BootstrapOperations {
     fn installation_required(&self) -> bool;
     fn wait_display_ready(&mut self, process_id: u64) -> bool;
     fn wait_filesystem_ready(&mut self, process_id: u64) -> bool;
+    fn wait_posix_ready(&mut self, process_id: u64) -> bool;
     fn wait_input_ready(&mut self, process_id: u64) -> bool;
     fn start_discovery(&mut self) -> bool;
     fn wait_discovery_complete(&mut self, process_id: u64) -> bool;
@@ -124,6 +129,13 @@ pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> Bootstra
     children.filesystem = Some(filesystem);
     if !operations.wait_filesystem_ready(filesystem) {
         return outcome(children, StopReason::FilesystemReadyFailed);
+    }
+    let Some(posix) = operations.spawn_fixed(FixedService::Posix) else {
+        return outcome(children, StopReason::PosixSpawnFailed);
+    };
+    children.posix = Some(posix);
+    if !operations.wait_posix_ready(posix) {
+        return outcome(children, StopReason::PosixReadyFailed);
     }
     children.mboot_agent = operations.spawn_mboot_agent();
     operations.notify_mboot_stage(MbootStage::Userspace);
@@ -243,6 +255,7 @@ mod tests {
         Spawn(FixedService),
         SpawnUserSession(FixedService, SessionIdentity),
         WaitFilesystem,
+        WaitPosix,
         WaitDisplay,
         WaitInput,
         StartDiscovery,
@@ -260,6 +273,7 @@ mod tests {
         Hello,
         Spawn(FixedService),
         FilesystemReady,
+        PosixReady,
         DisplayReady,
         InputReady,
         StartDiscovery,
@@ -322,6 +336,7 @@ mod tests {
             Some(match service {
                 FixedService::MbootAgent => 19,
                 FixedService::Filesystem => 23,
+                FixedService::Posix => 24,
                 FixedService::Input => 11,
                 FixedService::Display => 12,
                 FixedService::Compositor => 13,
@@ -355,6 +370,11 @@ mod tests {
         fn wait_filesystem_ready(&mut self, _process_id: u64) -> bool {
             self.events.push(Event::WaitFilesystem);
             self.failure != Failure::FilesystemReady
+        }
+
+        fn wait_posix_ready(&mut self, _process_id: u64) -> bool {
+            self.events.push(Event::WaitPosix);
+            self.failure != Failure::PosixReady
         }
 
         fn installation_required(&self) -> bool {
@@ -408,6 +428,8 @@ mod tests {
             Event::WaitHello,
             Event::Spawn(FixedService::Filesystem),
             Event::WaitFilesystem,
+            Event::Spawn(FixedService::Posix),
+            Event::WaitPosix,
             Event::SpawnMbootAgent,
             Event::NotifyMbootStage(MbootStage::Userspace),
             Event::Spawn(FixedService::Input),
@@ -441,6 +463,8 @@ mod tests {
         assert_eq!(outcome.reason, StopReason::Running);
         assert_eq!(outcome.children.drivers, Some(10));
         assert_eq!(outcome.children.mboot_agent, Some(11));
+        assert_eq!(outcome.children.filesystem, Some(23));
+        assert_eq!(outcome.children.posix, Some(24));
         assert_eq!(outcome.children.input, Some(11));
         assert_eq!(outcome.children.display, Some(12));
         assert_eq!(outcome.children.compositor, Some(13));

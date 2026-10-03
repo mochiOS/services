@@ -8,6 +8,7 @@ use crate::spawn_support::{encode_spawn_args, resolve_execution_security};
 
 const SESSION_USER_ARG_PREFIX: &str = "--session-user=";
 const LOCK_USER_ARG_PREFIX: &str = "--lock-user=";
+const POSIX_ENDPOINT_ENV: &str = "MOCHI_POSIX_ENDPOINT";
 use mnu_abi::exec::ENVIRONMENT_PREFIX;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,12 +74,14 @@ pub(crate) fn spawn_fixed_service(
     service: FixedService,
     logger_endpoint: u64,
     ready_target: Option<platform::service_ready::Target>,
+    posix_endpoint: Option<u64>,
 ) -> Result<u64, mochi_user_syscall::SysError> {
     let ready_target = ready_target.map(|target| ReadyTarget {
         endpoint: target.endpoint,
         token: target.token,
     });
-    let arguments = fixed_service_arguments(service, logger_endpoint, ready_target);
+    let mut arguments = fixed_service_arguments(service, logger_endpoint, ready_target);
+    append_posix_endpoint(&mut arguments, posix_endpoint);
     spawn(fixed_service_spec(service), &arguments)
 }
 
@@ -98,12 +101,14 @@ pub(crate) fn spawn_user_session(
     identity: platform::service_ready::SessionIdentity,
     session_id: u64,
     ready_target: Option<platform::service_ready::Target>,
+    posix_endpoint: Option<u64>,
 ) -> Result<u64, mochi_user_syscall::SysError> {
     let ready_target = ready_target.map(|target| ReadyTarget {
         endpoint: target.endpoint,
         token: target.token,
     });
     let mut arguments = fixed_service_arguments(service, logger_endpoint, ready_target);
+    append_posix_endpoint(&mut arguments, posix_endpoint);
     if let Some(user) = session_user(identity.uid) {
         arguments.push(alloc::format!("{SESSION_USER_ARG_PREFIX}{}", user.name));
         for (name, value) in [
@@ -119,6 +124,14 @@ pub(crate) fn spawn_user_session(
         ));
     }
     spawn_with_credentials(fixed_service_spec(service), &arguments, identity)
+}
+
+fn append_posix_endpoint(arguments: &mut Vec<String>, endpoint: Option<u64>) {
+    if let Some(endpoint) = endpoint.filter(|endpoint| *endpoint != 0) {
+        arguments.push(alloc::format!(
+            "{ENVIRONMENT_PREFIX}{POSIX_ENDPOINT_ENV}={endpoint}"
+        ));
+    }
 }
 
 pub(crate) fn spawn_secure_ui(

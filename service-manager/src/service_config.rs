@@ -9,6 +9,7 @@ pub(crate) const NETWORK_READY_TIMEOUT_TICKS: u64 = 30_000;
 pub(crate) enum FixedService {
     MbootAgent,
     Filesystem,
+    Posix,
     Input,
     Display,
     Compositor,
@@ -70,6 +71,10 @@ pub(crate) const fn fixed_service_spec(service: FixedService) -> ServiceSpec {
         FixedService::Filesystem => ServiceSpec::privileged(
             "/system/services/filesystem.service",
             "/system/packages/filesystem/manifest.toml",
+        ),
+        FixedService::Posix => ServiceSpec::privileged(
+            "/system/services/posix.service",
+            "/system/packages/posix/manifest.toml",
         ),
         FixedService::Input => ServiceSpec::privileged(
             "/system/services/input.service",
@@ -182,6 +187,13 @@ mod tests {
                 FixedService::Filesystem,
                 "/system/services/filesystem.service",
                 "/system/packages/filesystem/manifest.toml",
+                ExecutionClass::Privileged,
+                true,
+            ),
+            (
+                FixedService::Posix,
+                "/system/services/posix.service",
+                "/system/packages/posix/manifest.toml",
                 ExecutionClass::Privileged,
                 true,
             ),
