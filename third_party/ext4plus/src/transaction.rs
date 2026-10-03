@@ -62,7 +62,17 @@ impl Transaction {
         }
 
         let mut block = vec![0; self.fs.superblock().block_size().to_usize()];
-        self.read_from_block(block_index, 0, &mut block).await?;
+        // With block sizes larger than 1 KiB, the primary superblock shares
+        // filesystem block zero with the reserved boot area. Never read that
+        // reserved prefix into a transaction: it is not ext4 data and the
+        // normal block validator intentionally rejects access to it.
+        let start = if block_index == 0 { 1024 } else { 0 };
+        self.read_from_block(
+            block_index,
+            u32::try_from(start).unwrap(),
+            &mut block[start..],
+        )
+        .await?;
         Ok(block)
     }
 
@@ -91,7 +101,16 @@ impl Transaction {
     #[maybe_async::maybe_async]
     pub(crate) async fn commit(self) -> Result<(), Ext4Error> {
         for (block_index, block) in self.dirty_blocks {
-            self.fs.write_to_block(block_index, 0, &block).await?;
+            // Preserve the non-filesystem boot area that precedes a
+            // large-block primary superblock in block zero.
+            let start = if block_index == 0 { 1024 } else { 0 };
+            self.fs
+                .write_to_block(
+                    block_index,
+                    u32::try_from(start).unwrap(),
+                    &block[start..],
+                )
+                .await?;
         }
         Ok(())
     }

@@ -3541,7 +3541,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "viewkit"
 version = "2.0.0"
-source = "git+https://github.com/mochiOS/viewkit#2ee7090fcea401402e937742821c551a179d7231"
+source = "git+https://github.com/mochiOS/viewkit#8cf525714c9e46704c935546fdbebc8da923911d"
 dependencies = [
  "bytemuck",
  "cosmic-text",
