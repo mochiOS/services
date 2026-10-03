@@ -74,6 +74,13 @@ struct RegisteredControlCenterCard {
     body: String,
 }
 
+#[derive(Debug)]
+struct PendingDocument {
+    fd: i32,
+    path: String,
+    content_type: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct NotificationRecord {
     id: u64,
@@ -97,6 +104,7 @@ struct WorkspaceService {
     pending_file_panels: Vec<PendingFilePanel>,
     next_file_panel_token: u64,
     application_endpoints: BTreeMap<u64, u64>,
+    pending_documents: BTreeMap<u64, PendingDocument>,
     control_center_cards: BTreeMap<(String, String), RegisteredControlCenterCard>,
     notifications: Vec<NotificationRecord>,
     next_notification_id: u64,
@@ -153,6 +161,7 @@ impl WorkspaceService {
             pending_file_panels: Vec::new(),
             next_file_panel_token: 1,
             application_endpoints: BTreeMap::new(),
+            pending_documents: BTreeMap::new(),
             control_center_cards: BTreeMap::new(),
             notifications,
             next_notification_id,
@@ -163,7 +172,12 @@ impl WorkspaceService {
         }
     }
 
-    fn handle(&mut self, sender: u64, request: protocol::Message<'_>) {
+    fn handle(
+        &mut self,
+        sender: u64,
+        request: protocol::Message<'_>,
+        handles: &mut platform::ipc::IpcFileHandles,
+    ) {
         let capability = match request.opcode {
             protocol::OP_CLIPBOARD_SNAPSHOT | protocol::OP_CLIPBOARD_READ => CLIPBOARD_READ,
             protocol::OP_CLIPBOARD_SET_BEGIN
@@ -219,7 +233,7 @@ impl WorkspaceService {
             protocol::OP_ASSOCIATION_REMOVE => self.association_remove(sender, request),
             protocol::OP_ASSOCIATION_RESOLVE => self.association_resolve(sender, request),
             protocol::OP_ASSOCIATION_HANDLERS => self.association_handlers(sender, request),
-            protocol::OP_DOCUMENT_OPEN => self.document_open(sender, request),
+            protocol::OP_DOCUMENT_OPEN => self.document_open(sender, request, handles),
             protocol::OP_FILE_PANEL => self.file_panel(sender, request),
             protocol::OP_FILE_PANEL_COMPLETE => self.file_panel_complete(sender, request),
             protocol::OP_FILE_PANEL_FINISH => self.file_panel_finish(sender, request),
@@ -672,6 +686,7 @@ impl WorkspaceService {
                 if endpoint != 0 && process != 0 && process == owner =>
             {
                 self.application_endpoints.insert(process, endpoint);
+                self.deliver_pending_document(process);
                 self.reply_status(sender, request.request_id, 0, 0);
             }
             _ => self.reply_status(
@@ -680,6 +695,43 @@ impl WorkspaceService {
                 -(mochi_user_syscall::EACCES as i32),
                 0,
             ),
+        }
+    }
+
+    fn deliver_pending_document(&mut self, process: u64) {
+        let Some(endpoint) = self.application_endpoints.get(&process).copied() else {
+            return;
+        };
+        let Some(document) = self.pending_documents.get(&process) else {
+            return;
+        };
+        let mut message = vec![
+            0u8;
+            protocol::DOCUMENT_DELIVERY_PREFIX_LEN
+                + document.path.len()
+                + document.content_type.len()
+        ];
+        let Ok(length) = protocol::encode_document_delivery(
+            &document.path,
+            &document.content_type,
+            &mut message,
+        ) else {
+            return;
+        };
+        let mut handles = platform::ipc::IpcFileHandles::default();
+        handles.count = 1;
+        handles.handles[0] = platform::ipc::IpcFileHandle {
+            fd: document.fd,
+            rights: mochi_user_syscall::FILE_HANDLE_RIGHT_READ
+                | mochi_user_syscall::FILE_HANDLE_RIGHT_SEEK
+                | mochi_user_syscall::FILE_HANDLE_RIGHT_STAT,
+        };
+        if platform::ipc::send_handles(endpoint, &message[..length], &handles).is_ok() {
+            if let Some(document) = self.pending_documents.remove(&process) {
+                let _ = platform::file::close(document.fd as u64);
+            }
+        } else {
+            self.application_endpoints.remove(&process);
         }
     }
 
@@ -1047,7 +1099,12 @@ impl WorkspaceService {
         );
     }
 
-    fn document_open(&self, sender: u64, request: protocol::Message<'_>) {
+    fn document_open(
+        &mut self,
+        sender: u64,
+        request: protocol::Message<'_>,
+        handles: &mut platform::ipc::IpcFileHandles,
+    ) {
         let Some((path, content_type, requested_bundle, roles)) =
             decode_document_open(request.payload)
         else {
@@ -1059,6 +1116,22 @@ impl WorkspaceService {
             );
             return;
         };
+        let required_rights = mochi_user_syscall::FILE_HANDLE_RIGHT_READ
+            | mochi_user_syscall::FILE_HANDLE_RIGHT_SEEK
+            | mochi_user_syscall::FILE_HANDLE_RIGHT_STAT
+            | mochi_user_syscall::FILE_HANDLE_RIGHT_TRANSFER;
+        if handles.count != 1
+            || handles.handles[0].fd < 0
+            || handles.handles[0].rights & required_rights != required_rights
+        {
+            self.reply_status(
+                sender,
+                request.request_id,
+                -(mochi_user_syscall::EACCES as i32),
+                0,
+            );
+            return;
+        }
         let canonical = match fs::canonicalize(&path) {
             Ok(path) if path.is_file() => path,
             Ok(_) => {
@@ -1122,7 +1195,21 @@ impl WorkspaceService {
             return;
         };
         match launch_application(application, path) {
-            Ok(process_id) => self.reply_status(sender, request.request_id, 0, process_id),
+            Ok(process_id) => {
+                let fd = handles.handles[0].fd;
+                handles.handles[0].fd = -1;
+                handles.count = 0;
+                self.pending_documents.insert(
+                    process_id,
+                    PendingDocument {
+                        fd,
+                        path: path.to_owned(),
+                        content_type,
+                    },
+                );
+                self.deliver_pending_document(process_id);
+                self.reply_status(sender, request.request_id, 0, process_id);
+            }
             Err(status) => self.reply_status(sender, request.request_id, -(status as i32), 0),
         }
     }
@@ -2360,6 +2447,17 @@ fn errno(error: io::Error) -> u64 {
         .unwrap_or(mochi_user_syscall::EIO as i32) as u64
 }
 
+fn close_attached_handles(handles: &mut platform::ipc::IpcFileHandles) {
+    let count = (handles.count as usize).min(handles.handles.len());
+    for handle in &mut handles.handles[..count] {
+        if handle.fd >= 0 {
+            let _ = platform::file::close(handle.fd as u64);
+            handle.fd = -1;
+        }
+    }
+    handles.count = 0;
+}
+
 fn main() {
     let _ = platform::logger::init_from_env();
     platform::logln!("workspace.service: start");
@@ -2386,7 +2484,8 @@ fn main() {
     );
     let mut buffer = vec![0u8; protocol::MAX_MESSAGE_LEN];
     loop {
-        let message = match platform::ipc::wait(endpoint, &mut buffer) {
+        let mut handles = platform::ipc::IpcFileHandles::default();
+        let message = match platform::ipc::wait_handles(endpoint, &mut buffer, &mut handles) {
             Ok(message) => message,
             Err(_) => {
                 platform::thread::yield_now();
@@ -2408,10 +2507,12 @@ fn main() {
                 ) {
                     let _ = platform::ipc::reply(sender, &reply[..length]);
                 }
+                close_attached_handles(&mut handles);
                 continue;
             }
         };
-        service.handle(sender, request);
+        service.handle(sender, request, &mut handles);
+        close_attached_handles(&mut handles);
     }
 }
 
