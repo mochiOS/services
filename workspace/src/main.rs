@@ -1194,7 +1194,7 @@ impl WorkspaceService {
             );
             return;
         };
-        match launch_application(application, path) {
+        match launch_application(application) {
             Ok(process_id) => {
                 let fd = handles.handles[0].fd;
                 handles.handles[0].fd = -1;
@@ -2168,8 +2168,8 @@ fn parse_string_literals(text: &str) -> Vec<String> {
     values
 }
 
-fn launch_application(application: &InstalledApplication, document: &str) -> Result<u64, u64> {
-    launch_executable(&application.entry_path, &[document.to_owned()])
+fn launch_application(application: &InstalledApplication) -> Result<u64, u64> {
+    launch_executable(&application.entry_path, &[])
 }
 
 fn launch_executable(executable: &str, arguments: &[String]) -> Result<u64, u64> {
