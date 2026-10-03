@@ -63,6 +63,9 @@ mod tests {
             pid,
             state: 1,
             parent_pid,
+            cpu_ticks: 0,
+            memory_bytes: 0,
+            thread_count: 0,
         }
     }
 
