@@ -40,6 +40,13 @@ description = "mochiOS package installation service"
 autostart = false
 order = 5
 
+[posix.service]
+dir = "posix"
+fs = "rootfs"
+description = "mochiOS userspace POSIX compatibility service"
+autostart = false
+order = 15
+
 [network.service]
 dir = "network"
 fs = "rootfs"
