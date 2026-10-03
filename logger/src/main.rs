@@ -57,45 +57,72 @@ fn log_path_for_line(line: &str) -> String {
     alloc::format!("{}/{}.log", LOG_ROOT, key)
 }
 
-fn ensure_dir_tree(path: &str) {
+fn ensure_dir_tree(path: &str) -> platform::syscall::SysResult<()> {
     let mut current = String::new();
     for segment in path.split('/').filter(|segment| !segment.is_empty()) {
         current.push('/');
         current.push_str(segment);
-        let _ = platform::file::create_dir(&current, 0o755);
+        if let Err(error) = platform::file::create_dir(&current, 0o755) {
+            if error.raw() != platform::syscall::EEXIST as i64 {
+                return Err(error);
+            }
+        }
     }
+    Ok(())
 }
 
-fn ensure_log_parent(path: &str) {
+fn ensure_log_parent(path: &str) -> platform::syscall::SysResult<()> {
     let Some((parent, _)) = path.rsplit_once('/') else {
-        return;
+        return Ok(());
     };
-    ensure_dir_tree(parent);
+    ensure_dir_tree(parent)
 }
 
-fn append_log_line(line: &[u8]) {
-    let Ok(text) = core::str::from_utf8(line) else {
-        return;
-    };
+fn append_log_line(line: &[u8]) -> platform::syscall::SysResult<()> {
+    let text = core::str::from_utf8(line)
+        .map_err(|_| platform::syscall::SysError::from_raw(platform::syscall::EINVAL as i64))?;
     let path = log_path_for_line(text);
-    ensure_log_parent(&path);
-    let flags = 0o1 | 0o100;
-    let Ok(fd) = platform::file::open_path(&path, flags) else {
-        return;
-    };
-    let _ = platform::file::seek(fd, 0, 2);
+    ensure_log_parent(&path)?;
+    const AT_FDCWD: i64 = -100;
+    const O_WRONLY: u64 = 0o1;
+    const O_CREAT: u64 = 0o100;
+    const O_APPEND: u64 = 0o2000;
+    const O_CLOEXEC: u64 = 0o2_000_000;
+    let fd = platform::file::openat_path(
+        AT_FDCWD,
+        &path,
+        O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC,
+        0o640,
+    )?;
+    let result = append_and_sync(fd, line);
+    let close_result = platform::file::close(fd).map(|_| ());
+    result.and(close_result)
+}
+
+fn append_and_sync(fd: u64, line: &[u8]) -> platform::syscall::SysResult<()> {
     let mut offset = 0usize;
     while offset < line.len() {
-        match platform::file::write(
+        let written = platform::file::write(
             fd,
             line[offset..].as_ptr() as u64,
             (line.len() - offset) as u64,
-        ) {
-            Ok(written) if written > 0 => offset += written as usize,
-            _ => break,
+        )?;
+        if written == 0 || written as usize > line.len() - offset {
+            return Err(platform::syscall::SysError::from_raw(
+                platform::syscall::EIO as i64,
+            ));
         }
+        offset += written as usize;
     }
-    let _ = platform::file::close(fd);
+    platform::file::sync(fd).map(|_| ())
+}
+
+fn report_persistence_error(error: platform::syscall::SysError) {
+    let errno = error.errno().unwrap_or(5);
+    let _ = platform::write_fmt(
+        platform::io::STDERR,
+        format_args!("logger.service: log persistence failed errno={errno}\n"),
+    );
 }
 
 fn main() {
@@ -121,6 +148,8 @@ fn main() {
         if len == 0 {
             continue;
         }
-        append_log_line(&buf[..len]);
+        if let Err(error) = append_log_line(&buf[..len]) {
+            report_persistence_error(error);
+        }
     }
 }
