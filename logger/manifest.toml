@@ -9,6 +9,7 @@ vendor = "mochiOS"
 path = "/system/services/logger.service"
 kind = "service"
 requires = [
+    "fs.read.all",
     "fs.write.all",
     "ipc.client",
     "ipc.server",
