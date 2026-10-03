@@ -114,10 +114,35 @@ fn log_path_for_line(line: &str) -> String {
 }
 
 fn ensure_dir_tree(path: &str) -> platform::syscall::SysResult<()> {
+    const AT_FDCWD: i64 = -100;
+    const O_RDONLY: u64 = 0;
+    const O_CLOEXEC: u64 = 0o2_000_000;
     let mut current = String::new();
     for segment in path.split('/').filter(|segment| !segment.is_empty()) {
         current.push('/');
         current.push_str(segment);
+        match platform::file::openat_path(AT_FDCWD, &current, O_RDONLY | O_CLOEXEC, 0) {
+            Ok(fd) => {
+                let metadata = platform::file::metadata(fd);
+                let close = platform::file::close(fd).map(|_| ());
+                match metadata {
+                    Ok(metadata) if metadata.is_directory() => close?,
+                    Ok(_) => {
+                        close?;
+                        return Err(platform::syscall::SysError::from_raw(
+                            platform::syscall::ENOTDIR as i64,
+                        ));
+                    }
+                    Err(error) => {
+                        let _ = close;
+                        return Err(error);
+                    }
+                }
+                continue;
+            }
+            Err(error) if error.raw() == platform::syscall::ENOENT as i64 => {}
+            Err(error) => return Err(error),
+        }
         if let Err(error) = platform::file::create_dir(&current, 0o755) {
             if error.raw() != platform::syscall::EEXIST as i64 {
                 return Err(error);
