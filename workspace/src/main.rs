@@ -2485,9 +2485,26 @@ fn main() {
     let mut buffer = vec![0u8; protocol::MAX_MESSAGE_LEN];
     loop {
         let mut handles = platform::ipc::IpcFileHandles::default();
-        let message = match platform::ipc::wait_handles(endpoint, &mut buffer, &mut handles) {
+        let message = match platform::ipc::wait(endpoint, &mut buffer) {
             Ok(message) => message,
-            Err(_) => {
+            Err(error) if error.raw() == mochi_user_syscall::EMSGSIZE as i64 => {
+                match platform::ipc::wait_handles(endpoint, &mut buffer, &mut handles) {
+                    Ok(message) => message,
+                    Err(error) => {
+                        eprintln!(
+                            "workspace.service: attached-handle receive failed errno={}",
+                            error.raw().unsigned_abs()
+                        );
+                        platform::thread::yield_now();
+                        continue;
+                    }
+                }
+            }
+            Err(error) => {
+                eprintln!(
+                    "workspace.service: request receive failed errno={}",
+                    error.raw().unsigned_abs()
+                );
                 platform::thread::yield_now();
                 continue;
             }
