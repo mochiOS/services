@@ -134,13 +134,10 @@ pub(crate) fn driver_arguments(
 }
 
 pub(crate) fn fixed_service_arguments(
-    service: FixedService,
+    _service: FixedService,
     logger_endpoint: u64,
     ready_target: Option<ReadyTarget>,
 ) -> Vec<String> {
-    if matches!(service, FixedService::Installer) {
-        return Vec::new();
-    }
     let mut arguments = Vec::with_capacity(2);
     arguments.push(logger_endpoint.to_string());
     if let Some(target) = ready_target {
@@ -313,6 +310,10 @@ mod tests {
         );
         assert_eq!(
             fixed_service_arguments(FixedService::Binder, 7, None),
+            alloc::vec!["7".to_string()]
+        );
+        assert_eq!(
+            fixed_service_arguments(FixedService::Installer, 7, None),
             alloc::vec!["7".to_string()]
         );
     }
