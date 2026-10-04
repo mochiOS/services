@@ -1549,7 +1549,6 @@ dependencies = [
 [[package]]
 name = "mnu-abi"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/mnu#829522f5737b96a50140961cdede28451805ad51"
 
 [[package]]
 name = "mochi-user-platform"
