@@ -528,6 +528,48 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
     ) {
         let _ = mochi_user_platform::handle::close(object.handle);
     }
+
+    fn directory_path(
+        &mut self,
+        root: posix_service::AttachedObject<mochi_user_platform::handle::Handle>,
+        directory: posix_service::AttachedObject<mochi_user_platform::handle::Handle>,
+    ) -> Result<Vec<u8>, i32> {
+        use mochi_user_platform as platform;
+        use mochios_filesystem_protocol as filesystem;
+
+        let header = filesystem::Header {
+            opcode: filesystem::OP_PATH_HANDLE,
+            request_id: 5,
+            ..filesystem::Header::default()
+        };
+        let mut request = [0u8; filesystem::HEADER_LEN];
+        let request_len = filesystem::encode(header, &[], &mut request).map_err(|_| -22)?;
+        let mut response = vec![0u8; filesystem::MAX_MESSAGE_LEN];
+        let mut handles = Self::path_handles(posix_service::PathObjects {
+            root,
+            base: Some(directory),
+        })?;
+        let received = match platform::ipc::call_object_handles(
+            self.endpoint,
+            &request[..request_len],
+            &mut response,
+            &mut handles,
+        ) {
+            Ok(received) => received,
+            Err(_) => {
+                close_runtime_handles(&handles);
+                return Err(-5);
+            }
+        };
+        close_runtime_handles(&handles);
+        let length = (received & 0xffff_ffff) as usize;
+        let bytes = response.get(..length).ok_or(-5)?;
+        let (response, payload) = filesystem::decode(bytes).map_err(|_| -5)?;
+        if response.opcode != filesystem::OP_STATUS || response.status != 0 {
+            return Err(if response.status == 0 { -5 } else { response.status });
+        }
+        Ok(payload.to_vec())
+    }
 }
 
 #[cfg(target_os = "mochios")]

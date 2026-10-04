@@ -120,6 +120,37 @@ fn session_info_and_umask_round_trip_through_the_client() {
     assert_eq!(client.session_info().unwrap().umask, 0o755);
 }
 
+struct GetcwdTransport;
+
+impl Transport for GetcwdTransport {
+    type Error = ();
+
+    fn call(&self, request: &[u8], response: &mut [u8]) -> Result<usize, Self::Error> {
+        let (header, payload) = protocol::decode(request).map_err(|_| ())?;
+        assert_eq!(header.opcode, protocol::OP_GETCWD);
+        assert!(payload.is_empty());
+        protocol::encode(
+            protocol::Header {
+                opcode: protocol::OP_STATUS,
+                request_id: header.request_id,
+                payload_len: 5,
+                status: protocol::STATUS_OK,
+                ..protocol::Header::default()
+            },
+            b"/work",
+            response,
+        )
+        .map_err(|_| ())
+    }
+}
+
+#[test]
+fn client_getcwd_returns_the_service_path() {
+    let mut output = [0u8; 16];
+    let length = Client::new(GetcwdTransport).getcwd(&mut output).unwrap();
+    assert_eq!(&output[..length], b"/work");
+}
+
 #[test]
 fn fixed_size_session_payloads_reject_trailing_bytes() {
     let mut encoded = [0u8; protocol::SESSION_INFO_LEN + 1];
@@ -584,6 +615,8 @@ struct RecordingFilesystem {
     stat_mode: Option<u32>,
     retained: Vec<AttachedObject<u32>>,
     released: Vec<AttachedObject<u32>>,
+    path_query: Option<(AttachedObject<u32>, AttachedObject<u32>)>,
+    directory_path: Vec<u8>,
 }
 
 impl FilesystemBackend<u32> for RecordingFilesystem {
@@ -659,6 +692,19 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
 
     fn release_object(&mut self, object: AttachedObject<u32>) {
         self.released.push(object);
+    }
+
+    fn directory_path(
+        &mut self,
+        root: AttachedObject<u32>,
+        directory: AttachedObject<u32>,
+    ) -> Result<Vec<u8>, i32> {
+        self.path_query = Some((root, directory));
+        if self.directory_path.is_empty() {
+            Ok(b"/".to_vec())
+        } else {
+            Ok(self.directory_path.clone())
+        }
     }
 }
 
@@ -974,6 +1020,57 @@ fn chdir_replaces_the_session_cwd_with_an_open_directory() {
     assert_eq!(filesystem.directory.unwrap().handle, 101);
     assert_eq!(service.session_directories(peer.process_id).unwrap().cwd.handle, 200);
     assert_eq!(filesystem.released, vec![AttachedObject { handle: 101, rights: 0x81 }]);
+}
+
+#[test]
+fn getcwd_resolves_the_live_root_and_cwd_handles() {
+    let peer = PeerIdentity {
+        process_id: 117,
+        effective_uid: 511,
+        effective_gid: 30,
+    };
+    let mut service = PosixService::new();
+    service.handle(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let mut filesystem = RecordingFilesystem {
+        directory_path: b"/renamed/work".to_vec(),
+        ..RecordingFilesystem::default()
+    };
+
+    let result = service.handle_objects(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_GETCWD,
+            request_id: 22,
+            ..protocol::Header::default()
+        },
+        &[],
+        &[],
+        &mut filesystem,
+    );
+
+    assert_eq!(result.response.header.status, protocol::STATUS_OK);
+    assert_eq!(result.response.payload, b"/renamed/work");
+    assert_eq!(result.response.header.payload_len, 13);
+    assert_eq!(
+        filesystem.path_query,
+        Some((
+            AttachedObject {
+                handle: 100,
+                rights: 0x81,
+            },
+            AttachedObject {
+                handle: 101,
+                rights: 0x81,
+            },
+        ))
+    );
 }
 
 #[test]

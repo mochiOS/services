@@ -118,6 +118,13 @@ pub trait FilesystemBackend<H: Copy> {
 
     /// Releases one service-owned object reference.
     fn release_object(&mut self, object: AttachedObject<H>);
+
+    /// Returns the live path of `directory` relative to `root`.
+    fn directory_path(
+        &mut self,
+        root: AttachedObject<H>,
+        directory: AttachedObject<H>,
+    ) -> Result<Vec<u8>, i32>;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -182,7 +189,8 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_FSTAT
             | protocol::OP_ACCESS_AT
             | protocol::OP_CHDIR_AT
-            | protocol::OP_FCHDIR => Err(STATUS_EINVAL),
+            | protocol::OP_FCHDIR
+            | protocol::OP_GETCWD => Err(STATUS_EINVAL),
             _ => Err(protocol::STATUS_ENOSYS),
         };
         let (status, payload) = match result {
@@ -217,6 +225,7 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_ACCESS_AT
                 | protocol::OP_CHDIR_AT
                 | protocol::OP_FCHDIR
+                | protocol::OP_GETCWD
         ) {
             let response = if handles.is_empty() {
                 self.handle(peer, header, payload)
@@ -241,6 +250,7 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_ACCESS_AT
                 | protocol::OP_CHDIR_AT
                 | protocol::OP_FCHDIR
+                | protocol::OP_GETCWD
         ) {
             if let Err(status) = self.ensure_session_directories(peer.process_id, filesystem) {
                 return object_error(header.request_id, status);
@@ -355,6 +365,19 @@ impl<H: Copy> PosixService<H> {
                 };
                 self.replace_cwd(peer.process_id, retained, filesystem);
                 object_error(header.request_id, protocol::STATUS_OK)
+            }
+            protocol::OP_GETCWD => {
+                if !payload.is_empty() || !handles.is_empty() {
+                    return object_error(header.request_id, STATUS_EINVAL);
+                }
+                let directories = match self.directories.get(&peer.process_id) {
+                    Some(directories) => *directories,
+                    None => return object_error(header.request_id, protocol::STATUS_ESRCH),
+                };
+                match filesystem.directory_path(directories.root, directories.cwd) {
+                    Ok(path) => object_payload(header.request_id, path),
+                    Err(status) => object_error(header.request_id, status),
+                }
             }
             _ => unreachable!(),
         }
@@ -540,6 +563,22 @@ impl<H: Copy> PosixService<H> {
 fn object_error<H>(request_id: u64, status: i32) -> ObjectResponse<H> {
     ObjectResponse {
         response: status_response(request_id, status),
+        handles: Vec::new(),
+    }
+}
+
+fn object_payload<H>(request_id: u64, payload: Vec<u8>) -> ObjectResponse<H> {
+    ObjectResponse {
+        response: Response {
+            header: protocol::Header {
+                opcode: protocol::OP_STATUS,
+                request_id,
+                payload_len: payload.len() as u32,
+                status: protocol::STATUS_OK,
+                ..protocol::Header::default()
+            },
+            payload,
+        },
         handles: Vec::new(),
     }
 }
