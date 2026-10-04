@@ -246,6 +246,21 @@ fn main() {
                             payload: Vec::new(),
                         },
                     }
+                } else if header.opcode == protocol::OP_PATH_HANDLE {
+                    match decode_open_pair(&attached)
+                        .and_then(|(root, directory)| service.path_handle(header, root, directory))
+                    {
+                        Ok(response) => response,
+                        Err(error) => filesystem_service::service::Response {
+                            header: protocol::Header {
+                                opcode: protocol::OP_STATUS,
+                                request_id: header.request_id,
+                                status: -error,
+                                ..protocol::Header::default()
+                            },
+                            payload: Vec::new(),
+                        },
+                    }
                 } else if header.opcode == protocol::OP_ACCESS_AT {
                     let anchors = decode_path_anchors(
                         header.flags,
@@ -317,6 +332,28 @@ fn main() {
             let _ = platform::ipc::reply(sender, &response_bytes[..length]);
         }
     }
+}
+
+#[cfg(target_os = "mochios")]
+fn decode_open_pair(
+    attached: &mochi_user_platform::ipc::IpcObjectHandles,
+) -> Result<(u64, u64), i32> {
+    use mochi_user_platform as platform;
+
+    if attached.count != 2 {
+        return Err(22);
+    }
+    let mut open_ids = [0u64; 2];
+    let required = platform::handle::HANDLE_RIGHT_READ
+        | platform::handle::HANDLE_RIGHT_TRANSFER;
+    for (index, object) in attached.handles.iter().take(2).enumerate() {
+        if object.handle == 0 || object.reserved != 0 || object.rights & required != required {
+            return Err(13);
+        }
+        open_ids[index] =
+            platform::handle::identify_provider_object(object.handle).map_err(|_| 9)?;
+    }
+    Ok((open_ids[0], open_ids[1]))
 }
 
 #[cfg(target_os = "mochios")]

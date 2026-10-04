@@ -16,6 +16,7 @@ const EACCES: i32 = 13;
 const EEXIST: i32 = 17;
 const EINVAL: i32 = 22;
 const ENOSPC: i32 = 28;
+const ENAMETOOLONG: i32 = 36;
 const EISDIR: i32 = 21;
 const ENOTDIR: i32 = 20;
 const ENOSYS: i32 = 38;
@@ -349,6 +350,72 @@ impl FilesystemService {
         let node_id = u64::from(open.inode.index.get());
         let metadata = open.inode.metadata();
         Ok(self.node_status_response(request, node_id, metadata))
+    }
+
+    /// Reconstructs the current pathname of an open directory below an open
+    /// root directory. This walks live directory entries, so rename is
+    /// reflected and an unlinked cwd reports `ENOENT`.
+    pub fn path_handle(
+        &self,
+        request: protocol::Header,
+        root_open_id: u64,
+        directory_open_id: u64,
+    ) -> Result<Response, i32> {
+        if request.flags != 0 || request.length != 0 {
+            return Err(EINVAL);
+        }
+        let root = self.opens.get(&root_open_id).ok_or(EBADF)?.inode.clone();
+        let mut current = self
+            .opens
+            .get(&directory_open_id)
+            .ok_or(EBADF)?
+            .inode
+            .clone();
+        if !root.file_type().is_dir() || !current.file_type().is_dir() {
+            return Err(ENOTDIR);
+        }
+        let mut components = Vec::new();
+        while current.index != root.index {
+            if components.len() >= protocol::MAX_PATH_LEN {
+                return Err(EIO);
+            }
+            let directory = Dir::open_inode(&self.fs, current.clone()).map_err(errno)?;
+            let parent = directory
+                .get_entry(DirEntryName::try_from("..").map_err(|_| EIO)?)
+                .map_err(errno)?;
+            if parent.index == current.index {
+                return Err(EACCES);
+            }
+            let parent_directory = Dir::open_inode(&self.fs, parent.clone()).map_err(errno)?;
+            let mut name = None;
+            for entry in parent_directory.read_dir().map_err(errno)? {
+                let entry = entry.map_err(errno)?;
+                if entry.file_name() != "."
+                    && entry.file_name() != ".."
+                    && !entry.file_name().as_str().map_err(|_| EIO)?.starts_with(".mochios-orphan-")
+                    && entry.inode.get() == current.index.get()
+                {
+                    name = Some(entry.file_name().as_str().map_err(|_| EIO)?.to_owned());
+                    break;
+                }
+            }
+            components.push(name.ok_or(ENOENT)?);
+            current = parent;
+        }
+        let mut path = String::from("/");
+        for (index, component) in components.iter().rev().enumerate() {
+            if index != 0 {
+                path.push('/');
+            }
+            path.push_str(component);
+            if path.len() > protocol::MAX_PATH_LEN {
+                return Err(ENAMETOOLONG);
+            }
+        }
+        let mut response = self.success(request);
+        response.header.length = path.len() as u32;
+        response.payload = path.into_bytes();
+        Ok(response)
     }
 
     /// Resolves a path and checks its permission bits without exposing a

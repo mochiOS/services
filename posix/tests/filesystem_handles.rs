@@ -171,6 +171,93 @@ fn an_open_directory_remains_a_valid_object_after_unlink() {
 }
 
 #[test]
+fn open_directory_paths_follow_rename_and_reject_unlinked_cwds() {
+    let mut filesystem = test_filesystem();
+    let root = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+                ..protocol::Header::default()
+            },
+            b"/",
+            PathAnchors::default(),
+        )
+        .unwrap()
+        .header
+        .open_id;
+    let cwd = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+                ..protocol::Header::default()
+            },
+            b"/jail/inside",
+            PathAnchors::default(),
+        )
+        .unwrap()
+        .header
+        .open_id;
+
+    let initial = filesystem
+        .path_handle(
+            protocol::Header {
+                opcode: protocol::OP_PATH_HANDLE,
+                ..protocol::Header::default()
+            },
+            root,
+            cwd,
+        )
+        .unwrap();
+    assert_eq!(initial.payload, b"/jail/inside");
+
+    let old = b"/jail/inside";
+    let new = b"/jail/moved";
+    let mut rename = Vec::from(old.as_slice());
+    rename.extend_from_slice(new);
+    let renamed = filesystem.handle(
+        protocol::Header {
+            opcode: protocol::OP_RENAME,
+            offset: old.len() as u64,
+            ..protocol::Header::default()
+        },
+        &rename,
+    );
+    assert_eq!(renamed.header.status, 0);
+    let current = filesystem
+        .path_handle(
+            protocol::Header {
+                opcode: protocol::OP_PATH_HANDLE,
+                ..protocol::Header::default()
+            },
+            root,
+            cwd,
+        )
+        .unwrap();
+    assert_eq!(current.payload, b"/jail/moved");
+
+    let removed = filesystem.handle(
+        protocol::Header {
+            opcode: protocol::OP_UNLINK,
+            flags: protocol::NODE_TYPE_DIRECTORY,
+            ..protocol::Header::default()
+        },
+        b"/jail/moved",
+    );
+    assert_eq!(removed.header.status, 0);
+    let missing = filesystem.path_handle(
+        protocol::Header {
+            opcode: protocol::OP_PATH_HANDLE,
+            ..protocol::Header::default()
+        },
+        root,
+        cwd,
+    );
+    assert!(matches!(missing, Err(2)));
+}
+
+#[test]
 fn symlink_targets_enforce_search_permission_on_the_actual_directory() {
     let mut filesystem = test_filesystem();
     let result = filesystem.stat_at(
