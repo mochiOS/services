@@ -16,6 +16,7 @@ struct Runtime {
     mboot_agent: Option<(u64, u64)>,
     deferred_requests: VecDeque<DeferredMessage>,
     permission_prompt: Option<crate::portal::PermissionPromptProcess>,
+    filesystem_endpoint: Option<platform::handle::Handle>,
     posix_endpoint: Option<platform::handle::Handle>,
 }
 
@@ -28,6 +29,7 @@ impl Runtime {
             mboot_agent: None,
             deferred_requests: VecDeque::new(),
             permission_prompt: None,
+            filesystem_endpoint: None,
             posix_endpoint: None,
         })
     }
@@ -315,6 +317,7 @@ impl BootstrapOperations for Runtime {
             service,
             self.logger_endpoint,
             ready_target,
+            self.filesystem_endpoint,
             self.posix_endpoint,
         ) {
             Ok(process_id) => {
@@ -391,7 +394,28 @@ impl BootstrapOperations for Runtime {
     }
 
     fn wait_filesystem_ready(&mut self, process_id: u64) -> bool {
-        self.wait_ready(ReadyService::Filesystem, process_id)
+        platform::logln!("service-manager.service: waiting for filesystem.service ready");
+        let result = self
+            .ready
+            .as_mut()
+            .ok_or(ReadyError::InvalidMessage)
+            .and_then(|handshake| {
+                handshake.wait_for_endpoint_ready(ReadyService::Filesystem, process_id)
+            });
+        match result {
+            Ok(endpoint) => {
+                self.filesystem_endpoint = Some(endpoint);
+                platform::logln!(
+                    "service-manager.service: filesystem.service ready endpoint={}",
+                    endpoint
+                );
+                true
+            }
+            Err(error) => {
+                log_ready_error(ReadyService::Filesystem, error);
+                false
+            }
+        }
     }
 
     fn wait_posix_ready(&mut self, process_id: u64) -> bool {

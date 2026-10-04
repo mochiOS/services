@@ -21,6 +21,7 @@ const ENOTDIR: i32 = 20;
 const ENOSYS: i32 = 38;
 const ENOTEMPTY: i32 = 39;
 const EFBIG: i32 = 27;
+const ELOOP: i32 = 40;
 
 pub struct Response {
     pub header: protocol::Header,
@@ -39,7 +40,9 @@ pub struct FilesystemService {
 
 struct OpenFile {
     node_id: u64,
-    file: File,
+    file: Option<File>,
+    offset: u64,
+    append: bool,
 }
 
 #[derive(Clone)]
@@ -83,6 +86,7 @@ impl FilesystemService {
             protocol::OP_READLINK => self.read_link(request),
             protocol::OP_SYNC => Ok(self.success(request)),
             protocol::OP_SETATTR => self.set_attr(request, payload),
+            protocol::OP_OPEN_AT => Err(EINVAL),
             _ => Err(ENOSYS),
         };
         result.unwrap_or_else(|errno| self.error(request, errno))
@@ -117,7 +121,9 @@ impl FilesystemService {
             open_id,
             OpenFile {
                 node_id: request.node_id,
-                file,
+                file: Some(file),
+                offset: 0,
+                append: false,
             },
         );
         let mut response = self.success(request);
@@ -125,10 +131,196 @@ impl FilesystemService {
         Ok(response)
     }
 
+    /// Resolves, optionally creates, validates and opens a path as one
+    /// serialized filesystem operation.
+    pub fn open_at(
+        &mut self,
+        request: protocol::Header,
+        payload: &[u8],
+        base_open_id: Option<u64>,
+    ) -> Result<Response, i32> {
+        if request.flags & !protocol::OPEN_AT_FLAGS_ALL != 0 {
+            return Err(EINVAL);
+        }
+        let attached = request.flags & protocol::OPEN_AT_BASE_ATTACHED != 0;
+        if attached != base_open_id.is_some() {
+            return Err(EINVAL);
+        }
+        let access = request.flags & (protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE);
+        if access == 0
+            || request.flags & protocol::OPEN_AT_EXCLUSIVE != 0
+                && request.flags & protocol::OPEN_AT_CREATE == 0
+            || request.flags & (protocol::OPEN_AT_TRUNCATE | protocol::OPEN_AT_APPEND) != 0
+                && request.flags & protocol::OPEN_AT_WRITE == 0
+        {
+            return Err(EINVAL);
+        }
+        let path = self.open_path(payload, base_open_id)?;
+        let existing = self.fs.symlink_metadata(path.as_str());
+        match existing {
+            Ok(_)
+                if request.flags & protocol::OPEN_AT_CREATE != 0
+                    && request.flags & protocol::OPEN_AT_EXCLUSIVE != 0 =>
+            {
+                return Err(EEXIST);
+            }
+            Ok(_) => {}
+            Err(Ext4Error::NotFound) if request.flags & protocol::OPEN_AT_CREATE != 0 => {
+                let create = protocol::Header {
+                    opcode: protocol::OP_CREATE,
+                    request_id: request.request_id,
+                    offset: request.offset,
+                    flags: protocol::NODE_TYPE_REGULAR,
+                    mode: request.mode,
+                    length: path.len() as u32,
+                    ..protocol::Header::default()
+                };
+                self.create(create, path.as_bytes())?;
+            }
+            Err(error) => return Err(errno(error)),
+        }
+        let metadata = self.fs.symlink_metadata(path.as_str()).map_err(errno)?;
+        let kind = metadata.file_type();
+        if request.flags & protocol::OPEN_AT_NOFOLLOW != 0 && kind.is_symlink() {
+            return Err(ELOOP);
+        }
+        if request.flags & protocol::OPEN_AT_DIRECTORY != 0 && !kind.is_dir() {
+            return Err(ENOTDIR);
+        }
+        if kind.is_dir() && request.flags & protocol::OPEN_AT_WRITE != 0 {
+            return Err(EISDIR);
+        }
+        let node_id = self.remember_node(path.as_str())?;
+        let mut file = if kind.is_dir() {
+            None
+        } else {
+            Some(self.fs.open(path.as_str()).map_err(errno)?)
+        };
+        if request.flags & protocol::OPEN_AT_TRUNCATE != 0 {
+            file.as_mut().ok_or(EISDIR)?.truncate(0).map_err(errno)?;
+        }
+        let open_id = self.next_open_id;
+        self.next_open_id = self.next_open_id.checked_add(1).ok_or(EIO)?;
+        self.opens.insert(
+            open_id,
+            OpenFile {
+                node_id,
+                file,
+                offset: 0,
+                append: request.flags & protocol::OPEN_AT_APPEND != 0,
+            },
+        );
+        let mut response = self.success(request);
+        response.header.open_id = open_id;
+        response.header.node_id = node_id;
+        Ok(response)
+    }
+
+    fn open_path(&self, payload: &[u8], base_open_id: Option<u64>) -> Result<String, i32> {
+        if payload.is_empty() || payload.len() > protocol::MAX_PATH_LEN || payload.contains(&0) {
+            return Err(EINVAL);
+        }
+        let path = std::str::from_utf8(payload).map_err(|_| EINVAL)?;
+        if path.starts_with('/') {
+            return Ok(path.to_owned());
+        }
+        let base = self.opens.get(&base_open_id.ok_or(EINVAL)?).ok_or(EBADF)?;
+        let base_path = self.nodes.get(&base.node_id).ok_or(ENOENT)?;
+        let metadata = self
+            .fs
+            .symlink_metadata(base_path.as_str())
+            .map_err(errno)?;
+        if !metadata.file_type().is_dir() {
+            return Err(ENOTDIR);
+        }
+        Ok(joined_path(base_path, path))
+    }
+
+    pub fn provider_read(&mut self, open_id: u64, length: usize) -> Result<Vec<u8>, i32> {
+        let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
+        let file = open.file.as_mut().ok_or(EISDIR)?;
+        let mut payload = vec![0u8; length.min(mnu_abi::provider::MAX_DATA_LEN)];
+        let mut done = 0usize;
+        while done < payload.len() {
+            let count = file
+                .read_bytes_at(&mut payload[done..], open.offset + done as u64)
+                .map_err(errno)?;
+            if count == 0 {
+                break;
+            }
+            done += count;
+        }
+        open.offset = open.offset.checked_add(done as u64).ok_or(EFBIG)?;
+        payload.truncate(done);
+        Ok(payload)
+    }
+
+    pub fn provider_write(&mut self, open_id: u64, payload: &[u8]) -> Result<usize, i32> {
+        if payload.len() > mnu_abi::provider::MAX_DATA_LEN {
+            return Err(EINVAL);
+        }
+        let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
+        let file = open.file.as_mut().ok_or(EISDIR)?;
+        if open.append {
+            open.offset = file.inode().metadata().len();
+        }
+        let mut done = 0usize;
+        while done < payload.len() {
+            let count = file
+                .write_bytes_at(&payload[done..], open.offset + done as u64)
+                .map_err(errno)?;
+            if count == 0 {
+                return Err(EIO);
+            }
+            done += count;
+        }
+        open.offset = open.offset.checked_add(done as u64).ok_or(EFBIG)?;
+        Ok(done)
+    }
+
+    pub fn provider_seek(&mut self, open_id: u64, offset: i64, basis: u64) -> Result<u64, i32> {
+        let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
+        let current = i128::from(open.offset);
+        let base = match basis {
+            mnu_abi::HANDLE_SEEK_START => 0,
+            mnu_abi::HANDLE_SEEK_CURRENT => current,
+            mnu_abi::HANDLE_SEEK_END => {
+                i128::from(open.file.as_ref().ok_or(EISDIR)?.inode().metadata().len())
+            }
+            _ => return Err(EINVAL),
+        };
+        let next = base.checked_add(i128::from(offset)).ok_or(EINVAL)?;
+        if !(0..=i128::from(u64::MAX)).contains(&next) {
+            return Err(EINVAL);
+        }
+        open.offset = next as u64;
+        Ok(open.offset)
+    }
+
+    pub fn provider_close(&mut self, open_id: u64) -> Result<(), i32> {
+        self.close(protocol::Header {
+            opcode: protocol::OP_CLOSE,
+            open_id,
+            ..protocol::Header::default()
+        })?;
+        Ok(())
+    }
+
     fn close(&mut self, request: protocol::Header) -> Result<Response, i32> {
         let open = self.opens.get(&request.open_id).ok_or(EBADF)?;
         let node_id = open.node_id;
-        let inode = open.file.inode().clone();
+        let inode = match open.file.as_ref() {
+            Some(file) => file.inode().clone(),
+            None => {
+                let path = self.nodes.get(&node_id).ok_or(ENOENT)?;
+                self.fs
+                    .path_to_inode(
+                        path.as_str().try_into().map_err(|_| EIO)?,
+                        FollowSymlinks::All,
+                    )
+                    .map_err(errno)?
+            }
+        };
         let is_last_open = self
             .opens
             .values()
@@ -161,7 +353,13 @@ impl FilesystemService {
 
     fn read(&mut self, request: protocol::Header) -> Result<Response, i32> {
         let length = (request.flags as usize).min(protocol::MAX_IO_LEN);
-        let file = &mut self.opens.get_mut(&request.open_id).ok_or(EBADF)?.file;
+        let file = self
+            .opens
+            .get_mut(&request.open_id)
+            .ok_or(EBADF)?
+            .file
+            .as_mut()
+            .ok_or(EISDIR)?;
         let mut payload = vec![0u8; length];
         let mut done = 0;
         while done < payload.len() {
@@ -184,7 +382,13 @@ impl FilesystemService {
         if payload.len() > protocol::MAX_IO_LEN {
             return Err(EINVAL);
         }
-        let file = &mut self.opens.get_mut(&request.open_id).ok_or(EBADF)?.file;
+        let file = self
+            .opens
+            .get_mut(&request.open_id)
+            .ok_or(EBADF)?
+            .file
+            .as_mut()
+            .ok_or(EISDIR)?;
         let mut done = 0;
         while done < payload.len() {
             let count = file
@@ -203,7 +407,14 @@ impl FilesystemService {
     fn stat(&self, request: protocol::Header) -> Result<Response, i32> {
         let (node_id, metadata) = if request.open_id != 0 {
             let open = self.opens.get(&request.open_id).ok_or(EBADF)?;
-            (open.node_id, open.file.inode().metadata())
+            let metadata = match open.file.as_ref() {
+                Some(file) => file.inode().metadata(),
+                None => {
+                    let path = self.nodes.get(&open.node_id).ok_or(ENOENT)?;
+                    self.fs.symlink_metadata(path.as_str()).map_err(errno)?
+                }
+            };
+            (open.node_id, metadata)
         } else {
             let path = self.nodes.get(&request.node_id).ok_or(ENOENT)?;
             (
@@ -822,6 +1033,8 @@ impl FilesystemService {
             .get_mut(&request.open_id)
             .ok_or(EBADF)?
             .file
+            .as_mut()
+            .ok_or(EISDIR)?
             .truncate(request.offset)
             .map_err(errno)?;
         Ok(self.success(request))

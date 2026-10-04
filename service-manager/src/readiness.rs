@@ -63,6 +63,7 @@ pub(crate) struct ReadyHandshake {
     workspace_token: u64,
     binder_token: u64,
     filesystem_status: platform::service_ready::OneShotStatus,
+    filesystem_endpoint: Option<platform::handle::Handle>,
     posix_status: platform::service_ready::OneShotStatus,
     posix_endpoint: Option<platform::handle::Handle>,
     input_status: platform::service_ready::OneShotStatus,
@@ -193,6 +194,7 @@ impl ReadyHandshake {
             workspace_token,
             binder_token,
             filesystem_status: platform::service_ready::OneShotStatus::new(),
+            filesystem_endpoint: None,
             posix_status: platform::service_ready::OneShotStatus::new(),
             posix_endpoint: None,
             input_status: platform::service_ready::OneShotStatus::new(),
@@ -281,14 +283,14 @@ impl ReadyHandshake {
         service: ReadyService,
         process_id: u64,
     ) -> Result<platform::handle::Handle, ReadyError> {
-        if service != ReadyService::Posix {
+        if !matches!(service, ReadyService::Filesystem | ReadyService::Posix) {
             return Err(ReadyError::InvalidMessage);
         }
         let started = current_ticks()?;
         loop {
             if let Some(status) = self.status(service) {
                 ready_result(status)?;
-                return self.posix_endpoint.ok_or(ReadyError::InvalidMessage);
+                return self.endpoint_for(service).ok_or(ReadyError::InvalidMessage);
             }
             if let Some(notification) = receive_notification()? {
                 match notification {
@@ -300,7 +302,9 @@ impl ReadyHandshake {
                         status,
                         endpoint,
                     } => {
-                        if token != self.posix_token || status != 0 || self.posix_endpoint.is_some()
+                        if token != self.token_for(service)
+                            || status != 0
+                            || self.endpoint_for(service).is_some()
                         {
                             let _ = platform::handle::close(endpoint);
                             if status != 0 {
@@ -309,7 +313,7 @@ impl ReadyHandshake {
                             }
                             return Err(ReadyError::InvalidMessage);
                         }
-                        self.posix_endpoint = Some(endpoint);
+                        self.set_endpoint(service, endpoint)?;
                         self.record(token, status)?;
                     }
                     ReceivedNotification::Session { .. } => {
@@ -328,6 +332,35 @@ impl ReadyHandshake {
             }
             platform::thread::yield_now();
         }
+    }
+
+    fn token_for(&self, service: ReadyService) -> u64 {
+        match service {
+            ReadyService::Filesystem => self.filesystem_token,
+            ReadyService::Posix => self.posix_token,
+            _ => 0,
+        }
+    }
+
+    fn endpoint_for(&self, service: ReadyService) -> Option<platform::handle::Handle> {
+        match service {
+            ReadyService::Filesystem => self.filesystem_endpoint,
+            ReadyService::Posix => self.posix_endpoint,
+            _ => None,
+        }
+    }
+
+    fn set_endpoint(
+        &mut self,
+        service: ReadyService,
+        endpoint: platform::handle::Handle,
+    ) -> Result<(), ReadyError> {
+        match service {
+            ReadyService::Filesystem => self.filesystem_endpoint = Some(endpoint),
+            ReadyService::Posix => self.posix_endpoint = Some(endpoint),
+            _ => return Err(ReadyError::InvalidMessage),
+        }
+        Ok(())
     }
 
     pub(crate) fn wait_for_login_complete(

@@ -8,6 +8,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mochios
 
 [dependencies]
 mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }
+mochios-filesystem-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-filesystem-protocol" }
 mochios-posix-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-posix-protocol" }
 
 [dev-dependencies]

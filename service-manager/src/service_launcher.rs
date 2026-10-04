@@ -13,6 +13,7 @@ use mnu_abi::exec::{ENVIRONMENT_PREFIX, INHERITED_HANDLE_PREFIX};
 const POSIX_CHILD_HANDLE_RIGHTS: u64 = platform::handle::HANDLE_RIGHT_SEND
     | platform::handle::HANDLE_RIGHT_DUPLICATE
     | platform::handle::HANDLE_RIGHT_TRANSFER;
+const FILESYSTEM_CHILD_HANDLE_RIGHTS: u64 = POSIX_CHILD_HANDLE_RIGHTS;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DriverManagerTarget {
@@ -77,6 +78,7 @@ pub(crate) fn spawn_fixed_service(
     service: FixedService,
     logger_endpoint: u64,
     ready_target: Option<platform::service_ready::Target>,
+    filesystem_endpoint: Option<platform::handle::Handle>,
     posix_endpoint: Option<platform::handle::Handle>,
 ) -> Result<u64, mochi_user_syscall::SysError> {
     let ready_target = ready_target.map(|target| ReadyTarget {
@@ -84,6 +86,9 @@ pub(crate) fn spawn_fixed_service(
         token: target.token,
     });
     let mut arguments = fixed_service_arguments(service, logger_endpoint, ready_target);
+    if service == FixedService::Posix {
+        append_filesystem_handle(&mut arguments, filesystem_endpoint);
+    }
     append_posix_handle(&mut arguments, posix_endpoint);
     spawn(fixed_service_spec(service), &arguments)
 }
@@ -134,6 +139,18 @@ fn append_posix_handle(arguments: &mut Vec<String>, endpoint: Option<platform::h
         arguments.push(alloc::format!(
             "{INHERITED_HANDLE_PREFIX}{}:{endpoint}:{POSIX_CHILD_HANDLE_RIGHTS}",
             mochios_posix_protocol::CONTROL_HANDLE_KEY,
+        ));
+    }
+}
+
+fn append_filesystem_handle(
+    arguments: &mut Vec<String>,
+    endpoint: Option<platform::handle::Handle>,
+) {
+    if let Some(endpoint) = endpoint.filter(|endpoint| *endpoint != 0) {
+        arguments.push(alloc::format!(
+            "{INHERITED_HANDLE_PREFIX}{}:{endpoint}:{FILESYSTEM_CHILD_HANDLE_RIGHTS}",
+            mochios_filesystem_protocol::CONTROL_HANDLE_KEY,
         ));
     }
 }

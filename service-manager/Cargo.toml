@@ -9,6 +9,7 @@ mnu-abi = { git = "https://github.com/mochiOS/mnu", package = "mnu-abi" }
 mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }
 mochi-user-syscall = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-syscall" }
 mochios-driver-control-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-driver-control-protocol" }
+mochios-filesystem-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-filesystem-protocol" }
 mochios-linux-portal-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-linux-portal-protocol" }
 mochios-posix-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-posix-protocol" }
 mochios-user-database = { git = "https://github.com/mochiOS/syscalls", package = "mochios-user-database", features = ["std"] }
