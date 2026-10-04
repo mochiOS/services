@@ -6,8 +6,9 @@ use mochios_posix_client::{
 };
 use mochios_posix_protocol as protocol;
 use posix_service::{
-    AttachedObject, FilesystemBackend, OpenedObject, PathObjects, PeerIdentity, PosixService,
-    PreparedAccess, PreparedOpen, PreparedStat, SessionDirectories,
+    AttachedObject, AuthenticatedProcess, FilesystemBackend, OpenedObject, PathObjects,
+    PeerIdentity, PosixService, PreparedAccess, PreparedOpen, PreparedStat, SessionDirectories,
+    STATUS_EINVAL,
 };
 
 struct LocalTransport {
@@ -27,9 +28,54 @@ impl Transport for LocalTransport {
 
 fn client(peer: PeerIdentity) -> Client<LocalTransport> {
     Client::new(LocalTransport {
-        service: RefCell::new(PosixService::new()),
+        service: RefCell::new(service_for(peer)),
         peer,
     })
+}
+
+fn service_for(peer: PeerIdentity) -> PosixService {
+    let mut service = PosixService::new();
+    assert_eq!(
+        service.bind_process(
+            peer,
+            AuthenticatedProcess {
+                handle: u32::try_from(peer.process_id).unwrap(),
+                process_id: peer.process_id,
+            },
+        ),
+        Ok(true)
+    );
+    service
+}
+
+#[test]
+fn session_registration_requires_a_matching_authenticated_process() {
+    let peer = PeerIdentity {
+        process_id: 40,
+        effective_uid: 501,
+        effective_gid: 20,
+    };
+    let mut service = PosixService::new();
+    let header = protocol::Header {
+        opcode: protocol::OP_SESSION_REGISTER,
+        request_id: 8,
+        ..protocol::Header::default()
+    };
+    assert_eq!(
+        service.handle(peer, header, &[]).header.status,
+        STATUS_EINVAL
+    );
+    assert_eq!(
+        service.bind_process(
+            peer,
+            AuthenticatedProcess {
+                handle: 9,
+                process_id: 41,
+            },
+        ),
+        Err(STATUS_EINVAL)
+    );
+    assert!(service.session(peer.process_id).is_none());
 }
 
 #[test]
@@ -61,7 +107,7 @@ fn session_uses_authenticated_peer_instead_of_request_payload() {
         effective_uid: 501,
         effective_gid: 20,
     };
-    let mut service = PosixService::new();
+    let mut service = service_for(peer);
     let response = service.handle(
         peer,
         protocol::Header {
@@ -484,7 +530,7 @@ fn service_prepares_open_with_authenticated_credentials_and_umask() {
         effective_uid: 504,
         effective_gid: 23,
     };
-    let mut service = PosixService::new();
+    let mut service = service_for(peer);
     service.handle(
         peer,
         protocol::Header {
@@ -924,7 +970,7 @@ fn service_submits_open_as_one_atomic_filesystem_operation() {
         effective_uid: 505,
         effective_gid: 24,
     };
-    let mut service = PosixService::new();
+    let mut service = service_for(peer);
     service.handle(
         peer,
         protocol::Header {
@@ -986,7 +1032,7 @@ fn service_submits_stat_as_one_atomic_filesystem_operation() {
         effective_uid: 506,
         effective_gid: 25,
     };
-    let mut service = PosixService::new();
+    let mut service = service_for(peer);
     service.handle(
         peer,
         protocol::Header {
@@ -1046,7 +1092,7 @@ fn fstat_uses_only_the_explicitly_attached_file_handle() {
         effective_uid: 507,
         effective_gid: 26,
     };
-    let mut service = PosixService::new();
+    let mut service = service_for(peer);
     service.handle(
         peer,
         protocol::Header {
@@ -1102,7 +1148,7 @@ fn file_mutations_use_only_the_explicitly_attached_handle() {
         effective_uid: 507,
         effective_gid: 26,
     };
-    let mut service = PosixService::new();
+    let mut service = service_for(peer);
     service.handle(
         peer,
         protocol::Header {
@@ -1182,7 +1228,7 @@ fn file_status_flags_live_on_the_attached_open_description() {
         effective_uid: 506,
         effective_gid: 25,
     };
-    let mut service = PosixService::new();
+    let mut service = service_for(peer);
     service.handle(
         peer,
         protocol::Header {
@@ -1239,7 +1285,7 @@ fn mkdir_uses_session_umask_credentials_and_directory_handles() {
         effective_uid: 505,
         effective_gid: 24,
     };
-    let mut service = PosixService::new();
+    let mut service = service_for(peer);
     service.handle(
         peer,
         protocol::Header {
@@ -1301,7 +1347,7 @@ fn unlink_uses_authenticated_credentials_and_directory_handles() {
         effective_uid: 504,
         effective_gid: 23,
     };
-    let mut service = PosixService::new();
+    let mut service = service_for(peer);
     service.handle(
         peer,
         protocol::Header {
@@ -1362,7 +1408,7 @@ fn rename_wire_and_service_preserve_two_distinct_directory_handles() {
         effective_uid: 503,
         effective_gid: 22,
     };
-    let mut service = PosixService::new();
+    let mut service = service_for(peer);
     service.handle(
         peer,
         protocol::Header {
@@ -1410,7 +1456,7 @@ fn truncate_path_uses_authenticated_session_and_explicit_base_handle() {
         effective_uid: 502,
         effective_gid: 21,
     };
-    let mut service = PosixService::new();
+    let mut service = service_for(peer);
     service.handle(
         peer,
         protocol::Header {
@@ -1470,7 +1516,7 @@ fn symlink_wire_and_service_preserve_target_credentials_and_directory_handle() {
         effective_uid: 501,
         effective_gid: 20,
     };
-    let mut service = PosixService::new();
+    let mut service = service_for(peer);
     service.handle(
         peer,
         protocol::Header {
@@ -1511,7 +1557,7 @@ fn readlink_uses_authenticated_session_and_returns_only_the_target_bytes() {
         effective_uid: 500,
         effective_gid: 19,
     };
-    let mut service = PosixService::new();
+    let mut service = service_for(peer);
     service.handle(
         peer,
         protocol::Header {
@@ -1562,7 +1608,7 @@ fn chmod_uses_authenticated_session_and_an_explicit_directory_handle() {
         effective_uid: 499,
         effective_gid: 18,
     };
-    let mut service = PosixService::new();
+    let mut service = service_for(peer);
     service.handle(
         peer,
         protocol::Header {
@@ -1625,7 +1671,7 @@ fn chown_wire_and_service_use_authenticated_credentials() {
         effective_uid: 498,
         effective_gid: 17,
     };
-    let mut service = PosixService::new();
+    let mut service = service_for(peer);
     service.handle(
         peer,
         protocol::Header {
@@ -1668,7 +1714,7 @@ fn access_uses_authenticated_session_credentials_and_one_atomic_operation() {
         effective_uid: 508,
         effective_gid: 27,
     };
-    let mut service = PosixService::new();
+    let mut service = service_for(peer);
     service.handle(
         peer,
         protocol::Header {
@@ -1738,7 +1784,7 @@ fn chdir_replaces_the_session_cwd_with_an_open_directory() {
         effective_uid: 509,
         effective_gid: 28,
     };
-    let mut service = PosixService::new();
+    let mut service = service_for(peer);
     service.handle(
         peer,
         protocol::Header {
@@ -1789,7 +1835,7 @@ fn getcwd_resolves_the_live_root_and_cwd_handles() {
         effective_uid: 511,
         effective_gid: 30,
     };
-    let mut service = PosixService::new();
+    let mut service = service_for(peer);
     service.handle(
         peer,
         protocol::Header {
@@ -1840,7 +1886,7 @@ fn fchdir_retains_a_directory_handle_and_rejects_regular_files() {
         effective_uid: 510,
         effective_gid: 29,
     };
-    let mut service = PosixService::new();
+    let mut service = service_for(peer);
     service.handle(
         peer,
         protocol::Header {

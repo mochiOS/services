@@ -1565,7 +1565,6 @@ dependencies = [
 [[package]]
 name = "mochi-user-syscall"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#49f2103e4dfa44caf331b6eaf426e4e5175b45a9"
 dependencies = [
  "mnu-abi",
 ]

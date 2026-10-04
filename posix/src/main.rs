@@ -93,7 +93,19 @@ fn main() {
         let decoded = request_bytes
             .get(..length)
             .and_then(|bytes| protocol::decode(bytes).ok());
-        let object_response = match (peer, decoded, attachments_valid) {
+        let registration_valid = match (peer, decoded) {
+            (Some(peer), Some((header, payload)))
+                if header.opcode == protocol::OP_SESSION_REGISTER
+                    && header.flags == 0
+                    && payload.is_empty()
+                    && attachments.is_empty()
+                    && attachments_valid =>
+            {
+                bind_sender_process(&mut service, peer, sender).is_ok()
+            }
+            _ => true,
+        };
+        let object_response = match (peer, decoded, attachments_valid && registration_valid) {
             (Some(peer), Some((header, payload)), true) => {
                 service.handle_objects(peer, header, payload, &attachments, &mut filesystem)
             }
@@ -139,6 +151,48 @@ fn main() {
         }
         for opened in object_response.handles {
             let _ = platform::handle::close(opened.handle);
+        }
+    }
+}
+
+#[cfg(target_os = "mochios")]
+fn bind_sender_process(
+    service: &mut posix_service::PosixService<u32>,
+    peer: posix_service::PeerIdentity,
+    sender: u64,
+) -> Result<(), ()> {
+    use mochi_user_platform as platform;
+
+    if service.process_handle(peer.process_id).is_some() {
+        return Ok(());
+    }
+    let handle = platform::process::open_handle_for_endpoint(
+        sender,
+        platform::handle::HANDLE_RIGHT_WAIT,
+    )
+    .map_err(|_| ())?;
+    match platform::process::handle_status(handle) {
+        Ok(status) if status.process_id == peer.process_id => {}
+        _ => {
+            let _ = platform::handle::close(handle);
+            return Err(());
+        }
+    }
+    match service.bind_process(
+        peer,
+        posix_service::AuthenticatedProcess {
+            handle,
+            process_id: peer.process_id,
+        },
+    ) {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            let _ = platform::handle::close(handle);
+            Ok(())
+        }
+        Err(_) => {
+            let _ = platform::handle::close(handle);
+            Err(())
         }
     }
 }

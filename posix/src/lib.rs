@@ -164,6 +164,12 @@ pub struct SessionDirectories<H> {
     pub cwd: AttachedObject<H>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AuthenticatedProcess<H> {
+    pub handle: H,
+    pub process_id: u64,
+}
+
 pub trait FilesystemBackend<H: Copy> {
     /// Opens two independently-owned handles for the filesystem root. They
     /// become the initial process root and current working directory.
@@ -269,6 +275,7 @@ pub struct ObjectResponse<H> {
 pub struct PosixService<H: Copy = u32> {
     sessions: BTreeMap<u64, Session>,
     directories: BTreeMap<u64, SessionDirectories<H>>,
+    processes: BTreeMap<u64, H>,
 }
 
 impl PosixService<u32> {
@@ -276,6 +283,7 @@ impl PosixService<u32> {
         Self {
             sessions: BTreeMap::new(),
             directories: BTreeMap::new(),
+            processes: BTreeMap::new(),
         }
     }
 }
@@ -289,6 +297,27 @@ impl<H: Copy> PosixService<H> {
         self.directories.get(&process_id)
     }
 
+    pub fn process_handle(&self, process_id: u64) -> Option<H> {
+        self.processes.get(&process_id).copied()
+    }
+
+    /// Binds service state to a kernel-authenticated process object. The
+    /// caller retains ownership when this returns `Ok(false)`.
+    pub fn bind_process(
+        &mut self,
+        peer: PeerIdentity,
+        process: AuthenticatedProcess<H>,
+    ) -> Result<bool, i32> {
+        if process.process_id != peer.process_id {
+            return Err(STATUS_EINVAL);
+        }
+        if self.processes.contains_key(&peer.process_id) {
+            return Ok(false);
+        }
+        self.processes.insert(peer.process_id, process.handle);
+        Ok(true)
+    }
+
     pub fn handle(
         &mut self,
         peer: PeerIdentity,
@@ -298,6 +327,9 @@ impl<H: Copy> PosixService<H> {
         let result = match header.opcode {
             protocol::OP_PING if header.flags == 0 && payload.is_empty() => Ok(Vec::new()),
             protocol::OP_SESSION_REGISTER if header.flags == 0 && payload.is_empty() => {
+                if !self.processes.contains_key(&peer.process_id) {
+                    return status_response(header.request_id, STATUS_EINVAL);
+                }
                 self.sessions.entry(peer.process_id).or_insert(Session {
                     process_id: peer.process_id,
                     real_uid: peer.effective_uid,
