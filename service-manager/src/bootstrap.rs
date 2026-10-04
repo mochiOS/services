@@ -405,7 +405,7 @@ impl BootstrapOperations for Runtime {
             });
         match result {
             Ok(endpoint) => {
-                self.posix_endpoint = Some(endpoint);
+                self.posix_endpoint = Some(u64::from(endpoint));
                 platform::logln!(
                     "service-manager.service: posix.service ready endpoint={}",
                     endpoint

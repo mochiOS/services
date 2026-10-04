@@ -13,18 +13,36 @@ fn main() {
     let endpoint = match platform::ipc::create() {
         Ok(endpoint) => endpoint,
         Err(error) => {
-            platform::logln!("posix.service: endpoint creation failed errno={}", error.raw());
+            platform::logln!(
+                "posix.service: endpoint creation failed errno={}",
+                error.raw()
+            );
             platform::process::exit(1);
         }
     };
-    if let Err(error) = platform::service_ready::notify_endpoint(ready_target, 0, endpoint) {
+    let endpoint_handle = match platform::ipc::create_handle() {
+        Ok(handle) => handle,
+        Err(error) => {
+            platform::logln!(
+                "posix.service: endpoint handle creation failed errno={}",
+                error.raw()
+            );
+            platform::process::exit(1);
+        }
+    };
+    let delegated_rights = platform::handle::HANDLE_RIGHT_SEND
+        | platform::handle::HANDLE_RIGHT_DUPLICATE
+        | platform::handle::HANDLE_RIGHT_TRANSFER;
+    if let Err(error) =
+        platform::service_ready::notify_handle(ready_target, 0, endpoint_handle, delegated_rights)
+    {
         platform::logln!(
             "posix.service: endpoint publication failed errno={}",
             error.raw()
         );
         platform::process::exit(1);
     }
-    platform::logln!("posix.service: endpoint={endpoint}");
+    platform::logln!("posix.service: endpoint ready");
 
     let mut service = PosixService::new();
     let mut request_bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];

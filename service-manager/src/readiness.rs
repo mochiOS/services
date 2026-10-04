@@ -64,7 +64,7 @@ pub(crate) struct ReadyHandshake {
     binder_token: u64,
     filesystem_status: platform::service_ready::OneShotStatus,
     posix_status: platform::service_ready::OneShotStatus,
-    posix_endpoint: Option<u64>,
+    posix_endpoint: Option<platform::handle::Handle>,
     input_status: platform::service_ready::OneShotStatus,
     display_status: platform::service_ready::OneShotStatus,
     network_status: platform::service_ready::OneShotStatus,
@@ -280,7 +280,7 @@ impl ReadyHandshake {
         &mut self,
         service: ReadyService,
         process_id: u64,
-    ) -> Result<u64, ReadyError> {
+    ) -> Result<platform::handle::Handle, ReadyError> {
         if service != ReadyService::Posix {
             return Err(ReadyError::InvalidMessage);
         }
@@ -300,7 +300,13 @@ impl ReadyHandshake {
                         status,
                         endpoint,
                     } => {
-                        if token != self.posix_token || endpoint == 0 {
+                        if token != self.posix_token || status != 0 || self.posix_endpoint.is_some()
+                        {
+                            let _ = platform::handle::close(endpoint);
+                            if status != 0 {
+                                self.record(token, status)?;
+                                continue;
+                            }
                             return Err(ReadyError::InvalidMessage);
                         }
                         self.posix_endpoint = Some(endpoint);
@@ -345,7 +351,8 @@ impl ReadyHandshake {
                         ready_result(status)?;
                         return Ok(identity);
                     }
-                    ReceivedNotification::Endpoint { .. } => {
+                    ReceivedNotification::Endpoint { endpoint, .. } => {
+                        let _ = platform::handle::close(endpoint);
                         return Err(ReadyError::InvalidMessage);
                     }
                     ReceivedNotification::Deferred(message) => {
@@ -380,8 +387,18 @@ impl ReadyHandshake {
                     ReceivedNotification::Session { .. } => {
                         return Err(ReadyError::InvalidMessage);
                     }
-                    ReceivedNotification::Endpoint { token, status, endpoint } => {
-                        if token != self.posix_token || endpoint == 0 {
+                    ReceivedNotification::Endpoint {
+                        token,
+                        status,
+                        endpoint,
+                    } => {
+                        if token != self.posix_token || status != 0 || self.posix_endpoint.is_some()
+                        {
+                            let _ = platform::handle::close(endpoint);
+                            if status != 0 {
+                                self.record(token, status)?;
+                                continue;
+                            }
                             return Err(ReadyError::InvalidMessage);
                         }
                         self.posix_endpoint = Some(endpoint);
@@ -437,7 +454,7 @@ enum ReceivedNotification {
     Endpoint {
         token: u64,
         status: i32,
-        endpoint: u64,
+        endpoint: platform::handle::Handle,
     },
     Deferred(DeferredMessage),
 }
@@ -445,7 +462,8 @@ enum ReceivedNotification {
 #[inline(never)]
 fn receive_notification() -> Result<Option<ReceivedNotification>, ReadyError> {
     let mut message = [0u8; BOOTSTRAP_MESSAGE_LEN];
-    let received = match platform::ipc::try_wait(&mut message) {
+    let mut handles = platform::ipc::IpcObjectHandles::default();
+    let received = match platform::ipc::try_wait_object_handles(&mut message, &mut handles) {
         Ok(received) => received,
         Err(error) if error.raw() == mochi_user_syscall::EAGAIN as i64 => return Ok(None),
         Err(error) => return Err(ReadyError::Ipc(error.raw().unsigned_abs())),
@@ -453,39 +471,66 @@ fn receive_notification() -> Result<Option<ReceivedNotification>, ReadyError> {
     let length = (received & 0xffff_ffff) as usize;
     let sender = received >> 32;
     let Some(message) = message.get(..length) else {
+        close_received_handles(&handles);
         return Err(ReadyError::InvalidMessage);
     };
-    match length {
-        platform::service_ready::MESSAGE_LEN => {
-            match platform::service_ready::decode_notification(message) {
-                Ok((token, status)) => Ok(Some(ReceivedNotification::Ready { token, status })),
-                Err(_) => Ok(Some(deferred_message(sender, message))),
-            }
+    let decoded = decode_received_notification(message, sender, &handles);
+    if decoded.is_err() {
+        close_received_handles(&handles);
+    }
+    decoded.map(Some)
+}
+
+fn decode_received_notification(
+    message: &[u8],
+    sender: u64,
+    handles: &platform::ipc::IpcObjectHandles,
+) -> Result<ReceivedNotification, ReadyError> {
+    if let Ok((token, status)) = platform::service_ready::decode_handle_notification(message) {
+        if handles.count != 1 {
+            return Err(ReadyError::InvalidMessage);
         }
-        platform::service_ready::SESSION_MESSAGE_LEN => {
-            if let Ok((token, status, identity)) =
-                platform::service_ready::decode_session_notification(message)
-            {
-                Ok(Some(ReceivedNotification::Session {
-                    token,
-                    status,
-                    identity,
-                }))
-            } else if let Ok((token, status, _advertised_endpoint)) =
-                platform::service_ready::decode_endpoint_notification(message)
-            {
-                Ok(Some(ReceivedNotification::Endpoint {
-                    token,
-                    status,
-                    // The IPC layer authenticates the sender endpoint.  Never
-                    // treat a handle claimed inside the payload as authority.
-                    endpoint: sender,
-                }))
-            } else {
-                Ok(Some(deferred_message(sender, message)))
-            }
+        let attached = handles.handles[0];
+        let required =
+            platform::handle::HANDLE_RIGHT_SEND | platform::handle::HANDLE_RIGHT_TRANSFER;
+        let allowed = required | platform::handle::HANDLE_RIGHT_DUPLICATE;
+        if attached.handle == 0
+            || attached.reserved != 0
+            || attached.rights & required != required
+            || attached.rights & !allowed != 0
+        {
+            return Err(ReadyError::InvalidMessage);
         }
-        _ => Ok(Some(deferred_message(sender, message))),
+        return Ok(ReceivedNotification::Endpoint {
+            token,
+            status,
+            endpoint: attached.handle,
+        });
+    }
+    if handles.count != 0 {
+        return Err(ReadyError::InvalidMessage);
+    }
+    if let Ok((token, status)) = platform::service_ready::decode_notification(message) {
+        return Ok(ReceivedNotification::Ready { token, status });
+    }
+    if let Ok((token, status, identity)) =
+        platform::service_ready::decode_session_notification(message)
+    {
+        return Ok(ReceivedNotification::Session {
+            token,
+            status,
+            identity,
+        });
+    }
+    Ok(deferred_message(sender, message))
+}
+
+fn close_received_handles(handles: &platform::ipc::IpcObjectHandles) {
+    let count = core::cmp::min(handles.count as usize, handles.handles.len());
+    for attached in &handles.handles[..count] {
+        if attached.handle != 0 {
+            let _ = platform::handle::close(attached.handle);
+        }
     }
 }
 
@@ -527,5 +572,50 @@ mod tests {
         assert_eq!(ready_timeout(ReadyService::User), 5_000);
         assert_eq!(ready_timeout(ReadyService::SecureUi), 5_000);
         assert_eq!(ready_timeout(ReadyService::Workspace), 5_000);
+    }
+
+    #[test]
+    fn endpoint_ready_uses_one_restricted_attached_handle() {
+        let message = platform::service_ready::handle_notification(7, 0);
+        let mut handles = platform::ipc::IpcObjectHandles::default();
+        handles.count = 1;
+        handles.handles[0] = platform::ipc::IpcObjectHandle {
+            handle: 41,
+            reserved: 0,
+            rights: platform::handle::HANDLE_RIGHT_SEND
+                | platform::handle::HANDLE_RIGHT_DUPLICATE
+                | platform::handle::HANDLE_RIGHT_TRANSFER,
+        };
+        assert!(matches!(
+            decode_received_notification(&message, 99, &handles),
+            Ok(ReceivedNotification::Endpoint {
+                token: 7,
+                status: 0,
+                endpoint: 41,
+            })
+        ));
+    }
+
+    #[test]
+    fn endpoint_ready_rejects_missing_or_receive_capable_handles() {
+        let message = platform::service_ready::handle_notification(7, 0);
+        let mut handles = platform::ipc::IpcObjectHandles::default();
+        assert!(matches!(
+            decode_received_notification(&message, 99, &handles),
+            Err(ReadyError::InvalidMessage)
+        ));
+
+        handles.count = 1;
+        handles.handles[0] = platform::ipc::IpcObjectHandle {
+            handle: 41,
+            reserved: 0,
+            rights: platform::handle::HANDLE_RIGHT_SEND
+                | platform::handle::HANDLE_RIGHT_RECEIVE
+                | platform::handle::HANDLE_RIGHT_TRANSFER,
+        };
+        assert!(matches!(
+            decode_received_notification(&message, 99, &handles),
+            Err(ReadyError::InvalidMessage)
+        ));
     }
 }
