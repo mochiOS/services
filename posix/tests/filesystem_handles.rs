@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::fs;
 use std::io;
+use std::os::unix::fs::symlink;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -83,8 +84,12 @@ fn test_filesystem() -> FilesystemService {
     let temporary = TempTree::create();
     let source = temporary.0.join("source");
     let directory = source.join("removed");
+    let blocked = source.join("blocked");
     let image_path = temporary.0.join("filesystem.ext4");
     fs::create_dir_all(&directory).unwrap();
+    fs::create_dir_all(&blocked).unwrap();
+    fs::write(blocked.join("child"), b"private").unwrap();
+    symlink("/blocked/child", source.join("redirect")).unwrap();
     let output = Command::new("mke2fs")
         .args(["-q", "-t", "ext4", "-F", "-d"])
         .arg(&source)
@@ -100,7 +105,18 @@ fn test_filesystem() -> FilesystemService {
     let image = SharedImage(Arc::new(Mutex::new(fs::read(image_path).unwrap())));
     let filesystem =
         Ext4::load_with_writer(Box::new(image.clone()), Some(Box::new(image))).unwrap();
-    FilesystemService::new(filesystem)
+    let mut service = FilesystemService::new(filesystem);
+    let restricted = service.handle(
+        protocol::Header {
+            opcode: protocol::OP_SETATTR,
+            flags: protocol::SETATTR_MODE,
+            mode: 0,
+            ..protocol::Header::default()
+        },
+        b"/blocked",
+    );
+    assert_eq!(restricted.header.status, 0);
+    service
 }
 
 #[test]
@@ -145,4 +161,19 @@ fn an_open_directory_remains_a_valid_object_after_unlink() {
         .provider_read(open_id, protocol::MAX_IO_LEN)
         .unwrap();
     assert!(!entries.is_empty());
+}
+
+#[test]
+fn symlink_targets_enforce_search_permission_on_the_actual_directory() {
+    let mut filesystem = test_filesystem();
+    let result = filesystem.stat_at(
+        protocol::Header {
+            opcode: protocol::OP_STAT_AT,
+            offset: u64::from(501u32) | (u64::from(20u32) << 32),
+            ..protocol::Header::default()
+        },
+        b"/redirect",
+        None,
+    );
+    assert!(matches!(result, Err(13)));
 }

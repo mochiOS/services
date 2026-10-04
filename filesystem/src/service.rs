@@ -1,11 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 use ext4plus::dir::Dir;
 use ext4plus::error::Ext4Error;
 use ext4plus::file::File;
 use ext4plus::inode::{Inode, InodeCreationOptions, InodeFlags, InodeMode};
-use ext4plus::path::PathBuf;
+use ext4plus::path::{Component, Path, PathBuf};
 use ext4plus::{DirEntryName, Ext4, FileType, FollowSymlinks, Metadata};
 use mochios_filesystem_protocol as protocol;
 
@@ -289,19 +289,15 @@ impl FilesystemService {
         if attached != base_open_id.is_some() {
             return Err(EINVAL);
         }
-        let path = self.open_path(payload, base_open_id)?;
         let uid = request.offset as u32;
         let gid = (request.offset >> 32) as u32;
-        self.check_search_path(path.as_str(), uid, gid)?;
         let follow = if request.flags & protocol::STAT_AT_NOFOLLOW != 0 {
             FollowSymlinks::ExcludeFinalComponent
         } else {
             FollowSymlinks::All
         };
-        let inode = self
-            .fs
-            .path_to_inode(path.as_str().try_into().map_err(|_| EINVAL)?, follow)
-            .map_err(errno)?;
+        let base = self.resolve_base_inode(payload, base_open_id)?;
+        let inode = self.resolve_inode_at(base, payload, follow, uid, gid)?;
         let node_id = u64::from(inode.index.get());
         Ok(self.node_status_response(request, node_id, inode.metadata()))
     }
@@ -337,19 +333,15 @@ impl FilesystemService {
         if attached != base_open_id.is_some() {
             return Err(EINVAL);
         }
-        let path = self.open_path(payload, base_open_id)?;
         let uid = request.offset as u32;
         let gid = (request.offset >> 32) as u32;
-        self.check_search_path(path.as_str(), uid, gid)?;
         let follow = if request.flags & protocol::ACCESS_AT_NOFOLLOW != 0 {
             FollowSymlinks::ExcludeFinalComponent
         } else {
             FollowSymlinks::All
         };
-        let inode = self
-            .fs
-            .path_to_inode(path.as_str().try_into().map_err(|_| EINVAL)?, follow)
-            .map_err(errno)?;
+        let base = self.resolve_base_inode(payload, base_open_id)?;
+        let inode = self.resolve_inode_at(base, payload, follow, uid, gid)?;
         let requested = request.flags
             & (protocol::ACCESS_AT_READ
                 | protocol::ACCESS_AT_WRITE
@@ -388,6 +380,146 @@ impl FilesystemService {
             return Err(ENOTDIR);
         }
         Ok(joined_path(base_path, path))
+    }
+
+    fn resolve_base_inode(
+        &self,
+        path: &[u8],
+        base_open_id: Option<u64>,
+    ) -> Result<Inode, i32> {
+        if path.first() == Some(&b'/') || base_open_id.is_none() {
+            return self.fs.read_root_inode().map_err(errno);
+        }
+        let base = self.opens.get(&base_open_id.ok_or(EINVAL)?).ok_or(EBADF)?;
+        if !base.inode.file_type().is_dir() {
+            return Err(ENOTDIR);
+        }
+        Ok(base.inode.clone())
+    }
+
+    /// Resolves a path one component at a time from an already-open directory
+    /// inode. Search permission is checked on the directory actually visited,
+    /// including directories reached through symbolic links.
+    fn resolve_inode_at(
+        &self,
+        base: Inode,
+        path: &[u8],
+        follow: FollowSymlinks,
+        uid: u32,
+        gid: u32,
+    ) -> Result<Inode, i32> {
+        const MAX_SYMLINKS: usize = 40;
+        const MAX_COMPONENTS: usize = 1024;
+
+        if path.is_empty() || path.len() > protocol::MAX_PATH_LEN || path.contains(&0) {
+            return Err(EINVAL);
+        }
+        let parsed = Path::try_from(path).map_err(|_| EINVAL)?;
+        let root = self.fs.read_root_inode().map_err(errno)?;
+        let mut ancestors = if parsed.is_absolute() {
+            vec![root.clone()]
+        } else {
+            self.ancestry_from_root(&root, base)?
+        };
+        let mut pending = owned_components(parsed);
+        let require_directory = path.last() == Some(&b'/');
+        let mut symlinks = 0usize;
+        let mut iterations = 0usize;
+
+        while let Some(component) = pending.pop_front() {
+            iterations = iterations.checked_add(1).ok_or(ELOOP)?;
+            if iterations > MAX_COMPONENTS {
+                return Err(ELOOP);
+            }
+            if component == OwnedComponent::Root {
+                ancestors.truncate(1);
+                continue;
+            }
+            let current = ancestors.last().ok_or(EIO)?;
+            if !current.file_type().is_dir() {
+                return Err(ENOTDIR);
+            }
+            let metadata = current.metadata();
+            if !permission_allows(
+                metadata.mode(),
+                protocol::NODE_TYPE_DIRECTORY,
+                metadata.uid(),
+                metadata.gid(),
+                uid,
+                gid,
+                protocol::ACCESS_AT_EXECUTE,
+            ) {
+                return Err(EACCES);
+            }
+            match component {
+                OwnedComponent::Root | OwnedComponent::Current => {}
+                OwnedComponent::Parent => {
+                    if ancestors.len() > 1 {
+                        ancestors.pop();
+                    }
+                }
+                OwnedComponent::Normal(name) => {
+                    let directory = Dir::open_inode(&self.fs, current.clone()).map_err(errno)?;
+                    let child = directory
+                        .get_entry(DirEntryName::try_from(name.as_slice()).map_err(|_| EINVAL)?)
+                        .map_err(errno)?;
+                    let is_final = pending.is_empty();
+                    if child.file_type().is_symlink()
+                        && (follow == FollowSymlinks::All || !is_final)
+                    {
+                        symlinks = symlinks.checked_add(1).ok_or(ELOOP)?;
+                        if symlinks > MAX_SYMLINKS {
+                            return Err(ELOOP);
+                        }
+                        let target = child.symlink_target(&self.fs).map_err(errno)?;
+                        if target.as_ref().len().saturating_add(path.len())
+                            > protocol::MAX_PATH_LEN
+                        {
+                            return Err(EINVAL);
+                        }
+                        if target.is_absolute() {
+                            ancestors.truncate(1);
+                        }
+                        let mut target_components = owned_components(target.as_path());
+                        while let Some(target_component) = target_components.pop_back() {
+                            pending.push_front(target_component);
+                        }
+                    } else {
+                        ancestors.push(child);
+                    }
+                }
+            }
+        }
+        let inode = ancestors.pop().ok_or(EIO)?;
+        if require_directory && !inode.file_type().is_dir() {
+            return Err(ENOTDIR);
+        }
+        Ok(inode)
+    }
+
+    fn ancestry_from_root(&self, root: &Inode, base: Inode) -> Result<Vec<Inode>, i32> {
+        const MAX_ANCESTORS: usize = 1024;
+
+        if !base.file_type().is_dir() {
+            return Err(ENOTDIR);
+        }
+        let mut reversed = vec![base];
+        while reversed.last().ok_or(EIO)?.index != root.index {
+            if reversed.len() >= MAX_ANCESTORS {
+                return Err(ELOOP);
+            }
+            let current = reversed.last().ok_or(EIO)?;
+            let parent = Dir::open_inode(&self.fs, current.clone())
+                .map_err(errno)?
+                .get_entry(DirEntryName::try_from("..").map_err(|_| EIO)?)
+                .map_err(errno)?;
+            if parent.index == current.index {
+                return Err(EACCES);
+            }
+            reversed.push(parent);
+        }
+        reversed.reverse();
+        Ok(reversed)
     }
 
     fn check_search_path(&self, path: &str, uid: u32, gid: u32) -> Result<(), i32> {
@@ -1465,6 +1597,25 @@ fn joined_path(parent: &str, name: &str) -> String {
         _ if parent == "/" => format!("/{name}"),
         _ => format!("{}/{name}", parent.trim_end_matches('/')),
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum OwnedComponent {
+    Root,
+    Current,
+    Parent,
+    Normal(Vec<u8>),
+}
+
+fn owned_components(path: Path<'_>) -> VecDeque<OwnedComponent> {
+    path.components()
+        .map(|component| match component {
+            Component::RootDir => OwnedComponent::Root,
+            Component::CurDir => OwnedComponent::Current,
+            Component::ParentDir => OwnedComponent::Parent,
+            Component::Normal(name) => OwnedComponent::Normal(name.as_ref().to_vec()),
+        })
+        .collect()
 }
 
 fn node_type(file_type: FileType) -> u32 {
