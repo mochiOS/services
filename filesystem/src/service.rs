@@ -100,7 +100,9 @@ impl FilesystemService {
             protocol::OP_OPEN_AT
             | protocol::OP_STAT_AT
             | protocol::OP_STAT_HANDLE
-            | protocol::OP_ACCESS_AT => Err(EINVAL),
+            | protocol::OP_ACCESS_AT
+            | protocol::OP_TRUNCATE_HANDLE
+            | protocol::OP_SYNC_HANDLE => Err(EINVAL),
             _ => Err(ENOSYS),
         };
         result.unwrap_or_else(|errno| self.error(request, errno))
@@ -1487,6 +1489,24 @@ impl FilesystemService {
             .ok_or(EISDIR)?
             .truncate(request.offset)
             .map_err(errno)?;
+        Ok(self.success(request))
+    }
+
+    pub fn truncate_handle(
+        &mut self,
+        mut request: protocol::Header,
+        open_id: u64,
+    ) -> Result<Response, i32> {
+        request.open_id = open_id;
+        self.truncate(request)
+    }
+
+    pub fn sync_handle(
+        &self,
+        request: protocol::Header,
+        open_id: u64,
+    ) -> Result<Response, i32> {
+        self.opens.get(&open_id).ok_or(EBADF)?;
         Ok(self.success(request))
     }
 

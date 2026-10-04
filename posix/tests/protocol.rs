@@ -198,6 +198,10 @@ fn fixed_size_session_payloads_reject_trailing_bytes() {
         protocol::decode_umask(&[0; protocol::UMASK_PAYLOAD_LEN + 1]),
         Err(protocol::ProtocolError::InvalidLength)
     );
+    assert_eq!(
+        protocol::decode_file_length(&[0; protocol::FILE_LENGTH_PAYLOAD_LEN + 1]),
+        Err(protocol::ProtocolError::InvalidLength)
+    );
 }
 
 #[test]
@@ -648,6 +652,8 @@ struct RecordingFilesystem {
     roots_opened: usize,
     stat_file: Option<AttachedObject<u32>>,
     stat_mode: Option<u32>,
+    truncated: Option<(AttachedObject<u32>, u64)>,
+    synced: Option<AttachedObject<u32>>,
     retained: Vec<AttachedObject<u32>>,
     released: Vec<AttachedObject<u32>>,
     path_query: Option<(AttachedObject<u32>, AttachedObject<u32>)>,
@@ -705,6 +711,16 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
             status.mode = mode;
         }
         Ok(status)
+    }
+
+    fn ftruncate(&mut self, file: AttachedObject<u32>, length: u64) -> Result<(), i32> {
+        self.truncated = Some((file, length));
+        Ok(())
+    }
+
+    fn fsync(&mut self, file: AttachedObject<u32>) -> Result<(), i32> {
+        self.synced = Some(file);
+        Ok(())
     }
 
     fn access_at(&mut self, request: &PreparedAccess, paths: PathObjects<u32>) -> Result<(), i32> {
@@ -934,6 +950,58 @@ fn fstat_uses_only_the_explicitly_attached_file_handle() {
         &mut filesystem,
     );
     assert_eq!(invalid.response.header.status, posix_service::STATUS_EINVAL);
+}
+
+#[test]
+fn file_mutations_use_only_the_explicitly_attached_handle() {
+    let peer = PeerIdentity {
+        process_id: 117,
+        effective_uid: 507,
+        effective_gid: 26,
+    };
+    let mut service = PosixService::new();
+    service.handle(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let file = AttachedObject {
+        handle: 59,
+        rights: 0x81,
+    };
+    let mut filesystem = RecordingFilesystem::default();
+    let mut length = [0u8; protocol::FILE_LENGTH_PAYLOAD_LEN];
+    protocol::encode_file_length(8192, &mut length).unwrap();
+
+    let truncated = service.handle_objects(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_FTRUNCATE,
+            ..protocol::Header::default()
+        },
+        &length,
+        &[file],
+        &mut filesystem,
+    );
+    assert_eq!(truncated.response.header.status, protocol::STATUS_OK);
+    assert_eq!(filesystem.truncated, Some((file, 8192)));
+
+    let synced = service.handle_objects(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_FSYNC,
+            ..protocol::Header::default()
+        },
+        &[],
+        &[file],
+        &mut filesystem,
+    );
+    assert_eq!(synced.response.header.status, protocol::STATUS_OK);
+    assert_eq!(filesystem.synced, Some(file));
+    assert_eq!(filesystem.roots_opened, 0);
 }
 
 #[test]

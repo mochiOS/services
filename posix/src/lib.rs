@@ -110,6 +110,10 @@ pub trait FilesystemBackend<H: Copy> {
     /// Reads metadata from the open file description identified by `file`.
     fn fstat(&mut self, file: AttachedObject<H>) -> Result<protocol::FileStatus, i32>;
 
+    fn ftruncate(&mut self, file: AttachedObject<H>, length: u64) -> Result<(), i32>;
+
+    fn fsync(&mut self, file: AttachedObject<H>) -> Result<(), i32>;
+
     /// Resolves a path and checks access using the supplied authenticated
     /// POSIX credentials as one backend operation.
     fn access_at(&mut self, request: &PreparedAccess, paths: PathObjects<H>) -> Result<(), i32>;
@@ -201,7 +205,10 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_CHDIR_AT
             | protocol::OP_FCHDIR
             | protocol::OP_GETCWD => Err(STATUS_EINVAL),
-            protocol::OP_SET_UID | protocol::OP_SET_GID => Err(STATUS_EINVAL),
+            protocol::OP_SET_UID
+            | protocol::OP_SET_GID
+            | protocol::OP_FTRUNCATE
+            | protocol::OP_FSYNC => Err(STATUS_EINVAL),
             _ => Err(protocol::STATUS_ENOSYS),
         };
         let (status, payload) = match result {
@@ -237,6 +244,8 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_CHDIR_AT
                 | protocol::OP_FCHDIR
                 | protocol::OP_GETCWD
+                | protocol::OP_FTRUNCATE
+                | protocol::OP_FSYNC
         ) {
             let response = if handles.is_empty() {
                 self.handle(peer, header, payload)
@@ -387,6 +396,34 @@ impl<H: Copy> PosixService<H> {
                 };
                 match filesystem.directory_path(directories.root, directories.cwd) {
                     Ok(path) => object_payload(header.request_id, path),
+                    Err(status) => object_error(header.request_id, status),
+                }
+            }
+            protocol::OP_FTRUNCATE => {
+                if handles.len() != 1 {
+                    return object_error(header.request_id, STATUS_EINVAL);
+                }
+                if !self.sessions.contains_key(&peer.process_id) {
+                    return object_error(header.request_id, protocol::STATUS_ESRCH);
+                }
+                let length = match protocol::decode_file_length(payload) {
+                    Ok(length) => length,
+                    Err(_) => return object_error(header.request_id, STATUS_EINVAL),
+                };
+                match filesystem.ftruncate(handles[0], length) {
+                    Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
+                    Err(status) => object_error(header.request_id, status),
+                }
+            }
+            protocol::OP_FSYNC => {
+                if !payload.is_empty() || handles.len() != 1 {
+                    return object_error(header.request_id, STATUS_EINVAL);
+                }
+                if !self.sessions.contains_key(&peer.process_id) {
+                    return object_error(header.request_id, protocol::STATUS_ESRCH);
+                }
+                match filesystem.fsync(handles[0]) {
+                    Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
                     Err(status) => object_error(header.request_id, status),
                 }
             }

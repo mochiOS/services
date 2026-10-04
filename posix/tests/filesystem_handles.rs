@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ext4plus::{Ext4, Ext4Read, Ext4Write};
 use filesystem_service::service::{FilesystemService, PathAnchors};
+use mochi_user_platform::handle::HANDLE_SEEK_START;
 use mochios_filesystem_protocol as protocol;
 
 #[derive(Clone)]
@@ -168,6 +169,51 @@ fn an_open_directory_remains_a_valid_object_after_unlink() {
         .provider_read(open_id, protocol::MAX_IO_LEN)
         .unwrap();
     assert!(!entries.is_empty());
+}
+
+#[test]
+fn truncate_and_sync_address_an_open_object_without_a_path() {
+    let mut filesystem = test_filesystem();
+    let opened = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ
+                    | protocol::OPEN_AT_WRITE
+                    | protocol::OPEN_AT_CREATE,
+                mode: 0o644,
+                ..protocol::Header::default()
+            },
+            b"/truncate.txt",
+            PathAnchors::default(),
+        )
+        .unwrap();
+    let open_id = opened.header.open_id;
+    filesystem.provider_write(open_id, b"abcdefgh").unwrap();
+
+    filesystem
+        .truncate_handle(
+            protocol::Header {
+                opcode: protocol::OP_TRUNCATE_HANDLE,
+                offset: 3,
+                ..protocol::Header::default()
+            },
+            open_id,
+        )
+        .unwrap();
+    filesystem
+        .provider_seek(open_id, 0, HANDLE_SEEK_START)
+        .unwrap();
+    assert_eq!(filesystem.provider_read(open_id, 8).unwrap(), b"abc");
+    filesystem
+        .sync_handle(
+            protocol::Header {
+                opcode: protocol::OP_SYNC_HANDLE,
+                ..protocol::Header::default()
+            },
+            open_id,
+        )
+        .unwrap();
 }
 
 #[test]

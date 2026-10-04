@@ -261,6 +261,46 @@ fn main() {
                             payload: Vec::new(),
                         },
                     }
+                } else if matches!(
+                    header.opcode,
+                    protocol::OP_TRUNCATE_HANDLE | protocol::OP_SYNC_HANDLE
+                ) {
+                    let open_id = decode_single_open(&attached);
+                    let result = open_id.and_then(|open_id| {
+                        if header.opcode == protocol::OP_TRUNCATE_HANDLE {
+                            service.truncate_handle(header, open_id)
+                        } else {
+                            service.sync_handle(header, open_id)
+                        }
+                    });
+                    match result {
+                        Ok(response) => {
+                            if header.opcode == protocol::OP_SYNC_HANDLE
+                                && partition.flush().is_err()
+                            {
+                                filesystem_service::service::Response {
+                                    header: protocol::Header {
+                                        opcode: protocol::OP_STATUS,
+                                        request_id: header.request_id,
+                                        status: -5,
+                                        ..protocol::Header::default()
+                                    },
+                                    payload: Vec::new(),
+                                }
+                            } else {
+                                response
+                            }
+                        }
+                        Err(error) => filesystem_service::service::Response {
+                            header: protocol::Header {
+                                opcode: protocol::OP_STATUS,
+                                request_id: header.request_id,
+                                status: -error,
+                                ..protocol::Header::default()
+                            },
+                            payload: Vec::new(),
+                        },
+                    }
                 } else if header.opcode == protocol::OP_ACCESS_AT {
                     let anchors = decode_path_anchors(
                         header.flags,
@@ -354,6 +394,25 @@ fn decode_open_pair(
             platform::handle::identify_provider_object(object.handle).map_err(|_| 9)?;
     }
     Ok((open_ids[0], open_ids[1]))
+}
+
+#[cfg(target_os = "mochios")]
+fn decode_single_open(
+    attached: &mochi_user_platform::ipc::IpcObjectHandles,
+) -> Result<u64, i32> {
+    use mochi_user_platform as platform;
+
+    if attached.count != 1 {
+        return Err(22);
+    }
+    let object = attached.handles[0];
+    if object.handle == 0
+        || object.reserved != 0
+        || object.rights & platform::handle::HANDLE_RIGHT_TRANSFER == 0
+    {
+        return Err(13);
+    }
+    platform::handle::identify_provider_object(object.handle).map_err(|_| 9)
 }
 
 #[cfg(target_os = "mochios")]

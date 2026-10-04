@@ -325,6 +325,25 @@ impl RuntimeFilesystem {
 }
 
 #[cfg(target_os = "mochios")]
+fn single_file_handle(
+    file: posix_service::AttachedObject<mochi_user_platform::handle::Handle>,
+) -> Result<mochi_user_platform::ipc::IpcObjectHandles, i32> {
+    use mochi_user_platform as platform;
+
+    if file.rights & platform::handle::HANDLE_RIGHT_TRANSFER == 0 {
+        return Err(-13);
+    }
+    let mut handles = platform::ipc::IpcObjectHandles::default();
+    handles.count = 1;
+    handles.handles[0] = platform::ipc::IpcObjectHandle {
+        handle: file.handle,
+        reserved: 0,
+        rights: platform::handle::HANDLE_RIGHT_TRANSFER,
+    };
+    Ok(handles)
+}
+
+#[cfg(target_os = "mochios")]
 impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for RuntimeFilesystem {
     fn open_session_root(
         &mut self,
@@ -464,6 +483,42 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             handles,
         )?;
         filesystem_status_to_posix(status)
+    }
+
+    fn ftruncate(
+        &mut self,
+        file: posix_service::AttachedObject<mochi_user_platform::handle::Handle>,
+        length: u64,
+    ) -> Result<(), i32> {
+        use mochios_filesystem_protocol as filesystem;
+
+        self.empty_call(
+            filesystem::Header {
+                opcode: filesystem::OP_TRUNCATE_HANDLE,
+                request_id: 6,
+                offset: length,
+                ..filesystem::Header::default()
+            },
+            &[],
+            single_file_handle(file)?,
+        )
+    }
+
+    fn fsync(
+        &mut self,
+        file: posix_service::AttachedObject<mochi_user_platform::handle::Handle>,
+    ) -> Result<(), i32> {
+        use mochios_filesystem_protocol as filesystem;
+
+        self.empty_call(
+            filesystem::Header {
+                opcode: filesystem::OP_SYNC_HANDLE,
+                request_id: 7,
+                ..filesystem::Header::default()
+            },
+            &[],
+            single_file_handle(file)?,
+        )
     }
 
     fn access_at(
