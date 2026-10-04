@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 use mochi_user_platform as platform;
 
 const CAPABILITY_SERVICE_NAME: &str = "capability.service";
+const PACKAGE_SERVICE_NAME: &str = "package.service";
 
 pub(crate) fn encode_spawn_args(items: &[String]) -> Vec<u8> {
     let mut output = vec![0; 512];
@@ -50,16 +51,18 @@ pub(crate) fn call_with_wait(
     }
 }
 
-pub(crate) fn install_posix_endpoint(
+fn install_posix_endpoint_for(
+    service_name: &str,
+    opcode: u32,
     endpoint: platform::handle::Handle,
 ) -> Result<(), mochi_user_syscall::SysError> {
-    let destination = platform::process::find_by_name(CAPABILITY_SERVICE_NAME)?;
+    let destination = platform::process::find_by_name(service_name)?;
     if destination == 0 {
         return Err(sys_error(mochi_user_syscall::ENOENT));
     }
     let destination =
         u32::try_from(destination).map_err(|_| sys_error(mochi_user_syscall::EOVERFLOW))?;
-    let request = platform::capability::INSTALL_POSIX_ENDPOINT_OPCODE.to_le_bytes();
+    let request = opcode.to_le_bytes();
     let mut reply = [0u8; core::mem::size_of::<u64>()];
     let mut handles = platform::ipc::IpcObjectHandles::default();
     handles.count = 1;
@@ -75,6 +78,21 @@ pub(crate) fn install_posix_endpoint(
         return Err(mochi_user_syscall::SysError::from_raw(status as i64));
     }
     Ok(())
+}
+
+pub(crate) fn install_early_posix_endpoints(
+    endpoint: platform::handle::Handle,
+) -> Result<(), mochi_user_syscall::SysError> {
+    install_posix_endpoint_for(
+        CAPABILITY_SERVICE_NAME,
+        platform::capability::INSTALL_POSIX_ENDPOINT_OPCODE,
+        endpoint,
+    )?;
+    install_posix_endpoint_for(
+        PACKAGE_SERVICE_NAME,
+        mochios_package_protocol::INSTALL_POSIX_ENDPOINT_OPCODE,
+        endpoint,
+    )
 }
 
 pub(crate) fn resolve_capabilities(

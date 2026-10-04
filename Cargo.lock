@@ -2209,6 +2209,8 @@ dependencies = [
  "mochi-user-syscall",
  "mochios-linux-gui-protocol",
  "mochios-package-protocol",
+ "mochios-posix-client",
+ "mochios-posix-protocol",
  "mochios-signature-protocol",
  "sha2",
 ]
@@ -2978,6 +2980,7 @@ dependencies = [
  "mochios-driver-control-protocol",
  "mochios-filesystem-protocol",
  "mochios-linux-portal-protocol",
+ "mochios-package-protocol",
  "mochios-permission-prompt-protocol",
  "mochios-posix-protocol",
  "mochios-user-database",

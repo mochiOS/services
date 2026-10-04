@@ -14,6 +14,8 @@ use mochios_signature_protocol::{
 };
 use sha2::{Digest, Sha256};
 
+mod posix_io;
+
 const SIG_SERVICE_NAME: &str = "signature.service";
 const LINUX_SERVICE_NAME: &str = "linux.service";
 const CAPABILITY_SERVICE_NAME: &str = "capability.service";
@@ -245,7 +247,7 @@ fn write_file(path: &str, data: &[u8], mode: u64) -> Result<(), mochi_user_sysca
                     current.push('/');
                 }
                 current.push_str(seg);
-                match platform::file::create_dir(&current, FILE_MODE_755) {
+                match posix_io::create_dir(&current, FILE_MODE_755) {
                     Ok(_) => {}
                     Err(err) if err.errno() == Some(mochi_user_syscall::EEXIST.wrapping_neg()) => {}
                     Err(err) => {
@@ -260,7 +262,7 @@ fn write_file(path: &str, data: &[u8], mode: u64) -> Result<(), mochi_user_sysca
             }
         }
     }
-    let fd = platform::file::openat_path(-100, path, O_WRONLY | O_CREAT | O_EXCL, mode).map_err(
+    let fd = posix_io::open_path(path, O_WRONLY | O_CREAT | O_EXCL, mode).map_err(
         |error| {
             diagnostic(&alloc::format!(
                 "package.service: open for write failed path={} errno={}",
@@ -273,11 +275,7 @@ fn write_file(path: &str, data: &[u8], mode: u64) -> Result<(), mochi_user_sysca
     let mut offset = 0usize;
     while offset < data.len() {
         let end = core::cmp::min(offset + FILE_WRITE_CHUNK_LEN, data.len());
-        let wrote = match platform::file::write(
-            fd,
-            data[offset..].as_ptr() as u64,
-            (end - offset) as u64,
-        ) {
+        let wrote = match platform::handle::write(fd, &data[offset..end]) {
             Ok(wrote) => wrote,
             Err(error) => {
                 diagnostic(&alloc::format!(
@@ -286,7 +284,7 @@ fn write_file(path: &str, data: &[u8], mode: u64) -> Result<(), mochi_user_sysca
                     offset,
                     error.errno().unwrap_or(0)
                 ));
-                let _ = platform::file::close(fd);
+                let _ = posix_io::close(fd);
                 return Err(error);
             }
         };
@@ -302,23 +300,23 @@ fn write_file(path: &str, data: &[u8], mode: u64) -> Result<(), mochi_user_sysca
         offset += wrote as usize;
     }
     let sync_result = if offset == data.len() {
-        platform::file::sync(fd).map(|_| ())
+        posix_io::sync(fd)
     } else {
         Ok(())
     };
-    let close_result = platform::file::close(fd);
+    let close_result = posix_io::close(fd);
     if offset != data.len() {
         return Err(mochi_user_syscall::SysError::from_raw(
             mochi_user_syscall::EIO as i64,
         ));
     }
     sync_result?;
-    close_result.map(|_| ())
+    close_result
 }
 
 fn rollback_created_files(paths: &[String]) {
     for path in paths.iter().rev() {
-        if let Err(error) = platform::file::remove(path) {
+        if let Err(error) = posix_io::remove(path) {
             if error.errno() != Some(mochi_user_syscall::ENOENT.wrapping_neg()) {
                 diagnostic(&alloc::format!(
                     "package.service: rollback failed path={} errno={}",
@@ -353,21 +351,22 @@ fn notify_package_index_changed() -> Result<(), mochi_user_syscall::SysError> {
 }
 
 fn require_path_absent(path: &str) -> Result<(), mochi_user_syscall::SysError> {
-    match platform::file::open_path(path, 0) {
-        Ok(fd) => {
-            let _ = platform::file::close(fd);
-            Err(mochi_user_syscall::SysError::from_raw(
-                mochi_user_syscall::EEXIST as i64,
-            ))
-        }
-        Err(error) if error.errno() == Some(mochi_user_syscall::ENOENT.wrapping_neg()) => Ok(()),
-        Err(error) => Err(error),
+    match posix_io::path_exists(path)? {
+        true => Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EEXIST as i64,
+        )),
+        false => Ok(()),
     }
 }
 
 fn require_path_present(path: &str) -> Result<(), mochi_user_syscall::SysError> {
-    let fd = platform::file::open_path(path, 0)?;
-    platform::file::close(fd).map(|_| ())
+    if posix_io::path_exists(path)? {
+        Ok(())
+    } else {
+        Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::ENOENT as i64,
+        ))
+    }
 }
 
 struct StagedUpdate {
@@ -405,8 +404,8 @@ fn manifest_physical_targets(
 
 fn rollback_update(staged: &[StagedUpdate], committed: usize) {
     for entry in staged[..committed].iter().rev() {
-        let _ = platform::file::remove(&entry.target);
-        if let Err(error) = platform::file::rename(&entry.backup, &entry.target) {
+        let _ = posix_io::remove(&entry.target);
+        if let Err(error) = posix_io::rename(&entry.backup, &entry.target) {
             diagnostic(&alloc::format!(
                 "package.service: update restore failed path={} errno={}",
                 entry.target,
@@ -415,7 +414,7 @@ fn rollback_update(staged: &[StagedUpdate], committed: usize) {
         }
     }
     for entry in &staged[committed..] {
-        let _ = platform::file::remove(&entry.temporary);
+        let _ = posix_io::remove(&entry.temporary);
     }
 }
 
@@ -428,7 +427,7 @@ fn update_package_files(
     manifest_path: &str,
     manifest_bytes: &[u8],
 ) -> Result<(), mochi_user_syscall::SysError> {
-    let existing_manifest_bytes = platform::file::read_to_end_path(manifest_path)?;
+    let existing_manifest_bytes = posix_io::read_to_end_path(manifest_path)?;
     let existing_manifest_text = core::str::from_utf8(&existing_manifest_bytes)
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64))?;
     let existing_manifest = platform::package::parse_manifest(existing_manifest_text)
@@ -441,7 +440,7 @@ fn update_package_files(
 
     let mut staged = Vec::new();
     for (target, offset, size, mode, digest) in install_files {
-        let data = platform::package::read_mpkg_range(mpkg_path, offset, size)?;
+        let data = posix_io::read_mpkg_range(mpkg_path, offset, size)?;
         let expected = decode_sha256_digest(&digest).ok_or_else(|| {
             mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
         })?;
@@ -466,12 +465,12 @@ fn update_package_files(
 
     let mut committed = 0usize;
     for entry in &staged {
-        if let Err(error) = platform::file::rename(&entry.target, &entry.backup) {
+        if let Err(error) = posix_io::rename(&entry.target, &entry.backup) {
             rollback_update(&staged, committed);
             return Err(error);
         }
-        if let Err(error) = platform::file::rename(&entry.temporary, &entry.target) {
-            let _ = platform::file::rename(&entry.backup, &entry.target);
+        if let Err(error) = posix_io::rename(&entry.temporary, &entry.target) {
+            let _ = posix_io::rename(&entry.backup, &entry.target);
             rollback_update(&staged, committed);
             return Err(error);
         }
@@ -483,7 +482,7 @@ fn update_package_files(
         return Err(error);
     }
     for entry in &staged {
-        let _ = platform::file::remove(&entry.backup);
+        let _ = posix_io::remove(&entry.backup);
     }
     Ok(())
 }
@@ -539,7 +538,7 @@ fn validate_update_owner(
     verification_path: &str,
     incoming: &VerifiedPackage,
 ) -> Result<SignerContinuity, mochi_user_syscall::SysError> {
-    let bytes = match platform::file::read_to_end_path(verification_path) {
+    let bytes = match posix_io::read_to_end_path(verification_path) {
         Ok(bytes) => bytes,
         Err(error) if error.errno() == Some(mochi_user_syscall::ENOENT.wrapping_neg()) => {
             return Ok(SignerContinuity::NewInstall);
@@ -568,7 +567,7 @@ fn install_package(
         "package.service: package read start path={}",
         mpkg_path
     ));
-    let index = platform::package::index_mpkg(mpkg_path).map_err(|error| {
+    let index = posix_io::index_mpkg(mpkg_path).map_err(|error| {
         diagnostic(&alloc::format!(
             "package.service: package read failed path={} errno={}",
             mpkg_path,
@@ -788,7 +787,7 @@ fn install_package(
     require_path_absent(&manifest_path)?;
     let mut created_paths = Vec::new();
     for (target, offset, size, mode, digest) in install_files {
-        let data = platform::package::read_mpkg_range(mpkg_path, offset, size)?;
+        let data = posix_io::read_mpkg_range(mpkg_path, offset, size)?;
         let expected = decode_sha256_digest(&digest).ok_or_else(|| {
             mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
         })?;
@@ -799,7 +798,7 @@ fn install_package(
             ));
         }
         if let Err(error) = write_file(&target, &data, mode) {
-            let _ = platform::file::remove(&target);
+            let _ = posix_io::remove(&target);
             rollback_created_files(&created_paths);
             diagnostic(&alloc::format!(
                 "package.service: payload write failed path={} errno={}",
@@ -811,7 +810,7 @@ fn install_package(
         created_paths.push(target);
     }
     if let Err(error) = write_file(&verification_path, &verification_bytes, FILE_MODE_644) {
-        let _ = platform::file::remove(&verification_path);
+        let _ = posix_io::remove(&verification_path);
         rollback_created_files(&created_paths);
         diagnostic(&alloc::format!(
             "package.service: verification record write failed errno={}",
@@ -821,7 +820,7 @@ fn install_package(
     }
     created_paths.push(verification_path.clone());
     if let Err(error) = write_file(&manifest_path, &index.manifest, FILE_MODE_644) {
-        let _ = platform::file::remove(&manifest_path);
+        let _ = posix_io::remove(&manifest_path);
         rollback_created_files(&created_paths);
         diagnostic(&alloc::format!(
             "package.service: manifest write failed errno={}",
@@ -832,7 +831,7 @@ fn install_package(
     created_paths.push(manifest_path.clone());
     if let Some(path) = bundle_manifest_path {
         if let Err(error) = write_file(&path, &index.manifest, FILE_MODE_644) {
-            let _ = platform::file::remove(&path);
+            let _ = posix_io::remove(&path);
             rollback_created_files(&created_paths);
             diagnostic(&alloc::format!(
                 "package.service: application manifest write failed errno={}",
@@ -1019,13 +1018,13 @@ fn collect_package_manifests(
     built_in: bool,
     packages: &mut BTreeMap<String, (platform::package::PackageManifest, bool)>,
 ) {
-    let Ok(entries) = platform::file::read_dir_names(path) else {
+    let Ok(entries) = posix_io::read_dir_names(path) else {
         return;
     };
     for name in entries {
         let child = join_path(path, &name);
         if name == "manifest.toml" {
-            let Ok(manifest_bytes) = platform::file::read_to_end_path(&child) else {
+            let Ok(manifest_bytes) = posix_io::read_to_end_path(&child) else {
                 diagnostic(&alloc::format!(
                     "package.service: ignoring invalid manifest {child}"
                 ));
@@ -1042,7 +1041,7 @@ fn collect_package_manifests(
             };
             if !built_in {
                 let verification = join_path(path, "verification.bin");
-                let verified = platform::file::read_to_end_path(&verification)
+                let verified = posix_io::read_to_end_path(&verification)
                     .ok()
                     .is_some_and(|bytes| {
                         InstallRecordView::decode(&bytes).is_ok_and(|record| {
@@ -1101,7 +1100,7 @@ fn reply_package_list(sender: u64, request_id: u64) -> Result<(), mochi_user_sys
 
 fn rollback_removal(staged: &[(String, String)]) {
     for (target, backup) in staged.iter().rev() {
-        if let Err(error) = platform::file::rename(backup, target) {
+        if let Err(error) = posix_io::rename(backup, target) {
             diagnostic(&alloc::format!(
                 "package.service: remove rollback failed path={} errno={}",
                 target,
@@ -1115,7 +1114,7 @@ fn remove_package(package_id: &str) -> Result<(), mochi_user_syscall::SysError> 
     let package_root = alloc::format!("/var/lib/packages/{package_id}");
     let manifest_path = alloc::format!("{package_root}/manifest.toml");
     let verification_path = alloc::format!("{package_root}/verification.bin");
-    let manifest_bytes = platform::file::read_to_end_path(&manifest_path)?;
+    let manifest_bytes = posix_io::read_to_end_path(&manifest_path)?;
     let manifest_text = core::str::from_utf8(&manifest_bytes)
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64))?;
     let manifest = platform::package::parse_manifest(manifest_text)
@@ -1129,7 +1128,7 @@ fn remove_package(package_id: &str) -> Result<(), mochi_user_syscall::SysError> 
             },
         ));
     }
-    let verification_bytes = platform::file::read_to_end_path(&verification_path)?;
+    let verification_bytes = posix_io::read_to_end_path(&verification_path)?;
     let install_record = InstallRecordView::decode(&verification_bytes)
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64))?;
     if install_record.provenance == InstallProvenance::BuiltIn
@@ -1156,7 +1155,7 @@ fn remove_package(package_id: &str) -> Result<(), mochi_user_syscall::SysError> 
         }
         if let Err(error) = require_path_absent(&backup)
             .and_then(|_| require_path_present(&target))
-            .and_then(|_| platform::file::rename(&target, &backup).map(|_| ()))
+            .and_then(|_| posix_io::rename(&target, &backup))
         {
             rollback_removal(&staged);
             return Err(error);
@@ -1169,7 +1168,7 @@ fn remove_package(package_id: &str) -> Result<(), mochi_user_syscall::SysError> 
         return Err(error);
     }
     for (_, backup) in &staged {
-        if let Err(error) = platform::file::remove(backup) {
+        if let Err(error) = posix_io::remove(backup) {
             diagnostic(&alloc::format!(
                 "package.service: removed package cleanup failed path={} errno={}",
                 backup,
@@ -1198,7 +1197,8 @@ fn run_server() -> ! {
     };
     let mut buf = [0u8; 8192];
     loop {
-        let msg = match platform::ipc::wait(endpoint, &mut buf) {
+        let mut attached = platform::ipc::IpcObjectHandles::default();
+        let msg = match platform::ipc::wait_object_handles(endpoint, &mut buf, &mut attached) {
             Ok(msg) => msg,
             Err(_) => {
                 platform::thread::yield_now();
@@ -1207,6 +1207,42 @@ fn run_server() -> ! {
         };
         let sender = msg >> 32;
         let len = (msg & 0xffff_ffff) as usize;
+        if buf[..len.min(buf.len())]
+            == package_protocol::INSTALL_POSIX_ENDPOINT_OPCODE.to_le_bytes()
+        {
+            let valid = attached.reserved == 0
+                && attached.count == 1
+                && attached.handles[0].handle != 0
+                && attached.handles[0].reserved == 0
+                && attached.handles[0].rights & platform::handle::HANDLE_RIGHT_SEND != 0;
+            let status = if !valid {
+                mochi_user_syscall::EINVAL
+            } else if platform::capability::check_thread(sender, "capabilities.manage") != Ok(1) {
+                mochi_user_syscall::EACCES
+            } else {
+                let posix_endpoint = attached.handles[0].handle;
+                attached.handles[0].handle = 0;
+                posix_io::install_endpoint(posix_endpoint)
+                    .map(|_| 0)
+                    .unwrap_or_else(|error| error.errno().unwrap_or(mochi_user_syscall::EIO))
+            };
+            for handle in attached.handles.iter().take(attached.count as usize) {
+                if handle.handle != 0 {
+                    let _ = platform::handle::close(handle.handle);
+                }
+            }
+            let _ = platform::ipc::reply(sender, &status.to_le_bytes());
+            continue;
+        }
+        if attached.count != 0 || attached.reserved != 0 {
+            for handle in attached.handles.iter().take(attached.count as usize) {
+                if handle.handle != 0 {
+                    let _ = platform::handle::close(handle.handle);
+                }
+            }
+            reply_status(sender, 0, true, Err(invalid_request()));
+            continue;
+        }
         let parsed = parse_package_request(&buf[..len]);
         let (request_id, request, legacy) = match parsed {
             Ok(parsed) => parsed,
