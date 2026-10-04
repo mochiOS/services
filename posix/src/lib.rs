@@ -50,6 +50,15 @@ pub struct PreparedMkdir {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedUnlink {
+    pub base: protocol::OpenBase,
+    pub flags: u32,
+    pub path: String,
+    pub effective_uid: u32,
+    pub effective_gid: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedStat {
     pub base: protocol::OpenBase,
     pub flags: u32,
@@ -128,6 +137,8 @@ pub trait FilesystemBackend<H: Copy> {
     fn set_status_flags(&mut self, file: AttachedObject<H>, flags: u32) -> Result<(), i32>;
 
     fn mkdir_at(&mut self, request: &PreparedMkdir, paths: PathObjects<H>) -> Result<(), i32>;
+
+    fn unlink_at(&mut self, request: &PreparedUnlink, paths: PathObjects<H>) -> Result<(), i32>;
 
     /// Resolves a path and checks access using the supplied authenticated
     /// POSIX credentials as one backend operation.
@@ -226,7 +237,8 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_FSYNC
             | protocol::OP_FGETFL
             | protocol::OP_FSETFL
-            | protocol::OP_MKDIR_AT => Err(STATUS_EINVAL),
+            | protocol::OP_MKDIR_AT
+            | protocol::OP_UNLINK_AT => Err(STATUS_EINVAL),
             _ => Err(protocol::STATUS_ENOSYS),
         };
         let (status, payload) = match result {
@@ -267,6 +279,7 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_FGETFL
                 | protocol::OP_FSETFL
                 | protocol::OP_MKDIR_AT
+                | protocol::OP_UNLINK_AT
         ) {
             let response = if handles.is_empty() {
                 self.handle(peer, header, payload)
@@ -293,6 +306,7 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_FCHDIR
                 | protocol::OP_GETCWD
                 | protocol::OP_MKDIR_AT
+                | protocol::OP_UNLINK_AT
         ) {
             if let Err(status) = self.ensure_session_directories(peer.process_id, filesystem) {
                 return object_error(header.request_id, status);
@@ -497,6 +511,20 @@ impl<H: Copy> PosixService<H> {
                     Err(status) => object_error(header.request_id, status),
                 }
             }
+            protocol::OP_UNLINK_AT => {
+                let prepared = match self.prepare_unlink_at(peer, payload, handles.len()) {
+                    Ok(prepared) => prepared,
+                    Err(status) => return object_error(header.request_id, status),
+                };
+                let paths = match self.path_objects(peer.process_id, prepared.base, handles) {
+                    Ok(paths) => paths,
+                    Err(status) => return object_error(header.request_id, status),
+                };
+                match filesystem.unlink_at(&prepared, paths) {
+                    Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
+                    Err(status) => object_error(header.request_id, status),
+                }
+            }
             _ => unreachable!(),
         }
     }
@@ -604,6 +632,30 @@ impl<H: Copy> PosixService<H> {
         Ok(PreparedMkdir {
             base: request.base,
             mode: (request.mode & 0o7777) & !(session.umask & 0o777),
+            path: request.path.to_owned(),
+            effective_uid: session.effective_uid,
+            effective_gid: session.effective_gid,
+        })
+    }
+
+    pub fn prepare_unlink_at(
+        &self,
+        peer: PeerIdentity,
+        payload: &[u8],
+        attached_handles: usize,
+    ) -> Result<PreparedUnlink, i32> {
+        let session = self
+            .sessions
+            .get(&peer.process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let request = protocol::decode_stat_at(payload).map_err(|_| STATUS_EINVAL)?;
+        let expected_handles = usize::from(request.base == protocol::OpenBase::AttachedDirectory);
+        if attached_handles != expected_handles || request.flags & !protocol::UNLINK_FLAGS_ALL != 0 {
+            return Err(STATUS_EINVAL);
+        }
+        Ok(PreparedUnlink {
+            base: request.base,
+            flags: request.flags,
             path: request.path.to_owned(),
             effective_uid: session.effective_uid,
             effective_gid: session.effective_gid,

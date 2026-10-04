@@ -657,6 +657,7 @@ struct RecordingFilesystem {
     status_flags: u32,
     flags_file: Option<AttachedObject<u32>>,
     mkdir_request: Option<posix_service::PreparedMkdir>,
+    unlink_request: Option<posix_service::PreparedUnlink>,
     retained: Vec<AttachedObject<u32>>,
     released: Vec<AttachedObject<u32>>,
     path_query: Option<(AttachedObject<u32>, AttachedObject<u32>)>,
@@ -743,6 +744,17 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         paths: PathObjects<u32>,
     ) -> Result<(), i32> {
         self.mkdir_request = Some(request.clone());
+        self.root = Some(paths.root);
+        self.directory = paths.base;
+        Ok(())
+    }
+
+    fn unlink_at(
+        &mut self,
+        request: &posix_service::PreparedUnlink,
+        paths: PathObjects<u32>,
+    ) -> Result<(), i32> {
+        self.unlink_request = Some(request.clone());
         self.root = Some(paths.root);
         self.directory = paths.base;
         Ok(())
@@ -1145,6 +1157,57 @@ fn mkdir_uses_session_umask_credentials_and_directory_handles() {
     assert_eq!(request.mode, 0o750);
     assert_eq!(request.effective_uid, 505);
     assert_eq!(request.effective_gid, 24);
+    assert_eq!(filesystem.directory, Some(directory));
+}
+
+#[test]
+fn unlink_uses_authenticated_credentials_and_directory_handles() {
+    let peer = PeerIdentity {
+        process_id: 120,
+        effective_uid: 504,
+        effective_gid: 23,
+    };
+    let mut service = PosixService::new();
+    service.handle(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let directory = AttachedObject {
+        handle: 62,
+        rights: 0x81,
+    };
+    let mut payload = [0; protocol::STAT_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
+    let payload_len = protocol::encode_stat_at(
+        protocol::StatAtRequest {
+            base: protocol::OpenBase::AttachedDirectory,
+            flags: protocol::UNLINK_REMOVE_DIRECTORY,
+            path: "child",
+        },
+        &mut payload,
+    )
+    .unwrap();
+    let mut filesystem = RecordingFilesystem::default();
+    let result = service.handle_objects(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_UNLINK_AT,
+            ..protocol::Header::default()
+        },
+        &payload[..payload_len],
+        &[directory],
+        &mut filesystem,
+    );
+
+    assert_eq!(result.response.header.status, protocol::STATUS_OK);
+    let request = filesystem.unlink_request.unwrap();
+    assert_eq!(request.path, "child");
+    assert_eq!(request.flags, protocol::UNLINK_REMOVE_DIRECTORY);
+    assert_eq!(request.effective_uid, 504);
+    assert_eq!(request.effective_gid, 23);
     assert_eq!(filesystem.directory, Some(directory));
 }
 

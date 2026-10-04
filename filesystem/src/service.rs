@@ -105,7 +105,8 @@ impl FilesystemService {
             | protocol::OP_SYNC_HANDLE
             | protocol::OP_GET_FLAGS_HANDLE
             | protocol::OP_SET_FLAGS_HANDLE
-            | protocol::OP_MKDIR_AT => Err(EINVAL),
+            | protocol::OP_MKDIR_AT
+            | protocol::OP_UNLINK_AT => Err(EINVAL),
             _ => Err(ENOSYS),
         };
         result.unwrap_or_else(|errno| self.error(request, errno))
@@ -196,7 +197,7 @@ impl FilesystemService {
             FollowSymlinks::All
         };
         let (inode, created) = match self.resolve_path_at(root, base, payload, follow, uid, gid)? {
-            Resolution::Found(inode) => {
+            Resolution::Found { inode, .. } => {
                 if request.flags & protocol::OPEN_AT_CREATE != 0
                     && request.flags & protocol::OPEN_AT_EXCLUSIVE != 0
                 {
@@ -346,7 +347,7 @@ impl FilesystemService {
             uid,
             gid,
         )? {
-            Resolution::Found(_) => return Err(EEXIST),
+            Resolution::Found { .. } => return Err(EEXIST),
             Resolution::Missing { parent, name } => (parent, name),
         };
         let metadata = parent.metadata();
@@ -390,6 +391,62 @@ impl FilesystemService {
                 directory.inode_mut(),
             )
             .map_err(errno)?;
+        Ok(self.success(request))
+    }
+
+    pub fn unlink_at(
+        &mut self,
+        request: protocol::Header,
+        payload: &[u8],
+        anchors: PathAnchors,
+    ) -> Result<Response, i32> {
+        if request.flags & !protocol::UNLINK_AT_FLAGS_ALL != 0 {
+            return Err(EINVAL);
+        }
+        let root_attached = request.flags & protocol::UNLINK_AT_ROOT_ATTACHED != 0;
+        let base_attached = request.flags & protocol::UNLINK_AT_BASE_ATTACHED != 0;
+        if root_attached != anchors.root_open_id.is_some()
+            || base_attached != anchors.base_open_id.is_some()
+        {
+            return Err(EINVAL);
+        }
+        let uid = request.offset as u32;
+        let gid = (request.offset >> 32) as u32;
+        let (root, base) = self.resolve_anchors(payload, anchors)?;
+        let (inode, parent, name) = match self.resolve_path_at(
+            root,
+            base,
+            payload,
+            FollowSymlinks::ExcludeFinalComponent,
+            uid,
+            gid,
+        )? {
+            Resolution::Found {
+                inode,
+                parent: Some((parent, name)),
+            } => (inode, parent, name),
+            Resolution::Found { parent: None, .. } => return Err(EINVAL),
+            Resolution::Missing { .. } => return Err(ENOENT),
+        };
+        let metadata = parent.metadata();
+        if !permission_allows(
+            metadata.mode(),
+            protocol::NODE_TYPE_DIRECTORY,
+            metadata.uid(),
+            metadata.gid(),
+            uid,
+            gid,
+            protocol::ACCESS_AT_WRITE | protocol::ACCESS_AT_EXECUTE,
+        ) {
+            return Err(EACCES);
+        }
+        self.unlink_entry(
+            parent,
+            &name,
+            inode,
+            request.flags & protocol::UNLINK_AT_REMOVE_DIRECTORY != 0,
+            None,
+        )?;
         Ok(self.success(request))
     }
 
@@ -591,7 +648,7 @@ impl FilesystemService {
         gid: u32,
     ) -> Result<Inode, i32> {
         match self.resolve_path_at(root, base, path, follow, uid, gid)? {
-            Resolution::Found(inode) => Ok(inode),
+            Resolution::Found { inode, .. } => Ok(inode),
             Resolution::Missing { .. } => Err(ENOENT),
         }
     }
@@ -621,6 +678,7 @@ impl FilesystemService {
         let require_directory = path.last() == Some(&b'/');
         let mut symlinks = 0usize;
         let mut iterations = 0usize;
+        let mut last_name = None;
 
         while let Some(component) = pending.pop_front() {
             iterations = iterations.checked_add(1).ok_or(ELOOP)?;
@@ -629,6 +687,7 @@ impl FilesystemService {
             }
             if component == OwnedComponent::Root {
                 ancestors.truncate(1);
+                last_name = None;
                 continue;
             }
             let current = ancestors.last().ok_or(EIO)?;
@@ -648,11 +707,14 @@ impl FilesystemService {
                 return Err(EACCES);
             }
             match component {
-                OwnedComponent::Root | OwnedComponent::Current => {}
+                OwnedComponent::Root | OwnedComponent::Current => {
+                    last_name = None;
+                }
                 OwnedComponent::Parent => {
                     if ancestors.len() > 1 {
                         ancestors.pop();
                     }
+                    last_name = None;
                 }
                 OwnedComponent::Normal(name) => {
                     let directory = Dir::open_inode(&self.fs, current.clone()).map_err(errno)?;
@@ -672,6 +734,7 @@ impl FilesystemService {
                     if child.file_type().is_symlink()
                         && (follow == FollowSymlinks::All || !is_final)
                     {
+                        last_name = None;
                         symlinks = symlinks.checked_add(1).ok_or(ELOOP)?;
                         if symlinks > MAX_SYMLINKS {
                             return Err(ELOOP);
@@ -690,16 +753,21 @@ impl FilesystemService {
                             pending.push_front(target_component);
                         }
                     } else {
+                        last_name = Some(name);
                         ancestors.push(child);
                     }
                 }
             }
         }
         let inode = ancestors.pop().ok_or(EIO)?;
+        let parent = last_name.map(|name| (ancestors.last().cloned(), name));
         if require_directory && !inode.file_type().is_dir() {
             return Err(ENOTDIR);
         }
-        Ok(Resolution::Found(inode))
+        Ok(Resolution::Found {
+            inode,
+            parent: parent.and_then(|(parent, name)| parent.map(|parent| (parent, name))),
+        })
     }
 
     fn ancestry_from_root(&self, root: &Inode, base: Inode) -> Result<Vec<Inode>, i32> {
@@ -1076,12 +1144,32 @@ impl FilesystemService {
                 FollowSymlinks::All,
             )
             .map_err(errno)?;
-        let mut parent = Dir::open_inode(&self.fs, parent_inode.clone()).map_err(errno)?;
-        let mut inode = parent
+        let parent = Dir::open_inode(&self.fs, parent_inode.clone()).map_err(errno)?;
+        let inode = parent
             .get_entry(DirEntryName::try_from(name).map_err(|_| EINVAL)?)
             .map_err(errno)?;
+        drop(parent);
+        self.unlink_entry(
+            parent_inode,
+            name.as_bytes(),
+            inode,
+            request.flags == protocol::NODE_TYPE_DIRECTORY,
+            Some(path),
+        )?;
+        Ok(self.success(request))
+    }
+
+    fn unlink_entry(
+        &mut self,
+        parent_inode: Inode,
+        name: &[u8],
+        mut inode: Inode,
+        remove_directory: bool,
+        path_hint: Option<&str>,
+    ) -> Result<(), i32> {
+        let mut parent = Dir::open_inode(&self.fs, parent_inode.clone()).map_err(errno)?;
         if inode.file_type().is_dir() {
-            if request.flags != protocol::NODE_TYPE_DIRECTORY {
+            if !remove_directory {
                 return Err(EISDIR);
             }
             let directory = Dir::open_inode(&self.fs, inode.clone()).map_err(errno)?;
@@ -1112,15 +1200,17 @@ impl FilesystemService {
                 let _ = parent.inode_mut().write(&self.fs);
                 return Err(errno(error));
             }
-            if let Some(node_id) = self.node_ids.remove(path) {
-                self.nodes.remove(&node_id);
+            if let Some(path) = path_hint {
+                if let Some(node_id) = self.node_ids.remove(path) {
+                    self.nodes.remove(&node_id);
+                }
             }
-            return Ok(self.success(request));
+            return Ok(());
         }
-        if request.flags == protocol::NODE_TYPE_DIRECTORY {
+        if remove_directory {
             return Err(ENOTDIR);
         }
-        let node_id = self.remember_node(path, FollowSymlinks::ExcludeFinalComponent)?;
+        let node_id = u64::from(inode.index.get());
         let is_open = self.opens.values().any(|open| open.node_id == node_id);
         let orphan_name = format!(".mochios-orphan-{node_id}");
         if is_open {
@@ -1143,7 +1233,9 @@ impl FilesystemService {
             }
             return Err(errno(error));
         }
-        self.node_ids.remove(path);
+        if let Some(path) = path_hint {
+            self.node_ids.remove(path);
+        }
         if is_open {
             self.orphans.insert(
                 node_id,
@@ -1155,7 +1247,7 @@ impl FilesystemService {
         } else {
             self.nodes.remove(&node_id);
         }
-        Ok(self.success(request))
+        Ok(())
     }
 
     fn symlink(&mut self, request: protocol::Header, payload: &[u8]) -> Result<Response, i32> {
@@ -1813,7 +1905,10 @@ enum OwnedComponent {
 }
 
 enum Resolution {
-    Found(Inode),
+    Found {
+        inode: Inode,
+        parent: Option<(Inode, Vec<u8>)>,
+    },
     Missing { parent: Inode, name: Vec<u8> },
 }
 

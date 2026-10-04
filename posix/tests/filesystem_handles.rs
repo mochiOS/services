@@ -364,6 +364,121 @@ fn orphan_cleanup_uses_parent_inode_after_parent_rename() {
 }
 
 #[test]
+fn unlink_at_removes_entries_relative_to_an_open_directory() {
+    let mut filesystem = test_filesystem();
+    let base = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+                ..protocol::Header::default()
+            },
+            b"/create-base",
+            PathAnchors::default(),
+        )
+        .unwrap();
+    filesystem
+        .mkdir_at(
+            protocol::Header {
+                opcode: protocol::OP_MKDIR_AT,
+                flags: protocol::MKDIR_AT_BASE_ATTACHED,
+                mode: 0o755,
+                ..protocol::Header::default()
+            },
+            b"victim",
+            PathAnchors {
+                root_open_id: None,
+                base_open_id: Some(base.header.open_id),
+            },
+        )
+        .unwrap();
+    filesystem
+        .unlink_at(
+            protocol::Header {
+                opcode: protocol::OP_UNLINK_AT,
+                flags: protocol::UNLINK_AT_BASE_ATTACHED
+                    | protocol::UNLINK_AT_REMOVE_DIRECTORY,
+                ..protocol::Header::default()
+            },
+            b"victim",
+            PathAnchors {
+                root_open_id: None,
+                base_open_id: Some(base.header.open_id),
+            },
+        )
+        .unwrap();
+
+    let missing = filesystem.handle(
+        protocol::Header {
+            opcode: protocol::OP_LOOKUP,
+            flags: protocol::LOOKUP_FOLLOW_SYMLINKS,
+            ..protocol::Header::default()
+        },
+        b"/create-base/victim",
+    );
+    assert_eq!(missing.header.status, -2);
+}
+
+#[test]
+fn unlink_at_keeps_an_open_file_description_alive() {
+    let mut filesystem = test_filesystem();
+    let base = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+                ..protocol::Header::default()
+            },
+            b"/create-base",
+            PathAnchors::default(),
+        )
+        .unwrap();
+    let file = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ
+                    | protocol::OPEN_AT_WRITE
+                    | protocol::OPEN_AT_CREATE
+                    | protocol::OPEN_AT_BASE_ATTACHED,
+                mode: 0o644,
+                ..protocol::Header::default()
+            },
+            b"open-victim",
+            PathAnchors {
+                root_open_id: None,
+                base_open_id: Some(base.header.open_id),
+            },
+        )
+        .unwrap();
+    filesystem
+        .provider_write(file.header.open_id, b"alive")
+        .unwrap();
+    filesystem
+        .unlink_at(
+            protocol::Header {
+                opcode: protocol::OP_UNLINK_AT,
+                flags: protocol::UNLINK_AT_BASE_ATTACHED,
+                ..protocol::Header::default()
+            },
+            b"open-victim",
+            PathAnchors {
+                root_open_id: None,
+                base_open_id: Some(base.header.open_id),
+            },
+        )
+        .unwrap();
+    filesystem
+        .provider_seek(file.header.open_id, 0, HANDLE_SEEK_START)
+        .unwrap();
+    assert_eq!(
+        filesystem.provider_read(file.header.open_id, 5).unwrap(),
+        b"alive"
+    );
+    filesystem.provider_close(file.header.open_id).unwrap();
+}
+
+#[test]
 fn open_directory_paths_follow_rename_and_reject_unlinked_cwds() {
     let mut filesystem = test_filesystem();
     let root = filesystem

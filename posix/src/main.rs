@@ -645,6 +645,36 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         )
     }
 
+    fn unlink_at(
+        &mut self,
+        request: &posix_service::PreparedUnlink,
+        paths: posix_service::PathObjects<mochi_user_platform::handle::Handle>,
+    ) -> Result<(), i32> {
+        use mochios_filesystem_protocol as filesystem;
+        use mochios_posix_protocol as posix;
+
+        let mut flags = filesystem::UNLINK_AT_ROOT_ATTACHED;
+        if paths.base.is_some() {
+            flags |= filesystem::UNLINK_AT_BASE_ATTACHED;
+        }
+        if request.flags & posix::UNLINK_REMOVE_DIRECTORY != 0 {
+            flags |= filesystem::UNLINK_AT_REMOVE_DIRECTORY;
+        }
+        self.empty_call(
+            filesystem::Header {
+                opcode: filesystem::OP_UNLINK_AT,
+                request_id: 11,
+                offset: u64::from(request.effective_uid)
+                    | (u64::from(request.effective_gid) << 32),
+                length: request.path.len() as u32,
+                flags,
+                ..filesystem::Header::default()
+            },
+            request.path.as_bytes(),
+            Self::path_handles(paths)?,
+        )
+    }
+
     fn access_at(
         &mut self,
         request: &posix_service::PreparedAccess,
