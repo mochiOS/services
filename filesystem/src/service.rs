@@ -116,7 +116,8 @@ impl FilesystemService {
             | protocol::OP_UNLINK_AT
             | protocol::OP_RENAME_AT
             | protocol::OP_TRUNCATE_AT
-            | protocol::OP_SYMLINK_AT => Err(EINVAL),
+            | protocol::OP_SYMLINK_AT
+            | protocol::OP_READLINK_AT => Err(EINVAL),
             _ => Err(ENOSYS),
         };
         result.unwrap_or_else(|errno| self.error(request, errno))
@@ -570,6 +571,47 @@ impl FilesystemService {
             )
             .map_err(errno)?;
         Ok(self.success(request))
+    }
+
+    pub fn readlink_at(
+        &mut self,
+        request: protocol::Header,
+        payload: &[u8],
+        anchors: PathAnchors,
+    ) -> Result<Response, i32> {
+        if request.flags & !protocol::READLINK_AT_FLAGS_ALL != 0 {
+            return Err(EINVAL);
+        }
+        let root_attached = request.flags & protocol::READLINK_AT_ROOT_ATTACHED != 0;
+        let base_attached = request.flags & protocol::READLINK_AT_BASE_ATTACHED != 0;
+        if root_attached != anchors.root_open_id.is_some()
+            || base_attached != anchors.base_open_id.is_some()
+        {
+            return Err(EINVAL);
+        }
+        let uid = request.offset as u32;
+        let gid = (request.offset >> 32) as u32;
+        let (root, base) = self.resolve_anchors(payload, anchors)?;
+        let inode = self.resolve_inode_at(
+            root,
+            base,
+            payload,
+            FollowSymlinks::ExcludeFinalComponent,
+            uid,
+            gid,
+        )?;
+        if !inode.file_type().is_symlink() {
+            return Err(EINVAL);
+        }
+        let target = inode.symlink_target(&self.fs).map_err(errno)?;
+        let payload = target.as_ref().to_vec();
+        if payload.len() > protocol::MAX_PATH_LEN {
+            return Err(EFBIG);
+        }
+        let mut response = self.success(request);
+        response.header.length = payload.len() as u32;
+        response.payload = payload;
+        Ok(response)
     }
 
     /// Resolves a path and obtains metadata as one serialized operation.

@@ -692,6 +692,21 @@ fn symlink_at_creates_a_literal_target_under_the_open_directory() {
             },
         )
         .unwrap();
+    let response = filesystem
+        .readlink_at(
+            protocol::Header {
+                opcode: protocol::OP_READLINK_AT,
+                flags: protocol::READLINK_AT_BASE_ATTACHED,
+                ..protocol::Header::default()
+            },
+            b"created-link",
+            PathAnchors {
+                root_open_id: None,
+                base_open_id: Some(base.header.open_id),
+            },
+        )
+        .unwrap();
+    assert_eq!(response.payload, b"symlink-target");
     let link = filesystem
         .open_at(
             protocol::Header {

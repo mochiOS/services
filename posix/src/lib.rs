@@ -87,6 +87,14 @@ pub struct PreparedSymlink {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedReadlink {
+    pub base: protocol::OpenBase,
+    pub path: String,
+    pub effective_uid: u32,
+    pub effective_gid: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedStat {
     pub base: protocol::OpenBase,
     pub flags: u32,
@@ -184,6 +192,12 @@ pub trait FilesystemBackend<H: Copy> {
     fn truncate_at(&mut self, request: &PreparedTruncate, paths: PathObjects<H>) -> Result<(), i32>;
 
     fn symlink_at(&mut self, request: &PreparedSymlink, paths: PathObjects<H>) -> Result<(), i32>;
+
+    fn readlink_at(
+        &mut self,
+        request: &PreparedReadlink,
+        paths: PathObjects<H>,
+    ) -> Result<Vec<u8>, i32>;
 
     /// Resolves a path and checks access using the supplied authenticated
     /// POSIX credentials as one backend operation.
@@ -286,7 +300,8 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_UNLINK_AT
             | protocol::OP_RENAME_AT
             | protocol::OP_TRUNCATE_AT
-            | protocol::OP_SYMLINK_AT => Err(STATUS_EINVAL),
+            | protocol::OP_SYMLINK_AT
+            | protocol::OP_READLINK_AT => Err(STATUS_EINVAL),
             _ => Err(protocol::STATUS_ENOSYS),
         };
         let (status, payload) = match result {
@@ -331,6 +346,7 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_RENAME_AT
                 | protocol::OP_TRUNCATE_AT
                 | protocol::OP_SYMLINK_AT
+                | protocol::OP_READLINK_AT
         ) {
             let response = if handles.is_empty() {
                 self.handle(peer, header, payload)
@@ -361,6 +377,7 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_RENAME_AT
                 | protocol::OP_TRUNCATE_AT
                 | protocol::OP_SYMLINK_AT
+                | protocol::OP_READLINK_AT
         ) {
             if let Err(status) = self.ensure_session_directories(peer.process_id, filesystem) {
                 return object_error(header.request_id, status);
@@ -626,6 +643,20 @@ impl<H: Copy> PosixService<H> {
                     Err(status) => object_error(header.request_id, status),
                 }
             }
+            protocol::OP_READLINK_AT => {
+                let prepared = match self.prepare_readlink_at(peer, payload, handles.len()) {
+                    Ok(prepared) => prepared,
+                    Err(status) => return object_error(header.request_id, status),
+                };
+                let paths = match self.path_objects(peer.process_id, prepared.base, handles) {
+                    Ok(paths) => paths,
+                    Err(status) => return object_error(header.request_id, status),
+                };
+                match filesystem.readlink_at(&prepared, paths) {
+                    Ok(target) => object_payload(header.request_id, target),
+                    Err(status) => object_error(header.request_id, status),
+                }
+            }
             _ => unreachable!(),
         }
     }
@@ -867,6 +898,29 @@ impl<H: Copy> PosixService<H> {
             base: request.base,
             target: request.target.to_owned(),
             link_path: request.link_path.to_owned(),
+            effective_uid: session.effective_uid,
+            effective_gid: session.effective_gid,
+        })
+    }
+
+    pub fn prepare_readlink_at(
+        &self,
+        peer: PeerIdentity,
+        payload: &[u8],
+        attached_handles: usize,
+    ) -> Result<PreparedReadlink, i32> {
+        let session = self
+            .sessions
+            .get(&peer.process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let request = protocol::decode_stat_at(payload).map_err(|_| STATUS_EINVAL)?;
+        let expected_handles = usize::from(request.base == protocol::OpenBase::AttachedDirectory);
+        if attached_handles != expected_handles || request.flags != 0 {
+            return Err(STATUS_EINVAL);
+        }
+        Ok(PreparedReadlink {
+            base: request.base,
+            path: request.path.to_owned(),
             effective_uid: session.effective_uid,
             effective_gid: session.effective_gid,
         })

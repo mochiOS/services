@@ -671,6 +671,7 @@ struct RecordingFilesystem {
     rename_paths: Option<posix_service::RenamePathObjects<u32>>,
     truncate_request: Option<posix_service::PreparedTruncate>,
     symlink_request: Option<posix_service::PreparedSymlink>,
+    readlink_request: Option<posix_service::PreparedReadlink>,
     retained: Vec<AttachedObject<u32>>,
     released: Vec<AttachedObject<u32>>,
     path_query: Option<(AttachedObject<u32>, AttachedObject<u32>)>,
@@ -803,6 +804,17 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         self.root = Some(paths.root);
         self.directory = paths.base;
         Ok(())
+    }
+
+    fn readlink_at(
+        &mut self,
+        request: &posix_service::PreparedReadlink,
+        paths: PathObjects<u32>,
+    ) -> Result<Vec<u8>, i32> {
+        self.readlink_request = Some(request.clone());
+        self.root = Some(paths.root);
+        self.directory = paths.base;
+        Ok(b"../target".to_vec())
     }
 
     fn access_at(&mut self, request: &PreparedAccess, paths: PathObjects<u32>) -> Result<(), i32> {
@@ -1412,6 +1424,57 @@ fn symlink_wire_and_service_preserve_target_credentials_and_directory_handle() {
     assert_eq!(prepared.link_path, "links/name");
     assert_eq!(prepared.effective_uid, 501);
     assert_eq!(prepared.effective_gid, 20);
+    assert_eq!(filesystem.directory, Some(directory));
+}
+
+#[test]
+fn readlink_uses_authenticated_session_and_returns_only_the_target_bytes() {
+    let peer = PeerIdentity {
+        process_id: 124,
+        effective_uid: 500,
+        effective_gid: 19,
+    };
+    let mut service = PosixService::new();
+    service.handle(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let directory = AttachedObject {
+        handle: 67,
+        rights: 0x81,
+    };
+    let mut payload = [0; protocol::STAT_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
+    let length = protocol::encode_stat_at(
+        protocol::StatAtRequest {
+            base: protocol::OpenBase::AttachedDirectory,
+            flags: 0,
+            path: "links/name",
+        },
+        &mut payload,
+    )
+    .unwrap();
+    let mut filesystem = RecordingFilesystem::default();
+    let result = service.handle_objects(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_READLINK_AT,
+            ..protocol::Header::default()
+        },
+        &payload[..length],
+        &[directory],
+        &mut filesystem,
+    );
+
+    assert_eq!(result.response.header.status, protocol::STATUS_OK);
+    assert_eq!(result.response.payload, b"../target");
+    let prepared = filesystem.readlink_request.unwrap();
+    assert_eq!(prepared.path, "links/name");
+    assert_eq!(prepared.effective_uid, 500);
+    assert_eq!(prepared.effective_gid, 19);
     assert_eq!(filesystem.directory, Some(directory));
 }
 

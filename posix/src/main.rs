@@ -251,6 +251,50 @@ impl RuntimeFilesystem {
         Ok(())
     }
 
+    fn payload_call(
+        &self,
+        header: mochios_filesystem_protocol::Header,
+        payload: &[u8],
+        mut handles: mochi_user_platform::ipc::IpcObjectHandles,
+    ) -> Result<Vec<u8>, i32> {
+        use mochi_user_platform as platform;
+        use mochios_filesystem_protocol as filesystem;
+
+        let mut request = vec![0u8; filesystem::HEADER_LEN + payload.len()];
+        let request_len = filesystem::encode(header, payload, &mut request).map_err(|_| -22)?;
+        let mut response = vec![0u8; filesystem::HEADER_LEN + filesystem::MAX_PATH_LEN];
+        if platform::ipc::call_object_handles(
+            self.endpoint,
+            &request[..request_len],
+            &mut response,
+            &mut handles,
+        )
+        .is_err()
+        {
+            close_runtime_handles(&handles);
+            return Err(-5);
+        }
+        let (response, payload) = match filesystem::decode(&response) {
+            Ok(decoded) => decoded,
+            Err(_) => {
+                close_runtime_handles(&handles);
+                return Err(-5);
+            }
+        };
+        if handles.count != 0 {
+            close_runtime_handles(&handles);
+            return Err(-5);
+        }
+        if response.opcode != filesystem::OP_STATUS || response.status != 0 {
+            return Err(if response.status < 0 {
+                response.status
+            } else {
+                -5
+            });
+        }
+        Ok(payload.to_vec())
+    }
+
     fn status_call(
         &self,
         header: mochios_filesystem_protocol::Header,
@@ -789,6 +833,32 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
                 ..filesystem::Header::default()
             },
             &payload,
+            Self::path_handles(paths)?,
+        )
+    }
+
+    fn readlink_at(
+        &mut self,
+        request: &posix_service::PreparedReadlink,
+        paths: posix_service::PathObjects<mochi_user_platform::handle::Handle>,
+    ) -> Result<Vec<u8>, i32> {
+        use mochios_filesystem_protocol as filesystem;
+
+        let mut flags = filesystem::READLINK_AT_ROOT_ATTACHED;
+        if paths.base.is_some() {
+            flags |= filesystem::READLINK_AT_BASE_ATTACHED;
+        }
+        self.payload_call(
+            filesystem::Header {
+                opcode: filesystem::OP_READLINK_AT,
+                request_id: 15,
+                offset: u64::from(request.effective_uid)
+                    | (u64::from(request.effective_gid) << 32),
+                length: request.path.len() as u32,
+                flags,
+                ..filesystem::Header::default()
+            },
+            request.path.as_bytes(),
             Self::path_handles(paths)?,
         )
     }
