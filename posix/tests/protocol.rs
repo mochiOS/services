@@ -71,3 +71,20 @@ fn session_uses_authenticated_peer_instead_of_request_payload() {
     assert_eq!(session.real_gid, 20);
     assert_eq!(session.umask, 0o022);
 }
+
+#[test]
+fn client_registers_an_authenticated_session() {
+    let peer = PeerIdentity {
+        process_id: 73,
+        effective_uid: 502,
+        effective_gid: 21,
+    };
+    let client = client(peer);
+    client.register_session().unwrap();
+
+    let transport = client.into_transport();
+    let service = transport.service.borrow();
+    let session = service.session(peer.process_id).unwrap();
+    assert_eq!(session.effective_uid, peer.effective_uid);
+    assert_eq!(session.effective_gid, peer.effective_gid);
+}
