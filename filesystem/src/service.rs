@@ -211,16 +211,17 @@ impl FilesystemService {
             }
             Err(error) => return Err(errno(error)),
         }
-        let metadata = self.fs.symlink_metadata(path.as_str()).map_err(errno)?;
-        let kind = metadata.file_type();
-        if request.flags & protocol::OPEN_AT_NOFOLLOW != 0 && kind.is_symlink() {
+        let base = self.resolve_base_inode(payload, base_open_id)?;
+        let follow = if request.flags & protocol::OPEN_AT_NOFOLLOW != 0 {
+            FollowSymlinks::ExcludeFinalComponent
+        } else {
+            FollowSymlinks::All
+        };
+        let inode = self.resolve_inode_at(base, payload, follow, uid, gid)?;
+        if request.flags & protocol::OPEN_AT_NOFOLLOW != 0 && inode.file_type().is_symlink() {
             return Err(ELOOP);
         }
-        let metadata = if kind.is_symlink() {
-            self.fs.metadata(path.as_str()).map_err(errno)?
-        } else {
-            metadata
-        };
+        let metadata = inode.metadata();
         let kind = metadata.file_type();
         if request.flags & protocol::OPEN_AT_DIRECTORY != 0 && !kind.is_dir() {
             return Err(ENOTDIR);
@@ -245,14 +246,8 @@ impl FilesystemService {
         {
             return Err(EACCES);
         }
-        let node_id = self.remember_node(path.as_str(), FollowSymlinks::All)?;
-        let inode = self
-            .fs
-            .path_to_inode(
-                path.as_str().try_into().map_err(|_| EINVAL)?,
-                FollowSymlinks::All,
-            )
-            .map_err(errno)?;
+        let node_id = u64::from(inode.index.get());
+        self.remember_known_node(path.as_str(), node_id);
         let mut file = if kind.is_dir() {
             None
         } else {

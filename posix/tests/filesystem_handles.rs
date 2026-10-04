@@ -176,6 +176,18 @@ fn symlink_targets_enforce_search_permission_on_the_actual_directory() {
         None,
     );
     assert!(matches!(result, Err(13)));
+
+    let result = filesystem.open_at(
+        protocol::Header {
+            opcode: protocol::OP_OPEN_AT,
+            offset: u64::from(501u32) | (u64::from(20u32) << 32),
+            flags: protocol::OPEN_AT_READ,
+            ..protocol::Header::default()
+        },
+        b"/redirect",
+        None,
+    );
+    assert!(matches!(result, Err(13)));
 }
 
 #[test]
