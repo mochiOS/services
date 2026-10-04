@@ -1219,6 +1219,86 @@ fn wait_selects_and_reaps_only_authenticated_children() {
 }
 
 #[test]
+fn process_groups_and_sessions_are_managed_by_posix_state() {
+    let parent = PeerIdentity {
+        process_id: 131,
+        effective_uid: 505,
+        effective_gid: 24,
+    };
+    let child = PeerIdentity {
+        process_id: 132,
+        effective_uid: 505,
+        effective_gid: 24,
+    };
+    let mut service = service_for(parent);
+    service.handle(
+        parent,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let mut filesystem = RecordingFilesystem::default();
+    service
+        .adopt_child(
+            parent,
+            AuthenticatedProcess {
+                handle: 72,
+                process_id: child.process_id,
+            },
+            &mut filesystem,
+        )
+        .unwrap();
+
+    let mut id_request = [0u8; protocol::PROCESS_ID_REQUEST_LEN];
+    protocol::encode_process_id_request(0, &mut id_request).unwrap();
+    let response = service.handle(
+        child,
+        protocol::Header {
+            opcode: protocol::OP_PROCESS_INFO,
+            ..protocol::Header::default()
+        },
+        &id_request,
+    );
+    let info = protocol::decode_process_info(&response.payload).unwrap();
+    assert_eq!(info.process_id, 132);
+    assert_eq!(info.parent_id, 131);
+    assert_eq!(info.process_group_id, 131);
+    assert_eq!(info.session_id, 131);
+
+    let response = service.handle(
+        child,
+        protocol::Header {
+            opcode: protocol::OP_CREATE_SESSION,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    assert_eq!(response.header.status, protocol::STATUS_OK);
+    let info = protocol::decode_process_info(&response.payload).unwrap();
+    assert_eq!(info.process_group_id, 132);
+    assert_eq!(info.session_id, 132);
+
+    let mut group_request = [0u8; protocol::PROCESS_GROUP_REQUEST_LEN];
+    protocol::encode_process_group_request(0, 0, &mut group_request).unwrap();
+    assert_eq!(
+        service
+            .handle(
+                child,
+                protocol::Header {
+                    opcode: protocol::OP_SET_PROCESS_GROUP,
+                    ..protocol::Header::default()
+                },
+                &group_request,
+            )
+            .header
+            .status,
+        protocol::STATUS_EPERM
+    );
+}
+
+#[test]
 fn service_submits_open_as_one_atomic_filesystem_operation() {
     let peer = PeerIdentity {
         process_id: 111,

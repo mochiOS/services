@@ -505,6 +505,99 @@ impl<H: Copy> PosixService<H> {
         }
     }
 
+    fn process_info_payload(&self, caller_id: u64, payload: &[u8]) -> Result<Vec<u8>, i32> {
+        let requested = protocol::decode_process_id_request(payload).map_err(|_| STATUS_EINVAL)?;
+        let process_id = match requested {
+            0 => caller_id,
+            value if value > 0 => value as u64,
+            _ => return Err(STATUS_EINVAL),
+        };
+        let caller_session = self
+            .session_ids
+            .get(&caller_id)
+            .copied()
+            .ok_or(protocol::STATUS_ESRCH)?;
+        if self.session_ids.get(&process_id).copied() != Some(caller_session) {
+            return Err(protocol::STATUS_ESRCH);
+        }
+        encode_process_info_payload(self.process_info_for(process_id)?)
+    }
+
+    fn process_info_for(&self, process_id: u64) -> Result<protocol::ProcessInfo, i32> {
+        Ok(protocol::ProcessInfo {
+            process_id,
+            parent_id: self.parents.get(&process_id).copied().unwrap_or(0),
+            process_group_id: self
+                .process_groups
+                .get(&process_id)
+                .copied()
+                .ok_or(protocol::STATUS_ESRCH)?,
+            session_id: self
+                .session_ids
+                .get(&process_id)
+                .copied()
+                .ok_or(protocol::STATUS_ESRCH)?,
+        })
+    }
+
+    fn set_process_group(&mut self, caller_id: u64, payload: &[u8]) -> Result<(), i32> {
+        let (process_id, process_group_id) =
+            protocol::decode_process_group_request(payload).map_err(|_| STATUS_EINVAL)?;
+        if process_id < 0 || process_group_id < 0 {
+            return Err(STATUS_EINVAL);
+        }
+        let target = if process_id == 0 {
+            caller_id
+        } else {
+            process_id as u64
+        };
+        if target != caller_id && self.parents.get(&target).copied() != Some(caller_id) {
+            return Err(protocol::STATUS_ESRCH);
+        }
+        let caller_session = self
+            .session_ids
+            .get(&caller_id)
+            .copied()
+            .ok_or(protocol::STATUS_ESRCH)?;
+        if self.session_ids.get(&target).copied() != Some(caller_session) {
+            return Err(protocol::STATUS_EPERM);
+        }
+        if self.session_ids.get(&target).copied() == Some(target) {
+            return Err(protocol::STATUS_EPERM);
+        }
+        let group = if process_group_id == 0 {
+            target
+        } else {
+            process_group_id as u64
+        };
+        if group != target
+            && !self.process_groups.iter().any(|(process, candidate)| {
+                *candidate == group
+                    && self.session_ids.get(process).copied() == Some(caller_session)
+            })
+        {
+            return Err(protocol::STATUS_EPERM);
+        }
+        self.process_groups.insert(target, group);
+        Ok(())
+    }
+
+    fn create_session(&mut self, process_id: u64) -> Result<protocol::ProcessInfo, i32> {
+        if self
+            .process_groups
+            .values()
+            .any(|group| *group == process_id)
+        {
+            return Err(protocol::STATUS_EPERM);
+        }
+        if !self.processes.contains_key(&process_id) {
+            return Err(protocol::STATUS_ESRCH);
+        }
+        self.process_groups.insert(process_id, process_id);
+        self.session_ids.insert(process_id, process_id);
+        self.process_info_for(process_id)
+    }
+
     pub fn handle(
         &mut self,
         peer: PeerIdentity,
@@ -539,6 +632,15 @@ impl<H: Copy> PosixService<H> {
             protocol::OP_SET_GID if header.flags == 0 => {
                 self.set_gid(peer.process_id, payload).map(|_| Vec::new())
             }
+            protocol::OP_PROCESS_INFO if header.flags == 0 => {
+                self.process_info_payload(peer.process_id, payload)
+            }
+            protocol::OP_SET_PROCESS_GROUP if header.flags == 0 => self
+                .set_process_group(peer.process_id, payload)
+                .map(|_| Vec::new()),
+            protocol::OP_CREATE_SESSION if header.flags == 0 && payload.is_empty() => self
+                .create_session(peer.process_id)
+                .and_then(encode_process_info_payload),
             protocol::OP_PING
             | protocol::OP_SESSION_REGISTER
             | protocol::OP_SESSION_INFO
@@ -554,6 +656,9 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_SET_GID
             | protocol::OP_PROCESS_FORKED
             | protocol::OP_WAIT_CHILD
+            | protocol::OP_PROCESS_INFO
+            | protocol::OP_SET_PROCESS_GROUP
+            | protocol::OP_CREATE_SESSION
             | protocol::OP_FTRUNCATE
             | protocol::OP_FSYNC
             | protocol::OP_FGETFL
@@ -1458,6 +1563,12 @@ fn object_error<H>(request_id: u64, status: i32) -> ObjectResponse<H> {
         response: status_response(request_id, status),
         handles: Vec::new(),
     }
+}
+
+fn encode_process_info_payload(info: protocol::ProcessInfo) -> Result<Vec<u8>, i32> {
+    let mut payload = vec![0u8; protocol::PROCESS_INFO_LEN];
+    protocol::encode_process_info(info, &mut payload).map_err(|_| STATUS_EINVAL)?;
+    Ok(payload)
 }
 
 fn object_payload<H>(request_id: u64, payload: Vec<u8>) -> ObjectResponse<H> {
