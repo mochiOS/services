@@ -242,6 +242,32 @@ fn maximum_path_fits_in_a_control_message() {
     );
 }
 
+#[test]
+fn inherited_fd_launch_keys_are_opaque_disjoint_and_reversible() {
+    for fd in [0, 1, 2, 42, i32::MAX] {
+        let handle = protocol::fd_handle_key(fd).unwrap();
+        let flags = protocol::fd_flags_key(fd).unwrap();
+        let rights = protocol::fd_rights_key(fd).unwrap();
+        assert_ne!(handle, flags);
+        assert_ne!(handle, rights);
+        assert_ne!(flags, rights);
+        assert_ne!(handle, protocol::CONTROL_HANDLE_KEY);
+        assert_eq!(protocol::inherited_fd_from_key(handle), Some(fd));
+        assert_eq!(protocol::inherited_fd_from_key(flags), Some(fd));
+        assert_eq!(protocol::inherited_fd_from_key(rights), Some(fd));
+    }
+    assert_eq!(protocol::fd_handle_key(-1), None);
+    assert_eq!(protocol::fd_flags_key(-1), None);
+    assert_eq!(protocol::fd_rights_key(-1), None);
+    assert_eq!(protocol::inherited_fd_from_key(0), None);
+
+    let encoded = protocol::encode_fd_flags(0xfeed_beef, 0x8000_0001);
+    assert_eq!(
+        protocol::decode_fd_flags(encoded),
+        (0xfeed_beef, 0x8000_0001)
+    );
+}
+
 struct LocalObjectTransport;
 
 impl Transport for LocalObjectTransport {

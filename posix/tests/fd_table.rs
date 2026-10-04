@@ -120,3 +120,34 @@ fn fast_path_resolves_local_fds_to_handles_before_io() {
     );
     assert_eq!(handles.io_handles, vec![0xfeed, 0xfeed, 0xfeed]);
 }
+
+#[test]
+fn inherited_install_preserves_fd_number_and_closes_replaced_handle() {
+    let mut table = FdTable::new();
+    let mut handles = FakeHandles::default();
+    table
+        .install_at(
+            7,
+            Entry {
+                handle: 70,
+                rights: 0x15,
+                descriptor_flags: 0,
+            },
+            &mut handles,
+        )
+        .unwrap();
+    assert_eq!(table.get(7).unwrap().handle, 70);
+    table
+        .install_at(
+            7,
+            Entry {
+                handle: 71,
+                rights: 0x05,
+                descriptor_flags: 0,
+            },
+            &mut handles,
+        )
+        .unwrap();
+    assert_eq!(table.get(7).unwrap().handle, 71);
+    assert_eq!(handles.closed, vec![70]);
+}
