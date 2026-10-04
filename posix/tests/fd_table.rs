@@ -4,7 +4,7 @@ use mochios_posix_client::fd::{
 
 #[derive(Default)]
 struct FakeHandles {
-    cloned: Vec<u64>,
+    cloned: Vec<(u64, u64)>,
     closed: Vec<u64>,
     io_handles: Vec<u64>,
     cursor: u64,
@@ -46,8 +46,8 @@ impl FileOps<u64> for FakeHandles {
 impl HandleOps<u64> for FakeHandles {
     type Error = ();
 
-    fn clone_handle(&mut self, handle: u64) -> Result<u64, Self::Error> {
-        self.cloned.push(handle);
+    fn clone_handle(&mut self, handle: u64, rights: u64) -> Result<u64, Self::Error> {
+        self.cloned.push((handle, rights));
         Ok(handle)
     }
 
@@ -62,14 +62,16 @@ fn dup_references_the_same_open_file_description_and_clears_cloexec() {
     let source = table
         .install(Entry {
             handle: 88,
+            rights: 0x25,
             descriptor_flags: FD_CLOEXEC,
         })
         .unwrap();
     let mut handles = FakeHandles::default();
     let duplicate = table.duplicate(source, &mut handles).unwrap();
     assert_eq!(table.get(duplicate).unwrap().handle, 88);
+    assert_eq!(table.get(duplicate).unwrap().rights, 0x25);
     assert_eq!(table.get(duplicate).unwrap().descriptor_flags, 0);
-    assert_eq!(handles.cloned, vec![88]);
+    assert_eq!(handles.cloned, vec![(88, 0x25)]);
 }
 
 #[test]
@@ -78,12 +80,14 @@ fn exec_closes_only_cloexec_descriptors() {
     let keep = table
         .install(Entry {
             handle: 10,
+            rights: 1,
             descriptor_flags: 0,
         })
         .unwrap();
     let close = table
         .install(Entry {
             handle: 11,
+            rights: 1,
             descriptor_flags: FD_CLOEXEC,
         })
         .unwrap();
@@ -100,6 +104,7 @@ fn fast_path_resolves_local_fds_to_handles_before_io() {
     let fd = table
         .install(Entry {
             handle: 0xfeed,
+            rights: 0x7,
             descriptor_flags: 0,
         })
         .unwrap();
