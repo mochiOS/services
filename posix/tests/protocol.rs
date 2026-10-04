@@ -673,6 +673,7 @@ struct RecordingFilesystem {
     symlink_request: Option<posix_service::PreparedSymlink>,
     readlink_request: Option<posix_service::PreparedReadlink>,
     chmod_request: Option<posix_service::PreparedChmod>,
+    chown_request: Option<posix_service::PreparedChown>,
     retained: Vec<AttachedObject<u32>>,
     released: Vec<AttachedObject<u32>>,
     path_query: Option<(AttachedObject<u32>, AttachedObject<u32>)>,
@@ -824,6 +825,17 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         paths: PathObjects<u32>,
     ) -> Result<(), i32> {
         self.chmod_request = Some(request.clone());
+        self.root = Some(paths.root);
+        self.directory = paths.base;
+        Ok(())
+    }
+
+    fn chown_at(
+        &mut self,
+        request: &posix_service::PreparedChown,
+        paths: PathObjects<u32>,
+    ) -> Result<(), i32> {
+        self.chown_request = Some(request.clone());
         self.root = Some(paths.root);
         self.directory = paths.base;
         Ok(())
@@ -1539,6 +1551,60 @@ fn chmod_uses_authenticated_session_and_an_explicit_directory_handle() {
     assert_eq!(prepared.mode, 0o2750);
     assert_eq!(prepared.effective_uid, 499);
     assert_eq!(prepared.effective_gid, 18);
+    assert_eq!(filesystem.directory, Some(directory));
+}
+
+#[test]
+fn chown_wire_and_service_use_authenticated_credentials() {
+    let request = protocol::ChownAtRequest {
+        base: protocol::OpenBase::AttachedDirectory,
+        flags: protocol::CHOWN_NOFOLLOW,
+        uid: 42,
+        gid: u32::MAX,
+        path: "link",
+    };
+    let mut payload = [0; protocol::CHOWN_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
+    let length = protocol::encode_chown_at(request, &mut payload).unwrap();
+    assert_eq!(protocol::decode_chown_at(&payload[..length]).unwrap(), request);
+
+    let peer = PeerIdentity {
+        process_id: 126,
+        effective_uid: 498,
+        effective_gid: 17,
+    };
+    let mut service = PosixService::new();
+    service.handle(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let directory = AttachedObject {
+        handle: 69,
+        rights: 0x81,
+    };
+    let mut filesystem = RecordingFilesystem::default();
+    let result = service.handle_objects(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_CHOWN_AT,
+            ..protocol::Header::default()
+        },
+        &payload[..length],
+        &[directory],
+        &mut filesystem,
+    );
+
+    assert_eq!(result.response.header.status, protocol::STATUS_OK);
+    let prepared = filesystem.chown_request.unwrap();
+    assert_eq!(prepared.path, "link");
+    assert_eq!(prepared.uid, 42);
+    assert_eq!(prepared.gid, u32::MAX);
+    assert_eq!(prepared.flags, protocol::CHOWN_NOFOLLOW);
+    assert_eq!(prepared.effective_uid, 498);
+    assert_eq!(prepared.effective_gid, 17);
     assert_eq!(filesystem.directory, Some(directory));
 }
 

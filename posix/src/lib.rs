@@ -104,6 +104,17 @@ pub struct PreparedChmod {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedChown {
+    pub base: protocol::OpenBase,
+    pub path: String,
+    pub flags: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub effective_uid: u32,
+    pub effective_gid: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedStat {
     pub base: protocol::OpenBase,
     pub flags: u32,
@@ -210,6 +221,8 @@ pub trait FilesystemBackend<H: Copy> {
 
     fn chmod_at(&mut self, request: &PreparedChmod, paths: PathObjects<H>) -> Result<(), i32>;
 
+    fn chown_at(&mut self, request: &PreparedChown, paths: PathObjects<H>) -> Result<(), i32>;
+
     /// Resolves a path and checks access using the supplied authenticated
     /// POSIX credentials as one backend operation.
     fn access_at(&mut self, request: &PreparedAccess, paths: PathObjects<H>) -> Result<(), i32>;
@@ -313,7 +326,8 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_TRUNCATE_AT
             | protocol::OP_SYMLINK_AT
             | protocol::OP_READLINK_AT
-            | protocol::OP_CHMOD_AT => Err(STATUS_EINVAL),
+            | protocol::OP_CHMOD_AT
+            | protocol::OP_CHOWN_AT => Err(STATUS_EINVAL),
             _ => Err(protocol::STATUS_ENOSYS),
         };
         let (status, payload) = match result {
@@ -360,6 +374,7 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_SYMLINK_AT
                 | protocol::OP_READLINK_AT
                 | protocol::OP_CHMOD_AT
+                | protocol::OP_CHOWN_AT
         ) {
             let response = if handles.is_empty() {
                 self.handle(peer, header, payload)
@@ -392,6 +407,7 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_SYMLINK_AT
                 | protocol::OP_READLINK_AT
                 | protocol::OP_CHMOD_AT
+                | protocol::OP_CHOWN_AT
         ) {
             if let Err(status) = self.ensure_session_directories(peer.process_id, filesystem) {
                 return object_error(header.request_id, status);
@@ -685,6 +701,20 @@ impl<H: Copy> PosixService<H> {
                     Err(status) => object_error(header.request_id, status),
                 }
             }
+            protocol::OP_CHOWN_AT => {
+                let prepared = match self.prepare_chown_at(peer, payload, handles.len()) {
+                    Ok(prepared) => prepared,
+                    Err(status) => return object_error(header.request_id, status),
+                };
+                let paths = match self.path_objects(peer.process_id, prepared.base, handles) {
+                    Ok(paths) => paths,
+                    Err(status) => return object_error(header.request_id, status),
+                };
+                match filesystem.chown_at(&prepared, paths) {
+                    Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
+                    Err(status) => object_error(header.request_id, status),
+                }
+            }
             _ => unreachable!(),
         }
     }
@@ -973,6 +1003,32 @@ impl<H: Copy> PosixService<H> {
             base: request.base,
             path: request.path.to_owned(),
             mode: request.mode,
+            effective_uid: session.effective_uid,
+            effective_gid: session.effective_gid,
+        })
+    }
+
+    pub fn prepare_chown_at(
+        &self,
+        peer: PeerIdentity,
+        payload: &[u8],
+        attached_handles: usize,
+    ) -> Result<PreparedChown, i32> {
+        let session = self
+            .sessions
+            .get(&peer.process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let request = protocol::decode_chown_at(payload).map_err(|_| STATUS_EINVAL)?;
+        let expected_handles = usize::from(request.base == protocol::OpenBase::AttachedDirectory);
+        if attached_handles != expected_handles {
+            return Err(STATUS_EINVAL);
+        }
+        Ok(PreparedChown {
+            base: request.base,
+            path: request.path.to_owned(),
+            flags: request.flags,
+            uid: request.uid,
+            gid: request.gid,
             effective_uid: session.effective_uid,
             effective_gid: session.effective_gid,
         })

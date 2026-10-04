@@ -782,6 +782,81 @@ fn chmod_at_changes_only_permissions_on_an_anchored_path() {
 }
 
 #[test]
+fn chown_at_updates_ownership_and_rejects_a_non_owner() {
+    let mut filesystem = test_filesystem();
+    let base = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+                ..protocol::Header::default()
+            },
+            b"/create-base",
+            PathAnchors::default(),
+        )
+        .unwrap();
+    let file = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ
+                    | protocol::OPEN_AT_WRITE
+                    | protocol::OPEN_AT_CREATE
+                    | protocol::OPEN_AT_BASE_ATTACHED,
+                mode: 0o6750,
+                ..protocol::Header::default()
+            },
+            b"chown-file",
+            PathAnchors {
+                root_open_id: None,
+                base_open_id: Some(base.header.open_id),
+            },
+        )
+        .unwrap();
+    filesystem
+        .chown_at(
+            protocol::Header {
+                opcode: protocol::OP_CHOWN_AT,
+                flags: protocol::CHOWN_AT_BASE_ATTACHED,
+                node_id: u64::from(100u32) | (u64::from(200u32) << 32),
+                ..protocol::Header::default()
+            },
+            b"chown-file",
+            PathAnchors {
+                root_open_id: None,
+                base_open_id: Some(base.header.open_id),
+            },
+        )
+        .unwrap();
+    let status = filesystem
+        .stat_handle(protocol::Header::default(), file.header.open_id)
+        .unwrap();
+    let status = protocol::decode_node_status(&status.payload).unwrap();
+    assert_eq!(status.uid, 100);
+    assert_eq!(status.gid, 200);
+    assert_eq!(status.mode & 0o6000, 0);
+
+    let error = match filesystem.chown_at(
+        protocol::Header {
+            opcode: protocol::OP_CHOWN_AT,
+            flags: protocol::CHOWN_AT_BASE_ATTACHED,
+            offset: u64::from(101u32) | (u64::from(200u32) << 32),
+            node_id: u64::from(u32::MAX) | (u64::from(101u32) << 32),
+            ..protocol::Header::default()
+        },
+        b"chown-file",
+        PathAnchors {
+            root_open_id: None,
+            base_open_id: Some(base.header.open_id),
+        },
+    ) {
+        Ok(_) => panic!("non-owner chown unexpectedly succeeded"),
+        Err(error) => error,
+    };
+    assert_eq!(error, 1);
+}
+
+#[test]
 fn open_directory_paths_follow_rename_and_reject_unlinked_cwds() {
     let mut filesystem = test_filesystem();
     let root = filesystem

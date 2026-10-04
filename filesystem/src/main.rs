@@ -451,6 +451,25 @@ fn main() {
                             payload: Vec::new(),
                         },
                     }
+                } else if header.opcode == protocol::OP_CHOWN_AT {
+                    let anchors = decode_path_anchors(
+                        header.flags,
+                        protocol::CHOWN_AT_ROOT_ATTACHED,
+                        protocol::CHOWN_AT_BASE_ATTACHED,
+                        &attached,
+                    );
+                    match anchors.and_then(|anchors| service.chown_at(header, payload, anchors)) {
+                        Ok(response) => response,
+                        Err(error) => filesystem_service::service::Response {
+                            header: protocol::Header {
+                                opcode: protocol::OP_STATUS,
+                                request_id: header.request_id,
+                                status: -error,
+                                ..protocol::Header::default()
+                            },
+                            payload: Vec::new(),
+                        },
+                    }
                 } else if attached.count != 0 {
                     filesystem_service::service::Response {
                         header: protocol::Header {

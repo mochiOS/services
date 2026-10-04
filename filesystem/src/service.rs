@@ -119,7 +119,8 @@ impl FilesystemService {
             | protocol::OP_TRUNCATE_AT
             | protocol::OP_SYMLINK_AT
             | protocol::OP_READLINK_AT
-            | protocol::OP_CHMOD_AT => Err(EINVAL),
+            | protocol::OP_CHMOD_AT
+            | protocol::OP_CHOWN_AT => Err(EINVAL),
             _ => Err(ENOSYS),
         };
         result.unwrap_or_else(|errno| self.error(request, errno))
@@ -645,6 +646,50 @@ impl FilesystemService {
             permissions &= !0o2000;
         }
         self.chmod_inode(inode, permissions)?;
+        Ok(self.success(request))
+    }
+
+    pub fn chown_at(
+        &mut self,
+        request: protocol::Header,
+        payload: &[u8],
+        anchors: PathAnchors,
+    ) -> Result<Response, i32> {
+        if request.flags & !protocol::CHOWN_AT_FLAGS_ALL != 0 {
+            return Err(EINVAL);
+        }
+        let root_attached = request.flags & protocol::CHOWN_AT_ROOT_ATTACHED != 0;
+        let base_attached = request.flags & protocol::CHOWN_AT_BASE_ATTACHED != 0;
+        if root_attached != anchors.root_open_id.is_some()
+            || base_attached != anchors.base_open_id.is_some()
+        {
+            return Err(EINVAL);
+        }
+        let effective_uid = request.offset as u32;
+        let effective_gid = (request.offset >> 32) as u32;
+        let requested_uid = request.node_id as u32;
+        let requested_gid = (request.node_id >> 32) as u32;
+        let follow = if request.flags & protocol::CHOWN_AT_NOFOLLOW != 0 {
+            FollowSymlinks::ExcludeFinalComponent
+        } else {
+            FollowSymlinks::All
+        };
+        let (root, base) = self.resolve_anchors(payload, anchors)?;
+        let inode = self.resolve_inode_at(root, base, payload, follow, effective_uid, effective_gid)?;
+        let metadata = inode.metadata();
+        if effective_uid != 0 {
+            if effective_uid != metadata.uid()
+                || requested_uid != u32::MAX && requested_uid != metadata.uid()
+                || requested_gid != u32::MAX
+                    && requested_gid != metadata.gid()
+                    && requested_gid != effective_gid
+            {
+                return Err(EPERM);
+            }
+        }
+        let new_uid = (requested_uid != u32::MAX).then_some(requested_uid);
+        let new_gid = (requested_gid != u32::MAX).then_some(requested_gid);
+        self.chown_inode(inode, new_uid, new_gid, new_uid.is_some() || new_gid.is_some())?;
         Ok(self.success(request))
     }
 
@@ -2112,6 +2157,49 @@ impl FilesystemService {
                 .set_mode(InodeMode::from_bits_retain(file_type | permissions))
                 .map_err(errno)?;
             inode.write(&self.fs).map_err(errno)?;
+        }
+        Ok(())
+    }
+
+    fn chown_inode(
+        &mut self,
+        mut inode: Inode,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        clear_set_id: bool,
+    ) -> Result<(), i32> {
+        fn update(
+            filesystem: &Ext4,
+            inode: &mut Inode,
+            uid: Option<u32>,
+            gid: Option<u32>,
+            clear_set_id: bool,
+        ) -> Result<(), i32> {
+            if let Some(uid) = uid {
+                inode.set_uid(uid);
+            }
+            if let Some(gid) = gid {
+                inode.set_gid(gid);
+            }
+            if clear_set_id {
+                let mode = inode.mode().bits() & !0o6000;
+                inode
+                    .set_mode(InodeMode::from_bits_retain(mode))
+                    .map_err(errno)?;
+            }
+            inode.write(filesystem).map_err(errno)
+        }
+
+        let node_id = u64::from(inode.index.get());
+        let mut matched = false;
+        for open in self.opens.values_mut() {
+            if open.node_id == node_id {
+                update(&self.fs, &mut open.inode, uid, gid, clear_set_id)?;
+                matched = true;
+            }
+        }
+        if !matched {
+            update(&self.fs, &mut inode, uid, gid, clear_set_id)?;
         }
         Ok(())
     }
