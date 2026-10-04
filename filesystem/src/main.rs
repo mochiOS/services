@@ -313,6 +313,10 @@ fn handle_provider_request(
 ) -> Option<usize> {
     use mnu_abi::provider;
     let (header, payload) = provider::RequestHeader::decode(request).ok()?;
+    if header.opcode == provider::OP_RELEASE {
+        let _ = service.provider_close(header.object_id);
+        return None;
+    }
     let result = match header.opcode {
         provider::OP_READ => service
             .provider_read(header.object_id, header.length as usize)
