@@ -34,7 +34,6 @@ pub struct FilesystemService {
     node_ids: HashMap<String, u64>,
     opens: HashMap<u64, OpenFile>,
     orphans: HashMap<u64, Orphan>,
-    next_node_id: u64,
     next_open_id: u64,
 }
 
@@ -60,15 +59,15 @@ impl FilesystemService {
     pub fn new(fs: Ext4) -> Self {
         let mut nodes = HashMap::new();
         let mut node_ids = HashMap::new();
-        nodes.insert(1, "/".to_owned());
-        node_ids.insert("/".to_owned(), 1);
+        // ext4 reserves inode 2 for the filesystem root.
+        nodes.insert(2, "/".to_owned());
+        node_ids.insert("/".to_owned(), 2);
         Self {
             fs,
             nodes,
             node_ids,
             opens: HashMap::new(),
             orphans: HashMap::new(),
-            next_node_id: 2,
             next_open_id: 1,
         }
     }
@@ -102,7 +101,7 @@ impl FilesystemService {
 
     fn mount(&self, request: protocol::Header) -> Result<Response, i32> {
         let metadata = self.fs.metadata("/").map_err(errno)?;
-        Ok(self.metadata_response(request, 1, metadata))
+        Ok(self.metadata_response(request, 2, metadata))
     }
 
     fn lookup(&mut self, request: protocol::Header, payload: &[u8]) -> Result<Response, i32> {
@@ -116,7 +115,12 @@ impl FilesystemService {
             self.fs.symlink_metadata(path)
         }
         .map_err(errno)?;
-        let node_id = self.remember_node(path)?;
+        let follow = if request.flags & protocol::LOOKUP_FOLLOW_SYMLINKS != 0 {
+            FollowSymlinks::All
+        } else {
+            FollowSymlinks::ExcludeFinalComponent
+        };
+        let node_id = self.remember_node(path, follow)?;
         Ok(self.metadata_response(request, node_id, metadata))
     }
 
@@ -241,7 +245,7 @@ impl FilesystemService {
         {
             return Err(EACCES);
         }
-        let node_id = self.remember_node(path.as_str())?;
+        let node_id = self.remember_node(path.as_str(), FollowSymlinks::All)?;
         let inode = self
             .fs
             .path_to_inode(
@@ -816,7 +820,7 @@ impl FilesystemService {
                 )
                 .map_err(errno)?;
         }
-        let node_id = self.remember_node(path)?;
+        let node_id = self.remember_node(path, FollowSymlinks::All)?;
         Ok(self.metadata_response(request, node_id, inode.metadata()))
     }
 
@@ -854,7 +858,8 @@ impl FilesystemService {
                 continue;
             }
             let child_path = joined_path(&path, name);
-            let node_id = self.remember_node(&child_path)?;
+            let node_id = u64::from(entry.inode.get());
+            self.remember_known_node(&child_path, node_id);
             let kind = node_type(entry.file_type().map_err(errno)?);
             let record_length = protocol::DIRENT_HEADER_LEN + name.len();
             if payload.len().saturating_add(record_length) > max_length {
@@ -964,7 +969,7 @@ impl FilesystemService {
         if request.flags == protocol::NODE_TYPE_DIRECTORY {
             return Err(ENOTDIR);
         }
-        let node_id = self.remember_node(path)?;
+        let node_id = self.remember_node(path, FollowSymlinks::ExcludeFinalComponent)?;
         let is_open = self.opens.values().any(|open| open.node_id == node_id);
         let orphan_name = format!(".mochios-orphan-{node_id}");
         if is_open {
@@ -1037,7 +1042,7 @@ impl FilesystemService {
                 Duration::default(),
             )
             .map_err(errno)?;
-        let node_id = self.remember_node(link_path)?;
+        let node_id = self.remember_node(link_path, FollowSymlinks::ExcludeFinalComponent)?;
         Ok(self.metadata_response(request, node_id, inode.metadata()))
     }
 
@@ -1071,7 +1076,7 @@ impl FilesystemService {
             .get_entry(DirEntryName::try_from(old_name).map_err(|_| EINVAL)?)
             .map_err(errno)?;
         let source_is_directory = source_inode.file_type().is_dir();
-        self.remember_node(old_path)?;
+        self.remember_node(old_path, FollowSymlinks::ExcludeFinalComponent)?;
 
         let destination =
             match new_parent.get_entry(DirEntryName::try_from(new_name).map_err(|_| EINVAL)?) {
@@ -1079,13 +1084,15 @@ impl FilesystemService {
                     if !self.directory_is_empty(&inode)? {
                         return Err(ENOTEMPTY);
                     }
-                    let node_id = self.remember_node(new_path)?;
+                    let node_id =
+                        self.remember_node(new_path, FollowSymlinks::ExcludeFinalComponent)?;
                     Some((node_id, inode))
                 }
                 Ok(_) if source_is_directory => return Err(ENOTDIR),
                 Ok(inode) if inode.file_type().is_dir() => return Err(EISDIR),
                 Ok(inode) => {
-                    let node_id = self.remember_node(new_path)?;
+                    let node_id =
+                        self.remember_node(new_path, FollowSymlinks::ExcludeFinalComponent)?;
                     Some((node_id, inode))
                 }
                 Err(Ext4Error::NotFound) => None,
@@ -1528,15 +1535,22 @@ impl FilesystemService {
         response
     }
 
-    fn remember_node(&mut self, path: &str) -> Result<u64, i32> {
+    fn remember_node(&mut self, path: &str, follow: FollowSymlinks) -> Result<u64, i32> {
         if let Some(node_id) = self.node_ids.get(path) {
             return Ok(*node_id);
         }
-        let node_id = self.next_node_id;
-        self.next_node_id = self.next_node_id.checked_add(1).ok_or(EIO)?;
+        let inode = self
+            .fs
+            .path_to_inode(path.try_into().map_err(|_| EINVAL)?, follow)
+            .map_err(errno)?;
+        let node_id = u64::from(inode.index.get());
+        self.remember_known_node(path, node_id);
+        Ok(node_id)
+    }
+
+    fn remember_known_node(&mut self, path: &str, node_id: u64) {
         self.nodes.insert(node_id, path.to_owned());
         self.node_ids.insert(path.to_owned(), node_id);
-        Ok(node_id)
     }
 
     fn rename_node_paths(&mut self, old_path: &str, new_path: &str) {

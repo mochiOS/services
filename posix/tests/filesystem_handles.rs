@@ -177,3 +177,50 @@ fn symlink_targets_enforce_search_permission_on_the_actual_directory() {
     );
     assert!(matches!(result, Err(13)));
 }
+
+#[test]
+fn filesystem_node_ids_are_stable_ext4_inode_numbers() {
+    let mut filesystem = test_filesystem();
+    let mounted = filesystem.handle(
+        protocol::Header {
+            opcode: protocol::OP_MOUNT,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let root = filesystem
+        .stat_at(
+            protocol::Header {
+                opcode: protocol::OP_STAT_AT,
+                ..protocol::Header::default()
+            },
+            b"/",
+            None,
+        )
+        .unwrap();
+    let root = protocol::decode_node_status(&root.payload).unwrap();
+    assert_eq!(mounted.header.node_id, root.node_id);
+    assert_eq!(root.node_id, 2);
+
+    let lookup = filesystem.handle(
+        protocol::Header {
+            opcode: protocol::OP_LOOKUP,
+            flags: protocol::LOOKUP_FOLLOW_SYMLINKS,
+            ..protocol::Header::default()
+        },
+        b"/blocked/child",
+    );
+    let status = filesystem
+        .stat_at(
+            protocol::Header {
+                opcode: protocol::OP_STAT_AT,
+                offset: u64::from(0u32),
+                ..protocol::Header::default()
+            },
+            b"/blocked/child",
+            None,
+        )
+        .unwrap();
+    let status = protocol::decode_node_status(&status.payload).unwrap();
+    assert_eq!(lookup.header.node_id, status.node_id);
+}
