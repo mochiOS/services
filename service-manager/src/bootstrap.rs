@@ -16,7 +16,7 @@ struct Runtime {
     mboot_agent: Option<(u64, u64)>,
     deferred_requests: VecDeque<DeferredMessage>,
     permission_prompt: Option<crate::portal::PermissionPromptProcess>,
-    posix_endpoint: Option<u64>,
+    posix_endpoint: Option<platform::handle::Handle>,
 }
 
 impl Runtime {
@@ -405,7 +405,7 @@ impl BootstrapOperations for Runtime {
             });
         match result {
             Ok(endpoint) => {
-                self.posix_endpoint = Some(u64::from(endpoint));
+                self.posix_endpoint = Some(endpoint);
                 platform::logln!(
                     "service-manager.service: posix.service ready endpoint={}",
                     endpoint

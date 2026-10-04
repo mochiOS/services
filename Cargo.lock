@@ -2987,6 +2987,7 @@ dependencies = [
  "mochios-driver-control-protocol",
  "mochios-linux-portal-protocol",
  "mochios-permission-prompt-protocol",
+ "mochios-posix-protocol",
  "mochios-user-database",
 ]
 
