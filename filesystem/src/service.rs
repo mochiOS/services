@@ -169,55 +169,35 @@ impl FilesystemService {
         {
             return Err(EINVAL);
         }
-        let path = self.open_path(payload, base_open_id)?;
         let uid = request.offset as u32;
         let gid = (request.offset >> 32) as u32;
-        self.check_search_path(path.as_str(), uid, gid)?;
-        let existing = self.fs.symlink_metadata(path.as_str());
-        let mut created = false;
-        match existing {
-            Ok(_)
-                if request.flags & protocol::OPEN_AT_CREATE != 0
-                    && request.flags & protocol::OPEN_AT_EXCLUSIVE != 0 =>
-            {
-                return Err(EEXIST);
-            }
-            Ok(_) => {}
-            Err(Ext4Error::NotFound) if request.flags & protocol::OPEN_AT_CREATE != 0 => {
-                let (parent_path, _) = split_parent(path.as_str())?;
-                let parent = self.fs.metadata(parent_path).map_err(errno)?;
-                if !permission_allows(
-                    parent.mode(),
-                    node_type(parent.file_type()),
-                    parent.uid(),
-                    parent.gid(),
-                    uid,
-                    gid,
-                    protocol::ACCESS_AT_WRITE | protocol::ACCESS_AT_EXECUTE,
-                ) {
-                    return Err(EACCES);
-                }
-                let create = protocol::Header {
-                    opcode: protocol::OP_CREATE,
-                    request_id: request.request_id,
-                    offset: request.offset,
-                    flags: protocol::NODE_TYPE_REGULAR,
-                    mode: request.mode,
-                    length: path.len() as u32,
-                    ..protocol::Header::default()
-                };
-                self.create(create, path.as_bytes())?;
-                created = true;
-            }
-            Err(error) => return Err(errno(error)),
-        }
         let base = self.resolve_base_inode(payload, base_open_id)?;
-        let follow = if request.flags & protocol::OPEN_AT_NOFOLLOW != 0 {
+        let exclusive_create = request.flags
+            & (protocol::OPEN_AT_CREATE | protocol::OPEN_AT_EXCLUSIVE)
+            == (protocol::OPEN_AT_CREATE | protocol::OPEN_AT_EXCLUSIVE);
+        let follow = if request.flags & protocol::OPEN_AT_NOFOLLOW != 0 || exclusive_create {
             FollowSymlinks::ExcludeFinalComponent
         } else {
             FollowSymlinks::All
         };
-        let inode = self.resolve_inode_at(base, payload, follow, uid, gid)?;
+        let (inode, created) = match self.resolve_path_at(base, payload, follow, uid, gid)? {
+            Resolution::Found(inode) => {
+                if request.flags & protocol::OPEN_AT_CREATE != 0
+                    && request.flags & protocol::OPEN_AT_EXCLUSIVE != 0
+                {
+                    return Err(EEXIST);
+                }
+                (inode, false)
+            }
+            Resolution::Missing { parent, name }
+                if request.flags & protocol::OPEN_AT_CREATE != 0
+                    && request.flags & protocol::OPEN_AT_DIRECTORY == 0
+                    && payload.last() != Some(&b'/') =>
+            {
+                (self.create_regular_at(parent, &name, request.mode, uid, gid)?, true)
+            }
+            Resolution::Missing { .. } => return Err(ENOENT),
+        };
         if request.flags & protocol::OPEN_AT_NOFOLLOW != 0 && inode.file_type().is_symlink() {
             return Err(ELOOP);
         }
@@ -247,7 +227,6 @@ impl FilesystemService {
             return Err(EACCES);
         }
         let node_id = u64::from(inode.index.get());
-        self.remember_known_node(path.as_str(), node_id);
         let mut file = if kind.is_dir() {
             None
         } else {
@@ -272,6 +251,49 @@ impl FilesystemService {
         response.header.open_id = open_id;
         response.header.node_id = node_id;
         Ok(response)
+    }
+
+    fn create_regular_at(
+        &self,
+        parent: Inode,
+        name: &[u8],
+        mode: u32,
+        uid: u32,
+        gid: u32,
+    ) -> Result<Inode, i32> {
+        let metadata = parent.metadata();
+        if !permission_allows(
+            metadata.mode(),
+            protocol::NODE_TYPE_DIRECTORY,
+            metadata.uid(),
+            metadata.gid(),
+            uid,
+            gid,
+            protocol::ACCESS_AT_WRITE | protocol::ACCESS_AT_EXECUTE,
+        ) {
+            return Err(EACCES);
+        }
+        let mut directory = Dir::open_inode(&self.fs, parent).map_err(errno)?;
+        let name = DirEntryName::try_from(name).map_err(|_| EINVAL)?;
+        match directory.get_entry(name) {
+            Ok(_) => return Err(EEXIST),
+            Err(Ext4Error::NotFound) => {}
+            Err(error) => return Err(errno(error)),
+        }
+        let mut inode = self
+            .fs
+            .create_inode(InodeCreationOptions {
+                file_type: FileType::Regular,
+                mode: InodeMode::from_bits_truncate((mode as u16) & 0x0fff)
+                    | InodeMode::S_IFREG,
+                uid,
+                gid,
+                time: Duration::default(),
+                flags: InodeFlags::empty(),
+            })
+            .map_err(errno)?;
+        directory.link(name, &mut inode).map_err(errno)?;
+        Ok(inode)
     }
 
     /// Resolves a path and obtains metadata as one serialized operation.
@@ -361,26 +383,6 @@ impl FilesystemService {
         }
     }
 
-    fn open_path(&self, payload: &[u8], base_open_id: Option<u64>) -> Result<String, i32> {
-        if payload.is_empty() || payload.len() > protocol::MAX_PATH_LEN || payload.contains(&0) {
-            return Err(EINVAL);
-        }
-        let path = std::str::from_utf8(payload).map_err(|_| EINVAL)?;
-        if path.starts_with('/') {
-            return Ok(path.to_owned());
-        }
-        let base = self.opens.get(&base_open_id.ok_or(EINVAL)?).ok_or(EBADF)?;
-        let base_path = self.nodes.get(&base.node_id).ok_or(ENOENT)?;
-        let metadata = self
-            .fs
-            .symlink_metadata(base_path.as_str())
-            .map_err(errno)?;
-        if !metadata.file_type().is_dir() {
-            return Err(ENOTDIR);
-        }
-        Ok(joined_path(base_path, path))
-    }
-
     fn resolve_base_inode(
         &self,
         path: &[u8],
@@ -407,6 +409,20 @@ impl FilesystemService {
         uid: u32,
         gid: u32,
     ) -> Result<Inode, i32> {
+        match self.resolve_path_at(base, path, follow, uid, gid)? {
+            Resolution::Found(inode) => Ok(inode),
+            Resolution::Missing { .. } => Err(ENOENT),
+        }
+    }
+
+    fn resolve_path_at(
+        &self,
+        base: Inode,
+        path: &[u8],
+        follow: FollowSymlinks,
+        uid: u32,
+        gid: u32,
+    ) -> Result<Resolution, i32> {
         const MAX_SYMLINKS: usize = 40;
         const MAX_COMPONENTS: usize = 1024;
 
@@ -459,9 +475,18 @@ impl FilesystemService {
                 }
                 OwnedComponent::Normal(name) => {
                     let directory = Dir::open_inode(&self.fs, current.clone()).map_err(errno)?;
-                    let child = directory
+                    let child = match directory
                         .get_entry(DirEntryName::try_from(name.as_slice()).map_err(|_| EINVAL)?)
-                        .map_err(errno)?;
+                    {
+                        Ok(child) => child,
+                        Err(Ext4Error::NotFound) if pending.is_empty() => {
+                            return Ok(Resolution::Missing {
+                                parent: current.clone(),
+                                name,
+                            });
+                        }
+                        Err(error) => return Err(errno(error)),
+                    };
                     let is_final = pending.is_empty();
                     if child.file_type().is_symlink()
                         && (follow == FollowSymlinks::All || !is_final)
@@ -493,7 +518,7 @@ impl FilesystemService {
         if require_directory && !inode.file_type().is_dir() {
             return Err(ENOTDIR);
         }
-        Ok(inode)
+        Ok(Resolution::Found(inode))
     }
 
     fn ancestry_from_root(&self, root: &Inode, base: Inode) -> Result<Vec<Inode>, i32> {
@@ -519,49 +544,6 @@ impl FilesystemService {
         }
         reversed.reverse();
         Ok(reversed)
-    }
-
-    fn check_search_path(&self, path: &str, uid: u32, gid: u32) -> Result<(), i32> {
-        if !path.starts_with('/') {
-            return Err(EINVAL);
-        }
-        let components: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
-        if components.is_empty() {
-            return Ok(());
-        }
-        let root = self.fs.metadata("/").map_err(errno)?;
-        if !permission_allows(
-            root.mode(),
-            node_type(root.file_type()),
-            root.uid(),
-            root.gid(),
-            uid,
-            gid,
-            protocol::ACCESS_AT_EXECUTE,
-        ) {
-            return Err(EACCES);
-        }
-        let mut prefix = String::new();
-        for component in &components[..components.len() - 1] {
-            prefix.push('/');
-            prefix.push_str(component);
-            let metadata = self.fs.metadata(prefix.as_str()).map_err(errno)?;
-            if !metadata.is_dir() {
-                return Err(ENOTDIR);
-            }
-            if !permission_allows(
-                metadata.mode(),
-                node_type(metadata.file_type()),
-                metadata.uid(),
-                metadata.gid(),
-                uid,
-                gid,
-                protocol::ACCESS_AT_EXECUTE,
-            ) {
-                return Err(EACCES);
-            }
-        }
-        Ok(())
     }
 
     pub fn provider_read(&mut self, open_id: u64, length: usize) -> Result<Vec<u8>, i32> {
@@ -1614,6 +1596,11 @@ enum OwnedComponent {
     Current,
     Parent,
     Normal(Vec<u8>),
+}
+
+enum Resolution {
+    Found(Inode),
+    Missing { parent: Inode, name: Vec<u8> },
 }
 
 fn owned_components(path: Path<'_>) -> VecDeque<OwnedComponent> {

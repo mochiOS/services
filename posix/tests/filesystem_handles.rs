@@ -85,11 +85,14 @@ fn test_filesystem() -> FilesystemService {
     let source = temporary.0.join("source");
     let directory = source.join("removed");
     let blocked = source.join("blocked");
+    let create_base = source.join("create-base");
     let image_path = temporary.0.join("filesystem.ext4");
     fs::create_dir_all(&directory).unwrap();
     fs::create_dir_all(&blocked).unwrap();
+    fs::create_dir_all(&create_base).unwrap();
     fs::write(blocked.join("child"), b"private").unwrap();
     symlink("/blocked/child", source.join("redirect")).unwrap();
+    symlink("target", create_base.join("dangling")).unwrap();
     let output = Command::new("mke2fs")
         .args(["-q", "-t", "ext4", "-F", "-d"])
         .arg(&source)
@@ -235,4 +238,108 @@ fn filesystem_node_ids_are_stable_ext4_inode_numbers() {
         .unwrap();
     let status = protocol::decode_node_status(&status.payload).unwrap();
     assert_eq!(lookup.header.node_id, status.node_id);
+}
+
+#[test]
+fn create_at_uses_the_open_parent_inode_and_follows_a_dangling_symlink() {
+    let mut filesystem = test_filesystem();
+    let base = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+                ..protocol::Header::default()
+            },
+            b"/create-base",
+            None,
+        )
+        .unwrap()
+        .header
+        .open_id;
+
+    let directory_only = filesystem.open_at(
+        protocol::Header {
+            opcode: protocol::OP_OPEN_AT,
+            flags: protocol::OPEN_AT_BASE_ATTACHED
+                | protocol::OPEN_AT_READ
+                | protocol::OPEN_AT_CREATE
+                | protocol::OPEN_AT_DIRECTORY,
+            mode: 0o755,
+            ..protocol::Header::default()
+        },
+        b"directory-only",
+        Some(base),
+    );
+    assert!(matches!(directory_only, Err(2)));
+    let absent = filesystem.stat_at(
+        protocol::Header {
+            opcode: protocol::OP_STAT_AT,
+            flags: protocol::STAT_AT_BASE_ATTACHED,
+            ..protocol::Header::default()
+        },
+        b"directory-only",
+        Some(base),
+    );
+    assert!(matches!(absent, Err(2)));
+
+    let exclusive = filesystem.open_at(
+        protocol::Header {
+            opcode: protocol::OP_OPEN_AT,
+            flags: protocol::OPEN_AT_BASE_ATTACHED
+                | protocol::OPEN_AT_READ
+                | protocol::OPEN_AT_WRITE
+                | protocol::OPEN_AT_CREATE
+                | protocol::OPEN_AT_EXCLUSIVE,
+            mode: 0o640,
+            ..protocol::Header::default()
+        },
+        b"dangling",
+        Some(base),
+    );
+    assert!(matches!(exclusive, Err(17)));
+
+    filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_BASE_ATTACHED
+                    | protocol::OPEN_AT_READ
+                    | protocol::OPEN_AT_WRITE
+                    | protocol::OPEN_AT_CREATE,
+                mode: 0o640,
+                ..protocol::Header::default()
+            },
+            b"dangling",
+            Some(base),
+        )
+        .unwrap();
+
+    let target = filesystem
+        .stat_at(
+            protocol::Header {
+                opcode: protocol::OP_STAT_AT,
+                flags: protocol::STAT_AT_BASE_ATTACHED,
+                ..protocol::Header::default()
+            },
+            b"target",
+            Some(base),
+        )
+        .unwrap();
+    let target = protocol::decode_node_status(&target.payload).unwrap();
+    assert_eq!(target.kind, protocol::NODE_TYPE_REGULAR);
+    assert_eq!(target.mode & 0o777, 0o640);
+
+    let link = filesystem
+        .stat_at(
+            protocol::Header {
+                opcode: protocol::OP_STAT_AT,
+                flags: protocol::STAT_AT_BASE_ATTACHED | protocol::STAT_AT_NOFOLLOW,
+                ..protocol::Header::default()
+            },
+            b"dangling",
+            Some(base),
+        )
+        .unwrap();
+    let link = protocol::decode_node_status(&link.payload).unwrap();
+    assert_eq!(link.kind, protocol::NODE_TYPE_SYMLINK);
 }
