@@ -2204,6 +2204,16 @@ fn launch_executable(executable: &str, arguments: &[String]) -> Result<u64, u64>
     let mut items = Vec::with_capacity(1 + arguments.len() + SESSION_ENVIRONMENT_NAMES.len());
     items.push(executable.to_owned());
     items.extend(arguments.iter().cloned());
+    let posix_endpoint = platform::handle::inherited(mochios_posix_protocol::CONTROL_HANDLE_KEY)
+        .map_err(|error| error.errno().unwrap_or(mochi_user_syscall::EBADF as u64))?;
+    let posix_rights = platform::handle::HANDLE_RIGHT_SEND
+        | platform::handle::HANDLE_RIGHT_DUPLICATE
+        | platform::handle::HANDLE_RIGHT_TRANSFER;
+    items.push(format!(
+        "{}{}:{posix_endpoint}:{posix_rights}",
+        mnu_abi::exec::INHERITED_HANDLE_PREFIX,
+        mochios_posix_protocol::CONTROL_HANDLE_KEY,
+    ));
     for name in SESSION_ENVIRONMENT_NAMES {
         if let Ok(value) = std::env::var(name)
             && !value.as_bytes().contains(&0)

@@ -4362,8 +4362,10 @@ dependencies = [
 name = "workspace-service"
 version = "0.1.0"
 dependencies = [
+ "mnu-abi",
  "mochi-user-platform",
  "mochi-user-syscall",
+ "mochios-posix-protocol",
  "mochios-workspace-protocol",
 ]
 

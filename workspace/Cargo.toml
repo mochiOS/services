@@ -7,6 +7,8 @@ edition = "2024"
 mochios-workspace-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-workspace-protocol" }
 mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }
 mochi-user-syscall = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-syscall" }
+mochios-posix-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-posix-protocol" }
+mnu-abi = { git = "https://github.com/mochiOS/mnu", package = "mnu-abi" }
 
 [[bin]]
 name = "workspace-service"
