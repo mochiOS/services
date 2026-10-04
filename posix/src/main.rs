@@ -619,6 +619,51 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         )
     }
 
+    fn fchmod(
+        &mut self,
+        file: posix_service::AttachedObject<mochi_user_platform::handle::Handle>,
+        mode: u32,
+        effective_uid: u32,
+        effective_gid: u32,
+    ) -> Result<(), i32> {
+        use mochios_filesystem_protocol as filesystem;
+
+        self.empty_call(
+            filesystem::Header {
+                opcode: filesystem::OP_CHMOD_HANDLE,
+                request_id: 18,
+                offset: u64::from(effective_uid) | (u64::from(effective_gid) << 32),
+                mode,
+                ..filesystem::Header::default()
+            },
+            &[],
+            single_file_handle(file)?,
+        )
+    }
+
+    fn fchown(
+        &mut self,
+        file: posix_service::AttachedObject<mochi_user_platform::handle::Handle>,
+        uid: u32,
+        gid: u32,
+        effective_uid: u32,
+        effective_gid: u32,
+    ) -> Result<(), i32> {
+        use mochios_filesystem_protocol as filesystem;
+
+        self.empty_call(
+            filesystem::Header {
+                opcode: filesystem::OP_CHOWN_HANDLE,
+                request_id: 19,
+                offset: u64::from(effective_uid) | (u64::from(effective_gid) << 32),
+                node_id: u64::from(uid) | (u64::from(gid) << 32),
+                ..filesystem::Header::default()
+            },
+            &[],
+            single_file_handle(file)?,
+        )
+    }
+
     fn fsync(
         &mut self,
         file: posix_service::AttachedObject<mochi_user_platform::handle::Handle>,

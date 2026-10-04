@@ -662,6 +662,8 @@ struct RecordingFilesystem {
     stat_file: Option<AttachedObject<u32>>,
     stat_mode: Option<u32>,
     truncated: Option<(AttachedObject<u32>, u64)>,
+    chmod_file: Option<(AttachedObject<u32>, u32, u32, u32)>,
+    chown_file: Option<(AttachedObject<u32>, u32, u32, u32, u32)>,
     synced: Option<AttachedObject<u32>>,
     status_flags: u32,
     flags_file: Option<AttachedObject<u32>>,
@@ -735,6 +737,29 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
 
     fn ftruncate(&mut self, file: AttachedObject<u32>, length: u64) -> Result<(), i32> {
         self.truncated = Some((file, length));
+        Ok(())
+    }
+
+    fn fchmod(
+        &mut self,
+        file: AttachedObject<u32>,
+        mode: u32,
+        effective_uid: u32,
+        effective_gid: u32,
+    ) -> Result<(), i32> {
+        self.chmod_file = Some((file, mode, effective_uid, effective_gid));
+        Ok(())
+    }
+
+    fn fchown(
+        &mut self,
+        file: AttachedObject<u32>,
+        uid: u32,
+        gid: u32,
+        effective_uid: u32,
+        effective_gid: u32,
+    ) -> Result<(), i32> {
+        self.chown_file = Some((file, uid, gid, effective_uid, effective_gid));
         Ok(())
     }
 
@@ -1119,6 +1144,34 @@ fn file_mutations_use_only_the_explicitly_attached_handle() {
     );
     assert_eq!(synced.response.header.status, protocol::STATUS_OK);
     assert_eq!(filesystem.synced, Some(file));
+
+    let changed_mode = service.handle_objects(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_FCHMOD,
+            ..protocol::Header::default()
+        },
+        &0o2750u32.to_le_bytes(),
+        &[file],
+        &mut filesystem,
+    );
+    assert_eq!(changed_mode.response.header.status, protocol::STATUS_OK);
+    assert_eq!(filesystem.chmod_file, Some((file, 0o2750, 507, 26)));
+
+    let mut owner = [0; protocol::FILE_OWNER_PAYLOAD_LEN];
+    protocol::encode_file_owner(100, u32::MAX, &mut owner).unwrap();
+    let changed_owner = service.handle_objects(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_FCHOWN,
+            ..protocol::Header::default()
+        },
+        &owner,
+        &[file],
+        &mut filesystem,
+    );
+    assert_eq!(changed_owner.response.header.status, protocol::STATUS_OK);
+    assert_eq!(filesystem.chown_file, Some((file, 100, u32::MAX, 507, 26)));
     assert_eq!(filesystem.roots_opened, 0);
 }
 

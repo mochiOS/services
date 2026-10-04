@@ -193,6 +193,23 @@ pub trait FilesystemBackend<H: Copy> {
 
     fn ftruncate(&mut self, file: AttachedObject<H>, length: u64) -> Result<(), i32>;
 
+    fn fchmod(
+        &mut self,
+        file: AttachedObject<H>,
+        mode: u32,
+        effective_uid: u32,
+        effective_gid: u32,
+    ) -> Result<(), i32>;
+
+    fn fchown(
+        &mut self,
+        file: AttachedObject<H>,
+        uid: u32,
+        gid: u32,
+        effective_uid: u32,
+        effective_gid: u32,
+    ) -> Result<(), i32>;
+
     fn fsync(&mut self, file: AttachedObject<H>) -> Result<(), i32>;
 
     fn get_status_flags(&mut self, file: AttachedObject<H>) -> Result<u32, i32>;
@@ -327,7 +344,9 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_SYMLINK_AT
             | protocol::OP_READLINK_AT
             | protocol::OP_CHMOD_AT
-            | protocol::OP_CHOWN_AT => Err(STATUS_EINVAL),
+            | protocol::OP_CHOWN_AT
+            | protocol::OP_FCHMOD
+            | protocol::OP_FCHOWN => Err(STATUS_EINVAL),
             _ => Err(protocol::STATUS_ENOSYS),
         };
         let (status, payload) = match result {
@@ -375,6 +394,8 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_READLINK_AT
                 | protocol::OP_CHMOD_AT
                 | protocol::OP_CHOWN_AT
+                | protocol::OP_FCHMOD
+                | protocol::OP_FCHOWN
         ) {
             let response = if handles.is_empty() {
                 self.handle(peer, header, payload)
@@ -548,6 +569,51 @@ impl<H: Copy> PosixService<H> {
                     Err(_) => return object_error(header.request_id, STATUS_EINVAL),
                 };
                 match filesystem.ftruncate(handles[0], length) {
+                    Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
+                    Err(status) => object_error(header.request_id, status),
+                }
+            }
+            protocol::OP_FCHMOD => {
+                if handles.len() != 1 || payload.len() != 4 {
+                    return object_error(header.request_id, STATUS_EINVAL);
+                }
+                let session = match self.sessions.get(&peer.process_id) {
+                    Some(session) => *session,
+                    None => return object_error(header.request_id, protocol::STATUS_ESRCH),
+                };
+                let mode = u32::from_le_bytes(payload.try_into().unwrap());
+                if mode & !0o7777 != 0 {
+                    return object_error(header.request_id, STATUS_EINVAL);
+                }
+                match filesystem.fchmod(
+                    handles[0],
+                    mode,
+                    session.effective_uid,
+                    session.effective_gid,
+                ) {
+                    Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
+                    Err(status) => object_error(header.request_id, status),
+                }
+            }
+            protocol::OP_FCHOWN => {
+                if handles.len() != 1 {
+                    return object_error(header.request_id, STATUS_EINVAL);
+                }
+                let session = match self.sessions.get(&peer.process_id) {
+                    Some(session) => *session,
+                    None => return object_error(header.request_id, protocol::STATUS_ESRCH),
+                };
+                let (uid, gid) = match protocol::decode_file_owner(payload) {
+                    Ok(owner) => owner,
+                    Err(_) => return object_error(header.request_id, STATUS_EINVAL),
+                };
+                match filesystem.fchown(
+                    handles[0],
+                    uid,
+                    gid,
+                    session.effective_uid,
+                    session.effective_gid,
+                ) {
                     Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
                     Err(status) => object_error(header.request_id, status),
                 }

@@ -120,7 +120,9 @@ impl FilesystemService {
             | protocol::OP_SYMLINK_AT
             | protocol::OP_READLINK_AT
             | protocol::OP_CHMOD_AT
-            | protocol::OP_CHOWN_AT => Err(EINVAL),
+            | protocol::OP_CHOWN_AT
+            | protocol::OP_CHMOD_HANDLE
+            | protocol::OP_CHOWN_HANDLE => Err(EINVAL),
             _ => Err(ENOSYS),
         };
         result.unwrap_or_else(|errno| self.error(request, errno))
@@ -2211,6 +2213,58 @@ impl FilesystemService {
     ) -> Result<Response, i32> {
         request.open_id = open_id;
         self.truncate(request)
+    }
+
+    pub fn chmod_handle(
+        &mut self,
+        request: protocol::Header,
+        open_id: u64,
+    ) -> Result<Response, i32> {
+        if request.flags != 0 || request.mode & !0o7777 != 0 {
+            return Err(EINVAL);
+        }
+        let effective_uid = request.offset as u32;
+        let effective_gid = (request.offset >> 32) as u32;
+        let inode = self.opens.get(&open_id).ok_or(EBADF)?.inode.clone();
+        let metadata = inode.metadata();
+        if effective_uid != 0 && effective_uid != metadata.uid() {
+            return Err(EPERM);
+        }
+        let mut permissions = request.mode as u16;
+        if effective_uid != 0 && effective_gid != metadata.gid() {
+            permissions &= !0o2000;
+        }
+        self.chmod_inode(inode, permissions)?;
+        Ok(self.success(request))
+    }
+
+    pub fn chown_handle(
+        &mut self,
+        request: protocol::Header,
+        open_id: u64,
+    ) -> Result<Response, i32> {
+        if request.flags != 0 {
+            return Err(EINVAL);
+        }
+        let effective_uid = request.offset as u32;
+        let effective_gid = (request.offset >> 32) as u32;
+        let requested_uid = request.node_id as u32;
+        let requested_gid = (request.node_id >> 32) as u32;
+        let inode = self.opens.get(&open_id).ok_or(EBADF)?.inode.clone();
+        let metadata = inode.metadata();
+        if effective_uid != 0
+            && (effective_uid != metadata.uid()
+                || requested_uid != u32::MAX && requested_uid != metadata.uid()
+                || requested_gid != u32::MAX
+                    && requested_gid != metadata.gid()
+                    && requested_gid != effective_gid)
+        {
+            return Err(EPERM);
+        }
+        let uid = (requested_uid != u32::MAX).then_some(requested_uid);
+        let gid = (requested_gid != u32::MAX).then_some(requested_gid);
+        self.chown_inode(inode, uid, gid, uid.is_some() || gid.is_some())?;
+        Ok(self.success(request))
     }
 
     pub fn sync_handle(
