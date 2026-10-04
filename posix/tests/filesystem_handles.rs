@@ -217,6 +217,56 @@ fn truncate_and_sync_address_an_open_object_without_a_path() {
 }
 
 #[test]
+fn duplicated_open_descriptions_share_mutable_status_flags() {
+    let mut filesystem = test_filesystem();
+    let opened = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+                mode: 0o644,
+                ..protocol::Header::default()
+            },
+            b"/flags.txt",
+            PathAnchors::default(),
+        )
+        .unwrap();
+    let open_id = opened.header.open_id;
+    let wanted = protocol::OPEN_STATUS_APPEND | protocol::OPEN_STATUS_NONBLOCK;
+    filesystem
+        .set_flags_handle(
+            protocol::Header {
+                opcode: protocol::OP_SET_FLAGS_HANDLE,
+                flags: wanted,
+                ..protocol::Header::default()
+            },
+            open_id,
+        )
+        .unwrap();
+
+    let flags = filesystem
+        .get_flags_handle(
+            protocol::Header {
+                opcode: protocol::OP_GET_FLAGS_HANDLE,
+                ..protocol::Header::default()
+            },
+            open_id,
+        )
+        .unwrap();
+    assert_eq!(flags.header.flags, wanted);
+
+    filesystem.provider_write(open_id, b"a").unwrap();
+    filesystem
+        .provider_seek(open_id, 0, HANDLE_SEEK_START)
+        .unwrap();
+    filesystem.provider_write(open_id, b"b").unwrap();
+    filesystem
+        .provider_seek(open_id, 0, HANDLE_SEEK_START)
+        .unwrap();
+    assert_eq!(filesystem.provider_read(open_id, 2).unwrap(), b"ab");
+}
+
+#[test]
 fn open_directory_paths_follow_rename_and_reject_unlinked_cwds() {
     let mut filesystem = test_filesystem();
     let root = filesystem

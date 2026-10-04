@@ -654,6 +654,8 @@ struct RecordingFilesystem {
     stat_mode: Option<u32>,
     truncated: Option<(AttachedObject<u32>, u64)>,
     synced: Option<AttachedObject<u32>>,
+    status_flags: u32,
+    flags_file: Option<AttachedObject<u32>>,
     retained: Vec<AttachedObject<u32>>,
     released: Vec<AttachedObject<u32>>,
     path_query: Option<(AttachedObject<u32>, AttachedObject<u32>)>,
@@ -720,6 +722,17 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
 
     fn fsync(&mut self, file: AttachedObject<u32>) -> Result<(), i32> {
         self.synced = Some(file);
+        Ok(())
+    }
+
+    fn get_status_flags(&mut self, file: AttachedObject<u32>) -> Result<u32, i32> {
+        self.flags_file = Some(file);
+        Ok(self.status_flags)
+    }
+
+    fn set_status_flags(&mut self, file: AttachedObject<u32>, flags: u32) -> Result<(), i32> {
+        self.flags_file = Some(file);
+        self.status_flags = flags;
         Ok(())
     }
 
@@ -1001,6 +1014,63 @@ fn file_mutations_use_only_the_explicitly_attached_handle() {
     );
     assert_eq!(synced.response.header.status, protocol::STATUS_OK);
     assert_eq!(filesystem.synced, Some(file));
+    assert_eq!(filesystem.roots_opened, 0);
+}
+
+#[test]
+fn file_status_flags_live_on_the_attached_open_description() {
+    let peer = PeerIdentity {
+        process_id: 118,
+        effective_uid: 506,
+        effective_gid: 25,
+    };
+    let mut service = PosixService::new();
+    service.handle(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let file = AttachedObject {
+        handle: 60,
+        rights: 0x81,
+    };
+    let mut filesystem = RecordingFilesystem::default();
+    let wanted = protocol::OPEN_APPEND | protocol::OPEN_NONBLOCK;
+    let mut flags = [0; protocol::FILE_FLAGS_PAYLOAD_LEN];
+    protocol::encode_file_flags(wanted, &mut flags).unwrap();
+
+    let set = service.handle_objects(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_FSETFL,
+            ..protocol::Header::default()
+        },
+        &flags,
+        &[file],
+        &mut filesystem,
+    );
+    assert_eq!(set.response.header.status, protocol::STATUS_OK);
+    assert_eq!(filesystem.status_flags, wanted);
+    assert_eq!(filesystem.flags_file, Some(file));
+
+    let get = service.handle_objects(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_FGETFL,
+            ..protocol::Header::default()
+        },
+        &[],
+        &[file],
+        &mut filesystem,
+    );
+    assert_eq!(get.response.header.status, protocol::STATUS_OK);
+    assert_eq!(
+        protocol::decode_file_flags(&get.response.payload).unwrap(),
+        wanted
+    );
     assert_eq!(filesystem.roots_opened, 0);
 }
 

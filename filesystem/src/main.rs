@@ -263,15 +263,18 @@ fn main() {
                     }
                 } else if matches!(
                     header.opcode,
-                    protocol::OP_TRUNCATE_HANDLE | protocol::OP_SYNC_HANDLE
+                    protocol::OP_TRUNCATE_HANDLE
+                        | protocol::OP_SYNC_HANDLE
+                        | protocol::OP_GET_FLAGS_HANDLE
+                        | protocol::OP_SET_FLAGS_HANDLE
                 ) {
                     let open_id = decode_single_open(&attached);
-                    let result = open_id.and_then(|open_id| {
-                        if header.opcode == protocol::OP_TRUNCATE_HANDLE {
-                            service.truncate_handle(header, open_id)
-                        } else {
-                            service.sync_handle(header, open_id)
-                        }
+                    let result = open_id.and_then(|open_id| match header.opcode {
+                        protocol::OP_TRUNCATE_HANDLE => service.truncate_handle(header, open_id),
+                        protocol::OP_SYNC_HANDLE => service.sync_handle(header, open_id),
+                        protocol::OP_GET_FLAGS_HANDLE => service.get_flags_handle(header, open_id),
+                        protocol::OP_SET_FLAGS_HANDLE => service.set_flags_handle(header, open_id),
+                        _ => unreachable!(),
                     });
                     match result {
                         Ok(response) => {

@@ -53,7 +53,7 @@ struct OpenFile {
     inode: Inode,
     file: Option<File>,
     offset: u64,
-    append: bool,
+    status_flags: u32,
 }
 
 #[derive(Clone)]
@@ -102,7 +102,9 @@ impl FilesystemService {
             | protocol::OP_STAT_HANDLE
             | protocol::OP_ACCESS_AT
             | protocol::OP_TRUNCATE_HANDLE
-            | protocol::OP_SYNC_HANDLE => Err(EINVAL),
+            | protocol::OP_SYNC_HANDLE
+            | protocol::OP_GET_FLAGS_HANDLE
+            | protocol::OP_SET_FLAGS_HANDLE => Err(EINVAL),
             _ => Err(ENOSYS),
         };
         result.unwrap_or_else(|errno| self.error(request, errno))
@@ -146,7 +148,7 @@ impl FilesystemService {
                 inode,
                 file: Some(file),
                 offset: 0,
-                append: false,
+                status_flags: 0,
             },
         );
         let mut response = self.success(request);
@@ -256,7 +258,15 @@ impl FilesystemService {
                 inode,
                 file,
                 offset: 0,
-                append: request.flags & protocol::OPEN_AT_APPEND != 0,
+                status_flags: (if request.flags & protocol::OPEN_AT_APPEND != 0 {
+                    protocol::OPEN_STATUS_APPEND
+                } else {
+                    0
+                }) | (if request.flags & protocol::OPEN_AT_NONBLOCK != 0 {
+                    protocol::OPEN_STATUS_NONBLOCK
+                } else {
+                    0
+                }),
             },
         );
         let mut response = self.success(request);
@@ -679,7 +689,7 @@ impl FilesystemService {
         }
         let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
         let file = open.file.as_mut().ok_or(EISDIR)?;
-        if open.append {
+        if open.status_flags & protocol::OPEN_STATUS_APPEND != 0 {
             open.offset = file.inode().metadata().len();
         }
         let mut done = 0usize;
@@ -1507,6 +1517,28 @@ impl FilesystemService {
         open_id: u64,
     ) -> Result<Response, i32> {
         self.opens.get(&open_id).ok_or(EBADF)?;
+        Ok(self.success(request))
+    }
+
+    pub fn get_flags_handle(
+        &self,
+        request: protocol::Header,
+        open_id: u64,
+    ) -> Result<Response, i32> {
+        let mut response = self.success(request);
+        response.header.flags = self.opens.get(&open_id).ok_or(EBADF)?.status_flags;
+        Ok(response)
+    }
+
+    pub fn set_flags_handle(
+        &mut self,
+        request: protocol::Header,
+        open_id: u64,
+    ) -> Result<Response, i32> {
+        if request.flags & !protocol::OPEN_STATUS_FLAGS_ALL != 0 {
+            return Err(EINVAL);
+        }
+        self.opens.get_mut(&open_id).ok_or(EBADF)?.status_flags = request.flags;
         Ok(self.success(request))
     }
 
