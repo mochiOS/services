@@ -120,6 +120,41 @@ fn session_info_and_umask_round_trip_through_the_client() {
     assert_eq!(client.session_info().unwrap().umask, 0o755);
 }
 
+#[test]
+fn credential_changes_follow_posix_privilege_rules() {
+    let unprivileged = client(PeerIdentity {
+        process_id: 92,
+        effective_uid: 503,
+        effective_gid: 22,
+    });
+    unprivileged.register_session().unwrap();
+    assert_eq!(
+        unprivileged.set_uid(999).unwrap_err(),
+        ClientError::Remote(-1)
+    );
+    assert_eq!(
+        unprivileged.set_gid(999).unwrap_err(),
+        ClientError::Remote(-1)
+    );
+    unprivileged.set_uid(503).unwrap();
+    unprivileged.set_gid(22).unwrap();
+
+    let privileged = client(PeerIdentity {
+        process_id: 93,
+        effective_uid: 0,
+        effective_gid: 0,
+    });
+    privileged.register_session().unwrap();
+    privileged.set_gid(42).unwrap();
+    privileged.set_uid(501).unwrap();
+    let session = privileged.session_info().unwrap();
+    assert_eq!(session.real_uid, 501);
+    assert_eq!(session.effective_uid, 501);
+    assert_eq!(session.real_gid, 42);
+    assert_eq!(session.effective_gid, 42);
+    assert_eq!(privileged.set_uid(0).unwrap_err(), ClientError::Remote(-1));
+}
+
 struct GetcwdTransport;
 
 impl Transport for GetcwdTransport {
