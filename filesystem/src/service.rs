@@ -40,6 +40,11 @@ pub struct FilesystemService {
 
 struct OpenFile {
     node_id: u64,
+    /// The opened inode is the identity of this open file description.
+    ///
+    /// Keep it independently of the path cache: an open directory or file
+    /// must remain usable after its directory entry is renamed or removed.
+    inode: Inode,
     file: Option<File>,
     offset: u64,
     append: bool,
@@ -118,12 +123,14 @@ impl FilesystemService {
     fn open(&mut self, request: protocol::Header) -> Result<Response, i32> {
         let path = self.nodes.get(&request.node_id).ok_or(ENOENT)?;
         let file = self.fs.open(path.as_str()).map_err(errno)?;
+        let inode = file.inode().clone();
         let open_id = self.next_open_id;
         self.next_open_id = self.next_open_id.checked_add(1).ok_or(EIO)?;
         self.opens.insert(
             open_id,
             OpenFile {
                 node_id: request.node_id,
+                inode,
                 file: Some(file),
                 offset: 0,
                 append: false,
@@ -235,10 +242,17 @@ impl FilesystemService {
             return Err(EACCES);
         }
         let node_id = self.remember_node(path.as_str())?;
+        let inode = self
+            .fs
+            .path_to_inode(
+                path.as_str().try_into().map_err(|_| EINVAL)?,
+                FollowSymlinks::All,
+            )
+            .map_err(errno)?;
         let mut file = if kind.is_dir() {
             None
         } else {
-            Some(self.fs.open(path.as_str()).map_err(errno)?)
+            Some(File::open_inode(&self.fs, inode.clone()).map_err(errno)?)
         };
         if request.flags & protocol::OPEN_AT_TRUNCATE != 0 {
             file.as_mut().ok_or(EISDIR)?.truncate(0).map_err(errno)?;
@@ -249,6 +263,7 @@ impl FilesystemService {
             open_id,
             OpenFile {
                 node_id,
+                inode,
                 file,
                 offset: 0,
                 append: request.flags & protocol::OPEN_AT_APPEND != 0,
@@ -302,23 +317,8 @@ impl FilesystemService {
             return Err(EINVAL);
         }
         let open = self.opens.get(&open_id).ok_or(EBADF)?;
-        let (node_id, metadata) = match open.file.as_ref() {
-            Some(file) => (
-                u64::from(file.inode().index.get()),
-                file.inode().metadata(),
-            ),
-            None => {
-                let path = self.nodes.get(&open.node_id).ok_or(ENOENT)?;
-                let inode = self
-                    .fs
-                    .path_to_inode(
-                        path.as_str().try_into().map_err(|_| EINVAL)?,
-                        FollowSymlinks::ExcludeFinalComponent,
-                    )
-                    .map_err(errno)?;
-                (u64::from(inode.index.get()), inode.metadata())
-            }
-        };
+        let node_id = u64::from(open.inode.index.get());
+        let metadata = open.inode.metadata();
         Ok(self.node_status_response(request, node_id, metadata))
     }
 
@@ -436,10 +436,10 @@ impl FilesystemService {
     pub fn provider_read(&mut self, open_id: u64, length: usize) -> Result<Vec<u8>, i32> {
         let open = self.opens.get(&open_id).ok_or(EBADF)?;
         if open.file.is_none() {
-            let node_id = open.node_id;
+            let inode = open.inode.clone();
             let start_entry = open.offset;
-            let (payload, next_entry) = self.read_directory_payload(
-                node_id,
+            let (payload, next_entry) = self.read_open_directory_payload(
+                inode,
                 start_entry,
                 length.min(mnu_abi::provider::MAX_DATA_LEN),
             )?;
@@ -518,18 +518,7 @@ impl FilesystemService {
     fn close(&mut self, request: protocol::Header) -> Result<Response, i32> {
         let open = self.opens.get(&request.open_id).ok_or(EBADF)?;
         let node_id = open.node_id;
-        let inode = match open.file.as_ref() {
-            Some(file) => file.inode().clone(),
-            None => {
-                let path = self.nodes.get(&node_id).ok_or(ENOENT)?;
-                self.fs
-                    .path_to_inode(
-                        path.as_str().try_into().map_err(|_| EIO)?,
-                        FollowSymlinks::All,
-                    )
-                    .map_err(errno)?
-            }
-        };
+        let inode = open.inode.clone();
         let is_last_open = self
             .opens
             .values()
@@ -616,14 +605,7 @@ impl FilesystemService {
     fn stat(&self, request: protocol::Header) -> Result<Response, i32> {
         let (node_id, metadata) = if request.open_id != 0 {
             let open = self.opens.get(&request.open_id).ok_or(EBADF)?;
-            let metadata = match open.file.as_ref() {
-                Some(file) => file.inode().metadata(),
-                None => {
-                    let path = self.nodes.get(&open.node_id).ok_or(ENOENT)?;
-                    self.fs.symlink_metadata(path.as_str()).map_err(errno)?
-                }
-            };
-            (open.node_id, metadata)
+            (open.node_id, open.inode.metadata())
         } else {
             let path = self.nodes.get(&request.node_id).ok_or(ENOENT)?;
             (
@@ -741,6 +723,44 @@ impl FilesystemService {
             }
             let child_path = joined_path(&path, name);
             let node_id = self.remember_node(&child_path)?;
+            let kind = node_type(entry.file_type().map_err(errno)?);
+            let record_length = protocol::DIRENT_HEADER_LEN + name.len();
+            if payload.len().saturating_add(record_length) > max_length {
+                if payload.is_empty() {
+                    return Err(ENOSPC);
+                }
+                break;
+            }
+            let offset = payload.len();
+            payload.resize(offset + record_length, 0);
+            protocol::encode_dir_entry(node_id, kind, name.as_bytes(), &mut payload[offset..])
+                .map_err(|_| EIO)?;
+            next_entry = next_entry.checked_add(1).ok_or(EIO)?;
+        }
+        Ok((payload, next_entry as u64))
+    }
+
+    /// Reads an already-open directory by inode rather than resolving its
+    /// former pathname again. Directory handles therefore survive rename and
+    /// unlink in the same way as every other open file description.
+    fn read_open_directory_payload(
+        &self,
+        inode: Inode,
+        start_entry: u64,
+        max_length: usize,
+    ) -> Result<(Vec<u8>, u64), i32> {
+        let start_entry = usize::try_from(start_entry).map_err(|_| EINVAL)?;
+        let directory = Dir::open_inode(&self.fs, inode).map_err(errno)?;
+        let mut payload = Vec::new();
+        let mut next_entry = start_entry;
+        for entry in directory.read_dir().map_err(errno)?.skip(start_entry) {
+            let entry = entry.map_err(errno)?;
+            let name = entry.file_name().as_str().map_err(|_| EIO)?;
+            if name.starts_with(".mochios-orphan-") {
+                next_entry = next_entry.checked_add(1).ok_or(EIO)?;
+                continue;
+            }
+            let node_id = u64::from(entry.inode.get());
             let kind = node_type(entry.file_type().map_err(errno)?);
             let record_length = protocol::DIRENT_HEADER_LEN + name.len();
             if payload.len().saturating_add(record_length) > max_length {
