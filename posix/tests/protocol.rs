@@ -469,6 +469,60 @@ impl ObjectTransport for LocalObjectTransport {
     }
 }
 
+struct ChildRegistrationTransport;
+
+impl Transport for ChildRegistrationTransport {
+    type Error = ();
+
+    fn call(&self, _request: &[u8], _response: &mut [u8]) -> Result<usize, Self::Error> {
+        Err(())
+    }
+}
+
+impl ObjectTransport for ChildRegistrationTransport {
+    type Handle = u32;
+
+    fn call_with_handles(
+        &self,
+        request: &[u8],
+        response: &mut [u8],
+        handles: &mut ObjectHandles<Self::Handle>,
+    ) -> Result<usize, Self::Error> {
+        let (header, payload) = protocol::decode(request).map_err(|_| ())?;
+        assert_eq!(header.opcode, protocol::OP_PROCESS_FORKED);
+        assert!(payload.is_empty());
+        assert_eq!(
+            handles.get(0),
+            Some(ObjectHandleAttachment {
+                handle: 52,
+                rights: 1 << 4,
+            })
+        );
+        handles.clear();
+        protocol::encode(
+            protocol::Header {
+                opcode: protocol::OP_STATUS,
+                request_id: header.request_id,
+                status: protocol::STATUS_OK,
+                ..protocol::Header::default()
+            },
+            &[],
+            response,
+        )
+        .map_err(|_| ())
+    }
+}
+
+#[test]
+fn client_registers_a_child_only_by_transferring_its_process_handle() {
+    Client::new(ChildRegistrationTransport)
+        .register_child(ObjectHandleAttachment {
+            handle: 52,
+            rights: 1 << 4,
+        })
+        .unwrap();
+}
+
 #[test]
 fn object_transport_replaces_request_handles_with_reply_handles() {
     let client = Client::new(LocalObjectTransport);
@@ -961,6 +1015,80 @@ fn sample_status() -> protocol::FileStatus {
         blocks: 1,
         ..protocol::FileStatus::default()
     }
+}
+
+#[test]
+fn adopted_child_inherits_posix_state_and_retained_directories() {
+    let peer = PeerIdentity {
+        process_id: 111,
+        effective_uid: 505,
+        effective_gid: 24,
+    };
+    let mut service = service_for(peer);
+    assert_eq!(
+        service
+            .handle(
+                peer,
+                protocol::Header {
+                    opcode: protocol::OP_SESSION_REGISTER,
+                    ..protocol::Header::default()
+                },
+                &[],
+            )
+            .header
+            .status,
+        protocol::STATUS_OK
+    );
+    let mut filesystem = RecordingFilesystem::default();
+    assert_eq!(
+        service
+            .handle_objects(
+                peer,
+                protocol::Header {
+                    opcode: protocol::OP_GETCWD,
+                    ..protocol::Header::default()
+                },
+                &[],
+                &[],
+                &mut filesystem,
+            )
+            .response
+            .header
+            .status,
+        protocol::STATUS_OK
+    );
+    service
+        .adopt_child(
+            peer,
+            AuthenticatedProcess {
+                handle: 52,
+                process_id: 112,
+            },
+            &mut filesystem,
+        )
+        .unwrap();
+
+    assert_eq!(service.parent_id(112), Some(111));
+    assert!(service.is_child(111, 112));
+    assert_eq!(service.process_handle(112), Some(52));
+    let child = service.session(112).unwrap();
+    assert_eq!(child.effective_uid, 505);
+    assert_eq!(child.effective_gid, 24);
+    assert_eq!(child.umask, 0o022);
+    assert_eq!(
+        service.session_directories(112),
+        Some(&SessionDirectories {
+            root: AttachedObject {
+                handle: 1100,
+                rights: 0x81,
+            },
+            cwd: AttachedObject {
+                handle: 1101,
+                rights: 0x81,
+            },
+        })
+    );
+    assert_eq!(filesystem.retained.len(), 2);
 }
 
 #[test]

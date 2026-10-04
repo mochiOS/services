@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::string::String;
 
 use mochios_posix_protocol as protocol;
@@ -276,6 +276,8 @@ pub struct PosixService<H: Copy = u32> {
     sessions: BTreeMap<u64, Session>,
     directories: BTreeMap<u64, SessionDirectories<H>>,
     processes: BTreeMap<u64, H>,
+    parents: BTreeMap<u64, u64>,
+    children: BTreeMap<u64, BTreeSet<u64>>,
 }
 
 impl PosixService<u32> {
@@ -284,6 +286,8 @@ impl PosixService<u32> {
             sessions: BTreeMap::new(),
             directories: BTreeMap::new(),
             processes: BTreeMap::new(),
+            parents: BTreeMap::new(),
+            children: BTreeMap::new(),
         }
     }
 }
@@ -301,6 +305,16 @@ impl<H: Copy> PosixService<H> {
         self.processes.get(&process_id).copied()
     }
 
+    pub fn parent_id(&self, process_id: u64) -> Option<u64> {
+        self.parents.get(&process_id).copied()
+    }
+
+    pub fn is_child(&self, parent_id: u64, process_id: u64) -> bool {
+        self.children
+            .get(&parent_id)
+            .is_some_and(|children| children.contains(&process_id))
+    }
+
     /// Binds service state to a kernel-authenticated process object. The
     /// caller retains ownership when this returns `Ok(false)`.
     pub fn bind_process(
@@ -316,6 +330,60 @@ impl<H: Copy> PosixService<H> {
         }
         self.processes.insert(peer.process_id, process.handle);
         Ok(true)
+    }
+
+    /// Installs POSIX state for a native process cloned by `peer`. Directory
+    /// capabilities are retained so parent and child own independent service
+    /// references to the same live filesystem objects.
+    pub fn adopt_child<F: FilesystemBackend<H>>(
+        &mut self,
+        peer: PeerIdentity,
+        process: AuthenticatedProcess<H>,
+        filesystem: &mut F,
+    ) -> Result<(), i32> {
+        if process.process_id == peer.process_id
+            || !self.processes.contains_key(&peer.process_id)
+            || self.processes.contains_key(&process.process_id)
+        {
+            return Err(STATUS_EINVAL);
+        }
+        let parent_session = self
+            .sessions
+            .get(&peer.process_id)
+            .copied()
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let child_directories = if let Some(parent) = self.directories.get(&peer.process_id).copied()
+        {
+            let root = filesystem.retain_object(parent.root)?;
+            let cwd = match filesystem.retain_object(parent.cwd) {
+                Ok(cwd) => cwd,
+                Err(error) => {
+                    filesystem.release_object(root);
+                    return Err(error);
+                }
+            };
+            Some(SessionDirectories { root, cwd })
+        } else {
+            None
+        };
+        let child_id = process.process_id;
+        self.processes.insert(child_id, process.handle);
+        self.sessions.insert(
+            child_id,
+            Session {
+                process_id: child_id,
+                ..parent_session
+            },
+        );
+        if let Some(directories) = child_directories {
+            self.directories.insert(child_id, directories);
+        }
+        self.parents.insert(child_id, peer.process_id);
+        self.children
+            .entry(peer.process_id)
+            .or_default()
+            .insert(child_id);
+        Ok(())
     }
 
     pub fn handle(
@@ -365,6 +433,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_GETCWD => Err(STATUS_EINVAL),
             protocol::OP_SET_UID
             | protocol::OP_SET_GID
+            | protocol::OP_PROCESS_FORKED
             | protocol::OP_FTRUNCATE
             | protocol::OP_FSYNC
             | protocol::OP_FGETFL
