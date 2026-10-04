@@ -38,6 +38,34 @@ pub struct PreparedOpen {
     pub effective_gid: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AttachedObject<H> {
+    pub handle: H,
+    pub rights: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpenedObject<H> {
+    pub handle: H,
+    pub rights: u64,
+}
+
+pub trait FilesystemBackend<H: Copy> {
+    /// Executes path resolution, optional creation, exclusivity checks and
+    /// opening as one backend operation.
+    fn open_at(
+        &mut self,
+        request: &PreparedOpen,
+        directory: Option<AttachedObject<H>>,
+    ) -> Result<OpenedObject<H>, i32>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObjectResponse<H> {
+    pub response: Response,
+    pub handles: Vec<OpenedObject<H>>,
+}
+
 #[derive(Debug, Default)]
 pub struct PosixService {
     sessions: BTreeMap<u64, Session>,
@@ -99,6 +127,55 @@ impl PosixService {
                 status,
             },
             payload,
+        }
+    }
+
+    pub fn handle_objects<H: Copy, F: FilesystemBackend<H>>(
+        &mut self,
+        peer: PeerIdentity,
+        header: protocol::Header,
+        payload: &[u8],
+        handles: &[AttachedObject<H>],
+        filesystem: &mut F,
+    ) -> ObjectResponse<H> {
+        if header.opcode != protocol::OP_OPEN_AT {
+            let response = if handles.is_empty() {
+                self.handle(peer, header, payload)
+            } else {
+                status_response(header.request_id, STATUS_EINVAL)
+            };
+            return ObjectResponse {
+                response,
+                handles: Vec::new(),
+            };
+        }
+        if header.flags != 0 {
+            return ObjectResponse {
+                response: status_response(header.request_id, STATUS_EINVAL),
+                handles: Vec::new(),
+            };
+        }
+        let prepared = match self.prepare_open_at(peer, payload, handles.len()) {
+            Ok(prepared) => prepared,
+            Err(status) => {
+                return ObjectResponse {
+                    response: status_response(header.request_id, status),
+                    handles: Vec::new(),
+                };
+            }
+        };
+        let directory = (prepared.base == protocol::OpenBase::AttachedDirectory)
+            .then(|| handles.first().copied())
+            .flatten();
+        match filesystem.open_at(&prepared, directory) {
+            Ok(opened) => ObjectResponse {
+                response: status_response(header.request_id, protocol::STATUS_OK),
+                handles: vec![opened],
+            },
+            Err(status) => ObjectResponse {
+                response: status_response(header.request_id, status),
+                handles: Vec::new(),
+            },
         }
     }
 
@@ -168,5 +245,17 @@ impl PosixService {
         let mut response = vec![0u8; protocol::UMASK_PAYLOAD_LEN];
         protocol::encode_umask(previous, &mut response).map_err(|_| STATUS_EINVAL)?;
         Ok(response)
+    }
+}
+
+fn status_response(request_id: u64, status: i32) -> Response {
+    Response {
+        header: protocol::Header {
+            opcode: protocol::OP_STATUS,
+            request_id,
+            status,
+            ..protocol::Header::default()
+        },
+        payload: Vec::new(),
     }
 }

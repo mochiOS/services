@@ -4,7 +4,9 @@ use mochios_posix_client::{
     Client, ClientError, ObjectHandleAttachment, ObjectHandles, ObjectTransport, Transport,
 };
 use mochios_posix_protocol as protocol;
-use posix_service::{PeerIdentity, PosixService};
+use posix_service::{
+    AttachedObject, FilesystemBackend, OpenedObject, PeerIdentity, PosixService, PreparedOpen,
+};
 
 struct LocalTransport {
     service: RefCell<PosixService>,
@@ -338,4 +340,85 @@ fn client_open_at_returns_only_the_attached_file_handle() {
         .unwrap();
     assert_eq!(handle.handle, 91);
     assert_eq!(handle.rights, 0x81);
+}
+
+#[derive(Default)]
+struct RecordingFilesystem {
+    request: Option<PreparedOpen>,
+    directory: Option<AttachedObject<u32>>,
+}
+
+impl FilesystemBackend<u32> for RecordingFilesystem {
+    fn open_at(
+        &mut self,
+        request: &PreparedOpen,
+        directory: Option<AttachedObject<u32>>,
+    ) -> Result<OpenedObject<u32>, i32> {
+        self.request = Some(request.clone());
+        self.directory = directory;
+        Ok(OpenedObject {
+            handle: 200,
+            rights: 0x81,
+        })
+    }
+}
+
+#[test]
+fn service_submits_open_as_one_atomic_filesystem_operation() {
+    let peer = PeerIdentity {
+        process_id: 111,
+        effective_uid: 505,
+        effective_gid: 24,
+    };
+    let mut service = PosixService::new();
+    service.handle(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let mut payload = [0u8; protocol::OPEN_AT_HEADER_LEN + 16];
+    let length = protocol::encode_open_at(
+        protocol::OpenAtRequest {
+            base: protocol::OpenBase::AttachedDirectory,
+            options: protocol::OPEN_WRITE | protocol::OPEN_CREATE | protocol::OPEN_EXCLUSIVE,
+            mode: 0o666,
+            path: "result.txt",
+        },
+        &mut payload,
+    )
+    .unwrap();
+    let directory = AttachedObject {
+        handle: 55,
+        rights: 0x85,
+    };
+    let mut filesystem = RecordingFilesystem::default();
+
+    let result = service.handle_objects(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_OPEN_AT,
+            request_id: 13,
+            payload_len: length as u32,
+            ..protocol::Header::default()
+        },
+        &payload[..length],
+        &[directory],
+        &mut filesystem,
+    );
+
+    assert_eq!(result.response.header.status, protocol::STATUS_OK);
+    assert_eq!(result.handles[0].handle, 200);
+    assert_eq!(filesystem.directory, Some(directory));
+    let request = filesystem.request.unwrap();
+    assert_eq!(request.path, "result.txt");
+    assert_eq!(request.effective_uid, 505);
+    assert_eq!(request.effective_gid, 24);
+    assert_eq!(request.mode, 0o644);
+    assert_eq!(
+        request.options,
+        protocol::OPEN_WRITE | protocol::OPEN_CREATE | protocol::OPEN_EXCLUSIVE
+    );
 }
