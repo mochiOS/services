@@ -1,9 +1,46 @@
-use mochios_posix_client::fd::{Entry, FD_CLOEXEC, FdTable, HandleOps};
+use mochios_posix_client::fd::{
+    Entry, FD_CLOEXEC, FdTable, FileOps, HandleOps, SeekBasis,
+};
 
 #[derive(Default)]
 struct FakeHandles {
     cloned: Vec<u64>,
     closed: Vec<u64>,
+    io_handles: Vec<u64>,
+    cursor: u64,
+}
+
+impl FileOps<u64> for FakeHandles {
+    type Error = ();
+
+    fn read(&mut self, handle: u64, buffer: &mut [u8]) -> Result<usize, Self::Error> {
+        self.io_handles.push(handle);
+        buffer.fill(0x5a);
+        self.cursor += buffer.len() as u64;
+        Ok(buffer.len())
+    }
+
+    fn write(&mut self, handle: u64, buffer: &[u8]) -> Result<usize, Self::Error> {
+        self.io_handles.push(handle);
+        self.cursor += buffer.len() as u64;
+        Ok(buffer.len())
+    }
+
+    fn seek(
+        &mut self,
+        handle: u64,
+        offset: i64,
+        basis: SeekBasis,
+    ) -> Result<u64, Self::Error> {
+        self.io_handles.push(handle);
+        let base = match basis {
+            SeekBasis::Start => 0,
+            SeekBasis::Current => self.cursor as i64,
+            SeekBasis::End => 100,
+        };
+        self.cursor = (base + offset) as u64;
+        Ok(self.cursor)
+    }
 }
 
 impl HandleOps<u64> for FakeHandles {
@@ -55,4 +92,26 @@ fn exec_closes_only_cloexec_descriptors() {
     assert!(table.get(keep).is_some());
     assert!(table.get(close).is_none());
     assert_eq!(handles.closed, vec![11]);
+}
+
+#[test]
+fn fast_path_resolves_local_fds_to_handles_before_io() {
+    let mut table = FdTable::new();
+    let fd = table
+        .install(Entry {
+            handle: 0xfeed,
+            descriptor_flags: 0,
+        })
+        .unwrap();
+    let mut handles = FakeHandles::default();
+    let mut input = [0u8; 3];
+
+    assert_eq!(table.read(fd, &mut input, &mut handles), Ok(3));
+    assert_eq!(input, [0x5a; 3]);
+    assert_eq!(table.write(fd, b"ok", &mut handles), Ok(2));
+    assert_eq!(
+        table.seek(fd, -1, SeekBasis::Current, &mut handles),
+        Ok(4)
+    );
+    assert_eq!(handles.io_handles, vec![0xfeed, 0xfeed, 0xfeed]);
 }
