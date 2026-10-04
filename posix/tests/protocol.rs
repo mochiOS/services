@@ -88,3 +88,42 @@ fn client_registers_an_authenticated_session() {
     assert_eq!(session.effective_uid, peer.effective_uid);
     assert_eq!(session.effective_gid, peer.effective_gid);
 }
+
+#[test]
+fn session_info_and_umask_round_trip_through_the_client() {
+    let peer = PeerIdentity {
+        process_id: 91,
+        effective_uid: 503,
+        effective_gid: 22,
+    };
+    let client = client(peer);
+    assert_eq!(
+        client.session_info().unwrap_err(),
+        ClientError::Remote(protocol::STATUS_ESRCH)
+    );
+
+    client.register_session().unwrap();
+    let initial = client.session_info().unwrap();
+    assert_eq!(initial.real_uid, peer.effective_uid);
+    assert_eq!(initial.effective_uid, peer.effective_uid);
+    assert_eq!(initial.real_gid, peer.effective_gid);
+    assert_eq!(initial.effective_gid, peer.effective_gid);
+    assert_eq!(initial.umask, 0o022);
+
+    assert_eq!(client.set_umask(0o1755).unwrap(), 0o022);
+    assert_eq!(client.session_info().unwrap().umask, 0o755);
+}
+
+#[test]
+fn fixed_size_session_payloads_reject_trailing_bytes() {
+    let mut encoded = [0u8; protocol::SESSION_INFO_LEN + 1];
+    protocol::encode_session_info(protocol::SessionInfo::default(), &mut encoded).unwrap();
+    assert_eq!(
+        protocol::decode_session_info(&encoded),
+        Err(protocol::ProtocolError::InvalidLength)
+    );
+    assert_eq!(
+        protocol::decode_umask(&[0; protocol::UMASK_PAYLOAD_LEN + 1]),
+        Err(protocol::ProtocolError::InvalidLength)
+    );
+}
