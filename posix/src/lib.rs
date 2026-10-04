@@ -111,6 +111,13 @@ pub trait FilesystemBackend<H: Copy> {
     /// Resolves a path and checks access using the supplied authenticated
     /// POSIX credentials as one backend operation.
     fn access_at(&mut self, request: &PreparedAccess, paths: PathObjects<H>) -> Result<(), i32>;
+
+    /// Retains an attached object beyond the lifetime of the current IPC
+    /// request, monotonically preserving or reducing its rights.
+    fn retain_object(&mut self, object: AttachedObject<H>) -> Result<AttachedObject<H>, i32>;
+
+    /// Releases one service-owned object reference.
+    fn release_object(&mut self, object: AttachedObject<H>);
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -173,7 +180,9 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_OPEN_AT
             | protocol::OP_STAT_AT
             | protocol::OP_FSTAT
-            | protocol::OP_ACCESS_AT => Err(STATUS_EINVAL),
+            | protocol::OP_ACCESS_AT
+            | protocol::OP_CHDIR_AT
+            | protocol::OP_FCHDIR => Err(STATUS_EINVAL),
             _ => Err(protocol::STATUS_ENOSYS),
         };
         let (status, payload) = match result {
@@ -206,6 +215,8 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_STAT_AT
                 | protocol::OP_FSTAT
                 | protocol::OP_ACCESS_AT
+                | protocol::OP_CHDIR_AT
+                | protocol::OP_FCHDIR
         ) {
             let response = if handles.is_empty() {
                 self.handle(peer, header, payload)
@@ -225,7 +236,11 @@ impl<H: Copy> PosixService<H> {
         }
         if matches!(
             header.opcode,
-            protocol::OP_OPEN_AT | protocol::OP_STAT_AT | protocol::OP_ACCESS_AT
+            protocol::OP_OPEN_AT
+                | protocol::OP_STAT_AT
+                | protocol::OP_ACCESS_AT
+                | protocol::OP_CHDIR_AT
+                | protocol::OP_FCHDIR
         ) {
             if let Err(status) = self.ensure_session_directories(peer.process_id, filesystem) {
                 return object_error(header.request_id, status);
@@ -289,7 +304,71 @@ impl<H: Copy> PosixService<H> {
                     Err(status) => object_error(header.request_id, status),
                 }
             }
+            protocol::OP_CHDIR_AT => {
+                let prepared = match self.prepare_stat_at(peer, payload, handles.len()) {
+                    Ok(prepared) if prepared.flags == 0 => prepared,
+                    Ok(_) => return object_error(header.request_id, STATUS_EINVAL),
+                    Err(status) => return object_error(header.request_id, status),
+                };
+                let paths = match self.path_objects(peer.process_id, prepared.base, handles) {
+                    Ok(paths) => paths,
+                    Err(status) => return object_error(header.request_id, status),
+                };
+                let open = PreparedOpen {
+                    base: prepared.base,
+                    options: protocol::OPEN_READ | protocol::OPEN_DIRECTORY,
+                    mode: 0,
+                    path: prepared.path,
+                    effective_uid: prepared.effective_uid,
+                    effective_gid: prepared.effective_gid,
+                };
+                match filesystem.open_at(&open, paths) {
+                    Ok(opened) => {
+                        self.replace_cwd(
+                            peer.process_id,
+                            AttachedObject {
+                                handle: opened.handle,
+                                rights: opened.rights,
+                            },
+                            filesystem,
+                        );
+                        object_error(header.request_id, protocol::STATUS_OK)
+                    }
+                    Err(status) => object_error(header.request_id, status),
+                }
+            }
+            protocol::OP_FCHDIR => {
+                if !payload.is_empty() || handles.len() != 1 {
+                    return object_error(header.request_id, STATUS_EINVAL);
+                }
+                let directory = handles[0];
+                let status = match filesystem.fstat(directory) {
+                    Ok(status) => status,
+                    Err(status) => return object_error(header.request_id, status),
+                };
+                if status.mode & 0o170000 != 0o040000 {
+                    return object_error(header.request_id, -20);
+                }
+                let retained = match filesystem.retain_object(directory) {
+                    Ok(retained) => retained,
+                    Err(status) => return object_error(header.request_id, status),
+                };
+                self.replace_cwd(peer.process_id, retained, filesystem);
+                object_error(header.request_id, protocol::STATUS_OK)
+            }
             _ => unreachable!(),
+        }
+    }
+
+    fn replace_cwd<F: FilesystemBackend<H>>(
+        &mut self,
+        process_id: u64,
+        cwd: AttachedObject<H>,
+        filesystem: &mut F,
+    ) {
+        if let Some(directories) = self.directories.get_mut(&process_id) {
+            let previous = core::mem::replace(&mut directories.cwd, cwd);
+            filesystem.release_object(previous);
         }
     }
 

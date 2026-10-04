@@ -503,6 +503,31 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             handles,
         )
     }
+
+    fn retain_object(
+        &mut self,
+        object: posix_service::AttachedObject<mochi_user_platform::handle::Handle>,
+    ) -> Result<posix_service::AttachedObject<mochi_user_platform::handle::Handle>, i32> {
+        use mochi_user_platform as platform;
+
+        if object.rights & platform::handle::HANDLE_RIGHT_DUPLICATE == 0 {
+            return Err(-13);
+        }
+        let handle = platform::handle::duplicate(object.handle, object.rights).map_err(|error| {
+            -(i32::try_from(error.raw().unsigned_abs()).unwrap_or(i32::MAX))
+        })?;
+        Ok(posix_service::AttachedObject {
+            handle,
+            rights: object.rights,
+        })
+    }
+
+    fn release_object(
+        &mut self,
+        object: posix_service::AttachedObject<mochi_user_platform::handle::Handle>,
+    ) {
+        let _ = mochi_user_platform::handle::close(object.handle);
+    }
 }
 
 #[cfg(target_os = "mochios")]

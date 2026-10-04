@@ -509,6 +509,69 @@ fn client_open_at_returns_only_the_attached_file_handle() {
     assert_eq!(handle.rights, 0x81);
 }
 
+struct DirectoryChangeTransport;
+
+impl Transport for DirectoryChangeTransport {
+    type Error = ();
+
+    fn call(&self, _request: &[u8], _response: &mut [u8]) -> Result<usize, Self::Error> {
+        Err(())
+    }
+}
+
+impl ObjectTransport for DirectoryChangeTransport {
+    type Handle = u32;
+
+    fn call_with_handles(
+        &self,
+        request: &[u8],
+        response: &mut [u8],
+        handles: &mut ObjectHandles<Self::Handle>,
+    ) -> Result<usize, Self::Error> {
+        let (header, payload) = protocol::decode(request).map_err(|_| ())?;
+        assert_eq!(handles.len(), 1);
+        assert_eq!(handles.get(0).unwrap().handle, 77);
+        match header.opcode {
+            protocol::OP_CHDIR_AT => {
+                let request = protocol::decode_stat_at(payload).map_err(|_| ())?;
+                assert_eq!(request.base, protocol::OpenBase::AttachedDirectory);
+                assert_eq!(request.flags, 0);
+                assert_eq!(request.path, "child");
+            }
+            protocol::OP_FCHDIR => assert!(payload.is_empty()),
+            _ => return Err(()),
+        }
+        handles.clear();
+        protocol::encode(
+            protocol::Header {
+                opcode: protocol::OP_STATUS,
+                request_id: header.request_id,
+                status: protocol::STATUS_OK,
+                ..protocol::Header::default()
+            },
+            &[],
+            response,
+        )
+        .map_err(|_| ())
+    }
+}
+
+#[test]
+fn client_transfers_directory_handles_for_chdir_and_fchdir() {
+    let directory = ObjectHandleAttachment {
+        handle: 77,
+        rights: 0x4000_0000_0000_0081,
+    };
+    let client = Client::new(DirectoryChangeTransport);
+    client
+        .chdir_at(
+            mochios_posix_client::StatAtBase::Directory(directory),
+            "child",
+        )
+        .unwrap();
+    client.fchdir(directory).unwrap();
+}
+
 #[derive(Default)]
 struct RecordingFilesystem {
     request: Option<PreparedOpen>,
@@ -518,6 +581,9 @@ struct RecordingFilesystem {
     root: Option<AttachedObject<u32>>,
     roots_opened: usize,
     stat_file: Option<AttachedObject<u32>>,
+    stat_mode: Option<u32>,
+    retained: Vec<AttachedObject<u32>>,
+    released: Vec<AttachedObject<u32>>,
 }
 
 impl FilesystemBackend<u32> for RecordingFilesystem {
@@ -566,7 +632,11 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
 
     fn fstat(&mut self, file: AttachedObject<u32>) -> Result<protocol::FileStatus, i32> {
         self.stat_file = Some(file);
-        Ok(sample_status())
+        let mut status = sample_status();
+        if let Some(mode) = self.stat_mode {
+            status.mode = mode;
+        }
+        Ok(status)
     }
 
     fn access_at(&mut self, request: &PreparedAccess, paths: PathObjects<u32>) -> Result<(), i32> {
@@ -574,6 +644,21 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         self.root = Some(paths.root);
         self.directory = paths.base;
         Ok(())
+    }
+
+    fn retain_object(
+        &mut self,
+        object: AttachedObject<u32>,
+    ) -> Result<AttachedObject<u32>, i32> {
+        self.retained.push(object);
+        Ok(AttachedObject {
+            handle: object.handle + 1000,
+            rights: object.rights,
+        })
+    }
+
+    fn release_object(&mut self, object: AttachedObject<u32>) {
+        self.released.push(object);
     }
 }
 
@@ -838,4 +923,119 @@ fn access_uses_authenticated_session_credentials_and_one_atomic_operation() {
         request.modes,
         protocol::ACCESS_READ | protocol::ACCESS_EXECUTE
     );
+}
+
+#[test]
+fn chdir_replaces_the_session_cwd_with_an_open_directory() {
+    let peer = PeerIdentity {
+        process_id: 115,
+        effective_uid: 509,
+        effective_gid: 28,
+    };
+    let mut service = PosixService::new();
+    service.handle(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let mut payload = [0u8; protocol::STAT_AT_HEADER_LEN + 8];
+    let length = protocol::encode_stat_at(
+        protocol::StatAtRequest {
+            base: protocol::OpenBase::ProcessCwd,
+            flags: 0,
+            path: "work",
+        },
+        &mut payload,
+    )
+    .unwrap();
+    let mut filesystem = RecordingFilesystem::default();
+
+    let result = service.handle_objects(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_CHDIR_AT,
+            request_id: 19,
+            payload_len: length as u32,
+            ..protocol::Header::default()
+        },
+        &payload[..length],
+        &[],
+        &mut filesystem,
+    );
+
+    assert_eq!(result.response.header.status, protocol::STATUS_OK);
+    assert!(result.handles.is_empty());
+    let request = filesystem.request.as_ref().unwrap();
+    assert_eq!(request.path, "work");
+    assert_eq!(request.options, protocol::OPEN_READ | protocol::OPEN_DIRECTORY);
+    assert_eq!(filesystem.directory.unwrap().handle, 101);
+    assert_eq!(service.session_directories(peer.process_id).unwrap().cwd.handle, 200);
+    assert_eq!(filesystem.released, vec![AttachedObject { handle: 101, rights: 0x81 }]);
+}
+
+#[test]
+fn fchdir_retains_a_directory_handle_and_rejects_regular_files() {
+    let peer = PeerIdentity {
+        process_id: 116,
+        effective_uid: 510,
+        effective_gid: 29,
+    };
+    let mut service = PosixService::new();
+    service.handle(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let directory = AttachedObject {
+        handle: 58,
+        rights: 0x4000_0000_0000_0081,
+    };
+    let mut filesystem = RecordingFilesystem {
+        stat_mode: Some(0o040755),
+        ..RecordingFilesystem::default()
+    };
+
+    let result = service.handle_objects(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_FCHDIR,
+            request_id: 20,
+            ..protocol::Header::default()
+        },
+        &[],
+        &[directory],
+        &mut filesystem,
+    );
+
+    assert_eq!(result.response.header.status, protocol::STATUS_OK);
+    assert_eq!(filesystem.stat_file, Some(directory));
+    assert_eq!(filesystem.retained, vec![directory]);
+    assert_eq!(service.session_directories(peer.process_id).unwrap().cwd.handle, 1058);
+    assert_eq!(filesystem.released, vec![AttachedObject { handle: 101, rights: 0x81 }]);
+
+    filesystem.stat_mode = Some(0o100644);
+    let regular = AttachedObject {
+        handle: 59,
+        rights: directory.rights,
+    };
+    let rejected = service.handle_objects(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_FCHDIR,
+            request_id: 21,
+            ..protocol::Header::default()
+        },
+        &[],
+        &[regular],
+        &mut filesystem,
+    );
+    assert_eq!(rejected.response.header.status, -20);
+    assert_eq!(filesystem.retained, vec![directory]);
+    assert_eq!(service.session_directories(peer.process_id).unwrap().cwd.handle, 1058);
 }
