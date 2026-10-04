@@ -670,6 +670,7 @@ struct RecordingFilesystem {
     rename_request: Option<posix_service::PreparedRename>,
     rename_paths: Option<posix_service::RenamePathObjects<u32>>,
     truncate_request: Option<posix_service::PreparedTruncate>,
+    symlink_request: Option<posix_service::PreparedSymlink>,
     retained: Vec<AttachedObject<u32>>,
     released: Vec<AttachedObject<u32>>,
     path_query: Option<(AttachedObject<u32>, AttachedObject<u32>)>,
@@ -788,6 +789,17 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         paths: PathObjects<u32>,
     ) -> Result<(), i32> {
         self.truncate_request = Some(request.clone());
+        self.root = Some(paths.root);
+        self.directory = paths.base;
+        Ok(())
+    }
+
+    fn symlink_at(
+        &mut self,
+        request: &posix_service::PreparedSymlink,
+        paths: PathObjects<u32>,
+    ) -> Result<(), i32> {
+        self.symlink_request = Some(request.clone());
         self.root = Some(paths.root);
         self.directory = paths.base;
         Ok(())
@@ -1350,6 +1362,56 @@ fn truncate_path_uses_authenticated_session_and_explicit_base_handle() {
     assert_eq!(prepared.length, 1234);
     assert_eq!(prepared.effective_uid, 502);
     assert_eq!(prepared.effective_gid, 21);
+    assert_eq!(filesystem.directory, Some(directory));
+}
+
+#[test]
+fn symlink_wire_and_service_preserve_target_credentials_and_directory_handle() {
+    let request = protocol::SymlinkAtRequest {
+        base: protocol::OpenBase::AttachedDirectory,
+        target: "../target",
+        link_path: "links/name",
+    };
+    let mut encoded = [0; protocol::SYMLINK_AT_HEADER_LEN + protocol::MAX_PATH_LEN * 2];
+    let length = protocol::encode_symlink_at(request, &mut encoded).unwrap();
+    assert_eq!(protocol::decode_symlink_at(&encoded[..length]).unwrap(), request);
+
+    let peer = PeerIdentity {
+        process_id: 123,
+        effective_uid: 501,
+        effective_gid: 20,
+    };
+    let mut service = PosixService::new();
+    service.handle(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let directory = AttachedObject {
+        handle: 66,
+        rights: 0x81,
+    };
+    let mut filesystem = RecordingFilesystem::default();
+    let result = service.handle_objects(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_SYMLINK_AT,
+            ..protocol::Header::default()
+        },
+        &encoded[..length],
+        &[directory],
+        &mut filesystem,
+    );
+
+    assert_eq!(result.response.header.status, protocol::STATUS_OK);
+    let prepared = filesystem.symlink_request.unwrap();
+    assert_eq!(prepared.target, "../target");
+    assert_eq!(prepared.link_path, "links/name");
+    assert_eq!(prepared.effective_uid, 501);
+    assert_eq!(prepared.effective_gid, 20);
     assert_eq!(filesystem.directory, Some(directory));
 }
 

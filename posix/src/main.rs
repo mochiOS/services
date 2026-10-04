@@ -762,6 +762,37 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         )
     }
 
+    fn symlink_at(
+        &mut self,
+        request: &posix_service::PreparedSymlink,
+        paths: posix_service::PathObjects<mochi_user_platform::handle::Handle>,
+    ) -> Result<(), i32> {
+        use mochios_filesystem_protocol as filesystem;
+
+        let mut flags = filesystem::SYMLINK_AT_ROOT_ATTACHED;
+        if paths.base.is_some() {
+            flags |= filesystem::SYMLINK_AT_BASE_ATTACHED;
+        }
+        let target_length = u32::try_from(request.target.len()).map_err(|_| -22)?;
+        let mut payload = Vec::with_capacity(request.target.len() + request.link_path.len());
+        payload.extend_from_slice(request.target.as_bytes());
+        payload.extend_from_slice(request.link_path.as_bytes());
+        self.empty_call(
+            filesystem::Header {
+                opcode: filesystem::OP_SYMLINK_AT,
+                request_id: 14,
+                offset: u64::from(request.effective_uid)
+                    | (u64::from(request.effective_gid) << 32),
+                length: payload.len() as u32,
+                flags,
+                mode: target_length,
+                ..filesystem::Header::default()
+            },
+            &payload,
+            Self::path_handles(paths)?,
+        )
+    }
+
     fn access_at(
         &mut self,
         request: &posix_service::PreparedAccess,

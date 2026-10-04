@@ -641,6 +641,78 @@ fn truncate_at_resolves_and_mutates_in_one_anchored_operation() {
 }
 
 #[test]
+fn symlink_at_creates_a_literal_target_under_the_open_directory() {
+    let mut filesystem = test_filesystem();
+    let base = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+                ..protocol::Header::default()
+            },
+            b"/create-base",
+            PathAnchors::default(),
+        )
+        .unwrap();
+    let target = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ
+                    | protocol::OPEN_AT_WRITE
+                    | protocol::OPEN_AT_CREATE
+                    | protocol::OPEN_AT_BASE_ATTACHED,
+                mode: 0o644,
+                ..protocol::Header::default()
+            },
+            b"symlink-target",
+            PathAnchors {
+                root_open_id: None,
+                base_open_id: Some(base.header.open_id),
+            },
+        )
+        .unwrap();
+    filesystem
+        .provider_write(target.header.open_id, b"linked")
+        .unwrap();
+    let mut payload = b"symlink-target".to_vec();
+    payload.extend_from_slice(b"created-link");
+    filesystem
+        .symlink_at(
+            protocol::Header {
+                opcode: protocol::OP_SYMLINK_AT,
+                flags: protocol::SYMLINK_AT_BASE_ATTACHED,
+                mode: 14,
+                ..protocol::Header::default()
+            },
+            &payload,
+            PathAnchors {
+                root_open_id: None,
+                base_open_id: Some(base.header.open_id),
+            },
+        )
+        .unwrap();
+    let link = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_BASE_ATTACHED,
+                ..protocol::Header::default()
+            },
+            b"created-link",
+            PathAnchors {
+                root_open_id: None,
+                base_open_id: Some(base.header.open_id),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        filesystem.provider_read(link.header.open_id, 6).unwrap(),
+        b"linked"
+    );
+}
+
+#[test]
 fn open_directory_paths_follow_rename_and_reject_unlinked_cwds() {
     let mut filesystem = test_filesystem();
     let root = filesystem

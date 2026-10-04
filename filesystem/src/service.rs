@@ -115,7 +115,8 @@ impl FilesystemService {
             | protocol::OP_MKDIR_AT
             | protocol::OP_UNLINK_AT
             | protocol::OP_RENAME_AT
-            | protocol::OP_TRUNCATE_AT => Err(EINVAL),
+            | protocol::OP_TRUNCATE_AT
+            | protocol::OP_SYMLINK_AT => Err(EINVAL),
             _ => Err(ENOSYS),
         };
         result.unwrap_or_else(|errno| self.error(request, errno))
@@ -502,6 +503,72 @@ impl FilesystemService {
             return Err(EACCES);
         }
         self.truncate_inode(inode, request.open_id)?;
+        Ok(self.success(request))
+    }
+
+    pub fn symlink_at(
+        &mut self,
+        request: protocol::Header,
+        payload: &[u8],
+        anchors: PathAnchors,
+    ) -> Result<Response, i32> {
+        if request.flags & !protocol::SYMLINK_AT_FLAGS_ALL != 0 {
+            return Err(EINVAL);
+        }
+        let root_attached = request.flags & protocol::SYMLINK_AT_ROOT_ATTACHED != 0;
+        let base_attached = request.flags & protocol::SYMLINK_AT_BASE_ATTACHED != 0;
+        if root_attached != anchors.root_open_id.is_some()
+            || base_attached != anchors.base_open_id.is_some()
+        {
+            return Err(EINVAL);
+        }
+        let split = request.mode as usize;
+        let (target, link_path) = payload.split_at_checked(split).ok_or(EINVAL)?;
+        if target.is_empty()
+            || link_path.is_empty()
+            || target.len() > protocol::MAX_PATH_LEN
+            || link_path.len() > protocol::MAX_PATH_LEN
+            || target.contains(&0)
+        {
+            return Err(EINVAL);
+        }
+        let uid = request.offset as u32;
+        let gid = (request.offset >> 32) as u32;
+        let (root, base) = self.resolve_anchors(link_path, anchors)?;
+        let (parent, name) = match self.resolve_path_at(
+            root,
+            base,
+            link_path,
+            FollowSymlinks::ExcludeFinalComponent,
+            uid,
+            gid,
+        )? {
+            Resolution::Found { .. } => return Err(EEXIST),
+            Resolution::Missing { parent, name } => (parent, name),
+        };
+        let metadata = parent.metadata();
+        if !permission_allows(
+            metadata.mode(),
+            protocol::NODE_TYPE_DIRECTORY,
+            metadata.uid(),
+            metadata.gid(),
+            uid,
+            gid,
+            protocol::ACCESS_AT_WRITE | protocol::ACCESS_AT_EXECUTE,
+        ) {
+            return Err(EACCES);
+        }
+        let mut parent = Dir::open_inode(&self.fs, parent).map_err(errno)?;
+        self.fs
+            .symlink(
+                &mut parent,
+                DirEntryName::try_from(name.as_slice()).map_err(|_| EINVAL)?,
+                PathBuf::try_from(target).map_err(|_| EINVAL)?,
+                uid,
+                gid,
+                Duration::default(),
+            )
+            .map_err(errno)?;
         Ok(self.success(request))
     }
 
