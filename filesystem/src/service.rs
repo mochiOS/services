@@ -10,6 +10,7 @@ use ext4plus::{DirEntryName, Ext4, FileType, FollowSymlinks, Metadata};
 use mochios_filesystem_protocol as protocol;
 
 const EIO: i32 = 5;
+const EPERM: i32 = 1;
 const ENOENT: i32 = 2;
 const EBADF: i32 = 9;
 const EACCES: i32 = 13;
@@ -117,7 +118,8 @@ impl FilesystemService {
             | protocol::OP_RENAME_AT
             | protocol::OP_TRUNCATE_AT
             | protocol::OP_SYMLINK_AT
-            | protocol::OP_READLINK_AT => Err(EINVAL),
+            | protocol::OP_READLINK_AT
+            | protocol::OP_CHMOD_AT => Err(EINVAL),
             _ => Err(ENOSYS),
         };
         result.unwrap_or_else(|errno| self.error(request, errno))
@@ -612,6 +614,38 @@ impl FilesystemService {
         response.header.length = payload.len() as u32;
         response.payload = payload;
         Ok(response)
+    }
+
+    pub fn chmod_at(
+        &mut self,
+        request: protocol::Header,
+        payload: &[u8],
+        anchors: PathAnchors,
+    ) -> Result<Response, i32> {
+        if request.flags & !protocol::CHMOD_AT_FLAGS_ALL != 0 || request.mode & !0o7777 != 0 {
+            return Err(EINVAL);
+        }
+        let root_attached = request.flags & protocol::CHMOD_AT_ROOT_ATTACHED != 0;
+        let base_attached = request.flags & protocol::CHMOD_AT_BASE_ATTACHED != 0;
+        if root_attached != anchors.root_open_id.is_some()
+            || base_attached != anchors.base_open_id.is_some()
+        {
+            return Err(EINVAL);
+        }
+        let uid = request.offset as u32;
+        let gid = (request.offset >> 32) as u32;
+        let (root, base) = self.resolve_anchors(payload, anchors)?;
+        let inode = self.resolve_inode_at(root, base, payload, FollowSymlinks::All, uid, gid)?;
+        let metadata = inode.metadata();
+        if uid != 0 && uid != metadata.uid() {
+            return Err(EPERM);
+        }
+        let mut permissions = request.mode as u16;
+        if uid != 0 && gid != metadata.gid() {
+            permissions &= !0o2000;
+        }
+        self.chmod_inode(inode, permissions)?;
+        Ok(self.success(request))
     }
 
     /// Resolves a path and obtains metadata as one serialized operation.
@@ -2055,6 +2089,29 @@ impl FilesystemService {
                 .map_err(errno)?
                 .truncate(length)
                 .map_err(errno)?;
+        }
+        Ok(())
+    }
+
+    fn chmod_inode(&mut self, mut inode: Inode, permissions: u16) -> Result<(), i32> {
+        let node_id = u64::from(inode.index.get());
+        let mut matched = false;
+        for open in self.opens.values_mut() {
+            if open.node_id == node_id {
+                let file_type = open.inode.mode().bits() & 0xf000;
+                open.inode
+                    .set_mode(InodeMode::from_bits_retain(file_type | permissions))
+                    .map_err(errno)?;
+                open.inode.write(&self.fs).map_err(errno)?;
+                matched = true;
+            }
+        }
+        if !matched {
+            let file_type = inode.mode().bits() & 0xf000;
+            inode
+                .set_mode(InodeMode::from_bits_retain(file_type | permissions))
+                .map_err(errno)?;
+            inode.write(&self.fs).map_err(errno)?;
         }
         Ok(())
     }

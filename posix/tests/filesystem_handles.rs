@@ -728,6 +728,60 @@ fn symlink_at_creates_a_literal_target_under_the_open_directory() {
 }
 
 #[test]
+fn chmod_at_changes_only_permissions_on_an_anchored_path() {
+    let mut filesystem = test_filesystem();
+    let base = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+                ..protocol::Header::default()
+            },
+            b"/create-base",
+            PathAnchors::default(),
+        )
+        .unwrap();
+    let file = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ
+                    | protocol::OPEN_AT_WRITE
+                    | protocol::OPEN_AT_CREATE
+                    | protocol::OPEN_AT_BASE_ATTACHED,
+                mode: 0o600,
+                ..protocol::Header::default()
+            },
+            b"chmod-file",
+            PathAnchors {
+                root_open_id: None,
+                base_open_id: Some(base.header.open_id),
+            },
+        )
+        .unwrap();
+    filesystem
+        .chmod_at(
+            protocol::Header {
+                opcode: protocol::OP_CHMOD_AT,
+                flags: protocol::CHMOD_AT_BASE_ATTACHED,
+                mode: 0o750,
+                ..protocol::Header::default()
+            },
+            b"chmod-file",
+            PathAnchors {
+                root_open_id: None,
+                base_open_id: Some(base.header.open_id),
+            },
+        )
+        .unwrap();
+    let status = filesystem
+        .stat_handle(protocol::Header::default(), file.header.open_id)
+        .unwrap();
+    let status = protocol::decode_node_status(&status.payload).unwrap();
+    assert_eq!(status.mode & 0o7777, 0o750);
+}
+
+#[test]
 fn open_directory_paths_follow_rename_and_reject_unlinked_cwds() {
     let mut filesystem = test_filesystem();
     let root = filesystem

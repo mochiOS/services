@@ -672,6 +672,7 @@ struct RecordingFilesystem {
     truncate_request: Option<posix_service::PreparedTruncate>,
     symlink_request: Option<posix_service::PreparedSymlink>,
     readlink_request: Option<posix_service::PreparedReadlink>,
+    chmod_request: Option<posix_service::PreparedChmod>,
     retained: Vec<AttachedObject<u32>>,
     released: Vec<AttachedObject<u32>>,
     path_query: Option<(AttachedObject<u32>, AttachedObject<u32>)>,
@@ -815,6 +816,17 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         self.root = Some(paths.root);
         self.directory = paths.base;
         Ok(b"../target".to_vec())
+    }
+
+    fn chmod_at(
+        &mut self,
+        request: &posix_service::PreparedChmod,
+        paths: PathObjects<u32>,
+    ) -> Result<(), i32> {
+        self.chmod_request = Some(request.clone());
+        self.root = Some(paths.root);
+        self.directory = paths.base;
+        Ok(())
     }
 
     fn access_at(&mut self, request: &PreparedAccess, paths: PathObjects<u32>) -> Result<(), i32> {
@@ -1475,6 +1487,58 @@ fn readlink_uses_authenticated_session_and_returns_only_the_target_bytes() {
     assert_eq!(prepared.path, "links/name");
     assert_eq!(prepared.effective_uid, 500);
     assert_eq!(prepared.effective_gid, 19);
+    assert_eq!(filesystem.directory, Some(directory));
+}
+
+#[test]
+fn chmod_uses_authenticated_session_and_an_explicit_directory_handle() {
+    let peer = PeerIdentity {
+        process_id: 125,
+        effective_uid: 499,
+        effective_gid: 18,
+    };
+    let mut service = PosixService::new();
+    service.handle(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let directory = AttachedObject {
+        handle: 68,
+        rights: 0x81,
+    };
+    let mut payload = [0; protocol::OPEN_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
+    let length = protocol::encode_open_at(
+        protocol::OpenAtRequest {
+            base: protocol::OpenBase::AttachedDirectory,
+            options: 0,
+            mode: 0o2750,
+            path: "file",
+        },
+        &mut payload,
+    )
+    .unwrap();
+    let mut filesystem = RecordingFilesystem::default();
+    let result = service.handle_objects(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_CHMOD_AT,
+            ..protocol::Header::default()
+        },
+        &payload[..length],
+        &[directory],
+        &mut filesystem,
+    );
+
+    assert_eq!(result.response.header.status, protocol::STATUS_OK);
+    let prepared = filesystem.chmod_request.unwrap();
+    assert_eq!(prepared.path, "file");
+    assert_eq!(prepared.mode, 0o2750);
+    assert_eq!(prepared.effective_uid, 499);
+    assert_eq!(prepared.effective_gid, 18);
     assert_eq!(filesystem.directory, Some(directory));
 }
 
