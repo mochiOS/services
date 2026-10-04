@@ -249,7 +249,7 @@ fn write_file(path: &str, data: &[u8], mode: u64) -> Result<(), mochi_user_sysca
                 current.push_str(seg);
                 match posix_io::create_dir(&current, FILE_MODE_755) {
                     Ok(_) => {}
-                    Err(err) if err.errno() == Some(mochi_user_syscall::EEXIST.wrapping_neg()) => {}
+                    Err(err) if err.errno() == Some(mochi_user_syscall::EEXIST) => {}
                     Err(err) => {
                         diagnostic(&alloc::format!(
                             "package.service: parent directory create failed path={} errno={}",
@@ -317,7 +317,7 @@ fn write_file(path: &str, data: &[u8], mode: u64) -> Result<(), mochi_user_sysca
 fn rollback_created_files(paths: &[String]) {
     for path in paths.iter().rev() {
         if let Err(error) = posix_io::remove(path) {
-            if error.errno() != Some(mochi_user_syscall::ENOENT.wrapping_neg()) {
+            if error.errno() != Some(mochi_user_syscall::ENOENT) {
                 diagnostic(&alloc::format!(
                     "package.service: rollback failed path={} errno={}",
                     path,
@@ -540,7 +540,7 @@ fn validate_update_owner(
 ) -> Result<SignerContinuity, mochi_user_syscall::SysError> {
     let bytes = match posix_io::read_to_end_path(verification_path) {
         Ok(bytes) => bytes,
-        Err(error) if error.errno() == Some(mochi_user_syscall::ENOENT.wrapping_neg()) => {
+        Err(error) if error.errno() == Some(mochi_user_syscall::ENOENT) => {
             return Ok(SignerContinuity::NewInstall);
         }
         Err(error) => return Err(error),
