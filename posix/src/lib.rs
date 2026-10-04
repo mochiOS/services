@@ -49,9 +49,9 @@ impl PosixService {
         header: protocol::Header,
         payload: &[u8],
     ) -> Response {
-        let status = match header.opcode {
-            protocol::OP_PING if payload.is_empty() => protocol::STATUS_OK,
-            protocol::OP_SESSION_REGISTER if payload.is_empty() => {
+        let result = match header.opcode {
+            protocol::OP_PING if header.flags == 0 && payload.is_empty() => Ok(Vec::new()),
+            protocol::OP_SESSION_REGISTER if header.flags == 0 && payload.is_empty() => {
                 self.sessions.entry(peer.process_id).or_insert(Session {
                     process_id: peer.process_id,
                     real_uid: peer.effective_uid,
@@ -60,20 +60,66 @@ impl PosixService {
                     effective_gid: peer.effective_gid,
                     umask: 0o022,
                 });
-                protocol::STATUS_OK
+                Ok(Vec::new())
             }
-            protocol::OP_PING | protocol::OP_SESSION_REGISTER => STATUS_EINVAL,
-            _ => protocol::STATUS_ENOSYS,
+            protocol::OP_SESSION_INFO if header.flags == 0 && payload.is_empty() => {
+                self.session_info(peer.process_id)
+            }
+            protocol::OP_UMASK_SET if header.flags == 0 => {
+                self.set_umask(peer.process_id, payload)
+            }
+            protocol::OP_PING
+            | protocol::OP_SESSION_REGISTER
+            | protocol::OP_SESSION_INFO
+            | protocol::OP_UMASK_SET => Err(STATUS_EINVAL),
+            _ => Err(protocol::STATUS_ENOSYS),
+        };
+        let (status, payload) = match result {
+            Ok(payload) => (protocol::STATUS_OK, payload),
+            Err(status) => (status, Vec::new()),
         };
         Response {
             header: protocol::Header {
                 opcode: protocol::OP_STATUS,
                 request_id: header.request_id,
                 flags: 0,
-                payload_len: 0,
+                payload_len: payload.len() as u32,
                 status,
             },
-            payload: Vec::new(),
+            payload,
         }
+    }
+
+    fn session_info(&self, process_id: u64) -> Result<Vec<u8>, i32> {
+        let session = self
+            .sessions
+            .get(&process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let mut payload = vec![0u8; protocol::SESSION_INFO_LEN];
+        protocol::encode_session_info(
+            protocol::SessionInfo {
+                real_uid: session.real_uid,
+                effective_uid: session.effective_uid,
+                real_gid: session.real_gid,
+                effective_gid: session.effective_gid,
+                umask: session.umask,
+            },
+            &mut payload,
+        )
+        .map_err(|_| STATUS_EINVAL)?;
+        Ok(payload)
+    }
+
+    fn set_umask(&mut self, process_id: u64, payload: &[u8]) -> Result<Vec<u8>, i32> {
+        let requested = protocol::decode_umask(payload).map_err(|_| STATUS_EINVAL)?;
+        let session = self
+            .sessions
+            .get_mut(&process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let previous = session.umask;
+        session.umask = requested & 0o777;
+        let mut response = vec![0u8; protocol::UMASK_PAYLOAD_LEN];
+        protocol::encode_umask(previous, &mut response).map_err(|_| STATUS_EINVAL)?;
+        Ok(response)
     }
 }
