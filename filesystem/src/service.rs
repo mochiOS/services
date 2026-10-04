@@ -28,6 +28,12 @@ pub struct Response {
     pub payload: Vec<u8>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PathAnchors {
+    pub root_open_id: Option<u64>,
+    pub base_open_id: Option<u64>,
+}
+
 pub struct FilesystemService {
     fs: Ext4,
     nodes: HashMap<u64, String>,
@@ -151,13 +157,16 @@ impl FilesystemService {
         &mut self,
         request: protocol::Header,
         payload: &[u8],
-        base_open_id: Option<u64>,
+        anchors: PathAnchors,
     ) -> Result<Response, i32> {
         if request.flags & !protocol::OPEN_AT_FLAGS_ALL != 0 {
             return Err(EINVAL);
         }
-        let attached = request.flags & protocol::OPEN_AT_BASE_ATTACHED != 0;
-        if attached != base_open_id.is_some() {
+        let root_attached = request.flags & protocol::OPEN_AT_ROOT_ATTACHED != 0;
+        let base_attached = request.flags & protocol::OPEN_AT_BASE_ATTACHED != 0;
+        if root_attached != anchors.root_open_id.is_some()
+            || base_attached != anchors.base_open_id.is_some()
+        {
             return Err(EINVAL);
         }
         let access = request.flags & (protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE);
@@ -171,7 +180,7 @@ impl FilesystemService {
         }
         let uid = request.offset as u32;
         let gid = (request.offset >> 32) as u32;
-        let base = self.resolve_base_inode(payload, base_open_id)?;
+        let (root, base) = self.resolve_anchors(payload, anchors)?;
         let exclusive_create = request.flags
             & (protocol::OPEN_AT_CREATE | protocol::OPEN_AT_EXCLUSIVE)
             == (protocol::OPEN_AT_CREATE | protocol::OPEN_AT_EXCLUSIVE);
@@ -180,7 +189,7 @@ impl FilesystemService {
         } else {
             FollowSymlinks::All
         };
-        let (inode, created) = match self.resolve_path_at(base, payload, follow, uid, gid)? {
+        let (inode, created) = match self.resolve_path_at(root, base, payload, follow, uid, gid)? {
             Resolution::Found(inode) => {
                 if request.flags & protocol::OPEN_AT_CREATE != 0
                     && request.flags & protocol::OPEN_AT_EXCLUSIVE != 0
@@ -301,13 +310,16 @@ impl FilesystemService {
         &mut self,
         request: protocol::Header,
         payload: &[u8],
-        base_open_id: Option<u64>,
+        anchors: PathAnchors,
     ) -> Result<Response, i32> {
         if request.flags & !protocol::STAT_AT_FLAGS_ALL != 0 {
             return Err(EINVAL);
         }
-        let attached = request.flags & protocol::STAT_AT_BASE_ATTACHED != 0;
-        if attached != base_open_id.is_some() {
+        let root_attached = request.flags & protocol::STAT_AT_ROOT_ATTACHED != 0;
+        let base_attached = request.flags & protocol::STAT_AT_BASE_ATTACHED != 0;
+        if root_attached != anchors.root_open_id.is_some()
+            || base_attached != anchors.base_open_id.is_some()
+        {
             return Err(EINVAL);
         }
         let uid = request.offset as u32;
@@ -317,8 +329,8 @@ impl FilesystemService {
         } else {
             FollowSymlinks::All
         };
-        let base = self.resolve_base_inode(payload, base_open_id)?;
-        let inode = self.resolve_inode_at(base, payload, follow, uid, gid)?;
+        let (root, base) = self.resolve_anchors(payload, anchors)?;
+        let inode = self.resolve_inode_at(root, base, payload, follow, uid, gid)?;
         let node_id = u64::from(inode.index.get());
         Ok(self.node_status_response(request, node_id, inode.metadata()))
     }
@@ -345,13 +357,16 @@ impl FilesystemService {
         &self,
         request: protocol::Header,
         payload: &[u8],
-        base_open_id: Option<u64>,
+        anchors: PathAnchors,
     ) -> Result<Response, i32> {
         if request.flags & !protocol::ACCESS_AT_FLAGS_ALL != 0 {
             return Err(EINVAL);
         }
-        let attached = request.flags & protocol::ACCESS_AT_BASE_ATTACHED != 0;
-        if attached != base_open_id.is_some() {
+        let root_attached = request.flags & protocol::ACCESS_AT_ROOT_ATTACHED != 0;
+        let base_attached = request.flags & protocol::ACCESS_AT_BASE_ATTACHED != 0;
+        if root_attached != anchors.root_open_id.is_some()
+            || base_attached != anchors.base_open_id.is_some()
+        {
             return Err(EINVAL);
         }
         let uid = request.offset as u32;
@@ -361,8 +376,8 @@ impl FilesystemService {
         } else {
             FollowSymlinks::All
         };
-        let base = self.resolve_base_inode(payload, base_open_id)?;
-        let inode = self.resolve_inode_at(base, payload, follow, uid, gid)?;
+        let (root, base) = self.resolve_anchors(payload, anchors)?;
+        let inode = self.resolve_inode_at(root, base, payload, follow, uid, gid)?;
         let requested = request.flags
             & (protocol::ACCESS_AT_READ
                 | protocol::ACCESS_AT_WRITE
@@ -383,19 +398,30 @@ impl FilesystemService {
         }
     }
 
-    fn resolve_base_inode(
+    fn resolve_anchors(
         &self,
         path: &[u8],
-        base_open_id: Option<u64>,
-    ) -> Result<Inode, i32> {
-        if path.first() == Some(&b'/') || base_open_id.is_none() {
-            return self.fs.read_root_inode().map_err(errno);
-        }
-        let base = self.opens.get(&base_open_id.ok_or(EINVAL)?).ok_or(EBADF)?;
-        if !base.inode.file_type().is_dir() {
+        anchors: PathAnchors,
+    ) -> Result<(Inode, Inode), i32> {
+        let root = match anchors.root_open_id {
+            Some(open_id) => self.opens.get(&open_id).ok_or(EBADF)?.inode.clone(),
+            None => self.fs.read_root_inode().map_err(errno)?,
+        };
+        if !root.file_type().is_dir() {
             return Err(ENOTDIR);
         }
-        Ok(base.inode.clone())
+        let base = if path.first() == Some(&b'/') {
+            root.clone()
+        } else {
+            match anchors.base_open_id {
+                Some(open_id) => self.opens.get(&open_id).ok_or(EBADF)?.inode.clone(),
+                None => root.clone(),
+            }
+        };
+        if !base.file_type().is_dir() {
+            return Err(ENOTDIR);
+        }
+        Ok((root, base))
     }
 
     /// Resolves a path one component at a time from an already-open directory
@@ -403,13 +429,14 @@ impl FilesystemService {
     /// including directories reached through symbolic links.
     fn resolve_inode_at(
         &self,
+        root: Inode,
         base: Inode,
         path: &[u8],
         follow: FollowSymlinks,
         uid: u32,
         gid: u32,
     ) -> Result<Inode, i32> {
-        match self.resolve_path_at(base, path, follow, uid, gid)? {
+        match self.resolve_path_at(root, base, path, follow, uid, gid)? {
             Resolution::Found(inode) => Ok(inode),
             Resolution::Missing { .. } => Err(ENOENT),
         }
@@ -417,6 +444,7 @@ impl FilesystemService {
 
     fn resolve_path_at(
         &self,
+        root: Inode,
         base: Inode,
         path: &[u8],
         follow: FollowSymlinks,
@@ -430,7 +458,6 @@ impl FilesystemService {
             return Err(EINVAL);
         }
         let parsed = Path::try_from(path).map_err(|_| EINVAL)?;
-        let root = self.fs.read_root_inode().map_err(errno)?;
         let mut ancestors = if parsed.is_absolute() {
             vec![root.clone()]
         } else {

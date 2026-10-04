@@ -119,38 +119,13 @@ fn main() {
         let response = match protocol::decode(&request_bytes[..length.min(request_bytes.len())]) {
             Ok((header, payload)) => {
                 if header.opcode == protocol::OP_OPEN_AT {
-                    let base_open_id = if attached.count == 1 {
-                        let directory = attached.handles[0];
-                        let required = platform::handle::HANDLE_RIGHT_READ
-                            | platform::handle::HANDLE_RIGHT_TRANSFER;
-                        if directory.reserved != 0 || directory.rights & required != required {
-                            None
-                        } else {
-                            platform::handle::identify_provider_object(directory.handle).ok()
-                        }
-                    } else if attached.count == 0 {
-                        None
-                    } else {
-                        close_attached_handles(&attached);
-                        let response = filesystem_service::service::Response {
-                            header: protocol::Header {
-                                opcode: protocol::OP_STATUS,
-                                request_id: header.request_id,
-                                status: -22,
-                                ..protocol::Header::default()
-                            },
-                            payload: Vec::new(),
-                        };
-                        if let Ok(length) = protocol::encode(
-                            response.header,
-                            &response.payload,
-                            &mut response_bytes,
-                        ) {
-                            let _ = platform::ipc::reply(sender, &response_bytes[..length]);
-                        }
-                        continue;
-                    };
-                    let result = service.open_at(header, payload, base_open_id);
+                    let result = decode_path_anchors(
+                        header.flags,
+                        protocol::OPEN_AT_ROOT_ATTACHED,
+                        protocol::OPEN_AT_BASE_ATTACHED,
+                        &attached,
+                    )
+                    .and_then(|anchors| service.open_at(header, payload, anchors));
                     close_attached_handles(&attached);
                     match result {
                         Ok(response) => {
@@ -228,23 +203,13 @@ fn main() {
                         }
                     }
                 } else if header.opcode == protocol::OP_STAT_AT {
-                    let base_open_id = match attached.count {
-                        0 => Ok(None),
-                        1 => {
-                            let directory = attached.handles[0];
-                            let required = platform::handle::HANDLE_RIGHT_READ
-                                | platform::handle::HANDLE_RIGHT_TRANSFER;
-                            if directory.reserved != 0 || directory.rights & required != required {
-                                Err(22)
-                            } else {
-                                platform::handle::identify_provider_object(directory.handle)
-                                    .map(Some)
-                                    .map_err(|_| 9)
-                            }
-                        }
-                        _ => Err(22),
-                    };
-                    match base_open_id.and_then(|base| service.stat_at(header, payload, base)) {
+                    let anchors = decode_path_anchors(
+                        header.flags,
+                        protocol::STAT_AT_ROOT_ATTACHED,
+                        protocol::STAT_AT_BASE_ATTACHED,
+                        &attached,
+                    );
+                    match anchors.and_then(|anchors| service.stat_at(header, payload, anchors)) {
                         Ok(response) => response,
                         Err(error) => filesystem_service::service::Response {
                             header: protocol::Header {
@@ -282,23 +247,13 @@ fn main() {
                         },
                     }
                 } else if header.opcode == protocol::OP_ACCESS_AT {
-                    let base_open_id = match attached.count {
-                        0 => Ok(None),
-                        1 => {
-                            let directory = attached.handles[0];
-                            let required = platform::handle::HANDLE_RIGHT_READ
-                                | platform::handle::HANDLE_RIGHT_TRANSFER;
-                            if directory.reserved != 0 || directory.rights & required != required {
-                                Err(22)
-                            } else {
-                                platform::handle::identify_provider_object(directory.handle)
-                                    .map(Some)
-                                    .map_err(|_| 9)
-                            }
-                        }
-                        _ => Err(22),
-                    };
-                    match base_open_id.and_then(|base| service.access_at(header, payload, base)) {
+                    let anchors = decode_path_anchors(
+                        header.flags,
+                        protocol::ACCESS_AT_ROOT_ATTACHED,
+                        protocol::ACCESS_AT_BASE_ATTACHED,
+                        &attached,
+                    );
+                    match anchors.and_then(|anchors| service.access_at(header, payload, anchors)) {
                         Ok(response) => response,
                         Err(error) => filesystem_service::service::Response {
                             header: protocol::Header {
@@ -362,6 +317,49 @@ fn main() {
             let _ = platform::ipc::reply(sender, &response_bytes[..length]);
         }
     }
+}
+
+#[cfg(target_os = "mochios")]
+fn decode_path_anchors(
+    flags: u32,
+    root_flag: u32,
+    base_flag: u32,
+    attached: &mochi_user_platform::ipc::IpcObjectHandles,
+) -> Result<filesystem_service::service::PathAnchors, i32> {
+    use mochi_user_platform as platform;
+
+    let root_attached = flags & root_flag != 0;
+    let base_attached = flags & base_flag != 0;
+    let expected = usize::from(root_attached) + usize::from(base_attached);
+    if attached.count as usize != expected || expected > attached.handles.len() {
+        return Err(22);
+    }
+    let mut index = 0usize;
+    let mut next_open_id = || -> Result<u64, i32> {
+        let directory = attached.handles[index];
+        index += 1;
+        let required = platform::handle::HANDLE_RIGHT_READ
+            | platform::handle::HANDLE_RIGHT_TRANSFER;
+        if directory.handle == 0
+            || directory.reserved != 0
+            || directory.rights & required != required
+        {
+            return Err(13);
+        }
+        platform::handle::identify_provider_object(directory.handle).map_err(|_| 9)
+    };
+    Ok(filesystem_service::service::PathAnchors {
+        root_open_id: if root_attached {
+            Some(next_open_id()?)
+        } else {
+            None
+        },
+        base_open_id: if base_attached {
+            Some(next_open_id()?)
+        } else {
+            None
+        },
+    })
 }
 
 #[cfg(target_os = "mochios")]

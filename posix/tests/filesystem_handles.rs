@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ext4plus::{Ext4, Ext4Read, Ext4Write};
-use filesystem_service::service::FilesystemService;
+use filesystem_service::service::{FilesystemService, PathAnchors};
 use mochios_filesystem_protocol as protocol;
 
 #[derive(Clone)]
@@ -86,13 +86,17 @@ fn test_filesystem() -> FilesystemService {
     let directory = source.join("removed");
     let blocked = source.join("blocked");
     let create_base = source.join("create-base");
+    let jail = source.join("jail");
     let image_path = temporary.0.join("filesystem.ext4");
     fs::create_dir_all(&directory).unwrap();
     fs::create_dir_all(&blocked).unwrap();
     fs::create_dir_all(&create_base).unwrap();
+    fs::create_dir_all(jail.join("inside")).unwrap();
+    fs::create_dir_all(source.join("outside")).unwrap();
     fs::write(blocked.join("child"), b"private").unwrap();
     symlink("/blocked/child", source.join("redirect")).unwrap();
     symlink("target", create_base.join("dangling")).unwrap();
+    symlink("/outside", jail.join("escape")).unwrap();
     let output = Command::new("mke2fs")
         .args(["-q", "-t", "ext4", "-F", "-d"])
         .arg(&source)
@@ -133,7 +137,7 @@ fn an_open_directory_remains_a_valid_object_after_unlink() {
                 ..protocol::Header::default()
             },
             b"/removed",
-            None,
+            PathAnchors::default(),
         )
         .unwrap();
     let open_id = opened.header.open_id;
@@ -176,7 +180,7 @@ fn symlink_targets_enforce_search_permission_on_the_actual_directory() {
             ..protocol::Header::default()
         },
         b"/redirect",
-        None,
+        PathAnchors::default(),
     );
     assert!(matches!(result, Err(13)));
 
@@ -188,7 +192,7 @@ fn symlink_targets_enforce_search_permission_on_the_actual_directory() {
             ..protocol::Header::default()
         },
         b"/redirect",
-        None,
+        PathAnchors::default(),
     );
     assert!(matches!(result, Err(13)));
 }
@@ -210,7 +214,7 @@ fn filesystem_node_ids_are_stable_ext4_inode_numbers() {
                 ..protocol::Header::default()
             },
             b"/",
-            None,
+            PathAnchors::default(),
         )
         .unwrap();
     let root = protocol::decode_node_status(&root.payload).unwrap();
@@ -233,7 +237,7 @@ fn filesystem_node_ids_are_stable_ext4_inode_numbers() {
                 ..protocol::Header::default()
             },
             b"/blocked/child",
-            None,
+            PathAnchors::default(),
         )
         .unwrap();
     let status = protocol::decode_node_status(&status.payload).unwrap();
@@ -251,7 +255,7 @@ fn create_at_uses_the_open_parent_inode_and_follows_a_dangling_symlink() {
                 ..protocol::Header::default()
             },
             b"/create-base",
-            None,
+            PathAnchors::default(),
         )
         .unwrap()
         .header
@@ -268,7 +272,10 @@ fn create_at_uses_the_open_parent_inode_and_follows_a_dangling_symlink() {
             ..protocol::Header::default()
         },
         b"directory-only",
-        Some(base),
+        PathAnchors {
+            base_open_id: Some(base),
+            ..PathAnchors::default()
+        },
     );
     assert!(matches!(directory_only, Err(2)));
     let absent = filesystem.stat_at(
@@ -278,7 +285,10 @@ fn create_at_uses_the_open_parent_inode_and_follows_a_dangling_symlink() {
             ..protocol::Header::default()
         },
         b"directory-only",
-        Some(base),
+        PathAnchors {
+            base_open_id: Some(base),
+            ..PathAnchors::default()
+        },
     );
     assert!(matches!(absent, Err(2)));
 
@@ -294,7 +304,10 @@ fn create_at_uses_the_open_parent_inode_and_follows_a_dangling_symlink() {
             ..protocol::Header::default()
         },
         b"dangling",
-        Some(base),
+        PathAnchors {
+            base_open_id: Some(base),
+            ..PathAnchors::default()
+        },
     );
     assert!(matches!(exclusive, Err(17)));
 
@@ -310,7 +323,10 @@ fn create_at_uses_the_open_parent_inode_and_follows_a_dangling_symlink() {
                 ..protocol::Header::default()
             },
             b"dangling",
-            Some(base),
+            PathAnchors {
+                base_open_id: Some(base),
+                ..PathAnchors::default()
+            },
         )
         .unwrap();
 
@@ -322,7 +338,10 @@ fn create_at_uses_the_open_parent_inode_and_follows_a_dangling_symlink() {
                 ..protocol::Header::default()
             },
             b"target",
-            Some(base),
+            PathAnchors {
+                base_open_id: Some(base),
+                ..PathAnchors::default()
+            },
         )
         .unwrap();
     let target = protocol::decode_node_status(&target.payload).unwrap();
@@ -337,9 +356,78 @@ fn create_at_uses_the_open_parent_inode_and_follows_a_dangling_symlink() {
                 ..protocol::Header::default()
             },
             b"dangling",
-            Some(base),
+            PathAnchors {
+                base_open_id: Some(base),
+                ..PathAnchors::default()
+            },
         )
         .unwrap();
     let link = protocol::decode_node_status(&link.payload).unwrap();
     assert_eq!(link.kind, protocol::NODE_TYPE_SYMLINK);
+}
+
+#[test]
+fn root_anchor_confines_absolute_paths_symlinks_and_parent_components() {
+    let mut filesystem = test_filesystem();
+    let root = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+                ..protocol::Header::default()
+            },
+            b"/jail",
+            PathAnchors::default(),
+        )
+        .unwrap()
+        .header
+        .open_id;
+    let inside = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ
+                    | protocol::OPEN_AT_DIRECTORY
+                    | protocol::OPEN_AT_ROOT_ATTACHED,
+                ..protocol::Header::default()
+            },
+            b"/inside",
+            PathAnchors {
+                root_open_id: Some(root),
+                ..PathAnchors::default()
+            },
+        )
+        .unwrap()
+        .header
+        .open_id;
+
+    for path in [b"/../outside".as_slice(), b"/escape".as_slice()] {
+        let escaped = filesystem.stat_at(
+            protocol::Header {
+                opcode: protocol::OP_STAT_AT,
+                flags: protocol::STAT_AT_ROOT_ATTACHED,
+                ..protocol::Header::default()
+            },
+            path,
+            PathAnchors {
+                root_open_id: Some(root),
+                ..PathAnchors::default()
+            },
+        );
+        assert!(matches!(escaped, Err(2)));
+    }
+
+    let escaped = filesystem.stat_at(
+        protocol::Header {
+            opcode: protocol::OP_STAT_AT,
+            flags: protocol::STAT_AT_ROOT_ATTACHED | protocol::STAT_AT_BASE_ATTACHED,
+            ..protocol::Header::default()
+        },
+        b"../../outside",
+        PathAnchors {
+            root_open_id: Some(root),
+            base_open_id: Some(inside),
+        },
+    );
+    assert!(matches!(escaped, Err(2)));
 }
