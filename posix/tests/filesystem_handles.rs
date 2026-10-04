@@ -310,6 +310,60 @@ fn mkdir_at_is_anchored_to_an_open_directory() {
 }
 
 #[test]
+fn orphan_cleanup_uses_parent_inode_after_parent_rename() {
+    let mut filesystem = test_filesystem();
+    filesystem
+        .mkdir_at(
+            protocol::Header {
+                opcode: protocol::OP_MKDIR_AT,
+                mode: 0o755,
+                ..protocol::Header::default()
+            },
+            b"/create-base/parent",
+            PathAnchors::default(),
+        )
+        .unwrap();
+    let opened = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ
+                    | protocol::OPEN_AT_WRITE
+                    | protocol::OPEN_AT_CREATE,
+                mode: 0o644,
+                ..protocol::Header::default()
+            },
+            b"/create-base/parent/file",
+            PathAnchors::default(),
+        )
+        .unwrap();
+    let removed = filesystem.handle(
+        protocol::Header {
+            opcode: protocol::OP_UNLINK,
+            flags: protocol::NODE_TYPE_REGULAR,
+            ..protocol::Header::default()
+        },
+        b"/create-base/parent/file",
+    );
+    assert_eq!(removed.header.status, 0);
+
+    let old = b"/create-base/parent";
+    let new = b"/create-base/renamed";
+    let mut paths = old.to_vec();
+    paths.extend_from_slice(new);
+    let renamed = filesystem.handle(
+        protocol::Header {
+            opcode: protocol::OP_RENAME,
+            offset: old.len() as u64,
+            ..protocol::Header::default()
+        },
+        &paths,
+    );
+    assert_eq!(renamed.header.status, 0);
+    filesystem.provider_close(opened.header.open_id).unwrap();
+}
+
+#[test]
 fn open_directory_paths_follow_rename_and_reject_unlinked_cwds() {
     let mut filesystem = test_filesystem();
     let root = filesystem

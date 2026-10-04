@@ -58,7 +58,7 @@ struct OpenFile {
 
 #[derive(Clone)]
 struct Orphan {
-    parent_path: String,
+    parent: Inode,
     name: String,
 }
 
@@ -821,14 +821,7 @@ impl FilesystemService {
             == 1;
         if is_last_open {
             if let Some(orphan) = self.orphans.get(&node_id).cloned() {
-                let parent_inode = self
-                    .fs
-                    .path_to_inode(
-                        orphan.parent_path.as_str().try_into().map_err(|_| EIO)?,
-                        FollowSymlinks::All,
-                    )
-                    .map_err(errno)?;
-                let mut parent = Dir::open_inode(&self.fs, parent_inode).map_err(errno)?;
+                let mut parent = Dir::open_inode(&self.fs, orphan.parent).map_err(errno)?;
                 parent
                     .unlink(
                         DirEntryName::try_from(orphan.name.as_str()).map_err(|_| EIO)?,
@@ -1083,7 +1076,7 @@ impl FilesystemService {
                 FollowSymlinks::All,
             )
             .map_err(errno)?;
-        let mut parent = Dir::open_inode(&self.fs, parent_inode).map_err(errno)?;
+        let mut parent = Dir::open_inode(&self.fs, parent_inode.clone()).map_err(errno)?;
         let mut inode = parent
             .get_entry(DirEntryName::try_from(name).map_err(|_| EINVAL)?)
             .map_err(errno)?;
@@ -1155,7 +1148,7 @@ impl FilesystemService {
             self.orphans.insert(
                 node_id,
                 Orphan {
-                    parent_path: parent_path.to_owned(),
+                    parent: parent_inode,
                     name: orphan_name,
                 },
             );
@@ -1340,7 +1333,7 @@ impl FilesystemService {
                 self.orphans.insert(
                     destination_node_id,
                     Orphan {
-                        parent_path: new_parent_path.to_owned(),
+                        parent: new_parent_inode,
                         name: backup_name,
                     },
                 );
