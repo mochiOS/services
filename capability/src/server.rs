@@ -6,7 +6,9 @@ use sha2::{Digest, Sha256};
 
 use crate::app_spawn::{SPAWN_APP_OPCODE, spawn_application_from_manifest};
 use crate::dynamic_grant::{authorize_dynamic_capability, is_trusted_prompt_broker};
-use crate::persistent_grant::{authorize_persistent_capability, has_persistent_grant};
+use crate::persistent_grant::{
+    authorize_persistent_capability, has_persistent_grant, install_posix_endpoint,
+};
 use crate::policy::needs_app_prompt;
 use crate::resolver::{
     CapabilityDenyReason, application_identity, binary_caps, decide_binary_capabilities,
@@ -19,6 +21,15 @@ const REPLY_OK: u64 = 0;
 
 fn capability_reply(sender: u64, status: u64) {
     let _ = platform::ipc::reply(sender, &status.to_le_bytes());
+}
+
+fn close_received_handles(handles: &platform::ipc::IpcObjectHandles) {
+    let count = core::cmp::min(handles.count as usize, handles.handles.len());
+    for attached in &handles.handles[..count] {
+        if attached.handle != 0 {
+            let _ = platform::handle::close(attached.handle);
+        }
+    }
 }
 
 fn parse_decision_request(
@@ -105,7 +116,8 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
     platform::logln!("capability.service: ready");
     let mut buf = [0u8; 1024];
     loop {
-        let msg = match platform::ipc::wait(endpoint, &mut buf) {
+        let mut attached = platform::ipc::IpcObjectHandles::default();
+        let msg = match platform::ipc::wait_object_handles(endpoint, &mut buf, &mut attached) {
             Ok(msg) => msg,
             Err(_) => {
                 platform::thread::yield_now();
@@ -120,6 +132,32 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
         } else {
             0
         };
+        if opcode == platform::capability::INSTALL_POSIX_ENDPOINT_OPCODE {
+            let valid_attachment = attached.reserved == 0
+                && attached.count == 1
+                && attached.handles[0].handle != 0
+                && attached.handles[0].reserved == 0
+                && attached.handles[0].rights & platform::handle::HANDLE_RIGHT_SEND != 0;
+            let status = if slice.len() != core::mem::size_of::<u32>() || !valid_attachment {
+                mochi_user_syscall::EINVAL
+            } else if platform::capability::check_thread(sender, "capabilities.manage") != Ok(1) {
+                mochi_user_syscall::EACCES
+            } else {
+                let endpoint = attached.handles[0].handle;
+                attached.handles[0].handle = 0;
+                install_posix_endpoint(endpoint)
+                    .map(|_| REPLY_OK)
+                    .unwrap_or_else(|error| error.errno().unwrap_or(mochi_user_syscall::EIO))
+            };
+            close_received_handles(&attached);
+            capability_reply(sender, status);
+            continue;
+        }
+        if attached.count != 0 || attached.reserved != 0 {
+            close_received_handles(&attached);
+            capability_reply(sender, mochi_user_syscall::EINVAL);
+            continue;
+        }
         if opcode == platform::capability::RESOLVE_CAPABILITIES_OPCODE {
             let result = platform::capability::decode_resolve_capabilities_request(slice)
                 .map_err(|_| {

@@ -429,6 +429,13 @@ impl BootstrapOperations for Runtime {
             });
         match result {
             Ok(endpoint) => {
+                if let Err(error) = crate::spawn_support::install_posix_endpoint(endpoint) {
+                    platform::logln!(
+                        "service-manager.service: capability POSIX endpoint install failed errno={}",
+                        crate::spawn_support::errno(error)
+                    );
+                    return false;
+                }
                 self.posix_endpoint = Some(endpoint);
                 platform::logln!(
                     "service-manager.service: posix.service ready endpoint={}",

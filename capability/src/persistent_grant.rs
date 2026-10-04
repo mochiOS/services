@@ -1,6 +1,12 @@
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use std::sync::Mutex;
 
 use mochi_user_platform as platform;
+use mochios_posix_client::{
+    Client, ClientError, EndpointTransport, OpenAtBase, StatAtBase,
+};
+use mochios_posix_protocol as posix;
 
 use crate::dynamic_grant::{read_request_str, transfer_scoped_path_grant, transfer_user_grant};
 use crate::package_index::PackageIndex;
@@ -11,10 +17,55 @@ const GRANTS_PATH: &str = "/var/lib/security/capability-grants.db";
 const GRANTS_NEW_PATH: &str = "/var/lib/security/capability-grants.db.new";
 const GRANTS_OLD_PATH: &str = "/var/lib/security/capability-grants.db.old";
 const POLICY_DIR: &str = "/var/lib/security";
-const O_WRONLY: u64 = 0o1;
-const O_CREAT: u64 = 0o100;
-const O_TRUNC: u64 = 0o1000;
-const FILE_MODE_644: u64 = 0o644;
+const FILE_MODE_644: u32 = 0o644;
+
+type PosixClient = Client<EndpointTransport>;
+
+static POSIX_CLIENT: Mutex<Option<PosixClient>> = Mutex::new(None);
+
+fn sys_error(errno: u64) -> mochi_user_syscall::SysError {
+    mochi_user_syscall::SysError::from_raw(errno as i64)
+}
+
+fn client_error(error: ClientError<mochi_user_syscall::SysError>) -> mochi_user_syscall::SysError {
+    match error {
+        ClientError::Transport(error) => error,
+        ClientError::Remote(status) => mochi_user_syscall::SysError::from_raw(status as i64),
+        ClientError::Protocol(_)
+        | ClientError::RequestTooLarge
+        | ClientError::ResponseTooLarge
+        | ClientError::MismatchedResponse => sys_error(mochi_user_syscall::EIO),
+    }
+}
+
+fn with_client<T>(
+    operation: impl FnOnce(&PosixClient) -> Result<T, ClientError<mochi_user_syscall::SysError>>,
+) -> Result<T, mochi_user_syscall::SysError> {
+    let client = POSIX_CLIENT
+        .lock()
+        .map_err(|_| sys_error(mochi_user_syscall::EIO))?;
+    let client = client
+        .as_ref()
+        .ok_or_else(|| sys_error(mochi_user_syscall::EAGAIN))?;
+    operation(client).map_err(client_error)
+}
+
+pub(crate) fn install_posix_endpoint(
+    endpoint: platform::handle::Handle,
+) -> Result<(), mochi_user_syscall::SysError> {
+    let client = Client::new(EndpointTransport::new(endpoint));
+    if let Err(error) = client.register_session() {
+        let _ = platform::handle::close(endpoint);
+        return Err(client_error(error));
+    }
+    let mut installed = POSIX_CLIENT
+        .lock()
+        .map_err(|_| sys_error(mochi_user_syscall::EIO))?;
+    if let Some(previous) = installed.replace(client) {
+        let _ = platform::handle::close(previous.into_transport().endpoint());
+    }
+    Ok(())
+}
 
 fn hex_digest(digest: &[u8; 32]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -26,66 +77,117 @@ fn hex_digest(digest: &[u8; 32]) -> String {
     out
 }
 
-fn ensure_policy_dir() {
-    let _ = platform::file::create_dir("/var", 0o755);
-    let _ = platform::file::create_dir("/var/lib", 0o755);
-    let _ = platform::file::create_dir("/var/lib/security", 0o755);
+fn ensure_policy_dir() -> Result<(), mochi_user_syscall::SysError> {
+    for path in ["/var", "/var/lib", POLICY_DIR] {
+        let result = with_client(|client| client.mkdir_at(OpenAtBase::ProcessRoot, 0o755, path));
+        if let Err(error) = result
+            && error.errno() != Some(mochi_user_syscall::EEXIST.wrapping_neg())
+        {
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 fn write_file(path: &str, bytes: &[u8]) -> Result<(), mochi_user_syscall::SysError> {
-    let fd = platform::file::openat_path(-100, path, O_WRONLY | O_CREAT | O_TRUNC, FILE_MODE_644)?;
+    let file = with_client(|client| {
+        client.open_at(
+            OpenAtBase::ProcessRoot,
+            posix::OPEN_WRITE | posix::OPEN_CREATE | posix::OPEN_TRUNCATE,
+            FILE_MODE_644,
+            path,
+        )
+    })?;
     let mut written = 0usize;
     while written < bytes.len() {
-        let n = platform::file::write(
-            fd,
-            bytes[written..].as_ptr() as u64,
-            (bytes.len() - written) as u64,
-        )? as usize;
+        let n = match platform::handle::write(file.handle, &bytes[written..]) {
+            Ok(length) => length,
+            Err(error) => {
+                let _ = platform::handle::close(file.handle);
+                return Err(error);
+            }
+        };
         if n == 0 {
-            let _ = platform::file::close(fd);
-            return Err(mochi_user_syscall::SysError::from_raw(
-                mochi_user_syscall::EIO as i64,
-            ));
+            let _ = platform::handle::close(file.handle);
+            return Err(sys_error(mochi_user_syscall::EIO));
         }
         written += n;
     }
-    let sync_result = platform::file::sync(fd).map(|_| ());
-    let close_result = platform::file::close(fd).map(|_| ());
+    let sync_result = with_client(|client| client.fsync(file));
+    let close_result = platform::handle::close(file.handle);
     sync_result?;
     close_result
 }
 
-fn path_exists(path: &str) -> Result<bool, mochi_user_syscall::SysError> {
-    match platform::file::open_path(path, 0) {
-        Ok(fd) => {
-            platform::file::close(fd)?;
-            Ok(true)
+fn read_file(path: &str) -> Result<Vec<u8>, mochi_user_syscall::SysError> {
+    let file =
+        with_client(|client| client.open_at(OpenAtBase::ProcessRoot, posix::OPEN_READ, 0, path))?;
+    let mut output = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        match platform::handle::read(file.handle, &mut buffer) {
+            Ok(0) => break,
+            Ok(length) => output.extend_from_slice(&buffer[..length]),
+            Err(error) => {
+                let _ = platform::handle::close(file.handle);
+                return Err(error);
+            }
         }
+    }
+    platform::handle::close(file.handle)?;
+    Ok(output)
+}
+
+fn path_exists(path: &str) -> Result<bool, mochi_user_syscall::SysError> {
+    match with_client(|client| client.stat_at(StatAtBase::ProcessRoot, 0, path)) {
+        Ok(_) => Ok(true),
         Err(error) if error.errno() == Some(mochi_user_syscall::ENOENT.wrapping_neg()) => Ok(false),
         Err(error) => Err(error),
     }
 }
 
 fn sync_policy_dir() -> Result<(), mochi_user_syscall::SysError> {
-    let fd = platform::file::open_path(POLICY_DIR, 0)?;
-    let sync_result = platform::file::sync(fd).map(|_| ());
-    let close_result = platform::file::close(fd).map(|_| ());
+    let directory = with_client(|client| {
+        client.open_at(
+            OpenAtBase::ProcessRoot,
+            posix::OPEN_READ | posix::OPEN_DIRECTORY,
+            0,
+            POLICY_DIR,
+        )
+    })?;
+    let sync_result = with_client(|client| client.fsync(directory));
+    let close_result = platform::handle::close(directory.handle);
     sync_result?;
     close_result
+}
+
+fn rename(old_path: &str, new_path: &str) -> Result<(), mochi_user_syscall::SysError> {
+    with_client(|client| {
+        client.rename_at(
+            StatAtBase::ProcessRoot,
+            old_path,
+            StatAtBase::ProcessRoot,
+            new_path,
+        )
+    })
+}
+
+fn remove(path: &str) -> Result<(), mochi_user_syscall::SysError> {
+    with_client(|client| client.unlink_at(StatAtBase::ProcessRoot, 0, path))
 }
 
 fn recover_grant_db() -> Result<(), mochi_user_syscall::SysError> {
     let current = path_exists(GRANTS_PATH)?;
     let old = path_exists(GRANTS_OLD_PATH)?;
     if !current && old {
-        platform::file::rename(GRANTS_OLD_PATH, GRANTS_PATH)?;
+        rename(GRANTS_OLD_PATH, GRANTS_PATH)?;
         sync_policy_dir()?;
     } else if current && old {
-        platform::file::remove(GRANTS_OLD_PATH)?;
+        remove(GRANTS_OLD_PATH)?;
         sync_policy_dir()?;
     }
     if path_exists(GRANTS_NEW_PATH)? {
-        platform::file::remove(GRANTS_NEW_PATH)?;
+        remove(GRANTS_NEW_PATH)?;
         sync_policy_dir()?;
     }
     Ok(())
@@ -97,18 +199,18 @@ fn replace_grant_db(bytes: &[u8]) -> Result<(), mochi_user_syscall::SysError> {
     sync_policy_dir()?;
     let had_current = path_exists(GRANTS_PATH)?;
     if had_current {
-        platform::file::rename(GRANTS_PATH, GRANTS_OLD_PATH)?;
+        rename(GRANTS_PATH, GRANTS_OLD_PATH)?;
     }
-    if let Err(error) = platform::file::rename(GRANTS_NEW_PATH, GRANTS_PATH) {
+    if let Err(error) = rename(GRANTS_NEW_PATH, GRANTS_PATH) {
         if had_current {
-            let _ = platform::file::rename(GRANTS_OLD_PATH, GRANTS_PATH);
+            let _ = rename(GRANTS_OLD_PATH, GRANTS_PATH);
         }
         let _ = sync_policy_dir();
         return Err(error);
     }
     sync_policy_dir()?;
     if had_current {
-        platform::file::remove(GRANTS_OLD_PATH)?;
+        remove(GRANTS_OLD_PATH)?;
         sync_policy_dir()?;
     }
     Ok(())
@@ -120,7 +222,7 @@ pub(crate) fn append_persistent_grant(
     resource: Option<&str>,
     all_user_grantable: bool,
 ) -> Result<(), mochi_user_syscall::SysError> {
-    ensure_policy_dir();
+    ensure_policy_dir()?;
     recover_grant_db()?;
     if capability.as_bytes().iter().any(|byte| matches!(byte, b'\t' | b'\n' | 0))
         || resource.is_some_and(|value| {
@@ -134,7 +236,7 @@ pub(crate) fn append_persistent_grant(
             mochi_user_syscall::EINVAL as i64,
         ));
     }
-    let mut data = match platform::file::read_to_end_path(GRANTS_PATH) {
+    let mut data = match read_file(GRANTS_PATH) {
         Ok(data) => data,
         Err(error) if error.errno() == Some(mochi_user_syscall::ENOENT.wrapping_neg()) => {
             alloc::vec::Vec::new()
@@ -175,7 +277,7 @@ fn grant_db_matches(
     if recover_grant_db().is_err() {
         return false;
     }
-    let Ok(data) = platform::file::read_to_end_path(GRANTS_PATH) else {
+    let Ok(data) = read_file(GRANTS_PATH) else {
         return false;
     };
     let key_hex = hex_digest(&context.subject_key_id);

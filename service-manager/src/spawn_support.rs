@@ -50,6 +50,33 @@ pub(crate) fn call_with_wait(
     }
 }
 
+pub(crate) fn install_posix_endpoint(
+    endpoint: platform::handle::Handle,
+) -> Result<(), mochi_user_syscall::SysError> {
+    let destination = platform::process::find_by_name(CAPABILITY_SERVICE_NAME)?;
+    if destination == 0 {
+        return Err(sys_error(mochi_user_syscall::ENOENT));
+    }
+    let destination =
+        u32::try_from(destination).map_err(|_| sys_error(mochi_user_syscall::EOVERFLOW))?;
+    let request = platform::capability::INSTALL_POSIX_ENDPOINT_OPCODE.to_le_bytes();
+    let mut reply = [0u8; core::mem::size_of::<u64>()];
+    let mut handles = platform::ipc::IpcObjectHandles::default();
+    handles.count = 1;
+    handles.handles[0].handle = endpoint;
+    handles.handles[0].rights = platform::handle::HANDLE_RIGHT_SEND;
+    let message =
+        platform::ipc::call_object_handles(destination, &request, &mut reply, &mut handles)?;
+    if handles.count != 0 || (message & 0xffff_ffff) as usize != reply.len() {
+        return Err(sys_error(mochi_user_syscall::EIO));
+    }
+    let status = u64::from_le_bytes(reply);
+    if status != 0 {
+        return Err(mochi_user_syscall::SysError::from_raw(status as i64));
+    }
+    Ok(())
+}
+
 pub(crate) fn resolve_capabilities(
     entry_path: &str,
 ) -> Result<Vec<u8>, mochi_user_syscall::SysError> {
