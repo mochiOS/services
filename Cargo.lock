@@ -2451,6 +2451,7 @@ dependencies = [
 name = "posix-service"
 version = "0.1.0"
 dependencies = [
+ "filesystem-service",
  "mochi-user-platform",
  "mochios-filesystem-protocol",
  "mochios-posix-client",

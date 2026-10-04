@@ -86,7 +86,10 @@ impl FilesystemService {
             protocol::OP_READLINK => self.read_link(request),
             protocol::OP_SYNC => Ok(self.success(request)),
             protocol::OP_SETATTR => self.set_attr(request, payload),
-            protocol::OP_OPEN_AT | protocol::OP_STAT_AT | protocol::OP_STAT_HANDLE => Err(EINVAL),
+            protocol::OP_OPEN_AT
+            | protocol::OP_STAT_AT
+            | protocol::OP_STAT_HANDLE
+            | protocol::OP_ACCESS_AT => Err(EINVAL),
             _ => Err(ENOSYS),
         };
         result.unwrap_or_else(|errno| self.error(request, errno))
@@ -156,7 +159,11 @@ impl FilesystemService {
             return Err(EINVAL);
         }
         let path = self.open_path(payload, base_open_id)?;
+        let uid = request.offset as u32;
+        let gid = (request.offset >> 32) as u32;
+        self.check_search_path(path.as_str(), uid, gid)?;
         let existing = self.fs.symlink_metadata(path.as_str());
+        let mut created = false;
         match existing {
             Ok(_)
                 if request.flags & protocol::OPEN_AT_CREATE != 0
@@ -166,6 +173,19 @@ impl FilesystemService {
             }
             Ok(_) => {}
             Err(Ext4Error::NotFound) if request.flags & protocol::OPEN_AT_CREATE != 0 => {
+                let (parent_path, _) = split_parent(path.as_str())?;
+                let parent = self.fs.metadata(parent_path).map_err(errno)?;
+                if !permission_allows(
+                    parent.mode(),
+                    node_type(parent.file_type()),
+                    parent.uid(),
+                    parent.gid(),
+                    uid,
+                    gid,
+                    protocol::ACCESS_AT_WRITE | protocol::ACCESS_AT_EXECUTE,
+                ) {
+                    return Err(EACCES);
+                }
                 let create = protocol::Header {
                     opcode: protocol::OP_CREATE,
                     request_id: request.request_id,
@@ -176,6 +196,7 @@ impl FilesystemService {
                     ..protocol::Header::default()
                 };
                 self.create(create, path.as_bytes())?;
+                created = true;
             }
             Err(error) => return Err(errno(error)),
         }
@@ -184,11 +205,34 @@ impl FilesystemService {
         if request.flags & protocol::OPEN_AT_NOFOLLOW != 0 && kind.is_symlink() {
             return Err(ELOOP);
         }
+        let metadata = if kind.is_symlink() {
+            self.fs.metadata(path.as_str()).map_err(errno)?
+        } else {
+            metadata
+        };
+        let kind = metadata.file_type();
         if request.flags & protocol::OPEN_AT_DIRECTORY != 0 && !kind.is_dir() {
             return Err(ENOTDIR);
         }
         if kind.is_dir() && request.flags & protocol::OPEN_AT_WRITE != 0 {
             return Err(EISDIR);
+        }
+        let requested_access = (u32::from(request.flags & protocol::OPEN_AT_READ != 0)
+            * protocol::ACCESS_AT_READ)
+            | (u32::from(request.flags & protocol::OPEN_AT_WRITE != 0)
+                * protocol::ACCESS_AT_WRITE);
+        if !created
+            && !permission_allows(
+                metadata.mode(),
+                node_type(metadata.file_type()),
+                metadata.uid(),
+                metadata.gid(),
+                uid,
+                gid,
+                requested_access,
+            )
+        {
+            return Err(EACCES);
         }
         let node_id = self.remember_node(path.as_str())?;
         let mut file = if kind.is_dir() {
@@ -231,6 +275,9 @@ impl FilesystemService {
             return Err(EINVAL);
         }
         let path = self.open_path(payload, base_open_id)?;
+        let uid = request.offset as u32;
+        let gid = (request.offset >> 32) as u32;
+        self.check_search_path(path.as_str(), uid, gid)?;
         let follow = if request.flags & protocol::STAT_AT_NOFOLLOW != 0 {
             FollowSymlinks::ExcludeFinalComponent
         } else {
@@ -275,6 +322,54 @@ impl FilesystemService {
         Ok(self.node_status_response(request, node_id, metadata))
     }
 
+    /// Resolves a path and checks its permission bits without exposing a
+    /// check-then-use sequence to the POSIX policy service.
+    pub fn access_at(
+        &self,
+        request: protocol::Header,
+        payload: &[u8],
+        base_open_id: Option<u64>,
+    ) -> Result<Response, i32> {
+        if request.flags & !protocol::ACCESS_AT_FLAGS_ALL != 0 {
+            return Err(EINVAL);
+        }
+        let attached = request.flags & protocol::ACCESS_AT_BASE_ATTACHED != 0;
+        if attached != base_open_id.is_some() {
+            return Err(EINVAL);
+        }
+        let path = self.open_path(payload, base_open_id)?;
+        let uid = request.offset as u32;
+        let gid = (request.offset >> 32) as u32;
+        self.check_search_path(path.as_str(), uid, gid)?;
+        let follow = if request.flags & protocol::ACCESS_AT_NOFOLLOW != 0 {
+            FollowSymlinks::ExcludeFinalComponent
+        } else {
+            FollowSymlinks::All
+        };
+        let inode = self
+            .fs
+            .path_to_inode(path.as_str().try_into().map_err(|_| EINVAL)?, follow)
+            .map_err(errno)?;
+        let requested = request.flags
+            & (protocol::ACCESS_AT_READ
+                | protocol::ACCESS_AT_WRITE
+                | protocol::ACCESS_AT_EXECUTE);
+        let metadata = inode.metadata();
+        if permission_allows(
+            metadata.mode(),
+            node_type(metadata.file_type()),
+            metadata.uid(),
+            metadata.gid(),
+            uid,
+            gid,
+            requested,
+        ) {
+            Ok(self.success(request))
+        } else {
+            Err(EACCES)
+        }
+    }
+
     fn open_path(&self, payload: &[u8], base_open_id: Option<u64>) -> Result<String, i32> {
         if payload.is_empty() || payload.len() > protocol::MAX_PATH_LEN || payload.contains(&0) {
             return Err(EINVAL);
@@ -293,6 +388,49 @@ impl FilesystemService {
             return Err(ENOTDIR);
         }
         Ok(joined_path(base_path, path))
+    }
+
+    fn check_search_path(&self, path: &str, uid: u32, gid: u32) -> Result<(), i32> {
+        if !path.starts_with('/') {
+            return Err(EINVAL);
+        }
+        let components: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+        if components.is_empty() {
+            return Ok(());
+        }
+        let root = self.fs.metadata("/").map_err(errno)?;
+        if !permission_allows(
+            root.mode(),
+            node_type(root.file_type()),
+            root.uid(),
+            root.gid(),
+            uid,
+            gid,
+            protocol::ACCESS_AT_EXECUTE,
+        ) {
+            return Err(EACCES);
+        }
+        let mut prefix = String::new();
+        for component in &components[..components.len() - 1] {
+            prefix.push('/');
+            prefix.push_str(component);
+            let metadata = self.fs.metadata(prefix.as_str()).map_err(errno)?;
+            if !metadata.is_dir() {
+                return Err(ENOTDIR);
+            }
+            if !permission_allows(
+                metadata.mode(),
+                node_type(metadata.file_type()),
+                metadata.uid(),
+                metadata.gid(),
+                uid,
+                gid,
+                protocol::ACCESS_AT_EXECUTE,
+            ) {
+                return Err(EACCES);
+            }
+        }
+        Ok(())
     }
 
     pub fn provider_read(&mut self, open_id: u64, length: usize) -> Result<Vec<u8>, i32> {
@@ -1296,6 +1434,34 @@ fn node_type(file_type: FileType) -> u32 {
     } else {
         protocol::NODE_TYPE_SPECIAL
     }
+}
+
+pub fn permission_allows(
+    mode: u16,
+    kind: u32,
+    owner_uid: u32,
+    owner_gid: u32,
+    uid: u32,
+    gid: u32,
+    requested: u32,
+) -> bool {
+    if requested == 0 {
+        return true;
+    }
+    let mode = u32::from(mode);
+    if uid == 0 {
+        return requested & protocol::ACCESS_AT_EXECUTE == 0
+            || kind == protocol::NODE_TYPE_DIRECTORY
+            || mode & 0o111 != 0;
+    }
+    let granted = if uid == owner_uid {
+        (mode >> 6) & 0o7
+    } else if gid == owner_gid {
+        (mode >> 3) & 0o7
+    } else {
+        mode & 0o7
+    };
+    requested & !granted == 0
 }
 
 fn errno(error: Ext4Error) -> i32 {

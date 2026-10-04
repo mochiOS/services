@@ -163,6 +163,55 @@ struct RuntimeFilesystem {
 
 #[cfg(target_os = "mochios")]
 impl RuntimeFilesystem {
+    fn empty_call(
+        &self,
+        header: mochios_filesystem_protocol::Header,
+        payload: &[u8],
+        attachment: Option<mochi_user_platform::ipc::IpcObjectHandle>,
+    ) -> Result<(), i32> {
+        use mochi_user_platform as platform;
+        use mochios_filesystem_protocol as filesystem;
+
+        let mut request = vec![0u8; filesystem::HEADER_LEN + payload.len()];
+        let request_len = filesystem::encode(header, payload, &mut request).map_err(|_| -22)?;
+        let mut response = [0u8; filesystem::HEADER_LEN];
+        let mut handles = platform::ipc::IpcObjectHandles::default();
+        if let Some(attachment) = attachment {
+            handles.count = 1;
+            handles.handles[0] = attachment;
+        }
+        if platform::ipc::call_object_handles(
+            self.endpoint,
+            &request[..request_len],
+            &mut response,
+            &mut handles,
+        )
+        .is_err()
+        {
+            close_runtime_handles(&handles);
+            return Err(-5);
+        }
+        let (response, payload) = match filesystem::decode(&response) {
+            Ok(decoded) => decoded,
+            Err(_) => {
+                close_runtime_handles(&handles);
+                return Err(-5);
+            }
+        };
+        if handles.count != 0 {
+            close_runtime_handles(&handles);
+            return Err(-5);
+        }
+        if response.opcode != filesystem::OP_STATUS || !payload.is_empty() || response.status != 0 {
+            return Err(if response.status < 0 {
+                response.status
+            } else {
+                -5
+            });
+        }
+        Ok(())
+    }
+
     fn status_call(
         &self,
         header: mochios_filesystem_protocol::Header,
@@ -392,6 +441,68 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             }),
         )?;
         filesystem_status_to_posix(status)
+    }
+
+    fn access_at(
+        &mut self,
+        request: &posix_service::PreparedAccess,
+        directory: Option<posix_service::AttachedObject<mochi_user_platform::handle::Handle>>,
+    ) -> Result<(), i32> {
+        use mochi_user_platform as platform;
+        use mochios_filesystem_protocol as filesystem;
+        use mochios_posix_protocol as posix;
+
+        let mut flags = match request.base {
+            posix::OpenBase::AttachedDirectory => filesystem::ACCESS_AT_BASE_ATTACHED,
+            posix::OpenBase::ProcessRoot | posix::OpenBase::ProcessCwd => 0,
+        };
+        for (source, target) in [
+            (posix::ACCESS_READ, filesystem::ACCESS_AT_READ),
+            (posix::ACCESS_WRITE, filesystem::ACCESS_AT_WRITE),
+            (posix::ACCESS_EXECUTE, filesystem::ACCESS_AT_EXECUTE),
+        ] {
+            if request.modes & source != 0 {
+                flags |= target;
+            }
+        }
+        if request.flags & posix::ACCESS_NOFOLLOW != 0 {
+            flags |= filesystem::ACCESS_AT_NOFOLLOW;
+        }
+        let path = match request.base {
+            posix::OpenBase::ProcessRoot | posix::OpenBase::ProcessCwd
+                if !request.path.starts_with('/') =>
+            {
+                format!("/{}", request.path)
+            }
+            _ => request.path.clone(),
+        };
+        let attachment = match directory {
+            Some(directory) => {
+                let rights =
+                    platform::handle::HANDLE_RIGHT_READ | platform::handle::HANDLE_RIGHT_TRANSFER;
+                if directory.rights & rights != rights {
+                    return Err(-13);
+                }
+                Some(platform::ipc::IpcObjectHandle {
+                    handle: directory.handle,
+                    reserved: 0,
+                    rights,
+                })
+            }
+            None => None,
+        };
+        self.empty_call(
+            filesystem::Header {
+                opcode: filesystem::OP_ACCESS_AT,
+                request_id: 4,
+                offset: u64::from(request.uid) | (u64::from(request.gid) << 32),
+                length: path.len() as u32,
+                flags,
+                ..filesystem::Header::default()
+            },
+            path.as_bytes(),
+            attachment,
+        )
     }
 }
 

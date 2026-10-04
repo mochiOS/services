@@ -13,6 +13,7 @@ mochios-posix-protocol = { git = "https://github.com/mochiOS/syscalls", package 
 
 [dev-dependencies]
 mochios-posix-client = { git = "https://github.com/mochiOS/syscalls", package = "mochios-posix-client", default-features = false }
+filesystem-service = { path = "../filesystem" }
 
 [lib]
 path = "src/lib.rs"

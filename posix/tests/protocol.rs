@@ -3,10 +3,11 @@ use std::cell::RefCell;
 use mochios_posix_client::{
     Client, ClientError, ObjectHandleAttachment, ObjectHandles, ObjectTransport, Transport,
 };
+use mochios_filesystem_protocol as filesystem_protocol;
 use mochios_posix_protocol as protocol;
 use posix_service::{
-    AttachedObject, FilesystemBackend, OpenedObject, PeerIdentity, PosixService, PreparedOpen,
-    PreparedStat,
+    AttachedObject, FilesystemBackend, OpenedObject, PeerIdentity, PosixService, PreparedAccess,
+    PreparedOpen, PreparedStat,
 };
 
 struct LocalTransport {
@@ -130,6 +131,114 @@ fn fixed_size_session_payloads_reject_trailing_bytes() {
     assert_eq!(
         protocol::decode_umask(&[0; protocol::UMASK_PAYLOAD_LEN + 1]),
         Err(protocol::ProtocolError::InvalidLength)
+    );
+}
+
+#[test]
+fn stat_at_wire_format_is_strict_and_contains_no_descriptor() {
+    let mut bytes = [0u8; protocol::STAT_AT_HEADER_LEN + 16];
+    let length = protocol::encode_stat_at(
+        protocol::StatAtRequest {
+            base: protocol::OpenBase::AttachedDirectory,
+            flags: protocol::STAT_NOFOLLOW,
+            path: "child",
+        },
+        &mut bytes,
+    )
+    .unwrap();
+    assert_eq!(
+        protocol::decode_stat_at(&bytes[..length]).unwrap(),
+        protocol::StatAtRequest {
+            base: protocol::OpenBase::AttachedDirectory,
+            flags: protocol::STAT_NOFOLLOW,
+            path: "child",
+        }
+    );
+    bytes[1] = 1;
+    assert_eq!(
+        protocol::decode_stat_at(&bytes[..length]),
+        Err(protocol::ProtocolError::InvalidLength)
+    );
+}
+
+#[test]
+fn access_at_wire_format_is_strict_and_contains_no_descriptor() {
+    let mut bytes = [0u8; protocol::ACCESS_AT_HEADER_LEN + 16];
+    let length = protocol::encode_access_at(
+        protocol::AccessAtRequest {
+            base: protocol::OpenBase::ProcessCwd,
+            flags: protocol::ACCESS_EFFECTIVE_IDS,
+            modes: protocol::ACCESS_READ | protocol::ACCESS_WRITE,
+            path: "child",
+        },
+        &mut bytes,
+    )
+    .unwrap();
+    let decoded = protocol::decode_access_at(&bytes[..length]).unwrap();
+    assert_eq!(decoded.base, protocol::OpenBase::ProcessCwd);
+    assert_eq!(decoded.flags, protocol::ACCESS_EFFECTIVE_IDS);
+    assert_eq!(decoded.modes, protocol::ACCESS_READ | protocol::ACCESS_WRITE);
+    assert_eq!(decoded.path, "child");
+    bytes[2] = 1;
+    assert_eq!(
+        protocol::decode_access_at(&bytes[..length]),
+        Err(protocol::ProtocolError::InvalidLength)
+    );
+}
+
+#[test]
+fn status_wire_formats_are_target_abi_independent() {
+    let status = sample_status();
+    let mut bytes = [0u8; protocol::FILE_STATUS_LEN];
+    protocol::encode_file_status(status, &mut bytes).unwrap();
+    assert_eq!(protocol::decode_file_status(&bytes).unwrap(), status);
+
+    let node = filesystem_protocol::NodeStatus {
+        device: 2,
+        node_id: 17,
+        size: 8193,
+        blocks: 17,
+        block_size: 4096,
+        kind: filesystem_protocol::NODE_TYPE_REGULAR,
+        mode: 0o640,
+        uid: 501,
+        gid: 20,
+        link_count: 2,
+        access_time_seconds: 10,
+        access_time_nanoseconds: 11,
+        modification_time_seconds: 12,
+        modification_time_nanoseconds: 13,
+        change_time_seconds: 14,
+        change_time_nanoseconds: 15,
+        ..filesystem_protocol::NodeStatus::default()
+    };
+    let mut bytes = [0u8; filesystem_protocol::NODE_STATUS_LEN];
+    filesystem_protocol::encode_node_status(node, &mut bytes).unwrap();
+    assert_eq!(
+        filesystem_protocol::decode_node_status(&bytes).unwrap(),
+        node
+    );
+}
+
+#[test]
+fn maximum_path_fits_in_a_control_message() {
+    let path_bytes = [b'a'; protocol::MAX_PATH_LEN];
+    let path = core::str::from_utf8(&path_bytes).unwrap();
+    let mut payload = [0u8; protocol::MAX_CONTROL_PAYLOAD_LEN];
+    let payload_len = protocol::encode_open_at(
+        protocol::OpenAtRequest {
+            base: protocol::OpenBase::ProcessCwd,
+            options: protocol::OPEN_READ,
+            mode: 0,
+            path,
+        },
+        &mut payload,
+    )
+    .unwrap();
+    assert_eq!(payload_len, protocol::MAX_CONTROL_PAYLOAD_LEN);
+    assert_eq!(
+        protocol::HEADER_LEN + payload_len,
+        protocol::CONTROL_MESSAGE_LEN
     );
 }
 
@@ -347,6 +456,7 @@ fn client_open_at_returns_only_the_attached_file_handle() {
 struct RecordingFilesystem {
     request: Option<PreparedOpen>,
     stat_request: Option<PreparedStat>,
+    access_request: Option<PreparedAccess>,
     directory: Option<AttachedObject<u32>>,
     stat_file: Option<AttachedObject<u32>>,
 }
@@ -381,6 +491,16 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
     ) -> Result<protocol::FileStatus, i32> {
         self.stat_file = Some(file);
         Ok(sample_status())
+    }
+
+    fn access_at(
+        &mut self,
+        request: &PreparedAccess,
+        directory: Option<AttachedObject<u32>>,
+    ) -> Result<(), i32> {
+        self.access_request = Some(request.clone());
+        self.directory = directory;
+        Ok(())
     }
 }
 
@@ -571,4 +691,57 @@ fn fstat_uses_only_the_explicitly_attached_file_handle() {
         &mut filesystem,
     );
     assert_eq!(invalid.response.header.status, posix_service::STATUS_EINVAL);
+}
+
+#[test]
+fn access_uses_authenticated_session_credentials_and_one_atomic_operation() {
+    let peer = PeerIdentity {
+        process_id: 114,
+        effective_uid: 508,
+        effective_gid: 27,
+    };
+    let mut service = PosixService::new();
+    service.handle(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let mut payload = [0u8; protocol::ACCESS_AT_HEADER_LEN + 16];
+    let length = protocol::encode_access_at(
+        protocol::AccessAtRequest {
+            base: protocol::OpenBase::ProcessCwd,
+            flags: protocol::ACCESS_EFFECTIVE_IDS,
+            modes: protocol::ACCESS_READ | protocol::ACCESS_EXECUTE,
+            path: "tool",
+        },
+        &mut payload,
+    )
+    .unwrap();
+    let mut filesystem = RecordingFilesystem::default();
+    let result = service.handle_objects(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_ACCESS_AT,
+            request_id: 17,
+            payload_len: length as u32,
+            ..protocol::Header::default()
+        },
+        &payload[..length],
+        &[],
+        &mut filesystem,
+    );
+
+    assert_eq!(result.response.header.status, protocol::STATUS_OK);
+    assert!(result.handles.is_empty());
+    let request = filesystem.access_request.unwrap();
+    assert_eq!(request.path, "tool");
+    assert_eq!(request.uid, peer.effective_uid);
+    assert_eq!(request.gid, peer.effective_gid);
+    assert_eq!(
+        request.modes,
+        protocol::ACCESS_READ | protocol::ACCESS_EXECUTE
+    );
 }

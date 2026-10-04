@@ -47,6 +47,16 @@ pub struct PreparedStat {
     pub effective_gid: u32,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedAccess {
+    pub base: protocol::OpenBase,
+    pub flags: u32,
+    pub modes: u32,
+    pub path: String,
+    pub uid: u32,
+    pub gid: u32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AttachedObject<H> {
     pub handle: H,
@@ -77,6 +87,14 @@ pub trait FilesystemBackend<H: Copy> {
 
     /// Reads metadata from the open file description identified by `file`.
     fn fstat(&mut self, file: AttachedObject<H>) -> Result<protocol::FileStatus, i32>;
+
+    /// Resolves a path and checks access using the supplied authenticated
+    /// POSIX credentials as one backend operation.
+    fn access_at(
+        &mut self,
+        request: &PreparedAccess,
+        directory: Option<AttachedObject<H>>,
+    ) -> Result<(), i32>;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -132,7 +150,8 @@ impl PosixService {
             | protocol::OP_UMASK_SET
             | protocol::OP_OPEN_AT
             | protocol::OP_STAT_AT
-            | protocol::OP_FSTAT => Err(STATUS_EINVAL),
+            | protocol::OP_FSTAT
+            | protocol::OP_ACCESS_AT => Err(STATUS_EINVAL),
             _ => Err(protocol::STATUS_ENOSYS),
         };
         let (status, payload) = match result {
@@ -161,7 +180,10 @@ impl PosixService {
     ) -> ObjectResponse<H> {
         if !matches!(
             header.opcode,
-            protocol::OP_OPEN_AT | protocol::OP_STAT_AT | protocol::OP_FSTAT
+            protocol::OP_OPEN_AT
+                | protocol::OP_STAT_AT
+                | protocol::OP_FSTAT
+                | protocol::OP_ACCESS_AT
         ) {
             let response = if handles.is_empty() {
                 self.handle(peer, header, payload)
@@ -218,6 +240,19 @@ impl PosixService {
                 }
                 match filesystem.fstat(handles[0]) {
                     Ok(status) => object_status(header.request_id, status),
+                    Err(status) => object_error(header.request_id, status),
+                }
+            }
+            protocol::OP_ACCESS_AT => {
+                let prepared = match self.prepare_access_at(peer, payload, handles.len()) {
+                    Ok(prepared) => prepared,
+                    Err(status) => return object_error(header.request_id, status),
+                };
+                let directory = (prepared.base == protocol::OpenBase::AttachedDirectory)
+                    .then(|| handles.first().copied())
+                    .flatten();
+                match filesystem.access_at(&prepared, directory) {
+                    Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
                     Err(status) => object_error(header.request_id, status),
                 }
             }
@@ -281,6 +316,40 @@ impl PosixService {
             path: request.path.to_owned(),
             effective_uid: session.effective_uid,
             effective_gid: session.effective_gid,
+        })
+    }
+
+    pub fn prepare_access_at(
+        &self,
+        peer: PeerIdentity,
+        payload: &[u8],
+        attached_handles: usize,
+    ) -> Result<PreparedAccess, i32> {
+        let session = self
+            .sessions
+            .get(&peer.process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let request = protocol::decode_access_at(payload).map_err(|_| STATUS_EINVAL)?;
+        let expected_handles = usize::from(request.base == protocol::OpenBase::AttachedDirectory);
+        if attached_handles != expected_handles {
+            return Err(STATUS_EINVAL);
+        }
+        let effective = request.flags & protocol::ACCESS_EFFECTIVE_IDS != 0;
+        Ok(PreparedAccess {
+            base: request.base,
+            flags: request.flags,
+            modes: request.modes,
+            path: request.path.to_owned(),
+            uid: if effective {
+                session.effective_uid
+            } else {
+                session.real_uid
+            },
+            gid: if effective {
+                session.effective_gid
+            } else {
+                session.real_gid
+            },
         })
     }
 
