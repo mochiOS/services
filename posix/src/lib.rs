@@ -69,20 +69,40 @@ pub struct OpenedObject<H> {
     pub rights: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PathObjects<H> {
+    pub root: AttachedObject<H>,
+    pub base: Option<AttachedObject<H>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SessionDirectories<H> {
+    pub root: AttachedObject<H>,
+    pub cwd: AttachedObject<H>,
+}
+
 pub trait FilesystemBackend<H: Copy> {
+    /// Opens two independently-owned handles for the filesystem root. They
+    /// become the initial process root and current working directory.
+    fn open_session_root(
+        &mut self,
+        effective_uid: u32,
+        effective_gid: u32,
+    ) -> Result<SessionDirectories<H>, i32>;
+
     /// Executes path resolution, optional creation, exclusivity checks and
     /// opening as one backend operation.
     fn open_at(
         &mut self,
         request: &PreparedOpen,
-        directory: Option<AttachedObject<H>>,
+        paths: PathObjects<H>,
     ) -> Result<OpenedObject<H>, i32>;
 
     /// Resolves and reads metadata in one backend operation.
     fn stat_at(
         &mut self,
         request: &PreparedStat,
-        directory: Option<AttachedObject<H>>,
+        paths: PathObjects<H>,
     ) -> Result<protocol::FileStatus, i32>;
 
     /// Reads metadata from the open file description identified by `file`.
@@ -90,11 +110,7 @@ pub trait FilesystemBackend<H: Copy> {
 
     /// Resolves a path and checks access using the supplied authenticated
     /// POSIX credentials as one backend operation.
-    fn access_at(
-        &mut self,
-        request: &PreparedAccess,
-        directory: Option<AttachedObject<H>>,
-    ) -> Result<(), i32>;
+    fn access_at(&mut self, request: &PreparedAccess, paths: PathObjects<H>) -> Result<(), i32>;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -104,19 +120,27 @@ pub struct ObjectResponse<H> {
 }
 
 #[derive(Debug, Default)]
-pub struct PosixService {
+pub struct PosixService<H: Copy = u32> {
     sessions: BTreeMap<u64, Session>,
+    directories: BTreeMap<u64, SessionDirectories<H>>,
 }
 
-impl PosixService {
+impl PosixService<u32> {
     pub const fn new() -> Self {
         Self {
             sessions: BTreeMap::new(),
+            directories: BTreeMap::new(),
         }
     }
+}
 
+impl<H: Copy> PosixService<H> {
     pub fn session(&self, process_id: u64) -> Option<&Session> {
         self.sessions.get(&process_id)
+    }
+
+    pub fn session_directories(&self, process_id: u64) -> Option<&SessionDirectories<H>> {
+        self.directories.get(&process_id)
     }
 
     pub fn handle(
@@ -141,9 +165,7 @@ impl PosixService {
             protocol::OP_SESSION_INFO if header.flags == 0 && payload.is_empty() => {
                 self.session_info(peer.process_id)
             }
-            protocol::OP_UMASK_SET if header.flags == 0 => {
-                self.set_umask(peer.process_id, payload)
-            }
+            protocol::OP_UMASK_SET if header.flags == 0 => self.set_umask(peer.process_id, payload),
             protocol::OP_PING
             | protocol::OP_SESSION_REGISTER
             | protocol::OP_SESSION_INFO
@@ -170,7 +192,7 @@ impl PosixService {
         }
     }
 
-    pub fn handle_objects<H: Copy, F: FilesystemBackend<H>>(
+    pub fn handle_objects<F: FilesystemBackend<H>>(
         &mut self,
         peer: PeerIdentity,
         header: protocol::Header,
@@ -201,16 +223,25 @@ impl PosixService {
                 handles: Vec::new(),
             };
         }
+        if matches!(
+            header.opcode,
+            protocol::OP_OPEN_AT | protocol::OP_STAT_AT | protocol::OP_ACCESS_AT
+        ) {
+            if let Err(status) = self.ensure_session_directories(peer.process_id, filesystem) {
+                return object_error(header.request_id, status);
+            }
+        }
         match header.opcode {
             protocol::OP_OPEN_AT => {
                 let prepared = match self.prepare_open_at(peer, payload, handles.len()) {
                     Ok(prepared) => prepared,
                     Err(status) => return object_error(header.request_id, status),
                 };
-                let directory = (prepared.base == protocol::OpenBase::AttachedDirectory)
-                    .then(|| handles.first().copied())
-                    .flatten();
-                match filesystem.open_at(&prepared, directory) {
+                let paths = match self.path_objects(peer.process_id, prepared.base, handles) {
+                    Ok(paths) => paths,
+                    Err(status) => return object_error(header.request_id, status),
+                };
+                match filesystem.open_at(&prepared, paths) {
                     Ok(opened) => ObjectResponse {
                         response: status_response(header.request_id, protocol::STATUS_OK),
                         handles: vec![opened],
@@ -223,10 +254,11 @@ impl PosixService {
                     Ok(prepared) => prepared,
                     Err(status) => return object_error(header.request_id, status),
                 };
-                let directory = (prepared.base == protocol::OpenBase::AttachedDirectory)
-                    .then(|| handles.first().copied())
-                    .flatten();
-                match filesystem.stat_at(&prepared, directory) {
+                let paths = match self.path_objects(peer.process_id, prepared.base, handles) {
+                    Ok(paths) => paths,
+                    Err(status) => return object_error(header.request_id, status),
+                };
+                match filesystem.stat_at(&prepared, paths) {
                     Ok(status) => object_status(header.request_id, status),
                     Err(status) => object_error(header.request_id, status),
                 }
@@ -248,10 +280,11 @@ impl PosixService {
                     Ok(prepared) => prepared,
                     Err(status) => return object_error(header.request_id, status),
                 };
-                let directory = (prepared.base == protocol::OpenBase::AttachedDirectory)
-                    .then(|| handles.first().copied())
-                    .flatten();
-                match filesystem.access_at(&prepared, directory) {
+                let paths = match self.path_objects(peer.process_id, prepared.base, handles) {
+                    Ok(paths) => paths,
+                    Err(status) => return object_error(header.request_id, status),
+                };
+                match filesystem.access_at(&prepared, paths) {
                     Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
                     Err(status) => object_error(header.request_id, status),
                 }
@@ -260,6 +293,44 @@ impl PosixService {
         }
     }
 
+    fn ensure_session_directories<F: FilesystemBackend<H>>(
+        &mut self,
+        process_id: u64,
+        filesystem: &mut F,
+    ) -> Result<(), i32> {
+        if self.directories.contains_key(&process_id) {
+            return Ok(());
+        }
+        let session = self
+            .sessions
+            .get(&process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let directories =
+            filesystem.open_session_root(session.effective_uid, session.effective_gid)?;
+        self.directories.insert(process_id, directories);
+        Ok(())
+    }
+
+    fn path_objects(
+        &self,
+        process_id: u64,
+        base: protocol::OpenBase,
+        handles: &[AttachedObject<H>],
+    ) -> Result<PathObjects<H>, i32> {
+        let directories = self
+            .directories
+            .get(&process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let base = match base {
+            protocol::OpenBase::ProcessRoot => None,
+            protocol::OpenBase::ProcessCwd => Some(directories.cwd),
+            protocol::OpenBase::AttachedDirectory => handles.first().copied(),
+        };
+        Ok(PathObjects {
+            root: directories.root,
+            base,
+        })
+    }
 
     pub fn prepare_open_at(
         &self,

@@ -1,13 +1,13 @@
 use std::cell::RefCell;
 
+use mochios_filesystem_protocol as filesystem_protocol;
 use mochios_posix_client::{
     Client, ClientError, ObjectHandleAttachment, ObjectHandles, ObjectTransport, Transport,
 };
-use mochios_filesystem_protocol as filesystem_protocol;
 use mochios_posix_protocol as protocol;
 use posix_service::{
-    AttachedObject, FilesystemBackend, OpenedObject, PeerIdentity, PosixService, PreparedAccess,
-    PreparedOpen, PreparedStat,
+    AttachedObject, FilesystemBackend, OpenedObject, PathObjects, PeerIdentity, PosixService,
+    PreparedAccess, PreparedOpen, PreparedStat, SessionDirectories,
 };
 
 struct LocalTransport {
@@ -177,7 +177,10 @@ fn access_at_wire_format_is_strict_and_contains_no_descriptor() {
     let decoded = protocol::decode_access_at(&bytes[..length]).unwrap();
     assert_eq!(decoded.base, protocol::OpenBase::ProcessCwd);
     assert_eq!(decoded.flags, protocol::ACCESS_EFFECTIVE_IDS);
-    assert_eq!(decoded.modes, protocol::ACCESS_READ | protocol::ACCESS_WRITE);
+    assert_eq!(
+        decoded.modes,
+        protocol::ACCESS_READ | protocol::ACCESS_WRITE
+    );
     assert_eq!(decoded.path, "child");
     bytes[2] = 1;
     assert_eq!(
@@ -381,7 +384,10 @@ fn open_at_wire_format_is_strict_and_contains_no_descriptor_number() {
     .unwrap();
     let decoded = protocol::decode_open_at(&bytes[..length]).unwrap();
     assert_eq!(decoded.base, protocol::OpenBase::AttachedDirectory);
-    assert_eq!(decoded.options, protocol::OPEN_READ | protocol::OPEN_NOFOLLOW);
+    assert_eq!(
+        decoded.options,
+        protocol::OPEN_READ | protocol::OPEN_NOFOLLOW
+    );
     assert_eq!(decoded.mode, 0o640);
     assert_eq!(decoded.path, "child.txt");
 
@@ -509,17 +515,38 @@ struct RecordingFilesystem {
     stat_request: Option<PreparedStat>,
     access_request: Option<PreparedAccess>,
     directory: Option<AttachedObject<u32>>,
+    root: Option<AttachedObject<u32>>,
+    roots_opened: usize,
     stat_file: Option<AttachedObject<u32>>,
 }
 
 impl FilesystemBackend<u32> for RecordingFilesystem {
+    fn open_session_root(
+        &mut self,
+        _effective_uid: u32,
+        _effective_gid: u32,
+    ) -> Result<SessionDirectories<u32>, i32> {
+        self.roots_opened += 1;
+        Ok(SessionDirectories {
+            root: AttachedObject {
+                handle: 100,
+                rights: 0x81,
+            },
+            cwd: AttachedObject {
+                handle: 101,
+                rights: 0x81,
+            },
+        })
+    }
+
     fn open_at(
         &mut self,
         request: &PreparedOpen,
-        directory: Option<AttachedObject<u32>>,
+        paths: PathObjects<u32>,
     ) -> Result<OpenedObject<u32>, i32> {
         self.request = Some(request.clone());
-        self.directory = directory;
+        self.root = Some(paths.root);
+        self.directory = paths.base;
         Ok(OpenedObject {
             handle: 200,
             rights: 0x81,
@@ -529,28 +556,23 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
     fn stat_at(
         &mut self,
         request: &PreparedStat,
-        directory: Option<AttachedObject<u32>>,
+        paths: PathObjects<u32>,
     ) -> Result<protocol::FileStatus, i32> {
         self.stat_request = Some(request.clone());
-        self.directory = directory;
+        self.root = Some(paths.root);
+        self.directory = paths.base;
         Ok(sample_status())
     }
 
-    fn fstat(
-        &mut self,
-        file: AttachedObject<u32>,
-    ) -> Result<protocol::FileStatus, i32> {
+    fn fstat(&mut self, file: AttachedObject<u32>) -> Result<protocol::FileStatus, i32> {
         self.stat_file = Some(file);
         Ok(sample_status())
     }
 
-    fn access_at(
-        &mut self,
-        request: &PreparedAccess,
-        directory: Option<AttachedObject<u32>>,
-    ) -> Result<(), i32> {
+    fn access_at(&mut self, request: &PreparedAccess, paths: PathObjects<u32>) -> Result<(), i32> {
         self.access_request = Some(request.clone());
-        self.directory = directory;
+        self.root = Some(paths.root);
+        self.directory = paths.base;
         Ok(())
     }
 }
@@ -618,6 +640,8 @@ fn service_submits_open_as_one_atomic_filesystem_operation() {
 
     assert_eq!(result.response.header.status, protocol::STATUS_OK);
     assert_eq!(result.handles[0].handle, 200);
+    assert_eq!(filesystem.roots_opened, 1);
+    assert_eq!(filesystem.root.unwrap().handle, 100);
     assert_eq!(filesystem.directory, Some(directory));
     let request = filesystem.request.unwrap();
     assert_eq!(request.path, "result.txt");
@@ -682,6 +706,7 @@ fn service_submits_stat_as_one_atomic_filesystem_operation() {
         sample_status()
     );
     assert_eq!(filesystem.directory, Some(directory));
+    assert_eq!(filesystem.root.unwrap().handle, 100);
     let request = filesystem.stat_request.unwrap();
     assert_eq!(request.path, "result.txt");
     assert_eq!(request.flags, protocol::STAT_NOFOLLOW);
@@ -725,6 +750,7 @@ fn fstat_uses_only_the_explicitly_attached_file_handle() {
 
     assert_eq!(result.response.header.status, protocol::STATUS_OK);
     assert_eq!(filesystem.stat_file, Some(file));
+    assert_eq!(filesystem.roots_opened, 0);
     assert_eq!(
         protocol::decode_file_status(&result.response.payload).unwrap(),
         sample_status()
@@ -787,6 +813,23 @@ fn access_uses_authenticated_session_credentials_and_one_atomic_operation() {
 
     assert_eq!(result.response.header.status, protocol::STATUS_OK);
     assert!(result.handles.is_empty());
+    assert_eq!(filesystem.roots_opened, 1);
+    assert_eq!(filesystem.root.unwrap().handle, 100);
+    assert_eq!(filesystem.directory.unwrap().handle, 101);
+    let repeated = service.handle_objects(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_ACCESS_AT,
+            request_id: 18,
+            payload_len: length as u32,
+            ..protocol::Header::default()
+        },
+        &payload[..length],
+        &[],
+        &mut filesystem,
+    );
+    assert_eq!(repeated.response.header.status, protocol::STATUS_OK);
+    assert_eq!(filesystem.roots_opened, 1);
     let request = filesystem.access_request.unwrap();
     assert_eq!(request.path, "tool");
     assert_eq!(request.uid, peer.effective_uid);

@@ -167,7 +167,7 @@ impl RuntimeFilesystem {
         &self,
         header: mochios_filesystem_protocol::Header,
         payload: &[u8],
-        attachment: Option<mochi_user_platform::ipc::IpcObjectHandle>,
+        mut handles: mochi_user_platform::ipc::IpcObjectHandles,
     ) -> Result<(), i32> {
         use mochi_user_platform as platform;
         use mochios_filesystem_protocol as filesystem;
@@ -175,11 +175,6 @@ impl RuntimeFilesystem {
         let mut request = vec![0u8; filesystem::HEADER_LEN + payload.len()];
         let request_len = filesystem::encode(header, payload, &mut request).map_err(|_| -22)?;
         let mut response = [0u8; filesystem::HEADER_LEN];
-        let mut handles = platform::ipc::IpcObjectHandles::default();
-        if let Some(attachment) = attachment {
-            handles.count = 1;
-            handles.handles[0] = attachment;
-        }
         if platform::ipc::call_object_handles(
             self.endpoint,
             &request[..request_len],
@@ -216,7 +211,7 @@ impl RuntimeFilesystem {
         &self,
         header: mochios_filesystem_protocol::Header,
         payload: &[u8],
-        attachment: Option<mochi_user_platform::ipc::IpcObjectHandle>,
+        mut handles: mochi_user_platform::ipc::IpcObjectHandles,
     ) -> Result<mochios_filesystem_protocol::NodeStatus, i32> {
         use mochi_user_platform as platform;
         use mochios_filesystem_protocol as filesystem;
@@ -224,11 +219,6 @@ impl RuntimeFilesystem {
         let mut request = vec![0u8; filesystem::HEADER_LEN + payload.len()];
         let request_len = filesystem::encode(header, payload, &mut request).map_err(|_| -22)?;
         let mut response = vec![0u8; filesystem::HEADER_LEN + filesystem::NODE_STATUS_LEN];
-        let mut handles = platform::ipc::IpcObjectHandles::default();
-        if let Some(attachment) = attachment {
-            handles.count = 1;
-            handles.handles[0] = attachment;
-        }
         if platform::ipc::call_object_handles(
             self.endpoint,
             &request[..request_len],
@@ -260,79 +250,27 @@ impl RuntimeFilesystem {
         }
         filesystem::decode_node_status(payload).map_err(|_| -5)
     }
-}
 
-#[cfg(target_os = "mochios")]
-impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for RuntimeFilesystem {
-    fn open_at(
-        &mut self,
-        request: &posix_service::PreparedOpen,
-        directory: Option<posix_service::AttachedObject<mochi_user_platform::handle::Handle>>,
+    fn open_call(
+        &self,
+        header: mochios_filesystem_protocol::Header,
+        path: &[u8],
+        mut handles: mochi_user_platform::ipc::IpcObjectHandles,
     ) -> Result<posix_service::OpenedObject<mochi_user_platform::handle::Handle>, i32> {
         use mochi_user_platform as platform;
         use mochios_filesystem_protocol as filesystem;
-        use mochios_posix_protocol as posix;
 
-        let mut flags = match request.base {
-            posix::OpenBase::AttachedDirectory => filesystem::OPEN_AT_BASE_ATTACHED,
-            posix::OpenBase::ProcessRoot | posix::OpenBase::ProcessCwd => 0,
-        };
-        for (source, target) in [
-            (posix::OPEN_READ, filesystem::OPEN_AT_READ),
-            (posix::OPEN_WRITE, filesystem::OPEN_AT_WRITE),
-            (posix::OPEN_CREATE, filesystem::OPEN_AT_CREATE),
-            (posix::OPEN_EXCLUSIVE, filesystem::OPEN_AT_EXCLUSIVE),
-            (posix::OPEN_TRUNCATE, filesystem::OPEN_AT_TRUNCATE),
-            (posix::OPEN_APPEND, filesystem::OPEN_AT_APPEND),
-            (posix::OPEN_DIRECTORY, filesystem::OPEN_AT_DIRECTORY),
-            (posix::OPEN_NOFOLLOW, filesystem::OPEN_AT_NOFOLLOW),
-        ] {
-            if request.options & source != 0 {
-                flags |= target;
-            }
-        }
-        let path = match request.base {
-            posix::OpenBase::ProcessRoot | posix::OpenBase::ProcessCwd
-                if !request.path.starts_with('/') =>
-            {
-                format!("/{}", request.path)
-            }
-            _ => request.path.clone(),
-        };
-        let header = filesystem::Header {
-            opcode: filesystem::OP_OPEN_AT,
-            request_id: 1,
-            offset: u64::from(request.effective_uid) | (u64::from(request.effective_gid) << 32),
-            length: path.len() as u32,
-            flags,
-            mode: request.mode,
-            ..filesystem::Header::default()
-        };
-        let mut request_bytes = vec![0u8; filesystem::HEADER_LEN + path.len()];
-        let request_len =
-            filesystem::encode(header, path.as_bytes(), &mut request_bytes).map_err(|_| -22)?;
+        let mut request = vec![0u8; filesystem::HEADER_LEN + path.len()];
+        let request_len = filesystem::encode(header, path, &mut request).map_err(|_| -22)?;
         let mut reply = vec![0u8; filesystem::HEADER_LEN];
-        let mut handles = platform::ipc::IpcObjectHandles::default();
-        if let Some(directory) = directory {
-            let rights =
-                platform::handle::HANDLE_RIGHT_READ | platform::handle::HANDLE_RIGHT_TRANSFER;
-            if directory.rights & rights != rights {
-                return Err(-13);
-            }
-            handles.count = 1;
-            handles.handles[0] = platform::ipc::IpcObjectHandle {
-                handle: directory.handle,
-                reserved: 0,
-                rights,
-            };
-        }
-        let result = platform::ipc::call_object_handles(
+        if platform::ipc::call_object_handles(
             self.endpoint,
-            &request_bytes[..request_len],
+            &request[..request_len],
             &mut reply,
             &mut handles,
-        );
-        if result.is_err() {
+        )
+        .is_err()
+        {
             close_runtime_handles(&handles);
             return Err(-5);
         }
@@ -362,57 +300,139 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         })
     }
 
-    fn stat_at(
-        &mut self,
-        request: &posix_service::PreparedStat,
-        directory: Option<posix_service::AttachedObject<mochi_user_platform::handle::Handle>>,
-    ) -> Result<mochios_posix_protocol::FileStatus, i32> {
+    fn path_handles(
+        paths: posix_service::PathObjects<mochi_user_platform::handle::Handle>,
+    ) -> Result<mochi_user_platform::ipc::IpcObjectHandles, i32> {
         use mochi_user_platform as platform;
+
+        let required =
+            platform::handle::HANDLE_RIGHT_READ | platform::handle::HANDLE_RIGHT_TRANSFER;
+        let mut handles = platform::ipc::IpcObjectHandles::default();
+        for object in [Some(paths.root), paths.base].into_iter().flatten() {
+            if object.rights & required != required {
+                return Err(-13);
+            }
+            let index = handles.count as usize;
+            handles.handles[index] = platform::ipc::IpcObjectHandle {
+                handle: object.handle,
+                reserved: 0,
+                rights: required,
+            };
+            handles.count += 1;
+        }
+        Ok(handles)
+    }
+}
+
+#[cfg(target_os = "mochios")]
+impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for RuntimeFilesystem {
+    fn open_session_root(
+        &mut self,
+        effective_uid: u32,
+        effective_gid: u32,
+    ) -> Result<posix_service::SessionDirectories<mochi_user_platform::handle::Handle>, i32> {
+        use mochi_user_platform as platform;
+        use mochios_filesystem_protocol as filesystem;
+
+        let open_root = || {
+            self.open_call(
+                filesystem::Header {
+                    opcode: filesystem::OP_OPEN_AT,
+                    request_id: 1,
+                    offset: u64::from(effective_uid) | (u64::from(effective_gid) << 32),
+                    length: 1,
+                    flags: filesystem::OPEN_AT_READ | filesystem::OPEN_AT_DIRECTORY,
+                    ..filesystem::Header::default()
+                },
+                b"/",
+                platform::ipc::IpcObjectHandles::default(),
+            )
+        };
+        let root = open_root()?;
+        let cwd = match open_root() {
+            Ok(cwd) => cwd,
+            Err(status) => {
+                let _ = platform::handle::close(root.handle);
+                return Err(status);
+            }
+        };
+        Ok(posix_service::SessionDirectories {
+            root: posix_service::AttachedObject {
+                handle: root.handle,
+                rights: root.rights,
+            },
+            cwd: posix_service::AttachedObject {
+                handle: cwd.handle,
+                rights: cwd.rights,
+            },
+        })
+    }
+
+    fn open_at(
+        &mut self,
+        request: &posix_service::PreparedOpen,
+        paths: posix_service::PathObjects<mochi_user_platform::handle::Handle>,
+    ) -> Result<posix_service::OpenedObject<mochi_user_platform::handle::Handle>, i32> {
         use mochios_filesystem_protocol as filesystem;
         use mochios_posix_protocol as posix;
 
-        let mut flags = match request.base {
-            posix::OpenBase::AttachedDirectory => filesystem::STAT_AT_BASE_ATTACHED,
-            posix::OpenBase::ProcessRoot | posix::OpenBase::ProcessCwd => 0,
+        let mut flags = filesystem::OPEN_AT_ROOT_ATTACHED;
+        if paths.base.is_some() {
+            flags |= filesystem::OPEN_AT_BASE_ATTACHED;
+        }
+        for (source, target) in [
+            (posix::OPEN_READ, filesystem::OPEN_AT_READ),
+            (posix::OPEN_WRITE, filesystem::OPEN_AT_WRITE),
+            (posix::OPEN_CREATE, filesystem::OPEN_AT_CREATE),
+            (posix::OPEN_EXCLUSIVE, filesystem::OPEN_AT_EXCLUSIVE),
+            (posix::OPEN_TRUNCATE, filesystem::OPEN_AT_TRUNCATE),
+            (posix::OPEN_APPEND, filesystem::OPEN_AT_APPEND),
+            (posix::OPEN_DIRECTORY, filesystem::OPEN_AT_DIRECTORY),
+            (posix::OPEN_NOFOLLOW, filesystem::OPEN_AT_NOFOLLOW),
+        ] {
+            if request.options & source != 0 {
+                flags |= target;
+            }
+        }
+        let header = filesystem::Header {
+            opcode: filesystem::OP_OPEN_AT,
+            request_id: 1,
+            offset: u64::from(request.effective_uid) | (u64::from(request.effective_gid) << 32),
+            length: request.path.len() as u32,
+            flags,
+            mode: request.mode,
+            ..filesystem::Header::default()
         };
+        let handles = Self::path_handles(paths)?;
+        self.open_call(header, request.path.as_bytes(), handles)
+    }
+
+    fn stat_at(
+        &mut self,
+        request: &posix_service::PreparedStat,
+        paths: posix_service::PathObjects<mochi_user_platform::handle::Handle>,
+    ) -> Result<mochios_posix_protocol::FileStatus, i32> {
+        use mochios_filesystem_protocol as filesystem;
+        use mochios_posix_protocol as posix;
+        let mut flags = filesystem::STAT_AT_ROOT_ATTACHED;
+        if paths.base.is_some() {
+            flags |= filesystem::STAT_AT_BASE_ATTACHED;
+        }
         if request.flags & posix::STAT_NOFOLLOW != 0 {
             flags |= filesystem::STAT_AT_NOFOLLOW;
         }
-        let path = match request.base {
-            posix::OpenBase::ProcessRoot | posix::OpenBase::ProcessCwd
-                if !request.path.starts_with('/') =>
-            {
-                format!("/{}", request.path)
-            }
-            _ => request.path.clone(),
-        };
-        let attachment = match directory {
-            Some(directory) => {
-                let rights =
-                    platform::handle::HANDLE_RIGHT_READ | platform::handle::HANDLE_RIGHT_TRANSFER;
-                if directory.rights & rights != rights {
-                    return Err(-13);
-                }
-                Some(platform::ipc::IpcObjectHandle {
-                    handle: directory.handle,
-                    reserved: 0,
-                    rights,
-                })
-            }
-            None => None,
-        };
+        let handles = Self::path_handles(paths)?;
         let status = self.status_call(
             filesystem::Header {
                 opcode: filesystem::OP_STAT_AT,
                 request_id: 2,
-                offset: u64::from(request.effective_uid)
-                    | (u64::from(request.effective_gid) << 32),
-                length: path.len() as u32,
+                offset: u64::from(request.effective_uid) | (u64::from(request.effective_gid) << 32),
+                length: request.path.len() as u32,
                 flags,
                 ..filesystem::Header::default()
             },
-            path.as_bytes(),
-            attachment,
+            request.path.as_bytes(),
+            handles,
         )?;
         filesystem_status_to_posix(status)
     }
@@ -427,6 +447,13 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         if file.rights & platform::handle::HANDLE_RIGHT_TRANSFER == 0 {
             return Err(-13);
         }
+        let mut handles = platform::ipc::IpcObjectHandles::default();
+        handles.count = 1;
+        handles.handles[0] = platform::ipc::IpcObjectHandle {
+            handle: file.handle,
+            reserved: 0,
+            rights: platform::handle::HANDLE_RIGHT_TRANSFER,
+        };
         let status = self.status_call(
             filesystem::Header {
                 opcode: filesystem::OP_STAT_HANDLE,
@@ -434,11 +461,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
                 ..filesystem::Header::default()
             },
             &[],
-            Some(platform::ipc::IpcObjectHandle {
-                handle: file.handle,
-                reserved: 0,
-                rights: platform::handle::HANDLE_RIGHT_TRANSFER,
-            }),
+            handles,
         )?;
         filesystem_status_to_posix(status)
     }
@@ -446,16 +469,14 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
     fn access_at(
         &mut self,
         request: &posix_service::PreparedAccess,
-        directory: Option<posix_service::AttachedObject<mochi_user_platform::handle::Handle>>,
+        paths: posix_service::PathObjects<mochi_user_platform::handle::Handle>,
     ) -> Result<(), i32> {
-        use mochi_user_platform as platform;
         use mochios_filesystem_protocol as filesystem;
         use mochios_posix_protocol as posix;
-
-        let mut flags = match request.base {
-            posix::OpenBase::AttachedDirectory => filesystem::ACCESS_AT_BASE_ATTACHED,
-            posix::OpenBase::ProcessRoot | posix::OpenBase::ProcessCwd => 0,
-        };
+        let mut flags = filesystem::ACCESS_AT_ROOT_ATTACHED;
+        if paths.base.is_some() {
+            flags |= filesystem::ACCESS_AT_BASE_ATTACHED;
+        }
         for (source, target) in [
             (posix::ACCESS_READ, filesystem::ACCESS_AT_READ),
             (posix::ACCESS_WRITE, filesystem::ACCESS_AT_WRITE),
@@ -468,40 +489,18 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         if request.flags & posix::ACCESS_NOFOLLOW != 0 {
             flags |= filesystem::ACCESS_AT_NOFOLLOW;
         }
-        let path = match request.base {
-            posix::OpenBase::ProcessRoot | posix::OpenBase::ProcessCwd
-                if !request.path.starts_with('/') =>
-            {
-                format!("/{}", request.path)
-            }
-            _ => request.path.clone(),
-        };
-        let attachment = match directory {
-            Some(directory) => {
-                let rights =
-                    platform::handle::HANDLE_RIGHT_READ | platform::handle::HANDLE_RIGHT_TRANSFER;
-                if directory.rights & rights != rights {
-                    return Err(-13);
-                }
-                Some(platform::ipc::IpcObjectHandle {
-                    handle: directory.handle,
-                    reserved: 0,
-                    rights,
-                })
-            }
-            None => None,
-        };
+        let handles = Self::path_handles(paths)?;
         self.empty_call(
             filesystem::Header {
                 opcode: filesystem::OP_ACCESS_AT,
                 request_id: 4,
                 offset: u64::from(request.uid) | (u64::from(request.gid) << 32),
-                length: path.len() as u32,
+                length: request.path.len() as u32,
                 flags,
                 ..filesystem::Header::default()
             },
-            path.as_bytes(),
-            attachment,
+            request.path.as_bytes(),
+            handles,
         )
     }
 }
