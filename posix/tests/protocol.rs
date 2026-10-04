@@ -243,6 +243,31 @@ fn maximum_path_fits_in_a_control_message() {
 }
 
 #[test]
+fn filesystem_at_protocol_has_distinct_root_and_base_anchors() {
+    for (root, base, all) in [
+        (
+            filesystem_protocol::OPEN_AT_ROOT_ATTACHED,
+            filesystem_protocol::OPEN_AT_BASE_ATTACHED,
+            filesystem_protocol::OPEN_AT_FLAGS_ALL,
+        ),
+        (
+            filesystem_protocol::STAT_AT_ROOT_ATTACHED,
+            filesystem_protocol::STAT_AT_BASE_ATTACHED,
+            filesystem_protocol::STAT_AT_FLAGS_ALL,
+        ),
+        (
+            filesystem_protocol::ACCESS_AT_ROOT_ATTACHED,
+            filesystem_protocol::ACCESS_AT_BASE_ATTACHED,
+            filesystem_protocol::ACCESS_AT_FLAGS_ALL,
+        ),
+    ] {
+        assert_ne!(root, base);
+        assert_eq!(root & base, 0);
+        assert_eq!(all & (root | base), root | base);
+    }
+}
+
+#[test]
 fn inherited_fd_launch_keys_are_opaque_disjoint_and_reversible() {
     for fd in [0, 1, 2, 42, i32::MAX] {
         let handle = protocol::fd_handle_key(fd).unwrap();
