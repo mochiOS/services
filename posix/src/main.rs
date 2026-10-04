@@ -51,9 +51,27 @@ fn main() {
         endpoint: filesystem_endpoint,
     };
     let mut processes = RuntimeProcesses;
+    let mut pending_waits = Vec::new();
     let mut request_bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
     let mut response_bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
     loop {
+        complete_pending_waits(
+            &mut pending_waits,
+            &mut service,
+            &mut filesystem,
+            &mut processes,
+        );
+        if !pending_waits.is_empty() {
+            match wait_for_request_or_child(endpoint_handle, &pending_waits, &service) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    platform::logln!("posix.service: lifecycle wait failed errno={}", error);
+                    platform::thread::yield_now();
+                    continue;
+                }
+            }
+        }
         let mut received_handles = platform::ipc::IpcObjectHandles::default();
         let message = match platform::ipc::wait_object_handles(
             endpoint_handle as u64,
@@ -113,14 +131,34 @@ fn main() {
                     && header.flags == 0
                     && attachments.is_empty() =>
             {
-                let response = protocol::decode_wait_request(payload)
-                    .map_err(|_| posix_service::STATUS_EINVAL)
-                    .and_then(|request| {
-                        service.wait_child(peer, request, &mut filesystem, &mut processes)
-                    });
-                posix_service::ObjectResponse {
-                    response: wait_response(header.request_id, response),
-                    handles: Vec::new(),
+                match protocol::decode_wait_request(payload) {
+                    Ok(request) => match service.wait_child(
+                        peer,
+                        request,
+                        &mut filesystem,
+                        &mut processes,
+                    ) {
+                        Err(protocol::STATUS_EAGAIN) => {
+                            pending_waits.push(PendingWait {
+                                sender,
+                                peer,
+                                request_id: header.request_id,
+                                request,
+                            });
+                            None
+                        }
+                        response => Some(posix_service::ObjectResponse {
+                            response: wait_response(header.request_id, response),
+                            handles: Vec::new(),
+                        }),
+                    },
+                    Err(_) => Some(posix_service::ObjectResponse {
+                        response: wait_response(
+                            header.request_id,
+                            Err(posix_service::STATUS_EINVAL),
+                        ),
+                        handles: Vec::new(),
+                    }),
                 }
             }
             (Some(peer), Some((header, payload)), true)
@@ -137,34 +175,43 @@ fn main() {
                 ) {
                     Ok(()) => {
                         retained_process_handle = Some(attachments[0].handle);
-                        posix_service::ObjectResponse {
+                        Some(posix_service::ObjectResponse {
                             response: success_response(header.request_id),
                             handles: Vec::new(),
-                        }
+                        })
                     }
-                    Err(()) => posix_service::ObjectResponse {
+                    Err(()) => Some(posix_service::ObjectResponse {
                         response: invalid_response(header.request_id),
                         handles: Vec::new(),
-                    },
+                    }),
                 }
             }
             (Some(peer), Some((header, payload)), true) => {
-                service.handle_objects(peer, header, payload, &attachments, &mut filesystem)
+                Some(service.handle_objects(
+                    peer,
+                    header,
+                    payload,
+                    &attachments,
+                    &mut filesystem,
+                ))
             }
-            (_, Some((header, _)), _) => posix_service::ObjectResponse {
+            (_, Some((header, _)), _) => Some(posix_service::ObjectResponse {
                 response: invalid_response(header.request_id),
                 handles: Vec::new(),
-            },
-            _ => posix_service::ObjectResponse {
+            }),
+            _ => Some(posix_service::ObjectResponse {
                 response: invalid_response(0),
                 handles: Vec::new(),
-            },
+            }),
         };
         for attachment in received_handles.handles.iter().take(attached_count) {
             if Some(attachment.handle) != retained_process_handle {
                 let _ = platform::handle::close(attachment.handle);
             }
         }
+        let Some(object_response) = object_response else {
+            continue;
+        };
         if let Ok(response_len) = protocol::encode(
             object_response.response.header,
             &object_response.response.payload,
@@ -197,6 +244,76 @@ fn main() {
             let _ = platform::handle::close(opened.handle);
         }
     }
+}
+
+#[cfg(target_os = "mochios")]
+#[derive(Clone, Copy)]
+struct PendingWait {
+    sender: u64,
+    peer: posix_service::PeerIdentity,
+    request_id: u64,
+    request: mochios_posix_protocol::WaitRequest,
+}
+
+#[cfg(target_os = "mochios")]
+fn complete_pending_waits(
+    pending: &mut Vec<PendingWait>,
+    service: &mut posix_service::PosixService<u32>,
+    filesystem: &mut RuntimeFilesystem,
+    processes: &mut RuntimeProcesses,
+) {
+    use mochi_user_platform as platform;
+    use mochios_posix_protocol as protocol;
+
+    let mut index = 0;
+    while index < pending.len() {
+        let wait = pending[index];
+        let result = service.wait_child(wait.peer, wait.request, filesystem, processes);
+        if result == Err(protocol::STATUS_EAGAIN) {
+            index += 1;
+            continue;
+        }
+        let response = wait_response(wait.request_id, result);
+        let mut bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
+        if let Ok(length) = protocol::encode(response.header, &response.payload, &mut bytes) {
+            let _ = platform::ipc::reply(wait.sender, &bytes[..length]);
+        }
+        pending.swap_remove(index);
+    }
+}
+
+#[cfg(target_os = "mochios")]
+fn wait_for_request_or_child(
+    endpoint: u32,
+    pending: &[PendingWait],
+    service: &posix_service::PosixService<u32>,
+) -> Result<bool, i64> {
+    use mochi_user_platform::{process, syscall};
+
+    let mut items = Vec::new();
+    items.push(syscall::HandleWaitItem {
+        handle: endpoint,
+        interests: syscall::HANDLE_SIGNAL_READABLE,
+        ..syscall::HandleWaitItem::default()
+    });
+    for wait in pending {
+        let handles = service
+            .wait_handles(wait.peer, wait.request)
+            .map_err(i64::from)?;
+        for handle in handles {
+            if items.iter().any(|item| item.handle == handle) {
+                continue;
+            }
+            items.push(syscall::HandleWaitItem {
+                handle,
+                interests: syscall::HANDLE_SIGNAL_TERMINATED,
+                ..syscall::HandleWaitItem::default()
+            });
+        }
+    }
+    process::wait_many(&mut items, syscall::HANDLE_WAIT_INFINITE)
+        .map(|index| index == 0)
+        .map_err(|error| error.raw())
 }
 
 #[cfg(target_os = "mochios")]

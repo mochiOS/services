@@ -1161,6 +1161,19 @@ fn wait_selects_and_reaps_only_authenticated_children() {
         .states
         .insert(63, ProcessLifecycle::Exited { exit_code: 7 });
 
+    assert_eq!(
+        service
+            .wait_handles(
+                peer,
+                protocol::WaitRequest {
+                    selector: 122,
+                    options: 0,
+                },
+            )
+            .unwrap(),
+        vec![62]
+    );
+
     let waited = service
         .wait_child(
             peer,

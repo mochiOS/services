@@ -424,6 +424,53 @@ impl<H: Copy> PosixService<H> {
         filesystem: &mut F,
         processes: &mut P,
     ) -> Result<protocol::WaitResult, i32> {
+        let candidates = self.matching_child_ids(peer, request)?;
+        for child in candidates {
+            let handle = self
+                .processes
+                .get(&child)
+                .copied()
+                .ok_or(protocol::STATUS_ESRCH)?;
+            if let ProcessLifecycle::Exited { exit_code } = processes.status(handle)? {
+                let status = ((exit_code & 0xff) as u32) << 8;
+                self.reap_child(peer.process_id, child, filesystem, processes);
+                return Ok(protocol::WaitResult {
+                    process_id: child,
+                    status,
+                });
+            }
+        }
+        if request.options & protocol::WAIT_NOHANG != 0 {
+            Ok(protocol::WaitResult::default())
+        } else {
+            Err(protocol::STATUS_EAGAIN)
+        }
+    }
+
+    /// Returns the native process handles whose lifecycle can satisfy a
+    /// blocking wait request. The caller may wait on these together with its
+    /// IPC endpoint without importing POSIX child semantics into the kernel.
+    pub fn wait_handles(
+        &self,
+        peer: PeerIdentity,
+        request: protocol::WaitRequest,
+    ) -> Result<Vec<H>, i32> {
+        self.matching_child_ids(peer, request)?
+            .into_iter()
+            .map(|child| {
+                self.processes
+                    .get(&child)
+                    .copied()
+                    .ok_or(protocol::STATUS_ESRCH)
+            })
+            .collect()
+    }
+
+    fn matching_child_ids(
+        &self,
+        peer: PeerIdentity,
+        request: protocol::WaitRequest,
+    ) -> Result<Vec<u64>, i32> {
         if request.options & !protocol::WAIT_OPTIONS_ALL != 0 {
             return Err(STATUS_EINVAL);
         }
@@ -457,26 +504,7 @@ impl<H: Copy> PosixService<H> {
         if candidates.is_empty() {
             return Err(protocol::STATUS_ECHILD);
         }
-        for child in candidates {
-            let handle = self
-                .processes
-                .get(&child)
-                .copied()
-                .ok_or(protocol::STATUS_ESRCH)?;
-            if let ProcessLifecycle::Exited { exit_code } = processes.status(handle)? {
-                let status = ((exit_code & 0xff) as u32) << 8;
-                self.reap_child(peer.process_id, child, filesystem, processes);
-                return Ok(protocol::WaitResult {
-                    process_id: child,
-                    status,
-                });
-            }
-        }
-        if request.options & protocol::WAIT_NOHANG != 0 {
-            Ok(protocol::WaitResult::default())
-        } else {
-            Err(protocol::STATUS_EAGAIN)
-        }
+        Ok(candidates)
     }
 
     fn reap_child<F: FilesystemBackend<H>, P: ProcessBackend<H>>(
