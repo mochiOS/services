@@ -32,11 +32,10 @@ pub(crate) fn getrandom_u64() -> Option<u64> {
     let bytes = unsafe {
         core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(TOKEN_RANDOM_BUF).cast::<u8>(), 8)
     };
-    let len = match mochi_user_syscall::call3(
-        mochi_user_syscall::SyscallNumber::Getrandom,
+    let len = match mochi_user_syscall::call2(
+        mochi_user_syscall::SyscallNumber::RandomFill,
         bytes.as_mut_ptr() as u64,
         bytes.len() as u64,
-        0,
     ) {
         Ok(len) => len,
         Err(_) => return None,
