@@ -618,6 +618,33 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         )
     }
 
+    fn mkdir_at(
+        &mut self,
+        request: &posix_service::PreparedMkdir,
+        paths: posix_service::PathObjects<mochi_user_platform::handle::Handle>,
+    ) -> Result<(), i32> {
+        use mochios_filesystem_protocol as filesystem;
+
+        let mut flags = filesystem::MKDIR_AT_ROOT_ATTACHED;
+        if paths.base.is_some() {
+            flags |= filesystem::MKDIR_AT_BASE_ATTACHED;
+        }
+        self.empty_call(
+            filesystem::Header {
+                opcode: filesystem::OP_MKDIR_AT,
+                request_id: 10,
+                offset: u64::from(request.effective_uid)
+                    | (u64::from(request.effective_gid) << 32),
+                length: request.path.len() as u32,
+                flags,
+                mode: request.mode,
+                ..filesystem::Header::default()
+            },
+            request.path.as_bytes(),
+            Self::path_handles(paths)?,
+        )
+    }
+
     fn access_at(
         &mut self,
         request: &posix_service::PreparedAccess,

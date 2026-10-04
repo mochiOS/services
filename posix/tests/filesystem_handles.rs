@@ -267,6 +267,49 @@ fn duplicated_open_descriptions_share_mutable_status_flags() {
 }
 
 #[test]
+fn mkdir_at_is_anchored_to_an_open_directory() {
+    let mut filesystem = test_filesystem();
+    let base = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+                ..protocol::Header::default()
+            },
+            b"/removed",
+            PathAnchors::default(),
+        )
+        .unwrap();
+    filesystem
+        .mkdir_at(
+            protocol::Header {
+                opcode: protocol::OP_MKDIR_AT,
+                offset: 1000 | (1000 << 32),
+                flags: protocol::MKDIR_AT_BASE_ATTACHED,
+                mode: 0o755,
+                ..protocol::Header::default()
+            },
+            b"child",
+            PathAnchors {
+                root_open_id: None,
+                base_open_id: Some(base.header.open_id),
+            },
+        )
+        .unwrap();
+
+    let status = filesystem.handle(
+        protocol::Header {
+            opcode: protocol::OP_LOOKUP,
+            flags: protocol::LOOKUP_FOLLOW_SYMLINKS,
+            ..protocol::Header::default()
+        },
+        b"/removed/child",
+    );
+    assert_eq!(status.header.status, 0);
+    assert_eq!(status.header.flags, protocol::NODE_TYPE_DIRECTORY);
+}
+
+#[test]
 fn open_directory_paths_follow_rename_and_reject_unlinked_cwds() {
     let mut filesystem = test_filesystem();
     let root = filesystem

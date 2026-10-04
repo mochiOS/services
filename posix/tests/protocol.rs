@@ -656,6 +656,7 @@ struct RecordingFilesystem {
     synced: Option<AttachedObject<u32>>,
     status_flags: u32,
     flags_file: Option<AttachedObject<u32>>,
+    mkdir_request: Option<posix_service::PreparedMkdir>,
     retained: Vec<AttachedObject<u32>>,
     released: Vec<AttachedObject<u32>>,
     path_query: Option<(AttachedObject<u32>, AttachedObject<u32>)>,
@@ -733,6 +734,17 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
     fn set_status_flags(&mut self, file: AttachedObject<u32>, flags: u32) -> Result<(), i32> {
         self.flags_file = Some(file);
         self.status_flags = flags;
+        Ok(())
+    }
+
+    fn mkdir_at(
+        &mut self,
+        request: &posix_service::PreparedMkdir,
+        paths: PathObjects<u32>,
+    ) -> Result<(), i32> {
+        self.mkdir_request = Some(request.clone());
+        self.root = Some(paths.root);
+        self.directory = paths.base;
         Ok(())
     }
 
@@ -1072,6 +1084,68 @@ fn file_status_flags_live_on_the_attached_open_description() {
         wanted
     );
     assert_eq!(filesystem.roots_opened, 0);
+}
+
+#[test]
+fn mkdir_uses_session_umask_credentials_and_directory_handles() {
+    let peer = PeerIdentity {
+        process_id: 119,
+        effective_uid: 505,
+        effective_gid: 24,
+    };
+    let mut service = PosixService::new();
+    service.handle(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let mut umask = [0; protocol::UMASK_PAYLOAD_LEN];
+    protocol::encode_umask(0o027, &mut umask).unwrap();
+    service.handle(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_UMASK_SET,
+            ..protocol::Header::default()
+        },
+        &umask,
+    );
+    let directory = AttachedObject {
+        handle: 61,
+        rights: 0x81,
+    };
+    let mut payload = [0; protocol::OPEN_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
+    let payload_len = protocol::encode_open_at(
+        protocol::OpenAtRequest {
+            base: protocol::OpenBase::AttachedDirectory,
+            options: 0,
+            mode: 0o777,
+            path: "child",
+        },
+        &mut payload,
+    )
+    .unwrap();
+    let mut filesystem = RecordingFilesystem::default();
+    let result = service.handle_objects(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_MKDIR_AT,
+            ..protocol::Header::default()
+        },
+        &payload[..payload_len],
+        &[directory],
+        &mut filesystem,
+    );
+
+    assert_eq!(result.response.header.status, protocol::STATUS_OK);
+    let request = filesystem.mkdir_request.unwrap();
+    assert_eq!(request.path, "child");
+    assert_eq!(request.mode, 0o750);
+    assert_eq!(request.effective_uid, 505);
+    assert_eq!(request.effective_gid, 24);
+    assert_eq!(filesystem.directory, Some(directory));
 }
 
 #[test]

@@ -41,6 +41,15 @@ pub struct PreparedOpen {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedMkdir {
+    pub base: protocol::OpenBase,
+    pub mode: u32,
+    pub path: String,
+    pub effective_uid: u32,
+    pub effective_gid: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedStat {
     pub base: protocol::OpenBase,
     pub flags: u32,
@@ -117,6 +126,8 @@ pub trait FilesystemBackend<H: Copy> {
     fn get_status_flags(&mut self, file: AttachedObject<H>) -> Result<u32, i32>;
 
     fn set_status_flags(&mut self, file: AttachedObject<H>, flags: u32) -> Result<(), i32>;
+
+    fn mkdir_at(&mut self, request: &PreparedMkdir, paths: PathObjects<H>) -> Result<(), i32>;
 
     /// Resolves a path and checks access using the supplied authenticated
     /// POSIX credentials as one backend operation.
@@ -214,7 +225,8 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_FTRUNCATE
             | protocol::OP_FSYNC
             | protocol::OP_FGETFL
-            | protocol::OP_FSETFL => Err(STATUS_EINVAL),
+            | protocol::OP_FSETFL
+            | protocol::OP_MKDIR_AT => Err(STATUS_EINVAL),
             _ => Err(protocol::STATUS_ENOSYS),
         };
         let (status, payload) = match result {
@@ -254,6 +266,7 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_FSYNC
                 | protocol::OP_FGETFL
                 | protocol::OP_FSETFL
+                | protocol::OP_MKDIR_AT
         ) {
             let response = if handles.is_empty() {
                 self.handle(peer, header, payload)
@@ -279,6 +292,7 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_CHDIR_AT
                 | protocol::OP_FCHDIR
                 | protocol::OP_GETCWD
+                | protocol::OP_MKDIR_AT
         ) {
             if let Err(status) = self.ensure_session_directories(peer.process_id, filesystem) {
                 return object_error(header.request_id, status);
@@ -469,6 +483,20 @@ impl<H: Copy> PosixService<H> {
                     Err(status) => object_error(header.request_id, status),
                 }
             }
+            protocol::OP_MKDIR_AT => {
+                let prepared = match self.prepare_mkdir_at(peer, payload, handles.len()) {
+                    Ok(prepared) => prepared,
+                    Err(status) => return object_error(header.request_id, status),
+                };
+                let paths = match self.path_objects(peer.process_id, prepared.base, handles) {
+                    Ok(paths) => paths,
+                    Err(status) => return object_error(header.request_id, status),
+                };
+                match filesystem.mkdir_at(&prepared, paths) {
+                    Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
+                    Err(status) => object_error(header.request_id, status),
+                }
+            }
             _ => unreachable!(),
         }
     }
@@ -551,6 +579,30 @@ impl<H: Copy> PosixService<H> {
         Ok(PreparedOpen {
             base: request.base,
             options: request.options,
+            mode: (request.mode & 0o7777) & !(session.umask & 0o777),
+            path: request.path.to_owned(),
+            effective_uid: session.effective_uid,
+            effective_gid: session.effective_gid,
+        })
+    }
+
+    pub fn prepare_mkdir_at(
+        &self,
+        peer: PeerIdentity,
+        payload: &[u8],
+        attached_handles: usize,
+    ) -> Result<PreparedMkdir, i32> {
+        let session = self
+            .sessions
+            .get(&peer.process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let request = protocol::decode_open_at(payload).map_err(|_| STATUS_EINVAL)?;
+        let expected_handles = usize::from(request.base == protocol::OpenBase::AttachedDirectory);
+        if attached_handles != expected_handles || request.options != 0 {
+            return Err(STATUS_EINVAL);
+        }
+        Ok(PreparedMkdir {
+            base: request.base,
             mode: (request.mode & 0o7777) & !(session.umask & 0o777),
             path: request.path.to_owned(),
             effective_uid: session.effective_uid,

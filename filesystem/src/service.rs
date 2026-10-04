@@ -104,7 +104,8 @@ impl FilesystemService {
             | protocol::OP_TRUNCATE_HANDLE
             | protocol::OP_SYNC_HANDLE
             | protocol::OP_GET_FLAGS_HANDLE
-            | protocol::OP_SET_FLAGS_HANDLE => Err(EINVAL),
+            | protocol::OP_SET_FLAGS_HANDLE
+            | protocol::OP_MKDIR_AT => Err(EINVAL),
             _ => Err(ENOSYS),
         };
         result.unwrap_or_else(|errno| self.error(request, errno))
@@ -316,6 +317,80 @@ impl FilesystemService {
             .map_err(errno)?;
         directory.link(name, &mut inode).map_err(errno)?;
         Ok(inode)
+    }
+
+    pub fn mkdir_at(
+        &mut self,
+        request: protocol::Header,
+        payload: &[u8],
+        anchors: PathAnchors,
+    ) -> Result<Response, i32> {
+        if request.flags & !protocol::MKDIR_AT_FLAGS_ALL != 0 {
+            return Err(EINVAL);
+        }
+        let root_attached = request.flags & protocol::MKDIR_AT_ROOT_ATTACHED != 0;
+        let base_attached = request.flags & protocol::MKDIR_AT_BASE_ATTACHED != 0;
+        if root_attached != anchors.root_open_id.is_some()
+            || base_attached != anchors.base_open_id.is_some()
+        {
+            return Err(EINVAL);
+        }
+        let uid = request.offset as u32;
+        let gid = (request.offset >> 32) as u32;
+        let (root, base) = self.resolve_anchors(payload, anchors)?;
+        let (parent, name) = match self.resolve_path_at(
+            root,
+            base,
+            payload,
+            FollowSymlinks::ExcludeFinalComponent,
+            uid,
+            gid,
+        )? {
+            Resolution::Found(_) => return Err(EEXIST),
+            Resolution::Missing { parent, name } => (parent, name),
+        };
+        let metadata = parent.metadata();
+        if !permission_allows(
+            metadata.mode(),
+            protocol::NODE_TYPE_DIRECTORY,
+            metadata.uid(),
+            metadata.gid(),
+            uid,
+            gid,
+            protocol::ACCESS_AT_WRITE | protocol::ACCESS_AT_EXECUTE,
+        ) {
+            return Err(EACCES);
+        }
+        let mut parent = Dir::open_inode(&self.fs, parent).map_err(errno)?;
+        let inode = self
+            .fs
+            .create_inode(InodeCreationOptions {
+                file_type: FileType::Directory,
+                mode: InodeMode::from_bits_truncate((request.mode as u16) & 0o7777)
+                    | InodeMode::S_IFDIR,
+                uid,
+                gid,
+                time: Duration::default(),
+                flags: InodeFlags::empty(),
+            })
+            .map_err(errno)?;
+        let parent_index = parent
+            .read_dir()
+            .map_err(errno)?
+            .find_map(|entry| match entry {
+                Ok(entry) if entry.file_name() == "." => Some(Ok(entry.inode)),
+                Ok(_) => None,
+                Err(error) => Some(Err(errno(error))),
+            })
+            .ok_or(EIO)??;
+        let mut directory = Dir::init(self.fs.clone(), inode, parent_index).map_err(errno)?;
+        parent
+            .link(
+                DirEntryName::try_from(name.as_slice()).map_err(|_| EINVAL)?,
+                directory.inode_mut(),
+            )
+            .map_err(errno)?;
+        Ok(self.success(request))
     }
 
     /// Resolves a path and obtains metadata as one serialized operation.
