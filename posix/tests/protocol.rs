@@ -202,3 +202,140 @@ fn object_transport_replaces_request_handles_with_reply_handles() {
         })
     );
 }
+
+#[test]
+fn open_at_wire_format_is_strict_and_contains_no_descriptor_number() {
+    let mut bytes = [0u8; protocol::OPEN_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
+    let length = protocol::encode_open_at(
+        protocol::OpenAtRequest {
+            base: protocol::OpenBase::AttachedDirectory,
+            options: protocol::OPEN_READ | protocol::OPEN_NOFOLLOW,
+            mode: 0o640,
+            path: "child.txt",
+        },
+        &mut bytes,
+    )
+    .unwrap();
+    let decoded = protocol::decode_open_at(&bytes[..length]).unwrap();
+    assert_eq!(decoded.base, protocol::OpenBase::AttachedDirectory);
+    assert_eq!(decoded.options, protocol::OPEN_READ | protocol::OPEN_NOFOLLOW);
+    assert_eq!(decoded.mode, 0o640);
+    assert_eq!(decoded.path, "child.txt");
+
+    bytes[1] = 1;
+    assert_eq!(
+        protocol::decode_open_at(&bytes[..length]),
+        Err(protocol::ProtocolError::InvalidLength)
+    );
+}
+
+#[test]
+fn service_prepares_open_with_authenticated_credentials_and_umask() {
+    let peer = PeerIdentity {
+        process_id: 101,
+        effective_uid: 504,
+        effective_gid: 23,
+    };
+    let mut service = PosixService::new();
+    service.handle(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let mut umask = [0u8; protocol::UMASK_PAYLOAD_LEN];
+    protocol::encode_umask(0o027, &mut umask).unwrap();
+    service.handle(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_UMASK_SET,
+            payload_len: umask.len() as u32,
+            ..protocol::Header::default()
+        },
+        &umask,
+    );
+
+    let mut payload = [0u8; protocol::OPEN_AT_HEADER_LEN + 16];
+    let length = protocol::encode_open_at(
+        protocol::OpenAtRequest {
+            base: protocol::OpenBase::ProcessCwd,
+            options: protocol::OPEN_READ | protocol::OPEN_WRITE | protocol::OPEN_CREATE,
+            mode: 0o666,
+            path: "notes.txt",
+        },
+        &mut payload,
+    )
+    .unwrap();
+    let open = service
+        .prepare_open_at(peer, &payload[..length], 0)
+        .unwrap();
+    assert_eq!(open.mode, 0o640);
+    assert_eq!(open.effective_uid, 504);
+    assert_eq!(open.effective_gid, 23);
+    assert_eq!(open.path, "notes.txt");
+    assert_eq!(
+        service.prepare_open_at(peer, &payload[..length], 1),
+        Err(posix_service::STATUS_EINVAL)
+    );
+}
+
+struct OpenTransport;
+
+impl Transport for OpenTransport {
+    type Error = ();
+
+    fn call(&self, _request: &[u8], _response: &mut [u8]) -> Result<usize, Self::Error> {
+        Err(())
+    }
+}
+
+impl ObjectTransport for OpenTransport {
+    type Handle = u32;
+
+    fn call_with_handles(
+        &self,
+        request: &[u8],
+        response: &mut [u8],
+        handles: &mut ObjectHandles<Self::Handle>,
+    ) -> Result<usize, Self::Error> {
+        let (header, payload) = protocol::decode(request).map_err(|_| ())?;
+        assert_eq!(header.opcode, protocol::OP_OPEN_AT);
+        assert!(handles.is_empty());
+        let open = protocol::decode_open_at(payload).map_err(|_| ())?;
+        assert_eq!(open.base, protocol::OpenBase::ProcessCwd);
+        assert_eq!(open.path, "document.txt");
+        handles
+            .push(ObjectHandleAttachment {
+                handle: 91,
+                rights: 0x81,
+            })
+            .unwrap();
+        protocol::encode(
+            protocol::Header {
+                opcode: protocol::OP_STATUS,
+                request_id: header.request_id,
+                status: protocol::STATUS_OK,
+                ..protocol::Header::default()
+            },
+            &[],
+            response,
+        )
+        .map_err(|_| ())
+    }
+}
+
+#[test]
+fn client_open_at_returns_only_the_attached_file_handle() {
+    let handle = Client::new(OpenTransport)
+        .open_at(
+            mochios_posix_client::OpenAtBase::ProcessCwd,
+            protocol::OPEN_READ,
+            0,
+            "document.txt",
+        )
+        .unwrap();
+    assert_eq!(handle.handle, 91);
+    assert_eq!(handle.rights, 0x81);
+}

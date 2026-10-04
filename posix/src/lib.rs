@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::string::String;
 
 use mochios_posix_protocol as protocol;
 
@@ -25,6 +26,16 @@ pub struct Session {
 pub struct Response {
     pub header: protocol::Header,
     pub payload: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedOpen {
+    pub base: protocol::OpenBase,
+    pub options: u32,
+    pub mode: u32,
+    pub path: String,
+    pub effective_uid: u32,
+    pub effective_gid: u32,
 }
 
 #[derive(Debug, Default)]
@@ -71,7 +82,8 @@ impl PosixService {
             protocol::OP_PING
             | protocol::OP_SESSION_REGISTER
             | protocol::OP_SESSION_INFO
-            | protocol::OP_UMASK_SET => Err(STATUS_EINVAL),
+            | protocol::OP_UMASK_SET
+            | protocol::OP_OPEN_AT => Err(STATUS_EINVAL),
             _ => Err(protocol::STATUS_ENOSYS),
         };
         let (status, payload) = match result {
@@ -88,6 +100,41 @@ impl PosixService {
             },
             payload,
         }
+    }
+
+
+    pub fn prepare_open_at(
+        &self,
+        peer: PeerIdentity,
+        payload: &[u8],
+        attached_handles: usize,
+    ) -> Result<PreparedOpen, i32> {
+        let session = self
+            .sessions
+            .get(&peer.process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let request = protocol::decode_open_at(payload).map_err(|_| STATUS_EINVAL)?;
+        let expected_handles = usize::from(request.base == protocol::OpenBase::AttachedDirectory);
+        if attached_handles != expected_handles {
+            return Err(STATUS_EINVAL);
+        }
+        let access = request.options & (protocol::OPEN_READ | protocol::OPEN_WRITE);
+        if access == 0
+            || request.options & protocol::OPEN_EXCLUSIVE != 0
+                && request.options & protocol::OPEN_CREATE == 0
+            || request.options & (protocol::OPEN_TRUNCATE | protocol::OPEN_APPEND) != 0
+                && request.options & protocol::OPEN_WRITE == 0
+        {
+            return Err(STATUS_EINVAL);
+        }
+        Ok(PreparedOpen {
+            base: request.base,
+            options: request.options,
+            mode: (request.mode & 0o7777) & !(session.umask & 0o777),
+            path: request.path.to_owned(),
+            effective_uid: session.effective_uid,
+            effective_gid: session.effective_gid,
+        })
     }
 
     fn session_info(&self, process_id: u64) -> Result<Vec<u8>, i32> {
