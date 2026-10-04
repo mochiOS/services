@@ -1495,6 +1495,8 @@ version = "0.1.0"
 dependencies = [
  "mochi-user-platform",
  "mochi-user-syscall",
+ "mochios-posix-client",
+ "mochios-posix-protocol",
 ]
 
 [[package]]

@@ -57,6 +57,14 @@ fn install_posix_endpoint_for(
     endpoint: platform::handle::Handle,
 ) -> Result<(), mochi_user_syscall::SysError> {
     let destination = platform::process::find_by_name(service_name)?;
+    install_posix_endpoint_at(destination, opcode, endpoint)
+}
+
+fn install_posix_endpoint_at(
+    destination: u64,
+    opcode: u32,
+    endpoint: platform::handle::Handle,
+) -> Result<(), mochi_user_syscall::SysError> {
     if destination == 0 {
         return Err(sys_error(mochi_user_syscall::ENOENT));
     }
@@ -82,6 +90,7 @@ fn install_posix_endpoint_for(
 
 pub(crate) fn install_early_posix_endpoints(
     endpoint: platform::handle::Handle,
+    logger_endpoint: u64,
 ) -> Result<(), mochi_user_syscall::SysError> {
     install_posix_endpoint_for(
         CAPABILITY_SERVICE_NAME,
@@ -91,6 +100,11 @@ pub(crate) fn install_early_posix_endpoints(
     install_posix_endpoint_for(
         PACKAGE_SERVICE_NAME,
         mochios_package_protocol::INSTALL_POSIX_ENDPOINT_OPCODE,
+        endpoint,
+    )?;
+    install_posix_endpoint_at(
+        logger_endpoint,
+        platform::logger::INSTALL_POSIX_ENDPOINT_OPCODE,
         endpoint,
     )
 }

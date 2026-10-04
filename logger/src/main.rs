@@ -3,6 +3,8 @@ extern crate alloc;
 use alloc::{collections::VecDeque, string::String, vec::Vec};
 use mochi_user_platform as platform;
 
+mod posix_io;
+
 const LOG_ROOT: &str = "/var/log/services";
 const MAX_PENDING_BYTES: usize = 256 * 1024;
 
@@ -114,40 +116,11 @@ fn log_path_for_line(line: &str) -> String {
 }
 
 fn ensure_dir_tree(path: &str) -> platform::syscall::SysResult<()> {
-    const AT_FDCWD: i64 = -100;
-    const O_RDONLY: u64 = 0;
-    const O_CLOEXEC: u64 = 0o2_000_000;
     let mut current = String::new();
     for segment in path.split('/').filter(|segment| !segment.is_empty()) {
         current.push('/');
         current.push_str(segment);
-        match platform::file::openat_path(AT_FDCWD, &current, O_RDONLY | O_CLOEXEC, 0) {
-            Ok(fd) => {
-                let metadata = platform::file::metadata(fd);
-                let close = platform::file::close(fd).map(|_| ());
-                match metadata {
-                    Ok(metadata) if metadata.is_directory() => close?,
-                    Ok(_) => {
-                        close?;
-                        return Err(platform::syscall::SysError::from_raw(
-                            platform::syscall::ENOTDIR as i64,
-                        ));
-                    }
-                    Err(error) => {
-                        let _ = close;
-                        return Err(error);
-                    }
-                }
-                continue;
-            }
-            Err(error) if error.raw() == platform::syscall::ENOENT as i64 => {}
-            Err(error) => return Err(error),
-        }
-        if let Err(error) = platform::file::create_dir(&current, 0o755) {
-            if error.raw() != platform::syscall::EEXIST as i64 {
-                return Err(error);
-            }
-        }
+        posix_io::ensure_directory(&current, 0o755)?;
     }
     Ok(())
 }
@@ -164,38 +137,7 @@ fn append_log_line(line: &[u8]) -> platform::syscall::SysResult<()> {
         .map_err(|_| platform::syscall::SysError::from_raw(platform::syscall::EINVAL as i64))?;
     let path = log_path_for_line(text);
     ensure_log_parent(&path)?;
-    const AT_FDCWD: i64 = -100;
-    const O_WRONLY: u64 = 0o1;
-    const O_CREAT: u64 = 0o100;
-    const O_APPEND: u64 = 0o2000;
-    const O_CLOEXEC: u64 = 0o2_000_000;
-    let fd = platform::file::openat_path(
-        AT_FDCWD,
-        &path,
-        O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC,
-        0o640,
-    )?;
-    let result = append_and_sync(fd, line);
-    let close_result = platform::file::close(fd).map(|_| ());
-    result.and(close_result)
-}
-
-fn append_and_sync(fd: u64, line: &[u8]) -> platform::syscall::SysResult<()> {
-    let mut offset = 0usize;
-    while offset < line.len() {
-        let written = platform::file::write(
-            fd,
-            line[offset..].as_ptr() as u64,
-            (line.len() - offset) as u64,
-        )?;
-        if written == 0 || written as usize > line.len() - offset {
-            return Err(platform::syscall::SysError::from_raw(
-                platform::syscall::EIO as i64,
-            ));
-        }
-        offset += written as usize;
-    }
-    platform::file::sync(fd).map(|_| ())
+    posix_io::append_and_sync(&path, line, 0o640)
 }
 
 fn report_persistence_error(error: platform::syscall::SysError) {
@@ -223,12 +165,41 @@ fn main() {
     let mut pending = PendingLogs::new();
     let mut persistence_enabled = false;
     loop {
-        let Ok(msg) = platform::ipc::wait(log_endpoint, &mut buf) else {
+        let mut attached = platform::ipc::IpcObjectHandles::default();
+        let Ok(msg) = platform::ipc::wait_object_handles(log_endpoint, &mut buf, &mut attached)
+        else {
             platform::thread::yield_now();
             continue;
         };
+        let sender = msg >> 32;
         let len = (msg & 0xffff_ffff) as usize;
         if len == 0 || len > buf.len() {
+            close_received_handles(&attached);
+            continue;
+        }
+        if buf[..len] == platform::logger::INSTALL_POSIX_ENDPOINT_OPCODE.to_le_bytes() {
+            let valid = attached.reserved == 0
+                && attached.count == 1
+                && attached.handles[0].handle != 0
+                && attached.handles[0].reserved == 0
+                && attached.handles[0].rights & platform::handle::HANDLE_RIGHT_SEND != 0;
+            let status = if !valid {
+                mochi_user_syscall::EINVAL
+            } else if platform::capability::check_thread(sender, "capabilities.manage") != Ok(1) {
+                mochi_user_syscall::EACCES
+            } else {
+                let endpoint = attached.handles[0].handle;
+                attached.handles[0].handle = 0;
+                posix_io::install_endpoint(endpoint)
+                    .map(|_| 0)
+                    .unwrap_or_else(|error| error.errno().unwrap_or(mochi_user_syscall::EIO))
+            };
+            close_received_handles(&attached);
+            let _ = platform::ipc::reply(sender, &status.to_le_bytes());
+            continue;
+        }
+        if attached.count != 0 || attached.reserved != 0 {
+            close_received_handles(&attached);
             continue;
         }
         if len == 1 && buf[0] == 0 {
@@ -245,6 +216,14 @@ fn main() {
         pending.push(&buf[..len]);
         if persistence_enabled {
             pending.persist();
+        }
+    }
+}
+
+fn close_received_handles(handles: &platform::ipc::IpcObjectHandles) {
+    for handle in handles.handles.iter().take(handles.count as usize) {
+        if handle.handle != 0 {
+            let _ = platform::handle::close(handle.handle);
         }
     }
 }
