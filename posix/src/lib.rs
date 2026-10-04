@@ -38,6 +38,15 @@ pub struct PreparedOpen {
     pub effective_gid: u32,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedStat {
+    pub base: protocol::OpenBase,
+    pub flags: u32,
+    pub path: String,
+    pub effective_uid: u32,
+    pub effective_gid: u32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AttachedObject<H> {
     pub handle: H,
@@ -58,6 +67,16 @@ pub trait FilesystemBackend<H: Copy> {
         request: &PreparedOpen,
         directory: Option<AttachedObject<H>>,
     ) -> Result<OpenedObject<H>, i32>;
+
+    /// Resolves and reads metadata in one backend operation.
+    fn stat_at(
+        &mut self,
+        request: &PreparedStat,
+        directory: Option<AttachedObject<H>>,
+    ) -> Result<protocol::FileStatus, i32>;
+
+    /// Reads metadata from the open file description identified by `file`.
+    fn fstat(&mut self, file: AttachedObject<H>) -> Result<protocol::FileStatus, i32>;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -111,7 +130,9 @@ impl PosixService {
             | protocol::OP_SESSION_REGISTER
             | protocol::OP_SESSION_INFO
             | protocol::OP_UMASK_SET
-            | protocol::OP_OPEN_AT => Err(STATUS_EINVAL),
+            | protocol::OP_OPEN_AT
+            | protocol::OP_STAT_AT
+            | protocol::OP_FSTAT => Err(STATUS_EINVAL),
             _ => Err(protocol::STATUS_ENOSYS),
         };
         let (status, payload) = match result {
@@ -138,7 +159,10 @@ impl PosixService {
         handles: &[AttachedObject<H>],
         filesystem: &mut F,
     ) -> ObjectResponse<H> {
-        if header.opcode != protocol::OP_OPEN_AT {
+        if !matches!(
+            header.opcode,
+            protocol::OP_OPEN_AT | protocol::OP_STAT_AT | protocol::OP_FSTAT
+        ) {
             let response = if handles.is_empty() {
                 self.handle(peer, header, payload)
             } else {
@@ -155,27 +179,49 @@ impl PosixService {
                 handles: Vec::new(),
             };
         }
-        let prepared = match self.prepare_open_at(peer, payload, handles.len()) {
-            Ok(prepared) => prepared,
-            Err(status) => {
-                return ObjectResponse {
-                    response: status_response(header.request_id, status),
-                    handles: Vec::new(),
+        match header.opcode {
+            protocol::OP_OPEN_AT => {
+                let prepared = match self.prepare_open_at(peer, payload, handles.len()) {
+                    Ok(prepared) => prepared,
+                    Err(status) => return object_error(header.request_id, status),
                 };
+                let directory = (prepared.base == protocol::OpenBase::AttachedDirectory)
+                    .then(|| handles.first().copied())
+                    .flatten();
+                match filesystem.open_at(&prepared, directory) {
+                    Ok(opened) => ObjectResponse {
+                        response: status_response(header.request_id, protocol::STATUS_OK),
+                        handles: vec![opened],
+                    },
+                    Err(status) => object_error(header.request_id, status),
+                }
             }
-        };
-        let directory = (prepared.base == protocol::OpenBase::AttachedDirectory)
-            .then(|| handles.first().copied())
-            .flatten();
-        match filesystem.open_at(&prepared, directory) {
-            Ok(opened) => ObjectResponse {
-                response: status_response(header.request_id, protocol::STATUS_OK),
-                handles: vec![opened],
-            },
-            Err(status) => ObjectResponse {
-                response: status_response(header.request_id, status),
-                handles: Vec::new(),
-            },
+            protocol::OP_STAT_AT => {
+                let prepared = match self.prepare_stat_at(peer, payload, handles.len()) {
+                    Ok(prepared) => prepared,
+                    Err(status) => return object_error(header.request_id, status),
+                };
+                let directory = (prepared.base == protocol::OpenBase::AttachedDirectory)
+                    .then(|| handles.first().copied())
+                    .flatten();
+                match filesystem.stat_at(&prepared, directory) {
+                    Ok(status) => object_status(header.request_id, status),
+                    Err(status) => object_error(header.request_id, status),
+                }
+            }
+            protocol::OP_FSTAT => {
+                if !payload.is_empty() || handles.len() != 1 {
+                    return object_error(header.request_id, STATUS_EINVAL);
+                }
+                if !self.sessions.contains_key(&peer.process_id) {
+                    return object_error(header.request_id, protocol::STATUS_ESRCH);
+                }
+                match filesystem.fstat(handles[0]) {
+                    Ok(status) => object_status(header.request_id, status),
+                    Err(status) => object_error(header.request_id, status),
+                }
+            }
+            _ => unreachable!(),
         }
     }
 
@@ -214,6 +260,30 @@ impl PosixService {
         })
     }
 
+    pub fn prepare_stat_at(
+        &self,
+        peer: PeerIdentity,
+        payload: &[u8],
+        attached_handles: usize,
+    ) -> Result<PreparedStat, i32> {
+        let session = self
+            .sessions
+            .get(&peer.process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let request = protocol::decode_stat_at(payload).map_err(|_| STATUS_EINVAL)?;
+        let expected_handles = usize::from(request.base == protocol::OpenBase::AttachedDirectory);
+        if attached_handles != expected_handles {
+            return Err(STATUS_EINVAL);
+        }
+        Ok(PreparedStat {
+            base: request.base,
+            flags: request.flags,
+            path: request.path.to_owned(),
+            effective_uid: session.effective_uid,
+            effective_gid: session.effective_gid,
+        })
+    }
+
     fn session_info(&self, process_id: u64) -> Result<Vec<u8>, i32> {
         let session = self
             .sessions
@@ -245,6 +315,33 @@ impl PosixService {
         let mut response = vec![0u8; protocol::UMASK_PAYLOAD_LEN];
         protocol::encode_umask(previous, &mut response).map_err(|_| STATUS_EINVAL)?;
         Ok(response)
+    }
+}
+
+fn object_error<H>(request_id: u64, status: i32) -> ObjectResponse<H> {
+    ObjectResponse {
+        response: status_response(request_id, status),
+        handles: Vec::new(),
+    }
+}
+
+fn object_status<H>(request_id: u64, status: protocol::FileStatus) -> ObjectResponse<H> {
+    let mut payload = vec![0u8; protocol::FILE_STATUS_LEN];
+    if protocol::encode_file_status(status, &mut payload).is_err() {
+        return object_error(request_id, STATUS_EINVAL);
+    }
+    ObjectResponse {
+        response: Response {
+            header: protocol::Header {
+                opcode: protocol::OP_STATUS,
+                request_id,
+                payload_len: payload.len() as u32,
+                status: protocol::STATUS_OK,
+                ..protocol::Header::default()
+            },
+            payload,
+        },
+        handles: Vec::new(),
     }
 }
 

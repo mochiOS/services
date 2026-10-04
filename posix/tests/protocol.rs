@@ -6,6 +6,7 @@ use mochios_posix_client::{
 use mochios_posix_protocol as protocol;
 use posix_service::{
     AttachedObject, FilesystemBackend, OpenedObject, PeerIdentity, PosixService, PreparedOpen,
+    PreparedStat,
 };
 
 struct LocalTransport {
@@ -345,7 +346,9 @@ fn client_open_at_returns_only_the_attached_file_handle() {
 #[derive(Default)]
 struct RecordingFilesystem {
     request: Option<PreparedOpen>,
+    stat_request: Option<PreparedStat>,
     directory: Option<AttachedObject<u32>>,
+    stat_file: Option<AttachedObject<u32>>,
 }
 
 impl FilesystemBackend<u32> for RecordingFilesystem {
@@ -360,6 +363,39 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
             handle: 200,
             rights: 0x81,
         })
+    }
+
+    fn stat_at(
+        &mut self,
+        request: &PreparedStat,
+        directory: Option<AttachedObject<u32>>,
+    ) -> Result<protocol::FileStatus, i32> {
+        self.stat_request = Some(request.clone());
+        self.directory = directory;
+        Ok(sample_status())
+    }
+
+    fn fstat(
+        &mut self,
+        file: AttachedObject<u32>,
+    ) -> Result<protocol::FileStatus, i32> {
+        self.stat_file = Some(file);
+        Ok(sample_status())
+    }
+}
+
+fn sample_status() -> protocol::FileStatus {
+    protocol::FileStatus {
+        device: 1,
+        inode: 9,
+        mode: 0o100640,
+        link_count: 1,
+        uid: 505,
+        gid: 24,
+        size: 32,
+        block_size: 4096,
+        blocks: 1,
+        ..protocol::FileStatus::default()
     }
 }
 
@@ -421,4 +457,118 @@ fn service_submits_open_as_one_atomic_filesystem_operation() {
         request.options,
         protocol::OPEN_WRITE | protocol::OPEN_CREATE | protocol::OPEN_EXCLUSIVE
     );
+}
+
+#[test]
+fn service_submits_stat_as_one_atomic_filesystem_operation() {
+    let peer = PeerIdentity {
+        process_id: 112,
+        effective_uid: 506,
+        effective_gid: 25,
+    };
+    let mut service = PosixService::new();
+    service.handle(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let mut payload = [0u8; protocol::STAT_AT_HEADER_LEN + 16];
+    let length = protocol::encode_stat_at(
+        protocol::StatAtRequest {
+            base: protocol::OpenBase::AttachedDirectory,
+            flags: protocol::STAT_NOFOLLOW,
+            path: "result.txt",
+        },
+        &mut payload,
+    )
+    .unwrap();
+    let directory = AttachedObject {
+        handle: 56,
+        rights: 0x85,
+    };
+    let mut filesystem = RecordingFilesystem::default();
+
+    let result = service.handle_objects(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_STAT_AT,
+            request_id: 14,
+            payload_len: length as u32,
+            ..protocol::Header::default()
+        },
+        &payload[..length],
+        &[directory],
+        &mut filesystem,
+    );
+
+    assert!(result.handles.is_empty());
+    assert_eq!(result.response.header.status, protocol::STATUS_OK);
+    assert_eq!(
+        protocol::decode_file_status(&result.response.payload).unwrap(),
+        sample_status()
+    );
+    assert_eq!(filesystem.directory, Some(directory));
+    let request = filesystem.stat_request.unwrap();
+    assert_eq!(request.path, "result.txt");
+    assert_eq!(request.flags, protocol::STAT_NOFOLLOW);
+    assert_eq!(request.effective_uid, 506);
+    assert_eq!(request.effective_gid, 25);
+}
+
+#[test]
+fn fstat_uses_only_the_explicitly_attached_file_handle() {
+    let peer = PeerIdentity {
+        process_id: 113,
+        effective_uid: 507,
+        effective_gid: 26,
+    };
+    let mut service = PosixService::new();
+    service.handle(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let file = AttachedObject {
+        handle: 57,
+        rights: 0x81,
+    };
+    let mut filesystem = RecordingFilesystem::default();
+
+    let result = service.handle_objects(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_FSTAT,
+            request_id: 15,
+            ..protocol::Header::default()
+        },
+        &[],
+        &[file],
+        &mut filesystem,
+    );
+
+    assert_eq!(result.response.header.status, protocol::STATUS_OK);
+    assert_eq!(filesystem.stat_file, Some(file));
+    assert_eq!(
+        protocol::decode_file_status(&result.response.payload).unwrap(),
+        sample_status()
+    );
+
+    let invalid = service.handle_objects(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_FSTAT,
+            request_id: 16,
+            ..protocol::Header::default()
+        },
+        &[],
+        &[],
+        &mut filesystem,
+    );
+    assert_eq!(invalid.response.header.status, posix_service::STATUS_EINVAL);
 }

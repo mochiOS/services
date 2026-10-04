@@ -227,6 +227,60 @@ fn main() {
                             continue;
                         }
                     }
+                } else if header.opcode == protocol::OP_STAT_AT {
+                    let base_open_id = match attached.count {
+                        0 => Ok(None),
+                        1 => {
+                            let directory = attached.handles[0];
+                            let required = platform::handle::HANDLE_RIGHT_READ
+                                | platform::handle::HANDLE_RIGHT_TRANSFER;
+                            if directory.reserved != 0 || directory.rights & required != required {
+                                Err(22)
+                            } else {
+                                platform::handle::identify_provider_object(directory.handle)
+                                    .map(Some)
+                                    .map_err(|_| 9)
+                            }
+                        }
+                        _ => Err(22),
+                    };
+                    match base_open_id.and_then(|base| service.stat_at(header, payload, base)) {
+                        Ok(response) => response,
+                        Err(error) => filesystem_service::service::Response {
+                            header: protocol::Header {
+                                opcode: protocol::OP_STATUS,
+                                request_id: header.request_id,
+                                status: -error,
+                                ..protocol::Header::default()
+                            },
+                            payload: Vec::new(),
+                        },
+                    }
+                } else if header.opcode == protocol::OP_STAT_HANDLE {
+                    let open_id = if attached.count == 1 {
+                        let file = attached.handles[0];
+                        if file.reserved != 0
+                            || file.rights & platform::handle::HANDLE_RIGHT_TRANSFER == 0
+                        {
+                            Err(22)
+                        } else {
+                            platform::handle::identify_provider_object(file.handle).map_err(|_| 9)
+                        }
+                    } else {
+                        Err(22)
+                    };
+                    match open_id.and_then(|open_id| service.stat_handle(header, open_id)) {
+                        Ok(response) => response,
+                        Err(error) => filesystem_service::service::Response {
+                            header: protocol::Header {
+                                opcode: protocol::OP_STATUS,
+                                request_id: header.request_id,
+                                status: -error,
+                                ..protocol::Header::default()
+                            },
+                            payload: Vec::new(),
+                        },
+                    }
                 } else if attached.count != 0 {
                     filesystem_service::service::Response {
                         header: protocol::Header {

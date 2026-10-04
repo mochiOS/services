@@ -86,7 +86,7 @@ impl FilesystemService {
             protocol::OP_READLINK => self.read_link(request),
             protocol::OP_SYNC => Ok(self.success(request)),
             protocol::OP_SETATTR => self.set_attr(request, payload),
-            protocol::OP_OPEN_AT => Err(EINVAL),
+            protocol::OP_OPEN_AT | protocol::OP_STAT_AT | protocol::OP_STAT_HANDLE => Err(EINVAL),
             _ => Err(ENOSYS),
         };
         result.unwrap_or_else(|errno| self.error(request, errno))
@@ -214,6 +214,65 @@ impl FilesystemService {
         response.header.open_id = open_id;
         response.header.node_id = node_id;
         Ok(response)
+    }
+
+    /// Resolves a path and obtains metadata as one serialized operation.
+    pub fn stat_at(
+        &mut self,
+        request: protocol::Header,
+        payload: &[u8],
+        base_open_id: Option<u64>,
+    ) -> Result<Response, i32> {
+        if request.flags & !protocol::STAT_AT_FLAGS_ALL != 0 {
+            return Err(EINVAL);
+        }
+        let attached = request.flags & protocol::STAT_AT_BASE_ATTACHED != 0;
+        if attached != base_open_id.is_some() {
+            return Err(EINVAL);
+        }
+        let path = self.open_path(payload, base_open_id)?;
+        let follow = if request.flags & protocol::STAT_AT_NOFOLLOW != 0 {
+            FollowSymlinks::ExcludeFinalComponent
+        } else {
+            FollowSymlinks::All
+        };
+        let inode = self
+            .fs
+            .path_to_inode(path.as_str().try_into().map_err(|_| EINVAL)?, follow)
+            .map_err(errno)?;
+        let node_id = u64::from(inode.index.get());
+        Ok(self.node_status_response(request, node_id, inode.metadata()))
+    }
+
+    /// Obtains metadata from an existing provider object. The caller must
+    /// identify the attached Handle through the kernel before invoking this.
+    pub fn stat_handle(
+        &self,
+        request: protocol::Header,
+        open_id: u64,
+    ) -> Result<Response, i32> {
+        if request.flags != 0 {
+            return Err(EINVAL);
+        }
+        let open = self.opens.get(&open_id).ok_or(EBADF)?;
+        let (node_id, metadata) = match open.file.as_ref() {
+            Some(file) => (
+                u64::from(file.inode().index.get()),
+                file.inode().metadata(),
+            ),
+            None => {
+                let path = self.nodes.get(&open.node_id).ok_or(ENOENT)?;
+                let inode = self
+                    .fs
+                    .path_to_inode(
+                        path.as_str().try_into().map_err(|_| EINVAL)?,
+                        FollowSymlinks::ExcludeFinalComponent,
+                    )
+                    .map_err(errno)?;
+                (u64::from(inode.index.get()), inode.metadata())
+            }
+        };
+        Ok(self.node_status_response(request, node_id, metadata))
     }
 
     fn open_path(&self, payload: &[u8], base_open_id: Option<u64>) -> Result<String, i32> {
@@ -1100,6 +1159,39 @@ impl FilesystemService {
             &mut response.payload,
         )
         .expect("fixed-size metadata response");
+        response.header.length = response.payload.len() as u32;
+        response
+    }
+
+    fn node_status_response(
+        &self,
+        request: protocol::Header,
+        node_id: u64,
+        metadata: Metadata,
+    ) -> Response {
+        let mut response = self.success(request);
+        response.payload.resize(protocol::NODE_STATUS_LEN, 0);
+        let status = protocol::NodeStatus {
+            device: request.mount_id,
+            node_id,
+            size: metadata.len(),
+            blocks: metadata.len().div_ceil(512),
+            block_size: 4096,
+            kind: node_type(metadata.file_type()),
+            mode: u32::from(metadata.mode()),
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+            link_count: u32::from(metadata.links_count),
+            special_device: 0,
+            access_time_seconds: metadata.atime.as_secs(),
+            access_time_nanoseconds: metadata.atime.subsec_nanos(),
+            modification_time_seconds: metadata.mtime.as_secs(),
+            modification_time_nanoseconds: metadata.mtime.subsec_nanos(),
+            change_time_seconds: metadata.ctime.as_secs(),
+            change_time_nanoseconds: metadata.ctime.subsec_nanos(),
+        };
+        protocol::encode_node_status(status, &mut response.payload)
+            .expect("fixed-size node status response");
         response.header.length = response.payload.len() as u32;
         response
     }

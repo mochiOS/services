@@ -162,6 +162,58 @@ struct RuntimeFilesystem {
 }
 
 #[cfg(target_os = "mochios")]
+impl RuntimeFilesystem {
+    fn status_call(
+        &self,
+        header: mochios_filesystem_protocol::Header,
+        payload: &[u8],
+        attachment: Option<mochi_user_platform::ipc::IpcObjectHandle>,
+    ) -> Result<mochios_filesystem_protocol::NodeStatus, i32> {
+        use mochi_user_platform as platform;
+        use mochios_filesystem_protocol as filesystem;
+
+        let mut request = vec![0u8; filesystem::HEADER_LEN + payload.len()];
+        let request_len = filesystem::encode(header, payload, &mut request).map_err(|_| -22)?;
+        let mut response = vec![0u8; filesystem::HEADER_LEN + filesystem::NODE_STATUS_LEN];
+        let mut handles = platform::ipc::IpcObjectHandles::default();
+        if let Some(attachment) = attachment {
+            handles.count = 1;
+            handles.handles[0] = attachment;
+        }
+        if platform::ipc::call_object_handles(
+            self.endpoint,
+            &request[..request_len],
+            &mut response,
+            &mut handles,
+        )
+        .is_err()
+        {
+            close_runtime_handles(&handles);
+            return Err(-5);
+        }
+        let (response, payload) = match filesystem::decode(&response) {
+            Ok(decoded) => decoded,
+            Err(_) => {
+                close_runtime_handles(&handles);
+                return Err(-5);
+            }
+        };
+        if handles.count != 0 {
+            close_runtime_handles(&handles);
+            return Err(-5);
+        }
+        if response.opcode != filesystem::OP_STATUS || response.status != 0 {
+            return Err(if response.status < 0 {
+                response.status
+            } else {
+                -5
+            });
+        }
+        filesystem::decode_node_status(payload).map_err(|_| -5)
+    }
+}
+
+#[cfg(target_os = "mochios")]
 impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for RuntimeFilesystem {
     fn open_at(
         &mut self,
@@ -260,6 +312,121 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             rights: opened.rights,
         })
     }
+
+    fn stat_at(
+        &mut self,
+        request: &posix_service::PreparedStat,
+        directory: Option<posix_service::AttachedObject<mochi_user_platform::handle::Handle>>,
+    ) -> Result<mochios_posix_protocol::FileStatus, i32> {
+        use mochi_user_platform as platform;
+        use mochios_filesystem_protocol as filesystem;
+        use mochios_posix_protocol as posix;
+
+        let mut flags = match request.base {
+            posix::OpenBase::AttachedDirectory => filesystem::STAT_AT_BASE_ATTACHED,
+            posix::OpenBase::ProcessRoot | posix::OpenBase::ProcessCwd => 0,
+        };
+        if request.flags & posix::STAT_NOFOLLOW != 0 {
+            flags |= filesystem::STAT_AT_NOFOLLOW;
+        }
+        let path = match request.base {
+            posix::OpenBase::ProcessRoot | posix::OpenBase::ProcessCwd
+                if !request.path.starts_with('/') =>
+            {
+                format!("/{}", request.path)
+            }
+            _ => request.path.clone(),
+        };
+        let attachment = match directory {
+            Some(directory) => {
+                let rights =
+                    platform::handle::HANDLE_RIGHT_READ | platform::handle::HANDLE_RIGHT_TRANSFER;
+                if directory.rights & rights != rights {
+                    return Err(-13);
+                }
+                Some(platform::ipc::IpcObjectHandle {
+                    handle: directory.handle,
+                    reserved: 0,
+                    rights,
+                })
+            }
+            None => None,
+        };
+        let status = self.status_call(
+            filesystem::Header {
+                opcode: filesystem::OP_STAT_AT,
+                request_id: 2,
+                offset: u64::from(request.effective_uid)
+                    | (u64::from(request.effective_gid) << 32),
+                length: path.len() as u32,
+                flags,
+                ..filesystem::Header::default()
+            },
+            path.as_bytes(),
+            attachment,
+        )?;
+        filesystem_status_to_posix(status)
+    }
+
+    fn fstat(
+        &mut self,
+        file: posix_service::AttachedObject<mochi_user_platform::handle::Handle>,
+    ) -> Result<mochios_posix_protocol::FileStatus, i32> {
+        use mochi_user_platform as platform;
+        use mochios_filesystem_protocol as filesystem;
+
+        if file.rights & platform::handle::HANDLE_RIGHT_TRANSFER == 0 {
+            return Err(-13);
+        }
+        let status = self.status_call(
+            filesystem::Header {
+                opcode: filesystem::OP_STAT_HANDLE,
+                request_id: 3,
+                ..filesystem::Header::default()
+            },
+            &[],
+            Some(platform::ipc::IpcObjectHandle {
+                handle: file.handle,
+                reserved: 0,
+                rights: platform::handle::HANDLE_RIGHT_TRANSFER,
+            }),
+        )?;
+        filesystem_status_to_posix(status)
+    }
+}
+
+#[cfg(target_os = "mochios")]
+fn filesystem_status_to_posix(
+    status: mochios_filesystem_protocol::NodeStatus,
+) -> Result<mochios_posix_protocol::FileStatus, i32> {
+    use mochios_filesystem_protocol as filesystem;
+
+    let file_type = match status.kind {
+        filesystem::NODE_TYPE_REGULAR => 0o100000,
+        filesystem::NODE_TYPE_DIRECTORY => 0o040000,
+        filesystem::NODE_TYPE_SYMLINK => 0o120000,
+        filesystem::NODE_TYPE_SPECIAL => 0o020000,
+        _ => return Err(-5),
+    };
+    Ok(mochios_posix_protocol::FileStatus {
+        device: status.device,
+        inode: status.node_id,
+        mode: file_type | (status.mode & 0o7777),
+        link_count: status.link_count,
+        uid: status.uid,
+        gid: status.gid,
+        special_device: status.special_device,
+        size: i64::try_from(status.size).map_err(|_| -75)?,
+        block_size: i64::from(status.block_size),
+        blocks: i64::try_from(status.blocks).map_err(|_| -75)?,
+        access_time_seconds: i64::try_from(status.access_time_seconds).map_err(|_| -75)?,
+        access_time_nanoseconds: i64::from(status.access_time_nanoseconds),
+        modification_time_seconds: i64::try_from(status.modification_time_seconds)
+            .map_err(|_| -75)?,
+        modification_time_nanoseconds: i64::from(status.modification_time_nanoseconds),
+        change_time_seconds: i64::try_from(status.change_time_seconds).map_err(|_| -75)?,
+        change_time_nanoseconds: i64::from(status.change_time_nanoseconds),
+    })
 }
 
 #[cfg(target_os = "mochios")]
