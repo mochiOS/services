@@ -361,6 +361,20 @@ fn main() {
                             payload: Vec::new(),
                         },
                     }
+                } else if header.opcode == protocol::OP_RENAME_AT {
+                    let anchors = decode_rename_anchors(header.flags, &attached);
+                    match anchors.and_then(|anchors| service.rename_at(header, payload, anchors)) {
+                        Ok(response) => response,
+                        Err(error) => filesystem_service::service::Response {
+                            header: protocol::Header {
+                                opcode: protocol::OP_STATUS,
+                                request_id: header.request_id,
+                                status: -error,
+                                ..protocol::Header::default()
+                            },
+                            payload: Vec::new(),
+                        },
+                    }
                 } else if attached.count != 0 {
                     filesystem_service::service::Response {
                         header: protocol::Header {
@@ -497,6 +511,44 @@ fn decode_path_anchors(
             None
         },
     })
+}
+
+#[cfg(target_os = "mochios")]
+fn decode_rename_anchors(
+    flags: u32,
+    attached: &mochi_user_platform::ipc::IpcObjectHandles,
+) -> Result<filesystem_service::service::RenameAnchors, i32> {
+    use mochi_user_platform as platform;
+    use mochios_filesystem_protocol as protocol;
+
+    if flags & !protocol::RENAME_AT_FLAGS_ALL != 0 {
+        return Err(22);
+    }
+    let mut index = 0usize;
+    let mut next_open = |present: bool| -> Result<Option<u64>, i32> {
+        if !present {
+            return Ok(None);
+        }
+        let object = *attached.handles.get(index).ok_or(22)?;
+        index += 1;
+        let required = platform::handle::HANDLE_RIGHT_READ
+            | platform::handle::HANDLE_RIGHT_TRANSFER;
+        if object.handle == 0 || object.reserved != 0 || object.rights & required != required {
+            return Err(13);
+        }
+        platform::handle::identify_provider_object(object.handle)
+            .map(Some)
+            .map_err(|_| 9)
+    };
+    let anchors = filesystem_service::service::RenameAnchors {
+        root_open_id: next_open(flags & protocol::RENAME_AT_ROOT_ATTACHED != 0)?,
+        old_base_open_id: next_open(flags & protocol::RENAME_AT_OLD_BASE_ATTACHED != 0)?,
+        new_base_open_id: next_open(flags & protocol::RENAME_AT_NEW_BASE_ATTACHED != 0)?,
+    };
+    if index != attached.count as usize {
+        return Err(22);
+    }
+    Ok(anchors)
 }
 
 #[cfg(target_os = "mochios")]

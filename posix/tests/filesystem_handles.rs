@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ext4plus::{Ext4, Ext4Read, Ext4Write};
-use filesystem_service::service::{FilesystemService, PathAnchors};
+use filesystem_service::service::{FilesystemService, PathAnchors, RenameAnchors};
 use mochi_user_platform::handle::HANDLE_SEEK_START;
 use mochios_filesystem_protocol as protocol;
 
@@ -476,6 +476,112 @@ fn unlink_at_keeps_an_open_file_description_alive() {
         b"alive"
     );
     filesystem.provider_close(file.header.open_id).unwrap();
+}
+
+#[test]
+fn rename_at_moves_between_two_open_directories_and_replaces_atomically() {
+    let mut filesystem = test_filesystem();
+    let old_base = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+                ..protocol::Header::default()
+            },
+            b"/create-base",
+            PathAnchors::default(),
+        )
+        .unwrap();
+    let new_base = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+                ..protocol::Header::default()
+            },
+            b"/removed",
+            PathAnchors::default(),
+        )
+        .unwrap();
+    let source = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ
+                    | protocol::OPEN_AT_WRITE
+                    | protocol::OPEN_AT_CREATE
+                    | protocol::OPEN_AT_BASE_ATTACHED,
+                mode: 0o644,
+                ..protocol::Header::default()
+            },
+            b"source",
+            PathAnchors {
+                root_open_id: None,
+                base_open_id: Some(old_base.header.open_id),
+            },
+        )
+        .unwrap();
+    filesystem
+        .provider_write(source.header.open_id, b"source-data")
+        .unwrap();
+    let destination = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ
+                    | protocol::OPEN_AT_WRITE
+                    | protocol::OPEN_AT_CREATE
+                    | protocol::OPEN_AT_BASE_ATTACHED,
+                mode: 0o644,
+                ..protocol::Header::default()
+            },
+            b"destination",
+            PathAnchors {
+                root_open_id: None,
+                base_open_id: Some(new_base.header.open_id),
+            },
+        )
+        .unwrap();
+    filesystem
+        .provider_write(destination.header.open_id, b"old")
+        .unwrap();
+    let mut payload = b"source".to_vec();
+    payload.extend_from_slice(b"destination");
+    filesystem
+        .rename_at(
+            protocol::Header {
+                opcode: protocol::OP_RENAME_AT,
+                flags: protocol::RENAME_AT_OLD_BASE_ATTACHED
+                    | protocol::RENAME_AT_NEW_BASE_ATTACHED,
+                mode: 6,
+                ..protocol::Header::default()
+            },
+            &payload,
+            RenameAnchors {
+                root_open_id: None,
+                old_base_open_id: Some(old_base.header.open_id),
+                new_base_open_id: Some(new_base.header.open_id),
+            },
+        )
+        .unwrap();
+
+    filesystem
+        .provider_seek(source.header.open_id, 0, HANDLE_SEEK_START)
+        .unwrap();
+    assert_eq!(
+        filesystem.provider_read(source.header.open_id, 11).unwrap(),
+        b"source-data"
+    );
+    filesystem
+        .provider_seek(destination.header.open_id, 0, HANDLE_SEEK_START)
+        .unwrap();
+    assert_eq!(
+        filesystem
+            .provider_read(destination.header.open_id, 3)
+            .unwrap(),
+        b"old"
+    );
+    filesystem.provider_close(destination.header.open_id).unwrap();
 }
 
 #[test]

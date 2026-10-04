@@ -59,6 +59,16 @@ pub struct PreparedUnlink {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedRename {
+    pub old_base: protocol::OpenBase,
+    pub new_base: protocol::OpenBase,
+    pub old_path: String,
+    pub new_path: String,
+    pub effective_uid: u32,
+    pub effective_gid: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedStat {
     pub base: protocol::OpenBase,
     pub flags: u32,
@@ -93,6 +103,13 @@ pub struct OpenedObject<H> {
 pub struct PathObjects<H> {
     pub root: AttachedObject<H>,
     pub base: Option<AttachedObject<H>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RenamePathObjects<H> {
+    pub root: AttachedObject<H>,
+    pub old_base: Option<AttachedObject<H>>,
+    pub new_base: Option<AttachedObject<H>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,6 +156,12 @@ pub trait FilesystemBackend<H: Copy> {
     fn mkdir_at(&mut self, request: &PreparedMkdir, paths: PathObjects<H>) -> Result<(), i32>;
 
     fn unlink_at(&mut self, request: &PreparedUnlink, paths: PathObjects<H>) -> Result<(), i32>;
+
+    fn rename_at(
+        &mut self,
+        request: &PreparedRename,
+        paths: RenamePathObjects<H>,
+    ) -> Result<(), i32>;
 
     /// Resolves a path and checks access using the supplied authenticated
     /// POSIX credentials as one backend operation.
@@ -238,7 +261,8 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_FGETFL
             | protocol::OP_FSETFL
             | protocol::OP_MKDIR_AT
-            | protocol::OP_UNLINK_AT => Err(STATUS_EINVAL),
+            | protocol::OP_UNLINK_AT
+            | protocol::OP_RENAME_AT => Err(STATUS_EINVAL),
             _ => Err(protocol::STATUS_ENOSYS),
         };
         let (status, payload) = match result {
@@ -280,6 +304,7 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_FSETFL
                 | protocol::OP_MKDIR_AT
                 | protocol::OP_UNLINK_AT
+                | protocol::OP_RENAME_AT
         ) {
             let response = if handles.is_empty() {
                 self.handle(peer, header, payload)
@@ -307,6 +332,7 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_GETCWD
                 | protocol::OP_MKDIR_AT
                 | protocol::OP_UNLINK_AT
+                | protocol::OP_RENAME_AT
         ) {
             if let Err(status) = self.ensure_session_directories(peer.process_id, filesystem) {
                 return object_error(header.request_id, status);
@@ -525,6 +551,25 @@ impl<H: Copy> PosixService<H> {
                     Err(status) => object_error(header.request_id, status),
                 }
             }
+            protocol::OP_RENAME_AT => {
+                let prepared = match self.prepare_rename_at(peer, payload, handles.len()) {
+                    Ok(prepared) => prepared,
+                    Err(status) => return object_error(header.request_id, status),
+                };
+                let paths = match self.rename_path_objects(
+                    peer.process_id,
+                    prepared.old_base,
+                    prepared.new_base,
+                    handles,
+                ) {
+                    Ok(paths) => paths,
+                    Err(status) => return object_error(header.request_id, status),
+                };
+                match filesystem.rename_at(&prepared, paths) {
+                    Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
+                    Err(status) => object_error(header.request_id, status),
+                }
+            }
             _ => unreachable!(),
         }
     }
@@ -577,6 +622,41 @@ impl<H: Copy> PosixService<H> {
         Ok(PathObjects {
             root: directories.root,
             base,
+        })
+    }
+
+    fn rename_path_objects(
+        &self,
+        process_id: u64,
+        old_base: protocol::OpenBase,
+        new_base: protocol::OpenBase,
+        handles: &[AttachedObject<H>],
+    ) -> Result<RenamePathObjects<H>, i32> {
+        let directories = self
+            .directories
+            .get(&process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let mut next = 0usize;
+        let mut resolve = |base| -> Result<Option<AttachedObject<H>>, i32> {
+            match base {
+                protocol::OpenBase::ProcessRoot => Ok(None),
+                protocol::OpenBase::ProcessCwd => Ok(Some(directories.cwd)),
+                protocol::OpenBase::AttachedDirectory => {
+                    let object = handles.get(next).copied().ok_or(STATUS_EINVAL)?;
+                    next += 1;
+                    Ok(Some(object))
+                }
+            }
+        };
+        let old_base = resolve(old_base)?;
+        let new_base = resolve(new_base)?;
+        if next != handles.len() {
+            return Err(STATUS_EINVAL);
+        }
+        Ok(RenamePathObjects {
+            root: directories.root,
+            old_base,
+            new_base,
         })
     }
 
@@ -657,6 +737,32 @@ impl<H: Copy> PosixService<H> {
             base: request.base,
             flags: request.flags,
             path: request.path.to_owned(),
+            effective_uid: session.effective_uid,
+            effective_gid: session.effective_gid,
+        })
+    }
+
+    pub fn prepare_rename_at(
+        &self,
+        peer: PeerIdentity,
+        payload: &[u8],
+        attached_handles: usize,
+    ) -> Result<PreparedRename, i32> {
+        let session = self
+            .sessions
+            .get(&peer.process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let request = protocol::decode_rename_at(payload).map_err(|_| STATUS_EINVAL)?;
+        let expected_handles = usize::from(request.old_base == protocol::OpenBase::AttachedDirectory)
+            + usize::from(request.new_base == protocol::OpenBase::AttachedDirectory);
+        if attached_handles != expected_handles {
+            return Err(STATUS_EINVAL);
+        }
+        Ok(PreparedRename {
+            old_base: request.old_base,
+            new_base: request.new_base,
+            old_path: request.old_path.to_owned(),
+            new_path: request.new_path.to_owned(),
             effective_uid: session.effective_uid,
             effective_gid: session.effective_gid,
         })

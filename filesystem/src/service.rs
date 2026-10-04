@@ -35,6 +35,13 @@ pub struct PathAnchors {
     pub base_open_id: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RenameAnchors {
+    pub root_open_id: Option<u64>,
+    pub old_base_open_id: Option<u64>,
+    pub new_base_open_id: Option<u64>,
+}
+
 pub struct FilesystemService {
     fs: Ext4,
     nodes: HashMap<u64, String>,
@@ -106,7 +113,8 @@ impl FilesystemService {
             | protocol::OP_GET_FLAGS_HANDLE
             | protocol::OP_SET_FLAGS_HANDLE
             | protocol::OP_MKDIR_AT
-            | protocol::OP_UNLINK_AT => Err(EINVAL),
+            | protocol::OP_UNLINK_AT
+            | protocol::OP_RENAME_AT => Err(EINVAL),
             _ => Err(ENOSYS),
         };
         result.unwrap_or_else(|errno| self.error(request, errno))
@@ -1441,6 +1449,224 @@ impl FilesystemService {
         }
         self.rename_node_paths(old_path, new_path);
         Ok(self.success(request))
+    }
+
+    pub fn rename_at(
+        &mut self,
+        request: protocol::Header,
+        payload: &[u8],
+        anchors: RenameAnchors,
+    ) -> Result<Response, i32> {
+        if request.flags & !protocol::RENAME_AT_FLAGS_ALL != 0 {
+            return Err(EINVAL);
+        }
+        if (request.flags & protocol::RENAME_AT_ROOT_ATTACHED != 0)
+            != anchors.root_open_id.is_some()
+            || (request.flags & protocol::RENAME_AT_OLD_BASE_ATTACHED != 0)
+                != anchors.old_base_open_id.is_some()
+            || (request.flags & protocol::RENAME_AT_NEW_BASE_ATTACHED != 0)
+                != anchors.new_base_open_id.is_some()
+        {
+            return Err(EINVAL);
+        }
+        let split = request.mode as usize;
+        let (old_path, new_path) = payload.split_at_checked(split).ok_or(EINVAL)?;
+        if old_path.is_empty()
+            || new_path.is_empty()
+            || old_path.len() > protocol::MAX_PATH_LEN
+            || new_path.len() > protocol::MAX_PATH_LEN
+        {
+            return Err(EINVAL);
+        }
+        let uid = request.offset as u32;
+        let gid = (request.offset >> 32) as u32;
+        let (old_root, old_base) = self.resolve_anchors(
+            old_path,
+            PathAnchors {
+                root_open_id: anchors.root_open_id,
+                base_open_id: anchors.old_base_open_id,
+            },
+        )?;
+        let (new_root, new_base) = self.resolve_anchors(
+            new_path,
+            PathAnchors {
+                root_open_id: anchors.root_open_id,
+                base_open_id: anchors.new_base_open_id,
+            },
+        )?;
+        let (mut source_inode, old_parent_inode, old_name) = match self.resolve_path_at(
+            old_root,
+            old_base,
+            old_path,
+            FollowSymlinks::ExcludeFinalComponent,
+            uid,
+            gid,
+        )? {
+            Resolution::Found {
+                inode,
+                parent: Some((parent, name)),
+            } => (inode, parent, name),
+            Resolution::Found { parent: None, .. } => return Err(EINVAL),
+            Resolution::Missing { .. } => return Err(ENOENT),
+        };
+        let (new_parent_inode, new_name, destination_inode) = match self.resolve_path_at(
+            new_root,
+            new_base,
+            new_path,
+            FollowSymlinks::ExcludeFinalComponent,
+            uid,
+            gid,
+        )? {
+            Resolution::Found {
+                inode,
+                parent: Some((parent, name)),
+            } => (parent, name, Some(inode)),
+            Resolution::Found { parent: None, .. } => return Err(EINVAL),
+            Resolution::Missing { parent, name } => (parent, name, None),
+        };
+        let old_name = std::str::from_utf8(&old_name).map_err(|_| EINVAL)?;
+        let new_name = std::str::from_utf8(&new_name).map_err(|_| EINVAL)?;
+        let same_parent = old_parent_inode.index == new_parent_inode.index;
+        if same_parent && old_name == new_name {
+            return Ok(self.success(request));
+        }
+        for parent in [&old_parent_inode, &new_parent_inode] {
+            let metadata = parent.metadata();
+            if !permission_allows(
+                metadata.mode(),
+                protocol::NODE_TYPE_DIRECTORY,
+                metadata.uid(),
+                metadata.gid(),
+                uid,
+                gid,
+                protocol::ACCESS_AT_WRITE | protocol::ACCESS_AT_EXECUTE,
+            ) {
+                return Err(EACCES);
+            }
+        }
+        let mut old_parent = Dir::open_inode(&self.fs, old_parent_inode).map_err(errno)?;
+        let mut new_parent = Dir::open_inode(&self.fs, new_parent_inode.clone()).map_err(errno)?;
+        let source_node_id = u64::from(source_inode.index.get());
+        let source_is_directory = source_inode.file_type().is_dir();
+        if destination_inode
+            .as_ref()
+            .is_some_and(|inode| inode.index == source_inode.index)
+        {
+            return Ok(self.success(request));
+        }
+        let destination = match destination_inode {
+            Some(inode) if source_is_directory && inode.file_type().is_dir() => {
+                if !self.directory_is_empty(&inode)? {
+                    return Err(ENOTEMPTY);
+                }
+                Some((u64::from(inode.index.get()), inode))
+            }
+            Some(_) if source_is_directory => return Err(ENOTDIR),
+            Some(inode) if inode.file_type().is_dir() => return Err(EISDIR),
+            Some(inode) => Some((u64::from(inode.index.get()), inode)),
+            None => None,
+        };
+        if source_is_directory {
+            if self.directory_is_at_or_below(&source_inode, new_parent_inode)? {
+                return Err(EINVAL);
+            }
+            let backup_name = format!(".mochios-orphan-rename-{}", request.request_id);
+            self.stage_rename_destination(
+                &mut new_parent,
+                new_name,
+                &backup_name,
+                destination.as_ref(),
+            )?;
+            if let Err(error) = self.move_directory(
+                &mut old_parent,
+                &mut new_parent,
+                same_parent,
+                old_name,
+                new_name,
+                source_inode,
+            ) {
+                self.restore_rename_destination(
+                    &mut new_parent,
+                    new_name,
+                    &backup_name,
+                    destination,
+                );
+                return Err(error);
+            }
+            if let Some((destination_node_id, destination_inode)) = destination {
+                self.remove_replaced_directory(&mut new_parent, &backup_name, destination_inode)?;
+                self.forget_node_paths(destination_node_id);
+            }
+            self.forget_node_paths(source_node_id);
+            return Ok(self.success(request));
+        }
+        let backup_name = format!(".mochios-orphan-rename-{}", request.request_id);
+        if let Some((_, mut destination_inode)) = destination.clone() {
+            new_parent
+                .link(
+                    DirEntryName::try_from(backup_name.as_str()).map_err(|_| EIO)?,
+                    &mut destination_inode,
+                )
+                .map_err(errno)?;
+            if let Err(error) = new_parent.unlink(
+                DirEntryName::try_from(new_name).map_err(|_| EINVAL)?,
+                destination_inode.clone(),
+            ) {
+                let _ = new_parent.unlink(
+                    DirEntryName::try_from(backup_name.as_str()).map_err(|_| EIO)?,
+                    destination_inode,
+                );
+                return Err(errno(error));
+            }
+        }
+        if let Err(error) = new_parent.link(
+            DirEntryName::try_from(new_name).map_err(|_| EINVAL)?,
+            &mut source_inode,
+        ) {
+            self.restore_rename_destination(&mut new_parent, new_name, &backup_name, destination);
+            return Err(errno(error));
+        }
+        if let Err(error) = old_parent.unlink(
+            DirEntryName::try_from(old_name).map_err(|_| EINVAL)?,
+            source_inode.clone(),
+        ) {
+            let _ = new_parent.unlink(
+                DirEntryName::try_from(new_name).map_err(|_| EINVAL)?,
+                source_inode,
+            );
+            self.restore_rename_destination(&mut new_parent, new_name, &backup_name, destination);
+            return Err(errno(error));
+        }
+        if let Some((destination_node_id, destination_inode)) = destination {
+            if self
+                .opens
+                .values()
+                .any(|open| open.node_id == destination_node_id)
+            {
+                self.orphans.insert(
+                    destination_node_id,
+                    Orphan {
+                        parent: new_parent_inode,
+                        name: backup_name,
+                    },
+                );
+            } else {
+                new_parent
+                    .unlink(
+                        DirEntryName::try_from(backup_name.as_str()).map_err(|_| EIO)?,
+                        destination_inode,
+                    )
+                    .map_err(errno)?;
+                self.forget_node_paths(destination_node_id);
+            }
+        }
+        self.forget_node_paths(source_node_id);
+        Ok(self.success(request))
+    }
+
+    fn forget_node_paths(&mut self, node_id: u64) {
+        self.nodes.remove(&node_id);
+        self.node_ids.retain(|_, known_node_id| *known_node_id != node_id);
     }
 
     fn restore_rename_destination(

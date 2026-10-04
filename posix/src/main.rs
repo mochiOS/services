@@ -366,6 +366,32 @@ impl RuntimeFilesystem {
         }
         Ok(handles)
     }
+
+    fn rename_path_handles(
+        paths: posix_service::RenamePathObjects<mochi_user_platform::handle::Handle>,
+    ) -> Result<mochi_user_platform::ipc::IpcObjectHandles, i32> {
+        use mochi_user_platform as platform;
+
+        let required =
+            platform::handle::HANDLE_RIGHT_READ | platform::handle::HANDLE_RIGHT_TRANSFER;
+        let mut handles = platform::ipc::IpcObjectHandles::default();
+        for object in [Some(paths.root), paths.old_base, paths.new_base]
+            .into_iter()
+            .flatten()
+        {
+            if object.rights & required != required {
+                return Err(-13);
+            }
+            let index = handles.count as usize;
+            handles.handles[index] = platform::ipc::IpcObjectHandle {
+                handle: object.handle,
+                reserved: 0,
+                rights: required,
+            };
+            handles.count += 1;
+        }
+        Ok(handles)
+    }
 }
 
 #[cfg(target_os = "mochios")]
@@ -672,6 +698,40 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             },
             request.path.as_bytes(),
             Self::path_handles(paths)?,
+        )
+    }
+
+    fn rename_at(
+        &mut self,
+        request: &posix_service::PreparedRename,
+        paths: posix_service::RenamePathObjects<mochi_user_platform::handle::Handle>,
+    ) -> Result<(), i32> {
+        use mochios_filesystem_protocol as filesystem;
+
+        let mut flags = filesystem::RENAME_AT_ROOT_ATTACHED;
+        if paths.old_base.is_some() {
+            flags |= filesystem::RENAME_AT_OLD_BASE_ATTACHED;
+        }
+        if paths.new_base.is_some() {
+            flags |= filesystem::RENAME_AT_NEW_BASE_ATTACHED;
+        }
+        let old_length = u32::try_from(request.old_path.len()).map_err(|_| -22)?;
+        let mut payload = Vec::with_capacity(request.old_path.len() + request.new_path.len());
+        payload.extend_from_slice(request.old_path.as_bytes());
+        payload.extend_from_slice(request.new_path.as_bytes());
+        self.empty_call(
+            filesystem::Header {
+                opcode: filesystem::OP_RENAME_AT,
+                request_id: 12,
+                offset: u64::from(request.effective_uid)
+                    | (u64::from(request.effective_gid) << 32),
+                length: payload.len() as u32,
+                flags,
+                mode: old_length,
+                ..filesystem::Header::default()
+            },
+            &payload,
+            Self::rename_path_handles(paths)?,
         )
     }
 
