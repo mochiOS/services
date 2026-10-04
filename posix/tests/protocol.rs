@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 
 use mochios_filesystem_protocol as filesystem_protocol;
 use mochios_posix_client::{
@@ -7,8 +8,8 @@ use mochios_posix_client::{
 use mochios_posix_protocol as protocol;
 use posix_service::{
     AttachedObject, AuthenticatedProcess, FilesystemBackend, OpenedObject, PathObjects,
-    PeerIdentity, PosixService, PreparedAccess, PreparedOpen, PreparedStat, SessionDirectories,
-    STATUS_EINVAL,
+    PeerIdentity, PosixService, PreparedAccess, PreparedOpen, PreparedStat, ProcessBackend,
+    ProcessLifecycle, SessionDirectories, STATUS_EINVAL,
 };
 
 struct LocalTransport {
@@ -246,6 +247,27 @@ fn fixed_size_session_payloads_reject_trailing_bytes() {
     );
     assert_eq!(
         protocol::decode_file_length(&[0; protocol::FILE_LENGTH_PAYLOAD_LEN + 1]),
+        Err(protocol::ProtocolError::InvalidLength)
+    );
+    let mut wait = [0u8; protocol::WAIT_REQUEST_LEN];
+    protocol::encode_wait_request(
+        protocol::WaitRequest {
+            selector: -7,
+            options: protocol::WAIT_NOHANG,
+        },
+        &mut wait,
+    )
+    .unwrap();
+    assert_eq!(
+        protocol::decode_wait_request(&wait).unwrap(),
+        protocol::WaitRequest {
+            selector: -7,
+            options: protocol::WAIT_NOHANG,
+        }
+    );
+    wait[12] = 1;
+    assert_eq!(
+        protocol::decode_wait_request(&wait),
         Err(protocol::ProtocolError::InvalidLength)
     );
 }
@@ -782,6 +804,22 @@ struct RecordingFilesystem {
     directory_path: Vec<u8>,
 }
 
+#[derive(Default)]
+struct RecordingProcesses {
+    states: BTreeMap<u32, ProcessLifecycle>,
+    released: Vec<u32>,
+}
+
+impl ProcessBackend<u32> for RecordingProcesses {
+    fn status(&mut self, process: u32) -> Result<ProcessLifecycle, i32> {
+        self.states.get(&process).copied().ok_or(-3)
+    }
+
+    fn release(&mut self, process: u32) {
+        self.released.push(process);
+    }
+}
+
 impl FilesystemBackend<u32> for RecordingFilesystem {
     fn open_session_root(
         &mut self,
@@ -1089,6 +1127,95 @@ fn adopted_child_inherits_posix_state_and_retained_directories() {
         })
     );
     assert_eq!(filesystem.retained.len(), 2);
+}
+
+#[test]
+fn wait_selects_and_reaps_only_authenticated_children() {
+    let peer = PeerIdentity {
+        process_id: 121,
+        effective_uid: 505,
+        effective_gid: 24,
+    };
+    let mut service = service_for(peer);
+    service.handle(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let mut filesystem = RecordingFilesystem::default();
+    for (handle, process_id) in [(62, 122), (63, 123)] {
+        service
+            .adopt_child(
+                peer,
+                AuthenticatedProcess { handle, process_id },
+                &mut filesystem,
+            )
+            .unwrap();
+    }
+    let mut processes = RecordingProcesses::default();
+    processes.states.insert(62, ProcessLifecycle::Running);
+    processes
+        .states
+        .insert(63, ProcessLifecycle::Exited { exit_code: 7 });
+
+    let waited = service
+        .wait_child(
+            peer,
+            protocol::WaitRequest {
+                selector: -1,
+                options: 0,
+            },
+            &mut filesystem,
+            &mut processes,
+        )
+        .unwrap();
+    assert_eq!(waited.process_id, 123);
+    assert_eq!(waited.status, 7 << 8);
+    assert_eq!(processes.released, vec![63]);
+    assert!(!service.is_child(121, 123));
+    assert!(service.session(123).is_none());
+
+    assert_eq!(
+        service
+            .wait_child(
+                peer,
+                protocol::WaitRequest {
+                    selector: 122,
+                    options: protocol::WAIT_NOHANG,
+                },
+                &mut filesystem,
+                &mut processes,
+            )
+            .unwrap(),
+        protocol::WaitResult::default()
+    );
+    assert_eq!(
+        service.wait_child(
+            peer,
+            protocol::WaitRequest {
+                selector: 122,
+                options: 0,
+            },
+            &mut filesystem,
+            &mut processes,
+        ),
+        Err(protocol::STATUS_EAGAIN)
+    );
+    assert_eq!(
+        service.wait_child(
+            peer,
+            protocol::WaitRequest {
+                selector: 999,
+                options: protocol::WAIT_NOHANG,
+            },
+            &mut filesystem,
+            &mut processes,
+        ),
+        Err(protocol::STATUS_ECHILD)
+    );
 }
 
 #[test]

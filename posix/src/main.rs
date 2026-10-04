@@ -50,6 +50,7 @@ fn main() {
     let mut filesystem = RuntimeFilesystem {
         endpoint: filesystem_endpoint,
     };
+    let mut processes = RuntimeProcesses;
     let mut request_bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
     let mut response_bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
     loop {
@@ -107,6 +108,21 @@ fn main() {
         };
         let mut retained_process_handle = None;
         let object_response = match (peer, decoded, attachments_valid && registration_valid) {
+            (Some(peer), Some((header, payload)), true)
+                if header.opcode == protocol::OP_WAIT_CHILD
+                    && header.flags == 0
+                    && attachments.is_empty() =>
+            {
+                let response = protocol::decode_wait_request(payload)
+                    .map_err(|_| posix_service::STATUS_EINVAL)
+                    .and_then(|request| {
+                        service.wait_child(peer, request, &mut filesystem, &mut processes)
+                    });
+                posix_service::ObjectResponse {
+                    response: wait_response(header.request_id, response),
+                    handles: Vec::new(),
+                }
+            }
             (Some(peer), Some((header, payload)), true)
                 if header.opcode == protocol::OP_PROCESS_FORKED
                     && header.flags == 0
@@ -277,8 +293,68 @@ fn success_response(request_id: u64) -> posix_service::Response {
 }
 
 #[cfg(target_os = "mochios")]
+fn wait_response(
+    request_id: u64,
+    result: Result<mochios_posix_protocol::WaitResult, i32>,
+) -> posix_service::Response {
+    use mochios_posix_protocol as protocol;
+
+    match result {
+        Ok(result) => {
+            let mut payload = vec![0u8; protocol::WAIT_RESULT_LEN];
+            if protocol::encode_wait_result(result, &mut payload).is_err() {
+                return invalid_response(request_id);
+            }
+            posix_service::Response {
+                header: protocol::Header {
+                    opcode: protocol::OP_STATUS,
+                    request_id,
+                    payload_len: payload.len() as u32,
+                    status: protocol::STATUS_OK,
+                    ..protocol::Header::default()
+                },
+                payload,
+            }
+        }
+        Err(status) => posix_service::Response {
+            header: protocol::Header {
+                opcode: protocol::OP_STATUS,
+                request_id,
+                status,
+                ..protocol::Header::default()
+            },
+            payload: Vec::new(),
+        },
+    }
+}
+
+#[cfg(target_os = "mochios")]
 struct RuntimeFilesystem {
     endpoint: mochi_user_platform::handle::Handle,
+}
+
+#[cfg(target_os = "mochios")]
+struct RuntimeProcesses;
+
+#[cfg(target_os = "mochios")]
+impl posix_service::ProcessBackend<u32> for RuntimeProcesses {
+    fn status(&mut self, process: u32) -> Result<posix_service::ProcessLifecycle, i32> {
+        use mochi_user_platform as platform;
+
+        let status = platform::process::handle_status(process)
+            .map_err(|error| i32::try_from(error.raw()).unwrap_or(-5))?;
+        if status.state == platform::syscall::PROCESS_STATE_EXITED {
+            Ok(posix_service::ProcessLifecycle::Exited {
+                exit_code: status.exit_code,
+            })
+        } else {
+            Ok(posix_service::ProcessLifecycle::Running)
+        }
+    }
+
+    fn release(&mut self, process: u32) {
+        let _ = mochi_user_platform::handle::close(process);
+    }
 }
 
 #[cfg(target_os = "mochios")]

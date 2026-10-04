@@ -265,6 +265,17 @@ pub trait FilesystemBackend<H: Copy> {
     ) -> Result<Vec<u8>, i32>;
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcessLifecycle {
+    Running,
+    Exited { exit_code: u64 },
+}
+
+pub trait ProcessBackend<H: Copy> {
+    fn status(&mut self, process: H) -> Result<ProcessLifecycle, i32>;
+    fn release(&mut self, process: H);
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObjectResponse<H> {
     pub response: Response,
@@ -278,6 +289,8 @@ pub struct PosixService<H: Copy = u32> {
     processes: BTreeMap<u64, H>,
     parents: BTreeMap<u64, u64>,
     children: BTreeMap<u64, BTreeSet<u64>>,
+    process_groups: BTreeMap<u64, u64>,
+    session_ids: BTreeMap<u64, u64>,
 }
 
 impl PosixService<u32> {
@@ -288,6 +301,8 @@ impl PosixService<u32> {
             processes: BTreeMap::new(),
             parents: BTreeMap::new(),
             children: BTreeMap::new(),
+            process_groups: BTreeMap::new(),
+            session_ids: BTreeMap::new(),
         }
     }
 }
@@ -329,6 +344,8 @@ impl<H: Copy> PosixService<H> {
             return Ok(false);
         }
         self.processes.insert(peer.process_id, process.handle);
+        self.process_groups.insert(peer.process_id, peer.process_id);
+        self.session_ids.insert(peer.process_id, peer.process_id);
         Ok(true)
     }
 
@@ -379,11 +396,113 @@ impl<H: Copy> PosixService<H> {
             self.directories.insert(child_id, directories);
         }
         self.parents.insert(child_id, peer.process_id);
+        self.process_groups.insert(
+            child_id,
+            self.process_groups
+                .get(&peer.process_id)
+                .copied()
+                .unwrap_or(peer.process_id),
+        );
+        self.session_ids.insert(
+            child_id,
+            self.session_ids
+                .get(&peer.process_id)
+                .copied()
+                .unwrap_or(peer.process_id),
+        );
         self.children
             .entry(peer.process_id)
             .or_default()
             .insert(child_id);
         Ok(())
+    }
+
+    pub fn wait_child<F: FilesystemBackend<H>, P: ProcessBackend<H>>(
+        &mut self,
+        peer: PeerIdentity,
+        request: protocol::WaitRequest,
+        filesystem: &mut F,
+        processes: &mut P,
+    ) -> Result<protocol::WaitResult, i32> {
+        if request.options & !protocol::WAIT_OPTIONS_ALL != 0 {
+            return Err(STATUS_EINVAL);
+        }
+        let caller_group = self
+            .process_groups
+            .get(&peer.process_id)
+            .copied()
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let children = self
+            .children
+            .get(&peer.process_id)
+            .ok_or(protocol::STATUS_ECHILD)?;
+        let requested_group = if request.selector < -1 {
+            request.selector.checked_neg().map(|value| value as u64)
+        } else {
+            None
+        };
+        if request.selector < -1 && requested_group.is_none() {
+            return Err(STATUS_EINVAL);
+        }
+        let candidates: Vec<u64> = children
+            .iter()
+            .copied()
+            .filter(|child| match request.selector {
+                selector if selector > 0 => *child == selector as u64,
+                -1 => true,
+                0 => self.process_groups.get(child).copied() == Some(caller_group),
+                _ => self.process_groups.get(child).copied() == requested_group,
+            })
+            .collect();
+        if candidates.is_empty() {
+            return Err(protocol::STATUS_ECHILD);
+        }
+        for child in candidates {
+            let handle = self
+                .processes
+                .get(&child)
+                .copied()
+                .ok_or(protocol::STATUS_ESRCH)?;
+            if let ProcessLifecycle::Exited { exit_code } = processes.status(handle)? {
+                let status = ((exit_code & 0xff) as u32) << 8;
+                self.reap_child(peer.process_id, child, filesystem, processes);
+                return Ok(protocol::WaitResult {
+                    process_id: child,
+                    status,
+                });
+            }
+        }
+        if request.options & protocol::WAIT_NOHANG != 0 {
+            Ok(protocol::WaitResult::default())
+        } else {
+            Err(protocol::STATUS_EAGAIN)
+        }
+    }
+
+    fn reap_child<F: FilesystemBackend<H>, P: ProcessBackend<H>>(
+        &mut self,
+        parent_id: u64,
+        child_id: u64,
+        filesystem: &mut F,
+        processes: &mut P,
+    ) {
+        if let Some(children) = self.children.get_mut(&parent_id) {
+            children.remove(&child_id);
+            if children.is_empty() {
+                self.children.remove(&parent_id);
+            }
+        }
+        self.parents.remove(&child_id);
+        self.process_groups.remove(&child_id);
+        self.session_ids.remove(&child_id);
+        self.sessions.remove(&child_id);
+        if let Some(directories) = self.directories.remove(&child_id) {
+            filesystem.release_object(directories.root);
+            filesystem.release_object(directories.cwd);
+        }
+        if let Some(handle) = self.processes.remove(&child_id) {
+            processes.release(handle);
+        }
     }
 
     pub fn handle(
@@ -434,6 +553,7 @@ impl<H: Copy> PosixService<H> {
             protocol::OP_SET_UID
             | protocol::OP_SET_GID
             | protocol::OP_PROCESS_FORKED
+            | protocol::OP_WAIT_CHILD
             | protocol::OP_FTRUNCATE
             | protocol::OP_FSYNC
             | protocol::OP_FGETFL
