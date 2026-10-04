@@ -669,6 +669,7 @@ struct RecordingFilesystem {
     unlink_request: Option<posix_service::PreparedUnlink>,
     rename_request: Option<posix_service::PreparedRename>,
     rename_paths: Option<posix_service::RenamePathObjects<u32>>,
+    truncate_request: Option<posix_service::PreparedTruncate>,
     retained: Vec<AttachedObject<u32>>,
     released: Vec<AttachedObject<u32>>,
     path_query: Option<(AttachedObject<u32>, AttachedObject<u32>)>,
@@ -778,6 +779,17 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
     ) -> Result<(), i32> {
         self.rename_request = Some(request.clone());
         self.rename_paths = Some(paths);
+        Ok(())
+    }
+
+    fn truncate_at(
+        &mut self,
+        request: &posix_service::PreparedTruncate,
+        paths: PathObjects<u32>,
+    ) -> Result<(), i32> {
+        self.truncate_request = Some(request.clone());
+        self.root = Some(paths.root);
+        self.directory = paths.base;
         Ok(())
     }
 
@@ -1288,6 +1300,57 @@ fn rename_wire_and_service_preserve_two_distinct_directory_handles() {
     assert_eq!(paths.old_base, Some(old_directory));
     assert_eq!(paths.new_base, Some(new_directory));
     assert_eq!(filesystem.roots_opened, 1);
+}
+
+#[test]
+fn truncate_path_uses_authenticated_session_and_explicit_base_handle() {
+    let peer = PeerIdentity {
+        process_id: 122,
+        effective_uid: 502,
+        effective_gid: 21,
+    };
+    let mut service = PosixService::new();
+    service.handle(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let directory = AttachedObject {
+        handle: 65,
+        rights: 0x81,
+    };
+    let mut payload = [0; protocol::TRUNCATE_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
+    let length = protocol::encode_truncate_at(
+        protocol::TruncateAtRequest {
+            base: protocol::OpenBase::AttachedDirectory,
+            length: 1234,
+            path: "file",
+        },
+        &mut payload,
+    )
+    .unwrap();
+    let mut filesystem = RecordingFilesystem::default();
+    let result = service.handle_objects(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_TRUNCATE_AT,
+            ..protocol::Header::default()
+        },
+        &payload[..length],
+        &[directory],
+        &mut filesystem,
+    );
+
+    assert_eq!(result.response.header.status, protocol::STATUS_OK);
+    let prepared = filesystem.truncate_request.unwrap();
+    assert_eq!(prepared.path, "file");
+    assert_eq!(prepared.length, 1234);
+    assert_eq!(prepared.effective_uid, 502);
+    assert_eq!(prepared.effective_gid, 21);
+    assert_eq!(filesystem.directory, Some(directory));
 }
 
 #[test]

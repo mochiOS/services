@@ -585,6 +585,62 @@ fn rename_at_moves_between_two_open_directories_and_replaces_atomically() {
 }
 
 #[test]
+fn truncate_at_resolves_and_mutates_in_one_anchored_operation() {
+    let mut filesystem = test_filesystem();
+    let base = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+                ..protocol::Header::default()
+            },
+            b"/create-base",
+            PathAnchors::default(),
+        )
+        .unwrap();
+    let file = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ
+                    | protocol::OPEN_AT_WRITE
+                    | protocol::OPEN_AT_CREATE
+                    | protocol::OPEN_AT_BASE_ATTACHED,
+                mode: 0o666,
+                ..protocol::Header::default()
+            },
+            b"truncate-path",
+            PathAnchors {
+                root_open_id: None,
+                base_open_id: Some(base.header.open_id),
+            },
+        )
+        .unwrap();
+    filesystem
+        .provider_write(file.header.open_id, b"abcdefgh")
+        .unwrap();
+    filesystem
+        .truncate_at(
+            protocol::Header {
+                opcode: protocol::OP_TRUNCATE_AT,
+                open_id: 3,
+                flags: protocol::TRUNCATE_AT_BASE_ATTACHED,
+                ..protocol::Header::default()
+            },
+            b"truncate-path",
+            PathAnchors {
+                root_open_id: None,
+                base_open_id: Some(base.header.open_id),
+            },
+        )
+        .unwrap();
+    filesystem
+        .provider_seek(file.header.open_id, 0, HANDLE_SEEK_START)
+        .unwrap();
+    assert_eq!(filesystem.provider_read(file.header.open_id, 8).unwrap(), b"abc");
+}
+
+#[test]
 fn open_directory_paths_follow_rename_and_reject_unlinked_cwds() {
     let mut filesystem = test_filesystem();
     let root = filesystem

@@ -114,7 +114,8 @@ impl FilesystemService {
             | protocol::OP_SET_FLAGS_HANDLE
             | protocol::OP_MKDIR_AT
             | protocol::OP_UNLINK_AT
-            | protocol::OP_RENAME_AT => Err(EINVAL),
+            | protocol::OP_RENAME_AT
+            | protocol::OP_TRUNCATE_AT => Err(EINVAL),
             _ => Err(ENOSYS),
         };
         result.unwrap_or_else(|errno| self.error(request, errno))
@@ -455,6 +456,52 @@ impl FilesystemService {
             request.flags & protocol::UNLINK_AT_REMOVE_DIRECTORY != 0,
             None,
         )?;
+        Ok(self.success(request))
+    }
+
+    pub fn truncate_at(
+        &mut self,
+        request: protocol::Header,
+        payload: &[u8],
+        anchors: PathAnchors,
+    ) -> Result<Response, i32> {
+        if request.flags & !protocol::TRUNCATE_AT_FLAGS_ALL != 0 {
+            return Err(EINVAL);
+        }
+        let root_attached = request.flags & protocol::TRUNCATE_AT_ROOT_ATTACHED != 0;
+        let base_attached = request.flags & protocol::TRUNCATE_AT_BASE_ATTACHED != 0;
+        if root_attached != anchors.root_open_id.is_some()
+            || base_attached != anchors.base_open_id.is_some()
+        {
+            return Err(EINVAL);
+        }
+        let uid = request.offset as u32;
+        let gid = (request.offset >> 32) as u32;
+        let (root, base) = self.resolve_anchors(payload, anchors)?;
+        let inode = self.resolve_inode_at(
+            root,
+            base,
+            payload,
+            FollowSymlinks::All,
+            uid,
+            gid,
+        )?;
+        let metadata = inode.metadata();
+        if inode.file_type().is_dir() {
+            return Err(EISDIR);
+        }
+        if !permission_allows(
+            metadata.mode(),
+            node_type(metadata.file_type()),
+            metadata.uid(),
+            metadata.gid(),
+            uid,
+            gid,
+            protocol::ACCESS_AT_WRITE,
+        ) {
+            return Err(EACCES);
+        }
+        self.truncate_inode(inode, request.open_id)?;
         Ok(self.success(request))
     }
 
@@ -1877,15 +1924,30 @@ impl FilesystemService {
     }
 
     fn truncate(&mut self, request: protocol::Header) -> Result<Response, i32> {
-        self.opens
-            .get_mut(&request.open_id)
-            .ok_or(EBADF)?
-            .file
-            .as_mut()
-            .ok_or(EISDIR)?
-            .truncate(request.offset)
-            .map_err(errno)?;
+        let open = self.opens.get(&request.open_id).ok_or(EBADF)?;
+        if open.file.is_none() {
+            return Err(EISDIR);
+        }
+        self.truncate_inode(open.inode.clone(), request.offset)?;
         Ok(self.success(request))
+    }
+
+    fn truncate_inode(&mut self, inode: Inode, length: u64) -> Result<(), i32> {
+        let node_id = u64::from(inode.index.get());
+        let mut matched = false;
+        for open in self.opens.values_mut() {
+            if open.node_id == node_id {
+                open.file.as_mut().ok_or(EISDIR)?.truncate(length).map_err(errno)?;
+                matched = true;
+            }
+        }
+        if !matched {
+            File::open_inode(&self.fs, inode)
+                .map_err(errno)?
+                .truncate(length)
+                .map_err(errno)?;
+        }
+        Ok(())
     }
 
     pub fn truncate_handle(
