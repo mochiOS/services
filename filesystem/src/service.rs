@@ -434,6 +434,18 @@ impl FilesystemService {
     }
 
     pub fn provider_read(&mut self, open_id: u64, length: usize) -> Result<Vec<u8>, i32> {
+        let open = self.opens.get(&open_id).ok_or(EBADF)?;
+        if open.file.is_none() {
+            let node_id = open.node_id;
+            let start_entry = open.offset;
+            let (payload, next_entry) = self.read_directory_payload(
+                node_id,
+                start_entry,
+                length.min(mnu_abi::provider::MAX_DATA_LEN),
+            )?;
+            self.opens.get_mut(&open_id).ok_or(EBADF)?.offset = next_entry;
+            return Ok(payload);
+        }
         let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
         let file = open.file.as_mut().ok_or(EISDIR)?;
         let mut payload = vec![0u8; length.min(mnu_abi::provider::MAX_DATA_LEN)];
@@ -695,9 +707,24 @@ impl FilesystemService {
     }
 
     fn read_dir(&mut self, request: protocol::Header) -> Result<Response, i32> {
-        let path = self.nodes.get(&request.node_id).ok_or(ENOENT)?.clone();
         let max_length = (request.flags as usize).min(protocol::MAX_IO_LEN);
-        let start_entry = usize::try_from(request.offset).map_err(|_| EINVAL)?;
+        let (payload, next_entry) =
+            self.read_directory_payload(request.node_id, request.offset, max_length)?;
+        let mut response = self.success(request);
+        response.header.offset = next_entry;
+        response.header.length = payload.len() as u32;
+        response.payload = payload;
+        Ok(response)
+    }
+
+    fn read_directory_payload(
+        &mut self,
+        node_id: u64,
+        start_entry: u64,
+        max_length: usize,
+    ) -> Result<(Vec<u8>, u64), i32> {
+        let path = self.nodes.get(&node_id).ok_or(ENOENT)?.clone();
+        let start_entry = usize::try_from(start_entry).map_err(|_| EINVAL)?;
         let mut payload = Vec::new();
         let mut next_entry = start_entry;
         for entry in self
@@ -728,11 +755,7 @@ impl FilesystemService {
                 .map_err(|_| EIO)?;
             next_entry = next_entry.checked_add(1).ok_or(EIO)?;
         }
-        let mut response = self.success(request);
-        response.header.offset = next_entry as u64;
-        response.header.length = payload.len() as u32;
-        response.payload = payload;
-        Ok(response)
+        Ok((payload, next_entry as u64))
     }
 
     fn unlink(&mut self, request: protocol::Header, payload: &[u8]) -> Result<Response, i32> {
