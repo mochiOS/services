@@ -1,6 +1,8 @@
 use std::cell::RefCell;
 
-use mochios_posix_client::{Client, ClientError, Transport};
+use mochios_posix_client::{
+    Client, ClientError, ObjectHandleAttachment, ObjectHandles, ObjectTransport, Transport,
+};
 use mochios_posix_protocol as protocol;
 use posix_service::{PeerIdentity, PosixService};
 
@@ -125,5 +127,78 @@ fn fixed_size_session_payloads_reject_trailing_bytes() {
     assert_eq!(
         protocol::decode_umask(&[0; protocol::UMASK_PAYLOAD_LEN + 1]),
         Err(protocol::ProtocolError::InvalidLength)
+    );
+}
+
+struct LocalObjectTransport;
+
+impl Transport for LocalObjectTransport {
+    type Error = ();
+
+    fn call(&self, _request: &[u8], _response: &mut [u8]) -> Result<usize, Self::Error> {
+        Err(())
+    }
+}
+
+impl ObjectTransport for LocalObjectTransport {
+    type Handle = u32;
+
+    fn call_with_handles(
+        &self,
+        request: &[u8],
+        response: &mut [u8],
+        handles: &mut ObjectHandles<Self::Handle>,
+    ) -> Result<usize, Self::Error> {
+        let (header, _) = protocol::decode(request).map_err(|_| ())?;
+        assert_eq!(
+            handles.get(0),
+            Some(ObjectHandleAttachment {
+                handle: 41,
+                rights: 0x5,
+            })
+        );
+        handles.clear();
+        handles
+            .push(ObjectHandleAttachment {
+                handle: 73,
+                rights: 0x1,
+            })
+            .unwrap();
+        protocol::encode(
+            protocol::Header {
+                opcode: protocol::OP_STATUS,
+                request_id: header.request_id,
+                status: protocol::STATUS_OK,
+                ..protocol::Header::default()
+            },
+            &[],
+            response,
+        )
+        .map_err(|_| ())
+    }
+}
+
+#[test]
+fn object_transport_replaces_request_handles_with_reply_handles() {
+    let client = Client::new(LocalObjectTransport);
+    let mut handles = ObjectHandles::new();
+    handles
+        .push(ObjectHandleAttachment {
+            handle: 41,
+            rights: 0x5,
+        })
+        .unwrap();
+
+    client
+        .request_with_handles(protocol::OP_PING, 0, &[], &mut [], &mut handles)
+        .unwrap();
+
+    assert_eq!(handles.len(), 1);
+    assert_eq!(
+        handles.get(0),
+        Some(ObjectHandleAttachment {
+            handle: 73,
+            rights: 0x1,
+        })
     );
 }
