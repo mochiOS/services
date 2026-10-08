@@ -11,7 +11,7 @@ use crate::service_launcher::DriverManagerTarget;
 
 pub(crate) const DRIVER_CONTROL_TIMEOUT_TICKS: u64 = 5_000;
 #[cfg(not(test))]
-const WAIT_NO_HANG: u64 = 1;
+use crate::process_watch::ProcessWatch;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DriverSessionState {
@@ -191,6 +191,8 @@ impl DriverController {
 
 #[cfg(not(test))]
 fn wait_for_message(process_id: u64, buffer: &mut [u8]) -> Result<usize, DriverControlError> {
+    let process = ProcessWatch::open(process_id)
+        .map_err(|error| DriverControlError::ProcessWait(error.raw().unsigned_abs()))?;
     let started = current_ticks()?;
     loop {
         match platform::ipc::try_wait(buffer) {
@@ -205,7 +207,10 @@ fn wait_for_message(process_id: u64, buffer: &mut [u8]) -> Result<usize, DriverC
             Err(error) if error.raw() == mochi_user_syscall::EAGAIN as i64 => {}
             Err(error) => return Err(DriverControlError::Ipc(error.raw().unsigned_abs())),
         }
-        if let Some(status) = process_exit_status(process_id)? {
+        if let Some(status) = process
+            .exit_status()
+            .map_err(|error| DriverControlError::ProcessWait(error.raw().unsigned_abs()))?
+        {
             return Err(DriverControlError::ProcessExited(status));
         }
         let now = current_ticks()?;
@@ -219,20 +224,6 @@ fn wait_for_message(process_id: u64, buffer: &mut [u8]) -> Result<usize, DriverC
 #[cfg(not(test))]
 fn current_ticks() -> Result<u64, DriverControlError> {
     platform::time::ticks().map_err(|error| DriverControlError::Clock(error.raw().unsigned_abs()))
-}
-
-#[cfg(not(test))]
-fn process_exit_status(process_id: u64) -> Result<Option<i32>, DriverControlError> {
-    let mut status = 0i32;
-    match platform::process::wait(
-        process_id as i64,
-        core::ptr::addr_of_mut!(status) as u64,
-        WAIT_NO_HANG,
-    ) {
-        Ok(0) => Ok(None),
-        Ok(_) => Ok(Some(status)),
-        Err(error) => Err(DriverControlError::ProcessWait(error.raw().unsigned_abs())),
-    }
 }
 
 #[cfg(test)]
