@@ -651,8 +651,8 @@ fn log_ready_error(service: ReadyService, error: ReadyError) {
             service.name(),
             errno
         ),
-        ReadyError::ProcessWait(errno) => platform::logln!(
-            "service-manager.service: {} ready process wait failed errno={}",
+        ReadyError::ProcessStatus(errno) => platform::logln!(
+            "service-manager.service: {} process status failed errno={}",
             service.name(),
             errno
         ),

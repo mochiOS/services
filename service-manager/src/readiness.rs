@@ -48,7 +48,7 @@ pub(crate) enum ReadyError {
     ProcessExited(i32),
     Ipc(u64),
     Clock(u64),
-    ProcessWait(u64),
+    ProcessStatus(u64),
 }
 
 pub(crate) struct ReadyHandshake {
@@ -287,7 +287,7 @@ impl ReadyHandshake {
             return Err(ReadyError::InvalidMessage);
         }
         let process = ProcessWatch::open(process_id)
-            .map_err(|error| ReadyError::ProcessWait(error.raw().unsigned_abs()))?;
+            .map_err(|error| ReadyError::ProcessStatus(error.raw().unsigned_abs()))?;
         let started = current_ticks()?;
         loop {
             if let Some(status) = self.status(service) {
@@ -328,7 +328,7 @@ impl ReadyHandshake {
             }
             if let Some(status) = process
                 .exit_status()
-                .map_err(|error| ReadyError::ProcessWait(error.raw().unsigned_abs()))?
+                .map_err(|error| ReadyError::ProcessStatus(error.raw().unsigned_abs()))?
             {
                 return Err(ReadyError::ProcessExited(status));
             }
@@ -373,7 +373,7 @@ impl ReadyHandshake {
         process_id: u64,
     ) -> Result<platform::service_ready::SessionIdentity, ReadyError> {
         let process = ProcessWatch::open(process_id)
-            .map_err(|error| ReadyError::ProcessWait(error.raw().unsigned_abs()))?;
+            .map_err(|error| ReadyError::ProcessStatus(error.raw().unsigned_abs()))?;
         loop {
             if let Some(notification) = receive_notification()? {
                 match notification {
@@ -402,7 +402,7 @@ impl ReadyHandshake {
             }
             if let Some(status) = process
                 .exit_status()
-                .map_err(|error| ReadyError::ProcessWait(error.raw().unsigned_abs()))?
+                .map_err(|error| ReadyError::ProcessStatus(error.raw().unsigned_abs()))?
             {
                 return Err(ReadyError::ProcessExited(status));
             }
@@ -417,7 +417,7 @@ impl ReadyHandshake {
         has_timeout: bool,
     ) -> Result<(), ReadyError> {
         let process = ProcessWatch::open(process_id)
-            .map_err(|error| ReadyError::ProcessWait(error.raw().unsigned_abs()))?;
+            .map_err(|error| ReadyError::ProcessStatus(error.raw().unsigned_abs()))?;
         let started = has_timeout.then(current_ticks).transpose()?;
         let timeout = ready_timeout(service);
         loop {
@@ -459,7 +459,7 @@ impl ReadyHandshake {
             }
             if let Some(status) = process
                 .exit_status()
-                .map_err(|error| ReadyError::ProcessWait(error.raw().unsigned_abs()))?
+                .map_err(|error| ReadyError::ProcessStatus(error.raw().unsigned_abs()))?
             {
                 return Err(ReadyError::ProcessExited(status));
             }
