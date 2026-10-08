@@ -4,6 +4,33 @@ mod native;
 use native::{Range, cut};
 
 #[test]
+fn placement_rejects_a_single_resident_page_inside_a_larger_hole() {
+    assert_eq!(
+        native::any_page(4096, 16384, |page| page == 12288),
+        Some(true)
+    );
+    assert_eq!(native::any_page(4096, 16384, |_| false), Some(false));
+    assert_eq!(native::any_page(u64::MAX - 1, 4, |_| false), None);
+}
+
+#[test]
+fn page_iteration_includes_both_unaligned_endpoints() {
+    let mut visited = Vec::new();
+    assert_eq!(
+        native::any_page(8191, 2, |page| {
+            visited.push(page);
+            false
+        }),
+        Some(false)
+    );
+    assert_eq!(visited, [4096, 8192]);
+    assert_eq!(
+        native::any_page(0, 0, |_| panic!("empty range visited")),
+        Some(false)
+    );
+}
+
+#[test]
 fn middle_unmap_retains_both_sides_and_removes_only_the_hole() {
     let pieces = cut(
         Range {
