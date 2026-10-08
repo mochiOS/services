@@ -291,6 +291,7 @@ pub struct PosixService<H: Copy = u32> {
     children: BTreeMap<u64, BTreeSet<u64>>,
     process_groups: BTreeMap<u64, u64>,
     session_ids: BTreeMap<u64, u64>,
+    resource_limits: BTreeMap<(u64, u32), protocol::ResourceLimit>,
 }
 
 impl PosixService<u32> {
@@ -303,6 +304,7 @@ impl PosixService<u32> {
             children: BTreeMap::new(),
             process_groups: BTreeMap::new(),
             session_ids: BTreeMap::new(),
+            resource_limits: BTreeMap::new(),
         }
     }
 }
@@ -384,6 +386,13 @@ impl<H: Copy> PosixService<H> {
             None
         };
         let child_id = process.process_id;
+        let inherited_limits: Vec<(u32, protocol::ResourceLimit)> = self
+            .resource_limits
+            .iter()
+            .filter_map(|(&(process_id, resource), &limit)| {
+                (process_id == peer.process_id).then_some((resource, limit))
+            })
+            .collect();
         self.processes.insert(child_id, process.handle);
         self.sessions.insert(
             child_id,
@@ -414,6 +423,9 @@ impl<H: Copy> PosixService<H> {
             .entry(peer.process_id)
             .or_default()
             .insert(child_id);
+        for (resource, limit) in inherited_limits {
+            self.resource_limits.insert((child_id, resource), limit);
+        }
         Ok(())
     }
 
@@ -523,6 +535,8 @@ impl<H: Copy> PosixService<H> {
         self.parents.remove(&child_id);
         self.process_groups.remove(&child_id);
         self.session_ids.remove(&child_id);
+        self.resource_limits
+            .retain(|(process_id, _), _| *process_id != child_id);
         self.sessions.remove(&child_id);
         if let Some(directories) = self.directories.remove(&child_id) {
             filesystem.release_object(directories.root);
@@ -626,6 +640,62 @@ impl<H: Copy> PosixService<H> {
         self.process_info_for(process_id)
     }
 
+    fn resource_limit_payload(
+        &mut self,
+        caller_id: u64,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, i32> {
+        let request =
+            protocol::decode_resource_limit_request(payload).map_err(|_| STATUS_EINVAL)?;
+        if request.process_id < 0 || request.resource >= protocol::RLIMIT_COUNT {
+            return Err(STATUS_EINVAL);
+        }
+        let target_id = if request.process_id == 0 {
+            caller_id
+        } else {
+            request.process_id as u64
+        };
+        let caller = self
+            .sessions
+            .get(&caller_id)
+            .copied()
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let target = self
+            .sessions
+            .get(&target_id)
+            .copied()
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let same_credentials = caller.real_uid == target.real_uid
+            && caller.real_uid == target.effective_uid
+            && caller.real_uid == target.saved_uid
+            && caller.real_gid == target.real_gid
+            && caller.real_gid == target.effective_gid
+            && caller.real_gid == target.saved_gid;
+        if target_id != caller_id && caller.effective_uid != 0 && !same_credentials {
+            return Err(protocol::STATUS_EPERM);
+        }
+
+        let key = (target_id, request.resource);
+        let previous = self
+            .resource_limits
+            .get(&key)
+            .copied()
+            .unwrap_or_default();
+        if request.flags & protocol::RESOURCE_LIMIT_SET != 0 {
+            if request.limit.soft > request.limit.hard {
+                return Err(STATUS_EINVAL);
+            }
+            if request.limit.hard > previous.hard && caller.effective_uid != 0 {
+                return Err(protocol::STATUS_EPERM);
+            }
+            self.resource_limits.insert(key, request.limit);
+        }
+
+        let mut output = vec![0; protocol::RESOURCE_LIMIT_LEN];
+        protocol::encode_resource_limit(previous, &mut output).map_err(|_| STATUS_EINVAL)?;
+        Ok(output)
+    }
+
     pub fn handle(
         &mut self,
         peer: PeerIdentity,
@@ -669,6 +739,9 @@ impl<H: Copy> PosixService<H> {
             protocol::OP_CREATE_SESSION if header.flags == 0 && payload.is_empty() => self
                 .create_session(peer.process_id)
                 .and_then(encode_process_info_payload),
+            protocol::OP_RESOURCE_LIMIT if header.flags == 0 => {
+                self.resource_limit_payload(peer.process_id, payload)
+            }
             protocol::OP_PING
             | protocol::OP_SESSION_REGISTER
             | protocol::OP_SESSION_INFO
@@ -687,6 +760,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_PROCESS_INFO
             | protocol::OP_SET_PROCESS_GROUP
             | protocol::OP_CREATE_SESSION
+            | protocol::OP_RESOURCE_LIMIT
             | protocol::OP_FTRUNCATE
             | protocol::OP_FSYNC
             | protocol::OP_FGETFL

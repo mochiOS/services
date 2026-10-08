@@ -202,6 +202,98 @@ fn credential_changes_follow_posix_privilege_rules() {
     assert_eq!(privileged.set_uid(0).unwrap_err(), ClientError::Remote(-1));
 }
 
+#[test]
+fn resource_limits_round_trip_and_enforce_soft_hard_rules() {
+    let client = client(PeerIdentity {
+        process_id: 94,
+        effective_uid: 503,
+        effective_gid: 22,
+    });
+    client.register_session().unwrap();
+    assert_eq!(
+        client
+            .resource_limit(0, protocol::RLIMIT_NOFILE, None)
+            .unwrap(),
+        protocol::ResourceLimit::INFINITY
+    );
+    let finite = protocol::ResourceLimit {
+        soft: 64,
+        hard: 128,
+    };
+    assert_eq!(
+        client
+            .resource_limit(0, protocol::RLIMIT_NOFILE, Some(finite))
+            .unwrap(),
+        protocol::ResourceLimit::INFINITY
+    );
+    assert_eq!(
+        client
+            .resource_limit(0, protocol::RLIMIT_NOFILE, None)
+            .unwrap(),
+        finite
+    );
+    assert_eq!(
+        client
+            .resource_limit(
+                0,
+                protocol::RLIMIT_NOFILE,
+                Some(protocol::ResourceLimit {
+                    soft: 64,
+                    hard: 129,
+                }),
+            )
+            .unwrap_err(),
+        ClientError::Remote(protocol::STATUS_EPERM)
+    );
+    assert_eq!(
+        client
+            .resource_limit(
+                0,
+                protocol::RLIMIT_NOFILE,
+                Some(protocol::ResourceLimit {
+                    soft: 129,
+                    hard: 128,
+                }),
+            )
+            .unwrap_err(),
+        ClientError::Remote(STATUS_EINVAL)
+    );
+    assert_eq!(
+        client
+            .resource_limit(0, protocol::RLIMIT_COUNT, None)
+            .unwrap_err(),
+        ClientError::Remote(STATUS_EINVAL)
+    );
+}
+
+#[test]
+fn resource_limit_wire_format_is_fixed_and_strict() {
+    let request = protocol::ResourceLimitRequest {
+        process_id: 42,
+        resource: protocol::RLIMIT_AS,
+        flags: protocol::RESOURCE_LIMIT_SET,
+        limit: protocol::ResourceLimit {
+            soft: 1024,
+            hard: 2048,
+        },
+    };
+    let mut encoded = [0u8; protocol::RESOURCE_LIMIT_REQUEST_LEN];
+    protocol::encode_resource_limit_request(request, &mut encoded).unwrap();
+    assert_eq!(protocol::decode_resource_limit_request(&encoded), Ok(request));
+
+    let mut trailing = [0u8; protocol::RESOURCE_LIMIT_REQUEST_LEN + 1];
+    trailing[..protocol::RESOURCE_LIMIT_REQUEST_LEN].copy_from_slice(&encoded);
+    assert_eq!(
+        protocol::decode_resource_limit_request(&trailing),
+        Err(protocol::ProtocolError::InvalidLength)
+    );
+    encoded[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert_eq!(
+        protocol::decode_resource_limit_request(&encoded),
+        Err(protocol::ProtocolError::InvalidLength)
+    );
+}
+
 struct GetcwdTransport;
 
 impl Transport for GetcwdTransport {
@@ -1127,6 +1219,138 @@ fn adopted_child_inherits_posix_state_and_retained_directories() {
         })
     );
     assert_eq!(filesystem.retained.len(), 2);
+}
+
+#[test]
+fn adopted_child_inherits_an_independent_resource_limit_table() {
+    let parent = PeerIdentity {
+        process_id: 113,
+        effective_uid: 505,
+        effective_gid: 24,
+    };
+    let child = PeerIdentity {
+        process_id: 114,
+        effective_uid: 505,
+        effective_gid: 24,
+    };
+    let mut service = service_for(parent);
+    service.handle(
+        parent,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let inherited = protocol::ResourceLimit {
+        soft: 32,
+        hard: 64,
+    };
+    let mut request = [0u8; protocol::RESOURCE_LIMIT_REQUEST_LEN];
+    protocol::encode_resource_limit_request(
+        protocol::ResourceLimitRequest {
+            process_id: 0,
+            resource: protocol::RLIMIT_NOFILE,
+            flags: protocol::RESOURCE_LIMIT_SET,
+            limit: inherited,
+        },
+        &mut request,
+    )
+    .unwrap();
+    assert_eq!(
+        service
+            .handle(
+                parent,
+                protocol::Header {
+                    opcode: protocol::OP_RESOURCE_LIMIT,
+                    ..protocol::Header::default()
+                },
+                &request,
+            )
+            .header
+            .status,
+        protocol::STATUS_OK
+    );
+
+    let mut filesystem = RecordingFilesystem::default();
+    service
+        .adopt_child(
+            parent,
+            AuthenticatedProcess {
+                handle: 53,
+                process_id: child.process_id,
+            },
+            &mut filesystem,
+        )
+        .unwrap();
+
+    protocol::encode_resource_limit_request(
+        protocol::ResourceLimitRequest {
+            process_id: 0,
+            resource: protocol::RLIMIT_NOFILE,
+            flags: 0,
+            limit: protocol::ResourceLimit::default(),
+        },
+        &mut request,
+    )
+    .unwrap();
+    let response = service.handle(
+        child,
+        protocol::Header {
+            opcode: protocol::OP_RESOURCE_LIMIT,
+            ..protocol::Header::default()
+        },
+        &request,
+    );
+    assert_eq!(
+        protocol::decode_resource_limit(&response.payload),
+        Ok(inherited)
+    );
+
+    protocol::encode_resource_limit_request(
+        protocol::ResourceLimitRequest {
+            process_id: 0,
+            resource: protocol::RLIMIT_NOFILE,
+            flags: protocol::RESOURCE_LIMIT_SET,
+            limit: protocol::ResourceLimit {
+                soft: 16,
+                hard: 64,
+            },
+        },
+        &mut request,
+    )
+    .unwrap();
+    service.handle(
+        child,
+        protocol::Header {
+            opcode: protocol::OP_RESOURCE_LIMIT,
+            ..protocol::Header::default()
+        },
+        &request,
+    );
+
+    protocol::encode_resource_limit_request(
+        protocol::ResourceLimitRequest {
+            process_id: 0,
+            resource: protocol::RLIMIT_NOFILE,
+            flags: 0,
+            limit: protocol::ResourceLimit::default(),
+        },
+        &mut request,
+    )
+    .unwrap();
+    let parent_response = service.handle(
+        parent,
+        protocol::Header {
+            opcode: protocol::OP_RESOURCE_LIMIT,
+            ..protocol::Header::default()
+        },
+        &request,
+    );
+    assert_eq!(
+        protocol::decode_resource_limit(&parent_response.payload),
+        Ok(inherited)
+    );
 }
 
 #[test]
