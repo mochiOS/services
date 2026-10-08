@@ -206,6 +206,14 @@ fn terminal_attributes_are_shared_between_both_ends() {
     raw.control_characters[protocol::TERMINAL_CC_VMIN] = 7;
     ptys.set_attributes(pair.slave_object_id, raw).unwrap();
     assert_eq!(ptys.attributes(pair.master_object_id), Ok(raw));
+
+    let mut unsupported = raw;
+    unsupported.input_flags = protocol::TERMINAL_IFLAG_IXON;
+    assert_eq!(
+        ptys.set_attributes(pair.master_object_id, unsupported),
+        Err(ENOTSUP)
+    );
+    assert_eq!(ptys.attributes(pair.slave_object_id), Ok(raw));
 }
 
 #[test]

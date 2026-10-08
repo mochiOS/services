@@ -16,6 +16,18 @@ pub const READINESS_SIGNALS: u64 = mnu_abi::HANDLE_SIGNAL_READABLE
     | mnu_abi::HANDLE_SIGNAL_WRITABLE
     | mnu_abi::HANDLE_SIGNAL_PEER_CLOSED;
 
+const SUPPORTED_INPUT_FLAGS: u32 = posix_protocol::TERMINAL_IFLAG_ISTRIP
+    | posix_protocol::TERMINAL_IFLAG_INLCR
+    | posix_protocol::TERMINAL_IFLAG_IGNCR
+    | posix_protocol::TERMINAL_IFLAG_ICRNL;
+const SUPPORTED_OUTPUT_FLAGS: u32 =
+    posix_protocol::TERMINAL_OFLAG_OPOST | posix_protocol::TERMINAL_OFLAG_ONLCR;
+const SUPPORTED_LOCAL_FLAGS: u32 = posix_protocol::TERMINAL_LFLAG_ICANON
+    | posix_protocol::TERMINAL_LFLAG_ECHO
+    | posix_protocol::TERMINAL_LFLAG_ECHOE
+    | posix_protocol::TERMINAL_LFLAG_ECHOK
+    | posix_protocol::TERMINAL_LFLAG_ECHONL;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PtyPair {
     pub master_object_id: u64,
@@ -360,6 +372,14 @@ impl PtyManager {
         object_id: u64,
         attributes: posix_protocol::TerminalAttributes,
     ) -> Result<(), i32> {
+        if attributes.input_flags & !SUPPORTED_INPUT_FLAGS != 0
+            || attributes.output_flags & !SUPPORTED_OUTPUT_FLAGS != 0
+            || attributes.local_flags & !SUPPORTED_LOCAL_FLAGS != 0
+            || attributes.control_flags
+                != (posix_protocol::TERMINAL_CFLAG_CS8 | posix_protocol::TERMINAL_CFLAG_CREAD)
+        {
+            return Err(ENOTSUP);
+        }
         let (id, _) = decode_object_id(object_id).ok_or(EBADF)?;
         let terminal = self.terminals.get_mut(&id).ok_or(EBADF)?;
         let was_canonical =
