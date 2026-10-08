@@ -476,6 +476,7 @@ fn open_pty_response(
     let rights = platform::handle::HANDLE_RIGHT_READ
         | platform::handle::HANDLE_RIGHT_WRITE
         | platform::handle::HANDLE_RIGHT_WAIT
+        | platform::handle::HANDLE_RIGHT_CONTROL
         | platform::handle::HANDLE_RIGHT_DUPLICATE
         | platform::handle::HANDLE_RIGHT_TRANSFER;
     let master =

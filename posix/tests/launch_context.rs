@@ -240,3 +240,42 @@ fn restore_rejects_hidden_handle_on_a_pseudo_descriptor() {
         Err(LaunchFdError::UnexpectedHandle)
     );
 }
+
+#[test]
+fn pty_descriptor_round_trip_preserves_bidirectional_object_handle() {
+    let pty = object(73, protocol::INHERITED_FD_KIND_PTY, 2, true);
+    let mut source = FdTable::new();
+    let mut objects = Objects::default();
+    source
+        .install_at(
+            5,
+            Entry {
+                handle: pty,
+                rights: 0x3f,
+                descriptor_flags: 0,
+            },
+            &mut objects,
+        )
+        .unwrap();
+
+    let mut context = Context::default();
+    context.rights.insert(pty.id, 0x3f);
+    stage_launch_context(&source, 8, &mut context, describe).unwrap();
+
+    let mut restored = FdTable::new();
+    assert_eq!(
+        restore_launch_context(
+            &mut restored,
+            8,
+            &mut context,
+            &mut objects,
+            |metadata, attachment| {
+                attachment
+                    .map(|(handle, _)| object(handle.id, metadata.kind, metadata.open_flags, true))
+            },
+        ),
+        Ok(true)
+    );
+    assert_eq!(restored.get(5).unwrap().handle, pty);
+    assert_eq!(restored.get(5).unwrap().rights, 0x3f);
+}
