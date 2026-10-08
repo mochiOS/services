@@ -9,6 +9,7 @@ vendor = "mochiOS"
 path = "/system/services/drivers.service"
 kind = "service"
 requires = [
+    "system.random.read",
     "fs.read.all",
     "process.spawn",
     "dma.allocate",

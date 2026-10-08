@@ -176,7 +176,7 @@ impl BootstrapOperations for Runtime {
                 Some(process_id)
             }
             Err(error) => {
-                platform::logln!(
+                eprintln!(
                     "service-manager.service: drivers.service spawn failed errno={}",
                     errno(error)
                 );
@@ -542,7 +542,7 @@ pub(crate) fn run() -> ! {
             (outcome, Some(runtime))
         }
         Err(error) => {
-            platform::logln!(
+            eprintln!(
                 "service-manager.service: driver controller create failed error={:?}",
                 error
             );
