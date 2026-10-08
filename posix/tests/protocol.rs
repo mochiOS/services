@@ -203,6 +203,44 @@ fn credential_changes_follow_posix_privilege_rules() {
 }
 
 #[test]
+fn effective_credentials_change_independently_and_reset_atomically() {
+    let client = client(PeerIdentity {
+        process_id: 94,
+        effective_uid: 0,
+        effective_gid: 0,
+    });
+    client.register_session().unwrap();
+
+    client.set_effective_gid(42).unwrap();
+    client.set_effective_uid(501).unwrap();
+    let changed = client.session_info().unwrap();
+    assert_eq!(changed.real_uid, 0);
+    assert_eq!(changed.effective_uid, 501);
+    assert_eq!(changed.real_gid, 0);
+    assert_eq!(changed.effective_gid, 42);
+    assert_eq!(
+        client.set_effective_uid(777).unwrap_err(),
+        ClientError::Remote(protocol::STATUS_EPERM)
+    );
+    assert_eq!(
+        client.set_effective_gid(777).unwrap_err(),
+        ClientError::Remote(protocol::STATUS_EPERM)
+    );
+
+    client.reset_effective_ids().unwrap();
+    let reset = client.session_info().unwrap();
+    assert_eq!(reset.real_uid, 0);
+    assert_eq!(reset.effective_uid, 0);
+    assert_eq!(reset.real_gid, 0);
+    assert_eq!(reset.effective_gid, 0);
+    let transport = client.into_transport();
+    let service = transport.service.borrow();
+    let stored = service.session(94).unwrap();
+    assert_eq!(stored.saved_uid, 0);
+    assert_eq!(stored.saved_gid, 0);
+}
+
+#[test]
 fn supplementary_groups_round_trip_and_require_privilege() {
     let privileged = client(PeerIdentity {
         process_id: 95,

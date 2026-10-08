@@ -910,6 +910,15 @@ impl<H: Copy> PosixService<H> {
             protocol::OP_SET_GID if header.flags == 0 => {
                 self.set_gid(peer.process_id, payload).map(|_| Vec::new())
             }
+            protocol::OP_SET_EFFECTIVE_UID if header.flags == 0 => self
+                .set_effective_uid(peer.process_id, payload)
+                .map(|_| Vec::new()),
+            protocol::OP_SET_EFFECTIVE_GID if header.flags == 0 => self
+                .set_effective_gid(peer.process_id, payload)
+                .map(|_| Vec::new()),
+            protocol::OP_RESET_EFFECTIVE_IDS if header.flags == 0 && payload.is_empty() => self
+                .reset_effective_ids(peer.process_id)
+                .map(|_| Vec::new()),
             protocol::OP_GROUPS_GET if header.flags == 0 && payload.is_empty() => {
                 self.groups_payload(peer.process_id)
             }
@@ -953,6 +962,9 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_GETCWD => Err(STATUS_EINVAL),
             protocol::OP_SET_UID
             | protocol::OP_SET_GID
+            | protocol::OP_SET_EFFECTIVE_UID
+            | protocol::OP_SET_EFFECTIVE_GID
+            | protocol::OP_RESET_EFFECTIVE_IDS
             | protocol::OP_GROUPS_SET
             | protocol::OP_PROCESS_FORKED
             | protocol::OP_WAIT_CHILD
@@ -2025,6 +2037,48 @@ impl<H: Copy> PosixService<H> {
             return Err(-1);
         }
         session.effective_gid = requested;
+        Ok(())
+    }
+
+    fn set_effective_uid(&mut self, process_id: u64, payload: &[u8]) -> Result<(), i32> {
+        let requested = protocol::decode_credential_id(payload).map_err(|_| STATUS_EINVAL)?;
+        let session = self
+            .sessions
+            .get_mut(&process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        if session.effective_uid != 0
+            && requested != session.real_uid
+            && requested != session.saved_uid
+        {
+            return Err(protocol::STATUS_EPERM);
+        }
+        session.effective_uid = requested;
+        Ok(())
+    }
+
+    fn set_effective_gid(&mut self, process_id: u64, payload: &[u8]) -> Result<(), i32> {
+        let requested = protocol::decode_credential_id(payload).map_err(|_| STATUS_EINVAL)?;
+        let session = self
+            .sessions
+            .get_mut(&process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        if session.effective_uid != 0
+            && requested != session.real_gid
+            && requested != session.saved_gid
+        {
+            return Err(protocol::STATUS_EPERM);
+        }
+        session.effective_gid = requested;
+        Ok(())
+    }
+
+    fn reset_effective_ids(&mut self, process_id: u64) -> Result<(), i32> {
+        let session = self
+            .sessions
+            .get_mut(&process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        session.effective_uid = session.real_uid;
+        session.effective_gid = session.real_gid;
         Ok(())
     }
 
