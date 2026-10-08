@@ -8,6 +8,7 @@ mochios-workspace-protocol = { git = "https://github.com/mochiOS/syscalls", pack
 mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }
 mochi-user-syscall = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-syscall" }
 mochios-posix-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-posix-protocol" }
+mochios-posix-client = { git = "https://github.com/mochiOS/syscalls", package = "mochios-posix-client", default-features = false, features = ["syscall-endpoint"] }
 mnu-abi = { git = "https://github.com/mochiOS/mnu", package = "mnu-abi" }
 
 [[bin]]

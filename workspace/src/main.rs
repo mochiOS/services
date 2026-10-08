@@ -5,6 +5,9 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use mochi_user_platform as platform;
+use mochios_posix_client::{
+    Client as PosixClient, ObjectHandleAttachment, SyscallEndpointTransport,
+};
 use mochios_workspace_protocol as protocol;
 
 const CLIPBOARD_READ: &str = "clipboard.read";
@@ -75,26 +78,26 @@ struct RegisteredControlCenterCard {
 }
 
 #[derive(Debug)]
-struct OwnedFileDescriptor(i32);
+struct OwnedObjectHandle(platform::handle::Handle);
 
-impl OwnedFileDescriptor {
-    fn raw(&self) -> i32 {
+impl OwnedObjectHandle {
+    fn raw(&self) -> platform::handle::Handle {
         self.0
     }
 }
 
-impl Drop for OwnedFileDescriptor {
+impl Drop for OwnedObjectHandle {
     fn drop(&mut self) {
-        if self.0 >= 0 {
-            let _ = platform::file::close(self.0 as u64);
-            self.0 = -1;
+        if self.0 != 0 {
+            let _ = platform::handle::close(self.0);
+            self.0 = 0;
         }
     }
 }
 
 #[derive(Debug)]
 struct PendingDocument {
-    handle: OwnedFileDescriptor,
+    handle: OwnedObjectHandle,
     path: String,
     content_type: String,
 }
@@ -109,9 +112,9 @@ struct NotificationRecord {
     body: String,
 }
 
-#[derive(Debug)]
 struct WorkspaceService {
     endpoint: u64,
+    posix: PosixClient<SyscallEndpointTransport>,
     clipboard_generation: u64,
     clipboard_content_type: String,
     clipboard: Vec<u8>,
@@ -133,7 +136,7 @@ struct WorkspaceService {
 }
 
 impl WorkspaceService {
-    fn load(endpoint: u64) -> Self {
+    fn load(endpoint: u64, posix: PosixClient<SyscallEndpointTransport>) -> Self {
         let association_path = association_path();
         let associations = fs::read(&association_path)
             .ok()
@@ -169,6 +172,7 @@ impl WorkspaceService {
             .max(1);
         Self {
             endpoint,
+            posix,
             clipboard_generation: 0,
             clipboard_content_type: String::new(),
             clipboard: Vec::new(),
@@ -194,7 +198,7 @@ impl WorkspaceService {
         &mut self,
         sender: u64,
         request: protocol::Message<'_>,
-        handles: &mut platform::ipc::IpcFileHandles,
+        handles: &mut platform::ipc::IpcObjectHandles,
     ) {
         let capability = match request.opcode {
             protocol::OP_CLIPBOARD_SNAPSHOT | protocol::OP_CLIPBOARD_READ => CLIPBOARD_READ,
@@ -738,16 +742,14 @@ impl WorkspaceService {
             self.pending_documents.remove(&process);
             return;
         };
-        let mut handles = platform::ipc::IpcFileHandles::default();
+        let mut handles = platform::ipc::IpcObjectHandles::default();
         handles.count = 1;
-        handles.handles[0] = platform::ipc::IpcFileHandle {
-            fd: document.handle.raw(),
-            rights: mochi_user_syscall::FILE_HANDLE_RIGHT_READ
-                | mochi_user_syscall::FILE_HANDLE_RIGHT_SEEK
-                | mochi_user_syscall::FILE_HANDLE_RIGHT_STAT
-                | mochi_user_syscall::IPC_FILE_HANDLE_FLAG_FRESH_OFFSET,
+        handles.handles[0] = platform::ipc::IpcObjectHandle {
+            handle: document.handle.raw(),
+            reserved: 0,
+            rights: platform::handle::HANDLE_RIGHT_READ | platform::handle::HANDLE_RIGHT_SEEK,
         };
-        if platform::ipc::send_handles(endpoint, &message[..length], &handles).is_ok() {
+        if platform::ipc::send_object_handles(endpoint, &message[..length], &handles).is_ok() {
             self.pending_documents.remove(&process);
         } else {
             self.application_endpoints.remove(&process);
@@ -1123,7 +1125,7 @@ impl WorkspaceService {
         &mut self,
         sender: u64,
         request: protocol::Message<'_>,
-        handles: &mut platform::ipc::IpcFileHandles,
+        handles: &mut platform::ipc::IpcObjectHandles,
     ) {
         let Some((path, content_type, requested_bundle, roles)) =
             decode_document_open(request.payload)
@@ -1136,12 +1138,13 @@ impl WorkspaceService {
             );
             return;
         };
-        let required_rights = mochi_user_syscall::FILE_HANDLE_RIGHT_READ
-            | mochi_user_syscall::FILE_HANDLE_RIGHT_SEEK
-            | mochi_user_syscall::FILE_HANDLE_RIGHT_STAT
-            | mochi_user_syscall::FILE_HANDLE_RIGHT_TRANSFER;
+        let required_rights = platform::handle::HANDLE_RIGHT_READ
+            | platform::handle::HANDLE_RIGHT_SEEK
+            | platform::handle::HANDLE_RIGHT_TRANSFER;
         if handles.count != 1
-            || handles.handles[0].fd < 0
+            || handles.reserved != 0
+            || handles.handles[0].handle == 0
+            || handles.handles[0].reserved != 0
             || handles.handles[0].rights & required_rights != required_rights
         {
             self.reply_status(
@@ -1152,9 +1155,12 @@ impl WorkspaceService {
             );
             return;
         }
-        match platform::file::metadata(handles.handles[0].fd as u64) {
-            Ok(metadata) if metadata.is_file() => {}
-            Ok(metadata) if metadata.is_directory() => {
+        match self.posix.fstat(ObjectHandleAttachment {
+            handle: handles.handles[0].handle,
+            rights: handles.handles[0].rights,
+        }) {
+            Ok(status) if status.mode & 0o170000 == 0o100000 => {}
+            Ok(status) if status.mode & 0o170000 == 0o040000 => {
                 self.reply_status(
                     sender,
                     request.request_id,
@@ -1164,7 +1170,7 @@ impl WorkspaceService {
                 return;
             }
             Err(error) => {
-                let status = error.raw().unsigned_abs();
+                let status = posix_client_errno(error);
                 self.reply_status(sender, request.request_id, -(status as i32), 0);
                 return;
             }
@@ -1219,13 +1225,13 @@ impl WorkspaceService {
         };
         match launch_application(application) {
             Ok(process_id) => {
-                let fd = handles.handles[0].fd;
-                handles.handles[0].fd = -1;
+                let handle = handles.handles[0].handle;
+                handles.handles[0].handle = 0;
                 handles.count = 0;
                 self.pending_documents.insert(
                     process_id,
                     PendingDocument {
-                        handle: OwnedFileDescriptor(fd),
+                        handle: OwnedObjectHandle(handle),
                         path,
                         content_type,
                     },
@@ -2480,12 +2486,27 @@ fn errno(error: io::Error) -> u64 {
         .unwrap_or(mochi_user_syscall::EIO as i32) as u64
 }
 
-fn close_attached_handles(handles: &mut platform::ipc::IpcFileHandles) {
+fn posix_client_errno(
+    error: mochios_posix_client::ClientError<mochi_user_syscall::SysError>,
+) -> u64 {
+    match error {
+        mochios_posix_client::ClientError::Transport(error) => error.raw().unsigned_abs(),
+        mochios_posix_client::ClientError::Remote(status) => status.unsigned_abs() as u64,
+        mochios_posix_client::ClientError::RequestTooLarge => {
+            mochi_user_syscall::EOVERFLOW as u64
+        }
+        mochios_posix_client::ClientError::Protocol(_)
+        | mochios_posix_client::ClientError::ResponseTooLarge
+        | mochios_posix_client::ClientError::MismatchedResponse => mochi_user_syscall::EIO as u64,
+    }
+}
+
+fn close_attached_handles(handles: &mut platform::ipc::IpcObjectHandles) {
     let count = (handles.count as usize).min(handles.handles.len());
     for handle in &mut handles.handles[..count] {
-        if handle.fd >= 0 {
-            let _ = platform::file::close(handle.fd as u64);
-            handle.fd = -1;
+        if handle.handle != 0 {
+            let _ = platform::handle::close(handle.handle);
+            handle.handle = 0;
         }
     }
     handles.count = 0;
@@ -2506,7 +2527,16 @@ fn main() {
             platform::process::exit(1)
         }
     };
-    let mut service = WorkspaceService::load(endpoint);
+    let posix = match PosixClient::from_syscall_launch_context() {
+        Ok(client) => client,
+        Err(error) => {
+            let status = -(posix_client_errno(error) as i32);
+            platform::logln!("workspace.service: POSIX session failed errno={}", -status);
+            let _ = platform::service_ready::notify(ready_target, status);
+            platform::process::exit(1)
+        }
+    };
+    let mut service = WorkspaceService::load(endpoint, posix);
     if platform::service_ready::notify(ready_target, 0).is_err() {
         platform::logln!("workspace.service: ready notification failed");
         platform::process::exit(1);
@@ -2517,8 +2547,9 @@ fn main() {
     );
     let mut buffer = vec![0u8; protocol::MAX_MESSAGE_LEN];
     loop {
-        let mut handles = platform::ipc::IpcFileHandles::default();
-        let message = match platform::ipc::wait_handles(endpoint, &mut buffer, &mut handles) {
+        let mut handles = platform::ipc::IpcObjectHandles::default();
+        let message = match platform::ipc::wait_object_handles(endpoint, &mut buffer, &mut handles)
+        {
             Ok(message) => message,
             Err(error) => {
                 eprintln!(
