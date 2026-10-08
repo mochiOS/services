@@ -547,6 +547,14 @@ impl PtyManager {
             .ok_or(EBADF)
     }
 
+    pub fn slave_terminal_id(&self, object_id: u64) -> Result<u64, i32> {
+        let (id, side) = decode_object_id(object_id).ok_or(EBADF)?;
+        if side != PtySide::Slave || !self.terminals.contains_key(&id) {
+            return Err(EBADF);
+        }
+        Ok(id)
+    }
+
     pub fn signals(&self, object_id: u64) -> Result<u64, i32> {
         let (id, side) = decode_object_id(object_id).ok_or(EBADF)?;
         let terminal = self.terminals.get(&id).ok_or(EBADF)?;

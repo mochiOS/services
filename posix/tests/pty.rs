@@ -443,6 +443,16 @@ fn readiness_signals_follow_queue_capacity_and_peer_lifetime() {
 }
 
 #[test]
+fn only_a_live_slave_object_identifies_a_controlling_terminal() {
+    let mut ptys = PtyManager::new();
+    let pair = ptys.open().unwrap();
+    assert_eq!(ptys.slave_terminal_id(pair.slave_object_id), Ok(1));
+    assert_eq!(ptys.slave_terminal_id(pair.master_object_id), Err(EBADF));
+    ptys.discard(pair);
+    assert_eq!(ptys.slave_terminal_id(pair.slave_object_id), Err(EBADF));
+}
+
+#[test]
 fn client_receives_only_the_two_provider_handles() {
     let client = Client::new(PtyTransport { handle_count: 2 });
     let pair = client.open_pty().unwrap();
@@ -457,6 +467,103 @@ fn client_receives_only_the_two_provider_handles() {
 fn client_rejects_an_incomplete_pty_pair() {
     let client = Client::new(PtyTransport { handle_count: 1 });
     assert_eq!(client.open_pty(), Err(ClientError::MismatchedResponse));
+}
+
+#[test]
+fn client_attaches_only_the_terminal_handle_for_job_control() {
+    let terminal = ObjectHandleAttachment {
+        handle: 55,
+        rights: 0x40,
+    };
+    Client::new(TerminalTransport {
+        opcode: protocol::OP_TERMINAL_ACQUIRE,
+        process_group: None,
+    })
+    .acquire_controlling_terminal(terminal)
+    .unwrap();
+    assert_eq!(
+        Client::new(TerminalTransport {
+            opcode: protocol::OP_TERMINAL_GET_FOREGROUND,
+            process_group: Some(81),
+        })
+        .terminal_foreground_process_group(terminal),
+        Ok(81)
+    );
+    Client::new(TerminalTransport {
+        opcode: protocol::OP_TERMINAL_SET_FOREGROUND,
+        process_group: Some(82),
+    })
+    .set_terminal_foreground_process_group(terminal, 82)
+    .unwrap();
+    Client::new(TerminalTransport {
+        opcode: protocol::OP_TERMINAL_RELEASE,
+        process_group: None,
+    })
+    .release_controlling_terminal(terminal)
+    .unwrap();
+}
+
+struct TerminalTransport {
+    opcode: u16,
+    process_group: Option<i64>,
+}
+
+impl Transport for TerminalTransport {
+    type Error = ();
+
+    fn call(&self, _request: &[u8], _response: &mut [u8]) -> Result<usize, Self::Error> {
+        Err(())
+    }
+}
+
+impl ObjectTransport for TerminalTransport {
+    type Handle = u32;
+
+    fn call_with_handles(
+        &self,
+        request: &[u8],
+        response: &mut [u8],
+        handles: &mut ObjectHandles<Self::Handle>,
+    ) -> Result<usize, Self::Error> {
+        let (header, payload) = protocol::decode(request).unwrap();
+        assert_eq!(header.opcode, self.opcode);
+        assert_eq!(handles.len(), 1);
+        assert_eq!(
+            handles.get(0),
+            Some(ObjectHandleAttachment {
+                handle: 55,
+                rights: 0x40,
+            })
+        );
+        if self.opcode == protocol::OP_TERMINAL_SET_FOREGROUND {
+            assert_eq!(
+                protocol::decode_process_id_request(payload),
+                Ok(self.process_group.unwrap())
+            );
+        } else {
+            assert!(payload.is_empty());
+        }
+        handles.clear();
+        let mut payload = [0u8; protocol::PROCESS_ID_REQUEST_LEN];
+        let response_payload = if self.opcode == protocol::OP_TERMINAL_GET_FOREGROUND {
+            protocol::encode_process_id_request(self.process_group.unwrap(), &mut payload).unwrap();
+            payload.as_slice()
+        } else {
+            &[]
+        };
+        protocol::encode(
+            protocol::Header {
+                opcode: protocol::OP_STATUS,
+                request_id: header.request_id,
+                status: protocol::STATUS_OK,
+                payload_len: response_payload.len() as u32,
+                ..protocol::Header::default()
+            },
+            response_payload,
+            response,
+        )
+        .map_err(|_| ())
+    }
 }
 
 struct PtyTransport {

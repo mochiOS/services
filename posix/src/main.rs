@@ -2,6 +2,9 @@
 const PTY_SYNC_MAGIC: [u8; 4] = *b"PTYS";
 
 #[cfg(target_os = "mochios")]
+const PTY_IDENTIFY_MAGIC: [u8; 4] = *b"PTYI";
+
+#[cfg(target_os = "mochios")]
 fn main() {
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
@@ -155,6 +158,28 @@ fn main() {
                         response: invalid_response(header.request_id),
                         handles: Vec::new(),
                     }
+                })
+            }
+            (Some(peer), Some((header, payload)), true)
+                if matches!(
+                    header.opcode,
+                    protocol::OP_TERMINAL_ACQUIRE
+                        | protocol::OP_TERMINAL_RELEASE
+                        | protocol::OP_TERMINAL_GET_FOREGROUND
+                        | protocol::OP_TERMINAL_SET_FOREGROUND
+                ) && attachments.len() == 1
+                    && attachments[0].rights == platform::handle::HANDLE_RIGHT_TRANSFER =>
+            {
+                let response =
+                    match identify_pty_terminal(provider_endpoint_handle, attachments[0].handle) {
+                        Ok(terminal_id) => {
+                            service.handle_terminal(peer, header, payload, terminal_id)
+                        }
+                        Err(status) => status_response(header.request_id, status),
+                    };
+                Some(posix_service::ObjectResponse {
+                    response,
+                    handles: Vec::new(),
                 })
             }
             (Some(peer), Some((header, payload)), true)
@@ -359,6 +384,30 @@ fn run_pty_provider(
         let length = (message & 0xffff_ffff) as usize;
         let request_length = length.min(request.len());
         let count = (attachments.count as usize).min(attachments.handles.len());
+        if request[..request_length] == PTY_IDENTIFY_MAGIC {
+            let status = if attachments.count == 1
+                && count == 1
+                && attachments.handles[0].handle != 0
+                && attachments.handles[0].reserved == 0
+            {
+                platform::handle::identify_provider_object(attachments.handles[0].handle)
+                    .map_err(|_| 9)
+                    .and_then(|object_id| {
+                        ptys.lock()
+                            .map_err(|_| 5)
+                            .and_then(|manager| manager.slave_terminal_id(object_id))
+                    })
+                    .and_then(|terminal_id| i64::try_from(terminal_id).map_err(|_| 22))
+                    .unwrap_or_else(|errno| -(i64::from(errno)))
+            } else {
+                -22
+            };
+            for attachment in attachments.handles.iter().take(count) {
+                let _ = platform::handle::close(attachment.handle);
+            }
+            let _ = platform::ipc::reply(sender, &status.to_le_bytes());
+            continue;
+        }
         for attachment in attachments.handles.iter().take(count) {
             let _ = platform::handle::close(attachment.handle);
         }
@@ -397,6 +446,41 @@ fn run_pty_provider(
             let _ = platform::ipc::reply(sender, &response[..response_len]);
         }
     }
+}
+
+#[cfg(target_os = "mochios")]
+fn identify_pty_terminal(endpoint: u32, terminal: u32) -> Result<u64, i32> {
+    use mochi_user_platform as platform;
+
+    let mut attachments = platform::ipc::IpcObjectHandles::default();
+    attachments.count = 1;
+    attachments.handles[0] = platform::ipc::IpcObjectHandle {
+        handle: terminal,
+        reserved: 0,
+        rights: platform::handle::HANDLE_RIGHT_TRANSFER,
+    };
+    let mut response = [0u8; 8];
+    let message = platform::ipc::call_object_handles(
+        endpoint,
+        &PTY_IDENTIFY_MAGIC,
+        &mut response,
+        &mut attachments,
+    )
+    .map_err(|error| i32::try_from(error.raw()).unwrap_or(-5))?;
+    let returned_count = (attachments.count as usize).min(attachments.handles.len());
+    for attachment in attachments.handles.iter().take(returned_count) {
+        if attachment.handle != 0 {
+            let _ = platform::handle::close(attachment.handle);
+        }
+    }
+    if attachments.count != 0 || message & 0xffff_ffff != response.len() as u64 {
+        return Err(-5);
+    }
+    let value = i64::from_le_bytes(response);
+    if value <= 0 {
+        return Err(i32::try_from(value).unwrap_or(-5));
+    }
+    u64::try_from(value).map_err(|_| -5)
 }
 
 #[cfg(target_os = "mochios")]

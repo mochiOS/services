@@ -1807,6 +1807,185 @@ fn process_groups_and_sessions_are_managed_by_posix_state() {
 }
 
 #[test]
+fn controlling_terminals_are_bound_to_sessions_and_foreground_groups() {
+    let leader = PeerIdentity {
+        process_id: 141,
+        effective_uid: 505,
+        effective_gid: 24,
+    };
+    let member = PeerIdentity {
+        process_id: 142,
+        effective_uid: 505,
+        effective_gid: 24,
+    };
+    let other_leader = PeerIdentity {
+        process_id: 143,
+        effective_uid: 505,
+        effective_gid: 24,
+    };
+    let mut service = service_for(leader);
+    service.handle(
+        leader,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let mut filesystem = RecordingFilesystem::default();
+    for process in [member, other_leader] {
+        service
+            .adopt_child(
+                leader,
+                AuthenticatedProcess {
+                    handle: process.process_id as u32,
+                    process_id: process.process_id,
+                },
+                &mut filesystem,
+            )
+            .unwrap();
+    }
+
+    let terminal_request = |opcode| protocol::Header {
+        opcode,
+        request_id: 41,
+        ..protocol::Header::default()
+    };
+    assert_eq!(
+        service
+            .handle_terminal(
+                leader,
+                terminal_request(protocol::OP_TERMINAL_ACQUIRE),
+                &[],
+                77,
+            )
+            .header
+            .status,
+        protocol::STATUS_OK
+    );
+    assert_eq!(
+        service.controlling_terminal(77),
+        Some(posix_service::ControllingTerminal {
+            session_id: 141,
+            foreground_process_group: 141,
+        })
+    );
+    assert_eq!(
+        service
+            .handle_terminal(
+                member,
+                terminal_request(protocol::OP_TERMINAL_ACQUIRE),
+                &[],
+                78,
+            )
+            .header
+            .status,
+        protocol::STATUS_EPERM
+    );
+
+    let mut group_request = [0u8; protocol::PROCESS_GROUP_REQUEST_LEN];
+    protocol::encode_process_group_request(142, 142, &mut group_request).unwrap();
+    assert_eq!(
+        service
+            .handle(
+                leader,
+                protocol::Header {
+                    opcode: protocol::OP_SET_PROCESS_GROUP,
+                    ..protocol::Header::default()
+                },
+                &group_request,
+            )
+            .header
+            .status,
+        protocol::STATUS_OK
+    );
+    let mut foreground = [0u8; protocol::PROCESS_ID_REQUEST_LEN];
+    protocol::encode_process_id_request(142, &mut foreground).unwrap();
+    assert_eq!(
+        service
+            .handle_terminal(
+                member,
+                terminal_request(protocol::OP_TERMINAL_SET_FOREGROUND),
+                &foreground,
+                77,
+            )
+            .header
+            .status,
+        protocol::STATUS_OK
+    );
+    let response = service.handle_terminal(
+        leader,
+        terminal_request(protocol::OP_TERMINAL_GET_FOREGROUND),
+        &[],
+        77,
+    );
+    assert_eq!(response.header.status, protocol::STATUS_OK);
+    assert_eq!(
+        protocol::decode_process_id_request(&response.payload),
+        Ok(142)
+    );
+
+    let response = service.handle(
+        other_leader,
+        protocol::Header {
+            opcode: protocol::OP_CREATE_SESSION,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    assert_eq!(response.header.status, protocol::STATUS_OK);
+    assert_eq!(
+        service
+            .handle_terminal(
+                other_leader,
+                terminal_request(protocol::OP_TERMINAL_GET_FOREGROUND),
+                &[],
+                77,
+            )
+            .header
+            .status,
+        protocol::STATUS_ENOTTY
+    );
+    assert_eq!(
+        service
+            .handle_terminal(
+                other_leader,
+                terminal_request(protocol::OP_TERMINAL_ACQUIRE),
+                &[],
+                77,
+            )
+            .header
+            .status,
+        protocol::STATUS_EPERM
+    );
+    assert_eq!(
+        service
+            .handle_terminal(
+                member,
+                terminal_request(protocol::OP_TERMINAL_RELEASE),
+                &[],
+                77,
+            )
+            .header
+            .status,
+        protocol::STATUS_ENOTTY
+    );
+    assert_eq!(
+        service
+            .handle_terminal(
+                leader,
+                terminal_request(protocol::OP_TERMINAL_RELEASE),
+                &[],
+                77,
+            )
+            .header
+            .status,
+        protocol::STATUS_OK
+    );
+    assert!(service.controlling_terminal(77).is_none());
+}
+
+#[test]
 fn service_submits_open_as_one_atomic_filesystem_operation() {
     let peer = PeerIdentity {
         process_id: 111,

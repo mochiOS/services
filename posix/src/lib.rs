@@ -351,6 +351,12 @@ pub struct ObjectResponse<H> {
     pub handles: Vec<OpenedObject<H>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ControllingTerminal {
+    pub session_id: u64,
+    pub foreground_process_group: u64,
+}
+
 #[derive(Debug, Default)]
 pub struct PosixService<H: Copy = u32> {
     sessions: BTreeMap<u64, Session>,
@@ -360,6 +366,8 @@ pub struct PosixService<H: Copy = u32> {
     children: BTreeMap<u64, BTreeSet<u64>>,
     process_groups: BTreeMap<u64, u64>,
     session_ids: BTreeMap<u64, u64>,
+    controlling_terminals: BTreeMap<u64, u64>,
+    terminals: BTreeMap<u64, ControllingTerminal>,
     supplementary_groups: BTreeMap<u64, Vec<u32>>,
     resource_limits: BTreeMap<(u64, u32), protocol::ResourceLimit>,
     signals: BTreeMap<u64, ProcessSignalState>,
@@ -376,6 +384,8 @@ impl PosixService<u32> {
             children: BTreeMap::new(),
             process_groups: BTreeMap::new(),
             session_ids: BTreeMap::new(),
+            controlling_terminals: BTreeMap::new(),
+            terminals: BTreeMap::new(),
             supplementary_groups: BTreeMap::new(),
             resource_limits: BTreeMap::new(),
             signals: BTreeMap::new(),
@@ -399,6 +409,10 @@ impl<H: Copy> PosixService<H> {
 
     pub fn parent_id(&self, process_id: u64) -> Option<u64> {
         self.parents.get(&process_id).copied()
+    }
+
+    pub fn controlling_terminal(&self, terminal_id: u64) -> Option<ControllingTerminal> {
+        self.terminals.get(&terminal_id).copied()
     }
 
     pub fn supplementary_groups(&self, process_id: u64) -> Option<&[u32]> {
@@ -638,7 +652,10 @@ impl<H: Copy> PosixService<H> {
         }
         self.parents.remove(&child_id);
         self.process_groups.remove(&child_id);
-        self.session_ids.remove(&child_id);
+        let session_id = self.session_ids.remove(&child_id);
+        if session_id == Some(child_id) {
+            self.release_session_terminal(child_id);
+        }
         self.supplementary_groups.remove(&child_id);
         self.resource_limits
             .retain(|(process_id, _), _| *process_id != child_id);
@@ -744,6 +761,179 @@ impl<H: Copy> PosixService<H> {
         self.process_groups.insert(process_id, process_id);
         self.session_ids.insert(process_id, process_id);
         self.process_info_for(process_id)
+    }
+
+    fn acquire_controlling_terminal(
+        &mut self,
+        process_id: u64,
+        terminal_id: u64,
+    ) -> Result<(), i32> {
+        let session_id = self
+            .session_ids
+            .get(&process_id)
+            .copied()
+            .ok_or(protocol::STATUS_ESRCH)?;
+        if !self.sessions.contains_key(&process_id) || session_id != process_id {
+            return Err(protocol::STATUS_EPERM);
+        }
+        if let Some(existing) = self.controlling_terminals.get(&session_id).copied() {
+            return if existing == terminal_id {
+                Ok(())
+            } else {
+                Err(protocol::STATUS_EPERM)
+            };
+        }
+        if self.terminals.contains_key(&terminal_id) {
+            return Err(protocol::STATUS_EPERM);
+        }
+        let foreground_process_group = self
+            .process_groups
+            .get(&process_id)
+            .copied()
+            .ok_or(protocol::STATUS_ESRCH)?;
+        self.controlling_terminals.insert(session_id, terminal_id);
+        self.terminals.insert(
+            terminal_id,
+            ControllingTerminal {
+                session_id,
+                foreground_process_group,
+            },
+        );
+        Ok(())
+    }
+
+    fn release_controlling_terminal(
+        &mut self,
+        process_id: u64,
+        terminal_id: u64,
+    ) -> Result<(), i32> {
+        let session_id = self
+            .session_ids
+            .get(&process_id)
+            .copied()
+            .ok_or(protocol::STATUS_ESRCH)?;
+        if session_id != process_id
+            || self.controlling_terminals.get(&session_id).copied() != Some(terminal_id)
+        {
+            return Err(protocol::STATUS_ENOTTY);
+        }
+        self.release_session_terminal(session_id);
+        Ok(())
+    }
+
+    fn release_session_terminal(&mut self, session_id: u64) {
+        if let Some(terminal_id) = self.controlling_terminals.remove(&session_id) {
+            self.terminals.remove(&terminal_id);
+        }
+    }
+
+    fn terminal_foreground_process_group(
+        &self,
+        process_id: u64,
+        terminal_id: u64,
+    ) -> Result<u64, i32> {
+        let session_id = self
+            .session_ids
+            .get(&process_id)
+            .copied()
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let terminal = self
+            .terminals
+            .get(&terminal_id)
+            .copied()
+            .ok_or(protocol::STATUS_ENOTTY)?;
+        if terminal.session_id != session_id
+            || self.controlling_terminals.get(&session_id).copied() != Some(terminal_id)
+        {
+            return Err(protocol::STATUS_ENOTTY);
+        }
+        Ok(terminal.foreground_process_group)
+    }
+
+    fn set_terminal_foreground_process_group(
+        &mut self,
+        process_id: u64,
+        terminal_id: u64,
+        payload: &[u8],
+    ) -> Result<(), i32> {
+        let process_group =
+            protocol::decode_process_id_request(payload).map_err(|_| STATUS_EINVAL)?;
+        if process_group <= 0 {
+            return Err(STATUS_EINVAL);
+        }
+        let process_group = process_group as u64;
+        let session_id = self
+            .session_ids
+            .get(&process_id)
+            .copied()
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let terminal = self
+            .terminals
+            .get_mut(&terminal_id)
+            .ok_or(protocol::STATUS_ENOTTY)?;
+        if terminal.session_id != session_id
+            || self.controlling_terminals.get(&session_id).copied() != Some(terminal_id)
+        {
+            return Err(protocol::STATUS_ENOTTY);
+        }
+        let group_is_in_session = self.process_groups.iter().any(|(member, group)| {
+            *group == process_group && self.session_ids.get(member).copied() == Some(session_id)
+        });
+        if !group_is_in_session {
+            return Err(protocol::STATUS_EPERM);
+        }
+        terminal.foreground_process_group = process_group;
+        Ok(())
+    }
+
+    /// Applies POSIX controlling-terminal policy to a terminal object already
+    /// authenticated by its provider. `terminal_id` is provider-owned state;
+    /// clients cannot select or forge it in request bytes.
+    pub fn handle_terminal(
+        &mut self,
+        peer: PeerIdentity,
+        header: protocol::Header,
+        payload: &[u8],
+        terminal_id: u64,
+    ) -> Response {
+        let result = match header.opcode {
+            protocol::OP_TERMINAL_ACQUIRE if header.flags == 0 && payload.is_empty() => self
+                .acquire_controlling_terminal(peer.process_id, terminal_id)
+                .map(|_| Vec::new()),
+            protocol::OP_TERMINAL_RELEASE if header.flags == 0 && payload.is_empty() => self
+                .release_controlling_terminal(peer.process_id, terminal_id)
+                .map(|_| Vec::new()),
+            protocol::OP_TERMINAL_GET_FOREGROUND if header.flags == 0 && payload.is_empty() => self
+                .terminal_foreground_process_group(peer.process_id, terminal_id)
+                .and_then(|group| {
+                    let group = i64::try_from(group).map_err(|_| STATUS_EINVAL)?;
+                    let mut output = vec![0; protocol::PROCESS_ID_REQUEST_LEN];
+                    protocol::encode_process_id_request(group, &mut output)
+                        .map_err(|_| STATUS_EINVAL)?;
+                    Ok(output)
+                }),
+            protocol::OP_TERMINAL_SET_FOREGROUND if header.flags == 0 => self
+                .set_terminal_foreground_process_group(peer.process_id, terminal_id, payload)
+                .map(|_| Vec::new()),
+            protocol::OP_TERMINAL_ACQUIRE
+            | protocol::OP_TERMINAL_RELEASE
+            | protocol::OP_TERMINAL_GET_FOREGROUND
+            | protocol::OP_TERMINAL_SET_FOREGROUND => Err(STATUS_EINVAL),
+            _ => Err(protocol::STATUS_ENOSYS),
+        };
+        match result {
+            Ok(payload) => Response {
+                header: protocol::Header {
+                    opcode: protocol::OP_STATUS,
+                    request_id: header.request_id,
+                    flags: 0,
+                    payload_len: payload.len() as u32,
+                    status: protocol::STATUS_OK,
+                },
+                payload,
+            },
+            Err(status) => status_response(header.request_id, status),
+        }
     }
 
     fn resource_limit_payload(&mut self, caller_id: u64, payload: &[u8]) -> Result<Vec<u8>, i32> {
@@ -952,6 +1142,10 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_SESSION_REGISTER
             | protocol::OP_SIGNAL_THREAD_REGISTER
             | protocol::OP_PTY_OPEN
+            | protocol::OP_TERMINAL_ACQUIRE
+            | protocol::OP_TERMINAL_RELEASE
+            | protocol::OP_TERMINAL_GET_FOREGROUND
+            | protocol::OP_TERMINAL_SET_FOREGROUND
             | protocol::OP_SESSION_INFO
             | protocol::OP_UMASK_SET
             | protocol::OP_GROUPS_GET
