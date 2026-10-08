@@ -9,6 +9,9 @@ pub const EBADF: i32 = 9;
 pub const ESPIPE: i32 = 29;
 
 pub const BUFFER_CAPACITY: usize = 64 * 1024;
+pub const READINESS_SIGNALS: u64 = mnu_abi::HANDLE_SIGNAL_READABLE
+    | mnu_abi::HANDLE_SIGNAL_WRITABLE
+    | mnu_abi::HANDLE_SIGNAL_PEER_CLOSED;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PtyPair {
@@ -134,6 +137,45 @@ impl PtyManager {
         if let Some((id, _)) = decode_object_id(pair.master_object_id) {
             self.terminals.remove(&id);
         }
+    }
+
+    pub fn object_ids(&self, object_id: u64) -> Result<[u64; 2], i32> {
+        let (id, _) = decode_object_id(object_id).ok_or(EBADF)?;
+        self.terminals
+            .contains_key(&id)
+            .then_some([
+                encode_object_id(id, PtySide::Master),
+                encode_object_id(id, PtySide::Slave),
+            ])
+            .ok_or(EBADF)
+    }
+
+    pub fn signals(&self, object_id: u64) -> Result<u64, i32> {
+        let (id, side) = decode_object_id(object_id).ok_or(EBADF)?;
+        let terminal = self.terminals.get(&id).ok_or(EBADF)?;
+        let (readable, writable, peer_closed) = match side {
+            PtySide::Master => (
+                !terminal.output.is_empty(),
+                terminal.slave_open && terminal.input.len() < BUFFER_CAPACITY,
+                !terminal.slave_open,
+            ),
+            PtySide::Slave => (
+                !terminal.input.is_empty(),
+                terminal.master_open && terminal.output.len() < BUFFER_CAPACITY,
+                !terminal.master_open,
+            ),
+        };
+        let mut signals = 0;
+        if readable {
+            signals |= mnu_abi::HANDLE_SIGNAL_READABLE;
+        }
+        if writable {
+            signals |= mnu_abi::HANDLE_SIGNAL_WRITABLE;
+        }
+        if peer_closed {
+            signals |= mnu_abi::HANDLE_SIGNAL_PEER_CLOSED;
+        }
+        Ok(signals)
     }
 
     fn allocate_id(&mut self) -> Option<u64> {

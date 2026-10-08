@@ -114,6 +114,39 @@ fn pty_queues_are_bounded_and_support_partial_writes() {
 }
 
 #[test]
+fn readiness_signals_follow_queue_capacity_and_peer_lifetime() {
+    let mut ptys = PtyManager::new();
+    let pair = ptys.open().unwrap();
+
+    assert_eq!(
+        ptys.signals(pair.master_object_id),
+        Ok(mnu_abi::HANDLE_SIGNAL_WRITABLE)
+    );
+    assert_eq!(
+        ptys.signals(pair.slave_object_id),
+        Ok(mnu_abi::HANDLE_SIGNAL_WRITABLE)
+    );
+
+    assert_eq!(ptys.write(pair.master_object_id, b"input"), Ok(5));
+    assert_eq!(
+        ptys.signals(pair.slave_object_id),
+        Ok(mnu_abi::HANDLE_SIGNAL_READABLE | mnu_abi::HANDLE_SIGNAL_WRITABLE)
+    );
+    let remaining = vec![b'x'; BUFFER_CAPACITY - 5];
+    assert_eq!(
+        ptys.write(pair.master_object_id, &remaining),
+        Ok(remaining.len())
+    );
+    assert_eq!(ptys.signals(pair.master_object_id), Ok(0));
+
+    assert_eq!(ptys.release(pair.slave_object_id), Ok(()));
+    assert_eq!(
+        ptys.signals(pair.master_object_id),
+        Ok(mnu_abi::HANDLE_SIGNAL_PEER_CLOSED)
+    );
+}
+
+#[test]
 fn client_receives_only_the_two_provider_handles() {
     let client = Client::new(PtyTransport { handle_count: 2 });
     let pair = client.open_pty().unwrap();

@@ -1,4 +1,7 @@
 #[cfg(target_os = "mochios")]
+const PTY_SYNC_MAGIC: [u8; 4] = *b"PTYS";
+
+#[cfg(target_os = "mochios")]
 fn main() {
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
@@ -354,20 +357,102 @@ fn run_pty_provider(
         };
         let sender = message >> 32;
         let length = (message & 0xffff_ffff) as usize;
+        let request_length = length.min(request.len());
         let count = (attachments.count as usize).min(attachments.handles.len());
         for attachment in attachments.handles.iter().take(count) {
             let _ = platform::handle::close(attachment.handle);
         }
-        let response_len = ptys.lock().ok().and_then(|mut manager| {
-            posix_service::pty::handle_provider_request(
+        if request[..request_length].starts_with(&PTY_SYNC_MAGIC) {
+            let status = handle_pty_sync_request(&ptys, &request[..request_length]);
+            let _ = platform::ipc::reply(sender, &status.to_le_bytes());
+            continue;
+        }
+        let (response_len, signal_states) = if let Ok(mut manager) = ptys.lock() {
+            let object_ids = provider::RequestHeader::decode(&request[..request_length])
+                .ok()
+                .and_then(|(header, _)| manager.object_ids(header.object_id).ok());
+            let response_len = posix_service::pty::handle_provider_request(
                 &mut manager,
-                &request[..length.min(request.len())],
+                &request[..request_length],
                 &mut response,
-            )
-        });
+            );
+            let signal_states = object_ids
+                .map(|ids| ids.map(|object_id| (object_id, manager.signals(object_id).ok())));
+            (response_len, signal_states)
+        } else {
+            (None, None)
+        };
+        if let Some(signal_states) = signal_states {
+            for (object_id, signals) in signal_states {
+                if let Some(signals) = signals {
+                    let _ = platform::handle::signal_provider_object(
+                        object_id,
+                        signals,
+                        posix_service::pty::READINESS_SIGNALS & !signals,
+                    );
+                }
+            }
+        }
         if let Some(response_len) = response_len {
             let _ = platform::ipc::reply(sender, &response[..response_len]);
         }
+    }
+}
+
+#[cfg(target_os = "mochios")]
+fn handle_pty_sync_request(
+    ptys: &std::sync::Mutex<posix_service::pty::PtyManager>,
+    request: &[u8],
+) -> i64 {
+    use mochi_user_platform as platform;
+
+    if request.len() != 20 || request[..4] != PTY_SYNC_MAGIC {
+        return -22;
+    }
+    let master = u64::from_le_bytes(request[4..12].try_into().unwrap());
+    let slave = u64::from_le_bytes(request[12..20].try_into().unwrap());
+    let manager = match ptys.lock() {
+        Ok(manager) => manager,
+        Err(_) => return -5,
+    };
+    if manager.object_ids(master) != Ok([master, slave]) {
+        return -9;
+    }
+    for object_id in [master, slave] {
+        let signals = match manager.signals(object_id) {
+            Ok(signals) => signals,
+            Err(errno) => return -(i64::from(errno)),
+        };
+        if let Err(error) = platform::handle::signal_provider_object(
+            object_id,
+            signals,
+            posix_service::pty::READINESS_SIGNALS & !signals,
+        ) {
+            return error.raw();
+        }
+    }
+    0
+}
+
+#[cfg(target_os = "mochios")]
+fn sync_pty_provider(endpoint: u32, pair: posix_service::pty::PtyPair) -> Result<(), i32> {
+    use mochi_user_platform as platform;
+
+    let mut request = [0u8; 20];
+    request[..4].copy_from_slice(&PTY_SYNC_MAGIC);
+    request[4..12].copy_from_slice(&pair.master_object_id.to_le_bytes());
+    request[12..20].copy_from_slice(&pair.slave_object_id.to_le_bytes());
+    let mut response = [0u8; 8];
+    let message = platform::ipc::call(u64::from(endpoint), &request, &mut response)
+        .map_err(|error| i32::try_from(error.raw()).unwrap_or(-5))?;
+    if message & 0xffff_ffff != response.len() as u64 {
+        return Err(-5);
+    }
+    let status = i64::from_le_bytes(response);
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(i32::try_from(status).unwrap_or(-5))
     }
 }
 
@@ -390,6 +475,7 @@ fn open_pty_response(
     };
     let rights = platform::handle::HANDLE_RIGHT_READ
         | platform::handle::HANDLE_RIGHT_WRITE
+        | platform::handle::HANDLE_RIGHT_WAIT
         | platform::handle::HANDLE_RIGHT_DUPLICATE
         | platform::handle::HANDLE_RIGHT_TRANSFER;
     let master =
@@ -415,6 +501,15 @@ fn open_pty_response(
                 };
             }
         };
+    if let Err(status) = sync_pty_provider(endpoint, pair) {
+        let _ = platform::handle::close(master);
+        let _ = platform::handle::close(slave);
+        ptys.lock().unwrap().discard(pair);
+        return posix_service::ObjectResponse {
+            response: status_response(request_id, status),
+            handles: Vec::new(),
+        };
+    }
     posix_service::ObjectResponse {
         response: success_response(request_id),
         handles: vec![
