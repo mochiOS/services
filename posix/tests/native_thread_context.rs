@@ -27,3 +27,11 @@ fn native_thread_context_keeps_runtime_tls_opaque() {
 
     assert_eq!(context.thread_local_base, 0x4000);
 }
+
+#[test]
+fn initial_thread_argument_cannot_alias_iret_frame_scratch_registers() {
+    let source = include_str!("../../../core/src/task/usermode.rs");
+    let initial_entry = source.split("/// GDTR").next().unwrap();
+    assert!(initial_entry.contains("in(\"rdi\") user_arg0"));
+    assert!(!initial_entry.contains("arg0 = in(reg)"));
+}
