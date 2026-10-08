@@ -4,7 +4,8 @@ use mochios_posix_client::{
 };
 use mochios_posix_protocol as protocol;
 use posix_service::pty::{
-    BUFFER_CAPACITY, EAGAIN, EBADF, EIO, ENOTSUP, ESPIPE, PtyManager, handle_provider_request,
+    BUFFER_CAPACITY, EAGAIN, EBADF, EINVAL, EIO, ENOTSUP, ESPIPE, PtyManager,
+    handle_provider_request,
 };
 
 #[test]
@@ -117,6 +118,87 @@ fn unsupported_provider_control_returns_an_error_reply() {
     assert_eq!(header.status, -(i64::from(ENOTSUP)));
     assert_eq!(header.value, 0);
     assert!(payload.is_empty());
+}
+
+#[test]
+fn terminal_attributes_are_shared_between_both_ends() {
+    let mut ptys = PtyManager::new();
+    let pair = ptys.open().unwrap();
+    let defaults = protocol::TerminalAttributes::sane();
+    assert_eq!(ptys.attributes(pair.master_object_id), Ok(defaults));
+    assert_eq!(ptys.attributes(pair.slave_object_id), Ok(defaults));
+
+    let mut raw = defaults;
+    raw.input_flags = 0;
+    raw.output_flags = 0;
+    raw.local_flags = 0;
+    raw.control_characters[protocol::TERMINAL_CC_VMIN] = 7;
+    ptys.set_attributes(pair.slave_object_id, raw).unwrap();
+    assert_eq!(ptys.attributes(pair.master_object_id), Ok(raw));
+}
+
+#[test]
+fn provider_control_round_trips_terminal_attributes() {
+    let mut ptys = PtyManager::new();
+    let pair = ptys.open().unwrap();
+    let mut request = [0u8; provider::REQUEST_HEADER_LEN + protocol::TERMINAL_ATTRIBUTES_LEN];
+    let mut response = [0u8; provider::RESPONSE_HEADER_LEN + protocol::TERMINAL_ATTRIBUTES_LEN];
+    let mut attributes = protocol::TerminalAttributes::sane();
+    attributes.local_flags &= !protocol::TERMINAL_LFLAG_ECHO;
+    attributes.output_speed = 115_200;
+    let mut encoded = [0; protocol::TERMINAL_ATTRIBUTES_LEN];
+    protocol::encode_terminal_attributes(attributes, &mut encoded).unwrap();
+
+    let request_len = provider::RequestHeader {
+        opcode: provider::OP_CONTROL,
+        object_id: pair.slave_object_id,
+        argument: 0,
+        basis: protocol::PTY_CONTROL_SET_ATTRIBUTES_NOW,
+        length: 0,
+        data_length: encoded.len() as u32,
+    }
+    .encode(&encoded, &mut request)
+    .unwrap();
+    let response_len =
+        handle_provider_request(&mut ptys, &request[..request_len], &mut response).unwrap();
+    let (header, payload) = provider::ResponseHeader::decode(&response[..response_len]).unwrap();
+    assert_eq!(header.status, 0);
+    assert!(payload.is_empty());
+
+    let request_len = provider::RequestHeader {
+        opcode: provider::OP_CONTROL,
+        object_id: pair.master_object_id,
+        argument: 0,
+        basis: protocol::PTY_CONTROL_GET_ATTRIBUTES,
+        length: protocol::TERMINAL_ATTRIBUTES_LEN as u32,
+        data_length: 0,
+    }
+    .encode(&[], &mut request)
+    .unwrap();
+    let response_len =
+        handle_provider_request(&mut ptys, &request[..request_len], &mut response).unwrap();
+    let (header, payload) = provider::ResponseHeader::decode(&response[..response_len]).unwrap();
+    assert_eq!(header.status, 0);
+    assert_eq!(header.value, protocol::TERMINAL_ATTRIBUTES_LEN as u64);
+    assert_eq!(
+        protocol::decode_terminal_attributes(payload),
+        Ok(attributes)
+    );
+
+    let request_len = provider::RequestHeader {
+        opcode: provider::OP_CONTROL,
+        object_id: pair.master_object_id,
+        argument: 0,
+        basis: protocol::PTY_CONTROL_SET_ATTRIBUTES_NOW,
+        length: 0,
+        data_length: 1,
+    }
+    .encode(&[0], &mut request)
+    .unwrap();
+    let response_len =
+        handle_provider_request(&mut ptys, &request[..request_len], &mut response).unwrap();
+    let (header, _) = provider::ResponseHeader::decode(&response[..response_len]).unwrap();
+    assert_eq!(header.status, -(i64::from(EINVAL)));
 }
 
 #[test]

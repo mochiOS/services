@@ -2,10 +2,12 @@ use std::collections::{BTreeMap, VecDeque};
 use std::vec::Vec;
 
 use mnu_abi::provider;
+use mochios_posix_protocol as posix_protocol;
 
 pub const EIO: i32 = 5;
 pub const EAGAIN: i32 = 11;
 pub const EBADF: i32 = 9;
+pub const EINVAL: i32 = 22;
 pub const ESPIPE: i32 = 29;
 pub const ENOTSUP: i32 = 95;
 
@@ -32,6 +34,7 @@ struct PseudoTerminal {
     slave_open: bool,
     input: VecDeque<u8>,
     output: VecDeque<u8>,
+    attributes: posix_protocol::TerminalAttributes,
 }
 
 impl PseudoTerminal {
@@ -41,6 +44,7 @@ impl PseudoTerminal {
             slave_open: true,
             input: VecDeque::new(),
             output: VecDeque::new(),
+            attributes: posix_protocol::TerminalAttributes::sane(),
         }
     }
 }
@@ -115,6 +119,59 @@ impl PtyManager {
         let (id, _) = decode_object_id(object_id).ok_or(EBADF)?;
         self.terminals.contains_key(&id).then_some(0).ok_or(EBADF)?;
         Err(ESPIPE)
+    }
+
+    pub fn attributes(&self, object_id: u64) -> Result<posix_protocol::TerminalAttributes, i32> {
+        let (id, _) = decode_object_id(object_id).ok_or(EBADF)?;
+        self.terminals
+            .get(&id)
+            .map(|terminal| terminal.attributes)
+            .ok_or(EBADF)
+    }
+
+    pub fn set_attributes(
+        &mut self,
+        object_id: u64,
+        attributes: posix_protocol::TerminalAttributes,
+    ) -> Result<(), i32> {
+        let (id, _) = decode_object_id(object_id).ok_or(EBADF)?;
+        self.terminals.get_mut(&id).ok_or(EBADF)?.attributes = attributes;
+        Ok(())
+    }
+
+    pub fn control(
+        &mut self,
+        object_id: u64,
+        code: u64,
+        input: &[u8],
+        output_capacity: usize,
+    ) -> Result<Vec<u8>, i32> {
+        match code {
+            posix_protocol::PTY_CONTROL_GET_ATTRIBUTES => {
+                if !input.is_empty() || output_capacity < posix_protocol::TERMINAL_ATTRIBUTES_LEN {
+                    return Err(EINVAL);
+                }
+                let mut output = vec![0; posix_protocol::TERMINAL_ATTRIBUTES_LEN];
+                posix_protocol::encode_terminal_attributes(
+                    self.attributes(object_id)?,
+                    &mut output,
+                )
+                .map_err(|_| EINVAL)?;
+                Ok(output)
+            }
+            posix_protocol::PTY_CONTROL_SET_ATTRIBUTES_NOW => {
+                if output_capacity != 0 {
+                    return Err(EINVAL);
+                }
+                let attributes =
+                    posix_protocol::decode_terminal_attributes(input).map_err(|_| EINVAL)?;
+                self.set_attributes(object_id, attributes)?;
+                Ok(Vec::new())
+            }
+            posix_protocol::PTY_CONTROL_SET_ATTRIBUTES_DRAIN
+            | posix_protocol::PTY_CONTROL_SET_ATTRIBUTES_FLUSH => Err(ENOTSUP),
+            _ => Err(ENOTSUP),
+        }
     }
 
     pub fn release(&mut self, object_id: u64) -> Result<(), i32> {
@@ -212,7 +269,14 @@ pub fn handle_provider_request(
         provider::OP_SEEK => ptys
             .seek(header.object_id)
             .map(|offset| (offset, Vec::new())),
-        provider::OP_CONTROL => Err(ENOTSUP),
+        provider::OP_CONTROL => ptys
+            .control(
+                header.object_id,
+                header.basis,
+                payload,
+                header.length as usize,
+            )
+            .map(|data| (data.len() as u64, data)),
         _ => unreachable!("provider decoder rejects unknown operations"),
     };
     let (status, value, data) = match result {
