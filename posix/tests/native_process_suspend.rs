@@ -14,6 +14,12 @@ fn native_process_suspension_is_generic_and_outside_the_posix_protocol() {
 
     let protocol = include_str!("../../../user/crates/posix-protocol/src/lib.rs");
     assert!(!protocol.contains("OP_PROCESS_SUSPEND"));
+
+    let runtime = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
+    assert!(runtime.contains("SyscallNumber::ProcessSuspendCurrent"));
+    assert!(runtime.contains("posix_protocol::SIGNAL_TSTP"));
+    assert!(runtime.contains("posix_protocol::SIGNAL_TTIN"));
+    assert!(runtime.contains("posix_protocol::SIGNAL_TTOU"));
 }
 
 #[test]
@@ -27,4 +33,12 @@ fn suspension_preserves_wait_state_and_resume_does_not_wake_blocked_threads() {
     assert!(handle.contains("crate::task::resume_process_threads(process_id)"));
     assert!(!handle.contains("for thread in threads {\n        crate::task::wake_thread(thread);"));
     assert!(!thread.contains("ThreadState::Suspended"));
+
+    let service = include_str!("../src/main.rs");
+    assert!(service.contains("platform::process::resume_handle(handle)"));
+
+    let native_handles = include_str!("../../../core/src/syscall/handle.rs");
+    assert!(native_handles.contains("crate::capability::Capability::ProcessKill"));
+    let manifest = include_str!("../manifest.toml");
+    assert!(manifest.contains("\"process.kill\""));
 }

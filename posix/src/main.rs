@@ -87,6 +87,7 @@ fn main() {
     let mut request_bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
     let mut response_bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
     loop {
+        deliver_process_resume_notifications(&mut service);
         deliver_signal_notifications(&mut service, &mut signal_threads);
         complete_pending_waits(
             &mut pending_waits,
@@ -722,6 +723,22 @@ fn deliver_signal_notifications(
 }
 
 #[cfg(target_os = "mochios")]
+fn deliver_process_resume_notifications(service: &mut posix_service::PosixService<u32>) {
+    use mochi_user_platform as platform;
+
+    let processes: Vec<u64> = service.process_resume_notification_processes().collect();
+    for process_id in processes {
+        let Some(handle) = service.process_handle(process_id) else {
+            service.acknowledge_process_resume_notification(process_id);
+            continue;
+        };
+        if platform::process::resume_handle(handle).is_ok() {
+            service.acknowledge_process_resume_notification(process_id);
+        }
+    }
+}
+
+#[cfg(target_os = "mochios")]
 #[derive(Clone, Copy)]
 struct PendingWait {
     sender: u64,
@@ -800,7 +817,9 @@ fn adopt_sender_child(
 ) -> Result<(), ()> {
     use mochi_user_platform as platform;
 
-    if process.rights != platform::handle::HANDLE_RIGHT_WAIT {
+    let required_rights =
+        platform::handle::HANDLE_RIGHT_WAIT | platform::handle::HANDLE_RIGHT_SIGNAL;
+    if process.rights != required_rights {
         return Err(());
     }
     let status = platform::process::handle_status(process.handle).map_err(|_| ())?;
@@ -827,9 +846,10 @@ fn bind_sender_process(
     if service.process_handle(peer.process_id).is_some() {
         return Ok(());
     }
-    let handle =
-        platform::process::open_handle_for_endpoint(sender, platform::handle::HANDLE_RIGHT_WAIT)
-            .map_err(|_| ())?;
+    let required_rights =
+        platform::handle::HANDLE_RIGHT_WAIT | platform::handle::HANDLE_RIGHT_SIGNAL;
+    let handle = platform::process::open_handle_for_endpoint(sender, required_rights)
+        .map_err(|_| ())?;
     match platform::process::handle_status(handle) {
         Ok(status) if status.process_id == peer.process_id => {}
         _ => {

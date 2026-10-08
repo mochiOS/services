@@ -321,7 +321,13 @@ impl ProcessSignalState {
     }
 
     fn enqueue(&mut self, signal: u32) {
-        self.pending |= 1u64 << (signal - 1);
+        let signal = signal_bit(signal);
+        if signal == signal_bit(protocol::SIGNAL_CONT) {
+            self.pending &= !JOB_CONTROL_STOP_SIGNALS;
+        } else if signal & JOB_CONTROL_STOP_SIGNALS != 0 {
+            self.pending &= !signal_bit(protocol::SIGNAL_CONT);
+        }
+        self.pending |= signal;
     }
 
     fn dequeue(&mut self, blocked: u64) -> u32 {
@@ -339,6 +345,11 @@ impl ProcessSignalState {
 const fn signal_bit(signal: u32) -> u64 {
     1u64 << (signal - 1)
 }
+
+const JOB_CONTROL_STOP_SIGNALS: u64 = signal_bit(protocol::SIGNAL_STOP)
+    | signal_bit(protocol::SIGNAL_TSTP)
+    | signal_bit(protocol::SIGNAL_TTIN)
+    | signal_bit(protocol::SIGNAL_TTOU);
 
 pub trait ProcessBackend<H: Copy> {
     fn status(&mut self, process: H) -> Result<ProcessLifecycle, i32>;
@@ -372,6 +383,7 @@ pub struct PosixService<H: Copy = u32> {
     resource_limits: BTreeMap<(u64, u32), protocol::ResourceLimit>,
     signals: BTreeMap<u64, ProcessSignalState>,
     signal_notifications: BTreeSet<u64>,
+    process_resume_notifications: BTreeSet<u64>,
 }
 
 impl PosixService<u32> {
@@ -390,6 +402,7 @@ impl PosixService<u32> {
             resource_limits: BTreeMap::new(),
             signals: BTreeMap::new(),
             signal_notifications: BTreeSet::new(),
+            process_resume_notifications: BTreeSet::new(),
         }
     }
 }
@@ -433,6 +446,26 @@ impl<H: Copy> PosixService<H> {
         self.signal_notifications.remove(&process_id);
     }
 
+    pub fn process_resume_notification_processes(&self) -> impl Iterator<Item = u64> + '_ {
+        self.process_resume_notifications.iter().copied()
+    }
+
+    pub fn acknowledge_process_resume_notification(&mut self, process_id: u64) {
+        self.process_resume_notifications.remove(&process_id);
+    }
+
+    fn enqueue_signal(&mut self, process_id: u64, signal: u32) -> Result<(), i32> {
+        self.signals
+            .get_mut(&process_id)
+            .ok_or(protocol::STATUS_ESRCH)?
+            .enqueue(signal);
+        self.signal_notifications.insert(process_id);
+        if matches!(signal, protocol::SIGNAL_KILL | protocol::SIGNAL_CONT) {
+            self.process_resume_notifications.insert(process_id);
+        }
+        Ok(())
+    }
+
     /// Enqueues a terminal-generated signal for every member of the terminal's
     /// foreground process group. The PTY provider authenticates `terminal_id`;
     /// this path deliberately bypasses user credential checks because the
@@ -463,11 +496,7 @@ impl<H: Copy> PosixService<H> {
             return Err(protocol::STATUS_ESRCH);
         }
         for process_id in targets.iter().copied() {
-            self.signals
-                .get_mut(&process_id)
-                .ok_or(protocol::STATUS_ESRCH)?
-                .enqueue(signal);
-            self.signal_notifications.insert(process_id);
+            self.enqueue_signal(process_id, signal)?;
         }
         Ok(targets.len())
     }
@@ -699,6 +728,8 @@ impl<H: Copy> PosixService<H> {
         self.resource_limits
             .retain(|(process_id, _), _| *process_id != child_id);
         self.signals.remove(&child_id);
+        self.signal_notifications.remove(&child_id);
+        self.process_resume_notifications.remove(&child_id);
         self.sessions.remove(&child_id);
         if let Some(directories) = self.directories.remove(&child_id) {
             filesystem.release_object(directories.root);
@@ -1069,11 +1100,7 @@ impl<H: Copy> PosixService<H> {
             }
             permitted = true;
             if request.signal != 0 {
-                self.signals
-                    .get_mut(&target_id)
-                    .ok_or(protocol::STATUS_ESRCH)?
-                    .enqueue(request.signal);
-                self.signal_notifications.insert(target_id);
+                self.enqueue_signal(target_id, request.signal)?;
             }
         }
         if permitted {

@@ -13,4 +13,5 @@ requires = [
     "ipc.client",
     "ipc.server",
     "process.inspect",
+    "process.kill",
 ]

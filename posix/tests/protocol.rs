@@ -724,7 +724,7 @@ impl ObjectTransport for ChildRegistrationTransport {
             handles.get(0),
             Some(ObjectHandleAttachment {
                 handle: 52,
-                rights: 1 << 4,
+                rights: mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_SIGNAL,
             })
         );
         handles.clear();
@@ -747,7 +747,7 @@ fn client_registers_a_child_only_by_transferring_its_process_handle() {
     Client::new(ChildRegistrationTransport)
         .register_child(ObjectHandleAttachment {
             handle: 52,
-            rights: 1 << 4,
+            rights: mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_SIGNAL,
         })
         .unwrap();
 }

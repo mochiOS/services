@@ -155,6 +155,75 @@ fn standard_signals_coalesce_and_respect_the_receiving_thread_mask() {
 }
 
 #[test]
+fn sigcont_requests_native_resume_and_replaces_pending_stop_signals() {
+    let sender_identity = peer(151, 501);
+    let receiver_identity = peer(152, 501);
+    let service = Rc::new(RefCell::new(PosixService::new()));
+    register(&mut service.borrow_mut(), sender_identity);
+    register(&mut service.borrow_mut(), receiver_identity);
+    let sender = client(&service, sender_identity);
+    let receiver = client(&service, receiver_identity);
+
+    sender
+        .send_signal(152, protocol::SIGNAL_TSTP)
+        .unwrap();
+    sender
+        .send_signal(152, protocol::SIGNAL_CONT)
+        .unwrap();
+    assert_eq!(
+        service
+            .borrow()
+            .process_resume_notification_processes()
+            .collect::<Vec<_>>(),
+        vec![152]
+    );
+    assert_eq!(
+        receiver.pending_signals().unwrap(),
+        1u64 << (protocol::SIGNAL_CONT - 1)
+    );
+
+    service
+        .borrow_mut()
+        .acknowledge_process_resume_notification(152);
+    assert!(
+        service
+            .borrow()
+            .process_resume_notification_processes()
+            .next()
+            .is_none()
+    );
+
+    sender
+        .send_signal(152, protocol::SIGNAL_CONT)
+        .unwrap();
+    sender
+        .send_signal(152, protocol::SIGNAL_TTIN)
+        .unwrap();
+    assert_eq!(
+        receiver.pending_signals().unwrap(),
+        1u64 << (protocol::SIGNAL_TTIN - 1)
+    );
+
+    service
+        .borrow_mut()
+        .acknowledge_process_resume_notification(152);
+    sender
+        .send_signal(152, protocol::SIGNAL_KILL)
+        .unwrap();
+    assert_eq!(
+        service
+            .borrow()
+            .process_resume_notification_processes()
+            .collect::<Vec<_>>(),
+        vec![152]
+    );
+    assert_eq!(
+        receiver.pending_signals().unwrap(),
+        (1u64 << (protocol::SIGNAL_KILL - 1)) | (1u64 << (protocol::SIGNAL_TTIN - 1))
+    );
+}
+
+#[test]
 fn signal_selection_uses_posix_credentials_without_granting_uid_zero_authority() {
     let sender_identity = peer(201, 501);
     let same_user = peer(202, 501);
