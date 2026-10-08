@@ -1,6 +1,7 @@
 #[cfg(target_os = "mochios")]
 fn main() {
     use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
 
     use mochi_user_platform as platform;
     use mochios_filesystem_protocol as filesystem_protocol;
@@ -23,13 +24,11 @@ fn main() {
             platform::process::exit(1);
         }
     };
-    let provider_endpoint_handle = match platform::ipc::create_handle() {
+    let ptys = Arc::new(Mutex::new(posix_service::pty::PtyManager::new()));
+    let provider_endpoint_handle = match start_pty_provider(Arc::clone(&ptys)) {
         Ok(handle) => handle,
         Err(error) => {
-            platform::logln!(
-                "posix.service: provider endpoint creation failed errno={}",
-                error.raw()
-            );
+            platform::logln!("posix.service: provider worker failed errno={}", error);
             platform::process::exit(1);
         }
     };
@@ -48,7 +47,6 @@ fn main() {
     platform::logln!("posix.service: endpoint ready");
 
     let mut service = PosixService::new();
-    let mut ptys = posix_service::pty::PtyManager::new();
     let filesystem_endpoint =
         match platform::handle::inherited(filesystem_protocol::CONTROL_HANDLE_KEY) {
             Ok(endpoint) => endpoint,
@@ -76,23 +74,20 @@ fn main() {
             &mut filesystem,
             &mut processes,
         );
-        let ready_endpoint = match wait_for_work(
-            endpoint_handle,
-            provider_endpoint_handle,
-            &pending_waits,
-            &service,
-        ) {
-            Ok(Some(endpoint)) => endpoint,
-            Ok(None) => continue,
-            Err(error) => {
-                platform::logln!("posix.service: lifecycle wait failed errno={}", error);
-                platform::thread::yield_now();
-                continue;
+        if !pending_waits.is_empty() {
+            match wait_for_request_or_child(endpoint_handle, &pending_waits, &service) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    platform::logln!("posix.service: lifecycle wait failed errno={}", error);
+                    platform::thread::yield_now();
+                    continue;
+                }
             }
-        };
+        }
         let mut received_handles = platform::ipc::IpcObjectHandles::default();
         let message = match platform::ipc::wait_object_handles(
-            ready_endpoint as u64,
+            endpoint_handle as u64,
             &mut request_bytes,
             &mut received_handles,
         ) {
@@ -105,21 +100,6 @@ fn main() {
         let sender = message >> 32;
         let length = (message & 0xffff_ffff) as usize;
         let attached_count = (received_handles.count as usize).min(received_handles.handles.len());
-        let request = &request_bytes[..length.min(request_bytes.len())];
-        if ready_endpoint == provider_endpoint_handle {
-            let response_len = posix_service::pty::handle_provider_request(
-                &mut ptys,
-                request,
-                &mut response_bytes,
-            );
-            for attachment in received_handles.handles.iter().take(attached_count) {
-                let _ = platform::handle::close(attachment.handle);
-            }
-            if let Some(response_len) = response_len {
-                let _ = platform::ipc::reply(sender, &response_bytes[..response_len]);
-            }
-            continue;
-        }
         let attachments_valid = attached_count == received_handles.count as usize
             && received_handles
                 .handles
@@ -166,7 +146,7 @@ fn main() {
                     && attachments.is_empty() =>
             {
                 Some(if service.session(peer.process_id).is_some() {
-                    open_pty_response(&mut ptys, provider_endpoint_handle, header.request_id)
+                    open_pty_response(&ptys, provider_endpoint_handle, header.request_id)
                 } else {
                     posix_service::ObjectResponse {
                         response: invalid_response(header.request_id),
@@ -316,14 +296,90 @@ fn main() {
 }
 
 #[cfg(target_os = "mochios")]
+fn start_pty_provider(
+    ptys: std::sync::Arc<std::sync::Mutex<posix_service::pty::PtyManager>>,
+) -> Result<u32, i64> {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    use mochi_user_platform as platform;
+
+    let startup = Arc::new(AtomicI64::new(0));
+    let worker_startup = Arc::clone(&startup);
+    std::thread::Builder::new()
+        .name("posix-pty-provider".to_owned())
+        .spawn(move || {
+            let endpoint = match platform::ipc::create_handle() {
+                Ok(endpoint) => endpoint,
+                Err(error) => {
+                    worker_startup.store(error.raw(), Ordering::Release);
+                    return;
+                }
+            };
+            worker_startup.store(i64::from(endpoint), Ordering::Release);
+            run_pty_provider(endpoint, ptys);
+        })
+        .map_err(|_| -5)?;
+    loop {
+        match startup.load(Ordering::Acquire) {
+            0 => platform::thread::yield_now(),
+            value if value < 0 => return Err(value),
+            value => return u32::try_from(value).map_err(|_| -5),
+        }
+    }
+}
+
+#[cfg(target_os = "mochios")]
+fn run_pty_provider(
+    endpoint: u32,
+    ptys: std::sync::Arc<std::sync::Mutex<posix_service::pty::PtyManager>>,
+) -> ! {
+    use mnu_abi::provider;
+    use mochi_user_platform as platform;
+
+    let mut request = vec![0u8; provider::REQUEST_HEADER_LEN + provider::MAX_DATA_LEN];
+    let mut response = vec![0u8; provider::RESPONSE_HEADER_LEN + provider::MAX_DATA_LEN];
+    loop {
+        let mut attachments = platform::ipc::IpcObjectHandles::default();
+        let message = match platform::ipc::wait_object_handles(
+            u64::from(endpoint),
+            &mut request,
+            &mut attachments,
+        ) {
+            Ok(message) => message,
+            Err(_) => {
+                platform::thread::yield_now();
+                continue;
+            }
+        };
+        let sender = message >> 32;
+        let length = (message & 0xffff_ffff) as usize;
+        let count = (attachments.count as usize).min(attachments.handles.len());
+        for attachment in attachments.handles.iter().take(count) {
+            let _ = platform::handle::close(attachment.handle);
+        }
+        let response_len = ptys.lock().ok().and_then(|mut manager| {
+            posix_service::pty::handle_provider_request(
+                &mut manager,
+                &request[..length.min(request.len())],
+                &mut response,
+            )
+        });
+        if let Some(response_len) = response_len {
+            let _ = platform::ipc::reply(sender, &response[..response_len]);
+        }
+    }
+}
+
+#[cfg(target_os = "mochios")]
 fn open_pty_response(
-    ptys: &mut posix_service::pty::PtyManager,
+    ptys: &std::sync::Mutex<posix_service::pty::PtyManager>,
     endpoint: u32,
     request_id: u64,
 ) -> posix_service::ObjectResponse<u32> {
     use mochi_user_platform as platform;
 
-    let pair = match ptys.open() {
+    let pair = match ptys.lock().unwrap().open() {
         Ok(pair) => pair,
         Err(status) => {
             return posix_service::ObjectResponse {
@@ -340,7 +396,7 @@ fn open_pty_response(
         match platform::handle::create_provider_object(endpoint, pair.master_object_id, rights) {
             Ok(handle) => handle,
             Err(error) => {
-                ptys.discard(pair);
+                ptys.lock().unwrap().discard(pair);
                 return posix_service::ObjectResponse {
                     response: status_response(request_id, i32::try_from(error.raw()).unwrap_or(-5)),
                     handles: Vec::new(),
@@ -352,7 +408,7 @@ fn open_pty_response(
             Ok(handle) => handle,
             Err(error) => {
                 let _ = platform::handle::close(master);
-                ptys.discard(pair);
+                ptys.lock().unwrap().discard(pair);
                 return posix_service::ObjectResponse {
                     response: status_response(request_id, i32::try_from(error.raw()).unwrap_or(-5)),
                     handles: Vec::new(),
@@ -452,22 +508,16 @@ fn complete_pending_waits(
 }
 
 #[cfg(target_os = "mochios")]
-fn wait_for_work(
+fn wait_for_request_or_child(
     endpoint: u32,
-    provider_endpoint: u32,
     pending: &[PendingWait],
     service: &posix_service::PosixService<u32>,
-) -> Result<Option<u32>, i64> {
+) -> Result<bool, i64> {
     use mochi_user_platform::{process, syscall};
 
     let mut items = Vec::new();
     items.push(syscall::HandleWaitItem {
         handle: endpoint,
-        interests: syscall::HANDLE_SIGNAL_READABLE,
-        ..syscall::HandleWaitItem::default()
-    });
-    items.push(syscall::HandleWaitItem {
-        handle: provider_endpoint,
         interests: syscall::HANDLE_SIGNAL_READABLE,
         ..syscall::HandleWaitItem::default()
     });
@@ -487,11 +537,7 @@ fn wait_for_work(
         }
     }
     process::wait_many(&mut items, syscall::HANDLE_WAIT_INFINITE)
-        .map(|index| match index {
-            0 => Some(endpoint),
-            1 => Some(provider_endpoint),
-            _ => None,
-        })
+        .map(|index| index == 0)
         .map_err(|error| error.raw())
 }
 
