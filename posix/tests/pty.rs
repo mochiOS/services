@@ -73,6 +73,45 @@ fn canonical_erase_kill_and_eof_edit_the_pending_record() {
 }
 
 #[test]
+fn signal_characters_target_the_terminal_and_obey_noflsh() {
+    let mut ptys = PtyManager::new();
+    let pair = ptys.open().unwrap();
+
+    assert_eq!(
+        ptys.write(pair.master_object_id, b"discard\x03kept\n"),
+        Ok(13)
+    );
+    assert_eq!(ptys.read(pair.slave_object_id, 32), Ok(b"kept\n".to_vec()));
+    assert_eq!(
+        ptys.read(pair.master_object_id, 32),
+        Ok(b"kept\r\n".to_vec())
+    );
+    assert_eq!(
+        ptys.take_terminal_signal(),
+        Some(posix_service::pty::TerminalSignal {
+            terminal_id: 1,
+            signal: protocol::SIGNAL_INT,
+        })
+    );
+
+    let mut attributes = protocol::TerminalAttributes::sane();
+    attributes.local_flags |= protocol::TERMINAL_LFLAG_NOFLSH;
+    ptys.set_attributes(pair.slave_object_id, attributes)
+        .unwrap();
+    assert_eq!(ptys.write(pair.master_object_id, b"keep\x1c\x1a\n"), Ok(7));
+    assert_eq!(ptys.read(pair.slave_object_id, 32), Ok(b"keep\n".to_vec()));
+    assert_eq!(
+        ptys.take_terminal_signal().map(|event| event.signal),
+        Some(protocol::SIGNAL_QUIT)
+    );
+    assert_eq!(
+        ptys.take_terminal_signal().map(|event| event.signal),
+        Some(protocol::SIGNAL_TSTP)
+    );
+    assert_eq!(ptys.take_terminal_signal(), None);
+}
+
+#[test]
 fn raw_input_is_immediately_readable_and_output_postprocessing_is_configurable() {
     let mut ptys = PtyManager::new();
     let pair = ptys.open().unwrap();

@@ -24,10 +24,12 @@ const SUPPORTED_INPUT_FLAGS: u32 = posix_protocol::TERMINAL_IFLAG_ISTRIP
 const SUPPORTED_OUTPUT_FLAGS: u32 =
     posix_protocol::TERMINAL_OFLAG_OPOST | posix_protocol::TERMINAL_OFLAG_ONLCR;
 const SUPPORTED_LOCAL_FLAGS: u32 = posix_protocol::TERMINAL_LFLAG_ICANON
+    | posix_protocol::TERMINAL_LFLAG_ISIG
     | posix_protocol::TERMINAL_LFLAG_ECHO
     | posix_protocol::TERMINAL_LFLAG_ECHOE
     | posix_protocol::TERMINAL_LFLAG_ECHOK
-    | posix_protocol::TERMINAL_LFLAG_ECHONL;
+    | posix_protocol::TERMINAL_LFLAG_ECHONL
+    | posix_protocol::TERMINAL_LFLAG_NOFLSH;
 
 fn terminal_attributes_supported(attributes: posix_protocol::TerminalAttributes) -> bool {
     attributes.input_flags & !SUPPORTED_INPUT_FLAGS == 0
@@ -41,6 +43,12 @@ fn terminal_attributes_supported(attributes: posix_protocol::TerminalAttributes)
 pub struct PtyPair {
     pub master_object_id: u64,
     pub slave_object_id: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalSignal {
+    pub terminal_id: u64,
+    pub signal: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -182,17 +190,59 @@ impl PseudoTerminal {
         }
     }
 
-    fn write_master(&mut self, bytes: &[u8]) -> Result<usize, i32> {
+    fn signal_for_input(&self, byte: u8) -> Option<u32> {
+        if self.attributes.local_flags & posix_protocol::TERMINAL_LFLAG_ISIG == 0 {
+            return None;
+        }
+        [
+            (
+                posix_protocol::TERMINAL_CC_VINTR,
+                posix_protocol::SIGNAL_INT,
+            ),
+            (
+                posix_protocol::TERMINAL_CC_VQUIT,
+                posix_protocol::SIGNAL_QUIT,
+            ),
+            (
+                posix_protocol::TERMINAL_CC_VSUSP,
+                posix_protocol::SIGNAL_TSTP,
+            ),
+        ]
+        .into_iter()
+        .find_map(|(index, signal)| {
+            let character = self.attributes.control_characters[index];
+            (character != 0 && byte == character).then_some(signal)
+        })
+    }
+
+    fn flush_for_signal(&mut self) {
+        if self.attributes.local_flags & posix_protocol::TERMINAL_LFLAG_NOFLSH != 0 {
+            return;
+        }
+        self.input.clear();
+        self.input_records.clear();
+        self.canonical_input.clear();
+        self.output.clear();
+    }
+
+    fn write_master(&mut self, bytes: &[u8]) -> Result<(usize, Vec<u32>), i32> {
         if !self.slave_open {
             return Err(EIO);
         }
         let canonical = self.attributes.local_flags & posix_protocol::TERMINAL_LFLAG_ICANON != 0;
         let mut consumed = 0;
+        let mut signals = Vec::new();
         for source in bytes.iter().copied() {
             let Some(byte) = self.transformed_input_byte(source) else {
                 consumed += 1;
                 continue;
             };
+            if let Some(signal) = self.signal_for_input(byte) {
+                self.flush_for_signal();
+                signals.push(signal);
+                consumed += 1;
+                continue;
+            }
             if canonical {
                 let erase = self.attributes.control_characters[posix_protocol::TERMINAL_CC_VERASE];
                 let kill = self.attributes.control_characters[posix_protocol::TERMINAL_CC_VKILL];
@@ -283,7 +333,7 @@ impl PseudoTerminal {
         if consumed == 0 && !bytes.is_empty() {
             Err(EAGAIN)
         } else {
-            Ok(consumed)
+            Ok((consumed, signals))
         }
     }
 
@@ -311,6 +361,7 @@ impl PseudoTerminal {
 pub struct PtyManager {
     next_id: u64,
     terminals: BTreeMap<u64, PseudoTerminal>,
+    pending_signals: VecDeque<TerminalSignal>,
 }
 
 impl PtyManager {
@@ -318,6 +369,7 @@ impl PtyManager {
         Self {
             next_id: 1,
             terminals: BTreeMap::new(),
+            pending_signals: VecDeque::new(),
         }
     }
 
@@ -357,9 +409,21 @@ impl PtyManager {
             return Ok(0);
         }
         match side {
-            PtySide::Master => terminal.write_master(bytes),
+            PtySide::Master => {
+                let (written, signals) = terminal.write_master(bytes)?;
+                self.pending_signals
+                    .extend(signals.into_iter().map(|signal| TerminalSignal {
+                        terminal_id: id,
+                        signal,
+                    }));
+                Ok(written)
+            }
             PtySide::Slave => terminal.write_slave(bytes),
         }
+    }
+
+    pub fn take_terminal_signal(&mut self) -> Option<TerminalSignal> {
+        self.pending_signals.pop_front()
     }
 
     pub fn seek(&self, object_id: u64) -> Result<u64, i32> {

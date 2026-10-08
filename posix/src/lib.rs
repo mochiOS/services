@@ -433,6 +433,45 @@ impl<H: Copy> PosixService<H> {
         self.signal_notifications.remove(&process_id);
     }
 
+    /// Enqueues a terminal-generated signal for every member of the terminal's
+    /// foreground process group. The PTY provider authenticates `terminal_id`;
+    /// this path deliberately bypasses user credential checks because the
+    /// terminal, rather than a POSIX process, is the signal source.
+    pub fn signal_terminal_foreground_group(
+        &mut self,
+        terminal_id: u64,
+        signal: u32,
+    ) -> Result<usize, i32> {
+        if signal == 0 || signal > protocol::SIGNAL_MAX {
+            return Err(STATUS_EINVAL);
+        }
+        let terminal = self
+            .terminals
+            .get(&terminal_id)
+            .copied()
+            .ok_or(protocol::STATUS_ENOTTY)?;
+        let targets: Vec<u64> = self
+            .process_groups
+            .iter()
+            .filter_map(|(process_id, process_group)| {
+                (*process_group == terminal.foreground_process_group
+                    && self.session_ids.get(process_id).copied() == Some(terminal.session_id))
+                .then_some(*process_id)
+            })
+            .collect();
+        if targets.is_empty() {
+            return Err(protocol::STATUS_ESRCH);
+        }
+        for process_id in targets.iter().copied() {
+            self.signals
+                .get_mut(&process_id)
+                .ok_or(protocol::STATUS_ESRCH)?
+                .enqueue(signal);
+            self.signal_notifications.insert(process_id);
+        }
+        Ok(targets.len())
+    }
+
     pub fn is_child(&self, parent_id: u64, process_id: u64) -> bool {
         self.children
             .get(&parent_id)

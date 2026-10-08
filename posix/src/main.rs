@@ -5,6 +5,9 @@ const PTY_SYNC_MAGIC: [u8; 4] = *b"PTYS";
 const PTY_IDENTIFY_MAGIC: [u8; 4] = *b"PTYI";
 
 #[cfg(target_os = "mochios")]
+const PTY_SIGNAL_MAGIC: [u8; 4] = *b"PTYG";
+
+#[cfg(target_os = "mochios")]
 fn main() {
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
@@ -31,7 +34,7 @@ fn main() {
         }
     };
     let ptys = Arc::new(Mutex::new(posix_service::pty::PtyManager::new()));
-    let provider_endpoint_handle = match start_pty_provider(Arc::clone(&ptys)) {
+    let provider_endpoint_handle = match start_pty_provider(Arc::clone(&ptys), endpoint_handle) {
         Ok(handle) => handle,
         Err(error) => {
             platform::logln!("posix.service: provider worker failed errno={}", error);
@@ -51,6 +54,17 @@ fn main() {
         platform::process::exit(1);
     }
     platform::logln!("posix.service: endpoint ready");
+
+    let service_process_id = match platform::process::current_security_context() {
+        Ok(context) => context.process_id,
+        Err(error) => {
+            platform::logln!(
+                "posix.service: current security context failed errno={}",
+                error.raw()
+            );
+            platform::process::exit(1);
+        }
+    };
 
     let mut service = PosixService::new();
     let filesystem_endpoint =
@@ -131,6 +145,18 @@ fn main() {
         let decoded = request_bytes
             .get(..length)
             .and_then(|bytes| protocol::decode(bytes).ok());
+        if attachments_valid
+            && attachments.is_empty()
+            && peer.is_some_and(|peer| peer.process_id == service_process_id)
+            && let Some((terminal_id, signal)) = decode_pty_signal(&request_bytes[..length])
+        {
+            let status = service
+                .signal_terminal_foreground_group(terminal_id, signal)
+                .map(|_| 0i64)
+                .unwrap_or_else(i64::from);
+            let _ = platform::ipc::reply(sender, &status.to_le_bytes());
+            continue;
+        }
         let registration_valid = match (peer, decoded) {
             (Some(peer), Some((header, payload)))
                 if header.opcode == protocol::OP_SESSION_REGISTER
@@ -326,6 +352,7 @@ fn main() {
 #[cfg(target_os = "mochios")]
 fn start_pty_provider(
     ptys: std::sync::Arc<std::sync::Mutex<posix_service::pty::PtyManager>>,
+    control_endpoint: u32,
 ) -> Result<u32, i64> {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicI64, Ordering};
@@ -345,7 +372,7 @@ fn start_pty_provider(
                 }
             };
             worker_startup.store(i64::from(endpoint), Ordering::Release);
-            run_pty_provider(endpoint, ptys);
+            run_pty_provider(endpoint, control_endpoint, ptys);
         })
         .map_err(|_| -5)?;
     loop {
@@ -360,6 +387,7 @@ fn start_pty_provider(
 #[cfg(target_os = "mochios")]
 fn run_pty_provider(
     endpoint: u32,
+    control_endpoint: u32,
     ptys: std::sync::Arc<std::sync::Mutex<posix_service::pty::PtyManager>>,
 ) -> ! {
     use mnu_abi::provider;
@@ -416,7 +444,7 @@ fn run_pty_provider(
             let _ = platform::ipc::reply(sender, &status.to_le_bytes());
             continue;
         }
-        let (response_len, signal_states) = if let Ok(mut manager) = ptys.lock() {
+        let (response_len, signal_states, terminal_signals) = if let Ok(mut manager) = ptys.lock() {
             let object_ids = provider::RequestHeader::decode(&request[..request_length])
                 .ok()
                 .and_then(|(header, _)| manager.object_ids(header.object_id).ok());
@@ -427,10 +455,17 @@ fn run_pty_provider(
             );
             let signal_states = object_ids
                 .map(|ids| ids.map(|object_id| (object_id, manager.signals(object_id).ok())));
-            (response_len, signal_states)
+            let mut terminal_signals = Vec::new();
+            while let Some(signal) = manager.take_terminal_signal() {
+                terminal_signals.push(signal);
+            }
+            (response_len, signal_states, terminal_signals)
         } else {
-            (None, None)
+            (None, None, Vec::new())
         };
+        for signal in terminal_signals {
+            let _ = notify_terminal_signal(control_endpoint, signal);
+        }
         if let Some(signal_states) = signal_states {
             for (object_id, signals) in signal_states {
                 if let Some(signals) = signals {
@@ -445,6 +480,41 @@ fn run_pty_provider(
         if let Some(response_len) = response_len {
             let _ = platform::ipc::reply(sender, &response[..response_len]);
         }
+    }
+}
+
+#[cfg(target_os = "mochios")]
+fn decode_pty_signal(request: &[u8]) -> Option<(u64, u32)> {
+    if request.len() != 16 || request[..4] != PTY_SIGNAL_MAGIC {
+        return None;
+    }
+    let signal = u32::from_le_bytes(request[4..8].try_into().ok()?);
+    let terminal_id = u64::from_le_bytes(request[8..16].try_into().ok()?);
+    (signal != 0).then_some((terminal_id, signal))
+}
+
+#[cfg(target_os = "mochios")]
+fn notify_terminal_signal(
+    control_endpoint: u32,
+    event: posix_service::pty::TerminalSignal,
+) -> Result<(), i32> {
+    use mochi_user_platform as platform;
+
+    let mut request = [0u8; 16];
+    request[..4].copy_from_slice(&PTY_SIGNAL_MAGIC);
+    request[4..8].copy_from_slice(&event.signal.to_le_bytes());
+    request[8..16].copy_from_slice(&event.terminal_id.to_le_bytes());
+    let mut response = [0u8; 8];
+    let message = platform::ipc::call(u64::from(control_endpoint), &request, &mut response)
+        .map_err(|error| i32::try_from(error.raw()).unwrap_or(-5))?;
+    if message & 0xffff_ffff != response.len() as u64 {
+        return Err(-5);
+    }
+    let status = i64::from_le_bytes(response);
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(i32::try_from(status).unwrap_or(-5))
     }
 }
 

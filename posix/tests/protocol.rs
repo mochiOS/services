@@ -1924,6 +1924,26 @@ fn controlling_terminals_are_bound_to_sessions_and_foreground_groups() {
         protocol::decode_process_id_request(&response.payload),
         Ok(142)
     );
+    assert_eq!(
+        service.signal_terminal_foreground_group(77, protocol::SIGNAL_TSTP),
+        Ok(1)
+    );
+    assert_eq!(
+        service.signal_state(leader.process_id).unwrap().pending(),
+        0
+    );
+    assert_eq!(
+        service.signal_state(member.process_id).unwrap().pending(),
+        1u64 << (protocol::SIGNAL_TSTP - 1)
+    );
+    assert_eq!(
+        service.signal_notification_processes().collect::<Vec<_>>(),
+        vec![member.process_id]
+    );
+    assert_eq!(
+        service.signal_terminal_foreground_group(999, protocol::SIGNAL_INT),
+        Err(protocol::STATUS_ENOTTY)
+    );
 
     let response = service.handle(
         other_leader,
