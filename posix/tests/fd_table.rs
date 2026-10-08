@@ -170,3 +170,35 @@ fn inherited_install_preserves_fd_number_and_closes_replaced_handle() {
     assert_eq!(table.get(7).unwrap().handle, 71);
     assert_eq!(handles.closed, vec![70]);
 }
+
+#[test]
+fn spawn_close_ignores_an_already_closed_descriptor() {
+    let mut table = FdTable::<u64>::new();
+    let mut handles = FakeHandles::default();
+
+    table.close_for_spawn(19, &mut handles);
+
+    assert!(handles.closed.is_empty());
+}
+
+#[test]
+fn spawn_dup2_clears_cloexec_even_when_source_equals_target() {
+    let mut table = FdTable::new();
+    let mut handles = FakeHandles::default();
+    table
+        .install_at(
+            9,
+            Entry {
+                handle: 90,
+                rights: 0x15,
+                descriptor_flags: FD_CLOEXEC,
+            },
+            &mut handles,
+        )
+        .unwrap();
+
+    assert_eq!(table.duplicate_for_spawn(9, 9, &mut handles), Ok(9));
+    assert_eq!(table.get(9).unwrap().descriptor_flags, 0);
+    assert!(handles.cloned.is_empty());
+    assert!(handles.closed.is_empty());
+}
