@@ -14,7 +14,8 @@ pub const ENOTSUP: i32 = 95;
 pub const BUFFER_CAPACITY: usize = 64 * 1024;
 pub const READINESS_SIGNALS: u64 = mnu_abi::HANDLE_SIGNAL_READABLE
     | mnu_abi::HANDLE_SIGNAL_WRITABLE
-    | mnu_abi::HANDLE_SIGNAL_PEER_CLOSED;
+    | mnu_abi::HANDLE_SIGNAL_PEER_CLOSED
+    | mnu_abi::HANDLE_SIGNAL_IDLE;
 
 const SUPPORTED_INPUT_FLAGS: u32 = posix_protocol::TERMINAL_IFLAG_ISTRIP
     | posix_protocol::TERMINAL_IFLAG_INLCR
@@ -27,6 +28,14 @@ const SUPPORTED_LOCAL_FLAGS: u32 = posix_protocol::TERMINAL_LFLAG_ICANON
     | posix_protocol::TERMINAL_LFLAG_ECHOE
     | posix_protocol::TERMINAL_LFLAG_ECHOK
     | posix_protocol::TERMINAL_LFLAG_ECHONL;
+
+fn terminal_attributes_supported(attributes: posix_protocol::TerminalAttributes) -> bool {
+    attributes.input_flags & !SUPPORTED_INPUT_FLAGS == 0
+        && attributes.output_flags & !SUPPORTED_OUTPUT_FLAGS == 0
+        && attributes.local_flags & !SUPPORTED_LOCAL_FLAGS == 0
+        && attributes.control_flags
+            == (posix_protocol::TERMINAL_CFLAG_CS8 | posix_protocol::TERMINAL_CFLAG_CREAD)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PtyPair {
@@ -372,12 +381,7 @@ impl PtyManager {
         object_id: u64,
         attributes: posix_protocol::TerminalAttributes,
     ) -> Result<(), i32> {
-        if attributes.input_flags & !SUPPORTED_INPUT_FLAGS != 0
-            || attributes.output_flags & !SUPPORTED_OUTPUT_FLAGS != 0
-            || attributes.local_flags & !SUPPORTED_LOCAL_FLAGS != 0
-            || attributes.control_flags
-                != (posix_protocol::TERMINAL_CFLAG_CS8 | posix_protocol::TERMINAL_CFLAG_CREAD)
-        {
+        if !terminal_attributes_supported(attributes) {
             return Err(ENOTSUP);
         }
         let (id, _) = decode_object_id(object_id).ok_or(EBADF)?;
@@ -393,6 +397,33 @@ impl PtyManager {
             }
         }
         Ok(())
+    }
+
+    fn set_attributes_when_drained(
+        &mut self,
+        object_id: u64,
+        attributes: posix_protocol::TerminalAttributes,
+        flush_input: bool,
+    ) -> Result<(), i32> {
+        if !terminal_attributes_supported(attributes) {
+            return Err(ENOTSUP);
+        }
+        let (id, _) = decode_object_id(object_id).ok_or(EBADF)?;
+        {
+            let terminal = self.terminals.get_mut(&id).ok_or(EBADF)?;
+            if !terminal.output.is_empty() && terminal.master_open {
+                return Err(EAGAIN);
+            }
+            if !terminal.master_open {
+                terminal.output.clear();
+            }
+            if flush_input {
+                terminal.input.clear();
+                terminal.input_records.clear();
+                terminal.canonical_input.clear();
+            }
+        }
+        self.set_attributes(object_id, attributes)
     }
 
     pub fn control(
@@ -415,17 +446,28 @@ impl PtyManager {
                 .map_err(|_| EINVAL)?;
                 Ok(output)
             }
-            posix_protocol::PTY_CONTROL_SET_ATTRIBUTES_NOW => {
+            posix_protocol::PTY_CONTROL_SET_ATTRIBUTES_NOW
+            | posix_protocol::PTY_CONTROL_SET_ATTRIBUTES_DRAIN
+            | posix_protocol::PTY_CONTROL_SET_ATTRIBUTES_FLUSH => {
                 if output_capacity != 0 {
                     return Err(EINVAL);
                 }
                 let attributes =
                     posix_protocol::decode_terminal_attributes(input).map_err(|_| EINVAL)?;
-                self.set_attributes(object_id, attributes)?;
+                match code {
+                    posix_protocol::PTY_CONTROL_SET_ATTRIBUTES_NOW => {
+                        self.set_attributes(object_id, attributes)?;
+                    }
+                    posix_protocol::PTY_CONTROL_SET_ATTRIBUTES_DRAIN => {
+                        self.set_attributes_when_drained(object_id, attributes, false)?;
+                    }
+                    posix_protocol::PTY_CONTROL_SET_ATTRIBUTES_FLUSH => {
+                        self.set_attributes_when_drained(object_id, attributes, true)?;
+                    }
+                    _ => unreachable!(),
+                }
                 Ok(Vec::new())
             }
-            posix_protocol::PTY_CONTROL_SET_ATTRIBUTES_DRAIN
-            | posix_protocol::PTY_CONTROL_SET_ATTRIBUTES_FLUSH => Err(ENOTSUP),
             _ => Err(ENOTSUP),
         }
     }
@@ -494,6 +536,9 @@ impl PtyManager {
         }
         if peer_closed {
             signals |= mnu_abi::HANDLE_SIGNAL_PEER_CLOSED;
+        }
+        if terminal.output.is_empty() {
+            signals |= mnu_abi::HANDLE_SIGNAL_IDLE;
         }
         Ok(signals)
     }

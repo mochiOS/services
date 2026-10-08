@@ -281,6 +281,60 @@ fn provider_control_round_trips_terminal_attributes() {
 }
 
 #[test]
+fn drained_attribute_changes_wait_and_flush_discards_unread_input() {
+    let mut ptys = PtyManager::new();
+    let pair = ptys.open().unwrap();
+    let raw = raw_attributes();
+    ptys.set_attributes(pair.slave_object_id, raw).unwrap();
+    assert_eq!(ptys.write(pair.slave_object_id, b"pending"), Ok(7));
+
+    let cooked = protocol::TerminalAttributes::sane();
+    let mut encoded = [0; protocol::TERMINAL_ATTRIBUTES_LEN];
+    protocol::encode_terminal_attributes(cooked, &mut encoded).unwrap();
+    assert_eq!(
+        ptys.control(
+            pair.slave_object_id,
+            protocol::PTY_CONTROL_SET_ATTRIBUTES_DRAIN,
+            &encoded,
+            0,
+        ),
+        Err(EAGAIN)
+    );
+    assert_eq!(ptys.attributes(pair.master_object_id), Ok(raw));
+    assert_eq!(
+        ptys.read(pair.master_object_id, 32),
+        Ok(b"pending".to_vec())
+    );
+    assert_ne!(
+        ptys.signals(pair.slave_object_id).unwrap() & mnu_abi::HANDLE_SIGNAL_IDLE,
+        0
+    );
+    assert_eq!(
+        ptys.control(
+            pair.slave_object_id,
+            protocol::PTY_CONTROL_SET_ATTRIBUTES_DRAIN,
+            &encoded,
+            0,
+        ),
+        Ok(Vec::new())
+    );
+
+    ptys.set_attributes(pair.slave_object_id, raw).unwrap();
+    assert_eq!(ptys.write(pair.master_object_id, b"discard"), Ok(7));
+    assert_eq!(
+        ptys.control(
+            pair.slave_object_id,
+            protocol::PTY_CONTROL_SET_ATTRIBUTES_FLUSH,
+            &encoded,
+            0,
+        ),
+        Ok(Vec::new())
+    );
+    assert_eq!(ptys.read(pair.slave_object_id, 32), Err(EAGAIN));
+    assert_eq!(ptys.attributes(pair.master_object_id), Ok(cooked));
+}
+
+#[test]
 fn pty_queues_are_bounded_and_support_partial_writes() {
     let mut ptys = PtyManager::new();
     let pair = ptys.open().unwrap();
@@ -308,29 +362,34 @@ fn readiness_signals_follow_queue_capacity_and_peer_lifetime() {
 
     assert_eq!(
         ptys.signals(pair.master_object_id),
-        Ok(mnu_abi::HANDLE_SIGNAL_WRITABLE)
+        Ok(mnu_abi::HANDLE_SIGNAL_WRITABLE | mnu_abi::HANDLE_SIGNAL_IDLE)
     );
     assert_eq!(
         ptys.signals(pair.slave_object_id),
-        Ok(mnu_abi::HANDLE_SIGNAL_WRITABLE)
+        Ok(mnu_abi::HANDLE_SIGNAL_WRITABLE | mnu_abi::HANDLE_SIGNAL_IDLE)
     );
 
     assert_eq!(ptys.write(pair.master_object_id, b"input"), Ok(5));
     assert_eq!(
         ptys.signals(pair.slave_object_id),
-        Ok(mnu_abi::HANDLE_SIGNAL_READABLE | mnu_abi::HANDLE_SIGNAL_WRITABLE)
+        Ok(mnu_abi::HANDLE_SIGNAL_READABLE
+            | mnu_abi::HANDLE_SIGNAL_WRITABLE
+            | mnu_abi::HANDLE_SIGNAL_IDLE)
     );
     let remaining = vec![b'x'; BUFFER_CAPACITY - 5];
     assert_eq!(
         ptys.write(pair.master_object_id, &remaining),
         Ok(remaining.len())
     );
-    assert_eq!(ptys.signals(pair.master_object_id), Ok(0));
+    assert_eq!(
+        ptys.signals(pair.master_object_id),
+        Ok(mnu_abi::HANDLE_SIGNAL_IDLE)
+    );
 
     assert_eq!(ptys.release(pair.slave_object_id), Ok(()));
     assert_eq!(
         ptys.signals(pair.master_object_id),
-        Ok(mnu_abi::HANDLE_SIGNAL_PEER_CLOSED)
+        Ok(mnu_abi::HANDLE_SIGNAL_PEER_CLOSED | mnu_abi::HANDLE_SIGNAL_IDLE)
     );
 }
 
