@@ -146,3 +146,8 @@ fn posix_stack_encoder_rejects_invalid_or_oversized_vectors() {
         Err(EncodeError::ImageTooLarge)
     );
 }
+
+#[test]
+fn native_process_image_replacement_uses_the_post_posix_syscall_range() {
+    assert_eq!(mnu_abi::SyscallNumber::ProcessImageReplace as u64, 665);
+}
