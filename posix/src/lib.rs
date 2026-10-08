@@ -322,6 +322,7 @@ pub struct PosixService<H: Copy = u32> {
     children: BTreeMap<u64, BTreeSet<u64>>,
     process_groups: BTreeMap<u64, u64>,
     session_ids: BTreeMap<u64, u64>,
+    supplementary_groups: BTreeMap<u64, Vec<u32>>,
     resource_limits: BTreeMap<(u64, u32), protocol::ResourceLimit>,
     signals: BTreeMap<u64, ProcessSignalState>,
     signal_notifications: BTreeSet<u64>,
@@ -337,6 +338,7 @@ impl PosixService<u32> {
             children: BTreeMap::new(),
             process_groups: BTreeMap::new(),
             session_ids: BTreeMap::new(),
+            supplementary_groups: BTreeMap::new(),
             resource_limits: BTreeMap::new(),
             signals: BTreeMap::new(),
             signal_notifications: BTreeSet::new(),
@@ -359,6 +361,12 @@ impl<H: Copy> PosixService<H> {
 
     pub fn parent_id(&self, process_id: u64) -> Option<u64> {
         self.parents.get(&process_id).copied()
+    }
+
+    pub fn supplementary_groups(&self, process_id: u64) -> Option<&[u32]> {
+        self.supplementary_groups
+            .get(&process_id)
+            .map(Vec::as_slice)
     }
 
     pub fn signal_state(&self, process_id: u64) -> Option<ProcessSignalState> {
@@ -395,6 +403,8 @@ impl<H: Copy> PosixService<H> {
         self.processes.insert(peer.process_id, process.handle);
         self.process_groups.insert(peer.process_id, peer.process_id);
         self.session_ids.insert(peer.process_id, peer.process_id);
+        self.supplementary_groups
+            .insert(peer.process_id, Vec::new());
         self.signals
             .insert(peer.process_id, ProcessSignalState::default());
         Ok(true)
@@ -442,6 +452,11 @@ impl<H: Copy> PosixService<H> {
                 (process_id == peer.process_id).then_some((resource, limit))
             })
             .collect();
+        let inherited_groups = self
+            .supplementary_groups
+            .get(&peer.process_id)
+            .cloned()
+            .unwrap_or_default();
         self.processes.insert(child_id, process.handle);
         self.sessions.insert(
             child_id,
@@ -468,6 +483,7 @@ impl<H: Copy> PosixService<H> {
                 .copied()
                 .unwrap_or(peer.process_id),
         );
+        self.supplementary_groups.insert(child_id, inherited_groups);
         self.children
             .entry(peer.process_id)
             .or_default()
@@ -585,6 +601,7 @@ impl<H: Copy> PosixService<H> {
         self.parents.remove(&child_id);
         self.process_groups.remove(&child_id);
         self.session_ids.remove(&child_id);
+        self.supplementary_groups.remove(&child_id);
         self.resource_limits
             .retain(|(process_id, _), _| *process_id != child_id);
         self.signals.remove(&child_id);
@@ -857,6 +874,12 @@ impl<H: Copy> PosixService<H> {
             protocol::OP_SET_GID if header.flags == 0 => {
                 self.set_gid(peer.process_id, payload).map(|_| Vec::new())
             }
+            protocol::OP_GROUPS_GET if header.flags == 0 && payload.is_empty() => {
+                self.groups_payload(peer.process_id)
+            }
+            protocol::OP_GROUPS_SET if header.flags == 0 => self
+                .set_groups(peer.process_id, payload)
+                .map(|_| Vec::new()),
             protocol::OP_PROCESS_INFO if header.flags == 0 => {
                 self.process_info_payload(peer.process_id, payload)
             }
@@ -883,6 +906,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_SIGNAL_THREAD_REGISTER
             | protocol::OP_SESSION_INFO
             | protocol::OP_UMASK_SET
+            | protocol::OP_GROUPS_GET
             | protocol::OP_OPEN_AT
             | protocol::OP_STAT_AT
             | protocol::OP_FSTAT
@@ -892,6 +916,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_GETCWD => Err(STATUS_EINVAL),
             protocol::OP_SET_UID
             | protocol::OP_SET_GID
+            | protocol::OP_GROUPS_SET
             | protocol::OP_PROCESS_FORKED
             | protocol::OP_WAIT_CHILD
             | protocol::OP_PROCESS_INFO
@@ -1799,6 +1824,37 @@ impl<H: Copy> PosixService<H> {
             return Err(-1);
         }
         session.effective_gid = requested;
+        Ok(())
+    }
+
+    fn groups_payload(&self, process_id: u64) -> Result<Vec<u8>, i32> {
+        if !self.sessions.contains_key(&process_id) {
+            return Err(protocol::STATUS_ESRCH);
+        }
+        let groups = self
+            .supplementary_groups
+            .get(&process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let mut payload = vec![0u8; protocol::GROUP_LIST_MAX_LEN];
+        let length =
+            protocol::encode_group_list(groups, &mut payload).map_err(|_| STATUS_EINVAL)?;
+        payload.truncate(length);
+        Ok(payload)
+    }
+
+    fn set_groups(&mut self, process_id: u64, payload: &[u8]) -> Result<(), i32> {
+        let session = self
+            .sessions
+            .get(&process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        if session.effective_uid != 0 {
+            return Err(protocol::STATUS_EPERM);
+        }
+        let mut decoded = [0u32; protocol::MAX_SUPPLEMENTARY_GROUPS];
+        let count =
+            protocol::decode_group_list(payload, &mut decoded).map_err(|_| STATUS_EINVAL)?;
+        self.supplementary_groups
+            .insert(process_id, decoded[..count].to_vec());
         Ok(())
     }
 }

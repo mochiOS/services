@@ -203,6 +203,62 @@ fn credential_changes_follow_posix_privilege_rules() {
 }
 
 #[test]
+fn supplementary_groups_round_trip_and_require_privilege() {
+    let privileged = client(PeerIdentity {
+        process_id: 95,
+        effective_uid: 0,
+        effective_gid: 0,
+    });
+    let mut groups = [0u32; protocol::MAX_SUPPLEMENTARY_GROUPS];
+    assert_eq!(
+        privileged.get_groups(&mut groups).unwrap_err(),
+        ClientError::Remote(protocol::STATUS_ESRCH)
+    );
+    privileged.register_session().unwrap();
+    assert_eq!(privileged.get_groups(&mut groups).unwrap(), 0);
+    privileged.set_groups(&[20, 42, 501]).unwrap();
+    assert_eq!(privileged.get_groups(&mut groups).unwrap(), 3);
+    assert_eq!(&groups[..3], &[20, 42, 501]);
+    privileged.set_groups(&[]).unwrap();
+    assert_eq!(privileged.get_groups(&mut groups).unwrap(), 0);
+
+    let unprivileged = client(PeerIdentity {
+        process_id: 96,
+        effective_uid: 501,
+        effective_gid: 20,
+    });
+    unprivileged.register_session().unwrap();
+    assert_eq!(
+        unprivileged.set_groups(&[42]).unwrap_err(),
+        ClientError::Remote(protocol::STATUS_EPERM)
+    );
+}
+
+#[test]
+fn supplementary_group_wire_format_is_bounded_and_strict() {
+    let mut encoded = [0u8; protocol::GROUP_LIST_MAX_LEN];
+    let length = protocol::encode_group_list(&[7, 11, 13], &mut encoded).unwrap();
+    let mut decoded = [0u32; protocol::MAX_SUPPLEMENTARY_GROUPS];
+    assert_eq!(
+        protocol::decode_group_list(&encoded[..length], &mut decoded),
+        Ok(3)
+    );
+    assert_eq!(&decoded[..3], &[7, 11, 13]);
+    assert_eq!(
+        protocol::decode_group_list(&encoded[..length], &mut decoded[..2]),
+        Err(protocol::ProtocolError::BufferTooSmall)
+    );
+    assert_eq!(
+        protocol::decode_group_list(&encoded[..length + 1], &mut decoded),
+        Err(protocol::ProtocolError::InvalidLength)
+    );
+    assert_eq!(
+        protocol::encode_group_list(&[0; protocol::MAX_SUPPLEMENTARY_GROUPS + 1], &mut encoded),
+        Err(protocol::ProtocolError::InvalidLength)
+    );
+}
+
+#[test]
 fn resource_limits_round_trip_and_enforce_soft_hard_rules() {
     let client = client(PeerIdentity {
         process_id: 94,
@@ -1234,6 +1290,85 @@ fn adopted_child_inherits_posix_state_and_retained_directories() {
         })
     );
     assert_eq!(filesystem.retained.len(), 2);
+}
+
+#[test]
+fn adopted_child_inherits_an_independent_supplementary_group_list() {
+    let parent = PeerIdentity {
+        process_id: 115,
+        effective_uid: 0,
+        effective_gid: 0,
+    };
+    let child = PeerIdentity {
+        process_id: 116,
+        effective_uid: 0,
+        effective_gid: 0,
+    };
+    let mut service = service_for(parent);
+    service.handle(
+        parent,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let mut groups = [0u8; protocol::GROUP_LIST_MAX_LEN];
+    let length = protocol::encode_group_list(&[10, 20], &mut groups).unwrap();
+    assert_eq!(
+        service
+            .handle(
+                parent,
+                protocol::Header {
+                    opcode: protocol::OP_GROUPS_SET,
+                    ..protocol::Header::default()
+                },
+                &groups[..length],
+            )
+            .header
+            .status,
+        protocol::STATUS_OK
+    );
+
+    let mut filesystem = RecordingFilesystem::default();
+    service
+        .adopt_child(
+            parent,
+            AuthenticatedProcess {
+                handle: 54,
+                process_id: child.process_id,
+            },
+            &mut filesystem,
+        )
+        .unwrap();
+    assert_eq!(
+        service.supplementary_groups(child.process_id),
+        Some(&[10, 20][..])
+    );
+
+    let length = protocol::encode_group_list(&[30], &mut groups).unwrap();
+    assert_eq!(
+        service
+            .handle(
+                child,
+                protocol::Header {
+                    opcode: protocol::OP_GROUPS_SET,
+                    ..protocol::Header::default()
+                },
+                &groups[..length],
+            )
+            .header
+            .status,
+        protocol::STATUS_OK
+    );
+    assert_eq!(
+        service.supplementary_groups(parent.process_id),
+        Some(&[10, 20][..])
+    );
+    assert_eq!(
+        service.supplementary_groups(child.process_id),
+        Some(&[30][..])
+    );
 }
 
 #[test]
