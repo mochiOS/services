@@ -92,6 +92,28 @@ fn signal_wire_format_rejects_invalid_numbers_and_reserved_bytes() {
 }
 
 #[test]
+fn job_control_signal_numbers_match_the_newlib_target_abi() {
+    assert_eq!(protocol::SIGNAL_STOP, 17);
+    assert_eq!(protocol::SIGNAL_TSTP, 18);
+    assert_eq!(protocol::SIGNAL_CONT, 19);
+    assert_eq!(protocol::SIGNAL_CHLD, 20);
+    assert_eq!(protocol::SIGNAL_TTIN, 21);
+    assert_eq!(protocol::SIGNAL_TTOU, 22);
+
+    let newlib = include_str!("../../../libraries/newlib/newlib/libc/include/sys/signal.h");
+    for definition in [
+        "#define\tSIGSTOP\t17",
+        "#define\tSIGTSTP\t18",
+        "#define\tSIGCONT\t19",
+        "#define\tSIGCHLD\t20",
+        "#define\tSIGTTIN\t21",
+        "#define\tSIGTTOU\t22",
+    ] {
+        assert!(newlib.contains(definition), "missing {definition}");
+    }
+}
+
+#[test]
 fn standard_signals_coalesce_and_respect_the_receiving_thread_mask() {
     let first = peer(101, 501);
     let second = peer(102, 501);
