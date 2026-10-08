@@ -23,6 +23,16 @@ fn main() {
             platform::process::exit(1);
         }
     };
+    let provider_endpoint_handle = match platform::ipc::create_handle() {
+        Ok(handle) => handle,
+        Err(error) => {
+            platform::logln!(
+                "posix.service: provider endpoint creation failed errno={}",
+                error.raw()
+            );
+            platform::process::exit(1);
+        }
+    };
     let delegated_rights = platform::handle::HANDLE_RIGHT_SEND
         | platform::handle::HANDLE_RIGHT_DUPLICATE
         | platform::handle::HANDLE_RIGHT_TRANSFER;
@@ -38,6 +48,7 @@ fn main() {
     platform::logln!("posix.service: endpoint ready");
 
     let mut service = PosixService::new();
+    let mut ptys = posix_service::pty::PtyManager::new();
     let filesystem_endpoint =
         match platform::handle::inherited(filesystem_protocol::CONTROL_HANDLE_KEY) {
             Ok(endpoint) => endpoint,
@@ -65,20 +76,23 @@ fn main() {
             &mut filesystem,
             &mut processes,
         );
-        if !pending_waits.is_empty() {
-            match wait_for_request_or_child(endpoint_handle, &pending_waits, &service) {
-                Ok(true) => {}
-                Ok(false) => continue,
-                Err(error) => {
-                    platform::logln!("posix.service: lifecycle wait failed errno={}", error);
-                    platform::thread::yield_now();
-                    continue;
-                }
+        let ready_endpoint = match wait_for_work(
+            endpoint_handle,
+            provider_endpoint_handle,
+            &pending_waits,
+            &service,
+        ) {
+            Ok(Some(endpoint)) => endpoint,
+            Ok(None) => continue,
+            Err(error) => {
+                platform::logln!("posix.service: lifecycle wait failed errno={}", error);
+                platform::thread::yield_now();
+                continue;
             }
-        }
+        };
         let mut received_handles = platform::ipc::IpcObjectHandles::default();
         let message = match platform::ipc::wait_object_handles(
-            endpoint_handle as u64,
+            ready_endpoint as u64,
             &mut request_bytes,
             &mut received_handles,
         ) {
@@ -91,6 +105,21 @@ fn main() {
         let sender = message >> 32;
         let length = (message & 0xffff_ffff) as usize;
         let attached_count = (received_handles.count as usize).min(received_handles.handles.len());
+        let request = &request_bytes[..length.min(request_bytes.len())];
+        if ready_endpoint == provider_endpoint_handle {
+            let response_len = posix_service::pty::handle_provider_request(
+                &mut ptys,
+                request,
+                &mut response_bytes,
+            );
+            for attachment in received_handles.handles.iter().take(attached_count) {
+                let _ = platform::handle::close(attachment.handle);
+            }
+            if let Some(response_len) = response_len {
+                let _ = platform::ipc::reply(sender, &response_bytes[..response_len]);
+            }
+            continue;
+        }
         let attachments_valid = attached_count == received_handles.count as usize
             && received_handles
                 .handles
@@ -130,6 +159,21 @@ fn main() {
         };
         let mut retained_handle = None;
         let object_response = match (peer, decoded, attachments_valid && registration_valid) {
+            (Some(peer), Some((header, payload)), true)
+                if header.opcode == protocol::OP_PTY_OPEN
+                    && header.flags == 0
+                    && payload.is_empty()
+                    && attachments.is_empty() =>
+            {
+                Some(if service.session(peer.process_id).is_some() {
+                    open_pty_response(&mut ptys, provider_endpoint_handle, header.request_id)
+                } else {
+                    posix_service::ObjectResponse {
+                        response: invalid_response(header.request_id),
+                        handles: Vec::new(),
+                    }
+                })
+            }
             (Some(peer), Some((header, payload)), true)
                 if header.opcode == protocol::OP_SIGNAL_THREAD_REGISTER
                     && header.flags == 0
@@ -272,6 +316,65 @@ fn main() {
 }
 
 #[cfg(target_os = "mochios")]
+fn open_pty_response(
+    ptys: &mut posix_service::pty::PtyManager,
+    endpoint: u32,
+    request_id: u64,
+) -> posix_service::ObjectResponse<u32> {
+    use mochi_user_platform as platform;
+
+    let pair = match ptys.open() {
+        Ok(pair) => pair,
+        Err(status) => {
+            return posix_service::ObjectResponse {
+                response: status_response(request_id, -status),
+                handles: Vec::new(),
+            };
+        }
+    };
+    let rights = platform::handle::HANDLE_RIGHT_READ
+        | platform::handle::HANDLE_RIGHT_WRITE
+        | platform::handle::HANDLE_RIGHT_DUPLICATE
+        | platform::handle::HANDLE_RIGHT_TRANSFER;
+    let master =
+        match platform::handle::create_provider_object(endpoint, pair.master_object_id, rights) {
+            Ok(handle) => handle,
+            Err(error) => {
+                ptys.discard(pair);
+                return posix_service::ObjectResponse {
+                    response: status_response(request_id, i32::try_from(error.raw()).unwrap_or(-5)),
+                    handles: Vec::new(),
+                };
+            }
+        };
+    let slave =
+        match platform::handle::create_provider_object(endpoint, pair.slave_object_id, rights) {
+            Ok(handle) => handle,
+            Err(error) => {
+                let _ = platform::handle::close(master);
+                ptys.discard(pair);
+                return posix_service::ObjectResponse {
+                    response: status_response(request_id, i32::try_from(error.raw()).unwrap_or(-5)),
+                    handles: Vec::new(),
+                };
+            }
+        };
+    posix_service::ObjectResponse {
+        response: success_response(request_id),
+        handles: vec![
+            posix_service::OpenedObject {
+                handle: master,
+                rights,
+            },
+            posix_service::OpenedObject {
+                handle: slave,
+                rights,
+            },
+        ],
+    }
+}
+
+#[cfg(target_os = "mochios")]
 #[derive(Clone, Copy)]
 struct RegisteredSignalThread {
     process_id: u64,
@@ -349,16 +452,22 @@ fn complete_pending_waits(
 }
 
 #[cfg(target_os = "mochios")]
-fn wait_for_request_or_child(
+fn wait_for_work(
     endpoint: u32,
+    provider_endpoint: u32,
     pending: &[PendingWait],
     service: &posix_service::PosixService<u32>,
-) -> Result<bool, i64> {
+) -> Result<Option<u32>, i64> {
     use mochi_user_platform::{process, syscall};
 
     let mut items = Vec::new();
     items.push(syscall::HandleWaitItem {
         handle: endpoint,
+        interests: syscall::HANDLE_SIGNAL_READABLE,
+        ..syscall::HandleWaitItem::default()
+    });
+    items.push(syscall::HandleWaitItem {
+        handle: provider_endpoint,
         interests: syscall::HANDLE_SIGNAL_READABLE,
         ..syscall::HandleWaitItem::default()
     });
@@ -378,7 +487,11 @@ fn wait_for_request_or_child(
         }
     }
     process::wait_many(&mut items, syscall::HANDLE_WAIT_INFINITE)
-        .map(|index| index == 0)
+        .map(|index| match index {
+            0 => Some(endpoint),
+            1 => Some(provider_endpoint),
+            _ => None,
+        })
         .map_err(|error| error.raw())
 }
 
@@ -449,11 +562,16 @@ fn bind_sender_process(
 
 #[cfg(target_os = "mochios")]
 fn invalid_response(request_id: u64) -> posix_service::Response {
+    status_response(request_id, posix_service::STATUS_EINVAL)
+}
+
+#[cfg(target_os = "mochios")]
+fn status_response(request_id: u64, status: i32) -> posix_service::Response {
     posix_service::Response {
         header: mochios_posix_protocol::Header {
             opcode: mochios_posix_protocol::OP_STATUS,
             request_id,
-            status: posix_service::STATUS_EINVAL,
+            status,
             ..mochios_posix_protocol::Header::default()
         },
         payload: Vec::new(),

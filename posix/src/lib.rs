@@ -3,6 +3,8 @@ use std::string::String;
 
 use mochios_posix_protocol as protocol;
 
+pub mod pty;
+
 pub const STATUS_EINVAL: i32 = -22;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -949,6 +951,7 @@ impl<H: Copy> PosixService<H> {
             protocol::OP_PING
             | protocol::OP_SESSION_REGISTER
             | protocol::OP_SIGNAL_THREAD_REGISTER
+            | protocol::OP_PTY_OPEN
             | protocol::OP_SESSION_INFO
             | protocol::OP_UMASK_SET
             | protocol::OP_GROUPS_GET
