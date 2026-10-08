@@ -3042,3 +3042,26 @@ fn fchdir_retains_a_directory_handle_and_rejects_regular_files() {
         1058
     );
 }
+
+#[test]
+fn terminal_flush_wire_format_is_fixed_and_rejects_unknown_flags() {
+    let mut encoded = [0u8; protocol::TERMINAL_FLUSH_LEN];
+    protocol::encode_terminal_flush(protocol::TERMINAL_FLUSH_ALL, &mut encoded).unwrap();
+    assert_eq!(encoded, protocol::TERMINAL_FLUSH_ALL.to_le_bytes());
+    assert_eq!(
+        protocol::decode_terminal_flush(&encoded),
+        Ok(protocol::TERMINAL_FLUSH_ALL)
+    );
+    assert_eq!(
+        protocol::encode_terminal_flush(0, &mut encoded),
+        Err(protocol::ProtocolError::InvalidLength)
+    );
+    assert_eq!(
+        protocol::encode_terminal_flush(1 << 31, &mut encoded),
+        Err(protocol::ProtocolError::InvalidLength)
+    );
+    assert_eq!(
+        protocol::decode_terminal_flush(&[1, 0, 0, 0, 0]),
+        Err(protocol::ProtocolError::InvalidLength)
+    );
+}

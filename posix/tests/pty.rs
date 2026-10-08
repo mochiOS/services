@@ -335,6 +335,55 @@ fn drained_attribute_changes_wait_and_flush_discards_unread_input() {
 }
 
 #[test]
+fn terminal_queue_controls_drain_and_discard_selected_directions() {
+    let mut ptys = PtyManager::new();
+    let pair = ptys.open().unwrap();
+    make_raw(&mut ptys, pair.slave_object_id);
+    assert_eq!(ptys.write(pair.master_object_id, b"input"), Ok(5));
+    assert_eq!(ptys.write(pair.slave_object_id, b"output"), Ok(6));
+
+    assert_eq!(
+        ptys.control(pair.slave_object_id, protocol::PTY_CONTROL_DRAIN, &[], 0,),
+        Err(EAGAIN)
+    );
+
+    let mut flush = [0; protocol::TERMINAL_FLUSH_LEN];
+    protocol::encode_terminal_flush(protocol::TERMINAL_FLUSH_INPUT, &mut flush).unwrap();
+    assert_eq!(
+        ptys.control(pair.slave_object_id, protocol::PTY_CONTROL_FLUSH, &flush, 0,),
+        Ok(Vec::new())
+    );
+    assert_eq!(ptys.read(pair.slave_object_id, 32), Err(EAGAIN));
+    assert_eq!(ptys.read(pair.master_object_id, 32), Ok(b"output".to_vec()));
+
+    assert_eq!(ptys.write(pair.slave_object_id, b"discard"), Ok(7));
+    protocol::encode_terminal_flush(protocol::TERMINAL_FLUSH_OUTPUT, &mut flush).unwrap();
+    assert_eq!(
+        ptys.control(pair.slave_object_id, protocol::PTY_CONTROL_FLUSH, &flush, 0,),
+        Ok(Vec::new())
+    );
+    assert_ne!(
+        ptys.signals(pair.slave_object_id).unwrap() & mnu_abi::HANDLE_SIGNAL_IDLE,
+        0
+    );
+    assert_eq!(
+        ptys.control(pair.slave_object_id, protocol::PTY_CONTROL_DRAIN, &[], 0,),
+        Ok(Vec::new())
+    );
+    assert_eq!(ptys.read(pair.master_object_id, 32), Err(EAGAIN));
+
+    assert_eq!(
+        ptys.control(
+            pair.slave_object_id,
+            protocol::PTY_CONTROL_FLUSH,
+            &[0; protocol::TERMINAL_FLUSH_LEN],
+            0,
+        ),
+        Err(EINVAL)
+    );
+}
+
+#[test]
 fn pty_queues_are_bounded_and_support_partial_writes() {
     let mut ptys = PtyManager::new();
     let pair = ptys.open().unwrap();

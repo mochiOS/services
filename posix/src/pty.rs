@@ -426,6 +426,32 @@ impl PtyManager {
         self.set_attributes(object_id, attributes)
     }
 
+    fn drain_output(&mut self, object_id: u64) -> Result<(), i32> {
+        let (id, _) = decode_object_id(object_id).ok_or(EBADF)?;
+        let terminal = self.terminals.get_mut(&id).ok_or(EBADF)?;
+        if !terminal.output.is_empty() && terminal.master_open {
+            return Err(EAGAIN);
+        }
+        if !terminal.master_open {
+            terminal.output.clear();
+        }
+        Ok(())
+    }
+
+    fn flush_queues(&mut self, object_id: u64, flags: u32) -> Result<(), i32> {
+        let (id, _) = decode_object_id(object_id).ok_or(EBADF)?;
+        let terminal = self.terminals.get_mut(&id).ok_or(EBADF)?;
+        if flags & posix_protocol::TERMINAL_FLUSH_INPUT != 0 {
+            terminal.input.clear();
+            terminal.input_records.clear();
+            terminal.canonical_input.clear();
+        }
+        if flags & posix_protocol::TERMINAL_FLUSH_OUTPUT != 0 {
+            terminal.output.clear();
+        }
+        Ok(())
+    }
+
     pub fn control(
         &mut self,
         object_id: u64,
@@ -466,6 +492,21 @@ impl PtyManager {
                     }
                     _ => unreachable!(),
                 }
+                Ok(Vec::new())
+            }
+            posix_protocol::PTY_CONTROL_DRAIN => {
+                if !input.is_empty() || output_capacity != 0 {
+                    return Err(EINVAL);
+                }
+                self.drain_output(object_id)?;
+                Ok(Vec::new())
+            }
+            posix_protocol::PTY_CONTROL_FLUSH => {
+                if output_capacity != 0 {
+                    return Err(EINVAL);
+                }
+                let flags = posix_protocol::decode_terminal_flush(input).map_err(|_| EINVAL)?;
+                self.flush_queues(object_id, flags)?;
                 Ok(Vec::new())
             }
             _ => Err(ENOTSUP),
