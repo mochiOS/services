@@ -38,6 +38,7 @@ pub struct PreparedOpen {
     pub path: String,
     pub effective_uid: u32,
     pub effective_gid: u32,
+    pub supplementary_groups: Vec<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,6 +48,7 @@ pub struct PreparedMkdir {
     pub path: String,
     pub effective_uid: u32,
     pub effective_gid: u32,
+    pub supplementary_groups: Vec<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,6 +58,7 @@ pub struct PreparedUnlink {
     pub path: String,
     pub effective_uid: u32,
     pub effective_gid: u32,
+    pub supplementary_groups: Vec<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,6 +69,7 @@ pub struct PreparedRename {
     pub new_path: String,
     pub effective_uid: u32,
     pub effective_gid: u32,
+    pub supplementary_groups: Vec<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,6 +79,7 @@ pub struct PreparedTruncate {
     pub length: u64,
     pub effective_uid: u32,
     pub effective_gid: u32,
+    pub supplementary_groups: Vec<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,6 +89,7 @@ pub struct PreparedSymlink {
     pub link_path: String,
     pub effective_uid: u32,
     pub effective_gid: u32,
+    pub supplementary_groups: Vec<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -92,6 +98,7 @@ pub struct PreparedReadlink {
     pub path: String,
     pub effective_uid: u32,
     pub effective_gid: u32,
+    pub supplementary_groups: Vec<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -101,6 +108,7 @@ pub struct PreparedChmod {
     pub mode: u32,
     pub effective_uid: u32,
     pub effective_gid: u32,
+    pub supplementary_groups: Vec<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -112,6 +120,7 @@ pub struct PreparedChown {
     pub gid: u32,
     pub effective_uid: u32,
     pub effective_gid: u32,
+    pub supplementary_groups: Vec<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,6 +130,7 @@ pub struct PreparedStat {
     pub path: String,
     pub effective_uid: u32,
     pub effective_gid: u32,
+    pub supplementary_groups: Vec<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -131,6 +141,7 @@ pub struct PreparedAccess {
     pub path: String,
     pub uid: u32,
     pub gid: u32,
+    pub supplementary_groups: Vec<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -177,6 +188,7 @@ pub trait FilesystemBackend<H: Copy> {
         &mut self,
         effective_uid: u32,
         effective_gid: u32,
+        supplementary_groups: &[u32],
     ) -> Result<SessionDirectories<H>, i32>;
 
     /// Executes path resolution, optional creation, exclusivity checks and
@@ -205,6 +217,7 @@ pub trait FilesystemBackend<H: Copy> {
         mode: u32,
         effective_uid: u32,
         effective_gid: u32,
+        supplementary_groups: &[u32],
     ) -> Result<(), i32>;
 
     fn fchown(
@@ -214,6 +227,7 @@ pub trait FilesystemBackend<H: Copy> {
         gid: u32,
         effective_uid: u32,
         effective_gid: u32,
+        supplementary_groups: &[u32],
     ) -> Result<(), i32>;
 
     fn fsync(&mut self, file: AttachedObject<H>) -> Result<(), i32>;
@@ -1102,6 +1116,7 @@ impl<H: Copy> PosixService<H> {
                     path: prepared.path,
                     effective_uid: prepared.effective_uid,
                     effective_gid: prepared.effective_gid,
+                    supplementary_groups: prepared.supplementary_groups,
                 };
                 match filesystem.open_at(&open, paths) {
                     Ok(opened) => {
@@ -1178,11 +1193,17 @@ impl<H: Copy> PosixService<H> {
                 if mode & !0o7777 != 0 {
                     return object_error(header.request_id, STATUS_EINVAL);
                 }
+                let supplementary_groups = self
+                    .supplementary_groups
+                    .get(&peer.process_id)
+                    .cloned()
+                    .unwrap_or_default();
                 match filesystem.fchmod(
                     handles[0],
                     mode,
                     session.effective_uid,
                     session.effective_gid,
+                    &supplementary_groups,
                 ) {
                     Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
                     Err(status) => object_error(header.request_id, status),
@@ -1200,12 +1221,18 @@ impl<H: Copy> PosixService<H> {
                     Ok(owner) => owner,
                     Err(_) => return object_error(header.request_id, STATUS_EINVAL),
                 };
+                let supplementary_groups = self
+                    .supplementary_groups
+                    .get(&peer.process_id)
+                    .cloned()
+                    .unwrap_or_default();
                 match filesystem.fchown(
                     handles[0],
                     uid,
                     gid,
                     session.effective_uid,
                     session.effective_gid,
+                    &supplementary_groups,
                 ) {
                     Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
                     Err(status) => object_error(header.request_id, status),
@@ -1402,8 +1429,16 @@ impl<H: Copy> PosixService<H> {
             .sessions
             .get(&process_id)
             .ok_or(protocol::STATUS_ESRCH)?;
-        let directories =
-            filesystem.open_session_root(session.effective_uid, session.effective_gid)?;
+        let supplementary_groups = self
+            .supplementary_groups
+            .get(&process_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let directories = filesystem.open_session_root(
+            session.effective_uid,
+            session.effective_gid,
+            supplementary_groups,
+        )?;
         self.directories.insert(process_id, directories);
         Ok(())
     }
@@ -1495,6 +1530,11 @@ impl<H: Copy> PosixService<H> {
             path: request.path.to_owned(),
             effective_uid: session.effective_uid,
             effective_gid: session.effective_gid,
+            supplementary_groups: self
+                .supplementary_groups
+                .get(&peer.process_id)
+                .cloned()
+                .unwrap_or_default(),
         })
     }
 
@@ -1519,6 +1559,11 @@ impl<H: Copy> PosixService<H> {
             path: request.path.to_owned(),
             effective_uid: session.effective_uid,
             effective_gid: session.effective_gid,
+            supplementary_groups: self
+                .supplementary_groups
+                .get(&peer.process_id)
+                .cloned()
+                .unwrap_or_default(),
         })
     }
 
@@ -1544,6 +1589,11 @@ impl<H: Copy> PosixService<H> {
             path: request.path.to_owned(),
             effective_uid: session.effective_uid,
             effective_gid: session.effective_gid,
+            supplementary_groups: self
+                .supplementary_groups
+                .get(&peer.process_id)
+                .cloned()
+                .unwrap_or_default(),
         })
     }
 
@@ -1571,6 +1621,11 @@ impl<H: Copy> PosixService<H> {
             new_path: request.new_path.to_owned(),
             effective_uid: session.effective_uid,
             effective_gid: session.effective_gid,
+            supplementary_groups: self
+                .supplementary_groups
+                .get(&peer.process_id)
+                .cloned()
+                .unwrap_or_default(),
         })
     }
 
@@ -1595,6 +1650,11 @@ impl<H: Copy> PosixService<H> {
             length: request.length,
             effective_uid: session.effective_uid,
             effective_gid: session.effective_gid,
+            supplementary_groups: self
+                .supplementary_groups
+                .get(&peer.process_id)
+                .cloned()
+                .unwrap_or_default(),
         })
     }
 
@@ -1619,6 +1679,11 @@ impl<H: Copy> PosixService<H> {
             link_path: request.link_path.to_owned(),
             effective_uid: session.effective_uid,
             effective_gid: session.effective_gid,
+            supplementary_groups: self
+                .supplementary_groups
+                .get(&peer.process_id)
+                .cloned()
+                .unwrap_or_default(),
         })
     }
 
@@ -1642,6 +1707,11 @@ impl<H: Copy> PosixService<H> {
             path: request.path.to_owned(),
             effective_uid: session.effective_uid,
             effective_gid: session.effective_gid,
+            supplementary_groups: self
+                .supplementary_groups
+                .get(&peer.process_id)
+                .cloned()
+                .unwrap_or_default(),
         })
     }
 
@@ -1669,6 +1739,11 @@ impl<H: Copy> PosixService<H> {
             mode: request.mode,
             effective_uid: session.effective_uid,
             effective_gid: session.effective_gid,
+            supplementary_groups: self
+                .supplementary_groups
+                .get(&peer.process_id)
+                .cloned()
+                .unwrap_or_default(),
         })
     }
 
@@ -1695,6 +1770,11 @@ impl<H: Copy> PosixService<H> {
             gid: request.gid,
             effective_uid: session.effective_uid,
             effective_gid: session.effective_gid,
+            supplementary_groups: self
+                .supplementary_groups
+                .get(&peer.process_id)
+                .cloned()
+                .unwrap_or_default(),
         })
     }
 
@@ -1719,6 +1799,11 @@ impl<H: Copy> PosixService<H> {
             path: request.path.to_owned(),
             effective_uid: session.effective_uid,
             effective_gid: session.effective_gid,
+            supplementary_groups: self
+                .supplementary_groups
+                .get(&peer.process_id)
+                .cloned()
+                .unwrap_or_default(),
         })
     }
 
@@ -1753,6 +1838,11 @@ impl<H: Copy> PosixService<H> {
             } else {
                 session.real_gid
             },
+            supplementary_groups: self
+                .supplementary_groups
+                .get(&peer.process_id)
+                .cloned()
+                .unwrap_or_default(),
         })
     }
 

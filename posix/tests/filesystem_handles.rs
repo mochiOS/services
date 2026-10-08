@@ -12,6 +12,18 @@ use filesystem_service::service::{FilesystemService, PathAnchors, RenameAnchors}
 use mochi_user_platform::handle::HANDLE_SEEK_START;
 use mochios_filesystem_protocol as protocol;
 
+fn credentials(uid: u32, gid: u32, groups: &[u32]) -> protocol::Credentials {
+    let mut payload = [0u8; protocol::CREDENTIALS_MAX_LEN];
+    let length = protocol::encode_credentials_payload(uid, gid, groups, &[], &mut payload).unwrap();
+    protocol::decode_credentials_payload(&payload[..length])
+        .unwrap()
+        .0
+}
+
+fn root_credentials() -> protocol::Credentials {
+    credentials(0, 0, &[])
+}
+
 #[derive(Clone)]
 struct SharedImage(Arc<Mutex<Vec<u8>>>);
 
@@ -139,6 +151,7 @@ fn an_open_directory_remains_a_valid_object_after_unlink() {
             },
             b"/removed",
             PathAnchors::default(),
+            root_credentials(),
         )
         .unwrap();
     let open_id = opened.header.open_id;
@@ -178,14 +191,13 @@ fn truncate_and_sync_address_an_open_object_without_a_path() {
         .open_at(
             protocol::Header {
                 opcode: protocol::OP_OPEN_AT,
-                flags: protocol::OPEN_AT_READ
-                    | protocol::OPEN_AT_WRITE
-                    | protocol::OPEN_AT_CREATE,
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
                 mode: 0o644,
                 ..protocol::Header::default()
             },
             b"/truncate.txt",
             PathAnchors::default(),
+            root_credentials(),
         )
         .unwrap();
     let open_id = opened.header.open_id;
@@ -229,6 +241,7 @@ fn duplicated_open_descriptions_share_mutable_status_flags() {
             },
             b"/flags.txt",
             PathAnchors::default(),
+            root_credentials(),
         )
         .unwrap();
     let open_id = opened.header.open_id;
@@ -278,13 +291,13 @@ fn mkdir_at_is_anchored_to_an_open_directory() {
             },
             b"/removed",
             PathAnchors::default(),
+            root_credentials(),
         )
         .unwrap();
     filesystem
         .mkdir_at(
             protocol::Header {
                 opcode: protocol::OP_MKDIR_AT,
-                offset: 1000 | (1000 << 32),
                 flags: protocol::MKDIR_AT_BASE_ATTACHED,
                 mode: 0o755,
                 ..protocol::Header::default()
@@ -294,6 +307,7 @@ fn mkdir_at_is_anchored_to_an_open_directory() {
                 root_open_id: None,
                 base_open_id: Some(base.header.open_id),
             },
+            credentials(1000, 1000, &[]),
         )
         .unwrap();
 
@@ -321,20 +335,20 @@ fn orphan_cleanup_uses_parent_inode_after_parent_rename() {
             },
             b"/create-base/parent",
             PathAnchors::default(),
+            root_credentials(),
         )
         .unwrap();
     let opened = filesystem
         .open_at(
             protocol::Header {
                 opcode: protocol::OP_OPEN_AT,
-                flags: protocol::OPEN_AT_READ
-                    | protocol::OPEN_AT_WRITE
-                    | protocol::OPEN_AT_CREATE,
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
                 mode: 0o644,
                 ..protocol::Header::default()
             },
             b"/create-base/parent/file",
             PathAnchors::default(),
+            root_credentials(),
         )
         .unwrap();
     let removed = filesystem.handle(
@@ -375,6 +389,7 @@ fn unlink_at_removes_entries_relative_to_an_open_directory() {
             },
             b"/create-base",
             PathAnchors::default(),
+            root_credentials(),
         )
         .unwrap();
     filesystem
@@ -390,14 +405,14 @@ fn unlink_at_removes_entries_relative_to_an_open_directory() {
                 root_open_id: None,
                 base_open_id: Some(base.header.open_id),
             },
+            root_credentials(),
         )
         .unwrap();
     filesystem
         .unlink_at(
             protocol::Header {
                 opcode: protocol::OP_UNLINK_AT,
-                flags: protocol::UNLINK_AT_BASE_ATTACHED
-                    | protocol::UNLINK_AT_REMOVE_DIRECTORY,
+                flags: protocol::UNLINK_AT_BASE_ATTACHED | protocol::UNLINK_AT_REMOVE_DIRECTORY,
                 ..protocol::Header::default()
             },
             b"victim",
@@ -405,6 +420,7 @@ fn unlink_at_removes_entries_relative_to_an_open_directory() {
                 root_open_id: None,
                 base_open_id: Some(base.header.open_id),
             },
+            root_credentials(),
         )
         .unwrap();
 
@@ -431,6 +447,7 @@ fn unlink_at_keeps_an_open_file_description_alive() {
             },
             b"/create-base",
             PathAnchors::default(),
+            root_credentials(),
         )
         .unwrap();
     let file = filesystem
@@ -449,6 +466,7 @@ fn unlink_at_keeps_an_open_file_description_alive() {
                 root_open_id: None,
                 base_open_id: Some(base.header.open_id),
             },
+            root_credentials(),
         )
         .unwrap();
     filesystem
@@ -466,6 +484,7 @@ fn unlink_at_keeps_an_open_file_description_alive() {
                 root_open_id: None,
                 base_open_id: Some(base.header.open_id),
             },
+            root_credentials(),
         )
         .unwrap();
     filesystem
@@ -490,6 +509,7 @@ fn rename_at_moves_between_two_open_directories_and_replaces_atomically() {
             },
             b"/create-base",
             PathAnchors::default(),
+            root_credentials(),
         )
         .unwrap();
     let new_base = filesystem
@@ -501,6 +521,7 @@ fn rename_at_moves_between_two_open_directories_and_replaces_atomically() {
             },
             b"/removed",
             PathAnchors::default(),
+            root_credentials(),
         )
         .unwrap();
     let source = filesystem
@@ -519,6 +540,7 @@ fn rename_at_moves_between_two_open_directories_and_replaces_atomically() {
                 root_open_id: None,
                 base_open_id: Some(old_base.header.open_id),
             },
+            root_credentials(),
         )
         .unwrap();
     filesystem
@@ -540,6 +562,7 @@ fn rename_at_moves_between_two_open_directories_and_replaces_atomically() {
                 root_open_id: None,
                 base_open_id: Some(new_base.header.open_id),
             },
+            root_credentials(),
         )
         .unwrap();
     filesystem
@@ -562,6 +585,7 @@ fn rename_at_moves_between_two_open_directories_and_replaces_atomically() {
                 old_base_open_id: Some(old_base.header.open_id),
                 new_base_open_id: Some(new_base.header.open_id),
             },
+            root_credentials(),
         )
         .unwrap();
 
@@ -581,7 +605,9 @@ fn rename_at_moves_between_two_open_directories_and_replaces_atomically() {
             .unwrap(),
         b"old"
     );
-    filesystem.provider_close(destination.header.open_id).unwrap();
+    filesystem
+        .provider_close(destination.header.open_id)
+        .unwrap();
 }
 
 #[test]
@@ -596,6 +622,7 @@ fn truncate_at_resolves_and_mutates_in_one_anchored_operation() {
             },
             b"/create-base",
             PathAnchors::default(),
+            root_credentials(),
         )
         .unwrap();
     let file = filesystem
@@ -614,6 +641,7 @@ fn truncate_at_resolves_and_mutates_in_one_anchored_operation() {
                 root_open_id: None,
                 base_open_id: Some(base.header.open_id),
             },
+            root_credentials(),
         )
         .unwrap();
     filesystem
@@ -632,12 +660,16 @@ fn truncate_at_resolves_and_mutates_in_one_anchored_operation() {
                 root_open_id: None,
                 base_open_id: Some(base.header.open_id),
             },
+            root_credentials(),
         )
         .unwrap();
     filesystem
         .provider_seek(file.header.open_id, 0, HANDLE_SEEK_START)
         .unwrap();
-    assert_eq!(filesystem.provider_read(file.header.open_id, 8).unwrap(), b"abc");
+    assert_eq!(
+        filesystem.provider_read(file.header.open_id, 8).unwrap(),
+        b"abc"
+    );
 }
 
 #[test]
@@ -652,6 +684,7 @@ fn symlink_at_creates_a_literal_target_under_the_open_directory() {
             },
             b"/create-base",
             PathAnchors::default(),
+            root_credentials(),
         )
         .unwrap();
     let target = filesystem
@@ -670,6 +703,7 @@ fn symlink_at_creates_a_literal_target_under_the_open_directory() {
                 root_open_id: None,
                 base_open_id: Some(base.header.open_id),
             },
+            root_credentials(),
         )
         .unwrap();
     filesystem
@@ -690,6 +724,7 @@ fn symlink_at_creates_a_literal_target_under_the_open_directory() {
                 root_open_id: None,
                 base_open_id: Some(base.header.open_id),
             },
+            root_credentials(),
         )
         .unwrap();
     let response = filesystem
@@ -704,6 +739,7 @@ fn symlink_at_creates_a_literal_target_under_the_open_directory() {
                 root_open_id: None,
                 base_open_id: Some(base.header.open_id),
             },
+            root_credentials(),
         )
         .unwrap();
     assert_eq!(response.payload, b"symlink-target");
@@ -719,6 +755,7 @@ fn symlink_at_creates_a_literal_target_under_the_open_directory() {
                 root_open_id: None,
                 base_open_id: Some(base.header.open_id),
             },
+            root_credentials(),
         )
         .unwrap();
     assert_eq!(
@@ -739,6 +776,7 @@ fn chmod_at_changes_only_permissions_on_an_anchored_path() {
             },
             b"/create-base",
             PathAnchors::default(),
+            root_credentials(),
         )
         .unwrap();
     let file = filesystem
@@ -757,6 +795,7 @@ fn chmod_at_changes_only_permissions_on_an_anchored_path() {
                 root_open_id: None,
                 base_open_id: Some(base.header.open_id),
             },
+            root_credentials(),
         )
         .unwrap();
     filesystem
@@ -772,6 +811,7 @@ fn chmod_at_changes_only_permissions_on_an_anchored_path() {
                 root_open_id: None,
                 base_open_id: Some(base.header.open_id),
             },
+            root_credentials(),
         )
         .unwrap();
     let status = filesystem
@@ -793,6 +833,7 @@ fn chown_at_updates_ownership_and_rejects_a_non_owner() {
             },
             b"/create-base",
             PathAnchors::default(),
+            root_credentials(),
         )
         .unwrap();
     let file = filesystem
@@ -811,6 +852,7 @@ fn chown_at_updates_ownership_and_rejects_a_non_owner() {
                 root_open_id: None,
                 base_open_id: Some(base.header.open_id),
             },
+            root_credentials(),
         )
         .unwrap();
     filesystem
@@ -826,6 +868,7 @@ fn chown_at_updates_ownership_and_rejects_a_non_owner() {
                 root_open_id: None,
                 base_open_id: Some(base.header.open_id),
             },
+            root_credentials(),
         )
         .unwrap();
     let status = filesystem
@@ -840,7 +883,6 @@ fn chown_at_updates_ownership_and_rejects_a_non_owner() {
         protocol::Header {
             opcode: protocol::OP_CHOWN_AT,
             flags: protocol::CHOWN_AT_BASE_ATTACHED,
-            offset: u64::from(101u32) | (u64::from(200u32) << 32),
             node_id: u64::from(u32::MAX) | (u64::from(101u32) << 32),
             ..protocol::Header::default()
         },
@@ -849,6 +891,7 @@ fn chown_at_updates_ownership_and_rejects_a_non_owner() {
             root_open_id: None,
             base_open_id: Some(base.header.open_id),
         },
+        credentials(101, 200, &[]),
     ) {
         Ok(_) => panic!("non-owner chown unexpectedly succeeded"),
         Err(error) => error,
@@ -868,6 +911,7 @@ fn open_directory_paths_follow_rename_and_reject_unlinked_cwds() {
             },
             b"/",
             PathAnchors::default(),
+            root_credentials(),
         )
         .unwrap()
         .header
@@ -881,6 +925,7 @@ fn open_directory_paths_follow_rename_and_reject_unlinked_cwds() {
             },
             b"/jail/inside",
             PathAnchors::default(),
+            root_credentials(),
         )
         .unwrap()
         .header
@@ -949,25 +994,63 @@ fn symlink_targets_enforce_search_permission_on_the_actual_directory() {
     let result = filesystem.stat_at(
         protocol::Header {
             opcode: protocol::OP_STAT_AT,
-            offset: u64::from(501u32) | (u64::from(20u32) << 32),
             ..protocol::Header::default()
         },
         b"/redirect",
         PathAnchors::default(),
+        credentials(501, 20, &[]),
     );
     assert!(matches!(result, Err(13)));
 
     let result = filesystem.open_at(
         protocol::Header {
             opcode: protocol::OP_OPEN_AT,
-            offset: u64::from(501u32) | (u64::from(20u32) << 32),
             flags: protocol::OPEN_AT_READ,
             ..protocol::Header::default()
         },
         b"/redirect",
         PathAnchors::default(),
+        credentials(501, 20, &[]),
     );
     assert!(matches!(result, Err(13)));
+}
+
+#[test]
+fn supplementary_group_grants_directory_search_during_path_resolution() {
+    let mut filesystem = test_filesystem();
+    let response = filesystem.handle(
+        protocol::Header {
+            opcode: protocol::OP_SETATTR,
+            flags: protocol::SETATTR_MODE | protocol::SETATTR_GID,
+            offset: u64::from(20u32) << 32,
+            mode: 0o050,
+            ..protocol::Header::default()
+        },
+        b"/blocked",
+    );
+    assert_eq!(response.header.status, 0);
+
+    let without_group = filesystem.stat_at(
+        protocol::Header {
+            opcode: protocol::OP_STAT_AT,
+            ..protocol::Header::default()
+        },
+        b"/blocked/child",
+        PathAnchors::default(),
+        credentials(501, 99, &[]),
+    );
+    assert!(matches!(without_group, Err(13)));
+
+    let with_group = filesystem.stat_at(
+        protocol::Header {
+            opcode: protocol::OP_STAT_AT,
+            ..protocol::Header::default()
+        },
+        b"/blocked/child",
+        PathAnchors::default(),
+        credentials(501, 99, &[20]),
+    );
+    assert!(with_group.is_ok());
 }
 
 #[test]
@@ -988,6 +1071,7 @@ fn filesystem_node_ids_are_stable_ext4_inode_numbers() {
             },
             b"/",
             PathAnchors::default(),
+            root_credentials(),
         )
         .unwrap();
     let root = protocol::decode_node_status(&root.payload).unwrap();
@@ -1011,6 +1095,7 @@ fn filesystem_node_ids_are_stable_ext4_inode_numbers() {
             },
             b"/blocked/child",
             PathAnchors::default(),
+            root_credentials(),
         )
         .unwrap();
     let status = protocol::decode_node_status(&status.payload).unwrap();
@@ -1029,6 +1114,7 @@ fn create_at_uses_the_open_parent_inode_and_follows_a_dangling_symlink() {
             },
             b"/create-base",
             PathAnchors::default(),
+            root_credentials(),
         )
         .unwrap()
         .header
@@ -1049,6 +1135,7 @@ fn create_at_uses_the_open_parent_inode_and_follows_a_dangling_symlink() {
             base_open_id: Some(base),
             ..PathAnchors::default()
         },
+        root_credentials(),
     );
     assert!(matches!(directory_only, Err(2)));
     let absent = filesystem.stat_at(
@@ -1062,6 +1149,7 @@ fn create_at_uses_the_open_parent_inode_and_follows_a_dangling_symlink() {
             base_open_id: Some(base),
             ..PathAnchors::default()
         },
+        root_credentials(),
     );
     assert!(matches!(absent, Err(2)));
 
@@ -1081,6 +1169,7 @@ fn create_at_uses_the_open_parent_inode_and_follows_a_dangling_symlink() {
             base_open_id: Some(base),
             ..PathAnchors::default()
         },
+        root_credentials(),
     );
     assert!(matches!(exclusive, Err(17)));
 
@@ -1100,6 +1189,7 @@ fn create_at_uses_the_open_parent_inode_and_follows_a_dangling_symlink() {
                 base_open_id: Some(base),
                 ..PathAnchors::default()
             },
+            root_credentials(),
         )
         .unwrap();
 
@@ -1115,6 +1205,7 @@ fn create_at_uses_the_open_parent_inode_and_follows_a_dangling_symlink() {
                 base_open_id: Some(base),
                 ..PathAnchors::default()
             },
+            root_credentials(),
         )
         .unwrap();
     let target = protocol::decode_node_status(&target.payload).unwrap();
@@ -1133,6 +1224,7 @@ fn create_at_uses_the_open_parent_inode_and_follows_a_dangling_symlink() {
                 base_open_id: Some(base),
                 ..PathAnchors::default()
             },
+            root_credentials(),
         )
         .unwrap();
     let link = protocol::decode_node_status(&link.payload).unwrap();
@@ -1151,6 +1243,7 @@ fn root_anchor_confines_absolute_paths_symlinks_and_parent_components() {
             },
             b"/jail",
             PathAnchors::default(),
+            root_credentials(),
         )
         .unwrap()
         .header
@@ -1169,6 +1262,7 @@ fn root_anchor_confines_absolute_paths_symlinks_and_parent_components() {
                 root_open_id: Some(root),
                 ..PathAnchors::default()
             },
+            root_credentials(),
         )
         .unwrap()
         .header
@@ -1186,6 +1280,7 @@ fn root_anchor_confines_absolute_paths_symlinks_and_parent_components() {
                 root_open_id: Some(root),
                 ..PathAnchors::default()
             },
+            root_credentials(),
         );
         assert!(matches!(escaped, Err(2)));
     }
@@ -1201,6 +1296,7 @@ fn root_anchor_confines_absolute_paths_symlinks_and_parent_components() {
             root_open_id: Some(root),
             base_open_id: Some(inside),
         },
+        root_credentials(),
     );
     assert!(matches!(escaped, Err(2)));
 }

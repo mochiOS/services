@@ -540,6 +540,27 @@ impl posix_service::ProcessBackend<u32> for RuntimeProcesses {
 
 #[cfg(target_os = "mochios")]
 impl RuntimeFilesystem {
+    fn credential_payload(
+        effective_uid: u32,
+        effective_gid: u32,
+        supplementary_groups: &[u32],
+        payload: &[u8],
+    ) -> Result<Vec<u8>, i32> {
+        use mochios_filesystem_protocol as filesystem;
+
+        let mut encoded = vec![0u8; filesystem::CREDENTIALS_MAX_LEN + payload.len()];
+        let length = filesystem::encode_credentials_payload(
+            effective_uid,
+            effective_gid,
+            supplementary_groups,
+            payload,
+            &mut encoded,
+        )
+        .map_err(|_| -22)?;
+        encoded.truncate(length);
+        Ok(encoded)
+    }
+
     fn flags_call(
         &self,
         header: mochios_filesystem_protocol::Header,
@@ -840,21 +861,23 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         &mut self,
         effective_uid: u32,
         effective_gid: u32,
+        supplementary_groups: &[u32],
     ) -> Result<posix_service::SessionDirectories<mochi_user_platform::handle::Handle>, i32> {
         use mochi_user_platform as platform;
         use mochios_filesystem_protocol as filesystem;
 
+        let payload =
+            Self::credential_payload(effective_uid, effective_gid, supplementary_groups, b"/")?;
         let open_root = || {
             self.open_call(
                 filesystem::Header {
                     opcode: filesystem::OP_OPEN_AT,
                     request_id: 1,
-                    offset: u64::from(effective_uid) | (u64::from(effective_gid) << 32),
-                    length: 1,
+                    length: payload.len() as u32,
                     flags: filesystem::OPEN_AT_READ | filesystem::OPEN_AT_DIRECTORY,
                     ..filesystem::Header::default()
                 },
-                b"/",
+                &payload,
                 platform::ipc::IpcObjectHandles::default(),
             )
         };
@@ -908,14 +931,22 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         let header = filesystem::Header {
             opcode: filesystem::OP_OPEN_AT,
             request_id: 1,
-            offset: u64::from(request.effective_uid) | (u64::from(request.effective_gid) << 32),
-            length: request.path.len() as u32,
             flags,
             mode: request.mode,
             ..filesystem::Header::default()
         };
+        let payload = Self::credential_payload(
+            request.effective_uid,
+            request.effective_gid,
+            &request.supplementary_groups,
+            request.path.as_bytes(),
+        )?;
+        let header = filesystem::Header {
+            length: payload.len() as u32,
+            ..header
+        };
         let handles = Self::path_handles(paths)?;
-        self.open_call(header, request.path.as_bytes(), handles)
+        self.open_call(header, &payload, handles)
     }
 
     fn stat_at(
@@ -933,16 +964,21 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             flags |= filesystem::STAT_AT_NOFOLLOW;
         }
         let handles = Self::path_handles(paths)?;
+        let payload = Self::credential_payload(
+            request.effective_uid,
+            request.effective_gid,
+            &request.supplementary_groups,
+            request.path.as_bytes(),
+        )?;
         let status = self.status_call(
             filesystem::Header {
                 opcode: filesystem::OP_STAT_AT,
                 request_id: 2,
-                offset: u64::from(request.effective_uid) | (u64::from(request.effective_gid) << 32),
-                length: request.path.len() as u32,
+                length: payload.len() as u32,
                 flags,
                 ..filesystem::Header::default()
             },
-            request.path.as_bytes(),
+            &payload,
             handles,
         )?;
         filesystem_status_to_posix(status)
@@ -1002,18 +1038,21 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         mode: u32,
         effective_uid: u32,
         effective_gid: u32,
+        supplementary_groups: &[u32],
     ) -> Result<(), i32> {
         use mochios_filesystem_protocol as filesystem;
 
+        let payload =
+            Self::credential_payload(effective_uid, effective_gid, supplementary_groups, &[])?;
         self.empty_call(
             filesystem::Header {
                 opcode: filesystem::OP_CHMOD_HANDLE,
                 request_id: 18,
-                offset: u64::from(effective_uid) | (u64::from(effective_gid) << 32),
+                length: payload.len() as u32,
                 mode,
                 ..filesystem::Header::default()
             },
-            &[],
+            &payload,
             single_file_handle(file)?,
         )
     }
@@ -1025,18 +1064,21 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         gid: u32,
         effective_uid: u32,
         effective_gid: u32,
+        supplementary_groups: &[u32],
     ) -> Result<(), i32> {
         use mochios_filesystem_protocol as filesystem;
 
+        let payload =
+            Self::credential_payload(effective_uid, effective_gid, supplementary_groups, &[])?;
         self.empty_call(
             filesystem::Header {
                 opcode: filesystem::OP_CHOWN_HANDLE,
                 request_id: 19,
-                offset: u64::from(effective_uid) | (u64::from(effective_gid) << 32),
                 node_id: u64::from(uid) | (u64::from(gid) << 32),
+                length: payload.len() as u32,
                 ..filesystem::Header::default()
             },
-            &[],
+            &payload,
             single_file_handle(file)?,
         )
     }
@@ -1121,17 +1163,22 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         if paths.base.is_some() {
             flags |= filesystem::MKDIR_AT_BASE_ATTACHED;
         }
+        let payload = Self::credential_payload(
+            request.effective_uid,
+            request.effective_gid,
+            &request.supplementary_groups,
+            request.path.as_bytes(),
+        )?;
         self.empty_call(
             filesystem::Header {
                 opcode: filesystem::OP_MKDIR_AT,
                 request_id: 10,
-                offset: u64::from(request.effective_uid) | (u64::from(request.effective_gid) << 32),
-                length: request.path.len() as u32,
+                length: payload.len() as u32,
                 flags,
                 mode: request.mode,
                 ..filesystem::Header::default()
             },
-            request.path.as_bytes(),
+            &payload,
             Self::path_handles(paths)?,
         )
     }
@@ -1151,16 +1198,21 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         if request.flags & posix::UNLINK_REMOVE_DIRECTORY != 0 {
             flags |= filesystem::UNLINK_AT_REMOVE_DIRECTORY;
         }
+        let payload = Self::credential_payload(
+            request.effective_uid,
+            request.effective_gid,
+            &request.supplementary_groups,
+            request.path.as_bytes(),
+        )?;
         self.empty_call(
             filesystem::Header {
                 opcode: filesystem::OP_UNLINK_AT,
                 request_id: 11,
-                offset: u64::from(request.effective_uid) | (u64::from(request.effective_gid) << 32),
-                length: request.path.len() as u32,
+                length: payload.len() as u32,
                 flags,
                 ..filesystem::Header::default()
             },
-            request.path.as_bytes(),
+            &payload,
             Self::path_handles(paths)?,
         )
     }
@@ -1180,14 +1232,19 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             flags |= filesystem::RENAME_AT_NEW_BASE_ATTACHED;
         }
         let old_length = u32::try_from(request.old_path.len()).map_err(|_| -22)?;
-        let mut payload = Vec::with_capacity(request.old_path.len() + request.new_path.len());
-        payload.extend_from_slice(request.old_path.as_bytes());
-        payload.extend_from_slice(request.new_path.as_bytes());
+        let mut operation = Vec::with_capacity(request.old_path.len() + request.new_path.len());
+        operation.extend_from_slice(request.old_path.as_bytes());
+        operation.extend_from_slice(request.new_path.as_bytes());
+        let payload = Self::credential_payload(
+            request.effective_uid,
+            request.effective_gid,
+            &request.supplementary_groups,
+            &operation,
+        )?;
         self.empty_call(
             filesystem::Header {
                 opcode: filesystem::OP_RENAME_AT,
                 request_id: 12,
-                offset: u64::from(request.effective_uid) | (u64::from(request.effective_gid) << 32),
                 length: payload.len() as u32,
                 flags,
                 mode: old_length,
@@ -1209,17 +1266,22 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         if paths.base.is_some() {
             flags |= filesystem::TRUNCATE_AT_BASE_ATTACHED;
         }
+        let payload = Self::credential_payload(
+            request.effective_uid,
+            request.effective_gid,
+            &request.supplementary_groups,
+            request.path.as_bytes(),
+        )?;
         self.empty_call(
             filesystem::Header {
                 opcode: filesystem::OP_TRUNCATE_AT,
                 request_id: 13,
-                offset: u64::from(request.effective_uid) | (u64::from(request.effective_gid) << 32),
                 open_id: request.length,
-                length: request.path.len() as u32,
+                length: payload.len() as u32,
                 flags,
                 ..filesystem::Header::default()
             },
-            request.path.as_bytes(),
+            &payload,
             Self::path_handles(paths)?,
         )
     }
@@ -1236,14 +1298,19 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             flags |= filesystem::SYMLINK_AT_BASE_ATTACHED;
         }
         let target_length = u32::try_from(request.target.len()).map_err(|_| -22)?;
-        let mut payload = Vec::with_capacity(request.target.len() + request.link_path.len());
-        payload.extend_from_slice(request.target.as_bytes());
-        payload.extend_from_slice(request.link_path.as_bytes());
+        let mut operation = Vec::with_capacity(request.target.len() + request.link_path.len());
+        operation.extend_from_slice(request.target.as_bytes());
+        operation.extend_from_slice(request.link_path.as_bytes());
+        let payload = Self::credential_payload(
+            request.effective_uid,
+            request.effective_gid,
+            &request.supplementary_groups,
+            &operation,
+        )?;
         self.empty_call(
             filesystem::Header {
                 opcode: filesystem::OP_SYMLINK_AT,
                 request_id: 14,
-                offset: u64::from(request.effective_uid) | (u64::from(request.effective_gid) << 32),
                 length: payload.len() as u32,
                 flags,
                 mode: target_length,
@@ -1265,16 +1332,21 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         if paths.base.is_some() {
             flags |= filesystem::READLINK_AT_BASE_ATTACHED;
         }
+        let payload = Self::credential_payload(
+            request.effective_uid,
+            request.effective_gid,
+            &request.supplementary_groups,
+            request.path.as_bytes(),
+        )?;
         self.payload_call(
             filesystem::Header {
                 opcode: filesystem::OP_READLINK_AT,
                 request_id: 15,
-                offset: u64::from(request.effective_uid) | (u64::from(request.effective_gid) << 32),
-                length: request.path.len() as u32,
+                length: payload.len() as u32,
                 flags,
                 ..filesystem::Header::default()
             },
-            request.path.as_bytes(),
+            &payload,
             Self::path_handles(paths)?,
         )
     }
@@ -1290,17 +1362,22 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         if paths.base.is_some() {
             flags |= filesystem::CHMOD_AT_BASE_ATTACHED;
         }
+        let payload = Self::credential_payload(
+            request.effective_uid,
+            request.effective_gid,
+            &request.supplementary_groups,
+            request.path.as_bytes(),
+        )?;
         self.empty_call(
             filesystem::Header {
                 opcode: filesystem::OP_CHMOD_AT,
                 request_id: 16,
-                offset: u64::from(request.effective_uid) | (u64::from(request.effective_gid) << 32),
-                length: request.path.len() as u32,
+                length: payload.len() as u32,
                 flags,
                 mode: request.mode,
                 ..filesystem::Header::default()
             },
-            request.path.as_bytes(),
+            &payload,
             Self::path_handles(paths)?,
         )
     }
@@ -1320,17 +1397,22 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         if request.flags & posix::CHOWN_NOFOLLOW != 0 {
             flags |= filesystem::CHOWN_AT_NOFOLLOW;
         }
+        let payload = Self::credential_payload(
+            request.effective_uid,
+            request.effective_gid,
+            &request.supplementary_groups,
+            request.path.as_bytes(),
+        )?;
         self.empty_call(
             filesystem::Header {
                 opcode: filesystem::OP_CHOWN_AT,
                 request_id: 17,
-                offset: u64::from(request.effective_uid) | (u64::from(request.effective_gid) << 32),
                 node_id: u64::from(request.uid) | (u64::from(request.gid) << 32),
-                length: request.path.len() as u32,
+                length: payload.len() as u32,
                 flags,
                 ..filesystem::Header::default()
             },
-            request.path.as_bytes(),
+            &payload,
             Self::path_handles(paths)?,
         )
     }
@@ -1359,16 +1441,21 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             flags |= filesystem::ACCESS_AT_NOFOLLOW;
         }
         let handles = Self::path_handles(paths)?;
+        let payload = Self::credential_payload(
+            request.uid,
+            request.gid,
+            &request.supplementary_groups,
+            request.path.as_bytes(),
+        )?;
         self.empty_call(
             filesystem::Header {
                 opcode: filesystem::OP_ACCESS_AT,
                 request_id: 4,
-                offset: u64::from(request.uid) | (u64::from(request.gid) << 32),
-                length: request.path.len() as u32,
+                length: payload.len() as u32,
                 flags,
                 ..filesystem::Header::default()
             },
-            request.path.as_bytes(),
+            &payload,
             handles,
         )
     }

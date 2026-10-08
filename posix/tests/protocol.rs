@@ -9,7 +9,7 @@ use mochios_posix_protocol as protocol;
 use posix_service::{
     AttachedObject, AuthenticatedProcess, FilesystemBackend, OpenedObject, PathObjects,
     PeerIdentity, PosixService, PreparedAccess, PreparedOpen, PreparedStat, ProcessBackend,
-    ProcessLifecycle, SessionDirectories, STATUS_EINVAL,
+    ProcessLifecycle, STATUS_EINVAL, SessionDirectories,
 };
 
 struct LocalTransport {
@@ -335,7 +335,10 @@ fn resource_limit_wire_format_is_fixed_and_strict() {
     };
     let mut encoded = [0u8; protocol::RESOURCE_LIMIT_REQUEST_LEN];
     protocol::encode_resource_limit_request(request, &mut encoded).unwrap();
-    assert_eq!(protocol::decode_resource_limit_request(&encoded), Ok(request));
+    assert_eq!(
+        protocol::decode_resource_limit_request(&encoded),
+        Ok(request)
+    );
 
     let mut trailing = [0u8; protocol::RESOURCE_LIMIT_REQUEST_LEN + 1];
     trailing[..protocol::RESOURCE_LIMIT_REQUEST_LEN].copy_from_slice(&encoded);
@@ -537,7 +540,10 @@ fn maximum_path_fits_in_a_control_message() {
     )
     .unwrap();
     assert_eq!(rename_len, protocol::MAX_CONTROL_PAYLOAD_LEN);
-    assert_eq!(protocol::HEADER_LEN + rename_len, protocol::CONTROL_MESSAGE_LEN);
+    assert_eq!(
+        protocol::HEADER_LEN + rename_len,
+        protocol::CONTROL_MESSAGE_LEN
+    );
 }
 
 #[test]
@@ -814,6 +820,56 @@ fn service_prepares_open_with_authenticated_credentials_and_umask() {
     );
 }
 
+#[test]
+fn prepared_filesystem_request_carries_supplementary_groups() {
+    let peer = PeerIdentity {
+        process_id: 102,
+        effective_uid: 0,
+        effective_gid: 0,
+    };
+    let mut service = service_for(peer);
+    service.handle(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let mut groups = [0u8; protocol::GROUP_LIST_MAX_LEN];
+    let groups_len = protocol::encode_group_list(&[20, 42], &mut groups).unwrap();
+    assert_eq!(
+        service
+            .handle(
+                peer,
+                protocol::Header {
+                    opcode: protocol::OP_GROUPS_SET,
+                    ..protocol::Header::default()
+                },
+                &groups[..groups_len],
+            )
+            .header
+            .status,
+        protocol::STATUS_OK
+    );
+    let mut payload = [0u8; protocol::OPEN_AT_HEADER_LEN + 16];
+    let length = protocol::encode_open_at(
+        protocol::OpenAtRequest {
+            base: protocol::OpenBase::ProcessCwd,
+            options: protocol::OPEN_READ,
+            mode: 0,
+            path: "notes.txt",
+        },
+        &mut payload,
+    )
+    .unwrap();
+
+    let open = service
+        .prepare_open_at(peer, &payload[..length], 0)
+        .unwrap();
+    assert_eq!(open.supplementary_groups, vec![20, 42]);
+}
+
 struct OpenTransport;
 
 impl Transport for OpenTransport {
@@ -988,6 +1044,7 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         &mut self,
         _effective_uid: u32,
         _effective_gid: u32,
+        _supplementary_groups: &[u32],
     ) -> Result<SessionDirectories<u32>, i32> {
         self.roots_opened += 1;
         Ok(SessionDirectories {
@@ -1047,6 +1104,7 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         mode: u32,
         effective_uid: u32,
         effective_gid: u32,
+        _supplementary_groups: &[u32],
     ) -> Result<(), i32> {
         self.chmod_file = Some((file, mode, effective_uid, effective_gid));
         Ok(())
@@ -1059,6 +1117,7 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         gid: u32,
         effective_uid: u32,
         effective_gid: u32,
+        _supplementary_groups: &[u32],
     ) -> Result<(), i32> {
         self.chown_file = Some((file, uid, gid, effective_uid, effective_gid));
         Ok(())
@@ -1174,10 +1233,7 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         Ok(())
     }
 
-    fn retain_object(
-        &mut self,
-        object: AttachedObject<u32>,
-    ) -> Result<AttachedObject<u32>, i32> {
+    fn retain_object(&mut self, object: AttachedObject<u32>) -> Result<AttachedObject<u32>, i32> {
         self.retained.push(object);
         Ok(AttachedObject {
             handle: object.handle + 1000,
@@ -1392,10 +1448,7 @@ fn adopted_child_inherits_an_independent_resource_limit_table() {
         },
         &[],
     );
-    let inherited = protocol::ResourceLimit {
-        soft: 32,
-        hard: 64,
-    };
+    let inherited = protocol::ResourceLimit { soft: 32, hard: 64 };
     let mut request = [0u8; protocol::RESOURCE_LIMIT_REQUEST_LEN];
     protocol::encode_resource_limit_request(
         protocol::ResourceLimitRequest {
@@ -1462,10 +1515,7 @@ fn adopted_child_inherits_an_independent_resource_limit_table() {
             process_id: 0,
             resource: protocol::RLIMIT_NOFILE,
             flags: protocol::RESOURCE_LIMIT_SET,
-            limit: protocol::ResourceLimit {
-                soft: 16,
-                hard: 64,
-            },
+            limit: protocol::ResourceLimit { soft: 16, hard: 64 },
         },
         &mut request,
     )
@@ -2123,7 +2173,10 @@ fn rename_wire_and_service_preserve_two_distinct_directory_handles() {
     };
     let mut encoded = [0; protocol::RENAME_AT_HEADER_LEN + protocol::MAX_PATH_LEN * 2];
     let length = protocol::encode_rename_at(request, &mut encoded).unwrap();
-    assert_eq!(protocol::decode_rename_at(&encoded[..length]).unwrap(), request);
+    assert_eq!(
+        protocol::decode_rename_at(&encoded[..length]).unwrap(),
+        request
+    );
 
     let peer = PeerIdentity {
         process_id: 121,
@@ -2231,7 +2284,10 @@ fn symlink_wire_and_service_preserve_target_credentials_and_directory_handle() {
     };
     let mut encoded = [0; protocol::SYMLINK_AT_HEADER_LEN + protocol::MAX_PATH_LEN * 2];
     let length = protocol::encode_symlink_at(request, &mut encoded).unwrap();
-    assert_eq!(protocol::decode_symlink_at(&encoded[..length]).unwrap(), request);
+    assert_eq!(
+        protocol::decode_symlink_at(&encoded[..length]).unwrap(),
+        request
+    );
 
     let peer = PeerIdentity {
         process_id: 123,
@@ -2386,7 +2442,10 @@ fn chown_wire_and_service_use_authenticated_credentials() {
     };
     let mut payload = [0; protocol::CHOWN_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
     let length = protocol::encode_chown_at(request, &mut payload).unwrap();
-    assert_eq!(protocol::decode_chown_at(&payload[..length]).unwrap(), request);
+    assert_eq!(
+        protocol::decode_chown_at(&payload[..length]).unwrap(),
+        request
+    );
 
     let peer = PeerIdentity {
         process_id: 126,
@@ -2544,10 +2603,26 @@ fn chdir_replaces_the_session_cwd_with_an_open_directory() {
     assert!(result.handles.is_empty());
     let request = filesystem.request.as_ref().unwrap();
     assert_eq!(request.path, "work");
-    assert_eq!(request.options, protocol::OPEN_READ | protocol::OPEN_DIRECTORY);
+    assert_eq!(
+        request.options,
+        protocol::OPEN_READ | protocol::OPEN_DIRECTORY
+    );
     assert_eq!(filesystem.directory.unwrap().handle, 101);
-    assert_eq!(service.session_directories(peer.process_id).unwrap().cwd.handle, 200);
-    assert_eq!(filesystem.released, vec![AttachedObject { handle: 101, rights: 0x81 }]);
+    assert_eq!(
+        service
+            .session_directories(peer.process_id)
+            .unwrap()
+            .cwd
+            .handle,
+        200
+    );
+    assert_eq!(
+        filesystem.released,
+        vec![AttachedObject {
+            handle: 101,
+            rights: 0x81
+        }]
+    );
 }
 
 #[test]
@@ -2641,8 +2716,21 @@ fn fchdir_retains_a_directory_handle_and_rejects_regular_files() {
     assert_eq!(result.response.header.status, protocol::STATUS_OK);
     assert_eq!(filesystem.stat_file, Some(directory));
     assert_eq!(filesystem.retained, vec![directory]);
-    assert_eq!(service.session_directories(peer.process_id).unwrap().cwd.handle, 1058);
-    assert_eq!(filesystem.released, vec![AttachedObject { handle: 101, rights: 0x81 }]);
+    assert_eq!(
+        service
+            .session_directories(peer.process_id)
+            .unwrap()
+            .cwd
+            .handle,
+        1058
+    );
+    assert_eq!(
+        filesystem.released,
+        vec![AttachedObject {
+            handle: 101,
+            rights: 0x81
+        }]
+    );
 
     filesystem.stat_mode = Some(0o100644);
     let regular = AttachedObject {
@@ -2662,5 +2750,12 @@ fn fchdir_retains_a_directory_handle_and_rejects_regular_files() {
     );
     assert_eq!(rejected.response.header.status, -20);
     assert_eq!(filesystem.retained, vec![directory]);
-    assert_eq!(service.session_directories(peer.process_id).unwrap().cwd.handle, 1058);
+    assert_eq!(
+        service
+            .session_directories(peer.process_id)
+            .unwrap()
+            .cwd
+            .handle,
+        1058
+    );
 }

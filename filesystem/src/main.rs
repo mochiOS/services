@@ -119,13 +119,19 @@ fn main() {
         let response = match protocol::decode(&request_bytes[..length.min(request_bytes.len())]) {
             Ok((header, payload)) => {
                 if header.opcode == protocol::OP_OPEN_AT {
-                    let result = decode_path_anchors(
-                        header.flags,
-                        protocol::OPEN_AT_ROOT_ATTACHED,
-                        protocol::OPEN_AT_BASE_ATTACHED,
-                        &attached,
-                    )
-                    .and_then(|anchors| service.open_at(header, payload, anchors));
+                    let result = protocol::decode_credentials_payload(payload)
+                        .map_err(|_| 22)
+                        .and_then(|(credentials, payload)| {
+                            decode_path_anchors(
+                                header.flags,
+                                protocol::OPEN_AT_ROOT_ATTACHED,
+                                protocol::OPEN_AT_BASE_ATTACHED,
+                                &attached,
+                            )
+                            .and_then(|anchors| {
+                                service.open_at(header, payload, anchors, credentials)
+                            })
+                        });
                     close_attached_handles(&attached);
                     match result {
                         Ok(response) => {
@@ -209,7 +215,14 @@ fn main() {
                         protocol::STAT_AT_BASE_ATTACHED,
                         &attached,
                     );
-                    match anchors.and_then(|anchors| service.stat_at(header, payload, anchors)) {
+                    let result = protocol::decode_credentials_payload(payload)
+                        .map_err(|_| 22)
+                        .and_then(|(credentials, payload)| {
+                            anchors.and_then(|anchors| {
+                                service.stat_at(header, payload, anchors, credentials)
+                            })
+                        });
+                    match result {
                         Ok(response) => response,
                         Err(error) => filesystem_service::service::Response {
                             header: protocol::Header {
@@ -276,8 +289,24 @@ fn main() {
                         protocol::OP_SYNC_HANDLE => service.sync_handle(header, open_id),
                         protocol::OP_GET_FLAGS_HANDLE => service.get_flags_handle(header, open_id),
                         protocol::OP_SET_FLAGS_HANDLE => service.set_flags_handle(header, open_id),
-                        protocol::OP_CHMOD_HANDLE => service.chmod_handle(header, open_id),
-                        protocol::OP_CHOWN_HANDLE => service.chown_handle(header, open_id),
+                        protocol::OP_CHMOD_HANDLE => protocol::decode_credentials_payload(payload)
+                            .map_err(|_| 22)
+                            .and_then(|(credentials, payload)| {
+                                if payload.is_empty() {
+                                    service.chmod_handle(header, open_id, credentials)
+                                } else {
+                                    Err(22)
+                                }
+                            }),
+                        protocol::OP_CHOWN_HANDLE => protocol::decode_credentials_payload(payload)
+                            .map_err(|_| 22)
+                            .and_then(|(credentials, payload)| {
+                                if payload.is_empty() {
+                                    service.chown_handle(header, open_id, credentials)
+                                } else {
+                                    Err(22)
+                                }
+                            }),
                         _ => unreachable!(),
                     });
                     match result {
@@ -315,7 +344,14 @@ fn main() {
                         protocol::ACCESS_AT_BASE_ATTACHED,
                         &attached,
                     );
-                    match anchors.and_then(|anchors| service.access_at(header, payload, anchors)) {
+                    let result = protocol::decode_credentials_payload(payload)
+                        .map_err(|_| 22)
+                        .and_then(|(credentials, payload)| {
+                            anchors.and_then(|anchors| {
+                                service.access_at(header, payload, anchors, credentials)
+                            })
+                        });
+                    match result {
                         Ok(response) => response,
                         Err(error) => filesystem_service::service::Response {
                             header: protocol::Header {
@@ -334,7 +370,14 @@ fn main() {
                         protocol::MKDIR_AT_BASE_ATTACHED,
                         &attached,
                     );
-                    match anchors.and_then(|anchors| service.mkdir_at(header, payload, anchors)) {
+                    let result = protocol::decode_credentials_payload(payload)
+                        .map_err(|_| 22)
+                        .and_then(|(credentials, payload)| {
+                            anchors.and_then(|anchors| {
+                                service.mkdir_at(header, payload, anchors, credentials)
+                            })
+                        });
+                    match result {
                         Ok(response) => response,
                         Err(error) => filesystem_service::service::Response {
                             header: protocol::Header {
@@ -353,7 +396,14 @@ fn main() {
                         protocol::UNLINK_AT_BASE_ATTACHED,
                         &attached,
                     );
-                    match anchors.and_then(|anchors| service.unlink_at(header, payload, anchors)) {
+                    let result = protocol::decode_credentials_payload(payload)
+                        .map_err(|_| 22)
+                        .and_then(|(credentials, payload)| {
+                            anchors.and_then(|anchors| {
+                                service.unlink_at(header, payload, anchors, credentials)
+                            })
+                        });
+                    match result {
                         Ok(response) => response,
                         Err(error) => filesystem_service::service::Response {
                             header: protocol::Header {
@@ -367,7 +417,14 @@ fn main() {
                     }
                 } else if header.opcode == protocol::OP_RENAME_AT {
                     let anchors = decode_rename_anchors(header.flags, &attached);
-                    match anchors.and_then(|anchors| service.rename_at(header, payload, anchors)) {
+                    let result = protocol::decode_credentials_payload(payload)
+                        .map_err(|_| 22)
+                        .and_then(|(credentials, payload)| {
+                            anchors.and_then(|anchors| {
+                                service.rename_at(header, payload, anchors, credentials)
+                            })
+                        });
+                    match result {
                         Ok(response) => response,
                         Err(error) => filesystem_service::service::Response {
                             header: protocol::Header {
@@ -386,7 +443,14 @@ fn main() {
                         protocol::TRUNCATE_AT_BASE_ATTACHED,
                         &attached,
                     );
-                    match anchors.and_then(|anchors| service.truncate_at(header, payload, anchors)) {
+                    let result = protocol::decode_credentials_payload(payload)
+                        .map_err(|_| 22)
+                        .and_then(|(credentials, payload)| {
+                            anchors.and_then(|anchors| {
+                                service.truncate_at(header, payload, anchors, credentials)
+                            })
+                        });
+                    match result {
                         Ok(response) => response,
                         Err(error) => filesystem_service::service::Response {
                             header: protocol::Header {
@@ -405,7 +469,14 @@ fn main() {
                         protocol::SYMLINK_AT_BASE_ATTACHED,
                         &attached,
                     );
-                    match anchors.and_then(|anchors| service.symlink_at(header, payload, anchors)) {
+                    let result = protocol::decode_credentials_payload(payload)
+                        .map_err(|_| 22)
+                        .and_then(|(credentials, payload)| {
+                            anchors.and_then(|anchors| {
+                                service.symlink_at(header, payload, anchors, credentials)
+                            })
+                        });
+                    match result {
                         Ok(response) => response,
                         Err(error) => filesystem_service::service::Response {
                             header: protocol::Header {
@@ -424,7 +495,14 @@ fn main() {
                         protocol::READLINK_AT_BASE_ATTACHED,
                         &attached,
                     );
-                    match anchors.and_then(|anchors| service.readlink_at(header, payload, anchors)) {
+                    let result = protocol::decode_credentials_payload(payload)
+                        .map_err(|_| 22)
+                        .and_then(|(credentials, payload)| {
+                            anchors.and_then(|anchors| {
+                                service.readlink_at(header, payload, anchors, credentials)
+                            })
+                        });
+                    match result {
                         Ok(response) => response,
                         Err(error) => filesystem_service::service::Response {
                             header: protocol::Header {
@@ -443,7 +521,14 @@ fn main() {
                         protocol::CHMOD_AT_BASE_ATTACHED,
                         &attached,
                     );
-                    match anchors.and_then(|anchors| service.chmod_at(header, payload, anchors)) {
+                    let result = protocol::decode_credentials_payload(payload)
+                        .map_err(|_| 22)
+                        .and_then(|(credentials, payload)| {
+                            anchors.and_then(|anchors| {
+                                service.chmod_at(header, payload, anchors, credentials)
+                            })
+                        });
+                    match result {
                         Ok(response) => response,
                         Err(error) => filesystem_service::service::Response {
                             header: protocol::Header {
@@ -462,7 +547,14 @@ fn main() {
                         protocol::CHOWN_AT_BASE_ATTACHED,
                         &attached,
                     );
-                    match anchors.and_then(|anchors| service.chown_at(header, payload, anchors)) {
+                    let result = protocol::decode_credentials_payload(payload)
+                        .map_err(|_| 22)
+                        .and_then(|(credentials, payload)| {
+                            anchors.and_then(|anchors| {
+                                service.chown_at(header, payload, anchors, credentials)
+                            })
+                        });
+                    match result {
                         Ok(response) => response,
                         Err(error) => filesystem_service::service::Response {
                             header: protocol::Header {
@@ -538,8 +630,7 @@ fn decode_open_pair(
         return Err(22);
     }
     let mut open_ids = [0u64; 2];
-    let required = platform::handle::HANDLE_RIGHT_READ
-        | platform::handle::HANDLE_RIGHT_TRANSFER;
+    let required = platform::handle::HANDLE_RIGHT_READ | platform::handle::HANDLE_RIGHT_TRANSFER;
     for (index, object) in attached.handles.iter().take(2).enumerate() {
         if object.handle == 0 || object.reserved != 0 || object.rights & required != required {
             return Err(13);
@@ -551,9 +642,7 @@ fn decode_open_pair(
 }
 
 #[cfg(target_os = "mochios")]
-fn decode_single_open(
-    attached: &mochi_user_platform::ipc::IpcObjectHandles,
-) -> Result<u64, i32> {
+fn decode_single_open(attached: &mochi_user_platform::ipc::IpcObjectHandles) -> Result<u64, i32> {
     use mochi_user_platform as platform;
 
     if attached.count != 1 {
@@ -588,8 +677,8 @@ fn decode_path_anchors(
     let mut next_open_id = || -> Result<u64, i32> {
         let directory = attached.handles[index];
         index += 1;
-        let required = platform::handle::HANDLE_RIGHT_READ
-            | platform::handle::HANDLE_RIGHT_TRANSFER;
+        let required =
+            platform::handle::HANDLE_RIGHT_READ | platform::handle::HANDLE_RIGHT_TRANSFER;
         if directory.handle == 0
             || directory.reserved != 0
             || directory.rights & required != required
@@ -630,8 +719,8 @@ fn decode_rename_anchors(
         }
         let object = *attached.handles.get(index).ok_or(22)?;
         index += 1;
-        let required = platform::handle::HANDLE_RIGHT_READ
-            | platform::handle::HANDLE_RIGHT_TRANSFER;
+        let required =
+            platform::handle::HANDLE_RIGHT_READ | platform::handle::HANDLE_RIGHT_TRANSFER;
         if object.handle == 0 || object.reserved != 0 || object.rights & required != required {
             return Err(13);
         }

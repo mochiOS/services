@@ -181,6 +181,7 @@ impl FilesystemService {
         request: protocol::Header,
         payload: &[u8],
         anchors: PathAnchors,
+        credentials: protocol::Credentials,
     ) -> Result<Response, i32> {
         if request.flags & !protocol::OPEN_AT_FLAGS_ALL != 0 {
             return Err(EINVAL);
@@ -201,8 +202,9 @@ impl FilesystemService {
         {
             return Err(EINVAL);
         }
-        let uid = request.offset as u32;
-        let gid = (request.offset >> 32) as u32;
+        let uid = credentials.effective_uid;
+        let gid = credentials.effective_gid;
+        let groups = credentials.supplementary_groups();
         let (root, base) = self.resolve_anchors(payload, anchors)?;
         let exclusive_create = request.flags
             & (protocol::OPEN_AT_CREATE | protocol::OPEN_AT_EXCLUSIVE)
@@ -212,24 +214,28 @@ impl FilesystemService {
         } else {
             FollowSymlinks::All
         };
-        let (inode, created) = match self.resolve_path_at(root, base, payload, follow, uid, gid)? {
-            Resolution::Found { inode, .. } => {
-                if request.flags & protocol::OPEN_AT_CREATE != 0
-                    && request.flags & protocol::OPEN_AT_EXCLUSIVE != 0
-                {
-                    return Err(EEXIST);
+        let (inode, created) =
+            match self.resolve_path_at(root, base, payload, follow, uid, gid, groups)? {
+                Resolution::Found { inode, .. } => {
+                    if request.flags & protocol::OPEN_AT_CREATE != 0
+                        && request.flags & protocol::OPEN_AT_EXCLUSIVE != 0
+                    {
+                        return Err(EEXIST);
+                    }
+                    (inode, false)
                 }
-                (inode, false)
-            }
-            Resolution::Missing { parent, name }
-                if request.flags & protocol::OPEN_AT_CREATE != 0
-                    && request.flags & protocol::OPEN_AT_DIRECTORY == 0
-                    && payload.last() != Some(&b'/') =>
-            {
-                (self.create_regular_at(parent, &name, request.mode, uid, gid)?, true)
-            }
-            Resolution::Missing { .. } => return Err(ENOENT),
-        };
+                Resolution::Missing { parent, name }
+                    if request.flags & protocol::OPEN_AT_CREATE != 0
+                        && request.flags & protocol::OPEN_AT_DIRECTORY == 0
+                        && payload.last() != Some(&b'/') =>
+                {
+                    (
+                        self.create_regular_at(parent, &name, request.mode, uid, gid, groups)?,
+                        true,
+                    )
+                }
+                Resolution::Missing { .. } => return Err(ENOENT),
+            };
         if request.flags & protocol::OPEN_AT_NOFOLLOW != 0 && inode.file_type().is_symlink() {
             return Err(ELOOP);
         }
@@ -243,8 +249,7 @@ impl FilesystemService {
         }
         let requested_access = (u32::from(request.flags & protocol::OPEN_AT_READ != 0)
             * protocol::ACCESS_AT_READ)
-            | (u32::from(request.flags & protocol::OPEN_AT_WRITE != 0)
-                * protocol::ACCESS_AT_WRITE);
+            | (u32::from(request.flags & protocol::OPEN_AT_WRITE != 0) * protocol::ACCESS_AT_WRITE);
         if !created
             && !permission_allows(
                 metadata.mode(),
@@ -253,6 +258,7 @@ impl FilesystemService {
                 metadata.gid(),
                 uid,
                 gid,
+                groups,
                 requested_access,
             )
         {
@@ -300,6 +306,7 @@ impl FilesystemService {
         mode: u32,
         uid: u32,
         gid: u32,
+        groups: &[u32],
     ) -> Result<Inode, i32> {
         let metadata = parent.metadata();
         if !permission_allows(
@@ -309,6 +316,7 @@ impl FilesystemService {
             metadata.gid(),
             uid,
             gid,
+            groups,
             protocol::ACCESS_AT_WRITE | protocol::ACCESS_AT_EXECUTE,
         ) {
             return Err(EACCES);
@@ -324,8 +332,7 @@ impl FilesystemService {
             .fs
             .create_inode(InodeCreationOptions {
                 file_type: FileType::Regular,
-                mode: InodeMode::from_bits_truncate((mode as u16) & 0x0fff)
-                    | InodeMode::S_IFREG,
+                mode: InodeMode::from_bits_truncate((mode as u16) & 0x0fff) | InodeMode::S_IFREG,
                 uid,
                 gid,
                 time: Duration::default(),
@@ -341,6 +348,7 @@ impl FilesystemService {
         request: protocol::Header,
         payload: &[u8],
         anchors: PathAnchors,
+        credentials: protocol::Credentials,
     ) -> Result<Response, i32> {
         if request.flags & !protocol::MKDIR_AT_FLAGS_ALL != 0 {
             return Err(EINVAL);
@@ -352,8 +360,9 @@ impl FilesystemService {
         {
             return Err(EINVAL);
         }
-        let uid = request.offset as u32;
-        let gid = (request.offset >> 32) as u32;
+        let uid = credentials.effective_uid;
+        let gid = credentials.effective_gid;
+        let groups = credentials.supplementary_groups();
         let (root, base) = self.resolve_anchors(payload, anchors)?;
         let (parent, name) = match self.resolve_path_at(
             root,
@@ -362,6 +371,7 @@ impl FilesystemService {
             FollowSymlinks::ExcludeFinalComponent,
             uid,
             gid,
+            groups,
         )? {
             Resolution::Found { .. } => return Err(EEXIST),
             Resolution::Missing { parent, name } => (parent, name),
@@ -374,6 +384,7 @@ impl FilesystemService {
             metadata.gid(),
             uid,
             gid,
+            groups,
             protocol::ACCESS_AT_WRITE | protocol::ACCESS_AT_EXECUTE,
         ) {
             return Err(EACCES);
@@ -415,6 +426,7 @@ impl FilesystemService {
         request: protocol::Header,
         payload: &[u8],
         anchors: PathAnchors,
+        credentials: protocol::Credentials,
     ) -> Result<Response, i32> {
         if request.flags & !protocol::UNLINK_AT_FLAGS_ALL != 0 {
             return Err(EINVAL);
@@ -426,8 +438,9 @@ impl FilesystemService {
         {
             return Err(EINVAL);
         }
-        let uid = request.offset as u32;
-        let gid = (request.offset >> 32) as u32;
+        let uid = credentials.effective_uid;
+        let gid = credentials.effective_gid;
+        let groups = credentials.supplementary_groups();
         let (root, base) = self.resolve_anchors(payload, anchors)?;
         let (inode, parent, name) = match self.resolve_path_at(
             root,
@@ -436,6 +449,7 @@ impl FilesystemService {
             FollowSymlinks::ExcludeFinalComponent,
             uid,
             gid,
+            groups,
         )? {
             Resolution::Found {
                 inode,
@@ -452,6 +466,7 @@ impl FilesystemService {
             metadata.gid(),
             uid,
             gid,
+            groups,
             protocol::ACCESS_AT_WRITE | protocol::ACCESS_AT_EXECUTE,
         ) {
             return Err(EACCES);
@@ -471,6 +486,7 @@ impl FilesystemService {
         request: protocol::Header,
         payload: &[u8],
         anchors: PathAnchors,
+        credentials: protocol::Credentials,
     ) -> Result<Response, i32> {
         if request.flags & !protocol::TRUNCATE_AT_FLAGS_ALL != 0 {
             return Err(EINVAL);
@@ -482,17 +498,12 @@ impl FilesystemService {
         {
             return Err(EINVAL);
         }
-        let uid = request.offset as u32;
-        let gid = (request.offset >> 32) as u32;
+        let uid = credentials.effective_uid;
+        let gid = credentials.effective_gid;
+        let groups = credentials.supplementary_groups();
         let (root, base) = self.resolve_anchors(payload, anchors)?;
-        let inode = self.resolve_inode_at(
-            root,
-            base,
-            payload,
-            FollowSymlinks::All,
-            uid,
-            gid,
-        )?;
+        let inode =
+            self.resolve_inode_at(root, base, payload, FollowSymlinks::All, uid, gid, groups)?;
         let metadata = inode.metadata();
         if inode.file_type().is_dir() {
             return Err(EISDIR);
@@ -504,6 +515,7 @@ impl FilesystemService {
             metadata.gid(),
             uid,
             gid,
+            groups,
             protocol::ACCESS_AT_WRITE,
         ) {
             return Err(EACCES);
@@ -517,6 +529,7 @@ impl FilesystemService {
         request: protocol::Header,
         payload: &[u8],
         anchors: PathAnchors,
+        credentials: protocol::Credentials,
     ) -> Result<Response, i32> {
         if request.flags & !protocol::SYMLINK_AT_FLAGS_ALL != 0 {
             return Err(EINVAL);
@@ -538,8 +551,9 @@ impl FilesystemService {
         {
             return Err(EINVAL);
         }
-        let uid = request.offset as u32;
-        let gid = (request.offset >> 32) as u32;
+        let uid = credentials.effective_uid;
+        let gid = credentials.effective_gid;
+        let groups = credentials.supplementary_groups();
         let (root, base) = self.resolve_anchors(link_path, anchors)?;
         let (parent, name) = match self.resolve_path_at(
             root,
@@ -548,6 +562,7 @@ impl FilesystemService {
             FollowSymlinks::ExcludeFinalComponent,
             uid,
             gid,
+            groups,
         )? {
             Resolution::Found { .. } => return Err(EEXIST),
             Resolution::Missing { parent, name } => (parent, name),
@@ -560,6 +575,7 @@ impl FilesystemService {
             metadata.gid(),
             uid,
             gid,
+            groups,
             protocol::ACCESS_AT_WRITE | protocol::ACCESS_AT_EXECUTE,
         ) {
             return Err(EACCES);
@@ -583,6 +599,7 @@ impl FilesystemService {
         request: protocol::Header,
         payload: &[u8],
         anchors: PathAnchors,
+        credentials: protocol::Credentials,
     ) -> Result<Response, i32> {
         if request.flags & !protocol::READLINK_AT_FLAGS_ALL != 0 {
             return Err(EINVAL);
@@ -594,8 +611,9 @@ impl FilesystemService {
         {
             return Err(EINVAL);
         }
-        let uid = request.offset as u32;
-        let gid = (request.offset >> 32) as u32;
+        let uid = credentials.effective_uid;
+        let gid = credentials.effective_gid;
+        let groups = credentials.supplementary_groups();
         let (root, base) = self.resolve_anchors(payload, anchors)?;
         let inode = self.resolve_inode_at(
             root,
@@ -604,6 +622,7 @@ impl FilesystemService {
             FollowSymlinks::ExcludeFinalComponent,
             uid,
             gid,
+            groups,
         )?;
         if !inode.file_type().is_symlink() {
             return Err(EINVAL);
@@ -624,6 +643,7 @@ impl FilesystemService {
         request: protocol::Header,
         payload: &[u8],
         anchors: PathAnchors,
+        credentials: protocol::Credentials,
     ) -> Result<Response, i32> {
         if request.flags & !protocol::CHMOD_AT_FLAGS_ALL != 0 || request.mode & !0o7777 != 0 {
             return Err(EINVAL);
@@ -635,16 +655,18 @@ impl FilesystemService {
         {
             return Err(EINVAL);
         }
-        let uid = request.offset as u32;
-        let gid = (request.offset >> 32) as u32;
+        let uid = credentials.effective_uid;
+        let gid = credentials.effective_gid;
+        let groups = credentials.supplementary_groups();
         let (root, base) = self.resolve_anchors(payload, anchors)?;
-        let inode = self.resolve_inode_at(root, base, payload, FollowSymlinks::All, uid, gid)?;
+        let inode =
+            self.resolve_inode_at(root, base, payload, FollowSymlinks::All, uid, gid, groups)?;
         let metadata = inode.metadata();
         if uid != 0 && uid != metadata.uid() {
             return Err(EPERM);
         }
         let mut permissions = request.mode as u16;
-        if uid != 0 && gid != metadata.gid() {
+        if uid != 0 && gid != metadata.gid() && !groups.contains(&metadata.gid()) {
             permissions &= !0o2000;
         }
         self.chmod_inode(inode, permissions)?;
@@ -656,6 +678,7 @@ impl FilesystemService {
         request: protocol::Header,
         payload: &[u8],
         anchors: PathAnchors,
+        credentials: protocol::Credentials,
     ) -> Result<Response, i32> {
         if request.flags & !protocol::CHOWN_AT_FLAGS_ALL != 0 {
             return Err(EINVAL);
@@ -667,8 +690,9 @@ impl FilesystemService {
         {
             return Err(EINVAL);
         }
-        let effective_uid = request.offset as u32;
-        let effective_gid = (request.offset >> 32) as u32;
+        let effective_uid = credentials.effective_uid;
+        let effective_gid = credentials.effective_gid;
+        let groups = credentials.supplementary_groups();
         let requested_uid = request.node_id as u32;
         let requested_gid = (request.node_id >> 32) as u32;
         let follow = if request.flags & protocol::CHOWN_AT_NOFOLLOW != 0 {
@@ -677,7 +701,15 @@ impl FilesystemService {
             FollowSymlinks::All
         };
         let (root, base) = self.resolve_anchors(payload, anchors)?;
-        let inode = self.resolve_inode_at(root, base, payload, follow, effective_uid, effective_gid)?;
+        let inode = self.resolve_inode_at(
+            root,
+            base,
+            payload,
+            follow,
+            effective_uid,
+            effective_gid,
+            groups,
+        )?;
         let metadata = inode.metadata();
         if effective_uid != 0 {
             if effective_uid != metadata.uid()
@@ -685,13 +717,19 @@ impl FilesystemService {
                 || requested_gid != u32::MAX
                     && requested_gid != metadata.gid()
                     && requested_gid != effective_gid
+                    && !groups.contains(&requested_gid)
             {
                 return Err(EPERM);
             }
         }
         let new_uid = (requested_uid != u32::MAX).then_some(requested_uid);
         let new_gid = (requested_gid != u32::MAX).then_some(requested_gid);
-        self.chown_inode(inode, new_uid, new_gid, new_uid.is_some() || new_gid.is_some())?;
+        self.chown_inode(
+            inode,
+            new_uid,
+            new_gid,
+            new_uid.is_some() || new_gid.is_some(),
+        )?;
         Ok(self.success(request))
     }
 
@@ -701,6 +739,7 @@ impl FilesystemService {
         request: protocol::Header,
         payload: &[u8],
         anchors: PathAnchors,
+        credentials: protocol::Credentials,
     ) -> Result<Response, i32> {
         if request.flags & !protocol::STAT_AT_FLAGS_ALL != 0 {
             return Err(EINVAL);
@@ -712,26 +751,23 @@ impl FilesystemService {
         {
             return Err(EINVAL);
         }
-        let uid = request.offset as u32;
-        let gid = (request.offset >> 32) as u32;
+        let uid = credentials.effective_uid;
+        let gid = credentials.effective_gid;
+        let groups = credentials.supplementary_groups();
         let follow = if request.flags & protocol::STAT_AT_NOFOLLOW != 0 {
             FollowSymlinks::ExcludeFinalComponent
         } else {
             FollowSymlinks::All
         };
         let (root, base) = self.resolve_anchors(payload, anchors)?;
-        let inode = self.resolve_inode_at(root, base, payload, follow, uid, gid)?;
+        let inode = self.resolve_inode_at(root, base, payload, follow, uid, gid, groups)?;
         let node_id = u64::from(inode.index.get());
         Ok(self.node_status_response(request, node_id, inode.metadata()))
     }
 
     /// Obtains metadata from an existing provider object. The caller must
     /// identify the attached Handle through the kernel before invoking this.
-    pub fn stat_handle(
-        &self,
-        request: protocol::Header,
-        open_id: u64,
-    ) -> Result<Response, i32> {
+    pub fn stat_handle(&self, request: protocol::Header, open_id: u64) -> Result<Response, i32> {
         if request.flags != 0 {
             return Err(EINVAL);
         }
@@ -781,7 +817,11 @@ impl FilesystemService {
                 let entry = entry.map_err(errno)?;
                 if entry.file_name() != "."
                     && entry.file_name() != ".."
-                    && !entry.file_name().as_str().map_err(|_| EIO)?.starts_with(".mochios-orphan-")
+                    && !entry
+                        .file_name()
+                        .as_str()
+                        .map_err(|_| EIO)?
+                        .starts_with(".mochios-orphan-")
                     && entry.inode.get() == current.index.get()
                 {
                     name = Some(entry.file_name().as_str().map_err(|_| EIO)?.to_owned());
@@ -814,6 +854,7 @@ impl FilesystemService {
         request: protocol::Header,
         payload: &[u8],
         anchors: PathAnchors,
+        credentials: protocol::Credentials,
     ) -> Result<Response, i32> {
         if request.flags & !protocol::ACCESS_AT_FLAGS_ALL != 0 {
             return Err(EINVAL);
@@ -825,19 +866,18 @@ impl FilesystemService {
         {
             return Err(EINVAL);
         }
-        let uid = request.offset as u32;
-        let gid = (request.offset >> 32) as u32;
+        let uid = credentials.effective_uid;
+        let gid = credentials.effective_gid;
+        let groups = credentials.supplementary_groups();
         let follow = if request.flags & protocol::ACCESS_AT_NOFOLLOW != 0 {
             FollowSymlinks::ExcludeFinalComponent
         } else {
             FollowSymlinks::All
         };
         let (root, base) = self.resolve_anchors(payload, anchors)?;
-        let inode = self.resolve_inode_at(root, base, payload, follow, uid, gid)?;
+        let inode = self.resolve_inode_at(root, base, payload, follow, uid, gid, groups)?;
         let requested = request.flags
-            & (protocol::ACCESS_AT_READ
-                | protocol::ACCESS_AT_WRITE
-                | protocol::ACCESS_AT_EXECUTE);
+            & (protocol::ACCESS_AT_READ | protocol::ACCESS_AT_WRITE | protocol::ACCESS_AT_EXECUTE);
         let metadata = inode.metadata();
         if permission_allows(
             metadata.mode(),
@@ -846,6 +886,7 @@ impl FilesystemService {
             metadata.gid(),
             uid,
             gid,
+            groups,
             requested,
         ) {
             Ok(self.success(request))
@@ -854,11 +895,7 @@ impl FilesystemService {
         }
     }
 
-    fn resolve_anchors(
-        &self,
-        path: &[u8],
-        anchors: PathAnchors,
-    ) -> Result<(Inode, Inode), i32> {
+    fn resolve_anchors(&self, path: &[u8], anchors: PathAnchors) -> Result<(Inode, Inode), i32> {
         let root = match anchors.root_open_id {
             Some(open_id) => self.opens.get(&open_id).ok_or(EBADF)?.inode.clone(),
             None => self.fs.read_root_inode().map_err(errno)?,
@@ -891,8 +928,9 @@ impl FilesystemService {
         follow: FollowSymlinks,
         uid: u32,
         gid: u32,
+        groups: &[u32],
     ) -> Result<Inode, i32> {
-        match self.resolve_path_at(root, base, path, follow, uid, gid)? {
+        match self.resolve_path_at(root, base, path, follow, uid, gid, groups)? {
             Resolution::Found { inode, .. } => Ok(inode),
             Resolution::Missing { .. } => Err(ENOENT),
         }
@@ -906,6 +944,7 @@ impl FilesystemService {
         follow: FollowSymlinks,
         uid: u32,
         gid: u32,
+        groups: &[u32],
     ) -> Result<Resolution, i32> {
         const MAX_SYMLINKS: usize = 40;
         const MAX_COMPONENTS: usize = 1024;
@@ -947,6 +986,7 @@ impl FilesystemService {
                 metadata.gid(),
                 uid,
                 gid,
+                groups,
                 protocol::ACCESS_AT_EXECUTE,
             ) {
                 return Err(EACCES);
@@ -985,8 +1025,7 @@ impl FilesystemService {
                             return Err(ELOOP);
                         }
                         let target = child.symlink_target(&self.fs).map_err(errno)?;
-                        if target.as_ref().len().saturating_add(path.len())
-                            > protocol::MAX_PATH_LEN
+                        if target.as_ref().len().saturating_add(path.len()) > protocol::MAX_PATH_LEN
                         {
                             return Err(EINVAL);
                         }
@@ -1693,6 +1732,7 @@ impl FilesystemService {
         request: protocol::Header,
         payload: &[u8],
         anchors: RenameAnchors,
+        credentials: protocol::Credentials,
     ) -> Result<Response, i32> {
         if request.flags & !protocol::RENAME_AT_FLAGS_ALL != 0 {
             return Err(EINVAL);
@@ -1715,8 +1755,9 @@ impl FilesystemService {
         {
             return Err(EINVAL);
         }
-        let uid = request.offset as u32;
-        let gid = (request.offset >> 32) as u32;
+        let uid = credentials.effective_uid;
+        let gid = credentials.effective_gid;
+        let groups = credentials.supplementary_groups();
         let (old_root, old_base) = self.resolve_anchors(
             old_path,
             PathAnchors {
@@ -1738,6 +1779,7 @@ impl FilesystemService {
             FollowSymlinks::ExcludeFinalComponent,
             uid,
             gid,
+            groups,
         )? {
             Resolution::Found {
                 inode,
@@ -1753,6 +1795,7 @@ impl FilesystemService {
             FollowSymlinks::ExcludeFinalComponent,
             uid,
             gid,
+            groups,
         )? {
             Resolution::Found {
                 inode,
@@ -1776,6 +1819,7 @@ impl FilesystemService {
                 metadata.gid(),
                 uid,
                 gid,
+                groups,
                 protocol::ACCESS_AT_WRITE | protocol::ACCESS_AT_EXECUTE,
             ) {
                 return Err(EACCES);
@@ -1903,7 +1947,8 @@ impl FilesystemService {
 
     fn forget_node_paths(&mut self, node_id: u64) {
         self.nodes.remove(&node_id);
-        self.node_ids.retain(|_, known_node_id| *known_node_id != node_id);
+        self.node_ids
+            .retain(|_, known_node_id| *known_node_id != node_id);
     }
 
     fn restore_rename_destination(
@@ -2127,7 +2172,11 @@ impl FilesystemService {
         let mut matched = false;
         for open in self.opens.values_mut() {
             if open.node_id == node_id {
-                open.file.as_mut().ok_or(EISDIR)?.truncate(length).map_err(errno)?;
+                open.file
+                    .as_mut()
+                    .ok_or(EISDIR)?
+                    .truncate(length)
+                    .map_err(errno)?;
                 matched = true;
             }
         }
@@ -2219,19 +2268,24 @@ impl FilesystemService {
         &mut self,
         request: protocol::Header,
         open_id: u64,
+        credentials: protocol::Credentials,
     ) -> Result<Response, i32> {
         if request.flags != 0 || request.mode & !0o7777 != 0 {
             return Err(EINVAL);
         }
-        let effective_uid = request.offset as u32;
-        let effective_gid = (request.offset >> 32) as u32;
+        let effective_uid = credentials.effective_uid;
+        let effective_gid = credentials.effective_gid;
+        let groups = credentials.supplementary_groups();
         let inode = self.opens.get(&open_id).ok_or(EBADF)?.inode.clone();
         let metadata = inode.metadata();
         if effective_uid != 0 && effective_uid != metadata.uid() {
             return Err(EPERM);
         }
         let mut permissions = request.mode as u16;
-        if effective_uid != 0 && effective_gid != metadata.gid() {
+        if effective_uid != 0
+            && effective_gid != metadata.gid()
+            && !groups.contains(&metadata.gid())
+        {
             permissions &= !0o2000;
         }
         self.chmod_inode(inode, permissions)?;
@@ -2242,12 +2296,14 @@ impl FilesystemService {
         &mut self,
         request: protocol::Header,
         open_id: u64,
+        credentials: protocol::Credentials,
     ) -> Result<Response, i32> {
         if request.flags != 0 {
             return Err(EINVAL);
         }
-        let effective_uid = request.offset as u32;
-        let effective_gid = (request.offset >> 32) as u32;
+        let effective_uid = credentials.effective_uid;
+        let effective_gid = credentials.effective_gid;
+        let groups = credentials.supplementary_groups();
         let requested_uid = request.node_id as u32;
         let requested_gid = (request.node_id >> 32) as u32;
         let inode = self.opens.get(&open_id).ok_or(EBADF)?.inode.clone();
@@ -2257,7 +2313,8 @@ impl FilesystemService {
                 || requested_uid != u32::MAX && requested_uid != metadata.uid()
                 || requested_gid != u32::MAX
                     && requested_gid != metadata.gid()
-                    && requested_gid != effective_gid)
+                    && requested_gid != effective_gid
+                    && !groups.contains(&requested_gid))
         {
             return Err(EPERM);
         }
@@ -2267,11 +2324,7 @@ impl FilesystemService {
         Ok(self.success(request))
     }
 
-    pub fn sync_handle(
-        &self,
-        request: protocol::Header,
-        open_id: u64,
-    ) -> Result<Response, i32> {
+    pub fn sync_handle(&self, request: protocol::Header, open_id: u64) -> Result<Response, i32> {
         self.opens.get(&open_id).ok_or(EBADF)?;
         Ok(self.success(request))
     }
@@ -2505,7 +2558,10 @@ enum Resolution {
         inode: Inode,
         parent: Option<(Inode, Vec<u8>)>,
     },
-    Missing { parent: Inode, name: Vec<u8> },
+    Missing {
+        parent: Inode,
+        name: Vec<u8>,
+    },
 }
 
 fn owned_components(path: Path<'_>) -> VecDeque<OwnedComponent> {
@@ -2538,6 +2594,7 @@ pub fn permission_allows(
     owner_gid: u32,
     uid: u32,
     gid: u32,
+    supplementary_groups: &[u32],
     requested: u32,
 ) -> bool {
     if requested == 0 {
@@ -2551,7 +2608,7 @@ pub fn permission_allows(
     }
     let granted = if uid == owner_uid {
         (mode >> 6) & 0o7
-    } else if gid == owner_gid {
+    } else if gid == owner_gid || supplementary_groups.contains(&owner_gid) {
         (mode >> 3) & 0o7
     } else {
         mode & 0o7

@@ -11,6 +11,7 @@ fn owner_group_and_other_permissions_are_selected_exclusively() {
         20,
         501,
         99,
+        &[],
         filesystem::ACCESS_AT_READ | filesystem::ACCESS_AT_WRITE,
     ));
     assert!(!permission_allows(
@@ -20,6 +21,7 @@ fn owner_group_and_other_permissions_are_selected_exclusively() {
         20,
         501,
         20,
+        &[],
         filesystem::ACCESS_AT_EXECUTE,
     ));
     assert!(permission_allows(
@@ -29,6 +31,7 @@ fn owner_group_and_other_permissions_are_selected_exclusively() {
         20,
         777,
         20,
+        &[],
         filesystem::ACCESS_AT_READ,
     ));
     assert!(!permission_allows(
@@ -38,6 +41,7 @@ fn owner_group_and_other_permissions_are_selected_exclusively() {
         20,
         777,
         99,
+        &[],
         filesystem::ACCESS_AT_READ,
     ));
 }
@@ -51,6 +55,7 @@ fn existence_checks_do_not_require_permission_bits() {
         20,
         777,
         99,
+        &[],
         0,
     ));
 }
@@ -64,6 +69,7 @@ fn root_execute_still_requires_an_executable_file_or_directory() {
         20,
         0,
         0,
+        &[],
         filesystem::ACCESS_AT_EXECUTE,
     ));
     assert!(permission_allows(
@@ -73,6 +79,7 @@ fn root_execute_still_requires_an_executable_file_or_directory() {
         20,
         0,
         0,
+        &[],
         filesystem::ACCESS_AT_EXECUTE,
     ));
     assert!(permission_allows(
@@ -82,6 +89,31 @@ fn root_execute_still_requires_an_executable_file_or_directory() {
         20,
         0,
         0,
+        &[],
         filesystem::ACCESS_AT_EXECUTE,
+    ));
+}
+
+#[test]
+fn supplementary_group_selects_group_permissions() {
+    assert!(permission_allows(
+        0o640,
+        filesystem::NODE_TYPE_REGULAR,
+        501,
+        20,
+        777,
+        99,
+        &[20, 80],
+        filesystem::ACCESS_AT_READ,
+    ));
+    assert!(!permission_allows(
+        0o640,
+        filesystem::NODE_TYPE_REGULAR,
+        501,
+        20,
+        777,
+        99,
+        &[80],
+        filesystem::ACCESS_AT_READ,
     ));
 }
