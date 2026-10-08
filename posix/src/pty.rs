@@ -33,8 +33,16 @@ struct PseudoTerminal {
     master_open: bool,
     slave_open: bool,
     input: VecDeque<u8>,
+    input_records: VecDeque<InputRecord>,
+    canonical_input: VecDeque<u8>,
     output: VecDeque<u8>,
     attributes: posix_protocol::TerminalAttributes,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct InputRecord {
+    remaining: usize,
+    canonical: bool,
 }
 
 impl PseudoTerminal {
@@ -43,8 +51,237 @@ impl PseudoTerminal {
             master_open: true,
             slave_open: true,
             input: VecDeque::new(),
+            input_records: VecDeque::new(),
+            canonical_input: VecDeque::new(),
             output: VecDeque::new(),
             attributes: posix_protocol::TerminalAttributes::sane(),
+        }
+    }
+
+    fn input_occupancy(&self) -> usize {
+        self.input.len() + self.canonical_input.len()
+    }
+
+    fn output_bytes_for(&self, byte: u8) -> usize {
+        if byte == b'\n'
+            && self.attributes.output_flags & posix_protocol::TERMINAL_OFLAG_OPOST != 0
+            && self.attributes.output_flags & posix_protocol::TERMINAL_OFLAG_ONLCR != 0
+        {
+            2
+        } else {
+            1
+        }
+    }
+
+    fn can_append_output(&self, bytes: &[u8]) -> bool {
+        let required = bytes.iter().copied().fold(0usize, |total, byte| {
+            total.saturating_add(self.output_bytes_for(byte))
+        });
+        required <= BUFFER_CAPACITY.saturating_sub(self.output.len())
+    }
+
+    fn append_output(&mut self, byte: u8) {
+        if self.output_bytes_for(byte) == 2 {
+            self.output.push_back(b'\r');
+        }
+        self.output.push_back(byte);
+    }
+
+    fn append_raw_input(&mut self, byte: u8) {
+        self.input.push_back(byte);
+        if let Some(record) = self.input_records.back_mut()
+            && !record.canonical
+        {
+            record.remaining += 1;
+            return;
+        }
+        self.input_records.push_back(InputRecord {
+            remaining: 1,
+            canonical: false,
+        });
+    }
+
+    fn commit_canonical_input(&mut self) {
+        let length = self.canonical_input.len();
+        self.input.extend(self.canonical_input.drain(..));
+        self.input_records.push_back(InputRecord {
+            remaining: length,
+            canonical: true,
+        });
+    }
+
+    fn read_input(&mut self, maximum: usize) -> Result<Vec<u8>, i32> {
+        let Some(record) = self.input_records.front_mut() else {
+            return if self.master_open {
+                Err(EAGAIN)
+            } else {
+                Ok(Vec::new())
+            };
+        };
+        if record.remaining == 0 {
+            self.input_records.pop_front();
+            return Ok(Vec::new());
+        }
+        let length = maximum.min(record.remaining);
+        record.remaining -= length;
+        if record.remaining == 0 {
+            self.input_records.pop_front();
+        }
+        Ok(self.input.drain(..length).collect())
+    }
+
+    fn transformed_input_byte(&self, mut byte: u8) -> Option<u8> {
+        if self.attributes.input_flags & posix_protocol::TERMINAL_IFLAG_ISTRIP != 0 {
+            byte &= 0x7f;
+        }
+        if byte == b'\r' {
+            if self.attributes.input_flags & posix_protocol::TERMINAL_IFLAG_IGNCR != 0 {
+                return None;
+            }
+            if self.attributes.input_flags & posix_protocol::TERMINAL_IFLAG_ICRNL != 0 {
+                byte = b'\n';
+            }
+        } else if byte == b'\n'
+            && self.attributes.input_flags & posix_protocol::TERMINAL_IFLAG_INLCR != 0
+        {
+            byte = b'\r';
+        }
+        Some(byte)
+    }
+
+    fn should_echo(&self, byte: u8) -> bool {
+        let local = self.attributes.local_flags;
+        if byte == b'\n'
+            && local & posix_protocol::TERMINAL_LFLAG_ECHO == 0
+            && local & posix_protocol::TERMINAL_LFLAG_ECHONL != 0
+        {
+            true
+        } else {
+            local & posix_protocol::TERMINAL_LFLAG_ECHO != 0
+        }
+    }
+
+    fn write_master(&mut self, bytes: &[u8]) -> Result<usize, i32> {
+        if !self.slave_open {
+            return Err(EIO);
+        }
+        let canonical = self.attributes.local_flags & posix_protocol::TERMINAL_LFLAG_ICANON != 0;
+        let mut consumed = 0;
+        for source in bytes.iter().copied() {
+            let Some(byte) = self.transformed_input_byte(source) else {
+                consumed += 1;
+                continue;
+            };
+            if canonical {
+                let erase = self.attributes.control_characters[posix_protocol::TERMINAL_CC_VERASE];
+                let kill = self.attributes.control_characters[posix_protocol::TERMINAL_CC_VKILL];
+                let eof = self.attributes.control_characters[posix_protocol::TERMINAL_CC_VEOF];
+                if erase != 0 && byte == erase {
+                    if self.canonical_input.is_empty() {
+                        consumed += 1;
+                        continue;
+                    }
+                    let single = [byte];
+                    let echo: &[u8] = if self.attributes.local_flags
+                        & (posix_protocol::TERMINAL_LFLAG_ECHO
+                            | posix_protocol::TERMINAL_LFLAG_ECHOE)
+                        == (posix_protocol::TERMINAL_LFLAG_ECHO
+                            | posix_protocol::TERMINAL_LFLAG_ECHOE)
+                    {
+                        b"\x08 \x08".as_slice()
+                    } else if self.should_echo(byte) {
+                        &single
+                    } else {
+                        b""
+                    };
+                    if !self.can_append_output(echo) {
+                        break;
+                    }
+                    self.canonical_input.pop_back();
+                    for byte in echo.iter().copied() {
+                        self.append_output(byte);
+                    }
+                    consumed += 1;
+                    continue;
+                }
+                if kill != 0 && byte == kill {
+                    let single = [byte];
+                    let echo: &[u8] = if self.attributes.local_flags
+                        & (posix_protocol::TERMINAL_LFLAG_ECHO
+                            | posix_protocol::TERMINAL_LFLAG_ECHOK)
+                        == (posix_protocol::TERMINAL_LFLAG_ECHO
+                            | posix_protocol::TERMINAL_LFLAG_ECHOK)
+                    {
+                        b"\n".as_slice()
+                    } else if self.should_echo(byte) {
+                        &single
+                    } else {
+                        b""
+                    };
+                    if !self.can_append_output(echo) {
+                        break;
+                    }
+                    self.canonical_input.clear();
+                    for byte in echo.iter().copied() {
+                        self.append_output(byte);
+                    }
+                    consumed += 1;
+                    continue;
+                }
+                if eof != 0 && byte == eof {
+                    self.commit_canonical_input();
+                    consumed += 1;
+                    continue;
+                }
+            }
+            if self.input_occupancy() == BUFFER_CAPACITY {
+                break;
+            }
+            let single = [byte];
+            let echo: &[u8] = if self.should_echo(byte) { &single } else { b"" };
+            if !self.can_append_output(echo) {
+                break;
+            }
+            if canonical {
+                self.canonical_input.push_back(byte);
+            } else {
+                self.append_raw_input(byte);
+            }
+            for byte in echo.iter().copied() {
+                self.append_output(byte);
+            }
+            if canonical {
+                let eol = self.attributes.control_characters[posix_protocol::TERMINAL_CC_VEOL];
+                let eol2 = self.attributes.control_characters[posix_protocol::TERMINAL_CC_VEOL2];
+                if byte == b'\n' || (eol != 0 && byte == eol) || (eol2 != 0 && byte == eol2) {
+                    self.commit_canonical_input();
+                }
+            }
+            consumed += 1;
+        }
+        if consumed == 0 && !bytes.is_empty() {
+            Err(EAGAIN)
+        } else {
+            Ok(consumed)
+        }
+    }
+
+    fn write_slave(&mut self, bytes: &[u8]) -> Result<usize, i32> {
+        if !self.master_open {
+            return Err(EIO);
+        }
+        let mut consumed = 0;
+        for byte in bytes.iter().copied() {
+            if !self.can_append_output(core::slice::from_ref(&byte)) {
+                break;
+            }
+            self.append_output(byte);
+            consumed += 1;
+        }
+        if consumed == 0 && !bytes.is_empty() {
+            Err(EAGAIN)
+        } else {
+            Ok(consumed)
         }
     }
 }
@@ -78,19 +315,18 @@ impl PtyManager {
         }
         let (id, side) = decode_object_id(object_id).ok_or(EBADF)?;
         let terminal = self.terminals.get_mut(&id).ok_or(EBADF)?;
-        let (queue, peer_open) = match side {
-            PtySide::Master => (&mut terminal.output, terminal.slave_open),
-            PtySide::Slave => (&mut terminal.input, terminal.master_open),
-        };
-        let length = maximum.min(queue.len());
-        if length == 0 {
-            return if peer_open {
-                Err(EAGAIN)
-            } else {
-                Ok(Vec::new())
-            };
+        if side == PtySide::Slave {
+            return terminal.read_input(maximum);
         }
-        Ok(queue.drain(..length).collect())
+        let length = maximum.min(terminal.output.len());
+        if length != 0 {
+            return Ok(terminal.output.drain(..length).collect());
+        }
+        if terminal.slave_open {
+            Err(EAGAIN)
+        } else {
+            Ok(Vec::new())
+        }
     }
 
     pub fn write(&mut self, object_id: u64, bytes: &[u8]) -> Result<usize, i32> {
@@ -99,20 +335,10 @@ impl PtyManager {
         if bytes.is_empty() {
             return Ok(0);
         }
-        let (queue, peer_open) = match side {
-            PtySide::Master => (&mut terminal.input, terminal.slave_open),
-            PtySide::Slave => (&mut terminal.output, terminal.master_open),
-        };
-        if !peer_open {
-            return Err(EIO);
+        match side {
+            PtySide::Master => terminal.write_master(bytes),
+            PtySide::Slave => terminal.write_slave(bytes),
         }
-        let available = BUFFER_CAPACITY.saturating_sub(queue.len());
-        if available == 0 {
-            return Err(EAGAIN);
-        }
-        let length = available.min(bytes.len());
-        queue.extend(&bytes[..length]);
-        Ok(length)
     }
 
     pub fn seek(&self, object_id: u64) -> Result<u64, i32> {
@@ -135,7 +361,17 @@ impl PtyManager {
         attributes: posix_protocol::TerminalAttributes,
     ) -> Result<(), i32> {
         let (id, _) = decode_object_id(object_id).ok_or(EBADF)?;
-        self.terminals.get_mut(&id).ok_or(EBADF)?.attributes = attributes;
+        let terminal = self.terminals.get_mut(&id).ok_or(EBADF)?;
+        let was_canonical =
+            terminal.attributes.local_flags & posix_protocol::TERMINAL_LFLAG_ICANON != 0;
+        let is_canonical = attributes.local_flags & posix_protocol::TERMINAL_LFLAG_ICANON != 0;
+        terminal.attributes = attributes;
+        if was_canonical && !is_canonical && !terminal.canonical_input.is_empty() {
+            let pending: Vec<_> = terminal.canonical_input.drain(..).collect();
+            for byte in pending {
+                terminal.append_raw_input(byte);
+            }
+        }
         Ok(())
     }
 
@@ -214,11 +450,17 @@ impl PtyManager {
         let (readable, writable, peer_closed) = match side {
             PtySide::Master => (
                 !terminal.output.is_empty(),
-                terminal.slave_open && terminal.input.len() < BUFFER_CAPACITY,
+                terminal.slave_open
+                    && terminal.input_occupancy() < BUFFER_CAPACITY
+                    && (terminal.attributes.local_flags
+                        & (posix_protocol::TERMINAL_LFLAG_ECHO
+                            | posix_protocol::TERMINAL_LFLAG_ECHONL)
+                        == 0
+                        || terminal.output.len() < BUFFER_CAPACITY),
                 !terminal.slave_open,
             ),
             PtySide::Slave => (
-                !terminal.input.is_empty(),
+                !terminal.input_records.is_empty(),
                 terminal.master_open && terminal.output.len() < BUFFER_CAPACITY,
                 !terminal.master_open,
             ),

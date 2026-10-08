@@ -8,10 +8,25 @@ use posix_service::pty::{
     handle_provider_request,
 };
 
+fn raw_attributes() -> protocol::TerminalAttributes {
+    let mut attributes = protocol::TerminalAttributes::sane();
+    attributes.input_flags = 0;
+    attributes.output_flags = 0;
+    attributes.local_flags = 0;
+    attributes.control_characters[protocol::TERMINAL_CC_VMIN] = 1;
+    attributes.control_characters[protocol::TERMINAL_CC_VTIME] = 0;
+    attributes
+}
+
+fn make_raw(ptys: &mut PtyManager, object_id: u64) {
+    ptys.set_attributes(object_id, raw_attributes()).unwrap();
+}
+
 #[test]
 fn master_and_slave_exchange_bytes_in_opposite_directions() {
     let mut ptys = PtyManager::new();
     let pair = ptys.open().unwrap();
+    make_raw(&mut ptys, pair.slave_object_id);
 
     assert_eq!(ptys.write(pair.master_object_id, b"input"), Ok(5));
     assert_eq!(ptys.read(pair.slave_object_id, 3), Ok(b"inp".to_vec()));
@@ -23,9 +38,64 @@ fn master_and_slave_exchange_bytes_in_opposite_directions() {
 }
 
 #[test]
+fn canonical_input_waits_for_a_record_and_preserves_line_boundaries() {
+    let mut ptys = PtyManager::new();
+    let pair = ptys.open().unwrap();
+
+    assert_eq!(ptys.write(pair.master_object_id, b"first"), Ok(5));
+    assert_eq!(ptys.read(pair.slave_object_id, 32), Err(EAGAIN));
+    assert_eq!(ptys.write(pair.master_object_id, b"\rsecond\n"), Ok(8));
+    assert_eq!(ptys.read(pair.slave_object_id, 32), Ok(b"first\n".to_vec()));
+    assert_eq!(
+        ptys.read(pair.slave_object_id, 32),
+        Ok(b"second\n".to_vec())
+    );
+    assert_eq!(ptys.read(pair.slave_object_id, 32), Err(EAGAIN));
+    assert_eq!(
+        ptys.read(pair.master_object_id, 32),
+        Ok(b"first\r\nsecond\r\n".to_vec())
+    );
+}
+
+#[test]
+fn canonical_erase_kill_and_eof_edit_the_pending_record() {
+    let mut ptys = PtyManager::new();
+    let pair = ptys.open().unwrap();
+
+    assert_eq!(
+        ptys.write(pair.master_object_id, b"ab\x7fc\nthrow-away\x15ok\x04"),
+        Ok(19)
+    );
+    assert_eq!(ptys.read(pair.slave_object_id, 32), Ok(b"ac\n".to_vec()));
+    assert_eq!(ptys.read(pair.slave_object_id, 32), Ok(b"ok".to_vec()));
+    assert_eq!(ptys.write(pair.master_object_id, b"\x04"), Ok(1));
+    assert_eq!(ptys.read(pair.slave_object_id, 32), Ok(Vec::new()));
+}
+
+#[test]
+fn raw_input_is_immediately_readable_and_output_postprocessing_is_configurable() {
+    let mut ptys = PtyManager::new();
+    let pair = ptys.open().unwrap();
+    make_raw(&mut ptys, pair.slave_object_id);
+
+    assert_eq!(ptys.write(pair.master_object_id, b"raw"), Ok(3));
+    assert_eq!(ptys.read(pair.slave_object_id, 32), Ok(b"raw".to_vec()));
+    assert_eq!(ptys.write(pair.slave_object_id, b"a\nb"), Ok(3));
+    assert_eq!(ptys.read(pair.master_object_id, 32), Ok(b"a\nb".to_vec()));
+
+    let mut cooked_output = raw_attributes();
+    cooked_output.output_flags = protocol::TERMINAL_OFLAG_OPOST | protocol::TERMINAL_OFLAG_ONLCR;
+    ptys.set_attributes(pair.slave_object_id, cooked_output)
+        .unwrap();
+    assert_eq!(ptys.write(pair.slave_object_id, b"c\nd"), Ok(3));
+    assert_eq!(ptys.read(pair.master_object_id, 32), Ok(b"c\r\nd".to_vec()));
+}
+
+#[test]
 fn empty_reads_distinguish_would_block_from_peer_close() {
     let mut ptys = PtyManager::new();
     let pair = ptys.open().unwrap();
+    make_raw(&mut ptys, pair.slave_object_id);
 
     assert_eq!(ptys.read(pair.master_object_id, 1), Err(EAGAIN));
     assert_eq!(ptys.read(pair.slave_object_id, 1), Err(EAGAIN));
@@ -41,6 +111,7 @@ fn empty_reads_distinguish_would_block_from_peer_close() {
 fn provider_wire_requests_drive_the_pty_without_posix_rpc() {
     let mut ptys = PtyManager::new();
     let pair = ptys.open().unwrap();
+    make_raw(&mut ptys, pair.slave_object_id);
     let mut request = [0u8; provider::REQUEST_HEADER_LEN + 5];
     let mut response = [0u8; provider::RESPONSE_HEADER_LEN + provider::MAX_DATA_LEN];
 
@@ -205,6 +276,7 @@ fn provider_control_round_trips_terminal_attributes() {
 fn pty_queues_are_bounded_and_support_partial_writes() {
     let mut ptys = PtyManager::new();
     let pair = ptys.open().unwrap();
+    make_raw(&mut ptys, pair.slave_object_id);
     let bytes = vec![b'x'; BUFFER_CAPACITY + 7];
 
     assert_eq!(
@@ -224,6 +296,7 @@ fn pty_queues_are_bounded_and_support_partial_writes() {
 fn readiness_signals_follow_queue_capacity_and_peer_lifetime() {
     let mut ptys = PtyManager::new();
     let pair = ptys.open().unwrap();
+    make_raw(&mut ptys, pair.slave_object_id);
 
     assert_eq!(
         ptys.signals(pair.master_object_id),
