@@ -48,7 +48,7 @@ fn trusted_broker_package(endpoint: u64) -> Option<&'static [u8]> {
 }
 
 fn current_process_id() -> Result<u64, mochi_user_syscall::SysError> {
-    syscall::call0(syscall::SyscallNumber::GetPid)
+    platform::process::current_security_context().map(|context| context.process_id)
 }
 
 pub(crate) fn prompt_shell_for_capability(
