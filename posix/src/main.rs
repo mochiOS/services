@@ -1,5 +1,7 @@
 #[cfg(target_os = "mochios")]
 fn main() {
+    use std::collections::BTreeMap;
+
     use mochi_user_platform as platform;
     use mochios_filesystem_protocol as filesystem_protocol;
     use mochios_posix_protocol as protocol;
@@ -52,9 +54,11 @@ fn main() {
     };
     let mut processes = RuntimeProcesses;
     let mut pending_waits = Vec::new();
+    let mut signal_threads = BTreeMap::new();
     let mut request_bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
     let mut response_bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
     loop {
+        deliver_signal_notifications(&mut service, &mut signal_threads);
         complete_pending_waits(
             &mut pending_waits,
             &mut service,
@@ -124,34 +128,66 @@ fn main() {
             }
             _ => true,
         };
-        let mut retained_process_handle = None;
+        let mut retained_handle = None;
         let object_response = match (peer, decoded, attachments_valid && registration_valid) {
+            (Some(peer), Some((header, payload)), true)
+                if header.opcode == protocol::OP_SIGNAL_THREAD_REGISTER
+                    && header.flags == 0
+                    && payload.is_empty()
+                    && attachments.len() == 1 =>
+            {
+                let thread = attachments[0];
+                let required_rights =
+                    platform::handle::HANDLE_RIGHT_WAIT | platform::handle::HANDLE_RIGHT_SIGNAL;
+                let valid = thread.rights == required_rights
+                    && platform::thread::handle_status(thread.handle).is_ok_and(|status| {
+                        status.thread_id == sender && status.process_id == peer.process_id
+                    });
+                if valid {
+                    if let Some(previous) = signal_threads.insert(
+                        sender,
+                        RegisteredSignalThread {
+                            process_id: peer.process_id,
+                            handle: thread.handle,
+                        },
+                    ) {
+                        let _ = platform::handle::close(previous.handle);
+                    }
+                    retained_handle = Some(thread.handle);
+                    Some(posix_service::ObjectResponse {
+                        response: success_response(header.request_id),
+                        handles: Vec::new(),
+                    })
+                } else {
+                    Some(posix_service::ObjectResponse {
+                        response: invalid_response(header.request_id),
+                        handles: Vec::new(),
+                    })
+                }
+            }
             (Some(peer), Some((header, payload)), true)
                 if header.opcode == protocol::OP_WAIT_CHILD
                     && header.flags == 0
                     && attachments.is_empty() =>
             {
                 match protocol::decode_wait_request(payload) {
-                    Ok(request) => match service.wait_child(
-                        peer,
-                        request,
-                        &mut filesystem,
-                        &mut processes,
-                    ) {
-                        Err(protocol::STATUS_EAGAIN) => {
-                            pending_waits.push(PendingWait {
-                                sender,
-                                peer,
-                                request_id: header.request_id,
-                                request,
-                            });
-                            None
+                    Ok(request) => {
+                        match service.wait_child(peer, request, &mut filesystem, &mut processes) {
+                            Err(protocol::STATUS_EAGAIN) => {
+                                pending_waits.push(PendingWait {
+                                    sender,
+                                    peer,
+                                    request_id: header.request_id,
+                                    request,
+                                });
+                                None
+                            }
+                            response => Some(posix_service::ObjectResponse {
+                                response: wait_response(header.request_id, response),
+                                handles: Vec::new(),
+                            }),
                         }
-                        response => Some(posix_service::ObjectResponse {
-                            response: wait_response(header.request_id, response),
-                            handles: Vec::new(),
-                        }),
-                    },
+                    }
                     Err(_) => Some(posix_service::ObjectResponse {
                         response: wait_response(
                             header.request_id,
@@ -167,14 +203,9 @@ fn main() {
                     && payload.is_empty()
                     && attachments.len() == 1 =>
             {
-                match adopt_sender_child(
-                    &mut service,
-                    peer,
-                    attachments[0],
-                    &mut filesystem,
-                ) {
+                match adopt_sender_child(&mut service, peer, attachments[0], &mut filesystem) {
                     Ok(()) => {
-                        retained_process_handle = Some(attachments[0].handle);
+                        retained_handle = Some(attachments[0].handle);
                         Some(posix_service::ObjectResponse {
                             response: success_response(header.request_id),
                             handles: Vec::new(),
@@ -187,13 +218,7 @@ fn main() {
                 }
             }
             (Some(peer), Some((header, payload)), true) => {
-                Some(service.handle_objects(
-                    peer,
-                    header,
-                    payload,
-                    &attachments,
-                    &mut filesystem,
-                ))
+                Some(service.handle_objects(peer, header, payload, &attachments, &mut filesystem))
             }
             (_, Some((header, _)), _) => Some(posix_service::ObjectResponse {
                 response: invalid_response(header.request_id),
@@ -205,7 +230,7 @@ fn main() {
             }),
         };
         for attachment in received_handles.handles.iter().take(attached_count) {
-            if Some(attachment.handle) != retained_process_handle {
+            if Some(attachment.handle) != retained_handle {
                 let _ = platform::handle::close(attachment.handle);
             }
         }
@@ -242,6 +267,47 @@ fn main() {
         }
         for opened in object_response.handles {
             let _ = platform::handle::close(opened.handle);
+        }
+    }
+}
+
+#[cfg(target_os = "mochios")]
+#[derive(Clone, Copy)]
+struct RegisteredSignalThread {
+    process_id: u64,
+    handle: u32,
+}
+
+#[cfg(target_os = "mochios")]
+fn deliver_signal_notifications(
+    service: &mut posix_service::PosixService<u32>,
+    threads: &mut std::collections::BTreeMap<u64, RegisteredSignalThread>,
+) {
+    use mochi_user_platform as platform;
+
+    let processes: Vec<u64> = service.signal_notification_processes().collect();
+    for process_id in processes {
+        let mut delivered = false;
+        let mut stale = Vec::new();
+        for (&thread_id, thread) in threads.iter() {
+            if thread.process_id != process_id {
+                continue;
+            }
+            match platform::thread::interrupt(thread.handle, 0) {
+                Ok(()) => delivered = true,
+                Err(_) if platform::thread::handle_status(thread.handle).is_err() => {
+                    stale.push(thread_id)
+                }
+                Err(_) => {}
+            }
+        }
+        for thread_id in stale {
+            if let Some(thread) = threads.remove(&thread_id) {
+                let _ = platform::handle::close(thread.handle);
+            }
+        }
+        if delivered {
+            service.acknowledge_signal_notification(process_id);
         }
     }
 }
@@ -352,11 +418,9 @@ fn bind_sender_process(
     if service.process_handle(peer.process_id).is_some() {
         return Ok(());
     }
-    let handle = platform::process::open_handle_for_endpoint(
-        sender,
-        platform::handle::HANDLE_RIGHT_WAIT,
-    )
-    .map_err(|_| ())?;
+    let handle =
+        platform::process::open_handle_for_endpoint(sender, platform::handle::HANDLE_RIGHT_WAIT)
+            .map_err(|_| ())?;
     match platform::process::handle_status(handle) {
         Ok(status) if status.process_id == peer.process_id => {}
         _ => {
@@ -1061,8 +1125,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             filesystem::Header {
                 opcode: filesystem::OP_MKDIR_AT,
                 request_id: 10,
-                offset: u64::from(request.effective_uid)
-                    | (u64::from(request.effective_gid) << 32),
+                offset: u64::from(request.effective_uid) | (u64::from(request.effective_gid) << 32),
                 length: request.path.len() as u32,
                 flags,
                 mode: request.mode,
@@ -1092,8 +1155,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             filesystem::Header {
                 opcode: filesystem::OP_UNLINK_AT,
                 request_id: 11,
-                offset: u64::from(request.effective_uid)
-                    | (u64::from(request.effective_gid) << 32),
+                offset: u64::from(request.effective_uid) | (u64::from(request.effective_gid) << 32),
                 length: request.path.len() as u32,
                 flags,
                 ..filesystem::Header::default()
@@ -1125,8 +1187,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             filesystem::Header {
                 opcode: filesystem::OP_RENAME_AT,
                 request_id: 12,
-                offset: u64::from(request.effective_uid)
-                    | (u64::from(request.effective_gid) << 32),
+                offset: u64::from(request.effective_uid) | (u64::from(request.effective_gid) << 32),
                 length: payload.len() as u32,
                 flags,
                 mode: old_length,
@@ -1152,8 +1213,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             filesystem::Header {
                 opcode: filesystem::OP_TRUNCATE_AT,
                 request_id: 13,
-                offset: u64::from(request.effective_uid)
-                    | (u64::from(request.effective_gid) << 32),
+                offset: u64::from(request.effective_uid) | (u64::from(request.effective_gid) << 32),
                 open_id: request.length,
                 length: request.path.len() as u32,
                 flags,
@@ -1183,8 +1243,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             filesystem::Header {
                 opcode: filesystem::OP_SYMLINK_AT,
                 request_id: 14,
-                offset: u64::from(request.effective_uid)
-                    | (u64::from(request.effective_gid) << 32),
+                offset: u64::from(request.effective_uid) | (u64::from(request.effective_gid) << 32),
                 length: payload.len() as u32,
                 flags,
                 mode: target_length,
@@ -1210,8 +1269,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             filesystem::Header {
                 opcode: filesystem::OP_READLINK_AT,
                 request_id: 15,
-                offset: u64::from(request.effective_uid)
-                    | (u64::from(request.effective_gid) << 32),
+                offset: u64::from(request.effective_uid) | (u64::from(request.effective_gid) << 32),
                 length: request.path.len() as u32,
                 flags,
                 ..filesystem::Header::default()
@@ -1236,8 +1294,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             filesystem::Header {
                 opcode: filesystem::OP_CHMOD_AT,
                 request_id: 16,
-                offset: u64::from(request.effective_uid)
-                    | (u64::from(request.effective_gid) << 32),
+                offset: u64::from(request.effective_uid) | (u64::from(request.effective_gid) << 32),
                 length: request.path.len() as u32,
                 flags,
                 mode: request.mode,
@@ -1267,8 +1324,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             filesystem::Header {
                 opcode: filesystem::OP_CHOWN_AT,
                 request_id: 17,
-                offset: u64::from(request.effective_uid)
-                    | (u64::from(request.effective_gid) << 32),
+                offset: u64::from(request.effective_uid) | (u64::from(request.effective_gid) << 32),
                 node_id: u64::from(request.uid) | (u64::from(request.gid) << 32),
                 length: request.path.len() as u32,
                 flags,
@@ -1326,9 +1382,8 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         if object.rights & platform::handle::HANDLE_RIGHT_DUPLICATE == 0 {
             return Err(-13);
         }
-        let handle = platform::handle::duplicate(object.handle, object.rights).map_err(|error| {
-            -(i32::try_from(error.raw().unsigned_abs()).unwrap_or(i32::MAX))
-        })?;
+        let handle = platform::handle::duplicate(object.handle, object.rights)
+            .map_err(|error| -(i32::try_from(error.raw().unsigned_abs()).unwrap_or(i32::MAX)))?;
         Ok(posix_service::AttachedObject {
             handle,
             rights: object.rights,
@@ -1379,7 +1434,11 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         let bytes = response.get(..length).ok_or(-5)?;
         let (response, payload) = filesystem::decode(bytes).map_err(|_| -5)?;
         if response.opcode != filesystem::OP_STATUS || response.status != 0 {
-            return Err(if response.status == 0 { -5 } else { response.status });
+            return Err(if response.status == 0 {
+                -5
+            } else {
+                response.status
+            });
         }
         Ok(payload.to_vec())
     }

@@ -232,7 +232,8 @@ pub trait FilesystemBackend<H: Copy> {
         paths: RenamePathObjects<H>,
     ) -> Result<(), i32>;
 
-    fn truncate_at(&mut self, request: &PreparedTruncate, paths: PathObjects<H>) -> Result<(), i32>;
+    fn truncate_at(&mut self, request: &PreparedTruncate, paths: PathObjects<H>)
+    -> Result<(), i32>;
 
     fn symlink_at(&mut self, request: &PreparedSymlink, paths: PathObjects<H>) -> Result<(), i32>;
 
@@ -323,6 +324,7 @@ pub struct PosixService<H: Copy = u32> {
     session_ids: BTreeMap<u64, u64>,
     resource_limits: BTreeMap<(u64, u32), protocol::ResourceLimit>,
     signals: BTreeMap<u64, ProcessSignalState>,
+    signal_notifications: BTreeSet<u64>,
 }
 
 impl PosixService<u32> {
@@ -337,6 +339,7 @@ impl PosixService<u32> {
             session_ids: BTreeMap::new(),
             resource_limits: BTreeMap::new(),
             signals: BTreeMap::new(),
+            signal_notifications: BTreeSet::new(),
         }
     }
 }
@@ -360,6 +363,14 @@ impl<H: Copy> PosixService<H> {
 
     pub fn signal_state(&self, process_id: u64) -> Option<ProcessSignalState> {
         self.signals.get(&process_id).copied()
+    }
+
+    pub fn signal_notification_processes(&self) -> impl Iterator<Item = u64> + '_ {
+        self.signal_notifications.iter().copied()
+    }
+
+    pub fn acknowledge_signal_notification(&mut self, process_id: u64) {
+        self.signal_notifications.remove(&process_id);
     }
 
     pub fn is_child(&self, parent_id: u64, process_id: u64) -> bool {
@@ -409,20 +420,20 @@ impl<H: Copy> PosixService<H> {
             .get(&peer.process_id)
             .copied()
             .ok_or(protocol::STATUS_ESRCH)?;
-        let child_directories = if let Some(parent) = self.directories.get(&peer.process_id).copied()
-        {
-            let root = filesystem.retain_object(parent.root)?;
-            let cwd = match filesystem.retain_object(parent.cwd) {
-                Ok(cwd) => cwd,
-                Err(error) => {
-                    filesystem.release_object(root);
-                    return Err(error);
-                }
+        let child_directories =
+            if let Some(parent) = self.directories.get(&peer.process_id).copied() {
+                let root = filesystem.retain_object(parent.root)?;
+                let cwd = match filesystem.retain_object(parent.cwd) {
+                    Ok(cwd) => cwd,
+                    Err(error) => {
+                        filesystem.release_object(root);
+                        return Err(error);
+                    }
+                };
+                Some(SessionDirectories { root, cwd })
+            } else {
+                None
             };
-            Some(SessionDirectories { root, cwd })
-        } else {
-            None
-        };
         let child_id = process.process_id;
         let inherited_limits: Vec<(u32, protocol::ResourceLimit)> = self
             .resource_limits
@@ -461,8 +472,7 @@ impl<H: Copy> PosixService<H> {
             .entry(peer.process_id)
             .or_default()
             .insert(child_id);
-        self.signals
-            .insert(child_id, ProcessSignalState::default());
+        self.signals.insert(child_id, ProcessSignalState::default());
         for (resource, limit) in inherited_limits {
             self.resource_limits.insert((child_id, resource), limit);
         }
@@ -681,11 +691,7 @@ impl<H: Copy> PosixService<H> {
         self.process_info_for(process_id)
     }
 
-    fn resource_limit_payload(
-        &mut self,
-        caller_id: u64,
-        payload: &[u8],
-    ) -> Result<Vec<u8>, i32> {
+    fn resource_limit_payload(&mut self, caller_id: u64, payload: &[u8]) -> Result<Vec<u8>, i32> {
         let request =
             protocol::decode_resource_limit_request(payload).map_err(|_| STATUS_EINVAL)?;
         if request.process_id < 0 || request.resource >= protocol::RLIMIT_COUNT {
@@ -717,11 +723,7 @@ impl<H: Copy> PosixService<H> {
         }
 
         let key = (target_id, request.resource);
-        let previous = self
-            .resource_limits
-            .get(&key)
-            .copied()
-            .unwrap_or_default();
+        let previous = self.resource_limits.get(&key).copied().unwrap_or_default();
         if request.flags & protocol::RESOURCE_LIMIT_SET != 0 {
             if request.limit.soft > request.limit.hard {
                 return Err(STATUS_EINVAL);
@@ -738,8 +740,7 @@ impl<H: Copy> PosixService<H> {
     }
 
     fn send_signal(&mut self, caller_id: u64, payload: &[u8]) -> Result<(), i32> {
-        let request =
-            protocol::decode_signal_send_request(payload).map_err(|_| STATUS_EINVAL)?;
+        let request = protocol::decode_signal_send_request(payload).map_err(|_| STATUS_EINVAL)?;
         let caller = self
             .sessions
             .get(&caller_id)
@@ -788,6 +789,7 @@ impl<H: Copy> PosixService<H> {
                     .get_mut(&target_id)
                     .ok_or(protocol::STATUS_ESRCH)?
                     .enqueue(request.signal);
+                self.signal_notifications.insert(target_id);
             }
         }
         if permitted {
@@ -809,11 +811,7 @@ impl<H: Copy> PosixService<H> {
         Ok(output)
     }
 
-    fn dequeue_signal_payload(
-        &mut self,
-        process_id: u64,
-        payload: &[u8],
-    ) -> Result<Vec<u8>, i32> {
+    fn dequeue_signal_payload(&mut self, process_id: u64, payload: &[u8]) -> Result<Vec<u8>, i32> {
         let blocked = protocol::decode_signal_mask(payload).map_err(|_| STATUS_EINVAL)?;
         let signal = self
             .signals
@@ -882,6 +880,7 @@ impl<H: Copy> PosixService<H> {
             }
             protocol::OP_PING
             | protocol::OP_SESSION_REGISTER
+            | protocol::OP_SIGNAL_THREAD_REGISTER
             | protocol::OP_SESSION_INFO
             | protocol::OP_UMASK_SET
             | protocol::OP_OPEN_AT
@@ -1510,7 +1509,8 @@ impl<H: Copy> PosixService<H> {
             .ok_or(protocol::STATUS_ESRCH)?;
         let request = protocol::decode_stat_at(payload).map_err(|_| STATUS_EINVAL)?;
         let expected_handles = usize::from(request.base == protocol::OpenBase::AttachedDirectory);
-        if attached_handles != expected_handles || request.flags & !protocol::UNLINK_FLAGS_ALL != 0 {
+        if attached_handles != expected_handles || request.flags & !protocol::UNLINK_FLAGS_ALL != 0
+        {
             return Err(STATUS_EINVAL);
         }
         Ok(PreparedUnlink {
@@ -1533,8 +1533,9 @@ impl<H: Copy> PosixService<H> {
             .get(&peer.process_id)
             .ok_or(protocol::STATUS_ESRCH)?;
         let request = protocol::decode_rename_at(payload).map_err(|_| STATUS_EINVAL)?;
-        let expected_handles = usize::from(request.old_base == protocol::OpenBase::AttachedDirectory)
-            + usize::from(request.new_base == protocol::OpenBase::AttachedDirectory);
+        let expected_handles =
+            usize::from(request.old_base == protocol::OpenBase::AttachedDirectory)
+                + usize::from(request.new_base == protocol::OpenBase::AttachedDirectory);
         if attached_handles != expected_handles {
             return Err(STATUS_EINVAL);
         }
@@ -1631,7 +1632,10 @@ impl<H: Copy> PosixService<H> {
             .ok_or(protocol::STATUS_ESRCH)?;
         let request = protocol::decode_open_at(payload).map_err(|_| STATUS_EINVAL)?;
         let expected_handles = usize::from(request.base == protocol::OpenBase::AttachedDirectory);
-        if attached_handles != expected_handles || request.options != 0 || request.mode & !0o7777 != 0 {
+        if attached_handles != expected_handles
+            || request.options != 0
+            || request.mode & !0o7777 != 0
+        {
             return Err(STATUS_EINVAL);
         }
         Ok(PreparedChmod {
@@ -1761,8 +1765,7 @@ impl<H: Copy> PosixService<H> {
     }
 
     fn set_uid(&mut self, process_id: u64, payload: &[u8]) -> Result<(), i32> {
-        let requested =
-            protocol::decode_credential_id(payload).map_err(|_| STATUS_EINVAL)?;
+        let requested = protocol::decode_credential_id(payload).map_err(|_| STATUS_EINVAL)?;
         let session = self
             .sessions
             .get_mut(&process_id)
@@ -1781,8 +1784,7 @@ impl<H: Copy> PosixService<H> {
     }
 
     fn set_gid(&mut self, process_id: u64, payload: &[u8]) -> Result<(), i32> {
-        let requested =
-            protocol::decode_credential_id(payload).map_err(|_| STATUS_EINVAL)?;
+        let requested = protocol::decode_credential_id(payload).map_err(|_| STATUS_EINVAL)?;
         let session = self
             .sessions
             .get_mut(&process_id)
@@ -1801,12 +1803,7 @@ impl<H: Copy> PosixService<H> {
     }
 }
 
-fn signal_permission(
-    caller_id: u64,
-    caller: Session,
-    target_id: u64,
-    target: Session,
-) -> bool {
+fn signal_permission(caller_id: u64, caller: Session, target_id: u64, target: Session) -> bool {
     caller_id == target_id
         || caller.real_uid == target.real_uid
         || caller.real_uid == target.saved_uid

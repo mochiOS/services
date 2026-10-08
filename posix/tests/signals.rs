@@ -103,6 +103,21 @@ fn standard_signals_coalesce_and_respect_the_receiving_thread_mask() {
 
     sender.send_signal(102, 10).unwrap();
     sender.send_signal(102, 10).unwrap();
+    assert_eq!(
+        service
+            .borrow()
+            .signal_notification_processes()
+            .collect::<Vec<_>>(),
+        vec![102]
+    );
+    service.borrow_mut().acknowledge_signal_notification(102);
+    assert!(
+        service
+            .borrow()
+            .signal_notification_processes()
+            .next()
+            .is_none()
+    );
     assert_eq!(receiver.pending_signals().unwrap(), 1 << 9);
     assert_eq!(receiver.dequeue_signal(1 << 9).unwrap(), 0);
     assert_eq!(receiver.dequeue_signal(0).unwrap(), 10);
@@ -138,6 +153,13 @@ fn signal_selection_uses_posix_credentials_without_granting_uid_zero_authority()
     let root_client = client(&service, root_without_capability);
 
     sender.send_signal(202, 0).unwrap();
+    assert!(
+        service
+            .borrow()
+            .signal_notification_processes()
+            .next()
+            .is_none()
+    );
     assert_eq!(same_user_client.pending_signals().unwrap(), 0);
     assert_eq!(
         sender.send_signal(999, 0).unwrap_err(),

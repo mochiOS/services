@@ -25,4 +25,5 @@ fn native_thread_upcall_syscalls_are_not_posix_operations() {
     assert_eq!(SyscallNumber::ThreadUpcallReturn as u64, 655);
     assert_eq!(SyscallNumber::ThreadHandleCreate as u64, 656);
     assert_eq!(SyscallNumber::ThreadInterrupt as u64, 657);
+    assert_eq!(SyscallNumber::ThreadHandleStatus as u64, 658);
 }
