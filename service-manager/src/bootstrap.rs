@@ -623,40 +623,12 @@ fn service_name(service: FixedService) -> &'static str {
 }
 
 fn log_ready_error(service: ReadyService, error: ReadyError) {
-    match error {
-        ReadyError::InvalidMessage => platform::logln!(
-            "service-manager.service: invalid ready message from {}",
-            service.name()
-        ),
-        ReadyError::Failed(status) => platform::logln!(
-            "service-manager.service: {} ready failed status={}",
-            service.name(),
-            status
-        ),
-        ReadyError::TimedOut => {
-            platform::logln!("service-manager.service: {} ready timeout", service.name())
-        }
-        ReadyError::ProcessExited(status) => platform::logln!(
-            "service-manager.service: {} exited before ready status={}",
-            service.name(),
-            status
-        ),
-        ReadyError::Ipc(errno) => platform::logln!(
-            "service-manager.service: {} ready IPC failed errno={}",
-            service.name(),
-            errno
-        ),
-        ReadyError::Clock(errno) => platform::logln!(
-            "service-manager.service: {} ready clock failed errno={}",
-            service.name(),
-            errno
-        ),
-        ReadyError::ProcessStatus(errno) => platform::logln!(
-            "service-manager.service: {} process status failed errno={}",
-            service.name(),
-            errno
-        ),
-    }
+    // Startup failures must remain visible before logger persistence is ready.
+    eprintln!(
+        "service-manager.service: {} readiness failed: {:?}",
+        service.name(),
+        error
+    );
 }
 
 fn resident(outcome: BootstrapOutcome, runtime: Option<Runtime>) -> ! {
