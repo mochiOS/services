@@ -874,7 +874,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
                     opcode: filesystem::OP_OPEN_AT,
                     request_id: 1,
                     length: payload.len() as u32,
-                    flags: filesystem::OPEN_AT_READ | filesystem::OPEN_AT_DIRECTORY,
+                    flags: filesystem::OPEN_AT_SEARCH | filesystem::OPEN_AT_DIRECTORY,
                     ..filesystem::Header::default()
                 },
                 &payload,
@@ -947,6 +947,38 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         };
         let handles = Self::path_handles(paths)?;
         self.open_call(header, &payload, handles)
+    }
+
+    fn open_directory_at(
+        &mut self,
+        request: &posix_service::PreparedStat,
+        paths: posix_service::PathObjects<mochi_user_platform::handle::Handle>,
+    ) -> Result<posix_service::OpenedObject<mochi_user_platform::handle::Handle>, i32> {
+        use mochios_filesystem_protocol as filesystem;
+
+        let mut flags = filesystem::OPEN_AT_ROOT_ATTACHED
+            | filesystem::OPEN_AT_DIRECTORY
+            | filesystem::OPEN_AT_SEARCH;
+        if paths.base.is_some() {
+            flags |= filesystem::OPEN_AT_BASE_ATTACHED;
+        }
+        let payload = Self::credential_payload(
+            request.effective_uid,
+            request.effective_gid,
+            &request.supplementary_groups,
+            request.path.as_bytes(),
+        )?;
+        self.open_call(
+            filesystem::Header {
+                opcode: filesystem::OP_OPEN_AT,
+                request_id: 21,
+                length: payload.len() as u32,
+                flags,
+                ..filesystem::Header::default()
+            },
+            &payload,
+            Self::path_handles(paths)?,
+        )
     }
 
     fn stat_at(

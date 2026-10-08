@@ -195,7 +195,17 @@ impl FilesystemService {
             return Err(EINVAL);
         }
         let access = request.flags & (protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE);
-        if access == 0
+        let search = request.flags & protocol::OPEN_AT_SEARCH != 0;
+        if access == 0 && !search
+            || search
+                && (access != 0
+                    || request.flags & protocol::OPEN_AT_DIRECTORY == 0
+                    || request.flags
+                        & (protocol::OPEN_AT_CREATE
+                            | protocol::OPEN_AT_EXCLUSIVE
+                            | protocol::OPEN_AT_TRUNCATE
+                            | protocol::OPEN_AT_APPEND)
+                        != 0)
             || request.flags & protocol::OPEN_AT_EXCLUSIVE != 0
                 && request.flags & protocol::OPEN_AT_CREATE == 0
             || request.flags & (protocol::OPEN_AT_TRUNCATE | protocol::OPEN_AT_APPEND) != 0
@@ -248,9 +258,13 @@ impl FilesystemService {
         if kind.is_dir() && request.flags & protocol::OPEN_AT_WRITE != 0 {
             return Err(EISDIR);
         }
-        let requested_access = (u32::from(request.flags & protocol::OPEN_AT_READ != 0)
-            * protocol::ACCESS_AT_READ)
-            | (u32::from(request.flags & protocol::OPEN_AT_WRITE != 0) * protocol::ACCESS_AT_WRITE);
+        let requested_access = if search {
+            protocol::ACCESS_AT_EXECUTE
+        } else {
+            (u32::from(request.flags & protocol::OPEN_AT_READ != 0) * protocol::ACCESS_AT_READ)
+                | (u32::from(request.flags & protocol::OPEN_AT_WRITE != 0)
+                    * protocol::ACCESS_AT_WRITE)
+        };
         if !created
             && !permission_allows(
                 metadata.mode(),

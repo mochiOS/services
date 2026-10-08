@@ -782,7 +782,7 @@ fn open_handle_rights(flags: u32) -> u64 {
     use mochios_filesystem_protocol as protocol;
     let mut rights = mochi_user_platform::handle::HANDLE_RIGHT_DUPLICATE
         | mochi_user_platform::handle::HANDLE_RIGHT_TRANSFER;
-    if flags & protocol::OPEN_AT_READ != 0 {
+    if flags & (protocol::OPEN_AT_READ | protocol::OPEN_AT_SEARCH) != 0 {
         rights |= mochi_user_platform::handle::HANDLE_RIGHT_READ;
     }
     if flags & protocol::OPEN_AT_WRITE != 0 {

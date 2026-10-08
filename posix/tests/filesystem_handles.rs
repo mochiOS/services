@@ -100,11 +100,13 @@ fn test_filesystem() -> FilesystemService {
     let blocked = source.join("blocked");
     let create_base = source.join("create-base");
     let jail = source.join("jail");
+    let search_only = source.join("search-only");
     let image_path = temporary.0.join("filesystem.ext4");
     fs::create_dir_all(&directory).unwrap();
     fs::create_dir_all(&blocked).unwrap();
     fs::create_dir_all(&create_base).unwrap();
     fs::create_dir_all(jail.join("inside")).unwrap();
+    fs::create_dir_all(&search_only).unwrap();
     fs::create_dir_all(source.join("outside")).unwrap();
     fs::write(blocked.join("child"), b"private").unwrap();
     symlink("/blocked/child", source.join("redirect")).unwrap();
@@ -136,7 +138,64 @@ fn test_filesystem() -> FilesystemService {
         b"/blocked",
     );
     assert_eq!(restricted.header.status, 0);
+    let search_only = service.handle(
+        protocol::Header {
+            opcode: protocol::OP_SETATTR,
+            flags: protocol::SETATTR_MODE,
+            mode: 0o111,
+            ..protocol::Header::default()
+        },
+        b"/search-only",
+    );
+    assert_eq!(search_only.header.status, 0);
     service
+}
+
+#[test]
+fn internal_directory_search_open_checks_execute_instead_of_read_permission() {
+    let mut filesystem = test_filesystem();
+    let searched = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_DIRECTORY | protocol::OPEN_AT_SEARCH,
+                ..protocol::Header::default()
+            },
+            b"/search-only",
+            PathAnchors::default(),
+            credentials(501, 501, &[]),
+        )
+        .unwrap();
+    assert_ne!(searched.header.open_id, 0);
+
+    assert!(matches!(
+        filesystem.open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_DIRECTORY | protocol::OPEN_AT_READ,
+                ..protocol::Header::default()
+            },
+            b"/search-only",
+            PathAnchors::default(),
+            credentials(501, 501, &[]),
+        ),
+        Err(13)
+    ));
+    assert!(matches!(
+        filesystem.open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_DIRECTORY
+                    | protocol::OPEN_AT_SEARCH
+                    | protocol::OPEN_AT_READ,
+                ..protocol::Header::default()
+            },
+            b"/search-only",
+            PathAnchors::default(),
+            credentials(501, 501, &[]),
+        ),
+        Err(22)
+    ));
 }
 
 #[test]

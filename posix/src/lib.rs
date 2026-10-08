@@ -211,6 +211,14 @@ pub trait FilesystemBackend<H: Copy> {
         paths: PathObjects<H>,
     ) -> Result<OpenedObject<H>, i32>;
 
+    /// Resolves a directory and checks search permission without granting a
+    /// client-visible readable file description.
+    fn open_directory_at(
+        &mut self,
+        request: &PreparedStat,
+        paths: PathObjects<H>,
+    ) -> Result<OpenedObject<H>, i32>;
+
     /// Resolves and reads metadata in one backend operation.
     fn stat_at(
         &mut self,
@@ -940,6 +948,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_FSTAT
             | protocol::OP_ACCESS_AT
             | protocol::OP_CHDIR_AT
+            | protocol::OP_CHROOT_AT
             | protocol::OP_FCHDIR
             | protocol::OP_GETCWD => Err(STATUS_EINVAL),
             protocol::OP_SET_UID
@@ -1002,6 +1011,7 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_FSTAT
                 | protocol::OP_ACCESS_AT
                 | protocol::OP_CHDIR_AT
+                | protocol::OP_CHROOT_AT
                 | protocol::OP_FCHDIR
                 | protocol::OP_GETCWD
                 | protocol::OP_FTRUNCATE
@@ -1042,6 +1052,7 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_STAT_AT
                 | protocol::OP_ACCESS_AT
                 | protocol::OP_CHDIR_AT
+                | protocol::OP_CHROOT_AT
                 | protocol::OP_FCHDIR
                 | protocol::OP_GETCWD
                 | protocol::OP_MKDIR_AT
@@ -1126,18 +1137,37 @@ impl<H: Copy> PosixService<H> {
                     Ok(paths) => paths,
                     Err(status) => return object_error(header.request_id, status),
                 };
-                let open = PreparedOpen {
-                    base: prepared.base,
-                    options: protocol::OPEN_READ | protocol::OPEN_DIRECTORY,
-                    mode: 0,
-                    path: prepared.path,
-                    effective_uid: prepared.effective_uid,
-                    effective_gid: prepared.effective_gid,
-                    supplementary_groups: prepared.supplementary_groups,
-                };
-                match filesystem.open_at(&open, paths) {
+                match filesystem.open_directory_at(&prepared, paths) {
                     Ok(opened) => {
                         self.replace_cwd(
+                            peer.process_id,
+                            AttachedObject {
+                                handle: opened.handle,
+                                rights: opened.rights,
+                            },
+                            filesystem,
+                        );
+                        object_error(header.request_id, protocol::STATUS_OK)
+                    }
+                    Err(status) => object_error(header.request_id, status),
+                }
+            }
+            protocol::OP_CHROOT_AT => {
+                let prepared = match self.prepare_stat_at(peer, payload, handles.len()) {
+                    Ok(prepared) if prepared.flags == 0 => prepared,
+                    Ok(_) => return object_error(header.request_id, STATUS_EINVAL),
+                    Err(status) => return object_error(header.request_id, status),
+                };
+                if prepared.effective_uid != 0 {
+                    return object_error(header.request_id, protocol::STATUS_EPERM);
+                }
+                let paths = match self.path_objects(peer.process_id, prepared.base, handles) {
+                    Ok(paths) => paths,
+                    Err(status) => return object_error(header.request_id, status),
+                };
+                match filesystem.open_directory_at(&prepared, paths) {
+                    Ok(opened) => {
+                        self.replace_root(
                             peer.process_id,
                             AttachedObject {
                                 handle: opened.handle,
@@ -1449,6 +1479,18 @@ impl<H: Copy> PosixService<H> {
     ) {
         if let Some(directories) = self.directories.get_mut(&process_id) {
             let previous = core::mem::replace(&mut directories.cwd, cwd);
+            filesystem.release_object(previous);
+        }
+    }
+
+    fn replace_root<F: FilesystemBackend<H>>(
+        &mut self,
+        process_id: u64,
+        root: AttachedObject<H>,
+        filesystem: &mut F,
+    ) {
+        if let Some(directories) = self.directories.get_mut(&process_id) {
+            let previous = core::mem::replace(&mut directories.root, root);
             filesystem.release_object(previous);
         }
     }

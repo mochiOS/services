@@ -952,7 +952,7 @@ impl ObjectTransport for DirectoryChangeTransport {
         assert_eq!(handles.len(), 1);
         assert_eq!(handles.get(0).unwrap().handle, 77);
         match header.opcode {
-            protocol::OP_CHDIR_AT => {
+            protocol::OP_CHDIR_AT | protocol::OP_CHROOT_AT => {
                 let request = protocol::decode_stat_at(payload).map_err(|_| ())?;
                 assert_eq!(request.base, protocol::OpenBase::AttachedDirectory);
                 assert_eq!(request.flags, 0);
@@ -977,7 +977,7 @@ impl ObjectTransport for DirectoryChangeTransport {
 }
 
 #[test]
-fn client_transfers_directory_handles_for_chdir_and_fchdir() {
+fn client_transfers_directory_handles_for_chdir_chroot_and_fchdir() {
     let directory = ObjectHandleAttachment {
         handle: 77,
         rights: 0x4000_0000_0000_0081,
@@ -989,12 +989,19 @@ fn client_transfers_directory_handles_for_chdir_and_fchdir() {
             "child",
         )
         .unwrap();
+    client
+        .chroot_at(
+            mochios_posix_client::StatAtBase::Directory(directory),
+            "child",
+        )
+        .unwrap();
     client.fchdir(directory).unwrap();
 }
 
 #[derive(Default)]
 struct RecordingFilesystem {
     request: Option<PreparedOpen>,
+    directory_request: Option<PreparedStat>,
     stat_request: Option<PreparedStat>,
     access_request: Option<PreparedAccess>,
     directory: Option<AttachedObject<u32>>,
@@ -1067,6 +1074,20 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         paths: PathObjects<u32>,
     ) -> Result<OpenedObject<u32>, i32> {
         self.request = Some(request.clone());
+        self.root = Some(paths.root);
+        self.directory = paths.base;
+        Ok(OpenedObject {
+            handle: 200,
+            rights: 0x81,
+        })
+    }
+
+    fn open_directory_at(
+        &mut self,
+        request: &PreparedStat,
+        paths: PathObjects<u32>,
+    ) -> Result<OpenedObject<u32>, i32> {
+        self.directory_request = Some(request.clone());
         self.root = Some(paths.root);
         self.directory = paths.base;
         Ok(OpenedObject {
@@ -2696,12 +2717,9 @@ fn chdir_replaces_the_session_cwd_with_an_open_directory() {
 
     assert_eq!(result.response.header.status, protocol::STATUS_OK);
     assert!(result.handles.is_empty());
-    let request = filesystem.request.as_ref().unwrap();
+    let request = filesystem.directory_request.as_ref().unwrap();
     assert_eq!(request.path, "work");
-    assert_eq!(
-        request.options,
-        protocol::OPEN_READ | protocol::OPEN_DIRECTORY
-    );
+    assert_eq!(request.flags, 0);
     assert_eq!(filesystem.directory.unwrap().handle, 101);
     assert_eq!(
         service
@@ -2718,6 +2736,138 @@ fn chdir_replaces_the_session_cwd_with_an_open_directory() {
             rights: 0x81
         }]
     );
+}
+
+#[test]
+fn chroot_replaces_only_the_privileged_sessions_root_handle() {
+    let peer = PeerIdentity {
+        process_id: 127,
+        effective_uid: 0,
+        effective_gid: 28,
+    };
+    let mut service = service_for(peer);
+    service.handle(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let mut payload = [0u8; protocol::STAT_AT_HEADER_LEN + 8];
+    let length = protocol::encode_stat_at(
+        protocol::StatAtRequest {
+            base: protocol::OpenBase::ProcessCwd,
+            flags: 0,
+            path: "jail",
+        },
+        &mut payload,
+    )
+    .unwrap();
+    let mut filesystem = RecordingFilesystem::default();
+
+    let result = service.handle_objects(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_CHROOT_AT,
+            request_id: 20,
+            payload_len: length as u32,
+            ..protocol::Header::default()
+        },
+        &payload[..length],
+        &[],
+        &mut filesystem,
+    );
+
+    assert_eq!(result.response.header.status, protocol::STATUS_OK);
+    let request = filesystem.directory_request.as_ref().unwrap();
+    assert_eq!(request.path, "jail");
+    assert_eq!(request.flags, 0);
+    assert_eq!(filesystem.root.unwrap().handle, 100);
+    assert_eq!(filesystem.directory.unwrap().handle, 101);
+    let directories = service.session_directories(peer.process_id).unwrap();
+    assert_eq!(directories.root.handle, 200);
+    assert_eq!(directories.cwd.handle, 101);
+    assert_eq!(
+        filesystem.released,
+        vec![AttachedObject {
+            handle: 100,
+            rights: 0x81
+        }]
+    );
+
+    let getcwd = service.handle_objects(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_GETCWD,
+            request_id: 21,
+            ..protocol::Header::default()
+        },
+        &[],
+        &[],
+        &mut filesystem,
+    );
+    assert_eq!(getcwd.response.header.status, protocol::STATUS_OK);
+    assert_eq!(
+        filesystem.path_query,
+        Some((
+            AttachedObject {
+                handle: 200,
+                rights: 0x81
+            },
+            AttachedObject {
+                handle: 101,
+                rights: 0x81
+            }
+        ))
+    );
+}
+
+#[test]
+fn chroot_rejects_an_unprivileged_session_before_resolving_the_path() {
+    let peer = PeerIdentity {
+        process_id: 128,
+        effective_uid: 501,
+        effective_gid: 28,
+    };
+    let mut service = service_for(peer);
+    service.handle(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let mut payload = [0u8; protocol::STAT_AT_HEADER_LEN + 8];
+    let length = protocol::encode_stat_at(
+        protocol::StatAtRequest {
+            base: protocol::OpenBase::ProcessCwd,
+            flags: 0,
+            path: "jail",
+        },
+        &mut payload,
+    )
+    .unwrap();
+    let mut filesystem = RecordingFilesystem::default();
+
+    let result = service.handle_objects(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_CHROOT_AT,
+            request_id: 22,
+            payload_len: length as u32,
+            ..protocol::Header::default()
+        },
+        &payload[..length],
+        &[],
+        &mut filesystem,
+    );
+
+    assert_eq!(result.response.header.status, protocol::STATUS_EPERM);
+    assert!(filesystem.directory_request.is_none());
+    assert_eq!(filesystem.roots_opened, 1);
+    assert!(filesystem.released.is_empty());
 }
 
 #[test]
