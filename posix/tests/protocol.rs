@@ -442,7 +442,7 @@ fn fixed_size_session_payloads_reject_trailing_bytes() {
     protocol::encode_wait_request(
         protocol::WaitRequest {
             selector: -7,
-            options: protocol::WAIT_NOHANG,
+            options: protocol::WAIT_NOHANG | protocol::WAIT_UNTRACED | protocol::WAIT_CONTINUED,
         },
         &mut wait,
     )
@@ -451,12 +451,38 @@ fn fixed_size_session_payloads_reject_trailing_bytes() {
         protocol::decode_wait_request(&wait).unwrap(),
         protocol::WaitRequest {
             selector: -7,
-            options: protocol::WAIT_NOHANG,
+            options: protocol::WAIT_NOHANG | protocol::WAIT_UNTRACED | protocol::WAIT_CONTINUED,
         }
     );
     wait[12] = 1;
     assert_eq!(
         protocol::decode_wait_request(&wait),
+        Err(protocol::ProtocolError::InvalidLength)
+    );
+
+    let delivery = protocol::SignalDelivery {
+        signal: protocol::SIGNAL_TSTP,
+        token: 0x1020_3040_5060_7080,
+    };
+    let mut encoded_delivery = [0u8; protocol::SIGNAL_DELIVERY_LEN];
+    protocol::encode_signal_delivery(delivery, &mut encoded_delivery).unwrap();
+    assert_eq!(
+        protocol::decode_signal_delivery(&encoded_delivery),
+        Ok(delivery)
+    );
+    encoded_delivery[4] = 1;
+    assert_eq!(
+        protocol::decode_signal_delivery(&encoded_delivery),
+        Err(protocol::ProtocolError::InvalidLength)
+    );
+    assert_eq!(
+        protocol::encode_signal_delivery(
+            protocol::SignalDelivery {
+                signal: 0,
+                token: 1,
+            },
+            &mut encoded_delivery,
+        ),
         Err(protocol::ProtocolError::InvalidLength)
     );
 }
@@ -1073,12 +1099,25 @@ struct RecordingFilesystem {
 #[derive(Default)]
 struct RecordingProcesses {
     states: BTreeMap<u32, ProcessLifecycle>,
+    suspend_error: Option<i32>,
+    suspended: Vec<u32>,
     released: Vec<u32>,
 }
 
 impl ProcessBackend<u32> for RecordingProcesses {
     fn status(&mut self, process: u32) -> Result<ProcessLifecycle, i32> {
         self.states.get(&process).copied().ok_or(-3)
+    }
+
+    fn suspend(&mut self, process: u32) -> Result<(), i32> {
+        if let Some(error) = self.suspend_error {
+            return Err(error);
+        }
+        if !self.states.contains_key(&process) {
+            return Err(-3);
+        }
+        self.suspended.push(process);
+        Ok(())
     }
 
     fn release(&mut self, process: u32) {
@@ -1724,6 +1763,249 @@ fn wait_selects_and_reaps_only_authenticated_children() {
         ),
         Err(protocol::STATUS_ECHILD)
     );
+}
+
+fn send_signal(
+    service: &mut PosixService,
+    sender: PeerIdentity,
+    receiver: PeerIdentity,
+    signal: u32,
+) {
+    let mut send = [0u8; protocol::SIGNAL_SEND_REQUEST_LEN];
+    protocol::encode_signal_send_request(
+        protocol::SignalSendRequest {
+            selector: receiver.process_id as i64,
+            signal,
+        },
+        &mut send,
+    )
+    .unwrap();
+    assert_eq!(
+        service
+            .handle(
+                sender,
+                protocol::Header {
+                    opcode: protocol::OP_SIGNAL_SEND,
+                    ..protocol::Header::default()
+                },
+                &send,
+            )
+            .header
+            .status,
+        protocol::STATUS_OK
+    );
+}
+
+fn dequeue_signal(service: &mut PosixService, receiver: PeerIdentity) -> protocol::SignalDelivery {
+    let mut mask = [0u8; protocol::SIGNAL_MASK_LEN];
+    protocol::encode_signal_mask(0, &mut mask).unwrap();
+    let response = service.handle(
+        receiver,
+        protocol::Header {
+            opcode: protocol::OP_SIGNAL_DEQUEUE,
+            ..protocol::Header::default()
+        },
+        &mask,
+    );
+    assert_eq!(response.header.status, protocol::STATUS_OK);
+    protocol::decode_signal_delivery(&response.payload).unwrap()
+}
+
+fn deliver_signal(
+    service: &mut PosixService,
+    sender: PeerIdentity,
+    receiver: PeerIdentity,
+    signal: u32,
+) -> protocol::SignalDelivery {
+    send_signal(service, sender, receiver, signal);
+    dequeue_signal(service, receiver)
+}
+
+#[test]
+fn wait_reports_authenticated_stop_and_continue_transitions_once() {
+    let parent = PeerIdentity {
+        process_id: 124,
+        effective_uid: 505,
+        effective_gid: 24,
+    };
+    let child = PeerIdentity {
+        process_id: 125,
+        ..parent
+    };
+    let mut service = service_for(parent);
+    service.handle(
+        parent,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let mut filesystem = RecordingFilesystem::default();
+    service
+        .adopt_child(
+            parent,
+            AuthenticatedProcess {
+                handle: 64,
+                process_id: child.process_id,
+            },
+            &mut filesystem,
+        )
+        .unwrap();
+    let mut processes = RecordingProcesses::default();
+    processes.states.insert(64, ProcessLifecycle::Running);
+    let no_state_options = protocol::WaitRequest {
+        selector: child.process_id as i64,
+        options: protocol::WAIT_NOHANG,
+    };
+
+    let delivery = deliver_signal(&mut service, parent, child, protocol::SIGNAL_TSTP);
+    assert_ne!(delivery.token, 0);
+    let mut delivery_bytes = [0u8; protocol::SIGNAL_DELIVERY_LEN];
+    protocol::encode_signal_delivery(delivery, &mut delivery_bytes).unwrap();
+    send_signal(&mut service, parent, child, protocol::SIGNAL_CONT);
+    assert_eq!(
+        service.report_process_stopped(child, &delivery_bytes, &mut processes),
+        Err(protocol::STATUS_EAGAIN)
+    );
+    assert!(processes.suspended.is_empty());
+    assert_eq!(
+        service
+            .wait_child(
+                parent,
+                protocol::WaitRequest {
+                    options: protocol::WAIT_NOHANG | protocol::WAIT_CONTINUED,
+                    ..no_state_options
+                },
+                &mut filesystem,
+                &mut processes,
+            )
+            .unwrap(),
+        protocol::WaitResult::default()
+    );
+
+    let delivery = deliver_signal(&mut service, parent, child, protocol::SIGNAL_TSTP);
+    protocol::encode_signal_delivery(delivery, &mut delivery_bytes).unwrap();
+    processes.suspend_error = Some(-5);
+    assert_eq!(
+        service.report_process_stopped(child, &delivery_bytes, &mut processes),
+        Err(-5)
+    );
+    assert!(processes.suspended.is_empty());
+    assert_eq!(
+        service
+            .wait_child(
+                parent,
+                protocol::WaitRequest {
+                    options: protocol::WAIT_NOHANG | protocol::WAIT_UNTRACED,
+                    ..no_state_options
+                },
+                &mut filesystem,
+                &mut processes,
+            )
+            .unwrap(),
+        protocol::WaitResult::default()
+    );
+    processes.suspend_error = None;
+    let delivery = deliver_signal(&mut service, parent, child, protocol::SIGNAL_TSTP);
+    protocol::encode_signal_delivery(delivery, &mut delivery_bytes).unwrap();
+    let stopped = service.report_process_stopped(child, &delivery_bytes, &mut processes);
+    assert_eq!(stopped, Ok(()));
+    assert_eq!(processes.suspended, vec![64]);
+
+    assert_eq!(
+        service
+            .wait_child(parent, no_state_options, &mut filesystem, &mut processes)
+            .unwrap(),
+        protocol::WaitResult::default()
+    );
+    let stopped_result = service
+        .wait_child(
+            parent,
+            protocol::WaitRequest {
+                options: protocol::WAIT_UNTRACED,
+                ..no_state_options
+            },
+            &mut filesystem,
+            &mut processes,
+        )
+        .unwrap();
+    assert_eq!(stopped_result.process_id, child.process_id);
+    assert_eq!(stopped_result.status, (protocol::SIGNAL_TSTP << 8) | 0x7f);
+    assert_eq!(
+        service
+            .wait_child(
+                parent,
+                protocol::WaitRequest {
+                    options: protocol::WAIT_NOHANG | protocol::WAIT_UNTRACED,
+                    ..no_state_options
+                },
+                &mut filesystem,
+                &mut processes,
+            )
+            .unwrap(),
+        protocol::WaitResult::default()
+    );
+
+    send_signal(&mut service, parent, child, protocol::SIGNAL_CONT);
+    let continued = service
+        .wait_child(
+            parent,
+            protocol::WaitRequest {
+                options: protocol::WAIT_CONTINUED,
+                ..no_state_options
+            },
+            &mut filesystem,
+            &mut processes,
+        )
+        .unwrap();
+    assert_eq!(continued.process_id, child.process_id);
+    assert_eq!(continued.status, protocol::WAIT_STATUS_CONTINUED);
+    assert_eq!(
+        service
+            .wait_child(
+                parent,
+                protocol::WaitRequest {
+                    options: protocol::WAIT_NOHANG | protocol::WAIT_CONTINUED,
+                    ..no_state_options
+                },
+                &mut filesystem,
+                &mut processes,
+            )
+            .unwrap(),
+        protocol::WaitResult::default()
+    );
+
+    let invalid_delivery = protocol::SignalDelivery {
+        signal: protocol::SIGNAL_KILL,
+        token: 99,
+    };
+    protocol::encode_signal_delivery(invalid_delivery, &mut delivery_bytes).unwrap();
+    assert_eq!(
+        service
+            .report_process_stopped(child, &delivery_bytes, &mut processes)
+            .unwrap_err(),
+        STATUS_EINVAL
+    );
+}
+
+#[test]
+fn wait_option_values_match_the_newlib_target_abi() {
+    assert_eq!(protocol::SIGNAL_DELIVERY_LEN, 16);
+    assert_eq!(protocol::WAIT_NOHANG, 1);
+    assert_eq!(protocol::WAIT_UNTRACED, 2);
+    assert_eq!(protocol::WAIT_CONTINUED, 8);
+    assert_eq!(protocol::WAIT_STATUS_CONTINUED, 0xffff);
+
+    let newlib = include_str!("../../../libraries/newlib/newlib/libc/include/sys/wait.h");
+    for definition in [
+        "#define WNOHANG 1",
+        "#define WUNTRACED 2",
+        "#define WCONTINUED 8",
+        "#define WIFCONTINUED(w)\t((w) == 0xffff)",
+    ] {
+        assert!(newlib.contains(definition), "missing {definition}");
+    }
 }
 
 #[test]

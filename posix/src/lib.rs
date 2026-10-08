@@ -311,6 +311,65 @@ pub enum ProcessLifecycle {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ProcessWaitState {
+    stopped: bool,
+    stop_signal: u32,
+    stop_reported: bool,
+    continued_pending: bool,
+    stop_delivery: Option<protocol::SignalDelivery>,
+}
+
+impl ProcessWaitState {
+    fn stopped(&mut self, signal: u32) {
+        if self.stopped {
+            return;
+        }
+        self.stopped = true;
+        self.stop_signal = signal;
+        self.stop_reported = false;
+        self.continued_pending = false;
+    }
+
+    fn continued(&mut self) {
+        self.stop_delivery = None;
+        if !self.stopped {
+            return;
+        }
+        self.stopped = false;
+        self.stop_reported = false;
+        self.continued_pending = true;
+    }
+
+    fn begin_stop_delivery(&mut self, delivery: protocol::SignalDelivery) {
+        self.stop_delivery = Some(delivery);
+    }
+
+    fn cancel_stop_delivery(&mut self) {
+        self.stop_delivery = None;
+    }
+
+    fn consume_stop_delivery(&mut self, delivery: protocol::SignalDelivery) -> bool {
+        if self.stop_delivery != Some(delivery) {
+            return false;
+        }
+        self.stop_delivery = None;
+        true
+    }
+
+    fn take_status(&mut self, options: u32) -> Option<u32> {
+        if options & protocol::WAIT_UNTRACED != 0 && self.stopped && !self.stop_reported {
+            self.stop_reported = true;
+            return Some((self.stop_signal << 8) | 0x7f);
+        }
+        if options & protocol::WAIT_CONTINUED != 0 && self.continued_pending {
+            self.continued_pending = false;
+            return Some(protocol::WAIT_STATUS_CONTINUED);
+        }
+        None
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ProcessSignalState {
     pending: u64,
 }
@@ -353,6 +412,7 @@ const JOB_CONTROL_STOP_SIGNALS: u64 = signal_bit(protocol::SIGNAL_STOP)
 
 pub trait ProcessBackend<H: Copy> {
     fn status(&mut self, process: H) -> Result<ProcessLifecycle, i32>;
+    fn suspend(&mut self, process: H) -> Result<(), i32>;
     fn release(&mut self, process: H);
 }
 
@@ -368,7 +428,7 @@ pub struct ControllingTerminal {
     pub foreground_process_group: u64,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct PosixService<H: Copy = u32> {
     sessions: BTreeMap<u64, Session>,
     directories: BTreeMap<u64, SessionDirectories<H>>,
@@ -382,6 +442,8 @@ pub struct PosixService<H: Copy = u32> {
     supplementary_groups: BTreeMap<u64, Vec<u32>>,
     resource_limits: BTreeMap<(u64, u32), protocol::ResourceLimit>,
     signals: BTreeMap<u64, ProcessSignalState>,
+    process_wait_states: BTreeMap<u64, ProcessWaitState>,
+    next_signal_delivery_token: u64,
     signal_notifications: BTreeSet<u64>,
     process_resume_notifications: BTreeSet<u64>,
 }
@@ -401,9 +463,17 @@ impl PosixService<u32> {
             supplementary_groups: BTreeMap::new(),
             resource_limits: BTreeMap::new(),
             signals: BTreeMap::new(),
+            process_wait_states: BTreeMap::new(),
+            next_signal_delivery_token: 1,
             signal_notifications: BTreeSet::new(),
             process_resume_notifications: BTreeSet::new(),
         }
+    }
+}
+
+impl Default for PosixService<u32> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -455,6 +525,17 @@ impl<H: Copy> PosixService<H> {
     }
 
     fn enqueue_signal(&mut self, process_id: u64, signal: u32) -> Result<(), i32> {
+        if signal == protocol::SIGNAL_CONT {
+            self.process_wait_states
+                .get_mut(&process_id)
+                .ok_or(protocol::STATUS_ESRCH)?
+                .continued();
+        } else if signal == protocol::SIGNAL_KILL {
+            self.process_wait_states
+                .get_mut(&process_id)
+                .ok_or(protocol::STATUS_ESRCH)?
+                .cancel_stop_delivery();
+        }
         self.signals
             .get_mut(&process_id)
             .ok_or(protocol::STATUS_ESRCH)?
@@ -527,6 +608,8 @@ impl<H: Copy> PosixService<H> {
             .insert(peer.process_id, Vec::new());
         self.signals
             .insert(peer.process_id, ProcessSignalState::default());
+        self.process_wait_states
+            .insert(peer.process_id, ProcessWaitState::default());
         Ok(true)
     }
 
@@ -609,6 +692,8 @@ impl<H: Copy> PosixService<H> {
             .or_default()
             .insert(child_id);
         self.signals.insert(child_id, ProcessSignalState::default());
+        self.process_wait_states
+            .insert(child_id, ProcessWaitState::default());
         for (resource, limit) in inherited_limits {
             self.resource_limits.insert((child_id, resource), limit);
         }
@@ -632,6 +717,16 @@ impl<H: Copy> PosixService<H> {
             if let ProcessLifecycle::Exited { exit_code } = processes.status(handle)? {
                 let status = ((exit_code & 0xff) as u32) << 8;
                 self.reap_child(peer.process_id, child, filesystem, processes);
+                return Ok(protocol::WaitResult {
+                    process_id: child,
+                    status,
+                });
+            }
+            if let Some(status) = self
+                .process_wait_states
+                .get_mut(&child)
+                .and_then(|state| state.take_status(request.options))
+            {
                 return Ok(protocol::WaitResult {
                     process_id: child,
                     status,
@@ -728,6 +823,7 @@ impl<H: Copy> PosixService<H> {
         self.resource_limits
             .retain(|(process_id, _), _| *process_id != child_id);
         self.signals.remove(&child_id);
+        self.process_wait_states.remove(&child_id);
         self.signal_notifications.remove(&child_id);
         self.process_resume_notifications.remove(&child_id);
         self.sessions.remove(&child_id);
@@ -1129,9 +1225,67 @@ impl<H: Copy> PosixService<H> {
             .get_mut(&process_id)
             .ok_or(protocol::STATUS_ESRCH)?
             .dequeue(blocked);
-        let mut output = vec![0; protocol::SIGNAL_NUMBER_LEN];
-        protocol::encode_signal_number(signal, &mut output).map_err(|_| STATUS_EINVAL)?;
+        let token = if signal != 0 && signal_bit(signal) & JOB_CONTROL_STOP_SIGNALS != 0 {
+            let token = self.next_signal_delivery_token;
+            self.next_signal_delivery_token = self.next_signal_delivery_token.wrapping_add(1);
+            if self.next_signal_delivery_token == 0 {
+                self.next_signal_delivery_token = 1;
+            }
+            let delivery = protocol::SignalDelivery { signal, token };
+            self.process_wait_states
+                .get_mut(&process_id)
+                .ok_or(protocol::STATUS_ESRCH)?
+                .begin_stop_delivery(delivery);
+            token
+        } else {
+            0
+        };
+        let mut output = vec![0; protocol::SIGNAL_DELIVERY_LEN];
+        protocol::encode_signal_delivery(protocol::SignalDelivery { signal, token }, &mut output)
+            .map_err(|_| STATUS_EINVAL)?;
         Ok(output)
+    }
+
+    pub fn report_process_stopped<P: ProcessBackend<H>>(
+        &mut self,
+        peer: PeerIdentity,
+        payload: &[u8],
+        processes: &mut P,
+    ) -> Result<(), i32> {
+        let delivery = protocol::decode_signal_delivery(payload).map_err(|_| STATUS_EINVAL)?;
+        let signal = delivery.signal;
+        if !matches!(
+            signal,
+            protocol::SIGNAL_STOP
+                | protocol::SIGNAL_TSTP
+                | protocol::SIGNAL_TTIN
+                | protocol::SIGNAL_TTOU
+        ) {
+            return Err(STATUS_EINVAL);
+        }
+        let process = self
+            .processes
+            .get(&peer.process_id)
+            .copied()
+            .ok_or(protocol::STATUS_ESRCH)?;
+        if !self.sessions.contains_key(&peer.process_id) {
+            return Err(protocol::STATUS_ESRCH);
+        }
+        if delivery.token == 0
+            || !self
+                .process_wait_states
+                .get_mut(&peer.process_id)
+                .ok_or(protocol::STATUS_ESRCH)?
+                .consume_stop_delivery(delivery)
+        {
+            return Err(protocol::STATUS_EAGAIN);
+        }
+        processes.suspend(process)?;
+        self.process_wait_states
+            .get_mut(&peer.process_id)
+            .ok_or(protocol::STATUS_ESRCH)?
+            .stopped(signal);
+        Ok(())
     }
 
     pub fn handle(
@@ -1231,6 +1385,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_GROUPS_SET
             | protocol::OP_PROCESS_FORKED
             | protocol::OP_WAIT_CHILD
+            | protocol::OP_PROCESS_STOPPED
             | protocol::OP_PROCESS_INFO
             | protocol::OP_SET_PROCESS_GROUP
             | protocol::OP_CREATE_SESSION

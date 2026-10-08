@@ -3,10 +3,12 @@ use mnu_abi::SyscallNumber;
 #[test]
 fn native_process_suspension_is_generic_and_outside_the_posix_protocol() {
     assert_eq!(SyscallNumber::ProcessSuspendCurrent as u64, 669);
+    assert_eq!(SyscallNumber::ProcessHandleSuspend as u64, 670);
 
     let dispatch = include_str!("../../../core/src/syscall/mod.rs");
     let implementation = include_str!("../../../core/src/syscall/process.rs");
     assert!(dispatch.contains("SyscallNumber::ProcessSuspendCurrent"));
+    assert!(dispatch.contains("SyscallNumber::ProcessHandleSuspend"));
     assert!(implementation.contains("pub fn suspend_current_process()"));
     assert!(!implementation.contains("SIGTSTP"));
     assert!(!implementation.contains("SIGTTIN"));
@@ -16,10 +18,18 @@ fn native_process_suspension_is_generic_and_outside_the_posix_protocol() {
     assert!(!protocol.contains("OP_PROCESS_SUSPEND"));
 
     let runtime = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
-    assert!(runtime.contains("SyscallNumber::ProcessSuspendCurrent"));
     assert!(runtime.contains("posix_protocol::SIGNAL_TSTP"));
     assert!(runtime.contains("posix_protocol::SIGNAL_TTIN"));
     assert!(runtime.contains("posix_protocol::SIGNAL_TTOU"));
+    let report = runtime
+        .find(".report_process_stopped(delivery)")
+        .expect("default stop action must report authenticated process state");
+    assert!(runtime.contains("PosixClientError::Remote(posix_protocol::STATUS_EAGAIN)"));
+    assert!(!runtime[report..report + 256.min(runtime.len() - report)]
+        .contains("ProcessSuspendCurrent"));
+
+    let service = include_str!("../src/main.rs");
+    assert!(service.contains("platform::process::suspend_handle(process)"));
 }
 
 #[test]
