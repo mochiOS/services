@@ -271,6 +271,36 @@ pub enum ProcessLifecycle {
     Exited { exit_code: u64 },
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProcessSignalState {
+    pending: u64,
+}
+
+impl ProcessSignalState {
+    pub const fn pending(self) -> u64 {
+        self.pending
+    }
+
+    fn enqueue(&mut self, signal: u32) {
+        self.pending |= 1u64 << (signal - 1);
+    }
+
+    fn dequeue(&mut self, blocked: u64) -> u32 {
+        let unblockable = signal_bit(protocol::SIGNAL_KILL) | signal_bit(protocol::SIGNAL_STOP);
+        let deliverable = self.pending & !(blocked & !unblockable);
+        if deliverable == 0 {
+            return 0;
+        }
+        let index = deliverable.trailing_zeros();
+        self.pending &= !(1u64 << index);
+        index + 1
+    }
+}
+
+const fn signal_bit(signal: u32) -> u64 {
+    1u64 << (signal - 1)
+}
+
 pub trait ProcessBackend<H: Copy> {
     fn status(&mut self, process: H) -> Result<ProcessLifecycle, i32>;
     fn release(&mut self, process: H);
@@ -292,6 +322,7 @@ pub struct PosixService<H: Copy = u32> {
     process_groups: BTreeMap<u64, u64>,
     session_ids: BTreeMap<u64, u64>,
     resource_limits: BTreeMap<(u64, u32), protocol::ResourceLimit>,
+    signals: BTreeMap<u64, ProcessSignalState>,
 }
 
 impl PosixService<u32> {
@@ -305,6 +336,7 @@ impl PosixService<u32> {
             process_groups: BTreeMap::new(),
             session_ids: BTreeMap::new(),
             resource_limits: BTreeMap::new(),
+            signals: BTreeMap::new(),
         }
     }
 }
@@ -324,6 +356,10 @@ impl<H: Copy> PosixService<H> {
 
     pub fn parent_id(&self, process_id: u64) -> Option<u64> {
         self.parents.get(&process_id).copied()
+    }
+
+    pub fn signal_state(&self, process_id: u64) -> Option<ProcessSignalState> {
+        self.signals.get(&process_id).copied()
     }
 
     pub fn is_child(&self, parent_id: u64, process_id: u64) -> bool {
@@ -348,6 +384,8 @@ impl<H: Copy> PosixService<H> {
         self.processes.insert(peer.process_id, process.handle);
         self.process_groups.insert(peer.process_id, peer.process_id);
         self.session_ids.insert(peer.process_id, peer.process_id);
+        self.signals
+            .insert(peer.process_id, ProcessSignalState::default());
         Ok(true)
     }
 
@@ -423,6 +461,8 @@ impl<H: Copy> PosixService<H> {
             .entry(peer.process_id)
             .or_default()
             .insert(child_id);
+        self.signals
+            .insert(child_id, ProcessSignalState::default());
         for (resource, limit) in inherited_limits {
             self.resource_limits.insert((child_id, resource), limit);
         }
@@ -537,6 +577,7 @@ impl<H: Copy> PosixService<H> {
         self.session_ids.remove(&child_id);
         self.resource_limits
             .retain(|(process_id, _), _| *process_id != child_id);
+        self.signals.remove(&child_id);
         self.sessions.remove(&child_id);
         if let Some(directories) = self.directories.remove(&child_id) {
             filesystem.release_object(directories.root);
@@ -696,6 +737,94 @@ impl<H: Copy> PosixService<H> {
         Ok(output)
     }
 
+    fn send_signal(&mut self, caller_id: u64, payload: &[u8]) -> Result<(), i32> {
+        let request =
+            protocol::decode_signal_send_request(payload).map_err(|_| STATUS_EINVAL)?;
+        let caller = self
+            .sessions
+            .get(&caller_id)
+            .copied()
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let caller_group = self
+            .process_groups
+            .get(&caller_id)
+            .copied()
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let requested_group = if request.selector < -1 {
+            request.selector.checked_neg().map(|value| value as u64)
+        } else {
+            None
+        };
+        if request.selector < -1 && requested_group.is_none() {
+            return Err(STATUS_EINVAL);
+        }
+
+        let targets: Vec<u64> = self
+            .sessions
+            .keys()
+            .copied()
+            .filter(|target| match request.selector {
+                selector if selector > 0 => *target == selector as u64,
+                0 => self.process_groups.get(target).copied() == Some(caller_group),
+                -1 => true,
+                _ => self.process_groups.get(target).copied() == requested_group,
+            })
+            .collect();
+        if targets.is_empty() {
+            return Err(protocol::STATUS_ESRCH);
+        }
+
+        let mut permitted = false;
+        for target_id in targets {
+            let Some(target) = self.sessions.get(&target_id).copied() else {
+                continue;
+            };
+            if !signal_permission(caller_id, caller, target_id, target) {
+                continue;
+            }
+            permitted = true;
+            if request.signal != 0 {
+                self.signals
+                    .get_mut(&target_id)
+                    .ok_or(protocol::STATUS_ESRCH)?
+                    .enqueue(request.signal);
+            }
+        }
+        if permitted {
+            Ok(())
+        } else {
+            Err(protocol::STATUS_EPERM)
+        }
+    }
+
+    fn pending_signals_payload(&self, process_id: u64) -> Result<Vec<u8>, i32> {
+        let pending = self
+            .signals
+            .get(&process_id)
+            .copied()
+            .ok_or(protocol::STATUS_ESRCH)?
+            .pending();
+        let mut output = vec![0; protocol::SIGNAL_MASK_LEN];
+        protocol::encode_signal_mask(pending, &mut output).map_err(|_| STATUS_EINVAL)?;
+        Ok(output)
+    }
+
+    fn dequeue_signal_payload(
+        &mut self,
+        process_id: u64,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, i32> {
+        let blocked = protocol::decode_signal_mask(payload).map_err(|_| STATUS_EINVAL)?;
+        let signal = self
+            .signals
+            .get_mut(&process_id)
+            .ok_or(protocol::STATUS_ESRCH)?
+            .dequeue(blocked);
+        let mut output = vec![0; protocol::SIGNAL_NUMBER_LEN];
+        protocol::encode_signal_number(signal, &mut output).map_err(|_| STATUS_EINVAL)?;
+        Ok(output)
+    }
+
     pub fn handle(
         &mut self,
         peer: PeerIdentity,
@@ -742,6 +871,15 @@ impl<H: Copy> PosixService<H> {
             protocol::OP_RESOURCE_LIMIT if header.flags == 0 => {
                 self.resource_limit_payload(peer.process_id, payload)
             }
+            protocol::OP_SIGNAL_SEND if header.flags == 0 => self
+                .send_signal(peer.process_id, payload)
+                .map(|_| Vec::new()),
+            protocol::OP_SIGNAL_PENDING if header.flags == 0 && payload.is_empty() => {
+                self.pending_signals_payload(peer.process_id)
+            }
+            protocol::OP_SIGNAL_DEQUEUE if header.flags == 0 => {
+                self.dequeue_signal_payload(peer.process_id, payload)
+            }
             protocol::OP_PING
             | protocol::OP_SESSION_REGISTER
             | protocol::OP_SESSION_INFO
@@ -761,6 +899,9 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_SET_PROCESS_GROUP
             | protocol::OP_CREATE_SESSION
             | protocol::OP_RESOURCE_LIMIT
+            | protocol::OP_SIGNAL_SEND
+            | protocol::OP_SIGNAL_PENDING
+            | protocol::OP_SIGNAL_DEQUEUE
             | protocol::OP_FTRUNCATE
             | protocol::OP_FSYNC
             | protocol::OP_FGETFL
@@ -1658,6 +1799,19 @@ impl<H: Copy> PosixService<H> {
         session.effective_gid = requested;
         Ok(())
     }
+}
+
+fn signal_permission(
+    caller_id: u64,
+    caller: Session,
+    target_id: u64,
+    target: Session,
+) -> bool {
+    caller_id == target_id
+        || caller.real_uid == target.real_uid
+        || caller.real_uid == target.saved_uid
+        || caller.effective_uid == target.real_uid
+        || caller.effective_uid == target.saved_uid
 }
 
 fn object_error<H>(request_id: u64, status: i32) -> ObjectResponse<H> {
