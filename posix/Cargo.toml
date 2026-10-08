@@ -12,6 +12,7 @@ mochios-filesystem-protocol = { git = "https://github.com/mochiOS/syscalls", pac
 mochios-posix-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-posix-protocol" }
 
 [dev-dependencies]
+mnu-abi = { git = "https://github.com/mochiOS/mnu", package = "mnu-abi" }
 mochios-posix-client = { git = "https://github.com/mochiOS/syscalls", package = "mochios-posix-client", default-features = false, features = ["fd-table"] }
 filesystem-service = { path = "../filesystem" }
 ext4plus = { git = "https://github.com/arihant2math/ext4plus", rev = "382b9e0a65a4b5155015992aee74ff2a798764f8", default-features = false, features = [
