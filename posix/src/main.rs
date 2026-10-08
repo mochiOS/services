@@ -259,6 +259,20 @@ fn main() {
                 })
             }
             (Some(peer), Some((header, payload)), true)
+                if header.opcode == protocol::OP_PROCESS_SIGNALED
+                    && header.flags == 0
+                    && attachments.is_empty() =>
+            {
+                let status = service
+                    .report_process_signaled(peer, payload, &mut processes)
+                    .map(|_| protocol::STATUS_OK)
+                    .unwrap_or_else(|status| status);
+                Some(posix_service::ObjectResponse {
+                    response: status_response(header.request_id, status),
+                    handles: Vec::new(),
+                })
+            }
+            (Some(peer), Some((header, payload)), true)
                 if header.opcode == protocol::OP_WAIT_CHILD
                     && header.flags == 0
                     && attachments.is_empty() =>
@@ -983,6 +997,11 @@ impl posix_service::ProcessBackend<u32> for RuntimeProcesses {
 
     fn suspend(&mut self, process: u32) -> Result<(), i32> {
         mochi_user_platform::process::suspend_handle(process)
+            .map_err(|error| i32::try_from(error.raw()).unwrap_or(-5))
+    }
+
+    fn terminate(&mut self, process: u32, exit_code: u64) -> Result<(), i32> {
+        mochi_user_platform::process::terminate_handle(process, exit_code)
             .map_err(|error| i32::try_from(error.raw()).unwrap_or(-5))
     }
 

@@ -27,9 +27,16 @@ fn native_process_suspension_is_generic_and_outside_the_posix_protocol() {
     assert!(runtime.contains("PosixClientError::Remote(posix_protocol::STATUS_EAGAIN)"));
     assert!(!runtime[report..report + 256.min(runtime.len() - report)]
         .contains("ProcessSuspendCurrent"));
+    assert!(runtime.contains(".report_process_signaled(delivery)"));
+    assert!(runtime.contains(".complete_signal_delivery(delivery)"));
 
     let service = include_str!("../src/main.rs");
     assert!(service.contains("platform::process::suspend_handle(process)"));
+    assert!(service.contains("platform::process::terminate_handle(process, exit_code)"));
+
+    let native_process_control = include_str!("../../../core/src/syscall/handle.rs");
+    assert!(!native_process_control.contains("WTERMSIG"));
+    assert!(!native_process_control.contains("SIGCHLD"));
 }
 
 #[test]

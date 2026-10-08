@@ -1100,7 +1100,9 @@ struct RecordingFilesystem {
 struct RecordingProcesses {
     states: BTreeMap<u32, ProcessLifecycle>,
     suspend_error: Option<i32>,
+    terminate_error: Option<i32>,
     suspended: Vec<u32>,
+    terminated: Vec<(u32, u64)>,
     released: Vec<u32>,
 }
 
@@ -1117,6 +1119,19 @@ impl ProcessBackend<u32> for RecordingProcesses {
             return Err(-3);
         }
         self.suspended.push(process);
+        Ok(())
+    }
+
+    fn terminate(&mut self, process: u32, exit_code: u64) -> Result<(), i32> {
+        if let Some(error) = self.terminate_error {
+            return Err(error);
+        }
+        if !self.states.contains_key(&process) {
+            return Err(-3);
+        }
+        self.terminated.push((process, exit_code));
+        self.states
+            .insert(process, ProcessLifecycle::Exited { exit_code });
         Ok(())
     }
 
@@ -1990,8 +2005,232 @@ fn wait_reports_authenticated_stop_and_continue_transitions_once() {
 }
 
 #[test]
+fn signal_delivery_tokens_are_scoped_exact_and_single_use() {
+    let process = PeerIdentity {
+        process_id: 126,
+        effective_uid: 505,
+        effective_gid: 24,
+    };
+    let mut service = service_for(process);
+    assert_eq!(
+        service
+            .handle(
+                process,
+                protocol::Header {
+                    opcode: protocol::OP_SESSION_REGISTER,
+                    ..protocol::Header::default()
+                },
+                &[],
+            )
+            .header
+            .status,
+        protocol::STATUS_OK
+    );
+
+    let delivery = deliver_signal(&mut service, process, process, protocol::SIGNAL_HUP);
+    assert_ne!(delivery.token, 0);
+    let second = deliver_signal(&mut service, process, process, protocol::SIGNAL_INT);
+    assert_ne!(second.token, 0);
+    assert_ne!(delivery.token, second.token);
+    let mut encoded = [0u8; protocol::SIGNAL_DELIVERY_LEN];
+    protocol::encode_signal_delivery(
+        protocol::SignalDelivery {
+            signal: second.signal,
+            token: delivery.token,
+        },
+        &mut encoded,
+    )
+    .unwrap();
+    assert_eq!(
+        service.complete_signal_delivery(process, &encoded),
+        Err(protocol::STATUS_EAGAIN)
+    );
+
+    protocol::encode_signal_delivery(second, &mut encoded).unwrap();
+    assert_eq!(service.complete_signal_delivery(process, &encoded), Ok(()));
+    protocol::encode_signal_delivery(delivery, &mut encoded).unwrap();
+    assert_eq!(service.complete_signal_delivery(process, &encoded), Ok(()));
+    assert_eq!(
+        service.complete_signal_delivery(process, &encoded),
+        Err(protocol::STATUS_EAGAIN)
+    );
+}
+
+#[test]
+fn outstanding_signal_deliveries_are_bounded_without_losing_pending_state() {
+    let process = PeerIdentity {
+        process_id: 1260,
+        effective_uid: 505,
+        effective_gid: 24,
+    };
+    let mut service = service_for(process);
+    service.handle(
+        process,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let mut deliveries = Vec::new();
+    for _ in 0..protocol::SIGNAL_MAX {
+        deliveries.push(deliver_signal(
+            &mut service,
+            process,
+            process,
+            protocol::SIGNAL_HUP,
+        ));
+    }
+
+    send_signal(&mut service, process, process, protocol::SIGNAL_INT);
+    let mut mask = [0u8; protocol::SIGNAL_MASK_LEN];
+    protocol::encode_signal_mask(0, &mut mask).unwrap();
+    let response = service.handle(
+        process,
+        protocol::Header {
+            opcode: protocol::OP_SIGNAL_DEQUEUE,
+            ..protocol::Header::default()
+        },
+        &mask,
+    );
+    assert_eq!(response.header.status, protocol::STATUS_EAGAIN);
+
+    let mut encoded = [0u8; protocol::SIGNAL_DELIVERY_LEN];
+    protocol::encode_signal_delivery(deliveries[0], &mut encoded).unwrap();
+    service
+        .complete_signal_delivery(process, &encoded)
+        .unwrap();
+    let delivery = dequeue_signal(&mut service, process);
+    assert_eq!(delivery.signal, protocol::SIGNAL_INT);
+    assert_ne!(delivery.token, 0);
+}
+
+#[test]
+fn wait_reports_default_signal_termination_without_faking_normal_exit() {
+    let parent = PeerIdentity {
+        process_id: 127,
+        effective_uid: 505,
+        effective_gid: 24,
+    };
+    let child = PeerIdentity {
+        process_id: 128,
+        ..parent
+    };
+    let mut service = service_for(parent);
+    service.handle(
+        parent,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let mut filesystem = RecordingFilesystem::default();
+    service
+        .adopt_child(
+            parent,
+            AuthenticatedProcess {
+                handle: 65,
+                process_id: child.process_id,
+            },
+            &mut filesystem,
+        )
+        .unwrap();
+    let mut processes = RecordingProcesses::default();
+    processes.states.insert(65, ProcessLifecycle::Running);
+
+    let delivery = deliver_signal(&mut service, parent, child, 15);
+    let mut encoded = [0u8; protocol::SIGNAL_DELIVERY_LEN];
+    protocol::encode_signal_delivery(delivery, &mut encoded).unwrap();
+    assert_eq!(
+        service.report_process_signaled(child, &encoded, &mut processes),
+        Ok(())
+    );
+    assert_eq!(processes.terminated, vec![(65, 143)]);
+
+    let waited = service
+        .wait_child(
+            parent,
+            protocol::WaitRequest {
+                selector: child.process_id as i64,
+                options: 0,
+            },
+            &mut filesystem,
+            &mut processes,
+        )
+        .unwrap();
+    assert_eq!(waited.process_id, child.process_id);
+    assert_eq!(waited.status, 15);
+    assert_eq!(processes.released, vec![65]);
+}
+
+#[test]
+fn failed_native_termination_does_not_publish_signaled_wait_state() {
+    let parent = PeerIdentity {
+        process_id: 129,
+        effective_uid: 505,
+        effective_gid: 24,
+    };
+    let child = PeerIdentity {
+        process_id: 130,
+        ..parent
+    };
+    let mut service = service_for(parent);
+    service.handle(
+        parent,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let mut filesystem = RecordingFilesystem::default();
+    service
+        .adopt_child(
+            parent,
+            AuthenticatedProcess {
+                handle: 66,
+                process_id: child.process_id,
+            },
+            &mut filesystem,
+        )
+        .unwrap();
+    let mut processes = RecordingProcesses::default();
+    processes.states.insert(66, ProcessLifecycle::Running);
+    processes.terminate_error = Some(-5);
+
+    let delivery = deliver_signal(&mut service, parent, child, 15);
+    let mut encoded = [0u8; protocol::SIGNAL_DELIVERY_LEN];
+    protocol::encode_signal_delivery(delivery, &mut encoded).unwrap();
+    assert_eq!(
+        service.report_process_signaled(child, &encoded, &mut processes),
+        Err(-5)
+    );
+    assert!(processes.terminated.is_empty());
+
+    processes.terminate_error = None;
+    processes
+        .states
+        .insert(66, ProcessLifecycle::Exited { exit_code: 143 });
+    let waited = service
+        .wait_child(
+            parent,
+            protocol::WaitRequest {
+                selector: child.process_id as i64,
+                options: 0,
+            },
+            &mut filesystem,
+            &mut processes,
+        )
+        .unwrap();
+    assert_eq!(waited.status, 143 << 8);
+}
+
+#[test]
 fn wait_option_values_match_the_newlib_target_abi() {
     assert_eq!(protocol::SIGNAL_DELIVERY_LEN, 16);
+    assert_eq!(protocol::OP_SIGNAL_DELIVERY_COMPLETE, 51);
+    assert_eq!(protocol::OP_PROCESS_SIGNALED, 52);
     assert_eq!(protocol::WAIT_NOHANG, 1);
     assert_eq!(protocol::WAIT_UNTRACED, 2);
     assert_eq!(protocol::WAIT_CONTINUED, 8);
