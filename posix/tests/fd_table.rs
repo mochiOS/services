@@ -1,5 +1,5 @@
 use mochios_posix_client::fd::{
-    Entry, FD_CLOEXEC, FdTable, FileOps, HandleOps, SeekBasis,
+    Entry, FD_CLOEXEC, FdError, FdTable, FileOps, HandleOps, SeekBasis,
 };
 
 #[derive(Default)]
@@ -119,6 +119,25 @@ fn fast_path_resolves_local_fds_to_handles_before_io() {
         Ok(4)
     );
     assert_eq!(handles.io_handles, vec![0xfeed, 0xfeed, 0xfeed]);
+}
+
+#[test]
+fn descriptor_allocation_respects_the_process_local_range() {
+    let mut table = FdTable::new();
+    let entry = Entry {
+        handle: 7,
+        rights: 1,
+        descriptor_flags: 0,
+    };
+
+    assert_eq!(table.install_from(3, 5, entry), Ok(3));
+    assert_eq!(table.install_from(3, 5, entry), Ok(4));
+    assert_eq!(
+        table.install_from(3, 5, entry),
+        Err(FdError::InvalidDescriptor)
+    );
+    assert_eq!(table.get(0), None);
+    assert_eq!(table.get(3), Some(entry));
 }
 
 #[test]
