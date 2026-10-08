@@ -87,23 +87,27 @@ fn main() {
     let mut request_bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
     let mut response_bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
     loop {
+        if let Err(error) = service.refresh_child_exit_notifications(&mut processes) {
+            platform::logln!(
+                "posix.service: child lifecycle refresh failed errno={}",
+                error
+            );
+        }
         deliver_process_resume_notifications(&mut service);
-        deliver_signal_notifications(&mut service, &mut signal_threads);
         complete_pending_waits(
             &mut pending_waits,
             &mut service,
             &mut filesystem,
             &mut processes,
         );
-        if !pending_waits.is_empty() {
-            match wait_for_request_or_child(endpoint_handle, &pending_waits, &service) {
-                Ok(true) => {}
-                Ok(false) => continue,
-                Err(error) => {
-                    platform::logln!("posix.service: lifecycle wait failed errno={}", error);
-                    platform::thread::yield_now();
-                    continue;
-                }
+        deliver_signal_notifications(&mut service, &mut signal_threads);
+        match wait_for_request_or_child(endpoint_handle, &service) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(error) => {
+                platform::logln!("posix.service: lifecycle wait failed errno={}", error);
+                platform::thread::yield_now();
+                continue;
             }
         }
         let mut received_handles = platform::ipc::IpcObjectHandles::default();
@@ -805,7 +809,6 @@ fn complete_pending_waits(
 #[cfg(target_os = "mochios")]
 fn wait_for_request_or_child(
     endpoint: u32,
-    pending: &[PendingWait],
     service: &posix_service::PosixService<u32>,
 ) -> Result<bool, i64> {
     use mochi_user_platform::{process, syscall};
@@ -816,20 +819,12 @@ fn wait_for_request_or_child(
         interests: syscall::HANDLE_SIGNAL_READABLE,
         ..syscall::HandleWaitItem::default()
     });
-    for wait in pending {
-        let handles = service
-            .wait_handles(wait.peer, wait.request)
-            .map_err(i64::from)?;
-        for handle in handles {
-            if items.iter().any(|item| item.handle == handle) {
-                continue;
-            }
-            items.push(syscall::HandleWaitItem {
-                handle,
-                interests: syscall::HANDLE_SIGNAL_TERMINATED,
-                ..syscall::HandleWaitItem::default()
-            });
-        }
+    for handle in service.child_lifecycle_handles() {
+        items.push(syscall::HandleWaitItem {
+            handle,
+            interests: syscall::HANDLE_SIGNAL_TERMINATED,
+            ..syscall::HandleWaitItem::default()
+        });
     }
     process::wait_many(&mut items, syscall::HANDLE_WAIT_INFINITE)
         .map(|index| index == 0)

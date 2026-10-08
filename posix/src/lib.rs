@@ -316,29 +316,32 @@ struct ProcessWaitState {
     stop_signal: u32,
     stop_reported: bool,
     continued_pending: bool,
+    exit_notified: bool,
     deliveries: BTreeMap<u64, u32>,
     termination_signal: Option<u32>,
 }
 
 impl ProcessWaitState {
-    fn stopped(&mut self, signal: u32) {
+    fn stopped(&mut self, signal: u32) -> bool {
         if self.stopped {
-            return;
+            return false;
         }
         self.stopped = true;
         self.stop_signal = signal;
         self.stop_reported = false;
         self.continued_pending = false;
+        true
     }
 
-    fn continued(&mut self) {
+    fn continued(&mut self) -> bool {
         self.cancel_stop_deliveries();
         if !self.stopped {
-            return;
+            return false;
         }
         self.stopped = false;
         self.stop_reported = false;
         self.continued_pending = true;
+        true
     }
 
     fn begin_delivery(&mut self, delivery: protocol::SignalDelivery) {
@@ -554,17 +557,20 @@ impl<H: Copy> PosixService<H> {
     }
 
     fn enqueue_signal(&mut self, process_id: u64, signal: u32) -> Result<(), i32> {
-        if signal == protocol::SIGNAL_CONT {
+        let continued = if signal == protocol::SIGNAL_CONT {
             self.process_wait_states
                 .get_mut(&process_id)
                 .ok_or(protocol::STATUS_ESRCH)?
-                .continued();
+                .continued()
         } else if signal == protocol::SIGNAL_KILL {
             self.process_wait_states
                 .get_mut(&process_id)
                 .ok_or(protocol::STATUS_ESRCH)?
                 .cancel_stop_deliveries();
-        }
+            false
+        } else {
+            false
+        };
         self.signals
             .get_mut(&process_id)
             .ok_or(protocol::STATUS_ESRCH)?
@@ -573,7 +579,83 @@ impl<H: Copy> PosixService<H> {
         if matches!(signal, protocol::SIGNAL_KILL | protocol::SIGNAL_CONT) {
             self.process_resume_notifications.insert(process_id);
         }
+        if continued {
+            self.notify_parent_of_child_change(process_id)?;
+        }
         Ok(())
+    }
+
+    fn notify_parent_of_child_change(&mut self, child_id: u64) -> Result<(), i32> {
+        let Some(parent_id) = self.parents.get(&child_id).copied() else {
+            return Ok(());
+        };
+        if !self.signals.contains_key(&parent_id) {
+            return Ok(());
+        }
+        self.enqueue_signal(parent_id, protocol::SIGNAL_CHLD)
+    }
+
+    fn note_child_exited(&mut self, child_id: u64) -> Result<bool, i32> {
+        let wait_state = self
+            .process_wait_states
+            .get_mut(&child_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        if wait_state.exit_notified {
+            return Ok(false);
+        }
+        wait_state.exit_notified = true;
+        if let Err(status) = self.notify_parent_of_child_change(child_id) {
+            if let Some(wait_state) = self.process_wait_states.get_mut(&child_id) {
+                wait_state.exit_notified = false;
+            }
+            return Err(status);
+        }
+        Ok(true)
+    }
+
+    /// Observes native process lifecycle without assigning POSIX meaning in
+    /// the kernel. Each child exit queues one coalescing SIGCHLD for its POSIX
+    /// parent and remains waitable until the parent reaps it.
+    pub fn refresh_child_exit_notifications<P: ProcessBackend<H>>(
+        &mut self,
+        processes: &mut P,
+    ) -> Result<usize, i32> {
+        let candidates: Vec<(u64, H)> = self
+            .parents
+            .keys()
+            .filter_map(|child_id| {
+                let wait_state = self.process_wait_states.get(child_id)?;
+                if wait_state.exit_notified {
+                    return None;
+                }
+                self.processes
+                    .get(child_id)
+                    .copied()
+                    .map(|handle| (*child_id, handle))
+            })
+            .collect();
+        let mut notified = 0;
+        for (child_id, handle) in candidates {
+            if matches!(processes.status(handle)?, ProcessLifecycle::Exited { .. })
+                && self.note_child_exited(child_id)?
+            {
+                notified += 1;
+            }
+        }
+        Ok(notified)
+    }
+
+    /// Native process handles which can still produce a first exit event.
+    /// The service main loop combines these with its IPC endpoint in one
+    /// generic HandleWaitMany operation.
+    pub fn child_lifecycle_handles(&self) -> Vec<H> {
+        self.parents
+            .keys()
+            .filter_map(|child_id| match self.process_wait_states.get(child_id) {
+                Some(state) if !state.exit_notified => self.processes.get(child_id).copied(),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Enqueues a terminal-generated signal for every member of the terminal's
@@ -744,6 +826,7 @@ impl<H: Copy> PosixService<H> {
                 .copied()
                 .ok_or(protocol::STATUS_ESRCH)?;
             if let ProcessLifecycle::Exited { exit_code } = processes.status(handle)? {
+                self.note_child_exited(child)?;
                 let status = self
                     .process_wait_states
                     .get(&child)
@@ -1325,10 +1408,14 @@ impl<H: Copy> PosixService<H> {
             return Err(protocol::STATUS_EAGAIN);
         }
         processes.suspend(process)?;
-        self.process_wait_states
+        let stopped = self
+            .process_wait_states
             .get_mut(&peer.process_id)
             .ok_or(protocol::STATUS_ESRCH)?
             .stopped(signal);
+        if stopped {
+            self.notify_parent_of_child_change(peer.process_id)?;
+        }
         Ok(())
     }
 

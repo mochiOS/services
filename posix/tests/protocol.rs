@@ -1780,6 +1780,80 @@ fn wait_selects_and_reaps_only_authenticated_children() {
     );
 }
 
+#[test]
+fn child_exit_queues_sigchld_before_the_parent_waits() {
+    let parent = PeerIdentity {
+        process_id: 1230,
+        effective_uid: 505,
+        effective_gid: 24,
+    };
+    let child = PeerIdentity {
+        process_id: 1231,
+        ..parent
+    };
+    let mut service = service_for(parent);
+    service.handle(
+        parent,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let mut filesystem = RecordingFilesystem::default();
+    service
+        .adopt_child(
+            parent,
+            AuthenticatedProcess {
+                handle: 631,
+                process_id: child.process_id,
+            },
+            &mut filesystem,
+        )
+        .unwrap();
+    let mut processes = RecordingProcesses::default();
+    processes.states.insert(631, ProcessLifecycle::Running);
+    assert_eq!(service.child_lifecycle_handles(), vec![631]);
+
+    processes
+        .states
+        .insert(631, ProcessLifecycle::Exited { exit_code: 4 });
+    assert_eq!(
+        service.refresh_child_exit_notifications(&mut processes),
+        Ok(1)
+    );
+    assert_eq!(
+        service.refresh_child_exit_notifications(&mut processes),
+        Ok(0)
+    );
+    assert!(service.child_lifecycle_handles().is_empty());
+    assert_eq!(
+        service.signal_state(parent.process_id).unwrap().pending(),
+        1u64 << (protocol::SIGNAL_CHLD - 1)
+    );
+
+    let delivery = dequeue_signal(&mut service, parent);
+    assert_eq!(delivery.signal, protocol::SIGNAL_CHLD);
+    let mut encoded = [0u8; protocol::SIGNAL_DELIVERY_LEN];
+    protocol::encode_signal_delivery(delivery, &mut encoded).unwrap();
+    service
+        .complete_signal_delivery(parent, &encoded)
+        .unwrap();
+
+    let waited = service
+        .wait_child(
+            parent,
+            protocol::WaitRequest {
+                selector: child.process_id as i64,
+                options: 0,
+            },
+            &mut filesystem,
+            &mut processes,
+        )
+        .unwrap();
+    assert_eq!(waited.status, 4 << 8);
+}
+
 fn send_signal(
     service: &mut PosixService,
     sender: PeerIdentity,
@@ -1927,6 +2001,13 @@ fn wait_reports_authenticated_stop_and_continue_transitions_once() {
     let stopped = service.report_process_stopped(child, &delivery_bytes, &mut processes);
     assert_eq!(stopped, Ok(()));
     assert_eq!(processes.suspended, vec![64]);
+    let child_change = dequeue_signal(&mut service, parent);
+    assert_eq!(child_change.signal, protocol::SIGNAL_CHLD);
+    let mut child_change_bytes = [0u8; protocol::SIGNAL_DELIVERY_LEN];
+    protocol::encode_signal_delivery(child_change, &mut child_change_bytes).unwrap();
+    service
+        .complete_signal_delivery(parent, &child_change_bytes)
+        .unwrap();
 
     assert_eq!(
         service
@@ -1963,6 +2044,12 @@ fn wait_reports_authenticated_stop_and_continue_transitions_once() {
     );
 
     send_signal(&mut service, parent, child, protocol::SIGNAL_CONT);
+    let child_change = dequeue_signal(&mut service, parent);
+    assert_eq!(child_change.signal, protocol::SIGNAL_CHLD);
+    protocol::encode_signal_delivery(child_change, &mut child_change_bytes).unwrap();
+    service
+        .complete_signal_delivery(parent, &child_change_bytes)
+        .unwrap();
     let continued = service
         .wait_child(
             parent,
