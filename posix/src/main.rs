@@ -1255,6 +1255,48 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         )
     }
 
+    fn link_at(
+        &mut self,
+        request: &posix_service::PreparedLink,
+        paths: posix_service::RenamePathObjects<mochi_user_platform::handle::Handle>,
+    ) -> Result<(), i32> {
+        use mochios_filesystem_protocol as filesystem;
+        use mochios_posix_protocol as posix;
+
+        let mut flags = filesystem::LINK_AT_ROOT_ATTACHED;
+        if paths.old_base.is_some() {
+            flags |= filesystem::LINK_AT_OLD_BASE_ATTACHED;
+        }
+        if paths.new_base.is_some() {
+            flags |= filesystem::LINK_AT_NEW_BASE_ATTACHED;
+        }
+        if request.flags & posix::LINK_FOLLOW_SOURCE != 0 {
+            flags |= filesystem::LINK_AT_FOLLOW_SOURCE;
+        }
+        let old_length = u32::try_from(request.old_path.len()).map_err(|_| -22)?;
+        let mut operation = Vec::with_capacity(request.old_path.len() + request.new_path.len());
+        operation.extend_from_slice(request.old_path.as_bytes());
+        operation.extend_from_slice(request.new_path.as_bytes());
+        let payload = Self::credential_payload(
+            request.effective_uid,
+            request.effective_gid,
+            &request.supplementary_groups,
+            &operation,
+        )?;
+        self.empty_call(
+            filesystem::Header {
+                opcode: filesystem::OP_LINK_AT,
+                request_id: 20,
+                length: payload.len() as u32,
+                flags,
+                mode: old_length,
+                ..filesystem::Header::default()
+            },
+            &payload,
+            Self::rename_path_handles(paths)?,
+        )
+    }
+
     fn truncate_at(
         &mut self,
         request: &posix_service::PreparedTruncate,

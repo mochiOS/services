@@ -116,6 +116,7 @@ impl FilesystemService {
             | protocol::OP_MKDIR_AT
             | protocol::OP_UNLINK_AT
             | protocol::OP_RENAME_AT
+            | protocol::OP_LINK_AT
             | protocol::OP_TRUNCATE_AT
             | protocol::OP_SYMLINK_AT
             | protocol::OP_READLINK_AT
@@ -1942,6 +1943,105 @@ impl FilesystemService {
             }
         }
         self.forget_node_paths(source_node_id);
+        Ok(self.success(request))
+    }
+
+    pub fn link_at(
+        &mut self,
+        request: protocol::Header,
+        payload: &[u8],
+        anchors: RenameAnchors,
+        credentials: protocol::Credentials,
+    ) -> Result<Response, i32> {
+        if request.flags & !protocol::LINK_AT_FLAGS_ALL != 0 {
+            return Err(EINVAL);
+        }
+        if (request.flags & protocol::LINK_AT_ROOT_ATTACHED != 0) != anchors.root_open_id.is_some()
+            || (request.flags & protocol::LINK_AT_OLD_BASE_ATTACHED != 0)
+                != anchors.old_base_open_id.is_some()
+            || (request.flags & protocol::LINK_AT_NEW_BASE_ATTACHED != 0)
+                != anchors.new_base_open_id.is_some()
+        {
+            return Err(EINVAL);
+        }
+        let split = request.mode as usize;
+        let (old_path, new_path) = payload.split_at_checked(split).ok_or(EINVAL)?;
+        if old_path.is_empty()
+            || new_path.is_empty()
+            || old_path.len() > protocol::MAX_PATH_LEN
+            || new_path.len() > protocol::MAX_PATH_LEN
+        {
+            return Err(EINVAL);
+        }
+        let uid = credentials.effective_uid;
+        let gid = credentials.effective_gid;
+        let groups = credentials.supplementary_groups();
+        let (old_root, old_base) = self.resolve_anchors(
+            old_path,
+            PathAnchors {
+                root_open_id: anchors.root_open_id,
+                base_open_id: anchors.old_base_open_id,
+            },
+        )?;
+        let (new_root, new_base) = self.resolve_anchors(
+            new_path,
+            PathAnchors {
+                root_open_id: anchors.root_open_id,
+                base_open_id: anchors.new_base_open_id,
+            },
+        )?;
+        let source_follow = if request.flags & protocol::LINK_AT_FOLLOW_SOURCE != 0 {
+            FollowSymlinks::All
+        } else {
+            FollowSymlinks::ExcludeFinalComponent
+        };
+        let mut source_inode = match self.resolve_path_at(
+            old_root,
+            old_base,
+            old_path,
+            source_follow,
+            uid,
+            gid,
+            groups,
+        )? {
+            Resolution::Found { inode, .. } => inode,
+            Resolution::Missing { .. } => return Err(ENOENT),
+        };
+        if source_inode.file_type().is_dir() {
+            return Err(EPERM);
+        }
+        let (new_parent_inode, new_name) = match self.resolve_path_at(
+            new_root,
+            new_base,
+            new_path,
+            FollowSymlinks::ExcludeFinalComponent,
+            uid,
+            gid,
+            groups,
+        )? {
+            Resolution::Found { .. } => return Err(EEXIST),
+            Resolution::Missing { parent, name } => (parent, name),
+        };
+        let metadata = new_parent_inode.metadata();
+        if !permission_allows(
+            metadata.mode(),
+            protocol::NODE_TYPE_DIRECTORY,
+            metadata.uid(),
+            metadata.gid(),
+            uid,
+            gid,
+            groups,
+            protocol::ACCESS_AT_WRITE | protocol::ACCESS_AT_EXECUTE,
+        ) {
+            return Err(EACCES);
+        }
+        let mut new_parent = Dir::open_inode(&self.fs, new_parent_inode).map_err(errno)?;
+        new_parent
+            .link(
+                DirEntryName::try_from(new_name.as_slice()).map_err(|_| EINVAL)?,
+                &mut source_inode,
+            )
+            .map_err(errno)?;
         Ok(self.success(request))
     }
 

@@ -73,6 +73,18 @@ pub struct PreparedRename {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedLink {
+    pub old_base: protocol::OpenBase,
+    pub new_base: protocol::OpenBase,
+    pub flags: u32,
+    pub old_path: String,
+    pub new_path: String,
+    pub effective_uid: u32,
+    pub effective_gid: u32,
+    pub supplementary_groups: Vec<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedTruncate {
     pub base: protocol::OpenBase,
     pub path: String,
@@ -245,6 +257,8 @@ pub trait FilesystemBackend<H: Copy> {
         request: &PreparedRename,
         paths: RenamePathObjects<H>,
     ) -> Result<(), i32>;
+
+    fn link_at(&mut self, request: &PreparedLink, paths: RenamePathObjects<H>) -> Result<(), i32>;
 
     fn truncate_at(&mut self, request: &PreparedTruncate, paths: PathObjects<H>)
     -> Result<(), i32>;
@@ -947,6 +961,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_MKDIR_AT
             | protocol::OP_UNLINK_AT
             | protocol::OP_RENAME_AT
+            | protocol::OP_LINK_AT
             | protocol::OP_TRUNCATE_AT
             | protocol::OP_SYMLINK_AT
             | protocol::OP_READLINK_AT
@@ -996,6 +1011,7 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_MKDIR_AT
                 | protocol::OP_UNLINK_AT
                 | protocol::OP_RENAME_AT
+                | protocol::OP_LINK_AT
                 | protocol::OP_TRUNCATE_AT
                 | protocol::OP_SYMLINK_AT
                 | protocol::OP_READLINK_AT
@@ -1031,6 +1047,7 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_MKDIR_AT
                 | protocol::OP_UNLINK_AT
                 | protocol::OP_RENAME_AT
+                | protocol::OP_LINK_AT
                 | protocol::OP_TRUNCATE_AT
                 | protocol::OP_SYMLINK_AT
                 | protocol::OP_READLINK_AT
@@ -1331,6 +1348,25 @@ impl<H: Copy> PosixService<H> {
                     Err(status) => object_error(header.request_id, status),
                 }
             }
+            protocol::OP_LINK_AT => {
+                let prepared = match self.prepare_link_at(peer, payload, handles.len()) {
+                    Ok(prepared) => prepared,
+                    Err(status) => return object_error(header.request_id, status),
+                };
+                let paths = match self.rename_path_objects(
+                    peer.process_id,
+                    prepared.old_base,
+                    prepared.new_base,
+                    handles,
+                ) {
+                    Ok(paths) => paths,
+                    Err(status) => return object_error(header.request_id, status),
+                };
+                match filesystem.link_at(&prepared, paths) {
+                    Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
+                    Err(status) => object_error(header.request_id, status),
+                }
+            }
             protocol::OP_TRUNCATE_AT => {
                 let prepared = match self.prepare_truncate_at(peer, payload, handles.len()) {
                     Ok(prepared) => prepared,
@@ -1617,6 +1653,39 @@ impl<H: Copy> PosixService<H> {
         Ok(PreparedRename {
             old_base: request.old_base,
             new_base: request.new_base,
+            old_path: request.old_path.to_owned(),
+            new_path: request.new_path.to_owned(),
+            effective_uid: session.effective_uid,
+            effective_gid: session.effective_gid,
+            supplementary_groups: self
+                .supplementary_groups
+                .get(&peer.process_id)
+                .cloned()
+                .unwrap_or_default(),
+        })
+    }
+
+    pub fn prepare_link_at(
+        &self,
+        peer: PeerIdentity,
+        payload: &[u8],
+        attached_handles: usize,
+    ) -> Result<PreparedLink, i32> {
+        let session = self
+            .sessions
+            .get(&peer.process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let request = protocol::decode_link_at(payload).map_err(|_| STATUS_EINVAL)?;
+        let expected_handles =
+            usize::from(request.old_base == protocol::OpenBase::AttachedDirectory)
+                + usize::from(request.new_base == protocol::OpenBase::AttachedDirectory);
+        if attached_handles != expected_handles {
+            return Err(STATUS_EINVAL);
+        }
+        Ok(PreparedLink {
+            old_base: request.old_base,
+            new_base: request.new_base,
+            flags: request.flags,
             old_path: request.old_path.to_owned(),
             new_path: request.new_path.to_owned(),
             effective_uid: session.effective_uid,

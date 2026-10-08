@@ -416,12 +416,47 @@ fn main() {
                         },
                     }
                 } else if header.opcode == protocol::OP_RENAME_AT {
-                    let anchors = decode_rename_anchors(header.flags, &attached);
+                    let anchors = decode_two_path_anchors(
+                        header.flags,
+                        protocol::RENAME_AT_FLAGS_ALL,
+                        protocol::RENAME_AT_ROOT_ATTACHED,
+                        protocol::RENAME_AT_OLD_BASE_ATTACHED,
+                        protocol::RENAME_AT_NEW_BASE_ATTACHED,
+                        &attached,
+                    );
                     let result = protocol::decode_credentials_payload(payload)
                         .map_err(|_| 22)
                         .and_then(|(credentials, payload)| {
                             anchors.and_then(|anchors| {
                                 service.rename_at(header, payload, anchors, credentials)
+                            })
+                        });
+                    match result {
+                        Ok(response) => response,
+                        Err(error) => filesystem_service::service::Response {
+                            header: protocol::Header {
+                                opcode: protocol::OP_STATUS,
+                                request_id: header.request_id,
+                                status: -error,
+                                ..protocol::Header::default()
+                            },
+                            payload: Vec::new(),
+                        },
+                    }
+                } else if header.opcode == protocol::OP_LINK_AT {
+                    let anchors = decode_two_path_anchors(
+                        header.flags,
+                        protocol::LINK_AT_FLAGS_ALL,
+                        protocol::LINK_AT_ROOT_ATTACHED,
+                        protocol::LINK_AT_OLD_BASE_ATTACHED,
+                        protocol::LINK_AT_NEW_BASE_ATTACHED,
+                        &attached,
+                    );
+                    let result = protocol::decode_credentials_payload(payload)
+                        .map_err(|_| 22)
+                        .and_then(|(credentials, payload)| {
+                            anchors.and_then(|anchors| {
+                                service.link_at(header, payload, anchors, credentials)
                             })
                         });
                     match result {
@@ -702,14 +737,17 @@ fn decode_path_anchors(
 }
 
 #[cfg(target_os = "mochios")]
-fn decode_rename_anchors(
+fn decode_two_path_anchors(
     flags: u32,
+    allowed_flags: u32,
+    root_flag: u32,
+    old_base_flag: u32,
+    new_base_flag: u32,
     attached: &mochi_user_platform::ipc::IpcObjectHandles,
 ) -> Result<filesystem_service::service::RenameAnchors, i32> {
     use mochi_user_platform as platform;
-    use mochios_filesystem_protocol as protocol;
 
-    if flags & !protocol::RENAME_AT_FLAGS_ALL != 0 {
+    if flags & !allowed_flags != 0 {
         return Err(22);
     }
     let mut index = 0usize;
@@ -729,9 +767,9 @@ fn decode_rename_anchors(
             .map_err(|_| 9)
     };
     let anchors = filesystem_service::service::RenameAnchors {
-        root_open_id: next_open(flags & protocol::RENAME_AT_ROOT_ATTACHED != 0)?,
-        old_base_open_id: next_open(flags & protocol::RENAME_AT_OLD_BASE_ATTACHED != 0)?,
-        new_base_open_id: next_open(flags & protocol::RENAME_AT_NEW_BASE_ATTACHED != 0)?,
+        root_open_id: next_open(flags & root_flag != 0)?,
+        old_base_open_id: next_open(flags & old_base_flag != 0)?,
+        new_base_open_id: next_open(flags & new_base_flag != 0)?,
     };
     if index != attached.count as usize {
         return Err(22);

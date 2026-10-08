@@ -611,6 +611,231 @@ fn rename_at_moves_between_two_open_directories_and_replaces_atomically() {
 }
 
 #[test]
+fn link_at_creates_one_inode_across_two_open_directories() {
+    let mut filesystem = test_filesystem();
+    let old_base = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+                ..protocol::Header::default()
+            },
+            b"/create-base",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    let new_base = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+                ..protocol::Header::default()
+            },
+            b"/removed",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    let source = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ
+                    | protocol::OPEN_AT_WRITE
+                    | protocol::OPEN_AT_CREATE
+                    | protocol::OPEN_AT_BASE_ATTACHED,
+                mode: 0o640,
+                ..protocol::Header::default()
+            },
+            b"hard-link-source",
+            PathAnchors {
+                root_open_id: None,
+                base_open_id: Some(old_base.header.open_id),
+            },
+            root_credentials(),
+        )
+        .unwrap();
+    filesystem
+        .provider_write(source.header.open_id, b"shared")
+        .unwrap();
+    let mut payload = b"hard-link-source".to_vec();
+    payload.extend_from_slice(b"hard-link-destination");
+    filesystem
+        .link_at(
+            protocol::Header {
+                opcode: protocol::OP_LINK_AT,
+                flags: protocol::LINK_AT_OLD_BASE_ATTACHED | protocol::LINK_AT_NEW_BASE_ATTACHED,
+                mode: b"hard-link-source".len() as u32,
+                ..protocol::Header::default()
+            },
+            &payload,
+            RenameAnchors {
+                root_open_id: None,
+                old_base_open_id: Some(old_base.header.open_id),
+                new_base_open_id: Some(new_base.header.open_id),
+            },
+            root_credentials(),
+        )
+        .unwrap();
+
+    let source_status = filesystem
+        .stat_at(
+            protocol::Header {
+                opcode: protocol::OP_STAT_AT,
+                flags: protocol::STAT_AT_BASE_ATTACHED,
+                ..protocol::Header::default()
+            },
+            b"hard-link-source",
+            PathAnchors {
+                root_open_id: None,
+                base_open_id: Some(old_base.header.open_id),
+            },
+            root_credentials(),
+        )
+        .unwrap();
+    let destination_status = filesystem
+        .stat_at(
+            protocol::Header {
+                opcode: protocol::OP_STAT_AT,
+                flags: protocol::STAT_AT_BASE_ATTACHED,
+                ..protocol::Header::default()
+            },
+            b"hard-link-destination",
+            PathAnchors {
+                root_open_id: None,
+                base_open_id: Some(new_base.header.open_id),
+            },
+            root_credentials(),
+        )
+        .unwrap();
+    let source_status = protocol::decode_node_status(&source_status.payload).unwrap();
+    let destination_status = protocol::decode_node_status(&destination_status.payload).unwrap();
+    assert_eq!(source_status.node_id, destination_status.node_id);
+    assert_eq!(source_status.link_count, 2);
+    assert_eq!(destination_status.link_count, 2);
+
+    let destination = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ
+                    | protocol::OPEN_AT_WRITE
+                    | protocol::OPEN_AT_BASE_ATTACHED,
+                ..protocol::Header::default()
+            },
+            b"hard-link-destination",
+            PathAnchors {
+                root_open_id: None,
+                base_open_id: Some(new_base.header.open_id),
+            },
+            root_credentials(),
+        )
+        .unwrap();
+    filesystem
+        .provider_write(destination.header.open_id, b"alias!")
+        .unwrap();
+    filesystem
+        .provider_seek(source.header.open_id, 0, HANDLE_SEEK_START)
+        .unwrap();
+    assert_eq!(
+        filesystem.provider_read(source.header.open_id, 6).unwrap(),
+        b"alias!"
+    );
+
+    assert!(matches!(
+        filesystem.link_at(
+            protocol::Header {
+                opcode: protocol::OP_LINK_AT,
+                flags: protocol::LINK_AT_OLD_BASE_ATTACHED | protocol::LINK_AT_NEW_BASE_ATTACHED,
+                mode: b"hard-link-source".len() as u32,
+                ..protocol::Header::default()
+            },
+            &payload,
+            RenameAnchors {
+                root_open_id: None,
+                old_base_open_id: Some(old_base.header.open_id),
+                new_base_open_id: Some(new_base.header.open_id),
+            },
+            root_credentials(),
+        ),
+        Err(17)
+    ));
+}
+
+#[test]
+fn link_at_only_follows_the_source_symlink_when_requested() {
+    let mut filesystem = test_filesystem();
+    filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+                mode: 0o640,
+                ..protocol::Header::default()
+            },
+            b"/create-base/target",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    for (destination, follow) in [
+        (b"/removed/symlink-alias".as_slice(), false),
+        (b"/removed/target-alias".as_slice(), true),
+    ] {
+        let mut payload = b"/create-base/dangling".to_vec();
+        payload.extend_from_slice(destination);
+        filesystem
+            .link_at(
+                protocol::Header {
+                    opcode: protocol::OP_LINK_AT,
+                    flags: if follow {
+                        protocol::LINK_AT_FOLLOW_SOURCE
+                    } else {
+                        0
+                    },
+                    mode: b"/create-base/dangling".len() as u32,
+                    ..protocol::Header::default()
+                },
+                &payload,
+                RenameAnchors::default(),
+                root_credentials(),
+            )
+            .unwrap();
+    }
+    let status = |filesystem: &mut FilesystemService, path: &[u8], nofollow: bool| {
+        let response = filesystem
+            .stat_at(
+                protocol::Header {
+                    opcode: protocol::OP_STAT_AT,
+                    flags: if nofollow {
+                        protocol::STAT_AT_NOFOLLOW
+                    } else {
+                        0
+                    },
+                    ..protocol::Header::default()
+                },
+                path,
+                PathAnchors::default(),
+                root_credentials(),
+            )
+            .unwrap();
+        protocol::decode_node_status(&response.payload).unwrap()
+    };
+    let source_link = status(&mut filesystem, b"/create-base/dangling", true);
+    let linked_link = status(&mut filesystem, b"/removed/symlink-alias", true);
+    assert_eq!(source_link.kind, protocol::NODE_TYPE_SYMLINK);
+    assert_eq!(source_link.node_id, linked_link.node_id);
+    assert_eq!(source_link.link_count, 2);
+
+    let target = status(&mut filesystem, b"/create-base/target", false);
+    let followed_link = status(&mut filesystem, b"/removed/target-alias", false);
+    assert_eq!(target.kind, protocol::NODE_TYPE_REGULAR);
+    assert_eq!(target.node_id, followed_link.node_id);
+    assert_eq!(target.link_count, 2);
+}
+
+#[test]
 fn truncate_at_resolves_and_mutates_in_one_anchored_operation() {
     let mut filesystem = test_filesystem();
     let base = filesystem

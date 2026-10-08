@@ -1012,6 +1012,8 @@ struct RecordingFilesystem {
     unlink_request: Option<posix_service::PreparedUnlink>,
     rename_request: Option<posix_service::PreparedRename>,
     rename_paths: Option<posix_service::RenamePathObjects<u32>>,
+    link_request: Option<posix_service::PreparedLink>,
+    link_paths: Option<posix_service::RenamePathObjects<u32>>,
     truncate_request: Option<posix_service::PreparedTruncate>,
     symlink_request: Option<posix_service::PreparedSymlink>,
     readlink_request: Option<posix_service::PreparedReadlink>,
@@ -1168,6 +1170,16 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
     ) -> Result<(), i32> {
         self.rename_request = Some(request.clone());
         self.rename_paths = Some(paths);
+        Ok(())
+    }
+
+    fn link_at(
+        &mut self,
+        request: &posix_service::PreparedLink,
+        paths: posix_service::RenamePathObjects<u32>,
+    ) -> Result<(), i32> {
+        self.link_request = Some(request.clone());
+        self.link_paths = Some(paths);
         Ok(())
     }
 
@@ -2219,6 +2231,89 @@ fn rename_wire_and_service_preserve_two_distinct_directory_handles() {
     assert_eq!(prepared.effective_uid, 503);
     assert_eq!(prepared.effective_gid, 22);
     let paths = filesystem.rename_paths.unwrap();
+    assert_eq!(paths.old_base, Some(old_directory));
+    assert_eq!(paths.new_base, Some(new_directory));
+    assert_eq!(filesystem.roots_opened, 1);
+}
+
+#[test]
+fn link_wire_and_service_preserve_flags_credentials_and_two_directory_handles() {
+    let request = protocol::LinkAtRequest {
+        old_base: protocol::OpenBase::AttachedDirectory,
+        new_base: protocol::OpenBase::AttachedDirectory,
+        flags: protocol::LINK_FOLLOW_SOURCE,
+        old_path: "old/source",
+        new_path: "new/link",
+    };
+    let mut encoded = [0; protocol::LINK_AT_HEADER_LEN + protocol::MAX_PATH_LEN * 2];
+    let length = protocol::encode_link_at(request, &mut encoded).unwrap();
+    assert_eq!(
+        protocol::decode_link_at(&encoded[..length]).unwrap(),
+        request
+    );
+    let mut invalid = encoded[..length].to_vec();
+    invalid[4..8].copy_from_slice(&(protocol::LINK_FLAGS_ALL << 1).to_le_bytes());
+    assert!(protocol::decode_link_at(&invalid).is_err());
+
+    let peer = PeerIdentity {
+        process_id: 126,
+        effective_uid: 0,
+        effective_gid: 23,
+    };
+    let mut service = service_for(peer);
+    service.handle(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let mut groups = [0u8; protocol::GROUP_LIST_MAX_LEN];
+    let groups_len = protocol::encode_group_list(&[42, 84], &mut groups).unwrap();
+    assert_eq!(
+        service
+            .handle(
+                peer,
+                protocol::Header {
+                    opcode: protocol::OP_GROUPS_SET,
+                    ..protocol::Header::default()
+                },
+                &groups[..groups_len],
+            )
+            .header
+            .status,
+        protocol::STATUS_OK
+    );
+    let old_directory = AttachedObject {
+        handle: 73,
+        rights: 0x81,
+    };
+    let new_directory = AttachedObject {
+        handle: 74,
+        rights: 0x81,
+    };
+    let mut filesystem = RecordingFilesystem::default();
+    let result = service.handle_objects(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_LINK_AT,
+            ..protocol::Header::default()
+        },
+        &encoded[..length],
+        &[old_directory, new_directory],
+        &mut filesystem,
+    );
+
+    assert_eq!(result.response.header.status, protocol::STATUS_OK);
+    let prepared = filesystem.link_request.unwrap();
+    assert_eq!(prepared.old_path, "old/source");
+    assert_eq!(prepared.new_path, "new/link");
+    assert_eq!(prepared.flags, protocol::LINK_FOLLOW_SOURCE);
+    assert_eq!(prepared.effective_uid, 0);
+    assert_eq!(prepared.effective_gid, 23);
+    assert_eq!(prepared.supplementary_groups, vec![42, 84]);
+    let paths = filesystem.link_paths.unwrap();
     assert_eq!(paths.old_base, Some(old_directory));
     assert_eq!(paths.new_base, Some(new_directory));
     assert_eq!(filesystem.roots_opened, 1);
