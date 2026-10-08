@@ -28,3 +28,8 @@ path = "src/main.rs"
 test = false
 bench = false
 harness = false
+
+[[test]]
+name = "rust_thread_lifecycle"
+path = "tests/rust_thread_lifecycle.rs"
+harness = false
