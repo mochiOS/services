@@ -89,6 +89,19 @@ fn signal_wire_format_rejects_invalid_numbers_and_reserved_bytes() {
         )
         .is_err()
     );
+
+    let mut options = [0u8; protocol::SIGNAL_CHILD_OPTIONS_LEN];
+    protocol::encode_signal_child_options(
+        protocol::SIGNAL_CHILD_OPTION_NOCLDSTOP,
+        &mut options,
+    )
+    .unwrap();
+    assert_eq!(
+        protocol::decode_signal_child_options(&options),
+        Ok(protocol::SIGNAL_CHILD_OPTION_NOCLDSTOP)
+    );
+    assert!(protocol::encode_signal_child_options(2, &mut options).is_err());
+    assert!(protocol::decode_signal_child_options(&[0; 5]).is_err());
 }
 
 #[test]
@@ -152,6 +165,22 @@ fn standard_signals_coalesce_and_respect_the_receiving_thread_mask() {
             .unwrap(),
         protocol::SIGNAL_KILL
     );
+}
+
+#[test]
+fn child_signal_options_round_trip_through_the_client() {
+    let identity = peer(103, 501);
+    let service = Rc::new(RefCell::new(PosixService::new()));
+    register(&mut service.borrow_mut(), identity);
+    let client = client(&service, identity);
+
+    client
+        .set_signal_child_options(protocol::SIGNAL_CHILD_OPTION_NOCLDSTOP)
+        .unwrap();
+    assert!(matches!(
+        client.set_signal_child_options(2),
+        Err(ClientError::Protocol(protocol::ProtocolError::InvalidLength))
+    ));
 }
 
 #[test]

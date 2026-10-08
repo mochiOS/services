@@ -1854,6 +1854,114 @@ fn child_exit_queues_sigchld_before_the_parent_waits() {
     assert_eq!(waited.status, 4 << 8);
 }
 
+#[test]
+fn nocldstop_is_inherited_and_suppresses_only_stop_continue_notifications() {
+    let parent = PeerIdentity {
+        process_id: 1240,
+        effective_uid: 505,
+        effective_gid: 24,
+    };
+    let child = PeerIdentity {
+        process_id: 1241,
+        ..parent
+    };
+    let grandchild = PeerIdentity {
+        process_id: 1242,
+        ..parent
+    };
+    let mut service = service_for(parent);
+    service.handle(
+        parent,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..protocol::Header::default()
+        },
+        &[],
+    );
+    let mut options = [0u8; protocol::SIGNAL_CHILD_OPTIONS_LEN];
+    protocol::encode_signal_child_options(
+        protocol::SIGNAL_CHILD_OPTION_NOCLDSTOP,
+        &mut options,
+    )
+    .unwrap();
+    assert_eq!(
+        service
+            .handle(
+                parent,
+                protocol::Header {
+                    opcode: protocol::OP_SIGNAL_CHILD_OPTIONS,
+                    ..protocol::Header::default()
+                },
+                &options,
+            )
+            .header
+            .status,
+        protocol::STATUS_OK
+    );
+
+    let mut filesystem = RecordingFilesystem::default();
+    service
+        .adopt_child(
+            parent,
+            AuthenticatedProcess {
+                handle: 641,
+                process_id: child.process_id,
+            },
+            &mut filesystem,
+        )
+        .unwrap();
+    service
+        .adopt_child(
+            child,
+            AuthenticatedProcess {
+                handle: 642,
+                process_id: grandchild.process_id,
+            },
+            &mut filesystem,
+        )
+        .unwrap();
+    let mut processes = RecordingProcesses::default();
+    processes.states.insert(641, ProcessLifecycle::Running);
+    processes.states.insert(642, ProcessLifecycle::Running);
+
+    for (sender, target, handle) in [
+        (parent, child, 641),
+        (child, grandchild, 642),
+    ] {
+        let delivery = deliver_signal(
+            &mut service,
+            sender,
+            target,
+            protocol::SIGNAL_TSTP,
+        );
+        let mut encoded = [0u8; protocol::SIGNAL_DELIVERY_LEN];
+        protocol::encode_signal_delivery(delivery, &mut encoded).unwrap();
+        service
+            .report_process_stopped(target, &encoded, &mut processes)
+            .unwrap();
+        assert!(processes.suspended.contains(&handle));
+        assert_eq!(
+            service.signal_state(sender.process_id).unwrap().pending(),
+            0
+        );
+    }
+
+    send_signal(&mut service, parent, child, protocol::SIGNAL_CONT);
+    assert_eq!(service.signal_state(parent.process_id).unwrap().pending(), 0);
+
+    processes
+        .states
+        .insert(641, ProcessLifecycle::Exited { exit_code: 0 });
+    assert_eq!(
+        service.refresh_child_exit_notifications(&mut processes),
+        Ok(1)
+    );
+    assert_eq!(
+        service.signal_state(parent.process_id).unwrap().pending(),
+        1u64 << (protocol::SIGNAL_CHLD - 1)
+    );
+}
+
 fn send_signal(
     service: &mut PosixService,
     sender: PeerIdentity,

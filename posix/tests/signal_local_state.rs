@@ -20,6 +20,17 @@ fn signal_masks_are_thread_local_policy_and_never_block_kill_or_stop() {
 }
 
 #[test]
+fn child_signal_options_are_synced_and_reset_on_process_image_entry() {
+    let runtime = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
+    assert!(runtime.contains("client.set_signal_child_options(0)"));
+    assert!(runtime.contains("SIGNAL_CHILD_OPTION_NOCLDSTOP"));
+    assert!(runtime.contains(".set_signal_child_options(options)"));
+
+    let kernel = include_str!("../../../core/src/syscall/handle.rs");
+    assert!(!kernel.contains("NOCLDSTOP"));
+}
+
+#[test]
 fn kill_and_stop_dispositions_cannot_be_replaced() {
     assert!(signal::can_change_disposition(1));
     assert!(!signal::can_change_disposition(0));

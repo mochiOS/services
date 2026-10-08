@@ -474,6 +474,7 @@ pub struct PosixService<H: Copy = u32> {
     supplementary_groups: BTreeMap<u64, Vec<u32>>,
     resource_limits: BTreeMap<(u64, u32), protocol::ResourceLimit>,
     signals: BTreeMap<u64, ProcessSignalState>,
+    signal_child_options: BTreeMap<u64, u32>,
     process_wait_states: BTreeMap<u64, ProcessWaitState>,
     next_signal_delivery_token: u64,
     signal_notifications: BTreeSet<u64>,
@@ -495,6 +496,7 @@ impl PosixService<u32> {
             supplementary_groups: BTreeMap::new(),
             resource_limits: BTreeMap::new(),
             signals: BTreeMap::new(),
+            signal_child_options: BTreeMap::new(),
             process_wait_states: BTreeMap::new(),
             next_signal_delivery_token: 1,
             signal_notifications: BTreeSet::new(),
@@ -580,16 +582,31 @@ impl<H: Copy> PosixService<H> {
             self.process_resume_notifications.insert(process_id);
         }
         if continued {
-            self.notify_parent_of_child_change(process_id)?;
+            self.notify_parent_of_child_change(process_id, true)?;
         }
         Ok(())
     }
 
-    fn notify_parent_of_child_change(&mut self, child_id: u64) -> Result<(), i32> {
+    fn notify_parent_of_child_change(
+        &mut self,
+        child_id: u64,
+        stopped_or_continued: bool,
+    ) -> Result<(), i32> {
         let Some(parent_id) = self.parents.get(&child_id).copied() else {
             return Ok(());
         };
         if !self.signals.contains_key(&parent_id) {
+            return Ok(());
+        }
+        if stopped_or_continued
+            && self
+                .signal_child_options
+                .get(&parent_id)
+                .copied()
+                .unwrap_or_default()
+                & protocol::SIGNAL_CHILD_OPTION_NOCLDSTOP
+                != 0
+        {
             return Ok(());
         }
         self.enqueue_signal(parent_id, protocol::SIGNAL_CHLD)
@@ -604,7 +621,7 @@ impl<H: Copy> PosixService<H> {
             return Ok(false);
         }
         wait_state.exit_notified = true;
-        if let Err(status) = self.notify_parent_of_child_change(child_id) {
+        if let Err(status) = self.notify_parent_of_child_change(child_id, false) {
             if let Some(wait_state) = self.process_wait_states.get_mut(&child_id) {
                 wait_state.exit_notified = false;
             }
@@ -719,6 +736,7 @@ impl<H: Copy> PosixService<H> {
             .insert(peer.process_id, Vec::new());
         self.signals
             .insert(peer.process_id, ProcessSignalState::default());
+        self.signal_child_options.insert(peer.process_id, 0);
         self.process_wait_states
             .insert(peer.process_id, ProcessWaitState::default());
         Ok(true)
@@ -771,6 +789,11 @@ impl<H: Copy> PosixService<H> {
             .get(&peer.process_id)
             .cloned()
             .unwrap_or_default();
+        let inherited_signal_child_options = self
+            .signal_child_options
+            .get(&peer.process_id)
+            .copied()
+            .unwrap_or_default();
         self.processes.insert(child_id, process.handle);
         self.sessions.insert(
             child_id,
@@ -803,6 +826,8 @@ impl<H: Copy> PosixService<H> {
             .or_default()
             .insert(child_id);
         self.signals.insert(child_id, ProcessSignalState::default());
+        self.signal_child_options
+            .insert(child_id, inherited_signal_child_options);
         self.process_wait_states
             .insert(child_id, ProcessWaitState::default());
         for (resource, limit) in inherited_limits {
@@ -940,6 +965,7 @@ impl<H: Copy> PosixService<H> {
         self.resource_limits
             .retain(|(process_id, _), _| *process_id != child_id);
         self.signals.remove(&child_id);
+        self.signal_child_options.remove(&child_id);
         self.process_wait_states.remove(&child_id);
         self.signal_notifications.remove(&child_id);
         self.process_resume_notifications.remove(&child_id);
@@ -1335,6 +1361,19 @@ impl<H: Copy> PosixService<H> {
         Ok(output)
     }
 
+    fn set_signal_child_options(
+        &mut self,
+        process_id: u64,
+        payload: &[u8],
+    ) -> Result<(), i32> {
+        if !self.sessions.contains_key(&process_id) {
+            return Err(protocol::STATUS_ESRCH);
+        }
+        let options = protocol::decode_signal_child_options(payload).map_err(|_| STATUS_EINVAL)?;
+        self.signal_child_options.insert(process_id, options);
+        Ok(())
+    }
+
     fn dequeue_signal_payload(&mut self, process_id: u64, payload: &[u8]) -> Result<Vec<u8>, i32> {
         let blocked = protocol::decode_signal_mask(payload).map_err(|_| STATUS_EINVAL)?;
         let signal = self
@@ -1414,7 +1453,7 @@ impl<H: Copy> PosixService<H> {
             .ok_or(protocol::STATUS_ESRCH)?
             .stopped(signal);
         if stopped {
-            self.notify_parent_of_child_change(peer.process_id)?;
+            self.notify_parent_of_child_change(peer.process_id, true)?;
         }
         Ok(())
     }
@@ -1549,6 +1588,9 @@ impl<H: Copy> PosixService<H> {
             protocol::OP_SIGNAL_DELIVERY_COMPLETE if header.flags == 0 => self
                 .complete_signal_delivery(peer, payload)
                 .map(|_| Vec::new()),
+            protocol::OP_SIGNAL_CHILD_OPTIONS if header.flags == 0 => self
+                .set_signal_child_options(peer.process_id, payload)
+                .map(|_| Vec::new()),
             protocol::OP_PING
             | protocol::OP_SESSION_REGISTER
             | protocol::OP_SIGNAL_THREAD_REGISTER
@@ -1586,6 +1628,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_SIGNAL_DEQUEUE
             | protocol::OP_SIGNAL_DELIVERY_COMPLETE
             | protocol::OP_PROCESS_SIGNALED
+            | protocol::OP_SIGNAL_CHILD_OPTIONS
             | protocol::OP_FTRUNCATE
             | protocol::OP_FSYNC
             | protocol::OP_FGETFL

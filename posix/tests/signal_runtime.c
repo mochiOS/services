@@ -76,6 +76,15 @@ int main(void) {
         return 9;
     }
 
+    action.sa_flags = SA_NOCLDSTOP;
+    if (sigaction(SIGCHLD, &action, 0) != 0) {
+        return 10;
+    }
+    errno = 0;
+    if (sigaction(SIGUSR1, &action, 0) != -1 || errno != EINVAL) {
+        return 11;
+    }
+
     puts("signal-runtime: pass");
     return 0;
 }
