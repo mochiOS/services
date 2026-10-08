@@ -4,7 +4,7 @@ use mochios_posix_client::{
 };
 use mochios_posix_protocol as protocol;
 use posix_service::pty::{
-    BUFFER_CAPACITY, EAGAIN, EBADF, EIO, ESPIPE, PtyManager, handle_provider_request,
+    BUFFER_CAPACITY, EAGAIN, EBADF, EIO, ENOTSUP, ESPIPE, PtyManager, handle_provider_request,
 };
 
 #[test]
@@ -92,6 +92,31 @@ fn provider_wire_requests_drive_the_pty_without_posix_rpc() {
         None
     );
     assert_eq!(ptys.write(pair.master_object_id, b"x"), Err(EIO));
+}
+
+#[test]
+fn unsupported_provider_control_returns_an_error_reply() {
+    let mut ptys = PtyManager::new();
+    let pair = ptys.open().unwrap();
+    let mut request = [0u8; provider::REQUEST_HEADER_LEN];
+    let mut response = [0u8; provider::RESPONSE_HEADER_LEN];
+    let request_len = provider::RequestHeader {
+        opcode: provider::OP_CONTROL,
+        object_id: pair.master_object_id,
+        argument: 0,
+        basis: 17,
+        length: 0,
+        data_length: 0,
+    }
+    .encode(&[], &mut request)
+    .unwrap();
+
+    let response_len =
+        handle_provider_request(&mut ptys, &request[..request_len], &mut response).unwrap();
+    let (header, payload) = provider::ResponseHeader::decode(&response[..response_len]).unwrap();
+    assert_eq!(header.status, -(i64::from(ENOTSUP)));
+    assert_eq!(header.value, 0);
+    assert!(payload.is_empty());
 }
 
 #[test]

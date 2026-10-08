@@ -7,6 +7,7 @@ pub const EIO: i32 = 5;
 pub const EAGAIN: i32 = 11;
 pub const EBADF: i32 = 9;
 pub const ESPIPE: i32 = 29;
+pub const ENOTSUP: i32 = 95;
 
 pub const BUFFER_CAPACITY: usize = 64 * 1024;
 pub const READINESS_SIGNALS: u64 = mnu_abi::HANDLE_SIGNAL_READABLE
@@ -211,6 +212,7 @@ pub fn handle_provider_request(
         provider::OP_SEEK => ptys
             .seek(header.object_id)
             .map(|offset| (offset, Vec::new())),
+        provider::OP_CONTROL => Err(ENOTSUP),
         _ => unreachable!("provider decoder rejects unknown operations"),
     };
     let (status, value, data) = match result {
