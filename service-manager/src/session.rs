@@ -3,7 +3,8 @@ use alloc::vec::Vec;
 use mochi_user_platform as platform;
 
 const MAX_PROCESS_RECORDS: usize = 512;
-const SIGKILL: u64 = 9;
+// Native process teardown is deliberately independent of POSIX signals.
+const FORCED_TERMINATION_EXIT_CODE: u64 = 1;
 const PROCESS_STATE_TERMINATED: u64 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,9 +27,19 @@ pub(crate) fn terminate_process_tree(root_pid: u64) -> Result<(), mochi_user_sys
     let mut processes = descendant_processes(&records, root_pid);
     processes.retain(|pid| *pid != root_pid);
     for pid in processes.into_iter().rev() {
-        let _ = platform::process::kill(pid, SIGKILL);
+        let _ = terminate_process(pid);
     }
-    platform::process::kill(root_pid, SIGKILL).map(|_| ())
+    terminate_process(root_pid)
+}
+
+fn terminate_process(process_id: u64) -> Result<(), mochi_user_syscall::SysError> {
+    let handle = platform::process::open_handle_for_process_id(
+        process_id,
+        platform::handle::HANDLE_RIGHT_SIGNAL,
+    )?;
+    let result = platform::process::terminate_handle(handle, FORCED_TERMINATION_EXIT_CODE);
+    let _ = platform::handle::close(handle);
+    result
 }
 
 fn descendant_processes(records: &[platform::process::Record], root_pid: u64) -> Vec<u64> {

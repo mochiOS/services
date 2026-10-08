@@ -26,4 +26,16 @@ fn native_thread_upcall_syscalls_are_not_posix_operations() {
     assert_eq!(SyscallNumber::ThreadHandleCreate as u64, 656);
     assert_eq!(SyscallNumber::ThreadInterrupt as u64, 657);
     assert_eq!(SyscallNumber::ThreadHandleStatus as u64, 658);
+    assert_eq!(SyscallNumber::ProcessHandleOpenById as u64, 659);
+}
+
+#[test]
+fn legacy_posix_kill_is_not_a_native_syscall() {
+    let native_numbers = [
+        SyscallNumber::ThreadInterrupt as u64,
+        SyscallNumber::ProcessHandleTerminate as u64,
+        SyscallNumber::ProcessHandleOpenById as u64,
+    ];
+
+    assert!(!native_numbers.contains(&62));
 }
