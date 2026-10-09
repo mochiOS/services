@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ext4plus::{Ext4, Ext4Read, Ext4Write};
 use filesystem_service::namespace::{Namespace, Node};
 use filesystem_service::path_walk::{Credentials, Resolution};
-use filesystem_service::service::{FilesystemService, PathAnchors};
+use filesystem_service::service::{FilesystemService, PathAnchors, RenameAnchors};
 use mochios_filesystem_protocol as protocol;
 
 #[derive(Clone)]
@@ -847,6 +847,152 @@ fn unlink_in_a_mounted_volume_retains_its_open_files_and_never_aliases_root_inod
         Err(2)
     ));
     for opened in [replacement, data] {
+        service.provider_close(opened.open_id).unwrap();
+    }
+}
+
+#[test]
+fn hard_links_share_mounted_inode_identity_and_reject_actual_cross_volume_operations() {
+    let fixture = Fixture::new();
+    let mut service = FilesystemService::new(fixture.volume("data"));
+    service
+        .mount_volume(b"/mount", fixture.volume("system"))
+        .unwrap();
+    let link = |service: &mut FilesystemService, old: &[u8], new: &[u8], flags, anchors| {
+        let mut payload = old.to_vec();
+        payload.extend_from_slice(new);
+        service.link_at(
+            protocol::Header {
+                flags,
+                mode: old.len() as u32,
+                ..Default::default()
+            },
+            &payload,
+            anchors,
+            root_credentials(),
+        )
+    };
+    let mounted = open(
+        &mut service,
+        b"/mount",
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+        PathAnchors::default(),
+    );
+    let nested = open(
+        &mut service,
+        b"/mount/nested",
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+        PathAnchors::default(),
+    );
+    let anchors = RenameAnchors {
+        root_open_id: None,
+        old_base_open_id: Some(mounted.open_id),
+        new_base_open_id: Some(nested.open_id),
+    };
+    let flags = protocol::LINK_AT_OLD_BASE_ATTACHED | protocol::LINK_AT_NEW_BASE_ATTACHED;
+    link(&mut service, b"file", b"alias", flags, anchors).unwrap();
+    assert!(matches!(
+        link(&mut service, b"file", b"alias", flags, anchors),
+        Err(17)
+    ));
+    let source = service
+        .stat_at(
+            protocol::Header::default(),
+            b"/mount/file",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    let alias = service
+        .stat_at(
+            protocol::Header::default(),
+            b"/mount/nested/alias",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    let source = protocol::decode_node_status(&source.payload).unwrap();
+    let alias = protocol::decode_node_status(&alias.payload).unwrap();
+    assert_eq!(source.node_id, alias.node_id);
+    assert_eq!(source.link_count, 2);
+    assert!(matches!(
+        link(
+            &mut service,
+            b"/file",
+            b"/mount/cross",
+            0,
+            RenameAnchors::default()
+        ),
+        Err(18)
+    ));
+    assert!(matches!(
+        link(
+            &mut service,
+            b"/mount/file",
+            b"/cross",
+            0,
+            RenameAnchors::default()
+        ),
+        Err(18)
+    ));
+    assert!(matches!(
+        service.stat_at(
+            protocol::Header::default(),
+            b"/mount/cross",
+            PathAnchors::default(),
+            root_credentials()
+        ),
+        Err(2)
+    ));
+    link(
+        &mut service,
+        b"/mount/absolute",
+        b"/mount/link-copy",
+        0,
+        RenameAnchors::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        service
+            .readlink_at(
+                protocol::Header::default(),
+                b"/mount/link-copy",
+                PathAnchors::default(),
+                root_credentials()
+            )
+            .unwrap()
+            .payload,
+        b"/file"
+    );
+    assert!(matches!(
+        link(
+            &mut service,
+            b"/mount/absolute",
+            b"/mount/followed",
+            protocol::LINK_AT_FOLLOW_SOURCE,
+            RenameAnchors::default()
+        ),
+        Err(18)
+    ));
+    service
+        .unlink_at(
+            protocol::Header::default(),
+            b"/mount/file",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    let retained = open(
+        &mut service,
+        b"/mount/nested/alias",
+        protocol::OPEN_AT_READ,
+        PathAnchors::default(),
+    );
+    assert_eq!(
+        service.provider_read(retained.open_id, 4096).unwrap(),
+        b"system"
+    );
+    for opened in [retained, nested, mounted] {
         service.provider_close(opened.open_id).unwrap();
     }
 }

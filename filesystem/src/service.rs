@@ -2189,52 +2189,43 @@ impl FilesystemService {
         let uid = credentials.effective_uid;
         let gid = credentials.effective_gid;
         let groups = credentials.supplementary_groups();
-        let (old_root, old_base) = self.resolve_anchors(
-            old_path,
-            PathAnchors {
-                root_open_id: anchors.root_open_id,
-                base_open_id: anchors.old_base_open_id,
-            },
-        )?;
-        let (new_root, new_base) = self.resolve_anchors(
-            new_path,
-            PathAnchors {
-                root_open_id: anchors.root_open_id,
-                base_open_id: anchors.new_base_open_id,
-            },
-        )?;
         let source_follow = if request.flags & protocol::LINK_AT_FOLLOW_SOURCE != 0 {
             FollowSymlinks::All
         } else {
             FollowSymlinks::ExcludeFinalComponent
         };
-        let mut source_inode = match self.resolve_path_at(
-            old_root,
-            old_base,
+        let (mut source_inode, _, source_volume) = self.resolve_scoped_inode(
             old_path,
+            PathAnchors {
+                root_open_id: anchors.root_open_id,
+                base_open_id: anchors.old_base_open_id,
+            },
             source_follow,
             uid,
             gid,
             groups,
-        )? {
-            Resolution::Found { inode, .. } => inode,
-            Resolution::Missing { .. } => return Err(ENOENT),
-        };
+        )?;
         if source_inode.file_type().is_dir() {
             return Err(EPERM);
         }
-        let (new_parent_inode, new_name) = match self.resolve_path_at(
-            new_root,
-            new_base,
+        let (resolution, filesystem, destination_volume) = self.resolve_open_path(
             new_path,
+            PathAnchors {
+                root_open_id: anchors.root_open_id,
+                base_open_id: anchors.new_base_open_id,
+            },
             FollowSymlinks::ExcludeFinalComponent,
             uid,
             gid,
             groups,
-        )? {
+        )?;
+        let (new_parent_inode, new_name) = match resolution {
             Resolution::Found { .. } => return Err(EEXIST),
             Resolution::Missing { parent, name } => (parent, name),
         };
+        if source_volume != destination_volume {
+            return Err(EXDEV);
+        }
         let metadata = new_parent_inode.metadata();
         if !permission_allows(
             metadata.mode(),
@@ -2248,7 +2239,7 @@ impl FilesystemService {
         ) {
             return Err(EACCES);
         }
-        let mut new_parent = Dir::open_inode(&self.fs, new_parent_inode).map_err(errno)?;
+        let mut new_parent = Dir::open_inode(&filesystem, new_parent_inode).map_err(errno)?;
         new_parent
             .link(
                 DirEntryName::try_from(new_name.as_slice()).map_err(|_| EINVAL)?,
