@@ -987,16 +987,6 @@ impl FilesystemService {
     }
 
     fn resolve_anchors(&self, path: &[u8], anchors: PathAnchors) -> Result<(Inode, Inode), i32> {
-        // Remaining single-volume mutation helpers must never interpret a
-        // mounted inode number as an inode in the root filesystem.
-        for open_id in [anchors.root_open_id, anchors.base_open_id]
-            .into_iter()
-            .flatten()
-        {
-            if self.opens.get(&open_id).ok_or(EBADF)?.volume != 0 {
-                return Err(EXDEV);
-            }
-        }
         let root = match anchors.root_open_id {
             Some(open_id) => self.opens.get(&open_id).ok_or(EBADF)?.inode.clone(),
             None => self.fs.read_root_inode().map_err(errno)?,
@@ -1104,40 +1094,6 @@ impl FilesystemService {
         gid: u32,
         groups: &[u32],
     ) -> Result<Resolution, i32> {
-        if let Some(namespace) = &self.namespace {
-            let root = namespace.retained_node(0, root)?;
-            let base = namespace.retained_node(0, base)?;
-            return match namespace.resolve(
-                root,
-                base,
-                path,
-                follow == FollowSymlinks::All,
-                path_walk::Credentials { uid, gid, groups },
-            )? {
-                path_walk::Resolution::Found { inode, parent } => {
-                    if inode.id().volume != 0
-                        || parent
-                            .as_ref()
-                            .is_some_and(|(node, _)| node.id().volume != 0)
-                    {
-                        return Err(EXDEV);
-                    }
-                    Ok(Resolution::Found {
-                        inode: inode.into_inode(),
-                        parent: parent.map(|(node, name)| (node.into_inode(), name)),
-                    })
-                }
-                path_walk::Resolution::Missing { parent, name } => {
-                    if parent.id().volume != 0 {
-                        return Err(EXDEV);
-                    }
-                    Ok(Resolution::Missing {
-                        parent: parent.into_inode(),
-                        name,
-                    })
-                }
-            };
-        }
         path_walk::resolve(
             self,
             root,
@@ -1362,7 +1318,6 @@ impl FilesystemService {
     fn close(&mut self, request: protocol::Header) -> Result<Response, i32> {
         let open = self.opens.get(&request.open_id).ok_or(EBADF)?;
         let node_id = open.node_id;
-        let inode = open.inode.clone();
         let is_last_open = self
             .opens
             .values()
@@ -1371,6 +1326,7 @@ impl FilesystemService {
             == 1;
         if is_last_open {
             if let Some(orphan) = self.orphans.get(&node_id).cloned() {
+                let inode = Inode::read(&open.filesystem, open.inode.index).map_err(errno)?;
                 let mut parent = Dir::open_inode(&open.filesystem, orphan.parent).map_err(errno)?;
                 parent
                     .unlink(
@@ -1788,6 +1744,7 @@ impl FilesystemService {
     }
 
     fn rename(&mut self, request: protocol::Header, payload: &[u8]) -> Result<Response, i32> {
+        let filesystem = self.fs.clone();
         let split = usize::try_from(request.offset).map_err(|_| EINVAL)?;
         let (old_path, new_path) = payload.split_at_checked(split).ok_or(EINVAL)?;
         let old_path = decode_path(old_path)?;
@@ -1822,7 +1779,7 @@ impl FilesystemService {
         let destination =
             match new_parent.get_entry(DirEntryName::try_from(new_name).map_err(|_| EINVAL)?) {
                 Ok(inode) if source_is_directory && inode.file_type().is_dir() => {
-                    if !self.directory_is_empty(&inode)? {
+                    if !self.directory_is_empty(&filesystem, &inode)? {
                         return Err(ENOTEMPTY);
                     }
                     let node_id =
@@ -1840,17 +1797,19 @@ impl FilesystemService {
                 Err(error) => return Err(errno(error)),
             };
         if source_is_directory {
-            if self.directory_is_at_or_below(&source_inode, new_parent_inode)? {
+            if self.directory_is_at_or_below(&filesystem, &source_inode, new_parent_inode)? {
                 return Err(EINVAL);
             }
             let backup_name = format!(".mochios-orphan-rename-{}", request.request_id);
             self.stage_rename_destination(
+                &filesystem,
                 &mut new_parent,
                 new_name,
                 &backup_name,
                 destination.as_ref(),
             )?;
             if let Err(error) = self.move_directory(
+                &filesystem,
                 &mut old_parent,
                 &mut new_parent,
                 old_parent_path == new_parent_path,
@@ -1859,6 +1818,7 @@ impl FilesystemService {
                 source_inode,
             ) {
                 self.restore_rename_destination(
+                    &filesystem,
                     &mut new_parent,
                     new_name,
                     &backup_name,
@@ -1867,7 +1827,12 @@ impl FilesystemService {
                 return Err(error);
             }
             if let Some((destination_node_id, destination_inode)) = destination {
-                self.remove_replaced_directory(&mut new_parent, &backup_name, destination_inode)?;
+                self.remove_replaced_directory(
+                    &filesystem,
+                    &mut new_parent,
+                    &backup_name,
+                    destination_inode,
+                )?;
                 self.node_ids.remove(new_path);
                 self.nodes.remove(&destination_node_id);
             }
@@ -1898,7 +1863,13 @@ impl FilesystemService {
             DirEntryName::try_from(new_name).map_err(|_| EINVAL)?,
             &mut source_inode,
         ) {
-            self.restore_rename_destination(&mut new_parent, new_name, &backup_name, destination);
+            self.restore_rename_destination(
+                &filesystem,
+                &mut new_parent,
+                new_name,
+                &backup_name,
+                destination,
+            );
             return Err(errno(error));
         }
         if let Err(error) = old_parent.unlink(
@@ -1909,7 +1880,13 @@ impl FilesystemService {
                 DirEntryName::try_from(new_name).map_err(|_| EINVAL)?,
                 source_inode,
             );
-            self.restore_rename_destination(&mut new_parent, new_name, &backup_name, destination);
+            self.restore_rename_destination(
+                &filesystem,
+                &mut new_parent,
+                new_name,
+                &backup_name,
+                destination,
+            );
             return Err(errno(error));
         }
 
@@ -1972,29 +1949,29 @@ impl FilesystemService {
         let uid = credentials.effective_uid;
         let gid = credentials.effective_gid;
         let groups = credentials.supplementary_groups();
-        let (old_root, old_base) = self.resolve_anchors(
+        let (source, filesystem, source_volume) = self.resolve_open_path(
             old_path,
             PathAnchors {
                 root_open_id: anchors.root_open_id,
                 base_open_id: anchors.old_base_open_id,
             },
+            FollowSymlinks::ExcludeFinalComponent,
+            uid,
+            gid,
+            groups,
         )?;
-        let (new_root, new_base) = self.resolve_anchors(
+        let (destination, _, destination_volume) = self.resolve_open_path(
             new_path,
             PathAnchors {
                 root_open_id: anchors.root_open_id,
                 base_open_id: anchors.new_base_open_id,
             },
-        )?;
-        let (mut source_inode, old_parent_inode, old_name) = match self.resolve_path_at(
-            old_root,
-            old_base,
-            old_path,
             FollowSymlinks::ExcludeFinalComponent,
             uid,
             gid,
             groups,
-        )? {
+        )?;
+        let (mut source_inode, old_parent_inode, old_name) = match source {
             Resolution::Found {
                 inode,
                 parent: Some((parent, name)),
@@ -2002,15 +1979,14 @@ impl FilesystemService {
             Resolution::Found { parent: None, .. } => return Err(EINVAL),
             Resolution::Missing { .. } => return Err(ENOENT),
         };
-        let (new_parent_inode, new_name, destination_inode) = match self.resolve_path_at(
-            new_root,
-            new_base,
-            new_path,
-            FollowSymlinks::ExcludeFinalComponent,
-            uid,
-            gid,
-            groups,
-        )? {
+        if self
+            .namespace
+            .as_ref()
+            .is_some_and(|namespace| namespace.is_mount_root(source_volume, &source_inode))
+        {
+            return Err(EBUSY);
+        }
+        let (new_parent_inode, new_name, destination_inode) = match destination {
             Resolution::Found {
                 inode,
                 parent: Some((parent, name)),
@@ -2018,6 +1994,16 @@ impl FilesystemService {
             Resolution::Found { parent: None, .. } => return Err(EINVAL),
             Resolution::Missing { parent, name } => (parent, name, None),
         };
+        if destination_inode.as_ref().is_some_and(|inode| {
+            self.namespace
+                .as_ref()
+                .is_some_and(|namespace| namespace.is_mount_root(destination_volume, inode))
+        }) {
+            return Err(EBUSY);
+        }
+        if source_volume != destination_volume {
+            return Err(EXDEV);
+        }
         let old_name = std::str::from_utf8(&old_name).map_err(|_| EINVAL)?;
         let new_name = std::str::from_utf8(&new_name).map_err(|_| EINVAL)?;
         let same_parent = old_parent_inode.index == new_parent_inode.index;
@@ -2039,9 +2025,10 @@ impl FilesystemService {
                 return Err(EACCES);
             }
         }
-        let mut old_parent = Dir::open_inode(&self.fs, old_parent_inode).map_err(errno)?;
-        let mut new_parent = Dir::open_inode(&self.fs, new_parent_inode.clone()).map_err(errno)?;
-        let source_node_id = u64::from(source_inode.index.get());
+        let mut old_parent = Dir::open_inode(&filesystem, old_parent_inode).map_err(errno)?;
+        let mut new_parent =
+            Dir::open_inode(&filesystem, new_parent_inode.clone()).map_err(errno)?;
+        let source_node_id = scoped_node_id(source_volume, &source_inode);
         let source_is_directory = source_inode.file_type().is_dir();
         if destination_inode
             .as_ref()
@@ -2051,28 +2038,30 @@ impl FilesystemService {
         }
         let destination = match destination_inode {
             Some(inode) if source_is_directory && inode.file_type().is_dir() => {
-                if !self.directory_is_empty(&inode)? {
+                if !self.directory_is_empty(&filesystem, &inode)? {
                     return Err(ENOTEMPTY);
                 }
-                Some((u64::from(inode.index.get()), inode))
+                Some((scoped_node_id(destination_volume, &inode), inode))
             }
             Some(_) if source_is_directory => return Err(ENOTDIR),
             Some(inode) if inode.file_type().is_dir() => return Err(EISDIR),
-            Some(inode) => Some((u64::from(inode.index.get()), inode)),
+            Some(inode) => Some((scoped_node_id(destination_volume, &inode), inode)),
             None => None,
         };
         if source_is_directory {
-            if self.directory_is_at_or_below(&source_inode, new_parent_inode)? {
+            if self.directory_is_at_or_below(&filesystem, &source_inode, new_parent_inode)? {
                 return Err(EINVAL);
             }
             let backup_name = format!(".mochios-orphan-rename-{}", request.request_id);
             self.stage_rename_destination(
+                &filesystem,
                 &mut new_parent,
                 new_name,
                 &backup_name,
                 destination.as_ref(),
             )?;
             if let Err(error) = self.move_directory(
+                &filesystem,
                 &mut old_parent,
                 &mut new_parent,
                 same_parent,
@@ -2081,6 +2070,7 @@ impl FilesystemService {
                 source_inode,
             ) {
                 self.restore_rename_destination(
+                    &filesystem,
                     &mut new_parent,
                     new_name,
                     &backup_name,
@@ -2089,7 +2079,12 @@ impl FilesystemService {
                 return Err(error);
             }
             if let Some((destination_node_id, destination_inode)) = destination {
-                self.remove_replaced_directory(&mut new_parent, &backup_name, destination_inode)?;
+                self.remove_replaced_directory(
+                    &filesystem,
+                    &mut new_parent,
+                    &backup_name,
+                    destination_inode,
+                )?;
                 self.forget_node_paths(destination_node_id);
             }
             self.forget_node_paths(source_node_id);
@@ -2118,7 +2113,13 @@ impl FilesystemService {
             DirEntryName::try_from(new_name).map_err(|_| EINVAL)?,
             &mut source_inode,
         ) {
-            self.restore_rename_destination(&mut new_parent, new_name, &backup_name, destination);
+            self.restore_rename_destination(
+                &filesystem,
+                &mut new_parent,
+                new_name,
+                &backup_name,
+                destination,
+            );
             return Err(errno(error));
         }
         if let Err(error) = old_parent.unlink(
@@ -2129,7 +2130,13 @@ impl FilesystemService {
                 DirEntryName::try_from(new_name).map_err(|_| EINVAL)?,
                 source_inode,
             );
-            self.restore_rename_destination(&mut new_parent, new_name, &backup_name, destination);
+            self.restore_rename_destination(
+                &filesystem,
+                &mut new_parent,
+                new_name,
+                &backup_name,
+                destination,
+            );
             return Err(errno(error));
         }
         if let Some((destination_node_id, destination_inode)) = destination {
@@ -2257,6 +2264,7 @@ impl FilesystemService {
 
     fn restore_rename_destination(
         &self,
+        filesystem: &Ext4,
         parent: &mut Dir,
         name: &str,
         backup_name: &str,
@@ -2278,12 +2286,13 @@ impl FilesystemService {
             && is_directory
         {
             parent.inode_mut().set_links_count(parent_links);
-            let _ = parent.inode_mut().write(&self.fs);
+            let _ = parent.inode_mut().write(filesystem);
         }
     }
 
     fn stage_rename_destination(
         &self,
+        filesystem: &Ext4,
         parent: &mut Dir,
         name: &str,
         backup_name: &str,
@@ -2304,14 +2313,15 @@ impl FilesystemService {
             let _ = parent.unlink(backup_name, inode);
             if is_directory {
                 parent.inode_mut().set_links_count(parent_links);
-                let _ = parent.inode_mut().write(&self.fs);
+                let _ = parent.inode_mut().write(filesystem);
             }
             return Err(errno(error));
         }
         if is_directory {
             parent.inode_mut().set_links_count(parent_links);
-            if let Err(error) = parent.inode_mut().write(&self.fs) {
+            if let Err(error) = parent.inode_mut().write(filesystem) {
                 self.restore_rename_destination(
+                    filesystem,
                     parent,
                     name,
                     backup_name.as_str().map_err(|_| EIO)?,
@@ -2325,6 +2335,7 @@ impl FilesystemService {
 
     fn move_directory(
         &self,
+        filesystem: &Ext4,
         old_parent: &mut Dir,
         new_parent: &mut Dir,
         same_parent: bool,
@@ -2340,10 +2351,10 @@ impl FilesystemService {
                 .link(new_name, &mut source_inode)
                 .map_err(errno)?;
             new_parent.inode_mut().set_links_count(parent_links);
-            if let Err(error) = new_parent.inode_mut().write(&self.fs) {
+            if let Err(error) = new_parent.inode_mut().write(filesystem) {
                 let _ = new_parent.unlink(new_name, source_inode);
                 new_parent.inode_mut().set_links_count(parent_links);
-                let _ = new_parent.inode_mut().write(&self.fs);
+                let _ = new_parent.inode_mut().write(filesystem);
                 return Err(errno(error));
             }
             if let Err(error) = old_parent.unlink(old_name, source_inode.clone()) {
@@ -2361,11 +2372,12 @@ impl FilesystemService {
         new_parent
             .link(new_name, &mut source_inode)
             .map_err(errno)?;
-        let mut moved_directory = Dir::open_inode(&self.fs, source_inode.clone()).map_err(errno)?;
+        let mut moved_directory =
+            Dir::open_inode(filesystem, source_inode.clone()).map_err(errno)?;
         if let Err(error) = moved_directory.set_parent(new_parent.inode()) {
             let _ = new_parent.unlink(new_name, source_inode);
             new_parent.inode_mut().set_links_count(new_parent_links);
-            let _ = new_parent.inode_mut().write(&self.fs);
+            let _ = new_parent.inode_mut().write(filesystem);
             return Err(errno(error));
         }
 
@@ -2376,7 +2388,7 @@ impl FilesystemService {
                 let _ = moved_directory.set_parent(old_parent.inode());
                 let _ = new_parent.unlink(new_name, source_inode);
                 new_parent.inode_mut().set_links_count(new_parent_links);
-                let _ = new_parent.inode_mut().write(&self.fs);
+                let _ = new_parent.inode_mut().write(filesystem);
                 return Err(errno(error));
             }
         };
@@ -2385,16 +2397,16 @@ impl FilesystemService {
             let _ = moved_directory.set_parent(old_parent.inode());
             let _ = new_parent.unlink(new_name, moved_inode);
             new_parent.inode_mut().set_links_count(new_parent_links);
-            let _ = new_parent.inode_mut().write(&self.fs);
+            let _ = new_parent.inode_mut().write(filesystem);
             return Err(EIO);
         };
         old_parent.inode_mut().set_links_count(old_parent_links);
-        if let Err(error) = old_parent.inode_mut().write(&self.fs) {
+        if let Err(error) = old_parent.inode_mut().write(filesystem) {
             let _ = old_parent.link(old_name, &mut moved_inode);
             let _ = moved_directory.set_parent(old_parent.inode());
             let _ = new_parent.unlink(new_name, moved_inode);
             new_parent.inode_mut().set_links_count(new_parent_links);
-            let _ = new_parent.inode_mut().write(&self.fs);
+            let _ = new_parent.inode_mut().write(filesystem);
             return Err(errno(error));
         }
         Ok(())
@@ -2402,6 +2414,7 @@ impl FilesystemService {
 
     fn remove_replaced_directory(
         &self,
+        filesystem: &Ext4,
         parent: &mut Dir,
         name: &str,
         mut inode: Inode,
@@ -2409,12 +2422,12 @@ impl FilesystemService {
         let original_parent_links = parent.inode().links_count();
         let parent_links = original_parent_links.checked_sub(1).ok_or(EIO)?;
         parent.inode_mut().set_links_count(parent_links);
-        parent.inode_mut().write(&self.fs).map_err(errno)?;
+        parent.inode_mut().write(filesystem).map_err(errno)?;
         let original_links = inode.links_count();
         inode.set_links_count(1);
-        if let Err(error) = inode.write(&self.fs) {
+        if let Err(error) = inode.write(filesystem) {
             parent.inode_mut().set_links_count(original_parent_links);
-            let _ = parent.inode_mut().write(&self.fs);
+            let _ = parent.inode_mut().write(filesystem);
             return Err(errno(error));
         }
         if let Err(error) = parent.unlink(
@@ -2422,16 +2435,16 @@ impl FilesystemService {
             inode.clone(),
         ) {
             inode.set_links_count(original_links);
-            let _ = inode.write(&self.fs);
+            let _ = inode.write(filesystem);
             parent.inode_mut().set_links_count(original_parent_links);
-            let _ = parent.inode_mut().write(&self.fs);
+            let _ = parent.inode_mut().write(filesystem);
             return Err(errno(error));
         }
         Ok(())
     }
 
-    fn directory_is_empty(&self, inode: &Inode) -> Result<bool, i32> {
-        let directory = Dir::open_inode(&self.fs, inode.clone()).map_err(errno)?;
+    fn directory_is_empty(&self, filesystem: &Ext4, inode: &Inode) -> Result<bool, i32> {
+        let directory = Dir::open_inode(filesystem, inode.clone()).map_err(errno)?;
         for entry in directory.read_dir().map_err(errno)? {
             let entry = entry.map_err(errno)?;
             if entry.file_name() != "." && entry.file_name() != ".." {
@@ -2443,6 +2456,7 @@ impl FilesystemService {
 
     fn directory_is_at_or_below(
         &self,
+        filesystem: &Ext4,
         ancestor: &Inode,
         mut directory: Inode,
     ) -> Result<bool, i32> {
@@ -2450,7 +2464,7 @@ impl FilesystemService {
             if directory.index == ancestor.index {
                 return Ok(true);
             }
-            let parent = Dir::open_inode(&self.fs, directory.clone())
+            let parent = Dir::open_inode(filesystem, directory.clone())
                 .map_err(errno)?
                 .get_entry(DirEntryName::try_from("..").map_err(|_| EIO)?)
                 .map_err(errno)?;

@@ -996,3 +996,198 @@ fn hard_links_share_mounted_inode_identity_and_reject_actual_cross_volume_operat
         service.provider_close(opened.open_id).unwrap();
     }
 }
+
+#[test]
+fn mounted_rename_replaces_a_file_without_invalidating_its_retained_description() {
+    let fixture = Fixture::new();
+    let mut service = FilesystemService::new(fixture.volume("data"));
+    service
+        .mount_volume(b"/mount", fixture.volume("system"))
+        .unwrap();
+    let directory_flags = protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY;
+    let mounted = open(
+        &mut service,
+        b"/mount",
+        directory_flags,
+        PathAnchors::default(),
+    );
+    let nested = open(
+        &mut service,
+        b"/mount/nested",
+        directory_flags,
+        PathAnchors::default(),
+    );
+    let old_target = open(
+        &mut service,
+        b"/mount/nested/target",
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+        PathAnchors::default(),
+    );
+    service
+        .provider_write(old_target.open_id, b"original target")
+        .unwrap();
+    let root_file = open(
+        &mut service,
+        b"/file",
+        protocol::OPEN_AT_READ,
+        PathAnchors::default(),
+    );
+    let mut payload = b"file".to_vec();
+    payload.extend_from_slice(b"target");
+    service
+        .rename_at(
+            protocol::Header {
+                flags: protocol::RENAME_AT_OLD_BASE_ATTACHED
+                    | protocol::RENAME_AT_NEW_BASE_ATTACHED,
+                mode: 4,
+                ..Default::default()
+            },
+            &payload,
+            RenameAnchors {
+                root_open_id: None,
+                old_base_open_id: Some(mounted.open_id),
+                new_base_open_id: Some(nested.open_id),
+            },
+            root_credentials(),
+        )
+        .unwrap();
+    assert!(matches!(
+        service.stat_at(
+            protocol::Header::default(),
+            b"/mount/file",
+            PathAnchors::default(),
+            root_credentials()
+        ),
+        Err(2)
+    ));
+    let target = open(
+        &mut service,
+        b"/mount/nested/target",
+        protocol::OPEN_AT_READ,
+        PathAnchors::default(),
+    );
+    assert_eq!(
+        service.provider_read(target.open_id, 4096).unwrap(),
+        b"system"
+    );
+    assert_eq!(
+        service
+            .provider_read_at(old_target.open_id, 0, 4096)
+            .unwrap(),
+        b"original target"
+    );
+    assert_eq!(
+        service.provider_read(root_file.open_id, 4096).unwrap(),
+        b"data"
+    );
+    service
+        .provider_write_at(old_target.open_id, 0, &[b'x'; 8192])
+        .unwrap_err(); // Provider packets remain bounded.
+    service
+        .provider_write_at(old_target.open_id, 4096, &[b'x'; 4096])
+        .unwrap();
+    let old = service
+        .stat_handle(protocol::Header::default(), old_target.open_id)
+        .unwrap();
+    assert_eq!(
+        protocol::decode_node_status(&old.payload).unwrap().size,
+        8192
+    );
+    service.provider_close(old_target.open_id).unwrap();
+    assert_eq!(
+        service.provider_read_at(target.open_id, 0, 4096).unwrap(),
+        b"system"
+    );
+    for opened in [target, root_file, nested, mounted] {
+        service.provider_close(opened.open_id).unwrap();
+    }
+}
+
+#[test]
+fn mounted_directory_rename_updates_virtual_parents_and_rejects_cross_volume_and_mount_roots() {
+    let fixture = Fixture::new();
+    let mut service = FilesystemService::new(fixture.volume("data"));
+    service
+        .mount_volume(b"/mount", fixture.volume("system"))
+        .unwrap();
+    let rename = |service: &mut FilesystemService, old: &[u8], new: &[u8]| {
+        let mut payload = old.to_vec();
+        payload.extend_from_slice(new);
+        service.rename_at(
+            protocol::Header {
+                mode: old.len() as u32,
+                ..Default::default()
+            },
+            &payload,
+            RenameAnchors::default(),
+            root_credentials(),
+        )
+    };
+    let directory_flags = protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY;
+    let root = open(&mut service, b"/", directory_flags, PathAnchors::default());
+    let retained = open(
+        &mut service,
+        b"/mount/nested",
+        directory_flags,
+        PathAnchors::default(),
+    );
+    service
+        .mkdir_at(
+            protocol::Header {
+                mode: 0o755,
+                ..Default::default()
+            },
+            b"/mount/parent",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    rename(&mut service, b"/mount/nested", b"/mount/parent/moved").unwrap();
+    assert_eq!(
+        service
+            .path_handle(protocol::Header::default(), root.open_id, retained.open_id)
+            .unwrap()
+            .payload,
+        b"/mount/parent/moved"
+    );
+    assert!(matches!(
+        rename(&mut service, b"/mount/parent", b"/mount/parent/moved/cycle"),
+        Err(22)
+    ));
+    assert!(matches!(
+        rename(&mut service, b"/file", b"/mount/file"),
+        Err(18)
+    ));
+    assert!(matches!(
+        rename(&mut service, b"/mount/file", b"/file"),
+        Err(18)
+    ));
+    assert!(matches!(
+        rename(&mut service, b"/mount", b"/moved-mount"),
+        Err(16)
+    ));
+    assert!(matches!(
+        rename(&mut service, b"/nested", b"/mount"),
+        Err(16)
+    ));
+    for path in [b"/file".as_slice(), b"/mount/file"] {
+        let file = open(
+            &mut service,
+            path,
+            protocol::OPEN_AT_READ,
+            PathAnchors::default(),
+        );
+        assert_eq!(
+            service.provider_read(file.open_id, 4096).unwrap(),
+            if path == b"/file" {
+                b"data".as_slice()
+            } else {
+                b"system".as_slice()
+            }
+        );
+        service.provider_close(file.open_id).unwrap();
+    }
+    for opened in [retained, root] {
+        service.provider_close(opened.open_id).unwrap();
+    }
+}
