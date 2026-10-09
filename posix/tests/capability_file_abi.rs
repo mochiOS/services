@@ -17,3 +17,15 @@ fn runtime_capability_digest_reads_use_the_installed_posix_endpoint() {
     assert!(!reader.contains("find_by_name"));
     assert!(reader.contains("ok_or_else(|| sys_error(mochi_user_syscall::EAGAIN))"));
 }
+
+#[test]
+fn retired_certificate_validator_does_not_keep_unused_legacy_readers() {
+    let resolver = include_str!("../../capability/src/resolver.rs");
+    assert!(!resolver.contains("fn validate_certificate_capabilities("));
+    // The active validator still checks provenance, the signed manifest digest,
+    // and the certificate's allowed-capability list.
+    assert!(resolver.contains("fn decide_binary_capabilities("));
+    assert!(resolver.contains("install_record_matches_manifest(manifest, &record)"));
+    assert!(resolver.contains("verified.manifest_digest"));
+    assert!(resolver.contains("verified.allowed_capabilities()"));
+}

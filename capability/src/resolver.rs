@@ -371,61 +371,6 @@ pub(crate) fn binary_caps<'a>(
     Ok(caps)
 }
 
-fn validate_certificate_capabilities(
-    manifest: &platform::package::PackageManifest,
-    manifest_path: &str,
-    requested: &[String],
-) -> Result<(), mochi_user_syscall::SysError> {
-    let package_root = package_root_from_manifest_path(manifest_path)?;
-    let verification_path = alloc::format!("{package_root}/verification.bin");
-    let verification_bytes = platform::file::read_to_end_path(&verification_path).map_err(|error| {
-        if error.raw() == mochi_user_syscall::ENOENT as i64 {
-            platform::logln!(
-                "capability.service: package {} has no explicit install provenance",
-                manifest.package_id
-            );
-        }
-        error
-    })?;
-    let install_record = InstallRecordView::decode(&verification_bytes)
-        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64))?;
-    if !install_record_matches_manifest(manifest, &install_record) {
-        return Err(mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::EACCES as i64,
-        ));
-    }
-    let verified = install_record.verification;
-    let manifest_bytes = platform::file::read_to_end_path(manifest_path)?;
-    if Sha256::digest(&manifest_bytes).as_slice() != verified.manifest_digest {
-        return Err(mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::EACCES as i64,
-        ));
-    }
-    for capability in requested {
-        let mut allowed = false;
-        for certificate_capability in verified.allowed_capabilities() {
-            let certificate_capability = certificate_capability.map_err(|_| {
-                mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64)
-            })?;
-            if certificate_capability == capability {
-                allowed = true;
-                break;
-            }
-        }
-        if !allowed {
-            platform::logln!(
-                "capability.service: certificate denies required capability {} for {}",
-                capability,
-                manifest.package_id
-            );
-            return Err(mochi_user_syscall::SysError::from_raw(
-                mochi_user_syscall::EACCES as i64,
-            ));
-        }
-    }
-    Ok(())
-}
-
 pub(crate) fn resolve_capabilities_for_path(
     index: &PackageIndex,
     binary_path: &str,
