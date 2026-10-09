@@ -1,4 +1,4 @@
-use filesystem_service::partition::{DiscoveryError, PartitionRange, find_by_type};
+use filesystem_service::partition::{find_by_type, DiscoveryError, PartitionRange};
 use filesystem_service::storage::SectorDevice;
 
 struct Disk(Vec<u8>);
@@ -208,9 +208,116 @@ fn system_image_is_readable_through_the_user_space_filesystem_backend() {
         )
         .unwrap();
     let bytes = service.provider_read(opened.header.open_id, 4096).unwrap();
-    assert!(
-        std::str::from_utf8(&bytes)
+    assert!(std::str::from_utf8(&bytes)
+        .unwrap()
+        .contains("org.mochios.binder"));
+}
+
+#[test]
+#[ignore = "requires an already built out/artifacts/disk.img; never builds or boots the OS"]
+fn system_source_is_projected_into_the_data_namespace_without_a_duplicate_system_directory() {
+    use filesystem_service::{
+        ext4::Ext4Storage,
+        service::{FilesystemService, PathAnchors},
+        storage::PartitionIo,
+    };
+    use mochios_filesystem_protocol as protocol;
+    use std::sync::Arc;
+
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../out/artifacts/disk.img");
+    let load = |partition_type| {
+        let mut disk = FileDisk(std::fs::File::open(&path).unwrap());
+        let range = find_by_type(&mut disk, partition_type).unwrap().unwrap();
+        let partition = Arc::new(PartitionIo::new(disk, range.first_lba, range.sector_count));
+        ext4plus::Ext4::load(Box::new(Ext4Storage::new(partition))).unwrap()
+    };
+    let mut partition_type = [
+        0x68, 0x63, 0x6f, 0x6d, 0x4f, 0x69, 0x00, 0x53, 0x80, 0x00, 0x6d, 0x50, 0x61, 0x72, 0x74,
+        0x02,
+    ];
+    let data = load(partition_type);
+    assert!(data.symlink_metadata("/system").is_err());
+    partition_type[15] = 0x01;
+    let system = load(partition_type);
+    let mut service = FilesystemService::new(data.clone());
+    service
+        .mount_named_volume(b"/", b"system", system, b"/system")
+        .unwrap();
+    let mut bytes = [0u8; protocol::CREDENTIALS_MAX_LEN];
+    let length = protocol::encode_credentials_payload(0, 0, &[], &[], &mut bytes).unwrap();
+    let credentials = protocol::decode_credentials_payload(&bytes[..length])
+        .unwrap()
+        .0;
+    let request = protocol::Header {
+        opcode: protocol::OP_OPEN_AT,
+        flags: protocol::OPEN_AT_READ,
+        ..Default::default()
+    };
+    let opened = service
+        .open_at(
+            request,
+            b"/system/packages/binder/manifest.toml",
+            PathAnchors::default(),
+            credentials,
+        )
+        .unwrap();
+    let manifest = service.provider_read(opened.header.open_id, 4096).unwrap();
+    assert!(std::str::from_utf8(&manifest)
+        .unwrap()
+        .contains("org.mochios.binder"));
+    assert!(matches!(
+        service.open_at(
+            request,
+            b"/system/system/packages/binder/manifest.toml",
+            PathAnchors::default(),
+            credentials
+        ),
+        Err(2)
+    ));
+    let flags = protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY;
+    let root = service
+        .open_at(
+            protocol::Header { flags, ..request },
+            b"/",
+            PathAnchors::default(),
+            credentials,
+        )
+        .unwrap();
+    let mounted = service
+        .open_at(
+            protocol::Header { flags, ..request },
+            b"/system",
+            PathAnchors::default(),
+            credentials,
+        )
+        .unwrap();
+    assert_eq!(
+        service
+            .path_handle(
+                protocol::Header::default(),
+                root.header.open_id,
+                mounted.header.open_id
+            )
             .unwrap()
-            .contains("org.mochios.binder")
+            .payload,
+        b"/system"
     );
+    for path in [
+        b"/bin".as_slice(),
+        b"/applications",
+        b"/home",
+        b"/var",
+        b"/tmp",
+    ] {
+        service
+            .open_at(
+                protocol::Header { flags, ..request },
+                path,
+                PathAnchors::default(),
+                credentials,
+            )
+            .unwrap();
+    }
+    assert!(data.symlink_metadata("/system").is_err());
 }
