@@ -2754,7 +2754,7 @@ pub fn permission_allows(
     requested & !granted == 0
 }
 
-fn errno(error: Ext4Error) -> i32 {
+pub(crate) fn errno(error: Ext4Error) -> i32 {
     match error {
         Ext4Error::NotFound => ENOENT,
         Ext4Error::IsADirectory => EISDIR,
