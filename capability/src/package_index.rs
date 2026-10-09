@@ -38,7 +38,7 @@ pub(crate) fn build_package_index() -> PackageIndex {
     let mut manifest_paths = Vec::new();
     walk_package_tree("/system/packages", &mut manifest_paths);
     walk_package_tree("/var/lib/packages", &mut manifest_paths);
-    let mut index = PackageIndex::default();
+    let mut manifests = Vec::new();
     for manifest_path in manifest_paths {
         let Ok(bytes) = platform::file::read_to_end_path(&manifest_path) else {
             platform::logln!(
@@ -47,6 +47,24 @@ pub(crate) fn build_package_index() -> PackageIndex {
             );
             continue;
         };
+        manifests.push((manifest_path, bytes));
+    }
+    index_manifests(manifests)
+}
+
+pub(crate) fn build_runtime_package_index() -> Result<PackageIndex, mochi_user_syscall::SysError> {
+    let paths = crate::package_walk::manifest_paths(crate::persistent_grant::read_dir_names)?;
+    let mut manifests = Vec::new();
+    for path in paths {
+        let bytes = crate::persistent_grant::read_file(&path)?;
+        manifests.push((path, bytes));
+    }
+    Ok(index_manifests(manifests))
+}
+
+fn index_manifests(manifests: Vec<(String, Vec<u8>)>) -> PackageIndex {
+    let mut index = PackageIndex::default();
+    for (manifest_path, bytes) in manifests {
         let Ok(text) = core::str::from_utf8(&bytes) else {
             platform::logln!(
                 "capability.service: invalid package manifest {}",

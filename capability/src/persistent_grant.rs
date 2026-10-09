@@ -3,9 +3,8 @@ use alloc::vec::Vec;
 use std::sync::Mutex;
 
 use mochi_user_platform as platform;
-use mochios_posix_client::{
-    Client, ClientError, EndpointTransport, OpenAtBase, StatAtBase,
-};
+use mochios_posix_client::directory::DirectoryEntries;
+use mochios_posix_client::{Client, ClientError, EndpointTransport, OpenAtBase, StatAtBase};
 use mochios_posix_protocol as posix;
 
 use crate::dynamic_grant::{read_request_str, transfer_scoped_path_grant, transfer_user_grant};
@@ -138,6 +137,35 @@ pub(crate) fn read_file(path: &str) -> Result<Vec<u8>, mochi_user_syscall::SysEr
     Ok(output)
 }
 
+pub(crate) fn read_dir_names(path: &str) -> Result<Vec<String>, mochi_user_syscall::SysError> {
+    let directory = with_client(|client| {
+        client.open_at(
+            OpenAtBase::ProcessRoot,
+            posix::OPEN_READ | posix::OPEN_DIRECTORY,
+            0,
+            path,
+        )
+    })?;
+    let result = (|| {
+        let mut names = Vec::new();
+        let mut bytes = [0u8; 4096];
+        loop {
+            let length = platform::handle::read(directory.handle, &mut bytes)?;
+            if length == 0 {
+                return Ok(names);
+            }
+            for entry in DirectoryEntries::new(&bytes[..length]) {
+                let entry = entry.map_err(|_| sys_error(mochi_user_syscall::EIO))?;
+                if entry.name != "." && entry.name != ".." {
+                    names.push(entry.name.to_string());
+                }
+            }
+        }
+    })();
+    let closed = platform::handle::close(directory.handle);
+    result.and_then(|names| closed.map(|_| names))
+}
+
 fn path_exists(path: &str) -> Result<bool, mochi_user_syscall::SysError> {
     match with_client(|client| client.stat_at(StatAtBase::ProcessRoot, 0, path)) {
         Ok(_) => Ok(true),
@@ -224,7 +252,10 @@ pub(crate) fn append_persistent_grant(
 ) -> Result<(), mochi_user_syscall::SysError> {
     ensure_policy_dir()?;
     recover_grant_db()?;
-    if capability.as_bytes().iter().any(|byte| matches!(byte, b'\t' | b'\n' | 0))
+    if capability
+        .as_bytes()
+        .iter()
+        .any(|byte| matches!(byte, b'\t' | b'\n' | 0))
         || resource.is_some_and(|value| {
             value
                 .as_bytes()
@@ -238,9 +269,7 @@ pub(crate) fn append_persistent_grant(
     }
     let mut data = match read_file(GRANTS_PATH) {
         Ok(data) => data,
-        Err(error) if error.errno() == Some(mochi_user_syscall::ENOENT) => {
-            alloc::vec::Vec::new()
-        }
+        Err(error) if error.errno() == Some(mochi_user_syscall::ENOENT) => alloc::vec::Vec::new(),
         Err(error) => return Err(error),
     };
     data.extend_from_slice(b"v2\t");
@@ -302,10 +331,18 @@ fn grant_db_matches(
         let Some(grant_developer) = fields.next() else {
             continue;
         };
-        let Some(grant_key) = fields.next() else { continue };
-        let Some(grant_provenance) = fields.next() else { continue };
-        let Some(grant_cap) = fields.next().and_then(|v| core::str::from_utf8(v).ok()) else { continue };
-        let Some(scope) = fields.next().and_then(|v| core::str::from_utf8(v).ok()) else { continue };
+        let Some(grant_key) = fields.next() else {
+            continue;
+        };
+        let Some(grant_provenance) = fields.next() else {
+            continue;
+        };
+        let Some(grant_cap) = fields.next().and_then(|v| core::str::from_utf8(v).ok()) else {
+            continue;
+        };
+        let Some(scope) = fields.next().and_then(|v| core::str::from_utf8(v).ok()) else {
+            continue;
+        };
         let grant_resource = fields
             .next()
             .and_then(|v| core::str::from_utf8(v).ok())
@@ -373,9 +410,10 @@ pub(crate) fn authorize_persistent_capability(
         ));
     }
     let executable = read_request_str(&request.executable.path, request.executable.path_len)?;
-    let record = index.by_binary.get(executable).ok_or_else(|| {
-        mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64)
-    })?;
+    let record = index
+        .by_binary
+        .get(executable)
+        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64))?;
     let expected = application_identity(&record.manifest, &record.manifest_path)?;
     if context.package_id_len as usize != expected.package_id.len()
         || context.developer_id_len as usize != expected.developer_id.len()

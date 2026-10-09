@@ -5,6 +5,7 @@ use mochi_user_platform as platform;
 mod app_spawn;
 mod dynamic_grant;
 mod package_index;
+mod package_walk;
 mod persistent_grant;
 mod policy;
 mod resolver;

@@ -36,6 +36,20 @@ pub(crate) fn load_app_prompt_policy(index: &PackageIndex) -> AppPromptPolicy {
     let Ok(bytes) = platform::file::read_to_end_path(&record.manifest_path) else {
         return AppPromptPolicy::default();
     };
+    parse_app_prompt_policy(&bytes)
+}
+
+pub(crate) fn load_runtime_app_prompt_policy(
+    index: &PackageIndex,
+) -> Result<AppPromptPolicy, mochi_user_syscall::SysError> {
+    let Some(record) = index.by_package.get(CAPABILITY_PACKAGE_ID) else {
+        return Ok(AppPromptPolicy::default());
+    };
+    let bytes = crate::persistent_grant::read_file(&record.manifest_path)?;
+    Ok(parse_app_prompt_policy(&bytes))
+}
+
+fn parse_app_prompt_policy(bytes: &[u8]) -> AppPromptPolicy {
     let Ok(text) = core::str::from_utf8(&bytes) else {
         return AppPromptPolicy::default();
     };
