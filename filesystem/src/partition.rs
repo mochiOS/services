@@ -21,8 +21,24 @@ pub fn find_by_type<D: SectorDevice>(
     disk: &mut D,
     partition_type: [u8; 16],
 ) -> Result<Option<PartitionRange>, DiscoveryError<D::Error>> {
+    find_by_type_ordinal(disk, partition_type, 1, 0)
+}
+
+/// Selects from an exact-size set of partitions, ordered by starting LBA.
+/// The caller owns the meaning of the ordinal (for example a boot slot).
+/// A partial or overlapping set is not safe to select from.
+pub fn find_by_type_ordinal<D: SectorDevice>(
+    disk: &mut D,
+    partition_type: [u8; 16],
+    expected_count: usize,
+    ordinal: usize,
+) -> Result<Option<PartitionRange>, DiscoveryError<D::Error>> {
     let invalid = || DiscoveryError::InvalidTable;
-    if partition_type == [0; 16] {
+    if partition_type == [0; 16]
+        || expected_count == 0
+        || expected_count > 128
+        || ordinal >= expected_count
+    {
         return Err(invalid());
     }
     let mut header = [0u8; SECTOR_BYTES];
@@ -68,7 +84,7 @@ pub fn find_by_type<D: SectorDevice>(
     if crc32(&entries[..length]) != u32_at(&header, 88) {
         return Err(invalid());
     }
-    let mut found = None;
+    let mut found = Vec::new();
     for entry in entries[..length].chunks_exact(entry_size) {
         if entry[..16] == [0; 16] {
             continue;
@@ -83,18 +99,29 @@ pub fn find_by_type<D: SectorDevice>(
                 .checked_sub(first_lba)
                 .and_then(|length| length.checked_add(1))
                 .ok_or_else(invalid)?;
-            if found
-                .replace(PartitionRange {
-                    first_lba,
-                    sector_count,
-                })
-                .is_some()
-            {
-                return Err(DiscoveryError::AmbiguousType);
-            }
+            found.push(PartitionRange {
+                first_lba,
+                sector_count,
+            });
         }
     }
-    Ok(found)
+    if found.is_empty() {
+        return Ok(None);
+    }
+    if found.len() != expected_count {
+        return Err(DiscoveryError::AmbiguousType);
+    }
+    found.sort_unstable_by_key(|range| range.first_lba);
+    for pair in found.windows(2) {
+        let end = pair[0]
+            .first_lba
+            .checked_add(pair[0].sector_count)
+            .ok_or_else(invalid)?;
+        if end > pair[1].first_lba {
+            return Err(invalid());
+        }
+    }
+    Ok(Some(found[ordinal]))
 }
 
 fn u32_at(bytes: &[u8], offset: usize) -> u32 {

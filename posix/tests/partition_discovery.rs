@@ -1,4 +1,6 @@
-use filesystem_service::partition::{find_by_type, DiscoveryError, PartitionRange};
+use filesystem_service::partition::{
+    DiscoveryError, PartitionRange, find_by_type, find_by_type_ordinal,
+};
 use filesystem_service::storage::SectorDevice;
 
 struct Disk(Vec<u8>);
@@ -81,6 +83,60 @@ fn empty_slots_do_not_hide_a_later_partition_and_type_is_caller_selected() {
         find_by_type(&mut disk, [0; 16]),
         Err(DiscoveryError::InvalidTable)
     );
+}
+
+#[test]
+fn paired_partition_selection_uses_lba_order_not_gpt_entry_order() {
+    let mut disk = fixture();
+    entry(&mut disk, 0, [7; 16], 300, 399);
+    seal(&mut disk);
+    assert_eq!(
+        find_by_type_ordinal(&mut disk, [7; 16], 2, 0),
+        Ok(Some(PartitionRange {
+            first_lba: 100,
+            sector_count: 100
+        }))
+    );
+    assert_eq!(
+        find_by_type_ordinal(&mut disk, [7; 16], 2, 1),
+        Ok(Some(PartitionRange {
+            first_lba: 300,
+            sector_count: 100
+        }))
+    );
+    assert_eq!(
+        find_by_type(&mut disk, [7; 16]),
+        Err(DiscoveryError::AmbiguousType)
+    );
+}
+
+#[test]
+fn incomplete_extra_overlapping_or_invalid_partition_selections_fail_closed() {
+    let mut disk = fixture();
+    assert_eq!(
+        find_by_type_ordinal(&mut disk, [7; 16], 2, 0),
+        Err(DiscoveryError::AmbiguousType)
+    );
+    for (count, ordinal) in [(0, 0), (129, 0), (2, 2)] {
+        assert_eq!(
+            find_by_type_ordinal(&mut disk, [7; 16], count, ordinal),
+            Err(DiscoveryError::InvalidTable)
+        );
+    }
+    entry(&mut disk, 0, [7; 16], 150, 249);
+    seal(&mut disk);
+    assert_eq!(
+        find_by_type_ordinal(&mut disk, [7; 16], 2, 1),
+        Err(DiscoveryError::InvalidTable)
+    );
+    entry(&mut disk, 0, [7; 16], 300, 399);
+    entry(&mut disk, 1, [7; 16], 500, 599);
+    seal(&mut disk);
+    assert_eq!(
+        find_by_type_ordinal(&mut disk, [7; 16], 2, 0),
+        Err(DiscoveryError::AmbiguousType)
+    );
+    assert_eq!(find_by_type_ordinal(&mut disk, [8; 16], 2, 1), Ok(None));
 }
 #[test]
 fn corrupted_header_and_array_fail_closed() {
@@ -208,9 +264,11 @@ fn system_image_is_readable_through_the_user_space_filesystem_backend() {
         )
         .unwrap();
     let bytes = service.provider_read(opened.header.open_id, 4096).unwrap();
-    assert!(std::str::from_utf8(&bytes)
-        .unwrap()
-        .contains("org.mochios.binder"));
+    assert!(
+        std::str::from_utf8(&bytes)
+            .unwrap()
+            .contains("org.mochios.binder")
+    );
 }
 
 #[test]
@@ -263,9 +321,11 @@ fn system_source_is_projected_into_the_data_namespace_without_a_duplicate_system
         )
         .unwrap();
     let manifest = service.provider_read(opened.header.open_id, 4096).unwrap();
-    assert!(std::str::from_utf8(&manifest)
-        .unwrap()
-        .contains("org.mochios.binder"));
+    assert!(
+        std::str::from_utf8(&manifest)
+            .unwrap()
+            .contains("org.mochios.binder")
+    );
     assert!(matches!(
         service.open_at(
             request,
