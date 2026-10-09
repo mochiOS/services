@@ -109,7 +109,12 @@ fn main() {
         let length = (message & 0xffff_ffff) as usize;
         let request = &request_bytes[..length.min(request_bytes.len())];
         if request.starts_with(&mnu_abi::provider::MAGIC.to_le_bytes()) {
-            let response_len = handle_provider_request(&mut service, request, &mut response_bytes);
+            let response_len = handle_provider_request(
+                &mut service,
+                partition.as_ref(),
+                request,
+                &mut response_bytes,
+            );
             close_attached_handles(&attached);
             if let Some(response_len) = response_len {
                 let _ = platform::ipc::reply(sender, &response_bytes[..response_len]);
@@ -790,6 +795,9 @@ fn open_handle_rights(flags: u32) -> u64 {
     }
     if flags & protocol::OPEN_AT_DIRECTORY == 0 {
         rights |= mochi_user_platform::handle::HANDLE_RIGHT_SEEK;
+        if flags & protocol::OPEN_AT_READ != 0 {
+            rights |= mochi_user_platform::handle::HANDLE_RIGHT_MAP;
+        }
     }
     rights
 }
@@ -804,6 +812,9 @@ fn close_attached_handles(handles: &mochi_user_platform::ipc::IpcObjectHandles) 
 #[cfg(target_os = "mochios")]
 fn handle_provider_request(
     service: &mut filesystem_service::service::FilesystemService,
+    partition: &filesystem_service::storage::PartitionIo<
+        filesystem_service::platform_storage::MochiDisk,
+    >,
     request: &[u8],
     response: &mut [u8],
 ) -> Option<usize> {
@@ -818,8 +829,21 @@ fn handle_provider_request(
             .provider_read(header.object_id, header.length as usize)
             .map(|data| (data.len() as u64, data)),
         provider::OP_WRITE => service
-            .provider_write(header.object_id, payload)
+            .provider_write_with_offset(header.object_id, payload)
+            .map(|(written, start)| (written as u64, start.to_le_bytes().to_vec())),
+        provider::OP_READ_AT => service
+            .provider_read_at(header.object_id, header.basis, header.length as usize)
+            .map(|data| (data.len() as u64, data)),
+        provider::OP_WRITE_AT => service
+            .provider_write_at(header.object_id, header.basis, payload)
             .map(|written| (written as u64, Vec::new())),
+        provider::OP_SYNC => service
+            .provider_sync(header.object_id)
+            .and_then(|_| partition.flush().map_err(|_| 5))
+            .map(|_| (0, Vec::new())),
+        provider::OP_MEMORY_OBJECT => service
+            .provider_memory_object(header.object_id)
+            .map(|identity| (identity, Vec::new())),
         provider::OP_SEEK => service
             .provider_seek(header.object_id, header.argument, header.basis)
             .map(|offset| (offset, Vec::new())),

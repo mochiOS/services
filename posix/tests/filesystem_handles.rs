@@ -288,6 +288,112 @@ fn truncate_and_sync_address_an_open_object_without_a_path() {
 }
 
 #[test]
+fn pager_positioned_io_does_not_change_the_open_description_offset() {
+    let mut filesystem = test_filesystem();
+    let open_id = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+                mode: 0o644,
+                ..protocol::Header::default()
+            },
+            b"/pager.txt",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap()
+        .header
+        .open_id;
+    filesystem.provider_write(open_id, b"abcdef").unwrap();
+    filesystem
+        .provider_seek(open_id, 2, HANDLE_SEEK_START)
+        .unwrap();
+
+    assert_eq!(filesystem.provider_read_at(open_id, 0, 2).unwrap(), b"ab");
+    assert_eq!(filesystem.provider_read(open_id, 2).unwrap(), b"cd");
+    filesystem.provider_write_at(open_id, 0, b"ZZ").unwrap();
+    assert_eq!(filesystem.provider_read(open_id, 2).unwrap(), b"ef");
+    assert_eq!(
+        filesystem.provider_read_at(open_id, 0, 6).unwrap(),
+        b"ZZcdef"
+    );
+    assert_eq!(
+        filesystem
+            .provider_write_with_offset(open_id, b"gh")
+            .unwrap(),
+        (2, 6)
+    );
+    // A later seek cannot change the offset captured in the write result.
+    filesystem
+        .provider_seek(open_id, 1, HANDLE_SEEK_START)
+        .unwrap();
+    assert_eq!(
+        filesystem
+            .provider_write_with_offset(open_id, b"X")
+            .unwrap(),
+        (1, 1)
+    );
+    assert_eq!(
+        filesystem.provider_read_at(open_id, 0, 8).unwrap(),
+        b"ZXcdefgh"
+    );
+}
+
+#[test]
+fn pager_identity_is_stable_across_open_descriptions() {
+    let mut filesystem = test_filesystem();
+    let create = |filesystem: &mut FilesystemService, path: &[u8]| {
+        filesystem
+            .open_at(
+                protocol::Header {
+                    opcode: protocol::OP_OPEN_AT,
+                    flags: protocol::OPEN_AT_READ
+                        | protocol::OPEN_AT_WRITE
+                        | protocol::OPEN_AT_CREATE,
+                    mode: 0o644,
+                    ..protocol::Header::default()
+                },
+                path,
+                PathAnchors::default(),
+                root_credentials(),
+            )
+            .unwrap()
+            .header
+            .open_id
+    };
+    let first = create(&mut filesystem, b"/identity.txt");
+    let second = create(&mut filesystem, b"/identity.txt");
+    let other = create(&mut filesystem, b"/other.txt");
+
+    assert_eq!(
+        filesystem.provider_memory_object(first).unwrap(),
+        filesystem.provider_memory_object(second).unwrap()
+    );
+    assert_ne!(
+        filesystem.provider_memory_object(first).unwrap(),
+        filesystem.provider_memory_object(other).unwrap()
+    );
+    let identity = filesystem.provider_memory_object(first).unwrap();
+    for open_id in [first, second] {
+        let response = filesystem.handle(
+            protocol::Header {
+                opcode: protocol::OP_CLOSE,
+                open_id,
+                ..protocol::Header::default()
+            },
+            &[],
+        );
+        assert_eq!(response.header.status, 0);
+        if open_id == first {
+            assert_eq!(filesystem.provider_memory_object(second).unwrap(), identity);
+        }
+    }
+    let reopened = create(&mut filesystem, b"/identity.txt");
+    assert_ne!(filesystem.provider_memory_object(reopened).unwrap(), identity);
+}
+
+#[test]
 fn duplicated_open_descriptions_share_mutable_status_flags() {
     let mut filesystem = test_filesystem();
     let opened = filesystem

@@ -54,6 +54,9 @@ pub struct FilesystemService {
 
 struct OpenFile {
     node_id: u64,
+    // Stable while any description retains this inode, but never reused after
+    // the last close. An inode number alone can alias a recycled cache key.
+    memory_object_id: u64,
     /// The opened inode is the identity of this open file description.
     ///
     /// Keep it independently of the path cache: an open directory or file
@@ -160,10 +163,12 @@ impl FilesystemService {
         let inode = file.inode().clone();
         let open_id = self.next_open_id;
         self.next_open_id = self.next_open_id.checked_add(1).ok_or(EIO)?;
+        let memory_object_id = self.memory_identity_for(request.node_id, open_id);
         self.opens.insert(
             open_id,
             OpenFile {
                 node_id: request.node_id,
+                memory_object_id,
                 inode,
                 file: Some(file),
                 offset: 0,
@@ -290,10 +295,12 @@ impl FilesystemService {
         }
         let open_id = self.next_open_id;
         self.next_open_id = self.next_open_id.checked_add(1).ok_or(EIO)?;
+        let memory_object_id = self.memory_identity_for(node_id, open_id);
         self.opens.insert(
             open_id,
             OpenFile {
                 node_id,
+                memory_object_id,
                 inode,
                 file,
                 offset: 0,
@@ -1126,6 +1133,15 @@ impl FilesystemService {
     }
 
     pub fn provider_write(&mut self, open_id: u64, payload: &[u8]) -> Result<usize, i32> {
+        self.provider_write_with_offset(open_id, payload)
+            .map(|(written, _)| written)
+    }
+
+    pub fn provider_write_with_offset(
+        &mut self,
+        open_id: u64,
+        payload: &[u8],
+    ) -> Result<(usize, u64), i32> {
         if payload.len() > mnu_abi::provider::MAX_DATA_LEN {
             return Err(EINVAL);
         }
@@ -1134,6 +1150,7 @@ impl FilesystemService {
         if open.status_flags & protocol::OPEN_STATUS_APPEND != 0 {
             open.offset = file.inode().metadata().len();
         }
+        let start = open.offset;
         let mut done = 0usize;
         while done < payload.len() {
             let count = file
@@ -1145,7 +1162,79 @@ impl FilesystemService {
             done += count;
         }
         open.offset = open.offset.checked_add(done as u64).ok_or(EFBIG)?;
+        Ok((done, start))
+    }
+
+    pub fn provider_read_at(
+        &mut self,
+        open_id: u64,
+        offset: u64,
+        length: usize,
+    ) -> Result<Vec<u8>, i32> {
+        let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
+        let file = open.file.as_mut().ok_or(EISDIR)?;
+        let mut payload = vec![0u8; length.min(mnu_abi::provider::MAX_DATA_LEN)];
+        let mut done = 0usize;
+        while done < payload.len() {
+            let position = offset.checked_add(done as u64).ok_or(EFBIG)?;
+            let count = file
+                .read_bytes_at(&mut payload[done..], position)
+                .map_err(errno)?;
+            if count == 0 {
+                break;
+            }
+            done += count;
+        }
+        payload.truncate(done);
+        Ok(payload)
+    }
+
+    pub fn provider_write_at(
+        &mut self,
+        open_id: u64,
+        offset: u64,
+        payload: &[u8],
+    ) -> Result<usize, i32> {
+        if payload.len() > mnu_abi::provider::MAX_DATA_LEN {
+            return Err(EINVAL);
+        }
+        let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
+        let file = open.file.as_mut().ok_or(EISDIR)?;
+        let mut done = 0usize;
+        while done < payload.len() {
+            let position = offset.checked_add(done as u64).ok_or(EFBIG)?;
+            let count = file
+                .write_bytes_at(&payload[done..], position)
+                .map_err(errno)?;
+            if count == 0 {
+                return Err(EIO);
+            }
+            done += count;
+        }
         Ok(done)
+    }
+
+    pub fn provider_sync(&self, open_id: u64) -> Result<(), i32> {
+        let open = self.opens.get(&open_id).ok_or(EBADF)?;
+        if open.file.is_none() {
+            return Err(EISDIR);
+        }
+        Ok(())
+    }
+
+    pub fn provider_memory_object(&self, open_id: u64) -> Result<u64, i32> {
+        let open = self.opens.get(&open_id).ok_or(EBADF)?;
+        if open.file.is_none() || open.node_id == 0 {
+            return Err(EISDIR);
+        }
+        Ok(open.memory_object_id)
+    }
+
+    fn memory_identity_for(&self, node_id: u64, new_open_id: u64) -> u64 {
+        self.opens
+            .values()
+            .find(|open| open.node_id == node_id)
+            .map_or(new_open_id, |open| open.memory_object_id)
     }
 
     pub fn provider_seek(&mut self, open_id: u64, offset: i64, basis: u64) -> Result<u64, i32> {
