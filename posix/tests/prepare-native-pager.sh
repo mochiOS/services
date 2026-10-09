@@ -5,6 +5,7 @@ set -euo pipefail
 # artifact or the runner configuration. Binder's automatic launch runs the probe
 # by default. NATIVE_PROBE_ROLE=input isolates System I/O before dictionary
 # parsing; its successful exit intentionally does not publish input readiness.
+# NATIVE_PROBE_ROLE=heap exercises concurrent anonymous page population instead.
 tests=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 root=$(cd -- "$tests/../../.." && pwd)
 sdk=$root/out/newlib-port/sdk
@@ -20,6 +21,12 @@ case ${NATIVE_PROBE_ROLE:-binder} in
     input)
         probe_source=$tests/native_system_read.c
         probe_manifest=$tests/native-system-read-manifest.toml
+        probe_entry=/system/services/input.service
+        probe_package=/system/packages/input
+        ;;
+    heap)
+        probe_source=$tests/heap_mapping.c
+        probe_manifest=$tests/native-heap-manifest.toml
         probe_entry=/system/services/input.service
         probe_package=/system/packages/input
         ;;
