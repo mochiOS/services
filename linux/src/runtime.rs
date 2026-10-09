@@ -253,8 +253,7 @@ fn handle_bundle_launch(
 
 fn load_bundle_spec(bundle_id: &str, user: &str) -> Result<BundleSpec, i32> {
     let manifest_path = format!("/var/lib/packages/{bundle_id}/manifest.toml");
-    let manifest = platform::package::read_manifest(&manifest_path)
-        .ok_or(-(mochi_user_syscall::ENOENT as i32))?;
+    let manifest = crate::manifest_io::read_manifest(&manifest_path, |path| std::fs::read(path))?;
     if manifest.package_id != bundle_id
         || manifest.package_kind.as_deref() != Some("application")
         || manifest.package_architecture.as_deref() != Some("x86_64")

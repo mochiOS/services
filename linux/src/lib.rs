@@ -5,6 +5,8 @@ mod compositor;
 mod host;
 mod input;
 #[cfg(target_os = "mochios")]
+mod manifest_io;
+#[cfg(target_os = "mochios")]
 mod portal;
 #[cfg(target_os = "mochios")]
 mod runtime;
