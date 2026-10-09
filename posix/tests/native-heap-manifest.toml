@@ -8,4 +8,4 @@ vendor = "mochiOS"
 [[binary]]
 path = "/system/services/input.service"
 kind = "service"
-requires = ["ipc.client", "process.spawn", "process.inspect"]
+requires = ["ipc.client", "ipc.server", "process.spawn", "process.inspect"]

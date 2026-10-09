@@ -30,6 +30,12 @@ case ${NATIVE_PROBE_ROLE:-binder} in
         probe_entry=/system/services/input.service
         probe_package=/system/packages/input
         ;;
+    shared-memory)
+        probe_source=$tests/native_shared_memory.c
+        probe_manifest=$tests/native-heap-manifest.toml
+        probe_entry=/system/services/input.service
+        probe_package=/system/packages/input
+        ;;
     *) echo "unsupported native probe role" >&2; exit 1 ;;
 esac
 for command in dd debugfs e2fsck cmp; do
