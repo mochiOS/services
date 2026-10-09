@@ -29,8 +29,11 @@ int main(void) {
     STAGE("shared map");
     unsigned char *shared = mmap(0, page, PROT_READ | PROT_WRITE,
                                  MAP_SHARED, fd, (off_t)page);
+    STAGE("shared map returned");
     if (shared == MAP_FAILED || shared[0] != 0x22) return 6;
+    STAGE("shared page read");
     if (lseek(fd, 0, SEEK_CUR) != 19) return 7;
+    STAGE("offset preserved");
     shared[37] = 0x77;
     STAGE("writeback");
     if (msync(shared, page, MS_SYNC) != 0) return 8;
