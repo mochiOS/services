@@ -9,6 +9,7 @@ mod package_walk;
 mod persistent_grant;
 mod policy;
 mod resolver;
+mod runtime_manifest;
 mod server;
 mod service_bootstrap;
 mod state;

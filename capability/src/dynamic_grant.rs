@@ -252,9 +252,10 @@ pub(crate) fn authorize_dynamic_capability(
     let record = index.by_binary.get(executable).ok_or_else(|| {
         mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64)
     })?;
-    let manifest = platform::package::read_manifest(&record.manifest_path).ok_or_else(|| {
-        mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
-    })?;
+    let manifest = crate::runtime_manifest::read_manifest(
+        &record.manifest_path,
+        crate::persistent_grant::read_file,
+    )?;
     let declared_caps = binary_caps(&manifest, &record.manifest_path, executable)?;
     if !declared_caps.iter().any(|cap| cap.as_str() == capability) {
         return Err(mochi_user_syscall::SysError::from_raw(

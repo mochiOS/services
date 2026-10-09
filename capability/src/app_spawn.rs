@@ -86,8 +86,10 @@ pub(crate) fn spawn_application_from_manifest(
         .by_binary
         .get(entry_path)
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOENT as i64))?;
-    let manifest = platform::package::read_manifest(&manifest_record.manifest_path)
-        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    let manifest = crate::runtime_manifest::read_manifest(
+        &manifest_record.manifest_path,
+        crate::persistent_grant::read_file,
+    )?;
     let binary = manifest
         .binary(entry_path)
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
