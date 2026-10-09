@@ -25,6 +25,19 @@ int main(void) {
     fprintf(stderr, "system-read: namespace ok\n");
     fd = open("/system/libraries/ime/ja.mime", O_RDONLY);
     if (fd < 0) { perror("system-read: dictionary open"); return 9; }
+    char bulk[65536], inline_bytes[4088];
+    length = read(fd, bulk, sizeof(bulk));
+    if (length != sizeof(bulk) || lseek(fd, 0, SEEK_SET) != 0) return 15;
+    size_t checked = 0;
+    while (checked < sizeof(bulk)) {
+        size_t count = sizeof(bulk) - checked;
+        if (count > sizeof(inline_bytes)) count = sizeof(inline_bytes);
+        length = read(fd, inline_bytes, count);
+        if (length != (ssize_t)count || memcmp(inline_bytes, bulk + checked, count)) return 16;
+        checked += count;
+    }
+    if (lseek(fd, 0, SEEK_SET) != 0) return 17;
+    fprintf(stderr, "system-read: bulk matches inline bytes and shared offset\n");
     struct timespec start, end;
     if (clock_gettime(CLOCK_MONOTONIC, &start) != 0) return 10;
     char buffer[65536];

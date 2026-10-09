@@ -135,6 +135,7 @@ fn main() {
                 partition.as_ref(),
                 request,
                 &mut response_bytes,
+                &attached,
             );
             close_attached_handles(&attached);
             if let Some(response_len) = response_len {
@@ -838,6 +839,7 @@ fn handle_provider_request(
     >,
     request: &[u8],
     response: &mut [u8],
+    attached: &mochi_user_platform::ipc::IpcObjectHandles,
 ) -> Option<usize> {
     use mnu_abi::provider;
     let (header, payload) = provider::RequestHeader::decode(request).ok()?;
@@ -846,6 +848,7 @@ fn handle_provider_request(
         return None;
     }
     let result = match header.opcode {
+        provider::OP_READ_SHARED => read_provider_shared(service, header, attached),
         provider::OP_READ => service
             .provider_read(header.object_id, header.length as usize)
             .map(|data| (data.len() as u64, data)),
@@ -891,6 +894,57 @@ fn handle_provider_request(
     }
     .encode(&data, response)
     .ok()
+}
+
+#[cfg(target_os = "mochios")]
+fn read_provider_shared(
+    service: &mut filesystem_service::service::FilesystemService,
+    header: mnu_abi::provider::RequestHeader,
+    attached: &mochi_user_platform::ipc::IpcObjectHandles,
+) -> Result<(u64, Vec<u8>), i32> {
+    use mochi_user_platform::{handle, memory};
+    if attached.count != 1 || attached.reserved != 0 {
+        return Err(22);
+    }
+    let attachment = attached.handles[0];
+    let required = handle::HANDLE_RIGHT_READ | handle::HANDLE_RIGHT_WRITE | handle::HANDLE_RIGHT_MAP;
+    if attachment.reserved != 0 || attachment.rights & required != required {
+        return Err(13);
+    }
+    // Checking type as well as size avoids mapping a provider or file object
+    // that could recurse into this service while it is processing this call.
+    let object_length = memory::object_length(attachment.handle as u64).map_err(|_| 22)?;
+    let end = header.basis.checked_add(header.length as u64).ok_or(22)?;
+    if end > object_length {
+        return Err(22);
+    }
+    let base = header.basis & !4095;
+    let length = end.checked_add(4095).ok_or(22)? & !4095;
+    let length = length - base;
+    let address = memory::map_at_offset(
+        0,
+        length,
+        mnu_abi::MEMORY_ACCESS_READ | mnu_abi::MEMORY_ACCESS_WRITE,
+        mnu_abi::MEMORY_MAP_SHARED,
+        attachment.handle as u64,
+        base,
+    )
+    .map_err(|_| 22)?;
+    let mut output = vec![0u8; header.length as usize];
+    let result = service.provider_read_into(header.object_id, &mut output);
+    let result = result.map(|(count, start)| {
+        let pointer = (address + header.basis - base) as *mut u8;
+        for (index, byte) in output[..count].iter().enumerate() {
+            // A different address space may alias the mapping. Keep Rust
+            // references confined to our private read buffer.
+            unsafe {
+                core::ptr::write_volatile(pointer.add(index), *byte);
+            }
+        }
+        (count as u64, start.to_le_bytes().to_vec())
+    });
+    let unmapped = memory::munmap(address, length).map_err(|_| 5);
+    result.and_then(|value| unmapped.map(|_| value))
 }
 
 #[cfg(target_os = "mochios")]

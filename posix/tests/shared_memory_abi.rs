@@ -18,6 +18,7 @@ fn native_probe_uses_the_current_generic_handle_and_memory_abi() {
         ("IPC_RECV_HANDLES", SyscallNumber::IpcRecvObjectHandles),
         ("IPC_CALL_HANDLES", SyscallNumber::IpcCallObjectHandles),
         ("MEMORY_OBJECT_CREATE", SyscallNumber::MemoryObjectCreate),
+        ("MEMORY_OBJECT_LENGTH", SyscallNumber::MemoryObjectLength),
     ] {
         assert!(
             source.contains(&format!("{name} = {}", number as u64)),

@@ -7,7 +7,7 @@
 enum { MEMORY_MAP = 582, MEMORY_UNMAP = 583, MEMORY_PROTECT = 584,
        IPC_REPLY = 589, HANDLE_CLOSE = 626, HANDLE_DUPLICATE = 627,
        IPC_CREATE = 629, IPC_SEND_HANDLES = 630, IPC_RECV_HANDLES = 631,
-       IPC_CALL_HANDLES = 632, MEMORY_OBJECT_CREATE = 671 };
+       IPC_CALL_HANDLES = 632, MEMORY_OBJECT_CREATE = 671, MEMORY_OBJECT_LENGTH = 672 };
 #define READ 1ULL
 #define WRITE 2ULL
 #define MAP 64ULL
@@ -40,6 +40,7 @@ int main(void) {
     if ((int64_t)native(MEMORY_OBJECT_CREATE, 4096, 1, 0, 0, 0, 0) != -22) return 2;
     uint64_t object = native(MEMORY_OBJECT_CREATE, 8192, 0, 0, 0, 0, 0);
     if ((int64_t)object < 0) return 3;
+    if (native(MEMORY_OBJECT_LENGTH, object, 0, 0, 0, 0, 0) != 8192) return 35;
     fprintf(stderr, "shared-memory: created\n");
     uint64_t first = map(object, 8192, READ | WRITE, 0);
     uint64_t second = map(object, 4096, READ | WRITE, 4096);
@@ -60,6 +61,7 @@ int main(void) {
 
     uint64_t endpoint = native(IPC_CREATE, 0, 0, 0, 0, 0, 0);
     if ((int64_t)endpoint < 0) return 14;
+    if ((int64_t)native(MEMORY_OBJECT_LENGTH, endpoint, 0, 0, 0, 0, 0) != -13) return 36;
     pid_t child = fork();
     if (child < 0) return 15;
     fprintf(stderr, "shared-memory: fork %d\n", (int)child);
