@@ -4,6 +4,47 @@ mod native;
 use native::{Range, cut};
 
 #[test]
+fn every_interval_cut_preserves_exact_coverage_without_overlap() {
+    // Exercise all relative interval placements, including adjacency, and
+    // repeat near the address-space ceiling to catch unchecked arithmetic.
+    for base in [0, u64::MAX - 16] {
+        for start in 0..8 {
+            for end in start + 1..=8 {
+                let region = Range {
+                    start: base + start,
+                    end: base + end,
+                };
+                for remove_start in 0..9 {
+                    for remove_end in remove_start + 1..=9 {
+                        let removal = Range {
+                            start: base + remove_start,
+                            end: base + remove_end,
+                        };
+                        let pieces = cut(region, removal).unwrap();
+                        let ranges = [pieces.before, pieces.removed, pieces.after];
+                        let mut cursor = region.start;
+                        for piece in ranges.into_iter().flatten() {
+                            assert_eq!(piece.start, cursor);
+                            assert!(piece.start < piece.end);
+                            assert!(piece.end <= region.end);
+                            cursor = piece.end;
+                        }
+                        assert_eq!(cursor, region.end);
+                        for address in region.start..region.end {
+                            let in_removal = removal.start <= address && address < removal.end;
+                            let removed = pieces
+                                .removed
+                                .is_some_and(|piece| piece.start <= address && address < piece.end);
+                            assert_eq!(removed, in_removal);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn placement_rejects_a_single_resident_page_inside_a_larger_hole() {
     assert_eq!(
         native::any_page(4096, 16384, |page| page == 12288),
