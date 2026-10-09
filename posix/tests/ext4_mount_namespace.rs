@@ -4,13 +4,17 @@ use std::io;
 use std::os::unix::fs::symlink;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ext4plus::{Ext4, Ext4Read};
+use ext4plus::{Ext4, Ext4Read, Ext4Write};
 use filesystem_service::namespace::{Namespace, Node};
 use filesystem_service::path_walk::{Credentials, Resolution};
+use filesystem_service::service::{FilesystemService, PathAnchors};
+use mochios_filesystem_protocol as protocol;
 
-struct Image(Vec<u8>);
+#[derive(Clone)]
+struct Image(Arc<Mutex<Vec<u8>>>);
 impl Ext4Read for Image {
     fn read(&self, offset: u64, output: &mut [u8]) -> Result<(), Box<dyn Error + Send + Sync>> {
         let start = usize::try_from(offset)?;
@@ -19,9 +23,27 @@ impl Ext4Read for Image {
             .ok_or_else(|| io::Error::other("offset overflow"))?;
         output.copy_from_slice(
             self.0
+                .lock()
+                .map_err(|_| io::Error::other("image lock poisoned"))?
                 .get(start..end)
                 .ok_or_else(|| io::Error::other("outside image"))?,
         );
+        Ok(())
+    }
+}
+
+impl Ext4Write for Image {
+    fn write(&self, offset: u64, input: &[u8]) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let start = usize::try_from(offset)?;
+        let end = start
+            .checked_add(input.len())
+            .ok_or_else(|| io::Error::other("offset overflow"))?;
+        self.0
+            .lock()
+            .map_err(|_| io::Error::other("image lock poisoned"))?
+            .get_mut(start..end)
+            .ok_or_else(|| io::Error::other("outside image"))?
+            .copy_from_slice(input);
         Ok(())
     }
 }
@@ -73,7 +95,8 @@ impl Fixture {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        Ext4::load(Box::new(Image(fs::read(image).unwrap()))).unwrap()
+        let image = Image(Arc::new(Mutex::new(fs::read(image).unwrap())));
+        Ext4::load_with_writer(Box::new(image.clone()), Some(Box::new(image))).unwrap()
     }
 }
 impl Drop for Fixture {
@@ -210,4 +233,364 @@ fn namespace_identity_and_mount_validation_do_not_trust_numeric_node_ids() {
         namespace.mount(mounted, fixture.volume("overmounted")),
         Err(16)
     ));
+}
+
+fn root_credentials() -> protocol::Credentials {
+    let mut bytes = [0u8; protocol::CREDENTIALS_MAX_LEN];
+    let size = protocol::encode_credentials_payload(0, 0, &[], &[], &mut bytes).unwrap();
+    protocol::decode_credentials_payload(&bytes[..size])
+        .unwrap()
+        .0
+}
+
+fn open(
+    service: &mut FilesystemService,
+    path: &[u8],
+    flags: u32,
+    anchors: PathAnchors,
+) -> protocol::Header {
+    service
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags,
+                mode: 0o600,
+                ..Default::default()
+            },
+            path,
+            anchors,
+            root_credentials(),
+        )
+        .unwrap()
+        .header
+}
+
+#[test]
+fn service_open_descriptions_keep_volume_identity_for_io_metadata_and_pager() {
+    let fixture = Fixture::new();
+    let mut service = FilesystemService::new(fixture.volume("data"));
+    service
+        .mount_volume(b"/mount", fixture.volume("system"))
+        .unwrap();
+    let flags = protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE;
+    let data = open(&mut service, b"/file", flags, PathAnchors::default());
+    let system = open(&mut service, b"/mount/file", flags, PathAnchors::default());
+    let alias = open(&mut service, b"/mount/file", flags, PathAnchors::default());
+    assert_eq!(data.node_id as u32, system.node_id as u32);
+    assert_ne!(data.node_id, system.node_id);
+    assert_ne!(
+        service.provider_memory_object(data.open_id).unwrap(),
+        service.provider_memory_object(system.open_id).unwrap()
+    );
+    assert_eq!(
+        service.provider_memory_object(system.open_id).unwrap(),
+        service.provider_memory_object(alias.open_id).unwrap()
+    );
+    assert_eq!(service.provider_read(data.open_id, 4096).unwrap(), b"data");
+    assert_eq!(
+        service.provider_read(system.open_id, 4096).unwrap(),
+        b"system"
+    );
+    service
+        .provider_write_at(system.open_id, 0, b"SYSTEM")
+        .unwrap();
+    assert_eq!(
+        service.provider_read_at(alias.open_id, 0, 4096).unwrap(),
+        b"SYSTEM"
+    );
+    assert_eq!(
+        service.provider_read_at(data.open_id, 0, 4096).unwrap(),
+        b"data"
+    );
+    service
+        .truncate_handle(
+            protocol::Header {
+                offset: 2,
+                ..Default::default()
+            },
+            system.open_id,
+        )
+        .unwrap();
+    assert_eq!(
+        service.provider_read_at(alias.open_id, 0, 4096).unwrap(),
+        b"SY"
+    );
+    assert_eq!(
+        service.provider_read_at(data.open_id, 0, 4096).unwrap(),
+        b"data"
+    );
+    service
+        .chmod_handle(
+            protocol::Header {
+                mode: 0o640,
+                ..Default::default()
+            },
+            system.open_id,
+            root_credentials(),
+        )
+        .unwrap();
+    service
+        .chown_handle(
+            protocol::Header {
+                node_id: 501 | (20u64 << 32),
+                ..Default::default()
+            },
+            system.open_id,
+            root_credentials(),
+        )
+        .unwrap();
+    let status = service
+        .stat_handle(protocol::Header::default(), system.open_id)
+        .unwrap();
+    let status = protocol::decode_node_status(&status.payload).unwrap();
+    assert_eq!(
+        (
+            status.node_id,
+            status.size,
+            status.mode & 0o7777,
+            status.uid,
+            status.gid
+        ),
+        (system.node_id, 2, 0o640, 501, 20)
+    );
+    let reopened = open(&mut service, b"/mount/file", flags, PathAnchors::default());
+    assert_eq!(
+        service.provider_read(reopened.open_id, 4096).unwrap(),
+        b"SY"
+    );
+    service.provider_close(reopened.open_id).unwrap();
+    let root_status = service
+        .stat_handle(protocol::Header::default(), data.open_id)
+        .unwrap();
+    assert_eq!(
+        protocol::decode_node_status(&root_status.payload)
+            .unwrap()
+            .size,
+        4
+    );
+    let created = open(
+        &mut service,
+        b"/mount/new",
+        flags | protocol::OPEN_AT_CREATE | protocol::OPEN_AT_EXCLUSIVE,
+        PathAnchors::default(),
+    );
+    assert_eq!(created.node_id >> 32, system.node_id >> 32);
+    service
+        .provider_write(created.open_id, b"new on system")
+        .unwrap();
+    assert!(matches!(
+        service.open_at(
+            protocol::Header {
+                flags: protocol::OPEN_AT_READ,
+                ..Default::default()
+            },
+            b"/new",
+            PathAnchors::default(),
+            root_credentials()
+        ),
+        Err(2)
+    ));
+    for opened in [created, alias, system, data] {
+        service.provider_close(opened.open_id).unwrap();
+    }
+}
+
+#[test]
+fn service_retained_mount_directories_resolve_relative_paths_and_report_namespace_cwd() {
+    let fixture = Fixture::new();
+    let mut service = FilesystemService::new(fixture.volume("data"));
+    service
+        .mount_volume(b"/mount", fixture.volume("system"))
+        .unwrap();
+    let directory_flags = protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY;
+    let root = open(&mut service, b"/", directory_flags, PathAnchors::default());
+    let mounted = open(
+        &mut service,
+        b"/mount",
+        directory_flags,
+        PathAnchors::default(),
+    );
+    let base = PathAnchors {
+        root_open_id: None,
+        base_open_id: Some(mounted.open_id),
+    };
+    let inside = open(
+        &mut service,
+        b"file",
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_BASE_ATTACHED,
+        base,
+    );
+    assert_eq!(
+        service.provider_read(inside.open_id, 4096).unwrap(),
+        b"system"
+    );
+    let outside = open(
+        &mut service,
+        b"../file",
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_BASE_ATTACHED,
+        base,
+    );
+    assert_eq!(
+        service.provider_read(outside.open_id, 4096).unwrap(),
+        b"data"
+    );
+    let jail = PathAnchors {
+        root_open_id: Some(mounted.open_id),
+        base_open_id: Some(mounted.open_id),
+    };
+    let jailed = open(
+        &mut service,
+        b"/absolute",
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_ROOT_ATTACHED | protocol::OPEN_AT_BASE_ATTACHED,
+        jail,
+    );
+    assert_eq!(
+        service.provider_read(jailed.open_id, 4096).unwrap(),
+        b"system"
+    );
+    assert_eq!(
+        service
+            .path_handle(protocol::Header::default(), root.open_id, mounted.open_id)
+            .unwrap()
+            .payload,
+        b"/mount"
+    );
+    assert_eq!(
+        service
+            .path_handle(
+                protocol::Header::default(),
+                mounted.open_id,
+                mounted.open_id
+            )
+            .unwrap()
+            .payload,
+        b"/"
+    );
+    assert!(matches!(
+        service.path_handle(protocol::Header::default(), mounted.open_id, root.open_id),
+        Err(13)
+    ));
+    let entries = service.provider_read(mounted.open_id, 4096).unwrap();
+    assert!(!entries.is_empty());
+    let mut remaining = entries.as_slice();
+    let mut ids = std::collections::HashMap::new();
+    while !remaining.is_empty() {
+        let (entry, name, length) = protocol::decode_dir_entry(remaining).unwrap();
+        ids.insert(name.to_vec(), entry.node_id);
+        remaining = &remaining[length..];
+    }
+    assert_eq!(ids[b".".as_slice()], mounted.node_id);
+    assert_eq!(ids[b"..".as_slice()], root.node_id);
+    assert_eq!(ids[b"file".as_slice()], inside.node_id);
+    service
+        .chmod_handle(
+            protocol::Header {
+                mode: 0,
+                ..Default::default()
+            },
+            mounted.open_id,
+            root_credentials(),
+        )
+        .unwrap();
+    let mut bytes = [0u8; protocol::CREDENTIALS_MAX_LEN];
+    let size = protocol::encode_credentials_payload(501, 20, &[], &[], &mut bytes).unwrap();
+    let unprivileged = protocol::decode_credentials_payload(&bytes[..size])
+        .unwrap()
+        .0;
+    assert!(matches!(
+        service.open_at(
+            protocol::Header {
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_BASE_ATTACHED,
+                ..Default::default()
+            },
+            b"file",
+            base,
+            unprivileged
+        ),
+        Err(13)
+    ));
+    for opened in [jailed, outside, inside, mounted, root] {
+        service.provider_close(opened.open_id).unwrap();
+    }
+}
+
+#[test]
+fn service_path_metadata_mutations_and_readlink_use_the_resolved_volume() {
+    let fixture = Fixture::new();
+    let mut service = FilesystemService::new(fixture.volume("data"));
+    service
+        .mount_volume(b"/mount", fixture.volume("system"))
+        .unwrap();
+    service
+        .truncate_at(
+            protocol::Header {
+                open_id: 2,
+                ..Default::default()
+            },
+            b"/mount/file",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    service
+        .chmod_at(
+            protocol::Header {
+                mode: 0o600,
+                ..Default::default()
+            },
+            b"/mount/file",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    service
+        .chown_at(
+            protocol::Header {
+                node_id: 600 | (30u64 << 32),
+                ..Default::default()
+            },
+            b"/mount/file",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    let mounted = service
+        .stat_at(
+            protocol::Header::default(),
+            b"/mount/file",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    let mounted = protocol::decode_node_status(&mounted.payload).unwrap();
+    assert_eq!(
+        (
+            mounted.size,
+            mounted.mode & 0o7777,
+            mounted.uid,
+            mounted.gid
+        ),
+        (2, 0o600, 600, 30)
+    );
+    let root = service
+        .stat_at(
+            protocol::Header::default(),
+            b"/file",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    let root = protocol::decode_node_status(&root.payload).unwrap();
+    assert_eq!(root.size, 4);
+    assert_ne!(root.uid, mounted.uid);
+    assert_ne!(root.node_id, mounted.node_id);
+    let target = service
+        .readlink_at(
+            protocol::Header::default(),
+            b"/mount/absolute",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    assert_eq!(target.payload, b"/file");
 }

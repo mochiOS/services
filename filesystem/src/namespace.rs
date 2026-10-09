@@ -32,6 +32,9 @@ pub struct Node {
 }
 
 impl Node {
+    pub(crate) fn into_inode(self) -> Inode {
+        self.inode
+    }
     pub fn id(&self) -> NodeId {
         NodeId {
             volume: self.volume,
@@ -109,23 +112,120 @@ impl Namespace {
     ) -> Result<Resolution<Node>, i32> {
         self.filesystem(&root)?;
         self.filesystem(&base)?;
+        let root = self.refresh(root)?;
+        let base = self.refresh(base)?;
         if !self.is_directory(&root) || !self.is_directory(&base) {
             return Err(ENOTDIR);
         }
         path_walk::resolve(self, root, base, path, follow_final, credentials)
     }
 
-    fn filesystem(&self, node: &Node) -> Result<&Ext4, i32> {
+    /// Reconstruct a retained directory's current namespace path, including
+    /// mount edges. A removed directory has no pathname, even while open.
+    pub(crate) fn directory_path(&self, root: Node, mut current: Node) -> Result<Vec<u8>, i32> {
+        self.filesystem(&root)?;
+        self.filesystem(&current)?;
+        if !self.is_directory(&root) || !self.is_directory(&current) {
+            return Err(ENOTDIR);
+        }
+        let mut components = Vec::new();
+        let mut length = 1usize;
+        while current.id() != root.id() {
+            if components.len() >= 1024 {
+                return Err(ELOOP);
+            }
+            let entry_node = self.covered.get(&current.id()).unwrap_or(&current);
+            let parent = self.parent(&current)?;
+            if parent.id() == current.id() {
+                return Err(EACCES);
+            }
+            let directory =
+                Dir::open_inode(self.filesystem(&parent)?, parent.inode.clone()).map_err(errno)?;
+            let mut name = None;
+            for entry in directory.read_dir().map_err(errno)? {
+                let entry = entry.map_err(errno)?;
+                let file_name = entry.file_name();
+                let bytes = file_name.as_ref();
+                if bytes != b"."
+                    && bytes != b".."
+                    && !bytes.starts_with(b".mochios-orphan-")
+                    && entry.inode == entry_node.inode.index
+                    && parent.volume == entry_node.volume
+                {
+                    name = Some(bytes.to_vec());
+                    break;
+                }
+            }
+            let name = name.ok_or(2)?;
+            length = length
+                .checked_add(name.len() + usize::from(!components.is_empty()))
+                .ok_or(36)?;
+            if length > protocol::MAX_PATH_LEN {
+                return Err(36);
+            }
+            components.push(name);
+            current = parent;
+        }
+        let mut path = vec![b'/'];
+        for (index, component) in components.iter().rev().enumerate() {
+            if index != 0 {
+                path.push(b'/');
+            }
+            path.extend_from_slice(component);
+        }
+        Ok(path)
+    }
+
+    pub(crate) fn filesystem(&self, node: &Node) -> Result<&Ext4, i32> {
         if !Arc::ptr_eq(&self.owner, &node.owner) {
             return Err(EACCES);
         }
         self.volumes.get(node.volume as usize).ok_or(EINVAL)
     }
 
+    fn refresh(&self, mut node: Node) -> Result<Node, i32> {
+        node.inode = Inode::read(self.filesystem(&node)?, node.inode.index).map_err(errno)?;
+        Ok(node)
+    }
+
+    /// Reconstruct only a node already retained by this service's open table.
+    /// This is not a wire API accepting a caller-selected volume/inode pair.
+    pub(crate) fn retained_node(&self, volume: u32, inode: Inode) -> Result<Node, i32> {
+        if self.volumes.get(volume as usize).is_none() {
+            return Err(EINVAL);
+        }
+        Ok(Node {
+            owner: self.owner.clone(),
+            volume: u64::from(volume),
+            inode,
+        })
+    }
+
+    pub(crate) fn directory_entry_id(
+        &self,
+        current: &Node,
+        name: &[u8],
+        inode: u32,
+    ) -> Result<NodeId, i32> {
+        self.filesystem(current)?;
+        if name == b"." {
+            return Ok(current.id());
+        }
+        if name == b".." {
+            return Ok(self.parent(current)?.id());
+        }
+        let id = NodeId {
+            volume: current.volume,
+            inode,
+        };
+        Ok(self.mounts.get(&id).map_or(id, Node::id))
+    }
+
     fn parent(&self, node: &Node) -> Result<Node, i32> {
         let node = self.covered.get(&node.id()).unwrap_or(node);
         let filesystem = self.filesystem(node)?;
-        let inode = Dir::open_inode(filesystem, node.inode.clone())
+        let current = Inode::read(filesystem, node.inode.index).map_err(errno)?;
+        let inode = Dir::open_inode(filesystem, current)
             .map_err(errno)?
             .get_entry(DirEntryName::try_from("..").map_err(|_| EINVAL)?)
             .map_err(errno)?;
@@ -149,8 +249,9 @@ impl Backend for Namespace {
     }
 
     fn search(&self, node: &Node, credentials: Credentials<'_>) -> Result<(), i32> {
-        self.filesystem(node)?;
-        let metadata = node.metadata();
+        let metadata = Inode::read(self.filesystem(node)?, node.inode.index)
+            .map_err(errno)?
+            .metadata();
         if permission_allows(
             metadata.mode(),
             protocol::NODE_TYPE_DIRECTORY,
@@ -168,7 +269,9 @@ impl Backend for Namespace {
     }
 
     fn child(&self, node: &Node, name: &[u8]) -> Result<Node, i32> {
-        let inode = Dir::open_inode(self.filesystem(node)?, node.inode.clone())
+        let filesystem = self.filesystem(node)?;
+        let current = Inode::read(filesystem, node.inode.index).map_err(errno)?;
+        let inode = Dir::open_inode(filesystem, current)
             .map_err(errno)?
             .get_entry(DirEntryName::try_from(name).map_err(|_| EINVAL)?)
             .map_err(errno)?;
@@ -177,7 +280,7 @@ impl Backend for Namespace {
             volume: node.volume,
             inode,
         };
-        Ok(self.mounts.get(&child.id()).cloned().unwrap_or(child))
+        self.refresh(self.mounts.get(&child.id()).cloned().unwrap_or(child))
     }
 
     fn symlink(&self, node: &Node) -> Result<Vec<u8>, i32> {

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use crate::namespace::{Namespace, Node};
 use crate::path_walk;
 use ext4plus::dir::Dir;
 use ext4plus::error::Ext4Error;
@@ -12,6 +13,7 @@ use mochios_filesystem_protocol as protocol;
 type Resolution = path_walk::Resolution<Inode>;
 
 const EIO: i32 = 5;
+const EXDEV: i32 = 18;
 const EPERM: i32 = 1;
 const ENOENT: i32 = 2;
 const EBADF: i32 = 9;
@@ -47,6 +49,7 @@ pub struct RenameAnchors {
 
 pub struct FilesystemService {
     fs: Ext4,
+    namespace: Option<Namespace>,
     nodes: HashMap<u64, String>,
     node_ids: HashMap<String, u64>,
     opens: HashMap<u64, OpenFile>,
@@ -56,6 +59,8 @@ pub struct FilesystemService {
 
 struct OpenFile {
     node_id: u64,
+    volume: u32,
+    filesystem: Ext4,
     // Stable while any description retains this inode, but never reused after
     // the last close. An inode number alone can alias a recycled cache key.
     memory_object_id: u64,
@@ -84,12 +89,39 @@ impl FilesystemService {
         node_ids.insert("/".to_owned(), 2);
         Self {
             fs,
+            namespace: None,
             nodes,
             node_ids,
             opens: HashMap::new(),
             orphans: HashMap::new(),
             next_open_id: 1,
         }
+    }
+
+    /// Service-owned mount configuration; callers must already hold the volume.
+    /// Startup wiring is kept separate from the legacy mount-registration IPC.
+    pub fn mount_volume(&mut self, at: &[u8], filesystem: Ext4) -> Result<(), i32> {
+        if self.namespace.is_none() {
+            self.namespace = Some(Namespace::new(self.fs.clone())?);
+        }
+        let namespace = self.namespace.as_mut().ok_or(EIO)?;
+        let root = namespace.root();
+        let at = match namespace.resolve(
+            root.clone(),
+            root,
+            at,
+            true,
+            path_walk::Credentials {
+                uid: 0,
+                gid: 0,
+                groups: &[],
+            },
+        )? {
+            path_walk::Resolution::Found { inode, .. } => inode,
+            path_walk::Resolution::Missing { .. } => return Err(ENOENT),
+        };
+        namespace.mount(at, filesystem)?;
+        Ok(())
     }
 
     pub fn handle(&mut self, request: protocol::Header, payload: &[u8]) -> Response {
@@ -170,6 +202,8 @@ impl FilesystemService {
             open_id,
             OpenFile {
                 node_id: request.node_id,
+                volume: 0,
+                filesystem: self.fs.clone(),
                 memory_object_id,
                 inode,
                 file: Some(file),
@@ -223,7 +257,6 @@ impl FilesystemService {
         let uid = credentials.effective_uid;
         let gid = credentials.effective_gid;
         let groups = credentials.supplementary_groups();
-        let (root, base) = self.resolve_anchors(payload, anchors)?;
         let exclusive_create = request.flags
             & (protocol::OPEN_AT_CREATE | protocol::OPEN_AT_EXCLUSIVE)
             == (protocol::OPEN_AT_CREATE | protocol::OPEN_AT_EXCLUSIVE);
@@ -232,28 +265,37 @@ impl FilesystemService {
         } else {
             FollowSymlinks::All
         };
-        let (inode, created) =
-            match self.resolve_path_at(root, base, payload, follow, uid, gid, groups)? {
-                Resolution::Found { inode, .. } => {
-                    if request.flags & protocol::OPEN_AT_CREATE != 0
-                        && request.flags & protocol::OPEN_AT_EXCLUSIVE != 0
-                    {
-                        return Err(EEXIST);
-                    }
-                    (inode, false)
-                }
-                Resolution::Missing { parent, name }
-                    if request.flags & protocol::OPEN_AT_CREATE != 0
-                        && request.flags & protocol::OPEN_AT_DIRECTORY == 0
-                        && payload.last() != Some(&b'/') =>
+        let (resolution, filesystem, volume) =
+            self.resolve_open_path(payload, anchors, follow, uid, gid, groups)?;
+        let (inode, created) = match resolution {
+            Resolution::Found { inode, .. } => {
+                if request.flags & protocol::OPEN_AT_CREATE != 0
+                    && request.flags & protocol::OPEN_AT_EXCLUSIVE != 0
                 {
-                    (
-                        self.create_regular_at(parent, &name, request.mode, uid, gid, groups)?,
-                        true,
-                    )
+                    return Err(EEXIST);
                 }
-                Resolution::Missing { .. } => return Err(ENOENT),
-            };
+                (inode, false)
+            }
+            Resolution::Missing { parent, name }
+                if request.flags & protocol::OPEN_AT_CREATE != 0
+                    && request.flags & protocol::OPEN_AT_DIRECTORY == 0
+                    && payload.last() != Some(&b'/') =>
+            {
+                (
+                    self.create_regular_at(
+                        &filesystem,
+                        parent,
+                        &name,
+                        request.mode,
+                        uid,
+                        gid,
+                        groups,
+                    )?,
+                    true,
+                )
+            }
+            Resolution::Missing { .. } => return Err(ENOENT),
+        };
         if request.flags & protocol::OPEN_AT_NOFOLLOW != 0 && inode.file_type().is_symlink() {
             return Err(ELOOP);
         }
@@ -286,11 +328,11 @@ impl FilesystemService {
         {
             return Err(EACCES);
         }
-        let node_id = u64::from(inode.index.get());
+        let node_id = scoped_node_id(volume, &inode);
         let mut file = if kind.is_dir() {
             None
         } else {
-            Some(File::open_inode(&self.fs, inode.clone()).map_err(errno)?)
+            Some(File::open_inode(&filesystem, inode.clone()).map_err(errno)?)
         };
         if request.flags & protocol::OPEN_AT_TRUNCATE != 0 {
             file.as_mut().ok_or(EISDIR)?.truncate(0).map_err(errno)?;
@@ -302,6 +344,8 @@ impl FilesystemService {
             open_id,
             OpenFile {
                 node_id,
+                volume,
+                filesystem,
                 memory_object_id,
                 inode,
                 file,
@@ -325,6 +369,7 @@ impl FilesystemService {
 
     fn create_regular_at(
         &self,
+        filesystem: &Ext4,
         parent: Inode,
         name: &[u8],
         mode: u32,
@@ -345,15 +390,14 @@ impl FilesystemService {
         ) {
             return Err(EACCES);
         }
-        let mut directory = Dir::open_inode(&self.fs, parent).map_err(errno)?;
+        let mut directory = Dir::open_inode(filesystem, parent).map_err(errno)?;
         let name = DirEntryName::try_from(name).map_err(|_| EINVAL)?;
         match directory.get_entry(name) {
             Ok(_) => return Err(EEXIST),
             Err(Ext4Error::NotFound) => {}
             Err(error) => return Err(errno(error)),
         }
-        let mut inode = self
-            .fs
+        let mut inode = filesystem
             .create_inode(InodeCreationOptions {
                 file_type: FileType::Regular,
                 mode: InodeMode::from_bits_truncate((mode as u16) & 0x0fff) | InodeMode::S_IFREG,
@@ -525,9 +569,8 @@ impl FilesystemService {
         let uid = credentials.effective_uid;
         let gid = credentials.effective_gid;
         let groups = credentials.supplementary_groups();
-        let (root, base) = self.resolve_anchors(payload, anchors)?;
-        let inode =
-            self.resolve_inode_at(root, base, payload, FollowSymlinks::All, uid, gid, groups)?;
+        let (inode, filesystem, volume) =
+            self.resolve_scoped_inode(payload, anchors, FollowSymlinks::All, uid, gid, groups)?;
         let metadata = inode.metadata();
         if inode.file_type().is_dir() {
             return Err(EISDIR);
@@ -544,7 +587,8 @@ impl FilesystemService {
         ) {
             return Err(EACCES);
         }
-        self.truncate_inode(inode, request.open_id)?;
+        let node_id = scoped_node_id(volume, &inode);
+        self.truncate_scoped_inode(inode, filesystem, node_id, request.open_id)?;
         Ok(self.success(request))
     }
 
@@ -638,11 +682,9 @@ impl FilesystemService {
         let uid = credentials.effective_uid;
         let gid = credentials.effective_gid;
         let groups = credentials.supplementary_groups();
-        let (root, base) = self.resolve_anchors(payload, anchors)?;
-        let inode = self.resolve_inode_at(
-            root,
-            base,
+        let (inode, filesystem, _) = self.resolve_scoped_inode(
             payload,
+            anchors,
             FollowSymlinks::ExcludeFinalComponent,
             uid,
             gid,
@@ -651,7 +693,7 @@ impl FilesystemService {
         if !inode.file_type().is_symlink() {
             return Err(EINVAL);
         }
-        let target = inode.symlink_target(&self.fs).map_err(errno)?;
+        let target = inode.symlink_target(&filesystem).map_err(errno)?;
         let payload = target.as_ref().to_vec();
         if payload.len() > protocol::MAX_PATH_LEN {
             return Err(EFBIG);
@@ -682,9 +724,8 @@ impl FilesystemService {
         let uid = credentials.effective_uid;
         let gid = credentials.effective_gid;
         let groups = credentials.supplementary_groups();
-        let (root, base) = self.resolve_anchors(payload, anchors)?;
-        let inode =
-            self.resolve_inode_at(root, base, payload, FollowSymlinks::All, uid, gid, groups)?;
+        let (inode, filesystem, volume) =
+            self.resolve_scoped_inode(payload, anchors, FollowSymlinks::All, uid, gid, groups)?;
         let metadata = inode.metadata();
         if uid != 0 && uid != metadata.uid() {
             return Err(EPERM);
@@ -693,7 +734,8 @@ impl FilesystemService {
         if uid != 0 && gid != metadata.gid() && !groups.contains(&metadata.gid()) {
             permissions &= !0o2000;
         }
-        self.chmod_inode(inode, permissions)?;
+        let node_id = scoped_node_id(volume, &inode);
+        self.chmod_scoped_inode(inode, filesystem, node_id, permissions)?;
         Ok(self.success(request))
     }
 
@@ -724,11 +766,9 @@ impl FilesystemService {
         } else {
             FollowSymlinks::All
         };
-        let (root, base) = self.resolve_anchors(payload, anchors)?;
-        let inode = self.resolve_inode_at(
-            root,
-            base,
+        let (inode, filesystem, volume) = self.resolve_scoped_inode(
             payload,
+            anchors,
             follow,
             effective_uid,
             effective_gid,
@@ -748,8 +788,11 @@ impl FilesystemService {
         }
         let new_uid = (requested_uid != u32::MAX).then_some(requested_uid);
         let new_gid = (requested_gid != u32::MAX).then_some(requested_gid);
-        self.chown_inode(
+        let node_id = scoped_node_id(volume, &inode);
+        self.chown_scoped_inode(
             inode,
+            filesystem,
+            node_id,
             new_uid,
             new_gid,
             new_uid.is_some() || new_gid.is_some(),
@@ -783,9 +826,9 @@ impl FilesystemService {
         } else {
             FollowSymlinks::All
         };
-        let (root, base) = self.resolve_anchors(payload, anchors)?;
-        let inode = self.resolve_inode_at(root, base, payload, follow, uid, gid, groups)?;
-        let node_id = u64::from(inode.index.get());
+        let (inode, _, volume) =
+            self.resolve_scoped_inode(payload, anchors, follow, uid, gid, groups)?;
+        let node_id = scoped_node_id(volume, &inode);
         Ok(self.node_status_response(request, node_id, inode.metadata()))
     }
 
@@ -796,8 +839,14 @@ impl FilesystemService {
             return Err(EINVAL);
         }
         let open = self.opens.get(&open_id).ok_or(EBADF)?;
-        let node_id = u64::from(open.inode.index.get());
-        let metadata = open.inode.metadata();
+        let node_id = open.node_id;
+        let metadata = if open.file.is_some() {
+            Inode::read(&open.filesystem, open.inode.index)
+                .map_err(errno)?
+                .metadata()
+        } else {
+            open.inode.metadata()
+        };
         Ok(self.node_status_response(request, node_id, metadata))
     }
 
@@ -812,6 +861,18 @@ impl FilesystemService {
     ) -> Result<Response, i32> {
         if request.flags != 0 || request.length != 0 {
             return Err(EINVAL);
+        }
+        if let Some(namespace) = &self.namespace {
+            let root = self.opens.get(&root_open_id).ok_or(EBADF)?;
+            let current = self.opens.get(&directory_open_id).ok_or(EBADF)?;
+            let payload = namespace.directory_path(
+                namespace.retained_node(root.volume, root.inode.clone())?,
+                namespace.retained_node(current.volume, current.inode.clone())?,
+            )?;
+            let mut response = self.success(request);
+            response.header.length = payload.len() as u32;
+            response.payload = payload;
+            return Ok(response);
         }
         let root = self.opens.get(&root_open_id).ok_or(EBADF)?.inode.clone();
         let mut current = self
@@ -898,8 +959,8 @@ impl FilesystemService {
         } else {
             FollowSymlinks::All
         };
-        let (root, base) = self.resolve_anchors(payload, anchors)?;
-        let inode = self.resolve_inode_at(root, base, payload, follow, uid, gid, groups)?;
+        let (inode, _, _) =
+            self.resolve_scoped_inode(payload, anchors, follow, uid, gid, groups)?;
         let requested = request.flags
             & (protocol::ACCESS_AT_READ | protocol::ACCESS_AT_WRITE | protocol::ACCESS_AT_EXECUTE);
         let metadata = inode.metadata();
@@ -920,6 +981,16 @@ impl FilesystemService {
     }
 
     fn resolve_anchors(&self, path: &[u8], anchors: PathAnchors) -> Result<(Inode, Inode), i32> {
+        // Remaining single-volume mutation helpers must never interpret a
+        // mounted inode number as an inode in the root filesystem.
+        for open_id in [anchors.root_open_id, anchors.base_open_id]
+            .into_iter()
+            .flatten()
+        {
+            if self.opens.get(&open_id).ok_or(EBADF)?.volume != 0 {
+                return Err(EXDEV);
+            }
+        }
         let root = match anchors.root_open_id {
             Some(open_id) => self.opens.get(&open_id).ok_or(EBADF)?.inode.clone(),
             None => self.fs.read_root_inode().map_err(errno)?,
@@ -941,23 +1012,80 @@ impl FilesystemService {
         Ok((root, base))
     }
 
-    /// Resolves a path one component at a time from an already-open directory
-    /// inode. Search permission is checked on the directory actually visited,
-    /// including directories reached through symbolic links.
-    fn resolve_inode_at(
+    fn resolve_scoped_inode(
         &self,
-        root: Inode,
-        base: Inode,
         path: &[u8],
+        anchors: PathAnchors,
         follow: FollowSymlinks,
         uid: u32,
         gid: u32,
         groups: &[u32],
-    ) -> Result<Inode, i32> {
-        match self.resolve_path_at(root, base, path, follow, uid, gid, groups)? {
-            Resolution::Found { inode, .. } => Ok(inode),
+    ) -> Result<(Inode, Ext4, u32), i32> {
+        let (resolution, filesystem, volume) =
+            self.resolve_open_path(path, anchors, follow, uid, gid, groups)?;
+        match resolution {
+            Resolution::Found { inode, .. } => Ok((inode, filesystem, volume)),
             Resolution::Missing { .. } => Err(ENOENT),
         }
+    }
+
+    fn resolve_open_path(
+        &self,
+        path: &[u8],
+        anchors: PathAnchors,
+        follow: FollowSymlinks,
+        uid: u32,
+        gid: u32,
+        groups: &[u32],
+    ) -> Result<(Resolution, Ext4, u32), i32> {
+        let Some(namespace) = &self.namespace else {
+            let (root, base) = self.resolve_anchors(path, anchors)?;
+            return Ok((
+                self.resolve_path_at(root, base, path, follow, uid, gid, groups)?,
+                self.fs.clone(),
+                0,
+            ));
+        };
+        let retained = |open_id| -> Result<Node, i32> {
+            let open: &OpenFile = self.opens.get(&open_id).ok_or(EBADF)?;
+            namespace.retained_node(open.volume, open.inode.clone())
+        };
+        let root = match anchors.root_open_id {
+            Some(open_id) => retained(open_id)?,
+            None => namespace.root(),
+        };
+        let base = if path.first() == Some(&b'/') {
+            root.clone()
+        } else {
+            match anchors.base_open_id {
+                Some(open_id) => retained(open_id)?,
+                None => root.clone(),
+            }
+        };
+        let resolution = namespace.resolve(
+            root,
+            base,
+            path,
+            follow == FollowSymlinks::All,
+            path_walk::Credentials { uid, gid, groups },
+        )?;
+        let node = match &resolution {
+            path_walk::Resolution::Found { inode, .. } => inode,
+            path_walk::Resolution::Missing { parent, .. } => parent,
+        };
+        let filesystem = namespace.filesystem(node)?.clone();
+        let volume = u32::try_from(node.id().volume).map_err(|_| EIO)?;
+        let resolution = match resolution {
+            path_walk::Resolution::Found { inode, parent } => Resolution::Found {
+                inode: inode.into_inode(),
+                parent: parent.map(|(node, name)| (node.into_inode(), name)),
+            },
+            path_walk::Resolution::Missing { parent, name } => Resolution::Missing {
+                parent: parent.into_inode(),
+                name,
+            },
+        };
+        Ok((resolution, filesystem, volume))
     }
 
     fn resolve_path_at(
@@ -970,6 +1098,40 @@ impl FilesystemService {
         gid: u32,
         groups: &[u32],
     ) -> Result<Resolution, i32> {
+        if let Some(namespace) = &self.namespace {
+            let root = namespace.retained_node(0, root)?;
+            let base = namespace.retained_node(0, base)?;
+            return match namespace.resolve(
+                root,
+                base,
+                path,
+                follow == FollowSymlinks::All,
+                path_walk::Credentials { uid, gid, groups },
+            )? {
+                path_walk::Resolution::Found { inode, parent } => {
+                    if inode.id().volume != 0
+                        || parent
+                            .as_ref()
+                            .is_some_and(|(node, _)| node.id().volume != 0)
+                    {
+                        return Err(EXDEV);
+                    }
+                    Ok(Resolution::Found {
+                        inode: inode.into_inode(),
+                        parent: parent.map(|(node, name)| (node.into_inode(), name)),
+                    })
+                }
+                path_walk::Resolution::Missing { parent, name } => {
+                    if parent.id().volume != 0 {
+                        return Err(EXDEV);
+                    }
+                    Ok(Resolution::Missing {
+                        parent: parent.into_inode(),
+                        name,
+                    })
+                }
+            };
+        }
         path_walk::resolve(
             self,
             root,
@@ -1009,8 +1171,12 @@ impl FilesystemService {
         let open = self.opens.get(&open_id).ok_or(EBADF)?;
         if open.file.is_none() {
             let inode = open.inode.clone();
+            let filesystem = open.filesystem.clone();
+            let volume = open.volume;
             let start_entry = open.offset;
             let (payload, next_entry) = self.read_open_directory_payload(
+                &filesystem,
+                volume,
                 inode,
                 start_entry,
                 length.min(mnu_abi::provider::MAX_DATA_LEN),
@@ -1199,7 +1365,7 @@ impl FilesystemService {
             == 1;
         if is_last_open {
             if let Some(orphan) = self.orphans.get(&node_id).cloned() {
-                let mut parent = Dir::open_inode(&self.fs, orphan.parent).map_err(errno)?;
+                let mut parent = Dir::open_inode(&open.filesystem, orphan.parent).map_err(errno)?;
                 parent
                     .unlink(
                         DirEntryName::try_from(orphan.name.as_str()).map_err(|_| EIO)?,
@@ -1411,12 +1577,19 @@ impl FilesystemService {
     /// unlink in the same way as every other open file description.
     fn read_open_directory_payload(
         &self,
+        filesystem: &Ext4,
+        volume: u32,
         inode: Inode,
         start_entry: u64,
         max_length: usize,
     ) -> Result<(Vec<u8>, u64), i32> {
         let start_entry = usize::try_from(start_entry).map_err(|_| EINVAL)?;
-        let directory = Dir::open_inode(&self.fs, inode).map_err(errno)?;
+        let node = self
+            .namespace
+            .as_ref()
+            .map(|namespace| namespace.retained_node(volume, inode.clone()))
+            .transpose()?;
+        let directory = Dir::open_inode(filesystem, inode).map_err(errno)?;
         let mut payload = Vec::new();
         let mut next_entry = start_entry;
         for entry in directory.read_dir().map_err(errno)?.skip(start_entry) {
@@ -1426,7 +1599,12 @@ impl FilesystemService {
                 next_entry = next_entry.checked_add(1).ok_or(EIO)?;
                 continue;
             }
-            let node_id = u64::from(entry.inode.get());
+            let node_id = if let (Some(namespace), Some(node)) = (&self.namespace, &node) {
+                let id = namespace.directory_entry_id(node, name.as_bytes(), entry.inode.get())?;
+                (id.volume << 32) | u64::from(id.inode)
+            } else {
+                (u64::from(volume) << 32) | u64::from(entry.inode.get())
+            };
             let kind = node_type(entry.file_type().map_err(errno)?);
             let record_length = protocol::DIRENT_HEADER_LEN + name.len();
             if payload.len().saturating_add(record_length) > max_length {
@@ -2288,12 +2466,22 @@ impl FilesystemService {
         if open.file.is_none() {
             return Err(EISDIR);
         }
-        self.truncate_inode(open.inode.clone(), request.offset)?;
+        self.truncate_scoped_inode(
+            open.inode.clone(),
+            open.filesystem.clone(),
+            open.node_id,
+            request.offset,
+        )?;
         Ok(self.success(request))
     }
 
-    fn truncate_inode(&mut self, inode: Inode, length: u64) -> Result<(), i32> {
-        let node_id = u64::from(inode.index.get());
+    fn truncate_scoped_inode(
+        &mut self,
+        inode: Inode,
+        filesystem: Ext4,
+        node_id: u64,
+        length: u64,
+    ) -> Result<(), i32> {
         let mut matched = false;
         for open in self.opens.values_mut() {
             if open.node_id == node_id {
@@ -2306,7 +2494,7 @@ impl FilesystemService {
             }
         }
         if !matched {
-            File::open_inode(&self.fs, inode)
+            File::open_inode(&filesystem, inode)
                 .map_err(errno)?
                 .truncate(length)
                 .map_err(errno)?;
@@ -2314,32 +2502,35 @@ impl FilesystemService {
         Ok(())
     }
 
-    fn chmod_inode(&mut self, mut inode: Inode, permissions: u16) -> Result<(), i32> {
-        let node_id = u64::from(inode.index.get());
-        let mut matched = false;
+    fn chmod_scoped_inode(
+        &mut self,
+        inode: Inode,
+        filesystem: Ext4,
+        node_id: u64,
+        permissions: u16,
+    ) -> Result<(), i32> {
+        let mut inode = Inode::read(&filesystem, inode.index).map_err(errno)?;
+        let file_type = inode.mode().bits() & 0xf000;
+        inode
+            .set_mode(InodeMode::from_bits_retain(file_type | permissions))
+            .map_err(errno)?;
+        inode.write(&filesystem).map_err(errno)?;
         for open in self.opens.values_mut() {
             if open.node_id == node_id {
-                let file_type = open.inode.mode().bits() & 0xf000;
-                open.inode
-                    .set_mode(InodeMode::from_bits_retain(file_type | permissions))
-                    .map_err(errno)?;
-                open.inode.write(&self.fs).map_err(errno)?;
-                matched = true;
+                open.inode = inode.clone();
+                if let Some(file) = &mut open.file {
+                    *file.inode_mut() = inode.clone();
+                }
             }
-        }
-        if !matched {
-            let file_type = inode.mode().bits() & 0xf000;
-            inode
-                .set_mode(InodeMode::from_bits_retain(file_type | permissions))
-                .map_err(errno)?;
-            inode.write(&self.fs).map_err(errno)?;
         }
         Ok(())
     }
 
-    fn chown_inode(
+    fn chown_scoped_inode(
         &mut self,
-        mut inode: Inode,
+        inode: Inode,
+        filesystem: Ext4,
+        node_id: u64,
         uid: Option<u32>,
         gid: Option<u32>,
         clear_set_id: bool,
@@ -2366,16 +2557,15 @@ impl FilesystemService {
             inode.write(filesystem).map_err(errno)
         }
 
-        let node_id = u64::from(inode.index.get());
-        let mut matched = false;
+        let mut inode = Inode::read(&filesystem, inode.index).map_err(errno)?;
+        update(&filesystem, &mut inode, uid, gid, clear_set_id)?;
         for open in self.opens.values_mut() {
             if open.node_id == node_id {
-                update(&self.fs, &mut open.inode, uid, gid, clear_set_id)?;
-                matched = true;
+                open.inode = inode.clone();
+                if let Some(file) = &mut open.file {
+                    *file.inode_mut() = inode.clone();
+                }
             }
-        }
-        if !matched {
-            update(&self.fs, &mut inode, uid, gid, clear_set_id)?;
         }
         Ok(())
     }
@@ -2401,7 +2591,10 @@ impl FilesystemService {
         let effective_uid = credentials.effective_uid;
         let effective_gid = credentials.effective_gid;
         let groups = credentials.supplementary_groups();
-        let inode = self.opens.get(&open_id).ok_or(EBADF)?.inode.clone();
+        let open = self.opens.get(&open_id).ok_or(EBADF)?;
+        let inode = open.inode.clone();
+        let filesystem = open.filesystem.clone();
+        let node_id = open.node_id;
         let metadata = inode.metadata();
         if effective_uid != 0 && effective_uid != metadata.uid() {
             return Err(EPERM);
@@ -2413,7 +2606,7 @@ impl FilesystemService {
         {
             permissions &= !0o2000;
         }
-        self.chmod_inode(inode, permissions)?;
+        self.chmod_scoped_inode(inode, filesystem, node_id, permissions)?;
         Ok(self.success(request))
     }
 
@@ -2431,7 +2624,10 @@ impl FilesystemService {
         let groups = credentials.supplementary_groups();
         let requested_uid = request.node_id as u32;
         let requested_gid = (request.node_id >> 32) as u32;
-        let inode = self.opens.get(&open_id).ok_or(EBADF)?.inode.clone();
+        let open = self.opens.get(&open_id).ok_or(EBADF)?;
+        let inode = open.inode.clone();
+        let filesystem = open.filesystem.clone();
+        let node_id = open.node_id;
         let metadata = inode.metadata();
         if effective_uid != 0
             && (effective_uid != metadata.uid()
@@ -2445,7 +2641,14 @@ impl FilesystemService {
         }
         let uid = (requested_uid != u32::MAX).then_some(requested_uid);
         let gid = (requested_gid != u32::MAX).then_some(requested_gid);
-        self.chown_inode(inode, uid, gid, uid.is_some() || gid.is_some())?;
+        self.chown_scoped_inode(
+            inode,
+            filesystem,
+            node_id,
+            uid,
+            gid,
+            uid.is_some() || gid.is_some(),
+        )?;
         Ok(self.success(request))
     }
 
@@ -2711,6 +2914,10 @@ impl path_walk::Backend for FilesystemService {
     fn ancestry(&self, root: &Inode, base: Inode) -> Result<Vec<Inode>, i32> {
         self.ancestry_from_root(root, base)
     }
+}
+
+fn scoped_node_id(volume: u32, inode: &Inode) -> u64 {
+    (u64::from(volume) << 32) | u64::from(inode.index.get())
 }
 
 fn node_type(file_type: FileType) -> u32 {
