@@ -5,6 +5,7 @@ extern crate alloc;
 #[cfg(not(test))]
 mod bootstrap;
 mod driver_controller;
+mod launch_arguments;
 mod orchestration;
 mod portal;
 mod process_watch;

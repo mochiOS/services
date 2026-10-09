@@ -4,7 +4,8 @@ use crate::service_config::{
     DRIVERS, FixedService, ReadyTarget, ServiceSpec, driver_arguments, fixed_service_arguments,
     fixed_service_spec, mboot_agent_arguments,
 };
-use crate::spawn_support::{encode_spawn_args, resolve_execution_security};
+use crate::launch_arguments::encode_spawn_args;
+use crate::spawn_support::{resolve_execution_security, sys_error};
 
 const SESSION_USER_ARG_PREFIX: &str = "--session-user=";
 const LOCK_USER_ARG_PREFIX: &str = "--lock-user=";
@@ -32,7 +33,8 @@ fn spawn(
             arguments.insert(0, identity_item);
         }
     }
-    let arguments = encode_spawn_args(&arguments);
+    let arguments = encode_spawn_args(&arguments)
+        .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
     platform::service::spawn_manifest(
         spec.path,
         spec.execution_class,
@@ -53,7 +55,8 @@ fn spawn_with_credentials(
             arguments.insert(0, identity_item);
         }
     }
-    let arguments = encode_spawn_args(&arguments);
+    let arguments = encode_spawn_args(&arguments)
+        .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
     platform::service::spawn_manifest_with_credentials(
         spec.path,
         spec.execution_class,

@@ -1,27 +1,10 @@
 use alloc::string::String;
-use alloc::vec;
 use alloc::vec::Vec;
 
 use mochi_user_platform as platform;
 
 const CAPABILITY_SERVICE_NAME: &str = "capability.service";
 const PACKAGE_SERVICE_NAME: &str = "package.service";
-
-pub(crate) fn encode_spawn_args(items: &[String]) -> Vec<u8> {
-    let mut output = vec![0; 512];
-    let mut cursor = 0usize;
-    for item in items {
-        let bytes = item.as_bytes();
-        if cursor + bytes.len() + 2 > output.len() {
-            break;
-        }
-        output[cursor..cursor + bytes.len()].copy_from_slice(bytes);
-        cursor += bytes.len();
-        output[cursor] = 0;
-        cursor += 1;
-    }
-    output
-}
 
 pub(crate) fn errno(error: mochi_user_syscall::SysError) -> u64 {
     error.errno().map_or(0, |errno| errno)
