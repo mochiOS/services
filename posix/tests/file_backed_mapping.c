@@ -15,6 +15,21 @@
 /* Run with the target runtime and an inherited POSIX endpoint. */
 int main(void) {
     STAGE("start");
+    STAGE("System namespace");
+    int system_file = open("/system/packages/binder/manifest.toml", O_RDONLY);
+    if (system_file < 0) return 50;
+    char manifest[4096];
+    ssize_t manifest_size = read(system_file, manifest, sizeof(manifest) - 1);
+    if (manifest_size <= 0) return 51;
+    manifest[manifest_size] = '\0';
+    if (!strstr(manifest, "org.mochios.binder")) return 52;
+    if (close(system_file) != 0) return 53;
+    if (chdir("/system") != 0) return 54;
+    char cwd[256];
+    if (!getcwd(cwd, sizeof(cwd)) || strcmp(cwd, "/system") != 0) return 55;
+    if (chdir("..") != 0) return 56;
+    if (!getcwd(cwd, sizeof(cwd)) || strcmp(cwd, "/") != 0) return 57;
+    STAGE("System namespace ok");
     long page_size = sysconf(_SC_PAGESIZE);
     if (page_size <= 0) return 1;
     size_t page = (size_t)page_size;

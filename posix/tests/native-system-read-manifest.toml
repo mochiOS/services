@@ -1,0 +1,11 @@
+[package]
+provenance = "built-in"
+id = "org.mochios.input"
+name = "Native System Read Probe"
+version = "1"
+vendor = "mochiOS"
+
+[[binary]]
+path = "/system/services/input.service"
+kind = "service"
+requires = ["fs.read.all", "ipc.client", "system.time.read"]
