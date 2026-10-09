@@ -1214,6 +1214,34 @@ impl FilesystemService {
         Ok((payload, start))
     }
 
+    /// Reads one sequential operation into caller-owned storage. The starting
+    /// position and offset advance belong to the same open-file description.
+    pub fn provider_read_into(
+        &mut self,
+        open_id: u64,
+        output: &mut [u8],
+    ) -> Result<(usize, u64), i32> {
+        if output.is_empty() || output.len() > mnu_abi::provider::MAX_SHARED_READ_LEN {
+            return Err(EINVAL);
+        }
+        let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
+        let file = open.file.as_mut().ok_or(EISDIR)?;
+        let start = open.offset;
+        start.checked_add(output.len() as u64).ok_or(EFBIG)?;
+        let mut done = 0usize;
+        while done < output.len() {
+            match file.read_bytes_at(&mut output[done..], start + done as u64) {
+                Ok(0) => break,
+                Ok(count) if count <= output.len() - done => done += count,
+                Ok(_) => return Err(EIO),
+                Err(error) if done == 0 => return Err(errno(error)),
+                Err(_) => break,
+            }
+        }
+        open.offset = start + done as u64;
+        Ok((done, start))
+    }
+
     pub fn provider_write(&mut self, open_id: u64, payload: &[u8]) -> Result<usize, i32> {
         self.provider_write_with_offset(open_id, payload)
             .map(|(written, _)| written)

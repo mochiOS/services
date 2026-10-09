@@ -440,6 +440,58 @@ fn pager_identity_is_stable_across_open_descriptions() {
 }
 
 #[test]
+fn bulk_read_into_exceeds_inline_ipc_limit_and_advances_one_description() {
+    let mut filesystem = test_filesystem();
+    let open_id = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+                mode: 0o644,
+                ..protocol::Header::default()
+            },
+            b"/bulk-read.txt",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap()
+        .header
+        .open_id;
+    let contents: Vec<u8> = (0..3 * 4096 + 71).map(|i| (i % 251) as u8).collect();
+    for chunk in contents.chunks(4096) {
+        filesystem.provider_write(open_id, chunk).unwrap();
+    }
+    filesystem
+        .provider_seek(open_id, 0, HANDLE_SEEK_START)
+        .unwrap();
+    let mut output = vec![0xa5; 8192];
+    assert_eq!(
+        filesystem.provider_read_into(open_id, &mut output),
+        Ok((8192, 0))
+    );
+    assert_eq!(output, contents[..8192]);
+    assert_eq!(filesystem.provider_read_into(open_id, &mut []), Err(22));
+    let mut oversized = vec![0; mnu_abi::provider::MAX_SHARED_READ_LEN + 1];
+    assert_eq!(
+        filesystem.provider_read_into(open_id, &mut oversized),
+        Err(22)
+    );
+    output.fill(0xa5);
+    let remaining = contents.len() - 8192;
+    assert_eq!(
+        filesystem.provider_read_into(open_id, &mut output),
+        Ok((remaining, 8192))
+    );
+    assert_eq!(&output[..remaining], &contents[8192..]);
+    assert!(output[remaining..].iter().all(|byte| *byte == 0xa5));
+    assert_eq!(
+        filesystem.provider_read_into(open_id, &mut output),
+        Ok((0, contents.len() as u64))
+    );
+    assert_eq!(filesystem.provider_read_into(u64::MAX, &mut output), Err(9));
+}
+
+#[test]
 fn duplicated_open_descriptions_share_mutable_status_flags() {
     let mut filesystem = test_filesystem();
     let opened = filesystem
