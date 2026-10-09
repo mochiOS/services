@@ -1,10 +1,69 @@
 #include <fcntl.h>
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+
+/* Native storage ABI; guarded by native_system_read_abi.rs. This test never
+ * writes storage and obtains its sample range from the fixture's GPT. */
+enum { BLOCK_READ = 555 };
+static int block_read(uint64_t lba, void *bytes, size_t length) {
+    uint64_t number = BLOCK_READ;
+    register uint64_t r10 __asm__("r10") = length;
+    __asm__ volatile("syscall" : "+a"(number)
+                     : "D"(0ULL), "S"(lba), "d"(bytes), "r"(r10)
+                     : "rcx", "r11", "memory");
+    return (int64_t)number == 0 ? 0 : -1;
+}
+static uint64_t little_u64(const unsigned char *bytes) {
+    uint64_t value = 0;
+    for (unsigned i = 0; i < 8; ++i) value |= (uint64_t)bytes[i] << (8 * i);
+    return value;
+}
+static uint32_t little_u32(const unsigned char *bytes) {
+    uint32_t value = 0;
+    for (unsigned i = 0; i < 4; ++i) value |= (uint32_t)bytes[i] << (8 * i);
+    return value;
+}
+static int measure_raw_sample(void) {
+    static const unsigned char system_type[16] = {
+        0x68,0x63,0x6f,0x6d,0x4f,0x69,0x00,0x53,0x80,0x00,0x6d,0x50,0x61,0x72,0x74,0x01
+    };
+    unsigned char header[512];
+    size_t capacity = 256 * 1024;
+    unsigned char *bytes = malloc(capacity);
+    if (!bytes || block_read(1, header, sizeof(header))) return -1;
+    if (memcmp(header, "EFI PART", 8)) return -1;
+    uint64_t table = little_u64(header + 72);
+    uint32_t count = little_u32(header + 80), size = little_u32(header + 84);
+    if (!count || count > 128 || size != 128) return -1;
+    size_t table_length = ((size_t)count * size + 511) & ~(size_t)511;
+    if (block_read(table, bytes, table_length)) return -1;
+    uint64_t first = 0, last = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        if (!memcmp(bytes + i * size, system_type, sizeof(system_type))) {
+            if (first) return -1; /* This isolated fixture has one System. */
+            first = little_u64(bytes + i * size + 32);
+            last = little_u64(bytes + i * size + 40);
+        }
+    }
+    if (!first || last < first || last - first < 32768) return -1;
+    struct timespec start, end;
+    if (clock_gettime(CLOCK_MONOTONIC, &start)) return -1;
+    for (uint64_t offset = 0; offset < 32768; offset += capacity / 512) {
+        if (block_read(first + offset, bytes, capacity)) return -1;
+    }
+    if (clock_gettime(CLOCK_MONOTONIC, &end)) return -1;
+    long long elapsed_ms = (long long)(end.tv_sec - start.tv_sec) * 1000
+        + (end.tv_nsec - start.tv_nsec) / 1000000;
+    if (elapsed_ms < 0 || elapsed_ms > UINT_MAX) return -1;
+    fprintf(stderr, "system-read: raw 16MiB in %u ms\n", (unsigned)elapsed_ms);
+    free(bytes);
+    return 0;
+}
 
 /* Isolated early-boot probe: intentionally exits instead of publishing input
  * readiness. It uses the service's inherited POSIX endpoint, not a fallback. */
@@ -24,6 +83,7 @@ int main(void) {
     if (chdir("..") != 0) return 7;
     if (!getcwd(cwd, sizeof(cwd)) || strcmp(cwd, "/") != 0) return 8;
     fprintf(stderr, "system-read: namespace ok\n");
+    if (measure_raw_sample()) return 26;
     fd = open("/system/libraries/ime/ja.mime", O_RDONLY);
     if (fd < 0) { perror("system-read: dictionary open"); return 9; }
     char bulk[65536], inline_bytes[4088];
@@ -69,6 +129,16 @@ int main(void) {
         + (end.tv_nsec - start.tv_nsec) / 1000000;
     if (large_ms < 0 || large_ms > UINT_MAX) return 23;
     fprintf(stderr, "system-read: single 16MiB read in %u ms\n", (unsigned)large_ms);
+    /* Separate destination page population from the file/provider path without
+     * changing the service-manager deadline. Reuse already resident storage. */
+    if (lseek(fd, 0, SEEK_SET) != 0 || clock_gettime(CLOCK_MONOTONIC, &start)) return 27;
+    length = read(fd, large, large_size / 2);
+    if (clock_gettime(CLOCK_MONOTONIC, &end) || length != (ssize_t)(large_size / 2)) return 28;
+    if (memcmp(large, bulk, sizeof(bulk))) return 29;
+    long long resident_ms = (long long)(end.tv_sec - start.tv_sec) * 1000
+        + (end.tv_nsec - start.tv_nsec) / 1000000;
+    if (resident_ms < 0 || resident_ms > UINT_MAX) return 30;
+    fprintf(stderr, "system-read: resident 8MiB read in %u ms\n", (unsigned)resident_ms);
     free(large);
     off_t tail = lseek(fd, -123, SEEK_END);
     if (tail < 0 || read(fd, buffer, sizeof(buffer)) != 123) return 24;
