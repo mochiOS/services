@@ -166,8 +166,11 @@ impl Runtime {
 
 impl BootstrapOperations for Runtime {
     fn spawn_drivers(&mut self) -> Option<u64> {
-        match service_launcher::spawn_drivers(self.logger_endpoint, self.driver_controller.target())
-        {
+        match service_launcher::spawn_drivers(
+            self.logger_endpoint,
+            self.driver_controller.target(),
+            self.posix_endpoint?,
+        ) {
             Ok(process_id) => {
                 platform::logln!(
                     "service-manager.service: drivers.service spawned pid={}",

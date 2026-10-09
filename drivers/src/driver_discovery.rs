@@ -16,7 +16,16 @@ pub(crate) fn roots() -> &'static [DriverSearchRoot] {
 }
 
 fn read_dir_names(path: &str) -> Vec<String> {
-    match platform::file::read_dir_names(path) {
+    let names = std::fs::read_dir(path).and_then(|entries| {
+        entries
+            .map(|entry| {
+                entry?.file_name().into_string().map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "non-UTF-8 driver name")
+                })
+            })
+            .collect::<std::io::Result<Vec<_>>>()
+    });
+    match names {
         Ok(names) => {
             let message = alloc::format!(
                 "drivers.service: discovery root={} entries={}\n",
@@ -30,13 +39,13 @@ fn read_dir_names(path: &str) -> Vec<String> {
             let message = alloc::format!(
                 "drivers.service: discovery root={} errno={}\n",
                 path,
-                err.errno().unwrap_or(0)
+                err.raw_os_error().unwrap_or(5)
             );
             let _ = platform::io::stderr(message.as_bytes());
             platform::logln!(
                 "drivers.service: open dir failed {} errno={}",
                 path,
-                err.errno().unwrap_or(0)
+                err.raw_os_error().unwrap_or(5)
             );
             Vec::new()
         }

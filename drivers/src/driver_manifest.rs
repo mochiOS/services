@@ -16,14 +16,14 @@ fn bundle_manifest_path(bundle_root: &str) -> Option<String> {
 
 pub(crate) fn load(bundle_root: &str) -> Option<DriverManifest> {
     let package_manifest_path = bundle_manifest_path(bundle_root)?;
-    let bytes = match platform::file::read_to_end_path(&package_manifest_path) {
+    let bytes = match std::fs::read(&package_manifest_path) {
         Ok(bytes) => bytes,
         Err(err) => {
             platform::logln!(
                 "drivers.service: rejected bundle={} reason=manifest-read path={} errno={}",
                 bundle_root,
                 package_manifest_path,
-                err.errno().unwrap_or(0)
+                err.raw_os_error().unwrap_or(5)
             );
             return None;
         }

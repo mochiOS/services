@@ -70,11 +70,11 @@ fn spawn_with_credentials(
 pub(crate) fn spawn_drivers(
     logger_endpoint: u64,
     manager: DriverManagerTarget,
+    posix_endpoint: platform::handle::Handle,
 ) -> Result<u64, mochi_user_syscall::SysError> {
-    spawn(
-        DRIVERS,
-        &driver_arguments(logger_endpoint, manager.endpoint, manager.token),
-    )
+    let mut arguments = driver_arguments(logger_endpoint, manager.endpoint, manager.token);
+    append_posix_handle(&mut arguments, Some(posix_endpoint));
+    spawn(DRIVERS, &arguments)
 }
 
 pub(crate) fn spawn_fixed_service(

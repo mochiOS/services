@@ -116,13 +116,6 @@ const FIRST_BOOT_IDENTITY: SessionIdentity = SessionIdentity { uid: 0, gid: 0 };
 pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> BootstrapOutcome {
     let mut children = ChildProcesses::default();
 
-    let Some(drivers) = operations.spawn_drivers() else {
-        return outcome(children, StopReason::DriversSpawnFailed);
-    };
-    children.drivers = Some(drivers);
-    if !operations.wait_driver_hello(drivers) {
-        return outcome(children, StopReason::DriverHelloFailed);
-    }
     let Some(filesystem) = operations.spawn_fixed(FixedService::Filesystem) else {
         return outcome(children, StopReason::FilesystemSpawnFailed);
     };
@@ -136,6 +129,13 @@ pub(crate) fn orchestrate(operations: &mut impl BootstrapOperations) -> Bootstra
     children.posix = Some(posix);
     if !operations.wait_posix_ready(posix) {
         return outcome(children, StopReason::PosixReadyFailed);
+    }
+    let Some(drivers) = operations.spawn_drivers() else {
+        return outcome(children, StopReason::DriversSpawnFailed);
+    };
+    children.drivers = Some(drivers);
+    if !operations.wait_driver_hello(drivers) {
+        return outcome(children, StopReason::DriverHelloFailed);
     }
     children.mboot_agent = operations.spawn_mboot_agent();
     operations.notify_mboot_stage(MbootStage::Userspace);
@@ -424,12 +424,12 @@ mod tests {
 
     fn expected_success_events() -> Vec<Event> {
         alloc::vec![
-            Event::SpawnDrivers,
-            Event::WaitHello,
             Event::Spawn(FixedService::Filesystem),
             Event::WaitFilesystem,
             Event::Spawn(FixedService::Posix),
             Event::WaitPosix,
+            Event::SpawnDrivers,
+            Event::WaitHello,
             Event::SpawnMbootAgent,
             Event::NotifyMbootStage(MbootStage::Userspace),
             Event::Spawn(FixedService::Input),
@@ -456,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_order_starts_drivers_first_and_waits_display_before_input() {
+    fn successful_order_waits_for_posix_before_drivers_and_display_before_input() {
         let mut operations = FakeOperations::new(Failure::None);
         let outcome = orchestrate(&mut operations);
         assert_eq!(operations.events, expected_success_events());
