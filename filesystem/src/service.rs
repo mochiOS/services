@@ -431,16 +431,15 @@ impl FilesystemService {
         let uid = credentials.effective_uid;
         let gid = credentials.effective_gid;
         let groups = credentials.supplementary_groups();
-        let (root, base) = self.resolve_anchors(payload, anchors)?;
-        let (parent, name) = match self.resolve_path_at(
-            root,
-            base,
+        let (resolution, filesystem, _) = self.resolve_open_path(
             payload,
+            anchors,
             FollowSymlinks::ExcludeFinalComponent,
             uid,
             gid,
             groups,
-        )? {
+        )?;
+        let (parent, name) = match resolution {
             Resolution::Found { .. } => return Err(EEXIST),
             Resolution::Missing { parent, name } => (parent, name),
         };
@@ -457,9 +456,8 @@ impl FilesystemService {
         ) {
             return Err(EACCES);
         }
-        let mut parent = Dir::open_inode(&self.fs, parent).map_err(errno)?;
-        let inode = self
-            .fs
+        let mut parent = Dir::open_inode(&filesystem, parent).map_err(errno)?;
+        let inode = filesystem
             .create_inode(InodeCreationOptions {
                 file_type: FileType::Directory,
                 mode: InodeMode::from_bits_truncate((request.mode as u16) & 0o7777)
@@ -479,7 +477,7 @@ impl FilesystemService {
                 Err(error) => Some(Err(errno(error))),
             })
             .ok_or(EIO)??;
-        let mut directory = Dir::init(self.fs.clone(), inode, parent_index).map_err(errno)?;
+        let mut directory = Dir::init(filesystem, inode, parent_index).map_err(errno)?;
         parent
             .link(
                 DirEntryName::try_from(name.as_slice()).map_err(|_| EINVAL)?,
@@ -622,16 +620,15 @@ impl FilesystemService {
         let uid = credentials.effective_uid;
         let gid = credentials.effective_gid;
         let groups = credentials.supplementary_groups();
-        let (root, base) = self.resolve_anchors(link_path, anchors)?;
-        let (parent, name) = match self.resolve_path_at(
-            root,
-            base,
+        let (resolution, filesystem, _) = self.resolve_open_path(
             link_path,
+            anchors,
             FollowSymlinks::ExcludeFinalComponent,
             uid,
             gid,
             groups,
-        )? {
+        )?;
+        let (parent, name) = match resolution {
             Resolution::Found { .. } => return Err(EEXIST),
             Resolution::Missing { parent, name } => (parent, name),
         };
@@ -648,8 +645,8 @@ impl FilesystemService {
         ) {
             return Err(EACCES);
         }
-        let mut parent = Dir::open_inode(&self.fs, parent).map_err(errno)?;
-        self.fs
+        let mut parent = Dir::open_inode(&filesystem, parent).map_err(errno)?;
+        filesystem
             .symlink(
                 &mut parent,
                 DirEntryName::try_from(name.as_slice()).map_err(|_| EINVAL)?,

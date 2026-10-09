@@ -594,3 +594,120 @@ fn service_path_metadata_mutations_and_readlink_use_the_resolved_volume() {
         .unwrap();
     assert_eq!(target.payload, b"/file");
 }
+
+#[test]
+fn directory_and_symlink_creation_use_the_mounted_parent_and_preserve_literal_targets() {
+    let fixture = Fixture::new();
+    let mut service = FilesystemService::new(fixture.volume("data"));
+    service
+        .mount_volume(b"/mount", fixture.volume("system"))
+        .unwrap();
+    let mounted = open(
+        &mut service,
+        b"/mount",
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+        PathAnchors::default(),
+    );
+    let anchors = PathAnchors {
+        root_open_id: None,
+        base_open_id: Some(mounted.open_id),
+    };
+    let mkdir = protocol::Header {
+        flags: protocol::MKDIR_AT_BASE_ATTACHED,
+        mode: 0o755,
+        ..Default::default()
+    };
+    service
+        .mkdir_at(mkdir, b"created", anchors, root_credentials())
+        .unwrap();
+    assert!(matches!(
+        service.mkdir_at(mkdir, b"created", anchors, root_credentials()),
+        Err(17)
+    ));
+    let directory = service
+        .stat_at(
+            protocol::Header::default(),
+            b"/mount/created",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    let directory = protocol::decode_node_status(&directory.payload).unwrap();
+    assert_eq!(directory.kind, protocol::NODE_TYPE_DIRECTORY);
+    assert_eq!(directory.node_id >> 32, mounted.node_id >> 32);
+    assert!(matches!(
+        service.stat_at(
+            protocol::Header::default(),
+            b"/created",
+            PathAnchors::default(),
+            root_credentials()
+        ),
+        Err(2)
+    ));
+
+    let mut payload = b"/file".to_vec();
+    payload.extend_from_slice(b"created/link");
+    let symlink = protocol::Header {
+        flags: protocol::SYMLINK_AT_BASE_ATTACHED,
+        mode: 5,
+        ..Default::default()
+    };
+    service
+        .symlink_at(symlink, &payload, anchors, root_credentials())
+        .unwrap();
+    assert!(matches!(
+        service.symlink_at(symlink, &payload, anchors, root_credentials()),
+        Err(17)
+    ));
+    let target = service
+        .readlink_at(
+            protocol::Header::default(),
+            b"/mount/created/link",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    assert_eq!(target.payload, b"/file");
+    let global = open(
+        &mut service,
+        b"/mount/created/link",
+        protocol::OPEN_AT_READ,
+        PathAnchors::default(),
+    );
+    assert_eq!(
+        service.provider_read(global.open_id, 4096).unwrap(),
+        b"data"
+    );
+    let confined = open(
+        &mut service,
+        b"created/link",
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_ROOT_ATTACHED | protocol::OPEN_AT_BASE_ATTACHED,
+        PathAnchors {
+            root_open_id: Some(mounted.open_id),
+            base_open_id: Some(mounted.open_id),
+        },
+    );
+    assert_eq!(
+        service.provider_read(confined.open_id, 4096).unwrap(),
+        b"system"
+    );
+
+    let mut bytes = [0u8; protocol::CREDENTIALS_MAX_LEN];
+    let size = protocol::encode_credentials_payload(501, 20, &[], &[], &mut bytes).unwrap();
+    let unprivileged = protocol::decode_credentials_payload(&bytes[..size])
+        .unwrap()
+        .0;
+    assert!(matches!(
+        service.mkdir_at(mkdir, b"denied", anchors, unprivileged),
+        Err(13)
+    ));
+    let mut denied_link = b"/file".to_vec();
+    denied_link.extend_from_slice(b"denied-link");
+    assert!(matches!(
+        service.symlink_at(symlink, &denied_link, anchors, unprivileged),
+        Err(13)
+    ));
+    for opened in [confined, global, mounted] {
+        service.provider_close(opened.open_id).unwrap();
+    }
+}
