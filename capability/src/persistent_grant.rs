@@ -119,7 +119,7 @@ fn write_file(path: &str, bytes: &[u8]) -> Result<(), mochi_user_syscall::SysErr
     close_result
 }
 
-fn read_file(path: &str) -> Result<Vec<u8>, mochi_user_syscall::SysError> {
+pub(crate) fn read_file(path: &str) -> Result<Vec<u8>, mochi_user_syscall::SysError> {
     let file =
         with_client(|client| client.open_at(OpenAtBase::ProcessRoot, posix::OPEN_READ, 0, path))?;
     let mut output = Vec::new();

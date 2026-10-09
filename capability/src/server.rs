@@ -282,7 +282,7 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                     let caps = capability_decision.effective;
                     let mut identity_items = Vec::new();
                     encode_identity_args(&identity, &mut identity_items);
-                    let executable = platform::file::read_to_end_path(path)?;
+                    let executable = crate::persistent_grant::read_file(path)?;
                     let digest = Sha256::digest(&executable);
                     let mut digest_hex = String::with_capacity(64);
                     for byte in digest {

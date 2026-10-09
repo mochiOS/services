@@ -6,7 +6,7 @@ use mochi_user_syscall as syscall;
 use sha2::{Digest, Sha256};
 
 use crate::package_index::PackageIndex;
-use crate::persistent_grant::append_persistent_grant;
+use crate::persistent_grant::{append_persistent_grant, read_file};
 use crate::policy::is_known_capability;
 use crate::resolver::binary_caps;
 
@@ -230,7 +230,7 @@ pub(crate) fn authorize_dynamic_capability(
                 | platform::capability::CapabilityDecision::AllowAllUserGrantable
         );
     if needs_digest {
-        let executable_bytes = platform::file::read_to_end_path(executable)?;
+        let executable_bytes = read_file(executable)?;
         let actual_digest = Sha256::digest(&executable_bytes);
         digest.copy_from_slice(&actual_digest);
         if request.executable.digest != [0; 32] && request.executable.digest != digest {
