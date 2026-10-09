@@ -58,6 +58,11 @@ int main(void) {
     observed = 0x55;
     if (lseek(fd, (off_t)page + 39, SEEK_SET) != (off_t)page + 39) return 26;
     if (write(fd, &observed, 1) != 1 || shared[39] != 0x55) return 27;
+    unsigned char *source = mmap(0, page, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (source == MAP_FAILED) return 32;
+    if (lseek(fd, (off_t)page + 40, SEEK_SET) != (off_t)page + 40) return 33;
+    if (write(fd, source, 1) != 1 || shared[40] != 0x77) return 34;
+    if (munmap(source, page) != 0) return 35;
     STAGE("writeback");
     if (msync(shared, page, MS_SYNC) != 0) return 8;
     if (lseek(fd, (off_t)page + 37, SEEK_SET) != (off_t)page + 37) return 9;
