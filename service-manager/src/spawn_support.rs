@@ -5,6 +5,7 @@ use mochi_user_platform as platform;
 
 const CAPABILITY_SERVICE_NAME: &str = "capability.service";
 const PACKAGE_SERVICE_NAME: &str = "package.service";
+const SIGNATURE_SERVICE_NAME: &str = "signature.service";
 
 pub(crate) fn errno(error: mochi_user_syscall::SysError) -> u64 {
     error.errno().map_or(0, |errno| errno)
@@ -83,6 +84,11 @@ pub(crate) fn install_early_posix_endpoints(
     install_posix_endpoint_for(
         PACKAGE_SERVICE_NAME,
         mochios_package_protocol::INSTALL_POSIX_ENDPOINT_OPCODE,
+        endpoint,
+    )?;
+    install_posix_endpoint_for(
+        SIGNATURE_SERVICE_NAME,
+        mochios_signature_protocol::INSTALL_POSIX_ENDPOINT_OPCODE,
         endpoint,
     )?;
     install_posix_endpoint_at(

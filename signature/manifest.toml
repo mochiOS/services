@@ -10,6 +10,7 @@ path = "/system/services/signature.service"
 kind = "service"
 requires = [
     "fs.read.all",
+    "ipc.client",
     "ipc.server",
     "system.time.read",
 ]

@@ -1594,6 +1594,13 @@ dependencies = [
 [[package]]
 name = "mochios-certificate-database"
 version = "0.1.0"
+dependencies = [
+ "sha2",
+]
+
+[[package]]
+name = "mochios-certificate-database"
+version = "0.1.0"
 source = "git+https://github.com/mochiOS/syscalls#38b10ca1d8b95d8ad638e24a2f83adae6aa17034"
 dependencies = [
  "sha2",
@@ -1627,6 +1634,7 @@ source = "git+https://github.com/mochiOS/syscalls#38b10ca1d8b95d8ad638e24a2f83ad
 [[package]]
 name = "mochios-linux-gui-protocol"
 version = "0.1.0"
+source = "git+https://github.com/mochiOS/syscalls?rev=814cb3f1f5e0dab5fc199f1de5a443bd61fe566e#814cb3f1f5e0dab5fc199f1de5a443bd61fe566e"
 
 [[package]]
 name = "mochios-linux-portal-protocol"
@@ -2463,6 +2471,7 @@ dependencies = [
  "filesystem-service",
  "mnu-abi",
  "mochi-user-platform",
+ "mochios-certificate-database 0.1.0",
  "mochios-filesystem-protocol",
  "mochios-posix-client",
  "mochios-posix-protocol",
@@ -3004,6 +3013,7 @@ dependencies = [
  "mochios-package-protocol",
  "mochios-permission-prompt-protocol",
  "mochios-posix-protocol",
+ "mochios-signature-protocol 0.1.0",
  "mochios-user-database",
 ]
 
@@ -3033,9 +3043,11 @@ dependencies = [
  "mochi-user-platform",
  "mochi-user-syscall",
  "mochios-certificate",
- "mochios-certificate-database",
+ "mochios-certificate-database 0.1.0 (git+https://github.com/mochiOS/syscalls)",
  "mochios-developer-ca-trust",
- "mochios-signature-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
+ "mochios-posix-client",
+ "mochios-posix-protocol",
+ "mochios-signature-protocol 0.1.0",
  "serde_json",
  "sha2",
 ]
@@ -3522,7 +3534,7 @@ dependencies = [
  "ed25519-dalek",
  "mochi-user-platform",
  "mochios-boot-selection",
- "mochios-certificate-database",
+ "mochios-certificate-database 0.1.0 (git+https://github.com/mochiOS/syscalls)",
  "mochios-developer-ca-trust",
  "mochios-http-client",
  "mochios-net-device-protocol",

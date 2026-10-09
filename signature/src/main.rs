@@ -1,5 +1,8 @@
 extern crate alloc;
 
+mod endpoint_handoff;
+mod posix_io;
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::convert::TryInto;
@@ -7,8 +10,8 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use mochi_user_platform as platform;
 use mochios_certificate::DeveloperCertificate;
 use mochios_signature_protocol::{
-    ErrorResponse, InstallProvenance, Opcode, StatusResponse, UpdateNotification,
-    VerifiedResponse, VerifyBegin, VerifyChunk, VerifyFile, VerifyFinish, decode_opcode,
+    ErrorResponse, InstallProvenance, Opcode, StatusResponse, UpdateNotification, VerifiedResponse,
+    VerifyBegin, VerifyChunk, VerifyFile, VerifyFinish, decode_opcode,
 };
 use sha2::{Digest, Sha256};
 
@@ -293,7 +296,7 @@ fn verify_package(
     database: &ActiveDatabase,
     now_utc: u64,
 ) -> Result<Verification, mochi_user_syscall::SysError> {
-    let bytes = platform::file::read_to_end_path(mpkg_path)?;
+    let bytes = posix_io::read_file(mpkg_path, MAX_PACKAGE_LEN)?;
     verify_package_bytes(&bytes, database, now_utc)
 }
 
@@ -302,7 +305,20 @@ fn verify_package_metadata(
     database: &ActiveDatabase,
     now_utc: u64,
 ) -> Result<Verification, mochi_user_syscall::SysError> {
-    let index = platform::package::index_mpkg(mpkg_path)?;
+    let (index, signature_data, certificate_data) = posix_io::with_reader(mpkg_path, |reader| {
+        let index = platform::package::index_mpkg_reader(reader)?;
+        let sig_entry = index.entry("signatures/manifest.sig").ok_or_else(|| {
+            mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOENT as i64)
+        })?;
+        let cert_entry = index.entry("signatures/developer.cert").ok_or_else(|| {
+            mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOENT as i64)
+        })?;
+        let signature_data =
+            platform::package::read_mpkg_range_reader(reader, sig_entry.offset, sig_entry.size)?;
+        let certificate_data =
+            platform::package::read_mpkg_range_reader(reader, cert_entry.offset, cert_entry.size)?;
+        Ok((index, signature_data, certificate_data))
+    })?;
     if index.entries.iter().any(|entry| {
         entry.path.starts_with("signatures/chain/")
             || (entry.path.starts_with("signatures/")
@@ -313,16 +329,6 @@ fn verify_package_metadata(
             mochi_user_syscall::EINVAL as i64,
         ));
     }
-    let sig_entry = index
-        .entry("signatures/manifest.sig")
-        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOENT as i64))?;
-    let cert_entry = index
-        .entry("signatures/developer.cert")
-        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOENT as i64))?;
-    let signature_data =
-        platform::package::read_mpkg_range(mpkg_path, sig_entry.offset, sig_entry.size)?;
-    let certificate_data =
-        platform::package::read_mpkg_range(mpkg_path, cert_entry.offset, cert_entry.size)?;
     let manifest_text = core::str::from_utf8(&index.manifest)
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     let manifest = platform::package::parse_manifest(manifest_text)
@@ -565,6 +571,14 @@ fn reply_verified(sender: u64, request_id: u64, verification: &Verification) {
     }
 }
 
+fn close_received_handles(handles: &platform::ipc::IpcObjectHandles) {
+    for handle in handles.handles.iter().take(handles.count as usize) {
+        if handle.handle != 0 {
+            let _ = platform::handle::close(handle.handle);
+        }
+    }
+}
+
 fn run_server() -> ! {
     let endpoint = match platform::ipc::create() {
         Ok(endpoint) => endpoint,
@@ -576,12 +590,13 @@ fn run_server() -> ! {
             platform::process::exit(1);
         }
     };
-    let mut database = load_active_database();
+    let mut database = None;
     platform::logln!("signature.service: ready");
     let mut transfer: Option<Transfer> = None;
     let mut buf = [0u8; IPC_BUFFER_LEN];
     loop {
-        let msg = match platform::ipc::wait(endpoint, &mut buf) {
+        let mut attached = platform::ipc::IpcObjectHandles::default();
+        let msg = match platform::ipc::wait_object_handles(endpoint, &mut buf, &mut attached) {
             Ok(msg) => msg,
             Err(_) => {
                 platform::thread::yield_now();
@@ -590,7 +605,30 @@ fn run_server() -> ! {
         };
         let sender = msg >> 32;
         let len = (msg & 0xffff_ffff) as usize;
-        let request = &buf[..len];
+        let request = &buf[..len.min(buf.len())];
+        if request == mochios_signature_protocol::INSTALL_POSIX_ENDPOINT_OPCODE.to_le_bytes() {
+            let status = endpoint_handoff::validate(
+                &attached,
+                platform::capability::check_thread(sender, "capabilities.manage") == Ok(1),
+            )
+            .and_then(|handle| {
+                attached.handles[0].handle = 0;
+                posix_io::install_endpoint(handle).map_err(|error| error.raw() as u64)
+            })
+            .map(|_| {
+                database = load_active_database();
+                0u64
+            })
+            .unwrap_or_else(|error| error);
+            close_received_handles(&attached);
+            let _ = platform::ipc::reply(sender, &status.to_le_bytes());
+            continue;
+        }
+        if attached.count != 0 || attached.reserved != 0 || len > buf.len() {
+            close_received_handles(&attached);
+            reply_error(sender, 0, mochi_user_syscall::EINVAL);
+            continue;
+        }
         if matches!(
             decode_opcode(request),
             Ok(Opcode::TrustUpdated | Opcode::RevocationsUpdated)
@@ -722,7 +760,7 @@ fn run_server() -> ! {
                         }
                         continue;
                     }
-                    let bytes = match platform::file::read_to_end_path(file.path) {
+                    let bytes = match posix_io::read_file(file.path, MAX_PACKAGE_LEN) {
                         Ok(bytes) => bytes,
                         Err(error) => {
                             reply_error(sender, file.request_id, error.raw() as u64);
@@ -755,7 +793,7 @@ fn run_server() -> ! {
 }
 
 fn load_active_database() -> Option<ActiveDatabase> {
-    match ActiveDatabase::load(ROOT_PUBLIC_KEYS) {
+    match ActiveDatabase::load_from(posix_io::DatabaseBackend, ROOT_PUBLIC_KEYS) {
         Ok(database) => {
             let state = database.state();
             platform::logln!(
@@ -831,6 +869,14 @@ fn main() {
     let Some(mpkg_path) = mpkg_path else {
         run_server();
     };
+
+    if let Err(error) = posix_io::install_launch_endpoint() {
+        platform::logln!(
+            "signature.service: POSIX endpoint unavailable errno={}",
+            error.errno().unwrap_or(0)
+        );
+        platform::process::exit(1);
+    }
 
     platform::logln!("signature.service: start {}", mpkg_path);
     let Some(database) = load_active_database() else {
