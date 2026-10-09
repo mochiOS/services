@@ -221,6 +221,13 @@ impl Namespace {
         Ok(self.mounts.get(&id).map_or(id, Node::id))
     }
 
+    pub(crate) fn is_mount_root(&self, volume: u32, inode: &Inode) -> bool {
+        self.covered.contains_key(&NodeId {
+            volume: u64::from(volume),
+            inode: inode.index.get(),
+        })
+    }
+
     fn parent(&self, node: &Node) -> Result<Node, i32> {
         let node = self.covered.get(&node.id()).unwrap_or(node);
         let filesystem = self.filesystem(node)?;

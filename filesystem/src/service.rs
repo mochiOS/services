@@ -17,6 +17,7 @@ const EXDEV: i32 = 18;
 const EPERM: i32 = 1;
 const ENOENT: i32 = 2;
 const EBADF: i32 = 9;
+const EBUSY: i32 = 16;
 const EACCES: i32 = 13;
 const EEXIST: i32 = 17;
 const EINVAL: i32 = 22;
@@ -507,16 +508,15 @@ impl FilesystemService {
         let uid = credentials.effective_uid;
         let gid = credentials.effective_gid;
         let groups = credentials.supplementary_groups();
-        let (root, base) = self.resolve_anchors(payload, anchors)?;
-        let (inode, parent, name) = match self.resolve_path_at(
-            root,
-            base,
+        let (resolution, filesystem, volume) = self.resolve_open_path(
             payload,
+            anchors,
             FollowSymlinks::ExcludeFinalComponent,
             uid,
             gid,
             groups,
-        )? {
+        )?;
+        let (inode, parent, name) = match resolution {
             Resolution::Found {
                 inode,
                 parent: Some((parent, name)),
@@ -524,6 +524,13 @@ impl FilesystemService {
             Resolution::Found { parent: None, .. } => return Err(EINVAL),
             Resolution::Missing { .. } => return Err(ENOENT),
         };
+        if self
+            .namespace
+            .as_ref()
+            .is_some_and(|namespace| namespace.is_mount_root(volume, &inode))
+        {
+            return Err(EBUSY);
+        }
         let metadata = parent.metadata();
         if !permission_allows(
             metadata.mode(),
@@ -538,6 +545,8 @@ impl FilesystemService {
             return Err(EACCES);
         }
         self.unlink_entry(
+            &filesystem,
+            volume,
             parent,
             &name,
             inode,
@@ -1635,6 +1644,8 @@ impl FilesystemService {
             .map_err(errno)?;
         drop(parent);
         self.unlink_entry(
+            &self.fs.clone(),
+            0,
             parent_inode,
             name.as_bytes(),
             inode,
@@ -1646,18 +1657,20 @@ impl FilesystemService {
 
     fn unlink_entry(
         &mut self,
+        filesystem: &Ext4,
+        volume: u32,
         parent_inode: Inode,
         name: &[u8],
         mut inode: Inode,
         remove_directory: bool,
         path_hint: Option<&str>,
     ) -> Result<(), i32> {
-        let mut parent = Dir::open_inode(&self.fs, parent_inode.clone()).map_err(errno)?;
+        let mut parent = Dir::open_inode(filesystem, parent_inode.clone()).map_err(errno)?;
         if inode.file_type().is_dir() {
             if !remove_directory {
                 return Err(EISDIR);
             }
-            let directory = Dir::open_inode(&self.fs, inode.clone()).map_err(errno)?;
+            let directory = Dir::open_inode(filesystem, inode.clone()).map_err(errno)?;
             for entry in directory.read_dir().map_err(errno)? {
                 let entry = entry.map_err(errno)?;
                 if entry.file_name() != "." && entry.file_name() != ".." {
@@ -1667,12 +1680,12 @@ impl FilesystemService {
             let original_parent_links = parent.inode().links_count();
             let parent_links = original_parent_links.checked_sub(1).ok_or(EIO)?;
             parent.inode_mut().set_links_count(parent_links);
-            parent.inode_mut().write(&self.fs).map_err(errno)?;
+            parent.inode_mut().write(filesystem).map_err(errno)?;
             let original_links = inode.links_count();
             inode.set_links_count(1);
-            if let Err(error) = inode.write(&self.fs) {
+            if let Err(error) = inode.write(filesystem) {
                 parent.inode_mut().set_links_count(original_parent_links);
-                let _ = parent.inode_mut().write(&self.fs);
+                let _ = parent.inode_mut().write(filesystem);
                 return Err(errno(error));
             }
             if let Err(error) = parent.unlink(
@@ -1680,9 +1693,9 @@ impl FilesystemService {
                 inode.clone(),
             ) {
                 inode.set_links_count(original_links);
-                let _ = inode.write(&self.fs);
+                let _ = inode.write(filesystem);
                 parent.inode_mut().set_links_count(original_parent_links);
-                let _ = parent.inode_mut().write(&self.fs);
+                let _ = parent.inode_mut().write(filesystem);
                 return Err(errno(error));
             }
             if let Some(path) = path_hint {
@@ -1695,7 +1708,7 @@ impl FilesystemService {
         if remove_directory {
             return Err(ENOTDIR);
         }
-        let node_id = u64::from(inode.index.get());
+        let node_id = scoped_node_id(volume, &inode);
         let is_open = self.opens.values().any(|open| open.node_id == node_id);
         let orphan_name = format!(".mochios-orphan-{node_id}");
         if is_open {

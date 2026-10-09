@@ -711,3 +711,142 @@ fn directory_and_symlink_creation_use_the_mounted_parent_and_preserve_literal_ta
         service.provider_close(opened.open_id).unwrap();
     }
 }
+
+#[test]
+fn unlink_in_a_mounted_volume_retains_its_open_files_and_never_aliases_root_inodes() {
+    let fixture = Fixture::new();
+    let mut service = FilesystemService::new(fixture.volume("data"));
+    service
+        .mount_volume(b"/mount", fixture.volume("system"))
+        .unwrap();
+    let data = open(
+        &mut service,
+        b"/file",
+        protocol::OPEN_AT_READ,
+        PathAnchors::default(),
+    );
+    let system = open(
+        &mut service,
+        b"/mount/file",
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE,
+        PathAnchors::default(),
+    );
+    let alias = open(
+        &mut service,
+        b"/mount/file",
+        protocol::OPEN_AT_READ,
+        PathAnchors::default(),
+    );
+    let memory_id = service.provider_memory_object(system.open_id).unwrap();
+    service
+        .unlink_at(
+            protocol::Header::default(),
+            b"/mount/file",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    assert!(matches!(
+        service.stat_at(
+            protocol::Header::default(),
+            b"/mount/file",
+            PathAnchors::default(),
+            root_credentials()
+        ),
+        Err(2)
+    ));
+    assert_eq!(
+        service.provider_read_at(system.open_id, 0, 4096).unwrap(),
+        b"system"
+    );
+    assert_eq!(
+        service.provider_read_at(data.open_id, 0, 4096).unwrap(),
+        b"data"
+    );
+    service
+        .provider_write_at(system.open_id, 0, b"SYSTEM")
+        .unwrap();
+    assert_eq!(
+        service.provider_read_at(alias.open_id, 0, 4096).unwrap(),
+        b"SYSTEM"
+    );
+    service.provider_close(system.open_id).unwrap();
+    assert_eq!(
+        service.provider_read_at(alias.open_id, 0, 4096).unwrap(),
+        b"SYSTEM"
+    );
+    let status = service
+        .stat_handle(protocol::Header::default(), alias.open_id)
+        .unwrap();
+    assert_eq!(
+        protocol::decode_node_status(&status.payload)
+            .unwrap()
+            .node_id,
+        alias.node_id
+    );
+    service.provider_close(alias.open_id).unwrap();
+    let replacement = open(
+        &mut service,
+        b"/mount/file",
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+        PathAnchors::default(),
+    );
+    assert_ne!(
+        service.provider_memory_object(replacement.open_id).unwrap(),
+        memory_id
+    );
+    service
+        .provider_write(replacement.open_id, b"replacement")
+        .unwrap();
+    assert_eq!(
+        service.provider_read_at(data.open_id, 0, 4096).unwrap(),
+        b"data"
+    );
+
+    assert!(matches!(
+        service.unlink_at(
+            protocol::Header {
+                flags: protocol::UNLINK_AT_REMOVE_DIRECTORY,
+                ..Default::default()
+            },
+            b"/mount",
+            PathAnchors::default(),
+            root_credentials()
+        ),
+        Err(16)
+    ));
+    service
+        .mkdir_at(
+            protocol::Header {
+                mode: 0o755,
+                ..Default::default()
+            },
+            b"/mount/empty",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    service
+        .unlink_at(
+            protocol::Header {
+                flags: protocol::UNLINK_AT_REMOVE_DIRECTORY,
+                ..Default::default()
+            },
+            b"/mount/empty",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    assert!(matches!(
+        service.stat_at(
+            protocol::Header::default(),
+            b"/mount/empty",
+            PathAnchors::default(),
+            root_credentials()
+        ),
+        Err(2)
+    ));
+    for opened in [replacement, data] {
+        service.provider_close(opened.open_id).unwrap();
+    }
+}
