@@ -1,0 +1,28 @@
+format = 1
+
+[package]
+provenance = "built-in"
+id = "org.mochios.binder"
+name = "Binder"
+version = "0.1.0"
+revision = 1
+vendor = "mochiOS"
+kind = "application"
+architecture = "x86_64"
+abi = "mochios-1"
+
+[application]
+entry = "entry.elf"
+
+[[binary]]
+path = "/system/applications/Binder.app/entry.elf"
+kind = "application"
+requires = [
+    "fs.read.all",
+    "fs.write.tmp",
+    "ipc.client",
+    "ipc.server",
+    "process.inspect",
+    "process.spawn",
+    "system.time.read",
+]
