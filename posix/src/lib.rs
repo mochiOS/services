@@ -7,6 +7,18 @@ pub mod pty;
 
 pub const STATUS_EINVAL: i32 = -22;
 
+/// Validates a delegated signal-thread object against kernel-authenticated
+/// sender identity. An IPC endpoint number is not a native thread identifier.
+pub fn signal_thread_registration_matches(
+    sender: &mnu_abi::ThreadSecurityContext,
+    thread: &mnu_abi::ThreadStatus,
+    rights: u64,
+) -> bool {
+    rights == mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_SIGNAL
+        && thread.thread_id == sender.thread_id
+        && thread.process_id == sender.process_id
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PeerIdentity {
     pub process_id: u64,

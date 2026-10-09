@@ -140,13 +140,12 @@ fn main() {
                 rights: attachment.rights,
             })
             .collect();
-        let peer = platform::process::thread_security_context(sender)
-            .ok()
-            .map(|context| PeerIdentity {
-                process_id: context.process_id,
-                effective_uid: context.effective_uid,
-                effective_gid: context.effective_gid,
-            });
+        let sender_context = platform::process::thread_security_context(sender).ok();
+        let peer = sender_context.as_ref().map(|context| PeerIdentity {
+            process_id: context.process_id,
+            effective_uid: context.effective_uid,
+            effective_gid: context.effective_gid,
+        });
         let decoded = request_bytes
             .get(..length)
             .and_then(|bytes| protocol::decode(bytes).ok());
@@ -220,15 +219,19 @@ fn main() {
                     && attachments.len() == 1 =>
             {
                 let thread = attachments[0];
-                let required_rights =
-                    platform::handle::HANDLE_RIGHT_WAIT | platform::handle::HANDLE_RIGHT_SIGNAL;
-                let valid = thread.rights == required_rights
-                    && platform::thread::handle_status(thread.handle).is_ok_and(|status| {
-                        status.thread_id == sender && status.process_id == peer.process_id
-                    });
-                if valid {
+                let status = platform::thread::handle_status(thread.handle).ok();
+                let registered_thread = sender_context.as_ref().zip(status.as_ref())
+                    .filter(|(context, status)| {
+                        posix_service::signal_thread_registration_matches(
+                            context,
+                            status,
+                            thread.rights,
+                        )
+                    })
+                    .map(|(context, _)| context.thread_id);
+                if let Some(thread_id) = registered_thread {
                     if let Some(previous) = signal_threads.insert(
-                        sender,
+                        thread_id,
                         RegisteredSignalThread {
                             process_id: peer.process_id,
                             handle: thread.handle,
