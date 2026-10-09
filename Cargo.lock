@@ -1627,7 +1627,6 @@ source = "git+https://github.com/mochiOS/syscalls#38b10ca1d8b95d8ad638e24a2f83ad
 [[package]]
 name = "mochios-linux-gui-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls?rev=814cb3f1f5e0dab5fc199f1de5a443bd61fe566e#814cb3f1f5e0dab5fc199f1de5a443bd61fe566e"
 
 [[package]]
 name = "mochios-linux-portal-protocol"

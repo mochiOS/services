@@ -200,39 +200,13 @@ pub fn read_dir_names(path: &str) -> Result<Vec<String>, mochi_user_syscall::Sys
     Ok(output)
 }
 
-struct HandleReader {
-    handle: platform::handle::Handle,
-}
-
-impl platform::package::MpkgReader for HandleReader {
-    fn len(&mut self) -> Result<u64, mochi_user_syscall::SysError> {
-        platform::handle::seek(self.handle, 0, platform::handle::HANDLE_SEEK_END)
-    }
-
-    fn read_exact_at(
-        &mut self,
-        offset: u64,
-        output: &mut [u8],
-    ) -> Result<(), mochi_user_syscall::SysError> {
-        let offset = i64::try_from(offset).map_err(|_| sys_error(mochi_user_syscall::ERANGE))?;
-        platform::handle::seek(self.handle, offset, platform::handle::HANDLE_SEEK_START)?;
-        let mut done = 0usize;
-        while done < output.len() {
-            let read = platform::handle::read(self.handle, &mut output[done..])?;
-            if read == 0 {
-                return Err(sys_error(mochi_user_syscall::EIO));
-            }
-            done += read;
-        }
-        Ok(())
-    }
-}
-
 pub fn index_mpkg(
     path: &str,
 ) -> Result<platform::package::MpkgIndex, mochi_user_syscall::SysError> {
     let handle = open_path(path, 0, 0)?;
-    let result = platform::package::index_mpkg_reader(&mut HandleReader { handle });
+    let result = platform::package::index_mpkg_reader(
+        &mut platform::package::NativeMpkgReader::from_borrowed_handle(handle),
+    );
     let close_result = close(handle);
     match result {
         Ok(index) => {
@@ -249,8 +223,11 @@ pub fn read_mpkg_range(
     size: u64,
 ) -> Result<Vec<u8>, mochi_user_syscall::SysError> {
     let handle = open_path(path, 0, 0)?;
-    let result =
-        platform::package::read_mpkg_range_reader(&mut HandleReader { handle }, offset, size);
+    let result = platform::package::read_mpkg_range_reader(
+        &mut platform::package::NativeMpkgReader::from_borrowed_handle(handle),
+        offset,
+        size,
+    );
     let close_result = close(handle);
     match result {
         Ok(bytes) => {
