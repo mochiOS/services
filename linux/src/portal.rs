@@ -374,8 +374,11 @@ fn copy_directory(
     }
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
-        let mut entries = platform::file::read_dir_names(path_text(&directory)?)
-            .map_err(|error| -(error.raw().unsigned_abs().min(i32::MAX as u64) as i32))?;
+        let mut entries = fs::read_dir(&directory)
+            .map_err(io_status)?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(io_status)?;
         entries.sort();
         for entry in entries {
             let path = directory.join(entry);

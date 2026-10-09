@@ -3,6 +3,9 @@ use mboot_protocol::{
     MessageType, STAGE_SHARED_CHUNK_LEN, STAGE_SHARED_CHUNK_MAGIC, decode_line, encode_to_string,
 };
 use mochi_user_platform as platform;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::os::fd::AsRawFd;
 
 use crate::codec::{decode_hex, decode_rle32};
 
@@ -12,6 +15,11 @@ const STAGE_CHUNK_BYTES: usize = mboot_protocol::MAX_BULK_STAGE_BYTES;
 const PAGE_SIZE: usize = 4096;
 const PORTAL_CHUNK_BYTES: usize = 1536;
 const PORTAL_EXPORT_CHUNK_BYTES: usize = 1536;
+
+unsafe extern "C" {
+    #[link_name = "read"]
+    fn posix_read(fd: i32, buffer: *mut u8, length: usize) -> isize;
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HostError {
@@ -275,15 +283,14 @@ impl HostClient {
         path: &str,
         expected_size: u64,
     ) -> Result<(), HostError> {
-        let fd = platform::file::open_path(path, 0).map_err(|_| HostError::Unavailable)?;
+        let mut file = File::open(path).map_err(|_| HostError::Unavailable)?;
         let mut offset = 0u64;
         let mut buffer = [0u8; PORTAL_CHUNK_BYTES];
         let result = loop {
-            let read =
-                match platform::file::read(fd, buffer.as_mut_ptr() as u64, buffer.len() as u64) {
-                    Ok(read) => read as usize,
-                    Err(_) => break Err(HostError::Unavailable),
-                };
+            let read = match file.read(&mut buffer) {
+                Ok(read) => read,
+                Err(_) => break Err(HostError::Unavailable),
+            };
             if read == 0 {
                 break if offset == expected_size {
                     Ok(())
@@ -306,7 +313,6 @@ impl HostClient {
             }
             offset += read as u64;
         };
-        let _ = platform::file::close(fd);
         result
     }
 
@@ -403,17 +409,9 @@ impl HostClient {
         source_offset: u64,
         expected_size: u64,
     ) -> Result<(), HostError> {
-        let fd = platform::file::open_path(path, 0).map_err(|_| HostError::Unavailable)?;
-        if platform::file::seek(
-            fd,
-            i64::try_from(source_offset).map_err(|_| HostError::InvalidReply)?,
-            0,
-        )
-        .is_err()
-        {
-            let _ = platform::file::close(fd);
-            return Err(HostError::Unavailable);
-        }
+        let mut file = File::open(path).map_err(|_| HostError::Unavailable)?;
+        file.seek(SeekFrom::Start(source_offset))
+            .map_err(|_| HostError::Unavailable)?;
         self.ensure_stage_buffer()?;
         let (buffer_address, buffer_capacity) = self
             .stage_buffer
@@ -427,10 +425,23 @@ impl HostClient {
             }
             let remaining = expected_size - offset;
             let requested = core::cmp::min(remaining, buffer_capacity as u64);
-            let read = match platform::file::read(fd, buffer_address, requested) {
-                Ok(read) => read as usize,
-                Err(_) => break Err(HostError::Unavailable),
+            // The agent aliases these bytes. Call the POSIX runtime with a raw
+            // pointer, not a Rust &mut slice over concurrently mapped storage.
+            // Its process-local FD table resolves this to native HandleRead.
+            let read = unsafe {
+                posix_read(
+                    file.as_raw_fd(),
+                    buffer_address as *mut u8,
+                    requested as usize,
+                )
             };
+            if read < 0 {
+                break Err(HostError::Unavailable);
+            }
+            let read = read as usize;
+            if read > requested as usize {
+                break Err(HostError::InvalidReply);
+            }
             if read == 0 {
                 break Err(HostError::InvalidReply);
             }
@@ -439,7 +450,6 @@ impl HostClient {
             }
             offset += read as u64;
         };
-        let _ = platform::file::close(fd);
         result
     }
 
