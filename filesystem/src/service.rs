@@ -1132,6 +1132,24 @@ impl FilesystemService {
         Ok(payload)
     }
 
+    pub fn provider_read_with_offset(
+        &mut self,
+        open_id: u64,
+        length: usize,
+    ) -> Result<(Vec<u8>, u64), i32> {
+        if length > mnu_abi::provider::MAX_POSITIONED_READ_LEN {
+            return Err(EINVAL);
+        }
+        let open = self.opens.get(&open_id).ok_or(EBADF)?;
+        if open.file.is_none() {
+            return Err(EISDIR);
+        }
+        let start = open.offset;
+        start.checked_add(length as u64).ok_or(EFBIG)?;
+        let payload = self.provider_read(open_id, length)?;
+        Ok((payload, start))
+    }
+
     pub fn provider_write(&mut self, open_id: u64, payload: &[u8]) -> Result<usize, i32> {
         self.provider_write_with_offset(open_id, payload)
             .map(|(written, _)| written)

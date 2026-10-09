@@ -6,7 +6,11 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-#define STAGE(text) ((void)write(STDERR_FILENO, "pager: " text "\n", sizeof("pager: " text "\n") - 1))
+#define STAGE(text) do { \
+    ssize_t diagnostic_result = write(STDERR_FILENO, "pager: " text "\n", \
+                                      sizeof("pager: " text "\n") - 1); \
+    (void)diagnostic_result; \
+} while (0)
 
 /* Run with the target runtime and an inherited POSIX endpoint. */
 int main(void) {
@@ -35,10 +39,29 @@ int main(void) {
     if (lseek(fd, 0, SEEK_CUR) != 19) return 7;
     STAGE("offset preserved");
     shared[37] = 0x77;
+    STAGE("read before writeback");
+    unsigned char observed = 0;
+    if (lseek(fd, (off_t)page + 37, SEEK_SET) != (off_t)page + 37) return 20;
+    if (read(fd, &observed, 1) != 1 || observed != 0x77) return 21;
+    int independent = open(path, O_RDONLY);
+    if (independent < 0) return 22;
+    if (lseek(independent, (off_t)page + 37, SEEK_SET) != (off_t)page + 37) return 23;
+    if (read(independent, &observed, 1) != 1 || observed != 0x77) return 24;
+    if (close(independent) != 0) return 25;
+    /* A user-buffer fault must not recursively acquire the backing I/O lock. */
+    unsigned char *destination = mmap(0, page, PROT_READ | PROT_WRITE,
+                                      MAP_SHARED, fd, 0);
+    if (destination == MAP_FAILED) return 28;
+    if (lseek(fd, (off_t)page + 37, SEEK_SET) != (off_t)page + 37) return 29;
+    if (read(fd, destination, 1) != 1 || destination[0] != 0x77) return 30;
+    if (munmap(destination, page) != 0) return 31;
+    observed = 0x55;
+    if (lseek(fd, (off_t)page + 39, SEEK_SET) != (off_t)page + 39) return 26;
+    if (write(fd, &observed, 1) != 1 || shared[39] != 0x55) return 27;
     STAGE("writeback");
     if (msync(shared, page, MS_SYNC) != 0) return 8;
     if (lseek(fd, (off_t)page + 37, SEEK_SET) != (off_t)page + 37) return 9;
-    unsigned char observed = 0;
+    observed = 0;
     if (read(fd, &observed, 1) != 1 || observed != 0x77) return 10;
 
     STAGE("read-only map");

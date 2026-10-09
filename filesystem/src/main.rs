@@ -828,6 +828,14 @@ fn handle_provider_request(
         provider::OP_READ => service
             .provider_read(header.object_id, header.length as usize)
             .map(|data| (data.len() as u64, data)),
+        provider::OP_READ_WITH_POSITION => service
+            .provider_read_with_offset(header.object_id, header.length as usize)
+            .map(|(data, start)| {
+                let length = data.len() as u64;
+                let mut positioned = start.to_le_bytes().to_vec();
+                positioned.extend_from_slice(&data);
+                (length, positioned)
+            }),
         provider::OP_WRITE => service
             .provider_write_with_offset(header.object_id, payload)
             .map(|(written, start)| (written as u64, start.to_le_bytes().to_vec())),

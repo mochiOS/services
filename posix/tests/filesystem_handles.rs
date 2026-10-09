@@ -341,6 +341,49 @@ fn pager_positioned_io_does_not_change_the_open_description_offset() {
 }
 
 #[test]
+fn sequential_read_returns_its_original_position_and_preserves_offset_on_error() {
+    let mut filesystem = test_filesystem();
+    let open_id = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+                mode: 0o644,
+                ..protocol::Header::default()
+            },
+            b"/read-position.txt",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap()
+        .header
+        .open_id;
+    filesystem.provider_write(open_id, b"abcdef").unwrap();
+    filesystem
+        .provider_seek(open_id, 2, HANDLE_SEEK_START)
+        .unwrap();
+    let first = filesystem.provider_read_with_offset(open_id, 2).unwrap();
+    assert_eq!(first, (b"cd".to_vec(), 2));
+    assert_eq!(
+        filesystem
+            .provider_read_with_offset(open_id, mnu_abi::provider::MAX_POSITIONED_READ_LEN + 1),
+        Err(22)
+    );
+    assert_eq!(
+        filesystem.provider_read_with_offset(open_id, 8).unwrap(),
+        (b"ef".to_vec(), 4)
+    );
+    assert_eq!(
+        filesystem.provider_read_with_offset(open_id, 8).unwrap(),
+        (Vec::new(), 6)
+    );
+    filesystem
+        .provider_seek(open_id, 0, HANDLE_SEEK_START)
+        .unwrap();
+    assert_eq!(first, (b"cd".to_vec(), 2));
+}
+
+#[test]
 fn pager_identity_is_stable_across_open_descriptions() {
     let mut filesystem = test_filesystem();
     let create = |filesystem: &mut FilesystemService, path: &[u8]| {
@@ -390,7 +433,10 @@ fn pager_identity_is_stable_across_open_descriptions() {
         }
     }
     let reopened = create(&mut filesystem, b"/identity.txt");
-    assert_ne!(filesystem.provider_memory_object(reopened).unwrap(), identity);
+    assert_ne!(
+        filesystem.provider_memory_object(reopened).unwrap(),
+        identity
+    );
 }
 
 #[test]
