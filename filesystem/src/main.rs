@@ -113,6 +113,7 @@ fn main() {
     platform::logln!("filesystem.service: ready");
     let mut request_bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
     let mut response_bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
+    let mut provider_buffer = filesystem_service::provider_buffer::ProviderReadBuffer::default();
     loop {
         let mut attached = platform::ipc::IpcObjectHandles::default();
         let message = match platform::ipc::wait_object_handles(
@@ -136,6 +137,7 @@ fn main() {
                 request,
                 &mut response_bytes,
                 &attached,
+                &mut provider_buffer,
             );
             close_attached_handles(&attached);
             if let Some(response_len) = response_len {
@@ -840,6 +842,7 @@ fn handle_provider_request(
     request: &[u8],
     response: &mut [u8],
     attached: &mochi_user_platform::ipc::IpcObjectHandles,
+    buffer: &mut filesystem_service::provider_buffer::ProviderReadBuffer,
 ) -> Option<usize> {
     use mnu_abi::provider;
     let (header, payload) = provider::RequestHeader::decode(request).ok()?;
@@ -848,7 +851,7 @@ fn handle_provider_request(
         return None;
     }
     let result = match header.opcode {
-        provider::OP_READ_SHARED => read_provider_shared(service, header, attached),
+        provider::OP_READ_SHARED => read_provider_shared(service, header, attached, buffer),
         provider::OP_READ => service
             .provider_read(header.object_id, header.length as usize)
             .map(|data| (data.len() as u64, data)),
@@ -901,6 +904,7 @@ fn read_provider_shared(
     service: &mut filesystem_service::service::FilesystemService,
     header: mnu_abi::provider::RequestHeader,
     attached: &mochi_user_platform::ipc::IpcObjectHandles,
+    buffer: &mut filesystem_service::provider_buffer::ProviderReadBuffer,
 ) -> Result<(u64, Vec<u8>), i32> {
     use mochi_user_platform::{handle, memory};
     if attached.count != 1 || attached.reserved != 0 {
@@ -921,6 +925,7 @@ fn read_provider_shared(
     let base = header.basis & !4095;
     let length = end.checked_add(4095).ok_or(22)? & !4095;
     let length = length - base;
+    let output = buffer.get(header.length as usize)?;
     let address = memory::map_at_offset(
         0,
         length,
@@ -930,8 +935,7 @@ fn read_provider_shared(
         base,
     )
     .map_err(|_| 22)?;
-    let mut output = vec![0u8; header.length as usize];
-    let result = service.provider_read_into(header.object_id, &mut output);
+    let result = service.provider_read_into(header.object_id, output);
     let result = result.map(|(count, start)| {
         let pointer = (address + header.basis - base) as *mut u8;
         for (index, byte) in output[..count].iter().enumerate() {
