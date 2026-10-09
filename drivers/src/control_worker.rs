@@ -58,6 +58,9 @@ pub(crate) fn run(config: DriverManagerConfig) -> ! {
                 continue;
             }
         };
+        if !is_manager_request(message >> 32) {
+            continue;
+        }
         let len = (message & 0xffff_ffff) as usize;
         let Some(bytes) = buffer.get(..len) else {
             continue;
@@ -120,6 +123,12 @@ fn send_complete(response_endpoint: u64, message: DiscoveryComplete) {
     }
 }
 
+fn is_manager_request(sender: u64) -> bool {
+    crate::control_authorization::manager_request(sender, |endpoint| {
+        platform::capability::check_thread(endpoint, "capabilities.manage") == Ok(1)
+    })
+}
+
 fn drain_running_requests(controller: &mut DiscoveryController) {
     let mut buffer = [0u8; CONTROL_BUFFER_LEN];
     loop {
@@ -128,6 +137,9 @@ fn drain_running_requests(controller: &mut DiscoveryController) {
             Err(err) if err.raw() == mochi_user_syscall::EAGAIN as i64 => return,
             Err(_) => return,
         };
+        if !is_manager_request(message >> 32) {
+            continue;
+        }
         let len = (message & 0xffff_ffff) as usize;
         let Some(bytes) = buffer.get(..len) else {
             continue;

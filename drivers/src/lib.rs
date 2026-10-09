@@ -1,6 +1,7 @@
 extern crate alloc;
 
 mod control_state;
+mod control_authorization;
 mod control_worker;
 mod discovery;
 mod driver_discovery;
