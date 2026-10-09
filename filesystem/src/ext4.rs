@@ -107,7 +107,27 @@ where
             } else {
                 let length =
                     (self.partition.byte_len() - window_start).min(READ_WINDOW_BYTES) as usize;
-                let mut bytes = vec![0; length];
+                // Reuse the least-recently-used window's resident allocation.
+                // A sequential read must not allocate and fault another 64 KiB
+                // every time it advances beyond the bounded cache.
+                let mut bytes = if windows.len() == READ_CACHE_WINDOWS {
+                    windows
+                        .pop_back()
+                        .map(|(_, bytes)| bytes)
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                if length > bytes.len() {
+                    bytes
+                        .try_reserve_exact(length - bytes.len())
+                        .map_err(|_| {
+                            std::io::Error::other("immutable read cache allocation failed")
+                        })?;
+                }
+                bytes.resize(length, 0);
+                // Publish only a successful fill. A failed/partial device read
+                // must never be cached under either the old or new offset.
                 self.partition.read(window_start, &mut bytes)?;
                 (window_start, bytes)
             };
