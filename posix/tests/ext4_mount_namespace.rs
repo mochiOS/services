@@ -70,6 +70,9 @@ impl Fixture {
         fs::write(source.join("file"), name.as_bytes()).unwrap();
         fs::write(source.join("mount/hidden"), b"covered").unwrap();
         fs::write(source.join("blocked/private"), b"private").unwrap();
+        fs::write(source.join("nested/inside"), name.as_bytes()).unwrap();
+        symlink("/file", source.join("nested/absolute")).unwrap();
+        symlink("../file", source.join("nested/relative")).unwrap();
         symlink("/file", source.join("absolute")).unwrap();
         symlink("../file", source.join("relative")).unwrap();
         let image = self.0.join(format!("{name}.ext4"));
@@ -120,6 +123,144 @@ fn found(result: Result<Resolution<Node>, i32>) -> Node {
 }
 fn walk(namespace: &Namespace, base: Node, path: &[u8]) -> Node {
     found(namespace.resolve(namespace.root(), base, path, true, credentials()))
+}
+
+#[test]
+fn named_source_mount_projects_a_directory_without_modifying_the_parent_volume() {
+    let fixture = Fixture::new();
+    let data = fixture.volume("data");
+    let mut namespace = Namespace::new(data.clone()).unwrap();
+    let root = namespace.root();
+    let mounted = namespace
+        .mount_named(
+            root.clone(),
+            b"system",
+            fixture.volume("system"),
+            b"/nested",
+        )
+        .unwrap();
+    let inside = walk(&namespace, root.clone(), b"/system/inside");
+    assert_eq!(inside.id().volume, mounted.id().volume);
+    let data_file = walk(&namespace, root.clone(), b"/file");
+    for path in [
+        b"/system/../file".as_slice(),
+        b"/system/absolute",
+        b"/system/relative",
+    ] {
+        assert_eq!(walk(&namespace, root.clone(), path).id(), data_file.id());
+    }
+    assert!(matches!(
+        namespace.resolve(
+            mounted.clone(),
+            mounted.clone(),
+            b"/absolute",
+            true,
+            credentials()
+        ),
+        Ok(Resolution::Missing { .. })
+    ));
+    assert!(matches!(
+        namespace.resolve(mounted.clone(), root.clone(), b"file", true, credentials()),
+        Err(13)
+    ));
+    assert!(data.symlink_metadata("/system").is_err());
+    assert!(matches!(
+        namespace.mount_named(
+            root.clone(),
+            b"system",
+            fixture.volume("duplicate"),
+            b"/nested"
+        ),
+        Err(17)
+    ));
+    assert!(matches!(
+        namespace.mount_named(
+            root.clone(),
+            b"file",
+            fixture.volume("collision"),
+            b"/nested"
+        ),
+        Err(17)
+    ));
+    assert!(matches!(
+        namespace.mount_named(
+            root.clone(),
+            b"bad-source",
+            fixture.volume("not-directory"),
+            b"/file"
+        ),
+        Err(20)
+    ));
+    assert!(matches!(
+        namespace.mount_named(root, b"..", fixture.volume("invalid-name"), b"/nested"),
+        Err(22)
+    ));
+}
+
+#[test]
+fn named_mount_handles_report_namespace_paths_and_paginated_directory_entries() {
+    let fixture = Fixture::new();
+    let mut service = FilesystemService::new(fixture.volume("data"));
+    service
+        .mount_named_volume(b"/", b"system", fixture.volume("system"), b"/nested")
+        .unwrap();
+    let flags = protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY;
+    let root = open(&mut service, b"/", flags, PathAnchors::default());
+    let mounted = open(&mut service, b"/system", flags, PathAnchors::default());
+    assert_eq!(
+        service
+            .path_handle(protocol::Header::default(), root.open_id, mounted.open_id)
+            .unwrap()
+            .payload,
+        b"/system"
+    );
+    let inside = open(
+        &mut service,
+        b"/system/inside",
+        protocol::OPEN_AT_READ,
+        PathAnchors::default(),
+    );
+    assert_eq!(
+        service.provider_read(inside.open_id, 4096).unwrap(),
+        b"system"
+    );
+    let mut entries = Vec::new();
+    loop {
+        let payload = service.provider_read(root.open_id, 64).unwrap();
+        if payload.is_empty() {
+            break;
+        }
+        let mut remaining = payload.as_slice();
+        while !remaining.is_empty() {
+            let (entry, name, length) = protocol::decode_dir_entry(remaining).unwrap();
+            entries.push((name.to_vec(), entry.node_id));
+            remaining = &remaining[length..];
+        }
+    }
+    assert_eq!(
+        entries.iter().filter(|(name, _)| name == b"system").count(),
+        1
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .find(|(name, _)| name == b"system")
+            .unwrap()
+            .1,
+        mounted.node_id
+    );
+    assert!(service.provider_read(root.open_id, 64).unwrap().is_empty());
+    let payload = service.provider_read(mounted.open_id, 4096).unwrap();
+    let mut remaining = payload.as_slice();
+    let mut parent = None;
+    while !remaining.is_empty() {
+        let (entry, name, length) = protocol::decode_dir_entry(remaining).unwrap();
+        if name == b".." {
+            parent = Some(entry.node_id);
+        }
+        remaining = &remaining[length..];
+    }
+    assert_eq!(parent, Some(root.node_id));
 }
 
 #[test]

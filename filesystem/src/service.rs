@@ -125,6 +125,38 @@ impl FilesystemService {
         Ok(())
     }
 
+    /// Attach a source directory without creating a mountpoint on the disk.
+    /// This is service-owned configuration, not an untrusted IPC mount request.
+    pub fn mount_named_volume(
+        &mut self,
+        parent: &[u8],
+        name: &[u8],
+        filesystem: Ext4,
+        source: &[u8],
+    ) -> Result<(), i32> {
+        if self.namespace.is_none() {
+            self.namespace = Some(Namespace::new(self.fs.clone())?);
+        }
+        let namespace = self.namespace.as_mut().ok_or(EIO)?;
+        let root = namespace.root();
+        let parent = match namespace.resolve(
+            root.clone(),
+            root,
+            parent,
+            true,
+            path_walk::Credentials {
+                uid: 0,
+                gid: 0,
+                groups: &[],
+            },
+        )? {
+            path_walk::Resolution::Found { inode, .. } => inode,
+            path_walk::Resolution::Missing { .. } => return Err(ENOENT),
+        };
+        namespace.mount_named(parent, name, filesystem, source)?;
+        Ok(())
+    }
+
     pub fn handle(&mut self, request: protocol::Header, payload: &[u8]) -> Response {
         let result = match request.opcode {
             protocol::OP_MOUNT => self.mount(request),
@@ -1552,22 +1584,44 @@ impl FilesystemService {
             .map(|namespace| namespace.retained_node(volume, inode.clone()))
             .transpose()?;
         let directory = Dir::open_inode(filesystem, inode).map_err(errno)?;
+        let physical =
+            directory
+                .read_dir()
+                .map_err(errno)?
+                .map(|entry| -> Result<(u64, u32, Vec<u8>), i32> {
+                    let entry = entry.map_err(errno)?;
+                    let name = entry.file_name().as_ref().to_vec();
+                    if name.starts_with(b".mochios-orphan-") {
+                        return Ok((0, 0, name));
+                    }
+                    let node_id = if let (Some(namespace), Some(node)) = (&self.namespace, &node) {
+                        let id = namespace.directory_entry_id(node, &name, entry.inode.get())?;
+                        (id.volume << 32) | u64::from(id.inode)
+                    } else {
+                        (u64::from(volume) << 32) | u64::from(entry.inode.get())
+                    };
+                    Ok((node_id, node_type(entry.file_type().map_err(errno)?), name))
+                });
+        let named = if let (Some(namespace), Some(node)) = (&self.namespace, &node) {
+            namespace.named_children(node)?
+        } else {
+            Vec::new()
+        };
+        let named = named.into_iter().map(|(name, id)| {
+            Ok((
+                (id.volume << 32) | u64::from(id.inode),
+                protocol::NODE_TYPE_DIRECTORY,
+                name,
+            ))
+        });
         let mut payload = Vec::new();
         let mut next_entry = start_entry;
-        for entry in directory.read_dir().map_err(errno)?.skip(start_entry) {
-            let entry = entry.map_err(errno)?;
-            let name = entry.file_name().as_str().map_err(|_| EIO)?;
-            if name.starts_with(".mochios-orphan-") {
+        for entry in physical.chain(named).skip(start_entry) {
+            let (node_id, kind, name) = entry?;
+            if name.starts_with(b".mochios-orphan-") {
                 next_entry = next_entry.checked_add(1).ok_or(EIO)?;
                 continue;
             }
-            let node_id = if let (Some(namespace), Some(node)) = (&self.namespace, &node) {
-                let id = namespace.directory_entry_id(node, name.as_bytes(), entry.inode.get())?;
-                (id.volume << 32) | u64::from(id.inode)
-            } else {
-                (u64::from(volume) << 32) | u64::from(entry.inode.get())
-            };
-            let kind = node_type(entry.file_type().map_err(errno)?);
             let record_length = protocol::DIRENT_HEADER_LEN + name.len();
             if payload.len().saturating_add(record_length) > max_length {
                 if payload.is_empty() {
@@ -1577,7 +1631,7 @@ impl FilesystemService {
             }
             let offset = payload.len();
             payload.resize(offset + record_length, 0);
-            protocol::encode_dir_entry(node_id, kind, name.as_bytes(), &mut payload[offset..])
+            protocol::encode_dir_entry(node_id, kind, &name, &mut payload[offset..])
                 .map_err(|_| EIO)?;
             next_entry = next_entry.checked_add(1).ok_or(EIO)?;
         }

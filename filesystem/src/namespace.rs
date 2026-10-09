@@ -1,6 +1,6 @@
 //! User-space mount topology. Paths cross mounts by inode identity, not prefixes.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use ext4plus::dir::Dir;
@@ -13,11 +13,12 @@ use crate::service::{errno, permission_allows};
 
 const EACCES: i32 = 13;
 const EBUSY: i32 = 16;
+const EEXIST: i32 = 17;
 const ENOTDIR: i32 = 20;
 const EINVAL: i32 = 22;
 const ELOOP: i32 = 40;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeId {
     pub volume: u64,
     pub inode: u32,
@@ -54,6 +55,8 @@ pub struct Namespace {
     // Covered directory -> mounted volume root; mounted root -> covered directory.
     mounts: HashMap<NodeId, Node>,
     covered: HashMap<NodeId, Node>,
+    named_mounts: BTreeMap<(NodeId, Vec<u8>), Node>,
+    named_parents: HashMap<NodeId, (Node, Vec<u8>)>,
 }
 
 impl Namespace {
@@ -70,6 +73,8 @@ impl Namespace {
             root,
             mounts: HashMap::new(),
             covered: HashMap::new(),
+            named_mounts: BTreeMap::new(),
+            named_parents: HashMap::new(),
         })
     }
 
@@ -88,17 +93,68 @@ impl Namespace {
         if at.id() == self.root.id()
             || self.mounts.contains_key(&at.id())
             || self.covered.contains_key(&at.id())
+            || self.named_parents.contains_key(&at.id())
         {
             return Err(EBUSY);
         }
         let root = Node {
             owner: self.owner.clone(),
-            volume: u64::try_from(self.volumes.len()).map_err(|_| EINVAL)?,
+            volume: u64::from(u32::try_from(self.volumes.len()).map_err(|_| EINVAL)?),
             inode: filesystem.read_root_inode().map_err(errno)?,
         };
         self.volumes.push(filesystem);
         self.covered.insert(root.id(), at.clone());
         self.mounts.insert(at.id(), root.clone());
+        Ok(root)
+    }
+
+    /// Attach a volume directory as a namespace-only child. The backing parent
+    /// is not modified, and the mounted source's physical parent is not exposed.
+    pub fn mount_named(
+        &mut self,
+        parent: Node,
+        name: &[u8],
+        filesystem: Ext4,
+        source: &[u8],
+    ) -> Result<Node, i32> {
+        self.filesystem(&parent)?;
+        if !self.is_directory(&parent) {
+            return Err(ENOTDIR);
+        }
+        if name == b"." || name == b".." {
+            return Err(EINVAL);
+        }
+        DirEntryName::try_from(name).map_err(|_| EINVAL)?;
+        match self.child(&parent, name) {
+            Ok(_) => return Err(EEXIST),
+            Err(2) => {}
+            Err(error) => return Err(error),
+        }
+        if source.first() != Some(&b'/')
+            || source.len() > protocol::MAX_PATH_LEN
+            || source.contains(&0)
+        {
+            return Err(EINVAL);
+        }
+        let inode = filesystem
+            .path_to_inode(
+                source.try_into().map_err(|_| EINVAL)?,
+                ext4plus::FollowSymlinks::All,
+            )
+            .map_err(errno)?;
+        if !inode.file_type().is_dir() {
+            return Err(ENOTDIR);
+        }
+        let root = Node {
+            owner: self.owner.clone(),
+            volume: u64::from(u32::try_from(self.volumes.len()).map_err(|_| EINVAL)?),
+            inode,
+        };
+        self.volumes.push(filesystem);
+        self.named_parents
+            .insert(root.id(), (parent.clone(), name.to_vec()));
+        self.named_mounts
+            .insert((parent.id(), name.to_vec()), root.clone());
         Ok(root)
     }
 
@@ -134,29 +190,35 @@ impl Namespace {
             if components.len() >= 1024 {
                 return Err(ELOOP);
             }
-            let entry_node = self.covered.get(&current.id()).unwrap_or(&current);
-            let parent = self.parent(&current)?;
-            if parent.id() == current.id() {
-                return Err(EACCES);
-            }
-            let directory =
-                Dir::open_inode(self.filesystem(&parent)?, parent.inode.clone()).map_err(errno)?;
-            let mut name = None;
-            for entry in directory.read_dir().map_err(errno)? {
-                let entry = entry.map_err(errno)?;
-                let file_name = entry.file_name();
-                let bytes = file_name.as_ref();
-                if bytes != b"."
-                    && bytes != b".."
-                    && !bytes.starts_with(b".mochios-orphan-")
-                    && entry.inode == entry_node.inode.index
-                    && parent.volume == entry_node.volume
-                {
-                    name = Some(bytes.to_vec());
-                    break;
+            let (parent, name) = if let Some((parent, name)) = self.named_parents.get(&current.id())
+            {
+                (self.refresh(parent.clone())?, name.clone())
+            } else {
+                let entry_node = self.covered.get(&current.id()).unwrap_or(&current);
+                let parent = self.parent(&current)?;
+                if parent.id() == current.id() {
+                    return Err(EACCES);
                 }
-            }
-            let name = name.ok_or(2)?;
+                let directory = Dir::open_inode(self.filesystem(&parent)?, parent.inode.clone())
+                    .map_err(errno)?;
+                let mut name = None;
+                for entry in directory.read_dir().map_err(errno)? {
+                    let entry = entry.map_err(errno)?;
+                    let file_name = entry.file_name();
+                    let bytes = file_name.as_ref();
+                    if bytes != b"."
+                        && bytes != b".."
+                        && !bytes.starts_with(b".mochios-orphan-")
+                        && entry.inode == entry_node.inode.index
+                        && parent.volume == entry_node.volume
+                    {
+                        name = Some(bytes.to_vec());
+                        break;
+                    }
+                }
+                let name = name.ok_or(2)?;
+                (parent, name)
+            };
             length = length
                 .checked_add(name.len() + usize::from(!components.is_empty()))
                 .ok_or(36)?;
@@ -222,13 +284,28 @@ impl Namespace {
     }
 
     pub(crate) fn is_mount_root(&self, volume: u32, inode: &Inode) -> bool {
-        self.covered.contains_key(&NodeId {
+        let id = NodeId {
             volume: u64::from(volume),
             inode: inode.index.get(),
-        })
+        };
+        self.covered.contains_key(&id) || self.named_parents.contains_key(&id)
+    }
+
+    /// Stable name order keeps appended readdir cookies deterministic.
+    pub(crate) fn named_children(&self, parent: &Node) -> Result<Vec<(Vec<u8>, NodeId)>, i32> {
+        self.filesystem(parent)?;
+        Ok(self
+            .named_mounts
+            .iter()
+            .filter(|((id, _), _)| *id == parent.id())
+            .map(|((_, name), node)| (name.clone(), node.id()))
+            .collect())
     }
 
     fn parent(&self, node: &Node) -> Result<Node, i32> {
+        if let Some((parent, _)) = self.named_parents.get(&node.id()) {
+            return self.refresh(parent.clone());
+        }
         let node = self.covered.get(&node.id()).unwrap_or(node);
         let filesystem = self.filesystem(node)?;
         let current = Inode::read(filesystem, node.inode.index).map_err(errno)?;
@@ -277,6 +354,9 @@ impl Backend for Namespace {
 
     fn child(&self, node: &Node, name: &[u8]) -> Result<Node, i32> {
         let filesystem = self.filesystem(node)?;
+        if let Some(mounted) = self.named_mounts.get(&(node.id(), name.to_vec())) {
+            return self.refresh(mounted.clone());
+        }
         let current = Inode::read(filesystem, node.inode.index).map_err(errno)?;
         let inode = Dir::open_inode(filesystem, current)
             .map_err(errno)?
