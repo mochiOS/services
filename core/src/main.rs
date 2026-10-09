@@ -1,4 +1,5 @@
 extern crate alloc;
+mod boot_files;
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -68,12 +69,12 @@ fn load_builtin_execution_security(
             mochi_user_syscall::EACCES as i64,
         ));
     }
-    let manifest_bytes = platform::file::read_to_end_path(manifest_path)?;
+    let manifest_bytes = boot_files::read(manifest_path)?;
     let package_root = manifest_path.rsplit_once('/').map(|(root, _)| root).ok_or_else(|| {
         mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
     })?;
     let verification_path = alloc::format!("{package_root}/verification.bin");
-    let verification_bytes = platform::file::read_to_end_path(&verification_path)?;
+    let verification_bytes = boot_files::read(&verification_path)?;
     let record = InstallRecordView::decode(&verification_bytes)
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64))?;
     let verified = record.verification;
@@ -243,7 +244,7 @@ fn read_manifest_with_retry(
     let mut last_len = 0usize;
     let mut last_preview = String::new();
     for _ in 0..ROOTFS_READY_RETRIES {
-        match platform::file::read_to_end_path(path) {
+        match boot_files::read(path) {
             Ok(bytes) => {
                 last_len = bytes.len();
                 last_preview = bytes_preview(&bytes);

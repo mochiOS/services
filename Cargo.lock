@@ -415,6 +415,7 @@ checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 name = "core"
 version = "0.1.0"
 dependencies = [
+ "filesystem-service",
  "mnu-abi",
  "mochi-user-platform",
  "mochi-user-syscall",
