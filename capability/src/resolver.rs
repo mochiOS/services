@@ -185,7 +185,7 @@ pub(crate) fn decide_binary_capabilities(
                 deny_reason.get_or_insert(CapabilityDenyReason::InvalidInstallRecord);
             }
         },
-        Err(error) if error.errno() == Some(mochi_user_syscall::ENOENT) => {
+        Err(error) if error.raw() == mochi_user_syscall::ENOENT as i64 => {
             deny_reason.get_or_insert(CapabilityDenyReason::MissingProvenance);
         }
         Err(error) => return Err(error),
@@ -379,7 +379,7 @@ fn validate_certificate_capabilities(
     let package_root = package_root_from_manifest_path(manifest_path)?;
     let verification_path = alloc::format!("{package_root}/verification.bin");
     let verification_bytes = platform::file::read_to_end_path(&verification_path).map_err(|error| {
-        if error.errno() == Some(mochi_user_syscall::ENOENT) {
+        if error.raw() == mochi_user_syscall::ENOENT as i64 {
             platform::logln!(
                 "capability.service: package {} has no explicit install provenance",
                 manifest.package_id

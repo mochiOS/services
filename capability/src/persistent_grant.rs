@@ -80,7 +80,7 @@ fn ensure_policy_dir() -> Result<(), mochi_user_syscall::SysError> {
     for path in ["/var", "/var/lib", POLICY_DIR] {
         let result = with_client(|client| client.mkdir_at(OpenAtBase::ProcessRoot, 0o755, path));
         if let Err(error) = result
-            && error.errno() != Some(mochi_user_syscall::EEXIST)
+            && error.raw() != mochi_user_syscall::EEXIST as i64
         {
             return Err(error);
         }
@@ -169,7 +169,7 @@ pub(crate) fn read_dir_names(path: &str) -> Result<Vec<String>, mochi_user_sysca
 fn path_exists(path: &str) -> Result<bool, mochi_user_syscall::SysError> {
     match with_client(|client| client.stat_at(StatAtBase::ProcessRoot, 0, path)) {
         Ok(_) => Ok(true),
-        Err(error) if error.errno() == Some(mochi_user_syscall::ENOENT) => Ok(false),
+        Err(error) if error.raw() == mochi_user_syscall::ENOENT as i64 => Ok(false),
         Err(error) => Err(error),
     }
 }
@@ -269,7 +269,7 @@ pub(crate) fn append_persistent_grant(
     }
     let mut data = match read_file(GRANTS_PATH) {
         Ok(data) => data,
-        Err(error) if error.errno() == Some(mochi_user_syscall::ENOENT) => alloc::vec::Vec::new(),
+        Err(error) if error.raw() == mochi_user_syscall::ENOENT as i64 => alloc::vec::Vec::new(),
         Err(error) => return Err(error),
     };
     data.extend_from_slice(b"v2\t");
