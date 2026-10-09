@@ -9,8 +9,8 @@ use crate::package_index::PackageIndex;
 use crate::persistent_grant::{append_persistent_grant, has_persistent_grant};
 use crate::policy::{AppPromptPolicy, needs_app_prompt};
 use crate::resolver::{
-    CapabilityDenyReason, application_identity, decide_binary_capabilities,
-    authorize_spawn, encode_identity_args, encode_nul_list,
+    CapabilityDenyReason, application_identity, authorize_spawn, decide_binary_capabilities,
+    encode_identity_args, encode_nul_list,
 };
 
 pub(crate) const SPAWN_APP_OPCODE: u32 = 0x4150_5053;
@@ -99,10 +99,18 @@ pub(crate) fn spawn_application_from_manifest(
         ));
     }
 
-    let mut capability_decision =
-        decide_binary_capabilities(&manifest, &manifest_record.manifest_path, entry_path)?;
+    let mut capability_decision = decide_binary_capabilities(
+        &manifest,
+        &manifest_record.manifest_path,
+        entry_path,
+        crate::persistent_grant::read_file,
+    )?;
     let requested_caps = capability_decision.requested.clone();
-    let identity = application_identity(&manifest, &manifest_record.manifest_path)?;
+    let identity = application_identity(
+        &manifest,
+        &manifest_record.manifest_path,
+        crate::persistent_grant::read_file,
+    )?;
     let requester_context = platform::process::thread_security_context(sender)?;
     let mut grant_context = mochi_user_syscall::ThreadSecurityContext::default();
     grant_context.effective_uid = requester_context.effective_uid;
@@ -187,13 +195,12 @@ pub(crate) fn spawn_application_from_manifest(
             capability_decision.deny_reason,
             capability_decision.denied
         );
-        let errno = if capability_decision.deny_reason
-            == Some(CapabilityDenyReason::UnknownCapability)
-        {
-            mochi_user_syscall::EINVAL
-        } else {
-            mochi_user_syscall::EACCES
-        };
+        let errno =
+            if capability_decision.deny_reason == Some(CapabilityDenyReason::UnknownCapability) {
+                mochi_user_syscall::EINVAL
+            } else {
+                mochi_user_syscall::EACCES
+            };
         return Err(mochi_user_syscall::SysError::from_raw(errno as i64));
     }
     let caps = capability_decision.effective;
@@ -210,6 +217,7 @@ pub(crate) fn spawn_application_from_manifest(
         &identity,
         &caps,
         platform::service::ExecutionClass::Unprivileged,
+        crate::persistent_grant::read_file,
     )?;
     let mut spawn_items = Vec::new();
     encode_identity_args(&identity, &mut spawn_items);
@@ -245,9 +253,7 @@ pub(crate) fn spawn_application_from_manifest(
     )
 }
 
-pub(crate) fn encode_spawn_args(
-    items: &[String],
-) -> Result<Vec<u8>, mochi_user_syscall::SysError> {
+pub(crate) fn encode_spawn_args(items: &[String]) -> Result<Vec<u8>, mochi_user_syscall::SysError> {
     let mut out = Vec::with_capacity(4096);
     out.resize(4096, 0);
     let mut cursor = 0usize;

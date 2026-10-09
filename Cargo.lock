@@ -2453,6 +2453,8 @@ dependencies = [
  "mochios-filesystem-protocol",
  "mochios-posix-client",
  "mochios-posix-protocol",
+ "mochios-signature-protocol",
+ "sha2",
 ]
 
 [[package]]

@@ -4,7 +4,9 @@ fn runtime_capability_digest_reads_use_the_installed_posix_endpoint() {
     let server = include_str!("../../capability/src/server.rs");
     let reader = include_str!("../../capability/src/persistent_grant.rs");
     assert!(!grant.contains("platform::file::"));
-    assert!(!server.contains("platform::file::"));
+    // Exactly one bootstrap reader, replaced after the authenticated handoff.
+    assert_eq!(server.matches("platform::file::read_to_end_path").count(), 1);
+    assert!(server.contains("authorization_reader = crate::persistent_grant::read_file;"));
     assert!(grant.contains("read_file(executable)?"));
     assert!(server.contains("crate::persistent_grant::read_file(path)?"));
     let start = reader.find("pub(crate) fn read_file(").unwrap();

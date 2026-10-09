@@ -3,12 +3,14 @@ use alloc::vec::Vec;
 
 use mochi_user_platform as platform;
 use mochios_signature_protocol::{InstallProvenance, InstallRecordView};
+use platform::syscall as mochi_user_syscall;
 use sha2::{Digest, Sha256};
 
 use crate::package_index::PackageIndex;
-use crate::policy::validate_capabilities;
 
 const BUILT_IN_DEVELOPER_ID: &str = "org.mochios.system";
+
+pub(crate) type FileReader = fn(&str) -> Result<Vec<u8>, mochi_user_syscall::SysError>;
 
 fn install_record_matches_manifest(
     manifest: &platform::package::PackageManifest,
@@ -40,8 +42,10 @@ fn package_root_from_manifest_path(
 ) -> Result<&str, mochi_user_syscall::SysError> {
     manifest_path
         .strip_suffix("/manifest.toml")
-        .filter(|root| (root.starts_with("/system/packages/") && root.len() > 17)
-            || (root.starts_with("/var/lib/packages/") && root.len() > 18))
+        .filter(|root| {
+            (root.starts_with("/system/packages/") && root.len() > 17)
+                || (root.starts_with("/var/lib/packages/") && root.len() > 18)
+        })
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))
 }
 
@@ -140,12 +144,11 @@ pub(crate) fn decide_binary_capabilities(
     manifest: &platform::package::PackageManifest,
     manifest_path: &str,
     binary_path: &str,
+    read_file: FileReader,
 ) -> Result<EffectiveCapabilityDecision, mochi_user_syscall::SysError> {
     let requested = manifest
         .binary_requires(binary_path)
-        .ok_or_else(|| {
-            mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
-        })?
+        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?
         .to_vec();
     let system_allowed = requested
         .iter()
@@ -158,14 +161,14 @@ pub(crate) fn decide_binary_capabilities(
     let package_root = package_root_from_manifest_path(manifest_path)?;
     let verification_path = alloc::format!("{package_root}/verification.bin");
     let mut certificate_allowed = Vec::new();
-    match platform::file::read_to_end_path(&verification_path) {
+    match read_file(&verification_path) {
         Ok(bytes) => match InstallRecordView::decode(&bytes) {
             Ok(record) => {
                 let verified = record.verification;
                 if !install_record_matches_manifest(manifest, &record) {
                     deny_reason.get_or_insert(CapabilityDenyReason::InvalidInstallRecord);
                 } else {
-                    let manifest_bytes = platform::file::read_to_end_path(manifest_path)?;
+                    let manifest_bytes = read_file(manifest_path)?;
                     if Sha256::digest(&manifest_bytes).as_slice() != verified.manifest_digest {
                         deny_reason.get_or_insert(CapabilityDenyReason::ManifestMismatch);
                     }
@@ -215,10 +218,11 @@ pub(crate) fn decide_binary_capabilities(
 pub(crate) fn application_identity(
     manifest: &platform::package::PackageManifest,
     manifest_path: &str,
+    read_file: FileReader,
 ) -> Result<ApplicationIdentity, mochi_user_syscall::SysError> {
     let package_root = package_root_from_manifest_path(manifest_path)?;
     let verification_path = alloc::format!("{package_root}/verification.bin");
-    let verification_bytes = platform::file::read_to_end_path(&verification_path)?;
+    let verification_bytes = read_file(&verification_path)?;
     let record = InstallRecordView::decode(&verification_bytes)
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64))?;
     if !install_record_matches_manifest(manifest, &record) {
@@ -226,7 +230,7 @@ pub(crate) fn application_identity(
             mochi_user_syscall::EACCES as i64,
         ));
     }
-    let manifest_bytes = platform::file::read_to_end_path(manifest_path)?;
+    let manifest_bytes = read_file(manifest_path)?;
     if Sha256::digest(&manifest_bytes).as_slice() != record.verification.manifest_digest {
         return Err(mochi_user_syscall::SysError::from_raw(
             mochi_user_syscall::EACCES as i64,
@@ -279,9 +283,7 @@ pub(crate) fn encode_nul_list(items: &[String]) -> Vec<u8> {
     out
 }
 
-fn encode_authorization_args(
-    items: &[String],
-) -> Result<Vec<u8>, mochi_user_syscall::SysError> {
+fn encode_authorization_args(items: &[String]) -> Result<Vec<u8>, mochi_user_syscall::SysError> {
     let mut output = Vec::new();
     output.resize(1024, 0);
     let mut cursor = 0usize;
@@ -304,13 +306,14 @@ pub(crate) fn authorize_spawn(
     identity: &ApplicationIdentity,
     capabilities: &[String],
     execution_class: platform::service::ExecutionClass,
+    read_file: FileReader,
 ) -> Result<(), mochi_user_syscall::SysError> {
     use mnu_abi::exec::{
-        EXECUTABLE_DIGEST_PREFIX, EXEC_AUTHORIZATION_CLASS_PREFIX,
-        EXEC_AUTHORIZATION_KIND_PREFIX, EXEC_AUTHORIZATION_KIND_SPAWN,
+        EXEC_AUTHORIZATION_CLASS_PREFIX, EXEC_AUTHORIZATION_KIND_PREFIX,
+        EXEC_AUTHORIZATION_KIND_SPAWN, EXECUTABLE_DIGEST_PREFIX,
     };
 
-    let executable = platform::file::read_to_end_path(path)?;
+    let executable = read_file(path)?;
     let digest = Sha256::digest(&executable);
     let mut digest_hex = String::with_capacity(64);
     for byte in digest {
@@ -350,11 +353,12 @@ pub(crate) fn binary_caps<'a>(
     manifest: &'a platform::package::PackageManifest,
     manifest_path: &str,
     binary_path: &str,
+    read_file: FileReader,
 ) -> Result<&'a [String], mochi_user_syscall::SysError> {
-    let caps = manifest.binary_requires(binary_path).ok_or_else(|| {
-        mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
-    })?;
-    let decision = decide_binary_capabilities(manifest, manifest_path, binary_path)?;
+    let caps = manifest
+        .binary_requires(binary_path)
+        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+    let decision = decide_binary_capabilities(manifest, manifest_path, binary_path, read_file)?;
     if !decision.is_allowed() {
         platform::logln!(
             "capability.service: capability decision denied path={} reason={:?}",
@@ -374,6 +378,7 @@ pub(crate) fn binary_caps<'a>(
 pub(crate) fn resolve_capabilities_for_path(
     index: &PackageIndex,
     binary_path: &str,
+    read_file: FileReader,
 ) -> Result<Vec<String>, mochi_user_syscall::SysError> {
     if index.duplicate {
         return Err(mochi_user_syscall::SysError::from_raw(
@@ -388,6 +393,7 @@ pub(crate) fn resolve_capabilities_for_path(
         &manifest_path.manifest,
         &manifest_path.manifest_path,
         binary_path,
+        read_file,
     )?;
     Ok(caps.to_vec())
 }

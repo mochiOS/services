@@ -11,9 +11,9 @@ use crate::persistent_grant::{
 };
 use crate::policy::needs_app_prompt;
 use crate::resolver::{
-    CapabilityDenyReason, application_identity, binary_caps, decide_binary_capabilities,
-    authorize_spawn, encode_exec_authorization_args, encode_identity_args, encode_nul_list,
-    resolve_capabilities_for_path,
+    CapabilityDenyReason, application_identity, authorize_spawn, binary_caps,
+    decide_binary_capabilities, encode_exec_authorization_args, encode_identity_args,
+    encode_nul_list, resolve_capabilities_for_path,
 };
 use crate::state::CapabilityServiceState;
 
@@ -103,6 +103,10 @@ fn parse_persistent_query(
 }
 
 pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! {
+    // Service startup needs authorization before the POSIX endpoint exists.
+    // The authenticated handoff below switches this phase permanently; a
+    // runtime read failure must never retry through the bootstrap path.
+    let mut authorization_reader: crate::resolver::FileReader = platform::file::read_to_end_path;
     let endpoint = match platform::ipc::create() {
         Ok(endpoint) => endpoint,
         Err(err) => {
@@ -146,7 +150,10 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                 let endpoint = attached.handles[0].handle;
                 attached.handles[0].handle = 0;
                 install_posix_endpoint(endpoint)
-                    .map(|_| REPLY_OK)
+                    .map(|_| {
+                        authorization_reader = crate::persistent_grant::read_file;
+                        REPLY_OK
+                    })
                     .unwrap_or_else(|error| error.errno().unwrap_or(mochi_user_syscall::EIO))
             };
             close_received_handles(&attached);
@@ -163,7 +170,9 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                 .map_err(|_| {
                     mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
                 })
-                .and_then(|path| resolve_capabilities_for_path(&state.package_index, path));
+                .and_then(|path| {
+                    resolve_capabilities_for_path(&state.package_index, path, authorization_reader)
+                });
             reply_capabilities(sender, result);
             continue;
         }
@@ -173,22 +182,38 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                     mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
                 })
                 .and_then(|(execution_class_raw, path)| {
-                    let execution_class = platform::service::ExecutionClass::from_raw(
-                        execution_class_raw,
-                    )
-                    .ok_or_else(|| {
-                        mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
-                    })?;
+                    let execution_class =
+                        platform::service::ExecutionClass::from_raw(execution_class_raw)
+                            .ok_or_else(|| {
+                                mochi_user_syscall::SysError::from_raw(
+                                    mochi_user_syscall::EINVAL as i64,
+                                )
+                            })?;
                     let record = state.package_index.by_binary.get(path).ok_or_else(|| {
                         mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOENT as i64)
                     })?;
-                    let caps =
-                        binary_caps(&record.manifest, &record.manifest_path, path)?.to_vec();
-                    let identity =
-                        application_identity(&record.manifest, &record.manifest_path)?;
+                    let caps = binary_caps(
+                        &record.manifest,
+                        &record.manifest_path,
+                        path,
+                        authorization_reader,
+                    )?
+                    .to_vec();
+                    let identity = application_identity(
+                        &record.manifest,
+                        &record.manifest_path,
+                        authorization_reader,
+                    )?;
                     let mut identity_items = Vec::new();
                     encode_identity_args(&identity, &mut identity_items);
-                    authorize_spawn(sender, path, &identity, &caps, execution_class)?;
+                    authorize_spawn(
+                        sender,
+                        path,
+                        &identity,
+                        &caps,
+                        execution_class,
+                        authorization_reader,
+                    )?;
                     Ok((identity_items, caps))
                 });
             reply_execution_security(sender, result);
@@ -207,11 +232,14 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                         &record.manifest,
                         &record.manifest_path,
                         path,
+                        crate::persistent_grant::read_file,
                     )?;
-                    let identity =
-                        application_identity(&record.manifest, &record.manifest_path)?;
-                    let requester_context =
-                        platform::process::thread_security_context(sender)?;
+                    let identity = application_identity(
+                        &record.manifest,
+                        &record.manifest_path,
+                        crate::persistent_grant::read_file,
+                    )?;
+                    let requester_context = platform::process::thread_security_context(sender)?;
                     let package_id = identity.package_id.as_bytes();
                     let developer_id = identity.developer_id.as_bytes();
                     if package_id.len() > requester_context.package_id.len()
@@ -236,8 +264,7 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                     target_context.package_id_len = package_id.len() as u16;
                     target_context.developer_id_len = developer_id.len() as u16;
                     target_context.package_id[..package_id.len()].copy_from_slice(package_id);
-                    target_context.developer_id[..developer_id.len()]
-                        .copy_from_slice(developer_id);
+                    target_context.developer_id[..developer_id.len()].copy_from_slice(developer_id);
                     target_context.subject_key_id = identity.subject_key_id;
                     target_context.provenance = identity.provenance as u8;
                     let mut user_allowed = Vec::new();
@@ -245,8 +272,9 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                     for capability in &capability_decision.requested {
                         let already_held =
                             platform::capability::check_thread(sender, capability) == Ok(1);
-                        let user_grantable = platform::capability::capability_from_string(capability)
-                            == platform::capability::CapabilityClass::UserGrantable;
+                        let user_grantable =
+                            platform::capability::capability_from_string(capability)
+                                == platform::capability::CapabilityClass::UserGrantable;
                         let policy_allows = user_grantable
                             && !needs_app_prompt(&state.app_prompt_policy, capability);
                         let user_authorized = !user_grantable
