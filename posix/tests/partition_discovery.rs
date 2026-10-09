@@ -381,3 +381,68 @@ fn system_source_is_projected_into_the_data_namespace_without_a_duplicate_system
     }
     assert!(data.symlink_metadata("/system").is_err());
 }
+
+#[test]
+#[ignore = "requires an already built out/artifacts/disk.img; never builds or boots the OS"]
+fn immutable_system_dictionary_reads_do_not_reread_indirect_blocks_for_every_chunk() {
+    use filesystem_service::{ext4::ImmutableExt4Storage, storage::PartitionIo};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct CountedDisk(FileDisk, Arc<AtomicUsize>);
+    impl SectorDevice for CountedDisk {
+        type Error = std::io::Error;
+        fn read_sectors(&mut self, lba: u64, bytes: &mut [u8]) -> Result<(), Self::Error> {
+            self.1.fetch_add(1, Ordering::Relaxed);
+            self.0.read_sectors(lba, bytes)
+        }
+        fn write_sectors(&mut self, _: u64, _: &[u8]) -> Result<(), Self::Error> {
+            panic!("read-only test")
+        }
+        fn flush(&mut self) -> Result<(), Self::Error> {
+            panic!("read-only test")
+        }
+    }
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../out/artifacts/disk.img");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut disk = CountedDisk(FileDisk(std::fs::File::open(path).unwrap()), calls.clone());
+    let kind = [
+        0x68, 0x63, 0x6f, 0x6d, 0x4f, 0x69, 0x00, 0x53, 0x80, 0x00, 0x6d, 0x50, 0x61, 0x72, 0x74,
+        0x01,
+    ];
+    let range = find_by_type(&mut disk, kind).unwrap().unwrap();
+    let partition = Arc::new(PartitionIo::new(disk, range.first_lba, range.sector_count));
+    let filesystem = ext4plus::Ext4::load(Box::new(ImmutableExt4Storage::new(partition))).unwrap();
+    let inode = filesystem
+        .path_to_inode(
+            "/system/libraries/ime/ja.mime".try_into().unwrap(),
+            ext4plus::FollowSymlinks::All,
+        )
+        .unwrap();
+    let mut file = ext4plus::file::File::open_inode(&filesystem, inode).unwrap();
+    let mut buffer = [0; 4088];
+    let mut position = 0;
+    let mut chunks = 0;
+    let started = std::time::Instant::now();
+    loop {
+        let count = file.read_bytes_at(&mut buffer, position).unwrap();
+        if count == 0 {
+            break;
+        }
+        position += count as u64;
+        chunks += 1;
+    }
+    let reads = calls.load(Ordering::Relaxed);
+    eprintln!(
+        "System dictionary: {position} bytes, {chunks} chunks, {reads} device reads, {:?}",
+        started.elapsed()
+    );
+    assert!(position > 0);
+    assert!(
+        reads < chunks / 4,
+        "indirect block reads were not amortized"
+    );
+}
