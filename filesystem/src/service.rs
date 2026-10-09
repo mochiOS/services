@@ -1,13 +1,15 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::time::Duration;
 
+use crate::path_walk;
 use ext4plus::dir::Dir;
 use ext4plus::error::Ext4Error;
 use ext4plus::file::File;
 use ext4plus::inode::{Inode, InodeCreationOptions, InodeFlags, InodeMode};
-use ext4plus::path::{Component, Path, PathBuf};
+use ext4plus::path::PathBuf;
 use ext4plus::{DirEntryName, Ext4, FileType, FollowSymlinks, Metadata};
 use mochios_filesystem_protocol as protocol;
+type Resolution = path_walk::Resolution<Inode>;
 
 const EIO: i32 = 5;
 const EPERM: i32 = 1;
@@ -968,112 +970,14 @@ impl FilesystemService {
         gid: u32,
         groups: &[u32],
     ) -> Result<Resolution, i32> {
-        const MAX_SYMLINKS: usize = 40;
-        const MAX_COMPONENTS: usize = 1024;
-
-        if path.is_empty() || path.len() > protocol::MAX_PATH_LEN || path.contains(&0) {
-            return Err(EINVAL);
-        }
-        let parsed = Path::try_from(path).map_err(|_| EINVAL)?;
-        let mut ancestors = if parsed.is_absolute() {
-            vec![root.clone()]
-        } else {
-            self.ancestry_from_root(&root, base)?
-        };
-        let mut pending = owned_components(parsed);
-        let require_directory = path.last() == Some(&b'/');
-        let mut symlinks = 0usize;
-        let mut iterations = 0usize;
-        let mut last_name = None;
-
-        while let Some(component) = pending.pop_front() {
-            iterations = iterations.checked_add(1).ok_or(ELOOP)?;
-            if iterations > MAX_COMPONENTS {
-                return Err(ELOOP);
-            }
-            if component == OwnedComponent::Root {
-                ancestors.truncate(1);
-                last_name = None;
-                continue;
-            }
-            let current = ancestors.last().ok_or(EIO)?;
-            if !current.file_type().is_dir() {
-                return Err(ENOTDIR);
-            }
-            let metadata = current.metadata();
-            if !permission_allows(
-                metadata.mode(),
-                protocol::NODE_TYPE_DIRECTORY,
-                metadata.uid(),
-                metadata.gid(),
-                uid,
-                gid,
-                groups,
-                protocol::ACCESS_AT_EXECUTE,
-            ) {
-                return Err(EACCES);
-            }
-            match component {
-                OwnedComponent::Root | OwnedComponent::Current => {
-                    last_name = None;
-                }
-                OwnedComponent::Parent => {
-                    if ancestors.len() > 1 {
-                        ancestors.pop();
-                    }
-                    last_name = None;
-                }
-                OwnedComponent::Normal(name) => {
-                    let directory = Dir::open_inode(&self.fs, current.clone()).map_err(errno)?;
-                    let child = match directory
-                        .get_entry(DirEntryName::try_from(name.as_slice()).map_err(|_| EINVAL)?)
-                    {
-                        Ok(child) => child,
-                        Err(Ext4Error::NotFound) if pending.is_empty() => {
-                            return Ok(Resolution::Missing {
-                                parent: current.clone(),
-                                name,
-                            });
-                        }
-                        Err(error) => return Err(errno(error)),
-                    };
-                    let is_final = pending.is_empty();
-                    if child.file_type().is_symlink()
-                        && (follow == FollowSymlinks::All || !is_final)
-                    {
-                        last_name = None;
-                        symlinks = symlinks.checked_add(1).ok_or(ELOOP)?;
-                        if symlinks > MAX_SYMLINKS {
-                            return Err(ELOOP);
-                        }
-                        let target = child.symlink_target(&self.fs).map_err(errno)?;
-                        if target.as_ref().len().saturating_add(path.len()) > protocol::MAX_PATH_LEN
-                        {
-                            return Err(EINVAL);
-                        }
-                        if target.is_absolute() {
-                            ancestors.truncate(1);
-                        }
-                        let mut target_components = owned_components(target.as_path());
-                        while let Some(target_component) = target_components.pop_back() {
-                            pending.push_front(target_component);
-                        }
-                    } else {
-                        last_name = Some(name);
-                        ancestors.push(child);
-                    }
-                }
-            }
-        }
-        let inode = ancestors.pop().ok_or(EIO)?;
-        let parent = last_name.map(|name| (ancestors.last().cloned(), name));
-        if require_directory && !inode.file_type().is_dir() {
-            return Err(ENOTDIR);
-        }
-        Ok(Resolution::Found {
-            inode,
-            parent: parent.and_then(|(parent, name)| parent.map(|parent| (parent, name))),
-        })
+        path_walk::resolve(
+            self,
+            root,
+            base,
+            path,
+            follow == FollowSymlinks::All,
+            path_walk::Credentials { uid, gid, groups },
+        )
     }
 
     fn ancestry_from_root(&self, root: &Inode, base: Inode) -> Result<Vec<Inode>, i32> {
@@ -2766,34 +2670,47 @@ fn joined_path(parent: &str, name: &str) -> String {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum OwnedComponent {
-    Root,
-    Current,
-    Parent,
-    Normal(Vec<u8>),
-}
-
-enum Resolution {
-    Found {
-        inode: Inode,
-        parent: Option<(Inode, Vec<u8>)>,
-    },
-    Missing {
-        parent: Inode,
-        name: Vec<u8>,
-    },
-}
-
-fn owned_components(path: Path<'_>) -> VecDeque<OwnedComponent> {
-    path.components()
-        .map(|component| match component {
-            Component::RootDir => OwnedComponent::Root,
-            Component::CurDir => OwnedComponent::Current,
-            Component::ParentDir => OwnedComponent::Parent,
-            Component::Normal(name) => OwnedComponent::Normal(name.as_ref().to_vec()),
-        })
-        .collect()
+impl path_walk::Backend for FilesystemService {
+    type Node = Inode;
+    fn is_directory(&self, node: &Inode) -> bool {
+        node.file_type().is_dir()
+    }
+    fn is_symlink(&self, node: &Inode) -> bool {
+        node.file_type().is_symlink()
+    }
+    fn search(&self, node: &Inode, credentials: path_walk::Credentials<'_>) -> Result<(), i32> {
+        let metadata = node.metadata();
+        if permission_allows(
+            metadata.mode(),
+            protocol::NODE_TYPE_DIRECTORY,
+            metadata.uid(),
+            metadata.gid(),
+            credentials.uid,
+            credentials.gid,
+            credentials.groups,
+            protocol::ACCESS_AT_EXECUTE,
+        ) {
+            Ok(())
+        } else {
+            Err(EACCES)
+        }
+    }
+    fn child(&self, node: &Inode, name: &[u8]) -> Result<Inode, i32> {
+        Dir::open_inode(&self.fs, node.clone())
+            .map_err(errno)?
+            .get_entry(DirEntryName::try_from(name).map_err(|_| EINVAL)?)
+            .map_err(errno)
+    }
+    fn symlink(&self, node: &Inode) -> Result<Vec<u8>, i32> {
+        Ok(node
+            .symlink_target(&self.fs)
+            .map_err(errno)?
+            .as_ref()
+            .to_vec())
+    }
+    fn ancestry(&self, root: &Inode, base: Inode) -> Result<Vec<Inode>, i32> {
+        self.ancestry_from_root(root, base)
+    }
 }
 
 fn node_type(file_type: FileType) -> u32 {
