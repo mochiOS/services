@@ -1,6 +1,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -56,6 +57,23 @@ int main(void) {
             fprintf(stderr, "system-read: %u bytes in %u ms\n", (unsigned)total, (unsigned)elapsed_ms);
         }
     }
+    size_t large_size = 16 * 1024 * 1024;
+    char *large = malloc(large_size);
+    if (!large || lseek(fd, 0, SEEK_SET) != 0) return 18;
+    if (clock_gettime(CLOCK_MONOTONIC, &start) != 0) return 19;
+    length = read(fd, large, large_size);
+    if (clock_gettime(CLOCK_MONOTONIC, &end) != 0) return 20;
+    if (length != (ssize_t)large_size || memcmp(large, bulk, sizeof(bulk))) return 21;
+    if (lseek(fd, 0, SEEK_CUR) != (off_t)large_size) return 22;
+    long long large_ms = (long long)(end.tv_sec - start.tv_sec) * 1000
+        + (end.tv_nsec - start.tv_nsec) / 1000000;
+    if (large_ms < 0 || large_ms > UINT_MAX) return 23;
+    fprintf(stderr, "system-read: single 16MiB read in %u ms\n", (unsigned)large_ms);
+    free(large);
+    off_t tail = lseek(fd, -123, SEEK_END);
+    if (tail < 0 || read(fd, buffer, sizeof(buffer)) != 123) return 24;
+    if (lseek(fd, 0, SEEK_CUR) != tail + 123 || read(fd, buffer, sizeof(buffer)) != 0) return 25;
+    fprintf(stderr, "system-read: shared short read and EOF ok\n");
     if (close(fd) != 0) return 13;
     fprintf(stderr, "system-read: ok\n");
     return 0;
