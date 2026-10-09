@@ -5,11 +5,12 @@ pub(crate) struct ProcessWatch {
 }
 
 impl ProcessWatch {
-    pub(crate) fn open(launch_endpoint: u64) -> Result<Self, mochi_user_syscall::SysError> {
-        // Manifest launch returns the initial thread's IPC endpoint, not a
-        // process ID. They diverge as soon as any service creates a thread.
-        let handle = platform::process::open_handle_for_endpoint(
-            launch_endpoint,
+    pub(crate) fn open(launch_thread: u64) -> Result<Self, mochi_user_syscall::SysError> {
+        // Manifest launch returns a thread ID, not a process ID or an opaque
+        // endpoint handle. Resolve its owner using capability-gated inspection.
+        let context = platform::process::thread_security_context(launch_thread)?;
+        let handle = platform::process::open_handle_for_process_id(
+            context.process_id,
             platform::handle::HANDLE_RIGHT_WAIT,
         )?;
         Ok(Self { handle })
