@@ -103,6 +103,20 @@ fn transfer_read<D: SectorDevice>(
 ) -> Result<(), PartitionIoError<D::Error>> {
     let first_sector = offset / SECTOR_BYTES as u64;
     let offset_in_sector = offset as usize % SECTOR_BYTES;
+    if offset_in_sector == 0 && destination.len().is_multiple_of(SECTOR_BYTES) {
+        for (index, chunk) in destination.chunks_mut(MAX_TRANSFER_BYTES).enumerate() {
+            let lba = first_lba
+                .checked_add(first_sector)
+                .and_then(|value| {
+                    value.checked_add((index * (MAX_TRANSFER_BYTES / SECTOR_BYTES)) as u64)
+                })
+                .ok_or(PartitionIoError::OffsetOverflow)?;
+            device
+                .read_sectors(lba, chunk)
+                .map_err(PartitionIoError::Device)?;
+        }
+        return Ok(());
+    }
     let covered = offset_in_sector
         .checked_add(destination.len())
         .ok_or(PartitionIoError::OffsetOverflow)?;
@@ -113,7 +127,7 @@ fn transfer_read<D: SectorDevice>(
         * SECTOR_BYTES;
     let mut copied = 0;
     let mut sector_offset = 0;
-    let mut buffer = vec![0u8; MAX_TRANSFER_BYTES];
+    let mut buffer = vec![0u8; transfer_len.min(MAX_TRANSFER_BYTES)];
     while sector_offset < transfer_len {
         let length = (transfer_len - sector_offset).min(buffer.len());
         let lba = first_lba
