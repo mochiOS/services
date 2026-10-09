@@ -72,6 +72,17 @@ int main(void) {
     STAGE("read-only map");
     int read_only = open(path, O_RDONLY);
     if (read_only < 0) return 11;
+    errno = 0;
+    if (write(read_only, &observed, 1) != -1 || errno != EBADF) return 36;
+    errno = 0;
+    if (write(read_only, &observed, 0) != -1 || errno != EBADF) return 37;
+    int write_only = open(path, O_WRONLY);
+    if (write_only < 0) return 38;
+    errno = 0;
+    if (read(write_only, &observed, 1) != -1 || errno != EBADF) return 39;
+    errno = 0;
+    if (read(write_only, &observed, 0) != -1 || errno != EBADF) return 40;
+    if (close(write_only) != 0) return 41;
     unsigned char *restricted = mmap(0, page, PROT_READ, MAP_SHARED,
                                      read_only, (off_t)page);
     if (restricted == MAP_FAILED || restricted[37] != 0x77) return 12;
