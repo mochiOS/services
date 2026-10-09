@@ -17,6 +17,27 @@ pub(crate) struct ActiveSession {
 }
 
 impl ActiveSession {
+    pub(crate) fn from_launch_threads(
+        id: u64,
+        identity: platform::service_ready::SessionIdentity,
+        linux_thread: Option<u64>,
+        workspace_thread: u64,
+        binder_thread: u64,
+    ) -> Result<Self, mochi_user_syscall::SysError> {
+        // Launch IDs name threads; authentication and process-tree teardown
+        // must use their kernel-reported process owners, not those thread IDs.
+        let process_id = |thread| {
+            platform::process::thread_security_context(thread).map(|context| context.process_id)
+        };
+        Ok(Self {
+            id,
+            identity,
+            linux_pid: linux_thread.map(process_id).transpose()?,
+            workspace_pid: process_id(workspace_thread)?,
+            binder_pid: process_id(binder_thread)?,
+        })
+    }
+
     pub(crate) fn next_id(self) -> u64 {
         self.id.wrapping_add(1).max(1)
     }

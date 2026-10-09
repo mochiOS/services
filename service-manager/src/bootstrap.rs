@@ -637,12 +637,21 @@ fn resident(outcome: BootstrapOutcome, runtime: Option<Runtime>) -> ! {
         .identity
         .zip(outcome.children.binder)
         .zip(outcome.children.workspace)
-        .map(|((identity, binder_pid), workspace_pid)| ActiveSession {
-            id: outcome.session_id,
-            identity,
-            linux_pid: outcome.children.linux,
-            workspace_pid,
-            binder_pid,
+        .and_then(|((identity, binder_thread), workspace_thread)| {
+            ActiveSession::from_launch_threads(
+                outcome.session_id,
+                identity,
+                outcome.children.linux,
+                workspace_thread,
+                binder_thread,
+            )
+            .map_err(|error| {
+                eprintln!(
+                    "service-manager.service: session identity resolution failed: {:?}",
+                    error
+                );
+            })
+            .ok()
         });
     if active_session.is_some()
         && let Some(runtime) = runtime.as_mut()
@@ -779,14 +788,21 @@ fn resident(outcome: BootstrapOutcome, runtime: Option<Runtime>) -> ! {
                     None,
                     runtime.posix_endpoint,
                 ) {
-                    Ok(binder_pid) => {
-                        active_session = Some(ActiveSession {
-                            id: session_id,
+                    Ok(binder_thread) => {
+                        active_session = ActiveSession::from_launch_threads(
+                            session_id,
                             identity,
                             linux_pid,
                             workspace_pid,
-                            binder_pid,
-                        });
+                            binder_thread,
+                        )
+                        .map_err(|error| {
+                            eprintln!(
+                                "service-manager.service: session identity resolution failed: {:?}",
+                                error
+                            );
+                        })
+                        .ok();
                     }
                     Err(error) => platform::logln!(
                         "service-manager.service: Binder.app spawn failed errno={}",
