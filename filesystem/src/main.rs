@@ -3,8 +3,10 @@ fn main() {
     use std::sync::Arc;
 
     use ext4plus::Ext4;
-    use filesystem_service::ext4::Ext4Storage;
-    use filesystem_service::platform_storage::{MochiDisk, find_data_partition};
+    use filesystem_service::ext4::{Ext4Storage, ImmutableExt4Storage};
+    use filesystem_service::platform_storage::{
+        MochiDisk, find_data_partition, find_system_partition,
+    };
     use filesystem_service::service::FilesystemService;
     use filesystem_service::storage::PartitionIo;
     use mochi_user_platform as platform;
@@ -48,6 +50,26 @@ fn main() {
             platform::process::exit(1);
         }
     };
+    let mut service = FilesystemService::new(fs);
+    let system = find_system_partition(0)
+        .map_err(|error| error.to_string())
+        .and_then(|(first_lba, sector_count)| {
+            let partition = Arc::new(PartitionIo::new(MochiDisk::new(0), first_lba, sector_count));
+            // The selected, verified System image is immutable. Do not give
+            // its backend a writer, even for a POSIX uid-zero caller.
+            Ext4::load(Box::new(ImmutableExt4Storage::new(partition)))
+                .map_err(|error| error.to_string())
+        })
+        .and_then(|system| {
+            service
+                .mount_named_volume(b"/", b"system", system, b"/system")
+                .map_err(|error| format!("namespace mount error {error}"))
+        });
+    if let Err(error) = system {
+        platform::logln!("filesystem.service: native System mount failed: {error}");
+        let _ = platform::service_ready::notify(ready_target, -1);
+        platform::process::exit(1);
+    }
     let legacy_endpoint = match platform::ipc::create() {
         Ok(endpoint) => endpoint,
         Err(_) => {
@@ -81,7 +103,6 @@ fn main() {
         let _ = platform::service_ready::notify(ready_target, -1);
         platform::process::exit(1);
     }
-    let mut service = FilesystemService::new(fs);
     let delegated_rights = platform::handle::HANDLE_RIGHT_SEND
         | platform::handle::HANDLE_RIGHT_DUPLICATE
         | platform::handle::HANDLE_RIGHT_TRANSFER;
