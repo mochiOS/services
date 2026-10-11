@@ -312,12 +312,20 @@ fn main() {
                 }
             }
             (Some(peer), Some((header, payload)), true)
-                if header.opcode == protocol::OP_PROCESS_FORKED
-                    && header.flags == 0
-                    && payload.is_empty()
+                if matches!(
+                    header.opcode,
+                    protocol::OP_PROCESS_FORKED | protocol::OP_PROCESS_SPAWNED
+                ) && header.flags == 0
+                    && (header.opcode == protocol::OP_PROCESS_SPAWNED || payload.is_empty())
                     && attachments.len() == 1 =>
             {
-                match adopt_sender_child(&mut service, peer, attachments[0], &mut filesystem) {
+                match adopt_sender_child(
+                    &mut service,
+                    peer,
+                    attachments[0],
+                    (header.opcode == protocol::OP_PROCESS_SPAWNED).then_some(payload),
+                    &mut filesystem,
+                ) {
                     Ok(()) => {
                         retained_handle = Some(attachments[0].handle);
                         Some(posix_service::ObjectResponse {
@@ -325,10 +333,14 @@ fn main() {
                             handles: Vec::new(),
                         })
                     }
-                    Err(()) => Some(posix_service::ObjectResponse {
-                        response: invalid_response(header.request_id),
-                        handles: Vec::new(),
-                    }),
+                    Err(status) => {
+                        let mut response = invalid_response(header.request_id);
+                        response.header.status = status;
+                        Some(posix_service::ObjectResponse {
+                            response,
+                            handles: Vec::new(),
+                        })
+                    }
                 }
             }
             (Some(peer), Some((header, payload)), true) => {
@@ -839,26 +851,31 @@ fn adopt_sender_child(
     service: &mut posix_service::PosixService<u32>,
     peer: posix_service::PeerIdentity,
     process: posix_service::AttachedObject<u32>,
+    credentials: Option<&[u8]>,
     filesystem: &mut RuntimeFilesystem,
-) -> Result<(), ()> {
+) -> Result<(), i32> {
     use mochi_user_platform as platform;
 
     let required_rights =
         platform::handle::HANDLE_RIGHT_WAIT | platform::handle::HANDLE_RIGHT_SIGNAL;
     if process.rights != required_rights {
-        return Err(());
+        return Err(posix_service::STATUS_EINVAL);
     }
-    let status = platform::process::handle_status(process.handle).map_err(|_| ())?;
-    service
-        .adopt_child(
-            peer,
-            posix_service::AuthenticatedProcess {
-                handle: process.handle,
-                process_id: status.process_id,
-            },
-            filesystem,
-        )
-        .map_err(|_| ())
+    let status =
+        platform::process::handle_status(process.handle).map_err(|error| error.raw() as i32)?;
+    let process = posix_service::AuthenticatedProcess {
+        handle: process.handle,
+        process_id: status.process_id,
+    };
+    if let Some(credentials) = credentials {
+        let mut groups = [0; mochios_posix_protocol::MAX_SUPPLEMENTARY_GROUPS];
+        let (uid, gid, count) =
+            mochios_posix_protocol::decode_spawn_credentials(credentials, &mut groups)
+                .map_err(|_| posix_service::STATUS_EINVAL)?;
+        service.adopt_spawned_child(peer, process, uid, gid, &groups[..count], filesystem)
+    } else {
+        service.adopt_child(peer, process, filesystem)
+    }
 }
 
 #[cfg(target_os = "mochios")]

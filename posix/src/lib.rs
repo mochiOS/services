@@ -848,6 +848,49 @@ impl<H: Copy> PosixService<H> {
         Ok(())
     }
 
+    /// Initialize a fresh image using userspace POSIX authority, without
+    /// changing native capabilities or trusting sender-supplied identity.
+    pub fn adopt_spawned_child<F: FilesystemBackend<H>>(
+        &mut self,
+        peer: PeerIdentity,
+        process: AuthenticatedProcess<H>,
+        uid: u32,
+        gid: u32,
+        groups: &[u32],
+        filesystem: &mut F,
+    ) -> Result<(), i32> {
+        if uid == u32::MAX || gid == u32::MAX || groups.len() > protocol::MAX_SUPPLEMENTARY_GROUPS {
+            return Err(STATUS_EINVAL);
+        }
+        let parent = self
+            .sessions
+            .get(&peer.process_id)
+            .copied()
+            .ok_or(protocol::STATUS_ESRCH)?;
+        if parent.effective_uid != 0 {
+            let memberships = self.supplementary_groups.get(&peer.process_id);
+            if uid != parent.effective_uid
+                || gid != parent.effective_gid
+                || groups.iter().any(|group| {
+                    !memberships.is_some_and(|memberships| memberships.contains(group))
+                })
+            {
+                return Err(protocol::STATUS_EPERM);
+            }
+        }
+        self.adopt_child(peer, process, filesystem)?;
+        let child = self.sessions.get_mut(&process.process_id).unwrap();
+        child.real_uid = uid;
+        child.effective_uid = uid;
+        child.saved_uid = uid;
+        child.real_gid = gid;
+        child.effective_gid = gid;
+        child.saved_gid = gid;
+        self.supplementary_groups
+            .insert(process.process_id, groups.to_vec());
+        Ok(())
+    }
+
     pub fn wait_child<F: FilesystemBackend<H>, P: ProcessBackend<H>>(
         &mut self,
         peer: PeerIdentity,
@@ -1629,6 +1672,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_RESET_EFFECTIVE_IDS
             | protocol::OP_GROUPS_SET
             | protocol::OP_PROCESS_FORKED
+            | protocol::OP_PROCESS_SPAWNED
             | protocol::OP_WAIT_CHILD
             | protocol::OP_PROCESS_STOPPED
             | protocol::OP_PROCESS_INFO

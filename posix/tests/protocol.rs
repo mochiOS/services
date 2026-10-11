@@ -744,8 +744,18 @@ impl ObjectTransport for ChildRegistrationTransport {
         handles: &mut ObjectHandles<Self::Handle>,
     ) -> Result<usize, Self::Error> {
         let (header, payload) = protocol::decode(request).map_err(|_| ())?;
-        assert_eq!(header.opcode, protocol::OP_PROCESS_FORKED);
-        assert!(payload.is_empty());
+        if header.opcode == protocol::OP_PROCESS_FORKED {
+            assert!(payload.is_empty());
+        } else {
+            assert_eq!(header.opcode, protocol::OP_PROCESS_SPAWNED);
+            let mut groups = [0; protocol::MAX_SUPPLEMENTARY_GROUPS];
+            assert_eq!(
+                protocol::decode_spawn_credentials(payload, &mut groups),
+                Ok((505, 24, 2))
+            );
+            assert_eq!(&groups[..2], &[10, 20]);
+        }
+        assert_eq!(handles.len(), 1);
         assert_eq!(
             handles.get(0),
             Some(ObjectHandleAttachment {
@@ -775,6 +785,17 @@ fn client_registers_a_child_only_by_transferring_its_process_handle() {
             handle: 52,
             rights: mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_SIGNAL,
         })
+        .unwrap();
+    Client::new(ChildRegistrationTransport)
+        .register_spawned_child(
+            ObjectHandleAttachment {
+                handle: 52,
+                rights: mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_SIGNAL,
+            },
+            505,
+            24,
+            &[10, 20],
+        )
         .unwrap();
 }
 
@@ -1382,6 +1403,155 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
             Ok(self.directory_path.clone())
         }
     }
+}
+
+#[test]
+fn spawned_credentials_wire_is_strict_and_contains_no_process_id() {
+    let mut bytes = [0; 8 + protocol::GROUP_LIST_MAX_LEN];
+    let length = protocol::encode_spawn_credentials(505, 24, &[10, 20], &mut bytes).unwrap();
+    let mut groups = [0; protocol::MAX_SUPPLEMENTARY_GROUPS];
+    assert_eq!(
+        protocol::decode_spawn_credentials(&bytes[..length], &mut groups),
+        Ok((505, 24, 2))
+    );
+    assert_eq!(&groups[..2], &[10, 20]);
+    for end in 0..length {
+        assert!(protocol::decode_spawn_credentials(&bytes[..end], &mut groups).is_err());
+    }
+    assert!(protocol::decode_spawn_credentials(&bytes[..length + 1], &mut groups).is_err());
+    assert!(protocol::encode_spawn_credentials(u32::MAX, 24, &[], &mut bytes).is_err());
+    assert!(protocol::encode_spawn_credentials(505, u32::MAX, &[], &mut bytes).is_err());
+}
+
+#[test]
+fn fresh_child_credentials_replace_launcher_identity_before_registration() {
+    let parent = PeerIdentity {
+        process_id: 301,
+        effective_uid: 0,
+        effective_gid: 0,
+    };
+    let mut service = service_for(parent);
+    service.handle(
+        parent,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..Default::default()
+        },
+        &[],
+    );
+    let mut filesystem = RecordingFilesystem::default();
+    service
+        .adopt_spawned_child(
+            parent,
+            AuthenticatedProcess {
+                handle: 302,
+                process_id: 302,
+            },
+            505,
+            24,
+            &[10, 20],
+            &mut filesystem,
+        )
+        .unwrap();
+    let child = service.session(302).unwrap();
+    assert_eq!(
+        (child.real_uid, child.effective_uid, child.saved_uid),
+        (505, 505, 505)
+    );
+    assert_eq!(
+        (child.real_gid, child.effective_gid, child.saved_gid),
+        (24, 24, 24)
+    );
+    assert_eq!(service.supplementary_groups(302), Some(&[10, 20][..]));
+    assert_eq!(service.parent_id(302), Some(301));
+    // Native credentials cannot overwrite already initialized POSIX state.
+    let native_peer = PeerIdentity {
+        process_id: 302,
+        effective_uid: 0,
+        effective_gid: 0,
+    };
+    service.handle(
+        native_peer,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..Default::default()
+        },
+        &[],
+    );
+    assert_eq!(service.session(302).unwrap().effective_uid, 505);
+    assert_eq!(
+        service.adopt_spawned_child(
+            parent,
+            AuthenticatedProcess {
+                handle: 303,
+                process_id: 302
+            },
+            0,
+            0,
+            &[],
+            &mut filesystem
+        ),
+        Err(STATUS_EINVAL)
+    );
+    assert_eq!(service.session(302).unwrap().effective_uid, 505);
+}
+
+#[test]
+fn fresh_child_initialization_cannot_elevate_nonroot_posix_authority() {
+    let parent = PeerIdentity {
+        process_id: 311,
+        effective_uid: 505,
+        effective_gid: 24,
+    };
+    let mut service = service_for(parent);
+    service.handle(
+        parent,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..Default::default()
+        },
+        &[],
+    );
+    let mut filesystem = RecordingFilesystem::default();
+    // Even a kernel/native UID of zero is not POSIX root after initialization.
+    let native_peer = PeerIdentity {
+        effective_uid: 0,
+        effective_gid: 0,
+        ..parent
+    };
+    for (uid, gid, groups) in [(0, 24, &[][..]), (505, 0, &[][..]), (505, 24, &[10][..])] {
+        assert_eq!(
+            service.adopt_spawned_child(
+                native_peer,
+                AuthenticatedProcess {
+                    handle: 312,
+                    process_id: 312
+                },
+                uid,
+                gid,
+                groups,
+                &mut filesystem
+            ),
+            Err(protocol::STATUS_EPERM)
+        );
+        assert!(service.session(312).is_none());
+        assert!(service.process_handle(312).is_none());
+        assert!(filesystem.retained.is_empty());
+    }
+    service
+        .adopt_spawned_child(
+            native_peer,
+            AuthenticatedProcess {
+                handle: 312,
+                process_id: 312,
+            },
+            505,
+            24,
+            &[],
+            &mut filesystem,
+        )
+        .unwrap();
+    assert_eq!(service.session(312).unwrap().effective_uid, 505);
 }
 
 fn sample_status() -> protocol::FileStatus {
