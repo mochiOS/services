@@ -39,6 +39,11 @@ fn publishing_identical_complete_runtime_preserves_sdk_mtime() {
     )
     .unwrap();
     fs::write(
+        root.join("runtime/newlib_ioctl.c"),
+        "int ioctl_fixture(void) { return 4; }\n",
+    )
+    .unwrap();
+    fs::write(
         root.join("base.c"),
         "int base_fixture(void) { return 2; }\n",
     )

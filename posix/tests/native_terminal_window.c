@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
@@ -40,6 +41,24 @@ int main(void) {
     CHECK(tcgetwinsize(duplicate, &actual) == 0);
     CHECK(memcmp(&actual, &initial, sizeof(actual)) == 0);
     CHECK(close(duplicate) == 0);
+    struct termios attributes;
+    CHECK(ioctl(slave, TCGETS, &attributes) == 0);
+    CHECK(ioctl(slave, TCSETS, &attributes) == 0);
+    CHECK(ioctl(slave, TCSETSW, &attributes) == 0);
+    CHECK(ioctl(slave, TCSETSF, &attributes) == 0);
+    CHECK(ioctl(master, TIOCGWINSZ, &actual) == 0);
+    CHECK(memcmp(&actual, &initial, sizeof(actual)) == 0);
+    errno = 0;
+    CHECK(ioctl(master, 0xdeadUL) == -1 && errno == ENOTTY);
+    errno = 0;
+    CHECK(ioctl(-1, TIOCGWINSZ) == -1 && errno == EBADF);
+    errno = 0;
+    CHECK(ioctl(master, TIOCGWINSZ, (void *)0) == -1 && errno == EFAULT);
+    int pipes[2];
+    CHECK(pipe(pipes) == 0);
+    errno = 0;
+    CHECK(ioctl(pipes[0], TCGETS, &attributes) == -1 && errno == ENOTTY);
+    CHECK(close(pipes[0]) == 0 && close(pipes[1]) == 0);
     errno = 0;
     CHECK(tcgetwinsize(-1, &actual) == -1 && errno == EBADF);
     errno = 0;
@@ -51,8 +70,12 @@ int main(void) {
     CHECK(sigemptyset(&action.sa_mask) == 0);
     CHECK(sigaction(SIGWINCH, &action, NULL) == 0);
     CHECK(login_tty(slave) == 0);
+    pid_t foreground = -1;
+    CHECK(ioctl(STDIN_FILENO, TIOCGPGRP, &foreground) == 0);
+    CHECK(foreground == getpgrp());
+    CHECK(ioctl(STDIN_FILENO, TIOCSPGRP, &foreground) == 0);
     struct winsize changed = {42, 132, 1920, 1080};
-    CHECK(tcsetwinsize(master, &changed) == 0);
+    CHECK(ioctl(master, TIOCSWINSZ, &changed) == 0);
     CHECK(tcgetwinsize(STDIN_FILENO, &actual) == 0);
     CHECK(memcmp(&actual, &changed, sizeof(actual)) == 0);
     for (unsigned retry = 0; retry < 1000 && resized == 0; ++retry) {
@@ -60,13 +83,13 @@ int main(void) {
         nanosleep(&pause, NULL);
     }
     CHECK(resized == 1);
-    CHECK(tcsetwinsize(STDIN_FILENO, &changed) == 0);
+    CHECK(ioctl(STDIN_FILENO, TIOCSWINSZ, &changed) == 0);
     for (unsigned retry = 0; retry < 20; ++retry) {
         struct timespec pause = {0, 1000000};
         nanosleep(&pause, NULL);
     }
     CHECK(resized == 1);
-    debug("native-terminal-window: PASS initial size, both PTY sides, dup, errors and foreground SIGWINCH\n");
+    debug("native-terminal-window: PASS variadic ioctl, attributes, process group, size, errors and SIGWINCH\n");
     CHECK(close(master) == 0);
     return 0;
 }
