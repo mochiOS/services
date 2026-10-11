@@ -1673,6 +1673,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_GROUPS_SET
             | protocol::OP_PROCESS_FORKED
             | protocol::OP_PROCESS_SPAWNED
+            | protocol::OP_PROCESS_SESSION_INFO
             | protocol::OP_WAIT_CHILD
             | protocol::OP_PROCESS_STOPPED
             | protocol::OP_PROCESS_INFO
@@ -2697,6 +2698,30 @@ impl<H: Copy> PosixService<H> {
         )
         .map_err(|_| STATUS_EINVAL)?;
         Ok(payload)
+    }
+
+    /// The runtime must authenticate `process` using the received native
+    /// ProcessHandle. Request bytes never select the subject of inspection.
+    pub fn inspect_process_session(
+        &self,
+        peer: PeerIdentity,
+        process: AuthenticatedProcess<H>,
+    ) -> Result<Vec<u8>, i32> {
+        let caller = self
+            .sessions
+            .get(&peer.process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let target = self
+            .sessions
+            .get(&process.process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        if peer.process_id != process.process_id
+            && caller.effective_uid != 0
+            && caller.effective_uid != target.effective_uid
+        {
+            return Err(protocol::STATUS_EPERM);
+        }
+        self.session_info(process.process_id)
     }
 
     fn set_umask(&mut self, process_id: u64, payload: &[u8]) -> Result<Vec<u8>, i32> {

@@ -155,6 +155,31 @@ static int fresh_spawn(int64_t posix, int64_t authority) {
           (int32_t)get32(reply + 24));
   CHECK(message >= 0 && (uint32_t)message == 32 && get32(reply + 24) == 0 &&
         handles.count == 0);
+  unsigned char inspection[32] = {0};
+  memcpy(inspection, "POSX", 4);
+  inspection[4] = 1;
+  inspection[6] = 55; /* OP_PROCESS_SESSION_INFO; WAIT-only object, no PID. */
+  put64(inspection + 8, 4);
+  memset(&handles, 0, sizeof(handles));
+  handles.count = 1;
+  handles.entries[0].handle = (uint32_t)process;
+  handles.entries[0].rights = 16;
+  message =
+      native6(IPC_CALL_HANDLES, posix, (uint64_t)inspection, sizeof(inspection),
+              (uint64_t)reply, sizeof(reply), (uint64_t)&handles);
+  CHECK(message >= 0 && (uint32_t)message == 52 && get32(reply + 24) == 0 &&
+        handles.count == 0);
+  CHECK(get32(reply + 32) == 505 && get32(reply + 36) == 505 &&
+        get32(reply + 40) == 24 && get32(reply + 44) == 24);
+  memset(&handles, 0, sizeof(handles));
+  handles.count = 1;
+  handles.entries[0].handle = (uint32_t)process;
+  handles.entries[0].rights = 16 | 32; /* Inspection must not accept SIGNAL. */
+  message =
+      native6(IPC_CALL_HANDLES, posix, (uint64_t)inspection, sizeof(inspection),
+              (uint64_t)reply, sizeof(reply), (uint64_t)&handles);
+  CHECK(message >= 0 && (uint32_t)message == 32 &&
+        (int32_t)get32(reply + 24) == -22 && handles.count == 0);
   CHECK(N(PROCESS_RESUME, process, 0, 0) == 0);
   struct process_status status = {0};
   for (unsigned attempt = 0; attempt < 500; ++attempt) {
@@ -166,8 +191,10 @@ static int fresh_spawn(int64_t posix, int64_t authority) {
   CHECK(status.state == 2 && status.exit_code == 37);
   CHECK(N(HANDLE_CLOSE, process, 0, 0) == 0 &&
         N(HANDLE_CLOSE, image, 0, 0) == 0);
-  fprintf(stderr, "fresh-spawn: PASS stopped creation, attached registration, "
-                  "newlib credentials, resume and retained exit\n");
+  fprintf(
+      stderr,
+      "fresh-spawn: PASS stopped creation, attached registration, "
+      "WAIT-only inspection, newlib credentials, resume and retained exit\n");
   return 0;
 }
 

@@ -191,6 +191,29 @@ fn main() {
                 })
             }
             (Some(peer), Some((header, payload)), true)
+                if header.opcode == protocol::OP_PROCESS_SESSION_INFO
+                    && header.flags == 0
+                    && payload.is_empty()
+                    && attachments.len() == 1 =>
+            {
+                let response = match inspect_sender_process(&service, peer, attachments[0]) {
+                    Ok(payload) => posix_service::Response {
+                        header: protocol::Header {
+                            opcode: protocol::OP_STATUS,
+                            request_id: header.request_id,
+                            payload_len: payload.len() as u32,
+                            ..Default::default()
+                        },
+                        payload,
+                    },
+                    Err(status) => status_response(header.request_id, status),
+                };
+                Some(posix_service::ObjectResponse {
+                    response,
+                    handles: Vec::new(),
+                })
+            }
+            (Some(peer), Some((header, payload)), true)
                 if matches!(
                     header.opcode,
                     protocol::OP_TERMINAL_ACQUIRE
@@ -844,6 +867,27 @@ fn wait_for_request_or_child(
     process::wait_many(&mut items, syscall::HANDLE_WAIT_INFINITE)
         .map(|index| index == 0)
         .map_err(|error| error.raw())
+}
+
+#[cfg(target_os = "mochios")]
+fn inspect_sender_process(
+    service: &posix_service::PosixService<u32>,
+    peer: posix_service::PeerIdentity,
+    process: posix_service::AttachedObject<u32>,
+) -> Result<Vec<u8>, i32> {
+    use mochi_user_platform as platform;
+    if process.rights != platform::handle::HANDLE_RIGHT_WAIT {
+        return Err(posix_service::STATUS_EINVAL);
+    }
+    let status =
+        platform::process::handle_status(process.handle).map_err(|error| error.raw() as i32)?;
+    service.inspect_process_session(
+        peer,
+        posix_service::AuthenticatedProcess {
+            handle: process.handle,
+            process_id: status.process_id,
+        },
+    )
 }
 
 #[cfg(target_os = "mochios")]
