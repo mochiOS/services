@@ -190,7 +190,7 @@ fn creation_backend_retains_before_publication_and_never_weakens_grants() {
     assert!(export.contains("source.rights().contains(spec.rights)"));
 }
 
-/// Generates only the built-in package record for the isolated native probe.
+/// Generates the built-in package record and startup metadata for the isolated native probe.
 /// It never modifies an installed package or relaxes production verification.
 #[test]
 #[ignore = "requires POSIX_NATIVE_FIXTURE_DIR containing the test-only manifest"]
@@ -222,9 +222,61 @@ fn generate_native_creation_fixture_record() {
     };
     let mut output = vec![0; record.encoded_len()];
     record.encode(&mut output).unwrap();
+    let executable = b"/system/services/input.service";
+    let mut startup = vec![0; 16384];
+    let length = mochios_posix_client::process_image::encode_initial_stack(
+        &[b"native-process-create", b"--created-child"],
+        &[],
+        executable,
+        [7; 16],
+        &mut startup,
+    )
+    .unwrap();
+    let mut metadata = vec![0; wire::MAX_REQUEST_BYTES];
+    let length = wire::encode(
+        std::str::from_utf8(executable).unwrap(),
+        &startup[..length],
+        &[HandleGrant {
+            key: u64::from_le_bytes(*b"TESTFILE"),
+            source: 1,
+            rights: mnu_abi::HANDLE_RIGHT_READ,
+        }],
+        &[Value {
+            key: u64::from_le_bytes(*b"TESTVALU"),
+            value: 42,
+        }],
+        &mut metadata,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("process-create-probe-metadata.bin"),
+        &metadata[..length],
+    )
+    .unwrap();
     std::fs::write(
         directory.join("process-create-probe-verification.bin"),
         output,
     )
     .unwrap();
+}
+
+#[test]
+fn native_creation_probe_uses_the_current_mechanism_abi() {
+    use mnu_abi::SyscallNumber as Call;
+    let source = include_str!("native_process_create.c");
+    for (name, call) in [
+        ("PROCESS_CREATE", Call::ProcessCreate),
+        ("PROCESS_EXIT", Call::ProcessExit),
+        ("IPC_CALL_HANDLES", Call::IpcCallObjectHandles),
+        ("PROCESS_STATUS", Call::ProcessHandleStatus),
+        ("PROCESS_WAIT", Call::ProcessHandleWait),
+        ("PROCESS_RESUME", Call::ProcessHandleResume),
+        ("LAUNCH_HANDLE_GET", Call::LaunchHandleGet),
+        ("LAUNCH_VALUE_GET", Call::LaunchValueGet),
+        ("HANDLE_READ_AT", Call::HandleReadAt),
+        ("HANDLE_DUPLICATE", Call::HandleDuplicate),
+        ("HANDLE_RIGHTS", Call::HandleRightsGet),
+    ] {
+        assert!(source.contains(&format!("{name} = {}", call as u64)));
+    }
 }
