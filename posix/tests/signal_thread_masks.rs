@@ -18,8 +18,13 @@ impl Transport for LocalTransport {
 
     fn call(&self, request: &[u8], response: &mut [u8]) -> Result<usize, Self::Error> {
         let (header, payload) = protocol::decode(request).map_err(|_| ())?;
-        let reply = if header.opcode == protocol::OP_SIGNAL_THREAD_MASK {
-            self.service.borrow_mut().handle_thread_signal_mask(
+        let reply = if matches!(
+            header.opcode,
+            protocol::OP_SIGNAL_THREAD_MASK
+                | protocol::OP_SIGNAL_THREAD_DEQUEUE
+                | protocol::OP_SIGNAL_THREAD_PENDING
+        ) {
+            self.service.borrow_mut().handle_thread_signal_request(
                 self.peer,
                 self.authenticated,
                 header,
@@ -243,7 +248,7 @@ fn malformed_mask_requests_are_rejected_without_mutating_state() {
         let mut invalid = bytes;
         invalid[offset..offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(protocol::decode_signal_mask_request(&invalid).is_err());
-        let response = service.borrow_mut().handle_thread_signal_mask(
+        let response = service.borrow_mut().handle_thread_signal_request(
             peer(101),
             ExecutionIdentity {
                 process_id: 101,
@@ -343,7 +348,7 @@ fn mask_updates_require_authenticated_dispatch_and_strict_header_flags() {
         (protocol::OP_SIGNAL_THREAD_MASK, 1, -22),
         (u16::MAX, 0, protocol::STATUS_ENOSYS),
     ] {
-        let response = service.borrow_mut().handle_thread_signal_mask(
+        let response = service.borrow_mut().handle_thread_signal_request(
             peer(101),
             ExecutionIdentity {
                 process_id: 101,
@@ -364,5 +369,119 @@ fn mask_updates_require_authenticated_dispatch_and_strict_header_flags() {
                 .unwrap(),
             1 << 29
         );
+    }
+}
+
+#[test]
+fn delivery_and_pending_use_the_authenticated_threads_mask() {
+    let service = service();
+    let blocked = client(&service, 101, 501);
+    let open = client(&service, 101, 502);
+    blocked
+        .thread_signal_mask(protocol::SIGNAL_MASK_INITIALIZE, 1 << 29)
+        .unwrap();
+    open.thread_signal_mask(protocol::SIGNAL_MASK_INITIALIZE, 0)
+        .unwrap();
+    blocked.send_signal(101, 30).unwrap();
+    assert_eq!(blocked.thread_pending_signals().unwrap(), 1 << 29);
+    assert_eq!(open.thread_pending_signals().unwrap(), 0);
+    assert_eq!(blocked.thread_dequeue_signal_delivery().unwrap().signal, 0);
+    assert_eq!(blocked.pending_signals().unwrap(), 1 << 29);
+    let delivery = open.thread_dequeue_signal_delivery().unwrap();
+    assert_eq!(delivery.signal, 30);
+    assert_ne!(delivery.token, 0);
+    open.complete_signal_delivery(delivery).unwrap();
+    assert_eq!(blocked.thread_pending_signals().unwrap(), 0);
+    blocked.send_signal(101, 30).unwrap();
+    blocked
+        .thread_signal_mask(protocol::SIGNAL_MASK_UNBLOCK, 1 << 29)
+        .unwrap();
+    assert_eq!(blocked.thread_pending_signals().unwrap(), 0);
+    let delivery = blocked.thread_dequeue_signal_delivery().unwrap();
+    assert_eq!(delivery.signal, 30);
+    blocked.complete_signal_delivery(delivery).unwrap();
+}
+
+#[test]
+fn thread_delivery_rejects_uninitialized_threads_and_untrusted_requests_atomically() {
+    let service = service();
+    let caller = client(&service, 101, 501);
+    caller.send_signal(101, 30).unwrap();
+    assert!(matches!(
+        caller.thread_pending_signals(),
+        Err(ClientError::Remote(protocol::STATUS_ESRCH))
+    ));
+    assert!(matches!(
+        caller.thread_dequeue_signal_delivery(),
+        Err(ClientError::Remote(protocol::STATUS_ESRCH))
+    ));
+    caller
+        .thread_signal_mask(protocol::SIGNAL_MASK_INITIALIZE, 0)
+        .unwrap();
+    for opcode in [
+        protocol::OP_SIGNAL_THREAD_PENDING,
+        protocol::OP_SIGNAL_THREAD_DEQUEUE,
+    ] {
+        let header = protocol::Header {
+            opcode,
+            request_id: 113,
+            ..Default::default()
+        };
+        assert_eq!(
+            service
+                .borrow_mut()
+                .handle(peer(101), header, &[])
+                .header
+                .status,
+            -22
+        );
+        for (identity, flags, payload, status) in [
+            (
+                ExecutionIdentity {
+                    process_id: 101,
+                    thread_id: 501,
+                },
+                1,
+                &[][..],
+                -22,
+            ),
+            (
+                ExecutionIdentity {
+                    process_id: 101,
+                    thread_id: 501,
+                },
+                0,
+                &[0u8][..],
+                -22,
+            ),
+            (
+                ExecutionIdentity {
+                    process_id: 102,
+                    thread_id: 501,
+                },
+                0,
+                &[][..],
+                protocol::STATUS_EPERM,
+            ),
+            (
+                ExecutionIdentity {
+                    process_id: 101,
+                    thread_id: 0,
+                },
+                0,
+                &[][..],
+                protocol::STATUS_EPERM,
+            ),
+        ] {
+            let reply = service.borrow_mut().handle_thread_signal_request(
+                peer(101),
+                identity,
+                protocol::Header { flags, ..header },
+                payload,
+            );
+            assert_eq!(reply.header.status, status);
+            assert_eq!(reply.header.request_id, 113);
+            assert_eq!(caller.pending_signals().unwrap(), 1 << 29);
+        }
     }
 }

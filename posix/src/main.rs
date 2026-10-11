@@ -200,12 +200,17 @@ fn main() {
         let mut retained_handle = None;
         let object_response = match (peer, decoded, attachments_valid) {
             (Some(peer), Some((header, payload)), true)
-                if header.opcode == protocol::OP_SIGNAL_THREAD_MASK
+                if matches!(
+                    header.opcode,
+                    protocol::OP_SIGNAL_THREAD_MASK
+                        | protocol::OP_SIGNAL_THREAD_DEQUEUE
+                        | protocol::OP_SIGNAL_THREAD_PENDING
+                )
                     && attachments.is_empty() =>
             {
                 let response = match platform::ipc::endpoint_execution_identity(sender) {
                     Ok(identity) => {
-                        service.handle_thread_signal_mask(peer, identity, header, payload)
+                        service.handle_thread_signal_request(peer, identity, header, payload)
                     }
                     Err(_) => invalid_response(header.request_id),
                 };

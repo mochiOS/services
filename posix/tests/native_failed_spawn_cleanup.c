@@ -25,14 +25,18 @@ static void caught_signal(int signal_number) {
 
 /* Direct client/service boundary probe. The wire payload contains no TID or
  * PID; posix.service must obtain both from the native request endpoint. */
-static int service_mask(uint32_t operation, uint64_t mask, uint64_t *previous) {
+static int service_signal_request(uint16_t opcode, uint32_t operation, uint64_t mask,
+                                  uint64_t *previous) {
     struct {
         char magic[4]; uint16_t version, opcode;
         uint64_t request_id;
         uint32_t flags, length; int32_t status; uint32_t reserved;
         uint32_t operation, mask_reserved; uint64_t mask;
-    } request = {{'P', 'O', 'S', 'X'}, 1, 65, 1, 0, 16, 0, 0, operation, 0, mask};
-    unsigned char reply[40] = {0};
+    } request = {{'P', 'O', 'S', 'X'}, 1, opcode, 1, 0, opcode == 65 ? 16 : 0,
+                 0, 0, operation, 0, mask};
+    unsigned char reply[48] = {0};
+    size_t request_length = opcode == 65 ? sizeof(request) : 32;
+    size_t reply_length = opcode == 66 ? sizeof(reply) : 40;
     _Static_assert(sizeof(request) == 48, "POSIX mask wire layout");
     uint64_t endpoint = UINT64_C(0x4c52544358534f50);
     uint64_t number = 628;
@@ -41,16 +45,20 @@ static int service_mask(uint32_t operation, uint64_t mask, uint64_t *previous) {
     endpoint = number;
     number = 588;
     register uint64_t r10 __asm__("r10") = (uintptr_t)reply;
-    register uint64_t r8 __asm__("r8") = sizeof(reply);
+    register uint64_t r8 __asm__("r8") = reply_length;
     __asm__ volatile("syscall" : "+a"(number)
-                     : "D"(endpoint), "S"(&request), "d"(sizeof(request)), "r"(r10), "r"(r8)
+                     : "D"(endpoint), "S"(&request), "d"(request_length), "r"(r10), "r"(r8)
                      : "rcx", "r11", "memory");
     int32_t status;
     memcpy(&status, reply + 24, sizeof(status));
-    if (number >= UINT64_MAX - 4094 || (uint32_t)number != sizeof(reply) ||
+    if (number >= UINT64_MAX - 4094 || (uint32_t)number != reply_length ||
         memcmp(reply, "POSX", 4) != 0 || status != 0) return 2;
     memcpy(previous, reply + 32, sizeof(*previous));
     return 0;
+}
+
+static int service_mask(uint32_t operation, uint64_t mask, uint64_t *previous) {
+    return service_signal_request(65, operation, mask, previous);
 }
 
 static void *inspect_service_thread_mask(void *unused) {
@@ -58,7 +66,9 @@ static void *inspect_service_thread_mask(void *unused) {
     uint64_t previous;
     if (service_mask(0, 0, &previous) || previous != 0 ||
         service_mask(1, UINT64_C(1) << 30, &previous) || previous != 0 ||
-        service_mask(0, 0, &previous) || previous != (UINT64_C(1) << 30))
+        service_mask(0, 0, &previous) || previous != (UINT64_C(1) << 30) ||
+        service_signal_request(67, 0, 0, &previous) || previous != 0 ||
+        service_signal_request(66, 0, 0, &previous) || previous != 0)
         return (void *)1;
     return NULL;
 }
@@ -77,7 +87,10 @@ static int inspect_service_masks(void) {
     CHECK(service_mask(0, 0, &previous) == 0 && previous == first);
     CHECK(service_mask(3, first, &previous) == 0 && previous == first);
     CHECK(service_mask(0, 0, &previous) == 0 && previous == 0);
+    CHECK(service_signal_request(67, 0, 0, &previous) == 0 && previous == 0);
+    CHECK(service_signal_request(66, 0, 0, &previous) == 0 && previous == 0);
     fprintf(stderr, "native-signal-masks: PASS authenticated per-thread masks, initialize preservation and unblockable signals\n");
+    fprintf(stderr, "native-thread-delivery: PASS authenticated pending and dequeue for parent and pthread\n");
     return 0;
 }
 

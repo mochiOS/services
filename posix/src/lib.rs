@@ -2109,14 +2109,19 @@ impl<H: Copy> PosixService<H> {
 
     /// `sender` must come from the kernel-authenticated request endpoint.
     /// Neither a PID nor a TID is accepted in the wire payload.
-    pub fn handle_thread_signal_mask(
+    pub fn handle_thread_signal_request(
         &mut self,
         peer: PeerIdentity,
         sender: mnu_abi::ExecutionIdentity,
         header: protocol::Header,
         payload: &[u8],
     ) -> Response {
-        let result = if header.opcode != protocol::OP_SIGNAL_THREAD_MASK {
+        let result = if !matches!(
+            header.opcode,
+            protocol::OP_SIGNAL_THREAD_MASK
+                | protocol::OP_SIGNAL_THREAD_DEQUEUE
+                | protocol::OP_SIGNAL_THREAD_PENDING
+        ) {
             Err(protocol::STATUS_ENOSYS)
         } else if header.flags != 0 {
             Err(STATUS_EINVAL)
@@ -2126,7 +2131,10 @@ impl<H: Copy> PosixService<H> {
         {
             Err(protocol::STATUS_EPERM)
         } else {
-            self.thread_signal_mask_payload(sender, payload)
+            match header.opcode {
+                protocol::OP_SIGNAL_THREAD_MASK => self.thread_signal_mask_payload(sender, payload),
+                _ => self.thread_signal_delivery_payload(sender, header.opcode, payload),
+            }
         };
         match result {
             Ok(payload) => Response {
@@ -2180,8 +2188,43 @@ impl<H: Copy> PosixService<H> {
         Ok(output)
     }
 
+    fn thread_signal_delivery_payload(
+        &mut self,
+        sender: mnu_abi::ExecutionIdentity,
+        opcode: u16,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, i32> {
+        if !payload.is_empty() {
+            return Err(STATUS_EINVAL);
+        }
+        // An explicit initialization is required: a missing thread record
+        // must not silently grant delivery with an unblocked mask.
+        let blocked = self
+            .signal_masks
+            .get(&(sender.process_id, sender.thread_id))
+            .copied()
+            .ok_or(protocol::STATUS_ESRCH)?;
+        if opcode == protocol::OP_SIGNAL_THREAD_DEQUEUE {
+            self.dequeue_signal_with_mask(sender.process_id, blocked)
+        } else {
+            let pending = self
+                .signals
+                .get(&sender.process_id)
+                .ok_or(protocol::STATUS_ESRCH)?
+                .pending()
+                & blocked;
+            let mut output = vec![0; protocol::SIGNAL_MASK_LEN];
+            protocol::encode_signal_mask(pending, &mut output).map_err(|_| STATUS_EINVAL)?;
+            Ok(output)
+        }
+    }
+
     fn dequeue_signal_payload(&mut self, process_id: u64, payload: &[u8]) -> Result<Vec<u8>, i32> {
         let blocked = protocol::decode_signal_mask(payload).map_err(|_| STATUS_EINVAL)?;
+        self.dequeue_signal_with_mask(process_id, blocked)
+    }
+
+    fn dequeue_signal_with_mask(&mut self, process_id: u64, blocked: u64) -> Result<Vec<u8>, i32> {
         let signal = self
             .signals
             .get(&process_id)
@@ -2469,6 +2512,8 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_SIGNAL_DISPOSITION
             | protocol::OP_SIGNAL_IMAGE_STARTED
             | protocol::OP_SIGNAL_THREAD_MASK
+            | protocol::OP_SIGNAL_THREAD_DEQUEUE
+            | protocol::OP_SIGNAL_THREAD_PENDING
             | protocol::OP_FTRUNCATE
             | protocol::OP_FSYNC
             | protocol::OP_FGETFL
