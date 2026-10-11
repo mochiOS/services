@@ -4447,6 +4447,298 @@ fn controlling_terminals_are_bound_to_sessions_and_foreground_groups() {
     assert!(service.controlling_terminal(77).is_none());
 }
 
+fn terminal_exit_family() -> (
+    PosixService,
+    [PeerIdentity; 5],
+    RecordingFilesystem,
+    RecordingProcesses,
+) {
+    let peers = [4100, 4101, 4102, 4103, 4104].map(|process_id| PeerIdentity {
+        process_id,
+        effective_uid: 505,
+        effective_gid: 24,
+    });
+    let [parent, leader, first, second, background] = peers;
+    let mut service = service_for(parent);
+    let mut filesystem = RecordingFilesystem::default();
+    service
+        .adopt_child(
+            parent,
+            AuthenticatedProcess {
+                handle: leader.process_id as u32,
+                process_id: leader.process_id,
+            },
+            &mut filesystem,
+        )
+        .unwrap();
+    let header = |opcode| protocol::Header {
+        opcode,
+        ..Default::default()
+    };
+    assert_eq!(
+        service
+            .handle(leader, header(protocol::OP_CREATE_SESSION), &[])
+            .header
+            .status,
+        0
+    );
+    for child in [first, second, background] {
+        service
+            .adopt_child(
+                leader,
+                AuthenticatedProcess {
+                    handle: child.process_id as u32,
+                    process_id: child.process_id,
+                },
+                &mut filesystem,
+            )
+            .unwrap();
+    }
+    for child in [first, second] {
+        let mut group = [0; protocol::PROCESS_GROUP_REQUEST_LEN];
+        protocol::encode_process_group_request(
+            child.process_id as i64,
+            first.process_id as i64,
+            &mut group,
+        )
+        .unwrap();
+        assert_eq!(
+            service
+                .handle(leader, header(protocol::OP_SET_PROCESS_GROUP), &group)
+                .header
+                .status,
+            0
+        );
+    }
+    assert_eq!(
+        service
+            .handle_terminal(leader, header(protocol::OP_TERMINAL_ACQUIRE), &[], 77)
+            .header
+            .status,
+        0
+    );
+    let mut group = [0; protocol::PROCESS_ID_REQUEST_LEN];
+    protocol::encode_process_id_request(first.process_id as i64, &mut group).unwrap();
+    assert_eq!(
+        service
+            .handle_terminal(
+                leader,
+                header(protocol::OP_TERMINAL_SET_FOREGROUND),
+                &group,
+                77
+            )
+            .header
+            .status,
+        0
+    );
+    let mut processes = RecordingProcesses::default();
+    for peer in peers {
+        processes
+            .states
+            .insert(peer.process_id as u32, ProcessLifecycle::Running);
+    }
+    (service, peers, filesystem, processes)
+}
+
+#[test]
+fn controlling_process_exit_hangs_up_only_foreground_members_once_before_wait() {
+    let (mut service, [parent, leader, first, second, background], mut filesystem, mut processes) =
+        terminal_exit_family();
+    assert_eq!(
+        service.refresh_child_exit_notifications(&mut processes),
+        Ok(0)
+    );
+    assert!(service.controlling_terminal(77).is_some());
+    assert_eq!(service.signal_state(first.process_id).unwrap().pending(), 0);
+    processes.states.remove(&(leader.process_id as u32));
+    assert_eq!(
+        service.refresh_child_exit_notifications(&mut processes),
+        Err(-3)
+    );
+    assert!(service.controlling_terminal(77).is_some());
+    assert_eq!(service.signal_state(first.process_id).unwrap().pending(), 0);
+    processes.states.insert(
+        leader.process_id as u32,
+        ProcessLifecycle::Exited { exit_code: 0 },
+    );
+    assert_eq!(
+        service.refresh_child_exit_notifications(&mut processes),
+        Ok(1)
+    );
+    assert!(service.controlling_terminal(77).is_none());
+    assert!(processes.released.is_empty());
+    for peer in [first, second] {
+        assert_eq!(
+            dequeue_signal(&mut service, peer).signal,
+            protocol::SIGNAL_HUP
+        );
+    }
+    for peer in [leader, background] {
+        assert_eq!(service.signal_state(peer.process_id).unwrap().pending(), 0);
+    }
+    assert_eq!(
+        service.refresh_child_exit_notifications(&mut processes),
+        Ok(0)
+    );
+    for peer in [first, second] {
+        assert_eq!(service.signal_state(peer.process_id).unwrap().pending(), 0);
+    }
+    assert_eq!(
+        service
+            .wait_child(
+                parent,
+                protocol::WaitRequest {
+                    selector: leader.process_id as i64,
+                    options: 0,
+                },
+                &mut filesystem,
+                &mut processes
+            )
+            .unwrap()
+            .process_id,
+        leader.process_id
+    );
+    assert_eq!(processes.released, [leader.process_id as u32]);
+    for peer in [first, second] {
+        assert_eq!(service.signal_state(peer.process_id).unwrap().pending(), 0);
+    }
+    // The terminal is reusable immediately, without waiting for old members.
+    assert_eq!(
+        service
+            .handle_terminal(
+                parent,
+                protocol::Header {
+                    opcode: protocol::OP_TERMINAL_ACQUIRE,
+                    ..Default::default()
+                },
+                &[],
+                77
+            )
+            .header
+            .status,
+        0
+    );
+}
+
+#[test]
+fn direct_wait_also_applies_controlling_process_exit_policy() {
+    let (mut service, [parent, leader, first, second, background], mut filesystem, mut processes) =
+        terminal_exit_family();
+    processes.states.insert(
+        leader.process_id as u32,
+        ProcessLifecycle::Exited { exit_code: 0 },
+    );
+    service
+        .wait_child(
+            parent,
+            protocol::WaitRequest {
+                selector: leader.process_id as i64,
+                options: 0,
+            },
+            &mut filesystem,
+            &mut processes,
+        )
+        .unwrap();
+    assert!(service.controlling_terminal(77).is_none());
+    for peer in [first, second] {
+        assert_eq!(
+            dequeue_signal(&mut service, peer).signal,
+            protocol::SIGNAL_HUP
+        );
+    }
+    assert_eq!(
+        service
+            .signal_state(background.process_id)
+            .unwrap()
+            .pending(),
+        0
+    );
+}
+
+#[test]
+fn parentless_controlling_process_is_watched_and_terminal_release_is_idempotent() {
+    let leader = PeerIdentity {
+        process_id: 4200,
+        effective_uid: 505,
+        effective_gid: 24,
+    };
+    let mut service = service_for(leader);
+    assert_eq!(
+        service
+            .handle_terminal(
+                leader,
+                protocol::Header {
+                    opcode: protocol::OP_TERMINAL_ACQUIRE,
+                    ..Default::default()
+                },
+                &[],
+                77
+            )
+            .header
+            .status,
+        0
+    );
+    assert_eq!(service.child_lifecycle_handles(), [4200]);
+    let mut processes = RecordingProcesses::default();
+    processes
+        .states
+        .insert(4200, ProcessLifecycle::Exited { exit_code: 0 });
+    assert_eq!(
+        service.refresh_child_exit_notifications(&mut processes),
+        Ok(0)
+    );
+    assert!(service.controlling_terminal(77).is_none());
+    assert!(service.child_lifecycle_handles().is_empty());
+    assert_eq!(
+        dequeue_signal(&mut service, leader).signal,
+        protocol::SIGNAL_HUP
+    );
+    assert_eq!(
+        service.refresh_child_exit_notifications(&mut processes),
+        Ok(0)
+    );
+    assert_eq!(
+        service.signal_state(leader.process_id).unwrap().pending(),
+        0
+    );
+    assert!(processes.released.is_empty());
+}
+
+#[test]
+fn controlling_process_exit_releases_a_terminal_with_an_empty_foreground_group() {
+    let (mut service, [_, leader, first, second, background], mut filesystem, mut processes) =
+        terminal_exit_family();
+    for member in [first, second] {
+        processes.states.insert(
+            member.process_id as u32,
+            ProcessLifecycle::Exited { exit_code: 0 },
+        );
+        service
+            .wait_child(
+                leader,
+                protocol::WaitRequest {
+                    selector: member.process_id as i64,
+                    options: 0,
+                },
+                &mut filesystem,
+                &mut processes,
+            )
+            .unwrap();
+    }
+    assert!(service.controlling_terminal(77).is_some());
+    processes.states.insert(
+        leader.process_id as u32,
+        ProcessLifecycle::Exited { exit_code: 0 },
+    );
+    assert_eq!(service.refresh_child_exit_notifications(&mut processes), Ok(1));
+    assert!(service.controlling_terminal(77).is_none());
+    assert_eq!(
+        service.signal_state(background.process_id).unwrap().pending(),
+        0
+    );
+    assert_eq!(service.refresh_child_exit_notifications(&mut processes), Ok(0));
+}
+
 #[test]
 fn service_submits_open_as_one_atomic_filesystem_operation() {
     let peer = PeerIdentity {

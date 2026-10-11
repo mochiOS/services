@@ -762,6 +762,7 @@ impl<H: Copy> PosixService<H> {
                 let has_children = self.has_reparentable_children(*child_id);
                 if (wait_state.exit_notified || !self.parents.contains_key(child_id))
                     && !has_children
+                    && !self.controlling_terminals.contains_key(child_id)
                 {
                     return None;
                 }
@@ -774,6 +775,7 @@ impl<H: Copy> PosixService<H> {
         let mut notified = 0;
         for (child_id, handle) in candidates {
             if matches!(processes.status(handle)?, ProcessLifecycle::Exited { .. }) {
+                self.hangup_exited_controlling_process(child_id)?;
                 self.reparent_children_of_exited(child_id);
                 if self.parents.contains_key(&child_id) && self.note_child_exited(child_id)? {
                     notified += 1;
@@ -867,7 +869,7 @@ impl<H: Copy> PosixService<H> {
                 .parents
                 .get(&process_id)
                 .ok_or(protocol::STATUS_ESRCH)?;
-            self.reap_child(parent, process_id, filesystem, processes);
+            self.reap_child(parent, process_id, filesystem, processes)?;
             reaped += 1;
         }
         Ok(reaped)
@@ -883,7 +885,8 @@ impl<H: Copy> PosixService<H> {
             .filter_map(|child_id| match self.process_wait_states.get(child_id) {
                 Some(state)
                     if (!state.exit_notified && self.parents.contains_key(child_id))
-                        || self.has_reparentable_children(*child_id) =>
+                        || self.has_reparentable_children(*child_id)
+                        || self.controlling_terminals.contains_key(child_id) =>
                 {
                     self.processes.get(child_id).copied()
                 }
@@ -1276,7 +1279,7 @@ impl<H: Copy> PosixService<H> {
             }
         }
         for (process_id, parent, _) in plan {
-            self.reap_child(parent, process_id, filesystem, processes);
+            self.reap_child(parent, process_id, filesystem, processes)?;
         }
         self.tree_teardowns.remove(&root.process_id);
         Ok(())
@@ -1314,7 +1317,7 @@ impl<H: Copy> PosixService<H> {
                 return Err(protocol::STATUS_EAGAIN);
             }
         }
-        self.reap_child(parent, child.process_id, filesystem, processes);
+        self.reap_child(parent, child.process_id, filesystem, processes)?;
         Ok(())
     }
 
@@ -1343,7 +1346,7 @@ impl<H: Copy> PosixService<H> {
                     .and_then(|state| state.termination_signal)
                     .map(|signal| signal & 0x7f)
                     .unwrap_or_else(|| ((exit_code & 0xff) as u32) << 8);
-                self.reap_child(peer.process_id, child, filesystem, processes);
+                self.reap_child(peer.process_id, child, filesystem, processes)?;
                 return Ok(protocol::WaitResult {
                     process_id: child,
                     status,
@@ -1434,7 +1437,8 @@ impl<H: Copy> PosixService<H> {
         child_id: u64,
         filesystem: &mut F,
         processes: &mut P,
-    ) {
+    ) -> Result<(), i32> {
+        self.hangup_exited_controlling_process(child_id)?;
         self.reparent_children_of_exited(child_id);
         self.orphaned_processes.remove(&child_id);
         if let Some(children) = self.children.get_mut(&parent_id) {
@@ -1466,6 +1470,7 @@ impl<H: Copy> PosixService<H> {
         if let Some(handle) = self.processes.remove(&child_id) {
             processes.release(handle);
         }
+        Ok(())
     }
 
     fn process_info_payload(&self, caller_id: u64, payload: &[u8]) -> Result<Vec<u8>, i32> {
@@ -1623,6 +1628,28 @@ impl<H: Copy> PosixService<H> {
         if let Some(terminal_id) = self.controlling_terminals.remove(&session_id) {
             self.terminals.remove(&terminal_id);
         }
+    }
+
+    /// POSIX exit policy, applied only after native exit is confirmed. Drop the
+    /// terminal association at exit, not at wait/reap; its removal also makes
+    /// repeated lifecycle observations unable to generate another hangup.
+    fn hangup_exited_controlling_process(&mut self, process_id: u64) -> Result<(), i32> {
+        let Some(terminal_id) = self.controlling_terminals.get(&process_id).copied() else {
+            return Ok(());
+        };
+        let terminal = self
+            .terminals
+            .get(&terminal_id)
+            .ok_or(protocol::STATUS_ENOTTY)?;
+        let has_foreground_members = self.process_groups.iter().any(|(member, group)| {
+            *group == terminal.foreground_process_group
+                && self.session_ids.get(member).copied() == Some(terminal.session_id)
+        });
+        if has_foreground_members {
+            self.signal_terminal_foreground_group(terminal_id, protocol::SIGNAL_HUP)?;
+        }
+        self.release_session_terminal(process_id);
+        Ok(())
     }
 
     fn terminal_foreground_process_group(
