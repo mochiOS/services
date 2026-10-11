@@ -39,3 +39,33 @@ fn legacy_posix_kill_is_not_a_native_syscall() {
 
     assert!(!native_numbers.contains(&62));
 }
+
+#[test]
+fn image_replacement_discards_upcalls_only_after_committing_the_new_address_space() {
+    let source = include_str!("../../../core/src/syscall/exec.rs");
+    let replacement = source
+        .split("fn replace_current_process_image(")
+        .nth(1)
+        .unwrap();
+    let committed = replacement
+        .find("process.set_page_table(new_pt_phys)")
+        .unwrap();
+    let reset = replacement
+        .find("thread.clear_upcall_for_image_replace()")
+        .unwrap();
+    let release = replacement.find("destroy_user_page_table(old)").unwrap();
+    let enter = replacement
+        .find("jump_to_usermode(entry, initial_rsp, 0)")
+        .unwrap();
+    assert!(committed < reset && reset < release && release < enter);
+    let thread = include_str!("../../../core/src/task/thread.rs");
+    let clear = thread
+        .split("pub fn clear_upcall_for_image_replace(")
+        .nth(1)
+        .unwrap()
+        .split("pub fn enqueue_upcall(")
+        .next()
+        .unwrap();
+    assert!(clear.contains("next_token: self.upcall.next_token"));
+    assert!(clear.contains("..ThreadUpcallState::new()"));
+}

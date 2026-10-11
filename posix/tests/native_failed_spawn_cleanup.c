@@ -174,7 +174,80 @@ static int inspect_abandoned_deliveries(void) {
     return 0;
 }
 
+static unsigned char replacement_upcall_stack[4096] __attribute__((aligned(16)));
+
+static void exec_from_signal_handler(int signal_number) {
+    struct {
+        uint64_t entry, stack_base, stack_size, flags, reserved[4];
+    } config = {(uintptr_t)exec_from_signal_handler,
+                (uintptr_t)replacement_upcall_stack,
+                sizeof(replacement_upcall_stack), 0, {0, 0, 0, 0}};
+    char *arguments[] = {"upcall-exec", "--upcall-exec-child", NULL};
+    char *environment[] = {NULL};
+    if (signal_number != SIGUSR2) _exit(81);
+    uint64_t number = 654;
+    __asm__ volatile("syscall" : "+a"(number)
+                     : "D"(&config), "S"(sizeof(config)) : "rcx", "r11", "memory");
+    /* Prove this really runs inside a native upcall, not a synchronous
+     * userspace drain that would never exercise active-context replacement. */
+    if ((int64_t)number != -EAGAIN) _exit(82);
+    if (execve("/system/services/missing-exec-probe", arguments, environment) != -1)
+        _exit(83);
+    number = 654;
+    __asm__ volatile("syscall" : "+a"(number)
+                     : "D"(&config), "S"(sizeof(config)) : "rcx", "r11", "memory");
+    if ((int64_t)number != -EAGAIN) _exit(84);
+    execve("/system/services/compositor.service", arguments, environment);
+    _exit(85);
+}
+
+static void caught_after_image_replace(int signal_number) {
+    if (signal_number == SIGUSR1) ++caught_count;
+}
+
+static int inspect_exec_from_upcall(void) {
+    pid_t child = fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        sigset_t empty = 0;
+        struct sigaction action;
+        memset(&action, 0, sizeof(action));
+        action.sa_handler = exec_from_signal_handler;
+        if (sigprocmask(SIG_SETMASK, &empty, NULL) != 0 ||
+            sigaction(SIGUSR2, &action, NULL) != 0 || kill(getpid(), SIGUSR2) != 0)
+            _exit(86);
+        for (unsigned retry = 0; retry < 5000; ++retry) {
+            struct timespec pause = {0, 1000000};
+            nanosleep(&pause, NULL);
+        }
+        _exit(87);
+    }
+    int status;
+    CHECK(waitpid(child, &status, 0) == child);
+    fprintf(stderr, "native-upcall-exec: child status=%d\n", status);
+    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 42);
+    fprintf(stderr, "native-upcall-exec: PASS failed exec retains active context; successful exec installs and delivers new upcalls\n");
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "--upcall-exec-child") == 0) {
+        sigset_t mask;
+        struct sigaction action;
+        if (sigprocmask(99, NULL, &mask) != 0 ||
+            mask != (UINT64_C(1) << (SIGUSR2 - 1)) ||
+            sigaction(SIGUSR2, NULL, &action) != 0 || action.sa_handler != SIG_DFL)
+            _exit(88);
+        memset(&action, 0, sizeof(action));
+        action.sa_handler = caught_after_image_replace;
+        if (sigaction(SIGUSR1, &action, NULL) != 0 || kill(getpid(), SIGUSR1) != 0)
+            _exit(89);
+        for (unsigned retry = 0; retry < 5000 && caught_count == 0; ++retry) {
+            struct timespec pause = {0, 1000000};
+            nanosleep(&pause, NULL);
+        }
+        _exit(caught_count == 1 ? 42 : 90);
+    }
     if (argc == 2 && (strcmp(argv[1], "--exec-child") == 0 ||
                      strcmp(argv[1], "--exec-default-child") == 0)) {
         int preserve_ignore = strcmp(argv[1], "--exec-child") == 0;
@@ -342,5 +415,6 @@ int main(int argc, char **argv) {
     fprintf(stderr, "native-signals: PASS POSIX_SPAWN_SETSIGDEF overrides inherited SIG_IGN\n");
     CHECK(sigprocmask(99, NULL, &pending) == 0 && pending == exec_mask);
     fprintf(stderr, "native-signal-masks: PASS fork/exec inheritance, failed exec preservation and spawn SETSIGMASK override\n");
+    CHECK(inspect_exec_from_upcall() == 0);
     return 0;
 }
