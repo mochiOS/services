@@ -22,7 +22,9 @@ enum {
     PROCESS_RESUME = 645,
     HANDLE_RIGHTS = 664,
     HANDLE_READ_AT = 673,
-    PROCESS_CREATE = 676
+    PROCESS_CREATE = 676,
+    PROCESS_STATE_RUNNING = 1,
+    PROCESS_STATE_EXITED = 2
 };
 static int64_t native6(uint64_t number, uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e,
                        uint64_t f) {
@@ -84,9 +86,132 @@ static int child(void) {
     CHECK(N(HANDLE_WRITE, file, elf, sizeof(elf)) == -EACCES);
     CHECK(N(HANDLE_DUPLICATE, file, 1, 0) == -EACCES);
     CHECK(N(HANDLE_CLOSE, file, 0, 0) == 0);
+#ifdef TREE_LIFECYCLE_PROBE
+    for (;;) CHECK(N(SLEEP, 10, 0, 0) == 0);
+#else
     N(PROCESS_EXIT, 37, 0, 0);
+#endif
     return 1;
 }
+
+#ifdef TREE_LIFECYCLE_PROBE
+enum {
+    ROOT_REGISTER = 54,
+    CHILD_ADOPT = 56,
+    LAUNCH_ABORT = 57,
+    TREE_EXIT = 61,
+    TREE_RECLAIM = 62,
+    WAIT_RIGHT = 1 << 4,
+    SIGNAL_RIGHT = 1 << 5
+};
+
+/* Wire identities are exclusively attached objects. A native PID is used
+ * only for diagnostic assertions, never serialized into an authority request. */
+static int32_t tree_rpc(uint32_t endpoint, uint16_t opcode, const void *payload,
+                        uint32_t payload_len, struct attachments *handles) {
+    static uint64_t sequence = 0x12345678;
+    unsigned char request[44] = {0}, response[64] = {0};
+    if (payload_len > sizeof(request) - 32) return -EINVAL;
+    memcpy(request, "POSX", 4);
+    request[4] = 1;
+    memcpy(request + 6, &opcode, sizeof(opcode));
+    put64(request + 8, ++sequence);
+    put32(request + 20, payload_len);
+    if (payload_len) memcpy(request + 32, payload, payload_len);
+    int64_t result = native6(IPC_CALL_HANDLES, endpoint, (uint64_t)request, 32 + payload_len,
+                             (uint64_t)response, sizeof(response), (uint64_t)handles);
+    if (result < 0) return (int32_t)result;
+    if ((uint32_t)result != 32 || handles->count || memcmp(response, "POSX", 4) ||
+        response[6] != 0 || response[7] != 0x80 || get64(response + 8) != sequence)
+        return -EIO;
+    return (int32_t)get32(response + 24);
+}
+
+static int32_t root_rpc(uint32_t endpoint, uint16_t opcode, uint32_t process) {
+    struct attachments handles = {0};
+    handles.count = 1;
+    handles.entries[0].handle = process;
+    handles.entries[0].rights = WAIT_RIGHT | SIGNAL_RIGHT;
+    return tree_rpc(endpoint, opcode, NULL, 0, &handles);
+}
+
+static int32_t register_root(uint32_t endpoint, uint32_t process) {
+    unsigned char credentials[12] = {0};
+    put32(credentials, 501);
+    put32(credentials + 4, 20);
+    struct attachments handles = {0};
+    handles.count = 1;
+    handles.entries[0].handle = process;
+    handles.entries[0].rights = WAIT_RIGHT | SIGNAL_RIGHT;
+    return tree_rpc(endpoint, ROOT_REGISTER, credentials, sizeof(credentials), &handles);
+}
+
+static int64_t create_another(uint64_t authority, const void *authorization, size_t authorization_len,
+                              uint32_t image, const void *metadata, size_t length) {
+    unsigned char reply[2048] = {0};
+    int64_t result = native6(IPC_CALL, authority, (uint64_t)authorization, authorization_len,
+                             (uint64_t)reply, sizeof(reply), 0);
+    if (result < 0) return result;
+    if ((uint32_t)result < 16 || get64(reply)) return -EACCES;
+    return N(PROCESS_CREATE, image, metadata, length);
+}
+
+static int tree_lifecycle(uint32_t endpoint, uint64_t authority, const void *authorization,
+                           size_t authorization_len, uint32_t image, const void *metadata,
+                           size_t length, uint32_t root) {
+    CHECK(register_root(endpoint, root) == 0);
+    int64_t descendant = create_another(authority, authorization, authorization_len, image, metadata, length);
+    CHECK(descendant > 0);
+    struct attachments handles = {0};
+    handles.count = 2;
+    handles.entries[0].handle = root;
+    handles.entries[0].rights = WAIT_RIGHT;
+    handles.entries[1].handle = (uint32_t)descendant;
+    handles.entries[1].rights = WAIT_RIGHT | SIGNAL_RIGHT;
+    CHECK(tree_rpc(endpoint, CHILD_ADOPT, NULL, 0, &handles) == 0);
+    int64_t bystander = create_another(authority, authorization, authorization_len, image, metadata, length);
+    CHECK(bystander > 0 && register_root(endpoint, (uint32_t)bystander) == 0);
+    CHECK(root_rpc(endpoint, TREE_RECLAIM, root) == -EAGAIN);
+    struct process_status status = {0};
+    CHECK(N(PROCESS_STATUS, root, &status, 0) == 0 && status.state == 1);
+    CHECK(N(PROCESS_STATUS, descendant, &status, 0) == 0 && status.state == 1);
+    CHECK(N(PROCESS_RESUME, root, 0, 0) == 0);
+    CHECK(N(PROCESS_RESUME, descendant, 0, 0) == 0);
+    CHECK(N(SLEEP, 100, 0, 0) == 0);
+    CHECK(N(PROCESS_STATUS, root, &status, 0) == 0 && status.state == PROCESS_STATE_RUNNING);
+    CHECK(N(PROCESS_STATUS, descendant, &status, 0) == 0 && status.state == PROCESS_STATE_RUNNING);
+    int32_t result = -EAGAIN;
+    for (unsigned attempt = 0; attempt < 500 && result == -EAGAIN; ++attempt) {
+        result = root_rpc(endpoint, TREE_EXIT, root);
+        if (result == -EAGAIN) CHECK(N(SLEEP, 10, 0, 0) == 0);
+    }
+    CHECK(result == 0);
+    CHECK(N(PROCESS_STATUS, root, &status, 0) == 0 && status.state == 2 && status.exit_code == 1);
+    CHECK(N(PROCESS_STATUS, descendant, &status, 0) == 0 && status.state == 2 && status.exit_code == 1);
+    CHECK(N(PROCESS_STATUS, bystander, &status, 0) == 0 && status.state == 1);
+    /* Discard the first success logically: confirmation is safe to resend. */
+    CHECK(root_rpc(endpoint, TREE_EXIT, root) == 0);
+    CHECK(root_rpc(endpoint, TREE_RECLAIM, root) == 0);
+    /* Reclaim's success reply may also be lost. No root record now remains. */
+    CHECK(root_rpc(endpoint, TREE_RECLAIM, root) == -ESRCH);
+    CHECK(N(PROCESS_STATUS, root, &status, 0) == 0 && status.state == 2);
+    CHECK(N(PROCESS_STATUS, descendant, &status, 0) == 0 && status.state == 2);
+    CHECK(N(PROCESS_STATUS, bystander, &status, 0) == 0 && status.state == 1);
+    handles = (struct attachments){0};
+    handles.count = 1;
+    handles.entries[0].handle = (uint32_t)bystander;
+    handles.entries[0].rights = WAIT_RIGHT;
+    CHECK(tree_rpc(endpoint, LAUNCH_ABORT, NULL, 0, &handles) == 0);
+    CHECK(N(PROCESS_STATUS, bystander, &status, 0) == 0 && status.state == 2 && status.exit_code == 127);
+    CHECK(N(HANDLE_CLOSE, bystander, 0, 0) == 0);
+    CHECK(N(HANDLE_CLOSE, descendant, 0, 0) == 0);
+    CHECK(N(HANDLE_CLOSE, root, 0, 0) == 0);
+    CHECK(N(HANDLE_CLOSE, image, 0, 0) == 0);
+    fprintf(stderr, "native-tree-lifecycle: PASS running root and descendant exit, bystander isolation, "
+                    "repeat confirmation, repeat reclaim, retained owner status\n");
+    return 0;
+}
+#endif
 
 int main(int argc, char **argv) {
     if (argc == 2 && strcmp(argv[1], "--created-child") == 0)
@@ -135,6 +260,10 @@ int main(int argc, char **argv) {
     CHECK(process > 0);
     struct process_status status = {0};
     CHECK(N(PROCESS_STATUS, process, &status, 0) == 0 && status.state == 1);
+#ifdef TREE_LIFECYCLE_PROBE
+    return tree_lifecycle((uint32_t)endpoint, (uint64_t)authority, authorization, sizeof(authorization),
+                          image, metadata, (size_t)length, (uint32_t)process);
+#endif
     const char label[] = "native-create-child";
     /* Legacy name lookup returns a thread ID, not status.process (a PID). */
     CHECK(N(FIND_PROCESS, label, strlen(label), 0) > 0);

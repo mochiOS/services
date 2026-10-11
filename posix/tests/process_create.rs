@@ -320,3 +320,53 @@ fn native_creation_probe_uses_the_current_mechanism_abi() {
         assert!(source.contains(&format!("{name} = {}", call as u64)));
     }
 }
+
+#[test]
+fn native_tree_probe_attaches_objects_and_preserves_an_unrelated_live_owner() {
+    use mochios_posix_protocol as protocol;
+    let source = include_str!("native_process_create.c");
+    for (name, opcode) in [
+        ("ROOT_REGISTER", protocol::OP_PROCESS_SPAWNED),
+        ("CHILD_ADOPT", protocol::OP_PROCESS_LAUNCHED),
+        ("LAUNCH_ABORT", protocol::OP_PROCESS_LAUNCH_ABORT),
+        ("TREE_EXIT", protocol::OP_PROCESS_TREE_TERMINATE),
+        ("TREE_RECLAIM", protocol::OP_PROCESS_TREE_RECLAIM),
+    ] {
+        assert!(source.contains(&format!("{name} = {opcode}")));
+    }
+    assert_eq!(mnu_abi::HANDLE_RIGHT_WAIT, 1 << 4);
+    assert_eq!(mnu_abi::HANDLE_RIGHT_SIGNAL, 1 << 5);
+    assert!(source.contains(&format!(
+        "PROCESS_STATE_RUNNING = {}",
+        mnu_abi::PROCESS_STATE_RUNNING
+    )));
+    assert!(source.contains(&format!(
+        "PROCESS_STATE_EXITED = {}",
+        mnu_abi::PROCESS_STATE_EXITED
+    )));
+    let rpc = source
+        .split("static int32_t tree_rpc(")
+        .nth(1)
+        .unwrap()
+        .split("static int32_t root_rpc(")
+        .next()
+        .unwrap();
+    assert!(rpc.contains("IPC_CALL_HANDLES"));
+    assert!(rpc.contains("get64(response + 8) != sequence"));
+    assert!(!rpc.contains("PROCESS_STATUS"));
+    assert!(!rpc.contains("process_id"));
+    let scenario = source.split("static int tree_lifecycle(").nth(1).unwrap();
+    assert!(scenario.contains("TREE_RECLAIM, root) == -EAGAIN"));
+    assert!(scenario.contains("TREE_RECLAIM, root) == -ESRCH"));
+    assert!(scenario.contains("PROCESS_STATUS, bystander, &status, 0) == 0 && status.state == 1"));
+    assert!(scenario.contains("status.exit_code == 1"));
+    assert!(scenario.contains("status.exit_code == 127"));
+    assert!(scenario.contains("PROCESS_RESUME, root"));
+    assert!(scenario.contains("PROCESS_RESUME, descendant"));
+    assert!(scenario.contains(
+        "PROCESS_STATUS, root, &status, 0) == 0 && status.state == PROCESS_STATE_RUNNING"
+    ));
+    let manifest = include_str!("native-tree-lifecycle-manifest.toml");
+    assert!(manifest.contains("\"process.spawn\""));
+    assert!(!manifest.contains("fs.write.all"));
+}

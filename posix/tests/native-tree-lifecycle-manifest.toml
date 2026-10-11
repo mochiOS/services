@@ -1,0 +1,13 @@
+# Diagnostic package for the isolated KVM Input slot, not the production Input
+# manifest. Reuses process_create.rs's host fixture metadata/record generator.
+[package]
+provenance = "built-in"
+id = "org.mochios.input"
+name = "Native Process Creation Probe"
+version = "1"
+vendor = "mochiOS"
+
+[[binary]]
+path = "/system/services/input.service"
+kind = "service"
+requires = ["fs.read.all", "ipc.client", "process.spawn"]
