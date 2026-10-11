@@ -2,6 +2,8 @@ mod codec;
 #[cfg(target_os = "mochios")]
 mod compositor;
 #[cfg(target_os = "mochios")]
+mod error;
+#[cfg(target_os = "mochios")]
 mod host;
 mod input;
 #[cfg(target_os = "mochios")]

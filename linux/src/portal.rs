@@ -10,7 +10,8 @@ use mochios_linux_portal_protocol::{
     NETWORK_RESPONSE_LEN, RequestNetworkRequest, RequestNetworkResponse,
 };
 
-use crate::host::{HostClient, HostError, PortalEntryKind};
+use crate::error::{io_status, portal_status as host_status};
+use crate::host::{HostClient, PortalEntryKind};
 
 const SERVICE_MANAGER_NAME: &str = "service-manager.service";
 const REQUEST_BUFFER_LEN: usize = 1024;
@@ -28,18 +29,18 @@ pub(crate) fn request_network(instance: u64, bundle_id: &str, user: &str) -> Res
     let mut encoded = [0u8; REQUEST_BUFFER_LEN];
     let length = request
         .encode(&mut encoded)
-        .map_err(|_| -(mochi_user_syscall::EINVAL as i32))?;
+        .map_err(|_| mochi_user_syscall::EINVAL as i32)?;
     let mut reply = [0u8; NETWORK_RESPONSE_LEN];
     let received = platform::ipc::call(service, &encoded[..length], &mut reply)
-        .map_err(|_| -(mochi_user_syscall::EIO as i32))?;
+        .map_err(|_| mochi_user_syscall::EIO as i32)?;
     let response = RequestNetworkResponse::decode(
         reply
             .get(..(received as u32 as usize))
-            .ok_or(-(mochi_user_syscall::EINVAL as i32))?,
+            .ok_or(mochi_user_syscall::EINVAL as i32)?,
     )
-    .map_err(|_| -(mochi_user_syscall::EINVAL as i32))?;
+    .map_err(|_| mochi_user_syscall::EINVAL as i32)?;
     if response.request_id != request_id {
-        return Err(-(mochi_user_syscall::EPERM as i32));
+        return Err(mochi_user_syscall::EPERM as i32);
     }
     (response.status == 0).then_some(()).ok_or(response.status)
 }
@@ -136,7 +137,7 @@ fn requested_paths(
     for declared in write_paths {
         let path = resolve_user_path(declared, user)?;
         if path == home {
-            return Err(-(mochi_user_syscall::ENOTSUP as i32));
+            return Err(mochi_user_syscall::ENOTSUP as i32);
         }
         if let Some(existing) = requested
             .iter_mut()
@@ -155,18 +156,18 @@ fn requested_paths(
             .iter()
             .any(|other| paths_overlap(&candidate.path, &other.path))
     }) {
-        return Err(-(mochi_user_syscall::EINVAL as i32));
+        return Err(mochi_user_syscall::EINVAL as i32);
     }
     Ok(requested)
 }
 
 fn write_back_grant(host: &mut HostClient, instance: u64, grant: &WriteGrant) -> Result<(), i32> {
     let root = Path::new(&grant.path);
-    let parent = root.parent().ok_or(-(mochi_user_syscall::EINVAL as i32))?;
+    let parent = root.parent().ok_or(mochi_user_syscall::EINVAL as i32)?;
     let name = root
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or(-(mochi_user_syscall::EINVAL as i32))?;
+        .ok_or(mochi_user_syscall::EINVAL as i32)?;
     let temporary = parent.join(format!(".{name}.mochios-portal.partial"));
     let backup = parent.join(format!(".{name}.mochios-portal.backup"));
     recover_swap(root, &temporary, &backup)?;
@@ -210,13 +211,13 @@ fn transfer_export(
             .portal_export_entry(instance, index)
             .map_err(host_status)?;
         if !valid_relative_path(&entry.path) {
-            return Err(-(mochi_user_syscall::EINVAL as i32));
+            return Err(mochi_user_syscall::EINVAL as i32);
         }
         let destination = temporary.join(&entry.path);
         match entry.kind {
             PortalEntryKind::Directory => {
                 if entry.size != 0 {
-                    return Err(-(mochi_user_syscall::EINVAL as i32));
+                    return Err(mochi_user_syscall::EINVAL as i32);
                 }
                 fs::create_dir_all(&destination).map_err(io_status)?;
                 directory_modes.push((destination, entry.mode));
@@ -224,7 +225,7 @@ fn transfer_export(
             PortalEntryKind::File => {
                 let parent = destination
                     .parent()
-                    .ok_or(-(mochi_user_syscall::EINVAL as i32))?;
+                    .ok_or(mochi_user_syscall::EINVAL as i32)?;
                 fs::create_dir_all(parent).map_err(io_status)?;
                 let mut output = OpenOptions::new()
                     .create_new(true)
@@ -240,7 +241,7 @@ fn transfer_export(
                         || bytes.is_empty()
                         || offset.saturating_add(bytes.len() as u64) > entry.size
                     {
-                        return Err(-(mochi_user_syscall::EINVAL as i32));
+                        return Err(mochi_user_syscall::EINVAL as i32);
                     }
                     output.write_all(&bytes).map_err(io_status)?;
                     offset += bytes.len() as u64;
@@ -288,7 +289,7 @@ fn remove_path(path: &Path) -> Result<(), i32> {
 
 fn remove_directory_tree(path: &Path, depth: usize) -> Result<(), i32> {
     if depth > 128 {
-        return Err(-(mochi_user_syscall::EINVAL as i32));
+        return Err(mochi_user_syscall::EINVAL as i32);
     }
     let entries = fs::read_dir(path)
         .map_err(io_status)?
@@ -326,19 +327,19 @@ fn request_grant(
     let mut encoded = [0u8; REQUEST_BUFFER_LEN];
     let length = request
         .encode(&mut encoded)
-        .map_err(|_| -(mochi_user_syscall::EINVAL as i32))?;
+        .map_err(|_| mochi_user_syscall::EINVAL as i32)?;
     let mut reply = [0u8; GRANT_RESPONSE_LEN];
     let received = platform::ipc::call(service, &encoded[..length], &mut reply)
-        .map_err(|_| -(mochi_user_syscall::EIO as i32))?;
+        .map_err(|_| mochi_user_syscall::EIO as i32)?;
     let reply_length = (received & 0xffff_ffff) as usize;
     let response = GrantDirectoryResponse::decode(
         reply
             .get(..reply_length)
-            .ok_or(-(mochi_user_syscall::EINVAL as i32))?,
+            .ok_or(mochi_user_syscall::EINVAL as i32)?,
     )
-    .map_err(|_| -(mochi_user_syscall::EINVAL as i32))?;
+    .map_err(|_| mochi_user_syscall::EINVAL as i32)?;
     if response.request_id != request_id {
-        return Err(-(mochi_user_syscall::EPERM as i32));
+        return Err(mochi_user_syscall::EPERM as i32);
     }
     if response.status != 0 {
         return Err(response.status);
@@ -351,15 +352,15 @@ fn session_id() -> Result<u64, i32> {
         .ok()
         .and_then(|value| value.parse().ok())
         .filter(|value| *value != 0)
-        .ok_or(-(mochi_user_syscall::EPERM as i32))
+        .ok_or(mochi_user_syscall::EPERM as i32)
 }
 
 fn service_manager() -> Result<u64, i32> {
     platform::process::find_by_name(SERVICE_MANAGER_NAME)
-        .map_err(|_| -(mochi_user_syscall::ENOENT as i32))?
+        .map_err(|_| mochi_user_syscall::ENOENT as i32)?
         .checked_sub(0)
         .filter(|service| *service != 0)
-        .ok_or(-(mochi_user_syscall::ENOENT as i32))
+        .ok_or(mochi_user_syscall::ENOENT as i32)
 }
 
 fn copy_directory(
@@ -370,7 +371,7 @@ fn copy_directory(
 ) -> Result<(), i32> {
     let metadata = fs::symlink_metadata(root).map_err(io_status)?;
     if !metadata.is_dir() {
-        return Err(-(mochi_user_syscall::ENOTDIR as i32));
+        return Err(mochi_user_syscall::ENOTDIR as i32);
     }
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
@@ -385,7 +386,7 @@ fn copy_directory(
             let metadata = fs::symlink_metadata(&path).map_err(io_status)?;
             let target = path_text(&path)?;
             if metadata.file_type().is_symlink() {
-                return Err(-(mochi_user_syscall::EACCES as i32));
+                return Err(mochi_user_syscall::EACCES as i32);
             }
             if metadata.is_dir() {
                 host.portal_mkdir(
@@ -407,7 +408,7 @@ fn copy_directory(
                 )
                 .map_err(host_status)?;
             } else {
-                return Err(-(mochi_user_syscall::ENOTSUP as i32));
+                return Err(mochi_user_syscall::ENOTSUP as i32);
             }
         }
     }
@@ -428,7 +429,7 @@ fn resolve_user_path(path: &str, user: &str) -> Result<String, i32> {
     {
         return Ok(path.to_string());
     }
-    Err(-(mochi_user_syscall::EINVAL as i32))
+    Err(mochi_user_syscall::EINVAL as i32)
 }
 
 fn paths_overlap(left: &str, right: &str) -> bool {
@@ -453,21 +454,7 @@ fn valid_relative_path(path: &str) -> bool {
 }
 
 fn path_text(path: &Path) -> Result<&str, i32> {
-    path.to_str().ok_or(-(mochi_user_syscall::EINVAL as i32))
-}
-
-fn io_status(error: std::io::Error) -> i32 {
-    error
-        .raw_os_error()
-        .map_or(-(mochi_user_syscall::EIO as i32), |errno| -errno)
-}
-
-fn host_status(error: HostError) -> i32 {
-    match error {
-        HostError::Unavailable => -(mochi_user_syscall::EIO as i32),
-        HostError::InvalidReply => -(mochi_user_syscall::EINVAL as i32),
-        HostError::Rejected(_) => -(mochi_user_syscall::EPERM as i32),
-    }
+    path.to_str().ok_or(mochi_user_syscall::EINVAL as i32)
 }
 
 #[cfg(test)]

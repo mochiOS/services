@@ -6,6 +6,7 @@ use mochios_linux_gui_protocol::{
 };
 
 use crate::compositor::Surface;
+use crate::error::launch_status as host_status;
 use crate::host::{HostClient, HostError, decode_frame};
 use crate::input::x11_keycode;
 
@@ -114,10 +115,10 @@ fn handle_prepare_bundle(
     let package_service = platform::process::find_by_name("package.service").ok();
     let authorized = owner.is_some() && owner == package_service;
     let status = if !authorized {
-        -(mochi_user_syscall::EPERM as i32)
+        mochi_user_syscall::EPERM as i32
     } else {
         decoded
-            .map_err(|_| -(mochi_user_syscall::EINVAL as i32))
+            .map_err(|_| mochi_user_syscall::EINVAL as i32)
             .and_then(|request| {
                 let instance = allocate_instance(next_instance);
                 platform::logln!(
@@ -178,12 +179,12 @@ fn handle_bundle_launch(
         Ok(1)
     );
     let result = if !authorized {
-        Err(-(mochi_user_syscall::EPERM as i32))
+        Err(mochi_user_syscall::EPERM as i32)
     } else if instances.len() >= MAX_INSTANCES {
-        Err(-(mochi_user_syscall::ENOSPC as i32))
+        Err(mochi_user_syscall::ENOSPC as i32)
     } else {
         decoded
-            .map_err(|_| -(mochi_user_syscall::EINVAL as i32))
+            .map_err(|_| mochi_user_syscall::EINVAL as i32)
             .and_then(|request| load_bundle_spec(request.bundle_id, request.user))
             .and_then(|spec| {
                 let instance = allocate_instance(next_instance);
@@ -259,23 +260,23 @@ fn load_bundle_spec(bundle_id: &str, user: &str) -> Result<BundleSpec, i32> {
         || manifest.package_architecture.as_deref() != Some("x86_64")
         || manifest.package_abi.as_deref() != Some("mboot-linux-1")
     {
-        return Err(-(mochi_user_syscall::EINVAL as i32));
+        return Err(mochi_user_syscall::EINVAL as i32);
     }
-    let linux = manifest.linux.ok_or(-(mochi_user_syscall::EINVAL as i32))?;
+    let linux = manifest.linux.ok_or(mochi_user_syscall::EINVAL as i32)?;
     let rootfs = manifest
         .files
         .iter()
         .find(|file| file.id == linux.rootfs_file)
-        .ok_or(-(mochi_user_syscall::EINVAL as i32))?;
+        .ok_or(mochi_user_syscall::EINVAL as i32)?;
     let relative = rootfs
         .path
         .strip_prefix("$/")
-        .ok_or(-(mochi_user_syscall::EINVAL as i32))?;
+        .ok_or(mochi_user_syscall::EINVAL as i32)?;
     let digest = rootfs
         .digest
         .strip_prefix("sha256:")
         .filter(|digest| digest.len() == 64)
-        .ok_or(-(mochi_user_syscall::EINVAL as i32))?;
+        .ok_or(mochi_user_syscall::EINVAL as i32)?;
     Ok(BundleSpec {
         bundle_id: bundle_id.to_string(),
         rootfs_path: format!("/applications/{}.app/{}", manifest.package_name, relative),
@@ -313,12 +314,12 @@ fn handle_launch(
         Ok(1)
     );
     let result = if !authorized {
-        Err(-(mochi_user_syscall::EPERM as i32))
+        Err(mochi_user_syscall::EPERM as i32)
     } else if instances.len() >= MAX_INSTANCES {
-        Err(-(mochi_user_syscall::ENOSPC as i32))
+        Err(mochi_user_syscall::ENOSPC as i32)
     } else {
         decoded
-            .map_err(|_| -(mochi_user_syscall::EINVAL as i32))
+            .map_err(|_| mochi_user_syscall::EINVAL as i32)
             .and_then(|request| {
                 let instance = allocate_instance(next_instance);
                 host.launch(instance, request.application.host_name())
@@ -352,7 +353,7 @@ fn handle_status(request: &[u8], sender: u64, instances: &[LinuxInstance]) {
         Ok(1)
     );
     let (status, instance, running) = if !authorized {
-        (-(mochi_user_syscall::EPERM as i32), 0, false)
+        (mochi_user_syscall::EPERM as i32, 0, false)
     } else {
         match decoded {
             Ok(request) => (
@@ -362,7 +363,7 @@ fn handle_status(request: &[u8], sender: u64, instances: &[LinuxInstance]) {
                     .iter()
                     .any(|instance| instance.id == request.instance),
             ),
-            Err(_) => (-(mochi_user_syscall::EINVAL as i32), 0, false),
+            Err(_) => (mochi_user_syscall::EINVAL as i32, 0, false),
         }
     };
     let response = StatusResponse {
@@ -623,18 +624,6 @@ fn handle_event(event: &[u8], instances: &mut [LinuxInstance], host: &mut HostCl
             active.closing = true;
         }
         _ => {}
-    }
-}
-
-fn host_status(error: HostError) -> i32 {
-    match error {
-        HostError::Rejected(mboot_protocol::ErrorCode::PermissionDenied) => {
-            -(mochi_user_syscall::EACCES as i32)
-        }
-        HostError::Rejected(mboot_protocol::ErrorCode::Busy) => -16,
-        HostError::Rejected(_) => -(mochi_user_syscall::EINVAL as i32),
-        HostError::Unavailable => -(mochi_user_syscall::EAGAIN as i32),
-        HostError::InvalidReply => -(mochi_user_syscall::EIO as i32),
     }
 }
 

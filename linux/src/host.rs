@@ -21,12 +21,7 @@ unsafe extern "C" {
     fn posix_read(fd: i32, buffer: *mut u8, length: usize) -> isize;
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum HostError {
-    Unavailable,
-    InvalidReply,
-    Rejected(ErrorCode),
-}
+pub(crate) use crate::error::HostError;
 
 pub(crate) struct WindowInfo {
     pub(crate) width: u16,
