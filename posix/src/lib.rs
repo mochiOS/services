@@ -330,6 +330,7 @@ struct ProcessWaitState {
     stop_signal: u32,
     stop_reported: bool,
     continued_pending: bool,
+    exit_observed: bool,
     exit_notified: bool,
     deliveries: BTreeMap<u64, u32>,
     termination_signal: Option<u32>,
@@ -763,6 +764,7 @@ impl<H: Copy> PosixService<H> {
                 if (wait_state.exit_notified || !self.parents.contains_key(child_id))
                     && !has_children
                     && !self.controlling_terminals.contains_key(child_id)
+                    && !self.needs_parent_exit_observation(*child_id)
                 {
                     return None;
                 }
@@ -775,14 +777,96 @@ impl<H: Copy> PosixService<H> {
         let mut notified = 0;
         for (child_id, handle) in candidates {
             if matches!(processes.status(handle)?, ProcessLifecycle::Exited { .. }) {
-                self.hangup_exited_controlling_process(child_id)?;
-                self.reparent_children_of_exited(child_id);
+                self.observe_process_exit(child_id)?;
                 if self.parents.contains_key(&child_id) && self.note_child_exited(child_id)? {
                     notified += 1;
                 }
             }
         }
         Ok(notified)
+    }
+
+    fn needs_parent_exit_observation(&self, process_id: u64) -> bool {
+        self.bootstrap_process_id != Some(process_id)
+            && self
+                .process_wait_states
+                .get(&process_id)
+                .is_some_and(|state| !state.exit_observed)
+            && self
+                .children
+                .get(&process_id)
+                .is_some_and(|children| !children.is_empty())
+    }
+
+    /// A group remains connected to job control while a live member has a
+    /// live parent in another group of the same session. Frozen teardown links
+    /// may retain exited parents, so linkage alone is not proof of connection.
+    fn non_orphaned_groups(&self) -> BTreeSet<(u64, u64)> {
+        self.process_groups
+            .iter()
+            .filter_map(|(&member, &group)| {
+                let session = *self.session_ids.get(&member)?;
+                let parent = *self.parents.get(&member)?;
+                let member_state = self.process_wait_states.get(&member)?;
+                let parent_state = self.process_wait_states.get(&parent)?;
+                (!member_state.exit_observed
+                    && !parent_state.exit_observed
+                    && self.session_ids.get(&parent).copied() == Some(session)
+                    && self.process_groups.get(&parent).copied() != Some(group))
+                .then_some((session, group))
+            })
+            .collect()
+    }
+
+    fn observe_process_exit(&mut self, process_id: u64) -> Result<(), i32> {
+        if self
+            .process_wait_states
+            .get(&process_id)
+            .ok_or(protocol::STATUS_ESRCH)?
+            .exit_observed
+        {
+            return Ok(());
+        }
+        let connected_before = self.non_orphaned_groups();
+        self.hangup_exited_controlling_process(process_id)?;
+        self.process_wait_states
+            .get_mut(&process_id)
+            .ok_or(protocol::STATUS_ESRCH)?
+            .exit_observed = true;
+        self.reparent_children_of_exited(process_id);
+        let connected_after = self.non_orphaned_groups();
+        for &(session, group) in connected_before.difference(&connected_after) {
+            let members: Vec<u64> = self
+                .process_groups
+                .iter()
+                .filter_map(|(&member, &candidate)| {
+                    (candidate == group
+                        && self.session_ids.get(&member).copied() == Some(session)
+                        && self
+                            .process_wait_states
+                            .get(&member)
+                            .is_some_and(|state| !state.exit_observed))
+                    .then_some(member)
+                })
+                .collect();
+            if !members.iter().any(|member| {
+                self.process_wait_states
+                    .get(member)
+                    .is_some_and(|state| state.stopped)
+            }) {
+                continue;
+            }
+            // Generate hangup before continue for the entire group, including
+            // running members. Existing signal delivery/resume paths enforce
+            // native authority; no PID capture or kernel POSIX policy is used.
+            for &member in &members {
+                self.enqueue_signal(member, protocol::SIGNAL_HUP)?;
+            }
+            for member in members {
+                self.enqueue_signal(member, protocol::SIGNAL_CONT)?;
+            }
+        }
+        Ok(())
     }
 
     /// The inherited bootstrap process is the userspace orphan reaper. Moving
@@ -864,7 +948,7 @@ impl<H: Copy> PosixService<H> {
             if !matches!(processes.status(handle)?, ProcessLifecycle::Exited { .. }) {
                 continue;
             }
-            self.reparent_children_of_exited(process_id);
+            self.observe_process_exit(process_id)?;
             let parent = *self
                 .parents
                 .get(&process_id)
@@ -886,6 +970,7 @@ impl<H: Copy> PosixService<H> {
                 Some(state)
                     if (!state.exit_notified && self.parents.contains_key(child_id))
                         || self.has_reparentable_children(*child_id)
+                        || self.needs_parent_exit_observation(*child_id)
                         || self.controlling_terminals.contains_key(child_id) =>
                 {
                     self.processes.get(child_id).copied()
@@ -1438,8 +1523,7 @@ impl<H: Copy> PosixService<H> {
         filesystem: &mut F,
         processes: &mut P,
     ) -> Result<(), i32> {
-        self.hangup_exited_controlling_process(child_id)?;
-        self.reparent_children_of_exited(child_id);
+        self.observe_process_exit(child_id)?;
         self.orphaned_processes.remove(&child_id);
         if let Some(children) = self.children.get_mut(&parent_id) {
             children.remove(&child_id);

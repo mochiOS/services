@@ -4540,6 +4540,311 @@ fn terminal_exit_family() -> (
     (service, peers, filesystem, processes)
 }
 
+fn orphan_job_family() -> (
+    PosixService,
+    [PeerIdentity; 5],
+    RecordingFilesystem,
+    RecordingProcesses,
+) {
+    let (mut service, peers, filesystem, processes) = terminal_exit_family();
+    // Isolate orphan-group policy from controlling-terminal hangup policy.
+    assert_eq!(
+        service
+            .handle_terminal(
+                peers[1],
+                protocol::Header {
+                    opcode: protocol::OP_TERMINAL_RELEASE,
+                    ..Default::default()
+                },
+                &[],
+                77
+            )
+            .header
+            .status,
+        0
+    );
+    (service, peers, filesystem, processes)
+}
+
+fn stop_job_member(
+    service: &mut PosixService,
+    parent: PeerIdentity,
+    member: PeerIdentity,
+    processes: &mut RecordingProcesses,
+) {
+    let delivery = deliver_signal(service, parent, member, protocol::SIGNAL_STOP);
+    let mut bytes = [0; protocol::SIGNAL_DELIVERY_LEN];
+    protocol::encode_signal_delivery(delivery, &mut bytes).unwrap();
+    service
+        .report_process_stopped(member, &bytes, processes)
+        .unwrap();
+}
+
+fn consume_job_hangup_and_continue(service: &mut PosixService, member: PeerIdentity) {
+    for signal in [protocol::SIGNAL_HUP, protocol::SIGNAL_CONT] {
+        let delivery = dequeue_signal(service, member);
+        assert_eq!(delivery.signal, signal);
+        let mut bytes = [0; protocol::SIGNAL_DELIVERY_LEN];
+        protocol::encode_signal_delivery(delivery, &mut bytes).unwrap();
+        service.complete_signal_delivery(member, &bytes).unwrap();
+    }
+}
+
+#[test]
+fn parent_exit_continues_the_whole_newly_orphaned_job_once_without_reaping_it() {
+    let (mut service, [init, parent, first, second, background], mut filesystem, mut processes) =
+        orphan_job_family();
+    stop_job_member(&mut service, parent, first, &mut processes);
+    assert_eq!(
+        service.refresh_child_exit_notifications(&mut processes),
+        Ok(0)
+    );
+    processes.states.remove(&(parent.process_id as u32));
+    assert_eq!(
+        service.refresh_child_exit_notifications(&mut processes),
+        Err(-3)
+    );
+    assert_eq!(service.signal_state(first.process_id).unwrap().pending(), 0);
+    assert!(
+        service
+            .process_resume_notification_processes()
+            .next()
+            .is_none()
+    );
+    processes.states.insert(
+        parent.process_id as u32,
+        ProcessLifecycle::Exited { exit_code: 0 },
+    );
+    assert_eq!(
+        service.refresh_child_exit_notifications(&mut processes),
+        Ok(1)
+    );
+    for member in [first, second] {
+        assert_eq!(service.parent_id(member.process_id), Some(init.process_id));
+        consume_job_hangup_and_continue(&mut service, member);
+    }
+    assert_eq!(
+        service
+            .signal_state(background.process_id)
+            .unwrap()
+            .pending(),
+        0
+    );
+    assert_eq!(
+        service
+            .process_resume_notification_processes()
+            .collect::<Vec<_>>(),
+        [first.process_id, second.process_id]
+    );
+    assert!(processes.released.is_empty());
+    assert!(processes.terminated.is_empty());
+    let continued = service
+        .wait_child(
+            init,
+            protocol::WaitRequest {
+                selector: first.process_id as i64,
+                options: protocol::WAIT_NOHANG | protocol::WAIT_CONTINUED,
+            },
+            &mut filesystem,
+            &mut processes,
+        )
+        .unwrap();
+    assert_eq!(
+        (continued.process_id, continued.status),
+        (first.process_id, protocol::WAIT_STATUS_CONTINUED)
+    );
+    assert_eq!(
+        service.refresh_child_exit_notifications(&mut processes),
+        Ok(0)
+    );
+    for member in [first, second] {
+        assert_eq!(
+            service.signal_state(member.process_id).unwrap().pending(),
+            0
+        );
+    }
+}
+
+#[test]
+fn immediate_wait_applies_orphan_job_policy_without_a_lifecycle_refresh() {
+    let (mut service, [init, parent, first, second, _], mut filesystem, mut processes) =
+        orphan_job_family();
+    stop_job_member(&mut service, parent, first, &mut processes);
+    processes.states.insert(
+        parent.process_id as u32,
+        ProcessLifecycle::Exited { exit_code: 0 },
+    );
+    service
+        .wait_child(
+            init,
+            protocol::WaitRequest {
+                selector: parent.process_id as i64,
+                options: 0,
+            },
+            &mut filesystem,
+            &mut processes,
+        )
+        .unwrap();
+    for member in [first, second] {
+        consume_job_hangup_and_continue(&mut service, member);
+    }
+    assert_eq!(processes.released, [parent.process_id as u32]);
+}
+
+#[test]
+fn another_live_parent_keeps_the_job_connected_until_its_own_exit() {
+    let (mut service, [_, parent, first, second, connector], mut filesystem, mut processes) =
+        orphan_job_family();
+    let third = PeerIdentity {
+        process_id: 4105,
+        ..connector
+    };
+    service
+        .adopt_child(
+            connector,
+            AuthenticatedProcess {
+                handle: 4105,
+                process_id: third.process_id,
+            },
+            &mut filesystem,
+        )
+        .unwrap();
+    let mut group = [0; protocol::PROCESS_GROUP_REQUEST_LEN];
+    protocol::encode_process_group_request(
+        third.process_id as i64,
+        first.process_id as i64,
+        &mut group,
+    )
+    .unwrap();
+    assert_eq!(
+        service
+            .handle(
+                connector,
+                protocol::Header {
+                    opcode: protocol::OP_SET_PROCESS_GROUP,
+                    ..Default::default()
+                },
+                &group
+            )
+            .header
+            .status,
+        0
+    );
+    processes.states.insert(4105, ProcessLifecycle::Running);
+    stop_job_member(&mut service, parent, first, &mut processes);
+    processes.states.insert(
+        parent.process_id as u32,
+        ProcessLifecycle::Exited { exit_code: 0 },
+    );
+    service
+        .refresh_child_exit_notifications(&mut processes)
+        .unwrap();
+    for member in [first, second, third] {
+        assert_eq!(
+            service.signal_state(member.process_id).unwrap().pending(),
+            0
+        );
+    }
+    assert!(
+        service
+            .process_resume_notification_processes()
+            .next()
+            .is_none()
+    );
+    processes.states.insert(
+        connector.process_id as u32,
+        ProcessLifecycle::Exited { exit_code: 0 },
+    );
+    service
+        .refresh_child_exit_notifications(&mut processes)
+        .unwrap();
+    for member in [first, second, third] {
+        consume_job_hangup_and_continue(&mut service, member);
+    }
+}
+
+#[test]
+fn running_jobs_and_groups_already_orphaned_are_not_hung_up_on_parent_exit() {
+    let (mut service, [_, parent, first, second, background], _, mut processes) =
+        orphan_job_family();
+    // This member is already in its parent's group, so that group was already
+    // orphaned. Its stop must not cause unrelated running groups to hang up.
+    stop_job_member(&mut service, parent, background, &mut processes);
+    processes.states.insert(
+        parent.process_id as u32,
+        ProcessLifecycle::Exited { exit_code: 0 },
+    );
+    service
+        .refresh_child_exit_notifications(&mut processes)
+        .unwrap();
+    for member in [first, second, background] {
+        assert_eq!(
+            service.signal_state(member.process_id).unwrap().pending(),
+            0
+        );
+    }
+    assert!(
+        service
+            .process_resume_notification_processes()
+            .next()
+            .is_none()
+    );
+}
+
+#[test]
+fn an_exited_parent_is_not_a_job_control_connection_even_with_frozen_links() {
+    let (mut service, init, parent, child, _, mut processes) = orphan_family();
+    let mut group = [0; protocol::PROCESS_GROUP_REQUEST_LEN];
+    protocol::encode_process_group_request(0, 0, &mut group).unwrap();
+    assert_eq!(
+        service
+            .handle(
+                child,
+                protocol::Header {
+                    opcode: protocol::OP_SET_PROCESS_GROUP,
+                    ..Default::default()
+                },
+                &group
+            )
+            .header
+            .status,
+        0
+    );
+    stop_job_member(&mut service, parent, child, &mut processes);
+    processes.termination_pending = true;
+    assert_eq!(
+        service.begin_launched_tree_termination(
+            init,
+            AuthenticatedProcess {
+                handle: 142,
+                process_id: child.process_id,
+            },
+            &mut processes,
+        ),
+        Err(protocol::STATUS_EAGAIN)
+    );
+    processes
+        .states
+        .insert(141, ProcessLifecycle::Exited { exit_code: 0 });
+    service
+        .refresh_child_exit_notifications(&mut processes)
+        .unwrap();
+    assert_eq!(service.parent_id(child.process_id), Some(parent.process_id));
+    assert!(processes.released.is_empty());
+    consume_job_hangup_and_continue(&mut service, child);
+    assert_eq!(
+        service
+            .process_resume_notification_processes()
+            .collect::<Vec<_>>(),
+        [child.process_id]
+    );
+    assert_eq!(
+        service.refresh_child_exit_notifications(&mut processes),
+        Ok(0)
+    );
+    assert_eq!(service.signal_state(child.process_id).unwrap().pending(), 0);
+}
+
 #[test]
 fn controlling_process_exit_hangs_up_only_foreground_members_once_before_wait() {
     let (mut service, [parent, leader, first, second, background], mut filesystem, mut processes) =
