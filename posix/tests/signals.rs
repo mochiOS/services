@@ -86,6 +86,63 @@ fn disposition(signal: u32, kind: u32) -> protocol::SignalDisposition {
 }
 
 #[test]
+fn installed_image_preserves_ignore_and_pending_but_resets_caught_and_action_flags() {
+    let identity = peer(101, 501);
+    let service = Rc::new(RefCell::new(PosixService::new()));
+    register(&mut service.borrow_mut(), identity);
+    let caller = client(&service, identity);
+    caller.set_signal_disposition(disposition(10, 1)).unwrap();
+    caller.set_signal_disposition(disposition(12, 2)).unwrap();
+    caller
+        .set_signal_disposition(protocol::SignalDisposition {
+            signal: protocol::SIGNAL_CHLD,
+            kind: protocol::SIGNAL_DISPOSITION_IGNORE,
+            child_options: protocol::SIGNAL_CHILD_OPTION_NOCLDSTOP,
+        })
+        .unwrap();
+    caller.send_signal(101, 12).unwrap();
+    let pending = caller.pending_signals().unwrap();
+    assert_eq!(
+        caller.signal_image_started().unwrap(),
+        (1 << 9) | (1 << (protocol::SIGNAL_CHLD - 1))
+    );
+    assert_eq!(caller.signal_disposition(10).unwrap(), disposition(10, 1));
+    assert_eq!(caller.signal_disposition(12).unwrap(), disposition(12, 0));
+    assert_eq!(
+        caller.signal_disposition(protocol::SIGNAL_CHLD).unwrap(),
+        disposition(protocol::SIGNAL_CHLD, 1)
+    );
+    assert_eq!(caller.pending_signals().unwrap(), pending);
+    assert_eq!(caller.dequeue_signal(0).unwrap(), 12);
+}
+
+#[test]
+fn malformed_image_start_does_not_reset_caught_dispositions() {
+    let identity = peer(101, 501);
+    let service = Rc::new(RefCell::new(PosixService::new()));
+    register(&mut service.borrow_mut(), identity);
+    let caller = client(&service, identity);
+    caller.set_signal_disposition(disposition(12, 2)).unwrap();
+    for (flags, payload) in [(1, &[][..]), (0, &[1][..])] {
+        let response = service.borrow_mut().handle(
+            identity,
+            protocol::Header {
+                opcode: protocol::OP_SIGNAL_IMAGE_STARTED,
+                flags,
+                ..Default::default()
+            },
+            payload,
+        );
+        assert_eq!(response.header.status, -22);
+        assert_eq!(caller.signal_disposition(12).unwrap(), disposition(12, 2));
+    }
+    assert_eq!(
+        client(&service, peer(999, 0)).signal_image_started(),
+        Err(ClientError::Remote(protocol::STATUS_ESRCH))
+    );
+}
+
+#[test]
 fn disposition_wire_is_pointer_free_and_rejects_malformed_metadata() {
     let action = disposition(10, protocol::SIGNAL_DISPOSITION_CAUGHT);
     let mut bytes = [0; protocol::SIGNAL_DISPOSITION_LEN];

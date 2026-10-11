@@ -2088,6 +2088,21 @@ impl<H: Copy> PosixService<H> {
         Ok(output)
     }
 
+    fn signal_image_started_payload(&mut self, process_id: u64) -> Result<Vec<u8>, i32> {
+        let state = self
+            .signals
+            .get_mut(&process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let mut output = vec![0; protocol::SIGNAL_MASK_LEN];
+        protocol::encode_signal_mask(state.ignored, &mut output).map_err(|_| STATUS_EINVAL)?;
+        // Startup is reached only after native image replacement succeeds.
+        // Pending signals survive exec, unlike fork. Handler addresses and
+        // action flags do not survive, even for an ignored signal.
+        state.caught = 0;
+        self.signal_child_options.insert(process_id, 0);
+        Ok(output)
+    }
+
     fn dequeue_signal_payload(&mut self, process_id: u64, payload: &[u8]) -> Result<Vec<u8>, i32> {
         let blocked = protocol::decode_signal_mask(payload).map_err(|_| STATUS_EINVAL)?;
         let signal = self
@@ -2324,6 +2339,9 @@ impl<H: Copy> PosixService<H> {
             protocol::OP_SIGNAL_DISPOSITION if header.flags <= protocol::SIGNAL_DISPOSITION_SET => {
                 self.signal_disposition_payload(peer.process_id, header.flags, payload)
             }
+            protocol::OP_SIGNAL_IMAGE_STARTED if header.flags == 0 && payload.is_empty() => {
+                self.signal_image_started_payload(peer.process_id)
+            }
             protocol::OP_PING
             | protocol::OP_SESSION_REGISTER
             | protocol::OP_SIGNAL_THREAD_REGISTER
@@ -2372,6 +2390,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_PROCESS_SIGNALED
             | protocol::OP_SIGNAL_CHILD_OPTIONS
             | protocol::OP_SIGNAL_DISPOSITION
+            | protocol::OP_SIGNAL_IMAGE_STARTED
             | protocol::OP_FTRUNCATE
             | protocol::OP_FSYNC
             | protocol::OP_FGETFL
