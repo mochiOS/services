@@ -17,6 +17,20 @@ static long long elapsed_ms(struct timespec start, struct timespec end) {
 
 int main(void) {
     fprintf(stderr, "dictionary-read: start\n");
+    /* ext4plus's indirect-block reads allocate a zeroed filesystem block.
+     * Measure that runtime cost independently of IPC and storage access. */
+    struct timespec allocation_start, allocation_end;
+    if (clock_gettime(CLOCK_MONOTONIC, &allocation_start)) return 13;
+    for (unsigned i = 0; i < 40000; ++i) {
+        unsigned char *block = calloc(4096, 1);
+        if (!block) return 14;
+        if (*(volatile unsigned char *)block != 0) return 15;
+        *(volatile unsigned char *)block = 1;
+        free(block);
+    }
+    if (clock_gettime(CLOCK_MONOTONIC, &allocation_end)) return 16;
+    fprintf(stderr, "dictionary-read: 40000 zeroed block allocations in %lld ms\n",
+            elapsed_ms(allocation_start, allocation_end));
     int fd = open("/system/libraries/ime/ja.mime", O_RDONLY);
     struct stat info;
     if (fd < 0 || fstat(fd, &info) || info.st_size <= 0) {
