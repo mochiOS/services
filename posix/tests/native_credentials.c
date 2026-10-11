@@ -8,6 +8,11 @@ int main(void) {
     const uid_t keep_uid = (uid_t)-1;
     const gid_t keep_gid = (gid_t)-1;
     fprintf(stderr, "native-credentials: start\n");
+    /* Native creation has no POSIX parent in mnu. This must come from the
+     * creator's userspace registration, before this image first executes. */
+    pid_t parent = getppid();
+    if (parent <= 0 || parent == getpid()) return 14;
+    fprintf(stderr, "native-credentials: registered POSIX parent %d\n", (int)parent);
     if (getuid() != 0 || geteuid() != 0) return 1;
     errno = 123;
     if (setreuid(keep_uid, keep_uid) || errno != 123) return 2;

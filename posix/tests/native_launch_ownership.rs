@@ -110,6 +110,29 @@ fn display_launch_and_readiness_use_retained_handles_without_legacy_fallback() {
 }
 
 #[test]
+fn fixed_services_register_userspace_posix_state_before_resume_with_rollback() {
+    let launcher = include_str!("../../service-manager/src/service_launcher.rs");
+    let native = launcher
+        .split("fn spawn_native(")
+        .nth(1)
+        .unwrap()
+        .split("pub(crate) fn spawn_mboot_agent(")
+        .next()
+        .unwrap();
+    assert!(native.contains("resolve_execution_security(spec.path, spec.execution_class)?"));
+    assert!(native.contains("NativeProcess::create_with_rollback"));
+    assert!(!native.contains("create_and_resume"));
+    assert!(!native.contains("thread_security_context"));
+    let compact: String = native
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    assert!(compact.contains("client.register_spawned_child(ObjectHandleAttachment{handle,rights:mnu_abi::HANDLE_RIGHT_WAIT|mnu_abi::HANDLE_RIGHT_SIGNAL,},0,0,&[],)"));
+    assert!(compact.contains("client.abort_launched_child(ObjectHandleAttachment{handle,rights:mnu_abi::HANDLE_RIGHT_WAIT,})"));
+    assert!(native.contains("close(image.handle)"));
+}
+
+#[test]
 fn compositor_creation_keeps_a_native_owner_and_has_no_path_launch_fallback() {
     let launcher = include_str!("../../service-manager/src/service_launcher.rs");
     let start = launcher

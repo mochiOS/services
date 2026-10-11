@@ -197,7 +197,9 @@ fn spawn_native(
     arguments: &[String],
     posix_endpoint: platform::handle::Handle,
 ) -> Result<NativeProcess, mochi_user_syscall::SysError> {
-    use mochios_posix_client::{Client, ClientError, OpenAtBase, SyscallEndpointTransport};
+    use mochios_posix_client::{
+        Client, ClientError, ObjectHandleAttachment, OpenAtBase, SyscallEndpointTransport,
+    };
     let mut random = [0; 16];
     platform::random::fill(&mut random)?;
     let metadata = encode_native_launch(spec.path, label, arguments, random)
@@ -223,7 +225,35 @@ fn spawn_native(
     // capture API. Always release it, including authorization/create failure.
     let result = (|| {
         resolve_execution_security(spec.path, spec.execution_class)?;
-        NativeProcess::create_and_resume(image.handle, &metadata)
+        // Fixed system services run as POSIX root by userspace policy. Register
+        // their environment and parent before execution; never derive it from
+        // the new native task's default kernel credentials. Native capability
+        // authorization above remains independent of these POSIX IDs.
+        NativeProcess::create_with_rollback(
+            image.handle,
+            &metadata,
+            |handle| {
+                client
+                    .register_spawned_child(
+                        ObjectHandleAttachment {
+                            handle,
+                            rights: mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_SIGNAL,
+                        },
+                        0,
+                        0,
+                        &[],
+                    )
+                    .map_err(client_error)
+            },
+            |handle| {
+                if let Err(error) = client.abort_launched_child(ObjectHandleAttachment {
+                    handle,
+                    rights: mnu_abi::HANDLE_RIGHT_WAIT,
+                }) {
+                    platform::logln!("service-manager.service: fixed service rollback failed: {error:?}");
+                }
+            },
+        )
     })();
     let _ = platform::handle::close(image.handle);
     result
