@@ -1554,6 +1554,284 @@ fn fresh_child_initialization_cannot_elevate_nonroot_posix_authority() {
     assert_eq!(service.session(312).unwrap().effective_uid, 505);
 }
 
+#[test]
+fn broker_launch_inherits_the_requester_not_the_broker() {
+    let broker = PeerIdentity {
+        process_id: 321,
+        effective_uid: 0,
+        effective_gid: 0,
+    };
+    let mut service = service_for(broker);
+    assert_eq!(
+        service
+            .handle(
+                broker,
+                protocol::Header {
+                    opcode: protocol::OP_SESSION_REGISTER,
+                    ..Default::default()
+                },
+                &[]
+            )
+            .header
+            .status,
+        0
+    );
+    let mut filesystem = RecordingFilesystem::default();
+    service
+        .adopt_spawned_child(
+            broker,
+            AuthenticatedProcess {
+                handle: 322,
+                process_id: 322,
+            },
+            505,
+            24,
+            &[10, 20],
+            &mut filesystem,
+        )
+        .unwrap();
+    let requester = PeerIdentity {
+        process_id: 322,
+        effective_uid: 0,
+        effective_gid: 0,
+    };
+    let mut mask = [0; protocol::UMASK_PAYLOAD_LEN];
+    protocol::encode_umask(0o27, &mut mask).unwrap();
+    let mut limits = [0; protocol::RESOURCE_LIMIT_REQUEST_LEN];
+    let inherited_limit = protocol::ResourceLimit { soft: 7, hard: 17 };
+    protocol::encode_resource_limit_request(
+        protocol::ResourceLimitRequest {
+            process_id: 0,
+            resource: protocol::RLIMIT_NOFILE,
+            flags: protocol::RESOURCE_LIMIT_SET,
+            limit: inherited_limit,
+        },
+        &mut limits,
+    )
+    .unwrap();
+    assert_eq!(
+        service
+            .handle(
+                requester,
+                protocol::Header {
+                    opcode: protocol::OP_RESOURCE_LIMIT,
+                    ..Default::default()
+                },
+                &limits
+            )
+            .header
+            .status,
+        0
+    );
+    assert_eq!(
+        service
+            .handle_objects(
+                requester,
+                protocol::Header {
+                    opcode: protocol::OP_GETCWD,
+                    ..Default::default()
+                },
+                &[],
+                &[],
+                &mut filesystem
+            )
+            .response
+            .header
+            .status,
+        0
+    );
+    assert_eq!(
+        service
+            .handle(
+                requester,
+                protocol::Header {
+                    opcode: protocol::OP_UMASK_SET,
+                    ..Default::default()
+                },
+                &mask
+            )
+            .header
+            .status,
+        0
+    );
+    service
+        .adopt_launched_child(
+            broker,
+            AuthenticatedProcess {
+                handle: 1322,
+                process_id: 322,
+            },
+            AuthenticatedProcess {
+                handle: 323,
+                process_id: 323,
+            },
+            &mut filesystem,
+        )
+        .unwrap();
+    let child = service.session(323).unwrap();
+    assert_eq!(
+        (child.real_uid, child.effective_uid, child.saved_uid),
+        (505, 505, 505)
+    );
+    assert_eq!(
+        (child.real_gid, child.effective_gid, child.saved_gid),
+        (24, 24, 24)
+    );
+    assert_eq!(child.umask, 0o27);
+    assert_eq!(service.supplementary_groups(323), Some(&[10, 20][..]));
+    assert_eq!(service.parent_id(323), Some(322));
+    assert!(service.is_child(322, 323));
+    assert!(!service.is_child(321, 323));
+    assert_eq!(service.process_handle(323), Some(323));
+    protocol::encode_resource_limit_request(
+        protocol::ResourceLimitRequest {
+            process_id: 0,
+            resource: protocol::RLIMIT_NOFILE,
+            flags: 0,
+            limit: Default::default(),
+        },
+        &mut limits,
+    )
+    .unwrap();
+    let child_limit = service.handle(
+        PeerIdentity {
+            process_id: 323,
+            ..requester
+        },
+        protocol::Header {
+            opcode: protocol::OP_RESOURCE_LIMIT,
+            ..Default::default()
+        },
+        &limits,
+    );
+    assert_eq!(child_limit.header.status, 0);
+    assert_eq!(
+        protocol::decode_resource_limit(&child_limit.payload).unwrap(),
+        inherited_limit
+    );
+    assert_eq!(filesystem.retained.len(), 2);
+    let parent_directories = service.session_directories(322).unwrap();
+    let child_directories = service.session_directories(323).unwrap();
+    assert_eq!(
+        child_directories.root.handle,
+        parent_directories.root.handle + 1000
+    );
+    assert_eq!(
+        child_directories.cwd.handle,
+        parent_directories.cwd.handle + 1000
+    );
+    // The inspection-only requester attachment is not stored as its owner.
+    assert_eq!(service.process_handle(322), Some(322));
+    assert_eq!(
+        service.adopt_launched_child(
+            broker,
+            AuthenticatedProcess {
+                handle: 322,
+                process_id: 322
+            },
+            AuthenticatedProcess {
+                handle: 1323,
+                process_id: 323
+            },
+            &mut filesystem
+        ),
+        Err(STATUS_EINVAL)
+    );
+    assert_eq!(service.parent_id(323), Some(322));
+    assert_eq!(
+        service
+            .handle(
+                broker,
+                protocol::Header {
+                    opcode: protocol::OP_PROCESS_LAUNCHED,
+                    ..Default::default()
+                },
+                &[]
+            )
+            .header
+            .status,
+        STATUS_EINVAL
+    );
+}
+
+#[test]
+fn launch_registration_never_trusts_native_root_or_unknown_requester() {
+    let broker = PeerIdentity {
+        process_id: 331,
+        effective_uid: 505,
+        effective_gid: 24,
+    };
+    let mut service = service_for(broker);
+    service.handle(
+        broker,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..Default::default()
+        },
+        &[],
+    );
+    let mut filesystem = RecordingFilesystem::default();
+    assert_eq!(
+        service.adopt_launched_child(
+            PeerIdentity {
+                effective_uid: 0,
+                ..broker
+            },
+            AuthenticatedProcess {
+                handle: 331,
+                process_id: 331
+            },
+            AuthenticatedProcess {
+                handle: 332,
+                process_id: 332
+            },
+            &mut filesystem
+        ),
+        Err(protocol::STATUS_EPERM)
+    );
+    assert!(service.session(332).is_none());
+    assert!(service.process_handle(332).is_none());
+    assert!(filesystem.retained.is_empty());
+    let root = PeerIdentity {
+        process_id: 333,
+        effective_uid: 0,
+        effective_gid: 0,
+    };
+    service
+        .bind_process(
+            root,
+            AuthenticatedProcess {
+                handle: 333,
+                process_id: 333,
+            },
+        )
+        .unwrap();
+    service.handle(
+        root,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..Default::default()
+        },
+        &[],
+    );
+    assert_eq!(
+        service.adopt_launched_child(
+            root,
+            AuthenticatedProcess {
+                handle: 999,
+                process_id: 999
+            },
+            AuthenticatedProcess {
+                handle: 332,
+                process_id: 332
+            },
+            &mut filesystem
+        ),
+        Err(protocol::STATUS_ESRCH)
+    );
+    assert!(service.process_handle(332).is_none());
+}
+
 fn sample_status() -> protocol::FileStatus {
     protocol::FileStatus {
         device: 1,

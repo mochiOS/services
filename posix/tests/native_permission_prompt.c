@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -74,7 +75,9 @@ static void pause_tick(void) {
   nanosleep(&delay, 0);
 }
 
-static int credential_child(void) {
+static int credential_child(uint64_t expected_parent) {
+  if (expected_parent != 0)
+    CHECK((uint64_t)getppid() == expected_parent);
   gid_t groups[4] = {777, 777, 777, 777};
   CHECK(getuid() == 505 && geteuid() == 505);
   CHECK(getgid() == 24 && getegid() == 24);
@@ -119,6 +122,73 @@ static int credential_overflow_child(void) {
   fprintf(stderr, "credential-overflow: PASS all four queries return invalid "
                   "ID/EOVERFLOW, never root\n");
   return 37;
+}
+
+static int launched_child(uint32_t posix, uint64_t authority, uint32_t image,
+                          uint32_t requester) {
+  unsigned char metadata[20000], reply[2048];
+  int fd = open("/system/resources/native-launch-metadata.bin", O_RDONLY);
+  CHECK(fd >= 0);
+  ssize_t length = read(fd, metadata, sizeof(metadata));
+  CHECK(length > 0 && close(fd) == 0);
+  size_t grants = 32 + get32(metadata + 8) + get32(metadata + 24) + get32(metadata + 12);
+  CHECK(grants + 24 <= (size_t)length);
+  put32(metadata + grants + 8, posix);
+  struct process_status parent_status = {0};
+  CHECK(N(PROCESS_STATUS, requester, &parent_status, 0) == 0);
+  const char placeholder[] = "--expected-parent=00000000000000000000";
+  int patched = 0;
+  for (size_t i = 0; i + sizeof(placeholder) <= (size_t)length; ++i) {
+    if (memcmp(metadata + i, placeholder, sizeof(placeholder)) == 0) {
+      char decimal[21];
+      CHECK(snprintf(decimal, sizeof(decimal), "%020llu",
+                     (unsigned long long)parent_status.process) == 20);
+      memcpy(metadata + i + 18, decimal, 20);
+      patched++;
+    }
+  }
+  CHECK(patched == 1);
+  const char path[] = "/system/services/input.service";
+  unsigned char authorization[12 + sizeof(path) - 1] = {0};
+  put32(authorization, 0x43414553);
+  put64(authorization + 4, 2);
+  memcpy(authorization + 12, path, sizeof(path) - 1);
+  int64_t message = native6(IPC_CALL, authority, (uint64_t)authorization,
+                            sizeof(authorization), (uint64_t)reply, sizeof(reply), 0);
+  CHECK(message >= 0 && get64(reply) == 0);
+  int64_t child = N(PROCESS_CREATE, image, metadata, length);
+  CHECK(child > 0);
+  unsigned char registration[32] = {0};
+  memcpy(registration, "POSX", 4);
+  registration[4] = 1;
+  registration[6] = 56; /* OP_PROCESS_LAUNCHED, no identity payload. */
+  put64(registration + 8, 8);
+  struct attachments handles = {0};
+  for (unsigned scenario = 0; scenario < 3; ++scenario) {
+    memset(&handles, 0, sizeof(handles));
+    handles.count = 2;
+    handles.entries[0].handle = requester;
+    handles.entries[0].rights = scenario == 0 ? 16 | 32 : 16;
+    handles.entries[1].handle = (uint32_t)child;
+    handles.entries[1].rights = 16 | 32;
+    message = native6(IPC_CALL_HANDLES, posix, (uint64_t)registration,
+                      sizeof(registration), (uint64_t)reply, sizeof(reply), (uint64_t)&handles);
+    CHECK(message >= 0 && (uint32_t)message == 32 && handles.count == 0);
+    CHECK((int32_t)get32(reply + 24) == (scenario == 1 ? 0 : -22));
+  }
+  CHECK(N(PROCESS_RESUME, child, 0, 0) == 0);
+  struct process_status status = {0};
+  for (unsigned attempt = 0; attempt < 500; ++attempt) {
+    CHECK(N(PROCESS_STATUS, child, &status, 0) == 0);
+    if (status.state == 2)
+      break;
+    pause_tick();
+  }
+  CHECK(status.state == 2 && status.exit_code == 37);
+  CHECK(N(HANDLE_CLOSE, child, 0, 0) == 0);
+  fprintf(stderr, "broker-launch: PASS two attenuated ProcessHandles, requester "
+                  "credentials/groups/parent, duplicate rejection and retained exit\n");
+  return 0;
 }
 
 static int fresh_spawn(int64_t posix, int64_t authority, int overflow) {
@@ -215,6 +285,8 @@ static int fresh_spawn(int64_t posix, int64_t authority, int overflow) {
               (uint64_t)reply, sizeof(reply), (uint64_t)&handles);
   CHECK(message >= 0 && (uint32_t)message == 32 &&
         (int32_t)get32(reply + 24) == -22 && handles.count == 0);
+  if (!overflow)
+    CHECK(launched_child((uint32_t)posix, (uint64_t)authority, image, (uint32_t)process) == 0);
   CHECK(N(PROCESS_RESUME, process, 0, 0) == 0);
   struct process_status status = {0};
   for (unsigned attempt = 0; attempt < 500; ++attempt) {
@@ -250,7 +322,13 @@ static int entropy_probe(void) {
 
 int main(int argc, char **argv) {
   if (argc == 2 && strcmp(argv[1], "--credential-child") == 0)
-    return credential_child();
+    return credential_child(0);
+  if (argc == 3 && strcmp(argv[1], "--launched-child") == 0) {
+    CHECK(strncmp(argv[2], "--expected-parent=", 18) == 0);
+    uint64_t expected_parent = strtoull(argv[2] + 18, NULL, 10);
+    CHECK(expected_parent != 0);
+    return credential_child(expected_parent);
+  }
   if (argc == 2 && strcmp(argv[1], "--credential-overflow") == 0)
     return credential_overflow_child();
   CHECK(entropy_probe() == 0);

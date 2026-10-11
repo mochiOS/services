@@ -93,9 +93,14 @@ requires = []
             "spawn-overflow-metadata.bin",
             b"--credential-overflow".as_slice(),
         ),
+        ("launch-probe-metadata.bin", b"--launched-child".as_slice()),
     ] {
+        let mut arguments = vec![b"fresh-spawn-probe".as_slice(), mode];
+        if filename == "launch-probe-metadata.bin" {
+            arguments.push(b"--expected-parent=00000000000000000000");
+        }
         let length = mochios_posix_client::process_image::encode_initial_stack(
-            &[b"fresh-spawn-probe", mode],
+            &arguments,
             &[],
             executable,
             [7; 16],
@@ -175,6 +180,10 @@ fn permission_probe_matches_native_abi_and_never_edits_real_ui_policy() {
     assert!(compact.contains(&format!(
         "registration[6]={};",
         mochios_posix_protocol::OP_PROCESS_SPAWNED
+    )));
+    assert!(compact.contains(&format!(
+        "registration[6]={};",
+        mochios_posix_protocol::OP_PROCESS_LAUNCHED
     )));
     assert!(compact.contains(&format!(
         "put32(request,{:#x});",

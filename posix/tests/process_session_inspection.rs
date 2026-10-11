@@ -159,7 +159,10 @@ fn native_inspection_authenticates_handle_and_never_retains_query_reference() {
     let start = source
         .find("if header.opcode == protocol::OP_PROCESS_SESSION_INFO")
         .unwrap();
-    let end = start + source[start..].find("if matches!(").unwrap();
+    let end = start
+        + source[start..]
+            .find("if header.opcode == protocol::OP_PROCESS_LAUNCHED")
+            .unwrap();
     let dispatch = &source[start..end];
     assert!(dispatch.contains("payload.is_empty()"));
     assert!(dispatch.contains("attachments.len() == 1"));

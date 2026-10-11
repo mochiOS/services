@@ -214,6 +214,30 @@ fn main() {
                 })
             }
             (Some(peer), Some((header, payload)), true)
+                if header.opcode == protocol::OP_PROCESS_LAUNCHED
+                    && header.flags == 0
+                    && payload.is_empty()
+                    && attachments.len() == 2 =>
+            {
+                let status = adopt_launched_child(
+                    &mut service,
+                    peer,
+                    attachments[0],
+                    attachments[1],
+                    &mut filesystem,
+                );
+                if status.is_ok() {
+                    retained_handle = Some(attachments[1].handle);
+                }
+                Some(posix_service::ObjectResponse {
+                    response: match status {
+                        Ok(()) => success_response(header.request_id),
+                        Err(status) => status_response(header.request_id, status),
+                    },
+                    handles: Vec::new(),
+                })
+            }
+            (Some(peer), Some((header, payload)), true)
                 if matches!(
                     header.opcode,
                     protocol::OP_TERMINAL_ACQUIRE
@@ -920,6 +944,44 @@ fn adopt_sender_child(
     } else {
         service.adopt_child(peer, process, filesystem)
     }
+}
+
+#[cfg(target_os = "mochios")]
+fn adopt_launched_child(
+    service: &mut posix_service::PosixService<u32>,
+    peer: posix_service::PeerIdentity,
+    requester: posix_service::AttachedObject<u32>,
+    child: posix_service::AttachedObject<u32>,
+    filesystem: &mut RuntimeFilesystem,
+) -> Result<(), i32> {
+    use mochi_user_platform as platform;
+    if requester.rights != platform::handle::HANDLE_RIGHT_WAIT
+        || child.rights
+            != platform::handle::HANDLE_RIGHT_WAIT | platform::handle::HANDLE_RIGHT_SIGNAL
+    {
+        return Err(posix_service::STATUS_EINVAL);
+    }
+    let parent_status =
+        platform::process::handle_status(requester.handle).map_err(|error| error.raw() as i32)?;
+    let child_status =
+        platform::process::handle_status(child.handle).map_err(|error| error.raw() as i32)?;
+    if parent_status.state == platform::process::PROCESS_STATE_EXITED
+        || child_status.state == platform::process::PROCESS_STATE_EXITED
+    {
+        return Err(mochios_posix_protocol::STATUS_ESRCH);
+    }
+    service.adopt_launched_child(
+        peer,
+        posix_service::AuthenticatedProcess {
+            handle: requester.handle,
+            process_id: parent_status.process_id,
+        },
+        posix_service::AuthenticatedProcess {
+            handle: child.handle,
+            process_id: child_status.process_id,
+        },
+        filesystem,
+    )
 }
 
 #[cfg(target_os = "mochios")]

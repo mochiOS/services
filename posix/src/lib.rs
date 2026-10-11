@@ -891,6 +891,36 @@ impl<H: Copy> PosixService<H> {
         Ok(())
     }
 
+    /// Initialize a broker-created image from an authenticated requester, not
+    /// from the broker's environment. Native process creation/Handle rights
+    /// remain separately enforced by mnu. Only userspace POSIX root can assign
+    /// another process's parent relationship or credential environment.
+    pub fn adopt_launched_child<F: FilesystemBackend<H>>(
+        &mut self,
+        peer: PeerIdentity,
+        requester: AuthenticatedProcess<H>,
+        child: AuthenticatedProcess<H>,
+        filesystem: &mut F,
+    ) -> Result<(), i32> {
+        let broker = self
+            .sessions
+            .get(&peer.process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        if broker.effective_uid != 0 {
+            return Err(protocol::STATUS_EPERM);
+        }
+        let parent = self
+            .sessions
+            .get(&requester.process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let parent_peer = PeerIdentity {
+            process_id: parent.process_id,
+            effective_uid: parent.effective_uid,
+            effective_gid: parent.effective_gid,
+        };
+        self.adopt_child(parent_peer, child, filesystem)
+    }
+
     pub fn wait_child<F: FilesystemBackend<H>, P: ProcessBackend<H>>(
         &mut self,
         peer: PeerIdentity,
@@ -1674,6 +1704,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_PROCESS_FORKED
             | protocol::OP_PROCESS_SPAWNED
             | protocol::OP_PROCESS_SESSION_INFO
+            | protocol::OP_PROCESS_LAUNCHED
             | protocol::OP_WAIT_CHILD
             | protocol::OP_PROCESS_STOPPED
             | protocol::OP_PROCESS_INFO
