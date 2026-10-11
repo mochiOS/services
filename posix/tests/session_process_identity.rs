@@ -11,53 +11,11 @@ impl SysError {
     }
 }
 
-static TERMINATED: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
-
 pub mod service_ready {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct SessionIdentity {
         pub uid: u32,
         pub gid: u32,
-    }
-}
-
-pub mod handle {
-    pub const HANDLE_RIGHT_SIGNAL: u64 = mnu_abi::HANDLE_RIGHT_SIGNAL;
-    pub fn close(_: u32) -> Result<(), super::SysError> {
-        Ok(())
-    }
-}
-
-pub mod process {
-    pub struct Record {
-        pub pid: u64,
-        pub state: u64,
-        pub parent_pid: u64,
-        pub cpu_ticks: u64,
-        pub memory_bytes: u64,
-        pub thread_count: u64,
-    }
-    pub fn list(_: usize) -> Result<Vec<Record>, super::SysError> {
-        Ok([(23, 22), (22, 19), (99, 20)]
-            .into_iter()
-            .map(|(pid, parent_pid)| Record {
-                pid,
-                parent_pid,
-                state: 1,
-                cpu_ticks: 0,
-                memory_bytes: 0,
-                thread_count: 1,
-            })
-            .collect())
-    }
-    pub fn open_handle_for_process_id(pid: u64, rights: u64) -> Result<u32, super::SysError> {
-        assert_eq!(rights, super::handle::HANDLE_RIGHT_SIGNAL);
-        Ok(pid as u32)
-    }
-    pub fn terminate_handle(handle: u32, exit_code: u64) -> Result<(), super::SysError> {
-        assert_eq!(exit_code, 1);
-        super::TERMINATED.lock().unwrap().push(handle as u64);
-        Ok(())
     }
 }
 
@@ -85,10 +43,18 @@ fn native_session_ids_are_not_reinterpreted_as_launch_threads() {
 fn session_launcher_registers_credentials_before_resume_without_legacy_creation() {
     let launcher = include_str!("../../service-manager/src/service_launcher.rs");
     assert!(!launcher.contains("spawn_manifest_with_credentials"));
-    let native = launcher.split("fn spawn_native_session(").nth(1).unwrap()
-        .split("fn append_posix_handle(").next().unwrap();
+    let native = launcher
+        .split("fn spawn_native_session(")
+        .nth(1)
+        .unwrap()
+        .split("fn append_posix_handle(")
+        .next()
+        .unwrap();
     assert!(native.contains("NativeProcess::create_with_rollback"));
-    let compact: String = native.chars().filter(|character| !character.is_whitespace()).collect();
+    let compact: String = native
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
     assert!(compact.contains("client.register_spawned_child"));
     assert!(native.contains("identity.uid"));
     assert!(native.contains("identity.gid"));
@@ -101,7 +67,7 @@ fn session_launcher_registers_credentials_before_resume_without_legacy_creation(
 }
 
 #[test]
-fn session_identity_and_teardown_keep_native_process_ids() {
+fn session_identity_keeps_native_process_ids_and_session_generation_never_becomes_zero() {
     let identity = service_ready::SessionIdentity {
         uid: 1000,
         gid: 1000,
@@ -112,10 +78,13 @@ fn session_identity_and_teardown_keep_native_process_ids() {
     assert_eq!(session.workspace_pid, 20);
     assert_eq!(session.linux_pid, Some(21));
     assert_eq!(session.identity, identity);
-    production::terminate_process_tree(session.binder_pid).unwrap();
-    assert_eq!(*TERMINATED.lock().unwrap(), [23, 22, 19]);
-    let session =
-        production::ActiveSession::from_process_ids(1, identity, None, 20, 19).unwrap();
+    assert_eq!(session.next_id(), 2);
+    let final_generation = production::ActiveSession {
+        id: u64::MAX,
+        ..session
+    };
+    assert_eq!(final_generation.next_id(), 1);
+    let session = production::ActiveSession::from_process_ids(1, identity, None, 20, 19).unwrap();
     assert_eq!(session.linux_pid, None);
 }
 
@@ -126,4 +95,7 @@ fn session_construction_has_no_legacy_thread_or_credential_fallback() {
     assert!(!source.contains("thread_security_context"));
     assert!(!source.contains("ThreadSecurityContext"));
     assert!(source.contains("fn from_process_ids("));
+    assert!(!source.contains("process::list"));
+    assert!(!source.contains("parent_pid"));
+    assert!(!source.contains("open_handle_for_process_id"));
 }

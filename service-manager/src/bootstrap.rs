@@ -7,7 +7,8 @@ use crate::orchestration::{BootstrapOperations, BootstrapOutcome, MbootStage, or
 use crate::readiness::{DeferredMessage, ReadyError, ReadyHandshake, ReadyService};
 use crate::service_config::FixedService;
 use crate::service_launcher;
-use crate::session::{ActiveSession, terminate_process_tree};
+use crate::session::ActiveSession;
+use crate::session_teardown::{SessionTeardown, TeardownError, terminate_owned_root};
 use crate::spawn_support::errno;
 
 struct Runtime {
@@ -23,7 +24,48 @@ struct Runtime {
     session_processes: alloc::collections::BTreeMap<u64, NativeProcess>,
 }
 
+struct PendingLogout {
+    session: ActiveSession,
+    sender: u64,
+    plan: SessionTeardown,
+    client: mochios_posix_client::Client<mochios_posix_client::SyscallEndpointTransport>,
+    acknowledged: bool,
+    last_error: Option<u64>,
+}
+
 impl Runtime {
+    fn login_next_session(&mut self, previous: ActiveSession) -> Option<ActiveSession> {
+        let identity = self.authenticate_session(None)?;
+        let session_id = previous.next_id();
+        let workspace_pid = self.spawn_workspace_session(identity, session_id)?;
+        let linux_pid = self
+            .launch_session_image(FixedService::Linux, identity, session_id, None)
+            .ok();
+        match self.launch_session_image(FixedService::Binder, identity, session_id, None) {
+            Ok(binder_pid) => ActiveSession::from_process_ids(
+                session_id,
+                identity,
+                linux_pid,
+                workspace_pid,
+                binder_pid,
+            )
+            .map_err(|error| {
+                eprintln!(
+                    "service-manager.service: session identity resolution failed: {:?}",
+                    error
+                );
+            })
+            .ok(),
+            Err(error) => {
+                platform::logln!(
+                    "service-manager.service: Binder.app spawn failed errno={}",
+                    errno(error)
+                );
+                None
+            }
+        }
+    }
+
     fn launch_session_image(
         &mut self,
         service: FixedService,
@@ -874,7 +916,54 @@ fn resident(
         crate::portal::prewarm(&mut runtime.permission_prompt, runtime.logger_endpoint);
     }
     let mut request_bytes = [0u8; 1024];
+    let mut pending_logout: Option<PendingLogout> = None;
     loop {
+        if let (Some(logout), Some(runtime)) = (pending_logout.as_mut(), runtime.as_mut()) {
+            // Binder exits voluntarily on success. Do not acknowledge until
+            // all preceding roots have confirmed exit AND released their refs.
+            if !logout.acknowledged && logout.plan.pending_root() == Some(logout.session.binder_pid)
+            {
+                reply_session_status(
+                    logout.sender,
+                    platform::session_control::Action::LogOut,
+                    logout.session.id,
+                    0,
+                );
+                logout.acknowledged = true;
+            }
+            let result = logout.plan.step(|process_id| {
+                terminate_owned_root(&logout.client, &mut runtime.session_processes, process_id)
+            });
+            match result {
+                Ok(true) => {
+                    let previous = logout.session;
+                    pending_logout = None;
+                    let _ = active_session.take();
+                    // No authentication or new image may precede this gate.
+                    active_session = runtime.login_next_session(previous);
+                }
+                Ok(false) => logout.last_error = None,
+                Err(error) => {
+                    let status = match error {
+                        mochios_posix_client::ClientError::Transport(error) => errno(error),
+                        mochios_posix_client::ClientError::Remote(status) => {
+                            status.unsigned_abs() as u64
+                        }
+                        _ => mochi_user_syscall::EIO,
+                    };
+                    if logout.last_error != Some(status) {
+                        platform::logln!(
+                            "service-manager.service: session termination pending errno={}",
+                            status
+                        );
+                        logout.last_error = Some(status);
+                    }
+                    // Retain both the session and the failed root's owner;
+                    // throttle retries while still servicing incoming IPC.
+                    let _ = platform::thread::sleep_milliseconds(10);
+                }
+            }
+        }
         let received = if let Some(deferred) = runtime.as_mut().and_then(|runtime| {
             runtime
                 .permission_prompt
@@ -904,17 +993,22 @@ fn resident(
             continue;
         };
         if message.starts_with(&mochios_linux_portal_protocol::MAGIC.to_le_bytes()) {
+            let available_session = if pending_logout.is_none() {
+                active_session
+            } else {
+                None
+            };
             if let Some(runtime) = runtime.as_mut() {
                 crate::portal::handle(
                     message,
                     sender,
-                    active_session,
+                    available_session,
                     runtime.logger_endpoint,
                     &mut runtime.permission_prompt,
                 );
             } else {
                 let mut prompt = crate::portal::PermissionPrompts::default();
-                crate::portal::handle(message, sender, active_session, 0, &mut prompt);
+                crate::portal::handle(message, sender, available_session, 0, &mut prompt);
             }
             continue;
         }
@@ -950,6 +1044,15 @@ fn resident(
             );
             continue;
         }
+        if pending_logout.is_some() {
+            reply_session_status(
+                sender,
+                request.action,
+                request.session_id,
+                mochi_user_syscall::EAGAIN as i32,
+            );
+            continue;
+        }
         let Some(runtime) = runtime.as_mut() else {
             reply_session_status(
                 sender,
@@ -969,50 +1072,41 @@ fn resident(
                 reply_session_status(sender, request.action, session.id, status);
             }
             platform::session_control::Action::LogOut => {
-                reply_session_status(sender, request.action, session.id, 0);
-                active_session = None;
-                if let Err(error) = terminate_process_tree(session.binder_pid) {
-                    platform::logln!(
-                        "service-manager.service: session termination failed errno={}",
-                        errno(error)
+                let Some(endpoint) = runtime.posix_endpoint else {
+                    reply_session_status(
+                        sender,
+                        request.action,
+                        session.id,
+                        mochi_user_syscall::EIO as i32,
                     );
-                }
-                if let Some(linux_pid) = session.linux_pid {
-                    let _ = terminate_process_tree(linux_pid);
-                }
-                let _ = terminate_process_tree(session.workspace_pid);
-                let Some(identity) = runtime.authenticate_session(None) else {
                     continue;
                 };
-                let session_id = session.next_id();
-                let Some(workspace_pid) = runtime.spawn_workspace_session(identity, session_id)
-                else {
-                    continue;
-                };
-                let linux_pid = runtime
-                    .launch_session_image(FixedService::Linux, identity, session_id, None)
-                    .ok();
-                match runtime.launch_session_image(FixedService::Binder, identity, session_id, None)
-                {
-                    Ok(binder_thread) => {
-                        active_session = ActiveSession::from_process_ids(
-                            session_id,
-                            identity,
-                            linux_pid,
-                            workspace_pid,
-                            binder_thread,
-                        )
-                        .map_err(|error| {
-                            eprintln!(
-                                "service-manager.service: session identity resolution failed: {:?}",
-                                error
-                            );
-                        })
-                        .ok();
+                match SessionTeardown::begin(
+                    session.linux_pid,
+                    session.workspace_pid,
+                    session.binder_pid,
+                    &runtime.session_processes,
+                ) {
+                    Ok(plan) => {
+                        pending_logout = Some(PendingLogout {
+                            session,
+                            sender,
+                            plan,
+                            client: mochios_posix_client::Client::new(
+                                mochios_posix_client::SyscallEndpointTransport::new(endpoint),
+                            ),
+                            acknowledged: false,
+                            last_error: None,
+                        });
                     }
-                    Err(error) => platform::logln!(
-                        "service-manager.service: Binder.app spawn failed errno={}",
-                        errno(error)
+                    Err(error) => reply_session_status(
+                        sender,
+                        request.action,
+                        session.id,
+                        match error {
+                            TeardownError::InvalidRoot => mochi_user_syscall::EINVAL,
+                            TeardownError::MissingOwner => mochi_user_syscall::ESRCH,
+                        } as i32,
                     ),
                 }
             }
