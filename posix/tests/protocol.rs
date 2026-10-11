@@ -1555,6 +1555,51 @@ fn fresh_child_initialization_cannot_elevate_nonroot_posix_authority() {
 }
 
 #[test]
+fn fresh_image_failure_cleanup_is_owned_by_the_authenticated_creator_not_root() {
+    let creator = PeerIdentity {
+        process_id: 321,
+        effective_uid: 505,
+        effective_gid: 24,
+    };
+    let mut service = service_for(creator);
+    service.handle(
+        creator,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..Default::default()
+        },
+        &[],
+    );
+    let mut filesystem = RecordingFilesystem::default();
+    let child = AuthenticatedProcess {
+        process_id: 322,
+        handle: 1322,
+    };
+    service
+        .adopt_spawned_child(creator, child, 505, 24, &[], &mut filesystem)
+        .unwrap();
+    let mut processes = RecordingProcesses::default();
+    processes.states.insert(1322, ProcessLifecycle::Running);
+    let other_root = PeerIdentity {
+        process_id: 323,
+        effective_uid: 0,
+        effective_gid: 0,
+    };
+    assert_eq!(
+        service.abort_launched_child(other_root, child, &mut filesystem, &mut processes),
+        Err(protocol::STATUS_EPERM)
+    );
+    assert!(processes.terminated.is_empty());
+    service
+        .abort_launched_child(creator, child, &mut filesystem, &mut processes)
+        .unwrap();
+    assert_eq!(processes.terminated, [(1322, 127)]);
+    assert_eq!(processes.released, [1322]);
+    assert!(service.session(322).is_none());
+    assert!(!service.is_child(321, 322));
+}
+
+#[test]
 fn failed_broker_launch_is_reclaimed_only_by_its_creator() {
     let broker = PeerIdentity {
         process_id: 321,

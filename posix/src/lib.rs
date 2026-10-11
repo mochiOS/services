@@ -890,6 +890,9 @@ impl<H: Copy> PosixService<H> {
         child.saved_gid = gid;
         self.supplementary_groups
             .insert(process.process_id, groups.to_vec());
+        // Fresh-image launchers need the same failure cleanup authority as a
+        // broker. This records only this authenticated creator, not UID zero.
+        self.launch_creators.insert(process.process_id, peer.process_id);
         Ok(())
     }
 

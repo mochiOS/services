@@ -23,16 +23,30 @@ impl NativeProcess {
         metadata: &[u8],
         setup: impl FnOnce(platform::handle::Handle) -> Result<(), platform::syscall::SysError>,
     ) -> Result<Self, platform::syscall::SysError> {
+        Self::create_with_rollback(image, metadata, setup, |_| {})
+    }
+
+    /// Roll back userspace registration when setup or resume fails. Rollback
+    /// runs after termination but before closing the owner's creation Handle,
+    /// including when a registration reply was lost. Preserve the first error.
+    pub(crate) fn create_with_rollback(
+        image: platform::handle::Handle,
+        metadata: &[u8],
+        setup: impl FnOnce(platform::handle::Handle) -> Result<(), platform::syscall::SysError>,
+        rollback: impl FnOnce(platform::handle::Handle),
+    ) -> Result<Self, platform::syscall::SysError> {
         let process = Self {
             handle: platform::process::create_stopped(image, metadata)?,
         };
         if let Err(error) = setup(process.handle) {
             process.terminate();
+            rollback(process.handle);
             return Err(error);
         }
         if let Err(error) = platform::process::resume_handle(process.handle) {
             // Creation published a stopped task; do not strand it on failure.
             let _ = platform::process::terminate_handle(process.handle, 127);
+            rollback(process.handle);
             return Err(error);
         }
         Ok(process)

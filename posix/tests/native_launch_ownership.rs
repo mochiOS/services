@@ -317,4 +317,86 @@ fn native_launch_owns_the_creation_reference_and_cleans_failed_resume() {
             "close"
         ]
     );
+    for fail_resume in [false, true] {
+        {
+            let mut state = STATE.lock().unwrap();
+            state.events.clear();
+            state.fail_resume = fail_resume;
+        }
+        assert!(
+            production::NativeProcess::create_with_rollback(
+                9,
+                b"metadata",
+                |handle| {
+                    assert_eq!(handle, 7);
+                    STATE.lock().unwrap().events.push("register-posix-state");
+                    if fail_resume {
+                        Ok(())
+                    } else {
+                        Err(crate::syscall::SysError)
+                    }
+                },
+                |handle| {
+                    assert_eq!(handle, 7);
+                    STATE.lock().unwrap().events.push("reclaim-posix-state");
+                },
+            )
+            .is_err()
+        );
+        let expected = if fail_resume {
+            vec![
+                "create-stopped",
+                "register-posix-state",
+                "resume",
+                "terminate",
+                "reclaim-posix-state",
+                "close",
+            ]
+        } else {
+            vec![
+                "create-stopped",
+                "register-posix-state",
+                "terminate",
+                "reclaim-posix-state",
+                "close",
+            ]
+        };
+        assert_eq!(STATE.lock().unwrap().events, expected);
+    }
+    {
+        let mut state = STATE.lock().unwrap();
+        state.events.clear();
+        state.fail_resume = false;
+        state.fail_create = true;
+    }
+    assert!(
+        production::NativeProcess::create_with_rollback(
+            9,
+            b"metadata",
+            |_| panic!("no process to initialize"),
+            |_| panic!("no registration to reclaim"),
+        )
+        .is_err()
+    );
+    assert_eq!(STATE.lock().unwrap().events, ["create-stopped"]);
+    {
+        let mut state = STATE.lock().unwrap();
+        state.events.clear();
+        state.fail_create = false;
+    }
+    let process = production::NativeProcess::create_with_rollback(
+        9,
+        b"metadata",
+        |_| {
+            STATE.lock().unwrap().events.push("register-posix-state");
+            Ok(())
+        },
+        |_| panic!("successful launch must not be reclaimed"),
+    )
+    .unwrap();
+    drop(process);
+    assert_eq!(
+        STATE.lock().unwrap().events,
+        ["create-stopped", "register-posix-state", "resume", "close"]
+    );
 }
