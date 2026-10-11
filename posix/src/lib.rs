@@ -1028,6 +1028,43 @@ impl<H: Copy> PosixService<H> {
         Ok(())
     }
 
+    /// Snapshot retained process objects in descendant-first order for a
+    /// launcher's teardown. The root must be an explicitly authenticated
+    /// ProcessHandle for an image registered by this launcher. POSIX root or
+    /// possession of an unrelated process object is not teardown authority.
+    /// Handles remain owned by the service; this neither transfers nor closes
+    /// them. Parent relationships come only from userspace registration.
+    pub fn launched_tree_handles(
+        &self,
+        peer: PeerIdentity,
+        root: AuthenticatedProcess<H>,
+    ) -> Result<Vec<H>, i32> {
+        if self.registered_peer(peer.process_id).is_none() {
+            return Err(protocol::STATUS_ESRCH);
+        }
+        if self.launch_creators.get(&root.process_id) != Some(&peer.process_id) {
+            return Err(protocol::STATUS_EPERM);
+        }
+        let mut process_ids = vec![root.process_id];
+        let mut index = 0;
+        while index < process_ids.len() {
+            if let Some(children) = self.children.get(&process_ids[index]) {
+                process_ids.extend(children.iter().copied());
+            }
+            index += 1;
+        }
+        process_ids
+            .into_iter()
+            .rev()
+            .map(|process_id| {
+                self.processes
+                    .get(&process_id)
+                    .copied()
+                    .ok_or(protocol::STATUS_ESRCH)
+            })
+            .collect()
+    }
+
     /// Roll back a broker's failed launch without leaving an unreported zombie.
     /// Possessing another process's WAIT Handle or being POSIX root alone does
     /// not suffice: the sender must be the broker that registered this child.

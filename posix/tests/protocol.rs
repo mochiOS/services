@@ -2213,6 +2213,88 @@ fn launch_registration_never_trusts_native_root_or_unknown_requester() {
     assert!(service.process_handle(332).is_none());
 }
 
+#[test]
+fn launcher_tree_uses_userspace_descendants_and_exact_creation_authority() {
+    let creator = PeerIdentity {
+        process_id: 10,
+        effective_uid: 0,
+        effective_gid: 0,
+    };
+    let mut service = service_for(creator);
+    let process = |process_id| AuthenticatedProcess {
+        process_id,
+        handle: process_id as u32 + 1000,
+    };
+    service
+        .initialize_process(creator, process(20), 501, 20, &[])
+        .unwrap();
+    service
+        .initialize_process(creator, process(60), 0, 0, &[])
+        .unwrap();
+    let requester = service.registered_peer(20).unwrap();
+    let unrelated_root = service.registered_peer(60).unwrap();
+    let mut filesystem = RecordingFilesystem::default();
+    // A broker-created root belongs to the requester's POSIX family, not the
+    // launcher's. Teardown authority must still belong to the actual creator.
+    service
+        .adopt_launched_child(creator, process(20), process(30), &mut filesystem)
+        .unwrap();
+    let root_peer = service.registered_peer(30).unwrap();
+    service
+        .adopt_child(root_peer, process(40), &mut filesystem)
+        .unwrap();
+    let child_peer = service.registered_peer(40).unwrap();
+    service
+        .adopt_child(child_peer, process(50), &mut filesystem)
+        .unwrap();
+    service
+        .adopt_launched_child(creator, process(20), process(70), &mut filesystem)
+        .unwrap();
+    assert_eq!(
+        service.launched_tree_handles(creator, process(30)),
+        Ok(vec![1050, 1040, 1030])
+    );
+    assert_eq!(service.parent_id(30), Some(20));
+    assert_eq!(service.parent_id(50), Some(40));
+    for unauthorized in [
+        requester,
+        unrelated_root,
+        PeerIdentity {
+            effective_uid: 0,
+            ..requester
+        },
+    ] {
+        assert_eq!(
+            service.launched_tree_handles(unauthorized, process(30)),
+            Err(protocol::STATUS_EPERM)
+        );
+    }
+    // A descendant's object does not let the launcher broaden the selected
+    // root, and unrelated/unknown objects cannot initiate a teardown.
+    for pid in [20, 40, 60, 999] {
+        assert_eq!(
+            service.launched_tree_handles(creator, process(pid)),
+            Err(protocol::STATUS_EPERM)
+        );
+    }
+    assert_eq!(
+        service.launched_tree_handles(
+            PeerIdentity {
+                process_id: 999,
+                ..creator
+            },
+            process(30)
+        ),
+        Err(protocol::STATUS_ESRCH)
+    );
+    assert_eq!(
+        service.launched_tree_handles(creator, process(70)),
+        Ok(vec![1070])
+    );
+    assert!(filesystem.released.is_empty());
+    assert!(service.session(50).is_some());
+}
+
 fn sample_status() -> protocol::FileStatus {
     protocol::FileStatus {
         device: 1,
