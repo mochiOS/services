@@ -32,6 +32,7 @@ mod native_process {
 mod production;
 
 struct Replies {
+    expected_handle: Cell<u32>,
     status: Cell<i32>,
     fail_transport: Cell<bool>,
     calls: Cell<usize>,
@@ -58,7 +59,7 @@ impl ObjectTransport for Replies {
         assert_eq!(
             handles.get(0),
             Some(ObjectHandleAttachment {
-                handle: 52,
+                handle: self.expected_handle.get(),
                 rights: mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_SIGNAL
             })
         );
@@ -92,6 +93,7 @@ fn failed_or_delayed_teardown_keeps_the_actual_process_owner_until_success() {
         },
     );
     let client = Client::new(Replies {
+        expected_handle: Cell::new(52),
         status: Cell::new(0),
         fail_transport: Cell::new(false),
         calls: Cell::new(0),
@@ -123,6 +125,122 @@ fn failed_or_delayed_teardown_keeps_the_actual_process_owner_until_success() {
         Err(ClientError::Remote(protocol::STATUS_ESRCH))
     );
     assert_eq!(client.transport().calls.get(), calls);
+}
+
+fn session_owners(closed: &Rc<Cell<usize>>) -> BTreeMap<u64, native_process::NativeProcess> {
+    [1030, 1040, 1050]
+        .into_iter()
+        .enumerate()
+        .map(|(index, process_id)| {
+            (
+                process_id,
+                native_process::NativeProcess {
+                    handle: 52 + index as u32,
+                    closed: Rc::clone(closed),
+                },
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn logout_preflights_all_roots_without_closing_or_terminating_any_process() {
+    use production::TeardownError::{InvalidRoot, MissingOwner};
+    let closed = Rc::new(Cell::new(0));
+    let mut owners = session_owners(&closed);
+    for (linux, workspace, binder, errno) in [
+        (Some(0), 1040, 1050, InvalidRoot),
+        (Some(1030), 0, 1050, InvalidRoot),
+        (Some(1030), 1040, 0, InvalidRoot),
+        (Some(1030), 1030, 1050, InvalidRoot),
+        (None, 1040, 1040, InvalidRoot),
+        (Some(1030), 1040, 9999, MissingOwner),
+    ] {
+        assert_eq!(
+            production::SessionTeardown::begin(linux, workspace, binder, &owners).unwrap_err(),
+            errno
+        );
+        assert_eq!(owners.len(), 3);
+        assert_eq!(closed.get(), 0);
+    }
+    owners.remove(&1050);
+    assert_eq!(
+        production::SessionTeardown::begin(Some(1030), 1040, 1050, &owners).unwrap_err(),
+        MissingOwner
+    );
+    assert_eq!(owners.len(), 2);
+    assert_eq!(closed.get(), 1);
+}
+
+#[test]
+fn partial_logout_retries_the_pending_root_and_keeps_binder_alive_until_last() {
+    let closed = Rc::new(Cell::new(0));
+    let mut owners = session_owners(&closed);
+    let client = Client::new(Replies {
+        expected_handle: Cell::new(52),
+        status: Cell::new(0),
+        fail_transport: Cell::new(false),
+        calls: Cell::new(0),
+    });
+    let mut logout = production::SessionTeardown::begin(Some(1030), 1040, 1050, &owners).unwrap();
+    assert_eq!(logout.pending_root(), Some(1030));
+    let mut attempted = Vec::new();
+    let mut step = |logout: &mut production::SessionTeardown| {
+        logout.step(|process_id| {
+            attempted.push(process_id);
+            client
+                .transport()
+                .expected_handle
+                .set(owners.get(&process_id).unwrap().handle);
+            production::terminate_owned_root(&client, &mut owners, process_id)
+        })
+    };
+    assert_eq!(step(&mut logout), Ok(false));
+    assert_eq!(logout.pending_root(), Some(1040));
+    for error in [protocol::STATUS_EAGAIN, -5, protocol::STATUS_EPERM] {
+        client.transport().status.set(error);
+        assert_eq!(step(&mut logout), Err(ClientError::Remote(error)));
+        assert_eq!(logout.pending_root(), Some(1040));
+        assert_eq!(closed.get(), 1);
+    }
+    client.transport().status.set(0);
+    client.transport().fail_transport.set(true);
+    assert_eq!(step(&mut logout), Err(ClientError::Transport(7)));
+    assert_eq!(closed.get(), 1);
+    client.transport().fail_transport.set(false);
+    assert_eq!(step(&mut logout), Ok(false));
+    assert_eq!(logout.pending_root(), Some(1050));
+    assert_eq!(closed.get(), 2);
+    client.transport().status.set(protocol::STATUS_EAGAIN);
+    assert_eq!(
+        step(&mut logout),
+        Err(ClientError::Remote(protocol::STATUS_EAGAIN))
+    );
+    assert_eq!(closed.get(), 2);
+    client.transport().status.set(0);
+    assert_eq!(step(&mut logout), Ok(true));
+    assert_eq!(logout.pending_root(), None);
+    assert_eq!(closed.get(), 3);
+    assert_eq!(step(&mut logout), Ok(true));
+    assert_eq!(attempted, [1030, 1040, 1040, 1040, 1040, 1040, 1050, 1050]);
+    assert!(owners.is_empty());
+}
+
+#[test]
+fn logout_without_linux_still_requires_workspace_and_binder_confirmation() {
+    let closed = Rc::new(Cell::new(0));
+    let owners = session_owners(&closed);
+    let mut logout = production::SessionTeardown::begin(None, 1040, 1050, &owners).unwrap();
+    assert_eq!(logout.pending_root(), Some(1040));
+    let mut attempted = Vec::new();
+    let mut terminate = |process_id| -> Result<(), i32> {
+        attempted.push(process_id);
+        Ok(())
+    };
+    assert_eq!(logout.step(&mut terminate), Ok(false));
+    assert_eq!(logout.step(&mut terminate), Ok(true));
+    assert_eq!(logout.step(&mut terminate), Ok(true));
+    assert_eq!(attempted, [1040, 1050]);
 }
 
 #[test]
