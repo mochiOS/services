@@ -1,3 +1,4 @@
+#define _GNU_SOURCE 1
 /* Isolated Compositor-slot KVM test: real newlib -> HandleControl -> PTY
  * provider and service-owned foreground signal delivery, not a desktop test. */
 #include <errno.h>
@@ -178,6 +179,12 @@ static void *continue_then_make_readable(void *context) {
     struct timespec pause = {0, 50000000};
     if (nanosleep(&pause, NULL) != 0 || kill(getpid(), SIGCONT) != 0
         || nanosleep(&pause, NULL) != 0 || write(*(int *)context, "m", 1) != 1)
+        return (void *)(uintptr_t)1;
+    return NULL;
+}
+
+static void *signal_then_make_readable(void *context) {
+    if (interrupt_handle_wait(NULL) != NULL || write(*(int *)context, "s", 1) != 1)
         return (void *)(uintptr_t)1;
     return NULL;
 }
@@ -576,6 +583,57 @@ int main(void) {
         CHECK(close(pipes[0]) == 0 && close(pipes[1]) == 0);
     }
     debug("native-terminal-window: multiplex interruption and unrelated wakeups passed\n");
+    sigset_t block_user, empty_mask, original_mask, restored_mask;
+    CHECK(sigemptyset(&block_user) == 0 && sigaddset(&block_user, SIGUSR1) == 0);
+    CHECK(sigemptyset(&empty_mask) == 0);
+    CHECK(pthread_sigmask(SIG_BLOCK, &block_user, &original_mask) == 0);
+    for (unsigned polling = 0; polling < 2; ++polling) {
+        sig_atomic_t before = atomic_load(&waited_signal);
+        CHECK(kill(getpid(), SIGUSR1) == 0);
+        struct timespec timeout = {1, 123456789}, unchanged = timeout;
+        errno = 0;
+        int result = polling ? ppoll(NULL, 0, &timeout, &empty_mask)
+            : pselect(0, NULL, NULL, NULL, &timeout, &empty_mask);
+        CHECK(result == -1 && errno == EINTR && atomic_load(&waited_signal) == before + 1);
+        CHECK(memcmp(&timeout, &unchanged, sizeof(timeout)) == 0);
+        CHECK(pthread_sigmask(SIG_SETMASK, NULL, &restored_mask) == 0);
+        CHECK(sigismember(&restored_mask, SIGUSR1) == 1);
+    }
+    struct timespec zero_timeout = {0, 0};
+    struct timespec invalid_timeout = {0, 1000000000};
+    errno = 0;
+    CHECK(ppoll(NULL, 0, &invalid_timeout, &empty_mask) == -1 && errno == EINVAL);
+    CHECK(ppoll(NULL, 0, &zero_timeout, &empty_mask) == 0);
+    errno = 0;
+    CHECK(ppoll(NULL, 65, &zero_timeout, &empty_mask) == -1 && errno == EINVAL);
+    fd_set invalid_set;
+    FD_ZERO(&invalid_set);
+    FD_SET(63, &invalid_set);
+    errno = 0;
+    CHECK(pselect(64, &invalid_set, NULL, NULL, &zero_timeout, &empty_mask) == -1 && errno == EBADF);
+    CHECK(pthread_sigmask(SIG_SETMASK, NULL, &restored_mask) == 0);
+    CHECK(sigismember(&restored_mask, SIGUSR1) == 1);
+    CHECK(pthread_sigmask(SIG_SETMASK, &original_mask, NULL) == 0);
+    for (unsigned polling = 0; polling < 2; ++polling) {
+        CHECK(pipe(pipes) == 0);
+        sig_atomic_t before = atomic_load(&waited_signal);
+        CHECK(pthread_create(&writer, NULL, signal_then_make_readable, &pipes[1]) == 0);
+        struct timespec timeout = {1, 0};
+        struct pollfd descriptor = {pipes[0], POLLIN, 0};
+        fd_set readable;
+        FD_ZERO(&readable);
+        FD_SET(pipes[0], &readable);
+        int result = polling ? ppoll(&descriptor, 1, &timeout, &block_user)
+            : pselect(pipes[0] + 1, &readable, NULL, NULL, &timeout, &block_user);
+        CHECK(result == 1 && atomic_load(&waited_signal) == before + 1);
+        CHECK(pthread_sigmask(SIG_SETMASK, NULL, &restored_mask) == 0);
+        CHECK(sigismember(&restored_mask, SIGUSR1) == sigismember(&original_mask, SIGUSR1));
+        char byte = 0;
+        CHECK(read(pipes[0], &byte, 1) == 1 && byte == 's');
+        CHECK(pthread_join(writer, &worker_result) == 0 && worker_result == NULL);
+        CHECK(close(pipes[0]) == 0 && close(pipes[1]) == 0);
+    }
+    debug("native-terminal-window: pselect/ppoll masks, pending entry and restoration passed\n");
     struct sigaction pipe_action;
     memset(&pipe_action, 0, sizeof(pipe_action));
     pipe_action.sa_handler = on_pipe;
@@ -617,7 +675,7 @@ int main(void) {
     CHECK(waitpid(broken_child, &broken_status, 0) == broken_child);
     CHECK(WIFSIGNALED(broken_status) && WTERMSIG(broken_status) == SIGPIPE);
     CHECK(close(pipes[1]) == 0);
-    debug("native-terminal-window: PASS poll/select interruption, SIGPIPE, waits and terminal regressions\n");
+    debug("native-terminal-window: PASS masked multiplex waits, SIGPIPE and terminal regressions\n");
     CHECK(close(master) == 0);
     return 0;
 }

@@ -3,6 +3,106 @@ use mochios_posix_client::multiplex::{wait, WaitError};
 use std::cell::Cell;
 
 #[test]
+fn nanosecond_waits_validate_the_entire_timespec_without_rounding() {
+    use mochios_posix_client::multiplex::timespec_timeout_nanoseconds as parse;
+    assert_eq!(parse(0, 0), Some(0));
+    assert_eq!(parse(0, 1), Some(1));
+    assert_eq!(parse(2, 123), Some(2_000_000_123));
+    for (seconds, nanoseconds) in [(-1, 0), (0, -1), (0, 1_000_000_000), (i64::MAX, 0)] {
+        assert_eq!(parse(seconds, nanoseconds), None);
+    }
+}
+
+#[test]
+fn temporary_mask_is_restored_after_success_and_operation_errors() {
+    use mochios_posix_client::multiplex::with_signal_mask;
+    for outcome in [Ok(7), Err(4)] {
+        let mask = Cell::new(0x10);
+        let changes = Cell::new(0);
+        let result = with_signal_mask(
+            Some(0x20),
+            |new| {
+                changes.set(changes.get() + 1);
+                Ok(mask.replace(new))
+            },
+            || {
+                assert_eq!(mask.get(), 0x20);
+                outcome
+            },
+        );
+        assert_eq!(result, outcome);
+        assert_eq!((mask.get(), changes.get()), (0x10, 2));
+    }
+    assert_eq!(
+        with_signal_mask::<_, i32>(None, |_| panic!("null mask must not replace"), || Ok(7)),
+        Ok(7)
+    );
+}
+
+#[test]
+fn failed_mask_installation_does_not_wait_and_failed_restoration_is_reported() {
+    use mochios_posix_client::multiplex::with_signal_mask;
+    assert_eq!(
+        with_signal_mask(
+            Some(0),
+            |_| Err(9),
+            || -> Result<(), i32> { panic!("must not wait") }
+        ),
+        Err(9)
+    );
+    let changes = Cell::new(0);
+    assert_eq!(
+        with_signal_mask(
+            Some(0),
+            |_| {
+                changes.set(changes.get() + 1);
+                if changes.get() == 1 {
+                    Ok(7)
+                } else {
+                    Err(10)
+                }
+            },
+            || Ok(())
+        ),
+        Err(10)
+    );
+    assert_eq!(changes.get(), 2);
+}
+
+#[test]
+fn masked_entry_captures_generation_before_unblocking_and_keeps_nanosecond_deadlines() {
+    let runtime = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
+    let masked = runtime
+        .split("fn masked_multiplex(")
+        .nth(1)
+        .unwrap()
+        .split("fn pselect(")
+        .next()
+        .unwrap();
+    assert!(
+        masked.find("caught_signal_generation.load").unwrap()
+            < masked.find("with_signal_mask(").unwrap()
+    );
+    assert!(masked.contains("operation(control, caught)"));
+    for (begin, end, backend) in [
+        ("fn pselect(", "fn ppoll(", "select_with_deadline"),
+        ("fn ppoll(", "fn getgroups(", "poll_with_deadline"),
+    ] {
+        let function = runtime
+            .split(begin)
+            .nth(1)
+            .unwrap()
+            .split(end)
+            .next()
+            .unwrap();
+        assert!(function.contains("timespec_deadline(timeout)"));
+        assert!(function.contains("masked_multiplex(mask"));
+        assert!(function.contains(backend));
+        assert!(!function.contains("timeout.write"));
+    }
+}
+
+#[test]
 fn every_negative_poll_timeout_is_infinite_and_nonnegative_values_are_exact() {
     use mochios_posix_client::multiplex::poll_timeout_nanoseconds;
     for value in [i32::MIN, -1000, -2, -1] {
