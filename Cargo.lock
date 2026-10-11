@@ -2463,6 +2463,7 @@ dependencies = [
  "mochios-posix-client",
  "mochios-posix-protocol",
  "mochios-signature-protocol",
+ "mochios-workspace-protocol",
  "sha2",
 ]
 

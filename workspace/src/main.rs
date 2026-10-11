@@ -10,6 +10,9 @@ use mochios_posix_client::{
 };
 use mochios_workspace_protocol as protocol;
 
+mod error;
+use error::{io_errno as errno, posix_errno as posix_client_errno};
+
 const CLIPBOARD_READ: &str = "clipboard.read";
 const CLIPBOARD_WRITE: &str = "clipboard.write";
 const ASSOCIATIONS_READ: &str = "file-association.read";
@@ -229,7 +232,7 @@ impl WorkspaceService {
                 self.reply_status(
                     sender,
                     request.request_id,
-                    -(mochi_user_syscall::EINVAL as i32),
+                    mochi_user_syscall::EINVAL as i32,
                     0,
                 );
                 return;
@@ -239,7 +242,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EACCES as i32),
+                mochi_user_syscall::EACCES as i32,
                 0,
             );
             return;
@@ -291,7 +294,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -300,7 +303,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -309,7 +312,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EACCES as i32),
+                mochi_user_syscall::EACCES as i32,
                 0,
             );
             return;
@@ -323,7 +326,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EACCES as i32),
+                mochi_user_syscall::EACCES as i32,
                 0,
             );
             return;
@@ -344,7 +347,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -394,7 +397,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -403,7 +406,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EACCES as i32),
+                mochi_user_syscall::EACCES as i32,
                 0,
             );
             return;
@@ -426,7 +429,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -457,7 +460,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EIO as i32),
+                mochi_user_syscall::EIO as i32,
                 0,
             );
             return;
@@ -470,7 +473,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -515,7 +518,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -531,7 +534,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -547,7 +550,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -561,7 +564,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -583,7 +586,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EIO as i32),
+                mochi_user_syscall::EIO as i32,
                 0,
             );
             return;
@@ -601,7 +604,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -610,7 +613,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -621,7 +624,7 @@ impl WorkspaceService {
             0
         } else {
             self.notification_focus_enabled = previous;
-            -(mochi_user_syscall::EIO as i32)
+            mochi_user_syscall::EIO as i32
         };
         self.reply_status(sender, request.request_id, status, 0);
     }
@@ -631,7 +634,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -656,7 +659,7 @@ impl WorkspaceService {
                 self.notification_disabled_applications
                     .remove(setting.bundle_id);
             }
-            -(mochi_user_syscall::EIO as i32)
+            mochi_user_syscall::EIO as i32
         };
         self.reply_status(sender, request.request_id, status, 0);
     }
@@ -684,7 +687,7 @@ impl WorkspaceService {
         let status = if save_notifications(&self.notification_path, &self.notifications).is_ok() {
             0
         } else {
-            -(mochi_user_syscall::EIO as i32)
+            mochi_user_syscall::EIO as i32
         };
         self.reply_status(sender, request_id, status, 0);
     }
@@ -694,7 +697,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -714,7 +717,7 @@ impl WorkspaceService {
             _ => self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EACCES as i32),
+                mochi_user_syscall::EACCES as i32,
                 0,
             ),
         }
@@ -762,7 +765,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -771,7 +774,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -786,14 +789,14 @@ impl WorkspaceService {
 
     fn signal_application_reopen(&mut self, process: u64) -> Result<(), u64> {
         let Some(endpoint) = self.application_endpoints.get(&process).copied() else {
-            return Err(mochi_user_syscall::ENOENT as u64);
+            return Err(error::status_errno(mochi_user_syscall::ENOENT as i64));
         };
         const REOPEN: [u8; 16] = *b"MAPPREOPEN\0\0\0\0\0\0";
         platform::ipc::send(endpoint, &REOPEN)
             .map(|_| ())
             .map_err(|error| {
                 self.application_endpoints.remove(&process);
-                error.errno().unwrap_or(mochi_user_syscall::EIO as u64)
+                error.errno().unwrap_or(error::status_errno(mochi_user_syscall::EIO as i64))
             })
     }
 
@@ -802,7 +805,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -811,7 +814,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EPERM as i32),
+                mochi_user_syscall::EPERM as i32,
                 0,
             );
             return;
@@ -839,7 +842,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::ENOENT as i32),
+                mochi_user_syscall::ENOENT as i32,
                 0,
             );
             return;
@@ -852,7 +855,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -862,7 +865,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::ENOSPC as i32),
+                mochi_user_syscall::ENOSPC as i32,
                 0,
             );
             return;
@@ -886,7 +889,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -896,7 +899,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -912,7 +915,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -948,7 +951,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -959,7 +962,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::ERANGE as i32),
+                mochi_user_syscall::ERANGE as i32,
                 0,
             );
             return;
@@ -982,7 +985,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -1009,7 +1012,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -1035,7 +1038,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -1051,7 +1054,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::ENOENT as i32),
+                mochi_user_syscall::ENOENT as i32,
                 0,
             );
             return;
@@ -1075,7 +1078,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -1133,7 +1136,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -1150,7 +1153,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EACCES as i32),
+                mochi_user_syscall::EACCES as i32,
                 0,
             );
             return;
@@ -1164,7 +1167,7 @@ impl WorkspaceService {
                 self.reply_status(
                     sender,
                     request.request_id,
-                    -(mochi_user_syscall::EISDIR as i32),
+                    mochi_user_syscall::EISDIR as i32,
                     0,
                 );
                 return;
@@ -1178,7 +1181,7 @@ impl WorkspaceService {
                 self.reply_status(
                     sender,
                     request.request_id,
-                    -(mochi_user_syscall::EINVAL as i32),
+                    mochi_user_syscall::EINVAL as i32,
                     0,
                 );
                 return;
@@ -1218,7 +1221,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::ENOENT as i32),
+                mochi_user_syscall::ENOENT as i32,
                 0,
             );
             return;
@@ -1248,7 +1251,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -1257,7 +1260,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EPERM as i32),
+                mochi_user_syscall::EPERM as i32,
                 0,
             );
             return;
@@ -1274,7 +1277,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -1292,7 +1295,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::ENOSPC as i32),
+                mochi_user_syscall::ENOSPC as i32,
                 0,
             );
             return;
@@ -1301,7 +1304,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::ENOSPC as i32),
+                mochi_user_syscall::ENOSPC as i32,
                 0,
             );
             return;
@@ -1319,7 +1322,7 @@ impl WorkspaceService {
                 self.reply_status(
                     sender,
                     request.request_id,
-                    -(mochi_user_syscall::EINVAL as i32),
+                    mochi_user_syscall::EINVAL as i32,
                     0,
                 );
                 return;
@@ -1369,7 +1372,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -1381,7 +1384,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EACCES as i32),
+                mochi_user_syscall::EACCES as i32,
                 0,
             );
             return;
@@ -1404,7 +1407,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -1416,7 +1419,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EAGAIN as i32),
+                mochi_user_syscall::EAGAIN as i32,
                 0,
             );
             return;
@@ -1467,7 +1470,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -1482,7 +1485,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EACCES as i32),
+                mochi_user_syscall::EACCES as i32,
                 0,
             );
             return;
@@ -1497,7 +1500,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
                 0,
             );
             return;
@@ -1510,7 +1513,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                -(mochi_user_syscall::EACCES as i32),
+                mochi_user_syscall::EACCES as i32,
                 0,
             );
             return;
@@ -1521,7 +1524,7 @@ impl WorkspaceService {
         self.reply_status(
             sender,
             request.request_id,
-            -(mochi_user_syscall::EAGAIN as i32),
+            mochi_user_syscall::EAGAIN as i32,
             0,
         );
     }
@@ -1543,7 +1546,7 @@ impl WorkspaceService {
             },
             &mut payload,
         ) else {
-            self.reply_status(sender, request_id, -(mochi_user_syscall::EINVAL as i32), 0);
+            self.reply_status(sender, request_id, mochi_user_syscall::EINVAL as i32, 0);
             return;
         };
         self.reply(
@@ -1592,17 +1595,17 @@ fn valid_file_panel_content_types(value: &str) -> bool {
 
 fn validate_panel_selection(pending: &PendingFilePanel, selected: &str) -> Result<String, u64> {
     if selected.is_empty() || !selected.starts_with('/') || selected.as_bytes().contains(&0) {
-        return Err(mochi_user_syscall::EINVAL as u64);
+        return Err(error::status_errno(mochi_user_syscall::EINVAL as i64));
     }
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .and_then(|path| fs::canonicalize(path).ok())
-        .ok_or(mochi_user_syscall::EACCES as u64)?;
+        .ok_or(error::status_errno(mochi_user_syscall::EACCES as i64))?;
     let path = Path::new(selected);
     let validated = if pending.mode == protocol::FILE_PANEL_MODE_OPEN {
         let canonical = fs::canonicalize(path).map_err(errno)?;
         if !canonical.is_file() {
-            return Err(mochi_user_syscall::EISDIR as u64);
+            return Err(error::status_errno(mochi_user_syscall::EISDIR as i64));
         }
         canonical
     } else {
@@ -1610,28 +1613,28 @@ fn validate_panel_selection(pending: &PendingFilePanel, selected: &str) -> Resul
             .file_name()
             .and_then(|name| name.to_str())
             .filter(|name| !name.is_empty() && *name != "." && *name != "..")
-            .ok_or(mochi_user_syscall::EINVAL as u64)?;
-        let parent = path.parent().ok_or(mochi_user_syscall::EINVAL as u64)?;
+            .ok_or(error::status_errno(mochi_user_syscall::EINVAL as i64))?;
+        let parent = path.parent().ok_or(error::status_errno(mochi_user_syscall::EINVAL as i64))?;
         let parent = fs::canonicalize(parent).map_err(errno)?;
         if !parent.is_dir() {
-            return Err(mochi_user_syscall::ENOTDIR as u64);
+            return Err(error::status_errno(mochi_user_syscall::ENOTDIR as i64));
         }
         let destination = parent.join(name);
         if destination.is_dir() {
-            return Err(mochi_user_syscall::EISDIR as u64);
+            return Err(error::status_errno(mochi_user_syscall::EISDIR as i64));
         }
         destination
     };
     if !validated.starts_with(&home) {
-        return Err(mochi_user_syscall::EACCES as u64);
+        return Err(error::status_errno(mochi_user_syscall::EACCES as i64));
     }
     if !selection_matches_content_types(&validated, &pending.allowed_content_types) {
-        return Err(mochi_user_syscall::EINVAL as u64);
+        return Err(error::status_errno(mochi_user_syscall::EINVAL as i64));
     }
     validated
         .to_str()
         .map(str::to_owned)
-        .ok_or(mochi_user_syscall::EINVAL as u64)
+        .ok_or(error::status_errno(mochi_user_syscall::EINVAL as i64))
 }
 
 fn selection_matches_content_types(path: &Path, allowed: &str) -> bool {
@@ -1670,9 +1673,9 @@ fn selection_matches_content_types(path: &Path, allowed: &str) -> bool {
 
 fn grant_selected_path(pending: &PendingFilePanel, path: &str) -> Result<(), u64> {
     let service = platform::process::find_by_name(CAPABILITY_SERVICE_NAME)
-        .map_err(|error| error.errno().unwrap_or(mochi_user_syscall::ENOENT as u64))?;
+        .map_err(|error| error.errno().unwrap_or(error::status_errno(mochi_user_syscall::ENOENT as i64)))?;
     if service == 0 {
-        return Err(mochi_user_syscall::ENOENT as u64);
+        return Err(error::status_errno(mochi_user_syscall::ENOENT as i64));
     }
     let capability = if pending.mode == protocol::FILE_PANEL_MODE_SAVE {
         "fs.write.user"
@@ -1693,7 +1696,7 @@ fn grant_selected_path(pending: &PendingFilePanel, path: &str) -> Result<(), u64
         true,
         platform::capability::CapabilityClass::UserGrantable,
     )
-    .map_err(|_| mochi_user_syscall::EINVAL as u64)?;
+    .map_err(|_| error::status_errno(mochi_user_syscall::EINVAL as i64))?;
     let mut decision = platform::capability::CapabilityDecisionRequest::new(
         platform::capability::CapabilityDecision::AllowForProcess,
         request,
@@ -1702,15 +1705,19 @@ fn grant_selected_path(pending: &PendingFilePanel, path: &str) -> Result<(), u64
     let mut encoded =
         vec![0u8; core::mem::size_of::<platform::capability::CapabilityDecisionRequest>()];
     let length = platform::capability::encode_decision_request(&decision, &mut encoded)
-        .map_err(|_| mochi_user_syscall::EINVAL as u64)?;
+        .map_err(|_| error::status_errno(mochi_user_syscall::EINVAL as i64))?;
     let mut reply = [0u8; 8];
     let message = platform::ipc::call(service, &encoded[..length], &mut reply)
-        .map_err(|error| error.errno().unwrap_or(mochi_user_syscall::EIO as u64))?;
+        .map_err(|error| error.errno().unwrap_or(error::status_errno(mochi_user_syscall::EIO as i64)))?;
     if (message & 0xffff_ffff) as usize != reply.len() {
-        return Err(mochi_user_syscall::EINVAL as u64);
+        return Err(error::status_errno(mochi_user_syscall::EINVAL as i64));
     }
     let status = u64::from_le_bytes(reply);
-    if status == 0 { Ok(()) } else { Err(status) }
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(error::status_errno(status as i64))
+    }
 }
 
 fn set_process_modal(opcode: u32, owner_process: u64, modal_process: u64) -> Result<(), u64> {
@@ -1721,12 +1728,12 @@ fn set_process_modal(opcode: u32, owner_process: u64, modal_process: u64) -> Res
         || modal_process == 0
         || owner_process == modal_process
     {
-        return Err(mochi_user_syscall::EINVAL as u64);
+        return Err(error::status_errno(mochi_user_syscall::EINVAL as i64));
     }
     let compositor = platform::process::find_by_name(COMPOSITOR_SERVICE_NAME)
-        .map_err(|error| error.errno().unwrap_or(mochi_user_syscall::ENOENT as u64))?;
+        .map_err(|error| error.errno().unwrap_or(error::status_errno(mochi_user_syscall::ENOENT as i64)))?;
     if compositor == 0 {
-        return Err(mochi_user_syscall::ENOENT as u64);
+        return Err(error::status_errno(mochi_user_syscall::ENOENT as i64));
     }
     let mut request = [0u8; 20];
     request[..4].copy_from_slice(&opcode.to_le_bytes());
@@ -1734,17 +1741,17 @@ fn set_process_modal(opcode: u32, owner_process: u64, modal_process: u64) -> Res
     request[12..20].copy_from_slice(&modal_process.to_le_bytes());
     let mut reply = [0u8; 16];
     let message = platform::ipc::call(compositor, &request, &mut reply)
-        .map_err(|error| error.errno().unwrap_or(mochi_user_syscall::EIO as u64))?;
+        .map_err(|error| error.errno().unwrap_or(error::status_errno(mochi_user_syscall::EIO as i64)))?;
     let length = (message & 0xffff_ffff) as usize;
     let status = reply
         .get(..length)
         .and_then(|bytes| bytes.get(..4))
         .map(|bytes| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-        .ok_or(mochi_user_syscall::EIO as u64)?;
+        .ok_or(error::status_errno(mochi_user_syscall::EIO as i64))?;
     if status == 0 {
         Ok(())
     } else {
-        Err(u64::from(status))
+        Err(error::status_errno(i64::from(status as i32)))
     }
 }
 
@@ -2203,15 +2210,15 @@ fn launch_application(application: &InstalledApplication) -> Result<u64, u64> {
 
 fn launch_executable(executable: &str, arguments: &[String]) -> Result<u64, u64> {
     let service = platform::process::find_by_name(CAPABILITY_SERVICE_NAME)
-        .map_err(|error| error.errno().unwrap_or(mochi_user_syscall::ENOENT as u64))?;
+        .map_err(|error| error.errno().unwrap_or(error::status_errno(mochi_user_syscall::ENOENT as i64)))?;
     if service == 0 {
-        return Err(mochi_user_syscall::ENOENT as u64);
+        return Err(error::status_errno(mochi_user_syscall::ENOENT as i64));
     }
     let mut items = Vec::with_capacity(1 + arguments.len() + SESSION_ENVIRONMENT_NAMES.len());
     items.push(executable.to_owned());
     items.extend(arguments.iter().cloned());
     let posix_endpoint = platform::handle::inherited(mochios_posix_protocol::CONTROL_HANDLE_KEY)
-        .map_err(|error| error.errno().unwrap_or(mochi_user_syscall::EBADF as u64))?;
+        .map_err(|error| error.errno().unwrap_or(error::status_errno(mochi_user_syscall::EBADF as i64)))?;
     let posix_rights = platform::handle::HANDLE_RIGHT_SEND
         | platform::handle::HANDLE_RIGHT_DUPLICATE
         | platform::handle::HANDLE_RIGHT_TRANSFER;
@@ -2228,7 +2235,7 @@ fn launch_executable(executable: &str, arguments: &[String]) -> Result<u64, u64>
         }
     }
     if items.iter().any(|item| item.as_bytes().contains(&0)) {
-        return Err(mochi_user_syscall::EINVAL as u64);
+        return Err(error::status_errno(mochi_user_syscall::EINVAL as i64));
     }
     let payload_len = items.iter().map(|item| item.len() + 1).sum::<usize>();
     let mut request = vec![0u8; SPAWN_APP_HEADER_LEN + payload_len];
@@ -2240,17 +2247,17 @@ fn launch_executable(executable: &str, arguments: &[String]) -> Result<u64, u64>
     }
     let mut reply = [0u8; 16];
     let message = platform::ipc::call(service, &request, &mut reply)
-        .map_err(|error| error.errno().unwrap_or(mochi_user_syscall::EIO as u64))?;
+        .map_err(|error| error.errno().unwrap_or(error::status_errno(mochi_user_syscall::EIO as i64)))?;
     if (message & 0xffff_ffff) as usize != reply.len() {
-        return Err(mochi_user_syscall::EINVAL as u64);
+        return Err(error::status_errno(mochi_user_syscall::EINVAL as i64));
     }
     let status = u64::from_le_bytes(reply[..8].try_into().unwrap_or_default());
     let process_id = u64::from_le_bytes(reply[8..].try_into().unwrap_or_default());
     if status != 0 {
-        return Err(status);
+        return Err(error::status_errno(status as i64));
     }
     if process_id == 0 {
-        return Err(mochi_user_syscall::EINVAL as u64);
+        return Err(error::status_errno(mochi_user_syscall::EINVAL as i64));
     }
     Ok(process_id)
 }
@@ -2480,27 +2487,6 @@ fn persist_private_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-fn errno(error: io::Error) -> u64 {
-    error
-        .raw_os_error()
-        .unwrap_or(mochi_user_syscall::EIO as i32) as u64
-}
-
-fn posix_client_errno(
-    error: mochios_posix_client::ClientError<mochi_user_syscall::SysError>,
-) -> u64 {
-    match error {
-        mochios_posix_client::ClientError::Transport(error) => error.raw().unsigned_abs(),
-        mochios_posix_client::ClientError::Remote(status) => status.unsigned_abs() as u64,
-        mochios_posix_client::ClientError::RequestTooLarge => {
-            mochi_user_syscall::EOVERFLOW as u64
-        }
-        mochios_posix_client::ClientError::Protocol(_)
-        | mochios_posix_client::ClientError::ResponseTooLarge
-        | mochios_posix_client::ClientError::MismatchedResponse => mochi_user_syscall::EIO as u64,
-    }
-}
-
 fn close_attached_handles(handles: &mut platform::ipc::IpcObjectHandles) {
     let count = (handles.count as usize).min(handles.handles.len());
     for handle in &mut handles.handles[..count] {
@@ -2567,7 +2553,7 @@ fn main() {
                 let mut reply = [0u8; protocol::HEADER_LEN + 24];
                 if let Ok(length) = protocol::encode_status(
                     0,
-                    -(mochi_user_syscall::EINVAL as i32),
+                    mochi_user_syscall::EINVAL as i32,
                     service.clipboard_generation,
                     0,
                     &mut reply,

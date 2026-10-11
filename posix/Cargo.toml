@@ -13,6 +13,7 @@ mochios-filesystem-protocol = { git = "https://github.com/mochiOS/syscalls", pac
 mochios-posix-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-posix-protocol" }
 
 [dev-dependencies]
+mochios-workspace-protocol = { path = "../../user/crates/workspace-protocol" }
 mboot-protocol = { path = "../mboot-protocol" }
 sha2 = { version = "0.10", default-features = false }
 mochios-signature-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-signature-protocol" }
