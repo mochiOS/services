@@ -77,6 +77,173 @@ fn client(service: &Rc<RefCell<PosixService>>, identity: PeerIdentity) -> Client
     })
 }
 
+fn disposition(signal: u32, kind: u32) -> protocol::SignalDisposition {
+    protocol::SignalDisposition {
+        signal,
+        kind,
+        child_options: 0,
+    }
+}
+
+#[test]
+fn disposition_wire_is_pointer_free_and_rejects_malformed_metadata() {
+    let action = disposition(10, protocol::SIGNAL_DISPOSITION_CAUGHT);
+    let mut bytes = [0; protocol::SIGNAL_DISPOSITION_LEN];
+    protocol::encode_signal_disposition(action, &mut bytes).unwrap();
+    assert_eq!(bytes.len(), 16);
+    assert_eq!(protocol::decode_signal_disposition(&bytes), Ok(action));
+    for offset in [0, 4, 8, 12] {
+        let mut invalid = bytes;
+        invalid[offset..offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(protocol::decode_signal_disposition(&invalid).is_err());
+    }
+    for length in 0..16 {
+        assert!(protocol::decode_signal_disposition(&bytes[..length]).is_err());
+    }
+    assert!(protocol::decode_signal_disposition(&[0; 17]).is_err());
+    assert!(protocol::encode_signal_disposition(action, &mut [0; 15]).is_err());
+    assert!(protocol::encode_signal_disposition(disposition(0, 0), &mut bytes).is_err());
+    assert!(protocol::encode_signal_disposition(disposition(65, 0), &mut bytes).is_err());
+}
+
+#[test]
+fn ignore_discards_pending_and_future_signals_without_affecting_other_processes() {
+    let first = peer(101, 501);
+    let second = peer(102, 501);
+    let service = Rc::new(RefCell::new(PosixService::new()));
+    register(&mut service.borrow_mut(), first);
+    register(&mut service.borrow_mut(), second);
+    let sender = client(&service, first);
+    let receiver = client(&service, second);
+    sender.send_signal(102, 10).unwrap();
+    assert_ne!(receiver.pending_signals().unwrap(), 0);
+    assert_eq!(
+        receiver.set_signal_disposition(disposition(10, 1)).unwrap(),
+        disposition(10, 0)
+    );
+    assert_eq!(receiver.pending_signals().unwrap(), 0);
+    assert!(
+        !service
+            .borrow()
+            .signal_notification_processes()
+            .any(|id| id == 102)
+    );
+    sender.send_signal(102, 10).unwrap();
+    assert_eq!(receiver.pending_signals().unwrap(), 0);
+    assert!(
+        !service
+            .borrow()
+            .signal_notification_processes()
+            .any(|id| id == 102)
+    );
+    assert_eq!(receiver.signal_disposition(10).unwrap(), disposition(10, 1));
+    assert_eq!(sender.signal_disposition(10).unwrap(), disposition(10, 0));
+    assert_eq!(
+        receiver.set_signal_disposition(disposition(10, 2)).unwrap(),
+        disposition(10, 1)
+    );
+    sender.send_signal(102, 10).unwrap();
+    assert_eq!(receiver.dequeue_signal(0).unwrap(), 10);
+}
+
+#[test]
+fn disposition_cannot_ignore_kill_or_stop_or_mutate_an_unregistered_peer() {
+    let identity = peer(101, 501);
+    let service = Rc::new(RefCell::new(PosixService::new()));
+    register(&mut service.borrow_mut(), identity);
+    let caller = client(&service, identity);
+    for signal in [protocol::SIGNAL_KILL, protocol::SIGNAL_STOP] {
+        for kind in [0, 1, 2] {
+            assert_eq!(
+                caller.set_signal_disposition(disposition(signal, kind)),
+                Err(ClientError::Remote(-22))
+            );
+        }
+        assert_eq!(
+            caller.signal_disposition(signal).unwrap(),
+            disposition(signal, 0)
+        );
+    }
+    assert_eq!(
+        client(&service, peer(999, 0)).set_signal_disposition(disposition(10, 1)),
+        Err(ClientError::Remote(protocol::STATUS_ESRCH))
+    );
+}
+
+#[test]
+fn child_notification_options_and_disposition_update_atomically() {
+    let identity = peer(101, 501);
+    let service = Rc::new(RefCell::new(PosixService::new()));
+    register(&mut service.borrow_mut(), identity);
+    let caller = client(&service, identity);
+    let action = protocol::SignalDisposition {
+        signal: protocol::SIGNAL_CHLD,
+        kind: protocol::SIGNAL_DISPOSITION_CAUGHT,
+        child_options: protocol::SIGNAL_CHILD_OPTION_NOCLDSTOP,
+    };
+    assert_eq!(
+        caller.set_signal_disposition(action).unwrap(),
+        disposition(protocol::SIGNAL_CHLD, 0)
+    );
+    assert_eq!(
+        caller.signal_disposition(protocol::SIGNAL_CHLD).unwrap(),
+        action
+    );
+    let mut bytes = [0; protocol::SIGNAL_DISPOSITION_LEN];
+    protocol::encode_signal_disposition(action, &mut bytes).unwrap();
+    for (flags, payload) in [
+        (2, bytes),
+        (0, bytes),
+        (1, {
+            let mut invalid = bytes;
+            invalid[12] = 1;
+            invalid
+        }),
+    ] {
+        let response = service.borrow_mut().handle(
+            identity,
+            protocol::Header {
+                opcode: protocol::OP_SIGNAL_DISPOSITION,
+                flags,
+                ..Default::default()
+            },
+            &payload,
+        );
+        assert_eq!(response.header.status, -22);
+        assert_eq!(
+            caller.signal_disposition(protocol::SIGNAL_CHLD).unwrap(),
+            action
+        );
+    }
+}
+
+#[test]
+fn ignored_continue_still_requests_native_resume_and_cancels_pending_stop() {
+    let identity = peer(101, 501);
+    let service = Rc::new(RefCell::new(PosixService::new()));
+    register(&mut service.borrow_mut(), identity);
+    let caller = client(&service, identity);
+    caller
+        .set_signal_disposition(disposition(protocol::SIGNAL_CONT, 1))
+        .unwrap();
+    caller.send_signal(101, protocol::SIGNAL_STOP).unwrap();
+    assert_ne!(caller.pending_signals().unwrap(), 0);
+    caller.send_signal(101, protocol::SIGNAL_CONT).unwrap();
+    assert_eq!(caller.pending_signals().unwrap(), 0);
+    assert!(
+        !service
+            .borrow()
+            .signal_notification_processes()
+            .any(|id| id == 101)
+    );
+    assert!(
+        service
+            .borrow()
+            .process_resume_notification_processes()
+            .any(|id| id == 101)
+    );
+}
+
 #[test]
 fn signal_wire_format_rejects_invalid_numbers_and_reserved_bytes() {
     let mut bytes = [0u8; protocol::SIGNAL_SEND_REQUEST_LEN];

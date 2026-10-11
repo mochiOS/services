@@ -1961,6 +1961,143 @@ fn failed_fork_cleanup_requires_its_creator_and_is_retryable_after_lost_reply() 
 }
 
 #[test]
+fn fork_inherits_dispositions_but_not_pending_signals_and_keeps_updates_independent() {
+    let parent = PeerIdentity {
+        process_id: 421,
+        effective_uid: 505,
+        effective_gid: 24,
+    };
+    let mut service = service_for(parent);
+    let action = protocol::SignalDisposition {
+        signal: 10,
+        kind: protocol::SIGNAL_DISPOSITION_IGNORE,
+        child_options: 0,
+    };
+    let mut bytes = [0; protocol::SIGNAL_DISPOSITION_LEN];
+    protocol::encode_signal_disposition(action, &mut bytes).unwrap();
+    let set = protocol::Header {
+        opcode: protocol::OP_SIGNAL_DISPOSITION,
+        flags: protocol::SIGNAL_DISPOSITION_SET,
+        ..Default::default()
+    };
+    assert_eq!(service.handle(parent, set, &bytes).header.status, 0);
+    let mut signal = [0; protocol::SIGNAL_SEND_REQUEST_LEN];
+    protocol::encode_signal_send_request(
+        protocol::SignalSendRequest {
+            selector: 421,
+            signal: 12,
+        },
+        &mut signal,
+    )
+    .unwrap();
+    assert_eq!(
+        service
+            .handle(
+                parent,
+                protocol::Header {
+                    opcode: protocol::OP_SIGNAL_SEND,
+                    ..Default::default()
+                },
+                &signal
+            )
+            .header
+            .status,
+        0
+    );
+    service
+        .adopt_child(
+            parent,
+            AuthenticatedProcess {
+                handle: 1422,
+                process_id: 422,
+            },
+            &mut RecordingFilesystem::default(),
+        )
+        .unwrap();
+    assert_ne!(service.signal_state(421).unwrap().pending(), 0);
+    assert_eq!(service.signal_state(422).unwrap().pending(), 0);
+    let child = PeerIdentity {
+        process_id: 422,
+        ..parent
+    };
+    protocol::encode_signal_disposition(
+        protocol::SignalDisposition {
+            kind: protocol::SIGNAL_DISPOSITION_CAUGHT,
+            ..action
+        },
+        &mut bytes,
+    )
+    .unwrap();
+    let reply = service.handle(child, set, &bytes);
+    assert_eq!(reply.header.status, 0);
+    assert_eq!(
+        protocol::decode_signal_disposition(&reply.payload).unwrap(),
+        action
+    );
+    protocol::encode_signal_disposition(
+        protocol::SignalDisposition { kind: 0, ..action },
+        &mut bytes,
+    )
+    .unwrap();
+    let get = protocol::Header { flags: 0, ..set };
+    let reply = service.handle(parent, get, &bytes);
+    assert_eq!(
+        protocol::decode_signal_disposition(&reply.payload).unwrap(),
+        action
+    );
+    let reply = service.handle(child, get, &bytes);
+    assert_eq!(
+        protocol::decode_signal_disposition(&reply.payload)
+            .unwrap()
+            .kind,
+        protocol::SIGNAL_DISPOSITION_CAUGHT
+    );
+}
+
+#[test]
+fn signal_disposition_uses_object_ipc_without_accepting_attached_authority() {
+    let peer = PeerIdentity {
+        process_id: 421,
+        effective_uid: 505,
+        effective_gid: 24,
+    };
+    let mut service = service_for(peer);
+    let mut filesystem = RecordingFilesystem::default();
+    let action = protocol::SignalDisposition {
+        signal: 10,
+        kind: protocol::SIGNAL_DISPOSITION_IGNORE,
+        child_options: 0,
+    };
+    let mut bytes = [0; protocol::SIGNAL_DISPOSITION_LEN];
+    protocol::encode_signal_disposition(action, &mut bytes).unwrap();
+    let header = protocol::Header {
+        opcode: protocol::OP_SIGNAL_DISPOSITION,
+        flags: protocol::SIGNAL_DISPOSITION_SET,
+        ..Default::default()
+    };
+    let reply = service.handle_objects(peer, header, &bytes, &[], &mut filesystem);
+    assert_eq!(reply.response.header.status, 0);
+    assert_eq!(
+        protocol::decode_signal_disposition(&reply.response.payload)
+            .unwrap()
+            .kind,
+        0
+    );
+    let reply = service.handle_objects(
+        peer,
+        header,
+        &bytes,
+        &[AttachedObject {
+            handle: 999,
+            rights: mnu_abi::HANDLE_RIGHT_ALL,
+        }],
+        &mut filesystem,
+    );
+    assert_eq!(reply.response.header.status, -22);
+    assert!(reply.handles.is_empty());
+}
+
+#[test]
 fn failed_launch_that_already_exited_is_reaped_without_terminating_again() {
     let broker = PeerIdentity {
         process_id: 321,

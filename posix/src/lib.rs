@@ -396,11 +396,41 @@ impl ProcessWaitState {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ProcessSignalState {
     pending: u64,
+    ignored: u64,
+    caught: u64,
 }
 
 impl ProcessSignalState {
     pub const fn pending(self) -> u64 {
         self.pending
+    }
+
+    fn disposition(self, signal: u32) -> u32 {
+        let bit = signal_bit(signal);
+        if self.ignored & bit != 0 {
+            protocol::SIGNAL_DISPOSITION_IGNORE
+        } else if self.caught & bit != 0 {
+            protocol::SIGNAL_DISPOSITION_CAUGHT
+        } else {
+            protocol::SIGNAL_DISPOSITION_DEFAULT
+        }
+    }
+
+    fn fork_child(self) -> Self {
+        Self { pending: 0, ..self }
+    }
+
+    fn set_disposition(&mut self, signal: u32, kind: u32) {
+        let bit = signal_bit(signal);
+        self.ignored &= !bit;
+        self.caught &= !bit;
+        if kind == protocol::SIGNAL_DISPOSITION_IGNORE {
+            self.ignored |= bit;
+            // POSIX discards already pending signals when changing to SIG_IGN.
+            self.pending &= !bit;
+        } else if kind == protocol::SIGNAL_DISPOSITION_CAUGHT {
+            self.caught |= bit;
+        }
     }
 
     fn enqueue(&mut self, signal: u32) {
@@ -410,7 +440,9 @@ impl ProcessSignalState {
         } else if signal & JOB_CONTROL_STOP_SIGNALS != 0 {
             self.pending &= !signal_bit(protocol::SIGNAL_CONT);
         }
-        self.pending |= signal;
+        if self.ignored & signal == 0 {
+            self.pending |= signal;
+        }
     }
 
     fn next_deliverable(&self, blocked: u64) -> u32 {
@@ -695,7 +727,11 @@ impl<H: Copy> PosixService<H> {
             .get_mut(&process_id)
             .ok_or(protocol::STATUS_ESRCH)?
             .enqueue(signal);
-        self.signal_notifications.insert(process_id);
+        if self.signals[&process_id].pending() & signal_bit(signal) != 0 {
+            self.signal_notifications.insert(process_id);
+        } else if self.signals[&process_id].pending() == 0 {
+            self.signal_notifications.remove(&process_id);
+        }
         if matches!(signal, protocol::SIGNAL_KILL | protocol::SIGNAL_CONT) {
             self.process_resume_notifications.insert(process_id);
         }
@@ -1149,7 +1185,8 @@ impl<H: Copy> PosixService<H> {
             .entry(peer.process_id)
             .or_default()
             .insert(child_id);
-        self.signals.insert(child_id, ProcessSignalState::default());
+        let child_signals = self.signals[&peer.process_id].fork_child();
+        self.signals.insert(child_id, child_signals);
         self.signal_child_options
             .insert(child_id, inherited_signal_child_options);
         self.process_wait_states
@@ -2003,6 +2040,54 @@ impl<H: Copy> PosixService<H> {
         Ok(())
     }
 
+    fn signal_disposition_payload(
+        &mut self,
+        process_id: u64,
+        flags: u32,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, i32> {
+        let request = protocol::decode_signal_disposition(payload).map_err(|_| STATUS_EINVAL)?;
+        let setting = flags == protocol::SIGNAL_DISPOSITION_SET;
+        if (!setting && (request.kind != 0 || request.child_options != 0))
+            || (setting
+                && matches!(
+                    request.signal,
+                    protocol::SIGNAL_KILL | protocol::SIGNAL_STOP
+                ))
+        {
+            return Err(STATUS_EINVAL);
+        }
+        let state = self
+            .signals
+            .get_mut(&process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let previous = protocol::SignalDisposition {
+            signal: request.signal,
+            kind: state.disposition(request.signal),
+            child_options: if request.signal == protocol::SIGNAL_CHLD {
+                self.signal_child_options
+                    .get(&process_id)
+                    .copied()
+                    .unwrap_or_default()
+            } else {
+                0
+            },
+        };
+        let mut output = vec![0; protocol::SIGNAL_DISPOSITION_LEN];
+        protocol::encode_signal_disposition(previous, &mut output).map_err(|_| STATUS_EINVAL)?;
+        if setting {
+            state.set_disposition(request.signal, request.kind);
+            if state.pending() == 0 {
+                self.signal_notifications.remove(&process_id);
+            }
+            if request.signal == protocol::SIGNAL_CHLD {
+                self.signal_child_options
+                    .insert(process_id, request.child_options);
+            }
+        }
+        Ok(output)
+    }
+
     fn dequeue_signal_payload(&mut self, process_id: u64, payload: &[u8]) -> Result<Vec<u8>, i32> {
         let blocked = protocol::decode_signal_mask(payload).map_err(|_| STATUS_EINVAL)?;
         let signal = self
@@ -2236,6 +2321,9 @@ impl<H: Copy> PosixService<H> {
             protocol::OP_SIGNAL_CHILD_OPTIONS if header.flags == 0 => self
                 .set_signal_child_options(peer.process_id, payload)
                 .map(|_| Vec::new()),
+            protocol::OP_SIGNAL_DISPOSITION if header.flags <= protocol::SIGNAL_DISPOSITION_SET => {
+                self.signal_disposition_payload(peer.process_id, header.flags, payload)
+            }
             protocol::OP_PING
             | protocol::OP_SESSION_REGISTER
             | protocol::OP_SIGNAL_THREAD_REGISTER
@@ -2283,6 +2371,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_SIGNAL_DELIVERY_COMPLETE
             | protocol::OP_PROCESS_SIGNALED
             | protocol::OP_SIGNAL_CHILD_OPTIONS
+            | protocol::OP_SIGNAL_DISPOSITION
             | protocol::OP_FTRUNCATE
             | protocol::OP_FSYNC
             | protocol::OP_FGETFL
