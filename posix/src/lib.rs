@@ -525,6 +525,8 @@ pub struct PosixService<H: Copy = u32> {
     supplementary_groups: BTreeMap<u64, Vec<u32>>,
     resource_limits: BTreeMap<(u64, u32), protocol::ResourceLimit>,
     signals: BTreeMap<u64, ProcessSignalState>,
+    // Native identities arrive only from authenticated endpoint metadata.
+    signal_masks: BTreeMap<(u64, u64), u64>,
     signal_child_options: BTreeMap<u64, u32>,
     process_wait_states: BTreeMap<u64, ProcessWaitState>,
     next_signal_delivery_token: u64,
@@ -551,6 +553,7 @@ impl PosixService<u32> {
             supplementary_groups: BTreeMap::new(),
             resource_limits: BTreeMap::new(),
             signals: BTreeMap::new(),
+            signal_masks: BTreeMap::new(),
             signal_child_options: BTreeMap::new(),
             process_wait_states: BTreeMap::new(),
             next_signal_delivery_token: 1,
@@ -1600,6 +1603,7 @@ impl<H: Copy> PosixService<H> {
         self.resource_limits
             .retain(|(process_id, _), _| *process_id != child_id);
         self.signals.remove(&child_id);
+        self.signal_masks.retain(|(process, _), _| *process != child_id);
         self.signal_child_options.remove(&child_id);
         self.process_wait_states.remove(&child_id);
         self.signal_notifications.remove(&child_id);
@@ -2103,6 +2107,79 @@ impl<H: Copy> PosixService<H> {
         Ok(output)
     }
 
+    /// `sender` must come from the kernel-authenticated request endpoint.
+    /// Neither a PID nor a TID is accepted in the wire payload.
+    pub fn handle_thread_signal_mask(
+        &mut self,
+        peer: PeerIdentity,
+        sender: mnu_abi::ExecutionIdentity,
+        header: protocol::Header,
+        payload: &[u8],
+    ) -> Response {
+        let result = if header.opcode != protocol::OP_SIGNAL_THREAD_MASK {
+            Err(protocol::STATUS_ENOSYS)
+        } else if header.flags != 0 {
+            Err(STATUS_EINVAL)
+        } else if sender.process_id != peer.process_id
+            || sender.process_id == 0
+            || sender.thread_id == 0
+        {
+            Err(protocol::STATUS_EPERM)
+        } else {
+            self.thread_signal_mask_payload(sender, payload)
+        };
+        match result {
+            Ok(payload) => Response {
+                header: protocol::Header {
+                    opcode: protocol::OP_STATUS,
+                    request_id: header.request_id,
+                    payload_len: payload.len() as u32,
+                    ..Default::default()
+                },
+                payload,
+            },
+            Err(error) => status_response(header.request_id, error),
+        }
+    }
+
+    fn thread_signal_mask_payload(
+        &mut self,
+        sender: mnu_abi::ExecutionIdentity,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, i32> {
+        if !self.sessions.contains_key(&sender.process_id) {
+            return Err(protocol::STATUS_ESRCH);
+        }
+        let request = protocol::decode_signal_mask_request(payload).map_err(|_| STATUS_EINVAL)?;
+        let unblockable = signal_bit(protocol::SIGNAL_KILL) | signal_bit(protocol::SIGNAL_STOP);
+        let requested = request.mask & !unblockable;
+        let key = (sender.process_id, sender.thread_id);
+        let previous = self.signal_masks.get(&key).copied();
+        let current = previous.unwrap_or(0);
+        let updated = match request.operation {
+            protocol::SIGNAL_MASK_QUERY => current,
+            protocol::SIGNAL_MASK_SET => requested,
+            protocol::SIGNAL_MASK_BLOCK => current | requested,
+            protocol::SIGNAL_MASK_UNBLOCK => current & !requested,
+            protocol::SIGNAL_MASK_INITIALIZE => previous.unwrap_or(requested),
+            _ => return Err(STATUS_EINVAL),
+        };
+        let mut output = vec![0; protocol::SIGNAL_MASK_LEN];
+        let returned = if request.operation == protocol::SIGNAL_MASK_INITIALIZE {
+            updated
+        } else {
+            current
+        };
+        protocol::encode_signal_mask(returned, &mut output).map_err(|_| STATUS_EINVAL)?;
+        if request.operation != protocol::SIGNAL_MASK_QUERY {
+            self.signal_masks.insert(key, updated);
+            if current & !updated & self.signals[&sender.process_id].pending() != 0 {
+                self.signal_notifications.insert(sender.process_id);
+            }
+        }
+        Ok(output)
+    }
+
     fn dequeue_signal_payload(&mut self, process_id: u64, payload: &[u8]) -> Result<Vec<u8>, i32> {
         let blocked = protocol::decode_signal_mask(payload).map_err(|_| STATUS_EINVAL)?;
         let signal = self
@@ -2391,6 +2468,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_SIGNAL_CHILD_OPTIONS
             | protocol::OP_SIGNAL_DISPOSITION
             | protocol::OP_SIGNAL_IMAGE_STARTED
+            | protocol::OP_SIGNAL_THREAD_MASK
             | protocol::OP_FTRUNCATE
             | protocol::OP_FSYNC
             | protocol::OP_FGETFL

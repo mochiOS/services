@@ -4,6 +4,8 @@
 #include <fcntl.h>
 #include <spawn.h>
 #include <signal.h>
+#include <pthread.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,6 +21,64 @@
 
 static void caught_signal(int signal_number) {
     (void)signal_number;
+}
+
+/* Direct client/service boundary probe. The wire payload contains no TID or
+ * PID; posix.service must obtain both from the native request endpoint. */
+static int service_mask(uint32_t operation, uint64_t mask, uint64_t *previous) {
+    struct {
+        char magic[4]; uint16_t version, opcode;
+        uint64_t request_id;
+        uint32_t flags, length; int32_t status; uint32_t reserved;
+        uint32_t operation, mask_reserved; uint64_t mask;
+    } request = {{'P', 'O', 'S', 'X'}, 1, 65, 1, 0, 16, 0, 0, operation, 0, mask};
+    unsigned char reply[40] = {0};
+    _Static_assert(sizeof(request) == 48, "POSIX mask wire layout");
+    uint64_t endpoint = UINT64_C(0x4c52544358534f50);
+    uint64_t number = 628;
+    __asm__ volatile("syscall" : "+a"(number) : "D"(endpoint) : "rcx", "r11", "memory");
+    if (number == 0 || number >= UINT64_MAX - 4094) return 1;
+    endpoint = number;
+    number = 588;
+    register uint64_t r10 __asm__("r10") = (uintptr_t)reply;
+    register uint64_t r8 __asm__("r8") = sizeof(reply);
+    __asm__ volatile("syscall" : "+a"(number)
+                     : "D"(endpoint), "S"(&request), "d"(sizeof(request)), "r"(r10), "r"(r8)
+                     : "rcx", "r11", "memory");
+    int32_t status;
+    memcpy(&status, reply + 24, sizeof(status));
+    if (number >= UINT64_MAX - 4094 || (uint32_t)number != sizeof(reply) ||
+        memcmp(reply, "POSX", 4) != 0 || status != 0) return 2;
+    memcpy(previous, reply + 32, sizeof(*previous));
+    return 0;
+}
+
+static void *inspect_service_thread_mask(void *unused) {
+    (void)unused;
+    uint64_t previous;
+    if (service_mask(0, 0, &previous) || previous != 0 ||
+        service_mask(1, UINT64_C(1) << 30, &previous) || previous != 0 ||
+        service_mask(0, 0, &previous) || previous != (UINT64_C(1) << 30))
+        return (void *)1;
+    return NULL;
+}
+
+static int inspect_service_masks(void) {
+    uint64_t previous;
+    uint64_t first = UINT64_C(1) << 29;
+    uint64_t unblockable = (UINT64_C(1) << (SIGKILL - 1)) | (UINT64_C(1) << (SIGSTOP - 1));
+    CHECK(service_mask(4, first, &previous) == 0 && previous == first);
+    CHECK(service_mask(2, unblockable, &previous) == 0 && previous == first);
+    CHECK(service_mask(4, 0, &previous) == 0 && previous == first);
+    pthread_t thread;
+    void *result = (void *)1;
+    CHECK(pthread_create(&thread, NULL, inspect_service_thread_mask, NULL) == 0);
+    CHECK(pthread_join(thread, &result) == 0 && result == NULL);
+    CHECK(service_mask(0, 0, &previous) == 0 && previous == first);
+    CHECK(service_mask(3, first, &previous) == 0 && previous == first);
+    CHECK(service_mask(0, 0, &previous) == 0 && previous == 0);
+    fprintf(stderr, "native-signal-masks: PASS authenticated per-thread masks, initialize preservation and unblockable signals\n");
+    return 0;
 }
 
 int main(int argc, char **argv) {
@@ -55,6 +115,7 @@ int main(int argc, char **argv) {
         _exit(41);
     }
     fprintf(stderr, "failed-spawn-cleanup: start\n");
+    CHECK(inspect_service_masks() == 0);
     posix_spawn_file_actions_t actions;
     CHECK(posix_spawn_file_actions_init(&actions) == 0);
     /* FD 63 is in range but unopened. Failure occurs in the registered child,

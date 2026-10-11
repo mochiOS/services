@@ -174,12 +174,19 @@ fn runtime_does_not_auto_bind_senders_or_import_native_uid_gid() {
     // Same-thread signal registration needs only native endpoint identity.
     // Neither registration nor peer admission may query kernel credentials or
     // reinterpret endpoint numbers as native thread IDs.
-    let query = source
-        .find("platform::ipc::endpoint_execution_identity(sender)")
-        .unwrap();
     let registration = source
         .find("header.opcode == protocol::OP_SIGNAL_THREAD_REGISTER")
         .unwrap();
+    let query = registration
+        + source[registration..]
+            .find("platform::ipc::endpoint_execution_identity(sender)")
+            .unwrap();
     assert!(registration < query);
+    // The mask branch also uses kernel identity, after POSIX peer admission.
+    let admission = source.find("service.registered_peer(process_id)").unwrap();
+    let first_query = source
+        .find("platform::ipc::endpoint_execution_identity(sender)")
+        .unwrap();
+    assert!(admission < first_query);
     assert!(!source.contains("thread_security_context"));
 }

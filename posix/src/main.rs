@@ -200,6 +200,21 @@ fn main() {
         let mut retained_handle = None;
         let object_response = match (peer, decoded, attachments_valid) {
             (Some(peer), Some((header, payload)), true)
+                if header.opcode == protocol::OP_SIGNAL_THREAD_MASK
+                    && attachments.is_empty() =>
+            {
+                let response = match platform::ipc::endpoint_execution_identity(sender) {
+                    Ok(identity) => {
+                        service.handle_thread_signal_mask(peer, identity, header, payload)
+                    }
+                    Err(_) => invalid_response(header.request_id),
+                };
+                Some(posix_service::ObjectResponse {
+                    response,
+                    handles: Vec::new(),
+                })
+            }
+            (Some(peer), Some((header, payload)), true)
                 if header.opcode == protocol::OP_PTY_OPEN
                     && header.flags == 0
                     && payload.is_empty()
