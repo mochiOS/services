@@ -5,6 +5,7 @@ use mochi_user_platform as platform;
 #[derive(Debug)]
 pub(crate) struct NativeProcess {
     handle: platform::handle::Handle,
+    process_id: u64,
 }
 
 impl NativeProcess {
@@ -35,14 +36,26 @@ impl NativeProcess {
         setup: impl FnOnce(platform::handle::Handle) -> Result<(), platform::syscall::SysError>,
         rollback: impl FnOnce(platform::handle::Handle),
     ) -> Result<Self, platform::syscall::SysError> {
-        let process = Self {
+        let mut process = Self {
             handle: platform::process::create_stopped(image, metadata)?,
+            process_id: 0,
         };
         if let Err(error) = setup(process.handle) {
             process.terminate();
             rollback(process.handle);
             return Err(error);
         }
+        // Resolve identity inside the launch transaction, while still stopped.
+        // A status failure after resume would otherwise strand a running child
+        // and its POSIX registration when the caller drops this owner.
+        process.process_id = match platform::process::handle_status(process.handle) {
+            Ok(status) => status.process_id,
+            Err(error) => {
+                process.terminate();
+                rollback(process.handle);
+                return Err(error);
+            }
+        };
         if let Err(error) = platform::process::resume_handle(process.handle) {
             // Creation published a stopped task; do not strand it on failure.
             let _ = platform::process::terminate_handle(process.handle, 127);
@@ -60,8 +73,8 @@ impl NativeProcess {
         let _ = platform::process::terminate_handle(self.handle, 127);
     }
 
-    pub(crate) fn process_id(&self) -> Result<u64, platform::syscall::SysError> {
-        Ok(platform::process::handle_status(self.handle)?.process_id)
+    pub(crate) fn process_id(&self) -> u64 {
+        self.process_id
     }
 }
 

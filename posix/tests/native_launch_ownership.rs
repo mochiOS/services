@@ -18,11 +18,15 @@ struct State {
     events: Vec<&'static str>,
     fail_create: bool,
     fail_resume: bool,
+    fail_status: bool,
+    status_calls: usize,
 }
 static STATE: Mutex<State> = Mutex::new(State {
     events: Vec::new(),
     fail_create: false,
     fail_resume: false,
+    fail_status: false,
+    status_calls: 0,
 });
 
 pub mod handle {
@@ -40,7 +44,13 @@ pub mod process {
     }
     pub fn handle_status(handle: u32) -> Result<Status, crate::syscall::SysError> {
         assert_eq!(handle, 7);
-        Ok(Status { process_id: 70 })
+        let mut state = crate::STATE.lock().unwrap();
+        state.status_calls += 1;
+        if state.fail_status {
+            Err(crate::syscall::SysError)
+        } else {
+            Ok(Status { process_id: 70 })
+        }
     }
     pub fn create_stopped(image: u32, metadata: &[u8]) -> Result<u32, crate::syscall::SysError> {
         assert_eq!(image, 9);
@@ -250,12 +260,17 @@ fn permission_server_uses_native_creation_and_an_explicit_send_handle() {
 #[test]
 fn native_launch_owns_the_creation_reference_and_cleans_failed_resume() {
     let process = production::NativeProcess::create_and_resume(9, b"metadata").unwrap();
-    assert_eq!(process.process_id().unwrap(), 70);
+    assert_eq!(process.process_id(), 70);
     assert_eq!(
         process.watch_target(),
         process_watch::ProcessWatchTarget::RetainedHandle(7)
     );
     assert_eq!(STATE.lock().unwrap().events, ["create-stopped", "resume"]);
+    assert_eq!(STATE.lock().unwrap().status_calls, 1);
+    STATE.lock().unwrap().fail_status = true;
+    assert_eq!(process.process_id(), 70);
+    assert_eq!(STATE.lock().unwrap().status_calls, 1);
+    STATE.lock().unwrap().fail_status = false;
     drop(process);
     assert_eq!(
         STATE.lock().unwrap().events,
@@ -407,4 +422,32 @@ fn native_launch_owns_the_creation_reference_and_cleans_failed_resume() {
         STATE.lock().unwrap().events,
         ["create-stopped", "register-posix-state", "resume", "close"]
     );
+    {
+        let mut state = STATE.lock().unwrap();
+        state.events.clear();
+        state.fail_status = true;
+    }
+    assert!(
+        production::NativeProcess::create_with_rollback(
+            9,
+            b"metadata",
+            |_| {
+                STATE.lock().unwrap().events.push("register-posix-state");
+                Ok(())
+            },
+            |_| STATE.lock().unwrap().events.push("reclaim-posix-state"),
+        )
+        .is_err()
+    );
+    assert_eq!(
+        STATE.lock().unwrap().events,
+        [
+            "create-stopped",
+            "register-posix-state",
+            "terminate",
+            "reclaim-posix-state",
+            "close"
+        ]
+    );
+    STATE.lock().unwrap().fail_status = false;
 }

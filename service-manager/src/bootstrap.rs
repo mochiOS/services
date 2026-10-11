@@ -39,7 +39,7 @@ impl Runtime {
             target,
             self.posix_endpoint,
         )?;
-        let id = process.process_id()?;
+        let id = process.process_id();
         self.session_processes.insert(id, process);
         Ok(id)
     }
