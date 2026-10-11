@@ -47,6 +47,11 @@ int main(void) {
     int fd = open(path, O_RDWR | O_CREAT | O_EXCL, 0600);
     CHECK(fd >= 0);
     CHECK(write(fd, "abcdef", 6) == 6);
+    int64_t bootstrap_fd = native(560, (uint64_t)path, 0, 0, 0);
+    CHECK(bootstrap_fd >= 0);
+    CHECK(native(569, bootstrap_fd, (uint64_t)actual, sizeof(actual), 0) == -20);
+    CHECK(native(562, bootstrap_fd, 0, 0, 0) == 0);
+    fprintf(stderr, "positioned-io: bootstrap directory read rejects regular files with ENOTDIR ok\n");
     CHECK(lseek(fd, 2, SEEK_SET) == 2);
     CHECK(fcntl(fd, F_SETFD, FD_CLOEXEC) == 0);
     int duplicate = dup(fd);
