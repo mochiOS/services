@@ -5,6 +5,10 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[allow(dead_code)]
+#[path = "../../capability/src/bootstrap_file.rs"]
+mod bootstrap_file;
+
 struct Fixture(PathBuf);
 
 impl Fixture {
@@ -473,6 +477,102 @@ fn bootstrap_wire_large_files_and_maximum_names_paginate_without_loss() {
         assert_eq!(header.status, expected);
         assert!(bytes.is_empty());
     }
+}
+
+#[test]
+fn bootstrap_client_round_trips_real_immutable_filesystem_and_propagates_errors() {
+    use mochi_user_platform::syscall::{self, SysError};
+    let fixture = Fixture::new();
+    let reader = fixture.reader();
+    let mut previous_id = 0;
+    let mut client =
+        bootstrap_file::Client::new(4, |endpoint, request: &[u8], reply: &mut [u8]| {
+            assert_eq!(endpoint, 4);
+            let (header, _) = mochios_filesystem_protocol::decode(request).unwrap();
+            assert_eq!(header.request_id, previous_id + 1);
+            previous_id = header.request_id;
+            filesystem_service::bootstrap_ipc::respond(&reader, request, reply)
+                .map_err(|_| SysError::from_raw(syscall::EIO as i64))
+        });
+    for (path, limit) in [
+        ("/large", 130_000),
+        ("/file", 16),
+        ("/empty", 0),
+        ("/absolute", 16),
+    ] {
+        assert_eq!(
+            client.read_file(path, limit).unwrap(),
+            reader.read(path, limit).unwrap()
+        );
+    }
+    assert_eq!(client.read_file("/file", 15).unwrap_err().raw(), -27);
+    assert_eq!(client.read_file("/missing", 100).unwrap_err().raw(), -2);
+    assert_eq!(client.read_file("/directory", 100).unwrap_err().raw(), -21);
+    assert_eq!(client.read_dir_names("/file", 1024).unwrap_err().raw(), -20);
+    let expected = reader
+        .read_directory("/long-names", 0, 1000, 100_000)
+        .unwrap()
+        .names;
+    assert_eq!(
+        client.read_dir_names("/long-names", 100_000).unwrap(),
+        expected
+    );
+    assert_eq!(
+        client.read_dir_names("/long-names", 100).unwrap_err().raw(),
+        -75
+    );
+    assert_eq!(client.read_file("/file", 16).unwrap(), b"0123456789abcdef");
+}
+
+#[test]
+fn bootstrap_client_rejects_corrupt_replies_and_propagates_transport_failure() {
+    use mochi_user_platform::syscall::{self, SysError};
+    use mochios_filesystem_protocol as wire;
+    let fixture = Fixture::new();
+    let reader = fixture.reader();
+    for index in [0, 4, 6, 8, 16, 24, 32, 40, 48, 52, 56, 60] {
+        let mut client = bootstrap_file::Client::new(4, |_, request: &[u8], reply: &mut [u8]| {
+            let length =
+                filesystem_service::bootstrap_ipc::respond(&reader, request, reply).unwrap();
+            reply[index] ^= 0x80;
+            Ok(length)
+        });
+        assert_eq!(
+            client.read_file("/file", 16).unwrap_err().raw(),
+            -5,
+            "field {index}"
+        );
+    }
+    for extra in [1, wire::HEADER_LEN + 100_000] {
+        let mut client = bootstrap_file::Client::new(4, |_, request: &[u8], reply: &mut [u8]| {
+            let length =
+                filesystem_service::bootstrap_ipc::respond(&reader, request, reply).unwrap();
+            Ok(length + extra)
+        });
+        assert_eq!(client.read_file("/file", 16).unwrap_err().raw(), -5);
+    }
+    let mut client = bootstrap_file::Client::new(4, |_, _: &[u8], _: &mut [u8]| {
+        Err(SysError::from_raw(syscall::EPIPE as i64))
+    });
+    assert_eq!(client.read_file("/file", 16).unwrap_err().raw(), -32);
+    let mut client = bootstrap_file::Client::new(4, |_, request: &[u8], reply: &mut [u8]| {
+        let (header, _) = wire::decode(request).unwrap();
+        Ok(wire::encode(
+            wire::Header {
+                opcode: wire::OP_STATUS,
+                request_id: header.request_id,
+                ..wire::Header::default()
+            },
+            &[],
+            reply,
+        )
+        .unwrap())
+    });
+    assert_eq!(client.read_file("/file", 16).unwrap_err().raw(), -5);
+    assert_eq!(
+        client.read_dir_names("/directory", 1024).unwrap_err().raw(),
+        -5
+    );
 }
 
 #[test]

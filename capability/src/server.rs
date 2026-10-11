@@ -106,7 +106,7 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
     // Service startup needs authorization before the POSIX endpoint exists.
     // The authenticated handoff below switches this phase permanently; a
     // runtime read failure must never retry through the bootstrap path.
-    let mut authorization_reader: crate::resolver::FileReader = platform::file::read_to_end_path;
+    let mut authorization_reader: crate::resolver::FileReader = crate::bootstrap_file::read_file;
     let endpoint = match platform::ipc::create() {
         Ok(endpoint) => endpoint,
         Err(err) => {
@@ -150,13 +150,20 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                 let endpoint = attached.handles[0].handle;
                 attached.handles[0].handle = 0;
                 install_posix_endpoint(endpoint)
-                    .map(|_| {
+                    .and_then(|_| {
                         authorization_reader = crate::persistent_grant::read_file;
-                        REPLY_OK
+                        // Mutable Data packages become visible only through
+                        // the runtime filesystem and authenticated session.
+                        state.refresh_package_index()
                     })
+                    .map(|_| REPLY_OK)
                     .unwrap_or_else(|error| error.errno().unwrap_or(mochi_user_syscall::EIO))
             };
             close_received_handles(&attached);
+            if status != REPLY_OK {
+                let _ = platform::write_fmt(platform::io::STDERR,
+                    format_args!("capability.service: POSIX endpoint handoff failed status={}\n", status as i64));
+            }
             capability_reply(sender, status);
             continue;
         }

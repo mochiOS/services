@@ -25,6 +25,10 @@ mod persistent_grant {
     }
 }
 
+mod bootstrap_file {
+    pub(crate) use super::persistent_grant::{read_dir_names, read_file};
+}
+
 #[allow(dead_code)]
 #[path = "../../capability/src/package_index.rs"]
 mod package_index;
@@ -69,6 +73,7 @@ fn bootstrap_traversal_and_reads_propagate_errors_instead_of_skipping_them() {
     let source = include_str!("../../capability/src/package_index.rs");
     assert!(!source.contains("walk_package_tree"));
     assert!(!source.contains("platform::package::read_manifest"));
-    assert!(source.contains("manifest_paths(platform::file::read_dir_names)?"));
-    assert!(source.contains("platform::file::read_to_end_path(&manifest_path)?"));
+    assert!(source.contains("bootstrap_manifest_paths(crate::bootstrap_file::read_dir_names)?"));
+    assert!(source.contains("crate::bootstrap_file::read_file(&manifest_path)?"));
+    assert!(!source.contains("platform::file::"));
 }

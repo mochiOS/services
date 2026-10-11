@@ -5,6 +5,20 @@ mod package_walk;
 
 use mochi_user_platform::syscall::{self, SysError};
 
+#[test]
+fn initial_boot_index_reads_only_the_immutable_generation() {
+    let paths = package_walk::bootstrap_manifest_paths(|path| match path {
+        "/system/packages" => Ok(vec!["manifest.toml".into()]),
+        _ => panic!("bootstrap must not consult mutable Data: {path}"),
+    })
+    .unwrap();
+    assert_eq!(paths, ["/system/packages/manifest.toml"]);
+    assert_eq!(
+        package_walk::bootstrap_manifest_paths(|_| Err(error(syscall::EIO))),
+        Err(error(syscall::EIO))
+    );
+}
+
 fn error(errno: u64) -> SysError {
     SysError::from_raw(errno as i64)
 }

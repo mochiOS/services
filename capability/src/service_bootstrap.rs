@@ -46,7 +46,7 @@ fn spawn_service_by_package(
         &manifest,
         &manifest_path,
         service_path,
-        platform::file::read_to_end_path,
+        crate::bootstrap_file::read_file,
     )
     .map_err(|error| {
         stderr_line(&format!(
@@ -64,7 +64,7 @@ fn spawn_service_by_package(
     let caps_nul = encode_nul_list(&caps);
     let logger_endpoint = platform::logger::endpoint().unwrap_or(0);
     let identity =
-        application_identity(&manifest, &manifest_path, platform::file::read_to_end_path)?;
+        application_identity(&manifest, &manifest_path, crate::bootstrap_file::read_file)?;
     let mut args = alloc::vec::Vec::new();
     encode_identity_args(&identity, &mut args);
     args.push(logger_endpoint.to_string());
@@ -75,7 +75,7 @@ fn spawn_service_by_package(
         &identity,
         caps,
         platform::service::ExecutionClass::Privileged,
-        platform::file::read_to_end_path,
+        crate::bootstrap_file::read_file,
     )?;
     platform::service::spawn_manifest(
         service_path,

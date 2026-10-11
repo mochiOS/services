@@ -18,8 +18,7 @@ use mochios_filesystem_protocol as wire;
 
 use crate::bootstrap_read::BootstrapReader;
 
-pub const MAX_TRANSFER: usize = 64 * 1024;
-pub const EOF: u32 = 1;
+pub use wire::{BOOTSTRAP_EOF as EOF, BOOTSTRAP_MAX_TRANSFER as MAX_TRANSFER};
 const MAX_ENTRIES: usize = 128;
 
 /// Format a reply into caller-owned storage. Malformed requests receive EINVAL

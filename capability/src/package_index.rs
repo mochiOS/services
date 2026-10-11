@@ -20,10 +20,11 @@ pub(crate) struct PackageRecord {
 }
 
 pub(crate) fn build_package_index() -> Result<PackageIndex, platform::syscall::SysError> {
-    let manifest_paths = crate::package_walk::manifest_paths(platform::file::read_dir_names)?;
+    let manifest_paths =
+        crate::package_walk::bootstrap_manifest_paths(crate::bootstrap_file::read_dir_names)?;
     let mut manifests = Vec::new();
     for manifest_path in manifest_paths {
-        let bytes = platform::file::read_to_end_path(&manifest_path)?;
+        let bytes = crate::bootstrap_file::read_file(&manifest_path)?;
         manifests.push((manifest_path, bytes));
     }
     Ok(index_manifests(manifests))

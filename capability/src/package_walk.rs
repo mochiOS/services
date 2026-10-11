@@ -6,7 +6,22 @@ use mochi_user_platform::syscall::{self, SysError};
 /// Read every manifest path, allowing only the Data package root to be absent.
 /// Failed traversal must not silently replace the live policy with a partial index.
 pub(crate) fn manifest_paths(
+    read_directory: impl FnMut(&str) -> Result<Vec<String>, SysError>,
+) -> Result<Vec<String>, SysError> {
+    collect_manifest_paths(read_directory, true)
+}
+
+/// The immutable boot generation contains built-ins only. Mutable Data policy
+/// is indexed by refresh_package_index after the POSIX endpoint handoff.
+pub(crate) fn bootstrap_manifest_paths(
+    read_directory: impl FnMut(&str) -> Result<Vec<String>, SysError>,
+) -> Result<Vec<String>, SysError> {
+    collect_manifest_paths(read_directory, false)
+}
+
+fn collect_manifest_paths(
     mut read_directory: impl FnMut(&str) -> Result<Vec<String>, SysError>,
+    include_data: bool,
 ) -> Result<Vec<String>, SysError> {
     fn walk(
         path: &str,
@@ -50,12 +65,14 @@ pub(crate) fn manifest_paths(
         &mut paths,
         &mut read_directory,
     )?;
-    walk(
-        "/var/lib/packages",
-        0,
-        true,
-        &mut paths,
-        &mut read_directory,
-    )?;
+    if include_data {
+        walk(
+            "/var/lib/packages",
+            0,
+            true,
+            &mut paths,
+            &mut read_directory,
+        )?;
+    }
     Ok(paths)
 }

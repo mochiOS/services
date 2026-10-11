@@ -33,7 +33,7 @@ pub(crate) fn load_app_prompt_policy(index: &PackageIndex) -> AppPromptPolicy {
     let Some(record) = index.by_package.get(CAPABILITY_PACKAGE_ID) else {
         return AppPromptPolicy::default();
     };
-    let Ok(bytes) = platform::file::read_to_end_path(&record.manifest_path) else {
+    let Ok(bytes) = crate::bootstrap_file::read_file(&record.manifest_path) else {
         return AppPromptPolicy::default();
     };
     parse_app_prompt_policy(&bytes)

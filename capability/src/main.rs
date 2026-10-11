@@ -3,6 +3,7 @@ extern crate alloc;
 use mochi_user_platform as platform;
 
 mod app_spawn;
+mod bootstrap_file;
 mod dynamic_grant;
 mod package_index;
 mod package_walk;
@@ -21,6 +22,13 @@ use state::CapabilityServiceState;
 fn main() {
     let _ = platform::logger::init_from_env();
     platform::logln!("capability.service: start");
+    if let Err(error) = bootstrap_file::initialize() {
+        platform::logln!(
+            "capability.service: bootstrap Handle rejected errno={}",
+            error.errno().unwrap_or(0)
+        );
+        platform::process::exit(1);
+    }
     let state = match CapabilityServiceState::new() {
         Ok(state) => state,
         Err(error) => {

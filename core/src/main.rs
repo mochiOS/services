@@ -325,11 +325,9 @@ fn spawn_logger_service() -> Result<u64, mochi_user_syscall::SysError> {
     Ok(pid)
 }
 
-fn spawn_capability_service() -> Result<u64, mochi_user_syscall::SysError> {
-    let (mut args, caps) = load_builtin_execution_security(
-        CAPABILITY_PACKAGE_MANIFEST_PATH,
-        CAPABILITY_SERVICE_PATH,
-    )?;
+fn spawn_capability_service(bootstrap: u32) -> Result<u64, mochi_user_syscall::SysError> {
+    let (mut args, caps) =
+        load_builtin_execution_security(CAPABILITY_PACKAGE_MANIFEST_PATH, CAPABILITY_SERVICE_PATH)?;
     platform::logln!(
         "core.service: parsed capability.service package caps={}",
         caps.len()
@@ -337,6 +335,13 @@ fn spawn_capability_service() -> Result<u64, mochi_user_syscall::SysError> {
     let caps_nul = encode_nul_list(&caps);
     let logger_endpoint = platform::logger::endpoint().unwrap_or(0);
     args.push(logger_endpoint.to_string());
+    args.push(alloc::format!(
+        "{}{}:{}:{}",
+        mnu_abi::exec::INHERITED_HANDLE_PREFIX,
+        mochios_filesystem_protocol::BOOTSTRAP_READ_HANDLE_KEY,
+        bootstrap,
+        platform::handle::HANDLE_RIGHT_SEND
+    ));
     let args_nul = encode_spawn_args(&args);
     match platform::service::spawn_manifest(
         CAPABILITY_SERVICE_PATH,
@@ -370,9 +375,20 @@ fn main() {
 
 fn run() {
     platform::logln!("core.service: start");
-    match spawn_capability_service() {
+    let endpoint = match platform::ipc::create_handle() {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            platform::logln!(
+                "core.service: bootstrap endpoint failed errno={}",
+                error.errno().unwrap_or(0)
+            );
+            platform::process::exit(1);
+        }
+    };
+    let capability_pid = match spawn_capability_service(endpoint) {
         Ok(pid) => {
             platform::logln!("core.service: capability.service spawned pid={}", pid);
+            pid
         }
         Err(err) => {
             platform::logln!(
@@ -381,9 +397,6 @@ fn run() {
             );
             platform::process::exit(1);
         }
-    }
-
-    loop {
-        platform::thread::yield_now();
-    }
+    };
+    boot_files::serve(endpoint, capability_pid);
 }
