@@ -17,6 +17,7 @@ struct Runtime {
     mboot_agent: Option<(u64, u64)>,
     deferred_requests: VecDeque<DeferredMessage>,
     permission_prompt: crate::portal::PermissionPrompts,
+    iommu_warning: Option<NativeProcess>,
     filesystem_endpoint: Option<platform::handle::Handle>,
     posix_endpoint: Option<platform::handle::Handle>,
 }
@@ -30,6 +31,7 @@ impl Runtime {
             mboot_agent: None,
             deferred_requests: VecDeque::new(),
             permission_prompt: crate::portal::PermissionPrompts::default(),
+            iommu_warning: None,
             filesystem_endpoint: None,
             posix_endpoint: None,
         })
@@ -716,7 +718,7 @@ impl BootstrapOperations for Runtime {
 pub(crate) fn run() -> ! {
     platform::logln!("service-manager.service: start");
     let logger_endpoint = platform::logger::endpoint().map_or(0, |endpoint| endpoint);
-    let (outcome, runtime) = match Runtime::create(logger_endpoint) {
+    let (outcome, mut runtime) = match Runtime::create(logger_endpoint) {
         Ok(mut runtime) => {
             let outcome = orchestrate(&mut runtime);
             (outcome, Some(runtime))
@@ -741,13 +743,17 @@ pub(crate) fn run() -> ! {
             info.addr != 0
                 && info.format & mnu_abi::hypervisor::FRAMEBUFFER_FORMAT_SHARED_SURFACE == 0
         })
+        && let Some(runtime) = runtime.as_mut()
+        && let Some(endpoint) = runtime.posix_endpoint
     {
         let vendor = cpu_iommu_vendor();
-        match service_launcher::spawn_iommu_warning(logger_endpoint, vendor) {
-            Ok(process_id) => platform::logln!(
-                "service-manager.service: hardware acceleration warning spawned pid={}",
-                process_id
-            ),
+        match service_launcher::spawn_iommu_warning(logger_endpoint, vendor, endpoint) {
+            Ok(process) => {
+                runtime.iommu_warning = Some(process);
+                platform::logln!(
+                    "service-manager.service: hardware acceleration warning native process created"
+                );
+            }
             Err(error) => platform::logln!(
                 "service-manager.service: hardware acceleration warning spawn failed errno={}",
                 errno(error)

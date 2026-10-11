@@ -341,38 +341,20 @@ pub(crate) fn spawn_secure_ui(
     )
 }
 
-pub(crate) fn spawn_portal_prompt(
-    logger_endpoint: u64,
-    application: &str,
-    path: &str,
-    writable: bool,
-) -> Result<u64, mochi_user_syscall::SysError> {
-    let mut arguments = fixed_service_arguments(FixedService::SecureUi, logger_endpoint, None);
-    arguments.push(alloc::format!("--portal-application={application}"));
-    arguments.push(alloc::format!("--portal-path={path}"));
-    arguments.push(alloc::format!(
-        "--portal-access={}",
-        if writable { "read-write" } else { "read" }
-    ));
-    spawn(fixed_service_spec(FixedService::SecureUi), &arguments)
-}
-
-pub(crate) fn spawn_network_prompt(
-    logger_endpoint: u64,
-    application: &str,
-) -> Result<u64, mochi_user_syscall::SysError> {
-    let mut arguments = fixed_service_arguments(FixedService::SecureUi, logger_endpoint, None);
-    arguments.push(alloc::format!("--network-application={application}"));
-    spawn(fixed_service_spec(FixedService::SecureUi), &arguments)
-}
-
 pub(crate) fn spawn_iommu_warning(
     logger_endpoint: u64,
     vendor: &str,
-) -> Result<u64, mochi_user_syscall::SysError> {
+    posix_endpoint: platform::handle::Handle,
+) -> Result<NativeProcess, mochi_user_syscall::SysError> {
     let mut arguments = fixed_service_arguments(FixedService::SecureUi, logger_endpoint, None);
     arguments.push(alloc::format!("--iommu-warning={vendor}"));
-    spawn(fixed_service_spec(FixedService::SecureUi), &arguments)
+    append_posix_handle(&mut arguments, Some(posix_endpoint));
+    spawn_native(
+        fixed_service_spec(FixedService::SecureUi),
+        "secure-ui.service",
+        &arguments,
+        posix_endpoint,
+    )
 }
 
 pub(crate) fn spawn_permission_prompt_server(

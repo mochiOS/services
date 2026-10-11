@@ -174,7 +174,7 @@ fn secure_login_launches_and_watches_retained_native_process_handles() {
     let start = launcher.find("pub(crate) fn spawn_secure_ui(").unwrap();
     let end = start
         + launcher[start..]
-            .find("pub(crate) fn spawn_portal_prompt(")
+            .find("pub(crate) fn spawn_iommu_warning(")
             .unwrap();
     let login = &launcher[start..end];
     assert!(login.contains("Result<NativeProcess,"));
@@ -193,6 +193,27 @@ fn secure_login_launches_and_watches_retained_native_process_handles() {
     assert!(orchestration.contains("secure_ui: Option<SecureUi>"));
     assert!(orchestration.contains("operations.spawn_secure_ui()"));
     assert!(!orchestration.contains("operations.spawn_fixed(FixedService::SecureUi)"));
+}
+
+#[test]
+fn remaining_secure_ui_warning_launch_is_native_and_keeps_its_owner() {
+    let launcher = include_str!("../../service-manager/src/service_launcher.rs");
+    assert!(!launcher.contains("spawn_portal_prompt("));
+    assert!(!launcher.contains("spawn_network_prompt("));
+    let start = launcher.find("pub(crate) fn spawn_iommu_warning(").unwrap();
+    let end = start
+        + launcher[start..]
+            .find("pub(crate) fn spawn_permission_prompt_server(")
+            .unwrap();
+    let warning = &launcher[start..end];
+    assert!(warning.contains("Result<NativeProcess,"));
+    assert!(warning.contains("append_posix_handle(&mut arguments, Some(posix_endpoint))"));
+    assert!(warning.contains("spawn_native("));
+    assert!(!warning.contains("spawn("));
+    let bootstrap = include_str!("../../service-manager/src/bootstrap.rs");
+    assert!(bootstrap.contains("iommu_warning: Option<NativeProcess>"));
+    assert!(bootstrap.contains("runtime.iommu_warning = Some(process)"));
+    assert!(bootstrap.contains("!running_under_hypervisor()"));
 }
 
 #[test]
