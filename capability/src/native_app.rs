@@ -137,6 +137,18 @@ pub(crate) fn launch(
     })();
     if result.is_err() {
         let _ = platform::process::terminate_handle(process.0, 127);
+        // Registration may have succeeded even when its reply was lost. Ask
+        // the service to reclaim our own launch; never use an arbitrary PID.
+        if let Err(error) = crate::persistent_grant::with_client(|client| {
+            client.abort_launched_child(ObjectHandleAttachment {
+                handle: process.0,
+                rights: mnu_abi::HANDLE_RIGHT_WAIT,
+            })
+        }) {
+            if error.raw() != mochios_posix_protocol::STATUS_EPERM as i64 {
+                platform::logln!("capability.service: failed launch cleanup: {error:?}");
+            }
+        }
     }
     result
 }

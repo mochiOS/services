@@ -233,6 +233,45 @@ static int launched_child(uint32_t posix, uint64_t authority, uint32_t image,
   }
   CHECK(status.state == 2 && status.exit_code == 37);
   CHECK(N(HANDLE_CLOSE, child, 0, 0) == 0);
+  /* Create another image but never publish/resume it. Abort must reclaim the
+   * service-owned child state and release its retained ProcessHandle. */
+  message = native6(IPC_CALL, authority, (uint64_t)authorization,
+                    sizeof(authorization), (uint64_t)reply, sizeof(reply), 0);
+  CHECK(message >= 0 && get64(reply) == 0);
+  child = N(PROCESS_CREATE, image, metadata, length);
+  CHECK(child > 0);
+  memset(&handles, 0, sizeof(handles));
+  handles.count = 2;
+  handles.entries[0].handle = requester;
+  handles.entries[0].rights = 16;
+  handles.entries[1].handle = (uint32_t)child;
+  handles.entries[1].rights = 16 | 32;
+  message = native6(IPC_CALL_HANDLES, posix, (uint64_t)registration,
+                    sizeof(registration), (uint64_t)reply, sizeof(reply), (uint64_t)&handles);
+  CHECK(message >= 0 && (uint32_t)message == 32 && get32(reply + 24) == 0 && handles.count == 0);
+  registration[6] = 57; /* OP_PROCESS_LAUNCH_ABORT, no PID payload. */
+  for (unsigned scenario = 0; scenario < 3; ++scenario) {
+    memset(&handles, 0, sizeof(handles));
+    handles.count = 1;
+    handles.entries[0].handle = (uint32_t)child;
+    handles.entries[0].rights = scenario == 0 ? 16 | 32 : 16;
+    message = native6(IPC_CALL_HANDLES, posix, (uint64_t)registration,
+                      sizeof(registration), (uint64_t)reply, sizeof(reply), (uint64_t)&handles);
+    CHECK(message >= 0 && (uint32_t)message == 32 && handles.count == 0);
+    CHECK((int32_t)get32(reply + 24) == (scenario == 0 ? -22 : scenario == 1 ? 0 : -1));
+  }
+  CHECK(N(PROCESS_STATUS, child, &status, 0) == 0);
+  CHECK(status.state == 2 && status.exit_code == 127);
+  registration[6] = 55; /* Session inspection must now report no state. */
+  memset(&handles, 0, sizeof(handles));
+  handles.count = 1;
+  handles.entries[0].handle = (uint32_t)child;
+  handles.entries[0].rights = 16;
+  message = native6(IPC_CALL_HANDLES, posix, (uint64_t)registration,
+                    sizeof(registration), (uint64_t)reply, sizeof(reply), (uint64_t)&handles);
+  CHECK(message >= 0 && (uint32_t)message == 32 && (int32_t)get32(reply + 24) == -3 && handles.count == 0);
+  CHECK(N(HANDLE_CLOSE, child, 0, 0) == 0);
+  fprintf(stderr, "launch-abort: PASS termination, reclaimed POSIX state, strict rights and duplicate rejection\n");
   fprintf(stderr, "broker-launch: PASS two attenuated ProcessHandles, requester "
                   "credentials/groups/parent, duplicate rejection and retained exit\n");
   return 0;

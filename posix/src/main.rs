@@ -238,6 +238,37 @@ fn main() {
                 })
             }
             (Some(peer), Some((header, payload)), true)
+                if header.opcode == protocol::OP_PROCESS_LAUNCH_ABORT
+                    && header.flags == 0
+                    && payload.is_empty()
+                    && attachments.len() == 1 =>
+            {
+                let status = if attachments[0].rights != platform::handle::HANDLE_RIGHT_WAIT {
+                    Err(posix_service::STATUS_EINVAL)
+                } else {
+                    platform::process::handle_status(attachments[0].handle)
+                        .map_err(|error| i32::try_from(error.raw()).unwrap_or(-5))
+                        .and_then(|status| {
+                            service.abort_launched_child(
+                                peer,
+                                posix_service::AuthenticatedProcess {
+                                    handle: attachments[0].handle,
+                                    process_id: status.process_id,
+                                },
+                                &mut filesystem,
+                                &mut processes,
+                            )
+                        })
+                };
+                Some(posix_service::ObjectResponse {
+                    response: match status {
+                        Ok(()) => success_response(header.request_id),
+                        Err(status) => status_response(header.request_id, status),
+                    },
+                    handles: Vec::new(),
+                })
+            }
+            (Some(peer), Some((header, payload)), true)
                 if matches!(
                     header.opcode,
                     protocol::OP_TERMINAL_ACQUIRE

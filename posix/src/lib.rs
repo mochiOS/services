@@ -479,6 +479,7 @@ pub struct PosixService<H: Copy = u32> {
     processes: BTreeMap<u64, H>,
     parents: BTreeMap<u64, u64>,
     children: BTreeMap<u64, BTreeSet<u64>>,
+    launch_creators: BTreeMap<u64, u64>,
     process_groups: BTreeMap<u64, u64>,
     session_ids: BTreeMap<u64, u64>,
     controlling_terminals: BTreeMap<u64, u64>,
@@ -501,6 +502,7 @@ impl PosixService<u32> {
             processes: BTreeMap::new(),
             parents: BTreeMap::new(),
             children: BTreeMap::new(),
+            launch_creators: BTreeMap::new(),
             process_groups: BTreeMap::new(),
             session_ids: BTreeMap::new(),
             controlling_terminals: BTreeMap::new(),
@@ -918,7 +920,43 @@ impl<H: Copy> PosixService<H> {
             effective_uid: parent.effective_uid,
             effective_gid: parent.effective_gid,
         };
-        self.adopt_child(parent_peer, child, filesystem)
+        self.adopt_child(parent_peer, child, filesystem)?;
+        self.launch_creators
+            .insert(child.process_id, peer.process_id);
+        Ok(())
+    }
+
+    /// Roll back a broker's failed launch without leaving an unreported zombie.
+    /// Possessing another process's WAIT Handle or being POSIX root alone does
+    /// not suffice: the sender must be the broker that registered this child.
+    pub fn abort_launched_child<F: FilesystemBackend<H>, P: ProcessBackend<H>>(
+        &mut self,
+        peer: PeerIdentity,
+        child: AuthenticatedProcess<H>,
+        filesystem: &mut F,
+        processes: &mut P,
+    ) -> Result<(), i32> {
+        if self.launch_creators.get(&child.process_id) != Some(&peer.process_id) {
+            return Err(protocol::STATUS_EPERM);
+        }
+        let handle = self
+            .processes
+            .get(&child.process_id)
+            .copied()
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let parent = self
+            .parents
+            .get(&child.process_id)
+            .copied()
+            .ok_or(protocol::STATUS_ESRCH)?;
+        if !matches!(processes.status(handle)?, ProcessLifecycle::Exited { .. }) {
+            processes.terminate(handle, 127)?;
+            if !matches!(processes.status(handle)?, ProcessLifecycle::Exited { .. }) {
+                return Err(protocol::STATUS_EAGAIN);
+            }
+        }
+        self.reap_child(parent, child.process_id, filesystem, processes);
+        Ok(())
     }
 
     pub fn wait_child<F: FilesystemBackend<H>, P: ProcessBackend<H>>(
@@ -1041,6 +1079,7 @@ impl<H: Copy> PosixService<H> {
             }
         }
         self.parents.remove(&child_id);
+        self.launch_creators.remove(&child_id);
         self.process_groups.remove(&child_id);
         let session_id = self.session_ids.remove(&child_id);
         if session_id == Some(child_id) {
@@ -1705,6 +1744,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_PROCESS_SPAWNED
             | protocol::OP_PROCESS_SESSION_INFO
             | protocol::OP_PROCESS_LAUNCHED
+            | protocol::OP_PROCESS_LAUNCH_ABORT
             | protocol::OP_WAIT_CHILD
             | protocol::OP_PROCESS_STOPPED
             | protocol::OP_PROCESS_INFO

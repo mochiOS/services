@@ -1555,6 +1555,131 @@ fn fresh_child_initialization_cannot_elevate_nonroot_posix_authority() {
 }
 
 #[test]
+fn failed_broker_launch_is_reclaimed_only_by_its_creator() {
+    let broker = PeerIdentity {
+        process_id: 321,
+        effective_uid: 0,
+        effective_gid: 0,
+    };
+    let mut service = service_for(broker);
+    service.handle(
+        broker,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..Default::default()
+        },
+        &[],
+    );
+    let mut filesystem = RecordingFilesystem::default();
+    service.handle_objects(
+        broker,
+        protocol::Header {
+            opcode: protocol::OP_GETCWD,
+            ..Default::default()
+        },
+        &[],
+        &[],
+        &mut filesystem,
+    );
+    let child = AuthenticatedProcess {
+        process_id: 322,
+        handle: 1322,
+    };
+    service
+        .adopt_launched_child(
+            broker,
+            AuthenticatedProcess {
+                process_id: 321,
+                handle: 999,
+            },
+            child,
+            &mut filesystem,
+        )
+        .unwrap();
+    let mut processes = RecordingProcesses::default();
+    processes.states.insert(1322, ProcessLifecycle::Running);
+    let impostor = PeerIdentity {
+        process_id: 323,
+        ..broker
+    };
+    assert_eq!(
+        service.abort_launched_child(impostor, child, &mut filesystem, &mut processes),
+        Err(protocol::STATUS_EPERM)
+    );
+    assert!(processes.terminated.is_empty());
+    assert!(service.is_child(321, 322));
+    processes.terminate_error = Some(-5);
+    assert_eq!(
+        service.abort_launched_child(broker, child, &mut filesystem, &mut processes),
+        Err(-5)
+    );
+    assert!(service.session(322).is_some());
+    assert!(processes.released.is_empty());
+    processes.terminate_error = None;
+    service
+        .abort_launched_child(broker, child, &mut filesystem, &mut processes)
+        .unwrap();
+    assert_eq!(processes.terminated, [(1322, 127)]);
+    assert_eq!(processes.released, [1322]);
+    assert_eq!(filesystem.released.len(), 2);
+    assert!(service.session(322).is_none());
+    assert!(service.session_directories(322).is_none());
+    assert!(service.process_handle(322).is_none());
+    assert!(service.parent_id(322).is_none());
+    assert!(service.supplementary_groups(322).is_none());
+    assert!(!service.is_child(321, 322));
+    assert_eq!(
+        service.abort_launched_child(broker, child, &mut filesystem, &mut processes),
+        Err(protocol::STATUS_EPERM)
+    );
+    assert_eq!(processes.released, [1322]);
+}
+
+#[test]
+fn failed_launch_that_already_exited_is_reaped_without_terminating_again() {
+    let broker = PeerIdentity {
+        process_id: 321,
+        effective_uid: 0,
+        effective_gid: 0,
+    };
+    let mut service = service_for(broker);
+    service.handle(
+        broker,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..Default::default()
+        },
+        &[],
+    );
+    let mut filesystem = RecordingFilesystem::default();
+    let child = AuthenticatedProcess {
+        process_id: 322,
+        handle: 1322,
+    };
+    service
+        .adopt_launched_child(
+            broker,
+            AuthenticatedProcess {
+                process_id: 321,
+                handle: 999,
+            },
+            child,
+            &mut filesystem,
+        )
+        .unwrap();
+    let mut processes = RecordingProcesses::default();
+    processes
+        .states
+        .insert(1322, ProcessLifecycle::Exited { exit_code: 127 });
+    service
+        .abort_launched_child(broker, child, &mut filesystem, &mut processes)
+        .unwrap();
+    assert!(processes.terminated.is_empty());
+    assert_eq!(processes.released, [1322]);
+    assert!(service.session(322).is_none());
+}
+
+#[test]
 fn broker_launch_inherits_the_requester_not_the_broker() {
     let broker = PeerIdentity {
         process_id: 321,

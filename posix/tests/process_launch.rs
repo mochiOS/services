@@ -10,6 +10,57 @@ impl Transport for LaunchTransport {
         panic!("launch must carry authenticated process objects")
     }
 }
+
+struct AbortTransport;
+impl Transport for AbortTransport {
+    type Error = ();
+    fn call(&self, _: &[u8], _: &mut [u8]) -> Result<usize, ()> {
+        panic!("abort must attach an authenticated child")
+    }
+}
+impl ObjectTransport for AbortTransport {
+    type Handle = u32;
+    fn call_with_handles(
+        &self,
+        request: &[u8],
+        response: &mut [u8],
+        handles: &mut ObjectHandles<u32>,
+    ) -> Result<usize, ()> {
+        let (header, payload) = protocol::decode(request).unwrap();
+        assert_eq!(header.opcode, protocol::OP_PROCESS_LAUNCH_ABORT);
+        assert_eq!(header.flags, 0);
+        assert!(payload.is_empty());
+        assert_eq!(handles.len(), 1);
+        assert_eq!(
+            handles.get(0),
+            Some(ObjectHandleAttachment {
+                handle: 52,
+                rights: mnu_abi::HANDLE_RIGHT_WAIT
+            })
+        );
+        handles.clear();
+        protocol::encode(
+            protocol::Header {
+                opcode: protocol::OP_STATUS,
+                request_id: header.request_id,
+                ..Default::default()
+            },
+            &[],
+            response,
+        )
+        .map_err(|_| ())
+    }
+}
+
+#[test]
+fn failed_launch_cleanup_carries_only_a_wait_handle_not_a_pid() {
+    Client::new(AbortTransport)
+        .abort_launched_child(ObjectHandleAttachment {
+            handle: 52,
+            rights: mnu_abi::HANDLE_RIGHT_WAIT,
+        })
+        .unwrap();
+}
 impl ObjectTransport for LaunchTransport {
     type Handle = u32;
     fn call_with_handles(
