@@ -21,6 +21,8 @@ static int64_t native(uint64_t number, uint64_t a, uint64_t b, uint64_t c, uint6
 
 int main(void) {
     fprintf(stderr, "positioned-io: start\n");
+    CHECK(native(565, 0, 0, 0, 0) == -38);
+    fprintf(stderr, "positioned-io: retired FileSeek ABI rejects calls ok\n");
     int64_t object = native(MEMORY_OBJECT_CREATE, 8192, 0, 0, 0);
     CHECK(object > 0);
     int64_t read_only = native(HANDLE_DUPLICATE, object, 1, 0, 0);
