@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -72,7 +73,107 @@ static void pause_tick(void) {
   nanosleep(&delay, 0);
 }
 
-int main(void) {
+static int credential_child(void) {
+  gid_t groups[4] = {777, 777, 777, 777};
+  CHECK(getuid() == 505 && geteuid() == 505);
+  CHECK(getgid() == 24 && getegid() == 24);
+  CHECK(getgroups(4, groups) == 2 && groups[0] == 10 && groups[1] == 20);
+  CHECK(groups[2] == 777 && groups[3] == 777);
+  CHECK(umask(027) == 022);
+  errno = 0;
+  CHECK(setuid(0) == -1 && errno == EPERM);
+  errno = 0;
+  CHECK(setgid(0) == -1 && errno == EPERM);
+  CHECK(getuid() == 505 && getgid() == 24);
+  fprintf(stderr, "fresh-spawn: child PASS newlib uid/gid/groups/umask and "
+                  "elevation denial\n");
+  return 37;
+}
+
+static int fresh_spawn(int64_t posix, int64_t authority) {
+  const gid_t parent_groups[2] = {30, 40};
+  gid_t observed[4] = {777, 777, 777, 777};
+  CHECK(setgroups(2, parent_groups) == 0);
+  CHECK(getgroups(0, NULL) == 2);
+  CHECK(getgroups(4, observed) == 2 && observed[0] == 30 && observed[1] == 40);
+  CHECK(observed[2] == 777 && observed[3] == 777);
+  const char path[] = "/system/services/input.service";
+  unsigned char metadata[20000], request[48 + sizeof(path) - 1] = {0},
+                                                             reply[2048];
+  int fd = open("/system/resources/native-spawn-metadata.bin", O_RDONLY);
+  CHECK(fd >= 0);
+  ssize_t length = read(fd, metadata, sizeof(metadata));
+  CHECK(length > 0 && close(fd) == 0);
+  size_t grants =
+      32 + get32(metadata + 8) + get32(metadata + 24) + get32(metadata + 12);
+  CHECK(grants + 24 <= (size_t)length &&
+        get64(metadata + grants) == get64("POSXCTRL"));
+  put32(metadata + grants + 8, (uint32_t)posix);
+  memcpy(request, "POSX", 4);
+  request[4] = 1;
+  request[6] = 5;
+  put64(request + 8, 2);
+  put32(request + 20, sizeof(request) - 32);
+  put32(request + 36, 1);
+  put32(request + 44, sizeof(path) - 1);
+  memcpy(request + 48, path, sizeof(path) - 1);
+  struct attachments handles = {0};
+  int64_t message =
+      native6(IPC_CALL_HANDLES, posix, (uint64_t)request, sizeof(request),
+              (uint64_t)reply, sizeof(reply), (uint64_t)&handles);
+  CHECK(message >= 0 && (uint32_t)message == 32 && get32(reply + 24) == 0 &&
+        handles.count == 1);
+  uint32_t image = handles.entries[0].handle;
+  unsigned char authorization[12 + sizeof(path) - 1] = {0};
+  put32(authorization, 0x43414553);
+  put64(authorization + 4, 2);
+  memcpy(authorization + 12, path, sizeof(path) - 1);
+  message = native6(IPC_CALL, authority, (uint64_t)authorization,
+                    sizeof(authorization), (uint64_t)reply, sizeof(reply), 0);
+  CHECK(message >= 0 && get64(reply) == 0);
+  int64_t process = N(PROCESS_CREATE, image, metadata, length);
+  CHECK(process > 0);
+  unsigned char registration[52] = {0};
+  memcpy(registration, "POSX", 4);
+  registration[4] = 1;
+  registration[6] = 54; /* OP_PROCESS_SPAWNED; no PID is serialized. */
+  put64(registration + 8, 3);
+  put32(registration + 20, 20);
+  put32(registration + 32, 505);
+  put32(registration + 36, 24);
+  put32(registration + 40, 2);
+  put32(registration + 44, 10);
+  put32(registration + 48, 20);
+  memset(&handles, 0, sizeof(handles));
+  handles.count = 1;
+  handles.entries[0].handle = (uint32_t)process;
+  handles.entries[0].rights = 16 | 32; /* WAIT | SIGNAL only. */
+  message = native6(IPC_CALL_HANDLES, posix, (uint64_t)registration,
+                    sizeof(registration), (uint64_t)reply, sizeof(reply),
+                    (uint64_t)&handles);
+  fprintf(stderr, "fresh-spawn: registration status %d\n",
+          (int32_t)get32(reply + 24));
+  CHECK(message >= 0 && (uint32_t)message == 32 && get32(reply + 24) == 0 &&
+        handles.count == 0);
+  CHECK(N(PROCESS_RESUME, process, 0, 0) == 0);
+  struct process_status status = {0};
+  for (unsigned attempt = 0; attempt < 500; ++attempt) {
+    CHECK(N(PROCESS_STATUS, process, &status, 0) == 0);
+    if (status.state == 2)
+      break;
+    pause_tick();
+  }
+  CHECK(status.state == 2 && status.exit_code == 37);
+  CHECK(N(HANDLE_CLOSE, process, 0, 0) == 0 &&
+        N(HANDLE_CLOSE, image, 0, 0) == 0);
+  fprintf(stderr, "fresh-spawn: PASS stopped creation, attached registration, "
+                  "newlib credentials, resume and retained exit\n");
+  return 0;
+}
+
+int main(int argc, char **argv) {
+  if (argc == 2 && strcmp(argv[1], "--credential-child") == 0)
+    return credential_child();
   fprintf(stderr, "permission-native: start real secure-ui endpoint test\n");
   unsigned char metadata[20000];
   int fd = open("/system/resources/native-permission-metadata.bin", O_RDONLY);
@@ -185,5 +286,5 @@ int main(void) {
   fprintf(stderr,
           "permission-native: PASS real secure-ui native creation, SEND-only "
           "publication, token/attachment denial, reply and exit\n");
-  return 0;
+  return fresh_spawn(posix, authority);
 }
