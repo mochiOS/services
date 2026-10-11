@@ -20,6 +20,106 @@ fn admission_requires_an_initialized_environment_not_only_a_process_handle() {
         .unwrap();
     assert_eq!(service.registered_peer(70), None);
     assert!(service.session(70).is_none());
+    let reply = service.handle(
+        PeerIdentity {
+            process_id: 70,
+            effective_uid: 0,
+            effective_gid: 0,
+        },
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            request_id: 11,
+            ..Default::default()
+        },
+        &[],
+    );
+    assert_eq!(reply.header.status, posix_service::STATUS_EINVAL);
+    assert_eq!(reply.header.request_id, 11);
+    assert!(service.session(70).is_none());
+    assert_eq!(service.registered_peer(70), None);
+}
+
+#[test]
+fn registration_cannot_replace_initialized_credentials_groups_or_umask() {
+    let mut service = PosixService::new();
+    service
+        .initialize_bootstrap_process(
+            AuthenticatedProcess {
+                handle: 7,
+                process_id: 70,
+            },
+            501,
+            20,
+            &[42],
+        )
+        .unwrap();
+    let peer = service.registered_peer(70).unwrap();
+    let mut mask = [0; 4];
+    protocol::encode_umask(0o77, &mut mask).unwrap();
+    assert_eq!(
+        service
+            .handle(
+                peer,
+                protocol::Header {
+                    opcode: protocol::OP_UMASK_SET,
+                    ..Default::default()
+                },
+                &mask
+            )
+            .header
+            .status,
+        0
+    );
+    let before = *service.session(70).unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            service
+                .handle(
+                    PeerIdentity {
+                        effective_uid: 0,
+                        effective_gid: 0,
+                        ..peer
+                    },
+                    protocol::Header {
+                        opcode: protocol::OP_SESSION_REGISTER,
+                        ..Default::default()
+                    },
+                    &[]
+                )
+                .header
+                .status,
+            0
+        );
+        assert_eq!(*service.session(70).unwrap(), before);
+        let response = service.handle(
+            peer,
+            protocol::Header {
+                opcode: protocol::OP_GROUPS_GET,
+                ..Default::default()
+            },
+            &[],
+        );
+        assert_eq!(response.header.status, 0);
+        let mut groups = [0; 1];
+        assert_eq!(
+            protocol::decode_group_list(&response.payload, &mut groups),
+            Ok(1)
+        );
+        assert_eq!(groups, [42]);
+    }
+    for (flags, payload) in [(1, &[][..]), (0, &[0][..])] {
+        let response = service.handle(
+            peer,
+            protocol::Header {
+                opcode: protocol::OP_SESSION_REGISTER,
+                flags,
+                ..Default::default()
+            },
+            payload,
+        );
+        assert_eq!(response.header.status, posix_service::STATUS_EINVAL);
+        assert_eq!(*service.session(70).unwrap(), before);
+    }
 }
 
 #[test]

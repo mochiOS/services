@@ -28,15 +28,9 @@ fn only_the_selected_bootstrap_process_can_initialize_existing_tasks() {
     service
         .initialize_bootstrap_process(process(70), 0, 0, &[])
         .unwrap();
-    service.bind_process(peer(90), process(90)).unwrap();
-    service.handle(
-        peer(90),
-        protocol::Header {
-            opcode: protocol::OP_SESSION_REGISTER,
-            ..Default::default()
-        },
-        &[],
-    );
+    service
+        .initialize_process(peer(70), process(90), 0, 0, &[])
+        .unwrap();
     // A different UID-zero process, even with a genuine ProcessHandle, is not
     // the authority that was explicitly inherited at bootstrap.
     assert_eq!(

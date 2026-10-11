@@ -30,16 +30,34 @@ fn peer(process_id: u64, uid: u32) -> PeerIdentity {
 }
 
 fn register(service: &mut PosixService, identity: PeerIdentity) {
-    assert_eq!(
-        service.bind_process(
-            identity,
+    // Model the userspace boot authority explicitly; signal test actors are
+    // initialized with independent credentials, not credentials from IPC peers.
+    let bootstrap = peer(1, 0);
+    if service.registered_peer(1).is_none() {
+        service
+            .initialize_bootstrap_process(
+                AuthenticatedProcess {
+                    handle: 1,
+                    process_id: 1,
+                },
+                0,
+                0,
+                &[],
+            )
+            .unwrap();
+    }
+    service
+        .initialize_process(
+            bootstrap,
             AuthenticatedProcess {
                 handle: identity.process_id as u32,
                 process_id: identity.process_id,
             },
-        ),
-        Ok(true)
-    );
+            identity.effective_uid,
+            identity.effective_gid,
+            &[],
+        )
+        .unwrap();
     let response = service.handle(
         identity,
         protocol::Header {

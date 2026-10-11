@@ -10,15 +10,19 @@ fn register(service: &mut PosixService, pid: u64, uid: u32) -> PeerIdentity {
         effective_uid: uid,
         effective_gid: 24,
     };
-    service
-        .bind_process(
-            peer,
-            AuthenticatedProcess {
-                handle: pid as u32,
-                process_id: pid,
-            },
-        )
-        .unwrap();
+    let process = AuthenticatedProcess {
+        handle: pid as u32,
+        process_id: pid,
+    };
+    if pid == 1 {
+        service
+            .initialize_bootstrap_process(process, uid, 24, &[])
+            .unwrap();
+    } else {
+        service
+            .initialize_process(service.registered_peer(1).unwrap(), process, uid, 24, &[])
+            .unwrap();
+    }
     let response = service.handle(
         peer,
         protocol::Header {

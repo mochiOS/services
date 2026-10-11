@@ -245,14 +245,16 @@ fn client(peer: PeerIdentity) -> Client<LocalTransport> {
 fn service_for(peer: PeerIdentity) -> PosixService {
     let mut service = PosixService::new();
     assert_eq!(
-        service.bind_process(
-            peer,
+        service.initialize_bootstrap_process(
             AuthenticatedProcess {
                 handle: u32::try_from(peer.process_id).unwrap(),
                 process_id: peer.process_id,
             },
+            peer.effective_uid,
+            peer.effective_gid,
+            &[],
         ),
-        Ok(true)
+        Ok(())
     );
     service
 }
@@ -358,13 +360,11 @@ fn session_info_and_umask_round_trip_through_the_client() {
         effective_gid: 22,
     };
     let client = client(peer);
-    assert_eq!(
-        client.session_info().unwrap_err(),
-        ClientError::Remote(protocol::STATUS_ESRCH)
-    );
+    let initialized = client.session_info().unwrap();
 
     client.register_session().unwrap();
     let initial = client.session_info().unwrap();
+    assert_eq!(initial, initialized);
     assert_eq!(initial.real_uid, peer.effective_uid);
     assert_eq!(initial.effective_uid, peer.effective_uid);
     assert_eq!(initial.real_gid, peer.effective_gid);
@@ -457,8 +457,8 @@ fn supplementary_groups_round_trip_and_require_privilege() {
     });
     let mut groups = [0u32; protocol::MAX_SUPPLEMENTARY_GROUPS];
     assert_eq!(
-        privileged.get_groups(&mut groups).unwrap_err(),
-        ClientError::Remote(protocol::STATUS_ESRCH)
+        privileged.get_groups(&mut groups).unwrap(),
+        0
     );
     privileged.register_session().unwrap();
     assert_eq!(privileged.get_groups(&mut groups).unwrap(), 0);
@@ -2134,12 +2134,29 @@ fn broker_launch_inherits_the_requester_not_the_broker() {
 
 #[test]
 fn launch_registration_never_trusts_native_root_or_unknown_requester() {
+    let root = PeerIdentity {
+        process_id: 333,
+        effective_uid: 0,
+        effective_gid: 0,
+    };
     let broker = PeerIdentity {
         process_id: 331,
         effective_uid: 505,
         effective_gid: 24,
     };
-    let mut service = service_for(broker);
+    let mut service = service_for(root);
+    service
+        .initialize_process(
+            root,
+            AuthenticatedProcess {
+                handle: 331,
+                process_id: 331,
+            },
+            broker.effective_uid,
+            broker.effective_gid,
+            &[],
+        )
+        .unwrap();
     service.handle(
         broker,
         protocol::Header {
@@ -2170,20 +2187,6 @@ fn launch_registration_never_trusts_native_root_or_unknown_requester() {
     assert!(service.session(332).is_none());
     assert!(service.process_handle(332).is_none());
     assert!(filesystem.retained.is_empty());
-    let root = PeerIdentity {
-        process_id: 333,
-        effective_uid: 0,
-        effective_gid: 0,
-    };
-    service
-        .bind_process(
-            root,
-            AuthenticatedProcess {
-                handle: 333,
-                process_id: 333,
-            },
-        )
-        .unwrap();
     service.handle(
         root,
         protocol::Header {

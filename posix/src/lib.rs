@@ -1748,19 +1748,11 @@ impl<H: Copy> PosixService<H> {
         let result = match header.opcode {
             protocol::OP_PING if header.flags == 0 && payload.is_empty() => Ok(Vec::new()),
             protocol::OP_SESSION_REGISTER if header.flags == 0 && payload.is_empty() => {
-                if !self.processes.contains_key(&peer.process_id) {
+                // Registration acknowledges an environment initialized before
+                // execution; IPC peer credentials must never create one.
+                if self.registered_peer(peer.process_id).is_none() {
                     return status_response(header.request_id, STATUS_EINVAL);
                 }
-                self.sessions.entry(peer.process_id).or_insert(Session {
-                    process_id: peer.process_id,
-                    real_uid: peer.effective_uid,
-                    effective_uid: peer.effective_uid,
-                    saved_uid: peer.effective_uid,
-                    real_gid: peer.effective_gid,
-                    effective_gid: peer.effective_gid,
-                    saved_gid: peer.effective_gid,
-                    umask: 0o022,
-                });
                 Ok(Vec::new())
             }
             protocol::OP_SESSION_INFO if header.flags == 0 && payload.is_empty() => {
