@@ -41,6 +41,16 @@ static void debug(const char *message) {
                      : "rcx", "r11", "memory");
 }
 
+struct native_wait_guard { uint64_t address, expected; };
+static int64_t guarded_native_wait(const struct native_wait_guard *guard, uint64_t deadline) {
+    uint64_t number = 682;
+    register uint64_t argument __asm__("r10") = (uintptr_t)guard;
+    __asm__ volatile("syscall" : "+a"(number)
+        : "D"((uint64_t)0), "S"((uint64_t)0), "d"(deadline), "r"(argument)
+        : "rcx", "r11", "memory");
+    return (int64_t)number;
+}
+
 static void *exercise_foreground_io(void *unused) {
     (void)unused;
     for (unsigned iteration = 0; iteration < 32; ++iteration) {
@@ -114,6 +124,18 @@ static void *interrupt_stream_io(void *context) {
 } while (0)
 
 int main(void) {
+    _Atomic uint64_t epoch = 9;
+    struct native_wait_guard guard = {(uintptr_t)&epoch, 8};
+    // A pre-delivered notification must prevent an infinite empty-object wait.
+    CHECK(guarded_native_wait(&guard, UINT64_MAX) == -EAGAIN);
+    guard.expected = 9;
+    CHECK(guarded_native_wait(&guard, 0) == -EAGAIN);
+    CHECK(guarded_native_wait(NULL, 0) == -EINVAL);
+    guard.address = (uintptr_t)&epoch + 1;
+    CHECK(guarded_native_wait(&guard, 0) == -EINVAL);
+    guard.address = 0;
+    CHECK(guarded_native_wait(&guard, 0) == -EFAULT);
+    CHECK(guarded_native_wait((const struct native_wait_guard *)(uintptr_t)(UINT64_MAX - 7), 0) == -EFAULT);
     struct winsize initial = {24, 80, 640, 480}, actual = {0};
     int master = -1, slave = -1;
     CHECK(openpty(&master, &slave, NULL, NULL, &initial) == 0);
@@ -397,7 +419,7 @@ int main(void) {
             CHECK(close(pipes[0]) == 0 && close(pipes[1]) == 0);
         }
     }
-    debug("native-terminal-window: PASS pipe read/write EINTR and SA_RESTART, shared flags, terminal and sleep regressions\n");
+    debug("native-terminal-window: PASS wait guard validation and stale epoch, pipe/terminal signal regressions\n");
     CHECK(close(master) == 0);
     return 0;
 }
