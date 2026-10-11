@@ -87,7 +87,10 @@ pub(crate) fn spawn_fixed_service(
     posix_endpoint: Option<platform::handle::Handle>,
 ) -> Result<u64, mochi_user_syscall::SysError> {
     // Migrated services must not fall back to legacy pathname creation.
-    if matches!(service, FixedService::Input | FixedService::Display) {
+    if matches!(
+        service,
+        FixedService::Input | FixedService::Display | FixedService::Compositor
+    ) {
         return Err(sys_error(mochi_user_syscall::EINVAL));
     }
     let ready_target = ready_target.map(|target| ReadyTarget {
@@ -126,6 +129,20 @@ pub(crate) fn spawn_display_service(
         "display.driver",
         logger_endpoint,
         ready_target,
+        posix_endpoint,
+    )
+}
+
+pub(crate) fn spawn_compositor_service(
+    logger_endpoint: u64,
+    posix_endpoint: platform::handle::Handle,
+) -> Result<NativeProcess, mochi_user_syscall::SysError> {
+    let mut arguments = fixed_service_arguments(FixedService::Compositor, logger_endpoint, None);
+    append_posix_handle(&mut arguments, Some(posix_endpoint));
+    spawn_native(
+        fixed_service_spec(FixedService::Compositor),
+        "compositor.service",
+        &arguments,
         posix_endpoint,
     )
 }

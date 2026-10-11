@@ -2,14 +2,14 @@ use crate::service_config::FixedService;
 use mochi_user_platform::service_ready::SessionIdentity;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ChildProcesses<Input = u64, Display = u64, Drivers = u64> {
+pub(crate) struct ChildProcesses<Input = u64, Display = u64, Drivers = u64, Compositor = u64> {
     pub(crate) drivers: Option<Drivers>,
     pub(crate) mboot_agent: Option<u64>,
     pub(crate) filesystem: Option<u64>,
     pub(crate) posix: Option<u64>,
     pub(crate) input: Option<Input>,
     pub(crate) display: Option<Display>,
-    pub(crate) compositor: Option<u64>,
+    pub(crate) compositor: Option<Compositor>,
     pub(crate) network: Option<u64>,
     pub(crate) user: Option<u64>,
     pub(crate) secure_ui: Option<u64>,
@@ -45,14 +45,14 @@ pub(crate) enum StopReason {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct BootstrapOutcome<Input = u64, Display = u64, Drivers = u64> {
-    pub(crate) children: ChildProcesses<Input, Display, Drivers>,
+pub(crate) struct BootstrapOutcome<Input = u64, Display = u64, Drivers = u64, Compositor = u64> {
+    pub(crate) children: ChildProcesses<Input, Display, Drivers, Compositor>,
     pub(crate) reason: StopReason,
     pub(crate) identity: Option<SessionIdentity>,
     pub(crate) session_id: u64,
 }
 
-impl<Input, Display, Drivers> BootstrapOutcome<Input, Display, Drivers> {
+impl<Input, Display, Drivers, Compositor> BootstrapOutcome<Input, Display, Drivers, Compositor> {
     pub(crate) const fn initialization_failed() -> Self {
         Self {
             children: ChildProcesses {
@@ -79,9 +79,11 @@ impl<Input, Display, Drivers> BootstrapOutcome<Input, Display, Drivers> {
     }
 }
 
-impl<Input, Display, Drivers> Default for ChildProcesses<Input, Display, Drivers> {
+impl<Input, Display, Drivers, Compositor> Default
+    for ChildProcesses<Input, Display, Drivers, Compositor>
+{
     fn default() -> Self {
-        BootstrapOutcome::<Input, Display, Drivers>::initialization_failed().children
+        BootstrapOutcome::<Input, Display, Drivers, Compositor>::initialization_failed().children
     }
 }
 
@@ -89,6 +91,8 @@ pub(crate) trait BootstrapOperations {
     type InputProcess;
     type DisplayProcess;
     type DriversProcess;
+    type CompositorProcess;
+    fn spawn_compositor(&mut self) -> Option<Self::CompositorProcess>;
     fn spawn_input(&mut self) -> Option<Self::InputProcess>;
     fn spawn_display(&mut self) -> Option<Self::DisplayProcess>;
     fn spawn_drivers(&mut self) -> Option<Self::DriversProcess>;
@@ -126,7 +130,7 @@ const FIRST_BOOT_IDENTITY: SessionIdentity = SessionIdentity { uid: 0, gid: 0 };
 
 pub(crate) fn orchestrate<O: BootstrapOperations>(
     operations: &mut O,
-) -> BootstrapOutcome<O::InputProcess, O::DisplayProcess, O::DriversProcess> {
+) -> BootstrapOutcome<O::InputProcess, O::DisplayProcess, O::DriversProcess, O::CompositorProcess> {
     let mut children = ChildProcesses::default();
 
     let Some(filesystem) = operations.spawn_fixed(FixedService::Filesystem) else {
@@ -169,7 +173,7 @@ pub(crate) fn orchestrate<O: BootstrapOperations>(
         return outcome(children, StopReason::InputReadyFailed);
     }
 
-    children.compositor = operations.spawn_fixed(FixedService::Compositor);
+    children.compositor = operations.spawn_compositor();
     if children.compositor.is_some() {
         operations.notify_mboot_stage(MbootStage::Display);
     }
@@ -243,10 +247,10 @@ pub(crate) fn orchestrate<O: BootstrapOperations>(
     }
 }
 
-const fn outcome<Input, Display, Drivers>(
-    children: ChildProcesses<Input, Display, Drivers>,
+const fn outcome<Input, Display, Drivers, Compositor>(
+    children: ChildProcesses<Input, Display, Drivers, Compositor>,
     reason: StopReason,
-) -> BootstrapOutcome<Input, Display, Drivers> {
+) -> BootstrapOutcome<Input, Display, Drivers, Compositor> {
     BootstrapOutcome {
         children,
         reason,
@@ -328,6 +332,11 @@ mod tests {
         type InputProcess = u64;
         type DisplayProcess = u64;
         type DriversProcess = u64;
+        type CompositorProcess = u64;
+
+        fn spawn_compositor(&mut self) -> Option<Self::CompositorProcess> {
+            self.spawn_fixed(FixedService::Compositor)
+        }
 
         fn spawn_display(&mut self) -> Option<Self::DisplayProcess> {
             self.spawn_fixed(FixedService::Display)

@@ -71,13 +71,35 @@ fn display_launch_and_readiness_use_retained_handles_without_legacy_fallback() {
     let launcher = include_str!("../../service-manager/src/service_launcher.rs");
     let bootstrap = include_str!("../../service-manager/src/bootstrap.rs");
     let orchestration = include_str!("../../service-manager/src/orchestration.rs");
-    assert!(launcher.contains("matches!(service, FixedService::Input | FixedService::Display)"));
+    assert!(
+        launcher.contains("FixedService::Input | FixedService::Display | FixedService::Compositor")
+    );
     assert!(launcher.contains("FixedService::Display,\n        \"display.driver\""));
     assert!(bootstrap.contains("type DisplayProcess = NativeProcess;"));
     assert!(bootstrap.contains("self.wait_ready(ReadyService::Display, process.watch_target())"));
     assert!(orchestration.contains("operations.spawn_display()"));
     assert!(!orchestration.contains("operations.spawn_fixed(FixedService::Display)"));
     assert!(orchestration.contains("children.display.as_ref().unwrap()"));
+}
+
+#[test]
+fn compositor_creation_keeps_a_native_owner_and_has_no_path_launch_fallback() {
+    let launcher = include_str!("../../service-manager/src/service_launcher.rs");
+    let start = launcher
+        .find("pub(crate) fn spawn_compositor_service(")
+        .unwrap();
+    let end = start + launcher[start..].find("fn spawn_native_fixed(").unwrap();
+    let compositor = &launcher[start..end];
+    assert!(compositor.contains("Result<NativeProcess,"));
+    assert!(compositor.contains("append_posix_handle(&mut arguments, Some(posix_endpoint))"));
+    assert!(compositor.contains("spawn_native("));
+    assert!(!compositor.contains("spawn("));
+    let bootstrap = include_str!("../../service-manager/src/bootstrap.rs");
+    assert!(bootstrap.contains("type CompositorProcess = NativeProcess;"));
+    let orchestration = include_str!("../../service-manager/src/orchestration.rs");
+    assert!(orchestration.contains("compositor: Option<Compositor>"));
+    assert!(orchestration.contains("children.compositor = operations.spawn_compositor();"));
+    assert!(!orchestration.contains("children.compositor = operations.spawn_fixed("));
 }
 
 #[test]

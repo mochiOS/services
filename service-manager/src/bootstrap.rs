@@ -173,6 +173,24 @@ impl BootstrapOperations for Runtime {
     type InputProcess = NativeProcess;
     type DisplayProcess = NativeProcess;
     type DriversProcess = NativeProcess;
+    type CompositorProcess = NativeProcess;
+
+    fn spawn_compositor(&mut self) -> Option<Self::CompositorProcess> {
+        let endpoint = self.posix_endpoint?;
+        match service_launcher::spawn_compositor_service(self.logger_endpoint, endpoint) {
+            Ok(process) => {
+                eprintln!("service-manager.service: compositor.service native process created");
+                Some(process)
+            }
+            Err(error) => {
+                eprintln!(
+                    "service-manager.service: compositor.service native spawn failed errno={}",
+                    errno(error)
+                );
+                None
+            }
+        }
+    }
 
     fn spawn_display(&mut self) -> Option<Self::DisplayProcess> {
         let endpoint = self.posix_endpoint?;
@@ -703,7 +721,7 @@ fn log_ready_error(service: ReadyService, error: ReadyError) {
 }
 
 fn resident(
-    outcome: BootstrapOutcome<NativeProcess, NativeProcess, NativeProcess>,
+    outcome: BootstrapOutcome<NativeProcess, NativeProcess, NativeProcess, NativeProcess>,
     runtime: Option<Runtime>,
 ) -> ! {
     let mut runtime = runtime;
