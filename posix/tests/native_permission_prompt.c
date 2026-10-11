@@ -105,7 +105,24 @@ static int credential_child(void) {
   return 37;
 }
 
-static int fresh_spawn(int64_t posix, int64_t authority) {
+static int credential_overflow_child(void) {
+  errno = 0;
+  CHECK(getuid() == (uid_t)-1 && errno == EOVERFLOW);
+  errno = 0;
+  CHECK(geteuid() == (uid_t)-1 && errno == EOVERFLOW);
+  errno = 0;
+  CHECK(getgid() == (gid_t)-1 && errno == EOVERFLOW);
+  errno = 0;
+  CHECK(getegid() == (gid_t)-1 && errno == EOVERFLOW);
+  errno = 0;
+  CHECK(setuid(0) == -1 && errno == EPERM);
+  fprintf(stderr, "credential-overflow: PASS all four queries return invalid "
+                  "ID/EOVERFLOW, never root\n");
+  return 37;
+}
+
+static int fresh_spawn(int64_t posix, int64_t authority, int overflow) {
+  const uint32_t uid = overflow ? 65536 : 505, gid = overflow ? 65536 : 24;
   const gid_t parent_groups[2] = {30, 40};
   gid_t observed[4] = {777, 777, 777, 777};
   CHECK(setgroups(2, parent_groups) == 0);
@@ -115,7 +132,10 @@ static int fresh_spawn(int64_t posix, int64_t authority) {
   const char path[] = "/system/services/input.service";
   unsigned char metadata[20000], request[48 + sizeof(path) - 1] = {0},
                                                              reply[2048];
-  int fd = open("/system/resources/native-spawn-metadata.bin", O_RDONLY);
+  int fd =
+      open(overflow ? "/system/resources/native-spawn-overflow-metadata.bin"
+                    : "/system/resources/native-spawn-metadata.bin",
+           O_RDONLY);
   CHECK(fd >= 0);
   ssize_t length = read(fd, metadata, sizeof(metadata));
   CHECK(length > 0 && close(fd) == 0);
@@ -154,8 +174,8 @@ static int fresh_spawn(int64_t posix, int64_t authority) {
   registration[6] = 54; /* OP_PROCESS_SPAWNED; no PID is serialized. */
   put64(registration + 8, 3);
   put32(registration + 20, 20);
-  put32(registration + 32, 505);
-  put32(registration + 36, 24);
+  put32(registration + 32, uid);
+  put32(registration + 36, gid);
   put32(registration + 40, 2);
   put32(registration + 44, 10);
   put32(registration + 48, 20);
@@ -184,8 +204,8 @@ static int fresh_spawn(int64_t posix, int64_t authority) {
               (uint64_t)reply, sizeof(reply), (uint64_t)&handles);
   CHECK(message >= 0 && (uint32_t)message == 52 && get32(reply + 24) == 0 &&
         handles.count == 0);
-  CHECK(get32(reply + 32) == 505 && get32(reply + 36) == 505 &&
-        get32(reply + 40) == 24 && get32(reply + 44) == 24);
+  CHECK(get32(reply + 32) == uid && get32(reply + 36) == uid &&
+        get32(reply + 40) == gid && get32(reply + 44) == gid);
   memset(&handles, 0, sizeof(handles));
   handles.count = 1;
   handles.entries[0].handle = (uint32_t)process;
@@ -216,6 +236,8 @@ static int fresh_spawn(int64_t posix, int64_t authority) {
 int main(int argc, char **argv) {
   if (argc == 2 && strcmp(argv[1], "--credential-child") == 0)
     return credential_child();
+  if (argc == 2 && strcmp(argv[1], "--credential-overflow") == 0)
+    return credential_overflow_child();
   fprintf(stderr, "permission-native: start real secure-ui endpoint test\n");
   unsigned char metadata[20000];
   int fd = open("/system/resources/native-permission-metadata.bin", O_RDONLY);
@@ -328,5 +350,6 @@ int main(int argc, char **argv) {
   fprintf(stderr,
           "permission-native: PASS real secure-ui native creation, SEND-only "
           "publication, token/attachment denial, reply and exit\n");
-  return fresh_spawn(posix, authority);
+  CHECK(fresh_spawn(posix, authority, 0) == 0);
+  return fresh_spawn(posix, authority, 1);
 }

@@ -81,34 +81,38 @@ requires = []
     )
     .unwrap();
     let executable = b"/system/services/input.service";
-    let length = mochios_posix_client::process_image::encode_initial_stack(
-        &[b"fresh-spawn-probe", b"--credential-child"],
-        &[],
-        executable,
-        [7; 16],
-        &mut startup,
-    )
-    .unwrap();
-    let length = process_create::encode(
-        std::str::from_utf8(executable).unwrap(),
-        "fresh-spawn-probe",
-        &startup[..length],
-        &[HandleGrant {
-            key: u64::from_le_bytes(*b"POSXCTRL"),
-            source: 1,
-            rights: mnu_abi::HANDLE_RIGHT_SEND
-                | mnu_abi::HANDLE_RIGHT_TRANSFER
-                | mnu_abi::HANDLE_RIGHT_DUPLICATE,
-        }],
-        &[],
-        &mut metadata,
-    )
-    .unwrap();
-    std::fs::write(
-        directory.join("spawn-probe-metadata.bin"),
-        &metadata[..length],
-    )
-    .unwrap();
+    for (filename, mode) in [
+        ("spawn-probe-metadata.bin", b"--credential-child".as_slice()),
+        (
+            "spawn-overflow-metadata.bin",
+            b"--credential-overflow".as_slice(),
+        ),
+    ] {
+        let length = mochios_posix_client::process_image::encode_initial_stack(
+            &[b"fresh-spawn-probe", mode],
+            &[],
+            executable,
+            [7; 16],
+            &mut startup,
+        )
+        .unwrap();
+        let length = process_create::encode(
+            std::str::from_utf8(executable).unwrap(),
+            "fresh-spawn-probe",
+            &startup[..length],
+            &[HandleGrant {
+                key: u64::from_le_bytes(*b"POSXCTRL"),
+                source: 1,
+                rights: mnu_abi::HANDLE_RIGHT_SEND
+                    | mnu_abi::HANDLE_RIGHT_TRANSFER
+                    | mnu_abi::HANDLE_RIGHT_DUPLICATE,
+            }],
+            &[],
+            &mut metadata,
+        )
+        .unwrap();
+        std::fs::write(directory.join(filename), &metadata[..length]).unwrap();
+    }
     // Use the actual capability package policy, including its explicit
     // inspection authority. Do not replace it with a permissive test manifest.
     let manifest = include_bytes!("../../capability/manifest.toml");
