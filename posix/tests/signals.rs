@@ -16,7 +16,24 @@ impl Transport for LocalTransport {
 
     fn call(&self, request: &[u8], response: &mut [u8]) -> Result<usize, Self::Error> {
         let (header, payload) = protocol::decode(request).map_err(|_| ())?;
-        let reply = self.service.borrow_mut().handle(self.peer, header, payload);
+        let reply = if matches!(
+            header.opcode,
+            protocol::OP_SIGNAL_THREAD_MASK
+                | protocol::OP_SIGNAL_THREAD_DEQUEUE
+                | protocol::OP_SIGNAL_THREAD_PENDING
+        ) {
+            self.service.borrow_mut().handle_thread_signal_request(
+                self.peer,
+                mnu_abi::ExecutionIdentity {
+                    process_id: self.peer.process_id,
+                    thread_id: self.peer.process_id,
+                },
+                header,
+                payload,
+            )
+        } else {
+            self.service.borrow_mut().handle(self.peer, header, payload)
+        };
         protocol::encode(reply.header, &reply.payload, response).map_err(|_| ())
     }
 }
@@ -85,6 +102,22 @@ fn disposition(signal: u32, kind: u32) -> protocol::SignalDisposition {
     }
 }
 
+// Mask changes are separate authenticated operations, not a dequeue payload.
+trait TestSignalDelivery {
+    fn dequeue_with_mask(&self, mask: u64) -> Result<u32, ClientError<()>>;
+}
+
+impl TestSignalDelivery for Client<LocalTransport> {
+    fn dequeue_with_mask(&self, mask: u64) -> Result<u32, ClientError<()>> {
+        self.thread_signal_mask(protocol::SIGNAL_MASK_SET, mask)?;
+        let delivery = self.thread_dequeue_signal_delivery()?;
+        if delivery.signal != 0 {
+            self.complete_signal_delivery(delivery)?;
+        }
+        Ok(delivery.signal)
+    }
+}
+
 #[test]
 fn installed_image_preserves_ignore_and_pending_but_resets_caught_and_action_flags() {
     let identity = peer(101, 501);
@@ -113,7 +146,7 @@ fn installed_image_preserves_ignore_and_pending_but_resets_caught_and_action_fla
         disposition(protocol::SIGNAL_CHLD, 1)
     );
     assert_eq!(caller.pending_signals().unwrap(), pending);
-    assert_eq!(caller.dequeue_signal(0).unwrap(), 12);
+    assert_eq!(caller.dequeue_with_mask(0).unwrap(), 12);
 }
 
 #[test]
@@ -200,7 +233,7 @@ fn ignore_discards_pending_and_future_signals_without_affecting_other_processes(
         disposition(10, 1)
     );
     sender.send_signal(102, 10).unwrap();
-    assert_eq!(receiver.dequeue_signal(0).unwrap(), 10);
+    assert_eq!(receiver.dequeue_with_mask(0).unwrap(), 10);
 }
 
 #[test]
@@ -333,11 +366,8 @@ fn signal_wire_format_rejects_invalid_numbers_and_reserved_bytes() {
     );
 
     let mut options = [0u8; protocol::SIGNAL_CHILD_OPTIONS_LEN];
-    protocol::encode_signal_child_options(
-        protocol::SIGNAL_CHILD_OPTION_NOCLDSTOP,
-        &mut options,
-    )
-    .unwrap();
+    protocol::encode_signal_child_options(protocol::SIGNAL_CHILD_OPTION_NOCLDSTOP, &mut options)
+        .unwrap();
     assert_eq!(
         protocol::decode_signal_child_options(&options),
         Ok(protocol::SIGNAL_CHILD_OPTION_NOCLDSTOP)
@@ -396,14 +426,14 @@ fn standard_signals_coalesce_and_respect_the_receiving_thread_mask() {
             .is_none()
     );
     assert_eq!(receiver.pending_signals().unwrap(), 1 << 9);
-    assert_eq!(receiver.dequeue_signal(1 << 9).unwrap(), 0);
-    assert_eq!(receiver.dequeue_signal(0).unwrap(), 10);
+    assert_eq!(receiver.dequeue_with_mask(1 << 9).unwrap(), 0);
+    assert_eq!(receiver.dequeue_with_mask(0).unwrap(), 10);
     assert_eq!(receiver.pending_signals().unwrap(), 0);
 
     sender.send_signal(102, protocol::SIGNAL_KILL).unwrap();
     assert_eq!(
         receiver
-            .dequeue_signal(1 << (protocol::SIGNAL_KILL - 1))
+            .dequeue_with_mask(1 << (protocol::SIGNAL_KILL - 1))
             .unwrap(),
         protocol::SIGNAL_KILL
     );
@@ -421,7 +451,9 @@ fn child_signal_options_round_trip_through_the_client() {
         .unwrap();
     assert!(matches!(
         client.set_signal_child_options(2),
-        Err(ClientError::Protocol(protocol::ProtocolError::InvalidLength))
+        Err(ClientError::Protocol(
+            protocol::ProtocolError::InvalidLength
+        ))
     ));
 }
 
@@ -435,12 +467,8 @@ fn sigcont_requests_native_resume_and_replaces_pending_stop_signals() {
     let sender = client(&service, sender_identity);
     let receiver = client(&service, receiver_identity);
 
-    sender
-        .send_signal(152, protocol::SIGNAL_TSTP)
-        .unwrap();
-    sender
-        .send_signal(152, protocol::SIGNAL_CONT)
-        .unwrap();
+    sender.send_signal(152, protocol::SIGNAL_TSTP).unwrap();
+    sender.send_signal(152, protocol::SIGNAL_CONT).unwrap();
     assert_eq!(
         service
             .borrow()
@@ -464,12 +492,8 @@ fn sigcont_requests_native_resume_and_replaces_pending_stop_signals() {
             .is_none()
     );
 
-    sender
-        .send_signal(152, protocol::SIGNAL_CONT)
-        .unwrap();
-    sender
-        .send_signal(152, protocol::SIGNAL_TTIN)
-        .unwrap();
+    sender.send_signal(152, protocol::SIGNAL_CONT).unwrap();
+    sender.send_signal(152, protocol::SIGNAL_TTIN).unwrap();
     assert_eq!(
         receiver.pending_signals().unwrap(),
         1u64 << (protocol::SIGNAL_TTIN - 1)
@@ -478,9 +502,7 @@ fn sigcont_requests_native_resume_and_replaces_pending_stop_signals() {
     service
         .borrow_mut()
         .acknowledge_process_resume_notification(152);
-    sender
-        .send_signal(152, protocol::SIGNAL_KILL)
-        .unwrap();
+    sender.send_signal(152, protocol::SIGNAL_KILL).unwrap();
     assert_eq!(
         service
             .borrow()
@@ -537,7 +559,7 @@ fn signal_selection_uses_posix_credentials_without_granting_uid_zero_authority()
     );
 
     sender.send_signal(-1, 12).unwrap();
-    assert_eq!(sender.dequeue_signal(0).unwrap(), 12);
-    assert_eq!(same_user_client.dequeue_signal(0).unwrap(), 12);
+    assert_eq!(sender.dequeue_with_mask(0).unwrap(), 12);
+    assert_eq!(same_user_client.dequeue_with_mask(0).unwrap(), 12);
     assert_eq!(other_user_client.pending_signals().unwrap(), 0);
 }

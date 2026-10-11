@@ -2219,11 +2219,6 @@ impl<H: Copy> PosixService<H> {
         }
     }
 
-    fn dequeue_signal_payload(&mut self, process_id: u64, payload: &[u8]) -> Result<Vec<u8>, i32> {
-        let blocked = protocol::decode_signal_mask(payload).map_err(|_| STATUS_EINVAL)?;
-        self.dequeue_signal_with_mask(process_id, blocked)
-    }
-
     fn dequeue_signal_with_mask(&mut self, process_id: u64, blocked: u64) -> Result<Vec<u8>, i32> {
         let signal = self
             .signals
@@ -2447,9 +2442,6 @@ impl<H: Copy> PosixService<H> {
             protocol::OP_SIGNAL_PENDING if header.flags == 0 && payload.is_empty() => {
                 self.pending_signals_payload(peer.process_id)
             }
-            protocol::OP_SIGNAL_DEQUEUE if header.flags == 0 => {
-                self.dequeue_signal_payload(peer.process_id, payload)
-            }
             protocol::OP_SIGNAL_DELIVERY_COMPLETE if header.flags == 0 => self
                 .complete_signal_delivery(peer, payload)
                 .map(|_| Vec::new()),
@@ -2505,7 +2497,6 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_RESOURCE_LIMIT
             | protocol::OP_SIGNAL_SEND
             | protocol::OP_SIGNAL_PENDING
-            | protocol::OP_SIGNAL_DEQUEUE
             | protocol::OP_SIGNAL_DELIVERY_COMPLETE
             | protocol::OP_PROCESS_SIGNALED
             | protocol::OP_SIGNAL_CHILD_OPTIONS

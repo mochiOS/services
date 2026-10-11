@@ -485,3 +485,31 @@ fn thread_delivery_rejects_uninitialized_threads_and_untrusted_requests_atomical
         }
     }
 }
+
+#[test]
+fn retired_dequeue_opcode_is_unknown_and_cannot_override_a_thread_mask() {
+    let service = service();
+    let caller = client(&service, 101, 501);
+    caller
+        .thread_signal_mask(protocol::SIGNAL_MASK_INITIALIZE, 1 << 29)
+        .unwrap();
+    caller.send_signal(101, 30).unwrap();
+    for payload in [&[][..], &[0u8; 8][..]] {
+        let header = protocol::Header {
+            opcode: 36,
+            request_id: 114,
+            ..Default::default()
+        };
+        let reply = service.borrow_mut().handle(peer(101), header, payload);
+        assert_eq!(reply.header.status, protocol::STATUS_ENOSYS);
+        assert_eq!(reply.header.request_id, 114);
+    }
+    assert_eq!(caller.thread_pending_signals().unwrap(), 1 << 29);
+    assert_eq!(caller.thread_dequeue_signal_delivery().unwrap().signal, 0);
+    assert_eq!(
+        caller
+            .thread_signal_mask(protocol::SIGNAL_MASK_QUERY, 0)
+            .unwrap(),
+        1 << 29
+    );
+}

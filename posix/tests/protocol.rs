@@ -3922,18 +3922,44 @@ fn send_signal(
 }
 
 fn dequeue_signal(service: &mut PosixService, receiver: PeerIdentity) -> protocol::SignalDelivery {
-    let mut mask = [0u8; protocol::SIGNAL_MASK_LEN];
-    protocol::encode_signal_mask(0, &mut mask).unwrap();
-    let response = service.handle(
-        receiver,
-        protocol::Header {
-            opcode: protocol::OP_SIGNAL_DEQUEUE,
-            ..protocol::Header::default()
+    let mut mask = [0u8; protocol::SIGNAL_THREAD_MASK_LEN];
+    protocol::encode_signal_mask_request(
+        protocol::SignalMaskRequest {
+            operation: protocol::SIGNAL_MASK_INITIALIZE,
+            mask: 0,
         },
-        &mask,
+        &mut mask,
+    )
+    .unwrap();
+    assert_eq!(
+        thread_signal_request(service, receiver, protocol::OP_SIGNAL_THREAD_MASK, &mask)
+            .header
+            .status,
+        0
     );
+    let response = thread_signal_request(service, receiver, protocol::OP_SIGNAL_THREAD_DEQUEUE, &[]);
     assert_eq!(response.header.status, protocol::STATUS_OK);
     protocol::decode_signal_delivery(&response.payload).unwrap()
+}
+
+fn thread_signal_request(
+    service: &mut PosixService,
+    receiver: PeerIdentity,
+    opcode: u16,
+    payload: &[u8],
+) -> posix_service::Response {
+    service.handle_thread_signal_request(
+        receiver,
+        mnu_abi::ExecutionIdentity {
+            process_id: receiver.process_id,
+            thread_id: receiver.process_id,
+        },
+        protocol::Header {
+            opcode,
+            ..protocol::Header::default()
+        },
+        payload,
+    )
 }
 
 fn deliver_signal(
@@ -4207,16 +4233,7 @@ fn outstanding_signal_deliveries_are_bounded_without_losing_pending_state() {
     }
 
     send_signal(&mut service, process, process, protocol::SIGNAL_INT);
-    let mut mask = [0u8; protocol::SIGNAL_MASK_LEN];
-    protocol::encode_signal_mask(0, &mut mask).unwrap();
-    let response = service.handle(
-        process,
-        protocol::Header {
-            opcode: protocol::OP_SIGNAL_DEQUEUE,
-            ..protocol::Header::default()
-        },
-        &mask,
-    );
+    let response = thread_signal_request(&mut service, process, protocol::OP_SIGNAL_THREAD_DEQUEUE, &[]);
     assert_eq!(response.header.status, protocol::STATUS_EAGAIN);
 
     let mut encoded = [0u8; protocol::SIGNAL_DELIVERY_LEN];
