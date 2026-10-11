@@ -399,7 +399,12 @@ fn main() {
                 let response =
                     match identify_pty_terminal(provider_endpoint_handle, attachments[0].handle) {
                         Ok(terminal_id) => {
-                            service.handle_terminal(peer, header, payload, terminal_id)
+                            match platform::ipc::endpoint_execution_identity(sender) {
+                                Ok(identity) => service.handle_terminal(
+                                    peer, identity, header, payload, terminal_id,
+                                ),
+                                Err(_) => invalid_response(header.request_id),
+                            }
                         }
                         Err(status) => status_response(header.request_id, status),
                     };

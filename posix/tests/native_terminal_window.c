@@ -8,12 +8,15 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/wait.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
 
 static volatile sig_atomic_t resized;
+static volatile sig_atomic_t background_stopped;
 static void on_resize(int signal_number) { if (signal_number == SIGWINCH) ++resized; }
+static void on_background(int signal_number) { if (signal_number == SIGTTOU) ++background_stopped; }
 
 static void debug(const char *message) {
     uint64_t number = 660;
@@ -110,7 +113,38 @@ int main(void) {
         nanosleep(&pause, NULL);
     }
     CHECK(resized == 1);
-    debug("native-terminal-window: PASS ioctl, tcflow, attributes, process group, size, errors and SIGWINCH\n");
+    pid_t parent_group = getpgrp();
+    pid_t child = fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        action.sa_handler = on_background;
+        CHECK(sigaction(SIGTTOU, &action, NULL) == 0);
+        CHECK(setpgid(0, 0) == 0);
+        errno = 0;
+        CHECK(tcsetpgrp(STDIN_FILENO, getpgrp()) == -1 && errno == EINTR);
+        CHECK(tcgetpgrp(STDIN_FILENO) == parent_group);
+        for (unsigned retry = 0; retry < 1000 && background_stopped == 0; ++retry) {
+            struct timespec pause = {0, 1000000};
+            nanosleep(&pause, NULL);
+        }
+        CHECK(background_stopped == 1);
+        sigset_t mask;
+        CHECK(sigemptyset(&mask) == 0 && sigaddset(&mask, SIGTTOU) == 0);
+        CHECK(sigprocmask(SIG_BLOCK, &mask, NULL) == 0);
+        CHECK(tcsetpgrp(STDIN_FILENO, getpgrp()) == 0);
+        CHECK(tcgetpgrp(STDIN_FILENO) == getpgrp());
+        _exit(0);
+    }
+    int status;
+    CHECK(waitpid(child, &status, 0) == child);
+    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    // The session leader is now background and its group is orphaned.
+    errno = 0;
+    CHECK(tcsetpgrp(STDIN_FILENO, parent_group) == -1 && errno == EIO);
+    action.sa_handler = SIG_IGN;
+    CHECK(sigaction(SIGTTOU, &action, NULL) == 0);
+    CHECK(tcsetpgrp(STDIN_FILENO, parent_group) == 0);
+    debug("native-terminal-window: PASS ioctl, tcflow, tcsetpgrp job control, attributes, size and SIGWINCH\n");
     CHECK(close(master) == 0);
     return 0;
 }

@@ -1836,10 +1836,11 @@ impl<H: Copy> PosixService<H> {
 
     fn set_terminal_foreground_process_group(
         &mut self,
-        process_id: u64,
+        sender: mnu_abi::ExecutionIdentity,
         terminal_id: u64,
         payload: &[u8],
     ) -> Result<(), i32> {
+        let process_id = sender.process_id;
         let process_group =
             protocol::decode_process_id_request(payload).map_err(|_| STATUS_EINVAL)?;
         if process_group <= 0 {
@@ -1853,7 +1854,7 @@ impl<H: Copy> PosixService<H> {
             .ok_or(protocol::STATUS_ESRCH)?;
         let terminal = self
             .terminals
-            .get_mut(&terminal_id)
+            .get(&terminal_id)
             .ok_or(protocol::STATUS_ENOTTY)?;
         if terminal.session_id != session_id
             || self.controlling_terminals.get(&session_id).copied() != Some(terminal_id)
@@ -1866,20 +1867,87 @@ impl<H: Copy> PosixService<H> {
         if !group_is_in_session {
             return Err(protocol::STATUS_EPERM);
         }
-        terminal.foreground_process_group = process_group;
+        self.authorize_terminal_change(sender, terminal_id)?;
+        self.terminals
+            .get_mut(&terminal_id)
+            .ok_or(protocol::STATUS_ENOTTY)?
+            .foreground_process_group = process_group;
         Ok(())
+    }
+
+    /// Terminal-changing operations ignore TOSTOP. Only the authenticated
+    /// calling thread's mask can exempt a background caller from SIGTTOU.
+    fn authorize_terminal_change(
+        &mut self,
+        sender: mnu_abi::ExecutionIdentity,
+        terminal_id: u64,
+    ) -> Result<(), i32> {
+        let terminal = self
+            .terminals
+            .get(&terminal_id)
+            .ok_or(protocol::STATUS_ENOTTY)?;
+        let group = *self
+            .process_groups
+            .get(&sender.process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        if group == terminal.foreground_process_group {
+            return Ok(());
+        }
+        let signal = protocol::SIGNAL_TTOU;
+        let ignored = self
+            .signals
+            .get(&sender.process_id)
+            .ok_or(protocol::STATUS_ESRCH)?
+            .disposition(signal)
+            == protocol::SIGNAL_DISPOSITION_IGNORE;
+        if ignored {
+            return Ok(());
+        }
+        let blocked = *self
+            .signal_masks
+            .get(&(sender.process_id, sender.thread_id))
+            .ok_or(protocol::STATUS_ESRCH)?;
+        if blocked & signal_bit(signal) != 0 {
+            return Ok(());
+        }
+        let session = terminal.session_id;
+        if !self.non_orphaned_groups().contains(&(session, group)) {
+            return Err(protocol::STATUS_EIO);
+        }
+        let members: Vec<u64> = self
+            .process_groups
+            .iter()
+            .filter_map(|(&member, &candidate)| {
+                (candidate == group
+                    && self.session_ids.get(&member).copied() == Some(session)
+                    && self
+                        .process_wait_states
+                        .get(&member)
+                        .is_some_and(|state| !state.exit_observed))
+                .then_some(member)
+            })
+            .collect();
+        for member in members {
+            self.enqueue_signal(member, signal)?;
+        }
+        Err(protocol::STATUS_EINTR)
     }
 
     /// Applies POSIX controlling-terminal policy to a terminal object already
     /// authenticated by its provider. `terminal_id` is provider-owned state;
     /// clients cannot select or forge it in request bytes.
+    /// `sender` must be resolved from the kernel-authenticated IPC endpoint.
     pub fn handle_terminal(
         &mut self,
         peer: PeerIdentity,
+        sender: mnu_abi::ExecutionIdentity,
         header: protocol::Header,
         payload: &[u8],
         terminal_id: u64,
     ) -> Response {
+        if sender.process_id != peer.process_id || sender.process_id == 0 || sender.thread_id == 0 {
+            return status_response(header.request_id, protocol::STATUS_EPERM);
+        }
         let result = match header.opcode {
             protocol::OP_TERMINAL_ACQUIRE if header.flags == 0 && payload.is_empty() => self
                 .acquire_controlling_terminal(peer.process_id, terminal_id)
@@ -1897,7 +1965,7 @@ impl<H: Copy> PosixService<H> {
                     Ok(output)
                 }),
             protocol::OP_TERMINAL_SET_FOREGROUND if header.flags == 0 => self
-                .set_terminal_foreground_process_group(peer.process_id, terminal_id, payload)
+                .set_terminal_foreground_process_group(sender, terminal_id, payload)
                 .map(|_| Vec::new()),
             protocol::OP_TERMINAL_ACQUIRE
             | protocol::OP_TERMINAL_RELEASE

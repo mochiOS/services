@@ -242,6 +242,13 @@ fn client(peer: PeerIdentity) -> Client<LocalTransport> {
     })
 }
 
+fn terminal_identity(peer: PeerIdentity) -> mnu_abi::ExecutionIdentity {
+    mnu_abi::ExecutionIdentity {
+        process_id: peer.process_id,
+        thread_id: 1,
+    }
+}
+
 fn service_for(peer: PeerIdentity) -> PosixService {
     let mut service = PosixService::new();
     assert_eq!(
@@ -4517,6 +4524,7 @@ fn controlling_terminals_are_bound_to_sessions_and_foreground_groups() {
         service
             .handle_terminal(
                 leader,
+                terminal_identity(leader),
                 terminal_request(protocol::OP_TERMINAL_ACQUIRE),
                 &[],
                 77,
@@ -4536,6 +4544,7 @@ fn controlling_terminals_are_bound_to_sessions_and_foreground_groups() {
         service
             .handle_terminal(
                 member,
+                terminal_identity(member),
                 terminal_request(protocol::OP_TERMINAL_ACQUIRE),
                 &[],
                 78,
@@ -4566,7 +4575,8 @@ fn controlling_terminals_are_bound_to_sessions_and_foreground_groups() {
     assert_eq!(
         service
             .handle_terminal(
-                member,
+                leader,
+                terminal_identity(leader),
                 terminal_request(protocol::OP_TERMINAL_SET_FOREGROUND),
                 &foreground,
                 77,
@@ -4577,6 +4587,7 @@ fn controlling_terminals_are_bound_to_sessions_and_foreground_groups() {
     );
     let response = service.handle_terminal(
         leader,
+        terminal_identity(leader),
         terminal_request(protocol::OP_TERMINAL_GET_FOREGROUND),
         &[],
         77,
@@ -4620,6 +4631,7 @@ fn controlling_terminals_are_bound_to_sessions_and_foreground_groups() {
         service
             .handle_terminal(
                 other_leader,
+                terminal_identity(other_leader),
                 terminal_request(protocol::OP_TERMINAL_GET_FOREGROUND),
                 &[],
                 77,
@@ -4632,6 +4644,7 @@ fn controlling_terminals_are_bound_to_sessions_and_foreground_groups() {
         service
             .handle_terminal(
                 other_leader,
+                terminal_identity(other_leader),
                 terminal_request(protocol::OP_TERMINAL_ACQUIRE),
                 &[],
                 77,
@@ -4644,6 +4657,7 @@ fn controlling_terminals_are_bound_to_sessions_and_foreground_groups() {
         service
             .handle_terminal(
                 member,
+                terminal_identity(member),
                 terminal_request(protocol::OP_TERMINAL_RELEASE),
                 &[],
                 77,
@@ -4656,6 +4670,7 @@ fn controlling_terminals_are_bound_to_sessions_and_foreground_groups() {
         service
             .handle_terminal(
                 leader,
+                terminal_identity(leader),
                 terminal_request(protocol::OP_TERMINAL_RELEASE),
                 &[],
                 77,
@@ -4732,7 +4747,7 @@ fn terminal_exit_family() -> (
     }
     assert_eq!(
         service
-            .handle_terminal(leader, header(protocol::OP_TERMINAL_ACQUIRE), &[], 77)
+            .handle_terminal(leader, terminal_identity(leader), header(protocol::OP_TERMINAL_ACQUIRE), &[], 77)
             .header
             .status,
         0
@@ -4743,6 +4758,7 @@ fn terminal_exit_family() -> (
         service
             .handle_terminal(
                 leader,
+                terminal_identity(leader),
                 header(protocol::OP_TERMINAL_SET_FOREGROUND),
                 &group,
                 77
@@ -4771,6 +4787,7 @@ fn master_close_hangs_up_the_controller_before_controller_exit_hangs_up_the_job(
         service
             .handle_terminal(
                 controller,
+                terminal_identity(controller),
                 protocol::Header {
                     opcode: protocol::OP_TERMINAL_RELEASE,
                     ..Default::default()
@@ -4786,6 +4803,7 @@ fn master_close_hangs_up_the_controller_before_controller_exit_hangs_up_the_job(
         service
             .handle_terminal(
                 controller,
+                terminal_identity(controller),
                 protocol::Header {
                     opcode: protocol::OP_TERMINAL_ACQUIRE,
                     ..Default::default()
@@ -4803,6 +4821,7 @@ fn master_close_hangs_up_the_controller_before_controller_exit_hangs_up_the_job(
         service
             .handle_terminal(
                 controller,
+                terminal_identity(controller),
                 protocol::Header {
                     opcode: protocol::OP_TERMINAL_SET_FOREGROUND,
                     ..Default::default()
@@ -4852,6 +4871,275 @@ fn master_close_hangs_up_the_controller_before_controller_exit_hangs_up_the_job(
     assert_eq!(ptys.take_terminal_signal(), None);
 }
 
+fn terminal_mask(service: &mut PosixService, caller: PeerIdentity, thread: u64, mask: u64) {
+    let mut bytes = [0; protocol::SIGNAL_THREAD_MASK_LEN];
+    protocol::encode_signal_mask_request(
+        protocol::SignalMaskRequest {
+            operation: protocol::SIGNAL_MASK_SET,
+            mask,
+        },
+        &mut bytes,
+    )
+    .unwrap();
+    assert_eq!(
+        service
+            .handle_thread_signal_request(
+                caller,
+                mnu_abi::ExecutionIdentity {
+                    process_id: caller.process_id,
+                    thread_id: thread
+                },
+                protocol::Header {
+                    opcode: protocol::OP_SIGNAL_THREAD_MASK,
+                    ..Default::default()
+                },
+                &bytes,
+            )
+            .header
+            .status,
+        0
+    );
+}
+
+fn request_foreground(
+    service: &mut PosixService,
+    caller: PeerIdentity,
+    sender: mnu_abi::ExecutionIdentity,
+    group: u64,
+) -> i32 {
+    let mut bytes = [0; protocol::PROCESS_ID_REQUEST_LEN];
+    protocol::encode_process_id_request(group as i64, &mut bytes).unwrap();
+    service
+        .handle_terminal(
+            caller,
+            sender,
+            protocol::Header {
+                opcode: protocol::OP_TERMINAL_SET_FOREGROUND,
+                ..Default::default()
+            },
+            &bytes,
+            77,
+        )
+        .header
+        .status
+}
+
+#[test]
+fn background_tcsetpgrp_signals_the_whole_group_without_changing_foreground() {
+    let (mut service, [_, leader, first, second, background], _, _) = terminal_exit_family();
+    set_own_job_group(&mut service, background);
+    let mut bytes = [0; protocol::PROCESS_GROUP_REQUEST_LEN];
+    protocol::encode_process_group_request(
+        second.process_id as i64,
+        background.process_id as i64,
+        &mut bytes,
+    )
+    .unwrap();
+    assert_eq!(
+        service
+            .handle(
+                leader,
+                protocol::Header {
+                    opcode: protocol::OP_SET_PROCESS_GROUP,
+                    ..Default::default()
+                },
+                &bytes
+            )
+            .header
+            .status,
+        0
+    );
+    terminal_mask(&mut service, background, 1, 0);
+    assert_eq!(
+        request_foreground(
+            &mut service,
+            background,
+            terminal_identity(background),
+            background.process_id
+        ),
+        protocol::STATUS_EINTR
+    );
+    assert_eq!(
+        service
+            .controlling_terminal(77)
+            .unwrap()
+            .foreground_process_group,
+        first.process_id
+    );
+    for member in [background, second] {
+        assert_eq!(
+            service.signal_state(member.process_id).unwrap().pending(),
+            1 << (protocol::SIGNAL_TTOU - 1)
+        );
+    }
+    assert_eq!(service.signal_state(first.process_id).unwrap().pending(), 0);
+    assert_eq!(
+        service.signal_state(leader.process_id).unwrap().pending(),
+        0
+    );
+}
+
+#[test]
+fn tcsetpgrp_uses_calling_thread_mask_and_never_another_threads_exemption() {
+    let (mut service, [_, _, first, _, background], _, _) = terminal_exit_family();
+    set_own_job_group(&mut service, background);
+    terminal_mask(
+        &mut service,
+        background,
+        2,
+        1 << (protocol::SIGNAL_TTOU - 1),
+    );
+    assert_eq!(
+        request_foreground(
+            &mut service,
+            background,
+            terminal_identity(background),
+            background.process_id
+        ),
+        protocol::STATUS_ESRCH
+    );
+    terminal_mask(&mut service, background, 1, 0);
+    assert_eq!(
+        request_foreground(
+            &mut service,
+            background,
+            terminal_identity(background),
+            background.process_id
+        ),
+        protocol::STATUS_EINTR
+    );
+    assert_eq!(
+        service
+            .controlling_terminal(77)
+            .unwrap()
+            .foreground_process_group,
+        first.process_id
+    );
+    let sender = mnu_abi::ExecutionIdentity {
+        process_id: background.process_id,
+        thread_id: 2,
+    };
+    assert_eq!(
+        request_foreground(&mut service, background, sender, background.process_id),
+        0
+    );
+    assert_eq!(
+        service
+            .controlling_terminal(77)
+            .unwrap()
+            .foreground_process_group,
+        background.process_id
+    );
+}
+
+#[test]
+fn orphaned_background_tcsetpgrp_fails_without_sending_a_stop_signal() {
+    let (mut service, [_, leader, first, _, _], _, _) = terminal_exit_family();
+    terminal_mask(&mut service, leader, 1, 0);
+    assert_eq!(
+        request_foreground(
+            &mut service,
+            leader,
+            terminal_identity(leader),
+            leader.process_id
+        ),
+        protocol::STATUS_EIO
+    );
+    assert_eq!(
+        service.signal_state(leader.process_id).unwrap().pending(),
+        0
+    );
+    assert_eq!(
+        service
+            .controlling_terminal(77)
+            .unwrap()
+            .foreground_process_group,
+        first.process_id
+    );
+    // Blocking SIGTTOU permits the operation even in an orphaned group.
+    terminal_mask(&mut service, leader, 1, 1 << (protocol::SIGNAL_TTOU - 1));
+    assert_eq!(
+        request_foreground(
+            &mut service,
+            leader,
+            terminal_identity(leader),
+            leader.process_id
+        ),
+        0
+    );
+}
+
+#[test]
+fn ignoring_ttou_permits_background_tcsetpgrp_but_forged_identity_never_does() {
+    let (mut service, [_, leader, first, _, _], _, _) = terminal_exit_family();
+    let mut bytes = [0; protocol::SIGNAL_DISPOSITION_LEN];
+    protocol::encode_signal_disposition(
+        protocol::SignalDisposition {
+            signal: protocol::SIGNAL_TTOU,
+            kind: protocol::SIGNAL_DISPOSITION_IGNORE,
+            child_options: 0,
+        },
+        &mut bytes,
+    )
+    .unwrap();
+    assert_eq!(
+        service
+            .handle(
+                leader,
+                protocol::Header {
+                    opcode: protocol::OP_SIGNAL_DISPOSITION,
+                    flags: protocol::SIGNAL_DISPOSITION_SET,
+                    ..Default::default()
+                },
+                &bytes
+            )
+            .header
+            .status,
+        0
+    );
+    assert_eq!(
+        request_foreground(
+            &mut service,
+            leader,
+            terminal_identity(first),
+            leader.process_id
+        ),
+        protocol::STATUS_EPERM
+    );
+    assert_eq!(
+        request_foreground(
+            &mut service,
+            leader,
+            mnu_abi::ExecutionIdentity {
+                process_id: leader.process_id,
+                thread_id: 0
+            },
+            leader.process_id
+        ),
+        protocol::STATUS_EPERM
+    );
+    assert_eq!(
+        service
+            .controlling_terminal(77)
+            .unwrap()
+            .foreground_process_group,
+        first.process_id
+    );
+    assert_eq!(
+        request_foreground(
+            &mut service,
+            leader,
+            terminal_identity(leader),
+            leader.process_id
+        ),
+        0
+    );
+    assert_eq!(
+        service.signal_state(leader.process_id).unwrap().pending(),
+        0
+    );
+}
+
 fn orphan_job_family() -> (
     PosixService,
     [PeerIdentity; 5],
@@ -4864,6 +5152,7 @@ fn orphan_job_family() -> (
         service
             .handle_terminal(
                 peers[1],
+                terminal_identity(peers[1]),
                 protocol::Header {
                     opcode: protocol::OP_TERMINAL_RELEASE,
                     ..Default::default()
@@ -5425,6 +5714,7 @@ fn controlling_process_exit_hangs_up_only_foreground_members_once_before_wait() 
         service
             .handle_terminal(
                 parent,
+                terminal_identity(parent),
                 protocol::Header {
                     opcode: protocol::OP_TERMINAL_ACQUIRE,
                     ..Default::default()
@@ -5485,6 +5775,7 @@ fn parentless_controlling_process_is_watched_and_terminal_release_is_idempotent(
         service
             .handle_terminal(
                 leader,
+                terminal_identity(leader),
                 protocol::Header {
                     opcode: protocol::OP_TERMINAL_ACQUIRE,
                     ..Default::default()
