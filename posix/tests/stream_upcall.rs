@@ -65,7 +65,7 @@ fn userspace_stream_io_preserves_the_generation_across_native_attempts() {
         io.find("nonrestart_signal_generation.load").unwrap()
             < io.find("match operation()").unwrap()
     );
-    assert!(io.contains("wait_for_handle_since(entry, interests, control, caught)"));
+    assert!(io.contains("wait_for_handle_capacity(entry, interests, control, caught, minimum_write_bytes)"));
     let read = source
         .split("fn syscall_read(")
         .nth(1)

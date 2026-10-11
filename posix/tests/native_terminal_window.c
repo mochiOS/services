@@ -42,6 +42,14 @@ static void debug(const char *message) {
 }
 
 struct native_wait_guard { uint64_t address, expected; };
+struct native_wait_item { uint32_t handle, minimum_write_bytes; uint64_t interests, observed; };
+static int64_t native_call4(uint64_t number, uint64_t first, uint64_t second, uint64_t third, uint64_t fourth) {
+    register uint64_t argument __asm__("r10") = fourth;
+    __asm__ volatile("syscall" : "+a"(number)
+        : "D"(first), "S"(second), "d"(third), "r"(argument)
+        : "rcx", "r11", "memory");
+    return (int64_t)number;
+}
 static int64_t guarded_native_wait(const struct native_wait_guard *guard, uint64_t deadline) {
     uint64_t number = 682;
     register uint64_t argument __asm__("r10") = (uintptr_t)guard;
@@ -136,6 +144,33 @@ int main(void) {
     guard.address = 0;
     CHECK(guarded_native_wait(&guard, 0) == -EFAULT);
     CHECK(guarded_native_wait((const struct native_wait_guard *)(uintptr_t)(UINT64_MAX - 7), 0) == -EFAULT);
+    uint32_t native_pair[2];
+    CHECK(native_call4(649, (uintptr_t)native_pair, 0, 0, 0) == 0);
+    char capacity_block[512];
+    memset(capacity_block, 'c', sizeof(capacity_block));
+    for (;;) {
+        int64_t count = native_call4(675, native_pair[1], (uintptr_t)capacity_block, sizeof(capacity_block), 3);
+        if (count < 0) { CHECK(count == -EAGAIN); break; }
+        CHECK(count == 512);
+    }
+    struct native_wait_item capacity_wait = {native_pair[1], 512, 4, 0};
+    CHECK(native_call4(647, (uintptr_t)&capacity_wait, 1, 0, 0) == -EAGAIN);
+    CHECK(native_call4(681, native_pair[0], (uintptr_t)capacity_block, 1, 2) == 1);
+    CHECK(native_call4(647, (uintptr_t)&capacity_wait, 1, 0, 0) == -EAGAIN);
+    capacity_wait.minimum_write_bytes = 0;
+    CHECK(native_call4(647, (uintptr_t)&capacity_wait, 1, 0, 0) == 0);
+    capacity_wait.minimum_write_bytes = 512;
+    CHECK(native_call4(681, native_pair[0], (uintptr_t)capacity_block, 511, 2) == 511);
+    CHECK(native_call4(647, (uintptr_t)&capacity_wait, 1, 0, 0) == 0);
+    CHECK((capacity_wait.observed & 4) != 0);
+    CHECK(native_call4(675, native_pair[1], (uintptr_t)capacity_block, 512, 3) == 512);
+    capacity_wait.minimum_write_bytes = UINT32_MAX;
+    CHECK(native_call4(647, (uintptr_t)&capacity_wait, 1, 0, 0) == -EINVAL);
+    capacity_wait.minimum_write_bytes = 512;
+    capacity_wait.handle = native_pair[0];
+    CHECK(native_call4(647, (uintptr_t)&capacity_wait, 1, 0, 0) == -EINVAL);
+    CHECK(native_call4(626, native_pair[0], 0, 0, 0) == 0);
+    CHECK(native_call4(626, native_pair[1], 0, 0, 0) == 0);
     struct winsize initial = {24, 80, 640, 480}, actual = {0};
     int master = -1, slave = -1;
     CHECK(openpty(&master, &slave, NULL, NULL, &initial) == 0);
@@ -419,7 +454,7 @@ int main(void) {
             CHECK(close(pipes[0]) == 0 && close(pipes[1]) == 0);
         }
     }
-    debug("native-terminal-window: PASS wait guard validation and stale epoch, pipe/terminal signal regressions\n");
+    debug("native-terminal-window: PASS stream capacity thresholds, wait guards and pipe/terminal signal regressions\n");
     CHECK(close(master) == 0);
     return 0;
 }
