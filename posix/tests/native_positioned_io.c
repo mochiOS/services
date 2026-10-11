@@ -1,5 +1,8 @@
+#define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -19,6 +22,65 @@ static int64_t native(uint64_t number, uint64_t a, uint64_t b, uint64_t c, uint6
 #define CHECK(condition) do { if (!(condition)) { \
     fprintf(stderr, "positioned-io: FAIL line %d errno %d\n", __LINE__, errno); return 1; \
 } } while (0)
+
+static char stream_input[90000], stream_output[90000];
+struct drain_state { int fd; size_t received; int error; };
+static void *drain_stream(void *argument) {
+    struct drain_state *state = argument;
+    while (state->received < sizeof(stream_output)) {
+        ssize_t count = read(state->fd, stream_output + state->received,
+                             sizeof(stream_output) - state->received);
+        if (count <= 0) { state->error = errno ? errno : EIO; break; }
+        state->received += (size_t)count;
+    }
+    return NULL;
+}
+
+static int test_stream_writes(void) {
+    int fds[2];
+    CHECK(pipe2(fds, O_NONBLOCK) == 0);
+    char chunk[4096];
+    memset(chunk, 'F', sizeof(chunk));
+    size_t filled = 0;
+    for (;;) {
+        ssize_t count = write(fds[1], chunk, sizeof(chunk));
+        if (count < 0) { CHECK(errno == EAGAIN); break; }
+        CHECK(count > 0);
+        filled += (size_t)count;
+        CHECK(filled < sizeof(stream_output));
+    }
+    CHECK(read(fds[0], chunk, 257) == 257);
+    char atomic_bytes[PIPE_BUF];
+    memset(atomic_bytes, 'A', sizeof(atomic_bytes));
+    CHECK(write(fds[1], atomic_bytes, sizeof(atomic_bytes)) == -1 && errno == EAGAIN);
+    memset(chunk, 'P', sizeof(chunk));
+    CHECK(write(fds[1], chunk, sizeof(chunk)) == 257);
+    CHECK(write(fds[1], chunk, sizeof(chunk)) == -1 && errno == EAGAIN);
+    size_t drained = 0;
+    for (;;) {
+        ssize_t count = read(fds[0], stream_output + drained, sizeof(stream_output) - drained);
+        if (count < 0) { CHECK(errno == EAGAIN); break; }
+        CHECK(count > 0);
+        drained += (size_t)count;
+    }
+    CHECK(drained == filled);
+    for (size_t i = 0; i < filled - 257; ++i) CHECK(stream_output[i] == 'F');
+    for (size_t i = filled - 257; i < filled; ++i) CHECK(stream_output[i] == 'P');
+    CHECK(close(fds[0]) == 0 && close(fds[1]) == 0);
+
+    CHECK(pipe(fds) == 0);
+    for (size_t i = 0; i < sizeof(stream_input); ++i) stream_input[i] = (char)(i * 13);
+    struct drain_state state = {fds[0], 0, 0};
+    pthread_t reader;
+    CHECK(pthread_create(&reader, NULL, drain_stream, &state) == 0);
+    CHECK(write(fds[1], stream_input, sizeof(stream_input)) == sizeof(stream_input));
+    CHECK(pthread_join(reader, NULL) == 0);
+    CHECK(state.error == 0 && state.received == sizeof(stream_output));
+    CHECK(!memcmp(stream_input, stream_output, sizeof(stream_input)));
+    CHECK(close(fds[0]) == 0 && close(fds[1]) == 0);
+    fprintf(stderr, "positioned-io: PIPE_BUF atomicity, nonblocking partial write and 90KB blocking stream write ok\n");
+    return 0;
+}
 
 int main(void) {
     fprintf(stderr, "positioned-io: start\n");
@@ -127,6 +189,7 @@ int main(void) {
     CHECK(lseek(fd, 0, SEEK_CUR) == 6);
     CHECK(lseek(fd, 4, SEEK_SET) == 4);
     fprintf(stderr, "positioned-io: gathered writev and single-read readv, short read, EAGAIN, shared cursor ok\n");
+    CHECK(test_stream_writes() == 0);
 
     char input[9000], output[9000];
     for (size_t i = 0; i < sizeof(input); ++i) input[i] = (char)(i * 17);
