@@ -1,4 +1,39 @@
 #[test]
+fn retired_path_syscalls_leave_no_unused_kernel_policy_helpers() {
+    let filesystem = include_str!("../../../core/src/syscall/fs.rs");
+    for name in [
+        "resolve_relative_to_cwd",
+        "resolve_path",
+        "ensure_fs_path_readable",
+        "ensure_fs_path_access",
+        "ensure_fs_path_access_for_process",
+        "ensure_fs_capability_access",
+        "current_effective_ids",
+        "ensure_unix_mode_access",
+        "ensure_unix_traversal",
+        "ensure_unix_parent_write_for_process",
+        "sticky_directory_allows_delete",
+        "ensure_unix_sticky_delete_for_process",
+        "open_required_rights",
+        "open_path_required_rights",
+        "access_mode_rights",
+        "readdir_rootfs_first",
+        "errno_from_cext",
+        "vnode_kind_from_protocol",
+    ] {
+        assert!(
+            !filesystem.contains(&format!("fn {name}(")),
+            "retired policy helper restored: {name}"
+        );
+    }
+    // The transitional path loader still requires capability enforcement.
+    assert!(filesystem.contains("fn ensure_fs_path_executable_for_process("));
+    assert!(
+        filesystem.contains("ensure_fs_capability_access_for_process(path, PATH_EXEC, pid_raw)?")
+    );
+}
+
+#[test]
 fn descriptor_numbers_and_cloexec_are_not_kernel_process_state() {
     let objects = include_str!("../../../core/src/task/fd_table.rs");
     let process = include_str!("../../../core/src/task/process.rs");
