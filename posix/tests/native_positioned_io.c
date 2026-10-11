@@ -84,6 +84,14 @@ static int test_stream_writes(void) {
 
 int main(void) {
     fprintf(stderr, "positioned-io: start\n");
+    errno = EBUSY;
+    CHECK(sysconf(_SC_IOV_MAX) == 1024);
+    CHECK(sysconf(_SC_THREAD_KEYS_MAX) == 64);
+    CHECK(sysconf(_SC_THREAD_THREADS_MAX) == 64);
+    CHECK(sysconf(_SC_THREAD_DESTRUCTOR_ITERATIONS) == 4);
+    CHECK(errno == EBUSY);
+    CHECK(sysconf(-1) == -1 && errno == EINVAL);
+    fprintf(stderr, "positioned-io: sysconf vector and pthread limits ok\n");
     CHECK(native(565, 0, 0, 0, 0) == -38);
     for (uint64_t number = 560; number <= 563; ++number) {
         CHECK(native(number, 0, 0, 0, 0) == -38);
