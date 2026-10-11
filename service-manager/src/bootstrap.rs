@@ -171,6 +171,30 @@ impl Runtime {
 
 impl BootstrapOperations for Runtime {
     type InputProcess = NativeProcess;
+    type DisplayProcess = NativeProcess;
+
+    fn spawn_display(&mut self) -> Option<Self::DisplayProcess> {
+        let endpoint = self.posix_endpoint?;
+        if !self.ensure_ready_handshake() {
+            return None;
+        }
+        let target = self.ready.as_ref()?.target(ReadyService::Display);
+        match service_launcher::spawn_display_service(self.logger_endpoint, target, endpoint) {
+            Ok(process) => {
+                platform::logln!(
+                    "service-manager.service: display.driver spawned with retained Process Handle"
+                );
+                Some(process)
+            }
+            Err(error) => {
+                eprintln!(
+                    "service-manager.service: display.driver native spawn failed errno={}",
+                    errno(error)
+                );
+                None
+            }
+        }
+    }
 
     fn spawn_input(&mut self) -> Option<Self::InputProcess> {
         let endpoint = self.posix_endpoint?;
@@ -421,8 +445,12 @@ impl BootstrapOperations for Runtime {
         }
     }
 
-    fn wait_display_ready(&mut self, process_id: u64) -> bool {
-        self.wait_ready(ReadyService::Display, process_id)
+    fn wait_display_ready(&mut self, process: &Self::DisplayProcess) -> bool {
+        let ready = self.wait_ready(ReadyService::Display, process.watch_target());
+        if ready {
+            eprintln!("service-manager.service: display.driver native READY received");
+        }
+        ready
     }
 
     fn wait_binder_ready(&mut self, process_id: u64) -> bool {
@@ -667,7 +695,10 @@ fn log_ready_error(service: ReadyService, error: ReadyError) {
     );
 }
 
-fn resident(outcome: BootstrapOutcome<NativeProcess>, runtime: Option<Runtime>) -> ! {
+fn resident(
+    outcome: BootstrapOutcome<NativeProcess, NativeProcess>,
+    runtime: Option<Runtime>,
+) -> ! {
     let mut runtime = runtime;
     let mut active_session = outcome
         .identity

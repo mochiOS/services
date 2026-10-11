@@ -67,6 +67,20 @@ pub mod process {
 mod production;
 
 #[test]
+fn display_launch_and_readiness_use_retained_handles_without_legacy_fallback() {
+    let launcher = include_str!("../../service-manager/src/service_launcher.rs");
+    let bootstrap = include_str!("../../service-manager/src/bootstrap.rs");
+    let orchestration = include_str!("../../service-manager/src/orchestration.rs");
+    assert!(launcher.contains("matches!(service, FixedService::Input | FixedService::Display)"));
+    assert!(launcher.contains("FixedService::Display,\n        \"display.driver\""));
+    assert!(bootstrap.contains("type DisplayProcess = NativeProcess;"));
+    assert!(bootstrap.contains("self.wait_ready(ReadyService::Display, process.watch_target())"));
+    assert!(orchestration.contains("operations.spawn_display()"));
+    assert!(!orchestration.contains("operations.spawn_fixed(FixedService::Display)"));
+    assert!(orchestration.contains("children.display.as_ref().unwrap()"));
+}
+
+#[test]
 fn native_launch_owns_the_creation_reference_and_cleans_failed_resume() {
     let process = production::NativeProcess::create_and_resume(9, b"metadata").unwrap();
     assert_eq!(

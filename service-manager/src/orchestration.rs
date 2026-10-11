@@ -2,13 +2,13 @@ use crate::service_config::FixedService;
 use mochi_user_platform::service_ready::SessionIdentity;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ChildProcesses<Input = u64> {
+pub(crate) struct ChildProcesses<Input = u64, Display = u64> {
     pub(crate) drivers: Option<u64>,
     pub(crate) mboot_agent: Option<u64>,
     pub(crate) filesystem: Option<u64>,
     pub(crate) posix: Option<u64>,
     pub(crate) input: Option<Input>,
-    pub(crate) display: Option<u64>,
+    pub(crate) display: Option<Display>,
     pub(crate) compositor: Option<u64>,
     pub(crate) network: Option<u64>,
     pub(crate) user: Option<u64>,
@@ -45,14 +45,14 @@ pub(crate) enum StopReason {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct BootstrapOutcome<Input = u64> {
-    pub(crate) children: ChildProcesses<Input>,
+pub(crate) struct BootstrapOutcome<Input = u64, Display = u64> {
+    pub(crate) children: ChildProcesses<Input, Display>,
     pub(crate) reason: StopReason,
     pub(crate) identity: Option<SessionIdentity>,
     pub(crate) session_id: u64,
 }
 
-impl<Input> BootstrapOutcome<Input> {
+impl<Input, Display> BootstrapOutcome<Input, Display> {
     pub(crate) const fn initialization_failed() -> Self {
         Self {
             children: ChildProcesses {
@@ -79,15 +79,17 @@ impl<Input> BootstrapOutcome<Input> {
     }
 }
 
-impl<Input> Default for ChildProcesses<Input> {
+impl<Input, Display> Default for ChildProcesses<Input, Display> {
     fn default() -> Self {
-        BootstrapOutcome::<Input>::initialization_failed().children
+        BootstrapOutcome::<Input, Display>::initialization_failed().children
     }
 }
 
 pub(crate) trait BootstrapOperations {
     type InputProcess;
+    type DisplayProcess;
     fn spawn_input(&mut self) -> Option<Self::InputProcess>;
+    fn spawn_display(&mut self) -> Option<Self::DisplayProcess>;
     fn spawn_drivers(&mut self) -> Option<u64>;
     fn wait_driver_hello(&mut self, process_id: u64) -> bool;
     fn spawn_mboot_agent(&mut self) -> Option<u64>;
@@ -100,7 +102,7 @@ pub(crate) trait BootstrapOperations {
         session_id: u64,
     ) -> Option<u64>;
     fn installation_required(&self) -> bool;
-    fn wait_display_ready(&mut self, process_id: u64) -> bool;
+    fn wait_display_ready(&mut self, process: &Self::DisplayProcess) -> bool;
     fn wait_filesystem_ready(&mut self, process_id: u64) -> bool;
     fn wait_posix_ready(&mut self, process_id: u64) -> bool;
     fn wait_input_ready(&mut self, process: &Self::InputProcess) -> bool;
@@ -123,7 +125,7 @@ const FIRST_BOOT_IDENTITY: SessionIdentity = SessionIdentity { uid: 0, gid: 0 };
 
 pub(crate) fn orchestrate<O: BootstrapOperations>(
     operations: &mut O,
-) -> BootstrapOutcome<O::InputProcess> {
+) -> BootstrapOutcome<O::InputProcess, O::DisplayProcess> {
     let mut children = ChildProcesses::default();
 
     let Some(filesystem) = operations.spawn_fixed(FixedService::Filesystem) else {
@@ -154,12 +156,12 @@ pub(crate) fn orchestrate<O: BootstrapOperations>(
         return outcome(children, StopReason::InputSpawnFailed);
     };
     children.input = Some(input);
-    let Some(display) = operations.spawn_fixed(FixedService::Display) else {
+    let Some(display) = operations.spawn_display() else {
         return outcome(children, StopReason::DisplaySpawnFailed);
     };
     children.display = Some(display);
 
-    if !operations.wait_display_ready(display) {
+    if !operations.wait_display_ready(children.display.as_ref().unwrap()) {
         return outcome(children, StopReason::DisplayReadyFailed);
     }
     if !operations.wait_input_ready(children.input.as_ref().unwrap()) {
@@ -240,10 +242,10 @@ pub(crate) fn orchestrate<O: BootstrapOperations>(
     }
 }
 
-const fn outcome<Input>(
-    children: ChildProcesses<Input>,
+const fn outcome<Input, Display>(
+    children: ChildProcesses<Input, Display>,
     reason: StopReason,
-) -> BootstrapOutcome<Input> {
+) -> BootstrapOutcome<Input, Display> {
     BootstrapOutcome {
         children,
         reason,
@@ -323,6 +325,11 @@ mod tests {
 
     impl BootstrapOperations for FakeOperations {
         type InputProcess = u64;
+        type DisplayProcess = u64;
+
+        fn spawn_display(&mut self) -> Option<Self::DisplayProcess> {
+            self.spawn_fixed(FixedService::Display)
+        }
 
         fn spawn_input(&mut self) -> Option<Self::InputProcess> {
             self.spawn_fixed(FixedService::Input)
@@ -399,7 +406,7 @@ mod tests {
             self.installation_required
         }
 
-        fn wait_display_ready(&mut self, _process_id: u64) -> bool {
+        fn wait_display_ready(&mut self, _process_id: &u64) -> bool {
             self.events.push(Event::WaitDisplay);
             self.failure != Failure::DisplayReady
         }

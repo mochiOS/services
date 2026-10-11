@@ -86,9 +86,8 @@ pub(crate) fn spawn_fixed_service(
     filesystem_endpoint: Option<platform::handle::Handle>,
     posix_endpoint: Option<platform::handle::Handle>,
 ) -> Result<u64, mochi_user_syscall::SysError> {
-    // Input has moved to explicit image/Process Handles. Never launch it via
-    // the legacy path if its native launch fails.
-    if service == FixedService::Input {
+    // Migrated services must not fall back to legacy pathname creation.
+    if matches!(service, FixedService::Input | FixedService::Display) {
         return Err(sys_error(mochi_user_syscall::EINVAL));
     }
     let ready_target = ready_target.map(|target| ReadyTarget {
@@ -108,10 +107,40 @@ pub(crate) fn spawn_input_service(
     ready_target: platform::service_ready::Target,
     posix_endpoint: platform::handle::Handle,
 ) -> Result<NativeProcess, mochi_user_syscall::SysError> {
-    use mochios_posix_client::{Client, ClientError, OpenAtBase, SyscallEndpointTransport};
-    let spec = fixed_service_spec(FixedService::Input);
-    let mut arguments = fixed_service_arguments(
+    spawn_native_fixed(
         FixedService::Input,
+        "input.service",
+        logger_endpoint,
+        ready_target,
+        posix_endpoint,
+    )
+}
+
+pub(crate) fn spawn_display_service(
+    logger_endpoint: u64,
+    ready_target: platform::service_ready::Target,
+    posix_endpoint: platform::handle::Handle,
+) -> Result<NativeProcess, mochi_user_syscall::SysError> {
+    spawn_native_fixed(
+        FixedService::Display,
+        "display.driver",
+        logger_endpoint,
+        ready_target,
+        posix_endpoint,
+    )
+}
+
+fn spawn_native_fixed(
+    service: FixedService,
+    label: &str,
+    logger_endpoint: u64,
+    ready_target: platform::service_ready::Target,
+    posix_endpoint: platform::handle::Handle,
+) -> Result<NativeProcess, mochi_user_syscall::SysError> {
+    use mochios_posix_client::{Client, ClientError, OpenAtBase, SyscallEndpointTransport};
+    let spec = fixed_service_spec(service);
+    let mut arguments = fixed_service_arguments(
+        service,
         logger_endpoint,
         Some(ReadyTarget {
             endpoint: ready_target.endpoint,
@@ -121,7 +150,7 @@ pub(crate) fn spawn_input_service(
     append_posix_handle(&mut arguments, Some(posix_endpoint));
     let mut random = [0; 16];
     platform::random::fill(&mut random)?;
-    let metadata = encode_native_launch(spec.path, "input.service", &arguments, random)
+    let metadata = encode_native_launch(spec.path, label, &arguments, random)
         .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
     let client = Client::new(SyscallEndpointTransport::new(posix_endpoint));
     let client_error = |error| match error {
