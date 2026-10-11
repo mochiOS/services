@@ -175,6 +175,28 @@ impl BootstrapOperations for Runtime {
     type DriversProcess = NativeProcess;
     type CompositorProcess = NativeProcess;
     type NetworkProcess = NativeProcess;
+    type UserProcess = NativeProcess;
+
+    fn spawn_user(&mut self) -> Option<Self::UserProcess> {
+        let endpoint = self.posix_endpoint?;
+        if !self.ensure_ready_handshake() {
+            return None;
+        }
+        let target = self.ready.as_ref()?.target(ReadyService::User);
+        match service_launcher::spawn_user_service(self.logger_endpoint, target, endpoint) {
+            Ok(process) => {
+                eprintln!("service-manager.service: user.service native process created");
+                Some(process)
+            }
+            Err(error) => {
+                eprintln!(
+                    "service-manager.service: user.service native spawn failed errno={}",
+                    errno(error)
+                );
+                None
+            }
+        }
+    }
 
     fn spawn_network(&mut self) -> Option<Self::NetworkProcess> {
         let endpoint = self.posix_endpoint?;
@@ -575,8 +597,12 @@ impl BootstrapOperations for Runtime {
         self.wait_ready(ReadyService::Input, process.watch_target())
     }
 
-    fn wait_user_ready(&mut self, process_id: u64) -> bool {
-        self.wait_ready(ReadyService::User, process_id)
+    fn wait_user_ready(&mut self, process: &Self::UserProcess) -> bool {
+        let ready = self.wait_ready(ReadyService::User, process.watch_target());
+        if ready {
+            eprintln!("service-manager.service: user.service native READY received");
+        }
+        ready
     }
 
     fn wait_secure_ui_login(
@@ -744,6 +770,7 @@ fn log_ready_error(service: ReadyService, error: ReadyError) {
 
 fn resident(
     outcome: BootstrapOutcome<
+        NativeProcess,
         NativeProcess,
         NativeProcess,
         NativeProcess,

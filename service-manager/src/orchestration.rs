@@ -8,6 +8,7 @@ pub(crate) struct ChildProcesses<
     Drivers = u64,
     Compositor = u64,
     Network = u64,
+    User = u64,
 > {
     pub(crate) drivers: Option<Drivers>,
     pub(crate) mboot_agent: Option<u64>,
@@ -17,7 +18,7 @@ pub(crate) struct ChildProcesses<
     pub(crate) display: Option<Display>,
     pub(crate) compositor: Option<Compositor>,
     pub(crate) network: Option<Network>,
-    pub(crate) user: Option<u64>,
+    pub(crate) user: Option<User>,
     pub(crate) secure_ui: Option<u64>,
     pub(crate) linux: Option<u64>,
     pub(crate) binder: Option<u64>,
@@ -57,15 +58,16 @@ pub(crate) struct BootstrapOutcome<
     Drivers = u64,
     Compositor = u64,
     Network = u64,
+    User = u64,
 > {
-    pub(crate) children: ChildProcesses<Input, Display, Drivers, Compositor, Network>,
+    pub(crate) children: ChildProcesses<Input, Display, Drivers, Compositor, Network, User>,
     pub(crate) reason: StopReason,
     pub(crate) identity: Option<SessionIdentity>,
     pub(crate) session_id: u64,
 }
 
-impl<Input, Display, Drivers, Compositor, Network>
-    BootstrapOutcome<Input, Display, Drivers, Compositor, Network>
+impl<Input, Display, Drivers, Compositor, Network, User>
+    BootstrapOutcome<Input, Display, Drivers, Compositor, Network, User>
 {
     pub(crate) const fn initialization_failed() -> Self {
         Self {
@@ -93,11 +95,11 @@ impl<Input, Display, Drivers, Compositor, Network>
     }
 }
 
-impl<Input, Display, Drivers, Compositor, Network> Default
-    for ChildProcesses<Input, Display, Drivers, Compositor, Network>
+impl<Input, Display, Drivers, Compositor, Network, User> Default
+    for ChildProcesses<Input, Display, Drivers, Compositor, Network, User>
 {
     fn default() -> Self {
-        BootstrapOutcome::<Input, Display, Drivers, Compositor, Network>::initialization_failed()
+        BootstrapOutcome::<Input, Display, Drivers, Compositor, Network, User>::initialization_failed()
             .children
     }
 }
@@ -108,6 +110,8 @@ pub(crate) trait BootstrapOperations {
     type DriversProcess;
     type CompositorProcess;
     type NetworkProcess;
+    type UserProcess;
+    fn spawn_user(&mut self) -> Option<Self::UserProcess>;
     fn spawn_network(&mut self) -> Option<Self::NetworkProcess>;
     fn spawn_compositor(&mut self) -> Option<Self::CompositorProcess>;
     fn spawn_input(&mut self) -> Option<Self::InputProcess>;
@@ -131,7 +135,7 @@ pub(crate) trait BootstrapOperations {
     fn start_discovery(&mut self) -> bool;
     fn wait_discovery_complete(&mut self, process: &Self::DriversProcess) -> bool;
     fn wait_network_ready(&mut self, process: &Self::NetworkProcess) -> bool;
-    fn wait_user_ready(&mut self, process_id: u64) -> bool;
+    fn wait_user_ready(&mut self, process: &Self::UserProcess) -> bool;
     fn wait_secure_ui_login(&mut self, process_id: u64) -> Option<SessionIdentity>;
     fn wait_binder_ready(&mut self, process_id: u64) -> bool;
 }
@@ -153,6 +157,7 @@ pub(crate) fn orchestrate<O: BootstrapOperations>(
     O::DriversProcess,
     O::CompositorProcess,
     O::NetworkProcess,
+    O::UserProcess,
 > {
     let mut children = ChildProcesses::default();
 
@@ -209,11 +214,11 @@ pub(crate) fn orchestrate<O: BootstrapOperations>(
     if children.network.is_some() {
         children.update = operations.spawn_fixed(FixedService::Update);
     }
-    let Some(user) = operations.spawn_fixed(FixedService::User) else {
+    let Some(user) = operations.spawn_user() else {
         return outcome(children, StopReason::UserSpawnFailed);
     };
     children.user = Some(user);
-    if !operations.wait_user_ready(user) {
+    if !operations.wait_user_ready(children.user.as_ref().unwrap()) {
         return outcome(children, StopReason::UserReadyFailed);
     }
 
@@ -270,10 +275,10 @@ pub(crate) fn orchestrate<O: BootstrapOperations>(
     }
 }
 
-const fn outcome<Input, Display, Drivers, Compositor, Network>(
-    children: ChildProcesses<Input, Display, Drivers, Compositor, Network>,
+const fn outcome<Input, Display, Drivers, Compositor, Network, User>(
+    children: ChildProcesses<Input, Display, Drivers, Compositor, Network, User>,
     reason: StopReason,
-) -> BootstrapOutcome<Input, Display, Drivers, Compositor, Network> {
+) -> BootstrapOutcome<Input, Display, Drivers, Compositor, Network, User> {
     BootstrapOutcome {
         children,
         reason,
@@ -357,6 +362,11 @@ mod tests {
         type DriversProcess = u64;
         type CompositorProcess = u64;
         type NetworkProcess = u64;
+        type UserProcess = u64;
+
+        fn spawn_user(&mut self) -> Option<Self::UserProcess> {
+            self.spawn_fixed(FixedService::User)
+        }
 
         fn spawn_network(&mut self) -> Option<Self::NetworkProcess> {
             self.spawn_fixed(FixedService::Network)
@@ -470,7 +480,7 @@ mod tests {
             self.failure != Failure::NetworkReady
         }
 
-        fn wait_user_ready(&mut self, _process_id: u64) -> bool {
+        fn wait_user_ready(&mut self, _process: &Self::UserProcess) -> bool {
             self.events.push(Event::WaitUser);
             self.failure != Failure::UserReady
         }

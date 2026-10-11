@@ -73,7 +73,7 @@ fn display_launch_and_readiness_use_retained_handles_without_legacy_fallback() {
     let orchestration = include_str!("../../service-manager/src/orchestration.rs");
     let fixed_spawn = &launcher[launcher.find("pub(crate) fn spawn_fixed_service(").unwrap()
         ..launcher.find("pub(crate) fn spawn_input_service(").unwrap()];
-    for native_only in ["Input", "Display", "Compositor", "Network"] {
+    for native_only in ["Input", "Display", "Compositor", "Network", "User"] {
         assert!(fixed_spawn.contains(&format!("FixedService::{native_only}")));
     }
     assert!(launcher.contains("FixedService::Display,\n        \"display.driver\""));
@@ -121,6 +121,23 @@ fn network_creation_and_readiness_use_native_owned_process_handles() {
     assert!(orchestration.contains("children.network = operations.spawn_network();"));
     assert!(orchestration.contains("children.network.as_ref()"));
     assert!(!orchestration.contains("children.network = operations.spawn_fixed("));
+}
+
+#[test]
+fn user_creation_and_readiness_use_native_owned_process_handles() {
+    let launcher = include_str!("../../service-manager/src/service_launcher.rs");
+    let start = launcher.find("pub(crate) fn spawn_user_service(").unwrap();
+    let end = start + launcher[start..].find("fn spawn_native_fixed(").unwrap();
+    assert!(launcher[start..end].contains("FixedService::User,\n        \"user.service\""));
+    assert!(launcher[start..end].contains("Result<NativeProcess,"));
+    let bootstrap = include_str!("../../service-manager/src/bootstrap.rs");
+    assert!(bootstrap.contains("type UserProcess = NativeProcess;"));
+    assert!(bootstrap.contains("self.wait_ready(ReadyService::User, process.watch_target())"));
+    let orchestration = include_str!("../../service-manager/src/orchestration.rs");
+    assert!(orchestration.contains("user: Option<User>"));
+    assert!(orchestration.contains("operations.spawn_user()"));
+    assert!(orchestration.contains("operations.wait_user_ready(children.user.as_ref().unwrap())"));
+    assert!(!orchestration.contains("operations.spawn_fixed(FixedService::User)"));
 }
 
 #[test]
