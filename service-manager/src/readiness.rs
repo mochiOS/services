@@ -2,8 +2,8 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use mochi_user_platform as platform;
 
-use crate::service_config::{NETWORK_READY_TIMEOUT_TICKS, SERVICE_READY_TIMEOUT_TICKS};
 use crate::process_watch::ProcessWatch;
+use crate::service_config::{NETWORK_READY_TIMEOUT_TICKS, SERVICE_READY_TIMEOUT_TICKS};
 const BOOTSTRAP_MESSAGE_LEN: usize = 1024;
 
 pub(crate) struct DeferredMessage {
@@ -48,7 +48,7 @@ pub(crate) enum ReadyError {
     ProcessExited(i32),
     Ipc(u64),
     Clock(u64),
-    ProcessStatus(u64),
+    ProcessStatus(crate::process_watch::ProcessWatchError),
 }
 
 pub(crate) struct ReadyHandshake {
@@ -286,8 +286,7 @@ impl ReadyHandshake {
         if !matches!(service, ReadyService::Filesystem | ReadyService::Posix) {
             return Err(ReadyError::InvalidMessage);
         }
-        let process = ProcessWatch::open(process_id)
-            .map_err(|error| ReadyError::ProcessStatus(error.raw().unsigned_abs()))?;
+        let process = ProcessWatch::open(process_id).map_err(ReadyError::ProcessStatus)?;
         let started = current_ticks()?;
         loop {
             if let Some(status) = self.status(service) {
@@ -326,10 +325,7 @@ impl ReadyHandshake {
                     }
                 }
             }
-            if let Some(status) = process
-                .exit_status()
-                .map_err(|error| ReadyError::ProcessStatus(error.raw().unsigned_abs()))?
-            {
+            if let Some(status) = process.exit_status().map_err(ReadyError::ProcessStatus)? {
                 return Err(ReadyError::ProcessExited(status));
             }
             if current_ticks()?.saturating_sub(started) >= ready_timeout(service) {
@@ -372,8 +368,7 @@ impl ReadyHandshake {
         &mut self,
         process_id: u64,
     ) -> Result<platform::service_ready::SessionIdentity, ReadyError> {
-        let process = ProcessWatch::open(process_id)
-            .map_err(|error| ReadyError::ProcessStatus(error.raw().unsigned_abs()))?;
+        let process = ProcessWatch::open(process_id).map_err(ReadyError::ProcessStatus)?;
         loop {
             if let Some(notification) = receive_notification()? {
                 match notification {
@@ -400,10 +395,7 @@ impl ReadyHandshake {
                     }
                 }
             }
-            if let Some(status) = process
-                .exit_status()
-                .map_err(|error| ReadyError::ProcessStatus(error.raw().unsigned_abs()))?
-            {
+            if let Some(status) = process.exit_status().map_err(ReadyError::ProcessStatus)? {
                 return Err(ReadyError::ProcessExited(status));
             }
             platform::thread::yield_now();
@@ -416,8 +408,7 @@ impl ReadyHandshake {
         process_id: u64,
         has_timeout: bool,
     ) -> Result<(), ReadyError> {
-        let process = ProcessWatch::open(process_id)
-            .map_err(|error| ReadyError::ProcessStatus(error.raw().unsigned_abs()))?;
+        let process = ProcessWatch::open(process_id).map_err(ReadyError::ProcessStatus)?;
         let started = has_timeout.then(current_ticks).transpose()?;
         let timeout = ready_timeout(service);
         loop {
@@ -457,10 +448,7 @@ impl ReadyHandshake {
             if let Some(status) = self.status(service) {
                 return ready_result(status);
             }
-            if let Some(status) = process
-                .exit_status()
-                .map_err(|error| ReadyError::ProcessStatus(error.raw().unsigned_abs()))?
-            {
+            if let Some(status) = process.exit_status().map_err(ReadyError::ProcessStatus)? {
                 return Err(ReadyError::ProcessExited(status));
             }
             if let Some(started) = started {

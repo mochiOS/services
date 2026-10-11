@@ -6,12 +6,19 @@ use std::sync::Mutex;
 #[derive(Debug, PartialEq, Eq)]
 pub struct SysError;
 
+impl SysError {
+    pub fn raw(&self) -> i64 {
+        -22
+    }
+}
+
 #[derive(Default)]
 struct State {
     inspected_thread: Option<u64>,
     requested: Option<(u64, u64)>,
     closed: Vec<u32>,
     exited: bool,
+    fail_stage: u8,
 }
 
 static STATE: Mutex<State> = Mutex::new(State {
@@ -19,6 +26,7 @@ static STATE: Mutex<State> = Mutex::new(State {
     requested: None,
     closed: Vec::new(),
     exited: false,
+    fail_stage: 0,
 });
 
 pub mod handle {
@@ -41,6 +49,9 @@ pub mod process {
             return Err(super::SysError);
         }
         super::STATE.lock().unwrap().inspected_thread = Some(thread);
+        if super::STATE.lock().unwrap().fail_stage == 1 {
+            return Err(super::SysError);
+        }
         Ok(mnu_abi::ThreadSecurityContext {
             process_id: 19,
             thread_id: thread,
@@ -56,11 +67,17 @@ pub mod process {
             return Err(super::SysError);
         }
         super::STATE.lock().unwrap().requested = Some((process_id, rights));
+        if super::STATE.lock().unwrap().fail_stage == 2 {
+            return Err(super::SysError);
+        }
         Ok(7)
     }
 
     pub fn handle_status(handle: u32) -> Result<mnu_abi::ProcessStatus, super::SysError> {
         assert_eq!(handle, 7);
+        if super::STATE.lock().unwrap().fail_stage == 3 {
+            return Err(super::SysError);
+        }
         Ok(mnu_abi::ProcessStatus {
             // An extra worker thread makes thread 42 belong to process 19.
             process_id: 19,
@@ -91,4 +108,30 @@ fn readiness_resolves_the_launch_thread_before_watching_its_process() {
     assert_eq!(watch.exit_status(), Ok(Some(127)));
     drop(watch);
     assert_eq!(STATE.lock().unwrap().closed, [7]);
+
+    // A vanished launch thread is not proof of successful process exit.
+    STATE.lock().unwrap().fail_stage = 1;
+    assert!(matches!(
+        production::ProcessWatch::open(42),
+        Err(production::ProcessWatchError::ResolveLaunchThread(22))
+    ));
+    assert_eq!(STATE.lock().unwrap().closed, [7]);
+
+    STATE.lock().unwrap().fail_stage = 2;
+    assert!(matches!(
+        production::ProcessWatch::open(42),
+        Err(production::ProcessWatchError::OpenProcess(22))
+    ));
+    assert_eq!(STATE.lock().unwrap().closed, [7]);
+
+    STATE.lock().unwrap().fail_stage = 0;
+    let watch = production::ProcessWatch::open(42).unwrap();
+    STATE.lock().unwrap().fail_stage = 3;
+    assert_eq!(
+        watch.exit_status(),
+        Err(production::ProcessWatchError::ReadStatus(22))
+    );
+    assert_eq!(production::ProcessWatchError::ReadStatus(22).errno(), 22);
+    drop(watch);
+    assert_eq!(STATE.lock().unwrap().closed, [7, 7]);
 }

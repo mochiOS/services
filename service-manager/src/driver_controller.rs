@@ -192,7 +192,7 @@ impl DriverController {
 #[cfg(not(test))]
 fn wait_for_message(process_id: u64, buffer: &mut [u8]) -> Result<usize, DriverControlError> {
     let process = ProcessWatch::open(process_id)
-        .map_err(|error| DriverControlError::ProcessStatus(error.raw().unsigned_abs()))?;
+        .map_err(|error| DriverControlError::ProcessStatus(error.errno()))?;
     let started = current_ticks()?;
     loop {
         match platform::ipc::try_wait(buffer) {
@@ -209,7 +209,7 @@ fn wait_for_message(process_id: u64, buffer: &mut [u8]) -> Result<usize, DriverC
         }
         if let Some(status) = process
             .exit_status()
-            .map_err(|error| DriverControlError::ProcessStatus(error.raw().unsigned_abs()))?
+            .map_err(|error| DriverControlError::ProcessStatus(error.errno()))?
         {
             return Err(DriverControlError::ProcessExited(status));
         }
