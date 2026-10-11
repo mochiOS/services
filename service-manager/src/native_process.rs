@@ -10,32 +10,15 @@ pub(crate) struct NativeProcess {
 }
 
 impl NativeProcess {
-    pub(crate) fn create_and_resume(
-        image: platform::handle::Handle,
-        metadata: &[u8],
-    ) -> Result<Self, platform::syscall::SysError> {
-        Self::create_with_setup(image, metadata, |_| Ok(()))
-    }
-
-    /// Initialize userspace state before allowing the new image to execute.
-    /// The callback receives this owner's creation reference, never a PID/FD
-    /// lookup. Failure terminates the stopped task and releases the reference.
-    pub(crate) fn create_with_setup(
-        image: platform::handle::Handle,
-        metadata: &[u8],
-        setup: impl FnOnce(platform::handle::Handle) -> Result<(), platform::syscall::SysError>,
-    ) -> Result<Self, platform::syscall::SysError> {
-        Self::create_with_rollback(image, metadata, setup, |_| {})
-    }
-
-    /// Roll back userspace registration when setup or resume fails. Rollback
-    /// runs after termination but before closing the owner's creation Handle,
-    /// including when a registration reply was lost. Preserve the first error.
+    /// Transfer the creation owner to rollback when setup or resume fails.
+    /// Termination is only a request: rollback must retain this owner until
+    /// native exit and userspace registration cleanup are confirmed. This also
+    /// covers a lost registration reply. Preserve the original launch error.
     pub(crate) fn create_with_rollback(
         image: platform::handle::Handle,
         metadata: &[u8],
         setup: impl FnOnce(platform::handle::Handle) -> Result<(), platform::syscall::SysError>,
-        rollback: impl FnOnce(platform::handle::Handle),
+        rollback: impl FnOnce(Self),
     ) -> Result<Self, platform::syscall::SysError> {
         let mut process = Self {
             handle: platform::process::create_stopped(image, metadata)?,
@@ -44,7 +27,7 @@ impl NativeProcess {
         };
         if let Err(error) = setup(process.handle) {
             process.terminate();
-            rollback(process.handle);
+            rollback(process);
             return Err(error);
         }
         // Resolve identity inside the launch transaction, while still stopped.
@@ -54,14 +37,14 @@ impl NativeProcess {
             Ok(status) => status.process_id,
             Err(error) => {
                 process.terminate();
-                rollback(process.handle);
+                rollback(process);
                 return Err(error);
             }
         };
         if let Err(error) = platform::process::resume_handle(process.handle) {
             // Creation published a stopped task; do not strand it on failure.
             let _ = platform::process::terminate_handle(process.handle, 127);
-            rollback(process.handle);
+            rollback(process);
             return Err(error);
         }
         Ok(process)
@@ -73,6 +56,25 @@ impl NativeProcess {
 
     pub(crate) fn terminate(&self) {
         let _ = platform::process::terminate_handle(self.handle, 127);
+    }
+
+    /// Retry rollback through this retained object, never a PID lookup. A
+    /// failed query or unconfirmed termination cannot discard registration.
+    pub(crate) fn retry_rollback(
+        &self,
+        reclaim: impl FnOnce(platform::handle::Handle) -> Result<(), platform::syscall::SysError>,
+    ) -> Result<(), platform::syscall::SysError> {
+        let mut status = platform::process::handle_status(self.handle)?;
+        if status.state != mnu_abi::PROCESS_STATE_EXITED {
+            platform::process::terminate_handle(self.handle, 127)?;
+            status = platform::process::handle_status(self.handle)?;
+            if status.state != mnu_abi::PROCESS_STATE_EXITED {
+                return Err(platform::syscall::SysError::from_raw(
+                    mnu_abi::EAGAIN as i64,
+                ));
+            }
+        }
+        reclaim(self.handle)
     }
 
     pub(crate) fn process_id(&self) -> u64 {

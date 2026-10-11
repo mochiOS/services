@@ -5,6 +5,11 @@ use std::sync::Mutex;
 pub mod syscall {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct SysError;
+    impl SysError {
+        pub fn from_raw(_: i64) -> Self {
+            Self
+        }
+    }
 }
 
 pub mod process_watch {
@@ -20,6 +25,9 @@ struct State {
     fail_resume: bool,
     fail_status: bool,
     status_calls: usize,
+    fail_terminate: bool,
+    termination_pending: bool,
+    exited: bool,
 }
 static STATE: Mutex<State> = Mutex::new(State {
     events: Vec::new(),
@@ -27,6 +35,9 @@ static STATE: Mutex<State> = Mutex::new(State {
     fail_resume: false,
     fail_status: false,
     status_calls: 0,
+    fail_terminate: false,
+    termination_pending: false,
+    exited: false,
 });
 
 pub mod handle {
@@ -42,6 +53,7 @@ pub mod handle {
 pub mod process {
     pub struct Status {
         pub process_id: u64,
+        pub state: u32,
     }
     pub fn handle_status(handle: u32) -> Result<Status, crate::syscall::SysError> {
         assert_eq!(handle, 7);
@@ -50,7 +62,14 @@ pub mod process {
         if state.fail_status {
             Err(crate::syscall::SysError)
         } else {
-            Ok(Status { process_id: 70 })
+            Ok(Status {
+                process_id: 70,
+                state: if state.exited {
+                    mnu_abi::PROCESS_STATE_EXITED
+                } else {
+                    mnu_abi::PROCESS_STATE_RUNNING
+                },
+            })
         }
     }
     pub fn create_stopped(image: u32, metadata: &[u8]) -> Result<u32, crate::syscall::SysError> {
@@ -76,7 +95,14 @@ pub mod process {
     }
     pub fn terminate_handle(handle: u32, code: u64) -> Result<(), crate::syscall::SysError> {
         assert_eq!((handle, code), (7, 127));
-        crate::STATE.lock().unwrap().events.push("terminate");
+        let mut state = crate::STATE.lock().unwrap();
+        state.events.push("terminate");
+        if state.fail_terminate {
+            return Err(crate::syscall::SysError);
+        }
+        if !state.termination_pending {
+            state.exited = true;
+        }
         Ok(())
     }
 }
@@ -129,7 +155,19 @@ fn fixed_services_register_userspace_posix_state_before_resume_with_rollback() {
         .filter(|character| !character.is_whitespace())
         .collect();
     assert!(compact.contains("client.register_spawned_child(ObjectHandleAttachment{handle,rights:mnu_abi::HANDLE_RIGHT_WAIT|mnu_abi::HANDLE_RIGHT_SIGNAL,},0,0,&[],)"));
-    assert!(compact.contains("client.abort_launched_child(ObjectHandleAttachment{handle,rights:mnu_abi::HANDLE_RIGHT_WAIT,})"));
+    assert!(native.contains("retain_failed_launch(process, posix_endpoint)"));
+    assert!(launcher.contains("pending.process.retry_rollback"));
+    let launcher_compact: String = launcher
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    assert!(launcher_compact.contains("pending.client.abort_launched_child"));
+    assert!(native.contains("if has_failed_launch_cleanup()"));
+    assert!(launcher.contains("FAILED_LAUNCHES.lock().unwrap().push_back(pending)"));
+    assert!(
+        include_str!("../../service-manager/src/bootstrap.rs")
+            .contains("service_launcher::retry_failed_launch_cleanup();")
+    );
     assert!(native.contains("close(image.handle)"));
 }
 
@@ -282,206 +320,141 @@ fn permission_server_uses_native_creation_and_an_explicit_send_handle() {
 }
 
 #[test]
-fn native_launch_owns_the_creation_reference_and_cleans_failed_resume() {
-    let mut process = production::NativeProcess::create_and_resume(9, b"metadata").unwrap();
-    assert!(!process.tree_exit_confirmed());
-    process.confirm_tree_exit();
-    assert!(process.tree_exit_confirmed());
+fn native_launch_transfers_failed_creation_owners_until_cleanup_is_confirmed() {
+    let mut state = STATE.lock().unwrap();
+    state.events.clear();
+    state.fail_create = false;
+    state.fail_resume = false;
+    state.fail_status = false;
+    state.fail_terminate = false;
+    state.termination_pending = false;
+    state.exited = false;
+    state.status_calls = 0;
+    drop(state);
+
+    let mut process = production::NativeProcess::create_with_rollback(
+        9,
+        b"metadata",
+        |_| Ok(()),
+        |_| panic!("successful launch"),
+    )
+    .unwrap();
     assert_eq!(process.process_id(), 70);
-    assert_eq!(
-        process.termination_attachment(),
-        mochios_posix_client::ObjectHandleAttachment {
-            handle: 7,
-            rights: mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_SIGNAL,
-        }
-    );
     assert_eq!(
         process.watch_target(),
         process_watch::ProcessWatchTarget::RetainedHandle(7)
     );
+    assert_eq!(process.termination_attachment().handle, 7);
+    assert!(!process.tree_exit_confirmed());
+    process.confirm_tree_exit();
+    assert!(process.tree_exit_confirmed());
     assert_eq!(STATE.lock().unwrap().events, ["create-stopped", "resume"]);
-    assert_eq!(STATE.lock().unwrap().status_calls, 1);
-    STATE.lock().unwrap().fail_status = true;
-    assert_eq!(process.process_id(), 70);
-    assert_eq!(STATE.lock().unwrap().status_calls, 1);
-    STATE.lock().unwrap().fail_status = false;
     drop(process);
     assert_eq!(
         STATE.lock().unwrap().events,
         ["create-stopped", "resume", "close"]
     );
-    {
-        let mut state = STATE.lock().unwrap();
-        state.events.clear();
-        state.fail_create = true;
-    }
-    assert!(production::NativeProcess::create_and_resume(9, b"metadata").is_err());
-    assert_eq!(STATE.lock().unwrap().events, ["create-stopped"]);
-    {
-        let mut state = STATE.lock().unwrap();
-        state.events.clear();
-        state.fail_create = false;
-        state.fail_resume = true;
-    }
-    assert!(production::NativeProcess::create_and_resume(9, b"metadata").is_err());
-    assert_eq!(
-        STATE.lock().unwrap().events,
-        ["create-stopped", "resume", "terminate", "close"]
-    );
-    {
-        let mut state = STATE.lock().unwrap();
-        state.events.clear();
-        state.fail_resume = false;
-    }
-    let process = production::NativeProcess::create_and_resume(9, b"metadata").unwrap();
-    process.terminate();
-    drop(process);
-    assert_eq!(
-        STATE.lock().unwrap().events,
-        ["create-stopped", "resume", "terminate", "close"]
-    );
-    STATE.lock().unwrap().events.clear();
-    let process = production::NativeProcess::create_with_setup(9, b"metadata", |handle| {
-        assert_eq!(handle, 7);
-        STATE.lock().unwrap().events.push("register-posix-state");
-        Ok(())
-    })
-    .unwrap();
-    assert_eq!(
-        STATE.lock().unwrap().events,
-        ["create-stopped", "register-posix-state", "resume"]
-    );
-    drop(process);
-    assert_eq!(
-        STATE.lock().unwrap().events,
-        ["create-stopped", "register-posix-state", "resume", "close"]
-    );
-    STATE.lock().unwrap().events.clear();
-    assert!(
-        production::NativeProcess::create_with_setup(9, b"metadata", |handle| {
-            assert_eq!(handle, 7);
-            STATE.lock().unwrap().events.push("register-posix-state");
-            Err(crate::syscall::SysError)
-        })
-        .is_err()
-    );
-    assert_eq!(
-        STATE.lock().unwrap().events,
-        [
-            "create-stopped",
-            "register-posix-state",
-            "terminate",
-            "close"
-        ]
-    );
-    for fail_resume in [false, true] {
+
+    for failure in 0..3 {
         {
             let mut state = STATE.lock().unwrap();
             state.events.clear();
-            state.fail_resume = fail_resume;
+            state.fail_resume = failure == 2;
+            state.fail_status = failure == 1;
+            state.fail_terminate = true;
+            state.exited = false;
         }
+        let mut retained = None;
         assert!(
             production::NativeProcess::create_with_rollback(
                 9,
                 b"metadata",
-                |handle| {
-                    assert_eq!(handle, 7);
+                |_| {
                     STATE.lock().unwrap().events.push("register-posix-state");
-                    if fail_resume {
-                        Ok(())
+                    if failure == 0 {
+                        Err(syscall::SysError)
                     } else {
-                        Err(crate::syscall::SysError)
+                        Ok(())
                     }
                 },
-                |handle| {
-                    assert_eq!(handle, 7);
-                    STATE.lock().unwrap().events.push("reclaim-posix-state");
-                },
+                |owner| retained = Some(owner),
             )
             .is_err()
         );
-        let expected = if fail_resume {
-            vec![
-                "create-stopped",
-                "register-posix-state",
-                "resume",
-                "terminate",
-                "reclaim-posix-state",
-                "close",
-            ]
-        } else {
-            vec![
-                "create-stopped",
-                "register-posix-state",
-                "terminate",
-                "reclaim-posix-state",
-                "close",
-            ]
-        };
-        assert_eq!(STATE.lock().unwrap().events, expected);
+        let process = retained.unwrap();
+        assert!(!STATE.lock().unwrap().events.contains(&"close"));
+        // Native failure must not even attempt userspace reclaim.
+        assert!(
+            process
+                .retry_rollback(|_| panic!("exit not confirmed"))
+                .is_err()
+        );
+        assert!(!STATE.lock().unwrap().events.contains(&"close"));
+        {
+            let mut state = STATE.lock().unwrap();
+            state.fail_status = false;
+            state.fail_terminate = false;
+            state.termination_pending = true;
+        }
+        assert!(
+            process
+                .retry_rollback(|_| panic!("termination is asynchronous"))
+                .is_err()
+        );
+        assert!(!STATE.lock().unwrap().events.contains(&"close"));
+        {
+            let mut state = STATE.lock().unwrap();
+            state.exited = true;
+            state.events.clear();
+        }
+        assert!(
+            process
+                .retry_rollback(|handle| {
+                    assert_eq!(handle, 7);
+                    STATE.lock().unwrap().events.push("reclaim-failed");
+                    Err(syscall::SysError)
+                })
+                .is_err()
+        );
+        assert_eq!(STATE.lock().unwrap().events, ["reclaim-failed"]);
+        process
+            .retry_rollback(|handle| {
+                assert_eq!(handle, 7);
+                STATE.lock().unwrap().events.push("reclaim-posix-state");
+                Ok(())
+            })
+            .unwrap();
+        // No repeat termination after confirmed exit, no early close.
+        assert_eq!(
+            STATE.lock().unwrap().events,
+            ["reclaim-failed", "reclaim-posix-state"]
+        );
+        drop(process);
+        assert_eq!(
+            STATE.lock().unwrap().events,
+            ["reclaim-failed", "reclaim-posix-state", "close"]
+        );
     }
     {
         let mut state = STATE.lock().unwrap();
         state.events.clear();
-        state.fail_resume = false;
         state.fail_create = true;
     }
     assert!(
         production::NativeProcess::create_with_rollback(
             9,
             b"metadata",
-            |_| panic!("no process to initialize"),
-            |_| panic!("no registration to reclaim"),
+            |_| panic!("no created process"),
+            |_| panic!("no owner to retain"),
         )
         .is_err()
     );
     assert_eq!(STATE.lock().unwrap().events, ["create-stopped"]);
-    {
-        let mut state = STATE.lock().unwrap();
-        state.events.clear();
-        state.fail_create = false;
-    }
-    let process = production::NativeProcess::create_with_rollback(
-        9,
-        b"metadata",
-        |_| {
-            STATE.lock().unwrap().events.push("register-posix-state");
-            Ok(())
-        },
-        |_| panic!("successful launch must not be reclaimed"),
-    )
-    .unwrap();
-    drop(process);
-    assert_eq!(
-        STATE.lock().unwrap().events,
-        ["create-stopped", "register-posix-state", "resume", "close"]
-    );
-    {
-        let mut state = STATE.lock().unwrap();
-        state.events.clear();
-        state.fail_status = true;
-    }
-    assert!(
-        production::NativeProcess::create_with_rollback(
-            9,
-            b"metadata",
-            |_| {
-                STATE.lock().unwrap().events.push("register-posix-state");
-                Ok(())
-            },
-            |_| STATE.lock().unwrap().events.push("reclaim-posix-state"),
-        )
-        .is_err()
-    );
-    assert_eq!(
-        STATE.lock().unwrap().events,
-        [
-            "create-stopped",
-            "register-posix-state",
-            "terminate",
-            "reclaim-posix-state",
-            "close"
-        ]
-    );
-    STATE.lock().unwrap().fail_status = false;
+    let mut state = STATE.lock().unwrap();
+    state.fail_create = false;
+    state.fail_resume = false;
+    state.fail_status = false;
+    state.fail_terminate = false;
+    state.termination_pending = false;
+    state.exited = false;
 }

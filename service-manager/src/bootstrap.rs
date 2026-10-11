@@ -43,7 +43,10 @@ struct PendingLogout {
 
 impl Runtime {
     fn login_next_session(&mut self, previous: ActiveSession) -> Option<ActiveSession> {
-        if self.failed_session_cleanup.is_some() || !self.unpublished_session_roots.is_empty() {
+        if self.failed_session_cleanup.is_some()
+            || !self.unpublished_session_roots.is_empty()
+            || service_launcher::has_failed_launch_cleanup()
+        {
             return None;
         }
         let session = self.launch_next_session(previous);
@@ -1007,6 +1010,7 @@ fn resident(
     }
     let mut pending_logout: Option<PendingLogout> = None;
     loop {
+        service_launcher::retry_failed_launch_cleanup();
         if let Some(runtime) = runtime.as_mut() {
             runtime.retry_failed_session_cleanup();
         }

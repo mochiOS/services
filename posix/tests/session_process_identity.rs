@@ -58,7 +58,12 @@ fn session_launcher_registers_credentials_before_resume_without_legacy_creation(
     assert!(compact.contains("client.register_spawned_child"));
     assert!(native.contains("identity.uid"));
     assert!(native.contains("identity.gid"));
-    assert!(native.contains("client.abort_launched_child"));
+    assert!(native.contains("retain_failed_launch(process, endpoint)"));
+    let launcher_compact: String = launcher
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    assert!(launcher_compact.contains("pending.client.abort_launched_child"));
     assert!(native.contains("close(image.handle)"));
     let runtime = include_str!("../../service-manager/src/bootstrap.rs");
     assert!(!runtime.contains("ActiveSession::from_launch_threads"));
