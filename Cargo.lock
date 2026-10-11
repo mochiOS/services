@@ -300,7 +300,7 @@ dependencies = [
  "mochios-filesystem-protocol",
  "mochios-posix-client",
  "mochios-posix-protocol",
- "mochios-signature-protocol",
+ "mochios-signature-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
  "sha2",
 ]
 
@@ -421,7 +421,7 @@ dependencies = [
  "mochi-user-platform",
  "mochi-user-syscall",
  "mochios-filesystem-protocol",
- "mochios-signature-protocol",
+ "mochios-signature-protocol 0.1.0",
  "sha2",
 ]
 
@@ -1413,6 +1413,8 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 [[package]]
 name = "libc"
 version = "0.2.190"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 
 [[package]]
 name = "libloading"
@@ -1634,10 +1636,12 @@ source = "git+https://github.com/mochiOS/syscalls#38b10ca1d8b95d8ad638e24a2f83ad
 [[package]]
 name = "mochios-linux-gui-protocol"
 version = "0.1.0"
+source = "git+https://github.com/mochiOS/syscalls?rev=814cb3f1f5e0dab5fc199f1de5a443bd61fe566e#814cb3f1f5e0dab5fc199f1de5a443bd61fe566e"
 
 [[package]]
 name = "mochios-linux-portal-protocol"
 version = "0.1.0"
+source = "git+https://github.com/mochiOS/syscalls#38b10ca1d8b95d8ad638e24a2f83adae6aa17034"
 
 [[package]]
 name = "mochios-mdriver-protocol"
@@ -1685,6 +1689,11 @@ name = "mochios-signature-protocol"
 version = "0.1.0"
 
 [[package]]
+name = "mochios-signature-protocol"
+version = "0.1.0"
+source = "git+https://github.com/mochiOS/syscalls#38b10ca1d8b95d8ad638e24a2f83adae6aa17034"
+
+[[package]]
 name = "mochios-system-image"
 version = "0.1.0"
 dependencies = [
@@ -1695,6 +1704,7 @@ dependencies = [
 [[package]]
 name = "mochios-tls-client"
 version = "0.1.0"
+source = "git+https://github.com/mochiOS/syscalls#38b10ca1d8b95d8ad638e24a2f83adae6aa17034"
 dependencies = [
  "getrandom 0.2.17",
  "mochi-user-platform",
@@ -1707,18 +1717,26 @@ dependencies = [
 [[package]]
 name = "mochios-user-database"
 version = "0.1.0"
+source = "git+https://github.com/mochiOS/syscalls#38b10ca1d8b95d8ad638e24a2f83adae6aa17034"
 
 [[package]]
 name = "mochios-user-protocol"
 version = "0.1.0"
 
 [[package]]
+name = "mochios-user-protocol"
+version = "0.1.0"
+source = "git+https://github.com/mochiOS/syscalls#38b10ca1d8b95d8ad638e24a2f83adae6aa17034"
+
+[[package]]
 name = "mochios-viewkit-gpu-protocol"
 version = "0.1.0"
+source = "git+https://github.com/mochiOS/syscalls#38b10ca1d8b95d8ad638e24a2f83adae6aa17034"
 
 [[package]]
 name = "mochios-virtio-gpu-protocol"
 version = "0.1.0"
+source = "git+https://github.com/mochiOS/syscalls#38b10ca1d8b95d8ad638e24a2f83adae6aa17034"
 
 [[package]]
 name = "mochios-workspace-protocol"
@@ -2229,7 +2247,7 @@ dependencies = [
  "mochios-package-protocol",
  "mochios-posix-client",
  "mochios-posix-protocol",
- "mochios-signature-protocol",
+ "mochios-signature-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
  "sha2",
 ]
 
@@ -2469,8 +2487,8 @@ dependencies = [
  "mochios-net-device-protocol 0.1.0",
  "mochios-posix-client",
  "mochios-posix-protocol",
- "mochios-signature-protocol",
- "mochios-user-protocol",
+ "mochios-signature-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
+ "mochios-user-protocol 0.1.0",
  "mochios-workspace-protocol",
  "sha2",
 ]
@@ -2937,7 +2955,7 @@ dependencies = [
  "mochios-linux-portal-protocol",
  "mochios-permission-prompt-protocol",
  "mochios-user-database",
- "mochios-user-protocol",
+ "mochios-user-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
  "viewkit",
 ]
 
@@ -3008,8 +3026,9 @@ dependencies = [
  "mochios-linux-portal-protocol",
  "mochios-package-protocol",
  "mochios-permission-prompt-protocol",
+ "mochios-posix-client",
  "mochios-posix-protocol",
- "mochios-signature-protocol",
+ "mochios-signature-protocol 0.1.0",
  "mochios-user-database",
 ]
 
@@ -3043,7 +3062,7 @@ dependencies = [
  "mochios-developer-ca-trust",
  "mochios-posix-client",
  "mochios-posix-protocol",
- "mochios-signature-protocol",
+ "mochios-signature-protocol 0.1.0",
  "serde_json",
  "sha2",
 ]
@@ -3534,7 +3553,7 @@ dependencies = [
  "mochios-developer-ca-trust",
  "mochios-http-client",
  "mochios-net-device-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
- "mochios-signature-protocol",
+ "mochios-signature-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
  "mochios-system-image",
  "serde",
  "serde_json",
@@ -3549,7 +3568,7 @@ dependencies = [
  "mochi-user-platform",
  "mochi-user-syscall",
  "mochios-user-database",
- "mochios-user-protocol",
+ "mochios-user-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
  "sha2",
  "zeroize",
 ]
@@ -3585,6 +3604,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "viewkit"
 version = "2.0.0"
+source = "git+https://github.com/mochiOS/viewkit#274ca526b435eba1263929f1c148f37fca90c07f"
 dependencies = [
  "bytemuck",
  "cosmic-text",
@@ -4552,11 +4572,3 @@ checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
 ]
-
-[[patch.unused]]
-name = "rustc-std-workspace-alloc"
-version = "1.99.0"
-
-[[patch.unused]]
-name = "rustc-std-workspace-std"
-version = "1.99.0"
