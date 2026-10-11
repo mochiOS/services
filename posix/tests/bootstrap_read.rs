@@ -576,6 +576,67 @@ fn bootstrap_client_rejects_corrupt_replies_and_propagates_transport_failure() {
 }
 
 #[test]
+fn bootstrap_client_short_reads_require_explicit_eof_and_errors_do_not_return_partial_data() {
+    use mochi_user_platform::syscall::SysError;
+    use mochios_filesystem_protocol as wire;
+    let mut pieces = [
+        b"ab".as_slice(),
+        b"c".as_slice(),
+        b"def".as_slice(),
+        b"".as_slice(),
+    ]
+    .into_iter();
+    let mut cursor = 0;
+    let mut client = bootstrap_file::Client::new(4, |_, request: &[u8], reply: &mut [u8]| {
+        let (request, _) = wire::decode(request).unwrap();
+        assert_eq!(request.offset, cursor);
+        let bytes = pieces.next().expect("stop after explicit EOF");
+        cursor += bytes.len() as u64;
+        Ok(wire::encode(
+            wire::Header {
+                opcode: wire::OP_STATUS,
+                request_id: request.request_id,
+                offset: cursor,
+                length: bytes.len() as u32,
+                flags: if bytes.is_empty() {
+                    wire::BOOTSTRAP_EOF
+                } else {
+                    0
+                },
+                ..wire::Header::default()
+            },
+            bytes,
+            reply,
+        )
+        .unwrap())
+    });
+    assert_eq!(client.read_file("/file", 10).unwrap(), b"abcdef");
+    assert!(pieces.next().is_none());
+    let mut calls = 0;
+    let mut client = bootstrap_file::Client::new(4, |_, request: &[u8], reply: &mut [u8]| {
+        calls += 1;
+        if calls > 1 {
+            return Err(SysError::from_raw(-13));
+        }
+        let (request, _) = wire::decode(request).unwrap();
+        Ok(wire::encode(
+            wire::Header {
+                opcode: wire::OP_STATUS,
+                request_id: request.request_id,
+                offset: 2,
+                length: 2,
+                ..wire::Header::default()
+            },
+            b"ab",
+            reply,
+        )
+        .unwrap())
+    });
+    assert_eq!(client.read_file("/file", 10).unwrap_err().raw(), -13);
+    assert_eq!(calls, 2);
+}
+
+#[test]
 #[ignore = "requires an existing out/artifacts/disk.img; never builds or boots the OS"]
 fn early_boot_reads_are_bounded_and_need_no_posix_endpoint() {
     let image =

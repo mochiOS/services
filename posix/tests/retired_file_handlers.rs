@@ -3,6 +3,14 @@ fn retired_posix_descriptor_and_stat_handlers_do_not_remain_in_the_kernel() {
     let filesystem = include_str!("../../../core/src/syscall/fs.rs");
     let dispatch = include_str!("../../../core/src/syscall/mod.rs");
     for name in [
+        "open",
+        "close",
+        "read",
+        "getdents64",
+        "file_open",
+        "file_close",
+        "file_read",
+        "file_read_dir",
         "fcntl",
         "dup",
         "dup2",

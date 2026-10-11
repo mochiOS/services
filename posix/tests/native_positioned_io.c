@@ -22,6 +22,11 @@ static int64_t native(uint64_t number, uint64_t a, uint64_t b, uint64_t c, uint6
 int main(void) {
     fprintf(stderr, "positioned-io: start\n");
     CHECK(native(565, 0, 0, 0, 0) == -38);
+    for (uint64_t number = 560; number <= 563; ++number) {
+        CHECK(native(number, 0, 0, 0, 0) == -38);
+    }
+    CHECK(native(569, 0, 0, 0, 0) == -38);
+    fprintf(stderr, "positioned-io: retired FileOpen/Close/Read/ReadDir ABI rejects calls ok\n");
     fprintf(stderr, "positioned-io: retired FileSeek ABI rejects calls ok\n");
     int64_t object = native(MEMORY_OBJECT_CREATE, 8192, 0, 0, 0);
     CHECK(object > 0);
@@ -47,11 +52,6 @@ int main(void) {
     int fd = open(path, O_RDWR | O_CREAT | O_EXCL, 0600);
     CHECK(fd >= 0);
     CHECK(write(fd, "abcdef", 6) == 6);
-    int64_t bootstrap_fd = native(560, (uint64_t)path, 0, 0, 0);
-    CHECK(bootstrap_fd >= 0);
-    CHECK(native(569, bootstrap_fd, (uint64_t)actual, sizeof(actual), 0) == -20);
-    CHECK(native(562, bootstrap_fd, 0, 0, 0) == 0);
-    fprintf(stderr, "positioned-io: bootstrap directory read rejects regular files with ENOTDIR ok\n");
     CHECK(lseek(fd, 2, SEEK_SET) == 2);
     CHECK(fcntl(fd, F_SETFD, FD_CLOEXEC) == 0);
     int duplicate = dup(fd);
