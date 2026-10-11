@@ -38,7 +38,10 @@ fn creation_metadata_is_relocatable_and_has_no_foreign_pid_or_fd() {
     let request = wire::decode(&bytes).unwrap();
     assert_eq!(request.identity, "opaque identity");
     assert_eq!(request.label, "display label");
-    assert_eq!(request.startup.stack(), [0; 32]);
+    let wire::InitialState::Image(startup) = request.startup else {
+        panic!("expected image")
+    };
+    assert_eq!(startup.stack(), [0; 32]);
     assert_eq!(request.handles().collect::<Vec<_>>(), handles);
     assert_eq!(request.values().collect::<Vec<_>>(), values);
     // Handle and value keys are independent opaque namespaces.
@@ -46,6 +49,113 @@ fn creation_metadata_is_relocatable_and_has_no_foreign_pid_or_fd() {
         request.handles().next().unwrap().key,
         request.values().next().unwrap().key
     );
+}
+
+fn explicit_context() -> mnu_abi::ThreadCreateContext {
+    mnu_abi::ThreadCreateContext {
+        entry: 0x12345000,
+        stack_pointer: 0x56789000,
+        argument: 0xabcdef0123456789,
+        thread_local_base: 0x45678000,
+        registers: mnu_abi::ThreadInitialRegisters {
+            rax: 1,
+            rbx: 2,
+            rcx: 3,
+            rdx: 4,
+            rsi: 5,
+            rbp: 6,
+            r8: 7,
+            r9: 8,
+            r10: 9,
+            r11: 10,
+            r12: 11,
+            r13: 12,
+            r14: 13,
+            r15: 14,
+        },
+        ..Default::default()
+    }
+}
+
+#[test]
+fn context_creation_roundtrips_all_registers_and_explicit_grants() {
+    assert_eq!(
+        wire::CONTEXT_LEN,
+        core::mem::size_of::<mnu_abi::ThreadCreateContext>()
+    );
+    let context = explicit_context();
+    let handles = [HandleGrant {
+        key: 19,
+        source: 3,
+        rights: 1,
+    }];
+    let values = [Value {
+        key: 20,
+        value: u64::MAX,
+    }];
+    let mut bytes = vec![0; wire::MAX_REQUEST_BYTES];
+    let length =
+        wire::encode_context("identity", "label", &context, &handles, &values, &mut bytes).unwrap();
+    let request = wire::decode(&bytes[..length]).unwrap();
+    assert_eq!(request.startup, wire::InitialState::Context(context));
+    assert_eq!(request.handles().collect::<Vec<_>>(), handles);
+    assert_eq!(request.values().collect::<Vec<_>>(), values);
+    let start = wire::HEADER_LEN + "identity".len() + "label".len();
+    assert_eq!(&bytes[start..start + 8], &context.entry.to_le_bytes());
+    assert_eq!(
+        &bytes[start + 64..start + 72],
+        &context.registers.rax.to_le_bytes()
+    );
+    assert_eq!(
+        &bytes[start + 168..start + 176],
+        &context.registers.r15.to_le_bytes()
+    );
+}
+
+#[test]
+fn context_has_no_privileged_flags_reserved_words_or_ambiguous_image_form() {
+    let context = explicit_context();
+    let mut bytes = vec![0; wire::MAX_REQUEST_BYTES];
+    for field in 0..6 {
+        let mut invalid = context;
+        match field {
+            0 => invalid.entry = 0,
+            1 => invalid.stack_pointer = 15,
+            2 => invalid.flags = 0x3000,
+            index => invalid.reserved[index - 3] = 1,
+        }
+        assert_eq!(
+            wire::encode_context("x", "y", &invalid, &[], &[], &mut bytes),
+            Err(Error::Startup)
+        );
+    }
+    let length = wire::encode_context("x", "y", &context, &[], &[], &mut bytes).unwrap();
+    for truncated in 0..length {
+        assert!(wire::decode(&bytes[..truncated]).is_err());
+    }
+    bytes[28..32].copy_from_slice(&0u32.to_le_bytes());
+    assert!(wire::decode(&bytes[..length]).is_err());
+    bytes[28..32].copy_from_slice(&2u32.to_le_bytes());
+    assert!(matches!(wire::decode(&bytes[..length]), Err(Error::Header)));
+    let mut image = metadata(&[], &[]);
+    image[28..32].copy_from_slice(&1u32.to_le_bytes());
+    assert!(matches!(wire::decode(&image), Err(Error::Startup)));
+}
+
+#[test]
+fn unconnected_context_path_rejects_before_consuming_authorization() {
+    let exec = include_str!("../../../core/src/syscall/exec.rs");
+    let native = &exec[exec.find("pub fn process_create_syscall(").unwrap()..];
+    let reject = native
+        .find("InitialState::Context(_) => return crate::syscall::types::ENOTSUP")
+        .unwrap();
+    assert!(
+        reject
+            < native
+                .find("take_exec_authorization(request.identity, thread)")
+                .unwrap()
+    );
+    assert!(reject < native.find("read_all(image_handle").unwrap());
 }
 
 #[test]
@@ -211,7 +321,7 @@ fn creation_backend_retains_before_publication_and_never_weakens_grants() {
         "read_all(image_handle",
         "authorization.executable_digest",
         "export_inherited_handles(Some(owner), &specs)",
-        "Some(request.startup)",
+        "Some(startup)",
     ] {
         assert!(native.contains(required));
     }

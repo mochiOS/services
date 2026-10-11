@@ -53,7 +53,10 @@ fn native_launch_builds_argv_env_and_inheritance_in_user_space() {
             value: u64::MAX,
         }]
     );
-    let stack = request.startup.stack();
+    let mnu_abi::process_create::InitialState::Image(startup) = request.startup else {
+        panic!("expected image")
+    };
+    let stack = startup.stack();
     assert_eq!(stack_word(stack, 0), 3);
     assert_eq!(stack_text(stack, stack_word(stack, 1)), b"example.service");
     assert_eq!(stack_text(stack, stack_word(stack, 2)), b"argument");

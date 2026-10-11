@@ -37,9 +37,11 @@ fn application_metadata_inherits_only_the_locally_owned_attached_endpoint() {
         }]
     );
     assert!(request.values().next().is_none());
+    let mnu_abi::process_create::InitialState::Image(startup) = request.startup else {
+        panic!("expected image")
+    };
     assert!(
-        !request
-            .startup
+        !startup
             .stack()
             .windows(11)
             .any(|part| part == b"__MNU_EXEC_")
