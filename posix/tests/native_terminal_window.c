@@ -189,6 +189,14 @@ static void *signal_then_make_readable(void *context) {
     return NULL;
 }
 
+static void *continue_then_interrupt(void *unused) {
+    (void)unused;
+    struct timespec pause = {0, 50000000};
+    if (nanosleep(&pause, NULL) != 0 || kill(getpid(), SIGCONT) != 0)
+        return (void *)(uintptr_t)1;
+    return interrupt_handle_wait(NULL);
+}
+
 #define CHECK(condition) do { \
     if (!(condition)) { \
         char message[128]; \
@@ -634,6 +642,28 @@ int main(void) {
         CHECK(close(pipes[0]) == 0 && close(pipes[1]) == 0);
     }
     debug("native-terminal-window: pselect/ppoll masks, pending entry and restoration passed\n");
+    for (unsigned restart = 0; restart < 2; ++restart) {
+        action.sa_flags = restart ? SA_RESTART : 0;
+        CHECK(sigaction(SIGUSR1, &action, NULL) == 0);
+        sig_atomic_t before = atomic_load(&waited_signal);
+        CHECK(pthread_create(&writer, NULL, continue_then_interrupt, NULL) == 0);
+        errno = 0;
+        CHECK(pause() == -1 && errno == EINTR && atomic_load(&waited_signal) == before + 1);
+        CHECK(pthread_join(writer, &worker_result) == 0 && worker_result == NULL);
+        CHECK(pthread_sigmask(SIG_SETMASK, NULL, &restored_mask) == 0);
+        CHECK(memcmp(&restored_mask, &original_mask, sizeof(restored_mask)) == 0);
+        CHECK(pthread_sigmask(SIG_BLOCK, &block_user, NULL) == 0);
+        before = atomic_load(&waited_signal);
+        CHECK(raise(SIGUSR1) == 0 && atomic_load(&waited_signal) == before);
+        errno = 0;
+        CHECK(sigsuspend(&empty_mask) == -1 && errno == EINTR && atomic_load(&waited_signal) == before + 1);
+        CHECK(pthread_sigmask(SIG_SETMASK, NULL, &restored_mask) == 0);
+        CHECK(sigismember(&restored_mask, SIGUSR1) == 1);
+        CHECK(pthread_sigmask(SIG_SETMASK, &original_mask, NULL) == 0);
+    }
+    errno = 0;
+    CHECK(sigsuspend(NULL) == -1 && errno == EFAULT);
+    debug("native-terminal-window: pause/sigsuspend handlers and mask restoration passed\n");
     struct sigaction pipe_action;
     memset(&pipe_action, 0, sizeof(pipe_action));
     pipe_action.sa_handler = on_pipe;
@@ -675,7 +705,7 @@ int main(void) {
     CHECK(waitpid(broken_child, &broken_status, 0) == broken_child);
     CHECK(WIFSIGNALED(broken_status) && WTERMSIG(broken_status) == SIGPIPE);
     CHECK(close(pipes[1]) == 0);
-    debug("native-terminal-window: PASS masked multiplex waits, SIGPIPE and terminal regressions\n");
+    debug("native-terminal-window: PASS signal suspension, masked waits and terminal regressions\n");
     CHECK(close(master) == 0);
     return 0;
 }
