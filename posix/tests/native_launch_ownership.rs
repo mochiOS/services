@@ -156,14 +156,15 @@ fn fixed_services_register_userspace_posix_state_before_resume_with_rollback() {
         .collect();
     assert!(compact.contains("client.register_spawned_child(ObjectHandleAttachment{handle,rights:mnu_abi::HANDLE_RIGHT_WAIT|mnu_abi::HANDLE_RIGHT_SIGNAL,},0,0,&[],)"));
     assert!(native.contains("retain_failed_launch(process, posix_endpoint)"));
-    assert!(launcher.contains("pending.process.retry_rollback"));
-    let launcher_compact: String = launcher
+    let rollback = include_str!("../../service-manager/src/launch_rollback.rs");
+    assert!(rollback.contains("pending.process.retry_rollback"));
+    let launcher_compact: String = rollback
         .chars()
         .filter(|character| !character.is_whitespace())
         .collect();
     assert!(launcher_compact.contains("pending.client.abort_launched_child"));
     assert!(native.contains("if has_failed_launch_cleanup()"));
-    assert!(launcher.contains("FAILED_LAUNCHES.lock().unwrap().push_back(pending)"));
+    assert!(rollback.contains("FAILED_LAUNCHES.lock().unwrap().push_back(pending)"));
     assert!(
         include_str!("../../service-manager/src/bootstrap.rs")
             .contains("service_launcher::retry_failed_launch_cleanup();")

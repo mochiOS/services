@@ -6,6 +6,7 @@ extern crate alloc;
 mod bootstrap;
 mod driver_controller;
 mod launch_arguments;
+mod launch_rollback;
 mod native_process;
 mod orchestration;
 mod portal;

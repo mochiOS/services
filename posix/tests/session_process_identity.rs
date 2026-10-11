@@ -59,7 +59,7 @@ fn session_launcher_registers_credentials_before_resume_without_legacy_creation(
     assert!(native.contains("identity.uid"));
     assert!(native.contains("identity.gid"));
     assert!(native.contains("retain_failed_launch(process, endpoint)"));
-    let launcher_compact: String = launcher
+    let launcher_compact: String = include_str!("../../service-manager/src/launch_rollback.rs")
         .chars()
         .filter(|character| !character.is_whitespace())
         .collect();
