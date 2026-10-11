@@ -762,7 +762,9 @@ pub fn handle_provider_request(
                 header.length as usize,
             )
             .map(|data| (data.len() as u64, data)),
-        _ => unreachable!("provider decoder rejects unknown operations"),
+        // The generic decoder also accepts optional file/pager operations.
+        // A terminal is a byte stream, not a file-backed memory object.
+        _ => Err(ENOTSUP),
     };
     let (status, value, data) = match result {
         Ok((value, data)) => (0, value, data),
