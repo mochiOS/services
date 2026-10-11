@@ -20,9 +20,30 @@ struct Runtime {
     iommu_warning: Option<NativeProcess>,
     filesystem_endpoint: Option<platform::handle::Handle>,
     posix_endpoint: Option<platform::handle::Handle>,
+    session_processes: alloc::collections::BTreeMap<u64, NativeProcess>,
 }
 
 impl Runtime {
+    fn launch_session_image(
+        &mut self,
+        service: FixedService,
+        identity: platform::service_ready::SessionIdentity,
+        session_id: u64,
+        target: Option<platform::service_ready::Target>,
+    ) -> Result<u64, mochi_user_syscall::SysError> {
+        let process = service_launcher::spawn_user_session(
+            service,
+            self.logger_endpoint,
+            identity,
+            session_id,
+            target,
+            self.posix_endpoint,
+        )?;
+        let id = process.process_id()?;
+        self.session_processes.insert(id, process);
+        Ok(id)
+    }
+
     fn create(logger_endpoint: u64) -> Result<Self, DriverControlError> {
         Ok(Self {
             logger_endpoint,
@@ -34,6 +55,7 @@ impl Runtime {
             iommu_warning: None,
             filesystem_endpoint: None,
             posix_endpoint: None,
+            session_processes: alloc::collections::BTreeMap::new(),
         })
     }
 
@@ -104,13 +126,11 @@ impl Runtime {
             .ready
             .as_ref()
             .map(|handshake| handshake.target(ReadyService::Workspace))?;
-        let process_id = match service_launcher::spawn_user_session(
+        let process_id = match self.launch_session_image(
             FixedService::Workspace,
-            self.logger_endpoint,
             identity,
             session_id,
             Some(target),
-            self.posix_endpoint,
         ) {
             Ok(process_id) => process_id,
             Err(error) => {
@@ -125,7 +145,8 @@ impl Runtime {
             "service-manager.service: workspace.service spawned pid={}",
             process_id
         );
-        let ready = self.wait_ready(ReadyService::Workspace, process_id);
+        let watch = self.session_processes.get(&process_id)?.watch_target();
+        let ready = self.wait_ready(ReadyService::Workspace, watch);
         if owns_handshake {
             if let Some(handshake) = self.ready.as_mut() {
                 self.deferred_requests.extend(handshake.take_deferred());
@@ -529,14 +550,7 @@ impl BootstrapOperations for Runtime {
         } else {
             None
         };
-        match service_launcher::spawn_user_session(
-            service,
-            self.logger_endpoint,
-            identity,
-            session_id,
-            ready_target,
-            self.posix_endpoint,
-        ) {
+        match self.launch_session_image(service, identity, session_id, ready_target) {
             Ok(process_id) => {
                 platform::logln!(
                     "service-manager.service: {} spawned pid={}",
@@ -565,7 +579,10 @@ impl BootstrapOperations for Runtime {
     }
 
     fn wait_binder_ready(&mut self, process_id: u64) -> bool {
-        self.wait_ready(ReadyService::Binder, process_id)
+        let Some(process) = self.session_processes.get(&process_id) else {
+            return false;
+        };
+        self.wait_ready(ReadyService::Binder, process.watch_target())
     }
 
     fn wait_filesystem_ready(&mut self, process_id: u64) -> bool {
@@ -836,7 +853,7 @@ fn resident(
         .zip(outcome.children.binder)
         .zip(outcome.children.workspace)
         .and_then(|((identity, binder_thread), workspace_thread)| {
-            ActiveSession::from_launch_threads(
+            ActiveSession::from_process_ids(
                 outcome.session_id,
                 identity,
                 outcome.children.linux,
@@ -972,25 +989,13 @@ fn resident(
                 else {
                     continue;
                 };
-                let linux_pid = service_launcher::spawn_user_session(
-                    FixedService::Linux,
-                    runtime.logger_endpoint,
-                    identity,
-                    session_id,
-                    None,
-                    runtime.posix_endpoint,
-                )
-                .ok();
-                match service_launcher::spawn_user_session(
-                    FixedService::Binder,
-                    runtime.logger_endpoint,
-                    identity,
-                    session_id,
-                    None,
-                    runtime.posix_endpoint,
-                ) {
+                let linux_pid = runtime
+                    .launch_session_image(FixedService::Linux, identity, session_id, None)
+                    .ok();
+                match runtime.launch_session_image(FixedService::Binder, identity, session_id, None)
+                {
                     Ok(binder_thread) => {
-                        active_session = ActiveSession::from_launch_threads(
+                        active_session = ActiveSession::from_process_ids(
                             session_id,
                             identity,
                             linux_pid,

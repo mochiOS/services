@@ -35,6 +35,13 @@ pub mod handle {
 }
 
 pub mod process {
+    pub struct Status {
+        pub process_id: u64,
+    }
+    pub fn handle_status(handle: u32) -> Result<Status, crate::syscall::SysError> {
+        assert_eq!(handle, 7);
+        Ok(Status { process_id: 70 })
+    }
     pub fn create_stopped(image: u32, metadata: &[u8]) -> Result<u32, crate::syscall::SysError> {
         assert_eq!(image, 9);
         assert_eq!(metadata, b"metadata");
@@ -243,6 +250,7 @@ fn permission_server_uses_native_creation_and_an_explicit_send_handle() {
 #[test]
 fn native_launch_owns_the_creation_reference_and_cleans_failed_resume() {
     let process = production::NativeProcess::create_and_resume(9, b"metadata").unwrap();
+    assert_eq!(process.process_id().unwrap(), 70);
     assert_eq!(
         process.watch_target(),
         process_watch::ProcessWatchTarget::RetainedHandle(7)

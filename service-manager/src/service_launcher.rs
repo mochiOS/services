@@ -45,30 +45,6 @@ fn spawn(
     )
 }
 
-fn spawn_with_credentials(
-    spec: ServiceSpec,
-    arguments: &[alloc::string::String],
-    identity: platform::service_ready::SessionIdentity,
-) -> Result<u64, mochi_user_syscall::SysError> {
-    let mut arguments = arguments.to_vec();
-    let security = resolve_execution_security(spec.path, spec.execution_class)?;
-    if spec.security_identity {
-        for identity_item in security.identity.into_iter().rev() {
-            arguments.insert(0, identity_item);
-        }
-    }
-    let arguments =
-        encode_spawn_args(&arguments).map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
-    platform::service::spawn_manifest_with_credentials(
-        spec.path,
-        spec.execution_class,
-        identity.uid,
-        identity.gid,
-        Some(arguments.as_slice()),
-        Some(security.capabilities.as_slice()),
-    )
-}
-
 pub(crate) fn spawn_drivers(
     logger_endpoint: u64,
     manager: DriverManagerTarget,
@@ -270,7 +246,7 @@ pub(crate) fn spawn_user_session(
     session_id: u64,
     ready_target: Option<platform::service_ready::Target>,
     posix_endpoint: Option<platform::handle::Handle>,
-) -> Result<u64, mochi_user_syscall::SysError> {
+) -> Result<NativeProcess, mochi_user_syscall::SysError> {
     let ready_target = ready_target.map(|target| ReadyTarget {
         endpoint: target.endpoint,
         token: target.token,
@@ -291,7 +267,76 @@ pub(crate) fn spawn_user_session(
             "{ENVIRONMENT_PREFIX}MOCHI_SESSION_ID={session_id}"
         ));
     }
-    spawn_with_credentials(fixed_service_spec(service), &arguments, identity)
+    let endpoint = posix_endpoint
+        .filter(|endpoint| *endpoint != 0)
+        .ok_or_else(|| sys_error(mochi_user_syscall::EINVAL))?;
+    spawn_native_session(fixed_service_spec(service), &arguments, identity, endpoint)
+}
+
+fn spawn_native_session(
+    spec: ServiceSpec,
+    arguments: &[String],
+    identity: platform::service_ready::SessionIdentity,
+    endpoint: platform::handle::Handle,
+) -> Result<NativeProcess, mochi_user_syscall::SysError> {
+    use mochios_posix_client::{
+        Client, ClientError, ObjectHandleAttachment, OpenAtBase, SyscallEndpointTransport,
+    };
+    let client = Client::new(SyscallEndpointTransport::new(endpoint));
+    let convert = |error| match error {
+        ClientError::Transport(error) => error,
+        ClientError::Remote(errno) => sys_error(errno.unsigned_abs() as u64),
+        _ => sys_error(mochi_user_syscall::EIO),
+    };
+    client.register_session().map_err(convert)?;
+    let mut random = [0; 16];
+    platform::random::fill(&mut random)?;
+    let label = spec
+        .path
+        .rsplit('/')
+        .find(|part| part.ends_with(".app"))
+        .or_else(|| spec.path.rsplit('/').next())
+        .unwrap_or("session");
+    let metadata = encode_native_launch(spec.path, label, arguments, random)
+        .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
+    let image = client
+        .open_at(
+            OpenAtBase::ProcessRoot,
+            mochios_posix_protocol::OPEN_READ,
+            0,
+            spec.path,
+        )
+        .map_err(convert)?;
+    let result = (|| {
+        resolve_execution_security(spec.path, spec.execution_class)?;
+        NativeProcess::create_with_rollback(
+            image.handle,
+            &metadata,
+            |handle| {
+                client
+                    .register_spawned_child(
+                        ObjectHandleAttachment {
+                            handle,
+                            rights: mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_SIGNAL,
+                        },
+                        identity.uid,
+                        identity.gid,
+                        &[],
+                    )
+                    .map_err(convert)
+            },
+            |handle| {
+                if let Err(error) = client.abort_launched_child(ObjectHandleAttachment {
+                    handle,
+                    rights: mnu_abi::HANDLE_RIGHT_WAIT,
+                }) {
+                    platform::logln!("service-manager.service: session rollback failed: {error:?}");
+                }
+            },
+        )
+    })();
+    let _ = platform::handle::close(image.handle);
+    result
 }
 
 fn append_posix_handle(arguments: &mut Vec<String>, endpoint: Option<platform::handle::Handle>) {

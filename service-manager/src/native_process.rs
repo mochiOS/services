@@ -59,6 +59,10 @@ impl NativeProcess {
     pub(crate) fn terminate(&self) {
         let _ = platform::process::terminate_handle(self.handle, 127);
     }
+
+    pub(crate) fn process_id(&self) -> Result<u64, platform::syscall::SysError> {
+        Ok(platform::process::handle_status(self.handle)?.process_id)
+    }
 }
 
 impl Drop for NativeProcess {
