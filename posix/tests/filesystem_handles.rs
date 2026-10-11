@@ -338,6 +338,18 @@ fn pager_positioned_io_does_not_change_the_open_description_offset() {
         filesystem.provider_read_at(open_id, 0, 8).unwrap(),
         b"ZXcdefgh"
     );
+    assert_eq!(filesystem.provider_read_at(open_id, u64::MAX, 1), Err(27));
+    assert_eq!(
+        filesystem.provider_write_at(open_id, u64::MAX, b"!"),
+        Err(27)
+    );
+    assert_eq!(
+        filesystem.provider_read_at(open_id, 0, 8).unwrap(),
+        b"ZXcdefgh"
+    );
+    // Neither positioned operation, including its rejected range, changes
+    // the sequential cursor left at 2 by the write above.
+    assert_eq!(filesystem.provider_read(open_id, 2).unwrap(), b"cd");
 }
 
 #[test]

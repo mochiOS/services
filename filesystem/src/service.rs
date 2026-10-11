@@ -1284,17 +1284,11 @@ impl FilesystemService {
         let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
         let file = open.file.as_mut().ok_or(EISDIR)?;
         let mut payload = vec![0u8; length.min(mnu_abi::provider::MAX_DATA_LEN)];
-        let mut done = 0usize;
-        while done < payload.len() {
-            let position = offset.checked_add(done as u64).ok_or(EFBIG)?;
-            let count = file
-                .read_bytes_at(&mut payload[done..], position)
-                .map_err(errno)?;
-            if count == 0 {
-                break;
-            }
-            done += count;
-        }
+        let done =
+            crate::positioned_io::transfer(offset, payload.len(), false, |done, position, _| {
+                file.read_bytes_at(&mut payload[done..], position)
+                    .map_err(errno)
+            })?;
         payload.truncate(done);
         Ok(payload)
     }
@@ -1310,18 +1304,10 @@ impl FilesystemService {
         }
         let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
         let file = open.file.as_mut().ok_or(EISDIR)?;
-        let mut done = 0usize;
-        while done < payload.len() {
-            let position = offset.checked_add(done as u64).ok_or(EFBIG)?;
-            let count = file
-                .write_bytes_at(&payload[done..], position)
-                .map_err(errno)?;
-            if count == 0 {
-                return Err(EIO);
-            }
-            done += count;
-        }
-        Ok(done)
+        crate::positioned_io::transfer(offset, payload.len(), true, |done, position, _| {
+            file.write_bytes_at(&payload[done..], position)
+                .map_err(errno)
+        })
     }
 
     pub fn provider_sync(&self, open_id: u64) -> Result<(), i32> {
