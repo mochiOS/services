@@ -51,11 +51,7 @@ impl UserService {
     }
 
     fn reply_status(&self, sender: u64, request_id: u64, status: u64) {
-        let status = if status == 0 {
-            0
-        } else {
-            -(i32::try_from(status).unwrap_or(i32::MAX))
-        };
+        let status = user_service::status::wire_status(status);
         let response = Status {
             request_id,
             status,

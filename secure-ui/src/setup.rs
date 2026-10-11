@@ -1074,9 +1074,7 @@ fn create_home(user: &UserRecord) -> Result<(), SetupError> {
     let home = Path::new(&user.home);
     match fs::symlink_metadata(home) {
         Ok(_) => {
-            return Err(SetupError::Storage(
-                -(mochi_user_syscall::EEXIST as i32),
-            ));
+            return Err(SetupError::Storage(mochi_user_syscall::EEXIST as i32));
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(storage_error(error)),

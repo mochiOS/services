@@ -86,7 +86,7 @@ fn handle_storage(
         });
     let response = AuthorizeStorageResponse {
         request_id,
-        status: result.map_or_else(|error| -(error as i32), |_| 0),
+        status: result.map_or_else(crate::portal_status::failure_status, |_| 0),
     };
     let mut output = [0u8; STORAGE_RESPONSE_LEN];
     if let Ok(length) = response.encode(&mut output) {
@@ -131,7 +131,7 @@ fn handle_directory(
         });
     let (status, grant_id) = match result {
         Ok(grant_id) => (0, grant_id),
-        Err(error) => (-(error as i32), 0),
+        Err(error) => (crate::portal_status::failure_status(error), 0),
     };
     let response = GrantDirectoryResponse {
         request_id,
@@ -161,7 +161,7 @@ fn handle_network(
         });
     let response = RequestNetworkResponse {
         request_id,
-        status: result.map_or_else(|error| -(error as i32), |_| 0),
+        status: result.map_or_else(crate::portal_status::failure_status, |_| 0),
     };
     let mut output = [0u8; NETWORK_RESPONSE_LEN];
     if let Ok(length) = response.encode(&mut output) {
@@ -204,7 +204,7 @@ fn prompt_network(
 fn reply_invalid(request: &[u8], sender: u64) {
     let response = RequestNetworkResponse {
         request_id: request_id(request),
-        status: -(mochi_user_syscall::EINVAL as i32),
+        status: mochi_user_syscall::EINVAL as i32,
     };
     let mut output = [0u8; NETWORK_RESPONSE_LEN];
     if let Ok(length) = response.encode(&mut output) {

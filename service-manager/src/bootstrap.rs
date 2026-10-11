@@ -712,7 +712,7 @@ fn resident(outcome: BootstrapOutcome, runtime: Option<Runtime>) -> ! {
                 sender,
                 platform::session_control::Action::Lock,
                 1,
-                -(mochi_user_syscall::EINVAL as i32),
+                mochi_user_syscall::EINVAL as i32,
             );
             continue;
         };
@@ -721,7 +721,7 @@ fn resident(outcome: BootstrapOutcome, runtime: Option<Runtime>) -> ! {
                 sender,
                 request.action,
                 request.session_id,
-                -(mochi_user_syscall::EPERM as i32),
+                mochi_user_syscall::EPERM as i32,
             );
             continue;
         };
@@ -731,7 +731,7 @@ fn resident(outcome: BootstrapOutcome, runtime: Option<Runtime>) -> ! {
                 sender,
                 request.action,
                 request.session_id,
-                -(mochi_user_syscall::EPERM as i32),
+                mochi_user_syscall::EPERM as i32,
             );
             continue;
         }
@@ -740,7 +740,7 @@ fn resident(outcome: BootstrapOutcome, runtime: Option<Runtime>) -> ! {
                 sender,
                 request.action,
                 request.session_id,
-                -(mochi_user_syscall::EIO as i32),
+                mochi_user_syscall::EIO as i32,
             );
             continue;
         };
@@ -748,8 +748,8 @@ fn resident(outcome: BootstrapOutcome, runtime: Option<Runtime>) -> ! {
             platform::session_control::Action::Lock => {
                 let status = match runtime.authenticate_session(Some(session.identity.uid)) {
                     Some(identity) if identity == session.identity => 0,
-                    Some(_) => -(mochi_user_syscall::EACCES as i32),
-                    None => -(mochi_user_syscall::EIO as i32),
+                    Some(_) => mochi_user_syscall::EACCES as i32,
+                    None => mochi_user_syscall::EIO as i32,
                 };
                 reply_session_status(sender, request.action, session.id, status);
             }

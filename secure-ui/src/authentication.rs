@@ -199,7 +199,7 @@ pub(crate) fn authenticate(
                 );
                 return Err(AuthenticationError::Protocol);
             }
-            if status.status == -(mochi_user_syscall::EACCES as i32) {
+            if status.status == mochi_user_syscall::EACCES as i32 {
                 Err(AuthenticationError::InvalidCredentials)
             } else {
                 Err(AuthenticationError::Protocol)

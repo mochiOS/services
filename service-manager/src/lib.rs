@@ -8,6 +8,7 @@ mod driver_controller;
 mod launch_arguments;
 mod orchestration;
 mod portal;
+mod portal_status;
 mod process_watch;
 mod readiness;
 mod service_config;

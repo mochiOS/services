@@ -92,7 +92,7 @@ pub(crate) fn run() -> Result<(), viewkit::ViewKitError> {
     let status = if allowed {
         0i32
     } else {
-        -(mochi_user_syscall::EACCES as i32)
+        mochi_user_syscall::EACCES as i32
     };
     platform::logln!(
         "secure-ui.service: permission prompt completed allowed={} status={}",

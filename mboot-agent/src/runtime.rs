@@ -147,10 +147,10 @@ fn receive_ipc_request(
                 3 => Some(ReadyStage::Desktop),
                 _ => None,
             })
-            .map_or(-(mochi_user_syscall::EINVAL as i32), |stage| {
+            .map_or(mochi_user_syscall::EINVAL as i32, |stage| {
                 agent
                     .mark_ready(stage)
-                    .map_or(-(mochi_user_syscall::EINVAL as i32), |()| 0)
+                    .map_or(mochi_user_syscall::EINVAL as i32, |()| 0)
             });
         let _ = platform::ipc::reply(sender, &status.to_le_bytes());
         return;
