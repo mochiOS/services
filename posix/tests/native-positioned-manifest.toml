@@ -1,0 +1,11 @@
+[package]
+provenance = "built-in"
+id = "org.mochios.input"
+name = "Native Positioned I/O Probe"
+version = "1"
+vendor = "mochiOS"
+
+[[binary]]
+path = "/system/services/input.service"
+kind = "service"
+requires = ["fs.read.all", "fs.write.all", "ipc.client"]
