@@ -69,6 +69,11 @@ static void *exercise_foreground_io(void *unused) {
     return NULL;
 }
 
+static void *return_immediately(void *argument) {
+    errno = EBUSY; // Exercise the per-thread reent immediately before exit.
+    return argument;
+}
+
 static void *read_after_process_stop(void *unused) {
     (void)unused;
     char input[7];
@@ -171,6 +176,14 @@ int main(void) {
     CHECK(native_call4(647, (uintptr_t)&capacity_wait, 1, 0, 0) == -EINVAL);
     CHECK(native_call4(626, native_pair[0], 0, 0, 0) == 0);
     CHECK(native_call4(626, native_pair[1], 0, 0, 0) == 0);
+    debug("native-terminal-window: capacity thresholds passed\n");
+    for (uintptr_t iteration = 1; iteration <= 128; ++iteration) {
+        pthread_t thread;
+        void *result = NULL;
+        CHECK(pthread_create(&thread, NULL, return_immediately, (void *)iteration) == 0);
+        CHECK(pthread_join(thread, &result) == 0 && result == (void *)iteration);
+    }
+    debug("native-terminal-window: 128 native thread retirements passed\n");
     struct winsize initial = {24, 80, 640, 480}, actual = {0};
     int master = -1, slave = -1;
     CHECK(openpty(&master, &slave, NULL, NULL, &initial) == 0);
