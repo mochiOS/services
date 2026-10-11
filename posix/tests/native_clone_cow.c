@@ -20,8 +20,29 @@ static int64_t native3(uint64_t number, uint64_t a, uint64_t b, uint64_t c) {
 } while (0)
 
 int main(void) {
-    enum { PROCESS_CLONE = 644, RESUME = 645, WAIT = 643, CLOSE = 626, EXIT = 574 };
+    enum { PROCESS_CLONE = 644, RESUME = 645, WAIT = 643, CLOSE = 626, EXIT = 574,
+           SPACE_CLONE = 679, RIGHTS_GET = 664, DUPLICATE = 627, SAME_OBJECT = 666 };
     struct status { uint64_t id; uint32_t state, reserved; uint64_t code; } status;
+    const uint64_t control = UINT64_C(1) << 8;
+    const uint64_t duplicate = UINT64_C(1) << 62;
+    const uint64_t transfer = UINT64_C(1) << 63;
+    for (unsigned attempt = 0; attempt < 12; ++attempt) {
+        int64_t image = native3(SPACE_CLONE, 0, 0, 0);
+        CHECK(image > 0);
+        CHECK((uint64_t)native3(RIGHTS_GET, image, 0, 0)
+              == (control | duplicate | transfer));
+        CHECK(native3(DUPLICATE, image, 1 /* READ */, 0) == -13);
+        int64_t copy = native3(DUPLICATE, image, control, 0);
+        CHECK(copy > 0);
+        CHECK(native3(SAME_OBJECT, image, copy, 0) == 1);
+        CHECK(native3(642 /* ProcessHandleStatus */, image, (uint64_t)&status, 0) == -13);
+        CHECK(native3(CLOSE, image, 0, 0) == 0);
+        CHECK(native3(RIGHTS_GET, copy, 0, 0) == (int64_t)control);
+        private_value = 0x22;
+        CHECK(native3(CLOSE, copy, 0, 0) == 0);
+        CHECK(native3(RIGHTS_GET, copy, 0, 0) == -9);
+    }
+    fprintf(stderr, "address-space-image: PASS detached images close and attenuate without process authority\n");
     for (unsigned attempt = 0; attempt < 4; ++attempt) {
         /* Populate a writable source translation immediately before clone. */
         private_value = 0x11;
