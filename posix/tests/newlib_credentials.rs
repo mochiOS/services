@@ -1,6 +1,27 @@
 #[path = "../../../user/crates/newlib-runtime/src/credentials.rs"]
 mod production;
 
+#[test]
+fn credential_update_sentinel_is_widened_not_truncated() {
+    assert_eq!(production::update_id(u16::MAX), u32::MAX);
+    for id in [0, 24, 505, 65534] {
+        assert_eq!(production::update_id(id), u32::from(id));
+    }
+    let source = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
+    for function in ["setreuid", "setregid"] {
+        let start = source
+            .find(&format!(
+                "pub extern \"C\" fn {function}(real: credentials::Id"
+            ))
+            .unwrap();
+        let end = start + source[start..].find("\n}").unwrap();
+        let body = &source[start..end];
+        assert!(body.contains("credentials::update_id(real)"));
+        assert!(body.contains("credentials::update_id(effective)"));
+        assert!(!body.contains("native_call"));
+    }
+}
+
 use mochios_posix_client::newlib_errno::{EACCES, EAGAIN, EIO, EOVERFLOW, ESRCH};
 
 #[test]

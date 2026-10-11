@@ -17,6 +17,178 @@ struct LocalTransport {
     peer: PeerIdentity,
 }
 
+#[test]
+fn real_effective_updates_are_atomic_and_use_stored_not_peer_credentials() {
+    let client = client(PeerIdentity {
+        process_id: 198,
+        effective_uid: 0,
+        effective_gid: 0,
+    });
+    client.register_session().unwrap();
+    client.set_groups(&[20, 42]).unwrap();
+    client.set_real_effective_gid(20, 42).unwrap();
+    client.set_real_effective_uid(501, 502).unwrap();
+    let unchanged = protocol::CREDENTIAL_ID_UNCHANGED;
+    // The transport still reports UID zero: only stored POSIX state authorizes.
+    let before = client.session_info().unwrap();
+    assert_eq!(
+        client.set_real_effective_uid(502, 777),
+        Err(ClientError::Remote(protocol::STATUS_EPERM))
+    );
+    assert_eq!(client.session_info().unwrap(), before);
+    assert_eq!(
+        client.set_real_effective_gid(42, 777),
+        Err(ClientError::Remote(protocol::STATUS_EPERM))
+    );
+    assert_eq!(client.session_info().unwrap(), before);
+    client.set_real_effective_uid(unchanged, 501).unwrap();
+    client.set_real_effective_uid(unchanged, 502).unwrap();
+    client.set_real_effective_uid(502, 501).unwrap();
+    let state = client.session_info().unwrap();
+    assert_eq!((state.real_uid, state.effective_uid), (502, 501));
+    client.set_real_effective_uid(unchanged, unchanged).unwrap();
+    client.set_real_effective_gid(42, 20).unwrap();
+    assert_eq!(client.session_info().unwrap().effective_gid, 20);
+    let mut groups = [0; 4];
+    assert_eq!(client.get_groups(&mut groups).unwrap(), 2);
+    assert_eq!(&groups[..2], &[20, 42]);
+    let transport = client.into_transport();
+    let service = transport.service.borrow();
+    let stored = service.session(198).unwrap();
+    assert_eq!(
+        (stored.real_uid, stored.effective_uid, stored.saved_uid),
+        (502, 501, 501)
+    );
+    assert_eq!(
+        (stored.real_gid, stored.effective_gid, stored.saved_gid),
+        (42, 20, 20)
+    );
+}
+
+#[test]
+fn explicitly_setting_real_id_drops_saved_privilege_even_when_real_is_unchanged() {
+    let client = client(PeerIdentity {
+        process_id: 199,
+        effective_uid: 0,
+        effective_gid: 0,
+    });
+    client.register_session().unwrap();
+    let unchanged = protocol::CREDENTIAL_ID_UNCHANGED;
+    client.set_effective_gid(42).unwrap();
+    client.set_real_effective_gid(unchanged, 42).unwrap();
+    client.set_real_effective_gid(0, unchanged).unwrap();
+    client.set_effective_uid(501).unwrap();
+    client.set_real_effective_uid(unchanged, 501).unwrap();
+    client.set_real_effective_uid(0, unchanged).unwrap();
+    // Effective-only no-op is permitted even when it differs from real/saved.
+    client.set_real_effective_uid(unchanged, 501).unwrap();
+    let transport = client.into_transport();
+    let service = transport.service.borrow();
+    let stored = service.session(199).unwrap();
+    assert_eq!(stored.saved_uid, 501);
+    assert_eq!(stored.saved_gid, 42);
+}
+
+#[test]
+fn real_id_effective_update_preserves_saved_id_until_explicit_permanent_drop() {
+    let client = client(PeerIdentity {
+        process_id: 201,
+        effective_uid: 0,
+        effective_gid: 0,
+    });
+    client.register_session().unwrap();
+    client.set_real_effective_gid(20, 42).unwrap();
+    client.set_real_effective_uid(501, 502).unwrap();
+    let unchanged = protocol::CREDENTIAL_ID_UNCHANGED;
+    client.set_real_effective_uid(unchanged, 501).unwrap();
+    client.set_real_effective_gid(unchanged, 20).unwrap();
+    client.set_real_effective_uid(unchanged, unchanged).unwrap();
+    client.set_real_effective_gid(unchanged, unchanged).unwrap();
+    {
+        let service = client.transport().service.borrow();
+        let stored = service.session(201).unwrap();
+        assert_eq!(stored.saved_uid, 502);
+        assert_eq!(stored.saved_gid, 42);
+    }
+    client.set_real_effective_uid(unchanged, 502).unwrap();
+    client.set_real_effective_gid(unchanged, 42).unwrap();
+    client.set_real_effective_gid(20, 20).unwrap();
+    client.set_real_effective_uid(501, 501).unwrap();
+    assert_eq!(
+        client.set_real_effective_uid(unchanged, 502),
+        Err(ClientError::Remote(protocol::STATUS_EPERM))
+    );
+    assert_eq!(
+        client.set_real_effective_gid(unchanged, 42),
+        Err(ClientError::Remote(protocol::STATUS_EPERM))
+    );
+}
+
+#[test]
+fn credential_pair_wire_is_exact_and_malformed_requests_do_not_change_state() {
+    let mut bytes = [0; protocol::CREDENTIAL_PAIR_PAYLOAD_LEN];
+    protocol::encode_credential_pair(501, u32::MAX, &mut bytes).unwrap();
+    assert_eq!(bytes, [245, 1, 0, 0, 255, 255, 255, 255]);
+    assert_eq!(
+        protocol::decode_credential_pair(&bytes),
+        Ok((501, u32::MAX))
+    );
+    assert!(protocol::encode_credential_pair(1, 2, &mut bytes[..7]).is_err());
+    let peer = PeerIdentity {
+        process_id: 200,
+        effective_uid: 501,
+        effective_gid: 20,
+    };
+    let mut service = service_for(peer);
+    service.handle(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..Default::default()
+        },
+        &[],
+    );
+    let before = *service.session(200).unwrap();
+    for opcode in [
+        protocol::OP_SET_REAL_EFFECTIVE_UID,
+        protocol::OP_SET_REAL_EFFECTIVE_GID,
+    ] {
+        for payload in [&bytes[..7], &[0; 9][..]] {
+            assert_eq!(
+                service
+                    .handle(
+                        peer,
+                        protocol::Header {
+                            opcode,
+                            ..Default::default()
+                        },
+                        payload
+                    )
+                    .header
+                    .status,
+                STATUS_EINVAL
+            );
+            assert_eq!(*service.session(200).unwrap(), before);
+        }
+        assert_eq!(
+            service
+                .handle(
+                    peer,
+                    protocol::Header {
+                        opcode,
+                        flags: 1,
+                        ..Default::default()
+                    },
+                    &bytes
+                )
+                .header
+                .status,
+            STATUS_EINVAL
+        );
+        assert_eq!(*service.session(200).unwrap(), before);
+    }
+}
+
 impl Transport for LocalTransport {
     type Error = ();
 

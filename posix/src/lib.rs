@@ -1682,6 +1682,12 @@ impl<H: Copy> PosixService<H> {
             protocol::OP_SET_EFFECTIVE_GID if header.flags == 0 => self
                 .set_effective_gid(peer.process_id, payload)
                 .map(|_| Vec::new()),
+            protocol::OP_SET_REAL_EFFECTIVE_UID if header.flags == 0 => self
+                .set_real_effective_ids(peer.process_id, payload, true)
+                .map(|_| Vec::new()),
+            protocol::OP_SET_REAL_EFFECTIVE_GID if header.flags == 0 => self
+                .set_real_effective_ids(peer.process_id, payload, false)
+                .map(|_| Vec::new()),
             protocol::OP_RESET_EFFECTIVE_IDS if header.flags == 0 && payload.is_empty() => self
                 .reset_effective_ids(peer.process_id)
                 .map(|_| Vec::new()),
@@ -1741,6 +1747,8 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_SET_GID
             | protocol::OP_SET_EFFECTIVE_UID
             | protocol::OP_SET_EFFECTIVE_GID
+            | protocol::OP_SET_REAL_EFFECTIVE_UID
+            | protocol::OP_SET_REAL_EFFECTIVE_GID
             | protocol::OP_RESET_EFFECTIVE_IDS
             | protocol::OP_GROUPS_SET
             | protocol::OP_PROCESS_FORKED
@@ -2878,6 +2886,59 @@ impl<H: Copy> PosixService<H> {
             return Err(protocol::STATUS_EPERM);
         }
         session.effective_gid = requested;
+        Ok(())
+    }
+
+    fn set_real_effective_ids(
+        &mut self,
+        process_id: u64,
+        payload: &[u8],
+        user: bool,
+    ) -> Result<(), i32> {
+        let (real, effective) =
+            protocol::decode_credential_pair(payload).map_err(|_| STATUS_EINVAL)?;
+        let session = self
+            .sessions
+            .get_mut(&process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let (old_real, old_effective, old_saved) = if user {
+            (session.real_uid, session.effective_uid, session.saved_uid)
+        } else {
+            (session.real_gid, session.effective_gid, session.saved_gid)
+        };
+        let change_real = real != protocol::CREDENTIAL_ID_UNCHANGED;
+        let change_effective = effective != protocol::CREDENTIAL_ID_UNCHANGED;
+        // Validate both against the OLD credentials before modifying anything.
+        // POSIX privilege never changes native Handle/Capability authority.
+        if session.effective_uid != 0
+            && ((change_real && real != old_real && real != old_effective)
+                || (change_effective
+                    && effective != old_real
+                    && effective != old_effective
+                    && effective != old_saved))
+        {
+            return Err(protocol::STATUS_EPERM);
+        }
+        let new_real = if change_real { real } else { old_real };
+        let new_effective = if change_effective {
+            effective
+        } else {
+            old_effective
+        };
+        let new_saved = if change_real || (change_effective && effective != old_real) {
+            new_effective
+        } else {
+            old_saved
+        };
+        if user {
+            session.real_uid = new_real;
+            session.effective_uid = new_effective;
+            session.saved_uid = new_saved;
+        } else {
+            session.real_gid = new_real;
+            session.effective_gid = new_effective;
+            session.saved_gid = new_saved;
+        }
         Ok(())
     }
 
