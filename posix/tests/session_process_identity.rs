@@ -37,21 +37,6 @@ pub mod process {
         pub memory_bytes: u64,
         pub thread_count: u64,
     }
-    pub fn thread_security_context(
-        thread: u64,
-    ) -> Result<mnu_abi::ThreadSecurityContext, super::SysError> {
-        let process_id = match thread {
-            42 => 19,
-            43 => 20,
-            44 => 21,
-            _ => return Err(super::SysError),
-        };
-        Ok(mnu_abi::ThreadSecurityContext {
-            thread_id: thread,
-            process_id,
-            ..Default::default()
-        })
-    }
     pub fn list(_: usize) -> Result<Vec<Record>, super::SysError> {
         Ok([(23, 22), (22, 19), (99, 20)]
             .into_iter()
@@ -116,13 +101,13 @@ fn session_launcher_registers_credentials_before_resume_without_legacy_creation(
 }
 
 #[test]
-fn session_authentication_and_teardown_keep_process_owners_not_launch_threads() {
+fn session_identity_and_teardown_keep_native_process_ids() {
     let identity = service_ready::SessionIdentity {
         uid: 1000,
         gid: 1000,
     };
     let session =
-        production::ActiveSession::from_launch_threads(1, identity, Some(44), 43, 42).unwrap();
+        production::ActiveSession::from_process_ids(1, identity, Some(21), 20, 19).unwrap();
     assert_eq!(session.binder_pid, 19);
     assert_eq!(session.workspace_pid, 20);
     assert_eq!(session.linux_pid, Some(21));
@@ -130,20 +115,15 @@ fn session_authentication_and_teardown_keep_process_owners_not_launch_threads() 
     production::terminate_process_tree(session.binder_pid).unwrap();
     assert_eq!(*TERMINATED.lock().unwrap(), [23, 22, 19]);
     let session =
-        production::ActiveSession::from_launch_threads(1, identity, None, 43, 42).unwrap();
+        production::ActiveSession::from_process_ids(1, identity, None, 20, 19).unwrap();
     assert_eq!(session.linux_pid, None);
 }
 
 #[test]
-fn session_identity_resolution_does_not_fall_back_to_unverified_launch_ids() {
-    let identity = service_ready::SessionIdentity {
-        uid: 1000,
-        gid: 1000,
-    };
-    for (linux, workspace, binder) in [(Some(99), 43, 42), (None, 99, 42), (None, 43, 99)] {
-        assert_eq!(
-            production::ActiveSession::from_launch_threads(1, identity, linux, workspace, binder),
-            Err(SysError)
-        );
-    }
+fn session_construction_has_no_legacy_thread_or_credential_fallback() {
+    let source = include_str!("../../service-manager/src/session.rs");
+    assert!(!source.contains("from_launch_threads"));
+    assert!(!source.contains("thread_security_context"));
+    assert!(!source.contains("ThreadSecurityContext"));
+    assert!(source.contains("fn from_process_ids("));
 }
