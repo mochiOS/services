@@ -1256,7 +1256,7 @@ impl WorkspaceService {
             );
             return;
         };
-        let Ok(context) = platform::process::thread_security_context(sender) else {
+        let Ok(context) = platform::ipc::endpoint_execution_identity(sender) else {
             self.reply_status(
                 sender,
                 request.request_id,
