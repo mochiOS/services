@@ -98,3 +98,19 @@ fn application_launch_uses_native_creation_and_registers_before_resume() {
         assert!(compact.contains("call_object_handles(destination,&request,&mutreply,&muthandles"));
     }
 }
+
+#[test]
+fn retired_requester_launch_has_no_kernel_abi_dispatch_or_wrapper() {
+    let name = concat!("ExecManifest", "ForRequester");
+    for source in [
+        include_str!("../../../core/crates/abi/src/lib.rs"),
+        include_str!("../../../core/src/syscall/mod.rs"),
+        include_str!("../../../core/src/syscall/exec.rs"),
+        include_str!("../../../user/crates/platform/src/lib.rs"),
+    ] {
+        assert!(!source.contains(name));
+        assert!(!source.contains(concat!("ExecManifest", "Requester")));
+        assert!(!source.contains(concat!("exec_manifest_", "for_requester")));
+        assert!(!source.contains(concat!("spawn_manifest_", "for_requester")));
+    }
+}

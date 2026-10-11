@@ -426,6 +426,8 @@ int main(int argc, char **argv) {
   }
   if (argc == 2 && strcmp(argv[1], "--credential-overflow") == 0)
     return credential_overflow_child();
+  CHECK(native6(609, 0, 0, 0, 0, 0, 0) == -38);
+  fprintf(stderr, "retired-requester: PASS old syscall number returns ENOSYS\n");
   CHECK(entropy_probe() == 0);
   fprintf(stderr, "permission-native: start real secure-ui endpoint test\n");
   unsigned char metadata[20000];
