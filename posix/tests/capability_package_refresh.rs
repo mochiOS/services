@@ -14,8 +14,8 @@ mod package_index {
         pub(crate) duplicate: bool,
         pub(crate) generation: u64,
     }
-    pub(crate) fn build_package_index() -> PackageIndex {
-        panic!("runtime refresh must not call the legacy bootstrap reader");
+    pub(crate) fn build_package_index() -> Result<PackageIndex, SysError> {
+        build_runtime_package_index()
     }
     pub(crate) fn build_runtime_package_index() -> Result<PackageIndex, SysError> {
         if let Some(error) = INDEX_ERROR.get() {
@@ -35,7 +35,7 @@ mod policy {
         pub(crate) generation: u64,
     }
     pub(crate) fn load_app_prompt_policy(_: &PackageIndex) -> AppPromptPolicy {
-        panic!("runtime refresh must not call the legacy bootstrap reader");
+        AppPromptPolicy { generation: 2 }
     }
     pub(crate) fn load_runtime_app_prompt_policy(
         index: &PackageIndex,
@@ -52,6 +52,25 @@ mod policy {
 #[allow(dead_code)]
 #[path = "../../capability/src/state.rs"]
 mod state;
+
+#[test]
+fn initial_index_failure_and_duplicate_index_do_not_publish_service_state() {
+    for (error, duplicate, expected) in [
+        (Some(syscall::EIO), false, syscall::EIO),
+        (Some(syscall::EACCES), false, syscall::EACCES),
+        (None, true, syscall::EEXIST),
+    ] {
+        INDEX_ERROR.set(error.map(|raw| SysError::from_raw(raw as i64)));
+        DUPLICATE.set(duplicate);
+        assert_eq!(
+            state::CapabilityServiceState::new().err(),
+            Some(SysError::from_raw(expected as i64))
+        );
+    }
+    INDEX_ERROR.set(None);
+    DUPLICATE.set(false);
+    assert!(state::CapabilityServiceState::new().is_ok());
+}
 
 #[test]
 fn publishes_the_new_index_and_policy_only_after_both_reads_succeed() {

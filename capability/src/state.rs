@@ -8,13 +8,16 @@ pub(crate) struct CapabilityServiceState {
 }
 
 impl CapabilityServiceState {
-    pub(crate) fn new() -> Self {
-        let package_index = build_package_index();
+    pub(crate) fn new() -> Result<Self, syscall::SysError> {
+        let package_index = build_package_index()?;
+        if package_index.duplicate {
+            return Err(syscall::SysError::from_raw(syscall::EEXIST as i64));
+        }
         let app_prompt_policy = load_app_prompt_policy(&package_index);
-        Self {
+        Ok(Self {
             package_index,
             app_prompt_policy,
-        }
+        })
     }
 
     pub(crate) fn refresh_package_index(&mut self) -> Result<(), syscall::SysError> {

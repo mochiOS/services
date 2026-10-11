@@ -21,7 +21,23 @@ use state::CapabilityServiceState;
 fn main() {
     let _ = platform::logger::init_from_env();
     platform::logln!("capability.service: start");
-    let state = CapabilityServiceState::new();
+    let state = match CapabilityServiceState::new() {
+        Ok(state) => state,
+        Err(error) => {
+            let _ = platform::write_fmt(
+                platform::io::STDERR,
+                format_args!(
+                    "capability.service: initial package index failed errno={}\n",
+                    error.errno().unwrap_or(0)
+                ),
+            );
+            platform::logln!(
+                "capability.service: initial package index failed errno={}",
+                error.errno().unwrap_or(0)
+            );
+            platform::process::exit(1);
+        }
+    };
     start_required_services(&state.package_index);
     serve_capability_requests(state);
 }

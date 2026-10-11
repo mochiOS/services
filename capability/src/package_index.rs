@@ -1,5 +1,4 @@
 use alloc::collections::BTreeMap;
-use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -20,39 +19,17 @@ pub(crate) struct PackageRecord {
     manifest_hash: [u8; 32],
 }
 
-fn walk_package_tree(path: &str, out: &mut Vec<String>) {
-    let Ok(entries) = platform::file::read_dir_names(path) else {
-        return;
-    };
-    for name in entries {
-        let child = format!("{}/{}", path.trim_end_matches('/'), name);
-        if name == "manifest.toml" {
-            out.push(child);
-            continue;
-        }
-        walk_package_tree(&child, out);
-    }
-}
-
-pub(crate) fn build_package_index() -> PackageIndex {
-    let mut manifest_paths = Vec::new();
-    walk_package_tree("/system/packages", &mut manifest_paths);
-    walk_package_tree("/var/lib/packages", &mut manifest_paths);
+pub(crate) fn build_package_index() -> Result<PackageIndex, platform::syscall::SysError> {
+    let manifest_paths = crate::package_walk::manifest_paths(platform::file::read_dir_names)?;
     let mut manifests = Vec::new();
     for manifest_path in manifest_paths {
-        let Ok(bytes) = platform::file::read_to_end_path(&manifest_path) else {
-            platform::logln!(
-                "capability.service: invalid package manifest {}",
-                manifest_path
-            );
-            continue;
-        };
+        let bytes = platform::file::read_to_end_path(&manifest_path)?;
         manifests.push((manifest_path, bytes));
     }
-    index_manifests(manifests)
+    Ok(index_manifests(manifests))
 }
 
-pub(crate) fn build_runtime_package_index() -> Result<PackageIndex, mochi_user_syscall::SysError> {
+pub(crate) fn build_runtime_package_index() -> Result<PackageIndex, platform::syscall::SysError> {
     let paths = crate::package_walk::manifest_paths(crate::persistent_grant::read_dir_names)?;
     let mut manifests = Vec::new();
     for path in paths {
@@ -133,26 +110,17 @@ pub(crate) fn service_binary_path(manifest: &platform::package::PackageManifest)
 pub(crate) fn package_manifest_by_id(
     index: &PackageIndex,
     package_id: &str,
-) -> Result<(platform::package::PackageManifest, String), mochi_user_syscall::SysError> {
+) -> Result<(platform::package::PackageManifest, String), platform::syscall::SysError> {
+    if index.duplicate {
+        return Err(platform::syscall::SysError::from_raw(
+            platform::syscall::EEXIST as i64,
+        ));
+    }
     if let Some(record) = index.by_package.get(package_id) {
         return Ok((record.manifest.clone(), record.manifest_path.clone()));
     }
 
-    if let Some(package_dir) = package_id.rsplit('.').next() {
-        for root in ["/system/packages", "/var/lib/packages"] {
-            let fallback_path = format!("{root}/{package_dir}/manifest.toml");
-            if let Some(manifest) = platform::package::read_manifest(&fallback_path) {
-                if manifest.package_id == package_id {
-                    return Ok((manifest, fallback_path));
-                }
-                return Err(mochi_user_syscall::SysError::from_raw(
-                    mochi_user_syscall::EINVAL as i64,
-                ));
-            }
-        }
-    }
-
-    Err(mochi_user_syscall::SysError::from_raw(
-        mochi_user_syscall::ENOENT as i64,
+    Err(platform::syscall::SysError::from_raw(
+        platform::syscall::ENOENT as i64,
     ))
 }
