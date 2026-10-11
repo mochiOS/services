@@ -396,6 +396,34 @@ fn sequential_read_returns_its_original_position_and_preserves_offset_on_error()
 }
 
 #[test]
+fn directory_provider_declines_pager_identity_without_disabling_stream_reads() {
+    let mut filesystem = test_filesystem();
+    let open_id = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+                ..protocol::Header::default()
+            },
+            b"/",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap()
+        .header
+        .open_id;
+    assert_eq!(filesystem.provider_memory_object(open_id), Err(95));
+    let bytes = filesystem.provider_read(open_id, 4096).unwrap();
+    assert!(!bytes.is_empty());
+    let mut remaining = bytes.as_slice();
+    while !remaining.is_empty() {
+        let (_, _, consumed) = protocol::decode_dir_entry(remaining).unwrap();
+        remaining = &remaining[consumed..];
+    }
+    assert_eq!(filesystem.provider_memory_object(u64::MAX), Err(9));
+}
+
+#[test]
 fn pager_identity_is_stable_across_open_descriptions() {
     let mut filesystem = test_filesystem();
     let create = |filesystem: &mut FilesystemService, path: &[u8]| {

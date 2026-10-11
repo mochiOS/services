@@ -26,6 +26,7 @@ const ENAMETOOLONG: i32 = 36;
 const EISDIR: i32 = 21;
 const ENOTDIR: i32 = 20;
 const ENOSYS: i32 = 38;
+const ENOTSUP: i32 = 95;
 const ENOTEMPTY: i32 = 39;
 const EFBIG: i32 = 27;
 const ELOOP: i32 = 40;
@@ -1321,7 +1322,10 @@ impl FilesystemService {
     pub fn provider_memory_object(&self, open_id: u64) -> Result<u64, i32> {
         let open = self.opens.get(&open_id).ok_or(EBADF)?;
         if open.file.is_none() || open.node_id == 0 {
-            return Err(EISDIR);
+            // A directory remains a readable provider stream, but does not
+            // expose byte-addressed pager backing. Decline this optional
+            // mechanism so native HandleRead uses the ordinary stream path.
+            return Err(ENOTSUP);
         }
         Ok(open.memory_object_id)
     }
