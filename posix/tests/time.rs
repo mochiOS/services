@@ -1,6 +1,32 @@
 use mochios_posix_client::time::{ClockKind, classify_clock_id};
 
 #[test]
+fn sleep_observation_distinguishes_spurious_wakes_caught_handlers_and_expiry() {
+    use mochios_posix_client::time::{SleepObservation, observe_sleep};
+    assert_eq!(observe_sleep(100, 40, 7, 7), SleepObservation::Waiting);
+    assert_eq!(observe_sleep(100, 100, 7, 7), SleepObservation::Complete);
+    assert_eq!(observe_sleep(100, 101, 7, 7), SleepObservation::Complete);
+    assert_eq!(
+        observe_sleep(100, 40, 7, 8),
+        SleepObservation::Interrupted {
+            remaining_nanoseconds: 60
+        }
+    );
+    assert_eq!(
+        observe_sleep(100, 101, 7, 8),
+        SleepObservation::Interrupted {
+            remaining_nanoseconds: 0
+        }
+    );
+    assert_eq!(
+        observe_sleep(100, 40, u64::MAX, 0),
+        SleepObservation::Interrupted {
+            remaining_nanoseconds: 60
+        }
+    );
+}
+
+#[test]
 fn posix_clock_ids_are_classified_in_user_space() {
     for clock_id in [0, 1, 8] {
         assert_eq!(classify_clock_id(clock_id), Some(ClockKind::Realtime));
