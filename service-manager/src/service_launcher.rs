@@ -1,10 +1,12 @@
 use mochi_user_platform as platform;
 
+use crate::launch_arguments::encode_native_launch;
+use crate::launch_arguments::encode_spawn_args;
+use crate::native_process::NativeProcess;
 use crate::service_config::{
     DRIVERS, FixedService, ReadyTarget, ServiceSpec, driver_arguments, fixed_service_arguments,
     fixed_service_spec, mboot_agent_arguments,
 };
-use crate::launch_arguments::encode_spawn_args;
 use crate::spawn_support::{resolve_execution_security, sys_error};
 
 const SESSION_USER_ARG_PREFIX: &str = "--session-user=";
@@ -33,8 +35,8 @@ fn spawn(
             arguments.insert(0, identity_item);
         }
     }
-    let arguments = encode_spawn_args(&arguments)
-        .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
+    let arguments =
+        encode_spawn_args(&arguments).map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
     platform::service::spawn_manifest(
         spec.path,
         spec.execution_class,
@@ -55,8 +57,8 @@ fn spawn_with_credentials(
             arguments.insert(0, identity_item);
         }
     }
-    let arguments = encode_spawn_args(&arguments)
-        .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
+    let arguments =
+        encode_spawn_args(&arguments).map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
     platform::service::spawn_manifest_with_credentials(
         spec.path,
         spec.execution_class,
@@ -84,6 +86,11 @@ pub(crate) fn spawn_fixed_service(
     filesystem_endpoint: Option<platform::handle::Handle>,
     posix_endpoint: Option<platform::handle::Handle>,
 ) -> Result<u64, mochi_user_syscall::SysError> {
+    // Input has moved to explicit image/Process Handles. Never launch it via
+    // the legacy path if its native launch fails.
+    if service == FixedService::Input {
+        return Err(sys_error(mochi_user_syscall::EINVAL));
+    }
     let ready_target = ready_target.map(|target| ReadyTarget {
         endpoint: target.endpoint,
         token: target.token,
@@ -94,6 +101,53 @@ pub(crate) fn spawn_fixed_service(
     }
     append_posix_handle(&mut arguments, posix_endpoint);
     spawn(fixed_service_spec(service), &arguments)
+}
+
+pub(crate) fn spawn_input_service(
+    logger_endpoint: u64,
+    ready_target: platform::service_ready::Target,
+    posix_endpoint: platform::handle::Handle,
+) -> Result<NativeProcess, mochi_user_syscall::SysError> {
+    use mochios_posix_client::{Client, ClientError, OpenAtBase, SyscallEndpointTransport};
+    let spec = fixed_service_spec(FixedService::Input);
+    let mut arguments = fixed_service_arguments(
+        FixedService::Input,
+        logger_endpoint,
+        Some(ReadyTarget {
+            endpoint: ready_target.endpoint,
+            token: ready_target.token,
+        }),
+    );
+    append_posix_handle(&mut arguments, Some(posix_endpoint));
+    let mut random = [0; 16];
+    platform::random::fill(&mut random)?;
+    let metadata = encode_native_launch(spec.path, "input.service", &arguments, random)
+        .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
+    let client = Client::new(SyscallEndpointTransport::new(posix_endpoint));
+    let client_error = |error| match error {
+        ClientError::Transport(error) => error,
+        ClientError::Remote(errno) => sys_error(errno.unsigned_abs() as u64),
+        _ => sys_error(mochi_user_syscall::EIO),
+    };
+    // Endpoint possession is not a POSIX session. Register the authenticated
+    // caller before asking the service to resolve a process-root pathname.
+    client.register_session().map_err(client_error)?;
+    let image = client
+        .open_at(
+            OpenAtBase::ProcessRoot,
+            mochios_posix_protocol::OPEN_READ,
+            0,
+            spec.path,
+        )
+        .map_err(client_error)?;
+    // The source reference comes only from this IPC attachment, not a PID/FD
+    // capture API. Always release it, including authorization/create failure.
+    let result = (|| {
+        resolve_execution_security(spec.path, spec.execution_class)?;
+        NativeProcess::create_and_resume(image.handle, &metadata)
+    })();
+    let _ = platform::handle::close(image.handle);
+    result
 }
 
 pub(crate) fn spawn_mboot_agent(

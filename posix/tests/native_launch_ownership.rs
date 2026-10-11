@@ -1,0 +1,100 @@
+extern crate self as mochi_user_platform;
+
+use std::sync::Mutex;
+
+pub mod syscall {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct SysError;
+}
+
+pub mod process_watch {
+    #[derive(Debug, PartialEq, Eq)]
+    pub enum ProcessWatchTarget {
+        RetainedHandle(u32),
+    }
+}
+
+struct State {
+    events: Vec<&'static str>,
+    fail_create: bool,
+    fail_resume: bool,
+}
+static STATE: Mutex<State> = Mutex::new(State {
+    events: Vec::new(),
+    fail_create: false,
+    fail_resume: false,
+});
+
+pub mod handle {
+    pub type Handle = u32;
+    pub fn close(handle: Handle) -> Result<(), crate::syscall::SysError> {
+        assert_eq!(handle, 7);
+        crate::STATE.lock().unwrap().events.push("close");
+        Ok(())
+    }
+}
+
+pub mod process {
+    pub fn create_stopped(image: u32, metadata: &[u8]) -> Result<u32, crate::syscall::SysError> {
+        assert_eq!(image, 9);
+        assert_eq!(metadata, b"metadata");
+        let mut state = crate::STATE.lock().unwrap();
+        state.events.push("create-stopped");
+        if state.fail_create {
+            Err(crate::syscall::SysError)
+        } else {
+            Ok(7)
+        }
+    }
+    pub fn resume_handle(handle: u32) -> Result<(), crate::syscall::SysError> {
+        assert_eq!(handle, 7);
+        let mut state = crate::STATE.lock().unwrap();
+        state.events.push("resume");
+        if state.fail_resume {
+            Err(crate::syscall::SysError)
+        } else {
+            Ok(())
+        }
+    }
+    pub fn terminate_handle(handle: u32, code: u64) -> Result<(), crate::syscall::SysError> {
+        assert_eq!((handle, code), (7, 127));
+        crate::STATE.lock().unwrap().events.push("terminate");
+        Ok(())
+    }
+}
+
+#[path = "../../service-manager/src/native_process.rs"]
+mod production;
+
+#[test]
+fn native_launch_owns_the_creation_reference_and_cleans_failed_resume() {
+    let process = production::NativeProcess::create_and_resume(9, b"metadata").unwrap();
+    assert_eq!(
+        process.watch_target(),
+        process_watch::ProcessWatchTarget::RetainedHandle(7)
+    );
+    assert_eq!(STATE.lock().unwrap().events, ["create-stopped", "resume"]);
+    drop(process);
+    assert_eq!(
+        STATE.lock().unwrap().events,
+        ["create-stopped", "resume", "close"]
+    );
+    {
+        let mut state = STATE.lock().unwrap();
+        state.events.clear();
+        state.fail_create = true;
+    }
+    assert!(production::NativeProcess::create_and_resume(9, b"metadata").is_err());
+    assert_eq!(STATE.lock().unwrap().events, ["create-stopped"]);
+    {
+        let mut state = STATE.lock().unwrap();
+        state.events.clear();
+        state.fail_create = false;
+        state.fail_resume = true;
+    }
+    assert!(production::NativeProcess::create_and_resume(9, b"metadata").is_err());
+    assert_eq!(
+        STATE.lock().unwrap().events,
+        ["create-stopped", "resume", "terminate", "close"]
+    );
+}

@@ -2,6 +2,7 @@ use alloc::collections::VecDeque;
 use mochi_user_platform as platform;
 
 use crate::driver_controller::{DriverControlError, DriverController};
+use crate::native_process::NativeProcess;
 use crate::orchestration::{BootstrapOperations, BootstrapOutcome, MbootStage, orchestrate};
 use crate::readiness::{DeferredMessage, ReadyError, ReadyHandshake, ReadyService};
 use crate::service_config::FixedService;
@@ -53,7 +54,11 @@ impl Runtime {
         }
     }
 
-    fn wait_ready(&mut self, service: ReadyService, process_id: u64) -> bool {
+    fn wait_ready(
+        &mut self,
+        service: ReadyService,
+        process_id: impl Into<crate::process_watch::ProcessWatchTarget>,
+    ) -> bool {
         platform::logln!(
             "service-manager.service: waiting for {} ready",
             service.name()
@@ -165,6 +170,34 @@ impl Runtime {
 }
 
 impl BootstrapOperations for Runtime {
+    type InputProcess = NativeProcess;
+
+    fn spawn_input(&mut self) -> Option<Self::InputProcess> {
+        let endpoint = self.posix_endpoint?;
+        if !self.ensure_ready_handshake() {
+            return None;
+        }
+        let target = self.ready.as_ref()?.target(ReadyService::Input);
+        match service_launcher::spawn_input_service(self.logger_endpoint, target, endpoint) {
+            Ok(process) => {
+                platform::logln!(
+                    "service-manager.service: input.service spawned with retained Process Handle"
+                );
+                Some(process)
+            }
+            Err(error) => {
+                eprintln!(
+                    "service-manager.service: input.service native spawn failed errno={}",
+                    errno(error)
+                );
+                platform::logln!(
+                    "service-manager.service: input.service native spawn failed errno={}",
+                    errno(error)
+                );
+                None
+            }
+        }
+    }
     fn spawn_drivers(&mut self) -> Option<u64> {
         match service_launcher::spawn_drivers(
             self.logger_endpoint,
@@ -466,8 +499,8 @@ impl BootstrapOperations for Runtime {
         }
     }
 
-    fn wait_input_ready(&mut self, process_id: u64) -> bool {
-        self.wait_ready(ReadyService::Input, process_id)
+    fn wait_input_ready(&mut self, process: &Self::InputProcess) -> bool {
+        self.wait_ready(ReadyService::Input, process.watch_target())
     }
 
     fn wait_user_ready(&mut self, process_id: u64) -> bool {
@@ -634,7 +667,7 @@ fn log_ready_error(service: ReadyService, error: ReadyError) {
     );
 }
 
-fn resident(outcome: BootstrapOutcome, runtime: Option<Runtime>) -> ! {
+fn resident(outcome: BootstrapOutcome<NativeProcess>, runtime: Option<Runtime>) -> ! {
     let mut runtime = runtime;
     let mut active_session = outcome
         .identity
