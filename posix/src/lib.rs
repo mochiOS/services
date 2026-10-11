@@ -2105,7 +2105,11 @@ impl<H: Copy> PosixService<H> {
         Ok(output)
     }
 
-    fn signal_image_started_payload(&mut self, process_id: u64) -> Result<Vec<u8>, i32> {
+    fn signal_image_started_payload(
+        &mut self,
+        sender: mnu_abi::ExecutionIdentity,
+    ) -> Result<Vec<u8>, i32> {
+        let process_id = sender.process_id;
         let state = self
             .signals
             .get_mut(&process_id)
@@ -2117,6 +2121,14 @@ impl<H: Copy> PosixService<H> {
         // action flags do not survive, even for an ignored signal.
         state.caught = 0;
         self.signal_child_options.insert(process_id, 0);
+        // exec may replace an image while its signal handler is running.
+        // That handler cannot return to complete its delivery in the old image.
+        // Native image replacement retains this TID: thread-exit GC cannot
+        // reclaim these tokens. Keep other threads' tokens and the caller's mask.
+        if let Some(wait) = self.process_wait_states.get_mut(&process_id) {
+            wait.deliveries
+                .retain(|_, owner| owner.thread_id != sender.thread_id);
+        }
         Ok(output)
     }
 
@@ -2134,6 +2146,7 @@ impl<H: Copy> PosixService<H> {
             protocol::OP_SIGNAL_THREAD_MASK
                 | protocol::OP_SIGNAL_THREAD_DEQUEUE
                 | protocol::OP_SIGNAL_THREAD_PENDING
+                | protocol::OP_SIGNAL_IMAGE_STARTED
         ) {
             Err(protocol::STATUS_ENOSYS)
         } else if header.flags != 0 {
@@ -2146,6 +2159,10 @@ impl<H: Copy> PosixService<H> {
         } else {
             match header.opcode {
                 protocol::OP_SIGNAL_THREAD_MASK => self.thread_signal_mask_payload(sender, payload),
+                protocol::OP_SIGNAL_IMAGE_STARTED if payload.is_empty() => {
+                    self.signal_image_started_payload(sender)
+                }
+                protocol::OP_SIGNAL_IMAGE_STARTED => Err(STATUS_EINVAL),
                 _ => self.thread_signal_delivery_payload(sender, header.opcode, payload),
             }
         };
@@ -2515,9 +2532,6 @@ impl<H: Copy> PosixService<H> {
                 .map(|_| Vec::new()),
             protocol::OP_SIGNAL_DISPOSITION if header.flags <= protocol::SIGNAL_DISPOSITION_SET => {
                 self.signal_disposition_payload(peer.process_id, header.flags, payload)
-            }
-            protocol::OP_SIGNAL_IMAGE_STARTED if header.flags == 0 && payload.is_empty() => {
-                self.signal_image_started_payload(peer.process_id)
             }
             protocol::OP_PING
             | protocol::OP_SESSION_REGISTER

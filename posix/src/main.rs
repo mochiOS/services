@@ -232,6 +232,7 @@ fn main() {
                     protocol::OP_SIGNAL_THREAD_MASK
                         | protocol::OP_SIGNAL_THREAD_DEQUEUE
                         | protocol::OP_SIGNAL_THREAD_PENDING
+                        | protocol::OP_SIGNAL_IMAGE_STARTED
                 )
                     && attachments.is_empty() =>
             {

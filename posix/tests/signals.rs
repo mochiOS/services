@@ -21,6 +21,7 @@ impl Transport for LocalTransport {
             protocol::OP_SIGNAL_THREAD_MASK
                 | protocol::OP_SIGNAL_THREAD_DEQUEUE
                 | protocol::OP_SIGNAL_THREAD_PENDING
+                | protocol::OP_SIGNAL_IMAGE_STARTED
         ) {
             self.service.borrow_mut().handle_thread_signal_request(
                 self.peer,

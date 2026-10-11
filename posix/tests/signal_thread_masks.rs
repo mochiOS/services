@@ -23,6 +23,7 @@ impl Transport for LocalTransport {
             protocol::OP_SIGNAL_THREAD_MASK
                 | protocol::OP_SIGNAL_THREAD_DEQUEUE
                 | protocol::OP_SIGNAL_THREAD_PENDING
+                | protocol::OP_SIGNAL_IMAGE_STARTED
         ) {
             self.service.borrow_mut().handle_thread_signal_request(
                 self.peer,
@@ -723,4 +724,145 @@ fn reclaiming_abandoned_deliveries_frees_capacity_without_touching_live_owners()
         .unwrap();
     assert_eq!(live.pending_signals().unwrap(), 0);
     assert_eq!(live.thread_dequeue_signal_delivery().unwrap().signal, 0);
+}
+
+#[test]
+fn image_start_reclaims_only_callers_deliveries_and_preserves_mask_and_pending() {
+    let service = service();
+    let caller = client(&service, 101, 501);
+    let sibling = client(&service, 101, 502);
+    let other = client(&service, 102, 501);
+    for thread in [&caller, &sibling, &other] {
+        thread
+            .thread_signal_mask(protocol::SIGNAL_MASK_INITIALIZE, 0)
+            .unwrap();
+    }
+    let mut old = Vec::new();
+    let mut live = Vec::new();
+    for index in 0..protocol::SIGNAL_MAX {
+        caller.send_signal(101, 30).unwrap();
+        let delivery = if index % 2 == 0 {
+            caller.thread_dequeue_signal_delivery().unwrap()
+        } else {
+            sibling.thread_dequeue_signal_delivery().unwrap()
+        };
+        if index % 2 == 0 {
+            old.push(delivery);
+        } else {
+            live.push(delivery);
+        }
+    }
+    other.send_signal(102, 30).unwrap();
+    let foreign = other.thread_dequeue_signal_delivery().unwrap();
+    caller
+        .thread_signal_mask(protocol::SIGNAL_MASK_SET, 1 << 30)
+        .unwrap();
+    caller.send_signal(101, 31).unwrap();
+    assert_eq!(
+        sibling.thread_dequeue_signal_delivery(),
+        Err(ClientError::Remote(protocol::STATUS_EAGAIN))
+    );
+    assert_eq!(caller.signal_image_started().unwrap(), 0);
+    assert_eq!(
+        caller
+            .thread_signal_mask(protocol::SIGNAL_MASK_QUERY, 0)
+            .unwrap(),
+        1 << 30
+    );
+    assert_eq!(caller.thread_pending_signals().unwrap(), 1 << 30);
+    for delivery in old {
+        assert_eq!(
+            caller.complete_signal_delivery(delivery),
+            Err(ClientError::Remote(protocol::STATUS_EAGAIN))
+        );
+    }
+    let pending = sibling.thread_dequeue_signal_delivery().unwrap();
+    assert_eq!(pending.signal, 31);
+    sibling.complete_signal_delivery(pending).unwrap();
+    for delivery in live {
+        sibling.complete_signal_delivery(delivery).unwrap();
+    }
+    other.complete_signal_delivery(foreign).unwrap();
+    assert_eq!(caller.pending_signals().unwrap(), 0);
+}
+
+#[test]
+fn image_start_requires_authenticated_identity_and_empty_payload_before_mutation() {
+    let service = service();
+    let caller = client(&service, 101, 501);
+    caller
+        .thread_signal_mask(protocol::SIGNAL_MASK_INITIALIZE, 0)
+        .unwrap();
+    caller
+        .set_signal_disposition(protocol::SignalDisposition {
+            signal: 30,
+            kind: protocol::SIGNAL_DISPOSITION_CAUGHT,
+            child_options: 0,
+        })
+        .unwrap();
+    caller.send_signal(101, 30).unwrap();
+    let delivery = caller.thread_dequeue_signal_delivery().unwrap();
+    let header = protocol::Header {
+        opcode: protocol::OP_SIGNAL_IMAGE_STARTED,
+        ..Default::default()
+    };
+    assert_eq!(
+        service
+            .borrow_mut()
+            .handle(peer(101), header, &[])
+            .header
+            .status,
+        -22
+    );
+    for (identity, flags, payload, expected) in [
+        (
+            ExecutionIdentity {
+                process_id: 102,
+                thread_id: 501,
+            },
+            0,
+            &[][..],
+            protocol::STATUS_EPERM,
+        ),
+        (
+            ExecutionIdentity {
+                process_id: 101,
+                thread_id: 0,
+            },
+            0,
+            &[][..],
+            protocol::STATUS_EPERM,
+        ),
+        (
+            ExecutionIdentity {
+                process_id: 101,
+                thread_id: 501,
+            },
+            1,
+            &[][..],
+            -22,
+        ),
+        (
+            ExecutionIdentity {
+                process_id: 101,
+                thread_id: 501,
+            },
+            0,
+            &[1][..],
+            -22,
+        ),
+    ] {
+        let response = service.borrow_mut().handle_thread_signal_request(
+            peer(101),
+            identity,
+            protocol::Header { flags, ..header },
+            payload,
+        );
+        assert_eq!(response.header.status, expected);
+        assert_eq!(
+            caller.signal_disposition(30).unwrap().kind,
+            protocol::SIGNAL_DISPOSITION_CAUGHT
+        );
+    }
+    caller.complete_signal_delivery(delivery).unwrap();
 }
