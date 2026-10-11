@@ -15,7 +15,7 @@ fn main() {
     use mochi_user_platform as platform;
     use mochios_filesystem_protocol as filesystem_protocol;
     use mochios_posix_protocol as protocol;
-    use posix_service::{AttachedObject, PeerIdentity, PosixService};
+    use posix_service::{AttachedObject, PosixService};
 
     let _ = platform::logger::init_from_env();
     platform::logln!("posix.service: start");
@@ -170,17 +170,17 @@ fn main() {
             })
             .collect();
         let sender_context = platform::process::thread_security_context(sender).ok();
-        let peer = sender_context.as_ref().map(|context| PeerIdentity {
-            process_id: context.process_id,
-            effective_uid: context.effective_uid,
-            effective_gid: context.effective_gid,
-        });
+        let peer = sender_context
+            .as_ref()
+            .and_then(|context| service.registered_peer(context.process_id));
         let decoded = request_bytes
             .get(..length)
             .and_then(|bytes| protocol::decode(bytes).ok());
         if attachments_valid
             && attachments.is_empty()
-            && peer.is_some_and(|peer| peer.process_id == service_process_id)
+            && sender_context
+                .as_ref()
+                .is_some_and(|context| context.process_id == service_process_id)
             && let Some((terminal_id, signal)) = decode_pty_signal(&request_bytes[..length])
         {
             let status = service
@@ -190,20 +190,8 @@ fn main() {
             let _ = platform::ipc::reply(sender, &status.to_le_bytes());
             continue;
         }
-        let registration_valid = match (peer, decoded) {
-            (Some(peer), Some((header, payload)))
-                if header.opcode == protocol::OP_SESSION_REGISTER
-                    && header.flags == 0
-                    && payload.is_empty()
-                    && attachments.is_empty()
-                    && attachments_valid =>
-            {
-                bind_sender_process(&mut service, peer, sender).is_ok()
-            }
-            _ => true,
-        };
         let mut retained_handle = None;
-        let object_response = match (peer, decoded, attachments_valid && registration_valid) {
+        let object_response = match (peer, decoded, attachments_valid) {
             (Some(peer), Some((header, payload)), true)
                 if header.opcode == protocol::OP_PTY_OPEN
                     && header.flags == 0
@@ -1088,47 +1076,6 @@ fn adopt_launched_child(
         },
         filesystem,
     )
-}
-
-#[cfg(target_os = "mochios")]
-fn bind_sender_process(
-    service: &mut posix_service::PosixService<u32>,
-    peer: posix_service::PeerIdentity,
-    sender: u64,
-) -> Result<(), ()> {
-    use mochi_user_platform as platform;
-
-    if service.process_handle(peer.process_id).is_some() {
-        return Ok(());
-    }
-    let required_rights =
-        platform::handle::HANDLE_RIGHT_WAIT | platform::handle::HANDLE_RIGHT_SIGNAL;
-    let handle = platform::process::open_handle_for_endpoint(sender, required_rights)
-        .map_err(|_| ())?;
-    match platform::process::handle_status(handle) {
-        Ok(status) if status.process_id == peer.process_id => {}
-        _ => {
-            let _ = platform::handle::close(handle);
-            return Err(());
-        }
-    }
-    match service.bind_process(
-        peer,
-        posix_service::AuthenticatedProcess {
-            handle,
-            process_id: peer.process_id,
-        },
-    ) {
-        Ok(true) => Ok(()),
-        Ok(false) => {
-            let _ = platform::handle::close(handle);
-            Ok(())
-        }
-        Err(_) => {
-            let _ = platform::handle::close(handle);
-            Err(())
-        }
-    }
 }
 
 #[cfg(target_os = "mochios")]

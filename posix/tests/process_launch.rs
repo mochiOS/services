@@ -125,7 +125,7 @@ fn native_launch_checks_both_process_objects_and_retains_only_the_child() {
         .split("fn adopt_launched_child(")
         .nth(1)
         .unwrap()
-        .split("fn bind_sender_process(")
+        .split("fn invalid_response(")
         .next()
         .unwrap();
     assert!(implementation.contains("requester.rights != platform::handle::HANDLE_RIGHT_WAIT"));

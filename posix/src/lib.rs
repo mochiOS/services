@@ -615,6 +615,18 @@ impl<H: Copy> PosixService<H> {
         self.sessions.get(&process_id)
     }
 
+    /// Resolve an IPC-authenticated native process ID to an initialized POSIX
+    /// environment. Native UID/GID fields are not credentials for this layer.
+    pub fn registered_peer(&self, process_id: u64) -> Option<PeerIdentity> {
+        self.processes.get(&process_id)?;
+        let session = self.sessions.get(&process_id)?;
+        Some(PeerIdentity {
+            process_id,
+            effective_uid: session.effective_uid,
+            effective_gid: session.effective_gid,
+        })
+    }
+
     pub fn session_directories(&self, process_id: u64) -> Option<&SessionDirectories<H>> {
         self.directories.get(&process_id)
     }
