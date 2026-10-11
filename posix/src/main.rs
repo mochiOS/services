@@ -620,8 +620,15 @@ fn start_pty_provider(
                     return;
                 }
             };
+            let identity = match platform::process::current_execution_identity() {
+                Ok(identity) => identity,
+                Err(error) => {
+                    worker_startup.store(error.raw(), Ordering::Release);
+                    return;
+                }
+            };
             worker_startup.store(i64::from(endpoint), Ordering::Release);
-            run_pty_provider(endpoint, control_endpoint, ptys);
+            run_pty_provider(endpoint, control_endpoint, ptys, identity.process_id);
         })
         .map_err(|_| -5)?;
     loop {
@@ -638,6 +645,7 @@ fn run_pty_provider(
     endpoint: u32,
     control_endpoint: u32,
     ptys: std::sync::Arc<std::sync::Mutex<posix_service::pty::PtyManager>>,
+    service_process_id: u64,
 ) -> ! {
     use mnu_abi::provider;
     use mochi_user_platform as platform;
@@ -689,7 +697,14 @@ fn run_pty_provider(
             let _ = platform::handle::close(attachment.handle);
         }
         if request[..request_length].starts_with(&PTY_SYNC_MAGIC) {
-            let status = handle_pty_sync_request(&ptys, &request[..request_length]);
+            let identity = platform::ipc::endpoint_execution_identity(sender).ok();
+            let status = handle_pty_sync_request(
+                &ptys,
+                &request[..request_length],
+                identity,
+                service_process_id,
+                attachments.count,
+            );
             let _ = platform::ipc::reply(sender, &status.to_le_bytes());
             continue;
         }
@@ -806,14 +821,23 @@ fn identify_pty_terminal(endpoint: u32, terminal: u32) -> Result<u64, i32> {
 fn handle_pty_sync_request(
     ptys: &std::sync::Mutex<posix_service::pty::PtyManager>,
     request: &[u8],
+    sender: Option<mnu_abi::ExecutionIdentity>,
+    service_process_id: u64,
+    attached_count: u32,
 ) -> i64 {
     use mochi_user_platform as platform;
 
-    if request.len() != 20 || request[..4] != PTY_SYNC_MAGIC {
-        return -22;
-    }
-    let master = u64::from_le_bytes(request[4..12].try_into().unwrap());
-    let slave = u64::from_le_bytes(request[12..20].try_into().unwrap());
+    let pair = match posix_service::pty::authorize_sync_request(
+        request,
+        sender,
+        service_process_id,
+        attached_count,
+    ) {
+        Ok(pair) => pair,
+        Err(error) => return -(i64::from(error)),
+    };
+    let master = pair.master_object_id;
+    let slave = pair.slave_object_id;
     let manager = match ptys.lock() {
         Ok(manager) => manager,
         Err(_) => return -5,

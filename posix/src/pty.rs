@@ -5,6 +5,7 @@ use mnu_abi::provider;
 use mochios_posix_protocol as posix_protocol;
 
 pub const EIO: i32 = 5;
+pub const EACCES: i32 = 13;
 pub const EAGAIN: i32 = 11;
 pub const EBADF: i32 = 9;
 pub const EINVAL: i32 = 22;
@@ -44,6 +45,31 @@ fn terminal_attributes_supported(attributes: posix_protocol::TerminalAttributes)
 pub struct PtyPair {
     pub master_object_id: u64,
     pub slave_object_id: u64,
+}
+
+/// Authenticate the service-private readiness synchronization message before
+/// accepting its provider-owned object IDs. Identity must come from native
+/// endpoint metadata, never from the request or attached objects.
+pub fn authorize_sync_request(
+    request: &[u8],
+    sender: Option<mnu_abi::ExecutionIdentity>,
+    service_process_id: u64,
+    attached_count: u32,
+) -> Result<PtyPair, i32> {
+    if service_process_id == 0
+        || !sender.is_some_and(|identity| {
+            identity.process_id == service_process_id && identity.thread_id != 0
+        })
+    {
+        return Err(EACCES);
+    }
+    if request.len() != 20 || request[..4] != *b"PTYS" || attached_count != 0 {
+        return Err(EINVAL);
+    }
+    Ok(PtyPair {
+        master_object_id: u64::from_le_bytes(request[4..12].try_into().unwrap()),
+        slave_object_id: u64::from_le_bytes(request[12..20].try_into().unwrap()),
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
