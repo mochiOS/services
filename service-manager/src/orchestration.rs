@@ -9,6 +9,7 @@ pub(crate) struct ChildProcesses<
     Compositor = u64,
     Network = u64,
     User = u64,
+    Update = u64,
 > {
     pub(crate) drivers: Option<Drivers>,
     pub(crate) mboot_agent: Option<u64>,
@@ -23,7 +24,7 @@ pub(crate) struct ChildProcesses<
     pub(crate) linux: Option<u64>,
     pub(crate) binder: Option<u64>,
     pub(crate) installer: Option<u64>,
-    pub(crate) update: Option<u64>,
+    pub(crate) update: Option<Update>,
     pub(crate) workspace: Option<u64>,
 }
 
@@ -59,15 +60,16 @@ pub(crate) struct BootstrapOutcome<
     Compositor = u64,
     Network = u64,
     User = u64,
+    Update = u64,
 > {
-    pub(crate) children: ChildProcesses<Input, Display, Drivers, Compositor, Network, User>,
+    pub(crate) children: ChildProcesses<Input, Display, Drivers, Compositor, Network, User, Update>,
     pub(crate) reason: StopReason,
     pub(crate) identity: Option<SessionIdentity>,
     pub(crate) session_id: u64,
 }
 
-impl<Input, Display, Drivers, Compositor, Network, User>
-    BootstrapOutcome<Input, Display, Drivers, Compositor, Network, User>
+impl<Input, Display, Drivers, Compositor, Network, User, Update>
+    BootstrapOutcome<Input, Display, Drivers, Compositor, Network, User, Update>
 {
     pub(crate) const fn initialization_failed() -> Self {
         Self {
@@ -95,11 +97,11 @@ impl<Input, Display, Drivers, Compositor, Network, User>
     }
 }
 
-impl<Input, Display, Drivers, Compositor, Network, User> Default
-    for ChildProcesses<Input, Display, Drivers, Compositor, Network, User>
+impl<Input, Display, Drivers, Compositor, Network, User, Update> Default
+    for ChildProcesses<Input, Display, Drivers, Compositor, Network, User, Update>
 {
     fn default() -> Self {
-        BootstrapOutcome::<Input, Display, Drivers, Compositor, Network, User>::initialization_failed()
+        BootstrapOutcome::<Input, Display, Drivers, Compositor, Network, User, Update>::initialization_failed()
             .children
     }
 }
@@ -111,6 +113,8 @@ pub(crate) trait BootstrapOperations {
     type CompositorProcess;
     type NetworkProcess;
     type UserProcess;
+    type UpdateProcess;
+    fn spawn_update(&mut self) -> Option<Self::UpdateProcess>;
     fn spawn_user(&mut self) -> Option<Self::UserProcess>;
     fn spawn_network(&mut self) -> Option<Self::NetworkProcess>;
     fn spawn_compositor(&mut self) -> Option<Self::CompositorProcess>;
@@ -158,6 +162,7 @@ pub(crate) fn orchestrate<O: BootstrapOperations>(
     O::CompositorProcess,
     O::NetworkProcess,
     O::UserProcess,
+    O::UpdateProcess,
 > {
     let mut children = ChildProcesses::default();
 
@@ -212,7 +217,7 @@ pub(crate) fn orchestrate<O: BootstrapOperations>(
 
     children.network = operations.spawn_network();
     if children.network.is_some() {
-        children.update = operations.spawn_fixed(FixedService::Update);
+        children.update = operations.spawn_update();
     }
     let Some(user) = operations.spawn_user() else {
         return outcome(children, StopReason::UserSpawnFailed);
@@ -275,10 +280,10 @@ pub(crate) fn orchestrate<O: BootstrapOperations>(
     }
 }
 
-const fn outcome<Input, Display, Drivers, Compositor, Network, User>(
-    children: ChildProcesses<Input, Display, Drivers, Compositor, Network, User>,
+const fn outcome<Input, Display, Drivers, Compositor, Network, User, Update>(
+    children: ChildProcesses<Input, Display, Drivers, Compositor, Network, User, Update>,
     reason: StopReason,
-) -> BootstrapOutcome<Input, Display, Drivers, Compositor, Network, User> {
+) -> BootstrapOutcome<Input, Display, Drivers, Compositor, Network, User, Update> {
     BootstrapOutcome {
         children,
         reason,
@@ -363,6 +368,11 @@ mod tests {
         type CompositorProcess = u64;
         type NetworkProcess = u64;
         type UserProcess = u64;
+        type UpdateProcess = u64;
+
+        fn spawn_update(&mut self) -> Option<Self::UpdateProcess> {
+            self.spawn_fixed(FixedService::Update)
+        }
 
         fn spawn_user(&mut self) -> Option<Self::UserProcess> {
             self.spawn_fixed(FixedService::User)

@@ -94,6 +94,7 @@ pub(crate) fn spawn_fixed_service(
             | FixedService::Compositor
             | FixedService::Network
             | FixedService::User
+            | FixedService::Update
     ) {
         return Err(sys_error(mochi_user_syscall::EINVAL));
     }
@@ -175,6 +176,20 @@ pub(crate) fn spawn_user_service(
         "user.service",
         logger_endpoint,
         ready_target,
+        posix_endpoint,
+    )
+}
+
+pub(crate) fn spawn_update_service(
+    logger_endpoint: u64,
+    posix_endpoint: platform::handle::Handle,
+) -> Result<NativeProcess, mochi_user_syscall::SysError> {
+    let mut arguments = fixed_service_arguments(FixedService::Update, logger_endpoint, None);
+    append_posix_handle(&mut arguments, Some(posix_endpoint));
+    spawn_native(
+        fixed_service_spec(FixedService::Update),
+        "update.service",
+        &arguments,
         posix_endpoint,
     )
 }

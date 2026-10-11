@@ -73,7 +73,14 @@ fn display_launch_and_readiness_use_retained_handles_without_legacy_fallback() {
     let orchestration = include_str!("../../service-manager/src/orchestration.rs");
     let fixed_spawn = &launcher[launcher.find("pub(crate) fn spawn_fixed_service(").unwrap()
         ..launcher.find("pub(crate) fn spawn_input_service(").unwrap()];
-    for native_only in ["Input", "Display", "Compositor", "Network", "User"] {
+    for native_only in [
+        "Input",
+        "Display",
+        "Compositor",
+        "Network",
+        "User",
+        "Update",
+    ] {
         assert!(fixed_spawn.contains(&format!("FixedService::{native_only}")));
     }
     assert!(launcher.contains("FixedService::Display,\n        \"display.driver\""));
@@ -138,6 +145,26 @@ fn user_creation_and_readiness_use_native_owned_process_handles() {
     assert!(orchestration.contains("operations.spawn_user()"));
     assert!(orchestration.contains("operations.wait_user_ready(children.user.as_ref().unwrap())"));
     assert!(!orchestration.contains("operations.spawn_fixed(FixedService::User)"));
+}
+
+#[test]
+fn update_creation_keeps_a_native_owner_without_legacy_fallback() {
+    let launcher = include_str!("../../service-manager/src/service_launcher.rs");
+    let start = launcher
+        .find("pub(crate) fn spawn_update_service(")
+        .unwrap();
+    let end = start + launcher[start..].find("fn spawn_native_fixed(").unwrap();
+    let update = &launcher[start..end];
+    assert!(update.contains("Result<NativeProcess,"));
+    assert!(update.contains("append_posix_handle(&mut arguments, Some(posix_endpoint))"));
+    assert!(update.contains("spawn_native("));
+    assert!(!update.contains("spawn("));
+    let bootstrap = include_str!("../../service-manager/src/bootstrap.rs");
+    assert!(bootstrap.contains("type UpdateProcess = NativeProcess;"));
+    let orchestration = include_str!("../../service-manager/src/orchestration.rs");
+    assert!(orchestration.contains("update: Option<Update>"));
+    assert!(orchestration.contains("children.update = operations.spawn_update();"));
+    assert!(!orchestration.contains("children.update = operations.spawn_fixed("));
 }
 
 #[test]

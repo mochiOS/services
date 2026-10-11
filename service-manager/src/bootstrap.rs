@@ -176,6 +176,23 @@ impl BootstrapOperations for Runtime {
     type CompositorProcess = NativeProcess;
     type NetworkProcess = NativeProcess;
     type UserProcess = NativeProcess;
+    type UpdateProcess = NativeProcess;
+
+    fn spawn_update(&mut self) -> Option<Self::UpdateProcess> {
+        match service_launcher::spawn_update_service(self.logger_endpoint, self.posix_endpoint?) {
+            Ok(process) => {
+                eprintln!("service-manager.service: update.service native process created");
+                Some(process)
+            }
+            Err(error) => {
+                eprintln!(
+                    "service-manager.service: update.service native spawn failed errno={}",
+                    errno(error)
+                );
+                None
+            }
+        }
+    }
 
     fn spawn_user(&mut self) -> Option<Self::UserProcess> {
         let endpoint = self.posix_endpoint?;
@@ -770,6 +787,7 @@ fn log_ready_error(service: ReadyService, error: ReadyError) {
 
 fn resident(
     outcome: BootstrapOutcome<
+        NativeProcess,
         NativeProcess,
         NativeProcess,
         NativeProcess,
