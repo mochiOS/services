@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <unistd.h>
 
 enum { HANDLE_CLOSE = 626, HANDLE_DUPLICATE = 627, MEMORY_OBJECT_CREATE = 671,
@@ -107,6 +108,31 @@ int main(void) {
     CHECK(pread(fd, actual, 1, 0) == 1 && actual[0] == 'Q');
     CHECK(msync(mapping, 4096, MS_SYNC) == 0);
     CHECK(munmap(mapping, 4096) == 0);
+    struct rlimit saved, limited;
+    CHECK(getrlimit(RLIMIT_NOFILE, &saved) == 0);
+    limited = saved;
+    limited.rlim_cur = (rlim_t)fd + 1;
+    CHECK(setrlimit(RLIMIT_NOFILE, &limited) == 0);
+    CHECK(sysconf(_SC_OPEN_MAX) == (long)limited.rlim_cur);
+    CHECK(dup(fd) == -1 && errno == EMFILE);
+    CHECK(fcntl(fd, F_DUPFD, (int)limited.rlim_cur) == -1 && errno == EINVAL);
+    CHECK(dup2(fd, (int)limited.rlim_cur + 1) == -1 && errno == EBADF);
+    CHECK(dup2(duplicate, duplicate) == duplicate);
+    CHECK(pread(duplicate, actual, 1, 0) == 1 && actual[0] == 'Q');
+    CHECK(open(path, O_WRONLY | O_TRUNC) == -1 && errno == EMFILE);
+    CHECK(lseek(fd, 0, SEEK_END) == 9000);
+    pipefds[0] = -7;
+    pipefds[1] = -8;
+    CHECK(pipe(pipefds) == -1 && errno == EMFILE);
+    CHECK(pipefds[0] == -7 && pipefds[1] == -8);
+    limited.rlim_cur = 0;
+    CHECK(setrlimit(RLIMIT_NOFILE, &limited) == 0);
+    CHECK(dup(fd) == -1 && errno == EMFILE);
+    CHECK(fcntl(fd, F_DUPFD, 0) == -1 && errno == EINVAL);
+    CHECK(setrlimit(RLIMIT_NOFILE, &saved) == 0);
+    int available = dup(fd);
+    CHECK(available >= 0 && close(available) == 0);
+    fprintf(stderr, "positioned-io: RLIMIT_NOFILE allocation, retained FDs and restore ok\n");
     CHECK(close(duplicate) == 0 && close(fd) == 0);
     CHECK(unlink(path) == 0);
     fprintf(stderr, "positioned-io: chunking and shared mapping coherence ok\n");

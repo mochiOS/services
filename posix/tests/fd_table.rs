@@ -198,6 +198,36 @@ fn exec_closes_only_cloexec_descriptors() {
 }
 
 #[test]
+fn lowering_the_allocation_limit_preserves_existing_high_descriptors() {
+    let mut table = FdTable::new();
+    let entry = Entry {
+        handle: 88,
+        rights: 1,
+        descriptor_flags: 0,
+    };
+    let mut handles = FakeHandles::default();
+    table.install_at(7, entry, &mut handles).unwrap();
+    assert_eq!(table.install_from(0, 1, entry), Ok(0));
+    assert_eq!(
+        table.install_from(0, 1, entry),
+        Err(FdError::InvalidDescriptor)
+    );
+    assert_eq!(
+        table.duplicate_from(7, 0, 1, false, &mut handles),
+        Err(FdError::InvalidDescriptor)
+    );
+    assert_eq!(table.get(7), Some(entry));
+    assert_eq!(
+        table.install_from(0, 0, entry),
+        Err(FdError::InvalidDescriptor)
+    );
+    assert!(handles.cloned.is_empty());
+    table.close(0, &mut handles).unwrap();
+    assert_eq!(table.install_from(0, 1, entry), Ok(0));
+    assert_eq!(table.get(7), Some(entry));
+}
+
+#[test]
 fn fast_path_resolves_local_fds_to_handles_before_io() {
     let mut table = FdTable::new();
     let fd = table
