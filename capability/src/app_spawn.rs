@@ -10,7 +10,6 @@ use crate::persistent_grant::{append_persistent_grant, has_persistent_grant};
 use crate::policy::{AppPromptPolicy, needs_app_prompt};
 use crate::resolver::{
     CapabilityDenyReason, application_identity, authorize_spawn, decide_binary_capabilities,
-    encode_identity_args, encode_nul_list,
 };
 
 pub(crate) const SPAWN_APP_OPCODE: u32 = 0x4150_5053;
@@ -52,7 +51,9 @@ pub(crate) fn spawn_application_from_manifest(
     policy: &AppPromptPolicy,
     sender: u64,
     buf: &[u8],
+    posix_endpoint: platform::handle::Handle,
 ) -> Result<u64, mochi_user_syscall::SysError> {
+    crate::persistent_grant::validate_posix_endpoint(posix_endpoint)?;
     if buf.len() <= core::mem::size_of::<SpawnAppRequestHeader>() || index.duplicate {
         return Err(mochi_user_syscall::SysError::from_raw(
             mochi_user_syscall::EINVAL as i64,
@@ -210,9 +211,8 @@ pub(crate) fn spawn_application_from_manifest(
             entry_path
         );
     }
-    let caps_nul = encode_nul_list(&caps);
     authorize_spawn(
-        sender,
+        0, // The native creator consumes its own separately authorized permit.
         entry_path,
         &identity,
         &caps,
@@ -220,7 +220,6 @@ pub(crate) fn spawn_application_from_manifest(
         crate::persistent_grant::read_file,
     )?;
     let mut spawn_items = Vec::new();
-    encode_identity_args(&identity, &mut spawn_items);
     spawn_items.push(format!(
         "{}MOCHI_EXECUTABLE_PATH={}",
         ENVIRONMENT_PREFIX, entry_path
@@ -243,16 +242,17 @@ pub(crate) fn spawn_application_from_manifest(
         }
     ));
     spawn_items.extend(items[1..].iter().cloned());
-    let args_nul = encode_spawn_args(&spawn_items)?;
-    platform::service::spawn_manifest_for_requester(
+    crate::native_app::launch(
         entry_path,
-        platform::service::ExecutionClass::Unprivileged,
+        &spawn_items,
+        posix_endpoint,
         sender,
-        Some(args_nul.as_slice()),
-        Some(caps_nul.as_slice()),
+        requester_context.process_id,
     )
 }
 
+// Early service bootstrap still uses the legacy metadata encoder until its
+// independent launch path is migrated. Application creation never uses it.
 pub(crate) fn encode_spawn_args(items: &[String]) -> Result<Vec<u8>, mochi_user_syscall::SysError> {
     let mut out = Vec::with_capacity(4096);
     out.resize(4096, 0);

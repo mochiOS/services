@@ -8,11 +8,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
 enum {
   IPC_CREATE = 587,
+  IPC_CREATE_HANDLE = 629,
   IPC_CALL = 588,
   FIND_PROCESS = 518,
   HANDLE_CLOSE = 626,
@@ -75,6 +77,50 @@ static void pause_tick(void) {
   nanosleep(&delay, 0);
 }
 
+static int application_spawn(int64_t authority) {
+  const char path[] = "/system/resources/native-credential-target.elf";
+  unsigned char request[512] = {0}, reply[16];
+  put32(request, 0x41505053); /* SPAWN_APP_OPCODE, attached POSIX endpoint. */
+  size_t length = 24;
+  memcpy(request + length, path, sizeof(path));
+  length += sizeof(path);
+  const char mode[] = "--application-child";
+  memcpy(request + length, mode, sizeof(mode));
+  length += sizeof(mode);
+  int count = snprintf((char *)request + length, sizeof(request) - length,
+                       "%llu", (unsigned long long)getpid());
+  CHECK(count > 0);
+  length += (size_t)count + 1;
+  int64_t posix = N(LAUNCH_HANDLE_GET, get64("POSXCTRL"), 0, 0);
+  int64_t impostor = N(IPC_CREATE_HANDLE, 0, 0, 0);
+  CHECK(posix > 0 && impostor > 0);
+  for (unsigned scenario = 0; scenario < 3; ++scenario) {
+    struct attachments handles = {0};
+    handles.count = 1;
+    handles.entries[0].handle = (uint32_t)(scenario == 1 ? impostor : posix);
+    handles.entries[0].rights = scenario == 0 ? 4 : 4 | (1ULL << 62) | (1ULL << 63);
+    int64_t message = native6(IPC_CALL_HANDLES, authority, (uint64_t)request, length,
+                              (uint64_t)reply, sizeof(reply), (uint64_t)&handles);
+    fprintf(stderr, "application-native: scenario %u message %lld length %u handles %u\n",
+            scenario, (long long)message, (unsigned)message, handles.count);
+    CHECK(message >= 0 && (uint32_t)message == sizeof(reply) && handles.count == 0);
+    fprintf(stderr, "application-native: scenario %u status %lld pid %llu\n", scenario,
+            (long long)get64(reply), (unsigned long long)get64(reply + 8));
+    /* The existing capability spawn reply carries positive errno values. */
+    CHECK(get64(reply) == (uint64_t)(scenario == 0 ? 22 : scenario == 1 ? 13 : 0));
+    if (scenario == 2) {
+      pid_t child = (pid_t)get64(reply + 8);
+      int status = 0;
+      CHECK(child > 0 && waitpid(child, &status, 0) == child);
+      CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 37);
+    }
+  }
+  CHECK(N(HANDLE_CLOSE, impostor, 0, 0) == 0);
+  fprintf(stderr, "application-native: PASS real capability launch, same-object "
+                  "endpoint validation, inherited uid/groups/umask/parent and POSIX wait\n");
+  return 0;
+}
+
 static int credential_child(uint64_t expected_parent) {
   if (expected_parent != 0)
     CHECK((uint64_t)getppid() == expected_parent);
@@ -101,6 +147,7 @@ static int credential_child(uint64_t expected_parent) {
   fprintf(stderr, "capability-posix: authorization result %lld status %lld\n",
           (long long)result, (long long)get64(reply));
   CHECK(result >= 0 && (uint32_t)result == 8 && get64(reply) == 0);
+  CHECK(application_spawn(authority) == 0);
   fprintf(stderr, "capability-posix: PASS native owner Handle inspection and "
                   "exec authorization for child uid 505/gid 24\n");
   fprintf(stderr, "fresh-spawn: child PASS newlib uid/gid/groups/umask and "
@@ -321,6 +368,15 @@ static int entropy_probe(void) {
 }
 
 int main(int argc, char **argv) {
+  if (argc == 3 && strcmp(argv[1], "--application-child") == 0) {
+    CHECK((uint64_t)getppid() == strtoull(argv[2], NULL, 10));
+    CHECK(getuid() == 505 && geteuid() == 505 && getgid() == 24 && getegid() == 24);
+    gid_t groups[2] = {0};
+    CHECK(getgroups(2, groups) == 2 && groups[0] == 10 && groups[1] == 20);
+    CHECK(umask(022) == 027);
+    CHECK(setuid(0) == -1 && errno == EPERM);
+    return 37;
+  }
   if (argc == 2 && strcmp(argv[1], "--credential-child") == 0)
     return credential_child(0);
   if (argc == 3 && strcmp(argv[1], "--launched-child") == 0) {

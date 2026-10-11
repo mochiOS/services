@@ -2222,11 +2222,6 @@ fn launch_executable(executable: &str, arguments: &[String]) -> Result<u64, u64>
     let posix_rights = platform::handle::HANDLE_RIGHT_SEND
         | platform::handle::HANDLE_RIGHT_DUPLICATE
         | platform::handle::HANDLE_RIGHT_TRANSFER;
-    items.push(format!(
-        "{}{}:{posix_endpoint}:{posix_rights}",
-        mnu_abi::exec::INHERITED_HANDLE_PREFIX,
-        mochios_posix_protocol::CONTROL_HANDLE_KEY,
-    ));
     for name in SESSION_ENVIRONMENT_NAMES {
         if let Ok(value) = std::env::var(name)
             && !value.as_bytes().contains(&0)
@@ -2246,9 +2241,18 @@ fn launch_executable(executable: &str, arguments: &[String]) -> Result<u64, u64>
         cursor += item.len() + 1;
     }
     let mut reply = [0u8; 16];
-    let message = platform::ipc::call(service, &request, &mut reply)
+    let mut handles = platform::ipc::IpcObjectHandles::default();
+    handles.count = 1;
+    handles.handles[0].handle = posix_endpoint;
+    handles.handles[0].rights = posix_rights;
+    let destination = u32::try_from(service)
+        .map_err(|_| error::status_errno(mochi_user_syscall::EOVERFLOW as i64))?;
+    let message = platform::ipc::call_object_handles(destination, &request, &mut reply, &mut handles)
         .map_err(|error| error.errno().unwrap_or(error::status_errno(mochi_user_syscall::EIO as i64)))?;
-    if (message & 0xffff_ffff) as usize != reply.len() {
+    if handles.count != 0 || (message & 0xffff_ffff) as usize != reply.len() {
+        for attachment in handles.handles.iter().take(handles.count as usize) {
+            let _ = platform::handle::close(attachment.handle);
+        }
         return Err(error::status_errno(mochi_user_syscall::EINVAL as i64));
     }
     let status = u64::from_le_bytes(reply[..8].try_into().unwrap_or_default());

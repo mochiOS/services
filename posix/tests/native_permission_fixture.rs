@@ -18,7 +18,7 @@ requires = ["fs.read.all", "ipc.client", "ipc.server", "process.spawn", "system.
 [[binary]]
 path = "/system/resources/native-credential-target.elf"
 kind = "application"
-requires = []
+requires = ["ipc.client"]
 "#;
     let digest: [u8; 32] = Sha256::digest(manifest).into();
     let caps = [
@@ -169,6 +169,7 @@ fn permission_probe_matches_native_abi_and_never_edits_real_ui_policy() {
     let source = include_str!("native_permission_prompt.c");
     for (name, call) in [
         ("PROCESS_CREATE", Call::ProcessCreate),
+        ("IPC_CREATE_HANDLE", Call::IpcCreateHandle),
         ("IPC_RECV_HANDLES", Call::IpcRecvObjectHandles),
         ("IPC_CALL_HANDLES", Call::IpcCallObjectHandles),
     ] {

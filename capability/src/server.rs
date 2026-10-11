@@ -167,6 +167,32 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
             capability_reply(sender, status);
             continue;
         }
+        if opcode == SPAWN_APP_OPCODE {
+            let required = platform::handle::HANDLE_RIGHT_SEND
+                | platform::handle::HANDLE_RIGHT_DUPLICATE
+                | platform::handle::HANDLE_RIGHT_TRANSFER;
+            let valid = attached.count == 1
+                && attached.reserved == 0
+                && attached.handles[0].handle != 0
+                && attached.handles[0].reserved == 0
+                && attached.handles[0].rights == required;
+            let result = if valid {
+                spawn_application_from_manifest(
+                    &state.package_index,
+                    &state.app_prompt_policy,
+                    sender,
+                    slice,
+                    attached.handles[0].handle,
+                )
+            } else {
+                Err(mochi_user_syscall::SysError::from_raw(
+                    mochi_user_syscall::EINVAL as i64,
+                ))
+            };
+            close_received_handles(&attached);
+            reply_spawn(sender, result);
+            continue;
+        }
         if attached.count != 0 || attached.reserved != 0 {
             close_received_handles(&attached);
             capability_reply(sender, mochi_user_syscall::EINVAL);
@@ -367,16 +393,6 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                     .unwrap_or_else(|error| error.errno().unwrap_or(mochi_user_syscall::EIO))
             };
             capability_reply(sender, status);
-            continue;
-        }
-        if opcode == SPAWN_APP_OPCODE {
-            let result = spawn_application_from_manifest(
-                &state.package_index,
-                &state.app_prompt_policy,
-                sender,
-                slice,
-            );
-            reply_spawn(sender, result);
             continue;
         }
         if opcode == platform::capability::CAPABILITY_DECISION_OPCODE {

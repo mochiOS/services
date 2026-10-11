@@ -37,7 +37,7 @@ fn client_error(error: ClientError<mochi_user_syscall::SysError>) -> mochi_user_
     }
 }
 
-fn with_client<T>(
+pub(crate) fn with_client<T>(
     operation: impl FnOnce(&PosixClient) -> Result<T, ClientError<mochi_user_syscall::SysError>>,
 ) -> Result<T, mochi_user_syscall::SysError> {
     let client = POSIX_CLIENT
@@ -72,6 +72,20 @@ pub(crate) fn requester_context(
     crate::requester_context::read(endpoint, |process| {
         with_client(|client| client.process_session_info(process))
     })
+}
+
+pub(crate) fn validate_posix_endpoint(
+    endpoint: platform::handle::Handle,
+) -> Result<(), mochi_user_syscall::SysError> {
+    let same = with_client(|client| {
+        platform::handle::same_object(client.transport().endpoint(), endpoint)
+            .map_err(ClientError::Transport)
+    })?;
+    if same {
+        Ok(())
+    } else {
+        Err(sys_error(mochi_user_syscall::EACCES))
+    }
 }
 
 fn hex_digest(digest: &[u8; 32]) -> String {
