@@ -181,11 +181,12 @@ fn capture_is_immutable_not_a_live_process_reference() {
 }
 
 #[test]
-fn production_creation_replacement_and_clone_preserve_measurement() {
+fn production_creation_replacement_and_vm_snapshot_preserve_measurement() {
     let exec = include_str!("../../../core/src/syscall/exec.rs");
     assert!(exec.contains("proc.set_image_digest(Sha256::digest(data).into())"));
     assert!(exec.contains("process.set_image_digest(authorization.executable_digest)"));
-    let clone = include_str!("../../../core/src/syscall/process.rs");
-    assert!(clone.contains("p.image_digest()"));
-    assert!(clone.contains("child_proc.set_image_digest(digest)"));
+    let snapshot = include_str!("../../../core/src/mem/address_space.rs");
+    assert!(snapshot.contains("ImageOrigin::capture(process)"));
+    assert!(snapshot.contains("origin: self.origin"));
+    assert!(exec.contains("image.consume(&authorization, &context)"));
 }

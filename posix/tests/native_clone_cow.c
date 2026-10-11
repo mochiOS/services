@@ -1,18 +1,19 @@
 /* Isolated Compositor-slot probe using its existing process.spawn authority.
- * The legacy clone backend is under test, not endorsed as the final native
- * API. No POSIX RPC occurs between cloning and the source's first write.
- * The newlib section instead exercises AddressSpaceClone + ProcessCreate. */
+ * All execution cloning uses newlib's AddressSpaceClone + ProcessCreate path.
+ * Immediate source-TLB isolation is covered by native_snapshot_continuation.c. */
 #include <stdint.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
 extern int native_thread_register_probe(void);
 
 static volatile unsigned char private_value = 0x11;
 static int64_t native3(uint64_t number, uint64_t a, uint64_t b, uint64_t c) {
+    register uint64_t r10 __asm__("r10") = 0;
     __asm__ volatile("syscall" : "+a"(number)
-                     : "D"(a), "S"(b), "d"(c) : "rcx", "r11", "memory");
+                     : "D"(a), "S"(b), "d"(c), "r"(r10) : "rcx", "r11", "memory");
     return (int64_t)number;
 }
 #define CHECK(condition) do { \
@@ -23,8 +24,9 @@ static int64_t native3(uint64_t number, uint64_t a, uint64_t b, uint64_t c) {
 } while (0)
 
 int main(void) {
-    enum { PROCESS_CLONE = 644, RESUME = 645, WAIT = 643, CLOSE = 626, EXIT = 574,
-           SPACE_CLONE = 679, RIGHTS_GET = 664, DUPLICATE = 627, SAME_OBJECT = 666 };
+    CHECK(native3(644 /* removed combined-clone ABI */, 0, 0, 0) == -38);
+    enum { CLOSE = 626, SPACE_CLONE = 679, RIGHTS_GET = 664,
+           DUPLICATE = 627, SAME_OBJECT = 666, SHARED_PAGES = 548 };
     struct status { uint64_t id; uint32_t state, reserved; uint64_t code; } status;
     const uint64_t control = UINT64_C(1) << 8;
     const uint64_t duplicate = UINT64_C(1) << 62;
@@ -46,31 +48,6 @@ int main(void) {
         CHECK(native3(RIGHTS_GET, copy, 0, 0) == -9);
     }
     fprintf(stderr, "address-space-image: PASS detached images close and attenuate without process authority\n");
-    for (unsigned attempt = 0; attempt < 4; ++attempt) {
-        /* Populate a writable source translation immediately before clone. */
-        private_value = 0x11;
-        /* Nonzero and high-bit register values prove the kernel does not
-         * force the POSIX child return value. Avoid the errno range. */
-        const uint64_t resume_rax[] = {
-            0, UINT64_C(0x1122334455667788),
-            UINT64_C(0x87654321abcdef00), UINT64_C(0xffffffff00000000)
-        };
-        int64_t child = native3(PROCESS_CLONE, resume_rax[attempt], 0, 0);
-        if ((uint64_t)child == resume_rax[attempt]) {
-            native3(EXIT, private_value == 0x11 ? 37 : 99, 0, 0);
-            __builtin_unreachable();
-        }
-        CHECK(child > 0);
-        /* No intervening syscall may incidentally invalidate the source TLB. */
-        private_value = 0x22;
-        CHECK(native3(RESUME, child, 0, 0) == 0);
-        CHECK(native3(WAIT, child, UINT64_MAX, (uint64_t)&status) == 0);
-        CHECK(status.state == 2 && status.code == 37);
-        CHECK(private_value == 0x22);
-        CHECK(native3(CLOSE, child, 0, 0) == 0);
-    }
-    fprintf(stderr, "clone-cow: PASS warm source translations cannot write into cloned private pages\n");
-    fprintf(stderr, "clone-resume: PASS explicit 64-bit RAX values survive userspace restoration\n");
     pid_t child = fork();
     CHECK(child >= 0);
     if (child == 0) {
@@ -80,6 +57,18 @@ int main(void) {
     CHECK(waitpid(child, &exit_status, 0) == child);
     CHECK(WIFEXITED(exit_status) && WEXITSTATUS(exit_status) == 37);
     fprintf(stderr, "clone-resume: PASS newlib fork selects zero in the child and waitpid reaps it\n");
+    pid_t children[4];
+    for (unsigned index = 0; index < 4; ++index) {
+        child = fork();
+        CHECK(child >= 0);
+        if (child == 0) _exit((int)index + 5);
+        children[index] = child;
+    }
+    for (unsigned index = 0; index < 4; ++index) {
+        CHECK(waitpid(children[index], &exit_status, 0) == children[index]);
+        CHECK(WIFEXITED(exit_status) && WEXITSTATUS(exit_status) == (int)index + 5);
+    }
+    fprintf(stderr, "native-fork: PASS removed clone ABI rejects calls; explicit creation supports concurrent children\n");
     for (unsigned attempt = 0; attempt < 3; ++attempt) {
         int channel[2];
         CHECK(pipe(channel) == 0);
@@ -140,8 +129,38 @@ int main(void) {
     CHECK(WIFEXITED(exit_status) && WEXITSTATUS(exit_status) == 40);
     CHECK(lseek(source, 0, SEEK_CUR) == 4);
     CHECK(lseek(alias, 0, SEEK_CUR) == 4);
+    volatile unsigned char *private_map = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                                               MAP_PRIVATE, source, 0);
+    CHECK(private_map != MAP_FAILED && private_map[0] == 0x7f);
+    volatile unsigned char *shared_map = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                                              MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    CHECK(shared_map != MAP_FAILED);
+    shared_map[0] = 0x21;
+    uint64_t physical_page = 0;
+    int64_t allocated = native3(SHARED_PAGES, 1,
+                                (uint64_t)&physical_page, 1);
+    CHECK(allocated > 0 && physical_page != 0);
+    volatile unsigned char *allocated_map = (void *)(uintptr_t)allocated;
+    allocated_map[0] = 0x21;
+    child = fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        if (private_map[0] != 0x7f || shared_map[0] != 0x21 ||
+            allocated_map[0] != 0x21) _exit(97);
+        private_map[0] = 0x5a;
+        shared_map[0] = 0x3c;
+        allocated_map[0] = 0x6d;
+        _exit(private_map[0] == 0x5a ? 42 : 98);
+    }
+    CHECK(waitpid(child, &exit_status, 0) == child);
+    CHECK(WIFEXITED(exit_status) && WEXITSTATUS(exit_status) == 42);
+    CHECK(private_map[0] == 0x7f && shared_map[0] == 0x3c && allocated_map[0] == 0x6d);
+    CHECK(munmap((void *)private_map, 4096) == 0);
+    CHECK(munmap((void *)shared_map, 4096) == 0);
+    CHECK(munmap((void *)allocated_map, 4096) == 0);
     CHECK(close(alias) == 0 && close(source) == 0);
     fprintf(stderr, "native-fork: PASS parent/child and dup aliases share the same file offset\n");
+    fprintf(stderr, "native-fork: PASS file-backed private COW, anonymous shared mappings and allocated shared pages\n");
     int thread_result = native_thread_register_probe();
     if (thread_result != 0) fprintf(stderr, "thread-registers: FAIL case %d\n", thread_result);
     CHECK(thread_result == 0);

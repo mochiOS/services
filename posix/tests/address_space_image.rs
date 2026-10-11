@@ -408,7 +408,7 @@ fn native_entrypoint_does_not_create_execution_or_capture_other_processes() {
         .split("pub fn clone_address_space() -> u64 {")
         .nth(1)
         .unwrap()
-        .split("fn clone_current_process(")
+        .split("pub fn suspend_current_process(")
         .next()
         .unwrap();
     assert!(clone.contains("caller_has_process_spawn_capability()"));
@@ -433,30 +433,21 @@ fn native_probe_numbers_match_authoritative_abi() {
         ("RIGHTS_GET", mnu_abi::SyscallNumber::HandleRightsGet),
         ("DUPLICATE", mnu_abi::SyscallNumber::HandleDuplicate),
         ("SAME_OBJECT", mnu_abi::SyscallNumber::HandleSameObject),
+        ("SHARED_PAGES", mnu_abi::SyscallNumber::AllocSharedPages),
     ] {
         assert!(probe.contains(&format!("{name} = {}", number as u64)));
     }
 }
 
 #[test]
-fn execution_clone_uses_the_same_vm_image_as_address_space_clone() {
+fn execution_creation_consumes_a_detached_vm_image_without_implicit_clone() {
     let source = include_str!("../../../core/src/syscall/process.rs");
-    let clone = source
-        .split("fn clone_current_process(")
-        .nth(1)
-        .unwrap()
-        .split("pub fn clone_process(")
-        .next()
-        .unwrap();
-    assert!(clone.contains("CloneSource::capture(p)"));
-    assert!(clone.contains("vm_source.clone_image()"));
-    assert!(clone.contains("vm_image.install(&mut child_proc)"));
-    assert!(!clone.contains("clone_user_page_table("));
-    assert!(!clone.contains("ForkPagePolicy"));
-    assert!(
-        clone.find("if user_context.rip == 0").unwrap()
-            < clone.find("vm_source.clone_image()").unwrap()
-    );
+    assert!(!source.contains("fn clone_current_process("));
+    let exec = include_str!("../../../core/src/syscall/exec.rs");
+    assert!(exec.contains("KernelObject::AddressSpace"));
+    assert!(exec.contains("image.install(&mut process)"));
+    assert!(!exec.contains("clone_user_page_table("));
+    assert!(!exec.contains("clone_object_handles"));
     let process = include_str!("../../../core/src/task/process.rs");
     assert!(!process.contains("clone_memory_regions_for_fork"));
 }
