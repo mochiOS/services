@@ -9,3 +9,4 @@ pub mod positioned_io;
 pub mod service;
 pub mod storage;
 pub mod bootstrap_read;
+pub mod bootstrap_ipc;

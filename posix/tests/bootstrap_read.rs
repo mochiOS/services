@@ -25,6 +25,14 @@ impl Fixture {
         std::fs::create_dir(source.join("directory")).unwrap();
         std::fs::write(source.join("file"), b"0123456789abcdef").unwrap();
         std::fs::write(source.join("empty"), b"").unwrap();
+        let large: Vec<u8> = (0..130_000).map(|index| (index % 251) as u8).collect();
+        std::fs::write(source.join("large"), large).unwrap();
+        std::fs::create_dir(source.join("long-names")).unwrap();
+        for index in 0..140 {
+            let name = format!("{index:03}{}", "x".repeat(252));
+            std::fs::write(source.join("long-names").join(name), []).unwrap();
+        }
+        std::os::unix::fs::symlink("loop", source.join("loop")).unwrap();
         for name in ["alpha", "beta", "gamma", "delta"] {
             std::fs::write(source.join("directory").join(name), name.as_bytes()).unwrap();
         }
@@ -193,6 +201,189 @@ fn bootstrap_errors_preserve_path_and_object_failures() {
 
 struct Disk(std::fs::File);
 
+fn bootstrap_request(opcode: u16, path: &[u8], offset: u64, budget: u32) -> Vec<u8> {
+    use mochios_filesystem_protocol as wire;
+    let mut message = vec![0; wire::HEADER_LEN + path.len()];
+    wire::encode(
+        wire::Header {
+            opcode,
+            request_id: 123,
+            offset,
+            flags: budget,
+            length: path.len() as u32,
+            ..wire::Header::default()
+        },
+        path,
+        &mut message,
+    )
+    .unwrap();
+    message
+}
+
+fn bootstrap_response(
+    reader: &BootstrapReader,
+    request: &[u8],
+    budget: usize,
+) -> (mochios_filesystem_protocol::Header, Vec<u8>) {
+    use mochios_filesystem_protocol as wire;
+    let mut reply = vec![0xaa; wire::HEADER_LEN + budget];
+    let length = filesystem_service::bootstrap_ipc::respond(reader, request, &mut reply).unwrap();
+    assert!(length <= reply.len());
+    assert!(reply[length..].iter().all(|byte| *byte == 0xaa));
+    let (header, payload) = wire::decode(&reply[..length]).unwrap();
+    assert_eq!(header.opcode, wire::OP_STATUS);
+    assert_eq!(length, wire::HEADER_LEN + payload.len());
+    (header, payload.to_vec())
+}
+
+#[test]
+fn bootstrap_wire_reads_are_bounded_and_report_eof_and_typed_errors() {
+    use filesystem_service::bootstrap_ipc::{EOF, MAX_TRANSFER};
+    use mochios_filesystem_protocol as wire;
+    let fixture = Fixture::new();
+    let reader = fixture.reader();
+    for (offset, expected, next, eof) in [
+        (3, b"3456".as_slice(), 7, 0),
+        (14, b"ef", 16, EOF),
+        (16, b"", 16, EOF),
+    ] {
+        let (header, bytes) = bootstrap_response(
+            &reader,
+            &bootstrap_request(wire::OP_READ, b"/file", offset, 4),
+            4,
+        );
+        assert_eq!(header.request_id, 123);
+        assert_eq!(header.status, 0);
+        assert_eq!(header.offset, next);
+        assert_eq!(header.flags, eof);
+        assert_eq!(bytes, expected);
+    }
+    for (path, offset, budget, status) in [
+        (b"/missing".as_slice(), 0, 4, -2),
+        (b"/directory", 0, 4, -21),
+        (b"/file", u64::MAX, 4, -22),
+        (b"/file", 0, 0, -22),
+        (b"/file", 0, MAX_TRANSFER as u32 + 1, -22),
+        (b"relative", 0, 4, -22),
+        (b"/file\0suffix", 0, 4, -22),
+        (b"/\xff", 0, 4, -22),
+    ] {
+        let (header, bytes) = bootstrap_response(
+            &reader,
+            &bootstrap_request(wire::OP_READ, path, offset, budget),
+            4,
+        );
+        assert_eq!(header.status, status);
+        assert_eq!(header.request_id, 123);
+        assert!(bytes.is_empty());
+        assert_eq!(header.flags, 0);
+    }
+    let request = bootstrap_request(wire::OP_READ, b"/file", 0, MAX_TRANSFER as u32);
+    let (header, bytes) = bootstrap_response(&reader, &request, MAX_TRANSFER);
+    assert_eq!(header.status, 0);
+    assert_eq!(bytes, b"0123456789abcdef");
+    assert_eq!(header.flags, EOF);
+}
+
+#[test]
+fn bootstrap_wire_directory_pages_preserve_cookies_and_stay_within_budget() {
+    use filesystem_service::bootstrap_ipc::EOF;
+    use mochios_filesystem_protocol as wire;
+    let fixture = Fixture::new();
+    let reader = fixture.reader();
+    let expected = reader
+        .read_directory("/directory", 0, 20, 1024)
+        .unwrap()
+        .names;
+    let mut names = Vec::new();
+    let mut cursor = 0;
+    for _ in 0..20 {
+        let (header, bytes) = bootstrap_response(
+            &reader,
+            &bootstrap_request(wire::OP_READDIR, b"/directory", cursor, 32),
+            32,
+        );
+        assert_eq!(header.status, 0);
+        assert_eq!(header.request_id, 123);
+        assert!(bytes.len() <= 32);
+        let mut remaining = bytes.as_slice();
+        while !remaining.is_empty() {
+            let (entry, name, consumed) = wire::decode_dir_entry(remaining).unwrap();
+            assert_eq!(entry.node_id, 0);
+            assert_eq!(entry.kind, 0);
+            assert!(![b".".as_slice(), b".."].contains(&name));
+            names.push(std::str::from_utf8(name).unwrap().to_owned());
+            remaining = &remaining[consumed..];
+        }
+        if header.flags == EOF {
+            break;
+        }
+        assert!(header.offset > cursor);
+        cursor = header.offset;
+    }
+    assert_eq!(names, expected);
+    for (path, budget, expected) in [
+        (b"/file".as_slice(), 32, -20),
+        (b"/missing", 32, -2),
+        (b"/directory", 16, -22),
+        (b"/directory", 17, -22),
+    ] {
+        let (header, bytes) = bootstrap_response(
+            &reader,
+            &bootstrap_request(wire::OP_READDIR, path, 0, budget),
+            32,
+        );
+        assert_eq!(header.status, expected);
+        assert!(bytes.is_empty());
+    }
+}
+
+#[test]
+fn bootstrap_wire_rejects_mutation_object_ids_and_malformed_frames() {
+    use mochios_filesystem_protocol as wire;
+    let fixture = Fixture::new();
+    let reader = fixture.reader();
+    for opcode in [
+        wire::OP_WRITE,
+        wire::OP_UNLINK,
+        wire::OP_RENAME,
+        wire::OP_OPEN,
+        wire::OP_MOUNT,
+        wire::OP_STATUS,
+        u16::MAX,
+    ] {
+        let (header, bytes) =
+            bootstrap_response(&reader, &bootstrap_request(opcode, b"/file", 0, 4), 4);
+        assert_eq!(header.status, -38);
+        assert!(bytes.is_empty());
+    }
+    let valid = bootstrap_request(wire::OP_READ, b"/file", 0, 4);
+    for index in [16, 24, 32, 56, 60] {
+        let mut request = valid.clone();
+        request[index] = 1;
+        assert_eq!(bootstrap_response(&reader, &request, 4).0.status, -22);
+    }
+    for length in 0..valid.len() {
+        assert_eq!(
+            bootstrap_response(&reader, &valid[..length], 4).0.status,
+            -22
+        );
+    }
+    let mut extra = valid.clone();
+    extra.push(0);
+    assert_eq!(bootstrap_response(&reader, &extra, 4).0.status, -22);
+    for index in [0, 4, 48] {
+        let mut request = valid.clone();
+        request[index] ^= 0xff;
+        assert_eq!(bootstrap_response(&reader, &request, 4).0.status, -22);
+    }
+    // An undersized payload buffer is a wire error, not a partial success.
+    assert_eq!(bootstrap_response(&reader, &valid, 3).0.status, -22);
+    let mut short = [0; wire::HEADER_LEN - 1];
+    assert!(filesystem_service::bootstrap_ipc::respond(&reader, &valid, &mut short).is_err());
+    assert_eq!(reader.read("/file", 16).unwrap(), b"0123456789abcdef");
+}
+
 #[test]
 fn core_boot_policy_reads_use_user_space_storage_not_kernel_path_open() {
     let core = include_str!("../../core/src/main.rs");
@@ -217,6 +408,70 @@ impl SectorDevice for Disk {
     }
     fn flush(&mut self) -> Result<(), Self::Error> {
         panic!("bootstrap reader must not flush")
+    }
+}
+
+#[test]
+fn bootstrap_wire_large_files_and_maximum_names_paginate_without_loss() {
+    use filesystem_service::bootstrap_ipc::{EOF, MAX_TRANSFER};
+    use mochios_filesystem_protocol as wire;
+    let fixture = Fixture::new();
+    let reader = fixture.reader();
+    let expected = reader.read("/large", 130_000).unwrap();
+    let mut all = Vec::new();
+    let mut offset = 0;
+    loop {
+        let (header, bytes) = bootstrap_response(
+            &reader,
+            &bootstrap_request(wire::OP_READ, b"/large", offset, MAX_TRANSFER as u32),
+            MAX_TRANSFER,
+        );
+        assert_eq!(header.status, 0);
+        assert_eq!(header.offset, offset + bytes.len() as u64);
+        all.extend(bytes);
+        if header.flags == EOF {
+            break;
+        }
+        assert!(header.offset > offset);
+        offset = header.offset;
+    }
+    assert_eq!(all, expected);
+    for budget in [wire::DIRENT_HEADER_LEN + wire::MAX_NAME_LEN, MAX_TRANSFER] {
+        let mut cursor = 0;
+        let mut names = Vec::new();
+        loop {
+            let (header, bytes) = bootstrap_response(
+                &reader,
+                &bootstrap_request(wire::OP_READDIR, b"/long-names", cursor, budget as u32),
+                budget,
+            );
+            assert_eq!(header.status, 0);
+            let mut payload = bytes.as_slice();
+            let mut count = 0;
+            while !payload.is_empty() {
+                let (_, name, used) = wire::decode_dir_entry(payload).unwrap();
+                assert_eq!(name.len(), wire::MAX_NAME_LEN);
+                names.push(name.to_vec());
+                payload = &payload[used..];
+                count += 1;
+            }
+            assert!(count <= 128);
+            if header.flags == EOF {
+                break;
+            }
+            assert!(header.offset > cursor);
+            cursor = header.offset;
+        }
+        assert_eq!(names.len(), 140);
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), 140);
+    }
+    for (path, expected) in [(b"/file/child".as_slice(), -20), (b"/loop", -40)] {
+        let (header, bytes) =
+            bootstrap_response(&reader, &bootstrap_request(wire::OP_READ, path, 0, 4), 4);
+        assert_eq!(header.status, expected);
+        assert!(bytes.is_empty());
     }
 }
 
