@@ -11,10 +11,23 @@ use crate::service_launcher;
 use crate::session::ActiveSession;
 use crate::spawn_support::errno;
 
-#[derive(Clone, Copy)]
-pub(crate) struct PermissionPromptProcess {
-    process: u64,
+#[derive(Default)]
+pub(crate) struct PermissionPrompts {
+    process: Option<PermissionPromptProcess>,
+    pub(crate) deferred: alloc::collections::VecDeque<crate::readiness::DeferredMessage>,
+}
+
+struct PermissionPromptProcess {
+    process: crate::native_process::NativeProcess,
+    endpoint: platform::handle::Handle,
     token: u64,
+}
+
+impl Drop for PermissionPromptProcess {
+    fn drop(&mut self) {
+        self.process.terminate();
+        let _ = platform::handle::close(self.endpoint);
+    }
 }
 
 pub(crate) fn handle(
@@ -22,7 +35,7 @@ pub(crate) fn handle(
     sender: u64,
     session: Option<ActiveSession>,
     logger_endpoint: u64,
-    prompt_process: &mut Option<PermissionPromptProcess>,
+    prompt_process: &mut PermissionPrompts,
 ) {
     match decode_opcode(request_bytes) {
         Ok(Opcode::GrantDirectory) => handle_directory(
@@ -55,7 +68,7 @@ fn handle_storage(
     sender: u64,
     session: Option<ActiveSession>,
     logger_endpoint: u64,
-    prompt_process: &mut Option<PermissionPromptProcess>,
+    prompt_process: &mut PermissionPrompts,
 ) {
     let request_id = request_id(request_bytes);
     let result = AuthorizeStorageRequest::decode(request_bytes)
@@ -115,7 +128,7 @@ fn handle_directory(
     sender: u64,
     session: Option<ActiveSession>,
     logger_endpoint: u64,
-    prompt_process: &mut Option<PermissionPromptProcess>,
+    prompt_process: &mut PermissionPrompts,
 ) {
     let request_id = request_bytes
         .get(8..16)
@@ -149,7 +162,7 @@ fn handle_network(
     sender: u64,
     session: Option<ActiveSession>,
     logger_endpoint: u64,
-    prompt_process: &mut Option<PermissionPromptProcess>,
+    prompt_process: &mut PermissionPrompts,
 ) {
     let request_id = request_id(request_bytes);
     let result = RequestNetworkRequest::decode(request_bytes)
@@ -186,7 +199,7 @@ fn authorize_network(
 
 fn prompt_network(
     logger_endpoint: u64,
-    prompt_process: &mut Option<PermissionPromptProcess>,
+    prompt_process: &mut PermissionPrompts,
     bundle_id: &str,
 ) -> Result<(), u64> {
     let application = application_name(bundle_id);
@@ -257,7 +270,7 @@ fn authorize_request(
 
 fn prompt(
     logger_endpoint: u64,
-    prompt_process: &mut Option<PermissionPromptProcess>,
+    prompt_process: &mut PermissionPrompts,
     request: &GrantDirectoryRequest<'_>,
 ) -> Result<u64, u64> {
     let application = application_name(request.bundle_id);
@@ -279,8 +292,8 @@ fn prompt(
     platform::service_ready::generate_token().map_err(errno)
 }
 
-pub(crate) fn prewarm(prompt_process: &mut Option<PermissionPromptProcess>, logger_endpoint: u64) {
-    if prompt_process.is_some() {
+pub(crate) fn prewarm(prompt_process: &mut PermissionPrompts, logger_endpoint: u64) {
+    if prompt_process.process.is_some() {
         return;
     }
     let token = match platform::service_ready::generate_token() {
@@ -293,7 +306,35 @@ pub(crate) fn prewarm(prompt_process: &mut Option<PermissionPromptProcess>, logg
             return;
         }
     };
-    *prompt_process = service_launcher::spawn_permission_prompt_server(logger_endpoint, token)
+    let result = (|| {
+        let target = platform::service_ready::Target {
+            endpoint: platform::ipc::create()?,
+            token,
+        };
+        let process =
+            service_launcher::spawn_permission_prompt_server(logger_endpoint, token, target)?;
+        let endpoint = match crate::readiness::wait_for_published_endpoint(
+            token,
+            process.watch_target(),
+            &mut prompt_process.deferred,
+        ) {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                process.terminate();
+                platform::logln!(
+                    "service-manager.service: permission prompt readiness failed error={:?}",
+                    error
+                );
+                return Err(crate::spawn_support::sys_error(mochi_user_syscall::EIO));
+            }
+        };
+        Ok(PermissionPromptProcess {
+            process,
+            endpoint,
+            token,
+        })
+    })();
+    prompt_process.process = result
         .map_err(|error| {
             platform::logln!(
                 "service-manager.service: permission prompt prewarm failed errno={}",
@@ -301,17 +342,19 @@ pub(crate) fn prewarm(prompt_process: &mut Option<PermissionPromptProcess>, logg
             );
             error
         })
-        .ok()
-        .map(|process| PermissionPromptProcess { process, token });
+        .ok();
 }
 
 fn run_prompt(
     logger_endpoint: u64,
-    prompt_process: &mut Option<PermissionPromptProcess>,
+    prompt_process: &mut PermissionPrompts,
     request: PromptRequest<'_>,
 ) -> Result<(), u64> {
     prewarm(prompt_process, logger_endpoint);
-    let prompt = prompt_process.take().ok_or(mochi_user_syscall::EIO)?;
+    let prompt = prompt_process
+        .process
+        .take()
+        .ok_or(mochi_user_syscall::EIO)?;
     let request = match request {
         PromptRequest::Network { application, .. } => PromptRequest::Network {
             token: prompt.token,
@@ -345,33 +388,44 @@ fn run_prompt(
         .encode(&mut encoded)
         .map_err(|_| mochi_user_syscall::EINVAL)?;
     let mut reply = [0u8; 4];
-    let result = crate::spawn_support::call_with_wait(
-        prompt.process,
+    let mut handles = platform::ipc::IpcObjectHandles::default();
+    let result = platform::ipc::call_object_handles(
+        prompt.endpoint,
         &encoded[..length],
         &mut reply,
+        &mut handles,
     )
     .map_err(|error| {
         platform::logln!(
-            "service-manager.service: permission prompt IPC failed process={} errno={}",
-            prompt.process,
+            "service-manager.service: permission prompt IPC failed endpoint={} errno={}",
+            prompt.endpoint,
             errno(error)
         );
         errno(error)
     })
     .and_then(|message| {
         let length = (message & 0xffff_ffff) as usize;
-        if length != reply.len() {
+        if length != reply.len() || handles.count != 0 {
+            for attached in handles
+                .handles
+                .iter()
+                .take((handles.count as usize).min(handles.handles.len()))
+            {
+                if attached.handle != 0 {
+                    let _ = platform::handle::close(attached.handle);
+                }
+            }
             platform::logln!(
-                "service-manager.service: permission prompt reply invalid process={} bytes={}",
-                prompt.process,
+                "service-manager.service: permission prompt reply invalid endpoint={} bytes={}",
+                prompt.endpoint,
                 length
             );
             return Err(mochi_user_syscall::EIO);
         }
         let status = i32::from_le_bytes(reply);
         platform::logln!(
-            "service-manager.service: permission prompt reply process={} status={}",
-            prompt.process,
+            "service-manager.service: permission prompt reply endpoint={} status={}",
+            prompt.endpoint,
             status
         );
         if status == 0 {
@@ -380,6 +434,7 @@ fn run_prompt(
             Err(status.unsigned_abs() as u64)
         }
     });
+    drop(prompt);
     prewarm(prompt_process, logger_endpoint);
     result
 }

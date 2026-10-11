@@ -378,11 +378,26 @@ pub(crate) fn spawn_iommu_warning(
 pub(crate) fn spawn_permission_prompt_server(
     logger_endpoint: u64,
     token: u64,
-) -> Result<u64, mochi_user_syscall::SysError> {
-    let mut arguments = fixed_service_arguments(FixedService::SecureUi, logger_endpoint, None);
+    target: platform::service_ready::Target,
+) -> Result<NativeProcess, mochi_user_syscall::SysError> {
+    let posix_endpoint = platform::handle::inherited(mochios_posix_protocol::CONTROL_HANDLE_KEY)?;
+    let mut arguments = fixed_service_arguments(
+        FixedService::SecureUi,
+        logger_endpoint,
+        Some(ReadyTarget {
+            endpoint: target.endpoint,
+            token: target.token,
+        }),
+    );
     arguments.push("--permission-prompt-server".to_owned());
     arguments.push(alloc::format!("--permission-prompt-token={token}"));
-    spawn(fixed_service_spec(FixedService::SecureUi), &arguments)
+    append_posix_handle(&mut arguments, Some(posix_endpoint));
+    spawn_native(
+        fixed_service_spec(FixedService::SecureUi),
+        "secure-ui.service",
+        &arguments,
+        posix_endpoint,
+    )
 }
 
 fn session_user(uid: u32) -> Option<mochios_user_database::UserRecord> {

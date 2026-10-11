@@ -196,6 +196,30 @@ fn secure_login_launches_and_watches_retained_native_process_handles() {
 }
 
 #[test]
+fn permission_server_uses_native_creation_and_an_explicit_send_handle() {
+    let launcher = include_str!("../../service-manager/src/service_launcher.rs");
+    let start = launcher
+        .find("pub(crate) fn spawn_permission_prompt_server(")
+        .unwrap();
+    let end = start + launcher[start..].find("fn session_user(").unwrap();
+    let server = &launcher[start..end];
+    assert!(server.contains("Result<NativeProcess,"));
+    assert!(server.contains("platform::handle::inherited("));
+    assert!(server.contains("spawn_native("));
+    assert!(!server.contains("spawn("));
+    let portal = include_str!("../../service-manager/src/portal.rs");
+    assert!(portal.contains("process.watch_target()"));
+    assert!(portal.contains("platform::ipc::call_object_handles("));
+    assert!(!portal.contains("call_with_wait("));
+    let child = include_str!("../../secure-ui/src/permission_server.rs");
+    assert!(child.contains("platform::service_ready::notify_handle("));
+    assert!(child.contains("platform::ipc::wait_object_handles("));
+    assert!(!child.contains("platform::ipc::try_wait("));
+    assert!(child.contains("mochi_user_syscall::EIO as i32"));
+    assert!(child.find("platform::ipc::reply(").unwrap() < child.find("ui_error.map_or(").unwrap());
+}
+
+#[test]
 fn native_launch_owns_the_creation_reference_and_cleans_failed_resume() {
     let process = production::NativeProcess::create_and_resume(9, b"metadata").unwrap();
     assert_eq!(
@@ -222,6 +246,18 @@ fn native_launch_owns_the_creation_reference_and_cleans_failed_resume() {
         state.fail_resume = true;
     }
     assert!(production::NativeProcess::create_and_resume(9, b"metadata").is_err());
+    assert_eq!(
+        STATE.lock().unwrap().events,
+        ["create-stopped", "resume", "terminate", "close"]
+    );
+    {
+        let mut state = STATE.lock().unwrap();
+        state.events.clear();
+        state.fail_resume = false;
+    }
+    let process = production::NativeProcess::create_and_resume(9, b"metadata").unwrap();
+    process.terminate();
+    drop(process);
     assert_eq!(
         STATE.lock().unwrap().events,
         ["create-stopped", "resume", "terminate", "close"]

@@ -477,6 +477,47 @@ fn ready_result(status: i32) -> Result<(), ReadyError> {
     }
 }
 
+/// Wait for a one-shot child to publish its own endpoint. Other resident
+/// requests must remain queued; consuming them here would strand IPC callers.
+pub(crate) fn wait_for_published_endpoint(
+    token: u64,
+    target: ProcessWatchTarget,
+    deferred: &mut VecDeque<DeferredMessage>,
+) -> Result<platform::handle::Handle, ReadyError> {
+    let process = ProcessWatch::open(target).map_err(ReadyError::ProcessStatus)?;
+    let started = current_ticks()?;
+    loop {
+        if let Some(notification) = receive_notification()? {
+            match notification {
+                ReceivedNotification::Endpoint {
+                    token: received,
+                    status,
+                    endpoint,
+                } => {
+                    if received == token && status == 0 {
+                        return Ok(endpoint);
+                    }
+                    let _ = platform::handle::close(endpoint);
+                    return Err(if received == token && status != 0 {
+                        ReadyError::Failed(status)
+                    } else {
+                        ReadyError::InvalidMessage
+                    });
+                }
+                ReceivedNotification::Deferred(message) => deferred.push_back(message),
+                _ => return Err(ReadyError::InvalidMessage),
+            }
+        }
+        if let Some(status) = process.exit_status().map_err(ReadyError::ProcessStatus)? {
+            return Err(ReadyError::ProcessExited(status));
+        }
+        if current_ticks()?.saturating_sub(started) >= SERVICE_READY_TIMEOUT_TICKS {
+            return Err(ReadyError::TimedOut);
+        }
+        platform::thread::yield_now();
+    }
+}
+
 enum ReceivedNotification {
     Ready {
         token: u64,

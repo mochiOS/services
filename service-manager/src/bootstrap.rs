@@ -16,7 +16,7 @@ struct Runtime {
     ready: Option<ReadyHandshake>,
     mboot_agent: Option<(u64, u64)>,
     deferred_requests: VecDeque<DeferredMessage>,
-    permission_prompt: Option<crate::portal::PermissionPromptProcess>,
+    permission_prompt: crate::portal::PermissionPrompts,
     filesystem_endpoint: Option<platform::handle::Handle>,
     posix_endpoint: Option<platform::handle::Handle>,
 }
@@ -29,7 +29,7 @@ impl Runtime {
             ready: None,
             mboot_agent: None,
             deferred_requests: VecDeque::new(),
-            permission_prompt: None,
+            permission_prompt: crate::portal::PermissionPrompts::default(),
             filesystem_endpoint: None,
             posix_endpoint: None,
         })
@@ -852,10 +852,13 @@ fn resident(
     }
     let mut request_bytes = [0u8; 1024];
     loop {
-        let received = if let Some(deferred) = runtime
-            .as_mut()
-            .and_then(|runtime| runtime.deferred_requests.pop_front())
-        {
+        let received = if let Some(deferred) = runtime.as_mut().and_then(|runtime| {
+            runtime
+                .permission_prompt
+                .deferred
+                .pop_front()
+                .or_else(|| runtime.deferred_requests.pop_front())
+        }) {
             let length = deferred.bytes.len().min(request_bytes.len());
             request_bytes[..length].copy_from_slice(&deferred.bytes[..length]);
             (deferred.sender << 32) | length as u64
@@ -887,7 +890,7 @@ fn resident(
                     &mut runtime.permission_prompt,
                 );
             } else {
-                let mut prompt = None;
+                let mut prompt = crate::portal::PermissionPrompts::default();
                 crate::portal::handle(message, sender, active_session, 0, &mut prompt);
             }
             continue;

@@ -26,6 +26,10 @@ impl NativeProcess {
     pub(crate) fn watch_target(&self) -> crate::process_watch::ProcessWatchTarget {
         crate::process_watch::ProcessWatchTarget::RetainedHandle(self.handle)
     }
+
+    pub(crate) fn terminate(&self) {
+        let _ = platform::process::terminate_handle(self.handle, 127);
+    }
 }
 
 impl Drop for NativeProcess {
