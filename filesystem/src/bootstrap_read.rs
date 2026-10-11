@@ -7,12 +7,20 @@ use std::io;
 use std::sync::Arc;
 
 use ext4plus::{Ext4, FollowSymlinks};
+use ext4plus::{dir::Dir, inode::Inode};
 
 use crate::ext4::ImmutableExt4Storage;
 use crate::storage::{PartitionIo, SectorDevice};
 
 pub struct BootstrapReader {
     filesystem: Ext4,
+}
+
+pub struct BootstrapDirectoryPage {
+    pub names: Vec<String>,
+    /// Cookie in this immutable directory's on-disk entry order.
+    pub next_entry: u64,
+    pub eof: bool,
 }
 
 impl BootstrapReader {
@@ -27,26 +35,34 @@ impl BootstrapReader {
         Ok(Self { filesystem })
     }
 
-    pub fn read(&self, path: &str, maximum_bytes: usize) -> io::Result<Vec<u8>> {
-        if !path.starts_with('/') {
+    fn inode(&self, path: &str) -> io::Result<Inode> {
+        if !path.starts_with('/') || path.contains('\0') {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "absolute path required",
             ));
         }
-        let inode = self
-            .filesystem
+        self.filesystem
             .path_to_inode(
                 path.try_into().map_err(io::Error::other)?,
                 FollowSymlinks::All,
             )
-            .map_err(io::Error::other)?;
+            .map_err(io::Error::other)
+    }
+
+    fn regular_inode(&self, path: &str) -> io::Result<Inode> {
+        let inode = self.inode(path)?;
         if !inode.file_type().is_regular_file() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "regular file required",
             ));
         }
+        Ok(inode)
+    }
+
+    pub fn read(&self, path: &str, maximum_bytes: usize) -> io::Result<Vec<u8>> {
+        let inode = self.regular_inode(path)?;
         let length = usize::try_from(inode.metadata().len()).map_err(io::Error::other)?;
         if length > maximum_bytes {
             return Err(io::Error::new(
@@ -59,12 +75,36 @@ impl BootstrapReader {
         output.resize(length, 0);
         let mut file =
             ext4plus::file::File::open_inode(&self.filesystem, inode).map_err(io::Error::other)?;
+        Self::read_range(&mut file, &mut output, 0)?;
+        Ok(output)
+    }
+
+    /// Fill only the supplied range, without allocating the entire file.
+    /// The selected partition must remain immutable for this reader's lifetime.
+    pub fn read_at(&self, path: &str, offset: u64, output: &mut [u8]) -> io::Result<usize> {
+        offset.checked_add(output.len() as u64).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "bootstrap range overflow")
+        })?;
+        let inode = self.regular_inode(path)?;
+        let remaining = inode.metadata().len().saturating_sub(offset);
+        let length = remaining.min(output.len() as u64) as usize;
+        let mut file =
+            ext4plus::file::File::open_inode(&self.filesystem, inode).map_err(io::Error::other)?;
+        Self::read_range(&mut file, &mut output[..length], offset)?;
+        Ok(length)
+    }
+
+    fn read_range(
+        file: &mut ext4plus::file::File,
+        output: &mut [u8],
+        offset: u64,
+    ) -> io::Result<()> {
         let mut done = 0;
-        while done < length {
+        while done < output.len() {
             let count = file
-                .read_bytes_at(&mut output[done..], done as u64)
+                .read_bytes_at(&mut output[done..], offset + done as u64)
                 .map_err(io::Error::other)?;
-            if count == 0 || count > length - done {
+            if count == 0 || count > output.len() - done {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "incomplete boot generation file",
@@ -72,6 +112,69 @@ impl BootstrapReader {
             }
             done += count;
         }
-        Ok(output)
+        Ok(())
+    }
+
+    /// Paginate names with both entry and byte limits for bounded IPC replies.
+    /// Dot entries are consumed but never exposed to recursive package walkers.
+    pub fn read_directory(
+        &self,
+        path: &str,
+        start_entry: u64,
+        maximum_entries: usize,
+        maximum_name_bytes: usize,
+    ) -> io::Result<BootstrapDirectoryPage> {
+        if maximum_entries == 0 || maximum_name_bytes == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "empty directory page budget",
+            ));
+        }
+        let start = usize::try_from(start_entry).map_err(io::Error::other)?;
+        let inode = self.inode(path)?;
+        if !inode.file_type().is_dir() {
+            return Err(io::Error::from_raw_os_error(20));
+        }
+        let directory = Dir::open_inode(&self.filesystem, inode).map_err(io::Error::other)?;
+        let mut page = BootstrapDirectoryPage {
+            names: Vec::new(),
+            next_entry: start_entry,
+            eof: true,
+        };
+        let mut bytes = 0usize;
+        for (index, entry) in directory.read_dir().map_err(io::Error::other)?.enumerate() {
+            let entry = entry.map_err(io::Error::other)?;
+            if index < start {
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name
+                .as_str()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            if name != "." && name != ".." {
+                if page.names.len() == maximum_entries || name.len() > maximum_name_bytes - bytes {
+                    if page.names.is_empty() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "directory entry exceeds page budget",
+                        ));
+                    }
+                    page.eof = false;
+                    break;
+                }
+                page.names.try_reserve(1).map_err(io::Error::other)?;
+                let mut owned = String::new();
+                owned
+                    .try_reserve_exact(name.len())
+                    .map_err(io::Error::other)?;
+                owned.push_str(name);
+                page.names.push(owned);
+                bytes += name.len();
+            }
+            page.next_entry = page.next_entry.checked_add(1).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "directory cookie overflow")
+            })?;
+        }
+        Ok(page)
     }
 }
