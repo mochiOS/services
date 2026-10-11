@@ -7,6 +7,16 @@
 #include <time.h>
 #include <unistd.h>
 
+enum { EXECUTION_IDENTITY_READ = 677 };
+struct execution_identity { uint64_t process, thread; };
+static int64_t identity_read(struct execution_identity *identity, size_t length) {
+    uint64_t number = EXECUTION_IDENTITY_READ;
+    __asm__ volatile("syscall" : "+a"(number)
+                     : "D"(identity), "S"(length)
+                     : "rcx", "r11", "memory");
+    return (int64_t)number;
+}
+
 /* Run as an isolated early-boot Input replacement, with Input's unchanged
  * manifest and inherited POSIX endpoint. No storage or spawn authority needed.
  * This separates dictionary I/O from the IME parser; it is not a desktop test. */
@@ -17,6 +27,13 @@ static long long elapsed_ms(struct timespec start, struct timespec end) {
 
 int main(void) {
     fprintf(stderr, "dictionary-read: start\n");
+    struct execution_identity first, second;
+    if (identity_read(&first, sizeof(first)) || !first.process || !first.thread) return 17;
+    if (identity_read(&second, sizeof(second)) || first.process != second.process
+        || first.thread != second.thread) return 18;
+    if (identity_read(&second, sizeof(second) - 1) != -22
+        || identity_read(NULL, sizeof(second)) != -14) return 19;
+    fprintf(stderr, "dictionary-read: native execution identity ok\n");
     /* ext4plus's indirect-block reads allocate a zeroed filesystem block.
      * Measure that runtime cost independently of IPC and storage access. */
     struct timespec allocation_start, allocation_end;
