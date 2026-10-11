@@ -25,7 +25,7 @@ fn production_region_preserves_authority_offsets_and_access_when_sliced() {
         .unwrap();
     let implementation_start = source.find("impl MemoryRegion {").unwrap();
     let implementation_end = source
-        .find("/// プロセスが保持するUnix互換のユーザー資格情報。")
+        .find("/// Stable native process lifecycle object retained by `ProcessHandle`s")
         .unwrap();
     let mut probe = format!(
         "extern crate alloc; use alloc::sync::Arc;\n\

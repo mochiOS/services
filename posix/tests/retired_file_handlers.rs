@@ -29,7 +29,7 @@ fn retired_path_syscalls_leave_no_unused_kernel_policy_helpers() {
     // The transitional path loader still requires capability enforcement.
     assert!(filesystem.contains("fn ensure_fs_path_executable_for_process("));
     assert!(
-        filesystem.contains("ensure_fs_capability_access_for_process(path, PATH_EXEC, pid_raw)?")
+        filesystem.contains("ensure_fs_capability_access_for_process(path, PATH_EXEC, pid.as_u64())")
     );
 }
 

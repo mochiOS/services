@@ -17,6 +17,48 @@ fn obsolete_kernel_uid_gid_mutation_policy_is_absent() {
 }
 
 #[test]
+fn kernel_process_and_launch_no_longer_hold_or_inherit_posix_credentials() {
+    for source in [
+        include_str!("../../../core/src/task/process.rs"),
+        include_str!("../../../core/src/syscall/process.rs"),
+        include_str!("../../../core/src/syscall/exec.rs"),
+    ] {
+        for removed in [
+            "ProcessCredentials",
+            "set_credentials_for_exec",
+            "parent_credentials",
+            "credentials()",
+            "effective_uid",
+            "effective_gid",
+        ] {
+            assert!(!source.contains(removed), "kernel retains {removed}");
+        }
+    }
+}
+
+#[test]
+fn legacy_exec_path_keeps_native_authority_checks_without_posix_mode_policy() {
+    let fs = include_str!("../../../core/src/syscall/fs.rs");
+    let path = include_str!("../../../core/src/capability/path.rs");
+    for removed in [
+        "ensure_unix_",
+        "unix_mode_allows",
+        "effective_ids_for_process",
+        "PathOwner::User",
+    ] {
+        assert!(!fs.contains(removed), "kernel retains {removed}");
+    }
+    assert!(!path.contains("User(u64)"));
+    assert!(fs.contains("with_process(pid, |_| ()).is_none()"));
+    assert!(fs.contains("ensure_fs_capability_access_for_process(path, PATH_EXEC, pid.as_u64())"));
+    assert!(fs.contains("if !path_owner_allows(entry.owner, pid_raw)"));
+    assert!(fs.contains("enforce_fs_capabilities_for_process("));
+    assert!(fs.contains(
+        "PathOwner::Service(owner_pid) | PathOwner::Application(owner_pid) => owner_pid == pid_raw"
+    ));
+}
+
+#[test]
 fn native_security_context_layout_contains_only_execution_and_package_identity() {
     // No compatibility padding is kept for the removed POSIX UID/GID fields.
     assert_eq!(core::mem::size_of::<ThreadSecurityContext>(), 320);
