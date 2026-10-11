@@ -513,3 +513,146 @@ fn retired_dequeue_opcode_is_unknown_and_cannot_override_a_thread_mask() {
         1 << 29
     );
 }
+
+#[test]
+fn confirmed_thread_exit_reclaims_only_its_mask_and_preserves_process_signals() {
+    for status in [
+        Ok(mnu_abi::ThreadStatus {
+            process_id: 101,
+            thread_id: 501,
+            state: mnu_abi::THREAD_STATE_TERMINATED,
+            reserved: 0,
+        }),
+        Err(protocol::STATUS_ESRCH),
+    ] {
+        let service = service();
+        let exited = client(&service, 101, 501);
+        let live = client(&service, 101, 502);
+        exited
+            .thread_signal_mask(protocol::SIGNAL_MASK_INITIALIZE, 1 << 29)
+            .unwrap();
+        live.thread_signal_mask(protocol::SIGNAL_MASK_INITIALIZE, 1 << 30)
+            .unwrap();
+        exited.send_signal(101, 30).unwrap();
+        service.borrow_mut().acknowledge_signal_notification(101);
+        assert_eq!(
+            service.borrow_mut().retire_signal_thread(
+                ExecutionIdentity {
+                    process_id: 101,
+                    thread_id: 501
+                },
+                status
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            exited.thread_pending_signals(),
+            Err(ClientError::Remote(protocol::STATUS_ESRCH))
+        );
+        assert_eq!(
+            live.thread_signal_mask(protocol::SIGNAL_MASK_QUERY, 0)
+                .unwrap(),
+            1 << 30
+        );
+        assert_eq!(live.pending_signals().unwrap(), 1 << 29);
+        assert!(
+            service
+                .borrow()
+                .signal_notification_processes()
+                .any(|id| id == 101)
+        );
+        assert_eq!(
+            service.borrow_mut().retire_signal_thread(
+                ExecutionIdentity {
+                    process_id: 101,
+                    thread_id: 501
+                },
+                status
+            ),
+            Ok(true)
+        );
+    }
+}
+
+#[test]
+fn live_threads_and_failed_or_mismatched_observations_are_not_reclaimed() {
+    let service = service();
+    let caller = client(&service, 101, 501);
+    caller
+        .thread_signal_mask(protocol::SIGNAL_MASK_INITIALIZE, 1 << 29)
+        .unwrap();
+    let identity = ExecutionIdentity {
+        process_id: 101,
+        thread_id: 501,
+    };
+    let native = mnu_abi::ThreadStatus {
+        process_id: 101,
+        thread_id: 501,
+        state: mnu_abi::THREAD_STATE_TERMINATED,
+        reserved: 0,
+    };
+    for state in mnu_abi::THREAD_STATE_READY..=mnu_abi::THREAD_STATE_SLEEPING {
+        assert_eq!(
+            service
+                .borrow_mut()
+                .retire_signal_thread(identity, Ok(mnu_abi::ThreadStatus { state, ..native })),
+            Ok(false)
+        );
+    }
+    for (status, expected) in [
+        (Err(-5), -5),
+        (Err(-11), -11),
+        (Err(-9), -9),
+        (
+            Ok(mnu_abi::ThreadStatus {
+                process_id: 102,
+                ..native
+            }),
+            protocol::STATUS_EPERM,
+        ),
+        (
+            Ok(mnu_abi::ThreadStatus {
+                thread_id: 502,
+                ..native
+            }),
+            protocol::STATUS_EPERM,
+        ),
+        (
+            Ok(mnu_abi::ThreadStatus {
+                reserved: 1,
+                ..native
+            }),
+            -22,
+        ),
+        (Ok(mnu_abi::ThreadStatus { state: 0, ..native }), -22),
+        (Ok(mnu_abi::ThreadStatus { state: 6, ..native }), -22),
+    ] {
+        assert_eq!(
+            service.borrow_mut().retire_signal_thread(identity, status),
+            Err(expected)
+        );
+        assert_eq!(
+            caller
+                .thread_signal_mask(protocol::SIGNAL_MASK_QUERY, 0)
+                .unwrap(),
+            1 << 29
+        );
+    }
+    for invalid in [
+        ExecutionIdentity {
+            process_id: 0,
+            ..identity
+        },
+        ExecutionIdentity {
+            thread_id: 0,
+            ..identity
+        },
+    ] {
+        assert_eq!(
+            service
+                .borrow_mut()
+                .retire_signal_thread(invalid, Err(protocol::STATUS_ESRCH)),
+            Err(protocol::STATUS_EPERM)
+        );
+    }
+}

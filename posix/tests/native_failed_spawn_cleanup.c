@@ -22,6 +22,7 @@
 
 static volatile sig_atomic_t caught_count;
 static volatile sig_atomic_t handler_mask_error;
+static uint64_t exited_thread_id;
 static int service_mask(uint32_t operation, uint64_t mask, uint64_t *previous);
 
 static void caught_signal(int signal_number) {
@@ -79,6 +80,12 @@ static int service_mask(uint32_t operation, uint64_t mask, uint64_t *previous) {
 
 static void *inspect_service_thread_mask(void *unused) {
     (void)unused;
+    struct { uint64_t process_id, thread_id; } identity;
+    uint64_t number = 677;
+    __asm__ volatile("syscall" : "+a"(number)
+                     : "D"(&identity), "S"(sizeof(identity)) : "rcx", "r11", "memory");
+    if (number >= UINT64_MAX - 4094) return (void *)1;
+    exited_thread_id = identity.thread_id;
     uint64_t previous;
     sigset_t current, replacement = UINT64_C(1) << 30;
     if (pthread_sigmask(99, NULL, &current) || current != (UINT64_C(1) << 29) ||
@@ -112,6 +119,10 @@ static int inspect_service_masks(void) {
     void *result = (void *)1;
     CHECK(pthread_create(&thread, NULL, inspect_service_thread_mask, NULL) == 0);
     CHECK(pthread_join(thread, &result) == 0 && result == NULL);
+    fprintf(stderr, "native-thread-reap: joined pid=%llu tid=%llu\n",
+            (unsigned long long)getpid(), (unsigned long long)exited_thread_id);
+    struct timespec sweep_pause = {2, 0};
+    CHECK(nanosleep(&sweep_pause, NULL) == 0);
     CHECK(service_mask(0, 0, &previous) == 0 && previous == first);
     CHECK(sigprocmask(SIG_UNBLOCK, &replacement, &current) == 0 && current == first);
     CHECK(service_mask(0, 0, &previous) == 0 && previous == 0);
@@ -163,6 +174,20 @@ int main(int argc, char **argv) {
         _exit(41);
     }
     fprintf(stderr, "failed-spawn-cleanup: start\n");
+    /* This isolated probe does not send compositor READY. Explicitly release
+     * logger's boot buffer through the endpoint delegated in startup argv. */
+    uint64_t logger_endpoint = 0;
+    for (int i = 1; i < argc; ++i) {
+        char *end;
+        unsigned long long value = strtoull(argv[i], &end, 10);
+        if (end != argv[i] && *end == '\0' && value != 0) logger_endpoint = value;
+    }
+    CHECK(logger_endpoint != 0);
+    unsigned char flush = 0;
+    uint64_t send_number = 514;
+    __asm__ volatile("syscall" : "+a"(send_number)
+                     : "D"(logger_endpoint), "S"(&flush), "d"(1) : "rcx", "r11", "memory");
+    CHECK(send_number < UINT64_MAX - 4094);
     CHECK(inspect_service_masks() == 0);
     posix_spawn_file_actions_t actions;
     CHECK(posix_spawn_file_actions_init(&actions) == 0);

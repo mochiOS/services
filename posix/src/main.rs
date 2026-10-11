@@ -116,6 +116,9 @@ fn main() {
     platform::logln!("posix.service: endpoint ready");
     let mut pending_waits = Vec::new();
     let mut signal_threads = BTreeMap::new();
+    // Native ThreadHandles are not yet wait-many targets. Observe their
+    // lifecycle periodically, not by scanning every handle on every RPC.
+    let mut thread_sweep_deadline_ms = 0;
     let mut request_bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
     let mut response_bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
     loop {
@@ -136,7 +139,31 @@ fn main() {
             &mut processes,
         );
         deliver_signal_notifications(&mut service, &mut signal_threads);
-        match wait_for_request_or_child(endpoint_handle, &service) {
+        let deadline = if signal_threads.is_empty() {
+            platform::syscall::HANDLE_WAIT_INFINITE
+        } else {
+            let now = match platform::time::monotonic_milliseconds() {
+                Ok(now) => now,
+                Err(error) => {
+                    platform::logln!(
+                        "posix.service: thread lifecycle clock failed errno={}",
+                        error.raw()
+                    );
+                    platform::thread::yield_now();
+                    continue;
+                }
+            };
+            if now >= thread_sweep_deadline_ms {
+                reap_signal_threads(&mut service, &mut signal_threads);
+                thread_sweep_deadline_ms = now.saturating_add(1_000);
+            }
+            if signal_threads.is_empty() {
+                platform::syscall::HANDLE_WAIT_INFINITE
+            } else {
+                thread_sweep_deadline_ms.saturating_mul(1_000_000)
+            }
+        };
+        match wait_for_request_or_child(endpoint_handle, &service, deadline) {
             Ok(true) => {}
             Ok(false) => continue,
             Err(error) => {
@@ -909,6 +936,65 @@ struct RegisteredSignalThread {
 }
 
 #[cfg(target_os = "mochios")]
+fn signal_thread_terminated(
+    service: &mut posix_service::PosixService<u32>,
+    thread_id: u64,
+    thread: RegisteredSignalThread,
+) -> bool {
+    use mochi_user_platform as platform;
+
+    let status = platform::thread::handle_status(thread.handle)
+        .map_err(|error| i32::try_from(error.raw()).unwrap_or(-5));
+    match service.retire_signal_thread(
+        mnu_abi::ExecutionIdentity {
+            process_id: thread.process_id,
+            thread_id,
+        },
+        status,
+    ) {
+        Ok(terminated) => terminated,
+        Err(error) => {
+            platform::logln!("posix.service: thread lifecycle observation failed errno={error}");
+            false
+        }
+    }
+}
+
+#[cfg(target_os = "mochios")]
+fn reap_signal_threads(
+    service: &mut posix_service::PosixService<u32>,
+    threads: &mut std::collections::BTreeMap<u64, RegisteredSignalThread>,
+) {
+    threads.retain(|&thread_id, thread| {
+        if signal_thread_terminated(service, thread_id, *thread) {
+            !close_retired_signal_thread(thread_id, *thread)
+        } else {
+            true
+        }
+    });
+}
+
+#[cfg(target_os = "mochios")]
+fn close_retired_signal_thread(thread_id: u64, thread: RegisteredSignalThread) -> bool {
+    use mochi_user_platform as platform;
+
+    if let Err(error) = platform::handle::close(thread.handle) {
+        if error.raw() != -(platform::syscall::EBADF as i64) {
+            platform::logln!(
+                "posix.service: retired thread handle close failed errno={}",
+                error.raw()
+            );
+            return false;
+        }
+    }
+    let _ = platform::logger::write_status_fmt(format_args!(
+        "posix.service: reclaimed signal thread pid={} tid={}\n",
+        thread.process_id, thread_id
+    ));
+    true
+}
+
+#[cfg(target_os = "mochios")]
 fn deliver_signal_notifications(
     service: &mut posix_service::PosixService<u32>,
     threads: &mut std::collections::BTreeMap<u64, RegisteredSignalThread>,
@@ -925,15 +1011,17 @@ fn deliver_signal_notifications(
             }
             match platform::thread::interrupt(thread.handle, 0) {
                 Ok(()) => delivered = true,
-                Err(_) if platform::thread::handle_status(thread.handle).is_err() => {
+                Err(_) if signal_thread_terminated(service, thread_id, *thread) => {
                     stale.push(thread_id)
                 }
                 Err(_) => {}
             }
         }
         for thread_id in stale {
-            if let Some(thread) = threads.remove(&thread_id) {
-                let _ = platform::handle::close(thread.handle);
+            if let Some(thread) = threads.get(&thread_id).copied() {
+                if close_retired_signal_thread(thread_id, thread) {
+                    threads.remove(&thread_id);
+                }
             }
         }
         if delivered {
@@ -998,6 +1086,7 @@ fn complete_pending_waits(
 fn wait_for_request_or_child(
     endpoint: u32,
     service: &posix_service::PosixService<u32>,
+    deadline: u64,
 ) -> Result<bool, i64> {
     use mochi_user_platform::{process, syscall};
 
@@ -1014,9 +1103,16 @@ fn wait_for_request_or_child(
             ..syscall::HandleWaitItem::default()
         });
     }
-    process::wait_many(&mut items, syscall::HANDLE_WAIT_INFINITE)
-        .map(|index| index == 0)
-        .map_err(|error| error.raw())
+    match process::wait_many(&mut items, deadline) {
+        Ok(index) => Ok(index == 0),
+        Err(error)
+            if deadline != syscall::HANDLE_WAIT_INFINITE
+                && error.raw() == -(syscall::EAGAIN as i64) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error.raw()),
+    }
 }
 
 #[cfg(target_os = "mochios")]

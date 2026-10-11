@@ -2150,6 +2150,51 @@ impl<H: Copy> PosixService<H> {
         }
     }
 
+    /// Consumes a native status observation for a retained ThreadHandle.
+    /// This is a service/backend boundary, never a client-supplied IPC status.
+    /// Only confirmed termination or native ESRCH permits reclamation.
+    pub fn retire_signal_thread(
+        &mut self,
+        identity: mnu_abi::ExecutionIdentity,
+        status: Result<mnu_abi::ThreadStatus, i32>,
+    ) -> Result<bool, i32> {
+        if identity.process_id == 0 || identity.thread_id == 0 {
+            return Err(protocol::STATUS_EPERM);
+        }
+        let terminated = match status {
+            Err(protocol::STATUS_ESRCH) => true,
+            Err(error) => return Err(error),
+            Ok(status) => {
+                if status.process_id != identity.process_id || status.thread_id != identity.thread_id
+                {
+                    return Err(protocol::STATUS_EPERM);
+                }
+                if status.reserved != 0
+                    || !(mnu_abi::THREAD_STATE_READY..=mnu_abi::THREAD_STATE_TERMINATED)
+                        .contains(&status.state)
+                {
+                    return Err(STATUS_EINVAL);
+                }
+                status.state == mnu_abi::THREAD_STATE_TERMINATED
+            }
+        };
+        if terminated
+            && self
+                .signal_masks
+                .remove(&(identity.process_id, identity.thread_id))
+                .is_some()
+        {
+            if self
+                .signals
+                .get(&identity.process_id)
+                .is_some_and(|state| state.pending() != 0)
+            {
+                self.signal_notifications.insert(identity.process_id);
+            }
+        }
+        Ok(terminated)
+    }
+
     fn thread_signal_mask_payload(
         &mut self,
         sender: mnu_abi::ExecutionIdentity,
