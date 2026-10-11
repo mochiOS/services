@@ -55,11 +55,11 @@ fn main() {
     }
     platform::logln!("posix.service: endpoint ready");
 
-    let service_process_id = match platform::process::current_security_context() {
+    let service_process_id = match platform::process::current_execution_identity() {
         Ok(context) => context.process_id,
         Err(error) => {
             platform::logln!(
-                "posix.service: current security context failed errno={}",
+                "posix.service: current execution identity failed errno={}",
                 error.raw()
             );
             platform::process::exit(1);
