@@ -63,6 +63,7 @@ pub(crate) fn metadata(
         &[HandleGrant {
             key: mochios_posix_protocol::CONTROL_HANDLE_KEY,
             source: endpoint,
+            target: 0,
             rights: mnu_abi::HANDLE_RIGHT_SEND
                 | mnu_abi::HANDLE_RIGHT_DUPLICATE
                 | mnu_abi::HANDLE_RIGHT_TRANSFER,

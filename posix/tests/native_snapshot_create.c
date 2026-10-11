@@ -12,10 +12,15 @@ enum {
   EXIT = 574,
   CLOSE = 626,
   DUP = 627,
+  LAUNCH_HANDLE_GET = 628,
   VALUE_GET = 639,
   STATUS = 642,
   WAIT = 643,
   RESUME = 645,
+  RIGHTS_GET = 664,
+  MEMORY_CREATE = 671,
+  READ_AT = 673,
+  WRITE_AT = 674,
   CREATE = 676,
   SPACE_CLONE = 679
 };
@@ -53,6 +58,7 @@ static unsigned char stack[65536] __attribute__((aligned(16)));
 static volatile uint64_t private_value = 0x11;
 static volatile uint64_t initial_rax;
 static uint64_t tls_word = UINT64_C(0xabcdef0123456789);
+static uint32_t source_object;
 static const char path[] = "/system/services/compositor.service";
 static const char label[] = "snapshot-child";
 
@@ -62,6 +68,15 @@ __attribute__((used, noreturn)) static void child(void) {
   int ok = private_value == 0x11 &&
            initial_rax == UINT64_C(0x87654321abcdef00) && tls == tls_word &&
            N(VALUE_GET, UINT64_C(0x1234), &value, 0) == 0 && value == 42;
+  uint64_t memory = 0;
+  int64_t automatic = N(LAUNCH_HANDLE_GET, 0x2001, 0, 0);
+  ok = ok && N(LAUNCH_HANDLE_GET, 0x2002, 0, 0) == 1 &&
+       N(LAUNCH_HANDLE_GET, 0x2003, 0, 0) == 41 && automatic == 2 &&
+       N(RIGHTS_GET, automatic, 0, 0) == 0 && N(RIGHTS_GET, 41, 0, 0) == 1 &&
+       call6(READ_AT, 41, (uint64_t)&memory, 8, 0, 0, 0) == 8 &&
+       memory == UINT64_C(0x5555abcdef123456) &&
+       call6(WRITE_AT, 41, (uint64_t)&memory, 8, 0, 0, 0) == -EACCES &&
+       N(DUP, 41, 1, 0) == -EACCES;
   N(EXIT, ok ? 37 : 99, 0, 0);
   for (;;)
     __asm__ volatile("pause");
@@ -80,15 +95,24 @@ static size_t metadata(unsigned char *bytes, struct context context) {
   bytes[6] = 32;
   put32(bytes + 8, (uint32_t)identity);
   put32(bytes + 12, 176);
+  put32(bytes + 16, 3);
   put32(bytes + 20, 1);
   put32(bytes + 24, (uint32_t)name);
   put32(bytes + 28, 1);
   memcpy(bytes + 32, path, identity);
   memcpy(bytes + 32 + identity, label, name);
   memcpy(bytes + start, &context, sizeof(context));
-  put64(bytes + start + 176, UINT64_C(0x1234));
-  put64(bytes + start + 184, 42);
-  return start + 192;
+  const uint32_t targets[3] = {0, 1, 41};
+  for (unsigned i = 0; i < 3; i++) {
+    unsigned char *grant = bytes + start + 176 + i * 24;
+    put64(grant, 0x2001 + i);
+    put32(grant + 8, source_object);
+    put32(grant + 12, targets[i]);
+    put64(grant + 16, i == 0 ? 0 : 1);
+  }
+  put64(bytes + start + 248, UINT64_C(0x1234));
+  put64(bytes + start + 256, 42);
+  return start + 264;
 }
 static int authorize(uint64_t endpoint) {
   unsigned char request[12 + sizeof(path) - 1] = {0}, reply[2048] = {0};
@@ -109,6 +133,11 @@ int main(void) {
   int64_t authority =
       N(FIND_PROCESS, "capability.service", strlen("capability.service"), 0);
   CHECK(authority > 0);
+  int64_t memory = N(MEMORY_CREATE, 4096, 0, 0);
+  CHECK(memory > 0 && memory != 41);
+  source_object = (uint32_t)memory;
+  uint64_t data = UINT64_C(0x5555abcdef123456);
+  CHECK(call6(WRITE_AT, memory, (uint64_t)&data, 8, 0, 0, 0) == 8);
   /* Touch every stack page before capture so initial entry has resident VM. */
   for (size_t i = 0; i < sizeof(stack); i += 4096)
     stack[i] = 1;
@@ -128,6 +157,25 @@ int main(void) {
   CHECK(authorize((uint64_t)authority));
   CHECK(N(CREATE, reduced, bytes, length) == -EACCES);
   CHECK(N(CLOSE, reduced, 0, 0) == 0);
+  int64_t nontransferable = N(DUP, memory, 1, 0);
+  CHECK(nontransferable > 0);
+  size_t grant_offset = 32 + sizeof(path) - 1 + sizeof(label) - 1 + 176;
+  put32(bytes + grant_offset + 8, (uint32_t)nontransferable);
+  CHECK(authorize((uint64_t)authority));
+  CHECK(N(CREATE, image, bytes, length) == -EACCES);
+  CHECK(N(CLOSE, nontransferable, 0, 0) == 0);
+  int64_t readonly = N(DUP, memory, 1 | (UINT64_C(1) << 63), 0);
+  CHECK(readonly > 0);
+  length = metadata(bytes, context);
+  put32(bytes + grant_offset + 8, (uint32_t)readonly);
+  put64(bytes + grant_offset + 16, 2);
+  CHECK(authorize((uint64_t)authority));
+  CHECK(N(CREATE, image, bytes, length) == -EACCES);
+  CHECK(N(CLOSE, readonly, 0, 0) == 0);
+  length = metadata(bytes, context);
+  put32(bytes + grant_offset + 12, 4097);
+  CHECK(authorize((uint64_t)authority));
+  CHECK(N(CREATE, image, bytes, length) == -EINVAL);
   for (unsigned invalid = 0; invalid < 4; invalid++) {
     struct context bad = context;
     if (invalid == 0)
@@ -152,6 +200,7 @@ int main(void) {
   CHECK(authorize((uint64_t)authority));
   CHECK(N(CREATE, alias, bytes, length) == -EAGAIN);
   CHECK(N(CLOSE, image, 0, 0) == 0 && N(CLOSE, alias, 0, 0) == 0);
+  CHECK(N(CLOSE, memory, 0, 0) == 0);
   struct status state = {0};
   CHECK(N(STATUS, process, &state, 0) == 0 && state.state == 1);
   CHECK(N(SLEEP, 100, 0, 0) == 0);
@@ -172,5 +221,8 @@ int main(void) {
   fprintf(stderr, "snapshot-create: PASS control attenuation, target "
                   "validation, alias one-shot, stopped creation, COW, RAX, "
                   "TLS, opaque value, retained exit\n");
+  fprintf(stderr, "handle-placement: PASS fixed and automatic slots, "
+                  "explicit-first order, retained object after creator close, "
+                  "transfer requirement, rights attenuation, slot bounds\n");
   return 0;
 }

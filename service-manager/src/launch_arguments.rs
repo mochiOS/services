@@ -61,6 +61,7 @@ pub(crate) fn encode_native_launch(
             handles.push(HandleGrant {
                 key,
                 source,
+                target: 0,
                 rights,
             });
         } else if let Some(entry) = item.strip_prefix(INHERITED_VALUE_PREFIX) {

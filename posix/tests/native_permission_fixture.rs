@@ -67,6 +67,7 @@ requires = ["ipc.client"]
         &[HandleGrant {
             key: u64::from_le_bytes(*b"POSXCTRL"),
             source: 1,
+            target: 0,
             rights: mnu_abi::HANDLE_RIGHT_SEND
                 | mnu_abi::HANDLE_RIGHT_TRANSFER
                 | mnu_abi::HANDLE_RIGHT_DUPLICATE,
@@ -114,6 +115,7 @@ requires = ["ipc.client"]
             &[HandleGrant {
                 key: u64::from_le_bytes(*b"POSXCTRL"),
                 source: 1,
+                target: 0,
                 rights: mnu_abi::HANDLE_RIGHT_SEND
                     | mnu_abi::HANDLE_RIGHT_TRANSFER
                     | mnu_abi::HANDLE_RIGHT_DUPLICATE,

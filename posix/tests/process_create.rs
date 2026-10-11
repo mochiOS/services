@@ -28,6 +28,7 @@ fn creation_metadata_is_relocatable_and_has_no_foreign_pid_or_fd() {
     let handles = [HandleGrant {
         key: u64::MAX,
         source: 17,
+        target: 0,
         rights: 3,
     }];
     let values = [Value {
@@ -87,6 +88,7 @@ fn context_creation_roundtrips_all_registers_and_explicit_grants() {
     let handles = [HandleGrant {
         key: 19,
         source: 3,
+        target: 0,
         rights: 1,
     }];
     let values = [Value {
@@ -181,6 +183,7 @@ fn duplicate_keys_and_invalid_handles_are_rejected() {
     let grant = HandleGrant {
         key: 9,
         source: 12,
+        target: 0,
         rights: 3,
     };
     assert_eq!(
@@ -279,17 +282,26 @@ fn creation_label_is_bounded_text_and_never_an_authorization_identity() {
 }
 
 #[test]
-fn handle_record_reserved_bits_and_duplicate_wire_keys_are_rejected() {
+fn explicit_native_slots_and_duplicate_wire_keys_are_validated() {
     let grant = HandleGrant {
         key: 7,
         source: 2,
+        target: 0,
         rights: 3,
     };
     let offset =
         wire::HEADER_LEN + "opaque identity".len() + "display label".len() + startup().len();
     let mut bytes = metadata(&[grant], &[]);
     bytes[offset + 12] = 1;
-    assert!(matches!(wire::decode(&bytes), Err(Error::Handle)));
+    assert_eq!(
+        wire::decode(&bytes)
+            .unwrap()
+            .handles()
+            .next()
+            .unwrap()
+            .target,
+        1
+    );
     let mut bytes = metadata(&[grant, HandleGrant { key: 8, ..grant }], &[]);
     bytes[offset + wire::HANDLE_LEN..offset + wire::HANDLE_LEN + 8]
         .copy_from_slice(&7u64.to_le_bytes());
@@ -302,6 +314,7 @@ fn maximum_opaque_context_round_trips() {
         .map(|key| HandleGrant {
             key: key as u64,
             source: 1,
+            target: 0,
             rights: 0,
         })
         .collect();
@@ -317,6 +330,86 @@ fn maximum_opaque_context_round_trips() {
         handles.len()
     );
     assert_eq!(wire::decode(&bytes).unwrap().values().count(), values.len());
+}
+
+#[test]
+fn explicit_slots_roundtrip_and_duplicate_targets_are_rejected() {
+    let mut output = vec![0; wire::MAX_REQUEST_BYTES];
+    let grants = [
+        HandleGrant {
+            key: 7,
+            source: 2,
+            target: 41,
+            rights: 1,
+        },
+        HandleGrant {
+            key: 8,
+            source: 2,
+            target: 0,
+            rights: 0,
+        },
+        HandleGrant {
+            key: 9,
+            source: 2,
+            target: 1,
+            rights: 1,
+        },
+    ];
+    let length = wire::encode("x", "y", &startup(), &grants, &[], &mut output).unwrap();
+    assert_eq!(
+        wire::decode(&output[..length])
+            .unwrap()
+            .handles()
+            .collect::<Vec<_>>(),
+        grants
+    );
+    let length =
+        wire::encode_context("x", "y", &explicit_context(), &grants, &[], &mut output).unwrap();
+    assert_eq!(
+        wire::decode(&output[..length])
+            .unwrap()
+            .handles()
+            .collect::<Vec<_>>(),
+        grants
+    );
+    let duplicate = [
+        grants[0],
+        HandleGrant {
+            target: 41,
+            ..grants[1]
+        },
+    ];
+    assert_eq!(
+        wire::encode_context("x", "y", &explicit_context(), &duplicate, &[], &mut output),
+        Err(Error::DuplicateTarget)
+    );
+    let mut tampered = metadata(&grants, &[]);
+    let offset =
+        wire::HEADER_LEN + "opaque identity".len() + "display label".len() + startup().len();
+    tampered[offset + wire::HANDLE_LEN + 12..offset + wire::HANDLE_LEN + 16]
+        .copy_from_slice(&41u32.to_le_bytes());
+    assert!(matches!(
+        wire::decode(&tampered),
+        Err(Error::DuplicateTarget)
+    ));
+}
+
+#[test]
+fn explicit_placement_cannot_overwrite_entries_or_capture_a_foreign_table() {
+    let table = include_str!("../../../core/src/task/handle_table.rs");
+    let insert =
+        &table[table.find("pub fn insert_at(").unwrap()..table.find("pub fn retain(").unwrap()];
+    assert!(insert.contains("PROCESS_MAX_OBJECT_HANDLES"));
+    assert!(insert.contains("Entry::Vacant"));
+    assert!(!insert.contains("Entry::Occupied"));
+    let exec = include_str!("../../../core/src/syscall/exec.rs");
+    let install = &exec[exec.find("fn install_inherited_handles(").unwrap()
+        ..exec.find("fn install_inherited_values(").unwrap()];
+    assert!(
+        install.find("grant.target != 0").unwrap() < install.find("grant.target == 0").unwrap()
+    );
+    assert!(install.contains("insert_at(handle, grant.entry.clone())"));
+    assert!(!install.contains("source_process"));
 }
 
 #[test]
@@ -412,6 +505,7 @@ fn generate_native_creation_fixture_record() {
         &[HandleGrant {
             key: u64::from_le_bytes(*b"TESTFILE"),
             source: 1,
+            target: 0,
             rights: mnu_abi::HANDLE_RIGHT_READ,
         }],
         &[Value {

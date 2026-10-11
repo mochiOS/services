@@ -43,6 +43,7 @@ fn native_launch_builds_argv_env_and_inheritance_in_user_space() {
         [mnu_abi::process_create::HandleGrant {
             key: 7,
             source: 19,
+            target: 0,
             rights,
         }]
     );

@@ -31,6 +31,7 @@ fn application_metadata_inherits_only_the_locally_owned_attached_endpoint() {
         [mnu_abi::process_create::HandleGrant {
             key: mochios_posix_protocol::CONTROL_HANDLE_KEY,
             source: 73,
+            target: 0,
             rights: mnu_abi::HANDLE_RIGHT_SEND
                 | mnu_abi::HANDLE_RIGHT_DUPLICATE
                 | mnu_abi::HANDLE_RIGHT_TRANSFER,
