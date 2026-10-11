@@ -73,10 +73,10 @@ pub(crate) fn spawn_drivers(
     logger_endpoint: u64,
     manager: DriverManagerTarget,
     posix_endpoint: platform::handle::Handle,
-) -> Result<u64, mochi_user_syscall::SysError> {
+) -> Result<NativeProcess, mochi_user_syscall::SysError> {
     let mut arguments = driver_arguments(logger_endpoint, manager.endpoint, manager.token);
     append_posix_handle(&mut arguments, Some(posix_endpoint));
-    spawn(DRIVERS, &arguments)
+    spawn_native(DRIVERS, "drivers.service", &arguments, posix_endpoint)
 }
 
 pub(crate) fn spawn_fixed_service(
@@ -137,7 +137,6 @@ fn spawn_native_fixed(
     ready_target: platform::service_ready::Target,
     posix_endpoint: platform::handle::Handle,
 ) -> Result<NativeProcess, mochi_user_syscall::SysError> {
-    use mochios_posix_client::{Client, ClientError, OpenAtBase, SyscallEndpointTransport};
     let spec = fixed_service_spec(service);
     let mut arguments = fixed_service_arguments(
         service,
@@ -148,9 +147,19 @@ fn spawn_native_fixed(
         }),
     );
     append_posix_handle(&mut arguments, Some(posix_endpoint));
+    spawn_native(spec, label, &arguments, posix_endpoint)
+}
+
+fn spawn_native(
+    spec: ServiceSpec,
+    label: &str,
+    arguments: &[String],
+    posix_endpoint: platform::handle::Handle,
+) -> Result<NativeProcess, mochi_user_syscall::SysError> {
+    use mochios_posix_client::{Client, ClientError, OpenAtBase, SyscallEndpointTransport};
     let mut random = [0; 16];
     platform::random::fill(&mut random)?;
-    let metadata = encode_native_launch(spec.path, label, &arguments, random)
+    let metadata = encode_native_launch(spec.path, label, arguments, random)
         .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
     let client = Client::new(SyscallEndpointTransport::new(posix_endpoint));
     let client_error = |error| match error {

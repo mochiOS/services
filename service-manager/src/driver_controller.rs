@@ -11,7 +11,7 @@ use crate::service_launcher::DriverManagerTarget;
 
 pub(crate) const DRIVER_CONTROL_TIMEOUT_TICKS: u64 = 5_000;
 #[cfg(not(test))]
-use crate::process_watch::ProcessWatch;
+use crate::process_watch::{ProcessWatch, ProcessWatchTarget};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DriverSessionState {
@@ -155,7 +155,7 @@ impl DriverController {
 
     pub(crate) fn wait_for_hello(
         &mut self,
-        drivers_process: u64,
+        drivers_process: ProcessWatchTarget,
     ) -> Result<u64, DriverControlError> {
         let mut buffer = [0u8; DRIVER_HELLO_LEN];
         let length = wait_for_message(drivers_process, &mut buffer)?;
@@ -181,7 +181,7 @@ impl DriverController {
 
     pub(crate) fn wait_for_complete(
         &mut self,
-        drivers_process: u64,
+        drivers_process: ProcessWatchTarget,
     ) -> Result<(), DriverControlError> {
         let mut buffer = [0u8; DRIVER_HELLO_LEN];
         let length = wait_for_message(drivers_process, &mut buffer)?;
@@ -190,8 +190,11 @@ impl DriverController {
 }
 
 #[cfg(not(test))]
-fn wait_for_message(process_id: u64, buffer: &mut [u8]) -> Result<usize, DriverControlError> {
-    let process = ProcessWatch::open(process_id)
+fn wait_for_message(
+    target: ProcessWatchTarget,
+    buffer: &mut [u8],
+) -> Result<usize, DriverControlError> {
+    let process = ProcessWatch::open(target)
         .map_err(|error| DriverControlError::ProcessStatus(error.errno()))?;
     let started = current_ticks()?;
     loop {

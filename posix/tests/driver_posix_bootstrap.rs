@@ -16,6 +16,15 @@ fn drivers_inherit_posix_and_do_not_use_legacy_filesystem_syscalls() {
     assert!(
         launcher[start..end].contains("append_posix_handle(&mut arguments, Some(posix_endpoint))")
     );
+    assert!(launcher[start..end].contains("spawn_native(DRIVERS, \"drivers.service\""));
+    assert!(!launcher[start..end].contains("spawn(DRIVERS,"));
+    let bootstrap = include_str!("../../service-manager/src/bootstrap.rs");
+    let controller = include_str!("../../service-manager/src/driver_controller.rs");
+    assert!(bootstrap.contains("type DriversProcess = NativeProcess;"));
+    assert!(bootstrap.contains("wait_for_hello(process.watch_target())"));
+    assert!(bootstrap.contains("wait_for_complete(process.watch_target())"));
+    assert!(!controller.contains("drivers_process: u64"));
+    assert!(controller.contains("ProcessWatch::open(target)"));
     let manifest = include_str!("../../drivers/src/driver_manifest.rs");
     let discovery = include_str!("../../drivers/src/driver_discovery.rs");
     assert!(manifest.contains("std::fs::read(&package_manifest_path)"));
@@ -25,4 +34,3 @@ fn drivers_inherit_posix_and_do_not_use_legacy_filesystem_syscalls() {
     }
 }
 extern crate alloc;
-

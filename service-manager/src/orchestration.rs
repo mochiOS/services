@@ -2,8 +2,8 @@ use crate::service_config::FixedService;
 use mochi_user_platform::service_ready::SessionIdentity;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ChildProcesses<Input = u64, Display = u64> {
-    pub(crate) drivers: Option<u64>,
+pub(crate) struct ChildProcesses<Input = u64, Display = u64, Drivers = u64> {
+    pub(crate) drivers: Option<Drivers>,
     pub(crate) mboot_agent: Option<u64>,
     pub(crate) filesystem: Option<u64>,
     pub(crate) posix: Option<u64>,
@@ -45,14 +45,14 @@ pub(crate) enum StopReason {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct BootstrapOutcome<Input = u64, Display = u64> {
-    pub(crate) children: ChildProcesses<Input, Display>,
+pub(crate) struct BootstrapOutcome<Input = u64, Display = u64, Drivers = u64> {
+    pub(crate) children: ChildProcesses<Input, Display, Drivers>,
     pub(crate) reason: StopReason,
     pub(crate) identity: Option<SessionIdentity>,
     pub(crate) session_id: u64,
 }
 
-impl<Input, Display> BootstrapOutcome<Input, Display> {
+impl<Input, Display, Drivers> BootstrapOutcome<Input, Display, Drivers> {
     pub(crate) const fn initialization_failed() -> Self {
         Self {
             children: ChildProcesses {
@@ -79,19 +79,20 @@ impl<Input, Display> BootstrapOutcome<Input, Display> {
     }
 }
 
-impl<Input, Display> Default for ChildProcesses<Input, Display> {
+impl<Input, Display, Drivers> Default for ChildProcesses<Input, Display, Drivers> {
     fn default() -> Self {
-        BootstrapOutcome::<Input, Display>::initialization_failed().children
+        BootstrapOutcome::<Input, Display, Drivers>::initialization_failed().children
     }
 }
 
 pub(crate) trait BootstrapOperations {
     type InputProcess;
     type DisplayProcess;
+    type DriversProcess;
     fn spawn_input(&mut self) -> Option<Self::InputProcess>;
     fn spawn_display(&mut self) -> Option<Self::DisplayProcess>;
-    fn spawn_drivers(&mut self) -> Option<u64>;
-    fn wait_driver_hello(&mut self, process_id: u64) -> bool;
+    fn spawn_drivers(&mut self) -> Option<Self::DriversProcess>;
+    fn wait_driver_hello(&mut self, process: &Self::DriversProcess) -> bool;
     fn spawn_mboot_agent(&mut self) -> Option<u64>;
     fn notify_mboot_stage(&mut self, stage: MbootStage);
     fn spawn_fixed(&mut self, service: FixedService) -> Option<u64>;
@@ -107,7 +108,7 @@ pub(crate) trait BootstrapOperations {
     fn wait_posix_ready(&mut self, process_id: u64) -> bool;
     fn wait_input_ready(&mut self, process: &Self::InputProcess) -> bool;
     fn start_discovery(&mut self) -> bool;
-    fn wait_discovery_complete(&mut self, process_id: u64) -> bool;
+    fn wait_discovery_complete(&mut self, process: &Self::DriversProcess) -> bool;
     fn wait_network_ready(&mut self, process_id: u64) -> bool;
     fn wait_user_ready(&mut self, process_id: u64) -> bool;
     fn wait_secure_ui_login(&mut self, process_id: u64) -> Option<SessionIdentity>;
@@ -125,7 +126,7 @@ const FIRST_BOOT_IDENTITY: SessionIdentity = SessionIdentity { uid: 0, gid: 0 };
 
 pub(crate) fn orchestrate<O: BootstrapOperations>(
     operations: &mut O,
-) -> BootstrapOutcome<O::InputProcess, O::DisplayProcess> {
+) -> BootstrapOutcome<O::InputProcess, O::DisplayProcess, O::DriversProcess> {
     let mut children = ChildProcesses::default();
 
     let Some(filesystem) = operations.spawn_fixed(FixedService::Filesystem) else {
@@ -146,7 +147,7 @@ pub(crate) fn orchestrate<O: BootstrapOperations>(
         return outcome(children, StopReason::DriversSpawnFailed);
     };
     children.drivers = Some(drivers);
-    if !operations.wait_driver_hello(drivers) {
+    if !operations.wait_driver_hello(children.drivers.as_ref().unwrap()) {
         return outcome(children, StopReason::DriverHelloFailed);
     }
     children.mboot_agent = operations.spawn_mboot_agent();
@@ -229,7 +230,7 @@ pub(crate) fn orchestrate<O: BootstrapOperations>(
     }
     operations.notify_mboot_stage(MbootStage::Desktop);
     if discovery_started {
-        let _ = operations.wait_discovery_complete(drivers);
+        let _ = operations.wait_discovery_complete(children.drivers.as_ref().unwrap());
     }
     if let Some(network) = children.network {
         let _ = operations.wait_network_ready(network);
@@ -242,10 +243,10 @@ pub(crate) fn orchestrate<O: BootstrapOperations>(
     }
 }
 
-const fn outcome<Input, Display>(
-    children: ChildProcesses<Input, Display>,
+const fn outcome<Input, Display, Drivers>(
+    children: ChildProcesses<Input, Display, Drivers>,
     reason: StopReason,
-) -> BootstrapOutcome<Input, Display> {
+) -> BootstrapOutcome<Input, Display, Drivers> {
     BootstrapOutcome {
         children,
         reason,
@@ -326,6 +327,7 @@ mod tests {
     impl BootstrapOperations for FakeOperations {
         type InputProcess = u64;
         type DisplayProcess = u64;
+        type DriversProcess = u64;
 
         fn spawn_display(&mut self) -> Option<Self::DisplayProcess> {
             self.spawn_fixed(FixedService::Display)
@@ -339,7 +341,7 @@ mod tests {
             (self.failure != Failure::SpawnDrivers).then_some(10)
         }
 
-        fn wait_driver_hello(&mut self, _process_id: u64) -> bool {
+        fn wait_driver_hello(&mut self, _process_id: &u64) -> bool {
             self.events.push(Event::WaitHello);
             self.failure != Failure::Hello
         }
@@ -421,7 +423,7 @@ mod tests {
             self.failure != Failure::StartDiscovery
         }
 
-        fn wait_discovery_complete(&mut self, _process_id: u64) -> bool {
+        fn wait_discovery_complete(&mut self, _process_id: &u64) -> bool {
             self.events.push(Event::WaitDiscovery);
             self.failure != Failure::DiscoveryComplete
         }

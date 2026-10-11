@@ -172,6 +172,7 @@ impl Runtime {
 impl BootstrapOperations for Runtime {
     type InputProcess = NativeProcess;
     type DisplayProcess = NativeProcess;
+    type DriversProcess = NativeProcess;
 
     fn spawn_display(&mut self) -> Option<Self::DisplayProcess> {
         let endpoint = self.posix_endpoint?;
@@ -222,18 +223,17 @@ impl BootstrapOperations for Runtime {
             }
         }
     }
-    fn spawn_drivers(&mut self) -> Option<u64> {
+    fn spawn_drivers(&mut self) -> Option<Self::DriversProcess> {
         match service_launcher::spawn_drivers(
             self.logger_endpoint,
             self.driver_controller.target(),
             self.posix_endpoint?,
         ) {
-            Ok(process_id) => {
+            Ok(process) => {
                 platform::logln!(
-                    "service-manager.service: drivers.service spawned pid={}",
-                    process_id
+                    "service-manager.service: drivers.service spawned with retained Process Handle"
                 );
-                Some(process_id)
+                Some(process)
             }
             Err(error) => {
                 eprintln!(
@@ -245,10 +245,14 @@ impl BootstrapOperations for Runtime {
         }
     }
 
-    fn wait_driver_hello(&mut self, process_id: u64) -> bool {
+    fn wait_driver_hello(&mut self, process: &Self::DriversProcess) -> bool {
         platform::logln!("service-manager.service: waiting for drivers.service hello");
-        match self.driver_controller.wait_for_hello(process_id) {
+        match self
+            .driver_controller
+            .wait_for_hello(process.watch_target())
+        {
             Ok(_) => {
+                eprintln!("service-manager.service: drivers.service native HELLO received");
                 platform::logln!("service-manager.service: drivers.service hello received");
                 true
             }
@@ -572,8 +576,11 @@ impl BootstrapOperations for Runtime {
         }
     }
 
-    fn wait_discovery_complete(&mut self, process_id: u64) -> bool {
-        match self.driver_controller.wait_for_complete(process_id) {
+    fn wait_discovery_complete(&mut self, process: &Self::DriversProcess) -> bool {
+        match self
+            .driver_controller
+            .wait_for_complete(process.watch_target())
+        {
             Ok(()) => {
                 platform::logln!("service-manager.service: driver discovery complete");
                 true
@@ -696,7 +703,7 @@ fn log_ready_error(service: ReadyService, error: ReadyError) {
 }
 
 fn resident(
-    outcome: BootstrapOutcome<NativeProcess, NativeProcess>,
+    outcome: BootstrapOutcome<NativeProcess, NativeProcess, NativeProcess>,
     runtime: Option<Runtime>,
 ) -> ! {
     let mut runtime = runtime;
