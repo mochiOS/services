@@ -317,7 +317,7 @@ fn terminal_attributes_are_shared_between_both_ends() {
     assert_eq!(ptys.attributes(pair.master_object_id), Ok(raw));
 
     let mut unsupported = raw;
-    unsupported.input_flags = protocol::TERMINAL_IFLAG_IXON;
+    unsupported.input_flags = protocol::TERMINAL_IFLAG_IXOFF;
     assert_eq!(
         ptys.set_attributes(pair.master_object_id, unsupported),
         Err(ENOTSUP)

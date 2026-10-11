@@ -20,7 +20,8 @@ pub const READINESS_SIGNALS: u64 = mnu_abi::HANDLE_SIGNAL_READABLE
 const SUPPORTED_INPUT_FLAGS: u32 = posix_protocol::TERMINAL_IFLAG_ISTRIP
     | posix_protocol::TERMINAL_IFLAG_INLCR
     | posix_protocol::TERMINAL_IFLAG_IGNCR
-    | posix_protocol::TERMINAL_IFLAG_ICRNL;
+    | posix_protocol::TERMINAL_IFLAG_ICRNL
+    | posix_protocol::TERMINAL_IFLAG_IXON;
 const SUPPORTED_OUTPUT_FLAGS: u32 =
     posix_protocol::TERMINAL_OFLAG_OPOST | posix_protocol::TERMINAL_OFLAG_ONLCR;
 const SUPPORTED_LOCAL_FLAGS: u32 = posix_protocol::TERMINAL_LFLAG_ICANON
@@ -67,6 +68,7 @@ struct PseudoTerminal {
     output: VecDeque<u8>,
     attributes: posix_protocol::TerminalAttributes,
     window_size: posix_protocol::TerminalWindowSize,
+    output_stopped: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -86,6 +88,7 @@ impl PseudoTerminal {
             output: VecDeque::new(),
             attributes: posix_protocol::TerminalAttributes::sane(),
             window_size: posix_protocol::TerminalWindowSize::default(),
+            output_stopped: false,
         }
     }
 
@@ -245,6 +248,22 @@ impl PseudoTerminal {
                 consumed += 1;
                 continue;
             }
+            // Flow characters never enter the input/echo queues. Process
+            // them before capacity checks so a full queue cannot trap STOP.
+            if self.attributes.input_flags & posix_protocol::TERMINAL_IFLAG_IXON != 0 {
+                let start = self.attributes.control_characters[posix_protocol::TERMINAL_CC_VSTART];
+                let stop = self.attributes.control_characters[posix_protocol::TERMINAL_CC_VSTOP];
+                if stop != 0 && byte == stop {
+                    self.output_stopped = true;
+                    consumed += 1;
+                    continue;
+                }
+                if start != 0 && byte == start {
+                    self.output_stopped = false;
+                    consumed += 1;
+                    continue;
+                }
+            }
             if canonical {
                 let erase = self.attributes.control_characters[posix_protocol::TERMINAL_CC_VERASE];
                 let kill = self.attributes.control_characters[posix_protocol::TERMINAL_CC_VKILL];
@@ -393,6 +412,9 @@ impl PtyManager {
         if side == PtySide::Slave {
             return terminal.read_input(maximum);
         }
+        if terminal.output_stopped {
+            return Err(EAGAIN);
+        }
         let length = maximum.min(terminal.output.len());
         if length != 0 {
             return Ok(terminal.output.drain(..length).collect());
@@ -456,6 +478,9 @@ impl PtyManager {
             terminal.attributes.local_flags & posix_protocol::TERMINAL_LFLAG_ICANON != 0;
         let is_canonical = attributes.local_flags & posix_protocol::TERMINAL_LFLAG_ICANON != 0;
         terminal.attributes = attributes;
+        if attributes.input_flags & posix_protocol::TERMINAL_IFLAG_IXON == 0 {
+            terminal.output_stopped = false;
+        }
         if was_canonical && !is_canonical && !terminal.canonical_input.is_empty() {
             let pending: Vec<_> = terminal.canonical_input.drain(..).collect();
             for byte in pending {
@@ -620,7 +645,10 @@ impl PtyManager {
                         signal: posix_protocol::SIGNAL_HUP,
                     });
                 }
-                PtySide::Slave if terminal.slave_open => terminal.slave_open = false,
+                PtySide::Slave if terminal.slave_open => {
+                    terminal.slave_open = false;
+                    terminal.output_stopped = false;
+                }
                 _ => return Err(EBADF),
             }
             !terminal.master_open && !terminal.slave_open
@@ -661,7 +689,7 @@ impl PtyManager {
         let terminal = self.terminals.get(&id).ok_or(EBADF)?;
         let (readable, writable, peer_closed) = match side {
             PtySide::Master => (
-                !terminal.output.is_empty(),
+                !terminal.output_stopped && !terminal.output.is_empty(),
                 terminal.slave_open
                     && terminal.input_occupancy() < BUFFER_CAPACITY
                     && (terminal.attributes.local_flags
