@@ -11,7 +11,11 @@
 #include <unistd.h>
 
 #define WORKER_KEY UINT64_C(0x574f524b45524558)
+#define BUSY_KEY (WORKER_KEY + 1)
 static atomic_uint worker_handle;
+static atomic_uint busy_handle;
+
+static void *busy_worker(void *unused);
 
 static uint64_t native_call(uint64_t number, uint64_t first, uint64_t second,
                             uint64_t third) {
@@ -23,6 +27,18 @@ static uint64_t native_call(uint64_t number, uint64_t first, uint64_t second,
 
 static int native_error(uint64_t result) {
     return result >= UINT64_MAX - 4094;
+}
+
+static void *busy_worker(void *unused) {
+    (void)unused;
+    uint64_t handle = native_call(656, 0, 0, 0);
+    atomic_store_explicit(&busy_handle,
+        native_error(handle) || handle == 0 || handle > UINT32_MAX ? UINT32_MAX : (unsigned)handle,
+        memory_order_release);
+    /* No syscall or cooperative yield: the kernel must stop this context
+     * through scheduler handoff before it releases the old address space. */
+    for (;;) __asm__ volatile("pause" ::: "memory");
+    return NULL;
 }
 
 static void *sleeping_worker(void *unused) {
@@ -47,31 +63,48 @@ int main(int argc, char **argv) {
             uint64_t thread_id, process_id;
             uint32_t state, reserved;
         } status = {0};
-        uint64_t handle = native_call(628, WORKER_KEY, 0, 0);
-        if (native_error(handle) || handle == 0) return 2;
-        uint64_t result = native_call(658, handle, (uintptr_t)&status, sizeof(status));
-        fprintf(stderr, "native-multithread-exec: sibling tid=%llu pid=%llu state=%u result=%lld\n",
-                (unsigned long long)status.thread_id,
-                (unsigned long long)status.process_id, status.state, (long long)result);
-        if ((int64_t)result != -ESRCH && (result != 0 || status.state != 5)) {
-            fprintf(stderr, "native-multithread-exec: FAIL old sibling survives image replacement\n");
-            return 3;
+        for (uint64_t key = WORKER_KEY; key <= BUSY_KEY; ++key) {
+            uint64_t handle = native_call(628, key, 0, 0);
+            if (native_error(handle) || handle == 0) return 2;
+            uint64_t result = native_call(658, handle, (uintptr_t)&status, sizeof(status));
+            fprintf(stderr, "native-multithread-exec: sibling tid=%llu pid=%llu state=%u result=%lld\n",
+                    (unsigned long long)status.thread_id,
+                    (unsigned long long)status.process_id, status.state, (long long)result);
+            if ((int64_t)result != -ESRCH && (result != 0 || status.state != 5)) {
+                fprintf(stderr, "native-multithread-exec: FAIL old sibling survives image replacement\n");
+                return 3;
+            }
         }
         fprintf(stderr, "native-multithread-exec: PASS old sibling cannot resume after image replacement\n");
         return 0;
     }
-    pthread_t worker;
+    pthread_t worker, busy;
     if (pthread_create(&worker, NULL, sleeping_worker, NULL) != 0) return 4;
-    unsigned handle = 0;
-    for (unsigned retry = 0; retry < 5000 && handle == 0; ++retry) {
+    if (pthread_create(&busy, NULL, busy_worker, NULL) != 0) return 4;
+    unsigned handle = 0, busy_value = 0;
+    for (unsigned retry = 0; retry < 5000 && (handle == 0 || busy_value == 0); ++retry) {
         struct timespec pause = {0, 1000000};
         nanosleep(&pause, NULL);
         handle = atomic_load_explicit(&worker_handle, memory_order_acquire);
+        busy_value = atomic_load_explicit(&busy_handle, memory_order_acquire);
     }
-    if (handle == 0 || handle == UINT32_MAX) return 5;
+    if (handle == 0 || handle == UINT32_MAX || busy_value == 0 || busy_value == UINT32_MAX) return 5;
     /* Explicitly preserve our own worker Handle through the opaque native
      * LaunchContext, not by acquiring an arbitrary PID/TID's Handle. */
     if (native_error(native_call(648, WORKER_KEY, handle, 0))) return 6;
+    if (native_error(native_call(648, BUSY_KEY, busy_value, 0))) return 6;
+    char *missing_arguments[] = {"missing-image", NULL};
+    char *missing_environment[] = {NULL};
+    if (execve("/system/services/missing-exec-probe", missing_arguments, missing_environment) != -1)
+        return 8;
+    for (unsigned sibling = 0; sibling < 2; ++sibling) {
+        struct { uint64_t thread_id, process_id; uint32_t state, reserved; } status;
+        uint64_t result = native_call(658, sibling == 0 ? handle : busy_value,
+                                      (uintptr_t)&status, sizeof(status));
+        if (result != 0 || status.state == 5) return 9;
+    }
+    fprintf(stderr, "native-multithread-exec: PASS failed exec preserves both siblings\n");
+    fprintf(stderr, "native-multithread-exec: replacing image with sleeping and busy siblings\n");
     char *arguments[] = {"multithread-exec", "--verify-replacement", NULL};
     char *environment[] = {NULL};
     execve("/system/services/compositor.service", arguments, environment);

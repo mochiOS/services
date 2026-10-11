@@ -13,6 +13,10 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifdef MULTITHREAD_EXEC_PROBE
+extern int multithread_exec_main(int argc, char **argv);
+#endif
+
 #define CHECK(condition) do { \
     if (!(condition)) { \
         fprintf(stderr, "failed-spawn-cleanup: FAIL line %d errno %d\n", __LINE__, errno); \
@@ -231,6 +235,10 @@ static int inspect_exec_from_upcall(void) {
 }
 
 int main(int argc, char **argv) {
+#ifdef MULTITHREAD_EXEC_PROBE
+    if (argc == 2 && strcmp(argv[1], "--verify-replacement") == 0)
+        return multithread_exec_main(argc, argv);
+#endif
     if (argc == 2 && strcmp(argv[1], "--upcall-exec-child") == 0) {
         sigset_t mask;
         struct sigaction action;
@@ -416,5 +424,8 @@ int main(int argc, char **argv) {
     CHECK(sigprocmask(99, NULL, &pending) == 0 && pending == exec_mask);
     fprintf(stderr, "native-signal-masks: PASS fork/exec inheritance, failed exec preservation and spawn SETSIGMASK override\n");
     CHECK(inspect_exec_from_upcall() == 0);
+#ifdef MULTITHREAD_EXEC_PROBE
+    return multithread_exec_main(argc, argv);
+#endif
     return 0;
 }
