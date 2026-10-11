@@ -1,6 +1,48 @@
 use mochios_posix_client::time::{ClockKind, classify_clock_id};
 
 #[test]
+fn clock_sleep_parsing_uses_sdk_flags_and_rejects_unusable_clocks() {
+    use mochios_posix_client::newlib_errno::{EINVAL, ENOTSUP};
+    use mochios_posix_client::time::{ClockSleep, TIMER_ABSTIME};
+    let header = include_str!("../../../libraries/newlib/newlib/libc/include/time.h");
+    let value: i32 = header
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split_whitespace();
+            (fields.next() == Some("#define") && fields.next() == Some("TIMER_ABSTIME"))
+                .then(|| fields.next().unwrap().parse().unwrap())
+        })
+        .unwrap();
+    assert_eq!(TIMER_ABSTIME, value);
+    let absolute = ClockSleep::parse(4, value, 2, 3).unwrap();
+    assert!(absolute.absolute);
+    assert_eq!(absolute.nanoseconds, 2_000_000_003);
+    assert_eq!(absolute.remaining(2_000_000_000), 3);
+    assert_eq!(absolute.remaining(3_000_000_000), 0);
+    assert!(!ClockSleep::parse(1, 0, 0, 1).unwrap().absolute);
+    for (clock, flags, sec, nano) in [
+        (-1, 0, 0, 0),
+        (3, 0, 0, 0),
+        (4, 1, 0, 0),
+        (4, -1, 0, 0),
+        (4, 0, -1, 0),
+        (4, 0, 0, -1),
+        (4, 0, 0, 1_000_000_000),
+        (4, 0, i64::MAX, 0),
+    ] {
+        assert_eq!(ClockSleep::parse(clock, flags, sec, nano), Err(EINVAL));
+    }
+    for clock in [0, 2, 5, 6, 7, 8, 9] {
+        assert_eq!(ClockSleep::parse(clock, 0, 0, 0), Err(ENOTSUP));
+    }
+    let header = include_str!("../../../libraries/newlib/newlib/libc/include/time.h");
+    assert!(header.contains("#if defined(_POSIX_CLOCK_SELECTION) || defined(__mochios__)"));
+    let libc = include_str!("../../../libraries/libc/newlib/mochios.rs");
+    assert!(libc.contains("pub const TIMER_ABSTIME: c_int = 4;"));
+    assert!(libc.contains("pub fn clock_nanosleep("));
+}
+
+#[test]
 fn sleep_observation_distinguishes_spurious_wakes_caught_handlers_and_expiry() {
     use mochios_posix_client::time::{SleepObservation, observe_sleep};
     assert_eq!(observe_sleep(100, 40, 7, 7), SleepObservation::Waiting);
