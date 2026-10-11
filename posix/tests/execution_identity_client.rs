@@ -84,6 +84,21 @@ fn client_rejects_invalid_identity_and_propagates_errors_without_fallback() {
 
 #[test]
 fn self_identification_callers_do_not_request_kernel_credentials() {
+    let examples = include_str!("../../../core/examples/user/src/lib.rs");
+    assert!(!examples.contains("GetThreadSecurityContext"));
+    assert!(!examples.contains("ThreadSecurityContext"));
+    for (function, field) in [("getpid", "process_id"), ("gettid", "thread_id")] {
+        let body = examples
+            .split(&format!("pub fn {function}()"))
+            .nth(1)
+            .unwrap()
+            .split("\n}")
+            .next()
+            .unwrap();
+        assert!(body.contains("mochi_user_syscall::execution::identity()"));
+        assert!(body.contains(&format!("identity.{field}")));
+        assert!(body.contains(".unwrap_or(0)"));
+    }
     let platform = include_str!("../../../user/crates/platform/src/lib.rs");
     assert!(!platform.contains("fn current_security_context("));
     let current = platform
