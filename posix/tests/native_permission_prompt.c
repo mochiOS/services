@@ -233,11 +233,27 @@ static int fresh_spawn(int64_t posix, int64_t authority, int overflow) {
   return 0;
 }
 
+static int entropy_probe(void) {
+  unsigned char bytes[258];
+  memset(bytes, 0x5a, sizeof(bytes));
+  errno = EACCES;
+  CHECK(getentropy(NULL, 0) == 0 && errno == EACCES);
+  CHECK(getentropy(bytes + 1, 256) == 0 && errno == EACCES);
+  CHECK(bytes[0] == 0x5a && bytes[257] == 0x5a);
+  CHECK(getentropy(NULL, 1) == -1 && errno == EFAULT);
+  errno = 0;
+  CHECK(getentropy(bytes, 257) == -1 && errno == EIO);
+  fprintf(stderr, "entropy-native: PASS empty, full 256-byte fill, canaries, "
+                  "null pointer and oversized request\n");
+  return 0;
+}
+
 int main(int argc, char **argv) {
   if (argc == 2 && strcmp(argv[1], "--credential-child") == 0)
     return credential_child();
   if (argc == 2 && strcmp(argv[1], "--credential-overflow") == 0)
     return credential_overflow_child();
+  CHECK(entropy_probe() == 0);
   fprintf(stderr, "permission-native: start real secure-ui endpoint test\n");
   unsigned char metadata[20000];
   int fd = open("/system/resources/native-permission-metadata.bin", O_RDONLY);

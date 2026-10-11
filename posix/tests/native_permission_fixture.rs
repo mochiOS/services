@@ -14,14 +14,20 @@ vendor = "mochiOS"
 [[binary]]
 path = "/system/services/input.service"
 kind = "service"
-requires = ["fs.read.all", "ipc.client", "ipc.server", "process.spawn"]
+requires = ["fs.read.all", "ipc.client", "ipc.server", "process.spawn", "system.random.read"]
 [[binary]]
 path = "/system/resources/native-credential-target.elf"
 kind = "application"
 requires = []
 "#;
     let digest: [u8; 32] = Sha256::digest(manifest).into();
-    let caps = ["fs.read.all", "ipc.client", "ipc.server", "process.spawn"];
+    let caps = [
+        "fs.read.all",
+        "ipc.client",
+        "ipc.server",
+        "process.spawn",
+        "system.random.read",
+    ];
     let record = InstallRecord {
         provenance: InstallProvenance::BuiltIn,
         verification: VerifiedResponse {
