@@ -3,6 +3,56 @@ use mochios_posix_client::multiplex::{wait, WaitError};
 use std::cell::Cell;
 
 #[test]
+fn every_negative_poll_timeout_is_infinite_and_nonnegative_values_are_exact() {
+    use mochios_posix_client::multiplex::poll_timeout_nanoseconds;
+    for value in [i32::MIN, -1000, -2, -1] {
+        assert_eq!(poll_timeout_nanoseconds(value), None);
+    }
+    for value in [0, 1, 1000, i32::MAX] {
+        assert_eq!(
+            poll_timeout_nanoseconds(value),
+            Some(value as u64 * 1_000_000)
+        );
+    }
+    let runtime = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
+    let poll = runtime
+        .split("fn poll(")
+        .nth(1)
+        .unwrap()
+        .split("fn getgroups(")
+        .next()
+        .unwrap();
+    assert!(poll.contains("multiplex::poll_timeout_nanoseconds(timeout_ms)"));
+    assert!(!poll.contains("value if value < -1"));
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn negative_timeouts_match_host_poll_including_values_below_minus_one() {
+    use std::os::fd::AsRawFd;
+    #[repr(C)]
+    struct PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+    unsafe extern "C" {
+        fn poll(fds: *mut PollFd, count: usize, timeout: i32) -> i32;
+    }
+    let file = std::fs::File::open("/dev/null").unwrap();
+    for timeout in [i32::MIN, -1000, -2, -1, 0, 1, i32::MAX] {
+        // /dev/null is always readable, so even infinite waits complete.
+        let mut item = PollFd {
+            fd: file.as_raw_fd(),
+            events: 1,
+            revents: 0,
+        };
+        assert_eq!(unsafe { poll(&mut item, 1, timeout) }, 1);
+        assert_eq!(item.revents & 1, 1);
+    }
+}
+
+#[test]
 fn caught_handler_interrupts_before_entry_and_after_a_native_return() {
     let result = wait::<i32>(
         1,
