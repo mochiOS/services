@@ -2,6 +2,121 @@ use mochios_posix_client::fd::{
     Entry, FD_CLOEXEC, FdError, FdTable, FileOps, HandleOps, SeekBasis,
 };
 
+fn test_entry(handle: u64) -> Entry<u64> {
+    Entry {
+        handle,
+        rights: 0x25,
+        descriptor_flags: 0,
+    }
+}
+
+#[test]
+fn pending_open_is_not_visible_and_cannot_be_stolen() {
+    let mut table = FdTable::new();
+    let source = table.install(test_entry(10)).unwrap();
+    let reservation = table.reserve_from(0, 2).unwrap();
+    let mut handles = FakeHandles::default();
+    assert_eq!(table.get(1), None);
+    assert_eq!(table.close(1, &mut handles), Err(FdError::BadDescriptor));
+    assert_eq!(
+        table.install_from(0, 2, test_entry(20)),
+        Err(FdError::InvalidDescriptor)
+    );
+    assert_eq!(
+        table.duplicate_from(source, 0, 2, false, &mut handles),
+        Err(FdError::InvalidDescriptor)
+    );
+    assert_eq!(
+        table.duplicate_to(source, 1, &mut handles),
+        Err(FdError::BusyDescriptor)
+    );
+    assert_eq!(
+        table.install_at(1, test_entry(30), &mut handles),
+        Err(FdError::BusyDescriptor)
+    );
+    assert!(handles.cloned.is_empty());
+    assert!(handles.closed.is_empty());
+    assert_eq!(
+        table.commit_reservation(&reservation, test_entry(40)),
+        Ok(1)
+    );
+    assert_eq!(table.get(1), Some(test_entry(40)));
+    assert!(!table.cancel_reservation(&reservation));
+}
+
+#[test]
+fn failed_open_releases_slot_and_stale_token_cannot_cancel_next_open() {
+    let mut table = FdTable::<u64>::new();
+    let old = table.reserve_from(0, 1).unwrap();
+    assert!(table.cancel_reservation(&old));
+    let next = table.reserve_from(0, 1).unwrap();
+    assert!(!table.cancel_reservation(&old));
+    assert_eq!(
+        table.commit_reservation(&old, test_entry(10)),
+        Err(FdError::InvalidDescriptor)
+    );
+    assert_eq!(
+        table.install_from(0, 1, test_entry(20)),
+        Err(FdError::InvalidDescriptor)
+    );
+    assert_eq!(table.commit_reservation(&next, test_entry(30)), Ok(0));
+}
+
+#[test]
+fn concurrent_allocation_does_not_consume_pending_open_slot() {
+    let table = std::sync::Mutex::new(FdTable::new());
+    let reservation = table.lock().unwrap().reserve_from(0, 2).unwrap();
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let mut table = table.lock().unwrap();
+                assert_eq!(table.install_from(0, 2, test_entry(20)), Ok(1));
+                assert_eq!(
+                    table.install_from(0, 2, test_entry(30)),
+                    Err(FdError::InvalidDescriptor)
+                );
+            })
+            .join()
+            .unwrap();
+    });
+    let mut table = table.lock().unwrap();
+    assert_eq!(
+        table.commit_reservation(&reservation, test_entry(10)),
+        Ok(0)
+    );
+    assert_eq!(table.get(0), Some(test_entry(10)));
+    assert_eq!(table.get(1), Some(test_entry(20)));
+}
+
+#[test]
+fn fork_snapshot_inherits_entries_but_not_other_threads_pending_opens() {
+    let mut parent = FdTable::new();
+    parent.install(test_entry(10)).unwrap();
+    let reservation = parent.reserve_from(0, 2).unwrap();
+    let mut child = parent.clone();
+    assert_eq!(child.get(0), Some(test_entry(10)));
+    assert_eq!(child.install_from(0, 2, test_entry(20)), Ok(1));
+    assert_eq!(
+        parent.install_from(0, 2, test_entry(30)),
+        Err(FdError::InvalidDescriptor)
+    );
+    parent.clear_reservations();
+    assert!(!parent.cancel_reservation(&reservation));
+    assert_eq!(parent.install_from(0, 2, test_entry(40)), Ok(1));
+}
+
+#[test]
+fn reservations_reject_invalid_ranges_without_consuming_capacity() {
+    let mut table = FdTable::<u64>::new();
+    for (minimum, limit) in [(-1, 1), (0, 0), (2, 1), (0, 257), (0, -1)] {
+        assert!(matches!(
+            table.reserve_from(minimum, limit),
+            Err(FdError::InvalidDescriptor)
+        ));
+    }
+    assert_eq!(table.install(test_entry(10)), Ok(0));
+}
+
 #[derive(Default)]
 struct FakeHandles {
     cloned: Vec<(u64, u64)>,
@@ -26,12 +141,7 @@ impl FileOps<u64> for FakeHandles {
         Ok(buffer.len())
     }
 
-    fn seek(
-        &mut self,
-        handle: u64,
-        offset: i64,
-        basis: SeekBasis,
-    ) -> Result<u64, Self::Error> {
+    fn seek(&mut self, handle: u64, offset: i64, basis: SeekBasis) -> Result<u64, Self::Error> {
         self.io_handles.push(handle);
         let base = match basis {
             SeekBasis::Start => 0,
@@ -243,10 +353,7 @@ fn fast_path_resolves_local_fds_to_handles_before_io() {
     assert_eq!(table.read(fd, &mut input, &mut handles), Ok(3));
     assert_eq!(input, [0x5a; 3]);
     assert_eq!(table.write(fd, b"ok", &mut handles), Ok(2));
-    assert_eq!(
-        table.seek(fd, -1, SeekBasis::Current, &mut handles),
-        Ok(4)
-    );
+    assert_eq!(table.seek(fd, -1, SeekBasis::Current, &mut handles), Ok(4));
     assert_eq!(handles.io_handles, vec![0xfeed, 0xfeed, 0xfeed]);
 }
 

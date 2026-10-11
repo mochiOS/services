@@ -133,6 +133,18 @@ int main(void) {
     int available = dup(fd);
     CHECK(available >= 0 && close(available) == 0);
     fprintf(stderr, "positioned-io: RLIMIT_NOFILE allocation, retained FDs and restore ok\n");
+    limited.rlim_cur = (rlim_t)available + 1;
+    CHECK(setrlimit(RLIMIT_NOFILE, &limited) == 0);
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        CHECK(open("/tmp/posix-missing-parent/file", O_RDONLY) == -1 && errno == ENOENT);
+        CHECK(open(path, O_ACCMODE) == -1 && errno == EINVAL);
+        int opened = open(path, O_RDONLY);
+        CHECK(opened == available);
+        CHECK(open(path, O_RDONLY) == -1 && errno == EMFILE);
+        CHECK(close(opened) == 0);
+    }
+    CHECK(setrlimit(RLIMIT_NOFILE, &saved) == 0);
+    fprintf(stderr, "positioned-io: failed opens release reserved FD and reuse lowest slot ok\n");
     CHECK(close(duplicate) == 0 && close(fd) == 0);
     CHECK(unlink(path) == 0);
     fprintf(stderr, "positioned-io: chunking and shared mapping coherence ok\n");
