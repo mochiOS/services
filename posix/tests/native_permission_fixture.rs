@@ -15,6 +15,10 @@ vendor = "mochiOS"
 path = "/system/services/input.service"
 kind = "service"
 requires = ["fs.read.all", "ipc.client", "ipc.server", "process.spawn"]
+[[binary]]
+path = "/system/resources/native-credential-target.elf"
+kind = "application"
+requires = []
 "#;
     let digest: [u8; 32] = Sha256::digest(manifest).into();
     let caps = ["fs.read.all", "ipc.client", "ipc.server", "process.spawn"];
@@ -105,6 +109,43 @@ requires = ["fs.read.all", "ipc.client", "ipc.server", "process.spawn"]
         &metadata[..length],
     )
     .unwrap();
+    // Use the actual capability package policy, including its explicit
+    // inspection authority. Do not replace it with a permissive test manifest.
+    let manifest = include_bytes!("../../capability/manifest.toml");
+    let parsed =
+        mochi_user_platform::package::parse_manifest(std::str::from_utf8(manifest).unwrap())
+            .unwrap();
+    let capabilities = parsed
+        .binary_requires("/system/services/capability.service")
+        .unwrap();
+    let caps: Vec<&str> = capabilities.iter().map(String::as_str).collect();
+    let digest: [u8; 32] = Sha256::digest(manifest).into();
+    let record = InstallRecord {
+        provenance: InstallProvenance::BuiltIn,
+        verification: VerifiedResponse {
+            request_id: 0,
+            provenance: InstallProvenance::BuiltIn,
+            certificate_serial: 0,
+            subject_key_id: [0; 32],
+            manifest_digest: digest,
+            package_digest: digest,
+            developer_id: "org.mochios.system",
+            verified_package_id: "org.mochios.capability",
+            allowed_capabilities: &caps,
+        },
+    };
+    let mut verification = vec![0; record.encoded_len()];
+    record.encode(&mut verification).unwrap();
+    std::fs::write(
+        directory.join("capability-credential-manifest.toml"),
+        manifest,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("capability-credential-verification.bin"),
+        verification,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -124,5 +165,9 @@ fn permission_probe_matches_native_abi_and_never_edits_real_ui_policy() {
     assert!(compact.contains(&format!(
         "registration[6]={};",
         mochios_posix_protocol::OP_PROCESS_SPAWNED
+    )));
+    assert!(compact.contains(&format!(
+        "put32(request,{:#x});",
+        mochi_user_platform::capability::AUTHORIZE_EXEC_OPCODE
     )));
 }

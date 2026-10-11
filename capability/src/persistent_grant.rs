@@ -66,6 +66,14 @@ pub(crate) fn install_posix_endpoint(
     Ok(())
 }
 
+pub(crate) fn requester_context(
+    endpoint: u64,
+) -> Result<mochi_user_syscall::ThreadSecurityContext, mochi_user_syscall::SysError> {
+    crate::requester_context::read(endpoint, |process| {
+        with_client(|client| client.process_session_info(process))
+    })
+}
+
 fn hex_digest(digest: &[u8; 32]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(64);
@@ -403,7 +411,7 @@ pub(crate) fn authorize_persistent_capability(
         ));
     }
 
-    let context = platform::process::thread_security_context(requester_thread)?;
+    let context = requester_context(requester_thread)?;
     if context.process_id != request.process_id {
         return Err(mochi_user_syscall::SysError::from_raw(
             mochi_user_syscall::EACCES as i64,

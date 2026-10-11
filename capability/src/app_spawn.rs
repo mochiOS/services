@@ -111,7 +111,7 @@ pub(crate) fn spawn_application_from_manifest(
         &manifest_record.manifest_path,
         crate::persistent_grant::read_file,
     )?;
-    let requester_context = platform::process::thread_security_context(sender)?;
+    let requester_context = crate::persistent_grant::requester_context(sender)?;
     let mut grant_context = mochi_user_syscall::ThreadSecurityContext::default();
     grant_context.effective_uid = requester_context.effective_uid;
     grant_context.effective_gid = requester_context.effective_gid;

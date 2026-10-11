@@ -246,7 +246,7 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                         &record.manifest_path,
                         crate::persistent_grant::read_file,
                     )?;
-                    let requester_context = platform::process::thread_security_context(sender)?;
+                    let requester_context = crate::persistent_grant::requester_context(sender)?;
                     let package_id = identity.package_id.as_bytes();
                     let developer_id = identity.developer_id.as_bytes();
                     if package_id.len() > requester_context.package_id.len()

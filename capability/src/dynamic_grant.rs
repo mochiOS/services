@@ -195,7 +195,7 @@ pub(crate) fn authorize_dynamic_capability(
             mochi_user_syscall::EINVAL as i64,
         ));
     }
-    let context = platform::process::thread_security_context(requester_thread)?;
+    let context = crate::persistent_grant::requester_context(requester_thread)?;
     if context.process_id != request.process_id {
         return Err(mochi_user_syscall::SysError::from_raw(
             mochi_user_syscall::EACCES as i64,

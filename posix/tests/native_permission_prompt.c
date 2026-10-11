@@ -1,5 +1,6 @@
-/* Isolated native boundary test. Launches the real secure-ui executable and
- * checks denial without opening a GUI or bypassing production authorization. */
+/* Isolated native boundary test. Exercises real secure-ui denial, fresh-child
+ * POSIX registration and capability authorization without opening a GUI or
+ * bypassing production authorization. */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
@@ -85,6 +86,20 @@ static int credential_child(void) {
   errno = 0;
   CHECK(setgid(0) == -1 && errno == EPERM);
   CHECK(getuid() == 505 && getgid() == 24);
+  const char broker[] = "capability.service";
+  int64_t authority = N(FIND_PROCESS, broker, sizeof(broker) - 1, 0);
+  CHECK(authority > 0);
+  const char executable[] = "/system/resources/native-credential-target.elf";
+  unsigned char request[4 + sizeof(executable) - 1] = {0}, reply[2048] = {0};
+  put32(request, 0x43414558); /* AUTHORIZE_EXEC, uses POSIX requester IDs. */
+  memcpy(request + 4, executable, sizeof(executable) - 1);
+  int64_t result = native6(IPC_CALL, authority, (uint64_t)request,
+                           sizeof(request), (uint64_t)reply, sizeof(reply), 0);
+  fprintf(stderr, "capability-posix: authorization result %lld status %lld\n",
+          (long long)result, (long long)get64(reply));
+  CHECK(result >= 0 && (uint32_t)result == 8 && get64(reply) == 0);
+  fprintf(stderr, "capability-posix: PASS native owner Handle inspection and "
+                  "exec authorization for child uid 505/gid 24\n");
   fprintf(stderr, "fresh-spawn: child PASS newlib uid/gid/groups/umask and "
                   "elevation denial\n");
   return 37;

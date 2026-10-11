@@ -12,6 +12,7 @@ requires = [
     "fs.read.all",
     "fs.write.all",
     "process.spawn",
+    "process.inspect",
     "service.register",
     "capabilities.manage",
     "device.input",
