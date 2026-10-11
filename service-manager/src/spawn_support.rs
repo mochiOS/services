@@ -12,7 +12,7 @@ pub(crate) fn errno(error: mochi_user_syscall::SysError) -> u64 {
 }
 
 pub(crate) fn sys_error(errno: u64) -> mochi_user_syscall::SysError {
-    mochi_user_syscall::SysError::from_raw(-(errno as i64))
+    mochi_user_syscall::SysError::from_raw(crate::portal_status::failure_status(errno) as i64)
 }
 
 pub(crate) fn call_with_wait(

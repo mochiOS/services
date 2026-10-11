@@ -325,7 +325,9 @@ pub(crate) fn prewarm(prompt_process: &mut PermissionPrompts, logger_endpoint: u
                     "service-manager.service: permission prompt readiness failed error={:?}",
                     error
                 );
-                return Err(crate::spawn_support::sys_error(mochi_user_syscall::EIO));
+                return Err(mochi_user_syscall::SysError::from_raw(
+                    mochi_user_syscall::EIO as i64,
+                ));
             }
         };
         Ok(PermissionPromptProcess {

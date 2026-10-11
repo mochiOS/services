@@ -107,3 +107,19 @@ fn account_and_security_consumers_do_not_invert_native_error_constants() {
             .contains("status.status == mochi_user_syscall::EACCES as i32")
     );
 }
+
+#[test]
+fn spawn_errors_accept_native_constants_and_positive_remote_errors() {
+    for (raw, expected) in [(syscall::EINVAL, 22), (22, 22), (syscall::EIO, 5), (5, 5)] {
+        let error = syscall::SysError::from_raw(portal_status::failure_status(raw) as i64);
+        assert_eq!(error.errno(), Some(expected));
+    }
+    let source = include_str!("../../service-manager/src/spawn_support.rs");
+    let start = source.find("pub(crate) fn sys_error(").unwrap();
+    let end = start
+        + source[start..]
+            .find("pub(crate) fn call_with_wait(")
+            .unwrap();
+    assert!(source[start..end].contains("crate::portal_status::failure_status(errno)"));
+    assert!(!source[start..end].contains("-(errno as i64)"));
+}
