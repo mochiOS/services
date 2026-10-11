@@ -1,6 +1,22 @@
 use mnu_abi::ThreadSecurityContext;
 
 #[test]
+fn obsolete_kernel_uid_gid_mutation_policy_is_absent() {
+    let process = include_str!("../../../core/src/task/process.rs");
+    for removed in [
+        "fn set_uid(",
+        "fn set_gid(",
+        "fn real_uid(",
+        "fn real_gid(",
+        "real_uid:",
+        "real_gid:",
+        "ProcessCredentials::user(",
+    ] {
+        assert!(!process.contains(removed), "kernel retains {removed}");
+    }
+}
+
+#[test]
 fn native_security_context_layout_contains_only_execution_and_package_identity() {
     // No compatibility padding is kept for the removed POSIX UID/GID fields.
     assert_eq!(core::mem::size_of::<ThreadSecurityContext>(), 320);
