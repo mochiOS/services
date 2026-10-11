@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <sys/wait.h>
 #include <unistd.h>
+extern int native_thread_register_probe(void);
 
 static volatile unsigned char private_value = 0x11;
 static int64_t native3(uint64_t number, uint64_t a, uint64_t b, uint64_t c) {
@@ -77,5 +78,10 @@ int main(void) {
     CHECK(waitpid(child, &exit_status, 0) == child);
     CHECK(WIFEXITED(exit_status) && WEXITSTATUS(exit_status) == 37);
     fprintf(stderr, "clone-resume: PASS newlib fork selects zero in the child and waitpid reaps it\n");
+    int thread_result = native_thread_register_probe();
+    if (thread_result != 0) fprintf(stderr, "thread-registers: FAIL case %d\n", thread_result);
+    CHECK(thread_result == 0);
+    fprintf(stderr, "thread-registers: PASS all explicit registers, TLS and safe flags at native entry\n");
+    fprintf(stderr, "thread-registers: PASS newlib pthread_create and pthread_join preserve argument/result\n");
     return 0;
 }
