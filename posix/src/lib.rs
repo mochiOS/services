@@ -483,6 +483,7 @@ pub struct PosixService<H: Copy = u32> {
     parents: BTreeMap<u64, u64>,
     children: BTreeMap<u64, BTreeSet<u64>>,
     launch_creators: BTreeMap<u64, u64>,
+    tree_teardowns: BTreeMap<u64, Vec<u64>>,
     process_groups: BTreeMap<u64, u64>,
     session_ids: BTreeMap<u64, u64>,
     controlling_terminals: BTreeMap<u64, u64>,
@@ -507,6 +508,7 @@ impl PosixService<u32> {
             parents: BTreeMap::new(),
             children: BTreeMap::new(),
             launch_creators: BTreeMap::new(),
+            tree_teardowns: BTreeMap::new(),
             process_groups: BTreeMap::new(),
             session_ids: BTreeMap::new(),
             controlling_terminals: BTreeMap::new(),
@@ -864,6 +866,9 @@ impl<H: Copy> PosixService<H> {
         process: AuthenticatedProcess<H>,
         filesystem: &mut F,
     ) -> Result<(), i32> {
+        if self.tree_teardown_owns(peer.process_id) {
+            return Err(protocol::STATUS_EAGAIN);
+        }
         if process.process_id == peer.process_id
             || !self.processes.contains_key(&peer.process_id)
             || self.processes.contains_key(&process.process_id)
@@ -1083,10 +1088,87 @@ impl<H: Copy> PosixService<H> {
         filesystem: &mut F,
         processes: &mut P,
     ) -> Result<(), i32> {
-        let plan: Vec<(u64, u64, H)> = self
-            .launched_tree_process_ids(peer, root)?
-            .into_iter()
+        self.begin_launched_tree_termination(peer, root, processes)?;
+        self.reclaim_launched_tree(peer, root, filesystem, processes)
+    }
+
+    fn tree_teardown_owns(&self, process_id: u64) -> bool {
+        self.tree_teardowns
+            .values()
+            .any(|members| members.contains(&process_id))
+    }
+
+    /// Freeze the authenticated tree before terminating anything. Keep every
+    /// relationship and owned reference until a separate reclaim request: a
+    /// lost completion reply can repeat this operation without losing authority.
+    /// Ordinary wait/launch rollback must not steal these references meanwhile.
+    pub fn begin_launched_tree_termination<P: ProcessBackend<H>>(
+        &mut self,
+        peer: PeerIdentity,
+        root: AuthenticatedProcess<H>,
+        processes: &mut P,
+    ) -> Result<(), i32> {
+        let members = self.launched_tree_process_ids(peer, root)?;
+        if !self.tree_teardowns.contains_key(&root.process_id) {
+            if members
+                .iter()
+                .any(|&process_id| self.tree_teardown_owns(process_id))
+            {
+                return Err(protocol::STATUS_EAGAIN);
+            }
+            for process_id in &members {
+                if !self.parents.contains_key(process_id)
+                    || !self.processes.contains_key(process_id)
+                {
+                    return Err(protocol::STATUS_ESRCH);
+                }
+            }
+            self.tree_teardowns.insert(root.process_id, members);
+        }
+        let handles: Vec<H> = self.tree_teardowns[&root.process_id]
+            .iter()
             .map(|process_id| {
+                self.processes
+                    .get(process_id)
+                    .copied()
+                    .ok_or(protocol::STATUS_ESRCH)
+            })
+            .collect::<Result<_, _>>()?;
+        for handle in handles {
+            if !matches!(processes.status(handle)?, ProcessLifecycle::Exited { .. }) {
+                processes.terminate(handle, 1)?;
+                if !matches!(processes.status(handle)?, ProcessLifecycle::Exited { .. }) {
+                    return Err(protocol::STATUS_EAGAIN);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Release a frozen tree only after every native exit is confirmed. Once
+    /// this succeeds the root no longer has a POSIX environment (ESRCH), so a
+    /// caller that already received termination confirmation can retry reclaim
+    /// after a lost reply without keeping an unbounded completion tombstone.
+    pub fn reclaim_launched_tree<F: FilesystemBackend<H>, P: ProcessBackend<H>>(
+        &mut self,
+        peer: PeerIdentity,
+        root: AuthenticatedProcess<H>,
+        filesystem: &mut F,
+        processes: &mut P,
+    ) -> Result<(), i32> {
+        if self.registered_peer(peer.process_id).is_none() {
+            return Err(protocol::STATUS_ESRCH);
+        }
+        if !self.processes.contains_key(&root.process_id) {
+            return Err(protocol::STATUS_ESRCH);
+        }
+        self.launched_tree_process_ids(peer, root)?;
+        let plan: Vec<(u64, u64, H)> = self
+            .tree_teardowns
+            .get(&root.process_id)
+            .ok_or(protocol::STATUS_EAGAIN)?
+            .iter()
+            .map(|&process_id| {
                 let parent = self
                     .parents
                     .get(&process_id)
@@ -1102,15 +1184,13 @@ impl<H: Copy> PosixService<H> {
             .collect::<Result<_, i32>>()?;
         for &(_, _, handle) in &plan {
             if !matches!(processes.status(handle)?, ProcessLifecycle::Exited { .. }) {
-                processes.terminate(handle, 1)?;
-                if !matches!(processes.status(handle)?, ProcessLifecycle::Exited { .. }) {
-                    return Err(protocol::STATUS_EAGAIN);
-                }
+                return Err(protocol::STATUS_EAGAIN);
             }
         }
         for (process_id, parent, _) in plan {
             self.reap_child(parent, process_id, filesystem, processes);
         }
+        self.tree_teardowns.remove(&root.process_id);
         Ok(())
     }
 
@@ -1126,6 +1206,9 @@ impl<H: Copy> PosixService<H> {
     ) -> Result<(), i32> {
         if self.launch_creators.get(&child.process_id) != Some(&peer.process_id) {
             return Err(protocol::STATUS_EPERM);
+        }
+        if self.tree_teardown_owns(child.process_id) {
+            return Err(protocol::STATUS_EAGAIN);
         }
         let handle = self
             .processes
@@ -1156,6 +1239,9 @@ impl<H: Copy> PosixService<H> {
     ) -> Result<protocol::WaitResult, i32> {
         let candidates = self.matching_child_ids(peer, request)?;
         for child in candidates {
+            if self.tree_teardown_owns(child) {
+                continue;
+            }
             let handle = self
                 .processes
                 .get(&child)
@@ -1203,6 +1289,7 @@ impl<H: Copy> PosixService<H> {
     ) -> Result<Vec<H>, i32> {
         self.matching_child_ids(peer, request)?
             .into_iter()
+            .filter(|child| !self.tree_teardown_owns(*child))
             .map(|child| {
                 self.processes
                     .get(&child)

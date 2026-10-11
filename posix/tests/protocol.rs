@@ -2360,6 +2360,192 @@ fn launched_tree_fixture() -> (
 }
 
 #[test]
+fn lost_tree_exit_reply_can_repeat_confirmation_before_reclaim() {
+    let (mut service, creator, mut filesystem, mut processes) = launched_tree_fixture();
+    let root = AuthenticatedProcess {
+        process_id: 30,
+        handle: 1030,
+    };
+    service
+        .begin_launched_tree_termination(creator, root, &mut processes)
+        .unwrap();
+    assert_eq!(processes.terminated, [(1050, 1), (1040, 1), (1030, 1)]);
+    assert!(processes.released.is_empty());
+    assert!(filesystem.released.is_empty());
+    assert_eq!(
+        service.launched_tree_handles(creator, root),
+        Ok(vec![1050, 1040, 1030])
+    );
+    // Simulate a server operation whose successful reply never reached its
+    // launcher. The same explicit root must still authenticate on retry.
+    service
+        .begin_launched_tree_termination(creator, root, &mut processes)
+        .unwrap();
+    assert_eq!(processes.terminated.len(), 3);
+    let denied = service.registered_peer(40).unwrap();
+    assert_eq!(
+        service.reclaim_launched_tree(denied, root, &mut filesystem, &mut processes),
+        Err(protocol::STATUS_EPERM)
+    );
+    assert!(processes.released.is_empty());
+    service
+        .reclaim_launched_tree(creator, root, &mut filesystem, &mut processes)
+        .unwrap();
+    assert_eq!(processes.released, [1050, 1040, 1030]);
+    assert_eq!(filesystem.released.len(), 6);
+    // A lost reclaim reply is distinguishable from an unconfirmed exit:
+    // a caller may accept ESRCH only after it received exit confirmation.
+    assert_eq!(
+        service.reclaim_launched_tree(creator, root, &mut filesystem, &mut processes),
+        Err(protocol::STATUS_ESRCH)
+    );
+    assert_eq!(processes.released.len(), 3);
+    assert_eq!(filesystem.released.len(), 6);
+}
+
+#[test]
+fn active_tree_transaction_prevents_wait_rollback_and_late_child_adoption() {
+    let (mut service, creator, mut filesystem, mut processes) = launched_tree_fixture();
+    let root = AuthenticatedProcess {
+        process_id: 30,
+        handle: 1030,
+    };
+    processes.terminate_failure = Some((1040, -5));
+    assert_eq!(
+        service.begin_launched_tree_termination(creator, root, &mut processes),
+        Err(-5)
+    );
+    let child_parent = service.registered_peer(40).unwrap();
+    assert_eq!(
+        service.wait_handles(
+            child_parent,
+            protocol::WaitRequest {
+                selector: 50,
+                options: 0,
+            }
+        ),
+        Ok(vec![])
+    );
+    assert_eq!(
+        service.wait_child(
+            child_parent,
+            protocol::WaitRequest {
+                selector: 50,
+                options: 0,
+            },
+            &mut filesystem,
+            &mut processes
+        ),
+        Err(protocol::STATUS_EAGAIN)
+    );
+    assert_eq!(
+        service.abort_launched_child(creator, root, &mut filesystem, &mut processes),
+        Err(protocol::STATUS_EAGAIN)
+    );
+    assert_eq!(
+        service.adopt_child(
+            service.registered_peer(30).unwrap(),
+            AuthenticatedProcess {
+                process_id: 60,
+                handle: 1060
+            },
+            &mut filesystem
+        ),
+        Err(protocol::STATUS_EAGAIN)
+    );
+    assert_eq!(
+        service.reclaim_launched_tree(creator, root, &mut filesystem, &mut processes),
+        Err(protocol::STATUS_EAGAIN)
+    );
+    assert!(processes.released.is_empty());
+    assert!(filesystem.released.is_empty());
+    assert!(service.registered_peer(60).is_none());
+    assert_eq!(service.parent_id(50), Some(40));
+    processes.terminate_failure = None;
+    service
+        .begin_launched_tree_termination(creator, root, &mut processes)
+        .unwrap();
+    service
+        .reclaim_launched_tree(creator, root, &mut filesystem, &mut processes)
+        .unwrap();
+    // Pins are scoped to this transaction, not a permanent ban on creation.
+    service
+        .adopt_spawned_child(
+            creator,
+            AuthenticatedProcess {
+                process_id: 60,
+                handle: 1060,
+            },
+            501,
+            20,
+            &[],
+            &mut filesystem,
+        )
+        .unwrap();
+    assert_eq!(service.parent_id(60), Some(10));
+}
+
+#[test]
+fn overlapping_tree_transactions_do_not_steal_each_others_owned_processes() {
+    let (mut service, creator, mut filesystem, mut processes) = launched_tree_fixture();
+    let root = AuthenticatedProcess {
+        process_id: 30,
+        handle: 1030,
+    };
+    let nested = AuthenticatedProcess {
+        process_id: 60,
+        handle: 1060,
+    };
+    service
+        .adopt_launched_child(creator, root, nested, &mut filesystem)
+        .unwrap();
+    processes.states.insert(1060, ProcessLifecycle::Running);
+    service
+        .begin_launched_tree_termination(creator, nested, &mut processes)
+        .unwrap();
+    assert_eq!(
+        service.begin_launched_tree_termination(creator, root, &mut processes),
+        Err(protocol::STATUS_EAGAIN)
+    );
+    assert_eq!(processes.terminated, [(1060, 1)]);
+    assert!(processes.released.is_empty());
+    service
+        .reclaim_launched_tree(creator, nested, &mut filesystem, &mut processes)
+        .unwrap();
+    service
+        .begin_launched_tree_termination(creator, root, &mut processes)
+        .unwrap();
+    service
+        .reclaim_launched_tree(creator, root, &mut filesystem, &mut processes)
+        .unwrap();
+    assert_eq!(
+        processes.terminated,
+        [(1060, 1), (1050, 1), (1040, 1), (1030, 1)]
+    );
+    assert_eq!(processes.released, [1060, 1050, 1040, 1030]);
+}
+
+#[test]
+fn tree_reclaim_never_terminates_unconfirmed_processes_or_starts_a_transaction() {
+    let (mut service, creator, mut filesystem, mut processes) = launched_tree_fixture();
+    let root = AuthenticatedProcess {
+        process_id: 30,
+        handle: 1030,
+    };
+    assert_eq!(
+        service.reclaim_launched_tree(creator, root, &mut filesystem, &mut processes),
+        Err(protocol::STATUS_EAGAIN)
+    );
+    assert!(processes.terminated.is_empty());
+    assert!(processes.released.is_empty());
+    assert!(filesystem.released.is_empty());
+    assert_eq!(
+        service.launched_tree_handles(creator, root),
+        Ok(vec![1050, 1040, 1030])
+    );
+}
+
+#[test]
 fn launched_tree_is_reclaimed_only_after_confirmed_descendant_first_exit() {
     let (mut service, creator, mut filesystem, mut processes) = launched_tree_fixture();
     let root = AuthenticatedProcess {
