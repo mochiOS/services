@@ -649,6 +649,7 @@ fn handle_subscribe_message(subscribers: &mut [u64; MAX_SUBSCRIBERS], buf: &[u8]
 }
 
 fn main() {
+    eprintln!("input.service: initializing logger");
     let _ = platform::logger::init_from_env();
     platform::logln!("input.service: start");
 
@@ -670,6 +671,7 @@ fn main() {
         platform::process::exit(1);
     }
 
+    eprintln!("input.service: loading IME dictionary");
     let mut keyboard = KeyboardState::default();
     let mut input_method = ime::InputMethod::open_system_dictionary();
     if input_method.is_available() {
@@ -680,14 +682,17 @@ fn main() {
             ime::DICTIONARY_PATH
         );
     }
+    eprintln!("input.service: IME initialization finished");
     let mut hardware_input = true;
     let mut mouse = MouseState::default();
     let input_preferences = InputPreferences::load();
     let mut subscribers = [0u64; MAX_SUBSCRIBERS];
+    eprintln!("input.service: notifying READY");
     if platform::service_ready::notify(ready_target, 0).is_err() {
         platform::logln!("input.service: ready notification failed");
         platform::process::exit(1);
     }
+    eprintln!("input.service: READY sent");
 
     loop {
         let mut pointer_received = false;
