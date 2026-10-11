@@ -55,7 +55,7 @@ fn image_replacement_discards_upcalls_only_after_committing_the_new_address_spac
         .unwrap();
     let release = replacement.find("destroy_user_page_table(old)").unwrap();
     let enter = replacement
-        .find("jump_to_usermode(entry, initial_rsp, 0)")
+        .find("jump_to_usermode(entry, stack_pointer, 0)")
         .unwrap();
     assert!(committed < reset && reset < release && release < enter);
     let thread = include_str!("../../../core/src/task/thread.rs");

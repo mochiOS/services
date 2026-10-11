@@ -2,6 +2,38 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 #[test]
+fn image_entry_drops_preparation_and_input_allocations_before_abandoning_stack() {
+    let source = include_str!("../../../core/src/syscall/exec.rs");
+    let preparation = source
+        .split("fn replace_current_process_image(")
+        .nth(1)
+        .unwrap()
+        .split("pub fn process_image_replace_syscall(")
+        .next()
+        .unwrap();
+    assert!(preparation.contains("Ok((new_pt_phys, entry, initial_rsp))"));
+    assert!(!preparation.contains("jump_to_usermode("));
+    let syscall = source
+        .split("pub fn process_image_replace_syscall(")
+        .nth(1)
+        .unwrap()
+        .split("pub fn process_create_syscall(")
+        .next()
+        .unwrap();
+    let prepared = syscall
+        .find("match replace_current_process_image(")
+        .unwrap();
+    let jump = syscall
+        .find("jump_to_usermode(entry, stack_pointer, 0)")
+        .unwrap();
+    for allocation in ["executable", "startup_bytes", "identity_bytes"] {
+        let release = syscall.find(&format!("drop({allocation})")).unwrap();
+        assert!(prepared < release && release < jump);
+    }
+    assert!(syscall.contains("Err(errno) => return errno"));
+}
+
+#[test]
 fn production_thread_removal_reclaims_wait_slots_without_holding_queue_lock() {
     let thread = include_str!("../../../core/src/task/thread.rs");
     let time = include_str!("../../../core/src/syscall/time.rs");

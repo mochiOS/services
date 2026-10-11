@@ -1,7 +1,7 @@
 /* Isolated Compositor-slot KVM stress fixture, not a desktop test. Repeated
  * image replacement must release a sibling's long deadline before its expiry.
- * The 70-round stress run currently stalls near round 40 with both kernels;
- * keep it as a reproducer, not evidence of successful native completion. */
+ * It also exceeds the old kernel heap leak's failure point (round 43).
+ * Optional entry tracing: -DTRACE_IMAGE_START -Wl,--wrap=_start_c. */
 #include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -23,6 +23,25 @@ static uint64_t native_call(uint64_t number, uint64_t first, uint64_t second,
     return number;
 }
 
+#ifdef TRACE_IMAGE_START
+extern void __real__start_c(void *initial_stack) __attribute__((noreturn));
+void __wrap__start_c(void *initial_stack) {
+    static const char message[] = "native-wait-retirement: image entry\n";
+    native_call(660, (uintptr_t)message, sizeof(message) - 1, 0);
+    __real__start_c(initial_stack);
+}
+
+static void trace(unsigned round, const char *stage) {
+    char message[96];
+    int length = snprintf(message, sizeof(message),
+                          "native-wait-retirement: round=%u %s\n", round, stage);
+    if (length > 0 && (unsigned)length < sizeof(message))
+        native_call(660, (uintptr_t)message, (unsigned)length, 0);
+}
+#else
+static void trace(unsigned round, const char *stage) { (void)round; (void)stage; }
+#endif
+
 static void *worker(void *unused) {
     (void)unused;
     uint64_t handle = native_call(656, 0, 0, 0);
@@ -42,12 +61,14 @@ int main(int argc, char **argv) {
     unsigned round = 0;
     if (argc == 3 && strcmp(argv[1], "--round") == 0)
         round = (unsigned)strtoul(argv[2], NULL, 10);
+    trace(round, "main entered");
     if (round == ROUNDS) {
         fprintf(stderr, "native-wait-retirement: PASS 70 exec replacements reclaim sleeping siblings\n");
         return 0;
     }
     if (round > ROUNDS) return 1;
     pthread_t thread;
+    trace(round, "creating sibling");
     int error = pthread_create(&thread, NULL, worker, NULL);
     if (error != 0) {
         fprintf(stderr, "native-wait-retirement: FAIL round=%u pthread_create=%d\n", round, error);
@@ -70,12 +91,14 @@ int main(int argc, char **argv) {
         }
     }
     if (!parked) return 6;
+    trace(round, "sibling parked");
     if (round % 10 == 0)
         fprintf(stderr, "native-wait-retirement: round=%u sibling parked\n", round);
     char next[16];
     snprintf(next, sizeof(next), "%u", round + 1);
     char *arguments[] = {"native-wait-retirement", "--round", next, NULL};
     char *environment[] = {NULL};
+    trace(round, "exec requested");
     execve("/system/services/compositor.service", arguments, environment);
     fprintf(stderr, "native-wait-retirement: FAIL round=%u exec errno=%d\n", round, errno);
     return 7;
