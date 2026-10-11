@@ -66,6 +66,7 @@ struct PseudoTerminal {
     canonical_input: VecDeque<u8>,
     output: VecDeque<u8>,
     attributes: posix_protocol::TerminalAttributes,
+    window_size: posix_protocol::TerminalWindowSize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -84,6 +85,7 @@ impl PseudoTerminal {
             canonical_input: VecDeque::new(),
             output: VecDeque::new(),
             attributes: posix_protocol::TerminalAttributes::sane(),
+            window_size: posix_protocol::TerminalWindowSize::default(),
         }
     }
 
@@ -524,6 +526,35 @@ impl PtyManager {
         output_capacity: usize,
     ) -> Result<Vec<u8>, i32> {
         match code {
+            posix_protocol::PTY_CONTROL_GET_WINDOW_SIZE => {
+                if !input.is_empty()
+                    || output_capacity < posix_protocol::TERMINAL_WINDOW_SIZE_LEN
+                {
+                    return Err(EINVAL);
+                }
+                let (id, _) = decode_object_id(object_id).ok_or(EBADF)?;
+                let terminal = self.terminals.get(&id).ok_or(EBADF)?;
+                let mut output = vec![0; posix_protocol::TERMINAL_WINDOW_SIZE_LEN];
+                posix_protocol::encode_terminal_window_size(terminal.window_size, &mut output)
+                    .map_err(|_| EINVAL)?;
+                Ok(output)
+            }
+            posix_protocol::PTY_CONTROL_SET_WINDOW_SIZE => {
+                if output_capacity != 0 {
+                    return Err(EINVAL);
+                }
+                let size = posix_protocol::decode_terminal_window_size(input).map_err(|_| EINVAL)?;
+                let (id, _) = decode_object_id(object_id).ok_or(EBADF)?;
+                let terminal = self.terminals.get_mut(&id).ok_or(EBADF)?;
+                if terminal.window_size != size {
+                    terminal.window_size = size;
+                    self.pending_signals.push_back(TerminalSignal {
+                        terminal_id: id,
+                        signal: posix_protocol::SIGNAL_WINCH,
+                    });
+                }
+                Ok(Vec::new())
+            }
             posix_protocol::PTY_CONTROL_GET_ATTRIBUTES => {
                 if !input.is_empty() || output_capacity < posix_protocol::TERMINAL_ATTRIBUTES_LEN {
                     return Err(EINVAL);
