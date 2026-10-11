@@ -81,7 +81,7 @@ fn pipe_buf_matches_the_public_headers_and_native_stream_checks_rights() {
     assert_eq!(mnu_abi::SyscallNumber::StreamWrite as u64, 675);
     assert_eq!(
         mnu_abi::STREAM_WRITE_OPTIONS_ALL,
-        mnu_abi::STREAM_WRITE_COMPLETE
+        mnu_abi::STREAM_WRITE_COMPLETE | mnu_abi::STREAM_IO_TRY
     );
     let header = include_str!("../../../libraries/newlib/newlib/libc/include/sys/syslimits.h");
     assert!(

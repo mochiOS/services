@@ -6,6 +6,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -17,7 +18,7 @@
 static volatile sig_atomic_t resized;
 static volatile sig_atomic_t background_stopped;
 static volatile sig_atomic_t background_read;
-static volatile sig_atomic_t waited_signal;
+static _Atomic sig_atomic_t waited_signal;
 static void on_wait_signal(int signal_number) { if (signal_number == SIGUSR1) ++waited_signal; }
 static void on_resize(int signal_number) { if (signal_number == SIGWINCH) ++resized; }
 static void on_background(int signal_number) {
@@ -78,6 +79,28 @@ static void *complete_restarted_read(void *master_address) {
     }
     if (waited_signal != 2 || write(*(int *)master_address, "r\n", 2) != 2)
         return (void *)(uintptr_t)1;
+    return NULL;
+}
+
+struct stream_wakeup {
+    int handle;
+    int drain;
+    sig_atomic_t observed;
+};
+
+static void *interrupt_stream_io(void *context) {
+    struct stream_wakeup *wake = context;
+    if (interrupt_handle_wait(NULL) != NULL) return (void *)(uintptr_t)1;
+    for (unsigned retry = 0; retry < 1000 && waited_signal <= wake->observed; ++retry) {
+        struct timespec pause = {0, 1000000};
+        nanosleep(&pause, NULL);
+    }
+    if (waited_signal != wake->observed + 1) return (void *)(uintptr_t)1;
+    if (wake->handle >= 0) {
+        char byte = 'p';
+        ssize_t count = wake->drain ? read(wake->handle, &byte, 1) : write(wake->handle, &byte, 1);
+        if (count != 1 || (wake->drain && byte != 'b')) return (void *)(uintptr_t)1;
+    }
     return NULL;
 }
 
@@ -329,7 +352,52 @@ int main(void) {
     CHECK(nanosleep(&sleep_request, &remaining) == -1 && errno == EINTR);
     CHECK(waited_signal == 3 && remaining.tv_sec >= 0 && remaining.tv_sec <= 1);
     CHECK(pthread_join(writer, &worker_result) == 0 && worker_result == NULL);
-    debug("native-terminal-window: PASS SA_RESTART read, EINTR read/sleep, default-stop resume, controls and SIGWINCH\n");
+    for (unsigned writing = 0; writing < 2; ++writing) {
+        for (unsigned restart = 0; restart < 2; ++restart) {
+            CHECK(pipe(pipes) == 0);
+            size_t filled = 0;
+            char block[512];
+            memset(block, 'b', sizeof(block));
+            if (writing) {
+                CHECK(fcntl(pipes[1], F_SETFL, O_NONBLOCK) == 0);
+                for (;;) {
+                    ssize_t count = write(pipes[1], block, sizeof(block));
+                    if (count < 0) { CHECK(errno == EAGAIN); break; }
+                    CHECK(count == (ssize_t)sizeof(block));
+                    filled += (size_t)count;
+                }
+                CHECK(filled > 0 && fcntl(pipes[1], F_SETFL, 0) == 0);
+            }
+            action.sa_flags = restart ? SA_RESTART : 0;
+            CHECK(sigaction(SIGUSR1, &action, NULL) == 0);
+            struct stream_wakeup wake = {
+                restart ? pipes[writing ? 0 : 1] : -1, (int)writing, waited_signal
+            };
+            CHECK(pthread_create(&writer, NULL, interrupt_stream_io, &wake) == 0);
+            char byte = 'z';
+            errno = 0;
+            ssize_t count = writing ? write(pipes[1], &byte, 1) : read(pipes[0], &byte, 1);
+            if (restart) CHECK(count == 1 && (writing || byte == 'p'));
+            else CHECK(count == -1 && errno == EINTR);
+            CHECK(pthread_join(writer, &worker_result) == 0 && worker_result == NULL);
+            CHECK((fcntl(pipes[writing ? 1 : 0], F_GETFL) & O_NONBLOCK) == 0);
+            if (writing) {
+                CHECK(fcntl(pipes[0], F_SETFL, O_NONBLOCK) == 0);
+                size_t received = 0;
+                char last = 0;
+                for (;;) {
+                    ssize_t chunk = read(pipes[0], block, sizeof(block));
+                    if (chunk < 0) { CHECK(errno == EAGAIN); break; }
+                    CHECK(chunk > 0);
+                    received += (size_t)chunk;
+                    last = block[chunk - 1];
+                }
+                CHECK(received == filled && last == (restart ? 'z' : 'b'));
+            }
+            CHECK(close(pipes[0]) == 0 && close(pipes[1]) == 0);
+        }
+    }
+    debug("native-terminal-window: PASS pipe read/write EINTR and SA_RESTART, shared flags, terminal and sleep regressions\n");
     CHECK(close(master) == 0);
     return 0;
 }
