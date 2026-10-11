@@ -1,7 +1,9 @@
 /* Isolated Compositor-slot probe using its existing process.spawn authority.
  * The legacy clone backend is under test, not endorsed as the final native
- * API. No POSIX RPC occurs between cloning and the source's first write. */
+ * API. No POSIX RPC occurs between cloning and the source's first write.
+ * The newlib section instead exercises AddressSpaceClone + ProcessCreate. */
 #include <stdint.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -78,6 +80,68 @@ int main(void) {
     CHECK(waitpid(child, &exit_status, 0) == child);
     CHECK(WIFEXITED(exit_status) && WEXITSTATUS(exit_status) == 37);
     fprintf(stderr, "clone-resume: PASS newlib fork selects zero in the child and waitpid reaps it\n");
+    for (unsigned attempt = 0; attempt < 3; ++attempt) {
+        int channel[2];
+        CHECK(pipe(channel) == 0);
+        int writer = dup(channel[1]);
+        CHECK(writer >= 0);
+        CHECK(fcntl(writer, F_SETFD, FD_CLOEXEC) == 0);
+        private_value = 0x11;
+        child = fork();
+        CHECK(child >= 0);
+        if (child == 0) {
+            if (private_value != 0x11 || close(channel[0]) != 0 ||
+                close(channel[1]) != 0 || fcntl(writer, F_GETFD) != FD_CLOEXEC)
+                _exit(91);
+            pid_t grandchild = fork();
+            if (grandchild < 0) _exit(92);
+            if (grandchild == 0) {
+                const unsigned char marker = 0x37;
+                if (write(writer, &marker, 1) != 1 || close(writer) != 0)
+                    _exit(93);
+                _exit(38);
+            }
+            int nested_status = 0;
+            if (waitpid(grandchild, &nested_status, 0) != grandchild ||
+                !WIFEXITED(nested_status) || WEXITSTATUS(nested_status) != 38)
+                _exit(94);
+            if (close(writer) != 0) _exit(95);
+            _exit(39);
+        }
+        private_value = 0x22;
+        CHECK(close(channel[1]) == 0);
+        CHECK(close(writer) == 0);
+        unsigned char marker = 0;
+        CHECK(read(channel[0], &marker, 1) == 1 && marker == 0x37);
+        CHECK(waitpid(child, &exit_status, 0) == child);
+        CHECK(WIFEXITED(exit_status) && WEXITSTATUS(exit_status) == 39);
+        CHECK(read(channel[0], &marker, 1) == 0);
+        CHECK(close(channel[0]) == 0);
+        CHECK(private_value == 0x22);
+    }
+    fprintf(stderr, "native-fork: PASS repeated nested fork inherits pipe/dup/CLOEXEC descriptors and independent closes\n");
+    int source = open("/system/services/compositor.service", O_RDONLY);
+    CHECK(source >= 0);
+    int alias = dup(source);
+    CHECK(alias >= 0);
+    CHECK(lseek(source, 0, SEEK_SET) == 0);
+    child = fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        unsigned char signature[3];
+        if (close(source) != 0 || lseek(alias, 1, SEEK_SET) != 1 ||
+            read(alias, signature, sizeof(signature)) != sizeof(signature) ||
+            signature[0] != 'E' || signature[1] != 'L' || signature[2] != 'F' ||
+            close(alias) != 0)
+            _exit(96);
+        _exit(40);
+    }
+    CHECK(waitpid(child, &exit_status, 0) == child);
+    CHECK(WIFEXITED(exit_status) && WEXITSTATUS(exit_status) == 40);
+    CHECK(lseek(source, 0, SEEK_CUR) == 4);
+    CHECK(lseek(alias, 0, SEEK_CUR) == 4);
+    CHECK(close(alias) == 0 && close(source) == 0);
+    fprintf(stderr, "native-fork: PASS parent/child and dup aliases share the same file offset\n");
     int thread_result = native_thread_register_probe();
     if (thread_result != 0) fprintf(stderr, "thread-registers: FAIL case %d\n", thread_result);
     CHECK(thread_result == 0);

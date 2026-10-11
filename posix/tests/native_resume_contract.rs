@@ -21,8 +21,10 @@ fn resumed_register_value_flows_from_the_native_caller() {
 #[test]
 fn posix_zero_return_policy_is_explicit_in_userspace() {
     let runtime = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
-    assert!(runtime.contains("raw_syscall1(syscall::SyscallNumber::ProcessClone, 0)"));
-    assert!(!runtime.contains("raw_syscall0(syscall::SyscallNumber::ProcessClone)"));
+    assert!(runtime.contains("snapshot::capture_native("));
+    assert!(runtime.contains("syscall::SyscallNumber::ProcessCreate"));
+    assert!(runtime.contains("if image == 0"));
+    assert!(!runtime.contains("syscall::SyscallNumber::ProcessClone"));
     let platform = include_str!("../../../user/crates/platform/src/lib.rs");
     assert!(platform.contains("clone_process(resume_rax: u64) -> syscall::RawSyscallResult"));
     assert!(platform.contains("raw_syscall1(syscall::SyscallNumber::ProcessClone, resume_rax)"));
