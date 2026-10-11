@@ -22,3 +22,23 @@ impl ProviderReadBuffer {
         Ok(&mut self.bytes[..length])
     }
 }
+
+/// Publish only the initialized read prefix into a transferred memory object.
+/// A short write is retried at its new offset; never acknowledge stale bytes.
+pub fn publish(
+    bytes: &[u8],
+    offset: u64,
+    mut write: impl FnMut(&[u8], u64) -> Result<usize, i32>,
+) -> Result<(), i32> {
+    offset.checked_add(bytes.len() as u64).ok_or(22)?;
+    let mut done = 0;
+    while done < bytes.len() {
+        match write(&bytes[done..], offset + done as u64) {
+            Ok(count) if count > 0 && count <= bytes.len() - done => done += count,
+            Ok(_) => return Err(5),
+            Err(4) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}

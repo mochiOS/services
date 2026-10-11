@@ -915,40 +915,22 @@ fn read_provider_shared(
     if attachment.reserved != 0 || attachment.rights & required != required {
         return Err(13);
     }
-    // Checking type as well as size avoids mapping a provider or file object
+    // Checking type as well as size avoids writing a provider or file object
     // that could recurse into this service while it is processing this call.
     let object_length = memory::object_length(attachment.handle as u64).map_err(|_| 22)?;
     let end = header.basis.checked_add(header.length as u64).ok_or(22)?;
     if end > object_length {
         return Err(22);
     }
-    let base = header.basis & !4095;
-    let length = end.checked_add(4095).ok_or(22)? & !4095;
-    let length = length - base;
     let output = buffer.get(header.length as usize)?;
-    let address = memory::map_at_offset(
-        0,
-        length,
-        mnu_abi::MEMORY_ACCESS_READ | mnu_abi::MEMORY_ACCESS_WRITE,
-        mnu_abi::MEMORY_MAP_SHARED,
-        attachment.handle as u64,
-        base,
-    )
-    .map_err(|_| 22)?;
-    let result = service.provider_read_into(header.object_id, output);
-    let result = result.map(|(count, start)| {
-        let pointer = (address + header.basis - base) as *mut u8;
-        for (index, byte) in output[..count].iter().enumerate() {
-            // A different address space may alias the mapping. Keep Rust
-            // references confined to our private read buffer.
-            unsafe {
-                core::ptr::write_volatile(pointer.add(index), *byte);
-            }
-        }
-        (count as u64, start.to_le_bytes().to_vec())
-    });
-    let unmapped = memory::munmap(address, length).map_err(|_| 5);
-    result.and_then(|value| unmapped.map(|_| value))
+    let (count, start) = service.provider_read_into(header.object_id, output)?;
+    // Native positioned I/O already supports anonymous VM objects. Avoid a
+    // temporary address-space mapping and one user fault per destination page.
+    filesystem_service::provider_buffer::publish(&output[..count], header.basis, |bytes, offset| {
+        handle::write_at(attachment.handle, bytes, offset)
+            .map_err(|error| error.raw().unsigned_abs() as i32)
+    })?;
+    Ok((count as u64, start.to_le_bytes().to_vec()))
 }
 
 #[cfg(target_os = "mochios")]
