@@ -171,15 +171,15 @@ fn runtime_does_not_auto_bind_senders_or_import_native_uid_gid() {
     // Internal PTY worker messages are authenticated native messages, not
     // requests to manufacture a POSIX session for the service itself.
     assert!(source.contains("sender_process == Some(service_process_id)"));
-    // The legacy query is isolated to same-thread signal registration. General
-    // peer admission must not query kernel credentials or reinterpret endpoint
-    // numbers as native thread IDs.
+    // Same-thread signal registration needs only native endpoint identity.
+    // Neither registration nor peer admission may query kernel credentials or
+    // reinterpret endpoint numbers as native thread IDs.
     let query = source
-        .find("platform::process::thread_security_context(sender)")
+        .find("platform::ipc::endpoint_execution_identity(sender)")
         .unwrap();
     let registration = source
         .find("header.opcode == protocol::OP_SIGNAL_THREAD_REGISTER")
         .unwrap();
     assert!(registration < query);
-    assert_eq!(source.matches("thread_security_context(sender)").count(), 1);
+    assert!(!source.contains("thread_security_context"));
 }

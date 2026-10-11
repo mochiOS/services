@@ -12,7 +12,7 @@ struct execution_identity { uint64_t process, thread; };
 static int64_t identity_read(struct execution_identity *identity, size_t length) {
     uint64_t number = EXECUTION_IDENTITY_READ;
     __asm__ volatile("syscall" : "+a"(number)
-                     : "D"(identity), "S"(length)
+                     : "D"(identity), "S"(length), "d"(0)
                      : "rcx", "r11", "memory");
     return (int64_t)number;
 }

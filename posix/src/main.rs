@@ -360,15 +360,11 @@ fn main() {
             {
                 let thread = attachments[0];
                 let status = platform::thread::handle_status(thread.handle).ok();
-                // Only thread registration still needs the sender's native
-                // thread identity; ordinary requests never import credentials.
-                let sender_context = platform::process::thread_security_context(sender)
+                // Inspect only the kernel-authenticated sender endpoint; never
+                // import kernel credentials or reinterpret its number as a TID.
+                let sender_context = platform::ipc::endpoint_execution_identity(sender)
                     .ok()
-                    .filter(|context| context.process_id == peer.process_id)
-                    .map(|context| platform::syscall::ExecutionIdentity {
-                        process_id: context.process_id,
-                        thread_id: context.thread_id,
-                    });
+                    .filter(|context| context.process_id == peer.process_id);
                 let registered_thread = sender_context.as_ref().zip(status.as_ref())
                     .filter(|(context, status)| {
                         posix_service::signal_thread_registration_matches(

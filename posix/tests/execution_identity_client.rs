@@ -38,6 +38,10 @@ pub fn call2(number: SyscallNumber, pointer: u64, length: u64) -> SysResult<u64>
     }
     Ok(reply.status as u64)
 }
+pub fn call3(number: SyscallNumber, pointer: u64, length: u64, endpoint: u64) -> SysResult<u64> {
+    assert_eq!(endpoint, 0x4000_0005);
+    call2(number, pointer, length)
+}
 #[path = "../../../user/crates/syscall/src/execution.rs"]
 mod production;
 
@@ -67,6 +71,13 @@ fn client_rejects_invalid_identity_and_propagates_errors_without_fallback() {
         };
         assert_eq!(production::identity(), expected);
         assert_eq!(REPLY.lock().unwrap().calls, 1);
+        assert_eq!(production::endpoint_identity(0x4000_0005), expected);
+        assert_eq!(REPLY.lock().unwrap().calls, 2);
+        assert_eq!(
+            production::endpoint_identity(0),
+            Err(SysError(mnu_abi::EINVAL as i64))
+        );
+        assert_eq!(REPLY.lock().unwrap().calls, 2);
     }
 }
 

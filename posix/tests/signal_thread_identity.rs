@@ -83,7 +83,8 @@ fn signal_validation_does_not_depend_on_native_credentials_or_package_policy() {
     assert!(!library.contains("ThreadSecurityContext"));
     let runtime = include_str!("../src/main.rs");
     assert!(runtime.contains("context.process_id == peer.process_id"));
-    assert!(runtime.contains("map(|context| platform::syscall::ExecutionIdentity"));
+    assert!(runtime.contains("platform::ipc::endpoint_execution_identity(sender)"));
+    assert!(!runtime.contains("thread_security_context"));
     assert!(!runtime.contains("context.effective_uid"));
     assert!(!runtime.contains("context.effective_gid"));
 }
