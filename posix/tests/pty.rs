@@ -147,6 +147,76 @@ fn empty_reads_distinguish_would_block_from_peer_close() {
 }
 
 #[test]
+fn last_master_release_generates_one_controller_hangup_and_preserves_eof() {
+    let mut ptys = PtyManager::new();
+    let pair = ptys.open().unwrap();
+    let other = ptys.open().unwrap();
+    let terminal_id = ptys.slave_terminal_id(pair.slave_object_id).unwrap();
+    let mut request = [0; provider::REQUEST_HEADER_LEN];
+    let length = provider::RequestHeader {
+        opcode: provider::OP_RELEASE,
+        object_id: pair.master_object_id,
+        argument: 0,
+        basis: 0,
+        length: 0,
+        data_length: 0,
+    }
+    .encode(&[], &mut request)
+    .unwrap();
+    let mut response = [0; provider::RESPONSE_HEADER_LEN];
+    // Kernel RELEASE is a one-way notification, not a call awaiting a reply.
+    assert_eq!(
+        handle_provider_request(&mut ptys, &request[..length], &mut response),
+        None
+    );
+    assert_eq!(
+        ptys.take_terminal_signal(),
+        Some(posix_service::pty::TerminalSignal {
+            terminal_id,
+            signal: protocol::SIGNAL_HUP,
+        })
+    );
+    assert_eq!(ptys.release(pair.master_object_id), Err(EBADF));
+    assert_eq!(ptys.take_terminal_signal(), None);
+    assert_eq!(ptys.read(pair.slave_object_id, 1), Ok(Vec::new()));
+    assert_eq!(ptys.write(pair.slave_object_id, b"x"), Err(EIO));
+    assert_eq!(ptys.read(other.slave_object_id, 1), Err(EAGAIN));
+    assert_eq!(ptys.release(pair.slave_object_id), Ok(()));
+    assert_eq!(ptys.take_terminal_signal(), None);
+}
+
+#[test]
+fn slave_close_and_failed_pair_discard_do_not_generate_controller_hangups() {
+    let mut ptys = PtyManager::new();
+    let pair = ptys.open().unwrap();
+    let terminal_id = ptys.slave_terminal_id(pair.slave_object_id).unwrap();
+    assert_eq!(ptys.release(pair.slave_object_id), Ok(()));
+    assert_eq!(ptys.take_terminal_signal(), None);
+    let unpublished = ptys.open().unwrap();
+    ptys.discard(unpublished);
+    assert_eq!(ptys.take_terminal_signal(), None);
+    ptys.release(pair.master_object_id).unwrap();
+    assert_eq!(
+        ptys.take_terminal_signal(),
+        Some(posix_service::pty::TerminalSignal {
+            terminal_id,
+            signal: protocol::SIGNAL_HUP,
+        })
+    );
+    assert_eq!(ptys.take_terminal_signal(), None);
+}
+
+#[test]
+fn runtime_routes_master_hangup_only_from_the_authenticated_provider() {
+    let source = include_str!("../src/main.rs");
+    assert!(source.contains("sender_process == Some(service_process_id)"));
+    assert!(source.contains("&& attachments.is_empty()"));
+    assert!(source.contains("if signal == protocol::SIGNAL_HUP"));
+    assert!(source.contains("service.hangup_terminal(terminal_id)"));
+    assert!(source.contains("signal_terminal_foreground_group(terminal_id, signal)"));
+}
+
+#[test]
 fn provider_wire_requests_drive_the_pty_without_posix_rpc() {
     let mut ptys = PtyManager::new();
     let pair = ptys.open().unwrap();

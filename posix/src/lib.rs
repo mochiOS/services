@@ -1015,6 +1015,19 @@ impl<H: Copy> PosixService<H> {
         Ok(targets.len())
     }
 
+    /// The last PTY master close hangs up its controlling process, not the
+    /// foreground job. Only the authenticated provider supplies terminal IDs.
+    /// If SIGHUP terminates the controller, its normal exit policy subsequently
+    /// hangs up the foreground group and disassociates the terminal.
+    pub fn hangup_terminal(&mut self, terminal_id: u64) -> Result<(), i32> {
+        let controller = self
+            .terminals
+            .get(&terminal_id)
+            .ok_or(protocol::STATUS_ENOTTY)?
+            .session_id;
+        self.enqueue_signal(controller, protocol::SIGNAL_HUP)
+    }
+
     pub fn is_child(&self, parent_id: u64, process_id: u64) -> bool {
         self.children
             .get(&parent_id)

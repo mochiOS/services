@@ -4543,6 +4543,98 @@ fn terminal_exit_family() -> (
     (service, peers, filesystem, processes)
 }
 
+#[test]
+fn master_close_hangs_up_the_controller_before_controller_exit_hangs_up_the_job() {
+    let (mut service, [_, controller, first, second, background], _, mut processes) =
+        terminal_exit_family();
+    let mut ptys = posix_service::pty::PtyManager::new();
+    let pair = ptys.open().unwrap();
+    let terminal_id = ptys.slave_terminal_id(pair.slave_object_id).unwrap();
+    assert_eq!(
+        service
+            .handle_terminal(
+                controller,
+                protocol::Header {
+                    opcode: protocol::OP_TERMINAL_RELEASE,
+                    ..Default::default()
+                },
+                &[],
+                77
+            )
+            .header
+            .status,
+        0
+    );
+    assert_eq!(
+        service
+            .handle_terminal(
+                controller,
+                protocol::Header {
+                    opcode: protocol::OP_TERMINAL_ACQUIRE,
+                    ..Default::default()
+                },
+                &[],
+                terminal_id
+            )
+            .header
+            .status,
+        0
+    );
+    let mut group = [0; protocol::PROCESS_ID_REQUEST_LEN];
+    protocol::encode_process_id_request(first.process_id as i64, &mut group).unwrap();
+    assert_eq!(
+        service
+            .handle_terminal(
+                controller,
+                protocol::Header {
+                    opcode: protocol::OP_TERMINAL_SET_FOREGROUND,
+                    ..Default::default()
+                },
+                &group,
+                terminal_id
+            )
+            .header
+            .status,
+        0
+    );
+    ptys.release(pair.master_object_id).unwrap();
+    let event = ptys.take_terminal_signal().unwrap();
+    assert_eq!(event.signal, protocol::SIGNAL_HUP);
+    service.hangup_terminal(event.terminal_id).unwrap();
+    let delivery = dequeue_signal(&mut service, controller);
+    assert_eq!(delivery.signal, protocol::SIGNAL_HUP);
+    for member in [first, second, background] {
+        assert_eq!(
+            service.signal_state(member.process_id).unwrap().pending(),
+            0
+        );
+    }
+    assert!(service.controlling_terminal(terminal_id).is_some());
+    assert_eq!(service.hangup_terminal(999), Err(protocol::STATUS_ENOTTY));
+    processes.states.insert(
+        controller.process_id as u32,
+        ProcessLifecycle::Exited { exit_code: 129 },
+    );
+    service
+        .refresh_child_exit_notifications(&mut processes)
+        .unwrap();
+    assert!(service.controlling_terminal(terminal_id).is_none());
+    for member in [first, second] {
+        assert_eq!(
+            dequeue_signal(&mut service, member).signal,
+            protocol::SIGNAL_HUP
+        );
+    }
+    assert_eq!(
+        service
+            .signal_state(background.process_id)
+            .unwrap()
+            .pending(),
+        0
+    );
+    assert_eq!(ptys.take_terminal_signal(), None);
+}
+
 fn orphan_job_family() -> (
     PosixService,
     [PeerIdentity; 5],

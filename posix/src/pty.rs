@@ -582,7 +582,13 @@ impl PtyManager {
         let remove = {
             let terminal = self.terminals.get_mut(&id).ok_or(EBADF)?;
             match side {
-                PtySide::Master if terminal.master_open => terminal.master_open = false,
+                PtySide::Master if terminal.master_open => {
+                    terminal.master_open = false;
+                    self.pending_signals.push_back(TerminalSignal {
+                        terminal_id: id,
+                        signal: posix_protocol::SIGNAL_HUP,
+                    });
+                }
                 PtySide::Slave if terminal.slave_open => terminal.slave_open = false,
                 _ => return Err(EBADF),
             }

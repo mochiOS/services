@@ -185,10 +185,15 @@ fn main() {
             && sender_process == Some(service_process_id)
             && let Some((terminal_id, signal)) = decode_pty_signal(&request_bytes[..length])
         {
-            let status = service
-                .signal_terminal_foreground_group(terminal_id, signal)
-                .map(|_| 0i64)
-                .unwrap_or_else(i64::from);
+            let status = if signal == protocol::SIGNAL_HUP {
+                service.hangup_terminal(terminal_id)
+            } else {
+                service
+                    .signal_terminal_foreground_group(terminal_id, signal)
+                    .map(|_| ())
+            }
+            .map(|_| 0i64)
+            .unwrap_or_else(i64::from);
             let _ = platform::ipc::reply(sender, &status.to_le_bytes());
             continue;
         }
