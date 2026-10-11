@@ -3507,6 +3507,187 @@ fn nocldstop_is_inherited_and_suppresses_only_stop_continue_notifications() {
     );
 }
 
+fn changed_uid_signal_family() -> (PosixService, PeerIdentity, PeerIdentity) {
+    let parent = PeerIdentity {
+        process_id: 1500,
+        effective_uid: 0,
+        effective_gid: 0,
+    };
+    let child = PeerIdentity {
+        process_id: 1501,
+        effective_uid: 502,
+        effective_gid: 20,
+    };
+    let mut service = service_for(parent);
+    service
+        .adopt_spawned_child(
+            parent,
+            AuthenticatedProcess {
+                handle: 1501,
+                process_id: child.process_id,
+            },
+            502,
+            20,
+            &[],
+            &mut RecordingFilesystem::default(),
+        )
+        .unwrap();
+    let mut uid = [0u8; 4];
+    uid.copy_from_slice(&501u32.to_le_bytes());
+    assert_eq!(
+        service
+            .handle(
+                parent,
+                protocol::Header {
+                    opcode: protocol::OP_SET_UID,
+                    ..Default::default()
+                },
+                &uid
+            )
+            .header
+            .status,
+        protocol::STATUS_OK
+    );
+    // Keep the peer's stale UID zero: authorization must use stored state.
+    (service, parent, child)
+}
+
+fn signal_request_status(
+    service: &mut PosixService,
+    sender: PeerIdentity,
+    selector: i64,
+    signal: u32,
+) -> i32 {
+    let mut payload = [0; protocol::SIGNAL_SEND_REQUEST_LEN];
+    protocol::encode_signal_send_request(
+        protocol::SignalSendRequest { selector, signal },
+        &mut payload,
+    )
+    .unwrap();
+    service
+        .handle(
+            sender,
+            protocol::Header {
+                opcode: protocol::OP_SIGNAL_SEND,
+                ..Default::default()
+            },
+            &payload,
+        )
+        .header
+        .status
+}
+
+#[test]
+fn same_session_continue_ignores_uid_but_other_signals_do_not() {
+    let (mut service, parent, child) = changed_uid_signal_family();
+    for signal in [
+        0,
+        protocol::SIGNAL_HUP,
+        protocol::SIGNAL_KILL,
+        protocol::SIGNAL_TSTP,
+    ] {
+        assert_eq!(
+            signal_request_status(&mut service, parent, child.process_id as i64, signal),
+            protocol::STATUS_EPERM
+        );
+        assert_eq!(service.signal_state(child.process_id).unwrap().pending(), 0);
+        assert!(
+            !service
+                .process_resume_notification_processes()
+                .any(|id| id == child.process_id)
+        );
+    }
+    send_signal(&mut service, parent, child, protocol::SIGNAL_CONT);
+    assert_eq!(
+        service.signal_state(child.process_id).unwrap().pending(),
+        1u64 << (protocol::SIGNAL_CONT - 1)
+    );
+    assert!(
+        service
+            .process_resume_notification_processes()
+            .any(|id| id == child.process_id)
+    );
+    assert_eq!(
+        service.session(child.process_id).unwrap().effective_uid,
+        502
+    );
+    assert_eq!(
+        service.session(parent.process_id).unwrap().effective_uid,
+        501
+    );
+    // The session exception also permits a job to continue its ancestor.
+    send_signal(&mut service, child, parent, protocol::SIGNAL_CONT);
+    assert_eq!(
+        service.signal_state(parent.process_id).unwrap().pending(),
+        1u64 << (protocol::SIGNAL_CONT - 1)
+    );
+}
+
+#[test]
+fn continue_session_exception_applies_to_groups_but_not_a_new_session() {
+    for selector_kind in 0..4 {
+        let (mut service, parent, child) = changed_uid_signal_family();
+        let selector = match selector_kind {
+            0 => child.process_id as i64,
+            1 => 0,
+            2 => -(parent.process_id as i64),
+            _ => -1,
+        };
+        assert_eq!(
+            signal_request_status(&mut service, parent, selector, protocol::SIGNAL_CONT),
+            protocol::STATUS_OK
+        );
+        assert_eq!(
+            service.signal_state(child.process_id).unwrap().pending(),
+            1u64 << (protocol::SIGNAL_CONT - 1)
+        );
+    }
+    let (mut service, parent, child) = changed_uid_signal_family();
+    assert_eq!(
+        service
+            .handle(
+                child,
+                protocol::Header {
+                    opcode: protocol::OP_CREATE_SESSION,
+                    ..Default::default()
+                },
+                &[]
+            )
+            .header
+            .status,
+        protocol::STATUS_OK
+    );
+    assert_eq!(
+        signal_request_status(
+            &mut service,
+            parent,
+            child.process_id as i64,
+            protocol::SIGNAL_CONT
+        ),
+        protocol::STATUS_EPERM
+    );
+    assert_eq!(
+        signal_request_status(
+            &mut service,
+            parent,
+            -(child.process_id as i64),
+            protocol::SIGNAL_CONT
+        ),
+        protocol::STATUS_EPERM
+    );
+    // The broadcast succeeds for the caller itself, not the unauthorized job.
+    assert_eq!(
+        signal_request_status(&mut service, parent, -1, protocol::SIGNAL_CONT),
+        protocol::STATUS_OK
+    );
+    assert_eq!(service.signal_state(child.process_id).unwrap().pending(), 0);
+    assert!(
+        !service
+            .process_resume_notification_processes()
+            .any(|id| id == child.process_id)
+    );
+}
+
 fn send_signal(
     service: &mut PosixService,
     sender: PeerIdentity,

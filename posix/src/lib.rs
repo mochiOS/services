@@ -1823,7 +1823,15 @@ impl<H: Copy> PosixService<H> {
             let Some(target) = self.sessions.get(&target_id).copied() else {
                 continue;
             };
-            if !signal_permission(caller_id, caller, target_id, target) {
+            // Job-control shells may continue jobs which changed their UID,
+            // but only within the same POSIX session. Native object authority
+            // remains unchanged; this is userspace signal permission policy.
+            let same_session_continue = request.signal == protocol::SIGNAL_CONT
+                && self
+                    .session_ids
+                    .get(&caller_id)
+                    .is_some_and(|session| self.session_ids.get(&target_id) == Some(session));
+            if !same_session_continue && !signal_permission(caller_id, caller, target_id, target) {
                 continue;
             }
             permitted = true;
