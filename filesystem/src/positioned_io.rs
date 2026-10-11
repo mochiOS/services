@@ -17,7 +17,8 @@ pub fn transfer(
         let remaining = length - done;
         let count = match operation(done, offset + done as u64, remaining) {
             Ok(count) if count <= remaining => count,
-            Ok(_) => return Err(EIO),
+            Ok(_) if done == 0 => return Err(EIO),
+            Ok(_) => return Ok(done),
             Err(error) if done == 0 => return Err(error),
             Err(_) => return Ok(done),
         };
@@ -31,4 +32,19 @@ pub fn transfer(
         done += count;
     }
     Ok(done)
+}
+
+/// Advance a shared open-file-description cursor by the reported prefix only.
+/// A failure before progress leaves the cursor unchanged; EOF advances by zero.
+pub fn sequential(
+    cursor: &mut u64,
+    length: usize,
+    zero_is_error: bool,
+    operation: impl FnMut(usize, u64, usize) -> Result<usize, i32>,
+) -> Result<(usize, u64), i32> {
+    let start = *cursor;
+    let done = transfer(start, length, zero_is_error, operation)?;
+    // transfer validated the entire range before invoking the backend.
+    *cursor = start + done as u64;
+    Ok((done, start))
 }

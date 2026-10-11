@@ -1182,17 +1182,15 @@ impl FilesystemService {
         let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
         let file = open.file.as_mut().ok_or(EISDIR)?;
         let mut payload = vec![0u8; length.min(mnu_abi::provider::MAX_DATA_LEN)];
-        let mut done = 0usize;
-        while done < payload.len() {
-            let count = file
-                .read_bytes_at(&mut payload[done..], open.offset + done as u64)
-                .map_err(errno)?;
-            if count == 0 {
-                break;
-            }
-            done += count;
-        }
-        open.offset = open.offset.checked_add(done as u64).ok_or(EFBIG)?;
+        let (done, _) = crate::positioned_io::sequential(
+            &mut open.offset,
+            payload.len(),
+            false,
+            |done, position, _| {
+                file.read_bytes_at(&mut payload[done..], position)
+                    .map_err(errno)
+            },
+        )?;
         payload.truncate(done);
         Ok(payload)
     }
@@ -1227,20 +1225,15 @@ impl FilesystemService {
         }
         let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
         let file = open.file.as_mut().ok_or(EISDIR)?;
-        let start = open.offset;
-        start.checked_add(output.len() as u64).ok_or(EFBIG)?;
-        let mut done = 0usize;
-        while done < output.len() {
-            match file.read_bytes_at(&mut output[done..], start + done as u64) {
-                Ok(0) => break,
-                Ok(count) if count <= output.len() - done => done += count,
-                Ok(_) => return Err(EIO),
-                Err(error) if done == 0 => return Err(errno(error)),
-                Err(_) => break,
-            }
-        }
-        open.offset = start + done as u64;
-        Ok((done, start))
+        crate::positioned_io::sequential(
+            &mut open.offset,
+            output.len(),
+            false,
+            |done, position, _| {
+                file.read_bytes_at(&mut output[done..], position)
+                    .map_err(errno)
+            },
+        )
     }
 
     pub fn provider_write(&mut self, open_id: u64, payload: &[u8]) -> Result<usize, i32> {
@@ -1258,22 +1251,25 @@ impl FilesystemService {
         }
         let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
         let file = open.file.as_mut().ok_or(EISDIR)?;
-        if open.status_flags & protocol::OPEN_STATUS_APPEND != 0 {
-            open.offset = file.inode().metadata().len();
+        if payload.is_empty() {
+            return Ok((0, open.offset));
         }
-        let start = open.offset;
-        let mut done = 0usize;
-        while done < payload.len() {
-            let count = file
-                .write_bytes_at(&payload[done..], open.offset + done as u64)
-                .map_err(errno)?;
-            if count == 0 {
-                return Err(EIO);
-            }
-            done += count;
-        }
-        open.offset = open.offset.checked_add(done as u64).ok_or(EFBIG)?;
-        Ok((done, start))
+        let mut cursor = if open.status_flags & protocol::OPEN_STATUS_APPEND != 0 {
+            file.inode().metadata().len()
+        } else {
+            open.offset
+        };
+        let result = crate::positioned_io::sequential(
+            &mut cursor,
+            payload.len(),
+            true,
+            |done, position, _| {
+                file.write_bytes_at(&payload[done..], position)
+                    .map_err(errno)
+            },
+        )?;
+        open.offset = cursor;
+        Ok(result)
     }
 
     pub fn provider_read_at(

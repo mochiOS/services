@@ -25,7 +25,7 @@ fn root_credentials() -> protocol::Credentials {
 }
 
 #[derive(Clone)]
-struct SharedImage(Arc<Mutex<Vec<u8>>>);
+struct SharedImage(Arc<Mutex<Vec<u8>>>, Arc<Mutex<Option<usize>>>);
 
 impl Ext4Read for SharedImage {
     fn read(
@@ -33,6 +33,14 @@ impl Ext4Read for SharedImage {
         start_byte: u64,
         destination: &mut [u8],
     ) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
+        let mut remaining = self.1.lock().unwrap();
+        if let Some(remaining) = remaining.as_mut() {
+            if *remaining == 0 {
+                return Err(io::Error::other("injected read failure").into());
+            }
+            *remaining -= 1;
+        }
+        drop(remaining);
         let start = usize::try_from(start_byte)?;
         let end = start
             .checked_add(destination.len())
@@ -94,6 +102,10 @@ impl Drop for TempTree {
 }
 
 fn test_filesystem() -> FilesystemService {
+    test_filesystem_with_read_failure().0
+}
+
+fn test_filesystem_with_read_failure() -> (FilesystemService, Arc<Mutex<Option<usize>>>) {
     let temporary = TempTree::create();
     let source = temporary.0.join("source");
     let directory = source.join("removed");
@@ -124,7 +136,11 @@ fn test_filesystem() -> FilesystemService {
         "mke2fs failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let image = SharedImage(Arc::new(Mutex::new(fs::read(image_path).unwrap())));
+    let failure = Arc::new(Mutex::new(None));
+    let image = SharedImage(
+        Arc::new(Mutex::new(fs::read(image_path).unwrap())),
+        failure.clone(),
+    );
     let filesystem =
         Ext4::load_with_writer(Box::new(image.clone()), Some(Box::new(image))).unwrap();
     let mut service = FilesystemService::new(filesystem);
@@ -148,7 +164,73 @@ fn test_filesystem() -> FilesystemService {
         b"/search-only",
     );
     assert_eq!(search_only.header.status, 0);
-    service
+    (service, failure)
+}
+
+#[test]
+fn provider_reads_return_the_completed_prefix_after_a_storage_failure() {
+    for shared in [false, true] {
+        let (mut filesystem, failure) = test_filesystem_with_read_failure();
+        let open_id = filesystem
+            .open_at(
+                protocol::Header {
+                    opcode: protocol::OP_OPEN_AT,
+                    flags: protocol::OPEN_AT_READ
+                        | protocol::OPEN_AT_WRITE
+                        | protocol::OPEN_AT_CREATE,
+                    mode: 0o644,
+                    ..protocol::Header::default()
+                },
+                b"/partial.txt",
+                PathAnchors::default(),
+                root_credentials(),
+            )
+            .unwrap()
+            .header
+            .open_id;
+        let contents: Vec<u8> = (0..8192).map(|i| (i % 251) as u8).collect();
+        for chunk in contents.chunks(1024) {
+            filesystem.provider_write(open_id, chunk).unwrap();
+        }
+        filesystem
+            .provider_seek(open_id, 0, HANDLE_SEEK_START)
+            .unwrap();
+        // Warm the retained File's block lookup before failing its data reads.
+        assert_eq!(
+            filesystem.provider_read_at(open_id, 0, 4096).unwrap(),
+            contents[..4096]
+        );
+        // Begin inside a block so even a 4 KiB inline request spans two blocks.
+        filesystem
+            .provider_seek(open_id, 1, HANDLE_SEEK_START)
+            .unwrap();
+        *failure.lock().unwrap() = Some(1);
+        let mut output = vec![0xa5; 4096];
+        let done = if shared {
+            let (done, start) = filesystem.provider_read_into(open_id, &mut output).unwrap();
+            assert_eq!(start, 1);
+            assert!(output[done..].iter().all(|byte| *byte == 0xa5));
+            done
+        } else {
+            let bytes = filesystem.provider_read(open_id, output.len()).unwrap();
+            output[..bytes.len()].copy_from_slice(&bytes);
+            bytes.len()
+        };
+        assert!(done > 0 && done < output.len());
+        assert_eq!(output[..done], contents[1..1 + done]);
+        assert!(filesystem.provider_read(open_id, 1).is_err());
+        assert_eq!(
+            filesystem
+                .provider_seek(open_id, 0, mnu_abi::HANDLE_SEEK_CURRENT)
+                .unwrap(),
+            1 + done as u64
+        );
+        *failure.lock().unwrap() = None;
+        assert_eq!(
+            filesystem.provider_read(open_id, 3).unwrap(),
+            contents[1 + done..1 + done + 3]
+        );
+    }
 }
 
 #[test]
@@ -575,6 +657,14 @@ fn duplicated_open_descriptions_share_mutable_status_flags() {
     filesystem
         .provider_seek(open_id, 0, HANDLE_SEEK_START)
         .unwrap();
+    assert_eq!(
+        filesystem.provider_write_with_offset(open_id, &[]),
+        Ok((0, 0))
+    );
+    assert_eq!(
+        filesystem.provider_seek(open_id, 0, mnu_abi::HANDLE_SEEK_CURRENT),
+        Ok(0)
+    );
     filesystem.provider_write(open_id, b"b").unwrap();
     filesystem
         .provider_seek(open_id, 0, HANDLE_SEEK_START)
