@@ -1039,6 +1039,22 @@ impl<H: Copy> PosixService<H> {
         peer: PeerIdentity,
         root: AuthenticatedProcess<H>,
     ) -> Result<Vec<H>, i32> {
+        self.launched_tree_process_ids(peer, root)?
+            .into_iter()
+            .map(|process_id| {
+                self.processes
+                    .get(&process_id)
+                    .copied()
+                    .ok_or(protocol::STATUS_ESRCH)
+            })
+            .collect()
+    }
+
+    fn launched_tree_process_ids(
+        &self,
+        peer: PeerIdentity,
+        root: AuthenticatedProcess<H>,
+    ) -> Result<Vec<u64>, i32> {
         if self.registered_peer(peer.process_id).is_none() {
             return Err(protocol::STATUS_ESRCH);
         }
@@ -1053,16 +1069,49 @@ impl<H: Copy> PosixService<H> {
             }
             index += 1;
         }
-        process_ids
+        process_ids.reverse();
+        Ok(process_ids)
+    }
+
+    /// Force a launcher's registered tree to exit, descendants first. Retain
+    /// every service reference until all exits have been confirmed; a native
+    /// failure or delayed exit can then be retried without losing descendants.
+    pub fn terminate_launched_tree<F: FilesystemBackend<H>, P: ProcessBackend<H>>(
+        &mut self,
+        peer: PeerIdentity,
+        root: AuthenticatedProcess<H>,
+        filesystem: &mut F,
+        processes: &mut P,
+    ) -> Result<(), i32> {
+        let plan: Vec<(u64, u64, H)> = self
+            .launched_tree_process_ids(peer, root)?
             .into_iter()
-            .rev()
             .map(|process_id| {
-                self.processes
+                let parent = self
+                    .parents
                     .get(&process_id)
                     .copied()
-                    .ok_or(protocol::STATUS_ESRCH)
+                    .ok_or(protocol::STATUS_ESRCH)?;
+                let handle = self
+                    .processes
+                    .get(&process_id)
+                    .copied()
+                    .ok_or(protocol::STATUS_ESRCH)?;
+                Ok((process_id, parent, handle))
             })
-            .collect()
+            .collect::<Result<_, i32>>()?;
+        for &(_, _, handle) in &plan {
+            if !matches!(processes.status(handle)?, ProcessLifecycle::Exited { .. }) {
+                processes.terminate(handle, 1)?;
+                if !matches!(processes.status(handle)?, ProcessLifecycle::Exited { .. }) {
+                    return Err(protocol::STATUS_EAGAIN);
+                }
+            }
+        }
+        for (process_id, parent, _) in plan {
+            self.reap_child(parent, process_id, filesystem, processes);
+        }
+        Ok(())
     }
 
     /// Roll back a broker's failed launch without leaving an unreported zombie.

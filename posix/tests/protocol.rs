@@ -1330,6 +1330,8 @@ struct RecordingProcesses {
     states: BTreeMap<u32, ProcessLifecycle>,
     suspend_error: Option<i32>,
     terminate_error: Option<i32>,
+    terminate_failure: Option<(u32, i32)>,
+    termination_pending: bool,
     suspended: Vec<u32>,
     terminated: Vec<(u32, u64)>,
     released: Vec<u32>,
@@ -1355,12 +1357,19 @@ impl ProcessBackend<u32> for RecordingProcesses {
         if let Some(error) = self.terminate_error {
             return Err(error);
         }
+        if let Some((target, error)) = self.terminate_failure {
+            if process == target {
+                return Err(error);
+            }
+        }
         if !self.states.contains_key(&process) {
             return Err(-3);
         }
         self.terminated.push((process, exit_code));
-        self.states
-            .insert(process, ProcessLifecycle::Exited { exit_code });
+        if !self.termination_pending {
+            self.states
+                .insert(process, ProcessLifecycle::Exited { exit_code });
+        }
         Ok(())
     }
 
@@ -2293,6 +2302,143 @@ fn launcher_tree_uses_userspace_descendants_and_exact_creation_authority() {
     );
     assert!(filesystem.released.is_empty());
     assert!(service.session(50).is_some());
+}
+
+fn launched_tree_fixture() -> (
+    PosixService,
+    PeerIdentity,
+    RecordingFilesystem,
+    RecordingProcesses,
+) {
+    let creator = PeerIdentity {
+        process_id: 10,
+        effective_uid: 0,
+        effective_gid: 0,
+    };
+    let mut service = service_for(creator);
+    let mut filesystem = RecordingFilesystem::default();
+    service.handle_objects(
+        creator,
+        protocol::Header {
+            opcode: protocol::OP_GETCWD,
+            ..Default::default()
+        },
+        &[],
+        &[],
+        &mut filesystem,
+    );
+    service
+        .adopt_spawned_child(
+            creator,
+            AuthenticatedProcess {
+                process_id: 30,
+                handle: 1030,
+            },
+            501,
+            20,
+            &[],
+            &mut filesystem,
+        )
+        .unwrap();
+    for (parent, child) in [(30, 40), (40, 50)] {
+        service
+            .adopt_child(
+                service.registered_peer(parent).unwrap(),
+                AuthenticatedProcess {
+                    process_id: child,
+                    handle: child as u32 + 1000,
+                },
+                &mut filesystem,
+            )
+            .unwrap();
+    }
+    let mut processes = RecordingProcesses::default();
+    for handle in [1030, 1040, 1050] {
+        processes.states.insert(handle, ProcessLifecycle::Running);
+    }
+    (service, creator, filesystem, processes)
+}
+
+#[test]
+fn launched_tree_is_reclaimed_only_after_confirmed_descendant_first_exit() {
+    let (mut service, creator, mut filesystem, mut processes) = launched_tree_fixture();
+    let root = AuthenticatedProcess {
+        process_id: 30,
+        handle: 1030,
+    };
+    let denied = service.registered_peer(30).unwrap();
+    assert_eq!(
+        service.terminate_launched_tree(denied, root, &mut filesystem, &mut processes),
+        Err(protocol::STATUS_EPERM)
+    );
+    assert!(processes.terminated.is_empty());
+    service
+        .terminate_launched_tree(creator, root, &mut filesystem, &mut processes)
+        .unwrap();
+    assert_eq!(processes.terminated, [(1050, 1), (1040, 1), (1030, 1)]);
+    assert_eq!(processes.released, [1050, 1040, 1030]);
+    assert_eq!(filesystem.released.len(), 6);
+    for pid in [30, 40, 50] {
+        assert!(service.registered_peer(pid).is_none());
+        assert!(service.parent_id(pid).is_none());
+    }
+    assert!(service.registered_peer(10).is_some());
+    assert_eq!(
+        service.terminate_launched_tree(creator, root, &mut filesystem, &mut processes),
+        Err(protocol::STATUS_EPERM)
+    );
+}
+
+#[test]
+fn partial_tree_termination_failure_keeps_all_objects_for_retry() {
+    let (mut service, creator, mut filesystem, mut processes) = launched_tree_fixture();
+    let root = AuthenticatedProcess {
+        process_id: 30,
+        handle: 1030,
+    };
+    processes.terminate_failure = Some((1040, -5));
+    assert_eq!(
+        service.terminate_launched_tree(creator, root, &mut filesystem, &mut processes),
+        Err(-5)
+    );
+    assert_eq!(processes.terminated, [(1050, 1)]);
+    assert!(processes.released.is_empty());
+    assert!(filesystem.released.is_empty());
+    assert_eq!(
+        service.launched_tree_handles(creator, root),
+        Ok(vec![1050, 1040, 1030])
+    );
+    processes.terminate_failure = None;
+    service
+        .terminate_launched_tree(creator, root, &mut filesystem, &mut processes)
+        .unwrap();
+    assert_eq!(processes.terminated, [(1050, 1), (1040, 1), (1030, 1)]);
+    assert_eq!(processes.released, [1050, 1040, 1030]);
+}
+
+#[test]
+fn delayed_tree_exit_is_not_treated_as_completed_teardown() {
+    let (mut service, creator, mut filesystem, mut processes) = launched_tree_fixture();
+    let root = AuthenticatedProcess {
+        process_id: 30,
+        handle: 1030,
+    };
+    processes.termination_pending = true;
+    assert_eq!(
+        service.terminate_launched_tree(creator, root, &mut filesystem, &mut processes),
+        Err(protocol::STATUS_EAGAIN)
+    );
+    assert!(processes.released.is_empty());
+    assert!(filesystem.released.is_empty());
+    assert_eq!(service.parent_id(50), Some(40));
+    processes.termination_pending = false;
+    processes
+        .states
+        .insert(1050, ProcessLifecycle::Exited { exit_code: 1 });
+    service
+        .terminate_launched_tree(creator, root, &mut filesystem, &mut processes)
+        .unwrap();
+    assert_eq!(processes.terminated, [(1050, 1), (1040, 1), (1030, 1)]);
 }
 
 fn sample_status() -> protocol::FileStatus {
