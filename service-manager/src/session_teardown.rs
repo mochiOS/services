@@ -69,16 +69,24 @@ impl SessionTeardown {
 
 /// Select only a process owner retained by this launcher. Never capture a new
 /// reference by PID. A failed or delayed service reply must preserve the owner
-/// for retry; only a confirmed successful tree teardown may release it.
+/// for retry. Release only after confirmed tree exit and a successful (or
+/// already completed) reclaim, never based on the root's native exit alone.
 pub(crate) fn terminate_owned_root<T: ObjectTransport<Handle = u32>>(
     client: &Client<T>,
     owners: &mut BTreeMap<u64, NativeProcess>,
     process_id: u64,
 ) -> Result<(), ClientError<T::Error>> {
     let process = owners
-        .get(&process_id)
+        .get_mut(&process_id)
         .ok_or(ClientError::Remote(mochios_posix_protocol::STATUS_ESRCH))?;
-    client.terminate_launched_tree(process.termination_attachment())?;
+    if !process.tree_exit_confirmed() {
+        client.terminate_launched_tree(process.termination_attachment())?;
+        process.confirm_tree_exit();
+    }
+    match client.reclaim_launched_tree(process.termination_attachment()) {
+        Ok(()) | Err(ClientError::Remote(mochios_posix_protocol::STATUS_ESRCH)) => {}
+        Err(error) => return Err(error),
+    }
     owners.remove(&process_id);
     Ok(())
 }

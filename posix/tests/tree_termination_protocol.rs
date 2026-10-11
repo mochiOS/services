@@ -6,6 +6,7 @@ use mochios_posix_client::{
 use mochios_posix_protocol as protocol;
 
 struct TreeTransport {
+    opcode: u16,
     status: i32,
     unexpected_handle: bool,
     unexpected_payload: bool,
@@ -16,6 +17,7 @@ struct TreeTransport {
 impl Default for TreeTransport {
     fn default() -> Self {
         Self {
+            opcode: protocol::OP_PROCESS_TREE_TERMINATE,
             status: 0,
             unexpected_handle: false,
             unexpected_payload: false,
@@ -44,7 +46,7 @@ impl ObjectTransport for TreeTransport {
         let calls = self.calls.get() + 1;
         self.calls.set(calls);
         assert_eq!(header.request_id, calls);
-        assert_eq!(header.opcode, protocol::OP_PROCESS_TREE_TERMINATE);
+        assert_eq!(header.opcode, self.opcode);
         assert_eq!(header.flags, 0);
         assert!(payload.is_empty());
         assert_eq!(handles.len(), 1);
@@ -84,6 +86,51 @@ fn tree_request_attaches_only_the_explicit_root_without_identity_bytes() {
     client.terminate_launched_tree(root()).unwrap();
     client.terminate_launched_tree(root()).unwrap();
     assert_eq!(client.into_transport().calls.get(), 2);
+}
+
+#[test]
+fn reclaim_uses_its_own_opcode_and_does_not_swallow_missing_process_errors() {
+    let client = Client::new(TreeTransport {
+        opcode: protocol::OP_PROCESS_TREE_RECLAIM,
+        ..Default::default()
+    });
+    client.reclaim_launched_tree(root()).unwrap();
+    client.reclaim_launched_tree(root()).unwrap();
+    assert_eq!(client.into_transport().calls.get(), 2);
+    for status in [
+        protocol::STATUS_ESRCH,
+        protocol::STATUS_EPERM,
+        protocol::STATUS_EAGAIN,
+        -5,
+    ] {
+        let client = Client::new(TreeTransport {
+            opcode: protocol::OP_PROCESS_TREE_RECLAIM,
+            status,
+            ..Default::default()
+        });
+        assert_eq!(
+            client.reclaim_launched_tree(root()),
+            Err(ClientError::Remote(status))
+        );
+    }
+    let client = Client::new(TreeTransport {
+        opcode: protocol::OP_PROCESS_TREE_RECLAIM,
+        unexpected_handle: true,
+        ..Default::default()
+    });
+    assert_eq!(
+        client.reclaim_launched_tree(root()),
+        Err(ClientError::MismatchedResponse)
+    );
+    let client = Client::new(TreeTransport {
+        opcode: protocol::OP_PROCESS_TREE_RECLAIM,
+        transport_failure: true,
+        ..Default::default()
+    });
+    assert_eq!(
+        client.reclaim_launched_tree(root()),
+        Err(ClientError::Transport(7))
+    );
 }
 
 #[test]

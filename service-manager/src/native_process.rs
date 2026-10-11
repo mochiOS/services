@@ -6,6 +6,7 @@ use mochi_user_platform as platform;
 pub(crate) struct NativeProcess {
     handle: platform::handle::Handle,
     process_id: u64,
+    tree_exit_confirmed: bool,
 }
 
 impl NativeProcess {
@@ -39,6 +40,7 @@ impl NativeProcess {
         let mut process = Self {
             handle: platform::process::create_stopped(image, metadata)?,
             process_id: 0,
+            tree_exit_confirmed: false,
         };
         if let Err(error) = setup(process.handle) {
             process.terminate();
@@ -84,6 +86,16 @@ impl NativeProcess {
             handle: self.handle,
             rights: platform::handle::HANDLE_RIGHT_WAIT | platform::handle::HANDLE_RIGHT_SIGNAL,
         }
+    }
+
+    pub(crate) fn tree_exit_confirmed(&self) -> bool {
+        self.tree_exit_confirmed
+    }
+
+    /// Record only an authenticated successful reply for this owner's root.
+    /// Native root exit alone does not prove that all its descendants exited.
+    pub(crate) fn confirm_tree_exit(&mut self) {
+        self.tree_exit_confirmed = true;
     }
 }
 

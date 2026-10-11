@@ -271,14 +271,25 @@ fn main() {
                 })
             }
             (Some(peer), Some((header, payload)), true)
-                if header.opcode == protocol::OP_PROCESS_TREE_TERMINATE
-                    && header.flags == 0
+                if matches!(
+                    header.opcode,
+                    protocol::OP_PROCESS_TREE_TERMINATE | protocol::OP_PROCESS_TREE_RECLAIM
+                ) && header.flags == 0
                     && payload.is_empty()
                     && attachments.len() == 1 =>
             {
-                let status = process_control::authenticated_tree_root(attachments[0])
-                    .and_then(|root| {
-                        service.terminate_launched_tree(peer, root, &mut filesystem, &mut processes)
+                let status =
+                    process_control::authenticated_tree_root(attachments[0]).and_then(|root| {
+                        if header.opcode == protocol::OP_PROCESS_TREE_TERMINATE {
+                            service.begin_launched_tree_termination(peer, root, &mut processes)
+                        } else {
+                            service.reclaim_launched_tree(
+                                peer,
+                                root,
+                                &mut filesystem,
+                                &mut processes,
+                            )
+                        }
                     });
                 Some(posix_service::ObjectResponse {
                     response: match status {

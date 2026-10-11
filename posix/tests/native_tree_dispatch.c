@@ -19,12 +19,12 @@ static int64_t native(uint64_t number, uint64_t a, uint64_t b, uint64_t c,
                      : "rcx", "r11", "memory");
     return (int64_t)number;
 }
-static int invalid_request(uint32_t endpoint, uint32_t object, uint32_t flags,
+static int invalid_request(uint16_t opcode, uint32_t endpoint, uint32_t object, uint32_t flags,
                            uint32_t payload_len, uint64_t id) {
     unsigned char request[33] = {0}, response[64] = {0};
     memcpy(request, "POSX", 4);
     request[4] = 1;
-    request[6] = 61;
+    memcpy(request + 6, &opcode, sizeof(opcode));
     memcpy(request + 8, &id, sizeof(id));
     memcpy(request + 16, &flags, sizeof(flags));
     memcpy(request + 20, &payload_len, sizeof(payload_len));
@@ -51,11 +51,14 @@ int main(void) {
     int64_t endpoint = native(INHERITED_HANDLE, key, 0, 0, 0, 0, 0);
     int64_t object = native(IPC_CREATE, 0, 0, 0, 0, 0, 0);
     if (endpoint <= 0 || object <= 0) return 1;
-    if (!invalid_request((uint32_t)endpoint, 0, 0, 0, 1)) return 2;
-    if (!invalid_request((uint32_t)endpoint, (uint32_t)object, 0, 0, 2)) return 3;
-    if (!invalid_request((uint32_t)endpoint, (uint32_t)object, 1, 0, 3)) return 4;
-    if (!invalid_request((uint32_t)endpoint, (uint32_t)object, 0, 1, 4)) return 5;
+    for (uint16_t opcode = 61; opcode <= 62; ++opcode) {
+        uint64_t id = (uint64_t)(opcode - 61) * 4;
+        if (!invalid_request(opcode, (uint32_t)endpoint, 0, 0, 0, id + 1)) return 2;
+        if (!invalid_request(opcode, (uint32_t)endpoint, (uint32_t)object, 0, 0, id + 2)) return 3;
+        if (!invalid_request(opcode, (uint32_t)endpoint, (uint32_t)object, 1, 0, id + 3)) return 4;
+        if (!invalid_request(opcode, (uint32_t)endpoint, (uint32_t)object, 0, 1, id + 4)) return 5;
+    }
     if (native(HANDLE_CLOSE, (uint32_t)object, 0, 0, 0, 0, 0) || getpid() <= 0) return 6;
-    fprintf(stderr, "native-tree-dispatch: PASS missing object, wrong rights, flags, payload\n");
+    fprintf(stderr, "native-tree-dispatch: PASS terminate and reclaim: missing object, wrong rights, flags, payload\n");
     return 0;
 }

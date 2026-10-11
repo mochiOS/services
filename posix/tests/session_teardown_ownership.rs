@@ -4,7 +4,7 @@ use mochios_posix_client::{
     Client, ClientError, ObjectHandleAttachment, ObjectHandles, ObjectTransport, Transport,
 };
 use mochios_posix_protocol as protocol;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
@@ -13,8 +13,15 @@ mod native_process {
     pub struct NativeProcess {
         pub handle: u32,
         pub closed: Rc<Cell<usize>>,
+        pub confirmed: bool,
     }
     impl NativeProcess {
+        pub fn tree_exit_confirmed(&self) -> bool {
+            self.confirmed
+        }
+        pub fn confirm_tree_exit(&mut self) {
+            self.confirmed = true;
+        }
         pub fn termination_attachment(&self) -> ObjectHandleAttachment<u32> {
             ObjectHandleAttachment {
                 handle: self.handle,
@@ -36,6 +43,9 @@ struct Replies {
     status: Cell<i32>,
     fail_transport: Cell<bool>,
     calls: Cell<usize>,
+    reclaim_status: Cell<i32>,
+    lose_reclaim_reply: Cell<bool>,
+    opcodes: RefCell<Vec<u16>>,
 }
 impl Transport for Replies {
     type Error = u32;
@@ -53,7 +63,11 @@ impl ObjectTransport for Replies {
     ) -> Result<usize, u32> {
         self.calls.set(self.calls.get() + 1);
         let (header, payload) = protocol::decode(request).unwrap();
-        assert_eq!(header.opcode, protocol::OP_PROCESS_TREE_TERMINATE);
+        assert!(matches!(
+            header.opcode,
+            protocol::OP_PROCESS_TREE_TERMINATE | protocol::OP_PROCESS_TREE_RECLAIM
+        ));
+        self.opcodes.borrow_mut().push(header.opcode);
         assert!(payload.is_empty());
         assert_eq!(handles.len(), 1);
         assert_eq!(
@@ -67,11 +81,20 @@ impl ObjectTransport for Replies {
         if self.fail_transport.get() {
             return Err(7);
         }
+        let status = if header.opcode == protocol::OP_PROCESS_TREE_RECLAIM {
+            if self.lose_reclaim_reply.replace(false) {
+                self.reclaim_status.set(protocol::STATUS_ESRCH);
+                return Err(7);
+            }
+            self.reclaim_status.get()
+        } else {
+            self.status.get()
+        };
         protocol::encode(
             protocol::Header {
                 opcode: protocol::OP_STATUS,
                 request_id: header.request_id,
-                status: self.status.get(),
+                status,
                 ..Default::default()
             },
             &[],
@@ -90,6 +113,7 @@ fn failed_or_delayed_teardown_keeps_the_actual_process_owner_until_success() {
         native_process::NativeProcess {
             handle: 52,
             closed: Rc::clone(&closed),
+            confirmed: false,
         },
     );
     let client = Client::new(Replies {
@@ -97,6 +121,9 @@ fn failed_or_delayed_teardown_keeps_the_actual_process_owner_until_success() {
         status: Cell::new(0),
         fail_transport: Cell::new(false),
         calls: Cell::new(0),
+        reclaim_status: Cell::new(0),
+        lose_reclaim_reply: Cell::new(false),
+        opcodes: RefCell::new(Vec::new()),
     });
     for error in [protocol::STATUS_EAGAIN, protocol::STATUS_EPERM, -5] {
         client.transport().status.set(error);
@@ -137,6 +164,7 @@ fn session_owners(closed: &Rc<Cell<usize>>) -> BTreeMap<u64, native_process::Nat
                 native_process::NativeProcess {
                     handle: 52 + index as u32,
                     closed: Rc::clone(closed),
+                    confirmed: false,
                 },
             )
         })
@@ -181,6 +209,9 @@ fn partial_logout_retries_the_pending_root_and_keeps_binder_alive_until_last() {
         status: Cell::new(0),
         fail_transport: Cell::new(false),
         calls: Cell::new(0),
+        reclaim_status: Cell::new(0),
+        lose_reclaim_reply: Cell::new(false),
+        opcodes: RefCell::new(Vec::new()),
     });
     let mut logout = production::SessionTeardown::begin(Some(1030), 1040, 1050, &owners).unwrap();
     assert_eq!(logout.pending_root(), Some(1030));
@@ -244,6 +275,91 @@ fn logout_without_linux_still_requires_workspace_and_binder_confirmation() {
 }
 
 #[test]
+fn reclaim_reply_loss_retries_only_reclaim_after_confirmed_tree_exit() {
+    let closed = Rc::new(Cell::new(0));
+    let mut owners = session_owners(&closed);
+    let client = Client::new(Replies {
+        expected_handle: Cell::new(52),
+        status: Cell::new(0),
+        fail_transport: Cell::new(false),
+        calls: Cell::new(0),
+        reclaim_status: Cell::new(0),
+        lose_reclaim_reply: Cell::new(true),
+        opcodes: RefCell::new(Vec::new()),
+    });
+    assert_eq!(
+        production::terminate_owned_root(&client, &mut owners, 1030),
+        Err(ClientError::Transport(7))
+    );
+    assert!(owners.get(&1030).unwrap().confirmed);
+    assert_eq!(closed.get(), 0);
+    // The server already reclaimed its records, and the success reply was
+    // lost. Only this root's remembered exit confirmation allows ESRCH here.
+    assert_eq!(
+        production::terminate_owned_root(&client, &mut owners, 1030),
+        Ok(())
+    );
+    assert!(!owners.contains_key(&1030));
+    assert_eq!(closed.get(), 1);
+    assert_eq!(
+        *client.transport().opcodes.borrow(),
+        [
+            protocol::OP_PROCESS_TREE_TERMINATE,
+            protocol::OP_PROCESS_TREE_RECLAIM,
+            protocol::OP_PROCESS_TREE_RECLAIM,
+        ]
+    );
+}
+
+#[test]
+fn missing_exit_confirmation_is_not_completion_and_reclaim_denials_keep_the_owner() {
+    let closed = Rc::new(Cell::new(0));
+    let mut owners = session_owners(&closed);
+    let client = Client::new(Replies {
+        expected_handle: Cell::new(52),
+        status: Cell::new(protocol::STATUS_ESRCH),
+        fail_transport: Cell::new(false),
+        calls: Cell::new(0),
+        reclaim_status: Cell::new(protocol::STATUS_EPERM),
+        lose_reclaim_reply: Cell::new(false),
+        opcodes: RefCell::new(Vec::new()),
+    });
+    assert_eq!(
+        production::terminate_owned_root(&client, &mut owners, 1030),
+        Err(ClientError::Remote(protocol::STATUS_ESRCH))
+    );
+    assert!(!owners.get(&1030).unwrap().confirmed);
+    assert_eq!(closed.get(), 0);
+    assert_eq!(
+        *client.transport().opcodes.borrow(),
+        [protocol::OP_PROCESS_TREE_TERMINATE]
+    );
+    client.transport().status.set(0);
+    for error in [protocol::STATUS_EPERM, protocol::STATUS_EAGAIN, -5] {
+        client.transport().reclaim_status.set(error);
+        assert_eq!(
+            production::terminate_owned_root(&client, &mut owners, 1030),
+            Err(ClientError::Remote(error))
+        );
+        assert!(owners.get(&1030).unwrap().confirmed);
+        assert_eq!(closed.get(), 0);
+    }
+    client.transport().reclaim_status.set(0);
+    production::terminate_owned_root(&client, &mut owners, 1030).unwrap();
+    assert_eq!(closed.get(), 1);
+    assert_eq!(
+        client
+            .transport()
+            .opcodes
+            .borrow()
+            .iter()
+            .filter(|&&opcode| opcode == protocol::OP_PROCESS_TREE_TERMINATE)
+            .count(),
+        2
+    );
+}
+
+#[test]
 fn teardown_never_captures_an_arbitrary_pid_or_discards_an_owner_before_reply() {
     let source = include_str!("../../service-manager/src/session_teardown.rs");
     assert!(!source.contains("open_handle_for_process_id"));
@@ -252,6 +368,15 @@ fn teardown_never_captures_an_arbitrary_pid_or_discards_an_owner_before_reply() 
         source.find("client.terminate_launched_tree").unwrap()
             < source.find("owners.remove").unwrap()
     );
+    assert!(
+        source.find("client.terminate_launched_tree").unwrap()
+            < source.find("process.confirm_tree_exit()").unwrap()
+    );
+    assert!(
+        source.find("client.reclaim_launched_tree").unwrap()
+            < source.find("owners.remove").unwrap()
+    );
+    assert!(!source.contains("handle_status"));
     let owner = include_str!("../../service-manager/src/native_process.rs");
     assert!(owner.contains("handle: self.handle"));
     assert!(owner.contains("HANDLE_RIGHT_WAIT | platform::handle::HANDLE_RIGHT_SIGNAL"));

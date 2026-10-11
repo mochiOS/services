@@ -283,7 +283,10 @@ fn permission_server_uses_native_creation_and_an_explicit_send_handle() {
 
 #[test]
 fn native_launch_owns_the_creation_reference_and_cleans_failed_resume() {
-    let process = production::NativeProcess::create_and_resume(9, b"metadata").unwrap();
+    let mut process = production::NativeProcess::create_and_resume(9, b"metadata").unwrap();
+    assert!(!process.tree_exit_confirmed());
+    process.confirm_tree_exit();
+    assert!(process.tree_exit_confirmed());
     assert_eq!(process.process_id(), 70);
     assert_eq!(
         process.termination_attachment(),

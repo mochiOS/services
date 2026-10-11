@@ -2554,13 +2554,11 @@ fn launched_tree_is_reclaimed_only_after_confirmed_descendant_first_exit() {
     };
     let denied = service.registered_peer(30).unwrap();
     assert_eq!(
-        service.terminate_launched_tree(denied, root, &mut filesystem, &mut processes),
+        finish_tree(&mut service, denied, root, &mut filesystem, &mut processes),
         Err(protocol::STATUS_EPERM)
     );
     assert!(processes.terminated.is_empty());
-    service
-        .terminate_launched_tree(creator, root, &mut filesystem, &mut processes)
-        .unwrap();
+    finish_tree(&mut service, creator, root, &mut filesystem, &mut processes).unwrap();
     assert_eq!(processes.terminated, [(1050, 1), (1040, 1), (1030, 1)]);
     assert_eq!(processes.released, [1050, 1040, 1030]);
     assert_eq!(filesystem.released.len(), 6);
@@ -2570,9 +2568,20 @@ fn launched_tree_is_reclaimed_only_after_confirmed_descendant_first_exit() {
     }
     assert!(service.registered_peer(10).is_some());
     assert_eq!(
-        service.terminate_launched_tree(creator, root, &mut filesystem, &mut processes),
+        finish_tree(&mut service, creator, root, &mut filesystem, &mut processes),
         Err(protocol::STATUS_EPERM)
     );
+}
+
+fn finish_tree(
+    service: &mut PosixService,
+    peer: PeerIdentity,
+    root: AuthenticatedProcess<u32>,
+    filesystem: &mut RecordingFilesystem,
+    processes: &mut RecordingProcesses,
+) -> Result<(), i32> {
+    service.begin_launched_tree_termination(peer, root, processes)?;
+    service.reclaim_launched_tree(peer, root, filesystem, processes)
 }
 
 #[test]
@@ -2584,7 +2593,7 @@ fn partial_tree_termination_failure_keeps_all_objects_for_retry() {
     };
     processes.terminate_failure = Some((1040, -5));
     assert_eq!(
-        service.terminate_launched_tree(creator, root, &mut filesystem, &mut processes),
+        finish_tree(&mut service, creator, root, &mut filesystem, &mut processes),
         Err(-5)
     );
     assert_eq!(processes.terminated, [(1050, 1)]);
@@ -2595,9 +2604,7 @@ fn partial_tree_termination_failure_keeps_all_objects_for_retry() {
         Ok(vec![1050, 1040, 1030])
     );
     processes.terminate_failure = None;
-    service
-        .terminate_launched_tree(creator, root, &mut filesystem, &mut processes)
-        .unwrap();
+    finish_tree(&mut service, creator, root, &mut filesystem, &mut processes).unwrap();
     assert_eq!(processes.terminated, [(1050, 1), (1040, 1), (1030, 1)]);
     assert_eq!(processes.released, [1050, 1040, 1030]);
 }
@@ -2611,7 +2618,7 @@ fn delayed_tree_exit_is_not_treated_as_completed_teardown() {
     };
     processes.termination_pending = true;
     assert_eq!(
-        service.terminate_launched_tree(creator, root, &mut filesystem, &mut processes),
+        finish_tree(&mut service, creator, root, &mut filesystem, &mut processes),
         Err(protocol::STATUS_EAGAIN)
     );
     assert!(processes.released.is_empty());
@@ -2621,9 +2628,7 @@ fn delayed_tree_exit_is_not_treated_as_completed_teardown() {
     processes
         .states
         .insert(1050, ProcessLifecycle::Exited { exit_code: 1 });
-    service
-        .terminate_launched_tree(creator, root, &mut filesystem, &mut processes)
-        .unwrap();
+    finish_tree(&mut service, creator, root, &mut filesystem, &mut processes).unwrap();
     assert_eq!(processes.terminated, [(1050, 1), (1040, 1), (1030, 1)]);
 }
 

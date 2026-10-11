@@ -1078,20 +1078,6 @@ impl<H: Copy> PosixService<H> {
         Ok(process_ids)
     }
 
-    /// Force a launcher's registered tree to exit, descendants first. Retain
-    /// every service reference until all exits have been confirmed; a native
-    /// failure or delayed exit can then be retried without losing descendants.
-    pub fn terminate_launched_tree<F: FilesystemBackend<H>, P: ProcessBackend<H>>(
-        &mut self,
-        peer: PeerIdentity,
-        root: AuthenticatedProcess<H>,
-        filesystem: &mut F,
-        processes: &mut P,
-    ) -> Result<(), i32> {
-        self.begin_launched_tree_termination(peer, root, processes)?;
-        self.reclaim_launched_tree(peer, root, filesystem, processes)
-    }
-
     fn tree_teardown_owns(&self, process_id: u64) -> bool {
         self.tree_teardowns
             .values()
@@ -2021,6 +2007,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_PROCESS_LAUNCHED
             | protocol::OP_PROCESS_LAUNCH_ABORT
             | protocol::OP_PROCESS_TREE_TERMINATE
+            | protocol::OP_PROCESS_TREE_RECLAIM
             | protocol::OP_PROCESS_INITIALIZE
             | protocol::OP_WAIT_CHILD
             | protocol::OP_PROCESS_STOPPED

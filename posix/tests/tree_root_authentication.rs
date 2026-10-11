@@ -71,9 +71,9 @@ fn tree_root_rejects_missing_or_excess_rights_and_invalid_objects() {
 fn tree_dispatch_requires_one_explicit_object_and_releases_request_reference() {
     let source = include_str!("../src/main.rs");
     let branch = source
-        .split("if header.opcode == protocol::OP_PROCESS_TREE_TERMINATE")
-        .nth(1)
+        .split_once("protocol::OP_PROCESS_TREE_TERMINATE")
         .unwrap()
+        .1
         .split("if header.opcode == protocol::OP_PROCESS_LAUNCH_ABORT")
         .next()
         .unwrap();
@@ -81,10 +81,13 @@ fn tree_dispatch_requires_one_explicit_object_and_releases_request_reference() {
     assert!(branch.contains("payload.is_empty()"));
     assert!(branch.contains("attachments.len() == 1"));
     assert!(branch.contains("authenticated_tree_root(attachments[0])"));
-    assert!(branch.contains("service.terminate_launched_tree"));
+    assert!(branch.contains("protocol::OP_PROCESS_TREE_RECLAIM"));
+    assert!(branch.contains("service.begin_launched_tree_termination"));
+    assert!(branch.contains("service.reclaim_launched_tree"));
     assert!(!branch.contains("retained_handle ="));
     let library = include_str!("../src/lib.rs");
     assert!(library.contains("| protocol::OP_PROCESS_TREE_TERMINATE"));
+    assert!(library.contains("| protocol::OP_PROCESS_TREE_RECLAIM"));
 }
 
 #[test]
@@ -97,5 +100,6 @@ fn native_dispatch_probe_uses_current_wire_and_handle_abi() {
     assert_eq!(mochios_posix_protocol::VERSION, 1);
     assert_eq!(mochios_posix_protocol::HEADER_LEN, 32);
     assert_eq!(mochios_posix_protocol::OP_PROCESS_TREE_TERMINATE, 61);
+    assert_eq!(mochios_posix_protocol::OP_PROCESS_TREE_RECLAIM, 62);
     assert_eq!(mnu_abi::HANDLE_RIGHT_SEND, 1 << 2);
 }
