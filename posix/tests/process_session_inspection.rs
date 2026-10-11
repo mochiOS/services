@@ -161,7 +161,7 @@ fn native_inspection_authenticates_handle_and_never_retains_query_reference() {
         .unwrap();
     let end = start
         + source[start..]
-            .find("if header.opcode == protocol::OP_PROCESS_LAUNCHED")
+            .find("if header.opcode == protocol::OP_PROCESS_INITIALIZE")
             .unwrap();
     let dispatch = &source[start..end];
     assert!(dispatch.contains("payload.is_empty()"));

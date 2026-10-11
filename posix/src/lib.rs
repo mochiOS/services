@@ -474,6 +474,7 @@ pub struct ControllingTerminal {
 
 #[derive(Debug)]
 pub struct PosixService<H: Copy = u32> {
+    bootstrap_process_id: Option<u64>,
     sessions: BTreeMap<u64, Session>,
     directories: BTreeMap<u64, SessionDirectories<H>>,
     processes: BTreeMap<u64, H>,
@@ -497,6 +498,7 @@ pub struct PosixService<H: Copy = u32> {
 impl PosixService<u32> {
     pub const fn new() -> Self {
         Self {
+            bootstrap_process_id: None,
             sessions: BTreeMap::new(),
             directories: BTreeMap::new(),
             processes: BTreeMap::new(),
@@ -538,6 +540,45 @@ impl<H: Copy> PosixService<H> {
     ) -> Result<(), i32> {
         if !self.processes.is_empty() || !self.sessions.is_empty() {
             return Err(protocol::STATUS_EPERM);
+        }
+        self.initialize_process_environment(process, uid, gid, groups)?;
+        self.bootstrap_process_id = Some(process.process_id);
+        Ok(())
+    }
+
+    /// Initialize pre-existing boot processes only on behalf of the authority
+    /// selected by the inherited bootstrap Handle. POSIX root alone is not
+    /// enough, and existing environments may never be replaced.
+    pub fn initialize_process(
+        &mut self,
+        peer: PeerIdentity,
+        process: AuthenticatedProcess<H>,
+        uid: u32,
+        gid: u32,
+        groups: &[u32],
+    ) -> Result<(), i32> {
+        if self.bootstrap_process_id != Some(peer.process_id)
+            || !self
+                .sessions
+                .get(&peer.process_id)
+                .is_some_and(|session| session.effective_uid == 0)
+        {
+            return Err(protocol::STATUS_EPERM);
+        }
+        self.initialize_process_environment(process, uid, gid, groups)
+    }
+
+    fn initialize_process_environment(
+        &mut self,
+        process: AuthenticatedProcess<H>,
+        uid: u32,
+        gid: u32,
+        groups: &[u32],
+    ) -> Result<(), i32> {
+        if self.processes.contains_key(&process.process_id)
+            || self.sessions.contains_key(&process.process_id)
+        {
+            return Err(STATUS_EINVAL);
         }
         if process.process_id == 0
             || uid == u32::MAX
@@ -1800,6 +1841,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_PROCESS_SESSION_INFO
             | protocol::OP_PROCESS_LAUNCHED
             | protocol::OP_PROCESS_LAUNCH_ABORT
+            | protocol::OP_PROCESS_INITIALIZE
             | protocol::OP_WAIT_CHILD
             | protocol::OP_PROCESS_STOPPED
             | protocol::OP_PROCESS_INFO

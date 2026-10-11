@@ -243,6 +243,23 @@ fn main() {
                 })
             }
             (Some(peer), Some((header, payload)), true)
+                if header.opcode == protocol::OP_PROCESS_INITIALIZE
+                    && header.flags == 0
+                    && attachments.len() == 1 =>
+            {
+                let status = initialize_sender_process(&mut service, peer, attachments[0], payload);
+                if status.is_ok() {
+                    retained_handle = Some(attachments[0].handle);
+                }
+                Some(posix_service::ObjectResponse {
+                    response: match status {
+                        Ok(()) => success_response(header.request_id),
+                        Err(status) => status_response(header.request_id, status),
+                    },
+                    handles: Vec::new(),
+                })
+            }
+            (Some(peer), Some((header, payload)), true)
                 if header.opcode == protocol::OP_PROCESS_LAUNCHED
                     && header.flags == 0
                     && payload.is_empty()
@@ -951,6 +968,35 @@ fn wait_for_request_or_child(
     process::wait_many(&mut items, syscall::HANDLE_WAIT_INFINITE)
         .map(|index| index == 0)
         .map_err(|error| error.raw())
+}
+
+#[cfg(target_os = "mochios")]
+fn initialize_sender_process(
+    service: &mut posix_service::PosixService<u32>,
+    peer: posix_service::PeerIdentity,
+    process: posix_service::AttachedObject<u32>,
+    payload: &[u8],
+) -> Result<(), i32> {
+    use mochi_user_platform as platform;
+    let required = platform::handle::HANDLE_RIGHT_WAIT | platform::handle::HANDLE_RIGHT_SIGNAL;
+    if process.rights != required {
+        return Err(posix_service::STATUS_EINVAL);
+    }
+    let status = platform::process::handle_status(process.handle)
+        .map_err(|error| error.errno().map_or(-5, |errno| -(errno as i32)))?;
+    let mut groups = [0; mochios_posix_protocol::MAX_SUPPLEMENTARY_GROUPS];
+    let (uid, gid, count) = mochios_posix_protocol::decode_spawn_credentials(payload, &mut groups)
+        .map_err(|_| posix_service::STATUS_EINVAL)?;
+    service.initialize_process(
+        peer,
+        posix_service::AuthenticatedProcess {
+            handle: process.handle,
+            process_id: status.process_id,
+        },
+        uid,
+        gid,
+        &groups[..count],
+    )
 }
 
 #[cfg(target_os = "mochios")]

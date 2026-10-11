@@ -52,6 +52,31 @@ fn install_posix_endpoint_at(
     if destination == 0 {
         return Err(sys_error(mochi_user_syscall::ENOENT));
     }
+    // Select the already running boot process through its authenticated
+    // endpoint; never serialize a PID or derive credentials from kernel UID.
+    let rights = platform::handle::HANDLE_RIGHT_WAIT | platform::handle::HANDLE_RIGHT_SIGNAL;
+    let process = platform::process::open_handle_for_endpoint(
+        destination,
+        rights | platform::handle::HANDLE_RIGHT_TRANSFER,
+    )?;
+    let client = mochios_posix_client::Client::new(
+        mochios_posix_client::SyscallEndpointTransport::new(endpoint),
+    );
+    let initialized = client.initialize_process(
+        mochios_posix_client::ObjectHandleAttachment {
+            handle: process,
+            rights,
+        },
+        0,
+        0,
+        &[],
+    );
+    let _ = platform::handle::close(process);
+    initialized.map_err(|error| match error {
+        mochios_posix_client::ClientError::Transport(error) => error,
+        mochios_posix_client::ClientError::Remote(errno) => sys_error(errno.unsigned_abs() as u64),
+        _ => sys_error(mochi_user_syscall::EIO),
+    })?;
     let destination =
         u32::try_from(destination).map_err(|_| sys_error(mochi_user_syscall::EOVERFLOW))?;
     let request = opcode.to_le_bytes();
