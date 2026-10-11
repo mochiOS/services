@@ -22,7 +22,8 @@ enum {
   READ_AT = 673,
   WRITE_AT = 674,
   CREATE = 676,
-  SPACE_CLONE = 679
+  SPACE_CLONE = 679,
+  TABLE_READ = 680
 };
 static int64_t call6(uint64_t n, uint64_t a, uint64_t b, uint64_t c, uint64_t d,
                      uint64_t e, uint64_t f) {
@@ -53,6 +54,11 @@ struct context {
   uint64_t entry, stack, argument, tls, flags, reserved[3];
   uint64_t registers[14];
 };
+struct handle_info {
+  uint32_t handle, reserved;
+  uint64_t rights;
+};
+_Static_assert(sizeof(struct handle_info) == 16, "native Handle metadata");
 _Static_assert(sizeof(struct context) == 176, "native initial context");
 static unsigned char stack[65536] __attribute__((aligned(16)));
 static volatile uint64_t private_value = 0x11;
@@ -70,6 +76,11 @@ __attribute__((used, noreturn)) static void child(void) {
            N(VALUE_GET, UINT64_C(0x1234), &value, 0) == 0 && value == 42;
   uint64_t memory = 0;
   int64_t automatic = N(LAUNCH_HANDLE_GET, 0x2001, 0, 0);
+  struct handle_info owned[3] = {0};
+  ok = ok && N(TABLE_READ, 0, 0, 0) == 3 && N(TABLE_READ, owned, 3, 0) == 3 &&
+       owned[0].handle == 1 && owned[0].reserved == 0 && owned[0].rights == 1 &&
+       owned[1].handle == 2 && owned[1].reserved == 0 && owned[1].rights == 0 &&
+       owned[2].handle == 41 && owned[2].reserved == 0 && owned[2].rights == 1;
   ok = ok && N(LAUNCH_HANDLE_GET, 0x2002, 0, 0) == 1 &&
        N(LAUNCH_HANDLE_GET, 0x2003, 0, 0) == 41 && automatic == 2 &&
        N(RIGHTS_GET, automatic, 0, 0) == 0 && N(RIGHTS_GET, 41, 0, 0) == 1 &&
@@ -138,6 +149,28 @@ int main(void) {
   source_object = (uint32_t)memory;
   uint64_t data = UINT64_C(0x5555abcdef123456);
   CHECK(call6(WRITE_AT, memory, (uint64_t)&data, 8, 0, 0, 0) == 8);
+  int64_t count = N(TABLE_READ, 0, 0, 0);
+  CHECK(count > 1 && count <= 64);
+  struct handle_info owned[64];
+  memset(owned, 0xa5, sizeof(owned));
+  CHECK(N(TABLE_READ, owned, count - 1, 0) == -ENOSPC);
+  const unsigned char *sentinel = (const unsigned char *)owned;
+  for (size_t i = 0; i < sizeof(owned); i++)
+    CHECK(sentinel[i] == 0xa5);
+  CHECK(N(TABLE_READ, owned, count, 0) == count);
+  int found = 0;
+  for (int64_t i = 0; i < count; i++) {
+    CHECK(owned[i].handle != 0 && owned[i].reserved == 0);
+    CHECK(owned[i].rights == (uint64_t)N(RIGHTS_GET, owned[i].handle, 0, 0));
+    if (i > 0)
+      CHECK(owned[i - 1].handle < owned[i].handle);
+    if (owned[i].handle == source_object)
+      found = 1;
+  }
+  CHECK(found);
+  CHECK(N(TABLE_READ, 0, 1, 0) == -EFAULT);
+  CHECK(N(TABLE_READ, owned, 0, 0) == -EINVAL);
+  CHECK(N(TABLE_READ, owned, 4097, 0) == -EINVAL);
   /* Touch every stack page before capture so initial entry has resident VM. */
   for (size_t i = 0; i < sizeof(stack); i += 4096)
     stack[i] = 1;
@@ -224,5 +257,8 @@ int main(void) {
   fprintf(stderr, "handle-placement: PASS fixed and automatic slots, "
                   "explicit-first order, retained object after creator close, "
                   "transfer requirement, rights attenuation, slot bounds\n");
+  fprintf(stderr,
+          "handle-table: PASS caller-only metadata, exact count, no "
+          "truncation, zero and full-width rights, child table isolation\n");
   return 0;
 }
