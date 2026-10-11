@@ -17,6 +17,8 @@
 static volatile sig_atomic_t resized;
 static volatile sig_atomic_t background_stopped;
 static volatile sig_atomic_t background_read;
+static volatile sig_atomic_t waited_signal;
+static void on_wait_signal(int signal_number) { if (signal_number == SIGUSR1) ++waited_signal; }
 static void on_resize(int signal_number) { if (signal_number == SIGWINCH) ++resized; }
 static void on_background(int signal_number) {
     if (signal_number == SIGTTOU) ++background_stopped;
@@ -52,6 +54,18 @@ static void *read_after_process_stop(void *unused) {
     (void)unused;
     char input[7];
     if (read(STDIN_FILENO, input, sizeof(input)) != 7 || memcmp(input, "resume\n", 7) != 0)
+        return (void *)(uintptr_t)1;
+    return NULL;
+}
+
+static void *interrupt_handle_wait(void *unused) {
+    (void)unused;
+    sigset_t blocked;
+    if (sigemptyset(&blocked) != 0 || sigaddset(&blocked, SIGUSR1) != 0
+        || pthread_sigmask(SIG_BLOCK, &blocked, NULL) != 0)
+        return (void *)(uintptr_t)1;
+    struct timespec pause = {0, 100000000};
+    if (nanosleep(&pause, NULL) != 0 || kill(getpid(), SIGUSR1) != 0)
         return (void *)(uintptr_t)1;
     return NULL;
 }
@@ -280,7 +294,15 @@ int main(void) {
             CHECK(memcmp(flow_bytes, "resumed", 7) == 0);
         }
     }
-    debug("native-terminal-window: PASS default-stop resume and caught-handler EINTR, terminal controls, I/O, size and SIGWINCH\n");
+    action.sa_handler = on_wait_signal;
+    CHECK(sigaction(SIGUSR1, &action, NULL) == 0);
+    CHECK(pthread_create(&writer, NULL, interrupt_handle_wait, NULL) == 0);
+    char interrupted_byte;
+    errno = 0;
+    CHECK(read(STDIN_FILENO, &interrupted_byte, 1) == -1 && errno == EINTR);
+    CHECK(waited_signal == 1);
+    CHECK(pthread_join(writer, &worker_result) == 0 && worker_result == NULL);
+    debug("native-terminal-window: PASS empty-terminal wait interruption, default-stop resume, controls, I/O and SIGWINCH\n");
     CHECK(close(master) == 0);
     return 0;
 }
