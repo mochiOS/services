@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #define CHECK(condition) do { \
@@ -19,8 +20,23 @@
     } \
 } while (0)
 
+static volatile sig_atomic_t caught_count;
+static volatile sig_atomic_t handler_mask_error;
+static int service_mask(uint32_t operation, uint64_t mask, uint64_t *previous);
+
 static void caught_signal(int signal_number) {
-    (void)signal_number;
+    sigset_t current, pending;
+    uint64_t authoritative;
+    ++caught_count;
+    if (sigprocmask(99, NULL, &current) != 0 ||
+        sigismember(&current, SIGUSR1) != 1 ||
+        sigismember(&current, SIGUSR2) != 1 ||
+        service_mask(0, 0, &authoritative) != 0 || authoritative != current)
+        handler_mask_error = 1;
+    if (caught_count == 1) {
+        if (kill(getpid(), signal_number) != 0 || sigpending(&pending) != 0 ||
+            sigismember(&pending, SIGUSR2) != 1) handler_mask_error = 2;
+    }
 }
 
 /* Direct client/service boundary probe. The wire payload contains no TID or
@@ -64,8 +80,10 @@ static int service_mask(uint32_t operation, uint64_t mask, uint64_t *previous) {
 static void *inspect_service_thread_mask(void *unused) {
     (void)unused;
     uint64_t previous;
-    if (service_mask(0, 0, &previous) || previous != 0 ||
-        service_mask(1, UINT64_C(1) << 30, &previous) || previous != 0 ||
+    sigset_t current, replacement = UINT64_C(1) << 30;
+    if (pthread_sigmask(99, NULL, &current) || current != (UINT64_C(1) << 29) ||
+        service_mask(0, 0, &previous) || previous != current ||
+        pthread_sigmask(SIG_SETMASK, &replacement, &current) || current != (UINT64_C(1) << 29) ||
         service_mask(0, 0, &previous) || previous != (UINT64_C(1) << 30) ||
         service_signal_request(67, 0, 0, &previous) || previous != 0 ||
         service_signal_request(66, 0, 0, &previous) || previous != 0)
@@ -76,8 +94,18 @@ static void *inspect_service_thread_mask(void *unused) {
 static int inspect_service_masks(void) {
     uint64_t previous;
     uint64_t first = UINT64_C(1) << 29;
+    sigset_t current, replacement = first;
     uint64_t unblockable = (UINT64_C(1) << (SIGKILL - 1)) | (UINT64_C(1) << (SIGSTOP - 1));
-    CHECK(service_mask(4, first, &previous) == 0 && previous == first);
+    CHECK(sigprocmask(99, NULL, &current) == 0 && current == 0);
+    current = UINT64_C(1) << 28;
+    errno = 0;
+    CHECK(sigprocmask(99, &replacement, &current) == -1 && errno == EINVAL);
+    CHECK(current == (UINT64_C(1) << 28));
+    CHECK(pthread_sigmask(99, &replacement, &current) == EINVAL);
+    CHECK(current == (UINT64_C(1) << 28));
+    CHECK(service_mask(0, 0, &previous) == 0 && previous == 0);
+    CHECK(pthread_sigmask(SIG_SETMASK, &replacement, &current) == 0 && current == 0);
+    CHECK(service_mask(0, 0, &previous) == 0 && previous == first);
     CHECK(service_mask(2, unblockable, &previous) == 0 && previous == first);
     CHECK(service_mask(4, 0, &previous) == 0 && previous == first);
     pthread_t thread;
@@ -85,11 +113,11 @@ static int inspect_service_masks(void) {
     CHECK(pthread_create(&thread, NULL, inspect_service_thread_mask, NULL) == 0);
     CHECK(pthread_join(thread, &result) == 0 && result == NULL);
     CHECK(service_mask(0, 0, &previous) == 0 && previous == first);
-    CHECK(service_mask(3, first, &previous) == 0 && previous == first);
+    CHECK(sigprocmask(SIG_UNBLOCK, &replacement, &current) == 0 && current == first);
     CHECK(service_mask(0, 0, &previous) == 0 && previous == 0);
     CHECK(service_signal_request(67, 0, 0, &previous) == 0 && previous == 0);
     CHECK(service_signal_request(66, 0, 0, &previous) == 0 && previous == 0);
-    fprintf(stderr, "native-signal-masks: PASS authenticated per-thread masks, initialize preservation and unblockable signals\n");
+    fprintf(stderr, "native-signal-masks: PASS C sigprocmask/pthread_sigmask, inheritance, service state and unblockable signals\n");
     fprintf(stderr, "native-thread-delivery: PASS authenticated pending and dequeue for parent and pthread\n");
     return 0;
 }
@@ -99,6 +127,10 @@ int main(int argc, char **argv) {
                      strcmp(argv[1], "--exec-default-child") == 0)) {
         int preserve_ignore = strcmp(argv[1], "--exec-child") == 0;
         struct sigaction inherited;
+        sigset_t inherited_mask;
+        if (sigprocmask(99, NULL, &inherited_mask) != 0 ||
+            inherited_mask != (UINT64_C(1) << ((preserve_ignore ? SIGUSR2 : SIGUSR1) - 1)))
+            _exit(98);
         if (sigaction(SIGUSR1, NULL, &inherited) != 0 ||
             inherited.sa_handler != (preserve_ignore ? SIG_IGN : SIG_DFL) ||
             sigaction(SIGUSR2, NULL, &inherited) != 0 || inherited.sa_handler != SIG_DFL ||
@@ -118,7 +150,10 @@ int main(int argc, char **argv) {
             _exit(91);
         pid_t nested = fork();
         if (nested < 0) _exit(95);
-        if (nested == 0) _exit(43);
+        if (nested == 0) {
+            sigset_t nested_mask;
+            _exit(sigprocmask(99, NULL, &nested_mask) == 0 && nested_mask == inherited_mask ? 43 : 99);
+        }
         int nested_status = 0;
         if (waitpid(nested, &nested_status, 0) != nested ||
             !WIFEXITED(nested_status) || WEXITSTATUS(nested_status) != 43)
@@ -174,8 +209,18 @@ int main(int argc, char **argv) {
     CHECK(sigpending(&pending) == 0 && sigismember(&pending, SIGUSR1) == 0);
     CHECK(sigprocmask(SIG_UNBLOCK, &mask, NULL) == 0);
     action.sa_handler = caught_signal;
+    action.sa_mask = mask;
     CHECK(sigaction(SIGUSR2, &action, NULL) == 0);
+    CHECK(kill(getpid(), SIGUSR2) == 0);
+    struct timespec pause = {0, 1000000};
+    for (unsigned spin = 0; spin < 1000 && caught_count < 2; ++spin) nanosleep(&pause, NULL);
+    CHECK(caught_count == 2 && handler_mask_error == 0);
+    CHECK(sigprocmask(99, NULL, &pending) == 0 && pending == 0);
+    fprintf(stderr, "native-signal-handlers: PASS service-owned action mask, self-blocking, pending and mask restoration\n");
+    sigset_t exec_mask = UINT64_C(1) << (SIGUSR2 - 1);
+    CHECK(sigprocmask(SIG_BLOCK, &exec_mask, NULL) == 0);
     CHECK(execve("/system/services/missing-exec-probe", exec_arguments, exec_environment) == -1);
+    CHECK(sigprocmask(99, NULL, &pending) == 0 && pending == exec_mask);
     CHECK(sigaction(SIGUSR2, NULL, &action) == 0 && action.sa_handler == caught_signal);
     CHECK(sigaction(SIGUSR1, NULL, &action) == 0 && action.sa_handler == SIG_IGN);
     fprintf(stderr, "native-signals: PASS SIG_IGN discards pending signals and failed exec preserves dispositions\n");
@@ -191,7 +236,8 @@ int main(int argc, char **argv) {
             if (attempt >= 4) {
                 CHECK(posix_spawnattr_init(&attributes) == 0);
                 CHECK(posix_spawnattr_setsigdefault(&attributes, &mask) == 0);
-                CHECK(posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETSIGDEF) == 0);
+                CHECK(posix_spawnattr_setsigmask(&attributes, &mask) == 0);
+                CHECK(posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK) == 0);
                 attribute_pointer = &attributes;
                 exec_arguments[1] = "--exec-default-child";
             }
@@ -227,5 +273,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "native-exec: PASS posix_spawn and fork/execve preserve argv/env/non-CLOEXEC FDs, close CLOEXEC FDs and support fork after exec\n");
     fprintf(stderr, "native-signals: PASS spawn and fork/exec preserve SIG_IGN and reset caught dispositions\n");
     fprintf(stderr, "native-signals: PASS POSIX_SPAWN_SETSIGDEF overrides inherited SIG_IGN\n");
+    CHECK(sigprocmask(99, NULL, &pending) == 0 && pending == exec_mask);
+    fprintf(stderr, "native-signal-masks: PASS fork/exec inheritance, failed exec preservation and spawn SETSIGMASK override\n");
     return 0;
 }

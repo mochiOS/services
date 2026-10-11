@@ -46,3 +46,44 @@ fn kill_and_stop_dispositions_cannot_be_replaced() {
     assert!(!signal::can_change_disposition(SIGNAL_STOP));
     assert!(!signal::can_change_disposition(65));
 }
+
+#[test]
+fn newlib_delivery_uses_service_masks_and_initializes_before_installing_upcalls() {
+    let runtime = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
+    let setup = runtime
+        .split("fn setup_signal_delivery(")
+        .nth(1)
+        .unwrap()
+        .split("fn ")
+        .next()
+        .unwrap();
+    assert!(
+        setup.find("SIGNAL_MASK_INITIALIZE").unwrap() < setup.find("ThreadUpcallInstall").unwrap()
+    );
+    let pending = runtime
+        .split("fn sigpending(")
+        .nth(1)
+        .unwrap()
+        .split("#[unsafe(no_mangle)]")
+        .next()
+        .unwrap();
+    assert!(pending.contains("client.thread_pending_signals()"));
+    assert!(!pending.contains("signal_mask.load"));
+    let delivery = runtime
+        .split("fn drain_pending_signals(")
+        .nth(1)
+        .unwrap()
+        .split("extern \"C\" fn posix_signal_upcall")
+        .next()
+        .unwrap();
+    assert!(delivery.contains(".thread_dequeue_signal_delivery()"));
+    assert!(!delivery.contains("signal_mask.load"));
+    let fork = runtime
+        .split("fn clone_registered_process(")
+        .nth(1)
+        .unwrap()
+        .split("fn ")
+        .next()
+        .unwrap();
+    assert!(fork.find("SIGNAL_MASK_QUERY").unwrap() < fork.find("capture_native").unwrap());
+}
