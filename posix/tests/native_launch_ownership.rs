@@ -30,6 +30,7 @@ static STATE: Mutex<State> = Mutex::new(State {
 });
 
 pub mod handle {
+    pub use mnu_abi::{HANDLE_RIGHT_SIGNAL, HANDLE_RIGHT_WAIT};
     pub type Handle = u32;
     pub fn close(handle: Handle) -> Result<(), crate::syscall::SysError> {
         assert_eq!(handle, 7);
@@ -284,6 +285,13 @@ fn permission_server_uses_native_creation_and_an_explicit_send_handle() {
 fn native_launch_owns_the_creation_reference_and_cleans_failed_resume() {
     let process = production::NativeProcess::create_and_resume(9, b"metadata").unwrap();
     assert_eq!(process.process_id(), 70);
+    assert_eq!(
+        process.termination_attachment(),
+        mochios_posix_client::ObjectHandleAttachment {
+            handle: 7,
+            rights: mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_SIGNAL,
+        }
+    );
     assert_eq!(
         process.watch_target(),
         process_watch::ProcessWatchTarget::RetainedHandle(7)

@@ -76,6 +76,15 @@ impl NativeProcess {
     pub(crate) fn process_id(&self) -> u64 {
         self.process_id
     }
+
+    pub(crate) fn termination_attachment(
+        &self,
+    ) -> mochios_posix_client::ObjectHandleAttachment<platform::handle::Handle> {
+        mochios_posix_client::ObjectHandleAttachment {
+            handle: self.handle,
+            rights: platform::handle::HANDLE_RIGHT_WAIT | platform::handle::HANDLE_RIGHT_SIGNAL,
+        }
+    }
 }
 
 impl Drop for NativeProcess {

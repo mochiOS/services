@@ -15,6 +15,7 @@ mod readiness;
 mod service_config;
 mod service_launcher;
 mod session;
+mod session_teardown;
 mod spawn_support;
 
 #[cfg(not(test))]
