@@ -268,6 +268,7 @@ fn main() {
                     protocol::OP_SIGNAL_THREAD_MASK
                         | protocol::OP_SIGNAL_THREAD_DEQUEUE
                         | protocol::OP_SIGNAL_THREAD_PENDING
+                        | protocol::OP_SIGNAL_THREAD_RAISE
                         | protocol::OP_SIGNAL_IMAGE_STARTED
                 )
                     && attachments.is_empty() =>
@@ -1094,6 +1095,23 @@ fn deliver_signal_notifications(
     threads: &mut std::collections::BTreeMap<u64, RegisteredSignalThread>,
 ) {
     use mochi_user_platform as platform;
+
+    let targets: Vec<_> = service.thread_signal_notification_threads().collect();
+    for (process_id, thread_id) in targets {
+        let Some(thread) = threads.get(&thread_id).copied() else {
+            continue;
+        };
+        if thread.process_id != process_id {
+            continue;
+        }
+        if platform::thread::interrupt(thread.handle, 0).is_ok() {
+            service.acknowledge_thread_signal_notification(process_id, thread_id);
+        } else if signal_thread_terminated(service, thread_id, thread)
+            && close_retired_signal_thread(thread_id, thread)
+        {
+            threads.remove(&thread_id);
+        }
+    }
 
     let processes: Vec<u64> = service.signal_notification_processes().collect();
     for process_id in processes {

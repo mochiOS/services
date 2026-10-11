@@ -540,6 +540,8 @@ pub struct PosixService<H: Copy = u32> {
     signals: BTreeMap<u64, ProcessSignalState>,
     // Native identities arrive only from authenticated endpoint metadata.
     signal_masks: BTreeMap<(u64, u64), u64>,
+    thread_pending_signals: BTreeMap<(u64, u64), u64>,
+    thread_signal_notifications: BTreeSet<(u64, u64)>,
     signal_child_options: BTreeMap<u64, u32>,
     process_wait_states: BTreeMap<u64, ProcessWaitState>,
     next_signal_delivery_token: u64,
@@ -567,6 +569,8 @@ impl PosixService<u32> {
             resource_limits: BTreeMap::new(),
             signals: BTreeMap::new(),
             signal_masks: BTreeMap::new(),
+            thread_pending_signals: BTreeMap::new(),
+            thread_signal_notifications: BTreeSet::new(),
             signal_child_options: BTreeMap::new(),
             process_wait_states: BTreeMap::new(),
             next_signal_delivery_token: 1,
@@ -716,6 +720,14 @@ impl<H: Copy> PosixService<H> {
         self.signal_notifications.remove(&process_id);
     }
 
+    pub fn thread_signal_notification_threads(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.thread_signal_notifications.iter().copied()
+    }
+
+    pub fn acknowledge_thread_signal_notification(&mut self, process_id: u64, thread_id: u64) {
+        self.thread_signal_notifications.remove(&(process_id, thread_id));
+    }
+
     pub fn process_resume_notification_processes(&self) -> impl Iterator<Item = u64> + '_ {
         self.process_resume_notifications.iter().copied()
     }
@@ -725,6 +737,37 @@ impl<H: Copy> PosixService<H> {
     }
 
     fn enqueue_signal(&mut self, process_id: u64, signal: u32) -> Result<(), i32> {
+        self.prepare_signal_generation(process_id, signal)?;
+        self.signals
+            .get_mut(&process_id)
+            .ok_or(protocol::STATUS_ESRCH)?
+            .enqueue(signal);
+        if self.signals[&process_id].pending() & signal_bit(signal) != 0 {
+            self.signal_notifications.insert(process_id);
+        } else if self.signals[&process_id].pending() == 0 {
+            self.signal_notifications.remove(&process_id);
+        }
+        Ok(())
+    }
+
+    fn prepare_signal_generation(&mut self, process_id: u64, signal: u32) -> Result<(), i32> {
+        let cancelled = if signal == protocol::SIGNAL_CONT {
+            JOB_CONTROL_STOP_SIGNALS
+        } else if signal_bit(signal) & JOB_CONTROL_STOP_SIGNALS != 0 {
+            signal_bit(protocol::SIGNAL_CONT)
+        } else {
+            0
+        };
+        let state = self
+            .signals
+            .get_mut(&process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        state.pending &= !cancelled;
+        for ((process, _), pending) in &mut self.thread_pending_signals {
+            if *process == process_id {
+                *pending &= !cancelled;
+            }
+        }
         let continued = if signal == protocol::SIGNAL_CONT {
             self.process_wait_states
                 .get_mut(&process_id)
@@ -739,15 +782,6 @@ impl<H: Copy> PosixService<H> {
         } else {
             false
         };
-        self.signals
-            .get_mut(&process_id)
-            .ok_or(protocol::STATUS_ESRCH)?
-            .enqueue(signal);
-        if self.signals[&process_id].pending() & signal_bit(signal) != 0 {
-            self.signal_notifications.insert(process_id);
-        } else if self.signals[&process_id].pending() == 0 {
-            self.signal_notifications.remove(&process_id);
-        }
         if matches!(signal, protocol::SIGNAL_KILL | protocol::SIGNAL_CONT) {
             self.process_resume_notifications.insert(process_id);
         }
@@ -1617,6 +1651,8 @@ impl<H: Copy> PosixService<H> {
             .retain(|(process_id, _), _| *process_id != child_id);
         self.signals.remove(&child_id);
         self.signal_masks.retain(|(process, _), _| *process != child_id);
+        self.thread_pending_signals.retain(|(process, _), _| *process != child_id);
+        self.thread_signal_notifications.retain(|(process, _)| *process != child_id);
         self.signal_child_options.remove(&child_id);
         self.process_wait_states.remove(&child_id);
         self.signal_notifications.remove(&child_id);
@@ -2213,6 +2249,13 @@ impl<H: Copy> PosixService<H> {
         protocol::encode_signal_disposition(previous, &mut output).map_err(|_| STATUS_EINVAL)?;
         if setting {
             state.set_disposition(request.signal, request.kind);
+            if request.kind == protocol::SIGNAL_DISPOSITION_IGNORE {
+                for ((process, _), pending) in &mut self.thread_pending_signals {
+                    if *process == process_id {
+                        *pending &= !signal_bit(request.signal);
+                    }
+                }
+            }
             if state.pending() == 0 {
                 self.signal_notifications.remove(&process_id);
             }
@@ -2265,6 +2308,7 @@ impl<H: Copy> PosixService<H> {
             protocol::OP_SIGNAL_THREAD_MASK
                 | protocol::OP_SIGNAL_THREAD_DEQUEUE
                 | protocol::OP_SIGNAL_THREAD_PENDING
+                | protocol::OP_SIGNAL_THREAD_RAISE
                 | protocol::OP_SIGNAL_IMAGE_STARTED
         ) {
             Err(protocol::STATUS_ENOSYS)
@@ -2278,6 +2322,7 @@ impl<H: Copy> PosixService<H> {
         } else {
             match header.opcode {
                 protocol::OP_SIGNAL_THREAD_MASK => self.thread_signal_mask_payload(sender, payload),
+                protocol::OP_SIGNAL_THREAD_RAISE => self.thread_raise_signal_payload(sender, payload),
                 protocol::OP_SIGNAL_IMAGE_STARTED if payload.is_empty() => {
                     self.signal_image_started_payload(sender)
                 }
@@ -2329,6 +2374,8 @@ impl<H: Copy> PosixService<H> {
         };
         if terminated {
             self.signal_masks.remove(&(identity.process_id, identity.thread_id));
+            self.thread_pending_signals.remove(&(identity.process_id, identity.thread_id));
+            self.thread_signal_notifications.remove(&(identity.process_id, identity.thread_id));
             if let Some(wait) = self.process_wait_states.get_mut(&identity.process_id) {
                 // A selected signal was already delivered to this thread.
                 // Discard its abandoned completion token; do not redeliver it.
@@ -2380,8 +2427,37 @@ impl<H: Copy> PosixService<H> {
             if current & !updated & self.signals[&sender.process_id].pending() != 0 {
                 self.signal_notifications.insert(sender.process_id);
             }
+            if current & !updated & self.thread_pending_signals.get(&key).copied().unwrap_or(0) != 0 {
+                self.thread_signal_notifications.insert(key);
+            }
         }
         Ok(output)
+    }
+
+    fn thread_raise_signal_payload(
+        &mut self,
+        sender: mnu_abi::ExecutionIdentity,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, i32> {
+        let request = protocol::decode_signal_send_request(payload).map_err(|_| STATUS_EINVAL)?;
+        if request.selector != 0 {
+            return Err(STATUS_EINVAL);
+        }
+        let key = (sender.process_id, sender.thread_id);
+        let blocked = *self.signal_masks.get(&key).ok_or(protocol::STATUS_ESRCH)?;
+        if request.signal == 0 {
+            return Ok(Vec::new());
+        }
+        self.prepare_signal_generation(sender.process_id, request.signal)?;
+        if self.signals[&sender.process_id].disposition(request.signal)
+            != protocol::SIGNAL_DISPOSITION_IGNORE
+        {
+            *self.thread_pending_signals.entry(key).or_default() |= signal_bit(request.signal);
+            if blocked & signal_bit(request.signal) == 0 {
+                self.thread_signal_notifications.insert(key);
+            }
+        }
+        Ok(Vec::new())
     }
 
     fn thread_signal_delivery_payload(
@@ -2408,7 +2484,12 @@ impl<H: Copy> PosixService<H> {
                 .get(&sender.process_id)
                 .ok_or(protocol::STATUS_ESRCH)?
                 .pending()
-                & blocked;
+                | self
+                    .thread_pending_signals
+                    .get(&(sender.process_id, sender.thread_id))
+                    .copied()
+                    .unwrap_or(0);
+            let pending = pending & blocked;
             let mut output = vec![0; protocol::SIGNAL_MASK_LEN];
             protocol::encode_signal_mask(pending, &mut output).map_err(|_| STATUS_EINVAL)?;
             Ok(output)
@@ -2421,11 +2502,25 @@ impl<H: Copy> PosixService<H> {
         blocked: u64,
     ) -> Result<Vec<u8>, i32> {
         let process_id = sender.process_id;
-        let signal = self
-            .signals
-            .get(&process_id)
-            .ok_or(protocol::STATUS_ESRCH)?
-            .next_deliverable(blocked);
+        let own_pending = self
+            .thread_pending_signals
+            .get(&(process_id, sender.thread_id))
+            .copied()
+            .unwrap_or(0)
+            & !blocked;
+        let own_signal = if own_pending == 0 {
+            0
+        } else {
+            own_pending.trailing_zeros() + 1
+        };
+        let signal = if own_signal != 0 {
+            own_signal
+        } else {
+            self.signals
+                .get(&process_id)
+                .ok_or(protocol::STATUS_ESRCH)?
+                .next_deliverable(blocked)
+        };
         let token = if signal != 0 {
             let state = self
                 .process_wait_states
@@ -2439,11 +2534,18 @@ impl<H: Copy> PosixService<H> {
                 token = token.wrapping_add(1).max(1);
             }
             self.next_signal_delivery_token = token.wrapping_add(1).max(1);
-            let dequeued = self
-                .signals
-                .get_mut(&process_id)
-                .ok_or(protocol::STATUS_ESRCH)?
-                .dequeue(blocked);
+            let dequeued = if own_signal != 0 {
+                *self
+                    .thread_pending_signals
+                    .get_mut(&(process_id, sender.thread_id))
+                    .unwrap() &= !signal_bit(signal);
+                signal
+            } else {
+                self.signals
+                    .get_mut(&process_id)
+                    .ok_or(protocol::STATUS_ESRCH)?
+                    .dequeue(blocked)
+            };
             debug_assert_eq!(dequeued, signal);
             let delivery = protocol::SignalDelivery { signal, token };
             state.begin_delivery(delivery, sender.thread_id);

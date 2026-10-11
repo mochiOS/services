@@ -19,6 +19,14 @@ static volatile sig_atomic_t resized;
 static volatile sig_atomic_t background_stopped;
 static volatile sig_atomic_t background_read;
 static _Atomic sig_atomic_t waited_signal;
+static _Atomic unsigned pipe_signals;
+static pthread_t pipe_handler_thread;
+static void on_pipe(int signal_number) {
+    if (signal_number == SIGPIPE) {
+        pipe_handler_thread = pthread_self();
+        atomic_fetch_add(&pipe_signals, 1);
+    }
+}
 static void on_wait_signal(int signal_number) { if (signal_number == SIGUSR1) ++waited_signal; }
 static void on_resize(int signal_number) { if (signal_number == SIGWINCH) ++resized; }
 static void on_background(int signal_number) {
@@ -132,6 +140,32 @@ static void *interrupt_stream_io(void *context) {
         ssize_t count = wake->drain ? read(wake->handle, &byte, 1) : write(wake->handle, &byte, 1);
         if (count != 1 || (wake->drain && byte != 'b')) return (void *)(uintptr_t)1;
     }
+    return NULL;
+}
+
+static void *blocked_pipe_writer(void *context) {
+    int fd = *(int *)context;
+    sigset_t mask, pending;
+    unsigned before = atomic_load(&pipe_signals);
+    if (sigemptyset(&mask) != 0 || sigaddset(&mask, SIGPIPE) != 0
+        || pthread_sigmask(SIG_BLOCK, &mask, NULL) != 0)
+        return (void *)(uintptr_t)1;
+    errno = 0;
+    if (write(fd, "x", 1) != -1 || errno != EPIPE
+        || atomic_load(&pipe_signals) != before || sigpending(&pending) != 0
+        || sigismember(&pending, SIGPIPE) != 1)
+        return (void *)(uintptr_t)1;
+    if (pthread_sigmask(SIG_UNBLOCK, &mask, NULL) != 0
+        || atomic_load(&pipe_signals) != before + 1
+        || !pthread_equal(pipe_handler_thread, pthread_self()))
+        return (void *)(uintptr_t)1;
+    return NULL;
+}
+
+static void *close_pipe_reader(void *context) {
+    struct timespec pause = {0, 100000000};
+    if (nanosleep(&pause, NULL) != 0 || close(*(int *)context) != 0)
+        return (void *)(uintptr_t)1;
     return NULL;
 }
 
@@ -489,7 +523,48 @@ int main(void) {
             CHECK(close(pipes[0]) == 0 && close(pipes[1]) == 0);
         }
     }
-    debug("native-terminal-window: PASS stream capacity thresholds, wait guards and pipe/terminal signal regressions\n");
+    struct sigaction pipe_action;
+    memset(&pipe_action, 0, sizeof(pipe_action));
+    pipe_action.sa_handler = on_pipe;
+    CHECK(sigemptyset(&pipe_action.sa_mask) == 0);
+    CHECK(sigaction(SIGPIPE, &pipe_action, NULL) == 0);
+    CHECK(pipe(pipes) == 0 && close(pipes[0]) == 0);
+    CHECK(write(pipes[1], "", 0) == 0 && atomic_load(&pipe_signals) == 0);
+    errno = 0;
+    CHECK(write(pipes[1], "x", 1) == -1 && errno == EPIPE);
+    CHECK(atomic_load(&pipe_signals) == 1 && pthread_equal(pipe_handler_thread, pthread_self()));
+    CHECK(pthread_create(&writer, NULL, blocked_pipe_writer, &pipes[1]) == 0);
+    CHECK(pthread_join(writer, &worker_result) == 0 && worker_result == NULL);
+    CHECK(atomic_load(&pipe_signals) == 2);
+    CHECK(raise(SIGPIPE) == 0 && atomic_load(&pipe_signals) == 3);
+    pipe_action.sa_handler = SIG_IGN;
+    CHECK(sigaction(SIGPIPE, &pipe_action, NULL) == 0);
+    errno = 0;
+    CHECK(write(pipes[1], "x", 1) == -1 && errno == EPIPE && atomic_load(&pipe_signals) == 3);
+    CHECK(close(pipes[1]) == 0);
+    pipe_action.sa_handler = on_pipe;
+    CHECK(sigaction(SIGPIPE, &pipe_action, NULL) == 0);
+    CHECK(pipe(pipes) == 0);
+    CHECK(pthread_create(&writer, NULL, close_pipe_reader, &pipes[0]) == 0);
+    static char large_write[131072];
+    ssize_t prefix = write(pipes[1], large_write, sizeof(large_write));
+    CHECK(prefix > 0 && prefix < (ssize_t)sizeof(large_write) && atomic_load(&pipe_signals) == 4);
+    CHECK(pthread_join(writer, &worker_result) == 0 && worker_result == NULL);
+    CHECK(close(pipes[1]) == 0);
+    CHECK(pipe(pipes) == 0 && close(pipes[0]) == 0);
+    pid_t broken_child = fork();
+    CHECK(broken_child >= 0);
+    if (broken_child == 0) {
+        pipe_action.sa_handler = SIG_DFL;
+        if (sigaction(SIGPIPE, &pipe_action, NULL) != 0) _exit(80);
+        (void)write(pipes[1], "x", 1);
+        _exit(81);
+    }
+    int broken_status = 0;
+    CHECK(waitpid(broken_child, &broken_status, 0) == broken_child);
+    CHECK(WIFSIGNALED(broken_status) && WTERMSIG(broken_status) == SIGPIPE);
+    CHECK(close(pipes[1]) == 0);
+    debug("native-terminal-window: PASS thread-directed SIGPIPE, partial writes, waits and terminal regressions\n");
     CHECK(close(master) == 0);
     return 0;
 }

@@ -23,6 +23,7 @@ impl Transport for LocalTransport {
             protocol::OP_SIGNAL_THREAD_MASK
                 | protocol::OP_SIGNAL_THREAD_DEQUEUE
                 | protocol::OP_SIGNAL_THREAD_PENDING
+                | protocol::OP_SIGNAL_THREAD_RAISE
                 | protocol::OP_SIGNAL_IMAGE_STARTED
         ) {
             self.service.borrow_mut().handle_thread_signal_request(
@@ -89,6 +90,161 @@ fn client(
             thread_id,
         },
     })
+}
+
+#[test]
+fn generated_signal_is_pending_only_for_the_authenticated_calling_thread() {
+    let service = service();
+    let first = client(&service, 101, 501);
+    let second = client(&service, 101, 502);
+    let pipe = 1 << (protocol::SIGNAL_PIPE - 1);
+    first
+        .thread_signal_mask(protocol::SIGNAL_MASK_SET, pipe)
+        .unwrap();
+    second
+        .thread_signal_mask(protocol::SIGNAL_MASK_SET, 0)
+        .unwrap();
+    first.raise_signal(protocol::SIGNAL_PIPE).unwrap();
+    first.raise_signal(protocol::SIGNAL_PIPE).unwrap();
+    assert_eq!(first.thread_pending_signals().unwrap(), pipe);
+    assert_eq!(second.thread_pending_signals().unwrap(), 0);
+    assert_eq!(second.thread_dequeue_signal_delivery().unwrap().signal, 0);
+    assert_eq!(first.thread_dequeue_signal_delivery().unwrap().signal, 0);
+    first
+        .thread_signal_mask(protocol::SIGNAL_MASK_UNBLOCK, pipe)
+        .unwrap();
+    assert_eq!(
+        service
+            .borrow()
+            .thread_signal_notification_threads()
+            .collect::<Vec<_>>(),
+        vec![(101, 501)]
+    );
+    let delivery = first.thread_dequeue_signal_delivery().unwrap();
+    assert_eq!(delivery.signal, protocol::SIGNAL_PIPE);
+    assert_ne!(delivery.token, 0);
+    first.complete_signal_delivery(delivery).unwrap();
+    assert_eq!(first.thread_dequeue_signal_delivery().unwrap().signal, 0);
+}
+
+#[test]
+fn ignoring_a_signal_discards_all_thread_pending_instances() {
+    let service = service();
+    let pipe = 1 << (protocol::SIGNAL_PIPE - 1);
+    let first = client(&service, 101, 501);
+    let second = client(&service, 101, 502);
+    for thread in [&first, &second] {
+        thread
+            .thread_signal_mask(protocol::SIGNAL_MASK_SET, pipe)
+            .unwrap();
+        thread.raise_signal(protocol::SIGNAL_PIPE).unwrap();
+    }
+    first
+        .set_signal_disposition(protocol::SignalDisposition {
+            signal: protocol::SIGNAL_PIPE,
+            kind: protocol::SIGNAL_DISPOSITION_IGNORE,
+            child_options: 0,
+        })
+        .unwrap();
+    for thread in [&first, &second] {
+        assert_eq!(thread.thread_pending_signals().unwrap(), 0);
+        thread.raise_signal(protocol::SIGNAL_PIPE).unwrap();
+        assert_eq!(thread.thread_pending_signals().unwrap(), 0);
+    }
+}
+
+#[test]
+fn generated_signal_rejects_forged_target_and_uninitialized_thread() {
+    let service = service();
+    let first = client(&service, 101, 501);
+    assert_eq!(
+        first.raise_signal(protocol::SIGNAL_PIPE),
+        Err(ClientError::Remote(protocol::STATUS_ESRCH))
+    );
+    first
+        .thread_signal_mask(protocol::SIGNAL_MASK_SET, 0)
+        .unwrap();
+    let mut payload = [0; protocol::SIGNAL_SEND_REQUEST_LEN];
+    protocol::encode_signal_send_request(
+        protocol::SignalSendRequest {
+            selector: 102,
+            signal: protocol::SIGNAL_PIPE,
+        },
+        &mut payload,
+    )
+    .unwrap();
+    let response = service.borrow_mut().handle_thread_signal_request(
+        peer(101),
+        ExecutionIdentity {
+            process_id: 101,
+            thread_id: 501,
+        },
+        protocol::Header {
+            opcode: protocol::OP_SIGNAL_THREAD_RAISE,
+            ..Default::default()
+        },
+        &payload,
+    );
+    assert_eq!(response.header.status, -22);
+    assert_eq!(first.thread_dequeue_signal_delivery().unwrap().signal, 0);
+}
+
+#[test]
+fn thread_exit_discards_its_pending_signal_without_leaking_to_another_thread() {
+    let service = service();
+    let first = client(&service, 101, 501);
+    first
+        .thread_signal_mask(protocol::SIGNAL_MASK_SET, 1 << (protocol::SIGNAL_PIPE - 1))
+        .unwrap();
+    first.raise_signal(protocol::SIGNAL_PIPE).unwrap();
+    service
+        .borrow_mut()
+        .retire_signal_thread(
+            ExecutionIdentity {
+                process_id: 101,
+                thread_id: 501,
+            },
+            Err(protocol::STATUS_ESRCH),
+        )
+        .unwrap();
+    first
+        .thread_signal_mask(protocol::SIGNAL_MASK_SET, 0)
+        .unwrap();
+    assert_eq!(first.thread_dequeue_signal_delivery().unwrap().signal, 0);
+    assert_eq!(
+        service
+            .borrow()
+            .thread_signal_notification_threads()
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn continue_and_stop_cancel_pending_signals_across_thread_and_process_queues() {
+    let service = service();
+    let first = client(&service, 101, 501);
+    let bits = (1 << (protocol::SIGNAL_CONT - 1)) | (1 << (protocol::SIGNAL_TSTP - 1));
+    first
+        .thread_signal_mask(protocol::SIGNAL_MASK_SET, bits)
+        .unwrap();
+    first.raise_signal(protocol::SIGNAL_TSTP).unwrap();
+    first.send_signal(101, protocol::SIGNAL_CONT).unwrap();
+    assert_eq!(
+        first.thread_pending_signals().unwrap(),
+        1 << (protocol::SIGNAL_CONT - 1)
+    );
+    first.raise_signal(protocol::SIGNAL_TSTP).unwrap();
+    assert_eq!(
+        first.thread_pending_signals().unwrap(),
+        1 << (protocol::SIGNAL_TSTP - 1)
+    );
+    first.send_signal(101, protocol::SIGNAL_TSTP).unwrap();
+    first.raise_signal(protocol::SIGNAL_CONT).unwrap();
+    assert_eq!(
+        first.thread_pending_signals().unwrap(),
+        1 << (protocol::SIGNAL_CONT - 1)
+    );
 }
 
 #[test]
