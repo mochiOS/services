@@ -2,7 +2,13 @@ use crate::service_config::FixedService;
 use mochi_user_platform::service_ready::SessionIdentity;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ChildProcesses<Input = u64, Display = u64, Drivers = u64, Compositor = u64> {
+pub(crate) struct ChildProcesses<
+    Input = u64,
+    Display = u64,
+    Drivers = u64,
+    Compositor = u64,
+    Network = u64,
+> {
     pub(crate) drivers: Option<Drivers>,
     pub(crate) mboot_agent: Option<u64>,
     pub(crate) filesystem: Option<u64>,
@@ -10,7 +16,7 @@ pub(crate) struct ChildProcesses<Input = u64, Display = u64, Drivers = u64, Comp
     pub(crate) input: Option<Input>,
     pub(crate) display: Option<Display>,
     pub(crate) compositor: Option<Compositor>,
-    pub(crate) network: Option<u64>,
+    pub(crate) network: Option<Network>,
     pub(crate) user: Option<u64>,
     pub(crate) secure_ui: Option<u64>,
     pub(crate) linux: Option<u64>,
@@ -45,14 +51,22 @@ pub(crate) enum StopReason {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct BootstrapOutcome<Input = u64, Display = u64, Drivers = u64, Compositor = u64> {
-    pub(crate) children: ChildProcesses<Input, Display, Drivers, Compositor>,
+pub(crate) struct BootstrapOutcome<
+    Input = u64,
+    Display = u64,
+    Drivers = u64,
+    Compositor = u64,
+    Network = u64,
+> {
+    pub(crate) children: ChildProcesses<Input, Display, Drivers, Compositor, Network>,
     pub(crate) reason: StopReason,
     pub(crate) identity: Option<SessionIdentity>,
     pub(crate) session_id: u64,
 }
 
-impl<Input, Display, Drivers, Compositor> BootstrapOutcome<Input, Display, Drivers, Compositor> {
+impl<Input, Display, Drivers, Compositor, Network>
+    BootstrapOutcome<Input, Display, Drivers, Compositor, Network>
+{
     pub(crate) const fn initialization_failed() -> Self {
         Self {
             children: ChildProcesses {
@@ -79,11 +93,12 @@ impl<Input, Display, Drivers, Compositor> BootstrapOutcome<Input, Display, Drive
     }
 }
 
-impl<Input, Display, Drivers, Compositor> Default
-    for ChildProcesses<Input, Display, Drivers, Compositor>
+impl<Input, Display, Drivers, Compositor, Network> Default
+    for ChildProcesses<Input, Display, Drivers, Compositor, Network>
 {
     fn default() -> Self {
-        BootstrapOutcome::<Input, Display, Drivers, Compositor>::initialization_failed().children
+        BootstrapOutcome::<Input, Display, Drivers, Compositor, Network>::initialization_failed()
+            .children
     }
 }
 
@@ -92,6 +107,8 @@ pub(crate) trait BootstrapOperations {
     type DisplayProcess;
     type DriversProcess;
     type CompositorProcess;
+    type NetworkProcess;
+    fn spawn_network(&mut self) -> Option<Self::NetworkProcess>;
     fn spawn_compositor(&mut self) -> Option<Self::CompositorProcess>;
     fn spawn_input(&mut self) -> Option<Self::InputProcess>;
     fn spawn_display(&mut self) -> Option<Self::DisplayProcess>;
@@ -113,7 +130,7 @@ pub(crate) trait BootstrapOperations {
     fn wait_input_ready(&mut self, process: &Self::InputProcess) -> bool;
     fn start_discovery(&mut self) -> bool;
     fn wait_discovery_complete(&mut self, process: &Self::DriversProcess) -> bool;
-    fn wait_network_ready(&mut self, process_id: u64) -> bool;
+    fn wait_network_ready(&mut self, process: &Self::NetworkProcess) -> bool;
     fn wait_user_ready(&mut self, process_id: u64) -> bool;
     fn wait_secure_ui_login(&mut self, process_id: u64) -> Option<SessionIdentity>;
     fn wait_binder_ready(&mut self, process_id: u64) -> bool;
@@ -130,7 +147,13 @@ const FIRST_BOOT_IDENTITY: SessionIdentity = SessionIdentity { uid: 0, gid: 0 };
 
 pub(crate) fn orchestrate<O: BootstrapOperations>(
     operations: &mut O,
-) -> BootstrapOutcome<O::InputProcess, O::DisplayProcess, O::DriversProcess, O::CompositorProcess> {
+) -> BootstrapOutcome<
+    O::InputProcess,
+    O::DisplayProcess,
+    O::DriversProcess,
+    O::CompositorProcess,
+    O::NetworkProcess,
+> {
     let mut children = ChildProcesses::default();
 
     let Some(filesystem) = operations.spawn_fixed(FixedService::Filesystem) else {
@@ -182,7 +205,7 @@ pub(crate) fn orchestrate<O: BootstrapOperations>(
     // desktop and Installer from starting.
     let discovery_started = operations.start_discovery();
 
-    children.network = operations.spawn_fixed(FixedService::Network);
+    children.network = operations.spawn_network();
     if children.network.is_some() {
         children.update = operations.spawn_fixed(FixedService::Update);
     }
@@ -236,7 +259,7 @@ pub(crate) fn orchestrate<O: BootstrapOperations>(
     if discovery_started {
         let _ = operations.wait_discovery_complete(children.drivers.as_ref().unwrap());
     }
-    if let Some(network) = children.network {
+    if let Some(network) = children.network.as_ref() {
         let _ = operations.wait_network_ready(network);
     }
     BootstrapOutcome {
@@ -247,10 +270,10 @@ pub(crate) fn orchestrate<O: BootstrapOperations>(
     }
 }
 
-const fn outcome<Input, Display, Drivers, Compositor>(
-    children: ChildProcesses<Input, Display, Drivers, Compositor>,
+const fn outcome<Input, Display, Drivers, Compositor, Network>(
+    children: ChildProcesses<Input, Display, Drivers, Compositor, Network>,
     reason: StopReason,
-) -> BootstrapOutcome<Input, Display, Drivers, Compositor> {
+) -> BootstrapOutcome<Input, Display, Drivers, Compositor, Network> {
     BootstrapOutcome {
         children,
         reason,
@@ -333,6 +356,11 @@ mod tests {
         type DisplayProcess = u64;
         type DriversProcess = u64;
         type CompositorProcess = u64;
+        type NetworkProcess = u64;
+
+        fn spawn_network(&mut self) -> Option<Self::NetworkProcess> {
+            self.spawn_fixed(FixedService::Network)
+        }
 
         fn spawn_compositor(&mut self) -> Option<Self::CompositorProcess> {
             self.spawn_fixed(FixedService::Compositor)
@@ -437,7 +465,7 @@ mod tests {
             self.failure != Failure::DiscoveryComplete
         }
 
-        fn wait_network_ready(&mut self, _process_id: u64) -> bool {
+        fn wait_network_ready(&mut self, _process: &u64) -> bool {
             self.events.push(Event::WaitNetwork);
             self.failure != Failure::NetworkReady
         }

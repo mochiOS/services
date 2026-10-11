@@ -89,7 +89,10 @@ pub(crate) fn spawn_fixed_service(
     // Migrated services must not fall back to legacy pathname creation.
     if matches!(
         service,
-        FixedService::Input | FixedService::Display | FixedService::Compositor
+        FixedService::Input
+            | FixedService::Display
+            | FixedService::Compositor
+            | FixedService::Network
     ) {
         return Err(sys_error(mochi_user_syscall::EINVAL));
     }
@@ -143,6 +146,20 @@ pub(crate) fn spawn_compositor_service(
         fixed_service_spec(FixedService::Compositor),
         "compositor.service",
         &arguments,
+        posix_endpoint,
+    )
+}
+
+pub(crate) fn spawn_network_service(
+    logger_endpoint: u64,
+    ready_target: platform::service_ready::Target,
+    posix_endpoint: platform::handle::Handle,
+) -> Result<NativeProcess, mochi_user_syscall::SysError> {
+    spawn_native_fixed(
+        FixedService::Network,
+        "network.service",
+        logger_endpoint,
+        ready_target,
         posix_endpoint,
     )
 }

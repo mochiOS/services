@@ -71,9 +71,11 @@ fn display_launch_and_readiness_use_retained_handles_without_legacy_fallback() {
     let launcher = include_str!("../../service-manager/src/service_launcher.rs");
     let bootstrap = include_str!("../../service-manager/src/bootstrap.rs");
     let orchestration = include_str!("../../service-manager/src/orchestration.rs");
-    assert!(
-        launcher.contains("FixedService::Input | FixedService::Display | FixedService::Compositor")
-    );
+    let fixed_spawn = &launcher[launcher.find("pub(crate) fn spawn_fixed_service(").unwrap()
+        ..launcher.find("pub(crate) fn spawn_input_service(").unwrap()];
+    for native_only in ["Input", "Display", "Compositor", "Network"] {
+        assert!(fixed_spawn.contains(&format!("FixedService::{native_only}")));
+    }
     assert!(launcher.contains("FixedService::Display,\n        \"display.driver\""));
     assert!(bootstrap.contains("type DisplayProcess = NativeProcess;"));
     assert!(bootstrap.contains("self.wait_ready(ReadyService::Display, process.watch_target())"));
@@ -100,6 +102,25 @@ fn compositor_creation_keeps_a_native_owner_and_has_no_path_launch_fallback() {
     assert!(orchestration.contains("compositor: Option<Compositor>"));
     assert!(orchestration.contains("children.compositor = operations.spawn_compositor();"));
     assert!(!orchestration.contains("children.compositor = operations.spawn_fixed("));
+}
+
+#[test]
+fn network_creation_and_readiness_use_native_owned_process_handles() {
+    let launcher = include_str!("../../service-manager/src/service_launcher.rs");
+    let start = launcher
+        .find("pub(crate) fn spawn_network_service(")
+        .unwrap();
+    let end = start + launcher[start..].find("fn spawn_native_fixed(").unwrap();
+    assert!(launcher[start..end].contains("FixedService::Network,\n        \"network.service\""));
+    assert!(launcher[start..end].contains("Result<NativeProcess,"));
+    let bootstrap = include_str!("../../service-manager/src/bootstrap.rs");
+    assert!(bootstrap.contains("type NetworkProcess = NativeProcess;"));
+    assert!(bootstrap.contains("self.wait_ready(ReadyService::Network, process.watch_target())"));
+    let orchestration = include_str!("../../service-manager/src/orchestration.rs");
+    assert!(orchestration.contains("network: Option<Network>"));
+    assert!(orchestration.contains("children.network = operations.spawn_network();"));
+    assert!(orchestration.contains("children.network.as_ref()"));
+    assert!(!orchestration.contains("children.network = operations.spawn_fixed("));
 }
 
 #[test]

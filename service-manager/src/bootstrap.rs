@@ -174,6 +174,28 @@ impl BootstrapOperations for Runtime {
     type DisplayProcess = NativeProcess;
     type DriversProcess = NativeProcess;
     type CompositorProcess = NativeProcess;
+    type NetworkProcess = NativeProcess;
+
+    fn spawn_network(&mut self) -> Option<Self::NetworkProcess> {
+        let endpoint = self.posix_endpoint?;
+        if !self.ensure_ready_handshake() {
+            return None;
+        }
+        let target = self.ready.as_ref()?.target(ReadyService::Network);
+        match service_launcher::spawn_network_service(self.logger_endpoint, target, endpoint) {
+            Ok(process) => {
+                eprintln!("service-manager.service: network.service native process created");
+                Some(process)
+            }
+            Err(error) => {
+                eprintln!(
+                    "service-manager.service: network.service native spawn failed errno={}",
+                    errno(error)
+                );
+                None
+            }
+        }
+    }
 
     fn spawn_compositor(&mut self) -> Option<Self::CompositorProcess> {
         let endpoint = self.posix_endpoint?;
@@ -613,8 +635,8 @@ impl BootstrapOperations for Runtime {
         }
     }
 
-    fn wait_network_ready(&mut self, process_id: u64) -> bool {
-        self.wait_ready(ReadyService::Network, process_id)
+    fn wait_network_ready(&mut self, process: &Self::NetworkProcess) -> bool {
+        self.wait_ready(ReadyService::Network, process.watch_target())
     }
 
     fn installation_required(&self) -> bool {
@@ -721,7 +743,13 @@ fn log_ready_error(service: ReadyService, error: ReadyError) {
 }
 
 fn resident(
-    outcome: BootstrapOutcome<NativeProcess, NativeProcess, NativeProcess, NativeProcess>,
+    outcome: BootstrapOutcome<
+        NativeProcess,
+        NativeProcess,
+        NativeProcess,
+        NativeProcess,
+        NativeProcess,
+    >,
     runtime: Option<Runtime>,
 ) -> ! {
     let mut runtime = runtime;
