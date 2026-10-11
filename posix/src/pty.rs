@@ -69,6 +69,7 @@ struct PseudoTerminal {
     attributes: posix_protocol::TerminalAttributes,
     window_size: posix_protocol::TerminalWindowSize,
     output_stopped: bool,
+    output_manually_stopped: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -89,6 +90,7 @@ impl PseudoTerminal {
             attributes: posix_protocol::TerminalAttributes::sane(),
             window_size: posix_protocol::TerminalWindowSize::default(),
             output_stopped: false,
+            output_manually_stopped: false,
         }
     }
 
@@ -412,7 +414,7 @@ impl PtyManager {
         if side == PtySide::Slave {
             return terminal.read_input(maximum);
         }
-        if terminal.output_stopped {
+        if (terminal.output_stopped || terminal.output_manually_stopped) && terminal.slave_open {
             return Err(EAGAIN);
         }
         let length = maximum.min(terminal.output.len());
@@ -551,6 +553,45 @@ impl PtyManager {
         output_capacity: usize,
     ) -> Result<Vec<u8>, i32> {
         match code {
+            posix_protocol::PTY_CONTROL_FLOW => {
+                if output_capacity != 0 {
+                    return Err(EINVAL);
+                }
+                let action = posix_protocol::decode_terminal_flow(input).map_err(|_| EINVAL)?;
+                let (id, _) = decode_object_id(object_id).ok_or(EBADF)?;
+                let terminal = self.terminals.get_mut(&id).ok_or(EBADF)?;
+                match action {
+                    posix_protocol::TERMINAL_FLOW_OUTPUT_STOP => {
+                        terminal.output_manually_stopped = true;
+                    }
+                    posix_protocol::TERMINAL_FLOW_OUTPUT_START => {
+                        terminal.output_manually_stopped = false;
+                        terminal.output_stopped = false;
+                    }
+                    posix_protocol::TERMINAL_FLOW_INPUT_STOP
+                    | posix_protocol::TERMINAL_FLOW_INPUT_START => {
+                        let index = if action == posix_protocol::TERMINAL_FLOW_INPUT_STOP {
+                            posix_protocol::TERMINAL_CC_VSTOP
+                        } else {
+                            posix_protocol::TERMINAL_CC_VSTART
+                        };
+                        let byte = terminal.attributes.control_characters[index];
+                        if byte != 0 {
+                            if !terminal.master_open {
+                                return Err(EIO);
+                            }
+                            if terminal.output.len() == BUFFER_CAPACITY {
+                                return Err(EAGAIN);
+                            }
+                            // Transmit the configured control byte verbatim,
+                            // without the terminal's output transformations.
+                            terminal.output.push_back(byte);
+                        }
+                    }
+                    _ => unreachable!("flow decoder validates actions"),
+                }
+                Ok(Vec::new())
+            }
             posix_protocol::PTY_CONTROL_GET_WINDOW_SIZE => {
                 if !input.is_empty()
                     || output_capacity < posix_protocol::TERMINAL_WINDOW_SIZE_LEN
@@ -648,6 +689,7 @@ impl PtyManager {
                 PtySide::Slave if terminal.slave_open => {
                     terminal.slave_open = false;
                     terminal.output_stopped = false;
+                    terminal.output_manually_stopped = false;
                 }
                 _ => return Err(EBADF),
             }
@@ -689,7 +731,9 @@ impl PtyManager {
         let terminal = self.terminals.get(&id).ok_or(EBADF)?;
         let (readable, writable, peer_closed) = match side {
             PtySide::Master => (
-                !terminal.output_stopped && !terminal.output.is_empty(),
+                ((!terminal.output_stopped && !terminal.output_manually_stopped)
+                    || !terminal.slave_open)
+                    && !terminal.output.is_empty(),
                 terminal.slave_open
                     && terminal.input_occupancy() < BUFFER_CAPACITY
                     && (terminal.attributes.local_flags

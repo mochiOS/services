@@ -1,6 +1,7 @@
 /* Isolated Compositor-slot KVM test: real newlib -> HandleControl -> PTY
  * provider and service-owned foreground signal delivery, not a desktop test. */
 #include <errno.h>
+#include <fcntl.h>
 #include <pty.h>
 #include <signal.h>
 #include <stdint.h>
@@ -46,6 +47,24 @@ int main(void) {
     CHECK(ioctl(slave, TCSETS, &attributes) == 0);
     CHECK(ioctl(slave, TCSETSW, &attributes) == 0);
     CHECK(ioctl(slave, TCSETSF, &attributes) == 0);
+    CHECK(fcntl(master, F_SETFL, O_NONBLOCK) == 0);
+    CHECK(tcflow(slave, TCOOFF) == 0);
+    CHECK(write(slave, "queued", 6) == 6);
+    char flow_bytes[8];
+    errno = 0;
+    CHECK(read(master, flow_bytes, sizeof(flow_bytes)) == -1 && errno == EAGAIN);
+    CHECK(tcflow(slave, TCOON) == 0);
+    CHECK(read(master, flow_bytes, sizeof(flow_bytes)) == 6);
+    CHECK(memcmp(flow_bytes, "queued", 6) == 0);
+    CHECK(tcflow(slave, TCIOFF) == 0);
+    CHECK(tcflow(slave, TCION) == 0);
+    CHECK(read(master, flow_bytes, sizeof(flow_bytes)) == 2);
+    CHECK((unsigned char)flow_bytes[0] == attributes.c_cc[VSTOP]);
+    CHECK((unsigned char)flow_bytes[1] == attributes.c_cc[VSTART]);
+    errno = 0;
+    CHECK(tcflow(slave, -1) == -1 && errno == EINVAL);
+    errno = 0;
+    CHECK(tcflow(-1, TCOON) == -1 && errno == EBADF);
     CHECK(ioctl(master, TIOCGWINSZ, &actual) == 0);
     CHECK(memcmp(&actual, &initial, sizeof(actual)) == 0);
     errno = 0;
@@ -58,6 +77,8 @@ int main(void) {
     CHECK(pipe(pipes) == 0);
     errno = 0;
     CHECK(ioctl(pipes[0], TCGETS, &attributes) == -1 && errno == ENOTTY);
+    errno = 0;
+    CHECK(tcflow(pipes[0], TCOON) == -1 && errno == ENOTTY);
     CHECK(close(pipes[0]) == 0 && close(pipes[1]) == 0);
     errno = 0;
     CHECK(tcgetwinsize(-1, &actual) == -1 && errno == EBADF);
@@ -89,7 +110,7 @@ int main(void) {
         nanosleep(&pause, NULL);
     }
     CHECK(resized == 1);
-    debug("native-terminal-window: PASS variadic ioctl, attributes, process group, size, errors and SIGWINCH\n");
+    debug("native-terminal-window: PASS ioctl, tcflow, attributes, process group, size, errors and SIGWINCH\n");
     CHECK(close(master) == 0);
     return 0;
 }
