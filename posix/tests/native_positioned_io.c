@@ -5,6 +5,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 enum { HANDLE_CLOSE = 626, HANDLE_DUPLICATE = 627, MEMORY_OBJECT_CREATE = 671,
@@ -99,6 +100,33 @@ int main(void) {
     CHECK(pwrite(pipefds[1], "!", 1, 0) == -1 && errno == ESPIPE);
     CHECK(close(pipefds[0]) == 0 && close(pipefds[1]) == 0);
     fprintf(stderr, "positioned-io: pread/pwrite cursor, access, EOF and pipe errors ok\n");
+
+    CHECK(pipe(pipefds) == 0);
+    struct iovec send_vectors[] = {{"ab", 2}, {NULL, 0}, {"cde", 3}};
+    CHECK(writev(pipefds[1], send_vectors, 3) == 5);
+    char first[2] = {0}, second[6];
+    memset(second, '!', sizeof(second));
+    struct iovec receive_vectors[] = {{first, 2}, {second, sizeof(second)}};
+    /* Writer stays open: a second read would block after consuming abcde. */
+    CHECK(readv(pipefds[0], receive_vectors, 2) == 5);
+    CHECK(!memcmp(first, "ab", 2) && !memcmp(second, "cde!!!", 6));
+    CHECK(fcntl(pipefds[0], F_SETFL, O_NONBLOCK) == 0);
+    CHECK(readv(pipefds[0], receive_vectors, 2) == -1 && errno == EAGAIN);
+    CHECK(!memcmp(second, "cde!!!", 6));
+    CHECK(writev(-1, NULL, 0) == -1 && errno == EBADF);
+    struct iovec invalid_vectors[] = {{"abc", 3}, {NULL, 1}};
+    CHECK(writev(pipefds[1], invalid_vectors, 2) == -1 && errno == EFAULT);
+    CHECK(readv(pipefds[0], receive_vectors, 2) == -1 && errno == EAGAIN);
+    CHECK(close(pipefds[0]) == 0 && close(pipefds[1]) == 0);
+    CHECK(lseek(fd, 0, SEEK_SET) == 0);
+    CHECK(writev(fd, send_vectors, 3) == 5);
+    CHECK(lseek(duplicate, 0, SEEK_CUR) == 5);
+    CHECK(lseek(fd, 0, SEEK_SET) == 0);
+    CHECK(readv(duplicate, receive_vectors, 2) == 6);
+    CHECK(!memcmp(first, "ab", 2) && !memcmp(second, "cdef!!", 6));
+    CHECK(lseek(fd, 0, SEEK_CUR) == 6);
+    CHECK(lseek(fd, 4, SEEK_SET) == 4);
+    fprintf(stderr, "positioned-io: gathered writev and single-read readv, short read, EAGAIN, shared cursor ok\n");
 
     char input[9000], output[9000];
     for (size_t i = 0; i < sizeof(input); ++i) input[i] = (char)(i * 17);
