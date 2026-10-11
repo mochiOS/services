@@ -1127,6 +1127,9 @@ impl<H: Copy> PosixService<H> {
             self.directories.insert(child_id, directories);
         }
         self.parents.insert(child_id, peer.process_id);
+        // Keep failure-cleanup ownership separate from the POSIX parent link:
+        // reparenting must not transfer the creator's rollback authority.
+        self.launch_creators.insert(child_id, peer.process_id);
         self.process_groups.insert(
             child_id,
             self.process_groups
@@ -1383,9 +1386,11 @@ impl<H: Copy> PosixService<H> {
         Ok(())
     }
 
-    /// Roll back a broker's failed launch without leaving an unreported zombie.
+    /// Roll back a creator's failed fork or launch without an unreported zombie.
     /// Possessing another process's WAIT Handle or being POSIX root alone does
-    /// not suffice: the sender must be the broker that registered this child.
+    /// not suffice: the sender must have registered this child. ESRCH means
+    /// registration is already absent; callers may treat it as completed only
+    /// after confirming native exit through their retained ProcessHandle.
     pub fn abort_launched_child<F: FilesystemBackend<H>, P: ProcessBackend<H>>(
         &mut self,
         peer: PeerIdentity,
@@ -1393,6 +1398,9 @@ impl<H: Copy> PosixService<H> {
         filesystem: &mut F,
         processes: &mut P,
     ) -> Result<(), i32> {
+        if !self.processes.contains_key(&child.process_id) {
+            return Err(protocol::STATUS_ESRCH);
+        }
         if self.launch_creators.get(&child.process_id) != Some(&peer.process_id) {
             return Err(protocol::STATUS_EPERM);
         }

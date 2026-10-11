@@ -1892,9 +1892,72 @@ fn failed_broker_launch_is_reclaimed_only_by_its_creator() {
     assert!(!service.is_child(321, 322));
     assert_eq!(
         service.abort_launched_child(broker, child, &mut filesystem, &mut processes),
-        Err(protocol::STATUS_EPERM)
+        Err(protocol::STATUS_ESRCH)
     );
     assert_eq!(processes.released, [1322]);
+}
+
+#[test]
+fn failed_fork_cleanup_requires_its_creator_and_is_retryable_after_lost_reply() {
+    let parent = PeerIdentity {
+        process_id: 421,
+        effective_uid: 505,
+        effective_gid: 24,
+    };
+    let mut service = service_for(parent);
+    service.handle(
+        parent,
+        protocol::Header {
+            opcode: protocol::OP_SESSION_REGISTER,
+            ..Default::default()
+        },
+        &[],
+    );
+    let mut filesystem = RecordingFilesystem::default();
+    let child = AuthenticatedProcess {
+        process_id: 422,
+        handle: 1422,
+    };
+    let mut processes = RecordingProcesses::default();
+    // Registration may never have reached the server.
+    assert_eq!(
+        service.abort_launched_child(parent, child, &mut filesystem, &mut processes),
+        Err(protocol::STATUS_ESRCH)
+    );
+    service.adopt_child(parent, child, &mut filesystem).unwrap();
+    processes.states.insert(1422, ProcessLifecycle::Running);
+    let other_root = PeerIdentity {
+        process_id: 423,
+        effective_uid: 0,
+        effective_gid: 0,
+    };
+    assert_eq!(
+        service.abort_launched_child(other_root, child, &mut filesystem, &mut processes),
+        Err(protocol::STATUS_EPERM)
+    );
+    assert!(processes.terminated.is_empty());
+    processes.terminate_error = Some(-5);
+    assert_eq!(
+        service.abort_launched_child(parent, child, &mut filesystem, &mut processes),
+        Err(-5)
+    );
+    assert!(service.is_child(421, 422));
+    assert!(processes.released.is_empty());
+    processes.terminate_error = None;
+    service
+        .abort_launched_child(parent, child, &mut filesystem, &mut processes)
+        .unwrap();
+    assert!(!service.is_child(421, 422));
+    assert!(service.session(422).is_none());
+    assert_eq!(processes.terminated, [(1422, 127)]);
+    assert_eq!(processes.released, [1422]);
+    // A lost successful response must not make retry a new termination/reap.
+    assert_eq!(
+        service.abort_launched_child(parent, child, &mut filesystem, &mut processes),
+        Err(protocol::STATUS_ESRCH)
+    );
+    assert_eq!(processes.terminated, [(1422, 127)]);
+    assert_eq!(processes.released, [1422]);
 }
 
 #[test]
