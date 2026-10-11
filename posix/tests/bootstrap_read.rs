@@ -147,6 +147,50 @@ fn bootstrap_directory_limits_and_non_directory_errors_are_explicit() {
     );
 }
 
+#[test]
+fn bootstrap_errors_preserve_path_and_object_failures() {
+    let fixture = Fixture::new();
+    let reader = fixture.reader();
+    let mut output = [0; 4];
+    assert_eq!(
+        reader.read("/missing", 1024).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+    assert_eq!(
+        reader
+            .read_at("/missing", 0, &mut output)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::NotFound
+    );
+    assert_eq!(
+        reader
+            .read_directory("/missing", 0, 2, 100)
+            .err()
+            .unwrap()
+            .kind(),
+        std::io::ErrorKind::NotFound
+    );
+    assert_eq!(
+        reader.read("/directory", 1024).unwrap_err().raw_os_error(),
+        Some(21)
+    );
+    assert_eq!(
+        reader
+            .read_at("/directory", 0, &mut output)
+            .unwrap_err()
+            .raw_os_error(),
+        Some(21)
+    );
+    for path in ["relative", "/file\0suffix"] {
+        assert_eq!(
+            reader.read(path, 1024).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+    }
+    assert_eq!(reader.read("/file", 16).unwrap(), b"0123456789abcdef");
+}
+
 struct Disk(std::fs::File);
 
 #[test]

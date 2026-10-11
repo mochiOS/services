@@ -6,6 +6,7 @@ use std::error::Error;
 use std::io;
 use std::sync::Arc;
 
+use ext4plus::error::Ext4Error;
 use ext4plus::{Ext4, FollowSymlinks};
 use ext4plus::{dir::Dir, inode::Inode};
 
@@ -23,6 +24,32 @@ pub struct BootstrapDirectoryPage {
     pub eof: bool,
 }
 
+// ext4plus's std conversion is unavailable with our no-default-features
+// dependency. Preserve typed failures without enabling its host filesystem I/O.
+fn filesystem_error(error: Ext4Error) -> io::Error {
+    let kind = match error {
+        Ext4Error::NotFound => io::ErrorKind::NotFound,
+        Ext4Error::IsADirectory => io::ErrorKind::IsADirectory,
+        Ext4Error::NotADirectory => io::ErrorKind::NotADirectory,
+        Ext4Error::NotAbsolute
+        | Ext4Error::MalformedPath
+        | Ext4Error::IsASpecialFile
+        | Ext4Error::NotASymlink
+        | Ext4Error::InvalidXattrName
+        | Ext4Error::DotEntry => io::ErrorKind::InvalidInput,
+        Ext4Error::NotUtf8 => io::ErrorKind::InvalidData,
+        Ext4Error::Encrypted => io::ErrorKind::PermissionDenied,
+        Ext4Error::Readonly => io::ErrorKind::ReadOnlyFilesystem,
+        Ext4Error::FileTooLarge => io::ErrorKind::FileTooLarge,
+        Ext4Error::AlreadyExists => io::ErrorKind::AlreadyExists,
+        Ext4Error::NoSpace => io::ErrorKind::StorageFull,
+        Ext4Error::PathTooLong => return io::Error::from_raw_os_error(36),
+        Ext4Error::TooManySymlinks => return io::Error::from_raw_os_error(40),
+        _ => io::ErrorKind::Other,
+    };
+    io::Error::new(kind, error)
+}
+
 impl BootstrapReader {
     pub fn load<D>(partition: Arc<PartitionIo<D>>) -> io::Result<Self>
     where
@@ -31,7 +58,7 @@ impl BootstrapReader {
     {
         // Never attach a writer to the boot generation.
         let filesystem =
-            Ext4::load(Box::new(ImmutableExt4Storage::new(partition))).map_err(io::Error::other)?;
+            Ext4::load(Box::new(ImmutableExt4Storage::new(partition))).map_err(filesystem_error)?;
         Ok(Self { filesystem })
     }
 
@@ -44,14 +71,18 @@ impl BootstrapReader {
         }
         self.filesystem
             .path_to_inode(
-                path.try_into().map_err(io::Error::other)?,
+                path.try_into()
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?,
                 FollowSymlinks::All,
             )
-            .map_err(io::Error::other)
+            .map_err(filesystem_error)
     }
 
     fn regular_inode(&self, path: &str) -> io::Result<Inode> {
         let inode = self.inode(path)?;
+        if inode.file_type().is_dir() {
+            return Err(io::Error::from_raw_os_error(21));
+        }
         if !inode.file_type().is_regular_file() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -74,7 +105,7 @@ impl BootstrapReader {
         output.try_reserve_exact(length).map_err(io::Error::other)?;
         output.resize(length, 0);
         let mut file =
-            ext4plus::file::File::open_inode(&self.filesystem, inode).map_err(io::Error::other)?;
+            ext4plus::file::File::open_inode(&self.filesystem, inode).map_err(filesystem_error)?;
         Self::read_range(&mut file, &mut output, 0)?;
         Ok(output)
     }
@@ -89,7 +120,7 @@ impl BootstrapReader {
         let remaining = inode.metadata().len().saturating_sub(offset);
         let length = remaining.min(output.len() as u64) as usize;
         let mut file =
-            ext4plus::file::File::open_inode(&self.filesystem, inode).map_err(io::Error::other)?;
+            ext4plus::file::File::open_inode(&self.filesystem, inode).map_err(filesystem_error)?;
         Self::read_range(&mut file, &mut output[..length], offset)?;
         Ok(length)
     }
@@ -103,7 +134,7 @@ impl BootstrapReader {
         while done < output.len() {
             let count = file
                 .read_bytes_at(&mut output[done..], offset + done as u64)
-                .map_err(io::Error::other)?;
+                .map_err(filesystem_error)?;
             if count == 0 || count > output.len() - done {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
@@ -130,20 +161,21 @@ impl BootstrapReader {
                 "empty directory page budget",
             ));
         }
-        let start = usize::try_from(start_entry).map_err(io::Error::other)?;
+        let start = usize::try_from(start_entry)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         let inode = self.inode(path)?;
         if !inode.file_type().is_dir() {
             return Err(io::Error::from_raw_os_error(20));
         }
-        let directory = Dir::open_inode(&self.filesystem, inode).map_err(io::Error::other)?;
+        let directory = Dir::open_inode(&self.filesystem, inode).map_err(filesystem_error)?;
         let mut page = BootstrapDirectoryPage {
             names: Vec::new(),
             next_entry: start_entry,
             eof: true,
         };
         let mut bytes = 0usize;
-        for (index, entry) in directory.read_dir().map_err(io::Error::other)?.enumerate() {
-            let entry = entry.map_err(io::Error::other)?;
+        for (index, entry) in directory.read_dir().map_err(filesystem_error)?.enumerate() {
+            let entry = entry.map_err(filesystem_error)?;
             if index < start {
                 continue;
             }
