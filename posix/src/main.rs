@@ -169,18 +169,14 @@ fn main() {
                 rights: attachment.rights,
             })
             .collect();
-        let sender_context = platform::process::thread_security_context(sender).ok();
-        let peer = sender_context
-            .as_ref()
-            .and_then(|context| service.registered_peer(context.process_id));
+        let sender_process = platform::ipc::endpoint_owner_process(sender).ok();
+        let peer = sender_process.and_then(|process_id| service.registered_peer(process_id));
         let decoded = request_bytes
             .get(..length)
             .and_then(|bytes| protocol::decode(bytes).ok());
         if attachments_valid
             && attachments.is_empty()
-            && sender_context
-                .as_ref()
-                .is_some_and(|context| context.process_id == service_process_id)
+            && sender_process == Some(service_process_id)
             && let Some((terminal_id, signal)) = decode_pty_signal(&request_bytes[..length])
         {
             let status = service
@@ -332,6 +328,9 @@ fn main() {
             {
                 let thread = attachments[0];
                 let status = platform::thread::handle_status(thread.handle).ok();
+                // Only thread registration still needs the sender's native
+                // thread identity; ordinary requests never import credentials.
+                let sender_context = platform::process::thread_security_context(sender).ok();
                 let registered_thread = sender_context.as_ref().zip(status.as_ref())
                     .filter(|(context, status)| {
                         posix_service::signal_thread_registration_matches(

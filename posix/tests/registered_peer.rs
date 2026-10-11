@@ -162,12 +162,24 @@ fn admission_returns_only_userspace_credentials_including_later_updates() {
 #[test]
 fn runtime_does_not_auto_bind_senders_or_import_native_uid_gid() {
     let source = include_str!("../src/main.rs");
-    assert!(source.contains("service.registered_peer(context.process_id)"));
+    assert!(source.contains("platform::ipc::endpoint_owner_process(sender).ok()"));
+    assert!(source.contains("service.registered_peer(process_id)"));
     assert!(!source.contains("effective_uid: context.effective_uid"));
     assert!(!source.contains("effective_gid: context.effective_gid"));
     assert!(!source.contains("bind_sender_process"));
     assert!(!source.contains("service.bind_process("));
     // Internal PTY worker messages are authenticated native messages, not
     // requests to manufacture a POSIX session for the service itself.
-    assert!(source.contains("context.process_id == service_process_id"));
+    assert!(source.contains("sender_process == Some(service_process_id)"));
+    // The legacy query is isolated to same-thread signal registration. General
+    // peer admission must not query kernel credentials or reinterpret endpoint
+    // numbers as native thread IDs.
+    let query = source
+        .find("platform::process::thread_security_context(sender)")
+        .unwrap();
+    let registration = source
+        .find("header.opcode == protocol::OP_SIGNAL_THREAD_REGISTER")
+        .unwrap();
+    assert!(registration < query);
+    assert_eq!(source.matches("thread_security_context(sender)").count(), 1);
 }
