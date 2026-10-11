@@ -10,6 +10,21 @@ macro_rules! warn {
 
 mod task {
     use super::Arc;
+    pub mod process {
+        pub struct PendingExecSecurity;
+    }
+    pub mod image_origin {
+        #[derive(Clone)]
+        pub struct ImageOrigin;
+        impl ImageOrigin {
+            pub fn capture(_: &super::Process) -> Option<Self> {
+                None
+            }
+            pub fn permits(&self, _: &super::process::PendingExecSecurity) -> bool {
+                false
+            }
+        }
+    }
     #[derive(Clone)]
     pub struct MemoryRegion {
         pub start: u64,
@@ -124,11 +139,7 @@ mod paging {
         STATE.with(|state| {
             let mut state = state.borrow_mut();
             state.calls += 1;
-            if state.failed {
-                Err(())
-            } else {
-                Ok(0xcafe)
-            }
+            if state.failed { Err(()) } else { Ok(0xcafe) }
         })
     }
     pub fn destroy_user_page_table(table: u64) -> Result<(), ()> {
@@ -178,6 +189,7 @@ fn final_reference_releases_table_and_backing_once() {
     );
     assert_eq!(Arc::strong_count(&source.regions[0].backing), 2);
     let duplicate = image.clone();
+    assert!(!image.permits(&task::process::PendingExecSecurity));
     drop(image);
     paging::STATE.with(|state| assert!(state.borrow().destroyed.is_empty()));
     drop(duplicate);
