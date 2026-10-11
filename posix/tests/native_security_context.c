@@ -61,6 +61,18 @@ int main(void) {
     CHECK(native3(617, endpoint, (uint64_t)&output.record, 320) == 0);
     CHECK(output.record.process == caller.process && output.record.thread == caller.thread);
     CHECK(native3(617, UINT64_MAX, (uint64_t)&output.record, 320) == -22);
+    static const char relative_grant[] = "fs.scope.read@relative.txt\x1f"
+                                          "/system/services/capability.service";
+    static const char absolute_grant[] = "fs.scope.read@/native-scope-check\x1f"
+                                          "/system/services/capability.service";
+    static const char wrong_image[] = "fs.scope.read@/native-scope-check\x1f"
+                                     "/different-image";
+    CHECK(native3(593, endpoint, (uint64_t)relative_grant, sizeof(relative_grant) - 1) == -22);
+    CHECK(native3(593, endpoint, (uint64_t)wrong_image, sizeof(wrong_image) - 1) == -13);
+    CHECK(native3(593, endpoint, (uint64_t)absolute_grant, sizeof(absolute_grant) - 1) == 0);
+    static const char scoped_pass[] = "native-security: PASS absolute native grant, "
+                                      "relative path rejected, executable identity enforced\n";
+    native3(660, (uint64_t)scoped_pass, sizeof(scoped_pass) - 1, 0);
     static const char pass[] = "native-security: PASS exact-size credential-free ABI, "
                                "caller and endpoint identity, package provenance, invalid output\n";
     native3(660, (uint64_t)pass, sizeof(pass) - 1, 0);

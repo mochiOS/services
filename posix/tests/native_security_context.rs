@@ -1,6 +1,47 @@
 use mnu_abi::ThreadSecurityContext;
 
 #[test]
+fn cwd_is_not_kernel_process_or_launch_state() {
+    for source in [
+        include_str!("../../../core/src/task/process.rs"),
+        include_str!("../../../core/src/syscall/exec.rs"),
+        include_str!("../../../core/src/syscall/capability.rs"),
+    ] {
+        for removed in [
+            "cwd:",
+            "cwd_len",
+            "fn cwd(",
+            "set_cwd(",
+            ".cwd()",
+            "parent_cwd",
+        ] {
+            assert!(!source.contains(removed), "kernel retains {removed}");
+        }
+    }
+}
+
+#[test]
+fn native_scoped_grants_require_absolute_paths_without_losing_authentication() {
+    let kernel = include_str!("../../../core/src/syscall/capability.rs");
+    assert!(kernel.contains("if !selected_path.starts_with('/')"));
+    assert!(kernel.contains("if can_manage_capabilities"));
+    assert!(kernel.contains("proc.exe_path() == claimed_exe_path"));
+    assert!(
+        kernel.contains("path::grant_scoped_path(dest_process.as_u64(), selected_path, rights)")
+    );
+    let service = include_str!("../../capability/src/dynamic_grant.rs");
+    let grant = service
+        .split("pub(crate) fn transfer_scoped_path_grant(")
+        .nth(1)
+        .unwrap()
+        .split("pub(crate) fn read_request_str(")
+        .next()
+        .unwrap();
+    assert!(grant.contains("!path.starts_with('/')"));
+    assert!(!grant.contains("cwd"));
+}
+
+#[test]
 fn obsolete_kernel_uid_gid_mutation_policy_is_absent() {
     let process = include_str!("../../../core/src/task/process.rs");
     for removed in [

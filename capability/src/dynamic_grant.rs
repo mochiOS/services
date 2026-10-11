@@ -144,7 +144,7 @@ pub(crate) fn transfer_scoped_path_grant(
     writable: bool,
     executable: &str,
 ) -> Result<(), mochi_user_syscall::SysError> {
-    if path.is_empty() || path.len() > 4095 || path.as_bytes().contains(&0) {
+    if !path.starts_with('/') || path.len() > 4095 || path.as_bytes().contains(&0) {
         return Err(mochi_user_syscall::SysError::from_raw(
             mochi_user_syscall::EINVAL as i64,
         ));
