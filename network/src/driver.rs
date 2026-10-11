@@ -24,7 +24,7 @@ impl DriverClient {
                 }
                 Ok(_) | Err(_) => {}
             }
-            let now = platform::time::ticks().map_err(|e| e.raw().unsigned_abs())?;
+            let now = platform::time::ticks().map_err(|e| e.raw() as u64)?;
             if now >= deadline {
                 return Err(mochi_user_syscall::EAGAIN);
             }
@@ -38,7 +38,7 @@ impl DriverClient {
     }
     fn call(&self, request: &[u8], reply: &mut [u8]) -> Result<usize, u64> {
         let result =
-            platform::ipc::call(self.thread, request, reply).map_err(|e| e.raw().unsigned_abs())?;
+            platform::ipc::call(self.thread, request, reply).map_err(|e| e.raw() as u64)?;
         let len = (result & 0xffff_ffff) as usize;
         if len > reply.len() {
             Err(mochi_user_syscall::EIO)
@@ -72,11 +72,7 @@ impl DriverClient {
         if reply_id != id {
             return Err(mochi_user_syscall::EIO);
         }
-        if status == 0 {
-            Ok(())
-        } else {
-            Err(status.unsigned_abs() as u64)
-        }
+        crate::status::driver_result(status)
     }
     pub(crate) fn receive(&mut self) -> Result<Option<Vec<u8>>, u64> {
         let id = self.id();
@@ -91,10 +87,8 @@ impl DriverClient {
             if reply_id != id {
                 return Err(mochi_user_syscall::EIO);
             }
-            if status == -(mochi_user_syscall::EAGAIN as i32) {
-                return Ok(None);
-            }
-            return Err(status.unsigned_abs() as u64);
+            crate::status::receive_status(status)?;
+            return Ok(None);
         }
         let (reply_id, frame) = decode_frame(Opcode::FrameReceived, &reply[..n])
             .map_err(|_| mochi_user_syscall::EIO)?;

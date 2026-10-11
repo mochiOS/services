@@ -1648,6 +1648,10 @@ version = "0.1.0"
 [[package]]
 name = "mochios-net-device-protocol"
 version = "0.1.0"
+
+[[package]]
+name = "mochios-net-device-protocol"
+version = "0.1.0"
 source = "git+https://github.com/mochiOS/syscalls#38b10ca1d8b95d8ad638e24a2f83adae6aa17034"
 
 [[package]]
@@ -1822,7 +1826,7 @@ dependencies = [
  "mochi-user-platform",
  "mochi-user-syscall",
  "mochios-http-client",
- "mochios-net-device-protocol",
+ "mochios-net-device-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
  "mochios-network-stack",
  "mochios-tls-client",
 ]
@@ -2478,6 +2482,7 @@ dependencies = [
  "mochi-user-platform",
  "mochios-certificate-database 0.1.0",
  "mochios-filesystem-protocol",
+ "mochios-net-device-protocol 0.1.0",
  "mochios-posix-client",
  "mochios-posix-protocol",
  "mochios-signature-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
@@ -3544,7 +3549,7 @@ dependencies = [
  "mochios-certificate-database 0.1.0 (git+https://github.com/mochiOS/syscalls)",
  "mochios-developer-ca-trust",
  "mochios-http-client",
- "mochios-net-device-protocol",
+ "mochios-net-device-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
  "mochios-signature-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
  "mochios-system-image",
  "serde",

@@ -2,14 +2,14 @@ use mochi_user_platform as platform;
 use mochios_net_device_protocol::{
     HTTP_READ_RESULT_BASE_LEN, Header, HttpFailure, MAX_HTTP_CONTENT_TYPE_LEN,
     MAX_HTTP_IPC_DATA_LEN, MAX_HTTP_URL_LEN, MAX_TCP_IO_LEN, Opcode, PING_RESULT_LEN,
-    SECURITY_STATISTICS_LEN, STACK_STATISTICS_LEN, TCP_CONNECT_RESULT_LEN, TCP_IO_RESULT_LEN,
-    TLS_IO_RESULT_LEN, TlsFailure, decode_empty, decode_http_close, decode_http_read,
-    decode_http_request, decode_ping, decode_resolve_ipv4, decode_tcp_close, decode_tcp_connect,
-    decode_tcp_receive, decode_tcp_send, decode_tls_close, decode_tls_connect, decode_tls_receive,
-    decode_tls_send, encode_http_read_result, encode_http_request_result, encode_ping_result,
-    encode_resolve_ipv4_result, encode_security_statistics, encode_stack_statistics,
-    encode_tcp_connect_result, encode_tcp_io_result, encode_tcp_receive_result,
-    encode_tls_connect_result, encode_tls_io_result, encode_tls_receive_result,
+    SECURITY_STATISTICS_LEN, STACK_STATISTICS_LEN, TlsFailure, decode_empty, decode_http_close,
+    decode_http_read, decode_http_request, decode_ping, decode_resolve_ipv4, decode_tcp_close,
+    decode_tcp_connect, decode_tcp_receive, decode_tcp_send, decode_tls_close, decode_tls_connect,
+    decode_tls_receive, decode_tls_send, encode_http_read_result, encode_http_request_result,
+    encode_ping_result, encode_resolve_ipv4_result, encode_security_statistics,
+    encode_stack_statistics, encode_tcp_connect_result, encode_tcp_io_result,
+    encode_tcp_receive_result, encode_tls_connect_result, encode_tls_io_result,
+    encode_tls_receive_result,
 };
 use mochios_network_stack::parse_ipv4_literal;
 
@@ -34,7 +34,8 @@ pub(crate) fn run() -> ! {
                 errno
             );
             if let Some(target) = ready {
-                let _ = platform::service_ready::notify(target, -(errno as i32));
+                let _ =
+                    platform::service_ready::notify(target, crate::status::failure_status(errno));
             }
             idle()
         }
@@ -47,7 +48,8 @@ pub(crate) fn run() -> ! {
         Err(errno) => {
             platform::logln!("network.service: interface query failed errno={}", errno);
             if let Some(target) = ready {
-                let _ = platform::service_ready::notify(target, -(errno as i32));
+                let _ =
+                    platform::service_ready::notify(target, crate::status::failure_status(errno));
             }
             idle()
         }
@@ -149,14 +151,14 @@ fn handle(
         platform::capability::check_thread(sender, capability),
         Ok(1)
     ) {
-        return permission_denied(header, reply);
+        return crate::status::permission_denied(header, reply);
     }
     match header.opcode {
         Opcode::Ping => {
             let (request_id, target) = decode_ping(request).ok()?;
             let (status, rtt) = match stack.ping(target, now) {
                 Ok(rtt) => (0, rtt),
-                Err(errno) => (-(errno as i32), 0),
+                Err(errno) => (crate::status::failure_status(errno), 0),
             };
             encode_ping_result(request_id, status, rtt, &mut reply[..PING_RESULT_LEN]).ok()
         }
@@ -188,7 +190,7 @@ fn handle(
             let (status, address, from_cache) =
                 match stack.resolve_ipv4(hostname, now, u64::from(timeout), random) {
                     Ok((address, from_cache)) => (0, address, from_cache),
-                    Err(errno) => (-(errno as i32), [0; 4], false),
+                    Err(errno) => (crate::status::failure_status(errno), [0; 4], false),
                 };
             encode_resolve_ipv4_result(request_id, status, address, from_cache, reply).ok()
         }
@@ -211,9 +213,9 @@ fn handle(
                     random.rotate_left(29),
                 ) {
                     Ok(handle) => (0, handle, address),
-                    Err(errno) => (-(errno as i32), 0, address),
+                    Err(errno) => (crate::status::failure_status(errno), 0, address),
                 },
-                Err(errno) => (-(errno as i32), 0, [0; 4]),
+                Err(errno) => (crate::status::failure_status(errno), 0, [0; 4]),
             };
             encode_tcp_connect_result(request_id, status, handle, address, port, reply).ok()
         }
@@ -222,7 +224,7 @@ fn handle(
             let (status, transferred) =
                 match stack.tcp_send(sender, handle, data, now, u64::from(timeout)) {
                     Ok(transferred) => (0, transferred as u32),
-                    Err(errno) => (-(errno as i32), 0),
+                    Err(errno) => (crate::status::failure_status(errno), 0),
                 };
             encode_tcp_io_result(
                 Opcode::TcpSendResult,
@@ -245,7 +247,7 @@ fn handle(
                 u64::from(timeout),
             ) {
                 Ok((length, closed)) => (0, length, closed),
-                Err(errno) => (-(errno as i32), 0, false),
+                Err(errno) => (crate::status::failure_status(errno), 0, false),
             };
             encode_tcp_receive_result(request_id, status, closed, &received[..length], reply).ok()
         }
@@ -253,7 +255,7 @@ fn handle(
             let (request_id, handle, timeout) = decode_tcp_close(request).ok()?;
             let status = match stack.tcp_close(sender, handle, now, u64::from(timeout)) {
                 Ok(()) => 0,
-                Err(errno) => -(errno as i32),
+                Err(errno) => crate::status::failure_status(errno),
             };
             encode_tcp_io_result(Opcode::TcpCloseResult, request_id, status, 0, reply).ok()
         }
@@ -293,7 +295,7 @@ fn handle(
                     );
                     encode_tls_connect_result(
                         request_id,
-                        -(error.errno as i32),
+                        crate::status::failure_status(error.errno),
                         error.failure,
                         0,
                         [0; 4],
@@ -316,7 +318,7 @@ fn handle(
             let (status, failure, transferred) =
                 match tls.send(stack, sender, connection, data, now, u64::from(timeout)) {
                     Ok(transferred) => (0, TlsFailure::None, transferred as u32),
-                    Err(error) => (-(error.errno as i32), error.failure, 0),
+                    Err(error) => (crate::status::failure_status(error.errno), error.failure, 0),
                 };
             encode_tls_io_result(
                 Opcode::TlsSendResult,
@@ -341,7 +343,12 @@ fn handle(
                 u64::from(timeout),
             ) {
                 Ok((length, closed)) => (0, TlsFailure::None, length, closed),
-                Err(error) => (-(error.errno as i32), error.failure, 0, false),
+                Err(error) => (
+                    crate::status::failure_status(error.errno),
+                    error.failure,
+                    0,
+                    false,
+                ),
             };
             encode_tls_receive_result(
                 request_id,
@@ -359,7 +366,7 @@ fn handle(
             let (status, failure) =
                 match tls.close(stack, sender, connection, now, u64::from(timeout)) {
                     Ok(()) => (0, TlsFailure::None),
-                    Err(error) => (-(error.errno as i32), error.failure),
+                    Err(error) => (crate::status::failure_status(error.errno), error.failure),
                 };
             encode_tls_io_result(
                 Opcode::TlsCloseResult,
@@ -401,7 +408,7 @@ fn handle(
                 .ok(),
                 Err(error) => encode_http_request_result(
                     request.request_id,
-                    -(error.errno as i32),
+                    crate::status::failure_status(error.errno),
                     error.failure,
                     0,
                     0,
@@ -419,7 +426,12 @@ fn handle(
             let (status, failure, length, complete) =
                 match http.read(sender, handle, stream, maximum as usize, &mut data) {
                     Ok((length, complete)) => (0, HttpFailure::None, length, complete),
-                    Err(error) => (-(error.errno as i32), error.failure, 0, false),
+                    Err(error) => (
+                        crate::status::failure_status(error.errno),
+                        error.failure,
+                        0,
+                        false,
+                    ),
                 };
             encode_http_read_result(
                 request_id,
@@ -437,7 +449,7 @@ fn handle(
             let (request_id, handle) = decode_http_close(request).ok()?;
             let (status, failure) = match http.close(sender, handle) {
                 Ok(()) => (0, HttpFailure::None),
-                Err(error) => (-(error.errno as i32), error.failure),
+                Err(error) => (crate::status::failure_status(error.errno), error.failure),
             };
             encode_http_read_result(
                 request_id,
@@ -451,132 +463,6 @@ fn handle(
             )
             .ok()
         }
-        _ => None,
-    }
-}
-
-fn permission_denied(header: Header, reply: &mut [u8]) -> Option<usize> {
-    let status = -(mochi_user_syscall::EACCES as i32);
-    match header.opcode {
-        Opcode::Ping => encode_ping_result(header.request_id, status, 0, reply).ok(),
-        Opcode::ResolveIpv4 => {
-            encode_resolve_ipv4_result(header.request_id, status, [0; 4], false, reply).ok()
-        }
-        Opcode::TcpConnect => encode_tcp_connect_result(
-            header.request_id,
-            status,
-            0,
-            [0; 4],
-            0,
-            &mut reply[..TCP_CONNECT_RESULT_LEN],
-        )
-        .ok(),
-        Opcode::TcpSend => encode_tcp_io_result(
-            Opcode::TcpSendResult,
-            header.request_id,
-            status,
-            0,
-            &mut reply[..TCP_IO_RESULT_LEN],
-        )
-        .ok(),
-        Opcode::TcpReceive => {
-            encode_tcp_receive_result(header.request_id, status, false, &[], reply).ok()
-        }
-        Opcode::TcpClose => encode_tcp_io_result(
-            Opcode::TcpCloseResult,
-            header.request_id,
-            status,
-            0,
-            &mut reply[..TCP_IO_RESULT_LEN],
-        )
-        .ok(),
-        Opcode::GetStackStatistics => {
-            encode_stack_statistics(header.request_id, Default::default(), reply).ok()
-        }
-        Opcode::GetSecurityStatistics => {
-            encode_security_statistics(header.request_id, Default::default(), reply).ok()
-        }
-        Opcode::TlsConnect => encode_tls_connect_result(
-            header.request_id,
-            -(mochi_user_syscall::EACCES as i32),
-            TlsFailure::PermissionDenied,
-            0,
-            [0; 4],
-            0,
-            0,
-            0,
-            "",
-            "",
-            "",
-            0,
-            0,
-            reply,
-        )
-        .ok(),
-        Opcode::TlsSend => encode_tls_io_result(
-            Opcode::TlsSendResult,
-            header.request_id,
-            -(mochi_user_syscall::EACCES as i32),
-            TlsFailure::PermissionDenied,
-            0,
-            0,
-            &mut reply[..TLS_IO_RESULT_LEN],
-        )
-        .ok(),
-        Opcode::TlsReceive => encode_tls_receive_result(
-            header.request_id,
-            -(mochi_user_syscall::EACCES as i32),
-            TlsFailure::PermissionDenied,
-            0,
-            false,
-            &[],
-            reply,
-        )
-        .ok(),
-        Opcode::TlsClose => encode_tls_io_result(
-            Opcode::TlsCloseResult,
-            header.request_id,
-            -(mochi_user_syscall::EACCES as i32),
-            TlsFailure::PermissionDenied,
-            0,
-            0,
-            &mut reply[..TLS_IO_RESULT_LEN],
-        )
-        .ok(),
-        Opcode::HttpRequest => encode_http_request_result(
-            header.request_id,
-            status,
-            HttpFailure::PermissionDenied,
-            0,
-            0,
-            0,
-            0,
-            "",
-            reply,
-        )
-        .ok(),
-        Opcode::HttpRead => encode_http_read_result(
-            header.request_id,
-            Opcode::HttpReadResult,
-            status,
-            HttpFailure::PermissionDenied,
-            0,
-            false,
-            &[],
-            reply,
-        )
-        .ok(),
-        Opcode::HttpClose => encode_http_read_result(
-            header.request_id,
-            Opcode::HttpCloseResult,
-            status,
-            HttpFailure::PermissionDenied,
-            0,
-            false,
-            &[],
-            reply,
-        )
-        .ok(),
         _ => None,
     }
 }

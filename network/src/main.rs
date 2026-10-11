@@ -4,6 +4,7 @@ mod driver;
 mod http;
 mod service;
 mod stack;
+mod status;
 mod tls;
 
 getrandom::register_custom_getrandom!(mochios_tls_client::platform_getrandom);
