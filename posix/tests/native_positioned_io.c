@@ -93,13 +93,15 @@ int main(void) {
     CHECK(sysconf(-1) == -1 && errno == EINVAL);
     fprintf(stderr, "positioned-io: sysconf vector and pthread limits ok\n");
     /* Native creation cannot turn an unapproved image into a running task. */
-    unsigned char creation[32 + 4 + 32 + 8] = {0};
+    unsigned char creation[32 + 4 + 4 + 32 + 8] = {0};
     memcpy(creation, "MCRT", 4);
-    creation[4] = 1; creation[6] = 32;
+    creation[4] = 2; creation[6] = 32;
     creation[8] = 4; creation[12] = 40;
+    creation[24] = 4;
     memcpy(creation + 32, "test", 4);
-    memcpy(creation + 36, "MIMG", 4);
-    creation[40] = 1; creation[42] = 32; creation[52] = 8;
+    memcpy(creation + 36, "name", 4);
+    memcpy(creation + 40, "MIMG", 4);
+    creation[44] = 1; creation[46] = 32; creation[56] = 8;
     int64_t denied = native(676, 0, (uint64_t)creation, sizeof(creation), 0);
     CHECK(denied == -EPERM || denied == -EACCES);
     fprintf(stderr, "positioned-io: ProcessCreate authorization status %lld\n", (long long)denied);

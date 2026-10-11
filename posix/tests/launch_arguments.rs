@@ -37,6 +37,7 @@ fn native_launch_builds_argv_env_and_inheritance_in_user_space() {
     let bytes = native(&items).unwrap();
     let request = mnu_abi::process_create::decode(&bytes).unwrap();
     assert_eq!(request.identity, "/system/services/example.service");
+    assert_eq!(request.label, "example.service");
     assert_eq!(
         request.handles().collect::<Vec<_>>(),
         [mnu_abi::process_create::HandleGrant {

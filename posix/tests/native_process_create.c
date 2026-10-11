@@ -117,7 +117,7 @@ int main(int argc, char **argv) {
     CHECK(message >= 0 && (uint32_t)message == 32 && get32(reply + 24) == 0);
     CHECK(handles.count == 1 && handles.entries[0].handle != 0);
     uint32_t image = handles.entries[0].handle;
-    size_t grant = 32 + get32(metadata + 8) + get32(metadata + 12);
+    size_t grant = 32 + get32(metadata + 8) + get32(metadata + 24) + get32(metadata + 12);
     CHECK(grant + 24 <= (size_t)length);
     put32(metadata + grant + 8, image);
 
@@ -135,6 +135,10 @@ int main(int argc, char **argv) {
     CHECK(process > 0);
     struct process_status status = {0};
     CHECK(N(PROCESS_STATUS, process, &status, 0) == 0 && status.state == 1);
+    const char label[] = "native-create-child";
+    /* Legacy name lookup returns a thread ID, not status.process (a PID). */
+    CHECK(N(FIND_PROCESS, label, strlen(label), 0) > 0);
+    CHECK(N(FIND_PROCESS, image_path, strlen(image_path), 0) == 0);
     CHECK(N(PROCESS_WAIT, process, 0, &status) == -EAGAIN);
     CHECK(N(SLEEP, 100, 0, 0) == 0);
     CHECK(N(PROCESS_STATUS, process, &status, 0) == 0 && status.state == 1);
@@ -151,7 +155,8 @@ int main(int argc, char **argv) {
     CHECK(N(PROCESS_WAIT, process, 0, &status) == 0 && status.exit_code == 37);
     CHECK(N(HANDLE_CLOSE, process, 0, 0) == 0);
     CHECK(N(HANDLE_CLOSE, image, 0, 0) == 0);
-    fprintf(stderr, "native-create: stopped creation, one-shot authorization, resume, attenuated "
+    fprintf(stderr, "native-create: explicit label, stopped creation, one-shot authorization, "
+                    "resume, attenuated "
                     "handles and retained exit status ok\n");
     return 0;
 }

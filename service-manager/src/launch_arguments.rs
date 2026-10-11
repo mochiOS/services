@@ -95,6 +95,7 @@ pub(crate) fn encode_native_launch(
     let mut metadata = vec![0; process_create::MAX_REQUEST_BYTES];
     let length = process_create::encode(
         identity,
+        argument_zero,
         &startup[..length],
         &handles,
         &values,

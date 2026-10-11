@@ -10,7 +10,15 @@ fn startup() -> Vec<u8> {
 
 fn metadata(handles: &[HandleGrant], values: &[Value]) -> Vec<u8> {
     let mut bytes = vec![0; wire::MAX_REQUEST_BYTES];
-    let length = wire::encode("opaque identity", &startup(), handles, values, &mut bytes).unwrap();
+    let length = wire::encode(
+        "opaque identity",
+        "display label",
+        &startup(),
+        handles,
+        values,
+        &mut bytes,
+    )
+    .unwrap();
     bytes.truncate(length);
     bytes
 }
@@ -29,6 +37,7 @@ fn creation_metadata_is_relocatable_and_has_no_foreign_pid_or_fd() {
     let bytes = metadata(&handles, &values);
     let request = wire::decode(&bytes).unwrap();
     assert_eq!(request.identity, "opaque identity");
+    assert_eq!(request.label, "display label");
     assert_eq!(request.startup.stack(), [0; 32]);
     assert_eq!(request.handles().collect::<Vec<_>>(), handles);
     assert_eq!(request.values().collect::<Vec<_>>(), values);
@@ -48,12 +57,13 @@ fn duplicate_keys_and_invalid_handles_are_rejected() {
         rights: 3,
     };
     assert_eq!(
-        wire::encode("x", &startup(), &[grant, grant], &[], &mut output),
+        wire::encode("x", "label", &startup(), &[grant, grant], &[], &mut output),
         Err(Error::DuplicateKey)
     );
     assert_eq!(
         wire::encode(
             "x",
+            "label",
             &startup(),
             &[HandleGrant { source: 0, ..grant }],
             &[],
@@ -63,7 +73,7 @@ fn duplicate_keys_and_invalid_handles_are_rejected() {
     );
     let value = Value { key: 1, value: 0 };
     assert_eq!(
-        wire::encode("x", &startup(), &[], &[value, value], &mut output),
+        wire::encode("x", "label", &startup(), &[], &[value, value], &mut output),
         Err(Error::DuplicateKey)
     );
 }
@@ -71,12 +81,12 @@ fn duplicate_keys_and_invalid_handles_are_rejected() {
 #[test]
 fn version_reserved_fields_and_lengths_are_strict() {
     let original = metadata(&[], &[]);
-    for offset in [0, 4, 6, 24, 31] {
+    for offset in [0, 4, 6, 28, 31] {
         let mut bytes = original.clone();
         bytes[offset] ^= 1;
         assert!(wire::decode(&bytes).is_err());
     }
-    for offset in [8, 12, 16, 20] {
+    for offset in [8, 12, 16, 20, 24] {
         let mut bytes = original.clone();
         bytes[offset..offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(wire::decode(&bytes).is_err());
@@ -93,24 +103,52 @@ fn version_reserved_fields_and_lengths_are_strict() {
 fn identity_and_embedded_startup_are_validated() {
     let mut output = vec![0; wire::MAX_REQUEST_BYTES];
     assert_eq!(
-        wire::encode("", &startup(), &[], &[], &mut output),
+        wire::encode("", "label", &startup(), &[], &[], &mut output),
         Err(Error::Length)
     );
     assert_eq!(
-        wire::encode("x\0y", &startup(), &[], &[], &mut output),
+        wire::encode("x\0y", "label", &startup(), &[], &[], &mut output),
         Err(Error::Identity)
     );
     assert_eq!(
-        wire::encode("x", &[0; 64], &[], &[], &mut output),
+        wire::encode("x", "label", &[0; 64], &[], &[], &mut output),
         Err(Error::Startup)
     );
     assert_eq!(
-        wire::encode("x", &startup(), &[], &[], &mut [0; 8]),
+        wire::encode("x", "label", &startup(), &[], &[], &mut [0; 8]),
         Err(Error::BufferTooSmall)
     );
     let mut bytes = metadata(&[], &[]);
     bytes[wire::HEADER_LEN] = 0xff;
     assert!(matches!(wire::decode(&bytes), Err(Error::Identity)));
+}
+
+#[test]
+fn creation_label_is_bounded_text_and_never_an_authorization_identity() {
+    let mut output = vec![0; wire::MAX_REQUEST_BYTES];
+    for label in ["", &"x".repeat(wire::MAX_LABEL_BYTES + 1)] {
+        assert_eq!(
+            wire::encode("authorized", label, &startup(), &[], &[], &mut output),
+            Err(Error::Length)
+        );
+    }
+    assert_eq!(
+        wire::encode("authorized", "x\0y", &startup(), &[], &[], &mut output),
+        Err(Error::Label)
+    );
+    let label = "あ".repeat(10);
+    let length = wire::encode("authorized", &label, &startup(), &[], &[], &mut output).unwrap();
+    assert_eq!(wire::decode(&output[..length]).unwrap().label, label);
+    output[wire::HEADER_LEN + "authorized".len()] = 0xff;
+    assert!(matches!(wire::decode(&output[..length]), Err(Error::Label)));
+    let mut bytes = metadata(&[], &[]);
+    bytes[4..6].copy_from_slice(&1u16.to_le_bytes());
+    assert!(matches!(wire::decode(&bytes), Err(Error::Header)));
+    let exec = include_str!("../../../core/src/syscall/exec.rs");
+    let native = &exec[exec.find("pub fn process_create_syscall(").unwrap()..];
+    assert!(native.contains("take_exec_authorization(request.identity, thread)"));
+    assert!(!native.contains("take_exec_authorization(request.label"));
+    assert!(native.contains("request.label,\n        request.identity,"));
 }
 
 #[test]
@@ -120,7 +158,8 @@ fn handle_record_reserved_bits_and_duplicate_wire_keys_are_rejected() {
         source: 2,
         rights: 3,
     };
-    let offset = wire::HEADER_LEN + "opaque identity".len() + startup().len();
+    let offset =
+        wire::HEADER_LEN + "opaque identity".len() + "display label".len() + startup().len();
     let mut bytes = metadata(&[grant], &[]);
     bytes[offset + 12] = 1;
     assert!(matches!(wire::decode(&bytes), Err(Error::Handle)));
@@ -235,6 +274,7 @@ fn generate_native_creation_fixture_record() {
     let mut metadata = vec![0; wire::MAX_REQUEST_BYTES];
     let length = wire::encode(
         std::str::from_utf8(executable).unwrap(),
+        "native-create-child",
         &startup[..length],
         &[HandleGrant {
             key: u64::from_le_bytes(*b"TESTFILE"),
