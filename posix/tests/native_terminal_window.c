@@ -48,6 +48,14 @@ static void *exercise_foreground_io(void *unused) {
     return NULL;
 }
 
+static void *read_after_process_stop(void *unused) {
+    (void)unused;
+    char input[7];
+    if (read(STDIN_FILENO, input, sizeof(input)) != 7 || memcmp(input, "resume\n", 7) != 0)
+        return (void *)(uintptr_t)1;
+    return NULL;
+}
+
 #define CHECK(condition) do { \
     if (!(condition)) { \
         char message[128]; \
@@ -225,7 +233,54 @@ int main(void) {
     CHECK(read(master, concurrent_bytes, sizeof(concurrent_bytes)) == 32);
     for (unsigned index = 0; index < sizeof(concurrent_bytes); ++index)
         CHECK(concurrent_bytes[index] == 'x');
-    debug("native-terminal-window: PASS terminal control and I/O job control, ioctl, tcflow, tcsetpgrp, size and SIGWINCH\n");
+    // Default stops are not caught-handler EINTR. The original operation must
+    // finish after the shell promotes the job and continues it.
+    for (unsigned mode = 0; mode < 5; ++mode) {
+        CHECK(tcgetattr(STDIN_FILENO, &attributes) == 0);
+        attributes.c_lflag |= TOSTOP;
+        attributes.c_lflag &= ~(ECHO | ECHONL);
+        CHECK(tcsetattr(STDIN_FILENO, TCSANOW, &attributes) == 0);
+        child = fork();
+        CHECK(child >= 0);
+        if (child == 0) {
+            action.sa_handler = SIG_DFL;
+            CHECK(sigaction(SIGTTIN, &action, NULL) == 0);
+            CHECK(sigaction(SIGTTOU, &action, NULL) == 0);
+            CHECK(setpgid(0, 0) == 0);
+            if (mode == 0) {
+                char input[7];
+                CHECK(read(STDIN_FILENO, input, sizeof(input)) == 7);
+                CHECK(memcmp(input, "resume\n", sizeof(input)) == 0);
+            } else if (mode == 1) {
+                CHECK(write(STDOUT_FILENO, "resumed", 7) == 7);
+            } else if (mode == 2) {
+                CHECK(tcflow(STDIN_FILENO, TCOOFF) == 0);
+                CHECK(tcflow(STDIN_FILENO, TCOON) == 0);
+            } else if (mode == 3) {
+                CHECK(tcsetpgrp(STDIN_FILENO, getpgrp()) == 0);
+            } else {
+                pthread_t reader;
+                CHECK(pthread_create(&reader, NULL, read_after_process_stop, NULL) == 0);
+                void *read_result = NULL;
+                CHECK(pthread_join(reader, &read_result) == 0 && read_result == NULL);
+            }
+            _exit(0);
+        }
+        CHECK(waitpid(child, &status, WUNTRACED) == child);
+        CHECK(WIFSTOPPED(status));
+        CHECK(WSTOPSIG(status) == (mode == 0 || mode == 4 ? SIGTTIN : SIGTTOU));
+        CHECK(tcsetpgrp(STDIN_FILENO, child) == 0);
+        if (mode == 0 || mode == 4) CHECK(write(master, "resume\n", 7) == 7);
+        CHECK(kill(child, SIGCONT) == 0);
+        CHECK(waitpid(child, &status, 0) == child);
+        CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        CHECK(tcsetpgrp(STDIN_FILENO, parent_group) == 0);
+        if (mode == 1) {
+            CHECK(read(master, flow_bytes, sizeof(flow_bytes)) == 7);
+            CHECK(memcmp(flow_bytes, "resumed", 7) == 0);
+        }
+    }
+    debug("native-terminal-window: PASS default-stop resume and caught-handler EINTR, terminal controls, I/O, size and SIGWINCH\n");
     CHECK(close(master) == 0);
     return 0;
 }
