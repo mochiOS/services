@@ -10,6 +10,7 @@ pub(crate) struct ChildProcesses<
     Network = u64,
     User = u64,
     Update = u64,
+    SecureUi = u64,
 > {
     pub(crate) drivers: Option<Drivers>,
     pub(crate) mboot_agent: Option<u64>,
@@ -20,7 +21,7 @@ pub(crate) struct ChildProcesses<
     pub(crate) compositor: Option<Compositor>,
     pub(crate) network: Option<Network>,
     pub(crate) user: Option<User>,
-    pub(crate) secure_ui: Option<u64>,
+    pub(crate) secure_ui: Option<SecureUi>,
     pub(crate) linux: Option<u64>,
     pub(crate) binder: Option<u64>,
     pub(crate) installer: Option<u64>,
@@ -61,15 +62,17 @@ pub(crate) struct BootstrapOutcome<
     Network = u64,
     User = u64,
     Update = u64,
+    SecureUi = u64,
 > {
-    pub(crate) children: ChildProcesses<Input, Display, Drivers, Compositor, Network, User, Update>,
+    pub(crate) children:
+        ChildProcesses<Input, Display, Drivers, Compositor, Network, User, Update, SecureUi>,
     pub(crate) reason: StopReason,
     pub(crate) identity: Option<SessionIdentity>,
     pub(crate) session_id: u64,
 }
 
-impl<Input, Display, Drivers, Compositor, Network, User, Update>
-    BootstrapOutcome<Input, Display, Drivers, Compositor, Network, User, Update>
+impl<Input, Display, Drivers, Compositor, Network, User, Update, SecureUi>
+    BootstrapOutcome<Input, Display, Drivers, Compositor, Network, User, Update, SecureUi>
 {
     pub(crate) const fn initialization_failed() -> Self {
         Self {
@@ -97,11 +100,11 @@ impl<Input, Display, Drivers, Compositor, Network, User, Update>
     }
 }
 
-impl<Input, Display, Drivers, Compositor, Network, User, Update> Default
-    for ChildProcesses<Input, Display, Drivers, Compositor, Network, User, Update>
+impl<Input, Display, Drivers, Compositor, Network, User, Update, SecureUi> Default
+    for ChildProcesses<Input, Display, Drivers, Compositor, Network, User, Update, SecureUi>
 {
     fn default() -> Self {
-        BootstrapOutcome::<Input, Display, Drivers, Compositor, Network, User, Update>::initialization_failed()
+        BootstrapOutcome::<Input, Display, Drivers, Compositor, Network, User, Update, SecureUi>::initialization_failed()
             .children
     }
 }
@@ -114,6 +117,8 @@ pub(crate) trait BootstrapOperations {
     type NetworkProcess;
     type UserProcess;
     type UpdateProcess;
+    type SecureUiProcess;
+    fn spawn_secure_ui(&mut self) -> Option<Self::SecureUiProcess>;
     fn spawn_update(&mut self) -> Option<Self::UpdateProcess>;
     fn spawn_user(&mut self) -> Option<Self::UserProcess>;
     fn spawn_network(&mut self) -> Option<Self::NetworkProcess>;
@@ -140,7 +145,7 @@ pub(crate) trait BootstrapOperations {
     fn wait_discovery_complete(&mut self, process: &Self::DriversProcess) -> bool;
     fn wait_network_ready(&mut self, process: &Self::NetworkProcess) -> bool;
     fn wait_user_ready(&mut self, process: &Self::UserProcess) -> bool;
-    fn wait_secure_ui_login(&mut self, process_id: u64) -> Option<SessionIdentity>;
+    fn wait_secure_ui_login(&mut self, process: &Self::SecureUiProcess) -> Option<SessionIdentity>;
     fn wait_binder_ready(&mut self, process_id: u64) -> bool;
 }
 
@@ -163,6 +168,7 @@ pub(crate) fn orchestrate<O: BootstrapOperations>(
     O::NetworkProcess,
     O::UserProcess,
     O::UpdateProcess,
+    O::SecureUiProcess,
 > {
     let mut children = ChildProcesses::default();
 
@@ -231,11 +237,12 @@ pub(crate) fn orchestrate<O: BootstrapOperations>(
     let identity = if installation_required {
         FIRST_BOOT_IDENTITY
     } else {
-        let Some(secure_ui) = operations.spawn_fixed(FixedService::SecureUi) else {
+        let Some(secure_ui) = operations.spawn_secure_ui() else {
             return outcome(children, StopReason::SecureUiSpawnFailed);
         };
         children.secure_ui = Some(secure_ui);
-        let Some(identity) = operations.wait_secure_ui_login(secure_ui) else {
+        let Some(identity) = operations.wait_secure_ui_login(children.secure_ui.as_ref().unwrap())
+        else {
             return outcome(children, StopReason::SecureUiLoginFailed);
         };
         identity
@@ -280,10 +287,10 @@ pub(crate) fn orchestrate<O: BootstrapOperations>(
     }
 }
 
-const fn outcome<Input, Display, Drivers, Compositor, Network, User, Update>(
-    children: ChildProcesses<Input, Display, Drivers, Compositor, Network, User, Update>,
+const fn outcome<Input, Display, Drivers, Compositor, Network, User, Update, SecureUi>(
+    children: ChildProcesses<Input, Display, Drivers, Compositor, Network, User, Update, SecureUi>,
     reason: StopReason,
-) -> BootstrapOutcome<Input, Display, Drivers, Compositor, Network, User, Update> {
+) -> BootstrapOutcome<Input, Display, Drivers, Compositor, Network, User, Update, SecureUi> {
     BootstrapOutcome {
         children,
         reason,
@@ -369,6 +376,11 @@ mod tests {
         type NetworkProcess = u64;
         type UserProcess = u64;
         type UpdateProcess = u64;
+        type SecureUiProcess = u64;
+
+        fn spawn_secure_ui(&mut self) -> Option<Self::SecureUiProcess> {
+            self.spawn_fixed(FixedService::SecureUi)
+        }
 
         fn spawn_update(&mut self) -> Option<Self::UpdateProcess> {
             self.spawn_fixed(FixedService::Update)
@@ -495,7 +507,10 @@ mod tests {
             self.failure != Failure::UserReady
         }
 
-        fn wait_secure_ui_login(&mut self, _process_id: u64) -> Option<SessionIdentity> {
+        fn wait_secure_ui_login(
+            &mut self,
+            _process: &Self::SecureUiProcess,
+        ) -> Option<SessionIdentity> {
             self.events.push(Event::WaitSecureUiLogin);
             (self.failure != Failure::SecureUiLogin).then_some(TEST_IDENTITY)
         }

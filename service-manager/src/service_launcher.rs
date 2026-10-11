@@ -95,6 +95,7 @@ pub(crate) fn spawn_fixed_service(
             | FixedService::Network
             | FixedService::User
             | FixedService::Update
+            | FixedService::SecureUi
     ) {
         return Err(sys_error(mochi_user_syscall::EINVAL));
     }
@@ -318,7 +319,8 @@ pub(crate) fn spawn_secure_ui(
     logger_endpoint: u64,
     target: platform::service_ready::Target,
     lock_uid: Option<u32>,
-) -> Result<u64, mochi_user_syscall::SysError> {
+    posix_endpoint: platform::handle::Handle,
+) -> Result<NativeProcess, mochi_user_syscall::SysError> {
     let mut arguments = fixed_service_arguments(
         FixedService::SecureUi,
         logger_endpoint,
@@ -330,7 +332,13 @@ pub(crate) fn spawn_secure_ui(
     if let Some(user) = lock_uid.and_then(|uid| session_user(uid)) {
         arguments.push(alloc::format!("{LOCK_USER_ARG_PREFIX}{}", user.name));
     }
-    spawn(fixed_service_spec(FixedService::SecureUi), &arguments)
+    append_posix_handle(&mut arguments, Some(posix_endpoint));
+    spawn_native(
+        fixed_service_spec(FixedService::SecureUi),
+        "secure-ui.service",
+        &arguments,
+        posix_endpoint,
+    )
 }
 
 pub(crate) fn spawn_portal_prompt(

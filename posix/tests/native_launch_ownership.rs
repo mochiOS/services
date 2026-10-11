@@ -80,6 +80,7 @@ fn display_launch_and_readiness_use_retained_handles_without_legacy_fallback() {
         "Network",
         "User",
         "Update",
+        "SecureUi",
     ] {
         assert!(fixed_spawn.contains(&format!("FixedService::{native_only}")));
     }
@@ -165,6 +166,33 @@ fn update_creation_keeps_a_native_owner_without_legacy_fallback() {
     assert!(orchestration.contains("update: Option<Update>"));
     assert!(orchestration.contains("children.update = operations.spawn_update();"));
     assert!(!orchestration.contains("children.update = operations.spawn_fixed("));
+}
+
+#[test]
+fn secure_login_launches_and_watches_retained_native_process_handles() {
+    let launcher = include_str!("../../service-manager/src/service_launcher.rs");
+    let start = launcher.find("pub(crate) fn spawn_secure_ui(").unwrap();
+    let end = start
+        + launcher[start..]
+            .find("pub(crate) fn spawn_portal_prompt(")
+            .unwrap();
+    let login = &launcher[start..end];
+    assert!(login.contains("Result<NativeProcess,"));
+    assert!(login.contains("append_posix_handle(&mut arguments, Some(posix_endpoint))"));
+    assert!(login.contains("spawn_native("));
+    assert!(!login.contains("spawn("));
+    let bootstrap = include_str!("../../service-manager/src/bootstrap.rs");
+    assert!(bootstrap.contains("type SecureUiProcess = NativeProcess;"));
+    assert_eq!(
+        bootstrap
+            .matches("handshake.wait_for_login_complete(process.watch_target())")
+            .count(),
+        2
+    );
+    let orchestration = include_str!("../../service-manager/src/orchestration.rs");
+    assert!(orchestration.contains("secure_ui: Option<SecureUi>"));
+    assert!(orchestration.contains("operations.spawn_secure_ui()"));
+    assert!(!orchestration.contains("operations.spawn_fixed(FixedService::SecureUi)"));
 }
 
 #[test]

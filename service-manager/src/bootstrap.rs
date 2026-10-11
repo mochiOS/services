@@ -148,18 +148,22 @@ impl Runtime {
             }
         };
         let target = handshake.target(ReadyService::SecureUi);
-        let process_id =
-            match service_launcher::spawn_secure_ui(self.logger_endpoint, target, lock_uid) {
-                Ok(process_id) => process_id,
-                Err(error) => {
-                    platform::logln!(
-                        "service-manager.service: secure-ui.service spawn failed errno={}",
-                        errno(error)
-                    );
-                    return None;
-                }
-            };
-        match handshake.wait_for_login_complete(process_id) {
+        let process = match service_launcher::spawn_secure_ui(
+            self.logger_endpoint,
+            target,
+            lock_uid,
+            self.posix_endpoint?,
+        ) {
+            Ok(process) => process,
+            Err(error) => {
+                platform::logln!(
+                    "service-manager.service: secure-ui.service spawn failed errno={}",
+                    errno(error)
+                );
+                return None;
+            }
+        };
+        match handshake.wait_for_login_complete(process.watch_target()) {
             Ok(identity) => Some(identity),
             Err(error) => {
                 log_ready_error(ReadyService::SecureUi, error);
@@ -177,6 +181,28 @@ impl BootstrapOperations for Runtime {
     type NetworkProcess = NativeProcess;
     type UserProcess = NativeProcess;
     type UpdateProcess = NativeProcess;
+    type SecureUiProcess = NativeProcess;
+
+    fn spawn_secure_ui(&mut self) -> Option<Self::SecureUiProcess> {
+        let endpoint = self.posix_endpoint?;
+        if !self.ensure_ready_handshake() {
+            return None;
+        }
+        let target = self.ready.as_ref()?.target(ReadyService::SecureUi);
+        match service_launcher::spawn_secure_ui(self.logger_endpoint, target, None, endpoint) {
+            Ok(process) => {
+                eprintln!("service-manager.service: secure-ui.service native process created");
+                Some(process)
+            }
+            Err(error) => {
+                eprintln!(
+                    "service-manager.service: secure-ui.service native spawn failed errno={}",
+                    errno(error)
+                );
+                None
+            }
+        }
+    }
 
     fn spawn_update(&mut self) -> Option<Self::UpdateProcess> {
         match service_launcher::spawn_update_service(self.logger_endpoint, self.posix_endpoint?) {
@@ -624,11 +650,11 @@ impl BootstrapOperations for Runtime {
 
     fn wait_secure_ui_login(
         &mut self,
-        process_id: u64,
+        process: &Self::SecureUiProcess,
     ) -> Option<platform::service_ready::SessionIdentity> {
         platform::logln!("service-manager.service: waiting for secure-ui.service login");
         let result = match self.ready.as_mut() {
-            Some(handshake) => handshake.wait_for_login_complete(process_id),
+            Some(handshake) => handshake.wait_for_login_complete(process.watch_target()),
             None => Err(ReadyError::InvalidMessage),
         };
         match result {
@@ -787,6 +813,7 @@ fn log_ready_error(service: ReadyService, error: ReadyError) {
 
 fn resident(
     outcome: BootstrapOutcome<
+        NativeProcess,
         NativeProcess,
         NativeProcess,
         NativeProcess,
