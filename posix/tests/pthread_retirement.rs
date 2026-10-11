@@ -38,13 +38,14 @@ fn detached_reclamation_requires_native_retirement_and_closes_owned_handle() {
         .split("fn current_thread_control()")
         .next()
         .unwrap();
-    let claim = source.find("THREAD_REAPING").unwrap();
+    let claim = source.find("THREAD_REAP_CLAIMED").unwrap();
     let check = source
         .find("native_thread_retired(control) == Ok(true)")
         .unwrap();
     let release = source.find("release_thread_control(control)").unwrap();
     assert!(claim < check && check < release);
-    assert!(source.contains("control.state.store(THREAD_EXITED, Ordering::Release)"));
+    assert!(source.contains("control.joinability.store(THREAD_DETACHED, Ordering::Release)"));
+    assert!(check < source.find("control.state.store(THREAD_REAPING").unwrap());
     let detach = RUNTIME
         .split("fn pthread_detach(")
         .nth(1)
@@ -60,7 +61,7 @@ fn detached_reclamation_requires_native_retirement_and_closes_owned_handle() {
         .split("fn register_current_thread()")
         .next()
         .unwrap();
-    assert!(!lookup.contains("state != THREAD_REAPING"));
+    assert!(lookup.contains("state != THREAD_REAPING"));
     let release = RUNTIME
         .split("fn release_thread_control(")
         .nth(1)

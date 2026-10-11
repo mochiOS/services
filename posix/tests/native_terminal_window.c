@@ -74,6 +74,14 @@ static void *return_immediately(void *argument) {
     return argument;
 }
 
+static _Atomic unsigned detached_returns;
+static void *return_detached(void *unused) {
+    (void)unused;
+    errno = EBUSY;
+    atomic_fetch_add(&detached_returns, 1);
+    return NULL;
+}
+
 static void *read_after_process_stop(void *unused) {
     (void)unused;
     char input[7];
@@ -184,6 +192,20 @@ int main(void) {
         CHECK(pthread_join(thread, &result) == 0 && result == (void *)iteration);
     }
     debug("native-terminal-window: 128 native thread retirements passed\n");
+    pthread_attr_t detached;
+    CHECK(pthread_attr_init(&detached) == 0);
+    CHECK(pthread_attr_setdetachstate(&detached, PTHREAD_CREATE_DETACHED) == 0);
+    for (unsigned iteration = 1; iteration <= 128; ++iteration) {
+        pthread_t thread;
+        CHECK(pthread_create(&thread, &detached, return_detached, NULL) == 0);
+        for (unsigned retry = 0; retry < 1000 && atomic_load(&detached_returns) < iteration; ++retry) {
+            struct timespec pause = {0, 1000000};
+            CHECK(nanosleep(&pause, NULL) == 0);
+        }
+        CHECK(atomic_load(&detached_returns) == iteration);
+    }
+    CHECK(pthread_attr_destroy(&detached) == 0);
+    debug("native-terminal-window: 128 detached retirements passed\n");
     struct winsize initial = {24, 80, 640, 480}, actual = {0};
     int master = -1, slave = -1;
     CHECK(openpty(&master, &slave, NULL, NULL, &initial) == 0);
