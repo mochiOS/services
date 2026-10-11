@@ -100,3 +100,67 @@ fn pending_logout_blocks_new_portal_launches_and_session_actions_without_losing_
     assert!(busy.contains("mochi_user_syscall::EAGAIN"));
     assert!(busy.contains("continue;"));
 }
+
+#[test]
+fn unpublished_launches_are_recorded_before_readiness_and_reclaimed_without_new_login() {
+    let source = include_str!("../../service-manager/src/bootstrap.rs");
+    let launch = source
+        .split("fn launch_session_image(")
+        .nth(1)
+        .unwrap()
+        .split("fn create(")
+        .next()
+        .unwrap();
+    assert!(
+        launch
+            .find("session_processes.insert(id, process)")
+            .unwrap()
+            < launch.find("unpublished_session_roots.push(id)").unwrap()
+    );
+    let login = source
+        .split("fn login_next_session(")
+        .nth(1)
+        .unwrap()
+        .split("fn schedule_failed_session_cleanup(")
+        .next()
+        .unwrap();
+    assert!(
+        login.find("failed_session_cleanup.is_some()").unwrap()
+            < login.find("self.launch_next_session(previous)").unwrap()
+    );
+    assert!(login.contains("!self.unpublished_session_roots.is_empty()"));
+    assert!(login.contains("self.schedule_failed_session_cleanup()"));
+    let schedule = source
+        .split("fn schedule_failed_session_cleanup(")
+        .nth(1)
+        .unwrap()
+        .split("fn retry_failed_session_cleanup(")
+        .next()
+        .unwrap();
+    assert!(schedule.contains("SessionTeardown::begin_failed_launch("));
+    assert!(schedule.contains("&self.session_processes"));
+    assert!(
+        schedule
+            .find("self.failed_session_cleanup = Some(")
+            .unwrap()
+            < schedule
+                .find("self.unpublished_session_roots.clear()")
+                .unwrap()
+    );
+    let retry = source
+        .split("fn retry_failed_session_cleanup(")
+        .nth(1)
+        .unwrap()
+        .split("fn launch_next_session(")
+        .next()
+        .unwrap();
+    assert!(retry.contains("terminate_owned_root(&cleanup.client, &mut self.session_processes"));
+    assert!(retry.contains("Ok(true) => self.failed_session_cleanup = None"));
+    let failure = retry.split("Err(error) => {").nth(1).unwrap();
+    assert!(!failure.contains("session_processes.remove"));
+    assert!(!failure.contains("failed_session_cleanup = None"));
+    assert!(failure.contains("sleep_milliseconds(10)"));
+    let resident = source.split("fn resident(").nth(1).unwrap();
+    assert!(resident.contains("runtime.schedule_failed_session_cleanup()"));
+    assert!(resident.contains("runtime.retry_failed_session_cleanup()"));
+}

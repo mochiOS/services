@@ -22,6 +22,14 @@ struct Runtime {
     filesystem_endpoint: Option<platform::handle::Handle>,
     posix_endpoint: Option<platform::handle::Handle>,
     session_processes: alloc::collections::BTreeMap<u64, NativeProcess>,
+    unpublished_session_roots: alloc::vec::Vec<u64>,
+    failed_session_cleanup: Option<PendingSessionCleanup>,
+}
+
+struct PendingSessionCleanup {
+    plan: SessionTeardown,
+    client: mochios_posix_client::Client<mochios_posix_client::SyscallEndpointTransport>,
+    last_error: Option<u64>,
 }
 
 struct PendingLogout {
@@ -35,6 +43,77 @@ struct PendingLogout {
 
 impl Runtime {
     fn login_next_session(&mut self, previous: ActiveSession) -> Option<ActiveSession> {
+        if self.failed_session_cleanup.is_some() || !self.unpublished_session_roots.is_empty() {
+            return None;
+        }
+        let session = self.launch_next_session(previous);
+        if session.is_some() {
+            self.unpublished_session_roots.clear();
+        } else {
+            self.schedule_failed_session_cleanup();
+        }
+        session
+    }
+
+    fn schedule_failed_session_cleanup(&mut self) {
+        if self.unpublished_session_roots.is_empty() || self.failed_session_cleanup.is_some() {
+            return;
+        }
+        let Some(endpoint) = self.posix_endpoint else {
+            // Keep the unpublished roots and owners; never replace authority
+            // with a PID lookup or discard them when the endpoint is missing.
+            return;
+        };
+        match SessionTeardown::begin_failed_launch(
+            &self.unpublished_session_roots,
+            &self.session_processes,
+        ) {
+            Ok(plan) => {
+                self.failed_session_cleanup = Some(PendingSessionCleanup {
+                    plan,
+                    client: mochios_posix_client::Client::new(
+                        mochios_posix_client::SyscallEndpointTransport::new(endpoint),
+                    ),
+                    last_error: None,
+                });
+                self.unpublished_session_roots.clear();
+            }
+            Err(error) => platform::logln!(
+                "service-manager.service: failed session cleanup preflight failed: {error:?}"
+            ),
+        }
+    }
+
+    fn retry_failed_session_cleanup(&mut self) {
+        let Some(cleanup) = self.failed_session_cleanup.as_mut() else {
+            return;
+        };
+        match cleanup.plan.step(|process_id| {
+            terminate_owned_root(&cleanup.client, &mut self.session_processes, process_id)
+        }) {
+            Ok(true) => self.failed_session_cleanup = None,
+            Ok(false) => cleanup.last_error = None,
+            Err(error) => {
+                let status = match error {
+                    mochios_posix_client::ClientError::Transport(error) => errno(error),
+                    mochios_posix_client::ClientError::Remote(status) => {
+                        status.unsigned_abs() as u64
+                    }
+                    _ => mochi_user_syscall::EIO,
+                };
+                if cleanup.last_error != Some(status) {
+                    platform::logln!(
+                        "service-manager.service: failed session cleanup pending errno={}",
+                        status
+                    );
+                    cleanup.last_error = Some(status);
+                }
+                let _ = platform::thread::sleep_milliseconds(10);
+            }
+        }
+    }
+
+    fn launch_next_session(&mut self, previous: ActiveSession) -> Option<ActiveSession> {
         let identity = self.authenticate_session(None)?;
         let session_id = previous.next_id();
         let workspace_pid = self.spawn_workspace_session(identity, session_id)?;
@@ -83,6 +162,7 @@ impl Runtime {
         )?;
         let id = process.process_id();
         self.session_processes.insert(id, process);
+        self.unpublished_session_roots.push(id);
         Ok(id)
     }
 
@@ -98,6 +178,8 @@ impl Runtime {
             filesystem_endpoint: None,
             posix_endpoint: None,
             session_processes: alloc::collections::BTreeMap::new(),
+            unpublished_session_roots: alloc::vec::Vec::new(),
+            failed_session_cleanup: None,
         })
     }
 
@@ -916,8 +998,18 @@ fn resident(
         crate::portal::prewarm(&mut runtime.permission_prompt, runtime.logger_endpoint);
     }
     let mut request_bytes = [0u8; 1024];
+    if let Some(runtime) = runtime.as_mut() {
+        if active_session.is_some() {
+            runtime.unpublished_session_roots.clear();
+        } else {
+            runtime.schedule_failed_session_cleanup();
+        }
+    }
     let mut pending_logout: Option<PendingLogout> = None;
     loop {
+        if let Some(runtime) = runtime.as_mut() {
+            runtime.retry_failed_session_cleanup();
+        }
         if let (Some(logout), Some(runtime)) = (pending_logout.as_mut(), runtime.as_mut()) {
             // Binder exits voluntarily on success. Do not acknowledge until
             // all preceding roots have confirmed exit AND released their refs.

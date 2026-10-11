@@ -1,4 +1,5 @@
 use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 use mochios_posix_client::{Client, ClientError, ObjectTransport};
 
 use crate::native_process::NativeProcess;
@@ -10,7 +11,7 @@ use crate::native_process::NativeProcess;
 /// Only a confirmed reply advances the cursor, including across retries.
 #[derive(Debug)]
 pub(crate) struct SessionTeardown {
-    roots: [Option<u64>; 3],
+    roots: Vec<u64>,
     cursor: usize,
 }
 
@@ -27,15 +28,34 @@ impl SessionTeardown {
         binder: u64,
         owners: &BTreeMap<u64, NativeProcess>,
     ) -> Result<Self, TeardownError> {
-        let roots = [linux, Some(workspace), Some(binder)];
+        Self::from_roots(
+            [linux, Some(workspace), Some(binder)]
+                .into_iter()
+                .flatten()
+                .collect(),
+            owners,
+        )
+    }
+
+    /// Roll back only the roots recorded by this unpublished launch, in reverse
+    /// creation order. Validate the whole batch before attempting any teardown.
+    pub(crate) fn begin_failed_launch(
+        launched: &[u64],
+        owners: &BTreeMap<u64, NativeProcess>,
+    ) -> Result<Self, TeardownError> {
+        Self::from_roots(launched.iter().rev().copied().collect(), owners)
+    }
+
+    fn from_roots(
+        roots: Vec<u64>,
+        owners: &BTreeMap<u64, NativeProcess>,
+    ) -> Result<Self, TeardownError> {
         for (index, root) in roots.iter().enumerate() {
-            if let Some(process_id) = root {
-                if *process_id == 0 || roots[..index].contains(root) {
-                    return Err(TeardownError::InvalidRoot);
-                }
-                if !owners.contains_key(process_id) {
-                    return Err(TeardownError::MissingOwner);
-                }
+            if *root == 0 || roots[..index].contains(root) {
+                return Err(TeardownError::InvalidRoot);
+            }
+            if !owners.contains_key(root) {
+                return Err(TeardownError::MissingOwner);
             }
         }
         Ok(Self { roots, cursor: 0 })
@@ -44,7 +64,7 @@ impl SessionTeardown {
     /// The resident loop uses this boundary to acknowledge logout immediately
     /// before Binder's final step, not while other session roots still run.
     pub(crate) fn pending_root(&self) -> Option<u64> {
-        self.roots[self.cursor..].iter().flatten().next().copied()
+        self.roots.get(self.cursor).copied()
     }
 
     /// Attempt at most one root per resident-loop iteration. Errors leave the
@@ -54,11 +74,7 @@ impl SessionTeardown {
         &mut self,
         mut terminate: impl FnMut(u64) -> Result<(), E>,
     ) -> Result<bool, E> {
-        while self.cursor < self.roots.len() {
-            let Some(process_id) = self.roots[self.cursor] else {
-                self.cursor += 1;
-                continue;
-            };
+        if let Some(process_id) = self.pending_root() {
             terminate(process_id)?;
             self.cursor += 1;
             return Ok(self.cursor == self.roots.len());

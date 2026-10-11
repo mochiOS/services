@@ -172,6 +172,114 @@ fn session_owners(closed: &Rc<Cell<usize>>) -> BTreeMap<u64, native_process::Nat
 }
 
 #[test]
+fn failed_launch_retries_reverse_creation_order_without_touching_other_owners() {
+    let closed = Rc::new(Cell::new(0));
+    let mut owners = session_owners(&closed);
+    // Deliberately not PID order: these roots were created in this order.
+    let mut plan =
+        production::SessionTeardown::begin_failed_launch(&[1050, 1030], &owners).unwrap();
+    assert_eq!(plan.pending_root(), Some(1030));
+    assert_eq!(
+        plan.step(|_| Err::<(), _>(protocol::STATUS_EAGAIN)),
+        Err(protocol::STATUS_EAGAIN)
+    );
+    assert_eq!(plan.pending_root(), Some(1030));
+    assert_eq!(owners.len(), 3);
+    assert_eq!(closed.get(), 0);
+    let mut attempted = Vec::new();
+    let mut release = |root| -> Result<(), i32> {
+        attempted.push(root);
+        owners.remove(&root).unwrap();
+        Ok(())
+    };
+    assert_eq!(plan.step(&mut release), Ok(false));
+    assert_eq!(plan.pending_root(), Some(1050));
+    assert_eq!(plan.step(&mut release), Ok(true));
+    assert_eq!(plan.step(&mut release), Ok(true));
+    assert_eq!(attempted, [1030, 1050]);
+    assert_eq!(closed.get(), 2);
+    assert!(owners.contains_key(&1040));
+}
+
+#[test]
+fn failed_launch_preflight_requires_all_retained_owners_and_allows_an_empty_batch() {
+    let closed = Rc::new(Cell::new(0));
+    let owners = session_owners(&closed);
+    for roots in [&[0][..], &[1030, 1030][..]] {
+        assert_eq!(
+            production::SessionTeardown::begin_failed_launch(roots, &owners).unwrap_err(),
+            production::TeardownError::InvalidRoot
+        );
+    }
+    assert_eq!(
+        production::SessionTeardown::begin_failed_launch(&[1030, 9999], &owners).unwrap_err(),
+        production::TeardownError::MissingOwner
+    );
+    let mut empty = production::SessionTeardown::begin_failed_launch(&[], &owners).unwrap();
+    assert_eq!(
+        empty.step(|_| -> Result<(), i32> { panic!("no root") }),
+        Ok(true)
+    );
+    assert_eq!(closed.get(), 0);
+}
+
+#[test]
+fn failed_launch_lost_reclaim_reply_preserves_the_root_and_retries_the_same_handle() {
+    let closed = Rc::new(Cell::new(0));
+    let mut owners = session_owners(&closed);
+    let mut plan =
+        production::SessionTeardown::begin_failed_launch(&[1040, 1030], &owners).unwrap();
+    let client = Client::new(Replies {
+        expected_handle: Cell::new(52),
+        status: Cell::new(0),
+        fail_transport: Cell::new(false),
+        calls: Cell::new(0),
+        reclaim_status: Cell::new(0),
+        lose_reclaim_reply: Cell::new(true),
+        opcodes: RefCell::new(Vec::new()),
+    });
+    assert_eq!(
+        plan.step(|root| production::terminate_owned_root(&client, &mut owners, root)),
+        Err(ClientError::Transport(7))
+    );
+    assert_eq!(plan.pending_root(), Some(1030));
+    assert!(owners.get(&1030).unwrap().confirmed);
+    assert_eq!(closed.get(), 0);
+    assert_eq!(
+        plan.step(|root| production::terminate_owned_root(&client, &mut owners, root)),
+        Ok(false)
+    );
+    assert_eq!(closed.get(), 1);
+    assert_eq!(plan.pending_root(), Some(1040));
+    assert_eq!(
+        *client.transport().opcodes.borrow(),
+        [
+            protocol::OP_PROCESS_TREE_TERMINATE,
+            protocol::OP_PROCESS_TREE_RECLAIM,
+            protocol::OP_PROCESS_TREE_RECLAIM
+        ]
+    );
+    client.transport().expected_handle.set(53);
+    client.transport().status.set(protocol::STATUS_EPERM);
+    assert_eq!(
+        plan.step(|root| production::terminate_owned_root(&client, &mut owners, root)),
+        Err(ClientError::Remote(protocol::STATUS_EPERM))
+    );
+    assert_eq!(plan.pending_root(), Some(1040));
+    assert_eq!(closed.get(), 1);
+    assert!(owners.contains_key(&1040));
+    client.transport().status.set(0);
+    client.transport().reclaim_status.set(0);
+    assert_eq!(
+        plan.step(|root| production::terminate_owned_root(&client, &mut owners, root)),
+        Ok(true)
+    );
+    assert_eq!(closed.get(), 2);
+    assert_eq!(owners.len(), 1);
+    assert!(owners.contains_key(&1050));
+}
+
+#[test]
 fn logout_preflights_all_roots_without_closing_or_terminating_any_process() {
     use production::TeardownError::{InvalidRoot, MissingOwner};
     let closed = Rc::new(Cell::new(0));
