@@ -2054,6 +2054,24 @@ impl<H: Copy> PosixService<H> {
         {
             return Err(protocol::STATUS_EAGAIN);
         }
+        // Catchable job-control signals are still delivered to userspace
+        // handlers, but their default stop action is discarded for an orphaned
+        // group. Check at application time: membership may change after dequeue.
+        // SIGSTOP remains unconditional, and the exact token is consumed even
+        // when the default action does nothing.
+        if signal != protocol::SIGNAL_STOP {
+            let session = *self
+                .session_ids
+                .get(&peer.process_id)
+                .ok_or(protocol::STATUS_ESRCH)?;
+            let group = *self
+                .process_groups
+                .get(&peer.process_id)
+                .ok_or(protocol::STATUS_ESRCH)?;
+            if !self.non_orphaned_groups().contains(&(session, group)) {
+                return Ok(());
+            }
+        }
         processes.suspend(process)?;
         let stopped = self
             .process_wait_states

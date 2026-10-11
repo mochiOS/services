@@ -3465,6 +3465,8 @@ fn nocldstop_is_inherited_and_suppresses_only_stop_continue_notifications() {
             &mut filesystem,
         )
         .unwrap();
+    set_own_job_group(&mut service, child);
+    set_own_job_group(&mut service, grandchild);
     let mut processes = RecordingProcesses::default();
     processes.states.insert(641, ProcessLifecycle::Running);
     processes.states.insert(642, ProcessLifecycle::Running);
@@ -3775,6 +3777,7 @@ fn wait_reports_authenticated_stop_and_continue_transitions_once() {
             &mut filesystem,
         )
         .unwrap();
+    set_own_job_group(&mut service, child);
     let mut processes = RecordingProcesses::default();
     processes.states.insert(64, ProcessLifecycle::Running);
     let no_state_options = protocol::WaitRequest {
@@ -4566,6 +4569,25 @@ fn orphan_job_family() -> (
     (service, peers, filesystem, processes)
 }
 
+fn set_own_job_group(service: &mut PosixService, member: PeerIdentity) {
+    let mut group = [0; protocol::PROCESS_GROUP_REQUEST_LEN];
+    protocol::encode_process_group_request(0, 0, &mut group).unwrap();
+    assert_eq!(
+        service
+            .handle(
+                member,
+                protocol::Header {
+                    opcode: protocol::OP_SET_PROCESS_GROUP,
+                    ..Default::default()
+                },
+                &group
+            )
+            .header
+            .status,
+        0
+    );
+}
+
 fn stop_job_member(
     service: &mut PosixService,
     parent: PeerIdentity,
@@ -4587,6 +4609,188 @@ fn consume_job_hangup_and_continue(service: &mut PosixService, member: PeerIdent
         let mut bytes = [0; protocol::SIGNAL_DELIVERY_LEN];
         protocol::encode_signal_delivery(delivery, &mut bytes).unwrap();
         service.complete_signal_delivery(member, &bytes).unwrap();
+    }
+}
+
+#[test]
+fn orphaned_groups_discard_default_terminal_stops_but_not_delivery_or_sigstop() {
+    let (mut service, [_, parent, _, _, member], mut filesystem, mut processes) =
+        orphan_job_family();
+    for signal in [
+        protocol::SIGNAL_TSTP,
+        protocol::SIGNAL_TTIN,
+        protocol::SIGNAL_TTOU,
+    ] {
+        let delivery = deliver_signal(&mut service, parent, member, signal);
+        assert_eq!(delivery.signal, signal);
+        let mut bytes = [0; protocol::SIGNAL_DELIVERY_LEN];
+        protocol::encode_signal_delivery(delivery, &mut bytes).unwrap();
+        // Handler delivery is not filtered; completing it remains legal.
+        service.complete_signal_delivery(member, &bytes).unwrap();
+        let delivery = deliver_signal(&mut service, parent, member, signal);
+        for forged in [
+            protocol::SignalDelivery {
+                token: delivery.token + 1,
+                ..delivery
+            },
+            protocol::SignalDelivery {
+                signal: protocol::SIGNAL_STOP,
+                ..delivery
+            },
+        ] {
+            protocol::encode_signal_delivery(forged, &mut bytes).unwrap();
+            assert_eq!(
+                service.report_process_stopped(member, &bytes, &mut processes),
+                Err(protocol::STATUS_EAGAIN)
+            );
+        }
+        protocol::encode_signal_delivery(delivery, &mut bytes).unwrap();
+        // Even a backend failure must be irrelevant when no stop is allowed.
+        processes.suspend_error = Some(-5);
+        assert_eq!(
+            service.report_process_stopped(member, &bytes, &mut processes),
+            Ok(())
+        );
+        assert_eq!(
+            service.report_process_stopped(member, &bytes, &mut processes),
+            Err(protocol::STATUS_EAGAIN)
+        );
+        assert_eq!(
+            service.complete_signal_delivery(member, &bytes),
+            Err(protocol::STATUS_EAGAIN)
+        );
+        assert!(processes.suspended.is_empty());
+        assert_eq!(
+            service.signal_state(parent.process_id).unwrap().pending(),
+            0
+        );
+        assert_eq!(
+            service
+                .wait_child(
+                    parent,
+                    protocol::WaitRequest {
+                        selector: member.process_id as i64,
+                        options: protocol::WAIT_NOHANG | protocol::WAIT_UNTRACED,
+                    },
+                    &mut filesystem,
+                    &mut processes
+                )
+                .unwrap(),
+            protocol::WaitResult::default()
+        );
+    }
+    processes.suspend_error = None;
+    stop_job_member(&mut service, parent, member, &mut processes);
+    assert_eq!(processes.suspended, [member.process_id as u32]);
+    let stopped = service
+        .wait_child(
+            parent,
+            protocol::WaitRequest {
+                selector: member.process_id as i64,
+                options: protocol::WAIT_NOHANG | protocol::WAIT_UNTRACED,
+            },
+            &mut filesystem,
+            &mut processes,
+        )
+        .unwrap();
+    assert_eq!(stopped.status, (protocol::SIGNAL_STOP << 8) | 0x7f);
+}
+
+#[test]
+fn connected_jobs_can_stop_for_all_three_catchable_job_control_signals() {
+    let (mut service, [_, parent, member, _, _], mut filesystem, mut processes) =
+        orphan_job_family();
+    for signal in [
+        protocol::SIGNAL_TSTP,
+        protocol::SIGNAL_TTIN,
+        protocol::SIGNAL_TTOU,
+    ] {
+        let delivery = deliver_signal(&mut service, parent, member, signal);
+        let mut bytes = [0; protocol::SIGNAL_DELIVERY_LEN];
+        protocol::encode_signal_delivery(delivery, &mut bytes).unwrap();
+        service
+            .report_process_stopped(member, &bytes, &mut processes)
+            .unwrap();
+        let stopped = service
+            .wait_child(
+                parent,
+                protocol::WaitRequest {
+                    selector: member.process_id as i64,
+                    options: protocol::WAIT_NOHANG | protocol::WAIT_UNTRACED,
+                },
+                &mut filesystem,
+                &mut processes,
+            )
+            .unwrap();
+        assert_eq!(stopped.status, (signal << 8) | 0x7f);
+        let continued = deliver_signal(&mut service, parent, member, protocol::SIGNAL_CONT);
+        protocol::encode_signal_delivery(continued, &mut bytes).unwrap();
+        service.complete_signal_delivery(member, &bytes).unwrap();
+    }
+    assert_eq!(processes.suspended, [member.process_id as u32; 3]);
+}
+
+#[test]
+fn default_stop_rechecks_group_connection_after_signal_dequeue() {
+    for initially_connected in [false, true] {
+        let (mut service, [_, parent, member, _, _], _, mut processes) = orphan_job_family();
+        let mut group = [0; protocol::PROCESS_GROUP_REQUEST_LEN];
+        if !initially_connected {
+            protocol::encode_process_group_request(0, parent.process_id as i64, &mut group)
+                .unwrap();
+            assert_eq!(
+                service
+                    .handle(
+                        member,
+                        protocol::Header {
+                            opcode: protocol::OP_SET_PROCESS_GROUP,
+                            ..Default::default()
+                        },
+                        &group
+                    )
+                    .header
+                    .status,
+                0
+            );
+        }
+        let delivery = deliver_signal(&mut service, parent, member, protocol::SIGNAL_TSTP);
+        if initially_connected {
+            protocol::encode_process_group_request(0, parent.process_id as i64, &mut group)
+                .unwrap();
+            assert_eq!(
+                service
+                    .handle(
+                        member,
+                        protocol::Header {
+                            opcode: protocol::OP_SET_PROCESS_GROUP,
+                            ..Default::default()
+                        },
+                        &group
+                    )
+                    .header
+                    .status,
+                0
+            );
+        } else {
+            set_own_job_group(&mut service, member);
+        }
+        let mut bytes = [0; protocol::SIGNAL_DELIVERY_LEN];
+        protocol::encode_signal_delivery(delivery, &mut bytes).unwrap();
+        service
+            .report_process_stopped(member, &bytes, &mut processes)
+            .unwrap();
+        assert_eq!(
+            processes.suspended,
+            if initially_connected {
+                vec![]
+            } else {
+                vec![member.process_id as u32]
+            }
+        );
+        assert_eq!(
+            service.report_process_stopped(member, &bytes, &mut processes),
+            Err(protocol::STATUS_EAGAIN)
+        );
     }
 }
 
