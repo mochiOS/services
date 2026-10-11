@@ -294,3 +294,26 @@ fn native_probe_numbers_match_authoritative_abi() {
         assert!(probe.contains(&format!("{name} = {}", number as u64)));
     }
 }
+
+#[test]
+fn execution_clone_uses_the_same_vm_image_as_address_space_clone() {
+    let source = include_str!("../../../core/src/syscall/process.rs");
+    let clone = source
+        .split("fn clone_current_process(")
+        .nth(1)
+        .unwrap()
+        .split("pub fn clone_process(")
+        .next()
+        .unwrap();
+    assert!(clone.contains("CloneSource::capture(p)"));
+    assert!(clone.contains("vm_source.clone_image()"));
+    assert!(clone.contains("vm_image.install(&mut child_proc)"));
+    assert!(!clone.contains("clone_user_page_table("));
+    assert!(!clone.contains("ForkPagePolicy"));
+    assert!(
+        clone.find("if user_context.rip == 0").unwrap()
+            < clone.find("vm_source.clone_image()").unwrap()
+    );
+    let process = include_str!("../../../core/src/task/process.rs");
+    assert!(!process.contains("clone_memory_regions_for_fork"));
+}
