@@ -41,7 +41,7 @@ fn userspace_wait_converts_caught_handlers_but_retries_other_wakeups() {
         .split("fn syscall_write(")
         .next()
         .unwrap();
-    assert!(wait.contains("caught_signal_generation.load"));
+    assert!(wait.contains("nonrestart_signal_generation.load"));
     assert!(wait.contains("return Err(EINTR)"));
     assert!(wait.contains("Err(EAGAIN) => continue"));
 }

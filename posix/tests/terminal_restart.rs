@@ -23,7 +23,7 @@ fn default_job_stop_is_retried_after_resume_without_replaying_success() {
             stops.set(stops.get() + 1);
             Ok(())
         },
-        || (0, stops.get()),
+        || (0, stops.get(), 0),
         || false,
     );
     assert_eq!(result, Ok(3));
@@ -35,7 +35,7 @@ fn default_job_stop_is_retried_after_resume_without_replaying_success() {
 fn caught_handlers_and_unknown_interruptions_are_never_silently_retried() {
     for caught in [false, true] {
         let attempts = Cell::new(0);
-        let generations = Cell::new((0u64, 0u64));
+        let generations = Cell::new((0u64, 0u64, 0u64));
         let result: Result<(), _> = terminal_operation(
             || {
                 attempts.set(attempts.get() + 1);
@@ -43,7 +43,7 @@ fn caught_handlers_and_unknown_interruptions_are_never_silently_retried() {
             },
             || {
                 if caught {
-                    generations.set((1, 1));
+                    generations.set((1, 1, 0));
                 }
                 Ok(())
             },
@@ -58,18 +58,23 @@ fn caught_handlers_and_unknown_interruptions_are_never_silently_retried() {
 #[test]
 fn failed_drains_and_non_interrupt_errors_propagate_without_retry() {
     assert_eq!(
-        terminal_operation::<()>(|| Err(EINTR), || Err(EIO), || (0, 0), || true),
+        terminal_operation::<()>(|| Err(EINTR), || Err(EIO), || (0, 0, 0), || true),
         Err(EIO)
     );
     assert_eq!(
-        terminal_operation::<()>(|| Err(EIO), || panic!("must not drain"), || (0, 0), || true),
+        terminal_operation::<()>(
+            || Err(EIO),
+            || panic!("must not drain"),
+            || (0, 0, 0),
+            || true
+        ),
         Err(EIO)
     );
     assert_eq!(
         terminal_operation(
             || Ok(2),
             || panic!("partial success must not replay"),
-            || (0, 0),
+            || (0, 0, 0),
             || panic!("success must not consult restart policy"),
         ),
         Ok(2)
@@ -92,7 +97,7 @@ fn stops_observed_inside_native_call_and_wrapped_generations_are_detected() {
                 }
             },
             || Ok(()),
-            || (7, stops.get()),
+            || (7, stops.get(), 0),
             || false,
         ),
         Ok(())
@@ -114,7 +119,7 @@ fn backend_default_stop_can_be_selected_before_another_threads_upcall_starts() {
                 }
             },
             || Ok(()),
-            || (0, 0),
+            || (0, 0, 0),
             || true,
         ),
         Ok(())
@@ -145,7 +150,7 @@ fn runtime_records_actual_stops_and_wraps_only_terminal_paths() {
         .next()
         .unwrap();
     assert!(wrapper.contains("drain_terminal_signals"));
-    assert!(wrapper.contains("caught_signal_generation.load"));
+    assert!(wrapper.contains("nonrestart_signal_generation.load"));
     assert!(wrapper.contains("JOB_STOP_GENERATION.load"));
     assert!(source.contains("static JOB_STOPS_IN_FLIGHT: AtomicU32"));
     assert!(wrapper.contains("synchronization::wait_u32("));

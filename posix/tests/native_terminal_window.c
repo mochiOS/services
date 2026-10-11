@@ -70,6 +70,17 @@ static void *interrupt_handle_wait(void *unused) {
     return NULL;
 }
 
+static void *complete_restarted_read(void *master_address) {
+    if (interrupt_handle_wait(NULL) != NULL) return (void *)(uintptr_t)1;
+    for (unsigned retry = 0; retry < 1000 && waited_signal < 2; ++retry) {
+        struct timespec pause = {0, 1000000};
+        nanosleep(&pause, NULL);
+    }
+    if (waited_signal != 2 || write(*(int *)master_address, "r\n", 2) != 2)
+        return (void *)(uintptr_t)1;
+    return NULL;
+}
+
 #define CHECK(condition) do { \
     if (!(condition)) { \
         char message[128]; \
@@ -302,7 +313,23 @@ int main(void) {
     CHECK(read(STDIN_FILENO, &interrupted_byte, 1) == -1 && errno == EINTR);
     CHECK(waited_signal == 1);
     CHECK(pthread_join(writer, &worker_result) == 0 && worker_result == NULL);
-    debug("native-terminal-window: PASS empty-terminal wait interruption, default-stop resume, controls, I/O and SIGWINCH\n");
+    action.sa_flags = SA_RESTART;
+    CHECK(sigaction(SIGUSR1, &action, NULL) == 0);
+    struct sigaction installed;
+    CHECK(sigaction(SIGUSR1, NULL, &installed) == 0);
+    CHECK(installed.sa_flags == SA_RESTART);
+    CHECK(pthread_create(&writer, NULL, complete_restarted_read, &master) == 0);
+    char restarted_bytes[2];
+    CHECK(read(STDIN_FILENO, restarted_bytes, sizeof(restarted_bytes)) == 2);
+    CHECK(memcmp(restarted_bytes, "r\n", 2) == 0 && waited_signal == 2);
+    CHECK(pthread_join(writer, &worker_result) == 0 && worker_result == NULL);
+    CHECK(pthread_create(&writer, NULL, interrupt_handle_wait, NULL) == 0);
+    struct timespec sleep_request = {1, 0}, remaining = {0};
+    errno = 0;
+    CHECK(nanosleep(&sleep_request, &remaining) == -1 && errno == EINTR);
+    CHECK(waited_signal == 3 && remaining.tv_sec >= 0 && remaining.tv_sec <= 1);
+    CHECK(pthread_join(writer, &worker_result) == 0 && worker_result == NULL);
+    debug("native-terminal-window: PASS SA_RESTART read, EINTR read/sleep, default-stop resume, controls and SIGWINCH\n");
     CHECK(close(master) == 0);
     return 0;
 }
