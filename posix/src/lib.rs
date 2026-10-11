@@ -484,6 +484,7 @@ pub struct PosixService<H: Copy = u32> {
     children: BTreeMap<u64, BTreeSet<u64>>,
     launch_creators: BTreeMap<u64, u64>,
     tree_teardowns: BTreeMap<u64, Vec<u64>>,
+    orphaned_processes: BTreeSet<u64>,
     process_groups: BTreeMap<u64, u64>,
     session_ids: BTreeMap<u64, u64>,
     controlling_terminals: BTreeMap<u64, u64>,
@@ -509,6 +510,7 @@ impl PosixService<u32> {
             children: BTreeMap::new(),
             launch_creators: BTreeMap::new(),
             tree_teardowns: BTreeMap::new(),
+            orphaned_processes: BTreeSet::new(),
             process_groups: BTreeMap::new(),
             session_ids: BTreeMap::new(),
             controlling_terminals: BTreeMap::new(),
@@ -747,17 +749,20 @@ impl<H: Copy> PosixService<H> {
 
     /// Observes native process lifecycle without assigning POSIX meaning in
     /// the kernel. Each child exit queues one coalescing SIGCHLD for its POSIX
-    /// parent and remains waitable until the parent reaps it.
+    /// parent. Exited parents relinquish unpinned children to the orphan reaper.
     pub fn refresh_child_exit_notifications<P: ProcessBackend<H>>(
         &mut self,
         processes: &mut P,
     ) -> Result<usize, i32> {
         let candidates: Vec<(u64, H)> = self
-            .parents
+            .processes
             .keys()
             .filter_map(|child_id| {
                 let wait_state = self.process_wait_states.get(child_id)?;
-                if wait_state.exit_notified {
+                let has_children = self.has_reparentable_children(*child_id);
+                if (wait_state.exit_notified || !self.parents.contains_key(child_id))
+                    && !has_children
+                {
                     return None;
                 }
                 self.processes
@@ -768,23 +773,120 @@ impl<H: Copy> PosixService<H> {
             .collect();
         let mut notified = 0;
         for (child_id, handle) in candidates {
-            if matches!(processes.status(handle)?, ProcessLifecycle::Exited { .. })
-                && self.note_child_exited(child_id)?
-            {
-                notified += 1;
+            if matches!(processes.status(handle)?, ProcessLifecycle::Exited { .. }) {
+                self.reparent_children_of_exited(child_id);
+                if self.parents.contains_key(&child_id) && self.note_child_exited(child_id)? {
+                    notified += 1;
+                }
             }
         }
         Ok(notified)
     }
 
-    /// Native process handles which can still produce a first exit event.
+    /// The inherited bootstrap process is the userspace orphan reaper. Moving
+    /// parent links never changes credentials, descriptors or object authority.
+    /// A launcher's frozen teardown retains its relationships until reclaim.
+    fn reparent_children_of_exited(&mut self, parent: u64) {
+        let Some(reaper) = self.bootstrap_process_id else {
+            return;
+        };
+        if parent == reaper
+            || !self.sessions.contains_key(&reaper)
+            || self.tree_teardown_owns(parent)
+        {
+            return;
+        }
+        let children: Vec<u64> = self
+            .children
+            .get(&parent)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|child| !self.tree_teardown_owns(*child))
+            .collect();
+        for child in children {
+            self.parents.insert(child, reaper);
+            self.children.entry(reaper).or_default().insert(child);
+            if let Some(siblings) = self.children.get_mut(&parent) {
+                siblings.remove(&child);
+            }
+            self.orphaned_processes.insert(child);
+            // An already-observed zombie now belongs to a different parent.
+            if let Some(state) = self.process_wait_states.get_mut(&child) {
+                state.exit_notified = false;
+            }
+        }
+        if self.children.get(&parent).is_some_and(BTreeSet::is_empty) {
+            self.children.remove(&parent);
+        }
+    }
+
+    fn has_reparentable_children(&self, process_id: u64) -> bool {
+        self.bootstrap_process_id
+            .is_some_and(|reaper| reaper != process_id)
+            && !self.tree_teardown_owns(process_id)
+            && self.children.get(&process_id).is_some_and(|children| {
+                children
+                    .iter()
+                    .any(|child| !self.tree_teardown_owns(*child))
+            })
+    }
+
+    fn reap_is_pinned(&self, process_id: u64) -> bool {
+        self.tree_teardown_owns(process_id)
+            || self
+                .children
+                .get(&process_id)
+                .into_iter()
+                .flatten()
+                .any(|child| self.tree_teardown_owns(*child))
+    }
+
+    /// Release only orphan objects whose native exit is confirmed. The service
+    /// implements init's reaping policy; mnu knows no parent or orphan semantics.
+    pub fn reap_orphans<F: FilesystemBackend<H>, P: ProcessBackend<H>>(
+        &mut self,
+        filesystem: &mut F,
+        processes: &mut P,
+    ) -> Result<usize, i32> {
+        let candidates: Vec<u64> = self.orphaned_processes.iter().copied().collect();
+        let mut reaped = 0;
+        for process_id in candidates {
+            if self.reap_is_pinned(process_id) {
+                continue;
+            }
+            let handle = *self
+                .processes
+                .get(&process_id)
+                .ok_or(protocol::STATUS_ESRCH)?;
+            if !matches!(processes.status(handle)?, ProcessLifecycle::Exited { .. }) {
+                continue;
+            }
+            self.reparent_children_of_exited(process_id);
+            let parent = *self
+                .parents
+                .get(&process_id)
+                .ok_or(protocol::STATUS_ESRCH)?;
+            self.reap_child(parent, process_id, filesystem, processes);
+            reaped += 1;
+        }
+        Ok(reaped)
+    }
+
+    /// Native process handles whose lifecycle can trigger a first child-exit
+    /// notification or reparenting, including roots without a POSIX parent.
     /// The service main loop combines these with its IPC endpoint in one
     /// generic HandleWaitMany operation.
     pub fn child_lifecycle_handles(&self) -> Vec<H> {
-        self.parents
+        self.processes
             .keys()
             .filter_map(|child_id| match self.process_wait_states.get(child_id) {
-                Some(state) if !state.exit_notified => self.processes.get(child_id).copied(),
+                Some(state)
+                    if (!state.exit_notified && self.parents.contains_key(child_id))
+                        || self.has_reparentable_children(*child_id) =>
+                {
+                    self.processes.get(child_id).copied()
+                }
                 _ => None,
             })
             .collect()
@@ -1193,7 +1295,7 @@ impl<H: Copy> PosixService<H> {
         if self.launch_creators.get(&child.process_id) != Some(&peer.process_id) {
             return Err(protocol::STATUS_EPERM);
         }
-        if self.tree_teardown_owns(child.process_id) {
+        if self.reap_is_pinned(child.process_id) {
             return Err(protocol::STATUS_EAGAIN);
         }
         let handle = self
@@ -1225,7 +1327,7 @@ impl<H: Copy> PosixService<H> {
     ) -> Result<protocol::WaitResult, i32> {
         let candidates = self.matching_child_ids(peer, request)?;
         for child in candidates {
-            if self.tree_teardown_owns(child) {
+            if self.reap_is_pinned(child) {
                 continue;
             }
             let handle = self
@@ -1275,7 +1377,7 @@ impl<H: Copy> PosixService<H> {
     ) -> Result<Vec<H>, i32> {
         self.matching_child_ids(peer, request)?
             .into_iter()
-            .filter(|child| !self.tree_teardown_owns(*child))
+            .filter(|child| !self.reap_is_pinned(*child))
             .map(|child| {
                 self.processes
                     .get(&child)
@@ -1333,6 +1435,8 @@ impl<H: Copy> PosixService<H> {
         filesystem: &mut F,
         processes: &mut P,
     ) {
+        self.reparent_children_of_exited(child_id);
+        self.orphaned_processes.remove(&child_id);
         if let Some(children) = self.children.get_mut(&parent_id) {
             children.remove(&child_id);
             if children.is_empty() {

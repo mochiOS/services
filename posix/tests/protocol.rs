@@ -3102,6 +3102,303 @@ fn child_exit_queues_sigchld_before_the_parent_waits() {
     assert_eq!(waited.status, 4 << 8);
 }
 
+fn orphan_family() -> (
+    PosixService,
+    PeerIdentity,
+    PeerIdentity,
+    PeerIdentity,
+    RecordingFilesystem,
+    RecordingProcesses,
+) {
+    let init = PeerIdentity {
+        process_id: 1400,
+        effective_uid: 0,
+        effective_gid: 0,
+    };
+    let parent = PeerIdentity {
+        process_id: 1401,
+        effective_uid: 505,
+        effective_gid: 24,
+    };
+    let child = PeerIdentity {
+        process_id: 1402,
+        ..parent
+    };
+    let mut service = PosixService::new();
+    service
+        .initialize_bootstrap_process(
+            AuthenticatedProcess {
+                handle: 140,
+                process_id: init.process_id,
+            },
+            0,
+            0,
+            &[],
+        )
+        .unwrap();
+    let mut filesystem = RecordingFilesystem::default();
+    service
+        .adopt_spawned_child(
+            init,
+            AuthenticatedProcess {
+                handle: 141,
+                process_id: parent.process_id,
+            },
+            505,
+            24,
+            &[42],
+            &mut filesystem,
+        )
+        .unwrap();
+    assert_eq!(
+        service
+            .handle_objects(
+                parent,
+                protocol::Header {
+                    opcode: protocol::OP_GETCWD,
+                    ..Default::default()
+                },
+                &[],
+                &[],
+                &mut filesystem
+            )
+            .response
+            .header
+            .status,
+        0
+    );
+    service
+        .adopt_launched_child(
+            init,
+            AuthenticatedProcess {
+                handle: 141,
+                process_id: parent.process_id,
+            },
+            AuthenticatedProcess {
+                handle: 142,
+                process_id: child.process_id,
+            },
+            &mut filesystem,
+        )
+        .unwrap();
+    let mut processes = RecordingProcesses::default();
+    for handle in [140, 141, 142] {
+        processes.states.insert(handle, ProcessLifecycle::Running);
+    }
+    (service, init, parent, child, filesystem, processes)
+}
+
+#[test]
+fn orphan_reparenting_preserves_credentials_and_objects_then_reaps_exit_once() {
+    let (mut service, init, parent, child, mut filesystem, mut processes) = orphan_family();
+    let credentials = *service.session(child.process_id).unwrap();
+    let directories = *service.session_directories(child.process_id).unwrap();
+    let groups = service
+        .supplementary_groups(child.process_id)
+        .unwrap()
+        .to_vec();
+    let released = filesystem.released.len();
+    processes
+        .states
+        .insert(141, ProcessLifecycle::Exited { exit_code: 4 });
+    assert_eq!(
+        service.refresh_child_exit_notifications(&mut processes),
+        Ok(1)
+    );
+    assert_eq!(service.parent_id(child.process_id), Some(init.process_id));
+    assert!(service.is_child(init.process_id, child.process_id));
+    assert!(!service.is_child(parent.process_id, child.process_id));
+    assert_eq!(service.session(child.process_id), Some(&credentials));
+    assert_eq!(
+        service.session_directories(child.process_id),
+        Some(&directories)
+    );
+    assert_eq!(
+        service.supplementary_groups(child.process_id),
+        Some(groups.as_slice())
+    );
+    assert_eq!(filesystem.released.len(), released);
+    assert_eq!(service.reap_orphans(&mut filesystem, &mut processes), Ok(0));
+    assert!(processes.released.is_empty());
+    let wait = protocol::WaitRequest {
+        selector: parent.process_id as i64,
+        options: 0,
+    };
+    assert_eq!(
+        service
+            .wait_child(init, wait, &mut filesystem, &mut processes)
+            .unwrap()
+            .process_id,
+        parent.process_id
+    );
+    assert_eq!(processes.released, [141]);
+    // A failed lifecycle query must retain both the orphan's ProcessHandle and
+    // its filesystem objects, rather than treating uncertainty as exit.
+    processes.states.remove(&142);
+    let released = filesystem.released.len();
+    assert_eq!(
+        service.reap_orphans(&mut filesystem, &mut processes),
+        Err(protocol::STATUS_ESRCH)
+    );
+    assert!(service.session(child.process_id).is_some());
+    assert_eq!(filesystem.released.len(), released);
+    processes
+        .states
+        .insert(142, ProcessLifecycle::Exited { exit_code: 7 });
+    assert_eq!(service.reap_orphans(&mut filesystem, &mut processes), Ok(1));
+    assert_eq!(service.reap_orphans(&mut filesystem, &mut processes), Ok(0));
+    assert_eq!(processes.released, [141, 142]);
+    assert!(service.session(child.process_id).is_none());
+    assert_eq!(service.parent_id(child.process_id), None);
+    assert!(!service.is_child(init.process_id, child.process_id));
+    assert_eq!(filesystem.released.len(), released + 2);
+    assert!(processes.terminated.is_empty());
+}
+
+#[test]
+fn immediate_parent_wait_reparents_children_without_needing_a_refresh_first() {
+    let (mut service, init, parent, child, mut filesystem, mut processes) = orphan_family();
+    processes
+        .states
+        .insert(141, ProcessLifecycle::Exited { exit_code: 0 });
+    service
+        .wait_child(
+            init,
+            protocol::WaitRequest {
+                selector: parent.process_id as i64,
+                options: 0,
+            },
+            &mut filesystem,
+            &mut processes,
+        )
+        .unwrap();
+    assert_eq!(service.parent_id(child.process_id), Some(init.process_id));
+    assert!(service.session(child.process_id).is_some());
+    assert_eq!(service.reap_orphans(&mut filesystem, &mut processes), Ok(0));
+    assert_eq!(processes.released, [141]);
+}
+
+#[test]
+fn orphan_reparenting_does_not_change_a_frozen_tree_or_release_its_parent_early() {
+    let (mut service, init, parent, child, mut filesystem, mut processes) = orphan_family();
+    let root = AuthenticatedProcess {
+        handle: 142,
+        process_id: child.process_id,
+    };
+    service
+        .begin_launched_tree_termination(init, root, &mut processes)
+        .unwrap();
+    processes
+        .states
+        .insert(141, ProcessLifecycle::Exited { exit_code: 0 });
+    service
+        .refresh_child_exit_notifications(&mut processes)
+        .unwrap();
+    assert_eq!(service.parent_id(child.process_id), Some(parent.process_id));
+    assert_eq!(service.reap_orphans(&mut filesystem, &mut processes), Ok(0));
+    let wait = protocol::WaitRequest {
+        selector: parent.process_id as i64,
+        options: protocol::WAIT_NOHANG,
+    };
+    assert_eq!(
+        service
+            .wait_child(init, wait, &mut filesystem, &mut processes)
+            .unwrap()
+            .process_id,
+        0
+    );
+    assert!(service.wait_handles(init, wait).unwrap().is_empty());
+    assert!(service.child_lifecycle_handles().is_empty());
+    assert!(service.session(parent.process_id).is_some());
+    assert!(processes.released.is_empty());
+    service
+        .reclaim_launched_tree(init, root, &mut filesystem, &mut processes)
+        .unwrap();
+    assert_eq!(
+        service
+            .wait_child(init, wait, &mut filesystem, &mut processes)
+            .unwrap()
+            .process_id,
+        parent.process_id
+    );
+    assert_eq!(processes.released, [142, 141]);
+}
+
+#[test]
+fn a_native_root_without_a_posix_parent_still_wakes_orphan_processing() {
+    let (mut service, init, _, _, mut filesystem, mut processes) = orphan_family();
+    let root = PeerIdentity {
+        process_id: 1403,
+        effective_uid: 505,
+        effective_gid: 24,
+    };
+    service
+        .initialize_process(
+            init,
+            AuthenticatedProcess {
+                handle: 143,
+                process_id: root.process_id,
+            },
+            505,
+            24,
+            &[52],
+        )
+        .unwrap();
+    service
+        .adopt_child(
+            root,
+            AuthenticatedProcess {
+                handle: 144,
+                process_id: 1404,
+            },
+            &mut filesystem,
+        )
+        .unwrap();
+    processes.states.insert(143, ProcessLifecycle::Running);
+    processes.states.insert(144, ProcessLifecycle::Running);
+    assert!(service.child_lifecycle_handles().contains(&143));
+    assert!(!service.child_lifecycle_handles().contains(&140));
+    processes
+        .states
+        .insert(143, ProcessLifecycle::Exited { exit_code: 0 });
+    service
+        .refresh_child_exit_notifications(&mut processes)
+        .unwrap();
+    assert_eq!(service.parent_id(1404), Some(init.process_id));
+    assert!(!service.child_lifecycle_handles().contains(&143));
+    assert!(service.child_lifecycle_handles().contains(&144));
+    assert_eq!(service.reap_orphans(&mut filesystem, &mut processes), Ok(0));
+    assert!(processes.released.is_empty());
+}
+
+#[test]
+fn asynchronous_abort_cannot_reparent_or_release_children_before_confirmed_exit() {
+    let (mut service, init, parent, child, mut filesystem, mut processes) = orphan_family();
+    let root = AuthenticatedProcess {
+        handle: 141,
+        process_id: parent.process_id,
+    };
+    processes.termination_pending = true;
+    assert_eq!(
+        service.abort_launched_child(init, root, &mut filesystem, &mut processes),
+        Err(protocol::STATUS_EAGAIN)
+    );
+    assert_eq!(service.parent_id(child.process_id), Some(parent.process_id));
+    assert!(service.session(parent.process_id).is_some());
+    assert!(processes.released.is_empty());
+    assert!(filesystem.released.is_empty());
+    processes
+        .states
+        .insert(141, ProcessLifecycle::Exited { exit_code: 127 });
+    service
+        .abort_launched_child(init, root, &mut filesystem, &mut processes)
+        .unwrap();
+    assert_eq!(service.parent_id(child.process_id), Some(init.process_id));
+    assert_eq!(processes.released, [141]);
+    assert_eq!(processes.terminated, [(141, 127)]);
+    assert_eq!(service.reap_orphans(&mut filesystem, &mut processes), Ok(0));
+}
+
 #[test]
 fn nocldstop_is_inherited_and_suppresses_only_stop_continue_notifications() {
     let parent = PeerIdentity {
