@@ -19,6 +19,7 @@ struct State {
     closed: Vec<u32>,
     exited: bool,
     fail_stage: u8,
+    duplicated: Option<(u32, u64)>,
 }
 
 static STATE: Mutex<State> = Mutex::new(State {
@@ -27,11 +28,24 @@ static STATE: Mutex<State> = Mutex::new(State {
     closed: Vec::new(),
     exited: false,
     fail_stage: 0,
+    duplicated: None,
 });
 
 pub mod handle {
     pub type Handle = u32;
     pub const HANDLE_RIGHT_WAIT: u64 = mnu_abi::HANDLE_RIGHT_WAIT;
+
+    pub fn duplicate(source: Handle, rights: u64) -> Result<Handle, super::SysError> {
+        assert_eq!(source, 99);
+        assert_eq!(rights, HANDLE_RIGHT_WAIT);
+        let mut state = super::STATE.lock().unwrap();
+        state.duplicated = Some((source, rights));
+        if state.fail_stage == 4 {
+            Err(super::SysError)
+        } else {
+            Ok(7)
+        }
+    }
 
     pub fn close(handle: Handle) -> Result<(), super::SysError> {
         super::STATE.lock().unwrap().closed.push(handle);
@@ -96,7 +110,7 @@ pub mod process {
 mod production;
 
 #[test]
-fn readiness_resolves_the_launch_thread_before_watching_its_process() {
+fn readiness_separates_launch_threads_from_retained_process_handles() {
     let watch = production::ProcessWatch::open(42).unwrap();
     assert_eq!(
         STATE.lock().unwrap().requested,
@@ -134,4 +148,45 @@ fn readiness_resolves_the_launch_thread_before_watching_its_process() {
     assert_eq!(production::ProcessWatchError::ReadStatus(22).errno(), 22);
     drop(watch);
     assert_eq!(STATE.lock().unwrap().closed, [7, 7]);
+
+    // Even when the launch thread has vanished, the native path needs only
+    // the caller's retained Handle. It must never fall back to inspection.
+    {
+        let mut state = STATE.lock().unwrap();
+        state.inspected_thread = None;
+        state.requested = None;
+        state.fail_stage = 1;
+        state.exited = false;
+    }
+    let target = production::ProcessWatchTarget::RetainedHandle(99);
+    let watch = production::ProcessWatch::open(target).unwrap();
+    assert_eq!(watch.exit_status(), Ok(None));
+    STATE.lock().unwrap().exited = true;
+    assert_eq!(watch.exit_status(), Ok(Some(127)));
+    assert_eq!(
+        STATE.lock().unwrap().duplicated,
+        Some((99, handle::HANDLE_RIGHT_WAIT))
+    );
+    assert_eq!(STATE.lock().unwrap().inspected_thread, None);
+    assert_eq!(STATE.lock().unwrap().requested, None);
+    drop(watch);
+    assert_eq!(STATE.lock().unwrap().closed, [7, 7, 7]);
+
+    STATE.lock().unwrap().fail_stage = 4;
+    assert!(matches!(
+        production::ProcessWatch::open(target),
+        Err(production::ProcessWatchError::DuplicateProcess(22))
+    ));
+    assert_eq!(STATE.lock().unwrap().closed, [7, 7, 7]);
+
+    // A successful duplication followed by an invalid-object/status failure
+    // releases the duplicate while leaving the supplied Handle untouched.
+    STATE.lock().unwrap().fail_stage = 3;
+    assert!(matches!(
+        production::ProcessWatch::open(target),
+        Err(production::ProcessWatchError::ReadStatus(22))
+    ));
+    assert_eq!(STATE.lock().unwrap().closed, [7, 7, 7, 7]);
+    assert_eq!(STATE.lock().unwrap().inspected_thread, None);
+    assert_eq!(STATE.lock().unwrap().requested, None);
 }

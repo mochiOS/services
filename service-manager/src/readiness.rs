@@ -2,7 +2,7 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use mochi_user_platform as platform;
 
-use crate::process_watch::ProcessWatch;
+use crate::process_watch::{ProcessWatch, ProcessWatchTarget};
 use crate::service_config::{NETWORK_READY_TIMEOUT_TICKS, SERVICE_READY_TIMEOUT_TICKS};
 const BOOTSTRAP_MESSAGE_LEN: usize = 1024;
 
@@ -273,20 +273,20 @@ impl ReadyHandshake {
     pub(crate) fn wait_for_service_ready(
         &mut self,
         service: ReadyService,
-        process_id: u64,
+        process_target: impl Into<ProcessWatchTarget>,
     ) -> Result<(), ReadyError> {
-        self.wait(service, process_id, true)
+        self.wait(service, process_target.into(), true)
     }
 
     pub(crate) fn wait_for_endpoint_ready(
         &mut self,
         service: ReadyService,
-        process_id: u64,
+        process_target: impl Into<ProcessWatchTarget>,
     ) -> Result<platform::handle::Handle, ReadyError> {
         if !matches!(service, ReadyService::Filesystem | ReadyService::Posix) {
             return Err(ReadyError::InvalidMessage);
         }
-        let process = ProcessWatch::open(process_id).map_err(ReadyError::ProcessStatus)?;
+        let process = ProcessWatch::open(process_target).map_err(ReadyError::ProcessStatus)?;
         let started = current_ticks()?;
         loop {
             if let Some(status) = self.status(service) {
@@ -366,9 +366,9 @@ impl ReadyHandshake {
 
     pub(crate) fn wait_for_login_complete(
         &mut self,
-        process_id: u64,
+        process_target: impl Into<ProcessWatchTarget>,
     ) -> Result<platform::service_ready::SessionIdentity, ReadyError> {
-        let process = ProcessWatch::open(process_id).map_err(ReadyError::ProcessStatus)?;
+        let process = ProcessWatch::open(process_target).map_err(ReadyError::ProcessStatus)?;
         loop {
             if let Some(notification) = receive_notification()? {
                 match notification {
@@ -405,10 +405,10 @@ impl ReadyHandshake {
     fn wait(
         &mut self,
         service: ReadyService,
-        process_id: u64,
+        process_target: ProcessWatchTarget,
         has_timeout: bool,
     ) -> Result<(), ReadyError> {
-        let process = ProcessWatch::open(process_id).map_err(ReadyError::ProcessStatus)?;
+        let process = ProcessWatch::open(process_target).map_err(ReadyError::ProcessStatus)?;
         let started = has_timeout.then(current_ticks).transpose()?;
         let timeout = ready_timeout(service);
         loop {
