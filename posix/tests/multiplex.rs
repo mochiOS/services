@@ -1,4 +1,104 @@
 use mochios_posix_client::multiplex::select_ready_count;
+use mochios_posix_client::multiplex::{wait, WaitError};
+use std::cell::Cell;
+
+#[test]
+fn caught_handler_interrupts_before_entry_and_after_a_native_return() {
+    let result = wait::<i32>(
+        1,
+        || 2,
+        || panic!("must not wait"),
+        || panic!("must not check timeout"),
+    );
+    assert_eq!(result, Err(WaitError::Interrupted));
+    for ready in [false, true] {
+        let generation = Cell::new(1);
+        let result = wait::<i32>(
+            1,
+            || generation.get(),
+            || {
+                generation.set(2);
+                Ok(ready)
+            },
+            || panic!("caught handler takes precedence"),
+        );
+        assert_eq!(result, Err(WaitError::Interrupted));
+    }
+}
+
+#[test]
+fn unrelated_wakeups_retry_until_ready_or_the_original_deadline_expires() {
+    let attempts = Cell::new(0);
+    let clocks = Cell::new(0);
+    let result = wait::<i32>(
+        1,
+        || 1,
+        || {
+            attempts.set(attempts.get() + 1);
+            Ok(attempts.get() == 3)
+        },
+        || {
+            clocks.set(clocks.get() + 1);
+            Ok(false)
+        },
+    );
+    assert_eq!(result, Ok(()));
+    assert_eq!((attempts.get(), clocks.get()), (3, 2));
+    let clock = Cell::new(10);
+    let deadline = 13;
+    assert_eq!(
+        wait::<i32>(
+            1,
+            || 1,
+            || Ok(false),
+            || {
+                clock.set(clock.get() + 1);
+                Ok(clock.get() >= deadline)
+            }
+        ),
+        Ok(())
+    );
+    assert_eq!(clock.get(), deadline);
+}
+
+#[test]
+fn native_and_clock_errors_are_not_converted_to_false_timeouts() {
+    assert_eq!(
+        wait(1, || 1, || Err(9), || Ok(false)),
+        Err(WaitError::Io(9))
+    );
+    assert_eq!(
+        wait(1, || 1, || Ok(false), || Err(10)),
+        Err(WaitError::Io(10))
+    );
+}
+
+#[test]
+fn both_entry_points_guard_the_all_handler_generation_not_only_nonrestart_handlers() {
+    let runtime = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
+    let bridge = runtime
+        .split("fn wait_for_multiplex(")
+        .nth(1)
+        .unwrap()
+        .split("fn select_deadline(")
+        .next()
+        .unwrap();
+    assert!(bridge.contains("HandleWaitManyGuarded"));
+    assert!(bridge.contains("&control.caught_signal_generation as *const AtomicU64"));
+    assert!(!bridge.contains("nonrestart_signal_generation"));
+    for (begin, end) in [("fn select(", "fn poll("), ("fn poll(", "fn getgroups(")] {
+        let entry = runtime
+            .split(begin)
+            .nth(1)
+            .unwrap()
+            .split(end)
+            .next()
+            .unwrap();
+        assert!(entry.contains("control.caught_signal_generation.load(Ordering::Acquire)"));
+        assert!(entry.contains("wait_for_multiplex(&mut items[..item_count]"));
+        assert!(!entry.contains("SyscallNumber::HandleWaitMany,"));
+    }
+}
 
 #[test]
 fn select_counts_each_ready_set_instead_of_distinct_descriptors() {

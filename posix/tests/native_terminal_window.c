@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pty.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
@@ -165,6 +166,18 @@ static void *blocked_pipe_writer(void *context) {
 static void *close_pipe_reader(void *context) {
     struct timespec pause = {0, 100000000};
     if (nanosleep(&pause, NULL) != 0 || close(*(int *)context) != 0)
+        return (void *)(uintptr_t)1;
+    return NULL;
+}
+
+static void *continue_then_make_readable(void *context) {
+    sigset_t mask;
+    if (sigemptyset(&mask) != 0 || sigaddset(&mask, SIGUSR1) != 0
+        || pthread_sigmask(SIG_BLOCK, &mask, NULL) != 0)
+        return (void *)(uintptr_t)1;
+    struct timespec pause = {0, 50000000};
+    if (nanosleep(&pause, NULL) != 0 || kill(getpid(), SIGCONT) != 0
+        || nanosleep(&pause, NULL) != 0 || write(*(int *)context, "m", 1) != 1)
         return (void *)(uintptr_t)1;
     return NULL;
 }
@@ -523,6 +536,46 @@ int main(void) {
             CHECK(close(pipes[0]) == 0 && close(pipes[1]) == 0);
         }
     }
+    for (unsigned restart = 0; restart < 2; ++restart) {
+        action.sa_flags = restart ? SA_RESTART : 0;
+        CHECK(sigaction(SIGUSR1, &action, NULL) == 0);
+        for (unsigned mode = 0; mode < 4; ++mode) {
+            CHECK(pipe(pipes) == 0);
+            CHECK(pthread_create(&writer, NULL, interrupt_handle_wait, NULL) == 0);
+            sig_atomic_t before = atomic_load(&waited_signal);
+            struct pollfd descriptor = {pipes[0], POLLIN, 0};
+            fd_set readable;
+            FD_ZERO(&readable);
+            FD_SET(pipes[0], &readable);
+            struct timeval timeout = {1, 0};
+            errno = 0;
+            int result;
+            if (mode == 0) result = poll(&descriptor, 1, 1000);
+            else if (mode == 1) result = select(pipes[0] + 1, &readable, NULL, NULL, &timeout);
+            else if (mode == 2) result = poll(NULL, 0, 1000);
+            else result = select(0, NULL, NULL, NULL, &timeout);
+            CHECK(result == -1 && errno == EINTR && atomic_load(&waited_signal) == before + 1);
+            CHECK(pthread_join(writer, &worker_result) == 0 && worker_result == NULL);
+            CHECK(close(pipes[0]) == 0 && close(pipes[1]) == 0);
+        }
+    }
+    for (unsigned selecting = 0; selecting < 2; ++selecting) {
+        CHECK(pipe(pipes) == 0);
+        CHECK(pthread_create(&writer, NULL, continue_then_make_readable, &pipes[1]) == 0);
+        struct pollfd descriptor = {pipes[0], POLLIN, 0};
+        fd_set readable;
+        FD_ZERO(&readable);
+        FD_SET(pipes[0], &readable);
+        struct timeval timeout = {1, 0};
+        int result = selecting ? select(pipes[0] + 1, &readable, NULL, NULL, &timeout)
+            : poll(&descriptor, 1, 1000);
+        CHECK(result == 1 && (selecting ? FD_ISSET(pipes[0], &readable) : (descriptor.revents & POLLIN) != 0));
+        char byte = 0;
+        CHECK(read(pipes[0], &byte, 1) == 1 && byte == 'm');
+        CHECK(pthread_join(writer, &worker_result) == 0 && worker_result == NULL);
+        CHECK(close(pipes[0]) == 0 && close(pipes[1]) == 0);
+    }
+    debug("native-terminal-window: multiplex interruption and unrelated wakeups passed\n");
     struct sigaction pipe_action;
     memset(&pipe_action, 0, sizeof(pipe_action));
     pipe_action.sa_handler = on_pipe;
@@ -564,7 +617,7 @@ int main(void) {
     CHECK(waitpid(broken_child, &broken_status, 0) == broken_child);
     CHECK(WIFSIGNALED(broken_status) && WTERMSIG(broken_status) == SIGPIPE);
     CHECK(close(pipes[1]) == 0);
-    debug("native-terminal-window: PASS thread-directed SIGPIPE, partial writes, waits and terminal regressions\n");
+    debug("native-terminal-window: PASS poll/select interruption, SIGPIPE, waits and terminal regressions\n");
     CHECK(close(master) == 0);
     return 0;
 }
