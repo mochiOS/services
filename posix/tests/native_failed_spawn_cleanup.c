@@ -133,6 +133,47 @@ static int inspect_service_masks(void) {
     return 0;
 }
 
+static void exit_from_signal_handler(int signal_number) {
+    (void)signal_number;
+    pthread_exit((void *)0x55);
+}
+
+static void *receive_signal_then_exit(void *unused) {
+    (void)unused;
+    sigset_t mask = UINT64_C(1) << (SIGUSR2 - 1);
+    if (pthread_sigmask(SIG_UNBLOCK, &mask, NULL) != 0 || kill(getpid(), SIGUSR2) != 0)
+        return (void *)1;
+    struct timespec pause = {0, 1000000};
+    for (unsigned spin = 0; spin < 5000; ++spin) nanosleep(&pause, NULL);
+    return (void *)2;
+}
+
+static int inspect_abandoned_deliveries(void) {
+    sigset_t mask = UINT64_C(1) << (SIGUSR2 - 1), previous;
+    struct sigaction action, old_action;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = exit_from_signal_handler;
+    CHECK(sigaction(SIGUSR2, &action, &old_action) == 0);
+    CHECK(pthread_sigmask(SIG_BLOCK, &mask, &previous) == 0);
+    /* Exceed the service's 64-delivery limit. No handler returns to the
+     * completion RPC; each joined native thread must release its own record. */
+    for (unsigned cycle = 0; cycle < 70; ++cycle) {
+        pthread_t thread;
+        void *result = NULL;
+        CHECK(pthread_create(&thread, NULL, receive_signal_then_exit, NULL) == 0);
+        CHECK(pthread_join(thread, &result) == 0 && result == (void *)0x55);
+        if ((cycle + 1) % 16 == 0) {
+            struct timespec pause = {2, 0};
+            CHECK(nanosleep(&pause, NULL) == 0);
+            fprintf(stderr, "native-signal-retirement: completed %u handlers\n", cycle + 1);
+        }
+    }
+    CHECK(sigaction(SIGUSR2, &old_action, NULL) == 0);
+    CHECK(pthread_sigmask(SIG_SETMASK, &previous, NULL) == 0);
+    fprintf(stderr, "native-signal-retirement: PASS 70 pthread_exit handlers do not exhaust delivery capacity\n");
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && (strcmp(argv[1], "--exec-child") == 0 ||
                      strcmp(argv[1], "--exec-default-child") == 0)) {
@@ -189,6 +230,7 @@ int main(int argc, char **argv) {
                      : "D"(logger_endpoint), "S"(&flush), "d"(1) : "rcx", "r11", "memory");
     CHECK(send_number < UINT64_MAX - 4094);
     CHECK(inspect_service_masks() == 0);
+    CHECK(inspect_abandoned_deliveries() == 0);
     posix_spawn_file_actions_t actions;
     CHECK(posix_spawn_file_actions_init(&actions) == 0);
     /* FD 63 is in range but unopened. Failure occurs in the registered child,

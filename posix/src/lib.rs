@@ -332,8 +332,15 @@ struct ProcessWaitState {
     continued_pending: bool,
     exit_observed: bool,
     exit_notified: bool,
-    deliveries: BTreeMap<u64, u32>,
+    deliveries: BTreeMap<u64, SignalDeliveryOwner>,
     termination_signal: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SignalDeliveryOwner {
+    signal: u32,
+    // Captured from authenticated dequeue metadata, never from request bytes.
+    thread_id: u64,
 }
 
 impl ProcessWaitState {
@@ -359,8 +366,14 @@ impl ProcessWaitState {
         true
     }
 
-    fn begin_delivery(&mut self, delivery: protocol::SignalDelivery) {
-        self.deliveries.insert(delivery.token, delivery.signal);
+    fn begin_delivery(&mut self, delivery: protocol::SignalDelivery, thread_id: u64) {
+        self.deliveries.insert(
+            delivery.token,
+            SignalDeliveryOwner {
+                signal: delivery.signal,
+                thread_id,
+            },
+        );
     }
 
     fn contains_delivery_token(&self, token: u64) -> bool {
@@ -369,11 +382,11 @@ impl ProcessWaitState {
 
     fn cancel_stop_deliveries(&mut self) {
         self.deliveries
-            .retain(|_, signal| signal_bit(*signal) & JOB_CONTROL_STOP_SIGNALS == 0);
+            .retain(|_, owner| signal_bit(owner.signal) & JOB_CONTROL_STOP_SIGNALS == 0);
     }
 
     fn consume_delivery(&mut self, delivery: protocol::SignalDelivery) -> bool {
-        if self.deliveries.get(&delivery.token).copied() != Some(delivery.signal) {
+        if self.deliveries.get(&delivery.token).map(|owner| owner.signal) != Some(delivery.signal) {
             return false;
         }
         self.deliveries.remove(&delivery.token);
@@ -2178,12 +2191,14 @@ impl<H: Copy> PosixService<H> {
                 status.state == mnu_abi::THREAD_STATE_TERMINATED
             }
         };
-        if terminated
-            && self
-                .signal_masks
-                .remove(&(identity.process_id, identity.thread_id))
-                .is_some()
-        {
+        if terminated {
+            self.signal_masks.remove(&(identity.process_id, identity.thread_id));
+            if let Some(wait) = self.process_wait_states.get_mut(&identity.process_id) {
+                // A selected signal was already delivered to this thread.
+                // Discard its abandoned completion token; do not redeliver it.
+                wait.deliveries
+                    .retain(|_, owner| owner.thread_id != identity.thread_id);
+            }
             if self
                 .signals
                 .get(&identity.process_id)
@@ -2250,7 +2265,7 @@ impl<H: Copy> PosixService<H> {
             .copied()
             .ok_or(protocol::STATUS_ESRCH)?;
         if opcode == protocol::OP_SIGNAL_THREAD_DEQUEUE {
-            self.dequeue_signal_with_mask(sender.process_id, blocked)
+            self.dequeue_signal_with_mask(sender, blocked)
         } else {
             let pending = self
                 .signals
@@ -2264,7 +2279,12 @@ impl<H: Copy> PosixService<H> {
         }
     }
 
-    fn dequeue_signal_with_mask(&mut self, process_id: u64, blocked: u64) -> Result<Vec<u8>, i32> {
+    fn dequeue_signal_with_mask(
+        &mut self,
+        sender: mnu_abi::ExecutionIdentity,
+        blocked: u64,
+    ) -> Result<Vec<u8>, i32> {
+        let process_id = sender.process_id;
         let signal = self
             .signals
             .get(&process_id)
@@ -2290,7 +2310,7 @@ impl<H: Copy> PosixService<H> {
                 .dequeue(blocked);
             debug_assert_eq!(dequeued, signal);
             let delivery = protocol::SignalDelivery { signal, token };
-            state.begin_delivery(delivery);
+            state.begin_delivery(delivery, sender.thread_id);
             token
         } else {
             0

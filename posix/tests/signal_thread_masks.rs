@@ -656,3 +656,71 @@ fn live_threads_and_failed_or_mismatched_observations_are_not_reclaimed() {
         );
     }
 }
+
+#[test]
+fn reclaiming_abandoned_deliveries_frees_capacity_without_touching_live_owners() {
+    let service = service();
+    let exited = client(&service, 101, 501);
+    let live = client(&service, 101, 502);
+    let other_process = client(&service, 102, 501);
+    for caller in [&exited, &live, &other_process] {
+        caller
+            .thread_signal_mask(protocol::SIGNAL_MASK_INITIALIZE, 0)
+            .unwrap();
+    }
+    let mut abandoned = Vec::new();
+    let mut retained = Vec::new();
+    for index in 0..protocol::SIGNAL_MAX {
+        exited.send_signal(101, 30).unwrap();
+        let caller = if index % 2 == 0 { &exited } else { &live };
+        let delivery = caller.thread_dequeue_signal_delivery().unwrap();
+        assert_eq!(delivery.signal, 30);
+        if index % 2 == 0 {
+            abandoned.push(delivery);
+        } else {
+            retained.push(delivery);
+        }
+    }
+    other_process.send_signal(102, 30).unwrap();
+    let other_delivery = other_process.thread_dequeue_signal_delivery().unwrap();
+    live.send_signal(101, 31).unwrap();
+    assert_eq!(
+        live.thread_dequeue_signal_delivery(),
+        Err(ClientError::Remote(protocol::STATUS_EAGAIN))
+    );
+    let identity = ExecutionIdentity {
+        process_id: 101,
+        thread_id: 501,
+    };
+    assert_eq!(
+        service.borrow_mut().retire_signal_thread(identity, Err(-5)),
+        Err(-5)
+    );
+    assert_eq!(
+        live.thread_dequeue_signal_delivery(),
+        Err(ClientError::Remote(protocol::STATUS_EAGAIN))
+    );
+    assert_eq!(
+        service
+            .borrow_mut()
+            .retire_signal_thread(identity, Err(protocol::STATUS_ESRCH)),
+        Ok(true)
+    );
+    for delivery in abandoned {
+        assert_eq!(
+            exited.complete_signal_delivery(delivery),
+            Err(ClientError::Remote(protocol::STATUS_EAGAIN))
+        );
+    }
+    let pending = live.thread_dequeue_signal_delivery().unwrap();
+    assert_eq!(pending.signal, 31);
+    live.complete_signal_delivery(pending).unwrap();
+    for delivery in retained {
+        live.complete_signal_delivery(delivery).unwrap();
+    }
+    other_process
+        .complete_signal_delivery(other_delivery)
+        .unwrap();
+    assert_eq!(live.pending_signals().unwrap(), 0);
+    assert_eq!(live.thread_dequeue_signal_delivery().unwrap().signal, 0);
+}
