@@ -39,8 +39,9 @@ pub fn call2(number: SyscallNumber, pointer: u64, length: u64) -> SysResult<u64>
     Ok(reply.status as u64)
 }
 pub fn call3(number: SyscallNumber, pointer: u64, length: u64, endpoint: u64) -> SysResult<u64> {
+    assert_eq!(number, SyscallNumber::IpcEndpointIdentityRead);
     assert_eq!(endpoint, 0x4000_0005);
-    call2(number, pointer, length)
+    call2(SyscallNumber::ExecutionIdentityRead, pointer, length)
 }
 #[path = "../../../user/crates/syscall/src/execution.rs"]
 mod production;

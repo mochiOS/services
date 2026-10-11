@@ -1,0 +1,12 @@
+# Test-only Input-slot package. Production Input authority is unchanged.
+[package]
+provenance = "built-in"
+id = "org.mochios.input"
+name = "Native Process Creation Probe"
+version = "1"
+vendor = "mochiOS"
+
+[[binary]]
+path = "/system/services/input.service"
+kind = "service"
+requires = ["fs.read.all", "ipc.client", "process.inspect"]

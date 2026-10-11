@@ -243,7 +243,13 @@ fn generate_native_creation_fixture_record() {
     assert!(text.contains("id = \"org.mochios.input\""));
     assert!(text.contains("name = \"Native Process Creation Probe\""));
     let digest: [u8; 32] = Sha256::digest(&manifest).into();
-    let caps = ["fs.read.all", "fs.write.all", "ipc.client", "process.spawn"];
+    let caps = [
+        "fs.read.all",
+        "fs.write.all",
+        "ipc.client",
+        "process.spawn",
+        "process.inspect",
+    ];
     let verified = VerifiedResponse {
         request_id: 0,
         provenance: InstallProvenance::BuiltIn,
