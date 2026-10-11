@@ -44,17 +44,6 @@ fn main() {
     let delegated_rights = platform::handle::HANDLE_RIGHT_SEND
         | platform::handle::HANDLE_RIGHT_DUPLICATE
         | platform::handle::HANDLE_RIGHT_TRANSFER;
-    if let Err(error) =
-        platform::service_ready::notify_handle(ready_target, 0, endpoint_handle, delegated_rights)
-    {
-        platform::logln!(
-            "posix.service: endpoint publication failed errno={}",
-            error.raw()
-        );
-        platform::process::exit(1);
-    }
-    platform::logln!("posix.service: endpoint ready");
-
     let service_process_id = match platform::process::current_execution_identity() {
         Ok(context) => context.process_id,
         Err(error) => {
@@ -67,6 +56,36 @@ fn main() {
     };
 
     let mut service = PosixService::new();
+    let bootstrap = platform::handle::inherited(protocol::BOOTSTRAP_PROCESS_HANDLE_KEY)
+        .and_then(|handle| {
+            let required =
+                platform::handle::HANDLE_RIGHT_WAIT | platform::handle::HANDLE_RIGHT_SIGNAL;
+            if platform::handle::rights(handle)? != required {
+                return Err(platform::syscall::SysError::from_raw(-22));
+            }
+            platform::process::handle_status(handle).map(|status| (handle, status.process_id))
+        });
+    match bootstrap {
+        Ok((handle, process_id)) => {
+            // Userspace boot policy, never copied from kernel UID/GID fields.
+            if let Err(error) = service.initialize_bootstrap_process(
+                posix_service::AuthenticatedProcess { handle, process_id },
+                0,
+                0,
+                &[],
+            ) {
+                platform::logln!("posix.service: bootstrap registration failed errno={error}");
+                platform::process::exit(1);
+            }
+        }
+        Err(error) => {
+            platform::logln!(
+                "posix.service: missing or invalid bootstrap process errno={}",
+                error.raw()
+            );
+            platform::process::exit(1);
+        }
+    }
     let filesystem_endpoint =
         match platform::handle::inherited(filesystem_protocol::CONTROL_HANDLE_KEY) {
             Ok(endpoint) => endpoint,
@@ -82,6 +101,16 @@ fn main() {
         endpoint: filesystem_endpoint,
     };
     let mut processes = RuntimeProcesses;
+    if let Err(error) =
+        platform::service_ready::notify_handle(ready_target, 0, endpoint_handle, delegated_rights)
+    {
+        platform::logln!(
+            "posix.service: endpoint publication failed errno={}",
+            error.raw()
+        );
+        platform::process::exit(1);
+    }
+    platform::logln!("posix.service: endpoint ready");
     let mut pending_waits = Vec::new();
     let mut signal_threads = BTreeMap::new();
     let mut request_bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];

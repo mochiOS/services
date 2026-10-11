@@ -82,6 +82,19 @@ pub(crate) fn spawn_fixed_service(
     let mut arguments = fixed_service_arguments(service, logger_endpoint, ready_target);
     if service == FixedService::Posix {
         append_filesystem_handle(&mut arguments, filesystem_endpoint);
+        let own_endpoint = platform::ipc::create()?;
+        let rights = platform::handle::HANDLE_RIGHT_WAIT | platform::handle::HANDLE_RIGHT_SIGNAL;
+        let bootstrap = platform::process::open_handle_for_endpoint(
+            own_endpoint,
+            rights | platform::handle::HANDLE_RIGHT_TRANSFER,
+        )?;
+        arguments.push(alloc::format!(
+            "{INHERITED_HANDLE_PREFIX}{}:{bootstrap}:{rights}",
+            mochios_posix_protocol::BOOTSTRAP_PROCESS_HANDLE_KEY,
+        ));
+        let result = spawn(fixed_service_spec(service), &arguments);
+        let _ = platform::handle::close(bootstrap);
+        return result;
     }
     append_posix_handle(&mut arguments, posix_endpoint);
     spawn(fixed_service_spec(service), &arguments)

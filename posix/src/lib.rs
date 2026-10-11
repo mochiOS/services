@@ -526,6 +526,50 @@ impl Default for PosixService<u32> {
 }
 
 impl<H: Copy> PosixService<H> {
+    /// Seeds the initial userspace authority from an explicitly inherited,
+    /// authenticated ProcessHandle, before accepting requests. This operation
+    /// is not an IPC opcode and cannot replace an existing service environment.
+    pub fn initialize_bootstrap_process(
+        &mut self,
+        process: AuthenticatedProcess<H>,
+        uid: u32,
+        gid: u32,
+        groups: &[u32],
+    ) -> Result<(), i32> {
+        if !self.processes.is_empty() || !self.sessions.is_empty() {
+            return Err(protocol::STATUS_EPERM);
+        }
+        if process.process_id == 0
+            || uid == u32::MAX
+            || gid == u32::MAX
+            || groups.len() > protocol::MAX_SUPPLEMENTARY_GROUPS
+        {
+            return Err(STATUS_EINVAL);
+        }
+        let peer = PeerIdentity {
+            process_id: process.process_id,
+            effective_uid: uid,
+            effective_gid: gid,
+        };
+        self.bind_process(peer, process)?;
+        self.sessions.insert(
+            process.process_id,
+            Session {
+                process_id: process.process_id,
+                real_uid: uid,
+                effective_uid: uid,
+                saved_uid: uid,
+                real_gid: gid,
+                effective_gid: gid,
+                saved_gid: gid,
+                umask: 0o022,
+            },
+        );
+        self.supplementary_groups
+            .insert(process.process_id, groups.to_vec());
+        Ok(())
+    }
+
     pub fn session(&self, process_id: u64) -> Option<&Session> {
         self.sessions.get(&process_id)
     }
