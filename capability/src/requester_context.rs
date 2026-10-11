@@ -2,16 +2,58 @@ use mochi_user_platform as platform;
 use mochios_posix_client::ObjectHandleAttachment;
 use mochios_posix_protocol::SessionInfo;
 
-/// Native package identity and POSIX credentials have different authorities.
-/// The legacy context type is only a userspace container here: never copy its
-/// kernel UID/GID into permission policy, and never write POSIX IDs to mnu.
+/// Userspace permission-policy input, not a kernel ABI record. Package identity
+/// comes from native authentication; IDs come exclusively from posix.service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RequesterContext {
+    pub process_id: u64,
+    pub effective_uid: u32,
+    pub effective_gid: u32,
+    pub subject_key_id: [u8; 32],
+    pub provenance: u8,
+    pub package_id_len: u16,
+    pub developer_id_len: u16,
+    pub package_id: [u8; mnu_abi::APPLICATION_ID_FIELD_LEN],
+    pub developer_id: [u8; mnu_abi::APPLICATION_ID_FIELD_LEN],
+}
+
+impl RequesterContext {
+    fn from_authenticated_sources(
+        native: platform::syscall::ThreadSecurityContext,
+        credentials: SessionInfo,
+    ) -> Self {
+        Self {
+            process_id: native.process_id,
+            effective_uid: credentials.effective_uid,
+            effective_gid: credentials.effective_gid,
+            subject_key_id: native.subject_key_id,
+            provenance: native.provenance,
+            package_id_len: native.package_id_len,
+            developer_id_len: native.developer_id_len,
+            package_id: native.package_id,
+            developer_id: native.developer_id,
+        }
+    }
+}
+
+impl Default for RequesterContext {
+    fn default() -> Self {
+        Self::from_authenticated_sources(
+            platform::syscall::ThreadSecurityContext::default(),
+            SessionInfo::default(),
+        )
+    }
+}
+
+/// Authenticate the process object before requesting its POSIX credentials.
+/// Native credential fields are neither read nor overwritten.
 pub(crate) fn read(
     endpoint: u64,
     credentials: impl FnOnce(
         ObjectHandleAttachment<platform::handle::Handle>,
     ) -> Result<SessionInfo, platform::syscall::SysError>,
-) -> Result<platform::syscall::ThreadSecurityContext, platform::syscall::SysError> {
-    let mut context = platform::process::thread_security_context(endpoint)?;
+) -> Result<RequesterContext, platform::syscall::SysError> {
+    let context = platform::process::thread_security_context(endpoint)?;
     let handle = platform::process::open_handle_for_endpoint(
         endpoint,
         platform::handle::HANDLE_RIGHT_WAIT | platform::handle::HANDLE_RIGHT_TRANSFER,
@@ -27,9 +69,9 @@ pub(crate) fn read(
             handle,
             rights: platform::handle::HANDLE_RIGHT_WAIT,
         })?;
-        context.effective_uid = identity.effective_uid;
-        context.effective_gid = identity.effective_gid;
-        Ok(context)
+        Ok(RequesterContext::from_authenticated_sources(
+            context, identity,
+        ))
     })();
     let _ = platform::handle::close(handle);
     result

@@ -113,7 +113,7 @@ pub(crate) fn spawn_application_from_manifest(
         crate::persistent_grant::read_file,
     )?;
     let requester_context = crate::persistent_grant::requester_context(sender)?;
-    let mut grant_context = mochi_user_syscall::ThreadSecurityContext::default();
+    let mut grant_context = crate::requester_context::RequesterContext::default();
     grant_context.effective_uid = requester_context.effective_uid;
     grant_context.effective_gid = requester_context.effective_gid;
     grant_context.subject_key_id = identity.subject_key_id;

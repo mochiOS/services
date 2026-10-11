@@ -68,7 +68,7 @@ pub(crate) fn install_posix_endpoint(
 
 pub(crate) fn requester_context(
     endpoint: u64,
-) -> Result<mochi_user_syscall::ThreadSecurityContext, mochi_user_syscall::SysError> {
+) -> Result<crate::requester_context::RequesterContext, mochi_user_syscall::SysError> {
     crate::requester_context::read(endpoint, |process| {
         with_client(|client| client.process_session_info(process))
     })
@@ -267,7 +267,7 @@ fn replace_grant_db(bytes: &[u8]) -> Result<(), mochi_user_syscall::SysError> {
 }
 
 pub(crate) fn append_persistent_grant(
-    context: &mochi_user_syscall::ThreadSecurityContext,
+    context: &crate::requester_context::RequesterContext,
     capability: &str,
     resource: Option<&str>,
     all_user_grantable: bool,
@@ -321,7 +321,7 @@ pub(crate) fn append_persistent_grant(
 }
 
 fn grant_db_matches(
-    context: &mochi_user_syscall::ThreadSecurityContext,
+    context: &crate::requester_context::RequesterContext,
     capability: &str,
     resource: Option<&str>,
 ) -> bool {
@@ -394,7 +394,7 @@ fn grant_db_matches(
 }
 
 pub(crate) fn has_persistent_grant(
-    context: &mochi_user_syscall::ThreadSecurityContext,
+    context: &crate::requester_context::RequesterContext,
     capability: &str,
     resource: Option<&str>,
 ) -> bool {

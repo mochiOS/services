@@ -291,7 +291,7 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                             == developer_id
                         && requester_context.subject_key_id == identity.subject_key_id
                         && requester_context.provenance == identity.provenance as u8;
-                    let mut target_context = mochi_user_syscall::ThreadSecurityContext::default();
+                    let mut target_context = crate::requester_context::RequesterContext::default();
                     target_context.effective_uid = requester_context.effective_uid;
                     target_context.effective_gid = requester_context.effective_gid;
                     target_context.package_id_len = package_id.len() as u16;

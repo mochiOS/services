@@ -12,13 +12,7 @@ pub mod syscall {
             Self(raw)
         }
     }
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub struct ThreadSecurityContext {
-        pub process_id: u64,
-        pub effective_uid: u32,
-        pub effective_gid: u32,
-        pub package_marker: u32,
-    }
+    pub use mnu_abi::ThreadSecurityContext;
 }
 
 #[derive(Default)]
@@ -58,7 +52,13 @@ pub mod process {
             process_id: 31,
             effective_uid: 0,
             effective_gid: 0,
-            package_marker: 0x1234,
+            package_id: [0x34; mnu_abi::APPLICATION_ID_FIELD_LEN],
+            developer_id: [0x12; mnu_abi::APPLICATION_ID_FIELD_LEN],
+            package_id_len: 7,
+            developer_id_len: 9,
+            subject_key_id: [0x56; 32],
+            provenance: 2,
+            ..Default::default()
         })
     }
     pub fn open_handle_for_endpoint(
@@ -110,7 +110,12 @@ fn credentials_never_fall_back_to_native_root_and_every_acquired_handle_is_close
         })
     })
     .unwrap();
-    assert_eq!((info.process_id, info.package_marker), (31, 0x1234));
+    assert_eq!(info.process_id, 31);
+    assert_eq!(info.package_id, [0x34; mnu_abi::APPLICATION_ID_FIELD_LEN]);
+    assert_eq!(info.developer_id, [0x12; mnu_abi::APPLICATION_ID_FIELD_LEN]);
+    assert_eq!((info.package_id_len, info.developer_id_len), (7, 9));
+    assert_eq!(info.subject_key_id, [0x56; 32]);
+    assert_eq!(info.provenance, 2);
     assert_eq!((info.effective_uid, info.effective_gid), (505, 24));
     assert_eq!(
         STATE.lock().unwrap().events,
@@ -182,4 +187,10 @@ fn all_permission_paths_use_the_posix_credential_adapter() {
     assert!(include_str!("../../capability/manifest.toml").contains("\"process.inspect\""));
     let adapter = include_str!("../../capability/src/persistent_grant.rs");
     assert!(adapter.contains("client.process_session_info(process)"));
+    assert!(!adapter.contains("ThreadSecurityContext"));
+    let context = include_str!("../../capability/src/requester_context.rs");
+    assert!(!context.contains("native.effective_uid"));
+    assert!(!context.contains("native.effective_gid"));
+    assert!(!context.contains("context.effective_uid ="));
+    assert!(!context.contains("context.effective_gid ="));
 }
