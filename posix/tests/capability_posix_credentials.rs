@@ -50,8 +50,6 @@ pub mod process {
         crate::STATE.lock().unwrap().events.push("native-identity");
         Ok(crate::syscall::ThreadSecurityContext {
             process_id: 31,
-            effective_uid: 0,
-            effective_gid: 0,
             package_id: [0x34; mnu_abi::APPLICATION_ID_FIELD_LEN],
             developer_id: [0x12; mnu_abi::APPLICATION_ID_FIELD_LEN],
             package_id_len: 7,

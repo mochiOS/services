@@ -7,6 +7,15 @@ enum { IPC_CREATE = 587, EXECUTION_IDENTITY_READ = 677, IPC_ENDPOINT_IDENTITY_RE
 struct identity { uint64_t process, thread; };
 _Static_assert(sizeof(struct identity) == 16, "native execution identity ABI");
 
+struct security_identity {
+    uint64_t process, thread;
+    uint8_t provenance, reserved0[7], key[32];
+    uint16_t package_length, developer_length;
+    uint32_t reserved1;
+    uint8_t package[128], developer[128];
+};
+_Static_assert(sizeof(struct security_identity) == 320, "credential-free native security ABI");
+
 static int64_t native3(uint64_t number, uint64_t a, uint64_t b, uint64_t c) {
     __asm__ volatile("syscall" : "+a"(number)
                      : "D"(a), "S"(b), "d"(c)
@@ -80,6 +89,26 @@ int main(void) {
     CHECK(caller.process && caller.thread);
     int64_t endpoint = native3(IPC_CREATE, 0, 0, 0);
     CHECK(endpoint > 0 && (uint64_t)endpoint != caller.thread);
+    struct {
+        struct security_identity identity;
+        uint64_t guard;
+    } security;
+    memset(&security, 0x5a, sizeof(security));
+    CHECK(native3(617, 0, (uint64_t)&security.identity, sizeof(security.identity) - 1) == -22);
+    for (unsigned i = 0; i < sizeof(security); ++i)
+        CHECK(((unsigned char *)&security)[i] == 0x5a);
+    CHECK(native3(617, 0, 0, sizeof(security.identity)) == -14);
+    CHECK(native3(617, 0, (uint64_t)&security.identity, sizeof(security.identity)) == 0);
+    CHECK(security.guard == UINT64_C(0x5a5a5a5a5a5a5a5a));
+    CHECK(security.identity.process == caller.process && security.identity.thread == caller.thread);
+    CHECK(security.identity.provenance == 1);
+    CHECK(security.identity.package_length == sizeof("org.mochios.input") - 1);
+    CHECK(memcmp(security.identity.package, "org.mochios.input", security.identity.package_length) == 0);
+#ifdef EXPECT_INSPECTION_DENIED
+    CHECK(native3(617, endpoint, (uint64_t)&security.identity, sizeof(security.identity)) == -1);
+#endif
+    fprintf(stderr, "endpoint-identity: PASS credential-free security identity, "
+                    "exact-size output, package authentication and inspection gate\n");
     memset(&endpoint_owner, 0x5a, sizeof(endpoint_owner));
     struct identity unchanged = endpoint_owner;
     CHECK(native3(IPC_ENDPOINT_IDENTITY_READ, (uint64_t)&endpoint_owner,

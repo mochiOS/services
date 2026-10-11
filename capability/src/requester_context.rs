@@ -46,7 +46,7 @@ impl Default for RequesterContext {
 }
 
 /// Authenticate the process object before requesting its POSIX credentials.
-/// Native credential fields are neither read nor overwritten.
+/// The native record carries no POSIX credential fields.
 pub(crate) fn read(
     endpoint: u64,
     credentials: impl FnOnce(

@@ -1,0 +1,64 @@
+use mnu_abi::ThreadSecurityContext;
+
+#[test]
+fn native_security_context_layout_contains_only_execution_and_package_identity() {
+    // No compatibility padding is kept for the removed POSIX UID/GID fields.
+    assert_eq!(core::mem::size_of::<ThreadSecurityContext>(), 320);
+    assert_eq!(core::mem::align_of::<ThreadSecurityContext>(), 8);
+    assert_eq!(core::mem::offset_of!(ThreadSecurityContext, process_id), 0);
+    assert_eq!(core::mem::offset_of!(ThreadSecurityContext, thread_id), 8);
+    assert_eq!(core::mem::offset_of!(ThreadSecurityContext, provenance), 16);
+    assert_eq!(
+        core::mem::offset_of!(ThreadSecurityContext, subject_key_id),
+        24
+    );
+    assert_eq!(
+        core::mem::offset_of!(ThreadSecurityContext, package_id_len),
+        56
+    );
+    assert_eq!(
+        core::mem::offset_of!(ThreadSecurityContext, developer_id_len),
+        58
+    );
+    assert_eq!(core::mem::offset_of!(ThreadSecurityContext, package_id), 64);
+    assert_eq!(
+        core::mem::offset_of!(ThreadSecurityContext, developer_id),
+        192
+    );
+}
+
+#[test]
+fn native_probe_checks_actual_layout_package_identity_and_inspection_gate() {
+    let probe = include_str!("native_endpoint_identity.c");
+    assert!(probe.contains("sizeof(struct security_identity) == 320"));
+    assert!(probe.contains("security.identity.provenance == 1"));
+    assert!(probe.contains("security.identity.package_length"));
+    assert!(probe.contains("security.guard == UINT64_C(0x5a5a5a5a5a5a5a5a)"));
+    assert!(probe.contains("native3(617, endpoint"));
+    let early = include_str!("native_security_context.c");
+    assert!(early.contains("sizeof(struct security_identity) == 320"));
+    assert!(early.contains("offsetof(struct security_identity, provenance) == 16"));
+    assert!(early.contains("native3(617, endpoint"));
+    assert!(early.contains("org.mochios.capability"));
+}
+
+#[test]
+fn kernel_security_query_does_not_read_posix_credentials() {
+    let kernel = include_str!("../../../core/src/syscall/process.rs");
+    let query = kernel
+        .split("pub fn get_thread_security_context(")
+        .nth(1)
+        .unwrap()
+        .split("/// ユーザー空間の上限アドレス")
+        .next()
+        .unwrap();
+    assert!(!query.contains("credentials"));
+    assert!(!query.contains("effective_uid"));
+    assert!(!query.contains("effective_gid"));
+    // Removing POSIX fields must not remove native authentication or its gate.
+    assert!(query.contains("caller_has_any_capability"));
+    assert!(query.contains("Capability::CapabilitiesManage"));
+    assert!(query.contains("Capability::ProcessInspect"));
+    assert!(query.contains("process.application_identity()"));
+    assert!(query.contains("identity.subject_key_id()"));
+}
