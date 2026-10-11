@@ -1,4 +1,32 @@
 #[test]
+fn descriptor_numbers_and_cloexec_are_not_kernel_process_state() {
+    let objects = include_str!("../../../core/src/task/fd_table.rs");
+    let process = include_str!("../../../core/src/task/process.rs");
+    let exec = include_str!("../../../core/src/syscall/exec.rs");
+    let task = include_str!("../../../core/src/task/mod.rs");
+    for source in [objects, process, exec, task] {
+        for retired in [
+            "FdTable",
+            "FD_BASE",
+            "PROCESS_MAX_FDS",
+            "FD_CLOEXEC",
+            "close_cloexec_fds",
+            "max_fds",
+        ] {
+            assert!(
+                !source.contains(retired),
+                "kernel descriptor policy restored: {retired}"
+            );
+        }
+    }
+    assert!(!objects.contains("from_open_flags"));
+    assert!(objects.contains("pub struct FileHandle"));
+    assert!(objects.contains("pub open: Arc<SpinLock<OpenFile>>"));
+    assert!(process.contains("object_handles:"));
+    assert!(process.contains("retain_launch_context_handles_for_exec"));
+}
+
+#[test]
 fn retired_posix_descriptor_and_stat_handlers_do_not_remain_in_the_kernel() {
     let filesystem = include_str!("../../../core/src/syscall/fs.rs");
     let dispatch = include_str!("../../../core/src/syscall/mod.rs");
