@@ -75,6 +75,105 @@ fn dup_references_the_same_open_file_description_and_clears_cloexec() {
 }
 
 #[test]
+fn minimum_duplication_selects_the_lowest_free_slot_without_replacing() {
+    let mut table = FdTable::new();
+    let mut handles = FakeHandles::default();
+    let source = table
+        .install(Entry {
+            handle: 88,
+            rights: 0x25,
+            descriptor_flags: FD_CLOEXEC,
+        })
+        .unwrap();
+    assert_eq!(
+        table.duplicate_from(source, 7, 10, false, &mut handles),
+        Ok(7)
+    );
+    assert_eq!(
+        table.duplicate_from(source, 7, 10, true, &mut handles),
+        Ok(8)
+    );
+    assert_eq!(table.get(7).unwrap().descriptor_flags, 0);
+    assert_eq!(table.get(8).unwrap().descriptor_flags, FD_CLOEXEC);
+    assert_eq!(table.get(source).unwrap().descriptor_flags, FD_CLOEXEC);
+    assert_eq!(table.get(8).unwrap().rights, 0x25);
+    assert_eq!(handles.cloned, vec![(88, 0x25); 2]);
+    assert!(handles.closed.is_empty());
+    table.close(7, &mut handles).unwrap();
+    assert_eq!(
+        table.duplicate_from(source, 7, 10, false, &mut handles),
+        Ok(7)
+    );
+}
+
+#[test]
+fn failed_duplication_does_not_clone_or_close_handles() {
+    let mut table = FdTable::new();
+    let mut handles = FakeHandles::default();
+    let source = table
+        .install(Entry {
+            handle: 88,
+            rights: 1,
+            descriptor_flags: 0,
+        })
+        .unwrap();
+    assert_eq!(
+        table.duplicate_from(source, 0, 1, false, &mut handles),
+        Err(FdError::InvalidDescriptor)
+    );
+    assert_eq!(
+        table.duplicate_from(source, -1, 3, false, &mut handles),
+        Err(FdError::InvalidDescriptor)
+    );
+    assert_eq!(
+        table.duplicate_from(source, 3, 3, false, &mut handles),
+        Err(FdError::InvalidDescriptor)
+    );
+    assert_eq!(
+        table.duplicate_from(source, 0, 257, false, &mut handles),
+        Err(FdError::InvalidDescriptor)
+    );
+    assert_eq!(
+        table.duplicate_from(99, 1, 3, false, &mut handles),
+        Err(FdError::BadDescriptor)
+    );
+    assert_eq!(
+        table.duplicate_to(source, 256, &mut handles),
+        Err(FdError::InvalidDescriptor)
+    );
+    assert!(handles.cloned.is_empty());
+    assert!(handles.closed.is_empty());
+    assert_eq!(table.get(source).unwrap().handle, 88);
+}
+
+#[test]
+fn native_clone_failure_leaves_the_target_free() {
+    struct FailingHandles;
+    impl HandleOps<u64> for FailingHandles {
+        type Error = i32;
+        fn clone_handle(&mut self, _: u64, _: u64) -> Result<u64, i32> {
+            Err(13)
+        }
+        fn close_handle(&mut self, _: u64) {
+            panic!("no clone was acquired");
+        }
+    }
+    let mut table = FdTable::new();
+    table
+        .install(Entry {
+            handle: 88,
+            rights: 1,
+            descriptor_flags: 0,
+        })
+        .unwrap();
+    assert_eq!(
+        table.duplicate_from(0, 7, 10, true, &mut FailingHandles),
+        Err(FdError::Handle(13))
+    );
+    assert_eq!(table.get(7), None);
+}
+
+#[test]
 fn exec_closes_only_cloexec_descriptors() {
     let mut table = FdTable::new();
     let keep = table
