@@ -64,7 +64,8 @@ fn suspension_preserves_wait_state_and_resume_does_not_wake_blocked_threads() {
 fn child_exit_notification_waits_on_generic_process_handles() {
     let service = include_str!("../src/main.rs");
     assert!(service.contains("service.refresh_child_exit_notifications(&mut processes)"));
-    assert!(service.contains("for handle in service.child_lifecycle_handles()"));
+    assert!(service.contains("let lifecycle_handles = service.child_lifecycle_handles();"));
+    assert!(service.contains("for handle in lifecycle_handles"));
     assert!(service.contains("interests: syscall::HANDLE_SIGNAL_TERMINATED"));
 
     let kernel = include_str!("../../../core/src/syscall/handle.rs");

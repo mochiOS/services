@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pty.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -15,14 +16,28 @@
 
 static volatile sig_atomic_t resized;
 static volatile sig_atomic_t background_stopped;
+static volatile sig_atomic_t background_read;
 static void on_resize(int signal_number) { if (signal_number == SIGWINCH) ++resized; }
-static void on_background(int signal_number) { if (signal_number == SIGTTOU) ++background_stopped; }
+static void on_background(int signal_number) {
+    if (signal_number == SIGTTOU) ++background_stopped;
+    if (signal_number == SIGTTIN) ++background_read;
+}
 
 static void debug(const char *message) {
     uint64_t number = 660;
     __asm__ volatile("syscall" : "+a"(number)
                      : "D"((uintptr_t)message), "S"((uint64_t)strlen(message))
                      : "rcx", "r11", "memory");
+}
+
+static void *exercise_foreground_io(void *unused) {
+    (void)unused;
+    for (unsigned iteration = 0; iteration < 32; ++iteration) {
+        struct winsize size = {30, (unsigned short)(100 + iteration), 0, 0};
+        if (write(STDOUT_FILENO, "x", 1) != 1 || tcsetwinsize(STDIN_FILENO, &size) != 0)
+            return (void *)(uintptr_t)1;
+    }
+    return NULL;
 }
 
 #define CHECK(condition) do { \
@@ -113,24 +128,43 @@ int main(void) {
         nanosleep(&pause, NULL);
     }
     CHECK(resized == 1);
+    CHECK(tcgetattr(STDIN_FILENO, &attributes) == 0);
+    attributes.c_lflag |= TOSTOP;
+    CHECK(tcsetattr(STDIN_FILENO, TCSANOW, &attributes) == 0);
     pid_t parent_group = getpgrp();
     pid_t child = fork();
     CHECK(child >= 0);
     if (child == 0) {
         action.sa_handler = on_background;
         CHECK(sigaction(SIGTTOU, &action, NULL) == 0);
+        CHECK(sigaction(SIGTTIN, &action, NULL) == 0);
         CHECK(setpgid(0, 0) == 0);
+        char byte;
         errno = 0;
-        CHECK(tcsetpgrp(STDIN_FILENO, getpgrp()) == -1 && errno == EINTR);
-        CHECK(tcgetpgrp(STDIN_FILENO) == parent_group);
-        for (unsigned retry = 0; retry < 1000 && background_stopped == 0; ++retry) {
+        CHECK(read(STDIN_FILENO, &byte, 1) == -1 && errno == EINTR);
+        errno = 0;
+        CHECK(write(STDOUT_FILENO, "denied", 6) == -1 && errno == EINTR);
+        for (unsigned retry = 0; retry < 1000 && (background_read == 0 || background_stopped == 0); ++retry) {
             struct timespec pause = {0, 1000000};
             nanosleep(&pause, NULL);
         }
-        CHECK(background_stopped == 1);
+        CHECK(background_read == 1 && background_stopped == 1);
+        errno = 0;
+        CHECK(tcsetpgrp(STDIN_FILENO, getpgrp()) == -1 && errno == EINTR);
+        CHECK(tcgetpgrp(STDIN_FILENO) == parent_group);
+        for (unsigned retry = 0; retry < 1000 && background_stopped < 2; ++retry) {
+            struct timespec pause = {0, 1000000};
+            nanosleep(&pause, NULL);
+        }
+        CHECK(background_stopped == 2);
         sigset_t mask;
         CHECK(sigemptyset(&mask) == 0 && sigaddset(&mask, SIGTTOU) == 0);
         CHECK(sigprocmask(SIG_BLOCK, &mask, NULL) == 0);
+        CHECK(write(STDOUT_FILENO, "allowed", 7) == 7);
+        CHECK(sigaddset(&mask, SIGTTIN) == 0);
+        CHECK(sigprocmask(SIG_BLOCK, &mask, NULL) == 0);
+        errno = 0;
+        CHECK(read(STDIN_FILENO, &byte, 1) == -1 && errno == EIO);
         CHECK(tcsetpgrp(STDIN_FILENO, getpgrp()) == 0);
         CHECK(tcgetpgrp(STDIN_FILENO) == getpgrp());
         _exit(0);
@@ -138,13 +172,25 @@ int main(void) {
     int status;
     CHECK(waitpid(child, &status, 0) == child);
     CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    CHECK(read(master, flow_bytes, sizeof(flow_bytes)) == 7);
+    CHECK(memcmp(flow_bytes, "allowed", 7) == 0);
     // The session leader is now background and its group is orphaned.
     errno = 0;
     CHECK(tcsetpgrp(STDIN_FILENO, parent_group) == -1 && errno == EIO);
     action.sa_handler = SIG_IGN;
     CHECK(sigaction(SIGTTOU, &action, NULL) == 0);
     CHECK(tcsetpgrp(STDIN_FILENO, parent_group) == 0);
-    debug("native-terminal-window: PASS ioctl, tcflow, tcsetpgrp job control, attributes, size and SIGWINCH\n");
+    pthread_t writer;
+    CHECK(pthread_create(&writer, NULL, exercise_foreground_io, NULL) == 0);
+    for (unsigned iteration = 0; iteration < 32; ++iteration)
+        CHECK(tcgetpgrp(STDIN_FILENO) == parent_group);
+    void *worker_result = NULL;
+    CHECK(pthread_join(writer, &worker_result) == 0 && worker_result == NULL);
+    char concurrent_bytes[32];
+    CHECK(read(master, concurrent_bytes, sizeof(concurrent_bytes)) == 32);
+    for (unsigned index = 0; index < sizeof(concurrent_bytes); ++index)
+        CHECK(concurrent_bytes[index] == 'x');
+    debug("native-terminal-window: PASS terminal read/write job control, ioctl, tcflow, tcsetpgrp, size and SIGWINCH\n");
     CHECK(close(master) == 0);
     return 0;
 }

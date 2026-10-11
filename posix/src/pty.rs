@@ -31,6 +31,7 @@ const SUPPORTED_LOCAL_FLAGS: u32 = posix_protocol::TERMINAL_LFLAG_ICANON
     | posix_protocol::TERMINAL_LFLAG_ECHOE
     | posix_protocol::TERMINAL_LFLAG_ECHOK
     | posix_protocol::TERMINAL_LFLAG_ECHONL
+    | posix_protocol::TERMINAL_LFLAG_TOSTOP
     | posix_protocol::TERMINAL_LFLAG_NOFLSH;
 
 fn terminal_attributes_supported(attributes: posix_protocol::TerminalAttributes) -> bool {
@@ -750,6 +751,21 @@ impl PtyManager {
             return Err(EBADF);
         }
         Ok(id)
+    }
+
+    /// The master is the terminal controller, not a job's terminal endpoint.
+    /// Zero-length operations do not consume or produce terminal data.
+    pub fn job_control_access(&self, header: provider::RequestHeader) -> Option<(u64, bool, bool)> {
+        if header.length == 0 || !matches!(header.opcode, provider::OP_READ | provider::OP_WRITE) {
+            return None;
+        }
+        let terminal_id = self.slave_terminal_id(header.object_id).ok()?;
+        let attributes = self.attributes(header.object_id).ok()?;
+        Some((
+            terminal_id,
+            header.opcode == provider::OP_READ,
+            attributes.local_flags & posix_protocol::TERMINAL_LFLAG_TOSTOP != 0,
+        ))
     }
 
     pub fn signals(&self, object_id: u64) -> Result<u64, i32> {

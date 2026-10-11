@@ -8,7 +8,7 @@ const PTY_SYNC_MAGIC: [u8; 4] = *b"PTYS";
 const PTY_IDENTIFY_MAGIC: [u8; 4] = *b"PTYI";
 
 #[cfg(target_os = "mochios")]
-const PTY_SIGNAL_MAGIC: [u8; 4] = *b"PTYG";
+const PTY_WAKE_MAGIC: [u8; 4] = *b"PTYW";
 
 #[cfg(target_os = "mochios")]
 fn main() {
@@ -37,7 +37,12 @@ fn main() {
         }
     };
     let ptys = Arc::new(Mutex::new(posix_service::pty::PtyManager::new()));
-    let provider_endpoint_handle = match start_pty_provider(Arc::clone(&ptys), endpoint_handle) {
+    let service_state = Arc::new(Mutex::new(PosixService::new()));
+    let provider_endpoint_handle = match start_pty_provider(
+        Arc::clone(&ptys),
+        Arc::clone(&service_state),
+        endpoint_handle,
+    ) {
         Ok(handle) => handle,
         Err(error) => {
             platform::logln!("posix.service: provider worker failed errno={}", error);
@@ -58,7 +63,7 @@ fn main() {
         }
     };
 
-    let mut service = PosixService::new();
+    let mut service = service_state.lock().unwrap();
     let bootstrap = platform::handle::inherited(protocol::BOOTSTRAP_PROCESS_HANDLE_KEY)
         .and_then(|handle| {
             let required =
@@ -114,6 +119,7 @@ fn main() {
         platform::process::exit(1);
     }
     platform::logln!("posix.service: endpoint ready");
+    drop(service);
     let mut pending_waits = Vec::new();
     let mut signal_threads = BTreeMap::new();
     // Native ThreadHandles are not yet wait-many targets. Observe their
@@ -122,6 +128,7 @@ fn main() {
     let mut request_bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
     let mut response_bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
     loop {
+        let mut service = service_state.lock().unwrap();
         if let Err(error) = service.refresh_child_exit_notifications(&mut processes) {
             platform::logln!(
                 "posix.service: child lifecycle refresh failed errno={}",
@@ -163,7 +170,9 @@ fn main() {
                 thread_sweep_deadline_ms.saturating_mul(1_000_000)
             }
         };
-        match wait_for_request_or_child(endpoint_handle, &service, deadline) {
+        let lifecycle_handles = service.child_lifecycle_handles();
+        drop(service);
+        match wait_for_request_or_child(endpoint_handle, lifecycle_handles, deadline) {
             Ok(true) => {}
             Ok(false) => continue,
             Err(error) => {
@@ -203,25 +212,52 @@ fn main() {
             })
             .collect();
         let sender_process = platform::ipc::endpoint_owner_process(sender).ok();
-        let peer = sender_process.and_then(|process_id| service.registered_peer(process_id));
+        let peer = sender_process.and_then(|process_id| {
+            let service = service_state.lock().ok()?;
+            service.registered_peer(process_id)
+        });
         let decoded = request_bytes
             .get(..length)
             .and_then(|bytes| protocol::decode(bytes).ok());
+        // Do not hold POSIX state across provider RPC: concurrent terminal I/O
+        // must be able to acquire that same state to authorize its caller.
+        let identified_terminal = if attachments_valid
+            && attachments.len() == 1
+            && attachments[0].rights == platform::handle::HANDLE_RIGHT_TRANSFER
+            && decoded.is_some_and(|(header, _)| matches!(
+                header.opcode,
+                protocol::OP_TERMINAL_ACQUIRE | protocol::OP_TERMINAL_RELEASE
+                    | protocol::OP_TERMINAL_GET_FOREGROUND | protocol::OP_TERMINAL_SET_FOREGROUND
+            ))
+        {
+            Some(identify_pty_terminal(
+                provider_endpoint_handle,
+                attachments[0].handle,
+            ))
+        } else {
+            None
+        };
+        let opened_pty = if peer.is_some()
+            && attachments_valid
+            && attachments.is_empty()
+            && decoded.is_some_and(|(header, payload)| {
+                header.opcode == protocol::OP_PTY_OPEN && header.flags == 0 && payload.is_empty()
+            })
+        {
+            Some(open_pty_response(
+                &ptys,
+                provider_endpoint_handle,
+                decoded.unwrap().0.request_id,
+            ))
+        } else {
+            None
+        };
+        let mut service = service_state.lock().unwrap();
         if attachments_valid
             && attachments.is_empty()
             && sender_process == Some(service_process_id)
-            && let Some((terminal_id, signal)) = decode_pty_signal(&request_bytes[..length])
+            && request_bytes.get(..length) == Some(&PTY_WAKE_MAGIC[..])
         {
-            let status = if signal == protocol::SIGNAL_HUP {
-                service.hangup_terminal(terminal_id)
-            } else {
-                service
-                    .signal_terminal_foreground_group(terminal_id, signal)
-                    .map(|_| ())
-            }
-            .map(|_| 0i64)
-            .unwrap_or_else(i64::from);
-            let _ = platform::ipc::reply(sender, &status.to_le_bytes());
             continue;
         }
         let mut retained_handle = None;
@@ -254,7 +290,7 @@ fn main() {
                     && attachments.is_empty() =>
             {
                 Some(if service.session(peer.process_id).is_some() {
-                    open_pty_response(&ptys, provider_endpoint_handle, header.request_id)
+                    opened_pty.unwrap()
                 } else {
                     posix_service::ObjectResponse {
                         response: invalid_response(header.request_id),
@@ -397,7 +433,7 @@ fn main() {
                     && attachments[0].rights == platform::handle::HANDLE_RIGHT_TRANSFER =>
             {
                 let response =
-                    match identify_pty_terminal(provider_endpoint_handle, attachments[0].handle) {
+                    match identified_terminal.unwrap() {
                         Ok(terminal_id) => {
                             match platform::ipc::endpoint_execution_identity(sender) {
                                 Ok(identity) => service.handle_terminal(
@@ -606,6 +642,7 @@ fn main() {
 #[cfg(target_os = "mochios")]
 fn start_pty_provider(
     ptys: std::sync::Arc<std::sync::Mutex<posix_service::pty::PtyManager>>,
+    service: std::sync::Arc<std::sync::Mutex<posix_service::PosixService<u32>>>,
     control_endpoint: u32,
 ) -> Result<u32, i64> {
     use std::sync::Arc;
@@ -633,7 +670,7 @@ fn start_pty_provider(
                 }
             };
             worker_startup.store(i64::from(endpoint), Ordering::Release);
-            run_pty_provider(endpoint, control_endpoint, ptys, identity.process_id);
+            run_pty_provider(endpoint, control_endpoint, ptys, service, identity.process_id);
         })
         .map_err(|_| -5)?;
     loop {
@@ -650,6 +687,7 @@ fn run_pty_provider(
     endpoint: u32,
     control_endpoint: u32,
     ptys: std::sync::Arc<std::sync::Mutex<posix_service::pty::PtyManager>>,
+    service: std::sync::Arc<std::sync::Mutex<posix_service::PosixService<u32>>>,
     service_process_id: u64,
 ) -> ! {
     use mnu_abi::provider;
@@ -713,6 +751,43 @@ fn run_pty_provider(
             let _ = platform::ipc::reply(sender, &status.to_le_bytes());
             continue;
         }
+        let decoded_provider = provider::RequestHeader::decode(&request[..request_length]).ok();
+        let access = decoded_provider.as_ref().and_then(|(header, _)| {
+            ptys.lock().ok()?.job_control_access(*header)
+        });
+        let mut policy = if access.is_some() {
+            service.lock().ok()
+        } else {
+            None
+        };
+        if let Some((terminal_id, reading, stop_write)) = access {
+            let status = platform::ipc::endpoint_execution_identity(sender)
+                .map_err(|_| -13)
+                .and_then(|identity| {
+                    policy.as_mut().ok_or(-5)?.authorize_terminal_io(
+                        identity, terminal_id, reading, stop_write,
+                    )
+                });
+            if let Err(status) = status {
+                // The mutation and signal enqueue are serialized with all
+                // session/group/mask changes. Wake the owner after unlocking;
+                // never synchronously call it while it may identify a PTY.
+                drop(policy);
+                let _ = platform::ipc::send(u64::from(control_endpoint), &PTY_WAKE_MAGIC);
+                if let Some((header, _)) = decoded_provider {
+                    if let Ok(length) = (provider::ResponseHeader {
+                        opcode: header.opcode,
+                        object_id: header.object_id,
+                        status: i64::from(status),
+                        value: 0,
+                        data_length: 0,
+                    }).encode(&[], &mut response) {
+                        let _ = platform::ipc::reply(sender, &response[..length]);
+                    }
+                }
+                continue;
+            }
+        }
         let (response_len, signal_states, terminal_signals) = if let Ok(mut manager) = ptys.lock() {
             let object_ids = provider::RequestHeader::decode(&request[..request_length])
                 .ok()
@@ -732,8 +807,9 @@ fn run_pty_provider(
         } else {
             (None, None, Vec::new())
         };
+        drop(policy);
         for signal in terminal_signals {
-            let _ = notify_terminal_signal(control_endpoint, signal);
+            let _ = notify_terminal_signal(&service, control_endpoint, signal);
         }
         if let Some(signal_states) = signal_states {
             for (object_id, signals) in signal_states {
@@ -753,38 +829,26 @@ fn run_pty_provider(
 }
 
 #[cfg(target_os = "mochios")]
-fn decode_pty_signal(request: &[u8]) -> Option<(u64, u32)> {
-    if request.len() != 16 || request[..4] != PTY_SIGNAL_MAGIC {
-        return None;
-    }
-    let signal = u32::from_le_bytes(request[4..8].try_into().ok()?);
-    let terminal_id = u64::from_le_bytes(request[8..16].try_into().ok()?);
-    (signal != 0).then_some((terminal_id, signal))
-}
-
-#[cfg(target_os = "mochios")]
 fn notify_terminal_signal(
+    state: &std::sync::Mutex<posix_service::PosixService<u32>>,
     control_endpoint: u32,
     event: posix_service::pty::TerminalSignal,
 ) -> Result<(), i32> {
     use mochi_user_platform as platform;
 
-    let mut request = [0u8; 16];
-    request[..4].copy_from_slice(&PTY_SIGNAL_MAGIC);
-    request[4..8].copy_from_slice(&event.signal.to_le_bytes());
-    request[8..16].copy_from_slice(&event.terminal_id.to_le_bytes());
-    let mut response = [0u8; 8];
-    let message = platform::ipc::call(u64::from(control_endpoint), &request, &mut response)
-        .map_err(|error| i32::try_from(error.raw()).unwrap_or(-5))?;
-    if message & 0xffff_ffff != response.len() as u64 {
-        return Err(-5);
+    {
+        // Events originate in the provider-owned PTY manager, never in an
+        // external request's self-reported terminal ID or process identity.
+        let mut service = state.lock().map_err(|_| -5)?;
+        if event.signal == mochios_posix_protocol::SIGNAL_HUP {
+            service.hangup_terminal(event.terminal_id)?;
+        } else {
+            service.signal_terminal_foreground_group(event.terminal_id, event.signal)?;
+        }
     }
-    let status = i64::from_le_bytes(response);
-    if status == 0 {
-        Ok(())
-    } else {
-        Err(i32::try_from(status).unwrap_or(-5))
-    }
+    platform::ipc::send(u64::from(control_endpoint), &PTY_WAKE_MAGIC)
+        .map(|_| ())
+        .map_err(|error| i32::try_from(error.raw()).unwrap_or(-5))
 }
 
 #[cfg(target_os = "mochios")]
@@ -1115,7 +1179,7 @@ fn complete_pending_waits(
 #[cfg(target_os = "mochios")]
 fn wait_for_request_or_child(
     endpoint: u32,
-    service: &posix_service::PosixService<u32>,
+    lifecycle_handles: Vec<u32>,
     deadline: u64,
 ) -> Result<bool, i64> {
     use mochi_user_platform::{process, syscall};
@@ -1126,7 +1190,7 @@ fn wait_for_request_or_child(
         interests: syscall::HANDLE_SIGNAL_READABLE,
         ..syscall::HandleWaitItem::default()
     });
-    for handle in service.child_lifecycle_handles() {
+    for handle in lifecycle_handles {
         items.push(syscall::HandleWaitItem {
             handle,
             interests: syscall::HANDLE_SIGNAL_TERMINATED,

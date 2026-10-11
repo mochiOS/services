@@ -1882,6 +1882,50 @@ impl<H: Copy> PosixService<H> {
         sender: mnu_abi::ExecutionIdentity,
         terminal_id: u64,
     ) -> Result<(), i32> {
+        self.authorize_terminal_access(sender, terminal_id, protocol::SIGNAL_TTOU, false)
+    }
+
+    /// Applies job control only to the caller's controlling terminal. Native
+    /// handle rights continue to govern other delegated terminal resources.
+    /// `sender` must come from kernel-authenticated endpoint metadata.
+    pub fn authorize_terminal_io(
+        &mut self,
+        sender: mnu_abi::ExecutionIdentity,
+        terminal_id: u64,
+        reading: bool,
+        stop_background_write: bool,
+    ) -> Result<(), i32> {
+        if sender.process_id == 0 || sender.thread_id == 0 {
+            return Err(protocol::STATUS_EPERM);
+        }
+        let Some(session) = self.session_ids.get(&sender.process_id).copied() else {
+            return Ok(());
+        };
+        if self.controlling_terminals.get(&session).copied() != Some(terminal_id) {
+            return Ok(());
+        }
+        if !reading && !stop_background_write {
+            return Ok(());
+        }
+        self.authorize_terminal_access(
+            sender,
+            terminal_id,
+            if reading {
+                protocol::SIGNAL_TTIN
+            } else {
+                protocol::SIGNAL_TTOU
+            },
+            reading,
+        )
+    }
+
+    fn authorize_terminal_access(
+        &mut self,
+        sender: mnu_abi::ExecutionIdentity,
+        terminal_id: u64,
+        signal: u32,
+        reading: bool,
+    ) -> Result<(), i32> {
         let terminal = self
             .terminals
             .get(&terminal_id)
@@ -1893,7 +1937,6 @@ impl<H: Copy> PosixService<H> {
         if group == terminal.foreground_process_group {
             return Ok(());
         }
-        let signal = protocol::SIGNAL_TTOU;
         let ignored = self
             .signals
             .get(&sender.process_id)
@@ -1901,14 +1944,22 @@ impl<H: Copy> PosixService<H> {
             .disposition(signal)
             == protocol::SIGNAL_DISPOSITION_IGNORE;
         if ignored {
-            return Ok(());
+            return if reading {
+                Err(protocol::STATUS_EIO)
+            } else {
+                Ok(())
+            };
         }
         let blocked = *self
             .signal_masks
             .get(&(sender.process_id, sender.thread_id))
             .ok_or(protocol::STATUS_ESRCH)?;
         if blocked & signal_bit(signal) != 0 {
-            return Ok(());
+            return if reading {
+                Err(protocol::STATUS_EIO)
+            } else {
+                Ok(())
+            };
         }
         let session = terminal.session_id;
         if !self.non_orphaned_groups().contains(&(session, group)) {

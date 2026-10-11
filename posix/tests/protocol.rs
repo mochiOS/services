@@ -5140,6 +5140,154 @@ fn ignoring_ttou_permits_background_tcsetpgrp_but_forged_identity_never_does() {
     );
 }
 
+#[test]
+fn background_terminal_read_signals_ttin_and_blocking_it_returns_eio() {
+    let (mut service, [_, _, first, _, background], _, _) = terminal_exit_family();
+    set_own_job_group(&mut service, background);
+    terminal_mask(&mut service, background, 1, 0);
+    assert_eq!(
+        service.authorize_terminal_io(terminal_identity(background), 77, true, false),
+        Err(protocol::STATUS_EINTR)
+    );
+    assert_eq!(
+        service
+            .signal_state(background.process_id)
+            .unwrap()
+            .pending(),
+        1 << (protocol::SIGNAL_TTIN - 1)
+    );
+    terminal_mask(
+        &mut service,
+        background,
+        2,
+        1 << (protocol::SIGNAL_TTIN - 1),
+    );
+    assert_eq!(
+        service.authorize_terminal_io(
+            mnu_abi::ExecutionIdentity {
+                process_id: background.process_id,
+                thread_id: 2,
+            },
+            77,
+            true,
+            false
+        ),
+        Err(protocol::STATUS_EIO)
+    );
+    assert_eq!(
+        service.authorize_terminal_io(terminal_identity(first), 77, true, true),
+        Ok(())
+    );
+}
+
+#[test]
+fn terminal_write_tostop_and_orphan_exemptions_do_not_apply_to_reads() {
+    let (mut service, [_, leader, _, _, background], _, _) = terminal_exit_family();
+    set_own_job_group(&mut service, background);
+    terminal_mask(&mut service, background, 1, 0);
+    assert_eq!(
+        service.authorize_terminal_io(terminal_identity(background), 77, false, false),
+        Ok(())
+    );
+    assert_eq!(
+        service
+            .signal_state(background.process_id)
+            .unwrap()
+            .pending(),
+        0
+    );
+    assert_eq!(
+        service.authorize_terminal_io(terminal_identity(background), 77, false, true),
+        Err(protocol::STATUS_EINTR)
+    );
+    terminal_mask(&mut service, leader, 1, 0);
+    for reading in [true, false] {
+        assert_eq!(
+            service.authorize_terminal_io(terminal_identity(leader), 77, reading, true),
+            Err(protocol::STATUS_EIO)
+        );
+    }
+    assert_eq!(
+        service.signal_state(leader.process_id).unwrap().pending(),
+        0
+    );
+    terminal_mask(
+        &mut service,
+        leader,
+        1,
+        (1 << (protocol::SIGNAL_TTIN - 1)) | (1 << (protocol::SIGNAL_TTOU - 1)),
+    );
+    assert_eq!(
+        service.authorize_terminal_io(terminal_identity(leader), 77, false, true),
+        Ok(())
+    );
+    assert_eq!(
+        service.authorize_terminal_io(terminal_identity(leader), 77, true, true),
+        Err(protocol::STATUS_EIO)
+    );
+}
+
+#[test]
+fn ignored_ttin_is_eio_and_other_delegated_terminals_are_not_controlling_terminals() {
+    let (mut service, [parent, leader, _, _, background], _, _) = terminal_exit_family();
+    let mut bytes = [0; protocol::SIGNAL_DISPOSITION_LEN];
+    protocol::encode_signal_disposition(
+        protocol::SignalDisposition {
+            signal: protocol::SIGNAL_TTIN,
+            kind: protocol::SIGNAL_DISPOSITION_IGNORE,
+            child_options: 0,
+        },
+        &mut bytes,
+    )
+    .unwrap();
+    assert_eq!(
+        service
+            .handle(
+                background,
+                protocol::Header {
+                    opcode: protocol::OP_SIGNAL_DISPOSITION,
+                    flags: protocol::SIGNAL_DISPOSITION_SET,
+                    ..Default::default()
+                },
+                &bytes
+            )
+            .header
+            .status,
+        0
+    );
+    assert_eq!(
+        service.authorize_terminal_io(terminal_identity(background), 77, true, false),
+        Err(protocol::STATUS_EIO)
+    );
+    assert_eq!(
+        service
+            .signal_state(background.process_id)
+            .unwrap()
+            .pending(),
+        0
+    );
+    assert_eq!(
+        service.authorize_terminal_io(terminal_identity(parent), 77, true, true),
+        Ok(())
+    );
+    assert_eq!(
+        service.authorize_terminal_io(terminal_identity(leader), 999, true, true),
+        Ok(())
+    );
+    assert_eq!(
+        service.authorize_terminal_io(
+            mnu_abi::ExecutionIdentity {
+                process_id: 0,
+                thread_id: 1
+            },
+            77,
+            true,
+            true
+        ),
+        Err(protocol::STATUS_EPERM)
+    );
+}
+
 fn orphan_job_family() -> (
     PosixService,
     [PeerIdentity; 5],

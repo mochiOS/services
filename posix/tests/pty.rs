@@ -211,9 +211,14 @@ fn runtime_routes_master_hangup_only_from_the_authenticated_provider() {
     let source = include_str!("../src/main.rs");
     assert!(source.contains("sender_process == Some(service_process_id)"));
     assert!(source.contains("&& attachments.is_empty()"));
-    assert!(source.contains("if signal == protocol::SIGNAL_HUP"));
-    assert!(source.contains("service.hangup_terminal(terminal_id)"));
-    assert!(source.contains("signal_terminal_foreground_group(terminal_id, signal)"));
+    assert!(source.contains("if event.signal == mochios_posix_protocol::SIGNAL_HUP"));
+    assert!(source.contains("service.hangup_terminal(event.terminal_id)"));
+    assert!(source.contains("signal_terminal_foreground_group(event.terminal_id, event.signal)"));
+    let notification = source.split("fn notify_terminal_signal(").nth(1).unwrap()
+        .split("fn identify_pty_terminal(").next().unwrap();
+    assert!(notification.contains("state.lock()"));
+    assert!(!notification.contains("platform::ipc::call"));
+    assert!(!source.contains("const PTY_SIGNAL_MAGIC"));
 }
 
 #[test]
