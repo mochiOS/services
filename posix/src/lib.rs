@@ -2865,6 +2865,7 @@ impl<H: Copy> PosixService<H> {
             .ok_or(protocol::STATUS_ESRCH)?;
         if session.effective_uid != 0
             && requested != session.real_uid
+            && requested != session.effective_uid
             && requested != session.saved_uid
         {
             return Err(protocol::STATUS_EPERM);
@@ -2881,6 +2882,7 @@ impl<H: Copy> PosixService<H> {
             .ok_or(protocol::STATUS_ESRCH)?;
         if session.effective_uid != 0
             && requested != session.real_gid
+            && requested != session.effective_gid
             && requested != session.saved_gid
         {
             return Err(protocol::STATUS_EPERM);

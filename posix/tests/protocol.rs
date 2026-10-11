@@ -66,6 +66,42 @@ fn real_effective_updates_are_atomic_and_use_stored_not_peer_credentials() {
 }
 
 #[test]
+fn effective_id_noop_preserves_saved_ids_and_does_not_authorize_other_ids() {
+    let client = client(PeerIdentity {
+        process_id: 202,
+        effective_uid: 0,
+        effective_gid: 0,
+    });
+    client.register_session().unwrap();
+    client.set_effective_gid(42).unwrap();
+    client.set_effective_uid(501).unwrap();
+    let before = client.session_info().unwrap();
+    client.set_effective_uid(501).unwrap();
+    client.set_effective_gid(42).unwrap();
+    assert_eq!(client.session_info().unwrap(), before);
+    assert_eq!(
+        client.set_effective_uid(502),
+        Err(ClientError::Remote(protocol::STATUS_EPERM))
+    );
+    assert_eq!(
+        client.set_effective_gid(43),
+        Err(ClientError::Remote(protocol::STATUS_EPERM))
+    );
+    assert_eq!(client.session_info().unwrap(), before);
+    {
+        let service = client.transport().service.borrow();
+        let stored = service.session(202).unwrap();
+        assert_eq!(stored.saved_uid, 0);
+        assert_eq!(stored.saved_gid, 0);
+    }
+    // Temporary effective-ID changes must not destroy the restoration path.
+    client.set_effective_uid(0).unwrap();
+    client.set_effective_gid(0).unwrap();
+    assert_eq!(client.session_info().unwrap().effective_uid, 0);
+    assert_eq!(client.session_info().unwrap().effective_gid, 0);
+}
+
+#[test]
 fn explicitly_setting_real_id_drops_saved_privilege_even_when_real_is_unchanged() {
     let client = client(PeerIdentity {
         process_id: 199,
