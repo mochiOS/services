@@ -40,6 +40,57 @@ fn only_nonempty_slave_data_requests_require_job_control() {
 }
 
 #[test]
+fn changing_terminal_parameters_enforces_ttou_even_with_tostop_clear() {
+    let mut ptys = PtyManager::new();
+    let pair = ptys.open().unwrap();
+    let terminal = ptys.slave_terminal_id(pair.slave_object_id).unwrap();
+    let mut header = provider::RequestHeader {
+        opcode: provider::OP_CONTROL,
+        object_id: pair.slave_object_id,
+        argument: 0,
+        basis: 0,
+        length: 0,
+        data_length: 0,
+    };
+    for stop in [false, true] {
+        let mut attributes = ptys.attributes(pair.slave_object_id).unwrap();
+        if stop {
+            attributes.local_flags |= protocol::TERMINAL_LFLAG_TOSTOP;
+        } else {
+            attributes.local_flags &= !protocol::TERMINAL_LFLAG_TOSTOP;
+        }
+        ptys.set_attributes(pair.slave_object_id, attributes)
+            .unwrap();
+        for code in [
+            protocol::PTY_CONTROL_SET_ATTRIBUTES_NOW,
+            protocol::PTY_CONTROL_SET_ATTRIBUTES_DRAIN,
+            protocol::PTY_CONTROL_SET_ATTRIBUTES_FLUSH,
+            protocol::PTY_CONTROL_DRAIN,
+            protocol::PTY_CONTROL_FLUSH,
+            protocol::PTY_CONTROL_FLOW,
+        ] {
+            header.basis = code;
+            header.object_id = pair.slave_object_id;
+            assert_eq!(
+                ptys.job_control_access(header),
+                Some((terminal, false, true))
+            );
+            header.object_id = pair.master_object_id;
+            assert_eq!(ptys.job_control_access(header), None);
+        }
+        header.object_id = pair.slave_object_id;
+        for code in [
+            protocol::PTY_CONTROL_GET_ATTRIBUTES,
+            protocol::PTY_CONTROL_GET_WINDOW_SIZE,
+            u64::MAX,
+        ] {
+            header.basis = code;
+            assert_eq!(ptys.job_control_access(header), None);
+        }
+    }
+}
+
+#[test]
 fn service_does_not_hold_posix_state_across_provider_rpc_or_wait() {
     let source = include_str!("../src/main.rs");
     let wait = source

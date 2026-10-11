@@ -754,12 +754,27 @@ impl PtyManager {
     }
 
     /// The master is the terminal controller, not a job's terminal endpoint.
-    /// Zero-length operations do not consume or produce terminal data.
+    /// Zero-length data operations do not consume or produce terminal data.
+    /// Setting terminal parameters requires SIGTTOU policy even without TOSTOP;
+    /// a control request's length is output capacity, not its input size.
     pub fn job_control_access(&self, header: provider::RequestHeader) -> Option<(u64, bool, bool)> {
+        let terminal_id = self.slave_terminal_id(header.object_id).ok()?;
+        if header.opcode == provider::OP_CONTROL
+            && matches!(
+                header.basis,
+                posix_protocol::PTY_CONTROL_SET_ATTRIBUTES_NOW
+                    | posix_protocol::PTY_CONTROL_SET_ATTRIBUTES_DRAIN
+                    | posix_protocol::PTY_CONTROL_SET_ATTRIBUTES_FLUSH
+                    | posix_protocol::PTY_CONTROL_DRAIN
+                    | posix_protocol::PTY_CONTROL_FLUSH
+                    | posix_protocol::PTY_CONTROL_FLOW
+            )
+        {
+            return Some((terminal_id, false, true));
+        }
         if header.length == 0 || !matches!(header.opcode, provider::OP_READ | provider::OP_WRITE) {
             return None;
         }
-        let terminal_id = self.slave_terminal_id(header.object_id).ok()?;
         let attributes = self.attributes(header.object_id).ok()?;
         Some((
             terminal_id,

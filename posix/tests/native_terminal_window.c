@@ -23,6 +23,14 @@ static void on_background(int signal_number) {
     if (signal_number == SIGTTIN) ++background_read;
 }
 
+static int await_ttou(sig_atomic_t expected) {
+    for (unsigned retry = 0; retry < 1000 && background_stopped < expected; ++retry) {
+        struct timespec pause = {0, 1000000};
+        nanosleep(&pause, NULL);
+    }
+    return background_stopped == expected;
+}
+
 static void debug(const char *message) {
     uint64_t number = 660;
     __asm__ volatile("syscall" : "+a"(number)
@@ -149,17 +157,44 @@ int main(void) {
             nanosleep(&pause, NULL);
         }
         CHECK(background_read == 1 && background_stopped == 1);
+        // Master control belongs to the terminal controller and is exempt.
+        // With TOSTOP clear, slave parameter changes must still signal TTOU.
+        CHECK(tcgetattr(master, &attributes) == 0);
+        attributes.c_lflag &= ~TOSTOP;
+        CHECK(tcsetattr(master, TCSANOW, &attributes) == 0);
+        struct termios rejected = attributes, observed;
+        rejected.c_lflag ^= ECHO;
+        sig_atomic_t expected_ttou = 1;
+        const int settings[] = {TCSANOW, TCSADRAIN, TCSAFLUSH};
+        for (unsigned index = 0; index < sizeof(settings) / sizeof(settings[0]); ++index) {
+            errno = 0;
+            CHECK(tcsetattr(STDIN_FILENO, settings[index], &rejected) == -1 && errno == EINTR);
+            CHECK(await_ttou(++expected_ttou));
+            CHECK(tcgetattr(STDIN_FILENO, &observed) == 0);
+            CHECK(observed.c_lflag == attributes.c_lflag);
+        }
+        errno = 0;
+        CHECK(tcdrain(STDIN_FILENO) == -1 && errno == EINTR);
+        CHECK(await_ttou(++expected_ttou));
+        errno = 0;
+        CHECK(tcflush(STDIN_FILENO, TCIOFLUSH) == -1 && errno == EINTR);
+        CHECK(await_ttou(++expected_ttou));
+        errno = 0;
+        CHECK(tcflow(STDIN_FILENO, TCOOFF) == -1 && errno == EINTR);
+        CHECK(await_ttou(++expected_ttou));
         errno = 0;
         CHECK(tcsetpgrp(STDIN_FILENO, getpgrp()) == -1 && errno == EINTR);
         CHECK(tcgetpgrp(STDIN_FILENO) == parent_group);
-        for (unsigned retry = 0; retry < 1000 && background_stopped < 2; ++retry) {
-            struct timespec pause = {0, 1000000};
-            nanosleep(&pause, NULL);
-        }
-        CHECK(background_stopped == 2);
+        CHECK(await_ttou(++expected_ttou));
         sigset_t mask;
         CHECK(sigemptyset(&mask) == 0 && sigaddset(&mask, SIGTTOU) == 0);
         CHECK(sigprocmask(SIG_BLOCK, &mask, NULL) == 0);
+        for (unsigned index = 0; index < sizeof(settings) / sizeof(settings[0]); ++index)
+            CHECK(tcsetattr(STDIN_FILENO, settings[index], &attributes) == 0);
+        CHECK(tcdrain(STDIN_FILENO) == 0);
+        CHECK(tcflush(STDIN_FILENO, TCIOFLUSH) == 0);
+        CHECK(tcflow(STDIN_FILENO, TCOOFF) == 0);
+        CHECK(tcflow(STDIN_FILENO, TCOON) == 0);
         CHECK(write(STDOUT_FILENO, "allowed", 7) == 7);
         CHECK(sigaddset(&mask, SIGTTIN) == 0);
         CHECK(sigprocmask(SIG_BLOCK, &mask, NULL) == 0);
@@ -190,7 +225,7 @@ int main(void) {
     CHECK(read(master, concurrent_bytes, sizeof(concurrent_bytes)) == 32);
     for (unsigned index = 0; index < sizeof(concurrent_bytes); ++index)
         CHECK(concurrent_bytes[index] == 'x');
-    debug("native-terminal-window: PASS terminal read/write job control, ioctl, tcflow, tcsetpgrp, size and SIGWINCH\n");
+    debug("native-terminal-window: PASS terminal control and I/O job control, ioctl, tcflow, tcsetpgrp, size and SIGWINCH\n");
     CHECK(close(master) == 0);
     return 0;
 }
