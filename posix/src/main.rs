@@ -1,4 +1,7 @@
 #[cfg(target_os = "mochios")]
+mod process_control;
+
+#[cfg(target_os = "mochios")]
 const PTY_SYNC_MAGIC: [u8; 4] = *b"PTYS";
 
 #[cfg(target_os = "mochios")]
@@ -259,6 +262,24 @@ fn main() {
                 if status.is_ok() {
                     retained_handle = Some(attachments[1].handle);
                 }
+                Some(posix_service::ObjectResponse {
+                    response: match status {
+                        Ok(()) => success_response(header.request_id),
+                        Err(status) => status_response(header.request_id, status),
+                    },
+                    handles: Vec::new(),
+                })
+            }
+            (Some(peer), Some((header, payload)), true)
+                if header.opcode == protocol::OP_PROCESS_TREE_TERMINATE
+                    && header.flags == 0
+                    && payload.is_empty()
+                    && attachments.len() == 1 =>
+            {
+                let status = process_control::authenticated_tree_root(attachments[0])
+                    .and_then(|root| {
+                        service.terminate_launched_tree(peer, root, &mut filesystem, &mut processes)
+                    });
                 Some(posix_service::ObjectResponse {
                     response: match status {
                         Ok(()) => success_response(header.request_id),

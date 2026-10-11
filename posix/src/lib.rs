@@ -1933,6 +1933,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_PROCESS_SESSION_INFO
             | protocol::OP_PROCESS_LAUNCHED
             | protocol::OP_PROCESS_LAUNCH_ABORT
+            | protocol::OP_PROCESS_TREE_TERMINATE
             | protocol::OP_PROCESS_INITIALIZE
             | protocol::OP_WAIT_CHILD
             | protocol::OP_PROCESS_STOPPED
