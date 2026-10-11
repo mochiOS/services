@@ -68,6 +68,12 @@ static int register_signal_thread(void) {
 }
 
 int main(void) {
+    /* Removed credential-spawn ABI must not accept even a null request or
+       inspect user pointers through a compatibility shim. */
+    CHECK(native6(608, 0, 0, 0, 0, 0, 0) == -38);
+    CHECK(native6(608, UINT64_MAX, UINT64_MAX, UINT64_MAX,
+                  UINT64_MAX, UINT64_MAX, UINT64_MAX) == -38);
+    fprintf(stderr, "endpoint-identity: PASS removed credential spawn returns ENOSYS\n");
     struct identity caller = {0}, endpoint_owner = {0};
     /* Unused argument registers are not part of the two-argument caller ABI. */
     CHECK(native3(EXECUTION_IDENTITY_READ, (uint64_t)&caller, sizeof(caller), UINT64_MAX) == 0);
