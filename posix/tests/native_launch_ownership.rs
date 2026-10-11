@@ -283,4 +283,38 @@ fn native_launch_owns_the_creation_reference_and_cleans_failed_resume() {
         STATE.lock().unwrap().events,
         ["create-stopped", "resume", "terminate", "close"]
     );
+    STATE.lock().unwrap().events.clear();
+    let process = production::NativeProcess::create_with_setup(9, b"metadata", |handle| {
+        assert_eq!(handle, 7);
+        STATE.lock().unwrap().events.push("register-posix-state");
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        STATE.lock().unwrap().events,
+        ["create-stopped", "register-posix-state", "resume"]
+    );
+    drop(process);
+    assert_eq!(
+        STATE.lock().unwrap().events,
+        ["create-stopped", "register-posix-state", "resume", "close"]
+    );
+    STATE.lock().unwrap().events.clear();
+    assert!(
+        production::NativeProcess::create_with_setup(9, b"metadata", |handle| {
+            assert_eq!(handle, 7);
+            STATE.lock().unwrap().events.push("register-posix-state");
+            Err(crate::syscall::SysError)
+        })
+        .is_err()
+    );
+    assert_eq!(
+        STATE.lock().unwrap().events,
+        [
+            "create-stopped",
+            "register-posix-state",
+            "terminate",
+            "close"
+        ]
+    );
 }

@@ -12,9 +12,24 @@ impl NativeProcess {
         image: platform::handle::Handle,
         metadata: &[u8],
     ) -> Result<Self, platform::syscall::SysError> {
+        Self::create_with_setup(image, metadata, |_| Ok(()))
+    }
+
+    /// Initialize userspace state before allowing the new image to execute.
+    /// The callback receives this owner's creation reference, never a PID/FD
+    /// lookup. Failure terminates the stopped task and releases the reference.
+    pub(crate) fn create_with_setup(
+        image: platform::handle::Handle,
+        metadata: &[u8],
+        setup: impl FnOnce(platform::handle::Handle) -> Result<(), platform::syscall::SysError>,
+    ) -> Result<Self, platform::syscall::SysError> {
         let process = Self {
             handle: platform::process::create_stopped(image, metadata)?,
         };
+        if let Err(error) = setup(process.handle) {
+            process.terminate();
+            return Err(error);
+        }
         if let Err(error) = platform::process::resume_handle(process.handle) {
             // Creation published a stopped task; do not strand it on failure.
             let _ = platform::process::terminate_handle(process.handle, 127);
