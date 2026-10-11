@@ -3,6 +3,20 @@ extern crate alloc;
 
 use std::sync::Arc;
 
+mod interrupt {
+    pub mod spinlock {
+        pub struct SpinLock<T>(std::sync::Mutex<T>);
+        impl<T> SpinLock<T> {
+            pub fn new(value: T) -> Self {
+                Self(std::sync::Mutex::new(value))
+            }
+            pub fn lock(&self) -> std::sync::MutexGuard<'_, T> {
+                self.0.lock().unwrap()
+            }
+        }
+    }
+}
+
 #[macro_export]
 macro_rules! warn {
     ($($args:tt)*) => { let _ = format_args!($($args)*); };
@@ -17,11 +31,11 @@ mod task {
         #[derive(Clone)]
         pub struct ImageOrigin;
         impl ImageOrigin {
-            pub fn capture(_: &super::Process) -> Option<Self> {
-                None
+            pub fn capture(process: &super::Process) -> Option<Self> {
+                process.measured.then_some(Self)
             }
             pub fn permits(&self, _: &super::process::PendingExecSecurity) -> bool {
-                false
+                true
             }
         }
     }
@@ -53,6 +67,7 @@ mod task {
     }
     #[derive(Default)]
     pub struct Process {
+        pub measured: bool,
         pub table: Option<u64>,
         pub regions: Vec<MemoryRegion>,
         pub dma: Vec<DmaBuffer>,
@@ -146,6 +161,12 @@ mod paging {
         STATE.with(|state| state.borrow_mut().destroyed.push(table));
         Ok(())
     }
+    pub fn is_user_initial_context_in_table(
+        table: u64,
+        context: &mnu_abi::ThreadCreateContext,
+    ) -> bool {
+        table == 0xcafe && context.entry == 0x9000 && context.stack_pointer == 0xa000
+    }
 }
 
 #[path = "../../../core/src/mem/address_space.rs"]
@@ -154,6 +175,7 @@ mod address_space;
 fn source() -> task::Process {
     paging::STATE.with(|state| *state.borrow_mut() = paging::Backend::default());
     task::Process {
+        measured: false,
         table: Some(0xbeef),
         regions: vec![
             task::MemoryRegion {
@@ -174,6 +196,115 @@ fn source() -> task::Process {
         mmio: false,
         bounds: [1, 2, 3, 4, 5],
     }
+}
+
+fn sealed_object() -> Arc<address_space::AddressSpaceObject> {
+    let mut source = source();
+    source.measured = true;
+    Arc::new(address_space::AddressSpaceObject::new(
+        address_space::CloneSource::capture(&source)
+            .ok()
+            .unwrap()
+            .clone_image()
+            .ok()
+            .unwrap(),
+    ))
+}
+
+fn initial_context() -> mnu_abi::ThreadCreateContext {
+    mnu_abi::ThreadCreateContext {
+        entry: 0x9000,
+        stack_pointer: 0xa000,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn one_shot_consumption_is_shared_across_duplicate_references() {
+    let object = sealed_object();
+    let alias = object.clone();
+    let image = object
+        .consume(&task::process::PendingExecSecurity, &initial_context())
+        .unwrap();
+    assert!(matches!(
+        alias.consume(&task::process::PendingExecSecurity, &initial_context()),
+        Err(address_space::ConsumeError::Consumed)
+    ));
+    drop(object);
+    drop(alias);
+    paging::STATE.with(|state| assert!(state.borrow().destroyed.is_empty()));
+    drop(image);
+    paging::STATE.with(|state| assert_eq!(state.borrow().destroyed, vec![0xcafe]));
+}
+
+#[test]
+fn concurrent_aliases_have_exactly_one_vm_owner() {
+    let object = sealed_object();
+    let barrier = Arc::new(std::sync::Barrier::new(8));
+    let threads: Vec<_> = (0..8)
+        .map(|_| {
+            let object = object.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                object.consume(&task::process::PendingExecSecurity, &initial_context())
+            })
+        })
+        .collect();
+    let results: Vec<_> = threads
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect();
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(address_space::ConsumeError::Consumed)))
+            .count(),
+        7
+    );
+    drop(object);
+    paging::STATE.with(|state| assert!(state.borrow().destroyed.is_empty()));
+    drop(results);
+    paging::STATE.with(|state| assert_eq!(state.borrow().destroyed, vec![0xcafe]));
+}
+
+#[test]
+fn invalid_target_context_does_not_consume_the_image() {
+    let object = sealed_object();
+    let mut invalid = initial_context();
+    invalid.entry = 0xbeef;
+    assert!(matches!(
+        object.consume(&task::process::PendingExecSecurity, &invalid),
+        Err(address_space::ConsumeError::Context)
+    ));
+    let image = object
+        .consume(&task::process::PendingExecSecurity, &initial_context())
+        .unwrap();
+    drop(image);
+    drop(object);
+    paging::STATE.with(|state| assert_eq!(state.borrow().destroyed, vec![0xcafe]));
+}
+
+#[test]
+fn anonymous_image_is_not_consumed_on_authorization_failure() {
+    let source = source();
+    let object = address_space::AddressSpaceObject::new(
+        address_space::CloneSource::capture(&source)
+            .ok()
+            .unwrap()
+            .clone_image()
+            .ok()
+            .unwrap(),
+    );
+    for _ in 0..2 {
+        assert!(matches!(
+            object.consume(&task::process::PendingExecSecurity, &initial_context()),
+            Err(address_space::ConsumeError::Authorization)
+        ));
+    }
+    drop(object);
+    paging::STATE.with(|state| assert_eq!(state.borrow().destroyed, vec![0xcafe]));
 }
 
 #[test]

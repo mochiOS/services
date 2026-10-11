@@ -143,19 +143,36 @@ fn context_has_no_privileged_flags_reserved_words_or_ambiguous_image_form() {
 }
 
 #[test]
-fn unconnected_context_path_rejects_before_consuming_authorization() {
+fn snapshot_creation_requires_authorization_and_control_before_vm_consumption() {
     let exec = include_str!("../../../core/src/syscall/exec.rs");
     let native = &exec[exec.find("pub fn process_create_syscall(").unwrap()..];
-    let reject = native
-        .find("InitialState::Context(_) => return crate::syscall::types::ENOTSUP")
-        .unwrap();
     assert!(
-        reject
-            < native
-                .find("take_exec_authorization(request.identity, thread)")
+        native
+            .find("take_exec_authorization(request.identity, thread)")
+            .unwrap()
+            < native.find("return create_from_address_space(").unwrap()
+    );
+    let create = &native[native.find("fn create_from_address_space(").unwrap()..];
+    assert!(
+        create.find("HandleRights::CONTROL").unwrap()
+            < create
+                .find("image.consume(&authorization, &context)")
                 .unwrap()
     );
-    assert!(reject < native.find("read_all(image_handle").unwrap());
+    assert!(
+        create.find("retain_created_process(&process)").unwrap()
+            < create.find("add_process(process)").unwrap()
+    );
+    assert!(create.find("thread.suspend()").unwrap() < create.find("add_thread(thread)").unwrap());
+    for forbidden in [
+        "clone_object_handles",
+        "clone_launch_context",
+        "resource_limits()",
+        "find_process",
+        "parent_id",
+    ] {
+        assert!(!create.contains(forbidden));
+    }
 }
 
 #[test]
