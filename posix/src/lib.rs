@@ -332,6 +332,7 @@ struct ProcessWaitState {
     continued_pending: bool,
     exit_observed: bool,
     exit_notified: bool,
+    discard_exit_status: bool,
     deliveries: BTreeMap<u64, SignalDeliveryOwner>,
     termination_signal: Option<u32>,
 }
@@ -907,6 +908,16 @@ impl<H: Copy> PosixService<H> {
     }
 
     fn observe_process_exit(&mut self, process_id: u64) -> Result<(), i32> {
+        if self.parents.get(&process_id).is_some_and(|parent| {
+            self.signals.get(parent).is_some_and(|state| {
+                state.disposition(protocol::SIGNAL_CHLD) == protocol::SIGNAL_DISPOSITION_IGNORE
+            })
+        }) {
+            self.process_wait_states
+                .get_mut(&process_id)
+                .ok_or(protocol::STATUS_ESRCH)?
+                .discard_exit_status = true;
+        }
         if self
             .process_wait_states
             .get(&process_id)
@@ -1042,6 +1053,60 @@ impl<H: Copy> PosixService<H> {
                 .get(&process_id)
                 .ok_or(protocol::STATUS_ESRCH)?;
             self.reap_child(parent, process_id, filesystem, processes)?;
+            reaped += 1;
+        }
+        Ok(reaped)
+    }
+
+    /// Explicit SIG_IGN for SIGCHLD discards exit status; default SIGCHLD
+    /// does not. Retain teardown-pinned records, but never resurrect their
+    /// discarded status if the parent subsequently changes its disposition.
+    pub fn reap_discarded_children<F: FilesystemBackend<H>, P: ProcessBackend<H>>(
+        &mut self,
+        filesystem: &mut F,
+        processes: &mut P,
+    ) -> Result<usize, i32> {
+        self.reap_discarded_children_for(None, filesystem, processes)
+    }
+
+    fn reap_discarded_children_for<F: FilesystemBackend<H>, P: ProcessBackend<H>>(
+        &mut self,
+        parent_filter: Option<u64>,
+        filesystem: &mut F,
+        processes: &mut P,
+    ) -> Result<usize, i32> {
+        let candidates: Vec<_> = self
+            .parents
+            .iter()
+            .filter_map(|(&child, &parent)| {
+                if parent_filter.is_some_and(|filter| filter != parent) {
+                    return None;
+                }
+                let discarded = self
+                    .process_wait_states
+                    .get(&child)
+                    .is_some_and(|state| state.discard_exit_status);
+                let ignored = self.signals.get(&parent).is_some_and(|state| {
+                    state.disposition(protocol::SIGNAL_CHLD) == protocol::SIGNAL_DISPOSITION_IGNORE
+                });
+                (discarded || ignored).then_some((child, parent))
+            })
+            .collect();
+        let mut reaped = 0;
+        for (child, parent) in candidates {
+            let handle = *self.processes.get(&child).ok_or(protocol::STATUS_ESRCH)?;
+            if !matches!(processes.status(handle)?, ProcessLifecycle::Exited { .. }) {
+                continue;
+            }
+            self.observe_process_exit(child)?;
+            self.process_wait_states
+                .get_mut(&child)
+                .ok_or(protocol::STATUS_ESRCH)?
+                .discard_exit_status = true;
+            if self.reap_is_pinned(child) {
+                continue;
+            }
+            self.reap_child(parent, child, filesystem, processes)?;
             reaped += 1;
         }
         Ok(reaped)
@@ -1523,6 +1588,8 @@ impl<H: Copy> PosixService<H> {
         filesystem: &mut F,
         processes: &mut P,
     ) -> Result<protocol::WaitResult, i32> {
+        self.matching_child_ids(peer, request)?;
+        self.reap_discarded_children_for(Some(peer.process_id), filesystem, processes)?;
         let candidates = self.matching_child_ids(peer, request)?;
         for child in candidates {
             if self.reap_is_pinned(child) {
@@ -2252,6 +2319,19 @@ impl<H: Copy> PosixService<H> {
         protocol::encode_signal_disposition(previous, &mut output).map_err(|_| STATUS_EINVAL)?;
         if setting {
             state.set_disposition(request.signal, request.kind);
+            if request.signal == protocol::SIGNAL_CHLD
+                && request.kind == protocol::SIGNAL_DISPOSITION_IGNORE
+            {
+                for (&child, &parent) in &self.parents {
+                    if parent == process_id {
+                        if let Some(wait) = self.process_wait_states.get_mut(&child) {
+                            if wait.exit_observed {
+                                wait.discard_exit_status = true;
+                            }
+                        }
+                    }
+                }
+            }
             if request.kind == protocol::SIGNAL_DISPOSITION_IGNORE {
                 for ((process, _), pending) in &mut self.thread_pending_signals {
                     if *process == process_id {

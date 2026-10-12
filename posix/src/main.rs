@@ -138,6 +138,9 @@ fn main() {
         if let Err(error) = service.reap_orphans(&mut filesystem, &mut processes) {
             platform::logln!("posix.service: orphan reap pending errno={}", error);
         }
+        if let Err(error) = service.reap_discarded_children(&mut filesystem, &mut processes) {
+            platform::logln!("posix.service: discarded child reap pending errno={}", error);
+        }
         deliver_process_resume_notifications(&mut service);
         complete_pending_waits(
             &mut pending_waits,

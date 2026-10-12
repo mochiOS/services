@@ -3395,6 +3395,173 @@ fn orphan_family() -> (
     (service, init, parent, child, filesystem, processes)
 }
 
+fn set_child_signal_disposition(service: &mut PosixService, parent: PeerIdentity, kind: u32) {
+    let mut bytes = [0; protocol::SIGNAL_DISPOSITION_LEN];
+    protocol::encode_signal_disposition(
+        protocol::SignalDisposition {
+            signal: protocol::SIGNAL_CHLD,
+            kind,
+            child_options: 0,
+        },
+        &mut bytes,
+    )
+    .unwrap();
+    let response = service.handle(
+        parent,
+        protocol::Header {
+            opcode: protocol::OP_SIGNAL_DISPOSITION,
+            flags: protocol::SIGNAL_DISPOSITION_SET,
+            ..Default::default()
+        },
+        &bytes,
+    );
+    assert_eq!(response.header.status, 0);
+}
+
+#[test]
+fn explicit_sigchld_ignore_reaps_only_confirmed_exited_children_once() {
+    let (mut service, _, parent, child, mut filesystem, mut processes) = orphan_family();
+    set_child_signal_disposition(&mut service, parent, protocol::SIGNAL_DISPOSITION_IGNORE);
+    assert_eq!(
+        service.reap_discarded_children(&mut filesystem, &mut processes),
+        Ok(0)
+    );
+    assert!(service.is_child(parent.process_id, child.process_id));
+    processes
+        .states
+        .insert(142, ProcessLifecycle::Exited { exit_code: 7 });
+    assert_eq!(
+        service.reap_discarded_children(&mut filesystem, &mut processes),
+        Ok(1)
+    );
+    assert_eq!(processes.released, vec![142]);
+    assert!(!service.is_child(parent.process_id, child.process_id));
+    assert!(service.session(child.process_id).is_none());
+    assert_eq!(
+        service.reap_discarded_children(&mut filesystem, &mut processes),
+        Ok(0)
+    );
+    assert_eq!(
+        service.wait_child(
+            parent,
+            protocol::WaitRequest {
+                selector: child.process_id as i64,
+                options: 0
+            },
+            &mut filesystem,
+            &mut processes
+        ),
+        Err(protocol::STATUS_ECHILD)
+    );
+}
+
+#[test]
+fn default_sigchld_retains_status_and_direct_wait_also_honors_explicit_ignore() {
+    for ignored in [false, true] {
+        let (mut service, _, parent, child, mut filesystem, mut processes) = orphan_family();
+        if ignored {
+            set_child_signal_disposition(&mut service, parent, protocol::SIGNAL_DISPOSITION_IGNORE);
+        }
+        processes
+            .states
+            .insert(142, ProcessLifecycle::Exited { exit_code: 7 });
+        let waited = service.wait_child(
+            parent,
+            protocol::WaitRequest {
+                selector: child.process_id as i64,
+                options: 0,
+            },
+            &mut filesystem,
+            &mut processes,
+        );
+        if ignored {
+            assert_eq!(waited, Err(protocol::STATUS_ECHILD));
+        } else {
+            let status = waited.unwrap();
+            assert_eq!(
+                (status.process_id, status.status),
+                (child.process_id, 7 << 8)
+            );
+        }
+    }
+}
+
+#[test]
+fn restoring_sigchld_default_does_not_resurrect_observed_discarded_status() {
+    let (mut service, _, parent, child, mut filesystem, mut processes) = orphan_family();
+    set_child_signal_disposition(&mut service, parent, protocol::SIGNAL_DISPOSITION_IGNORE);
+    processes
+        .states
+        .insert(142, ProcessLifecycle::Exited { exit_code: 7 });
+    service
+        .refresh_child_exit_notifications(&mut processes)
+        .unwrap();
+    set_child_signal_disposition(&mut service, parent, protocol::SIGNAL_DISPOSITION_DEFAULT);
+    assert_eq!(
+        service.reap_discarded_children(&mut filesystem, &mut processes),
+        Ok(1)
+    );
+    assert!(!service.is_child(parent.process_id, child.process_id));
+}
+
+#[test]
+fn ignoring_sigchld_also_discards_already_observed_zombie_status() {
+    let (mut service, _, parent, child, mut filesystem, mut processes) = orphan_family();
+    processes
+        .states
+        .insert(142, ProcessLifecycle::Exited { exit_code: 7 });
+    service
+        .refresh_child_exit_notifications(&mut processes)
+        .unwrap();
+    set_child_signal_disposition(&mut service, parent, protocol::SIGNAL_DISPOSITION_IGNORE);
+    set_child_signal_disposition(&mut service, parent, protocol::SIGNAL_DISPOSITION_DEFAULT);
+    assert_eq!(
+        service.reap_discarded_children(&mut filesystem, &mut processes),
+        Ok(1)
+    );
+    assert!(!service.is_child(parent.process_id, child.process_id));
+}
+
+#[test]
+fn ignored_children_with_failed_native_status_are_not_assumed_dead() {
+    let (mut service, _, parent, child, mut filesystem, mut processes) = orphan_family();
+    set_child_signal_disposition(&mut service, parent, protocol::SIGNAL_DISPOSITION_IGNORE);
+    processes.states.remove(&142);
+    assert_eq!(
+        service.reap_discarded_children(&mut filesystem, &mut processes),
+        Err(protocol::STATUS_ESRCH)
+    );
+    assert!(service.is_child(parent.process_id, child.process_id));
+    assert!(processes.released.is_empty());
+}
+
+#[test]
+fn sigchld_ignore_does_not_steal_pinned_teardown_resources() {
+    let (mut service, creator, mut filesystem, mut processes) = launched_tree_fixture();
+    let root = AuthenticatedProcess {
+        process_id: 30,
+        handle: 1030,
+    };
+    set_child_signal_disposition(&mut service, creator, protocol::SIGNAL_DISPOSITION_IGNORE);
+    service
+        .begin_launched_tree_termination(creator, root, &mut processes)
+        .unwrap();
+    assert_eq!(
+        service.reap_discarded_children(&mut filesystem, &mut processes),
+        Ok(0)
+    );
+    assert!(processes.released.is_empty());
+    set_child_signal_disposition(&mut service, creator, protocol::SIGNAL_DISPOSITION_DEFAULT);
+    assert_eq!(
+        service.reap_discarded_children(&mut filesystem, &mut processes),
+        Ok(0)
+    );
+    service
+        .reclaim_launched_tree(creator, root, &mut filesystem, &mut processes)
+        .unwrap();
+    assert_eq!(processes.released, vec![1050, 1040, 1030]);
+}
+
 #[test]
 fn orphan_reparenting_preserves_credentials_and_objects_then_reaps_exit_once() {
     let (mut service, init, parent, child, mut filesystem, mut processes) = orphan_family();

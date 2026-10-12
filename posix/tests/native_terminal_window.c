@@ -698,6 +698,35 @@ int main(void) {
         CHECK(close(pipes[1]) == 0);
     }
     debug("native-terminal-window: waitpid EINTR, restart and unreaped child status passed\n");
+    struct sigaction child_action, previous_child_action;
+    memset(&child_action, 0, sizeof(child_action));
+    CHECK(sigemptyset(&child_action.sa_mask) == 0);
+    child_action.sa_handler = SIG_IGN;
+    CHECK(sigaction(SIGCHLD, &child_action, &previous_child_action) == 0);
+    pid_t ignored_child = fork();
+    CHECK(ignored_child >= 0);
+    if (ignored_child == 0) _exit(7);
+    unsigned ignored_retry;
+    for (ignored_retry = 0; ignored_retry < 1000; ++ignored_retry) {
+        errno = 0;
+        if (getpgid(ignored_child) == -1) {
+            CHECK(errno == ESRCH);
+            break;
+        }
+        struct timespec delay = {0, 1000000};
+        CHECK(nanosleep(&delay, NULL) == 0);
+    }
+    CHECK(ignored_retry < 1000); // No wait call was needed to reclaim the child.
+    int ignored_status = 99;
+    errno = 0;
+    CHECK(waitpid(ignored_child, &ignored_status, 0) == -1 && errno == ECHILD && ignored_status == 99);
+    CHECK(sigaction(SIGCHLD, &previous_child_action, NULL) == 0);
+    pid_t normal_child = fork();
+    CHECK(normal_child >= 0);
+    if (normal_child == 0) _exit(8);
+    CHECK(waitpid(normal_child, &ignored_status, 0) == normal_child);
+    CHECK(WIFEXITED(ignored_status) && WEXITSTATUS(ignored_status) == 8);
+    debug("native-terminal-window: explicit SIGCHLD ignore reaps without retaining status\n");
     struct sigaction pipe_action;
     memset(&pipe_action, 0, sizeof(pipe_action));
     pipe_action.sa_handler = on_pipe;
@@ -739,7 +768,7 @@ int main(void) {
     CHECK(waitpid(broken_child, &broken_status, 0) == broken_child);
     CHECK(WIFSIGNALED(broken_status) && WTERMSIG(broken_status) == SIGPIPE);
     CHECK(close(pipes[1]) == 0);
-    debug("native-terminal-window: PASS waitpid signal interruption and POSIX regressions\n");
+    debug("native-terminal-window: PASS SIGCHLD ignore, wait interruption and POSIX regressions\n");
     CHECK(close(master) == 0);
     return 0;
 }
