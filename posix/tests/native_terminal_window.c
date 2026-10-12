@@ -24,6 +24,10 @@ static _Atomic sig_atomic_t waited_signal;
 static _Atomic unsigned pipe_signals;
 static _Atomic unsigned child_signals;
 static _Atomic unsigned directed_ready, directed_signals;
+static _Atomic unsigned sync_ready, sync_completed, sync_unrelated;
+static void on_sync_unrelated(int signal_number) {
+    if (signal_number == SIGUSR2) atomic_fetch_add(&sync_unrelated, 1);
+}
 static pthread_t directed_handler_thread;
 static void on_directed(int signal_number) {
     if (signal_number == SIGUSR1) {
@@ -207,6 +211,22 @@ static void *continue_then_interrupt(void *unused) {
     if (nanosleep(&pause, NULL) != 0 || kill(getpid(), SIGCONT) != 0)
         return (void *)(uintptr_t)1;
     return interrupt_handle_wait(NULL);
+}
+
+static void *wait_sync_signal(void *unused) {
+    (void)unused;
+    sigset_t set, current;
+    if (sigemptyset(&set) != 0 || sigaddset(&set, SIGUSR1) != 0)
+        return (void *)(uintptr_t)1;
+    atomic_fetch_add(&sync_ready, 1);
+    int selected = 0;
+    errno = 123;
+    if (sigwait(&set, &selected) != 0 || selected != SIGUSR1 || errno != 123
+        || pthread_sigmask(SIG_SETMASK, NULL, &current) != 0
+        || sigismember(&current, SIGUSR1) != 1)
+        return (void *)(uintptr_t)1;
+    atomic_fetch_add(&sync_completed, 1);
+    return NULL;
 }
 
 static void *receive_directed_signal(void *unused) {
@@ -800,6 +820,66 @@ int main(void) {
     CHECK(pthread_kill(writer, 0) == ESRCH && errno == 123);
     CHECK(pthread_kill(pthread_self(), SIGUSR1) == 0);
     CHECK(atomic_load(&directed_signals) == 2 && pthread_equal(directed_handler_thread, pthread_self()));
+    sigset_t sync_set, sync_old, sync_pending;
+    CHECK(sigemptyset(&sync_set) == 0 && sigaddset(&sync_set, SIGUSR1) == 0);
+    CHECK(pthread_sigmask(SIG_BLOCK, &sync_set, &sync_old) == 0);
+    CHECK(raise(SIGUSR1) == 0);
+    int selected_signal = 99;
+    errno = 123;
+    CHECK(sigwait(&sync_set, &selected_signal) == 0 && selected_signal == SIGUSR1 && errno == 123);
+    CHECK(atomic_load(&directed_signals) == 2);
+    CHECK(sigpending(&sync_pending) == 0 && sigismember(&sync_pending, SIGUSR1) == 0);
+    CHECK(kill(getpid(), SIGUSR1) == 0);
+    CHECK(sigwait(&sync_set, &selected_signal) == 0 && selected_signal == SIGUSR1);
+    CHECK(sigwait(NULL, &selected_signal) == EFAULT && errno == 123);
+    CHECK(sigwait(&sync_set, NULL) == EFAULT && errno == 123);
+    sigset_t unblocked_set;
+    CHECK(sigemptyset(&unblocked_set) == 0 && sigaddset(&unblocked_set, SIGUSR2) == 0);
+    selected_signal = 99;
+    CHECK(sigwait(&unblocked_set, &selected_signal) == EINVAL && selected_signal == 99 && errno == 123);
+    struct sigaction unrelated_action, old_unrelated_action;
+    memset(&unrelated_action, 0, sizeof(unrelated_action));
+    unrelated_action.sa_handler = on_sync_unrelated;
+    CHECK(sigemptyset(&unrelated_action.sa_mask) == 0);
+    CHECK(sigaction(SIGUSR2, &unrelated_action, &old_unrelated_action) == 0);
+    CHECK(pthread_create(&writer, NULL, wait_sync_signal, NULL) == 0);
+    for (unsigned retry = 0; retry < 1000 && atomic_load(&sync_ready) == 0; ++retry) {
+        struct timespec delay = {0, 1000000};
+        CHECK(nanosleep(&delay, NULL) == 0);
+    }
+    CHECK(atomic_load(&sync_ready) == 1);
+    struct timespec settle_wait = {0, 50000000};
+    CHECK(nanosleep(&settle_wait, NULL) == 0);
+    CHECK(pthread_kill(writer, SIGUSR2) == 0);
+    for (unsigned retry = 0; retry < 1000 && atomic_load(&sync_unrelated) == 0; ++retry) {
+        struct timespec delay = {0, 1000000};
+        CHECK(nanosleep(&delay, NULL) == 0);
+    }
+    CHECK(atomic_load(&sync_unrelated) == 1 && atomic_load(&sync_completed) == 0);
+    CHECK(pthread_kill(writer, SIGUSR1) == 0);
+    CHECK(pthread_join(writer, &worker_result) == 0 && worker_result == NULL);
+    CHECK(atomic_load(&sync_completed) == 1 && atomic_load(&directed_signals) == 2);
+    pthread_t sync_second;
+    CHECK(pthread_create(&writer, NULL, wait_sync_signal, NULL) == 0);
+    CHECK(pthread_create(&sync_second, NULL, wait_sync_signal, NULL) == 0);
+    for (unsigned retry = 0; retry < 1000 && atomic_load(&sync_ready) < 3; ++retry) {
+        struct timespec delay = {0, 1000000};
+        CHECK(nanosleep(&delay, NULL) == 0);
+    }
+    CHECK(atomic_load(&sync_ready) == 3);
+    CHECK(kill(getpid(), SIGUSR1) == 0);
+    for (unsigned retry = 0; retry < 1000 && atomic_load(&sync_completed) < 2; ++retry) {
+        struct timespec delay = {0, 1000000};
+        CHECK(nanosleep(&delay, NULL) == 0);
+    }
+    CHECK(atomic_load(&sync_completed) == 2);
+    CHECK(kill(getpid(), SIGUSR1) == 0);
+    CHECK(pthread_join(writer, &worker_result) == 0 && worker_result == NULL);
+    CHECK(pthread_join(sync_second, &worker_result) == 0 && worker_result == NULL);
+    CHECK(atomic_load(&sync_completed) == 3 && atomic_load(&directed_signals) == 2);
+    CHECK(sigaction(SIGUSR2, &old_unrelated_action, NULL) == 0);
+    CHECK(pthread_sigmask(SIG_SETMASK, &sync_old, NULL) == 0);
+    debug("native-terminal-window: sigwait pending, deferred, interrupted and competing waiters passed\n");
     action.sa_handler = on_wait_signal;
     CHECK(sigaction(SIGUSR1, &action, NULL) == 0);
     debug("native-terminal-window: pthread_kill attached target, self delivery and return codes passed\n");
@@ -844,7 +924,7 @@ int main(void) {
     CHECK(waitpid(broken_child, &broken_status, 0) == broken_child);
     CHECK(WIFSIGNALED(broken_status) && WTERMSIG(broken_status) == SIGPIPE);
     CHECK(close(pipes[1]) == 0);
-    debug("native-terminal-window: PASS pthread_kill and POSIX signal regressions\n");
+    debug("native-terminal-window: PASS sigwait and POSIX signal regressions\n");
     CHECK(close(master) == 0);
     return 0;
 }

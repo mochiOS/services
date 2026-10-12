@@ -121,6 +121,7 @@ fn main() {
     platform::logln!("posix.service: endpoint ready");
     drop(service);
     let mut pending_waits = Vec::new();
+    let mut pending_signal_waits = Vec::new();
     let mut signal_threads = BTreeMap::new();
     // Native ThreadHandles are not yet wait-many targets. Observe their
     // lifecycle periodically, not by scanning every handle on every RPC.
@@ -142,6 +143,7 @@ fn main() {
             platform::logln!("posix.service: discarded child reap pending errno={}", error);
         }
         deliver_process_resume_notifications(&mut service);
+        complete_pending_signal_waits(&mut pending_signal_waits, &mut service);
         complete_pending_waits(
             &mut pending_waits,
             &mut service,
@@ -554,6 +556,54 @@ fn main() {
                     response: status_response(header.request_id, status),
                     handles: Vec::new(),
                 })
+            }
+            (Some(peer), Some((header, payload)), true)
+                if header.opcode == protocol::OP_SIGNAL_THREAD_WAIT
+                    && header.flags == 0
+                    && attachments.is_empty() =>
+            {
+                let parsed = protocol::decode_signal_wait_request(payload)
+                    .map_err(|_| posix_service::STATUS_EINVAL)
+                    .and_then(|(mask, epoch)| {
+                        let identity = platform::ipc::endpoint_execution_identity(sender)
+                            .map_err(|_| protocol::STATUS_EPERM)?;
+                        Ok((identity, mask, epoch))
+                    });
+                let result = parsed.and_then(|(identity, mask, epoch)| {
+                    // Bound deferred requests and disallow duplicates before
+                    // consuming any signal, including malicious async sends.
+                    if pending_signal_waits.len() >= 1024
+                        || pending_signal_waits.iter().any(|wait: &PendingSignalWait| {
+                            wait.identity == identity
+                        })
+                    {
+                        return Err(protocol::STATUS_EAGAIN);
+                    }
+                    match service.try_wait_signal(peer, identity, mask, epoch) {
+                        Err(protocol::STATUS_EAGAIN) => {
+                            pending_signal_waits.push(PendingSignalWait {
+                                sender,
+                                peer,
+                                identity,
+                                request_id: header.request_id,
+                                mask,
+                                epoch,
+                            });
+                            Ok(None)
+                        }
+                        result => result.map(Some),
+                    }
+                });
+                match result {
+                    Ok(None) => None,
+                    result => Some(posix_service::ObjectResponse {
+                        response: signal_wait_response(
+                            header.request_id,
+                            result.map(|signal| signal.unwrap()),
+                        ),
+                        handles: Vec::new(),
+                    }),
+                }
             }
             (Some(peer), Some((header, payload)), true)
                 if matches!(
@@ -1210,6 +1260,63 @@ fn deliver_process_resume_notifications(service: &mut posix_service::PosixServic
         if platform::process::resume_handle(handle).is_ok() {
             service.acknowledge_process_resume_notification(process_id);
         }
+    }
+}
+
+#[cfg(target_os = "mochios")]
+#[derive(Clone, Copy)]
+struct PendingSignalWait {
+    sender: u64,
+    peer: posix_service::PeerIdentity,
+    identity: mnu_abi::ExecutionIdentity,
+    request_id: u64,
+    mask: u64,
+    epoch: u64,
+}
+
+#[cfg(target_os = "mochios")]
+fn complete_pending_signal_waits(
+    pending: &mut Vec<PendingSignalWait>,
+    service: &mut posix_service::PosixService<u32>,
+) {
+    use mochi_user_platform as platform;
+    use mochios_posix_protocol as protocol;
+
+    let mut index = 0;
+    while index < pending.len() {
+        let wait = pending[index];
+        let result = service.try_wait_signal(wait.peer, wait.identity, wait.mask, wait.epoch);
+        if result == Err(protocol::STATUS_EAGAIN) {
+            index += 1;
+            continue;
+        }
+        let response = signal_wait_response(wait.request_id, result);
+        let mut bytes = vec![0; protocol::HEADER_LEN + protocol::SIGNAL_MASK_LEN];
+        if let Ok(length) = protocol::encode(response.header, &response.payload, &mut bytes) {
+            let _ = platform::ipc::reply(wait.sender, &bytes[..length]);
+        }
+        pending.swap_remove(index);
+    }
+}
+
+#[cfg(target_os = "mochios")]
+fn signal_wait_response(request_id: u64, result: Result<u32, i32>) -> posix_service::Response {
+    use mochios_posix_protocol as protocol;
+    match result {
+        Ok(signal) => {
+            let mut payload = vec![0; protocol::SIGNAL_MASK_LEN];
+            protocol::encode_signal_mask(u64::from(signal), &mut payload).unwrap();
+            posix_service::Response {
+                header: protocol::Header {
+                    opcode: protocol::OP_STATUS,
+                    request_id,
+                    payload_len: payload.len() as u32,
+                    ..Default::default()
+                },
+                payload,
+            }
+        }
+        Err(error) => status_response(request_id, error),
     }
 }
 
