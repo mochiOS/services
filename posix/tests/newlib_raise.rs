@@ -58,14 +58,25 @@ int main(void) {
 "#,
     )
     .unwrap();
-    let source =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../user/runtime/newlib_reent.c");
+    // Compile the actual raise bridge without depending on unrelated FILE ABI
+    // definitions added to the same C translation unit.
+    let source = include_str!("../../../user/runtime/newlib_reent.c");
+    let start = source.find("int _raise_r(").unwrap();
+    let end = start + source[start..].find("\n}\n").unwrap() + 3;
+    fs::write(
+        temp.0.join("raise.c"),
+        format!(
+            "#include <reent.h>\n#include <errno.h>\n#include <signal.h>\n{}",
+            &source[start..end]
+        ),
+    )
+    .unwrap();
     let binary = temp.0.join("raise-test");
     let output = Command::new("cc")
         .args(["-std=c11", "-Wall", "-Wextra", "-Werror"])
         .arg("-I")
         .arg(&temp.0)
-        .arg(source)
+        .arg(temp.0.join("raise.c"))
         .arg(temp.0.join("main.c"))
         .arg("-o")
         .arg(&binary)
