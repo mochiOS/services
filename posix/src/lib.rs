@@ -2708,6 +2708,42 @@ impl<H: Copy> PosixService<H> {
         Ok(output)
     }
 
+    /// Atomically accepts one blocked signal for a synchronous signal waiter.
+    /// `sender` must come from authenticated native endpoint metadata. EAGAIN
+    /// leaves all pending state intact so the transport can retain the request
+    /// until a signal arrives; no handler delivery/completion token is created.
+    pub fn try_wait_signal(
+        &mut self,
+        peer: PeerIdentity,
+        sender: mnu_abi::ExecutionIdentity,
+        requested: u64,
+        expected_epoch: u64,
+    ) -> Result<u32, i32> {
+        self.validate_wait_delivery_epoch(peer, sender, expected_epoch)?;
+        let key = (sender.process_id, sender.thread_id);
+        let blocked = self.signal_masks[&key];
+        // Uncatchable signals cannot be selected, including in sigfillset().
+        let requested = requested
+            & !(signal_bit(protocol::SIGNAL_KILL) | signal_bit(protocol::SIGNAL_STOP));
+        if requested & !blocked != 0 {
+            return Err(STATUS_EINVAL);
+        }
+        let own = self.thread_pending_signals.get(&key).copied().unwrap_or(0) & requested;
+        if own != 0 {
+            let signal = own.trailing_zeros() + 1;
+            *self.thread_pending_signals.get_mut(&key).unwrap() &= !signal_bit(signal);
+            return Ok(signal);
+        }
+        let state = self.signals.get_mut(&sender.process_id).unwrap();
+        let selected = state.pending() & requested;
+        if selected == 0 {
+            return Err(protocol::STATUS_EAGAIN);
+        }
+        let signal = selected.trailing_zeros() + 1;
+        state.pending &= !signal_bit(signal);
+        Ok(signal)
+    }
+
     /// Validate before examining/reaping a child. `sender` is native endpoint
     /// metadata. A pending delivery or changed sequence releases a blocked IPC
     /// caller; userspace decides EINTR versus SA_RESTART after dispatch.
