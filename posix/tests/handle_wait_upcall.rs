@@ -43,5 +43,6 @@ fn userspace_wait_converts_caught_handlers_but_retries_other_wakeups() {
         .unwrap();
     assert!(wait.contains("nonrestart_signal_generation.load"));
     assert!(wait.contains("return Err(EINTR)"));
-    assert!(wait.contains("Err(EAGAIN) => continue"));
+    assert!(wait.contains("wait_cancellable("));
+    assert!(wait.contains("Err(EAGAIN) => Ok(false)"));
 }

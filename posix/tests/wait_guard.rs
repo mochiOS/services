@@ -45,7 +45,7 @@ fn kernel_checks_only_readable_aligned_values_after_waiter_cleanup() {
 }
 
 #[test]
-fn runtime_passes_the_original_nonrestart_generation_as_a_native_precondition() {
+fn runtime_guards_notifications_while_preserving_nonrestart_signal_semantics() {
     let source = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
     let wait = source
         .split("fn wait_for_handle_since(")
@@ -55,7 +55,9 @@ fn runtime_passes_the_original_nonrestart_generation_as_a_native_precondition() 
         .next()
         .unwrap();
     assert!(wait.contains("HandleWaitGuard"));
-    assert!(wait.contains("expected: caught"));
+    assert!(wait.contains("expected: notification"));
+    assert!(wait.contains("control.nonrestart_signal_generation.load(Ordering::Acquire)"));
+    assert!(wait.contains("control.multiplex_generation as *const AtomicU64"));
     assert!(wait.contains("SyscallNumber::HandleWaitManyGuarded"));
     assert!(wait.contains("raw_syscall4"));
 }
