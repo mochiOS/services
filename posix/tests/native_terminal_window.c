@@ -31,6 +31,7 @@ static _Atomic uint64_t retired_cpu_nanoseconds;
 static _Atomic unsigned cancel_ready, cancel_resume, cancel_enabled, cancel_after_test;
 static _Atomic unsigned cancel_cleanup_returned, cancel_cleanup_bad;
 static _Atomic unsigned cleanup_order;
+static _Atomic unsigned sleep_cancel_ready, sleep_cancel_release, disabled_sleep_finished;
 static void record_cleanup(void *value) {
     atomic_store(&cleanup_order, atomic_load(&cleanup_order) * 10 + (unsigned)(uintptr_t)value);
 }
@@ -174,6 +175,40 @@ static void *exit_with_cleanup(void *unused) {
     pthread_cleanup_pop(0);
     pthread_cleanup_pop(0);
     return NULL;
+}
+
+static void *cancel_during_sleep(void *argument) {
+    unsigned mode = (unsigned)(uintptr_t)argument;
+    struct timespec request = {30, 0};
+    if (mode == 3) {
+        if (pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL) != 0) return (void *)1;
+        request = (struct timespec){0, 100000000};
+    } else if (mode == 2) {
+        if (clock_gettime(CLOCK_MONOTONIC, &request) != 0) return (void *)1;
+        request.tv_sec += 30;
+    } else if (mode >= 4) {
+        request = (struct timespec){0, 0};
+    }
+    int result;
+    pthread_cleanup_push(record_cleanup, (void *)(uintptr_t)1);
+    pthread_cleanup_push(record_cleanup, (void *)(uintptr_t)2);
+    atomic_store(&sleep_cancel_ready, 1);
+    if (mode >= 4) {
+        while (!atomic_load(&sleep_cancel_release)) sched_yield();
+    }
+    if (mode == 1 || mode == 2 || mode == 5)
+        result = clock_nanosleep(CLOCK_MONOTONIC, mode == 2 ? TIMER_ABSTIME : 0, &request, NULL);
+    else
+        result = nanosleep(&request, NULL);
+    if (mode == 3 && result == 0) {
+        atomic_store(&disabled_sleep_finished, 1);
+        pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+        request = (struct timespec){0, 0};
+        result = nanosleep(&request, NULL); // Pending request at a zero-duration point.
+    }
+    pthread_cleanup_pop(0);
+    pthread_cleanup_pop(0);
+    return (void *)(uintptr_t)(result ? 1 : 2); // Enabled sleeps must never return.
 }
 
 static void *return_immediately(void *argument) {
@@ -430,6 +465,28 @@ int main(void) {
     CHECK(atomic_load(&cleanup_order) == 21);
     debug("native-terminal-window: cleanup stack pop, cancel, pthread_exit and TLS ordering passed\n");
     debug("native-terminal-window: deferred cancellation waits for a point and disables cleanup reentry\n");
+    for (unsigned mode = 0; mode < 6; ++mode) {
+        atomic_store(&cleanup_order, 0);
+        atomic_store(&sleep_cancel_ready, 0);
+        atomic_store(&sleep_cancel_release, 0);
+        CHECK(pthread_create(&cancel_worker, NULL, cancel_during_sleep, (void *)(uintptr_t)mode) == 0);
+        for (unsigned retry = 0; retry < 1000 && !atomic_load(&sleep_cancel_ready); ++retry) {
+            struct timespec delay = {0, 1000000};
+            CHECK(nanosleep(&delay, NULL) == 0);
+        }
+        CHECK(atomic_load(&sleep_cancel_ready) == 1);
+        struct timespec started, finished, delay = {0, 20000000};
+        CHECK(clock_gettime(CLOCK_MONOTONIC, &started) == 0);
+        if (mode < 4) CHECK(nanosleep(&delay, NULL) == 0);
+        CHECK(pthread_cancel(cancel_worker) == 0);
+        atomic_store(&sleep_cancel_release, 1);
+        CHECK(pthread_join(cancel_worker, &cancel_result) == 0 && cancel_result == PTHREAD_CANCELED);
+        CHECK(clock_gettime(CLOCK_MONOTONIC, &finished) == 0);
+        CHECK(clock_nanoseconds(&finished) - clock_nanoseconds(&started) < UINT64_C(2000000000));
+        CHECK(atomic_load(&cleanup_order) == 21);
+    }
+    CHECK(atomic_load(&disabled_sleep_finished) == 1);
+    debug("native-terminal-window: relative/absolute/zero sleeps cancel and disabled sleeps complete\n");
     struct timespec process_cpu_before, process_cpu_after;
     CHECK(clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &process_cpu_before) == 0);
     pthread_t cpu_worker;
@@ -953,7 +1010,13 @@ int main(void) {
         struct timespec delay = {0, 1000000};
         CHECK(nanosleep(&delay, NULL) == 0 || errno == EINTR);
     }
-    CHECK(atomic_load(&child_signals) == 1);
+    unsigned observed_child_signals = atomic_load(&child_signals);
+    if (observed_child_signals != 1) {
+        char diagnostic[96];
+        snprintf(diagnostic, sizeof(diagnostic), "native-terminal-window: SA_NOCLDWAIT notifications=%u\n", observed_child_signals);
+        debug(diagnostic);
+    }
+    CHECK(observed_child_signals == 1);
     errno = 0;
     CHECK(waitpid(no_wait_child, &ignored_status, 0) == -1 && errno == ECHILD);
     CHECK(sigaction(SIGCHLD, &previous_child_action, NULL) == 0);
@@ -1115,7 +1178,7 @@ int main(void) {
           + (cpu_times_after.tms_cstime - cpu_times_before.tms_cstime) >= CLOCKS_PER_SEC / 5);
     CHECK(native_call4(626, (uint64_t)observed_child, 0, 0, 0) == 0);
     debug("native-terminal-window: WAIT-only child execution snapshot survives waitpid reclamation\n");
-    debug("native-terminal-window: PASS pthread cleanup stacks and POSIX regressions\n");
+    debug("native-terminal-window: PASS sleep cancellation and POSIX regressions\n");
     CHECK(close(master) == 0);
     return 0;
 }
