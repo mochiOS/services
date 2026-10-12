@@ -122,6 +122,17 @@ fn main() {
     if case == 3 { CONTROL.cancel_state.store(1, Ordering::Release); }
     let request = Timespec { tv_sec: if case == 0 { 0 } else { 1 }, tv_nsec: 0 };
     let mut remaining = Timespec { tv_sec: 99, tv_nsec: 99 };
+    if case == 7 {
+        let _: unsafe extern "C" fn(u64, c_int, *const Timespec, *mut Timespec) -> c_int = clock_nanosleep;
+        for id in [u64::MAX, 1u64 << 32 | 1, 1u64 << 32 | 4, 1u64 << 32 | 2, 1u64 << 32 | 3] {
+            assert_eq!(unsafe { clock_nanosleep(id, 0, &request, &mut remaining) }, EINVAL);
+            assert_eq!(unsafe { ERRNO }, 123);
+            assert_eq!((remaining.tv_sec, remaining.tv_nsec), (99, 99));
+            assert_eq!(WAITS.load(Ordering::Acquire), 0);
+            assert_eq!(READS.load(Ordering::Acquire), 0);
+        }
+        return;
+    }
     let result = unsafe {
         if args[2] == "clock" { clock_nanosleep(4, 0, &request, &mut remaining) }
         else { nanosleep(&request, &mut remaining) }
@@ -186,6 +197,8 @@ fn main() {
             );
         }
     }
+    let invalid_ids = Command::new(&executable).args(["7", "clock"]).output().unwrap();
+    assert!(invalid_ids.status.success(), "{}", String::from_utf8_lossy(&invalid_ids.stderr));
     std::fs::remove_dir_all(directory).unwrap();
 }
 
