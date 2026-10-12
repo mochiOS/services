@@ -22,11 +22,11 @@ const PTHREAD_CANCEL_ENABLE: u32 = 0;
 struct Timespec {{ tv_sec: i64, tv_nsec: i64 }}
 struct ThreadControl {{
     state: AtomicU32, cancel_state: AtomicU32, cancel_pending: AtomicU32,
-    sleep_wake_generation: AtomicU32, caught_signal_generation: AtomicU64,
+    wait_generation: AtomicU32, caught_signal_generation: AtomicU64,
 }}
 static CONTROL: ThreadControl = ThreadControl {{
     state: AtomicU32::new(2), cancel_state: AtomicU32::new(0), cancel_pending: AtomicU32::new(0),
-    sleep_wake_generation: AtomicU32::new(0), caught_signal_generation: AtomicU64::new(0),
+    wait_generation: AtomicU32::new(0), caught_signal_generation: AtomicU64::new(0),
 }};
 static CASE: AtomicU32 = AtomicU32::new(0);
 static WAITS: AtomicU32 = AtomicU32::new(0);
@@ -39,7 +39,7 @@ fn register_current_thread() -> Option<(usize, &'static ThreadControl)> {{ Some(
 fn current_thread_control() -> Option<(usize, &'static ThreadControl)> {{ register_current_thread() }}
 fn thread_control(thread: usize) -> Option<&'static ThreadControl> {{ (thread == 1).then_some(&CONTROL) }}
 fn native_mutex_wake_all(address: &AtomicU32) {{
-    assert!(std::ptr::eq(address, &CONTROL.state) || std::ptr::eq(address, &CONTROL.sleep_wake_generation));
+    assert!(std::ptr::eq(address, &CONTROL.state) || std::ptr::eq(address, &CONTROL.wait_generation));
 }}
 fn finish_thread(_: &ThreadControl, result: *mut c_void) -> ! {{
     assert_eq!(result as usize, usize::MAX);
@@ -54,7 +54,7 @@ fn monotonic_nanoseconds() -> Result<u64, i32> {{
     if read == 1 && CASE.load(Ordering::Acquire) == 1 {{ assert_eq!(pthread_cancel(1), 0); }}
     if read == 1 && CASE.load(Ordering::Acquire) == 4 {{
         CONTROL.caught_signal_generation.fetch_add(1, Ordering::Release);
-        notify_sleep_waiter(&CONTROL);
+        notify_thread_waiter(&CONTROL);
     }}
     Ok(NOW.load(Ordering::Acquire))
 }}
@@ -76,7 +76,7 @@ mod mochios_posix_client {{
         pub struct Error;
         impl Error {{ pub fn raw(&self) -> u64 {{ unreachable!() }} }}
         pub fn wait_u32(address: &AtomicU32, expected: u32, deadline: u64) -> Result<(), Error> {{
-            assert!(std::ptr::eq(address, &CONTROL.sleep_wake_generation));
+            assert!(std::ptr::eq(address, &CONTROL.wait_generation));
             let count = WAITS.fetch_add(1, Ordering::AcqRel);
             match CASE.load(Ordering::Acquire) {{
                 1 => assert_ne!(address.load(Ordering::Acquire), expected),
@@ -103,7 +103,7 @@ mod mochios_posix_client {{
         "pub unsafe extern \"C\" fn clock_nanosleep(",
         "pub extern \"C\" fn pthread_cancel(",
         "pub extern \"C\" fn pthread_testcancel(",
-        "fn notify_sleep_waiter(",
+        "fn notify_thread_waiter(",
     ] {
         let start = runtime.find(entry).unwrap();
         let end = start + runtime[start..].find("\n}\n").unwrap() + 3;
@@ -197,12 +197,12 @@ fn caught_handlers_notify_sleepers_and_recycled_controls_reset_the_generation() 
         .next()
         .unwrap();
     assert!(
-        dispatch.find("notify_sleep_waiter(control)").unwrap()
+        dispatch.find("notify_thread_waiter(control)").unwrap()
             < dispatch.find("function(signal)").unwrap()
     );
     assert_eq!(
         runtime
-            .matches("sleep_wake_generation.store(0, Ordering::Relaxed)")
+            .matches("wait_generation.store(0, Ordering::Relaxed)")
             .count(),
         2
     );

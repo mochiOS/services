@@ -10,7 +10,9 @@ fn join_waits_for_native_retirement_before_reclaiming_user_mappings() {
         .next()
         .unwrap();
     assert!(join.contains("match native_thread_retired(control)"));
-    assert!(join.contains("Ok(true) => break"));
+    assert!(join.contains(
+        "Ok(true) => {\n                    join_cancel_point(control);\n                    break;"
+    ));
     assert!(join.contains("SyscallNumber::ThreadYield"));
     assert!(
         join.find("native_thread_retired(control)").unwrap()

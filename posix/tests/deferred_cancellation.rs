@@ -29,6 +29,7 @@ static DESTRUCTOR_RETURNED: AtomicU32 = AtomicU32::new(0);
 fn register_current_thread() -> Option<((), &'static ThreadControl)> { Some(((), &CONTROL)) }
 fn current_thread_control() -> Option<((), &'static ThreadControl)> { Some(((), &CONTROL)) }
 fn native_mutex_wake_all(_: &AtomicU32) {}
+fn notify_join_waiter(_: &ThreadControl) {}
 mod thread_cleanup {
     use super::*;
     pub unsafe fn drain(head: &AtomicUsize) { assert_eq!(head.load(Ordering::Acquire), 0); }
