@@ -455,6 +455,35 @@ fn main() {
                 })
             }
             (Some(peer), Some((header, payload)), true)
+                if header.opcode == protocol::OP_SIGNAL_THREAD_SEND
+                    && header.flags == 0
+                    && attachments.len() == 1 =>
+            {
+                let attached = attachments[0];
+                let required =
+                    platform::handle::HANDLE_RIGHT_WAIT | platform::handle::HANDLE_RIGHT_SIGNAL;
+                let result = if attached.rights & required != required {
+                    Err(protocol::STATUS_EPERM)
+                } else {
+                    platform::ipc::endpoint_execution_identity(sender)
+                        .map_err(|_| protocol::STATUS_EPERM)
+                        .and_then(|identity| {
+                            platform::thread::handle_status(attached.handle)
+                                .map_err(|error| error.raw() as i32)
+                                .and_then(|target| {
+                                    service.send_thread_signal(peer, identity, target, attached.rights, payload)
+                                })
+                        })
+                };
+                Some(posix_service::ObjectResponse {
+                    response: match result {
+                        Ok(()) => success_response(header.request_id),
+                        Err(error) => status_response(header.request_id, error),
+                    },
+                    handles: Vec::new(),
+                })
+            }
+            (Some(peer), Some((header, payload)), true)
                 if header.opcode == protocol::OP_SIGNAL_THREAD_REGISTER
                     && header.flags == 0
                     && payload.is_empty()

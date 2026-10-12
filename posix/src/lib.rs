@@ -2566,6 +2566,44 @@ impl<H: Copy> PosixService<H> {
         Ok(Vec::new())
     }
 
+    /// Sender is authenticated endpoint metadata; target is the native status
+    /// of the explicitly attached handle, never an identity from request bytes.
+    pub fn send_thread_signal(
+        &mut self,
+        peer: PeerIdentity,
+        sender: mnu_abi::ExecutionIdentity,
+        target: mnu_abi::ThreadStatus,
+        rights: u64,
+        payload: &[u8],
+    ) -> Result<(), i32> {
+        let required = mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_SIGNAL;
+        if rights & required != required
+            || sender.process_id != peer.process_id
+            || sender.process_id == 0
+            || sender.thread_id == 0
+            || target.process_id != sender.process_id
+        {
+            return Err(protocol::STATUS_EPERM);
+        }
+        if target.thread_id == 0
+            || target.reserved != 0
+            || !(mnu_abi::THREAD_STATE_READY..=mnu_abi::THREAD_STATE_TERMINATED).contains(&target.state)
+        {
+            return Err(STATUS_EINVAL);
+        }
+        if target.state == mnu_abi::THREAD_STATE_TERMINATED {
+            return Err(protocol::STATUS_ESRCH);
+        }
+        self.thread_raise_signal_payload(
+            mnu_abi::ExecutionIdentity {
+                process_id: target.process_id,
+                thread_id: target.thread_id,
+            },
+            payload,
+        )
+        .map(|_| ())
+    }
+
     fn thread_signal_delivery_payload(
         &mut self,
         sender: mnu_abi::ExecutionIdentity,

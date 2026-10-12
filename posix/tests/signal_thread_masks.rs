@@ -94,6 +94,126 @@ fn client(
 }
 
 #[test]
+fn attached_thread_signal_is_private_to_the_native_target_not_the_sender() {
+    let service = service();
+    let first = client(&service, 101, 501);
+    let second = client(&service, 101, 502);
+    let bit = 1 << 9;
+    first
+        .thread_signal_mask(protocol::SIGNAL_MASK_SET, 0)
+        .unwrap();
+    second
+        .thread_signal_mask(protocol::SIGNAL_MASK_SET, bit)
+        .unwrap();
+    let target = mnu_abi::ThreadStatus {
+        process_id: 101,
+        thread_id: 502,
+        state: mnu_abi::THREAD_STATE_RUNNING,
+        reserved: 0,
+    };
+    let rights = mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_SIGNAL;
+    let mut payload = [0; protocol::SIGNAL_SEND_REQUEST_LEN];
+    protocol::encode_signal_send_request(
+        protocol::SignalSendRequest {
+            selector: 0,
+            signal: 10,
+        },
+        &mut payload,
+    )
+    .unwrap();
+    service
+        .borrow_mut()
+        .send_thread_signal(
+            peer(101),
+            ExecutionIdentity {
+                process_id: 101,
+                thread_id: 501,
+            },
+            target,
+            rights,
+            &payload,
+        )
+        .unwrap();
+    assert_eq!(first.thread_dequeue_signal_delivery().unwrap().signal, 0);
+    assert_eq!(second.thread_pending_signals().unwrap(), bit);
+    second
+        .thread_signal_mask(protocol::SIGNAL_MASK_UNBLOCK, bit)
+        .unwrap();
+    assert_eq!(second.thread_dequeue_signal_delivery().unwrap().signal, 10);
+}
+
+#[test]
+fn thread_signal_requires_signal_rights_same_process_and_a_live_native_thread() {
+    let service = service();
+    let first = client(&service, 101, 501);
+    first
+        .thread_signal_mask(protocol::SIGNAL_MASK_SET, 0)
+        .unwrap();
+    let sender = ExecutionIdentity {
+        process_id: 101,
+        thread_id: 501,
+    };
+    let target = mnu_abi::ThreadStatus {
+        process_id: 101,
+        thread_id: 501,
+        state: mnu_abi::THREAD_STATE_RUNNING,
+        reserved: 0,
+    };
+    let rights = mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_SIGNAL;
+    let mut payload = [0; protocol::SIGNAL_SEND_REQUEST_LEN];
+    protocol::encode_signal_send_request(
+        protocol::SignalSendRequest {
+            selector: 0,
+            signal: 0,
+        },
+        &mut payload,
+    )
+    .unwrap();
+    assert_eq!(
+        service
+            .borrow_mut()
+            .send_thread_signal(peer(101), sender, target, rights, &payload),
+        Ok(())
+    );
+    assert_eq!(first.thread_signal_epoch().unwrap(), 0);
+    for reduced in [0, mnu_abi::HANDLE_RIGHT_WAIT, mnu_abi::HANDLE_RIGHT_SIGNAL] {
+        assert_eq!(
+            service
+                .borrow_mut()
+                .send_thread_signal(peer(101), sender, target, reduced, &payload),
+            Err(protocol::STATUS_EPERM)
+        );
+    }
+    assert_eq!(
+        service.borrow_mut().send_thread_signal(
+            peer(101),
+            sender,
+            mnu_abi::ThreadStatus {
+                process_id: 102,
+                ..target
+            },
+            rights,
+            &payload
+        ),
+        Err(protocol::STATUS_EPERM)
+    );
+    assert_eq!(
+        service.borrow_mut().send_thread_signal(
+            peer(101),
+            sender,
+            mnu_abi::ThreadStatus {
+                state: mnu_abi::THREAD_STATE_TERMINATED,
+                ..target
+            },
+            rights,
+            &payload
+        ),
+        Err(protocol::STATUS_ESRCH)
+    );
+    assert_eq!(first.thread_dequeue_signal_delivery().unwrap().signal, 0);
+}
+
+#[test]
 fn wait_guard_detects_pending_delivery_and_the_post_delivery_entry_race() {
     let service = service();
     let first = client(&service, 101, 501);

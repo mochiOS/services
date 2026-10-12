@@ -23,6 +23,14 @@ static volatile sig_atomic_t background_read;
 static _Atomic sig_atomic_t waited_signal;
 static _Atomic unsigned pipe_signals;
 static _Atomic unsigned child_signals;
+static _Atomic unsigned directed_ready, directed_signals;
+static pthread_t directed_handler_thread;
+static void on_directed(int signal_number) {
+    if (signal_number == SIGUSR1) {
+        directed_handler_thread = pthread_self();
+        atomic_fetch_add(&directed_signals, 1);
+    }
+}
 static void on_child(int signal_number) {
     if (signal_number == SIGCHLD) atomic_fetch_add(&child_signals, 1);
 }
@@ -199,6 +207,19 @@ static void *continue_then_interrupt(void *unused) {
     if (nanosleep(&pause, NULL) != 0 || kill(getpid(), SIGCONT) != 0)
         return (void *)(uintptr_t)1;
     return interrupt_handle_wait(NULL);
+}
+
+static void *receive_directed_signal(void *unused) {
+    (void)unused;
+    sigset_t blocked, empty;
+    if (sigemptyset(&blocked) != 0 || sigaddset(&blocked, SIGUSR1) != 0
+        || sigemptyset(&empty) != 0 || pthread_sigmask(SIG_BLOCK, &blocked, NULL) != 0)
+        return (void *)(uintptr_t)1;
+    atomic_store(&directed_ready, 1);
+    while (atomic_load(&directed_signals) == 0) {
+        if (sigsuspend(&empty) != -1 || errno != EINTR) return (void *)(uintptr_t)1;
+    }
+    return pthread_equal(directed_handler_thread, pthread_self()) ? NULL : (void *)(uintptr_t)1;
 }
 
 #define CHECK(condition) do { \
@@ -760,6 +781,28 @@ int main(void) {
     CHECK(waitpid(no_wait_child, &ignored_status, 0) == -1 && errno == ECHILD);
     CHECK(sigaction(SIGCHLD, &previous_child_action, NULL) == 0);
     debug("native-terminal-window: SA_NOCLDWAIT retains handler notification without zombie status\n");
+    action.sa_handler = on_directed;
+    action.sa_flags = 0;
+    CHECK(sigaction(SIGUSR1, &action, NULL) == 0);
+    CHECK(pthread_create(&writer, NULL, receive_directed_signal, NULL) == 0);
+    errno = 123;
+    CHECK(pthread_kill(writer, -1) == EINVAL && errno == 123);
+    CHECK(pthread_kill(writer, 0) == 0 && errno == 123);
+    for (unsigned retry = 0; retry < 1000 && atomic_load(&directed_ready) == 0; ++retry) {
+        struct timespec delay = {0, 1000000};
+        CHECK(nanosleep(&delay, NULL) == 0);
+    }
+    CHECK(atomic_load(&directed_ready) == 1);
+    CHECK(pthread_kill(writer, SIGUSR1) == 0);
+    CHECK(pthread_join(writer, &worker_result) == 0 && worker_result == NULL);
+    CHECK(atomic_load(&directed_signals) == 1 && pthread_equal(directed_handler_thread, writer));
+    errno = 123;
+    CHECK(pthread_kill(writer, 0) == ESRCH && errno == 123);
+    CHECK(pthread_kill(pthread_self(), SIGUSR1) == 0);
+    CHECK(atomic_load(&directed_signals) == 2 && pthread_equal(directed_handler_thread, pthread_self()));
+    action.sa_handler = on_wait_signal;
+    CHECK(sigaction(SIGUSR1, &action, NULL) == 0);
+    debug("native-terminal-window: pthread_kill attached target, self delivery and return codes passed\n");
     struct sigaction pipe_action;
     memset(&pipe_action, 0, sizeof(pipe_action));
     pipe_action.sa_handler = on_pipe;
@@ -801,7 +844,7 @@ int main(void) {
     CHECK(waitpid(broken_child, &broken_status, 0) == broken_child);
     CHECK(WIFSIGNALED(broken_status) && WTERMSIG(broken_status) == SIGPIPE);
     CHECK(close(pipes[1]) == 0);
-    debug("native-terminal-window: PASS SA_NOCLDWAIT, signal waits and POSIX regressions\n");
+    debug("native-terminal-window: PASS pthread_kill and POSIX signal regressions\n");
     CHECK(close(master) == 0);
     return 0;
 }
