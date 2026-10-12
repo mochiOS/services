@@ -26,6 +26,10 @@ static _Atomic unsigned child_signals;
 static _Atomic unsigned directed_ready, directed_signals;
 static _Atomic unsigned sync_ready, sync_completed, sync_unrelated;
 static _Atomic uint64_t retired_cpu_nanoseconds;
+struct native_execution_usage {
+    uint64_t user_ticks, kernel_ticks, ticks_per_second, reserved;
+};
+_Static_assert(sizeof(struct native_execution_usage) == 32, "native accounting layout changed");
 static void on_sync_unrelated(int signal_number) {
     if (signal_number == SIGUSR2) atomic_fetch_add(&sync_unrelated, 1);
 }
@@ -283,6 +287,18 @@ int main(void) {
     CHECK(guarded_native_wait((const struct native_wait_guard *)(uintptr_t)(UINT64_MAX - 7), 0) == -EFAULT);
     uint32_t native_pair[2];
     CHECK(native_call4(649, (uintptr_t)native_pair, 0, 0, 0) == 0);
+    struct native_execution_usage usage_before, usage_after;
+    CHECK(native_call4(683, 0, (uintptr_t)&usage_before, sizeof(usage_before), 0) == 0);
+    CHECK(usage_before.ticks_per_second > 0 && usage_before.reserved == 0);
+    CHECK(native_call4(683, 0, (uintptr_t)&usage_before, sizeof(usage_before) - 1, 0) == -EINVAL);
+    CHECK(native_call4(683, 0, 0, sizeof(usage_before), 0) == -EFAULT);
+    CHECK(native_call4(683, UINT32_MAX, (uintptr_t)&usage_before, sizeof(usage_before), 0) == -EBADF);
+    CHECK(native_call4(683, native_pair[0], (uintptr_t)&usage_before, sizeof(usage_before), 0) == -EBADF);
+    int64_t read_only_native = native_call4(627, native_pair[0], 1, 0, 0);
+    CHECK(read_only_native > 0);
+    CHECK(native_call4(683, (uint64_t)read_only_native, (uintptr_t)&usage_before,
+                       sizeof(usage_before), 0) == -EACCES);
+    CHECK(native_call4(626, (uint64_t)read_only_native, 0, 0, 0) == 0);
     char capacity_block[512];
     memset(capacity_block, 'c', sizeof(capacity_block));
     for (;;) {
@@ -326,6 +342,11 @@ int main(void) {
     CHECK(atomic_load(&retired_cpu_nanoseconds) >= UINT64_C(200000000));
     CHECK(clock_nanoseconds(&process_cpu_after) >= clock_nanoseconds(&process_cpu_before)
           + atomic_load(&retired_cpu_nanoseconds));
+    CHECK(native_call4(683, 0, (uintptr_t)&usage_after, sizeof(usage_after), 0) == 0);
+    CHECK(usage_after.user_ticks > usage_before.user_ticks);
+    CHECK(usage_after.kernel_ticks >= usage_before.kernel_ticks);
+    CHECK(usage_after.ticks_per_second == usage_before.ticks_per_second && usage_after.reserved == 0);
+    debug("native-terminal-window: native execution snapshot domains and authorization passed\n");
     debug("native-terminal-window: process CPU clock preserves joined worker execution\n");
     pthread_attr_t detached;
     CHECK(pthread_attr_init(&detached) == 0);
@@ -952,7 +973,35 @@ int main(void) {
     CHECK(waitpid(broken_child, &broken_status, 0) == broken_child);
     CHECK(WIFSIGNALED(broken_status) && WTERMSIG(broken_status) == SIGPIPE);
     CHECK(close(pipes[1]) == 0);
-    debug("native-terminal-window: PASS process CPU accounting and POSIX regressions\n");
+    int cpu_gate[2];
+    CHECK(pipe(cpu_gate) == 0);
+    pid_t cpu_child = fork();
+    CHECK(cpu_child >= 0);
+    if (cpu_child == 0) {
+        char release;
+        if (close(cpu_gate[1]) != 0 || read(cpu_gate[0], &release, 1) != 1
+            || consume_cpu_before_retirement(NULL) != NULL) _exit(48);
+        _exit(47);
+    }
+    CHECK(close(cpu_gate[0]) == 0);
+    // This fixture explicitly grants process.inspect. Obtain a WAIT-only
+    // native object before releasing the child; the reader itself takes no PID.
+    int64_t observed_child = native_call4(659, (uint64_t)cpu_child, 16, 0, 0);
+    CHECK(observed_child > 0);
+    struct native_execution_usage child_usage;
+    CHECK(native_call4(683, (uint64_t)observed_child, (uintptr_t)&child_usage,
+                       sizeof(child_usage), 0) == 0);
+    CHECK(child_usage.user_ticks < usage_after.user_ticks);
+    CHECK(write(cpu_gate[1], "x", 1) == 1 && close(cpu_gate[1]) == 0);
+    int cpu_child_status;
+    CHECK(waitpid(cpu_child, &cpu_child_status, 0) == cpu_child);
+    CHECK(WIFEXITED(cpu_child_status) && WEXITSTATUS(cpu_child_status) == 47);
+    CHECK(native_call4(683, (uint64_t)observed_child, (uintptr_t)&child_usage,
+                       sizeof(child_usage), 0) == 0);
+    CHECK(child_usage.user_ticks > 0 && child_usage.ticks_per_second > 0 && child_usage.reserved == 0);
+    CHECK(native_call4(626, (uint64_t)observed_child, 0, 0, 0) == 0);
+    debug("native-terminal-window: WAIT-only child execution snapshot survives waitpid reclamation\n");
+    debug("native-terminal-window: PASS execution usage read and POSIX regressions\n");
     CHECK(close(master) == 0);
     return 0;
 }
