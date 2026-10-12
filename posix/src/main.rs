@@ -269,6 +269,7 @@ fn main() {
                         | protocol::OP_SIGNAL_THREAD_DEQUEUE
                         | protocol::OP_SIGNAL_THREAD_PENDING
                         | protocol::OP_SIGNAL_THREAD_RAISE
+                        | protocol::OP_SIGNAL_THREAD_EPOCH
                         | protocol::OP_SIGNAL_IMAGE_STARTED
                 )
                     && attachments.is_empty() =>
@@ -523,19 +524,44 @@ fn main() {
                 })
             }
             (Some(peer), Some((header, payload)), true)
-                if header.opcode == protocol::OP_WAIT_CHILD
+                if matches!(
+                    header.opcode,
+                    protocol::OP_WAIT_CHILD | protocol::OP_WAIT_CHILD_GUARDED
+                )
                     && header.flags == 0
                     && attachments.is_empty() =>
             {
-                match protocol::decode_wait_request(payload) {
-                    Ok(request) => {
-                        match service.wait_child(peer, request, &mut filesystem, &mut processes) {
+                let parsed = if header.opcode == protocol::OP_WAIT_CHILD_GUARDED {
+                    protocol::decode_guarded_wait_request(payload)
+                        .map_err(|_| posix_service::STATUS_EINVAL)
+                        .and_then(|(request, epoch)| {
+                            let identity = platform::ipc::endpoint_execution_identity(sender)
+                                .map_err(|_| posix_service::STATUS_EINVAL)?;
+                            Ok((request, Some((identity, epoch))))
+                        })
+                } else {
+                    protocol::decode_wait_request(payload)
+                        .map(|request| (request, None))
+                        .map_err(|_| posix_service::STATUS_EINVAL)
+                };
+                match parsed {
+                    Ok((request, guard)) => {
+                        let validated = match guard {
+                            Some((identity, epoch)) => {
+                                service.validate_wait_delivery_epoch(peer, identity, epoch)
+                            }
+                            None => Ok(()),
+                        };
+                        match validated.and_then(|()| {
+                            service.wait_child(peer, request, &mut filesystem, &mut processes)
+                        }) {
                             Err(protocol::STATUS_EAGAIN) => {
                                 pending_waits.push(PendingWait {
                                     sender,
                                     peer,
                                     request_id: header.request_id,
                                     request,
+                                    guard,
                                 });
                                 None
                             }
@@ -545,11 +571,8 @@ fn main() {
                             }),
                         }
                     }
-                    Err(_) => Some(posix_service::ObjectResponse {
-                        response: wait_response(
-                            header.request_id,
-                            Err(posix_service::STATUS_EINVAL),
-                        ),
+                    Err(error) => Some(posix_service::ObjectResponse {
+                        response: wait_response(header.request_id, Err(error)),
                         handles: Vec::new(),
                     }),
                 }
@@ -1165,6 +1188,7 @@ struct PendingWait {
     peer: posix_service::PeerIdentity,
     request_id: u64,
     request: mochios_posix_protocol::WaitRequest,
+    guard: Option<(mnu_abi::ExecutionIdentity, u64)>,
 }
 
 #[cfg(target_os = "mochios")]
@@ -1180,7 +1204,14 @@ fn complete_pending_waits(
     let mut index = 0;
     while index < pending.len() {
         let wait = pending[index];
-        let result = service.wait_child(wait.peer, wait.request, filesystem, processes);
+        let validated = match wait.guard {
+            Some((identity, epoch)) => {
+                service.validate_wait_delivery_epoch(wait.peer, identity, epoch)
+            }
+            None => Ok(()),
+        };
+        let result = validated
+            .and_then(|()| service.wait_child(wait.peer, wait.request, filesystem, processes));
         if result == Err(protocol::STATUS_EAGAIN) {
             index += 1;
             continue;

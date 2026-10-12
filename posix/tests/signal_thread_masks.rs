@@ -24,6 +24,7 @@ impl Transport for LocalTransport {
                 | protocol::OP_SIGNAL_THREAD_DEQUEUE
                 | protocol::OP_SIGNAL_THREAD_PENDING
                 | protocol::OP_SIGNAL_THREAD_RAISE
+                | protocol::OP_SIGNAL_THREAD_EPOCH
                 | protocol::OP_SIGNAL_IMAGE_STARTED
         ) {
             self.service.borrow_mut().handle_thread_signal_request(
@@ -90,6 +91,149 @@ fn client(
             thread_id,
         },
     })
+}
+
+#[test]
+fn wait_guard_detects_pending_delivery_and_the_post_delivery_entry_race() {
+    let service = service();
+    let first = client(&service, 101, 501);
+    let second = client(&service, 101, 502);
+    first
+        .thread_signal_mask(protocol::SIGNAL_MASK_SET, 0)
+        .unwrap();
+    second
+        .thread_signal_mask(protocol::SIGNAL_MASK_SET, 0)
+        .unwrap();
+    let identity = ExecutionIdentity {
+        process_id: 101,
+        thread_id: 501,
+    };
+    assert_eq!(first.thread_signal_epoch().unwrap(), 0);
+    assert_eq!(
+        service
+            .borrow()
+            .validate_wait_delivery_epoch(peer(101), identity, 0),
+        Ok(())
+    );
+    first.send_signal(101, 10).unwrap();
+    assert_eq!(
+        service
+            .borrow()
+            .validate_wait_delivery_epoch(peer(101), identity, 0),
+        Err(protocol::STATUS_EINTR)
+    );
+    let delivery = first.thread_dequeue_signal_delivery().unwrap();
+    first.complete_signal_delivery(delivery).unwrap();
+    assert_eq!(first.thread_signal_epoch().unwrap(), 1);
+    assert_eq!(second.thread_signal_epoch().unwrap(), 0);
+    assert_eq!(
+        service
+            .borrow()
+            .validate_wait_delivery_epoch(peer(101), identity, 0),
+        Err(protocol::STATUS_EINTR)
+    );
+    assert_eq!(
+        service
+            .borrow()
+            .validate_wait_delivery_epoch(peer(101), identity, 1),
+        Ok(())
+    );
+    first
+        .thread_signal_mask(protocol::SIGNAL_MASK_INITIALIZE, 0)
+        .unwrap();
+    assert_eq!(first.thread_signal_epoch().unwrap(), 1);
+}
+
+#[test]
+fn wait_guard_uses_the_authenticated_threads_mask_and_private_pending_queue() {
+    let service = service();
+    let first = client(&service, 101, 501);
+    let second = client(&service, 101, 502);
+    let pipe = 1 << (protocol::SIGNAL_PIPE - 1);
+    first
+        .thread_signal_mask(protocol::SIGNAL_MASK_SET, pipe)
+        .unwrap();
+    second
+        .thread_signal_mask(protocol::SIGNAL_MASK_SET, 0)
+        .unwrap();
+    first.raise_signal(protocol::SIGNAL_PIPE).unwrap();
+    let identity = ExecutionIdentity {
+        process_id: 101,
+        thread_id: 501,
+    };
+    assert_eq!(
+        service
+            .borrow()
+            .validate_wait_delivery_epoch(peer(101), identity, 0),
+        Ok(())
+    );
+    assert_eq!(
+        service.borrow().validate_wait_delivery_epoch(
+            peer(101),
+            ExecutionIdentity {
+                thread_id: 502,
+                ..identity
+            },
+            0
+        ),
+        Ok(())
+    );
+    first
+        .thread_signal_mask(protocol::SIGNAL_MASK_UNBLOCK, pipe)
+        .unwrap();
+    assert_eq!(
+        service
+            .borrow()
+            .validate_wait_delivery_epoch(peer(101), identity, 0),
+        Err(protocol::STATUS_EINTR)
+    );
+}
+
+#[test]
+fn wait_guard_rejects_untrusted_identity_and_reclaims_epochs_only_after_thread_exit() {
+    let service = service();
+    let first = client(&service, 101, 501);
+    assert_eq!(
+        first.thread_signal_epoch(),
+        Err(ClientError::Remote(protocol::STATUS_ESRCH))
+    );
+    first
+        .thread_signal_mask(protocol::SIGNAL_MASK_SET, 0)
+        .unwrap();
+    let identity = ExecutionIdentity {
+        process_id: 101,
+        thread_id: 501,
+    };
+    assert_eq!(
+        service
+            .borrow()
+            .validate_wait_delivery_epoch(peer(102), identity, 0),
+        Err(protocol::STATUS_EPERM)
+    );
+    assert_eq!(
+        service.borrow().validate_wait_delivery_epoch(
+            peer(101),
+            ExecutionIdentity {
+                thread_id: 0,
+                ..identity
+            },
+            0
+        ),
+        Err(protocol::STATUS_EPERM)
+    );
+    service
+        .borrow_mut()
+        .retire_signal_thread(identity, Err(-5))
+        .unwrap_err();
+    assert_eq!(first.thread_signal_epoch().unwrap(), 0);
+    service
+        .borrow_mut()
+        .retire_signal_thread(identity, Err(protocol::STATUS_ESRCH))
+        .unwrap();
+    assert_eq!(
+        first.thread_signal_epoch(),
+        Err(ClientError::Remote(protocol::STATUS_ESRCH))
+    );
 }
 
 #[test]

@@ -664,6 +664,40 @@ int main(void) {
     errno = 0;
     CHECK(sigsuspend(NULL) == -1 && errno == EFAULT);
     debug("native-terminal-window: pause/sigsuspend handlers and mask restoration passed\n");
+    for (unsigned restart = 0; restart < 2; ++restart) {
+        action.sa_flags = restart ? SA_RESTART : 0;
+        CHECK(sigaction(SIGUSR1, &action, NULL) == 0);
+        CHECK(pipe(pipes) == 0);
+        pid_t waiting_child = fork();
+        CHECK(waiting_child >= 0);
+        if (waiting_child == 0) {
+            char byte = 0;
+            if (close(pipes[1]) != 0 || read(pipes[0], &byte, 1) != 1 || byte != 'p') _exit(82);
+            _exit(42);
+        }
+        CHECK(close(pipes[0]) == 0);
+        sig_atomic_t before = atomic_load(&waited_signal);
+        struct stream_wakeup wake = {restart ? pipes[1] : -1, 0, before};
+        CHECK(pthread_create(&writer, NULL, interrupt_stream_io, &wake) == 0);
+        int child_status = 0;
+        errno = 0;
+        pid_t result = waitpid(waiting_child, &child_status, 0);
+        if (restart) {
+            CHECK(result == waiting_child && WIFEXITED(child_status) && WEXITSTATUS(child_status) == 42);
+        } else {
+            CHECK(result == -1 && errno == EINTR);
+            CHECK(waitpid(waiting_child, &child_status, WNOHANG) == 0);
+        }
+        CHECK(atomic_load(&waited_signal) == before + 1);
+        CHECK(pthread_join(writer, &worker_result) == 0 && worker_result == NULL);
+        if (!restart) {
+            CHECK(write(pipes[1], "p", 1) == 1);
+            CHECK(waitpid(waiting_child, &child_status, 0) == waiting_child);
+            CHECK(WIFEXITED(child_status) && WEXITSTATUS(child_status) == 42);
+        }
+        CHECK(close(pipes[1]) == 0);
+    }
+    debug("native-terminal-window: waitpid EINTR, restart and unreaped child status passed\n");
     struct sigaction pipe_action;
     memset(&pipe_action, 0, sizeof(pipe_action));
     pipe_action.sa_handler = on_pipe;
@@ -705,7 +739,7 @@ int main(void) {
     CHECK(waitpid(broken_child, &broken_status, 0) == broken_child);
     CHECK(WIFSIGNALED(broken_status) && WTERMSIG(broken_status) == SIGPIPE);
     CHECK(close(pipes[1]) == 0);
-    debug("native-terminal-window: PASS signal suspension, masked waits and terminal regressions\n");
+    debug("native-terminal-window: PASS waitpid signal interruption and POSIX regressions\n");
     CHECK(close(master) == 0);
     return 0;
 }

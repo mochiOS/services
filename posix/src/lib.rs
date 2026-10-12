@@ -540,6 +540,7 @@ pub struct PosixService<H: Copy = u32> {
     signals: BTreeMap<u64, ProcessSignalState>,
     // Native identities arrive only from authenticated endpoint metadata.
     signal_masks: BTreeMap<(u64, u64), u64>,
+    signal_delivery_epochs: BTreeMap<(u64, u64), u64>,
     thread_pending_signals: BTreeMap<(u64, u64), u64>,
     thread_signal_notifications: BTreeSet<(u64, u64)>,
     signal_child_options: BTreeMap<u64, u32>,
@@ -569,6 +570,7 @@ impl PosixService<u32> {
             resource_limits: BTreeMap::new(),
             signals: BTreeMap::new(),
             signal_masks: BTreeMap::new(),
+            signal_delivery_epochs: BTreeMap::new(),
             thread_pending_signals: BTreeMap::new(),
             thread_signal_notifications: BTreeSet::new(),
             signal_child_options: BTreeMap::new(),
@@ -1651,6 +1653,7 @@ impl<H: Copy> PosixService<H> {
             .retain(|(process_id, _), _| *process_id != child_id);
         self.signals.remove(&child_id);
         self.signal_masks.retain(|(process, _), _| *process != child_id);
+        self.signal_delivery_epochs.retain(|(process, _), _| *process != child_id);
         self.thread_pending_signals.retain(|(process, _), _| *process != child_id);
         self.thread_signal_notifications.retain(|(process, _)| *process != child_id);
         self.signal_child_options.remove(&child_id);
@@ -2309,6 +2312,7 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_SIGNAL_THREAD_DEQUEUE
                 | protocol::OP_SIGNAL_THREAD_PENDING
                 | protocol::OP_SIGNAL_THREAD_RAISE
+                | protocol::OP_SIGNAL_THREAD_EPOCH
                 | protocol::OP_SIGNAL_IMAGE_STARTED
         ) {
             Err(protocol::STATUS_ENOSYS)
@@ -2323,6 +2327,19 @@ impl<H: Copy> PosixService<H> {
             match header.opcode {
                 protocol::OP_SIGNAL_THREAD_MASK => self.thread_signal_mask_payload(sender, payload),
                 protocol::OP_SIGNAL_THREAD_RAISE => self.thread_raise_signal_payload(sender, payload),
+                protocol::OP_SIGNAL_THREAD_EPOCH if payload.is_empty() => {
+                    let epoch = self
+                        .signal_delivery_epochs
+                        .get(&(sender.process_id, sender.thread_id))
+                        .copied()
+                        .ok_or(protocol::STATUS_ESRCH);
+                    epoch.and_then(|epoch| {
+                        let mut output = vec![0; protocol::SIGNAL_MASK_LEN];
+                        protocol::encode_signal_mask(epoch, &mut output).map_err(|_| STATUS_EINVAL)?;
+                        Ok(output)
+                    })
+                }
+                protocol::OP_SIGNAL_THREAD_EPOCH => Err(STATUS_EINVAL),
                 protocol::OP_SIGNAL_IMAGE_STARTED if payload.is_empty() => {
                     self.signal_image_started_payload(sender)
                 }
@@ -2374,6 +2391,7 @@ impl<H: Copy> PosixService<H> {
         };
         if terminated {
             self.signal_masks.remove(&(identity.process_id, identity.thread_id));
+            self.signal_delivery_epochs.remove(&(identity.process_id, identity.thread_id));
             self.thread_pending_signals.remove(&(identity.process_id, identity.thread_id));
             self.thread_signal_notifications.remove(&(identity.process_id, identity.thread_id));
             if let Some(wait) = self.process_wait_states.get_mut(&identity.process_id) {
@@ -2424,6 +2442,7 @@ impl<H: Copy> PosixService<H> {
         protocol::encode_signal_mask(returned, &mut output).map_err(|_| STATUS_EINVAL)?;
         if request.operation != protocol::SIGNAL_MASK_QUERY {
             self.signal_masks.insert(key, updated);
+            self.signal_delivery_epochs.entry(key).or_insert(0);
             if current & !updated & self.signals[&sender.process_id].pending() != 0 {
                 self.signal_notifications.insert(sender.process_id);
             }
@@ -2549,6 +2568,11 @@ impl<H: Copy> PosixService<H> {
             debug_assert_eq!(dequeued, signal);
             let delivery = protocol::SignalDelivery { signal, token };
             state.begin_delivery(delivery, sender.thread_id);
+            let epoch = self
+                .signal_delivery_epochs
+                .entry((process_id, sender.thread_id))
+                .or_insert(0);
+            *epoch = epoch.wrapping_add(1);
             token
         } else {
             0
@@ -2557,6 +2581,37 @@ impl<H: Copy> PosixService<H> {
         protocol::encode_signal_delivery(protocol::SignalDelivery { signal, token }, &mut output)
             .map_err(|_| STATUS_EINVAL)?;
         Ok(output)
+    }
+
+    /// Validate before examining/reaping a child. `sender` is native endpoint
+    /// metadata. A pending delivery or changed sequence releases a blocked IPC
+    /// caller; userspace decides EINTR versus SA_RESTART after dispatch.
+    pub fn validate_wait_delivery_epoch(
+        &self,
+        peer: PeerIdentity,
+        sender: mnu_abi::ExecutionIdentity,
+        expected: u64,
+    ) -> Result<(), i32> {
+        if sender.process_id != peer.process_id || sender.process_id == 0 || sender.thread_id == 0 {
+            return Err(protocol::STATUS_EPERM);
+        }
+        let key = (sender.process_id, sender.thread_id);
+        let epoch = *self
+            .signal_delivery_epochs
+            .get(&key)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let blocked = *self.signal_masks.get(&key).ok_or(protocol::STATUS_ESRCH)?;
+        let pending = self
+            .signals
+            .get(&sender.process_id)
+            .ok_or(protocol::STATUS_ESRCH)?
+            .pending()
+            | self.thread_pending_signals.get(&key).copied().unwrap_or(0);
+        if epoch != expected || pending & !blocked != 0 {
+            Err(protocol::STATUS_EINTR)
+        } else {
+            Ok(())
+        }
     }
 
     pub fn report_process_stopped<P: ProcessBackend<H>>(
