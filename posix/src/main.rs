@@ -1594,6 +1594,11 @@ struct RuntimeProcesses;
 
 #[cfg(target_os = "mochios")]
 impl posix_service::ProcessBackend<u32> for RuntimeProcesses {
+    fn execution_usage(&mut self, process: u32) -> Result<mnu_abi::ProcessExecutionUsage, i32> {
+        mochi_user_platform::process::execution_usage(Some(process))
+            .map_err(|error| i32::try_from(error.raw()).unwrap_or(-5))
+    }
+
     fn status(&mut self, process: u32) -> Result<posix_service::ProcessLifecycle, i32> {
         use mochi_user_platform as platform;
 

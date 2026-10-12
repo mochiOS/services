@@ -12,6 +12,9 @@ use posix_service::{
     ProcessLifecycle, STATUS_EINVAL, SessionDirectories,
 };
 
+#[path = "support/child_cpu_state.rs"]
+mod child_cpu_state;
+
 struct LocalTransport {
     service: RefCell<PosixService>,
     peer: PeerIdentity,
@@ -1335,6 +1338,7 @@ struct RecordingFilesystem {
 #[derive(Default)]
 struct RecordingProcesses {
     states: BTreeMap<u32, ProcessLifecycle>,
+    usage: BTreeMap<u32, Result<mnu_abi::ProcessExecutionUsage, i32>>,
     suspend_error: Option<i32>,
     terminate_error: Option<i32>,
     terminate_failure: Option<(u32, i32)>,
@@ -1345,6 +1349,19 @@ struct RecordingProcesses {
 }
 
 impl ProcessBackend<u32> for RecordingProcesses {
+    fn execution_usage(&mut self, process: u32) -> Result<mnu_abi::ProcessExecutionUsage, i32> {
+        if !self.states.contains_key(&process) {
+            return Err(protocol::STATUS_ESRCH);
+        }
+        // Tests without simulated CPU execution have a zero-valued test clock.
+        // Production obtains every sample from the retained native Handle.
+        self.usage.get(&process).copied()
+            .unwrap_or(Ok(mnu_abi::ProcessExecutionUsage {
+                ticks_per_second: 500,
+                ..Default::default()
+            }))
+    }
+
     fn status(&mut self, process: u32) -> Result<ProcessLifecycle, i32> {
         self.states.get(&process).copied().ok_or(-3)
     }

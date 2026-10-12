@@ -6,6 +6,7 @@ use mochios_posix_protocol as protocol;
 pub mod pty;
 
 pub const STATUS_EINVAL: i32 = -22;
+pub const STATUS_EOVERFLOW: i32 = -75;
 
 /// Validates a delegated signal-thread object against kernel-authenticated
 /// sender identity. An IPC endpoint number is not a native thread identifier.
@@ -326,6 +327,7 @@ pub enum ProcessLifecycle {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ProcessWaitState {
+    waited_cpu: WaitedChildCpuUsage,
     stopped: bool,
     stop_signal: u32,
     stop_reported: bool,
@@ -504,9 +506,46 @@ fn default_signal_terminates(signal: u32) -> bool {
 
 pub trait ProcessBackend<H: Copy> {
     fn status(&mut self, process: H) -> Result<ProcessLifecycle, i32>;
+    /// Reads the retained native process object, not client-supplied metrics.
+    fn execution_usage(&mut self, process: H) -> Result<mnu_abi::ProcessExecutionUsage, i32>;
     fn suspend(&mut self, process: H) -> Result<(), i32>;
     fn terminate(&mut self, process: H, exit_code: u64) -> Result<(), i32>;
     fn release(&mut self, process: H);
+}
+
+/// Waited-for children and the descendants those children actually waited for.
+/// Native tick precision is preserved until conversion at the libc boundary.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WaitedChildCpuUsage {
+    pub user_ticks: u128,
+    pub kernel_ticks: u128,
+    /// Zero only for an empty accumulator. All native processes share a clock
+    /// sampling rate; inconsistent backend rates must not be mixed silently.
+    pub ticks_per_second: u64,
+}
+
+impl WaitedChildCpuUsage {
+    /// Combines counts without truncation, unit mixing, or wrapping.
+    pub fn checked_add(self, other: Self) -> Result<Self, i32> {
+        if (self.ticks_per_second == 0 && (self.user_ticks != 0 || self.kernel_ticks != 0))
+            || (other.ticks_per_second == 0 && (other.user_ticks != 0 || other.kernel_ticks != 0))
+        {
+            return Err(protocol::STATUS_EIO);
+        }
+        let rate = self.ticks_per_second.max(other.ticks_per_second);
+        if (self.ticks_per_second != 0 && self.ticks_per_second != rate)
+            || (other.ticks_per_second != 0 && other.ticks_per_second != rate)
+        {
+            return Err(protocol::STATUS_EIO);
+        }
+        Ok(Self {
+            user_ticks: self.user_ticks.checked_add(other.user_ticks)
+                .ok_or(STATUS_EOVERFLOW)?,
+            kernel_ticks: self.kernel_ticks.checked_add(other.kernel_ticks)
+                .ok_or(STATUS_EOVERFLOW)?,
+            ticks_per_second: rate,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1622,7 +1661,30 @@ impl<H: Copy> PosixService<H> {
                     .and_then(|state| state.termination_signal)
                     .map(|signal| signal & 0x7f)
                     .unwrap_or_else(|| ((exit_code & 0xff) as u32) << 8);
+                let usage = processes.execution_usage(handle)?;
+                if usage.ticks_per_second == 0 || usage.reserved != 0 {
+                    return Err(protocol::STATUS_EIO);
+                }
+                let own = WaitedChildCpuUsage {
+                    user_ticks: u128::from(usage.user_ticks),
+                    kernel_ticks: u128::from(usage.kernel_ticks),
+                    ticks_per_second: usage.ticks_per_second,
+                };
+                let descendant = self.process_wait_states
+                    .get(&child)
+                    .ok_or(protocol::STATUS_ESRCH)?
+                    .waited_cpu;
+                let total = self.process_wait_states
+                    .get(&peer.process_id)
+                    .ok_or(protocol::STATUS_ESRCH)?
+                    .waited_cpu
+                    .checked_add(own)?
+                    .checked_add(descendant)?;
+                // Compute and validate first. Backend failures and overflow
+                // leave the child waitable and do not partially add its time.
                 self.reap_child(peer.process_id, child, filesystem, processes)?;
+                self.process_wait_states.get_mut(&peer.process_id)
+                    .unwrap().waited_cpu = total;
                 return Ok(protocol::WaitResult {
                     process_id: child,
                     status,
@@ -1644,6 +1706,14 @@ impl<H: Copy> PosixService<H> {
         } else {
             Err(protocol::STATUS_EAGAIN)
         }
+    }
+
+    /// Only the authenticated caller's already-waited child time is exposed.
+    pub fn waited_child_cpu_usage(&self, peer: PeerIdentity) -> Result<WaitedChildCpuUsage, i32> {
+        self.process_wait_states
+            .get(&peer.process_id)
+            .map(|state| state.waited_cpu)
+            .ok_or(protocol::STATUS_ESRCH)
     }
 
     /// Returns the native process handles whose lifecycle can satisfy a
