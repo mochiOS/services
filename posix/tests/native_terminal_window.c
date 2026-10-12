@@ -30,13 +30,17 @@ static _Atomic unsigned sync_ready, sync_completed, sync_unrelated;
 static _Atomic uint64_t retired_cpu_nanoseconds;
 static _Atomic unsigned cancel_ready, cancel_resume, cancel_enabled, cancel_after_test;
 static _Atomic unsigned cancel_cleanup_returned, cancel_cleanup_bad;
+static _Atomic unsigned cleanup_order;
+static void record_cleanup(void *value) {
+    atomic_store(&cleanup_order, atomic_load(&cleanup_order) * 10 + (unsigned)(uintptr_t)value);
+}
 static pthread_key_t cancel_key;
 static unsigned cancel_marker;
 static void cancel_destructor(void *value) {
     int previous = 99;
     if (value != &cancel_marker
         || pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &previous) != 0
-        || previous != PTHREAD_CANCEL_DISABLE)
+        || previous != PTHREAD_CANCEL_DISABLE || atomic_load(&cleanup_order) != 21)
         atomic_store(&cancel_cleanup_bad, 1);
     pthread_testcancel();
     atomic_fetch_add(&cancel_cleanup_returned, 1);
@@ -141,17 +145,34 @@ static void *receive_deferred_cancellation(void *unused) {
         || pthread_setspecific(cancel_key, &cancel_marker) != 0)
         return (void *)(uintptr_t)1;
     atomic_store(&cancel_ready, 1);
+    int failure = 0;
+    pthread_cleanup_push(record_cleanup, (void *)(uintptr_t)1);
+    pthread_cleanup_push(record_cleanup, (void *)(uintptr_t)2);
     while (atomic_load(&cancel_resume) == 0) {
-        if (sched_yield() != 0) return (void *)(uintptr_t)1;
+        if (sched_yield() != 0) { failure = 1; break; }
     }
     pthread_testcancel(); // Disabled cancellation must leave the request pending.
     errno = 123;
     if (pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, &previous) != 0
         || previous != PTHREAD_CANCEL_DISABLE || errno != 123)
-        return (void *)(uintptr_t)1;
-    atomic_store(&cancel_enabled, 1);
-    pthread_testcancel();
-    atomic_store(&cancel_after_test, 1);
+        failure = 1;
+    if (!failure) {
+        atomic_store(&cancel_enabled, 1);
+        pthread_testcancel();
+        atomic_store(&cancel_after_test, 1);
+    }
+    pthread_cleanup_pop(0);
+    pthread_cleanup_pop(0);
+    return failure ? (void *)(uintptr_t)1 : NULL;
+}
+
+static void *exit_with_cleanup(void *unused) {
+    (void)unused;
+    pthread_cleanup_push(record_cleanup, (void *)(uintptr_t)1);
+    pthread_cleanup_push(record_cleanup, (void *)(uintptr_t)2);
+    pthread_exit((void *)(uintptr_t)55);
+    pthread_cleanup_pop(0);
+    pthread_cleanup_pop(0);
     return NULL;
 }
 
@@ -391,7 +412,23 @@ int main(void) {
     CHECK(pthread_join(cancel_worker, &cancel_result) == 0 && cancel_result == PTHREAD_CANCELED);
     CHECK(atomic_load(&cancel_enabled) == 1 && atomic_load(&cancel_after_test) == 0);
     CHECK(atomic_load(&cancel_cleanup_returned) == 1 && atomic_load(&cancel_cleanup_bad) == 0);
+    CHECK(atomic_load(&cleanup_order) == 21);
     CHECK(pthread_key_delete(cancel_key) == 0);
+    atomic_store(&cleanup_order, 0);
+    pthread_cleanup_push(record_cleanup, (void *)(uintptr_t)1);
+    pthread_cleanup_push(record_cleanup, (void *)(uintptr_t)2);
+    pthread_cleanup_pop(1);
+    pthread_cleanup_pop(0);
+    CHECK(atomic_load(&cleanup_order) == 2);
+    atomic_store(&cleanup_order, 0);
+    pthread_cleanup_push_defer_np(record_cleanup, (void *)(uintptr_t)1);
+    pthread_cleanup_pop_restore_np(1);
+    CHECK(atomic_load(&cleanup_order) == 1);
+    atomic_store(&cleanup_order, 0);
+    CHECK(pthread_create(&cancel_worker, NULL, exit_with_cleanup, NULL) == 0);
+    CHECK(pthread_join(cancel_worker, &cancel_result) == 0 && cancel_result == (void *)(uintptr_t)55);
+    CHECK(atomic_load(&cleanup_order) == 21);
+    debug("native-terminal-window: cleanup stack pop, cancel, pthread_exit and TLS ordering passed\n");
     debug("native-terminal-window: deferred cancellation waits for a point and disables cleanup reentry\n");
     struct timespec process_cpu_before, process_cpu_after;
     CHECK(clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &process_cpu_before) == 0);
@@ -1078,7 +1115,7 @@ int main(void) {
           + (cpu_times_after.tms_cstime - cpu_times_before.tms_cstime) >= CLOCKS_PER_SEC / 5);
     CHECK(native_call4(626, (uint64_t)observed_child, 0, 0, 0) == 0);
     debug("native-terminal-window: WAIT-only child execution snapshot survives waitpid reclamation\n");
-    debug("native-terminal-window: PASS deferred cancellation and POSIX regressions\n");
+    debug("native-terminal-window: PASS pthread cleanup stacks and POSIX regressions\n");
     CHECK(close(master) == 0);
     return 0;
 }

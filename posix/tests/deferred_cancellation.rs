@@ -17,18 +17,22 @@ const PTHREAD_CANCEL_DEFERRED: u32 = 0;
 const THREAD_EXITED: u32 = 3;
 struct ThreadControl {
     cancel_state: AtomicU32, cancel_type: AtomicU32, cancel_pending: AtomicU32,
-    result: AtomicUsize, state: AtomicU32,
+    result: AtomicUsize, state: AtomicU32, cleanup_head: AtomicUsize,
 }
 static CONTROL: ThreadControl = ThreadControl {
     cancel_state: AtomicU32::new(PTHREAD_CANCEL_ENABLE),
     cancel_type: AtomicU32::new(PTHREAD_CANCEL_DEFERRED), cancel_pending: AtomicU32::new(0),
-    result: AtomicUsize::new(0), state: AtomicU32::new(2),
+    result: AtomicUsize::new(0), state: AtomicU32::new(2), cleanup_head: AtomicUsize::new(0),
 };
 static AFTER_ENABLE: AtomicU32 = AtomicU32::new(0);
 static DESTRUCTOR_RETURNED: AtomicU32 = AtomicU32::new(0);
 fn register_current_thread() -> Option<((), &'static ThreadControl)> { Some(((), &CONTROL)) }
 fn current_thread_control() -> Option<((), &'static ThreadControl)> { Some(((), &CONTROL)) }
 fn native_mutex_wake_all(_: &AtomicU32) {}
+mod thread_cleanup {
+    use super::*;
+    pub unsafe fn drain(head: &AtomicUsize) { assert_eq!(head.load(Ordering::Acquire), 0); }
+}
 fn run_thread_specific_destructors(control: &ThreadControl) {
     assert_eq!(control.cancel_state.load(Ordering::Acquire), PTHREAD_CANCEL_DISABLE);
     assert_eq!(control.cancel_type.load(Ordering::Acquire), PTHREAD_CANCEL_DEFERRED);
