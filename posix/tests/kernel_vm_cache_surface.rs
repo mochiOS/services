@@ -34,15 +34,11 @@ fn unused_inode_cache_commands_are_not_a_kernel_filesystem_interface() {
 }
 
 #[test]
-fn actual_vm_object_cache_keys_keep_provider_identity_separate_from_legacy_inodes() {
+fn actual_vm_object_cache_keys_keep_provider_identity_separate_from_memory_objects() {
     let source = include_str!("../../../core/src/mem/vm_object.rs");
     let mut program = String::from(
         r#"
 use std::sync::Arc;
-#[derive(Clone, Copy, Debug, PartialEq, Eq)] struct MountId(u64);
-#[derive(Clone, Copy, Debug, PartialEq, Eq)] struct InodeId(u64);
-struct Inode { mount_id: MountId, inode_id: InodeId }
-struct Vnode { inode: Inode }
 struct ProviderObject { endpoint_thread_id: u64, endpoint_slot: u16, endpoint_generation: u64 }
 mod shared_memory {
     pub struct SharedMemory(pub u64);
@@ -67,7 +63,6 @@ mod actual {
     program.push_str("impl VmObject {\n");
     for entry in [
         "    pub fn shared_memory(",
-        "    pub fn file(",
         "    pub fn provider(",
         "    fn object_key(",
     ] {
@@ -94,11 +89,7 @@ pub fn verify() {
         assert_ne!(first.object_key(), VmObject::provider(Arc::new(replacement), 11).object_key());
     }
     let memory = VmObject::shared_memory(Arc::new(shared_memory::SharedMemory(11)));
-    let legacy = VmObject::file(Arc::new(Vnode { inode: Inode { mount_id: MountId(7), inode_id: InodeId(11) } }));
     assert_ne!(first.object_key(), memory.object_key());
-    assert_ne!(first.object_key(), legacy.object_key());
-    assert_ne!(memory.object_key(), legacy.object_key());
-    assert_eq!(legacy.object_key(), ObjectKey::Vnode { mount_id: MountId(7), inode_id: InodeId(11) });
 }
 }
 fn main() { actual::verify(); }

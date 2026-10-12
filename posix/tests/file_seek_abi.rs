@@ -13,5 +13,8 @@ fn legacy_seek_is_removed_from_abi_dispatch_and_kernel_fd_semantics() {
     assert!(!platform.contains("SyscallNumber::FileSeek"));
     assert!(!platform.contains("mod file_read;"));
     assert!(dispatch.contains("SyscallNumber::HandleSeek"));
-    assert!(filesystem.contains("pub(crate) fn seek_file_handle("));
+    assert!(!filesystem.contains("fn seek_file_handle("));
+    let handles = include_str!("../../../core/src/syscall/handle.rs");
+    assert!(handles.contains("KernelObject::File(_) => ENOTSUP"));
+    assert!(handles.contains("KernelObject::Provider(provider) => provider_seek("));
 }

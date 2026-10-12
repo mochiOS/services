@@ -15,7 +15,6 @@ pub const HANDLE_OPTION_NONBLOCKING: u64 = 1;
 use std::sync::atomic::{AtomicUsize, Ordering};
 static READ_CLOSED: AtomicUsize = AtomicUsize::new(0);
 static WRITE_CLOSED: AtomicUsize = AtomicUsize::new(0);
-mod vfs { pub struct Vnode; }
 mod interrupt { pub mod spinlock {
     pub struct SpinLock<T>(std::sync::Mutex<T>);
     impl<T> SpinLock<T> {
@@ -23,7 +22,9 @@ mod interrupt { pub mod spinlock {
         pub fn lock(&self) -> std::sync::MutexGuard<'_, T> { self.0.lock().unwrap() }
     }
 } }
-mod syscall { pub mod fs {
+mod syscall {
+    pub fn validate_user_ptr(pointer: u64, _: u64) -> bool { pointer == 1 }
+    pub mod fs {
     pub fn close_pipe_endpoint_from_kernel(stream: usize, write: bool) {
         assert_eq!(stream, 42);
         if write { crate::WRITE_CLOSED.fetch_add(1, crate::Ordering::Relaxed); }
@@ -33,6 +34,32 @@ mod syscall { pub mod fs {
 "#,
     );
     program.push_str(&format!("#[path = {source:?}] mod objects;\n"));
+    program.push_str(
+        r#"
+mod io {
+    use super::*;
+    use objects::{FileHandle, FileHandleCap};
+    pub const EFAULT: u64 = (-14i64) as u64;
+    pub const EACCES: u64 = (-13i64) as u64;
+    const ENOTSUP: u64 = (-95i64) as u64;
+    fn read_pipe(id: usize, options: u64, pointer: u64, len: u64) -> u64 {
+        assert_eq!((id, options, pointer), (42, HANDLE_OPTION_NONBLOCKING, 1)); len
+    }
+    fn write_pipe(id: usize, options: u64, pointer: u64, len: u64, complete: bool) -> u64 {
+        assert_eq!((id, options, pointer, complete), (42, 0, 1, true)); len
+    }
+"#,
+    );
+    let filesystem = include_str!("../../../core/src/syscall/fs.rs");
+    for entry in [
+        "pub(crate) fn read_file_handle(",
+        "pub(crate) fn write_file_handle(",
+    ] {
+        let start = filesystem.find(entry).unwrap();
+        let end = start + filesystem[start..].find("\n}\n").unwrap() + 3;
+        program.push_str(&filesystem[start..end]);
+    }
+    program.push_str("}\n");
     program.push_str(
         r#"
 fn main() {
@@ -52,6 +79,14 @@ fn main() {
     reader.open.lock().io_options = HANDLE_OPTION_NONBLOCKING;
     assert_eq!(duplicate.open.lock().io_options, HANDLE_OPTION_NONBLOCKING);
     assert_eq!(writer.open.lock().io_options, 0);
+    assert_eq!(io::read_file_handle(&reader, 1, 7), 7);
+    assert_eq!(io::write_file_handle(&writer, 1, 8), 8);
+    assert_eq!(io::read_file_handle(&writer, 1, 7), io::EACCES);
+    assert_eq!(io::write_file_handle(&reader, 1, 8), io::EACCES);
+    assert_eq!(io::read_file_handle(&reader, 2, 7), io::EFAULT);
+    assert_eq!(io::write_file_handle(&writer, 2, 8), io::EFAULT);
+    assert_eq!(io::read_file_handle(&reader, 0, 0), io::EFAULT);
+    assert_eq!(io::read_file_handle(&reader, 1, 0), 0);
     drop(reader);
     assert_eq!(READ_CLOSED.load(Ordering::Relaxed), 0);
     assert_eq!(WRITE_CLOSED.load(Ordering::Relaxed), 0);
