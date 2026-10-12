@@ -55,6 +55,9 @@ fn descriptor_numbers_and_cloexec_are_not_kernel_process_state() {
         }
     }
     assert!(!objects.contains("from_open_flags"));
+    assert!(!objects.contains("fd_remote"));
+    assert!(!objects.contains("is_remote"));
+    assert!(!include_str!("../../../core/src/syscall/fs.rs").contains("close_remote_fd_from_kernel"));
     assert!(objects.contains("pub struct FileHandle"));
     assert!(objects.contains("pub open: Arc<SpinLock<OpenFile>>"));
     assert!(process.contains("object_handles:"));
