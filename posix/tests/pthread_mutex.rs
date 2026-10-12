@@ -10,6 +10,8 @@ fn normal_default_and_errorcheck_have_their_own_relock_semantics() {
     for kind in [NORMAL, DEFAULT, ERRORCHECK] {
         let lock = Mutex::new(kind);
         assert_eq!(lock.try_lock(1), Ok(()));
+        assert_eq!(lock.check_owner(1), Ok(()));
+        assert_eq!(lock.check_owner(2), Err(Error::NotOwner));
         assert_eq!(lock.try_lock(1), Err(Error::Busy));
         assert_eq!(lock.try_lock(2), Err(Error::Busy));
         assert_eq!(
