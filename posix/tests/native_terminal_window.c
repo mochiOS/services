@@ -25,6 +25,7 @@ static _Atomic unsigned pipe_signals;
 static _Atomic unsigned child_signals;
 static _Atomic unsigned directed_ready, directed_signals;
 static _Atomic unsigned sync_ready, sync_completed, sync_unrelated;
+static _Atomic uint64_t retired_cpu_nanoseconds;
 static void on_sync_unrelated(int signal_number) {
     if (signal_number == SIGUSR2) atomic_fetch_add(&sync_unrelated, 1);
 }
@@ -92,6 +93,22 @@ static void *exercise_foreground_io(void *unused) {
         if (write(STDOUT_FILENO, "x", 1) != 1 || tcsetwinsize(STDIN_FILENO, &size) != 0)
             return (void *)(uintptr_t)1;
     }
+    return NULL;
+}
+
+static uint64_t clock_nanoseconds(const struct timespec *value) {
+    return (uint64_t)value->tv_sec * UINT64_C(1000000000) + (uint64_t)value->tv_nsec;
+}
+
+static void *consume_cpu_before_retirement(void *unused) {
+    (void)unused;
+    struct timespec cpu;
+    do {
+        for (volatile unsigned iteration = 0; iteration < 10000; ++iteration) {}
+        if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu) != 0)
+            return (void *)(uintptr_t)1;
+    } while (clock_nanoseconds(&cpu) < UINT64_C(200000000));
+    atomic_store(&retired_cpu_nanoseconds, clock_nanoseconds(&cpu));
     return NULL;
 }
 
@@ -299,6 +316,17 @@ int main(void) {
         CHECK(pthread_join(thread, &result) == 0 && result == (void *)iteration);
     }
     debug("native-terminal-window: 128 native thread retirements passed\n");
+    struct timespec process_cpu_before, process_cpu_after;
+    CHECK(clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &process_cpu_before) == 0);
+    pthread_t cpu_worker;
+    CHECK(pthread_create(&cpu_worker, NULL, consume_cpu_before_retirement, NULL) == 0);
+    void *cpu_result = NULL;
+    CHECK(pthread_join(cpu_worker, &cpu_result) == 0 && cpu_result == NULL);
+    CHECK(clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &process_cpu_after) == 0);
+    CHECK(atomic_load(&retired_cpu_nanoseconds) >= UINT64_C(200000000));
+    CHECK(clock_nanoseconds(&process_cpu_after) >= clock_nanoseconds(&process_cpu_before)
+          + atomic_load(&retired_cpu_nanoseconds));
+    debug("native-terminal-window: process CPU clock preserves joined worker execution\n");
     pthread_attr_t detached;
     CHECK(pthread_attr_init(&detached) == 0);
     CHECK(pthread_attr_setdetachstate(&detached, PTHREAD_CREATE_DETACHED) == 0);
@@ -924,7 +952,7 @@ int main(void) {
     CHECK(waitpid(broken_child, &broken_status, 0) == broken_child);
     CHECK(WIFSIGNALED(broken_status) && WTERMSIG(broken_status) == SIGPIPE);
     CHECK(close(pipes[1]) == 0);
-    debug("native-terminal-window: PASS sigwait and POSIX signal regressions\n");
+    debug("native-terminal-window: PASS process CPU accounting and POSIX regressions\n");
     CHECK(close(master) == 0);
     return 0;
 }

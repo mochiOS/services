@@ -27,7 +27,7 @@ fn production_reclaim_is_independent_of_creator_and_preserves_handle_status() {
         .unwrap()
         + method_start;
     let mut probe = format!(
-        "use std::sync::{{Arc, atomic::{{AtomicU8, AtomicU64, Ordering}}}};\n\
+        "mod native {{\nuse std::sync::{{Arc, atomic::{{AtomicU8, AtomicU64, Ordering}}}};\n\
          type ProcessId = u64;\n\
          mod mnu_abi {{ pub const PROCESS_STATE_RUNNING:u32={}; pub const PROCESS_STATE_EXITED:u32={}; }}\n",
         mnu_abi::PROCESS_STATE_RUNNING, mnu_abi::PROCESS_STATE_EXITED,
@@ -52,7 +52,7 @@ impl Table {
     probe.push_str(
         r#"
 }
-fn main() {
+pub fn run() {
     let retained = Arc::new(ProcessObject::new(1));
     retained.mark_exited(37);
     let other = Arc::new(ProcessObject::new(2));
@@ -77,6 +77,7 @@ fn main() {
 }
 "#,
     );
+    probe.push_str("\n}\nfn main() { native::run(); }\n");
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
