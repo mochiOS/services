@@ -35,13 +35,9 @@ mod cext { pub mod fs {
 mod vfs {
     pub struct MountId(pub u64);
     pub mod userspace {
-        pub struct Node { pub size: u64 }
-        pub fn lookup(_: u64, _: &str) -> Result<Node, u64> {
+        pub fn lookup_size(_: u64, _: &str) -> Result<u64, u64> {
             crate::LOOKUPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if crate::FAIL.load(std::sync::atomic::Ordering::Acquire) { Err(crate::EIO) } else { Ok(Node { size: 22 }) }
-        }
-        pub fn stat(_: u64, _: u64, _: u64) -> Result<Node, u64> {
-            if crate::FAIL.load(std::sync::atomic::Ordering::Acquire) { Err(crate::EIO) } else { Ok(Node { size: 66 }) }
+            if crate::FAIL.load(std::sync::atomic::Ordering::Acquire) { Err(crate::EIO) } else { Ok(22) }
         }
     }
 }
@@ -49,10 +45,8 @@ struct Mount { mount_id: vfs::MountId, path: String }
 fn userspace_mount(path: &str) -> Option<Mount> {
     MOUNTED.load(Ordering::Acquire).then(|| Mount { mount_id: vfs::MountId(2), path: path.into() })
 }
-struct Inode { mount_id: vfs::MountId }
-struct Vnode { inode: Inode, user: bool, handle: Option<u64> }
+struct Vnode { handle: Option<u64> }
 impl Vnode {
-    fn userspace_handle_ids(&self) -> Option<(u64, u64)> { self.user.then_some((1, 2)) }
     fn cext_handle_id(&self) -> Option<u64> { self.handle }
     fn path(&self) -> &str { "/image" }
 }
@@ -63,7 +57,8 @@ impl Vnode {
         let end = start + source[start..].find("\n}\n").unwrap() + 3;
         program.push_str(&source[start..end]);
     }
-    program.push_str(r#"
+    program.push_str(
+        r#"
 fn main() {
     INIT.store(true, Ordering::Release); MOUNTED.store(true, Ordering::Release);
     assert_eq!(file_size_rootfs_first("/image"), Some(11));
@@ -75,19 +70,17 @@ fn main() {
     assert_eq!(file_size_rootfs_first("/image"), None);
     assert_eq!(CEXT_CALLS.load(Ordering::Relaxed), 0);
     assert_eq!(ROOT_CALLS.load(Ordering::Relaxed), 0);
-    let user = Vnode { inode: Inode { mount_id: vfs::MountId(2) }, user: true, handle: Some(1) };
-    assert_eq!(vnode_size(&user), Err(EIO)); // Never fall back from an open provider object to a pathname.
     FAIL.store(false, Ordering::Release);
-    assert_eq!(vnode_size(&user), Ok(Some(66)));
-    let cext = Vnode { inode: Inode { mount_id: vfs::MountId(1) }, user: false, handle: Some(1) };
-    assert_eq!(vnode_size(&cext), Ok(Some(55)));
+    let cext = Vnode { handle: Some(1) };
+    assert_eq!(vnode_size(&cext), Some(55));
     assert_eq!(CEXT_CALLS.load(Ordering::Relaxed), 0);
     MOUNTED.store(false, Ordering::Release);
     assert_eq!(file_size_rootfs_first("/image"), Some(33));
     FAIL.store(true, Ordering::Release);
     assert_eq!(file_size_rootfs_first("/image"), Some(44));
 }
-"#);
+"#,
+    );
     let directory = std::env::temp_dir().join(format!(
         "mochios-kernel-size-{}-{}",
         std::process::id(),
@@ -130,14 +123,7 @@ fn main() {
 #[test]
 fn transitional_kernel_object_records_no_longer_store_posix_ownership_or_modes() {
     let source = include_str!("../../../core/src/vfs/userspace.rs");
-    let fields = source
-        .split("pub struct NodeInfo {")
-        .nth(1)
-        .unwrap()
-        .split('}')
-        .next()
-        .unwrap();
-    assert!(!fields.contains("mode:") && !fields.contains("uid:") && !fields.contains("gid:"));
+    assert!(!source.contains("struct NodeInfo"));
     let fs = include_str!("../../../core/src/syscall/fs.rs");
     assert!(!fs.contains("struct FileMetadata") && !fs.contains("fn userspace_mode("));
     assert!(source.contains("protocol::decode_metadata(payload).map_err(|_| EIO)?;"));

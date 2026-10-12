@@ -8,7 +8,7 @@ fn transitional_kernel_transport_cannot_construct_removed_posix_requests() {
                 .and_then(|line| line.split('(').next())
         })
         .collect();
-    assert_eq!(functions, ["lookup", "close", "read", "write", "stat"]);
+    assert_eq!(functions, ["lookup_size"]);
     for opcode in [
         "OP_MOUNT",
         "OP_OPEN",
