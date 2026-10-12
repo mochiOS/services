@@ -23,10 +23,12 @@ struct Timespec {{ tv_sec: i64, tv_nsec: i64 }}
 struct ThreadControl {{
     state: AtomicU32, cancel_state: AtomicU32, cancel_pending: AtomicU32,
     wait_generation: AtomicU32, caught_signal_generation: AtomicU64,
+    multiplex_generation: AtomicU64,
 }}
 static CONTROL: ThreadControl = ThreadControl {{
     state: AtomicU32::new(2), cancel_state: AtomicU32::new(0), cancel_pending: AtomicU32::new(0),
     wait_generation: AtomicU32::new(0), caught_signal_generation: AtomicU64::new(0),
+    multiplex_generation: AtomicU64::new(0),
 }};
 static CASE: AtomicU32 = AtomicU32::new(0);
 static WAITS: AtomicU32 = AtomicU32::new(0);
@@ -41,6 +43,7 @@ fn thread_control(thread: usize) -> Option<&'static ThreadControl> {{ (thread ==
 fn native_mutex_wake_all(address: &AtomicU32) {{
     assert!(std::ptr::eq(address, &CONTROL.state) || std::ptr::eq(address, &CONTROL.wait_generation));
 }}
+fn native_counter_wake_all(address: &AtomicU64) {{ assert!(std::ptr::eq(address, &CONTROL.multiplex_generation)); }}
 fn finish_thread(_: &ThreadControl, result: *mut c_void) -> ! {{
     assert_eq!(result as usize, usize::MAX);
     let case = CASE.load(Ordering::Acquire);

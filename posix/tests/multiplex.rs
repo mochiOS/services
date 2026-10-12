@@ -234,7 +234,9 @@ fn both_entry_points_guard_the_all_handler_generation_not_only_nonrestart_handle
         .next()
         .unwrap();
     assert!(bridge.contains("HandleWaitManyGuarded"));
-    assert!(bridge.contains("&control.caught_signal_generation as *const AtomicU64"));
+    assert!(bridge.contains("&control.multiplex_generation as *const AtomicU64"));
+    assert!(bridge.contains("control.caught_signal_generation.load(Ordering::Acquire)"));
+    assert!(bridge.contains("expected: notification"));
     assert!(!bridge.contains("nonrestart_signal_generation"));
     for (begin, end) in [("fn select(", "fn poll("), ("fn poll(", "fn getgroups(")] {
         let entry = runtime

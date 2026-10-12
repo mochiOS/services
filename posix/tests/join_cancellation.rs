@@ -7,7 +7,7 @@ fn production_join_cancellation_releases_the_claim_before_cleanup_and_preserves_
     let mut program = String::from(
         r#"
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 type c_int = i32;
 const ESRCH: i32 = 3;
 const EAGAIN: i32 = 11;
@@ -23,12 +23,14 @@ const PTHREAD_CANCEL_ENABLE: u32 = 0;
 struct ThreadControl {
     state: AtomicU32, joinability: AtomicU32, join_waiter: AtomicU32, result: AtomicUsize,
     cancel_state: AtomicU32, cancel_pending: AtomicU32, wait_generation: AtomicU32,
+    multiplex_generation: AtomicU64,
 }
 impl ThreadControl {
     const fn new() -> Self { Self {
         state: AtomicU32::new(THREAD_RUNNING), joinability: AtomicU32::new(THREAD_JOINABLE),
         join_waiter: AtomicU32::new(0), result: AtomicUsize::new(55), cancel_state: AtomicU32::new(0),
         cancel_pending: AtomicU32::new(0), wait_generation: AtomicU32::new(0),
+        multiplex_generation: AtomicU64::new(0),
     } }
 }
 static CALLER: ThreadControl = ThreadControl::new();
@@ -46,6 +48,7 @@ fn register_current_thread() -> Option<(Pthread, &'static ThreadControl)> {
 }
 fn current_thread_control() -> Option<(Pthread, &'static ThreadControl)> { Some((1, &CALLER)) }
 fn native_mutex_wake_all(_: &AtomicU32) {}
+fn native_counter_wake_all(_: &AtomicU64) {}
 fn release_thread_control(target: &ThreadControl) {
     assert_eq!(target.state.load(Ordering::Acquire), THREAD_REAPING);
     RELEASED.fetch_add(1, Ordering::AcqRel);

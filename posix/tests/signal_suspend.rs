@@ -47,5 +47,7 @@ fn pause_preserves_the_mask_and_sigsuspend_requires_a_mask_pointer() {
             < suspend.find("suspend_with_signal_mask(mask)").unwrap()
     );
     assert!(suspend.contains("set_errno(EFAULT)"));
-    assert!(suspend.contains("result_with_errno(suspend_with_signal_mask(mask), -1)"));
+    assert!(suspend.contains("let result = suspend_with_signal_mask(mask)"));
+    assert!(suspend.find("suspend_with_signal_mask(mask)").unwrap()
+        < suspend.rfind("pthread_testcancel()").unwrap());
 }
