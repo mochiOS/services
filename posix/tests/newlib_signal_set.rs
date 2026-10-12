@@ -52,6 +52,7 @@ fn sdk_signal_set_calls_match_real_newlib_functions_and_validate_arguments() {
         );
     }
     let header = fs::read_to_string(&header).unwrap();
+    assert_eq!(header.matches("#define SA_NOCLDWAIT 0x2").count(), 1);
     let start = header
         .find("#if !defined(__CYGWIN__) && !defined(__rtems__)")
         .unwrap();

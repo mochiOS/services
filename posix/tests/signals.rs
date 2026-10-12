@@ -373,7 +373,9 @@ fn signal_wire_format_rejects_invalid_numbers_and_reserved_bytes() {
         protocol::decode_signal_child_options(&options),
         Ok(protocol::SIGNAL_CHILD_OPTION_NOCLDSTOP)
     );
-    assert!(protocol::encode_signal_child_options(2, &mut options).is_err());
+    assert!(protocol::encode_signal_child_options(4, &mut options).is_err());
+    protocol::encode_signal_child_options(protocol::SIGNAL_CHILD_OPTIONS_ALL, &mut options).unwrap();
+    assert_eq!(protocol::decode_signal_child_options(&options), Ok(protocol::SIGNAL_CHILD_OPTIONS_ALL));
     assert!(protocol::decode_signal_child_options(&[0; 5]).is_err());
 }
 
@@ -450,8 +452,9 @@ fn child_signal_options_round_trip_through_the_client() {
     client
         .set_signal_child_options(protocol::SIGNAL_CHILD_OPTION_NOCLDSTOP)
         .unwrap();
+    client.set_signal_child_options(protocol::SIGNAL_CHILD_OPTIONS_ALL).unwrap();
     assert!(matches!(
-        client.set_signal_child_options(2),
+        client.set_signal_child_options(4),
         Err(ClientError::Protocol(
             protocol::ProtocolError::InvalidLength
         ))

@@ -80,5 +80,5 @@ fn runtime_keeps_sleep_interruptions_separate_from_restartable_io() {
             .unwrap()
             < dispatch.find("function(signal)").unwrap()
     );
-    assert!(source.contains("!(SA_NOCLDSTOP | SA_RESTART)"));
+    assert!(source.contains("!(SA_NOCLDSTOP | SA_NOCLDWAIT | SA_RESTART)"));
 }

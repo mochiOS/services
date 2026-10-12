@@ -3396,12 +3396,21 @@ fn orphan_family() -> (
 }
 
 fn set_child_signal_disposition(service: &mut PosixService, parent: PeerIdentity, kind: u32) {
+    set_child_signal_policy(service, parent, kind, 0);
+}
+
+fn set_child_signal_policy(
+    service: &mut PosixService,
+    parent: PeerIdentity,
+    kind: u32,
+    options: u32,
+) {
     let mut bytes = [0; protocol::SIGNAL_DISPOSITION_LEN];
     protocol::encode_signal_disposition(
         protocol::SignalDisposition {
             signal: protocol::SIGNAL_CHLD,
             kind,
-            child_options: 0,
+            child_options: options,
         },
         &mut bytes,
     )
@@ -3560,6 +3569,74 @@ fn sigchld_ignore_does_not_steal_pinned_teardown_resources() {
         .reclaim_launched_tree(creator, root, &mut filesystem, &mut processes)
         .unwrap();
     assert_eq!(processes.released, vec![1050, 1040, 1030]);
+}
+
+#[test]
+fn no_cld_wait_reaps_children_while_preserving_caught_exit_notifications() {
+    let (mut service, _, parent, child, mut filesystem, mut processes) = orphan_family();
+    set_child_signal_policy(
+        &mut service,
+        parent,
+        protocol::SIGNAL_DISPOSITION_CAUGHT,
+        protocol::SIGNAL_CHILD_OPTION_NOCLDWAIT | protocol::SIGNAL_CHILD_OPTION_NOCLDSTOP,
+    );
+    processes
+        .states
+        .insert(142, ProcessLifecycle::Exited { exit_code: 9 });
+    assert_eq!(
+        service.refresh_child_exit_notifications(&mut processes),
+        Ok(1)
+    );
+    assert_ne!(
+        service.signal_state(parent.process_id).unwrap().pending()
+            & (1 << (protocol::SIGNAL_CHLD - 1)),
+        0
+    );
+    assert_eq!(
+        service.reap_discarded_children(&mut filesystem, &mut processes),
+        Ok(1)
+    );
+    assert!(!service.is_child(parent.process_id, child.process_id));
+    assert_eq!(
+        service.wait_child(
+            parent,
+            protocol::WaitRequest {
+                selector: -1,
+                options: 0
+            },
+            &mut filesystem,
+            &mut processes
+        ),
+        Err(protocol::STATUS_ECHILD)
+    );
+}
+
+#[test]
+fn clearing_no_cld_wait_after_observed_exit_does_not_restore_discarded_status() {
+    let (mut service, _, parent, child, mut filesystem, mut processes) = orphan_family();
+    set_child_signal_policy(
+        &mut service,
+        parent,
+        protocol::SIGNAL_DISPOSITION_DEFAULT,
+        protocol::SIGNAL_CHILD_OPTION_NOCLDWAIT,
+    );
+    processes
+        .states
+        .insert(142, ProcessLifecycle::Exited { exit_code: 9 });
+    service
+        .refresh_child_exit_notifications(&mut processes)
+        .unwrap();
+    set_child_signal_policy(
+        &mut service,
+        parent,
+        protocol::SIGNAL_DISPOSITION_DEFAULT,
+        0,
+    );
+    assert_eq!(
+        service.reap_discarded_children(&mut filesystem, &mut processes),
+        Ok(1)
+    );
+    assert!(!service.is_child(parent.process_id, child.process_id));
 }
 
 #[test]

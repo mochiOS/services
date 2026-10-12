@@ -22,6 +22,10 @@ static volatile sig_atomic_t background_stopped;
 static volatile sig_atomic_t background_read;
 static _Atomic sig_atomic_t waited_signal;
 static _Atomic unsigned pipe_signals;
+static _Atomic unsigned child_signals;
+static void on_child(int signal_number) {
+    if (signal_number == SIGCHLD) atomic_fetch_add(&child_signals, 1);
+}
 static pthread_t pipe_handler_thread;
 static void on_pipe(int signal_number) {
     if (signal_number == SIGPIPE) {
@@ -727,6 +731,35 @@ int main(void) {
     CHECK(waitpid(normal_child, &ignored_status, 0) == normal_child);
     CHECK(WIFEXITED(ignored_status) && WEXITSTATUS(ignored_status) == 8);
     debug("native-terminal-window: explicit SIGCHLD ignore reaps without retaining status\n");
+    CHECK(raise(SIGCONT) == 0); // Drain prior default SIGCHLD deliveries first.
+    child_action.sa_handler = on_child;
+    child_action.sa_flags = SA_NOCLDWAIT | SA_RESTART;
+    CHECK(sigaction(SIGCHLD, &child_action, NULL) == 0);
+    struct sigaction queried_child_action;
+    CHECK(sigaction(SIGCHLD, NULL, &queried_child_action) == 0);
+    CHECK((queried_child_action.sa_flags & SA_NOCLDWAIT) != 0);
+    pid_t no_wait_child = fork();
+    CHECK(no_wait_child >= 0);
+    if (no_wait_child == 0) _exit(9);
+    for (ignored_retry = 0; ignored_retry < 1000; ++ignored_retry) {
+        errno = 0;
+        if (getpgid(no_wait_child) == -1) {
+            CHECK(errno == ESRCH);
+            break;
+        }
+        struct timespec delay = {0, 1000000};
+        CHECK(nanosleep(&delay, NULL) == 0 || errno == EINTR);
+    }
+    CHECK(ignored_retry < 1000);
+    for (ignored_retry = 0; ignored_retry < 1000 && atomic_load(&child_signals) == 0; ++ignored_retry) {
+        struct timespec delay = {0, 1000000};
+        CHECK(nanosleep(&delay, NULL) == 0 || errno == EINTR);
+    }
+    CHECK(atomic_load(&child_signals) == 1);
+    errno = 0;
+    CHECK(waitpid(no_wait_child, &ignored_status, 0) == -1 && errno == ECHILD);
+    CHECK(sigaction(SIGCHLD, &previous_child_action, NULL) == 0);
+    debug("native-terminal-window: SA_NOCLDWAIT retains handler notification without zombie status\n");
     struct sigaction pipe_action;
     memset(&pipe_action, 0, sizeof(pipe_action));
     pipe_action.sa_handler = on_pipe;
@@ -768,7 +801,7 @@ int main(void) {
     CHECK(waitpid(broken_child, &broken_status, 0) == broken_child);
     CHECK(WIFSIGNALED(broken_status) && WTERMSIG(broken_status) == SIGPIPE);
     CHECK(close(pipes[1]) == 0);
-    debug("native-terminal-window: PASS SIGCHLD ignore, wait interruption and POSIX regressions\n");
+    debug("native-terminal-window: PASS SA_NOCLDWAIT, signal waits and POSIX regressions\n");
     CHECK(close(master) == 0);
     return 0;
 }

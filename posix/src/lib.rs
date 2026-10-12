@@ -908,11 +908,7 @@ impl<H: Copy> PosixService<H> {
     }
 
     fn observe_process_exit(&mut self, process_id: u64) -> Result<(), i32> {
-        if self.parents.get(&process_id).is_some_and(|parent| {
-            self.signals.get(parent).is_some_and(|state| {
-                state.disposition(protocol::SIGNAL_CHLD) == protocol::SIGNAL_DISPOSITION_IGNORE
-            })
-        }) {
+        if self.parents.get(&process_id).is_some_and(|parent| self.discards_child_status(*parent)) {
             self.process_wait_states
                 .get_mut(&process_id)
                 .ok_or(protocol::STATUS_ESRCH)?
@@ -1058,7 +1054,27 @@ impl<H: Copy> PosixService<H> {
         Ok(reaped)
     }
 
-    /// Explicit SIG_IGN for SIGCHLD discards exit status; default SIGCHLD
+    fn discards_child_status(&self, parent: u64) -> bool {
+        self.signals.get(&parent).is_some_and(|state| {
+            state.disposition(protocol::SIGNAL_CHLD) == protocol::SIGNAL_DISPOSITION_IGNORE
+        }) || self.signal_child_options.get(&parent).copied().unwrap_or(0)
+            & protocol::SIGNAL_CHILD_OPTION_NOCLDWAIT
+            != 0
+    }
+
+    fn discard_observed_child_status(&mut self, parent: u64) {
+        for (&child, &owner) in &self.parents {
+            if owner == parent {
+                if let Some(wait) = self.process_wait_states.get_mut(&child) {
+                    if wait.exit_observed {
+                        wait.discard_exit_status = true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Explicit SIG_IGN or SA_NOCLDWAIT for SIGCHLD discards exit status; default SIGCHLD
     /// does not. Retain teardown-pinned records, but never resurrect their
     /// discarded status if the parent subsequently changes its disposition.
     pub fn reap_discarded_children<F: FilesystemBackend<H>, P: ProcessBackend<H>>(
@@ -1086,9 +1102,7 @@ impl<H: Copy> PosixService<H> {
                     .process_wait_states
                     .get(&child)
                     .is_some_and(|state| state.discard_exit_status);
-                let ignored = self.signals.get(&parent).is_some_and(|state| {
-                    state.disposition(protocol::SIGNAL_CHLD) == protocol::SIGNAL_DISPOSITION_IGNORE
-                });
+                let ignored = self.discards_child_status(parent);
                 (discarded || ignored).then_some((child, parent))
             })
             .collect();
@@ -2279,6 +2293,9 @@ impl<H: Copy> PosixService<H> {
         }
         let options = protocol::decode_signal_child_options(payload).map_err(|_| STATUS_EINVAL)?;
         self.signal_child_options.insert(process_id, options);
+        if options & protocol::SIGNAL_CHILD_OPTION_NOCLDWAIT != 0 {
+            self.discard_observed_child_status(process_id);
+        }
         Ok(())
     }
 
@@ -2319,19 +2336,6 @@ impl<H: Copy> PosixService<H> {
         protocol::encode_signal_disposition(previous, &mut output).map_err(|_| STATUS_EINVAL)?;
         if setting {
             state.set_disposition(request.signal, request.kind);
-            if request.signal == protocol::SIGNAL_CHLD
-                && request.kind == protocol::SIGNAL_DISPOSITION_IGNORE
-            {
-                for (&child, &parent) in &self.parents {
-                    if parent == process_id {
-                        if let Some(wait) = self.process_wait_states.get_mut(&child) {
-                            if wait.exit_observed {
-                                wait.discard_exit_status = true;
-                            }
-                        }
-                    }
-                }
-            }
             if request.kind == protocol::SIGNAL_DISPOSITION_IGNORE {
                 for ((process, _), pending) in &mut self.thread_pending_signals {
                     if *process == process_id {
@@ -2346,6 +2350,9 @@ impl<H: Copy> PosixService<H> {
                 self.signal_child_options
                     .insert(process_id, request.child_options);
             }
+        }
+        if setting && request.signal == protocol::SIGNAL_CHLD && self.discards_child_status(process_id) {
+            self.discard_observed_child_status(process_id);
         }
         Ok(output)
     }
