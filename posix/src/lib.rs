@@ -2985,6 +2985,17 @@ impl<H: Copy> PosixService<H> {
             protocol::OP_SESSION_INFO if header.flags == 0 && payload.is_empty() => {
                 self.session_info(peer.process_id)
             }
+            protocol::OP_WAITED_CHILD_CPU_USAGE if header.flags == 0 && payload.is_empty() => {
+                self.waited_child_cpu_usage(peer).and_then(|usage| {
+                    let mut output = vec![0; protocol::WAITED_CHILD_CPU_USAGE_LEN];
+                    protocol::encode_waited_child_cpu_usage(protocol::WaitedChildCpuUsage {
+                        user_ticks: usage.user_ticks,
+                        kernel_ticks: usage.kernel_ticks,
+                        ticks_per_second: usage.ticks_per_second,
+                    }, &mut output).map_err(|_| protocol::STATUS_EIO)?;
+                    Ok(output)
+                })
+            }
             protocol::OP_UMASK_SET if header.flags == 0 => self.set_umask(peer.process_id, payload),
             protocol::OP_SET_UID if header.flags == 0 => {
                 self.set_uid(peer.process_id, payload).map(|_| Vec::new())
@@ -3049,6 +3060,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_TERMINAL_GET_FOREGROUND
             | protocol::OP_TERMINAL_SET_FOREGROUND
             | protocol::OP_SESSION_INFO
+            | protocol::OP_WAITED_CHILD_CPU_USAGE
             | protocol::OP_UMASK_SET
             | protocol::OP_GROUPS_GET
             | protocol::OP_OPEN_AT

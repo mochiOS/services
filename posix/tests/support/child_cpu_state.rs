@@ -1,6 +1,81 @@
 use super::*;
 use posix_service::WaitedChildCpuUsage;
 
+#[test]
+fn wire_queries_only_the_authenticated_callers_history_and_rejects_extra_authority() {
+    let (mut service, init, parent, child, mut fs, mut processes) = orphan_family();
+    processes
+        .states
+        .insert(142, ProcessLifecycle::Exited { exit_code: 0 });
+    processes.usage.insert(142, Ok(sample(9, 4)));
+    wait(
+        &mut service,
+        parent,
+        child.process_id,
+        &mut fs,
+        &mut processes,
+    )
+    .unwrap();
+    let header = protocol::Header {
+        opcode: protocol::OP_WAITED_CHILD_CPU_USAGE,
+        ..Default::default()
+    };
+    let reply = service.handle(parent, header, &[]);
+    assert_eq!(reply.header.status, 0);
+    assert_eq!(
+        protocol::decode_waited_child_cpu_usage(&reply.payload)
+            .unwrap()
+            .user_ticks,
+        9
+    );
+    let other = service.handle(init, header, &[]);
+    assert_eq!(
+        protocol::decode_waited_child_cpu_usage(&other.payload)
+            .unwrap()
+            .user_ticks,
+        0
+    );
+    assert_eq!(
+        service
+            .handle(parent, header, &parent.process_id.to_le_bytes())
+            .header
+            .status,
+        STATUS_EINVAL
+    );
+    assert_eq!(
+        service
+            .handle(parent, protocol::Header { flags: 1, ..header }, &[])
+            .header
+            .status,
+        STATUS_EINVAL
+    );
+    assert_eq!(
+        service
+            .handle(
+                PeerIdentity {
+                    process_id: 9999,
+                    ..parent
+                },
+                header,
+                &[]
+            )
+            .header
+            .status,
+        protocol::STATUS_ESRCH
+    );
+    let reply = service.handle_objects(
+        parent,
+        header,
+        &[],
+        &[AttachedObject {
+            handle: 42,
+            rights: 16,
+        }],
+        &mut fs,
+    );
+    assert_eq!(reply.response.header.status, STATUS_EINVAL);
+}
+
 fn sample(user_ticks: u64, kernel_ticks: u64) -> mnu_abi::ProcessExecutionUsage {
     mnu_abi::ProcessExecutionUsage {
         user_ticks,

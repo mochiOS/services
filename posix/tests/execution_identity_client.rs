@@ -1,4 +1,4 @@
-pub use mnu_abi::{ExecutionIdentity, SyscallNumber};
+pub use mnu_abi::{ExecutionIdentity, ProcessExecutionUsage, SyscallNumber};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct SysError(i64);

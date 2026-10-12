@@ -154,8 +154,10 @@ fn snapshot_is_coherent_and_platform_wrapper_rejects_invalid_optional_handles() 
         .split("fn wait_handle(")
         .next()
         .unwrap();
-    assert!(wrapper.contains("Some(0) => return Err"));
-    assert!(wrapper.contains("ProcessExecutionRead"));
-    assert!(wrapper.contains("usage.ticks_per_second == 0 || usage.reserved != 0"));
+    assert!(wrapper.contains("syscall::execution::usage(handle)"));
+    let low = include_str!("../../../user/crates/syscall/src/execution.rs");
+    assert!(low.contains("Some(0) => return Err"));
+    assert!(low.contains("ProcessExecutionRead"));
+    assert!(low.contains("usage.ticks_per_second == 0 || usage.reserved != 0"));
     assert!(!wrapper.contains("process_id"));
 }

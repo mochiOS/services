@@ -13,6 +13,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
+#include <sys/times.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
@@ -273,6 +274,11 @@ static void *receive_directed_signal(void *unused) {
 } while (0)
 
 int main(void) {
+    CHECK(sysconf(_SC_CLK_TCK) == CLOCKS_PER_SEC && CLOCKS_PER_SEC == 1000);
+    struct tms cpu_times_before, cpu_times_after;
+    CHECK(times(&cpu_times_before) != (clock_t)-1);
+    clock_t process_clock_before = clock();
+    CHECK(process_clock_before != (clock_t)-1);
     _Atomic uint64_t epoch = 9;
     struct native_wait_guard guard = {(uintptr_t)&epoch, 8};
     // A pre-delivered notification must prevent an infinite empty-object wait.
@@ -346,6 +352,16 @@ int main(void) {
     CHECK(usage_after.user_ticks > usage_before.user_ticks);
     CHECK(usage_after.kernel_ticks >= usage_before.kernel_ticks);
     CHECK(usage_after.ticks_per_second == usage_before.ticks_per_second && usage_after.reserved == 0);
+    CHECK(times(&cpu_times_after) != (clock_t)-1);
+    CHECK(cpu_times_after.tms_utime > cpu_times_before.tms_utime);
+    CHECK(cpu_times_after.tms_stime >= cpu_times_before.tms_stime);
+    CHECK(clock() >= process_clock_before + CLOCKS_PER_SEC / 5);
+    struct timespec mono_before, mono_after;
+    CHECK(clock_gettime(CLOCK_MONOTONIC, &mono_before) == 0);
+    clock_t elapsed_times = times(NULL);
+    CHECK(clock_gettime(CLOCK_MONOTONIC, &mono_after) == 0);
+    CHECK(elapsed_times >= (clock_t)(clock_nanoseconds(&mono_before) / UINT64_C(1000000)));
+    CHECK(elapsed_times <= (clock_t)(clock_nanoseconds(&mono_after) / UINT64_C(1000000)));
     debug("native-terminal-window: native execution snapshot domains and authorization passed\n");
     debug("native-terminal-window: process CPU clock preserves joined worker execution\n");
     pthread_attr_t detached;
@@ -974,6 +990,7 @@ int main(void) {
     CHECK(WIFSIGNALED(broken_status) && WTERMSIG(broken_status) == SIGPIPE);
     CHECK(close(pipes[1]) == 0);
     int cpu_gate[2];
+    CHECK(times(&cpu_times_before) != (clock_t)-1);
     CHECK(pipe(cpu_gate) == 0);
     pid_t cpu_child = fork();
     CHECK(cpu_child >= 0);
@@ -999,9 +1016,14 @@ int main(void) {
     CHECK(native_call4(683, (uint64_t)observed_child, (uintptr_t)&child_usage,
                        sizeof(child_usage), 0) == 0);
     CHECK(child_usage.user_ticks > 0 && child_usage.ticks_per_second > 0 && child_usage.reserved == 0);
+    CHECK(times(&cpu_times_after) != (clock_t)-1);
+    CHECK(cpu_times_after.tms_cutime > cpu_times_before.tms_cutime);
+    CHECK(cpu_times_after.tms_cstime >= cpu_times_before.tms_cstime);
+    CHECK((cpu_times_after.tms_cutime - cpu_times_before.tms_cutime)
+          + (cpu_times_after.tms_cstime - cpu_times_before.tms_cstime) >= CLOCKS_PER_SEC / 5);
     CHECK(native_call4(626, (uint64_t)observed_child, 0, 0, 0) == 0);
     debug("native-terminal-window: WAIT-only child execution snapshot survives waitpid reclamation\n");
-    debug("native-terminal-window: PASS execution usage read and POSIX regressions\n");
+    debug("native-terminal-window: PASS times clock and POSIX regressions\n");
     CHECK(close(master) == 0);
     return 0;
 }
