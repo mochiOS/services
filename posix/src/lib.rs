@@ -446,6 +446,10 @@ impl ProcessSignalState {
             self.pending &= !bit;
         } else if kind == protocol::SIGNAL_DISPOSITION_CAUGHT {
             self.caught |= bit;
+        } else if default_signal_ignores(signal) {
+            // Selecting SIG_DFL for a default-ignored signal discards pending
+            // occurrences even while blocked. This does not auto-reap children.
+            self.pending &= !bit;
         }
     }
 
@@ -488,6 +492,13 @@ const JOB_CONTROL_STOP_SIGNALS: u64 = signal_bit(protocol::SIGNAL_STOP)
     | signal_bit(protocol::SIGNAL_TTIN)
     | signal_bit(protocol::SIGNAL_TTOU);
 const MAX_OUTSTANDING_SIGNAL_DELIVERIES: usize = protocol::SIGNAL_MAX as usize;
+
+fn default_signal_ignores(signal: u32) -> bool {
+    matches!(
+        signal,
+        protocol::SIGNAL_URG | protocol::SIGNAL_CHLD | protocol::SIGNAL_WINCH
+    )
+}
 
 fn default_signal_terminates(signal: u32) -> bool {
     (1..=protocol::SIGNAL_MAX).contains(&signal)
@@ -2406,10 +2417,16 @@ impl<H: Copy> PosixService<H> {
         protocol::encode_signal_disposition(previous, &mut output).map_err(|_| STATUS_EINVAL)?;
         if setting {
             state.set_disposition(request.signal, request.kind);
-            if request.kind == protocol::SIGNAL_DISPOSITION_IGNORE {
-                for ((process, _), pending) in &mut self.thread_pending_signals {
-                    if *process == process_id {
+            if request.kind == protocol::SIGNAL_DISPOSITION_IGNORE
+                || (request.kind == protocol::SIGNAL_DISPOSITION_DEFAULT
+                    && default_signal_ignores(request.signal))
+            {
+                for (key, pending) in &mut self.thread_pending_signals {
+                    if key.0 == process_id {
                         *pending &= !signal_bit(request.signal);
+                        if *pending == 0 {
+                            self.thread_signal_notifications.remove(key);
+                        }
                     }
                 }
             }
