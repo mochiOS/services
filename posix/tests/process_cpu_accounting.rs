@@ -30,19 +30,23 @@ pub fn exercise() {
     let threads: Vec<_> = (0..8).map(|_| {
         let owner = Arc::clone(&process);
         std::thread::spawn(move || {
-            for _ in 0..10000 { owner.note_cpu_tick(); }
+            for tick in 0..10000 { owner.note_cpu_tick(tick % 2 == 0); }
         })
     }).collect();
     for thread in threads { thread.join().unwrap(); }
     assert_eq!(process.cpu_ticks(), 80000);
+    assert_eq!(process.user_cpu_ticks(), 40000);
+    assert_eq!(process.kernel_cpu_ticks(), 40000);
     assert_eq!(Arc::strong_count(&process), 1, "thread references were reclaimed");
     assert_eq!(foreign.cpu_ticks(), 0, "native process counters are independent");
     process.mark_exited(7);
     assert_eq!(process.cpu_ticks(), 80000, "native exit does not reset accounting");
     assert_eq!(process.exit_code(), 7);
-    process.cpu_ticks.store(u64::MAX - 1, Ordering::Relaxed);
-    process.note_cpu_tick();
-    process.note_cpu_tick();
+    process.user_cpu_ticks.store(u64::MAX - 1, Ordering::Relaxed);
+    process.note_cpu_tick(true);
+    process.note_cpu_tick(true);
+    assert_eq!(process.user_cpu_ticks(), u64::MAX);
+    assert_eq!(process.kernel_cpu_ticks(), 40000);
     assert_eq!(process.cpu_ticks(), u64::MAX, "overflow cannot make CPU time decrease");
 }
 }
@@ -99,7 +103,7 @@ fn timer_records_both_clocks_and_native_readers_use_stable_owner_accounting() {
         .next()
         .unwrap();
     assert!(tick.contains("self.cpu_ticks.saturating_add(1)"));
-    assert!(tick.contains("process.note_cpu_tick()"));
+    assert!(tick.contains("process.note_cpu_tick(user_mode)"));
     assert!(tick.contains("self.process_object.as_ref()"));
     let push = thread
         .split("pub fn push(")
@@ -126,4 +130,40 @@ fn timer_records_both_clocks_and_native_readers_use_stable_owner_accounting() {
     assert!(!cpu.contains("for_each_thread"));
     let metrics = include_str!("../../../core/src/syscall/process.rs");
     assert!(metrics.contains("let cpu_ticks = proc.process_object().cpu_ticks()"));
+}
+
+#[test]
+fn both_timer_sources_classify_the_interrupted_cpu_mode_before_switching_address_spaces() {
+    let source = include_str!("../../../core/src/interrupt/timer.rs");
+    for entry in [
+        "fn timer_interrupt_handler(",
+        "fn local_timer_interrupt_handler(",
+    ] {
+        let handler = source
+            .split(entry)
+            .nth(1)
+            .unwrap()
+            .split("fn ")
+            .next()
+            .unwrap();
+        let mode = handler
+            .find("stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3")
+            .unwrap();
+        assert!(mode < handler.find("kpti_enter_for_trap(user_mode)").unwrap());
+        assert!(mode < handler.find("normalize_user_iret_frame").unwrap());
+        assert!(handler.contains("scheduler_tick(user_mode)"));
+    }
+    let scheduler = include_str!("../../../core/src/task/scheduler.rs");
+    let tick = scheduler
+        .split("fn scheduler_tick(")
+        .nth(1)
+        .unwrap()
+        .split("let should_schedule")
+        .next()
+        .unwrap();
+    assert_eq!(tick.matches("thread.note_cpu_tick(user_mode)").count(), 2);
+    assert!(
+        tick.find("thread.note_cpu_tick(user_mode)").unwrap()
+            < tick.find("t.in_syscall()").unwrap()
+    );
 }
