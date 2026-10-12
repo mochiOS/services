@@ -6,6 +6,7 @@
 #include <pty.h>
 #include <poll.h>
 #include <pthread.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdatomic.h>
@@ -27,6 +28,19 @@ static _Atomic unsigned child_signals;
 static _Atomic unsigned directed_ready, directed_signals;
 static _Atomic unsigned sync_ready, sync_completed, sync_unrelated;
 static _Atomic uint64_t retired_cpu_nanoseconds;
+static _Atomic unsigned cancel_ready, cancel_resume, cancel_enabled, cancel_after_test;
+static _Atomic unsigned cancel_cleanup_returned, cancel_cleanup_bad;
+static pthread_key_t cancel_key;
+static unsigned cancel_marker;
+static void cancel_destructor(void *value) {
+    int previous = 99;
+    if (value != &cancel_marker
+        || pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &previous) != 0
+        || previous != PTHREAD_CANCEL_DISABLE)
+        atomic_store(&cancel_cleanup_bad, 1);
+    pthread_testcancel();
+    atomic_fetch_add(&cancel_cleanup_returned, 1);
+}
 struct native_execution_usage {
     uint64_t user_ticks, kernel_ticks, ticks_per_second, reserved;
 };
@@ -114,6 +128,30 @@ static void *consume_cpu_before_retirement(void *unused) {
             return (void *)(uintptr_t)1;
     } while (clock_nanoseconds(&cpu) < UINT64_C(200000000));
     atomic_store(&retired_cpu_nanoseconds, clock_nanoseconds(&cpu));
+    return NULL;
+}
+
+static void *receive_deferred_cancellation(void *unused) {
+    (void)unused;
+    int previous;
+    if (pthread_setcanceltype(PTHREAD_CANCEL_DEFERRED, &previous) != 0
+        || previous != PTHREAD_CANCEL_DEFERRED
+        || pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &previous) != 0
+        || previous != PTHREAD_CANCEL_ENABLE
+        || pthread_setspecific(cancel_key, &cancel_marker) != 0)
+        return (void *)(uintptr_t)1;
+    atomic_store(&cancel_ready, 1);
+    while (atomic_load(&cancel_resume) == 0) {
+        if (sched_yield() != 0) return (void *)(uintptr_t)1;
+    }
+    pthread_testcancel(); // Disabled cancellation must leave the request pending.
+    errno = 123;
+    if (pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, &previous) != 0
+        || previous != PTHREAD_CANCEL_DISABLE || errno != 123)
+        return (void *)(uintptr_t)1;
+    atomic_store(&cancel_enabled, 1);
+    pthread_testcancel();
+    atomic_store(&cancel_after_test, 1);
     return NULL;
 }
 
@@ -338,6 +376,23 @@ int main(void) {
         CHECK(pthread_join(thread, &result) == 0 && result == (void *)iteration);
     }
     debug("native-terminal-window: 128 native thread retirements passed\n");
+    CHECK(pthread_key_create(&cancel_key, cancel_destructor) == 0);
+    pthread_t cancel_worker;
+    CHECK(pthread_create(&cancel_worker, NULL, receive_deferred_cancellation, NULL) == 0);
+    for (unsigned retry = 0; retry < 1000 && atomic_load(&cancel_ready) == 0; ++retry) {
+        struct timespec delay = {0, 1000000};
+        CHECK(nanosleep(&delay, NULL) == 0);
+    }
+    CHECK(atomic_load(&cancel_ready) == 1);
+    errno = 123;
+    CHECK(pthread_cancel(cancel_worker) == 0 && errno == 123);
+    atomic_store(&cancel_resume, 1);
+    void *cancel_result = NULL;
+    CHECK(pthread_join(cancel_worker, &cancel_result) == 0 && cancel_result == PTHREAD_CANCELED);
+    CHECK(atomic_load(&cancel_enabled) == 1 && atomic_load(&cancel_after_test) == 0);
+    CHECK(atomic_load(&cancel_cleanup_returned) == 1 && atomic_load(&cancel_cleanup_bad) == 0);
+    CHECK(pthread_key_delete(cancel_key) == 0);
+    debug("native-terminal-window: deferred cancellation waits for a point and disables cleanup reentry\n");
     struct timespec process_cpu_before, process_cpu_after;
     CHECK(clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &process_cpu_before) == 0);
     pthread_t cpu_worker;
@@ -1023,7 +1078,7 @@ int main(void) {
           + (cpu_times_after.tms_cstime - cpu_times_before.tms_cstime) >= CLOCKS_PER_SEC / 5);
     CHECK(native_call4(626, (uint64_t)observed_child, 0, 0, 0) == 0);
     debug("native-terminal-window: WAIT-only child execution snapshot survives waitpid reclamation\n");
-    debug("native-terminal-window: PASS times clock and POSIX regressions\n");
+    debug("native-terminal-window: PASS deferred cancellation and POSIX regressions\n");
     CHECK(close(master) == 0);
     return 0;
 }
