@@ -157,10 +157,10 @@ fn internal_io_returns_through_owned_resources_instead_of_exiting_under_a_stdio_
         .split("fn stream_io_since<")
         .nth(1)
         .unwrap()
-        .split("fn syscall_write(")
+        .split("fn io_cancellation_requested(")
         .next()
         .unwrap();
-    assert!(stream.find("cancel_pending.load").unwrap() < stream.find("operation()").unwrap());
+    assert!(stream.find("io_cancellation_requested(control)").unwrap() < stream.find("operation()").unwrap());
     assert!(!stream.contains("pthread_testcancel()"));
     let wait = source
         .split("fn wait_for_handle_capacity(")
