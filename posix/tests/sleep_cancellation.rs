@@ -71,7 +71,7 @@ mod syscall {{
     pub enum SyscallNumber {{ ClockRead }}
     pub fn raw_syscall2(_: SyscallNumber, _: u64, _: u64) -> u64 {{ unreachable!() }}
 }}
-mod newlib_errno {{ pub const EINVAL: i32 = 22; pub const ENOTSUP: i32 = 95; }}
+mod newlib_errno {{ pub const EIO: i32 = 5; pub const EINVAL: i32 = 22; pub const ENOTSUP: i32 = 95; }}
 mod mochios_posix_client {{
     #[path = "{}"] pub mod time;
     pub mod synchronization {{
