@@ -91,7 +91,7 @@ impl FilesystemService {
             path_walk::Resolution::Found { inode, .. } => inode,
             path_walk::Resolution::Missing { .. } => {
                 return Err(if request.flags & protocol::OPEN_AT_CREATE != 0 {
-                    30
+                    EROFS
                 } else {
                     ENOENT
                 });

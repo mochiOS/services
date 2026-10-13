@@ -26,6 +26,7 @@ const EACCES: i32 = 13;
 const EEXIST: i32 = 17;
 const EINVAL: i32 = 22;
 const ENOSPC: i32 = 28;
+const EROFS: i32 = 30;
 const ENAMETOOLONG: i32 = 36;
 const EISDIR: i32 = 21;
 const ENOTDIR: i32 = 20;
@@ -2745,6 +2746,9 @@ impl FilesystemService {
         mut request: protocol::Header,
         open_id: u64,
     ) -> Result<Response, i32> {
+        if let Some(open) = self.opens.device(open_id) {
+            return Err(if open.null.is_some() { EINVAL } else { EISDIR });
+        }
         request.open_id = open_id;
         self.truncate(request)
     }
@@ -2757,6 +2761,11 @@ impl FilesystemService {
     ) -> Result<Response, i32> {
         if request.flags != 0 || request.mode & !0o7777 != 0 {
             return Err(EINVAL);
+        }
+        if self.opens.device(open_id).is_some() {
+            // Device nodes live on the immutable service-owned filesystem;
+            // their descriptions are valid, but their metadata is not mutable.
+            return Err(EROFS);
         }
         let effective_uid = credentials.effective_uid;
         let effective_gid = credentials.effective_gid;
@@ -2788,6 +2797,9 @@ impl FilesystemService {
     ) -> Result<Response, i32> {
         if request.flags != 0 {
             return Err(EINVAL);
+        }
+        if self.opens.device(open_id).is_some() {
+            return Err(EROFS);
         }
         let effective_uid = credentials.effective_uid;
         let effective_gid = credentials.effective_gid;

@@ -145,6 +145,105 @@ fn device_open(
 }
 
 #[test]
+fn device_mutations_distinguish_valid_resources_from_closed_descriptions() {
+    let fixture = Fixture::new();
+    let mut service = FilesystemService::new(fixture.volume("device-mutations"));
+    service
+        .mount_devices(
+            b"/dev",
+            filesystem_service::devfs::DeviceFilesystem::default(),
+        )
+        .unwrap();
+    let null = device_open(
+        &mut service,
+        b"/dev/null",
+        protocol::OPEN_AT_WRITE,
+        PathAnchors::default(),
+    )
+    .unwrap();
+    let directory = device_open(
+        &mut service,
+        b"/dev",
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+        PathAnchors::default(),
+    )
+    .unwrap();
+    let before = service
+        .stat_handle(protocol::Header::default(), null)
+        .unwrap()
+        .payload;
+    assert!(matches!(
+        service.truncate_handle(protocol::Header::default(), null),
+        Err(22)
+    ));
+    assert!(matches!(
+        service.truncate_handle(protocol::Header::default(), directory),
+        Err(21)
+    ));
+    let chmod = protocol::Header {
+        mode: 0o600,
+        ..protocol::Header::default()
+    };
+    let chown = protocol::Header {
+        node_id: (1001 << 32) | 1001,
+        ..protocol::Header::default()
+    };
+    for id in [null, directory] {
+        assert!(matches!(
+            service.chmod_handle(chmod, id, root_credentials()),
+            Err(30)
+        ));
+        assert!(matches!(
+            service.chown_handle(chown, id, root_credentials()),
+            Err(30)
+        ));
+        assert!(matches!(
+            service.chmod_handle(
+                protocol::Header {
+                    mode: u32::MAX,
+                    ..chmod
+                },
+                id,
+                root_credentials()
+            ),
+            Err(22)
+        ));
+        assert!(matches!(
+            service.chown_handle(
+                protocol::Header {
+                    flags: u32::MAX,
+                    ..chown
+                },
+                id,
+                root_credentials()
+            ),
+            Err(22)
+        ));
+    }
+    assert_eq!(
+        service
+            .stat_handle(protocol::Header::default(), null)
+            .unwrap()
+            .payload,
+        before
+    );
+    assert_eq!(service.provider_write(null, b"still usable"), Ok(12));
+    service.provider_close(null).unwrap();
+    assert!(matches!(
+        service.truncate_handle(protocol::Header::default(), null),
+        Err(9)
+    ));
+    assert!(matches!(
+        service.chmod_handle(chmod, null, root_credentials()),
+        Err(9)
+    ));
+    assert!(matches!(
+        service.chown_handle(chown, null, root_credentials()),
+        Err(9)
+    ));
+}
+
+#[test]
 fn device_provider_uses_one_id_space_and_never_allocates_regular_file_backing() {
     let fixture = Fixture::new();
     let mut service = FilesystemService::new(fixture.volume("device-provider"));
