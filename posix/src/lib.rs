@@ -5,6 +5,7 @@ use mochios_posix_protocol as protocol;
 
 pub mod pty;
 pub mod named_semaphore;
+pub mod shared_memory;
 
 pub const STATUS_EINVAL: i32 = -22;
 pub const STATUS_EOVERFLOW: i32 = -75;
@@ -589,6 +590,7 @@ pub struct PosixService<H: Copy = u32> {
     terminals: BTreeMap<u64, ControllingTerminal>,
     supplementary_groups: BTreeMap<u64, Vec<u32>>,
     named_semaphores: named_semaphore::Namespace<H>,
+    shared_memory: shared_memory::Namespace<H>,
     resource_limits: BTreeMap<(u64, u32), protocol::ResourceLimit>,
     signals: BTreeMap<u64, ProcessSignalState>,
     // Native identities arrive only from authenticated endpoint metadata.
@@ -621,6 +623,7 @@ impl PosixService<u32> {
             terminals: BTreeMap::new(),
             supplementary_groups: BTreeMap::new(),
             named_semaphores: named_semaphore::Namespace::new(),
+            shared_memory: shared_memory::Namespace::new(),
             resource_limits: BTreeMap::new(),
             signals: BTreeMap::new(),
             signal_masks: BTreeMap::new(),
