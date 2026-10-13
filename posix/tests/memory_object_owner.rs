@@ -18,6 +18,8 @@ mod linux_stage_buffer;
 mod agent_stage_mapping;
 #[path = "../../../applications/binder/src/platform/mochios/decoration_buffer.rs"]
 mod binder_decoration_buffer;
+#[path = "../../../binaries/coreutils/src/gui_buffer.rs"]
+mod coreutils_gui_buffer;
 #[derive(Debug)]
 struct DecorationError(u64);
 type HostError = CompositorError;
@@ -94,6 +96,36 @@ thread_local! { static STATE: RefCell<State> = RefCell::new(State::default()); }
 
 fn reset() {
     STATE.with(|state| *state.borrow_mut() = State::default());
+}
+
+#[test]
+fn coreutils_gui_buffer_paints_owned_ram_and_offers_only_read_map() {
+    reset();
+    let mut pixels = vec![0u32; 1024];
+    STATE.with(|state| state.borrow_mut().map_address = Some(pixels.as_mut_ptr() as u64));
+    let buffer = coreutils_gui_buffer::GuiBuffer::new(16, 16, |x, y| (y * 16 + x) as u32).unwrap();
+    assert_eq!(&pixels[..256], &(0..256).collect::<Vec<u32>>()[..]);
+    buffer.offer(9).unwrap();
+    STATE.with(|state| {
+        assert_eq!(
+            state.borrow().offers[0].2.handles[0].rights,
+            memory_object::READONLY_BUFFER_RIGHTS
+        )
+    });
+    drop(buffer);
+    STATE.with(|state| {
+        let state = state.borrow();
+        assert_eq!(
+            state.calls[state.calls.len() - 2].0,
+            syscall::SyscallNumber::MemoryUnmap
+        );
+        assert_eq!(
+            state.calls.last().unwrap().0,
+            syscall::SyscallNumber::HandleClose
+        );
+    });
+    assert!(coreutils_gui_buffer::GuiBuffer::new(0, 16, |_, _| panic!()).is_err());
+    assert!(coreutils_gui_buffer::GuiBuffer::new(usize::MAX, 16, |_, _| panic!()).is_err());
 }
 
 #[test]

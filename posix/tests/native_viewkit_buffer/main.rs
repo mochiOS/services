@@ -6,6 +6,8 @@ use tiny_skia::Pixmap;
 mod agent_stage_mapping;
 #[path = "../../../../applications/binder/src/platform/mochios/decoration_buffer.rs"]
 mod binder_decoration_buffer;
+#[path = "../../../../binaries/coreutils/src/gui_buffer.rs"]
+mod coreutils_gui_buffer;
 #[derive(Debug)]
 struct DecorationError(u64);
 #[path = "../../../../libraries/viewkit/src/platform/mochios/buffer.rs"]
@@ -122,6 +124,42 @@ fn probe() -> Result<u64, String> {
         return Err("decor content mismatch".into());
     }
     drop(view);
+    let coreutils_endpoint =
+        ipc::create().map_err(|error| format!("coreutils endpoint {error:?}"))?;
+    let coreutils = coreutils_gui_buffer::GuiBuffer::new(16, 16, |x, y| (y * 16 + x) as u32)
+        .map_err(|error| format!("coreutils allocation {error:?}"))?;
+    coreutils
+        .offer(coreutils_endpoint)
+        .map_err(|error| format!("coreutils offer {error:?}"))?;
+    drop(coreutils);
+    let mut coreutils_wire = [0u8; 32];
+    let mut coreutils_attached = agent_stage_mapping::Attachments::default();
+    let delivered = ipc::wait_object_handles(
+        coreutils_endpoint,
+        &mut coreutils_wire,
+        &mut coreutils_attached.handles,
+    )
+    .map_err(|error| format!("coreutils receive {error:?}"))?;
+    let owner = delivered >> 32;
+    let view = agent_stage_mapping::SharedStageMapping::receive(
+        owner,
+        true,
+        &coreutils_wire,
+        &mut coreutils_attached,
+        4096,
+    )
+    .map_err(|error| format!("coreutils mapping {error:#x}"))?;
+    let bytes = view
+        .snapshot(owner, 1024)
+        .map_err(|error| format!("coreutils snapshot {error:#x}"))?;
+    if bytes
+        .chunks_exact(4)
+        .enumerate()
+        .any(|(index, bytes)| u32::from_ne_bytes(bytes.try_into().unwrap()) != index as u32)
+    {
+        return Err("coreutils pixels mismatch".into());
+    }
+    drop(view);
     let _ = mochi_user_platform::logger::init_from_env();
     let target = mochi_user_platform::service_ready::take_bootstrap_target()
         .ok_or("missing ready target")?;
@@ -218,7 +256,7 @@ fn probe() -> Result<u64, String> {
 fn main() {
     let result = probe();
     let line = format!(
-        "viewkit-buffer: {} ViewKit + Linux + staging + Binder decoration RAM offers, sender drop, 3 commits, destroy {result:?}\n",
+        "viewkit-buffer: {} ViewKit + Linux + staging + Binder + coreutils RAM offers, sender drop, 3 commits, destroy {result:?}\n",
         if result.is_ok() { "PASS" } else { "FAIL" }
     );
     let _ = syscall::call2(
