@@ -16,6 +16,8 @@ _Static_assert(sizeof(pthread_rwlock_t) == 4, "newlib rwlock ABI");
 _Static_assert(sizeof(pthread_rwlockattr_t) == 8, "newlib rwlock attribute ABI");
 static pthread_rwlock_t lock = PTHREAD_RWLOCK_INITIALIZER;
 static atomic_int waiting, returned;
+static atomic_int timed_started, timed_finished;
+struct timed_request { int write; struct timespec deadline; };
 static unsigned data;
 static void pause_tick(void) { struct timespec delay = {0, 1000000}; nanosleep(&delay, NULL); }
 static void debug(const char *message) {
@@ -39,6 +41,26 @@ static void *waiter(void *unused) {
     if (pthread_rwlock_unlock(&lock)) return (void *)(uintptr_t)2;
     pthread_testcancel(); return (void *)(uintptr_t)3;
 }
+static struct timespec after(struct timespec time, long nanoseconds) {
+    time.tv_nsec += nanoseconds;
+    if (time.tv_nsec >= 1000000000) { ++time.tv_sec; time.tv_nsec -= 1000000000; }
+    return time;
+}
+static int reached(struct timespec now, struct timespec target) {
+    return now.tv_sec > target.tv_sec || (now.tv_sec == target.tv_sec && now.tv_nsec >= target.tv_nsec);
+}
+static void *timed_waiter(void *argument) {
+    struct timed_request *request = argument;
+    errno = 123;
+    atomic_store(&timed_started, 1);
+    int result = request->write
+        ? pthread_rwlock_clockwrlock(&lock, CLOCK_MONOTONIC, &request->deadline)
+        : pthread_rwlock_clockrdlock(&lock, CLOCK_MONOTONIC, &request->deadline);
+    if (!result && pthread_rwlock_unlock(&lock)) result = EIO;
+    if (errno != 123) result = EIO;
+    atomic_store(&timed_finished, 1);
+    return (void *)(uintptr_t)result;
+}
 struct shared { pthread_rwlock_t lock; atomic_int started, passed; };
 int main(void) {
     pthread_rwlockattr_t attr; int sharing = -1;
@@ -60,6 +82,31 @@ int main(void) {
     CHECK(pthread_rwlock_timedwrlock(&lock, &bad) == 0 && pthread_rwlock_unlock(&lock) == 0);
     CHECK(pthread_rwlock_clockrdlock(&lock, CLOCK_MONOTONIC, &past) == 0 && pthread_rwlock_unlock(&lock) == 0);
     pthread_t threads[6]; void *result;
+    for (int write = 0; write <= 1; ++write) {
+        CHECK(pthread_rwlock_wrlock(&lock) == 0);
+        struct timespec target, now;
+        CHECK(clock_gettime(CLOCK_MONOTONIC, &target) == 0);
+        target = after(target, 50000000);
+        errno = 123;
+        int error = write ? pthread_rwlock_clockwrlock(&lock, CLOCK_MONOTONIC, &target)
+                          : pthread_rwlock_clockrdlock(&lock, CLOCK_MONOTONIC, &target);
+        CHECK(error == ETIMEDOUT && errno == 123);
+        CHECK(clock_gettime(CLOCK_MONOTONIC, &now) == 0 && reached(now, target));
+        CHECK(pthread_rwlock_unlock(&lock) == 0);
+
+        CHECK(pthread_rwlock_wrlock(&lock) == 0);
+        struct timed_request request = { .write = write };
+        CHECK(clock_gettime(CLOCK_MONOTONIC, &request.deadline) == 0);
+        request.deadline.tv_sec += 5;
+        atomic_store(&timed_started, 0); atomic_store(&timed_finished, 0);
+        CHECK(pthread_create(&threads[0], NULL, timed_waiter, &request) == 0);
+        while (!atomic_load(&timed_started)) pause_tick();
+        pause_tick();
+        CHECK(atomic_load(&timed_finished) == 0);
+        CHECK(pthread_rwlock_unlock(&lock) == 0);
+        CHECK(pthread_join(threads[0], &result) == 0 && result == NULL);
+    }
+    debug("native-pthread-rwlock: future deadlines and release-before-deadline passed\n");
     for (unsigned i = 0; i < 6; ++i) CHECK(pthread_create(&threads[i], NULL, writer, NULL) == 0);
     for (unsigned i = 0; i < 6; ++i) CHECK(pthread_join(threads[i], &result) == 0 && result == NULL);
     CHECK(data == 600);
