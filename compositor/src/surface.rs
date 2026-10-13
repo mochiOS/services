@@ -1197,22 +1197,10 @@ pub(crate) fn handle_request(
                 surface.pending.clear();
                 surface.pending_buffer = None;
                 surface.pending_damage = Some(Rect::full(width, height));
-                if let Some(buffer) = surface.current_buffer.as_ref() {
-                    if buffer.width == width
-                        && buffer.height == height
-                        && buffer.stride == stride
-                        && buffer.pixels == pixels
-                        && buffer.format == format
-                    {
-                        surface.pending_buffer = Some(buffer.clone());
-                        surface.pending_bytes_received = buffer.byte_len;
-                        surface.awaiting_buffer = false;
-                    } else {
-                        surface.awaiting_buffer = true;
-                    }
-                } else {
-                    surface.awaiting_buffer = true;
-                }
+                // An explicit shared attach announces new backing even when
+                // geometry is unchanged. Ordinary damage/commit already reuse
+                // the current view without issuing another attach request.
+                surface.awaiting_buffer = true;
             } else {
                 if needed > MAX_SHARED_BYTES {
                     put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ERANGE));
