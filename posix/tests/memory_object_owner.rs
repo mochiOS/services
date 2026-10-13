@@ -11,6 +11,10 @@ struct State {
     fail_map: bool,
     fail_unmap: bool,
     fail_close: bool,
+    fail_length: bool,
+    fail_send: bool,
+    extra_rights: u64,
+    offers: Vec<(u64, Vec<u8>, mnu_abi::IpcObjectHandles)>,
 }
 thread_local! { static STATE: RefCell<State> = RefCell::new(State::default()); }
 
@@ -19,7 +23,10 @@ fn reset() {
 }
 
 mod syscall {
-    pub use mnu_abi::{SyscallNumber, EINVAL, EIO, MEMORY_ACCESS_ALL, MEMORY_MAP_SHARED};
+    pub use mnu_abi::{
+        SyscallNumber, EACCES, EINVAL, EIO, HANDLE_RIGHT_MAP, HANDLE_RIGHT_READ, MEMORY_ACCESS_ALL,
+        MEMORY_ACCESS_READ, MEMORY_MAP_SHARED,
+    };
     pub use mochi_user_platform::syscall::{SysError, SysResult};
     fn call(number: SyscallNumber, args: &[u64]) -> SysResult<u64> {
         super::STATE.with(|state| {
@@ -32,6 +39,9 @@ mod syscall {
                 SyscallNumber::MemoryObjectCreate => Ok(7),
                 SyscallNumber::MemoryMap if state.fail_map => Err(SysError::from_raw(-13)),
                 SyscallNumber::MemoryMap => Ok(0x10000),
+                SyscallNumber::MemoryObjectLength if state.fail_length => {
+                    Err(SysError::from_raw(-22))
+                }
                 SyscallNumber::MemoryObjectLength => Ok(8192),
                 SyscallNumber::MemoryUnmap if state.fail_unmap => Err(SysError::from_raw(-5)),
                 SyscallNumber::HandleClose if state.fail_close => Err(SysError::from_raw(-5)),
@@ -63,8 +73,172 @@ mod handle {
         super::syscall::call1(super::syscall::SyscallNumber::HandleClose, handle as u64).map(|_| ())
     }
     pub fn rights(_: Handle) -> super::syscall::SysResult<u64> {
-        Ok(mnu_abi::HANDLE_RIGHT_READ | mnu_abi::HANDLE_RIGHT_MAP)
+        super::STATE.with(|state| {
+            Ok(
+                mnu_abi::HANDLE_RIGHT_READ
+                    | mnu_abi::HANDLE_RIGHT_MAP
+                    | state.borrow().extra_rights,
+            )
+        })
     }
+}
+
+mod ipc {
+    pub use mnu_abi::IpcObjectHandles;
+    pub fn send_object_handles(
+        endpoint: u64,
+        bytes: &[u8],
+        handles: &IpcObjectHandles,
+    ) -> super::syscall::SysResult<u64> {
+        super::STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            if state.fail_send {
+                return Err(super::syscall::SysError::from_raw(-11));
+            }
+            state.offers.push((endpoint, bytes.to_vec(), *handles));
+            Ok(0)
+        })
+    }
+}
+
+#[test]
+fn readonly_offers_attach_only_read_map_and_receiver_owns_a_local_mapping() {
+    use memory_object::{receive_readonly_offer, ReadOnlyOffer, READONLY_BUFFER_RIGHTS};
+    reset();
+    let source = MemoryObject::create(8192).unwrap();
+    source.send_readonly(9, 4096, 4096).unwrap();
+    let bytes = STATE.with(|state| {
+        let state = state.borrow();
+        let (endpoint, bytes, handles) = &state.offers[0];
+        assert_eq!(*endpoint, 9);
+        assert_eq!(handles.count, 1);
+        assert_eq!(handles.delivery_flags, 0);
+        assert_eq!(handles.handles[0].handle, 7);
+        assert_eq!(handles.handles[0].rights, READONLY_BUFFER_RIGHTS);
+        bytes.clone()
+    });
+    assert_eq!(
+        ReadOnlyOffer::decode(&bytes).unwrap(),
+        ReadOnlyOffer {
+            offset: 4096,
+            length: 4096
+        }
+    );
+    // SAFETY: a single simulated received reference is relinquished here.
+    let received = unsafe { MemoryObject::from_owned_handle(19) };
+    let view = receive_readonly_offer(&bytes, received, 4096).unwrap();
+    assert_eq!(view.address(), 0x10000);
+    STATE.with(|state| {
+        assert!(state.borrow().calls.contains(&(
+            syscall::SyscallNumber::MemoryMap,
+            vec![0, 4096, 1, 2, 19, 4096]
+        )))
+    });
+    drop(view);
+    drop(source);
+}
+
+#[test]
+fn malformed_or_overprivileged_received_offers_are_closed_without_mapping() {
+    use memory_object::{receive_readonly_offer, ReadOnlyOffer};
+    let wire = ReadOnlyOffer {
+        offset: 4096,
+        length: 4096,
+    }
+    .encode()
+    .unwrap();
+    for index in [0, 4, 6, 8] {
+        let mut corrupted = wire;
+        corrupted[index] ^= 1;
+        assert!(ReadOnlyOffer::decode(&corrupted).is_err());
+    }
+    assert!(ReadOnlyOffer::decode(&wire[..31]).is_err());
+    for offer in [
+        ReadOnlyOffer {
+            offset: 1,
+            length: 1,
+        },
+        ReadOnlyOffer {
+            offset: 0,
+            length: 0,
+        },
+        ReadOnlyOffer {
+            offset: u64::MAX - 4095,
+            length: 4096,
+        },
+    ] {
+        assert!(offer.encode().is_err());
+    }
+    for mode in 0..6 {
+        reset();
+        if mode == 1 {
+            STATE.with(|state| state.borrow_mut().extra_rights = mnu_abi::HANDLE_RIGHT_WRITE);
+        }
+        if mode == 4 {
+            STATE.with(|state| state.borrow_mut().fail_length = true);
+        }
+        if mode == 5 {
+            STATE.with(|state| state.borrow_mut().fail_map = true);
+        }
+        let bytes = if mode == 2 {
+            ReadOnlyOffer {
+                offset: 8192,
+                length: 1,
+            }
+            .encode()
+            .unwrap()
+        } else {
+            wire
+        };
+        // SAFETY: each iteration owns one simulated received reference.
+        let received = unsafe { MemoryObject::from_owned_handle(19) };
+        assert!(receive_readonly_offer(
+            if mode == 3 { &bytes[..31] } else { &bytes },
+            received,
+            if mode == 0 { 1 } else { 8192 }
+        )
+        .is_err());
+        STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(
+                state
+                    .calls
+                    .iter()
+                    .any(|call| call.0 == syscall::SyscallNumber::MemoryMap),
+                mode == 5
+            );
+            assert_eq!(
+                state.calls.last().unwrap(),
+                &(syscall::SyscallNumber::HandleClose, vec![19])
+            );
+        });
+    }
+}
+
+#[test]
+fn rejected_or_failed_sends_leave_source_ownership_intact() {
+    reset();
+    let source = MemoryObject::create(8192).unwrap();
+    assert!(source.send_readonly(9, 8192, 1).is_err());
+    assert!(source.send_readonly(9, 1, 4096).is_err());
+    STATE.with(|state| state.borrow_mut().fail_send = true);
+    assert_eq!(source.send_readonly(9, 0, 4096).unwrap_err().raw(), -11);
+    assert_eq!(source.handle(), 7);
+    STATE.with(|state| {
+        let state = state.borrow();
+        assert!(state.offers.is_empty());
+        assert!(!state
+            .calls
+            .iter()
+            .any(|call| call.0 == syscall::SyscallNumber::HandleClose));
+    });
+    drop(source);
+    STATE.with(|state| {
+        assert_eq!(
+            state.borrow().calls.last().unwrap(),
+            &(syscall::SyscallNumber::HandleClose, vec![7])
+        )
+    });
 }
 
 #[test]
