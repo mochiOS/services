@@ -625,8 +625,15 @@ impl FilesystemService {
         let uid = credentials.effective_uid;
         let gid = credentials.effective_gid;
         let groups = credentials.supplementary_groups();
-        let (inode, filesystem, volume) =
-            self.resolve_scoped_inode(payload, anchors, FollowSymlinks::All, uid, gid, groups)?;
+        let (inode, filesystem, volume) = self.resolve_disk_operation_inode(
+            payload,
+            anchors,
+            FollowSymlinks::All,
+            credentials,
+            |kind| {
+                if kind == protocol::NODE_TYPE_DIRECTORY { EISDIR } else { EINVAL }
+            },
+        )?;
         let metadata = inode.metadata();
         if inode.file_type().is_dir() {
             return Err(EISDIR);
@@ -734,16 +741,12 @@ impl FilesystemService {
         {
             return Err(EINVAL);
         }
-        let uid = credentials.effective_uid;
-        let gid = credentials.effective_gid;
-        let groups = credentials.supplementary_groups();
-        let (inode, filesystem, _) = self.resolve_scoped_inode(
+        let (inode, filesystem, _) = self.resolve_disk_operation_inode(
             payload,
             anchors,
             FollowSymlinks::ExcludeFinalComponent,
-            uid,
-            gid,
-            groups,
+            credentials,
+            |_| EINVAL,
         )?;
         if !inode.file_type().is_symlink() {
             return Err(EINVAL);
@@ -779,8 +782,13 @@ impl FilesystemService {
         let uid = credentials.effective_uid;
         let gid = credentials.effective_gid;
         let groups = credentials.supplementary_groups();
-        let (inode, filesystem, volume) =
-            self.resolve_scoped_inode(payload, anchors, FollowSymlinks::All, uid, gid, groups)?;
+        let (inode, filesystem, volume) = self.resolve_disk_operation_inode(
+            payload,
+            anchors,
+            FollowSymlinks::All,
+            credentials,
+            |_| EROFS,
+        )?;
         let metadata = inode.metadata();
         if uid != 0 && uid != metadata.uid() {
             return Err(EPERM);
@@ -821,13 +829,12 @@ impl FilesystemService {
         } else {
             FollowSymlinks::All
         };
-        let (inode, filesystem, volume) = self.resolve_scoped_inode(
+        let (inode, filesystem, volume) = self.resolve_disk_operation_inode(
             payload,
             anchors,
             follow,
-            effective_uid,
-            effective_gid,
-            groups,
+            credentials,
+            |_| EROFS,
         )?;
         let metadata = inode.metadata();
         if effective_uid != 0 {

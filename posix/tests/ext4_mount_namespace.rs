@@ -145,6 +145,288 @@ fn device_open(
 }
 
 #[test]
+fn device_path_operations_preserve_existing_missing_and_wrong_type_errors() {
+    let fixture = Fixture::new();
+    let mut service = FilesystemService::new(fixture.volume("device-path-errors"));
+    service
+        .mount_devices(
+            b"/dev",
+            filesystem_service::devfs::DeviceFilesystem::default(),
+        )
+        .unwrap();
+    for path in [b"/dev".as_slice(), b"/dev/null"] {
+        assert!(matches!(
+            service.chmod_at(
+                protocol::Header {
+                    mode: 0o600,
+                    ..protocol::Header::default()
+                },
+                path,
+                PathAnchors::default(),
+                root_credentials()
+            ),
+            Err(30)
+        ));
+        assert!(matches!(
+            service.chown_at(
+                protocol::Header::default(),
+                path,
+                PathAnchors::default(),
+                root_credentials()
+            ),
+            Err(30)
+        ));
+        assert!(matches!(
+            service.readlink_at(
+                protocol::Header::default(),
+                path,
+                PathAnchors::default(),
+                root_credentials()
+            ),
+            Err(22)
+        ));
+    }
+    assert!(matches!(
+        service.truncate_at(
+            protocol::Header::default(),
+            b"/dev/null",
+            PathAnchors::default(),
+            root_credentials()
+        ),
+        Err(22)
+    ));
+    assert!(matches!(
+        service.truncate_at(
+            protocol::Header::default(),
+            b"/dev",
+            PathAnchors::default(),
+            root_credentials()
+        ),
+        Err(21)
+    ));
+    for path in [b"/dev/missing".as_slice(), b"/missing"] {
+        assert!(matches!(
+            service.chmod_at(
+                protocol::Header::default(),
+                path,
+                PathAnchors::default(),
+                root_credentials()
+            ),
+            Err(2)
+        ));
+        assert!(matches!(
+            service.chown_at(
+                protocol::Header::default(),
+                path,
+                PathAnchors::default(),
+                root_credentials()
+            ),
+            Err(2)
+        ));
+        assert!(matches!(
+            service.readlink_at(
+                protocol::Header::default(),
+                path,
+                PathAnchors::default(),
+                root_credentials()
+            ),
+            Err(2)
+        ));
+        assert!(matches!(
+            service.truncate_at(
+                protocol::Header::default(),
+                path,
+                PathAnchors::default(),
+                root_credentials()
+            ),
+            Err(2)
+        ));
+    }
+    assert!(matches!(
+        service.readlink_at(
+            protocol::Header::default(),
+            b"/dev/null/child",
+            PathAnchors::default(),
+            root_credentials()
+        ),
+        Err(20)
+    ));
+    let null = device_open(
+        &mut service,
+        b"/dev/null",
+        protocol::OPEN_AT_WRITE,
+        PathAnchors::default(),
+    )
+    .unwrap();
+    assert_eq!(service.provider_write(null, b"unchanged"), Ok(9));
+}
+
+#[test]
+fn device_metadata_errors_follow_nodes_but_nofollow_retains_disk_symlink_identity() {
+    let fixture = Fixture::new();
+    let data = fixture.volume("device-path-symlink");
+    let mut directory =
+        ext4plus::dir::Dir::open_inode(&data, data.read_root_inode().unwrap()).unwrap();
+    data.symlink(
+        &mut directory,
+        ext4plus::DirEntryName::try_from("alias").unwrap(),
+        ext4plus::path::PathBuf::try_from("/dev/null").unwrap(),
+        0,
+        0,
+        std::time::Duration::ZERO,
+    )
+    .unwrap();
+    let mut service = FilesystemService::new(data);
+    service
+        .mount_devices(
+            b"/dev",
+            filesystem_service::devfs::DeviceFilesystem::default(),
+        )
+        .unwrap();
+    assert!(matches!(
+        service.chmod_at(
+            protocol::Header::default(),
+            b"/alias",
+            PathAnchors::default(),
+            root_credentials()
+        ),
+        Err(30)
+    ));
+    assert!(matches!(
+        service.chown_at(
+            protocol::Header::default(),
+            b"/alias",
+            PathAnchors::default(),
+            root_credentials()
+        ),
+        Err(30)
+    ));
+    assert!(matches!(
+        service.truncate_at(
+            protocol::Header::default(),
+            b"/alias",
+            PathAnchors::default(),
+            root_credentials()
+        ),
+        Err(22)
+    ));
+    assert_eq!(
+        service
+            .readlink_at(
+                protocol::Header::default(),
+                b"/alias",
+                PathAnchors::default(),
+                root_credentials()
+            )
+            .unwrap()
+            .payload,
+        b"/dev/null"
+    );
+    service
+        .chown_at(
+            protocol::Header {
+                flags: protocol::CHOWN_AT_NOFOLLOW,
+                node_id: (1001 << 32) | 1001,
+                ..protocol::Header::default()
+            },
+            b"/alias",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    let alias = service
+        .stat_at(
+            protocol::Header {
+                flags: protocol::STAT_AT_NOFOLLOW,
+                ..protocol::Header::default()
+            },
+            b"/alias",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    let null = service
+        .stat_at(
+            protocol::Header::default(),
+            b"/dev/null",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    assert_eq!(
+        protocol::decode_node_status(&alias.payload).unwrap().uid,
+        1001
+    );
+    assert_eq!(protocol::decode_node_status(&null.payload).unwrap().uid, 0);
+}
+
+#[test]
+fn device_path_mutations_keep_root_confinement_and_search_permission_checks() {
+    let fixture = Fixture::new();
+    let mut service = FilesystemService::new(fixture.volume("device-path-authority"));
+    service
+        .mount_devices(
+            b"/dev",
+            filesystem_service::devfs::DeviceFilesystem::default(),
+        )
+        .unwrap();
+    let root = device_open(
+        &mut service,
+        b"/",
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+        PathAnchors::default(),
+    )
+    .unwrap();
+    let dev = device_open(
+        &mut service,
+        b"/dev",
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+        PathAnchors::default(),
+    )
+    .unwrap();
+    let scoped = PathAnchors {
+        root_open_id: Some(dev),
+        base_open_id: Some(dev),
+    };
+    let chmod = protocol::Header {
+        flags: protocol::CHMOD_AT_ROOT_ATTACHED | protocol::CHMOD_AT_BASE_ATTACHED,
+        ..protocol::Header::default()
+    };
+    assert!(matches!(
+        service.chmod_at(chmod, b"../../null", scoped, root_credentials()),
+        Err(30)
+    ));
+    assert!(matches!(
+        service.chmod_at(
+            chmod,
+            b"null",
+            PathAnchors {
+                root_open_id: Some(dev),
+                base_open_id: Some(root)
+            },
+            root_credentials()
+        ),
+        Err(13)
+    ));
+    assert!(matches!(
+        service.chmod_at(chmod, b"null", PathAnchors::default(), root_credentials()),
+        Err(22)
+    ));
+    let mut user = root_credentials();
+    user.effective_uid = 501;
+    user.effective_gid = 20;
+    assert!(matches!(
+        service.chmod_at(
+            protocol::Header::default(),
+            b"/blocked/private",
+            PathAnchors::default(),
+            user
+        ),
+        Err(13)
+    ));
+}
+
+#[test]
 fn device_mutations_distinguish_valid_resources_from_closed_descriptions() {
     let fixture = Fixture::new();
     let mut service = FilesystemService::new(fixture.volume("device-mutations"));

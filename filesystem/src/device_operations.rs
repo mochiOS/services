@@ -46,6 +46,45 @@ impl FilesystemService {
             .retained_node(open.volume, open.inode.clone())
     }
 
+    /// For operations on an existing path, distinguish device nodes from disk
+    /// inodes without losing lookup errors or the caller's root/base authority.
+    pub(super) fn resolve_disk_operation_inode(
+        &self,
+        path: &[u8],
+        anchors: PathAnchors,
+        follow: FollowSymlinks,
+        credentials: protocol::Credentials,
+        device_error: fn(u32) -> i32,
+    ) -> Result<(Inode, Ext4, u32), i32> {
+        match self.resolve_namespace_path(
+            path,
+            anchors,
+            follow,
+            credentials.effective_uid,
+            credentials.effective_gid,
+            credentials.supplementary_groups(),
+        )? {
+            Some(path_walk::Resolution::Found { inode, .. }) => {
+                let namespace = self.namespace.as_ref().ok_or(EIO)?;
+                if inode.device_node().is_some() {
+                    return Err(device_error(namespace.device_status(&inode)?.kind));
+                }
+                let filesystem = namespace.filesystem(&inode)?.clone();
+                let volume = u32::try_from(inode.id().volume).map_err(|_| EIO)?;
+                Ok((inode.into_inode()?, filesystem, volume))
+            }
+            Some(path_walk::Resolution::Missing { .. }) => Err(ENOENT),
+            None => self.resolve_scoped_inode(
+                path,
+                anchors,
+                follow,
+                credentials.effective_uid,
+                credentials.effective_gid,
+                credentials.supplementary_groups(),
+            ),
+        }
+    }
+
     pub(super) fn resolve_namespace_path(
         &self,
         path: &[u8],
