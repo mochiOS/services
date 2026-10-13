@@ -30,5 +30,6 @@ fn native_probe_uses_the_current_generic_handle_and_memory_abi() {
     assert_eq!(HANDLE_RIGHT_DUPLICATE, 1 << 62);
     assert_eq!(HANDLE_RIGHT_TRANSFER, 1 << 63);
     assert_eq!(mnu_abi::IPC_MAX_OBJECT_HANDLES, 4);
+    assert_eq!(mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE, 2);
     assert_eq!(core::mem::size_of::<mnu_abi::IpcObjectHandles>(), 72);
 }

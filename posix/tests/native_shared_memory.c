@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -15,7 +16,7 @@ enum { MEMORY_MAP = 582, MEMORY_UNMAP = 583, MEMORY_PROTECT = 584,
 #define TRANSFER (1ULL << 63)
 #define SHARED 2ULL
 struct attached_handle { uint32_t handle, reserved; uint64_t rights; };
-struct attachments { uint32_t count, reserved; struct attached_handle handles[4]; };
+struct attachments { uint32_t count, delivery_flags; struct attached_handle handles[4]; };
 _Static_assert(sizeof(struct attached_handle) == 16, "attachment ABI");
 _Static_assert(sizeof(struct attachments) == 72, "attachments ABI");
 
@@ -34,7 +35,7 @@ static uint64_t map(uint64_t handle, uint64_t size, uint64_t access, uint64_t of
     return native(MEMORY_MAP, 0, size, access, SHARED, handle, offset);
 }
 
-int main(void) {
+static int probe(void) {
     fprintf(stderr, "shared-memory: start\n");
     if ((int64_t)native(MEMORY_OBJECT_CREATE, 0, 0, 0, 0, 0, 0) != -22) return 1;
     if ((int64_t)native(MEMORY_OBJECT_CREATE, 4096, 1, 0, 0, 0, 0) != -22) return 2;
@@ -99,6 +100,11 @@ int main(void) {
     if (((volatile unsigned char *)(uintptr_t)readonly)[103] != 0xa7) return 25;
     if ((int64_t)map(received, 4096, READ | WRITE, 0) >= 0) return 26;
     if ((int64_t)native(MEMORY_PROTECT, readonly, 4096, READ | WRITE, 0, 0, 0) >= 0) return 27;
+    /* Delivery proof belongs to the kernel's receive envelope, not a send.
+       Check rejection before constructing the ordinary outgoing envelope. */
+    if (handles.delivery_flags != 2) return 37;
+    if ((int64_t)native(IPC_SEND_HANDLES, endpoint, (uintptr_t)&request, 1, (uintptr_t)&handles, 0, 0) != -22) return 38;
+    handles.delivery_flags = 0;
     if ((int64_t)native(IPC_SEND_HANDLES, endpoint, (uintptr_t)&request, 1, (uintptr_t)&handles, 0, 0) != -13) return 28;
     if (native(HANDLE_CLOSE, received, 0, 0, 0, 0, 0) != 0) return 29;
     if (native(IPC_REPLY, message >> 32, (uintptr_t)&reply, 1, 0, 0, 0) != 0) return 30;
@@ -109,4 +115,12 @@ int main(void) {
     if (native(HANDLE_CLOSE, endpoint, 0, 0, 0, 0, 0) != 0) return 34;
     fprintf(stderr, "shared-memory: aliases, attenuation, IPC, retained mappings ok\n");
     return 0;
+}
+
+int main(void) {
+    int result = probe();
+    char text[96];
+    snprintf(text, sizeof(text), "shared-memory: result=%d\n", result);
+    native(660, (uintptr_t)text, strlen(text), 0, 0, 0, 0);
+    return result;
 }
