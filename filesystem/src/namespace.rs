@@ -8,6 +8,7 @@ use ext4plus::inode::Inode;
 use ext4plus::{DirEntryName, Ext4, Metadata};
 use mochios_filesystem_protocol as protocol;
 
+use crate::devfs::{DeviceFilesystem, NodeKind};
 use crate::path_walk::{self, Backend, Credentials, Resolution};
 use crate::service::{errno, permission_allows};
 
@@ -29,28 +30,61 @@ pub struct NodeId {
 pub struct Node {
     owner: Arc<()>,
     volume: u64,
-    inode: Inode,
+    backing: NodeBacking,
+}
+
+#[derive(Clone)]
+enum NodeBacking {
+    Ext4(Inode),
+    Device(crate::devfs::Node),
+}
+
+enum Volume {
+    Ext4(Ext4),
+    Device(DeviceFilesystem),
 }
 
 impl Node {
-    pub(crate) fn into_inode(self) -> Inode {
-        self.inode
+    pub(crate) fn into_inode(self) -> Result<Inode, i32> {
+        match self.backing {
+            NodeBacking::Ext4(inode) => Ok(inode),
+            NodeBacking::Device(_) => Err(95),
+        }
+    }
+
+    fn inode(&self) -> Result<&Inode, i32> {
+        match &self.backing {
+            NodeBacking::Ext4(inode) => Ok(inode),
+            NodeBacking::Device(_) => Err(95),
+        }
+    }
+
+    pub fn device_node(&self) -> Option<&crate::devfs::Node> {
+        match &self.backing {
+            NodeBacking::Device(node) => Some(node),
+            NodeBacking::Ext4(_) => None,
+        }
     }
     pub fn id(&self) -> NodeId {
         NodeId {
             volume: self.volume,
-            inode: self.inode.index.get(),
+            inode: match &self.backing {
+                NodeBacking::Ext4(inode) => inode.index.get(),
+                NodeBacking::Device(node) => node.id(),
+            },
         }
     }
 
-    pub fn metadata(&self) -> Metadata {
-        self.inode.metadata()
+    /// ext4 metadata is unavailable for virtual nodes; use `device_status`
+    /// on their owning namespace instead of fabricating a disk inode.
+    pub fn metadata(&self) -> Result<Metadata, i32> {
+        Ok(self.inode()?.metadata())
     }
 }
 
 pub struct Namespace {
     owner: Arc<()>,
-    volumes: Vec<Ext4>,
+    volumes: Vec<Volume>,
     root: Node,
     // Covered directory -> mounted volume root; mounted root -> covered directory.
     mounts: HashMap<NodeId, Node>,
@@ -65,11 +99,11 @@ impl Namespace {
         let root = Node {
             owner: owner.clone(),
             volume: 0,
-            inode: filesystem.read_root_inode().map_err(errno)?,
+            backing: NodeBacking::Ext4(filesystem.read_root_inode().map_err(errno)?),
         };
         Ok(Self {
             owner,
-            volumes: vec![filesystem],
+            volumes: vec![Volume::Ext4(filesystem)],
             root,
             mounts: HashMap::new(),
             covered: HashMap::new(),
@@ -82,12 +116,10 @@ impl Namespace {
         self.root.clone()
     }
 
-    /// Mount configuration belongs to the service holding the volume authority.
-    /// No pathname, process identity or service knowledge is sent to the kernel.
-    /// Overmount and unmount are deliberately not supported by this operation.
-    pub fn mount(&mut self, at: Node, filesystem: Ext4) -> Result<Node, i32> {
-        self.filesystem(&at)?;
-        if !at.inode.file_type().is_dir() {
+    /// Attach a device filesystem over an existing directory by node identity.
+    pub fn mount_devices(&mut self, at: Node, filesystem: DeviceFilesystem) -> Result<Node, i32> {
+        self.validate(&at)?;
+        if !self.is_directory(&at) {
             return Err(ENOTDIR);
         }
         if at.id() == self.root.id()
@@ -100,9 +132,78 @@ impl Namespace {
         let root = Node {
             owner: self.owner.clone(),
             volume: u64::from(u32::try_from(self.volumes.len()).map_err(|_| EINVAL)?),
-            inode: filesystem.read_root_inode().map_err(errno)?,
+            backing: NodeBacking::Device(filesystem.root()),
         };
-        self.volumes.push(filesystem);
+        self.volumes.push(Volume::Device(filesystem));
+        self.covered.insert(root.id(), at.clone());
+        self.mounts.insert(at.id(), root.clone());
+        Ok(root)
+    }
+
+    /// Attach a device root without modifying the parent filesystem on disk.
+    pub fn mount_named_devices(
+        &mut self,
+        parent: Node,
+        name: &[u8],
+        filesystem: DeviceFilesystem,
+    ) -> Result<Node, i32> {
+        self.validate(&parent)?;
+        if !self.is_directory(&parent) {
+            return Err(ENOTDIR);
+        }
+        if name == b"." || name == b".." {
+            return Err(EINVAL);
+        }
+        DirEntryName::try_from(name).map_err(|_| EINVAL)?;
+        match self.child(&parent, name) {
+            Ok(_) => return Err(EEXIST),
+            Err(2) => {}
+            Err(error) => return Err(error),
+        }
+        let root = Node {
+            owner: self.owner.clone(),
+            volume: u64::from(u32::try_from(self.volumes.len()).map_err(|_| EINVAL)?),
+            backing: NodeBacking::Device(filesystem.root()),
+        };
+        self.volumes.push(Volume::Device(filesystem));
+        self.named_parents
+            .insert(root.id(), (parent.clone(), name.to_vec()));
+        self.named_mounts
+            .insert((parent.id(), name.to_vec()), root.clone());
+        Ok(root)
+    }
+
+    pub fn device_status(&self, node: &Node) -> Result<protocol::NodeStatus, i32> {
+        self.validate(node)?;
+        match (self.volumes.get(node.volume as usize), &node.backing) {
+            (Some(Volume::Device(filesystem)), NodeBacking::Device(device)) => {
+                filesystem.status(device, node.volume)
+            }
+            _ => Err(95),
+        }
+    }
+
+    /// Mount configuration belongs to the service holding the volume authority.
+    /// No pathname, process identity or service knowledge is sent to the kernel.
+    /// Overmount and unmount are deliberately not supported by this operation.
+    pub fn mount(&mut self, at: Node, filesystem: Ext4) -> Result<Node, i32> {
+        self.filesystem(&at)?;
+        if !self.is_directory(&at) {
+            return Err(ENOTDIR);
+        }
+        if at.id() == self.root.id()
+            || self.mounts.contains_key(&at.id())
+            || self.covered.contains_key(&at.id())
+            || self.named_parents.contains_key(&at.id())
+        {
+            return Err(EBUSY);
+        }
+        let root = Node {
+            owner: self.owner.clone(),
+            volume: u64::from(u32::try_from(self.volumes.len()).map_err(|_| EINVAL)?),
+            backing: NodeBacking::Ext4(filesystem.read_root_inode().map_err(errno)?),
+        };
+        self.volumes.push(Volume::Ext4(filesystem));
         self.covered.insert(root.id(), at.clone());
         self.mounts.insert(at.id(), root.clone());
         Ok(root)
@@ -148,9 +249,9 @@ impl Namespace {
         let root = Node {
             owner: self.owner.clone(),
             volume: u64::from(u32::try_from(self.volumes.len()).map_err(|_| EINVAL)?),
-            inode,
+            backing: NodeBacking::Ext4(inode),
         };
-        self.volumes.push(filesystem);
+        self.volumes.push(Volume::Ext4(filesystem));
         self.named_parents
             .insert(root.id(), (parent.clone(), name.to_vec()));
         self.named_mounts
@@ -166,8 +267,8 @@ impl Namespace {
         follow_final: bool,
         credentials: Credentials<'_>,
     ) -> Result<Resolution<Node>, i32> {
-        self.filesystem(&root)?;
-        self.filesystem(&base)?;
+        self.validate(&root)?;
+        self.validate(&base)?;
         let root = self.refresh(root)?;
         let base = self.refresh(base)?;
         if !self.is_directory(&root) || !self.is_directory(&base) {
@@ -179,8 +280,8 @@ impl Namespace {
     /// Reconstruct a retained directory's current namespace path, including
     /// mount edges. A removed directory has no pathname, even while open.
     pub(crate) fn directory_path(&self, root: Node, mut current: Node) -> Result<Vec<u8>, i32> {
-        self.filesystem(&root)?;
-        self.filesystem(&current)?;
+        self.validate(&root)?;
+        self.validate(&current)?;
         if !self.is_directory(&root) || !self.is_directory(&current) {
             return Err(ENOTDIR);
         }
@@ -199,7 +300,7 @@ impl Namespace {
                 if parent.id() == current.id() {
                     return Err(EACCES);
                 }
-                let directory = Dir::open_inode(self.filesystem(&parent)?, parent.inode.clone())
+                let directory = Dir::open_inode(self.filesystem(&parent)?, parent.inode()?.clone())
                     .map_err(errno)?;
                 let mut name = None;
                 for entry in directory.read_dir().map_err(errno)? {
@@ -209,7 +310,7 @@ impl Namespace {
                     if bytes != b"."
                         && bytes != b".."
                         && !bytes.starts_with(b".mochios-orphan-")
-                        && entry.inode == entry_node.inode.index
+                        && entry.inode == entry_node.inode()?.index
                         && parent.volume == entry_node.volume
                     {
                         name = Some(bytes.to_vec());
@@ -239,27 +340,47 @@ impl Namespace {
     }
 
     pub(crate) fn filesystem(&self, node: &Node) -> Result<&Ext4, i32> {
+        self.validate(node)?;
+        match self.volumes.get(node.volume as usize) {
+            Some(Volume::Ext4(filesystem)) => Ok(filesystem),
+            Some(Volume::Device(_)) => Err(95),
+            None => Err(EINVAL),
+        }
+    }
+
+    fn validate(&self, node: &Node) -> Result<(), i32> {
         if !Arc::ptr_eq(&self.owner, &node.owner) {
             return Err(EACCES);
         }
-        self.volumes.get(node.volume as usize).ok_or(EINVAL)
+        match (self.volumes.get(node.volume as usize), &node.backing) {
+            (Some(Volume::Ext4(_)), NodeBacking::Ext4(_)) => Ok(()),
+            (Some(Volume::Device(filesystem)), NodeBacking::Device(device)) => {
+                filesystem.status(device, node.volume).map(|_| ())
+            }
+            _ => Err(EINVAL),
+        }
     }
 
     fn refresh(&self, mut node: Node) -> Result<Node, i32> {
-        node.inode = Inode::read(self.filesystem(&node)?, node.inode.index).map_err(errno)?;
+        self.validate(&node)?;
+        if let NodeBacking::Ext4(inode) = &node.backing {
+            node.backing = NodeBacking::Ext4(
+                Inode::read(self.filesystem(&node)?, inode.index).map_err(errno)?,
+            );
+        }
         Ok(node)
     }
 
     /// Reconstruct only a node already retained by this service's open table.
     /// This is not a wire API accepting a caller-selected volume/inode pair.
     pub(crate) fn retained_node(&self, volume: u32, inode: Inode) -> Result<Node, i32> {
-        if self.volumes.get(volume as usize).is_none() {
+        if !matches!(self.volumes.get(volume as usize), Some(Volume::Ext4(_))) {
             return Err(EINVAL);
         }
         Ok(Node {
             owner: self.owner.clone(),
             volume: u64::from(volume),
-            inode,
+            backing: NodeBacking::Ext4(inode),
         })
     }
 
@@ -269,7 +390,7 @@ impl Namespace {
         name: &[u8],
         inode: u32,
     ) -> Result<NodeId, i32> {
-        self.filesystem(current)?;
+        self.validate(current)?;
         if name == b"." {
             return Ok(current.id());
         }
@@ -293,7 +414,7 @@ impl Namespace {
 
     /// Stable name order keeps appended readdir cookies deterministic.
     pub(crate) fn named_children(&self, parent: &Node) -> Result<Vec<(Vec<u8>, NodeId)>, i32> {
-        self.filesystem(parent)?;
+        self.validate(parent)?;
         Ok(self
             .named_mounts
             .iter()
@@ -308,7 +429,7 @@ impl Namespace {
         }
         let node = self.covered.get(&node.id()).unwrap_or(node);
         let filesystem = self.filesystem(node)?;
-        let current = Inode::read(filesystem, node.inode.index).map_err(errno)?;
+        let current = Inode::read(filesystem, node.inode()?.index).map_err(errno)?;
         let inode = Dir::open_inode(filesystem, current)
             .map_err(errno)?
             .get_entry(DirEntryName::try_from("..").map_err(|_| EINVAL)?)
@@ -316,7 +437,7 @@ impl Namespace {
         Ok(Node {
             owner: self.owner.clone(),
             volume: node.volume,
-            inode,
+            backing: NodeBacking::Ext4(inode),
         })
     }
 }
@@ -325,15 +446,24 @@ impl Backend for Namespace {
     type Node = Node;
 
     fn is_directory(&self, node: &Node) -> bool {
-        node.inode.file_type().is_dir()
+        match &node.backing {
+            NodeBacking::Ext4(inode) => inode.file_type().is_dir(),
+            NodeBacking::Device(device) => device.kind() == NodeKind::Directory,
+        }
     }
 
     fn is_symlink(&self, node: &Node) -> bool {
-        node.inode.file_type().is_symlink()
+        matches!(&node.backing, NodeBacking::Ext4(inode) if inode.file_type().is_symlink())
     }
 
     fn search(&self, node: &Node, credentials: Credentials<'_>) -> Result<(), i32> {
-        let metadata = Inode::read(self.filesystem(node)?, node.inode.index)
+        self.validate(node)?;
+        if let (Some(Volume::Device(filesystem)), NodeBacking::Device(device)) =
+            (self.volumes.get(node.volume as usize), &node.backing)
+        {
+            return filesystem.search(device, credentials);
+        }
+        let metadata = Inode::read(self.filesystem(node)?, node.inode()?.index)
             .map_err(errno)?
             .metadata();
         if permission_allows(
@@ -353,11 +483,21 @@ impl Backend for Namespace {
     }
 
     fn child(&self, node: &Node, name: &[u8]) -> Result<Node, i32> {
-        let filesystem = self.filesystem(node)?;
+        self.validate(node)?;
         if let Some(mounted) = self.named_mounts.get(&(node.id(), name.to_vec())) {
             return self.refresh(mounted.clone());
         }
-        let current = Inode::read(filesystem, node.inode.index).map_err(errno)?;
+        if let (Some(Volume::Device(filesystem)), NodeBacking::Device(device)) =
+            (self.volumes.get(node.volume as usize), &node.backing)
+        {
+            return Ok(Node {
+                owner: self.owner.clone(),
+                volume: node.volume,
+                backing: NodeBacking::Device(filesystem.child(device, name)?),
+            });
+        }
+        let filesystem = self.filesystem(node)?;
+        let current = Inode::read(filesystem, node.inode()?.index).map_err(errno)?;
         let inode = Dir::open_inode(filesystem, current)
             .map_err(errno)?
             .get_entry(DirEntryName::try_from(name).map_err(|_| EINVAL)?)
@@ -365,14 +505,14 @@ impl Backend for Namespace {
         let child = Node {
             owner: self.owner.clone(),
             volume: node.volume,
-            inode,
+            backing: NodeBacking::Ext4(inode),
         };
         self.refresh(self.mounts.get(&child.id()).cloned().unwrap_or(child))
     }
 
     fn symlink(&self, node: &Node) -> Result<Vec<u8>, i32> {
         Ok(node
-            .inode
+            .inode()?
             .symlink_target(self.filesystem(node)?)
             .map_err(errno)?
             .as_ref()
@@ -380,8 +520,8 @@ impl Backend for Namespace {
     }
 
     fn ancestry(&self, root: &Node, base: Node) -> Result<Vec<Node>, i32> {
-        self.filesystem(root)?;
-        self.filesystem(&base)?;
+        self.validate(root)?;
+        self.validate(&base)?;
         if !self.is_directory(&base) {
             return Err(ENOTDIR);
         }

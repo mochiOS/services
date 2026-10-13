@@ -126,6 +126,159 @@ fn walk(namespace: &Namespace, base: Node, path: &[u8]) -> Node {
 }
 
 #[test]
+fn device_mounts_share_namespace_traversal_without_ext4_inode_aliases() {
+    let fixture = Fixture::new();
+    let data = fixture.volume("device-data");
+    let mut directory =
+        ext4plus::dir::Dir::open_inode(&data, data.read_root_inode().unwrap()).unwrap();
+    data.symlink(
+        &mut directory,
+        ext4plus::DirEntryName::try_from("null-alias").unwrap(),
+        ext4plus::path::PathBuf::try_from("/device/null").unwrap(),
+        0,
+        0,
+        std::time::Duration::ZERO,
+    )
+    .unwrap();
+    let mut namespace = Namespace::new(data.clone()).unwrap();
+    let root = namespace.root();
+    let mounted = namespace
+        .mount_named_devices(
+            root.clone(),
+            b"device",
+            filesystem_service::devfs::DeviceFilesystem::default(),
+        )
+        .unwrap();
+    let null = walk(&namespace, root.clone(), b"/device/null");
+    assert_ne!(root.id(), null.id()); // Root inode 2 and device inode 2 differ by volume.
+    assert_eq!(
+        walk(&namespace, root.clone(), b"/null-alias").id(),
+        null.id()
+    );
+    assert_eq!(walk(&namespace, mounted.clone(), b"null").id(), null.id());
+    assert_eq!(
+        walk(&namespace, mounted.clone(), b"../file").id(),
+        walk(&namespace, root.clone(), b"file").id()
+    );
+    let confined = found(namespace.resolve(
+        mounted.clone(),
+        mounted.clone(),
+        b"../../null",
+        true,
+        credentials(),
+    ));
+    assert_eq!(confined.id(), null.id());
+    assert!(matches!(
+        namespace.resolve(mounted.clone(), root.clone(), b"file", true, credentials()),
+        Err(13)
+    ));
+    assert!(matches!(
+        namespace.resolve(
+            root.clone(),
+            root.clone(),
+            b"/device/null/",
+            true,
+            credentials()
+        ),
+        Err(20)
+    ));
+    let status = namespace.device_status(&null).unwrap();
+    assert_eq!(
+        (status.device, status.node_id, status.special_device),
+        (1, 2, 259)
+    );
+    assert!(matches!(null.metadata(), Err(95)));
+    assert!(data.symlink_metadata("/device").is_err());
+    assert!(matches!(
+        namespace.mount_named_devices(
+            root,
+            b"device",
+            filesystem_service::devfs::DeviceFilesystem::default()
+        ),
+        Err(17)
+    ));
+}
+
+#[test]
+fn covered_device_mount_hides_disk_children_and_preserves_parent_edges() {
+    let fixture = Fixture::new();
+    let mut namespace = Namespace::new(fixture.volume("covered-device-data")).unwrap();
+    let root = namespace.root();
+    let at = walk(&namespace, root.clone(), b"/mount");
+    let mounted = namespace
+        .mount_devices(
+            at.clone(),
+            filesystem_service::devfs::DeviceFilesystem::default(),
+        )
+        .unwrap();
+    assert!(matches!(
+        namespace
+            .resolve(
+                root.clone(),
+                root.clone(),
+                b"/mount/hidden",
+                true,
+                credentials()
+            )
+            .unwrap(),
+        Resolution::Missing { .. }
+    ));
+    assert_eq!(walk(&namespace, mounted.clone(), b"..").id(), root.id());
+    assert_eq!(
+        walk(&namespace, root.clone(), b"/mount/null")
+            .device_node()
+            .unwrap()
+            .kind(),
+        filesystem_service::devfs::NodeKind::Null
+    );
+    assert!(matches!(
+        namespace.mount_devices(at, filesystem_service::devfs::DeviceFilesystem::default()),
+        Err(16)
+    ));
+    assert!(matches!(
+        namespace.mount_devices(
+            mounted,
+            filesystem_service::devfs::DeviceFilesystem::default()
+        ),
+        Err(16)
+    ));
+}
+
+#[test]
+fn device_mount_authority_does_not_accept_another_namespaces_nodes() {
+    let fixture = Fixture::new();
+    let mut namespace = Namespace::new(fixture.volume("owned-device-data")).unwrap();
+    let mut other = Namespace::new(fixture.volume("foreign-device-data")).unwrap();
+    let foreign = other
+        .mount_named_devices(
+            other.root(),
+            b"device",
+            filesystem_service::devfs::DeviceFilesystem::default(),
+        )
+        .unwrap();
+    assert!(matches!(
+        namespace.mount_named_devices(
+            foreign.clone(),
+            b"nested",
+            filesystem_service::devfs::DeviceFilesystem::default()
+        ),
+        Err(13)
+    ));
+    assert!(matches!(
+        namespace.mount_devices(
+            foreign.clone(),
+            filesystem_service::devfs::DeviceFilesystem::default()
+        ),
+        Err(13)
+    ));
+    assert!(matches!(namespace.device_status(&foreign), Err(13)));
+    assert!(matches!(
+        namespace.resolve(namespace.root(), foreign, b"null", true, credentials()),
+        Err(13)
+    ));
+}
+
+#[test]
 fn named_source_mount_projects_a_directory_without_modifying_the_parent_volume() {
     let fixture = Fixture::new();
     let data = fixture.volume("data");

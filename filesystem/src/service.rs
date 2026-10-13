@@ -1106,11 +1106,13 @@ impl FilesystemService {
         let volume = u32::try_from(node.id().volume).map_err(|_| EIO)?;
         let resolution = match resolution {
             path_walk::Resolution::Found { inode, parent } => Resolution::Found {
-                inode: inode.into_inode(),
-                parent: parent.map(|(node, name)| (node.into_inode(), name)),
+                inode: inode.into_inode()?,
+                parent: parent
+                    .map(|(node, name)| node.into_inode().map(|inode| (inode, name)))
+                    .transpose()?,
             },
             path_walk::Resolution::Missing { parent, name } => Resolution::Missing {
-                parent: parent.into_inode(),
+                parent: parent.into_inode()?,
                 name,
             },
         };
