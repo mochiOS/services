@@ -188,6 +188,27 @@ fn byte_creation_checks_rounded_capacity_without_rounding_logical_length() {
 }
 
 #[test]
+fn page_population_uses_live_extent_including_its_partial_final_page() {
+    let memory = shared_memory::SharedMemory::new_resizable(4097, 3).unwrap();
+    let (partial, epoch) = memory.prepare_page(1).unwrap();
+    assert_eq!(memory.prepare_page(2), Err(syscall::EINVAL));
+    memory.resize_with(12288, |_, _| Ok(())).unwrap();
+    let (future, _) = memory.prepare_page(2).unwrap();
+    memory.resize_with(4096, |_, _| Ok(())).unwrap();
+    assert_eq!(memory.prepare_page(1), Err(syscall::EINVAL));
+    assert_eq!(memory.prepare_page(2), Err(syscall::EINVAL));
+    assert_eq!(
+        memory.with_generation(epoch, || Ok(())),
+        Err(syscall::EAGAIN)
+    );
+    // Outstanding pins retain storage but cannot authorize a stale install.
+    assert!(frames().lock().unwrap().contains_key(&partial));
+    assert!(frames().lock().unwrap().contains_key(&future));
+    paging::release_user_frame(partial);
+    paging::release_user_frame(future);
+}
+
+#[test]
 fn byte_resize_preserves_prefix_and_clears_padding_before_growth() {
     let memory = shared_memory::SharedMemory::new(8192, 2).unwrap();
     memory.write_at(4999, &[7, 8, 9]).unwrap();

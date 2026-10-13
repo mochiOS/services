@@ -57,7 +57,12 @@ static int probe(void) {
     if (private_bytes[4096 + 37] != 0x5b) return 40;
     private_bytes[4096 + 37] = 0x61;
     if (bytes[4096 + 37] != 0x5b) return 41;
-    if ((int64_t)map(object, 4096, READ, 8192) >= 0) return 7;
+    /* Reserving virtual space does not grant access to absent backing pages.
+       Live backing bounds are enforced by faults, not map-time length. */
+    uint64_t future = map(object, 4096, READ, 8192);
+    if ((int64_t)future < 0) return 7;
+    if (native(MEMORY_UNMAP, future, 4096, 0, 0, 0, 0) != 0) return 44;
+    if ((int64_t)map(object, 8192, READ, UINT64_MAX & ~UINT64_C(4095)) != -22) return 45;
     if ((int64_t)map(object, 4096, READ | 4, 0) >= 0) return 8;
     if (native(HANDLE_CLOSE, object, 0, 0, 0, 0, 0) != 0) return 9;
     if (private_bytes[4096 + 37] != 0x61) return 42;
@@ -121,6 +126,26 @@ static int probe(void) {
     if (((volatile unsigned char *)(uintptr_t)readonly)[103] != 0xa7) return 32;
     if (native(MEMORY_UNMAP, readonly, 4096, 0, 0, 0, 0) != 0) return 33;
     if (native(HANDLE_CLOSE, endpoint, 0, 0, 0, 0, 0) != 0) return 34;
+    /* Test both pager paths: absent storage must never become an accessible
+       zero page. This checks native process termination, not POSIX SIGBUS
+       translation, which is a separate userspace exception-delivery task. */
+    uint64_t bounded = native(MEMORY_OBJECT_CREATE, 4096, 0, 0, 0, 0, 0);
+    if ((int64_t)bounded < 0) return 46;
+    for (unsigned shared = 0; shared < 2; ++shared) {
+        pid_t invalid = fork();
+        if (invalid < 0) return 47;
+        if (invalid == 0) {
+            uint64_t absent = native(MEMORY_MAP, 0, 4096, READ,
+                                     shared ? SHARED : 0, bounded, 4096);
+            if ((int64_t)absent < 0) _exit(48);
+            unsigned char value = *(volatile unsigned char *)(uintptr_t)absent;
+            (void)value;
+            _exit(49); /* Must not reach this after the absent-page read. */
+        }
+        status = 0;
+        if (waitpid(invalid, &status, 0) != invalid || !WIFEXITED(status) || WEXITSTATUS(status) != 255) return 50;
+    }
+    if (native(HANDLE_CLOSE, bounded, 0, 0, 0, 0, 0) != 0) return 51;
     fprintf(stderr, "shared-memory: aliases, attenuation, IPC, retained mappings ok\n");
     return 0;
 }
