@@ -41,6 +41,10 @@ fn newlib_heap_growth_commits_its_reserved_arena() {
         .next()
         .unwrap();
     assert!(mapping.contains("if present"));
+    // Private accessible arenas use the existing zero-fill fault path. Only
+    // shared anonymous backing remains eagerly materialized before fork.
+    assert!(mapping.contains("if present && shared"));
+    assert!(kernel.contains("None => Some(Arc::new([0u8; crate::mem::vm_object::PAGE_BYTES]))"));
 }
 
 #[test]
