@@ -83,6 +83,7 @@ use std::cell::RefCell;
 struct State {
     calls: Vec<(syscall::SyscallNumber, Vec<u64>)>,
     fail_create: bool,
+    fail_resize: bool,
     fail_map: bool,
     fail_unmap: bool,
     fail_close: bool,
@@ -680,7 +681,8 @@ fn native_compositor_gate_uses_current_ipc_abi() {
 mod syscall {
     pub use mnu_abi::{
         EACCES, EINVAL, EIO, ENOMEM, HANDLE_RIGHT_MAP, HANDLE_RIGHT_READ, MEMORY_ACCESS_ALL,
-        MEMORY_ACCESS_READ, MEMORY_ACCESS_WRITE, MEMORY_MAP_SHARED, SyscallNumber,
+        MEMORY_ACCESS_READ, MEMORY_ACCESS_WRITE, MEMORY_MAP_SHARED, MEMORY_OBJECT_RESIZABLE,
+        SyscallNumber,
     };
     pub use mochi_user_platform::syscall::{SysError, SysResult};
     fn call(number: SyscallNumber, args: &[u64]) -> SysResult<u64> {
@@ -692,6 +694,9 @@ mod syscall {
                     Err(SysError::from_raw(-12))
                 }
                 SyscallNumber::MemoryObjectCreate => Ok(7),
+                SyscallNumber::MemoryObjectResize if state.fail_resize => {
+                    Err(SysError::from_raw(-13))
+                }
                 SyscallNumber::MemoryMap if state.fail_map => Err(SysError::from_raw(-13)),
                 SyscallNumber::MemoryMap => Ok(state.map_address.unwrap_or(0x10000)),
                 SyscallNumber::MemoryObjectLength if state.fail_length => {
@@ -1065,6 +1070,38 @@ fn failed_creation_and_received_handle_ownership_close_only_valid_owned_handles(
             1
         );
         assert_eq!(state.calls.last().unwrap().1, [19]);
+    });
+}
+
+#[test]
+fn resizable_owner_requests_explicit_control_creation_and_propagates_resize_errors() {
+    reset();
+    let object = MemoryObject::create_resizable(0).unwrap();
+    object.resize(4097).unwrap();
+    STATE.with(|state| state.borrow_mut().fail_resize = true);
+    assert_eq!(object.resize(0).unwrap_err().errno(), Some(13));
+    assert_eq!(object.handle(), 7);
+    STATE.with(|state| {
+        let state = state.borrow();
+        assert_eq!(
+            state.calls[0],
+            (syscall::SyscallNumber::MemoryObjectCreate, vec![0, 1])
+        );
+        assert_eq!(
+            state.calls[1],
+            (syscall::SyscallNumber::MemoryObjectResize, vec![7, 4097])
+        );
+        assert_eq!(
+            state.calls[2],
+            (syscall::SyscallNumber::MemoryObjectResize, vec![7, 0])
+        );
+    });
+    drop(object);
+    STATE.with(|state| {
+        assert_eq!(
+            state.borrow().calls.last().unwrap().0,
+            syscall::SyscallNumber::HandleClose
+        )
     });
 }
 

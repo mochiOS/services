@@ -38,7 +38,7 @@ static uint64_t map(uint64_t handle, uint64_t size, uint64_t access, uint64_t of
 static int probe(void) {
     fprintf(stderr, "shared-memory: start\n");
     if ((int64_t)native(MEMORY_OBJECT_CREATE, 0, 0, 0, 0, 0, 0) != -22) return 1;
-    if ((int64_t)native(MEMORY_OBJECT_CREATE, 4096, 1, 0, 0, 0, 0) != -22) return 2;
+    if ((int64_t)native(MEMORY_OBJECT_CREATE, 4096, 2, 0, 0, 0, 0) != -22) return 2;
     uint64_t object = native(MEMORY_OBJECT_CREATE, 8192, 0, 0, 0, 0, 0);
     if ((int64_t)object < 0) return 3;
     if (native(MEMORY_OBJECT_LENGTH, object, 0, 0, 0, 0, 0) != 8192) return 35;
