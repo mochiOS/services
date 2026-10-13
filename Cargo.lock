@@ -394,7 +394,7 @@ version = "0.1.0"
 dependencies = [
  "mochi-user-platform",
  "mochi-user-syscall",
- "mochios-viewkit-gpu-protocol",
+ "mochios-viewkit-gpu-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
 ]
 
 [[package]]
@@ -671,7 +671,7 @@ version = "0.1.0"
 dependencies = [
  "mochi-user-platform",
  "mochi-user-syscall",
- "mochios-viewkit-gpu-protocol",
+ "mochios-viewkit-gpu-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
  "mochios-virtio-gpu-protocol",
  "plugkit",
 ]
@@ -1734,6 +1734,10 @@ source = "git+https://github.com/mochiOS/syscalls#38b10ca1d8b95d8ad638e24a2f83ad
 [[package]]
 name = "mochios-viewkit-gpu-protocol"
 version = "0.1.0"
+
+[[package]]
+name = "mochios-viewkit-gpu-protocol"
+version = "0.1.0"
 source = "git+https://github.com/mochiOS/syscalls#38b10ca1d8b95d8ad638e24a2f83adae6aa17034"
 
 [[package]]
@@ -2492,6 +2496,7 @@ dependencies = [
  "mochios-posix-protocol",
  "mochios-signature-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
  "mochios-user-protocol 0.1.0",
+ "mochios-viewkit-gpu-protocol 0.1.0",
  "mochios-workspace-protocol",
  "sha2",
 ]
@@ -3614,7 +3619,7 @@ dependencies = [
  "image",
  "mochi-user-platform",
  "mochi-user-syscall",
- "mochios-viewkit-gpu-protocol",
+ "mochios-viewkit-gpu-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
  "pollster",
  "raw-window-handle",
  "resvg",

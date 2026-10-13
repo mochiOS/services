@@ -10,6 +10,52 @@ mod compositor_frame_buffer;
 mod compositor_received_buffer;
 #[path = "../../display/src/shared_buffer.rs"]
 mod display_shared_buffer;
+#[path = "../../../libraries/viewkit/src/platform/mochios/buffer.rs"]
+mod viewkit_buffer;
+
+const PAGE_SIZE: usize = 4096;
+const PIXEL_FORMAT_ARGB8888_PREMULTIPLIED: u32 = 2;
+
+#[derive(Debug, PartialEq, Eq)]
+enum MochiOsBackendError {
+    ArithmeticOverflow,
+    InvalidWindowSize,
+    InvalidReply,
+    Syscall(u64),
+}
+
+#[derive(Clone, Copy)]
+struct Color {
+    red: u8,
+    green: u8,
+    blue: u8,
+}
+
+// Only the tiny-skia input interface is simulated; buffer ownership, syscalls,
+// wire encoding and the actual ViewKit copy implementation are under test.
+struct Pixmap {
+    width: u32,
+    height: u32,
+    bytes: Vec<u8>,
+}
+impl Pixmap {
+    fn width(&self) -> u32 {
+        self.width
+    }
+    fn height(&self) -> u32 {
+        self.height
+    }
+    fn data(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+mod connection {
+    pub(super) fn syscall_result<T>(
+        result: super::syscall::SysResult<T>,
+    ) -> Result<T, super::MochiOsBackendError> {
+        result.map_err(|error| super::MochiOsBackendError::Syscall(error.errno().unwrap_or(5)))
+    }
+}
 
 use memory_object::MemoryObject;
 use std::cell::RefCell;
@@ -24,12 +70,133 @@ struct State {
     fail_length: bool,
     fail_send: bool,
     extra_rights: u64,
+    map_address: Option<u64>,
     offers: Vec<(u64, Vec<u8>, mnu_abi::IpcObjectHandles)>,
 }
 thread_local! { static STATE: RefCell<State> = RefCell::new(State::default()); }
 
 fn reset() {
     STATE.with(|state| *state.borrow_mut() = State::default());
+}
+
+#[test]
+fn viewkit_buffer_owns_mapping_and_retries_readonly_scene_offers() {
+    reset();
+    let mut bytes = vec![0u8; 4096];
+    STATE.with(|state| state.borrow_mut().map_address = Some(bytes.as_mut_ptr() as u64));
+    let mut buffer = viewkit_buffer::SharedBuffer::new(16, 16).unwrap();
+    assert!(!buffer.is_attached());
+    buffer.mark_attached();
+    assert!(buffer.is_attached());
+    STATE.with(|state| state.borrow_mut().fail_send = true);
+    assert_eq!(
+        buffer.send_scene_to(9, &[1, 2, 3]),
+        Err(MochiOsBackendError::Syscall(11))
+    );
+    STATE.with(|state| state.borrow_mut().fail_send = false);
+    buffer.send_scene_to(9, &[4, 5, 6]).unwrap();
+    buffer.send_scene_to(9, &[7, 8, 9]).unwrap();
+    assert_eq!(&bytes[..3], &[7, 8, 9]);
+    buffer.send_scene_to(10, &[1, 2, 3]).unwrap();
+    STATE.with(|state| {
+        let state = state.borrow();
+        assert_eq!(state.offers.len(), 2);
+        for (_, wire, handles) in &state.offers {
+            assert_eq!(
+                memory_object::ReadOnlyOffer::decode(wire).unwrap().length,
+                4096
+            );
+            assert_eq!(
+                handles.handles[0].rights,
+                memory_object::READONLY_BUFFER_RIGHTS
+            );
+        }
+    });
+    drop(buffer);
+    STATE.with(|state| {
+        let state = state.borrow();
+        assert_eq!(
+            state
+                .calls
+                .iter()
+                .filter(|call| call.0 == syscall::SyscallNumber::MemoryUnmap)
+                .count(),
+            1
+        );
+        assert_eq!(
+            state
+                .calls
+                .iter()
+                .filter(|call| call.0 == syscall::SyscallNumber::HandleClose)
+                .count(),
+            1
+        );
+    });
+}
+
+#[test]
+fn viewkit_pixmap_copy_is_full_for_new_endpoint_and_partial_after_offer() {
+    reset();
+    let mut bytes = vec![0u8; 4096];
+    STATE.with(|state| state.borrow_mut().map_address = Some(bytes.as_mut_ptr() as u64));
+    let mut buffer = viewkit_buffer::SharedBuffer::new(2, 1).unwrap();
+    let mut pixmap = Pixmap {
+        width: 2,
+        height: 1,
+        bytes: vec![10, 20, 30, 255, 40, 50, 60, 255],
+    };
+    let background = Color {
+        red: 0,
+        green: 0,
+        blue: 0,
+    };
+    let dirty = viewkit_buffer::PhysicalDirtyRect {
+        x: 0,
+        y: 0,
+        width: 1,
+        height: 1,
+    };
+    buffer
+        .send_pixmap_to(9, &pixmap, background, dirty, 2)
+        .unwrap();
+    assert_eq!(&bytes[..8], &[30, 20, 10, 255, 60, 50, 40, 255]);
+    pixmap.bytes.fill(255);
+    buffer
+        .send_pixmap_to(9, &pixmap, background, dirty, 2)
+        .unwrap();
+    assert_eq!(&bytes[..8], &[255, 255, 255, 255, 60, 50, 40, 255]);
+    buffer
+        .send_pixmap_to(10, &pixmap, background, dirty, 2)
+        .unwrap();
+    assert_eq!(&bytes[..8], &[255; 8]);
+    STATE.with(|state| assert_eq!(state.borrow().offers.len(), 2));
+}
+
+#[test]
+fn viewkit_buffer_rejects_overflow_and_failed_map_closes_new_object() {
+    reset();
+    assert!(matches!(
+        viewkit_buffer::SharedBuffer::new(usize::MAX, 2),
+        Err(MochiOsBackendError::ArithmeticOverflow)
+    ));
+    STATE.with(|state| state.borrow_mut().fail_map = true);
+    assert!(matches!(
+        viewkit_buffer::SharedBuffer::new(1, 1),
+        Err(MochiOsBackendError::Syscall(13))
+    ));
+    STATE.with(|state| {
+        let state = state.borrow();
+        assert!(
+            !state
+                .calls
+                .iter()
+                .any(|call| call.0 == syscall::SyscallNumber::MemoryUnmap)
+        );
+        assert_eq!(
+            state.calls.last().unwrap().0,
+            syscall::SyscallNumber::HandleClose
+        );
+    });
 }
 
 #[test]
@@ -274,7 +441,10 @@ fn native_compositor_gate_uses_current_ipc_abi() {
         ("MEMORY_MAP", mnu_abi::SyscallNumber::MemoryMap),
         ("MEMORY_UNMAP", mnu_abi::SyscallNumber::MemoryUnmap),
         ("HANDLE_CLOSE", mnu_abi::SyscallNumber::HandleClose),
-        ("IPC_SEND_HANDLES", mnu_abi::SyscallNumber::IpcSendObjectHandles),
+        (
+            "IPC_SEND_HANDLES",
+            mnu_abi::SyscallNumber::IpcSendObjectHandles,
+        ),
         ("MEMORY_CREATE", mnu_abi::SyscallNumber::MemoryObjectCreate),
     ] {
         assert!(source.contains(&format!("{name} = {}", number as u64)));
@@ -297,7 +467,7 @@ mod syscall {
                 }
                 SyscallNumber::MemoryObjectCreate => Ok(7),
                 SyscallNumber::MemoryMap if state.fail_map => Err(SysError::from_raw(-13)),
-                SyscallNumber::MemoryMap => Ok(0x10000),
+                SyscallNumber::MemoryMap => Ok(state.map_address.unwrap_or(0x10000)),
                 SyscallNumber::MemoryObjectLength if state.fail_length => {
                     Err(SysError::from_raw(-22))
                 }

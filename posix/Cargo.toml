@@ -16,6 +16,7 @@ mochios-posix-protocol = { git = "https://github.com/mochiOS/syscalls", package 
 mochios-posix-client = { git = "https://github.com/mochiOS/syscalls", package = "mochios-posix-client", default-features = false }
 
 [dev-dependencies]
+mochios-viewkit-gpu-protocol = { path = "../../user/crates/viewkit-gpu-protocol" }
 mochios-net-device-protocol = { path = "../../user/crates/net-device-protocol" }
 mochios-user-protocol = { path = "../../user/crates/user-protocol" }
 mochios-workspace-protocol = { path = "../../user/crates/workspace-protocol" }
