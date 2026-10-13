@@ -8,7 +8,7 @@ pub(crate) struct SharedBuffer {
     sender: u64,
     address: u64,
     length: u64,
-    _mapping: Option<MemoryMapping>,
+    _mapping: MemoryMapping,
 }
 
 impl SharedBuffer {
@@ -38,22 +38,13 @@ impl SharedBuffer {
                 sender,
                 address: mapping.address(),
                 length: offer.length,
-                _mapping: Some(mapping),
+                _mapping: mapping,
             })
         })();
         close_attachments(handles);
         result
     }
 
-    // Retained solely until legacy producers have been migrated to offers.
-    pub(crate) fn legacy(sender: u64, address: u64, length: u64) -> Self {
-        Self {
-            sender,
-            address,
-            length,
-            _mapping: None,
-        }
-    }
 
     pub(crate) fn view(&self) -> (u64, u64, u64) {
         (self.sender, self.address, self.length)

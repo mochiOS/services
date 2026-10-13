@@ -675,22 +675,6 @@ pub(crate) fn run() -> ! {
             let _ = platform::ipc::reply(sender, &reply);
             continue;
         }
-        if len == 16 {
-            let client =
-                client_id_for_sender(&mut state.clients, sender, &mut state.next_client_id);
-            if client == ClientId(0) {
-                continue;
-            }
-            let mapped_addr = u64::from_le_bytes([
-                buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
-            ]);
-            let total = u64::from_le_bytes([
-                buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
-            ]);
-            if handle_shared_buffer(&mut state.surfaces, client, mapped_addr, total, None) {
-                continue;
-            }
-        }
         if crate::input::is_input_message(msg, input_sender) {
             let event = unsafe {
                 core::ptr::read_unaligned(buf.as_ptr().cast::<platform::input::InputEvent>())

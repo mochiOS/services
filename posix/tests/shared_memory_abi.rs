@@ -14,7 +14,6 @@ fn native_probe_uses_the_current_generic_handle_and_memory_abi() {
         ("HANDLE_CLOSE", SyscallNumber::HandleClose),
         ("HANDLE_DUPLICATE", SyscallNumber::HandleDuplicate),
         ("IPC_CREATE", SyscallNumber::IpcCreateHandle),
-        ("IPC_SEND_PAGES", SyscallNumber::IpcSendPages),
         ("IPC_SEND_HANDLES", SyscallNumber::IpcSendObjectHandles),
         ("IPC_RECV_HANDLES", SyscallNumber::IpcRecvObjectHandles),
         ("IPC_CALL_HANDLES", SyscallNumber::IpcCallObjectHandles),

@@ -75,12 +75,6 @@ pub(crate) fn run() -> ! {
             reply_status(sender, errno_status(EINVAL));
             continue;
         }
-        if let Some((address, size)) = shared_buffer_notification(request) {
-            if present_owner == 0 || sender == present_owner {
-                shared_buffer = Some(SharedBuffer::legacy(sender, address, size));
-            }
-            continue;
-        }
         match read_u32(request, 0).unwrap_or(0) {
             OP_GET_INFO => reply_info(sender, backend.geometry()),
             OP_GET_RENDERER_CAPS => reply_caps(sender, backend.renderer_caps()),

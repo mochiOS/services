@@ -826,10 +826,6 @@ fn display_receiver_retains_mapping_until_buffer_replacement_and_drains_bad_atta
             );
         });
     }
-    assert_eq!(
-        SharedBuffer::legacy(9, 0x20000, 8192).view(),
-        (9, 0x20000, 8192)
-    );
 }
 
 #[test]

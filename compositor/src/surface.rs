@@ -876,6 +876,9 @@ pub(crate) fn handle_shared_buffer(
     total: u64,
     mapping: Option<ReceivedBuffer>,
 ) -> bool {
+    if mapping.as_ref().is_none_or(|view| view.view() != (mapped_addr, total)) {
+        return false;
+    }
     let Some(index) = surfaces
         .iter()
         .position(|surface| surface.live && surface.owner == client && surface.awaiting_buffer)

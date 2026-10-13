@@ -66,6 +66,17 @@ fn rpc(endpoint: u64, request: &[u8]) -> Result<[u8; 16], String> {
 }
 
 fn probe() -> Result<u64, String> {
+    // This numeric value is deliberately not an ABI enum entry or reservation.
+    // A removed operation must take the generic unknown-syscall path.
+    let mut unknown = 550u64;
+    unsafe {
+        core::arch::asm!("syscall", inout("rax") unknown, in("rdi") 0u64,
+            in("rsi") u64::MAX, in("rdx") 1u64, in("r10") 0u64,
+            lateout("rcx") _, lateout("r11") _, options(nostack));
+    }
+    if unknown as i64 != -38 {
+        return Err(format!("removed syscall returned {unknown:#x}"));
+    }
     let stage_endpoint = ipc::create().map_err(|error| format!("stage endpoint {error:?}"))?;
     let stage = linux_stage_buffer::SharedStageBuffer::new(stage_endpoint, 4096)
         .map_err(|error| format!("stage source {error:?}"))?;
@@ -193,6 +204,15 @@ fn probe() -> Result<u64, String> {
         // Toplevel surfaces use flattened XRGB, as the production backend does.
         attach[24..28].copy_from_slice(&1u32.to_le_bytes());
         rpc(compositor, &attach)?;
+        let mut forged = [0u8; 16];
+        forged[..8].copy_from_slice(&0x710000000000u64.to_le_bytes());
+        forged[8..].copy_from_slice(&4096u64.to_le_bytes());
+        let mut rejected = [0u8; 16];
+        ipc::call(compositor, &forged, &mut rejected)
+            .map_err(|error| format!("forged address reply {error:?}"))?;
+        if u32::from_le_bytes(rejected[..4].try_into().unwrap()) == 0 {
+            return Err("raw address offer accepted".into());
+        }
         let mut pixmap = Pixmap::new(16, 16).ok_or("pixmap allocation")?;
         for pixel in pixmap.data_mut().chunks_exact_mut(4) {
             pixel.copy_from_slice(&[(color >> 16) as u8, (color >> 8) as u8, color as u8, 255]);
@@ -256,7 +276,7 @@ fn probe() -> Result<u64, String> {
 fn main() {
     let result = probe();
     let line = format!(
-        "viewkit-buffer: {} ViewKit + Linux + staging + Binder + coreutils RAM offers, sender drop, 3 commits, destroy {result:?}\n",
+        "viewkit-buffer: {} removed page ABI, forged address rejection, RAM offers, sender drop, 3 commits, destroy {result:?}\n",
         if result.is_ok() { "PASS" } else { "FAIL" }
     );
     let _ = syscall::call2(

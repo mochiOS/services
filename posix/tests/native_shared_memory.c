@@ -8,8 +8,7 @@
 enum { MEMORY_MAP = 582, MEMORY_UNMAP = 583, MEMORY_PROTECT = 584,
        IPC_REPLY = 589, HANDLE_CLOSE = 626, HANDLE_DUPLICATE = 627,
        IPC_CREATE = 629, IPC_SEND_HANDLES = 630, IPC_RECV_HANDLES = 631,
-       IPC_CALL_HANDLES = 632, MEMORY_OBJECT_CREATE = 671, MEMORY_OBJECT_LENGTH = 672,
-       IPC_SEND_PAGES = 550 };
+       IPC_CALL_HANDLES = 632, MEMORY_OBJECT_CREATE = 671, MEMORY_OBJECT_LENGTH = 672 };
 #define READ 1ULL
 #define WRITE 2ULL
 #define MAP 64ULL
@@ -38,9 +37,6 @@ static uint64_t map(uint64_t handle, uint64_t size, uint64_t access, uint64_t of
 
 static int probe(void) {
     fprintf(stderr, "shared-memory: start\n");
-    uint64_t forged_pages[] = {0x100000, 0xfec00000};
-    if ((int64_t)native(IPC_SEND_PAGES, 0, (uintptr_t)forged_pages, 2, 0, 0, 0) != -22) return 52;
-    if ((int64_t)native(IPC_SEND_PAGES, 0, UINT64_MAX, 1, 0, 0, 0) != -22) return 53;
     if ((int64_t)native(MEMORY_OBJECT_CREATE, 0, 0, 0, 0, 0, 0) != -22) return 1;
     if ((int64_t)native(MEMORY_OBJECT_CREATE, 4096, 1, 0, 0, 0, 0) != -22) return 2;
     uint64_t object = native(MEMORY_OBJECT_CREATE, 8192, 0, 0, 0, 0, 0);
