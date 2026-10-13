@@ -134,6 +134,60 @@ fn retained_physical_storage_outlives_the_object_and_is_released_once() {
 }
 
 #[test]
+fn empty_byte_object_grows_lazily_and_keeps_its_original_ceiling() {
+    let memory = shared_memory::SharedMemory::new_resizable(0, 2).unwrap();
+    assert_eq!(memory.length(), 0);
+    assert_eq!(memory.prepare_page(0), Err(syscall::EINVAL));
+    assert_eq!(memory.read_at(0, &mut [1]), Ok(0));
+    assert_eq!(memory.write_at(0, &[1]), Err(syscall::EINVAL));
+    memory
+        .resize_with(1, |_, _| panic!("no old mapping"))
+        .unwrap();
+    assert_eq!(memory.length(), 1);
+    assert_eq!(memory.write_at(0, &[17]), Ok(1));
+    let (frame, _) = memory.prepare_page(0).unwrap();
+    assert_eq!(memory.prepare_page(1), Err(syscall::EINVAL));
+    memory
+        .resize_with(8192, |start, end| {
+            assert_eq!((start, end), (0, 4096));
+            Ok(())
+        })
+        .unwrap();
+    let mut bytes = [1; 2];
+    assert_eq!(memory.read_at(0, &mut bytes), Ok(2));
+    assert_eq!(bytes, [17, 0]);
+    let epoch = memory.generation();
+    assert_eq!(
+        memory.resize_with(8193, |_, _| panic!("quota before revoke")),
+        Err(syscall::ENOMEM)
+    );
+    assert_eq!(memory.length(), 8192);
+    assert_eq!(memory.with_generation(epoch, || Ok(())), Ok(()));
+    paging::release_user_frame(frame);
+}
+
+#[test]
+fn byte_creation_checks_rounded_capacity_without_rounding_logical_length() {
+    let memory = shared_memory::SharedMemory::new_resizable(4097, 2).unwrap();
+    assert_eq!(memory.length(), 4097);
+    assert!(memory.contains_range(4096, 1));
+    assert!(!memory.contains_range(4096, 2));
+    assert_eq!(memory.write_at(4096, &[23]), Ok(1));
+    let mut bytes = [0; 2];
+    assert_eq!(memory.read_at(4096, &mut bytes), Ok(1));
+    assert_eq!(bytes[0], 23);
+    assert!(matches!(
+        shared_memory::SharedMemory::new_resizable(4097, 1),
+        Err(syscall::ENOMEM)
+    ));
+    assert!(matches!(
+        shared_memory::SharedMemory::new_resizable(u64::MAX, u64::MAX),
+        Err(syscall::ENOMEM)
+    ));
+    assert!(shared_memory::SharedMemory::new_resizable(0, 0).is_ok());
+}
+
+#[test]
 fn byte_resize_preserves_prefix_and_clears_padding_before_growth() {
     let memory = shared_memory::SharedMemory::new(8192, 2).unwrap();
     memory.write_at(4999, &[7, 8, 9]).unwrap();
