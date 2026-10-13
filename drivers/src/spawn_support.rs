@@ -5,23 +5,6 @@ use mochi_user_platform as platform;
 
 const CAPABILITY_SERVICE_NAME: &str = "capability.service";
 
-pub(crate) fn encode_spawn_args(items: &[String]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(512);
-    out.resize(512, 0);
-    let mut cursor = 0usize;
-    for item in items {
-        let bytes = item.as_bytes();
-        if cursor + bytes.len() + 2 > out.len() {
-            break;
-        }
-        out[cursor..cursor + bytes.len()].copy_from_slice(bytes);
-        cursor += bytes.len();
-        out[cursor] = 0;
-        cursor += 1;
-    }
-    out
-}
-
 pub(crate) fn sys_error(errno: u64) -> mochi_user_syscall::SysError {
     mochi_user_syscall::SysError::from_raw(-(errno as i64))
 }

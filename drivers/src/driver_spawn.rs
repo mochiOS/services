@@ -3,7 +3,8 @@ use alloc::vec::Vec;
 
 use mochi_user_platform as platform;
 
-use crate::spawn_support::{encode_spawn_args, resolve_execution_security, sys_error};
+use crate::launch_arguments::encode_spawn_args;
+use crate::spawn_support::{resolve_execution_security, sys_error};
 
 fn spawn_bundle(
     entry_path: &str,
@@ -24,7 +25,8 @@ fn spawn_bundle(
     if logger_endpoint != 0 {
         spawn_args.push(logger_endpoint.to_string());
     }
-    let args_nul = encode_spawn_args(&spawn_args);
+    let args_nul = encode_spawn_args(&spawn_args)
+        .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
     platform::service::spawn_manifest(
         entry_path,
         execution_class,
