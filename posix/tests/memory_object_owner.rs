@@ -1106,6 +1106,16 @@ fn resizable_owner_requests_explicit_control_creation_and_propagates_resize_erro
 }
 
 #[test]
+fn raw_namespace_ownership_transfer_does_not_close_the_returned_reference() {
+    reset();
+    let raw = MemoryObject::create_resizable(0).unwrap().into_handle();
+    assert_eq!(raw, 7);
+    STATE.with(|state| assert_eq!(state.borrow().calls.len(), 1));
+    handle::close(raw).unwrap();
+    STATE.with(|state| assert_eq!(state.borrow().calls.last().unwrap().0, syscall::SyscallNumber::HandleClose));
+}
+
+#[test]
 fn explicit_release_failures_return_ownership_and_success_does_not_drop_twice() {
     reset();
     let object = MemoryObject::create(4096).unwrap();

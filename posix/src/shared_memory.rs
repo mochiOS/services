@@ -59,6 +59,13 @@ pub trait Backing<H> {
     fn truncate_zero(&mut self, backing: H) -> Result<(), i32>;
 }
 
+/// Creates independent reply references. A service-local namespace Handle
+/// must never be handed out or closed as a temporary response attachment.
+pub trait Delegation<H>: Backing<H> {
+    fn duplicate(&mut self, backing: H, rights: u64) -> Result<H, i32>;
+    fn close(&mut self, backing: H) -> Result<(), i32>;
+}
+
 fn validate_name(name: &[u8]) -> Result<(), i32> {
     if name.first() != Some(&b'/')
         || name.len() < 2
@@ -79,13 +86,90 @@ fn rights(access: Access) -> u64 {
         | mnu_abi::HANDLE_RIGHT_TRANSFER;
     common
         | if access == Access::ReadWrite {
-            mnu_abi::HANDLE_RIGHT_WRITE
+            mnu_abi::HANDLE_RIGHT_WRITE | mnu_abi::HANDLE_RIGHT_CONTROL
         } else {
             0
         }
 }
 
 impl<H: Copy> PosixService<H> {
+    pub fn handle_shared_memory<B: Delegation<H>>(
+        &mut self,
+        peer: PeerIdentity,
+        header: mochios_posix_protocol::Header,
+        payload: &[u8],
+        attachments: &[super::AttachedObject<H>],
+        backend: &mut B,
+    ) -> super::ObjectResponse<H> {
+        use mochios_posix_protocol::{self as protocol, shared_memory as wire};
+        let outcome = (|| {
+            if header.flags != 0
+                || header.status != 0
+                || header.payload_len as usize != payload.len()
+                || !attachments.is_empty()
+            {
+                return Err(-22);
+            }
+            match header.opcode {
+                protocol::OP_SHARED_MEMORY_OPEN => {
+                    let request = wire::decode_open(payload).map_err(|_| -22)?;
+                    let opened = self.open_shared_memory(
+                        peer,
+                        request.name,
+                        Open {
+                            access: if request.options & wire::READ_WRITE != 0 {
+                                Access::ReadWrite
+                            } else {
+                                Access::ReadOnly
+                            },
+                            create: request.options & wire::CREATE != 0,
+                            exclusive: request.options & wire::EXCLUSIVE != 0,
+                            truncate: request.options & wire::TRUNCATE != 0,
+                            mode: request.mode,
+                        },
+                        backend,
+                    )?;
+                    let handle = match backend.duplicate(opened.backing, opened.rights) {
+                        Ok(handle) => handle,
+                        Err(error) => {
+                            if opened.created {
+                                // If release fails, keep the owning namespace
+                                // reference rather than losing a live resource.
+                                backend.close(opened.backing)?;
+                                self.shared_memory.names.remove(request.name);
+                            }
+                            return Err(error);
+                        }
+                    };
+                    Ok(vec![super::OpenedObject {
+                        handle,
+                        rights: opened.rights,
+                    }])
+                }
+                protocol::OP_SHARED_MEMORY_UNLINK => {
+                    let name = wire::decode_name(payload).map_err(|_| -22)?;
+                    // Check permission before releasing the owning reference.
+                    // Serialize through the same service lock as open/truncate.
+                    let backing = self.shared_memory_unlink_target(peer, name)?;
+                    backend.close(backing)?;
+                    self.shared_memory.names.remove(name);
+                    Ok(Vec::new())
+                }
+                _ => Err(protocol::STATUS_ENOSYS),
+            }
+        })();
+        match outcome {
+            Ok(handles) => super::ObjectResponse {
+                response: super::status_response(header.request_id, 0),
+                handles,
+            },
+            Err(error) => super::ObjectResponse {
+                response: super::status_response(header.request_id, error),
+                handles: Vec::new(),
+            },
+        }
+    }
+
     pub fn open_shared_memory<B: Backing<H>>(
         &mut self,
         peer: PeerIdentity,
@@ -163,6 +247,13 @@ impl<H: Copy> PosixService<H> {
     }
 
     pub fn unlink_shared_memory(&mut self, peer: PeerIdentity, name: &[u8]) -> Result<H, i32> {
+        self.shared_memory_unlink_target(peer, name)?;
+        // Caller closes only this namespace reference. Previously delegated
+        // references and mappings keep the old object alive independently.
+        Ok(self.shared_memory.names.remove(name).unwrap().backing)
+    }
+
+    fn shared_memory_unlink_target(&self, peer: PeerIdentity, name: &[u8]) -> Result<H, i32> {
         let session = self.shared_memory_session(peer)?;
         validate_name(name)?;
         let entry = self.shared_memory.names.get(name).ok_or(-2)?;
@@ -171,9 +262,7 @@ impl<H: Copy> PosixService<H> {
         if session.effective_uid != 0 && session.effective_uid != entry.owner {
             return Err(-13);
         }
-        // Caller closes only this namespace reference. Previously delegated
-        // references and mappings keep the old object alive independently.
-        Ok(self.shared_memory.names.remove(name).unwrap().backing)
+        Ok(entry.backing)
     }
 
     fn shared_memory_session(&self, peer: PeerIdentity) -> Result<Session, i32> {

@@ -5,6 +5,9 @@ mod process_control;
 mod named_semaphore_native;
 
 #[cfg(target_os = "mochios")]
+mod shared_memory_native;
+
+#[cfg(target_os = "mochios")]
 const PTY_SYNC_MAGIC: [u8; 4] = *b"PTYS";
 
 #[cfg(target_os = "mochios")]
@@ -270,6 +273,12 @@ fn main() {
         }
         let mut retained_handle = None;
         let object_response = match (peer, decoded, attachments_valid) {
+            (Some(peer), Some((header, payload)), true)
+                if matches!(header.opcode, protocol::OP_SHARED_MEMORY_OPEN | protocol::OP_SHARED_MEMORY_UNLINK) =>
+            {
+                Some(service.handle_shared_memory(peer, header, payload, &attachments,
+                    &mut shared_memory_native::NativeBacking))
+            }
             (Some(peer), Some((header, payload)), true)
                 if matches!(header.opcode, protocol::OP_SEMAPHORE_OPEN | protocol::OP_SEMAPHORE_UNLINK) =>
             {
