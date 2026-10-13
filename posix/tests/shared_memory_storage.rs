@@ -235,3 +235,25 @@ fn final_installation_holds_size_and_generation_stable_against_concurrent_resize
     );
     paging::release_user_frame(frame);
 }
+
+#[test]
+fn private_byte_snapshot_is_rejected_after_resize_even_when_size_returns_to_original() {
+    let memory = shared_memory::SharedMemory::new(4096, 1).unwrap();
+    memory.write_at(17, &[0xa7]).unwrap();
+    let generation = memory.generation();
+    let mut snapshot = [0u8; 4096];
+    memory.read_at(0, &mut snapshot).unwrap();
+    assert_eq!(snapshot[17], 0xa7);
+    memory.resize_with(0, |_, _| Ok(())).unwrap();
+    memory.resize_with(4096, |_, _| Ok(())).unwrap();
+    assert_eq!(
+        memory.with_generation(generation, || -> Result<(), u64> {
+            panic!("size equality alone must not authorize stale private bytes")
+        }),
+        Err(syscall::EAGAIN)
+    );
+    let current = memory.generation();
+    memory.read_at(0, &mut snapshot).unwrap();
+    assert_eq!(snapshot[17], 0);
+    assert_eq!(memory.with_generation(current, || Ok(snapshot[17])), Ok(0));
+}

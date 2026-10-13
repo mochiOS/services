@@ -51,9 +51,17 @@ static int probe(void) {
     for (unsigned i = 0; i < 8192; ++i) if (bytes[i] != 0) return 5;
     bytes[4096 + 37] = 0x5b;
     if (((volatile unsigned char *)(uintptr_t)second)[37] != 0x5b) return 6;
+    uint64_t private_map = native(MEMORY_MAP, 0, 8192, READ | WRITE, 0, object, 0);
+    if ((int64_t)private_map < 0) return 39;
+    volatile unsigned char *private_bytes = (volatile unsigned char *)(uintptr_t)private_map;
+    if (private_bytes[4096 + 37] != 0x5b) return 40;
+    private_bytes[4096 + 37] = 0x61;
+    if (bytes[4096 + 37] != 0x5b) return 41;
     if ((int64_t)map(object, 4096, READ, 8192) >= 0) return 7;
     if ((int64_t)map(object, 4096, READ | 4, 0) >= 0) return 8;
     if (native(HANDLE_CLOSE, object, 0, 0, 0, 0, 0) != 0) return 9;
+    if (private_bytes[4096 + 37] != 0x61) return 42;
+    if (native(MEMORY_UNMAP, private_map, 8192, 0, 0, 0, 0) != 0) return 43;
     if (bytes[4096 + 37] != 0x5b) return 10;
     if (native(MEMORY_UNMAP, first, 8192, 0, 0, 0, 0) != 0) return 11;
     if (((volatile unsigned char *)(uintptr_t)second)[37] != 0x5b) return 12;
