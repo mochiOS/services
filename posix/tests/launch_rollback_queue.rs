@@ -3,6 +3,9 @@ extern crate self as mochi_user_platform;
 extern crate self as mochi_user_syscall;
 extern crate self as mochios_posix_client;
 
+#[path = "../../../user/crates/posix-client/src/process_creation.rs"]
+pub mod process_creation;
+
 use std::sync::Mutex;
 
 pub const EIO: u64 = mnu_abi::EIO;

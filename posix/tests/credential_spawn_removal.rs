@@ -46,9 +46,8 @@ fn credentials_are_registered_in_userspace_before_native_session_resume() {
     assert!(native.contains("identity.uid"));
     assert!(native.contains("identity.gid"));
     assert!(native.contains("NativeProcess::create_with_rollback"));
-    let owner = include_str!("../../service-manager/src/native_process.rs");
+    let owner = include_str!("../../../user/crates/posix-client/src/process_creation.rs");
     assert!(
-        owner.find("setup(process.handle)").unwrap()
-            < owner.find("resume_handle(process.handle)").unwrap()
+        owner.find("setup(handle)?").unwrap() < owner.find("resume(handle)?").unwrap()
     );
 }

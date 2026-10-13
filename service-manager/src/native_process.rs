@@ -20,34 +20,27 @@ impl NativeProcess {
         setup: impl FnOnce(platform::handle::Handle) -> Result<(), platform::syscall::SysError>,
         rollback: impl FnOnce(Self),
     ) -> Result<Self, platform::syscall::SysError> {
-        let mut process = Self {
-            handle: platform::process::create_stopped(image, metadata)?,
-            process_id: 0,
+        let (handle, process_id) = mochios_posix_client::process_creation::create_with_rollback(
+            || platform::process::create_stopped(image, metadata),
+            setup,
+            |handle| platform::process::handle_status(handle).map(|status| status.process_id),
+            platform::process::resume_handle,
+            |handle| {
+                let _ = platform::process::terminate_handle(handle, 127);
+            },
+            |handle| {
+                rollback(Self {
+                    handle,
+                    process_id: 0,
+                    tree_exit_confirmed: false,
+                })
+            },
+        )?;
+        Ok(Self {
+            handle,
+            process_id,
             tree_exit_confirmed: false,
-        };
-        if let Err(error) = setup(process.handle) {
-            process.terminate();
-            rollback(process);
-            return Err(error);
-        }
-        // Resolve identity inside the launch transaction, while still stopped.
-        // A status failure after resume would otherwise strand a running child
-        // and its POSIX registration when the caller drops this owner.
-        process.process_id = match platform::process::handle_status(process.handle) {
-            Ok(status) => status.process_id,
-            Err(error) => {
-                process.terminate();
-                rollback(process);
-                return Err(error);
-            }
-        };
-        if let Err(error) = platform::process::resume_handle(process.handle) {
-            // Creation published a stopped task; do not strand it on failure.
-            let _ = platform::process::terminate_handle(process.handle, 127);
-            rollback(process);
-            return Err(error);
-        }
-        Ok(process)
+        })
     }
 
     pub(crate) fn watch_target(&self) -> crate::process_watch::ProcessWatchTarget {
