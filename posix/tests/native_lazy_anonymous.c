@@ -50,6 +50,17 @@ static int check(void) {
     if (!child) { shared[4096] = 42; _exit(0); }
     if (waitpid(child, &status, 0) != child || status || shared[4096] != 42) return 13;
     if (munmap((void *)shared, 8192)) return 14;
+    unsigned char *gap = mmap(NULL, 12288, PROT_READ|PROT_WRITE,
+                              MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+    if (gap == MAP_FAILED) return 16;
+    gap[0] = 31;
+    gap[8192] = 42;
+    if (munmap(gap + 4096, 4096)) return 17;
+    /* The range preflight must reject holes before changing either side. */
+    if (!mprotect(gap, 12288, PROT_NONE)) return 18;
+    gap[0] = 32;
+    gap[8192] = 43;
+    if (munmap(gap, 4096) || munmap(gap + 8192, 4096)) return 19;
     return 0;
 }
 

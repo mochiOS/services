@@ -1,7 +1,73 @@
 #[path = "../../../core/src/task/memory_range.rs"]
 mod native;
 
-use native::{Range, cut};
+use native::{cut, Range};
+
+#[test]
+fn reserved_coverage_skips_large_spans_but_never_bridges_a_hole() {
+    let mut queries = 0;
+    assert!(native::covers_pages(
+        0,
+        1 << 40,
+        |_| {
+            queries += 1;
+            Some(1 << 40)
+        },
+        |_| panic!("reservation coverage must not walk resident leaves")
+    ));
+    assert_eq!(queries, 1);
+    assert!(!native::covers_pages(
+        0,
+        16384,
+        |page| match page {
+            0 => Some(4096),
+            12288 => Some(16384),
+            _ => None,
+        },
+        |page| page == 4096
+    ));
+    assert!(native::covers_pages(
+        0,
+        16384,
+        |page| match page {
+            0 => Some(4096),
+            12288 => Some(16384),
+            _ => None,
+        },
+        |page| page == 4096 || page == 8192
+    ));
+    assert!(!native::covers_pages(4096, 8192, |_| Some(8191), |_| false));
+    assert!(!native::covers_pages(0, 4096, |_| Some(0), |_| false));
+    assert!(!native::covers_pages(1, 4096, |_| panic!(), |_| panic!()));
+    assert!(native::covers_pages(4096, 4096, |_| panic!(), |_| panic!()));
+}
+
+#[test]
+fn reservation_jump_matches_the_original_per_page_coverage_rule() {
+    for low in 0..6 {
+        for high in low + 1..=6 {
+            for mask in 0..64u64 {
+                for start in 0..=6 {
+                    for end in start..=6 {
+                        let region = |page: u64| {
+                            (low * 4096 <= page && page < high * 4096).then_some(high * 4096)
+                        };
+                        let retained = |page: u64| mask & (1u64 << (page / 4096)) != 0;
+                        let original = (start..end).all(|page| {
+                            retained(page * 4096)
+                                || region(page * 4096)
+                                    .is_some_and(|limit| limit >= (page + 1) * 4096)
+                        });
+                        assert_eq!(
+                            native::covers_pages(start * 4096, end * 4096, region, retained),
+                            original
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
 
 #[test]
 fn every_interval_cut_preserves_exact_coverage_without_overlap() {
