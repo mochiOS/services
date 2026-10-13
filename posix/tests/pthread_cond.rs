@@ -157,8 +157,17 @@ pub struct pthread_mutex_t {
 pub struct pthread_mutexattr_t {
 pub struct pthread_cond_t {
 pub struct pthread_condattr_t {
+pub struct sem_t {
+pub struct pthread_rwlock_t {
+pub struct pthread_rwlockattr_t {
 pub const PTHREAD_MUTEX_INITIALIZER: pthread_mutex_t =
 pub const PTHREAD_COND_INITIALIZER: pthread_cond_t =
+pub const PTHREAD_RWLOCK_INITIALIZER: pthread_rwlock_t =
+pub const __SIZEOF_PTHREAD_RWLOCK_T: usize = 56;
+pub const __SIZEOF_PTHREAD_RWLOCK_T: usize = 32;
+pub const __SIZEOF_PTHREAD_RWLOCKATTR_T: usize = 4;
+pub const __SIZEOF_PTHREAD_RWLOCKATTR_T: usize = 12;
+pub const __SIZEOF_PTHREAD_BARRIER_T: usize = 4;
 pub const __SIZEOF_PTHREAD_MUTEX_T: usize = 40;
 pub const __SIZEOF_PTHREAD_MUTEXATTR_T: usize = 4;
 pub const __SIZEOF_PTHREAD_MUTEXATTR_T: usize = 4;
@@ -203,11 +212,15 @@ pub const __SIZEOF_PTHREAD_CONDATTR_T: usize = 4;
     }
     assert!(output.contains("{ 24 } else { 48 }"));
     assert!(output.contains("{ 32 } else { 40 }"));
+    assert!(output.contains("{ 4 } else { 56 }"));
+    assert!(output.contains("{ 4 } else { 32 }"));
+    assert!(output.contains("{ 8 } else { 4 }"));
+    assert!(output.contains("{ 8 } else { 12 }"));
     assert_eq!(
         output
             .matches("#[cfg(not(target_os = \"mochios\"))]")
             .count(),
-        7
+        11
     ); // Types, initializers, pthread_t.
     std::fs::remove_dir_all(directory).unwrap();
 }
