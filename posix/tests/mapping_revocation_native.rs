@@ -98,6 +98,21 @@ mod tlb_shootdown {
     }
 }
 
+mod detached_roots {
+    pub struct Root {
+        pub table: u64,
+        pub published: bool,
+    }
+    impl Root {
+        pub fn table(&self) -> u64 {
+            self.table
+        }
+        pub fn published(&self) -> bool {
+            self.published
+        }
+    }
+}
+
 #[test]
 fn actual_native_adapter_checks_owned_roots_restores_on_sync_failure_and_releases_only_after_ack() {
     use mapping_revocation::{revoke, Backend, Error};
@@ -140,4 +155,19 @@ fn actual_native_adapter_checks_owned_roots_restores_on_sync_failure_and_release
     assert!(matches!(device.suspend(8192, 4096), Err(syscall::EFAULT)));
     revoke([(4096, 4096, 8192)], &mut device).unwrap();
     assert_eq!(state().lock().unwrap().released, 2);
+    let roots = [
+        std::sync::Arc::new(detached_roots::Root {
+            table: 12288,
+            published: false,
+        }),
+        std::sync::Arc::new(detached_roots::Root {
+            table: 16384,
+            published: true,
+        }),
+    ];
+    let mut staging = unsafe { Native::with_detached(&table, &roots) };
+    assert!(matches!(staging.suspend(16384, 4096), Err(syscall::EFAULT)));
+    state().lock().unwrap().entries.insert((12288, 4096), 0x105);
+    revoke([(12288, 4096, 8192)], &mut staging).unwrap();
+    assert_eq!(state().lock().unwrap().released, 3);
 }

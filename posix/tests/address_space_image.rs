@@ -7,7 +7,7 @@ mod interrupt {
     pub mod spinlock {
         pub struct SpinLock<T>(std::sync::Mutex<T>);
         impl<T> SpinLock<T> {
-            pub fn new(value: T) -> Self {
+            pub const fn new(value: T) -> Self {
                 Self(std::sync::Mutex::new(value))
             }
             pub fn lock(&self) -> std::sync::MutexGuard<'_, T> {
@@ -46,11 +46,32 @@ mod task {
         pub backing: Arc<()>,
     }
     impl MemoryRegion {
+        pub fn start(&self) -> u64 {
+            self.start
+        }
+        pub fn len(&self) -> u64 {
+            4096
+        }
+        pub fn backing(&self) -> &Self {
+            self
+        }
+        pub fn file_offset(&self) -> u64 {
+            0
+        }
+        pub fn file_object(&self) -> Option<&VmObject> {
+            None
+        }
         pub fn contains(&self, address: u64) -> bool {
             address == self.start
         }
         pub fn is_shared(&self) -> bool {
             self.shared
+        }
+    }
+    pub struct VmObject;
+    impl VmObject {
+        pub fn memory_identity(&self) -> Option<u64> {
+            None
         }
     }
     pub struct DmaBuffer {
@@ -73,8 +94,12 @@ mod task {
         pub dma: Vec<DmaBuffer>,
         pub mmio: bool,
         pub bounds: [u64; 5],
+        pub root: Option<Arc<crate::detached_roots::Root>>,
     }
     impl Process {
+        pub fn set_pending_image_root(&mut self, root: Arc<crate::detached_roots::Root>) {
+            self.root = Some(root);
+        }
         pub fn has_mmio_mappings(&self) -> bool {
             self.mmio
         }
@@ -154,7 +179,11 @@ mod paging {
         STATE.with(|state| {
             let mut state = state.borrow_mut();
             state.calls += 1;
-            if state.failed { Err(()) } else { Ok(0xcafe) }
+            if state.failed {
+                Err(())
+            } else {
+                Ok(0xcafe)
+            }
         })
     }
     pub fn destroy_user_page_table(table: u64) -> Result<(), ()> {
@@ -171,6 +200,8 @@ mod paging {
 
 #[path = "../../../core/src/mem/address_space.rs"]
 mod address_space;
+#[path = "../../../core/src/mem/detached_roots.rs"]
+mod detached_roots;
 
 fn source() -> task::Process {
     paging::STATE.with(|state| *state.borrow_mut() = paging::Backend::default());
@@ -195,6 +226,7 @@ fn source() -> task::Process {
         }],
         mmio: false,
         bounds: [1, 2, 3, 4, 5],
+        root: None,
     }
 }
 
