@@ -68,14 +68,15 @@ fn rpc(endpoint: u64, request: &[u8]) -> Result<[u8; 16], String> {
 fn probe() -> Result<u64, String> {
     // This numeric value is deliberately not an ABI enum entry or reservation.
     // A removed operation must take the generic unknown-syscall path.
-    let mut unknown = 550u64;
-    unsafe {
-        core::arch::asm!("syscall", inout("rax") unknown, in("rdi") 0u64,
+    for mut unknown in [548u64, 549, 550] {
+        unsafe {
+            core::arch::asm!("syscall", inout("rax") unknown, in("rdi") 0u64,
             in("rsi") u64::MAX, in("rdx") 1u64, in("r10") 0u64,
             lateout("rcx") _, lateout("r11") _, options(nostack));
-    }
-    if unknown as i64 != -38 {
-        return Err(format!("removed syscall returned {unknown:#x}"));
+        }
+        if unknown as i64 != -38 {
+            return Err(format!("removed syscall returned {unknown:#x}"));
+        }
     }
     let stage_endpoint = ipc::create().map_err(|error| format!("stage endpoint {error:?}"))?;
     let stage = linux_stage_buffer::SharedStageBuffer::new(stage_endpoint, 4096)

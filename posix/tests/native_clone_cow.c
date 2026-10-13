@@ -10,6 +10,16 @@
 extern int native_thread_register_probe(void);
 
 static volatile unsigned char private_value = 0x11;
+static int64_t native6(uint64_t number, uint64_t a, uint64_t b, uint64_t c,
+                       uint64_t d, uint64_t e, uint64_t f) {
+    register uint64_t r10 __asm__("r10") = d;
+    register uint64_t r8 __asm__("r8") = e;
+    register uint64_t r9 __asm__("r9") = f;
+    __asm__ volatile("syscall" : "+a"(number)
+        : "D"(a), "S"(b), "d"(c), "r"(r10), "r"(r8), "r"(r9)
+        : "rcx", "r11", "memory");
+    return (int64_t)number;
+}
 static int64_t native3(uint64_t number, uint64_t a, uint64_t b, uint64_t c) {
     register uint64_t r10 __asm__("r10") = 0;
     __asm__ volatile("syscall" : "+a"(number)
@@ -26,7 +36,7 @@ static int64_t native3(uint64_t number, uint64_t a, uint64_t b, uint64_t c) {
 int main(void) {
     CHECK(native3(644 /* removed combined-clone ABI */, 0, 0, 0) == -38);
     enum { CLOSE = 626, SPACE_CLONE = 679, RIGHTS_GET = 664,
-           DUPLICATE = 627, SAME_OBJECT = 666, SHARED_PAGES = 548 };
+           DUPLICATE = 627, SAME_OBJECT = 666, MEMORY_OBJECT_CREATE = 671, MEMORY_MAP = 582 };
     struct status { uint64_t id; uint32_t state, reserved; uint64_t code; } status;
     const uint64_t control = UINT64_C(1) << 8;
     const uint64_t duplicate = UINT64_C(1) << 62;
@@ -136,10 +146,11 @@ int main(void) {
                                               MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     CHECK(shared_map != MAP_FAILED);
     shared_map[0] = 0x21;
-    uint64_t physical_page = 0;
-    int64_t allocated = native3(SHARED_PAGES, 1,
-                                (uint64_t)&physical_page, 1);
-    CHECK(allocated > 0 && physical_page != 0);
+    int64_t memory = native3(MEMORY_OBJECT_CREATE, 4096, 0, 0);
+    CHECK(memory > 0);
+    int64_t allocated = native6(MEMORY_MAP, 0, 4096, 3, 2, (uint64_t)memory, 0);
+    CHECK(allocated > 0);
+    CHECK(native3(CLOSE, (uint64_t)memory, 0, 0) == 0);
     volatile unsigned char *allocated_map = (void *)(uintptr_t)allocated;
     allocated_map[0] = 0x21;
     child = fork();
@@ -160,7 +171,7 @@ int main(void) {
     CHECK(munmap((void *)allocated_map, 4096) == 0);
     CHECK(close(alias) == 0 && close(source) == 0);
     fprintf(stderr, "native-fork: PASS parent/child and dup aliases share the same file offset\n");
-    fprintf(stderr, "native-fork: PASS file-backed private COW, anonymous shared mappings and allocated shared pages\n");
+    fprintf(stderr, "native-fork: PASS file-backed private COW, anonymous shared mappings and handle-owned RAM\n");
     int thread_result = native_thread_register_probe();
     if (thread_result != 0) fprintf(stderr, "thread-registers: FAIL case %d\n", thread_result);
     CHECK(thread_result == 0);

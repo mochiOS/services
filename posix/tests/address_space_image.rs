@@ -465,7 +465,8 @@ fn native_probe_numbers_match_authoritative_abi() {
         ("RIGHTS_GET", mnu_abi::SyscallNumber::HandleRightsGet),
         ("DUPLICATE", mnu_abi::SyscallNumber::HandleDuplicate),
         ("SAME_OBJECT", mnu_abi::SyscallNumber::HandleSameObject),
-        ("SHARED_PAGES", mnu_abi::SyscallNumber::AllocSharedPages),
+        ("MEMORY_OBJECT_CREATE", mnu_abi::SyscallNumber::MemoryObjectCreate),
+        ("MEMORY_MAP", mnu_abi::SyscallNumber::MemoryMap),
     ] {
         assert!(probe.contains(&format!("{name} = {}", number as u64)));
     }
