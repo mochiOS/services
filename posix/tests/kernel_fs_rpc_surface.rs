@@ -1,35 +1,55 @@
 #[test]
-fn transitional_kernel_transport_cannot_construct_removed_posix_requests() {
-    let source = include_str!("../../../core/src/vfs/userspace.rs");
-    let functions: Vec<_> = source
-        .lines()
-        .filter_map(|line| {
-            line.strip_prefix("pub fn ")
-                .and_then(|line| line.split('(').next())
-        })
-        .collect();
-    assert_eq!(functions, ["lookup_size"]);
-    for opcode in [
-        "OP_MOUNT",
-        "OP_OPEN",
-        "OP_SETATTR",
-        "OP_CREATE",
-        "OP_UNLINK",
-        "OP_SYMLINK",
-        "OP_RENAME",
-        "OP_TRUNCATE",
-        "OP_READLINK",
-        "OP_READDIR",
-        "OP_SYNC",
-        "LOOKUP_FOLLOW_SYMLINKS",
-    ] {
-        assert!(
-            !source.contains(&format!("protocol::{opcode}")),
-            "{opcode} returned to kernel transport"
-        );
+fn kernel_has_no_filesystem_mount_registration_or_wire_protocol() {
+    let abi = include_str!("../../../core/crates/abi/src/lib.rs");
+    let dispatch = include_str!("../../../core/src/syscall/mod.rs");
+    let fs = include_str!("../../../core/src/syscall/fs.rs");
+    let protocol = include_str!("../../../user/crates/filesystem-protocol/src/lib.rs");
+    for source in [abi, dispatch, fs, protocol] {
+        for removed in [
+            "FilesystemRegister",
+            "FilesystemMount",
+            "SYS_FILESYSTEM_REGISTER",
+            "SYS_FILESYSTEM_MOUNT",
+            "fn filesystem_register(",
+            "fn filesystem_mount(",
+        ] {
+            assert!(
+                !source.contains(removed),
+                "retired filesystem interface {removed} returned"
+            );
+        }
     }
-    assert!(!source.contains("uid:") && !source.contains("gid:") && !source.contains("mode:"));
-    assert!(!source.contains("DirectoryBatch"));
+    assert!(!abi.contains("= 624") && !abi.contains("= 625"));
+    assert!(!include_str!("../../../core/src/lib.rs").contains("pub mod vfs;"));
+    assert!(!include_str!("../../../core/Cargo.toml").contains("mochios-filesystem-protocol"));
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/src/vfs");
+    assert!(!root.join("mod.rs").exists());
+    assert!(!root.join("userspace.rs").exists());
+}
+
+#[test]
+fn filesystem_service_owns_namespace_and_delegates_only_a_generic_endpoint() {
+    let source = include_str!("../../filesystem/src/main.rs");
+    for removed in [
+        "register_filesystem(",
+        "mount_filesystem(",
+        "legacy_endpoint",
+        "COMPATIBILITY_ROOT_FILESYSTEM_ID",
+        "SYS_FILESYSTEM_",
+    ] {
+        assert!(!source.contains(removed));
+    }
+    assert!(source.contains("FilesystemService::new(fs)"));
+    assert!(source.contains("mount_named_volume(b\"/\", b\"system\", system, b\"/system\")"));
+    assert!(source.contains("platform::ipc::create_handle()"));
+    assert!(source.contains(
+        "platform::service_ready::notify_handle(ready_target, 0, endpoint, delegated_rights)"
+    ));
+    assert!(source.contains("platform::ipc::wait_object_handles("));
+    assert!(source.contains("protocol::decode_credentials_payload(payload)"));
+    assert!(source.contains("decode_path_anchors("));
+    assert!(source.contains("close_attached_handles(&attached)"));
+    assert!(!include_str!("../../filesystem/manifest.toml").contains("service.register"));
 }
 
 #[test]

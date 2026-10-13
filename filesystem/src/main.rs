@@ -70,13 +70,6 @@ fn main() {
         let _ = platform::service_ready::notify(ready_target, -1);
         platform::process::exit(1);
     }
-    let legacy_endpoint = match platform::ipc::create() {
-        Ok(endpoint) => endpoint,
-        Err(_) => {
-            let _ = platform::service_ready::notify(ready_target, -1);
-            platform::process::exit(1);
-        }
-    };
     let endpoint = match platform::ipc::create_handle() {
         Ok(endpoint) => endpoint,
         Err(_) => {
@@ -84,25 +77,6 @@ fn main() {
             platform::process::exit(1);
         }
     };
-    let filesystem_id = match register_filesystem(legacy_endpoint) {
-        Ok(filesystem_id) => filesystem_id,
-        Err(_) => {
-            platform::logln!("filesystem.service: registration failed");
-            let _ = platform::service_ready::notify(ready_target, -1);
-            platform::process::exit(1);
-        }
-    };
-    const COMPATIBILITY_ROOT_FILESYSTEM_ID: u64 = 1;
-    if mount_filesystem(COMPATIBILITY_ROOT_FILESYSTEM_ID, "/system", "/system").is_err() {
-        platform::logln!("filesystem.service: System mount failed");
-        let _ = platform::service_ready::notify(ready_target, -1);
-        platform::process::exit(1);
-    }
-    if mount_filesystem(filesystem_id, "/", "/").is_err() {
-        platform::logln!("filesystem.service: Data root mount failed");
-        let _ = platform::service_ready::notify(ready_target, -1);
-        platform::process::exit(1);
-    }
     let delegated_rights = platform::handle::HANDLE_RIGHT_SEND
         | platform::handle::HANDLE_RIGHT_DUPLICATE
         | platform::handle::HANDLE_RIGHT_TRANSFER;
@@ -931,37 +905,6 @@ fn read_provider_shared(
             .map_err(|error| error.raw().unsigned_abs() as i32)
     })?;
     Ok((count as u64, start.to_le_bytes().to_vec()))
-}
-
-#[cfg(target_os = "mochios")]
-fn register_filesystem(endpoint: u64) -> Result<u64, ()> {
-    let raw = unsafe {
-        mochi_user_platform::syscall::syscall1(
-            mochios_filesystem_protocol::SYS_FILESYSTEM_REGISTER,
-            endpoint,
-        )
-    };
-    syscall_result(raw)
-}
-
-#[cfg(target_os = "mochios")]
-fn mount_filesystem(filesystem_id: u64, target: &str, source: &str) -> Result<u64, ()> {
-    let raw = unsafe {
-        mochi_user_platform::syscall::syscall5(
-            mochios_filesystem_protocol::SYS_FILESYSTEM_MOUNT,
-            filesystem_id,
-            target.as_ptr() as u64,
-            target.len() as u64,
-            source.as_ptr() as u64,
-            source.len() as u64,
-        )
-    };
-    syscall_result(raw)
-}
-
-#[cfg(target_os = "mochios")]
-fn syscall_result(raw: u64) -> Result<u64, ()> {
-    if (raw as i64) < 0 { Err(()) } else { Ok(raw) }
 }
 
 #[cfg(not(target_os = "mochios"))]

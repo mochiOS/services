@@ -2,9 +2,8 @@
 fn retired_kernel_file_backend_has_no_vnode_or_posix_open_description() {
     let objects = include_str!("../../../core/src/task/fd_table.rs");
     let filesystem = include_str!("../../../core/src/syscall/fs.rs");
-    let vfs = include_str!("../../../core/src/vfs/mod.rs");
     let pager = include_str!("../../../core/src/mem/vm_object.rs");
-    for source in [objects, filesystem, vfs, pager] {
+    for source in [objects, filesystem, pager] {
         for removed in [
             "Vnode",
             "InodeId",
