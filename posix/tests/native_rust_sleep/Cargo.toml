@@ -1,0 +1,14 @@
+[package]
+name = "native-rust-sleep-probe"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+libc = { path = "../../../../libraries/libc" }
+mochi-user-platform = { path = "../../../../user/crates/platform", default-features = false, features = ["std"] }
+
+[[bin]]
+name = "native-rust-sleep-probe"
+path = "main.rs"
