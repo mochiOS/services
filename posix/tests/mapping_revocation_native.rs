@@ -79,6 +79,11 @@ mod paging {
             );
             state.released += 1;
         }
+        pub unsafe fn detach(self) {
+            let mut state = super::state().lock().unwrap();
+            assert!(state.synchronized);
+            state.entries.remove(&(self.table, self.address)).unwrap();
+        }
     }
 }
 mod tlb_shootdown {
@@ -123,7 +128,16 @@ fn actual_native_adapter_checks_owned_roots_restores_on_sync_failure_and_release
     }
     state().lock().unwrap().fail_sync = false;
     revoke(ranges, &mut native).unwrap();
-    let state = state().lock().unwrap();
-    assert!(state.entries.is_empty());
-    assert_eq!(state.released, 2);
+    {
+        let state = state().lock().unwrap();
+        assert!(state.entries.is_empty());
+        assert_eq!(state.released, 2);
+    }
+    // A one-process MMIO mapping detaches its PTE but must not free a device
+    // aperture as an allocator-owned RAM frame.
+    state().lock().unwrap().entries.insert((4096, 4096), 0x105);
+    let mut device = unsafe { Native::for_process(&table.0[0], false) };
+    assert!(matches!(device.suspend(8192, 4096), Err(syscall::EFAULT)));
+    revoke([(4096, 4096, 8192)], &mut device).unwrap();
+    assert_eq!(state().lock().unwrap().released, 2);
 }

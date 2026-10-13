@@ -41,6 +41,26 @@ fn production_region_preserves_authority_offsets_and_access_when_sliced() {
     );
     probe.push_str(&source[definitions_start..definitions_end]);
     probe.push_str(&source[implementation_start..implementation_end]);
+    // Also compile the production two-phase removal planner. Metadata remains
+    // unchanged while PTE revocation can still fail; commit happens afterward.
+    probe.push_str("mod memory_range {\n");
+    probe.push_str(
+        &include_str!("../../../core/src/task/memory_range.rs")
+            .lines()
+            .filter(|line| !line.starts_with("//!"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    probe.push_str("\n}\nmod removal { use super::*; pub struct Process { pub memory_regions: Vec<MemoryRegion> } impl Process {\n");
+    let removal_start = source
+        .find("    pub(crate) fn prepare_remove_memory_range(")
+        .unwrap();
+    let removal_end = source[removal_start..]
+        .find("    pub fn has_kernel_authority(")
+        .unwrap()
+        + removal_start;
+    probe.push_str(&source[removal_start..removal_end]);
+    probe.push_str("\n} }\n");
     probe.push_str(r#"
 fn main() {
     use mnu_abi::*;
@@ -80,6 +100,17 @@ fn main() {
     let mut anonymous = MemoryRegion::anonymous(0x1000, 0x2000, MEMORY_ACCESS_WRITE, 0, true, false);
     assert!(anonymous.set_shared(true));
     assert!(anonymous.is_shared());
+    let process = removal::Process { memory_regions: vec![region.clone()] };
+    let (retained, removed) = process.prepare_remove_memory_range(0x2000, 0x2000).unwrap();
+    assert_eq!(process.memory_regions.len(), 1);
+    assert_eq!(process.memory_regions[0].len(), 0x4000);
+    assert_eq!(retained.len(), 2);
+    assert_eq!((retained[0].start(), retained[0].len()), (0x1000, 0x1000));
+    assert_eq!((retained[1].start(), retained[1].len()), (0x4000, 0x1000));
+    assert_eq!(removed.len(), 1);
+    assert_eq!(removed[0].backing().file_offset(), 12288);
+    assert!(!removed[0].allows_write_at(0x2000));
+    assert!(process.prepare_remove_memory_range(u64::MAX, 4096).is_none());
 }
 "#);
     let nonce = SystemTime::now()
