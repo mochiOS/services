@@ -19,6 +19,7 @@ mod syscall {
     pub const EINVAL: u64 = (-22i64) as u64;
     pub const ENOMEM: u64 = (-12i64) as u64;
     pub const EIO: u64 = (-5i64) as u64;
+    pub const EAGAIN: u64 = (-11i64) as u64;
 }
 #[path = "../../../core/src/mem/shared_memory.rs"]
 mod shared_memory;
@@ -127,4 +128,110 @@ fn retained_physical_storage_outlives_the_object_and_is_released_once() {
     assert_eq!(*frames().lock().unwrap().get(&frame).unwrap(), 1);
     paging::release_user_frame(frame);
     assert!(!frames().lock().unwrap().contains_key(&frame));
+}
+
+#[test]
+fn shrink_and_regrowth_reject_old_prepared_generations_without_recycling_pins() {
+    let memory = shared_memory::SharedMemory::new(4096, 2).unwrap();
+    memory.write_at(17, &[0xa7]).unwrap();
+    let (old_frame, old_generation) = memory.prepare_page(0).unwrap();
+    memory
+        .resize_with(0, |start, end| {
+            assert_eq!((start, end), (0, 4096));
+            assert_eq!(*frames().lock().unwrap().get(&old_frame).unwrap(), 2);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(memory.length(), 0);
+    assert_eq!(
+        memory.with_generation(old_generation, || -> Result<(), u64> {
+            panic!("old prepared page must not be installed")
+        }),
+        Err(syscall::EAGAIN)
+    );
+    memory
+        .resize_with(4096, |_, _| -> Result<(), u64> {
+            panic!("growth never revokes")
+        })
+        .unwrap();
+    let (fresh_frame, fresh_generation) = memory.prepare_page(0).unwrap();
+    assert_ne!(old_frame, fresh_frame);
+    assert_ne!(old_generation, fresh_generation);
+    assert_eq!(
+        unsafe { std::ptr::read_volatile((old_frame + 17) as *const u8) },
+        0xa7
+    );
+    assert_eq!(
+        unsafe { std::ptr::read_volatile((fresh_frame + 17) as *const u8) },
+        0
+    );
+    assert_eq!(
+        memory.with_generation(fresh_generation, || Ok(42u32)),
+        Ok(42)
+    );
+    paging::release_user_frame(old_frame);
+    paging::release_user_frame(fresh_frame);
+}
+
+#[test]
+fn failed_resize_and_noop_preserve_current_size_and_prepared_generation() {
+    let memory = shared_memory::SharedMemory::new(8192, 2).unwrap();
+    let (frame, generation) = memory.prepare_page(1).unwrap();
+    assert_eq!(memory.resize_with(1, |_, _| Ok(())), Err(syscall::EINVAL));
+    assert_eq!(
+        memory.resize_with(12288, |_, _| Ok(())),
+        Err(syscall::ENOMEM)
+    );
+    assert_eq!(
+        memory.resize_with(4096, |_, _| Err(syscall::EIO)),
+        Err(syscall::EIO)
+    );
+    assert_eq!(memory.length(), 8192);
+    assert_eq!(memory.with_generation(generation, || Ok(())), Ok(()));
+    memory
+        .resize_with(8192, |_, _| -> Result<(), u64> { panic!("no-op") })
+        .unwrap();
+    assert_eq!(memory.with_generation(generation, || Ok(())), Ok(()));
+    paging::release_user_frame(frame);
+}
+
+#[test]
+fn final_installation_holds_size_and_generation_stable_against_concurrent_resize() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let memory = shared_memory::SharedMemory::new(4096, 1).unwrap();
+    let (frame, generation) = memory.prepare_page(0).unwrap();
+    let entered = std::sync::Barrier::new(2);
+    let finish = std::sync::Barrier::new(2);
+    let attempted = std::sync::Barrier::new(2);
+    let installed = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let installer = scope.spawn(|| {
+            memory.with_generation(generation, || {
+                entered.wait();
+                finish.wait();
+                installed.store(true, Ordering::Release);
+                Ok(())
+            })
+        });
+        entered.wait();
+        let resize = scope.spawn(|| {
+            attempted.wait();
+            memory.resize_with(0, |_, _| {
+                assert!(
+                    installed.load(Ordering::Acquire),
+                    "resize must wait for PTE installation"
+                );
+                Ok(())
+            })
+        });
+        attempted.wait();
+        finish.wait();
+        assert_eq!(installer.join().unwrap(), Ok(()));
+        assert_eq!(resize.join().unwrap(), Ok(()));
+    });
+    assert_eq!(
+        memory.with_generation(generation, || Ok(())),
+        Err(syscall::EAGAIN)
+    );
+    paging::release_user_frame(frame);
 }
