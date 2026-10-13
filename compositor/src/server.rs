@@ -19,6 +19,8 @@ use crate::protocol::*;
 use crate::renderer::composite_and_present;
 use crate::state::{CompositorState, MAX_MODAL_SESSIONS, ModalSession};
 use crate::surface::{Surface, handle_shared_buffer, send_frame_done};
+use crate::received_buffer::{ReceivedBuffer, ReceivedHandles};
+use platform::memory_object::ReadOnlyOffer;
 use crate::surface::{SurfaceRole, surface_extent};
 use crate::window::Window;
 
@@ -596,6 +598,7 @@ pub(crate) fn run() -> ! {
         if status == 0 { Ok(()) } else { Err(status) }
     });
     let mut pending_msg: Option<u64> = None;
+    let mut pending_handles = ReceivedHandles::default();
     let mut pending_buf = [0u8; 4128];
     let mut frame = PendingPresent::default();
     loop {
@@ -604,7 +607,9 @@ pub(crate) fn run() -> ! {
             if frame.due() {
                 frame.flush(&mut state);
             } else if pending_msg.is_none() {
-                match platform::ipc::try_wait(&mut pending_buf) {
+                match platform::ipc::try_wait_object_handles(
+                    &mut pending_buf, &mut pending_handles.0,
+                ) {
                     Ok(msg) => pending_msg = Some(msg),
                     Err(_) => frame.flush(&mut state),
                 }
@@ -613,12 +618,14 @@ pub(crate) fn run() -> ! {
         let buf = unsafe {
             core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(IPC_BUF).cast::<u8>(), 4128)
         };
+        let mut handles = ReceivedHandles::default();
         let msg = if let Some(msg) = pending_msg.take() {
+            handles = core::mem::take(&mut pending_handles);
             let len = ((msg & 0xffff_ffff) as usize).min(buf.len());
             buf[..len].copy_from_slice(&pending_buf[..len]);
             msg
         } else {
-            match platform::ipc::wait(endpoint, buf) {
+            match platform::ipc::wait_object_handles(endpoint, buf, &mut handles.0) {
                 Ok(msg) => msg,
                 Err(_) => {
                     platform::thread::yield_now();
@@ -629,6 +636,45 @@ pub(crate) fn run() -> ! {
         let sender = msg >> 32;
         frame.messages = frame.messages.saturating_add(1);
         let len = (msg & 0xffff_ffff) as usize;
+        if len <= buf.len() && buf[..len].starts_with(&ReadOnlyOffer::MAGIC) {
+            let client = client_id_for_sender(
+                &mut state.clients, sender, &mut state.next_client_id,
+            );
+            let awaiting = client != ClientId(0) && state.surfaces.iter().any(|surface| {
+                surface.live && surface.owner == client && surface.awaiting_buffer
+            });
+            let result = if awaiting {
+                ReceivedBuffer::receive(
+                    &buf[..len], &mut handles, crate::state::MAX_SHARED_BYTES as u64,
+                )
+            } else {
+                Err(platform::syscall::SysError::from_raw(
+                    mochi_user_syscall::EACCES as i64,
+                ))
+            };
+            match result {
+                Ok(mapping) => {
+                    let (address, length) = mapping.view();
+                    handle_shared_buffer(
+                        &mut state.surfaces, client, address, length, Some(mapping),
+                    );
+                }
+                Err(error) => {
+                    let mut reply = [0u8; 16];
+                    put_u32(&mut reply, 0, errno_status(
+                        error.errno().unwrap_or(mochi_user_syscall::EIO),
+                    ));
+                    let _ = platform::ipc::reply(sender, &reply);
+                }
+            }
+            continue;
+        }
+        if handles.0.count != 0 {
+            let mut reply = [0u8; 16];
+            put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
+            let _ = platform::ipc::reply(sender, &reply);
+            continue;
+        }
         if len == 16 {
             let client =
                 client_id_for_sender(&mut state.clients, sender, &mut state.next_client_id);
@@ -641,7 +687,7 @@ pub(crate) fn run() -> ! {
             let total = u64::from_le_bytes([
                 buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
             ]);
-            if handle_shared_buffer(&mut state.surfaces, client, mapped_addr, total) {
+            if handle_shared_buffer(&mut state.surfaces, client, mapped_addr, total, None) {
                 continue;
             }
         }
@@ -661,11 +707,16 @@ pub(crate) fn run() -> ! {
                     &event,
                 );
                 for _ in 0..32 {
-                    let Ok(next_msg) = platform::ipc::try_wait(buf) else {
+                    let mut next_handles = ReceivedHandles::default();
+                    let Ok(next_msg) = platform::ipc::try_wait_object_handles(
+                        buf, &mut next_handles.0,
+                    ) else {
                         break;
                     };
                     let next_len = (next_msg & 0xffff_ffff) as usize;
-                    if crate::input::is_input_message(next_msg, input_sender) {
+                    if next_handles.0.count == 0
+                        && crate::input::is_input_message(next_msg, input_sender)
+                    {
                         let next_event = unsafe {
                             core::ptr::read_unaligned(
                                 buf.as_ptr().cast::<platform::input::InputEvent>(),
@@ -685,6 +736,7 @@ pub(crate) fn run() -> ! {
                     let copy_len = next_len.min(buf.len());
                     pending_buf[..copy_len].copy_from_slice(&buf[..copy_len]);
                     pending_msg = Some(next_msg);
+                    pending_handles = next_handles;
                     break;
                 }
                 finish_coalesced_pointer_motion(&mut state)

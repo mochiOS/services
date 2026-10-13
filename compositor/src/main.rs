@@ -11,6 +11,7 @@ mod geometry;
 mod gpu_compositor;
 mod input;
 mod protocol;
+mod received_buffer;
 mod renderer;
 mod server;
 mod startup;

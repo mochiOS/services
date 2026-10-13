@@ -1,9 +1,13 @@
+extern crate alloc;
+
 #[path = "../../../user/crates/platform/src/memory_object.rs"]
 mod memory_object;
 
 use crate as platform;
 #[path = "../../compositor/src/frame_buffer.rs"]
 mod compositor_frame_buffer;
+#[path = "../../compositor/src/received_buffer.rs"]
+mod compositor_received_buffer;
 #[path = "../../display/src/shared_buffer.rs"]
 mod display_shared_buffer;
 
@@ -26,6 +30,99 @@ thread_local! { static STATE: RefCell<State> = RefCell::new(State::default()); }
 
 fn reset() {
     STATE.with(|state| *state.borrow_mut() = State::default());
+}
+
+#[test]
+fn compositor_pending_and_current_views_keep_mapping_until_last_reference() {
+    use compositor_received_buffer::{ReceivedBuffer, ReceivedHandles};
+    reset();
+    let bytes = memory_object::ReadOnlyOffer {
+        offset: 0,
+        length: 4096,
+    }
+    .encode()
+    .unwrap();
+    let mut handles = ReceivedHandles::default();
+    handles.0.count = 1;
+    handles.0.handles[0].handle = 19;
+    let pending = ReceivedBuffer::receive(&bytes, &mut handles, 8192).unwrap();
+    let current = pending.clone();
+    assert_eq!(current.view(), (0x10000, 4096));
+    drop(handles);
+    drop(pending);
+    STATE.with(|state| {
+        assert!(
+            !state
+                .borrow()
+                .calls
+                .iter()
+                .any(|call| call.0 == syscall::SyscallNumber::MemoryUnmap)
+        )
+    });
+    drop(current);
+    STATE.with(|state| {
+        let state = state.borrow();
+        for number in [
+            syscall::SyscallNumber::MemoryUnmap,
+            syscall::SyscallNumber::HandleClose,
+        ] {
+            assert_eq!(
+                state.calls.iter().filter(|call| call.0 == number).count(),
+                1
+            );
+        }
+    });
+}
+
+#[test]
+fn compositor_deferred_attachments_and_failed_offers_are_drained() {
+    use compositor_received_buffer::{ReceivedBuffer, ReceivedHandles};
+    let bytes = memory_object::ReadOnlyOffer {
+        offset: 0,
+        length: 4096,
+    }
+    .encode()
+    .unwrap();
+    for mode in 0..4 {
+        reset();
+        let mut pending = ReceivedHandles::default();
+        pending.0.count = if mode == 0 { 2 } else { 1 };
+        pending.0.handles[0].handle = 19;
+        if mode == 0 {
+            pending.0.handles[1].handle = 20;
+        }
+        if mode == 2 {
+            STATE.with(|state| state.borrow_mut().fail_map = true);
+        }
+        let mut received = core::mem::take(&mut pending);
+        drop(pending);
+        assert!(
+            ReceivedBuffer::receive(
+                if mode == 1 { &bytes[..31] } else { &bytes },
+                &mut received,
+                if mode == 3 { 1 } else { 8192 },
+            )
+            .is_err()
+        );
+        drop(received);
+        STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(
+                state
+                    .calls
+                    .iter()
+                    .filter(|call| call.0 == syscall::SyscallNumber::HandleClose)
+                    .count(),
+                if mode == 0 { 2 } else { 1 }
+            );
+            assert!(
+                !state
+                    .calls
+                    .iter()
+                    .any(|call| call.0 == syscall::SyscallNumber::MemoryUnmap)
+            );
+        });
+    }
 }
 
 #[test]
@@ -174,6 +271,11 @@ fn native_compositor_gate_uses_current_ipc_abi() {
         ("IPC_REPLY", mnu_abi::SyscallNumber::IpcReply),
         ("IPC_WAIT", mnu_abi::SyscallNumber::IpcWait),
         ("DEBUG_WRITE", mnu_abi::SyscallNumber::DebugWrite),
+        ("MEMORY_MAP", mnu_abi::SyscallNumber::MemoryMap),
+        ("MEMORY_UNMAP", mnu_abi::SyscallNumber::MemoryUnmap),
+        ("HANDLE_CLOSE", mnu_abi::SyscallNumber::HandleClose),
+        ("IPC_SEND_HANDLES", mnu_abi::SyscallNumber::IpcSendObjectHandles),
+        ("MEMORY_CREATE", mnu_abi::SyscallNumber::MemoryObjectCreate),
     ] {
         assert!(source.contains(&format!("{name} = {}", number as u64)));
     }

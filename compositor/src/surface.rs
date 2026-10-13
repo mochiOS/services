@@ -11,6 +11,7 @@ use crate::input::{
     clear_focus_for_surface, raise_window, restore_keyboard_focus, update_keyboard_focus,
 };
 use crate::protocol::*;
+use crate::received_buffer::ReceivedBuffer;
 use crate::state::{MAX_DIMENSION, MAX_SHARED_BYTES, PAGE_SIZE, getrandom_u64};
 use crate::window::{
     MAX_WINDOW_TITLE_BYTES, Window, WindowId, content_surface_index_for_window,
@@ -107,6 +108,7 @@ impl SurfaceRights {
 
 #[derive(Clone)]
 pub(crate) struct SurfaceBuffer {
+    _mapping: Option<ReceivedBuffer>,
     pub(crate) mapped_addr: u64,
     pub(crate) byte_len: usize,
     pub(crate) width: u32,
@@ -872,6 +874,7 @@ pub(crate) fn handle_shared_buffer(
     client: ClientId,
     mapped_addr: u64,
     total: u64,
+    mapping: Option<ReceivedBuffer>,
 ) -> bool {
     let Some(index) = surfaces
         .iter()
@@ -912,6 +915,7 @@ pub(crate) fn handle_shared_buffer(
     }
     surface.pending.clear();
     surface.pending_buffer = Some(SurfaceBuffer {
+        _mapping: mapping,
         mapped_addr,
         byte_len: needed_bytes,
         width,
