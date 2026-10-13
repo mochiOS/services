@@ -34,7 +34,7 @@ fn native_framebuffer_probe_matches_current_abi() {
 fn production_mmio_dispatcher_keeps_root_and_metadata_locked_through_rollback() {
     let source = include_str!("../../../core/src/syscall/mod.rs");
     let start = source.find("pub fn map_physical_range(").unwrap();
-    let end = source[start..].find("pub fn get_physical_addr(").unwrap() + start;
+    let end = source[start..].find("#[repr(C)]").unwrap() + start;
     let mut program = String::from(
         r#"
 use std::sync::atomic::{AtomicBool,AtomicUsize,Ordering};
