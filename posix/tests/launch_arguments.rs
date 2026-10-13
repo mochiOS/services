@@ -69,6 +69,27 @@ fn native_launch_builds_argv_env_and_inheritance_in_user_space() {
 }
 
 #[test]
+fn service_launcher_uses_the_shared_client_encoder_without_a_private_copy() {
+    let source = include_str!("../../service-manager/src/launch_arguments.rs");
+    assert!(source.contains(
+        "pub(crate) use mochios_posix_client::launch_arguments::{EncodeError, encode_native_launch}"
+    ));
+    assert!(!source.contains("fn encode_native_launch("));
+    assert!(!source.contains("fn decimal("));
+    let items = vec!["argument".into(), "".into()];
+    assert_eq!(
+        native(&items).unwrap(),
+        mochios_posix_client::launch_arguments::encode_native_launch(
+            "/system/services/example.service",
+            "example.service",
+            &items,
+            [17; 16]
+        )
+        .unwrap()
+    );
+}
+
+#[test]
 fn native_launch_rejects_invalid_or_duplicate_handle_grants() {
     for value in [
         "",

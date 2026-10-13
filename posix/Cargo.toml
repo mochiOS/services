@@ -19,7 +19,7 @@ mochios-workspace-protocol = { path = "../../user/crates/workspace-protocol" }
 mboot-protocol = { path = "../mboot-protocol" }
 sha2 = { version = "0.10", default-features = false }
 mochios-signature-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-signature-protocol" }
-mochios-posix-client = { git = "https://github.com/mochiOS/syscalls", package = "mochios-posix-client", default-features = false, features = ["fd-table", "endpoint"] }
+mochios-posix-client = { git = "https://github.com/mochiOS/syscalls", package = "mochios-posix-client", default-features = false, features = ["fd-table", "endpoint", "launch-arguments"] }
 mochios-certificate-database = { path = "../../user/crates/certificate-database", features = ["std"] }
 filesystem-service = { path = "../filesystem" }
 ext4plus = { git = "https://github.com/arihant2math/ext4plus", rev = "382b9e0a65a4b5155015992aee74ff2a798764f8", default-features = false, features = [
