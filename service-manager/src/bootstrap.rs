@@ -15,7 +15,7 @@ struct Runtime {
     logger_endpoint: u64,
     driver_controller: DriverController,
     ready: Option<ReadyHandshake>,
-    mboot_agent: Option<(u64, u64)>,
+    mboot_agent: Option<(NativeProcess, u64)>,
     deferred_requests: VecDeque<DeferredMessage>,
     permission_prompt: crate::portal::PermissionPrompts,
     iommu_warning: Option<NativeProcess>,
@@ -522,6 +522,7 @@ impl BootstrapOperations for Runtime {
     }
 
     fn spawn_mboot_agent(&mut self) -> Option<u64> {
+        let endpoint = self.posix_endpoint.filter(|endpoint| *endpoint != 0)?;
         let token = match platform::service_ready::generate_token() {
             Ok(token) => token,
             Err(error) => {
@@ -532,9 +533,11 @@ impl BootstrapOperations for Runtime {
                 return None;
             }
         };
-        match service_launcher::spawn_mboot_agent(self.logger_endpoint, token) {
-            Ok(process_id) => {
-                self.mboot_agent = Some((process_id, token));
+        match service_launcher::spawn_mboot_agent(self.logger_endpoint, token, endpoint) {
+            Ok(process) => {
+                let process_id = process.process_id();
+                self.mboot_agent = Some((process, token));
+                eprintln!("service-manager.service: mboot-agent.service native process created");
                 platform::logln!(
                     "service-manager.service: mboot-agent.service spawned pid={}",
                     process_id
@@ -542,6 +545,10 @@ impl BootstrapOperations for Runtime {
                 Some(process_id)
             }
             Err(error) => {
+                eprintln!(
+                    "service-manager.service: mboot-agent.service native creation failed errno={}",
+                    errno(error)
+                );
                 platform::logln!(
                     "service-manager.service: mboot-agent.service spawn failed errno={}",
                     errno(error)
@@ -552,11 +559,11 @@ impl BootstrapOperations for Runtime {
     }
 
     fn notify_mboot_stage(&mut self, stage: MbootStage) {
-        let Some((process_id, token)) = self.mboot_agent else {
+        let Some((process, token)) = self.mboot_agent.as_ref() else {
             return;
         };
-        let request = platform::service_ready::notification(token, stage as i32);
-        if platform::ipc::send(process_id, &request).is_err() {
+        let request = platform::service_ready::notification(*token, stage as i32);
+        if platform::ipc::send(process.process_id(), &request).is_err() {
             platform::logln!(
                 "service-manager.service: mboot-agent stage notification failed stage={}",
                 stage as i32

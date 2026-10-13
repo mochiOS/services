@@ -266,10 +266,15 @@ fn spawn_native(
 pub(crate) fn spawn_mboot_agent(
     logger_endpoint: u64,
     stage_token: u64,
-) -> Result<u64, mochi_user_syscall::SysError> {
-    spawn(
+    posix_endpoint: platform::handle::Handle,
+) -> Result<NativeProcess, mochi_user_syscall::SysError> {
+    let mut arguments = mboot_agent_arguments(logger_endpoint, stage_token);
+    append_posix_handle(&mut arguments, Some(posix_endpoint));
+    spawn_native(
         fixed_service_spec(FixedService::MbootAgent),
-        &mboot_agent_arguments(logger_endpoint, stage_token),
+        "mboot-agent.service",
+        &arguments,
+        posix_endpoint,
     )
 }
 

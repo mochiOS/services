@@ -133,6 +133,23 @@ fn display_launch_and_readiness_use_retained_handles_without_legacy_fallback() {
 }
 
 #[test]
+fn mboot_agent_creation_inherits_posix_and_retains_the_native_owner() {
+    let launcher = include_str!("../../service-manager/src/service_launcher.rs");
+    let start = launcher.find("pub(crate) fn spawn_mboot_agent(").unwrap();
+    let end = launcher[start..].find("pub(crate) fn spawn_user_session(").unwrap() + start;
+    let launch = &launcher[start..end];
+    assert!(launch.contains("Result<NativeProcess,"));
+    assert!(launch.contains("append_posix_handle(&mut arguments, Some(posix_endpoint))"));
+    assert!(launch.contains("spawn_native("));
+    assert!(!launch.contains("\n    spawn("));
+    let bootstrap = include_str!("../../service-manager/src/bootstrap.rs");
+    assert!(bootstrap.contains("mboot_agent: Option<(NativeProcess, u64)>"));
+    assert!(bootstrap.contains("self.mboot_agent = Some((process, token))"));
+    assert!(bootstrap.contains("self.mboot_agent.as_ref()"));
+    assert!(bootstrap.contains("self.posix_endpoint.filter(|endpoint| *endpoint != 0)?"));
+}
+
+#[test]
 fn fixed_services_register_userspace_posix_state_before_resume_with_rollback() {
     let launcher = include_str!("../../service-manager/src/service_launcher.rs");
     let native = launcher
