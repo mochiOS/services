@@ -1,7 +1,7 @@
 /* Link all newlib stdlib wrappers that include _mallocr.c, rebuilt with
  * -D_LIBC -D__mochios__ -DGETREENT_PROVIDED, ahead of the existing SDK libc.a.
  * MALLOC_AGGREGATE checks aggregate heap escape; the default 384MiB case
- * separately exposes the current native MemoryMap per-mapping limit. */
+ * checks allocations beyond the retired native MemoryMap size limit. */
 #include <errno.h>
 #include <malloc.h>
 #include <stdint.h>

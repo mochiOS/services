@@ -91,6 +91,7 @@ fn kernel_memory_mapping_uses_handles_and_native_options() {
     assert!(mapping.contains("MEMORY_MAP_OPTIONS_ALL"));
     assert!(mapping.contains("handle::object_with_rights(backing_handle"));
     assert!(mapping.contains("KernelObject::Provider"));
+    assert!(!mapping.contains("MAX_MEMORY_BACKING_BYTES"));
     assert!(!mapping.contains("PROT_"));
     assert!(!mapping.contains("MAP_ANONYMOUS"));
     assert!(!mapping.contains("fd_table()"));
