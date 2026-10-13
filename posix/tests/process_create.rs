@@ -158,7 +158,7 @@ fn snapshot_creation_requires_authorization_and_control_before_vm_consumption() 
     assert!(
         create.find("HandleRights::CONTROL").unwrap()
             < create
-                .find("image.consume(&authorization, &context)")
+                .find("consume_address_space_for_create(&image, &authorization, &context)")
                 .unwrap()
     );
     assert!(
