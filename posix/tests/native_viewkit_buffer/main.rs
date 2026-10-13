@@ -4,6 +4,10 @@ use tiny_skia::Pixmap;
 
 #[path = "../../../mboot-agent/src/stage_mapping.rs"]
 mod agent_stage_mapping;
+#[path = "../../../../applications/binder/src/platform/mochios/decoration_buffer.rs"]
+mod binder_decoration_buffer;
+#[derive(Debug)]
+struct DecorationError(u64);
 #[path = "../../../../libraries/viewkit/src/platform/mochios/buffer.rs"]
 mod buffer;
 #[path = "../../../linux/src/compositor_buffer.rs"]
@@ -86,6 +90,38 @@ fn probe() -> Result<u64, String> {
         return Err("stage content mismatch".into());
     }
     drop(mapping);
+    let decor_endpoint = ipc::create().map_err(|error| format!("decor endpoint {error:?}"))?;
+    let mut decor = binder_decoration_buffer::TitleBarBuffer::new(256)
+        .map_err(|error| format!("decor allocation {error:?}"))?;
+    decor
+        .write(&[0xff123456; 256])
+        .map_err(|error| format!("decor pixels {error:?}"))?;
+    decor
+        .offer(decor_endpoint)
+        .map_err(|error| format!("decor offer {error:?}"))?;
+    drop(decor);
+    let mut decor_wire = [0u8; 32];
+    let mut decor_attached = agent_stage_mapping::Attachments::default();
+    let delivered =
+        ipc::wait_object_handles(decor_endpoint, &mut decor_wire, &mut decor_attached.handles)
+            .map_err(|error| format!("decor receive {error:?}"))?;
+    let owner = delivered >> 32;
+    let view = agent_stage_mapping::SharedStageMapping::receive(
+        owner,
+        true,
+        &decor_wire,
+        &mut decor_attached,
+        4096,
+    )
+    .map_err(|error| format!("decor mapping {error:#x}"))?;
+    if view
+        .snapshot(owner, 4)
+        .map_err(|error| format!("decor snapshot {error:#x}"))?
+        != 0xff123456u32.to_ne_bytes()
+    {
+        return Err("decor content mismatch".into());
+    }
+    drop(view);
     let _ = mochi_user_platform::logger::init_from_env();
     let target = mochi_user_platform::service_ready::take_bootstrap_target()
         .ok_or("missing ready target")?;
@@ -182,7 +218,7 @@ fn probe() -> Result<u64, String> {
 fn main() {
     let result = probe();
     let line = format!(
-        "viewkit-buffer: {} ViewKit + Linux + staging RAM offers, sender drop, 3 commits, destroy {result:?}\n",
+        "viewkit-buffer: {} ViewKit + Linux + staging + Binder decoration RAM offers, sender drop, 3 commits, destroy {result:?}\n",
         if result.is_ok() { "PASS" } else { "FAIL" }
     );
     let _ = syscall::call2(

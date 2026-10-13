@@ -16,6 +16,10 @@ mod linux_compositor_buffer;
 mod linux_stage_buffer;
 #[path = "../../mboot-agent/src/stage_mapping.rs"]
 mod agent_stage_mapping;
+#[path = "../../../applications/binder/src/platform/mochios/decoration_buffer.rs"]
+mod binder_decoration_buffer;
+#[derive(Debug)]
+struct DecorationError(u64);
 type HostError = CompositorError;
 #[path = "../../../libraries/viewkit/src/platform/mochios/buffer.rs"]
 mod viewkit_buffer;
@@ -90,6 +94,48 @@ thread_local! { static STATE: RefCell<State> = RefCell::new(State::default()); }
 
 fn reset() {
     STATE.with(|state| *state.borrow_mut() = State::default());
+}
+
+#[test]
+fn binder_decoration_owns_ram_copies_pixels_and_attenuates_offers() {
+    reset();
+    let mut storage = vec![0u32; 1024];
+    STATE.with(|state| state.borrow_mut().map_address = Some(storage.as_mut_ptr() as u64));
+    let mut buffer = binder_decoration_buffer::TitleBarBuffer::new(256).unwrap();
+    buffer.write(&[0xff123456; 256]).unwrap();
+    assert!(storage[..256].iter().all(|&pixel| pixel == 0xff123456));
+    assert!(buffer.write(&[0; 257]).is_err());
+    buffer.offer(9).unwrap();
+    STATE.with(|state| {
+        let state = state.borrow();
+        assert_eq!(
+            state.offers[0].2.handles[0].rights,
+            memory_object::READONLY_BUFFER_RIGHTS
+        );
+    });
+    drop(buffer);
+    STATE.with(|state| {
+        let state = state.borrow();
+        assert_eq!(
+            state.calls[state.calls.len() - 2].0,
+            syscall::SyscallNumber::MemoryUnmap
+        );
+        assert_eq!(
+            state.calls.last().unwrap().0,
+            syscall::SyscallNumber::HandleClose
+        );
+    });
+    assert!(binder_decoration_buffer::TitleBarBuffer::new(0).is_err());
+    assert!(binder_decoration_buffer::TitleBarBuffer::new(usize::MAX).is_err());
+    reset();
+    STATE.with(|state| state.borrow_mut().fail_map = true);
+    assert!(binder_decoration_buffer::TitleBarBuffer::new(256).is_err());
+    STATE.with(|state| {
+        assert_eq!(
+            state.borrow().calls.last().unwrap().0,
+            syscall::SyscallNumber::HandleClose
+        )
+    });
 }
 
 #[test]
