@@ -1,6 +1,10 @@
 #[path = "../../../user/crates/platform/src/memory_object.rs"]
 mod memory_object;
 
+use crate as platform;
+#[path = "../../display/src/shared_buffer.rs"]
+mod display_shared_buffer;
+
 use memory_object::MemoryObject;
 use std::cell::RefCell;
 
@@ -20,6 +24,29 @@ thread_local! { static STATE: RefCell<State> = RefCell::new(State::default()); }
 
 fn reset() {
     STATE.with(|state| *state.borrow_mut() = State::default());
+}
+
+#[test]
+fn native_display_offer_probe_matches_current_abi_and_userspace_wire_format() {
+    let source = include_str!("native_display_buffer_offer.c");
+    for (name, number) in [
+        ("FIND_PROCESS", mnu_abi::SyscallNumber::FindProcessByName),
+        ("IPC_CALL", mnu_abi::SyscallNumber::IpcCall),
+        (
+            "IPC_SEND_HANDLES",
+            mnu_abi::SyscallNumber::IpcSendObjectHandles,
+        ),
+        ("MEMORY_MAP", mnu_abi::SyscallNumber::MemoryMap),
+        ("MEMORY_UNMAP", mnu_abi::SyscallNumber::MemoryUnmap),
+        ("HANDLE_CLOSE", mnu_abi::SyscallNumber::HandleClose),
+        ("MEMORY_CREATE", mnu_abi::SyscallNumber::MemoryObjectCreate),
+        ("DEBUG_WRITE", mnu_abi::SyscallNumber::DebugWrite),
+    ] {
+        assert!(source.contains(&format!("{name} = {}", number as u64)));
+    }
+    assert_eq!(memory_object::ReadOnlyOffer::MAGIC, *b"MRAM");
+    assert_eq!(memory_object::ReadOnlyOffer::WIRE_LENGTH, 32);
+    assert_eq!(memory_object::READONLY_BUFFER_RIGHTS, 65);
 }
 
 mod syscall {
@@ -99,6 +126,76 @@ mod ipc {
             Ok(0)
         })
     }
+}
+
+#[test]
+fn display_receiver_retains_mapping_until_buffer_replacement_and_drains_bad_attachments() {
+    use display_shared_buffer::SharedBuffer;
+    use memory_object::ReadOnlyOffer;
+    let bytes = ReadOnlyOffer {
+        offset: 0,
+        length: 4096,
+    }
+    .encode()
+    .unwrap();
+    reset();
+    let mut attachments = mnu_abi::IpcObjectHandles::default();
+    attachments.count = 1;
+    attachments.handles[0].handle = 19;
+    let buffer = SharedBuffer::receive(9, 9, &bytes, &mut attachments).unwrap();
+    assert_eq!(buffer.view(), (9, 0x10000, 4096));
+    assert_eq!(attachments.count, 0);
+    STATE.with(|state| {
+        assert!(!state
+            .borrow()
+            .calls
+            .iter()
+            .any(|call| call.0 == syscall::SyscallNumber::MemoryUnmap))
+    });
+    drop(buffer);
+    STATE.with(|state| {
+        assert_eq!(
+            state.borrow().calls.last().unwrap().0,
+            syscall::SyscallNumber::MemoryUnmap
+        )
+    });
+    for mode in 0..3 {
+        reset();
+        let mut attachments = mnu_abi::IpcObjectHandles::default();
+        attachments.count = if mode == 1 { 2 } else { 1 };
+        attachments.handles[0].handle = 19;
+        if mode == 1 {
+            attachments.handles[1].handle = 20;
+        }
+        assert!(SharedBuffer::receive(
+            9,
+            if mode == 0 { 8 } else { 9 },
+            if mode == 2 { &bytes[..31] } else { &bytes },
+            &mut attachments
+        )
+        .is_err());
+        assert_eq!(attachments.count, 0);
+        assert!(attachments.handles.iter().all(|entry| entry.handle == 0));
+        STATE.with(|state| {
+            let state = state.borrow();
+            assert!(!state
+                .calls
+                .iter()
+                .any(|call| call.0 == syscall::SyscallNumber::MemoryMap));
+            assert_eq!(
+                state
+                    .calls
+                    .iter()
+                    .filter(|call| call.0 == syscall::SyscallNumber::HandleClose)
+                    .count(),
+                if mode == 1 { 2 } else { 1 }
+            );
+        });
+    }
+    assert_eq!(
+        SharedBuffer::legacy(9, 0x20000, 8192).view(),
+        (9, 0x20000, 8192)
+    );
 }
 
 #[test]

@@ -4,6 +4,8 @@ use mochi_user_syscall::{EACCES, EINVAL, EIO};
 use crate::backend::{DisplayBackend, PendingPresent};
 use crate::present::{DamageRect, PanelFrame, PresentFrame};
 use crate::protocol::*;
+use crate::shared_buffer::{close_attachments, SharedBuffer};
+use platform::memory_object::ReadOnlyOffer;
 
 static mut IPC_BUFFER: [u8; 4128] = [0; 4128];
 static mut REPLY: [u8; 20] = [0; 20];
@@ -36,7 +38,7 @@ pub(crate) fn run() -> ! {
         platform::process::exit(1);
     }
 
-    let mut shared_buffer: Option<(u64, u64, u64)> = None;
+    let mut shared_buffer: Option<SharedBuffer> = None;
     let mut present_owner = 0u64;
     let mut present_error = None;
     let mut gpu_panel_logged = false;
@@ -45,7 +47,8 @@ pub(crate) fn run() -> ! {
         let buffer = unsafe {
             core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(IPC_BUFFER).cast::<u8>(), 4128)
         };
-        let message = match platform::ipc::wait(endpoint, buffer) {
+        let mut handles = platform::ipc::IpcObjectHandles::default();
+        let message = match platform::ipc::wait_object_handles(endpoint, buffer, &mut handles) {
             Ok(message) => message,
             Err(_) => {
                 platform::thread::yield_now();
@@ -55,13 +58,26 @@ pub(crate) fn run() -> ! {
         let sender = message >> 32;
         let length = (message & 0xffff_ffff) as usize;
         if length < 4 || length > buffer.len() {
+            close_attachments(&mut handles);
             reply_status(sender, errno_status(EINVAL));
             continue;
         }
         let request = &buffer[..length];
+        if request.starts_with(&ReadOnlyOffer::MAGIC) {
+            match SharedBuffer::receive(sender, present_owner, request, &mut handles) {
+                Ok(received) => shared_buffer = Some(received),
+                Err(error) => reply_status(sender, errno_status(error)),
+            }
+            continue;
+        }
+        if handles.count != 0 {
+            close_attachments(&mut handles);
+            reply_status(sender, errno_status(EINVAL));
+            continue;
+        }
         if let Some((address, size)) = shared_buffer_notification(request) {
             if present_owner == 0 || sender == present_owner {
-                shared_buffer = Some((sender, address, size));
+                shared_buffer = Some(SharedBuffer::legacy(sender, address, size));
             }
             continue;
         }
@@ -87,7 +103,7 @@ pub(crate) fn run() -> ! {
                     &mut backend,
                     request,
                     sender,
-                    shared_buffer,
+                    shared_buffer.as_ref().map(SharedBuffer::view),
                     read_u32(request, 0) == Some(OP_PRESENT_RECT),
                 ) {
                     Ok(pending) => {
@@ -110,8 +126,12 @@ pub(crate) fn run() -> ! {
                     reply_status(sender, errno_status(EACCES));
                     continue;
                 }
-                let status =
-                    present_gpu_panel_request(&mut backend, request, sender, shared_buffer);
+                let status = present_gpu_panel_request(
+                    &mut backend,
+                    request,
+                    sender,
+                    shared_buffer.as_ref().map(SharedBuffer::view),
+                );
                 if status == 0 && !gpu_panel_logged {
                     platform::logln!("display.driver: virgl panel composition enabled");
                     gpu_panel_logged = true;
@@ -129,8 +149,12 @@ pub(crate) fn run() -> ! {
                     reply_status(sender, errno_status(EACCES));
                     continue;
                 }
-                let status =
-                    present_gpu_scene_request(&mut backend, request, sender, shared_buffer);
+                let status = present_gpu_scene_request(
+                    &mut backend,
+                    request,
+                    sender,
+                    shared_buffer.as_ref().map(SharedBuffer::view),
+                );
                 if status == 0 && !gpu_scene_logged {
                     platform::logln!("display.driver: ViewKit GPU rendering enabled");
                     gpu_scene_logged = true;
