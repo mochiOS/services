@@ -12,6 +12,9 @@ mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "
 mochios-filesystem-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-filesystem-protocol" }
 mochios-posix-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-posix-protocol" }
 
+[target.'cfg(target_os = "mochios")'.dependencies]
+mochios-posix-client = { git = "https://github.com/mochiOS/syscalls", package = "mochios-posix-client", default-features = false }
+
 [dev-dependencies]
 mochios-net-device-protocol = { path = "../../user/crates/net-device-protocol" }
 mochios-user-protocol = { path = "../../user/crates/user-protocol" }

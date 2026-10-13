@@ -4,7 +4,7 @@
 use super::{PeerIdentity, PosixService, Session};
 use std::collections::BTreeMap;
 
-pub const MAX_NAME_BYTES: usize = 255;
+pub use mochios_posix_protocol::named_semaphore::MAX_NAME_BYTES;
 pub const MAX_NAMES: usize = 1024;
 
 #[derive(Clone, Copy, Debug)]
@@ -164,5 +164,77 @@ impl<H: Copy> PosixService<H> {
             return Err(-3);
         }
         self.named_semaphores.unlink(name, session)
+    }
+}
+
+/// Resource ownership sits in the native adapter, never in the name codec.
+pub trait Backing<H> {
+    fn create_initialized(&mut self, value: u32) -> Result<H, i32>;
+    fn duplicate(&mut self, handle: H, rights: u64) -> Result<H, i32>;
+    fn close(&mut self, handle: H) -> Result<(), i32>;
+}
+
+/// Mutable shared backing, fork/explicit delegation, and no unrelated rights.
+pub const CLIENT_RIGHTS: u64 = mnu_abi::HANDLE_RIGHT_READ
+    | mnu_abi::HANDLE_RIGHT_WRITE
+    | mnu_abi::HANDLE_RIGHT_MAP
+    | mnu_abi::HANDLE_RIGHT_DUPLICATE
+    | mnu_abi::HANDLE_RIGHT_TRANSFER;
+
+impl<H: Copy> PosixService<H> {
+    pub fn handle_named_semaphore<B: Backing<H>>(
+        &mut self,
+        peer: PeerIdentity,
+        header: mochios_posix_protocol::Header,
+        payload: &[u8],
+        attachments: &[super::AttachedObject<H>],
+        backend: &mut B,
+    ) -> super::ObjectResponse<H> {
+        use mochios_posix_protocol::{self as protocol, named_semaphore as wire};
+        let outcome = (|| {
+            if header.flags != 0
+                || header.status != 0
+                || header.payload_len as usize != payload.len()
+                || !attachments.is_empty()
+            {
+                return Err(-22);
+            }
+            match header.opcode {
+                protocol::OP_SEMAPHORE_OPEN => {
+                    let request = wire::decode_open(payload).map_err(|_| -22)?;
+                    let create = (request.options & wire::CREATE != 0).then_some(Create {
+                        value: request.value,
+                        mode: request.mode,
+                        exclusive: request.options & wire::EXCLUSIVE != 0,
+                    });
+                    let opened =
+                        self.open_named_semaphore(peer, request.name, create, |value| {
+                            backend.create_initialized(value)
+                        })?;
+                    let handle = backend.duplicate(opened.handle, CLIENT_RIGHTS)?;
+                    Ok(vec![super::OpenedObject {
+                        handle,
+                        rights: CLIENT_RIGHTS,
+                    }])
+                }
+                protocol::OP_SEMAPHORE_UNLINK => {
+                    let name = wire::decode_name(payload).map_err(|_| -22)?;
+                    let handle = self.unlink_named_semaphore(peer, name)?;
+                    backend.close(handle)?;
+                    Ok(Vec::new())
+                }
+                _ => Err(protocol::STATUS_ENOSYS),
+            }
+        })();
+        match outcome {
+            Ok(handles) => super::ObjectResponse {
+                response: super::status_response(header.request_id, 0),
+                handles,
+            },
+            Err(error) => super::ObjectResponse {
+                response: super::status_response(header.request_id, error),
+                handles: Vec::new(),
+            },
+        }
     }
 }
