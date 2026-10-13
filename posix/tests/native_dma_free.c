@@ -1,5 +1,7 @@
 #include <stdint.h>
 #include <string.h>
+#include <pthread.h>
+#include <stdatomic.h>
 
 enum { MEMORY_MAP = 582, MEMORY_UNMAP = 583, DMA_ALLOC = 604, DMA_FREE = 605, DEBUG_WRITE = 660 };
 struct allocation { uint64_t handle, virt_addr, phys_addr, len; };
@@ -16,24 +18,48 @@ static uint64_t native(uint64_t number, uint64_t a, uint64_t b, uint64_t c,
     return number;
 }
 
+static int cycle(void) {
+    struct allocation object = {0};
+    if (native(DMA_ALLOC, 4097, (uintptr_t)&object, 0, 0, 0, 0) != 0) return 1;
+    if (!object.handle || !object.virt_addr || object.len != 8192) return 2;
+    volatile unsigned char *bytes = (volatile unsigned char *)(uintptr_t)object.virt_addr;
+    for (unsigned index = 0; index < 8192; ++index) {
+        if (bytes[index] != 0) return 3;
+        bytes[index] = 0xa7;
+    }
+    if (native(DMA_FREE, object.handle, 0, 0, 0, 0, 0) != 0) return 4;
+    if ((int64_t)native(DMA_FREE, object.handle, 0, 0, 0, 0, 0) != -22) return 5;
+    if (native(MEMORY_MAP, object.virt_addr, 8192, 3, 1, 0, 0) != object.virt_addr) return 6;
+    for (unsigned index = 0; index < 8192; ++index) if (bytes[index] != 0) return 7;
+    if (native(MEMORY_UNMAP, object.virt_addr, 8192, 0, 0, 0, 0) != 0) return 8;
+    return 0;
+}
+
+static atomic_uint failures;
+
+static void *worker(void *unused) {
+    (void)unused;
+    for (unsigned iteration = 0; iteration < 50; ++iteration) {
+        if (cycle()) atomic_fetch_add_explicit(&failures, 1, memory_order_relaxed);
+    }
+    return NULL;
+}
+
 int main(void) {
     /* Isolated fixture requires dma.allocate. No device receives this memory. */
     for (unsigned iteration = 0; iteration < 200; ++iteration) {
-        struct allocation object = {0};
-        if (native(DMA_ALLOC, 4097, (uintptr_t)&object, 0, 0, 0, 0) != 0) return 1;
-        if (!object.handle || !object.virt_addr || object.len != 8192) return 2;
-        volatile unsigned char *bytes = (volatile unsigned char *)(uintptr_t)object.virt_addr;
-        for (unsigned index = 0; index < 8192; ++index) {
-            if (bytes[index] != 0) return 3;
-            bytes[index] = 0xa7;
-        }
-        if (native(DMA_FREE, object.handle, 0, 0, 0, 0, 0) != 0) return 4;
-        if ((int64_t)native(DMA_FREE, object.handle, 0, 0, 0, 0, 0) != -22) return 5;
-        if (native(MEMORY_MAP, object.virt_addr, 8192, 3, 1, 0, 0) != object.virt_addr) return 6;
-        for (unsigned index = 0; index < 8192; ++index) if (bytes[index] != 0) return 7;
-        if (native(MEMORY_UNMAP, object.virt_addr, 8192, 0, 0, 0, 0) != 0) return 8;
+        int result = cycle();
+        if (result) return result;
     }
-    const char text[] = "dma-free: PASS 200 release, duplicate rejection and zeroed VA reuse cycles\n";
+    pthread_t threads[6];
+    for (unsigned index = 0; index < 6; ++index) {
+        if (pthread_create(&threads[index], NULL, worker, NULL)) return 9;
+    }
+    for (unsigned index = 0; index < 6; ++index) {
+        if (pthread_join(threads[index], NULL)) return 10;
+    }
+    if (atomic_load_explicit(&failures, memory_order_relaxed)) return 11;
+    const char text[] = "dma-free: PASS 200 serial and 300 concurrent release and zeroed VA reuse cycles\n";
     native(DEBUG_WRITE, (uintptr_t)text, strlen(text), 0, 0, 0, 0);
     return 0;
 }
