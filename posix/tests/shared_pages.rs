@@ -3,7 +3,7 @@ extern crate alloc;
 #[path = "../../../core/src/mem/shared_pages.rs"]
 mod shared_pages;
 
-use shared_pages::{PageError, SharedPages, SizeError};
+use shared_pages::{PageError, ResizeError, SharedPages, SizeError};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -124,4 +124,128 @@ fn concurrent_faults_allocate_one_page_when_the_object_serializes_population() {
     assert_eq!(freed.load(Ordering::SeqCst), 0);
     drop(retained);
     assert_eq!(freed.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn resizable_empty_backing_grows_lazily_and_preserves_retained_page_identity() {
+    let mut pages = SharedPages::<u64>::new_resizable(0, 4096, 2).unwrap();
+    assert_eq!(pages.length(), 0);
+    assert!(pages.contains_range(0, 0));
+    assert!(!pages.contains_range(0, 1));
+    assert_eq!(
+        pages.page_or_try_insert(0, || Ok::<_, ()>(7)),
+        Err(PageError::OutOfBounds)
+    );
+    pages
+        .resize_with(4096, |_, _| -> Result<(), ()> {
+            panic!("growth never revokes")
+        })
+        .unwrap();
+    let page = pages.page_or_try_insert(0, || Ok::<_, ()>(7)).unwrap();
+    pages
+        .resize_with(8192, |_, _| -> Result<(), ()> {
+            panic!("growth never revokes")
+        })
+        .unwrap();
+    let alias = pages
+        .page_or_try_insert(0, || -> Result<u64, ()> {
+            panic!("do not replace live page")
+        })
+        .unwrap();
+    assert!(Arc::ptr_eq(&page, &alias));
+    assert_eq!(*pages.page_or_try_insert(1, || Ok::<_, ()>(0)).unwrap(), 0);
+}
+
+#[test]
+fn invalid_growth_and_failed_revocation_leave_size_and_population_unchanged() {
+    let mut pages = SharedPages::<u64>::new_resizable(8192, 4096, 2).unwrap();
+    let page = pages.page_or_try_insert(1, || Ok::<_, ()>(42)).unwrap();
+    for (size, error) in [(1, SizeError::Invalid), (12288, SizeError::LimitExceeded)] {
+        assert_eq!(
+            pages.resize_with(size, |_, _| -> Result<(), u8> {
+                panic!("validate before revocation")
+            }),
+            Err(ResizeError::Size(error))
+        );
+        assert_eq!(pages.length(), 8192);
+    }
+    assert_eq!(
+        pages.resize_with(4096, |start, end| {
+            assert_eq!((start, end), (4096, 8192));
+            Err(5u8)
+        }),
+        Err(ResizeError::Revocation(5))
+    );
+    assert_eq!(pages.length(), 8192);
+    assert!(Arc::ptr_eq(
+        &page,
+        &pages
+            .page_or_try_insert(1, || -> Result<u64, ()> {
+                panic!("failed shrink preserves backing")
+            })
+            .unwrap()
+    ));
+}
+
+#[test]
+fn shrink_revokes_before_release_and_regrowth_does_not_resurrect_old_storage() {
+    let freed = Arc::new(AtomicUsize::new(0));
+    let mut pages = SharedPages::new_resizable(8192, 4096, 2).unwrap();
+    let low = pages
+        .page_or_try_insert(0, || {
+            Ok::<_, ()>(Page {
+                bytes: Mutex::new([1; 4096]),
+                freed: freed.clone(),
+            })
+        })
+        .unwrap();
+    let high = pages
+        .page_or_try_insert(1, || {
+            Ok::<_, ()>(Page {
+                bytes: Mutex::new([2; 4096]),
+                freed: freed.clone(),
+            })
+        })
+        .unwrap();
+    drop(high);
+    pages
+        .resize_with(4096, |start, end| -> Result<(), ()> {
+            assert_eq!((start, end), (4096, 8192));
+            assert_eq!(freed.load(Ordering::SeqCst), 0);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(freed.load(Ordering::SeqCst), 1);
+    assert!(Arc::ptr_eq(
+        &low,
+        &pages
+            .page_or_try_insert(0, || -> Result<Page, ()> {
+                panic!("shrink keeps lower pages")
+            })
+            .unwrap()
+    ));
+    pages
+        .resize_with(0, |start, end| -> Result<(), ()> {
+            assert_eq!((start, end), (0, 4096));
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(freed.load(Ordering::SeqCst), 1); // Retained caller reference.
+    pages
+        .resize_with(4096, |_, _| -> Result<(), ()> { panic!("growth") })
+        .unwrap();
+    let fresh = pages
+        .page_or_try_insert(0, || {
+            Ok::<_, ()>(Page {
+                bytes: Mutex::new([0; 4096]),
+                freed: freed.clone(),
+            })
+        })
+        .unwrap();
+    assert!(!Arc::ptr_eq(&low, &fresh));
+    assert!(fresh.bytes.lock().unwrap().iter().all(|byte| *byte == 0));
+    drop(low);
+    drop(fresh);
+    drop(pages);
+    assert_eq!(freed.load(Ordering::SeqCst), 3);
 }
