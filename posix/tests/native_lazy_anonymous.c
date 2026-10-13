@@ -61,6 +61,30 @@ static int check(void) {
     gap[0] = 32;
     gap[8192] = 43;
     if (munmap(gap, 4096) || munmap(gap + 8192, 4096)) return 19;
+    /* Shared backing must survive fork before either side first touches it.
+       The aggregate reservation exceeds physical RAM even for shared maps. */
+    volatile unsigned char *aliases[20] = {0};
+    for (unsigned i = 0; i < 20; ++i) {
+        aliases[i] = mmap(NULL, span, PROT_NONE, MAP_SHARED|MAP_ANONYMOUS, -1, 0);
+        if (aliases[i] == MAP_FAILED) return 20;
+    }
+    child = fork();
+    if (child < 0) return 21;
+    if (!child) {
+        for (unsigned i = 0; i < 20; ++i) {
+            if (mprotect((void *)aliases[i], span, PROT_READ|PROT_WRITE)) _exit(1);
+            if (aliases[i][0] || aliases[i][span-1]) _exit(2);
+            aliases[i][0] = (unsigned char)(i+1);
+            aliases[i][span-1] = (unsigned char)(i+31);
+        }
+        _exit(0);
+    }
+    if (waitpid(child, &status, 0) != child || status) return 22;
+    for (unsigned i = 0; i < 20; ++i) {
+        if (mprotect((void *)aliases[i], span, PROT_READ|PROT_WRITE)) return 23;
+        if (aliases[i][0] != i+1 || aliases[i][span-1] != i+31) return 24;
+        if (munmap((void *)aliases[i], span)) return 25;
+    }
     return 0;
 }
 

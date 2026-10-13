@@ -40,10 +40,11 @@ fn newlib_heap_growth_commits_its_reserved_arena() {
         .split("pub fn memory_unmap(")
         .next()
         .unwrap();
-    assert!(mapping.contains("if present"));
-    // Private accessible arenas use the existing zero-fill fault path. Only
-    // shared anonymous backing remains eagerly materialized before fork.
-    assert!(mapping.contains("if present && shared"));
+    // Shared reservations keep a RAM-object identity before first access.
+    assert!(mapping.contains("SharedMemory::new("));
+    assert!(mapping.contains("size, size / 4096"));
+    assert!(mapping.contains("VmObject::shared_memory(memory)"));
+    assert!(!mapping.contains("map_and_copy_segment_to"));
     assert!(kernel.contains("None => Some(Arc::new([0u8; crate::mem::vm_object::PAGE_BYTES]))"));
 }
 
