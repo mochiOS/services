@@ -44,6 +44,11 @@ fn publishing_identical_complete_runtime_preserves_sdk_mtime() {
     )
     .unwrap();
     fs::write(
+        root.join("runtime/newlib_semaphore.c"),
+        "int semaphore_fixture(void) { return 5; }\n",
+    )
+    .unwrap();
+    fs::write(
         root.join("base.c"),
         "int base_fixture(void) { return 2; }\n",
     )
@@ -103,6 +108,13 @@ fn publishing_identical_complete_runtime_preserves_sdk_mtime() {
     publish();
     let archive = root.join("sdk/lib/libmochi_user_newlib_runtime.a");
     let bytes = fs::read(&archive).unwrap();
+    let members = Command::new("ar").arg("t").arg(&archive).output().unwrap();
+    assert!(members.status.success());
+    assert!(
+        String::from_utf8_lossy(&members.stdout)
+            .lines()
+            .any(|member| member == "newlib_semaphore.o")
+    );
     let modified = fs::metadata(&archive).unwrap().modified().unwrap();
     publish();
     assert_eq!(fs::read(&archive).unwrap(), bytes);
