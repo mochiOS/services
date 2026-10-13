@@ -183,6 +183,56 @@ impl Namespace {
         }
     }
 
+    pub(crate) fn open_null(
+        &self,
+        node: &Node,
+        credentials: Credentials<'_>,
+        read: bool,
+        write: bool,
+        flags: u32,
+    ) -> Result<crate::null_device::NullDescription, i32> {
+        self.validate(node)?;
+        match (self.volumes.get(node.volume as usize), &node.backing) {
+            (Some(Volume::Device(filesystem)), NodeBacking::Device(device)) => {
+                filesystem.open_null(device, credentials, read, write, flags)
+            }
+            _ => Err(95),
+        }
+    }
+
+    pub(crate) fn device_entries(&self, node: &Node) -> Result<Vec<(NodeId, u32, Vec<u8>)>, i32> {
+        self.validate(node)?;
+        if !self.is_directory(node) {
+            return Err(ENOTDIR);
+        }
+        let (filesystem, device) = match (self.volumes.get(node.volume as usize), &node.backing) {
+            (Some(Volume::Device(filesystem)), NodeBacking::Device(device)) => (filesystem, device),
+            _ => return Err(95),
+        };
+        let mut entries = vec![
+            (node.id(), protocol::NODE_TYPE_DIRECTORY, b".".to_vec()),
+            (
+                self.parent(node)?.id(),
+                protocol::NODE_TYPE_DIRECTORY,
+                b"..".to_vec(),
+            ),
+        ];
+        for (name, child) in filesystem.children(device)? {
+            entries.push((
+                NodeId {
+                    volume: node.volume,
+                    inode: child.id(),
+                },
+                filesystem.status(&child, node.volume)?.kind,
+                name,
+            ));
+        }
+        for (name, id) in self.named_children(node)? {
+            entries.push((id, protocol::NODE_TYPE_DIRECTORY, name));
+        }
+        Ok(entries)
+    }
+
     /// Mount configuration belongs to the service holding the volume authority.
     /// No pathname, process identity or service knowledge is sent to the kernel.
     /// Overmount and unmount are deliberately not supported by this operation.

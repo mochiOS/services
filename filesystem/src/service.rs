@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::namespace::{Namespace, Node};
+use crate::open_table::{DeviceOpen, OpenTable};
 use crate::path_walk;
 use ext4plus::dir::Dir;
 use ext4plus::error::Ext4Error;
@@ -11,6 +12,9 @@ use ext4plus::path::PathBuf;
 use ext4plus::{DirEntryName, Ext4, FileType, FollowSymlinks, Metadata};
 use mochios_filesystem_protocol as protocol;
 type Resolution = path_walk::Resolution<Inode>;
+
+#[path = "device_operations.rs"]
+mod device_operations;
 
 const EIO: i32 = 5;
 const EXDEV: i32 = 18;
@@ -54,12 +58,12 @@ pub struct FilesystemService {
     namespace: Option<Namespace>,
     nodes: HashMap<u64, String>,
     node_ids: HashMap<String, u64>,
-    opens: HashMap<u64, OpenFile>,
+    opens: OpenTable,
     orphans: HashMap<u64, Orphan>,
     next_open_id: u64,
 }
 
-struct OpenFile {
+pub(crate) struct OpenFile {
     node_id: u64,
     volume: u32,
     filesystem: Ext4,
@@ -94,7 +98,7 @@ impl FilesystemService {
             namespace: None,
             nodes,
             node_ids,
-            opens: HashMap::new(),
+            opens: OpenTable::default(),
             orphans: HashMap::new(),
             next_open_id: 1,
         }
@@ -299,6 +303,17 @@ impl FilesystemService {
         } else {
             FollowSymlinks::All
         };
+        if let Some(resolution) =
+            self.resolve_namespace_path(payload, anchors, follow, uid, gid, groups)?
+        {
+            let node = match &resolution {
+                path_walk::Resolution::Found { inode, .. } => inode,
+                path_walk::Resolution::Missing { parent, .. } => parent,
+            };
+            if node.device_node().is_some() {
+                return self.open_device_at(request, resolution, credentials);
+            }
+        }
         let (resolution, filesystem, volume) =
             self.resolve_open_path(payload, anchors, follow, uid, gid, groups)?;
         let (inode, created) = match resolution {
@@ -865,6 +880,19 @@ impl FilesystemService {
         } else {
             FollowSymlinks::All
         };
+        if let Some(resolution) =
+            self.resolve_namespace_path(payload, anchors, follow, uid, gid, groups)?
+        {
+            match resolution {
+                path_walk::Resolution::Found { inode, .. } if inode.device_node().is_some() => {
+                    return self.device_status_response(request, &inode);
+                }
+                path_walk::Resolution::Missing { parent, .. } if parent.device_node().is_some() => {
+                    return Err(ENOENT);
+                }
+                _ => {}
+            }
+        }
         let (inode, _, volume) =
             self.resolve_scoped_inode(payload, anchors, follow, uid, gid, groups)?;
         let node_id = scoped_node_id(volume, &inode);
@@ -876,6 +904,9 @@ impl FilesystemService {
     pub fn stat_handle(&self, request: protocol::Header, open_id: u64) -> Result<Response, i32> {
         if request.flags != 0 {
             return Err(EINVAL);
+        }
+        if let Some(open) = self.opens.device(open_id) {
+            return self.device_status_response(request, &open.node);
         }
         let open = self.opens.get(&open_id).ok_or(EBADF)?;
         let node_id = open.node_id;
@@ -902,11 +933,9 @@ impl FilesystemService {
             return Err(EINVAL);
         }
         if let Some(namespace) = &self.namespace {
-            let root = self.opens.get(&root_open_id).ok_or(EBADF)?;
-            let current = self.opens.get(&directory_open_id).ok_or(EBADF)?;
             let payload = namespace.directory_path(
-                namespace.retained_node(root.volume, root.inode.clone())?,
-                namespace.retained_node(current.volume, current.inode.clone())?,
+                self.retained_namespace_node(root_open_id)?,
+                self.retained_namespace_node(directory_open_id)?,
             )?;
             let mut response = self.success(request);
             response.header.length = payload.len() as u32;
@@ -998,6 +1027,31 @@ impl FilesystemService {
         } else {
             FollowSymlinks::All
         };
+        if let Some(resolution) =
+            self.resolve_namespace_path(payload, anchors, follow, uid, gid, groups)?
+        {
+            if let path_walk::Resolution::Missing { parent, .. } = &resolution {
+                if parent.device_node().is_some() {
+                    return Err(ENOENT);
+                }
+            }
+            if let path_walk::Resolution::Found { inode, .. } = resolution {
+                if inode.device_node().is_some() {
+                    let status = self.namespace.as_ref().ok_or(EIO)?.device_status(&inode)?;
+                    let requested = request.flags
+                        & (protocol::ACCESS_AT_READ | protocol::ACCESS_AT_WRITE
+                            | protocol::ACCESS_AT_EXECUTE);
+                    return if permission_allows(
+                        u16::try_from(status.mode).map_err(|_| EIO)?, status.kind,
+                        status.uid, status.gid, uid, gid, groups, requested,
+                    ) {
+                        Ok(self.success(request))
+                    } else {
+                        Err(EACCES)
+                    };
+                }
+            }
+        }
         let (inode, _, _) =
             self.resolve_scoped_inode(payload, anchors, follow, uid, gid, groups)?;
         let requested = request.flags
@@ -1067,7 +1121,8 @@ impl FilesystemService {
         gid: u32,
         groups: &[u32],
     ) -> Result<(Resolution, Ext4, u32), i32> {
-        let Some(namespace) = &self.namespace else {
+        let Some(resolution) = self.resolve_namespace_path(path, anchors, follow, uid, gid, groups)?
+        else {
             let (root, base) = self.resolve_anchors(path, anchors)?;
             return Ok((
                 self.resolve_path_at(root, base, path, follow, uid, gid, groups)?,
@@ -1075,29 +1130,7 @@ impl FilesystemService {
                 0,
             ));
         };
-        let retained = |open_id| -> Result<Node, i32> {
-            let open: &OpenFile = self.opens.get(&open_id).ok_or(EBADF)?;
-            namespace.retained_node(open.volume, open.inode.clone())
-        };
-        let root = match anchors.root_open_id {
-            Some(open_id) => retained(open_id)?,
-            None => namespace.root(),
-        };
-        let base = if path.first() == Some(&b'/') {
-            root.clone()
-        } else {
-            match anchors.base_open_id {
-                Some(open_id) => retained(open_id)?,
-                None => root.clone(),
-            }
-        };
-        let resolution = namespace.resolve(
-            root,
-            base,
-            path,
-            follow == FollowSymlinks::All,
-            path_walk::Credentials { uid, gid, groups },
-        )?;
+        let namespace = self.namespace.as_ref().ok_or(EIO)?;
         let node = match &resolution {
             path_walk::Resolution::Found { inode, .. } => inode,
             path_walk::Resolution::Missing { parent, .. } => parent,
@@ -1165,6 +1198,9 @@ impl FilesystemService {
     }
 
     pub fn provider_read(&mut self, open_id: u64, length: usize) -> Result<Vec<u8>, i32> {
+        if self.opens.device(open_id).is_some() {
+            return self.read_device(open_id, length.min(mnu_abi::provider::MAX_DATA_LEN));
+        }
         let open = self.opens.get(&open_id).ok_or(EBADF)?;
         if open.file.is_none() {
             let inode = open.inode.clone();
@@ -1205,6 +1241,10 @@ impl FilesystemService {
         if length > mnu_abi::provider::MAX_POSITIONED_READ_LEN {
             return Err(EINVAL);
         }
+        if let Some(open) = self.opens.device(open_id) {
+            open.null.as_ref().ok_or(EISDIR)?.read_into(&mut [])?;
+            return Ok((Vec::new(), 0));
+        }
         let open = self.opens.get(&open_id).ok_or(EBADF)?;
         if open.file.is_none() {
             return Err(EISDIR);
@@ -1224,6 +1264,10 @@ impl FilesystemService {
     ) -> Result<(usize, u64), i32> {
         if output.is_empty() || output.len() > mnu_abi::provider::MAX_SHARED_READ_LEN {
             return Err(EINVAL);
+        }
+        if let Some(open) = self.opens.device(open_id) {
+            return open.null.as_ref().ok_or(EISDIR)?
+                .read_into(output).map(|count| (count, 0));
         }
         let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
         let file = open.file.as_mut().ok_or(EISDIR)?;
@@ -1250,6 +1294,10 @@ impl FilesystemService {
     ) -> Result<(usize, u64), i32> {
         if payload.len() > mnu_abi::provider::MAX_DATA_LEN {
             return Err(EINVAL);
+        }
+        if let Some(open) = self.opens.device(open_id) {
+            return open.null.as_ref().ok_or(EISDIR)?
+                .write(payload).map(|count| (count, 0));
         }
         let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
         let file = open.file.as_mut().ok_or(EISDIR)?;
@@ -1280,6 +1328,10 @@ impl FilesystemService {
         offset: u64,
         length: usize,
     ) -> Result<Vec<u8>, i32> {
+        if let Some(open) = self.opens.device(open_id) {
+            open.null.as_ref().ok_or(EISDIR)?.read_at(&mut [], offset)?;
+            return Ok(Vec::new());
+        }
         let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
         let file = open.file.as_mut().ok_or(EISDIR)?;
         let mut payload = vec![0u8; length.min(mnu_abi::provider::MAX_DATA_LEN)];
@@ -1301,6 +1353,9 @@ impl FilesystemService {
         if payload.len() > mnu_abi::provider::MAX_DATA_LEN {
             return Err(EINVAL);
         }
+        if let Some(open) = self.opens.device(open_id) {
+            return open.null.as_ref().ok_or(EISDIR)?.write_at(payload, offset);
+        }
         let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
         let file = open.file.as_mut().ok_or(EISDIR)?;
         crate::positioned_io::transfer(offset, payload.len(), true, |done, position, _| {
@@ -1310,6 +1365,9 @@ impl FilesystemService {
     }
 
     pub fn provider_sync(&self, open_id: u64) -> Result<(), i32> {
+        if self.opens.device(open_id).is_some() {
+            return Err(EINVAL);
+        }
         let open = self.opens.get(&open_id).ok_or(EBADF)?;
         if open.file.is_none() {
             return Err(EISDIR);
@@ -1318,6 +1376,9 @@ impl FilesystemService {
     }
 
     pub fn provider_memory_object(&self, open_id: u64) -> Result<u64, i32> {
+        if self.opens.device(open_id).is_some() {
+            return Err(ENOTSUP);
+        }
         let open = self.opens.get(&open_id).ok_or(EBADF)?;
         if open.file.is_none() || open.node_id == 0 {
             // A directory remains a readable provider stream, but does not
@@ -1336,6 +1397,26 @@ impl FilesystemService {
     }
 
     pub fn provider_seek(&mut self, open_id: u64, offset: i64, basis: u64) -> Result<u64, i32> {
+        if let Some(open) = self.opens.device_mut(open_id) {
+            if let Some(null) = &open.null {
+                let basis = match basis {
+                    mnu_abi::HANDLE_SEEK_START => 0,
+                    mnu_abi::HANDLE_SEEK_CURRENT => 1,
+                    mnu_abi::HANDLE_SEEK_END => 2,
+                    _ => return Err(EINVAL),
+                };
+                return null.seek(offset, basis);
+            }
+            let base = match basis {
+                mnu_abi::HANDLE_SEEK_START => 0,
+                mnu_abi::HANDLE_SEEK_CURRENT => i128::from(open.offset),
+                mnu_abi::HANDLE_SEEK_END => return Err(EISDIR),
+                _ => return Err(EINVAL),
+            };
+            let next = base.checked_add(i128::from(offset)).ok_or(EINVAL)?;
+            open.offset = u64::try_from(next).map_err(|_| EINVAL)?;
+            return Ok(open.offset);
+        }
         let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
         let current = i128::from(open.offset);
         let base = match basis {
@@ -1364,6 +1445,10 @@ impl FilesystemService {
     }
 
     fn close(&mut self, request: protocol::Header) -> Result<Response, i32> {
+        if self.opens.device(request.open_id).is_some() {
+            self.opens.remove(&request.open_id);
+            return Ok(self.success(request));
+        }
         let open = self.opens.get(&request.open_id).ok_or(EBADF)?;
         let node_id = open.node_id;
         let is_last_open = self
@@ -2738,6 +2823,9 @@ impl FilesystemService {
     }
 
     pub fn sync_handle(&self, request: protocol::Header, open_id: u64) -> Result<Response, i32> {
+        if self.opens.device(open_id).is_some() {
+            return Err(EINVAL);
+        }
         self.opens.get(&open_id).ok_or(EBADF)?;
         Ok(self.success(request))
     }
@@ -2748,6 +2836,11 @@ impl FilesystemService {
         open_id: u64,
     ) -> Result<Response, i32> {
         let mut response = self.success(request);
+        if let Some(open) = self.opens.device(open_id) {
+            response.header.flags = open.null.as_ref()
+                .map_or(open.directory_flags, |null| null.flags());
+            return Ok(response);
+        }
         response.header.flags = self.opens.get(&open_id).ok_or(EBADF)?.status_flags;
         Ok(response)
     }
@@ -2759,6 +2852,14 @@ impl FilesystemService {
     ) -> Result<Response, i32> {
         if request.flags & !protocol::OPEN_STATUS_FLAGS_ALL != 0 {
             return Err(EINVAL);
+        }
+        if let Some(open) = self.opens.device_mut(open_id) {
+            if let Some(null) = &mut open.null {
+                null.set_flags(request.flags)?;
+            } else {
+                open.directory_flags = request.flags;
+            }
+            return Ok(self.success(request));
         }
         self.opens.get_mut(&open_id).ok_or(EBADF)?.status_flags = request.flags;
         Ok(self.success(request))

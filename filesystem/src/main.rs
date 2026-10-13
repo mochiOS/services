@@ -70,6 +70,13 @@ fn main() {
         let _ = platform::service_ready::notify(ready_target, -1);
         platform::process::exit(1);
     }
+    if let Err(error) = service.mount_devices(
+        b"/dev", filesystem_service::devfs::DeviceFilesystem::default(),
+    ) {
+        platform::logln!("filesystem.service: device mount failed: {error}");
+        let _ = platform::service_ready::notify(ready_target, -1);
+        platform::process::exit(1);
+    }
     let endpoint = match platform::ipc::create_handle() {
         Ok(endpoint) => endpoint,
         Err(_) => {

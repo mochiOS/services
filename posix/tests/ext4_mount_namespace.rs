@@ -125,6 +125,301 @@ fn walk(namespace: &Namespace, base: Node, path: &[u8]) -> Node {
     found(namespace.resolve(namespace.root(), base, path, true, credentials()))
 }
 
+fn device_open(
+    service: &mut FilesystemService,
+    path: &[u8],
+    flags: u32,
+    anchors: PathAnchors,
+) -> Result<u64, i32> {
+    service
+        .open_at(
+            protocol::Header {
+                flags,
+                ..protocol::Header::default()
+            },
+            path,
+            anchors,
+            root_credentials(),
+        )
+        .map(|response| response.header.open_id)
+}
+
+#[test]
+fn device_provider_uses_one_id_space_and_never_allocates_regular_file_backing() {
+    let fixture = Fixture::new();
+    let mut service = FilesystemService::new(fixture.volume("device-provider"));
+    service
+        .mount_devices(
+            b"/dev",
+            filesystem_service::devfs::DeviceFilesystem::default(),
+        )
+        .unwrap();
+    let disk = device_open(
+        &mut service,
+        b"/file",
+        protocol::OPEN_AT_READ,
+        PathAnchors::default(),
+    )
+    .unwrap();
+    let reader = device_open(
+        &mut service,
+        b"/dev/null",
+        protocol::OPEN_AT_READ,
+        PathAnchors::default(),
+    )
+    .unwrap();
+    let writer = device_open(
+        &mut service,
+        b"/dev/null",
+        protocol::OPEN_AT_WRITE,
+        PathAnchors::default(),
+    )
+    .unwrap();
+    assert_ne!(disk, reader);
+    assert_ne!(reader, writer);
+    assert_eq!(
+        service.provider_read(disk, 100).unwrap(),
+        b"device-provider"
+    );
+    assert_eq!(service.provider_read(reader, 4096).unwrap(), b"");
+    assert_eq!(
+        service.provider_read_at(reader, u64::MAX, 4096).unwrap(),
+        b""
+    );
+    let mut storage = [42; 64];
+    assert_eq!(service.provider_read_into(reader, &mut storage), Ok((0, 0)));
+    assert_eq!(storage, [42; 64]);
+    assert_eq!(service.provider_write(reader, b"x"), Err(13));
+    assert_eq!(service.provider_read(writer, 1), Err(13));
+    assert_eq!(
+        service.provider_write_with_offset(writer, b"discard"),
+        Ok((7, 0))
+    );
+    assert_eq!(
+        service.provider_write_at(writer, u64::MAX, b"discard"),
+        Ok(7)
+    );
+    for basis in [
+        mnu_abi::HANDLE_SEEK_START,
+        mnu_abi::HANDLE_SEEK_CURRENT,
+        mnu_abi::HANDLE_SEEK_END,
+    ] {
+        assert_eq!(service.provider_seek(writer, i64::MIN, basis), Ok(0));
+    }
+    assert_eq!(service.provider_memory_object(reader), Err(95));
+    assert_eq!(service.provider_sync(writer), Err(22));
+    let status = service
+        .stat_handle(protocol::Header::default(), writer)
+        .unwrap();
+    let status = protocol::decode_node_status(&status.payload).unwrap();
+    assert_eq!(
+        (
+            status.mode,
+            status.special_device,
+            status.size,
+            status.node_id
+        ),
+        (0o020666, 259, 0, (1 << 32) | 2)
+    );
+    service
+        .set_flags_handle(
+            protocol::Header {
+                flags: protocol::OPEN_STATUS_NONBLOCK,
+                ..protocol::Header::default()
+            },
+            writer,
+        )
+        .unwrap();
+    assert_eq!(
+        service
+            .get_flags_handle(protocol::Header::default(), writer)
+            .unwrap()
+            .header
+            .flags,
+        protocol::OPEN_STATUS_NONBLOCK
+    );
+    assert_eq!(
+        service
+            .get_flags_handle(protocol::Header::default(), reader)
+            .unwrap()
+            .header
+            .flags,
+        0
+    );
+    service.provider_close(reader).unwrap();
+    assert_eq!(service.provider_read(reader, 1), Err(9));
+    assert_eq!(service.provider_close(reader), Err(9));
+    assert_eq!(service.provider_write(writer, b"still open"), Ok(10));
+}
+
+#[test]
+fn device_directory_handles_support_relative_open_cwd_and_confined_roots() {
+    let fixture = Fixture::new();
+    let mut service = FilesystemService::new(fixture.volume("device-directories"));
+    service
+        .mount_devices(
+            b"/mount",
+            filesystem_service::devfs::DeviceFilesystem::default(),
+        )
+        .unwrap();
+    let root = device_open(
+        &mut service,
+        b"/",
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+        PathAnchors::default(),
+    )
+    .unwrap();
+    let directory = device_open(
+        &mut service,
+        b"/mount",
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+        PathAnchors::default(),
+    )
+    .unwrap();
+    let path = service
+        .path_handle(protocol::Header::default(), root, directory)
+        .unwrap();
+    assert_eq!(path.payload, b"/mount");
+    let relative = device_open(
+        &mut service,
+        b"null",
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_BASE_ATTACHED,
+        PathAnchors {
+            root_open_id: None,
+            base_open_id: Some(directory),
+        },
+    )
+    .unwrap();
+    assert_eq!(service.provider_read(relative, 1).unwrap(), b"");
+    let confined = device_open(
+        &mut service,
+        b"../../null",
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_ROOT_ATTACHED | protocol::OPEN_AT_BASE_ATTACHED,
+        PathAnchors {
+            root_open_id: Some(directory),
+            base_open_id: Some(directory),
+        },
+    )
+    .unwrap();
+    assert_eq!(service.provider_read(confined, 1).unwrap(), b"");
+    let parent = device_open(
+        &mut service,
+        b"../file",
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_BASE_ATTACHED,
+        PathAnchors {
+            root_open_id: None,
+            base_open_id: Some(directory),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        service.provider_read(parent, 100).unwrap(),
+        b"device-directories"
+    );
+    let mut names = Vec::new();
+    loop {
+        let bytes = service
+            .provider_read(directory, protocol::DIRENT_HEADER_LEN + 4)
+            .unwrap();
+        if bytes.is_empty() {
+            break;
+        }
+        let (_, name, length) = protocol::decode_dir_entry(&bytes).unwrap();
+        assert_eq!(length, bytes.len());
+        names.push(name.to_vec());
+    }
+    assert_eq!(names, vec![b".".to_vec(), b"..".to_vec(), b"null".to_vec()]);
+    assert_eq!(
+        service.provider_seek(directory, 0, mnu_abi::HANDLE_SEEK_START),
+        Ok(0)
+    );
+    assert!(!service.provider_read(directory, 4096).unwrap().is_empty());
+    assert_eq!(service.provider_write(directory, b"x"), Err(21));
+}
+
+#[test]
+fn device_path_metadata_and_open_flags_do_not_bypass_directory_or_exclusive_checks() {
+    let fixture = Fixture::new();
+    let mut service = FilesystemService::new(fixture.volume("device-flags"));
+    service
+        .mount_devices(
+            b"/dev",
+            filesystem_service::devfs::DeviceFilesystem::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        device_open(
+            &mut service,
+            b"/dev/null",
+            protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+            PathAnchors::default()
+        ),
+        Err(20)
+    );
+    assert_eq!(
+        device_open(
+            &mut service,
+            b"/dev",
+            protocol::OPEN_AT_WRITE,
+            PathAnchors::default()
+        ),
+        Err(21)
+    );
+    assert_eq!(
+        device_open(
+            &mut service,
+            b"/dev/null",
+            protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE | protocol::OPEN_AT_EXCLUSIVE,
+            PathAnchors::default()
+        ),
+        Err(17)
+    );
+    assert_eq!(
+        device_open(
+            &mut service,
+            b"/dev/missing",
+            protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+            PathAnchors::default()
+        ),
+        Err(30)
+    );
+    let status = service
+        .stat_at(
+            protocol::Header::default(),
+            b"/dev/null",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    let status = protocol::decode_node_status(&status.payload).unwrap();
+    assert_eq!(status.mode, 0o020666);
+    assert!(
+        service
+            .access_at(
+                protocol::Header {
+                    flags: protocol::ACCESS_AT_READ | protocol::ACCESS_AT_WRITE,
+                    ..protocol::Header::default()
+                },
+                b"/dev/null",
+                PathAnchors::default(),
+                root_credentials()
+            )
+            .is_ok()
+    );
+    assert!(matches!(
+        service.access_at(
+            protocol::Header {
+                flags: protocol::ACCESS_AT_EXECUTE,
+                ..protocol::Header::default()
+            },
+            b"/dev/null",
+            PathAnchors::default(),
+            root_credentials()
+        ),
+        Err(13)
+    ));
+}
+
 #[test]
 fn device_mounts_share_namespace_traversal_without_ext4_inode_aliases() {
     let fixture = Fixture::new();

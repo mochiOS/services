@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "native-object-delivery: FAIL line %d\n", __LINE__); return 1; } } while (0)
@@ -83,6 +84,21 @@ static int object_delivery_probe(void) {
     CHECK(unlink(path) == 0);
     CHECK(lseek(fd, 0, SEEK_SET) == 0 && read(fd, data, sizeof(data)) == 10);
     CHECK(close(fd) == 0);
+    /* Real userspace devfs through ordinary POSIX API and FileHandle fast path. */
+    fd = open("/dev/null", O_RDWR);
+    CHECK(fd >= 0);
+    struct stat metadata;
+    CHECK(fstat(fd, &metadata) == 0 && S_ISCHR(metadata.st_mode));
+    CHECK(write(fd, "discarded", 9) == 9);
+    memset(data, 42, sizeof(data));
+    CHECK(read(fd, data, sizeof(data)) == 0 && data[0] == 42);
+    CHECK(lseek(fd, 123, SEEK_SET) == 0);
+    int duplicate = dup(fd);
+    CHECK(duplicate >= 0 && fcntl(duplicate, F_SETFL, O_NONBLOCK) == 0);
+    CHECK(fcntl(fd, F_GETFL) & O_NONBLOCK);
+    CHECK(close(fd) == 0 && write(duplicate, "alive", 5) == 5);
+    CHECK(close(duplicate) == 0);
+    fprintf(stderr, "native-devfs: PASS null read/write, metadata, seek and duplicated description flags\n");
     fprintf(stderr, "native-object-delivery: PASS forged flags and raw object-ID requests rejected; native file I/O and unlink lifetime preserved\n");
     return 0;
 }

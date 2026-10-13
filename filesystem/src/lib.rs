@@ -1,6 +1,7 @@
 pub mod ext4;
 pub mod devfs;
 pub mod namespace;
+mod open_table;
 pub mod null_device;
 pub mod partition;
 pub mod path_walk;
