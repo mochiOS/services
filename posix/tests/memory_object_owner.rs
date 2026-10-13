@@ -12,6 +12,11 @@ mod compositor_received_buffer;
 mod display_shared_buffer;
 #[path = "../../linux/src/compositor_buffer.rs"]
 mod linux_compositor_buffer;
+#[path = "../../linux/src/stage_buffer.rs"]
+mod linux_stage_buffer;
+#[path = "../../mboot-agent/src/stage_mapping.rs"]
+mod agent_stage_mapping;
+type HostError = CompositorError;
 #[path = "../../../libraries/viewkit/src/platform/mochios/buffer.rs"]
 mod viewkit_buffer;
 
@@ -85,6 +90,92 @@ thread_local! { static STATE: RefCell<State> = RefCell::new(State::default()); }
 
 fn reset() {
     STATE.with(|state| *state.borrow_mut() = State::default());
+}
+
+#[test]
+fn stage_sender_and_receiver_own_only_authorized_bounded_ram() {
+    reset();
+    let mut storage = vec![0x71u8; 8192];
+    STATE.with(|state| state.borrow_mut().map_address = Some(storage.as_mut_ptr() as u64));
+    let sender = linux_stage_buffer::SharedStageBuffer::new(9, 4096).unwrap();
+    assert_eq!(sender.address, storage.as_mut_ptr() as u64);
+    assert_eq!(sender.capacity, 4096);
+    let wire = STATE.with(|state| state.borrow().offers[0].1.clone());
+    let mut attachments = agent_stage_mapping::Attachments::default();
+    attachments.handles.count = 1;
+    attachments.handles.handles[0].handle = 19;
+    let receiver =
+        agent_stage_mapping::SharedStageMapping::receive(9, true, &wire, &mut attachments, 4096)
+            .unwrap();
+    assert!(attachments.is_empty());
+    assert_eq!(receiver.snapshot(9, 32).unwrap(), vec![0x71; 32]);
+    assert!(receiver.snapshot(10, 32).is_err());
+    assert!(receiver.snapshot(9, 0).is_err());
+    assert!(receiver.snapshot(9, 4097).is_err());
+    drop(sender);
+    assert_eq!(receiver.snapshot(9, 1).unwrap(), vec![0x71]);
+    drop(receiver);
+    drop(attachments);
+    for mode in 0..7 {
+        reset();
+        let mut attachments = agent_stage_mapping::Attachments::default();
+        attachments.handles.count = if mode == 1 { 2 } else { 1 };
+        attachments.handles.handles[0].handle = 19;
+        if mode == 1 {
+            attachments.handles.handles[1].handle = 20;
+        }
+        if mode == 2 {
+            STATE.with(|state| state.borrow_mut().extra_rights = mnu_abi::HANDLE_RIGHT_WRITE);
+        }
+        if mode == 5 {
+            STATE.with(|state| state.borrow_mut().fail_length = true);
+        }
+        if mode == 6 {
+            attachments.handles.delivery_flags = 1;
+        }
+        assert!(
+            agent_stage_mapping::SharedStageMapping::receive(
+                9,
+                mode != 0,
+                if mode == 4 { &wire[..31] } else { &wire },
+                &mut attachments,
+                if mode == 3 { 1 } else { 4096 }
+            )
+            .is_err()
+        );
+        drop(attachments);
+        STATE.with(|state| {
+            let state = state.borrow();
+            assert!(
+                !state
+                    .calls
+                    .iter()
+                    .any(|call| call.0 == syscall::SyscallNumber::MemoryMap)
+            );
+            assert_eq!(
+                state
+                    .calls
+                    .iter()
+                    .filter(|call| call.0 == syscall::SyscallNumber::HandleClose)
+                    .count(),
+                if mode == 1 { 2 } else { 1 }
+            );
+        });
+    }
+    reset();
+    STATE.with(|state| state.borrow_mut().fail_send = true);
+    assert!(linux_stage_buffer::SharedStageBuffer::new(9, 4096).is_err());
+    STATE.with(|state| {
+        let state = state.borrow();
+        assert_eq!(
+            state.calls[state.calls.len() - 2].0,
+            syscall::SyscallNumber::MemoryUnmap
+        );
+        assert_eq!(
+            state.calls.last().unwrap().0,
+            syscall::SyscallNumber::HandleClose
+        );
+    });
 }
 
 #[test]
@@ -510,7 +601,7 @@ fn native_compositor_gate_uses_current_ipc_abi() {
 
 mod syscall {
     pub use mnu_abi::{
-        EACCES, EINVAL, EIO, HANDLE_RIGHT_MAP, HANDLE_RIGHT_READ, MEMORY_ACCESS_ALL,
+        EACCES, EINVAL, EIO, ENOMEM, HANDLE_RIGHT_MAP, HANDLE_RIGHT_READ, MEMORY_ACCESS_ALL,
         MEMORY_ACCESS_READ, MEMORY_ACCESS_WRITE, MEMORY_MAP_SHARED, SyscallNumber,
     };
     pub use mochi_user_platform::syscall::{SysError, SysResult};

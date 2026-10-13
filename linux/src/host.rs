@@ -3,6 +3,9 @@ use mboot_protocol::{
     MessageType, STAGE_SHARED_CHUNK_LEN, STAGE_SHARED_CHUNK_MAGIC, decode_line, encode_to_string,
 };
 use mochi_user_platform as platform;
+#[path = "stage_buffer.rs"]
+mod stage_buffer;
+use stage_buffer::SharedStageBuffer;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::os::fd::AsRawFd;
@@ -12,7 +15,6 @@ use crate::codec::{decode_hex, decode_rle32};
 const AGENT_NAME: &str = "mboot-agent.service";
 const FRAME_CHUNK_BYTES: u64 = 1536;
 const STAGE_CHUNK_BYTES: usize = mboot_protocol::MAX_BULK_STAGE_BYTES;
-const PAGE_SIZE: usize = 4096;
 const PORTAL_CHUNK_BYTES: usize = 1536;
 const PORTAL_EXPORT_CHUNK_BYTES: usize = 1536;
 
@@ -53,11 +55,6 @@ pub(crate) struct HostClient {
     agent: u64,
     next_request_id: u64,
     stage_buffer: Option<SharedStageBuffer>,
-}
-
-struct SharedStageBuffer {
-    address: u64,
-    capacity: usize,
 }
 
 impl HostClient {
@@ -452,15 +449,7 @@ impl HostClient {
         if self.stage_buffer.is_some() {
             return Ok(());
         }
-        let page_count = STAGE_CHUNK_BYTES.div_ceil(PAGE_SIZE);
-        let address = platform::memory::alloc_shared_page_count(page_count)
-            .map_err(|_| HostError::Unavailable)?;
-        platform::ipc::send_page_count(self.agent, page_count, address)
-            .map_err(|_| HostError::Unavailable)?;
-        self.stage_buffer = Some(SharedStageBuffer {
-            address,
-            capacity: page_count * PAGE_SIZE,
-        });
+        self.stage_buffer = Some(SharedStageBuffer::new(self.agent, STAGE_CHUNK_BYTES)?);
         Ok(())
     }
 

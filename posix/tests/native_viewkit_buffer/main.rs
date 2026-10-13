@@ -2,10 +2,15 @@ use mochi_user_platform as platform;
 use mochi_user_platform::{ipc, memory_object, syscall};
 use tiny_skia::Pixmap;
 
+#[path = "../../../mboot-agent/src/stage_mapping.rs"]
+mod agent_stage_mapping;
 #[path = "../../../../libraries/viewkit/src/platform/mochios/buffer.rs"]
 mod buffer;
 #[path = "../../../linux/src/compositor_buffer.rs"]
 mod linux_buffer;
+#[path = "../../../linux/src/stage_buffer.rs"]
+mod linux_stage_buffer;
+type HostError = CompositorError;
 
 #[derive(Debug)]
 enum CompositorError {
@@ -55,6 +60,32 @@ fn rpc(endpoint: u64, request: &[u8]) -> Result<[u8; 16], String> {
 }
 
 fn probe() -> Result<u64, String> {
+    let stage_endpoint = ipc::create().map_err(|error| format!("stage endpoint {error:?}"))?;
+    let stage = linux_stage_buffer::SharedStageBuffer::new(stage_endpoint, 4096)
+        .map_err(|error| format!("stage source {error:?}"))?;
+    unsafe {
+        core::ptr::write_volatile(stage.address as *mut u8, 0x71);
+    }
+    drop(stage);
+    let mut wire = [0u8; 32];
+    let mut attached = agent_stage_mapping::Attachments::default();
+    let delivered = ipc::wait_object_handles(stage_endpoint, &mut wire, &mut attached.handles)
+        .map_err(|error| format!("stage receive {error:?}"))?;
+    if delivered as u32 != 32 {
+        return Err("stage offer length".into());
+    }
+    let sender = delivered >> 32;
+    let mapping =
+        agent_stage_mapping::SharedStageMapping::receive(sender, true, &wire, &mut attached, 4096)
+            .map_err(|error| format!("stage mapping {error:#x}"))?;
+    if mapping
+        .snapshot(sender, 1)
+        .map_err(|error| format!("stage snapshot {error:#x}"))?
+        != [0x71]
+    {
+        return Err("stage content mismatch".into());
+    }
+    drop(mapping);
     let _ = mochi_user_platform::logger::init_from_env();
     let target = mochi_user_platform::service_ready::take_bootstrap_target()
         .ok_or("missing ready target")?;
@@ -151,7 +182,7 @@ fn probe() -> Result<u64, String> {
 fn main() {
     let result = probe();
     let line = format!(
-        "viewkit-buffer: {} ViewKit + Linux RAM offers, sender drop, 3 commits, destroy {result:?}\n",
+        "viewkit-buffer: {} ViewKit + Linux + staging RAM offers, sender drop, 3 commits, destroy {result:?}\n",
         if result.is_ok() { "PASS" } else { "FAIL" }
     );
     let _ = syscall::call2(

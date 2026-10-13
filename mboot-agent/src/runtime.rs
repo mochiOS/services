@@ -5,6 +5,9 @@ use mboot_protocol::{
     STAGE_SHARED_CHUNK_MAGIC, decode_line, encode_to_string,
 };
 use mochi_user_platform as platform;
+#[path = "stage_mapping.rs"]
+mod stage_mapping;
+use stage_mapping::{Attachments, SharedStageMapping};
 
 use crate::agent::{Agent, AgentError, ExternalRequestError, ReadyStage};
 use crate::transport::TransportError;
@@ -19,13 +22,6 @@ const IPC_MESSAGE_LEN: usize = mboot_protocol::MAX_IPC_MESSAGE_LEN;
 struct PendingDeveloperRequest {
     sender: u64,
     request_id: u64,
-}
-
-#[derive(Clone, Copy)]
-struct SharedStageMapping {
-    address: u64,
-    length: usize,
-    owner: u64,
 }
 
 pub fn run() -> ! {
@@ -118,7 +114,10 @@ fn receive_ipc_request(
         return;
     }
     let mut request = [0u8; IPC_MESSAGE_LEN];
-    let received = match platform::ipc::try_wait(&mut request) {
+    let mut attachments = Attachments::default();
+    let received = match platform::ipc::try_wait_object_handles(
+        &mut request, &mut attachments.handles,
+    ) {
         Ok(received) => received,
         Err(error) if error.raw() == mochi_user_syscall::EAGAIN as i64 => return,
         Err(_) => return,
@@ -135,7 +134,12 @@ fn receive_ipc_request(
         message,
         streaming_stage,
         shared_stage_mapping,
+        &mut attachments,
     ) {
+        return;
+    }
+    if !attachments.is_empty() {
+        reply_errno(sender, mochi_user_syscall::EINVAL);
         return;
     }
     if let Ok((token, stage)) = platform::service_ready::decode_notification(message) {
@@ -208,24 +212,23 @@ fn handle_shared_stage_ipc(
     message: &[u8],
     streaming_stage: &mut bool,
     mapping: &mut Option<SharedStageMapping>,
+    attachments: &mut Attachments,
 ) -> bool {
-    if message.len() == 16 && linux_service_owns_sender(sender) {
-        let address = u64::from_le_bytes(message[..8].try_into().unwrap());
-        let length = u64::from_le_bytes(message[8..16].try_into().unwrap());
-        if address & 0xfff == 0
-            && length > 0
-            && let Ok(length) = usize::try_from(length)
-        {
-            *mapping = Some(SharedStageMapping {
-                address,
-                length,
-                owner: sender,
-            });
+    if message.starts_with(&platform::memory_object::ReadOnlyOffer::MAGIC) {
+        if let Ok(received) = SharedStageMapping::receive(
+            sender, linux_service_owns_sender(sender), message, attachments,
+            mboot_protocol::MAX_BULK_STAGE_BYTES as u64,
+        ) {
+            *mapping = Some(received);
         }
         return true;
     }
     if message.len() != STAGE_SHARED_CHUNK_LEN || message[..8] != STAGE_SHARED_CHUNK_MAGIC {
         return false;
+    }
+    if !attachments.is_empty() {
+        reply_errno(sender, mochi_user_syscall::EINVAL);
+        return true;
     }
     if !linux_service_owns_sender(sender) {
         reply_errno(sender, mochi_user_syscall::EACCES);
@@ -234,7 +237,7 @@ fn handle_shared_stage_ipc(
     let instance = u64::from_le_bytes(message[8..16].try_into().unwrap());
     let offset = u64::from_le_bytes(message[16..24].try_into().unwrap());
     let length = u64::from_le_bytes(message[24..32].try_into().unwrap());
-    let Some(shared) = *mapping else {
+    let Some(shared) = mapping.as_ref() else {
         reply_errno(sender, mochi_user_syscall::EINVAL);
         return true;
     };
@@ -242,12 +245,14 @@ fn handle_shared_stage_ipc(
         reply_errno(sender, mochi_user_syscall::EINVAL);
         return true;
     };
-    if shared.owner != sender || length == 0 || length > shared.length {
-        reply_errno(sender, mochi_user_syscall::EINVAL);
-        return true;
-    }
-    let bytes = unsafe { std::slice::from_raw_parts(shared.address as *const u8, length) };
-    match agent.queue_external_stage_bytes(instance, offset, bytes) {
+    let bytes = match shared.snapshot(sender, length) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            reply_errno(sender, error);
+            return true;
+        }
+    };
+    match agent.queue_external_stage_bytes(instance, offset, &bytes) {
         Ok(()) => {
             *streaming_stage = true;
             let _ = platform::ipc::reply(sender, &0i32.to_le_bytes());
