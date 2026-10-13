@@ -117,17 +117,13 @@ fn display_launch_and_readiness_use_retained_handles_without_legacy_fallback() {
     let orchestration = include_str!("../../service-manager/src/orchestration.rs");
     let fixed_spawn = &launcher[launcher.find("pub(crate) fn spawn_fixed_service(").unwrap()
         ..launcher.find("pub(crate) fn spawn_input_service(").unwrap()];
-    for native_only in [
-        "Input",
-        "Display",
-        "Compositor",
-        "Network",
-        "User",
-        "Update",
-        "SecureUi",
-    ] {
-        assert!(fixed_spawn.contains(&format!("FixedService::{native_only}")));
-    }
+    assert!(fixed_spawn.contains("if !service.is_namespace_bootstrap()"));
+    assert!(
+        fixed_spawn
+            .find("if !service.is_namespace_bootstrap()")
+            .unwrap()
+            < fixed_spawn.find("fixed_service_arguments(").unwrap()
+    );
     assert!(launcher.contains("FixedService::Display,\n        \"display.driver\""));
     assert!(bootstrap.contains("type DisplayProcess = NativeProcess;"));
     assert!(bootstrap.contains("self.wait_ready(ReadyService::Display, process.watch_target())"));

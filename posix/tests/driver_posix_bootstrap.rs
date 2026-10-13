@@ -34,3 +34,26 @@ fn drivers_inherit_posix_and_do_not_use_legacy_filesystem_syscalls() {
     }
 }
 extern crate alloc;
+
+#[test]
+fn only_namespace_bootstrap_can_use_the_legacy_fixed_launcher() {
+    use service_config::FixedService;
+    assert!(FixedService::Filesystem.is_namespace_bootstrap());
+    assert!(FixedService::Posix.is_namespace_bootstrap());
+    for service in [
+        FixedService::MbootAgent,
+        FixedService::Input,
+        FixedService::Display,
+        FixedService::Compositor,
+        FixedService::Network,
+        FixedService::User,
+        FixedService::SecureUi,
+        FixedService::Linux,
+        FixedService::Binder,
+        FixedService::Installer,
+        FixedService::Update,
+        FixedService::Workspace,
+    ] {
+        assert!(!service.is_namespace_bootstrap(), "{service:?}");
+    }
+}

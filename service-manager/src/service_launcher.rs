@@ -65,17 +65,9 @@ pub(crate) fn spawn_fixed_service(
     filesystem_endpoint: Option<platform::handle::Handle>,
     posix_endpoint: Option<platform::handle::Handle>,
 ) -> Result<u64, mochi_user_syscall::SysError> {
-    // Migrated services must not fall back to legacy pathname creation.
-    if matches!(
-        service,
-        FixedService::Input
-            | FixedService::Display
-            | FixedService::Compositor
-            | FixedService::Network
-            | FixedService::User
-            | FixedService::Update
-            | FixedService::SecureUi
-    ) {
+    // Only namespace bootstrap can run before executable Handles are available.
+    // Unknown or newly added kinds must not regain legacy pathname creation.
+    if !service.is_namespace_bootstrap() {
         return Err(sys_error(mochi_user_syscall::EINVAL));
     }
     let ready_target = ready_target.map(|target| ReadyTarget {

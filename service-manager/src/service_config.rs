@@ -23,6 +23,14 @@ pub(crate) enum FixedService {
     Workspace,
 }
 
+impl FixedService {
+    /// These services establish the namespace and POSIX endpoint needed to
+    /// open executable Handles. No other fixed launch may use this path.
+    pub(crate) const fn is_namespace_bootstrap(self) -> bool {
+        matches!(self, Self::Filesystem | Self::Posix)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ServiceSpec {
     pub(crate) path: &'static str,
