@@ -14,6 +14,26 @@ fn public_page_alias_abi_and_deferred_sender_root_capture_are_retired() {
     assert!(!ipc.contains("send_virtual_pages_from_kernel"));
     assert!(!ipc.contains("source_page_table"));
     assert!(!ipc.contains("source_base"));
+    for retired in [
+        "send_pages_to_endpoint",
+        "send_pages_from_kernel",
+        "send_map_header_to_endpoint",
+        "send_map_header_from_kernel",
+        "ExternalPages",
+        "ExternalPageMapping",
+        "map_external_pages_for_receiver",
+        "prepare_external_pages_for_user",
+        "ext_pages",
+    ] {
+        assert!(
+            !ipc.contains(retired),
+            "retired IPC page alias path: {retired}"
+        );
+    }
+    assert!(!include_str!("../../../core/src/config.rs").contains("max_external_pages"));
+    assert!(ipc.contains(
+        "install_received_object_handles(receiver_thread_id, receive.object_handles, output)?"
+    ));
     assert!(
         !include_str!("../../../core/src/syscall/process.rs").contains("fn alloc_shared_pages(")
     );
@@ -37,11 +57,8 @@ fn graphics_receivers_require_an_owned_mapping_instead_of_a_raw_address_packet()
     assert!(!display.contains("shared_buffer_notification"));
     assert!(!guard.contains("fn legacy("));
     assert!(!guard.contains("Option<MemoryMapping>"));
-    assert!(
-        !compositor.contains(
-            "handle_shared_buffer(&mut state.surfaces, client, mapped_addr, total, None)"
-        )
-    );
+    assert!(!compositor
+        .contains("handle_shared_buffer(&mut state.surfaces, client, mapped_addr, total, None)"));
     assert!(
         surface.contains("mapping.as_ref().is_none_or(|view| view.view() != (mapped_addr, total))")
     );
