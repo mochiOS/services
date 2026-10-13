@@ -86,6 +86,37 @@ fn inline_abi_matches_the_sdk_static_initializer() {
 }
 
 #[test]
+fn public_adapter_keeps_full_clock_ids_and_does_not_create_cancellation_points() {
+    let runtime = include_str!("../../../user/crates/newlib-runtime/src/pthread_rwlock.rs");
+    for name in [
+        "attr_init",
+        "attr_destroy",
+        "attr_getpshared",
+        "attr_setpshared",
+        "_init",
+        "_destroy",
+        "_rdlock",
+        "_wrlock",
+        "_tryrdlock",
+        "_trywrlock",
+        "_timedrdlock",
+        "_timedwrlock",
+        "_clockrdlock",
+        "_clockwrlock",
+        "_unlock",
+    ] {
+        let name = format!("fn pthread_rwlock{name}(");
+        assert!(runtime.contains(&name), "{name}");
+    }
+    assert!(runtime.contains("clock: u64,"));
+    assert!(runtime.contains("matches!(clock, 1 | 4)"));
+    assert!(runtime.contains("super::pthread_time::deadline"));
+    assert!(!runtime.contains("pthread_testcancel()"));
+    assert!(!runtime.contains("posix_client()"));
+    assert!(!runtime.contains("unwrap_or(u64::MAX)"));
+}
+
+#[test]
 fn simultaneous_readers_hold_shared_access_and_block_the_writer() {
     let word = AtomicU32::new(state::INITIALIZER);
     let acquired = std::sync::Barrier::new(9);
