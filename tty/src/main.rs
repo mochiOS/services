@@ -1,28 +1,15 @@
-extern crate alloc;
-
-use alloc::string::{String, ToString};
-use alloc::vec::Vec;
 use mochi_user_platform as platform;
 
+mod shell_launch;
+
 const MSH_PATH: &str = "/bin/msh";
-const CAPABILITY_SERVICE_NAME: &str = "capability.service";
 const INPUT_SERVICE_NAME: &str = "input.service";
 const INPUT_EVENT_SIZE: usize = core::mem::size_of::<platform::input::InputEvent>();
 const TTY_IPC_BUFFER_SIZE: usize = 2048;
 const TTY_OUTPUT_MAGIC: &[u8; 4] = b"TOUT";
 
-static mut CAPABILITY_REPLY_BUF: [u8; 1024] = [0; 1024];
 static mut INPUT_SUBSCRIBE_REPLY_BUF: [u8; 8] = [0; 8];
 static mut TTY_IPC_BUF: [u8; TTY_IPC_BUFFER_SIZE] = [0; TTY_IPC_BUFFER_SIZE];
-
-fn capability_reply_buf() -> &'static mut [u8] {
-    unsafe {
-        core::slice::from_raw_parts_mut(
-            core::ptr::addr_of_mut!(CAPABILITY_REPLY_BUF).cast::<u8>(),
-            core::mem::size_of::<[u8; 1024]>(),
-        )
-    }
-}
 
 fn input_subscribe_reply_buf() -> &'static mut [u8] {
     unsafe {
@@ -70,90 +57,6 @@ fn parse_endpoint_arg() -> Option<u64> {
     None
 }
 
-fn encode_spawn_args(items: &[String]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(512);
-    out.resize(512, 0);
-    let mut cursor = 0usize;
-    for item in items {
-        let bytes = item.as_bytes();
-        if cursor + bytes.len() + 2 > out.len() {
-            break;
-        }
-        out[cursor..cursor + bytes.len()].copy_from_slice(bytes);
-        cursor += bytes.len();
-        out[cursor] = 0;
-        cursor += 1;
-    }
-    out
-}
-
-fn resolve_execution_security(
-    entry_path: &str,
-    execution_class: platform::service::ExecutionClass,
-) -> Result<(Vec<String>, Vec<u8>), mochi_user_syscall::SysError> {
-    let service_tid = platform::process::find_by_name(CAPABILITY_SERVICE_NAME)?;
-    if service_tid == 0 {
-        return Err(mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::ENOENT as i64,
-        ));
-    }
-    let request = platform::capability::encode_resolve_execution_security_request(
-        execution_class.as_raw(),
-        entry_path,
-    )
-        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
-    let reply = capability_reply_buf();
-    reply.fill(0);
-    let msg = platform::ipc::call(service_tid, &request, reply)?;
-    let len = (msg & 0xffff_ffff) as usize;
-    if len > reply.len() {
-        return Err(mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::EIO as i64,
-        ));
-    }
-    let response = platform::capability::decode_resolve_execution_security_reply(&reply[..len])
-        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EIO as i64))?;
-    if response.status != 0 {
-        return Err(mochi_user_syscall::SysError::from_raw(
-            response.status as i64,
-        ));
-    }
-    if !response.identity.is_empty() && response.identity.last() != Some(&0) {
-        return Err(mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::EINVAL as i64,
-        ));
-    }
-    let mut identity = Vec::new();
-    for item in response.identity.split(|byte| *byte == 0) {
-        if item.is_empty() {
-            continue;
-        }
-        identity.push(
-            core::str::from_utf8(item)
-                .map_err(|_| {
-                    mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
-                })?
-                .to_string(),
-        );
-    }
-    Ok((identity, response.capabilities.to_vec()))
-}
-
-fn spawn_msh(tty_endpoint: u64, logger_endpoint: u64) -> Result<u64, mochi_user_syscall::SysError> {
-    let execution_class = platform::service::ExecutionClass::Unprivileged;
-    let (mut identity, caps_nul) = resolve_execution_security(MSH_PATH, execution_class)?;
-    let tty_arg = tty_endpoint.to_string();
-    let logger_arg = logger_endpoint.to_string();
-    identity.push(tty_arg);
-    identity.push(logger_arg);
-    let args_nul = encode_spawn_args(&identity);
-    platform::service::spawn_manifest(
-        MSH_PATH,
-        execution_class,
-        Some(args_nul.as_slice()),
-        Some(caps_nul.as_slice()),
-    )
-}
 
 fn find_input_service() -> Option<u64> {
     if let Ok(tid) = platform::process::find_by_name(INPUT_SERVICE_NAME) {
@@ -197,9 +100,16 @@ fn main() {
         platform::thread::yield_now();
     }
 
-    if spawn_msh(tty_endpoint, logger_endpoint).is_err() {
-        platform::process::exit(1);
-    }
+    // Keep the POSIX child object for the broker's lifetime. Spawn performs
+    // exec authorization, image Handle replacement and FD inheritance through
+    // the existing newlib/POSIX implementation, not a TTY-specific syscall.
+    let _shell = match shell_launch::spawn_shell(MSH_PATH, tty_endpoint, logger_endpoint) {
+        Ok(child) => child,
+        Err(error) => {
+            eprintln!("tty.service: shell spawn failed: {error}");
+            platform::process::exit(1);
+        }
+    };
 
     let mut shell_endpoint = 0u64;
     loop {
