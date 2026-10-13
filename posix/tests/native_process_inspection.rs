@@ -28,7 +28,8 @@ fn kernel_has_no_parent_state_and_inspection_consumers_use_compact_layout() {
     let exec = include_str!("../../../core/src/syscall/exec.rs");
     assert!(!exec.contains("parent_override"));
     // Native access checks are retained, not deleted with parent metadata.
-    assert!(exec.contains("access_process_override.or_else"));
+    assert!(!exec.contains("access_process_override"));
+    assert!(exec.contains("let Some(pid) = crate::task::current_thread_id()"));
     assert!(exec.contains("ensure_fs_path_executable_for_process(path, pid)"));
     let platform = include_str!("../../../user/crates/platform/src/lib.rs");
     assert!(!platform.contains("parent_pid"));
