@@ -26,7 +26,7 @@ fn authenticated_handoff_requires_exactly_one_send_only_handle() {
         |h: &mut platform::ipc::IpcObjectHandles| h.count = 0,
         |h: &mut platform::ipc::IpcObjectHandles| h.count = 2,
         |h: &mut platform::ipc::IpcObjectHandles| h.count = u32::MAX,
-        |h: &mut platform::ipc::IpcObjectHandles| h.reserved = 1,
+        |h: &mut platform::ipc::IpcObjectHandles| h.delivery_flags = 1,
         |h: &mut platform::ipc::IpcObjectHandles| h.handles[0].handle = 0,
         |h: &mut platform::ipc::IpcObjectHandles| h.handles[0].reserved = 1,
         |h: &mut platform::ipc::IpcObjectHandles| h.handles[0].rights = 0,

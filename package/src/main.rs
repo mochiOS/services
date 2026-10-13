@@ -1210,7 +1210,7 @@ fn run_server() -> ! {
         if buf[..len.min(buf.len())]
             == package_protocol::INSTALL_POSIX_ENDPOINT_OPCODE.to_le_bytes()
         {
-            let valid = attached.reserved == 0
+            let valid = attached.is_user_delivery()
                 && attached.count == 1
                 && attached.handles[0].handle != 0
                 && attached.handles[0].reserved == 0
@@ -1234,7 +1234,7 @@ fn run_server() -> ! {
             let _ = platform::ipc::reply(sender, &status.to_le_bytes());
             continue;
         }
-        if attached.count != 0 || attached.reserved != 0 {
+        if attached.count != 0 || !attached.is_user_delivery() {
             for handle in attached.handles.iter().take(attached.count as usize) {
                 if handle.handle != 0 {
                     let _ = platform::handle::close(handle.handle);

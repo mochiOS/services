@@ -7,7 +7,7 @@ pub(crate) fn validate(
     if !sender_authorized {
         return Err(platform::syscall::EACCES);
     }
-    if attached.reserved != 0 || attached.count != 1 {
+    if !attached.is_user_delivery() || attached.count != 1 {
         return Err(platform::syscall::EINVAL);
     }
     let handle = &attached.handles[0];

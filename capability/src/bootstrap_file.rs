@@ -29,7 +29,7 @@ pub(crate) fn initialize() -> SysResult<()> {
 fn native_call(endpoint: u32, request: &[u8], reply: &mut [u8]) -> SysResult<usize> {
     let mut handles = platform::ipc::IpcObjectHandles::default();
     let result = platform::ipc::call_object_handles(endpoint, request, reply, &mut handles);
-    let attached = handles.reserved != 0 || handles.count != 0;
+    let attached = handles.delivery_flags != 0 || handles.count != 0;
     for entry in handles
         .handles
         .iter()

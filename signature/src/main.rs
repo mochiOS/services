@@ -624,7 +624,7 @@ fn run_server() -> ! {
             let _ = platform::ipc::reply(sender, &status.to_le_bytes());
             continue;
         }
-        if attached.count != 0 || attached.reserved != 0 || len > buf.len() {
+        if attached.count != 0 || !attached.is_user_delivery() || len > buf.len() {
             close_received_handles(&attached);
             reply_error(sender, 0, mochi_user_syscall::EINVAL);
             continue;

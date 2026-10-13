@@ -50,7 +50,8 @@ pub(super) fn serve(endpoint: u32, expected_process: u64) -> ! {
             };
         let sender = received >> 32;
         let length = (received & 0xffff_ffff) as usize;
-        let attached = handles.count != 0 || handles.reserved != 0;
+        let attached = handles.count != 0
+            || handles.delivery_flags != mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE;
         for entry in handles
             .handles
             .iter()

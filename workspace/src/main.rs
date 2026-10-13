@@ -1145,7 +1145,7 @@ impl WorkspaceService {
             | platform::handle::HANDLE_RIGHT_SEEK
             | platform::handle::HANDLE_RIGHT_TRANSFER;
         if handles.count != 1
-            || handles.reserved != 0
+            || !handles.is_user_delivery()
             || handles.handles[0].handle == 0
             || handles.handles[0].reserved != 0
             || handles.handles[0].rights & required_rights != required_rights

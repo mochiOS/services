@@ -178,7 +178,7 @@ fn main() {
             continue;
         }
         if buf[..len] == platform::logger::INSTALL_POSIX_ENDPOINT_OPCODE.to_le_bytes() {
-            let valid = attached.reserved == 0
+            let valid = attached.is_user_delivery()
                 && attached.count == 1
                 && attached.handles[0].handle != 0
                 && attached.handles[0].reserved == 0
@@ -198,7 +198,7 @@ fn main() {
             let _ = platform::ipc::reply(sender, &status.to_le_bytes());
             continue;
         }
-        if attached.count != 0 || attached.reserved != 0 {
+        if attached.count != 0 || !attached.is_user_delivery() {
             close_received_handles(&attached);
             continue;
         }

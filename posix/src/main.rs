@@ -858,6 +858,22 @@ fn run_pty_provider(
             continue;
         }
         let decoded_provider = provider::RequestHeader::decode(&request[..request_length]).ok();
+        if attachments.delivery_flags != mnu_abi::IPC_DELIVERY_NATIVE_OBJECT {
+            if let Some((header, _)) = decoded_provider {
+                if let Ok(length) = (provider::ResponseHeader {
+                    opcode: header.opcode,
+                    object_id: header.object_id,
+                    status: -13,
+                    value: 0,
+                    data_length: 0,
+                })
+                .encode(&[], &mut response)
+                {
+                    let _ = platform::ipc::reply(sender, &response[..length]);
+                }
+            }
+            continue;
+        }
         let access = decoded_provider.as_ref().and_then(|(header, _)| {
             ptys.lock().ok()?.job_control_access(*header)
         });

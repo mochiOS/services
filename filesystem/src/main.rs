@@ -105,6 +105,26 @@ fn main() {
         let length = (message & 0xffff_ffff) as usize;
         let request = &request_bytes[..length.min(request_bytes.len())];
         if request.starts_with(&mnu_abi::provider::MAGIC.to_le_bytes()) {
+            // Object IDs are identifiers, not authority. Only native object
+            // dispatch may invoke this protocol; ordinary IPC cannot forge
+            // this receiver-only delivery flag, even with the same sender ID.
+            if attached.delivery_flags != mnu_abi::IPC_DELIVERY_NATIVE_OBJECT {
+                close_attached_handles(&attached);
+                if let Ok((header, _)) = mnu_abi::provider::RequestHeader::decode(request) {
+                    if let Ok(length) = (mnu_abi::provider::ResponseHeader {
+                        opcode: header.opcode,
+                        object_id: header.object_id,
+                        status: -13,
+                        value: 0,
+                        data_length: 0,
+                    })
+                    .encode(&[], &mut response_bytes)
+                    {
+                        let _ = platform::ipc::reply(sender, &response_bytes[..length]);
+                    }
+                }
+                continue;
+            }
             let response_len = handle_provider_request(
                 &mut service,
                 partition.as_ref(),
@@ -121,6 +141,21 @@ fn main() {
         }
         let response = match protocol::decode(&request_bytes[..length.min(request_bytes.len())]) {
             Ok((header, payload)) => {
+                // Credentials and namespace control are trusted only through
+                // the explicitly delegated control endpoint, never its global ID.
+                if attached.delivery_flags != mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE {
+                    close_attached_handles(&attached);
+                    let denied = protocol::Header {
+                        opcode: protocol::OP_STATUS,
+                        request_id: header.request_id,
+                        status: -13,
+                        ..protocol::Header::default()
+                    };
+                    if let Ok(length) = protocol::encode(denied, &[], &mut response_bytes) {
+                        let _ = platform::ipc::reply(sender, &response_bytes[..length]);
+                    }
+                    continue;
+                }
                 if header.opcode == protocol::OP_OPEN_AT {
                     let result = protocol::decode_credentials_payload(payload)
                         .map_err(|_| 22)
@@ -881,7 +916,7 @@ fn read_provider_shared(
     buffer: &mut filesystem_service::provider_buffer::ProviderReadBuffer,
 ) -> Result<(u64, Vec<u8>), i32> {
     use mochi_user_platform::{handle, memory};
-    if attached.count != 1 || attached.reserved != 0 {
+    if attached.count != 1 || attached.delivery_flags != mnu_abi::IPC_DELIVERY_NATIVE_OBJECT {
         return Err(22);
     }
     let attachment = attached.handles[0];

@@ -137,7 +137,7 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
             0
         };
         if opcode == platform::capability::INSTALL_POSIX_ENDPOINT_OPCODE {
-            let valid_attachment = attached.reserved == 0
+            let valid_attachment = attached.is_user_delivery()
                 && attached.count == 1
                 && attached.handles[0].handle != 0
                 && attached.handles[0].reserved == 0
@@ -172,7 +172,7 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                 | platform::handle::HANDLE_RIGHT_DUPLICATE
                 | platform::handle::HANDLE_RIGHT_TRANSFER;
             let valid = attached.count == 1
-                && attached.reserved == 0
+                && attached.is_user_delivery()
                 && attached.handles[0].handle != 0
                 && attached.handles[0].reserved == 0
                 && attached.handles[0].rights == required;
@@ -193,7 +193,7 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
             reply_spawn(sender, result);
             continue;
         }
-        if attached.count != 0 || attached.reserved != 0 {
+        if attached.count != 0 || !attached.is_user_delivery() {
             close_received_handles(&attached);
             capability_reply(sender, mochi_user_syscall::EINVAL);
             continue;
