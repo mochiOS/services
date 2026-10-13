@@ -9,7 +9,6 @@ mod driver_manifest;
 mod driver_matcher;
 mod driver_registry;
 mod driver_spawn;
-mod launch_arguments;
 mod spawn_support;
 mod startup_args;
 

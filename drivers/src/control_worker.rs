@@ -49,12 +49,27 @@ pub(crate) fn run(config: DriverManagerConfig) -> ! {
     }
 
     let mut controller = DiscoveryController::new(config.token);
+    let posix_endpoint =
+        match platform::handle::inherited(mochios_posix_protocol::CONTROL_HANDLE_KEY) {
+            Ok(endpoint) if endpoint != 0 => endpoint,
+            _ => {
+                platform::logln!("drivers.service: inherited POSIX endpoint missing");
+                idle()
+            }
+        };
+    let mut started_drivers = crate::driver_registry::StartedDrivers::new();
     let mut buffer = [0u8; CONTROL_BUFFER_LEN];
     loop {
-        let message = match platform::ipc::wait(control_endpoint, &mut buffer) {
+        started_drivers.retry_failed(posix_endpoint);
+        let incoming = if started_drivers.has_failed_cleanup() {
+            platform::ipc::try_wait(&mut buffer)
+        } else {
+            platform::ipc::wait(control_endpoint, &mut buffer)
+        };
+        let message = match incoming {
             Ok(message) => message,
             Err(_) => {
-                platform::thread::yield_now();
+                let _ = platform::thread::sleep_milliseconds(10);
                 continue;
             }
         };
@@ -72,8 +87,12 @@ pub(crate) fn run(config: DriverManagerConfig) -> ! {
                 message,
             } => send_complete(response_endpoint, message),
             ControlAction::Run(pending) => {
-                let result =
-                    discovery::run(logger_endpoint, || drain_running_requests(&mut controller));
+                let result = discovery::run(
+                    logger_endpoint,
+                    posix_endpoint,
+                    &mut started_drivers,
+                    || drain_running_requests(&mut controller),
+                );
                 drain_running_requests(&mut controller);
                 if let ControlAction::Reply {
                     response_endpoint,

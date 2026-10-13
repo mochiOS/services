@@ -7,6 +7,7 @@ fn maybe_spawn_bundle(
     root: driver_matcher::DriverSearchRoot,
     bundle_root: &str,
     logger_endpoint: u64,
+    posix_endpoint: platform::handle::Handle,
     started_drivers: &mut driver_registry::StartedDrivers,
 ) {
     let Some(bundle) = driver_manifest::load(bundle_root) else {
@@ -58,17 +59,43 @@ fn maybe_spawn_bundle(
         );
         return;
     }
-    if driver_spawn::spawn(entry_path, None, logger_endpoint) {
-        platform::logln!("drivers.service: active bundle={}", bundle_root);
-        started_drivers.record(manifest.package_id.clone());
+    if started_drivers.has_failed_cleanup() {
+        return;
+    }
+    match driver_spawn::spawn(
+        entry_path,
+        None,
+        logger_endpoint,
+        posix_endpoint,
+        |process| started_drivers.retain_failed(process),
+    ) {
+        Ok(process) => {
+            platform::logln!("drivers.service: active bundle={}", bundle_root);
+            started_drivers.record(manifest.package_id.clone(), process);
+        }
+        Err(error) => eprintln!(
+            "drivers.service: native driver creation failed path={entry_path} errno={}",
+            error.errno().unwrap_or(0)
+        ),
     }
 }
 
-pub(crate) fn run(logger_endpoint: u64, mut progress: impl FnMut()) -> DiscoveryResult {
-    let mut started_drivers = driver_registry::StartedDrivers::new();
+pub(crate) fn run(
+    logger_endpoint: u64,
+    posix_endpoint: platform::handle::Handle,
+    started_drivers: &mut driver_registry::StartedDrivers,
+    mut progress: impl FnMut(),
+) -> DiscoveryResult {
     for &root in driver_discovery::roots() {
         driver_discovery::visit_bundles(root, |bundle_root| {
-            maybe_spawn_bundle(root, bundle_root, logger_endpoint, &mut started_drivers);
+            started_drivers.retry_failed(posix_endpoint);
+            maybe_spawn_bundle(
+                root,
+                bundle_root,
+                logger_endpoint,
+                posix_endpoint,
+                started_drivers,
+            );
             progress();
         });
         progress();
