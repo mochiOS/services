@@ -6,6 +6,7 @@ mod cursor;
 mod decoration;
 mod display;
 mod fps_overlay;
+mod frame_buffer;
 mod geometry;
 mod gpu_compositor;
 mod input;

@@ -5,6 +5,7 @@ use crate::display::{
     DISPLAY_PRESENT_REQ, DISPLAY_REP_BUF, display_present_gpu_panel, display_present_gpu_scene,
 };
 use crate::fps_overlay;
+use crate::frame_buffer::FrameBuffer;
 use crate::geometry::{Rect, choose_frame_size, clip_present_rect};
 use crate::gpu_compositor::GpuCompositor;
 use crate::protocol::{
@@ -20,10 +21,7 @@ use crate::window::{
 
 #[derive(Default)]
 pub(crate) struct PresentFrame {
-    virt: u64,
-    page_count: usize,
-    pixel_capacity: usize,
-    sent_to_display: bool,
+    buffer: Option<FrameBuffer>,
     cpu_contents_valid: bool,
     gpu_contents_valid: bool,
     gpu_panel_disabled: bool,
@@ -50,26 +48,34 @@ impl PresentFrame {
         if page_count == 0 || page_count > MAX_SHARED_PAGES {
             return Err(errno_status(mochi_user_syscall::ERANGE));
         }
-        if self.virt == 0 || self.page_count < page_count {
-            let virt = platform::memory::alloc_shared_page_count(page_count)
-                .map_err(errno_from_platform)?;
-            if virt == 0 || (virt as usize) & (PAGE_SIZE - 1) != 0 {
-                return Err(errno_status(mochi_user_syscall::EIO));
-            }
-            self.virt = virt;
-            self.page_count = page_count;
-            self.sent_to_display = false;
+        let capacity = page_count
+            .checked_mul(PAGE_SIZE)
+            .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+        if self.buffer
+            .as_ref()
+            .is_none_or(|buffer| buffer.capacity() < capacity as u64)
+        {
+            let buffer = FrameBuffer::new(capacity as u64).map_err(errno_from_platform)?;
+            self.buffer = Some(buffer);
             self.cpu_contents_valid = false;
             self.gpu_contents_valid = false;
-            self.pixel_capacity = page_count
-                .checked_mul(PAGE_SIZE)
-                .and_then(|bytes| bytes.checked_div(4))
-                .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
         }
-        if self.pixel_capacity < pixel_count {
+        let buffer = self.buffer
+            .as_ref()
+            .ok_or_else(|| errno_status(mochi_user_syscall::EIO))?;
+        if buffer.capacity() / 4 < pixel_count as u64 {
             return Err(errno_status(mochi_user_syscall::ERANGE));
         }
-        Ok(unsafe { core::slice::from_raw_parts_mut(self.virt as *mut u32, pixel_count) })
+        // SAFETY: this process is the sole writer, the retained mapping covers
+        // the checked slice, and attached display handles are read-only.
+        Ok(unsafe { core::slice::from_raw_parts_mut(buffer.address() as *mut u32, pixel_count) })
+    }
+
+    fn offer(&mut self, display_tid: u64) -> Result<(), platform::syscall::SysError> {
+        self.buffer
+            .as_mut()
+            .ok_or_else(|| platform::syscall::SysError::from_raw(mochi_user_syscall::EIO as i64))?
+            .offer(display_tid)
     }
 
     fn bytes(&mut self, byte_count: usize) -> Result<&mut [u8], u32> {
@@ -189,14 +195,9 @@ fn try_gpu_scene_present(
         return None;
     }
     let present_start = perf_counter();
-    if !present_frame.sent_to_display {
-        if platform::ipc::send_page_count(display_tid, present_frame.page_count, present_frame.virt)
-            .is_err()
-        {
-            present_frame.gpu_contents_valid = false;
-            return None;
-        }
-        present_frame.sent_to_display = true;
+    if present_frame.offer(display_tid).is_err() {
+        present_frame.gpu_contents_valid = false;
+        return None;
     }
     let status = display_present_gpu_scene(display_tid, byte_len);
     let present_millis = perf_counter().saturating_sub(present_start);
@@ -273,14 +274,9 @@ fn try_gpu_panel_present(
                 .copy_from_slice(&surface.current[row + left..row + right]);
         }
     }
-    if !present_frame.sent_to_display {
-        if platform::ipc::send_page_count(display_tid, present_frame.page_count, present_frame.virt)
-            .is_err()
-        {
-            present_frame.gpu_panel_disabled = true;
-            return None;
-        }
-        present_frame.sent_to_display = true;
+    if present_frame.offer(display_tid).is_err() {
+        present_frame.gpu_panel_disabled = true;
+        return None;
     }
     let status = display_present_gpu_panel(
         display_tid,
@@ -561,13 +557,8 @@ pub(crate) fn composite_and_present(
     }
     let composition_millis = perf_counter().saturating_sub(composition_start);
     let present_start = perf_counter();
-    if !present_frame.sent_to_display {
-        let page_count = present_frame.page_count;
-        let virt = present_frame.virt;
-        if let Err(err) = platform::ipc::send_page_count(display_tid, page_count, virt) {
-            return errno_from_platform(err);
-        }
-        present_frame.sent_to_display = true;
+    if let Err(err) = present_frame.offer(display_tid) {
+        return errno_from_platform(err);
     }
     let request = unsafe {
         core::slice::from_raw_parts_mut(
@@ -616,7 +607,9 @@ pub(crate) fn composite_and_present(
     }
     let status = read_u32(reply, 0).unwrap_or(errno_status(mochi_user_syscall::EIO));
     if status != 0 {
-        present_frame.sent_to_display = false;
+        if let Some(buffer) = present_frame.buffer.as_mut() {
+            buffer.invalidate_offer();
+        }
         present_frame.cpu_contents_valid = false;
         return status;
     }

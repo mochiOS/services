@@ -2,6 +2,8 @@
 mod memory_object;
 
 use crate as platform;
+#[path = "../../compositor/src/frame_buffer.rs"]
+mod compositor_frame_buffer;
 #[path = "../../display/src/shared_buffer.rs"]
 mod display_shared_buffer;
 
@@ -27,6 +29,119 @@ fn reset() {
 }
 
 #[test]
+fn compositor_frame_owns_backing_and_offers_once_per_endpoint() {
+    use compositor_frame_buffer::FrameBuffer;
+    reset();
+    let mut frame = FrameBuffer::new(8192).unwrap();
+    assert_eq!(frame.address(), 0x10000);
+    assert_eq!(frame.capacity(), 8192);
+    assert!(frame.offer(0).is_err());
+    frame.offer(9).unwrap();
+    frame.offer(9).unwrap();
+    frame.invalidate_offer();
+    frame.offer(9).unwrap();
+    frame.offer(10).unwrap();
+    STATE.with(|state| {
+        let state = state.borrow();
+        assert_eq!(state.offers.len(), 3);
+        assert_eq!(state.offers[0].0, 9);
+        assert_eq!(state.offers[1].0, 9);
+        assert_eq!(state.offers[2].0, 10);
+        for (_, bytes, handles) in &state.offers {
+            assert_eq!(
+                memory_object::ReadOnlyOffer::decode(bytes).unwrap().length,
+                8192
+            );
+            assert_eq!(handles.count, 1);
+            assert_eq!(
+                handles.handles[0].rights,
+                memory_object::READONLY_BUFFER_RIGHTS
+            );
+        }
+        assert!(
+            state
+                .calls
+                .contains(&(syscall::SyscallNumber::MemoryMap, vec![0, 8192, 3, 2, 7, 0]))
+        );
+        assert!(!state.calls.iter().any(|call| matches!(
+            call.0,
+            syscall::SyscallNumber::MemoryUnmap | syscall::SyscallNumber::HandleClose
+        )));
+    });
+    drop(frame);
+    STATE.with(|state| {
+        let state = state.borrow();
+        assert_eq!(
+            &state.calls[state.calls.len() - 2..],
+            &[
+                (syscall::SyscallNumber::MemoryUnmap, vec![0x10000, 8192]),
+                (syscall::SyscallNumber::HandleClose, vec![7]),
+            ]
+        );
+    });
+}
+
+#[test]
+fn compositor_frame_failed_offer_is_retried_without_reallocation() {
+    reset();
+    let mut frame = compositor_frame_buffer::FrameBuffer::new(4096).unwrap();
+    STATE.with(|state| state.borrow_mut().fail_send = true);
+    assert_eq!(frame.offer(9).unwrap_err().raw(), -11);
+    STATE.with(|state| state.borrow_mut().fail_send = false);
+    frame.offer(9).unwrap();
+    frame.offer(9).unwrap();
+    STATE.with(|state| {
+        let state = state.borrow();
+        assert_eq!(state.offers.len(), 1);
+        assert_eq!(
+            state
+                .calls
+                .iter()
+                .filter(|call| call.0 == syscall::SyscallNumber::MemoryObjectCreate)
+                .count(),
+            1
+        );
+    });
+}
+
+#[test]
+fn compositor_frame_failed_replacement_preserves_previous_mapping() {
+    use compositor_frame_buffer::FrameBuffer;
+    reset();
+    let mut frame = FrameBuffer::new(4096).unwrap();
+    frame.offer(9).unwrap();
+    STATE.with(|state| state.borrow_mut().fail_map = true);
+    assert!(FrameBuffer::new(8192).is_err());
+    assert_eq!(frame.capacity(), 4096);
+    assert_eq!(frame.address(), 0x10000);
+    STATE.with(|state| {
+        let state = state.borrow();
+        assert!(
+            !state
+                .calls
+                .iter()
+                .any(|call| call.0 == syscall::SyscallNumber::MemoryUnmap)
+        );
+        assert_eq!(
+            state.calls.last().unwrap().0,
+            syscall::SyscallNumber::HandleClose
+        );
+    });
+    STATE.with(|state| state.borrow_mut().fail_map = false);
+    frame = FrameBuffer::new(8192).unwrap();
+    frame.offer(9).unwrap();
+    STATE.with(|state| {
+        let state = state.borrow();
+        assert_eq!(state.offers.len(), 2);
+        assert!(
+            state
+                .calls
+                .contains(&(syscall::SyscallNumber::MemoryUnmap, vec![0x10000, 4096]))
+        );
+    });
+}
+
+#[test]
 fn native_display_offer_probe_matches_current_abi_and_userspace_wire_format() {
     let source = include_str!("native_display_buffer_offer.c");
     for (name, number) in [
@@ -49,10 +164,25 @@ fn native_display_offer_probe_matches_current_abi_and_userspace_wire_format() {
     assert_eq!(memory_object::READONLY_BUFFER_RIGHTS, 65);
 }
 
+#[test]
+fn native_compositor_gate_uses_current_ipc_abi() {
+    let source = include_str!("native_compositor_buffer_gate.c");
+    for (name, number) in [
+        ("IPC_SEND", mnu_abi::SyscallNumber::IpcSend),
+        ("IPC_CREATE", mnu_abi::SyscallNumber::IpcCreate),
+        ("IPC_CALL", mnu_abi::SyscallNumber::IpcCall),
+        ("IPC_REPLY", mnu_abi::SyscallNumber::IpcReply),
+        ("IPC_WAIT", mnu_abi::SyscallNumber::IpcWait),
+        ("DEBUG_WRITE", mnu_abi::SyscallNumber::DebugWrite),
+    ] {
+        assert!(source.contains(&format!("{name} = {}", number as u64)));
+    }
+}
+
 mod syscall {
     pub use mnu_abi::{
-        SyscallNumber, EACCES, EINVAL, EIO, HANDLE_RIGHT_MAP, HANDLE_RIGHT_READ, MEMORY_ACCESS_ALL,
-        MEMORY_ACCESS_READ, MEMORY_MAP_SHARED,
+        EACCES, EINVAL, EIO, HANDLE_RIGHT_MAP, HANDLE_RIGHT_READ, MEMORY_ACCESS_ALL,
+        MEMORY_ACCESS_READ, MEMORY_ACCESS_WRITE, MEMORY_MAP_SHARED, SyscallNumber,
     };
     pub use mochi_user_platform::syscall::{SysError, SysResult};
     fn call(number: SyscallNumber, args: &[u64]) -> SysResult<u64> {
@@ -146,11 +276,13 @@ fn display_receiver_retains_mapping_until_buffer_replacement_and_drains_bad_atta
     assert_eq!(buffer.view(), (9, 0x10000, 4096));
     assert_eq!(attachments.count, 0);
     STATE.with(|state| {
-        assert!(!state
-            .borrow()
-            .calls
-            .iter()
-            .any(|call| call.0 == syscall::SyscallNumber::MemoryUnmap))
+        assert!(
+            !state
+                .borrow()
+                .calls
+                .iter()
+                .any(|call| call.0 == syscall::SyscallNumber::MemoryUnmap)
+        )
     });
     drop(buffer);
     STATE.with(|state| {
@@ -167,21 +299,25 @@ fn display_receiver_retains_mapping_until_buffer_replacement_and_drains_bad_atta
         if mode == 1 {
             attachments.handles[1].handle = 20;
         }
-        assert!(SharedBuffer::receive(
-            9,
-            if mode == 0 { 8 } else { 9 },
-            if mode == 2 { &bytes[..31] } else { &bytes },
-            &mut attachments
-        )
-        .is_err());
+        assert!(
+            SharedBuffer::receive(
+                9,
+                if mode == 0 { 8 } else { 9 },
+                if mode == 2 { &bytes[..31] } else { &bytes },
+                &mut attachments
+            )
+            .is_err()
+        );
         assert_eq!(attachments.count, 0);
         assert!(attachments.handles.iter().all(|entry| entry.handle == 0));
         STATE.with(|state| {
             let state = state.borrow();
-            assert!(!state
-                .calls
-                .iter()
-                .any(|call| call.0 == syscall::SyscallNumber::MemoryMap));
+            assert!(
+                !state
+                    .calls
+                    .iter()
+                    .any(|call| call.0 == syscall::SyscallNumber::MemoryMap)
+            );
             assert_eq!(
                 state
                     .calls
@@ -200,7 +336,7 @@ fn display_receiver_retains_mapping_until_buffer_replacement_and_drains_bad_atta
 
 #[test]
 fn readonly_offers_attach_only_read_map_and_receiver_owns_a_local_mapping() {
-    use memory_object::{receive_readonly_offer, ReadOnlyOffer, READONLY_BUFFER_RIGHTS};
+    use memory_object::{READONLY_BUFFER_RIGHTS, ReadOnlyOffer, receive_readonly_offer};
     reset();
     let source = MemoryObject::create(8192).unwrap();
     source.send_readonly(9, 4096, 4096).unwrap();
@@ -237,7 +373,7 @@ fn readonly_offers_attach_only_read_map_and_receiver_owns_a_local_mapping() {
 
 #[test]
 fn malformed_or_overprivileged_received_offers_are_closed_without_mapping() {
-    use memory_object::{receive_readonly_offer, ReadOnlyOffer};
+    use memory_object::{ReadOnlyOffer, receive_readonly_offer};
     let wire = ReadOnlyOffer {
         offset: 4096,
         length: 4096,
@@ -289,12 +425,14 @@ fn malformed_or_overprivileged_received_offers_are_closed_without_mapping() {
         };
         // SAFETY: each iteration owns one simulated received reference.
         let received = unsafe { MemoryObject::from_owned_handle(19) };
-        assert!(receive_readonly_offer(
-            if mode == 3 { &bytes[..31] } else { &bytes },
-            received,
-            if mode == 0 { 1 } else { 8192 }
-        )
-        .is_err());
+        assert!(
+            receive_readonly_offer(
+                if mode == 3 { &bytes[..31] } else { &bytes },
+                received,
+                if mode == 0 { 1 } else { 8192 }
+            )
+            .is_err()
+        );
         STATE.with(|state| {
             let state = state.borrow();
             assert_eq!(
@@ -324,10 +462,12 @@ fn rejected_or_failed_sends_leave_source_ownership_intact() {
     STATE.with(|state| {
         let state = state.borrow();
         assert!(state.offers.is_empty());
-        assert!(!state
-            .calls
-            .iter()
-            .any(|call| call.0 == syscall::SyscallNumber::HandleClose));
+        assert!(
+            !state
+                .calls
+                .iter()
+                .any(|call| call.0 == syscall::SyscallNumber::HandleClose)
+        );
     });
     drop(source);
     STATE.with(|state| {
@@ -401,11 +541,13 @@ fn invalid_geometry_and_failed_mapping_never_unmap_or_close_unowned_resources() 
     assert!(object.map(0, 4096, 1).is_err());
     drop(object);
     STATE.with(|state| {
-        assert!(!state
-            .borrow()
-            .calls
-            .iter()
-            .any(|call| call.0 == syscall::SyscallNumber::MemoryUnmap))
+        assert!(
+            !state
+                .borrow()
+                .calls
+                .iter()
+                .any(|call| call.0 == syscall::SyscallNumber::MemoryUnmap)
+        )
     });
 }
 
