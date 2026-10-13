@@ -1,4 +1,5 @@
 pub mod ext4;
+pub mod devfs;
 pub mod namespace;
 pub mod null_device;
 pub mod partition;

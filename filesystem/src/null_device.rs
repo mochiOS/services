@@ -76,15 +76,20 @@ impl NullDescription {
     /// Construct metadata only after the namespace has resolved this device's
     /// node identity. The caller supplies volume/inode IDs, not an FD or PID.
     pub fn status(&self, device: u64, node_id: u64) -> protocol::NodeStatus {
-        protocol::NodeStatus {
-            device,
-            node_id,
-            kind: protocol::NODE_TYPE_SPECIAL,
-            mode: 0o020666,
-            link_count: 1,
-            special_device: (1 << 8) | 3,
-            block_size: 4096,
-            ..protocol::NodeStatus::default()
-        }
+        node_status(device, node_id)
+    }
+}
+
+/// Metadata belongs to the device node, independently of an open description.
+pub fn node_status(device: u64, node_id: u64) -> protocol::NodeStatus {
+    protocol::NodeStatus {
+        device,
+        node_id,
+        kind: protocol::NODE_TYPE_SPECIAL,
+        mode: 0o020666,
+        link_count: 1,
+        special_device: (1 << 8) | 3,
+        block_size: 4096,
+        ..protocol::NodeStatus::default()
     }
 }
