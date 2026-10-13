@@ -15,6 +15,22 @@ fn native_mmio_probe_matches_current_generic_abi() {
 }
 
 #[test]
+fn native_framebuffer_probe_matches_current_abi() {
+    let source = include_str!("native_framebuffer_mapping.c");
+    for (name, number) in [
+        (
+            "FRAMEBUFFER_INFO",
+            mnu_abi::SyscallNumber::GetFramebufferInfo,
+        ),
+        ("MAP_FRAMEBUFFER", mnu_abi::SyscallNumber::MapFramebuffer),
+        ("MEMORY_UNMAP", mnu_abi::SyscallNumber::MemoryUnmap),
+        ("DEBUG_WRITE", mnu_abi::SyscallNumber::DebugWrite),
+    ] {
+        assert!(source.contains(&format!("{name} = {}", number as u64)));
+    }
+}
+
+#[test]
 fn production_mmio_dispatcher_keeps_root_and_metadata_locked_through_rollback() {
     let source = include_str!("../../../core/src/syscall/mod.rs");
     let start = source.find("pub fn map_physical_range(").unwrap();
@@ -41,6 +57,7 @@ mod syscall {
     }
 }
 mod task {
+    pub type ProcessId=u64;
     #[derive(Clone)] pub struct MmioMapping;
     impl MmioMapping {pub fn new(_:u64,_:u64,_:u64,write:bool)->Self {assert!(write);Self}}
     pub struct Limits {pub max_mmio_ranges:usize}
