@@ -1,11 +1,111 @@
 extern crate alloc;
 
+#[path = "../../../core/src/mem/byte_extent.rs"]
+mod byte_extent;
+
 #[path = "../../../core/src/mem/shared_pages.rs"]
 mod shared_pages;
 
 use shared_pages::{PageError, ResizeError, SharedPages, SizeError};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+
+#[test]
+fn byte_resize_prepares_then_revokes_then_zeros_without_replacing_prefix() {
+    let mut pages = SharedPages::new_resizable(8192, 4096, 2).unwrap();
+    let low = pages
+        .page_or_try_insert(0, || Ok::<_, u8>(Mutex::new([7u8; 4096])))
+        .unwrap();
+    let high = pages
+        .page_or_try_insert(1, || Ok::<_, u8>(Mutex::new([9u8; 4096])))
+        .unwrap();
+    let events = std::cell::RefCell::new(Vec::new());
+    pages
+        .resize_bytes_with(
+            5000,
+            |_, range| {
+                events.borrow_mut().push("prepare");
+                assert_eq!(range, 904..4096);
+                Ok::<_, u8>(range)
+            },
+            |start, end| {
+                events.borrow_mut().push("revoke");
+                assert_eq!((start, end), (4096, 8192));
+                assert_eq!(high.lock().unwrap()[904], 9);
+                Ok(())
+            },
+            |page, range| {
+                events.borrow_mut().push("zero");
+                page.lock().unwrap()[range.start as usize..range.end as usize].fill(0);
+            },
+        )
+        .unwrap();
+    assert_eq!(*events.borrow(), ["prepare", "revoke", "zero"]);
+    assert_eq!(pages.length(), 5000);
+    assert!(!pages.contains_range(5000, 1));
+    assert_eq!(low.lock().unwrap()[4095], 7);
+    assert_eq!(high.lock().unwrap()[903], 9);
+    assert_eq!(high.lock().unwrap()[904], 0);
+    high.lock().unwrap()[1000] = 42; // A mapped write into padding.
+    pages
+        .resize_bytes_with(
+            6000,
+            |_, range| Ok::<_, u8>(range),
+            |_, _| Ok(()),
+            |page, range| page.lock().unwrap()[range.start as usize..range.end as usize].fill(0),
+        )
+        .unwrap();
+    assert_eq!(high.lock().unwrap()[1000], 0);
+    assert!(Arc::ptr_eq(
+        &high,
+        &pages
+            .page_or_try_insert(1, || -> Result<_, u8> { panic!("retain boundary") })
+            .unwrap()
+    ));
+    assert_eq!(
+        pages
+            .page_or_try_insert(2, || Ok::<_, u8>(Mutex::new([0; 4096])))
+            .unwrap_err(),
+        PageError::OutOfBounds
+    );
+}
+
+#[test]
+fn byte_resize_failures_leave_size_and_bytes_unchanged() {
+    let mut pages = SharedPages::new_resizable(4096, 4096, 1).unwrap();
+    let page = pages
+        .page_or_try_insert(0, || Ok::<_, u8>(Mutex::new([8u8; 4096])))
+        .unwrap();
+    assert_eq!(
+        pages.resize_bytes_with(
+            1,
+            |_, _| Err::<(), _>(3u8),
+            |_, _| -> Result<(), u8> { panic!("no revoke") },
+            |_, _| panic!("no zero")
+        ),
+        Err(ResizeError::Preparation(3))
+    );
+    assert_eq!(
+        pages.resize_bytes_with(1, |_, _| Ok(()), |_, _| Err(5u8), |_, _| panic!("no zero")),
+        Err(ResizeError::Revocation(5))
+    );
+    assert_eq!(pages.length(), 4096);
+    assert!(page.lock().unwrap().iter().all(|b| *b == 8));
+    let mut absent = SharedPages::<()>::new_resizable(4096, 4096, 1).unwrap();
+    absent
+        .resize_bytes_with(
+            1,
+            |_, _| -> Result<(), u8> { panic!("no allocated boundary") },
+            |_, _| Ok(()),
+            |_, _| panic!("no zero"),
+        )
+        .unwrap();
+    assert_eq!(absent.length(), 1);
+    assert_eq!(
+        absent.resize_with(4096, |_, _| Ok::<_, u8>(())),
+        Err(ResizeError::Size(SizeError::Invalid))
+    );
+}
 
 struct Page {
     bytes: Mutex<[u8; 4096]>,

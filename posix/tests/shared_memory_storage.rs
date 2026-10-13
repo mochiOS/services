@@ -1,5 +1,8 @@
 extern crate alloc;
 
+#[path = "../../../core/src/mem/byte_extent.rs"]
+mod byte_extent;
+
 // Exercise the production storage implementation, substituting only the host
 // equivalents of physical frame allocation and interrupt-safe locking.
 mod interrupt {
