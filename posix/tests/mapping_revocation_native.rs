@@ -38,6 +38,22 @@ fn state() -> &'static Mutex<State> {
     STATE.get_or_init(Default::default)
 }
 mod paging {
+    pub unsafe fn next_user_page_entry(
+        table: u64,
+        start: u64,
+        end: u64,
+    ) -> Result<Option<u64>, ()> {
+        Ok(super::state()
+            .lock()
+            .unwrap()
+            .entries
+            .range((table, start)..(table, end))
+            .next()
+            .map(|(&(root, address), _)| {
+                assert_eq!(root, table);
+                address
+            }))
+    }
     pub struct SuspendedUserPage {
         table: u64,
         address: u64,
@@ -121,14 +137,18 @@ fn actual_native_adapter_checks_owned_roots_restores_on_sync_failure_and_release
     let table = ProcessTable(vec![Process(4096), Process(8192)]);
     // Host owns the entire mock table and PTE map throughout this transaction.
     let mut native = unsafe { Native::new(&table) };
+    assert!(matches!(
+        native.next_page(12288, 4096, 8192),
+        Err(syscall::EFAULT)
+    ));
     assert!(matches!(native.suspend(12288, 4096), Err(syscall::EFAULT)));
     assert_eq!(native.suspend(4096, 4096).unwrap().is_none(), true);
     *state().lock().unwrap() = State {
-        entries: BTreeMap::from([((4096, 4096), 0x105), ((8192, 8192), 0x205)]),
+        entries: BTreeMap::from([((4096, 4096), 0x104), ((8192, 8192), 0x205)]),
         fail_sync: true,
         ..Default::default()
     };
-    let ranges = [(4096, 4096, 8192), (8192, 8192, 12288)];
+    let ranges = [(4096, 0, 1 << 40), (8192, 0, 1 << 40)];
     assert_eq!(
         revoke(ranges, &mut native),
         Err(Error::Backend(syscall::EIO))
@@ -137,7 +157,7 @@ fn actual_native_adapter_checks_owned_roots_restores_on_sync_failure_and_release
         let state = state().lock().unwrap();
         assert_eq!(
             state.entries,
-            BTreeMap::from([((4096, 4096), 0x105), ((8192, 8192), 0x205)])
+            BTreeMap::from([((4096, 4096), 0x104), ((8192, 8192), 0x205)])
         );
         assert_eq!(state.released, 0);
     }

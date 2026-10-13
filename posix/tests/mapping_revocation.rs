@@ -13,6 +13,9 @@ struct Vm {
 impl Backend for Vm {
     type Page = (u64, u64);
     type Error = u8;
+    fn next_page(&mut self, _: u64, start: u64, end: u64) -> Result<Option<u64>, u8> {
+        Ok((start < end).then_some(start))
+    }
     fn suspend(&mut self, table: u64, address: u64) -> Result<Option<Self::Page>, u8> {
         if self.fail_page == Some(address) {
             return Err(5);
@@ -130,4 +133,84 @@ fn backing_offsets_select_only_overlapping_virtual_pages_without_overflow() {
     assert_eq!(virtual_overlap(u64::MAX, 4096, 0, 0, 4096), Err(()));
     assert_eq!(virtual_overlap(4096, 4096, u64::MAX, 0, 4096), Err(()));
     assert_eq!(virtual_overlap(4096, 4096, 0, 2, 1), Err(()));
+}
+
+#[test]
+fn sparse_discovery_scales_with_owned_leaves_and_finishes_before_edits() {
+    struct Sparse {
+        vm: Vm,
+        queries: usize,
+        fail_discovery: bool,
+    }
+    impl Backend for Sparse {
+        type Page = (u64, u64);
+        type Error = u8;
+        fn next_page(&mut self, _: u64, start: u64, end: u64) -> Result<Option<u64>, u8> {
+            assert!(self.vm.events.is_empty(), "discovery precedes every edit");
+            self.queries += 1;
+            if self.fail_discovery && self.queries == 2 {
+                return Err(9);
+            }
+            Ok([4096, 1 << 39]
+                .into_iter()
+                .find(|&page| page >= start && page < end))
+        }
+        fn suspend(&mut self, table: u64, address: u64) -> Result<Option<Self::Page>, u8> {
+            self.vm.suspend(table, address)
+        }
+        fn restore(&mut self, page: Self::Page) {
+            self.vm.restore(page);
+        }
+        fn synchronize(&mut self) -> Result<(), u8> {
+            self.vm.synchronize()
+        }
+        fn release(&mut self, page: Self::Page) {
+            self.vm.release(page);
+        }
+    }
+    let mut sparse = Sparse {
+        vm: Vm::default(),
+        queries: 0,
+        fail_discovery: true,
+    };
+    assert_eq!(
+        revoke([(4096, 0, 1 << 40)], &mut sparse),
+        Err(Error::Backend(9))
+    );
+    assert!(sparse.vm.events.is_empty());
+    sparse.fail_discovery = false;
+    sparse.queries = 0;
+    revoke([(4096, 0, 1 << 40)], &mut sparse).unwrap();
+    assert_eq!(sparse.queries, 3);
+    assert_eq!(sparse.vm.events.len(), 5);
+}
+
+#[test]
+fn malformed_discovery_never_edits_or_loops_backwards() {
+    struct Invalid(u64);
+    impl Backend for Invalid {
+        type Page = ();
+        type Error = ();
+        fn next_page(&mut self, _: u64, _: u64, _: u64) -> Result<Option<u64>, ()> {
+            Ok(Some(self.0))
+        }
+        fn suspend(&mut self, _: u64, _: u64) -> Result<Option<()>, ()> {
+            panic!()
+        }
+        fn restore(&mut self, _: ()) {
+            panic!()
+        }
+        fn synchronize(&mut self) -> Result<(), ()> {
+            panic!()
+        }
+        fn release(&mut self, _: ()) {
+            panic!()
+        }
+    }
+    for address in [0, 4097, 8192] {
+        assert_eq!(
+            revoke([(4096, 4096, 8192)], &mut Invalid(address)),
+            Err(Error::InvalidRange)
+        );
+    }
 }

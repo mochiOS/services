@@ -36,7 +36,11 @@ static int check(void) {
     if (mprotect((void *)regions[0], span, PROT_READ|PROT_WRITE)) return 9;
     regions[0][8192] = 77;
     for (unsigned i = 0; i < 20; ++i) {
-        if (regions[i][span-1] != i+1 || munmap((void *)regions[i], span)) return 10;
+        if (regions[i][span-1] != i+1) return 10;
+        /* Non-present leaves still own frames and must be discovered, while
+           untouched virtual pages must not consume revocation-plan storage. */
+        if (mprotect((void *)regions[i], span, i & 1 ? PROT_READ : PROT_NONE)) return 15;
+        if (munmap((void *)regions[i], span)) return 10;
     }
     volatile unsigned char *shared = mmap(NULL, 8192, PROT_READ|PROT_WRITE,
                                          MAP_SHARED|MAP_ANONYMOUS, -1, 0);
