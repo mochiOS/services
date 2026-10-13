@@ -10,8 +10,16 @@ mod compositor_frame_buffer;
 mod compositor_received_buffer;
 #[path = "../../display/src/shared_buffer.rs"]
 mod display_shared_buffer;
+#[path = "../../linux/src/compositor_buffer.rs"]
+mod linux_compositor_buffer;
 #[path = "../../../libraries/viewkit/src/platform/mochios/buffer.rs"]
 mod viewkit_buffer;
+
+#[derive(Debug)]
+enum CompositorError {
+    Unavailable,
+    InvalidSize,
+}
 
 const PAGE_SIZE: usize = 4096;
 const PIXEL_FORMAT_ARGB8888_PREMULTIPLIED: u32 = 2;
@@ -77,6 +85,55 @@ thread_local! { static STATE: RefCell<State> = RefCell::new(State::default()); }
 
 fn reset() {
     STATE.with(|state| *state.borrow_mut() = State::default());
+}
+
+#[test]
+fn linux_buffer_owns_ram_and_retries_attenuated_offers() {
+    reset();
+    let mut storage = vec![0u8; 4096];
+    STATE.with(|state| state.borrow_mut().map_address = Some(storage.as_mut_ptr() as u64));
+    let mut buffer = linux_compositor_buffer::SharedBuffer::allocate(16, 16).unwrap();
+    buffer.copy_from(&[77; 1024]).unwrap();
+    assert!(storage[..1024].iter().all(|&byte| byte == 77));
+    assert!(buffer.copy_from(&[0; 4097]).is_err());
+    STATE.with(|state| state.borrow_mut().fail_send = true);
+    assert!(buffer.send_to(9).is_err());
+    STATE.with(|state| state.borrow_mut().fail_send = false);
+    buffer.send_to(9).unwrap();
+    buffer.send_to(9).unwrap();
+    buffer.send_to(10).unwrap();
+    STATE.with(|state| {
+        let state = state.borrow();
+        assert_eq!(state.offers.len(), 2);
+        for (_, bytes, handles) in &state.offers {
+            assert_eq!(
+                memory_object::ReadOnlyOffer::decode(bytes).unwrap().length,
+                4096
+            );
+            assert_eq!(handles.count, 1);
+            assert_eq!(
+                handles.handles[0].rights,
+                memory_object::READONLY_BUFFER_RIGHTS
+            );
+        }
+    });
+    drop(buffer);
+    STATE.with(|state| {
+        let state = state.borrow();
+        let last = &state.calls[state.calls.len() - 2..];
+        assert_eq!(last[0].0, syscall::SyscallNumber::MemoryUnmap);
+        assert_eq!(last[1].0, syscall::SyscallNumber::HandleClose);
+    });
+    reset();
+    STATE.with(|state| state.borrow_mut().fail_map = true);
+    assert!(linux_compositor_buffer::SharedBuffer::allocate(16, 16).is_err());
+    STATE.with(|state| {
+        assert_eq!(
+            state.borrow().calls.last().unwrap().0,
+            syscall::SyscallNumber::HandleClose
+        )
+    });
+    assert!(linux_compositor_buffer::SharedBuffer::allocate(0, 16).is_err());
 }
 
 #[test]

@@ -1,5 +1,9 @@
 use mochi_user_platform as platform;
 
+#[path = "compositor_buffer.rs"]
+mod buffer;
+use buffer::SharedBuffer;
+
 const SERVICE_NAME: &str = "compositor.service";
 const PAGE_SIZE: usize = 4096;
 const OP_CREATE_SURFACE: u32 = 1;
@@ -65,7 +69,7 @@ impl Surface {
             .as_ref()
             .is_none_or(|buffer| buffer.width != width || buffer.height != height);
         if replace {
-            self.buffer = Some(SharedBuffer::allocate(width, height)?);
+            let mut buffer = SharedBuffer::allocate(width, height)?;
             let mut request = [0u8; 28];
             put_u32(&mut request, 0, OP_ATTACH_BUFFER);
             put_u64(&mut request, 4, self.token);
@@ -74,10 +78,8 @@ impl Surface {
             put_u32(&mut request, 20, u32::from(width));
             put_u32(&mut request, 24, PIXEL_FORMAT_XRGB8888);
             call(self.compositor, &request)?;
-            self.buffer
-                .as_mut()
-                .ok_or(CompositorError::InvalidSize)?
-                .send_to(self.compositor)?;
+            buffer.send_to(self.compositor)?;
+            self.buffer = Some(buffer);
         }
         self.buffer
             .as_mut()
@@ -123,60 +125,6 @@ impl Drop for Surface {
         put_u32(&mut request, 0, OP_DESTROY_SURFACE);
         put_u64(&mut request, 4, self.token);
         let _ = call(self.compositor, &request);
-    }
-}
-
-struct SharedBuffer {
-    address: u64,
-    byte_capacity: usize,
-    page_count: usize,
-    width: u16,
-    height: u16,
-    sent: bool,
-}
-
-impl SharedBuffer {
-    fn allocate(width: u16, height: u16) -> Result<Self, CompositorError> {
-        let bytes = usize::from(width)
-            .checked_mul(usize::from(height))
-            .and_then(|pixels| pixels.checked_mul(4))
-            .ok_or(CompositorError::InvalidSize)?;
-        let page_count = bytes
-            .checked_add(PAGE_SIZE - 1)
-            .map(|rounded| rounded / PAGE_SIZE)
-            .filter(|count| *count != 0)
-            .ok_or(CompositorError::InvalidSize)?;
-        let address = platform::memory::alloc_shared_page_count(page_count)
-            .map_err(|_| CompositorError::Unavailable)?;
-        Ok(Self {
-            address,
-            byte_capacity: page_count * PAGE_SIZE,
-            page_count,
-            width,
-            height,
-            sent: false,
-        })
-    }
-
-    fn copy_from(&mut self, frame: &[u8]) -> Result<(), CompositorError> {
-        if frame.len() > self.byte_capacity {
-            return Err(CompositorError::InvalidSize);
-        }
-        // SAFETY: alloc_shared_page_count returned this writable mapping for exactly
-        // byte_capacity bytes, and the mapping remains owned by this buffer.
-        let destination =
-            unsafe { core::slice::from_raw_parts_mut(self.address as *mut u8, self.byte_capacity) };
-        destination[..frame.len()].copy_from_slice(frame);
-        Ok(())
-    }
-
-    fn send_to(&mut self, compositor: u64) -> Result<(), CompositorError> {
-        if !self.sent {
-            platform::ipc::send_page_count(compositor, self.page_count, self.address)
-                .map_err(|_| CompositorError::Unavailable)?;
-            self.sent = true;
-        }
-        Ok(())
     }
 }
 

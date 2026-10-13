@@ -1,8 +1,17 @@
+use mochi_user_platform as platform;
 use mochi_user_platform::{ipc, memory_object, syscall};
 use tiny_skia::Pixmap;
 
 #[path = "../../../../libraries/viewkit/src/platform/mochios/buffer.rs"]
 mod buffer;
+#[path = "../../../linux/src/compositor_buffer.rs"]
+mod linux_buffer;
+
+#[derive(Debug)]
+enum CompositorError {
+    Unavailable,
+    InvalidSize,
+}
 
 const PAGE_SIZE: usize = 4096;
 const PIXEL_FORMAT_ARGB8888_PREMULTIPLIED: u32 = 2;
@@ -111,6 +120,27 @@ fn probe() -> Result<u64, String> {
         commit[4..12].copy_from_slice(token);
         rpc(compositor, &commit)?;
     }
+    let mut attach = [0u8; 28];
+    attach[..4].copy_from_slice(&2u32.to_le_bytes());
+    attach[4..12].copy_from_slice(token);
+    for offset in [12, 16, 20] {
+        attach[offset..offset + 4].copy_from_slice(&16u32.to_le_bytes());
+    }
+    attach[24..28].copy_from_slice(&1u32.to_le_bytes());
+    rpc(compositor, &attach)?;
+    let mut linux = linux_buffer::SharedBuffer::allocate(16, 16)
+        .map_err(|error| format!("linux buffer {error:?}"))?;
+    linux
+        .copy_from(&[0x77; 16 * 16 * 4])
+        .map_err(|error| format!("linux copy {error:?}"))?;
+    linux
+        .send_to(compositor)
+        .map_err(|error| format!("linux offer {error:?}"))?;
+    drop(linux);
+    let mut commit = [0u8; 12];
+    commit[..4].copy_from_slice(&4u32.to_le_bytes());
+    commit[4..12].copy_from_slice(token);
+    rpc(compositor, &commit)?;
     let mut destroy = [0u8; 12];
     destroy[..4].copy_from_slice(&6u32.to_le_bytes());
     destroy[4..12].copy_from_slice(token);
@@ -121,7 +151,7 @@ fn probe() -> Result<u64, String> {
 fn main() {
     let result = probe();
     let line = format!(
-        "viewkit-buffer: {} actual ViewKit pixmap offers, sender drop, 2 commits, destroy {result:?}\n",
+        "viewkit-buffer: {} ViewKit + Linux RAM offers, sender drop, 3 commits, destroy {result:?}\n",
         if result.is_ok() { "PASS" } else { "FAIL" }
     );
     let _ = syscall::call2(
