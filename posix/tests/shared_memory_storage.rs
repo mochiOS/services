@@ -134,6 +134,83 @@ fn retained_physical_storage_outlives_the_object_and_is_released_once() {
 }
 
 #[test]
+fn byte_resize_preserves_prefix_and_clears_padding_before_growth() {
+    let memory = shared_memory::SharedMemory::new(8192, 2).unwrap();
+    memory.write_at(4999, &[7, 8, 9]).unwrap();
+    let (frame, epoch) = memory.prepare_page(1).unwrap();
+    assert_eq!(
+        memory.resize_with(5000, |start, end| {
+            assert_eq!((start, end), (4096, 8192));
+            Err(syscall::EIO)
+        }),
+        Err(syscall::EIO)
+    );
+    assert_eq!(memory.length(), 8192);
+    assert_eq!(memory.with_generation(epoch, || Ok(())), Ok(()));
+    assert_eq!(
+        unsafe { std::ptr::read_volatile((frame + 904) as *const u8) },
+        8
+    );
+    memory.resize_with(5000, |_, _| Ok(())).unwrap();
+    assert_eq!(memory.write_at(5000, &[1]), Err(syscall::EINVAL));
+    let mut output = [0; 3];
+    assert_eq!(memory.read_at(4999, &mut output), Ok(1));
+    assert_eq!(output[0], 7);
+    assert_eq!(
+        unsafe { std::ptr::read_volatile((frame + 904) as *const u8) },
+        0
+    );
+    unsafe { std::ptr::write_volatile((frame + 904) as *mut u8, 42) };
+    memory
+        .resize_with(5001, |start, end| {
+            assert_eq!((start, end), (4096, 8192));
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(memory.read_at(5000, &mut output[..1]), Ok(1));
+    assert_eq!(output[0], 0);
+    assert_eq!(
+        memory.with_generation(epoch, || Ok(())),
+        Err(syscall::EAGAIN)
+    );
+    let alias = memory.retain_page(1).unwrap();
+    assert_eq!(alias, frame);
+    paging::release_user_frame(alias);
+    paging::release_user_frame(frame);
+}
+
+#[test]
+fn concurrent_byte_io_and_resize_preserve_prefix_and_validate_extent() {
+    let memory = shared_memory::SharedMemory::new(8192, 2).unwrap();
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            let memory = &memory;
+            scope.spawn(move || {
+                for _ in 0..200 {
+                    assert_eq!(memory.write_at(4095, &[6, 6]), Ok(2));
+                    let mut bytes = [0; 2];
+                    assert_eq!(memory.read_at(4095, &mut bytes), Ok(2));
+                    assert_eq!(bytes, [6, 6]);
+                    assert!(matches!(
+                        memory.write_at(6000, &[3]),
+                        Ok(1) | Err(syscall::EINVAL)
+                    ));
+                }
+            });
+        }
+        for _ in 0..200 {
+            memory.resize_with(5000, |_, _| Ok(())).unwrap();
+            memory.resize_with(8192, |_, _| Ok(())).unwrap();
+        }
+    });
+    memory.resize_with(5000, |_, _| Ok(())).unwrap();
+    memory.resize_with(8192, |_, _| Ok(())).unwrap();
+    let mut bytes = [1];
+    memory.read_at(6000, &mut bytes).unwrap();
+    assert_eq!(bytes, [0]);
+}
+
+#[test]
 fn shrink_and_regrowth_reject_old_prepared_generations_without_recycling_pins() {
     let memory = shared_memory::SharedMemory::new(4096, 2).unwrap();
     memory.write_at(17, &[0xa7]).unwrap();
@@ -180,7 +257,6 @@ fn shrink_and_regrowth_reject_old_prepared_generations_without_recycling_pins() 
 fn failed_resize_and_noop_preserve_current_size_and_prepared_generation() {
     let memory = shared_memory::SharedMemory::new(8192, 2).unwrap();
     let (frame, generation) = memory.prepare_page(1).unwrap();
-    assert_eq!(memory.resize_with(1, |_, _| Ok(())), Err(syscall::EINVAL));
     assert_eq!(
         memory.resize_with(12288, |_, _| Ok(())),
         Err(syscall::ENOMEM)
