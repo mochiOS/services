@@ -60,3 +60,19 @@ fn runtime_uses_newlib_layout_cleanup_and_non_cancellation_wait() {
             .contains("#define _PTHREAD_ONCE_INIT  { 1, 0 }")
     );
 }
+
+#[test]
+fn snapshot_child_preserves_the_calling_threads_live_cleanup_stack() {
+    let runtime = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
+    let start = runtime.find("if image == 0 {").unwrap();
+    let end = start
+        + runtime[start..]
+            .find("return Ok((0, inherited_fds, None));")
+            .unwrap();
+    let child = &runtime[start..end];
+    assert!(child.contains("!ptr::eq(other, thread_control)"));
+    assert!(!child.contains("thread_control.cleanup_head.store"));
+    assert!(!child.contains("release_thread_control(thread_control)"));
+    // This is a guard against losing the active stack contexts, not proof
+    // that multithreaded address-space snapshots are supported.
+}
