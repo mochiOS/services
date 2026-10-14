@@ -1326,6 +1326,26 @@ fn socket_inode_creation_is_exclusive_scoped_and_not_a_regular_file_placeholder(
         protocol::decode_node_status(&confined_status.payload).unwrap().kind,
         protocol::NODE_TYPE_SOCKET
     );
+    service
+        .unlink_at(
+            protocol::Header {
+                flags: protocol::UNLINK_AT_BASE_ATTACHED,
+                ..Default::default()
+            },
+            b"socket",
+            anchors,
+            root_credentials(),
+        )
+        .unwrap();
+    assert!(matches!(
+        service.stat_at(
+            protocol::Header::default(),
+            b"/mount/socket",
+            PathAnchors::default(),
+            root_credentials(),
+        ),
+        Err(2)
+    ));
     service.provider_close(mounted.open_id).unwrap();
 }
 

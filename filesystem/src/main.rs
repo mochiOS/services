@@ -408,6 +408,32 @@ fn main() {
                             payload: Vec::new(),
                         },
                     }
+                } else if header.opcode == protocol::OP_CREATE_SOCKET_AT {
+                    let anchors = decode_path_anchors(
+                        header.flags,
+                        protocol::SOCKET_AT_ROOT_ATTACHED,
+                        protocol::SOCKET_AT_BASE_ATTACHED,
+                        &attached,
+                    );
+                    let result = protocol::decode_credentials_payload(payload)
+                        .map_err(|_| 22)
+                        .and_then(|(credentials, payload)| {
+                            anchors.and_then(|anchors| {
+                                service.create_socket_at(header, payload, anchors, credentials)
+                            })
+                        });
+                    match result {
+                        Ok(response) => response,
+                        Err(error) => filesystem_service::service::Response {
+                            header: protocol::Header {
+                                opcode: protocol::OP_STATUS,
+                                request_id: header.request_id,
+                                status: -error,
+                                ..protocol::Header::default()
+                            },
+                            payload: Vec::new(),
+                        },
+                    }
                 } else if header.opcode == protocol::OP_MKDIR_AT {
                     let anchors = decode_path_anchors(
                         header.flags,
