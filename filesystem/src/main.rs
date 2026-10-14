@@ -163,24 +163,52 @@ fn main() {
                     }
                     continue;
                 }
-                if header.opcode == protocol::OP_OPEN_AT {
+                if matches!(
+                    header.opcode,
+                    protocol::OP_OPEN_AT | protocol::OP_CREATE_SOCKET_AT
+                ) {
+                    let socket = header.opcode == protocol::OP_CREATE_SOCKET_AT;
+                    let (root_flag, base_flag) = if socket {
+                        (
+                            protocol::SOCKET_AT_ROOT_ATTACHED,
+                            protocol::SOCKET_AT_BASE_ATTACHED,
+                        )
+                    } else {
+                        (
+                            protocol::OPEN_AT_ROOT_ATTACHED,
+                            protocol::OPEN_AT_BASE_ATTACHED,
+                        )
+                    };
                     let result = protocol::decode_credentials_payload(payload)
                         .map_err(|_| 22)
                         .and_then(|(credentials, payload)| {
                             decode_path_anchors(
                                 header.flags,
-                                protocol::OPEN_AT_ROOT_ATTACHED,
-                                protocol::OPEN_AT_BASE_ATTACHED,
+                                root_flag,
+                                base_flag,
                                 &attached,
                             )
                             .and_then(|anchors| {
-                                service.open_at(header, payload, anchors, credentials)
+                                if socket {
+                                    service.create_socket_at_retained(
+                                        header, payload, anchors, credentials,
+                                    )
+                                } else {
+                                    service.open_at(header, payload, anchors, credentials)
+                                }
                             })
                         });
                     close_attached_handles(&attached);
                     match result {
                         Ok(response) => {
-                            let rights = open_handle_rights(header.flags);
+                            let rights = if socket {
+                                // Namespace identity only: no byte I/O, mapping,
+                                // seeking, or provider control authority.
+                                platform::handle::HANDLE_RIGHT_DUPLICATE
+                                    | platform::handle::HANDLE_RIGHT_TRANSFER
+                            } else {
+                                open_handle_rights(header.flags)
+                            };
                             let opened = match platform::handle::create_provider_object(
                                 endpoint,
                                 response.header.open_id,
@@ -394,32 +422,6 @@ fn main() {
                         .and_then(|(credentials, payload)| {
                             anchors.and_then(|anchors| {
                                 service.access_at(header, payload, anchors, credentials)
-                            })
-                        });
-                    match result {
-                        Ok(response) => response,
-                        Err(error) => filesystem_service::service::Response {
-                            header: protocol::Header {
-                                opcode: protocol::OP_STATUS,
-                                request_id: header.request_id,
-                                status: -error,
-                                ..protocol::Header::default()
-                            },
-                            payload: Vec::new(),
-                        },
-                    }
-                } else if header.opcode == protocol::OP_CREATE_SOCKET_AT {
-                    let anchors = decode_path_anchors(
-                        header.flags,
-                        protocol::SOCKET_AT_ROOT_ATTACHED,
-                        protocol::SOCKET_AT_BASE_ATTACHED,
-                        &attached,
-                    );
-                    let result = protocol::decode_credentials_payload(payload)
-                        .map_err(|_| 22)
-                        .and_then(|(credentials, payload)| {
-                            anchors.and_then(|anchors| {
-                                service.create_socket_at(header, payload, anchors, credentials)
                             })
                         });
                     match result {

@@ -27,6 +27,8 @@ struct response {
 };
 _Static_assert(sizeof(struct header) == 64, "filesystem header");
 _Static_assert(sizeof(struct handles) == 72, "IPC attachments");
+static uint32_t created_handle;
+#define RETAIN_RIGHTS (UINT64_C(3) << 62)
 
 static uint64_t native(uint64_t number, uint64_t a, uint64_t b, uint64_t c,
                        uint64_t d, uint64_t e, uint64_t f) {
@@ -77,13 +79,39 @@ static int request(uint64_t endpoint, uint16_t opcode, int legacy,
   CHECK(response->header.request == 142 && response->header.opcode == 0x8000);
   CHECK(response->header.magic[0] == 'M' && response->header.magic[1] == 'F' &&
         response->header.magic[2] == 'S' && response->header.magic[3] == '1');
-  CHECK(response->header.version == 1 && handles.count == 0 &&
-        handles.flags == 0);
+  CHECK(response->header.version == 1 && handles.flags == 0);
+  if (opcode == 38 && response->header.status == 0) {
+    CHECK(handles.count == 1 && handles.entries[0].handle != 0 &&
+          handles.entries[0].reserved == 0 &&
+          handles.entries[0].rights == RETAIN_RIGHTS);
+    CHECK(response->header.open != 0);
+    created_handle = handles.entries[0].handle;
+  } else {
+    CHECK(handles.count == 0);
+  }
   return response->header.status;
 }
 static uint32_t read32(const unsigned char *bytes) {
   return (uint32_t)bytes[0] | (uint32_t)bytes[1] << 8 |
          (uint32_t)bytes[2] << 16 | (uint32_t)bytes[3] << 24;
+}
+static uint64_t read64(const unsigned char *bytes) {
+  return read32(bytes) | (uint64_t)read32(bytes + 4) << 32;
+}
+static void stat_handle(uint64_t endpoint, uint32_t file,
+                        struct response *response) {
+  struct header header = {{'M', 'F', 'S', '1'}, 1, 20, 143};
+  struct handles handles = {0};
+  handles.count = 1;
+  handles.entries[0] = (struct attachment){file, 0, UINT64_C(1) << 63};
+  uint64_t result =
+      native(632, endpoint, (uintptr_t)&header, sizeof(header),
+             (uintptr_t)response, sizeof(*response), (uintptr_t)&handles);
+  CHECK((int64_t)result >= 0);
+  CHECK((uint32_t)result == 176);
+  CHECK(response->header.request == 143 && response->header.status == 0 &&
+        response->header.length == 112 && handles.count == 0 &&
+        handles.flags == 0);
 }
 __attribute__((used, noreturn)) void filesystem_socket_main(void) {
   uint64_t endpoint = native(628, UINT64_C(0x4c5254433153464d), 0, 0, 0, 0, 0);
@@ -101,13 +129,37 @@ __attribute__((used, noreturn)) void filesystem_socket_main(void) {
   CHECK(read32(response.data + 36) == 5 && read32(response.data + 40) == 0600);
   CHECK(read32(response.data + 44) == 0 && read32(response.data + 48) == 0);
   CHECK(read32(response.data + 52) == 1);
+  uint32_t original = created_handle;
+  uint64_t node = read64(response.data + 8);
+  char byte = 0;
+  CHECK((int64_t)native(634, original, (uintptr_t)&byte, 1, 0, 0, 0) == -13);
+  CHECK((int64_t)native(635, original, (uintptr_t)&byte, 1, 0, 0, 0) == -13);
+  CHECK((int64_t)native(636, original, 0, 0, 0, 0, 0) == -13);
+  CHECK((int64_t)native(627, original, RETAIN_RIGHTS | 1, 0, 0, 0, 0) == -13);
+  uint64_t alias = native(627, original, RETAIN_RIGHTS, 0, 0, 0, 0);
+  CHECK((int64_t)alias > 0 && alias != original);
   CHECK(request(endpoint, 38, 0, &response) == -17);
   CHECK(request(endpoint, 19, 0, &response) == 0 &&
         read32(response.data + 36) == 5);
   CHECK(request(endpoint, 28, 0, &response) == 0);
   CHECK(request(endpoint, 19, 0, &response) == -2);
-  log_message("filesystem-socket-ipc: PASS delegated control, denied global "
-              "IPC, exclusive socket inode and unlink\n");
+  stat_handle(endpoint, original, &response);
+  CHECK(read64(response.data + 8) == node && read32(response.data + 36) == 5 &&
+        read32(response.data + 52) == 0);
+  CHECK(request(endpoint, 38, 0, &response) == 0);
+  CHECK(read64(response.data + 8) != node);
+  uint32_t replacement = created_handle;
+  CHECK(native(626, original, 0, 0, 0, 0, 0) == 0);
+  stat_handle(endpoint, (uint32_t)alias, &response);
+  CHECK(read64(response.data + 8) == node && read32(response.data + 52) == 0);
+  CHECK(native(626, alias, 0, 0, 0, 0, 0) == 0);
+  CHECK(request(endpoint, 19, 0, &response) == 0 &&
+        read64(response.data + 8) != node);
+  CHECK(request(endpoint, 28, 0, &response) == 0);
+  CHECK(native(626, replacement, 0, 0, 0, 0, 0) == 0);
+  log_message(
+      "filesystem-socket-ipc: PASS delegated control, denied global "
+      "IPC, attenuated metadata Handle, dup/unlink/recreate lifetime\n");
   finish(0);
 }
 __attribute__((naked, noreturn)) void filesystem_socket_entry(void) {
