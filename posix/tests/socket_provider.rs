@@ -92,6 +92,124 @@ fn native_read_write_frames_preserve_stream_data_and_return_backpressure() {
 }
 
 #[test]
+fn socket_kind_and_listener_state_are_read_only_native_queries() {
+    let (mut streams, [a, _]) = fixture();
+    let flags = mnu_abi::IPC_DELIVERY_NATIVE_OBJECT;
+    for (tag, value) in [(wire::CONTROL_KIND, 1u32), (wire::CONTROL_ACCEPTING, 0)] {
+        let query = frame(provider::OP_CONTROL, a, tag, 4, &[]);
+        let (reply, bytes) = call(&mut streams, &query, flags, 0);
+        assert_eq!((reply.status, reply.value), (0, 4));
+        assert_eq!(bytes, value.to_le_bytes());
+        assert_eq!(call(&mut streams, &query, 0, 0).0.status, -13);
+        assert_eq!(call(&mut streams, &query, flags, 1).0.status, -22);
+        for (length, payload) in [
+            (0, b"".as_slice()),
+            (4, b"x".as_slice()),
+            (8, b"".as_slice()),
+        ] {
+            let invalid = frame(provider::OP_CONTROL, a, tag, length, payload);
+            assert_eq!(call(&mut streams, &invalid, flags, 0).0.status, -22);
+        }
+        let invalid = frame(provider::OP_CONTROL, u64::MAX, tag, 4, &[]);
+        assert_eq!(call(&mut streams, &invalid, flags, 0).0.status, -9);
+    }
+    let mut service = PosixService::<u32>::new();
+    service
+        .initialize_bootstrap_process(
+            AuthenticatedProcess {
+                handle: 1,
+                process_id: 1,
+            },
+            501,
+            20,
+            &[],
+        )
+        .unwrap();
+    let listener = service
+        .create_socket(
+            PeerIdentity {
+                process_id: 1,
+                effective_uid: 501,
+                effective_gid: 20,
+            },
+            Create {
+                domain: Domain::Unix,
+                kind: Kind::Stream,
+                protocol: 0,
+                options: 0,
+            },
+            &mut streams,
+        )
+        .unwrap();
+    let query = frame(
+        provider::OP_CONTROL,
+        listener,
+        wire::CONTROL_ACCEPTING,
+        4,
+        &[],
+    );
+    assert_eq!(call(&mut streams, &query, flags, 0).1, 0u32.to_le_bytes());
+    streams.listen(listener, 3).unwrap();
+    assert_eq!(call(&mut streams, &query, flags, 0).1, 1u32.to_le_bytes());
+    let client = service
+        .create_socket(
+            PeerIdentity {
+                process_id: 1,
+                effective_uid: 501,
+                effective_gid: 20,
+            },
+            Create {
+                domain: Domain::Unix,
+                kind: Kind::Stream,
+                protocol: 0,
+                options: 0,
+            },
+            &mut streams,
+        )
+        .unwrap();
+    let accepted = streams.connect(client, listener).unwrap();
+    let ticket = streams.begin_accept(listener).unwrap();
+    streams.commit_accept(ticket, (501, 20), 0).unwrap();
+    let query = frame(
+        provider::OP_CONTROL,
+        accepted,
+        wire::CONTROL_ACCEPTING,
+        4,
+        &[],
+    );
+    assert_eq!(call(&mut streams, &query, flags, 0).1, 0u32.to_le_bytes());
+}
+
+#[test]
+fn libc_socket_option_tags_and_values_do_not_leak_wire_numbers() {
+    use mochios_posix_client::socket::{newlib_getsockopt_tag, newlib_getsockopt_value};
+    assert_eq!(newlib_getsockopt_tag(1, 3), Ok(wire::CONTROL_KIND));
+    assert_eq!(newlib_getsockopt_tag(1, 30), Ok(wire::CONTROL_ACCEPTING));
+    for (level, option) in [(0, 3), (1, 999), (1, 4)] {
+        assert_eq!(newlib_getsockopt_tag(level, option), Err(-92));
+    }
+    for (kind, native) in [(1u32, 1), (2, 2), (3, 5)] {
+        assert_eq!(
+            newlib_getsockopt_value(wire::CONTROL_KIND, &kind.to_le_bytes()),
+            Ok(native)
+        );
+    }
+    for tag in [wire::CONTROL_KIND, wire::CONTROL_ACCEPTING] {
+        assert_eq!(newlib_getsockopt_value(tag, &[]), Err(-5));
+        assert_eq!(newlib_getsockopt_value(tag, &[0; 5]), Err(-5));
+        assert_eq!(newlib_getsockopt_value(tag, &99u32.to_le_bytes()), Err(-5));
+    }
+    assert_eq!(
+        newlib_getsockopt_value(wire::CONTROL_ACCEPTING, &1u32.to_le_bytes()),
+        Ok(1)
+    );
+    assert_eq!(
+        newlib_getsockopt_value(wire::CONTROL_ACCEPTING, &[0; 4]),
+        Ok(0)
+    );
+}
+
+#[test]
 fn ordinary_ipc_and_attached_handles_cannot_forge_object_operations_or_release() {
     let (mut streams, [a, b]) = fixture();
     let flags = mnu_abi::IPC_DELIVERY_NATIVE_OBJECT;

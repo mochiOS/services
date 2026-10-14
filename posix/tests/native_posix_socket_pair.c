@@ -26,6 +26,31 @@
     }                                                                          \
   } while (0)
 static int blocking_fd;
+static int verify_socket_options(int fd, int accepting) {
+  int value = -1;
+  socklen_t length = sizeof(value);
+  CHECK(getsockopt(fd, SOL_SOCKET, SO_TYPE, &value, &length) == 0 &&
+        value == SOCK_STREAM && length == sizeof(value));
+  length = sizeof(value);
+  CHECK(getsockopt(fd, SOL_SOCKET, SO_ACCEPTCONN, &value, &length) == 0 &&
+        value == accepting && length == sizeof(value));
+  unsigned char truncated[2] = {0xff, 0xaa};
+  length = 1;
+  CHECK(getsockopt(fd, SOL_SOCKET, SO_TYPE, truncated, &length) == 0 &&
+        length == 1 && truncated[0] == SOCK_STREAM && truncated[1] == 0xaa);
+  length = 0;
+  CHECK(getsockopt(fd, SOL_SOCKET, SO_TYPE, NULL, &length) == 0 && length == 0);
+  length = sizeof(value);
+  CHECK(getsockopt(fd, SOL_SOCKET, SO_TYPE, NULL, &length) == -1 &&
+        errno == EFAULT);
+  CHECK(getsockopt(fd, SOL_SOCKET, SO_TYPE, &value, NULL) == -1 &&
+        errno == EFAULT);
+  CHECK(getsockopt(fd, SOL_SOCKET, 999, &value, &length) == -1 &&
+        errno == ENOPROTOOPT);
+  CHECK(getsockopt(-1, SOL_SOCKET, SO_TYPE, &value, &length) == -1 &&
+        errno == EBADF);
+  return 0;
+}
 static int accept_started;
 static int connect_started;
 static int connect_fd;
@@ -166,6 +191,8 @@ static int verify_connections(int listener, struct sockaddr_un *address,
   int first = socket(AF_UNIX, SOCK_STREAM, 0);
   int second = socket(AF_UNIX, SOCK_STREAM, 0);
   CHECK(first >= 0 && second >= 0);
+  CHECK(verify_socket_options(first, 0) == 0 &&
+        verify_socket_options(listener, 1) == 0);
   CHECK(connect(-1, (struct sockaddr *)address, size) == -1 && errno == EBADF);
   CHECK(connect(first, NULL, size) == -1 && errno == EFAULT);
   CHECK(connect(first, (struct sockaddr *)address, size) == 0);
@@ -197,6 +224,7 @@ static int verify_connections(int listener, struct sockaddr_un *address,
   int accepted = accept4(listener, (struct sockaddr *)&peer, &length,
                          SOCK_NONBLOCK | SOCK_CLOEXEC);
   CHECK(accepted >= 0 && length == 2 && peer.sun_family == AF_UNIX);
+  CHECK(verify_socket_options(accepted, 0) == 0);
   CHECK((fcntl(accepted, F_GETFL, 0) & O_NONBLOCK) != 0);
   CHECK((fcntl(accepted, F_GETFD, 0) & FD_CLOEXEC) != 0);
   char data[8];
@@ -406,6 +434,7 @@ int main(int argc, char **argv) {
     return verify_exec(argv);
   CHECK(verify_single_socket() == 0);
   CHECK(verify_path_binding() == 0);
+  puts("posix-socket-options: PASS");
   CHECK(verify_connect_interrupts() == 0);
   int fds[2] = {123, 456};
   CHECK(socketpair(AF_UNIX, SOCK_STREAM | 0x1000, 0, fds) == -1 &&

@@ -63,6 +63,21 @@ pub fn handle_provider_request(
                 .write(header.object_id, payload)
                 .map(|count| (count as u64, 0)),
             provider::OP_CONTROL => match header.basis {
+                wire::CONTROL_KIND | wire::CONTROL_ACCEPTING
+                    if payload.is_empty() && header.length == 4 =>
+                {
+                    let value = if header.basis == wire::CONTROL_KIND {
+                        streams.kind(header.object_id).map(|kind| kind as u32)
+                    } else {
+                        streams
+                            .listening_backlog(header.object_id)
+                            .map(|backlog| u32::from(backlog.is_some()))
+                    };
+                    value.map(|value| {
+                        data[..4].copy_from_slice(&value.to_le_bytes());
+                        (4, 4)
+                    })
+                }
                 wire::CONTROL_LOCAL_ADDRESS | wire::CONTROL_PEER_ADDRESS
                     if payload.is_empty() && header.length as usize >= wire::ADDRESS_HEADER_LEN =>
                 {
@@ -136,6 +151,8 @@ pub fn handle_provider_request(
                     })
                 }
                 wire::CONTROL_GET_OPTIONS
+                | wire::CONTROL_KIND
+                | wire::CONTROL_ACCEPTING
                 | wire::CONTROL_SET_OPTIONS
                 | wire::CONTROL_SHUTDOWN
                 | wire::CONTROL_READINESS => Err(-22),

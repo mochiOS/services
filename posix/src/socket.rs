@@ -347,6 +347,13 @@ impl Streams {
         Ok(())
     }
 
+    pub fn kind(&self, id: u64) -> Result<Kind, i32> {
+        self.endpoint(id)?;
+        // validate_create admits only UNIX stream descriptions, including
+        // those produced by pair/connect/accept; no other kind is synthesized.
+        Ok(Kind::Stream)
+    }
+
     /// Description IDs are private; the adapter resolves the listener through
     /// an authorized, retained filesystem object rather than a client ID/path.
     pub fn connect(&mut self, client: u64, listener: u64) -> Result<u64, i32> {
