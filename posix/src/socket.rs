@@ -6,6 +6,7 @@ use mochios_posix_protocol::socket::{Create, Domain, Kind, NONBLOCKING};
 use std::collections::VecDeque;
 
 pub const RECEIVE_CAPACITY: usize = 64 * 1024;
+pub const MIN_RECEIVE_CAPACITY: usize = 256;
 pub const MAX_ENDPOINTS: usize = 1024;
 pub const MAX_BACKLOG: usize = 128;
 /// Private Provider namespace: bit 62 distinguishes connection wait jobs.
@@ -64,6 +65,7 @@ struct Endpoint {
     peer: Option<u64>,
     credentials: (u32, u32),
     incoming: VecDeque<u8>,
+    receive_capacity: usize,
     error: u32,
     read_shutdown: bool,
     write_shutdown: bool,
@@ -156,6 +158,7 @@ impl Streams {
             peer: None,
             credentials,
             incoming: VecDeque::new(),
+            receive_capacity: RECEIVE_CAPACITY,
             error: 0,
             read_shutdown: false,
             write_shutdown: false,
@@ -189,6 +192,7 @@ impl Streams {
                 peer: Some(peer),
                 credentials,
                 incoming: VecDeque::new(),
+                receive_capacity: RECEIVE_CAPACITY,
                 error: 0,
                 read_shutdown: false,
                 write_shutdown: false,
@@ -259,6 +263,20 @@ impl Streams {
     pub fn take_error(&mut self, id: u64) -> Result<u32, i32> {
         Ok(std::mem::take(&mut self.endpoint_mut(id)?.error))
     }
+    pub fn receive_capacity(&self, id: u64) -> Result<usize, i32> {
+        Ok(self.endpoint(id)?.receive_capacity)
+    }
+
+    /// Clamp to the service's existing per-description memory ceiling. Do not
+    /// allocate on a hint or discard queued bytes when shrinking below usage.
+    pub fn set_receive_capacity(&mut self, id: u64, requested: u32) -> Result<(), i32> {
+        let entry = self.endpoint_mut(id)?;
+        if requested > i32::MAX as u32 {
+            return Err(-22);
+        }
+        entry.receive_capacity = (requested as usize).clamp(MIN_RECEIVE_CAPACITY, RECEIVE_CAPACITY);
+        Ok(())
+    }
     pub fn set_options(&mut self, id: u64, options: u32) -> Result<(), i32> {
         let entry = self.endpoint_mut(id)?;
         if options & !NONBLOCKING != 0 {
@@ -281,7 +299,11 @@ impl Streams {
         if receiver.read_shutdown {
             return Err(-32);
         }
-        let count = input.len().min(RECEIVE_CAPACITY - receiver.incoming.len());
+        let count = input.len().min(
+            receiver
+                .receive_capacity
+                .saturating_sub(receiver.incoming.len()),
+        );
         if count == 0 {
             return Err(-11);
         }
@@ -406,6 +428,7 @@ impl Streams {
             return Err(-23);
         }
         let credentials = target.credentials;
+        let receive_capacity = target.receive_capacity;
         let client_index = self
             .entries
             .iter()
@@ -431,6 +454,7 @@ impl Streams {
             peer: Some(client),
             credentials,
             incoming: VecDeque::new(),
+            receive_capacity,
             error: 0,
             read_shutdown: false,
             write_shutdown: false,
@@ -581,7 +605,7 @@ impl Streams {
         Ok(Readiness {
             readable: !entry.incoming.is_empty() || read_closed,
             writable: !write_closed
-                && peer.is_some_and(|peer| peer.incoming.len() < RECEIVE_CAPACITY),
+                && peer.is_some_and(|peer| peer.incoming.len() < peer.receive_capacity),
             read_closed,
             write_closed,
             write_error,

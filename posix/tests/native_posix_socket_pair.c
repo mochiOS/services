@@ -26,6 +26,64 @@
     }                                                                          \
   } while (0)
 static int blocking_fd;
+static int verify_receive_capacity(void) {
+  int fds[2];
+  CHECK(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, fds) == 0);
+  int alias = dup(fds[1]);
+  CHECK(alias >= 0);
+  int capacity = 1024;
+  CHECK(setsockopt(alias, SOL_SOCKET, SO_RCVBUF, &capacity, sizeof(capacity)) ==
+        0);
+  socklen_t length = sizeof(capacity);
+  capacity = -1;
+  CHECK(getsockopt(fds[1], SOL_SOCKET, SO_RCVBUF, &capacity, &length) == 0 &&
+        capacity == 1024);
+  char data[1024];
+  memset(data, 'd', sizeof(data));
+  CHECK(write(fds[0], data, sizeof(data)) == sizeof(data));
+  CHECK(write(fds[0], "x", 1) == -1 && errno == EAGAIN);
+  capacity = 256;
+  CHECK(setsockopt(alias, SOL_SOCKET, SO_RCVBUF, &capacity, sizeof(capacity)) ==
+        0);
+  CHECK(write(fds[0], "x", 1) == -1 && errno == EAGAIN);
+  CHECK(read(fds[1], data, 769) == 769);
+  for (unsigned i = 0; i < 769; ++i)
+    CHECK(data[i] == 'd');
+  CHECK(write(fds[0], "!more", 5) == 1);
+  CHECK(read(alias, data, sizeof(data)) == 256 && data[255] == '!');
+  for (unsigned i = 0; i < 255; ++i)
+    CHECK(data[i] == 'd');
+  memset(data, 'a', 256);
+  CHECK(write(fds[0], data, 256) == 256);
+  struct pollfd sender = {.fd = fds[0], .events = POLLOUT};
+  CHECK(poll(&sender, 1, 0) == 0);
+  capacity = 512;
+  CHECK(setsockopt(fds[1], SOL_SOCKET, SO_RCVBUF, &capacity,
+                   sizeof(capacity)) == 0);
+  CHECK(poll(&sender, 1, 0) == 1 && sender.revents == POLLOUT);
+  CHECK(read(fds[1], data, sizeof(data)) == 256);
+  capacity = -1;
+  CHECK(setsockopt(alias, SOL_SOCKET, SO_RCVBUF, &capacity, sizeof(capacity)) ==
+            -1 &&
+        errno == EINVAL);
+  CHECK(setsockopt(alias, SOL_SOCKET, SO_RCVBUF, NULL, sizeof(capacity)) ==
+            -1 &&
+        errno == EFAULT);
+  CHECK(setsockopt(alias, SOL_SOCKET, SO_RCVBUF, &capacity, 1) == -1 &&
+        errno == EINVAL);
+  CHECK(setsockopt(alias, SOL_SOCKET, SO_TYPE, &capacity, sizeof(capacity)) ==
+            -1 &&
+        errno == ENOPROTOOPT);
+  CHECK(setsockopt(-1, SOL_SOCKET, SO_RCVBUF, &capacity, sizeof(capacity)) ==
+            -1 &&
+        errno == EBADF);
+  length = sizeof(capacity);
+  CHECK(getsockopt(fds[1], SOL_SOCKET, SO_RCVBUF, &capacity, &length) == 0 &&
+        capacity == 512);
+  CHECK(close(alias) == 0 && close(fds[0]) == 0 && close(fds[1]) == 0);
+  puts("posix-socket-receive-capacity: PASS");
+  return 0;
+}
 static int verify_socket_errors(void) {
   for (int consume_by_read = 0; consume_by_read <= 1; ++consume_by_read) {
     int fds[2];
@@ -238,6 +296,9 @@ static int verify_connect_interrupts(void) {
 static int verify_connections(int listener, struct sockaddr_un *address,
                               socklen_t size) {
   CHECK(listen(listener, 1) == 0);
+  int receive_capacity = 4096;
+  CHECK(setsockopt(listener, SOL_SOCKET, SO_RCVBUF, &receive_capacity,
+                   sizeof(receive_capacity)) == 0);
   int first = socket(AF_UNIX, SOCK_STREAM, 0);
   int second = socket(AF_UNIX, SOCK_STREAM, 0);
   CHECK(first >= 0 && second >= 0);
@@ -274,6 +335,10 @@ static int verify_connections(int listener, struct sockaddr_un *address,
   int accepted = accept4(listener, (struct sockaddr *)&peer, &length,
                          SOCK_NONBLOCK | SOCK_CLOEXEC);
   CHECK(accepted >= 0 && length == 2 && peer.sun_family == AF_UNIX);
+  socklen_t capacity_length = sizeof(receive_capacity);
+  CHECK(getsockopt(accepted, SOL_SOCKET, SO_RCVBUF, &receive_capacity,
+                   &capacity_length) == 0 &&
+        receive_capacity == 4096);
   CHECK(verify_socket_options(accepted, 0) == 0);
   CHECK((fcntl(accepted, F_GETFL, 0) & O_NONBLOCK) != 0);
   CHECK((fcntl(accepted, F_GETFD, 0) & FD_CLOEXEC) != 0);
@@ -484,6 +549,7 @@ int main(int argc, char **argv) {
     return verify_exec(argv);
   CHECK(verify_single_socket() == 0);
   CHECK(verify_path_binding() == 0);
+  CHECK(verify_receive_capacity() == 0);
   CHECK(verify_socket_errors() == 0);
   puts("posix-socket-options: PASS");
   CHECK(verify_connect_interrupts() == 0);

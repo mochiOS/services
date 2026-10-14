@@ -64,6 +64,72 @@ fn creation_uses_registered_credentials_and_rejects_unknown_sender() {
 }
 
 #[test]
+fn receive_limit_shrink_preserves_queued_bytes_and_blocks_until_below_limit() {
+    let (service, peer, mut streams, request) = fixture();
+    let [sender, receiver] = service
+        .create_socket_pair(peer, request, &mut streams)
+        .unwrap();
+    assert_eq!(streams.receive_capacity(receiver), Ok(RECEIVE_CAPACITY));
+    streams.set_receive_capacity(receiver, 1024).unwrap();
+    let data = [b'x'; 1024];
+    assert_eq!(streams.write(sender, &data), Ok(1024));
+    assert!(!streams.readiness(sender).unwrap().writable);
+    streams.set_receive_capacity(receiver, 256).unwrap();
+    assert_eq!(streams.write(sender, b"!"), Err(-11));
+    let mut prefix = [0; 769];
+    assert_eq!(streams.read(receiver, &mut prefix), Ok(prefix.len()));
+    assert_eq!(prefix, [b'x'; 769]);
+    assert!(streams.readiness(sender).unwrap().writable);
+    assert_eq!(streams.write(sender, b"!more"), Ok(1));
+    assert!(!streams.readiness(sender).unwrap().writable);
+    let mut suffix = [0; 256];
+    assert_eq!(streams.read(receiver, &mut suffix), Ok(suffix.len()));
+    assert_eq!(&suffix[..255], &[b'x'; 255]);
+    assert_eq!(suffix[255], b'!');
+    assert!(streams.readiness(sender).unwrap().writable);
+    assert_eq!(streams.receive_capacity(sender), Ok(RECEIVE_CAPACITY));
+}
+
+#[test]
+fn receive_capacity_is_bounded_and_growth_reenables_writes_without_reading() {
+    let (service, peer, mut streams, request) = fixture();
+    let [a, b] = service
+        .create_socket_pair(peer, request, &mut streams)
+        .unwrap();
+    streams.set_receive_capacity(b, 0).unwrap();
+    assert_eq!(
+        streams.receive_capacity(b),
+        Ok(posix_service::socket::MIN_RECEIVE_CAPACITY)
+    );
+    assert_eq!(streams.write(a, &[0; 256]), Ok(256));
+    assert!(!streams.readiness(a).unwrap().writable);
+    streams.set_receive_capacity(b, 512).unwrap();
+    assert!(streams.readiness(a).unwrap().writable);
+    streams.set_receive_capacity(b, i32::MAX as u32).unwrap();
+    assert_eq!(streams.receive_capacity(b), Ok(RECEIVE_CAPACITY));
+    assert_eq!(streams.set_receive_capacity(b, u32::MAX), Err(-22));
+    assert_eq!(streams.receive_capacity(b), Ok(RECEIVE_CAPACITY));
+    assert_eq!(streams.set_receive_capacity(u64::MAX, 512), Err(-9));
+}
+
+#[test]
+fn queued_connections_inherit_listener_capacity_before_accept_not_on_later_changes() {
+    let (service, peer, mut streams, request) = fixture();
+    let listener = service.create_socket(peer, request, &mut streams).unwrap();
+    let client = service.create_socket(peer, request, &mut streams).unwrap();
+    streams.listen(listener, 2).unwrap();
+    streams.set_receive_capacity(listener, 512).unwrap();
+    let accepted = streams.connect(client, listener).unwrap();
+    assert_eq!(streams.write(client, &[0; 1024]), Ok(512));
+    streams.set_receive_capacity(listener, 1024).unwrap();
+    let ticket = streams.begin_accept(listener).unwrap();
+    streams.commit_accept(ticket, (501, 20), 0).unwrap();
+    assert_eq!(streams.receive_capacity(accepted), Ok(512));
+    assert_eq!(streams.write(client, b"x"), Err(-11));
+    assert_eq!(streams.receive_capacity(client), Ok(RECEIVE_CAPACITY));
+}
+
+#[test]
 fn socket_status_is_identity_not_queued_file_bytes_or_callers_identity() {
     let (service, peer, mut streams, request) = fixture();
     let [a, b] = service
