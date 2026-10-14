@@ -79,6 +79,50 @@ pub fn run(){
     reused.as_mut().activate().unwrap();reused.as_mut().deactivate().unwrap();
     assert_eq!(CONTROL.native_delivery_defer.load(Ordering::Acquire),1);drop(guard);
     assert_eq!(CONTROL.native_delivery_defer.load(Ordering::Acquire),0);
+    assert_eq!(unsafe{visit_abandoned(&CONTROL,0,|_|Ok(()))},Err(EINVAL));
+    let guard=upcall_guard::Guard::enter(&CONTROL.native_delivery_defer).unwrap();
+    let mut records=Vec::new();let mut target=0;
+    // Repeated forks may retain more than one service's pending-signal limit
+    // worth of copied callback frames. Walk the live chain, not a fixed array.
+    for index in 0..100 {
+        OWNER.store(37+index,Ordering::Release);
+        CONTROL.signal_upcall_stack.store((index as usize+1)*65536,Ordering::Release);
+        let mut frame=Box::pin(NativeFrame::new(100+index).unwrap());
+        frame.as_mut().activate().unwrap();records.push(frame);
+        if index==49{target=CONTROL.active_native_signal_frame_id.load(Ordering::Acquire);}
+    }
+    let top=CONTROL.active_native_signal_frame.load(Ordering::Acquire);
+    let top_id=CONTROL.active_native_signal_frame_id.load(Ordering::Acquire);
+    let mut staged=Vec::new();
+    assert_eq!(unsafe{visit_abandoned(&CONTROL,u64::MAX,|frame|{staged.push(frame);Ok(())})},Err(EINVAL));
+    assert!(staged.is_empty());
+    assert_eq!(unsafe{retire_to(&CONTROL,u64::MAX)},Err(EINVAL));
+    assert_eq!(CONTROL.active_native_signal_frame.load(Ordering::Acquire),top);
+    CONTROL.active_native_signal_frame_id.store(top_id+1,Ordering::Release);
+    assert_eq!(unsafe{visit_abandoned(&CONTROL,top_id+1,|_|Ok(()))},Err(EINVAL));
+    CONTROL.active_native_signal_frame_id.store(top_id,Ordering::Release);
+    assert_eq!(unsafe{visit_abandoned(&CONTROL,target,|_|Err(5))},Err(5));
+    assert_eq!(CONTROL.active_native_signal_frame.load(Ordering::Acquire),top);
+    unsafe{visit_abandoned(&CONTROL,target,|frame|{staged.push(frame);Ok(())})}.unwrap();
+    assert_eq!(staged.len(),50);
+    for (position,frame) in staged.iter().enumerate(){
+        let index=99-position as u64;
+        assert_eq!(frame.owner,37+index);assert_eq!(frame.token,100+index);
+        assert_eq!(frame.stack,(index as usize+1)*65536);assert_eq!(frame.size,65536);
+    }
+    unsafe{retire_to(&CONTROL,target)}.unwrap();
+    assert_eq!(CONTROL.active_native_signal_frame_id.load(Ordering::Acquire),target);
+    assert_eq!(CONTROL.active_native_signal_frame.load(Ordering::Acquire),records[49].as_ref().get_ref() as *const NativeFrame as usize);
+    assert_eq!(records[99].as_mut().activate(),Err(EINVAL));
+    staged.clear();
+    unsafe{visit_abandoned(&CONTROL,target,|frame|{staged.push(frame);Ok(())})}.unwrap();
+    assert!(staged.is_empty());
+    unsafe{retire_to(&CONTROL,0)}.unwrap();
+    assert_eq!(CONTROL.active_native_signal_frame.load(Ordering::Acquire),0);
+    assert_eq!(CONTROL.active_native_signal_frame_id.load(Ordering::Acquire),0);
+    assert_eq!(CONTROL.native_delivery_defer.load(Ordering::Acquire),1);
+    drop(records);drop(guard);
+    assert_eq!(CONTROL.native_delivery_defer.load(Ordering::Acquire),0);
     CONTROL.next_native_signal_frame_id.store(u64::MAX,Ordering::Release);
     assert!(matches!(NativeFrame::new(1),Err(EOVERFLOW)));
     assert_eq!(CONTROL.next_native_signal_frame_id.load(Ordering::Acquire),u64::MAX);
