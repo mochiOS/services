@@ -167,15 +167,17 @@ impl<H: Copy> Descriptions<H> {
     }
 
     pub fn set_status_flags(&mut self, id: u64, flags: u32) -> Result<(), i32> {
+        self.update_status_flags(id, mochios_posix_protocol::MUTABLE_STATUS_FLAGS, flags)
+    }
+
+    pub fn update_status_flags(&mut self, id: u64, mask: u32, flags: u32) -> Result<(), i32> {
         let entry = self.entries.get_mut(&id).ok_or(-9)?;
-        if flags & !(mochios_posix_protocol::OPEN_APPEND | mochios_posix_protocol::OPEN_NONBLOCK)
-            != 0
-        {
+        if mask & !mochios_posix_protocol::MUTABLE_STATUS_FLAGS != 0 || flags & !mask != 0 {
             return Err(-22);
         }
         // RAM IO never waits for data, so NONBLOCK requires no alternate IO
         // path. Both flags are shared by all aliases of this description.
-        entry.status_flags = flags;
+        entry.status_flags = (entry.status_flags & !mask) | flags;
         Ok(())
     }
 
@@ -404,6 +406,14 @@ pub fn handle_provider_request<H: Copy, B: Backing<H>>(
                             .set_status_flags(header.object_id, flags)
                             .map(|_| (0, Vec::new()))
                     }
+                    wire::CONTROL_UPDATE_FLAGS if header.length == 0 => {
+                        mochios_posix_protocol::decode_file_flags_update(payload)
+                            .map_err(|_| -22)
+                            .and_then(|(mask, flags)| {
+                                descriptions.update_status_flags(header.object_id, mask, flags)
+                            })
+                            .map(|_| (0, Vec::new()))
+                    }
                     wire::CONTROL_STAT
                         if payload.is_empty()
                             && header.length as usize
@@ -422,6 +432,7 @@ pub fn handle_provider_request<H: Copy, B: Backing<H>>(
                     | wire::CONTROL_RESIZE
                     | wire::CONTROL_GET_FLAGS
                     | wire::CONTROL_SET_FLAGS
+                    | wire::CONTROL_UPDATE_FLAGS
                     | wire::CONTROL_STAT => Err(-22),
                     _ => Err(-95),
                 }

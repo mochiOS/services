@@ -1522,6 +1522,17 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         Ok(())
     }
 
+    fn update_status_flags(
+        &mut self,
+        file: AttachedObject<u32>,
+        mask: u32,
+        flags: u32,
+    ) -> Result<(), i32> {
+        self.flags_file = Some(file);
+        self.status_flags = (self.status_flags & !mask) | flags;
+        Ok(())
+    }
+
     fn mkdir_at(
         &mut self,
         request: &posix_service::PreparedMkdir,
@@ -6539,7 +6550,9 @@ fn file_status_flags_live_on_the_attached_open_description() {
     );
     let file = AttachedObject {
         handle: 60,
-        rights: 0x81,
+        rights: mnu_abi::HANDLE_RIGHT_READ
+            | mnu_abi::HANDLE_RIGHT_CONTROL
+            | mnu_abi::HANDLE_RIGHT_TRANSFER,
     };
     let mut filesystem = RecordingFilesystem::default();
     let wanted = protocol::OPEN_APPEND | protocol::OPEN_NONBLOCK;
@@ -6575,6 +6588,59 @@ fn file_status_flags_live_on_the_attached_open_description() {
         protocol::decode_file_flags(&get.response.payload).unwrap(),
         wanted
     );
+    let mut update = [0; protocol::FILE_FLAGS_UPDATE_PAYLOAD_LEN];
+    protocol::encode_file_flags_update(protocol::OPEN_NONBLOCK, 0, &mut update).unwrap();
+    for (attachments, expected) in [(&[][..], STATUS_EINVAL), (&[file][..], protocol::STATUS_OK)] {
+        let response = service.handle_objects(
+            peer,
+            protocol::Header {
+                opcode: protocol::OP_FUPDATEFL,
+                ..Default::default()
+            },
+            &update,
+            attachments,
+            &mut filesystem,
+        );
+        assert_eq!(response.response.header.status, expected);
+    }
+    assert_eq!(filesystem.status_flags, protocol::OPEN_APPEND);
+    assert_eq!(filesystem.flags_file, Some(file));
+    let reduced = AttachedObject {
+        rights: file.rights & !mnu_abi::HANDLE_RIGHT_CONTROL,
+        ..file
+    };
+    for opcode in [protocol::OP_FSETFL, protocol::OP_FUPDATEFL] {
+        let payload = if opcode == protocol::OP_FSETFL {
+            &flags[..]
+        } else {
+            &update[..]
+        };
+        let response = service.handle_objects(
+            peer,
+            protocol::Header {
+                opcode,
+                ..Default::default()
+            },
+            payload,
+            &[reduced],
+            &mut filesystem,
+        );
+        assert_eq!(response.response.header.status, -13);
+        assert_eq!(filesystem.status_flags, protocol::OPEN_APPEND);
+    }
+    update[4..].copy_from_slice(&protocol::OPEN_APPEND.to_le_bytes());
+    let response = service.handle_objects(
+        peer,
+        protocol::Header {
+            opcode: protocol::OP_FUPDATEFL,
+            ..Default::default()
+        },
+        &update,
+        &[file],
+        &mut filesystem,
+    );
+    assert_eq!(response.response.header.status, STATUS_EINVAL);
+    assert_eq!(filesystem.status_flags, protocol::OPEN_APPEND);
     assert_eq!(filesystem.roots_opened, 0);
 }
 

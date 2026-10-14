@@ -292,6 +292,13 @@ pub trait FilesystemBackend<H: Copy> {
 
     fn set_status_flags(&mut self, file: AttachedObject<H>, flags: u32) -> Result<(), i32>;
 
+    fn update_status_flags(
+        &mut self,
+        file: AttachedObject<H>,
+        mask: u32,
+        flags: u32,
+    ) -> Result<(), i32>;
+
     fn mkdir_at(&mut self, request: &PreparedMkdir, paths: PathObjects<H>) -> Result<(), i32>;
 
     fn unlink_at(&mut self, request: &PreparedUnlink, paths: PathObjects<H>) -> Result<(), i32>;
@@ -3270,6 +3277,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_FSYNC
             | protocol::OP_FGETFL
             | protocol::OP_FSETFL
+            | protocol::OP_FUPDATEFL
             | protocol::OP_MKDIR_AT
             | protocol::OP_UNLINK_AT
             | protocol::OP_RENAME_AT
@@ -3321,6 +3329,7 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_FSYNC
                 | protocol::OP_FGETFL
                 | protocol::OP_FSETFL
+                | protocol::OP_FUPDATEFL
                 | protocol::OP_MKDIR_AT
                 | protocol::OP_UNLINK_AT
                 | protocol::OP_RENAME_AT
@@ -3622,6 +3631,9 @@ impl<H: Copy> PosixService<H> {
                 if handles.len() != 1 {
                     return object_error(header.request_id, STATUS_EINVAL);
                 }
+                if handles[0].rights & mnu_abi::HANDLE_RIGHT_CONTROL == 0 {
+                    return object_error(header.request_id, -13);
+                }
                 if !self.sessions.contains_key(&peer.process_id) {
                     return object_error(header.request_id, protocol::STATUS_ESRCH);
                 }
@@ -3630,6 +3642,25 @@ impl<H: Copy> PosixService<H> {
                     _ => return object_error(header.request_id, STATUS_EINVAL),
                 };
                 match filesystem.set_status_flags(handles[0], flags) {
+                    Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
+                    Err(status) => object_error(header.request_id, status),
+                }
+            }
+            protocol::OP_FUPDATEFL => {
+                if handles.len() != 1 {
+                    return object_error(header.request_id, STATUS_EINVAL);
+                }
+                if handles[0].rights & mnu_abi::HANDLE_RIGHT_CONTROL == 0 {
+                    return object_error(header.request_id, -13);
+                }
+                if !self.sessions.contains_key(&peer.process_id) {
+                    return object_error(header.request_id, protocol::STATUS_ESRCH);
+                }
+                let (mask, flags) = match protocol::decode_file_flags_update(payload) {
+                    Ok(update) => update,
+                    Err(_) => return object_error(header.request_id, STATUS_EINVAL),
+                };
+                match filesystem.update_status_flags(handles[0], mask, flags) {
                     Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
                     Err(status) => object_error(header.request_id, status),
                 }

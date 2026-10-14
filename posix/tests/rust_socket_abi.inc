@@ -10,6 +10,7 @@ fn main() {
     value!(SO_TIMESTAMP, SO_ACCEPTCONN, SOMAXCONN, SHUT_RD, SHUT_WR, SHUT_RDWR);
     value!(SCM_RIGHTS, MSG_OOB, MSG_PEEK, MSG_DONTROUTE, MSG_CTRUNC, MSG_TRUNC, MSG_DONTWAIT, MSG_WAITALL);
     value!(MSG_NOSIGNAL, MSG_MORE, MSG_CMSG_CLOEXEC);
+    value!(FIONBIO);
     size!(sa_family_t, "sa_family_t"); size!(socklen_t, "socklen_t");
     size!(sockaddr, "struct sockaddr"); align!(sockaddr, "struct sockaddr"); offset!(sockaddr, "struct sockaddr", sa_data);
     size!(sockaddr_un, "struct sockaddr_un"); align!(sockaddr_un, "struct sockaddr_un"); offset!(sockaddr_un, "struct sockaddr_un", sun_path);

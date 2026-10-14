@@ -492,3 +492,83 @@ fn provider_status_flags_are_shared_per_description_and_reject_invalid_fields() 
     assert_eq!(descriptions.status_flags(first), Ok(OPEN_NONBLOCK));
     assert_eq!(descriptions.set_status_flags(first + 99, 0), Err(-9));
 }
+
+#[test]
+fn masked_provider_flag_updates_preserve_append_and_require_authenticated_control_frames() {
+    use mnu_abi::{IPC_DELIVERY_NATIVE_OBJECT, provider};
+    use mochios_posix_protocol::{
+        self as protocol, OPEN_APPEND, OPEN_NONBLOCK, shared_memory as wire,
+    };
+    use posix_service::shared_memory_file::handle_provider_request;
+    let mut ram = Ram::default();
+    let mut descriptions = Descriptions::new();
+    let id = descriptions.open(1, true, &mut ram).unwrap();
+    descriptions.set_status_flags(id, OPEN_APPEND).unwrap();
+    let mut payload = [0; protocol::FILE_FLAGS_UPDATE_PAYLOAD_LEN];
+    let mut reply = [0; provider::RESPONSE_HEADER_LEN + 4];
+    for (flags, expected) in [
+        (OPEN_NONBLOCK, OPEN_APPEND | OPEN_NONBLOCK),
+        (0, OPEN_APPEND),
+    ] {
+        protocol::encode_file_flags_update(OPEN_NONBLOCK, flags, &mut payload).unwrap();
+        let request = frame(
+            provider::OP_CONTROL,
+            id,
+            wire::CONTROL_UPDATE_FLAGS,
+            0,
+            0,
+            &payload,
+        );
+        let count = handle_provider_request(
+            &mut descriptions,
+            &request,
+            IPC_DELIVERY_NATIVE_OBJECT,
+            0,
+            &mut ram,
+            &mut reply,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            provider::ResponseHeader::decode(&reply[..count])
+                .unwrap()
+                .0
+                .status,
+            0
+        );
+        assert_eq!(descriptions.status_flags(id), Ok(expected));
+    }
+    for (flags, attachments, length, bytes) in [
+        (0, 0, 0, &payload[..]),
+        (IPC_DELIVERY_NATIVE_OBJECT, 1, 0, &payload[..]),
+        (IPC_DELIVERY_NATIVE_OBJECT, 0, 1, &payload[..]),
+        (IPC_DELIVERY_NATIVE_OBJECT, 0, 0, &payload[..7]),
+    ] {
+        let request = frame(
+            provider::OP_CONTROL,
+            id,
+            wire::CONTROL_UPDATE_FLAGS,
+            0,
+            length,
+            bytes,
+        );
+        let count = handle_provider_request(
+            &mut descriptions,
+            &request,
+            flags,
+            attachments,
+            &mut ram,
+            &mut reply,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            provider::ResponseHeader::decode(&reply[..count])
+                .unwrap()
+                .0
+                .status
+                < 0
+        );
+        assert_eq!(descriptions.status_flags(id), Ok(OPEN_APPEND));
+    }
+}

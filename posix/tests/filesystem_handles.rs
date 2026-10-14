@@ -653,6 +653,71 @@ fn duplicated_open_descriptions_share_mutable_status_flags() {
         .unwrap();
     assert_eq!(flags.header.flags, wanted);
 
+    for (mask, value, expected) in [
+        (
+            protocol::OPEN_STATUS_NONBLOCK,
+            0,
+            protocol::OPEN_STATUS_APPEND,
+        ),
+        (protocol::OPEN_STATUS_APPEND, 0, 0),
+        (
+            protocol::OPEN_STATUS_NONBLOCK,
+            protocol::OPEN_STATUS_NONBLOCK,
+            protocol::OPEN_STATUS_NONBLOCK,
+        ),
+        (
+            protocol::OPEN_STATUS_APPEND,
+            protocol::OPEN_STATUS_APPEND,
+            wanted,
+        ),
+    ] {
+        filesystem
+            .update_flags_handle(
+                protocol::Header {
+                    opcode: protocol::OP_UPDATE_FLAGS_HANDLE,
+                    flags: value,
+                    ..Default::default()
+                },
+                open_id,
+                mask,
+            )
+            .unwrap();
+        assert_eq!(
+            filesystem
+                .get_flags_handle(protocol::Header::default(), open_id)
+                .unwrap()
+                .header
+                .flags,
+            expected
+        );
+    }
+    for (mask, flags) in [
+        (u32::MAX, 0),
+        (protocol::OPEN_STATUS_NONBLOCK, protocol::OPEN_STATUS_APPEND),
+    ] {
+        assert_eq!(
+            filesystem
+                .update_flags_handle(
+                    protocol::Header {
+                        flags,
+                        ..Default::default()
+                    },
+                    open_id,
+                    mask
+                )
+                .err(),
+            Some(22)
+        );
+        assert_eq!(
+            filesystem
+                .get_flags_handle(protocol::Header::default(), open_id)
+                .unwrap()
+                .header
+                .flags,
+            wanted
+        );
+    }
+
     filesystem.provider_write(open_id, b"a").unwrap();
     filesystem
         .provider_seek(open_id, 0, HANDLE_SEEK_START)

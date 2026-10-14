@@ -13,7 +13,14 @@
 #define tcgetpgrp mock_tcgetpgrp
 #define tcsetpgrp mock_tcsetpgrp
 
-static int operations, last_action, fail_group;
+static int operations, last_action, fail_group, nonblocking_calls, nonblocking_value, fail_nonblocking;
+int __mochios_fd_set_nonblocking(int fd, int enabled) {
+    assert(fd == 7 && (enabled == 0 || enabled == 1));
+    ++nonblocking_calls;
+    if (fail_nonblocking) { errno = EACCES; return -1; }
+    nonblocking_value = enabled;
+    return 0;
+}
 int mock_fcntl(int fd, int command, ...) {
     assert(command == F_GETFD);
     if (fd == -1) { errno = EBADF; return -1; }
@@ -60,7 +67,7 @@ int main(void) {
     assert(mochi_ioctl(7, TIOCSPGRP, &group) == 0);
     assert(operations == 8);
     unsigned long requests[] = {TCGETS, TCSETS, TCSETSW, TCSETSF,
-                                TIOCGPGRP, TIOCSPGRP, TIOCGWINSZ, TIOCSWINSZ};
+                                TIOCGPGRP, TIOCSPGRP, TIOCGWINSZ, TIOCSWINSZ, FIONBIO};
     for (unsigned index = 0; index < sizeof(requests) / sizeof(requests[0]); ++index) {
         assert(mochi_ioctl(7, requests[index], (void *)0) == -1 && errno == EFAULT);
         /* Bad descriptor rejection must happen before va_arg(). */
@@ -73,5 +80,13 @@ int main(void) {
     group = 1234;
     assert(mochi_ioctl(7, TIOCGPGRP, &group) == -1 && errno == EIO);
     assert(group == 1234);
+    int enabled = -9;
+    assert(mochi_ioctl(7, FIONBIO, &enabled) == 0 && nonblocking_value == 1);
+    enabled = 0;
+    assert(mochi_ioctl(7, FIONBIO, &enabled) == 0 && nonblocking_value == 0);
+    enabled = 1;
+    fail_nonblocking = 1;
+    assert(mochi_ioctl(7, FIONBIO, &enabled) == -1 && errno == EACCES);
+    assert(nonblocking_calls == 3 && nonblocking_value == 0);
     return 0;
 }

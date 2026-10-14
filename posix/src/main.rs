@@ -2187,6 +2187,18 @@ fn single_file_handle(
 }
 
 #[cfg(target_os = "mochios")]
+fn controlled_file_handle(
+    file: posix_service::AttachedObject<mochi_user_platform::handle::Handle>,
+) -> Result<mochi_user_platform::ipc::IpcObjectHandles, i32> {
+    if file.rights & mnu_abi::HANDLE_RIGHT_CONTROL == 0 {
+        return Err(-13);
+    }
+    let mut handles = single_file_handle(file)?;
+    handles.handles[0].rights |= mnu_abi::HANDLE_RIGHT_CONTROL;
+    Ok(handles)
+}
+
+#[cfg(target_os = "mochios")]
 impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for RuntimeFilesystem {
     fn open_session_root(
         &mut self,
@@ -2511,7 +2523,38 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
                 ..filesystem::Header::default()
             },
             &[],
-            single_file_handle(file)?,
+            controlled_file_handle(file)?,
+        )
+    }
+
+    fn update_status_flags(
+        &mut self,
+        file: posix_service::AttachedObject<mochi_user_platform::handle::Handle>,
+        mask: u32,
+        flags: u32,
+    ) -> Result<(), i32> {
+        use mochios_filesystem_protocol as filesystem;
+        let translate = |flags: u32| {
+            (if flags & mochios_posix_protocol::OPEN_APPEND != 0 {
+                filesystem::OPEN_STATUS_APPEND
+            } else {
+                0
+            }) | (if flags & mochios_posix_protocol::OPEN_NONBLOCK != 0 {
+                filesystem::OPEN_STATUS_NONBLOCK
+            } else {
+                0
+            })
+        };
+        self.empty_call(
+            filesystem::Header {
+                opcode: filesystem::OP_UPDATE_FLAGS_HANDLE,
+                request_id: 10,
+                flags: translate(flags),
+                length: 4,
+                ..filesystem::Header::default()
+            },
+            &translate(mask).to_le_bytes(),
+            controlled_file_handle(file)?,
         )
     }
 

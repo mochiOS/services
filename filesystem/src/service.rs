@@ -190,6 +190,7 @@ impl FilesystemService {
             | protocol::OP_SYNC_HANDLE
             | protocol::OP_GET_FLAGS_HANDLE
             | protocol::OP_SET_FLAGS_HANDLE
+            | protocol::OP_UPDATE_FLAGS_HANDLE
             | protocol::OP_MKDIR_AT
             | protocol::OP_UNLINK_AT
             | protocol::OP_RENAME_AT
@@ -3238,18 +3239,31 @@ impl FilesystemService {
         request: protocol::Header,
         open_id: u64,
     ) -> Result<Response, i32> {
-        if request.flags & !protocol::OPEN_STATUS_FLAGS_ALL != 0 {
+        self.update_flags_handle(request, open_id, protocol::OPEN_STATUS_FLAGS_ALL)
+    }
+
+    /// Runs under the filesystem worker's exclusive borrow of the OFD table.
+    /// No RPC or pathname lookup separates inspection from modification.
+    pub fn update_flags_handle(
+        &mut self,
+        request: protocol::Header,
+        open_id: u64,
+        mask: u32,
+    ) -> Result<Response, i32> {
+        if mask & !protocol::OPEN_STATUS_FLAGS_ALL != 0 || request.flags & !mask != 0 {
             return Err(EINVAL);
         }
+        let update = |old: u32| (old & !mask) | request.flags;
         if let Some(open) = self.opens.device_mut(open_id) {
             if let Some(null) = &mut open.null {
-                null.set_flags(request.flags)?;
+                null.set_flags(update(null.flags()))?;
             } else {
-                open.directory_flags = request.flags;
+                open.directory_flags = update(open.directory_flags);
             }
             return Ok(self.success(request));
         }
-        self.opens.get_mut(&open_id).ok_or(EBADF)?.status_flags = request.flags;
+        let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
+        open.status_flags = update(open.status_flags);
         Ok(self.success(request))
     }
 

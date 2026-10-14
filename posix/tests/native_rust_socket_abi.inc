@@ -23,6 +23,8 @@ const _: [(); 1] = [(); (SOL_SOCKET == 1 && SO_TYPE == 3 && SO_ERROR == 4
     && MSG_WAITALL == 0x100 && MSG_NOSIGNAL == 0x4000 && SCM_RIGHTS == 1) as usize];
 const _: [(); 24] = [(); unsafe { CMSG_SPACE(4) } as usize];
 const _: [(); 20] = [(); unsafe { CMSG_LEN(4) } as usize];
+const _: [(); 0x5421] = [(); FIONBIO as usize];
+const _: unsafe extern "C" fn(i32, u64, ...) -> i32 = ioctl;
 const _: unsafe extern "C" fn(i32, *const msghdr, i32) -> isize = sendmsg;
 const _: unsafe extern "C" fn(i32, *mut msghdr, i32) -> isize = recvmsg;
 const _: unsafe extern "C" fn(i32, *mut sockaddr, *mut socklen_t, i32) -> i32 = accept4;

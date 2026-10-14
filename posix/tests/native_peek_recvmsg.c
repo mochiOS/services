@@ -138,7 +138,10 @@ static int peek_waitall_prefix(void) {
   return 0;
 }
 
-int main(void) {
+#ifndef PEEK_RECEIVE_TEST_ENTRY
+#define PEEK_RECEIVE_TEST_ENTRY main
+#endif
+int PEEK_RECEIVE_TEST_ENTRY(void) {
   CHECK(run_stream_receive_regressions() == 0);
   CHECK(peek_stream_rights() == 0);
   CHECK(peek_datagram_rights() == 0);

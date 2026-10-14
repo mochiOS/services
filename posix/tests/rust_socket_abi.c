@@ -1,10 +1,11 @@
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/ioctl.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 
-#define VALUE(name) printf("%s=%d\n", #name, name)
+#define VALUE(name) printf("%s=%lld\n", #name, (long long)(name))
 #define SIZE(type) printf("sizeof(%s)=%zu\n", #type, sizeof(type))
 #define ALIGN(type) printf("alignof(%s)=%zu\n", #type, _Alignof(type))
 #define OFFSET(type, field) printf("%s.%s=%zu\n", #type, #field, offsetof(type, field))
@@ -26,6 +27,7 @@ int main(void) {
   VALUE(SCM_RIGHTS); VALUE(MSG_OOB); VALUE(MSG_PEEK); VALUE(MSG_DONTROUTE);
   VALUE(MSG_CTRUNC); VALUE(MSG_TRUNC); VALUE(MSG_DONTWAIT); VALUE(MSG_WAITALL);
   VALUE(MSG_NOSIGNAL); VALUE(MSG_MORE); VALUE(MSG_CMSG_CLOEXEC);
+  VALUE(FIONBIO);
   SIZE(sa_family_t); SIZE(socklen_t);
   SIZE(struct sockaddr); ALIGN(struct sockaddr); OFFSET(struct sockaddr, sa_data);
   SIZE(struct sockaddr_un); ALIGN(struct sockaddr_un); OFFSET(struct sockaddr_un, sun_path);

@@ -132,7 +132,7 @@ fn generated_rust_socket_abi_and_control_helpers_match_actual_c_headers() {
     let rust = format!(
         r#"
 #![allow(non_camel_case_types, non_snake_case, unused_imports, dead_code)]
-type c_int = i32; type c_uint = u32; type c_char = i8; type c_uchar = u8;
+type c_int = i32; type c_uint = u32; type c_char = i8; type c_uchar = u8; type c_ulong = u64;
 type size_t = usize; type ssize_t = isize; type c_void = core::ffi::c_void;
 #[macro_use] #[path = {macros:?}] mod macros;
 s! {{ {iovec} }}

@@ -351,15 +351,32 @@ fn main() {
                         | protocol::OP_SYNC_HANDLE
                         | protocol::OP_GET_FLAGS_HANDLE
                         | protocol::OP_SET_FLAGS_HANDLE
+                        | protocol::OP_UPDATE_FLAGS_HANDLE
                         | protocol::OP_CHMOD_HANDLE
                         | protocol::OP_CHOWN_HANDLE
                 ) {
-                    let open_id = decode_single_open(&attached);
+                    let open_id = decode_single_open(&attached).and_then(|id| {
+                        if matches!(
+                            header.opcode,
+                            protocol::OP_SET_FLAGS_HANDLE | protocol::OP_UPDATE_FLAGS_HANDLE
+                        )
+                            && attached.handles[0].rights & mnu_abi::HANDLE_RIGHT_CONTROL == 0
+                        {
+                            Err(13)
+                        } else {
+                            Ok(id)
+                        }
+                    });
                     let result = open_id.and_then(|open_id| match header.opcode {
                         protocol::OP_TRUNCATE_HANDLE => service.truncate_handle(header, open_id),
                         protocol::OP_SYNC_HANDLE => service.sync_handle(header, open_id),
                         protocol::OP_GET_FLAGS_HANDLE => service.get_flags_handle(header, open_id),
                         protocol::OP_SET_FLAGS_HANDLE => service.set_flags_handle(header, open_id),
+                        protocol::OP_UPDATE_FLAGS_HANDLE => <[u8; 4]>::try_from(payload)
+                            .map_err(|_| 22)
+                            .and_then(|mask| {
+                                service.update_flags_handle(header, open_id, u32::from_le_bytes(mask))
+                            }),
                         protocol::OP_CHMOD_HANDLE => protocol::decode_credentials_payload(payload)
                             .map_err(|_| 22)
                             .and_then(|(credentials, payload)| {
@@ -851,7 +868,10 @@ fn decode_two_path_anchors(
 #[cfg(target_os = "mochios")]
 fn open_handle_rights(flags: u32) -> u64 {
     use mochios_filesystem_protocol as protocol;
+    // CONTROL governs this open description's mutable status, not inode or
+    // byte-write permission. Read-only delegations can attenuate it away.
     let mut rights = mochi_user_platform::handle::HANDLE_RIGHT_DUPLICATE
+        | mochi_user_platform::handle::HANDLE_RIGHT_CONTROL
         | mochi_user_platform::handle::HANDLE_RIGHT_TRANSFER;
     if flags & (protocol::OPEN_AT_READ | protocol::OPEN_AT_SEARCH) != 0 {
         rights |= mochi_user_platform::handle::HANDLE_RIGHT_READ;
