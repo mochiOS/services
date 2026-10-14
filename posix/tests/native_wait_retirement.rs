@@ -52,6 +52,16 @@ mod task { pub struct ThreadQueue; impl ThreadQueue { pub const MAX_THREADS:usiz
 mod percpu { pub fn thread_is_cpu_referenced(id:u64)->bool { id==3 } }
 const NO_DEADLINE:u64=u64::MAX;
 mod syscall {
+    pub mod ipc {
+        pub struct IpcEndpoint {pub thread_id:u64,pub slot:u16,pub generation:u64}
+        pub mod lifetime {
+            pub fn remove_waiter(_:u64) {assert!(crate::THREAD_QUEUE.0.try_lock().is_ok());}
+            pub fn retire(endpoint:super::IpcEndpoint) {
+                assert!(crate::THREAD_QUEUE.0.try_lock().is_ok());
+                assert_eq!(endpoint.generation,123);
+            }
+        }
+    }
     pub mod address_wait {
         pub fn remove_waiter(_:u64) { assert!(crate::THREAD_QUEUE.0.try_lock().is_ok()); }
     }
@@ -98,6 +108,9 @@ impl Thread { fn state(&self)->ThreadState {
 } }
 struct Queue(Vec<Thread>);
 impl Queue {
+    fn slot_index_and_generation(&self,id:ThreadId)->Option<(usize,u64)> {
+        self.0.iter().position(|t|t.id==id).map(|slot|(slot,123))
+    }
     fn remove(&mut self,id:ThreadId)->Option<Thread> {
         let index=self.0.iter().position(|t|t.id==id)?; Some(self.0.remove(index))
     }
@@ -110,7 +123,7 @@ mod implementation {
     );
     let start = thread.find("pub fn remove_thread(").unwrap();
     let end = thread.find("/// 次に実行すべきスレッドIDを取得").unwrap();
-    program.push_str(&thread[start..end]);
+    program.push_str(&thread[start..end].replace("id.as_u64()", "id"));
     let start = thread
         .find("pub(super) fn remove_quiescent_terminated_thread(")
         .unwrap();

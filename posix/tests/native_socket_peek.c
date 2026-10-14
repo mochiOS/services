@@ -72,7 +72,10 @@ static void *cancelled_reader(void *unused) {
   return (void *)1;
 }
 
-int main(int argc, char **argv) {
+#ifndef SOCKET_PEEK_TEST_ENTRY
+#define SOCKET_PEEK_TEST_ENTRY main
+#endif
+int SOCKET_PEEK_TEST_ENTRY(int argc, char **argv) {
   if (argc == 5 && !strcmp(argv[1], "--socket-exec"))
     return run_socket_regressions(argc, argv);
   char bytes[9000];
