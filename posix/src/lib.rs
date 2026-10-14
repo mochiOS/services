@@ -12,6 +12,7 @@ pub mod socket_record;
 pub mod socket_stream;
 pub mod socket_record_io;
 pub mod socket_rights;
+mod socket_reference;
 pub mod socket_gc;
 pub mod socket_transfer;
 pub mod socket_route;

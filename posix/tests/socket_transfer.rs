@@ -989,6 +989,38 @@ fn queue_cycle_collection_keeps_external_roots_then_releases_unreachable_leases(
 }
 
 #[test]
+fn a_peek_pin_roots_a_mutual_queue_cycle_without_inventing_a_second_native_reference() {
+    use posix_service::socket_rights::{Budget, Pending};
+    let (mut streams, [a, b]) = pair();
+    let budget = Budget::new(3);
+    for (sender, handle) in [(a, 1), (b, 2)] {
+        let mut pending = Pending::new(1, &budget).unwrap();
+        pending.append(0, vec![lease(handle)]).unwrap();
+        streams
+            .commit_record_with_rights(sender, b"x", pending.finish().ok().unwrap())
+            .ok()
+            .unwrap();
+    }
+    let snapshot = streams.snapshot_queued_rights(b, 1, 1).unwrap().unwrap();
+    let identity = |handle| Ok(Some(if handle == 1 { a } else { b }));
+    assert_eq!(
+        streams.collect_record_cycles(identity, |_| Ok(1)),
+        Ok(vec![])
+    );
+    assert_eq!(budget.used(), 3);
+    assert!(closed().is_empty());
+    assert!(streams.readiness(a).unwrap().readable && streams.readiness(b).unwrap().readable);
+    drop(snapshot);
+    assert_eq!(budget.used(), 2);
+    assert_eq!(
+        streams.collect_record_cycles(identity, |_| Ok(1)),
+        Ok(vec![a, b])
+    );
+    assert_eq!(closed(), [2, 1]);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
 fn failed_or_inconsistent_observations_do_not_discard_any_queue() {
     let (mut streams, [a, b], budget) = cycle();
     let identity = |handle| Ok(Some(if handle == 1 { a } else { b }));

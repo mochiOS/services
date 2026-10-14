@@ -741,6 +741,12 @@ impl Streams {
             for lease in entry.incoming.ancillary_leases().chain(
                 entry.records.iter().flat_map(|queue| queue.ancillary_leases()),
             ) {
+                // A peek snapshot shares this one native reference outside
+                // the queue. Subtracting it as a queue-only edge would erase
+                // that root and could discard reachable data during a peek.
+                if !lease.is_exclusive() {
+                    continue;
+                }
                 if let Some(target) = identify(lease.handle())? {
                     edges.try_reserve(1).map_err(|_| -12)?;
                     edges.push((entry.id, target));
@@ -777,6 +783,23 @@ impl Streams {
                 || entry.records.as_ref()
                     .is_some_and(|queue| queue.ancillary_leases().next().is_some())
         })
+    }
+
+    /// Retain only the rights visible to one peek. The adapter must authenticate
+    /// the socket's READ authority and serialize this with data inspection.
+    /// These are local ownership pins; IPC later creates receiver references.
+    pub fn snapshot_queued_rights(
+        &self,
+        id: u64,
+        length: usize,
+        maximum: usize,
+    ) -> Result<Option<crate::socket_rights::Bundle>, i32> {
+        let entry = self.endpoint(id)?;
+        let rights = match &entry.records {
+            Some(records) => records.front_rights(),
+            None => entry.incoming.read_rights(length),
+        };
+        rights.map(|rights| rights.snapshot(maximum)).transpose()
     }
 
     /// Consuming stream ancillary receive. Buffer copy and receipt publication

@@ -8,13 +8,16 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-/// Exactly one owned receiver-local reference. Not Clone/Copy: duplicating a
-/// Rust value must never imply duplicating native authority or a close duty.
-pub struct Lease {
+/// One local owner of a receiver-local reference. Not Clone/Copy: explicit
+/// snapshots share the close duty, never create additional native authority.
+struct LeaseData {
     handle: u32,
     rights: u64,
     metadata: InheritedFdMetadata,
     close: fn(u32),
+}
+pub struct Lease {
+    data: crate::socket_reference::Shared<LeaseData>,
 }
 impl Lease {
     /// Ownership is consumed on success AND error. Inputs must come from the
@@ -26,7 +29,7 @@ impl Lease {
         metadata: InheritedFdMetadata,
         close: fn(u32),
     ) -> Result<Self, i32> {
-        let lease = Self {
+        let data = LeaseData {
             handle,
             rights,
             metadata,
@@ -47,21 +50,33 @@ impl Lease {
         {
             return Err(-22);
         }
-        Ok(lease)
+        Ok(Self {
+            data: crate::socket_reference::Shared::try_new(data)?,
+        })
     }
     pub fn handle(&self) -> u32 {
-        self.handle
+        self.data.get().handle
     }
     pub fn rights(&self) -> u64 {
-        self.rights
+        self.data.get().rights
     }
     /// Reporting/dispatch hints only. Every actual access is checked against
     /// the attached native object's type and kernel-enforced rights.
     pub fn metadata(&self) -> InheritedFdMetadata {
-        self.metadata
+        self.data.get().metadata
+    }
+    /// More than one userspace owner shares ONE native reference. Queue GC
+    /// must treat that reference as a root while an external snapshot owns it.
+    pub fn is_exclusive(&self) -> bool {
+        self.data.owners() == 1
+    }
+    fn retain(&self) -> Result<Self, i32> {
+        Ok(Self {
+            data: self.data.retain()?,
+        })
     }
 }
-impl Drop for Lease {
+impl Drop for LeaseData {
     fn drop(&mut self) {
         if self.handle != 0 {
             (self.close)(self.handle);
@@ -181,6 +196,22 @@ pub struct Bundle {
     _charge: Charge,
 }
 impl Bundle {
+    /// Snapshot a bounded prefix without duplicating native authority. Each
+    /// logical retained reference consumes worker quota. Only the final local
+    /// owner closes its native Handle; delivery still requires explicit IPC.
+    pub fn snapshot(&self, maximum: usize) -> Result<Self, i32> {
+        let count = maximum.min(self.len());
+        let charge = self._charge.budget.reserve(count)?;
+        let mut leases = Vec::new();
+        leases.try_reserve_exact(count).map_err(|_| -12)?;
+        for lease in &self.leases[..count] {
+            leases.push(lease.retain()?);
+        }
+        Ok(Self {
+            leases,
+            _charge: charge,
+        })
+    }
     pub fn leases(&self) -> &[Lease] {
         &self.leases
     }

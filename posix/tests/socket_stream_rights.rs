@@ -51,7 +51,10 @@ fn closed() -> Vec<u32> {
 }
 fn bundle(handles: &[u32]) -> Bundle {
     let budget = Budget::new(handles.len());
-    let mut pending = Pending::new(handles.len(), &budget).unwrap();
+    bundle_using(handles, &budget)
+}
+fn bundle_using(handles: &[u32], budget: &Budget) -> Bundle {
+    let mut pending = Pending::new(handles.len(), budget).unwrap();
     for (batch, handles) in handles.chunks(3).enumerate() {
         let leases = handles
             .iter()
@@ -691,4 +694,48 @@ fn every_stream_receipt_allocation_failure_preserves_data_and_all_references() {
         }
     }
     assert_eq!(failures, 2);
+}
+
+#[test]
+fn external_peek_snapshot_is_a_gc_root_until_released_without_changing_the_queue() {
+    let (mut streams, [a, b]) = pair();
+    let budget = Budget::new(2);
+    streams
+        .commit_stream_with_rights(a, b"abc", bundle_using(&[501], &budget))
+        .ok()
+        .unwrap();
+    let snapshot = streams.snapshot_queued_rights(b, 1, 1).unwrap().unwrap();
+    assert_eq!(snapshot.leases()[0].handle(), 501);
+    assert_eq!(
+        streams.collect_record_cycles(|_| Ok(Some(b)), |_| Ok(1)),
+        Ok(vec![])
+    );
+    assert_eq!(streams.peek(b, 0, &mut [0; 8]), Ok(3));
+    assert!(closed().is_empty());
+    drop(snapshot);
+    assert_eq!(
+        streams.collect_record_cycles(|_| Ok(Some(b)), |_| Ok(1)),
+        Ok(vec![b])
+    );
+    assert_eq!(closed(), [501]);
+}
+
+#[test]
+fn peek_snapshot_survives_another_reader_consuming_and_closing_the_source_queue() {
+    let (mut streams, [a, b]) = pair();
+    let budget = Budget::new(3);
+    streams.write(a, b"aa").unwrap();
+    streams
+        .commit_stream_with_rights(a, b"bcd", bundle_using(&[501, 502], &budget))
+        .ok()
+        .unwrap();
+    assert!(streams.snapshot_queued_rights(b, 2, 2).unwrap().is_none());
+    let mut snapshot = streams.snapshot_queued_rights(b, 3, 1).unwrap().unwrap();
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(streams.read(b, &mut [0; 8]), Ok(5));
+    assert_eq!(closed(), [502]);
+    streams.release(b).unwrap();
+    assert_eq!(snapshot.leases()[0].handle(), 501);
+    snapshot.discard_delivered_prefix(1).unwrap();
+    assert_eq!(closed(), [502, 501]);
 }

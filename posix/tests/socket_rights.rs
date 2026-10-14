@@ -352,3 +352,85 @@ fn allocation_failures_preserve_queue_and_return_all_bundle_ownership() {
     }
     assert_eq!(closed(), [1, 2, 3, 1, 2, 3]);
 }
+
+#[test]
+fn snapshots_pin_only_the_requested_prefix_without_duplicate_authority() {
+    reset();
+    let budget = Budget::new(5);
+    let mut original = bundle(&budget, &[1, 2, 3]);
+    let mut snapshot = original.snapshot(2).unwrap();
+    assert_eq!(budget.used(), 5);
+    assert_eq!(snapshot.len(), 2);
+    assert!(snapshot.leases().iter().all(|lease| !lease.is_exclusive()));
+    assert!(
+        snapshot
+            .leases()
+            .iter()
+            .all(|lease| lease.rights()
+                == mnu_abi::HANDLE_RIGHT_READ | mnu_abi::HANDLE_RIGHT_TRANSFER)
+    );
+    original.truncate(0);
+    assert_eq!(closed(), [3]);
+    assert_eq!(budget.used(), 2);
+    assert!(snapshot.leases().iter().all(Lease::is_exclusive));
+    snapshot.discard_delivered_prefix(1).unwrap();
+    assert_eq!(closed(), [3, 1]);
+    assert_eq!(budget.used(), 1);
+    drop(original);
+    drop(snapshot);
+    assert_eq!(closed(), [3, 1, 2]);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn dropping_a_snapshot_does_not_close_the_queued_native_reference() {
+    reset();
+    let budget = Budget::new(4);
+    let original = bundle(&budget, &[1, 2]);
+    for _ in 0..8 {
+        let snapshot = original.snapshot(2).unwrap();
+        assert_eq!(budget.used(), 4);
+        drop(snapshot);
+        assert_eq!(budget.used(), 2);
+        assert!(closed().is_empty());
+        assert!(original.leases().iter().all(Lease::is_exclusive));
+    }
+    drop(original);
+    assert_eq!(closed(), [1, 2]);
+}
+
+#[test]
+fn snapshot_pressure_and_allocation_failure_never_change_the_source_or_quota() {
+    reset();
+    let budget = Budget::new(5);
+    let original = bundle(&budget, &[1, 2, 3]);
+    assert_eq!(original.snapshot(3).err(), Some(-105));
+    assert_eq!(budget.used(), 3);
+    FAIL_AFTER.with(|fail| fail.set(0));
+    let result = original.snapshot(2);
+    FAIL_AFTER.with(|fail| fail.set(-1));
+    assert_eq!(result.err(), Some(-12));
+    assert_eq!(budget.used(), 3);
+    assert!(closed().is_empty());
+    assert!(original.leases().iter().all(Lease::is_exclusive));
+    let empty = original.snapshot(0).unwrap();
+    assert!(empty.is_empty());
+    drop(empty);
+    drop(original);
+    assert_eq!(closed(), [1, 2, 3]);
+}
+
+#[test]
+fn failed_local_reference_allocation_closes_the_adopted_native_handle_once() {
+    reset();
+    FAIL_AFTER.with(|fail| fail.set(0));
+    let result = Lease::adopt(
+        42,
+        mnu_abi::HANDLE_RIGHT_READ | mnu_abi::HANDLE_RIGHT_TRANSFER,
+        metadata(),
+        close,
+    );
+    FAIL_AFTER.with(|fail| fail.set(-1));
+    assert_eq!(result.err(), Some(-12));
+    assert_eq!(closed(), [42]);
+}
