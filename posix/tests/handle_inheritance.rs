@@ -1,7 +1,7 @@
 use mnu_abi::{
-    process_create, HandleInfo, HANDLE_RIGHT_ALL, HANDLE_RIGHT_READ, HANDLE_RIGHT_TRANSFER,
+    HANDLE_RIGHT_ALL, HANDLE_RIGHT_READ, HANDLE_RIGHT_TRANSFER, HandleInfo, process_create,
 };
-use mochios_posix_client::inheritance::{prepare, Error};
+use mochios_posix_client::inheritance::{Error, prepare};
 
 const SENTINEL: process_create::HandleGrant = process_create::HandleGrant {
     key: 999,
@@ -16,6 +16,80 @@ fn record(handle: u32, rights: u64) -> HandleInfo {
         reserved: 0,
         rights,
     }
+}
+
+fn capture_bytes(records: &[HandleInfo]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for word in [
+        mnu_abi::handle_snapshot::VERSION,
+        records.len() as u32,
+        16,
+        0,
+    ] {
+        bytes.extend_from_slice(&word.to_le_bytes());
+    }
+    for record in records {
+        bytes.extend_from_slice(&record.handle.to_le_bytes());
+        bytes.extend_from_slice(&record.reserved.to_le_bytes());
+        bytes.extend_from_slice(&record.rights.to_le_bytes());
+    }
+    bytes
+}
+
+#[test]
+fn capture_decodes_exact_layout_and_leaves_output_tail_untouched() {
+    use mochios_posix_client::inheritance::decode_capture;
+    let records = [record(7, HANDLE_RIGHT_ALL), record(2, HANDLE_RIGHT_READ)];
+    let sentinel = record(999, 0);
+    let mut output = [sentinel; 3];
+    assert_eq!(decode_capture(&capture_bytes(&records), &mut output), Ok(2));
+    assert_eq!(&output[..2], &records);
+    assert_eq!(output[2], sentinel);
+    assert_eq!(decode_capture(&capture_bytes(&[]), &mut output), Ok(0));
+    assert_eq!(output[2], sentinel);
+}
+
+#[test]
+fn malformed_capture_rejection_never_partially_updates_records() {
+    use mochios_posix_client::inheritance::decode_capture;
+    let valid = capture_bytes(&[record(7, HANDLE_RIGHT_ALL), record(2, HANDLE_RIGHT_READ)]);
+    let sentinel = record(999, 0);
+    let mut output = [sentinel; 2];
+    for length in 0..valid.len() {
+        assert!(decode_capture(&valid[..length], &mut output).is_err());
+        assert_eq!(output, [sentinel; 2]);
+    }
+    for offset in [0, 8, 12, 36, 47] {
+        let mut malformed = valid.clone();
+        malformed[offset] = 0xff;
+        assert!(decode_capture(&malformed, &mut output).is_err());
+        assert_eq!(output, [sentinel; 2]);
+    }
+    let mut extra = valid.clone();
+    extra.push(0);
+    assert_eq!(
+        decode_capture(&extra, &mut output),
+        Err(Error::InvalidCapture)
+    );
+    assert_eq!(
+        decode_capture(&valid, &mut output[..1]),
+        Err(Error::BufferTooSmall)
+    );
+    assert_eq!(output, [sentinel; 2]);
+    for records in [
+        vec![record(7, HANDLE_RIGHT_ALL); 2],
+        vec![record(7, HANDLE_RIGHT_ALL), record(0, HANDLE_RIGHT_READ)],
+    ] {
+        assert!(decode_capture(&capture_bytes(&records), &mut output).is_err());
+        assert_eq!(output, [sentinel; 2]);
+    }
+    let mut oversized = valid;
+    oversized[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert_eq!(
+        decode_capture(&oversized, &mut output),
+        Err(Error::TooManyHandles)
+    );
+    assert_eq!(output, [sentinel; 2]);
 }
 
 #[test]

@@ -43,9 +43,22 @@ fn fork_labels_are_removed_without_closing_handles_and_only_explicit_control_key
     );
     assert_eq!(removed, [91]);
     let runtime = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
-    let child = runtime.split("if image == 0 {").nth(1).unwrap();
+    let clone = runtime
+        .split("fn clone_registered_process()")
+        .nth(1)
+        .unwrap();
+    let child = clone.split("if image == 0 {").nth(2).unwrap();
     assert!(
         child.find("clear_transient_context(").unwrap()
             < child.find("fds.clear_reservations()").unwrap()
+    );
+    let resumed = clone.split("if image == 0 {").nth(1).unwrap();
+    assert!(resumed.find("capture.disarm_child()").unwrap() < resumed.find("drop(guard)").unwrap());
+    assert!(
+        !clone
+            .split("fn create_spawn_status_stream")
+            .next()
+            .unwrap()
+            .contains("HandleTableRead")
     );
 }

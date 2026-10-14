@@ -19,6 +19,10 @@
 #define main callback_probe
 #include "native_atfork.c"
 #undef main
+#undef CHECK
+#define main fork_capture_probe
+#include "native_fork_capture.c"
+#undef main
 
 int main(void) {
     int result = handle_capture_probe();
@@ -28,5 +32,7 @@ int main(void) {
     result = barrier_probe();
     if (result) return result;
     result = newlib_lock_probe();
+    if (result) return result;
+    result = fork_capture_probe();
     return result ? result : callback_probe();
 }

@@ -49,7 +49,7 @@ fn nonreturning_stack_entry_uses_the_selected_stack_and_preserves_its_argument()
 fn copied_handlers_never_complete_parent_tokens_or_free_live_native_frames() {
     let source = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
     let child = source
-        .split("if image == 0 {")
+        .split("fn clone_registered_process()")
         .nth(1)
         .unwrap()
         .split("return Ok((0,")
