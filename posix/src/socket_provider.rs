@@ -17,7 +17,7 @@ pub fn native_signals(ready: crate::socket::Readiness) -> u64 {
         mnu_abi::HANDLE_SIGNAL_WRITABLE
     } else {
         0
-    }) | (if ready.read_closed && ready.write_closed {
+    }) | (if ready.write_error || (ready.read_closed && ready.write_closed) {
         mnu_abi::HANDLE_SIGNAL_PEER_CLOSED
     } else {
         0
@@ -97,6 +97,11 @@ pub fn handle_provider_request(
                             }
                             | if ready.write_closed {
                                 wire::WRITE_CLOSED
+                            } else {
+                                0
+                            }
+                            | if ready.write_error {
+                                wire::WRITE_ERROR
                             } else {
                                 0
                             };

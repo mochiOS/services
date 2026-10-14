@@ -276,6 +276,7 @@ fn native_wait_signals_include_terminal_completion_without_conflating_half_close
                 writable: !write_closed,
                 read_closed,
                 write_closed,
+                write_error: false,
             };
             let signals = native_signals(ready);
             assert_eq!(signals & mnu_abi::HANDLE_SIGNAL_READABLE != 0, read_closed);
@@ -291,8 +292,19 @@ fn native_wait_signals_include_terminal_completion_without_conflating_half_close
             readable: false,
             writable: false,
             read_closed: false,
-            write_closed: false
+            write_closed: false,
+            write_error: false,
         }),
+        0
+    );
+    assert_ne!(
+        native_signals(Readiness {
+            readable: false,
+            writable: false,
+            read_closed: false,
+            write_closed: true,
+            write_error: true,
+        }) & mnu_abi::HANDLE_SIGNAL_PEER_CLOSED,
         0
     );
 }

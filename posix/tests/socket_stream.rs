@@ -108,6 +108,7 @@ fn half_close_drains_data_before_eof_and_preserves_reverse_direction() {
     streams.write(a, b"data").unwrap();
     streams.shutdown(a, Shutdown::Write).unwrap();
     streams.shutdown(a, Shutdown::Write).unwrap();
+    assert!(!streams.readiness(a).unwrap().write_error);
     let ready = streams.readiness(b).unwrap();
     assert!(ready.readable && ready.read_closed && ready.writable && !ready.write_closed);
     assert_eq!(streams.write(a, b"x"), Err(-32));
@@ -120,6 +121,7 @@ fn half_close_drains_data_before_eof_and_preserves_reverse_direction() {
     assert_eq!(streams.read(a, &mut output), Ok(0));
     assert_eq!(streams.write(b, b"x"), Err(-32));
     assert!(streams.readiness(b).unwrap().write_closed);
+    assert!(streams.readiness(b).unwrap().write_error);
 }
 
 #[test]

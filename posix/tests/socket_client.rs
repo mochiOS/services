@@ -161,3 +161,71 @@ fn invalid_request_options_are_rejected_before_allocating_remote_resources() {
     assert_eq!(state.lock().unwrap().calls, 0);
     assert!(closed.is_empty());
 }
+
+#[test]
+fn c_socket_types_translate_flags_and_keep_cloexec_descriptor_local() {
+    use mochios_posix_client::socket::{SOCK_CLOEXEC, SOCK_NONBLOCK, newlib_create};
+    for flags in [0, SOCK_NONBLOCK, SOCK_CLOEXEC, SOCK_CLOEXEC | SOCK_NONBLOCK] {
+        let (create, cloexec) = newlib_create(1, 1 | flags, 0).unwrap();
+        assert_eq!(create.domain, Domain::Unix);
+        assert_eq!(create.kind, Kind::Stream);
+        assert_eq!(
+            create.options,
+            if flags & SOCK_NONBLOCK != 0 {
+                wire::NONBLOCKING
+            } else {
+                0
+            }
+        );
+        assert_eq!(cloexec, flags & SOCK_CLOEXEC != 0);
+    }
+    assert_eq!(
+        newlib_create(10, 5, 0).unwrap().0.kind,
+        Kind::SequencedPacket
+    );
+    assert_eq!(newlib_create(2, 2, 17).unwrap().0.protocol, 17);
+    assert_eq!(newlib_create(0, 1, 0), Err(-97));
+    assert_eq!(newlib_create(1, 3, 0), Err(-94));
+    assert_eq!(newlib_create(1, 0x1001, 0), Err(-22));
+    assert_eq!(newlib_create(1, 1, -1), Err(-22));
+    let metadata = protocol::InheritedFdMetadata {
+        kind: protocol::INHERITED_FD_KIND_SOCKET,
+        open_flags: 2,
+        descriptor_flags: 0,
+    };
+    assert_eq!(
+        protocol::decode_inherited_fd_metadata(
+            protocol::encode_inherited_fd_metadata(metadata).unwrap()
+        ),
+        Some(metadata)
+    );
+    assert_eq!(
+        protocol::inherited_fd_kind_requires_handle(metadata.kind),
+        Some(true)
+    );
+}
+
+#[test]
+fn poll_readiness_distinguishes_eof_from_write_failure_and_never_reports_priority() {
+    use mochios_posix_client::socket::poll_events;
+    assert_eq!(poll_events(wire::READY_WRITE, 0x7fff), 4);
+    assert_eq!(
+        poll_events(
+            wire::READY_READ | wire::READ_CLOSED | wire::READY_WRITE,
+            0x7fff
+        ),
+        0x45
+    );
+    assert_eq!(
+        poll_events(
+            wire::READY_READ | wire::READ_CLOSED | wire::WRITE_CLOSED | wire::WRITE_ERROR,
+            0
+        ),
+        0x18
+    );
+    assert_eq!(poll_events(wire::WRITE_CLOSED, 4), 4);
+    assert_eq!(poll_events(wire::WRITE_CLOSED, 0), 0);
+    assert_eq!(poll_events(wire::WRITE_CLOSED | wire::WRITE_ERROR, 4), 0xc);
+    assert_eq!(poll_events(wire::READY_READ | wire::READY_WRITE, 2), 0);
+    assert_eq!(poll_events(0, 0x7fff), 0);
+}

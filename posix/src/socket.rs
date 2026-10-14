@@ -21,6 +21,7 @@ pub struct Readiness {
     pub writable: bool,
     pub read_closed: bool,
     pub write_closed: bool,
+    pub write_error: bool,
 }
 
 struct Endpoint {
@@ -175,13 +176,15 @@ impl Streams {
         let entry = self.endpoint(id)?;
         let peer = self.endpoint(entry.peer).ok();
         let read_closed = entry.read_shutdown || peer.is_none_or(|peer| peer.write_shutdown);
-        let write_closed = entry.write_shutdown || peer.is_none_or(|peer| peer.read_shutdown);
+        let write_error = peer.is_none_or(|peer| peer.read_shutdown);
+        let write_closed = entry.write_shutdown || write_error;
         Ok(Readiness {
             readable: !entry.incoming.is_empty() || read_closed,
             writable: !write_closed
                 && peer.is_some_and(|peer| peer.incoming.len() < RECEIVE_CAPACITY),
             read_closed,
             write_closed,
+            write_error,
         })
     }
 

@@ -130,11 +130,11 @@ int main(void) {
   // subsequent Provider operations, allowing scheduler progress, never sleep.
   for (unsigned attempt = 0; attempt < 1000; ++attempt) {
     CHECK(control(b, "SOPRDY01", 0, 0, &options, 4) == 4);
-    if (options == 13)
+    if (options == 29)
       break;
     native(579, 0, 0, 0, 0, 0, 0);
   }
-  CHECK(options == 13);
+  CHECK(options == 29);
   CHECK((int64_t)native(635, b, (uintptr_t) "x", 1, 0, 0, 0) == -32);
   CHECK(wait_ready(b, 14, &observed) == 0 && observed == 14);
   CHECK(native(626, b, 0, 0, 0, 0, 0) == 0);
