@@ -8,6 +8,7 @@ pub mod named_semaphore;
 pub mod shared_memory;
 pub mod shared_memory_file;
 pub mod socket;
+pub mod socket_record;
 pub mod socket_provider;
 pub mod socket_binding;
 pub mod socket_connect;
