@@ -26,6 +26,25 @@
     }                                                                          \
   } while (0)
 static int blocking_fd;
+static uint64_t find_process_label(const char *label) {
+  uint64_t result;
+  __asm__ volatile("syscall"
+                   : "=a"(result)
+                   : "a"(UINT64_C(518)), "D"((uint64_t)label),
+                     "S"((uint64_t)strlen(label))
+                   : "rcx", "r11", "memory");
+  return result;
+}
+
+static int verify_exact_process_lookup(void) {
+  CHECK(find_process_label("compositor.service") != 0);
+  CHECK(find_process_label("compositor") == 0);
+  CHECK(find_process_label("service") == 0);
+  CHECK(find_process_label(".service") == 0);
+  CHECK(find_process_label("compositor.service.elf") == 0);
+  puts("native-process-exact-lookup: PASS");
+  return 0;
+}
 static int verify_receive_capacity(void) {
   int fds[2];
   CHECK(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, fds) == 0);
@@ -549,6 +568,7 @@ int main(int argc, char **argv) {
     return verify_exec(argv);
   CHECK(verify_single_socket() == 0);
   CHECK(verify_path_binding() == 0);
+  CHECK(verify_exact_process_lookup() == 0);
   CHECK(verify_receive_capacity() == 0);
   CHECK(verify_socket_errors() == 0);
   puts("posix-socket-options: PASS");
