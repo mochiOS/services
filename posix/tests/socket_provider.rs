@@ -267,6 +267,58 @@ fn socket_handle_authority_excludes_seek_and_mapping() {
 }
 
 #[test]
+fn socket_stat_control_checks_authentication_shape_and_exact_reply_capacity() {
+    let (mut streams, [a, _]) = fixture();
+    let flags = mnu_abi::IPC_DELIVERY_NATIVE_OBJECT;
+    let request = frame(
+        provider::OP_CONTROL,
+        a,
+        wire::CONTROL_STAT,
+        mochios_posix_protocol::FILE_STATUS_LEN as u32,
+        &[],
+    );
+    let (header, bytes) = call(&mut streams, &request, flags, 0);
+    assert_eq!(header.status, 0);
+    assert_eq!(header.value, mochios_posix_protocol::FILE_STATUS_LEN as u64);
+    let status = mochios_posix_protocol::decode_file_status(&bytes).unwrap();
+    assert_eq!(status, streams.status(a).unwrap());
+    assert_eq!(call(&mut streams, &request, 0, 0).0.status, -13);
+    assert_eq!(call(&mut streams, &request, flags, 1).0.status, -22);
+    for (length, payload) in [
+        (0, Vec::new()),
+        (111, Vec::new()),
+        (113, Vec::new()),
+        (112, vec![0]),
+    ] {
+        assert_eq!(
+            call(
+                &mut streams,
+                &frame(
+                    provider::OP_CONTROL,
+                    a,
+                    wire::CONTROL_STAT,
+                    length,
+                    &payload
+                ),
+                flags,
+                0
+            )
+            .0
+            .status,
+            -22
+        );
+    }
+    let mut short =
+        vec![0; provider::RESPONSE_HEADER_LEN + mochios_posix_protocol::FILE_STATUS_LEN - 1];
+    assert_eq!(
+        handle_provider_request(&mut streams, &request, flags, 0, &mut short),
+        Err(-22)
+    );
+    streams.release(a).unwrap();
+    assert_eq!(call(&mut streams, &request, flags, 0).0.status, -9);
+}
+
+#[test]
 fn native_wait_signals_include_terminal_completion_without_conflating_half_close() {
     use posix_service::{socket::Readiness, socket_provider::native_signals};
     for read_closed in [false, true] {

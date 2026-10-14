@@ -10,6 +10,7 @@
 #include <sys/resource.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -35,6 +36,10 @@ static int verify_exec(char **argv) {
   CHECK(fcntl(closed, F_GETFD, 0) == -1 && errno == EBADF);
   CHECK(fcntl(a, F_GETFD, 0) == 0 && fcntl(b, F_GETFD, 0) == 0);
   CHECK(fcntl(a, F_GETFL, 0) == (O_RDWR | O_NONBLOCK));
+  struct stat left, right;
+  CHECK(fstat(a, &left) == 0 && fstat(b, &right) == 0);
+  CHECK(S_ISSOCK(left.st_mode) && S_ISSOCK(right.st_mode));
+  CHECK(left.st_dev == right.st_dev && left.st_ino != right.st_ino);
   char bytes[8];
   CHECK(write(b, "exec", 4) == 4);
   CHECK(read(a, bytes, sizeof(bytes)) == 4 && !memcmp(bytes, "exec", 4));
@@ -49,14 +54,14 @@ int main(int argc, char **argv) {
   CHECK(socketpair(AF_UNIX, SOCK_STREAM | 0x1000, 0, fds) == -1 &&
         errno == EINVAL);
   CHECK(fds[0] == 123 && fds[1] == 456);
-  struct rlimit original, exhausted;
-  CHECK(getrlimit(RLIMIT_NOFILE, &original) == 0);
-  exhausted = original;
+  struct rlimit original_limit, exhausted;
+  CHECK(getrlimit(RLIMIT_NOFILE, &original_limit) == 0);
+  exhausted = original_limit;
   exhausted.rlim_cur = 0;
   CHECK(setrlimit(RLIMIT_NOFILE, &exhausted) == 0);
   CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == -1 && errno == EMFILE);
   CHECK(fds[0] == 123 && fds[1] == 456);
-  CHECK(setrlimit(RLIMIT_NOFILE, &original) == 0);
+  CHECK(setrlimit(RLIMIT_NOFILE, &original_limit) == 0);
   CHECK(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0,
                    fds) == 0);
   int a = fds[0], b = fds[1];
@@ -65,6 +70,13 @@ int main(int argc, char **argv) {
   CHECK(fcntl(a, F_GETFL, 0) == (O_RDWR | O_NONBLOCK));
   int alias = dup(a);
   CHECK(alias >= 0 && fcntl(alias, F_GETFD, 0) == 0);
+  struct stat original, duplicate, other;
+  CHECK(fstat(a, &original) == 0 && fstat(alias, &duplicate) == 0 &&
+        fstat(b, &other) == 0);
+  CHECK(S_ISSOCK(original.st_mode) && original.st_dev == duplicate.st_dev &&
+        original.st_ino == duplicate.st_ino);
+  CHECK(original.st_ino != other.st_ino && original.st_uid == geteuid() &&
+        original.st_gid == getegid());
   CHECK(fcntl(alias, F_SETFL, 0) == 0 && fcntl(a, F_GETFL, 0) == O_RDWR);
   CHECK(fcntl(b, F_GETFL, 0) == (O_RDWR | O_NONBLOCK));
   CHECK(fcntl(a, F_SETFL, O_NONBLOCK) == 0);
@@ -76,6 +88,8 @@ int main(int argc, char **argv) {
   item.events = POLLIN;
   CHECK(poll(&item, 1, 0) == 0 && item.revents == 0);
   CHECK(write(b, "hello", 5) == 5);
+  CHECK(fstat(a, &duplicate) == 0 && duplicate.st_size == 0 &&
+        duplicate.st_ino == original.st_ino);
   CHECK(poll(&item, 1, 0) == 1 && item.revents == POLLIN);
   fd_set reads, writes, exceptions;
   FD_ZERO(&reads);

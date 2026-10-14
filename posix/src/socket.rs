@@ -106,6 +106,23 @@ impl Streams {
     pub fn credentials(&self, id: u64) -> Result<(u32, u32), i32> {
         Ok(self.endpoint(id)?.credentials)
     }
+
+    pub fn status(&self, id: u64) -> Result<mochios_posix_protocol::FileStatus, i32> {
+        let entry = self.endpoint(id)?;
+        Ok(mochios_posix_protocol::FileStatus {
+            device: 0x534f,
+            inode: entry.id,
+            mode: 0o140600,
+            // Socket pairs have no filesystem links. Queued bytes are not a
+            // regular file extent or allocated filesystem blocks.
+            link_count: 0,
+            uid: entry.credentials.0,
+            gid: entry.credentials.1,
+            block_size: mnu_abi::provider::MAX_DATA_LEN as i64,
+            // This virtual object does not currently track timestamps.
+            ..Default::default()
+        })
+    }
     /// Internal Provider IDs affected by an operation, not transferable authority.
     pub fn affected(&self, id: u64) -> Result<[u64; 2], i32> {
         Ok([id, self.endpoint(id)?.peer])

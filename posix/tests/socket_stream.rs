@@ -54,6 +54,34 @@ fn creation_uses_registered_credentials_and_rejects_unknown_sender() {
     assert_eq!([a, b], [1, 2]);
     assert_eq!(streams.credentials(a), Ok((501, 20)));
     assert_eq!(streams.credentials(b), Ok((501, 20)));
+    let status = streams.status(a).unwrap();
+    assert_eq!(
+        (status.uid, status.gid, status.inode, status.mode),
+        (501, 20, a, 0o140600)
+    );
+    assert_eq!(status.link_count, 0);
+    assert_ne!(streams.status(b).unwrap().inode, status.inode);
+}
+
+#[test]
+fn socket_status_is_identity_not_queued_file_bytes_or_callers_identity() {
+    let (service, peer, mut streams, request) = fixture();
+    let [a, b] = service
+        .create_socket_pair(peer, request, &mut streams)
+        .unwrap();
+    let original = streams.status(b).unwrap();
+    streams.write(a, b"queued bytes").unwrap();
+    let status = streams.status(b).unwrap();
+    assert_eq!(status, original);
+    assert_eq!((status.size, status.blocks), (0, 0));
+    streams.release(a).unwrap();
+    assert_eq!(streams.status(b), Ok(original));
+    assert_eq!(streams.status(a), Err(-9));
+    streams.release(b).unwrap();
+    let [next, _] = service
+        .create_socket_pair(peer, request, &mut streams)
+        .unwrap();
+    assert_ne!(streams.status(next).unwrap().inode, original.inode);
 }
 
 #[test]
