@@ -9,7 +9,7 @@ fn message_flags_are_call_local_and_unsupported_semantics_are_explicit() {
         assert!(options.dont_wait);
         assert!(!options.wait_all && !options.no_signal);
         assert!(!options.peek);
-        for unsupported in [1, -1, 0x10000] {
+        for unsupported in [1, 4, 0x8000, -1, 0x10000] {
             assert_eq!(message_options(unsupported, sending), Err(-95));
         }
     }
