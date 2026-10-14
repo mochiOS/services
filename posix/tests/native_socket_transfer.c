@@ -337,7 +337,10 @@ static int native_receipts(uint64_t service, uint32_t endpoint,
   fflush(stdout);
   return 0;
 }
-int main(void) {
+#ifndef SOCKET_TRANSFER_TEST_ENTRY
+#define SOCKET_TRANSFER_TEST_ENTRY main
+#endif
+int SOCKET_TRANSFER_TEST_ENTRY(void) {
   CHECK(run_record_regressions() == 0);
   uint64_t key;
   memcpy(&key, "POSXCTRL", 8);
