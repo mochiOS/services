@@ -12,6 +12,7 @@ pub mod socket_provider;
 pub mod socket_binding;
 pub mod socket_connect;
 pub mod filesystem_transport;
+mod fault_signal;
 
 pub const STATUS_EINVAL: i32 = -22;
 pub const STATUS_EOVERFLOW: i32 = -75;
@@ -2498,6 +2499,7 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_SIGNAL_THREAD_DEQUEUE
                 | protocol::OP_SIGNAL_THREAD_PENDING
                 | protocol::OP_SIGNAL_THREAD_RAISE
+                | protocol::OP_SIGNAL_THREAD_FAULT
                 | protocol::OP_SIGNAL_THREAD_EPOCH
                 | protocol::OP_SIGNAL_IMAGE_STARTED
         ) {
@@ -2513,6 +2515,7 @@ impl<H: Copy> PosixService<H> {
             match header.opcode {
                 protocol::OP_SIGNAL_THREAD_MASK => self.thread_signal_mask_payload(sender, payload),
                 protocol::OP_SIGNAL_THREAD_RAISE => self.thread_raise_signal_payload(sender, payload),
+                protocol::OP_SIGNAL_THREAD_FAULT => self.thread_fault_signal_payload(sender, payload),
                 protocol::OP_SIGNAL_THREAD_EPOCH if payload.is_empty() => {
                     let epoch = self
                         .signal_delivery_epochs
@@ -2765,18 +2768,7 @@ impl<H: Copy> PosixService<H> {
                 .next_deliverable(blocked)
         };
         let token = if signal != 0 {
-            let state = self
-                .process_wait_states
-                .get_mut(&process_id)
-                .ok_or(protocol::STATUS_ESRCH)?;
-            if state.deliveries.len() >= MAX_OUTSTANDING_SIGNAL_DELIVERIES {
-                return Err(protocol::STATUS_EAGAIN);
-            }
-            let mut token = self.next_signal_delivery_token.max(1);
-            while state.contains_delivery_token(token) {
-                token = token.wrapping_add(1).max(1);
-            }
-            self.next_signal_delivery_token = token.wrapping_add(1).max(1);
+            let delivery = self.begin_signal_delivery(sender, signal)?;
             let dequeued = if own_signal != 0 {
                 *self
                     .thread_pending_signals
@@ -2790,14 +2782,7 @@ impl<H: Copy> PosixService<H> {
                     .dequeue(blocked)
             };
             debug_assert_eq!(dequeued, signal);
-            let delivery = protocol::SignalDelivery { signal, token };
-            state.begin_delivery(delivery, sender.thread_id);
-            let epoch = self
-                .signal_delivery_epochs
-                .entry((process_id, sender.thread_id))
-                .or_insert(0);
-            *epoch = epoch.wrapping_add(1);
-            token
+            delivery.token
         } else {
             0
         };

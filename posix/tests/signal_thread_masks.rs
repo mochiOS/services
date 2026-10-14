@@ -6,6 +6,159 @@ use mochios_posix_client::{Client, ClientError, Transport};
 use mochios_posix_protocol as protocol;
 use posix_service::{AuthenticatedProcess, PeerIdentity, PosixService};
 
+#[test]
+fn synchronous_fault_is_immediate_and_does_not_consume_asynchronous_pending_signal() {
+    let service = service();
+    let caller = client(&service, 101, 501);
+    caller
+        .thread_signal_mask(protocol::SIGNAL_MASK_INITIALIZE, 0)
+        .unwrap();
+    caller
+        .set_signal_disposition(protocol::SignalDisposition {
+            signal: protocol::SIGNAL_SEGV,
+            kind: protocol::SIGNAL_DISPOSITION_CAUGHT,
+            child_options: 0,
+        })
+        .unwrap();
+    caller.raise_signal(protocol::SIGNAL_SEGV).unwrap();
+    let epoch = caller.thread_signal_epoch().unwrap();
+    let fault = caller.fault_signal_delivery(protocol::SIGNAL_SEGV).unwrap();
+    assert_eq!(fault.disposition, protocol::SIGNAL_DISPOSITION_CAUGHT);
+    assert_eq!(fault.signal.signal, protocol::SIGNAL_SEGV);
+    assert_ne!(fault.signal.token, 0);
+    assert_eq!(caller.thread_signal_epoch().unwrap(), epoch + 1);
+    let pending = caller.thread_dequeue_signal_delivery().unwrap();
+    assert_eq!(pending.signal, protocol::SIGNAL_SEGV);
+    assert_ne!(pending.token, fault.signal.token);
+    caller.complete_signal_delivery(fault.signal).unwrap();
+    assert!(matches!(
+        caller.complete_signal_delivery(fault.signal),
+        Err(ClientError::Remote(protocol::STATUS_EAGAIN))
+    ));
+    caller.complete_signal_delivery(pending).unwrap();
+    assert_eq!(caller.thread_dequeue_signal_delivery().unwrap().signal, 0);
+}
+
+#[test]
+fn ignored_or_blocked_fault_chooses_fatal_default_without_mutating_thread_mask() {
+    let service = service();
+    let caller = client(&service, 101, 501);
+    caller
+        .thread_signal_mask(protocol::SIGNAL_MASK_INITIALIZE, 0)
+        .unwrap();
+    for signal in [protocol::SIGNAL_BUS, protocol::SIGNAL_SEGV] {
+        for disposition in [
+            protocol::SIGNAL_DISPOSITION_DEFAULT,
+            protocol::SIGNAL_DISPOSITION_IGNORE,
+            protocol::SIGNAL_DISPOSITION_CAUGHT,
+        ] {
+            caller
+                .set_signal_disposition(protocol::SignalDisposition {
+                    signal,
+                    kind: disposition,
+                    child_options: 0,
+                })
+                .unwrap();
+            for blocked in [false, true] {
+                let mask = if blocked { 1 << (signal - 1) } else { 0 };
+                caller
+                    .thread_signal_mask(protocol::SIGNAL_MASK_SET, mask)
+                    .unwrap();
+                let fault = caller.fault_signal_delivery(signal).unwrap();
+                let expected = if !blocked && disposition == protocol::SIGNAL_DISPOSITION_CAUGHT {
+                    protocol::SIGNAL_DISPOSITION_CAUGHT
+                } else {
+                    protocol::SIGNAL_DISPOSITION_DEFAULT
+                };
+                assert_eq!(fault.disposition, expected);
+                assert_eq!(
+                    caller
+                        .thread_signal_mask(protocol::SIGNAL_MASK_QUERY, 0)
+                        .unwrap(),
+                    mask
+                );
+                caller.complete_signal_delivery(fault.signal).unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+fn fault_delivery_rejects_unregistered_forged_and_invalid_requests() {
+    let service = service();
+    let caller = client(&service, 101, 501);
+    assert!(matches!(
+        caller.fault_signal_delivery(protocol::SIGNAL_BUS),
+        Err(ClientError::Remote(protocol::STATUS_ESRCH))
+    ));
+    caller
+        .thread_signal_mask(protocol::SIGNAL_MASK_INITIALIZE, 0)
+        .unwrap();
+    for signal in [0, protocol::SIGNAL_KILL, protocol::SIGNAL_STOP] {
+        assert!(matches!(
+            caller.fault_signal_delivery(signal),
+            Err(ClientError::Remote(-22))
+        ));
+    }
+    let forged = Client::new(LocalTransport {
+        service: Rc::clone(&service),
+        peer: peer(101),
+        authenticated: ExecutionIdentity {
+            process_id: 102,
+            thread_id: 501,
+        },
+    });
+    assert!(matches!(
+        forged.fault_signal_delivery(protocol::SIGNAL_SEGV),
+        Err(ClientError::Remote(protocol::STATUS_EPERM))
+    ));
+    assert_eq!(caller.thread_signal_epoch().unwrap(), 0);
+}
+
+#[test]
+fn fault_reply_wire_rejects_missing_token_unknown_policy_and_reserved_bytes() {
+    let value = protocol::fault_signal::Delivery {
+        signal: protocol::SignalDelivery {
+            signal: protocol::SIGNAL_BUS,
+            token: 91,
+        },
+        disposition: protocol::SIGNAL_DISPOSITION_DEFAULT,
+    };
+    let mut wire = [0; protocol::fault_signal::DELIVERY_LEN];
+    protocol::fault_signal::encode(value, &mut wire).unwrap();
+    assert_eq!(protocol::fault_signal::decode(&wire).unwrap(), value);
+    for index in [4, 20] {
+        let mut bad = wire;
+        bad[index] = 1;
+        assert!(protocol::fault_signal::decode(&bad).is_err());
+    }
+    for length in 0..wire.len() {
+        assert!(protocol::fault_signal::decode(&wire[..length]).is_err());
+    }
+    for bad in [
+        protocol::fault_signal::Delivery {
+            disposition: protocol::SIGNAL_DISPOSITION_IGNORE,
+            ..value
+        },
+        protocol::fault_signal::Delivery {
+            signal: protocol::SignalDelivery {
+                token: 0,
+                ..value.signal
+            },
+            ..value
+        },
+        protocol::fault_signal::Delivery {
+            signal: protocol::SignalDelivery {
+                signal: protocol::SIGNAL_KILL,
+                ..value.signal
+            },
+            ..value
+        },
+    ] {
+        assert!(protocol::fault_signal::encode(bad, &mut wire).is_err());
+    }
+}
+
 #[derive(Clone)]
 struct LocalTransport {
     service: Rc<RefCell<PosixService>>,
@@ -24,6 +177,7 @@ impl Transport for LocalTransport {
                 | protocol::OP_SIGNAL_THREAD_DEQUEUE
                 | protocol::OP_SIGNAL_THREAD_PENDING
                 | protocol::OP_SIGNAL_THREAD_RAISE
+                | protocol::OP_SIGNAL_THREAD_FAULT
                 | protocol::OP_SIGNAL_THREAD_EPOCH
                 | protocol::OP_SIGNAL_IMAGE_STARTED
         ) {
