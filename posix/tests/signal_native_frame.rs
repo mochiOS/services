@@ -24,6 +24,7 @@ fn current_thread_control()->Option<((),&'static ThreadControl)>{Some(((),&CONTR
 struct NativeError;impl NativeError{fn raw(self)->i64{-5}}
 fn native_process_id()->Result<u64,NativeError>{Ok(OWNER.load(Ordering::Acquire))}
 fn map_kernel_errno(_:i64)->i32{5}
+mod signal_jump { #[derive(Clone,Copy)]pub struct Transition(pub usize); }
 pub mod upcall_guard {
 "#,
     );
@@ -94,6 +95,7 @@ pub fn run(){
     let top=CONTROL.active_native_signal_frame.load(Ordering::Acquire);
     let top_id=CONTROL.active_native_signal_frame_id.load(Ordering::Acquire);
     let mut staged=Vec::new();
+    assert!(unsafe{stage_jump(&CONTROL,u64::MAX,0,|_|panic!("invalid target staged"))}.is_err());
     assert_eq!(unsafe{visit_abandoned(&CONTROL,u64::MAX,|frame|{staged.push(frame);Ok(())})},Err(EINVAL));
     assert!(staged.is_empty());
     assert_eq!(unsafe{retire_to(&CONTROL,u64::MAX)},Err(EINVAL));
@@ -110,14 +112,45 @@ pub fn run(){
         assert_eq!(frame.owner,37+index);assert_eq!(frame.token,100+index);
         assert_eq!(frame.stack,(index as usize+1)*65536);assert_eq!(frame.size,65536);
     }
+    let mut chain=None;
+    let task=unsafe{stage_jump(&CONTROL,target,0,|cursor|{chain=Some(cursor);signal_jump::Transition(37)})}.unwrap();
+    assert_eq!(unsafe{(*task).0},37);
+    let mut chain=chain.unwrap();
+    assert!(unsafe{chain.next()}.is_err(),"active storage was treated as retired");
+    let mut orphan_chain=None;
+    let orphan_task=unsafe{stage_jump(&CONTROL,target,136,|cursor|{orphan_chain=Some(cursor);signal_jump::Transition(41)})}.unwrap();
+    let expected=unsafe{core::ptr::addr_of!((*records[98].as_ref().get_ref()).jump)}.cast::<signal_jump::Transition>();
+    assert_eq!(orphan_task.cast_const(),expected);
+    assert!(unsafe{stage_jump(&CONTROL,target,112,|_|panic!("owned frame behind orphan accepted"))}.is_err());
     unsafe{retire_to(&CONTROL,target)}.unwrap();
     assert_eq!(CONTROL.active_native_signal_frame_id.load(Ordering::Acquire),target);
     assert_eq!(CONTROL.active_native_signal_frame.load(Ordering::Acquire),records[49].as_ref().get_ref() as *const NativeFrame as usize);
     assert_eq!(records[99].as_mut().activate(),Err(EINVAL));
+    unsafe{records[99].as_mut().get_unchecked_mut()}.jump.write(signal_jump::Transition(0xbad));
+    assert_eq!(unsafe{(*orphan_task).0},41,"current upcall storage reused the staged jump");
+    let mut orphan_chain=orphan_chain.unwrap();let mut orphans=0;
+    while let Some(frame)=unsafe{orphan_chain.next()}.unwrap(){
+        assert_ne!(frame.owner,136);orphans+=1;
+    }
+    assert_eq!(orphans,49);
+    for index in (50..100).rev(){
+        let frame=unsafe{chain.next()}.unwrap().unwrap();
+        assert_eq!(frame.owner,37+index as u64);
+        assert_eq!(frame.token,100+index as u64);
+        // Model immediate reclamation: unread records must not depend on a
+        // previously returned record's contents remaining accessible.
+        unsafe{records[index].as_mut().get_unchecked_mut()}.id=0;
+    }
+    assert!(unsafe{chain.next()}.unwrap().is_none());
     staged.clear();
     unsafe{visit_abandoned(&CONTROL,target,|frame|{staged.push(frame);Ok(())})}.unwrap();
     assert!(staged.is_empty());
+    let mut remaining=None;
+    unsafe{stage_jump(&CONTROL,0,0,|cursor|{remaining=Some(cursor);signal_jump::Transition(41)})}.unwrap();
     unsafe{retire_to(&CONTROL,0)}.unwrap();
+    let mut remaining=remaining.unwrap();let mut seen=0;
+    while unsafe{remaining.next()}.unwrap().is_some(){seen+=1;}
+    assert_eq!(seen,50);
     assert_eq!(CONTROL.active_native_signal_frame.load(Ordering::Acquire),0);
     assert_eq!(CONTROL.active_native_signal_frame_id.load(Ordering::Acquire),0);
     assert_eq!(CONTROL.native_delivery_defer.load(Ordering::Acquire),1);

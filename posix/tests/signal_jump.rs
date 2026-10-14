@@ -2,6 +2,23 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 #[test]
+fn jump_cleanup_uses_owned_frame_storage_instead_of_allocating_a_workspace() {
+    let jump = include_str!("../../../user/crates/newlib-runtime/src/signal_jump.rs");
+    assert!(!jump.contains("MemoryMap"));
+    assert!(!jump.contains("malloc(") && !jump.contains("Vec::"));
+    assert!(jump.contains("signal_delivery::stage_jump("));
+    let finish = jump
+        .split("unsafe extern \"C\" fn finish_jump(")
+        .nth(1)
+        .unwrap()
+        .split("enum NativeDestination")
+        .next()
+        .unwrap();
+    assert!(finish.find("read_volatile()").unwrap() < finish.find("task.chain.next()").unwrap());
+    assert!(finish.find("task.chain.next()").unwrap() < finish.find("MemoryUnmap").unwrap());
+}
+
+#[test]
 fn production_jump_assembly_returns_twice_and_reopens_delivery_on_the_destination_stack() {
     let directory = std::env::temp_dir().join(format!("mochios-sigjump-{}", std::process::id()));
     std::fs::create_dir(&directory).unwrap();

@@ -240,6 +240,70 @@ static int sj_minimum_stack(void) {
     puts("sigjump: guarded minimum stack, sync and native async escape PASS");
     return 0;
 }
+static volatile sig_atomic_t sj_chain_depth, sj_chain_error;
+static volatile pid_t sj_chain_descendant, sj_chain_sender;
+static void sj_chain_handler(int signal) {
+    pid_t child = fork();
+    if (child < 0) { sj_chain_error = 1; return; }
+    sj_chain_descendant = child;
+    if (!child) ++sj_chain_depth;
+    if (signal == SIGUSR1 && !child) {
+        /* Keep copied frame A live while a genuinely asynchronous callback B
+           arrives on the child's freshly registered private stack. */
+        sj_chain_descendant = 0;
+        atomic_store_explicit(sj_ready, 0, memory_order_release);
+        pid_t parent = getpid();
+        pid_t sender = fork();
+        if (sender < 0) { sj_chain_error = 2; return; }
+        if (!sender) {
+            while (!atomic_load_explicit(sj_ready, memory_order_acquire)) {}
+            if (kill(parent, SIGUSR2)) _exit(94);
+            _exit(37);
+        }
+        sj_chain_sender = sender;
+        atomic_store_explicit(sj_ready, 1, memory_order_release);
+        for (;;) __asm__ volatile("" : : : "memory");
+    }
+    siglongjmp(sj_escape, 41);
+}
+static int sj_orphan_chain(void) {
+    struct sigaction action = {0};
+    action.sa_handler = sj_chain_handler;
+    sigemptyset(&action.sa_mask);
+    CHECK(sigaction(SIGUSR1, &action, NULL) == 0 && sigaction(SIGUSR2, &action, NULL) == 0);
+    sj_chain_depth = sj_chain_error = 0;
+    sj_chain_descendant = sj_chain_sender = 0;
+    atomic_store_explicit(sj_ready, 0, memory_order_release);
+    /* Force callback A through the native path too; raise alone may drain via
+       the synchronous userspace checkpoint before an interrupt is prepared. */
+    pid_t parent = getpid(), initial_sender = fork();
+    CHECK(initial_sender >= 0);
+    if (!initial_sender) {
+        while (!atomic_load_explicit(sj_ready, memory_order_acquire)) {}
+        if (kill(parent, SIGUSR1)) _exit(94);
+        _exit(37);
+    }
+    int result = sigsetjmp(sj_escape, 1);
+    if (!result) {
+        atomic_store_explicit(sj_ready, 1, memory_order_release);
+        for (;;) __asm__ volatile("" : : : "memory");
+    }
+    CHECK(result == 41 && !sj_chain_error && sj_chain_depth <= 2);
+    /* Every descendant must be able to deliver again after the old chain was
+       reclaimed. Neither parent's return token belongs to the grandchild. */
+    CHECK(sj_install(0, 0) == 0); sj_action = 0; sj_seen = 0;
+    CHECK(raise(SIGUSR1) == 0 && sj_seen == 1);
+    int status;
+    if (sj_chain_descendant > 0) CHECK(waitpid(sj_chain_descendant, &status, 0) == sj_chain_descendant
+        && WIFEXITED(status) && WEXITSTATUS(status) == 37);
+    if (sj_chain_depth == 1) CHECK(waitpid(sj_chain_sender, &status, 0) == sj_chain_sender
+        && WIFEXITED(status) && WEXITSTATUS(status) == 37);
+    printf("sigjump: copied chain depth=%d, fresh handler and descendant cleanup PASS\n", sj_chain_depth);
+    if (sj_chain_depth > 0) _exit(37);
+    CHECK(waitpid(initial_sender, &status, 0) == initial_sender && WIFEXITED(status) && WEXITSTATUS(status) == 37);
+    puts("sigjump: two copied native frames reclaimed after destination switch PASS");
+    return 0;
+}
 #ifndef SIGJUMP_TEST_ENTRY
 #define SIGJUMP_TEST_ENTRY main
 #endif
@@ -251,6 +315,7 @@ int SIGJUMP_TEST_ENTRY(int argc, char **argv) {
     sj_ready = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     CHECK(sj_ready != MAP_FAILED);
     CHECK(sj_minimum_stack() == 0);
+    CHECK(sj_orphan_chain() == 0);
     for (int asynchronous = 0; asynchronous < 2; ++asynchronous)
         for (int alternate = 0; alternate < 2; ++alternate) {
             CHECK(sj_async_or_fork(asynchronous, 3, alternate) == 0);
