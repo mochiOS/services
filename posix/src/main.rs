@@ -286,7 +286,7 @@ fn main() {
         let opened_socket = if let (Some(peer), Some((header, payload)), true) =
             (peer, decoded, attachments_valid)
         {
-            if header.opcode == protocol::OP_SOCKET_PAIR {
+            if matches!(header.opcode, protocol::OP_SOCKET_CREATE | protocol::OP_SOCKET_PAIR) {
                 let result = if header.flags != 0
                     || header.status != 0
                     || !attachments.is_empty()
@@ -296,7 +296,12 @@ fn main() {
                     protocol::socket::Create::decode(payload)
                         .map_err(|_| -22)
                         .and_then(|create| {
-                            socket_native::create_pair(socket_endpoint, peer.process_id, create)
+                            socket_native::create(
+                                socket_endpoint,
+                                peer.process_id,
+                                create,
+                                header.opcode == protocol::OP_SOCKET_PAIR,
+                            )
                         })
                 };
                 Some(match result {
@@ -325,7 +330,8 @@ fn main() {
         }
         let mut retained_handle = None;
         let object_response = match (peer, decoded, attachments_valid) {
-            (Some(_), Some((header, _)), true) if header.opcode == protocol::OP_SOCKET_PAIR => {
+            (Some(_), Some((header, _)), true)
+                if matches!(header.opcode, protocol::OP_SOCKET_CREATE | protocol::OP_SOCKET_PAIR) => {
                 opened_socket
             }
             (Some(_peer), Some((header, payload)), true)

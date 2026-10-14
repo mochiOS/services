@@ -121,7 +121,7 @@ fn malformed_names_and_insufficient_buffers_fail_before_modifying_output() {
 }
 
 #[test]
-fn socket_operations_remain_explicitly_unsupported_until_the_backend_is_connected() {
+fn pure_policy_dispatcher_does_not_fabricate_native_socket_handles() {
     use mochios_posix_protocol as protocol;
     use posix_service::{AuthenticatedProcess, PeerIdentity, PosixService};
     let mut service = PosixService::<u32>::new();

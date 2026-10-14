@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
 struct Reply {
+    single: bool,
     status: i32,
     mismatch: bool,
     transport_error: bool,
@@ -33,11 +34,18 @@ impl ObjectTransport for Mock {
         handles: &mut ObjectHandles<u32>,
     ) -> Result<usize, ()> {
         let (header, payload) = protocol::decode(request).unwrap();
-        assert_eq!(header.opcode, protocol::OP_SOCKET_PAIR);
+        let mut reply = self.0.lock().unwrap();
+        assert_eq!(
+            header.opcode,
+            if reply.single {
+                protocol::OP_SOCKET_CREATE
+            } else {
+                protocol::OP_SOCKET_PAIR
+            }
+        );
         assert_eq!(header.flags, 0);
         assert_eq!(Create::decode(payload).unwrap(), request_create());
         assert!(handles.is_empty());
-        let mut reply = self.0.lock().unwrap();
         reply.calls += 1;
         for attachment in &reply.attachments {
             handles.push(*attachment).unwrap();
@@ -94,6 +102,50 @@ fn successful_pair_transfers_both_handles_without_closing_them() {
     );
     assert!(closed.is_empty());
     assert_eq!(state.lock().unwrap().calls, 1);
+}
+
+#[test]
+fn single_socket_receives_exactly_one_handle_and_reclaims_invalid_replies() {
+    let state = Arc::new(Mutex::new(Reply {
+        single: true,
+        attachments: vec![pair()[0]],
+        ..Default::default()
+    }));
+    let client = Client::new(Mock(state.clone()));
+    let mut closed = Vec::new();
+    assert_eq!(
+        client.open_socket(request_create(), |handle| closed.push(handle)),
+        Ok(pair()[0])
+    );
+    assert!(closed.is_empty());
+    for case in 0..6 {
+        let mut reply = Reply {
+            single: true,
+            attachments: vec![pair()[0]],
+            ..Default::default()
+        };
+        match case {
+            0 => reply.attachments.clear(),
+            1 => reply.attachments.push(pair()[1]),
+            2 => reply.attachments[0].rights |= mnu_abi::HANDLE_RIGHT_SEEK,
+            3 => reply.status = -95,
+            4 => reply.transport_error = true,
+            _ => reply.mismatch = true,
+        }
+        let expected: Vec<_> = reply
+            .attachments
+            .iter()
+            .map(|attachment| attachment.handle)
+            .collect();
+        *state.lock().unwrap() = reply;
+        closed.clear();
+        assert!(
+            client
+                .open_socket(request_create(), |handle| closed.push(handle))
+                .is_err()
+        );
+        assert_eq!(closed, expected);
+    }
 }
 
 #[test]

@@ -13,6 +13,7 @@ use std::sync::{
 };
 
 const CREATE_MAGIC: &[u8; 4] = b"SOPA";
+const CREATE_SINGLE_MAGIC: &[u8; 4] = b"SOCR";
 const CREATE_LEN: usize = 12 + wire::CREATE_LEN;
 
 pub fn start(service: Arc<Mutex<PosixService<u32>>>) -> Result<u32, i64> {
@@ -45,13 +46,18 @@ pub fn start(service: Arc<Mutex<PosixService<u32>>>) -> Result<u32, i64> {
 
 /// Called by the service dispatcher only after kernel sender authentication.
 /// Never hold the service state mutex across this RPC.
-pub fn create_pair(
+pub fn create(
     endpoint: u32,
     process_id: u64,
     create: wire::Create,
+    pair: bool,
 ) -> Result<Vec<posix_service::OpenedObject<u32>>, i32> {
     let mut request = [0; CREATE_LEN];
-    request[..4].copy_from_slice(CREATE_MAGIC);
+    request[..4].copy_from_slice(if pair {
+        CREATE_MAGIC
+    } else {
+        CREATE_SINGLE_MAGIC
+    });
     request[4..12].copy_from_slice(&process_id.to_le_bytes());
     create.encode(&mut request[12..]).map_err(|_| -22)?;
     let mut attachments = platform::ipc::IpcObjectHandles::default();
@@ -67,8 +73,9 @@ pub fn create_pair(
         if status != 0 {
             return Err(status);
         }
-        if attachments.count != 2
-            || attachments.handles[..2].iter().any(|attachment| {
+        let count = if pair { 2 } else { 1 };
+        if attachments.count as usize != count
+            || attachments.handles[..count].iter().any(|attachment| {
                 attachment.handle == 0
                     || attachment.reserved != 0
                     || attachment.rights != wire::descriptor_rights()
@@ -76,7 +83,7 @@ pub fn create_pair(
         {
             return Err(-5);
         }
-        Ok(attachments.handles[..2]
+        Ok(attachments.handles[..count]
             .iter()
             .map(|attachment| posix_service::OpenedObject {
                 handle: attachment.handle,
@@ -132,7 +139,9 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
         };
         let sender = message >> 32;
         let bytes = &request[..(message as u32 as usize).min(request.len())];
-        if bytes.starts_with(CREATE_MAGIC) {
+        if bytes.starts_with(CREATE_MAGIC) || bytes.starts_with(CREATE_SINGLE_MAGIC) {
+            let pair = bytes.starts_with(CREATE_MAGIC);
+            let count = if pair { 2 } else { 1 };
             let result = (|| {
                 // Only the authenticated service dispatcher may nominate a process.
                 if bytes.len() != CREATE_LEN
@@ -149,10 +158,14 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                 let ids = {
                     let state = service.lock().map_err(|_| -5)?;
                     let peer = state.registered_peer(process_id).ok_or(-1)?;
-                    state.create_socket_pair(peer, create, &mut streams)?
+                    if pair {
+                        state.create_socket_pair(peer, create, &mut streams)?
+                    } else {
+                        [state.create_socket(peer, create, &mut streams)?, 0]
+                    }
                 };
                 let mut handles = [0; 2];
-                for (index, id) in ids.into_iter().enumerate() {
+                for (index, id) in ids.into_iter().take(count).enumerate() {
                     match platform::handle::create_provider_object(
                         endpoint,
                         id,
@@ -165,7 +178,7 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                                     let _ = platform::handle::close(handle);
                                 }
                             }
-                            for id in ids {
+                            for id in ids.into_iter().take(count) {
                                 let _ = streams.release(id);
                             }
                             return Err(error.raw() as i32);
@@ -178,8 +191,12 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
             match result {
                 Ok(handles) => {
                     let mut outgoing = platform::ipc::IpcObjectHandles::default();
-                    outgoing.count = 2;
-                    for (slot, handle) in outgoing.handles.iter_mut().zip(handles) {
+                    outgoing.count = count as u32;
+                    for (slot, handle) in outgoing
+                        .handles
+                        .iter_mut()
+                        .zip(handles.into_iter().take(count))
+                    {
                         *slot = platform::ipc::IpcObjectHandle {
                             handle,
                             reserved: 0,
@@ -188,7 +205,7 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                     }
                     let _ =
                         platform::ipc::reply_object_handles(sender, &0i32.to_le_bytes(), &outgoing);
-                    for handle in handles {
+                    for handle in handles.into_iter().take(count) {
                         let _ = platform::handle::close(handle);
                     }
                 }

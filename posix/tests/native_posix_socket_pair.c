@@ -24,6 +24,33 @@
     }                                                                          \
   } while (0)
 static int blocking_fd;
+static int verify_single_socket(void) {
+  int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+  CHECK(fd >= 0 && fcntl(fd, F_GETFD, 0) == FD_CLOEXEC);
+  CHECK(fcntl(fd, F_GETFL, 0) == (O_RDWR | O_NONBLOCK));
+  struct stat status;
+  CHECK(fstat(fd, &status) == 0 && S_ISSOCK(status.st_mode));
+  CHECK(status.st_uid == geteuid() && status.st_gid == getegid());
+  struct sockaddr address;
+  socklen_t length = sizeof(address);
+  CHECK(getsockname(fd, &address, &length) == 0 && length == 2 &&
+        address.sa_family == AF_UNIX);
+  length = sizeof(address);
+  CHECK(getpeername(fd, &address, &length) == -1 && errno == ENOTCONN);
+  char byte;
+  CHECK(read(fd, &byte, 1) == -1 && errno == ENOTCONN);
+  CHECK(send(fd, "x", 1, MSG_NOSIGNAL) == -1 && errno == ENOTCONN);
+  CHECK(shutdown(fd, SHUT_RDWR) == -1 && errno == ENOTCONN);
+  int alias = dup(fd);
+  CHECK(alias >= 0 && fcntl(alias, F_GETFD, 0) == 0);
+  CHECK(fcntl(alias, F_SETFL, 0) == 0 && fcntl(fd, F_GETFL, 0) == O_RDWR);
+  CHECK(close(fd) == 0);
+  length = sizeof(address);
+  CHECK(getsockname(alias, &address, &length) == 0 && length == 2);
+  CHECK(close(alias) == 0);
+  CHECK(socket(AF_INET, SOCK_STREAM, 0) == -1 && errno == ENOTSUP);
+  return 0;
+}
 static int verify_names(int fd) {
   for (int peer = 0; peer < 2; ++peer) {
     struct sockaddr address;
@@ -84,6 +111,7 @@ static int verify_exec(char **argv) {
 int main(int argc, char **argv) {
   if (argc == 5 && !strcmp(argv[1], "--socket-exec"))
     return verify_exec(argv);
+  CHECK(verify_single_socket() == 0);
   int fds[2] = {123, 456};
   CHECK(socketpair(AF_UNIX, SOCK_STREAM | 0x1000, 0, fds) == -1 &&
         errno == EINVAL);
