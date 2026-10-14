@@ -25,6 +25,7 @@ fn production_interrupt_register_conversion_preserves_every_word_and_validates_r
         "read_interrupt_context",
         "write_interrupt_context",
         "snapshot_context",
+        "return_context",
     ] {
         let start = source.find(&format!("fn {name}(")).unwrap();
         let end = start + source[start..].find("\n}\n").unwrap() + 3;
@@ -62,6 +63,26 @@ fn main() {
         invalid=updated;invalid.user_rsp=address;assert!(!valid_user_return(&invalid));
     }
     updated.user_rip=0;assert!(!valid_user_return(&updated));
+    let mut valid=context; valid.user_rip=0x4000;valid.user_rsp=0x8000;valid.user_rflags=0x202;
+    let mut candidate=snapshot_context(valid,[0;512]);
+    assert_eq!(return_context(&candidate),Some(valid));
+    for flag in [12,13,14,17,19,20,63] {
+        candidate.rflags=valid.user_rflags|(1u64<<flag);
+        assert!(return_context(&candidate).is_none());
+    }
+    for flag in [1,9] {
+        candidate.rflags=valid.user_rflags&!(1u64<<flag);
+        assert!(return_context(&candidate).is_none());
+    }
+    candidate.rflags=valid.user_rflags;
+    for address in [0x800000000000u64,0xffff800000000000,u64::MAX] {
+        candidate.instruction=address;assert!(return_context(&candidate).is_none());
+        candidate.instruction=valid.user_rip;candidate.stack_pointer=address;
+        assert!(return_context(&candidate).is_none());candidate.stack_pointer=valid.user_rsp;
+    }
+    candidate.registers.rcx=0x1122334455667788;candidate.registers.r11=0x8877665544332211;
+    let accepted=return_context(&candidate).unwrap();
+    assert_eq!((accepted.rcx,accepted.r11),(candidate.registers.rcx,candidate.registers.r11));
 }
 "#,
     );

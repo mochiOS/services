@@ -4,7 +4,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-enum { MAP = 582, UNMAP = 583, PROTECT = 584, INSTALL = 654, RETURN = 655, INSPECT = 688,
+enum { MAP = 582, UNMAP = 583, PROTECT = 584, INSTALL = 654, RETURN = 655, INSPECT = 688, RETURN_CONTEXT = 689,
        CREATE_MEMORY = 671 };
 struct snapshot {
     uint64_t instruction, stack_pointer, flags, argument;
@@ -42,7 +42,8 @@ static void handler(uint64_t vector, uint64_t token, uint64_t kind,
     /* Native lifecycle/wait notifications share this entry, even while
        SIGCHLD is blocked. They are not synchronous exceptions. */
     if (kind == 0) {
-        native(RETURN, token, 0, 0, 0, 0, 0);
+        /* Legacy return must ignore all registers outside its one argument. */
+        native(RETURN, token, UINT64_MAX, UINT64_MAX, 0, 0, 0);
         _exit(96);
     }
     uint64_t flags;
@@ -69,11 +70,29 @@ static void handler(uint64_t vector, uint64_t token, uint64_t kind,
     captured.registers.rcx = 0;
     if (native(INSPECT, token, (uintptr_t)&again, sizeof(again), 0, 0, 0) ||
         again.instruction != instruction || !again.registers.rcx) _exit(103);
+    captured = again;
+    if ((int64_t)native(RETURN_CONTEXT, token + 1, (uintptr_t)&captured, sizeof(captured), 0, 0, 0) != -22) _exit(109);
+    captured.flags |= 3u << 12;
+    if ((int64_t)native(RETURN_CONTEXT, token, (uintptr_t)&captured, sizeof(captured), 0, 0, 0) != -22) _exit(104);
+    captured = again; captured.instruction = UINT64_C(0xffff800000000000);
+    if ((int64_t)native(RETURN_CONTEXT, token, (uintptr_t)&captured, sizeof(captured), 0, 0, 0) != -22) _exit(105);
+    captured = again; captured.stack_pointer = UINT64_C(0xffff800000000000);
+    if ((int64_t)native(RETURN_CONTEXT, token, (uintptr_t)&captured, sizeof(captured), 0, 0, 0) != -22) _exit(106);
+    captured = again;
+    captured.fx_state[27] = 0x80;
+    for (unsigned i = 28; i < 32; ++i) captured.fx_state[i] = 0xff;
+    if ((int64_t)native(RETURN_CONTEXT, token, 0, sizeof(captured), 0, 0, 0) != -22 ||
+        (int64_t)native(RETURN_CONTEXT, token, 1, sizeof(captured), 0, 0, 0) != -14) _exit(108);
+    captured = again;
+    captured.flags |= 1;
+    captured.registers.rcx = UINT64_C(0x123456789abcdef0);
+    captured.registers.r11 = UINT64_C(0xfedcba9876543210);
+    captured.fx_state[25] = (captured.fx_state[25] & ~0x60u) | 0x40u;
     last_token = token;
     ++exceptions;
     if (recursive) invalid_access();
     if (native(PROTECT, address, 4096, 3, 0, 0, 0)) _exit(91);
-    native(RETURN, token, 0, 0, 0, 0, 0);
+    native(RETURN_CONTEXT, token, (uintptr_t)&captured, sizeof(captured), 0, 0, 0);
     _exit(92);
 }
 
@@ -90,14 +109,18 @@ static int recover(void) {
     expected_address = memory;
     if (native(PROTECT, memory, 4096, 1, 0, 0, 0)) return 2;
     uint64_t rcx, r11, restored_flags;
+    uint32_t before_mxcsr, after_mxcsr;
+    __asm__ volatile("stmxcsr %0" : "=m"(before_mxcsr));
     __asm__ volatile("movabs $0x1122334455667788, %%rcx\n"
                      "movabs $0x8877665544332211, %%r11\n"
-                     "std\nmovb $0xa7, (%3)\nmov %%rcx, %0\nmov %%r11, %1\n"
+                     "clc\nstd\nmovb $0xa7, (%3)\nmov %%rcx, %0\nmov %%r11, %1\n"
                      "pushfq\npop %2\ncld"
                      : "=m"(rcx), "=m"(r11), "=r"(restored_flags)
                      : "r"(memory) : "rcx", "r11", "memory", "cc");
-    if (rcx != UINT64_C(0x1122334455667788) || r11 != UINT64_C(0x8877665544332211) ||
-        *(volatile unsigned char *)(uintptr_t)memory != 0xa7 || !(restored_flags & (1 << 10))) return 3;
+    __asm__ volatile("stmxcsr %0\nldmxcsr %1" : "=m"(after_mxcsr) : "m"(before_mxcsr));
+    if (rcx != UINT64_C(0x123456789abcdef0) || r11 != UINT64_C(0xfedcba9876543210) ||
+        *(volatile unsigned char *)(uintptr_t)memory != 0xa7 || !(restored_flags & (1 << 10)) ||
+        !(restored_flags & 1) || (after_mxcsr & 0x6000) != 0x4000) return 3;
     if (native(UNMAP, memory, 4096, 0, 0, 0, 0)) return 4;
     return 0;
 }
@@ -117,6 +140,7 @@ int main(void) {
         }
         struct snapshot stale;
         if ((int64_t)native(INSPECT, last_token, (uintptr_t)&stale, sizeof(stale), 0, 0, 0) != -22) return 8;
+        if ((int64_t)native(RETURN_CONTEXT, last_token, (uintptr_t)&stale, sizeof(stale), 0, 0, 0) != -22) return 9;
     }
     /* Both private copies and shared pins must report absent backing, not
        manufacture pages. The unmapped-address case is a distinct cause. */
@@ -161,6 +185,6 @@ int main(void) {
         if (waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
             WEXITSTATUS(status) != 255) return 4;
     }
-    puts("user-exception: PASS opt-in, native causes, token-bound snapshot, backing bounds, repair/retry, full registers, COW and recursive rejection");
+    puts("user-exception: PASS opt-in, native causes, validated context return, backing bounds, repair/retry, full registers, COW and recursive rejection");
     return 0;
 }

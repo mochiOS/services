@@ -94,6 +94,18 @@ pub fn probe() {
     assert_eq!(state.pending_len,0);
     state.request_return(asynchronous.token).unwrap();
     state.take_restored_context().unwrap();
+    let event=state.begin_exception(user,14).unwrap();
+    let (_,fx)=state.snapshot(event.token).unwrap();
+    let mut invalid_fx=fx;
+    invalid_fx[24..28].copy_from_slice(&0x80001f80u32.to_le_bytes());
+    invalid_fx[28..32].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert_eq!(state.request_return_context(event.token,user,invalid_fx),Err(ThreadUpcallError::InvalidContext));
+    assert_eq!(state.snapshot(event.token).unwrap(),(user,fx));
+    assert_eq!(state.request_return_context(event.token+1,user,fx),Err(ThreadUpcallError::InvalidToken));
+    let mut changed_context=user;changed_context.rax=0x1234;
+    state.request_return_context(event.token,changed_context,fx).unwrap();
+    assert_eq!(state.take_restored_context(),Some(changed_context));
+    assert_eq!(state.request_return_context(event.token,user,fx),Err(ThreadUpcallError::InvalidToken));
     state.install(0x1000,0x8000,false).unwrap();
     assert!(state.begin_exception(user,14).is_none());
     original.restore_current();

@@ -164,6 +164,7 @@ fn native_exception_entry_is_opt_in_and_runs_after_vm_recovery_without_posix_pol
         ("INSTALL", mnu_abi::SyscallNumber::ThreadUpcallInstall),
         ("RETURN", mnu_abi::SyscallNumber::ThreadUpcallReturn),
         ("INSPECT", mnu_abi::SyscallNumber::ThreadUpcallInspect),
+        ("RETURN_CONTEXT", mnu_abi::SyscallNumber::ThreadUpcallReturnContext),
     ] {
         assert!(probe.contains(&format!("{name} = {}", value as u64)));
     }
