@@ -53,5 +53,5 @@ fn native_probe_numbers_and_runtime_exception_opt_in_match_the_current_abi() {
             .unwrap()
             .contains("flags: syscall::THREAD_UPCALL_EXCEPTIONS")
     );
-    assert!(runtime.contains("fault_signal::deliver(cause, address as usize)"));
+    assert!(runtime.contains("fault_signal::deliver(cause, address as usize, &mut context)"));
 }
