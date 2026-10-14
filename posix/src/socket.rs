@@ -399,6 +399,9 @@ impl Streams {
             return Err(-22);
         }
         let entry = self.endpoint(id)?;
+        if let Some(records) = &entry.records {
+            return Ok(records.is_readable() || entry.read_shutdown || entry.error != 0);
+        }
         if entry.peer.is_none() {
             return Err(-107);
         }
@@ -425,7 +428,9 @@ impl Streams {
             return Err(-107);
         }
         let offset = peek_offset.unwrap_or(0);
-        let count = output.len().min(entry.incoming.len().saturating_sub(offset));
+        let count = output
+            .len()
+            .min(entry.incoming.len().saturating_sub(offset));
         if entry.incoming.is_empty() && entry.error != 0 {
             return Err(-(std::mem::take(&mut entry.error) as i32));
         }
@@ -524,6 +529,9 @@ impl Streams {
     ) -> Result<usize, i32> {
         use mochios_posix_protocol::socket_record::Operation;
         let entry = self.endpoint(id)?;
+        if request.operation == Operation::WaitSend {
+            return Err(-22);
+        }
         if entry.records.is_none() {
             return Err(-95);
         }
@@ -541,7 +549,13 @@ impl Streams {
             peer
         } else {
             if entry.read_shutdown {
-                return Err(-108);
+                return mochios_posix_protocol::socket_record::Reply {
+                    copied: 0,
+                    length: 0,
+                    source: Some(mochios_posix_protocol::socket::Address::UnixUnnamed),
+                }
+                .encode(request, response)
+                .map_err(|_| -22);
             }
             id
         };
@@ -551,6 +565,31 @@ impl Streams {
             .as_mut()
             .ok_or(-91)?;
         crate::socket_record_io::transfer(queue, request, source, send_capacity, buffer, response)
+    }
+
+    /// A large atomic write needs its entire capacity, not just POLLOUT's
+    /// minimum-size availability. Evaluate and register under queue serialization.
+    pub fn record_send_ready(&self, id: u64, length: usize) -> Result<bool, i32> {
+        let entry = self.endpoint(id)?;
+        if entry.records.is_none() {
+            return Err(-95);
+        }
+        if length > crate::socket_record::MAX_RECORD_SIZE {
+            return Err(-90);
+        }
+        if entry.write_shutdown || entry.peer.is_none() {
+            return Ok(true);
+        }
+        let Some(peer) = entry.peer.and_then(|id| self.endpoint(id).ok()) else {
+            return Ok(true);
+        };
+        if peer.read_shutdown {
+            return Ok(true);
+        }
+        peer.records
+            .as_ref()
+            .ok_or(-91)?
+            .can_push(length, entry.send_capacity)
     }
 
     /// Description IDs are private; the adapter resolves the listener through

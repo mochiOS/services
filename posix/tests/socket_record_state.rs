@@ -164,3 +164,86 @@ fn shutdown_discards_only_its_own_queue_and_streams_reject_record_requests() {
         Err(-95)
     );
 }
+
+#[test]
+fn atomic_send_wait_ignores_small_free_prefix_and_releases_its_write_lease() {
+    use posix_service::socket_receive_wait::ReceiveWaits;
+    let mut service = PosixService::new();
+    service
+        .initialize_bootstrap_process(
+            AuthenticatedProcess {
+                handle: 1u32,
+                process_id: 1,
+            },
+            501,
+            20,
+            &[],
+        )
+        .unwrap();
+    let peer = PeerIdentity {
+        process_id: 1,
+        effective_uid: 0,
+        effective_gid: 0,
+    };
+    let mut streams = Streams::new();
+    let [a, b] = service
+        .create_socket_pair(
+            peer,
+            Create {
+                domain: Domain::Unix,
+                kind: Kind::Datagram,
+                protocol: 0,
+                options: 0,
+            },
+            &mut streams,
+        )
+        .unwrap();
+    let mut buffer = Buffer(vec![0; 40000]);
+    let mut response = [0; MAX_REPLY_LEN];
+    let send = Request {
+        operation: Operation::Send,
+        offset: 0,
+        length: 40000,
+        peek: false,
+    };
+    streams
+        .transfer_record(a, send, &mut buffer, &mut response)
+        .unwrap();
+    assert!(streams.readiness(a).unwrap().writable);
+    assert_eq!(streams.record_send_ready(a, 30000), Ok(false));
+    let mut waits = ReceiveWaits::new();
+    let job = waits.start_send(&streams, a, 30000, 42).unwrap();
+    waits.pump(&streams, |_| {
+        panic!("ordinary POLLOUT must not wake a large record")
+    });
+    assert_eq!(waits.ready(job), Ok(false));
+    streams
+        .transfer_record(
+            b,
+            Request {
+                operation: Operation::Receive,
+                ..send
+            },
+            &mut buffer,
+            &mut response,
+        )
+        .unwrap();
+    waits.pump(&streams, |ready| assert_eq!(ready, job));
+    assert_eq!(waits.ready(job), Ok(true));
+    streams
+        .transfer_record(a, send, &mut buffer, &mut response)
+        .unwrap();
+    assert_eq!(streams.record_send_ready(a, 30000), Ok(false));
+    waits.pump(&streams, |ready| assert_eq!(ready, job));
+    let mut closed = vec![];
+    waits.release(job, |handle| closed.push(handle)).unwrap();
+    assert_eq!(closed, [42]);
+    // Repeated timed-out/cancelled jobs cannot accumulate registrations.
+    for lease in 0..1100 {
+        let job = waits.start_send(&streams, a, 30000, lease).unwrap();
+        waits
+            .release(job, |handle| assert_eq!(handle, lease))
+            .unwrap();
+    }
+    assert_eq!(waits.start_send(&streams, a, usize::MAX, 0), Err(-90));
+}

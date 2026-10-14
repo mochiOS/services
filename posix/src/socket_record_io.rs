@@ -20,6 +20,9 @@ pub fn authorize<H: Copy + Default + Eq>(
     attachments: &[AttachedObject<H>],
 ) -> Result<(AttachedObject<H>, AttachedObject<H>), i32> {
     request.validate().map_err(|_| -22)?;
+    if request.operation == Operation::WaitSend {
+        return Err(-22);
+    }
     if delivery_flags != mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE {
         return Err(-13);
     }
@@ -80,6 +83,7 @@ pub fn transfer(
     data.try_reserve_exact(length).map_err(|_| -12)?;
     data.resize(length, 0);
     match request.operation {
+        Operation::WaitSend => Err(-22),
         Operation::Send => {
             buffer.read(request.offset, &mut data)?;
             let reply = wire::Reply {

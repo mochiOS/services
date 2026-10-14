@@ -258,6 +258,18 @@ fn c_socket_types_translate_flags_and_keep_cloexec_descriptor_local() {
 }
 
 #[test]
+fn datagram_subtype_is_preserved_by_exec_metadata_without_private_open_flags() {
+    let metadata = protocol::InheritedFdMetadata {
+        kind: protocol::INHERITED_FD_KIND_DATAGRAM,
+        open_flags: 2,
+        descriptor_flags: protocol::INHERITED_FD_DESCRIPTOR_CLOEXEC,
+    };
+    let encoded = protocol::encode_inherited_fd_metadata(metadata).unwrap();
+    assert_eq!(protocol::decode_inherited_fd_metadata(encoded), Some(metadata));
+    assert_eq!(protocol::inherited_fd_kind_requires_handle(metadata.kind), Some(true));
+}
+
+#[test]
 fn poll_readiness_distinguishes_eof_from_write_failure_and_never_reports_priority() {
     use mochios_posix_client::socket::poll_events;
     assert_eq!(poll_events(wire::READY_WRITE, 0x7fff), 4);

@@ -1,8 +1,9 @@
-//! One-shot receive notifications. Native adapters must authenticate the socket
-//! through an attached READ Handle and retain that reference for the job's life.
+//! One-shot socket notifications. Native adapters authenticate receive waits
+//! through a READ Handle and atomic record-send waits through a WRITE Handle,
+//! retaining that reference for the job's life.
 //! Registration and pumping run on the same worker as queue mutations.
 
-use crate::socket::{MAX_DESCRIPTION_ID, MAX_ENDPOINTS, Streams};
+use crate::socket::{Streams, MAX_DESCRIPTION_ID, MAX_ENDPOINTS};
 
 const TAG: u64 = 1 << 61;
 
@@ -27,8 +28,22 @@ struct Job<H> {
     id: u64,
     socket: u64,
     source: H,
-    minimum: u64,
+    condition: Condition,
     ready: bool,
+}
+
+#[derive(Clone, Copy)]
+enum Condition {
+    Receive(u64),
+    SendRecord(usize),
+}
+impl Condition {
+    fn ready(self, streams: &Streams, socket: u64) -> Result<bool, i32> {
+        match self {
+            Self::Receive(minimum) => streams.receive_wait_ready(socket, minimum),
+            Self::SendRecord(length) => streams.record_send_ready(socket, length),
+        }
+    }
 }
 
 pub struct ReceiveWaits<H> {
@@ -60,7 +75,29 @@ impl<H> ReceiveWaits<H> {
         minimum: u64,
         source: H,
     ) -> Result<u64, i32> {
-        let ready = streams.receive_wait_ready(socket, minimum)?;
+        self.start_condition(streams, socket, Condition::Receive(minimum), source)
+    }
+
+    /// Source is an explicitly delegated WRITE lease, retained until final job
+    /// release. No allocation or readiness registration lives on a client FD.
+    pub fn start_send(
+        &mut self,
+        streams: &Streams,
+        socket: u64,
+        length: usize,
+        source: H,
+    ) -> Result<u64, i32> {
+        self.start_condition(streams, socket, Condition::SendRecord(length), source)
+    }
+
+    fn start_condition(
+        &mut self,
+        streams: &Streams,
+        socket: u64,
+        condition: Condition,
+        source: H,
+    ) -> Result<u64, i32> {
+        let ready = condition.ready(streams, socket)?;
         if self.jobs.len() == MAX_ENDPOINTS || self.next > MAX_DESCRIPTION_ID {
             return Err(-23);
         }
@@ -71,7 +108,7 @@ impl<H> ReceiveWaits<H> {
             id,
             socket,
             source,
-            minimum,
+            condition,
             ready,
         });
         Ok(id)
@@ -90,9 +127,7 @@ impl<H> ReceiveWaits<H> {
     /// callbacks are repeatable so publication can signal an already-ready job.
     pub fn pump(&mut self, streams: &Streams, mut signal: impl FnMut(u64)) {
         for job in &mut self.jobs {
-            job.ready |= streams
-                .receive_wait_ready(job.socket, job.minimum)
-                .unwrap_or(true);
+            job.ready |= job.condition.ready(streams, job.socket).unwrap_or(true);
             if job.ready {
                 signal(job.id);
             }
