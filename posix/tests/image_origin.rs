@@ -188,5 +188,6 @@ fn production_creation_replacement_and_vm_snapshot_preserve_measurement() {
     let snapshot = include_str!("../../../core/src/mem/address_space.rs");
     assert!(snapshot.contains("ImageOrigin::capture(process)"));
     assert!(snapshot.contains("origin: self.origin"));
-    assert!(exec.contains("image.consume(&authorization, &context)"));
+    assert!(exec.contains("consume_address_space_for_create(&image, &authorization, &context)"));
+    assert!(exec.contains("crate::task::with_process(pid, |_| image.consume(authorization, context))"));
 }
