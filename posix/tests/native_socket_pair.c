@@ -90,7 +90,7 @@ int main(void) {
   CHECK((int64_t)endpoint > 0);
   struct handles handles = {0};
   CHECK(create(endpoint, 2, 1, 0, &handles) == -95 && handles.count == 0);
-  CHECK(create(endpoint, 1, 2, 0, &handles) == -95 && handles.count == 0);
+  CHECK(create(endpoint, 1, 3, 0, &handles) == -95 && handles.count == 0);
   CHECK(create(endpoint, 1, 1, 2, &handles) == -22 && handles.count == 0);
   CHECK(create(endpoint, 1, 1, 1, &handles) == 0 && handles.count == 2);
   uint32_t a = handles.entries[0].handle, b = handles.entries[1].handle;

@@ -26,6 +26,9 @@ mod socket_connect_native;
 mod socket_receive_wait_native;
 
 #[cfg(target_os = "mochios")]
+mod socket_record_native;
+
+#[cfg(target_os = "mochios")]
 const PTY_SYNC_MAGIC: [u8; 4] = *b"PTYS";
 
 #[cfg(target_os = "mochios")]
@@ -309,9 +312,17 @@ fn main() {
                     | protocol::OP_SOCKET_ACCEPT
                     | protocol::OP_SOCKET_CONNECT
                     | protocol::OP_SOCKET_RECEIVE_WAIT
+                    | protocol::OP_SOCKET_RECORD_ENDPOINT
             ) {
                 let result = if header.flags != 0 || header.status != 0 {
                     Err(-22)
+                } else if header.opcode == protocol::OP_SOCKET_RECORD_ENDPOINT {
+                    if !attachments.is_empty() || !payload.is_empty() {
+                        Err(-22)
+                    } else {
+                        socket_record_native::endpoint_reference(socket_endpoint)
+                            .map(|handles| (handles, Vec::new()))
+                    }
                 } else if header.opcode == protocol::OP_SOCKET_RECEIVE_WAIT {
                     if attachments.len() != 1 || payload.len() != 8 {
                         Err(-22)
@@ -415,6 +426,7 @@ fn main() {
                         | protocol::OP_SOCKET_ACCEPT
                         | protocol::OP_SOCKET_CONNECT
                         | protocol::OP_SOCKET_RECEIVE_WAIT
+                        | protocol::OP_SOCKET_RECORD_ENDPOINT
                 ) => {
                 opened_socket
             }

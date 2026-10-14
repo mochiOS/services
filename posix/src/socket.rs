@@ -1,4 +1,4 @@
-//! Userspace UNIX stream descriptions. IDs are private Provider object IDs,
+//! Userspace UNIX socket descriptions. IDs are private Provider object IDs,
 //! never client FDs or lookup authority. A native adapter must authenticate each
 //! operation through its attached Handle and release only its final reference.
 
@@ -67,6 +67,7 @@ struct Endpoint {
     peer: Option<u64>,
     credentials: (u32, u32),
     incoming: VecDeque<u8>,
+    records: Option<crate::socket_record::RecordQueue>,
     receive_capacity: usize,
     send_capacity: usize,
     receive_timeout: u64,
@@ -142,7 +143,8 @@ impl Streams {
         if request.options & !NONBLOCKING != 0 {
             return Err(-22);
         }
-        if request.domain != Domain::Unix || request.kind != Kind::Stream {
+        if request.domain != Domain::Unix || !matches!(request.kind, Kind::Stream | Kind::Datagram)
+        {
             return Err(-95);
         }
         if request.protocol != 0 {
@@ -163,6 +165,7 @@ impl Streams {
             peer: None,
             credentials,
             incoming: VecDeque::new(),
+            records: (request.kind == Kind::Datagram).then(crate::socket_record::RecordQueue::new),
             receive_capacity: RECEIVE_CAPACITY,
             send_capacity: SEND_CAPACITY,
             receive_timeout: 0,
@@ -200,6 +203,8 @@ impl Streams {
                 peer: Some(peer),
                 credentials,
                 incoming: VecDeque::new(),
+                records: (request.kind == Kind::Datagram)
+                    .then(crate::socket_record::RecordQueue::new),
                 receive_capacity: RECEIVE_CAPACITY,
                 send_capacity: SEND_CAPACITY,
                 receive_timeout: 0,
@@ -286,6 +291,9 @@ impl Streams {
             return Err(-22);
         }
         entry.receive_capacity = (requested as usize).clamp(MIN_RECEIVE_CAPACITY, RECEIVE_CAPACITY);
+        if let Some(records) = &mut entry.records {
+            records.set_capacity(requested)?;
+        }
         Ok(())
     }
     pub fn set_options(&mut self, id: u64, options: u32) -> Result<(), i32> {
@@ -342,6 +350,9 @@ impl Streams {
 
     pub fn write(&mut self, id: u64, input: &[u8]) -> Result<usize, i32> {
         let entry = self.endpoint(id)?;
+        if entry.records.is_some() {
+            return Err(-95);
+        }
         if input.is_empty() {
             return Ok(0);
         }
@@ -404,6 +415,9 @@ impl Streams {
     ) -> Result<usize, i32> {
         let ready = self.readiness(id)?;
         let entry = self.endpoint_mut(id)?;
+        if entry.records.is_some() {
+            return Err(-95);
+        }
         if output.is_empty() || entry.read_shutdown {
             return Ok(0);
         }
@@ -441,6 +455,9 @@ impl Streams {
         if matches!(how, Shutdown::Read | Shutdown::Both) {
             entry.read_shutdown = true;
             entry.incoming.clear();
+            if let Some(records) = &mut entry.records {
+                records.clear();
+            }
         }
         if matches!(how, Shutdown::Write | Shutdown::Both) {
             entry.write_shutdown = true;
@@ -452,6 +469,9 @@ impl Streams {
     /// transition. Allocate pending capacity before publishing or changing it.
     pub fn listen(&mut self, id: u64, backlog: u32) -> Result<(), i32> {
         let entry = self.endpoint_mut(id)?;
+        if entry.records.is_some() {
+            return Err(-95);
+        }
         if entry.peer.is_some() {
             return Err(-22);
         }
@@ -473,6 +493,9 @@ impl Streams {
     /// Reject invalid state before a potentially costly filesystem lookup.
     pub fn check_connect(&self, client: u64) -> Result<(), i32> {
         let source = self.endpoint(client)?;
+        if source.records.is_some() {
+            return Err(-95);
+        }
         if source.peer.is_some() {
             return Err(-106);
         }
@@ -483,10 +506,51 @@ impl Streams {
     }
 
     pub fn kind(&self, id: u64) -> Result<Kind, i32> {
-        self.endpoint(id)?;
-        // validate_create admits only UNIX stream descriptions, including
-        // those produced by pair/connect/accept; no other kind is synthesized.
-        Ok(Kind::Stream)
+        Ok(if self.endpoint(id)?.records.is_some() {
+            Kind::Datagram
+        } else {
+            Kind::Stream
+        })
+    }
+
+    /// Direct record transport only; the native adapter has authenticated and
+    /// identified the explicitly attached socket before supplying this ID.
+    pub fn transfer_record(
+        &mut self,
+        id: u64,
+        request: mochios_posix_protocol::socket_record::Request,
+        buffer: &mut impl crate::socket_record_io::RecordBuffer,
+        response: &mut [u8],
+    ) -> Result<usize, i32> {
+        use mochios_posix_protocol::socket_record::Operation;
+        let entry = self.endpoint(id)?;
+        if entry.records.is_none() {
+            return Err(-95);
+        }
+        let send_capacity = entry.send_capacity;
+        let source = crate::socket_record::SourceAddress::new(self.address(id)?)?;
+        let destination = if request.operation == Operation::Send {
+            if entry.write_shutdown {
+                return Err(-32);
+            }
+            let peer = entry.peer.ok_or(-89)?;
+            let target = self.endpoint(peer).map_err(|_| -111)?;
+            if target.read_shutdown {
+                return Err(-111);
+            }
+            peer
+        } else {
+            if entry.read_shutdown {
+                return Err(-108);
+            }
+            id
+        };
+        let queue = self
+            .endpoint_mut(destination)?
+            .records
+            .as_mut()
+            .ok_or(-91)?;
+        crate::socket_record_io::transfer(queue, request, source, send_capacity, buffer, response)
     }
 
     /// Description IDs are private; the adapter resolves the listener through
@@ -558,6 +622,7 @@ impl Streams {
             peer: Some(client),
             credentials,
             incoming: VecDeque::new(),
+            records: None,
             receive_capacity,
             send_capacity,
             receive_timeout,
@@ -686,6 +751,23 @@ impl Streams {
 
     pub fn readiness(&self, id: u64) -> Result<Readiness, i32> {
         let entry = self.endpoint(id)?;
+        if let Some(records) = &entry.records {
+            let peer = entry.peer.and_then(|peer| self.endpoint(peer).ok());
+            let write_error = entry.peer.is_some() && peer.is_none_or(|peer| peer.read_shutdown);
+            return Ok(Readiness {
+                readable: records.is_readable() || entry.read_shutdown,
+                writable: !entry.write_shutdown
+                    && !write_error
+                    && peer.is_none_or(|peer| {
+                        peer.records.as_ref().is_some_and(|queue| {
+                            queue.can_push(0, entry.send_capacity).unwrap_or(false)
+                        })
+                    }),
+                read_closed: entry.read_shutdown,
+                write_closed: entry.write_shutdown || write_error,
+                write_error,
+            });
+        }
         if let Some(listener) = &entry.listener {
             return Ok(Readiness {
                 readable: !listener.pending.is_empty(),

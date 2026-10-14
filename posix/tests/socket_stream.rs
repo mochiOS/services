@@ -377,13 +377,6 @@ fn invalid_creation_and_capacity_limits_do_not_publish_partial_pairs() {
         ),
         (
             Create {
-                kind: Kind::Datagram,
-                ..request
-            },
-            -95,
-        ),
-        (
-            Create {
                 kind: Kind::SequencedPacket,
                 ..request
             },

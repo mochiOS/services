@@ -151,7 +151,13 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
         let sender = message >> 32;
         let bytes = &request[..(message as u32 as usize).min(request.len())];
         let mut retained_receive_source = false;
-        if bytes.starts_with(super::socket_receive_wait_native::MAGIC) {
+        if bytes.starts_with(&mochios_posix_protocol::socket_record::REQUEST_MAGIC) {
+            if let Some(ids) = super::socket_record_native::dispatch(
+                &mut streams, sender, bytes, &attachments,
+            ) {
+                signal(&streams, &jobs, ids);
+            }
+        } else if bytes.starts_with(super::socket_receive_wait_native::MAGIC) {
             retained_receive_source = super::socket_receive_wait_native::dispatch(
                 endpoint,
                 service_process,
