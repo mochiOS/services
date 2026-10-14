@@ -112,7 +112,7 @@ fn server_retains_waits_and_services_them_before_async_notifications() {
                 .unwrap()
     );
     let initial = source
-        .split("if header.opcode == protocol::OP_SIGNAL_THREAD_WAIT_INFO")
+        .split("protocol::OP_SIGNAL_THREAD_WAIT_INFO | protocol::OP_SIGNAL_THREAD_TIMED_WAIT")
         .nth(1)
         .unwrap()
         .split("protocol::OP_WAIT_CHILD | protocol::OP_WAIT_CHILD_GUARDED")
@@ -123,7 +123,7 @@ fn server_retains_waits_and_services_them_before_async_notifications() {
     assert!(initial.contains("pending_signal_waits.push(PendingSignalWait"));
     assert!(
         initial.find("pending_signal_waits.len() >= 1024").unwrap()
-            < initial.find("service.try_wait_signal").unwrap()
+            < initial.find("service.poll_wait_signal_info").unwrap()
     );
     let pending = source
         .split("fn complete_pending_signal_waits(")
@@ -132,7 +132,7 @@ fn server_retains_waits_and_services_them_before_async_notifications() {
         .split("fn signal_wait_response(")
         .next()
         .unwrap();
-    assert!(pending.contains("if result == Err(protocol::STATUS_EAGAIN)"));
+    assert!(pending.contains("Ok(None) =>"));
     assert!(pending.contains("platform::ipc::reply(wait.sender"));
     assert!(!pending.contains("thread::yield"));
 }

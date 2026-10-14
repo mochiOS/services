@@ -210,6 +210,10 @@ fn main() {
                 thread_sweep_deadline_ms.saturating_mul(1_000_000)
             }
         };
+        let deadline = pending_signal_waits
+            .iter()
+            .filter_map(|wait: &PendingSignalWait| wait.deadline)
+            .fold(deadline, u64::min);
         let lifecycle_handles = service.child_lifecycle_handles();
         drop(service);
         match wait_for_request_or_child(endpoint_handle, lifecycle_handles, deadline) {
@@ -718,18 +722,27 @@ fn main() {
                 })
             }
             (Some(peer), Some((header, payload)), true)
-                if header.opcode == protocol::OP_SIGNAL_THREAD_WAIT_INFO
+                if matches!(
+                    header.opcode,
+                    protocol::OP_SIGNAL_THREAD_WAIT_INFO | protocol::OP_SIGNAL_THREAD_TIMED_WAIT
+                )
                     && header.flags == 0
                     && attachments.is_empty() =>
             {
-                let parsed = protocol::decode_signal_wait_request(payload)
-                    .map_err(|_| posix_service::STATUS_EINVAL)
-                    .and_then(|(mask, epoch)| {
-                        let identity = platform::ipc::endpoint_execution_identity(sender)
-                            .map_err(|_| protocol::STATUS_EPERM)?;
-                        Ok((identity, mask, epoch))
-                    });
-                let result = parsed.and_then(|(identity, mask, epoch)| {
+                let parsed = if header.opcode == protocol::OP_SIGNAL_THREAD_TIMED_WAIT {
+                    protocol::signal_wait::decode_timed_request(payload)
+                        .map(|(mask, epoch, deadline)| (mask, epoch, Some(deadline)))
+                } else {
+                    protocol::decode_signal_wait_request(payload)
+                        .map(|(mask, epoch)| (mask, epoch, None))
+                }
+                .map_err(|_| posix_service::STATUS_EINVAL)
+                .and_then(|(mask, epoch, deadline)| {
+                    let identity = platform::ipc::endpoint_execution_identity(sender)
+                        .map_err(|_| protocol::STATUS_EPERM)?;
+                    Ok((identity, mask, epoch, deadline))
+                });
+                let result = parsed.and_then(|(identity, mask, epoch, deadline)| {
                     // Bound deferred requests and disallow duplicates before
                     // consuming any signal, including malicious async sends.
                     if pending_signal_waits.len() >= 1024
@@ -739,8 +752,13 @@ fn main() {
                     {
                         return Err(protocol::STATUS_EAGAIN);
                     }
-                    match service.try_wait_signal_info(peer, identity, mask, epoch) {
-                        Err(protocol::STATUS_EAGAIN) => {
+                    let now = if deadline.is_some() {
+                        platform::time::monotonic_nanoseconds().map_err(|_| protocol::STATUS_EIO)?
+                    } else {
+                        0
+                    };
+                    match service.poll_wait_signal_info(peer, identity, mask, epoch, deadline, now) {
+                        Ok(None) => {
                             pending_signal_waits.push(PendingSignalWait {
                                 sender,
                                 peer,
@@ -748,10 +766,11 @@ fn main() {
                                 request_id: header.request_id,
                                 mask,
                                 epoch,
+                                deadline,
                             });
                             Ok(None)
                         }
-                        result => result.map(Some),
+                        result => result,
                     }
                 });
                 match result {
@@ -1448,6 +1467,7 @@ struct PendingSignalWait {
     request_id: u64,
     mask: u64,
     epoch: u64,
+    deadline: Option<u64>,
 }
 
 #[cfg(target_os = "mochios")]
@@ -1461,11 +1481,23 @@ fn complete_pending_signal_waits(
     let mut index = 0;
     while index < pending.len() {
         let wait = pending[index];
-        let result = service.try_wait_signal_info(wait.peer, wait.identity, wait.mask, wait.epoch);
-        if result == Err(protocol::STATUS_EAGAIN) {
-            index += 1;
-            continue;
+        let result = if wait.deadline.is_some() {
+            platform::time::monotonic_nanoseconds().map_err(|_| protocol::STATUS_EIO)
+        } else {
+            Ok(0)
         }
+        .and_then(|now| {
+            service.poll_wait_signal_info(
+                wait.peer, wait.identity, wait.mask, wait.epoch, wait.deadline, now,
+            )
+        });
+        let result = match result {
+            Ok(None) => {
+                index += 1;
+                continue;
+            }
+            result => result.map(|accepted| accepted.unwrap()),
+        };
         let response = signal_wait_response(wait.request_id, result);
         let mut bytes = vec![0; protocol::HEADER_LEN + protocol::signal_wait::LEN];
         if let Ok(length) = protocol::encode(response.header, &response.payload, &mut bytes) {

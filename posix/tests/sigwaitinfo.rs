@@ -138,3 +138,63 @@ fn retired_number_only_opcode_has_no_compatibility_path() {
     );
     assert_eq!(response.header.status, protocol::STATUS_ENOSYS);
 }
+
+#[test]
+fn timed_request_has_exact_length_no_identity_and_no_infinite_sentinel() {
+    use protocol::signal_wait::{TIMED_REQUEST_LEN, decode_timed_request, encode_timed_request};
+    let mut bytes = [0; TIMED_REQUEST_LEN];
+    for deadline in [0, 100, u64::MAX - 1] {
+        encode_timed_request(1 << 63, 27, deadline, &mut bytes).unwrap();
+        assert_eq!(decode_timed_request(&bytes), Ok((1 << 63, 27, deadline)));
+    }
+    assert!(encode_timed_request(0, 0, u64::MAX, &mut bytes).is_err());
+    bytes[16..].copy_from_slice(&u64::MAX.to_le_bytes());
+    assert!(decode_timed_request(&bytes).is_err());
+    assert!(decode_timed_request(&bytes[..23]).is_err());
+    assert!(decode_timed_request(&[0; 25]).is_err());
+    assert!(encode_timed_request(0, 0, 0, &mut bytes[..23]).is_err());
+}
+
+struct TimedReply(i32);
+impl Transport for TimedReply {
+    type Error = ();
+    fn call(&self, request: &[u8], response: &mut [u8]) -> Result<usize, ()> {
+        let (header, payload) = protocol::decode(request).unwrap();
+        assert_eq!(header.opcode, protocol::OP_SIGNAL_THREAD_TIMED_WAIT);
+        assert_eq!(
+            protocol::signal_wait::decode_timed_request(payload),
+            Ok((1 << (protocol::SIGNAL_CHLD - 1), 7, 12345))
+        );
+        let mut bytes = [0; LEN];
+        encode(accepted(), &mut bytes).unwrap();
+        let bytes = if self.0 == 0 { &bytes[..] } else { &[] };
+        protocol::encode(
+            protocol::Header {
+                opcode: protocol::OP_STATUS,
+                request_id: header.request_id,
+                status: self.0,
+                payload_len: bytes.len() as u32,
+                ..Default::default()
+            },
+            bytes,
+            response,
+        )
+        .map_err(|_| ())
+    }
+}
+
+#[test]
+fn timed_client_preserves_provenance_and_reports_timeout_or_interruption() {
+    use mochios_posix_client::ClientError;
+    let mask = 1 << (protocol::SIGNAL_CHLD - 1);
+    assert_eq!(
+        Client::new(TimedReply(0)).wait_thread_signal_info_until(mask, 7, 12345),
+        Ok(accepted())
+    );
+    for status in [protocol::STATUS_EAGAIN, protocol::STATUS_EINTR] {
+        assert_eq!(
+            Client::new(TimedReply(status)).wait_thread_signal_info_until(mask, 7, 12345),
+            Err(ClientError::Remote(status))
+        );
+    }
+}

@@ -309,3 +309,65 @@ fn stale_wait_preserves_provenance_for_a_fresh_atomic_acceptance() {
     assert_eq!(accepted.origin.process_id, 101);
     assert_eq!(accepted.origin.real_uid, 501);
 }
+
+#[test]
+fn timed_wait_defers_before_expiry_and_returns_eagain_at_the_deadline() {
+    let mut service = fixture(bit(USR1));
+    for now in [0, 99] {
+        assert_eq!(
+            service.poll_wait_signal_info(peer(101), identity(FIRST), bit(USR1), 0, Some(100), now),
+            Ok(None)
+        );
+    }
+    for now in [100, 101, u64::MAX] {
+        assert_eq!(
+            service.poll_wait_signal_info(peer(101), identity(FIRST), bit(USR1), 0, Some(100), now),
+            Err(protocol::STATUS_EAGAIN)
+        );
+    }
+    assert_eq!(
+        service.poll_wait_signal_info(peer(101), identity(FIRST), bit(USR1), 0, None, u64::MAX),
+        Ok(None)
+    );
+}
+
+#[test]
+fn available_signal_wins_expiry_observation_and_later_signal_is_not_lost() {
+    let mut service = fixture(bit(USR1));
+    assert_eq!(
+        service.poll_wait_signal_info(peer(101), identity(FIRST), bit(USR1), 0, Some(0), 10),
+        Err(protocol::STATUS_EAGAIN)
+    );
+    raise(&mut service, FIRST, USR1);
+    let accepted = service
+        .poll_wait_signal_info(peer(101), identity(FIRST), bit(USR1), 0, Some(0), 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(accepted.signal, USR1);
+    assert_eq!(accepted.origin.process_id, 101);
+    assert_eq!(
+        service.poll_wait_signal_info(peer(101), identity(FIRST), bit(USR1), 0, Some(0), 10),
+        Err(protocol::STATUS_EAGAIN)
+    );
+}
+
+#[test]
+fn timed_wait_authentication_and_interruption_precede_expiry() {
+    let mut service = fixture(bit(USR1));
+    raise(&mut service, FIRST, USR1);
+    assert_eq!(
+        service.poll_wait_signal_info(peer(102), identity(FIRST), bit(USR1), 0, Some(0), 1),
+        Err(protocol::STATUS_EPERM)
+    );
+    assert_eq!(
+        service.poll_wait_signal_info(peer(101), identity(FIRST), bit(USR1), 1, Some(0), 1),
+        Err(protocol::STATUS_EINTR)
+    );
+    assert_eq!(
+        service
+            .try_wait_signal_info(peer(101), identity(FIRST), bit(USR1), 0)
+            .unwrap()
+            .signal,
+        USR1
+    );
+}

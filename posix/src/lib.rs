@@ -2899,6 +2899,25 @@ impl<H: Copy> PosixService<H> {
             .map(|accepted| accepted.signal)
     }
 
+    /// `Ok(None)` keeps a deferred request. A pending signal is accepted
+    /// before testing expiry, so timeout observation cannot discard it.
+    pub fn poll_wait_signal_info(
+        &mut self,
+        peer: PeerIdentity,
+        sender: mnu_abi::ExecutionIdentity,
+        requested: u64,
+        expected_epoch: u64,
+        deadline: Option<u64>,
+        now: u64,
+    ) -> Result<Option<protocol::signal_wait::Accepted>, i32> {
+        match self.try_wait_signal_info(peer, sender, requested, expected_epoch) {
+            Err(protocol::STATUS_EAGAIN) if deadline.is_none_or(|deadline| now < deadline) => {
+                Ok(None)
+            }
+            result => result.map(Some),
+        }
+    }
+
     pub fn try_wait_signal_info(
         &mut self,
         peer: PeerIdentity,
