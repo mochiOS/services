@@ -11,6 +11,165 @@ fn test_entry(handle: u64) -> Entry<u64> {
 }
 
 #[test]
+fn ancillary_group_reserves_lowest_available_slots_up_to_limit() {
+    let mut table = FdTable::new();
+    let mut handles = FakeHandles::default();
+    table.install_at(1, test_entry(10), &mut handles).unwrap();
+    table.install_at(7, test_entry(70), &mut handles).unwrap();
+    let pending_open = table.reserve_from(2, 3).unwrap();
+    let group = table.reserve_up_to(0, 5, 253).unwrap();
+    assert_eq!(group.len(), 3);
+    assert!(!group.is_empty());
+    for fd in [0, 3, 4] {
+        assert_eq!(table.get(fd), None);
+        assert_eq!(
+            table.install_at(fd, test_entry(90), &mut handles),
+            Err(FdError::BusyDescriptor)
+        );
+    }
+    assert!(table.reserve_up_to(0, 5, 253).unwrap().is_empty());
+    let mut output = [-1; 4];
+    table
+        .commit_group(&group, &[test_entry(20), test_entry(30)], &mut output)
+        .unwrap();
+    assert_eq!(output, [0, 3, -1, -1]);
+    assert_eq!(table.get(0), Some(test_entry(20)));
+    assert_eq!(table.get(3), Some(test_entry(30)));
+    assert_eq!(table.install_from(0, 5, test_entry(40)), Ok(4));
+    assert_eq!(table.get(7), Some(test_entry(70)));
+    assert_eq!(
+        table.commit_reservation(&pending_open, test_entry(50)),
+        Ok(2)
+    );
+    assert_eq!(table.cancel_group(&group), 0);
+    assert!(handles.closed.is_empty());
+}
+
+#[test]
+fn ancillary_group_publishes_all_253_entries_without_changing_rights_or_cloexec() {
+    let mut table = FdTable::new();
+    for handle in 0..3 {
+        table.install(test_entry(handle)).unwrap();
+    }
+    let group = table.reserve_up_to(0, 256, 253).unwrap();
+    let entries: Vec<_> = (0..253)
+        .map(|index| Entry {
+            handle: 1000 + index,
+            rights: 1 << (index % 8),
+            descriptor_flags: if index % 2 == 0 { FD_CLOEXEC } else { 0 },
+        })
+        .collect();
+    let mut output = [-1; 253];
+    assert_eq!(group.len(), entries.len());
+    table.commit_group(&group, &entries, &mut output).unwrap();
+    for (index, entry) in entries.iter().enumerate() {
+        assert_eq!(output[index], 3 + index as i32);
+        assert_eq!(table.get(output[index]), Some(*entry));
+    }
+    assert_eq!(
+        table.commit_group(&group, &entries, &mut output),
+        Err(FdError::InvalidDescriptor)
+    );
+    assert_eq!(table.cancel_group(&group), 0);
+}
+
+#[test]
+fn ancillary_group_bad_lengths_leave_every_reservation_and_output_unchanged() {
+    let mut table = FdTable::new();
+    let group = table.reserve_up_to(0, 3, 2).unwrap();
+    let mut output = [-1; 3];
+    assert_eq!(
+        table.commit_group(&group, &[test_entry(1); 3], &mut output),
+        Err(FdError::InvalidDescriptor)
+    );
+    assert_eq!(output, [-1; 3]);
+    assert_eq!(
+        table.commit_group(&group, &[test_entry(1); 2], &mut output[..1]),
+        Err(FdError::InvalidDescriptor)
+    );
+    assert_eq!(output, [-1; 3]);
+    assert_eq!(table.install(test_entry(90)), Ok(2));
+    assert_eq!(table.get(0), None);
+    assert_eq!(table.get(1), None);
+    assert_eq!(table.cancel_group(&group), 2);
+    assert_eq!(table.install(test_entry(10)), Ok(0));
+    assert_eq!(table.install(test_entry(20)), Ok(1));
+}
+
+#[test]
+fn ancillary_stale_group_cannot_publish_or_release_another_receives_slots() {
+    let mut table = FdTable::<u64>::new();
+    let stale = table.reserve_up_to(0, 3, 3).unwrap();
+    table.clear_reservations();
+    let next = table.reserve_up_to(1, 3, 2).unwrap();
+    let mut output = [-1; 3];
+    assert_eq!(
+        table.commit_group(&stale, &[test_entry(10); 3], &mut output),
+        Err(FdError::InvalidDescriptor)
+    );
+    assert_eq!(output, [-1; 3]);
+    assert_eq!(table.get(0), None); // Even the first valid-looking slot is untouched.
+    assert_eq!(table.cancel_group(&stale), 0);
+    table
+        .commit_group(&next, &[test_entry(20); 2], &mut output)
+        .unwrap();
+    assert_eq!(output, [1, 2, -1]);
+}
+
+#[test]
+fn ancillary_group_is_not_inherited_and_parent_reservations_stay_exclusive() {
+    let parent = std::sync::Mutex::new(FdTable::new());
+    let group = parent.lock().unwrap().reserve_up_to(0, 4, 3).unwrap();
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let mut table = parent.lock().unwrap();
+                assert_eq!(table.install(test_entry(40)), Ok(3));
+                let mut child = table.clone();
+                assert_eq!(child.cancel_group(&group), 0);
+                assert_eq!(child.install(test_entry(50)), Ok(0));
+                let mut output = [-1; 3];
+                assert_eq!(
+                    child.commit_group(&group, &[test_entry(60); 3], &mut output),
+                    Err(FdError::InvalidDescriptor)
+                );
+                assert_eq!(output, [-1; 3]);
+            })
+            .join()
+            .unwrap();
+    });
+    let mut table = parent.lock().unwrap();
+    let mut output = [-1; 3];
+    table
+        .commit_group(&group, &[test_entry(10); 3], &mut output)
+        .unwrap();
+    assert_eq!(output, [0, 1, 2]);
+    assert_eq!(table.get(3), Some(test_entry(40)));
+}
+
+#[test]
+fn ancillary_zero_capacity_and_invalid_ranges_do_not_reserve_slots() {
+    let mut table = FdTable::<u64>::new();
+    for (minimum, limit, maximum) in [(0, 0, 253), (256, 256, 253), (0, 256, 0)] {
+        let group = table.reserve_up_to(minimum, limit, maximum).unwrap();
+        assert!(group.is_empty());
+        table.commit_group(&group, &[], &mut []).unwrap();
+        assert_eq!(table.cancel_group(&group), 0);
+    }
+    for (minimum, limit, maximum) in [(-1, 2, 1), (2, 1, 1), (0, 257, 1), (0, -1, 1), (0, 2, 257)] {
+        assert!(matches!(
+            table.reserve_up_to(minimum, limit, maximum),
+            Err(FdError::InvalidDescriptor)
+        ));
+    }
+    let group = table.reserve_up_to(0, 256, 256).unwrap();
+    assert_eq!(group.len(), 256);
+    // A receive without ancillary data releases all previously reserved slots.
+    table.commit_group(&group, &[], &mut []).unwrap();
+    assert_eq!(table.reserve_up_to(0, 256, 256).unwrap().len(), 256);
+}
+
+#[test]
 fn pending_open_is_not_visible_and_cannot_be_stolen() {
     let mut table = FdTable::new();
     let source = table.install(test_entry(10)).unwrap();
