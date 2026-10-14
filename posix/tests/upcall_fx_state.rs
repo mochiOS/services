@@ -21,7 +21,7 @@ pub fn probe() {
     let mut state = ThreadUpcallState::new();
     let user = UserUpcallContext {
         user_rsp:99,r15:15,r14:14,r13:13,r12:12,rbx:3,rbp:4,user_rflags:0x202,
-        user_rip:77,r9:9,r8:8,r10:10,rdx:2,rsi:5,rdi:6,rax:1
+        user_rip:77,r9:9,r8:8,r10:10,rdx:2,rsi:5,rdi:6,rax:1,rcx:88,r11:11
     };
     let pattern = [0xa7u8;16]; let changed = [0x5bu8;16];
     let initial=0x3f80u32; let clobbered=0x5f80u32;
