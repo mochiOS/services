@@ -51,6 +51,7 @@ struct life_response {
 static _Atomic uint32_t life_endpoint, life_object;
 static _Atomic int life_release, life_error;
 static int life_mode;
+static uint32_t life_reply_pipe[2];
 
 static void *life_provider(void *unused) {
   (void)unused;
@@ -83,7 +84,7 @@ static void *life_provider(void *unused) {
         break;
       }
       uint64_t sender = (uint64_t)received >> 32;
-      if (life_mode >= 3)
+      if (life_mode == 3 || life_mode == 4)
         break; /* ordinary IPC call, deliberately no reply */
       struct life_request header;
       if ((uint32_t)received < sizeof(header)) {
@@ -99,7 +100,7 @@ static void *life_provider(void *unused) {
                                        .object = header.object};
       if (header.opcode == 9)
         response.status = -95; /* no stable memory backing */
-      else if (header.opcode == 1 && life_mode == 2) {
+      else if (header.opcode == 1 && (life_mode == 2 || life_mode == 5)) {
         response.value = 2;
         response.data_length = 2;
         memcpy(response.bytes, "ok", 2);
@@ -109,8 +110,23 @@ static void *life_provider(void *unused) {
         atomic_store(&life_error, 5);
         break;
       }
-      if ((int64_t)life_native(589, sender, (uintptr_t)&response,
-                               40 + response.data_length, 0, 0, 0) < 0) {
+      int64_t sent;
+      if (life_mode == 5 && header.opcode == 9) {
+        // A native call without a Handle output must discard this unsolicited
+        // reference, not install it or leak it while recycling its message.
+        struct life_handles outgoing = {.count = 1};
+        outgoing.entries[0].handle = life_reply_pipe[1];
+        outgoing.entries[0].rights =
+            2; /* WRITE, no control/transfer authority */
+        sent = (int64_t)life_native(633, sender, (uintptr_t)&response, 40,
+                                    (uintptr_t)&outgoing, 0, 0);
+        if (life_native(626, life_reply_pipe[1], 0, 0, 0, 0, 0) != 0)
+          atomic_store(&life_error, 7);
+      } else {
+        sent = (int64_t)life_native(589, sender, (uintptr_t)&response,
+                                    40 + response.data_length, 0, 0, 0);
+      }
+      if (sent < 0) {
         atomic_store(&life_error, 6);
         break;
       }
@@ -169,12 +185,14 @@ int main(int argc, char **argv) {
   puts("provider-lifetime: parked and already-dead readiness waits fail closed "
        "PASS");
 
-  for (int mode = 1; mode <= 4; mode++) {
+  for (int mode = 1; mode <= 5; mode++) {
+    if (mode == 5)
+      CHECK(life_native(649, (uintptr_t)life_reply_pipe, 0, 0, 0, 0, 0) == 0);
     fprintf(stderr, "provider-lifetime: testing in-flight mode=%d\n", mode);
     CHECK(life_start(mode, &provider) == 0);
     fprintf(stderr, "provider-lifetime: invoking mode=%d\n", mode);
     int64_t result;
-    if (mode <= 2)
+    if (mode <= 2 || mode == 5)
       result = (int64_t)life_native(634, atomic_load(&life_object),
                                     (uintptr_t)output, 2, 0, 0, 0);
     else if (mode == 3)
@@ -187,10 +205,24 @@ int main(int argc, char **argv) {
                                     (uintptr_t) "req", 3, (uintptr_t)output, 2,
                                     (uintptr_t)&handles);
     }
-    CHECK(mode == 2 ? result == 2 && !memcmp(output, "ok", 2) : result == -3);
+    CHECK(mode == 2 || mode == 5 ? result == 2 && !memcmp(output, "ok", 2)
+                                 : result == -3);
     fprintf(stderr, "provider-lifetime: in-flight mode=%d result=%lld PASS\n",
             mode, (long long)result);
     CHECK(life_close(provider) == 0);
+    if (mode == 5) {
+      struct life_wait eof = {.handle = life_reply_pipe[0], .interests = 2};
+      int64_t ready = (int64_t)life_native(647, (uintptr_t)&eof, 1, 0, 0, 0, 0);
+      fprintf(stderr,
+              "provider-lifetime: discarded attachment EOF result=%lld "
+              "observed=%llu\n",
+              (long long)ready, (unsigned long long)eof.observed);
+      CHECK(ready == 0);
+      CHECK(eof.observed == 2);
+      CHECK(life_native(626, life_reply_pipe[0], 0, 0, 0, 0, 0) == 0);
+      puts("provider-lifetime: discarded attachment releases final native "
+           "stream reference PASS");
+    }
   }
   puts("provider-lifetime: native read and plain/attached IPC death wakeups "
        "PASS");
