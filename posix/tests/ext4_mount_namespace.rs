@@ -1213,6 +1213,122 @@ fn root_credentials() -> protocol::Credentials {
         .0
 }
 
+#[test]
+fn socket_inode_creation_is_exclusive_scoped_and_not_a_regular_file_placeholder() {
+    let fixture = Fixture::new();
+    let mut service = FilesystemService::new(fixture.volume("socket-data"));
+    service
+        .mount_volume(b"/mount", fixture.volume("socket-system"))
+        .unwrap();
+    let mounted = open(
+        &mut service,
+        b"/mount",
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+        PathAnchors::default(),
+    );
+    let anchors = PathAnchors {
+        root_open_id: None,
+        base_open_id: Some(mounted.open_id),
+    };
+    let request = protocol::Header {
+        flags: protocol::SOCKET_AT_BASE_ATTACHED,
+        mode: 0o100640,
+        ..Default::default()
+    };
+    let response = service
+        .create_socket_at(request, b"socket", anchors, root_credentials())
+        .unwrap();
+    let status = protocol::decode_node_status(&response.payload).unwrap();
+    assert_eq!(status.kind, protocol::NODE_TYPE_SOCKET);
+    // Filesystem wire mode carries permissions; the kind retains inode type.
+    assert_eq!(status.mode, 0o640);
+    assert_eq!(
+        (status.uid, status.gid, status.link_count, status.size),
+        (0, 0, 1, 0)
+    );
+    for path in [b"socket".as_slice(), b"file", b"mount", b"absolute", b"relative"] {
+        assert!(matches!(
+            service.create_socket_at(request, path, anchors, root_credentials()),
+            Err(17)
+        ));
+    }
+    let found = service
+        .stat_at(
+            protocol::Header::default(),
+            b"/mount/socket",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    assert_eq!(protocol::decode_node_status(&found.payload).unwrap(), status);
+    assert!(matches!(
+        service.stat_at(
+            protocol::Header::default(),
+            b"/socket",
+            PathAnchors::default(),
+            root_credentials(),
+        ),
+        Err(2)
+    ));
+    for flags in [request.flags | 4, 0] {
+        assert!(matches!(
+            service.create_socket_at(
+                protocol::Header { flags, ..request },
+                b"invalid",
+                anchors,
+                root_credentials(),
+            ),
+            Err(22)
+        ));
+    }
+    let mut bytes = [0; protocol::CREDENTIALS_MAX_LEN];
+    let length = protocol::encode_credentials_payload(501, 20, &[], &[], &mut bytes).unwrap();
+    let unprivileged = protocol::decode_credentials_payload(&bytes[..length])
+        .unwrap()
+        .0;
+    assert!(matches!(
+        service.create_socket_at(request, b"denied", anchors, unprivileged),
+        Err(13)
+    ));
+    let confined = PathAnchors {
+        root_open_id: Some(mounted.open_id),
+        base_open_id: Some(mounted.open_id),
+    };
+    service
+        .create_socket_at(
+            protocol::Header {
+                flags: protocol::SOCKET_AT_ROOT_ATTACHED | protocol::SOCKET_AT_BASE_ATTACHED,
+                ..request
+            },
+            b"../confined-socket",
+            confined,
+            root_credentials(),
+        )
+        .unwrap();
+    assert!(matches!(
+        service.stat_at(
+            protocol::Header::default(),
+            b"/confined-socket",
+            PathAnchors::default(),
+            root_credentials(),
+        ),
+        Err(2)
+    ));
+    let confined_status = service
+        .stat_at(
+            protocol::Header::default(),
+            b"/mount/confined-socket",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    assert_eq!(
+        protocol::decode_node_status(&confined_status.payload).unwrap().kind,
+        protocol::NODE_TYPE_SOCKET
+    );
+    service.provider_close(mounted.open_id).unwrap();
+}
+
 fn open(
     service: &mut FilesystemService,
     path: &[u8],

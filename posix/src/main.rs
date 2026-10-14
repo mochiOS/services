@@ -2822,6 +2822,7 @@ fn filesystem_status_to_posix(
         filesystem::NODE_TYPE_REGULAR => 0o100000,
         filesystem::NODE_TYPE_DIRECTORY => 0o040000,
         filesystem::NODE_TYPE_SYMLINK => 0o120000,
+        filesystem::NODE_TYPE_SOCKET => 0o140000,
         filesystem::NODE_TYPE_SPECIAL => 0o020000,
         _ => return Err(-5),
     };

@@ -461,6 +461,73 @@ impl FilesystemService {
         Ok(inode)
     }
 
+    /// Serialized path traversal and exclusive socket-inode creation. Callers
+    /// must supply credentials authenticated by their trusted policy boundary;
+    /// wire self-reported credentials are not sufficient authority.
+    pub fn create_socket_at(
+        &mut self,
+        request: protocol::Header,
+        payload: &[u8],
+        anchors: PathAnchors,
+        credentials: protocol::Credentials,
+    ) -> Result<Response, i32> {
+        if request.flags & !protocol::SOCKET_AT_FLAGS_ALL != 0
+            || (request.flags & protocol::SOCKET_AT_ROOT_ATTACHED != 0)
+                != anchors.root_open_id.is_some()
+            || (request.flags & protocol::SOCKET_AT_BASE_ATTACHED != 0)
+                != anchors.base_open_id.is_some()
+        {
+            return Err(EINVAL);
+        }
+        let uid = credentials.effective_uid;
+        let gid = credentials.effective_gid;
+        let groups = credentials.supplementary_groups();
+        let (resolution, filesystem, volume) = self.resolve_open_path(
+            payload,
+            anchors,
+            FollowSymlinks::ExcludeFinalComponent,
+            uid,
+            gid,
+            groups,
+        )?;
+        let (parent, name) = match resolution {
+            Resolution::Found { .. } => return Err(EEXIST),
+            Resolution::Missing { parent, name } => (parent, name),
+        };
+        let metadata = parent.metadata();
+        if !permission_allows(
+            metadata.mode(),
+            protocol::NODE_TYPE_DIRECTORY,
+            metadata.uid(),
+            metadata.gid(),
+            uid,
+            gid,
+            groups,
+            protocol::ACCESS_AT_WRITE | protocol::ACCESS_AT_EXECUTE,
+        ) {
+            return Err(EACCES);
+        }
+        let name = DirEntryName::try_from(name.as_slice()).map_err(|_| EINVAL)?;
+        let mut parent = Dir::open_inode(&filesystem, parent).map_err(errno)?;
+        let mut inode = filesystem
+            .create_inode(InodeCreationOptions {
+                file_type: FileType::Socket,
+                mode: InodeMode::from_bits_truncate((request.mode as u16) & 0o7777)
+                    | InodeMode::S_IFSOCK,
+                uid,
+                gid,
+                time: Duration::default(),
+                flags: InodeFlags::empty(),
+            })
+            .map_err(errno)?;
+        parent.link(name, &mut inode).map_err(errno)?;
+        Ok(self.node_status_response(
+            request,
+            scoped_node_id(volume, &inode),
+            inode.metadata(),
+        ))
+    }
+
     pub fn mkdir_at(
         &mut self,
         request: protocol::Header,
@@ -3132,6 +3199,8 @@ fn node_type(file_type: FileType) -> u32 {
         protocol::NODE_TYPE_DIRECTORY
     } else if file_type.is_symlink() {
         protocol::NODE_TYPE_SYMLINK
+    } else if file_type.is_socket() {
+        protocol::NODE_TYPE_SOCKET
     } else {
         protocol::NODE_TYPE_SPECIAL
     }
