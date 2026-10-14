@@ -86,7 +86,7 @@ fn valid_response_transfers_one_owned_reference_and_all_failed_shapes_close_atta
             0 => reply.status = -13,
             1 => reply.mismatch = true,
             2 => reply.transport_error = true,
-            3 => reply.attachments[0].rights |= mnu_abi::HANDLE_RIGHT_CONTROL,
+            3 => reply.attachments[0].rights |= mnu_abi::HANDLE_RIGHT_MAP,
             _ => reply.attachments.push(ObjectHandleAttachment {
                 handle: 8,
                 ..reader
@@ -94,9 +94,11 @@ fn valid_response_transfers_one_owned_reference_and_all_failed_shapes_close_atta
         }
         drop(reply);
         closed.clear();
-        assert!(client
-            .open_shared_memory(request, |handle| closed.push(handle))
-            .is_err());
+        assert!(
+            client
+                .open_shared_memory(request, |handle| closed.push(handle))
+                .is_err()
+        );
         assert_eq!(closed, if case == 4 { vec![7, 8] } else { vec![7] });
     }
     *state.lock().unwrap() = Reply::default();

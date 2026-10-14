@@ -123,6 +123,8 @@ fn readonly_bounds_failures_and_final_release_preserve_state() {
     let mut ram = Ram::default();
     let mut descriptions = Descriptions::new();
     let readonly = descriptions.open(1, false, &mut ram).unwrap();
+    assert_eq!(descriptions.mapping_backing(readonly, false), Ok(1));
+    assert_eq!(descriptions.mapping_backing(readonly, true), Err(-13));
     assert_eq!(descriptions.resize(readonly, 2, &mut ram), Err(-9));
     assert_eq!(descriptions.write(readonly, b"x", &mut ram), Err(-9));
     assert_eq!(descriptions.write_at(readonly, 0, b"x", &mut ram), Err(-9));
@@ -159,6 +161,7 @@ fn readonly_bounds_failures_and_final_release_preserve_state() {
     assert_eq!(ram.references, 0);
     assert_eq!(descriptions.release(writable, &mut ram), Err(-9));
     assert_eq!(descriptions.length(writable, &mut ram), Err(-9));
+    assert_eq!(descriptions.mapping_backing(writable, false), Err(-9));
 }
 
 fn frame(opcode: u16, id: u64, basis: u64, argument: i64, length: u32, data: &[u8]) -> Vec<u8> {

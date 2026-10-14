@@ -59,8 +59,8 @@ pub trait Backing<H> {
     fn truncate_zero(&mut self, backing: H) -> Result<(), i32>;
 }
 
-/// Creates independent reply references. A service-local namespace Handle
-/// must never be handed out or closed as a temporary response attachment.
+/// Creates independent reply descriptions backed by the namespace resource.
+/// A namespace Handle must never be handed out as a temporary attachment.
 pub trait Delegation<H>: Backing<H> {
     fn duplicate(&mut self, backing: H, rights: u64) -> Result<H, i32>;
     fn close(&mut self, backing: H) -> Result<(), i32>;
@@ -80,16 +80,7 @@ fn validate_name(name: &[u8]) -> Result<(), i32> {
 }
 
 fn rights(access: Access) -> u64 {
-    let common = mnu_abi::HANDLE_RIGHT_READ
-        | mnu_abi::HANDLE_RIGHT_MAP
-        | mnu_abi::HANDLE_RIGHT_DUPLICATE
-        | mnu_abi::HANDLE_RIGHT_TRANSFER;
-    common
-        | if access == Access::ReadWrite {
-            mnu_abi::HANDLE_RIGHT_WRITE | mnu_abi::HANDLE_RIGHT_CONTROL
-        } else {
-            0
-        }
+    mochios_posix_protocol::shared_memory::descriptor_rights(access == Access::ReadWrite)
 }
 
 impl<H: Copy> PosixService<H> {

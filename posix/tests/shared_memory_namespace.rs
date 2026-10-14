@@ -1,4 +1,4 @@
-use posix_service::shared_memory::{Access, Backing, Open, MAX_NAMES};
+use posix_service::shared_memory::{Access, Backing, MAX_NAMES, Open};
 use posix_service::{AuthenticatedProcess, PeerIdentity, PosixService};
 use std::sync::{Arc, Mutex};
 
@@ -135,7 +135,8 @@ fn registered_credentials_umask_and_access_specific_attenuation() {
         .open_shared_memory(peer(3), b"/buffer", ro, &mut objects)
         .unwrap();
     assert_eq!(reader.rights & mnu_abi::HANDLE_RIGHT_WRITE, 0);
-    assert_ne!(reader.rights & mnu_abi::HANDLE_RIGHT_MAP, 0);
+    assert_eq!(reader.rights & mnu_abi::HANDLE_RIGHT_MAP, 0);
+    assert_ne!(reader.rights & mnu_abi::HANDLE_RIGHT_SEEK, 0);
     assert_eq!(
         service.open_shared_memory(
             peer(3),
@@ -331,9 +332,11 @@ fn concurrent_creators_allocate_exactly_one_backing() {
         .map(|thread| thread.join().unwrap())
         .collect();
     assert_eq!(opened.iter().filter(|entry| entry.created).count(), 1);
-    assert!(opened
-        .iter()
-        .all(|entry| entry.backing == opened[0].backing));
+    assert!(
+        opened
+            .iter()
+            .all(|entry| entry.backing == opened[0].backing)
+    );
     assert_eq!(state.lock().unwrap().1.objects.len(), 1);
 }
 

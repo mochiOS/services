@@ -263,7 +263,7 @@ fn response_references_are_attenuated_and_survive_unlink_and_recreation() {
         mochios_posix_client::shared_memory::rights(false)
     );
     assert_eq!(
-        reader.rights & (mnu_abi::HANDLE_RIGHT_WRITE | mnu_abi::HANDLE_RIGHT_CONTROL),
+        reader.rights & (mnu_abi::HANDLE_RIGHT_WRITE | mnu_abi::HANDLE_RIGHT_MAP),
         0
     );
     assert!(Arc::ptr_eq(
@@ -461,6 +461,7 @@ fn native_namespace_probe_uses_current_protocol_and_generic_handle_abi() {
     for (name, number) in [
         ("OPEN", protocol::OP_SHARED_MEMORY_OPEN as u64),
         ("UNLINK", protocol::OP_SHARED_MEMORY_UNLINK as u64),
+        ("BACKING", protocol::OP_SHARED_MEMORY_BACKING as u64),
         ("CONTEXT_GET", Number::LaunchHandleGet as u64),
         ("IPC_CALL", Number::IpcCallObjectHandles as u64),
         ("MAP", Number::MemoryMap as u64),
@@ -470,6 +471,7 @@ fn native_namespace_probe_uses_current_protocol_and_generic_handle_abi() {
         ("SAME", Number::HandleSameObject as u64),
         ("LENGTH", Number::MemoryObjectLength as u64),
         ("RESIZE", Number::MemoryObjectResize as u64),
+        ("CONTROL", Number::HandleControl as u64),
     ] {
         assert!(source.contains(&format!("{name} = {number}")));
     }

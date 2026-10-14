@@ -68,6 +68,16 @@ impl<H: Copy> Descriptions<H> {
         backend.length(self.entries.get(&id).ok_or(-9)?.backing)
     }
 
+    /// Borrow only for an immediately attenuated mapping delegation under the
+    /// manager lock. The owning backing reference is never transferred.
+    pub fn mapping_backing(&self, id: u64, writable: bool) -> Result<H, i32> {
+        let entry = self.entries.get(&id).ok_or(-9)?;
+        if writable && !entry.writable {
+            return Err(-13);
+        }
+        Ok(entry.backing)
+    }
+
     pub fn resize<B: Backing<H>>(&self, id: u64, length: u64, backend: &mut B) -> Result<(), i32> {
         let entry = self.entries.get(&id).ok_or(-9)?;
         if !entry.writable {

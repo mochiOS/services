@@ -8,6 +8,9 @@ mod named_semaphore_native;
 mod shared_memory_native;
 
 #[cfg(target_os = "mochios")]
+mod shared_memory_provider;
+
+#[cfg(target_os = "mochios")]
 const PTY_SYNC_MAGIC: [u8; 4] = *b"PTYS";
 
 #[cfg(target_os = "mochios")]
@@ -43,6 +46,13 @@ fn main() {
         }
     };
     let ptys = Arc::new(Mutex::new(posix_service::pty::PtyManager::new()));
+    let mut shared_memory_backend = match shared_memory_provider::start() {
+        Ok(backend) => backend,
+        Err(error) => {
+            platform::logln!("posix.service: shared-memory provider startup failed errno={}", error);
+            platform::process::exit(1);
+        }
+    };
     let service_state = Arc::new(Mutex::new(PosixService::new()));
     let provider_endpoint_handle = match start_pty_provider(
         Arc::clone(&ptys),
@@ -273,11 +283,33 @@ fn main() {
         }
         let mut retained_handle = None;
         let object_response = match (peer, decoded, attachments_valid) {
+            (Some(_peer), Some((header, payload)), true)
+                if header.opcode == protocol::OP_SHARED_MEMORY_BACKING =>
+            {
+                let result = if header.flags != 0 || header.status != 0
+                    || payload.len() != 4 || attachments.len() != 1 {
+                    Err(-22)
+                } else {
+                    match u32::from_le_bytes(payload.try_into().unwrap()) {
+                        0 => shared_memory_provider::mapping(shared_memory_backend.endpoint, false, attachments[0]),
+                        1 => shared_memory_provider::mapping(shared_memory_backend.endpoint, true, attachments[0]),
+                        _ => Err(-22),
+                    }
+                };
+                Some(match result {
+                    Ok(opened) => posix_service::ObjectResponse {
+                        response: status_response(header.request_id, 0), handles: vec![opened],
+                    },
+                    Err(error) => posix_service::ObjectResponse {
+                        response: status_response(header.request_id, error), handles: Vec::new(),
+                    },
+                })
+            }
             (Some(peer), Some((header, payload)), true)
                 if matches!(header.opcode, protocol::OP_SHARED_MEMORY_OPEN | protocol::OP_SHARED_MEMORY_UNLINK) =>
             {
                 Some(service.handle_shared_memory(peer, header, payload, &attachments,
-                    &mut shared_memory_native::NativeBacking))
+                    &mut shared_memory_backend))
             }
             (Some(peer), Some((header, payload)), true)
                 if matches!(header.opcode, protocol::OP_SEMAPHORE_OPEN | protocol::OP_SEMAPHORE_UNLINK) =>
