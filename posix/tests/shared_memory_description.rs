@@ -433,3 +433,62 @@ fn provider_extent_control_enforces_access_and_exact_wire_lengths() {
     );
     assert_eq!(ram.bytes, [0; 5]);
 }
+
+#[test]
+fn provider_status_flags_are_shared_per_description_and_reject_invalid_fields() {
+    use mnu_abi::{IPC_DELIVERY_NATIVE_OBJECT, provider};
+    use mochios_posix_protocol::{OPEN_APPEND, OPEN_NONBLOCK, shared_memory as wire};
+    use posix_service::shared_memory_file::handle_provider_request;
+    let mut ram = Ram::default();
+    let mut descriptions = Descriptions::new();
+    let first = descriptions.open(1, true, &mut ram).unwrap();
+    let independent = descriptions.open(1, true, &mut ram).unwrap();
+    let mut reply = [0; provider::RESPONSE_HEADER_LEN + 4];
+    for (code, payload, length, expected_status) in [
+        (
+            wire::CONTROL_SET_FLAGS,
+            (OPEN_APPEND | OPEN_NONBLOCK).to_le_bytes().to_vec(),
+            0,
+            0,
+        ),
+        (
+            wire::CONTROL_SET_FLAGS,
+            u32::MAX.to_le_bytes().to_vec(),
+            0,
+            -22,
+        ),
+        (wire::CONTROL_SET_FLAGS, vec![0; 3], 0, -22),
+        (wire::CONTROL_SET_FLAGS, vec![0; 4], 1, -22),
+        (wire::CONTROL_GET_FLAGS, vec![], 3, -22),
+        (wire::CONTROL_GET_FLAGS, vec![0], 4, -22),
+        (wire::CONTROL_GET_FLAGS, vec![], 4, 0),
+    ] {
+        let request = frame(provider::OP_CONTROL, first, code, 0, length, &payload);
+        let count = handle_provider_request(
+            &mut descriptions,
+            &request,
+            IPC_DELIVERY_NATIVE_OBJECT,
+            0,
+            &mut ram,
+            &mut reply,
+        )
+        .unwrap()
+        .unwrap();
+        let (header, data) = provider::ResponseHeader::decode(&reply[..count]).unwrap();
+        assert_eq!(header.status, expected_status);
+        assert_eq!(
+            descriptions.status_flags(first),
+            Ok(OPEN_APPEND | OPEN_NONBLOCK)
+        );
+        if code == wire::CONTROL_GET_FLAGS && expected_status == 0 {
+            assert_eq!(data, &(OPEN_APPEND | OPEN_NONBLOCK).to_le_bytes());
+        }
+    }
+    assert_eq!(descriptions.status_flags(independent), Ok(0));
+    descriptions.write(independent, b"a", &mut ram).unwrap();
+    descriptions.write(first, b"b", &mut ram).unwrap();
+    assert_eq!(ram.bytes, b"ab");
+    descriptions.set_append(first, false).unwrap();
+    assert_eq!(descriptions.status_flags(first), Ok(OPEN_NONBLOCK));
+    assert_eq!(descriptions.set_status_flags(first + 99, 0), Err(-9));
+}

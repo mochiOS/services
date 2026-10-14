@@ -17,7 +17,7 @@ struct Description<H> {
     backing: H,
     writable: bool,
     cursor: u64,
-    append: bool,
+    status_flags: u32,
 }
 
 /// Serialize this manager externally through operation completion. Separate
@@ -50,7 +50,7 @@ impl<H: Copy> Descriptions<H> {
                 backing: retained,
                 writable,
                 cursor: 0,
-                append: false,
+                status_flags: 0,
             },
         );
         self.next = next;
@@ -91,12 +91,34 @@ impl<H: Copy> Descriptions<H> {
     }
 
     pub fn set_append(&mut self, id: u64, append: bool) -> Result<(), i32> {
-        self.entries.get_mut(&id).ok_or(-9)?.append = append;
+        let entry = self.entries.get_mut(&id).ok_or(-9)?;
+        if append {
+            entry.status_flags |= mochios_posix_protocol::OPEN_APPEND;
+        } else {
+            entry.status_flags &= !mochios_posix_protocol::OPEN_APPEND;
+        }
         Ok(())
     }
 
     pub fn append(&self, id: u64) -> Result<bool, i32> {
-        Ok(self.entries.get(&id).ok_or(-9)?.append)
+        Ok(self.status_flags(id)? & mochios_posix_protocol::OPEN_APPEND != 0)
+    }
+
+    pub fn status_flags(&self, id: u64) -> Result<u32, i32> {
+        Ok(self.entries.get(&id).ok_or(-9)?.status_flags)
+    }
+
+    pub fn set_status_flags(&mut self, id: u64, flags: u32) -> Result<(), i32> {
+        let entry = self.entries.get_mut(&id).ok_or(-9)?;
+        if flags & !(mochios_posix_protocol::OPEN_APPEND | mochios_posix_protocol::OPEN_NONBLOCK)
+            != 0
+        {
+            return Err(-22);
+        }
+        // RAM IO never waits for data, so NONBLOCK requires no alternate IO
+        // path. Both flags are shared by all aliases of this description.
+        entry.status_flags = flags;
+        Ok(())
     }
 
     pub fn read<B: Backing<H>>(
@@ -149,7 +171,7 @@ impl<H: Copy> Descriptions<H> {
         if input.is_empty() {
             return Ok(0);
         }
-        let position = if entry.append {
+        let position = if entry.status_flags & mochios_posix_protocol::OPEN_APPEND != 0 {
             backend.length(entry.backing)?
         } else {
             entry.cursor
@@ -313,7 +335,21 @@ pub fn handle_provider_request<H: Copy, B: Backing<H>>(
                             .resize(header.object_id, length, backend)
                             .map(|_| (0, Vec::new()))
                     }
-                    wire::CONTROL_LENGTH | wire::CONTROL_RESIZE => Err(-22),
+                    wire::CONTROL_GET_FLAGS if payload.is_empty() && header.length == 4 => {
+                        descriptions
+                            .status_flags(header.object_id)
+                            .map(|flags| (4, flags.to_le_bytes().to_vec()))
+                    }
+                    wire::CONTROL_SET_FLAGS if payload.len() == 4 && header.length == 0 => {
+                        let flags = u32::from_le_bytes(payload.try_into().unwrap());
+                        descriptions
+                            .set_status_flags(header.object_id, flags)
+                            .map(|_| (0, Vec::new()))
+                    }
+                    wire::CONTROL_LENGTH
+                    | wire::CONTROL_RESIZE
+                    | wire::CONTROL_GET_FLAGS
+                    | wire::CONTROL_SET_FLAGS => Err(-22),
                     _ => Err(-95),
                 }
             }

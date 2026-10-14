@@ -49,6 +49,14 @@ int main(void) {
   CHECK(lseek(fd, 0, SEEK_CUR) == 4097);
   CHECK(ftruncate(fd, 4097) == 0 && lseek(fd, 0, SEEK_CUR) == 4097);
   CHECK(ftruncate(fd, 8192) == 0 && shared[4097] == 0);
+  CHECK(fcntl(alias, F_SETFL, O_APPEND | O_NONBLOCK) == 0);
+  CHECK(fcntl(fd, F_GETFL, 0) == (O_RDWR | O_APPEND | O_NONBLOCK));
+  CHECK(fcntl(reader, F_GETFL, 0) == O_RDONLY);
+  CHECK(lseek(fd, 0, SEEK_SET) == 0 && write(alias, "a", 1) == 1);
+  CHECK(lseek(fd, 0, SEEK_CUR) == 8193);
+  CHECK(pread(fd, &byte, 1, 8192) == 1 && byte == 'a');
+  CHECK(fcntl(fd, F_SETFL, 0) == 0 && fcntl(alias, F_GETFL, 0) == O_RDWR);
+  CHECK(ftruncate(fd, 8192) == 0);
   CHECK(shm_unlink(name) == 0);
   CHECK(shm_open(name, O_RDONLY, 0) == -1 && errno == ENOENT);
   int fresh = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
@@ -60,7 +68,8 @@ int main(void) {
   pid_t child = fork();
   CHECK(child >= 0);
   if (child == 0) {
-    if (lseek(alias, 2, SEEK_SET) != 2 || write(fd, "z", 1) != 1)
+    if (lseek(alias, 2, SEEK_SET) != 2 || write(fd, "z", 1) != 1 ||
+        fcntl(alias, F_SETFL, O_NONBLOCK) != 0)
       _exit(1);
     _exit(0);
   }
@@ -68,6 +77,7 @@ int main(void) {
   CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) &&
         WEXITSTATUS(status) == 0);
   CHECK(shared[2] == 'z' && lseek(fd, 0, SEEK_CUR) == 3);
+  CHECK(fcntl(fd, F_GETFL, 0) == (O_RDWR | O_NONBLOCK));
   CHECK(close(fd) == 0 && close(alias) == 0 && close(reader) == 0 &&
         close(fresh) == 0);
   CHECK(shared[0] == 17 && offset[0] == 42 && fresh_map[0] == 0);
@@ -77,6 +87,7 @@ int main(void) {
   fprintf(
       stderr,
       "posix-shared-memory: PASS newlib API, CLOEXEC, shared OFD, permissions, "
-      "offset mapping, truncate, unlink lifetime, recreation and fork\n");
+      "offset mapping, truncate, unlink lifetime, recreation, shared status "
+      "flags and fork\n");
   return 0;
 }
