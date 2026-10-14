@@ -152,7 +152,13 @@ pub fn dispatch(
                 offset,
                 length,
                 maximum_rights,
+            }
+            | Request::Peek {
+                offset,
+                length,
+                maximum_rights,
             } => {
+                let peek = matches!(request, Request::Peek { .. });
                 if count != 2
                     || attached[0].rights != mnu_abi::HANDLE_RIGHT_READ
                     || attached[1].rights
@@ -163,68 +169,87 @@ pub fn dispatch(
                 let socket = platform::handle::identify_provider_object(attached[0].handle)
                     .map_err(|error| error.raw() as i32)?;
                 let ids = streams.affected(socket)?;
-                let (_, receipt) = transfers.receive(
-                    streams,
-                    socket,
-                    attached[0].handle,
-                    offset,
-                    length,
-                    maximum_rights as usize,
-                    close,
-                    |id, info| {
-                        let source = mochios_posix_protocol::socket::Address::decode(
-                            info.record.source.encoded(),
-                        )
-                        .map_err(|_| -5)?;
-                        let mut response = [0; wire::MAX_RECEIVE_REPLY_LEN];
-                        let size = wire::ReceiveReply {
-                            copied: info.record.copied as u32,
-                            length: info.record.length as u32,
-                            total_rights: info.total_rights as u16,
-                            available_rights: info.available_rights as u16,
-                            source,
+                let publish = |id, info: posix_service::socket_transfer::ReceiptInfo| {
+                    let source = mochios_posix_protocol::socket::Address::decode(
+                        info.record.source.encoded(),
+                    )
+                    .map_err(|_| -5)?;
+                    let mut response = [0; wire::MAX_RECEIVE_REPLY_LEN];
+                    let reply = wire::ReceiveReply {
+                        copied: info.record.copied as u32,
+                        length: info.record.length as u32,
+                        total_rights: info.total_rights as u16,
+                        available_rights: info.available_rights as u16,
+                        source,
+                    };
+                    let size = if peek {
+                        reply.encode_peek(length, maximum_rights, &mut response)
+                    } else {
+                        reply.encode(length, maximum_rights, &mut response)
+                    }
+                    .map_err(|_| -5)?;
+                    let mut outgoing = platform::ipc::IpcObjectHandles::default();
+                    let handle = match id {
+                        Some(id) => {
+                            let handle = platform::handle::create_provider_object(
+                                endpoint,
+                                object_id(id)?,
+                                wire::RIGHTS,
+                            )
+                            .map_err(|error| error.raw() as i32)?;
+                            outgoing.count = 1;
+                            outgoing.handles[0] = platform::ipc::IpcObjectHandle {
+                                handle,
+                                reserved: 0,
+                                rights: wire::RIGHTS,
+                            };
+                            Some(handle)
                         }
-                        .encode(length, maximum_rights, &mut response)
-                        .map_err(|_| -5)?;
-                        let mut outgoing = platform::ipc::IpcObjectHandles::default();
-                        let handle = match id {
-                            Some(id) => {
-                                let handle = platform::handle::create_provider_object(
-                                    endpoint,
-                                    object_id(id)?,
-                                    wire::RIGHTS,
-                                )
-                                .map_err(|error| error.raw() as i32)?;
-                                outgoing.count = 1;
-                                outgoing.handles[0] = platform::ipc::IpcObjectHandle {
-                                    handle,
-                                    reserved: 0,
-                                    rights: wire::RIGHTS,
-                                };
-                                Some(handle)
-                            }
-                            None => None,
-                        };
-                        let result = platform::ipc::reply_object_handles(
-                            sender,
-                            &response[..size],
-                            &outgoing,
-                        );
-                        if let Some(handle) = handle {
-                            close(handle);
-                        }
-                        result.map_err(|error| error.raw() as i32)?;
-                        replied = true;
-                        Ok(())
-                    },
-                    &mut posix_service::socket_record_io::NativeBuffer::borrowed(
-                        attached[1].handle,
-                    ),
-                )?;
+                        None => None,
+                    };
+                    let result =
+                        platform::ipc::reply_object_handles(sender, &response[..size], &outgoing);
+                    if let Some(handle) = handle {
+                        close(handle);
+                    }
+                    result.map_err(|error| error.raw() as i32)?;
+                    replied = true;
+                    Ok(())
+                };
+                let mut buffer =
+                    posix_service::socket_record_io::NativeBuffer::borrowed(attached[1].handle);
+                let (_, receipt) = if peek {
+                    transfers.peek(
+                        streams,
+                        socket,
+                        attached[0].handle,
+                        offset,
+                        length,
+                        maximum_rights as usize,
+                        close,
+                        publish,
+                        &mut buffer,
+                    )
+                } else {
+                    transfers.receive(
+                        streams,
+                        socket,
+                        attached[0].handle,
+                        offset,
+                        length,
+                        maximum_rights as usize,
+                        close,
+                        publish,
+                        &mut buffer,
+                    )
+                }?;
                 if receipt.is_some() {
                     consumed |= 1;
                 }
-                affected = Some(ids);
+                // Peek changes neither queue capacity nor provider readiness.
+                if !peek {
+                    affected = Some(ids);
+                }
                 Ok(0)
             }
             Request::Deliver { offset, maximum } => {

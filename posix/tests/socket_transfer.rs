@@ -164,6 +164,51 @@ fn codec_is_versioned_and_contains_only_lengths_indices_and_validated_metadata()
 }
 
 #[test]
+fn peek_codec_binds_mode_and_rejects_noncanonical_requests_and_receipts() {
+    let request = wire::peek(17, 3, 2).unwrap();
+    assert_eq!(
+        wire::decode(&request),
+        Ok(wire::Request::Peek {
+            offset: 17,
+            length: 3,
+            maximum_rights: 2,
+        })
+    );
+    for length in 0..request.len() {
+        assert!(wire::decode(&request[..length]).is_err());
+    }
+    for byte in 22..32 {
+        let mut invalid = request;
+        invalid[byte] = 1;
+        assert!(wire::decode(&invalid).is_err());
+    }
+    assert!(wire::peek(u64::MAX, 1, 0).is_err());
+    assert!(wire::peek(0, 65537, 0).is_err());
+    assert!(wire::peek(0, 0, 254).is_err());
+    let reply = wire::ReceiveReply {
+        copied: 3,
+        length: 8,
+        total_rights: 253,
+        available_rights: 2,
+        source: mochios_posix_protocol::socket::Address::UnixPath(b"/peer"),
+    };
+    let mut bytes = [0; wire::MAX_RECEIVE_REPLY_LEN];
+    let count = reply.encode_peek(3, 2, &mut bytes).unwrap();
+    assert_eq!(
+        wire::ReceiveReply::decode_peek(3, 2, &bytes[..count]),
+        Ok(reply)
+    );
+    assert!(wire::ReceiveReply::decode(3, 2, &bytes[..count]).is_err());
+    assert!(wire::ReceiveReply::decode_peek(2, 2, &bytes[..count]).is_err());
+    assert!(wire::ReceiveReply::decode_peek(3, 1, &bytes[..count]).is_err());
+    for length in 0..count {
+        assert!(wire::ReceiveReply::decode_peek(3, 2, &bytes[..length]).is_err());
+    }
+    let count = reply.encode(3, 2, &mut bytes).unwrap();
+    assert!(wire::ReceiveReply::decode_peek(3, 2, &bytes[..count]).is_err());
+}
+
+#[test]
 fn receive_and_delivery_codecs_bind_limits_offsets_counts_and_reserved_fields() {
     use mochios_posix_protocol::socket::Address;
     let request = wire::receive(17, 3, 2).unwrap();

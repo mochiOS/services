@@ -104,6 +104,112 @@ fn delivery_mock(offset: u16, count: u16) -> Mock {
     }
 }
 
+fn peek_mock(total: u16, maximum: u16) -> Mock {
+    let mut mock = receive_mock(total, maximum);
+    mock.request = wire::Request::Peek {
+        offset: 7,
+        length: 3,
+        maximum_rights: maximum,
+    };
+    mock.bytes[6..8].copy_from_slice(&6u16.to_le_bytes());
+    mock
+}
+
+#[test]
+fn peek_uses_read_authority_and_returns_a_mode_bound_independently_owned_receipt() {
+    for (total, maximum) in [(0, 253), (253, 0), (253, 2), (253, 253)] {
+        let mock = peek_mock(total, maximum);
+        let mut response = [0; wire::MAX_RECEIVE_REPLY_LEN];
+        let received = socket_transfer::peek(
+            &mock,
+            source(10),
+            source(20),
+            7,
+            3,
+            maximum,
+            &mut response,
+            |_| panic!("successful owned receipt"),
+        )
+        .unwrap();
+        assert_eq!(received.message.total_rights, total);
+        assert_eq!(received.message.available_rights, total.min(maximum));
+        assert_eq!(received.receipt, mock.incoming.first().copied());
+        assert_eq!(mock.calls.get(), 1);
+    }
+}
+
+#[test]
+fn peek_failures_close_only_new_references_and_never_retry_the_rpc() {
+    for case in 0..14 {
+        let mut mock = peek_mock(2, 2);
+        match case {
+            0 => mock.incoming.clear(),
+            1 => mock.incoming[0].rights |= mnu_abi::HANDLE_RIGHT_WRITE,
+            2 => mock.incoming.push(mock.incoming[0]),
+            3 => mock.incoming[0].handle = 0,
+            4 => mock.incoming[0].handle = 10,
+            5 => mock.incoming[0].handle = 20,
+            6 => mock.bytes[0] ^= 1,
+            7 => mock.bytes[18] = 1,
+            8 => mock.result = Err(()),
+            9 => mock.result = Ok(wire::MAX_RECEIVE_REPLY_LEN + 1),
+            10 => {
+                mock.bytes = (-11i32).to_le_bytes().to_vec();
+                mock.result = Ok(4);
+            }
+            11 => mock.result = Ok(0),
+            12 => mock.bytes[6..8].copy_from_slice(&4u16.to_le_bytes()),
+            13 => mock.bytes[4] = 2,
+            _ => unreachable!(),
+        }
+        let mut expected: Vec<_> = mock
+            .incoming
+            .iter()
+            .map(|item| item.handle)
+            .filter(|handle| ![0, 10, 20].contains(handle))
+            .collect();
+        expected.sort();
+        expected.dedup();
+        let mut closed = vec![];
+        let mut response = [0; wire::MAX_RECEIVE_REPLY_LEN];
+        assert!(
+            socket_transfer::peek(
+                &mock,
+                source(10),
+                source(20),
+                7,
+                3,
+                2,
+                &mut response,
+                |handle| closed.push(handle)
+            )
+            .is_err(),
+            "case {case}"
+        );
+        closed.sort();
+        assert_eq!(closed, expected, "case {case}");
+        assert_eq!(mock.calls.get(), 1);
+    }
+    let mut mock = peek_mock(0, 0);
+    mock.bytes = (-11i32).to_le_bytes().to_vec();
+    mock.result = Ok(4);
+    let mut response = [0; wire::MAX_RECEIVE_REPLY_LEN];
+    assert_eq!(
+        socket_transfer::peek(
+            &mock,
+            source(10),
+            source(20),
+            7,
+            3,
+            0,
+            &mut response,
+            |_| panic!("no receipt")
+        )
+        .unwrap_err(),
+        ClientError::Remote(-11)
+    );
+}
+
 fn send_mock(operation: u8) -> Mock {
     let mut mock = delivery_mock(0, 1);
     mock.incoming.clear();
