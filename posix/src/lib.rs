@@ -9,6 +9,7 @@ pub mod shared_memory;
 pub mod shared_memory_file;
 pub mod socket;
 pub mod socket_record;
+pub mod socket_stream;
 pub mod socket_record_io;
 pub mod socket_rights;
 pub mod socket_gc;

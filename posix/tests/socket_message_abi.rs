@@ -2,6 +2,15 @@ use std::process::Command;
 
 #[test]
 fn c_message_layout_and_control_iteration_match_the_runtime_abi() {
+    run("socket_message_abi.c");
+}
+
+#[test]
+fn host_stream_ancillary_boundaries_match_the_queue_contract() {
+    run("socket_stream_ancillary_abi.c");
+}
+
+fn run(source: &str) {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let directory = std::env::temp_dir().join(format!(
         "mochios-socket-message-{}-{}",
@@ -24,7 +33,7 @@ fn c_message_layout_and_control_iteration_match_the_runtime_abi() {
         ])
         .arg("-I")
         .arg(root.join("user/libc-port/include"))
-        .arg(root.join("services/posix/tests/socket_message_abi.c"))
+        .arg(root.join("services/posix/tests").join(source))
         .arg("-o")
         .arg(&binary)
         .output()

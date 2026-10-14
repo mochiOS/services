@@ -66,7 +66,7 @@ struct Endpoint {
     // None means never connected, not a previously connected peer's close.
     peer: Option<u64>,
     credentials: (u32, u32),
-    incoming: VecDeque<u8>,
+    incoming: crate::socket_stream::StreamQueue,
     records: Option<crate::socket_record::RecordQueue>,
     receive_capacity: usize,
     send_capacity: usize,
@@ -164,7 +164,7 @@ impl Streams {
             id,
             peer: None,
             credentials,
-            incoming: VecDeque::new(),
+            incoming: crate::socket_stream::StreamQueue::new(),
             records: (request.kind == Kind::Datagram).then(crate::socket_record::RecordQueue::new),
             receive_capacity: RECEIVE_CAPACITY,
             send_capacity: SEND_CAPACITY,
@@ -202,7 +202,7 @@ impl Streams {
                 id,
                 peer: Some(peer),
                 credentials,
-                incoming: VecDeque::new(),
+                incoming: crate::socket_stream::StreamQueue::new(),
                 records: (request.kind == Kind::Datagram)
                     .then(crate::socket_record::RecordQueue::new),
                 receive_capacity: RECEIVE_CAPACITY,
@@ -374,13 +374,69 @@ impl Streams {
         if count == 0 {
             return Err(-11);
         }
-        receiver.incoming.try_reserve(count).map_err(|_| -12)?;
-        receiver.incoming.extend(&input[..count]);
-        Ok(count)
+        receiver.incoming.write(&input[..count])
     }
 
     pub fn read(&mut self, id: u64, output: &mut [u8]) -> Result<usize, i32> {
         self.receive(id, output, None)
+    }
+
+    /// First-byte ancillary attachment on a connected byte stream. A short
+    /// write transfers all rights with its accepted prefix, exactly once.
+    /// The native adapter has authenticated the source WRITE lease already.
+    pub fn commit_stream_with_rights(
+        &mut self,
+        id: u64,
+        input: &[u8],
+        rights: crate::socket_rights::Bundle,
+    ) -> Result<(usize, [u64; 2]), (i32, crate::socket_rights::Bundle)> {
+        let prepared = (|| {
+            let source = self.endpoint(id)?;
+            if source.records.is_some() {
+                return Err(-95);
+            }
+            if input.is_empty() {
+                return Ok((id, 0));
+            }
+            if source.write_shutdown {
+                return Err(-32);
+            }
+            let peer = source.peer.ok_or(-107)?;
+            let receiver = self.endpoint(peer).map_err(|_| -32)?;
+            if receiver.read_shutdown {
+                return Err(-32);
+            }
+            let count = input.len().min(
+                receiver.receive_capacity.min(source.send_capacity)
+                    .saturating_sub(receiver.incoming.len()),
+            );
+            if count == 0 {
+                return Err(-11);
+            }
+            Ok((peer, count))
+        })();
+        let (peer, count) = match prepared {
+            Ok(values) => values,
+            Err(error) => return Err((error, rights)),
+        };
+        let receiver = match self.endpoint_mut(peer) {
+            Ok(receiver) => receiver,
+            Err(error) => return Err((error, rights)),
+        };
+        receiver.incoming
+            .write_with_rights(&input[..count], rights)
+            .map(|count| (count, [id, peer]))
+    }
+
+    /// Consume one stream prefix and move its first ancillary bundle. Ordinary
+    /// read uses the same boundary calculation but discards the owned bundle.
+    pub fn read_stream_with_rights(
+        &mut self,
+        id: u64,
+        output: &mut [u8],
+    ) -> Result<(usize, Option<crate::socket_rights::Bundle>), i32> {
+        let count = self.stream_read_count(id, output.len(), 0)?;
+        Ok(self.endpoint_mut(id)?.incoming.read_owned(&mut output[..count]))
     }
 
     /// Inspect bytes relative to the current receive head without removing them.
@@ -416,40 +472,34 @@ impl Streams {
         output: &mut [u8],
         peek_offset: Option<usize>,
     ) -> Result<usize, i32> {
+        let offset = peek_offset.unwrap_or(0);
+        let count = self.stream_read_count(id, output.len(), offset)?;
+        let entry = self.endpoint_mut(id)?;
+        Ok(if peek_offset.is_some() {
+            entry.incoming.peek(offset, &mut output[..count])
+        } else {
+            entry.incoming.read(&mut output[..count])
+        })
+    }
+
+    fn stream_read_count(&mut self, id: u64, length: usize, offset: usize) -> Result<usize, i32> {
         let ready = self.readiness(id)?;
         let entry = self.endpoint_mut(id)?;
         if entry.records.is_some() {
             return Err(-95);
         }
-        if output.is_empty() || entry.read_shutdown {
+        if length == 0 || entry.read_shutdown {
             return Ok(0);
         }
         if entry.peer.is_none() {
             return Err(-107);
         }
-        let offset = peek_offset.unwrap_or(0);
-        let count = output
-            .len()
-            .min(entry.incoming.len().saturating_sub(offset));
+        let count = length.min(entry.incoming.len().saturating_sub(offset));
         if entry.incoming.is_empty() && entry.error != 0 {
             return Err(-(std::mem::take(&mut entry.error) as i32));
         }
         if count == 0 && !ready.read_closed {
             return Err(-11);
-        }
-        if count != 0 {
-            if peek_offset.is_some() {
-                for (byte, queued) in output[..count]
-                    .iter_mut()
-                    .zip(entry.incoming.range(offset..offset + count))
-                {
-                    *byte = *queued;
-                }
-            } else {
-                for byte in &mut output[..count] {
-                    *byte = entry.incoming.pop_front().unwrap();
-                }
-            }
         }
         Ok(count)
     }
@@ -669,12 +719,12 @@ impl Streams {
     ) -> Result<Vec<u64>, i32> {
         let mut edges = Vec::new();
         for entry in &self.entries {
-            if let Some(queue) = &entry.records {
-                for lease in queue.ancillary_leases() {
-                    if let Some(target) = identify(lease.handle())? {
-                        edges.try_reserve(1).map_err(|_| -12)?;
-                        edges.push((entry.id, target));
-                    }
+            for lease in entry.incoming.ancillary_leases().chain(
+                entry.records.iter().flat_map(|queue| queue.ancillary_leases()),
+            ) {
+                if let Some(target) = identify(lease.handle())? {
+                    edges.try_reserve(1).map_err(|_| -12)?;
+                    edges.push((entry.id, target));
                 }
             }
         }
@@ -693,7 +743,9 @@ impl Streams {
         }
         let garbage = crate::socket_gc::unreachable(&nodes, &edges)?;
         for id in &garbage {
-            if let Some(queue) = self.endpoint_mut(*id)?.records.as_mut() {
+            let entry = self.endpoint_mut(*id)?;
+            entry.incoming.clear();
+            if let Some(queue) = entry.records.as_mut() {
                 queue.clear();
             }
         }
@@ -702,8 +754,9 @@ impl Streams {
 
     pub fn has_ancillary_records(&self) -> bool {
         self.entries.iter().any(|entry| {
-            entry.records.as_ref()
-                .is_some_and(|queue| queue.ancillary_leases().next().is_some())
+            entry.incoming.ancillary_leases().next().is_some()
+                || entry.records.as_ref()
+                    .is_some_and(|queue| queue.ancillary_leases().next().is_some())
         })
     }
 
@@ -925,7 +978,7 @@ impl Streams {
             id,
             peer: Some(client),
             credentials,
-            incoming: VecDeque::new(),
+            incoming: crate::socket_stream::StreamQueue::new(),
             records: None,
             receive_capacity,
             send_capacity,
