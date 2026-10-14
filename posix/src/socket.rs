@@ -638,6 +638,48 @@ impl Streams {
             .can_push(length, entry.send_capacity)
     }
 
+    /// Serialize graph construction, native observations and queue destruction
+    /// on this worker. Callbacks must use native owner-scoped observations only,
+    /// not metadata hints, client-reported counts or reentrant Provider RPC.
+    /// Nothing is discarded until EVERY lookup, sample and allocation succeeds.
+    pub fn collect_record_cycles(
+        &mut self,
+        mut identify: impl FnMut(u32) -> Result<Option<u64>, i32>,
+        mut reference_count: impl FnMut(u64) -> Result<u64, i32>,
+    ) -> Result<Vec<u64>, i32> {
+        let mut edges = Vec::new();
+        for entry in &self.entries {
+            if let Some(queue) = &entry.records {
+                for lease in queue.ancillary_leases() {
+                    if let Some(target) = identify(lease.handle())? {
+                        edges.try_reserve(1).map_err(|_| -12)?;
+                        edges.push((entry.id, target));
+                    }
+                }
+            }
+        }
+        if edges.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut nodes = Vec::new();
+        nodes.try_reserve_exact(self.entries.len()).map_err(|_| -12)?;
+        for entry in &self.entries {
+            if edges.iter().any(|(source, target)| *source == entry.id || *target == entry.id) {
+                nodes.push(crate::socket_gc::Node {
+                    id: entry.id,
+                    references: reference_count(entry.id)?,
+                });
+            }
+        }
+        let garbage = crate::socket_gc::unreachable(&nodes, &edges)?;
+        for id in &garbage {
+            if let Some(queue) = self.endpoint_mut(*id)?.records.as_mut() {
+                queue.clear();
+            }
+        }
+        Ok(garbage)
+    }
+
     /// Explicit-destination sends do not change the description's default
     /// peer or receive filter. Destination authority comes from a retained
     /// lookup ticket in the worker, never from a caller-supplied object ID.

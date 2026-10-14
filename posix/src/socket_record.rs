@@ -173,6 +173,13 @@ impl RecordQueue {
         self.records.front()?.rights.as_ref()
     }
 
+    pub fn ancillary_leases(&self) -> impl Iterator<Item = &crate::socket_rights::Lease> {
+        self.records
+            .iter()
+            .filter_map(|record| record.rights.as_ref())
+            .flat_map(|bundle| bundle.leases().iter())
+    }
+
     fn prepare_record(&mut self, payload: &[u8], send_capacity: usize) -> Result<Vec<u8>, i32> {
         // All fallible allocations precede commitment. On failure the caller
         // retains ownership, and the queue contents and charge are unchanged.
