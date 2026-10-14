@@ -10,13 +10,13 @@ const SIGNATURE_SERVICE_NAME: &str = "signature.service";
 pub(crate) fn prepare_execution_image(
     path: &str,
     class: platform::service::ExecutionClass,
-) -> Result<crate::prepared_image::PreparedImage, mochi_user_syscall::SysError> {
+) -> Result<platform::capability::PreparedExecutionImage, mochi_user_syscall::SysError> {
     let endpoint = platform::process::find_by_name(CAPABILITY_SERVICE_NAME)?;
     if endpoint == 0 {
         return Err(sys_error(mochi_user_syscall::ENOENT));
     }
     let endpoint = u32::try_from(endpoint).map_err(|_| sys_error(mochi_user_syscall::EOVERFLOW))?;
-    crate::prepared_image::prepare(endpoint, path, class)
+    platform::capability::prepare_execution_image(endpoint, path, class)
 }
 
 pub(crate) fn errno(error: mochi_user_syscall::SysError) -> u64 {

@@ -226,7 +226,7 @@ fn fixture() -> state::CapabilityServiceState {
     }
 }
 
-#[path = "../../service-manager/src/prepared_image.rs"]
+#[path = "../../../user/crates/platform/src/capability/prepared_image.rs"]
 mod client;
 #[path = "../../capability/src/prepared_image.rs"]
 mod server;
@@ -277,7 +277,7 @@ fn copied_snapshot_is_authorized_and_every_preparation_failure_releases_ownershi
 #[test]
 fn receiver_owns_exactly_one_read_only_reference_until_drop() {
     STATE.set(State::default());
-    let image = client::prepare(9, "/image", service::ExecutionClass::Privileged).unwrap();
+    let image = client::prepare_execution_image(9, "/image", service::ExecutionClass::Privileged).unwrap();
     assert_eq!(image.handle(), 32);
     STATE.with_borrow(|s| assert!(s.closed.is_empty()));
     drop(image);
@@ -295,7 +295,7 @@ fn malformed_or_overprivileged_replies_close_all_received_references_once() {
         ..Default::default()
     });
     assert_eq!(
-        client::prepare(9, "/image", service::ExecutionClass::Privileged).err(),
+        client::prepare_execution_image(9, "/image", service::ExecutionClass::Privileged).err(),
         Some(error(mnu_abi::EACCES))
     );
     STATE.with_borrow(|s| assert!(s.closed.is_empty()));
@@ -318,7 +318,7 @@ fn malformed_or_overprivileged_replies_close_all_received_references_once() {
             reply,
             ..Default::default()
         });
-        assert!(client::prepare(9, "/image", service::ExecutionClass::Privileged).is_err());
+        assert!(client::prepare_execution_image(9, "/image", service::ExecutionClass::Privileged).is_err());
         STATE.with_borrow(|s| {
             assert_eq!(s.closed, if invalid == 2 { vec![32, 33] } else { vec![32] })
         });
@@ -330,7 +330,7 @@ fn malformed_or_overprivileged_replies_close_all_received_references_once() {
         },
         ..Default::default()
     });
-    assert!(client::prepare(9, "/image", service::ExecutionClass::Privileged).is_err());
+    assert!(client::prepare_execution_image(9, "/image", service::ExecutionClass::Privileged).is_err());
     STATE.with_borrow(|s| assert!(s.closed.is_empty()));
 }
 
