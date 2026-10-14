@@ -7,7 +7,14 @@ fn retired_path_syscalls_leave_no_unused_kernel_policy_helpers() {
         "ensure_fs_path_readable",
         "ensure_fs_path_access",
         "ensure_fs_path_access_for_process",
+        "ensure_fs_path_executable_for_process",
         "ensure_fs_capability_access",
+        "ensure_fs_capability_access_for_process",
+        "path_owner_allows",
+        "process_has_cap",
+        "capability_requirement_satisfied",
+        "enforce_required_capability",
+        "enforce_fs_capabilities_for_process",
         "current_effective_ids",
         "ensure_unix_mode_access",
         "ensure_unix_traversal",
@@ -26,11 +33,6 @@ fn retired_path_syscalls_leave_no_unused_kernel_policy_helpers() {
             "retired policy helper restored: {name}"
         );
     }
-    // The transitional path loader still requires capability enforcement.
-    assert!(filesystem.contains("fn ensure_fs_path_executable_for_process("));
-    assert!(
-        filesystem.contains("ensure_fs_capability_access_for_process(path, PATH_EXEC, pid.as_u64())")
-    );
 }
 
 #[test]

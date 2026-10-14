@@ -27,10 +27,11 @@ fn kernel_has_no_parent_state_and_inspection_consumers_use_compact_layout() {
     assert!(!process.contains("parent_id"));
     let exec = include_str!("../../../core/src/syscall/exec.rs");
     assert!(!exec.contains("parent_override"));
-    // Native access checks are retained, not deleted with parent metadata.
+    // Native authority comes from the authenticated caller and image Handle,
+    // not a pathname-loader access-process override.
     assert!(!exec.contains("access_process_override"));
-    assert!(exec.contains("let Some(pid) = crate::task::current_thread_id()"));
-    assert!(exec.contains("ensure_fs_path_executable_for_process(path, pid)"));
+    assert!(exec.contains("process.take_exec_authorization(request.identity, thread)"));
+    assert!(exec.contains("crate::syscall::handle::read_all(image_handle,"));
     let platform = include_str!("../../../user/crates/platform/src/lib.rs");
     assert!(!platform.contains("parent_pid"));
     assert!(platform.contains("RECORD_SIZE: usize = syscall::PROCESS_INFO_RECORD_SIZE"));

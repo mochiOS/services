@@ -2,96 +2,68 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 #[test]
-fn actual_exec_path_guard_requires_the_live_callers_authority() {
+fn bootstrap_loads_only_initfs_and_preserves_explicit_label_and_loader_errors() {
     let source = include_str!("../../../core/src/syscall/exec.rs");
-    assert!(!source.contains("access_process_override"));
-    let function = &source[source.find("fn exec_internal(").unwrap()..];
-    let start = function.find("    if enforce_path_access {").unwrap();
-    let end = function
-        .find("    if let Some((data, source)) = load_exec_image(")
+    let begin = source
+        .find("pub(crate) fn launch_bootstrap_image(")
         .unwrap();
+    let end = begin + source[begin..].find("\n}\n").unwrap() + 3;
     let mut program = String::from(
         r#"
-use std::sync::atomic::{AtomicUsize, Ordering};
-static THREAD: AtomicUsize = AtomicUsize::new(0);
-static PROCESS: AtomicUsize = AtomicUsize::new(0);
-static CHECKS: AtomicUsize = AtomicUsize::new(0);
-static LOADS: AtomicUsize = AtomicUsize::new(0);
-static ERROR: AtomicUsize = AtomicUsize::new(0);
-mod task {
-    pub struct Thread;
-    impl Thread {
-        pub fn process_id(&self) -> usize {
-            crate::PROCESS.load(crate::Ordering::Relaxed)
-        }
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+type CapabilitySet = u64;
+type KernelAuthoritySet = u64;
+static PRESENT: AtomicBool = AtomicBool::new(false);
+static CALLS: AtomicU64 = AtomicU64::new(0);
+static BYTES: AtomicU64 = AtomicU64::new(0);
+static RESULT: AtomicU64 = AtomicU64::new(77);
+mod task { #[derive(Clone,Copy,Debug,PartialEq,Eq)] pub enum PrivilegeLevel { Service } }
+mod syscall { pub mod types { pub const ENOENT:u64=(-2i64) as u64; } }
+mod init { pub mod fs {
+    pub fn read_initfs(path:&str)->Option<Vec<u8>> {
+        assert_eq!(path,"/chosen/image");
+        crate::PRESENT.load(crate::Ordering::Relaxed).then(||vec![1,2,3])
     }
-    pub fn current_thread_id() -> Option<usize> {
-        match crate::THREAD.load(crate::Ordering::Relaxed) {
-            0 => None,
-            value => Some(value),
-        }
-    }
-    pub fn with_thread<T>(id: usize, f: impl FnOnce(&Thread) -> T) -> Option<T> {
-        assert_eq!(id, 7);
-        if crate::PROCESS.load(crate::Ordering::Relaxed) == 0 { None }
-        else { Some(f(&Thread)) }
-    }
+}}
+mod performance {
+    pub enum CounterMetric { ExecutableBytesRead }
+    pub fn increment(_:CounterMetric,bytes:u64) { crate::BYTES.fetch_add(bytes,crate::Ordering::Relaxed); }
 }
-mod syscall {
-    pub mod types { pub const EACCES: u64 = (-13i64) as u64; }
-    pub mod fs {
-        pub fn ensure_fs_path_executable_for_process(path: &str, pid: usize) -> Result<(), u64> {
-            assert_eq!(path, "/image");
-            assert_eq!(pid, 42);
-            crate::CHECKS.fetch_add(1, crate::Ordering::Relaxed);
-            match crate::ERROR.load(crate::Ordering::Relaxed) {
-                0 => Ok(()),
-                error => Err(error as u64),
-            }
-        }
-    }
+mod util { pub mod log { pub fn release_boot_marker(_:std::fmt::Arguments<'_>){} } }
+struct ExecMeasurement;
+impl ExecMeasurement {
+    fn start()->Self { Self }
+    fn finish(self,result:u64)->u64 { result }
 }
-fn exec_guard(enforce_path_access: bool) -> u64 {
-    let path = "/image";
-"#,
-    );
-    program.push_str(&function[start..end]);
-    program.push_str(
-        r#"
-    LOADS.fetch_add(1, Ordering::Relaxed);
-    0
-}
-fn main() {
-    // An absent caller must never reach either the path check or image loading.
-    assert_eq!(exec_guard(true), syscall::types::EACCES);
-    assert_eq!(CHECKS.load(Ordering::Relaxed), 0);
-    assert_eq!(LOADS.load(Ordering::Relaxed), 0);
-    THREAD.store(7, Ordering::Relaxed);
-    assert_eq!(exec_guard(true), syscall::types::EACCES);
-    assert_eq!(CHECKS.load(Ordering::Relaxed), 0);
-    assert_eq!(LOADS.load(Ordering::Relaxed), 0);
-
-    // The path check receives only the current thread's process, and its error
-    // is preserved before any attempt to load an executable.
-    PROCESS.store(42, Ordering::Relaxed);
-    ERROR.store(123, Ordering::Relaxed);
-    assert_eq!(exec_guard(true), 123);
-    assert_eq!(CHECKS.load(Ordering::Relaxed), 1);
-    assert_eq!(LOADS.load(Ordering::Relaxed), 0);
-    ERROR.store(0, Ordering::Relaxed);
-    assert_eq!(exec_guard(true), 0);
-    assert_eq!(CHECKS.load(Ordering::Relaxed), 2);
-    assert_eq!(LOADS.load(Ordering::Relaxed), 1);
-
-    // Explicit kernel bootstrap is not a user request and has no caller yet.
-    THREAD.store(0, Ordering::Relaxed);
-    PROCESS.store(0, Ordering::Relaxed);
-    assert_eq!(exec_guard(false), 0);
-    assert_eq!(CHECKS.load(Ordering::Relaxed), 2);
-    assert_eq!(LOADS.load(Ordering::Relaxed), 2);
+fn exec_with_data(data:&[u8],name:&str,path:&str,args:&[&str],env:&[&str],
+    caps:Option<u64>,authorities:Option<u64>,privilege:Option<task::PrivilegeLevel>,
+    identity:Option<()>,handles:&[()],values:&[()],startup:Option<()>,_:&mut ExecMeasurement)->u64 {
+    assert_eq!(data,[1,2,3]); assert_eq!(path,"/chosen/image");
+    assert!(["Compiler worker","/opaque/label","任意の名前",""].contains(&name));
+    assert!(args.is_empty()&&env.is_empty()&&handles.is_empty()&&values.is_empty());
+    assert_eq!((caps,authorities,privilege),(Some(7),Some(9),Some(task::PrivilegeLevel::Service)));
+    assert!(identity.is_none()&&startup.is_none());
+    CALLS.fetch_add(1,Ordering::Relaxed);
+    RESULT.load(Ordering::Relaxed)
 }
 "#,
     );
+    program.push_str(&source[begin..end]);
+    program.push_str(r#"
+fn main(){
+    assert_eq!(launch_bootstrap_image("/chosen/image","Compiler worker",7,9,task::PrivilegeLevel::Service),syscall::types::ENOENT);
+    assert_eq!(CALLS.load(Ordering::Relaxed),0);
+    assert_eq!(BYTES.load(Ordering::Relaxed),0);
+    PRESENT.store(true,Ordering::Relaxed);
+    for label in ["Compiler worker","/opaque/label","任意の名前",""] {
+        assert_eq!(launch_bootstrap_image("/chosen/image",label,7,9,task::PrivilegeLevel::Service),77);
+    }
+    assert_eq!(CALLS.load(Ordering::Relaxed),4);
+    assert_eq!(BYTES.load(Ordering::Relaxed),12);
+    RESULT.store((-12i64) as u64,Ordering::Relaxed);
+    assert_eq!(launch_bootstrap_image("/chosen/image","Compiler worker",7,9,task::PrivilegeLevel::Service),(-12i64) as u64);
+}
+"#);
     let directory = std::env::temp_dir().join(format!(
         "mochios-exec-authority-{}-{}",
         std::process::id(),

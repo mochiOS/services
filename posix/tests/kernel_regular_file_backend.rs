@@ -48,7 +48,16 @@ fn native_mapping_and_file_io_keep_the_provider_path_and_boot_loader_authority()
     assert!(handles.contains("provider_write(&provider, buffer, length)"));
     assert!(handles.contains("provider_seek(&provider, offset as i64, basis)"));
     let exec = include_str!("../../../core/src/syscall/exec.rs");
-    assert!(exec.contains("ensure_fs_path_executable_for_process(path, pid)"));
+    assert!(!exec.contains("ensure_fs_path_executable_for_process"));
     assert!(exec.contains("crate::init::fs::read_initfs(path)"));
-    assert!(exec.contains("crate::cext::fs::read_all(path)"));
+    for fallback in [
+        "crate::cext::fs::read_all",
+        "crate::init::fs::read_rootfs",
+        "load_regular_exec_image",
+    ] {
+        assert!(
+            !exec.contains(fallback),
+            "bootstrap filesystem fallback: {fallback}"
+        );
+    }
 }

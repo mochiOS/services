@@ -78,7 +78,7 @@ fn kernel_process_and_launch_no_longer_hold_or_inherit_posix_credentials() {
 }
 
 #[test]
-fn legacy_exec_path_keeps_native_authority_checks_without_posix_mode_policy() {
+fn native_image_authority_does_not_reintroduce_legacy_path_or_posix_mode_policy() {
     let fs = include_str!("../../../core/src/syscall/fs.rs");
     let path = include_str!("../../../core/src/capability/path.rs");
     for removed in [
@@ -90,13 +90,11 @@ fn legacy_exec_path_keeps_native_authority_checks_without_posix_mode_policy() {
         assert!(!fs.contains(removed), "kernel retains {removed}");
     }
     assert!(!path.contains("User(u64)"));
-    assert!(fs.contains("with_process(pid, |_| ()).is_none()"));
-    assert!(fs.contains("ensure_fs_capability_access_for_process(path, PATH_EXEC, pid.as_u64())"));
-    assert!(fs.contains("if !path_owner_allows(entry.owner, pid_raw)"));
-    assert!(fs.contains("enforce_fs_capabilities_for_process("));
-    assert!(fs.contains(
-        "PathOwner::Service(owner_pid) | PathOwner::Application(owner_pid) => owner_pid == pid_raw"
-    ));
+    assert!(!fs.contains("ensure_fs_capability_access_for_process"));
+    assert!(!fs.contains("path_owner_allows"));
+    let exec = include_str!("../../../core/src/syscall/exec.rs");
+    assert!(exec.contains("process.take_exec_authorization(request.identity, thread)"));
+    assert!(exec.contains("crate::syscall::handle::read_all(image_handle,"));
 }
 
 #[test]
