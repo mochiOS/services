@@ -41,6 +41,8 @@ struct Record {
     // Never a client PID/FD, supplied wire integer, or pathname comparison.
     sender: Option<u64>,
     payload: Vec<u8>,
+    // The queue owns these references, not a process-local sender FD table.
+    rights: Option<crate::socket_rights::Bundle>,
 }
 
 impl Record {
@@ -147,22 +149,60 @@ impl RecordQueue {
         send_capacity: usize,
         sender: Option<u64>,
     ) -> Result<usize, i32> {
+        let bytes = self.prepare_record(payload, send_capacity)?;
+        Ok(self.commit_record(source, bytes, sender, None))
+    }
+
+    /// On queue pressure or allocation failure, return ownership to the
+    /// transaction. Payload and ancillary references commit together.
+    pub fn push_with_rights(
+        &mut self,
+        source: SourceAddress,
+        payload: &[u8],
+        send_capacity: usize,
+        sender: Option<u64>,
+        rights: crate::socket_rights::Bundle,
+    ) -> Result<usize, (i32, crate::socket_rights::Bundle)> {
+        match self.prepare_record(payload, send_capacity) {
+            Ok(bytes) => Ok(self.commit_record(source, bytes, sender, Some(rights))),
+            Err(error) => Err((error, rights)),
+        }
+    }
+
+    pub fn front_rights(&self) -> Option<&crate::socket_rights::Bundle> {
+        self.records.front()?.rights.as_ref()
+    }
+
+    fn prepare_record(&mut self, payload: &[u8], send_capacity: usize) -> Result<Vec<u8>, i32> {
+        // All fallible allocations precede commitment. On failure the caller
+        // retains ownership, and the queue contents and charge are unchanged.
         if !self.can_push(payload.len(), send_capacity)? {
             return Err(-11);
         }
-        // All fallible allocations precede commitment. On failure the caller
-        // retains ownership, and the queue contents and charge are unchanged.
         let mut bytes = Vec::new();
         bytes.try_reserve_exact(payload.len()).map_err(|_| -12)?;
         bytes.extend_from_slice(payload);
         self.records.try_reserve(1).map_err(|_| -12)?;
+        Ok(bytes)
+    }
+
+    /// Only called immediately after prepare_record under queue serialization.
+    fn commit_record(
+        &mut self,
+        source: SourceAddress,
+        bytes: Vec<u8>,
+        sender: Option<u64>,
+        rights: Option<crate::socket_rights::Bundle>,
+    ) -> usize {
+        let length = bytes.len();
         self.charged += bytes.len().max(1);
         self.records.push_back(Record {
             source,
             sender,
             payload: bytes,
+            rights,
         });
-        Ok(payload.len())
+        length
     }
 
     /// A newly selected datagram peer restricts receive authority by socket
