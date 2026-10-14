@@ -1,0 +1,268 @@
+use mochios_posix_protocol::socket::{Create, Domain, Kind, NONBLOCKING};
+use posix_service::{
+    AuthenticatedProcess, PeerIdentity, PosixService,
+    socket::{MAX_ENDPOINTS, RECEIVE_CAPACITY, Shutdown, Streams},
+};
+
+fn fixture() -> (PosixService<u32>, PeerIdentity, Streams, Create) {
+    let mut service = PosixService::new();
+    service
+        .initialize_bootstrap_process(
+            AuthenticatedProcess {
+                handle: 1,
+                process_id: 1,
+            },
+            501,
+            20,
+            &[],
+        )
+        .unwrap();
+    (
+        service,
+        PeerIdentity {
+            process_id: 1,
+            effective_uid: 0,
+            effective_gid: 0,
+        },
+        Streams::new(),
+        Create {
+            domain: Domain::Unix,
+            kind: Kind::Stream,
+            protocol: 0,
+            options: 0,
+        },
+    )
+}
+
+#[test]
+fn creation_uses_registered_credentials_and_rejects_unknown_sender() {
+    let (service, peer, mut streams, request) = fixture();
+    assert_eq!(
+        service.create_socket_pair(
+            PeerIdentity {
+                process_id: 2,
+                ..peer
+            },
+            request,
+            &mut streams
+        ),
+        Err(-1)
+    );
+    let [a, b] = service
+        .create_socket_pair(peer, request, &mut streams)
+        .unwrap();
+    assert_eq!([a, b], [1, 2]);
+    assert_eq!(streams.credentials(a), Ok((501, 20)));
+    assert_eq!(streams.credentials(b), Ok((501, 20)));
+}
+
+#[test]
+fn independent_bidirectional_queues_preserve_order_and_partial_reads() {
+    let (service, peer, mut streams, request) = fixture();
+    let [a, b] = service
+        .create_socket_pair(peer, request, &mut streams)
+        .unwrap();
+    let mut bytes = [0; 4];
+    assert_eq!(streams.read(a, &mut bytes), Err(-11));
+    assert_eq!(streams.write(a, b"hello"), Ok(5));
+    assert_eq!(streams.write(b, b"1234"), Ok(4));
+    assert_eq!(streams.read(a, &mut bytes), Ok(4));
+    assert_eq!(&bytes, b"1234");
+    assert_eq!(streams.read(b, &mut bytes), Ok(4));
+    assert_eq!(&bytes, b"hell");
+    assert_eq!(streams.write(a, b"!"), Ok(1));
+    assert_eq!(streams.read(b, &mut bytes), Ok(2));
+    assert_eq!(&bytes[..2], b"o!");
+    assert_eq!(streams.read(b, &mut bytes), Err(-11));
+}
+
+#[test]
+fn full_queue_applies_backpressure_and_recovers_after_read() {
+    let (service, peer, mut streams, request) = fixture();
+    let [a, b] = service
+        .create_socket_pair(peer, request, &mut streams)
+        .unwrap();
+    let bytes = vec![7; RECEIVE_CAPACITY + 10];
+    assert_eq!(streams.write(a, &bytes), Ok(RECEIVE_CAPACITY));
+    assert!(!streams.readiness(a).unwrap().writable);
+    assert!(streams.readiness(b).unwrap().readable);
+    assert_eq!(streams.write(a, b"x"), Err(-11));
+    assert_eq!(streams.write(b, b"y"), Ok(1));
+    let mut output = [0; 3];
+    assert_eq!(streams.read(b, &mut output), Ok(3));
+    assert_eq!(output, [7; 3]);
+    assert!(streams.readiness(a).unwrap().writable);
+    assert_eq!(streams.write(a, b"abcd"), Ok(3));
+    let mut output = vec![0; RECEIVE_CAPACITY];
+    assert_eq!(streams.read(b, &mut output), Ok(RECEIVE_CAPACITY));
+    assert!(output[..RECEIVE_CAPACITY - 3].iter().all(|byte| *byte == 7));
+    assert_eq!(&output[RECEIVE_CAPACITY - 3..], b"abc");
+}
+
+#[test]
+fn half_close_drains_data_before_eof_and_preserves_reverse_direction() {
+    let (service, peer, mut streams, request) = fixture();
+    let [a, b] = service
+        .create_socket_pair(peer, request, &mut streams)
+        .unwrap();
+    streams.write(a, b"data").unwrap();
+    streams.shutdown(a, Shutdown::Write).unwrap();
+    streams.shutdown(a, Shutdown::Write).unwrap();
+    let ready = streams.readiness(b).unwrap();
+    assert!(ready.readable && ready.read_closed && ready.writable && !ready.write_closed);
+    assert_eq!(streams.write(a, b"x"), Err(-32));
+    assert_eq!(streams.write(b, b"reply"), Ok(5));
+    let mut output = [0; 8];
+    assert_eq!(streams.read(b, &mut output), Ok(4));
+    assert_eq!(&output[..4], b"data");
+    assert_eq!(streams.read(b, &mut output), Ok(0));
+    streams.shutdown(a, Shutdown::Read).unwrap();
+    assert_eq!(streams.read(a, &mut output), Ok(0));
+    assert_eq!(streams.write(b, b"x"), Err(-32));
+    assert!(streams.readiness(b).unwrap().write_closed);
+}
+
+#[test]
+fn final_release_preserves_peer_queue_then_eof_and_never_reuses_ids() {
+    let (service, peer, mut streams, request) = fixture();
+    let [a, b] = service
+        .create_socket_pair(peer, request, &mut streams)
+        .unwrap();
+    streams.write(a, b"data").unwrap();
+    streams.release(a).unwrap();
+    assert_eq!(streams.write(b, b"x"), Err(-32));
+    let mut output = [0; 8];
+    assert_eq!(streams.read(b, &mut output), Ok(4));
+    assert_eq!(&output[..4], b"data");
+    assert_eq!(streams.read(b, &mut output), Ok(0));
+    streams.release(b).unwrap();
+    assert_eq!(streams.release(b), Err(-9));
+    assert_eq!(
+        service.create_socket_pair(peer, request, &mut streams),
+        Ok([3, 4])
+    );
+    assert_eq!(streams.read(a, &mut output), Err(-9));
+}
+
+#[test]
+fn description_flags_are_shared_by_alias_not_by_peer_or_another_pair() {
+    let (service, peer, mut streams, request) = fixture();
+    let [a, b] = service
+        .create_socket_pair(
+            peer,
+            Create {
+                options: NONBLOCKING,
+                ..request
+            },
+            &mut streams,
+        )
+        .unwrap();
+    let [c, _] = service
+        .create_socket_pair(peer, request, &mut streams)
+        .unwrap();
+    let alias = a;
+    streams.set_options(alias, 0).unwrap();
+    assert_eq!(streams.options(a), Ok(0));
+    assert_eq!(streams.options(b), Ok(NONBLOCKING));
+    assert_eq!(streams.options(c), Ok(0));
+    assert_eq!(streams.set_options(a, 2), Err(-22));
+    assert_eq!(streams.options(a), Ok(0));
+}
+
+#[test]
+fn invalid_creation_and_capacity_limits_do_not_publish_partial_pairs() {
+    let (service, peer, mut streams, request) = fixture();
+    for (invalid, error) in [
+        (
+            Create {
+                options: 2,
+                ..request
+            },
+            -22,
+        ),
+        (
+            Create {
+                domain: Domain::Ipv4,
+                ..request
+            },
+            -95,
+        ),
+        (
+            Create {
+                domain: Domain::Ipv6,
+                ..request
+            },
+            -95,
+        ),
+        (
+            Create {
+                kind: Kind::Datagram,
+                ..request
+            },
+            -95,
+        ),
+        (
+            Create {
+                kind: Kind::SequencedPacket,
+                ..request
+            },
+            -95,
+        ),
+        (
+            Create {
+                protocol: 1,
+                ..request
+            },
+            -93,
+        ),
+    ] {
+        assert_eq!(
+            service.create_socket_pair(peer, invalid, &mut streams),
+            Err(error)
+        );
+    }
+    let mut pairs = Vec::new();
+    for index in 0..MAX_ENDPOINTS / 2 {
+        let ids = service
+            .create_socket_pair(peer, request, &mut streams)
+            .unwrap();
+        assert_eq!(ids, [(index * 2 + 1) as u64, (index * 2 + 2) as u64]);
+        pairs.push(ids);
+    }
+    assert_eq!(
+        service.create_socket_pair(peer, request, &mut streams),
+        Err(-23)
+    );
+    streams.release(pairs[0][0]).unwrap();
+    assert_eq!(
+        service.create_socket_pair(peer, request, &mut streams),
+        Err(-23)
+    );
+    streams.release(pairs[0][1]).unwrap();
+    assert_eq!(
+        service.create_socket_pair(peer, request, &mut streams),
+        Ok([MAX_ENDPOINTS as u64 + 1, MAX_ENDPOINTS as u64 + 2])
+    );
+}
+
+#[test]
+fn zero_length_operations_do_not_consume_data_and_still_validate_ids() {
+    let (service, peer, mut streams, request) = fixture();
+    let [a, b] = service
+        .create_socket_pair(peer, request, &mut streams)
+        .unwrap();
+    assert_eq!(streams.write(a, &[]), Ok(0));
+    assert_eq!(streams.read(a, &mut []), Ok(0));
+    assert_eq!(streams.write(9999, &[]), Err(-9));
+    assert_eq!(streams.read(9999, &mut []), Err(-9));
+    assert_eq!(streams.readiness(9999), Err(-9));
+    assert_eq!(streams.shutdown(9999, Shutdown::Both), Err(-9));
+    streams.write(a, b"x").unwrap();
+    assert_eq!(streams.read(b, &mut []), Ok(0));
+    let mut output = [0];
+    assert_eq!(streams.read(b, &mut output), Ok(1));
+    assert_eq!(output, [b'x']);
+    streams.shutdown(a, Shutdown::Both).unwrap();
+    assert_eq!(streams.write(a, &[]), Ok(0));
+    assert_eq!(streams.read(a, &mut []), Ok(0));
+}
