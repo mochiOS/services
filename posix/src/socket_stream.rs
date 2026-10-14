@@ -33,6 +33,9 @@ impl StreamQueue {
     pub fn is_empty(&self) -> bool {
         self.bytes.is_empty()
     }
+    pub fn can_attach_rights(&self) -> bool {
+        self.markers.len() < MAX_MARKERS
+    }
     pub fn ancillary_leases(&self) -> impl Iterator<Item = &Lease> {
         self.markers
             .iter()

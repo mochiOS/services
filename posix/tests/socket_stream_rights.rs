@@ -355,3 +355,136 @@ fn stream_socket_reference_cycles_share_the_existing_conservative_collector() {
     assert!(!streams.has_ancillary_records());
     assert!(!streams.readiness(b).unwrap().readable);
 }
+
+struct Buffer {
+    bytes: Vec<u8>,
+    read: usize,
+    fail: bool,
+}
+impl posix_service::socket_record_io::RecordBuffer for Buffer {
+    fn extent(&self) -> Result<u64, i32> {
+        Ok(self.bytes.len() as u64)
+    }
+    fn read(&mut self, offset: u64, output: &mut [u8]) -> Result<(), i32> {
+        if self.fail {
+            return Err(-5);
+        }
+        self.read = output.len();
+        output.copy_from_slice(&self.bytes[offset as usize..offset as usize + output.len()]);
+        Ok(())
+    }
+    fn write(&mut self, _: u64, _: &[u8]) -> Result<(), i32> {
+        unreachable!()
+    }
+}
+fn stage(
+    transfers: &mut posix_service::socket_transfer::Transfers,
+    streams: &Streams,
+    socket: u64,
+    length: u32,
+    source: u32,
+    file: u32,
+) -> u64 {
+    let id = transfers
+        .start(streams, socket, source, length, 1, close)
+        .unwrap();
+    transfers
+        .append(
+            id,
+            0,
+            vec![
+                Lease::adopt(
+                    file,
+                    mnu_abi::HANDLE_RIGHT_READ | mnu_abi::HANDLE_RIGHT_TRANSFER,
+                    InheritedFdMetadata {
+                        kind: 5,
+                        open_flags: 0,
+                        descriptor_flags: 0,
+                    },
+                    close,
+                )
+                .ok()
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+    id
+}
+
+#[test]
+fn staged_stream_commit_copies_only_accepted_prefix_and_never_replays_rights() {
+    let (mut streams, [a, b]) = pair();
+    let mut transfers = posix_service::socket_transfer::Transfers::new(1);
+    streams.set_receive_capacity(b, 256).unwrap();
+    streams.write(a, &[0; 255]).unwrap();
+    let id = stage(&mut transfers, &streams, a, 512, 900, 501);
+    let mut buffer = Buffer {
+        bytes: vec![b'x'; 512],
+        read: 0,
+        fail: true,
+    };
+    assert_eq!(transfers.commit(&mut streams, id, 0, &mut buffer), Err(-5));
+    assert_eq!(transfers.progress(id).unwrap().2, 1);
+    assert!(closed().is_empty());
+    buffer.fail = false;
+    assert_eq!(
+        transfers.commit(&mut streams, id, 0, &mut buffer),
+        Ok((1, [a, b]))
+    );
+    assert_eq!(buffer.read, 1);
+    assert_eq!(
+        transfers.commit(&mut streams, id, 0, &mut buffer),
+        Err(-114)
+    );
+    transfers.release(id).unwrap();
+    assert_eq!(closed(), [900]);
+    let mut output = [0; 512];
+    let (count, rights) = streams.read_stream_with_rights(b, &mut output).unwrap();
+    assert_eq!(count, 256);
+    assert_eq!(output[255], b'x');
+    assert_eq!(rights.as_ref().unwrap().leases()[0].handle(), 501);
+    drop(rights);
+    assert_eq!(closed(), [900, 501]);
+}
+
+#[test]
+fn ancillary_wait_needs_marker_capacity_even_when_plain_stream_is_writable() {
+    let (mut streams, [a, b]) = pair();
+    for index in 0..MAX_MARKERS {
+        streams
+            .commit_stream_with_rights(a, b"x", bundle(&[1000 + index as u32]))
+            .ok()
+            .unwrap();
+    }
+    assert!(streams.readiness(a).unwrap().writable);
+    assert_eq!(streams.ancillary_send_ready(a, 1), Ok(false));
+    let mut waits = posix_service::socket_receive_wait::ReceiveWaits::new();
+    let job = waits.start_send(&streams, a, 1, 900u32).unwrap();
+    waits.pump(&streams, |_| panic!("no busy wake on plain POLLOUT"));
+    streams.read(b, &mut [0; 1]).unwrap();
+    let mut signaled = vec![];
+    waits.pump(&streams, |id| signaled.push(id));
+    assert_eq!(signaled, [job]);
+    waits.release(job, close).unwrap();
+    assert_eq!(closed(), [1000, 900]);
+}
+
+#[test]
+fn staged_empty_stream_send_drops_rights_without_creating_readability() {
+    let (mut streams, [a, b]) = pair();
+    let mut transfers = posix_service::socket_transfer::Transfers::new(1);
+    let job = stage(&mut transfers, &streams, a, 0, 900, 501);
+    let mut buffer = Buffer {
+        bytes: vec![],
+        read: 0,
+        fail: false,
+    };
+    assert_eq!(
+        transfers.commit(&mut streams, job, 0, &mut buffer),
+        Ok((0, [a, a]))
+    );
+    assert!(!streams.readiness(b).unwrap().readable);
+    assert_eq!(closed(), [501]);
+    transfers.release(job).unwrap();
+    assert_eq!(closed(), [501, 900]);
+}

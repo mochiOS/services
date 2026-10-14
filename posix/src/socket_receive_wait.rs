@@ -1,5 +1,5 @@
 //! One-shot socket notifications. Native adapters authenticate receive waits
-//! through a READ Handle and atomic record-send waits through a WRITE Handle,
+//! through a READ Handle and record/ancillary-stream send waits through WRITE,
 //! retaining that reference for the job's life.
 //! Registration and pumping run on the same worker as queue mutations.
 
@@ -41,7 +41,7 @@ impl Condition {
     fn ready(self, streams: &Streams, socket: u64) -> Result<bool, i32> {
         match self {
             Self::Receive(minimum) => streams.receive_wait_ready(socket, minimum),
-            Self::SendRecord(length) => streams.record_send_ready(socket, length),
+            Self::SendRecord(length) => streams.ancillary_send_ready(socket, length),
         }
     }
 }

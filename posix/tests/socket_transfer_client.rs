@@ -320,6 +320,32 @@ fn send_validates_lengths_ranges_and_all_attachment_authority_before_ipc() {
 }
 
 #[test]
+fn stream_commit_accepts_only_valid_nonempty_prefixes_and_preserves_transport_errors() {
+    for value in [-11i32, 0, 1, 3, 8, 9] {
+        let mut mock = send_mock(3);
+        mock.bytes = value.to_le_bytes().to_vec();
+        let result =
+            socket_transfer::commit_prefix(&mock, source(42), source(20), 7, 8, |_| panic!());
+        match value {
+            -11 => assert_eq!(result, Err(ClientError::Remote(-11))),
+            1..=8 => assert_eq!(result, Ok(value as u32)),
+            _ => assert_eq!(result, Err(ClientError::MismatchedResponse)),
+        }
+        assert_eq!(mock.calls.get(), 1);
+    }
+    let mut mock = send_mock(3);
+    mock.bytes = 3i32.to_le_bytes().to_vec();
+    mock.incoming = vec![source(70), source(70)];
+    let mut closed = vec![];
+    assert!(
+        socket_transfer::commit_prefix(&mock, source(42), source(20), 7, 8, |handle| closed
+            .push(handle))
+        .is_err()
+    );
+    assert_eq!(closed, [70]);
+}
+
+#[test]
 fn consuming_receive_binds_capacity_and_returns_only_an_owned_receipt() {
     for (total, maximum) in [(0, 253), (253, 0), (253, 2), (253, 253)] {
         let mock = receive_mock(total, maximum);

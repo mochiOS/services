@@ -151,7 +151,8 @@ impl Transfers {
         Ok((stage.socket, stage.length, stage.state.received()?))
     }
 
-    /// Connected datagram commitment, serialized with cycle collection.
+    /// Socket send commitment, serialized with cycle collection. Datagrams
+    /// commit whole records; byte streams commit only their accepted prefix.
     /// Every fallible RAM check/copy precedes the ownership move; queue errors
     /// restore the full ready bundle. A successful send stays Complete even if
     /// its reply is lost, so repeating the same transaction cannot send twice.
@@ -195,30 +196,38 @@ impl Transfers {
             State::Collecting(pending) if !pending.is_complete() => return Err(-22),
             _ => (),
         }
-        if streams.kind(stage.socket)? != mochios_posix_protocol::socket::Kind::Datagram {
-            return Err(-95);
-        }
+        let stream = streams.kind(stage.socket)? == mochios_posix_protocol::socket::Kind::Stream;
         let end = offset.checked_add(u64::from(stage.length)).ok_or(-22)?;
         if end > buffer.extent()? {
             return Err(-22);
         }
-        let ready = match stage.route {
-            Some(route) => {
-                routes
-                    .as_deref()
-                    .ok_or(-95)?
-                    .ready(streams, route, stage.length as usize)?
+        let length = if stream {
+            if stage.route.is_some() {
+                return Err(-95);
             }
-            None => streams.record_send_ready(stage.socket, stage.length as usize)?,
+            streams.stream_send_length(
+                stage.socket,
+                stage.length as usize,
+                stage.state.received()? != 0,
+            )?
+        } else {
+            let ready = match stage.route {
+                Some(route) => {
+                    routes
+                        .as_deref()
+                        .ok_or(-95)?
+                        .ready(streams, route, stage.length as usize)?
+                }
+                None => streams.record_send_ready(stage.socket, stage.length as usize)?,
+            };
+            if !ready {
+                return Err(-11);
+            }
+            stage.length as usize
         };
-        if !ready {
-            return Err(-11);
-        }
         let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(stage.length as usize)
-            .map_err(|_| -12)?;
-        bytes.resize(stage.length as usize, 0);
+        bytes.try_reserve_exact(length).map_err(|_| -12)?;
+        bytes.resize(length, 0);
         buffer.read(offset, &mut bytes)?;
         let bundle = match std::mem::replace(&mut stage.state, State::Complete) {
             State::Ready(bundle) => bundle,
@@ -243,6 +252,7 @@ impl Transfers {
                 .as_deref_mut()
                 .unwrap()
                 .transfer_rights(streams, route, &bytes, bundle),
+            None if stream => streams.commit_stream_with_rights(stage.socket, &bytes, bundle),
             None => streams.commit_record_with_rights(stage.socket, &bytes, bundle),
         };
         match result {

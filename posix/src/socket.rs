@@ -381,6 +381,45 @@ impl Streams {
         self.receive(id, output, None)
     }
 
+    /// Bound a stream send by current byte and optional ancillary capacity.
+    pub fn stream_send_length(&self, id: u64, length: usize, with_rights: bool) -> Result<usize, i32> {
+        let source = self.endpoint(id)?;
+        if source.records.is_some() {
+            return Err(-95);
+        }
+        if length == 0 {
+            return Ok(0);
+        }
+        if source.write_shutdown {
+            return Err(-32);
+        }
+        let receiver = self.endpoint(source.peer.ok_or(-107)?).map_err(|_| -32)?;
+        if receiver.read_shutdown {
+            return Err(-32);
+        }
+        let count = length.min(
+            receiver.receive_capacity.min(source.send_capacity)
+                .saturating_sub(receiver.incoming.len()),
+        );
+        if count == 0 || (with_rights && !receiver.incoming.can_attach_rights()) {
+            return Err(-11);
+        }
+        Ok(count)
+    }
+
+    /// Wait for at least one byte and one ancillary marker on a stream; retain
+    /// full-record capacity semantics for datagrams. No FD enters this policy.
+    pub fn ancillary_send_ready(&self, id: u64, length: usize) -> Result<bool, i32> {
+        if self.kind(id)? == Kind::Datagram {
+            return self.record_send_ready(id, length);
+        }
+        match self.stream_send_length(id, length, true) {
+            Ok(_) => Ok(true),
+            Err(-11) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
     /// First-byte ancillary attachment on a connected byte stream. A short
     /// write transfers all rights with its accepted prefix, exactly once.
     /// The native adapter has authenticated the source WRITE lease already.
@@ -390,34 +429,14 @@ impl Streams {
         input: &[u8],
         rights: crate::socket_rights::Bundle,
     ) -> Result<(usize, [u64; 2]), (i32, crate::socket_rights::Bundle)> {
-        let prepared = (|| {
-            let source = self.endpoint(id)?;
-            if source.records.is_some() {
-                return Err(-95);
-            }
-            if input.is_empty() {
-                return Ok((id, 0));
-            }
-            if source.write_shutdown {
-                return Err(-32);
-            }
-            let peer = source.peer.ok_or(-107)?;
-            let receiver = self.endpoint(peer).map_err(|_| -32)?;
-            if receiver.read_shutdown {
-                return Err(-32);
-            }
-            let count = input.len().min(
-                receiver.receive_capacity.min(source.send_capacity)
-                    .saturating_sub(receiver.incoming.len()),
-            );
-            if count == 0 {
-                return Err(-11);
-            }
-            Ok((peer, count))
-        })();
-        let (peer, count) = match prepared {
-            Ok(values) => values,
+        let count = match self.stream_send_length(id, input.len(), !rights.is_empty()) {
+            Ok(count) => count,
             Err(error) => return Err((error, rights)),
+        };
+        let peer = if count == 0 {
+            id
+        } else {
+            self.endpoint(id).unwrap().peer.unwrap()
         };
         let receiver = match self.endpoint_mut(peer) {
             Ok(receiver) => receiver,
