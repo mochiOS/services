@@ -9,8 +9,38 @@ use posix_service::{
     socket_rights::Lease,
     socket_transfer::{Transfers, job_id, object_id},
 };
-use std::cell::RefCell;
+use std::{
+    alloc::{GlobalAlloc, Layout, System},
+    cell::{Cell, RefCell},
+};
 thread_local! { static CLOSED: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) }; }
+thread_local! { static FAIL_AFTER: Cell<isize> = const { Cell::new(-1) }; }
+struct Allocator;
+unsafe impl GlobalAlloc for Allocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let fail = FAIL_AFTER
+            .try_with(|remaining| {
+                let count = remaining.get();
+                if count < 0 {
+                    false
+                } else {
+                    remaining.set(count - 1);
+                    count == 0
+                }
+            })
+            .unwrap_or(false);
+        if fail {
+            std::ptr::null_mut()
+        } else {
+            unsafe { System.alloc(layout) }
+        }
+    }
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(pointer, layout) };
+    }
+}
+#[global_allocator]
+static ALLOCATOR: Allocator = Allocator;
 fn close(handle: u32) {
     CLOSED.with(|closed| closed.borrow_mut().push(handle));
 }
@@ -195,4 +225,314 @@ fn dropping_worker_cleans_partial_transactions_and_failed_starts_do_not_take_sou
     jobs.append(second, 0, vec![lease(2), lease(3)]).unwrap();
     drop(jobs);
     assert_eq!(closed(), [100, 1, 200, 2, 3]);
+}
+
+struct Buffer {
+    bytes: Vec<u8>,
+    reads: usize,
+    fail: bool,
+}
+impl Buffer {
+    fn new(bytes: &[u8]) -> Self {
+        Self {
+            bytes: bytes.to_vec(),
+            reads: 0,
+            fail: false,
+        }
+    }
+}
+impl posix_service::socket_record_io::RecordBuffer for Buffer {
+    fn extent(&self) -> Result<u64, i32> {
+        Ok(self.bytes.len() as u64)
+    }
+    fn read(&mut self, offset: u64, output: &mut [u8]) -> Result<(), i32> {
+        self.reads += 1;
+        if self.fail {
+            return Err(-5);
+        }
+        output.copy_from_slice(&self.bytes[offset as usize..offset as usize + output.len()]);
+        Ok(())
+    }
+    fn write(&mut self, offset: u64, input: &[u8]) -> Result<(), i32> {
+        self.bytes[offset as usize..offset as usize + input.len()].copy_from_slice(input);
+        Ok(())
+    }
+}
+fn pair() -> (Streams, [u64; 2]) {
+    let (mut streams, _) = fixture();
+    let mut service = PosixService::<u32>::new();
+    service
+        .initialize_bootstrap_process(
+            AuthenticatedProcess {
+                handle: 1,
+                process_id: 1,
+            },
+            501,
+            20,
+            &[],
+        )
+        .unwrap();
+    let ids = service
+        .create_socket_pair(
+            PeerIdentity {
+                process_id: 1,
+                effective_uid: 501,
+                effective_gid: 20,
+            },
+            Create {
+                domain: Domain::Unix,
+                kind: Kind::Datagram,
+                protocol: 0,
+                options: 0,
+            },
+            &mut streams,
+        )
+        .unwrap();
+    (streams, ids)
+}
+fn record(
+    operation: mochios_posix_protocol::socket_record::Operation,
+    length: u32,
+    peek: bool,
+) -> mochios_posix_protocol::socket_record::Request {
+    mochios_posix_protocol::socket_record::Request {
+        operation,
+        length,
+        offset: 0,
+        peek,
+    }
+}
+
+#[test]
+fn data_and_leases_commit_once_and_survive_transaction_release_until_receive() {
+    use mochios_posix_protocol::socket_record::{MAX_REPLY_LEN, Operation};
+    let (mut streams, [a, b]) = pair();
+    let mut jobs = Transfers::new(2);
+    let id = jobs.start(&streams, a, 100, 3, 2, close).unwrap();
+    jobs.append(id, 0, vec![lease(1), lease(2)]).unwrap();
+    let mut buffer = Buffer::new(b"abcdefgh");
+    assert_eq!(
+        jobs.commit(&mut streams, id, 2, &mut buffer),
+        Ok((3, [a, b]))
+    );
+    assert!(closed().is_empty());
+    assert_eq!(jobs.progress(id), Err(-114));
+    assert_eq!(jobs.commit(&mut streams, id, 2, &mut buffer), Err(-114));
+    assert_eq!(buffer.reads, 1);
+    assert_eq!(jobs.append(id, 2, vec![lease(3)]), Err(-114));
+    jobs.release(id).unwrap();
+    assert_eq!(closed(), [3, 100]);
+    assert_eq!(jobs.reserved_references(), 2);
+    let mut reply = [0; MAX_REPLY_LEN];
+    streams
+        .transfer_record(
+            b,
+            record(Operation::Receive, 2, true),
+            &mut buffer,
+            &mut reply,
+        )
+        .unwrap();
+    assert_eq!(&buffer.bytes[..2], b"cd");
+    assert_eq!(closed(), [3, 100]);
+    streams
+        .transfer_record(
+            b,
+            record(Operation::Receive, 1, false),
+            &mut buffer,
+            &mut reply,
+        )
+        .unwrap();
+    assert_eq!(closed(), [3, 100, 1, 2]);
+    assert_eq!(jobs.reserved_references(), 0);
+    assert_eq!(
+        streams.transfer_record(
+            b,
+            record(Operation::Receive, 1, false),
+            &mut buffer,
+            &mut reply
+        ),
+        Err(-11)
+    );
+}
+
+#[test]
+fn incomplete_batches_bad_extent_and_failed_copy_never_publish_data_or_rights() {
+    use mochios_posix_protocol::socket_record::{MAX_REPLY_LEN, Operation};
+    let (mut streams, [a, b]) = pair();
+    let mut jobs = Transfers::new(2);
+    let id = jobs.start(&streams, a, 100, 3, 2, close).unwrap();
+    jobs.append(id, 0, vec![lease(1)]).unwrap();
+    let mut buffer = Buffer::new(b"abc");
+    assert_eq!(jobs.commit(&mut streams, id, 0, &mut buffer), Err(-22));
+    assert_eq!(buffer.reads, 0);
+    jobs.append(id, 1, vec![lease(2)]).unwrap();
+    assert_eq!(jobs.commit(&mut streams, id, 1, &mut buffer), Err(-22));
+    assert_eq!(
+        jobs.commit(&mut streams, id, u64::MAX, &mut buffer),
+        Err(-22)
+    );
+    assert_eq!(buffer.reads, 0);
+    buffer.fail = true;
+    assert_eq!(jobs.commit(&mut streams, id, 0, &mut buffer), Err(-5));
+    assert_eq!(jobs.progress(id), Ok((a, 3, 2)));
+    assert!(closed().is_empty());
+    let mut reply = [0; MAX_REPLY_LEN];
+    assert_eq!(
+        streams.transfer_record(
+            b,
+            record(Operation::Receive, 3, false),
+            &mut buffer,
+            &mut reply
+        ),
+        Err(-11)
+    );
+    buffer.fail = false;
+    assert_eq!(
+        jobs.commit(&mut streams, id, 0, &mut buffer),
+        Ok((3, [a, b]))
+    );
+    streams
+        .transfer_record(
+            b,
+            record(Operation::Receive, 3, false),
+            &mut buffer,
+            &mut reply,
+        )
+        .unwrap();
+    assert_eq!(buffer.bytes, b"abc");
+    assert_eq!(closed(), [1, 2]);
+    jobs.release(id).unwrap();
+}
+
+#[test]
+fn pressure_and_peer_errors_keep_the_complete_bundle_available_for_retry_or_abort() {
+    use mochios_posix_protocol::socket_record::{MAX_REPLY_LEN, Operation};
+    let (mut streams, [a, b]) = pair();
+    let mut jobs = Transfers::new(1);
+    let id = jobs.start(&streams, a, 100, 1, 1, close).unwrap();
+    jobs.append(id, 0, vec![lease(1)]).unwrap();
+    let mut full = Buffer::new(&[0; 65536]);
+    let mut reply = [0; MAX_REPLY_LEN];
+    streams
+        .transfer_record(
+            a,
+            record(Operation::Send, 65536, false),
+            &mut full,
+            &mut reply,
+        )
+        .unwrap();
+    let mut buffer = Buffer::new(b"x");
+    assert_eq!(jobs.commit(&mut streams, id, 0, &mut buffer), Err(-11));
+    assert_eq!(buffer.reads, 0);
+    streams
+        .transfer_record(
+            b,
+            record(Operation::Receive, 0, false),
+            &mut full,
+            &mut reply,
+        )
+        .unwrap();
+    streams.disconnect_datagram(a).unwrap();
+    assert_eq!(jobs.commit(&mut streams, id, 0, &mut buffer), Err(-89));
+    assert_eq!(jobs.progress(id), Ok((a, 1, 1)));
+    assert!(closed().is_empty());
+    streams
+        .connect_datagram_named(a, b, None, b"/peer")
+        .unwrap();
+    assert_eq!(
+        jobs.commit(&mut streams, id, 0, &mut buffer),
+        Ok((1, [a, b]))
+    );
+    jobs.release(id).unwrap();
+    streams
+        .shutdown(b, posix_service::socket::Shutdown::Read)
+        .unwrap();
+    assert_eq!(jobs.reserved_references(), 0);
+    assert_eq!(closed(), [100, 1]);
+}
+
+#[test]
+fn every_commit_allocation_failure_restores_complete_ownership_and_allows_one_retry() {
+    for allocation in 0..3 {
+        let (mut streams, [a, b]) = pair();
+        let mut jobs = Transfers::new(1);
+        let id = jobs.start(&streams, a, 100, 3, 1, close).unwrap();
+        jobs.append(id, 0, vec![lease(1)]).unwrap();
+        let mut buffer = Buffer::new(b"abc");
+        FAIL_AFTER.with(|fail| fail.set(allocation));
+        let result = jobs.commit(&mut streams, id, 0, &mut buffer);
+        FAIL_AFTER.with(|fail| fail.set(-1));
+        assert_eq!(result, Err(-12));
+        assert_eq!(jobs.progress(id), Ok((a, 3, 1)));
+        assert!(!streams.readiness(b).unwrap().readable);
+        assert!(closed().is_empty());
+        assert_eq!(jobs.reserved_references(), 1);
+        assert_eq!(
+            jobs.commit(&mut streams, id, 0, &mut buffer),
+            Ok((3, [a, b]))
+        );
+        assert_eq!(jobs.commit(&mut streams, id, 0, &mut buffer), Err(-114));
+        jobs.release(id).unwrap();
+        streams
+            .shutdown(b, posix_service::socket::Shutdown::Read)
+            .unwrap();
+        assert_eq!(closed(), [100, 1]);
+        assert_eq!(jobs.reserved_references(), 0);
+    }
+}
+
+#[test]
+fn empty_datagram_commits_rights_as_a_readable_record_not_eof() {
+    use mochios_posix_protocol::socket_record::{MAX_REPLY_LEN, Operation};
+    let (mut streams, [a, b]) = pair();
+    let mut jobs = Transfers::new(1);
+    let id = jobs.start(&streams, a, 100, 0, 1, close).unwrap();
+    jobs.append(id, 0, vec![lease(1)]).unwrap();
+    let mut buffer = Buffer::new(&[]);
+    assert_eq!(
+        jobs.commit(&mut streams, id, 0, &mut buffer),
+        Ok((0, [a, b]))
+    );
+    jobs.release(id).unwrap();
+    assert!(streams.readiness(b).unwrap().readable);
+    let mut reply = [0; MAX_REPLY_LEN];
+    streams
+        .transfer_record(
+            b,
+            record(Operation::Receive, 0, false),
+            &mut buffer,
+            &mut reply,
+        )
+        .unwrap();
+    assert_eq!(closed(), [100, 1]);
+    assert_eq!(jobs.reserved_references(), 0);
+    assert!(!streams.readiness(b).unwrap().readable);
+    assert_eq!(
+        streams.transfer_record(
+            b,
+            record(Operation::Receive, 0, false),
+            &mut buffer,
+            &mut reply
+        ),
+        Err(-11)
+    );
+}
+
+#[test]
+fn terminal_peer_error_can_abort_a_ready_bundle_without_leaking_or_publishing() {
+    let (mut streams, [a, b]) = pair();
+    let mut jobs = Transfers::new(1);
+    let id = jobs.start(&streams, a, 100, 1, 1, close).unwrap();
+    jobs.append(id, 0, vec![lease(1)]).unwrap();
+    streams
+        .shutdown(b, posix_service::socket::Shutdown::Read)
+        .unwrap();
+    let mut buffer = Buffer::new(b"x");
+    assert_eq!(jobs.commit(&mut streams, id, 0, &mut buffer), Err(-111));
+    assert_eq!(jobs.progress(id), Ok((a, 1, 1)));
+    assert_eq!(jobs.reserved_references(), 1);
+    assert!(closed().is_empty());
+    jobs.release(id).unwrap();
+    assert_eq!(closed(), [100, 1]);
+    assert_eq!(jobs.reserved_references(), 0);
 }

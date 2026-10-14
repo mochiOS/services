@@ -541,16 +541,7 @@ impl Streams {
         let send_capacity = entry.send_capacity;
         let source = crate::socket_record::SourceAddress::new(self.address(id)?)?;
         let destination = if request.operation == Operation::Send {
-            if entry.write_shutdown {
-                return Err(-32);
-            }
-            let peer = entry.peer.ok_or(-89)?;
-            let target = self.endpoint(peer).map_err(|_| -111)?;
-            if target.read_shutdown {
-                return Err(-111);
-            }
-            if target.peer.is_some_and(|sender| sender != id) { return Err(-1); }
-            peer
+            self.record_destination(id)?
         } else {
             if entry.read_shutdown {
                 return mochios_posix_protocol::socket_record::Reply {
@@ -569,6 +560,57 @@ impl Streams {
             .as_mut()
             .ok_or(-91)?;
         crate::socket_record_io::transfer_from(queue, request, source, send_capacity, buffer, response, Some(id))
+    }
+
+    /// Shared connected-datagram policy. An adapter supplies only a socket ID
+    /// already authenticated through native attached authority, never a wire ID.
+    fn record_destination(&self, id: u64) -> Result<u64, i32> {
+        let entry = self.endpoint(id)?;
+        if entry.records.is_none() {
+            return Err(-95);
+        }
+        if entry.write_shutdown {
+            return Err(-32);
+        }
+        let peer = entry.peer.ok_or(-89)?;
+        let target = self.endpoint(peer).map_err(|_| -111)?;
+        if target.read_shutdown {
+            return Err(-111);
+        }
+        if target.peer.is_some_and(|sender| sender != id) {
+            return Err(-1);
+        }
+        Ok(peer)
+    }
+
+    /// Payload and ready ancillary leases become visible together. All errors
+    /// return the complete bundle to its staging transaction for retry/abort.
+    pub fn commit_record_with_rights(
+        &mut self,
+        id: u64,
+        payload: &[u8],
+        rights: crate::socket_rights::Bundle,
+    ) -> Result<(usize, [u64; 2]), (i32, crate::socket_rights::Bundle)> {
+        let prepared = (|| {
+            let destination = self.record_destination(id)?;
+            let source = crate::socket_record::SourceAddress::new(self.address(id)?)?;
+            let capacity = self.endpoint(id)?.send_capacity;
+            Ok((destination, source, capacity))
+        })();
+        let (destination, source, capacity) = match prepared {
+            Ok(values) => values,
+            Err(error) => return Err((error, rights)),
+        };
+        // record_destination verified a live datagram queue under this borrow.
+        let queue = match self.endpoint_mut(destination) {
+            Ok(entry) => match entry.records.as_mut() {
+                Some(queue) => queue,
+                None => return Err((-91, rights)),
+            },
+            Err(error) => return Err((error, rights)),
+        };
+        queue.push_with_rights(source, payload, capacity, Some(id), rights)
+            .map(|count| (count, [id, destination]))
     }
 
     /// A large atomic write needs its entire capacity, not just POLLOUT's

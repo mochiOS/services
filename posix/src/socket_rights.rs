@@ -145,6 +145,9 @@ impl Pending {
     pub fn received(&self) -> usize {
         self.bundle.leases.len()
     }
+    pub fn is_complete(&self) -> bool {
+        self.received() == self.expected
+    }
     /// Offset is a transaction-local index, not an FD or resource identity.
     /// On error the old stage is untouched; all newly supplied leases close.
     /// A repeated batch is NOT appended twice after an ambiguous/lost reply.
