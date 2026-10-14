@@ -55,7 +55,16 @@ fn captured_prefix_has_reverse_prepare_forward_parent_and_child_order() {
     assert_eq!(events(), "");
     register(&mut registry, first());
     register(&mut registry, Handlers::default());
-    register(&mut registry, second());
+    // Storage can be obtained before taking the registry's external mutex.
+    let layout = Registry::registration_layout();
+    let allocation = unsafe { std::alloc::alloc(layout) };
+    unsafe {
+        registry.register(second(), |requested| {
+            assert_eq!(requested, layout);
+            allocation
+        })
+    }
+    .unwrap();
     let snapshot = registry.snapshot();
     unsafe {
         snapshot.prepare();

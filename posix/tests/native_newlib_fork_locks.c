@@ -19,6 +19,7 @@ static _LOCK_RECURSIVE_T allocator_lock = &__lock___malloc_recursive_mutex;
 
 #ifdef __mochios__
 static atomic_int arena_ready, fork_entered, fork_finished, arena_copied_early, arena_stop;
+static atomic_int registration_error;
 static void *arena_writer(void *unused) {
     (void)unused;
     __lock_acquire_recursive(allocator_lock);
@@ -27,6 +28,8 @@ static void *arena_writer(void *unused) {
     struct timespec delay = { .tv_nsec = 100000000 };
     while (nanosleep(&delay, &delay) && errno == EINTR) {}
     atomic_store(&arena_copied_early, atomic_load(&fork_finished));
+    /* Fork must not hold REGISTRY while waiting for this allocator lock. */
+    atomic_store(&registration_error, pthread_atfork(NULL, NULL, NULL));
     __lock_release_recursive(allocator_lock);
     /* Stay live so AddressSpaceClone still rejects a multithreaded source. */
     while (!atomic_load(&arena_stop)) sched_yield();
@@ -44,8 +47,10 @@ static int serialized_arena(void) {
     atomic_store(&arena_stop, 1);
     void *result;
     CHECK(pthread_join(thread, &result) == 0 && result == NULL);
-    CHECK(child == -1 && error == EAGAIN && !atomic_load(&arena_copied_early));
+    CHECK(child == -1 && error == EAGAIN && !atomic_load(&arena_copied_early)
+        && !atomic_load(&registration_error));
     puts("newlib-fork-locks: PASS clone waits for allocator mutation and releases locks after EAGAIN");
+    puts("newlib-fork-locks: PASS atfork registration under allocator ownership does not invert clone locks");
     return 0;
 }
 #endif
