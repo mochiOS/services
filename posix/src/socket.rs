@@ -353,9 +353,6 @@ impl Streams {
         if entry.records.is_some() {
             return Err(-95);
         }
-        if input.is_empty() {
-            return Ok(0);
-        }
         if entry.write_shutdown {
             return Err(-32);
         }
@@ -364,6 +361,9 @@ impl Streams {
         let receiver = self.endpoint_mut(peer).map_err(|_| -32)?;
         if receiver.read_shutdown {
             return Err(-32);
+        }
+        if input.is_empty() {
+            return Ok(0);
         }
         let count = input.len().min(
             receiver
@@ -387,15 +387,15 @@ impl Streams {
         if source.records.is_some() {
             return Err(-95);
         }
-        if length == 0 {
-            return Ok(0);
-        }
         if source.write_shutdown {
             return Err(-32);
         }
         let receiver = self.endpoint(source.peer.ok_or(-107)?).map_err(|_| -32)?;
         if receiver.read_shutdown {
             return Err(-32);
+        }
+        if length == 0 {
+            return Ok(0);
         }
         let count = length.min(
             receiver.receive_capacity.min(source.send_capacity)

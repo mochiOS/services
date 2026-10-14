@@ -437,6 +437,46 @@ fn zero_length_operations_do_not_consume_data_and_still_validate_ids() {
     assert_eq!(streams.read(b, &mut output), Ok(1));
     assert_eq!(output, [b'x']);
     streams.shutdown(a, Shutdown::Both).unwrap();
-    assert_eq!(streams.write(a, &[]), Ok(0));
+    assert_eq!(streams.write(a, &[]), Err(-32));
     assert_eq!(streams.read(a, &mut []), Ok(0));
+}
+
+#[test]
+fn empty_stream_sends_validate_connection_and_shutdown_without_requiring_capacity() {
+    let (service, peer, mut streams, request) = fixture();
+    let unconnected = service
+        .create_socket(peer, request, &mut streams)
+        .unwrap();
+    assert_eq!(streams.write(unconnected, &[]), Err(-107));
+    assert_eq!(streams.stream_send_length(unconnected, 0, false), Err(-107));
+    for how in [Shutdown::Read, Shutdown::Write, Shutdown::Both] {
+        let [a, b] = service
+            .create_socket_pair(peer, request, &mut streams)
+            .unwrap();
+        let full = vec![0; RECEIVE_CAPACITY];
+        assert_eq!(streams.write(a, &full), Ok(RECEIVE_CAPACITY));
+        assert_eq!(streams.write(a, b"x"), Err(-11));
+        assert_eq!(streams.write(a, &[]), Ok(0));
+        assert_eq!(streams.stream_send_length(a, 0, true), Ok(0));
+        streams.shutdown(a, how).unwrap();
+        let expected = if how == Shutdown::Read {
+            Ok(0)
+        } else {
+            Err(-32)
+        };
+        assert_eq!(streams.write(a, &[]), expected);
+        assert_eq!(streams.stream_send_length(a, 0, true), expected);
+        if matches!(how, Shutdown::Read | Shutdown::Both) {
+            assert_eq!(streams.write(b, &[]), Err(-32));
+            assert_eq!(streams.stream_send_length(b, 0, false), Err(-32));
+        }
+        streams.release(a).unwrap();
+        streams.release(b).unwrap();
+    }
+    let [a, b] = service
+        .create_socket_pair(peer, request, &mut streams)
+        .unwrap();
+    streams.release(b).unwrap();
+    assert_eq!(streams.write(a, &[]), Err(-32));
+    assert_eq!(streams.stream_send_length(a, 0, false), Err(-32));
 }
