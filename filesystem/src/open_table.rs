@@ -22,6 +22,10 @@ enum Description {
 pub(crate) struct OpenTable(HashMap<u64, Description>);
 
 impl OpenTable {
+    pub fn try_reserve(&mut self, additional: usize) -> Result<(), std::collections::TryReserveError> {
+        self.0.try_reserve(additional)
+    }
+
     // Existing ext4 operations access only disk descriptions. Device operations
     // must select the other variant explicitly; no fake inode or disk fallback.
     pub fn get(&self, id: &u64) -> Option<&OpenFile> {

@@ -1349,6 +1349,72 @@ fn socket_inode_creation_is_exclusive_scoped_and_not_a_regular_file_placeholder(
     service.provider_close(mounted.open_id).unwrap();
 }
 
+#[test]
+fn retained_socket_inode_survives_unlink_and_cannot_alias_a_recreated_name() {
+    let fixture = Fixture::new();
+    let mut service = FilesystemService::new(fixture.volume("socket-retained"));
+    let request = protocol::Header {
+        mode: 0o600,
+        ..Default::default()
+    };
+    let response = service
+        .create_socket_at_retained(
+            request,
+            b"/socket",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    let original = protocol::decode_node_status(&response.payload).unwrap();
+    let open_id = response.header.open_id;
+    assert_ne!(open_id, 0);
+    assert_eq!(response.header.node_id, original.node_id);
+    service
+        .unlink_at(
+            protocol::Header::default(),
+            b"/socket",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    assert!(matches!(
+        service.stat_at(
+            protocol::Header::default(),
+            b"/socket",
+            PathAnchors::default(),
+            root_credentials(),
+        ),
+        Err(2)
+    ));
+    let retained = service
+        .stat_handle(protocol::Header::default(), open_id)
+        .unwrap();
+    let retained = protocol::decode_node_status(&retained.payload).unwrap();
+    assert_eq!(retained.node_id, original.node_id);
+    assert_eq!(retained.kind, protocol::NODE_TYPE_SOCKET);
+    assert_eq!(retained.link_count, 0);
+    let next = service
+        .create_socket_at(request, b"/socket", PathAnchors::default(), root_credentials())
+        .unwrap();
+    let next = protocol::decode_node_status(&next.payload).unwrap();
+    assert_ne!(next.node_id, original.node_id);
+    assert_eq!(next.link_count, 1);
+    service.provider_close(open_id).unwrap();
+    assert!(matches!(
+        service.stat_handle(protocol::Header::default(), open_id),
+        Err(9)
+    ));
+    let next_status = service
+        .stat_at(
+            protocol::Header::default(),
+            b"/socket",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    assert_eq!(protocol::decode_node_status(&next_status.payload).unwrap(), next);
+}
+
 fn open(
     service: &mut FilesystemService,
     path: &[u8],

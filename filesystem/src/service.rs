@@ -471,6 +471,41 @@ impl FilesystemService {
         anchors: PathAnchors,
         credentials: protocol::Credentials,
     ) -> Result<Response, i32> {
+        self.create_socket_at_inner(request, payload, anchors, credentials, false)
+    }
+
+    /// Keep an inode description for binding lifetime. The native adapter must
+    /// wrap open_id in a metadata-only Provider Handle and release it on failure.
+    /// Client FDs never enter this internal description table.
+    pub fn create_socket_at_retained(
+        &mut self,
+        request: protocol::Header,
+        payload: &[u8],
+        anchors: PathAnchors,
+        credentials: protocol::Credentials,
+    ) -> Result<Response, i32> {
+        self.create_socket_at_inner(request, payload, anchors, credentials, true)
+    }
+
+    fn create_socket_at_inner(
+        &mut self,
+        request: protocol::Header,
+        payload: &[u8],
+        anchors: PathAnchors,
+        credentials: protocol::Credentials,
+        retain: bool,
+    ) -> Result<Response, i32> {
+        // Reserve the identity before changing the namespace; a failed identity
+        // allocation must not leave a published file without a description.
+        let next_open = if retain {
+            if self.next_open_id > i64::MAX as u64 {
+                return Err(EIO);
+            }
+            self.opens.try_reserve(1).map_err(|_| 12)?;
+            Some(self.next_open_id.checked_add(1).ok_or(EIO)?)
+        } else {
+            None
+        };
         if request.flags & !protocol::SOCKET_AT_FLAGS_ALL != 0
             || (request.flags & protocol::SOCKET_AT_ROOT_ATTACHED != 0)
                 != anchors.root_open_id.is_some()
@@ -521,11 +556,32 @@ impl FilesystemService {
             })
             .map_err(errno)?;
         parent.link(name, &mut inode).map_err(errno)?;
-        Ok(self.node_status_response(
+        let node_id = scoped_node_id(volume, &inode);
+        let mut response = self.node_status_response(
             request,
-            scoped_node_id(volume, &inode),
+            node_id,
             inode.metadata(),
-        ))
+        );
+        if let Some(next_open) = next_open {
+            let open_id = self.next_open_id;
+            self.next_open_id = next_open;
+            self.opens.insert(
+                open_id,
+                OpenFile {
+                    node_id,
+                    volume,
+                    filesystem,
+                    memory_object_id: self.memory_identity_for(node_id, open_id),
+                    inode,
+                    file: None,
+                    offset: 0,
+                    status_flags: 0,
+                },
+            );
+            response.header.open_id = open_id;
+            response.header.node_id = node_id;
+        }
+        Ok(response)
     }
 
     pub fn mkdir_at(
@@ -985,7 +1041,7 @@ impl FilesystemService {
         }
         let open = self.opens.get(&open_id).ok_or(EBADF)?;
         let node_id = open.node_id;
-        let metadata = if open.file.is_some() {
+        let metadata = if open.file.is_some() || open.inode.file_type().is_socket() {
             Inode::read(&open.filesystem, open.inode.index)
                 .map_err(errno)?
                 .metadata()
@@ -3021,6 +3077,15 @@ impl FilesystemService {
         node_id: u64,
         metadata: Metadata,
     ) -> Response {
+        let physical_links = u32::from(metadata.links_count);
+        let link_count = if self.orphans.contains_key(&node_id) {
+            match physical_links.checked_sub(1) {
+                Some(links) => links,
+                None => return self.error(request, EIO),
+            }
+        } else {
+            physical_links
+        };
         let mut response = self.success(request);
         response.payload.resize(protocol::NODE_STATUS_LEN, 0);
         let status = protocol::NodeStatus {
@@ -3033,7 +3098,7 @@ impl FilesystemService {
             mode: u32::from(metadata.mode()),
             uid: metadata.uid(),
             gid: metadata.gid(),
-            link_count: u32::from(metadata.links_count),
+            link_count,
             special_device: 0,
             access_time_seconds: metadata.atime.as_secs(),
             access_time_nanoseconds: metadata.atime.subsec_nanos(),
