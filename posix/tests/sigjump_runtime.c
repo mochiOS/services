@@ -240,7 +240,10 @@ static int sj_minimum_stack(void) {
     puts("sigjump: guarded minimum stack, sync and native async escape PASS");
     return 0;
 }
-int main(int argc, char **argv) {
+#ifndef SIGJUMP_TEST_ENTRY
+#define SIGJUMP_TEST_ENTRY main
+#endif
+int SIGJUMP_TEST_ENTRY(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--after-exec")) return upcall_defer_regression_main(argc, argv);
     CHECK(sj_values_and_masks() == 0);
     CHECK(sj_sync() == 0);
