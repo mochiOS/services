@@ -783,7 +783,10 @@ static int verify_exec(char **argv) {
   fprintf(stderr, "posix-socket-pair-exec: PASS\n");
   return 0;
 }
-int main(int argc, char **argv) {
+#ifndef POSIX_SOCKET_PAIR_TEST_ENTRY
+#define POSIX_SOCKET_PAIR_TEST_ENTRY main
+#endif
+int POSIX_SOCKET_PAIR_TEST_ENTRY(int argc, char **argv) {
   if (argc == 5 && !strcmp(argv[1], "--socket-exec"))
     return verify_exec(argv);
   CHECK(verify_single_socket() == 0);
@@ -839,7 +842,7 @@ int main(int argc, char **argv) {
   item.events = POLLIN;
   CHECK(poll(&item, 1, 0) == 0 && item.revents == 0);
   CHECK(send(b, "hello", 5, MSG_NOSIGNAL) == 5);
-  CHECK(recv(a, bytes, sizeof(bytes), MSG_PEEK) == -1 && errno == ENOTSUP);
+  CHECK(recv(a, bytes, sizeof(bytes), MSG_PEEK) == 5 && !memcmp(bytes, "hello", 5));
   CHECK(fstat(a, &duplicate) == 0 && duplicate.st_size == 0 &&
         duplicate.st_ino == original.st_ino);
   CHECK(poll(&item, 1, 0) == 1 && item.revents == POLLIN);

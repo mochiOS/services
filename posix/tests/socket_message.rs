@@ -1,5 +1,5 @@
 use mochios_posix_client::socket::{
-    MSG_DONTWAIT, MSG_NOSIGNAL, MSG_WAITALL, ReceiveError, message_options, receive,
+    MSG_DONTWAIT, MSG_NOSIGNAL, MSG_PEEK, MSG_WAITALL, ReceiveError, message_options, receive,
 };
 
 #[test]
@@ -8,7 +8,8 @@ fn message_flags_are_call_local_and_unsupported_semantics_are_explicit() {
         let options = message_options(MSG_DONTWAIT, sending).unwrap();
         assert!(options.dont_wait);
         assert!(!options.wait_all && !options.no_signal);
-        for unsupported in [1, 2, -1, 0x10000] {
+        assert!(!options.peek);
+        for unsupported in [1, -1, 0x10000] {
             assert_eq!(message_options(unsupported, sending), Err(-95));
         }
     }
@@ -24,6 +25,9 @@ fn message_flags_are_call_local_and_unsupported_semantics_are_explicit() {
     );
     assert_eq!(message_options(MSG_WAITALL, true), Err(-95));
     assert_eq!(message_options(MSG_NOSIGNAL, false), Err(-95));
+    assert_eq!(message_options(MSG_PEEK, true), Err(-95));
+    let options = message_options(MSG_PEEK | MSG_WAITALL | MSG_DONTWAIT, false).unwrap();
+    assert!(options.peek && options.wait_all && options.dont_wait && !options.no_signal);
 }
 
 #[test]

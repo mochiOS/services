@@ -11,6 +11,7 @@ pub mod socket;
 pub mod socket_provider;
 pub mod socket_binding;
 pub mod socket_connect;
+pub mod socket_receive_wait;
 pub mod filesystem_transport;
 mod fault_signal;
 mod signal_origin;

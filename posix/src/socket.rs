@@ -11,9 +11,9 @@ pub const SEND_CAPACITY: usize = 64 * 1024;
 pub const MIN_SEND_CAPACITY: usize = 256;
 pub const MAX_ENDPOINTS: usize = 1024;
 pub const MAX_BACKLOG: usize = 128;
-/// Private Provider namespace: bit 62 distinguishes connection wait jobs.
+/// Private Provider namespace: bits 61/62 distinguish receive/connection jobs.
 /// Stay within the native Provider's signed 64-bit object identity range.
-pub const MAX_DESCRIPTION_ID: u64 = (1 << 62) - 1;
+pub const MAX_DESCRIPTION_ID: u64 = (1 << 61) - 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shutdown {
@@ -379,6 +379,21 @@ impl Streams {
     /// queue reports and clears a pending error before reporting EOF.
     pub fn peek(&mut self, id: u64, offset: usize, output: &mut [u8]) -> Result<usize, i32> {
         self.receive(id, output, Some(offset))
+    }
+
+    /// Serialized with registration of a receive notification. A terminal
+    /// result wakes a waiter even when the requested prefix cannot be filled.
+    pub fn receive_wait_ready(&self, id: u64, minimum: u64) -> Result<bool, i32> {
+        if minimum == 0 {
+            return Err(-22);
+        }
+        let entry = self.endpoint(id)?;
+        if entry.peer.is_none() {
+            return Err(-107);
+        }
+        Ok(entry.incoming.len() as u64 >= minimum
+            || entry.error != 0
+            || self.readiness(id)?.read_closed)
     }
 
     fn receive(

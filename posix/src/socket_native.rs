@@ -132,6 +132,7 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
     let mut streams = Streams::new();
     let mut bindings = posix_service::socket_binding::Bindings::new();
     let mut jobs = posix_service::socket_connect::Connections::new();
+    let mut receive_waits = posix_service::socket_receive_wait::ReceiveWaits::new();
     let mut request = vec![0; provider::REQUEST_HEADER_LEN + provider::MAX_DATA_LEN];
     let mut response = vec![0; provider::RESPONSE_HEADER_LEN + provider::MAX_DATA_LEN];
     loop {
@@ -149,7 +150,18 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
         };
         let sender = message >> 32;
         let bytes = &request[..(message as u32 as usize).min(request.len())];
-        if bytes.starts_with(super::socket_connect_native::MAGIC) {
+        let mut retained_receive_source = false;
+        if bytes.starts_with(super::socket_receive_wait_native::MAGIC) {
+            retained_receive_source = super::socket_receive_wait_native::dispatch(
+                endpoint,
+                service_process,
+                &streams,
+                &mut receive_waits,
+                sender,
+                bytes,
+                &attachments,
+            );
+        } else if bytes.starts_with(super::socket_connect_native::MAGIC) {
             if let Some(ids) = super::socket_connect_native::dispatch(
                 endpoint,
                 service_process,
@@ -257,6 +269,40 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                 .filter(|(header, _)| native && header.opcode == provider::OP_RELEASE)
                 .and_then(|(header, _)| streams.release_observers(header.object_id).ok());
             if let Some((header, payload)) = decoded {
+                if posix_service::socket_receive_wait::job_id(header.object_id).is_ok() {
+                    let result = receive_waits.handle_provider_request(
+                        bytes,
+                        attachments.delivery_flags,
+                        attachments.count,
+                        |source| {
+                            let _ = platform::handle::close(source);
+                        },
+                    );
+                    // Only final release is exposed. Other requests must get a
+                    // bounded error reply rather than leaving IPC callers hung.
+                    if let Err(error) = result
+                        && !(native
+                            && header.opcode == provider::OP_RELEASE
+                            && error == -9
+                            && attachments.count == 0)
+                    {
+                        if let Ok(length) = (provider::ResponseHeader {
+                            opcode: header.opcode,
+                            status: i64::from(error),
+                            object_id: header.object_id,
+                            value: 0,
+                            data_length: 0,
+                        })
+                        .encode(&[], &mut response)
+                        {
+                            let _ = platform::ipc::reply(sender, &response[..length]);
+                        }
+                    }
+                    for attached in attachments.handles.iter().take(attachments.count as usize) {
+                        let _ = platform::handle::close(attached.handle);
+                    }
+                    continue;
+                }
                 if header.object_id & posix_service::socket_connect::JOB_OBJECT_TAG != 0 {
                     let client = posix_service::socket_connect::job_id(header.object_id)
                         .and_then(|id| jobs.client(id))
@@ -383,9 +429,15 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                 ),
             }
         }
-        for attached in attachments.handles.iter().take(attachments.count as usize) {
+        for attached in attachments
+            .handles
+            .iter()
+            .take(attachments.count as usize)
+            .skip(usize::from(retained_receive_source))
+        {
             let _ = platform::handle::close(attached.handle);
         }
         super::socket_connect_native::pump(&mut streams, &bindings, &mut jobs);
+        super::socket_receive_wait_native::pump(&streams, &mut receive_waits);
     }
 }

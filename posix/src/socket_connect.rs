@@ -20,7 +20,7 @@ pub fn object_id(job: u64) -> Result<u64, i32> {
 }
 
 pub fn job_id(object: u64) -> Result<u64, i32> {
-    if object & JOB_OBJECT_TAG == 0 || object > i64::MAX as u64 {
+    if object & JOB_OBJECT_TAG == 0 || object & !(JOB_OBJECT_TAG | MAX_DESCRIPTION_ID) != 0 {
         return Err(-9);
     }
     let job = object & MAX_DESCRIPTION_ID;
