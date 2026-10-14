@@ -1964,6 +1964,229 @@ fn replacing_multiple_links_does_not_overwrite_the_original_retention_record() {
 }
 
 #[test]
+fn rename_retention_does_not_prevent_removing_or_replacing_the_empty_parent() {
+    for (mounted, legacy) in [(false, false), (false, true), (true, false)] {
+        for replace_directory in [false, true] {
+            let fixture = Fixture::new();
+            let mut service = FilesystemService::new(fixture.volume("rename-orphan-data"));
+            let prefix = if mounted {
+                service
+                    .mount_named_volume(
+                        b"/",
+                        b"system",
+                        fixture.volume("rename-orphan-system"),
+                        b"/",
+                    )
+                    .unwrap();
+                "/system"
+            } else {
+                ""
+            };
+            let directory = format!("{prefix}/replace-parent");
+            service
+                .mkdir_at(
+                    protocol::Header {
+                        mode: 0o755,
+                        ..Default::default()
+                    },
+                    directory.as_bytes(),
+                    PathAnchors::default(),
+                    root_credentials(),
+                )
+                .unwrap();
+            let source_path = format!("{directory}/source");
+            let target_path = format!("{directory}/target");
+            let source = open(
+                &mut service,
+                source_path.as_bytes(),
+                protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+                PathAnchors::default(),
+            );
+            let target = open(
+                &mut service,
+                target_path.as_bytes(),
+                protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+                PathAnchors::default(),
+            );
+            service
+                .provider_write_at(source.open_id, 0, b"new")
+                .unwrap();
+            service
+                .provider_write_at(target.open_id, 0, b"old")
+                .unwrap();
+            let mut payload = source_path.as_bytes().to_vec();
+            payload.extend_from_slice(target_path.as_bytes());
+            if legacy {
+                assert_eq!(
+                    service
+                        .handle(
+                            protocol::Header {
+                                opcode: protocol::OP_RENAME,
+                                request_id: 7701,
+                                offset: source_path.len() as u64,
+                                ..Default::default()
+                            },
+                            &payload
+                        )
+                        .header
+                        .status,
+                    0
+                );
+            } else {
+                service
+                    .rename_at(
+                        protocol::Header {
+                            request_id: 7701,
+                            mode: source_path.len() as u32,
+                            ..Default::default()
+                        },
+                        &payload,
+                        RenameAnchors::default(),
+                        root_credentials(),
+                    )
+                    .unwrap();
+            }
+            let replacement = open(
+                &mut service,
+                target_path.as_bytes(),
+                protocol::OPEN_AT_READ,
+                PathAnchors::default(),
+            );
+            assert_eq!(replacement.node_id, source.node_id);
+            service
+                .unlink_at(
+                    protocol::Header::default(),
+                    target_path.as_bytes(),
+                    PathAnchors::default(),
+                    root_credentials(),
+                )
+                .unwrap();
+            let ordinary = format!("{directory}/.mochios-orphan-rename-user");
+            let file = open(
+                &mut service,
+                ordinary.as_bytes(),
+                protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+                PathAnchors::default(),
+            );
+            service.provider_close(file.open_id).unwrap();
+            assert!(matches!(
+                service.unlink_at(
+                    protocol::Header {
+                        flags: protocol::UNLINK_AT_REMOVE_DIRECTORY,
+                        ..Default::default()
+                    },
+                    directory.as_bytes(),
+                    PathAnchors::default(),
+                    root_credentials()
+                ),
+                Err(39)
+            ));
+            service
+                .unlink_at(
+                    protocol::Header::default(),
+                    ordinary.as_bytes(),
+                    PathAnchors::default(),
+                    root_credentials(),
+                )
+                .unwrap();
+            if replace_directory {
+                let empty = format!("{prefix}/empty-directory");
+                service
+                    .mkdir_at(
+                        protocol::Header {
+                            mode: 0o755,
+                            ..Default::default()
+                        },
+                        empty.as_bytes(),
+                        PathAnchors::default(),
+                        root_credentials(),
+                    )
+                    .unwrap();
+                let mut payload = empty.as_bytes().to_vec();
+                payload.extend_from_slice(directory.as_bytes());
+                if legacy {
+                    assert_eq!(
+                        service
+                            .handle(
+                                protocol::Header {
+                                    opcode: protocol::OP_RENAME,
+                                    request_id: 7702,
+                                    offset: empty.len() as u64,
+                                    ..Default::default()
+                                },
+                                &payload
+                            )
+                            .header
+                            .status,
+                        0
+                    );
+                } else {
+                    service
+                        .rename_at(
+                            protocol::Header {
+                                request_id: 7702,
+                                mode: empty.len() as u32,
+                                ..Default::default()
+                            },
+                            &payload,
+                            RenameAnchors::default(),
+                            root_credentials(),
+                        )
+                        .unwrap();
+                }
+            }
+            service
+                .unlink_at(
+                    protocol::Header {
+                        flags: protocol::UNLINK_AT_REMOVE_DIRECTORY,
+                        ..Default::default()
+                    },
+                    directory.as_bytes(),
+                    PathAnchors::default(),
+                    root_credentials(),
+                )
+                .unwrap();
+            assert_eq!(
+                service.provider_read_at(target.open_id, 0, 4096).unwrap(),
+                b"old"
+            );
+            assert_eq!(
+                service
+                    .provider_read_at(replacement.open_id, 0, 4096)
+                    .unwrap(),
+                b"new"
+            );
+            for open_id in [target.open_id, source.open_id, replacement.open_id] {
+                let status = service
+                    .stat_handle(protocol::Header::default(), open_id)
+                    .unwrap();
+                assert_eq!(
+                    protocol::decode_node_status(&status.payload)
+                        .unwrap()
+                        .link_count,
+                    0
+                );
+                service.provider_close(open_id).unwrap();
+            }
+            let root = open(
+                &mut service,
+                if mounted { prefix.as_bytes() } else { b"/" },
+                protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+                PathAnchors::default(),
+            );
+            let bytes = service.provider_read(root.open_id, 4096).unwrap();
+            let mut remaining = bytes.as_slice();
+            while !remaining.is_empty() {
+                let (_, name, length) = protocol::decode_dir_entry(remaining).unwrap();
+                assert!(!name.starts_with(b".mochios-orphan-"));
+                remaining = &remaining[length..];
+            }
+            service.provider_close(root.open_id).unwrap();
+        }
+    }
+}
+
+#[test]
 fn socket_binding_records_keep_real_unlinked_inodes_distinct_from_recreated_names() {
     use posix_service::socket_binding::{Bindings, Filesystem, NODE_RIGHTS};
     struct Backend<'a>(&'a mut FilesystemService);

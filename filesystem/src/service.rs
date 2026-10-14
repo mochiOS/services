@@ -2030,13 +2030,16 @@ impl FilesystemService {
             if !remove_directory {
                 return Err(EISDIR);
             }
-            let directory = Dir::open_inode(filesystem, inode.clone()).map_err(errno)?;
-            for entry in directory.read_dir().map_err(errno)? {
-                let entry = entry.map_err(errno)?;
-                if entry.file_name() != "." && entry.file_name() != ".." {
-                    return Err(ENOTEMPTY);
-                }
+            if !self.prepare_empty_directory(filesystem, volume, &inode)? {
+                return Err(ENOTEMPTY);
             }
+            // Moving private retention links may have grown the volume root.
+            // Refresh before persisting the public parent's directory links.
+            parent = Dir::open_inode(
+                filesystem,
+                Inode::read(filesystem, parent_inode.index).map_err(errno)?,
+            )
+            .map_err(errno)?;
             let original_parent_links = parent.inode().links_count();
             let parent_links = original_parent_links.checked_sub(1).ok_or(EIO)?;
             parent.inode_mut().set_links_count(parent_links);
@@ -2239,7 +2242,7 @@ impl FilesystemService {
         let destination =
             match new_parent.get_entry(DirEntryName::try_from(new_name).map_err(|_| EINVAL)?) {
                 Ok(inode) if source_is_directory && inode.file_type().is_dir() => {
-                    if !self.directory_is_empty(&filesystem, &inode)? {
+                    if !self.prepare_empty_directory(&filesystem, 0, &inode)? {
                         return Err(ENOTEMPTY);
                     }
                     let node_id =
@@ -2257,6 +2260,16 @@ impl FilesystemService {
                 Err(error) => return Err(errno(error)),
             };
         if source_is_directory {
+            old_parent = Dir::open_inode(
+                &filesystem,
+                Inode::read(&filesystem, old_parent.inode().index).map_err(errno)?,
+            )
+            .map_err(errno)?;
+            new_parent = Dir::open_inode(
+                &filesystem,
+                Inode::read(&filesystem, new_parent.inode().index).map_err(errno)?,
+            )
+            .map_err(errno)?;
             if self.directory_is_at_or_below(&filesystem, &source_inode, new_parent_inode)? {
                 return Err(EINVAL);
             }
@@ -2500,7 +2513,7 @@ impl FilesystemService {
         }
         let destination = match destination_inode {
             Some(inode) if source_is_directory && inode.file_type().is_dir() => {
-                if !self.directory_is_empty(&filesystem, &inode)? {
+                if !self.prepare_empty_directory(&filesystem, destination_volume, &inode)? {
                     return Err(ENOTEMPTY);
                 }
                 Some((scoped_node_id(destination_volume, &inode), inode))
@@ -2511,6 +2524,16 @@ impl FilesystemService {
             None => None,
         };
         if source_is_directory {
+            old_parent = Dir::open_inode(
+                &filesystem,
+                Inode::read(&filesystem, old_parent.inode().index).map_err(errno)?,
+            )
+            .map_err(errno)?;
+            new_parent = Dir::open_inode(
+                &filesystem,
+                Inode::read(&filesystem, new_parent.inode().index).map_err(errno)?,
+            )
+            .map_err(errno)?;
             if self.directory_is_at_or_below(&filesystem, &source_inode, new_parent_inode)? {
                 return Err(EINVAL);
             }
@@ -2907,13 +2930,58 @@ impl FilesystemService {
         Ok(())
     }
 
-    fn directory_is_empty(&self, filesystem: &Ext4, inode: &Inode) -> Result<bool, i32> {
-        let directory = Dir::open_inode(filesystem, inode.clone()).map_err(errno)?;
+    fn prepare_empty_directory(
+        &mut self,
+        filesystem: &Ext4,
+        volume: u32,
+        inode: &Inode,
+    ) -> Result<bool, i32> {
+        let mut directory = Dir::open_inode(filesystem, inode.clone()).map_err(errno)?;
+        let mut retained = Vec::new();
         for entry in directory.read_dir().map_err(errno)? {
             let entry = entry.map_err(errno)?;
             if entry.file_name() != "." && entry.file_name() != ".." {
-                return Ok(false);
+                let node_id = (u64::from(volume) << 32) | u64::from(entry.inode.get());
+                let private = self.orphans.get(&node_id).is_some_and(|orphan| {
+                    orphan.parent.index == inode.index
+                        && orphan.name.as_bytes() == entry.file_name().as_ref()
+                });
+                if !private {
+                    return Ok(false);
+                }
+                retained.try_reserve(1).map_err(|_| ENOMEM)?;
+                retained.push(node_id);
             }
+        }
+        if retained.is_empty() {
+            return Ok(true);
+        }
+        let mut root = Dir::open_inode(filesystem, filesystem.read_root_inode().map_err(errno)?)
+            .map_err(errno)?;
+        if root.inode().index == inode.index {
+            return Ok(false);
+        }
+        // Rename's existing rollback transaction keeps its backup in the
+        // destination parent. Evacuate only exact registered private entries
+        // before that logically-empty parent is removed or replaced.
+        for node_id in retained {
+            let old = self.orphans.get(&node_id).cloned().ok_or(EIO)?;
+            let name = DirEntryName::try_from(old.name.as_str()).map_err(|_| EIO)?;
+            let mut target = directory.get_entry(name).map_err(errno)?;
+            if scoped_node_id(volume, &target) != node_id {
+                return Err(EIO);
+            }
+            let moved = Self::create_retention_link(filesystem, &mut root, &mut target, node_id)?;
+            if let Err(error) = directory.unlink(name, target.clone()) {
+                root.unlink(
+                    DirEntryName::try_from(moved.name.as_str()).map_err(|_| EIO)?,
+                    target,
+                )
+                .map_err(errno)?;
+                return Err(errno(error));
+            }
+            // Replacing an existing record cannot allocate or lose the pin.
+            *self.orphans.get_mut(&node_id).ok_or(EIO)? = moved;
         }
         Ok(true)
     }
