@@ -1,5 +1,9 @@
 /* Run real callback dispatch and allocator/registration contention in one
  * isolated process, including the registry inherited by subsequent forks. */
+#define main handle_capture_probe
+#include "native_handle_capture.c"
+#undef main
+#undef CHECK
 #define main snapshot_probe
 #include "native_multithread_snapshot.c"
 #undef main
@@ -17,7 +21,9 @@
 #undef main
 
 int main(void) {
-    int result = snapshot_probe();
+    int result = handle_capture_probe();
+    if (result) return result;
+    result = snapshot_probe();
     if (result) return result;
     result = barrier_probe();
     if (result) return result;

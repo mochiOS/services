@@ -8,6 +8,91 @@ fn startup() -> Vec<u8> {
     bytes
 }
 
+#[test]
+fn captured_handle_header_preserves_payload_and_explicit_grants() {
+    let grants = [HandleGrant {
+        key: 71,
+        source: 3,
+        target: 9,
+        rights: 1,
+    }];
+    let values = [Value { key: 19, value: 23 }];
+    let original = metadata(&grants, &values);
+    assert_eq!(wire::decode(&original).unwrap().handle_capture, None);
+    let mut bytes = original.clone();
+    bytes.resize(original.len() + 8, 0xa5);
+    let length = wire::attach_handle_capture(&mut bytes, original.len(), 47).unwrap();
+    assert_eq!(length, original.len() + 8);
+    let decoded = wire::decode(&bytes[..length]).unwrap();
+    assert_eq!(decoded.handle_capture, Some(47));
+    assert_eq!(decoded.handles().collect::<Vec<_>>(), grants);
+    assert_eq!(decoded.values().collect::<Vec<_>>(), values);
+    assert_eq!(decoded.identity, "opaque identity");
+    assert_eq!(
+        &bytes[wire::CAPTURE_HEADER_LEN..length],
+        &original[wire::HEADER_LEN..]
+    );
+    for offset in [32, 36] {
+        let mut invalid = bytes.clone();
+        if offset == 32 {
+            invalid[32..36].fill(0);
+        } else {
+            invalid[36] = 1;
+        }
+        assert!(matches!(wire::decode(&invalid), Err(Error::Header)));
+    }
+    let before = bytes.clone();
+    assert_eq!(
+        wire::attach_handle_capture(&mut bytes, length, 48),
+        Err(Error::Handle)
+    );
+    assert_eq!(bytes, before);
+}
+
+#[test]
+fn capture_header_attachment_failures_do_not_modify_storage() {
+    let original = metadata(&[], &[]);
+    for capture in [0, 9] {
+        let mut bytes = original.clone();
+        let before = bytes.clone();
+        assert!(wire::attach_handle_capture(&mut bytes, original.len(), capture).is_err());
+        assert_eq!(bytes, before);
+    }
+    let mut bytes = original.clone();
+    assert_eq!(
+        wire::attach_handle_capture(&mut bytes, usize::MAX, 9),
+        Err(Error::Length)
+    );
+    assert_eq!(bytes, original);
+    bytes.resize(original.len() + 8, 0xa5);
+    let before = bytes.clone();
+    assert_eq!(
+        wire::attach_handle_capture(&mut bytes, original.len(), 0),
+        Err(Error::Handle)
+    );
+    assert_eq!(bytes, before);
+    bytes[4] = 99;
+    let before = bytes.clone();
+    assert!(wire::attach_handle_capture(&mut bytes, original.len(), 9).is_err());
+    assert_eq!(bytes, before);
+}
+
+#[test]
+fn captured_table_is_supported_for_native_context_creation() {
+    let context = mnu_abi::ThreadCreateContext {
+        entry: 0x1000,
+        stack_pointer: 0x8000,
+        ..Default::default()
+    };
+    let mut bytes = [0u8; 512];
+    let length = wire::encode_context("identity", "label", &context, &[], &[], &mut bytes).unwrap();
+    let length = wire::attach_handle_capture(&mut bytes, length, 61).unwrap();
+    let decoded = wire::decode(&bytes[..length]).unwrap();
+    assert_eq!(decoded.handle_capture, Some(61));
+    assert!(matches!(decoded.startup, wire::InitialState::Context(value) if value == context));
+    assert!(matches!(wire::decode(&bytes[..39]), Err(Error::Header)));
+}
+
 fn metadata(handles: &[HandleGrant], values: &[Value]) -> Vec<u8> {
     let mut bytes = vec![0; wire::MAX_REQUEST_BYTES];
     let length = wire::encode(

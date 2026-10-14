@@ -18,6 +18,10 @@ fn production_capture_pins_exact_objects_and_attenuates_without_duplicate_author
         .join("../../core/src/task/handle_snapshot.rs")
         .canonicalize()
         .unwrap();
+    let wire = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../core/crates/abi/src/handle_snapshot.rs")
+        .canonicalize()
+        .unwrap();
     // The production identity, rights, table, entry and snapshot code executes
     // here. Only resource payloads are replaced with observable Arc values.
     let program = format!(
@@ -25,6 +29,7 @@ fn production_capture_pins_exact_objects_and_attenuates_without_duplicate_author
 #![allow(dead_code)]
 extern crate alloc;
 extern crate self as mnu_abi;
+#[path={wire:?}] pub mod handle_snapshot;
 use std::sync::{{Arc, atomic::{{AtomicBool, Ordering}}}};
 static FAIL_NEXT:AtomicBool=AtomicBool::new(false);
 struct Allocator;
@@ -65,6 +70,25 @@ fn main() {{
     assert_eq!(snapshot.len(),1);
     let metadata:Vec<_>=snapshot.describe().collect();
     assert_eq!((metadata[0].handle,metadata[0].reserved,metadata[0].rights),(handle.raw(),0,rights.bits()));
+    let mut description=[0xa5;64];
+    let length=snapshot.read_at(0,&mut description);
+    assert_eq!(length,32);
+    assert_eq!(u32::from_le_bytes(description[0..4].try_into().unwrap()),1);
+    assert_eq!(u32::from_le_bytes(description[4..8].try_into().unwrap()),1);
+    assert_eq!(u32::from_le_bytes(description[8..12].try_into().unwrap()),16);
+    assert_eq!(&description[12..16],&[0;4]);
+    assert_eq!(u32::from_le_bytes(description[16..20].try_into().unwrap()),handle.raw());
+    assert_eq!(u64::from_le_bytes(description[24..32].try_into().unwrap()),rights.bits());
+    assert_eq!(&description[32..],&[0xa5;32]);
+    for offset in 0..36 {{ for size in 0..35 {{
+        let mut output=[0xa5;40];
+        let copied=snapshot.read_at(offset as u64,&mut output[..size]);
+        let expected=size.min(length.saturating_sub(offset));
+        assert_eq!(copied,expected);
+        if expected>0 {{ assert_eq!(&output[..expected],&description[offset..offset+expected]); }}
+        assert!(output[expected..].iter().all(|value|*value==0xa5));
+    }} }}
+    assert_eq!(snapshot.read_at(u64::MAX,&mut [0;1]),0);
     assert!(table.close(handle));
     let replacement=Arc::new(29);
     // Drive the real allocation cursor around to reuse the same native slot.
