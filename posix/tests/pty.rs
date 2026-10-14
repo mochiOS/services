@@ -633,6 +633,10 @@ impl Transport for TerminalTransport {
 impl ObjectTransport for TerminalTransport {
     type Handle = u32;
 
+    fn close_received_handle(&self, _: u32) {
+        panic!("unexpected owned reply Handle in this fixture");
+    }
+
     fn call_with_handles(
         &self,
         request: &[u8],
@@ -694,6 +698,10 @@ impl Transport for PtyTransport {
 
 impl ObjectTransport for PtyTransport {
     type Handle = u32;
+
+    fn close_received_handle(&self, _: u32) {
+        panic!("unexpected owned reply Handle in this fixture");
+    }
 
     fn call_with_handles(
         &self,

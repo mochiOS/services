@@ -913,6 +913,10 @@ impl Transport for LocalObjectTransport {
 impl ObjectTransport for LocalObjectTransport {
     type Handle = u32;
 
+    fn close_received_handle(&self, _: u32) {
+        panic!("unexpected owned reply Handle in this fixture");
+    }
+
     fn call_with_handles(
         &self,
         request: &[u8],
@@ -960,6 +964,10 @@ impl Transport for ChildRegistrationTransport {
 
 impl ObjectTransport for ChildRegistrationTransport {
     type Handle = u32;
+
+    fn close_received_handle(&self, _: u32) {
+        panic!("unexpected owned reply Handle in this fixture");
+    }
 
     fn call_with_handles(
         &self,
@@ -1192,6 +1200,10 @@ impl Transport for OpenTransport {
 impl ObjectTransport for OpenTransport {
     type Handle = u32;
 
+    fn close_received_handle(&self, _: u32) {
+        panic!("unexpected owned reply Handle in this fixture");
+    }
+
     fn call_with_handles(
         &self,
         request: &[u8],
@@ -1250,6 +1262,10 @@ impl Transport for DirectoryChangeTransport {
 
 impl ObjectTransport for DirectoryChangeTransport {
     type Handle = u32;
+
+    fn close_received_handle(&self, _: u32) {
+        panic!("unexpected owned reply Handle in this fixture");
+    }
 
     fn call_with_handles(
         &self,

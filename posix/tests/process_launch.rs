@@ -20,6 +20,10 @@ impl Transport for AbortTransport {
 }
 impl ObjectTransport for AbortTransport {
     type Handle = u32;
+
+    fn close_received_handle(&self, _: u32) {
+        panic!("unexpected owned reply Handle in this fixture");
+    }
     fn call_with_handles(
         &self,
         request: &[u8],
@@ -63,6 +67,10 @@ fn failed_launch_cleanup_carries_only_a_wait_handle_not_a_pid() {
 }
 impl ObjectTransport for LaunchTransport {
     type Handle = u32;
+
+    fn close_received_handle(&self, _: u32) {
+        panic!("unexpected owned reply Handle in this fixture");
+    }
     fn call_with_handles(
         &self,
         request: &[u8],

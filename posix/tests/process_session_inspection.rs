@@ -95,6 +95,10 @@ impl Transport for Inspection {
 }
 impl ObjectTransport for Inspection {
     type Handle = u32;
+
+    fn close_received_handle(&self, _: u32) {
+        panic!("unexpected owned reply Handle in this fixture");
+    }
     fn call_with_handles(
         &self,
         request: &[u8],

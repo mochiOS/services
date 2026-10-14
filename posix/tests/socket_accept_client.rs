@@ -42,6 +42,10 @@ impl Transport for Mock {
 }
 impl ObjectTransport for Mock {
     type Handle = u32;
+
+    fn close_received_handle(&self, _: u32) {
+        panic!("unexpected owned reply Handle in this fixture");
+    }
     fn call_with_handles(
         &self,
         bytes: &[u8],

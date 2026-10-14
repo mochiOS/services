@@ -13,6 +13,7 @@ const MAX_OBJECT_HANDLES:usize=4;
 struct ObjectHandleAttachment<H>{handle:H,rights:u64}
 trait Transport {type Error;}
 trait ObjectTransport:Transport {type Handle:Copy;
+fn close_received_handle(&self,handle:Self::Handle);
 fn call_with_handles(&self,request:&[u8],response:&mut[u8],handles:&mut ObjectHandles<Self::Handle>)->Result<usize,Self::Error>;}
 struct EndpointTransport{endpoint:u32} struct SyscallEndpointTransport{endpoint:u32}
 impl Transport for EndpointTransport{type Error=syscall::SysError;}
@@ -73,7 +74,11 @@ assert_eq!(result.is_ok(),mode==1);
 if mode==1||mode==5{assert_eq!(handles.get(0).unwrap().handle,7);}else{assert!(handles.is_empty());}
 CLOSED.with(|v|assert_eq!(*v.borrow(),match mode{2|3=>vec![7],4=>vec![7,8,9,10],_=>vec![]}));
 assert!(!handles.iter().any(|h|h.handle==99));}}
-fn main(){check(EndpointTransport{endpoint:1});check(SyscallEndpointTransport{endpoint:1});}
+fn main(){check(EndpointTransport{endpoint:1});check(SyscallEndpointTransport{endpoint:1});
+CLOSED.with(|v|v.borrow_mut().clear());
+EndpointTransport{endpoint:1}.close_received_handle(77);
+SyscallEndpointTransport{endpoint:1}.close_received_handle(78);
+CLOSED.with(|v|assert_eq!(*v.borrow(),vec![77,78]));}
 "#);
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
