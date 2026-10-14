@@ -26,7 +26,8 @@ pub struct Readiness {
 
 struct Endpoint {
     id: u64,
-    peer: u64,
+    // None means never connected, not a previously connected peer's close.
+    peer: Option<u64>,
     credentials: (u32, u32),
     incoming: VecDeque<u8>,
     read_shutdown: bool,
@@ -67,7 +68,7 @@ impl Streams {
             .ok_or(-9)
     }
 
-    fn create_pair(&mut self, request: Create, credentials: (u32, u32)) -> Result<[u64; 2], i32> {
+    fn validate_create(request: Create) -> Result<(), i32> {
         if request.options & !NONBLOCKING != 0 {
             return Err(-22);
         }
@@ -77,6 +78,31 @@ impl Streams {
         if request.protocol != 0 {
             return Err(-93);
         }
+        Ok(())
+    }
+
+    fn create(&mut self, request: Create, credentials: (u32, u32)) -> Result<u64, i32> {
+        Self::validate_create(request)?;
+        if self.entries.len() == MAX_ENDPOINTS || self.next > i64::MAX as u64 {
+            return Err(-23);
+        }
+        self.entries.try_reserve(1).map_err(|_| -12)?;
+        let id = self.next;
+        self.entries.push(Endpoint {
+            id,
+            peer: None,
+            credentials,
+            incoming: VecDeque::new(),
+            read_shutdown: false,
+            write_shutdown: false,
+            options: request.options,
+        });
+        self.next += 1;
+        Ok(id)
+    }
+
+    fn create_pair(&mut self, request: Create, credentials: (u32, u32)) -> Result<[u64; 2], i32> {
+        Self::validate_create(request)?;
         if self.entries.len() > MAX_ENDPOINTS - 2 {
             return Err(-23);
         }
@@ -91,7 +117,7 @@ impl Streams {
         for (id, peer) in [(ids[0], ids[1]), (ids[1], ids[0])] {
             self.entries.push(Endpoint {
                 id,
-                peer,
+                peer: Some(peer),
                 credentials,
                 incoming: VecDeque::new(),
                 read_shutdown: false,
@@ -107,13 +133,22 @@ impl Streams {
         Ok(self.endpoint(id)?.credentials)
     }
 
-    /// This manager currently contains only connected, unnamed UNIX pairs.
-    /// Closing the peer does not erase the established connection's address.
+    /// Unbound UNIX sockets have no local pathname.
     pub fn address(
         &self,
         id: u64,
     ) -> Result<mochios_posix_protocol::socket::Address<'static>, i32> {
         self.endpoint(id)?;
+        Ok(mochios_posix_protocol::socket::Address::UnixUnnamed)
+    }
+
+    /// Closing a connected peer does not erase the established address;
+    /// a never-connected socket must instead report ENOTCONN.
+    pub fn peer_address(
+        &self,
+        id: u64,
+    ) -> Result<mochios_posix_protocol::socket::Address<'static>, i32> {
+        self.endpoint(id)?.peer.ok_or(-107)?;
         Ok(mochios_posix_protocol::socket::Address::UnixUnnamed)
     }
 
@@ -135,7 +170,7 @@ impl Streams {
     }
     /// Internal Provider IDs affected by an operation, not transferable authority.
     pub fn affected(&self, id: u64) -> Result<[u64; 2], i32> {
-        Ok([id, self.endpoint(id)?.peer])
+        Ok([id, self.endpoint(id)?.peer.unwrap_or(id)])
     }
     pub fn options(&self, id: u64) -> Result<u32, i32> {
         Ok(self.endpoint(id)?.options)
@@ -157,7 +192,7 @@ impl Streams {
         if entry.write_shutdown {
             return Err(-32);
         }
-        let peer = entry.peer;
+        let peer = entry.peer.ok_or(-107)?;
         let receiver = self.endpoint_mut(peer).map_err(|_| -32)?;
         if receiver.read_shutdown {
             return Err(-32);
@@ -177,6 +212,9 @@ impl Streams {
         if output.is_empty() || entry.read_shutdown {
             return Ok(0);
         }
+        if entry.peer.is_none() {
+            return Err(-107);
+        }
         let count = output.len().min(entry.incoming.len());
         if count == 0 && !ready.read_closed {
             return Err(-11);
@@ -189,6 +227,7 @@ impl Streams {
 
     pub fn shutdown(&mut self, id: u64, how: Shutdown) -> Result<(), i32> {
         let entry = self.endpoint_mut(id)?;
+        entry.peer.ok_or(-107)?;
         if matches!(how, Shutdown::Read | Shutdown::Both) {
             entry.read_shutdown = true;
             entry.incoming.clear();
@@ -201,7 +240,17 @@ impl Streams {
 
     pub fn readiness(&self, id: u64) -> Result<Readiness, i32> {
         let entry = self.endpoint(id)?;
-        let peer = self.endpoint(entry.peer).ok();
+        if entry.peer.is_none() {
+            // An attempted IO completes with ENOTCONN, rather than sleeping.
+            return Ok(Readiness {
+                readable: true,
+                writable: true,
+                read_closed: true,
+                write_closed: true,
+                write_error: false,
+            });
+        }
+        let peer = entry.peer.and_then(|peer| self.endpoint(peer).ok());
         let read_closed = entry.read_shutdown || peer.is_none_or(|peer| peer.write_shutdown);
         let write_error = peer.is_none_or(|peer| peer.read_shutdown);
         let write_closed = entry.write_shutdown || write_error;
@@ -227,6 +276,16 @@ impl Streams {
 }
 
 impl<H: Copy> super::PosixService<H> {
+    /// The dispatcher must authenticate process_id through native IPC delivery.
+    pub fn create_socket(
+        &self,
+        peer: super::PeerIdentity,
+        request: Create,
+        streams: &mut Streams,
+    ) -> Result<u64, i32> {
+        let session = self.session(peer.process_id).ok_or(-1)?;
+        streams.create(request, (session.effective_uid, session.effective_gid))
+    }
     /// `peer.process_id` must originate from authenticated native IPC delivery.
     /// Claimed UID/GID in PeerIdentity are deliberately ignored.
     pub fn create_socket_pair(

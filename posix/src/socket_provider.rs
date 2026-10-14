@@ -66,7 +66,12 @@ pub fn handle_provider_request(
                 wire::CONTROL_LOCAL_ADDRESS | wire::CONTROL_PEER_ADDRESS
                     if payload.is_empty() && header.length as usize >= wire::ADDRESS_HEADER_LEN =>
                 {
-                    streams.address(header.object_id).and_then(|address| {
+                    let address = if header.basis == wire::CONTROL_PEER_ADDRESS {
+                        streams.peer_address(header.object_id)
+                    } else {
+                        streams.address(header.object_id)
+                    };
+                    address.and_then(|address| {
                         let count = address
                             .encode(&mut data[..header.length as usize])
                             .map_err(|_| -22)?;
