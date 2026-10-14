@@ -322,3 +322,122 @@ fn lookup_failures_and_invalid_clients_preserve_existing_binding_references() {
     }
     bindings.release(listener, &mut backend);
 }
+
+fn extra_socket(streams: &mut Streams) -> u64 {
+    let mut service = PosixService::<u32>::new();
+    service
+        .initialize_bootstrap_process(
+            AuthenticatedProcess {
+                handle: 1,
+                process_id: 1,
+            },
+            501,
+            20,
+            &[],
+        )
+        .unwrap();
+    service
+        .create_socket(
+            PeerIdentity {
+                process_id: 1,
+                effective_uid: 501,
+                effective_gid: 20,
+            },
+            Create {
+                domain: Domain::Unix,
+                kind: Kind::Stream,
+                protocol: 0,
+                options: 0,
+            },
+            streams,
+        )
+        .unwrap()
+}
+
+#[test]
+fn backlog_retry_retains_the_original_target_instead_of_reopening_a_replaced_path() {
+    let (mut streams, [listener, first], mut bindings, mut backend) = fixture();
+    let waiting = extra_socket(&mut streams);
+    let replacement = extra_socket(&mut streams);
+    bindings
+        .bind_path(&streams, listener, b"/server", &mut backend)
+        .unwrap();
+    streams.listen(listener, 1).unwrap();
+    bindings
+        .connect_path(&mut streams, first, b"/server", &mut backend)
+        .unwrap();
+    let target = bindings
+        .prepare_connect(&streams, waiting, b"/server", &mut backend)
+        .unwrap();
+    assert_eq!((target.client(), target.listener()), (waiting, listener));
+    assert_eq!(bindings.try_connect(&mut streams, &target), Err(-11));
+    assert_eq!(backend.closed, [41]);
+    // Model unlink/recreate: subsequent pathname lookups return a new inode.
+    backend.status.node_id = 11;
+    bindings
+        .bind_path(&streams, replacement, b"/server", &mut backend)
+        .unwrap();
+    streams.listen(replacement, 1).unwrap();
+    let ticket = streams.begin_accept(listener).unwrap();
+    streams.commit_accept(ticket, (501, 20), 0).unwrap();
+    let (matched, accepted) = bindings.try_connect(&mut streams, &target).unwrap();
+    assert_eq!(matched, listener);
+    assert_eq!(streams.begin_accept(replacement), Err(-11));
+    assert_eq!(backend.lookups.len(), 2);
+    assert_eq!(streams.write(waiting, b"original"), Ok(8));
+    assert_eq!(streams.read(accepted, &mut [0; 8]), Ok(8));
+    target.release_with(|handle| backend.close(handle));
+    assert_eq!(backend.closed, [41, 42]);
+    bindings.release(listener, &mut backend);
+    bindings.release(replacement, &mut backend);
+    assert_eq!(backend.closed, [41, 42, 40, 43]);
+}
+
+#[test]
+fn retired_listener_cannot_be_replaced_even_with_the_same_inode_identity() {
+    let (mut streams, [listener, client], mut bindings, mut backend) = fixture();
+    let replacement = extra_socket(&mut streams);
+    bindings
+        .bind_path(&streams, listener, b"/server", &mut backend)
+        .unwrap();
+    streams.listen(listener, 1).unwrap();
+    let target = bindings
+        .prepare_connect(&streams, client, b"/alias", &mut backend)
+        .unwrap();
+    bindings.release(listener, &mut backend);
+    streams.release(listener).unwrap();
+    // Even an untrusted backend recycling its identity cannot redirect a job.
+    bindings
+        .bind_path(&streams, replacement, b"/server", &mut backend)
+        .unwrap();
+    streams.listen(replacement, 1).unwrap();
+    assert_eq!(bindings.try_connect(&mut streams, &target), Err(-111));
+    assert_eq!(streams.begin_accept(replacement), Err(-11));
+    assert_eq!(backend.lookups.len(), 1);
+    target.release_with(|handle| backend.close(handle));
+    assert_eq!(backend.closed, [40, 41]);
+    bindings.release(replacement, &mut backend);
+}
+
+#[test]
+fn cancelling_or_losing_a_client_releases_the_lookup_without_publishing_a_connection() {
+    for lost_client in [false, true] {
+        let (mut streams, [listener, client], mut bindings, mut backend) = fixture();
+        bindings
+            .bind_path(&streams, listener, b"/server", &mut backend)
+            .unwrap();
+        streams.listen(listener, 1).unwrap();
+        let target = bindings
+            .prepare_connect(&streams, client, b"/server", &mut backend)
+            .unwrap();
+        if lost_client {
+            streams.release(client).unwrap();
+            assert_eq!(bindings.try_connect(&mut streams, &target), Err(-9));
+        }
+        target.release_with(|handle| backend.close(handle));
+        assert_eq!(backend.closed, [41]);
+        assert_eq!(streams.begin_accept(listener), Err(-11));
+        bindings.release(listener, &mut backend);
+        assert_eq!(backend.closed, [41, 40]);
+    }
+}

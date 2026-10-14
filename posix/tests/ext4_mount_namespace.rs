@@ -1873,6 +1873,7 @@ fn socket_binding_records_keep_real_unlinked_inodes_distinct_from_recreated_name
         let b = policy.create_socket(peer, request, &mut streams).unwrap();
         let client = policy.create_socket(peer, request, &mut streams).unwrap();
         let rejected = policy.create_socket(peer, request, &mut streams).unwrap();
+        let waiting = policy.create_socket(peer, request, &mut streams).unwrap();
         let mut bindings = Bindings::new();
         let mut backend = Backend(&mut filesystem);
         bindings.bind_path(&streams, a, path, &mut backend).unwrap();
@@ -1881,6 +1882,10 @@ fn socket_binding_records_keep_real_unlinked_inodes_distinct_from_recreated_name
             Err(-98)
         );
         let old = bindings.retained_file(a).unwrap();
+        streams.listen(a, 1).unwrap();
+        let target = bindings
+            .prepare_connect(&streams, waiting, path, &mut backend)
+            .unwrap();
         backend
             .0
             .unlink_at(
@@ -1911,6 +1916,16 @@ fn socket_binding_records_keep_real_unlinked_inodes_distinct_from_recreated_name
             .connect_path(&mut streams, client, path, &mut backend)
             .unwrap();
         assert_eq!(listener, b);
+        // An already authorized wait stays on the unlinked original inode;
+        // a fresh lookup above connects to the replacement instead.
+        let (original, old_accepted) = bindings.try_connect(&mut streams, &target).unwrap();
+        assert_eq!(original, a);
+        target.release_with(|handle| backend.close(handle));
+        let old_ticket = streams.begin_accept(a).unwrap();
+        assert_eq!(old_ticket.endpoint(), old_accepted);
+        streams.commit_accept(old_ticket, (0, 0), 0).unwrap();
+        assert_eq!(streams.write(waiting, b"old"), Ok(3));
+        assert_eq!(streams.read(old_accepted, &mut [0; 3]), Ok(3));
         assert_eq!(streams.begin_accept(a), Err(-11));
         let ticket = streams.begin_accept(b).unwrap();
         assert_eq!(ticket.endpoint(), accepted);

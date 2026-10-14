@@ -32,6 +32,53 @@ struct Record<H> {
     length: usize,
 }
 
+/// One authorized lookup retained across backlog waits. Not cloneable: the
+/// owner must release its inode reference once on completion or cancellation.
+#[must_use = "release the retained target after connecting or cancelling"]
+pub struct ConnectTarget<H> {
+    file: H,
+    identity: (u64, u64),
+    client: u64,
+    listener: u64,
+    client_name: Option<SavedName>,
+    listener_name: SavedName,
+}
+
+struct SavedName {
+    bytes: [u8; MAX_UNIX_NAME_BYTES],
+    length: usize,
+}
+
+impl SavedName {
+    fn new(name: &[u8]) -> Self {
+        let mut bytes = [0; MAX_UNIX_NAME_BYTES];
+        bytes[..name.len()].copy_from_slice(name);
+        Self {
+            bytes,
+            length: name.len(),
+        }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.length]
+    }
+}
+
+impl<H> ConnectTarget<H> {
+    pub fn client(&self) -> u64 {
+        self.client
+    }
+
+    pub fn listener(&self) -> u64 {
+        self.listener
+    }
+
+    /// Consume the sole owned lookup reference, including on cancellation.
+    pub fn release_with(self, close: impl FnOnce(H)) {
+        close(self.file);
+    }
+}
+
 /// Serialize with socket operations in the Provider worker. Dup/fork retain
 /// that same socket object and do not add binding records. Release a record
 /// only on final native Provider release, not on individual descriptor closes.
@@ -105,9 +152,8 @@ impl<H: Copy + Default + Eq> Bindings<H> {
         Ok(())
     }
 
-    /// Authorize and retain the lookup result before matching an identity. The
-    /// temporary Handle is closed on every outcome, while the registered inode
-    /// stays pinned by its independent binding reference.
+    /// Immediate attempt; blocking adapters use prepare_connect/try_connect
+    /// instead so a backlog retry never reopens a mutable pathname.
     pub fn connect_path<B: Filesystem<H>>(
         &self,
         streams: &mut Streams,
@@ -115,6 +161,21 @@ impl<H: Copy + Default + Eq> Bindings<H> {
         path: &[u8],
         backend: &mut B,
     ) -> Result<(u64, u64), i32> {
+        let target = self.prepare_connect(streams, client, path, backend)?;
+        let result = self.try_connect(streams, &target);
+        target.release_with(|handle| backend.close(handle));
+        result
+    }
+
+    /// Authorize exactly once and retain the resolved inode while waiting.
+    /// Both socket IDs are service-private, monotonic description identities.
+    pub fn prepare_connect<B: Filesystem<H>>(
+        &self,
+        streams: &Streams,
+        client: u64,
+        path: &[u8],
+        backend: &mut B,
+    ) -> Result<ConnectTarget<H>, i32> {
         streams.check_connect(client)?;
         if path.is_empty() || path.len() > MAX_UNIX_NAME_BYTES || path.contains(&0) {
             return Err(-22);
@@ -135,19 +196,57 @@ impl<H: Copy + Default + Eq> Bindings<H> {
                 .iter()
                 .find(|record| record.identity == identity)
                 .ok_or(-111)?;
-            let listener_path = &listener.name[..listener.length];
-            let accepted = streams.connect_named(
+            if streams
+                .listening_backlog(listener.socket)
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                return Err(-111);
+            }
+            Ok(ConnectTarget {
+                file: file.handle,
+                identity,
                 client,
-                listener.socket,
-                self.address(client),
-                listener_path,
-            )?;
-            Ok((listener.socket, accepted))
+                listener: listener.socket,
+                client_name: self.address(client).map(SavedName::new),
+                listener_name: SavedName::new(&listener.name[..listener.length]),
+            })
         })();
-        if file.handle != H::default() {
+        if result.is_err() && file.handle != H::default() {
             backend.close(file.handle);
         }
         result
+    }
+
+    /// Retry only the retained target. EAGAIN preserves ownership and leaves
+    /// both endpoints unchanged; listener retirement is connection refusal,
+    /// even if a new listener now occupies the old pathname/inode number.
+    pub fn try_connect(
+        &self,
+        streams: &mut Streams,
+        target: &ConnectTarget<H>,
+    ) -> Result<(u64, u64), i32> {
+        streams.check_connect(target.client)?;
+        if !self
+            .records
+            .iter()
+            .any(|record| record.socket == target.listener && record.identity == target.identity)
+            || streams
+                .listening_backlog(target.listener)
+                .ok()
+                .flatten()
+                .is_none()
+        {
+            return Err(-111);
+        }
+        let accepted = streams.connect_named(
+            target.client,
+            target.listener,
+            target.client_name.as_ref().map(SavedName::as_bytes),
+            target.listener_name.as_bytes(),
+        )?;
+        Ok((target.listener, accepted))
     }
 
     /// The original spelling is reported by getsockname, even after unlink or
