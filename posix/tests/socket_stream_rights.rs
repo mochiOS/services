@@ -366,6 +366,57 @@ struct Buffer {
 }
 
 #[test]
+fn zero_length_stream_messages_wait_without_consuming_data_or_rights() {
+    let (mut streams, [a, b]) = pair();
+    let mut buffer = Buffer {
+        bytes: vec![],
+        read: 0,
+        fail: false,
+    };
+    // read(0) is not recvmsg(0).
+    assert_eq!(streams.read(b, &mut []), Ok(0));
+    for peek in [false, true] {
+        let result = if peek {
+            streams.peek_stream_with_rights(b, 0, 0, 1, &mut buffer, |_, _| panic!("not ready"))
+        } else {
+            streams.receive_stream_with_rights(b, 0, 0, &mut buffer, |_, _| panic!("not ready"))
+        };
+        assert!(matches!(result, Err(-11)));
+    }
+    streams
+        .commit_stream_with_rights(a, b"x", bundle(&[501]))
+        .ok()
+        .unwrap();
+    for peek in [false, true] {
+        let result = if peek {
+            streams.peek_stream_with_rights(b, 0, 0, 1, &mut buffer, |info, rights| {
+                assert_eq!((info.copied, rights), (0, 0));
+                Ok(())
+            })
+        } else {
+            streams.receive_stream_with_rights(b, 0, 0, &mut buffer, |info, rights| {
+                assert_eq!((info.copied, rights), (0, 0));
+                Ok(())
+            })
+        }
+        .unwrap();
+        assert_eq!(result.0.copied, 0);
+        assert!(result.1.is_none() && closed().is_empty() && streams.has_ancillary_records());
+    }
+    assert_eq!(streams.read(b, &mut [0]), Ok(1));
+    assert_eq!(closed(), vec![501]);
+    streams.shutdown(a, Shutdown::Write).unwrap();
+    let result = streams
+        .receive_stream_with_rights(b, 0, 0, &mut buffer, |_, rights| {
+            assert_eq!(rights, 0);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(result.0.copied, 0);
+    assert!(result.1.is_none());
+}
+
+#[test]
 fn stream_peek_receipts_stop_at_ancillary_barrier_and_outlive_consuming_read() {
     let (mut streams, [a, b]) = pair();
     let budget = Budget::new(6);

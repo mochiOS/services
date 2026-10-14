@@ -845,7 +845,14 @@ impl Streams {
         if offset.checked_add(length as u64).ok_or(-22)? > buffer.extent()? {
             return Err(-22);
         }
-        let count = self.stream_read_count(id, length as usize, 0)?;
+        let count = if length == 0 {
+            // Ancillary recvmsg(0) observes readiness but cannot consume data
+            // or transfer queued references. Plain native read(0) is separate.
+            self.stream_read_count(id, 1, 0)?;
+            0
+        } else {
+            self.stream_read_count(id, length as usize, 0)?
+        };
         let queue = &mut self.endpoint_mut(id)?.incoming;
         let count = queue.read_length(count);
         let rights = queue.read_rights(count).map_or(0, |bundle| bundle.len());
