@@ -619,7 +619,7 @@ fn malformed_controls_and_positional_operations_fail_without_mutation() {
     let seek = frame(provider::OP_SEEK, a, mnu_abi::HANDLE_SEEK_START, 0, &[]);
     assert_eq!(call(&mut streams, &seek, flags, 0).0.status, -29);
     let read_at = frame(provider::OP_READ_AT, a, 1, 1, &[]);
-    assert_eq!(call(&mut streams, &read_at, flags, 0).0.status, -29);
+    assert_eq!(call(&mut streams, &read_at, flags, 0).0.status, -11);
     let unknown = frame(provider::OP_CONTROL, a, 999, 0, &[]);
     assert_eq!(call(&mut streams, &unknown, flags, 0).0.status, -95);
     let mut invalid = frame(provider::OP_WRITE, a, 0, 1, b"x");
@@ -629,6 +629,87 @@ fn malformed_controls_and_positional_operations_fail_without_mutation() {
         Err(-22)
     );
     assert_eq!(streams.read(b, &mut [0]), Err(-11));
+}
+
+#[test]
+fn native_positioned_reads_inspect_the_queue_without_consuming_bytes() {
+    let (mut streams, [a, b]) = fixture();
+    let flags = mnu_abi::IPC_DELIVERY_NATIVE_OBJECT;
+    streams.write(a, b"abcdef").unwrap();
+    for (offset, length, expected) in [
+        (0, 6, &b"abcdef"[..]),
+        (2, 3, &b"cde"[..]),
+        (5, 6, &b"f"[..]),
+    ] {
+        let request = frame(provider::OP_READ_AT, b, offset, length, &[]);
+        for _ in 0..2 {
+            let (header, bytes) = call(&mut streams, &request, flags, 0);
+            assert_eq!(header.status, 0);
+            assert_eq!(header.value as usize, expected.len());
+            assert_eq!(bytes, expected);
+        }
+    }
+    let read = frame(provider::OP_READ, b, 0, 6, &[]);
+    assert_eq!(call(&mut streams, &read, flags, 0).1, b"abcdef");
+    let inspect = frame(provider::OP_READ_AT, b, 0, 6, &[]);
+    assert_eq!(call(&mut streams, &inspect, flags, 0).0.status, -11);
+    streams
+        .shutdown(a, posix_service::socket::Shutdown::Write)
+        .unwrap();
+    let (header, bytes) = call(&mut streams, &inspect, flags, 0);
+    assert_eq!((header.status, header.value), (0, 0));
+    assert!(bytes.is_empty());
+}
+
+#[test]
+fn inspection_requires_native_delivery_and_reply_capacity_before_any_state_change() {
+    let (mut streams, [a, b]) = fixture();
+    streams.write(a, b"data").unwrap();
+    let request = frame(provider::OP_READ_AT, b, 0, 4, &[]);
+    for flags in [
+        0,
+        mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE,
+        mnu_abi::IPC_DELIVERY_NATIVE_OBJECT | mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE,
+    ] {
+        let (header, bytes) = call(&mut streams, &request, flags, 0);
+        assert_eq!(header.status, -13);
+        assert!(bytes.is_empty());
+    }
+    let flags = mnu_abi::IPC_DELIVERY_NATIVE_OBJECT;
+    assert_eq!(call(&mut streams, &request, flags, 1).0.status, -22);
+    assert_eq!(
+        handle_provider_request(
+            &mut streams,
+            &request,
+            flags,
+            0,
+            &mut [0; provider::RESPONSE_HEADER_LEN + 3]
+        ),
+        Err(-22)
+    );
+    assert_eq!(call(&mut streams, &request, flags, 0).1, b"data");
+    let mut output = [0; 4];
+    assert_eq!(streams.read(b, &mut output), Ok(4));
+    assert_eq!(&output, b"data");
+
+    // A reset is a consuming error even for inspection. An undersized reply
+    // must not clear it before a valid caller can observe it.
+    streams.write(b, b"unread").unwrap();
+    streams.release(a).unwrap();
+    assert_eq!(streams.pending_error(b), Ok(104));
+    assert_eq!(
+        handle_provider_request(
+            &mut streams,
+            &request,
+            flags,
+            0,
+            &mut [0; provider::RESPONSE_HEADER_LEN + 3]
+        ),
+        Err(-22)
+    );
+    assert_eq!(streams.pending_error(b), Ok(104));
+    assert_eq!(call(&mut streams, &request, flags, 0).0.status, -104);
+    assert_eq!(streams.pending_error(b), Ok(0));
 }
 
 #[test]

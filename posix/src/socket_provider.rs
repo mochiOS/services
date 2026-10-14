@@ -39,7 +39,9 @@ pub fn handle_provider_request(
     }
     let maximum_data = if authenticated && attachment_count == 0 {
         match header.opcode {
-            provider::OP_READ | provider::OP_CONTROL => header.length as usize,
+            provider::OP_READ | provider::OP_READ_AT | provider::OP_CONTROL => {
+                header.length as usize
+            }
             _ => 0,
         }
     } else {
@@ -58,6 +60,20 @@ pub fn handle_provider_request(
         match header.opcode {
             provider::OP_READ => streams
                 .read(header.object_id, &mut data[..header.length as usize])
+                .map(|count| (count as u64, count)),
+            // Native positions are provider-defined. For a draining stream,
+            // READ_AT indexes the current receive head without advancing it.
+            // This uses READ authority, never CONTROL or a claimed FD/PID.
+            // POSIX pread(socket) is still rejected by the libc FD boundary.
+            provider::OP_READ_AT => usize::try_from(header.basis)
+                .map_err(|_| -22)
+                .and_then(|offset| {
+                    streams.peek(
+                        header.object_id,
+                        offset,
+                        &mut data[..header.length as usize],
+                    )
+                })
                 .map(|count| (count as u64, count)),
             provider::OP_WRITE => streams
                 .write(header.object_id, payload)
@@ -234,10 +250,9 @@ pub fn handle_provider_request(
                 }
                 _ => Err(-95),
             },
-            provider::OP_SEEK
-            | provider::OP_READ_AT
-            | provider::OP_WRITE_AT
-            | provider::OP_READ_WITH_POSITION => streams.options(header.object_id).and(Err(-29)),
+            provider::OP_SEEK | provider::OP_WRITE_AT | provider::OP_READ_WITH_POSITION => {
+                streams.options(header.object_id).and(Err(-29))
+            }
             _ => Err(-95),
         }
     };

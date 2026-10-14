@@ -1,6 +1,9 @@
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 struct header {
   char magic[4];
@@ -101,6 +104,28 @@ int main(void) {
   CHECK((int64_t)native(634, b, (uintptr_t)bytes, 1, 0, 0, 0) == -11);
   CHECK(native(635, a, (uintptr_t) "hello", 5, 0, 0, 0) == 5);
   CHECK(wait_ready(b, 2, &observed) == 0 && observed == 2);
+  // Inspection needs READ only, not SEEK or CONTROL. Attenuated aliases still
+  // refer to the same receive queue, and denied attempts cannot consume it.
+  uint64_t reader = native(627, b, 1, 0, 0, 0, 0);
+  uint64_t writer = native(627, b, 2, 0, 0, 0, 0);
+  CHECK((int64_t)reader > 0 && (int64_t)writer > 0);
+  CHECK(native(664, reader, 0, 0, 0, 0, 0) == 1);
+  CHECK((int64_t)native(673, writer, (uintptr_t)bytes, 3, 0, 0, 0) == -13);
+  CHECK((int64_t)native(636, reader, 0, 0, 0, 0, 0) == -13);
+  CHECK((int64_t)control(reader, "SOPRDY01", 0, 0, &observed, 8) == -13);
+  for (unsigned repeat = 0; repeat < 3; ++repeat) {
+    memset(bytes, 0x55, sizeof(bytes));
+    CHECK(native(673, reader, (uintptr_t)bytes, 3, 2, 0, 0) == 3);
+    CHECK(!memcmp(bytes, "llo", 3) && bytes[3] == 0x55);
+    CHECK(wait_ready(b, 2, &observed) == 0 && observed == 2);
+  }
+  CHECK((int64_t)native(673, reader, 0, 3, 0, 0, 0) == -14);
+  CHECK(native(673, reader, (uintptr_t)bytes, sizeof(bytes), 0, 0, 0) == 5);
+  CHECK(!memcmp(bytes, "hello", 5));
+  CHECK((int64_t)native(673, reader, (uintptr_t)bytes, 1, 5, 0, 0) == -11);
+  CHECK(native(626, reader, 0, 0, 0, 0, 0) == 0);
+  CHECK(native(626, writer, 0, 0, 0, 0, 0) == 0);
+  puts("native-socket-pair: READ-only queue inspection preserves bytes PASS");
   CHECK(native(635, b, (uintptr_t) "reply", 5, 0, 0, 0) == 5);
   CHECK(native(634, a, (uintptr_t)bytes, 5, 0, 0, 0) == 5 &&
         !memcmp(bytes, "reply", 5));
@@ -138,6 +163,14 @@ int main(void) {
   CHECK((int64_t)native(635, b, (uintptr_t) "x", 1, 0, 0, 0) == -32);
   CHECK(wait_ready(b, 14, &observed) == 0 && observed == 14);
   CHECK(native(626, b, 0, 0, 0, 0, 0) == 0);
+  // Native indexed inspection does not make a socket a POSIX seekable file.
+  int descriptors[2];
+  CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, descriptors) == 0);
+  CHECK(send(descriptors[0], "data", 4, 0) == 4);
+  CHECK(pread(descriptors[1], bytes, 4, 0) == -1 && errno == ESPIPE);
+  CHECK(recv(descriptors[1], bytes, 4, 0) == 4 && !memcmp(bytes, "data", 4));
+  CHECK(close(descriptors[0]) == 0 && close(descriptors[1]) == 0);
+  puts("native-socket-pair: POSIX pread remains ESPIPE without consuming data PASS");
   puts("native-socket-pair: PASS");
   return 0;
 }
