@@ -222,11 +222,12 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                 if native
                     && header.opcode == provider::OP_CONTROL
                     && (header.basis == wire::CONTROL_BIND
+                        || header.basis == wire::CONTROL_LISTEN
                         || (header.basis == wire::CONTROL_LOCAL_ADDRESS
                             && bindings.address(header.object_id).is_some()))
                 {
                     match super::socket_path_native::control(
-                        &streams,
+                        &mut streams,
                         &mut bindings,
                         &service,
                         sender,
@@ -235,6 +236,11 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                         &mut response,
                     ) {
                         Ok(length) => {
+                            if header.basis == wire::CONTROL_LISTEN {
+                                if let Ok(ids) = streams.affected(header.object_id) {
+                                    signal(&streams, ids);
+                                }
+                            }
                             let _ = platform::ipc::reply(sender, &response[..length]);
                         }
                         Err(error) => platform::logln!(

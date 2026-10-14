@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 
 pub const RECEIVE_CAPACITY: usize = 64 * 1024;
 pub const MAX_ENDPOINTS: usize = 1024;
+pub const MAX_BACKLOG: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shutdown {
@@ -24,6 +25,11 @@ pub struct Readiness {
     pub write_error: bool,
 }
 
+struct Listener {
+    backlog: usize,
+    pending: VecDeque<u64>,
+}
+
 struct Endpoint {
     id: u64,
     // None means never connected, not a previously connected peer's close.
@@ -33,6 +39,7 @@ struct Endpoint {
     read_shutdown: bool,
     write_shutdown: bool,
     options: u32,
+    listener: Option<Listener>,
 }
 
 /// Serialize operations externally. Dup/fork alias an existing description;
@@ -96,6 +103,7 @@ impl Streams {
             read_shutdown: false,
             write_shutdown: false,
             options: request.options,
+            listener: None,
         });
         self.next += 1;
         Ok(id)
@@ -123,6 +131,7 @@ impl Streams {
                 read_shutdown: false,
                 write_shutdown: false,
                 options: request.options,
+                listener: None,
             });
         }
         self.next = next;
@@ -238,8 +247,47 @@ impl Streams {
         Ok(())
     }
 
+    /// The adapter must verify a bound namespace identity before entering this
+    /// transition. Allocate pending capacity before publishing or changing it.
+    pub fn listen(&mut self, id: u64, backlog: u32) -> Result<(), i32> {
+        let entry = self.endpoint_mut(id)?;
+        if entry.peer.is_some() {
+            return Err(-22);
+        }
+        let backlog = (backlog as usize).clamp(1, MAX_BACKLOG);
+        if let Some(listener) = &mut entry.listener {
+            listener
+                .pending
+                .try_reserve(backlog.saturating_sub(listener.pending.len()))
+                .map_err(|_| -12)?;
+            listener.backlog = backlog;
+        } else {
+            let mut pending = VecDeque::new();
+            pending.try_reserve(backlog).map_err(|_| -12)?;
+            entry.listener = Some(Listener { backlog, pending });
+        }
+        Ok(())
+    }
+
+    pub fn listening_backlog(&self, id: u64) -> Result<Option<usize>, i32> {
+        Ok(self
+            .endpoint(id)?
+            .listener
+            .as_ref()
+            .map(|listener| listener.backlog))
+    }
+
     pub fn readiness(&self, id: u64) -> Result<Readiness, i32> {
         let entry = self.endpoint(id)?;
+        if let Some(listener) = &entry.listener {
+            return Ok(Readiness {
+                readable: !listener.pending.is_empty(),
+                writable: false,
+                read_closed: false,
+                write_closed: false,
+                write_error: false,
+            });
+        }
         if entry.peer.is_none() {
             // An attempted IO completes with ENOTCONN, rather than sleeping.
             return Ok(Readiness {

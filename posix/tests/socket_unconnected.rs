@@ -35,6 +35,51 @@ fn fixture() -> (PosixService<u32>, PeerIdentity, Streams, Create) {
 }
 
 #[test]
+fn listening_changes_readiness_and_bounds_backlog_without_changing_status_options() {
+    let (service, peer, mut streams, request) = fixture();
+    let id = service.create_socket(peer, request, &mut streams).unwrap();
+    assert_eq!(streams.listening_backlog(id), Ok(None));
+    streams.listen(id, 0).unwrap();
+    assert_eq!(streams.listening_backlog(id), Ok(Some(1)));
+    assert_eq!(streams.options(id), Ok(NONBLOCKING));
+    let ready = streams.readiness(id).unwrap();
+    assert!(
+        !ready.readable
+            && !ready.writable
+            && !ready.read_closed
+            && !ready.write_closed
+            && !ready.write_error
+    );
+    assert_eq!(posix_service::socket_provider::native_signals(ready), 0);
+    streams.listen(id, u32::MAX).unwrap();
+    assert_eq!(
+        streams.listening_backlog(id),
+        Ok(Some(posix_service::socket::MAX_BACKLOG))
+    );
+    streams.listen(id, 2).unwrap();
+    assert_eq!(streams.listening_backlog(id), Ok(Some(2)));
+    let mut bytes = [0];
+    assert_eq!(streams.read(id, &mut bytes), Err(-107));
+    assert_eq!(streams.write(id, b"x"), Err(-107));
+    streams.release(id).unwrap();
+    assert_eq!(streams.listen(id, 1), Err(-9));
+}
+
+#[test]
+fn connected_descriptions_cannot_be_replaced_with_listener_state() {
+    let (service, peer, mut streams, request) = fixture();
+    let [a, b] = service
+        .create_socket_pair(peer, request, &mut streams)
+        .unwrap();
+    assert_eq!(streams.listen(a, 5), Err(-22));
+    assert_eq!(streams.listening_backlog(a), Ok(None));
+    assert_eq!(streams.write(a, b"x"), Ok(1));
+    let mut bytes = [0];
+    assert_eq!(streams.read(b, &mut bytes), Ok(1));
+    assert_eq!(bytes, *b"x");
+}
+
+#[test]
 fn never_connected_socket_has_real_identity_but_no_peer_or_data() {
     let (service, peer, mut streams, request) = fixture();
     assert_eq!(

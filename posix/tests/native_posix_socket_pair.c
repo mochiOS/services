@@ -33,9 +33,15 @@ static int verify_path_binding(void) {
   int a = socket(AF_UNIX, SOCK_STREAM, 0);
   int b = socket(AF_UNIX, SOCK_STREAM, 0);
   CHECK(a >= 0 && b >= 0);
+  CHECK(listen(-1, 1) == -1 && errno == EBADF);
+  CHECK(listen(b, 1) == -1 && errno == EINVAL);
   CHECK(bind(-1, (struct sockaddr *)&address, size) == -1 && errno == EBADF);
   CHECK(bind(a, NULL, size) == -1 && errno == EFAULT);
   CHECK(bind(a, (struct sockaddr *)&address, size) == 0);
+  CHECK(listen(a, SOMAXCONN) == 0 && listen(a, -1) == 0 &&
+        listen(a, 0x7fffffff) == 0);
+  struct pollfd listener = {.fd = a, .events = POLLIN | POLLOUT};
+  CHECK(poll(&listener, 1, 0) == 0 && listener.revents == 0);
   CHECK(bind(a, (struct sockaddr *)&address, size) == -1 && errno == EINVAL);
   CHECK(bind(b, (struct sockaddr *)&address, size) == -1 &&
         errno == EADDRINUSE);
@@ -46,6 +52,9 @@ static int verify_path_binding(void) {
         !strcmp(actual.sun_path, address.sun_path));
   int alias = dup(a);
   CHECK(alias >= 0 && close(a) == 0);
+  CHECK(listen(alias, 4) == 0);
+  listener.fd = alias;
+  CHECK(poll(&listener, 1, 0) == 0 && listener.revents == 0);
   CHECK(unlink(address.sun_path) == 0);
   CHECK(bind(b, (struct sockaddr *)&address, size) == 0);
   length = sizeof(actual);

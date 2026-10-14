@@ -181,7 +181,7 @@ impl Filesystem<u32> for Snapshot {
 }
 
 pub fn control(
-    streams: &Streams,
+    streams: &mut Streams,
     bindings: &mut Bindings<u32>,
     state: &Arc<Mutex<PosixService<u32>>>,
     sender: u64,
@@ -205,6 +205,16 @@ pub fn control(
             };
             let mut backend = snapshot(state, sender, path)?;
             bindings.bind_path(streams, header.object_id, path, &mut backend)?;
+            Ok(0)
+        } else if header.basis == wire::CONTROL_LISTEN {
+            if header.length != 0
+                || payload.len() != 4
+                || bindings.retained_file(header.object_id).is_none()
+            {
+                return Err(-22);
+            }
+            let backlog = u32::from_le_bytes(payload.try_into().map_err(|_| -22)?);
+            streams.listen(header.object_id, backlog)?;
             Ok(0)
         } else {
             if !payload.is_empty() {
