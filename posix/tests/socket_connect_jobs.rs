@@ -144,6 +144,169 @@ fn waiting(started: Started) -> u64 {
     }
 }
 
+fn expiry_request(job: u64, length: u32, payload: &[u8]) -> Vec<u8> {
+    use mnu_abi::provider;
+    let mut request = vec![0; provider::REQUEST_HEADER_LEN + payload.len()];
+    provider::RequestHeader {
+        opcode: provider::OP_CONTROL,
+        object_id: posix_service::socket_connect::object_id(job).unwrap(),
+        argument: 0,
+        data_length: payload.len() as u32,
+        length,
+        basis: mochios_posix_protocol::socket::CONTROL_CONNECT_EXPIRE,
+    }
+    .encode(payload, &mut request)
+    .unwrap();
+    request
+}
+
+fn expire_call(
+    f: &mut Fixture,
+    request: &[u8],
+    flags: u32,
+    count: u32,
+    capacity: usize,
+) -> Result<i64, i32> {
+    let mut response = vec![0; capacity];
+    let length = f
+        .jobs
+        .handle_provider_request(request, flags, count, &mut response, |handle| {
+            f.backend.close(handle)
+        })?
+        .unwrap();
+    Ok(
+        mnu_abi::provider::ResponseHeader::decode(&response[..length])
+            .unwrap()
+            .0
+            .status,
+    )
+}
+
+#[test]
+fn expiry_cancels_before_commit_once_and_cannot_later_connect_or_cancel_a_retry() {
+    let mut f = Fixture::new();
+    let listener = f.listener();
+    let first = f.socket();
+    let client = f.socket();
+    f.start(first, false).unwrap();
+    let job = waiting(f.start(client, false).unwrap());
+    let request = expiry_request(job, 0, &[]);
+    for _ in 0..2 {
+        assert_eq!(
+            expire_call(
+                &mut f,
+                &request,
+                mnu_abi::IPC_DELIVERY_NATIVE_OBJECT,
+                0,
+                mnu_abi::provider::RESPONSE_HEADER_LEN
+            ),
+            Ok(-110)
+        );
+        assert_eq!(f.backend.closed, [2, 3]);
+    }
+    assert_eq!(f.jobs.status(job), Ok(Some(Err(-110))));
+    assert!(!f.jobs.is_pending(client));
+    f.release(job);
+    f.accept(listener);
+    assert!(f.pump().is_empty());
+    assert_eq!(f.streams.write(client, b"x"), Err(-107));
+    assert!(matches!(
+        f.start(client, false),
+        Ok(Started::Connected { .. })
+    ));
+    assert_eq!(
+        expire_call(
+            &mut f,
+            &request,
+            mnu_abi::IPC_DELIVERY_NATIVE_OBJECT,
+            0,
+            mnu_abi::provider::RESPONSE_HEADER_LEN
+        ),
+        Ok(-9)
+    );
+    assert_eq!(f.streams.write(client, b"x"), Ok(1));
+}
+
+#[test]
+fn commit_or_error_before_expiry_preserves_the_already_decided_result() {
+    for succeeds in [true, false] {
+        let mut f = Fixture::new();
+        let listener = f.listener();
+        let first = f.socket();
+        let client = f.socket();
+        f.start(first, false).unwrap();
+        let job = waiting(f.start(client, false).unwrap());
+        if succeeds {
+            f.accept(listener);
+        } else {
+            f.bindings.release(listener, &mut f.backend);
+            f.streams.release(listener).unwrap();
+        }
+        f.pump();
+        let before = f.jobs.status(job).unwrap();
+        let closed = f.backend.closed.clone();
+        let request = expiry_request(job, 0, &[]);
+        assert_eq!(
+            expire_call(
+                &mut f,
+                &request,
+                mnu_abi::IPC_DELIVERY_NATIVE_OBJECT,
+                0,
+                mnu_abi::provider::RESPONSE_HEADER_LEN
+            ),
+            Ok(if succeeds { 0 } else { -111 })
+        );
+        assert_eq!(f.jobs.status(job), Ok(before));
+        assert_eq!(f.backend.closed, closed);
+        f.release(job);
+        if succeeds {
+            assert_eq!(f.streams.write(client, b"still connected"), Ok(15));
+        }
+    }
+}
+
+#[test]
+fn expiry_requires_native_job_authority_and_validates_before_any_cancellation() {
+    let mut f = Fixture::new();
+    f.listener();
+    let first = f.socket();
+    let client = f.socket();
+    f.start(first, false).unwrap();
+    let job = waiting(f.start(client, false).unwrap());
+    let native = mnu_abi::IPC_DELIVERY_NATIVE_OBJECT;
+    let cap = mnu_abi::provider::RESPONSE_HEADER_LEN;
+    for (flags, count, length, payload, capacity, expected) in [
+        (0, 0, 0, vec![], cap, Ok(-13)),
+        (
+            mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE,
+            0,
+            0,
+            vec![],
+            cap,
+            Ok(-13),
+        ),
+        (native, 1, 0, vec![], cap, Ok(-22)),
+        (native, 0, 1, vec![], cap, Ok(-22)),
+        (native, 0, 0, vec![1], cap, Ok(-22)),
+        (native, 0, 0, vec![], 0, Err(-22)),
+    ] {
+        assert_eq!(
+            expire_call(
+                &mut f,
+                &expiry_request(job, length, &payload),
+                flags,
+                count,
+                capacity
+            ),
+            expected
+        );
+        assert!(f.jobs.is_pending(client));
+        assert_eq!(f.backend.closed, [2]);
+    }
+    f.release(job);
+    assert_eq!(f.backend.closed, [2, 3]);
+}
+
 #[test]
 fn fifo_waits_allow_accept_and_release_each_lookup_once() {
     let mut f = Fixture::new();

@@ -154,6 +154,20 @@ impl<H: Copy + Default + Eq> Connections<H> {
             .ok_or(-9)
     }
 
+    /// Serialized with pump: a committed result wins the deadline race. If
+    /// still pending, retire its lease exactly once before reporting timeout.
+    pub fn expire(&mut self, id: u64, close: impl FnOnce(H)) -> Result<(), i32> {
+        let job = self.jobs.iter_mut().find(|job| job.id == id).ok_or(-9)?;
+        if let Some(result) = job.result {
+            return result.map(|_| ());
+        }
+        if let Some(target) = job.target.take() {
+            target.release_with(close);
+        }
+        job.result = Some(Err(-110));
+        Err(-110)
+    }
+
     /// Final job-Handle release cancels a pending connection without changing
     /// the socket. A completed connection is already committed: releasing its
     /// notification object must not tear down the connected socket.
@@ -193,10 +207,16 @@ impl<H: Copy + Default + Eq> Connections<H> {
         } else if attachment_count != 0 {
             Err(-22)
         } else if header.opcode == provider::OP_CONTROL
-            && header.basis == mochios_posix_protocol::socket::CONTROL_CONNECT_RESULT
+            && matches!(
+                header.basis,
+                mochios_posix_protocol::socket::CONTROL_CONNECT_RESULT
+                    | mochios_posix_protocol::socket::CONTROL_CONNECT_EXPIRE
+            )
         {
             if header.length != 0 || !payload.is_empty() {
                 Err(-22)
+            } else if header.basis == mochios_posix_protocol::socket::CONTROL_CONNECT_EXPIRE {
+                job_id(header.object_id).and_then(|id| self.expire(id, close))
             } else {
                 job_id(header.object_id)
                     .and_then(|id| self.status(id))

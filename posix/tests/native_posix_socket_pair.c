@@ -35,6 +35,55 @@ static uint64_t monotonic_ns(void) {
   return (uint64_t)value.tv_sec * 1000000000 + (uint64_t)value.tv_nsec;
 }
 
+static int verify_connect_timeout(void) {
+  struct sockaddr_un address = {.sun_family = AF_UNIX};
+  strcpy(address.sun_path, "/native-posix-connect-timeout");
+  socklen_t size = 2 + strlen(address.sun_path) + 1;
+  CHECK(unlink(address.sun_path) == 0 || errno == ENOENT);
+  int listener = socket(AF_UNIX, SOCK_STREAM, 0);
+  int first = socket(AF_UNIX, SOCK_STREAM, 0);
+  int client = socket(AF_UNIX, SOCK_STREAM, 0);
+  CHECK(listener >= 0 && first >= 0 && client >= 0);
+  CHECK(bind(listener, (struct sockaddr *)&address, size) == 0 &&
+        listen(listener, 1) == 0);
+  CHECK(connect(first, (struct sockaddr *)&address, size) == 0);
+  int alias = dup(client);
+  CHECK(alias >= 0);
+  struct timeval timeout = {.tv_sec = 0, .tv_usec = 50000};
+  CHECK(setsockopt(alias, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) ==
+        0);
+  for (unsigned attempt = 0; attempt < 3; ++attempt) {
+    uint64_t started = monotonic_ns();
+    CHECK(started != 0);
+    CHECK(connect(client, (struct sockaddr *)&address, size) == -1 &&
+          errno == ETIMEDOUT);
+    CHECK(monotonic_ns() - started >= 30000000);
+    struct sockaddr_un peer;
+    socklen_t peer_length = sizeof(peer);
+    CHECK(getpeername(alias, (struct sockaddr *)&peer, &peer_length) == -1 &&
+          errno == ENOTCONN);
+  }
+  int accepted_first = accept(listener, NULL, NULL);
+  CHECK(accepted_first >= 0);
+  CHECK(fcntl(listener, F_SETFL, O_NONBLOCK) == 0);
+  CHECK(accept(listener, NULL, NULL) == -1 && errno == EAGAIN);
+  timeout.tv_usec = 0;
+  CHECK(setsockopt(alias, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) ==
+        0);
+  CHECK(connect(alias, (struct sockaddr *)&address, size) == 0);
+  int accepted = accept(listener, NULL, NULL);
+  CHECK(accepted >= 0);
+  char byte;
+  CHECK(write(client, "t", 1) == 1 && read(accepted, &byte, 1) == 1 &&
+        byte == 't');
+  CHECK(close(accepted) == 0 && close(accepted_first) == 0 &&
+        close(alias) == 0);
+  CHECK(close(first) == 0 && close(client) == 0 && close(listener) == 0);
+  CHECK(unlink(address.sun_path) == 0);
+  puts("posix-socket-connect-timeout: PASS");
+  return 0;
+}
+
 static int verify_send_timeout(void) {
   int fds[2];
   CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
@@ -744,6 +793,7 @@ int main(int argc, char **argv) {
   CHECK(verify_send_capacity() == 0);
   CHECK(verify_receive_timeout() == 0);
   CHECK(verify_send_timeout() == 0);
+  CHECK(verify_connect_timeout() == 0);
   CHECK(verify_socket_errors() == 0);
   puts("posix-socket-options: PASS");
   CHECK(verify_connect_interrupts() == 0);
