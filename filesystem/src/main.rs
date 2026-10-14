@@ -44,18 +44,23 @@ fn main() {
             // The selected, verified System image is immutable. Do not give
             // its backend a writer, even for a POSIX uid-zero caller.
             Ext4::load(Box::new(ImmutableExt4Storage::new(partition)))
+                .map(|system| (system, first_lba))
                 .map_err(|error| error.to_string())
         })
-        .and_then(|system| {
+        .and_then(|(system, first_lba)| {
             service
                 .mount_named_volume(b"/", b"system", system, b"/system")
+                .map(|_| first_lba)
                 .map_err(|error| format!("namespace mount error {error}"))
         });
-    if let Err(error) = system {
-        platform::logln!("filesystem.service: native System mount failed: {error}");
-        let _ = platform::service_ready::notify(ready_target, -1);
-        platform::process::exit(1);
-    }
+    let system_first_lba = match system {
+        Ok(first_lba) => first_lba,
+        Err(error) => {
+            platform::logln!("filesystem.service: native System mount failed: {error}");
+            let _ = platform::service_ready::notify(ready_target, -1);
+            platform::process::exit(1);
+        }
+    };
     if let Err(error) = service.mount_devices(
         b"/dev", filesystem_service::devfs::DeviceFilesystem::default(),
     ) {
@@ -78,6 +83,7 @@ fn main() {
         platform::process::exit(1);
     }
     platform::logln!("filesystem.service: ready");
+    eprintln!("filesystem.service: native System mounted at LBA {system_first_lba} (ready)");
     let mut request_bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
     let mut response_bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
     let mut provider_buffer = filesystem_service::provider_buffer::ProviderReadBuffer::default();
