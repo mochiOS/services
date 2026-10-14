@@ -69,7 +69,7 @@ static void *life_provider(void *unused) {
   atomic_store(&life_endpoint, (uint32_t)endpoint);
   fprintf(stderr, "provider-lifetime: worker mode=%d ready\n", life_mode);
   atomic_store(&life_object, (uint32_t)object);
-  if (life_mode == 0) {
+  if (life_mode == 0 || life_mode == 6) {
     while (!atomic_load(&life_release))
       sched_yield();
   } else {
@@ -162,6 +162,48 @@ static int life_close(pthread_t provider) {
   CHECK(life_native(626, atomic_load(&life_endpoint), 0, 0, 0, 0, 0) == 0);
   return 0;
 }
+static int life_unread_queue(void) {
+  for (unsigned round = 0; round < 8; round++) {
+    pthread_t provider;
+    uint32_t handles[2];
+    CHECK(life_native(649, (uintptr_t)handles, 0, 0, 0, 0, 0) == 0);
+    CHECK(life_start(6, &provider) == 0);
+    struct life_handles outgoing = {.count = 1};
+    outgoing.entries[0].handle = handles[1];
+    outgoing.entries[0].rights = 2; /* each unread message owns a WRITE lease */
+    unsigned queued = 0;
+    for (unsigned n = 0; n < 64; n++) {
+      int64_t sent = (int64_t)life_native(630, atomic_load(&life_endpoint),
+                                          (uintptr_t) "unread", 6,
+                                          (uintptr_t)&outgoing, 0, 0);
+      if (sent == -11)
+        break;
+      CHECK(sent == 0);
+      queued++;
+    }
+    CHECK(queued != 0);
+    CHECK(life_native(626, handles[1], 0, 0, 0, 0, 0) == 0);
+    struct life_wait eof = {.handle = handles[0], .interests = 2};
+    CHECK((int64_t)life_native(647, (uintptr_t)&eof, 1, 0, 0, 0, 0) == -11);
+    // The receiver never reads these ordinary messages. It can still receive
+    // its thread-cleanup RPC reply through the queue's reserved reply slot.
+    atomic_store(&life_release, 1);
+    CHECK(pthread_join(provider, NULL) == 0 && !atomic_load(&life_error));
+    // No test thread is created between exit and this check: reclamation must
+    // not depend on another receiver eventually reusing/draining the slot.
+    int64_t ready = (int64_t)life_native(647, (uintptr_t)&eof, 1, 0, 0, 0, 0);
+    fprintf(stderr, "provider-lifetime: unread round=%u queued=%u EOF=%lld\n",
+            round, queued, (long long)ready);
+    CHECK(ready == 0 && eof.observed == 2);
+    // Holding the dead endpoint's Handle must not retain its unread queue.
+    CHECK(life_native(626, atomic_load(&life_object), 0, 0, 0, 0, 0) == 0);
+    CHECK(life_native(626, atomic_load(&life_endpoint), 0, 0, 0, 0, 0) == 0);
+    CHECK(life_native(626, handles[0], 0, 0, 0, 0, 0) == 0);
+  }
+  puts("provider-lifetime: full unread queues release attached leases at "
+       "endpoint exit PASS");
+  return 0;
+}
 int main(int argc, char **argv) {
   if (argc == 5 && !strcmp(argv[1], "--socket-exec"))
     return run_socket_peek_regressions(argc, argv);
@@ -228,6 +270,7 @@ int main(int argc, char **argv) {
        "PASS");
   puts("provider-lifetime: committed reply survives owner exit PASS");
   CHECK(run_socket_peek_regressions(argc, argv) == 0);
+  CHECK(life_unread_queue() == 0);
   puts("provider-lifetime: PASS native endpoint retirement and socket "
        "regressions");
   return 0;

@@ -56,10 +56,10 @@ mod syscall {
         pub struct IpcEndpoint {pub thread_id:u64,pub slot:u16,pub generation:u64}
         pub mod lifetime {
             pub fn remove_waiter(_:u64) {assert!(crate::THREAD_QUEUE.0.try_lock().is_ok());}
-            pub fn retire(endpoint:super::IpcEndpoint) {
-                assert!(crate::THREAD_QUEUE.0.try_lock().is_ok());
-                assert_eq!(endpoint.generation,123);
-            }
+        }
+        pub fn retire_endpoint(endpoint:IpcEndpoint) {
+            assert!(crate::THREAD_QUEUE.0.try_lock().is_ok());
+            assert_eq!(endpoint.generation,123);
         }
     }
     pub mod address_wait {
