@@ -28,8 +28,11 @@ static volatile int started;
 static void *reader(void *unused) {
   (void)unused;
   __atomic_store_n(&started, 1, __ATOMIC_RELEASE);
-  char byte;
-  return read(blocking_fd, &byte, 1) == 1 && byte == 'z' ? NULL : (void *)1;
+  char bytes[4];
+  return recv(blocking_fd, bytes, sizeof(bytes), MSG_WAITALL) == 4 &&
+                 !memcmp(bytes, "z123", 4)
+             ? NULL
+             : (void *)1;
 }
 static int verify_exec(char **argv) {
   int a = atoi(argv[2]), b = atoi(argv[3]), closed = atoi(argv[4]);
@@ -78,6 +81,9 @@ int main(int argc, char **argv) {
   CHECK(original.st_ino != other.st_ino && original.st_uid == geteuid() &&
         original.st_gid == getegid());
   CHECK(fcntl(alias, F_SETFL, 0) == 0 && fcntl(a, F_GETFL, 0) == O_RDWR);
+  char empty_byte;
+  CHECK(recv(a, &empty_byte, 1, MSG_DONTWAIT) == -1 && errno == EAGAIN);
+  CHECK(fcntl(a, F_GETFL, 0) == O_RDWR && fcntl(alias, F_GETFL, 0) == O_RDWR);
   CHECK(fcntl(b, F_GETFL, 0) == (O_RDWR | O_NONBLOCK));
   CHECK(fcntl(a, F_SETFL, O_NONBLOCK) == 0);
   char bytes[8];
@@ -87,7 +93,8 @@ int main(int argc, char **argv) {
   CHECK(poll(&item, 1, 0) == 1 && item.revents == POLLOUT);
   item.events = POLLIN;
   CHECK(poll(&item, 1, 0) == 0 && item.revents == 0);
-  CHECK(write(b, "hello", 5) == 5);
+  CHECK(send(b, "hello", 5, MSG_NOSIGNAL) == 5);
+  CHECK(recv(a, bytes, sizeof(bytes), MSG_PEEK) == -1 && errno == ENOTSUP);
   CHECK(fstat(a, &duplicate) == 0 && duplicate.st_size == 0 &&
         duplicate.st_ino == original.st_ino);
   CHECK(poll(&item, 1, 0) == 1 && item.revents == POLLIN);
@@ -126,6 +133,7 @@ int main(int argc, char **argv) {
   CHECK(shutdown(b, SHUT_WR) == 0);
   CHECK(read(a, bytes, 1) == 0);
   CHECK(write(a, "x", 1) == 1 && read(b, bytes, 1) == 1 && bytes[0] == 'x');
+  CHECK(send(b, "x", 1, MSG_NOSIGNAL) == -1 && errno == EPIPE);
   CHECK(signal(SIGPIPE, SIG_IGN) != SIG_ERR);
   CHECK(write(b, "x", 1) == -1 && errno == EPIPE);
   item.fd = b;
@@ -143,7 +151,10 @@ int main(int argc, char **argv) {
     sched_yield();
   for (unsigned index = 0; index < 100; ++index)
     sched_yield();
-  CHECK(write(fds[1], "z", 1) == 1);
+  CHECK(send(fds[1], "z1", 2, 0) == 2);
+  for (unsigned index = 0; index < 100; ++index)
+    sched_yield();
+  CHECK(send(fds[1], "23", 2, 0) == 2);
   void *result;
   CHECK(pthread_join(thread, &result) == 0 && result == NULL);
   CHECK(close(fds[0]) == 0 && close(fds[1]) == 0);
