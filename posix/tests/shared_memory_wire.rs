@@ -48,6 +48,111 @@ impl Delegation<u32> for Objects {
         Ok(())
     }
 }
+
+impl posix_service::shared_memory_file::Backing<u32> for Objects {
+    fn retain(&mut self, handle: u32) -> Result<u32, i32> {
+        Delegation::duplicate(self, handle, self.rights[&handle])
+    }
+    fn close(&mut self, handle: u32) -> Result<(), i32> {
+        Delegation::close(self, handle)
+    }
+    fn length(&mut self, handle: u32) -> Result<u64, i32> {
+        Ok(self.handles.get(&handle).ok_or(-9)?.lock().unwrap().len() as u64)
+    }
+    fn resize(&mut self, handle: u32, length: u64) -> Result<(), i32> {
+        self.handles
+            .get(&handle)
+            .ok_or(-9)?
+            .lock()
+            .unwrap()
+            .resize(length as usize, 0);
+        Ok(())
+    }
+    fn read_at(&mut self, handle: u32, offset: u64, output: &mut [u8]) -> Result<usize, i32> {
+        let data = self.handles.get(&handle).ok_or(-9)?.lock().unwrap();
+        let start = (offset as usize).min(data.len());
+        let length = output.len().min(data.len() - start);
+        output[..length].copy_from_slice(&data[start..start + length]);
+        Ok(length)
+    }
+    fn write_at(&mut self, handle: u32, offset: u64, input: &[u8]) -> Result<usize, i32> {
+        let mut data = self.handles.get(&handle).ok_or(-9)?.lock().unwrap();
+        let start = offset as usize;
+        data[start..start + input.len()].copy_from_slice(input);
+        Ok(input.len())
+    }
+}
+
+#[test]
+fn namespace_open_descriptions_survive_unlink_and_failed_retention_rolls_back() {
+    use posix_service::shared_memory::{Access, Open};
+    use posix_service::shared_memory_file::Descriptions;
+    let (mut service, peer) = setup();
+    let mut objects = Objects::default();
+    let mut descriptions = Descriptions::new();
+    let options = Open {
+        access: Access::ReadWrite,
+        create: true,
+        exclusive: false,
+        truncate: false,
+        mode: 0o600,
+    };
+    objects.fail_duplicate = true;
+    assert_eq!(
+        service.open_shared_memory_description(
+            peer,
+            b"/file",
+            options,
+            &mut descriptions,
+            &mut objects
+        ),
+        Err(-24)
+    );
+    assert!(objects.handles.is_empty());
+    objects.fail_close = true;
+    assert_eq!(
+        service.open_shared_memory_description(
+            peer,
+            b"/file",
+            options,
+            &mut descriptions,
+            &mut objects
+        ),
+        Err(-5)
+    );
+    // The failed close keeps the named owning reference available for retry.
+    assert_eq!(objects.handles.len(), 1);
+    objects.fail_close = false;
+    objects.fail_duplicate = false;
+    let first = service
+        .open_shared_memory_description(peer, b"/file", options, &mut descriptions, &mut objects)
+        .unwrap();
+    let second = service
+        .open_shared_memory_description(peer, b"/file", options, &mut descriptions, &mut objects)
+        .unwrap();
+    descriptions.write(first, b"old", &mut objects).unwrap();
+    let original = service.unlink_shared_memory(peer, b"/file").unwrap();
+    Delegation::close(&mut objects, original).unwrap();
+    let mut output = [0; 3];
+    assert_eq!(
+        descriptions.read(second, &mut output, &mut objects),
+        Ok((0, 3))
+    );
+    assert_eq!(&output, b"old");
+    let recreated = service
+        .open_shared_memory_description(peer, b"/file", options, &mut descriptions, &mut objects)
+        .unwrap();
+    assert_eq!(descriptions.length(recreated, &mut objects), Ok(0));
+    descriptions.release(first, &mut objects).unwrap();
+    descriptions.release(second, &mut objects).unwrap();
+    descriptions.write(recreated, b"new", &mut objects).unwrap();
+    assert_eq!(descriptions.length(recreated, &mut objects), Ok(3));
+    descriptions.release(recreated, &mut objects).unwrap();
+    assert_eq!(objects.handles.len(), 1);
+    let original = service.unlink_shared_memory(peer, b"/file").unwrap();
+    Delegation::close(&mut objects, original).unwrap();
+    assert!(objects.handles.is_empty());
+}
 fn setup() -> (PosixService, PeerIdentity) {
     let peer = PeerIdentity {
         process_id: 1,

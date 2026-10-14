@@ -93,6 +93,35 @@ fn rights(access: Access) -> u64 {
 }
 
 impl<H: Copy> PosixService<H> {
+    /// Atomically resolve/create a name and retain an independent open
+    /// description. The caller serializes this with unlink and Provider IO.
+    /// Native Provider creation subsequently binds the returned ID; client FD
+    /// numbers and client-supplied object IDs never enter this operation.
+    pub fn open_shared_memory_description<B>(
+        &mut self,
+        peer: PeerIdentity,
+        name: &[u8],
+        options: Open,
+        descriptions: &mut super::shared_memory_file::Descriptions<H>,
+        backend: &mut B,
+    ) -> Result<u64, i32>
+    where
+        B: Delegation<H> + super::shared_memory_file::Backing<H>,
+    {
+        let opened = self.open_shared_memory(peer, name, options, backend)?;
+        match descriptions.open(opened.backing, options.access == Access::ReadWrite, backend) {
+            Ok(id) => Ok(id),
+            Err(error) => {
+                if opened.created {
+                    // Do not discard ownership if closing the original fails.
+                    <B as Delegation<H>>::close(backend, opened.backing)?;
+                    self.shared_memory.names.remove(name);
+                }
+                Err(error)
+            }
+        }
+    }
+
     pub fn handle_shared_memory<B: Delegation<H>>(
         &mut self,
         peer: PeerIdentity,
