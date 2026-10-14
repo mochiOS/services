@@ -4,11 +4,14 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-enum { MAP = 582, UNMAP = 583, PROTECT = 584, INSTALL = 654, RETURN = 655 };
-static unsigned char entry_stack[16384] __attribute__((aligned(16)));
+enum { MAP = 582, UNMAP = 583, PROTECT = 584, INSTALL = 654, RETURN = 655,
+       CREATE_MEMORY = 671 };
+static unsigned char entry_stack[16384] __attribute__((aligned(4096)));
 static volatile uint64_t expected_address;
+static volatile uint64_t expected_cause = 2;
 static volatile unsigned exceptions;
 static volatile int recursive;
+static volatile int report_only;
 
 static inline uint64_t native(uint64_t n, uint64_t a, uint64_t b, uint64_t c,
                               uint64_t d, uint64_t e, uint64_t f) {
@@ -27,7 +30,8 @@ static void invalid_access(void) {
 }
 
 static void handler(uint64_t vector, uint64_t token, uint64_t kind,
-                    uint64_t address, uint64_t code, uint64_t instruction) {
+                    uint64_t address, uint64_t code, uint64_t instruction,
+                    uint64_t cause) {
     /* Native lifecycle/wait notifications share this entry, even while
        SIGCHLD is blocked. They are not synchronous exceptions. */
     if (kind == 0) {
@@ -37,13 +41,15 @@ static void handler(uint64_t vector, uint64_t token, uint64_t kind,
     uint64_t flags;
     __asm__ volatile("pushfq\npop %0" : "=r"(flags));
     if (vector != 14 || !token || kind != 1 || address != expected_address ||
-        !(code & 2) || !(code & 4) || !instruction || (flags & (1 << 10))) {
+        (!report_only && !(code & 2)) || !(code & 4) || !instruction ||
+        (flags & (1 << 10)) || cause != expected_cause) {
         fprintf(stderr, "user-exception: bad envelope vector=%llu kind=%llu addr=%llx code=%llx ip=%llx\n",
                 (unsigned long long)vector, (unsigned long long)kind,
                 (unsigned long long)address, (unsigned long long)code,
                 (unsigned long long)instruction);
         _exit(90);
     }
+    if (report_only) _exit(70 + (int)cause);
     ++exceptions;
     if (recursive) invalid_access();
     if (native(PROTECT, address, 4096, 3, 0, 0, 0)) _exit(91);
@@ -89,6 +95,30 @@ int main(void) {
             return 2;
         }
     }
+    /* Both private copies and shared pins must report absent backing, not
+       manufacture pages. The unmapped-address case is a distinct cause. */
+    for (int kind = 0; kind < 3; ++kind) {
+        pid_t child = fork();
+        if (child < 0) return 5;
+        if (!child) {
+            report_only = 1;
+            expected_cause = kind == 0 ? 1 : 3;
+            expected_address = 0;
+            if (kind) {
+                uint64_t object = native(CREATE_MEMORY, 4096, 0, 0, 0, 0, 0);
+                if ((int64_t)object < 0) _exit(97);
+                expected_address = native(MAP, 0, 4096, 1, kind == 2 ? 2 : 0, object, 4096);
+                if ((int64_t)expected_address <= 0) _exit(98);
+            }
+            if (install(1)) _exit(99);
+            uint64_t value = expected_address;
+            __asm__ volatile("mov (%%rax), %%rax" : "+a"(value) : : "memory");
+            _exit(100);
+        }
+        int status;
+        if (waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
+            WEXITSTATUS(status) != (kind == 0 ? 71 : 73)) return 6;
+    }
     /* Non-opted-in children retain the native fatal-fault default. */
     for (int recurse = 0; recurse <= 1; ++recurse) {
         pid_t child = fork();
@@ -108,6 +138,6 @@ int main(void) {
         if (waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
             WEXITSTATUS(status) != 255) return 4;
     }
-    puts("user-exception: PASS opt-in, native envelope, repair/retry, full registers, COW and recursive rejection");
+    puts("user-exception: PASS opt-in, native causes, backing bounds, repair/retry, full registers, COW and recursive rejection");
     return 0;
 }

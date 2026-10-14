@@ -13,8 +13,17 @@ fn actual_exception_delivery_preserves_snapshot_and_rejects_kernel_or_invalid_co
 thread_local! {
     static MODE:std::cell::Cell<u8>=const {std::cell::Cell::new(0)};
     static SAVED:std::cell::Cell<Option<UserUpcallContext>>=const {std::cell::Cell::new(None)};
+    static METADATA:std::cell::Cell<Option<(u64,u64)>>=const {std::cell::Cell::new(None)};
 }
-mod mnu_abi { pub const THREAD_UPCALL_KIND_EXCEPTION:u64=1; }
+fn copy_to_user(address:u64, bytes:&[u8])->Result<(),()> {
+    if MODE.with(|v|v.get())==4 {return Err(());}
+    METADATA.with(|v|v.set(Some((address,u64::from_ne_bytes(bytes.try_into().unwrap())))));
+    Ok(())
+}
+mod mnu_abi {
+    pub const THREAD_UPCALL_KIND_EXCEPTION:u64=1;
+    #[repr(u64)] pub enum MemoryFaultCause { AccessDenied=2 }
+}
 mod task {
     pub fn current_thread_id()->Option<u64> {if crate::MODE.with(|v|v.get())==3 {None}else{Some(11)}}
     pub struct Thread;
@@ -22,7 +31,7 @@ mod task {
     impl Thread {
         pub fn begin_exception_upcall(&mut self,context:crate::UserUpcallContext,vector:u64)->Option<Delivery> {
             assert_eq!(vector,14);
-            if crate::MODE.with(|v|v.get())!=0 {return None;}
+            if matches!(crate::MODE.with(|v|v.get()),1..=3) {return None;}
             crate::SAVED.with(|v|v.set(Some(context)));
             Some(Delivery{entry:0x1000,stack_top:0x9000,payload:vector,token:77})
         }
@@ -32,6 +41,7 @@ mod task {
     }
 }
 "#);
+    program.push_str("mod actual { use super::*;\n");
     for name in [
         "prepare_user_exception",
         "valid_user_return",
@@ -44,21 +54,27 @@ mod task {
     }
     program.push_str(
         r#"
-fn main() {
+pub fn verify() {
     let mut raw=core::array::from_fn::<_,21,_>(|i|0x100+i as u64);
     raw[15]=6;raw[16]=0x4000;raw[17]=0x23;raw[18]=0x10702;raw[19]=0x8000;raw[20]=0x1b;
     let original=raw;
     for mode in 1..=3 {
         MODE.with(|v|v.set(mode));
-        assert!(!prepare_user_exception(&mut raw,0x5000));assert_eq!(raw,original);
+        assert!(!prepare_user_exception(&mut raw,0x5000,mnu_abi::MemoryFaultCause::AccessDenied));assert_eq!(raw,original);
+        assert_eq!(METADATA.with(|v|v.get()),None);
     }
     MODE.with(|v|v.set(0));
     for (slot,value) in [(17,8),(16,0),(19,0xffff800000000000)] {
         raw=original;raw[slot]=value;let invalid=raw;
-        assert!(!prepare_user_exception(&mut raw,0x5000));assert_eq!(raw,invalid);
+        assert!(!prepare_user_exception(&mut raw,0x5000,mnu_abi::MemoryFaultCause::AccessDenied));assert_eq!(raw,invalid);
     }
+    MODE.with(|v|v.set(4));raw=original;
+    assert!(!prepare_user_exception(&mut raw,0x5000,mnu_abi::MemoryFaultCause::AccessDenied));
+    assert_eq!(raw,original);assert_eq!(METADATA.with(|v|v.get()),None);
+    MODE.with(|v|v.set(0));
     raw=original;
-    assert!(prepare_user_exception(&mut raw,0x5000));
+    assert!(prepare_user_exception(&mut raw,0x5000,mnu_abi::MemoryFaultCause::AccessDenied));
+    assert_eq!(METADATA.with(|v|v.get()),Some((0x9008,2)));
     let saved=SAVED.with(|v|v.get().unwrap());
     assert_eq!((saved.user_rip,saved.user_rsp,saved.user_rflags),(0x4000,0x8000,original[18]));
     assert_eq!((saved.rcx,saved.r11,saved.rax),(original[13],original[4],original[14]));
@@ -68,6 +84,8 @@ fn main() {
     expected[18]&=!((1<<10)|(1<<8)|(1<<16));
     assert_eq!(raw,expected);
 }
+}
+fn main() {actual::verify();}
 "#,
     );
     let directory = std::env::temp_dir().join(format!(
@@ -148,4 +166,80 @@ fn native_exception_entry_is_opt_in_and_runs_after_vm_recovery_without_posix_pol
     ] {
         assert!(probe.contains(&format!("{name} = {}", value as u64)));
     }
+}
+
+#[test]
+fn production_fault_causes_preserve_origin_instead_of_guessing_from_errno() {
+    let process = include_str!("../../../core/src/syscall/process.rs");
+    let abi = include_str!("../../../core/crates/abi/src/lib.rs");
+    let mut program = String::from(
+        r#"
+const ENOMEM:u64=(-12i64) as u64;
+mod mem { pub mod vm_object {
+    #[derive(Clone,Copy,Debug,PartialEq,Eq)]
+    pub enum VmPageError { OutsideBacking, Operation(u64) }
+} }
+mod mnu_abi {
+#[repr(u64)] #[derive(Debug,PartialEq,Eq)]
+"#,
+    );
+    let start = abi.find("pub enum MemoryFaultCause {").unwrap();
+    let end = start + abi[start..].find("\n}\n").unwrap() + 3;
+    program.push_str(&abi[start..end]);
+    program.push_str("}\n#[derive(Debug,PartialEq,Eq)]\n");
+    let start = process.find("pub(crate) enum MemoryFault {").unwrap();
+    let end = process[start..].find("/// Resolves one page,").unwrap() + start;
+    program.push_str(&process[start..end]);
+    program.push_str(
+        r#"
+fn main() {
+    use mem::vm_object::VmPageError;
+    use mnu_abi::MemoryFaultCause::*;
+    assert_eq!(MemoryFault::Unmapped.cause(),Unmapped);
+    assert_eq!(MemoryFault::AccessDenied.cause(),AccessDenied);
+    assert_eq!(MemoryFault::Backing(VmPageError::OutsideBacking).cause(),OutsideBacking);
+    for error in [(-5i64) as u64,(-22i64) as u64,(-13i64) as u64] {
+        assert_eq!(MemoryFault::Backing(VmPageError::Operation(error)).cause(),BackingFailure);
+        assert_eq!(MemoryFault::Operation(error).cause(),Unresolved);
+    }
+    assert_eq!(MemoryFault::Operation(ENOMEM).cause(),ResourceUnavailable);
+    assert_eq!(MemoryFault::Backing(VmPageError::Operation(ENOMEM)).cause(),ResourceUnavailable);
+}
+"#,
+    );
+    let directory = std::env::temp_dir().join(format!(
+        "mochios-native-fault-cause-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let binary = directory.join("probe");
+    let mut compiler = Command::new("rustc")
+        .args(["--edition=2024", "-Awarnings", "-", "-o"])
+        .arg(&binary)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    compiler
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(program.as_bytes())
+        .unwrap();
+    let compiled = compiler.wait_with_output().unwrap();
+    if !compiled.status.success() {
+        std::fs::remove_dir_all(&directory).unwrap();
+        panic!("{}", String::from_utf8_lossy(&compiled.stderr));
+    }
+    let result = Command::new(binary).output().unwrap();
+    std::fs::remove_dir_all(directory).unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
 }
