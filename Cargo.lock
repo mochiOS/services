@@ -2493,6 +2493,7 @@ dependencies = [
  "mboot-protocol",
  "mnu-abi",
  "mochi-user-platform",
+ "mochios-capability-protocol",
  "mochios-certificate-database 0.1.0",
  "mochios-filesystem-protocol",
  "mochios-net-device-protocol 0.1.0",

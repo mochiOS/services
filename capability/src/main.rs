@@ -5,6 +5,7 @@ use mochi_user_platform as platform;
 mod app_spawn;
 mod native_app;
 mod native_bootstrap;
+mod prepared_image;
 mod bootstrap_file;
 mod dynamic_grant;
 mod package_index;

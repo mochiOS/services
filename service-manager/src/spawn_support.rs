@@ -7,6 +7,18 @@ const CAPABILITY_SERVICE_NAME: &str = "capability.service";
 const PACKAGE_SERVICE_NAME: &str = "package.service";
 const SIGNATURE_SERVICE_NAME: &str = "signature.service";
 
+pub(crate) fn prepare_execution_image(
+    path: &str,
+    class: platform::service::ExecutionClass,
+) -> Result<crate::prepared_image::PreparedImage, mochi_user_syscall::SysError> {
+    let endpoint = platform::process::find_by_name(CAPABILITY_SERVICE_NAME)?;
+    if endpoint == 0 {
+        return Err(sys_error(mochi_user_syscall::ENOENT));
+    }
+    let endpoint = u32::try_from(endpoint).map_err(|_| sys_error(mochi_user_syscall::EOVERFLOW))?;
+    crate::prepared_image::prepare(endpoint, path, class)
+}
+
 pub(crate) fn errno(error: mochi_user_syscall::SysError) -> u64 {
     error.errno().map_or(0, |errno| errno)
 }
@@ -190,8 +202,7 @@ fn decode_nul_list(bytes: &[u8]) -> Result<Vec<String>, mochi_user_syscall::SysE
         if item.is_empty() {
             continue;
         }
-        let item = core::str::from_utf8(item)
-            .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
+        let item = core::str::from_utf8(item).map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
         items.push(item.into());
     }
     Ok(items)
@@ -209,7 +220,7 @@ pub(crate) fn resolve_execution_security(
         execution_class.as_raw(),
         entry_path,
     )
-        .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
+    .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
     let mut reply = [0u8; 1024];
     let message = call_with_wait(service_tid, &request, &mut reply)?;
     let length = (message & 0xffff_ffff) as usize;

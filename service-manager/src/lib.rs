@@ -8,6 +8,7 @@ mod driver_controller;
 mod launch_arguments;
 mod launch_rollback;
 mod native_process;
+mod prepared_image;
 mod orchestration;
 mod portal;
 mod portal_status;

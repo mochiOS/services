@@ -1,13 +1,12 @@
 use mochi_user_platform as platform;
 
 use crate::launch_arguments::encode_native_launch;
-use crate::launch_arguments::encode_spawn_args;
 use crate::native_process::NativeProcess;
 use crate::service_config::{
     DRIVERS, FixedService, ReadyTarget, ServiceSpec, driver_arguments, fixed_service_arguments,
     fixed_service_spec, mboot_agent_arguments,
 };
-use crate::spawn_support::{resolve_execution_security, sys_error};
+use crate::spawn_support::{prepare_execution_image, resolve_execution_security, sys_error};
 
 use crate::launch_rollback::retain_failed_launch;
 pub(crate) use crate::launch_rollback::{has_failed_launch_cleanup, retry_failed_launch_cleanup};
@@ -31,21 +30,35 @@ fn spawn(
     spec: ServiceSpec,
     arguments: &[alloc::string::String],
 ) -> Result<u64, mochi_user_syscall::SysError> {
-    let mut arguments = arguments.to_vec();
-    let security = resolve_execution_security(spec.path, spec.execution_class)?;
-    if spec.security_identity {
-        for identity_item in security.identity.into_iter().rev() {
-            arguments.insert(0, identity_item);
-        }
+    let mut random = [0; 16];
+    platform::random::fill(&mut random)?;
+    let label = spec
+        .path
+        .rsplit('/')
+        .next()
+        .ok_or_else(|| sys_error(mochi_user_syscall::EINVAL))?;
+    let metadata = encode_native_launch(spec.path, label, arguments, random)
+        .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
+    let image = prepare_execution_image(spec.path, spec.execution_class)?;
+    let process = NativeProcess::create_with_rollback(
+        image.handle(),
+        &metadata,
+        |_| Ok(()),
+        reap_namespace_launch,
+    )?;
+    Ok(process.process_id())
+}
+
+fn reap_namespace_launch(process: NativeProcess) {
+    let _ = platform::write_fmt(
+        platform::io::STDERR,
+        format_args!("service-manager.service: retaining failed namespace launch until exit\n",),
+    );
+    // No POSIX service/session exists for these initial children. Retain the
+    // exact native owner until termination is confirmed; never look up a PID.
+    while process.retry_rollback(|_| Ok(())).is_err() {
+        let _ = platform::thread::sleep_milliseconds(1);
     }
-    let arguments =
-        encode_spawn_args(&arguments).map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
-    platform::service::spawn_manifest(
-        spec.path,
-        spec.execution_class,
-        Some(arguments.as_slice()),
-        Some(security.capabilities.as_slice()),
-    )
 }
 
 pub(crate) fn spawn_drivers(

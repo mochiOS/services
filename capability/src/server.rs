@@ -209,6 +209,38 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
             reply_capabilities(sender, result);
             continue;
         }
+        if opcode == platform::capability::PREPARE_EXECUTION_IMAGE_OPCODE {
+            let result = platform::capability::decode_prepare_execution_image_request(slice)
+                .map_err(|_| {
+                    mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
+                })
+                .and_then(|(class, path)| {
+                    crate::prepared_image::prepare(
+                        &state,
+                        sender,
+                        class,
+                        path,
+                        authorization_reader,
+                    )
+                });
+            match result {
+                Ok(image) => {
+                    let mut handles = platform::ipc::IpcObjectHandles::default();
+                    handles.count = 1;
+                    handles.handles[0] = platform::ipc::IpcObjectHandle {
+                        handle: image.handle(),
+                        reserved: 0,
+                        rights: platform::handle::HANDLE_RIGHT_READ,
+                    };
+                    let _ =
+                        platform::ipc::reply_object_handles(sender, &0u64.to_le_bytes(), &handles);
+                    // On success IPC owns the receiver reference. On failure
+                    // only this local owner exists; either way Drop is correct.
+                }
+                Err(error) => capability_reply(sender, error.errno().unwrap_or(5)),
+            }
+            continue;
+        }
         if opcode == platform::capability::RESOLVE_EXECUTION_SECURITY_OPCODE {
             let result = platform::capability::decode_resolve_execution_security_request(slice)
                 .map_err(|_| {
