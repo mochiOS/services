@@ -8,6 +8,9 @@ use std::collections::VecDeque;
 pub const RECEIVE_CAPACITY: usize = 64 * 1024;
 pub const MAX_ENDPOINTS: usize = 1024;
 pub const MAX_BACKLOG: usize = 128;
+/// Private Provider namespace: bit 62 distinguishes connection wait jobs.
+/// Stay within the native Provider's signed 64-bit object identity range.
+pub const MAX_DESCRIPTION_ID: u64 = (1 << 62) - 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shutdown {
@@ -142,7 +145,7 @@ impl Streams {
 
     fn create(&mut self, request: Create, credentials: (u32, u32)) -> Result<u64, i32> {
         Self::validate_create(request)?;
-        if self.entries.len() == MAX_ENDPOINTS || self.next > i64::MAX as u64 {
+        if self.entries.len() == MAX_ENDPOINTS || self.next > MAX_DESCRIPTION_ID {
             return Err(-23);
         }
         self.entries.try_reserve(1).map_err(|_| -12)?;
@@ -173,7 +176,7 @@ impl Streams {
         let second = self
             .next
             .checked_add(1)
-            .filter(|id| *id <= i64::MAX as u64)
+            .filter(|id| *id <= MAX_DESCRIPTION_ID)
             .ok_or(-23)?;
         let next = second + 1;
         self.entries.try_reserve(2).map_err(|_| -12)?;
@@ -380,7 +383,7 @@ impl Streams {
         if queue.pending.len() >= queue.backlog {
             return Err(-11);
         }
-        if self.entries.len() == MAX_ENDPOINTS || self.next > i64::MAX as u64 {
+        if self.entries.len() == MAX_ENDPOINTS || self.next > MAX_DESCRIPTION_ID {
             return Err(-23);
         }
         let credentials = target.credentials;
@@ -443,7 +446,7 @@ impl Streams {
         if queued.accept_retry.is_some() {
             return Err(-16);
         }
-        if self.next > i64::MAX as u64 {
+        if self.next > MAX_DESCRIPTION_ID {
             return Err(-23);
         }
         let retry = self.next;

@@ -167,6 +167,14 @@ fn fifo_waits_allow_accept_and_release_each_lookup_once() {
     assert_eq!(matched, listener);
     assert!(!f.jobs.is_pending(clients[1]));
     assert_eq!(f.jobs.status(first), Ok(Some(Ok((listener, accepted)))));
+    assert_eq!(
+        provider_query(&mut f, first, mnu_abi::IPC_DELIVERY_NATIVE_OBJECT, 0),
+        0
+    );
+    assert_eq!(
+        provider_query(&mut f, first, mnu_abi::IPC_DELIVERY_NATIVE_OBJECT, 0),
+        0
+    );
     assert_eq!(f.jobs.status(second), Ok(None));
     f.release(first);
     assert_eq!(f.streams.write(clients[1], b"live"), Ok(4));
@@ -300,4 +308,140 @@ fn completed_jobs_are_bounded_and_releasing_one_recovers_capacity() {
         f.release(job);
     }
     assert_eq!(f.jobs.status(retry), Err(-9));
+}
+
+fn provider_query(f: &mut Fixture, job: u64, flags: u32, count: u32) -> i64 {
+    use mnu_abi::provider;
+    let mut request = [0; provider::REQUEST_HEADER_LEN];
+    provider::RequestHeader {
+        opcode: provider::OP_CONTROL,
+        object_id: posix_service::socket_connect::object_id(job).unwrap(),
+        argument: 0,
+        data_length: 0,
+        length: 0,
+        basis: mochios_posix_protocol::socket::CONTROL_CONNECT_RESULT,
+    }
+    .encode(&[], &mut request)
+    .unwrap();
+    let mut response = [0; provider::RESPONSE_HEADER_LEN];
+    let length = f
+        .jobs
+        .handle_provider_request(&request, flags, count, &mut response, |_| {
+            panic!("query released target")
+        })
+        .unwrap()
+        .unwrap();
+    let (header, data) = provider::ResponseHeader::decode(&response[..length]).unwrap();
+    assert_eq!(header.value, 0);
+    assert!(data.is_empty());
+    header.status
+}
+
+#[test]
+fn job_provider_queries_require_native_authority_and_preserve_completed_errors() {
+    let mut f = Fixture::new();
+    let listener = f.listener();
+    let first = f.socket();
+    let client = f.socket();
+    f.start(first, false).unwrap();
+    let job = waiting(f.start(client, false).unwrap());
+    assert_eq!(provider_query(&mut f, job, 0, 0), -13);
+    assert_eq!(
+        provider_query(&mut f, job, mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE, 0),
+        -13
+    );
+    assert_eq!(
+        provider_query(&mut f, job, mnu_abi::IPC_DELIVERY_NATIVE_OBJECT, 1),
+        -22
+    );
+    assert_eq!(
+        provider_query(&mut f, job, mnu_abi::IPC_DELIVERY_NATIVE_OBJECT, 0),
+        -11
+    );
+    assert!(f.jobs.is_pending(client));
+    f.bindings.release(listener, &mut f.backend);
+    f.streams.release(listener).unwrap();
+    f.pump();
+    for _ in 0..2 {
+        assert_eq!(
+            provider_query(&mut f, job, mnu_abi::IPC_DELIVERY_NATIVE_OBJECT, 0),
+            -111
+        );
+    }
+    f.release(job);
+    assert_eq!(
+        provider_query(&mut f, job, mnu_abi::IPC_DELIVERY_NATIVE_OBJECT, 0),
+        -9
+    );
+}
+
+#[test]
+fn only_native_final_release_cancels_a_job_and_late_release_is_harmless() {
+    use mnu_abi::provider;
+    let mut f = Fixture::new();
+    let listener = f.listener();
+    let first = f.socket();
+    let client = f.socket();
+    f.start(first, false).unwrap();
+    let job = waiting(f.start(client, false).unwrap());
+    let mut request = [0; provider::REQUEST_HEADER_LEN];
+    provider::RequestHeader {
+        opcode: provider::OP_RELEASE,
+        object_id: posix_service::socket_connect::object_id(job).unwrap(),
+        argument: 0,
+        data_length: 0,
+        length: 0,
+        basis: 0,
+    }
+    .encode(&[], &mut request)
+    .unwrap();
+    let mut response = [0; provider::RESPONSE_HEADER_LEN];
+    let result = f
+        .jobs
+        .handle_provider_request(&request, 0, 0, &mut response, |_| panic!("forged release"));
+    assert!(result.unwrap().is_some());
+    assert!(f.jobs.is_pending(client));
+    assert_eq!(
+        f.jobs.handle_provider_request(
+            &request,
+            mnu_abi::IPC_DELIVERY_NATIVE_OBJECT,
+            0,
+            &mut [],
+            |handle| f.backend.close(handle)
+        ),
+        Ok(None)
+    );
+    assert!(!f.jobs.is_pending(client));
+    assert_eq!(
+        f.jobs.handle_provider_request(
+            &request,
+            mnu_abi::IPC_DELIVERY_NATIVE_OBJECT,
+            0,
+            &mut [],
+            |_| panic!("double release")
+        ),
+        Err(-9)
+    );
+    f.accept(listener);
+    assert!(f.pump().is_empty());
+    assert_eq!(f.streams.write(client, b"x"), Err(-107));
+    assert_eq!(f.backend.closed, [2, 3]);
+}
+
+#[test]
+fn provider_identity_namespaces_do_not_overlap_or_exceed_native_range() {
+    use posix_service::{
+        socket::MAX_DESCRIPTION_ID,
+        socket_connect::{job_id, object_id},
+    };
+    for job in [1, MAX_DESCRIPTION_ID] {
+        let object = object_id(job).unwrap();
+        assert!(object > MAX_DESCRIPTION_ID && object <= i64::MAX as u64);
+        assert_eq!(job_id(object), Ok(job));
+        assert_eq!(job_id(job), Err(-9));
+    }
+    assert_eq!(object_id(0), Err(-9));
+    assert_eq!(object_id(MAX_DESCRIPTION_ID + 1), Err(-9));
+    assert_eq!(job_id(1 << 62), Err(-9));
+    assert_eq!(job_id(u64::MAX), Err(-9));
 }
