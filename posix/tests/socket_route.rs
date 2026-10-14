@@ -1,15 +1,15 @@
 use mochios_filesystem_protocol as fs;
 use mochios_posix_protocol::{
     socket::{Address, Create, Domain, Kind},
-    socket_record::{Operation, Request, MAX_REPLY_LEN},
+    socket_record::{MAX_REPLY_LEN, Operation, Request},
     socket_route as wire,
 };
 use posix_service::{
+    AuthenticatedProcess, OpenedObject, PeerIdentity, PosixService,
     socket::Streams,
     socket_binding::{Bindings, Filesystem, NODE_RIGHTS},
     socket_record_io::RecordBuffer,
-    socket_route::{job_id, object_id, Routes},
-    AuthenticatedProcess, OpenedObject, PeerIdentity, PosixService,
+    socket_route::{Routes, job_id, object_id},
 };
 
 struct Backend {
@@ -106,6 +106,178 @@ fn request(length: u32) -> Request {
         length,
         peek: false,
     }
+}
+
+thread_local! { static CLOSED_RIGHTS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) }; }
+fn close_right(handle: u32) {
+    CLOSED_RIGHTS.with(|closed| closed.borrow_mut().push(handle));
+}
+fn lease(handle: u32) -> posix_service::socket_rights::Lease {
+    posix_service::socket_rights::Lease::adopt(
+        handle,
+        mnu_abi::HANDLE_RIGHT_READ | mnu_abi::HANDLE_RIGHT_TRANSFER,
+        mochios_posix_protocol::InheritedFdMetadata {
+            kind: 5,
+            open_flags: 0,
+            descriptor_flags: 0,
+        },
+        close_right,
+    )
+    .unwrap()
+}
+
+#[test]
+fn ancillary_route_is_atomic_single_use_and_never_falls_back_to_connected_send() {
+    use posix_service::socket_transfer::Transfers;
+    CLOSED_RIGHTS.with(|closed| closed.borrow_mut().clear());
+    let (mut streams, [client, server], bindings, mut backend) = fixture();
+    let target = bindings
+        .prepare_datagram_target(&streams, client, b"/alias", &mut backend)
+        .unwrap();
+    let mut routes = Routes::new();
+    let route = routes.start(&streams, target, 3, 777).ok().unwrap();
+    let mut transfers = Transfers::new(2);
+    assert_eq!(
+        transfers.start_route(&streams, &routes, route, 900, 2, 1, close_right),
+        Err(-22)
+    );
+    let first = transfers
+        .start_route(&streams, &routes, route, 901, 3, 1, close_right)
+        .unwrap();
+    let competing = transfers
+        .start_route(&streams, &routes, route, 902, 3, 1, close_right)
+        .unwrap();
+    transfers.append(first, 0, vec![lease(501)]).unwrap();
+    transfers.append(competing, 0, vec![lease(502)]).unwrap();
+    let mut buffer = Buffer(b"abc".to_vec(), false);
+    assert_eq!(
+        transfers.commit(&mut streams, first, 0, &mut buffer),
+        Err(-95)
+    );
+    buffer.1 = true;
+    assert_eq!(
+        transfers.commit_with_routes(&mut streams, &mut routes, first, 0, &mut buffer),
+        Err(-5)
+    );
+    buffer.1 = false;
+    assert_eq!(
+        transfers.commit_with_routes(&mut streams, &mut routes, first, 0, &mut buffer),
+        Ok((3, [client, server]))
+    );
+    assert_eq!(
+        transfers.commit_with_routes(&mut streams, &mut routes, first, 0, &mut buffer),
+        Err(-114)
+    );
+    assert_eq!(
+        transfers.commit_with_routes(&mut streams, &mut routes, competing, 0, &mut buffer),
+        Err(-114)
+    );
+    assert_eq!(streams.peer_address(client), Err(-107));
+    transfers.release(first).unwrap();
+    transfers.release(competing).unwrap();
+    CLOSED_RIGHTS.with(|closed| assert_eq!(*closed.borrow(), [901, 902, 502]));
+    let mut response = [0; MAX_REPLY_LEN];
+    let receive = Request {
+        operation: Operation::Receive,
+        ..request(3)
+    };
+    streams
+        .transfer_record(server, receive, &mut buffer, &mut response)
+        .unwrap();
+    assert_eq!(buffer.0, b"abc");
+    assert_eq!(
+        streams.transfer_record(server, receive, &mut buffer, &mut response),
+        Err(-11)
+    );
+    CLOSED_RIGHTS.with(|closed| assert_eq!(*closed.borrow(), [901, 902, 502, 501]));
+    assert_eq!(backend.lookups, 2);
+    routes
+        .release(route, close_right, |handle| backend.close(handle))
+        .unwrap();
+}
+
+#[test]
+fn ancillary_route_retains_all_leases_across_backpressure_and_rechecks_target_filter() {
+    use posix_service::socket_transfer::Transfers;
+    CLOSED_RIGHTS.with(|closed| closed.borrow_mut().clear());
+    let (mut streams, [client, server], bindings, mut backend) = fixture();
+    let mut routes = Routes::new();
+    let target = bindings
+        .prepare_datagram_target(&streams, client, b"/alias", &mut backend)
+        .unwrap();
+    let full = routes.start(&streams, target, 65536, 800).ok().unwrap();
+    let mut buffer = Buffer(vec![1; 65536], false);
+    let mut response = [0; MAX_REPLY_LEN];
+    routes
+        .transfer(
+            &mut streams,
+            full,
+            request(65536),
+            &mut buffer,
+            &mut response,
+        )
+        .unwrap();
+    routes
+        .release(full, |_| (), |handle| backend.close(handle))
+        .unwrap();
+    let target = bindings
+        .prepare_datagram_target(&streams, client, b"/alias", &mut backend)
+        .unwrap();
+    let route = routes.start(&streams, target, 3, 801).ok().unwrap();
+    let mut transfers = Transfers::new(1);
+    let job = transfers
+        .start_route(&streams, &routes, route, 900, 3, 1, close_right)
+        .unwrap();
+    transfers.append(job, 0, vec![lease(501)]).unwrap();
+    assert_eq!(
+        transfers.commit_with_routes(&mut streams, &mut routes, job, 0, &mut buffer),
+        Err(-11)
+    );
+    assert_eq!(transfers.progress(job).unwrap().2, 1);
+    CLOSED_RIGHTS.with(|closed| assert!(closed.borrow().is_empty()));
+    streams
+        .transfer_record(
+            server,
+            Request {
+                operation: Operation::Receive,
+                ..request(65536)
+            },
+            &mut buffer,
+            &mut response,
+        )
+        .unwrap();
+    // Receiving socket now accepts only itself, not our sender. Neither data
+    // nor authority may cross that changed filter after an earlier EAGAIN.
+    streams
+        .connect_datagram_named(server, server, Some(b"/server"), b"/server")
+        .unwrap();
+    assert_eq!(
+        transfers.commit_with_routes(&mut streams, &mut routes, job, 0, &mut buffer),
+        Err(-1)
+    );
+    streams.disconnect_datagram(server).unwrap();
+    buffer.0 = b"abc".to_vec();
+    assert_eq!(
+        transfers.commit_with_routes(&mut streams, &mut routes, job, 0, &mut buffer),
+        Ok((3, [client, server]))
+    );
+    transfers.release(job).unwrap();
+    streams
+        .transfer_record(
+            server,
+            Request {
+                operation: Operation::Receive,
+                ..request(3)
+            },
+            &mut buffer,
+            &mut response,
+        )
+        .unwrap();
+    CLOSED_RIGHTS.with(|closed| assert_eq!(*closed.borrow(), [900, 501]));
+    assert_eq!(backend.lookups, 3); // Never resolve the pending route again.
+    routes
+        .release(route, |_| (), |handle| backend.close(handle))
+        .unwrap();
 }
 
 #[test]

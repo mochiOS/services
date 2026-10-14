@@ -18,6 +18,7 @@ pub fn dispatch(
     endpoint: u32,
     streams: &mut Streams,
     transfers: &mut Transfers,
+    routes: &mut posix_service::socket_route::Routes<u32>,
     sender: u64,
     bytes: &[u8],
     attachments: &platform::ipc::IpcObjectHandles,
@@ -59,14 +60,26 @@ pub fn dispatch(
                 }
                 let socket = platform::handle::identify_provider_object(attached[0].handle)
                     .map_err(|error| error.raw() as i32)?;
-                let id = transfers.start(
-                    streams,
-                    socket,
-                    attached[0].handle,
-                    length,
-                    descriptors,
-                    close,
-                )?;
+                let id = if posix_service::socket_route::is_route(socket) {
+                    transfers.start_route(
+                        streams,
+                        routes,
+                        posix_service::socket_route::job_id(socket)?,
+                        attached[0].handle,
+                        length,
+                        descriptors,
+                        close,
+                    )?
+                } else {
+                    transfers.start(
+                        streams,
+                        socket,
+                        attached[0].handle,
+                        length,
+                        descriptors,
+                        close,
+                    )?
+                };
                 consumed |= 1;
                 let handle = match object_id(id).and_then(|object| {
                     platform::handle::create_provider_object(endpoint, object, wire::RIGHTS)
@@ -123,8 +136,9 @@ pub fn dispatch(
                 }
                 let object = platform::handle::identify_provider_object(attached[0].handle)
                     .map_err(|error| error.raw() as i32)?;
-                let (count, ids) = transfers.commit(
+                let (count, ids) = transfers.commit_with_routes(
                     streams,
+                    routes,
                     job_id(object)?,
                     offset,
                     &mut posix_service::socket_record_io::NativeBuffer::borrowed(

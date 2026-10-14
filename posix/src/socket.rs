@@ -594,14 +594,34 @@ impl Streams {
         let prepared = (|| {
             let destination = self.record_destination(id)?;
             let source = crate::socket_record::SourceAddress::new(self.address(id)?)?;
-            let capacity = self.endpoint(id)?.send_capacity;
-            Ok((destination, source, capacity))
+            Ok((destination, source))
         })();
-        let (destination, source, capacity) = match prepared {
+        let (destination, source) = match prepared {
             Ok(values) => values,
             Err(error) => return Err((error, rights)),
         };
-        // record_destination verified a live datagram queue under this borrow.
+        self.commit_record_to_with_rights(id, destination, source, payload, rights)
+    }
+
+    /// Commit through a retained, authorized destination without changing the
+    /// source's default peer. Shares sendto's filtering and capacity policy.
+    pub fn commit_record_to_with_rights(
+        &mut self,
+        id: u64,
+        destination: u64,
+        source: crate::socket_record::SourceAddress,
+        payload: &[u8],
+        rights: crate::socket_rights::Bundle,
+    ) -> Result<(usize, [u64; 2]), (i32, crate::socket_rights::Bundle)> {
+        match self.record_send_to_ready(id, destination, payload.len()) {
+            Ok(true) => (),
+            Ok(false) => return Err((-11, rights)),
+            Err(error) => return Err((error, rights)),
+        }
+        let capacity = match self.endpoint(id) {
+            Ok(entry) => entry.send_capacity,
+            Err(error) => return Err((error, rights)),
+        };
         let queue = match self.endpoint_mut(destination) {
             Ok(entry) => match entry.records.as_mut() {
                 Some(queue) => queue,

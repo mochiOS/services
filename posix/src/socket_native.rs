@@ -212,6 +212,7 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                 endpoint,
                 &mut streams,
                 &mut transfers,
+                &mut routes,
                 sender,
                 bytes,
                 &attachments,

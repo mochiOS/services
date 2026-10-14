@@ -53,6 +53,7 @@ struct Stage {
     length: u32,
     state: State,
     close: fn(u32),
+    route: Option<u64>,
 }
 impl Drop for Stage {
     fn drop(&mut self) {
@@ -107,7 +108,26 @@ impl Transfers {
             length,
             state: State::Collecting(pending),
             close,
+            route: None,
         });
+        Ok(id)
+    }
+
+    /// The owned source is a WRITE lease to the route, retaining both its
+    /// source socket and authorized target inode until this stage is dropped.
+    pub fn start_route<H>(
+        &mut self,
+        streams: &Streams,
+        routes: &crate::socket_route::Routes<H>,
+        route: u64,
+        source: u32,
+        length: u32,
+        count: u16,
+        close: fn(u32),
+    ) -> Result<u64, i32> {
+        let socket = routes.source(route, length as usize)?;
+        let id = self.start(streams, socket, source, length, count, close)?;
+        self.entries.last_mut().unwrap().route = Some(route);
         Ok(id)
     }
     pub fn append(&mut self, id: u64, offset: usize, leases: Vec<Lease>) -> Result<usize, i32> {
@@ -142,6 +162,28 @@ impl Transfers {
         offset: u64,
         buffer: &mut impl crate::socket_record_io::RecordBuffer,
     ) -> Result<(usize, [u64; 2]), i32> {
+        self.commit_using::<()>(streams, None, id, offset, buffer)
+    }
+
+    pub fn commit_with_routes<H>(
+        &mut self,
+        streams: &mut Streams,
+        routes: &mut crate::socket_route::Routes<H>,
+        id: u64,
+        offset: u64,
+        buffer: &mut impl crate::socket_record_io::RecordBuffer,
+    ) -> Result<(usize, [u64; 2]), i32> {
+        self.commit_using(streams, Some(routes), id, offset, buffer)
+    }
+
+    fn commit_using<H>(
+        &mut self,
+        streams: &mut Streams,
+        mut routes: Option<&mut crate::socket_route::Routes<H>>,
+        id: u64,
+        offset: u64,
+        buffer: &mut impl crate::socket_record_io::RecordBuffer,
+    ) -> Result<(usize, [u64; 2]), i32> {
         let stage = self
             .entries
             .iter_mut()
@@ -160,7 +202,16 @@ impl Transfers {
         if end > buffer.extent()? {
             return Err(-22);
         }
-        if !streams.record_send_ready(stage.socket, stage.length as usize)? {
+        let ready = match stage.route {
+            Some(route) => {
+                routes
+                    .as_deref()
+                    .ok_or(-95)?
+                    .ready(streams, route, stage.length as usize)?
+            }
+            None => streams.record_send_ready(stage.socket, stage.length as usize)?,
+        };
+        if !ready {
             return Err(-11);
         }
         let mut bytes = Vec::new();
@@ -187,7 +238,14 @@ impl Transfers {
                 return Err(-95);
             }
         };
-        match streams.commit_record_with_rights(stage.socket, &bytes, bundle) {
+        let result = match stage.route {
+            Some(route) => routes
+                .as_deref_mut()
+                .unwrap()
+                .transfer_rights(streams, route, &bytes, bundle),
+            None => streams.commit_record_with_rights(stage.socket, &bytes, bundle),
+        };
+        match result {
             Ok(result) => Ok(result),
             Err((error, bundle)) => {
                 stage.state = State::Ready(bundle);
@@ -270,6 +328,7 @@ impl Transfers {
                 source,
                 length,
                 close,
+                route: None,
                 state: State::Received {
                     rights,
                     info,

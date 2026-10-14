@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -36,17 +37,92 @@ static int received_fd(struct msghdr *message, size_t index) {
   return fd;
 }
 static atomic_int started, finished;
-struct send_state { int socket, file; ssize_t result; };
+struct send_state { int socket, file; ssize_t result; const struct sockaddr_un *address; };
 static void *blocked_send(void *opaque) {
   struct send_state *state = opaque;
   struct iovec vector = {(void *)"x", 1};
   union ancillary control;
   struct msghdr request;
   message(&request, &vector, 1, &control, state->file, 1);
+  if (state->address) {
+    request.msg_name = (void *)state->address;
+    request.msg_namelen = sizeof(*state->address);
+  }
   atomic_store(&started, 1);
   state->result = sendmsg(state->socket, &request, 0);
   atomic_store(&finished, 1);
   return NULL;
+}
+
+static int named_rights(void) {
+  struct sockaddr_un local = {AF_UNIX, "/tmp/native-sendmsg-source"};
+  struct sockaddr_un target = {AF_UNIX, "/tmp/native-sendmsg-target"};
+  struct sockaddr_un alternate = {AF_UNIX, "/tmp/native-sendmsg-alternate"};
+  unlink(local.sun_path); unlink(target.sun_path); unlink(alternate.sun_path);
+  int sender = socket(AF_UNIX, SOCK_DGRAM, 0);
+  int normal = socket(AF_UNIX, SOCK_DGRAM, 0);
+  int other = socket(AF_UNIX, SOCK_DGRAM, 0);
+  CHECK(sender >= 0 && normal >= 0 && other >= 0);
+  CHECK(bind(sender, (struct sockaddr *)&local, sizeof(local)) == 0);
+  CHECK(bind(normal, (struct sockaddr *)&target, sizeof(target)) == 0);
+  CHECK(bind(other, (struct sockaddr *)&alternate, sizeof(alternate)) == 0);
+  int file = open("/tmp/native-sendmsg-file", O_CREAT | O_TRUNC | O_RDWR, 0600);
+  CHECK(file >= 0 && write(file, "q", 1) == 1 && lseek(file, 0, SEEK_SET) == 0);
+  CHECK(unlink("/tmp/native-sendmsg-file") == 0);
+  struct iovec vector = {(void *)"r", 1};
+  union ancillary outgoing, incoming;
+  struct msghdr request;
+  message(&request, &vector, 1, &outgoing, file, 1);
+  request.msg_name = &alternate;
+  request.msg_namelen = sizeof(alternate);
+  CHECK(sendmsg(sender, &request, 0) == 1); /* No default peer required. */
+  struct sockaddr_un source;
+  socklen_t size = sizeof(source);
+  CHECK(getpeername(sender, (struct sockaddr *)&source, &size) == -1 && errno == ENOTCONN);
+  char byte;
+  struct iovec output = {&byte, 1};
+  struct msghdr response = {&source, sizeof(source), &output, 1, incoming.bytes, sizeof(incoming), 0};
+  CHECK(recvmsg(other, &response, 0) == 1 && byte == 'r');
+  CHECK(source.sun_family == AF_UNIX && !strcmp(source.sun_path, local.sun_path));
+  int fd = received_fd(&response, 0);
+  CHECK(fd >= 0 && pread(fd, &byte, 1, 0) == 1 && byte == 'q' && close(fd) == 0);
+  CHECK(connect(sender, (struct sockaddr *)&target, sizeof(target)) == 0);
+  CHECK(sendmsg(sender, &request, 0) == 1);
+  size = sizeof(source);
+  CHECK(getpeername(sender, (struct sockaddr *)&source, &size) == 0 && !strcmp(source.sun_path, target.sun_path));
+  response.msg_controllen = sizeof(incoming);
+  response.msg_namelen = sizeof(source);
+  CHECK(recvmsg(other, &response, 0) == 1 && close(received_fd(&response, 0)) == 0);
+  CHECK(send(sender, "d", 1, 0) == 1 && recv(normal, &byte, 1, 0) == 1 && byte == 'd');
+  static unsigned char full[65536];
+  CHECK(sendto(sender, full, sizeof(full), 0, (struct sockaddr *)&alternate, sizeof(alternate)) == sizeof(full));
+  atomic_store(&started, 0); atomic_store(&finished, 0);
+  struct send_state state = {sender, file, -999, &alternate};
+  pthread_t thread;
+  CHECK(pthread_create(&thread, NULL, blocked_send, &state) == 0);
+  while (!atomic_load(&started)) sched_yield();
+  struct timespec pause = {0, 30000000};
+  CHECK(nanosleep(&pause, NULL) == 0 && !atomic_load(&finished));
+  CHECK(unlink(alternate.sun_path) == 0);
+  int replacement = socket(AF_UNIX, SOCK_DGRAM, 0);
+  CHECK(replacement >= 0 && bind(replacement, (struct sockaddr *)&alternate, sizeof(alternate)) == 0);
+  CHECK(recv(other, &byte, 1, MSG_TRUNC) == sizeof(full));
+  CHECK(pthread_join(thread, NULL) == 0 && state.result == 1);
+  response.msg_controllen = sizeof(incoming);
+  response.msg_namelen = sizeof(source);
+  CHECK(recvmsg(other, &response, 0) == 1 && byte == 'x');
+  CHECK(close(received_fd(&response, 0)) == 0);
+  CHECK(recv(replacement, &byte, 1, MSG_DONTWAIT) == -1 && errno == EAGAIN);
+  size = sizeof(source);
+  CHECK(getpeername(sender, (struct sockaddr *)&source, &size) == 0 && !strcmp(source.sun_path, target.sun_path));
+  CHECK(unlink(alternate.sun_path) == 0);
+  CHECK(sendmsg(sender, &request, 0) == -1 && errno == ENOENT);
+  CHECK(fcntl(file, F_GETFD) == 0);
+  CHECK(close(replacement) == 0 && close(other) == 0 && close(normal) == 0 && close(sender) == 0 && close(file) == 0);
+  CHECK(unlink(local.sun_path) == 0 && unlink(target.sun_path) == 0);
+  puts("sendmsg: PASS explicit destination rights, source address, unchanged default peer, retained target across wait/unlink/rebind");
+  fflush(stdout);
+  return 0;
 }
 
 int main(void) {
@@ -109,7 +185,7 @@ int main(void) {
     message(&request, vectors, 1, &control, file, 253);
     CHECK(sendmsg(pair[0], &request, MSG_DONTWAIT) == -1 && errno == EAGAIN);
   }
-  struct send_state state = {pair[0], file, -999};
+  struct send_state state = {pair[0], file, -999, NULL};
   pthread_t thread;
   CHECK(pthread_create(&thread, NULL, blocked_send, &state) == 0);
   while (!atomic_load(&started)) sched_yield();
@@ -139,6 +215,7 @@ int main(void) {
   CHECK(sendmsg(pair[0], &request, 0) == 6 && recvmsg(pair[1], &response, 0) == 6);
   CHECK(!memcmp(first, "ab", 2) && !memcmp(second, "cdef", 4));
   CHECK(close(pair[0]) == 0 && close(pair[1]) == 0);
+  CHECK(named_rights() == 0);
   puts("sendmsg: PASS native C round trip, shared/unlinked OFD, duplicate FD, CLOEXEC, empty data, malformed input, 253-right cleanup and blocking backpressure");
   fflush(stdout);
   return 0;

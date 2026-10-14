@@ -1,11 +1,11 @@
 //! Per-call sendto authority: retained source WRITE lease plus resolved target
 //! inode. A route is not a writable socket and cannot impersonate its target.
 use crate::{
-    socket::{Streams, MAX_DESCRIPTION_ID, MAX_ENDPOINTS},
+    socket::{MAX_DESCRIPTION_ID, MAX_ENDPOINTS, Streams},
     socket_binding::DatagramTarget,
     socket_record_io::RecordBuffer,
 };
-use mochios_posix_protocol::socket_record::{Operation, Request, MAX_RECORD_SIZE};
+use mochios_posix_protocol::socket_record::{MAX_RECORD_SIZE, Operation, Request};
 
 const TAG: u64 = 1 << 60;
 pub fn object_id(id: u64) -> Result<u64, i32> {
@@ -117,6 +117,55 @@ impl<H> Routes<H> {
         // Exactly one commitment even if a client loses the success reply.
         route.complete = true;
         Ok((count, [route.target.client(), route.target.socket()]))
+    }
+
+    /// Only the adapter's kernel-identified route Handle may select this row.
+    /// Source/target identities are internal and never accepted from wire data.
+    pub fn source(&self, id: u64, length: usize) -> Result<u64, i32> {
+        let route = self.entries.iter().find(|route| route.id == id).ok_or(-9)?;
+        if route.complete {
+            return Err(-114);
+        }
+        if route.length != length {
+            return Err(-22);
+        }
+        Ok(route.target.client())
+    }
+
+    pub fn ready(&self, streams: &Streams, id: u64, length: usize) -> Result<bool, i32> {
+        self.source(id, length)?;
+        let route = self.entries.iter().find(|route| route.id == id).ok_or(-9)?;
+        streams.record_send_to_ready(route.target.client(), route.target.socket(), length)
+    }
+
+    /// Exactly one payload+rights commitment per retained route, including when
+    /// several staging jobs borrow it. Errors return all leases to their owner.
+    pub fn transfer_rights(
+        &mut self,
+        streams: &mut Streams,
+        id: u64,
+        payload: &[u8],
+        rights: crate::socket_rights::Bundle,
+    ) -> Result<(usize, [u64; 2]), (i32, crate::socket_rights::Bundle)> {
+        if let Err(error) = self.source(id, payload.len()) {
+            return Err((error, rights));
+        }
+        let route = self
+            .entries
+            .iter_mut()
+            .find(|route| route.id == id)
+            .unwrap();
+        let result = streams.commit_record_to_with_rights(
+            route.target.client(),
+            route.target.socket(),
+            route.target.source(),
+            payload,
+            rights,
+        );
+        if result.is_ok() {
+            route.complete = true;
+        }
+        result
     }
 
     /// Readiness is level-triggered for this complete message length, not for
