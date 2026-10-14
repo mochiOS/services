@@ -1911,6 +1911,155 @@ fn socket_binding_records_keep_real_unlinked_inodes_distinct_from_recreated_name
     }
 }
 
+#[test]
+fn socket_lookup_retains_authorized_mounted_inode_without_path_reopening() {
+    let fixture = Fixture::new();
+    let mut service = FilesystemService::new(fixture.volume("lookup-data"));
+    service
+        .mount_named_volume(b"/", b"system", fixture.volume("lookup-system"), b"/")
+        .unwrap();
+    service
+        .create_socket_at(
+            protocol::Header {
+                mode: 0o620,
+                ..Default::default()
+            },
+            b"/system/socket",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    let mut credential_bytes = [0; protocol::CREDENTIALS_MAX_LEN];
+    let length =
+        protocol::encode_credentials_payload(501, 20, &[0], &[], &mut credential_bytes).unwrap();
+    let member = protocol::decode_credentials_payload(&credential_bytes[..length])
+        .unwrap()
+        .0;
+    let opened = service
+        .open_socket_at_retained(
+            protocol::Header::default(),
+            b"/system/socket",
+            PathAnchors::default(),
+            member,
+        )
+        .unwrap();
+    let original = protocol::decode_node_status(&opened.payload).unwrap();
+    assert_ne!(opened.header.open_id, 0);
+    assert_eq!(original.node_id, opened.header.node_id);
+    let mut link_payload = b"socket".to_vec();
+    link_payload.extend_from_slice(b"/system/link");
+    service
+        .symlink_at(
+            protocol::Header {
+                mode: 6,
+                ..Default::default()
+            },
+            &link_payload,
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    let linked = service
+        .open_socket_at_retained(
+            protocol::Header::default(),
+            b"/system/link",
+            PathAnchors::default(),
+            member,
+        )
+        .unwrap();
+    assert_eq!(linked.header.node_id, original.node_id);
+    service.provider_close(linked.header.open_id).unwrap();
+    let directory = open(
+        &mut service,
+        b"/system",
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+        PathAnchors::default(),
+    );
+    let confined = service
+        .open_socket_at_retained(
+            protocol::Header {
+                flags: protocol::SOCKET_AT_ROOT_ATTACHED,
+                ..Default::default()
+            },
+            b"/../socket",
+            PathAnchors {
+                root_open_id: Some(directory.open_id),
+                base_open_id: None,
+            },
+            member,
+        )
+        .unwrap();
+    assert_eq!(confined.header.node_id, original.node_id);
+    service.provider_close(confined.header.open_id).unwrap();
+    service.provider_close(directory.open_id).unwrap();
+    let length =
+        protocol::encode_credentials_payload(501, 20, &[], &[], &mut credential_bytes).unwrap();
+    let denied = protocol::decode_credentials_payload(&credential_bytes[..length])
+        .unwrap()
+        .0;
+    assert!(matches!(
+        service.open_socket_at_retained(
+            protocol::Header::default(),
+            b"/system/socket",
+            PathAnchors::default(),
+            denied
+        ),
+        Err(13)
+    ));
+    for (path, error) in [
+        (b"/system/file".as_slice(), 88),
+        (b"/system".as_slice(), 88),
+        (b"/system/missing".as_slice(), 2),
+        (b"/system/blocked/private".as_slice(), 13),
+    ] {
+        assert!(
+            matches!(service.open_socket_at_retained(protocol::Header::default(), path, PathAnchors::default(), member), Err(actual) if actual == error)
+        );
+    }
+    service
+        .unlink_at(
+            protocol::Header::default(),
+            b"/system/socket",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    service
+        .create_socket_at(
+            protocol::Header {
+                mode: 0o600,
+                ..Default::default()
+            },
+            b"/system/socket",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    let retained = service
+        .stat_handle(protocol::Header::default(), opened.header.open_id)
+        .unwrap();
+    let retained = protocol::decode_node_status(&retained.payload).unwrap();
+    assert_eq!(
+        (retained.node_id, retained.link_count),
+        (original.node_id, 0)
+    );
+    let replacement = service
+        .open_socket_at_retained(
+            protocol::Header::default(),
+            b"/system/socket",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    assert_ne!(replacement.header.node_id, original.node_id);
+    service.provider_close(opened.header.open_id).unwrap();
+    assert!(matches!(
+        service.stat_handle(protocol::Header::default(), opened.header.open_id),
+        Err(9)
+    ));
+    service.provider_close(replacement.header.open_id).unwrap();
+}
+
 fn open(
     service: &mut FilesystemService,
     path: &[u8],

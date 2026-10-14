@@ -487,6 +487,96 @@ impl FilesystemService {
         self.create_socket_at_inner(request, payload, anchors, credentials, true)
     }
 
+    fn reserve_socket_description(&mut self) -> Result<u64, i32> {
+        if self.next_open_id > i64::MAX as u64 {
+            return Err(EIO);
+        }
+        self.opens.try_reserve(1).map_err(|_| 12)?;
+        self.next_open_id.checked_add(1).ok_or(EIO)
+    }
+
+    /// Resolve, authorize and retain the exact existing inode in one operation.
+    /// No pathname is looked up again after obtaining this description.
+    pub fn open_socket_at_retained(
+        &mut self,
+        request: protocol::Header,
+        payload: &[u8],
+        anchors: PathAnchors,
+        credentials: protocol::Credentials,
+    ) -> Result<Response, i32> {
+        if request.flags & !protocol::SOCKET_AT_FLAGS_ALL != 0
+            || (request.flags & protocol::SOCKET_AT_ROOT_ATTACHED != 0)
+                != anchors.root_open_id.is_some()
+            || (request.flags & protocol::SOCKET_AT_BASE_ATTACHED != 0)
+                != anchors.base_open_id.is_some()
+        {
+            return Err(EINVAL);
+        }
+        let (resolution, filesystem, volume) = self.resolve_open_path(
+            payload,
+            anchors,
+            FollowSymlinks::All,
+            credentials.effective_uid,
+            credentials.effective_gid,
+            credentials.supplementary_groups(),
+        )?;
+        let inode = match resolution {
+            Resolution::Found { inode, .. } => inode,
+            Resolution::Missing { .. } => return Err(ENOENT),
+        };
+        if !inode.file_type().is_socket() {
+            return Err(88);
+        }
+        let metadata = inode.metadata();
+        if !permission_allows(
+            metadata.mode(),
+            protocol::NODE_TYPE_SOCKET,
+            metadata.uid(),
+            metadata.gid(),
+            credentials.effective_uid,
+            credentials.effective_gid,
+            credentials.supplementary_groups(),
+            protocol::ACCESS_AT_WRITE,
+        ) {
+            return Err(EACCES);
+        }
+        let next_open = self.reserve_socket_description()?;
+        self.retain_socket_description(request, filesystem, volume, inode, next_open)
+    }
+
+    fn retain_socket_description(
+        &mut self,
+        request: protocol::Header,
+        filesystem: Ext4,
+        volume: u32,
+        inode: Inode,
+        next_open: u64,
+    ) -> Result<Response, i32> {
+        let node_id = scoped_node_id(volume, &inode);
+        let mut response = self.node_status_response(request, node_id, inode.metadata());
+        if response.header.status != 0 {
+            return Err(-response.header.status);
+        }
+        let open_id = self.next_open_id;
+        self.next_open_id = next_open;
+        self.opens.insert(
+            open_id,
+            OpenFile {
+                node_id,
+                volume,
+                filesystem,
+                memory_object_id: self.memory_identity_for(node_id, open_id),
+                inode,
+                file: None,
+                offset: 0,
+                status_flags: 0,
+            },
+        );
+        response.header.open_id = open_id;
+        response.header.node_id = node_id;
+        Ok(response)
+    }
+
     fn create_socket_at_inner(
         &mut self,
         request: protocol::Header,
@@ -498,11 +588,7 @@ impl FilesystemService {
         // Reserve the identity before changing the namespace; a failed identity
         // allocation must not leave a published file without a description.
         let next_open = if retain {
-            if self.next_open_id > i64::MAX as u64 {
-                return Err(EIO);
-            }
-            self.opens.try_reserve(1).map_err(|_| 12)?;
-            Some(self.next_open_id.checked_add(1).ok_or(EIO)?)
+            Some(self.reserve_socket_description()?)
         } else {
             None
         };
@@ -557,31 +643,11 @@ impl FilesystemService {
             .map_err(errno)?;
         parent.link(name, &mut inode).map_err(errno)?;
         let node_id = scoped_node_id(volume, &inode);
-        let mut response = self.node_status_response(
-            request,
-            node_id,
-            inode.metadata(),
-        );
         if let Some(next_open) = next_open {
-            let open_id = self.next_open_id;
-            self.next_open_id = next_open;
-            self.opens.insert(
-                open_id,
-                OpenFile {
-                    node_id,
-                    volume,
-                    filesystem,
-                    memory_object_id: self.memory_identity_for(node_id, open_id),
-                    inode,
-                    file: None,
-                    offset: 0,
-                    status_flags: 0,
-                },
-            );
-            response.header.open_id = open_id;
-            response.header.node_id = node_id;
+            self.retain_socket_description(request, filesystem, volume, inode, next_open)
+        } else {
+            Ok(self.node_status_response(request, node_id, inode.metadata()))
         }
-        Ok(response)
     }
 
     pub fn mkdir_at(

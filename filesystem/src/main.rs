@@ -165,9 +165,11 @@ fn main() {
                 }
                 if matches!(
                     header.opcode,
-                    protocol::OP_OPEN_AT | protocol::OP_CREATE_SOCKET_AT
+                    protocol::OP_OPEN_AT
+                        | protocol::OP_CREATE_SOCKET_AT
+                        | protocol::OP_OPEN_SOCKET_AT
                 ) {
-                    let socket = header.opcode == protocol::OP_CREATE_SOCKET_AT;
+                    let socket = header.opcode != protocol::OP_OPEN_AT;
                     let (root_flag, base_flag) = if socket {
                         (
                             protocol::SOCKET_AT_ROOT_ATTACHED,
@@ -189,7 +191,11 @@ fn main() {
                                 &attached,
                             )
                             .and_then(|anchors| {
-                                if socket {
+                                if header.opcode == protocol::OP_OPEN_SOCKET_AT {
+                                    service.open_socket_at_retained(
+                                        header, payload, anchors, credentials,
+                                    )
+                                } else if socket {
                                     service.create_socket_at_retained(
                                         header, payload, anchors, credentials,
                                     )
