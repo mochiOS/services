@@ -31,14 +31,133 @@ static int connect_started;
 static int connect_fd;
 static struct sockaddr_un connect_address;
 static socklen_t connect_size;
+static int connect_signals;
+static void connect_signal(int signal) {
+  (void)signal;
+  __atomic_fetch_add(&connect_signals, 1, __ATOMIC_RELEASE);
+}
+static int await_pending_connect(int fd) {
+  for (unsigned i = 0; i < 10000; ++i) {
+    struct pollfd item = {.fd = fd, .events = POLLIN | POLLOUT};
+    int ready = poll(&item, 1, 0);
+    if (ready == 0)
+      return 0;
+    CHECK(ready == 1);
+    sched_yield();
+  }
+  CHECK(0 && "connect did not enter backlog wait");
+  return 1;
+}
 static void *waiting_connector(void *unused) {
   (void)unused;
   __atomic_store_n(&connect_started, 1, __ATOMIC_RELEASE);
-  return (void *)(intptr_t)(connect(connect_fd,
-                                    (struct sockaddr *)&connect_address,
-                                    connect_size) == 0
-                                ? 1
-                                : 2);
+  int result =
+      connect(connect_fd, (struct sockaddr *)&connect_address, connect_size);
+  return (void *)(intptr_t)(result == 0 ? 1 : -errno);
+}
+
+static int verify_connect_interrupts(void) {
+  struct sockaddr_un address = {.sun_family = AF_UNIX};
+  strcpy(address.sun_path, "/native-posix-connect-signals");
+  socklen_t size = 2 + strlen(address.sun_path) + 1;
+  CHECK(unlink(address.sun_path) == 0 || errno == ENOENT);
+  int listener = socket(AF_UNIX, SOCK_STREAM, 0);
+  CHECK(listener >= 0 &&
+        bind(listener, (struct sockaddr *)&address, size) == 0);
+  CHECK(listen(listener, 1) == 0);
+  struct sigaction action = {.sa_handler = connect_signal}, previous;
+  CHECK(sigemptyset(&action.sa_mask) == 0);
+  CHECK(sigaction(SIGUSR1, &action, &previous) == 0);
+  for (int restart = 0; restart <= 1; ++restart) {
+    action.sa_flags = restart ? SA_RESTART : 0;
+    CHECK(sigaction(SIGUSR1, &action, NULL) == 0);
+    int first = socket(AF_UNIX, SOCK_STREAM, 0);
+    int client = socket(AF_UNIX, SOCK_STREAM, 0);
+    CHECK(first >= 0 && client >= 0);
+    CHECK(connect(first, (struct sockaddr *)&address, size) == 0);
+    connect_fd = client;
+    connect_address = address;
+    connect_size = size;
+    __atomic_store_n(&connect_signals, 0, __ATOMIC_RELEASE);
+    pthread_t worker;
+    CHECK(pthread_create(&worker, NULL, waiting_connector, NULL) == 0);
+    CHECK(await_pending_connect(client) == 0);
+    CHECK(pthread_kill(worker, SIGUSR1) == 0);
+    unsigned tries;
+    for (tries = 0;
+         tries < 10000 && !__atomic_load_n(&connect_signals, __ATOMIC_ACQUIRE);
+         ++tries)
+      sched_yield();
+    CHECK(tries < 10000);
+    void *result;
+    if (!restart) {
+      CHECK(pthread_join(worker, &result) == 0 &&
+            result == (void *)(intptr_t)-EINTR);
+    } else {
+      struct pollfd pending = {.fd = client, .events = POLLIN | POLLOUT};
+      CHECK(poll(&pending, 1, 0) == 0);
+    }
+    int accepted = accept(listener, NULL, NULL);
+    CHECK(accepted >= 0);
+    if (restart) {
+      CHECK(pthread_join(worker, &result) == 0 && result == (void *)1);
+    } else {
+      struct sockaddr_un peer;
+      socklen_t length = sizeof(peer);
+      CHECK(getpeername(client, (struct sockaddr *)&peer, &length) == -1 &&
+            errno == ENOTCONN);
+      struct pollfd empty = {.fd = listener, .events = POLLIN};
+      CHECK(poll(&empty, 1, 0) == 0);
+      CHECK(connect(client, (struct sockaddr *)&address, size) == 0);
+    }
+    int retried = accept(listener, NULL, NULL);
+    CHECK(retried >= 0);
+    CHECK(write(client, "ok", 2) == 2);
+    char data[2];
+    CHECK(read(retried, data, 2) == 2 && !memcmp(data, "ok", 2));
+    CHECK(close(first) == 0 && close(client) == 0 && close(accepted) == 0 &&
+          close(retried) == 0);
+  }
+  CHECK(sigaction(SIGUSR1, &previous, NULL) == 0);
+  puts("posix-socket-connect-signals: PASS");
+
+  int first = socket(AF_UNIX, SOCK_STREAM, 0);
+  int doomed = socket(AF_UNIX, SOCK_STREAM, 0);
+  CHECK(first >= 0 && doomed >= 0);
+  CHECK(connect(first, (struct sockaddr *)&address, size) == 0);
+  pid_t child = fork();
+  CHECK(child >= 0);
+  if (child == 0) {
+    close(listener);
+    close(first);
+    connect(doomed, (struct sockaddr *)&address, size);
+    _exit(91);
+  }
+  CHECK(await_pending_connect(doomed) == 0);
+  CHECK(kill(child, SIGKILL) == 0);
+  int status;
+  CHECK(waitpid(child, &status, 0) == child && WIFSIGNALED(status) &&
+        WTERMSIG(status) == SIGKILL);
+  unsigned tries;
+  for (tries = 0; tries < 10000; ++tries) {
+    struct pollfd state = {.fd = doomed, .events = POLLIN | POLLOUT};
+    if (poll(&state, 1, 0) == 1)
+      break;
+    sched_yield();
+  }
+  CHECK(tries < 10000);
+  int accepted = accept(listener, NULL, NULL);
+  CHECK(accepted >= 0);
+  struct pollfd empty = {.fd = listener, .events = POLLIN};
+  CHECK(poll(&empty, 1, 0) == 0);
+  CHECK(connect(doomed, (struct sockaddr *)&address, size) == 0);
+  int retried = accept(listener, NULL, NULL);
+  CHECK(retried >= 0);
+  CHECK(close(first) == 0 && close(doomed) == 0 && close(accepted) == 0 &&
+        close(retried) == 0);
+  CHECK(close(listener) == 0 && unlink(address.sun_path) == 0);
+  puts("posix-socket-connect-process-exit: PASS");
+  return 0;
 }
 
 static int verify_connections(int listener, struct sockaddr_un *address,
@@ -287,6 +406,7 @@ int main(int argc, char **argv) {
     return verify_exec(argv);
   CHECK(verify_single_socket() == 0);
   CHECK(verify_path_binding() == 0);
+  CHECK(verify_connect_interrupts() == 0);
   int fds[2] = {123, 456};
   CHECK(socketpair(AF_UNIX, SOCK_STREAM | 0x1000, 0, fds) == -1 &&
         errno == EINVAL);
