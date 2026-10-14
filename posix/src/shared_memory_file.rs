@@ -3,6 +3,7 @@
 //! client FD numbers. Dup/fork aliases retain one description and cursor.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 pub trait Backing<H> {
     fn retain(&mut self, backing: H) -> Result<H, i32>;
@@ -18,6 +19,7 @@ struct Description<H> {
     writable: bool,
     cursor: u64,
     status_flags: u32,
+    metadata: Option<Arc<super::shared_memory::Metadata>>,
 }
 
 /// Serialize this manager externally through operation completion. Separate
@@ -41,6 +43,26 @@ impl<H: Copy> Descriptions<H> {
         writable: bool,
         backend: &mut B,
     ) -> Result<u64, i32> {
+        self.open_internal(backing, writable, None, backend)
+    }
+
+    pub fn open_with_metadata<B: Backing<H>>(
+        &mut self,
+        backing: H,
+        writable: bool,
+        metadata: Arc<super::shared_memory::Metadata>,
+        backend: &mut B,
+    ) -> Result<u64, i32> {
+        self.open_internal(backing, writable, Some(metadata), backend)
+    }
+
+    fn open_internal<B: Backing<H>>(
+        &mut self,
+        backing: H,
+        writable: bool,
+        metadata: Option<Arc<super::shared_memory::Metadata>>,
+        backend: &mut B,
+    ) -> Result<u64, i32> {
         let next = self.next.checked_add(1).ok_or(-23)?;
         let retained = backend.retain(backing)?;
         let id = self.next;
@@ -51,10 +73,21 @@ impl<H: Copy> Descriptions<H> {
                 writable,
                 cursor: 0,
                 status_flags: 0,
+                metadata,
             },
         );
         self.next = next;
         Ok(id)
+    }
+
+    pub fn metadata(&self, id: u64) -> Result<Arc<super::shared_memory::Metadata>, i32> {
+        self.entries
+            .get(&id)
+            .ok_or(-9)?
+            .metadata
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or(-9)
     }
 
     pub fn release<B: Backing<H>>(&mut self, id: u64, backend: &mut B) -> Result<(), i32> {

@@ -28,16 +28,13 @@ impl Backing<u32> for Objects {
     }
 }
 impl Delegation<u32> for Objects {
-    fn duplicate(&mut self, handle: u32, rights: u64) -> Result<u32, i32> {
-        if self.fail_duplicate {
-            return Err(-24);
-        }
-        assert_eq!(rights & !self.rights[&handle], 0);
-        self.next += 1;
-        self.handles
-            .insert(self.next, Arc::clone(&self.handles[&handle]));
-        self.rights.insert(self.next, rights);
-        Ok(self.next)
+    fn open_description(
+        &mut self,
+        handle: u32,
+        rights: u64,
+        _: Arc<posix_service::shared_memory::Metadata>,
+    ) -> Result<u32, i32> {
+        self.duplicate(handle, rights)
     }
     fn close(&mut self, handle: u32) -> Result<(), i32> {
         if self.fail_close {
@@ -49,9 +46,23 @@ impl Delegation<u32> for Objects {
     }
 }
 
+impl Objects {
+    fn duplicate(&mut self, handle: u32, rights: u64) -> Result<u32, i32> {
+        if self.fail_duplicate {
+            return Err(-24);
+        }
+        assert_eq!(rights & !self.rights[&handle], 0);
+        self.next += 1;
+        self.handles
+            .insert(self.next, Arc::clone(&self.handles[&handle]));
+        self.rights.insert(self.next, rights);
+        Ok(self.next)
+    }
+}
+
 impl posix_service::shared_memory_file::Backing<u32> for Objects {
     fn retain(&mut self, handle: u32) -> Result<u32, i32> {
-        Delegation::duplicate(self, handle, self.rights[&handle])
+        self.duplicate(handle, self.rights[&handle])
     }
     fn close(&mut self, handle: u32) -> Result<(), i32> {
         Delegation::close(self, handle)
@@ -152,6 +163,68 @@ fn namespace_open_descriptions_survive_unlink_and_failed_retention_rolls_back() 
     let original = service.unlink_shared_memory(peer, b"/file").unwrap();
     Delegation::close(&mut objects, original).unwrap();
     assert!(objects.handles.is_empty());
+}
+
+#[test]
+fn metadata_identity_owner_permissions_and_links_follow_the_object_not_the_name() {
+    use posix_service::shared_memory::{Access, Attributes, Open};
+    use posix_service::shared_memory_file::Descriptions;
+    let (mut service, peer) = setup();
+    let mut objects = Objects::default();
+    let mut descriptions = Descriptions::new();
+    let options = Open {
+        access: Access::ReadWrite,
+        create: true,
+        exclusive: false,
+        truncate: false,
+        mode: 0o640,
+    };
+    let opened = service
+        .open_shared_memory(peer, b"/metadata", options, &mut objects)
+        .unwrap();
+    let old = Arc::clone(&opened.metadata);
+    assert_eq!(
+        *old.attributes.lock().unwrap(),
+        Attributes {
+            owner: 501,
+            group: 20,
+            mode: 0o640
+        }
+    );
+    assert_ne!(old.inode, 0);
+    assert_eq!(old.links(), 1);
+    let id = service
+        .open_shared_memory_description(
+            peer,
+            b"/metadata",
+            options,
+            &mut descriptions,
+            &mut objects,
+        )
+        .unwrap();
+    assert!(Arc::ptr_eq(&old, &descriptions.metadata(id).unwrap()));
+    old.attributes.lock().unwrap().mode = 0;
+    assert_eq!(
+        service.open_shared_memory(peer, b"/metadata", options, &mut objects),
+        Err(-13)
+    );
+    // peer claims UID 0, but registered UID 501 is used for permission checks.
+    old.attributes.lock().unwrap().mode = 0o600;
+    let owner = service.unlink_shared_memory(peer, b"/metadata").unwrap();
+    Delegation::close(&mut objects, owner).unwrap();
+    assert_eq!(old.links(), 0);
+    assert!(Arc::ptr_eq(&old, &descriptions.metadata(id).unwrap()));
+    let fresh = service
+        .open_shared_memory(peer, b"/metadata", options, &mut objects)
+        .unwrap();
+    assert_ne!(fresh.metadata.inode, old.inode);
+    assert!(!Arc::ptr_eq(&fresh.metadata, &old));
+    assert_eq!(fresh.metadata.links(), 1);
+    assert_eq!(fresh.metadata.attributes.lock().unwrap().mode, 0o640);
+    assert_eq!(old.attributes.lock().unwrap().mode, 0o600);
+    descriptions.release(id, &mut objects).unwrap();
+    assert_eq!(descriptions.metadata(id).unwrap_err(), -9);
+    assert_eq!(old.links(), 0);
 }
 fn setup() -> (PosixService, PeerIdentity) {
     let peer = PeerIdentity {

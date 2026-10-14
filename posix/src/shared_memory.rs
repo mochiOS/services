@@ -3,6 +3,10 @@
 
 use super::{PeerIdentity, PosixService, Session};
 use std::collections::BTreeMap;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU32, Ordering},
+};
 
 pub const MAX_NAME_BYTES: usize = 255;
 pub const MAX_NAMES: usize = 1024;
@@ -22,33 +26,71 @@ pub struct Open {
     pub mode: u32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct Opened<H> {
     /// Borrowed namespace reference. The adapter creates a new descriptor
     /// reference with these rights; it must never transfer the owning reference.
     pub backing: H,
     pub rights: u64,
     pub created: bool,
+    pub metadata: Arc<Metadata>,
+}
+
+impl<H: PartialEq> PartialEq for Opened<H> {
+    fn eq(&self, other: &Self) -> bool {
+        self.backing == other.backing
+            && self.rights == other.rights
+            && self.created == other.created
+            && Arc::ptr_eq(&self.metadata, &other.metadata)
+    }
+}
+impl<H: Eq> Eq for Opened<H> {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Attributes {
+    pub owner: u32,
+    pub group: u32,
+    pub mode: u32,
+}
+
+/// Namespace identity survives unlink through open-description references.
+/// Attributes are shared, not snapshots copied into each descriptor.
+#[derive(Debug)]
+pub struct Metadata {
+    pub inode: u64,
+    pub attributes: Mutex<Attributes>,
+    links: AtomicU32,
+}
+impl Metadata {
+    pub fn links(&self) -> u32 {
+        self.links.load(Ordering::Acquire)
+    }
 }
 
 #[derive(Debug)]
 struct Entry<H> {
     backing: H,
-    owner: u32,
-    group: u32,
-    mode: u32,
+    metadata: Arc<Metadata>,
 }
 
 #[derive(Debug)]
 pub(super) struct Namespace<H> {
     names: BTreeMap<Vec<u8>, Entry<H>>,
+    next_inode: u64,
 }
 
 impl<H> Namespace<H> {
     pub(super) const fn new() -> Self {
         Self {
             names: BTreeMap::new(),
+            next_inode: 1,
         }
+    }
+
+    fn detach(&mut self, name: &[u8]) -> Option<Entry<H>> {
+        let entry = self.names.remove(name)?;
+        entry.metadata.links.store(0, Ordering::Release);
+        Some(entry)
     }
 }
 
@@ -62,7 +104,12 @@ pub trait Backing<H> {
 /// Creates independent reply descriptions backed by the namespace resource.
 /// A namespace Handle must never be handed out as a temporary attachment.
 pub trait Delegation<H>: Backing<H> {
-    fn duplicate(&mut self, backing: H, rights: u64) -> Result<H, i32>;
+    fn open_description(
+        &mut self,
+        backing: H,
+        rights: u64,
+        metadata: Arc<Metadata>,
+    ) -> Result<H, i32>;
     fn close(&mut self, backing: H) -> Result<(), i32>;
 }
 
@@ -100,13 +147,18 @@ impl<H: Copy> PosixService<H> {
         B: Delegation<H> + super::shared_memory_file::Backing<H>,
     {
         let opened = self.open_shared_memory(peer, name, options, backend)?;
-        match descriptions.open(opened.backing, options.access == Access::ReadWrite, backend) {
+        match descriptions.open_with_metadata(
+            opened.backing,
+            options.access == Access::ReadWrite,
+            opened.metadata,
+            backend,
+        ) {
             Ok(id) => Ok(id),
             Err(error) => {
                 if opened.created {
                     // Do not discard ownership if closing the original fails.
                     <B as Delegation<H>>::close(backend, opened.backing)?;
-                    self.shared_memory.names.remove(name);
+                    self.shared_memory.detach(name);
                 }
                 Err(error)
             }
@@ -149,14 +201,18 @@ impl<H: Copy> PosixService<H> {
                         },
                         backend,
                     )?;
-                    let handle = match backend.duplicate(opened.backing, opened.rights) {
+                    let handle = match backend.open_description(
+                        opened.backing,
+                        opened.rights,
+                        opened.metadata,
+                    ) {
                         Ok(handle) => handle,
                         Err(error) => {
                             if opened.created {
                                 // If release fails, keep the owning namespace
                                 // reference rather than losing a live resource.
                                 backend.close(opened.backing)?;
-                                self.shared_memory.names.remove(request.name);
+                                self.shared_memory.detach(request.name);
                             }
                             return Err(error);
                         }
@@ -172,7 +228,7 @@ impl<H: Copy> PosixService<H> {
                     // Serialize through the same service lock as open/truncate.
                     let backing = self.shared_memory_unlink_target(peer, name)?;
                     backend.close(backing)?;
-                    self.shared_memory.names.remove(name);
+                    self.shared_memory.detach(name);
                     Ok(Vec::new())
                 }
                 _ => Err(protocol::STATUS_ENOSYS),
@@ -215,9 +271,12 @@ impl<H: Copy> PosixService<H> {
                 .get(&peer.process_id)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
-            let shift = if session.effective_uid == entry.owner {
+            let attributes = *entry.metadata.attributes.lock().map_err(|_| -5)?;
+            let shift = if session.effective_uid == attributes.owner {
                 6
-            } else if session.effective_gid == entry.group || groups.contains(&entry.group) {
+            } else if session.effective_gid == attributes.group
+                || groups.contains(&attributes.group)
+            {
                 3
             } else {
                 0
@@ -227,7 +286,7 @@ impl<H: Copy> PosixService<H> {
             } else {
                 4
             };
-            if session.effective_uid != 0 && (entry.mode >> shift) & required != required {
+            if session.effective_uid != 0 && (attributes.mode >> shift) & required != required {
                 return Err(-13);
             }
             // Serialize permission checks and truncate under the namespace
@@ -239,6 +298,7 @@ impl<H: Copy> PosixService<H> {
                 backing: entry.backing,
                 rights: rights(options.access),
                 created: false,
+                metadata: Arc::clone(&entry.metadata),
             });
         }
         if !options.create {
@@ -247,22 +307,32 @@ impl<H: Copy> PosixService<H> {
         if self.shared_memory.names.len() >= MAX_NAMES {
             return Err(-28);
         }
+        let next_inode = self.shared_memory.next_inode.checked_add(1).ok_or(-28)?;
         let backing = backend.create_zero_length()?;
+        let metadata = Arc::new(Metadata {
+            inode: self.shared_memory.next_inode,
+            attributes: Mutex::new(Attributes {
+                owner: session.effective_uid,
+                group: session.effective_gid,
+                mode: (options.mode & 0o777) & !(session.umask & 0o777),
+            }),
+            links: AtomicU32::new(1),
+        });
         // POSIX-created shm starts at length zero, even for read-only opens.
         // Publish only after successful allocation; no stat/create TOCTOU.
         self.shared_memory.names.insert(
             name.to_vec(),
             Entry {
                 backing,
-                owner: session.effective_uid,
-                group: session.effective_gid,
-                mode: (options.mode & 0o777) & !(session.umask & 0o777),
+                metadata: Arc::clone(&metadata),
             },
         );
+        self.shared_memory.next_inode = next_inode;
         Ok(Opened {
             backing,
             rights: rights(options.access),
             created: true,
+            metadata,
         })
     }
 
@@ -270,7 +340,7 @@ impl<H: Copy> PosixService<H> {
         self.shared_memory_unlink_target(peer, name)?;
         // Caller closes only this namespace reference. Previously delegated
         // references and mappings keep the old object alive independently.
-        Ok(self.shared_memory.names.remove(name).unwrap().backing)
+        Ok(self.shared_memory.detach(name).unwrap().backing)
     }
 
     fn shared_memory_unlink_target(&self, peer: PeerIdentity, name: &[u8]) -> Result<H, i32> {
@@ -279,7 +349,8 @@ impl<H: Copy> PosixService<H> {
         let entry = self.shared_memory.names.get(name).ok_or(-2)?;
         // Sticky shared-namespace policy. Mode bits never authorize deleting
         // somebody else's name. UID/GID here are registered service state.
-        if session.effective_uid != 0 && session.effective_uid != entry.owner {
+        let attributes = *entry.metadata.attributes.lock().map_err(|_| -5)?;
+        if session.effective_uid != 0 && session.effective_uid != attributes.owner {
             return Err(-13);
         }
         Ok(entry.backing)

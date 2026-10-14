@@ -23,11 +23,17 @@ impl Backing<u32> for NativeProviderBacking {
 }
 
 impl Delegation<u32> for NativeProviderBacking {
-    fn duplicate(&mut self, backing: u32, rights: u64) -> Result<u32, i32> {
+    fn open_description(
+        &mut self,
+        backing: u32,
+        rights: u64,
+        metadata: Arc<posix_service::shared_memory::Metadata>,
+    ) -> Result<u32, i32> {
         let mut descriptions = self.descriptions.lock().map_err(|_| -5)?;
-        let id = descriptions.open(
+        let id = descriptions.open_with_metadata(
             backing,
             rights & mnu_abi::HANDLE_RIGHT_WRITE != 0,
+            metadata,
             &mut NativeBacking,
         )?;
         match handle::create_provider_object(self.endpoint, id, rights) {
