@@ -9,14 +9,20 @@ impl Transport for SignalReply {
     type Error = ();
     fn call(&self, bytes: &[u8], response: &mut [u8]) -> Result<usize, ()> {
         let (header, payload) = protocol::decode(bytes).unwrap();
-        assert_eq!(header.opcode, protocol::OP_SIGNAL_THREAD_WAIT);
+        assert_eq!(header.opcode, protocol::OP_SIGNAL_THREAD_WAIT_INFO);
         assert_eq!(header.flags, 0);
         assert_eq!(
             protocol::decode_signal_wait_request(payload).unwrap(),
             (1 << 9, 23)
         );
-        let mut output = [0; protocol::SIGNAL_MASK_LEN];
-        protocol::encode_signal_mask(self.signal, &mut output).unwrap();
+        let mut output = [0; protocol::signal_wait::LEN];
+        // Deliberately permit invalid signals to exercise client validation.
+        output[..4].copy_from_slice(&(self.signal as u32).to_le_bytes());
+        protocol::signal_origin::encode(
+            protocol::signal_origin::Origin::system(),
+            &mut output[8..],
+        )
+        .unwrap();
         let output = if self.status == 0 { &output[..] } else { &[] };
         protocol::encode(
             protocol::Header {
@@ -106,7 +112,7 @@ fn server_retains_waits_and_services_them_before_async_notifications() {
                 .unwrap()
     );
     let initial = source
-        .split("if header.opcode == protocol::OP_SIGNAL_THREAD_WAIT")
+        .split("if header.opcode == protocol::OP_SIGNAL_THREAD_WAIT_INFO")
         .nth(1)
         .unwrap()
         .split("protocol::OP_WAIT_CHILD | protocol::OP_WAIT_CHILD_GUARDED")

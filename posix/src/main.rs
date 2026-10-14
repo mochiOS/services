@@ -718,7 +718,7 @@ fn main() {
                 })
             }
             (Some(peer), Some((header, payload)), true)
-                if header.opcode == protocol::OP_SIGNAL_THREAD_WAIT
+                if header.opcode == protocol::OP_SIGNAL_THREAD_WAIT_INFO
                     && header.flags == 0
                     && attachments.is_empty() =>
             {
@@ -739,7 +739,7 @@ fn main() {
                     {
                         return Err(protocol::STATUS_EAGAIN);
                     }
-                    match service.try_wait_signal(peer, identity, mask, epoch) {
+                    match service.try_wait_signal_info(peer, identity, mask, epoch) {
                         Err(protocol::STATUS_EAGAIN) => {
                             pending_signal_waits.push(PendingSignalWait {
                                 sender,
@@ -1461,13 +1461,13 @@ fn complete_pending_signal_waits(
     let mut index = 0;
     while index < pending.len() {
         let wait = pending[index];
-        let result = service.try_wait_signal(wait.peer, wait.identity, wait.mask, wait.epoch);
+        let result = service.try_wait_signal_info(wait.peer, wait.identity, wait.mask, wait.epoch);
         if result == Err(protocol::STATUS_EAGAIN) {
             index += 1;
             continue;
         }
         let response = signal_wait_response(wait.request_id, result);
-        let mut bytes = vec![0; protocol::HEADER_LEN + protocol::SIGNAL_MASK_LEN];
+        let mut bytes = vec![0; protocol::HEADER_LEN + protocol::signal_wait::LEN];
         if let Ok(length) = protocol::encode(response.header, &response.payload, &mut bytes) {
             let _ = platform::ipc::reply(wait.sender, &bytes[..length]);
         }
@@ -1476,12 +1476,17 @@ fn complete_pending_signal_waits(
 }
 
 #[cfg(target_os = "mochios")]
-fn signal_wait_response(request_id: u64, result: Result<u32, i32>) -> posix_service::Response {
+fn signal_wait_response(
+    request_id: u64,
+    result: Result<mochios_posix_protocol::signal_wait::Accepted, i32>,
+) -> posix_service::Response {
     use mochios_posix_protocol as protocol;
     match result {
-        Ok(signal) => {
-            let mut payload = vec![0; protocol::SIGNAL_MASK_LEN];
-            protocol::encode_signal_mask(u64::from(signal), &mut payload).unwrap();
+        Ok(accepted) => {
+            let mut payload = vec![0; protocol::signal_wait::LEN];
+            if protocol::signal_wait::encode(accepted, &mut payload).is_err() {
+                return status_response(request_id, protocol::STATUS_EIO);
+            }
             posix_service::Response {
                 header: protocol::Header {
                     opcode: protocol::OP_STATUS,

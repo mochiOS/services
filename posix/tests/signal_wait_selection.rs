@@ -265,3 +265,47 @@ fn empty_and_uncatchable_only_sets_wait_without_consuming_other_signals() {
         Ok(USR1)
     );
 }
+
+#[test]
+fn synchronous_acceptance_retains_authenticated_origin_and_consumes_it_once() {
+    let mut service = fixture(bit(USR1));
+    process_signal(&mut service, USR1);
+    raise(&mut service, FIRST, USR1);
+    for thread in [FIRST, SECOND] {
+        let accepted = service
+            .try_wait_signal_info(peer(101), identity(thread), bit(USR1), 0)
+            .unwrap();
+        assert_eq!(accepted.signal, USR1);
+        assert_eq!(accepted.origin.source, protocol::signal_origin::USER);
+        assert_eq!(
+            (accepted.origin.process_id, accepted.origin.real_uid),
+            (101, 501)
+        );
+    }
+    for thread in [FIRST, SECOND] {
+        assert_eq!(
+            service.try_wait_signal_info(peer(101), identity(thread), bit(USR1), 0),
+            Err(protocol::STATUS_EAGAIN)
+        );
+    }
+    // No async handler token/epoch was manufactured to fetch provenance.
+    assert_eq!(
+        service.validate_wait_delivery_epoch(peer(101), identity(FIRST), 0),
+        Ok(())
+    );
+}
+
+#[test]
+fn stale_wait_preserves_provenance_for_a_fresh_atomic_acceptance() {
+    let mut service = fixture(bit(USR1));
+    raise(&mut service, FIRST, USR1);
+    assert_eq!(
+        service.try_wait_signal_info(peer(101), identity(FIRST), bit(USR1), 1),
+        Err(protocol::STATUS_EINTR)
+    );
+    let accepted = service
+        .try_wait_signal_info(peer(101), identity(FIRST), bit(USR1), 0)
+        .unwrap();
+    assert_eq!(accepted.origin.process_id, 101);
+    assert_eq!(accepted.origin.real_uid, 501);
+}

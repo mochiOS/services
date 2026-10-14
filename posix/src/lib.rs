@@ -2895,6 +2895,17 @@ impl<H: Copy> PosixService<H> {
         requested: u64,
         expected_epoch: u64,
     ) -> Result<u32, i32> {
+        self.try_wait_signal_info(peer, sender, requested, expected_epoch)
+            .map(|accepted| accepted.signal)
+    }
+
+    pub fn try_wait_signal_info(
+        &mut self,
+        peer: PeerIdentity,
+        sender: mnu_abi::ExecutionIdentity,
+        requested: u64,
+        expected_epoch: u64,
+    ) -> Result<protocol::signal_wait::Accepted, i32> {
         self.validate_wait_delivery_epoch(peer, sender, expected_epoch)?;
         let key = (sender.process_id, sender.thread_id);
         let blocked = self.signal_masks[&key];
@@ -2907,9 +2918,14 @@ impl<H: Copy> PosixService<H> {
         let own = self.thread_pending_signals.get(&key).copied().unwrap_or(0) & requested;
         if own != 0 {
             let signal = own.trailing_zeros() + 1;
+            let origin = self
+                .signal_origins
+                .get(&(sender.process_id, sender.thread_id, signal))
+                .copied()
+                .ok_or(protocol::STATUS_EIO)?;
             *self.thread_pending_signals.get_mut(&key).unwrap() &= !signal_bit(signal);
             self.signal_origins.remove(&(sender.process_id, sender.thread_id, signal));
-            return Ok(signal);
+            return Ok(protocol::signal_wait::Accepted { signal, origin });
         }
         let state = self.signals.get_mut(&sender.process_id).unwrap();
         let selected = state.pending() & requested;
@@ -2917,9 +2933,14 @@ impl<H: Copy> PosixService<H> {
             return Err(protocol::STATUS_EAGAIN);
         }
         let signal = selected.trailing_zeros() + 1;
+        let origin = self
+            .signal_origins
+            .get(&(sender.process_id, 0, signal))
+            .copied()
+            .ok_or(protocol::STATUS_EIO)?;
         state.pending &= !signal_bit(signal);
         self.signal_origins.remove(&(sender.process_id, 0, signal));
-        Ok(signal)
+        Ok(protocol::signal_wait::Accepted { signal, origin })
     }
 
     /// Validate before examining/reaping a child. `sender` is native endpoint
