@@ -23,6 +23,7 @@ pub mod socket_receive_wait;
 pub mod filesystem_transport;
 mod fault_signal;
 mod signal_origin;
+mod fork_state;
 
 pub const STATUS_EINVAL: i32 = -22;
 pub const STATUS_EOVERFLOW: i32 = -75;
@@ -606,6 +607,8 @@ pub struct ControllingTerminal {
 
 #[derive(Debug)]
 pub struct PosixService<H: Copy = u32> {
+    prepared_forks: Vec<(u64, fork_state::ForkState<H>)>,
+    next_fork_token: u64,
     bootstrap_process_id: Option<u64>,
     sessions: BTreeMap<u64, Session>,
     directories: BTreeMap<u64, SessionDirectories<H>>,
@@ -640,6 +643,8 @@ pub struct PosixService<H: Copy = u32> {
 impl PosixService<u32> {
     pub const fn new() -> Self {
         Self {
+            prepared_forks: Vec::new(),
+            next_fork_token: 1,
             bootstrap_process_id: None,
             sessions: BTreeMap::new(),
             directories: BTreeMap::new(),
@@ -1273,6 +1278,7 @@ impl<H: Copy> PosixService<H> {
             .filter_map(|child_id| match self.process_wait_states.get(child_id) {
                 Some(state)
                     if (!state.exit_notified && self.parents.contains_key(child_id))
+                        || self.prepared_forks.iter().any(|(_, state)| state.owned_by(*child_id))
                         || self.has_reparentable_children(*child_id)
                         || self.needs_parent_exit_observation(*child_id)
                         || self.controlling_terminals.contains_key(child_id) =>
@@ -1373,94 +1379,10 @@ impl<H: Copy> PosixService<H> {
         process: AuthenticatedProcess<H>,
         filesystem: &mut F,
     ) -> Result<(), i32> {
-        if self.tree_teardown_owns(peer.process_id) {
-            return Err(protocol::STATUS_EAGAIN);
-        }
-        if process.process_id == peer.process_id
-            || !self.processes.contains_key(&peer.process_id)
-            || self.processes.contains_key(&process.process_id)
-        {
-            return Err(STATUS_EINVAL);
-        }
-        let parent_session = self
-            .sessions
-            .get(&peer.process_id)
-            .copied()
-            .ok_or(protocol::STATUS_ESRCH)?;
-        let child_directories =
-            if let Some(parent) = self.directories.get(&peer.process_id).copied() {
-                let root = filesystem.retain_object(parent.root)?;
-                let cwd = match filesystem.retain_object(parent.cwd) {
-                    Ok(cwd) => cwd,
-                    Err(error) => {
-                        filesystem.release_object(root);
-                        return Err(error);
-                    }
-                };
-                Some(SessionDirectories { root, cwd })
-            } else {
-                None
-            };
-        let child_id = process.process_id;
-        let inherited_limits: Vec<(u32, protocol::ResourceLimit)> = self
-            .resource_limits
-            .iter()
-            .filter_map(|(&(process_id, resource), &limit)| {
-                (process_id == peer.process_id).then_some((resource, limit))
-            })
-            .collect();
-        let inherited_groups = self
-            .supplementary_groups
-            .get(&peer.process_id)
-            .cloned()
-            .unwrap_or_default();
-        let inherited_signal_child_options = self
-            .signal_child_options
-            .get(&peer.process_id)
-            .copied()
-            .unwrap_or_default();
-        self.processes.insert(child_id, process.handle);
-        self.sessions.insert(
-            child_id,
-            Session {
-                process_id: child_id,
-                ..parent_session
-            },
-        );
-        if let Some(directories) = child_directories {
-            self.directories.insert(child_id, directories);
-        }
-        self.parents.insert(child_id, peer.process_id);
-        // Keep failure-cleanup ownership separate from the POSIX parent link:
-        // reparenting must not transfer the creator's rollback authority.
-        self.launch_creators.insert(child_id, peer.process_id);
-        self.process_groups.insert(
-            child_id,
-            self.process_groups
-                .get(&peer.process_id)
-                .copied()
-                .unwrap_or(peer.process_id),
-        );
-        self.session_ids.insert(
-            child_id,
-            self.session_ids
-                .get(&peer.process_id)
-                .copied()
-                .unwrap_or(peer.process_id),
-        );
-        self.supplementary_groups.insert(child_id, inherited_groups);
-        self.children
-            .entry(peer.process_id)
-            .or_default()
-            .insert(child_id);
-        let child_signals = self.signals[&peer.process_id].fork_child();
-        self.signals.insert(child_id, child_signals);
-        self.signal_child_options
-            .insert(child_id, inherited_signal_child_options);
-        self.process_wait_states
-            .insert(child_id, ProcessWaitState::default());
-        for (resource, limit) in inherited_limits {
-            self.resource_limits.insert((child_id, resource), limit);
+        let token = self.prepare_fork(peer, filesystem)?;
+        if let Err(error) = self.commit_fork(peer, token, process) {
+            let _ = self.cancel_fork(peer, token, filesystem);
+            return Err(error);
         }
         Ok(())
     }
@@ -1883,6 +1805,7 @@ impl<H: Copy> PosixService<H> {
         processes: &mut P,
     ) -> Result<(), i32> {
         self.observe_process_exit(child_id)?;
+        self.cancel_owned_forks(child_id, filesystem);
         self.orphaned_processes.remove(&child_id);
         if let Some(children) = self.children.get_mut(&parent_id) {
             children.remove(&child_id);

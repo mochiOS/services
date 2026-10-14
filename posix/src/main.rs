@@ -184,6 +184,12 @@ fn main() {
                 error
             );
         }
+        if let Err(error) = service.reap_abandoned_forks(&mut filesystem, &mut processes) {
+            platform::logln!(
+                "posix.service: abandoned fork cleanup failed errno={}",
+                error
+            );
+        }
         if let Err(error) = service.reap_orphans(&mut filesystem, &mut processes) {
             platform::logln!("posix.service: orphan reap pending errno={}", error);
         }

@@ -1352,6 +1352,7 @@ struct RecordingFilesystem {
     chmod_request: Option<posix_service::PreparedChmod>,
     chown_request: Option<posix_service::PreparedChown>,
     retained: Vec<AttachedObject<u32>>,
+    retain_failure_at: Option<usize>,
     released: Vec<AttachedObject<u32>>,
     path_query: Option<(AttachedObject<u32>, AttachedObject<u32>)>,
     directory_path: Vec<u8>,
@@ -1655,6 +1656,9 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
 
     fn retain_object(&mut self, object: AttachedObject<u32>) -> Result<AttachedObject<u32>, i32> {
         self.retained.push(object);
+        if self.retain_failure_at == Some(self.retained.len()) {
+            return Err(-5);
+        }
         Ok(AttachedObject {
             handle: object.handle + 1000,
             rights: object.rights,
@@ -1677,6 +1681,391 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
             Ok(self.directory_path.clone())
         }
     }
+}
+
+#[test]
+fn prepared_fork_keeps_policy_and_directory_objects_from_preparation_not_commit() {
+    let root = PeerIdentity {
+        process_id: 401,
+        effective_uid: 0,
+        effective_gid: 0,
+    };
+    let owner = PeerIdentity {
+        process_id: 402,
+        ..root
+    };
+    let mut service = service_for(root);
+    let mut filesystem = RecordingFilesystem::default();
+    service
+        .adopt_child(
+            root,
+            AuthenticatedProcess {
+                process_id: 402,
+                handle: 1402,
+            },
+            &mut filesystem,
+        )
+        .unwrap();
+    let call = |service: &mut PosixService, opcode, flags, bytes: &[u8]| {
+        let response = service.handle(
+            owner,
+            protocol::Header {
+                opcode,
+                flags,
+                ..Default::default()
+            },
+            bytes,
+        );
+        assert_eq!(response.header.status, 0);
+        response
+    };
+    // Open real independently-owned root/cwd references before preparing.
+    assert_eq!(
+        service
+            .handle_objects(
+                owner,
+                protocol::Header {
+                    opcode: protocol::OP_GETCWD,
+                    ..Default::default()
+                },
+                &[],
+                &[],
+                &mut filesystem
+            )
+            .response
+            .header
+            .status,
+        0
+    );
+    let before_directories = *service.session_directories(402).unwrap();
+    let mut groups = [0u8; protocol::GROUP_LIST_MAX_LEN];
+    let length = protocol::encode_group_list(&[7, 8], &mut groups).unwrap();
+    call(&mut service, protocol::OP_GROUPS_SET, 0, &groups[..length]);
+    let mut mask = [0; protocol::UMASK_PAYLOAD_LEN];
+    protocol::encode_umask(0o027, &mut mask).unwrap();
+    call(&mut service, protocol::OP_UMASK_SET, 0, &mask);
+    let mut limit = [0; protocol::RESOURCE_LIMIT_REQUEST_LEN];
+    protocol::encode_resource_limit_request(
+        protocol::ResourceLimitRequest {
+            process_id: 0,
+            resource: protocol::RLIMIT_NOFILE,
+            flags: protocol::RESOURCE_LIMIT_SET,
+            limit: protocol::ResourceLimit { soft: 7, hard: 17 },
+        },
+        &mut limit,
+    )
+    .unwrap();
+    call(&mut service, protocol::OP_RESOURCE_LIMIT, 0, &limit);
+    let mut action = [0; protocol::SIGNAL_DISPOSITION_LEN];
+    protocol::encode_signal_disposition(
+        protocol::SignalDisposition {
+            signal: 10,
+            kind: protocol::SIGNAL_DISPOSITION_IGNORE,
+            child_options: 0,
+        },
+        &mut action,
+    )
+    .unwrap();
+    call(
+        &mut service,
+        protocol::OP_SIGNAL_DISPOSITION,
+        protocol::SIGNAL_DISPOSITION_SET,
+        &action,
+    );
+    let token = service.prepare_fork(owner, &mut filesystem).unwrap();
+    // Parent updates between VM capture and ProcessCreate must not leak into
+    // the child. Claims in PeerIdentity are not credential overrides.
+    filesystem.stat_mode = Some(0o040755);
+    assert_eq!(service.handle_objects(
+        owner, protocol::Header { opcode: protocol::OP_FCHDIR, ..Default::default() },
+        &[], &[AttachedObject { handle: 58, rights: 0x4000_0000_0000_0081 }], &mut filesystem,
+    ).response.header.status, 0);
+    assert_eq!(service.session_directories(402).unwrap().cwd.handle, 1058);
+    protocol::encode_resource_limit_request(
+        protocol::ResourceLimitRequest {
+            process_id: 0,
+            resource: protocol::RLIMIT_NOFILE,
+            flags: protocol::RESOURCE_LIMIT_SET,
+            limit: protocol::ResourceLimit { soft: 1, hard: 2 },
+        },
+        &mut limit,
+    )
+    .unwrap();
+    call(&mut service, protocol::OP_RESOURCE_LIMIT, 0, &limit);
+    protocol::encode_umask(0o077, &mut mask).unwrap();
+    call(&mut service, protocol::OP_UMASK_SET, 0, &mask);
+    let length = protocol::encode_group_list(&[99], &mut groups).unwrap();
+    call(&mut service, protocol::OP_GROUPS_SET, 0, &groups[..length]);
+    protocol::encode_signal_disposition(
+        protocol::SignalDisposition {
+            signal: 10,
+            kind: protocol::SIGNAL_DISPOSITION_CAUGHT,
+            child_options: 0,
+        },
+        &mut action,
+    )
+    .unwrap();
+    call(
+        &mut service,
+        protocol::OP_SIGNAL_DISPOSITION,
+        protocol::SIGNAL_DISPOSITION_SET,
+        &action,
+    );
+    call(&mut service, protocol::OP_CREATE_SESSION, 0, &[]);
+    let mut credential = [0; 4];
+    protocol::encode_credential_id(505, &mut credential).unwrap();
+    call(&mut service, protocol::OP_SET_GID, 0, &credential);
+    call(&mut service, protocol::OP_SET_UID, 0, &credential);
+    let child = AuthenticatedProcess {
+        process_id: 403,
+        handle: 1403,
+    };
+    let retained = filesystem.retained.len();
+    service.commit_fork(owner, token, child).unwrap();
+    assert_eq!(
+        filesystem.retained.len(),
+        retained,
+        "commit must not reopen or retain live parent paths"
+    );
+    let session = service.session(403).unwrap();
+    assert_eq!(
+        (session.real_uid, session.effective_uid, session.saved_uid),
+        (0, 0, 0)
+    );
+    assert_eq!(
+        (session.real_gid, session.effective_gid, session.saved_gid),
+        (0, 0, 0)
+    );
+    assert_eq!(session.umask, 0o027);
+    assert_eq!(service.supplementary_groups(403), Some(&[7, 8][..]));
+    let directories = service.session_directories(403).unwrap();
+    assert_eq!(
+        directories.root.handle,
+        before_directories.root.handle + 1000
+    );
+    assert_eq!(directories.cwd.handle, before_directories.cwd.handle + 1000);
+    let child_peer = PeerIdentity {
+        process_id: 403,
+        ..owner
+    };
+    let response = service.handle(
+        child_peer,
+        protocol::Header {
+            opcode: protocol::OP_PROCESS_INFO,
+            ..Default::default()
+        },
+        &0i64.to_le_bytes(),
+    );
+    let info = protocol::decode_process_info(&response.payload).unwrap();
+    assert_eq!(
+        (info.parent_id, info.process_group_id, info.session_id),
+        (402, 401, 401)
+    );
+    let response = service.handle(
+        child_peer,
+        protocol::Header {
+            opcode: protocol::OP_SIGNAL_DISPOSITION,
+            ..Default::default()
+        },
+        &{
+            protocol::encode_signal_disposition(
+                protocol::SignalDisposition {
+                    signal: 10,
+                    kind: 0,
+                    child_options: 0,
+                },
+                &mut action,
+            )
+            .unwrap();
+            action
+        },
+    );
+    assert_eq!(
+        protocol::decode_signal_disposition(&response.payload)
+            .unwrap()
+            .kind,
+        protocol::SIGNAL_DISPOSITION_IGNORE
+    );
+    protocol::encode_resource_limit_request(
+        protocol::ResourceLimitRequest {
+            process_id: 0,
+            resource: protocol::RLIMIT_NOFILE,
+            flags: 0,
+            limit: Default::default(),
+        },
+        &mut limit,
+    )
+    .unwrap();
+    let response = service.handle(
+        child_peer,
+        protocol::Header {
+            opcode: protocol::OP_RESOURCE_LIMIT,
+            ..Default::default()
+        },
+        &limit,
+    );
+    assert_eq!(
+        protocol::decode_resource_limit(&response.payload).unwrap(),
+        protocol::ResourceLimit { soft: 7, hard: 17 }
+    );
+    assert_eq!(
+        service.cancel_fork(owner, token, &mut filesystem),
+        Err(protocol::STATUS_ESRCH)
+    );
+    assert_eq!(
+        service.commit_fork(owner, token, child),
+        Err(protocol::STATUS_ESRCH)
+    );
+}
+
+#[test]
+fn fork_preparation_is_owned_bounded_cancelable_and_commit_failure_does_not_consume_it() {
+    let owner = PeerIdentity {
+        process_id: 501,
+        effective_uid: 0,
+        effective_gid: 0,
+    };
+    let foreign = PeerIdentity {
+        process_id: 502,
+        ..owner
+    };
+    let mut service = service_for(owner);
+    let mut filesystem = RecordingFilesystem::default();
+    assert_eq!(
+        service
+            .handle_objects(
+                owner,
+                protocol::Header {
+                    opcode: protocol::OP_GETCWD,
+                    ..Default::default()
+                },
+                &[],
+                &[],
+                &mut filesystem
+            )
+            .response
+            .header
+            .status,
+        0
+    );
+    let token = service.prepare_fork(owner, &mut filesystem).unwrap();
+    let child = AuthenticatedProcess {
+        process_id: 503,
+        handle: 1503,
+    };
+    assert_eq!(
+        service.cancel_fork(foreign, token, &mut filesystem),
+        Err(protocol::STATUS_EPERM)
+    );
+    assert_eq!(
+        service.commit_fork(foreign, token, child),
+        Err(protocol::STATUS_EPERM)
+    );
+    assert_eq!(
+        service.commit_fork(
+            owner,
+            token,
+            AuthenticatedProcess {
+                process_id: 0,
+                handle: 1503
+            }
+        ),
+        Err(STATUS_EINVAL)
+    );
+    assert!(service.session(503).is_none());
+    assert!(filesystem.released.is_empty());
+    service.cancel_fork(owner, token, &mut filesystem).unwrap();
+    assert_eq!(filesystem.released.len(), 2);
+    assert_eq!(
+        service.cancel_fork(owner, token, &mut filesystem),
+        Err(protocol::STATUS_ESRCH)
+    );
+    let mut tokens = Vec::new();
+    for _ in 0..64 {
+        tokens.push(service.prepare_fork(owner, &mut filesystem).unwrap());
+    }
+    let retained = filesystem.retained.len();
+    assert_eq!(
+        service.prepare_fork(owner, &mut filesystem),
+        Err(protocol::STATUS_EAGAIN)
+    );
+    assert_eq!(filesystem.retained.len(), retained);
+    for token in tokens {
+        service.cancel_fork(owner, token, &mut filesystem).unwrap();
+    }
+    let next = service.prepare_fork(owner, &mut filesystem).unwrap();
+    assert!(next > token);
+    service.commit_fork(owner, next, child).unwrap();
+    assert!(service.is_child(501, 503));
+}
+
+#[test]
+fn failed_directory_retention_rolls_back_and_dead_owner_cleanup_uses_native_status() {
+    let owner = PeerIdentity {
+        process_id: 601,
+        effective_uid: 0,
+        effective_gid: 0,
+    };
+    let mut service = service_for(owner);
+    let mut filesystem = RecordingFilesystem::default();
+    assert_eq!(
+        service
+            .handle_objects(
+                owner,
+                protocol::Header {
+                    opcode: protocol::OP_GETCWD,
+                    ..Default::default()
+                },
+                &[],
+                &[],
+                &mut filesystem
+            )
+            .response
+            .header
+            .status,
+        0
+    );
+    filesystem.retain_failure_at = Some(2);
+    assert_eq!(service.prepare_fork(owner, &mut filesystem), Err(-5));
+    assert_eq!(
+        filesystem
+            .released
+            .iter()
+            .map(|object| object.handle)
+            .collect::<Vec<_>>(),
+        [1100]
+    );
+    filesystem.retain_failure_at = None;
+    let token = service.prepare_fork(owner, &mut filesystem).unwrap();
+    assert!(service.child_lifecycle_handles().contains(&601));
+    let mut processes = RecordingProcesses::default();
+    assert!(
+        service
+            .reap_abandoned_forks(&mut filesystem, &mut processes)
+            .is_err()
+    );
+    assert_eq!(filesystem.released.len(), 1);
+    processes.states.insert(601, ProcessLifecycle::Running);
+    assert_eq!(
+        service.reap_abandoned_forks(&mut filesystem, &mut processes),
+        Ok(0)
+    );
+    processes
+        .states
+        .insert(601, ProcessLifecycle::Exited { exit_code: 0 });
+    assert_eq!(
+        service.reap_abandoned_forks(&mut filesystem, &mut processes),
+        Ok(1)
+    );
+    assert_eq!(filesystem.released.len(), 3);
+    assert_eq!(
+        service.reap_abandoned_forks(&mut filesystem, &mut processes),
+        Ok(0)
+    );
+    assert_eq!(
+        service.cancel_fork(owner, token, &mut filesystem),
+        Err(protocol::STATUS_ESRCH)
+    );
 }
 
 #[test]
