@@ -17,18 +17,10 @@ fn production_gate_excludes_creators_and_image_operations_and_releases_on_failur
     let program = format!(
         r#"
 extern crate alloc;
-use std::sync::atomic::{{AtomicBool, AtomicU8, Ordering}};
 const EPERM:u64=1; const ENOSYS:u64=38; const EAGAIN:u64=11;
-static MODE:AtomicU8=AtomicU8::new(0);
-static CPU_REFERENCED:AtomicBool=AtomicBool::new(false);
 fn caller_has_process_spawn_capability()->bool {{ true }}
 mod syscall {{ pub mod security {{ pub fn current_process_id()->Option<u64> {{ Some(7) }} }} }}
 mod mem {{ pub mod address_space {{ pub enum CloneError {{}} pub struct CloneSource; }} }}
-mod percpu {{
-    pub fn thread_is_cpu_referenced(id:u64)->bool {{
-        id == 2 && super::CPU_REFERENCED.load(super::Ordering::Relaxed)
-    }}
-}}
 mod interrupt {{ pub mod spinlock {{
     pub struct SpinLock<T>(std::sync::Mutex<T>);
     impl<T> SpinLock<T> {{
@@ -38,27 +30,13 @@ mod interrupt {{ pub mod spinlock {{
 }} }}
 mod task {{
     pub type ProcessId = u64;
-    #[derive(PartialEq, Eq)]
-    pub enum ThreadState {{ Running, Ready, Terminated }}
-    pub struct Thread {{ id:u64, process:u64, state:ThreadState }}
     pub struct ThreadId(u64);
     impl ThreadId {{ pub fn as_u64(&self)->u64 {{ self.0 }} }}
-    impl Thread {{
-        pub fn process_id(&self)->u64 {{ self.process }}
-        pub fn state(&self)->ThreadState {{ match self.state {{
-            ThreadState::Running=>ThreadState::Running,
-            ThreadState::Ready=>ThreadState::Ready,
-            ThreadState::Terminated=>ThreadState::Terminated,
-        }} }}
-        pub fn id(&self)->ThreadId {{ ThreadId(self.id) }}
-    }}
-    pub fn for_each_thread(mut visit:impl FnMut(&Thread)) {{
-        visit(&Thread {{ id:1, process:7, state:ThreadState::Running }});
-        match super::MODE.load(super::Ordering::Relaxed) {{
-            1=>visit(&Thread {{ id:2, process:7, state:ThreadState::Ready }}),
-            2=>visit(&Thread {{ id:2, process:7, state:ThreadState::Terminated }}),
-            3=>visit(&Thread {{ id:2, process:9, state:ThreadState::Ready }}),
-            _=>{{}}
+    pub fn current_thread_id()->Option<ThreadId> {{ Some(ThreadId(1)) }}
+    pub mod scheduler {{
+        pub fn quiesce_image_siblings(process:u64, owner:super::ThreadId) {{
+            assert_eq!(process,7); assert_eq!(owner.as_u64(),1);
+            assert!(super::image_transition::begin_thread_creation(process).is_none());
         }}
     }}
     #[path={path:?}] pub mod image_transition;
@@ -79,17 +57,6 @@ fn main() {{
     let image=begin_image_transition(7).unwrap();
     assert_eq!(clone_admission(),EAGAIN);
     drop(image);
-    MODE.store(1,Ordering::Relaxed);
-    assert_eq!(clone_admission(),EAGAIN);
-    assert!(begin_thread_creation(7).is_some());
-    MODE.store(2,Ordering::Relaxed);
-    assert_eq!(clone_admission(),0);
-    CPU_REFERENCED.store(true,Ordering::Relaxed);
-    assert_eq!(clone_admission(),EAGAIN);
-    assert!(begin_thread_creation(7).is_some());
-    MODE.store(3,Ordering::Relaxed);
-    assert_eq!(clone_admission(),0);
-    MODE.store(0,Ordering::Relaxed);
     let first = begin_thread_creation(7).unwrap();
     let second = begin_thread_creation(7).unwrap();
     assert!(begin_image_transition(7).is_none());
