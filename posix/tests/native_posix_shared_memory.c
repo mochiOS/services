@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -17,7 +18,36 @@
     }                                                                          \
   } while (0)
 
-int main(void) {
+static int verify_exec(char **argv) {
+  int alias = atoi(argv[2]), reader = atoi(argv[3]), closed = atoi(argv[4]);
+  CHECK(fcntl(closed, F_GETFD, 0) == -1 && errno == EBADF);
+  CHECK(fcntl(alias, F_GETFD, 0) == 0 && fcntl(reader, F_GETFD, 0) == 0);
+  CHECK(fcntl(alias, F_GETFL, 0) == (O_RDWR | O_NONBLOCK));
+  CHECK(fcntl(reader, F_GETFL, 0) == O_RDONLY);
+  struct stat status;
+  CHECK(fstat(alias, &status) == 0 && status.st_size == 8192 &&
+        status.st_nlink == 0);
+  CHECK(ftruncate(reader, 0) == -1 && errno == EBADF);
+  CHECK(ftruncate(alias, 8192) == 0);
+  CHECK(lseek(alias, 0, SEEK_CUR) == 3);
+  CHECK(mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, reader, 0) ==
+            MAP_FAILED &&
+        errno == EACCES);
+  volatile unsigned char *mapped =
+      mmap(NULL, 4096, PROT_READ, MAP_SHARED, reader, 0);
+  CHECK(mapped != MAP_FAILED && mapped[0] == 17 && mapped[2] == 'z');
+  CHECK(lseek(alias, 5, SEEK_SET) == 5 && write(alias, "e", 1) == 1 &&
+        mapped[5] == 'e');
+  CHECK(fcntl(alias, F_SETFL, O_APPEND | O_NONBLOCK) == 0);
+  CHECK(munmap((void *)mapped, 4096) == 0);
+  fprintf(stderr, "posix-shared-memory-exec: PASS CLOEXEC, restored kind, "
+                  "read-only attenuation, unlinked backing and shared OFD\n");
+  return 0;
+}
+
+int main(int argc, char **argv) {
+  if (argc == 5 && strcmp(argv[1], "--verify-shm-exec") == 0)
+    return verify_exec(argv);
   const char *name = "/native-posix-shared-memory";
   int fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
   CHECK(fd >= 0 && (fcntl(fd, F_GETFD, 0) & FD_CLOEXEC));
@@ -90,6 +120,31 @@ int main(void) {
         WEXITSTATUS(status) == 0);
   CHECK(shared[2] == 'z' && lseek(fd, 0, SEEK_CUR) == 3);
   CHECK(fcntl(fd, F_GETFL, 0) == (O_RDWR | O_NONBLOCK));
+  CHECK(fcntl(reader, F_SETFD, 0) == 0);
+  child = fork();
+  CHECK(child >= 0);
+  if (child == 0) {
+    char alias_argument[16], reader_argument[16], closed_argument[16];
+    snprintf(alias_argument, sizeof(alias_argument), "%d", alias);
+    snprintf(reader_argument, sizeof(reader_argument), "%d", reader);
+    snprintf(closed_argument, sizeof(closed_argument), "%d", fd);
+    char *arguments[] = {"shared-memory-exec", "--verify-shm-exec",
+                         alias_argument,       reader_argument,
+                         closed_argument,      NULL};
+    char *environment[] = {NULL};
+    CHECK(execve("/system/services/missing-exec-probe", arguments,
+                 environment) == -1 &&
+          errno == ENOENT);
+    CHECK(fcntl(alias, F_GETFL, 0) == (O_RDWR | O_NONBLOCK));
+    CHECK(fcntl(fd, F_GETFD, 0) & FD_CLOEXEC);
+    execve("/system/services/compositor.service", arguments, environment);
+    fprintf(stderr, "posix-shared-memory-exec: FAIL execve errno=%d\n", errno);
+    _exit(1);
+  }
+  CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) &&
+        WEXITSTATUS(status) == 0);
+  CHECK(shared[5] == 'e' && lseek(fd, 0, SEEK_CUR) == 6);
+  CHECK(fcntl(fd, F_GETFL, 0) == (O_RDWR | O_APPEND | O_NONBLOCK));
   CHECK(close(fd) == 0 && close(alias) == 0 && close(reader) == 0 &&
         close(fresh) == 0);
   CHECK(shared[0] == 17 && offset[0] == 42 && fresh_map[0] == 0);
