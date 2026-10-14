@@ -2171,9 +2171,17 @@ impl RuntimeFilesystem {
 fn single_file_handle(
     file: posix_service::AttachedObject<mochi_user_platform::handle::Handle>,
 ) -> Result<mochi_user_platform::ipc::IpcObjectHandles, i32> {
-    use mochi_user_platform as platform;
+    file_handle_with_rights(file, 0)
+}
 
-    if file.rights & platform::handle::HANDLE_RIGHT_TRANSFER == 0 {
+#[cfg(target_os = "mochios")]
+fn file_handle_with_rights(
+    file: posix_service::AttachedObject<mochi_user_platform::handle::Handle>,
+    rights: u64,
+) -> Result<mochi_user_platform::ipc::IpcObjectHandles, i32> {
+    use mochi_user_platform as platform;
+    let required = rights | platform::handle::HANDLE_RIGHT_TRANSFER;
+    if file.rights & required != required {
         return Err(-13);
     }
     let mut handles = platform::ipc::IpcObjectHandles::default();
@@ -2181,7 +2189,7 @@ fn single_file_handle(
     handles.handles[0] = platform::ipc::IpcObjectHandle {
         handle: file.handle,
         reserved: 0,
-        rights: platform::handle::HANDLE_RIGHT_TRANSFER,
+        rights: required,
     };
     Ok(handles)
 }
@@ -2190,12 +2198,7 @@ fn single_file_handle(
 fn controlled_file_handle(
     file: posix_service::AttachedObject<mochi_user_platform::handle::Handle>,
 ) -> Result<mochi_user_platform::ipc::IpcObjectHandles, i32> {
-    if file.rights & mnu_abi::HANDLE_RIGHT_CONTROL == 0 {
-        return Err(-13);
-    }
-    let mut handles = single_file_handle(file)?;
-    handles.handles[0].rights |= mnu_abi::HANDLE_RIGHT_CONTROL;
-    Ok(handles)
+    file_handle_with_rights(file, mnu_abi::HANDLE_RIGHT_CONTROL)
 }
 
 #[cfg(target_os = "mochios")]
@@ -2403,7 +2406,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
                 ..filesystem::Header::default()
             },
             &[],
-            single_file_handle(file)?,
+            file_handle_with_rights(file, mnu_abi::HANDLE_RIGHT_WRITE)?,
         )
     }
 
@@ -2428,7 +2431,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
                 ..filesystem::Header::default()
             },
             &payload,
-            single_file_handle(file)?,
+            controlled_file_handle(file)?,
         )
     }
 
@@ -2454,7 +2457,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
                 ..filesystem::Header::default()
             },
             &payload,
-            single_file_handle(file)?,
+            controlled_file_handle(file)?,
         )
     }
 

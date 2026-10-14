@@ -6470,7 +6470,8 @@ fn file_mutations_use_only_the_explicitly_attached_handle() {
     );
     let file = AttachedObject {
         handle: 59,
-        rights: 0x81,
+        rights: mnu_abi::HANDLE_RIGHT_READ | mnu_abi::HANDLE_RIGHT_WRITE
+            | mnu_abi::HANDLE_RIGHT_CONTROL | mnu_abi::HANDLE_RIGHT_TRANSFER,
     };
     let mut filesystem = RecordingFilesystem::default();
     let mut length = [0u8; protocol::FILE_LENGTH_PAYLOAD_LEN];
@@ -6530,6 +6531,57 @@ fn file_mutations_use_only_the_explicitly_attached_handle() {
     assert_eq!(changed_owner.response.header.status, protocol::STATUS_OK);
     assert_eq!(filesystem.chown_file, Some((file, 100, u32::MAX, 507, 26)));
     assert_eq!(filesystem.roots_opened, 0);
+}
+
+#[test]
+fn file_mutation_capabilities_cannot_be_recovered_from_owner_or_root_credentials() {
+    for uid in [0, 501] {
+        let peer = PeerIdentity {
+            process_id: 1000 + uid as u64,
+            effective_uid: uid,
+            effective_gid: 20,
+        };
+        let mut service = service_for(peer);
+        service.handle(
+            peer,
+            protocol::Header {
+                opcode: protocol::OP_SESSION_REGISTER,
+                ..Default::default()
+            },
+            &[],
+        );
+        let file = AttachedObject {
+            handle: 59,
+            rights: mnu_abi::HANDLE_RIGHT_READ | mnu_abi::HANDLE_RIGHT_TRANSFER,
+        };
+        let mut filesystem = RecordingFilesystem::default();
+        for (opcode, payload) in [
+            (protocol::OP_FTRUNCATE, 1u64.to_le_bytes().to_vec()),
+            (protocol::OP_FCHMOD, 0o777u32.to_le_bytes().to_vec()),
+            (protocol::OP_FCHOWN, [0; 8].to_vec()),
+        ] {
+            let result = service.handle_objects(
+                peer,
+                protocol::Header {
+                    opcode,
+                    ..Default::default()
+                },
+                &payload,
+                &[file],
+                &mut filesystem,
+            );
+            assert_eq!(
+                result.response.header.status, -13,
+                "uid={uid} opcode={opcode}"
+            );
+            assert!(
+                filesystem.truncated.is_none()
+                    && filesystem.chmod_file.is_none()
+                    && filesystem.chown_file.is_none()
+            );
+            assert_eq!(filesystem.roots_opened, 0);
+        }
+    }
 }
 
 #[test]

@@ -3358,6 +3358,14 @@ impl<H: Copy> PosixService<H> {
                 handles: Vec::new(),
             };
         }
+        if let Some(required) = protocol::file_mutation_rights(header.opcode) {
+            if handles.len() != 1 {
+                return object_error(header.request_id, STATUS_EINVAL);
+            }
+            if handles[0].rights & required != required {
+                return object_error(header.request_id, -13);
+            }
+        }
         if matches!(
             header.opcode,
             protocol::OP_OPEN_AT
@@ -3631,9 +3639,6 @@ impl<H: Copy> PosixService<H> {
                 if handles.len() != 1 {
                     return object_error(header.request_id, STATUS_EINVAL);
                 }
-                if handles[0].rights & mnu_abi::HANDLE_RIGHT_CONTROL == 0 {
-                    return object_error(header.request_id, -13);
-                }
                 if !self.sessions.contains_key(&peer.process_id) {
                     return object_error(header.request_id, protocol::STATUS_ESRCH);
                 }
@@ -3649,9 +3654,6 @@ impl<H: Copy> PosixService<H> {
             protocol::OP_FUPDATEFL => {
                 if handles.len() != 1 {
                     return object_error(header.request_id, STATUS_EINVAL);
-                }
-                if handles[0].rights & mnu_abi::HANDLE_RIGHT_CONTROL == 0 {
-                    return object_error(header.request_id, -13);
                 }
                 if !self.sessions.contains_key(&peer.process_id) {
                     return object_error(header.request_id, protocol::STATUS_ESRCH);
