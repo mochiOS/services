@@ -64,6 +64,7 @@ struct Endpoint {
     peer: Option<u64>,
     credentials: (u32, u32),
     incoming: VecDeque<u8>,
+    error: u32,
     read_shutdown: bool,
     write_shutdown: bool,
     options: u32,
@@ -155,6 +156,7 @@ impl Streams {
             peer: None,
             credentials,
             incoming: VecDeque::new(),
+            error: 0,
             read_shutdown: false,
             write_shutdown: false,
             options: request.options,
@@ -187,6 +189,7 @@ impl Streams {
                 peer: Some(peer),
                 credentials,
                 incoming: VecDeque::new(),
+                error: 0,
                 read_shutdown: false,
                 write_shutdown: false,
                 options: request.options,
@@ -250,6 +253,12 @@ impl Streams {
     pub fn options(&self, id: u64) -> Result<u32, i32> {
         Ok(self.endpoint(id)?.options)
     }
+    pub fn pending_error(&self, id: u64) -> Result<u32, i32> {
+        Ok(self.endpoint(id)?.error)
+    }
+    pub fn take_error(&mut self, id: u64) -> Result<u32, i32> {
+        Ok(std::mem::take(&mut self.endpoint_mut(id)?.error))
+    }
     pub fn set_options(&mut self, id: u64, options: u32) -> Result<(), i32> {
         let entry = self.endpoint_mut(id)?;
         if options & !NONBLOCKING != 0 {
@@ -291,6 +300,9 @@ impl Streams {
             return Err(-107);
         }
         let count = output.len().min(entry.incoming.len());
+        if count == 0 && entry.error != 0 {
+            return Err(-(std::mem::take(&mut entry.error) as i32));
+        }
         if count == 0 && !ready.read_closed {
             return Err(-11);
         }
@@ -419,6 +431,7 @@ impl Streams {
             peer: Some(client),
             credentials,
             incoming: VecDeque::new(),
+            error: 0,
             read_shutdown: false,
             write_shutdown: false,
             options: 0,
@@ -609,10 +622,12 @@ impl Streams {
             .position(|entry| entry.id == id)
             .ok_or(-9)?;
         let removed = self.entries.swap_remove(index);
+        self.notify_peer_release(&removed, false);
         if let Some(listener) = removed.listener {
             for pending in listener.pending {
                 if let Some(index) = self.entries.iter().position(|entry| entry.id == pending) {
-                    self.entries.swap_remove(index);
+                    let queued = self.entries.swap_remove(index);
+                    self.notify_peer_release(&queued, true);
                 }
             }
         }
@@ -624,6 +639,16 @@ impl Streams {
             }
         }
         Ok(())
+    }
+
+    fn notify_peer_release(&mut self, removed: &Endpoint, unaccepted: bool) {
+        if unaccepted || !removed.incoming.is_empty() {
+            if let Some(peer) = removed.peer.and_then(|id| self.endpoint_mut(id).ok()) {
+                if peer.peer == Some(removed.id) && peer.error == 0 {
+                    peer.error = 104; // ECONNRESET: unread or unaccepted data lost.
+                }
+            }
+        }
     }
 }
 

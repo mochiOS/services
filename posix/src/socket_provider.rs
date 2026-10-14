@@ -63,6 +63,12 @@ pub fn handle_provider_request(
                 .write(header.object_id, payload)
                 .map(|count| (count as u64, 0)),
             provider::OP_CONTROL => match header.basis {
+                wire::CONTROL_TAKE_ERROR if payload.is_empty() && header.length == 4 => {
+                    streams.take_error(header.object_id).map(|error| {
+                        data[..4].copy_from_slice(&error.to_le_bytes());
+                        (4, 4)
+                    })
+                }
                 wire::CONTROL_KIND | wire::CONTROL_ACCEPTING
                     if payload.is_empty() && header.length == 4 =>
                 {
@@ -128,7 +134,8 @@ pub fn handle_provider_request(
                         .map(|_| (0, 0))
                 }
                 wire::CONTROL_READINESS if payload.is_empty() && header.length == 4 => {
-                    streams.readiness(header.object_id).map(|ready| {
+                    streams.readiness(header.object_id).and_then(|ready| {
+                        let pending_error = streams.pending_error(header.object_id)?;
                         let bits = if ready.readable { wire::READY_READ } else { 0 }
                             | if ready.writable { wire::READY_WRITE } else { 0 }
                             | if ready.read_closed {
@@ -145,14 +152,20 @@ pub fn handle_provider_request(
                                 wire::WRITE_ERROR
                             } else {
                                 0
+                            }
+                            | if pending_error != 0 {
+                                wire::ERROR_PENDING
+                            } else {
+                                0
                             };
                         data[..4].copy_from_slice(&bits.to_le_bytes());
-                        (4, 4)
+                        Ok((4, 4))
                     })
                 }
                 wire::CONTROL_GET_OPTIONS
                 | wire::CONTROL_KIND
                 | wire::CONTROL_ACCEPTING
+                | wire::CONTROL_TAKE_ERROR
                 | wire::CONTROL_SET_OPTIONS
                 | wire::CONTROL_SHUTDOWN
                 | wire::CONTROL_READINESS => Err(-22),

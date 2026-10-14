@@ -185,7 +185,8 @@ fn libc_socket_option_tags_and_values_do_not_leak_wire_numbers() {
     use mochios_posix_client::socket::{newlib_getsockopt_tag, newlib_getsockopt_value};
     assert_eq!(newlib_getsockopt_tag(1, 3), Ok(wire::CONTROL_KIND));
     assert_eq!(newlib_getsockopt_tag(1, 30), Ok(wire::CONTROL_ACCEPTING));
-    for (level, option) in [(0, 3), (1, 999), (1, 4)] {
+    assert_eq!(newlib_getsockopt_tag(1, 4), Ok(wire::CONTROL_TAKE_ERROR));
+    for (level, option) in [(0, 3), (1, 999)] {
         assert_eq!(newlib_getsockopt_tag(level, option), Err(-92));
     }
     for (kind, native) in [(1u32, 1), (2, 2), (3, 5)] {
@@ -207,6 +208,79 @@ fn libc_socket_option_tags_and_values_do_not_leak_wire_numbers() {
         newlib_getsockopt_value(wire::CONTROL_ACCEPTING, &[0; 4]),
         Ok(0)
     );
+    assert_eq!(
+        newlib_getsockopt_value(wire::CONTROL_TAKE_ERROR, &[0; 4]),
+        Ok(0)
+    );
+    assert_eq!(
+        newlib_getsockopt_value(wire::CONTROL_TAKE_ERROR, &104u32.to_le_bytes()),
+        Ok(104)
+    );
+    assert_eq!(
+        newlib_getsockopt_value(wire::CONTROL_TAKE_ERROR, &u32::MAX.to_le_bytes()),
+        Err(-5)
+    );
+}
+
+#[test]
+fn reset_error_is_shared_and_consumed_once_without_discarding_received_bytes() {
+    let (mut streams, [a, b]) = fixture();
+    streams.write(a, b"unread by peer").unwrap();
+    streams.write(b, b"reply").unwrap();
+    streams.release(b).unwrap();
+    assert_eq!(streams.pending_error(a), Ok(104));
+    let query = frame(provider::OP_CONTROL, a, wire::CONTROL_TAKE_ERROR, 4, &[]);
+    for (flags, count, error) in [(0, 0, -13), (mnu_abi::IPC_DELIVERY_NATIVE_OBJECT, 1, -22)] {
+        assert_eq!(call(&mut streams, &query, flags, count).0.status, error);
+        assert_eq!(streams.pending_error(a), Ok(104));
+    }
+    assert_eq!(
+        handle_provider_request(
+            &mut streams,
+            &query,
+            mnu_abi::IPC_DELIVERY_NATIVE_OBJECT,
+            0,
+            &mut [0; provider::RESPONSE_HEADER_LEN]
+        ),
+        Err(-22)
+    );
+    assert_eq!(streams.pending_error(a), Ok(104));
+    let flags = mnu_abi::IPC_DELIVERY_NATIVE_OBJECT;
+    let ready = frame(provider::OP_CONTROL, a, wire::CONTROL_READINESS, 4, &[]);
+    let bits = u32::from_le_bytes(call(&mut streams, &ready, flags, 0).1.try_into().unwrap());
+    assert_ne!(bits & wire::ERROR_PENDING, 0);
+    for expected in [104u32, 0] {
+        let (reply, data) = call(&mut streams, &query, flags, 0);
+        assert_eq!((reply.status, reply.value), (0, 4));
+        assert_eq!(data, expected.to_le_bytes());
+    }
+    let bits = u32::from_le_bytes(call(&mut streams, &ready, flags, 0).1.try_into().unwrap());
+    assert_eq!(bits & wire::ERROR_PENDING, 0);
+    let mut data = [0; 5];
+    assert_eq!(streams.read(a, &mut data), Ok(5));
+    assert_eq!(&data, b"reply");
+    assert_eq!(streams.read(a, &mut data), Ok(0));
+}
+
+#[test]
+fn read_consumes_reset_only_after_buffered_data_and_orderly_close_has_no_error() {
+    for unread in [false, true] {
+        let (mut streams, [a, b]) = fixture();
+        if unread {
+            streams.write(a, b"lost").unwrap();
+        }
+        streams.write(b, b"kept").unwrap();
+        streams.release(b).unwrap();
+        assert_eq!(streams.read(a, &mut []), Ok(0));
+        assert_eq!(streams.pending_error(a), Ok(if unread { 104 } else { 0 }));
+        assert_eq!(streams.read(a, &mut [0; 4]), Ok(4));
+        assert_eq!(
+            streams.read(a, &mut [0]),
+            if unread { Err(-104) } else { Ok(0) }
+        );
+        assert_eq!(streams.take_error(a), Ok(0));
+        assert_eq!(streams.read(a, &mut [0]), Ok(0));
+    }
 }
 
 #[test]

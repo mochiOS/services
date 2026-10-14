@@ -270,14 +270,32 @@ fn poll_readiness_distinguishes_eof_from_write_failure_and_never_reports_priorit
     );
     assert_eq!(
         poll_events(
-            wire::READY_READ | wire::READ_CLOSED | wire::WRITE_CLOSED | wire::WRITE_ERROR,
+            wire::READY_READ
+                | wire::READ_CLOSED
+                | wire::WRITE_CLOSED
+                | wire::WRITE_ERROR
+                | wire::ERROR_PENDING,
             0
         ),
         0x18
     );
     assert_eq!(poll_events(wire::WRITE_CLOSED, 4), 4);
     assert_eq!(poll_events(wire::WRITE_CLOSED, 0), 0);
-    assert_eq!(poll_events(wire::WRITE_CLOSED | wire::WRITE_ERROR, 4), 0xc);
+    assert_eq!(poll_events(wire::WRITE_CLOSED | wire::WRITE_ERROR, 4), 4);
+    assert_eq!(poll_events(wire::ERROR_PENDING, 0), 8);
     assert_eq!(poll_events(wire::READY_READ | wire::READY_WRITE, 2), 0);
     assert_eq!(poll_events(0, 0x7fff), 0);
+}
+
+#[test]
+fn readiness_decoder_accepts_pending_errors_and_rejects_unknown_bits() {
+    use mochios_posix_client::socket::decode_readiness;
+    for bits in [0u32, wire::ERROR_PENDING, wire::READINESS_MASK] {
+        assert_eq!(decode_readiness(&bits.to_le_bytes()), Ok(bits));
+    }
+    for bits in [64u32, u32::MAX] {
+        assert_eq!(decode_readiness(&bits.to_le_bytes()), Err(-5));
+    }
+    assert_eq!(decode_readiness(&[]), Err(-5));
+    assert_eq!(decode_readiness(&[0; 5]), Err(-5));
 }

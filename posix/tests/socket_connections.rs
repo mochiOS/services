@@ -125,6 +125,7 @@ fn listener_close_aborts_only_unaccepted_peers_and_identifies_all_waiters() {
     for (client, server) in clients[1..].iter().zip(pending) {
         assert_eq!(streams.options(server), Err(-9));
         assert_eq!(streams.write(*client, b"x"), Err(-32));
+        assert_eq!(streams.read(*client, &mut [0]), Err(-104));
         assert_eq!(streams.read(*client, &mut [0]), Ok(0));
         let ready = streams.readiness(*client).unwrap();
         assert!(ready.read_closed && ready.write_closed && ready.write_error);

@@ -26,6 +26,56 @@
     }                                                                          \
   } while (0)
 static int blocking_fd;
+static int verify_socket_errors(void) {
+  for (int consume_by_read = 0; consume_by_read <= 1; ++consume_by_read) {
+    int fds[2];
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    int alias = dup(fds[0]);
+    CHECK(alias >= 0);
+    CHECK(write(fds[0], "discarded", 9) == 9);
+    CHECK(write(fds[1], "kept", 4) == 4 && close(fds[1]) == 0);
+    struct pollfd item = {.fd = fds[0], .events = POLLIN};
+    unsigned tries;
+    for (tries = 0; tries < 10000; ++tries) {
+      CHECK(poll(&item, 1, 0) >= 0);
+      if (item.revents & POLLERR)
+        break;
+      sched_yield();
+    }
+    CHECK(tries < 10000);
+    int error = -1;
+    socklen_t length = sizeof(error);
+    CHECK(getsockopt(alias, SOL_SOCKET, SO_ERROR, NULL, &length) == -1 &&
+          errno == EFAULT);
+    char data[8];
+    if (!consume_by_read) {
+      CHECK(getsockopt(alias, SOL_SOCKET, SO_ERROR, &error, &length) == 0 &&
+            error == ECONNRESET && length == sizeof(error));
+    }
+    CHECK(read(fds[0], data, sizeof(data)) == 4 && !memcmp(data, "kept", 4));
+    if (consume_by_read) {
+      CHECK(read(alias, data, sizeof(data)) == -1 && errno == ECONNRESET);
+    }
+    error = -1;
+    length = sizeof(error);
+    CHECK(getsockopt(fds[0], SOL_SOCKET, SO_ERROR, &error, &length) == 0 &&
+          error == 0);
+    CHECK(read(alias, data, sizeof(data)) == 0);
+    item.events = 0;
+    CHECK(poll(&item, 1, 0) == 1 && !(item.revents & POLLERR) &&
+          (item.revents & POLLHUP));
+    CHECK(close(alias) == 0 && close(fds[0]) == 0);
+  }
+  int fds[2];
+  CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0 && close(fds[1]) == 0);
+  int error = -1;
+  socklen_t length = sizeof(error);
+  CHECK(getsockopt(fds[0], SOL_SOCKET, SO_ERROR, &error, &length) == 0 &&
+        error == 0);
+  CHECK(close(fds[0]) == 0);
+  puts("posix-socket-errors: PASS");
+  return 0;
+}
 static int verify_socket_options(int fd, int accepting) {
   int value = -1;
   socklen_t length = sizeof(value);
@@ -434,6 +484,7 @@ int main(int argc, char **argv) {
     return verify_exec(argv);
   CHECK(verify_single_socket() == 0);
   CHECK(verify_path_binding() == 0);
+  CHECK(verify_socket_errors() == 0);
   puts("posix-socket-options: PASS");
   CHECK(verify_connect_interrupts() == 0);
   int fds[2] = {123, 456};
