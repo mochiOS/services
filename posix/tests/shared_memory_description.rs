@@ -160,3 +160,200 @@ fn readonly_bounds_failures_and_final_release_preserve_state() {
     assert_eq!(descriptions.release(writable, &mut ram), Err(-9));
     assert_eq!(descriptions.length(writable, &mut ram), Err(-9));
 }
+
+fn frame(opcode: u16, id: u64, basis: u64, argument: i64, length: u32, data: &[u8]) -> Vec<u8> {
+    let mut frame = vec![0; mnu_abi::provider::REQUEST_HEADER_LEN + data.len()];
+    mnu_abi::provider::RequestHeader {
+        opcode,
+        object_id: id,
+        argument,
+        basis,
+        length,
+        data_length: data.len() as u32,
+    }
+    .encode(data, &mut frame)
+    .unwrap();
+    frame
+}
+
+#[test]
+fn provider_frames_require_native_delivery_and_preflight_reply_capacity() {
+    use mnu_abi::{IPC_DELIVERY_NATIVE_OBJECT, provider};
+    use posix_service::shared_memory_file::handle_provider_request;
+    let mut descriptions = Descriptions::new();
+    let mut ram = Ram::default();
+    let id = descriptions.open(1, true, &mut ram).unwrap();
+    let mut reply = [0; provider::RESPONSE_HEADER_LEN + provider::MAX_DATA_LEN];
+    let write = frame(provider::OP_WRITE, id, 0, 0, 3, b"abc");
+    for (flags, count, status) in [
+        (0, 0, -13),
+        (3, 0, -13),
+        (IPC_DELIVERY_NATIVE_OBJECT, 1, -22),
+    ] {
+        let length = handle_provider_request(
+            &mut descriptions,
+            &write,
+            flags,
+            count,
+            &mut ram,
+            &mut reply,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            provider::ResponseHeader::decode(&reply[..length])
+                .unwrap()
+                .0
+                .status,
+            status
+        );
+        assert!(ram.bytes.is_empty());
+    }
+    assert_eq!(
+        handle_provider_request(
+            &mut descriptions,
+            &write,
+            IPC_DELIVERY_NATIVE_OBJECT,
+            0,
+            &mut ram,
+            &mut [0; 1]
+        ),
+        Err(-22)
+    );
+    assert!(ram.bytes.is_empty());
+    let length = handle_provider_request(
+        &mut descriptions,
+        &write,
+        IPC_DELIVERY_NATIVE_OBJECT,
+        0,
+        &mut ram,
+        &mut reply,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        provider::ResponseHeader::decode(&reply[..length])
+            .unwrap()
+            .0
+            .value,
+        3
+    );
+    descriptions
+        .seek(id, 0, HANDLE_SEEK_START, &mut ram)
+        .unwrap();
+    let read = frame(provider::OP_READ_WITH_POSITION, id, 0, 0, 2, &[]);
+    assert_eq!(
+        handle_provider_request(
+            &mut descriptions,
+            &read,
+            IPC_DELIVERY_NATIVE_OBJECT,
+            0,
+            &mut ram,
+            &mut [0; provider::RESPONSE_HEADER_LEN]
+        ),
+        Err(-22)
+    );
+    let length = handle_provider_request(
+        &mut descriptions,
+        &read,
+        IPC_DELIVERY_NATIVE_OBJECT,
+        0,
+        &mut ram,
+        &mut reply,
+    )
+    .unwrap()
+    .unwrap();
+    let (header, data) = provider::ResponseHeader::decode(&reply[..length]).unwrap();
+    assert_eq!(header.value, 2);
+    assert_eq!(&data[..8], &0u64.to_le_bytes());
+    assert_eq!(&data[8..], b"ab");
+    let release = frame(provider::OP_RELEASE, id, 0, 0, 0, &[]);
+    handle_provider_request(&mut descriptions, &release, 0, 0, &mut ram, &mut reply).unwrap();
+    assert_eq!(ram.references, 1);
+    assert_eq!(
+        handle_provider_request(
+            &mut descriptions,
+            &release,
+            IPC_DELIVERY_NATIVE_OBJECT,
+            0,
+            &mut ram,
+            &mut reply
+        ),
+        Ok(None)
+    );
+    assert_eq!(ram.references, 0);
+}
+
+#[test]
+fn provider_seek_positioned_io_and_unsupported_requests_have_valid_responses() {
+    use mnu_abi::{IPC_DELIVERY_NATIVE_OBJECT, provider};
+    use posix_service::shared_memory_file::handle_provider_request;
+    let mut descriptions = Descriptions::new();
+    let mut ram = Ram::default();
+    let id = descriptions.open(1, true, &mut ram).unwrap();
+    let mut reply = [0; provider::RESPONSE_HEADER_LEN + provider::MAX_DATA_LEN];
+    for (request, expected_value, expected_data, expected_status) in [
+        (
+            frame(provider::OP_WRITE_AT, id, 2, 0, 2, b"xy"),
+            2,
+            &b""[..],
+            0,
+        ),
+        (
+            frame(provider::OP_READ_AT, id, 1, 0, 3, &[]),
+            3,
+            &b"\0xy"[..],
+            0,
+        ),
+        (
+            frame(provider::OP_SEEK, id, HANDLE_SEEK_END, -1, 0, &[]),
+            3,
+            &b""[..],
+            0,
+        ),
+        (frame(provider::OP_READ, id, 0, 0, 2, &[]), 1, &b"y"[..], 0),
+        (frame(provider::OP_SYNC, id, 0, 0, 0, &[]), 0, &b""[..], 0),
+        (
+            frame(provider::OP_MEMORY_OBJECT, id, 0, 0, 0, &[]),
+            0,
+            &b""[..],
+            -95,
+        ),
+        (
+            frame(provider::OP_READ, id + 1, 0, 0, 0, &[]),
+            0,
+            &b""[..],
+            -9,
+        ),
+    ] {
+        let length = handle_provider_request(
+            &mut descriptions,
+            &request,
+            IPC_DELIVERY_NATIVE_OBJECT,
+            0,
+            &mut ram,
+            &mut reply,
+        )
+        .unwrap()
+        .unwrap();
+        let (header, data) = provider::ResponseHeader::decode(&reply[..length]).unwrap();
+        assert_eq!(
+            (header.value, data, header.status),
+            (expected_value, expected_data, expected_status)
+        );
+    }
+    let mut invalid = frame(provider::OP_WRITE, id, 0, 0, 1, b"z");
+    invalid[40] = 1;
+    assert_eq!(
+        handle_provider_request(
+            &mut descriptions,
+            &invalid,
+            IPC_DELIVERY_NATIVE_OBJECT,
+            0,
+            &mut ram,
+            &mut reply
+        ),
+        Err(-22)
+    );
+    assert_eq!(ram.bytes, b"\0\0xy");
+}

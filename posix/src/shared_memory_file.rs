@@ -212,3 +212,99 @@ impl<H: Copy> Descriptions<H> {
         Ok(entry.cursor)
     }
 }
+
+/// Dispatch generic Provider frames. The caller must pass delivery metadata
+/// obtained from native IPC, never flags supplied in the request payload, and
+/// close any received attachments itself. RAM mapping uses separately attached
+/// backing Handles; it must not construct a second Provider pager/cache.
+pub fn handle_provider_request<H: Copy, B: Backing<H>>(
+    descriptions: &mut Descriptions<H>,
+    request: &[u8],
+    delivery_flags: u32,
+    attachment_count: u32,
+    backend: &mut B,
+    response: &mut [u8],
+) -> Result<Option<usize>, i32> {
+    use mnu_abi::provider;
+    let (header, payload) = provider::RequestHeader::decode(request).map_err(|_| -22)?;
+    let authenticated = delivery_flags == mnu_abi::IPC_DELIVERY_NATIVE_OBJECT;
+    if authenticated && attachment_count == 0 && header.opcode == provider::OP_RELEASE {
+        descriptions.release(header.object_id, backend)?;
+        return Ok(None);
+    }
+    let maximum_data = if !authenticated || attachment_count != 0 {
+        0
+    } else {
+        match header.opcode {
+            provider::OP_READ | provider::OP_READ_AT => header.length as usize,
+            provider::OP_READ_WITH_POSITION => header.length as usize + provider::READ_POSITION_LEN,
+            _ => 0,
+        }
+    };
+    // Validate reply capacity before changing position or backing contents.
+    if response.len() < provider::RESPONSE_HEADER_LEN + maximum_data {
+        return Err(-22);
+    }
+    let result: Result<(u64, Vec<u8>), i32> = if !authenticated {
+        Err(-13)
+    } else if attachment_count != 0 {
+        Err(-22)
+    } else {
+        match header.opcode {
+            provider::OP_READ | provider::OP_READ_WITH_POSITION => {
+                let mut data = vec![0; header.length as usize];
+                descriptions
+                    .read(header.object_id, &mut data, backend)
+                    .map(|(position, read)| {
+                        data.truncate(read);
+                        if header.opcode == provider::OP_READ_WITH_POSITION {
+                            let mut positioned =
+                                Vec::with_capacity(provider::READ_POSITION_LEN + read);
+                            positioned.extend_from_slice(&position.to_le_bytes());
+                            positioned.extend_from_slice(&data);
+                            data = positioned;
+                        }
+                        (read as u64, data)
+                    })
+            }
+            provider::OP_READ_AT => {
+                let mut data = vec![0; header.length as usize];
+                descriptions
+                    .read_at(header.object_id, header.basis, &mut data, backend)
+                    .map(|read| {
+                        data.truncate(read);
+                        (read as u64, data)
+                    })
+            }
+            provider::OP_WRITE => descriptions
+                .write(header.object_id, payload, backend)
+                .map(|written| (written as u64, Vec::new())),
+            provider::OP_WRITE_AT => descriptions
+                .write_at(header.object_id, header.basis, payload, backend)
+                .map(|written| (written as u64, Vec::new())),
+            provider::OP_SEEK => descriptions
+                .seek(header.object_id, header.argument, header.basis, backend)
+                .map(|position| (position, Vec::new())),
+            provider::OP_SYNC => descriptions
+                .length(header.object_id, backend)
+                .map(|_| (0, Vec::new())),
+            // Control, attached-buffer reads and mapping delegation require
+            // their own validated handlers; never pretend they succeeded.
+            _ => Err(-95),
+        }
+    };
+    let (status, value, data) = match result {
+        Ok((value, data)) => (0, value, data),
+        Err(errno) => (i64::from(errno), 0, Vec::new()),
+    };
+    provider::ResponseHeader {
+        opcode: header.opcode,
+        status,
+        object_id: header.object_id,
+        value,
+        data_length: data.len() as u32,
+    }
+    .encode(&data, response)
+    .map(Some)
+    .map_err(|_| -5)
+}
