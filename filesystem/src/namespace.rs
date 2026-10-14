@@ -317,6 +317,18 @@ impl Namespace {
         follow_final: bool,
         credentials: Credentials<'_>,
     ) -> Result<Resolution<Node>, i32> {
+        self.resolve_visible(root, base, path, follow_final, credentials, |_, _, _| true)
+    }
+
+    pub(crate) fn resolve_visible(
+        &self,
+        root: Node,
+        base: Node,
+        path: &[u8],
+        follow_final: bool,
+        credentials: Credentials<'_>,
+        visible: impl FnMut(&Node, &[u8], &Node) -> bool,
+    ) -> Result<Resolution<Node>, i32> {
         self.validate(&root)?;
         self.validate(&base)?;
         let root = self.refresh(root)?;
@@ -324,7 +336,7 @@ impl Namespace {
         if !self.is_directory(&root) || !self.is_directory(&base) {
             return Err(ENOTDIR);
         }
-        path_walk::resolve(self, root, base, path, follow_final, credentials)
+        path_walk::resolve_visible(self, root, base, path, follow_final, credentials, visible)
     }
 
     /// Reconstruct a retained directory's current namespace path, including
@@ -359,7 +371,6 @@ impl Namespace {
                     let bytes = file_name.as_ref();
                     if bytes != b"."
                         && bytes != b".."
-                        && !bytes.starts_with(b".mochios-orphan-")
                         && entry.inode == entry_node.inode()?.index
                         && parent.volume == entry_node.volume
                     {

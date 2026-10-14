@@ -1101,11 +1101,6 @@ impl FilesystemService {
                 let entry = entry.map_err(errno)?;
                 if entry.file_name() != "."
                     && entry.file_name() != ".."
-                    && !entry
-                        .file_name()
-                        .as_str()
-                        .map_err(|_| EIO)?
-                        .starts_with(".mochios-orphan-")
                     && entry.inode.get() == current.index.get()
                 {
                     name = Some(entry.file_name().as_str().map_err(|_| EIO)?.to_owned());
@@ -1283,6 +1278,23 @@ impl FilesystemService {
         Ok((resolution, filesystem, volume))
     }
 
+    // Only the exact retained link is private. User-created names and other
+    // hard links to the same inode remain ordinary namespace entries.
+    pub(super) fn is_private_entry(
+        &self,
+        parent: crate::namespace::NodeId,
+        name: &[u8],
+        target: crate::namespace::NodeId,
+    ) -> bool {
+        if parent.volume != target.volume {
+            return false;
+        }
+        let node_id = (target.volume << 32) | u64::from(target.inode);
+        self.orphans.get(&node_id).is_some_and(|orphan| {
+            orphan.parent.index.get() == parent.inode && orphan.name.as_bytes() == name
+        })
+    }
+
     fn resolve_path_at(
         &self,
         root: Inode,
@@ -1293,13 +1305,26 @@ impl FilesystemService {
         gid: u32,
         groups: &[u32],
     ) -> Result<Resolution, i32> {
-        path_walk::resolve(
+        path_walk::resolve_visible(
             self,
             root,
             base,
             path,
             follow == FollowSymlinks::All,
             path_walk::Credentials { uid, gid, groups },
+            |parent, name, child| {
+                !self.is_private_entry(
+                    crate::namespace::NodeId {
+                        volume: 0,
+                        inode: parent.index.get(),
+                    },
+                    name,
+                    crate::namespace::NodeId {
+                        volume: 0,
+                        inode: child.index.get(),
+                    },
+                )
+            },
         )
     }
 
@@ -1766,6 +1791,10 @@ impl FilesystemService {
         let start_entry = usize::try_from(start_entry).map_err(|_| EINVAL)?;
         let mut payload = Vec::new();
         let mut next_entry = start_entry;
+        let parent = self
+            .fs
+            .path_to_inode(path.as_str().try_into().map_err(|_| EINVAL)?, FollowSymlinks::All)
+            .map_err(errno)?;
         for entry in self
             .fs
             .read_dir(path.as_str())
@@ -1774,7 +1803,17 @@ impl FilesystemService {
         {
             let entry = entry.map_err(errno)?;
             let name = entry.file_name().as_str().map_err(|_| EIO)?;
-            if name.starts_with(".mochios-orphan-") {
+            if self.is_private_entry(
+                crate::namespace::NodeId {
+                    volume: 0,
+                    inode: parent.index.get(),
+                },
+                name.as_bytes(),
+                crate::namespace::NodeId {
+                    volume: 0,
+                    inode: entry.inode.get(),
+                },
+            ) {
                 next_entry = next_entry.checked_add(1).ok_or(EIO)?;
                 continue;
             }
@@ -1815,6 +1854,10 @@ impl FilesystemService {
             .as_ref()
             .map(|namespace| namespace.retained_node(volume, inode.clone()))
             .transpose()?;
+        let parent_id = crate::namespace::NodeId {
+            volume: u64::from(volume),
+            inode: inode.index.get(),
+        };
         let directory = Dir::open_inode(filesystem, inode).map_err(errno)?;
         let physical =
             directory
@@ -1823,7 +1866,14 @@ impl FilesystemService {
                 .map(|entry| -> Result<(u64, u32, Vec<u8>), i32> {
                     let entry = entry.map_err(errno)?;
                     let name = entry.file_name().as_ref().to_vec();
-                    if name.starts_with(b".mochios-orphan-") {
+                    if self.is_private_entry(
+                        parent_id,
+                        &name,
+                        crate::namespace::NodeId {
+                            volume: u64::from(volume),
+                            inode: entry.inode.get(),
+                        },
+                    ) {
                         return Ok((0, 0, name));
                     }
                     let node_id = if let (Some(namespace), Some(node)) = (&self.namespace, &node) {
@@ -1850,7 +1900,7 @@ impl FilesystemService {
         let mut next_entry = start_entry;
         for entry in physical.chain(named).skip(start_entry) {
             let (node_id, kind, name) = entry?;
-            if name.starts_with(b".mochios-orphan-") {
+            if node_id == 0 {
                 next_entry = next_entry.checked_add(1).ok_or(EIO)?;
                 continue;
             }

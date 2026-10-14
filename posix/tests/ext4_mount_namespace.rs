@@ -1415,6 +1415,198 @@ fn retained_socket_inode_survives_unlink_and_cannot_alias_a_recreated_name() {
     assert_eq!(protocol::decode_node_status(&next_status.payload).unwrap(), next);
 }
 
+#[test]
+fn private_retention_entries_are_inaccessible_but_prefixed_user_names_remain_visible() {
+    for mounted in [false, true] {
+        let fixture = Fixture::new();
+        let mut service = FilesystemService::new(fixture.volume("private-entry"));
+        let prefix = if mounted {
+            service
+                .mount_named_volume(b"/", b"system", fixture.volume("private-mounted"), b"/")
+                .unwrap();
+            "/system"
+        } else {
+            ""
+        };
+        let path = format!("{prefix}/socket");
+        let response = service
+            .create_socket_at_retained(
+                protocol::Header {
+                    mode: 0o600,
+                    ..Default::default()
+                },
+                path.as_bytes(),
+                PathAnchors::default(),
+                root_credentials(),
+            )
+            .unwrap();
+        service
+            .unlink_at(
+                protocol::Header::default(),
+                path.as_bytes(),
+                PathAnchors::default(),
+                root_credentials(),
+            )
+            .unwrap();
+        let private_name = format!(".mochios-orphan-{}", response.header.node_id);
+        let private_path = format!("{prefix}/{private_name}");
+        assert!(matches!(
+            service.stat_at(
+                protocol::Header::default(),
+                private_path.as_bytes(),
+                PathAnchors::default(),
+                root_credentials()
+            ),
+            Err(2)
+        ));
+        assert!(matches!(
+            service.open_at(
+                protocol::Header {
+                    flags: protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+                    mode: 0o600,
+                    ..Default::default()
+                },
+                private_path.as_bytes(),
+                PathAnchors::default(),
+                root_credentials(),
+            ),
+            Err(2)
+        ));
+        assert!(matches!(
+            service.unlink_at(
+                protocol::Header::default(),
+                private_path.as_bytes(),
+                PathAnchors::default(),
+                root_credentials()
+            ),
+            Err(2)
+        ));
+        let link_path = format!("{prefix}/private-link");
+        let mut link_payload = private_path.as_bytes().to_vec();
+        link_payload.extend_from_slice(link_path.as_bytes());
+        service
+            .symlink_at(
+                protocol::Header {
+                    mode: private_path.len() as u32,
+                    ..Default::default()
+                },
+                &link_payload,
+                PathAnchors::default(),
+                root_credentials(),
+            )
+            .unwrap();
+        assert!(matches!(
+            service.stat_at(
+                protocol::Header::default(),
+                link_path.as_bytes(),
+                PathAnchors::default(),
+                root_credentials()
+            ),
+            Err(2)
+        ));
+        assert_eq!(
+            protocol::decode_node_status(
+                &service
+                    .stat_at(
+                        protocol::Header {
+                            flags: protocol::STAT_AT_NOFOLLOW,
+                            ..Default::default()
+                        },
+                        link_path.as_bytes(),
+                        PathAnchors::default(),
+                        root_credentials(),
+                    )
+                    .unwrap()
+                    .payload
+            )
+            .unwrap()
+            .kind,
+            protocol::NODE_TYPE_SYMLINK
+        );
+        let user_path = format!("{prefix}/.mochios-orphan-user");
+        let user = open(
+            &mut service,
+            user_path.as_bytes(),
+            protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+            PathAnchors::default(),
+        );
+        let user_dir_path = format!("{prefix}/.mochios-orphan-directory");
+        service
+            .mkdir_at(
+                protocol::Header {
+                    mode: 0o755,
+                    ..Default::default()
+                },
+                user_dir_path.as_bytes(),
+                PathAnchors::default(),
+                root_credentials(),
+            )
+            .unwrap();
+        let user_dir = open(
+            &mut service,
+            user_dir_path.as_bytes(),
+            protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+            PathAnchors::default(),
+        );
+        let root = open(
+            &mut service,
+            b"/",
+            protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+            PathAnchors::default(),
+        );
+        assert_eq!(
+            service
+                .path_handle(protocol::Header::default(), root.open_id, user_dir.open_id)
+                .unwrap()
+                .payload,
+            user_dir_path.as_bytes()
+        );
+        let directory_path = if prefix.is_empty() { "/" } else { prefix };
+        let directory = open(
+            &mut service,
+            directory_path.as_bytes(),
+            protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+            PathAnchors::default(),
+        );
+        let payload = service.provider_read(directory.open_id, 4096).unwrap();
+        let mut remaining = payload.as_slice();
+        let mut names = Vec::new();
+        while !remaining.is_empty() {
+            let (_, name, length) = protocol::decode_dir_entry(remaining).unwrap();
+            names.push(name.to_vec());
+            remaining = &remaining[length..];
+        }
+        assert!(names.iter().any(|name| name == b".mochios-orphan-user"));
+        assert!(names
+            .iter()
+            .any(|name| name == b".mochios-orphan-directory"));
+        assert!(!names.iter().any(|name| name == private_name.as_bytes()));
+        assert_eq!(
+            protocol::decode_node_status(
+                &service
+                    .stat_handle(protocol::Header::default(), response.header.open_id)
+                    .unwrap()
+                    .payload
+            )
+            .unwrap()
+            .link_count,
+            0
+        );
+        service.provider_close(response.header.open_id).unwrap();
+        let reused = open(
+            &mut service,
+            private_path.as_bytes(),
+            protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+            PathAnchors::default(),
+        );
+        service.provider_close(reused.open_id).unwrap();
+        service.provider_close(user.open_id).unwrap();
+        service.provider_close(directory.open_id).unwrap();
+        service.provider_close(user_dir.open_id).unwrap();
+        service.provider_close(root.open_id).unwrap();
+    }
+}
+
 fn open(
     service: &mut FilesystemService,
     path: &[u8],

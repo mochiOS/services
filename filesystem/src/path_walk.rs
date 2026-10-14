@@ -50,6 +50,27 @@ pub fn resolve<B: Backend>(
     follow_final: bool,
     credentials: Credentials<'_>,
 ) -> Result<Resolution<B::Node>, i32> {
+    resolve_visible(
+        backend,
+        root,
+        base,
+        path,
+        follow_final,
+        credentials,
+        |_, _, _| true,
+    )
+}
+
+/// Reject private entries before following symlinks or returning a create target.
+pub fn resolve_visible<B: Backend>(
+    backend: &B,
+    root: B::Node,
+    base: B::Node,
+    path: &[u8],
+    follow_final: bool,
+    credentials: Credentials<'_>,
+    mut visible: impl FnMut(&B::Node, &[u8], &B::Node) -> bool,
+) -> Result<Resolution<B::Node>, i32> {
     if path.is_empty() || path.len() > MAX_PATH_LEN || path.contains(&0) {
         return Err(EINVAL);
     }
@@ -100,6 +121,9 @@ pub fn resolve<B: Backend>(
                     }
                     Err(error) => return Err(error),
                 };
+                if !visible(current, &name, &child) {
+                    return Err(ENOENT);
+                }
                 if backend.is_symlink(&child) && (follow_final || !pending.is_empty()) {
                     last_name = None;
                     symlinks += 1;

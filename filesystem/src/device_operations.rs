@@ -110,12 +110,13 @@ impl FilesystemService {
             }
         };
         namespace
-            .resolve(
+            .resolve_visible(
                 root,
                 base,
                 path,
                 follow == FollowSymlinks::All,
                 path_walk::Credentials { uid, gid, groups },
+                |parent, name, child| !self.is_private_entry(parent.id(), name, child.id()),
             )
             .map(Some)
     }
