@@ -5,6 +5,12 @@
 extern crate libc;
 use libc::*;
 
+const _: unsafe extern "C" fn(
+    Option<unsafe extern "C" fn()>,
+    Option<unsafe extern "C" fn()>,
+    Option<unsafe extern "C" fn()>,
+) -> c_int = libc::pthread_atfork;
+
 const _: [(); 2] = [(); core::mem::size_of::<sa_family_t>()];
 const _: [(); 4] = [(); core::mem::size_of::<socklen_t>()];
 const _: [(); 16] = [(); core::mem::size_of::<sockaddr>()];
