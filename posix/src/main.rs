@@ -20,6 +20,9 @@ mod socket_path_native;
 mod socket_accept_native;
 
 #[cfg(target_os = "mochios")]
+mod socket_connect_native;
+
+#[cfg(target_os = "mochios")]
 const PTY_SYNC_MAGIC: [u8; 4] = *b"PTYS";
 
 #[cfg(target_os = "mochios")]
@@ -294,10 +297,28 @@ fn main() {
         {
             if matches!(
                 header.opcode,
-                protocol::OP_SOCKET_CREATE | protocol::OP_SOCKET_PAIR | protocol::OP_SOCKET_ACCEPT
+                protocol::OP_SOCKET_CREATE
+                    | protocol::OP_SOCKET_PAIR
+                    | protocol::OP_SOCKET_ACCEPT
+                    | protocol::OP_SOCKET_CONNECT
             ) {
                 let result = if header.flags != 0 || header.status != 0 {
                     Err(-22)
+                } else if header.opcode == protocol::OP_SOCKET_CONNECT {
+                    if attachments.len() != 1 {
+                        Err(-22)
+                    } else {
+                        protocol::socket::Address::decode(payload)
+                            .map_err(|_| -22)
+                            .and_then(|address| {
+                                socket_connect_native::connect(
+                                    socket_endpoint,
+                                    peer.process_id,
+                                    attachments[0],
+                                    address,
+                                )
+                            })
+                    }
                 } else if header.opcode == protocol::OP_SOCKET_ACCEPT {
                     if attachments.len() != 1 {
                         Err(-22)
@@ -363,7 +384,10 @@ fn main() {
             (Some(_), Some((header, _)), true)
                 if matches!(
                     header.opcode,
-                    protocol::OP_SOCKET_CREATE | protocol::OP_SOCKET_PAIR | protocol::OP_SOCKET_ACCEPT
+                    protocol::OP_SOCKET_CREATE
+                        | protocol::OP_SOCKET_PAIR
+                        | protocol::OP_SOCKET_ACCEPT
+                        | protocol::OP_SOCKET_CONNECT
                 ) => {
                 opened_socket
             }

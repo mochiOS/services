@@ -11,7 +11,7 @@ use posix_service::{
 };
 use std::sync::{Arc, Mutex};
 
-struct Snapshot {
+pub(super) struct Snapshot {
     endpoint: u32,
     root: u32,
     cwd: Option<u32>,
@@ -36,10 +36,19 @@ fn snapshot(
 ) -> Result<Snapshot, i32> {
     let identity =
         platform::ipc::endpoint_execution_identity(sender).map_err(|e| e.raw() as i32)?;
+    snapshot_process(state, identity.process_id, path)
+}
+
+/// Process identity here must come only from the authenticated dispatcher.
+pub(super) fn snapshot_process(
+    state: &Arc<Mutex<PosixService<u32>>>,
+    process_id: u64,
+    path: &[u8],
+) -> Result<Snapshot, i32> {
     let endpoint =
         platform::handle::inherited(fs::CONTROL_HANDLE_KEY).map_err(|e| e.raw() as i32)?;
     let state = state.lock().map_err(|_| -5)?;
-    let peer = state.registered_peer(identity.process_id).ok_or(-1)?;
+    let peer = state.registered_peer(process_id).ok_or(-1)?;
     let session = state.session(peer.process_id).ok_or(-1)?;
     let dirs = state.session_directories(peer.process_id).ok_or(-9)?;
     let groups = state.supplementary_groups(peer.process_id).unwrap_or(&[]);

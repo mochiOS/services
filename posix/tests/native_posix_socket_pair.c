@@ -27,6 +27,92 @@
   } while (0)
 static int blocking_fd;
 static int accept_started;
+static int connect_started;
+static int connect_fd;
+static struct sockaddr_un connect_address;
+static socklen_t connect_size;
+static void *waiting_connector(void *unused) {
+  (void)unused;
+  __atomic_store_n(&connect_started, 1, __ATOMIC_RELEASE);
+  return (void *)(intptr_t)(connect(connect_fd,
+                                    (struct sockaddr *)&connect_address,
+                                    connect_size) == 0
+                                ? 1
+                                : 2);
+}
+
+static int verify_connections(int listener, struct sockaddr_un *address,
+                              socklen_t size) {
+  CHECK(listen(listener, 1) == 0);
+  int first = socket(AF_UNIX, SOCK_STREAM, 0);
+  int second = socket(AF_UNIX, SOCK_STREAM, 0);
+  CHECK(first >= 0 && second >= 0);
+  CHECK(connect(-1, (struct sockaddr *)address, size) == -1 && errno == EBADF);
+  CHECK(connect(first, NULL, size) == -1 && errno == EFAULT);
+  CHECK(connect(first, (struct sockaddr *)address, size) == 0);
+  CHECK(connect(first, (struct sockaddr *)address, size) == -1 &&
+        errno == EISCONN);
+  struct pollfd ready = {.fd = listener, .events = POLLIN};
+  CHECK(poll(&ready, 1, 0) == 1 && ready.revents == POLLIN);
+  CHECK(write(first, "before", 6) == 6);
+  CHECK(fcntl(second, F_SETFL, O_NONBLOCK) == 0);
+  CHECK(connect(second, (struct sockaddr *)address, size) == -1 &&
+        errno == EAGAIN);
+  CHECK(fcntl(second, F_SETFL, 0) == 0);
+  connect_fd = second;
+  connect_address = *address;
+  connect_size = size;
+  __atomic_store_n(&connect_started, 0, __ATOMIC_RELEASE);
+  pthread_t worker;
+  CHECK(pthread_create(&worker, NULL, waiting_connector, NULL) == 0);
+  while (!__atomic_load_n(&connect_started, __ATOMIC_ACQUIRE))
+    sched_yield();
+  for (unsigned i = 0; i < 100; ++i)
+    sched_yield();
+  void *result;
+  CHECK(pthread_cancel(worker) == 0);
+  CHECK(pthread_join(worker, &result) == 0 && result == PTHREAD_CANCELED);
+  // A cancelled attempt must not connect when backlog space becomes free.
+  struct sockaddr_un peer;
+  socklen_t length = sizeof(peer);
+  int accepted = accept4(listener, (struct sockaddr *)&peer, &length,
+                         SOCK_NONBLOCK | SOCK_CLOEXEC);
+  CHECK(accepted >= 0 && length == 2 && peer.sun_family == AF_UNIX);
+  CHECK((fcntl(accepted, F_GETFL, 0) & O_NONBLOCK) != 0);
+  CHECK((fcntl(accepted, F_GETFD, 0) & FD_CLOEXEC) != 0);
+  char data[8];
+  CHECK(read(accepted, data, sizeof(data)) == 6 && !memcmp(data, "before", 6));
+  CHECK(write(accepted, "reply", 5) == 5);
+  CHECK(read(first, data, sizeof(data)) == 5 && !memcmp(data, "reply", 5));
+  length = sizeof(peer);
+  CHECK(getpeername(first, (struct sockaddr *)&peer, &length) == 0 &&
+        length == size && !strcmp(peer.sun_path, address->sun_path));
+  CHECK(getpeername(second, (struct sockaddr *)&peer, &length) == -1 &&
+        errno == ENOTCONN);
+  CHECK(connect(second, (struct sockaddr *)address, size) == 0);
+  int third = socket(AF_UNIX, SOCK_STREAM, 0);
+  CHECK(third >= 0);
+  connect_fd = third;
+  __atomic_store_n(&connect_started, 0, __ATOMIC_RELEASE);
+  CHECK(pthread_create(&worker, NULL, waiting_connector, NULL) == 0);
+  while (!__atomic_load_n(&connect_started, __ATOMIC_ACQUIRE))
+    sched_yield();
+  for (unsigned i = 0; i < 100; ++i)
+    sched_yield();
+  int accepted_second = accept(listener, NULL, NULL);
+  CHECK(accepted_second >= 0);
+  CHECK(pthread_join(worker, &result) == 0 && result == (void *)1);
+  int accepted_third = accept(listener, NULL, NULL);
+  CHECK(accepted_third >= 0 &&
+        (fcntl(accepted_third, F_GETFL, 0) & O_NONBLOCK) == 0);
+  CHECK(write(third, "last", 4) == 4 &&
+        read(accepted_third, data, sizeof(data)) == 4);
+  CHECK(close(first) == 0 && close(second) == 0 && close(third) == 0);
+  CHECK(close(accepted) == 0 && close(accepted_second) == 0 &&
+        close(accepted_third) == 0);
+  puts("posix-socket-connect-accept: PASS");
+  return 0;
+}
 static void *empty_acceptor(void *argument) {
   __atomic_store_n(&accept_started, 1, __ATOMIC_RELEASE);
   int fd = accept((int)(intptr_t)argument, NULL, NULL);
@@ -75,6 +161,7 @@ static int verify_path_binding(void) {
   int reused_free = dup(b);
   CHECK(reused_free == expected_free && close(reused_free) == 0);
   puts("posix-socket-accept-empty: PASS");
+  CHECK(verify_connections(a, &address, size) == 0);
   CHECK(bind(a, (struct sockaddr *)&address, size) == -1 && errno == EINVAL);
   CHECK(bind(b, (struct sockaddr *)&address, size) == -1 &&
         errno == EADDRINUSE);

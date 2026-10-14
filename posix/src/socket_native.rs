@@ -99,13 +99,21 @@ pub fn create(
     result
 }
 
-fn signal(streams: &Streams, ids: impl IntoIterator<Item = u64>) {
+pub(super) fn signal(
+    streams: &Streams,
+    jobs: &posix_service::socket_connect::Connections<u32>,
+    ids: impl IntoIterator<Item = u64>,
+) {
     const SIGNALS: u64 = mnu_abi::HANDLE_SIGNAL_READABLE
         | mnu_abi::HANDLE_SIGNAL_WRITABLE
         | mnu_abi::HANDLE_SIGNAL_PEER_CLOSED;
     for id in ids {
         if let Ok(ready) = streams.readiness(id) {
-            let set = native_signals(ready);
+            let set = if jobs.is_pending(id) {
+                0
+            } else {
+                native_signals(ready)
+            };
             if let Err(error) = platform::handle::signal_provider_object(id, set, SIGNALS & !set) {
                 // A final close can race notification; no remaining observer.
                 if error.raw() != -9 {
@@ -123,6 +131,7 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
     use mnu_abi::provider;
     let mut streams = Streams::new();
     let mut bindings = posix_service::socket_binding::Bindings::new();
+    let mut jobs = posix_service::socket_connect::Connections::new();
     let mut request = vec![0; provider::REQUEST_HEADER_LEN + provider::MAX_DATA_LEN];
     let mut response = vec![0; provider::RESPONSE_HEADER_LEN + provider::MAX_DATA_LEN];
     loop {
@@ -140,7 +149,21 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
         };
         let sender = message >> 32;
         let bytes = &request[..(message as u32 as usize).min(request.len())];
-        if bytes.starts_with(super::socket_accept_native::MAGIC) {
+        if bytes.starts_with(super::socket_connect_native::MAGIC) {
+            if let Some(ids) = super::socket_connect_native::dispatch(
+                endpoint,
+                service_process,
+                &service,
+                &mut streams,
+                &bindings,
+                &mut jobs,
+                sender,
+                bytes,
+                &attachments,
+            ) {
+                signal(&streams, &jobs, ids);
+            }
+        } else if bytes.starts_with(super::socket_accept_native::MAGIC) {
             if let Some(ids) = super::socket_accept_native::dispatch(
                 endpoint,
                 service_process,
@@ -150,7 +173,7 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                 bytes,
                 &attachments,
             ) {
-                signal(&streams, ids);
+                signal(&streams, &jobs, ids);
             }
         } else if bytes.starts_with(CREATE_MAGIC) || bytes.starts_with(CREATE_SINGLE_MAGIC) {
             let pair = bytes.starts_with(CREATE_MAGIC);
@@ -198,7 +221,7 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                         }
                     }
                 }
-                signal(&streams, ids);
+                signal(&streams, &jobs, ids);
                 Ok(handles)
             })();
             match result {
@@ -234,6 +257,58 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                 .filter(|(header, _)| native && header.opcode == provider::OP_RELEASE)
                 .and_then(|(header, _)| streams.release_observers(header.object_id).ok());
             if let Some((header, payload)) = decoded {
+                if header.object_id & posix_service::socket_connect::JOB_OBJECT_TAG != 0 {
+                    let client = posix_service::socket_connect::job_id(header.object_id)
+                        .and_then(|id| jobs.client(id))
+                        .ok();
+                    match jobs.handle_provider_request(
+                        bytes,
+                        attachments.delivery_flags,
+                        attachments.count,
+                        &mut response,
+                        |handle| {
+                            let _ = platform::handle::close(handle);
+                        },
+                    ) {
+                        Ok(Some(length)) => {
+                            let _ = platform::ipc::reply(sender, &response[..length]);
+                        }
+                        Ok(None) => {
+                            if let Some(client) = client {
+                                signal(&streams, &jobs, [client]);
+                            }
+                        }
+                        Err(-9) if native && header.opcode == provider::OP_RELEASE => (),
+                        Err(error) => {
+                            platform::logln!("posix.service: connect job rejected errno={}", error)
+                        }
+                    }
+                    for attached in attachments.handles.iter().take(attachments.count as usize) {
+                        let _ = platform::handle::close(attached.handle);
+                    }
+                    super::socket_connect_native::pump(&mut streams, &bindings, &mut jobs);
+                    continue;
+                }
+                if native
+                    && jobs.is_pending(header.object_id)
+                    && header.opcode == provider::OP_CONTROL
+                    && header.basis == wire::CONTROL_READINESS
+                    && payload.is_empty()
+                    && header.length == 4
+                {
+                    if let Ok(length) = (provider::ResponseHeader {
+                        opcode: header.opcode,
+                        object_id: header.object_id,
+                        status: 0,
+                        value: 4,
+                        data_length: 4,
+                    })
+                    .encode(&[0; 4], &mut response)
+                    {
+                        let _ = platform::ipc::reply(sender, &response[..length]);
+                    }
+                    continue;
+                }
                 if native
                     && header.opcode == provider::OP_CONTROL
                     && (header.basis == wire::CONTROL_BIND
@@ -253,7 +328,7 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                         Ok(length) => {
                             if header.basis == wire::CONTROL_LISTEN {
                                 if let Ok(ids) = streams.affected(header.object_id) {
-                                    signal(&streams, ids);
+                                    signal(&streams, &jobs, ids);
                                 }
                             }
                             let _ = platform::ipc::reply(sender, &response[..length]);
@@ -263,6 +338,7 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                             error
                         ),
                     }
+                    super::socket_connect_native::pump(&mut streams, &bindings, &mut jobs);
                     continue;
                 }
                 if native && header.opcode == provider::OP_RELEASE {
@@ -282,10 +358,10 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                 &mut response,
             );
             if let Some(ids) = affected {
-                signal(&streams, ids);
+                signal(&streams, &jobs, ids);
             }
             if let Some(observers) = released_observers {
-                signal(&streams, observers.iter());
+                signal(&streams, &jobs, observers.iter());
             }
             match result {
                 Ok(Some(length)) => {
@@ -310,5 +386,6 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
         for attached in attachments.handles.iter().take(attachments.count as usize) {
             let _ = platform::handle::close(attached.handle);
         }
+        super::socket_connect_native::pump(&mut streams, &bindings, &mut jobs);
     }
 }
