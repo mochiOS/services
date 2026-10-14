@@ -99,7 +99,7 @@ pub fn create(
     result
 }
 
-fn signal(streams: &Streams, ids: [u64; 2]) {
+fn signal(streams: &Streams, ids: impl IntoIterator<Item = u64>) {
     const SIGNALS: u64 = mnu_abi::HANDLE_SIGNAL_READABLE
         | mnu_abi::HANDLE_SIGNAL_WRITABLE
         | mnu_abi::HANDLE_SIGNAL_PEER_CLOSED;
@@ -218,6 +218,9 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
             let decoded = provider::RequestHeader::decode(bytes).ok();
             let native = attachments.delivery_flags == mnu_abi::IPC_DELIVERY_NATIVE_OBJECT
                 && attachments.count == 0;
+            let released_observers = decoded
+                .filter(|(header, _)| native && header.opcode == provider::OP_RELEASE)
+                .and_then(|(header, _)| streams.release_observers(header.object_id).ok());
             if let Some((header, payload)) = decoded {
                 if native
                     && header.opcode == provider::OP_CONTROL
@@ -268,6 +271,9 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
             );
             if let Some(ids) = affected {
                 signal(&streams, ids);
+            }
+            if let Some(observers) = released_observers {
+                signal(&streams, observers.iter());
             }
             match result {
                 Ok(Some(length)) => {

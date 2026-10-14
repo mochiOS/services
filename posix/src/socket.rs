@@ -40,6 +40,31 @@ struct Endpoint {
     write_shutdown: bool,
     options: u32,
     listener: Option<Listener>,
+    pending_listener: Option<u64>,
+    accept_retry: Option<u64>,
+}
+
+/// Provider-owned accept transaction. Never serialize these IDs to a client.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AcceptTicket {
+    listener: u64,
+    endpoint: u64,
+    retry: u64,
+}
+impl AcceptTicket {
+    pub const fn endpoint(self) -> u64 {
+        self.endpoint
+    }
+}
+
+pub struct ReleaseObservers {
+    ids: [u64; MAX_BACKLOG + 2],
+    length: usize,
+}
+impl ReleaseObservers {
+    pub fn iter(&self) -> impl Iterator<Item = u64> + '_ {
+        self.ids[..self.length].iter().copied()
+    }
 }
 
 /// Serialize operations externally. Dup/fork alias an existing description;
@@ -104,6 +129,8 @@ impl Streams {
             write_shutdown: false,
             options: request.options,
             listener: None,
+            pending_listener: None,
+            accept_retry: None,
         });
         self.next += 1;
         Ok(id)
@@ -132,6 +159,8 @@ impl Streams {
                 write_shutdown: false,
                 options: request.options,
                 listener: None,
+                pending_listener: None,
+                accept_retry: None,
             });
         }
         self.next = next;
@@ -269,6 +298,159 @@ impl Streams {
         Ok(())
     }
 
+    /// Both description IDs must be resolved by the authenticated adapter. The
+    /// listener comes from a retained filesystem identity, not a client ID/path.
+    pub fn connect(&mut self, client: u64, listener: u64) -> Result<u64, i32> {
+        let source = self.endpoint(client)?;
+        if source.peer.is_some() {
+            return Err(-106);
+        }
+        if source.listener.is_some() || client == listener {
+            return Err(-22);
+        }
+        let target = self.endpoint(listener)?;
+        let queue = target.listener.as_ref().ok_or(-111)?;
+        if queue.pending.len() >= queue.backlog {
+            return Err(-11);
+        }
+        if self.entries.len() == MAX_ENDPOINTS || self.next > i64::MAX as u64 {
+            return Err(-23);
+        }
+        let credentials = target.credentials;
+        let client_index = self
+            .entries
+            .iter()
+            .position(|entry| entry.id == client)
+            .ok_or(-9)?;
+        let listener_index = self
+            .entries
+            .iter()
+            .position(|entry| entry.id == listener)
+            .ok_or(-9)?;
+        self.entries.try_reserve(1).map_err(|_| -12)?;
+        let id = self.next;
+        // listen() preallocated the bounded queue; no allocation or fallible
+        // operation follows publication of either half of this connection.
+        self.entries[listener_index]
+            .listener
+            .as_mut()
+            .ok_or(-111)?
+            .pending
+            .push_back(id);
+        self.entries.push(Endpoint {
+            id,
+            peer: Some(client),
+            credentials,
+            incoming: VecDeque::new(),
+            read_shutdown: false,
+            write_shutdown: false,
+            options: 0,
+            listener: None,
+            pending_listener: Some(listener),
+            accept_retry: None,
+        });
+        self.next += 1;
+        self.entries[client_index].peer = Some(id);
+        Ok(id)
+    }
+
+    /// Reserve a fresh retry identity before creating the native Provider. The
+    /// request stays queued until its Handle can be committed or rolled back.
+    pub fn begin_accept(&mut self, listener: u64) -> Result<AcceptTicket, i32> {
+        let endpoint = *self
+            .endpoint(listener)?
+            .listener
+            .as_ref()
+            .ok_or(-22)?
+            .pending
+            .front()
+            .ok_or(-11)?;
+        let queued = self.endpoint(endpoint)?;
+        if queued.pending_listener != Some(listener) {
+            return Err(-5);
+        }
+        if queued.accept_retry.is_some() {
+            return Err(-16);
+        }
+        if self.next > i64::MAX as u64 {
+            return Err(-23);
+        }
+        let retry = self.next;
+        self.next += 1;
+        self.endpoint_mut(endpoint)?.accept_retry = Some(retry);
+        Ok(AcceptTicket {
+            listener,
+            endpoint,
+            retry,
+        })
+    }
+
+    fn validate_accept(&self, ticket: AcceptTicket) -> Result<(), i32> {
+        let queued = self.endpoint(ticket.endpoint)?;
+        let queue = self
+            .endpoint(ticket.listener)?
+            .listener
+            .as_ref()
+            .ok_or(-22)?;
+        if queue.pending.front() != Some(&ticket.endpoint)
+            || queued.pending_listener != Some(ticket.listener)
+            || queued.accept_retry != Some(ticket.retry)
+        {
+            return Err(-22);
+        }
+        Ok(())
+    }
+
+    /// Commit only after native Handle creation. Credentials/options must come
+    /// from authenticated accept policy; NONBLOCK is not inherited from listen.
+    pub fn commit_accept(
+        &mut self,
+        ticket: AcceptTicket,
+        credentials: (u32, u32),
+        options: u32,
+    ) -> Result<u64, i32> {
+        if options & !NONBLOCKING != 0 {
+            return Err(-22);
+        }
+        self.validate_accept(ticket)?;
+        self.endpoint_mut(ticket.listener)?
+            .listener
+            .as_mut()
+            .ok_or(-22)?
+            .pending
+            .pop_front();
+        let accepted = self.endpoint_mut(ticket.endpoint)?;
+        accepted.pending_listener = None;
+        accepted.accept_retry = None;
+        accepted.credentials = credentials;
+        accepted.options = options;
+        Ok(ticket.endpoint)
+    }
+
+    /// Call before closing a failed temporary Provider Handle. Retire its ID
+    /// so a delayed native release cannot erase this still-queued connection.
+    pub fn abort_accept(&mut self, ticket: AcceptTicket) -> Result<u64, i32> {
+        self.validate_accept(ticket)?;
+        let queued = self.endpoint_mut(ticket.endpoint)?;
+        let peer = queued.peer;
+        queued.id = ticket.retry;
+        queued.accept_retry = None;
+        *self
+            .endpoint_mut(ticket.listener)?
+            .listener
+            .as_mut()
+            .ok_or(-22)?
+            .pending
+            .front_mut()
+            .ok_or(-11)? = ticket.retry;
+        if let Some(peer) = peer {
+            if let Ok(client) = self.endpoint_mut(peer) {
+                client.peer = Some(ticket.retry);
+            }
+        }
+        Ok(ticket.retry)
+    }
+
     pub fn listening_backlog(&self, id: u64) -> Result<Option<usize>, i32> {
         Ok(self
             .endpoint(id)?
@@ -312,13 +494,54 @@ impl Streams {
         })
     }
 
+    /// Snapshot before final release; queued clients also need readiness
+    /// notification when their unaccepted peer is destroyed with the listener.
+    /// Fixed storage avoids allocation failure on resource destruction.
+    pub fn release_observers(&self, id: u64) -> Result<ReleaseObservers, i32> {
+        let entry = self.endpoint(id)?;
+        let mut observers = ReleaseObservers {
+            ids: [0; MAX_BACKLOG + 2],
+            length: 1,
+        };
+        observers.ids[0] = id;
+        if let Some(peer) = entry.peer {
+            observers.ids[observers.length] = peer;
+            observers.length += 1;
+        }
+        if let Some(listener) = &entry.listener {
+            for pending in &listener.pending {
+                if let Ok(queued) = self.endpoint(*pending) {
+                    if let Some(peer) = queued.peer {
+                        observers.ids[observers.length] = peer;
+                        observers.length += 1;
+                    }
+                }
+            }
+        }
+        Ok(observers)
+    }
+
     pub fn release(&mut self, id: u64) -> Result<(), i32> {
         let index = self
             .entries
             .iter()
             .position(|entry| entry.id == id)
             .ok_or(-9)?;
-        self.entries.swap_remove(index);
+        let removed = self.entries.swap_remove(index);
+        if let Some(listener) = removed.listener {
+            for pending in listener.pending {
+                if let Some(index) = self.entries.iter().position(|entry| entry.id == pending) {
+                    self.entries.swap_remove(index);
+                }
+            }
+        }
+        if let Some(listener) = removed.pending_listener {
+            if let Ok(parent) = self.endpoint_mut(listener) {
+                if let Some(queue) = &mut parent.listener {
+                    queue.pending.retain(|pending| *pending != id);
+                }
+            }
+        }
         Ok(())
     }
 }
