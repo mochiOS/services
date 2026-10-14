@@ -64,7 +64,10 @@ static void *guarded_stack(size_t size, size_t page, size_t *mapping_size) {
     return mapping;
 }
 
-int main(int argc, char **argv) {
+#ifndef ALTSTACK_TEST_ENTRY
+#define ALTSTACK_TEST_ENTRY main
+#endif
+int ALTSTACK_TEST_ENTRY(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--after-exec")) {
         stack_t state;
         return sigaltstack(NULL, &state) == 0 && state.ss_flags == SS_DISABLE ? 37 : 97;
