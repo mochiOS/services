@@ -1,6 +1,7 @@
 #include <sys/socket.h>
 #include <stddef.h>
 #include <assert.h>
+#include <unistd.h>
 
 _Static_assert(sizeof(struct msghdr) == 56, "message size");
 _Static_assert(offsetof(struct msghdr, msg_iov) == 16, "vector offset");
@@ -44,5 +45,31 @@ int main(void) {
   message.msg_control = NULL;
   assert(CMSG_FIRSTHDR(&message) == NULL);
   assert(CMSG_NXTHDR(&message, first) == NULL);
+
+  /* Exercise these actual mochiOS declarations against the host ABI, not a
+     second handwritten layout. Every object is local to this test process. */
+  int sockets[2], channel[2];
+  assert(socketpair(AF_UNIX, SOCK_DGRAM, 0, sockets) == 0);
+  assert(pipe(channel) == 0);
+  char payload = 'x';
+  struct iovec vector = {&payload, 1};
+  message = (struct msghdr){NULL, 0, &vector, 1, data.bytes, CMSG_SPACE(sizeof(int)), 0};
+  first = CMSG_FIRSTHDR(&message);
+  first->cmsg_len = CMSG_LEN(sizeof(int));
+  first->cmsg_level = SOL_SOCKET;
+  first->cmsg_type = SCM_RIGHTS;
+  *(int *)CMSG_DATA(first) = channel[0];
+  assert(sendmsg(sockets[0], &message, 0) == 1);
+  assert(close(channel[0]) == 0);
+  payload = 0;
+  message.msg_controllen = sizeof(data.bytes);
+  assert(recvmsg(sockets[1], &message, MSG_CMSG_CLOEXEC) == 1 && payload == 'x');
+  first = CMSG_FIRSTHDR(&message);
+  assert(first && first->cmsg_len == CMSG_LEN(sizeof(int)));
+  int received = *(int *)CMSG_DATA(first);
+  assert(received >= 0 && write(channel[1], "q", 1) == 1);
+  assert(read(received, &payload, 1) == 1 && payload == 'q');
+  assert(close(received) == 0 && close(channel[1]) == 0);
+  assert(close(sockets[0]) == 0 && close(sockets[1]) == 0);
   return 0;
 }

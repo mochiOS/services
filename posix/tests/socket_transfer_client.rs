@@ -104,6 +104,221 @@ fn delivery_mock(offset: u16, count: u16) -> Mock {
     }
 }
 
+fn send_mock(operation: u8) -> Mock {
+    let mut mock = delivery_mock(0, 1);
+    mock.incoming.clear();
+    mock.bytes = 0i32.to_le_bytes().to_vec();
+    mock.result = Ok(4);
+    match operation {
+        1 => {
+            mock.request = wire::Request::Begin {
+                length: 8,
+                descriptors: 2,
+            };
+            mock.outgoing = vec![object(10, mnu_abi::HANDLE_RIGHT_WRITE)];
+            mock.incoming = vec![object(42, wire::RIGHTS)];
+        }
+        2 => {
+            mock.request = wire::Request::Append {
+                offset: 3,
+                count: 2,
+                metadata: [Some(metadata()), Some(metadata()), None],
+            };
+            mock.outgoing = vec![
+                object(42, mnu_abi::HANDLE_RIGHT_CONTROL),
+                object(10, mnu_abi::HANDLE_RIGHT_TRANSFER),
+                object(10, mnu_abi::HANDLE_RIGHT_TRANSFER),
+            ];
+            mock.bytes = 5i32.to_le_bytes().to_vec();
+        }
+        3 => {
+            mock.request = wire::Request::Commit { offset: 7 };
+            mock.outgoing = vec![
+                object(42, mnu_abi::HANDLE_RIGHT_CONTROL),
+                object(20, mnu_abi::HANDLE_RIGHT_READ | mnu_abi::HANDLE_RIGHT_MAP),
+            ];
+            mock.bytes = 8i32.to_le_bytes().to_vec();
+        }
+        _ => unreachable!(),
+    }
+    mock
+}
+
+fn send_call(mock: &Mock, operation: u8, close: impl FnMut(u32)) -> Result<(), ClientError<()>> {
+    match operation {
+        1 => socket_transfer::begin(mock, source(10), 8, 2, close).map(|job| {
+            assert_eq!(job, object(42, wire::RIGHTS));
+        }),
+        2 => {
+            let mut info = metadata();
+            info.descriptor_flags = 1;
+            let file = socket_transfer::SendFile {
+                object: object(10, mnu_abi::HANDLE_RIGHT_TRANSFER),
+                metadata: info,
+            };
+            socket_transfer::append(mock, source(42), 3, &[file, file], close)
+        }
+        3 => socket_transfer::commit(mock, source(42), source(20), 7, 8, close),
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn send_stages_borrowed_authority_strips_cloexec_and_keeps_duplicate_source_references() {
+    for operation in 1..=3 {
+        let mock = send_mock(operation);
+        send_call(&mock, operation, |_| {
+            panic!("borrowed source or successful result")
+        })
+        .unwrap();
+        assert_eq!(mock.calls.get(), 1);
+    }
+}
+
+#[test]
+fn invalid_begin_responses_release_only_distinct_new_references() {
+    for case in 0..10 {
+        let mut mock = send_mock(1);
+        match case {
+            0 => mock.incoming.clear(),
+            1 => mock.incoming[0].rights |= mnu_abi::HANDLE_RIGHT_READ,
+            2 => mock.incoming.push(mock.incoming[0]),
+            3 => mock.incoming[0].handle = 0,
+            4 => mock.incoming[0].handle = 10,
+            5 => mock.bytes = 1i32.to_le_bytes().to_vec(),
+            6 => mock.bytes = (-11i32).to_le_bytes().to_vec(),
+            7 => mock.result = Err(()),
+            8 => mock.result = Ok(3),
+            9 => mock.result = Ok(5),
+            _ => unreachable!(),
+        }
+        let mut closed = vec![];
+        assert!(send_call(&mock, 1, |handle| closed.push(handle)).is_err());
+        assert_eq!(
+            closed,
+            if matches!(case, 0 | 3 | 4) {
+                vec![]
+            } else {
+                vec![42]
+            }
+        );
+        assert_eq!(mock.calls.get(), 1);
+    }
+}
+
+#[test]
+fn append_and_commit_require_exact_progress_and_clean_unexpected_owned_results() {
+    for operation in 2..=3 {
+        for case in 0..8 {
+            let mut mock = send_mock(operation);
+            match case {
+                0 => mock.bytes = 0i32.to_le_bytes().to_vec(),
+                1 => mock.bytes = 99i32.to_le_bytes().to_vec(),
+                2 => mock.incoming = vec![source(70), source(70)],
+                3 => mock.incoming = vec![source(42)],
+                4 => {
+                    mock.incoming = vec![source(70)];
+                    mock.result = Err(());
+                }
+                5 => mock.result = Ok(3),
+                6 => mock.result = Ok(5),
+                7 => {
+                    mock.bytes = (-11i32).to_le_bytes().to_vec();
+                    mock.incoming = vec![source(70)];
+                }
+                _ => unreachable!(),
+            }
+            let mut closed = vec![];
+            assert!(send_call(&mock, operation, |handle| closed.push(handle)).is_err());
+            assert_eq!(
+                closed,
+                if matches!(case, 2 | 4 | 7) {
+                    vec![70]
+                } else {
+                    vec![]
+                }
+            );
+            assert_eq!(mock.calls.get(), 1);
+        }
+    }
+}
+
+#[test]
+fn explicit_remote_send_pressure_is_distinguishable_from_ambiguous_transport_failure() {
+    for operation in 1..=3 {
+        let mut mock = send_mock(operation);
+        mock.incoming.clear();
+        mock.bytes = (-11i32).to_le_bytes().to_vec();
+        assert_eq!(
+            send_call(&mock, operation, |_| panic!()),
+            Err(ClientError::Remote(-11))
+        );
+        mock.result = Err(());
+        assert_eq!(
+            send_call(&mock, operation, |_| panic!()),
+            Err(ClientError::Transport(()))
+        );
+        assert_eq!(mock.calls.get(), 2);
+    }
+}
+
+#[test]
+fn send_validates_lengths_ranges_and_all_attachment_authority_before_ipc() {
+    let mock = send_mock(1);
+    assert!(
+        socket_transfer::begin(
+            &mock,
+            object(10, mnu_abi::HANDLE_RIGHT_WRITE),
+            8,
+            2,
+            |_| panic!()
+        )
+        .is_err()
+    );
+    assert!(
+        socket_transfer::begin(
+            &mock,
+            source(10),
+            wire::MAX_PAYLOAD_LEN + 1,
+            2,
+            |_| panic!()
+        )
+        .is_err()
+    );
+    assert!(socket_transfer::begin(&mock, source(10), 8, 254, |_| panic!()).is_err());
+    let mut file = socket_transfer::SendFile {
+        object: source(10),
+        metadata: metadata(),
+    };
+    for files in [&[][..], &[file; 4][..]] {
+        assert!(socket_transfer::append(&mock, source(42), 0, files, |_| panic!()).is_err());
+    }
+    file.object.rights = mnu_abi::HANDLE_RIGHT_READ;
+    assert!(socket_transfer::append(&mock, source(42), 0, &[file], |_| panic!()).is_err());
+    file.object = source(42);
+    assert!(socket_transfer::append(&mock, source(42), 0, &[file], |_| panic!()).is_err());
+    file.object = source(10);
+    assert!(socket_transfer::append(&mock, source(42), 253, &[file], |_| panic!()).is_err());
+    file.metadata.kind = 255;
+    assert!(socket_transfer::append(&mock, source(42), 0, &[file], |_| panic!()).is_err());
+    assert!(socket_transfer::commit(&mock, source(42), source(42), 7, 8, |_| panic!()).is_err());
+    assert!(
+        socket_transfer::commit(&mock, source(42), source(20), u64::MAX, 8, |_| panic!()).is_err()
+    );
+    assert!(
+        socket_transfer::commit(
+            &mock,
+            source(42),
+            object(20, mnu_abi::HANDLE_RIGHT_READ),
+            7,
+            8,
+            |_| panic!()
+        )
+        .is_err()
+    );
+    assert_eq!(mock.calls.get(), 0);
+}
+
 #[test]
 fn consuming_receive_binds_capacity_and_returns_only_an_owned_receipt() {
     for (total, maximum) in [(0, 253), (253, 0), (253, 2), (253, 253)] {
