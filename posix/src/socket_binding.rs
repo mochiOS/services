@@ -16,6 +16,10 @@ pub trait Filesystem<H> {
         &mut self,
         path: &[u8],
     ) -> Result<(OpenedObject<H>, filesystem::NodeStatus), i32>;
+    fn open_socket(
+        &mut self,
+        path: &[u8],
+    ) -> Result<(OpenedObject<H>, filesystem::NodeStatus), i32>;
     /// Consumes one owned local reference, like FilesystemBackend::release_object.
     fn close(&mut self, handle: H);
 }
@@ -99,6 +103,51 @@ impl<H: Copy + Default + Eq> Bindings<H> {
             length: path.len(),
         });
         Ok(())
+    }
+
+    /// Authorize and retain the lookup result before matching an identity. The
+    /// temporary Handle is closed on every outcome, while the registered inode
+    /// stays pinned by its independent binding reference.
+    pub fn connect_path<B: Filesystem<H>>(
+        &self,
+        streams: &mut Streams,
+        client: u64,
+        path: &[u8],
+        backend: &mut B,
+    ) -> Result<(u64, u64), i32> {
+        streams.check_connect(client)?;
+        if path.is_empty() || path.len() > MAX_UNIX_NAME_BYTES || path.contains(&0) {
+            return Err(-22);
+        }
+        let (file, status) = backend
+            .open_socket(path)
+            .map_err(|error| if error == -88 { -111 } else { error })?;
+        let result = (|| {
+            if file.handle == H::default() || file.rights != NODE_RIGHTS || status.node_id == 0 {
+                return Err(-5);
+            }
+            if status.kind != filesystem::NODE_TYPE_SOCKET {
+                return Err(-111);
+            }
+            let identity = (status.device, status.node_id);
+            let listener = self
+                .records
+                .iter()
+                .find(|record| record.identity == identity)
+                .ok_or(-111)?;
+            let listener_path = &listener.name[..listener.length];
+            let accepted = streams.connect_named(
+                client,
+                listener.socket,
+                self.address(client),
+                listener_path,
+            )?;
+            Ok((listener.socket, accepted))
+        })();
+        if file.handle != H::default() {
+            backend.close(file.handle);
+        }
+        result
     }
 
     /// The original spelling is reported by getsockname, even after unlink or

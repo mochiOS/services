@@ -10,6 +10,7 @@ struct Backend {
     rights: u64,
     error: Option<i32>,
     calls: Vec<Vec<u8>>,
+    lookups: Vec<Vec<u8>>,
     closed: Vec<u32>,
 }
 impl Default for Backend {
@@ -25,6 +26,7 @@ impl Default for Backend {
             rights: NODE_RIGHTS,
             error: None,
             calls: Vec::new(),
+            lookups: Vec::new(),
             closed: Vec::new(),
         }
     }
@@ -32,6 +34,21 @@ impl Default for Backend {
 impl Filesystem<u32> for Backend {
     fn create_socket(&mut self, path: &[u8]) -> Result<(OpenedObject<u32>, fs::NodeStatus), i32> {
         self.calls.push(path.to_vec());
+        if let Some(error) = self.error {
+            return Err(error);
+        }
+        let handle = self.next;
+        self.next += 1;
+        Ok((
+            OpenedObject {
+                handle,
+                rights: self.rights,
+            },
+            self.status,
+        ))
+    }
+    fn open_socket(&mut self, path: &[u8]) -> Result<(OpenedObject<u32>, fs::NodeStatus), i32> {
+        self.lookups.push(path.to_vec());
         if let Some(error) = self.error {
             return Err(error);
         }
@@ -178,4 +195,130 @@ fn the_same_inode_cannot_be_registered_to_two_socket_descriptions() {
     assert_eq!(backend.closed, [41]);
     assert_eq!(bindings.retained_file(a), Some(40));
     bindings.release(a, &mut backend);
+}
+
+#[test]
+fn connection_matches_authorized_inode_not_the_lookup_spelling_and_closes_the_temporary_handle() {
+    let (mut streams, [listener, client], mut bindings, mut backend) = fixture();
+    bindings
+        .bind_path(&streams, listener, b"/server", &mut backend)
+        .unwrap();
+    streams.listen(listener, 1).unwrap();
+    backend.status.node_id = 11;
+    bindings
+        .bind_path(&streams, client, b"/client", &mut backend)
+        .unwrap();
+    backend.status.node_id = 10;
+    let (matched, accepted) = bindings
+        .connect_path(&mut streams, client, b"/hard-link-alias", &mut backend)
+        .unwrap();
+    assert_eq!(matched, listener);
+    assert_eq!(backend.closed, [42]);
+    assert_eq!(backend.lookups, [b"/hard-link-alias".to_vec()]);
+    let ticket = streams.begin_accept(listener).unwrap();
+    assert_eq!(ticket.endpoint(), accepted);
+    streams.commit_accept(ticket, (501, 20), 0).unwrap();
+    use mochios_posix_protocol::socket::Address;
+    assert_eq!(streams.address(client), Ok(Address::UnixPath(b"/client")));
+    assert_eq!(
+        streams.peer_address(client),
+        Ok(Address::UnixPath(b"/server"))
+    );
+    assert_eq!(streams.address(accepted), Ok(Address::UnixPath(b"/server")));
+    bindings.release(client, &mut backend);
+    streams.release(client).unwrap();
+    bindings.release(listener, &mut backend);
+    streams.release(listener).unwrap();
+    assert_eq!(
+        streams.peer_address(accepted),
+        Ok(Address::UnixPath(b"/client"))
+    );
+    assert_eq!(streams.address(accepted), Ok(Address::UnixPath(b"/server")));
+    assert_eq!(backend.closed, [42, 41, 40]);
+}
+
+#[test]
+fn stopped_or_missing_listeners_never_publish_connections_and_release_lookup_handles() {
+    for stopped in [false, true] {
+        let (mut streams, [listener, client], mut bindings, mut backend) = fixture();
+        bindings
+            .bind_path(&streams, listener, b"/server", &mut backend)
+            .unwrap();
+        if stopped {
+            streams.listen(listener, 1).unwrap();
+            bindings.release(listener, &mut backend);
+            streams.release(listener).unwrap();
+        }
+        assert_eq!(
+            bindings.connect_path(&mut streams, client, b"/server", &mut backend),
+            Err(-111)
+        );
+        assert_eq!(streams.write(client, b"x"), Err(-107));
+        assert_eq!(backend.closed.last(), Some(&41));
+        bindings.release(listener, &mut backend);
+    }
+}
+
+#[test]
+fn rejected_lookup_metadata_does_not_leak_handles_or_fill_the_listener_queue() {
+    for case in 0..5 {
+        let (mut streams, [listener, client], mut bindings, mut backend) = fixture();
+        bindings
+            .bind_path(&streams, listener, b"/server", &mut backend)
+            .unwrap();
+        streams.listen(listener, 1).unwrap();
+        let expected = match case {
+            0 => {
+                backend.rights |= mnu_abi::HANDLE_RIGHT_READ;
+                -5
+            }
+            1 => {
+                backend.status.node_id = 0;
+                -5
+            }
+            2 => {
+                backend.status.kind = fs::NODE_TYPE_REGULAR;
+                -111
+            }
+            3 => {
+                backend.status.device = 99;
+                -111
+            }
+            _ => {
+                backend.status.node_id = 99;
+                -111
+            }
+        };
+        assert_eq!(
+            bindings.connect_path(&mut streams, client, b"/server", &mut backend),
+            Err(expected)
+        );
+        assert_eq!(backend.closed, [41]);
+        assert_eq!(streams.begin_accept(listener), Err(-11));
+        bindings.release(listener, &mut backend);
+    }
+}
+
+#[test]
+fn lookup_failures_and_invalid_clients_preserve_existing_binding_references() {
+    let (mut streams, [listener, client], mut bindings, mut backend) = fixture();
+    bindings
+        .bind_path(&streams, listener, b"/server", &mut backend)
+        .unwrap();
+    streams.listen(listener, 1).unwrap();
+    assert_eq!(
+        bindings.connect_path(&mut streams, 999, b"/server", &mut backend),
+        Err(-9)
+    );
+    assert!(backend.lookups.is_empty());
+    for (error, expected) in [(-13, -13), (-2, -2), (-88, -111)] {
+        backend.error = Some(error);
+        assert_eq!(
+            bindings.connect_path(&mut streams, client, b"/server", &mut backend),
+            Err(expected)
+        );
+        assert!(backend.closed.is_empty());
+        assert_eq!(bindings.retained_file(listener), Some(40));
+    }
+    bindings.release(listener, &mut backend);
 }

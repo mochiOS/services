@@ -1809,6 +1809,27 @@ fn socket_binding_records_keep_real_unlinked_inodes_distinct_from_recreated_name
                 protocol::decode_node_status(&response.payload).unwrap(),
             ))
         }
+        fn open_socket(
+            &mut self,
+            path: &[u8],
+        ) -> Result<(posix_service::OpenedObject<u64>, protocol::NodeStatus), i32> {
+            let response = self
+                .0
+                .open_socket_at_retained(
+                    protocol::Header::default(),
+                    path,
+                    PathAnchors::default(),
+                    root_credentials(),
+                )
+                .map_err(|error| -error)?;
+            Ok((
+                posix_service::OpenedObject {
+                    handle: response.header.open_id,
+                    rights: NODE_RIGHTS,
+                },
+                protocol::decode_node_status(&response.payload).unwrap(),
+            ))
+        }
         fn close(&mut self, handle: u64) {
             self.0.provider_close(handle).unwrap();
         }
@@ -1850,6 +1871,8 @@ fn socket_binding_records_keep_real_unlinked_inodes_distinct_from_recreated_name
         let mut streams = posix_service::socket::Streams::new();
         let a = policy.create_socket(peer, request, &mut streams).unwrap();
         let b = policy.create_socket(peer, request, &mut streams).unwrap();
+        let client = policy.create_socket(peer, request, &mut streams).unwrap();
+        let rejected = policy.create_socket(peer, request, &mut streams).unwrap();
         let mut bindings = Bindings::new();
         let mut backend = Backend(&mut filesystem);
         bindings.bind_path(&streams, a, path, &mut backend).unwrap();
@@ -1882,6 +1905,20 @@ fn socket_binding_records_keep_real_unlinked_inodes_distinct_from_recreated_name
         assert_ne!(old_status.node_id, new_status.node_id);
         assert_eq!((old_status.link_count, new_status.link_count), (0, 1));
         assert_eq!(bindings.address(a), Some(path));
+        streams.listen(a, 1).unwrap();
+        streams.listen(b, 1).unwrap();
+        let (listener, accepted) = bindings
+            .connect_path(&mut streams, client, path, &mut backend)
+            .unwrap();
+        assert_eq!(listener, b);
+        assert_eq!(streams.begin_accept(a), Err(-11));
+        let ticket = streams.begin_accept(b).unwrap();
+        assert_eq!(ticket.endpoint(), accepted);
+        streams.commit_accept(ticket, (0, 0), 0).unwrap();
+        assert_eq!(
+            streams.peer_address(client),
+            Ok(mochios_posix_protocol::socket::Address::UnixPath(path))
+        );
         bindings.release(a, &mut backend);
         streams.release(a).unwrap();
         assert!(matches!(
@@ -1896,6 +1933,16 @@ fn socket_binding_records_keep_real_unlinked_inodes_distinct_from_recreated_name
         );
         bindings.release(b, &mut backend);
         streams.release(b).unwrap();
+        assert_eq!(
+            streams.address(accepted),
+            Ok(mochios_posix_protocol::socket::Address::UnixPath(path))
+        );
+        assert_eq!(
+            bindings.connect_path(&mut streams, rejected, path, &mut backend),
+            Err(-111)
+        );
+        assert_eq!(streams.write(client, b"live"), Ok(4));
+        assert_eq!(streams.read(accepted, &mut [0; 4]), Ok(4));
         // Closing a bound socket does not unlink its filesystem name.
         assert!(
             backend

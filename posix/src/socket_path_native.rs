@@ -87,8 +87,12 @@ fn close_received(handles: &platform::ipc::IpcObjectHandles) {
         }
     }
 }
-impl Filesystem<u32> for Snapshot {
-    fn create_socket(&mut self, path: &[u8]) -> Result<(OpenedObject<u32>, fs::NodeStatus), i32> {
+impl Snapshot {
+    fn socket_call(
+        &self,
+        path: &[u8],
+        opcode: u16,
+    ) -> Result<(OpenedObject<u32>, fs::NodeStatus), i32> {
         let mut request = [0; fs::HEADER_LEN + fs::CREDENTIALS_MAX_LEN + wire::MAX_UNIX_NAME_BYTES];
         let mut payload = [0; fs::CREDENTIALS_MAX_LEN + wire::MAX_UNIX_NAME_BYTES];
         let payload_len = fs::encode_credentials_payload(
@@ -100,7 +104,7 @@ impl Filesystem<u32> for Snapshot {
         )
         .map_err(|_| -22)?;
         let header = fs::Header {
-            opcode: fs::OP_CREATE_SOCKET_AT,
+            opcode,
             request_id: 1,
             length: payload_len as u32,
             mode: self.mode,
@@ -174,6 +178,14 @@ impl Filesystem<u32> for Snapshot {
             close_received(&handles);
         }
         result
+    }
+}
+impl Filesystem<u32> for Snapshot {
+    fn create_socket(&mut self, path: &[u8]) -> Result<(OpenedObject<u32>, fs::NodeStatus), i32> {
+        self.socket_call(path, fs::OP_CREATE_SOCKET_AT)
+    }
+    fn open_socket(&mut self, path: &[u8]) -> Result<(OpenedObject<u32>, fs::NodeStatus), i32> {
+        self.socket_call(path, fs::OP_OPEN_SOCKET_AT)
     }
     fn close(&mut self, handle: u32) {
         let _ = platform::handle::close(handle);

@@ -30,6 +30,31 @@ struct Listener {
     pending: VecDeque<u64>,
 }
 
+#[derive(Clone, Copy)]
+struct SocketName {
+    bytes: [u8; mochios_posix_protocol::socket::MAX_UNIX_NAME_BYTES],
+    length: usize,
+}
+impl SocketName {
+    fn new(path: &[u8]) -> Result<Self, i32> {
+        if path.is_empty()
+            || path.len() > mochios_posix_protocol::socket::MAX_UNIX_NAME_BYTES
+            || path.contains(&0)
+        {
+            return Err(-22);
+        }
+        let mut bytes = [0; mochios_posix_protocol::socket::MAX_UNIX_NAME_BYTES];
+        bytes[..path.len()].copy_from_slice(path);
+        Ok(Self {
+            bytes,
+            length: path.len(),
+        })
+    }
+    fn address(&self) -> mochios_posix_protocol::socket::Address<'_> {
+        mochios_posix_protocol::socket::Address::UnixPath(&self.bytes[..self.length])
+    }
+}
+
 struct Endpoint {
     id: u64,
     // None means never connected, not a previously connected peer's close.
@@ -42,6 +67,8 @@ struct Endpoint {
     listener: Option<Listener>,
     pending_listener: Option<u64>,
     accept_retry: Option<u64>,
+    local_name: Option<SocketName>,
+    peer_name: Option<SocketName>,
 }
 
 /// Provider-owned accept transaction. Never serialize these IDs to a client.
@@ -131,6 +158,8 @@ impl Streams {
             listener: None,
             pending_listener: None,
             accept_retry: None,
+            local_name: None,
+            peer_name: None,
         });
         self.next += 1;
         Ok(id)
@@ -161,6 +190,8 @@ impl Streams {
                 listener: None,
                 pending_listener: None,
                 accept_retry: None,
+                local_name: None,
+                peer_name: None,
             });
         }
         self.next = next;
@@ -172,12 +203,11 @@ impl Streams {
     }
 
     /// Unbound UNIX sockets have no local pathname.
-    pub fn address(
-        &self,
-        id: u64,
-    ) -> Result<mochios_posix_protocol::socket::Address<'static>, i32> {
-        self.endpoint(id)?;
-        Ok(mochios_posix_protocol::socket::Address::UnixUnnamed)
+    pub fn address(&self, id: u64) -> Result<mochios_posix_protocol::socket::Address<'_>, i32> {
+        Ok(self.endpoint(id)?.local_name.as_ref().map_or(
+            mochios_posix_protocol::socket::Address::UnixUnnamed,
+            SocketName::address,
+        ))
     }
 
     /// Closing a connected peer does not erase the established address;
@@ -185,9 +215,13 @@ impl Streams {
     pub fn peer_address(
         &self,
         id: u64,
-    ) -> Result<mochios_posix_protocol::socket::Address<'static>, i32> {
-        self.endpoint(id)?.peer.ok_or(-107)?;
-        Ok(mochios_posix_protocol::socket::Address::UnixUnnamed)
+    ) -> Result<mochios_posix_protocol::socket::Address<'_>, i32> {
+        let entry = self.endpoint(id)?;
+        entry.peer.ok_or(-107)?;
+        Ok(entry.peer_name.as_ref().map_or(
+            mochios_posix_protocol::socket::Address::UnixUnnamed,
+            SocketName::address,
+        ))
     }
 
     pub fn status(&self, id: u64) -> Result<mochios_posix_protocol::FileStatus, i32> {
@@ -298,14 +332,47 @@ impl Streams {
         Ok(())
     }
 
-    /// Both description IDs must be resolved by the authenticated adapter. The
-    /// listener comes from a retained filesystem identity, not a client ID/path.
-    pub fn connect(&mut self, client: u64, listener: u64) -> Result<u64, i32> {
+    /// Reject invalid state before a potentially costly filesystem lookup.
+    pub fn check_connect(&self, client: u64) -> Result<(), i32> {
         let source = self.endpoint(client)?;
         if source.peer.is_some() {
             return Err(-106);
         }
-        if source.listener.is_some() || client == listener {
+        if source.listener.is_some() {
+            return Err(-22);
+        }
+        Ok(())
+    }
+
+    /// Description IDs are private; the adapter resolves the listener through
+    /// an authorized, retained filesystem object rather than a client ID/path.
+    pub fn connect(&mut self, client: u64, listener: u64) -> Result<u64, i32> {
+        self.connect_internal(client, listener, None, None)
+    }
+
+    /// Names are snapshots for address queries, not namespace authority. The
+    /// caller has already resolved the listener through its retained inode.
+    pub fn connect_named(
+        &mut self,
+        client: u64,
+        listener: u64,
+        client_path: Option<&[u8]>,
+        listener_path: &[u8],
+    ) -> Result<u64, i32> {
+        let client_name = client_path.map(SocketName::new).transpose()?;
+        let listener_name = SocketName::new(listener_path)?;
+        self.connect_internal(client, listener, client_name, Some(listener_name))
+    }
+
+    fn connect_internal(
+        &mut self,
+        client: u64,
+        listener: u64,
+        client_name: Option<SocketName>,
+        listener_name: Option<SocketName>,
+    ) -> Result<u64, i32> {
+        self.check_connect(client)?;
+        if client == listener {
             return Err(-22);
         }
         let target = self.endpoint(listener)?;
@@ -348,9 +415,13 @@ impl Streams {
             listener: None,
             pending_listener: Some(listener),
             accept_retry: None,
+            local_name: listener_name,
+            peer_name: client_name,
         });
         self.next += 1;
         self.entries[client_index].peer = Some(id);
+        self.entries[client_index].local_name = client_name;
+        self.entries[client_index].peer_name = listener_name;
         Ok(id)
     }
 
