@@ -2002,8 +2002,11 @@ impl FilesystemService {
         }
         let node_id = scoped_node_id(volume, &inode);
         let is_open = self.opens.values().any(|open| open.node_id == node_id);
+        // Public hard links already keep the inode alive. Create one private
+        // retention link only when the last public name is being removed.
+        let retain = is_open && inode.links_count() == 1 && !self.orphans.contains_key(&node_id);
         let orphan_name = format!(".mochios-orphan-{node_id}");
-        if is_open {
+        if retain {
             parent
                 .link(
                     DirEntryName::try_from(orphan_name.as_str()).map_err(|_| EIO)?,
@@ -2015,7 +2018,7 @@ impl FilesystemService {
             DirEntryName::try_from(name).map_err(|_| EINVAL)?,
             inode.clone(),
         ) {
-            if is_open {
+            if retain {
                 let _ = parent.unlink(
                     DirEntryName::try_from(orphan_name.as_str()).map_err(|_| EIO)?,
                     inode,
@@ -2026,7 +2029,7 @@ impl FilesystemService {
         if let Some(path) = path_hint {
             self.node_ids.remove(path);
         }
-        if is_open {
+        if retain {
             self.orphans.insert(
                 node_id,
                 Orphan {
@@ -2034,7 +2037,7 @@ impl FilesystemService {
                     name: orphan_name,
                 },
             );
-        } else {
+        } else if !is_open {
             self.nodes.remove(&node_id);
         }
         Ok(())
@@ -2232,6 +2235,8 @@ impl FilesystemService {
                 .opens
                 .values()
                 .any(|open| open.node_id == destination_node_id)
+                && destination_inode.links_count() == 1
+                && !self.orphans.contains_key(&destination_node_id)
             {
                 self.orphans.insert(
                     destination_node_id,
@@ -2480,6 +2485,8 @@ impl FilesystemService {
                 .opens
                 .values()
                 .any(|open| open.node_id == destination_node_id)
+                && destination_inode.links_count() == 1
+                && !self.orphans.contains_key(&destination_node_id)
             {
                 self.orphans.insert(
                     destination_node_id,

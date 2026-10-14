@@ -1607,6 +1607,179 @@ fn private_retention_entries_are_inaccessible_but_prefixed_user_names_remain_vis
     }
 }
 
+#[test]
+fn unlinking_multiple_names_retains_an_open_inode_only_until_last_close() {
+    for across_directories in [false, true] {
+        let fixture = Fixture::new();
+        let mut service = FilesystemService::new(fixture.volume("multiple-links"));
+        let opened = open(
+            &mut service,
+            b"/file",
+            protocol::OPEN_AT_READ,
+            PathAnchors::default(),
+        );
+        let second = if across_directories {
+            b"/nested/second".as_slice()
+        } else {
+            b"/second".as_slice()
+        };
+        let third = if across_directories {
+            b"/mount/third".as_slice()
+        } else {
+            b"/third".as_slice()
+        };
+        for path in [second, third] {
+            let mut payload = b"/file".to_vec();
+            payload.extend_from_slice(path);
+            service
+                .link_at(
+                    protocol::Header {
+                        mode: 5,
+                        ..Default::default()
+                    },
+                    &payload,
+                    RenameAnchors::default(),
+                    root_credentials(),
+                )
+                .unwrap();
+        }
+        for (index, path) in [b"/file".as_slice(), second, third].into_iter().enumerate() {
+            service
+                .unlink_at(
+                    protocol::Header::default(),
+                    path,
+                    PathAnchors::default(),
+                    root_credentials(),
+                )
+                .unwrap();
+            let status = service
+                .stat_handle(protocol::Header::default(), opened.open_id)
+                .unwrap();
+            assert_eq!(
+                protocol::decode_node_status(&status.payload)
+                    .unwrap()
+                    .link_count,
+                2 - index as u32
+            );
+            assert_eq!(
+                service.provider_read_at(opened.open_id, 0, 4096).unwrap(),
+                b"multiple-links"
+            );
+        }
+        service.provider_close(opened.open_id).unwrap();
+        // All retention links must be gone, even when deletions crossed parents.
+        let orphan_name = format!(".mochios-orphan-{}", opened.node_id);
+        for parent in ["", "/nested", "/mount"] {
+            let path = format!("{parent}/{orphan_name}");
+            assert!(matches!(
+                service.stat_at(
+                    protocol::Header::default(),
+                    path.as_bytes(),
+                    PathAnchors::default(),
+                    root_credentials()
+                ),
+                Err(2)
+            ));
+        }
+    }
+}
+
+#[test]
+fn replacing_multiple_links_does_not_overwrite_the_original_retention_record() {
+    let fixture = Fixture::new();
+    let mut service = FilesystemService::new(fixture.volume("rename-links"));
+    let opened = open(
+        &mut service,
+        b"/file",
+        protocol::OPEN_AT_READ,
+        PathAnchors::default(),
+    );
+    for path in [b"/second".as_slice(), b"/third".as_slice()] {
+        let mut payload = b"/file".to_vec();
+        payload.extend_from_slice(path);
+        service
+            .link_at(
+                protocol::Header {
+                    mode: 5,
+                    ..Default::default()
+                },
+                &payload,
+                RenameAnchors::default(),
+                root_credentials(),
+            )
+            .unwrap();
+    }
+    for (index, (source, target)) in [
+        (b"/nested/inside".as_slice(), b"/file".as_slice()),
+        (b"/mount/hidden".as_slice(), b"/second".as_slice()),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut payload = source.to_vec();
+        payload.extend_from_slice(target);
+        service
+            .rename_at(
+                protocol::Header {
+                    request_id: 101 + index as u64,
+                    mode: source.len() as u32,
+                    ..Default::default()
+                },
+                &payload,
+                RenameAnchors::default(),
+                root_credentials(),
+            )
+            .unwrap();
+        let status = service
+            .stat_handle(protocol::Header::default(), opened.open_id)
+            .unwrap();
+        assert_eq!(
+            protocol::decode_node_status(&status.payload)
+                .unwrap()
+                .link_count,
+            2 - index as u32
+        );
+    }
+    service
+        .unlink_at(
+            protocol::Header::default(),
+            b"/third",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    assert_eq!(
+        protocol::decode_node_status(
+            &service
+                .stat_handle(protocol::Header::default(), opened.open_id)
+                .unwrap()
+                .payload
+        )
+        .unwrap()
+        .link_count,
+        0
+    );
+    assert_eq!(
+        service.provider_read_at(opened.open_id, 0, 4096).unwrap(),
+        b"rename-links"
+    );
+    service.provider_close(opened.open_id).unwrap();
+    let directory = open(
+        &mut service,
+        b"/",
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+        PathAnchors::default(),
+    );
+    let payload = service.provider_read(directory.open_id, 4096).unwrap();
+    let mut remaining = payload.as_slice();
+    while !remaining.is_empty() {
+        let (_, name, length) = protocol::decode_dir_entry(remaining).unwrap();
+        assert!(!name.starts_with(b".mochios-orphan-"));
+        remaining = &remaining[length..];
+    }
+    service.provider_close(directory.open_id).unwrap();
+}
+
 fn open(
     service: &mut FilesystemService,
     path: &[u8],
