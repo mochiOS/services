@@ -137,7 +137,60 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
     let mut transfers = posix_service::socket_transfer::Transfers::new(1024);
     let mut request = vec![0; provider::REQUEST_HEADER_LEN + provider::MAX_DATA_LEN];
     let mut response = vec![0; provider::RESPONSE_HEADER_LEN + provider::MAX_DATA_LEN];
+    let mut gc_deadline = 0;
+    let mut gc_clock_error_reported = false;
     loop {
+        // A final external close does not destroy a queue-only cycle, so no
+        // OP_RELEASE would arrive to wake an ordinary IPC wait. Use the existing
+        // native endpoint readiness wait with a bounded GC deadline only while
+        // ancillary records exist. Normal socket traffic has no extra wait.
+        if streams.has_ancillary_records() {
+            match platform::time::monotonic_nanoseconds() {
+                Ok(now) => {
+                    gc_clock_error_reported = false;
+                    if now >= gc_deadline {
+                        gc_deadline = now.saturating_add(super::socket_gc_native::INTERVAL_NS);
+                        match super::socket_gc_native::collect(&mut streams) {
+                            Ok(ids) => signal(&streams, &jobs, ids),
+                            // A retired Provider's release may still be queued.
+                            // Failed observations never authorize queue deletion.
+                            Err(-9 | -11) => (),
+                            Err(error) => platform::logln!(
+                                "posix.service: socket cycle observation failed errno={}", error
+                            ),
+                        }
+                        super::socket_receive_wait_native::pump(&streams, &mut receive_waits);
+                        super::socket_route_native::pump(&streams, &routes);
+                    }
+                    if streams.has_ancillary_records() {
+                        let mut wait = [mnu_abi::HandleWaitItem {
+                            handle: endpoint,
+                            minimum_write_bytes: 0,
+                            interests: mnu_abi::HANDLE_SIGNAL_READABLE,
+                            observed: 0,
+                        }];
+                        if let Err(error) = platform::process::wait_many(&mut wait, gc_deadline) {
+                            if error.raw() != -11 {
+                                platform::thread::yield_now();
+                            }
+                            continue;
+                        }
+                    }
+                }
+                Err(error) => {
+                    // Keep ordinary IPC available if the clock fails. Do not
+                    // collect using a fabricated timestamp or spin/log-flood.
+                    if !gc_clock_error_reported {
+                        platform::logln!(
+                            "posix.service: socket GC clock failed errno={}", error.raw()
+                        );
+                        gc_clock_error_reported = true;
+                    }
+                }
+            }
+        } else {
+            gc_deadline = 0;
+        }
         let mut attachments = platform::ipc::IpcObjectHandles::default();
         let message = match platform::ipc::wait_object_handles(
             u64::from(endpoint),
@@ -155,14 +208,18 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
         let mut retained_receive_source = false;
         let mut consumed_attachments = 0u8;
         if bytes.starts_with(&mochios_posix_protocol::socket_transfer::MAGIC) {
-            consumed_attachments = super::socket_transfer_native::dispatch(
+            let (consumed, affected) = super::socket_transfer_native::dispatch(
                 endpoint,
-                &streams,
+                &mut streams,
                 &mut transfers,
                 sender,
                 bytes,
                 &attachments,
             );
+            consumed_attachments = consumed;
+            if let Some(ids) = affected {
+                signal(&streams, &jobs, ids);
+            }
         } else if bytes.starts_with(&mochios_posix_protocol::socket_route::MAGIC) {
             retained_receive_source = super::socket_route_native::prepare(
                 endpoint, &service, &streams, &bindings, &mut routes, sender, bytes, &attachments,

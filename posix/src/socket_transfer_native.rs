@@ -1,4 +1,4 @@
-//! No process/FD lookup: Begin and Append require explicit IPC authority, and
+//! No process/FD lookup: Begin, Append and Commit require explicit IPC authority;
 //! transactions are resolved only through ProviderObjectIdentify on this worker.
 use mochi_user_platform as platform;
 use mochios_posix_protocol::socket_transfer::{self as wire, Request};
@@ -13,15 +13,17 @@ fn close(handle: u32) {
 
 /// Returns a bit mask of received references whose ownership has been consumed,
 /// including references closed by rollback. The common worker cleanup skips them.
+/// The second result identifies descriptions whose readiness changed on commit.
 pub fn dispatch(
     endpoint: u32,
-    streams: &Streams,
+    streams: &mut Streams,
     transfers: &mut Transfers,
     sender: u64,
     bytes: &[u8],
     attachments: &platform::ipc::IpcObjectHandles,
-) -> u8 {
+) -> (u8, Option<[u64; 2]>) {
     let mut consumed = 0u8;
+    let mut affected = None;
     let mut created = None;
     let result = (|| {
         if attachments.delivery_flags != mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE {
@@ -110,6 +112,26 @@ pub fn dispatch(
                     .append(id, offset as usize, leases)
                     .map(|count| count as u32)
             }
+            Request::Commit { offset } => {
+                if count != 2
+                    || attached[0].rights != mnu_abi::HANDLE_RIGHT_CONTROL
+                    || attached[1].rights != (mnu_abi::HANDLE_RIGHT_READ | mnu_abi::HANDLE_RIGHT_MAP)
+                {
+                    return Err(-13);
+                }
+                let object = platform::handle::identify_provider_object(attached[0].handle)
+                    .map_err(|error| error.raw() as i32)?;
+                let (count, ids) = transfers.commit(
+                    streams,
+                    job_id(object)?,
+                    offset,
+                    &mut posix_service::socket_record_io::NativeBuffer::borrowed(
+                        attached[1].handle,
+                    ),
+                )?;
+                affected = Some(ids);
+                Ok(count as u32)
+            }
         }
     })();
     if let Some((id, handle)) = created {
@@ -131,7 +153,7 @@ pub fn dispatch(
         };
         let _ = platform::ipc::reply(sender, &bytes);
     }
-    consumed
+    (consumed, affected)
 }
 
 pub fn provider_request(

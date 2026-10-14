@@ -118,8 +118,7 @@ impl Transfers {
         Ok((stage.socket, stage.length, stage.state.received()?))
     }
 
-    /// Policy-layer connected datagram commitment. No IPC entry enables this
-    /// yet: queued socket-reference cycle collection must precede publication.
+    /// Connected datagram commitment, serialized with cycle collection.
     /// Every fallible RAM check/copy precedes the ownership move; queue errors
     /// restore the full ready bundle. A successful send stays Complete even if
     /// its reply is lost, so repeating the same transaction cannot send twice.

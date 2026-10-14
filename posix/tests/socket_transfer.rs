@@ -99,6 +99,14 @@ fn fixture() -> (Streams, u64) {
 }
 #[test]
 fn codec_is_versioned_and_contains_only_lengths_indices_and_validated_metadata() {
+    for offset in [0, 4095, u64::MAX] {
+        let commit = wire::commit(offset);
+        assert_eq!(wire::decode(&commit), Ok(wire::Request::Commit { offset }));
+        assert!(wire::decode(&commit[..15]).is_err());
+        let mut oversized = commit.to_vec();
+        oversized.push(0);
+        assert!(wire::decode(&oversized).is_err());
+    }
     let begin = wire::begin(65536, 253).unwrap();
     assert_eq!(
         wire::decode(&begin),

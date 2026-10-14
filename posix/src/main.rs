@@ -30,7 +30,10 @@ mod socket_record_native;
 
 #[cfg(target_os = "mochios")]
 mod socket_route_native;
+#[cfg(target_os = "mochios")]
 mod socket_transfer_native;
+#[cfg(target_os = "mochios")]
+mod socket_gc_native;
 
 #[cfg(target_os = "mochios")]
 const PTY_SYNC_MAGIC: [u8; 4] = *b"PTYS";

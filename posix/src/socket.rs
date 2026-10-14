@@ -680,6 +680,13 @@ impl Streams {
         Ok(garbage)
     }
 
+    pub fn has_ancillary_records(&self) -> bool {
+        self.entries.iter().any(|entry| {
+            entry.records.as_ref()
+                .is_some_and(|queue| queue.ancillary_leases().next().is_some())
+        })
+    }
+
     /// Explicit-destination sends do not change the description's default
     /// peer or receive filter. Destination authority comes from a retained
     /// lookup ticket in the worker, never from a caller-supplied object ID.
