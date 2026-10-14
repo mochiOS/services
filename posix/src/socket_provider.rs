@@ -63,6 +63,20 @@ pub fn handle_provider_request(
                 .write(header.object_id, payload)
                 .map(|count| (count as u64, 0)),
             provider::OP_CONTROL => match header.basis {
+                wire::CONTROL_GET_SEND_TIMEOUT if payload.is_empty() && header.length == 8 => {
+                    streams.send_timeout(header.object_id).map(|duration| {
+                        data[..8].copy_from_slice(&duration.to_le_bytes());
+                        (8, 8)
+                    })
+                }
+                wire::CONTROL_SET_SEND_TIMEOUT if payload.len() == 8 && header.length == 0 => {
+                    streams
+                        .set_send_timeout(
+                            header.object_id,
+                            u64::from_le_bytes(payload.try_into().unwrap()),
+                        )
+                        .map(|_| (0, 0))
+                }
                 wire::CONTROL_GET_RECEIVE_TIMEOUT if payload.is_empty() && header.length == 8 => {
                     streams.receive_timeout(header.object_id).map(|duration| {
                         data[..8].copy_from_slice(&duration.to_le_bytes());
@@ -210,6 +224,8 @@ pub fn handle_provider_request(
                 | wire::CONTROL_SET_SEND_CAPACITY
                 | wire::CONTROL_GET_RECEIVE_TIMEOUT
                 | wire::CONTROL_SET_RECEIVE_TIMEOUT
+                | wire::CONTROL_GET_SEND_TIMEOUT
+                | wire::CONTROL_SET_SEND_TIMEOUT
                 | wire::CONTROL_SET_OPTIONS
                 | wire::CONTROL_SHUTDOWN
                 | wire::CONTROL_READINESS => Err(-22),

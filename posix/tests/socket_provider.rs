@@ -223,50 +223,52 @@ fn libc_socket_option_tags_and_values_do_not_leak_wire_numbers() {
 }
 
 #[test]
-fn receive_timeout_frames_are_authenticated_and_validate_lengths_before_mutation() {
-    let (mut streams, [a, _]) = fixture();
-    let flags = mnu_abi::IPC_DELIVERY_NATIVE_OBJECT;
-    let set = frame(
-        provider::OP_CONTROL,
-        a,
-        wire::CONTROL_SET_RECEIVE_TIMEOUT,
-        0,
-        &50_000_000u64.to_le_bytes(),
-    );
-    assert_eq!(call(&mut streams, &set, 0, 0).0.status, -13);
-    assert_eq!(call(&mut streams, &set, flags, 1).0.status, -22);
-    assert_eq!(
-        handle_provider_request(&mut streams, &set, flags, 0, &mut []),
-        Err(-22)
-    );
-    for (length, payload) in [(0, vec![]), (0, vec![0; 4]), (8, vec![0; 8])] {
-        let invalid = frame(
+fn timeout_frames_are_authenticated_and_validate_lengths_before_mutation() {
+    for (set_tag, get_tag) in [
+        (
+            wire::CONTROL_SET_RECEIVE_TIMEOUT,
+            wire::CONTROL_GET_RECEIVE_TIMEOUT,
+        ),
+        (
+            wire::CONTROL_SET_SEND_TIMEOUT,
+            wire::CONTROL_GET_SEND_TIMEOUT,
+        ),
+    ] {
+        let (mut streams, [a, _]) = fixture();
+        let flags = mnu_abi::IPC_DELIVERY_NATIVE_OBJECT;
+        let set = frame(
             provider::OP_CONTROL,
             a,
-            wire::CONTROL_SET_RECEIVE_TIMEOUT,
-            length,
-            &payload,
+            set_tag,
+            0,
+            &50_000_000u64.to_le_bytes(),
         );
-        assert_eq!(call(&mut streams, &invalid, flags, 0).0.status, -22);
+        assert_eq!(call(&mut streams, &set, 0, 0).0.status, -13);
+        assert_eq!(call(&mut streams, &set, flags, 1).0.status, -22);
+        assert_eq!(
+            handle_provider_request(&mut streams, &set, flags, 0, &mut []),
+            Err(-22)
+        );
+        for (length, payload) in [(0, vec![]), (0, vec![0; 4]), (8, vec![0; 8])] {
+            let invalid = frame(provider::OP_CONTROL, a, set_tag, length, &payload);
+            assert_eq!(call(&mut streams, &invalid, flags, 0).0.status, -22);
+        }
+        assert_eq!(streams.receive_timeout(a), Ok(0));
+        assert_eq!(call(&mut streams, &set, flags, 0).0.status, 0);
+        let get = frame(provider::OP_CONTROL, a, get_tag, 8, &[]);
+        assert_eq!(
+            call(&mut streams, &get, flags, 0).1,
+            50_000_000u64.to_le_bytes()
+        );
     }
-    assert_eq!(streams.receive_timeout(a), Ok(0));
-    assert_eq!(call(&mut streams, &set, flags, 0).0.status, 0);
-    let get = frame(
-        provider::OP_CONTROL,
-        a,
-        wire::CONTROL_GET_RECEIVE_TIMEOUT,
-        8,
-        &[],
-    );
-    assert_eq!(
-        call(&mut streams, &get, flags, 0).1,
-        50_000_000u64.to_le_bytes()
-    );
 }
 
 #[test]
 fn receive_timeval_conversion_rejects_invalid_fields_and_keeps_one_deadline() {
-    use mochios_posix_client::socket::{receive_deadline, receive_timeout_nanoseconds};
+    use mochios_posix_client::socket::{
+        socket_deadline as receive_deadline,
+        socket_timeout_nanoseconds as receive_timeout_nanoseconds,
+    };
     assert_eq!(receive_timeout_nanoseconds(1, 123456), Ok(1_123_456_000));
     assert_eq!(receive_timeout_nanoseconds(0, 0), Ok(0));
     for (seconds, micros) in [(-1, 0), (0, -1), (0, 1_000_000), (i64::MAX, 0)] {

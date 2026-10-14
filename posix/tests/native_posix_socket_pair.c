@@ -35,6 +35,49 @@ static uint64_t monotonic_ns(void) {
   return (uint64_t)value.tv_sec * 1000000000 + (uint64_t)value.tv_nsec;
 }
 
+static int verify_send_timeout(void) {
+  int fds[2];
+  CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+  int alias = dup(fds[0]);
+  CHECK(alias >= 0);
+  int capacity = 256;
+  CHECK(setsockopt(alias, SOL_SOCKET, SO_SNDBUF, &capacity, sizeof(capacity)) ==
+        0);
+  struct timeval timeout = {.tv_sec = 0, .tv_usec = 50000};
+  CHECK(setsockopt(alias, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) ==
+        0);
+  socklen_t length = sizeof(timeout);
+  memset(&timeout, 0, sizeof(timeout));
+  CHECK(getsockopt(fds[0], SOL_SOCKET, SO_SNDTIMEO, &timeout, &length) == 0 &&
+        timeout.tv_sec == 0 && timeout.tv_usec == 50000);
+  char bytes[512];
+  memset(bytes, 't', sizeof(bytes));
+  CHECK(write(fds[0], bytes, sizeof(bytes)) == 256);
+  uint64_t started = monotonic_ns();
+  CHECK(started != 0 && write(alias, "x", 1) == -1 && errno == EAGAIN);
+  CHECK(monotonic_ns() - started >= 30000000);
+  started = monotonic_ns();
+  CHECK(send(alias, "x", 1, MSG_NOSIGNAL) == -1 && errno == EAGAIN);
+  CHECK(monotonic_ns() - started >= 30000000);
+  CHECK(send(alias, "x", 1, MSG_DONTWAIT) == -1 && errno == EAGAIN);
+  struct pollfd sender = {.fd = alias, .events = POLLOUT};
+  started = monotonic_ns();
+  CHECK(poll(&sender, 1, 100) == 0 && monotonic_ns() - started >= 70000000);
+  CHECK(read(fds[1], bytes, 128) == 128);
+  CHECK(send(alias, bytes, sizeof(bytes), 0) == 128);
+  CHECK(read(fds[1], bytes, sizeof(bytes)) == 256);
+  for (unsigned i = 0; i < 256; ++i)
+    CHECK(bytes[i] == 't');
+  timeout.tv_usec = 0;
+  CHECK(setsockopt(alias, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) ==
+        0);
+  CHECK(write(alias, "z", 1) == 1 && read(fds[1], bytes, 1) == 1 &&
+        bytes[0] == 'z');
+  CHECK(close(alias) == 0 && close(fds[0]) == 0 && close(fds[1]) == 0);
+  puts("posix-socket-send-timeout: PASS");
+  return 0;
+}
+
 static int verify_receive_timeout(void) {
   int fds[2];
   CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
@@ -700,6 +743,7 @@ int main(int argc, char **argv) {
   CHECK(verify_receive_capacity() == 0);
   CHECK(verify_send_capacity() == 0);
   CHECK(verify_receive_timeout() == 0);
+  CHECK(verify_send_timeout() == 0);
   CHECK(verify_socket_errors() == 0);
   puts("posix-socket-options: PASS");
   CHECK(verify_connect_interrupts() == 0);

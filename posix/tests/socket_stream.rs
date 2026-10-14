@@ -42,11 +42,17 @@ fn receive_timeout_is_shared_policy_and_accepted_sockets_snapshot_it() {
     assert_eq!(streams.receive_timeout(listener), Ok(0));
     streams.listen(listener, 2).unwrap();
     streams.set_receive_timeout(listener, 50_000_000).unwrap();
+    streams.set_send_timeout(listener, 70_000_000).unwrap();
     let accepted = streams.connect(client, listener).unwrap();
     streams.set_receive_timeout(listener, 100_000_000).unwrap();
+    streams.set_send_timeout(listener, 120_000_000).unwrap();
     let ticket = streams.begin_accept(listener).unwrap();
     streams.commit_accept(ticket, (501, 20), 0).unwrap();
     assert_eq!(streams.receive_timeout(accepted), Ok(50_000_000));
+    assert_eq!(streams.send_timeout(accepted), Ok(70_000_000));
+    assert_eq!(streams.send_timeout(client), Ok(0));
+    assert_eq!(streams.set_send_timeout(accepted, 1), Err(-22));
+    assert_eq!(streams.send_timeout(accepted), Ok(70_000_000));
     assert_eq!(streams.receive_timeout(client), Ok(0));
     assert_eq!(streams.set_receive_timeout(accepted, 1), Err(-22));
     assert_eq!(streams.receive_timeout(accepted), Ok(50_000_000));

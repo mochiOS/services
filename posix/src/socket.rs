@@ -70,6 +70,7 @@ struct Endpoint {
     receive_capacity: usize,
     send_capacity: usize,
     receive_timeout: u64,
+    send_timeout: u64,
     error: u32,
     read_shutdown: bool,
     write_shutdown: bool,
@@ -165,6 +166,7 @@ impl Streams {
             receive_capacity: RECEIVE_CAPACITY,
             send_capacity: SEND_CAPACITY,
             receive_timeout: 0,
+            send_timeout: 0,
             error: 0,
             read_shutdown: false,
             write_shutdown: false,
@@ -201,6 +203,7 @@ impl Streams {
                 receive_capacity: RECEIVE_CAPACITY,
                 send_capacity: SEND_CAPACITY,
                 receive_timeout: 0,
+                send_timeout: 0,
                 error: 0,
                 read_shutdown: false,
                 write_shutdown: false,
@@ -309,6 +312,19 @@ impl Streams {
             return Err(-22);
         }
         entry.receive_timeout = nanoseconds;
+        Ok(())
+    }
+
+    pub fn send_timeout(&self, id: u64) -> Result<u64, i32> {
+        Ok(self.endpoint(id)?.send_timeout)
+    }
+
+    pub fn set_send_timeout(&mut self, id: u64, nanoseconds: u64) -> Result<(), i32> {
+        let entry = self.endpoint_mut(id)?;
+        if nanoseconds % 1000 != 0 {
+            return Err(-22);
+        }
+        entry.send_timeout = nanoseconds;
         Ok(())
     }
 
@@ -471,6 +487,7 @@ impl Streams {
         let receive_capacity = target.receive_capacity;
         let send_capacity = target.send_capacity;
         let receive_timeout = target.receive_timeout;
+        let send_timeout = target.send_timeout;
         let client_index = self
             .entries
             .iter()
@@ -499,6 +516,7 @@ impl Streams {
             receive_capacity,
             send_capacity,
             receive_timeout,
+            send_timeout,
             error: 0,
             read_shutdown: false,
             write_shutdown: false,
