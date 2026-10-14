@@ -140,7 +140,19 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
         };
         let sender = message >> 32;
         let bytes = &request[..(message as u32 as usize).min(request.len())];
-        if bytes.starts_with(CREATE_MAGIC) || bytes.starts_with(CREATE_SINGLE_MAGIC) {
+        if bytes.starts_with(super::socket_accept_native::MAGIC) {
+            if let Some(ids) = super::socket_accept_native::dispatch(
+                endpoint,
+                service_process,
+                &service,
+                &mut streams,
+                sender,
+                bytes,
+                &attachments,
+            ) {
+                signal(&streams, ids);
+            }
+        } else if bytes.starts_with(CREATE_MAGIC) || bytes.starts_with(CREATE_SINGLE_MAGIC) {
             let pair = bytes.starts_with(CREATE_MAGIC);
             let count = if pair { 2 } else { 1 };
             let result = (|| {

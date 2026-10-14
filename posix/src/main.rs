@@ -17,6 +17,9 @@ mod socket_native;
 mod socket_path_native;
 
 #[cfg(target_os = "mochios")]
+mod socket_accept_native;
+
+#[cfg(target_os = "mochios")]
 const PTY_SYNC_MAGIC: [u8; 4] = *b"PTYS";
 
 #[cfg(target_os = "mochios")]
@@ -289,11 +292,32 @@ fn main() {
         let opened_socket = if let (Some(peer), Some((header, payload)), true) =
             (peer, decoded, attachments_valid)
         {
-            if matches!(header.opcode, protocol::OP_SOCKET_CREATE | protocol::OP_SOCKET_PAIR) {
-                let result = if header.flags != 0
-                    || header.status != 0
-                    || !attachments.is_empty()
-                {
+            if matches!(
+                header.opcode,
+                protocol::OP_SOCKET_CREATE | protocol::OP_SOCKET_PAIR | protocol::OP_SOCKET_ACCEPT
+            ) {
+                let result = if header.flags != 0 || header.status != 0 {
+                    Err(-22)
+                } else if header.opcode == protocol::OP_SOCKET_ACCEPT {
+                    if attachments.len() != 1 {
+                        Err(-22)
+                    } else {
+                        protocol::socket::Accept::decode(payload)
+                            .map_err(|_| -22)
+                            .and_then(|request| {
+                                let mut handles = Vec::new();
+                                handles.try_reserve(1).map_err(|_| -12)?;
+                                let (opened, address) = socket_accept_native::accept(
+                                    socket_endpoint,
+                                    peer.process_id,
+                                    attachments[0],
+                                    request,
+                                )?;
+                                handles.push(opened);
+                                Ok((handles, address))
+                            })
+                    }
+                } else if !attachments.is_empty() {
                     Err(-22)
                 } else {
                     protocol::socket::Create::decode(payload)
@@ -306,12 +330,15 @@ fn main() {
                                 header.opcode == protocol::OP_SOCKET_PAIR,
                             )
                         })
+                        .map(|handles| (handles, Vec::new()))
                 };
                 Some(match result {
-                    Ok(handles) => posix_service::ObjectResponse {
-                        response: status_response(header.request_id, 0),
-                        handles,
-                    },
+                    Ok((handles, payload)) => {
+                        let mut response = status_response(header.request_id, 0);
+                        response.header.payload_len = payload.len() as u32;
+                        response.payload = payload;
+                        posix_service::ObjectResponse { response, handles }
+                    }
                     Err(error) => posix_service::ObjectResponse {
                         response: status_response(header.request_id, error),
                         handles: Vec::new(),
@@ -334,7 +361,10 @@ fn main() {
         let mut retained_handle = None;
         let object_response = match (peer, decoded, attachments_valid) {
             (Some(_), Some((header, _)), true)
-                if matches!(header.opcode, protocol::OP_SOCKET_CREATE | protocol::OP_SOCKET_PAIR) => {
+                if matches!(
+                    header.opcode,
+                    protocol::OP_SOCKET_CREATE | protocol::OP_SOCKET_PAIR | protocol::OP_SOCKET_ACCEPT
+                ) => {
                 opened_socket
             }
             (Some(_peer), Some((header, payload)), true)

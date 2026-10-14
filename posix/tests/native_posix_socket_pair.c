@@ -4,6 +4,7 @@
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,6 +26,14 @@
     }                                                                          \
   } while (0)
 static int blocking_fd;
+static int accept_started;
+static void *empty_acceptor(void *argument) {
+  __atomic_store_n(&accept_started, 1, __ATOMIC_RELEASE);
+  int fd = accept((int)(intptr_t)argument, NULL, NULL);
+  if (fd >= 0)
+    close(fd);
+  return (void *)1;
+}
 static int verify_path_binding(void) {
   struct sockaddr_un address = {.sun_family = AF_UNIX};
   strcpy(address.sun_path, "/native-posix-bound");
@@ -33,6 +42,8 @@ static int verify_path_binding(void) {
   int a = socket(AF_UNIX, SOCK_STREAM, 0);
   int b = socket(AF_UNIX, SOCK_STREAM, 0);
   CHECK(a >= 0 && b >= 0);
+  CHECK(accept(-1, NULL, NULL) == -1 && errno == EBADF);
+  CHECK(accept(b, NULL, NULL) == -1 && errno == EINVAL);
   CHECK(listen(-1, 1) == -1 && errno == EBADF);
   CHECK(listen(b, 1) == -1 && errno == EINVAL);
   CHECK(bind(-1, (struct sockaddr *)&address, size) == -1 && errno == EBADF);
@@ -42,6 +53,28 @@ static int verify_path_binding(void) {
         listen(a, 0x7fffffff) == 0);
   struct pollfd listener = {.fd = a, .events = POLLIN | POLLOUT};
   CHECK(poll(&listener, 1, 0) == 0 && listener.revents == 0);
+  int original_flags = fcntl(a, F_GETFL, 0);
+  CHECK(fcntl(a, F_SETFL, original_flags | O_NONBLOCK) == 0);
+  CHECK(accept(a, NULL, NULL) == -1 && errno == EAGAIN);
+  CHECK(accept4(a, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK) == -1 &&
+        errno == EAGAIN);
+  CHECK(accept4(a, NULL, NULL, 0x1000) == -1 && errno == EINVAL);
+  CHECK(fcntl(a, F_SETFL, original_flags) == 0);
+  int expected_free = dup(b);
+  CHECK(expected_free >= 0 && close(expected_free) == 0);
+  pthread_t waiter;
+  CHECK(pthread_create(&waiter, NULL, empty_acceptor, (void *)(intptr_t)a) ==
+        0);
+  while (!__atomic_load_n(&accept_started, __ATOMIC_ACQUIRE))
+    sched_yield();
+  for (unsigned index = 0; index < 100; ++index)
+    sched_yield();
+  CHECK(pthread_cancel(waiter) == 0);
+  void *waited;
+  CHECK(pthread_join(waiter, &waited) == 0 && waited == PTHREAD_CANCELED);
+  int reused_free = dup(b);
+  CHECK(reused_free == expected_free && close(reused_free) == 0);
+  puts("posix-socket-accept-empty: PASS");
   CHECK(bind(a, (struct sockaddr *)&address, size) == -1 && errno == EINVAL);
   CHECK(bind(b, (struct sockaddr *)&address, size) == -1 &&
         errno == EADDRINUSE);
