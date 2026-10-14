@@ -9,6 +9,7 @@ pub mod shared_memory;
 pub mod shared_memory_file;
 pub mod socket;
 pub mod socket_provider;
+pub mod socket_binding;
 pub mod filesystem_transport;
 
 pub const STATUS_EINVAL: i32 = -22;

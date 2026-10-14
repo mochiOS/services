@@ -1780,6 +1780,137 @@ fn replacing_multiple_links_does_not_overwrite_the_original_retention_record() {
     service.provider_close(directory.open_id).unwrap();
 }
 
+#[test]
+fn socket_binding_records_keep_real_unlinked_inodes_distinct_from_recreated_names() {
+    use posix_service::socket_binding::{Bindings, Filesystem, NODE_RIGHTS};
+    struct Backend<'a>(&'a mut FilesystemService);
+    impl Filesystem<u64> for Backend<'_> {
+        fn create_socket(
+            &mut self,
+            path: &[u8],
+        ) -> Result<(posix_service::OpenedObject<u64>, protocol::NodeStatus), i32> {
+            let response = self
+                .0
+                .create_socket_at_retained(
+                    protocol::Header {
+                        mode: 0o755,
+                        ..Default::default()
+                    },
+                    path,
+                    PathAnchors::default(),
+                    root_credentials(),
+                )
+                .map_err(|error| -error)?;
+            Ok((
+                posix_service::OpenedObject {
+                    handle: response.header.open_id,
+                    rights: NODE_RIGHTS,
+                },
+                protocol::decode_node_status(&response.payload).unwrap(),
+            ))
+        }
+        fn close(&mut self, handle: u64) {
+            self.0.provider_close(handle).unwrap();
+        }
+    }
+    for mounted in [false, true] {
+        let fixture = Fixture::new();
+        let mut filesystem = FilesystemService::new(fixture.volume("binding-data"));
+        let path = if mounted {
+            filesystem
+                .mount_named_volume(b"/", b"system", fixture.volume("binding-system"), b"/")
+                .unwrap();
+            b"/system/socket".as_slice()
+        } else {
+            b"/socket".as_slice()
+        };
+        let mut policy = posix_service::PosixService::<u32>::new();
+        policy
+            .initialize_bootstrap_process(
+                posix_service::AuthenticatedProcess {
+                    handle: 1,
+                    process_id: 1,
+                },
+                0,
+                0,
+                &[],
+            )
+            .unwrap();
+        let peer = posix_service::PeerIdentity {
+            process_id: 1,
+            effective_uid: 0,
+            effective_gid: 0,
+        };
+        let request = mochios_posix_protocol::socket::Create {
+            domain: mochios_posix_protocol::socket::Domain::Unix,
+            kind: mochios_posix_protocol::socket::Kind::Stream,
+            protocol: 0,
+            options: 0,
+        };
+        let mut streams = posix_service::socket::Streams::new();
+        let a = policy.create_socket(peer, request, &mut streams).unwrap();
+        let b = policy.create_socket(peer, request, &mut streams).unwrap();
+        let mut bindings = Bindings::new();
+        let mut backend = Backend(&mut filesystem);
+        bindings.bind_path(&streams, a, path, &mut backend).unwrap();
+        assert_eq!(
+            bindings.bind_path(&streams, b, path, &mut backend),
+            Err(-98)
+        );
+        let old = bindings.retained_file(a).unwrap();
+        backend
+            .0
+            .unlink_at(
+                protocol::Header::default(),
+                path,
+                PathAnchors::default(),
+                root_credentials(),
+            )
+            .unwrap();
+        bindings.bind_path(&streams, b, path, &mut backend).unwrap();
+        let new = bindings.retained_file(b).unwrap();
+        let old_status = backend
+            .0
+            .stat_handle(protocol::Header::default(), old)
+            .unwrap();
+        let old_status = protocol::decode_node_status(&old_status.payload).unwrap();
+        let new_status = backend
+            .0
+            .stat_handle(protocol::Header::default(), new)
+            .unwrap();
+        let new_status = protocol::decode_node_status(&new_status.payload).unwrap();
+        assert_ne!(old_status.node_id, new_status.node_id);
+        assert_eq!((old_status.link_count, new_status.link_count), (0, 1));
+        assert_eq!(bindings.address(a), Some(path));
+        bindings.release(a, &mut backend);
+        streams.release(a).unwrap();
+        assert!(matches!(
+            backend.0.stat_handle(protocol::Header::default(), old),
+            Err(9)
+        ));
+        assert!(
+            backend
+                .0
+                .stat_handle(protocol::Header::default(), new)
+                .is_ok()
+        );
+        bindings.release(b, &mut backend);
+        streams.release(b).unwrap();
+        // Closing a bound socket does not unlink its filesystem name.
+        assert!(
+            backend
+                .0
+                .stat_at(
+                    protocol::Header::default(),
+                    path,
+                    PathAnchors::default(),
+                    root_credentials()
+                )
+                .is_ok()
+        );
+    }
+}
+
 fn open(
     service: &mut FilesystemService,
     path: &[u8],
