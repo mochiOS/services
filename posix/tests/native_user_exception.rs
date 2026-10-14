@@ -1,0 +1,151 @@
+use std::io::Write;
+use std::process::{Command, Stdio};
+
+#[test]
+fn actual_exception_delivery_preserves_snapshot_and_rejects_kernel_or_invalid_contexts() {
+    let thread = include_str!("../../../core/src/task/thread.rs");
+    let begin = thread.find("pub struct UserUpcallContext {").unwrap();
+    let end = begin + thread[begin..].find("\n}\n").unwrap() + 3;
+    let source = include_str!("../../../core/src/syscall/upcall.rs");
+    let mut program = String::from("#[derive(Clone,Copy,Debug,PartialEq,Eq)]\n");
+    program.push_str(&thread[begin..end]);
+    program.push_str(r#"
+thread_local! {
+    static MODE:std::cell::Cell<u8>=const {std::cell::Cell::new(0)};
+    static SAVED:std::cell::Cell<Option<UserUpcallContext>>=const {std::cell::Cell::new(None)};
+}
+mod mnu_abi { pub const THREAD_UPCALL_KIND_EXCEPTION:u64=1; }
+mod task {
+    pub fn current_thread_id()->Option<u64> {if crate::MODE.with(|v|v.get())==3 {None}else{Some(11)}}
+    pub struct Thread;
+    pub struct Delivery { pub entry:u64,pub stack_top:u64,pub payload:u64,pub token:u64 }
+    impl Thread {
+        pub fn begin_exception_upcall(&mut self,context:crate::UserUpcallContext,vector:u64)->Option<Delivery> {
+            assert_eq!(vector,14);
+            if crate::MODE.with(|v|v.get())!=0 {return None;}
+            crate::SAVED.with(|v|v.set(Some(context)));
+            Some(Delivery{entry:0x1000,stack_top:0x9000,payload:vector,token:77})
+        }
+    }
+    pub fn with_thread_mut<T>(id:u64,body:impl FnOnce(&mut Thread)->T)->Option<T> {
+        assert_eq!(id,11);Some(body(&mut Thread))
+    }
+}
+"#);
+    for name in [
+        "prepare_user_exception",
+        "valid_user_return",
+        "read_interrupt_context",
+        "write_interrupt_context",
+    ] {
+        let start = source.find(&format!("fn {name}(")).unwrap();
+        let end = start + source[start..].find("\n}\n").unwrap() + 3;
+        program.push_str(&source[start..end]);
+    }
+    program.push_str(
+        r#"
+fn main() {
+    let mut raw=core::array::from_fn::<_,21,_>(|i|0x100+i as u64);
+    raw[15]=6;raw[16]=0x4000;raw[17]=0x23;raw[18]=0x10702;raw[19]=0x8000;raw[20]=0x1b;
+    let original=raw;
+    for mode in 1..=3 {
+        MODE.with(|v|v.set(mode));
+        assert!(!prepare_user_exception(&mut raw,0x5000));assert_eq!(raw,original);
+    }
+    MODE.with(|v|v.set(0));
+    for (slot,value) in [(17,8),(16,0),(19,0xffff800000000000)] {
+        raw=original;raw[slot]=value;let invalid=raw;
+        assert!(!prepare_user_exception(&mut raw,0x5000));assert_eq!(raw,invalid);
+    }
+    raw=original;
+    assert!(prepare_user_exception(&mut raw,0x5000));
+    let saved=SAVED.with(|v|v.get().unwrap());
+    assert_eq!((saved.user_rip,saved.user_rsp,saved.user_rflags),(0x4000,0x8000,original[18]));
+    assert_eq!((saved.rcx,saved.r11,saved.rax),(original[13],original[4],original[14]));
+    let mut expected=original;
+    expected[8]=14;expected[9]=77;expected[12]=1;expected[13]=0x5000;
+    expected[7]=6;expected[6]=0x4000;expected[16]=0x1000;expected[19]=0x9000;
+    expected[18]&=!((1<<10)|(1<<8)|(1<<16));
+    assert_eq!(raw,expected);
+}
+"#,
+    );
+    let directory = std::env::temp_dir().join(format!(
+        "mochios-user-exception-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let binary = directory.join("probe");
+    let mut compiler = Command::new("rustc")
+        .args(["--edition=2024", "-Awarnings", "-", "-o"])
+        .arg(&binary)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    compiler
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(program.as_bytes())
+        .unwrap();
+    let compiled = compiler.wait_with_output().unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let result = Command::new(binary).output().unwrap();
+    std::fs::remove_dir_all(directory).unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn native_exception_entry_is_opt_in_and_runs_after_vm_recovery_without_posix_policy() {
+    assert_eq!(mnu_abi::THREAD_UPCALL_EXCEPTIONS, 1);
+    assert_eq!(mnu_abi::THREAD_UPCALL_KIND_INTERRUPT, 0);
+    assert_eq!(mnu_abi::THREAD_UPCALL_KIND_EXCEPTION, 1);
+    assert_eq!(core::mem::size_of::<mnu_abi::ThreadUpcallConfig>(), 64);
+    let entry = include_str!("../../../core/src/interrupt/page_fault.rs");
+    for register in [
+        "rax", "rcx", "rdx", "rbx", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13",
+        "r14", "r15",
+    ] {
+        assert!(entry.contains(&format!("\"push {register}\"")));
+        assert!(entry.contains(&format!("\"pop {register}\"")));
+    }
+    assert!(entry.find("\"add rsp, 8\"").unwrap() < entry.find("\"iretq\"").unwrap());
+    assert!(entry.contains("\"and rsp, -16\""));
+    assert!(entry.contains("kpti_enter_for_trap(raw[17] & 3 == 3)"));
+    let idt = include_str!("../../../core/src/interrupt/idt.rs");
+    let body = idt
+        .split("pub(super) fn page_fault_handler(")
+        .nth(1)
+        .unwrap();
+    let deliver = body.find("prepare_user_exception(").unwrap();
+    assert!(body.find("resolve_user_copy_on_write(").unwrap() < deliver);
+    assert!(body.find("handle_user_memory_fault(").unwrap() < deliver);
+    assert!(body.find("try_grow_user_stack(").unwrap() < deliver);
+    for forbidden in ["SIGSEGV", "SIGBUS", "posix.service"] {
+        assert!(!entry.contains(forbidden));
+        assert!(!body.contains(forbidden));
+    }
+    let probe = include_str!("native_user_exception.c");
+    for (name, value) in [
+        ("MAP", mnu_abi::SyscallNumber::MemoryMap),
+        ("UNMAP", mnu_abi::SyscallNumber::MemoryUnmap),
+        ("PROTECT", mnu_abi::SyscallNumber::MemoryProtect),
+        ("INSTALL", mnu_abi::SyscallNumber::ThreadUpcallInstall),
+        ("RETURN", mnu_abi::SyscallNumber::ThreadUpcallReturn),
+    ] {
+        assert!(probe.contains(&format!("{name} = {}", value as u64)));
+    }
+}

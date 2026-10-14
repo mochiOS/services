@@ -25,7 +25,7 @@ pub fn probe() {
     };
     let pattern = [0xa7u8;16]; let changed = [0x5bu8;16];
     let initial=0x3f80u32; let clobbered=0x5f80u32;
-    state.install(0x1000,0x8000).unwrap();
+    state.install(0x1000,0x8000,false).unwrap();
     for _ in 0..3 {
         assert!(state.begin(user).is_none());
         state.enqueue(7).unwrap();
@@ -48,6 +48,24 @@ pub fn probe() {
         assert_eq!(bytes,pattern); assert_eq!(value,initial);
         assert_eq!(state.request_return(delivery.token),Err(ThreadUpcallError::InvalidToken));
     }
+    assert!(state.begin_exception(user,14).is_none());
+    state.install(0x1000,0x8000,true).unwrap();
+    state.enqueue(0xa7).unwrap();
+    let exception=state.begin_exception(user,14).unwrap();
+    assert_eq!(exception.payload,14);
+    assert_eq!(state.pending_len,1);
+    assert_eq!(state.install(0x2000,0x9000,false),Err(ThreadUpcallError::Active));
+    assert!(state.begin_exception(user,14).is_none());
+    assert!(state.begin(user).is_none());
+    state.request_return(exception.token).unwrap();
+    assert_eq!(state.take_restored_context(),Some(user));
+    let asynchronous=state.begin(user).unwrap();
+    assert_eq!(asynchronous.payload,0xa7);
+    assert_eq!(state.pending_len,0);
+    state.request_return(asynchronous.token).unwrap();
+    state.take_restored_context().unwrap();
+    state.install(0x1000,0x8000,false).unwrap();
+    assert!(state.begin_exception(user,14).is_none());
     original.restore_current();
 }
 } } fn main() { task::thread::probe(); }

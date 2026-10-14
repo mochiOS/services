@@ -1,0 +1,113 @@
+#include <stdint.h>
+#include <stdio.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+enum { MAP = 582, UNMAP = 583, PROTECT = 584, INSTALL = 654, RETURN = 655 };
+static unsigned char entry_stack[16384] __attribute__((aligned(16)));
+static volatile uint64_t expected_address;
+static volatile unsigned exceptions;
+static volatile int recursive;
+
+static inline uint64_t native(uint64_t n, uint64_t a, uint64_t b, uint64_t c,
+                              uint64_t d, uint64_t e, uint64_t f) {
+    register uint64_t r10 __asm__("r10") = d;
+    register uint64_t r8 __asm__("r8") = e;
+    register uint64_t r9 __asm__("r9") = f;
+    __asm__ volatile("syscall" : "+a"(n)
+                     : "D"(a), "S"(b), "d"(c), "r"(r10), "r"(r8), "r"(r9)
+                     : "rcx", "r11", "memory");
+    return n;
+}
+
+static void invalid_access(void) {
+    uint64_t value = 0;
+    __asm__ volatile("mov (%%rax), %%rax" : "+a"(value) : : "memory");
+}
+
+static void handler(uint64_t vector, uint64_t token, uint64_t kind,
+                    uint64_t address, uint64_t code, uint64_t instruction) {
+    /* Native lifecycle/wait notifications share this entry, even while
+       SIGCHLD is blocked. They are not synchronous exceptions. */
+    if (kind == 0) {
+        native(RETURN, token, 0, 0, 0, 0, 0);
+        _exit(96);
+    }
+    uint64_t flags;
+    __asm__ volatile("pushfq\npop %0" : "=r"(flags));
+    if (vector != 14 || !token || kind != 1 || address != expected_address ||
+        !(code & 2) || !(code & 4) || !instruction || (flags & (1 << 10))) {
+        fprintf(stderr, "user-exception: bad envelope vector=%llu kind=%llu addr=%llx code=%llx ip=%llx\n",
+                (unsigned long long)vector, (unsigned long long)kind,
+                (unsigned long long)address, (unsigned long long)code,
+                (unsigned long long)instruction);
+        _exit(90);
+    }
+    ++exceptions;
+    if (recursive) invalid_access();
+    if (native(PROTECT, address, 4096, 3, 0, 0, 0)) _exit(91);
+    native(RETURN, token, 0, 0, 0, 0, 0);
+    _exit(92);
+}
+
+static int install(uint64_t flags) {
+    struct { uint64_t entry, base, length, flags, reserved[4]; } config = {
+        (uintptr_t)handler, (uintptr_t)entry_stack, sizeof(entry_stack), flags, {0}
+    };
+    return (int64_t)native(INSTALL, (uintptr_t)&config, sizeof(config), 0, 0, 0, 0);
+}
+
+static int recover(void) {
+    uint64_t memory = native(MAP, 0, 4096, 3, 0, 0, 0);
+    if ((int64_t)memory <= 0) return 1;
+    expected_address = memory;
+    if (native(PROTECT, memory, 4096, 1, 0, 0, 0)) return 2;
+    uint64_t rcx, r11, restored_flags;
+    __asm__ volatile("movabs $0x1122334455667788, %%rcx\n"
+                     "movabs $0x8877665544332211, %%r11\n"
+                     "std\nmovb $0xa7, (%3)\nmov %%rcx, %0\nmov %%r11, %1\n"
+                     "pushfq\npop %2\ncld"
+                     : "=m"(rcx), "=m"(r11), "=r"(restored_flags)
+                     : "r"(memory) : "rcx", "r11", "memory", "cc");
+    if (rcx != UINT64_C(0x1122334455667788) || r11 != UINT64_C(0x8877665544332211) ||
+        *(volatile unsigned char *)(uintptr_t)memory != 0xa7 || !(restored_flags & (1 << 10))) return 3;
+    if (native(UNMAP, memory, 4096, 0, 0, 0, 0)) return 4;
+    return 0;
+}
+
+int main(void) {
+    sigset_t blocked;
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGCHLD);
+    if (sigprocmask(SIG_BLOCK, &blocked, NULL)) return 1;
+    if (install(2) != -22 || install(1)) return 1;
+    for (unsigned attempt = 1; attempt <= 3; ++attempt) {
+        int result = recover();
+        if (result || exceptions != attempt) {
+            fprintf(stderr, "user-exception: recovery FAIL %d count=%u\n", result, exceptions);
+            return 2;
+        }
+    }
+    /* Non-opted-in children retain the native fatal-fault default. */
+    for (int recurse = 0; recurse <= 1; ++recurse) {
+        pid_t child = fork();
+        if (child < 0) return 3;
+        if (!child) {
+            if (recurse) {
+                recursive = 1;
+                if (install(1)) _exit(93);
+                recover();
+            } else {
+                if (install(0)) _exit(94);
+                invalid_access();
+            }
+            _exit(95);
+        }
+        int status;
+        if (waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
+            WEXITSTATUS(status) != 255) return 4;
+    }
+    puts("user-exception: PASS opt-in, native envelope, repair/retry, full registers, COW and recursive rejection");
+    return 0;
+}
