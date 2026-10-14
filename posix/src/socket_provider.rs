@@ -63,6 +63,16 @@ pub fn handle_provider_request(
                 .write(header.object_id, payload)
                 .map(|count| (count as u64, 0)),
             provider::OP_CONTROL => match header.basis {
+                wire::CONTROL_LOCAL_ADDRESS | wire::CONTROL_PEER_ADDRESS
+                    if payload.is_empty() && header.length as usize >= wire::ADDRESS_HEADER_LEN =>
+                {
+                    streams.address(header.object_id).and_then(|address| {
+                        let count = address
+                            .encode(&mut data[..header.length as usize])
+                            .map_err(|_| -22)?;
+                        Ok((count as u64, count))
+                    })
+                }
                 wire::CONTROL_STAT
                     if payload.is_empty()
                         && header.length as usize == mochios_posix_protocol::FILE_STATUS_LEN =>
@@ -124,7 +134,9 @@ pub fn handle_provider_request(
                 | wire::CONTROL_SET_OPTIONS
                 | wire::CONTROL_SHUTDOWN
                 | wire::CONTROL_READINESS => Err(-22),
-                wire::CONTROL_STAT => Err(-22),
+                wire::CONTROL_STAT | wire::CONTROL_LOCAL_ADDRESS | wire::CONTROL_PEER_ADDRESS => {
+                    Err(-22)
+                }
                 _ => Err(-95),
             },
             provider::OP_SEEK

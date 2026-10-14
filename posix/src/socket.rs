@@ -107,6 +107,16 @@ impl Streams {
         Ok(self.endpoint(id)?.credentials)
     }
 
+    /// This manager currently contains only connected, unnamed UNIX pairs.
+    /// Closing the peer does not erase the established connection's address.
+    pub fn address(
+        &self,
+        id: u64,
+    ) -> Result<mochios_posix_protocol::socket::Address<'static>, i32> {
+        self.endpoint(id)?;
+        Ok(mochios_posix_protocol::socket::Address::UnixUnnamed)
+    }
+
     pub fn status(&self, id: u64) -> Result<mochios_posix_protocol::FileStatus, i32> {
         let entry = self.endpoint(id)?;
         Ok(mochios_posix_protocol::FileStatus {

@@ -319,6 +319,59 @@ fn socket_stat_control_checks_authentication_shape_and_exact_reply_capacity() {
 }
 
 #[test]
+fn socket_pair_names_are_unnamed_and_remain_available_after_peer_release() {
+    let (mut streams, [a, b]) = fixture();
+    let flags = mnu_abi::IPC_DELIVERY_NATIVE_OBJECT;
+    for tag in [wire::CONTROL_LOCAL_ADDRESS, wire::CONTROL_PEER_ADDRESS] {
+        let request = frame(
+            provider::OP_CONTROL,
+            a,
+            tag,
+            wire::MAX_ADDRESS_LEN as u32,
+            &[],
+        );
+        let (header, bytes) = call(&mut streams, &request, flags, 0);
+        assert_eq!(
+            (header.status, header.value),
+            (0, wire::ADDRESS_HEADER_LEN as u64)
+        );
+        assert_eq!(
+            wire::Address::decode(&bytes),
+            Ok(wire::Address::UnixUnnamed)
+        );
+        assert_eq!(call(&mut streams, &request, 0, 0).0.status, -13);
+        assert_eq!(call(&mut streams, &request, flags, 1).0.status, -22);
+        for length in [0, 7] {
+            assert_eq!(
+                call(
+                    &mut streams,
+                    &frame(provider::OP_CONTROL, a, tag, length, &[]),
+                    flags,
+                    0
+                )
+                .0
+                .status,
+                -22
+            );
+        }
+        assert_eq!(
+            call(
+                &mut streams,
+                &frame(provider::OP_CONTROL, a, tag, 8, &[0]),
+                flags,
+                0
+            )
+            .0
+            .status,
+            -22
+        );
+    }
+    streams.release(b).unwrap();
+    assert_eq!(streams.address(a), Ok(wire::Address::UnixUnnamed));
+    assert_eq!(streams.address(b), Err(-9));
+}
+
+#[test]
 fn native_wait_signals_include_terminal_completion_without_conflating_half_close() {
     use posix_service::{socket::Readiness, socket_provider::native_signals};
     for read_closed in [false, true] {

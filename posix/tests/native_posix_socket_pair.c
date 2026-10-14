@@ -24,6 +24,36 @@
     }                                                                          \
   } while (0)
 static int blocking_fd;
+static int verify_names(int fd) {
+  for (int peer = 0; peer < 2; ++peer) {
+    struct sockaddr address;
+    memset(&address, 0xff, sizeof(address));
+    socklen_t length = sizeof(address);
+    int result = peer ? getpeername(fd, &address, &length)
+                      : getsockname(fd, &address, &length);
+    CHECK(result == 0 && length == sizeof(sa_family_t) &&
+          address.sa_family == AF_UNIX &&
+          (unsigned char)address.sa_data[0] == 0xff);
+    unsigned char bytes[4] = {0xfe, 0xfe, 0xfe, 0xfe};
+    length = 1;
+    result = peer ? getpeername(fd, (struct sockaddr *)bytes, &length)
+                  : getsockname(fd, (struct sockaddr *)bytes, &length);
+    CHECK(result == 0 && length == 2 && bytes[0] == AF_UNIX &&
+          bytes[1] == 0xfe);
+    bytes[0] = 0xfe;
+    length = 0;
+    result = peer ? getpeername(fd, (struct sockaddr *)bytes, &length)
+                  : getsockname(fd, (struct sockaddr *)bytes, &length);
+    CHECK(result == 0 && length == 2 && bytes[0] == 0xfe);
+  }
+  socklen_t length = 16;
+  struct sockaddr address;
+  CHECK(getsockname(fd, NULL, &length) == -1 && errno == EFAULT);
+  CHECK(getpeername(fd, &address, NULL) == -1 && errno == EFAULT);
+  CHECK(getsockname(-1, &address, &length) == -1 && errno == EBADF);
+  CHECK(getpeername(1, &address, &length) == -1 && errno == ENOTSOCK);
+  return 0;
+}
 static volatile int started;
 static void *reader(void *unused) {
   (void)unused;
@@ -39,6 +69,7 @@ static int verify_exec(char **argv) {
   CHECK(fcntl(closed, F_GETFD, 0) == -1 && errno == EBADF);
   CHECK(fcntl(a, F_GETFD, 0) == 0 && fcntl(b, F_GETFD, 0) == 0);
   CHECK(fcntl(a, F_GETFL, 0) == (O_RDWR | O_NONBLOCK));
+  CHECK(verify_names(a) == 0 && verify_names(b) == 0);
   struct stat left, right;
   CHECK(fstat(a, &left) == 0 && fstat(b, &right) == 0);
   CHECK(S_ISSOCK(left.st_mode) && S_ISSOCK(right.st_mode));
@@ -72,6 +103,7 @@ int main(int argc, char **argv) {
         fcntl(b, F_GETFD, 0) == FD_CLOEXEC);
   CHECK(fcntl(a, F_GETFL, 0) == (O_RDWR | O_NONBLOCK));
   int alias = dup(a);
+  CHECK(verify_names(a) == 0 && verify_names(b) == 0);
   CHECK(alias >= 0 && fcntl(alias, F_GETFD, 0) == 0);
   struct stat original, duplicate, other;
   CHECK(fstat(a, &original) == 0 && fstat(alias, &duplicate) == 0 &&
@@ -157,7 +189,9 @@ int main(int argc, char **argv) {
   CHECK(send(fds[1], "23", 2, 0) == 2);
   void *result;
   CHECK(pthread_join(thread, &result) == 0 && result == NULL);
-  CHECK(close(fds[0]) == 0 && close(fds[1]) == 0);
+  CHECK(close(fds[1]) == 0);
+  CHECK(verify_names(fds[0]) == 0);
+  CHECK(close(fds[0]) == 0);
   puts("posix-socket-pair: PASS");
   return 0;
 }
