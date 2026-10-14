@@ -31,18 +31,19 @@ mod performance {
 }
 mod util { pub mod log { pub fn release_boot_marker(_:std::fmt::Arguments<'_>){} } }
 struct ExecMeasurement;
+enum ImageLaunch { Bootstrap }
 impl ExecMeasurement {
     fn start()->Self { Self }
     fn finish(self,result:u64)->u64 { result }
 }
 fn exec_with_data(data:&[u8],name:&str,path:&str,args:&[&str],env:&[&str],
     caps:Option<u64>,authorities:Option<u64>,privilege:Option<task::PrivilegeLevel>,
-    identity:Option<()>,handles:&[()],values:&[()],startup:Option<()>,_:&mut ExecMeasurement)->u64 {
+    identity:Option<()>,handles:&[()],values:&[()],launch:ImageLaunch,_:&mut ExecMeasurement)->u64 {
     assert_eq!(data,[1,2,3]); assert_eq!(path,"/chosen/image");
     assert!(["Compiler worker","/opaque/label","任意の名前",""].contains(&name));
     assert!(args.is_empty()&&env.is_empty()&&handles.is_empty()&&values.is_empty());
     assert_eq!((caps,authorities,privilege),(Some(7),Some(9),Some(task::PrivilegeLevel::Service)));
-    assert!(identity.is_none()&&startup.is_none());
+    assert!(identity.is_none()&&matches!(launch,ImageLaunch::Bootstrap));
     CALLS.fetch_add(1,Ordering::Relaxed);
     RESULT.load(Ordering::Relaxed)
 }
