@@ -369,6 +369,24 @@ impl Streams {
     }
 
     pub fn read(&mut self, id: u64, output: &mut [u8]) -> Result<usize, i32> {
+        self.receive(id, output, None)
+    }
+
+    /// Inspect bytes relative to the current receive head without removing them.
+    /// The offset is call-local, not an open-file offset or a retained cursor:
+    /// another reader may advance the head between calls. Inspection does not
+    /// release send capacity or change readiness. Like a normal read, an empty
+    /// queue reports and clears a pending error before reporting EOF.
+    pub fn peek(&mut self, id: u64, offset: usize, output: &mut [u8]) -> Result<usize, i32> {
+        self.receive(id, output, Some(offset))
+    }
+
+    fn receive(
+        &mut self,
+        id: u64,
+        output: &mut [u8],
+        peek_offset: Option<usize>,
+    ) -> Result<usize, i32> {
         let ready = self.readiness(id)?;
         let entry = self.endpoint_mut(id)?;
         if output.is_empty() || entry.read_shutdown {
@@ -377,15 +395,27 @@ impl Streams {
         if entry.peer.is_none() {
             return Err(-107);
         }
-        let count = output.len().min(entry.incoming.len());
-        if count == 0 && entry.error != 0 {
+        let offset = peek_offset.unwrap_or(0);
+        let count = output.len().min(entry.incoming.len().saturating_sub(offset));
+        if entry.incoming.is_empty() && entry.error != 0 {
             return Err(-(std::mem::take(&mut entry.error) as i32));
         }
         if count == 0 && !ready.read_closed {
             return Err(-11);
         }
-        for byte in &mut output[..count] {
-            *byte = entry.incoming.pop_front().unwrap();
+        if count != 0 {
+            if peek_offset.is_some() {
+                for (byte, queued) in output[..count]
+                    .iter_mut()
+                    .zip(entry.incoming.range(offset..offset + count))
+                {
+                    *byte = *queued;
+                }
+            } else {
+                for byte in &mut output[..count] {
+                    *byte = entry.incoming.pop_front().unwrap();
+                }
+            }
         }
         Ok(count)
     }
