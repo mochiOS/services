@@ -10,6 +10,8 @@ struct Reply {
     mismatch: bool,
     attachments: Vec<ObjectHandleAttachment<u32>>,
     transport_error: bool,
+    response_shape: u8,
+    calls: usize,
 }
 #[derive(Clone)]
 struct Mock(Arc<Mutex<Reply>>);
@@ -59,25 +61,174 @@ impl ObjectTransport for Mock {
             wire::decode_name(payload).unwrap();
         }
         handles.clear();
-        let reply = self.0.lock().unwrap();
+        let mut reply = self.0.lock().unwrap();
+        reply.calls += 1;
         for attachment in &reply.attachments {
             handles.push(*attachment).unwrap();
         }
         if reply.transport_error {
             return Err(());
         }
+        match reply.response_shape {
+            1 => return Ok(output.len() + 1),
+            2 => {
+                output[0] = 0;
+                return Ok(1);
+            }
+            _ => {}
+        }
+        let payload = if reply.response_shape == 3 {
+            &[1u8][..]
+        } else {
+            &[]
+        };
         Ok(protocol::encode(
             protocol::Header {
                 opcode: protocol::OP_STATUS,
                 request_id: header.request_id + u64::from(reply.mismatch),
                 status: reply.status,
+                payload_len: payload.len() as u32,
                 ..Default::default()
             },
-            &[],
+            payload,
             output,
         )
         .unwrap())
     }
+}
+
+#[test]
+fn shared_memory_replies_never_close_invalid_duplicate_or_borrowed_handles() {
+    for operation in 0..3 {
+        for writable in [false, true] {
+            let rights = if operation == 1 {
+                wire::mapping_rights(writable)
+            } else {
+                wire::descriptor_rights(writable)
+            };
+            for mode in 0..7 {
+                for incoming in [
+                    vec![],
+                    vec![7],
+                    vec![0],
+                    vec![99],
+                    vec![7, 7],
+                    vec![7, 99, 7, 0],
+                    vec![7, 8, 8, 0],
+                ] {
+                    let state = Arc::new(Mutex::new(Reply {
+                        attachments: incoming
+                            .iter()
+                            .map(|handle| ObjectHandleAttachment {
+                                handle: *handle,
+                                rights,
+                            })
+                            .collect(),
+                        transport_error: mode == 1,
+                        mismatch: mode == 2,
+                        status: if mode == 3 { -13 } else { 0 },
+                        response_shape: match mode {
+                            4 => 1,
+                            5 => 2,
+                            6 => 3,
+                            _ => 0,
+                        },
+                        ..Default::default()
+                    }));
+                    let client = Client::new(Mock(state.clone()));
+                    let mut closed = vec![];
+                    let result = match operation {
+                        0 => client
+                            .open_shared_memory(
+                                wire::Open {
+                                    options: wire::CREATE
+                                        | wire::EXCLUSIVE
+                                        | if writable { wire::READ_WRITE } else { 0 },
+                                    mode: 0o600,
+                                    name: b"/buffer",
+                                },
+                                |handle| closed.push(handle),
+                            )
+                            .map(Some),
+                        1 => client
+                            .shared_memory_backing(
+                                ObjectHandleAttachment {
+                                    handle: 99,
+                                    rights: wire::descriptor_rights(writable),
+                                },
+                                writable,
+                                |handle| closed.push(handle),
+                            )
+                            .map(Some),
+                        _ => client
+                            .unlink_shared_memory(b"/buffer", |handle| closed.push(handle))
+                            .map(|_| None),
+                    };
+                    let accepted = mode == 0
+                        && if operation == 2 {
+                            incoming.is_empty()
+                        } else {
+                            incoming.len() == 1
+                                && incoming[0] != 0
+                                && (operation != 1 || incoming[0] != 99)
+                        };
+                    match mode {
+                        0 if accepted => assert_eq!(
+                            result,
+                            Ok(if operation == 2 {
+                                None
+                            } else {
+                                Some(ObjectHandleAttachment {
+                                    handle: incoming[0],
+                                    rights,
+                                })
+                            })
+                        ),
+                        0 | 2 => assert_eq!(result, Err(ClientError::MismatchedResponse)),
+                        1 => assert_eq!(result, Err(ClientError::Transport(()))),
+                        3 => assert_eq!(result, Err(ClientError::Remote(-13))),
+                        4 | 6 => assert_eq!(result, Err(ClientError::ResponseTooLarge)),
+                        5 => assert!(matches!(result, Err(ClientError::Protocol(_)))),
+                        _ => unreachable!(),
+                    }
+                    let mut expected = vec![];
+                    if !accepted {
+                        for handle in incoming {
+                            if handle != 0
+                                && (operation != 1 || handle != 99)
+                                && !expected.contains(&handle)
+                            {
+                                expected.push(handle);
+                            }
+                        }
+                    }
+                    assert_eq!(
+                        closed, expected,
+                        "operation={operation} mode={mode} writable={writable}"
+                    );
+                    assert_eq!(state.lock().unwrap().calls, 1);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn invalid_mapping_descriptor_is_rejected_before_ipc_or_cleanup() {
+    let state = Arc::new(Mutex::new(Reply::default()));
+    let client = Client::new(Mock(state.clone()));
+    assert_eq!(
+        client.shared_memory_backing(
+            ObjectHandleAttachment {
+                handle: 0,
+                rights: wire::descriptor_rights(true)
+            },
+            false,
+            |_| panic!("borrowed or invalid Handle")
+        ),
+        Err(ClientError::Remote(-13))
+    );
+    assert_eq!(state.lock().unwrap().calls, 0);
 }
 
 #[test]
