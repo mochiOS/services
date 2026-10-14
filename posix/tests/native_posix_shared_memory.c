@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -20,6 +21,11 @@ int main(void) {
   const char *name = "/native-posix-shared-memory";
   int fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
   CHECK(fd >= 0 && (fcntl(fd, F_GETFD, 0) & FD_CLOEXEC));
+  struct stat original, observed;
+  CHECK(fstat(fd, &original) == 0 && original.st_size == 0 &&
+        original.st_nlink == 1);
+  CHECK((original.st_mode & 0777) == 0600 && original.st_uid == geteuid() &&
+        original.st_gid == getegid());
   CHECK(fcntl(fd, F_GETFL, 0) == O_RDWR);
   CHECK(shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600) == -1 &&
         errno == EEXIST);
@@ -31,6 +37,8 @@ int main(void) {
   shared[4096] = 42;
   int reader = shm_open(name, O_RDONLY, 0);
   CHECK(reader >= 0 && ftruncate(reader, 0) == -1 && errno == EBADF);
+  CHECK(fstat(reader, &observed) == 0 && observed.st_ino == original.st_ino &&
+        observed.st_size == 8192);
   CHECK(mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, reader, 0) ==
             MAP_FAILED &&
         errno == EACCES);
@@ -58,9 +66,13 @@ int main(void) {
   CHECK(fcntl(fd, F_SETFL, 0) == 0 && fcntl(alias, F_GETFL, 0) == O_RDWR);
   CHECK(ftruncate(fd, 8192) == 0);
   CHECK(shm_unlink(name) == 0);
+  CHECK(fstat(fd, &observed) == 0 && observed.st_nlink == 0 &&
+        observed.st_ino == original.st_ino);
   CHECK(shm_open(name, O_RDONLY, 0) == -1 && errno == ENOENT);
   int fresh = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
   CHECK(fresh >= 0 && ftruncate(fresh, 4096) == 0);
+  CHECK(fstat(fresh, &observed) == 0 && observed.st_ino != original.st_ino &&
+        observed.st_size == 4096 && observed.st_nlink == 1);
   volatile unsigned char *fresh_map =
       mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fresh, 0);
   CHECK(fresh_map != MAP_FAILED && fresh_map[0] == 0 && shared[0] == 17);
@@ -88,6 +100,6 @@ int main(void) {
       stderr,
       "posix-shared-memory: PASS newlib API, CLOEXEC, shared OFD, permissions, "
       "offset mapping, truncate, unlink lifetime, recreation, shared status "
-      "flags and fork\n");
+      "flags, fstat identity and fork\n");
   return 0;
 }

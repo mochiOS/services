@@ -203,6 +203,54 @@ fn metadata_identity_owner_permissions_and_links_follow_the_object_not_the_name(
         )
         .unwrap();
     assert!(Arc::ptr_eq(&old, &descriptions.metadata(id).unwrap()));
+    descriptions.resize(id, 8193, &mut objects).unwrap();
+    let status = descriptions.status(id, &mut objects).unwrap();
+    assert_eq!(
+        (
+            status.uid,
+            status.gid,
+            status.mode,
+            status.size,
+            status.inode,
+            status.link_count
+        ),
+        (501, 20, 0o100640, 8193, old.inode, 1)
+    );
+    assert_eq!(status.blocks, 0); // No false allocated-block count from logical length.
+    use mnu_abi::provider;
+    for (input, capacity, expected) in [
+        (&[][..], protocol::FILE_STATUS_LEN as u32, 0),
+        (&[0][..], protocol::FILE_STATUS_LEN as u32, -22),
+        (&[][..], 0, -22),
+    ] {
+        let mut frame = vec![0; provider::REQUEST_HEADER_LEN + input.len()];
+        provider::RequestHeader {
+            opcode: provider::OP_CONTROL,
+            object_id: id,
+            argument: 0,
+            basis: wire::CONTROL_STAT,
+            length: capacity,
+            data_length: input.len() as u32,
+        }
+        .encode(input, &mut frame)
+        .unwrap();
+        let mut reply = vec![0; provider::RESPONSE_HEADER_LEN + protocol::FILE_STATUS_LEN];
+        let count = posix_service::shared_memory_file::handle_provider_request(
+            &mut descriptions,
+            &frame,
+            mnu_abi::IPC_DELIVERY_NATIVE_OBJECT,
+            0,
+            &mut objects,
+            &mut reply,
+        )
+        .unwrap()
+        .unwrap();
+        let (header, data) = provider::ResponseHeader::decode(&reply[..count]).unwrap();
+        assert_eq!(header.status, expected);
+        if expected == 0 {
+            assert_eq!(protocol::decode_file_status(data), Ok(status));
+        }
+    }
     old.attributes.lock().unwrap().mode = 0;
     assert_eq!(
         service.open_shared_memory(peer, b"/metadata", options, &mut objects),
@@ -213,6 +261,16 @@ fn metadata_identity_owner_permissions_and_links_follow_the_object_not_the_name(
     let owner = service.unlink_shared_memory(peer, b"/metadata").unwrap();
     Delegation::close(&mut objects, owner).unwrap();
     assert_eq!(old.links(), 0);
+    let unlinked = descriptions.status(id, &mut objects).unwrap();
+    assert_eq!(
+        (
+            unlinked.inode,
+            unlinked.link_count,
+            unlinked.mode,
+            unlinked.size
+        ),
+        (old.inode, 0, 0o100600, 8193)
+    );
     assert!(Arc::ptr_eq(&old, &descriptions.metadata(id).unwrap()));
     let fresh = service
         .open_shared_memory(peer, b"/metadata", options, &mut objects)

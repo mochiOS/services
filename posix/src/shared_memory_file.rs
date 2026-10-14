@@ -90,6 +90,31 @@ impl<H: Copy> Descriptions<H> {
             .ok_or(-9)
     }
 
+    pub fn status<B: Backing<H>>(
+        &self,
+        id: u64,
+        backend: &mut B,
+    ) -> Result<mochios_posix_protocol::FileStatus, i32> {
+        let metadata = self.metadata(id)?;
+        let attributes = *metadata.attributes.lock().map_err(|_| -5)?;
+        let size = i64::try_from(self.length(id, backend)?).map_err(|_| -75)?;
+        Ok(mochios_posix_protocol::FileStatus {
+            // A service-owned virtual namespace, not a kernel device or path.
+            device: 0x534d,
+            inode: metadata.inode,
+            mode: 0o100000 | attributes.mode,
+            link_count: metadata.links(),
+            uid: attributes.owner,
+            gid: attributes.group,
+            size,
+            block_size: 4096,
+            // POSIX shared-memory fstat requires uid/gid/size/permission bits.
+            // No resident-page accounting or timestamp tracking is exposed:
+            // do not invent allocated blocks from the sparse logical extent.
+            ..Default::default()
+        })
+    }
+
     pub fn release<B: Backing<H>>(&mut self, id: u64, backend: &mut B) -> Result<(), i32> {
         let entry = self.entries.get(&id).ok_or(-9)?;
         backend.close(entry.backing)?;
@@ -379,10 +404,25 @@ pub fn handle_provider_request<H: Copy, B: Backing<H>>(
                             .set_status_flags(header.object_id, flags)
                             .map(|_| (0, Vec::new()))
                     }
+                    wire::CONTROL_STAT
+                        if payload.is_empty()
+                            && header.length as usize
+                                == mochios_posix_protocol::FILE_STATUS_LEN =>
+                    {
+                        descriptions
+                            .status(header.object_id, backend)
+                            .and_then(|status| {
+                                let mut data = vec![0; mochios_posix_protocol::FILE_STATUS_LEN];
+                                mochios_posix_protocol::encode_file_status(status, &mut data)
+                                    .map_err(|_| -5)?;
+                                Ok((data.len() as u64, data))
+                            })
+                    }
                     wire::CONTROL_LENGTH
                     | wire::CONTROL_RESIZE
                     | wire::CONTROL_GET_FLAGS
-                    | wire::CONTROL_SET_FLAGS => Err(-22),
+                    | wire::CONTROL_SET_FLAGS
+                    | wire::CONTROL_STAT => Err(-22),
                     _ => Err(-95),
                 }
             }
