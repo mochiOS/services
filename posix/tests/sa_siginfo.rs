@@ -61,7 +61,7 @@ fn dispatch_requires_real_delivery_metadata_and_finishes_bookkeeping_before_rest
         .next()
         .unwrap();
     assert!(dispatch.contains(".signal_delivery_origin(delivery)"));
-    assert!(dispatch.contains("signal_stack::invoke(control, action, signal, info.as_mut(), context, native)"));
+    assert!(dispatch.contains("signal_stack::invoke(") && dispatch.contains("preparation"));
     let stack = include_str!("../../../user/crates/newlib-runtime/src/signal_stack.rs");
     let compact: String = stack.chars().filter(|ch| !ch.is_whitespace()).collect();
     assert!(compact.contains("function(invocation.signal,info,"));
@@ -78,8 +78,11 @@ fn dispatch_requires_real_delivery_metadata_and_finishes_bookkeeping_before_rest
     assert!(scoped.contains("ThreadUpcallInspect"));
     assert!(scoped.contains("ThreadUpcallReturnContext"));
     assert!(!scoped.contains("ThreadUpcallReturn,"));
-    assert!(source.contains("dispatch_signal(delivery, None, context, native)"));
+    assert!(source.contains("dispatch_signal(delivery, None, context, native, &mut preparation)"));
     let fault = include_str!("../../../user/crates/newlib-runtime/src/fault_signal.rs");
-    assert!(fault.contains("dispatch_signal(fault.signal, Some(info), context, true)"));
+    let compact: String = fault.chars().filter(|ch| !ch.is_whitespace()).collect();
+    assert!(
+        compact.contains("dispatch_signal(fault.signal,Some(info),context,true,&mutpreparation)")
+    );
     assert!(scoped.contains("if delivered.is_ok()"));
 }

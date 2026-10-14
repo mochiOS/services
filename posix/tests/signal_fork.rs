@@ -65,7 +65,7 @@ fn copied_handlers_never_complete_parent_tokens_or_free_live_native_frames() {
         .split("extern \"C\" fn posix_signal_upcall(")
         .next()
         .unwrap();
-    let owner = drain.find("let epoch = FORK_EPOCH").unwrap();
+    let owner = drain.find("let epoch = preparation.epoch").unwrap();
     let received = drain.find("thread_dequeue_signal_delivery()").unwrap();
     let invoke = drain.find("dispatch_signal(delivery").unwrap();
     let before = drain.find("!= epoch").unwrap();

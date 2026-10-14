@@ -113,6 +113,20 @@ static int runtime_reentry(void) {
     puts("upcall-defer: runtime dup/close reentry across 32 acknowledged asynchronous handlers PASS");
     return 0;
 }
+static int default_stop_reentry(void) {
+    pid_t child = fork(); CHECK(child >= 0);
+    if (!child) {
+        if (raise(SIGSTOP)) _exit(97);
+        _exit(37);
+    }
+    int status;
+    CHECK(waitpid(child, &status, WUNTRACED) == child && WIFSTOPPED(status)
+        && WSTOPSIG(status) == SIGSTOP);
+    CHECK(kill(child, SIGCONT) == 0);
+    CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 37);
+    puts("upcall-defer: prepared default stop resumes on SIGCONT PASS");
+    return 0;
+}
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--after-exec"))
         return signal_fork_regression_main(argc, argv);
@@ -125,6 +139,7 @@ int main(int argc, char **argv) {
     CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 37);
     CHECK(sigprocmask(SIG_UNBLOCK, &mask, NULL) == 0);
     CHECK(runtime_reentry() == 0);
+    CHECK(default_stop_reentry() == 0);
     CHECK(signal_fork_regression_main(argc, argv) == 0);
     puts("upcall-defer: PASS native deferral, runtime reentry and complete signal/fork regressions");
     return 0;

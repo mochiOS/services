@@ -27,6 +27,12 @@ mod posix_protocol {
 impl SigInfo{fn memory_fault(_:u64,_:usize)->Result<Self,()>{Ok(Self{si_signo:11})}}
 mod mochios_posix_client {pub mod signal_context{pub type SigInfo=crate::SigInfo;}}
 struct UContext;
+struct ThreadControl;static CONTROL:ThreadControl=ThreadControl;
+struct Preparation{epoch:u64,started:bool}
+impl Preparation{
+    fn new(_:&'static ThreadControl)->Result<Self,i32>{Ok(Self{epoch:FORK_EPOCH.load(Ordering::Acquire),started:false})}
+    fn started(&self)->bool{self.started}
+}
 struct FaultDelivery {signal:posix_protocol::SignalDelivery,disposition:u32}
 struct Client;static CLIENT:Client=Client;
 fn copied_child(){OWNER.fetch_add(1,Ordering::AcqRel);FORK_EPOCH.fetch_add(1,Ordering::AcqRel);}
@@ -34,7 +40,7 @@ fn native_process_id()->Result<u64,NativeError>{Ok(OWNER.load(Ordering::Acquire)
 struct NativeError;impl NativeError{fn raw(self)->i64{-5}}
 fn map_kernel_errno(_:i64)->i32{5}
 fn map_posix_client_error(error:i32)->i32{error}
-fn register_current_thread()->Option<()>{Some(())}
+fn register_current_thread()->Option<((),&'static ThreadControl)>{Some(((),&CONTROL))}
 fn process_exit(_:i32)->!{panic!("unexpected process exit")}
 fn posix_client()->Result<&'static Client,i32>{
     if MODE.load(Ordering::Acquire)==12 && CLIENTS.fetch_add(1,Ordering::AcqRel)==0{
@@ -68,10 +74,13 @@ impl Client{
     }
     fn report_process_signaled(&self,_:posix_protocol::SignalDelivery)->Result<(),i32>{panic!("unexpected fatal report")}
 }
-fn dispatch_signal(delivery:posix_protocol::SignalDelivery,info:Option<SigInfo>,_:&mut UContext,_:bool)->Result<i32,i32>{
+fn dispatch_signal(delivery:posix_protocol::SignalDelivery,info:Option<SigInfo>,_:&mut UContext,_:bool,preparation:&mut Preparation)->Result<i32,i32>{
     assert_eq!(delivery.token,OWNER.load(Ordering::Acquire),"dispatched another image's token");
     assert_eq!(info.is_some(),FAULT.load(Ordering::Acquire)!=0);
     let call=DISPATCHES.fetch_add(1,Ordering::AcqRel);
+    if MODE.load(Ordering::Acquire)==18 && call==0{copied_child();return Err(5)}
+    if MODE.load(Ordering::Acquire)==19{return Err(5)}
+    preparation.started=!matches!(MODE.load(Ordering::Acquire),8|9|10|14|17);
     match MODE.load(Ordering::Acquire){
         4|5 if call==0=>{copied_child();if MODE.load(Ordering::Acquire)==5{Err(22)}else{Ok(0)}}
         8|14|17=>Ok(1),9=>Ok(3),10=>Ok(2),_=>Ok(0)
@@ -100,20 +109,20 @@ fn reset(mode:u32,fault:bool){
     for value in [&REQUESTS,&DISPATCHES,&COMPLETIONS,&DEFAULTS,&CLIENTS]{value.store(0,Ordering::Release)}
 }
 fn main(){
-    for mode in [0,1,2,3,4,5,6,7,8,9,10,12,13,14,15,16,17] {
+    for mode in [0,1,2,3,4,5,6,7,8,9,10,12,13,14,15,16,17,18,19] {
         reset(mode,false);
         let result=drain_pending_signals_with_context(&mut UContext,false);
-        assert_eq!(result,match mode{5|10=>Err(22),6|15|17=>Err(5),_=>Ok(())},"queued mode {mode}");
+        assert_eq!(result,match mode{5|10=>Err(22),6|15|17|19=>Err(5),_=>Ok(())},"queued mode {mode}");
         let completed=match mode{5|6|7|8|14|17=>0,_=>1};
         assert_eq!(COMPLETIONS.load(Ordering::Acquire),completed,"queued mode {mode}");
         assert_eq!(DEFAULTS.load(Ordering::Acquire),if matches!(mode,8|14|17){1}else{0});
         if matches!(mode,1|2|3) {assert_eq!(DISPATCHES.load(Ordering::Acquire),1)}
     }
-    for mode in [0,1,2,4,5,6,11,13,15,16] {
+    for mode in [0,1,2,4,5,6,11,13,15,16,18,19] {
         reset(mode,true);
         let result=deliver(1,0,&mut UContext);
-        assert_eq!(result,match mode{5=>Err(22),6|11|15=>Err(5),_=>Ok(())},"fault mode {mode}");
-        assert_eq!(COMPLETIONS.load(Ordering::Acquire),if matches!(mode,0|1|2|13|15|16){1}else{0},"fault mode {mode}");
+        assert_eq!(result,match mode{5=>Err(22),6|11|15|19=>Err(5),_=>Ok(())},"fault mode {mode}");
+        assert_eq!(COMPLETIONS.load(Ordering::Acquire),if matches!(mode,0|1|2|13|15|16|18|19){1}else{0},"fault mode {mode}");
         if matches!(mode,1|2) {assert_eq!(REQUESTS.load(Ordering::Acquire),2)}
     }
 }
