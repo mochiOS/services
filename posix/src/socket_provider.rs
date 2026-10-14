@@ -6,6 +6,24 @@ use crate::socket::{Shutdown, Streams};
 use mnu_abi::provider;
 use mochios_posix_protocol::socket as wire;
 
+/// Native readiness means an operation can complete, including EOF/EPIPE.
+/// POSIX poll must inspect CONTROL_READINESS to distinguish those outcomes.
+pub fn native_signals(ready: crate::socket::Readiness) -> u64 {
+    (if ready.readable {
+        mnu_abi::HANDLE_SIGNAL_READABLE
+    } else {
+        0
+    }) | (if ready.writable || ready.write_closed {
+        mnu_abi::HANDLE_SIGNAL_WRITABLE
+    } else {
+        0
+    }) | (if ready.read_closed && ready.write_closed {
+        mnu_abi::HANDLE_SIGNAL_PEER_CLOSED
+    } else {
+        0
+    })
+}
+
 pub fn handle_provider_request(
     streams: &mut Streams,
     request: &[u8],

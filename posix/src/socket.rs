@@ -105,6 +105,10 @@ impl Streams {
     pub fn credentials(&self, id: u64) -> Result<(u32, u32), i32> {
         Ok(self.endpoint(id)?.credentials)
     }
+    /// Internal Provider IDs affected by an operation, not transferable authority.
+    pub fn affected(&self, id: u64) -> Result<[u64; 2], i32> {
+        Ok([id, self.endpoint(id)?.peer])
+    }
     pub fn options(&self, id: u64) -> Result<u32, i32> {
         Ok(self.endpoint(id)?.options)
     }

@@ -1,0 +1,237 @@
+//! Socket objects owned by a dedicated native Provider endpoint thread.
+
+use mochi_user_platform as platform;
+use mochios_posix_protocol::socket as wire;
+use posix_service::{
+    PosixService,
+    socket::Streams,
+    socket_provider::{handle_provider_request, native_signals},
+};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicI64, Ordering},
+};
+
+const CREATE_MAGIC: &[u8; 4] = b"SOPA";
+const CREATE_LEN: usize = 12 + wire::CREATE_LEN;
+
+pub fn start(service: Arc<Mutex<PosixService<u32>>>) -> Result<u32, i64> {
+    let startup = Arc::new(AtomicI64::new(0));
+    let worker_startup = Arc::clone(&startup);
+    std::thread::Builder::new()
+        .name("posix-socket-provider".to_owned())
+        .spawn(move || {
+            let result = platform::ipc::create_handle().and_then(|endpoint| {
+                platform::process::current_execution_identity()
+                    .map(|identity| (endpoint, identity.process_id))
+            });
+            match result {
+                Ok((endpoint, process_id)) => {
+                    worker_startup.store(i64::from(endpoint), Ordering::Release);
+                    run(endpoint, process_id, service);
+                }
+                Err(error) => worker_startup.store(error.raw(), Ordering::Release),
+            }
+        })
+        .map_err(|_| -5)?;
+    loop {
+        match startup.load(Ordering::Acquire) {
+            0 => platform::thread::yield_now(),
+            error if error < 0 => return Err(error),
+            endpoint => return u32::try_from(endpoint).map_err(|_| -5),
+        }
+    }
+}
+
+/// Called by the service dispatcher only after kernel sender authentication.
+/// Never hold the service state mutex across this RPC.
+pub fn create_pair(
+    endpoint: u32,
+    process_id: u64,
+    create: wire::Create,
+) -> Result<Vec<posix_service::OpenedObject<u32>>, i32> {
+    let mut request = [0; CREATE_LEN];
+    request[..4].copy_from_slice(CREATE_MAGIC);
+    request[4..12].copy_from_slice(&process_id.to_le_bytes());
+    create.encode(&mut request[12..]).map_err(|_| -22)?;
+    let mut attachments = platform::ipc::IpcObjectHandles::default();
+    let mut response = [0; 4];
+    let length =
+        platform::ipc::call_object_handles(endpoint, &request, &mut response, &mut attachments)
+            .map_err(|error| error.raw() as i32)?;
+    let result = (|| {
+        if length as u32 != 4 || attachments.delivery_flags != 0 {
+            return Err(-5);
+        }
+        let status = i32::from_le_bytes(response);
+        if status != 0 {
+            return Err(status);
+        }
+        if attachments.count != 2
+            || attachments.handles[..2].iter().any(|attachment| {
+                attachment.handle == 0
+                    || attachment.reserved != 0
+                    || attachment.rights != wire::descriptor_rights()
+            })
+        {
+            return Err(-5);
+        }
+        Ok(attachments.handles[..2]
+            .iter()
+            .map(|attachment| posix_service::OpenedObject {
+                handle: attachment.handle,
+                rights: attachment.rights,
+            })
+            .collect())
+    })();
+    if result.is_err() {
+        for attached in attachments.handles.iter().take(attachments.count as usize) {
+            let _ = platform::handle::close(attached.handle);
+        }
+    }
+    result
+}
+
+fn signal(streams: &Streams, ids: [u64; 2]) {
+    const SIGNALS: u64 = mnu_abi::HANDLE_SIGNAL_READABLE
+        | mnu_abi::HANDLE_SIGNAL_WRITABLE
+        | mnu_abi::HANDLE_SIGNAL_PEER_CLOSED;
+    for id in ids {
+        if let Ok(ready) = streams.readiness(id) {
+            let set = native_signals(ready);
+            if let Err(error) = platform::handle::signal_provider_object(id, set, SIGNALS & !set) {
+                // A final close can race notification; no remaining observer.
+                if error.raw() != -9 {
+                    platform::logln!(
+                        "posix.service: socket readiness failed errno={}",
+                        error.raw()
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>>>) -> ! {
+    use mnu_abi::provider;
+    let mut streams = Streams::new();
+    let mut request = vec![0; provider::REQUEST_HEADER_LEN + provider::MAX_DATA_LEN];
+    let mut response = vec![0; provider::RESPONSE_HEADER_LEN + provider::MAX_DATA_LEN];
+    loop {
+        let mut attachments = platform::ipc::IpcObjectHandles::default();
+        let message = match platform::ipc::wait_object_handles(
+            u64::from(endpoint),
+            &mut request,
+            &mut attachments,
+        ) {
+            Ok(message) => message,
+            Err(_) => {
+                platform::thread::yield_now();
+                continue;
+            }
+        };
+        let sender = message >> 32;
+        let bytes = &request[..(message as u32 as usize).min(request.len())];
+        if bytes.starts_with(CREATE_MAGIC) {
+            let result = (|| {
+                // Only the authenticated service dispatcher may nominate a process.
+                if bytes.len() != CREATE_LEN
+                    || attachments.count != 0
+                    || attachments.delivery_flags != mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE
+                {
+                    return Err(-22);
+                }
+                if platform::ipc::endpoint_owner_process(sender).ok() != Some(service_process) {
+                    return Err(-13);
+                }
+                let process_id = u64::from_le_bytes(bytes[4..12].try_into().unwrap());
+                let create = wire::Create::decode(&bytes[12..]).map_err(|_| -22)?;
+                let ids = {
+                    let state = service.lock().map_err(|_| -5)?;
+                    let peer = state.registered_peer(process_id).ok_or(-1)?;
+                    state.create_socket_pair(peer, create, &mut streams)?
+                };
+                let mut handles = [0; 2];
+                for (index, id) in ids.into_iter().enumerate() {
+                    match platform::handle::create_provider_object(
+                        endpoint,
+                        id,
+                        wire::descriptor_rights(),
+                    ) {
+                        Ok(handle) => handles[index] = handle,
+                        Err(error) => {
+                            for handle in handles {
+                                if handle != 0 {
+                                    let _ = platform::handle::close(handle);
+                                }
+                            }
+                            for id in ids {
+                                let _ = streams.release(id);
+                            }
+                            return Err(error.raw() as i32);
+                        }
+                    }
+                }
+                signal(&streams, ids);
+                Ok(handles)
+            })();
+            match result {
+                Ok(handles) => {
+                    let mut outgoing = platform::ipc::IpcObjectHandles::default();
+                    outgoing.count = 2;
+                    for (slot, handle) in outgoing.handles.iter_mut().zip(handles) {
+                        *slot = platform::ipc::IpcObjectHandle {
+                            handle,
+                            reserved: 0,
+                            rights: wire::descriptor_rights(),
+                        };
+                    }
+                    let _ =
+                        platform::ipc::reply_object_handles(sender, &0i32.to_le_bytes(), &outgoing);
+                    for handle in handles {
+                        let _ = platform::handle::close(handle);
+                    }
+                }
+                Err(error) => {
+                    let _ = platform::ipc::reply(sender, &error.to_le_bytes());
+                }
+            }
+        } else {
+            let affected = provider::RequestHeader::decode(bytes)
+                .ok()
+                .and_then(|(header, _)| streams.affected(header.object_id).ok());
+            let result = handle_provider_request(
+                &mut streams,
+                bytes,
+                attachments.delivery_flags,
+                attachments.count,
+                &mut response,
+            );
+            if let Some(ids) = affected {
+                signal(&streams, ids);
+            }
+            match result {
+                Ok(Some(length)) => {
+                    let _ = platform::ipc::reply(sender, &response[..length]);
+                }
+                Ok(None) => (),
+                // Rollback of failed object creation may enqueue a late release.
+                Err(-9)
+                    if provider::RequestHeader::decode(bytes)
+                        .is_ok_and(|(header, _)| header.opcode == provider::OP_RELEASE)
+                        && attachments.delivery_flags == mnu_abi::IPC_DELIVERY_NATIVE_OBJECT
+                        && attachments.count == 0 =>
+                {
+                    ()
+                }
+                Err(error) => platform::logln!(
+                    "posix.service: socket provider rejected request errno={}",
+                    error
+                ),
+            }
+        }
+        for attached in attachments.handles.iter().take(attachments.count as usize) {
+            let _ = platform::handle::close(attached.handle);
+        }
+    }
+}

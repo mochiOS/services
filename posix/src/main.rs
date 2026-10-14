@@ -11,6 +11,9 @@ mod shared_memory_native;
 mod shared_memory_provider;
 
 #[cfg(target_os = "mochios")]
+mod socket_native;
+
+#[cfg(target_os = "mochios")]
 const PTY_SYNC_MAGIC: [u8; 4] = *b"PTYS";
 
 #[cfg(target_os = "mochios")]
@@ -54,6 +57,13 @@ fn main() {
         }
     };
     let service_state = Arc::new(Mutex::new(PosixService::new()));
+    let socket_endpoint = match socket_native::start(Arc::clone(&service_state)) {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            platform::logln!("posix.service: socket provider startup failed errno={}", error);
+            platform::process::exit(1);
+        }
+    };
     let provider_endpoint_handle = match start_pty_provider(
         Arc::clone(&ptys),
         Arc::clone(&service_state),
@@ -273,6 +283,38 @@ fn main() {
         } else {
             None
         };
+        let opened_socket = if let (Some(peer), Some((header, payload)), true) =
+            (peer, decoded, attachments_valid)
+        {
+            if header.opcode == protocol::OP_SOCKET_PAIR {
+                let result = if header.flags != 0
+                    || header.status != 0
+                    || !attachments.is_empty()
+                {
+                    Err(-22)
+                } else {
+                    protocol::socket::Create::decode(payload)
+                        .map_err(|_| -22)
+                        .and_then(|create| {
+                            socket_native::create_pair(socket_endpoint, peer.process_id, create)
+                        })
+                };
+                Some(match result {
+                    Ok(handles) => posix_service::ObjectResponse {
+                        response: status_response(header.request_id, 0),
+                        handles,
+                    },
+                    Err(error) => posix_service::ObjectResponse {
+                        response: status_response(header.request_id, error),
+                        handles: Vec::new(),
+                    },
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let mut service = service_state.lock().unwrap();
         if attachments_valid
             && attachments.is_empty()
@@ -283,6 +325,9 @@ fn main() {
         }
         let mut retained_handle = None;
         let object_response = match (peer, decoded, attachments_valid) {
+            (Some(_), Some((header, _)), true) if header.opcode == protocol::OP_SOCKET_PAIR => {
+                opened_socket
+            }
             (Some(_peer), Some((header, payload)), true)
                 if header.opcode == protocol::OP_SHARED_MEMORY_BACKING =>
             {

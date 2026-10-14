@@ -265,3 +265,34 @@ fn socket_handle_authority_excludes_seek_and_mapping() {
         0
     );
 }
+
+#[test]
+fn native_wait_signals_include_terminal_completion_without_conflating_half_close() {
+    use posix_service::{socket::Readiness, socket_provider::native_signals};
+    for read_closed in [false, true] {
+        for write_closed in [false, true] {
+            let ready = Readiness {
+                readable: read_closed,
+                writable: !write_closed,
+                read_closed,
+                write_closed,
+            };
+            let signals = native_signals(ready);
+            assert_eq!(signals & mnu_abi::HANDLE_SIGNAL_READABLE != 0, read_closed);
+            assert_ne!(signals & mnu_abi::HANDLE_SIGNAL_WRITABLE, 0);
+            assert_eq!(
+                signals & mnu_abi::HANDLE_SIGNAL_PEER_CLOSED != 0,
+                read_closed && write_closed
+            );
+        }
+    }
+    assert_eq!(
+        native_signals(Readiness {
+            readable: false,
+            writable: false,
+            read_closed: false,
+            write_closed: false
+        }),
+        0
+    );
+}
