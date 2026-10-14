@@ -213,6 +213,43 @@ static int named_datagrams(void) {
   CHECK(connect(client, (struct sockaddr *)&addresses[1], lengths[1]) == 0);
   CHECK(send(client, "replacement", 11, 0) == 11 &&
         recv(replacement, d_output, 20, 0) == 11);
+  struct sockaddr unspecified = {.sa_family = AF_UNSPEC};
+  int alias = dup(client);
+  CHECK(alias >= 0 && fcntl(alias, F_SETFL, O_NONBLOCK) == 0);
+  struct timeval timeout = {0, 7000}, observed;
+  CHECK(setsockopt(alias, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0);
+  CHECK(sendto(replacement, "discard", 7, 0,
+               (struct sockaddr *)&addresses[2], lengths[2]) == 7);
+  CHECK(connect(alias, &unspecified, sizeof(unspecified)) == 0);
+  source_length = sizeof(source);
+  CHECK(getpeername(client, (struct sockaddr *)&source, &source_length) == -1 &&
+        errno == ENOTCONN);
+  source_length = sizeof(source);
+  CHECK(getsockname(client, (struct sockaddr *)&source, &source_length) == 0 &&
+        !strcmp(source.sun_path, paths[2]));
+  CHECK((fcntl(client, F_GETFL, 0) & O_NONBLOCK) != 0);
+  socklen_t option_length = sizeof(observed);
+  CHECK(getsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &observed, &option_length) == 0 &&
+        observed.tv_sec == 0 && observed.tv_usec == 7000);
+  CHECK(recv(client, d_output, 1, 0) == -1 && errno == EAGAIN);
+  CHECK(send(client, "x", 1, 0) == -1 && errno == EDESTADDRREQ);
+  // first still addresses client, but was rejected by its former peer filter.
+  CHECK(send(first, "other", 5, 0) == 5);
+  CHECK(connect(alias, &unspecified, sizeof(unspecified.sa_family)) == 0);
+  CHECK(recv(client, d_output, 20, 0) == 5 && !memcmp(d_output, "other", 5));
+  CHECK(sendto(client, "explicit", 8, 0,
+               (struct sockaddr *)&addresses[1], lengths[1]) == 8 &&
+        recv(replacement, d_output, 20, 0) == 8);
+  CHECK(connect(client, (struct sockaddr *)&addresses[1], lengths[1]) == 0);
+  CHECK(send(client, "again", 5, 0) == 5 && recv(replacement, d_output, 20, 0) == 5);
+  CHECK(shutdown(client, SHUT_RDWR) == 0);
+  CHECK(connect(alias, &unspecified, sizeof(unspecified)) == 0);
+  CHECK(recv(client, d_output, 1, 0) == 0);
+  CHECK(send(client, "x", 1, MSG_NOSIGNAL) == -1 && errno == EPIPE);
+  CHECK(close(alias) == 0);
+  puts("posix-datagram: PASS AF_UNSPEC disconnect, shared dup, retained binding/options, "
+       "queue discard, idempotence, filter removal, reconnect, shutdown");
+  fflush(stdout);
   CHECK(close(first) == 0 && close(client) == 0 && close(replacement) == 0);
   for (unsigned i = 0; i < 3; i++)
     CHECK(unlink(paths[i]) == 0);

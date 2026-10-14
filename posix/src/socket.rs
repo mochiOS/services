@@ -684,6 +684,19 @@ impl Streams {
         self.entries.iter().filter(move |entry| entry.records.is_some() && entry.peer == Some(destination)).map(|entry| entry.id)
     }
 
+    /// Disconnect only the peer association. Do not undo bind, nonblocking,
+    /// timeouts or shutdown. An already-unconnected socket keeps any newly
+    /// received datagrams: a repeated disconnect is an idempotent no-op.
+    pub fn disconnect_datagram(&mut self, id: u64) -> Result<(), i32> {
+        let entry = self.endpoint_mut(id)?;
+        let records = entry.records.as_mut().ok_or(-95)?;
+        if entry.peer.take().is_some() {
+            records.clear();
+        }
+        entry.peer_name = None;
+        Ok(())
+    }
+
     /// Description IDs are private; the adapter resolves the listener through
     /// an authorized, retained filesystem object rather than a client ID/path.
     pub fn connect(&mut self, client: u64, listener: u64) -> Result<u64, i32> {

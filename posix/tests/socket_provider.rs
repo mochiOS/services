@@ -6,6 +6,10 @@ use posix_service::{
 };
 
 fn fixture() -> (Streams, [u64; 2]) {
+    fixture_kind(Kind::Stream)
+}
+
+fn fixture_kind(kind: Kind) -> (Streams, [u64; 2]) {
     let mut service = PosixService::<u32>::new();
     service
         .initialize_bootstrap_process(
@@ -28,7 +32,7 @@ fn fixture() -> (Streams, [u64; 2]) {
             },
             Create {
                 domain: Domain::Unix,
-                kind: Kind::Stream,
+                kind,
                 protocol: 0,
                 options: 0,
             },
@@ -36,6 +40,35 @@ fn fixture() -> (Streams, [u64; 2]) {
         )
         .unwrap();
     (streams, ids)
+}
+
+#[test]
+fn disconnect_requires_authenticated_empty_control_and_rejects_streams() {
+    let flags = mnu_abi::IPC_DELIVERY_NATIVE_OBJECT;
+    let (mut streams, [a, _]) = fixture_kind(Kind::Datagram);
+    let disconnect = frame(provider::OP_CONTROL, a, wire::CONTROL_DISCONNECT, 0, &[]);
+    assert_eq!(call(&mut streams, &disconnect, 0, 0).0.status, -13);
+    assert_eq!(call(&mut streams, &disconnect, flags, 1).0.status, -22);
+    for (length, payload) in [(1, &[][..]), (0, &b"x"[..])] {
+        let invalid = frame(
+            provider::OP_CONTROL,
+            a,
+            wire::CONTROL_DISCONNECT,
+            length,
+            payload,
+        );
+        assert_eq!(call(&mut streams, &invalid, flags, 0).0.status, -22);
+        assert!(streams.peer_address(a).is_ok());
+    }
+    let (reply, bytes) = call(&mut streams, &disconnect, flags, 0);
+    assert_eq!((reply.status, reply.value), (0, 0));
+    assert!(bytes.is_empty());
+    assert_eq!(streams.peer_address(a), Err(-107));
+    assert_eq!(call(&mut streams, &disconnect, flags, 0).0.status, 0);
+    let (mut streams, [a, _]) = fixture();
+    let disconnect = frame(provider::OP_CONTROL, a, wire::CONTROL_DISCONNECT, 0, &[]);
+    assert_eq!(call(&mut streams, &disconnect, flags, 0).0.status, -95);
+    assert!(streams.peer_address(a).is_ok());
 }
 
 fn frame(opcode: u16, object_id: u64, basis: u64, length: u32, payload: &[u8]) -> Vec<u8> {

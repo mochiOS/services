@@ -2,6 +2,27 @@ use mochios_posix_client::socket::{MAX_SOCKADDR_LEN, decode_sockaddr, encode_soc
 use mochios_posix_protocol::socket::Address;
 
 #[test]
+fn unspecified_family_is_a_connect_selector_not_a_bind_or_send_address() {
+    use mochios_posix_client::socket::{decode_connect_sockaddr, ConnectAddress};
+    for bytes in [&[0, 0][..], &[0; 16][..], &[0; MAX_SOCKADDR_LEN][..]] {
+        assert_eq!(
+            decode_connect_sockaddr(bytes),
+            Ok(ConnectAddress::Disconnect)
+        );
+        assert_eq!(decode_sockaddr(bytes), Err(-97));
+    }
+    for bytes in [&[][..], &[0][..], &[0; MAX_SOCKADDR_LEN + 1][..]] {
+        assert_eq!(decode_connect_sockaddr(bytes), Err(-22));
+    }
+    assert_eq!(
+        decode_connect_sockaddr(b"\x01\x00/socket\x00"),
+        Ok(ConnectAddress::Peer(Address::UnixPath(b"/socket")))
+    );
+    assert_eq!(decode_connect_sockaddr(&[2, 0]), Err(-22));
+    assert_eq!(decode_connect_sockaddr(&[255, 255]), Err(-97));
+}
+
+#[test]
 fn unix_names_preserve_terminators_abstract_binary_names_and_unnamed_length() {
     let mut bytes = [0xff; MAX_SOCKADDR_LEN];
     assert_eq!(encode_sockaddr(Address::UnixUnnamed, &mut bytes), Ok(2));

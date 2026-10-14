@@ -190,6 +190,9 @@ pub fn handle_provider_request(
                         .set_options(header.object_id, options)
                         .map(|_| (0, 0))
                 }
+                wire::CONTROL_DISCONNECT if payload.is_empty() && header.length == 0 => {
+                    streams.disconnect_datagram(header.object_id).map(|_| (0, 0))
+                }
                 wire::CONTROL_SHUTDOWN if payload.len() == 4 && header.length == 0 => {
                     let how = match u32::from_le_bytes(payload.try_into().unwrap()) {
                         wire::SHUTDOWN_READ => Some(Shutdown::Read),
@@ -244,6 +247,7 @@ pub fn handle_provider_request(
                 | wire::CONTROL_SET_SEND_TIMEOUT
                 | wire::CONTROL_SET_OPTIONS
                 | wire::CONTROL_SHUTDOWN
+                | wire::CONTROL_DISCONNECT
                 | wire::CONTROL_READINESS => Err(-22),
                 wire::CONTROL_STAT | wire::CONTROL_LOCAL_ADDRESS | wire::CONTROL_PEER_ADDRESS => {
                     Err(-22)

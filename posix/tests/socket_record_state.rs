@@ -24,6 +24,129 @@ impl RecordBuffer for Buffer {
 }
 
 #[test]
+fn disconnect_drops_old_records_but_preserves_options_binding_and_shutdown() {
+    use mochios_posix_protocol::socket::{Address, NONBLOCKING};
+    use posix_service::socket_receive_wait::ReceiveWaits;
+    let mut service = PosixService::new();
+    service
+        .initialize_bootstrap_process(
+            AuthenticatedProcess {
+                handle: 1u32,
+                process_id: 1,
+            },
+            501,
+            20,
+            &[],
+        )
+        .unwrap();
+    let peer = PeerIdentity {
+        process_id: 1,
+        effective_uid: 0,
+        effective_gid: 0,
+    };
+    let mut streams = Streams::new();
+    let create = Create {
+        domain: Domain::Unix,
+        kind: Kind::Datagram,
+        protocol: 0,
+        options: 0,
+    };
+    let a = service.create_socket(peer, create, &mut streams).unwrap();
+    let b = service.create_socket(peer, create, &mut streams).unwrap();
+    let c = service.create_socket(peer, create, &mut streams).unwrap();
+    streams
+        .connect_datagram_named(c, a, Some(b"/c"), b"/a")
+        .unwrap();
+    streams
+        .connect_datagram_named(a, b, Some(b"/a"), b"/b")
+        .unwrap();
+    streams
+        .connect_datagram_named(b, a, Some(b"/b"), b"/a")
+        .unwrap();
+    streams.set_options(a, NONBLOCKING).unwrap();
+    streams.set_receive_timeout(a, 123000).unwrap();
+    streams.set_send_timeout(a, 456000).unwrap();
+    streams.set_receive_capacity(a, 32768).unwrap();
+    let capacity = streams.receive_capacity(a).unwrap();
+    let send = Request {
+        operation: Operation::Send,
+        offset: 0,
+        length: 1,
+        peek: false,
+    };
+    let receive = Request {
+        operation: Operation::Receive,
+        ..send
+    };
+    let mut buffer = Buffer(vec![42]);
+    let mut response = [0; MAX_REPLY_LEN];
+    streams
+        .transfer_record(b, send, &mut buffer, &mut response)
+        .unwrap();
+    assert_eq!(
+        streams.transfer_record(c, send, &mut buffer, &mut response),
+        Err(-1)
+    );
+    streams.disconnect_datagram(a).unwrap();
+    assert_eq!(streams.peer_address(a), Err(-107));
+    assert_eq!(streams.address(a), Ok(Address::UnixPath(b"/a")));
+    assert_eq!(streams.options(a), Ok(NONBLOCKING));
+    assert_eq!(streams.receive_timeout(a), Ok(123000));
+    assert_eq!(streams.send_timeout(a), Ok(456000));
+    assert_eq!(streams.receive_capacity(a), Ok(capacity));
+    assert_eq!(
+        streams.transfer_record(a, receive, &mut buffer, &mut response),
+        Err(-11)
+    );
+    assert_eq!(
+        streams.transfer_record(a, send, &mut buffer, &mut response),
+        Err(-89)
+    );
+    // Removing the filter admits a different sender. Repeating disconnect must
+    // not erase datagrams that arrived while already unconnected.
+    streams
+        .transfer_record(c, send, &mut buffer, &mut response)
+        .unwrap();
+    streams.disconnect_datagram(a).unwrap();
+    streams
+        .transfer_record(a, receive, &mut buffer, &mut response)
+        .unwrap();
+    assert_eq!(buffer.0, [42]);
+    streams
+        .connect_datagram_named(a, c, Some(b"/a"), b"/c")
+        .unwrap();
+    assert_eq!(streams.peer_address(a), Ok(Address::UnixPath(b"/c")));
+    // A blocked connected send must wake to report the missing destination.
+    let large = Request {
+        length: 40000,
+        ..send
+    };
+    buffer.0.resize(40000, 0);
+    streams
+        .transfer_record(a, large, &mut buffer, &mut response)
+        .unwrap();
+    let mut waits = ReceiveWaits::new();
+    let job = waits.start_send(&streams, a, 30000, 42).unwrap();
+    assert_eq!(waits.ready(job), Ok(false));
+    streams.disconnect_datagram(a).unwrap();
+    waits.pump(&streams, |ready| assert_eq!(ready, job));
+    assert_eq!(waits.ready(job), Ok(true));
+    waits.release(job, |handle| assert_eq!(handle, 42)).unwrap();
+    streams
+        .connect_datagram_named(a, c, Some(b"/a"), b"/c")
+        .unwrap();
+    streams.shutdown(a, Shutdown::Both).unwrap();
+    streams.disconnect_datagram(a).unwrap();
+    let readiness = streams.readiness(a).unwrap();
+    assert!(readiness.read_closed && readiness.write_closed);
+    assert_eq!(
+        streams.transfer_record(a, send, &mut buffer, &mut response),
+        Err(-32)
+    );
+    assert_eq!(streams.disconnect_datagram(u64::MAX), Err(-9));
+}
+
+#[test]
 fn datagram_descriptions_use_record_transport_and_preserve_peer_lifetime() {
     let mut service = PosixService::new();
     service
