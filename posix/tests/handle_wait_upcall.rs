@@ -8,7 +8,7 @@ fn pending_generic_upcalls_return_after_wait_registration_cleanup() {
         .split("pub fn process_resume(")
         .next()
         .unwrap();
-    let check = wait.find("thread.has_deliverable_upcall()").unwrap();
+    let check = wait.find("upcall::current_has_deliverable_upcall()").unwrap();
     for cleanup in [
         "remove_process_exit_waiters(current)",
         "remove_endpoint_waiters(current",

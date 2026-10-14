@@ -114,7 +114,10 @@ static int signal_case(int mode, int asynchronous) {
     printf("signal-fork: mode=%d async=%d PASS\n", mode, asynchronous);
     return 0;
 }
-int main(int argc, char **argv) {
+#ifndef SIGNAL_FORK_TEST_ENTRY
+#define SIGNAL_FORK_TEST_ENTRY main
+#endif
+int SIGNAL_FORK_TEST_ENTRY(int argc, char **argv) {
     /* The included regression execs this same image for altstack reset. */
     if (argc == 2 && !strcmp(argv[1], "--after-exec"))
         return altstack_regression_main(argc, argv);

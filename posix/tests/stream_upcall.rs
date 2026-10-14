@@ -42,7 +42,7 @@ fn legacy_blocking_streams_release_their_waiter_before_upcall_delivery() {
     let fs = include_str!("../../../core/src/syscall/fs.rs");
     for name in ["fn read_pipe(", "fn write_pipe("] {
         let function = fs.split(name).nth(1).unwrap().split("\n}").next().unwrap();
-        let check = function.find("thread.has_deliverable_upcall()").unwrap();
+        let check = function.find("upcall::current_has_deliverable_upcall()").unwrap();
         assert!(function[..check].contains("drop(table);"));
         let release = function[check..]
             .find("remove_stream_waiter(pipe_id, current)")
@@ -65,7 +65,8 @@ fn userspace_stream_io_preserves_the_generation_across_native_attempts() {
         io.find("nonrestart_signal_generation.load").unwrap()
             < io.find("match operation()").unwrap()
     );
-    assert!(io.contains("wait_for_handle_capacity(entry, interests, control, caught, minimum_write_bytes)"));
+    let compact: String = io.chars().filter(|ch| !ch.is_whitespace()).collect();
+    assert!(compact.contains("wait_for_handle_capacity(entry,interests,control,caught,minimum_write_bytes,wait.deadline(entry)?,)"));
     let read = source
         .split("fn syscall_read(")
         .nth(1)

@@ -7,16 +7,20 @@ fn native_thread_upcall_configuration_is_fixed_and_policy_free() {
         stack_base: 0x8000,
         stack_size: 0x4000,
         flags: 0,
-        reserved: [0; 4],
+        defer_word: 0,
+        reserved: [0; 3],
     };
 
     assert_eq!(core::mem::size_of::<ThreadUpcallConfig>(), 64);
     assert_eq!(core::mem::align_of::<ThreadUpcallConfig>(), 8);
+    assert_eq!(core::mem::offset_of!(ThreadUpcallConfig, defer_word), 32);
+    assert_eq!(core::mem::offset_of!(ThreadUpcallConfig, reserved), 40);
     assert_eq!(config.entry, 0x1000);
     assert_eq!(config.stack_base, 0x8000);
     assert_eq!(config.stack_size, 0x4000);
     assert_eq!(config.flags, 0);
-    assert_eq!(config.reserved, [0; 4]);
+    assert_eq!(config.defer_word, 0);
+    assert_eq!(config.reserved, [0; 3]);
 }
 
 #[test]

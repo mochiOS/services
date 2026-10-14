@@ -24,6 +24,9 @@ mod mnu_abi {
 static NOW: AtomicU64 = AtomicU64::new(0);
 static ACTION: AtomicU64 = AtomicU64::new(0);
 static UPCALL: AtomicU32 = AtomicU32::new(0);
+mod upcall {
+    pub fn current_has_deliverable_upcall()->bool {crate::UPCALL.load(std::sync::atomic::Ordering::Acquire)!=0}
+}
 static ARM_OK: AtomicU32 = AtomicU32::new(1);
 static DISARMS: AtomicU32 = AtomicU32::new(0);
 mod syscall { pub mod time {
