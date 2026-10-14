@@ -127,7 +127,10 @@ static int default_stop_reentry(void) {
     puts("upcall-defer: prepared default stop resumes on SIGCONT PASS");
     return 0;
 }
-int main(int argc, char **argv) {
+#ifndef UPCALL_DEFER_TEST_ENTRY
+#define UPCALL_DEFER_TEST_ENTRY main
+#endif
+int UPCALL_DEFER_TEST_ENTRY(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--after-exec"))
         return signal_fork_regression_main(argc, argv);
     sigset_t mask;
