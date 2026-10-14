@@ -6,7 +6,7 @@
 #include <unistd.h>
 
 enum { INHERITED = 628, CALL = 632, INSTALL = 654, RETURN = 655,
-       ORIGIN = 84, FAULT = 83, RAISE = 68, DEQUEUE = 66, COMPLETE = 51 };
+       ORIGIN = 85, FAULT = 83, RAISE = 68, DEQUEUE = 66, COMPLETE = 51 };
 static unsigned char entry_stack[16384] __attribute__((aligned(16)));
 static uint64_t endpoint, request_id;
 
@@ -60,32 +60,48 @@ int main(void) {
         (uintptr_t)interrupt_only,(uintptr_t)entry_stack,sizeof(entry_stack),0,{0}
     };
     CHECK(native(INSTALL,(uintptr_t)&config,sizeof(config),0,0,0,0)==0);
-    unsigned char signal[16]={0},delivery[16],origin[16];
+    unsigned char signal[16]={0},delivery[16],origin[24];
     put32(signal+8,30);
     CHECK(request(RAISE,signal,16,NULL,0)==0);
     CHECK(request(DEQUEUE,NULL,0,delivery,16)==0 && get32(delivery)==30 && get64(delivery+8));
-    CHECK(request(ORIGIN,delivery,16,origin,16)==0);
+    CHECK(request(ORIGIN,delivery,16,origin,24)==0);
+    CHECK(request(84,delivery,16,origin,0)==-38); /* retired origin format */
     CHECK(get32(origin)==1 && get32(origin+4)==(uint32_t)getuid() && get64(origin+8)==(uint64_t)getpid());
     sigset_t children; sigemptyset(&children); sigaddset(&children,SIGCHLD);
     CHECK(sigprocmask(SIG_BLOCK,&children,NULL)==0);
     pid_t child=fork(); CHECK(child>=0);
-    if (!child) _exit(request(ORIGIN,delivery,16,origin,16)==-11 ? 0 : 91);
-    int status; CHECK(waitpid(child,&status,0)==child && WIFEXITED(status) && WEXITSTATUS(status)==0);
-    CHECK(request(ORIGIN,delivery,16,origin,16)==0);
+    if (!child) _exit(request(ORIGIN,delivery,16,origin,24)==-11 ? 37 : 91);
+    int status; CHECK(waitpid(child,&status,0)==child && WIFEXITED(status) && WEXITSTATUS(status)==37);
+    CHECK(request(ORIGIN,delivery,16,origin,24)==0);
     CHECK(request(COMPLETE,delivery,16,NULL,0)==0);
-    CHECK(request(ORIGIN,delivery,16,origin,16)==-11);
+    CHECK(request(ORIGIN,delivery,16,origin,24)==-11);
     unsigned char mask[16]={0}, child_delivery[16]; put32(mask,1);
     CHECK(request(65,mask,16,origin,8)==0);
     CHECK(request(DEQUEUE,NULL,0,child_delivery,16)==0 && get32(child_delivery)==SIGCHLD);
-    CHECK(request(ORIGIN,child_delivery,16,origin,16)==0);
+    CHECK(request(ORIGIN,child_delivery,16,origin,24)==0);
     CHECK(get32(origin)==2 && get32(origin+4)==(uint32_t)getuid() && get64(origin+8)==(uint64_t)child);
+    CHECK(get32(origin+16)==1 && get32(origin+20)==37);
+    CHECK(request(COMPLETE,child_delivery,16,NULL,0)==0);
+    CHECK(sigprocmask(SIG_SETMASK,&empty,NULL)==0);
+    CHECK(sigprocmask(SIG_BLOCK,&children,NULL)==0);
+    child=fork(); CHECK(child>=0);
+    if (!child) {
+        uint64_t address=0;
+        __asm__ volatile("mov (%%rax), %%rax" : "+a"(address) : : "memory");
+        _exit(92);
+    }
+    CHECK(waitpid(child,&status,0)==child && WIFSIGNALED(status) && WTERMSIG(status)==SIGSEGV);
+    CHECK(request(65,mask,16,origin,8)==0);
+    CHECK(request(DEQUEUE,NULL,0,child_delivery,16)==0 && get32(child_delivery)==SIGCHLD);
+    CHECK(request(ORIGIN,child_delivery,16,origin,24)==0);
+    CHECK(get64(origin+8)==(uint64_t)child && get32(origin+16)==2 && get32(origin+20)==SIGSEGV);
     CHECK(request(COMPLETE,child_delivery,16,NULL,0)==0);
     CHECK(sigprocmask(SIG_SETMASK,&empty,NULL)==0);
     unsigned char fault[24]; put32(signal+8,SIGSEGV);
     CHECK(request(FAULT,signal,16,fault,24)==0);
-    CHECK(request(ORIGIN,fault,16,origin,16)==0);
+    CHECK(request(ORIGIN,fault,16,origin,24)==0);
     CHECK(get32(origin)==4 && get32(origin+4)==0 && get64(origin+8)==0);
     CHECK(request(COMPLETE,fault,16,NULL,0)==0);
-    puts("signal-origin: PASS authenticated sender, real uid, owner-only lookup, token lifetime and fault provenance");
+    puts("signal-origin: PASS authenticated sender, owner-only lookup, retained exit and signal status, retired format and fault provenance");
     return 0;
 }

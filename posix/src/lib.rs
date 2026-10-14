@@ -881,7 +881,13 @@ impl<H: Copy> PosixService<H> {
             self.process_resume_notifications.insert(process_id);
         }
         if continued {
-            self.notify_parent_of_child_change(process_id, true)?;
+            self.notify_parent_of_child_change(
+                process_id,
+                protocol::signal_origin::ChildStatus {
+                    event: protocol::signal_origin::CONTINUED,
+                    status: protocol::SIGNAL_CONT,
+                },
+            )?;
         }
         Ok(())
     }
@@ -889,7 +895,7 @@ impl<H: Copy> PosixService<H> {
     fn notify_parent_of_child_change(
         &mut self,
         child_id: u64,
-        stopped_or_continued: bool,
+        child: protocol::signal_origin::ChildStatus,
     ) -> Result<(), i32> {
         let Some(parent_id) = self.parents.get(&child_id).copied() else {
             return Ok(());
@@ -897,7 +903,10 @@ impl<H: Copy> PosixService<H> {
         if !self.signals.contains_key(&parent_id) {
             return Ok(());
         }
-        if stopped_or_continued
+        if matches!(
+            child.event,
+            protocol::signal_origin::STOPPED | protocol::signal_origin::CONTINUED
+        )
             && self
                 .signal_child_options
                 .get(&parent_id)
@@ -913,12 +922,15 @@ impl<H: Copy> PosixService<H> {
         self.enqueue_signal_with_origin(
             parent_id, protocol::SIGNAL_CHLD,
             protocol::signal_origin::Origin {
-                source: protocol::signal_origin::CHILD, real_uid, process_id: child_id,
+                source: protocol::signal_origin::CHILD,
+                real_uid,
+                process_id: child_id,
+                child,
             },
         )
     }
 
-    fn note_child_exited(&mut self, child_id: u64) -> Result<bool, i32> {
+    fn note_child_exited(&mut self, child_id: u64, exit_code: u64) -> Result<bool, i32> {
         let wait_state = self
             .process_wait_states
             .get_mut(&child_id)
@@ -926,8 +938,18 @@ impl<H: Copy> PosixService<H> {
         if wait_state.exit_notified {
             return Ok(false);
         }
+        let child = match wait_state.termination_signal {
+            Some(signal) => protocol::signal_origin::ChildStatus {
+                event: protocol::signal_origin::KILLED,
+                status: signal,
+            },
+            None => protocol::signal_origin::ChildStatus {
+                event: protocol::signal_origin::EXITED,
+                status: (exit_code & 0xff) as u32,
+            },
+        };
         wait_state.exit_notified = true;
-        if let Err(status) = self.notify_parent_of_child_change(child_id, false) {
+        if let Err(status) = self.notify_parent_of_child_change(child_id, child) {
             if let Some(wait_state) = self.process_wait_states.get_mut(&child_id) {
                 wait_state.exit_notified = false;
             }
@@ -964,9 +986,9 @@ impl<H: Copy> PosixService<H> {
             .collect();
         let mut notified = 0;
         for (child_id, handle) in candidates {
-            if matches!(processes.status(handle)?, ProcessLifecycle::Exited { .. }) {
+            if let ProcessLifecycle::Exited { exit_code } = processes.status(handle)? {
                 self.observe_process_exit(child_id)?;
-                if self.parents.contains_key(&child_id) && self.note_child_exited(child_id)? {
+                if self.parents.contains_key(&child_id) && self.note_child_exited(child_id, exit_code)? {
                     notified += 1;
                 }
             }
@@ -1714,7 +1736,7 @@ impl<H: Copy> PosixService<H> {
                 .copied()
                 .ok_or(protocol::STATUS_ESRCH)?;
             if let ProcessLifecycle::Exited { exit_code } = processes.status(handle)? {
-                self.note_child_exited(child)?;
+                self.note_child_exited(child, exit_code)?;
                 let status = self
                     .process_wait_states
                     .get(&child)
@@ -2397,6 +2419,7 @@ impl<H: Copy> PosixService<H> {
                     protocol::signal_origin::Origin {
                         source: protocol::signal_origin::USER,
                         real_uid: caller.real_uid, process_id: caller_id,
+                        ..protocol::signal_origin::Origin::system()
                     },
                 )?;
             }
@@ -2719,6 +2742,7 @@ impl<H: Copy> PosixService<H> {
                     (sender.process_id, sender.thread_id, request.signal),
                     protocol::signal_origin::Origin {
                         source: protocol::signal_origin::USER, real_uid, process_id: sender.process_id,
+                        ..protocol::signal_origin::Origin::system()
                     },
                 );
             }
@@ -2988,7 +3012,13 @@ impl<H: Copy> PosixService<H> {
             .ok_or(protocol::STATUS_ESRCH)?
             .stopped(signal);
         if stopped {
-            self.notify_parent_of_child_change(peer.process_id, true)?;
+            self.notify_parent_of_child_change(
+                peer.process_id,
+                protocol::signal_origin::ChildStatus {
+                    event: protocol::signal_origin::STOPPED,
+                    status: signal,
+                },
+            )?;
         }
         Ok(())
     }

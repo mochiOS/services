@@ -15,6 +15,9 @@ use posix_service::{
 #[path = "support/child_cpu_state.rs"]
 mod child_cpu_state;
 
+#[path = "support/child_signal_info.rs"]
+mod child_signal_info;
+
 #[path = "support/default_ignored_signals.rs"]
 mod default_ignored_signals;
 

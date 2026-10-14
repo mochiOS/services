@@ -26,6 +26,7 @@ fn signal_origin_keeps_first_coalesced_sender_and_uses_service_owned_real_uid() 
             source: protocol::signal_origin::USER,
             real_uid: 501,
             process_id: 101,
+            ..protocol::signal_origin::Origin::system()
         }
     );
     // Reading repeatedly does not consume the delivery or rewrite provenance.
@@ -45,6 +46,7 @@ fn signal_origin_keeps_first_coalesced_sender_and_uses_service_owned_real_uid() 
             source: protocol::signal_origin::USER,
             real_uid: 0,
             process_id: 1,
+            ..protocol::signal_origin::Origin::system()
         }
     );
     target.complete_signal_delivery(delivery).unwrap();
@@ -130,6 +132,7 @@ fn discarded_pending_origin_does_not_leak_into_later_signal_or_native_fault() {
             source: protocol::signal_origin::FAULT,
             real_uid: 0,
             process_id: 0,
+            ..protocol::signal_origin::Origin::system()
         }
     );
     target.complete_signal_delivery(fault.signal).unwrap();
@@ -144,16 +147,22 @@ fn origin_wire_rejects_ambiguous_sources_and_noncanonical_lengths() {
             source: FAULT,
             real_uid: 0,
             process_id: 0,
+            ..Origin::system()
         },
         Origin {
             source: USER,
             real_uid: 501,
             process_id: 101,
+            ..Origin::system()
         },
         Origin {
             source: CHILD,
             real_uid: 502,
             process_id: 102,
+            child: ChildStatus {
+                event: EXITED,
+                status: 37,
+            },
         },
     ] {
         let mut bytes = [0; LEN];
@@ -183,6 +192,38 @@ fn origin_wire_rejects_ambiguous_sources_and_noncanonical_lengths() {
     ] {
         assert!(encode(origin, &mut [0; LEN]).is_err());
     }
+    let child = Origin {
+        source: CHILD,
+        real_uid: 501,
+        process_id: 101,
+        child: ChildStatus {
+            event: EXITED,
+            status: 37,
+        },
+    };
+    for (event, status) in [(0, 0), (EXITED, 256), (KILLED, 0), (CONTINUED, 18), (7, 0)] {
+        assert!(
+            encode(
+                Origin {
+                    child: ChildStatus { event, status },
+                    ..child
+                },
+                &mut [0; LEN]
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        encode(
+            Origin {
+                source: USER,
+                ..child
+            },
+            &mut [0; LEN]
+        )
+        .is_err()
+    );
+    assert!(decode(&[0; 16]).is_err());
 }
 
 #[test]

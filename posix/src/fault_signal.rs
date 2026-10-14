@@ -36,6 +36,7 @@ impl<H: Copy> PosixService<H> {
                 source: protocol::signal_origin::FAULT,
                 real_uid: 0,
                 process_id: 0,
+                ..protocol::signal_origin::Origin::system()
             },
         )?;
         let mut output = vec![0; protocol::fault_signal::DELIVERY_LEN];

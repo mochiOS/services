@@ -76,6 +76,7 @@ fn sender_conversion_rejects_overflow_and_does_not_fabricate_child_or_fault_deta
         source: signal_origin::USER,
         real_uid: 501,
         process_id: 123,
+        ..Origin::system()
     };
     let info = SigInfo::from_origin(30, source).unwrap();
     assert_eq!(
@@ -214,6 +215,12 @@ fn target_c_and_cpp_headers_match_rust_layout_without_changing_the_built_sdk() {
         ("SEGV_ACCERR", SEGV_ACCERR),
         ("BUS_ADRERR", BUS_ADRERR),
         ("BUS_OBJERR", BUS_OBJERR),
+        ("CLD_EXITED", CLD_EXITED),
+        ("CLD_KILLED", CLD_KILLED),
+        ("CLD_DUMPED", CLD_DUMPED),
+        ("CLD_TRAPPED", CLD_TRAPPED),
+        ("CLD_STOPPED", CLD_STOPPED),
+        ("CLD_CONTINUED", CLD_CONTINUED),
     ] {
         source.push_str(&format!("CHECK({name}=={value},\"{name} value\");\n"));
     }
