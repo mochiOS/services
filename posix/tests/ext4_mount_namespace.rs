@@ -1685,6 +1685,189 @@ fn unlinking_multiple_names_retains_an_open_inode_only_until_last_close() {
 }
 
 #[test]
+fn unlinked_open_file_does_not_keep_its_parent_directory_nonempty() {
+    for mounted in [false, true] {
+        let fixture = Fixture::new();
+        let mut service = FilesystemService::new(fixture.volume("orphan-parent-data"));
+        let prefix = if mounted {
+            service
+                .mount_named_volume(
+                    b"/",
+                    b"system",
+                    fixture.volume("orphan-parent-system"),
+                    b"/",
+                )
+                .unwrap();
+            "/system"
+        } else {
+            ""
+        };
+        let directory = format!("{prefix}/temporary-parent");
+        let path = format!("{directory}/file");
+        service
+            .mkdir_at(
+                protocol::Header {
+                    mode: 0o755,
+                    ..Default::default()
+                },
+                directory.as_bytes(),
+                PathAnchors::default(),
+                root_credentials(),
+            )
+            .unwrap();
+        let opened = open(
+            &mut service,
+            path.as_bytes(),
+            protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+            PathAnchors::default(),
+        );
+        service
+            .provider_write_at(opened.open_id, 0, b"retained")
+            .unwrap();
+        let alias = open(
+            &mut service,
+            path.as_bytes(),
+            protocol::OPEN_AT_READ,
+            PathAnchors::default(),
+        );
+        // The private retention name must not reserve or overwrite user names.
+        let collision = format!("{prefix}/.mochios-orphan-{}", opened.node_id);
+        let private_path = format!("{collision}-1");
+        let user = open(
+            &mut service,
+            collision.as_bytes(),
+            protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+            PathAnchors::default(),
+        );
+        service.provider_write_at(user.open_id, 0, b"user").unwrap();
+        service
+            .unlink_at(
+                protocol::Header::default(),
+                path.as_bytes(),
+                PathAnchors::default(),
+                root_credentials(),
+            )
+            .unwrap();
+        service
+            .unlink_at(
+                protocol::Header {
+                    flags: protocol::UNLINK_AT_REMOVE_DIRECTORY,
+                    ..Default::default()
+                },
+                directory.as_bytes(),
+                PathAnchors::default(),
+                root_credentials(),
+            )
+            .unwrap();
+        assert!(matches!(
+            service.stat_at(
+                protocol::Header::default(),
+                directory.as_bytes(),
+                PathAnchors::default(),
+                root_credentials()
+            ),
+            Err(2)
+        ));
+        assert_eq!(
+            service.provider_read_at(opened.open_id, 0, 4096).unwrap(),
+            b"retained"
+        );
+        let status = service
+            .stat_handle(protocol::Header::default(), alias.open_id)
+            .unwrap();
+        assert_eq!(
+            protocol::decode_node_status(&status.payload)
+                .unwrap()
+                .link_count,
+            0
+        );
+        assert_eq!(
+            service.provider_read_at(user.open_id, 0, 4096).unwrap(),
+            b"user"
+        );
+        // Reuse the removed directory name; the old FD must not alias its child.
+        assert!(matches!(
+            service.stat_at(
+                protocol::Header::default(),
+                private_path.as_bytes(),
+                PathAnchors::default(),
+                root_credentials()
+            ),
+            Err(2)
+        ));
+        // Grow the retention directory after its inode was saved. Last close
+        // must refresh that inode rather than using an obsolete block map.
+        for index in 0..80 {
+            let growth = format!("{prefix}/retention-growth-{index:03}-long-directory-entry");
+            let file = open(
+                &mut service,
+                growth.as_bytes(),
+                protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+                PathAnchors::default(),
+            );
+            service.provider_close(file.open_id).unwrap();
+        }
+        service
+            .mkdir_at(
+                protocol::Header {
+                    mode: 0o755,
+                    ..Default::default()
+                },
+                directory.as_bytes(),
+                PathAnchors::default(),
+                root_credentials(),
+            )
+            .unwrap();
+        let replacement = open(
+            &mut service,
+            path.as_bytes(),
+            protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+            PathAnchors::default(),
+        );
+        assert_ne!(replacement.node_id, opened.node_id);
+        service
+            .provider_write_at(replacement.open_id, 0, b"new")
+            .unwrap();
+        service.provider_close(opened.open_id).unwrap();
+        assert_eq!(
+            service.provider_read_at(alias.open_id, 0, 4096).unwrap(),
+            b"retained"
+        );
+        service.provider_close(alias.open_id).unwrap();
+        assert_eq!(
+            service
+                .provider_read_at(replacement.open_id, 0, 4096)
+                .unwrap(),
+            b"new"
+        );
+        assert!(
+            service
+                .stat_at(
+                    protocol::Header::default(),
+                    collision.as_bytes(),
+                    PathAnchors::default(),
+                    root_credentials()
+                )
+                .is_ok()
+        );
+        service.provider_close(replacement.open_id).unwrap();
+        service.provider_close(user.open_id).unwrap();
+        // With the final reference gone, this is an ordinary available name,
+        // not a filtered leak or a globally reserved filename prefix.
+        let reused = open(
+            &mut service,
+            private_path.as_bytes(),
+            protocol::OPEN_AT_READ
+                | protocol::OPEN_AT_WRITE
+                | protocol::OPEN_AT_CREATE
+                | protocol::OPEN_AT_EXCLUSIVE,
+            PathAnchors::default(),
+        );
+        service.provider_close(reused.open_id).unwrap();
+    }
+}
+
+#[test]
 fn replacing_multiple_links_does_not_overwrite_the_original_retention_record() {
     let fixture = Fixture::new();
     let mut service = FilesystemService::new(fixture.volume("rename-links"));

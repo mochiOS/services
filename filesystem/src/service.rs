@@ -21,6 +21,7 @@ const EXDEV: i32 = 18;
 const EPERM: i32 = 1;
 const ENOENT: i32 = 2;
 const EBADF: i32 = 9;
+const ENOMEM: i32 = 12;
 const EBUSY: i32 = 16;
 const EACCES: i32 = 13;
 const EEXIST: i32 = 17;
@@ -1682,7 +1683,8 @@ impl FilesystemService {
         if is_last_open {
             if let Some(orphan) = self.orphans.get(&node_id).cloned() {
                 let inode = Inode::read(&open.filesystem, open.inode.index).map_err(errno)?;
-                let mut parent = Dir::open_inode(&open.filesystem, orphan.parent).map_err(errno)?;
+                let parent_inode = Inode::read(&open.filesystem, orphan.parent.index).map_err(errno)?;
+                let mut parent = Dir::open_inode(&open.filesystem, parent_inode).map_err(errno)?;
                 parent
                     .unlink(
                         DirEntryName::try_from(orphan.name.as_str()).map_err(|_| EIO)?,
@@ -2071,42 +2073,95 @@ impl FilesystemService {
         // Public hard links already keep the inode alive. Create one private
         // retention link only when the last public name is being removed.
         let retain = is_open && inode.links_count() == 1 && !self.orphans.contains_key(&node_id);
-        let orphan_name = format!(".mochios-orphan-{node_id}");
-        if retain {
-            parent
-                .link(
-                    DirEntryName::try_from(orphan_name.as_str()).map_err(|_| EIO)?,
-                    &mut inode,
-                )
-                .map_err(errno)?;
-        }
+        let mut retention_root = if retain {
+            self.orphans.try_reserve(1).map_err(|_| ENOMEM)?;
+            Some(
+                Dir::open_inode(filesystem, filesystem.read_root_inode().map_err(errno)?)
+                    .map_err(errno)?,
+            )
+        } else {
+            None
+        };
+        let retained = if let Some(root) = retention_root.as_mut() {
+            // Never keep a user directory nonempty just to pin an open file.
+            // Use the same Dir instance when the public parent is the root,
+            // so directory growth does not leave its inode metadata stale.
+            let holder = if root.inode().index == parent.inode().index {
+                &mut parent
+            } else {
+                root
+            };
+            Some(Self::create_retention_link(
+                filesystem, holder, &mut inode, node_id,
+            )?)
+        } else {
+            None
+        };
         if let Err(error) = parent.unlink(
             DirEntryName::try_from(name).map_err(|_| EINVAL)?,
             inode.clone(),
         ) {
-            if retain {
-                let _ = parent.unlink(
-                    DirEntryName::try_from(orphan_name.as_str()).map_err(|_| EIO)?,
-                    inode,
-                );
+            if let Some(orphan) = retained {
+                let holder = if orphan.parent.index == parent.inode().index {
+                    &mut parent
+                } else {
+                    retention_root.as_mut().ok_or(EIO)?
+                };
+                holder
+                    .unlink(
+                        DirEntryName::try_from(orphan.name.as_str()).map_err(|_| EIO)?,
+                        inode,
+                    )
+                    .map_err(errno)?;
             }
             return Err(errno(error));
         }
         if let Some(path) = path_hint {
             self.node_ids.remove(path);
         }
-        if retain {
-            self.orphans.insert(
-                node_id,
-                Orphan {
-                    parent: parent_inode,
-                    name: orphan_name,
-                },
-            );
+        if let Some(orphan) = retained {
+            self.orphans.insert(node_id, orphan);
         } else if !is_open {
             self.nodes.remove(&node_id);
         }
         Ok(())
+    }
+
+    fn create_retention_link(
+        filesystem: &Ext4,
+        holder: &mut Dir,
+        inode: &mut Inode,
+        node_id: u64,
+    ) -> Result<Orphan, i32> {
+        let mut attempt = 0u64;
+        loop {
+            let name = if attempt == 0 {
+                format!(".mochios-orphan-{node_id}")
+            } else {
+                format!(".mochios-orphan-{node_id}-{attempt}")
+            };
+            let entry_name = DirEntryName::try_from(name.as_str()).map_err(|_| EIO)?;
+            // FilesystemService serializes the whole operation. Check before
+            // link(): the backend increments nlink even if the name exists.
+            match holder.get_entry(entry_name) {
+                Ok(_) => {
+                    attempt = attempt.checked_add(1).ok_or(ENOSPC)?;
+                    continue;
+                }
+                Err(Ext4Error::NotFound) => (),
+                Err(error) => return Err(errno(error)),
+            }
+            let original_links = inode.links_count();
+            if let Err(error) = holder.link(entry_name, inode) {
+                inode.set_links_count(original_links);
+                inode.write(filesystem).map_err(errno)?;
+                return Err(errno(error));
+            }
+            return Ok(Orphan {
+                parent: holder.inode().clone(),
+                name,
+            });
+        }
     }
 
     fn symlink(&mut self, request: protocol::Header, payload: &[u8]) -> Result<Response, i32> {
