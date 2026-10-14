@@ -11,6 +11,7 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -24,6 +25,50 @@
     }                                                                          \
   } while (0)
 static int blocking_fd;
+static int verify_path_binding(void) {
+  struct sockaddr_un address = {.sun_family = AF_UNIX};
+  strcpy(address.sun_path, "/native-posix-bound");
+  socklen_t size = 2 + strlen(address.sun_path) + 1;
+  CHECK(unlink(address.sun_path) == 0 || errno == ENOENT);
+  int a = socket(AF_UNIX, SOCK_STREAM, 0);
+  int b = socket(AF_UNIX, SOCK_STREAM, 0);
+  CHECK(a >= 0 && b >= 0);
+  CHECK(bind(-1, (struct sockaddr *)&address, size) == -1 && errno == EBADF);
+  CHECK(bind(a, NULL, size) == -1 && errno == EFAULT);
+  CHECK(bind(a, (struct sockaddr *)&address, size) == 0);
+  CHECK(bind(a, (struct sockaddr *)&address, size) == -1 && errno == EINVAL);
+  CHECK(bind(b, (struct sockaddr *)&address, size) == -1 &&
+        errno == EADDRINUSE);
+  struct sockaddr_un actual;
+  socklen_t length = sizeof(actual);
+  CHECK(getsockname(a, (struct sockaddr *)&actual, &length) == 0 &&
+        length == size && actual.sun_family == AF_UNIX &&
+        !strcmp(actual.sun_path, address.sun_path));
+  int alias = dup(a);
+  CHECK(alias >= 0 && close(a) == 0);
+  CHECK(unlink(address.sun_path) == 0);
+  CHECK(bind(b, (struct sockaddr *)&address, size) == 0);
+  length = sizeof(actual);
+  CHECK(getsockname(alias, (struct sockaddr *)&actual, &length) == 0 &&
+        !strcmp(actual.sun_path, address.sun_path));
+  CHECK(close(alias) == 0);
+  int c = socket(AF_UNIX, SOCK_STREAM, 0);
+  CHECK(c >= 0);
+  CHECK(bind(c, (struct sockaddr *)&address, size) == -1 &&
+        errno == EADDRINUSE);
+  CHECK(close(b) == 0);
+  CHECK(bind(c, (struct sockaddr *)&address, size) == -1 &&
+        errno == EADDRINUSE);
+  CHECK(unlink(address.sun_path) == 0);
+  // Relative spelling uses the retained cwd, not a second string-key namespace.
+  CHECK(chdir("/") == 0);
+  strcpy(address.sun_path, "native-posix-bound");
+  size = 2 + strlen(address.sun_path) + 1;
+  CHECK(bind(c, (struct sockaddr *)&address, size) == 0);
+  CHECK(close(c) == 0 && unlink("/native-posix-bound") == 0);
+  puts("posix-socket-bind: PASS");
+  return 0;
+}
 static int verify_single_socket(void) {
   int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
   CHECK(fd >= 0 && fcntl(fd, F_GETFD, 0) == FD_CLOEXEC);
@@ -112,6 +157,7 @@ int main(int argc, char **argv) {
   if (argc == 5 && !strcmp(argv[1], "--socket-exec"))
     return verify_exec(argv);
   CHECK(verify_single_socket() == 0);
+  CHECK(verify_path_binding() == 0);
   int fds[2] = {123, 456};
   CHECK(socketpair(AF_UNIX, SOCK_STREAM | 0x1000, 0, fds) == -1 &&
         errno == EINVAL);

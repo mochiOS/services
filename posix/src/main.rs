@@ -14,6 +14,9 @@ mod shared_memory_provider;
 mod socket_native;
 
 #[cfg(target_os = "mochios")]
+mod socket_path_native;
+
+#[cfg(target_os = "mochios")]
 const PTY_SYNC_MAGIC: [u8; 4] = *b"PTYS";
 
 #[cfg(target_os = "mochios")]

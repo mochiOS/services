@@ -122,6 +122,7 @@ fn signal(streams: &Streams, ids: [u64; 2]) {
 fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>>>) -> ! {
     use mnu_abi::provider;
     let mut streams = Streams::new();
+    let mut bindings = posix_service::socket_binding::Bindings::new();
     let mut request = vec![0; provider::REQUEST_HEADER_LEN + provider::MAX_DATA_LEN];
     let mut response = vec![0; provider::RESPONSE_HEADER_LEN + provider::MAX_DATA_LEN];
     loop {
@@ -214,6 +215,41 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                 }
             }
         } else {
+            let decoded = provider::RequestHeader::decode(bytes).ok();
+            let native = attachments.delivery_flags == mnu_abi::IPC_DELIVERY_NATIVE_OBJECT
+                && attachments.count == 0;
+            if let Some((header, payload)) = decoded {
+                if native
+                    && header.opcode == provider::OP_CONTROL
+                    && (header.basis == wire::CONTROL_BIND
+                        || (header.basis == wire::CONTROL_LOCAL_ADDRESS
+                            && bindings.address(header.object_id).is_some()))
+                {
+                    match super::socket_path_native::control(
+                        &streams,
+                        &mut bindings,
+                        &service,
+                        sender,
+                        header,
+                        payload,
+                        &mut response,
+                    ) {
+                        Ok(length) => {
+                            let _ = platform::ipc::reply(sender, &response[..length]);
+                        }
+                        Err(error) => platform::logln!(
+                            "posix.service: socket path control failed errno={}",
+                            error
+                        ),
+                    }
+                    continue;
+                }
+                if native && header.opcode == provider::OP_RELEASE {
+                    bindings.release_with(header.object_id, |handle| {
+                        let _ = platform::handle::close(handle);
+                    });
+                }
+            }
             let affected = provider::RequestHeader::decode(bytes)
                 .ok()
                 .and_then(|(header, _)| streams.affected(header.object_id).ok());

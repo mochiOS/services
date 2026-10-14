@@ -120,6 +120,10 @@ impl<H: Copy + Default + Eq> Bindings<H> {
     }
 
     pub fn release<B: Filesystem<H>>(&mut self, socket: u64, backend: &mut B) {
+        self.release_with(socket, |handle| backend.close(handle));
+    }
+
+    pub fn release_with(&mut self, socket: u64, mut close: impl FnMut(H)) {
         let Some(index) = self
             .records
             .iter()
@@ -127,7 +131,7 @@ impl<H: Copy + Default + Eq> Bindings<H> {
         else {
             return;
         };
-        backend.close(self.records[index].file);
+        close(self.records[index].file);
         self.records.swap_remove(index);
     }
 }
