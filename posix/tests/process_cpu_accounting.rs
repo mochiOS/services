@@ -135,24 +135,19 @@ fn timer_records_both_clocks_and_native_readers_use_stable_owner_accounting() {
 #[test]
 fn both_timer_sources_classify_the_interrupted_cpu_mode_before_switching_address_spaces() {
     let source = include_str!("../../../core/src/interrupt/timer.rs");
-    for entry in [
-        "fn timer_interrupt_handler(",
-        "fn local_timer_interrupt_handler(",
-    ] {
-        let handler = source
-            .split(entry)
-            .nth(1)
-            .unwrap()
-            .split("fn ")
-            .next()
-            .unwrap();
-        let mode = handler
-            .find("stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3")
-            .unwrap();
-        assert!(mode < handler.find("kpti_enter_for_trap(user_mode)").unwrap());
-        assert!(mode < handler.find("normalize_user_iret_frame").unwrap());
-        assert!(handler.contains("scheduler_tick(user_mode)"));
-    }
+    assert!(source.contains("timer_entry!(timer_interrupt_handler, 0)"));
+    assert!(source.contains("timer_entry!(local_timer_interrupt_handler, 1)"));
+    let handler = source
+        .split("fn handle_timer(")
+        .nth(1)
+        .unwrap()
+        .split("/// 現在")
+        .next()
+        .unwrap();
+    let mode = handler.find("frame[16] & 3 == 3").unwrap();
+    assert!(mode < handler.find("kpti_enter_for_trap(user_mode)").unwrap());
+    assert!(mode < handler.find("frame[16] =").unwrap());
+    assert!(handler.contains("scheduler_tick(user_mode)"));
     let scheduler = include_str!("../../../core/src/task/scheduler.rs");
     let tick = scheduler
         .split("fn scheduler_tick(")
