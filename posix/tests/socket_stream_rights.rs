@@ -364,6 +364,215 @@ struct Buffer {
     read: usize,
     fail: bool,
 }
+
+#[test]
+fn stream_peek_receipts_stop_at_ancillary_barrier_and_outlive_consuming_read() {
+    let (mut streams, [a, b]) = pair();
+    let budget = Budget::new(6);
+    streams.write(a, b"aa").unwrap();
+    streams
+        .commit_stream_with_rights(a, b"bcd", bundle_using(&[501, 502], &budget))
+        .ok()
+        .unwrap();
+    streams.write(a, b"ee").unwrap();
+    let mut transfers = posix_service::socket_transfer::Transfers::new(0);
+    let mut buffer = Buffer {
+        bytes: vec![0; 16],
+        read: 0,
+        fail: false,
+    };
+    let mut receipts = Vec::new();
+    for source in [900, 901] {
+        let mut published = None;
+        let result = transfers
+            .peek(
+                &mut streams,
+                b,
+                source,
+                2,
+                8,
+                1,
+                close,
+                |id, info| {
+                    published = Some((info, id));
+                    Ok(())
+                },
+                &mut buffer,
+            )
+            .unwrap();
+        assert_eq!(Some(result), published);
+        assert_eq!(
+            (
+                result.0.record.copied,
+                result.0.record.length,
+                result.0.total_rights,
+                result.0.available_rights
+            ),
+            (5, 5, 2, 1)
+        );
+        assert_eq!(&buffer.bytes[2..7], b"aabcd");
+        assert!(closed().is_empty());
+        receipts.push(result.1.unwrap());
+    }
+    assert_eq!(budget.used(), 4);
+    let mut data = [0; 16];
+    assert_eq!(streams.read(b, &mut data), Ok(5));
+    assert_eq!(&data[..5], b"aabcd");
+    assert_eq!(closed(), [502]);
+    assert_eq!(budget.used(), 2);
+    assert_eq!(streams.read(b, &mut data), Ok(2));
+    assert_eq!(&data[..2], b"ee");
+    streams.shutdown(a, Shutdown::Write).unwrap();
+    let (info, receipt) = transfers
+        .peek(
+            &mut streams,
+            b,
+            902,
+            0,
+            8,
+            1,
+            close,
+            |_, _| Ok(()),
+            &mut buffer,
+        )
+        .unwrap();
+    assert_eq!(info.record.copied, 0);
+    assert!(receipt.is_none());
+    for receipt in receipts {
+        assert_eq!(
+            transfers.deliver(receipt, 0, 4, |leases| {
+                assert_eq!(leases.len(), 1);
+                assert_eq!(leases[0].handle(), 501);
+                assert_eq!(
+                    leases[0].rights(),
+                    mnu_abi::HANDLE_RIGHT_READ | mnu_abi::HANDLE_RIGHT_TRANSFER
+                );
+                Ok(())
+            }),
+            Ok(1)
+        );
+        transfers.release(receipt).unwrap();
+    }
+    assert_eq!(closed(), [502, 900, 501, 901]);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn stream_peek_without_visible_control_never_discards_queued_rights() {
+    let (mut streams, [a, b]) = pair();
+    let budget = Budget::new(1);
+    streams.write(a, b"aa").unwrap();
+    streams
+        .commit_stream_with_rights(a, b"bcd", bundle_using(&[501], &budget))
+        .ok()
+        .unwrap();
+    let mut transfers = posix_service::socket_transfer::Transfers::new(0);
+    let mut buffer = Buffer {
+        bytes: vec![0; 8],
+        read: 0,
+        fail: false,
+    };
+    for (length, maximum, total) in [(0, 1, 0), (2, 1, 0), (3, 0, 1)] {
+        let (info, receipt) = transfers
+            .peek(
+                &mut streams,
+                b,
+                900,
+                0,
+                length,
+                maximum,
+                close,
+                |id, info| {
+                    assert!(id.is_none());
+                    assert_eq!(info.total_rights, total);
+                    Ok(())
+                },
+                &mut buffer,
+            )
+            .unwrap();
+        assert_eq!(info.record.copied, length as usize);
+        assert!(receipt.is_none());
+        assert_eq!(budget.used(), 1);
+        assert!(closed().is_empty());
+        assert_eq!(streams.peek(b, 0, &mut [0; 8]), Ok(5));
+    }
+}
+
+#[test]
+fn stream_peek_failures_rollback_pins_before_another_read() {
+    let mut failures = 0;
+    for allocation in 0..4 {
+        let (mut streams, [a, b]) = pair();
+        let budget = Budget::new(2);
+        streams
+            .commit_stream_with_rights(a, b"abc", bundle_using(&[501], &budget))
+            .ok()
+            .unwrap();
+        let mut transfers = posix_service::socket_transfer::Transfers::new(0);
+        let mut buffer = Buffer {
+            bytes: vec![0; 8],
+            read: 0,
+            fail: false,
+        };
+        FAIL.with(|remaining| remaining.set(allocation));
+        let result = transfers.peek(
+            &mut streams,
+            b,
+            900,
+            0,
+            8,
+            1,
+            close,
+            |_, _| Ok(()),
+            &mut buffer,
+        );
+        FAIL.with(|remaining| remaining.set(-1));
+        match result {
+            Err(error) => {
+                assert_eq!(error, -12);
+                failures += 1;
+            }
+            Ok((_, receipt)) => transfers.release(receipt.unwrap()).unwrap(),
+        }
+        assert_eq!(budget.used(), 1);
+        assert_eq!(streams.peek(b, 0, &mut [0; 8]), Ok(3));
+        buffer.fail = true;
+        assert_eq!(
+            transfers.peek(
+                &mut streams,
+                b,
+                901,
+                0,
+                8,
+                1,
+                close,
+                |_, _| panic!("copy failed"),
+                &mut buffer
+            ),
+            Err(-5)
+        );
+        buffer.fail = false;
+        assert_eq!(
+            transfers.peek(
+                &mut streams,
+                b,
+                901,
+                0,
+                8,
+                1,
+                close,
+                |_, _| Err(-5),
+                &mut buffer
+            ),
+            Err(-5)
+        );
+        assert_eq!(budget.used(), 1);
+        assert_eq!(streams.read(b, &mut [0; 8]), Ok(3));
+        assert_eq!(budget.used(), 0);
+        assert_eq!(closed().last(), Some(&501));
+    }
+    assert_eq!(failures, 3);
+}
 impl posix_service::socket_record_io::RecordBuffer for Buffer {
     fn extent(&self) -> Result<u64, i32> {
         Ok(self.bytes.len() as u64)

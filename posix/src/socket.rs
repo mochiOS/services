@@ -813,6 +813,32 @@ impl Streams {
         buffer: &mut impl crate::socket_record_io::RecordBuffer,
         publish: impl FnOnce(crate::socket_record::ReceivedRecord, usize) -> Result<(), i32>,
     ) -> Result<(crate::socket_record::ReceivedRecord, Option<crate::socket_rights::Bundle>), i32> {
+        self.receive_stream_rights_using(id, offset, length, None, buffer, publish)
+    }
+
+    /// Snapshot the visible prefix before publication without consuming data or
+    /// rights. The worker serializes the snapshot and reply with other readers.
+    pub fn peek_stream_with_rights(
+        &mut self,
+        id: u64,
+        offset: u64,
+        length: u32,
+        maximum: usize,
+        buffer: &mut impl crate::socket_record_io::RecordBuffer,
+        publish: impl FnOnce(crate::socket_record::ReceivedRecord, usize) -> Result<(), i32>,
+    ) -> Result<(crate::socket_record::ReceivedRecord, Option<crate::socket_rights::Bundle>), i32> {
+        self.receive_stream_rights_using(id, offset, length, Some(maximum), buffer, publish)
+    }
+
+    fn receive_stream_rights_using(
+        &mut self,
+        id: u64,
+        offset: u64,
+        length: u32,
+        peek_maximum: Option<usize>,
+        buffer: &mut impl crate::socket_record_io::RecordBuffer,
+        publish: impl FnOnce(crate::socket_record::ReceivedRecord, usize) -> Result<(), i32>,
+    ) -> Result<(crate::socket_record::ReceivedRecord, Option<crate::socket_rights::Bundle>), i32> {
         if length as usize > crate::socket_record::MAX_RECORD_SIZE {
             return Err(-22);
         }
@@ -835,7 +861,15 @@ impl Streams {
                 mochios_posix_protocol::socket::Address::UnixUnnamed,
             )?,
         };
+        let snapshot = peek_maximum
+            .map(|maximum| {
+                queue.read_rights(count).map(|rights| rights.snapshot(maximum)).transpose()
+            })
+            .transpose()?;
         publish(record, rights)?;
+        if let Some(snapshot) = snapshot {
+            return Ok((record, snapshot));
+        }
         let (_, rights) = queue.read_owned(&mut data);
         Ok((record, rights))
     }
@@ -854,6 +888,32 @@ impl Streams {
         (crate::socket_record::ReceivedRecord, Option<crate::socket_rights::Bundle>),
         i32,
     > {
+        self.receive_record_rights_using(id, offset, length, None, buffer, publish)
+    }
+
+    /// Retain only the requested rights prefix while preserving the exact head
+    /// record. No allocation or fallible snapshot work follows publication.
+    pub fn peek_record_with_rights(
+        &mut self,
+        id: u64,
+        offset: u64,
+        length: u32,
+        maximum: usize,
+        buffer: &mut impl crate::socket_record_io::RecordBuffer,
+        publish: impl FnOnce(crate::socket_record::ReceivedRecord, usize) -> Result<(), i32>,
+    ) -> Result<(crate::socket_record::ReceivedRecord, Option<crate::socket_rights::Bundle>), i32> {
+        self.receive_record_rights_using(id, offset, length, Some(maximum), buffer, publish)
+    }
+
+    fn receive_record_rights_using(
+        &mut self,
+        id: u64,
+        offset: u64,
+        length: u32,
+        peek_maximum: Option<usize>,
+        buffer: &mut impl crate::socket_record_io::RecordBuffer,
+        publish: impl FnOnce(crate::socket_record::ReceivedRecord, usize) -> Result<(), i32>,
+    ) -> Result<(crate::socket_record::ReceivedRecord, Option<crate::socket_rights::Bundle>), i32> {
         if length as usize > crate::socket_record::MAX_RECORD_SIZE {
             return Err(-22);
         }
@@ -883,7 +943,15 @@ impl Streams {
         let record = queue.receive(&mut data, true)?;
         let rights = queue.front_rights().map_or(0, |bundle| bundle.len());
         buffer.write(offset, &data[..record.copied])?;
+        let snapshot = peek_maximum
+            .map(|maximum| {
+                queue.front_rights().map(|rights| rights.snapshot(maximum)).transpose()
+            })
+            .transpose()?;
         publish(record, rights)?;
+        if let Some(snapshot) = snapshot {
+            return Ok((record, snapshot));
+        }
         // No allocation, copy, lookup or request processing after publication.
         let (_, rights) = queue.receive_owned(&mut [])?;
         Ok((record, rights))

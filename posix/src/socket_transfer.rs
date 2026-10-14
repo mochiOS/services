@@ -285,8 +285,64 @@ impl Transfers {
         length: u32,
         maximum_rights: usize,
         close: fn(u32),
+        publish: impl FnMut(Option<u64>, ReceiptInfo) -> Result<(), i32>,
+        buffer: &mut impl crate::socket_record_io::RecordBuffer,
+    ) -> Result<(ReceiptInfo, Option<u64>), i32> {
+        self.receive_using(
+            streams,
+            socket,
+            source,
+            offset,
+            length,
+            maximum_rights,
+            close,
+            publish,
+            buffer,
+            false,
+        )
+    }
+
+    /// Same READ authority and receipt protocol as receive, but retains a
+    /// bounded snapshot instead of moving the queued references. Every receipt
+    /// owns independent pins even if another reader consumes the queue later.
+    pub fn peek(
+        &mut self,
+        streams: &mut Streams,
+        socket: u64,
+        source: u32,
+        offset: u64,
+        length: u32,
+        maximum_rights: usize,
+        close: fn(u32),
+        publish: impl FnMut(Option<u64>, ReceiptInfo) -> Result<(), i32>,
+        buffer: &mut impl crate::socket_record_io::RecordBuffer,
+    ) -> Result<(ReceiptInfo, Option<u64>), i32> {
+        self.receive_using(
+            streams,
+            socket,
+            source,
+            offset,
+            length,
+            maximum_rights,
+            close,
+            publish,
+            buffer,
+            true,
+        )
+    }
+
+    fn receive_using(
+        &mut self,
+        streams: &mut Streams,
+        socket: u64,
+        source: u32,
+        offset: u64,
+        length: u32,
+        maximum_rights: usize,
+        close: fn(u32),
         mut publish: impl FnMut(Option<u64>, ReceiptInfo) -> Result<(), i32>,
         buffer: &mut impl crate::socket_record_io::RecordBuffer,
+        peek: bool,
     ) -> Result<(ReceiptInfo, Option<u64>), i32> {
         if source == 0 {
             return Err(-9);
@@ -295,7 +351,9 @@ impl Transfers {
             return Err(-22);
         }
         let mut receipt_id = None;
+        let mut observed_total = 0;
         let publish = |record, total_rights| {
+            observed_total = total_rights;
             let available_rights = maximum_rights.min(total_rights);
             if available_rights != 0 {
                 if self.entries.len() == MAX_ENDPOINTS || self.next > MAX_DESCRIPTION_ID {
@@ -318,11 +376,31 @@ impl Transfers {
         };
         let (record, mut rights) =
             if streams.kind(socket)? == mochios_posix_protocol::socket::Kind::Stream {
-                streams.receive_stream_with_rights(socket, offset, length, buffer, publish)?
+                if peek {
+                    streams.peek_stream_with_rights(
+                        socket,
+                        offset,
+                        length,
+                        maximum_rights,
+                        buffer,
+                        publish,
+                    )?
+                } else {
+                    streams.receive_stream_with_rights(socket, offset, length, buffer, publish)?
+                }
+            } else if peek {
+                streams.peek_record_with_rights(
+                    socket,
+                    offset,
+                    length,
+                    maximum_rights,
+                    buffer,
+                    publish,
+                )?
             } else {
                 streams.receive_record_with_rights(socket, offset, length, buffer, publish)?
             };
-        let total_rights = rights.as_ref().map_or(0, |bundle| bundle.len());
+        let total_rights = observed_total;
         let info = ReceiptInfo {
             record,
             total_rights,

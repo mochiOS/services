@@ -338,9 +338,21 @@ fn queued_rights(
     handles: &[u32],
     payload: &[u8],
 ) -> posix_service::socket_rights::Budget {
-    use posix_service::socket_rights::{Budget, Pending};
+    use posix_service::socket_rights::Budget;
     let budget = Budget::new(handles.len());
-    let mut pending = Pending::new(handles.len(), &budget).unwrap();
+    queue_using_budget(streams, source, handles, payload, &budget);
+    budget
+}
+
+fn queue_using_budget(
+    streams: &mut Streams,
+    source: u64,
+    handles: &[u32],
+    payload: &[u8],
+    budget: &posix_service::socket_rights::Budget,
+) {
+    use posix_service::socket_rights::Pending;
+    let mut pending = Pending::new(handles.len(), budget).unwrap();
     for (index, chunk) in handles.chunks(3).enumerate() {
         pending
             .append(
@@ -353,7 +365,287 @@ fn queued_rights(
         .commit_record_with_rights(source, payload, pending.finish().ok().unwrap())
         .ok()
         .unwrap();
-    budget
+}
+
+#[test]
+fn repeated_peek_receipts_keep_bounded_prefixes_alive_after_other_reader_consumes() {
+    use posix_service::socket_rights::Budget;
+    let (mut streams, [a, b]) = pair();
+    let budget = Budget::new(8);
+    queue_using_budget(&mut streams, a, &[1, 2, 3], b"abcdef", &budget);
+    let mut jobs = Transfers::new(0);
+    let mut buffer = Buffer::new(b"--------");
+    let mut receipts = Vec::new();
+    for source in [200, 201] {
+        let mut published = None;
+        let result = jobs
+            .peek(
+                &mut streams,
+                b,
+                source,
+                2,
+                2,
+                2,
+                close,
+                |id, info| {
+                    published = Some((info, id));
+                    Ok(())
+                },
+                &mut buffer,
+            )
+            .unwrap();
+        assert_eq!(published, Some(result));
+        assert_eq!(
+            (
+                result.0.record.copied,
+                result.0.record.length,
+                result.0.total_rights,
+                result.0.available_rights
+            ),
+            (2, 6, 3, 2)
+        );
+        assert_eq!(&buffer.bytes, b"--ab----");
+        receipts.push(result.1.unwrap());
+        assert!(streams.readiness(b).unwrap().readable);
+        assert!(closed().is_empty());
+    }
+    assert_ne!(receipts[0], receipts[1]);
+    assert_eq!(budget.used(), 7);
+    let (_, consumed) = jobs
+        .receive(
+            &mut streams,
+            b,
+            202,
+            0,
+            8,
+            0,
+            close,
+            |_, _| Ok(()),
+            &mut buffer,
+        )
+        .unwrap();
+    assert!(consumed.is_none());
+    assert_eq!(closed(), [3]);
+    assert_eq!(budget.used(), 4);
+    assert!(!streams.readiness(b).unwrap().readable);
+    for (index, receipt) in receipts.into_iter().enumerate() {
+        assert_eq!(
+            jobs.deliver(receipt, 0, 4, |leases| {
+                assert_eq!(leases.iter().map(Lease::handle).collect::<Vec<_>>(), [1, 2]);
+                assert!(leases.iter().all(|lease| lease.rights()
+                    == mnu_abi::HANDLE_RIGHT_READ | mnu_abi::HANDLE_RIGHT_TRANSFER));
+                Ok(())
+            }),
+            Ok(2)
+        );
+        assert_eq!(budget.used(), 2 * (1 - index));
+        jobs.release(receipt).unwrap();
+    }
+    assert_eq!(closed(), [3, 200, 1, 2, 201]);
+}
+
+#[test]
+fn zero_control_and_zero_payload_peeks_preserve_empty_datagram_rights() {
+    let (mut streams, [a, b]) = pair();
+    let budget = posix_service::socket_rights::Budget::new(2);
+    queue_using_budget(&mut streams, a, &[1], b"", &budget);
+    let mut jobs = Transfers::new(0);
+    let mut buffer = Buffer::new(b"");
+    let (info, receipt) = jobs
+        .peek(
+            &mut streams,
+            b,
+            200,
+            0,
+            0,
+            0,
+            close,
+            |id, info| {
+                assert!(id.is_none());
+                assert_eq!((info.total_rights, info.available_rights), (1, 0));
+                Ok(())
+            },
+            &mut buffer,
+        )
+        .unwrap();
+    assert_eq!((info.record.copied, info.record.length), (0, 0));
+    assert!(receipt.is_none() && closed().is_empty());
+    assert_eq!(budget.used(), 1);
+    let (_, receipt) = jobs
+        .peek(
+            &mut streams,
+            b,
+            201,
+            0,
+            0,
+            1,
+            close,
+            |_, _| Ok(()),
+            &mut buffer,
+        )
+        .unwrap();
+    let receipt = receipt.unwrap();
+    assert_eq!(budget.used(), 2);
+    jobs.release(receipt).unwrap();
+    assert_eq!(closed(), [201]);
+    assert_eq!(budget.used(), 1);
+    assert!(streams.readiness(b).unwrap().readable);
+    jobs.receive(
+        &mut streams,
+        b,
+        202,
+        0,
+        0,
+        0,
+        close,
+        |_, _| Ok(()),
+        &mut buffer,
+    )
+    .unwrap();
+    assert_eq!(closed(), [201, 1]);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn failed_peek_publication_releases_pins_without_adopting_source_or_reusing_id() {
+    let (mut streams, [a, b]) = pair();
+    let budget = posix_service::socket_rights::Budget::new(4);
+    queue_using_budget(&mut streams, a, &[1, 2], b"abc", &budget);
+    let mut jobs = Transfers::new(0);
+    let mut buffer = Buffer::new(b"---");
+    buffer.write_fail = true;
+    assert_eq!(
+        jobs.peek(
+            &mut streams,
+            b,
+            200,
+            0,
+            3,
+            2,
+            close,
+            |_, _| panic!("copy failed"),
+            &mut buffer
+        ),
+        Err(-5)
+    );
+    buffer.write_fail = false;
+    let mut failed_id = None;
+    assert_eq!(
+        jobs.peek(
+            &mut streams,
+            b,
+            200,
+            0,
+            3,
+            2,
+            close,
+            |id, _| {
+                failed_id = id;
+                assert_eq!(budget.used(), 4);
+                Err(-5)
+            },
+            &mut buffer
+        ),
+        Err(-5)
+    );
+    assert_eq!(budget.used(), 2);
+    assert!(closed().is_empty());
+    let (_, receipt) = jobs
+        .peek(
+            &mut streams,
+            b,
+            201,
+            0,
+            3,
+            2,
+            close,
+            |_, _| Ok(()),
+            &mut buffer,
+        )
+        .unwrap();
+    let receipt = receipt.unwrap();
+    assert_ne!(Some(receipt), failed_id);
+    assert_eq!(jobs.release(failed_id.unwrap()), Err(-9));
+    assert_eq!(jobs.deliver(receipt, 0, 2, |_| Err(-5)), Err(-5));
+    assert_eq!(budget.used(), 4);
+    jobs.release(receipt).unwrap();
+    assert_eq!(budget.used(), 2);
+    assert_eq!(closed(), [201]);
+    assert!(streams.readiness(b).unwrap().readable);
+}
+
+#[test]
+fn peek_quota_and_allocation_failures_leave_original_record_and_rights_usable() {
+    let mut failures = 0;
+    for allocation in 0..4 {
+        let (mut streams, [a, b]) = pair();
+        let budget = posix_service::socket_rights::Budget::new(4);
+        queue_using_budget(&mut streams, a, &[1, 2], b"abc", &budget);
+        let mut jobs = Transfers::new(0);
+        let mut buffer = Buffer::new(b"---");
+        FAIL_AFTER.with(|remaining| remaining.set(allocation));
+        let result = jobs.peek(
+            &mut streams,
+            b,
+            200,
+            0,
+            3,
+            2,
+            close,
+            |_, _| Ok(()),
+            &mut buffer,
+        );
+        FAIL_AFTER.with(|remaining| remaining.set(-1));
+        match result {
+            Err(error) => {
+                assert_eq!(error, -12);
+                failures += 1;
+                assert_eq!(budget.used(), 2);
+                assert!(closed().is_empty());
+            }
+            Ok((_, receipt)) => jobs.release(receipt.unwrap()).unwrap(),
+        }
+        assert!(streams.readiness(b).unwrap().readable);
+        jobs.receive(
+            &mut streams,
+            b,
+            201,
+            0,
+            3,
+            0,
+            close,
+            |_, info| {
+                assert_eq!(info.total_rights, 2);
+                Ok(())
+            },
+            &mut buffer,
+        )
+        .unwrap();
+        assert_eq!(buffer.bytes, b"abc");
+        assert_eq!(budget.used(), 0);
+    }
+    assert_eq!(failures, 3);
+    let (mut streams, [a, b]) = pair();
+    let budget = queued_rights(&mut streams, a, &[1], b"a");
+    let mut jobs = Transfers::new(0);
+    let mut buffer = Buffer::new(b"-");
+    assert_eq!(
+        jobs.peek(
+            &mut streams,
+            b,
+            200,
+            0,
+            1,
+            1,
+            close,
+            |_, _| panic!("quota exhausted"),
+            &mut buffer
+        ),
+        Err(-105)
+    );
+    assert_eq!(budget.used(), 1);
+    assert!(closed().is_empty());
+    assert!(streams.readiness(b).unwrap().readable);
 }
 
 #[test]
