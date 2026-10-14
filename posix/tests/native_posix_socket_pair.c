@@ -12,8 +12,10 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #define CHECK(condition)                                                       \
@@ -26,6 +28,73 @@
     }                                                                          \
   } while (0)
 static int blocking_fd;
+static uint64_t monotonic_ns(void) {
+  struct timespec value;
+  if (clock_gettime(CLOCK_MONOTONIC, &value) != 0)
+    return 0;
+  return (uint64_t)value.tv_sec * 1000000000 + (uint64_t)value.tv_nsec;
+}
+
+static int verify_receive_timeout(void) {
+  int fds[2];
+  CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+  int alias = dup(fds[1]);
+  CHECK(alias >= 0);
+  struct timeval timeout = {.tv_sec = 0, .tv_usec = 50000};
+  CHECK(setsockopt(alias, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) ==
+        0);
+  socklen_t length = sizeof(timeout);
+  memset(&timeout, 0, sizeof(timeout));
+  CHECK(getsockopt(fds[1], SOL_SOCKET, SO_RCVTIMEO, &timeout, &length) == 0 &&
+        length == sizeof(timeout) && timeout.tv_sec == 0 &&
+        timeout.tv_usec == 50000);
+  char bytes[4];
+  uint64_t started = monotonic_ns();
+  CHECK(started != 0);
+  CHECK(read(fds[1], bytes, sizeof(bytes)) == -1 && errno == EAGAIN);
+  CHECK(monotonic_ns() - started >= 30000000);
+  CHECK(write(fds[0], "xy", 2) == 2);
+  started = monotonic_ns();
+  CHECK(recv(alias, bytes, sizeof(bytes), MSG_WAITALL) == 2 &&
+        memcmp(bytes, "xy", 2) == 0);
+  CHECK(monotonic_ns() - started >= 30000000);
+  CHECK(recv(alias, bytes, sizeof(bytes), MSG_DONTWAIT) == -1 &&
+        errno == EAGAIN);
+  struct pollfd receiver = {.fd = alias, .events = POLLIN};
+  started = monotonic_ns();
+  CHECK(poll(&receiver, 1, 100) == 0);
+  CHECK(monotonic_ns() - started >= 70000000);
+  timeout.tv_usec = 1000000;
+  CHECK(setsockopt(alias, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) ==
+            -1 &&
+        errno == EINVAL);
+  timeout.tv_usec = 0;
+  CHECK(setsockopt(alias, SOL_SOCKET, SO_RCVTIMEO, &timeout, 4) == -1 &&
+        errno == EINVAL);
+  CHECK(setsockopt(alias, SOL_SOCKET, SO_RCVTIMEO, NULL, sizeof(timeout)) ==
+            -1 &&
+        errno == EFAULT);
+  CHECK(setsockopt(alias, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) ==
+        0);
+  CHECK(write(fds[0], "z", 1) == 1 && read(alias, bytes, sizeof(bytes)) == 1 &&
+        bytes[0] == 'z');
+  CHECK(close(alias) == 0 && close(fds[0]) == 0 && close(fds[1]) == 0);
+  int listener = socket(AF_UNIX, SOCK_STREAM, 0);
+  struct sockaddr_un address = {.sun_family = AF_UNIX};
+  strcpy(address.sun_path, "/native-posix-receive-timeout");
+  CHECK(unlink(address.sun_path) == 0 || errno == ENOENT);
+  CHECK(listener >= 0 &&
+        bind(listener, (struct sockaddr *)&address,
+             2 + strlen(address.sun_path) + 1) == 0 &&
+        listen(listener, 1) == 0);
+  timeout.tv_usec = 50000;
+  CHECK(setsockopt(listener, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+                   sizeof(timeout)) == 0);
+  CHECK(accept(listener, NULL, NULL) == -1 && errno == EAGAIN);
+  CHECK(close(listener) == 0 && unlink(address.sun_path) == 0);
+  puts("posix-socket-receive-timeout: PASS");
+  return 0;
+}
 static int verify_send_capacity(void) {
   int fds[2];
   CHECK(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, fds) == 0);
@@ -630,6 +699,7 @@ int main(int argc, char **argv) {
   CHECK(verify_exact_process_lookup() == 0);
   CHECK(verify_receive_capacity() == 0);
   CHECK(verify_send_capacity() == 0);
+  CHECK(verify_receive_timeout() == 0);
   CHECK(verify_socket_errors() == 0);
   puts("posix-socket-options: PASS");
   CHECK(verify_connect_interrupts() == 0);

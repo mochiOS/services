@@ -35,6 +35,28 @@ fn fixture() -> (PosixService<u32>, PeerIdentity, Streams, Create) {
 }
 
 #[test]
+fn receive_timeout_is_shared_policy_and_accepted_sockets_snapshot_it() {
+    let (service, peer, mut streams, request) = fixture();
+    let listener = service.create_socket(peer, request, &mut streams).unwrap();
+    let client = service.create_socket(peer, request, &mut streams).unwrap();
+    assert_eq!(streams.receive_timeout(listener), Ok(0));
+    streams.listen(listener, 2).unwrap();
+    streams.set_receive_timeout(listener, 50_000_000).unwrap();
+    let accepted = streams.connect(client, listener).unwrap();
+    streams.set_receive_timeout(listener, 100_000_000).unwrap();
+    let ticket = streams.begin_accept(listener).unwrap();
+    streams.commit_accept(ticket, (501, 20), 0).unwrap();
+    assert_eq!(streams.receive_timeout(accepted), Ok(50_000_000));
+    assert_eq!(streams.receive_timeout(client), Ok(0));
+    assert_eq!(streams.set_receive_timeout(accepted, 1), Err(-22));
+    assert_eq!(streams.receive_timeout(accepted), Ok(50_000_000));
+    // The provider stays nonblocking; client-owned wait deadlines apply policy.
+    assert_eq!(streams.read(accepted, &mut [0; 1]), Err(-11));
+    assert_eq!(streams.write(client, b"x"), Ok(1));
+    assert_eq!(streams.read(accepted, &mut [0; 1]), Ok(1));
+}
+
+#[test]
 fn send_limit_controls_queued_bytes_and_readiness_without_discarding_data() {
     let (service, peer, mut streams, request) = fixture();
     let [a, b] = service

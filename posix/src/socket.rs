@@ -69,6 +69,7 @@ struct Endpoint {
     incoming: VecDeque<u8>,
     receive_capacity: usize,
     send_capacity: usize,
+    receive_timeout: u64,
     error: u32,
     read_shutdown: bool,
     write_shutdown: bool,
@@ -163,6 +164,7 @@ impl Streams {
             incoming: VecDeque::new(),
             receive_capacity: RECEIVE_CAPACITY,
             send_capacity: SEND_CAPACITY,
+            receive_timeout: 0,
             error: 0,
             read_shutdown: false,
             write_shutdown: false,
@@ -198,6 +200,7 @@ impl Streams {
                 incoming: VecDeque::new(),
                 receive_capacity: RECEIVE_CAPACITY,
                 send_capacity: SEND_CAPACITY,
+                receive_timeout: 0,
                 error: 0,
                 read_shutdown: false,
                 write_shutdown: false,
@@ -293,6 +296,20 @@ impl Streams {
 
     pub fn send_capacity(&self, id: u64) -> Result<usize, i32> {
         Ok(self.endpoint(id)?.send_capacity)
+    }
+
+    pub fn receive_timeout(&self, id: u64) -> Result<u64, i32> {
+        Ok(self.endpoint(id)?.receive_timeout)
+    }
+
+    pub fn set_receive_timeout(&mut self, id: u64, nanoseconds: u64) -> Result<(), i32> {
+        let entry = self.endpoint_mut(id)?;
+        // Canonical timeval precision, no C layout or pointer on the wire.
+        if nanoseconds % 1000 != 0 {
+            return Err(-22);
+        }
+        entry.receive_timeout = nanoseconds;
+        Ok(())
     }
 
     /// Each UNIX stream has one peer, so its queued outgoing bytes are the
@@ -453,6 +470,7 @@ impl Streams {
         let credentials = target.credentials;
         let receive_capacity = target.receive_capacity;
         let send_capacity = target.send_capacity;
+        let receive_timeout = target.receive_timeout;
         let client_index = self
             .entries
             .iter()
@@ -480,6 +498,7 @@ impl Streams {
             incoming: VecDeque::new(),
             receive_capacity,
             send_capacity,
+            receive_timeout,
             error: 0,
             read_shutdown: false,
             write_shutdown: false,
