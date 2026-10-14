@@ -47,7 +47,10 @@ static void info_handler(int signal, siginfo_t *info, void *raw_context) {
     errno = 99;
 }
 
-int main(void) {
+#ifndef SIGINFO_TEST_ENTRY
+#define SIGINFO_TEST_ENTRY main
+#endif
+int SIGINFO_TEST_ENTRY(void) {
     CHECK(legacy_memory_fault_main() == 0);
     sigset_t old_children;
     sigemptyset(&old_children); sigaddset(&old_children, SIGCHLD);

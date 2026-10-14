@@ -209,6 +209,7 @@ fn target_c_and_cpp_headers_match_rust_layout_without_changing_the_built_sdk() {
     }
     source.push_str("CHECK(sizeof(uid_t)==2,\"target uid width\");\nCHECK(NGREG==18 && REG_RIP==16 && REG_RSP==15,\"register indices\");\n");
     source.push_str("CHECK(SA_SIGINFO==4 && (SA_SIGINFO & SA_NOCLDWAIT)==0,\"distinct action flags\");\nCHECK(sizeof(struct sigaction)==24,\"action layout\");\nCHECK(offsetof(struct sigaction,sa_handler)==offsetof(struct sigaction,sa_sigaction),\"handler union\");\nstatic void three_arguments(int signal, siginfo_t *info, void *context) { (void)signal; (void)info; (void)context; }\nstatic void action_typecheck(void) { struct sigaction action; action.sa_sigaction=three_arguments; action.sa_flags=SA_SIGINFO; }\n");
+    source.push_str("CHECK(SA_ONSTACK==8 && SS_ONSTACK==1 && SS_DISABLE==2 && MINSIGSTKSZ==2048,\"alternate stack ABI\");\n");
     for (name, value) in [
         ("SI_USER", SI_USER),
         ("SI_KERNEL", SI_KERNEL),

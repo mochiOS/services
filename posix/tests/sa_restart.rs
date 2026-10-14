@@ -78,7 +78,7 @@ fn runtime_keeps_sleep_interruptions_separate_from_restartable_io() {
         dispatch
             .find("restart_signal_generation")
             .unwrap()
-            < dispatch.find("function(signal)").unwrap()
+            < dispatch.find("signal_stack::invoke").unwrap()
     );
-    assert!(source.contains("!(SA_NOCLDSTOP | SA_NOCLDWAIT | SA_RESTART | SA_SIGINFO)"));
+    assert!(source.contains("!(SA_NOCLDSTOP | SA_NOCLDWAIT | SA_RESTART | SA_SIGINFO | SA_ONSTACK)"));
 }

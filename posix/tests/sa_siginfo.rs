@@ -61,21 +61,25 @@ fn dispatch_requires_real_delivery_metadata_and_finishes_bookkeeping_before_rest
         .next()
         .unwrap();
     assert!(dispatch.contains(".signal_delivery_origin(delivery)"));
-    assert!(dispatch.contains("function(signal, info, (context as *mut UContext).cast())"));
+    assert!(dispatch.contains("signal_stack::invoke(control, action, signal, info.as_mut(), context, native)"));
+    let stack = include_str!("../../../user/crates/newlib-runtime/src/signal_stack.rs");
+    let compact: String = stack.chars().filter(|ch| !ch.is_whitespace()).collect();
+    assert!(compact.contains("function(invocation.signal,info,"));
+    assert!(stack.contains("(invocation.context as *mut UContext).cast()"));
     assert!(dispatch.contains("context.uc_sigmask = previous"));
     assert!(dispatch.contains("checked_return(&original)"));
     let scoped = include_str!("../../../user/crates/newlib-runtime/src/signal_delivery.rs");
     assert!(
         scoped
-            .find("drain_pending_signals_with_context(&mut frame)")
+            .find("drain_pending_signals_with_context(&mut frame, false)")
             .unwrap()
             < scoped.find("machine.write(frame.uc_mcontext)").unwrap()
     );
     assert!(scoped.contains("ThreadUpcallInspect"));
     assert!(scoped.contains("ThreadUpcallReturnContext"));
     assert!(!scoped.contains("ThreadUpcallReturn,"));
-    assert!(source.contains("dispatch_signal(delivery, None, context)"));
+    assert!(source.contains("dispatch_signal(delivery, None, context, native)"));
     let fault = include_str!("../../../user/crates/newlib-runtime/src/fault_signal.rs");
-    assert!(fault.contains("dispatch_signal(fault.signal, Some(info), context)"));
+    assert!(fault.contains("dispatch_signal(fault.signal, Some(info), context, true)"));
     assert!(scoped.contains("if delivered.is_ok()"));
 }

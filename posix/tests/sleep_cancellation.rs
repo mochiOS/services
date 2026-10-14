@@ -214,7 +214,7 @@ fn caught_handlers_notify_sleepers_and_recycled_controls_reset_the_generation() 
         .unwrap();
     assert!(
         dispatch.find("notify_thread_waiter(control)").unwrap()
-            < dispatch.find("function(signal)").unwrap()
+            < dispatch.find("signal_stack::invoke").unwrap()
     );
     assert_eq!(
         runtime
