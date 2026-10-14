@@ -3,11 +3,8 @@ use alloc::string::ToString;
 
 use mochi_user_platform as platform;
 
-use crate::app_spawn::encode_spawn_args;
 use crate::package_index::{PackageIndex, package_manifest_by_id, service_binary_path};
-use crate::resolver::{
-    application_identity, authorize_spawn, binary_caps, encode_identity_args, encode_nul_list,
-};
+use crate::resolver::{application_identity, authorize_spawn_image, binary_caps};
 
 const SERVICE_MANAGER_PACKAGE_ID: &str = "org.mochios.service-manager";
 const SIGNATURE_PACKAGE_ID: &str = "org.mochios.signature";
@@ -61,31 +58,23 @@ fn spawn_service_by_package(
         service_path,
         caps.len()
     );
-    let caps_nul = encode_nul_list(&caps);
     let logger_endpoint = platform::logger::endpoint().unwrap_or(0);
     let identity =
         application_identity(&manifest, &manifest_path, crate::bootstrap_file::read_file)?;
-    let mut args = alloc::vec::Vec::new();
-    encode_identity_args(&identity, &mut args);
-    args.push(logger_endpoint.to_string());
-    let args_nul = encode_spawn_args(&args)?;
-    authorize_spawn(
-        0,
-        service_path,
-        &identity,
-        caps,
-        platform::service::ExecutionClass::Privileged,
-        crate::bootstrap_file::read_file,
-    )?;
-    platform::service::spawn_manifest(
-        service_path,
-        platform::service::ExecutionClass::Privileged,
-        Some(args_nul.as_slice()),
-        Some(caps_nul.as_slice()),
-    )
+    let args = alloc::vec![logger_endpoint.to_string()];
+    crate::native_bootstrap::spawn(service_path, &args, |image| {
+        authorize_spawn_image(
+            0,
+            service_path,
+            &identity,
+            caps,
+            platform::service::ExecutionClass::Privileged,
+            image,
+        )
+    })
     .map_err(|error| {
         stderr_line(&format!(
-            "capability.service: kernel spawn failed path={} errno={}",
+            "capability.service: native launch failed path={} errno={}",
             service_path,
             error.errno().unwrap_or(0)
         ));

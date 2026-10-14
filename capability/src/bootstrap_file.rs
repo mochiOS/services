@@ -50,11 +50,19 @@ fn native_call(endpoint: u32, request: &[u8], reply: &mut [u8]) -> SysResult<usi
 }
 
 pub(crate) fn read_file(path: &str) -> SysResult<Vec<u8>> {
+    read_bounded(path, MAX_BOOT_FILE_BYTES)
+}
+
+pub(crate) fn read_image(path: &str) -> SysResult<Vec<u8>> {
+    read_bounded(path, 64 * 1024 * 1024)
+}
+
+fn read_bounded(path: &str, maximum: usize) -> SysResult<Vec<u8>> {
     let mut reader = READER.lock().map_err(|_| error(syscall::EIO))?;
     reader
         .as_mut()
         .ok_or_else(|| error(syscall::EAGAIN))?
-        .read_file(path, MAX_BOOT_FILE_BYTES)
+        .read_file(path, maximum)
 }
 
 pub(crate) fn read_dir_names(path: &str) -> SysResult<Vec<String>> {

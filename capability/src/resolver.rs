@@ -308,13 +308,33 @@ pub(crate) fn authorize_spawn(
     execution_class: platform::service::ExecutionClass,
     read_file: FileReader,
 ) -> Result<(), mochi_user_syscall::SysError> {
+    let executable = read_file(path)?;
+    authorize_spawn_image(
+        requester,
+        path,
+        identity,
+        capabilities,
+        execution_class,
+        &executable,
+    )
+}
+
+/// Authorize the exact owned bytes to be supplied to native creation. The
+/// caller has already resolved and verified the package/capability policy.
+pub(crate) fn authorize_spawn_image(
+    requester: u64,
+    path: &str,
+    identity: &ApplicationIdentity,
+    capabilities: &[String],
+    execution_class: platform::service::ExecutionClass,
+    executable: &[u8],
+) -> Result<(), mochi_user_syscall::SysError> {
     use mnu_abi::exec::{
         EXEC_AUTHORIZATION_CLASS_PREFIX, EXEC_AUTHORIZATION_KIND_PREFIX,
         EXEC_AUTHORIZATION_KIND_SPAWN, EXECUTABLE_DIGEST_PREFIX,
     };
 
-    let executable = read_file(path)?;
-    let digest = Sha256::digest(&executable);
+    let digest = Sha256::digest(executable);
     let mut digest_hex = String::with_capacity(64);
     for byte in digest {
         use core::fmt::Write;

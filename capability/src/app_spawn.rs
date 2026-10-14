@@ -253,21 +253,3 @@ pub(crate) fn spawn_application_from_manifest(
 
 // Early service bootstrap still uses the legacy metadata encoder until its
 // independent launch path is migrated. Application creation never uses it.
-pub(crate) fn encode_spawn_args(items: &[String]) -> Result<Vec<u8>, mochi_user_syscall::SysError> {
-    let mut out = Vec::with_capacity(4096);
-    out.resize(4096, 0);
-    let mut cursor = 0usize;
-    for item in items {
-        let bytes = item.as_bytes();
-        if cursor + bytes.len() + 2 > out.len() {
-            return Err(mochi_user_syscall::SysError::from_raw(
-                mochi_user_syscall::EINVAL as i64,
-            ));
-        }
-        out[cursor..cursor + bytes.len()].copy_from_slice(bytes);
-        cursor += bytes.len();
-        out[cursor] = 0;
-        cursor += 1;
-    }
-    Ok(out)
-}
