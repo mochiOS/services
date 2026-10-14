@@ -1,8 +1,12 @@
 #include <pthread.h>
+#include <errno.h>
+#include <sched.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 #ifdef __mochios__
 #include <sys/lock.h>
@@ -12,6 +16,39 @@ static _LOCK_RECURSIVE_T allocator_lock = &__lock___malloc_recursive_mutex;
 #endif
 
 #define CHECK(x) do { if (!(x)) { printf("newlib-fork-locks: FAIL line=%d\n", __LINE__); return 1; } } while (0)
+
+#ifdef __mochios__
+static atomic_int arena_ready, fork_entered, fork_finished, arena_copied_early, arena_stop;
+static void *arena_writer(void *unused) {
+    (void)unused;
+    __lock_acquire_recursive(allocator_lock);
+    atomic_store(&arena_ready, 1);
+    while (!atomic_load(&fork_entered)) sched_yield();
+    struct timespec delay = { .tv_nsec = 100000000 };
+    while (nanosleep(&delay, &delay) && errno == EINTR) {}
+    atomic_store(&arena_copied_early, atomic_load(&fork_finished));
+    __lock_release_recursive(allocator_lock);
+    /* Stay live so AddressSpaceClone still rejects a multithreaded source. */
+    while (!atomic_load(&arena_stop)) sched_yield();
+    return NULL;
+}
+static int serialized_arena(void) {
+    pthread_t thread;
+    CHECK(pthread_create(&thread, NULL, arena_writer, NULL) == 0);
+    while (!atomic_load(&arena_ready)) sched_yield();
+    atomic_store(&fork_entered, 1);
+    pid_t child = fork();
+    int error = errno;
+    if (child == 0) _exit(48);
+    atomic_store(&fork_finished, 1);
+    atomic_store(&arena_stop, 1);
+    void *result;
+    CHECK(pthread_join(thread, &result) == 0 && result == NULL);
+    CHECK(child == -1 && error == EAGAIN && !atomic_load(&arena_copied_early));
+    puts("newlib-fork-locks: PASS clone waits for allocator mutation and releases locks after EAGAIN");
+    return 0;
+}
+#endif
 
 static void *contender(void *unused) {
     (void)unused;
@@ -78,6 +115,7 @@ static int fork_locked(unsigned nested) {
 
 int main(void) {
 #ifdef __mochios__
+    CHECK(serialized_arena() == 0);
     __lock_init_recursive(lock);
     __lock_acquire_recursive(lock);
     __lock_acquire_recursive(lock);

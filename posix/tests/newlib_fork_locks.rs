@@ -38,11 +38,32 @@ fn private_recursive_lock_identity_survives_native_thread_replacement() {
         "pub extern \"C\" fn __retarget_lock_release_recursive(",
     ];
     let operations = declarations.map(|name| item(source, name)).join("\n");
+    let fork_source = include_str!("../../../user/crates/newlib-runtime/src/atfork.rs");
+    let guard = [
+        "pub(super) struct AllocatorGuard {",
+        "pub(super) fn freeze_allocator()",
+        "impl Drop for AllocatorGuard {",
+    ]
+    .map(|name| item(fork_source, name))
+    .join("\n");
     let program = format!(
         r#"
 #![allow(non_camel_case_types, dead_code)]
 use std::sync::atomic::{{AtomicU32, AtomicU64, Ordering}};
+use std::ptr;
+extern crate self as mochios_posix_client;
 type c_int = i32;
+static DEFERRED: AtomicU32 = AtomicU32::new(0);
+pub mod upcall_guard {{
+    pub struct Guard<'a>(pub std::marker::PhantomData<&'a ()>);
+    impl Drop for Guard<'_> {{
+        fn drop(&mut self) {{ assert!(super::DEFERRED.fetch_sub(1, super::Ordering::Relaxed) > 0); }}
+    }}
+}}
+fn defer_native_delivery() -> Option<upcall_guard::Guard<'static>> {{
+    DEFERRED.fetch_add(1, Ordering::Relaxed);
+    Some(upcall_guard::Guard(std::marker::PhantomData))
+}}
 struct Control {{ newlib_lock_identity: AtomicU64 }}
 static CONTROL: Control = Control {{ newlib_lock_identity: AtomicU64::new(17) }};
 static NATIVE: AtomicU64 = AtomicU64::new(17);
@@ -58,6 +79,9 @@ fn native_mutex_try_acquire(state: &AtomicU32) -> bool {{
 }}
 fn native_mutex_release(state: &AtomicU32) {{ assert_eq!(state.swap(0, Ordering::Release), 1); }}
 {operations}
+#[allow(non_upper_case_globals)]
+static __lock___malloc_recursive_mutex: LockOpaque = LockOpaque::new(false);
+mod atfork {{ use super::*; {guard} }}
 fn main() {{
     let mut lock = LockOpaque::new(false);
     let pointer = &mut lock as *mut LockOpaque;
@@ -85,6 +109,24 @@ fn main() {{
     CONTROL.newlib_lock_identity.store(51, Ordering::Relaxed);
     assert_eq!(__retarget_lock_try_acquire_recursive(pointer), 1);
     __retarget_lock_release_recursive(pointer);
+    let allocator = ptr::from_ref(&__lock___malloc_recursive_mutex).cast_mut();
+    __retarget_lock_acquire_recursive(allocator);
+    __retarget_lock_acquire_recursive(allocator);
+    {{
+        let _guard = atfork::freeze_allocator();
+        assert_eq!(__lock___malloc_recursive_mutex.depth.load(Ordering::Relaxed), 3);
+        assert_eq!(DEFERRED.load(Ordering::Relaxed), 1);
+        NATIVE.store(99, Ordering::Relaxed);
+    }}
+    assert_eq!(__lock___malloc_recursive_mutex.depth.load(Ordering::Relaxed), 2);
+    assert_eq!(DEFERRED.load(Ordering::Relaxed), 0);
+    __retarget_lock_release_recursive(allocator);
+    __retarget_lock_release_recursive(allocator);
+    // Error returns before capture must release the same guard as success.
+    let failed = (|| -> Result<(), ()> {{ let _guard = atfork::freeze_allocator(); Err(()) }})();
+    assert_eq!(failed, Err(()));
+    assert_eq!(__lock___malloc_recursive_mutex.state.load(Ordering::Relaxed), 0);
+    assert_eq!(DEFERRED.load(Ordering::Relaxed), 0);
 }}
 "#
     );
