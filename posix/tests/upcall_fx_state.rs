@@ -96,6 +96,8 @@ pub fn probe() {
     state.take_restored_context().unwrap();
     let event=state.begin_exception(user,14).unwrap();
     let (_,fx)=state.snapshot(event.token).unwrap();
+    assert_eq!(state.request_context_restore(user,fx),Err(ThreadUpcallError::Active));
+    assert_eq!(state.snapshot(event.token).unwrap(),(user,fx));
     let mut invalid_fx=fx;
     invalid_fx[24..28].copy_from_slice(&0x80001f80u32.to_le_bytes());
     invalid_fx[28..32].copy_from_slice(&u32::MAX.to_le_bytes());
@@ -103,11 +105,38 @@ pub fn probe() {
     assert_eq!(state.snapshot(event.token).unwrap(),(user,fx));
     assert_eq!(state.request_return_context(event.token+1,user,fx),Err(ThreadUpcallError::InvalidToken));
     let mut changed_context=user;changed_context.rax=0x1234;
+    let mut independent=ThreadUpcallState::new();
+    assert_eq!(independent.entry,0);
+    independent.request_context_restore(changed_context,fx).unwrap();
+    assert_eq!(independent.take_restored_context(),Some(changed_context));
+    assert!(independent.take_restored_context().is_none());
     state.request_return_context(event.token,changed_context,fx).unwrap();
     assert_eq!(state.take_restored_context(),Some(changed_context));
     assert_eq!(state.request_return_context(event.token,user,fx),Err(ThreadUpcallError::InvalidToken));
     state.install(0x1000,0x8000,false).unwrap();
     assert!(state.begin_exception(user,14).is_none());
+    // A self-selected continuation needs no fabricated delivery token. It
+    // still validates MXCSR against this CPU, not the user's spoofed mask.
+    assert_eq!(state.request_context_restore(user,invalid_fx),Err(ThreadUpcallError::InvalidContext));
+    assert!(state.saved_context.is_none() && !state.restore_pending);
+    state.enqueue(0x55).unwrap();
+    let selected=0x5f80u32;
+    let mut selected_fx=fx;
+    selected_fx[24..28].copy_from_slice(&selected.to_le_bytes());
+    state.request_context_restore(changed_context,selected_fx).unwrap();
+    assert_eq!(state.request_context_restore(user,fx),Err(ThreadUpcallError::Active));
+    assert_eq!(state.install(0x2000,0x9000,false),Err(ThreadUpcallError::Active));
+    assert!(state.begin(user).is_none());
+    assert_eq!(state.pending_len,1);
+    assert_eq!(state.take_restored_context(),Some(changed_context));
+    let mut restored_mxcsr=0u32;
+    unsafe {core::arch::asm!("stmxcsr [{}]",in(reg)&mut restored_mxcsr,options(nostack));}
+    assert_eq!(restored_mxcsr,selected);
+    assert!(state.take_restored_context().is_none());
+    let queued=state.begin(user).unwrap();
+    assert_eq!(queued.payload,0x55);
+    state.request_return(queued.token).unwrap();
+    assert_eq!(state.take_restored_context(),Some(user));
     original.restore_current();
 }
 } } fn main() { task::thread::probe(); }
