@@ -65,14 +65,17 @@ fn copied_handlers_never_complete_parent_tokens_or_free_live_native_frames() {
         .split("extern \"C\" fn posix_signal_upcall(")
         .next()
         .unwrap();
-    let owner = drain.find("let owner = native_process_id()").unwrap();
+    let owner = drain.find("let epoch = FORK_EPOCH").unwrap();
+    let received = drain.find("thread_dequeue_signal_delivery()").unwrap();
     let invoke = drain.find("dispatch_signal(delivery").unwrap();
-    let check = drain.find("!= owner").unwrap();
+    let before = drain.find("!= epoch").unwrap();
+    let check = invoke + drain[invoke..].find("!= epoch").unwrap();
     let complete = drain.find("complete_signal_delivery(delivery)").unwrap();
-    assert!(owner < invoke && invoke < check && check < complete);
+    assert!(owner < received && received < before && before < invoke);
+    assert!(invoke < check && check < complete);
     let fault = include_str!("../../../user/crates/newlib-runtime/src/fault_signal.rs");
     assert!(
-        fault.find("!= owner").unwrap()
+        fault.find("!= epoch").unwrap()
             < fault
                 .find("complete_signal_delivery(fault.signal)")
                 .unwrap()
