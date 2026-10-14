@@ -10,6 +10,7 @@ pub mod shared_memory_file;
 pub mod socket;
 pub mod socket_record;
 pub mod socket_record_io;
+pub mod socket_route;
 pub mod socket_provider;
 pub mod socket_binding;
 pub mod socket_connect;

@@ -32,6 +32,133 @@ static void *d_receive(void *unused) {
   return NULL;
 }
 
+static struct sockaddr_un d_destination;
+static socklen_t d_destination_length;
+static int d_sendto_fd;
+static void *d_send_to(void *unused) {
+  (void)unused;
+  d_result = sendto(d_sendto_fd, d_input, 30000, 0,
+                    (struct sockaddr *)&d_destination, d_destination_length);
+  d_error = errno;
+  __atomic_store_n(&d_done, 1, __ATOMIC_RELEASE);
+  return NULL;
+}
+static int live_send_route(void) {
+  struct info {
+    uint32_t handle, reserved;
+    uint64_t rights;
+  } handles[256];
+  register uint64_t number __asm__("rax") =
+      680; // HandleTableRead, own table only
+  __asm__ volatile("syscall"
+                   : "+a"(number)
+                   : "D"((uintptr_t)handles), "S"(UINT64_C(256))
+                   : "rcx", "r11", "memory");
+  if ((int64_t)number < 0 || number > 256)
+    return -1;
+  for (unsigned i = 0; i < number; i++)
+    if (handles[i].rights == (UINT64_C(1) << 63 | 18))
+      return 1;
+  return 0;
+}
+static int await_send_route(void) {
+  for (unsigned i = 0; i < 3000; i++) {
+    int live = live_send_route();
+    if (live != 0)
+      return live == 1 ? 0 : -1;
+    pause_ms(1);
+  }
+  return -1;
+}
+
+static int explicit_datagrams(void) {
+  const char *paths[] = {"/tmp/sendto-first", "/tmp/sendto-second",
+                         "/tmp/sendto-client"};
+  struct sockaddr_un address[3];
+  socklen_t size[3];
+  int sockets[3];
+  for (unsigned i = 0; i < 3; i++) {
+    memset(&address[i], 0, sizeof(address[i]));
+    address[i].sun_family = AF_UNIX;
+    strcpy(address[i].sun_path, paths[i]);
+    size[i] = offsetof(struct sockaddr_un, sun_path) + strlen(paths[i]) + 1;
+    unlink(paths[i]);
+    sockets[i] = socket(AF_UNIX, SOCK_DGRAM, 0);
+    CHECK(sockets[i] >= 0 &&
+          bind(sockets[i], (struct sockaddr *)&address[i], size[i]) == 0);
+  }
+  int first = sockets[0], second = sockets[1], client = sockets[2];
+  CHECK(connect(client, (struct sockaddr *)&address[0], size[0]) == 0);
+  CHECK(sendto(client, "override", 8, 0, (struct sockaddr *)&address[1],
+               size[1]) == 8);
+  struct sockaddr_un source;
+  socklen_t source_size = sizeof(source);
+  CHECK(recvfrom(second, d_output, 20, 0, (struct sockaddr *)&source,
+                 &source_size) == 8);
+  CHECK(!memcmp(d_output, "override", 8) && !strcmp(source.sun_path, paths[2]));
+  source_size = sizeof(source);
+  CHECK(getpeername(client, (struct sockaddr *)&source, &source_size) == 0 &&
+        !strcmp(source.sun_path, paths[0]));
+  CHECK(send(client, "default", 7, 0) == 7 &&
+        recv(first, d_output, 20, 0) == 7);
+  CHECK(sendto(first, "reply", 5, 0, (struct sockaddr *)&address[2], size[2]) ==
+        5);
+  CHECK(recv(client, d_output, 20, 0) == 5 && !memcmp(d_output, "reply", 5));
+  CHECK(sendto(client, d_input, 65536, 0, (struct sockaddr *)&address[1],
+               size[1]) == 65536);
+  CHECK(sendto(client, "x", 1, MSG_DONTWAIT, (struct sockaddr *)&address[1],
+               size[1]) == -1 &&
+        errno == EAGAIN);
+  struct timeval timeout = {0, 5000};
+  CHECK(setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout,
+                   sizeof(timeout)) == 0);
+  for (unsigned i = 0; i < 20; i++)
+    CHECK(sendto(client, "x", 1, 0, (struct sockaddr *)&address[1], size[1]) ==
+              -1 &&
+          errno == EAGAIN);
+  timeout.tv_usec = 0;
+  CHECK(setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout,
+                   sizeof(timeout)) == 0);
+  CHECK(live_send_route() == 0);
+  d_sendto_fd = client;
+  d_destination = address[1];
+  d_destination_length = size[1];
+  d_done = 0;
+  pthread_t thread;
+  CHECK(pthread_create(&thread, NULL, d_send_to, NULL) == 0 &&
+        await_send_route() == 0);
+  CHECK(pthread_cancel(thread) == 0);
+  void *result;
+  CHECK(pthread_join(thread, &result) == 0 && result == PTHREAD_CANCELED);
+  CHECK(live_send_route() == 0);
+  // Observe the explicit route before replacing its pathname; this proves
+  // lookup has completed, instead of relying on scheduling or a blind sleep.
+  d_done = 0;
+  CHECK(pthread_create(&thread, NULL, d_send_to, NULL) == 0 &&
+        await_send_route() == 0);
+  CHECK(!__atomic_load_n(&d_done, __ATOMIC_ACQUIRE));
+  CHECK(unlink(paths[1]) == 0);
+  int replacement = socket(AF_UNIX, SOCK_DGRAM, 0);
+  CHECK(replacement >= 0 &&
+        bind(replacement, (struct sockaddr *)&address[1], size[1]) == 0);
+  CHECK(recv(second, d_output, sizeof(d_output), 0) == 65536);
+  CHECK(pthread_join(thread, NULL) == 0 && d_result == 30000);
+  CHECK(recv(second, d_output, sizeof(d_output), 0) == 30000);
+  CHECK(recv(replacement, d_output, 1, MSG_DONTWAIT) == -1 && errno == EAGAIN);
+  CHECK(sendto(client, "new", 3, 0, (struct sockaddr *)&address[1], size[1]) ==
+        3);
+  CHECK(recv(replacement, d_output, 10, 0) == 3 && !memcmp(d_output, "new", 3));
+  CHECK(live_send_route() == 0);
+  CHECK(close(first) == 0 && close(second) == 0 && close(client) == 0 &&
+        close(replacement) == 0);
+  for (unsigned i = 0; i < 3; i++)
+    CHECK(unlink(paths[i]) == 0);
+  puts("posix-datagram: PASS sendto override, reply, scoped route "
+       "timeout/cancel, retained target across unlink/rebind");
+  fflush(stdout);
+  return 0;
+}
+
 static int named_datagrams(void) {
   const char *paths[] = {"/tmp/posix-dgram-first", "/tmp/posix-dgram-second",
                          "/tmp/posix-dgram-client"};
@@ -203,5 +330,6 @@ int main(int argc, char **argv) {
   puts("posix-datagram: PASS fork/exec subtype inheritance and read shutdown");
   fflush(stdout);
   CHECK(named_datagrams() == 0);
+  CHECK(explicit_datagrams() == 0);
   return run_stream_regressions(argc, argv);
 }

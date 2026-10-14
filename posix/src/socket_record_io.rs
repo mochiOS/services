@@ -97,7 +97,9 @@ pub fn transfer_from(
         return Err(-22);
     }
     let length = request.length as usize;
-    if request.operation == Operation::Send && !queue.can_push(length, send_capacity)? {
+    if matches!(request.operation, Operation::Send | Operation::SendRoute)
+        && !queue.can_push(length, send_capacity)?
+    {
         return Err(-11);
     }
     let mut data = Vec::new();
@@ -105,7 +107,7 @@ pub fn transfer_from(
     data.resize(length, 0);
     match request.operation {
         Operation::WaitSend => Err(-22),
-        Operation::Send => {
+        Operation::Send | Operation::SendRoute => {
             buffer.read(request.offset, &mut data)?;
             let reply = wire::Reply {
                 copied: request.length,

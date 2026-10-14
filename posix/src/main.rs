@@ -29,6 +29,9 @@ mod socket_receive_wait_native;
 mod socket_record_native;
 
 #[cfg(target_os = "mochios")]
+mod socket_route_native;
+
+#[cfg(target_os = "mochios")]
 const PTY_SYNC_MAGIC: [u8; 4] = *b"PTYS";
 
 #[cfg(target_os = "mochios")]

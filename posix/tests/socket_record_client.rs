@@ -27,6 +27,42 @@ impl ObjectTransport for Mock {
         handles: &mut ObjectHandles<u32>,
     ) -> Result<usize, ()> {
         self.calls.set(self.calls.get() + 1);
+        if bytes.starts_with(&protocol::socket_route::MAGIC) {
+            assert_eq!(
+                protocol::socket_route::decode(bytes),
+                Ok((3, protocol::socket::Address::UnixPath(b"/server")))
+            );
+            assert_eq!(handles.len(), 1);
+            assert_eq!(
+                handles.get(0),
+                Some(Handle {
+                    handle: 10,
+                    rights: mnu_abi::HANDLE_RIGHT_WRITE
+                })
+            );
+            handles.clear();
+            if self.case != 1 {
+                handles
+                    .push(Handle {
+                        handle: 42,
+                        rights: protocol::socket_route::RIGHTS
+                            | if self.case == 2 {
+                                mnu_abi::HANDLE_RIGHT_CONTROL
+                            } else {
+                                0
+                            },
+                    })
+                    .unwrap();
+                if self.case == 3 {
+                    handles.push(handles.get(0).unwrap()).unwrap();
+                }
+            }
+            if self.case == 4 {
+                return Err(());
+            }
+            response[..4].copy_from_slice(&(if self.case == 1 { -13i32 } else { 0 }).to_le_bytes());
+            return Ok(if self.case == 5 { 3 } else { 4 });
+        }
         if bytes.starts_with(b"POSX") {
             let (header, payload) = protocol::decode(bytes).unwrap();
             assert_eq!(header.opcode, protocol::OP_SOCKET_RECORD_ENDPOINT);
@@ -243,6 +279,63 @@ fn missing_direction_or_transfer_authority_is_rejected_without_rpc() {
                 socket,
                 buffer,
                 &mut [0; wire::MAX_REPLY_LEN],
+                |_| panic!()
+            ),
+            Err(ClientError::Remote(-13))
+        ));
+    }
+    assert_eq!(mock.calls.get(), 0);
+}
+
+#[test]
+fn prepare_route_returns_only_scoped_write_wait_authority_and_cleans_bad_replies() {
+    for case in 0..6 {
+        let mock = Mock {
+            case,
+            calls: Cell::new(0),
+        };
+        let mut closed = vec![];
+        let result = socket_record::prepare_route(
+            &mock,
+            source(10),
+            3,
+            protocol::socket::Address::UnixPath(b"/server"),
+            |handle| closed.push(handle),
+        );
+        if case == 0 {
+            assert_eq!(
+                result,
+                Ok(Handle {
+                    handle: 42,
+                    rights: protocol::socket_route::RIGHTS
+                })
+            );
+            assert_eq!(
+                protocol::socket_route::RIGHTS
+                    & (mnu_abi::HANDLE_RIGHT_READ
+                        | mnu_abi::HANDLE_RIGHT_MAP
+                        | mnu_abi::HANDLE_RIGHT_CONTROL
+                        | mnu_abi::HANDLE_RIGHT_DUPLICATE),
+                0
+            );
+        } else {
+            assert!(result.is_err());
+        }
+        assert_eq!(closed, if case >= 2 { vec![42] } else { vec![] });
+    }
+    let mock = Mock {
+        case: 0,
+        calls: Cell::new(0),
+    };
+    for right in [mnu_abi::HANDLE_RIGHT_WRITE, mnu_abi::HANDLE_RIGHT_TRANSFER] {
+        let mut socket = source(10);
+        socket.rights &= !right;
+        assert!(matches!(
+            socket_record::prepare_route(
+                &mock,
+                socket,
+                3,
+                protocol::socket::Address::UnixPath(b"/server"),
                 |_| panic!()
             ),
             Err(ClientError::Remote(-13))

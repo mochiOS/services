@@ -44,6 +44,31 @@ pub struct ConnectTarget<H> {
     listener_name: SavedName,
 }
 
+/// One sendto destination, resolved once under authenticated FS authority.
+/// The retained inode prevents namespace reuse; the socket identity prevents
+/// redirection to a new endpoint after final close. Neither ID is wire authority.
+#[must_use = "release the retained destination inode exactly once"]
+pub struct DatagramTarget<H> {
+    file: H,
+    client: u64,
+    socket: u64,
+    source: crate::socket_record::SourceAddress,
+}
+impl<H> DatagramTarget<H> {
+    pub fn client(&self) -> u64 {
+        self.client
+    }
+    pub fn socket(&self) -> u64 {
+        self.socket
+    }
+    pub fn source(&self) -> crate::socket_record::SourceAddress {
+        self.source
+    }
+    pub fn release_with(self, close: impl FnOnce(H)) {
+        close(self.file);
+    }
+}
+
 struct SavedName {
     bytes: [u8; MAX_UNIX_NAME_BYTES],
     length: usize,
@@ -207,6 +232,56 @@ impl<H: Copy + Default + Eq> Bindings<H> {
             Ok(target.socket)
         })();
         if file.handle != H::default() {
+            backend.close(file.handle);
+        }
+        result
+    }
+
+    pub fn prepare_datagram_target<B: Filesystem<H>>(
+        &self,
+        streams: &Streams,
+        client: u64,
+        path: &[u8],
+        backend: &mut B,
+    ) -> Result<DatagramTarget<H>, i32> {
+        use mochios_posix_protocol::socket::{Address, Kind};
+        if streams.kind(client)? != Kind::Datagram {
+            return Err(-91);
+        }
+        if path.is_empty() || path.len() > MAX_UNIX_NAME_BYTES || path.contains(&0) {
+            return Err(-22);
+        }
+        let source = crate::socket_record::SourceAddress::new(
+            self.address(client)
+                .map_or(Address::UnixUnnamed, Address::UnixPath),
+        )?;
+        let (file, status) =
+            backend
+                .open_socket(path)
+                .map_err(|error| if error == -88 { -111 } else { error })?;
+        let result = (|| {
+            if file.handle == H::default() || file.rights != NODE_RIGHTS || status.node_id == 0 {
+                return Err(-5);
+            }
+            if status.kind != filesystem::NODE_TYPE_SOCKET {
+                return Err(-111);
+            }
+            let target = self
+                .records
+                .iter()
+                .find(|record| record.identity == (status.device, status.node_id))
+                .ok_or(-111)?;
+            if streams.kind(target.socket).map_err(|_| -111)? != Kind::Datagram {
+                return Err(-91);
+            }
+            Ok(DatagramTarget {
+                file: file.handle,
+                client,
+                socket: target.socket,
+                source,
+            })
+        })();
+        if result.is_err() && file.handle != H::default() {
             backend.close(file.handle);
         }
         result

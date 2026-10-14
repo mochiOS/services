@@ -29,7 +29,7 @@ impl Drop for Snapshot {
         }
     }
 }
-fn snapshot(
+pub(super) fn snapshot(
     state: &Arc<Mutex<PosixService<u32>>>,
     sender: u64,
     path: &[u8],

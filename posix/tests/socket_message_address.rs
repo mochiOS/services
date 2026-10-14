@@ -19,7 +19,7 @@ static mut RESULT:isize=3;
 static mut QUERY_ERROR:i32=0;
 static mut EXPECT_SENDING:bool=false;
 fn pthread_testcancel() {}
-fn destination_supported(_:i32,_:*const c_void)->Result<(),i32>{Ok(())}
+unsafe fn send_record_to(_:i32,_:*const c_void,_:usize,_:i32,_:*const c_void,_:u32)->Option<isize>{None}
 unsafe fn receive_record_address(_:i32,_:*mut c_void,_:usize,_:i32,_:*mut c_void,_:*mut u32)->Option<isize>{None}
 fn finish_io_cancellation(value:isize)->isize{value}
 fn result_with_errno(result:Result<isize,i32>,failure:isize)->isize {

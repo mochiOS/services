@@ -11,9 +11,9 @@ pub const SEND_CAPACITY: usize = 64 * 1024;
 pub const MIN_SEND_CAPACITY: usize = 256;
 pub const MAX_ENDPOINTS: usize = 1024;
 pub const MAX_BACKLOG: usize = 128;
-/// Private Provider namespace: bits 61/62 distinguish receive/connection jobs.
+/// Private Provider namespace: bits 60/61/62 distinguish send routes and jobs.
 /// Stay within the native Provider's signed 64-bit object identity range.
-pub const MAX_DESCRIPTION_ID: u64 = (1 << 61) - 1;
+pub const MAX_DESCRIPTION_ID: u64 = (1 << 60) - 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shutdown {
@@ -529,7 +529,10 @@ impl Streams {
     ) -> Result<usize, i32> {
         use mochios_posix_protocol::socket_record::Operation;
         let entry = self.endpoint(id)?;
-        if request.operation == Operation::WaitSend {
+        if matches!(
+            request.operation,
+            Operation::WaitSend | Operation::SendRoute
+        ) {
             return Err(-22);
         }
         if entry.records.is_none() {
@@ -591,6 +594,68 @@ impl Streams {
             .as_ref()
             .ok_or(-91)?
             .can_push(length, entry.send_capacity)
+    }
+
+    /// Explicit-destination sends do not change the description's default
+    /// peer or receive filter. Destination authority comes from a retained
+    /// lookup ticket in the worker, never from a caller-supplied object ID.
+    pub fn record_send_to_ready(
+        &self,
+        source: u64,
+        destination: u64,
+        length: usize,
+    ) -> Result<bool, i32> {
+        let entry = self.endpoint(source)?;
+        if entry.records.is_none() {
+            return Err(-91);
+        }
+        if entry.write_shutdown {
+            return Err(-32);
+        }
+        let target = self.endpoint(destination).map_err(|_| -111)?;
+        if target.read_shutdown {
+            return Err(-111);
+        }
+        if target.peer.is_some_and(|sender| sender != source) {
+            return Err(-1);
+        }
+        target
+            .records
+            .as_ref()
+            .ok_or(-91)?
+            .can_push(length, entry.send_capacity)
+    }
+
+    pub fn transfer_record_to(
+        &mut self,
+        id: u64,
+        destination: u64,
+        request: mochios_posix_protocol::socket_record::Request,
+        source: crate::socket_record::SourceAddress,
+        buffer: &mut impl crate::socket_record_io::RecordBuffer,
+        response: &mut [u8],
+    ) -> Result<usize, i32> {
+        if request.operation != mochios_posix_protocol::socket_record::Operation::SendRoute {
+            return Err(-22);
+        }
+        if !self.record_send_to_ready(id, destination, request.length as usize)? {
+            return Err(-11);
+        }
+        let capacity = self.endpoint(id)?.send_capacity;
+        let queue = self
+            .endpoint_mut(destination)?
+            .records
+            .as_mut()
+            .ok_or(-91)?;
+        crate::socket_record_io::transfer_from(
+            queue,
+            request,
+            source,
+            capacity,
+            buffer,
+            response,
+            Some(id),
+        )
     }
 
     /// One-way datagram peer selection. The adapter has authorized a retained

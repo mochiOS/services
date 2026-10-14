@@ -21,6 +21,7 @@ pub fn dispatch(
     endpoint: u32,
     streams: &mut Streams,
     waits: &mut posix_service::socket_receive_wait::ReceiveWaits<u32>,
+    routes: &mut posix_service::socket_route::Routes<u32>,
     sender: u64,
     bytes: &[u8],
     attachments: &platform::ipc::IpcObjectHandles,
@@ -58,6 +59,15 @@ pub fn dispatch(
         // endpoint thread. A foreign Provider or numeric object ID is useless.
         let id = platform::handle::identify_provider_object(socket.handle)
             .map_err(|error| error.raw() as i32)?;
+        if request.operation == wire::Operation::SendRoute {
+            return routes.transfer(
+                streams,
+                posix_service::socket_route::job_id(id)?,
+                request,
+                &mut socket_record_io::NativeBuffer::borrowed(buffer.handle),
+                &mut response,
+            );
+        }
         let affected = streams.affected(id)?;
         let length = streams.transfer_record(
             id,
