@@ -1747,6 +1747,17 @@ impl posix_service::ProcessBackend<u32> for RuntimeProcesses {
 
 #[cfg(target_os = "mochios")]
 impl RuntimeFilesystem {
+    fn call(
+        &self,
+        request: &[u8],
+        reply: &mut [u8],
+        handles: &mut mochi_user_platform::ipc::IpcObjectHandles,
+    ) -> mochi_user_platform::syscall::SysResult<u64> {
+        posix_service::filesystem_transport::call_native(handles, |exchanged| {
+            mochi_user_platform::ipc::call_object_handles(self.endpoint, request, reply, exchanged)
+        })
+    }
+
     fn credential_payload(
         effective_uid: u32,
         effective_gid: u32,
@@ -1773,19 +1784,14 @@ impl RuntimeFilesystem {
         header: mochios_filesystem_protocol::Header,
         mut handles: mochi_user_platform::ipc::IpcObjectHandles,
     ) -> Result<u32, i32> {
-        use mochi_user_platform as platform;
         use mochios_filesystem_protocol as filesystem;
 
         let mut request = [0u8; filesystem::HEADER_LEN];
         let request_len = filesystem::encode(header, &[], &mut request).map_err(|_| -22)?;
         let mut response = [0u8; filesystem::HEADER_LEN];
-        if platform::ipc::call_object_handles(
-            self.endpoint,
-            &request[..request_len],
-            &mut response,
-            &mut handles,
-        )
-        .is_err()
+        if self
+            .call(&request[..request_len], &mut response, &mut handles)
+            .is_err()
         {
             close_runtime_handles(&handles);
             return Err(-5);
@@ -1818,19 +1824,14 @@ impl RuntimeFilesystem {
         payload: &[u8],
         mut handles: mochi_user_platform::ipc::IpcObjectHandles,
     ) -> Result<(), i32> {
-        use mochi_user_platform as platform;
         use mochios_filesystem_protocol as filesystem;
 
         let mut request = vec![0u8; filesystem::HEADER_LEN + payload.len()];
         let request_len = filesystem::encode(header, payload, &mut request).map_err(|_| -22)?;
         let mut response = [0u8; filesystem::HEADER_LEN];
-        if platform::ipc::call_object_handles(
-            self.endpoint,
-            &request[..request_len],
-            &mut response,
-            &mut handles,
-        )
-        .is_err()
+        if self
+            .call(&request[..request_len], &mut response, &mut handles)
+            .is_err()
         {
             close_runtime_handles(&handles);
             return Err(-5);
@@ -1862,19 +1863,14 @@ impl RuntimeFilesystem {
         payload: &[u8],
         mut handles: mochi_user_platform::ipc::IpcObjectHandles,
     ) -> Result<Vec<u8>, i32> {
-        use mochi_user_platform as platform;
         use mochios_filesystem_protocol as filesystem;
 
         let mut request = vec![0u8; filesystem::HEADER_LEN + payload.len()];
         let request_len = filesystem::encode(header, payload, &mut request).map_err(|_| -22)?;
         let mut response = vec![0u8; filesystem::HEADER_LEN + filesystem::MAX_PATH_LEN];
-        if platform::ipc::call_object_handles(
-            self.endpoint,
-            &request[..request_len],
-            &mut response,
-            &mut handles,
-        )
-        .is_err()
+        if self
+            .call(&request[..request_len], &mut response, &mut handles)
+            .is_err()
         {
             close_runtime_handles(&handles);
             return Err(-5);
@@ -1906,19 +1902,14 @@ impl RuntimeFilesystem {
         payload: &[u8],
         mut handles: mochi_user_platform::ipc::IpcObjectHandles,
     ) -> Result<mochios_filesystem_protocol::NodeStatus, i32> {
-        use mochi_user_platform as platform;
         use mochios_filesystem_protocol as filesystem;
 
         let mut request = vec![0u8; filesystem::HEADER_LEN + payload.len()];
         let request_len = filesystem::encode(header, payload, &mut request).map_err(|_| -22)?;
         let mut response = vec![0u8; filesystem::HEADER_LEN + filesystem::NODE_STATUS_LEN];
-        if platform::ipc::call_object_handles(
-            self.endpoint,
-            &request[..request_len],
-            &mut response,
-            &mut handles,
-        )
-        .is_err()
+        if self
+            .call(&request[..request_len], &mut response, &mut handles)
+            .is_err()
         {
             close_runtime_handles(&handles);
             return Err(-5);
@@ -1950,19 +1941,14 @@ impl RuntimeFilesystem {
         path: &[u8],
         mut handles: mochi_user_platform::ipc::IpcObjectHandles,
     ) -> Result<posix_service::OpenedObject<mochi_user_platform::handle::Handle>, i32> {
-        use mochi_user_platform as platform;
         use mochios_filesystem_protocol as filesystem;
 
         let mut request = vec![0u8; filesystem::HEADER_LEN + path.len()];
         let request_len = filesystem::encode(header, path, &mut request).map_err(|_| -22)?;
         let mut reply = vec![0u8; filesystem::HEADER_LEN];
-        if platform::ipc::call_object_handles(
-            self.endpoint,
-            &request[..request_len],
-            &mut reply,
-            &mut handles,
-        )
-        .is_err()
+        if self
+            .call(&request[..request_len], &mut reply, &mut handles)
+            .is_err()
         {
             close_runtime_handles(&handles);
             return Err(-5);
@@ -2770,7 +2756,6 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         root: posix_service::AttachedObject<mochi_user_platform::handle::Handle>,
         directory: posix_service::AttachedObject<mochi_user_platform::handle::Handle>,
     ) -> Result<Vec<u8>, i32> {
-        use mochi_user_platform as platform;
         use mochios_filesystem_protocol as filesystem;
 
         let header = filesystem::Header {
@@ -2785,12 +2770,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             root,
             base: Some(directory),
         })?;
-        let received = match platform::ipc::call_object_handles(
-            self.endpoint,
-            &request[..request_len],
-            &mut response,
-            &mut handles,
-        ) {
+        let received = match self.call(&request[..request_len], &mut response, &mut handles) {
             Ok(received) => received,
             Err(_) => {
                 close_runtime_handles(&handles);
