@@ -22,8 +22,8 @@ fn credential_spawn_has_no_kernel_abi_dispatch_or_implementation() {
             .is_some_and(|value| value.trim().trim_end_matches(',') == "608")
     }));
     assert!(dispatch.contains("_ => ENOSYS"));
-    // Remaining bootstrap launch is not silently redirected through a shim.
-    assert!(dispatch.contains("exec::exec_manifest_syscall(arg0, arg1, arg2, arg3, arg4)"));
+    // Native creation remains explicit, not a retired pathname ABI shim.
+    assert!(dispatch.contains("exec::process_create_syscall(arg0, arg1, arg2)"));
 }
 
 #[test]
