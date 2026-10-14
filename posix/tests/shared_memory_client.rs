@@ -161,6 +161,44 @@ fn mapping_borrows_descriptor_and_closes_only_owned_failed_replies() {
     );
     assert!(borrowed.is_empty());
 }
+
+#[test]
+fn newlib_shm_flags_and_inherited_descriptor_kind_are_canonical() {
+    use mochios_posix_client::shared_memory::newlib_open_options;
+    assert_eq!(newlib_open_options(0), Some(0));
+    assert_eq!(newlib_open_options(2), Some(wire::READ_WRITE));
+    assert_eq!(
+        newlib_open_options(2 | 0x200 | 0x800 | 0x40000),
+        Some(wire::READ_WRITE | wire::CREATE | wire::EXCLUSIVE)
+    );
+    assert_eq!(
+        newlib_open_options(2 | 0x400),
+        Some(wire::READ_WRITE | wire::TRUNCATE)
+    );
+    for flags in [1, 3, -1, 0x800, 0x400, 0x8, 0x4000, 0x200000] {
+        assert_eq!(newlib_open_options(flags), None);
+    }
+    let metadata = protocol::InheritedFdMetadata {
+        kind: protocol::INHERITED_FD_KIND_SHARED_MEMORY,
+        open_flags: 2,
+        descriptor_flags: 0,
+    };
+    assert_eq!(
+        protocol::decode_inherited_fd_metadata(
+            protocol::encode_inherited_fd_metadata(metadata).unwrap()
+        ),
+        Some(metadata)
+    );
+    assert_eq!(
+        protocol::inherited_fd_kind_requires_handle(metadata.kind),
+        Some(true)
+    );
+    let runtime = include_str!("../../../user/crates/newlib-runtime/src/shared_memory.rs");
+    assert!(runtime.contains("(flags & 3) | O_CLOEXEC"));
+    assert!(runtime.contains("reserve_from(0, limit)"));
+    assert!(runtime.contains("commit_reservation"));
+    assert!(runtime.contains("impl Drop for MappingBacking"));
+}
 #[test]
 fn valid_response_transfers_one_owned_reference_and_all_failed_shapes_close_attachments() {
     let state = Arc::new(Mutex::new(Reply::default()));

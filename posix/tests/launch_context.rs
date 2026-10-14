@@ -279,3 +279,45 @@ fn pty_descriptor_round_trip_preserves_bidirectional_object_handle() {
     assert_eq!(restored.get(5).unwrap().handle, pty);
     assert_eq!(restored.get(5).unwrap().rights, 0x3f);
 }
+
+#[test]
+fn shared_memory_descriptor_round_trip_preserves_kind_and_provider_rights() {
+    let memory = object(74, protocol::INHERITED_FD_KIND_SHARED_MEMORY, 2, true);
+    let rights = protocol::shared_memory::descriptor_rights(true);
+    let mut source = FdTable::new();
+    let mut objects = Objects::default();
+    source
+        .install_at(
+            6,
+            Entry {
+                handle: memory,
+                rights,
+                descriptor_flags: 0,
+            },
+            &mut objects,
+        )
+        .unwrap();
+    let mut context = Context::default();
+    context.rights.insert(memory.id, rights);
+    stage_launch_context(&source, 8, &mut context, describe).unwrap();
+    let mut restored = FdTable::new();
+    assert_eq!(
+        restore_launch_context(
+            &mut restored,
+            8,
+            &mut context,
+            &mut objects,
+            |metadata, attachment| attachment.map(|(handle, _)| object(
+                handle.id,
+                metadata.kind,
+                metadata.open_flags,
+                true
+            ))
+        ),
+        Ok(true)
+    );
+    let entry = restored.get(6).unwrap();
+    assert_eq!(entry.handle, memory);
+    assert_eq!(entry.rights, rights);
+    assert_eq!(entry.descriptor_flags, 0);
+}
