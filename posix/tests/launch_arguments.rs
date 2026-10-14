@@ -3,7 +3,8 @@ extern crate alloc;
 #[path = "../../service-manager/src/launch_arguments.rs"]
 mod production;
 
-use production::{EncodeError, encode_native_launch, encode_spawn_args};
+use mochios_posix_client::launch_arguments::EncodeError;
+use production::encode_native_launch;
 
 fn native(items: &[String]) -> Result<Vec<u8>, EncodeError> {
     encode_native_launch(
@@ -72,7 +73,7 @@ fn native_launch_builds_argv_env_and_inheritance_in_user_space() {
 fn service_launcher_uses_the_shared_client_encoder_without_a_private_copy() {
     let source = include_str!("../../service-manager/src/launch_arguments.rs");
     assert!(source.contains(
-        "pub(crate) use mochios_posix_client::launch_arguments::{EncodeError, encode_native_launch}"
+        "pub(crate) use mochios_posix_client::launch_arguments::encode_native_launch"
     ));
     assert!(!source.contains("fn encode_native_launch("));
     assert!(!source.contains("fn decimal("));
@@ -186,50 +187,20 @@ fn native_launch_bounds_inheritance_and_startup_images() {
 }
 
 #[test]
-fn launch_metadata_preserves_identity_and_handles_past_the_old_512_byte_limit() {
-    let inherited = format!("{}7:19:12", mnu_abi::exec::INHERITED_HANDLE_PREFIX);
-    let items = ["a".repeat(700), inherited.clone()];
-    let bytes = encode_spawn_args(&items).unwrap();
-    assert_eq!(bytes.len(), 4096);
-    assert_eq!(&bytes[..700], items[0].as_bytes());
-    assert_eq!(&bytes[701..701 + inherited.len()], inherited.as_bytes());
-    assert!(bytes[701 + inherited.len()..].iter().all(|byte| *byte == 0));
-}
-
-#[test]
-fn launch_metadata_accepts_exact_limits_without_truncation() {
-    assert_eq!(
-        encode_spawn_args(&["x".repeat(4094)]).unwrap()[4094..],
-        [0, 0]
-    );
-    let entries = vec!["x".to_string(); 64];
-    let bytes = encode_spawn_args(&entries).unwrap();
-    assert_eq!(bytes[..128], b"x\0".repeat(64));
-    assert_eq!(bytes[128], 0);
-}
-
-#[test]
-fn launch_metadata_rejects_oversized_or_ambiguous_lists_instead_of_dropping_entries() {
-    assert_eq!(
-        encode_spawn_args(&["x".repeat(4095)]),
-        Err(EncodeError::TooLarge)
-    );
-    assert_eq!(
-        encode_spawn_args(&vec!["x".into(); 65]),
-        Err(EncodeError::TooLarge)
-    );
-    assert_eq!(
-        encode_spawn_args(&["".into()]),
-        Err(EncodeError::InvalidEntry)
-    );
-    assert_eq!(
-        encode_spawn_args(&["a\0b".into()]),
-        Err(EncodeError::InvalidEntry)
-    );
-    assert!(
-        encode_spawn_args(&[])
-            .unwrap()
-            .iter()
-            .all(|byte| *byte == 0)
-    );
+fn legacy_launch_wrapper_and_fixed_argument_block_are_removed() {
+    let platform = include_str!("../../../user/crates/platform/src/lib.rs");
+    let launcher = include_str!("../../service-manager/src/launch_arguments.rs");
+    for source in [platform, launcher] {
+        for obsolete in [
+            "spawn_manifest",
+            "spawn_arguments",
+            "encode_spawn_args",
+            "SPAWN_ARGUMENT_BYTES",
+        ] {
+            assert!(
+                !source.contains(obsolete),
+                "legacy launch dependency: {obsolete}"
+            );
+        }
+    }
 }
