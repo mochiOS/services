@@ -1,5 +1,7 @@
 extern crate alloc;
 mod boot_files;
+mod bootstrap_plan;
+mod native_bootstrap;
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -33,23 +35,6 @@ fn encode_nul_list(items: &[String]) -> Vec<u8> {
     for item in items {
         out.extend_from_slice(item.as_bytes());
         out.push(0);
-    }
-    out
-}
-
-fn encode_spawn_args(items: &[String]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(512);
-    out.resize(512, 0);
-    let mut cursor = 0usize;
-    for item in items {
-        let bytes = item.as_bytes();
-        if cursor + bytes.len() + 2 > out.len() {
-            break;
-        }
-        out[cursor..cursor + bytes.len()].copy_from_slice(bytes);
-        cursor += bytes.len();
-        out[cursor] = 0;
-        cursor += 1;
     }
     out
 }
@@ -287,24 +272,15 @@ fn spawn_logger_service() -> Result<u64, mochi_user_syscall::SysError> {
             return Err(err);
         }
     };
-    let (mut args, caps) =
+    let (identity, caps) =
         load_builtin_execution_security(LOGGER_PACKAGE_MANIFEST_PATH, LOGGER_SERVICE_PATH)?;
-    let caps_nul = encode_nul_list(&caps);
-    args.push(bootstrap.to_string());
-    let args_nul = encode_spawn_args(&args);
-    let pid = match platform::service::spawn_manifest(
-        LOGGER_SERVICE_PATH,
-        platform::service::ExecutionClass::Privileged,
-        Some(args_nul.as_slice()),
-        Some(caps_nul.as_slice()),
-    ) {
+    let args = vec![bootstrap.to_string()];
+    let pid = match native_bootstrap::spawn(LOGGER_SERVICE_PATH, &identity, &caps, &args) {
         Ok(pid) => pid,
         Err(err) => {
             stderr_line(&alloc::format!(
-                "core.service: logger exec failed caps={} args_len={} caps_len={} errno={}",
+                "core.service: logger native creation failed caps={} errno={}",
                 caps.len(),
-                args_nul.len(),
-                caps_nul.len(),
                 err.errno().unwrap_or(0)
             ));
             return Err(err);
@@ -326,15 +302,14 @@ fn spawn_logger_service() -> Result<u64, mochi_user_syscall::SysError> {
 }
 
 fn spawn_capability_service(bootstrap: u32) -> Result<u64, mochi_user_syscall::SysError> {
-    let (mut args, caps) =
+    let (identity, caps) =
         load_builtin_execution_security(CAPABILITY_PACKAGE_MANIFEST_PATH, CAPABILITY_SERVICE_PATH)?;
     platform::logln!(
         "core.service: parsed capability.service package caps={}",
         caps.len()
     );
-    let caps_nul = encode_nul_list(&caps);
     let logger_endpoint = platform::logger::endpoint().unwrap_or(0);
-    args.push(logger_endpoint.to_string());
+    let mut args = vec![logger_endpoint.to_string()];
     args.push(alloc::format!(
         "{}{}:{}:{}",
         mnu_abi::exec::INHERITED_HANDLE_PREFIX,
@@ -342,16 +317,7 @@ fn spawn_capability_service(bootstrap: u32) -> Result<u64, mochi_user_syscall::S
         bootstrap,
         platform::handle::HANDLE_RIGHT_SEND
     ));
-    let args_nul = encode_spawn_args(&args);
-    match platform::service::spawn_manifest(
-        CAPABILITY_SERVICE_PATH,
-        platform::service::ExecutionClass::Privileged,
-        Some(args_nul.as_slice()),
-        Some(caps_nul.as_slice()),
-    ) {
-        Ok(pid) => Ok(pid),
-        Err(err) => Err(err),
-    }
+    native_bootstrap::spawn(CAPABILITY_SERVICE_PATH, &identity, &caps, &args)
 }
 
 fn main() {

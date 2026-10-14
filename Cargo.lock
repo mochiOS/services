@@ -421,6 +421,7 @@ dependencies = [
  "mochi-user-platform",
  "mochi-user-syscall",
  "mochios-filesystem-protocol",
+ "mochios-posix-client",
  "mochios-signature-protocol 0.1.0",
  "sha2",
 ]

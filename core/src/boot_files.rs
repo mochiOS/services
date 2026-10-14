@@ -14,6 +14,14 @@ const MAX_BOOT_POLICY_BYTES: usize = 256 * 1024;
 static READER: Mutex<Option<BootstrapReader>> = Mutex::new(None);
 
 pub(super) fn read(path: &str) -> Result<Vec<u8>, SysError> {
+    read_bounded(path, MAX_BOOT_POLICY_BYTES)
+}
+
+pub(super) fn read_image(path: &str) -> Result<Vec<u8>, SysError> {
+    read_bounded(path, 64 * 1024 * 1024)
+}
+
+fn read_bounded(path: &str, maximum: usize) -> Result<Vec<u8>, SysError> {
     let mut reader = READER.lock().map_err(|_| SysError::from_raw(EIO as i64))?;
     if reader.is_none() {
         let (first_lba, sector_count) =
@@ -25,7 +33,7 @@ pub(super) fn read(path: &str) -> Result<Vec<u8>, SysError> {
     reader
         .as_ref()
         .ok_or_else(|| SysError::from_raw(EIO as i64))?
-        .read(path, MAX_BOOT_POLICY_BYTES)
+        .read(path, maximum)
         .map_err(|_| SysError::from_raw(EIO as i64))
 }
 
@@ -50,8 +58,8 @@ pub(super) fn serve(endpoint: u32, expected_process: u64) -> ! {
             };
         let sender = received >> 32;
         let length = (received & 0xffff_ffff) as usize;
-        let attached = handles.count != 0
-            || handles.delivery_flags != mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE;
+        let attached =
+            handles.count != 0 || handles.delivery_flags != mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE;
         for entry in handles
             .handles
             .iter()
