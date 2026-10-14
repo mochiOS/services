@@ -699,8 +699,8 @@ impl Transport for PtyTransport {
 impl ObjectTransport for PtyTransport {
     type Handle = u32;
 
-    fn close_received_handle(&self, _: u32) {
-        panic!("unexpected owned reply Handle in this fixture");
+    fn close_received_handle(&self, handle: u32) {
+        assert!((41..41 + self.handle_count as u32).contains(&handle));
     }
 
     fn call_with_handles(
