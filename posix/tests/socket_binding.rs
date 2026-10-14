@@ -67,6 +67,9 @@ impl Filesystem<u32> for Backend {
     }
 }
 fn fixture() -> (Streams, [u64; 2], Bindings<u32>, Backend) {
+    fixture_kind(Kind::Stream)
+}
+fn fixture_kind(kind: Kind) -> (Streams, [u64; 2], Bindings<u32>, Backend) {
     let mut service = PosixService::<u32>::new();
     service
         .initialize_bootstrap_process(
@@ -86,7 +89,7 @@ fn fixture() -> (Streams, [u64; 2], Bindings<u32>, Backend) {
     };
     let request = Create {
         domain: Domain::Unix,
-        kind: Kind::Stream,
+        kind,
         protocol: 0,
         options: 0,
     };
@@ -96,6 +99,108 @@ fn fixture() -> (Streams, [u64; 2], Bindings<u32>, Backend) {
         service.create_socket(peer, request, &mut streams).unwrap(),
     ];
     (streams, ids, Bindings::new(), Backend::default())
+}
+
+#[test]
+fn datagram_connect_uses_authorized_inode_not_spelling_and_has_no_accept_queue() {
+    let (mut streams, [server, client], mut bindings, mut backend) = fixture_kind(Kind::Datagram);
+    bindings
+        .bind_path(&streams, server, b"/server", &mut backend)
+        .unwrap();
+    backend.status.node_id = 11;
+    bindings
+        .bind_path(&streams, client, b"/client", &mut backend)
+        .unwrap();
+    backend.status.node_id = 10;
+    assert_eq!(
+        bindings.connect_datagram_path(&mut streams, client, b"/alias", &mut backend),
+        Ok(server)
+    );
+    assert_eq!(backend.lookups, [b"/alias".to_vec()]);
+    assert_eq!(backend.closed, [42]);
+    assert_eq!(streams.listening_backlog(server), Ok(None));
+    assert_eq!(streams.peer_address(server), Err(-107));
+    use mochios_posix_protocol::socket::Address;
+    assert_eq!(streams.address(client), Ok(Address::UnixPath(b"/client")));
+    assert_eq!(
+        streams.peer_address(client),
+        Ok(Address::UnixPath(b"/server"))
+    );
+    assert_eq!(
+        streams.record_observers(server).collect::<Vec<_>>(),
+        [client]
+    );
+    for failure in [-13, -2, -20] {
+        backend.error = Some(failure);
+        assert_eq!(
+            bindings.connect_datagram_path(&mut streams, client, b"/changed", &mut backend),
+            Err(failure)
+        );
+        assert_eq!(
+            streams.peer_address(client),
+            Ok(Address::UnixPath(b"/server"))
+        );
+        assert_eq!(backend.closed, [42]);
+    }
+    backend.error = None;
+    backend.status.node_id = 99;
+    assert_eq!(
+        bindings.connect_datagram_path(&mut streams, client, b"/replaced", &mut backend),
+        Err(-111)
+    );
+    assert_eq!(backend.closed, [42, 43]);
+    assert_eq!(
+        streams.peer_address(client),
+        Ok(Address::UnixPath(b"/server"))
+    );
+}
+
+#[test]
+fn datagram_lookup_type_and_metadata_failures_preserve_connection_and_close_refs() {
+    for case in 0..5 {
+        let (mut streams, [server, client], mut bindings, mut backend) =
+            fixture_kind(Kind::Datagram);
+        bindings
+            .bind_path(&streams, server, b"/server", &mut backend)
+            .unwrap();
+        let error = match case {
+            0 => {
+                backend.rights = mnu_abi::HANDLE_RIGHT_ALL;
+                -5
+            }
+            1 => {
+                backend.status.node_id = 0;
+                -5
+            }
+            2 => {
+                backend.status.kind = fs::NODE_TYPE_DIRECTORY;
+                -111
+            }
+            3 => {
+                backend.status.device = 1;
+                -111
+            }
+            _ => {
+                streams.release(server).unwrap();
+                -111
+            }
+        };
+        assert_eq!(
+            bindings.connect_datagram_path(&mut streams, client, b"/server", &mut backend),
+            Err(error)
+        );
+        assert_eq!(streams.peer_address(client), Err(-107));
+        assert_eq!(backend.closed, [41]);
+    }
+    let (mut streams, [server, client], mut bindings, mut backend) = fixture();
+    bindings
+        .bind_path(&streams, server, b"/stream", &mut backend)
+        .unwrap();
+    assert_eq!(
+        bindings.connect_datagram_path(&mut streams, client, b"/stream", &mut backend),
+        Err(-91)
+    );
+    assert!(backend.lookups.is_empty());
 }
 
 #[test]

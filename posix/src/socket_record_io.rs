@@ -63,6 +63,27 @@ pub fn transfer(
     buffer: &mut impl RecordBuffer,
     response: &mut [u8],
 ) -> Result<usize, i32> {
+    transfer_from(
+        queue,
+        request,
+        source,
+        send_capacity,
+        buffer,
+        response,
+        None,
+    )
+}
+
+/// `sender` is the native adapter's identified description, never request data.
+pub fn transfer_from(
+    queue: &mut RecordQueue,
+    request: Request,
+    source: SourceAddress,
+    send_capacity: usize,
+    buffer: &mut impl RecordBuffer,
+    response: &mut [u8],
+    sender: Option<u64>,
+) -> Result<usize, i32> {
     request.validate().map_err(|_| -22)?;
     // Validate reply capacity before touching the queue or shared memory.
     if response.len() < wire::MAX_REPLY_LEN {
@@ -93,7 +114,7 @@ pub fn transfer(
             };
             // Prepare the infallible success bytes before final commitment.
             let count = reply.encode(request, response).map_err(|_| -5)?;
-            queue.push(source, &data, send_capacity)?;
+            queue.push_from(source, &data, send_capacity, sender)?;
             Ok(count)
         }
         Operation::Receive => {

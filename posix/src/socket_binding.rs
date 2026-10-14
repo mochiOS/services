@@ -167,6 +167,51 @@ impl<H: Copy + Default + Eq> Bindings<H> {
         result
     }
 
+    /// Datagram connect is an immediate one-way selection, not a listener or
+    /// accept transaction. Authorize through one atomic inode lookup, retain
+    /// that reference through publication, and close it on every result.
+    pub fn connect_datagram_path<B: Filesystem<H>>(
+        &self,
+        streams: &mut Streams,
+        client: u64,
+        path: &[u8],
+        backend: &mut B,
+    ) -> Result<u64, i32> {
+        if streams.kind(client)? != mochios_posix_protocol::socket::Kind::Datagram {
+            return Err(-91);
+        }
+        if path.is_empty() || path.len() > MAX_UNIX_NAME_BYTES || path.contains(&0) {
+            return Err(-22);
+        }
+        let (file, status) = backend
+            .open_socket(path)
+            .map_err(|error| if error == -88 { -111 } else { error })?;
+        let result = (|| {
+            if file.handle == H::default() || file.rights != NODE_RIGHTS || status.node_id == 0 {
+                return Err(-5);
+            }
+            if status.kind != filesystem::NODE_TYPE_SOCKET {
+                return Err(-111);
+            }
+            let target = self
+                .records
+                .iter()
+                .find(|record| record.identity == (status.device, status.node_id))
+                .ok_or(-111)?;
+            streams.connect_datagram_named(
+                client,
+                target.socket,
+                self.address(client),
+                &target.name[..target.length],
+            )?;
+            Ok(target.socket)
+        })();
+        if file.handle != H::default() {
+            backend.close(file.handle);
+        }
+        result
+    }
+
     /// Authorize exactly once and retain the resolved inode while waiting.
     /// Both socket IDs are service-private, monotonic description identities.
     pub fn prepare_connect<B: Filesystem<H>>(

@@ -135,6 +135,30 @@ fn empty_messages_are_readable_bounded_records_not_eof_or_noop() {
 }
 
 #[test]
+fn peer_filter_uses_internal_sender_identity_even_when_names_are_identical() {
+    let mut queue = RecordQueue::new();
+    queue
+        .push_from(unnamed(), b"old", MAX_RECORD_SIZE, Some(1))
+        .unwrap();
+    queue
+        .push_from(unnamed(), b"new", MAX_RECORD_SIZE, Some(2))
+        .unwrap();
+    queue
+        .push_from(unnamed(), b"", MAX_RECORD_SIZE, Some(1))
+        .unwrap();
+    queue
+        .push_from(unnamed(), b"", MAX_RECORD_SIZE, Some(2))
+        .unwrap();
+    queue.retain_sender(2);
+    assert_eq!((queue.len(), queue.charged()), (2, 4));
+    let mut bytes = [0; 8];
+    assert_eq!(queue.receive(&mut bytes, false).unwrap().copied, 3);
+    assert_eq!(&bytes[..3], b"new");
+    assert_eq!(queue.receive(&mut bytes, false).unwrap().copied, 0);
+    assert_eq!((queue.len(), queue.charged()), (0, 0));
+}
+
+#[test]
 fn capacity_and_message_size_failures_never_commit_prefixes() {
     let mut queue = RecordQueue::new();
     let maximum = vec![0x77; MAX_RECORD_SIZE];

@@ -37,6 +37,9 @@ impl SourceAddress {
 
 struct Record {
     source: SourceAddress,
+    // Worker-private description identity, derived from an attached socket.
+    // Never a client PID/FD, supplied wire integer, or pathname comparison.
+    sender: Option<u64>,
     payload: Vec<u8>,
 }
 
@@ -134,6 +137,16 @@ impl RecordQueue {
         payload: &[u8],
         send_capacity: usize,
     ) -> Result<usize, i32> {
+        self.push_from(source, payload, send_capacity, None)
+    }
+
+    pub fn push_from(
+        &mut self,
+        source: SourceAddress,
+        payload: &[u8],
+        send_capacity: usize,
+        sender: Option<u64>,
+    ) -> Result<usize, i32> {
         if !self.can_push(payload.len(), send_capacity)? {
             return Err(-11);
         }
@@ -146,9 +159,24 @@ impl RecordQueue {
         self.charged += bytes.len().max(1);
         self.records.push_back(Record {
             source,
+            sender,
             payload: bytes,
         });
         Ok(payload.len())
+    }
+
+    /// A newly selected datagram peer restricts receive authority by socket
+    /// identity, including records already queued before connect/reconnect.
+    /// Filtering never allocates and releases the exact discarded capacity.
+    pub fn retain_sender(&mut self, sender: u64) {
+        let charged = &mut self.charged;
+        self.records.retain(|record| {
+            let keep = record.sender == Some(sender);
+            if !keep {
+                *charged -= record.charge();
+            }
+            keep
+        });
     }
 
     /// Copy at most one complete record's prefix. A consuming receive drops

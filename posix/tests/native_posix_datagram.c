@@ -32,6 +32,69 @@ static void *d_receive(void *unused) {
   return NULL;
 }
 
+static int named_datagrams(void) {
+  const char *paths[] = {"/tmp/posix-dgram-first", "/tmp/posix-dgram-second",
+                         "/tmp/posix-dgram-client"};
+  struct sockaddr_un addresses[3];
+  socklen_t lengths[3];
+  int sockets[3];
+  for (unsigned i = 0; i < 3; i++) {
+    memset(&addresses[i], 0, sizeof(addresses[i]));
+    addresses[i].sun_family = AF_UNIX;
+    strcpy(addresses[i].sun_path, paths[i]);
+    lengths[i] = offsetof(struct sockaddr_un, sun_path) + strlen(paths[i]) + 1;
+    unlink(paths[i]);
+    sockets[i] = socket(AF_UNIX, SOCK_DGRAM, 0);
+    CHECK(sockets[i] >= 0 &&
+          bind(sockets[i], (struct sockaddr *)&addresses[i], lengths[i]) == 0);
+  }
+  int first = sockets[0], second = sockets[1], client = sockets[2];
+  CHECK(connect(client, (struct sockaddr *)&addresses[0], lengths[0]) == 0);
+  CHECK(connect(first, (struct sockaddr *)&addresses[2], lengths[2]) == 0);
+  CHECK(send(client, "one", 3, 0) == 3);
+  struct sockaddr_un source;
+  socklen_t source_length = sizeof(source);
+  CHECK(recvfrom(first, d_output, sizeof(d_output), 0,
+                 (struct sockaddr *)&source, &source_length) == 3);
+  CHECK(!memcmp(d_output, "one", 3) && !strcmp(source.sun_path, paths[2]));
+  CHECK(send(first, "old", 3, 0) == 3);
+  CHECK(connect(client, (struct sockaddr *)&addresses[1], lengths[1]) == 0);
+  CHECK(send(first, "reject", 6, 0) == -1 && errno == EPERM);
+  CHECK(recv(client, d_output, 1, MSG_DONTWAIT) == -1 && errno == EAGAIN);
+  CHECK(connect(second, (struct sockaddr *)&addresses[2], lengths[2]) == 0);
+  CHECK(send(second, "new", 3, 0) == 3 && recv(client, d_output, 10, 0) == 3);
+  CHECK(!memcmp(d_output, "new", 3));
+  struct sockaddr_un missing = {.sun_family = AF_UNIX};
+  strcpy(missing.sun_path, "/tmp/posix-dgram-missing");
+  CHECK(connect(client, (struct sockaddr *)&missing,
+                offsetof(struct sockaddr_un, sun_path) +
+                    strlen(missing.sun_path) + 1) == -1 &&
+        errno == ENOENT);
+  source_length = sizeof(source);
+  CHECK(getpeername(client, (struct sockaddr *)&source, &source_length) == 0 &&
+        !strcmp(source.sun_path, paths[1]));
+  // Unlink/rebind cannot redirect a previously authorized peer to a new socket.
+  CHECK(unlink(paths[1]) == 0);
+  int replacement = socket(AF_UNIX, SOCK_DGRAM, 0);
+  CHECK(replacement >= 0 &&
+        bind(replacement, (struct sockaddr *)&addresses[1], lengths[1]) == 0);
+  CHECK(send(client, "old-peer", 8, 0) == 8 &&
+        recv(second, d_output, 10, 0) == 8);
+  CHECK(recv(replacement, d_output, 1, MSG_DONTWAIT) == -1 && errno == EAGAIN);
+  CHECK(close(second) == 0);
+  CHECK(send(client, "x", 1, 0) == -1 && errno == ECONNREFUSED);
+  CHECK(connect(client, (struct sockaddr *)&addresses[1], lengths[1]) == 0);
+  CHECK(send(client, "replacement", 11, 0) == 11 &&
+        recv(replacement, d_output, 20, 0) == 11);
+  CHECK(close(first) == 0 && close(client) == 0 && close(replacement) == 0);
+  for (unsigned i = 0; i < 3; i++)
+    CHECK(unlink(paths[i]) == 0);
+  puts("posix-datagram: PASS pathname connect, source names, peer filtering, "
+       "reconnect, unlink/rebind isolation");
+  fflush(stdout);
+  return 0;
+}
+
 int main(int argc, char **argv) {
   if (argc == 5 && !strcmp(argv[1], "--socket-exec"))
     return run_stream_regressions(argc, argv);
@@ -139,5 +202,6 @@ int main(int argc, char **argv) {
   CHECK(close(d_pair[0]) == 0 && close(d_pair[1]) == 0);
   puts("posix-datagram: PASS fork/exec subtype inheritance and read shutdown");
   fflush(stdout);
+  CHECK(named_datagrams() == 0);
   return run_stream_regressions(argc, argv);
 }

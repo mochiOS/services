@@ -247,3 +247,97 @@ fn atomic_send_wait_ignores_small_free_prefix_and_releases_its_write_lease() {
     }
     assert_eq!(waits.start_send(&streams, a, usize::MAX, 0), Err(-90));
 }
+
+#[test]
+fn selecting_peer_filters_queued_and_future_records_by_identity_not_source_name() {
+    let mut service = PosixService::new();
+    service
+        .initialize_bootstrap_process(
+            AuthenticatedProcess {
+                handle: 1u32,
+                process_id: 1,
+            },
+            501,
+            20,
+            &[],
+        )
+        .unwrap();
+    let peer = PeerIdentity {
+        process_id: 1,
+        effective_uid: 0,
+        effective_gid: 0,
+    };
+    let mut streams = Streams::new();
+    let create = Create {
+        domain: Domain::Unix,
+        kind: Kind::Datagram,
+        protocol: 0,
+        options: 0,
+    };
+    let a = service.create_socket(peer, create, &mut streams).unwrap();
+    let b = service.create_socket(peer, create, &mut streams).unwrap();
+    let client = service.create_socket(peer, create, &mut streams).unwrap();
+    streams
+        .connect_datagram_named(a, client, None, b"/client")
+        .unwrap();
+    streams
+        .connect_datagram_named(b, client, None, b"/client")
+        .unwrap();
+    assert_eq!(streams.record_observers(client).collect::<Vec<_>>(), [a, b]);
+    let send = Request {
+        operation: Operation::Send,
+        offset: 0,
+        length: 3,
+        peek: false,
+    };
+    let receive = Request {
+        operation: Operation::Receive,
+        ..send
+    };
+    let mut buffer = Buffer(b"old".to_vec());
+    let mut response = [0; MAX_REPLY_LEN];
+    streams
+        .transfer_record(a, send, &mut buffer, &mut response)
+        .unwrap();
+    buffer.0.copy_from_slice(b"new");
+    streams
+        .transfer_record(b, send, &mut buffer, &mut response)
+        .unwrap();
+    streams
+        .connect_datagram_named(client, b, Some(b"/client"), b"/b")
+        .unwrap();
+    let count = streams
+        .transfer_record(client, receive, &mut buffer, &mut response)
+        .unwrap();
+    assert_eq!(buffer.0, b"new");
+    let reply =
+        mochios_posix_protocol::socket_record::Reply::decode(receive, &response[..count]).unwrap();
+    assert_eq!(
+        reply.source,
+        Some(mochios_posix_protocol::socket::Address::UnixUnnamed)
+    );
+    assert_eq!(
+        streams.transfer_record(client, receive, &mut buffer, &mut response),
+        Err(-11)
+    );
+    assert_eq!(
+        streams.transfer_record(a, send, &mut buffer, &mut response),
+        Err(-1)
+    );
+    streams
+        .transfer_record(b, send, &mut buffer, &mut response)
+        .unwrap();
+    // A failed reconnect does not discard the already-authorized queued data.
+    assert_eq!(
+        streams.connect_datagram_named(client, a, None, b""),
+        Err(-22)
+    );
+    streams
+        .transfer_record(client, receive, &mut buffer, &mut response)
+        .unwrap();
+    assert_eq!(buffer.0, b"new");
+    assert_eq!(
+        streams.peer_address(client),
+        Ok(mochios_posix_protocol::socket::Address::UnixPath(b"/b"))
+    );
+}

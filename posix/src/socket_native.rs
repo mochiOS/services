@@ -107,7 +107,7 @@ pub(super) fn signal(
     const SIGNALS: u64 = mnu_abi::HANDLE_SIGNAL_READABLE
         | mnu_abi::HANDLE_SIGNAL_WRITABLE
         | mnu_abi::HANDLE_SIGNAL_PEER_CLOSED;
-    for id in ids {
+    for id in ids.into_iter().flat_map(|id| std::iter::once(id).chain(streams.record_observers(id))) {
         if let Ok(ready) = streams.readiness(id) {
             let set = if jobs.is_pending(id) {
                 0

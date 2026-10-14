@@ -546,6 +546,7 @@ impl Streams {
             if target.read_shutdown {
                 return Err(-111);
             }
+            if target.peer.is_some_and(|sender| sender != id) { return Err(-1); }
             peer
         } else {
             if entry.read_shutdown {
@@ -564,7 +565,7 @@ impl Streams {
             .records
             .as_mut()
             .ok_or(-91)?;
-        crate::socket_record_io::transfer(queue, request, source, send_capacity, buffer, response)
+        crate::socket_record_io::transfer_from(queue, request, source, send_capacity, buffer, response, Some(id))
     }
 
     /// A large atomic write needs its entire capacity, not just POLLOUT's
@@ -583,13 +584,39 @@ impl Streams {
         let Some(peer) = entry.peer.and_then(|id| self.endpoint(id).ok()) else {
             return Ok(true);
         };
-        if peer.read_shutdown {
+        if peer.read_shutdown || peer.peer.is_some_and(|sender| sender != id) {
             return Ok(true);
         }
         peer.records
             .as_ref()
             .ok_or(-91)?
             .can_push(length, entry.send_capacity)
+    }
+
+    /// One-way datagram peer selection. The adapter has authorized a retained
+    /// target inode; names are reporting snapshots only. All checks precede
+    /// publication so a failed reconnect leaves peer and receive queue intact.
+    pub fn connect_datagram_named(&mut self, client: u64, target: u64, client_path: Option<&[u8]>, target_path: &[u8]) -> Result<(), i32> {
+        let local_name = client_path.map(SocketName::new).transpose()?;
+        let peer_name = SocketName::new(target_path)?;
+        let source = self.endpoint(client)?;
+        if source.records.is_none() { return Err(-91); }
+        let destination = self.endpoint(target).map_err(|_| -111)?;
+        if destination.records.is_none() { return Err(-91); }
+        if destination.read_shutdown { return Err(-111); }
+        if destination.peer.is_some_and(|peer| peer != client) { return Err(-1); }
+        let source = self.endpoint_mut(client)?;
+        source.peer = Some(target);
+        source.local_name = local_name;
+        source.peer_name = Some(peer_name);
+        source.records.as_mut().ok_or(-91)?.retain_sender(target);
+        Ok(())
+    }
+
+    /// Capacity or receive-filter changes affect every connected datagram
+    /// sender, not just a symmetric socketpair's single opposite endpoint.
+    pub fn record_observers(&self, destination: u64) -> impl Iterator<Item = u64> + '_ {
+        self.entries.iter().filter(move |entry| entry.records.is_some() && entry.peer == Some(destination)).map(|entry| entry.id)
     }
 
     /// Description IDs are private; the adapter resolves the listener through
@@ -792,7 +819,7 @@ impl Streams {
         let entry = self.endpoint(id)?;
         if let Some(records) = &entry.records {
             let peer = entry.peer.and_then(|peer| self.endpoint(peer).ok());
-            let write_error = entry.peer.is_some() && peer.is_none_or(|peer| peer.read_shutdown);
+            let write_error = entry.peer.is_some() && peer.is_none_or(|peer| peer.read_shutdown || peer.peer.is_some_and(|sender| sender != id));
             return Ok(Readiness {
                 readable: records.is_readable() || entry.read_shutdown,
                 writable: !entry.write_shutdown

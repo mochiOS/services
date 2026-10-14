@@ -130,6 +130,17 @@ pub fn dispatch(
         let process_id = u64::from_le_bytes(bytes[4..12].try_into().map_err(|_| -22)?);
         let client = platform::handle::identify_provider_object(source.handle)
             .map_err(|e| e.raw() as i32)?;
+        if streams.kind(client)? == wire::Kind::Datagram {
+            let old_peer = streams.affected(client)?[1];
+            let mut response = [0; 4 + wire::CONNECT_REPLY_LEN];
+            wire::ConnectReply::Connected
+                .encode(&mut response[4..])
+                .map_err(|_| -5)?;
+            let mut backend = super::socket_path_native::snapshot_process(state, process_id, path)?;
+            let target = bindings.connect_datagram_path(streams, client, path, &mut backend)?;
+            let _ = platform::ipc::reply(sender, &response);
+            return Ok(Some([client, target, old_peer]));
+        }
         let nonblocking = streams.options(client)? & wire::NONBLOCKING != 0;
         let mut backend = super::socket_path_native::snapshot_process(state, process_id, path)?;
         let started = jobs.start(streams, bindings, client, path, nonblocking, &mut backend)?;
