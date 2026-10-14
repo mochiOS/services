@@ -3,6 +3,8 @@ extern crate alloc;
 use alloc::{collections::VecDeque, string::String, vec::Vec};
 use mochi_user_platform as platform;
 
+mod diagnostic;
+mod diagnostic_drain;
 mod posix_io;
 
 const LOG_ROOT: &str = "/var/log/services";
@@ -164,6 +166,7 @@ fn main() {
     let mut buf = [0u8; 512];
     let mut pending = PendingLogs::new();
     let mut persistence_enabled = false;
+    let mut diagnostic_started = false;
     loop {
         let mut attached = platform::ipc::IpcObjectHandles::default();
         let Ok(msg) = platform::ipc::wait_object_handles(log_endpoint, &mut buf, &mut attached)
@@ -191,6 +194,17 @@ fn main() {
                 let endpoint = attached.handles[0].handle;
                 attached.handles[0].handle = 0;
                 posix_io::install_endpoint(endpoint)
+                    .and_then(|_| {
+                        if !diagnostic_started {
+                            diagnostic::start().map_err(|error| {
+                                platform::syscall::SysError::from_raw(i64::from(
+                                    error.raw_os_error().unwrap_or(5),
+                                ))
+                            })?;
+                            diagnostic_started = true;
+                        }
+                        Ok(())
+                    })
                     .map(|_| 0)
                     .unwrap_or_else(|error| error.errno().unwrap_or(mochi_user_syscall::EIO))
             };

@@ -1,6 +1,40 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#ifdef DIAGNOSTIC_PERSISTENCE
+#include <fcntl.h>
+#include <time.h>
+#include <unistd.h>
+
+static int verify_persistence(const unsigned char *expected, size_t length) {
+  static unsigned char persisted[128 * 1024];
+  for (unsigned attempt = 0; attempt < 100; ++attempt) {
+    const int file = open("/var/log/audit.log", O_RDONLY);
+    if (file >= 0) {
+      size_t used = 0;
+      while (used < sizeof(persisted)) {
+        const ssize_t count =
+            read(file, persisted + used, sizeof(persisted) - used);
+        if (count <= 0)
+          break;
+        used += (size_t)count;
+      }
+      close(file);
+      for (size_t offset = 0; length <= used && offset <= used - length;
+           ++offset) {
+        if (memcmp(persisted + offset, expected, length) == 0) {
+          puts("native-diagnostic-persistence: PASS");
+          return 0;
+        }
+      }
+    }
+    const struct timespec interval = {.tv_sec = 0, .tv_nsec = 100000000};
+    nanosleep(&interval, NULL);
+  }
+  puts("native-diagnostic-persistence: FAIL missing persisted snapshot");
+  return 1;
+}
+#endif
 
 /* Compile twice with 0/1 and run with matching signed package permissions. */
 #ifndef DIAGNOSTIC_AUTHORIZED
@@ -73,5 +107,8 @@ int main(void) {
   CHECK(repeated.dropped == 0 && repeated.next_cursor == metadata.next_cursor);
   CHECK(memcmp(bytes, replay, (size_t)copied) == 0);
   puts("native-diagnostic-read: authorized PASS");
+#ifdef DIAGNOSTIC_PERSISTENCE
+  return verify_persistence(bytes, (size_t)copied);
+#endif
   return 0;
 }

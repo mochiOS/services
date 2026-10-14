@@ -2,8 +2,8 @@ extern crate alloc;
 
 include!("../../../core/src/util/diagnostic_buffer.rs");
 
-// Compile the actual audit adapter, not a copy, without architecture or disk
-// dependencies. Persistence is deliberately unavailable in this host fixture.
+// Compile the actual audit adapter, not a copy. No filesystem, configuration,
+// or persistence dependencies are supplied by this host fixture.
 mod interrupt {
     pub mod spinlock {
         pub struct SpinLock<T>(std::sync::Mutex<T>);
@@ -20,32 +20,6 @@ mod interrupt {
 mod util {
     pub mod diagnostic_buffer {
         pub use crate::{ByteRing, CursorError, ReadResult};
-    }
-}
-mod cext {
-    pub mod fs {
-        pub fn is_loaded() -> bool {
-            false
-        }
-        pub fn write_all(_: &str, _: u64, _: &[u8]) -> Result<(), ()> {
-            panic!("host diagnostics must not write to a filesystem");
-        }
-    }
-}
-mod config {
-    pub struct Paths;
-    impl Paths {
-        pub fn audit_log(&self) -> Option<&str> {
-            None
-        }
-    }
-    pub struct Config {
-        pub policy_paths: Paths,
-    }
-    pub fn kernel() -> &'static Config {
-        &Config {
-            policy_paths: Paths,
-        }
     }
 }
 #[macro_export]
@@ -164,19 +138,29 @@ fn ring_matches_a_linear_history_across_repeated_wraps() {
 }
 
 #[test]
-fn actual_audit_cursor_and_existing_snapshot_agree_after_wraparound() {
+fn actual_audit_retention_supports_independent_chunked_reads_without_storage() {
     for _ in 0..600 {
         audit::log(
             audit::AuditEventKind::Deny,
             "diagnostic cursor retention test: abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz",
         );
     }
-    let mut snapshot = vec![0; audit::file_size()];
-    assert_eq!(audit::read_file_at(0, &mut snapshot), snapshot.len());
-    let mut cursor = vec![0; snapshot.len()];
-    let read = audit::read_cursor(0, &mut cursor).unwrap();
+    let mut snapshot = vec![0; 64 * 1024];
+    let read = audit::read_cursor(0, &mut snapshot).unwrap();
     assert!(read.dropped > 0);
     assert_eq!(read.bytes, snapshot.len());
-    assert_eq!(cursor, snapshot);
+    let mut collected = Vec::new();
+    let mut cursor = 0;
+    loop {
+        let mut chunk = [0; 257];
+        let batch = audit::read_cursor(cursor, &mut chunk).unwrap();
+        if batch.bytes == 0 {
+            break;
+        }
+        collected.extend_from_slice(&chunk[..batch.bytes]);
+        cursor = batch.next;
+    }
+    assert_eq!(collected, snapshot);
+    assert_eq!(cursor, read.next);
     assert_eq!(audit::read_cursor(read.next, &mut [0; 4]).unwrap().bytes, 0);
 }

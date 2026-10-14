@@ -104,3 +104,39 @@ pub fn append_and_sync(
     sync?;
     close
 }
+
+/// Retained append handle for a writer which tracks partial-write progress.
+pub struct AppendFile(platform::handle::Handle);
+
+impl AppendFile {
+    pub fn open(path: &str, mode: u32) -> Result<Self, mochi_user_syscall::SysError> {
+        let file = with_client(|client| {
+            client.open_at(
+                OpenAtBase::ProcessRoot,
+                posix::OPEN_WRITE | posix::OPEN_CREATE | posix::OPEN_APPEND,
+                mode,
+                path,
+            )
+        })?;
+        Ok(Self(file.handle))
+    }
+
+    pub fn write(&mut self, bytes: &[u8]) -> Result<usize, mochi_user_syscall::SysError> {
+        platform::handle::write(self.0, bytes)
+    }
+
+    pub fn sync(&mut self) -> Result<(), mochi_user_syscall::SysError> {
+        with_client(|client| {
+            client.fsync(ObjectHandleAttachment {
+                handle: self.0,
+                rights: platform::handle::HANDLE_RIGHT_TRANSFER,
+            })
+        })
+    }
+}
+
+impl Drop for AppendFile {
+    fn drop(&mut self) {
+        let _ = platform::handle::close(self.0);
+    }
+}
