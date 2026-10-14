@@ -7,7 +7,7 @@
 use mochios_posix_protocol::socket::{Address, MAX_ADDRESS_LEN};
 use std::collections::VecDeque;
 
-pub const MAX_RECORD_SIZE: usize = super::socket::RECEIVE_CAPACITY;
+pub const MAX_RECORD_SIZE: usize = mochios_posix_protocol::socket_record::MAX_RECORD_SIZE;
 /// Bound metadata as well as payload storage, including empty datagrams.
 pub const MAX_QUEUED_RECORDS: usize = 256;
 
