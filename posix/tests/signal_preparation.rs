@@ -150,11 +150,54 @@ fn main(){
         assert_eq!(COMPLETIONS.load(Ordering::Acquire),if forked{1}else{2});
     }
     reset(0);
+    for forked in [false,true] {
+        reset(0);COMPLETE_ERROR.store(0,Ordering::Release);
+        assert_eq!(unsafe{signal_scope::validate_target(&CONTROL,0)},Err(EINVAL));
+        let prepared=Preparation::new(&CONTROL).unwrap();
+        let mut records=Vec::new();let mut target=0;
+        for index in 0..100 {
+            let mut record=Box::pin(signal_scope::Scope::new(&CONTROL,posix_protocol::SignalDelivery{signal:11,token:37},0).unwrap());
+            record.as_mut().activate().unwrap();records.push(record);
+            if index==49 {target=CONTROL.active_signal_scope_id.load(Ordering::Acquire);}
+        }
+        let top=CONTROL.active_signal_scope.load(Ordering::Acquire);
+        let top_id=CONTROL.active_signal_scope_id.load(Ordering::Acquire);
+        assert_eq!(unsafe{signal_scope::unwind_to(&CONTROL,u64::MAX)},Err(EINVAL));
+        assert_eq!(COMPLETIONS.load(Ordering::Acquire),0);
+        assert_eq!(CONTROL.active_signal_scope.load(Ordering::Acquire),top);
+        CONTROL.active_signal_scope_id.store(top_id+1,Ordering::Release);
+        assert_eq!(unsafe{signal_scope::unwind_to(&CONTROL,top_id+1)},Err(EINVAL));
+        CONTROL.active_signal_scope_id.store(top_id,Ordering::Release);
+        if forked {FORK_EPOCH.fetch_add(1,Ordering::AcqRel);}
+        unsafe{signal_scope::unwind_to(&CONTROL,target)}.unwrap();
+        assert_eq!(CONTROL.active_signal_scope_id.load(Ordering::Acquire),target);
+        assert_eq!(records[99].as_mut().activate(),Err(EINVAL));
+        assert_eq!(COMPLETIONS.load(Ordering::Acquire),if forked{0}else{50});
+        unsafe{signal_scope::unwind_to(&CONTROL,target)}.unwrap();
+        assert_eq!(COMPLETIONS.load(Ordering::Acquire),if forked{0}else{50});
+        if forked {
+            let mut fresh=Box::pin(signal_scope::Scope::new(&CONTROL,posix_protocol::SignalDelivery{signal:11,token:37},1).unwrap());
+            fresh.as_mut().activate().unwrap();
+            unsafe{signal_scope::unwind_to(&CONTROL,target)}.unwrap();drop(fresh);
+            assert_eq!(COMPLETIONS.load(Ordering::Acquire),1);
+        }
+        unsafe{signal_scope::unwind_to(&CONTROL,0)}.unwrap();
+        assert_eq!(COMPLETIONS.load(Ordering::Acquire),if forked{1}else{100});
+        assert_eq!(CONTROL.active_signal_scope.load(Ordering::Acquire),0);
+        assert_eq!(CONTROL.active_signal_scope_id.load(Ordering::Acquire),0);
+        // Retired records have no remaining link/destructor side effects.
+        drop(records);drop(prepared);
+        assert_eq!(CONTROL.native_delivery_defer.load(Ordering::Acquire),0);
+    }
+    reset(0);
     assert!(matches!(signal_scope::Scope::new(&CONTROL,posix_protocol::SignalDelivery{signal:11,token:37},0),Err(EINVAL)));
     let prepared=Preparation::new(&CONTROL).unwrap();
     let mut scope=Box::pin(signal_scope::Scope::new(&CONTROL,posix_protocol::SignalDelivery{signal:11,token:37},0).unwrap());
+    scope.as_mut().activate().unwrap();
+    let active=CONTROL.active_signal_scope.load(Ordering::Acquire);
     COMPLETE_ERROR.store(1,Ordering::Release);
-    assert_eq!(scope.as_mut().complete(),Err(5));
+    assert_eq!(unsafe{signal_scope::unwind_to(&CONTROL,0)},Err(5));
+    assert_eq!(CONTROL.active_signal_scope.load(Ordering::Acquire),active);
     assert_eq!(scope.as_mut().complete(),Err(EINVAL));
     assert_eq!(COMPLETIONS.load(Ordering::Acquire),1);
     drop(scope);drop(prepared);
