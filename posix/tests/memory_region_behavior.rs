@@ -92,13 +92,11 @@ fn main() {
     assert!(!restricted.set_access(0x1000, 0x2000, MEMORY_ACCESS_WRITE));
     let mut restricted_slice = restricted.slice(0x2000, 0x3000).unwrap();
     assert!(!restricted_slice.set_access(0x2000, 0x1000, MEMORY_ACCESS_WRITE));
-    let mut private = MemoryRegion::file_backed(0x1000, 0x2000,
+    let private = MemoryRegion::file_backed(0x1000, 0x2000,
         MEMORY_ACCESS_READ | MEMORY_ACCESS_WRITE, 0, object, 0, true, false, MEMORY_ACCESS_ALL);
-    assert!(!private.set_shared(true));
     assert!(!private.is_shared());
     assert!(!private.backing().file_shared());
-    let mut anonymous = MemoryRegion::anonymous(0x1000, 0x2000, MEMORY_ACCESS_WRITE, 0, true, false);
-    assert!(anonymous.set_shared(true));
+    let anonymous = MemoryRegion::anonymous(0x1000, 0x2000, MEMORY_ACCESS_WRITE, MEMORY_MAP_SHARED, true, true);
     assert!(anonymous.is_shared());
     let process = removal::Process { memory_regions: vec![region.clone()] };
     let (retained, removed) = process.prepare_remove_memory_range(0x2000, 0x2000).unwrap();
