@@ -246,6 +246,18 @@ impl RecordQueue {
         Ok(received)
     }
 
+    /// Consuming recvmsg moves the head's ancillary ownership to its receipt.
+    /// Ordinary recv continues to drop it; PEEK must not use this operation.
+    pub fn receive_owned(
+        &mut self,
+        output: &mut [u8],
+    ) -> Result<(ReceivedRecord, Option<crate::socket_rights::Bundle>), i32> {
+        let received = self.receive(output, true)?;
+        let record = self.records.pop_front().ok_or(-11)?;
+        self.charged -= record.charge();
+        Ok((received, record.rights))
+    }
+
     /// Read shutdown/final release discards queued records and their payloads.
     pub fn clear(&mut self) {
         self.records.clear();

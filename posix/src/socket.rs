@@ -687,6 +687,55 @@ impl Streams {
         })
     }
 
+    /// Consuming ancillary receive. All output copies and receipt publication
+    /// must succeed before removing the exact head record and moving its leases.
+    /// The worker serializes this entire operation; publish must not reenter it.
+    pub fn receive_record_with_rights(
+        &mut self,
+        id: u64,
+        offset: u64,
+        length: u32,
+        buffer: &mut impl crate::socket_record_io::RecordBuffer,
+        publish: impl FnOnce(crate::socket_record::ReceivedRecord, usize) -> Result<(), i32>,
+    ) -> Result<
+        (crate::socket_record::ReceivedRecord, Option<crate::socket_rights::Bundle>),
+        i32,
+    > {
+        if length as usize > crate::socket_record::MAX_RECORD_SIZE {
+            return Err(-22);
+        }
+        let end = offset.checked_add(u64::from(length)).ok_or(-22)?;
+        let entry = self.endpoint(id)?;
+        if entry.records.is_none() {
+            return Err(-95);
+        }
+        if end > buffer.extent()? {
+            return Err(-22);
+        }
+        if entry.read_shutdown {
+            let record = crate::socket_record::ReceivedRecord {
+                copied: 0,
+                length: 0,
+                source: crate::socket_record::SourceAddress::new(
+                    mochios_posix_protocol::socket::Address::UnixUnnamed,
+                )?,
+            };
+            publish(record, 0)?;
+            return Ok((record, None));
+        }
+        let queue = self.endpoint_mut(id)?.records.as_mut().ok_or(-95)?;
+        let mut data = Vec::new();
+        data.try_reserve_exact(length as usize).map_err(|_| -12)?;
+        data.resize(length as usize, 0);
+        let record = queue.receive(&mut data, true)?;
+        let rights = queue.front_rights().map_or(0, |bundle| bundle.len());
+        buffer.write(offset, &data[..record.copied])?;
+        publish(record, rights)?;
+        // No allocation, copy, lookup or request processing after publication.
+        let (_, rights) = queue.receive_owned(&mut [])?;
+        Ok((record, rights))
+    }
+
     /// Explicit-destination sends do not change the description's default
     /// peer or receive filter. Destination authority comes from a retained
     /// lookup ticket in the worker, never from a caller-supplied object ID.

@@ -24,6 +24,17 @@ enum State {
     Collecting(Pending),
     Ready(Bundle),
     Complete,
+    Received {
+        rights: Option<Bundle>,
+        info: ReceiptInfo,
+        delivered: usize,
+    },
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReceiptInfo {
+    pub record: crate::socket_record::ReceivedRecord,
+    pub total_rights: usize,
+    pub available_rights: usize,
 }
 impl State {
     fn received(&self) -> Result<usize, i32> {
@@ -31,6 +42,7 @@ impl State {
             Self::Collecting(pending) => Ok(pending.received()),
             Self::Ready(bundle) => Ok(bundle.len()),
             Self::Complete => Err(-114),
+            Self::Received { .. } => Err(-95),
         }
     }
 }
@@ -111,6 +123,7 @@ impl Transfers {
             }
             State::Ready(_) => Err(-22),
             State::Complete => Err(-114),
+            State::Received { .. } => Err(-95),
         }
     }
     pub fn progress(&self, id: u64) -> Result<(u64, u32, usize), i32> {
@@ -136,6 +149,7 @@ impl Transfers {
             .ok_or(-9)?;
         match &stage.state {
             State::Complete => return Err(-114),
+            State::Received { .. } => return Err(-95),
             State::Collecting(pending) if !pending.is_complete() => return Err(-22),
             _ => (),
         }
@@ -164,7 +178,14 @@ impl Transfers {
                     return Err(-22);
                 }
             },
-            State::Complete => return Err(-114),
+            state @ State::Complete => {
+                stage.state = state;
+                return Err(-114);
+            }
+            state @ State::Received { .. } => {
+                stage.state = state;
+                return Err(-95);
+            }
         };
         match streams.commit_record_with_rights(stage.socket, &bytes, bundle) {
             Ok(result) => Ok(result),
@@ -182,6 +203,121 @@ impl Transfers {
             .ok_or(-9)?;
         self.entries.swap_remove(index);
         Ok(())
+    }
+    /// The adapter supplies a kernel-identified READ lease. Publication receives
+    /// a private ID only to mint a native receipt Handle, never to serialize it.
+    /// On failure source stays owned by the adapter. On success ONLY Some(id)
+    /// adopts source. No-rights receives therefore need no persistent receipt.
+    pub fn receive(
+        &mut self,
+        streams: &mut Streams,
+        socket: u64,
+        source: u32,
+        offset: u64,
+        length: u32,
+        maximum_rights: usize,
+        close: fn(u32),
+        mut publish: impl FnMut(Option<u64>, ReceiptInfo) -> Result<(), i32>,
+        buffer: &mut impl crate::socket_record_io::RecordBuffer,
+    ) -> Result<(ReceiptInfo, Option<u64>), i32> {
+        if source == 0 {
+            return Err(-9);
+        }
+        if maximum_rights > mochios_posix_protocol::socket::MAX_TRANSFERRED_DESCRIPTORS {
+            return Err(-22);
+        }
+        let mut receipt_id = None;
+        let (record, mut rights) = streams.receive_record_with_rights(
+            socket,
+            offset,
+            length,
+            buffer,
+            |record, total_rights| {
+                let available_rights = maximum_rights.min(total_rights);
+                if available_rights != 0 {
+                    if self.entries.len() == MAX_ENDPOINTS || self.next > MAX_DESCRIPTION_ID {
+                        return Err(-23);
+                    }
+                    self.entries.try_reserve(1).map_err(|_| -12)?;
+                    receipt_id = Some(self.next);
+                    // Never reuse a minted ID after failed publication: closing a
+                    // failed native Handle may enqueue a delayed OP_RELEASE.
+                    self.next += 1;
+                }
+                publish(
+                    receipt_id,
+                    ReceiptInfo {
+                        record,
+                        total_rights,
+                        available_rights,
+                    },
+                )
+            },
+        )?;
+        let total_rights = rights.as_ref().map_or(0, |bundle| bundle.len());
+        let info = ReceiptInfo {
+            record,
+            total_rights,
+            available_rights: maximum_rights.min(total_rights),
+        };
+        if let Some(bundle) = &mut rights {
+            bundle.truncate(maximum_rights);
+        }
+        if let Some(id) = receipt_id {
+            self.entries.push(Stage {
+                id,
+                socket,
+                source,
+                length,
+                close,
+                state: State::Received {
+                    rights,
+                    info,
+                    delivered: 0,
+                },
+            });
+        }
+        Ok((info, receipt_id))
+    }
+
+    /// Reply acquires independent references before service leases are closed.
+    /// Failed replies retain all references and leave the cursor unchanged.
+    /// The caller must abort, not blindly retry an ambiguous transport failure.
+    pub fn deliver(
+        &mut self,
+        id: u64,
+        offset: usize,
+        maximum: usize,
+        reply: impl FnOnce(&[Lease]) -> Result<(), i32>,
+    ) -> Result<usize, i32> {
+        if maximum == 0 || maximum > mnu_abi::IPC_MAX_OBJECT_HANDLES {
+            return Err(-22);
+        }
+        let stage = self
+            .entries
+            .iter_mut()
+            .find(|stage| stage.id == id)
+            .ok_or(-9)?;
+        let State::Received {
+            rights,
+            info,
+            delivered,
+        } = &mut stage.state
+        else {
+            return Err(-95);
+        };
+        if offset != *delivered {
+            return Err(-22);
+        }
+        if *delivered == info.available_rights {
+            return Err(-61);
+        }
+        let bundle = rights.as_mut().ok_or(-5)?;
+        let count = maximum.min(bundle.len());
+        reply(&bundle.leases()[..count])?;
+        bundle.discard_delivered_prefix(count)?;
+        *delivered += count;
+        Ok(count)
     }
     pub fn reserved_references(&self) -> usize {
         self.budget.used()

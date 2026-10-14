@@ -239,6 +239,7 @@ struct Buffer {
     bytes: Vec<u8>,
     reads: usize,
     fail: bool,
+    write_fail: bool,
 }
 impl Buffer {
     fn new(bytes: &[u8]) -> Self {
@@ -246,6 +247,7 @@ impl Buffer {
             bytes: bytes.to_vec(),
             reads: 0,
             fail: false,
+            write_fail: false,
         }
     }
 }
@@ -262,8 +264,349 @@ impl posix_service::socket_record_io::RecordBuffer for Buffer {
         Ok(())
     }
     fn write(&mut self, offset: u64, input: &[u8]) -> Result<(), i32> {
+        if self.write_fail {
+            return Err(-5);
+        }
         self.bytes[offset as usize..offset as usize + input.len()].copy_from_slice(input);
         Ok(())
+    }
+}
+
+fn queued_rights(
+    streams: &mut Streams,
+    source: u64,
+    handles: &[u32],
+    payload: &[u8],
+) -> posix_service::socket_rights::Budget {
+    use posix_service::socket_rights::{Budget, Pending};
+    let budget = Budget::new(handles.len());
+    let mut pending = Pending::new(handles.len(), &budget).unwrap();
+    for (index, chunk) in handles.chunks(3).enumerate() {
+        pending
+            .append(
+                index * 3,
+                chunk.iter().map(|handle| lease(*handle)).collect(),
+            )
+            .unwrap();
+    }
+    streams
+        .commit_record_with_rights(source, payload, pending.finish().ok().unwrap())
+        .ok()
+        .unwrap();
+    budget
+}
+
+#[test]
+fn receipt_moves_data_and_rights_together_truncates_control_and_delivers_once() {
+    let (mut streams, [a, b]) = pair();
+    let budget = queued_rights(&mut streams, a, &[1, 2, 3, 4, 5, 6], b"abcdef");
+    let mut jobs = Transfers::new(0);
+    let mut buffer = Buffer::new(b"--------");
+    let mut published = None;
+    let (info, id) = jobs
+        .receive(
+            &mut streams,
+            b,
+            200,
+            2,
+            2,
+            4,
+            close,
+            |id, info| {
+                assert!(closed().is_empty());
+                assert_eq!(budget.used(), 6);
+                published = Some((info, id));
+                Ok(())
+            },
+            &mut buffer,
+        )
+        .unwrap();
+    assert_eq!(published, Some((info, id)));
+    assert_eq!(
+        (
+            info.record.copied,
+            info.record.length,
+            info.total_rights,
+            info.available_rights
+        ),
+        (2, 6, 6, 4)
+    );
+    assert_eq!(&buffer.bytes, b"--ab----");
+    assert!(!streams.readiness(b).unwrap().readable);
+    assert_eq!(closed(), [5, 6]);
+    assert_eq!(budget.used(), 4);
+    let id = id.unwrap();
+    assert_eq!(jobs.commit(&mut streams, id, 0, &mut buffer), Err(-95));
+    assert_eq!(jobs.append(id, 0, vec![]), Err(-95));
+    assert_eq!(
+        jobs.deliver(id, 0, 4, |leases| {
+            assert_eq!(
+                leases
+                    .iter()
+                    .map(|lease| lease.handle())
+                    .collect::<Vec<_>>(),
+                [1, 2, 3, 4]
+            );
+            assert!(leases.iter().all(|lease| lease.rights()
+                == mnu_abi::HANDLE_RIGHT_READ | mnu_abi::HANDLE_RIGHT_TRANSFER));
+            Ok(())
+        }),
+        Ok(4)
+    );
+    assert_eq!(budget.used(), 0);
+    assert_eq!(closed(), [5, 6, 1, 2, 3, 4]);
+    assert_eq!(
+        jobs.deliver(id, 0, 1, |_| panic!("replayed delivery")),
+        Err(-22)
+    );
+    assert_eq!(jobs.deliver(id, 4, 1, |_| panic!("past end")), Err(-61));
+    jobs.release(id).unwrap();
+    assert_eq!(closed(), [5, 6, 1, 2, 3, 4, 200]);
+}
+
+#[test]
+fn failed_receive_copy_and_publication_preserve_queue_and_do_not_adopt_source() {
+    let (mut streams, [a, b]) = pair();
+    let budget = queued_rights(&mut streams, a, &[1, 2], b"xyz");
+    let mut jobs = Transfers::new(0);
+    let mut buffer = Buffer::new(b"---");
+    buffer.write_fail = true;
+    assert_eq!(
+        jobs.receive(
+            &mut streams,
+            b,
+            200,
+            0,
+            3,
+            2,
+            close,
+            |_, _| panic!("copy failed"),
+            &mut buffer
+        ),
+        Err(-5)
+    );
+    assert_eq!(buffer.bytes, b"---");
+    buffer.write_fail = false;
+    let mut failed_id = None;
+    assert_eq!(
+        jobs.receive(
+            &mut streams,
+            b,
+            200,
+            0,
+            3,
+            2,
+            close,
+            |id, _| {
+                failed_id = id;
+                Err(-5)
+            },
+            &mut buffer
+        ),
+        Err(-5)
+    );
+    assert!(closed().is_empty());
+    assert_eq!(budget.used(), 2);
+    assert!(streams.readiness(b).unwrap().readable);
+    let (_, good_id) = jobs
+        .receive(
+            &mut streams,
+            b,
+            200,
+            0,
+            3,
+            2,
+            close,
+            |_, _| Ok(()),
+            &mut buffer,
+        )
+        .unwrap();
+    let good_id = good_id.unwrap();
+    assert_ne!(failed_id.unwrap(), good_id);
+    assert_eq!(jobs.release(failed_id.unwrap()), Err(-9));
+    assert!(closed().is_empty());
+    jobs.release(good_id).unwrap();
+    assert_eq!(closed(), [200, 1, 2]);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn failed_batch_reply_keeps_cursor_and_references_while_abort_closes_the_remainder() {
+    let (mut streams, [a, b]) = pair();
+    let budget = queued_rights(&mut streams, a, &[1, 2, 3], b"x");
+    let mut jobs = Transfers::new(0);
+    let mut buffer = Buffer::new(b"-");
+    let (_, id) = jobs
+        .receive(
+            &mut streams,
+            b,
+            200,
+            0,
+            1,
+            3,
+            close,
+            |_, _| Ok(()),
+            &mut buffer,
+        )
+        .unwrap();
+    let id = id.unwrap();
+    assert_eq!(jobs.deliver(id, 0, 0, |_| panic!()), Err(-22));
+    assert_eq!(jobs.deliver(id, 0, 5, |_| panic!()), Err(-22));
+    assert_eq!(jobs.deliver(id, 0, 2, |_| Err(-5)), Err(-5));
+    assert!(closed().is_empty());
+    assert_eq!(budget.used(), 3);
+    assert_eq!(jobs.deliver(id, 0, 2, |_| Ok(())), Ok(2));
+    assert_eq!(closed(), [1, 2]);
+    assert_eq!(budget.used(), 1);
+    jobs.release(id).unwrap();
+    assert_eq!(closed(), [1, 2, 200, 3]);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn no_control_capacity_needs_no_receipt_and_closes_all_discarded_references() {
+    let (mut streams, [a, b]) = pair();
+    let budget = queued_rights(&mut streams, a, &[1, 2], b"x");
+    let mut jobs = Transfers::new(0);
+    let mut buffer = Buffer::new(b"-");
+    let (info, id) = jobs
+        .receive(
+            &mut streams,
+            b,
+            200,
+            0,
+            1,
+            0,
+            close,
+            |id, info| {
+                assert_eq!(id, None);
+                assert_eq!((info.total_rights, info.available_rights), (2, 0));
+                Ok(())
+            },
+            &mut buffer,
+        )
+        .unwrap();
+    assert_eq!(id, None);
+    assert_eq!((info.total_rights, info.available_rights), (2, 0));
+    assert_eq!(buffer.bytes, b"x");
+    assert_eq!(closed(), [1, 2]); // source is still the adapter's cleanup duty
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn receiving_an_empty_record_with_rights_still_publishes_a_receipt() {
+    let (mut streams, [a, b]) = pair();
+    let budget = queued_rights(&mut streams, a, &[1], b"");
+    let mut jobs = Transfers::new(0);
+    let mut buffer = Buffer::new(b"");
+    let (info, id) = jobs
+        .receive(
+            &mut streams,
+            b,
+            200,
+            0,
+            0,
+            1,
+            close,
+            |_, _| Ok(()),
+            &mut buffer,
+        )
+        .unwrap();
+    assert_eq!(
+        (
+            info.record.length,
+            info.record.copied,
+            info.available_rights
+        ),
+        (0, 0, 1)
+    );
+    assert!(!streams.readiness(b).unwrap().readable);
+    jobs.release(id.unwrap()).unwrap();
+    assert_eq!(closed(), [200, 1]);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn all_253_received_references_are_delivered_in_independent_native_sized_batches() {
+    let (mut streams, [a, b]) = pair();
+    let handles: Vec<_> = (1..=253).collect();
+    let budget = queued_rights(&mut streams, a, &handles, b"x");
+    let mut jobs = Transfers::new(0);
+    let mut buffer = Buffer::new(b"-");
+    let (_, id) = jobs
+        .receive(
+            &mut streams,
+            b,
+            1000,
+            0,
+            1,
+            253,
+            close,
+            |_, _| Ok(()),
+            &mut buffer,
+        )
+        .unwrap();
+    let id = id.unwrap();
+    let mut delivered = 0;
+    while delivered < handles.len() {
+        let count = jobs
+            .deliver(id, delivered, 4, |leases| {
+                assert_eq!(leases.len(), (253 - delivered).min(4));
+                for (lease, expected) in leases.iter().zip(&handles[delivered..]) {
+                    assert_eq!(lease.handle(), *expected);
+                }
+                Ok(())
+            })
+            .unwrap();
+        delivered += count;
+        assert_eq!(budget.used(), 253 - delivered);
+    }
+    assert_eq!(closed(), handles);
+    jobs.release(id).unwrap();
+    assert_eq!(closed().last(), Some(&1000));
+    assert_eq!(closed().len(), 254);
+}
+
+#[test]
+fn receive_allocation_failures_cannot_consume_a_record_or_its_rights() {
+    for allocation in 0..2 {
+        let (mut streams, [a, b]) = pair();
+        let budget = queued_rights(&mut streams, a, &[1, 2], b"abc");
+        let mut jobs = Transfers::new(0);
+        let mut buffer = Buffer::new(b"---");
+        FAIL_AFTER.with(|fail| fail.set(allocation));
+        let result = jobs.receive(
+            &mut streams,
+            b,
+            200,
+            0,
+            3,
+            2,
+            close,
+            |_, _| panic!("allocation failed"),
+            &mut buffer,
+        );
+        FAIL_AFTER.with(|fail| fail.set(-1));
+        assert_eq!(result, Err(-12));
+        assert!(closed().is_empty());
+        assert_eq!(budget.used(), 2);
+        assert!(streams.readiness(b).unwrap().readable);
+        let (_, id) = jobs
+            .receive(
+                &mut streams,
+                b,
+                200,
+                0,
+                3,
+                2,
+                close,
+                |_, _| Ok(()),
+                &mut buffer,
+            )
+            .unwrap();
+        jobs.release(id.unwrap()).unwrap();
+        assert_eq!(closed(), [200, 1, 2]);
+        assert_eq!(budget.used(), 0);
     }
 }
 fn pair() -> (Streams, [u64; 2]) {

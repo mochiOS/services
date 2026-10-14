@@ -190,4 +190,29 @@ impl Bundle {
     pub fn is_empty(&self) -> bool {
         self.leases.is_empty()
     }
+    /// Receiving control truncation drops references that cannot be installed.
+    pub fn truncate(&mut self, maximum: usize) {
+        let keep = maximum.min(self.len());
+        let removed = self.len() - keep;
+        self.leases.truncate(keep);
+        self.release_charge(removed);
+    }
+    /// Only after an IPC reply has acquired independent receiver references.
+    /// On reply failure leave the entire prefix owned by this bundle instead.
+    pub fn discard_delivered_prefix(&mut self, count: usize) -> Result<(), i32> {
+        if count > self.len() {
+            return Err(-22);
+        }
+        drop(self.leases.drain(..count));
+        self.release_charge(count);
+        Ok(())
+    }
+    fn release_charge(&mut self, count: usize) {
+        self._charge
+            .budget
+            .0
+            .used
+            .fetch_sub(count, Ordering::Relaxed);
+        self._charge.count -= count;
+    }
 }
