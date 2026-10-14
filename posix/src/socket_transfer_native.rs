@@ -1,4 +1,4 @@
-//! No process/FD lookup: Begin, Append and Commit require explicit IPC authority;
+//! No process/FD lookup: every operation requires explicit IPC authority;
 //! transactions are resolved only through ProviderObjectIdentify on this worker.
 use mochi_user_platform as platform;
 use mochios_posix_protocol::socket_transfer::{self as wire, Request};
@@ -13,7 +13,7 @@ fn close(handle: u32) {
 
 /// Returns a bit mask of received references whose ownership has been consumed,
 /// including references closed by rollback. The common worker cleanup skips them.
-/// The second result identifies descriptions whose readiness changed on commit.
+/// The second result identifies descriptions whose send/receive readiness changed.
 pub fn dispatch(
     endpoint: u32,
     streams: &mut Streams,
@@ -25,6 +25,7 @@ pub fn dispatch(
     let mut consumed = 0u8;
     let mut affected = None;
     let mut created = None;
+    let mut replied = false;
     let result = (|| {
         if attachments.delivery_flags != mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE {
             return Err(-13);
@@ -115,7 +116,8 @@ pub fn dispatch(
             Request::Commit { offset } => {
                 if count != 2
                     || attached[0].rights != mnu_abi::HANDLE_RIGHT_CONTROL
-                    || attached[1].rights != (mnu_abi::HANDLE_RIGHT_READ | mnu_abi::HANDLE_RIGHT_MAP)
+                    || attached[1].rights
+                        != (mnu_abi::HANDLE_RIGHT_READ | mnu_abi::HANDLE_RIGHT_MAP)
                 {
                     return Err(-13);
                 }
@@ -132,6 +134,131 @@ pub fn dispatch(
                 affected = Some(ids);
                 Ok(count as u32)
             }
+            Request::Receive {
+                offset,
+                length,
+                maximum_rights,
+            } => {
+                if count != 2
+                    || attached[0].rights != mnu_abi::HANDLE_RIGHT_READ
+                    || attached[1].rights
+                        != (mnu_abi::HANDLE_RIGHT_WRITE | mnu_abi::HANDLE_RIGHT_MAP)
+                {
+                    return Err(-13);
+                }
+                let socket = platform::handle::identify_provider_object(attached[0].handle)
+                    .map_err(|error| error.raw() as i32)?;
+                let (_, receipt) = transfers.receive(
+                    streams,
+                    socket,
+                    attached[0].handle,
+                    offset,
+                    length,
+                    maximum_rights as usize,
+                    close,
+                    |id, info| {
+                        let source = mochios_posix_protocol::socket::Address::decode(
+                            info.record.source.encoded(),
+                        )
+                        .map_err(|_| -5)?;
+                        let mut response = [0; wire::MAX_RECEIVE_REPLY_LEN];
+                        let size = wire::ReceiveReply {
+                            copied: info.record.copied as u32,
+                            length: info.record.length as u32,
+                            total_rights: info.total_rights as u16,
+                            available_rights: info.available_rights as u16,
+                            source,
+                        }
+                        .encode(length, maximum_rights, &mut response)
+                        .map_err(|_| -5)?;
+                        let mut outgoing = platform::ipc::IpcObjectHandles::default();
+                        let handle = match id {
+                            Some(id) => {
+                                let handle = platform::handle::create_provider_object(
+                                    endpoint,
+                                    object_id(id)?,
+                                    wire::RIGHTS,
+                                )
+                                .map_err(|error| error.raw() as i32)?;
+                                outgoing.count = 1;
+                                outgoing.handles[0] = platform::ipc::IpcObjectHandle {
+                                    handle,
+                                    reserved: 0,
+                                    rights: wire::RIGHTS,
+                                };
+                                Some(handle)
+                            }
+                            None => None,
+                        };
+                        let result = platform::ipc::reply_object_handles(
+                            sender,
+                            &response[..size],
+                            &outgoing,
+                        );
+                        if let Some(handle) = handle {
+                            close(handle);
+                        }
+                        result.map_err(|error| error.raw() as i32)?;
+                        replied = true;
+                        Ok(())
+                    },
+                    &mut posix_service::socket_record_io::NativeBuffer::borrowed(
+                        attached[1].handle,
+                    ),
+                )?;
+                if receipt.is_some() {
+                    consumed |= 1;
+                }
+                affected = Some([socket, socket]);
+                Ok(0)
+            }
+            Request::Deliver { offset, maximum } => {
+                if count != 1 || attached[0].rights != mnu_abi::HANDLE_RIGHT_CONTROL {
+                    return Err(-13);
+                }
+                let object = platform::handle::identify_provider_object(attached[0].handle)
+                    .map_err(|error| error.raw() as i32)?;
+                transfers
+                    .deliver(
+                        job_id(object)?,
+                        offset as usize,
+                        maximum as usize,
+                        |leases| {
+                            let mut outgoing = platform::ipc::IpcObjectHandles::default();
+                            let mut metadata = [mochios_posix_protocol::InheritedFdMetadata {
+                                kind: 5,
+                                open_flags: 0,
+                                descriptor_flags: 0,
+                            };
+                                mnu_abi::IPC_MAX_OBJECT_HANDLES];
+                            outgoing.count = leases.len() as u32;
+                            for (index, lease) in leases.iter().enumerate() {
+                                metadata[index] = lease.metadata();
+                                outgoing.handles[index] = platform::ipc::IpcObjectHandle {
+                                    handle: lease.handle(),
+                                    reserved: 0,
+                                    rights: lease.rights(),
+                                };
+                            }
+                            let mut response = [0; wire::MAX_DELIVERY_REPLY_LEN];
+                            let size = wire::delivery_reply(
+                                offset,
+                                &metadata[..leases.len()],
+                                &mut response,
+                            )
+                            .map_err(|_| -5)?;
+                            platform::ipc::reply_object_handles(
+                                sender,
+                                &response[..size],
+                                &outgoing,
+                            )
+                            .map_err(|error| error.raw() as i32)?;
+                            replied = true;
+                            Ok(())
+                        },
+                    )
+                    .map(|count| count as u32)
+            }
         }
     })();
     if let Some((id, handle)) = created {
@@ -146,7 +273,7 @@ pub fn dispatch(
             let _ = transfers.release(id);
         }
         close(handle);
-    } else {
+    } else if !replied {
         let bytes = match result {
             Ok(count) => count.to_le_bytes(),
             Err(error) => i32::to_le_bytes(error),

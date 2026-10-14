@@ -162,6 +162,66 @@ fn codec_is_versioned_and_contains_only_lengths_indices_and_validated_metadata()
         assert!(wire::decode(&bytes[..size]).is_err());
     }
 }
+
+#[test]
+fn receive_and_delivery_codecs_bind_limits_offsets_counts_and_reserved_fields() {
+    use mochios_posix_protocol::socket::Address;
+    let request = wire::receive(17, 3, 2).unwrap();
+    assert_eq!(
+        wire::decode(&request),
+        Ok(wire::Request::Receive {
+            offset: 17,
+            length: 3,
+            maximum_rights: 2
+        })
+    );
+    assert!(wire::receive(u64::MAX, 1, 0).is_err());
+    assert!(wire::receive(0, 65537, 0).is_err());
+    assert!(wire::receive(0, 0, 254).is_err());
+    let mut invalid = request;
+    invalid[22] = 1;
+    assert!(wire::decode(&invalid).is_err());
+    let reply = wire::ReceiveReply {
+        copied: 3,
+        length: 8,
+        total_rights: 253,
+        available_rights: 2,
+        source: Address::UnixPath(b"/peer"),
+    };
+    let mut bytes = [0; wire::MAX_RECEIVE_REPLY_LEN];
+    let count = reply.encode(3, 2, &mut bytes).unwrap();
+    assert_eq!(wire::ReceiveReply::decode(3, 2, &bytes[..count]), Ok(reply));
+    assert!(wire::ReceiveReply::decode(2, 2, &bytes[..count]).is_err());
+    assert!(wire::ReceiveReply::decode(3, 1, &bytes[..count]).is_err());
+    assert!(wire::ReceiveReply::decode(65537, 2, &bytes[..count]).is_err());
+    bytes[22] = 1;
+    assert!(wire::ReceiveReply::decode(3, 2, &bytes[..count]).is_err());
+    for maximum in [0, 5, u16::MAX] {
+        assert!(wire::deliver(0, maximum).is_err());
+    }
+    assert!(wire::deliver(254, 4).is_err());
+    let request = wire::deliver(252, 4).unwrap();
+    assert_eq!(
+        wire::decode(&request),
+        Ok(wire::Request::Deliver {
+            offset: 252,
+            maximum: 4
+        })
+    );
+    let mut bytes = [0; wire::MAX_DELIVERY_REPLY_LEN];
+    let count = wire::delivery_reply(249, &[metadata(); 4], &mut bytes).unwrap();
+    assert_eq!(
+        wire::decode_delivery(249, 4, &bytes[..count]),
+        Ok(([Some(metadata()); 4], 4))
+    );
+    assert!(wire::decode_delivery(248, 4, &bytes[..count]).is_err());
+    assert!(wire::decode_delivery(249, 3, &bytes[..count]).is_err());
+    for length in 0..count {
+        assert!(wire::decode_delivery(249, 4, &bytes[..length]).is_err());
+    }
+    bytes[16 + 4] = 1; // Sender CLOEXEC must not be inherited as descriptor policy.
+    assert!(wire::decode_delivery(249, 4, &bytes[..count]).is_err());
+}
 #[test]
 fn transfer_ids_are_disjoint_from_sockets_routes_and_wait_jobs() {
     assert_eq!(job_id(object_id(1).unwrap()), Ok(1));

@@ -179,6 +179,164 @@ static int mutual_gc(uint64_t service, uint32_t endpoint, uint32_t memory) {
   fflush(stdout);
   return 0;
 }
+struct receipt_info {
+  uint32_t copied, length, receipt;
+  uint16_t total, available;
+};
+static uint16_t half(const unsigned char *bytes) {
+  uint16_t value;
+  memcpy(&value, bytes, 2);
+  return value;
+}
+static int receive_refs(uint32_t endpoint, uint32_t socket, uint32_t buffer,
+                        uint32_t length, uint16_t maximum,
+                        uint64_t socket_rights, uint64_t buffer_rights,
+                        struct receipt_info *info) {
+  unsigned char request[32] = {'S', 'C', 'M', 'B', 1, 0, 4, 0};
+  memcpy(request + 16, &length, 4);
+  memcpy(request + 20, &maximum, 2);
+  unsigned char reply[160];
+  struct handles attached = {
+      2, 0, {{socket, 0, socket_rights}, {buffer, 0, buffer_rights}}};
+  int64_t result =
+      native(632, endpoint, (uintptr_t)request, 32, (uintptr_t)reply,
+             sizeof(reply), (uintptr_t)&attached);
+  if (result < 0)
+    return (int)result;
+  if ((uint32_t)result == 4)
+    return (int32_t)word(reply);
+  if ((uint32_t)result < 24 || memcmp(reply, "SCMR", 4) ||
+      half(reply + 4) != 1 || half(reply + 6) != 4 ||
+      (uint32_t)result != 24 + half(reply + 20) || half(reply + 22) ||
+      attached.flags)
+    return -998;
+  info->copied = word(reply + 8);
+  info->length = word(reply + 12);
+  info->total = half(reply + 16);
+  info->available = half(reply + 18);
+  info->receipt = 0;
+  if (attached.count != (info->available != 0))
+    return -997;
+  if (attached.count) {
+    if (attached.entries[0].rights != TRANSFER_RIGHTS)
+      return -996;
+    info->receipt = attached.entries[0].handle;
+  }
+  return 0;
+}
+static int deliver_refs(uint32_t endpoint, uint32_t receipt, uint16_t offset,
+                        uint16_t maximum, struct handles *files) {
+  struct transfer_request request = {{'S', 'C', 'M', 'B'}, 1, 5, {0}, {0}};
+  memcpy(request.data, &offset, 2);
+  memcpy(request.data + 2, &maximum, 2);
+  unsigned char reply[64];
+  struct handles attached = {1, 0, {{receipt, 0, 256}}};
+  int64_t result =
+      native(632, endpoint, (uintptr_t)&request, 16, (uintptr_t)reply,
+             sizeof(reply), (uintptr_t)&attached);
+  if (result < 0)
+    return (int)result;
+  if ((uint32_t)result == 4)
+    return (int32_t)word(reply);
+  if ((uint32_t)result < 16 || memcmp(reply, "SCMR", 4) ||
+      half(reply + 4) != 1 || half(reply + 6) != 5 ||
+      half(reply + 8) != offset || attached.count == 0 ||
+      attached.count > maximum || attached.count > 4 || attached.flags ||
+      (uint32_t)result != 16 + 8 * attached.count ||
+      half(reply + 10) != attached.count || word(reply + 12))
+    return -998;
+  for (unsigned i = 0; i < attached.count; i++) {
+    uint64_t metadata;
+    memcpy(&metadata, reply + 16 + 8 * i, 8);
+    if (metadata != ((UINT64_C(0x5046) << 48) | (UINT64_C(10) << 40) | 2) ||
+        attached.entries[i].rights != ((UINT64_C(1) << 63) | 1))
+      return -997;
+  }
+  *files = attached;
+  return attached.count;
+}
+static int send_refs(uint32_t endpoint, uint32_t source, uint32_t memory,
+                     unsigned count) {
+  uint32_t job;
+  CHECK(begin_transfer(endpoint, source, count, &job) == 0);
+  for (unsigned offset = 0; offset < count;) {
+    unsigned batch = count - offset;
+    if (batch > 3)
+      batch = 3;
+    CHECK(append_transfer(endpoint, job, memory, offset, batch,
+                          (UINT64_C(1) << 63) | 1, 2) == (int)(offset + batch));
+    offset += batch;
+  }
+  CHECK(commit_transfer(endpoint, job, memory, 0, 65) == 8);
+  CHECK(native(626, job, 0, 0, 0, 0, 0) == 0);
+  return 0;
+}
+static int native_receipts(uint64_t service, uint32_t endpoint,
+                           uint32_t memory) {
+  struct handles sockets = {0}, files = {0};
+  CHECK(create(service, 1, 2, 0, &sockets) == 0 && sockets.count == 2);
+  uint32_t a = sockets.entries[0].handle, b = sockets.entries[1].handle;
+  int64_t output = native(671, 4096, 0, 0, 0, 0, 0);
+  CHECK(output > 0);
+  struct receipt_info info;
+  CHECK(send_refs(endpoint, a, memory, 253) == 0);
+  CHECK(receive_refs(endpoint, b, output, 3, 2, 2, 66, &info) == -13);
+  CHECK(receive_refs(endpoint, b, output, 3, 2, 1, 65, &info) == -13);
+  CHECK(receive_refs(endpoint, b, output, 3, 2, 1, 66, &info) == 0);
+  CHECK(info.copied == 3 && info.length == 8 && info.total == 253 &&
+        info.available == 2 && info.receipt);
+  unsigned char bytes[8], reply[144];
+  CHECK(native(673, output, (uintptr_t)bytes, 3, 0, 0, 0) == 3 &&
+        !memcmp(bytes, "anc", 3));
+  CHECK(deliver_refs(endpoint, info.receipt, 0, 4, &files) == 2);
+  for (unsigned i = 0; i < files.count; i++) {
+    CHECK(native(666, files.entries[i].handle, memory, 0, 0, 0, 0) == 1);
+    CHECK(native(673, files.entries[i].handle, (uintptr_t)bytes, 8, 0, 0, 0) ==
+              8 &&
+          !memcmp(bytes, "anc-data", 8));
+    CHECK((int64_t)native(674, files.entries[i].handle, (uintptr_t) "x", 1, 0,
+                          0, 0) == -13);
+    CHECK(native(626, files.entries[i].handle, 0, 0, 0, 0, 0) == 0);
+  }
+  CHECK(deliver_refs(endpoint, info.receipt, 0, 1, &files) == -22);
+  CHECK(deliver_refs(endpoint, info.receipt, 2, 1, &files) == -61);
+  CHECK(native(626, info.receipt, 0, 0, 0, 0, 0) == 0);
+  CHECK(record(endpoint, b, output, 2, 0, 8, 0, 1, reply) == -11);
+  // A full receive supports every descriptor, not just one IPC batch.
+  CHECK(send_refs(endpoint, a, memory, 253) == 0);
+  CHECK(receive_refs(endpoint, b, output, 8, 253, 1, 66, &info) == 0 &&
+        info.available == 253);
+  for (unsigned offset = 0; offset < 253;) {
+    int count = deliver_refs(endpoint, info.receipt, offset, 4, &files);
+    CHECK(count > 0 && count == (int)(253 - offset < 4 ? 253 - offset : 4));
+    for (unsigned i = 0; i < files.count; i++) {
+      CHECK(native(666, files.entries[i].handle, memory, 0, 0, 0, 0) == 1);
+      CHECK(native(626, files.entries[i].handle, 0, 0, 0, 0, 0) == 0);
+    }
+    offset += count;
+  }
+  CHECK(native(626, info.receipt, 0, 0, 0, 0, 0) == 0);
+  for (unsigned round = 0; round < 8; round++) {
+    CHECK(send_refs(endpoint, a, memory, 253) == 0);
+    CHECK(receive_refs(endpoint, b, output, 8, 253, 1, 66, &info) == 0 &&
+          info.receipt);
+    CHECK(deliver_refs(endpoint, info.receipt, 0, 4, &files) == 4);
+    for (unsigned i = 0; i < files.count; i++)
+      CHECK(native(626, files.entries[i].handle, 0, 0, 0, 0, 0) == 0);
+    CHECK(native(626, info.receipt, 0, 0, 0, 0, 0) == 0);
+  }
+  CHECK(send_refs(endpoint, a, memory, 253) == 0);
+  CHECK(receive_refs(endpoint, b, output, 8, 0, 1, 66, &info) == 0 &&
+        info.total == 253 && !info.available && !info.receipt);
+  CHECK(native(626, a, 0, 0, 0, 0, 0) == 0 &&
+        native(626, b, 0, 0, 0, 0, 0) == 0);
+  CHECK(native(626, output, 0, 0, 0, 0, 0) == 0);
+  puts("socket-transfer: PASS native receive, 253 delivered Handles, rights "
+       "preserved, control/data truncation, no replay, partial-abort quota "
+       "reclamation");
+  fflush(stdout);
+  return 0;
+}
 int main(void) {
   CHECK(run_record_regressions() == 0);
   uint64_t key;
@@ -224,6 +382,7 @@ int main(void) {
   }
   CHECK(idle_gc(service, endpoint, memory) == 0);
   CHECK(mutual_gc(service, endpoint, memory) == 0);
+  CHECK(native_receipts(service, endpoint, memory) == 0);
   CHECK(native(626, memory, 0, 0, 0, 0, 0) == 0);
   CHECK(native(626, a, 0, 0, 0, 0, 0) == 0 &&
         native(626, b, 0, 0, 0, 0, 0) == 0);
