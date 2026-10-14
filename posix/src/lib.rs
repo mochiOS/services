@@ -8,6 +8,7 @@ pub mod named_semaphore;
 pub mod shared_memory;
 pub mod shared_memory_file;
 pub mod socket;
+pub mod socket_provider;
 
 pub const STATUS_EINVAL: i32 = -22;
 pub const STATUS_EOVERFLOW: i32 = -75;
