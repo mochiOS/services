@@ -295,33 +295,33 @@ impl Transfers {
             return Err(-22);
         }
         let mut receipt_id = None;
-        let (record, mut rights) = streams.receive_record_with_rights(
-            socket,
-            offset,
-            length,
-            buffer,
-            |record, total_rights| {
-                let available_rights = maximum_rights.min(total_rights);
-                if available_rights != 0 {
-                    if self.entries.len() == MAX_ENDPOINTS || self.next > MAX_DESCRIPTION_ID {
-                        return Err(-23);
-                    }
-                    self.entries.try_reserve(1).map_err(|_| -12)?;
-                    receipt_id = Some(self.next);
-                    // Never reuse a minted ID after failed publication: closing a
-                    // failed native Handle may enqueue a delayed OP_RELEASE.
-                    self.next += 1;
+        let publish = |record, total_rights| {
+            let available_rights = maximum_rights.min(total_rights);
+            if available_rights != 0 {
+                if self.entries.len() == MAX_ENDPOINTS || self.next > MAX_DESCRIPTION_ID {
+                    return Err(-23);
                 }
-                publish(
-                    receipt_id,
-                    ReceiptInfo {
-                        record,
-                        total_rights,
-                        available_rights,
-                    },
-                )
-            },
-        )?;
+                self.entries.try_reserve(1).map_err(|_| -12)?;
+                receipt_id = Some(self.next);
+                // Never reuse a minted ID after failed publication: closing a
+                // failed native Handle may enqueue a delayed OP_RELEASE.
+                self.next += 1;
+            }
+            publish(
+                receipt_id,
+                ReceiptInfo {
+                    record,
+                    total_rights,
+                    available_rights,
+                },
+            )
+        };
+        let (record, mut rights) =
+            if streams.kind(socket)? == mochios_posix_protocol::socket::Kind::Stream {
+                streams.receive_stream_with_rights(socket, offset, length, buffer, publish)?
+            } else {
+                streams.receive_record_with_rights(socket, offset, length, buffer, publish)?
+            };
         let total_rights = rights.as_ref().map_or(0, |bundle| bundle.len());
         let info = ReceiptInfo {
             record,

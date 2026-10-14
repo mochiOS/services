@@ -162,6 +162,7 @@ pub fn dispatch(
                 }
                 let socket = platform::handle::identify_provider_object(attached[0].handle)
                     .map_err(|error| error.raw() as i32)?;
+                let ids = streams.affected(socket)?;
                 let (_, receipt) = transfers.receive(
                     streams,
                     socket,
@@ -223,7 +224,7 @@ pub fn dispatch(
                 if receipt.is_some() {
                     consumed |= 1;
                 }
-                affected = Some([socket, socket]);
+                affected = Some(ids);
                 Ok(0)
             }
             Request::Deliver { offset, maximum } => {

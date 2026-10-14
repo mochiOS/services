@@ -373,8 +373,12 @@ impl posix_service::socket_record_io::RecordBuffer for Buffer {
         output.copy_from_slice(&self.bytes[offset as usize..offset as usize + output.len()]);
         Ok(())
     }
-    fn write(&mut self, _: u64, _: &[u8]) -> Result<(), i32> {
-        unreachable!()
+    fn write(&mut self, offset: u64, input: &[u8]) -> Result<(), i32> {
+        if self.fail {
+            return Err(-5);
+        }
+        self.bytes[offset as usize..offset as usize + input.len()].copy_from_slice(input);
+        Ok(())
     }
 }
 fn stage(
@@ -487,4 +491,204 @@ fn staged_empty_stream_send_drops_rights_without_creating_readability() {
     assert_eq!(closed(), [501]);
     transfers.release(job).unwrap();
     assert_eq!(closed(), [501, 900]);
+}
+
+#[test]
+fn stream_receipt_publication_is_atomic_and_delivery_truncates_once_at_the_barrier() {
+    let (mut streams, [a, b]) = pair();
+    streams.write(a, b"aa").unwrap();
+    streams
+        .commit_stream_with_rights(a, b"bcd", bundle(&[501, 502]))
+        .ok()
+        .unwrap();
+    streams.write(a, b"ee").unwrap();
+    let mut transfers = posix_service::socket_transfer::Transfers::new(2);
+    let mut buffer = Buffer {
+        bytes: vec![b'-'; 32],
+        read: 0,
+        fail: true,
+    };
+    assert_eq!(
+        transfers.receive(
+            &mut streams,
+            b,
+            900,
+            3,
+            16,
+            1,
+            close,
+            |_, _| panic!("copy failed before publication"),
+            &mut buffer
+        ),
+        Err(-5)
+    );
+    buffer.fail = false;
+    assert_eq!(
+        transfers.receive(
+            &mut streams,
+            b,
+            900,
+            3,
+            16,
+            1,
+            close,
+            |id, info| {
+                assert_eq!(id, Some(1));
+                assert_eq!(info.record.copied, 5);
+                Err(-5)
+            },
+            &mut buffer
+        ),
+        Err(-5)
+    );
+    assert!(closed().is_empty());
+    assert!(streams.has_ancillary_records());
+    assert_eq!(streams.peek(b, 0, &mut [0; 16]), Ok(5));
+    let (info, receipt) = transfers
+        .receive(
+            &mut streams,
+            b,
+            900,
+            3,
+            16,
+            1,
+            close,
+            |id, info| {
+                assert_eq!(id, Some(2)); // A failed publication's identity cannot be reused.
+                assert_eq!(
+                    (
+                        info.record.copied,
+                        info.record.length,
+                        info.total_rights,
+                        info.available_rights
+                    ),
+                    (5, 5, 2, 1)
+                );
+                Ok(())
+            },
+            &mut buffer,
+        )
+        .unwrap();
+    assert_eq!(&buffer.bytes[3..8], b"aabcd");
+    assert_eq!(info.record.length, 5);
+    assert_eq!(closed(), [502]);
+    let receipt = receipt.unwrap();
+    assert_eq!(transfers.release(1), Err(-9));
+    assert_eq!(
+        transfers.deliver(receipt, 0, 4, |leases| {
+            assert_eq!(leases.len(), 1);
+            assert_eq!(leases[0].handle(), 501);
+            Ok(())
+        }),
+        Ok(1)
+    );
+    assert_eq!(closed(), [502, 501]);
+    transfers.release(receipt).unwrap();
+    assert_eq!(closed(), [502, 501, 900]);
+    assert_eq!(streams.read(b, &mut [0; 16]), Ok(2));
+}
+
+#[test]
+fn zero_length_stream_receive_does_not_consume_rights_and_no_control_discards_them() {
+    let (mut streams, [a, b]) = pair();
+    streams
+        .commit_stream_with_rights(a, b"abc", bundle(&[501]))
+        .ok()
+        .unwrap();
+    let mut transfers = posix_service::socket_transfer::Transfers::new(1);
+    let mut buffer = Buffer {
+        bytes: vec![0; 8],
+        read: 0,
+        fail: false,
+    };
+    let (info, receipt) = transfers
+        .receive(
+            &mut streams,
+            b,
+            900,
+            0,
+            0,
+            1,
+            close,
+            |id, info| {
+                assert!(id.is_none());
+                assert_eq!(info.total_rights, 0);
+                Ok(())
+            },
+            &mut buffer,
+        )
+        .unwrap();
+    assert_eq!(info.record.copied, 0);
+    assert!(receipt.is_none() && closed().is_empty() && streams.has_ancillary_records());
+    let (info, receipt) = transfers
+        .receive(
+            &mut streams,
+            b,
+            900,
+            0,
+            1,
+            0,
+            close,
+            |id, _| {
+                assert!(id.is_none());
+                Ok(())
+            },
+            &mut buffer,
+        )
+        .unwrap();
+    assert_eq!(
+        (info.record.copied, info.record.length, info.total_rights),
+        (1, 1, 1)
+    );
+    assert!(receipt.is_none());
+    assert_eq!(closed(), [501]);
+    assert!(!streams.has_ancillary_records());
+    assert_eq!(streams.read(b, &mut [0; 8]), Ok(2));
+}
+
+#[test]
+fn every_stream_receipt_allocation_failure_preserves_data_and_all_references() {
+    let mut failures = 0;
+    for fail in 0..4 {
+        let (mut streams, [a, b]) = pair();
+        streams
+            .commit_stream_with_rights(a, b"abc", bundle(&[501]))
+            .ok()
+            .unwrap();
+        let mut transfers = posix_service::socket_transfer::Transfers::new(1);
+        let mut buffer = Buffer {
+            bytes: vec![0; 8],
+            read: 0,
+            fail: false,
+        };
+        FAIL.with(|remaining| remaining.set(fail));
+        let result = transfers.receive(
+            &mut streams,
+            b,
+            900,
+            0,
+            8,
+            1,
+            close,
+            |_, _| Ok(()),
+            &mut buffer,
+        );
+        FAIL.with(|remaining| remaining.set(-1));
+        match result {
+            Err(error) => {
+                assert_eq!(error, -12);
+                assert!(closed().is_empty());
+                assert_eq!(streams.peek(b, 0, &mut [0; 8]), Ok(3));
+                assert!(streams.has_ancillary_records());
+                failures += 1;
+            }
+            Ok((info, receipt)) => {
+                assert_eq!(info.total_rights, 1);
+                transfers.release(receipt.unwrap()).unwrap();
+                assert_eq!(closed(), [900, 501]);
+                break;
+            }
+        }
+    }
+    assert_eq!(failures, 2);
 }

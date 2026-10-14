@@ -2,7 +2,10 @@
 #include "native_sendmsg.c"
 #undef main
 
-int main(void) {
+#ifndef STREAM_SEND_TEST_ENTRY
+#define STREAM_SEND_TEST_ENTRY main
+#endif
+int STREAM_SEND_TEST_ENTRY(void) {
   CHECK(run_datagram_regressions() == 0);
   int pair[2];
   CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == 0);

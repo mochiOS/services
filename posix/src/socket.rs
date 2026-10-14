@@ -779,6 +779,44 @@ impl Streams {
         })
     }
 
+    /// Consuming stream ancillary receive. Buffer copy and receipt publication
+    /// precede queue consumption; no allocation or fallible work follows them.
+    /// The returned span is a stream prefix, not a truncated datagram.
+    pub fn receive_stream_with_rights(
+        &mut self,
+        id: u64,
+        offset: u64,
+        length: u32,
+        buffer: &mut impl crate::socket_record_io::RecordBuffer,
+        publish: impl FnOnce(crate::socket_record::ReceivedRecord, usize) -> Result<(), i32>,
+    ) -> Result<(crate::socket_record::ReceivedRecord, Option<crate::socket_rights::Bundle>), i32> {
+        if length as usize > crate::socket_record::MAX_RECORD_SIZE {
+            return Err(-22);
+        }
+        if offset.checked_add(length as u64).ok_or(-22)? > buffer.extent()? {
+            return Err(-22);
+        }
+        let count = self.stream_read_count(id, length as usize, 0)?;
+        let queue = &mut self.endpoint_mut(id)?.incoming;
+        let count = queue.read_length(count);
+        let rights = queue.read_rights(count).map_or(0, |bundle| bundle.len());
+        let mut data = Vec::new();
+        data.try_reserve_exact(count).map_err(|_| -12)?;
+        data.resize(count, 0);
+        queue.peek(0, &mut data);
+        buffer.write(offset, &data)?;
+        let record = crate::socket_record::ReceivedRecord {
+            copied: count,
+            length: count,
+            source: crate::socket_record::SourceAddress::new(
+                mochios_posix_protocol::socket::Address::UnixUnnamed,
+            )?,
+        };
+        publish(record, rights)?;
+        let (_, rights) = queue.read_owned(&mut data);
+        Ok((record, rights))
+    }
+
     /// Consuming ancillary receive. All output copies and receipt publication
     /// must succeed before removing the exact head record and moving its leases.
     /// The worker serializes this entire operation; publish must not reenter it.
