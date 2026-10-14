@@ -7,6 +7,185 @@ use mochios_posix_protocol as protocol;
 use posix_service::{AuthenticatedProcess, PeerIdentity, PosixService};
 
 #[test]
+fn signal_origin_keeps_first_coalesced_sender_and_uses_service_owned_real_uid() {
+    let service = service();
+    let first = client(&service, 101, 501);
+    let root = client(&service, 1, 1);
+    root.set_effective_uid(501).unwrap();
+    let target = client(&service, 102, 502);
+    target
+        .thread_signal_mask(protocol::SIGNAL_MASK_INITIALIZE, 0)
+        .unwrap();
+    first.send_signal(102, 30).unwrap();
+    root.send_signal(102, 30).unwrap();
+    let delivery = target.thread_dequeue_signal_delivery().unwrap();
+    let origin = target.signal_delivery_origin(delivery).unwrap();
+    assert_eq!(
+        origin,
+        protocol::signal_origin::Origin {
+            source: protocol::signal_origin::USER,
+            real_uid: 501,
+            process_id: 101,
+        }
+    );
+    // Reading repeatedly does not consume the delivery or rewrite provenance.
+    assert_eq!(target.signal_delivery_origin(delivery).unwrap(), origin);
+    target.complete_signal_delivery(delivery).unwrap();
+    assert!(matches!(
+        target.signal_delivery_origin(delivery),
+        Err(ClientError::Remote(protocol::STATUS_EAGAIN))
+    ));
+    root.send_signal(102, 30).unwrap();
+    let delivery = target.thread_dequeue_signal_delivery().unwrap();
+    // LocalTransport's peer UID is deliberately 501 even for PID 1. The
+    // service's POSIX credentials, not this hint or request bytes, supply UID.
+    assert_eq!(
+        target.signal_delivery_origin(delivery).unwrap(),
+        protocol::signal_origin::Origin {
+            source: protocol::signal_origin::USER,
+            real_uid: 0,
+            process_id: 1,
+        }
+    );
+    target.complete_signal_delivery(delivery).unwrap();
+}
+
+#[test]
+fn delivery_origin_is_scoped_to_authenticated_owner_thread_and_signal() {
+    let service = service();
+    let caller = client(&service, 101, 501);
+    let sibling = client(&service, 101, 502);
+    let other = client(&service, 102, 503);
+    caller
+        .thread_signal_mask(protocol::SIGNAL_MASK_INITIALIZE, 0)
+        .unwrap();
+    caller.raise_signal(30).unwrap();
+    let delivery = caller.thread_dequeue_signal_delivery().unwrap();
+    assert_eq!(
+        caller.signal_delivery_origin(delivery).unwrap().process_id,
+        101
+    );
+    for denied in [&sibling, &other] {
+        assert!(matches!(
+            denied.signal_delivery_origin(delivery),
+            Err(ClientError::Remote(protocol::STATUS_EAGAIN))
+        ));
+    }
+    assert!(matches!(
+        caller.signal_delivery_origin(protocol::SignalDelivery {
+            signal: 31,
+            ..delivery
+        }),
+        Err(ClientError::Remote(protocol::STATUS_EAGAIN))
+    ));
+    let forged = Client::new(LocalTransport {
+        service: Rc::clone(&service),
+        peer: peer(101),
+        authenticated: ExecutionIdentity {
+            process_id: 102,
+            thread_id: 501,
+        },
+    });
+    assert!(matches!(
+        forged.signal_delivery_origin(delivery),
+        Err(ClientError::Remote(protocol::STATUS_EPERM))
+    ));
+    caller.complete_signal_delivery(delivery).unwrap();
+}
+
+#[test]
+fn discarded_pending_origin_does_not_leak_into_later_signal_or_native_fault() {
+    let service = service();
+    let source = client(&service, 102, 502);
+    let target = client(&service, 101, 501);
+    target
+        .thread_signal_mask(protocol::SIGNAL_MASK_INITIALIZE, 0)
+        .unwrap();
+    source.send_signal(101, 30).unwrap();
+    target
+        .set_signal_disposition(protocol::SignalDisposition {
+            signal: 30,
+            kind: protocol::SIGNAL_DISPOSITION_IGNORE,
+            child_options: 0,
+        })
+        .unwrap();
+    target
+        .set_signal_disposition(protocol::SignalDisposition {
+            signal: 30,
+            kind: protocol::SIGNAL_DISPOSITION_CAUGHT,
+            child_options: 0,
+        })
+        .unwrap();
+    target.raise_signal(30).unwrap();
+    let delivery = target.thread_dequeue_signal_delivery().unwrap();
+    assert_eq!(
+        target.signal_delivery_origin(delivery).unwrap().process_id,
+        101
+    );
+    target.complete_signal_delivery(delivery).unwrap();
+    let fault = target.fault_signal_delivery(protocol::SIGNAL_SEGV).unwrap();
+    assert_eq!(
+        target.signal_delivery_origin(fault.signal).unwrap(),
+        protocol::signal_origin::Origin {
+            source: protocol::signal_origin::FAULT,
+            real_uid: 0,
+            process_id: 0,
+        }
+    );
+    target.complete_signal_delivery(fault.signal).unwrap();
+}
+
+#[test]
+fn origin_wire_rejects_ambiguous_sources_and_noncanonical_lengths() {
+    use protocol::signal_origin::*;
+    for origin in [
+        Origin::system(),
+        Origin {
+            source: FAULT,
+            real_uid: 0,
+            process_id: 0,
+        },
+        Origin {
+            source: USER,
+            real_uid: 501,
+            process_id: 101,
+        },
+        Origin {
+            source: CHILD,
+            real_uid: 502,
+            process_id: 102,
+        },
+    ] {
+        let mut bytes = [0; LEN];
+        encode(origin, &mut bytes).unwrap();
+        assert_eq!(decode(&bytes).unwrap(), origin);
+        for length in 0..LEN {
+            assert!(decode(&bytes[..length]).is_err());
+        }
+    }
+    for origin in [
+        Origin {
+            source: 0,
+            ..Origin::system()
+        },
+        Origin {
+            source: USER,
+            ..Origin::system()
+        },
+        Origin {
+            process_id: 9,
+            ..Origin::system()
+        },
+        Origin {
+            real_uid: 501,
+            ..Origin::system()
+        },
+    ] {
+        assert!(encode(origin, &mut [0; LEN]).is_err());
+    }
+}
+
+#[test]
 fn synchronous_fault_is_immediate_and_does_not_consume_asynchronous_pending_signal() {
     let service = service();
     let caller = client(&service, 101, 501);
@@ -178,6 +357,7 @@ impl Transport for LocalTransport {
                 | protocol::OP_SIGNAL_THREAD_PENDING
                 | protocol::OP_SIGNAL_THREAD_RAISE
                 | protocol::OP_SIGNAL_THREAD_FAULT
+                | protocol::OP_SIGNAL_DELIVERY_ORIGIN
                 | protocol::OP_SIGNAL_THREAD_EPOCH
                 | protocol::OP_SIGNAL_IMAGE_STARTED
         ) {

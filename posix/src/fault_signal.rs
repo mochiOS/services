@@ -29,7 +29,15 @@ impl<H: Copy> PosixService<H> {
         };
         // No pending bit is consumed or notification enqueued. This fault is
         // already executing on the caller's native exception callback stack.
-        let signal = self.begin_signal_delivery(sender, request.signal)?;
+        let signal = self.begin_signal_delivery(
+            sender,
+            request.signal,
+            protocol::signal_origin::Origin {
+                source: protocol::signal_origin::FAULT,
+                real_uid: 0,
+                process_id: 0,
+            },
+        )?;
         let mut output = vec![0; protocol::fault_signal::DELIVERY_LEN];
         protocol::fault_signal::encode(
             protocol::fault_signal::Delivery {
@@ -46,6 +54,7 @@ impl<H: Copy> PosixService<H> {
         &mut self,
         sender: mnu_abi::ExecutionIdentity,
         signal: u32,
+        origin: protocol::signal_origin::Origin,
     ) -> Result<protocol::SignalDelivery, i32> {
         let state = self
             .process_wait_states
@@ -60,7 +69,7 @@ impl<H: Copy> PosixService<H> {
         }
         self.next_signal_delivery_token = token.wrapping_add(1).max(1);
         let delivery = protocol::SignalDelivery { signal, token };
-        state.begin_delivery(delivery, sender.thread_id);
+        state.begin_delivery(delivery, sender.thread_id, origin);
         let epoch = self
             .signal_delivery_epochs
             .entry((sender.process_id, sender.thread_id))

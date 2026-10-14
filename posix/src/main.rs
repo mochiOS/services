@@ -433,6 +433,7 @@ fn main() {
                         | protocol::OP_SIGNAL_THREAD_PENDING
                         | protocol::OP_SIGNAL_THREAD_RAISE
                         | protocol::OP_SIGNAL_THREAD_FAULT
+                        | protocol::OP_SIGNAL_DELIVERY_ORIGIN
                         | protocol::OP_SIGNAL_THREAD_EPOCH
                         | protocol::OP_SIGNAL_IMAGE_STARTED
                 )

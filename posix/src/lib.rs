@@ -13,6 +13,7 @@ pub mod socket_binding;
 pub mod socket_connect;
 pub mod filesystem_transport;
 mod fault_signal;
+mod signal_origin;
 
 pub const STATUS_EINVAL: i32 = -22;
 pub const STATUS_EOVERFLOW: i32 = -75;
@@ -351,6 +352,7 @@ struct ProcessWaitState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SignalDeliveryOwner {
     signal: u32,
+    origin: protocol::signal_origin::Origin,
     // Captured from authenticated dequeue metadata, never from request bytes.
     thread_id: u64,
 }
@@ -378,11 +380,17 @@ impl ProcessWaitState {
         true
     }
 
-    fn begin_delivery(&mut self, delivery: protocol::SignalDelivery, thread_id: u64) {
+    fn begin_delivery(
+        &mut self,
+        delivery: protocol::SignalDelivery,
+        thread_id: u64,
+        origin: protocol::signal_origin::Origin,
+    ) {
         self.deliveries.insert(
             delivery.token,
             SignalDeliveryOwner {
                 signal: delivery.signal,
+                origin,
                 thread_id,
             },
         );
@@ -604,6 +612,7 @@ pub struct PosixService<H: Copy = u32> {
     signal_masks: BTreeMap<(u64, u64), u64>,
     signal_delivery_epochs: BTreeMap<(u64, u64), u64>,
     thread_pending_signals: BTreeMap<(u64, u64), u64>,
+    signal_origins: BTreeMap<(u64, u64, u32), protocol::signal_origin::Origin>,
     thread_signal_notifications: BTreeSet<(u64, u64)>,
     signal_child_options: BTreeMap<u64, u32>,
     process_wait_states: BTreeMap<u64, ProcessWaitState>,
@@ -636,6 +645,7 @@ impl PosixService<u32> {
             signal_masks: BTreeMap::new(),
             signal_delivery_epochs: BTreeMap::new(),
             thread_pending_signals: BTreeMap::new(),
+            signal_origins: BTreeMap::new(),
             thread_signal_notifications: BTreeSet::new(),
             signal_child_options: BTreeMap::new(),
             process_wait_states: BTreeMap::new(),
@@ -803,12 +813,28 @@ impl<H: Copy> PosixService<H> {
     }
 
     fn enqueue_signal(&mut self, process_id: u64, signal: u32) -> Result<(), i32> {
+        self.enqueue_signal_with_origin(
+            process_id, signal, protocol::signal_origin::Origin::system(),
+        )
+    }
+
+    fn enqueue_signal_with_origin(
+        &mut self,
+        process_id: u64,
+        signal: u32,
+        origin: protocol::signal_origin::Origin,
+    ) -> Result<(), i32> {
         self.prepare_signal_generation(process_id, signal)?;
+        let pending = self.signals.get(&process_id)
+            .ok_or(protocol::STATUS_ESRCH)?.pending();
         self.signals
             .get_mut(&process_id)
             .ok_or(protocol::STATUS_ESRCH)?
             .enqueue(signal);
         if self.signals[&process_id].pending() & signal_bit(signal) != 0 {
+            if pending & signal_bit(signal) == 0 {
+                self.signal_origins.insert((process_id, 0, signal), origin);
+            }
             self.signal_notifications.insert(process_id);
         } else if self.signals[&process_id].pending() == 0 {
             self.signal_notifications.remove(&process_id);
@@ -834,6 +860,9 @@ impl<H: Copy> PosixService<H> {
                 *pending &= !cancelled;
             }
         }
+        self.signal_origins.retain(|(process, _, signal), _| {
+            *process != process_id || signal_bit(*signal) & cancelled == 0
+        });
         let continued = if signal == protocol::SIGNAL_CONT {
             self.process_wait_states
                 .get_mut(&process_id)
@@ -879,7 +908,14 @@ impl<H: Copy> PosixService<H> {
         {
             return Ok(());
         }
-        self.enqueue_signal(parent_id, protocol::SIGNAL_CHLD)
+        let real_uid = self.sessions.get(&child_id)
+            .ok_or(protocol::STATUS_ESRCH)?.real_uid;
+        self.enqueue_signal_with_origin(
+            parent_id, protocol::SIGNAL_CHLD,
+            protocol::signal_origin::Origin {
+                source: protocol::signal_origin::CHILD, real_uid, process_id: child_id,
+            },
+        )
     }
 
     fn note_child_exited(&mut self, child_id: u64) -> Result<bool, i32> {
@@ -1830,6 +1866,7 @@ impl<H: Copy> PosixService<H> {
         self.signal_masks.retain(|(process, _), _| *process != child_id);
         self.signal_delivery_epochs.retain(|(process, _), _| *process != child_id);
         self.thread_pending_signals.retain(|(process, _), _| *process != child_id);
+        self.signal_origins.retain(|(process, _, _), _| *process != child_id);
         self.thread_signal_notifications.retain(|(process, _)| *process != child_id);
         self.signal_child_options.remove(&child_id);
         self.process_wait_states.remove(&child_id);
@@ -2355,7 +2392,13 @@ impl<H: Copy> PosixService<H> {
             }
             permitted = true;
             if request.signal != 0 {
-                self.enqueue_signal(target_id, request.signal)?;
+                self.enqueue_signal_with_origin(
+                    target_id, request.signal,
+                    protocol::signal_origin::Origin {
+                        source: protocol::signal_origin::USER,
+                        real_uid: caller.real_uid, process_id: caller_id,
+                    },
+                )?;
             }
         }
         if permitted {
@@ -2434,6 +2477,9 @@ impl<H: Copy> PosixService<H> {
                 || (request.kind == protocol::SIGNAL_DISPOSITION_DEFAULT
                     && default_signal_ignores(request.signal))
             {
+                self.signal_origins.retain(|(process, _, signal), _| {
+                    *process != process_id || *signal != request.signal
+                });
                 for (key, pending) in &mut self.thread_pending_signals {
                     if key.0 == process_id {
                         *pending &= !signal_bit(request.signal);
@@ -2500,6 +2546,7 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_SIGNAL_THREAD_PENDING
                 | protocol::OP_SIGNAL_THREAD_RAISE
                 | protocol::OP_SIGNAL_THREAD_FAULT
+                | protocol::OP_SIGNAL_DELIVERY_ORIGIN
                 | protocol::OP_SIGNAL_THREAD_EPOCH
                 | protocol::OP_SIGNAL_IMAGE_STARTED
         ) {
@@ -2516,6 +2563,7 @@ impl<H: Copy> PosixService<H> {
                 protocol::OP_SIGNAL_THREAD_MASK => self.thread_signal_mask_payload(sender, payload),
                 protocol::OP_SIGNAL_THREAD_RAISE => self.thread_raise_signal_payload(sender, payload),
                 protocol::OP_SIGNAL_THREAD_FAULT => self.thread_fault_signal_payload(sender, payload),
+                protocol::OP_SIGNAL_DELIVERY_ORIGIN => self.signal_delivery_origin_payload(sender, payload),
                 protocol::OP_SIGNAL_THREAD_EPOCH if payload.is_empty() => {
                     let epoch = self
                         .signal_delivery_epochs
@@ -2582,6 +2630,9 @@ impl<H: Copy> PosixService<H> {
             self.signal_masks.remove(&(identity.process_id, identity.thread_id));
             self.signal_delivery_epochs.remove(&(identity.process_id, identity.thread_id));
             self.thread_pending_signals.remove(&(identity.process_id, identity.thread_id));
+            self.signal_origins.retain(|(process, thread, _), _| {
+                (*process, *thread) != (identity.process_id, identity.thread_id)
+            });
             self.thread_signal_notifications.remove(&(identity.process_id, identity.thread_id));
             if let Some(wait) = self.process_wait_states.get_mut(&identity.process_id) {
                 // A selected signal was already delivered to this thread.
@@ -2660,7 +2711,18 @@ impl<H: Copy> PosixService<H> {
         if self.signals[&sender.process_id].disposition(request.signal)
             != protocol::SIGNAL_DISPOSITION_IGNORE
         {
-            *self.thread_pending_signals.entry(key).or_default() |= signal_bit(request.signal);
+            let pending = self.thread_pending_signals.entry(key).or_default();
+            if *pending & signal_bit(request.signal) == 0 {
+                let real_uid = self.sessions.get(&sender.process_id)
+                    .ok_or(protocol::STATUS_ESRCH)?.real_uid;
+                self.signal_origins.insert(
+                    (sender.process_id, sender.thread_id, request.signal),
+                    protocol::signal_origin::Origin {
+                        source: protocol::signal_origin::USER, real_uid, process_id: sender.process_id,
+                    },
+                );
+            }
+            *pending |= signal_bit(request.signal);
             if blocked & signal_bit(request.signal) == 0 {
                 self.thread_signal_notifications.insert(key);
             }
@@ -2768,7 +2830,13 @@ impl<H: Copy> PosixService<H> {
                 .next_deliverable(blocked)
         };
         let token = if signal != 0 {
-            let delivery = self.begin_signal_delivery(sender, signal)?;
+            let origin_key = (
+                process_id, if own_signal != 0 { sender.thread_id } else { 0 }, signal,
+            );
+            let origin = self.signal_origins.get(&origin_key).copied()
+                .ok_or(protocol::STATUS_EIO)?;
+            let delivery = self.begin_signal_delivery(sender, signal, origin)?;
+            self.signal_origins.remove(&origin_key);
             let dequeued = if own_signal != 0 {
                 *self
                     .thread_pending_signals
@@ -2816,6 +2884,7 @@ impl<H: Copy> PosixService<H> {
         if own != 0 {
             let signal = own.trailing_zeros() + 1;
             *self.thread_pending_signals.get_mut(&key).unwrap() &= !signal_bit(signal);
+            self.signal_origins.remove(&(sender.process_id, sender.thread_id, signal));
             return Ok(signal);
         }
         let state = self.signals.get_mut(&sender.process_id).unwrap();
@@ -2825,6 +2894,7 @@ impl<H: Copy> PosixService<H> {
         }
         let signal = selected.trailing_zeros() + 1;
         state.pending &= !signal_bit(signal);
+        self.signal_origins.remove(&(sender.process_id, 0, signal));
         Ok(signal)
     }
 
