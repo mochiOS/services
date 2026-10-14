@@ -63,6 +63,18 @@ pub fn handle_provider_request(
                 .write(header.object_id, payload)
                 .map(|count| (count as u64, 0)),
             provider::OP_CONTROL => match header.basis {
+                wire::CONTROL_GET_SEND_CAPACITY if payload.is_empty() && header.length == 4 => {
+                    streams.send_capacity(header.object_id).map(|capacity| {
+                        data[..4].copy_from_slice(&(capacity as u32).to_le_bytes());
+                        (4, 4)
+                    })
+                }
+                wire::CONTROL_SET_SEND_CAPACITY if payload.len() == 4 && header.length == 0 => {
+                    let requested = u32::from_le_bytes(payload.try_into().unwrap());
+                    streams
+                        .set_send_capacity(header.object_id, requested)
+                        .map(|_| (0, 0))
+                }
                 wire::CONTROL_GET_RECEIVE_CAPACITY if payload.is_empty() && header.length == 4 => {
                     streams.receive_capacity(header.object_id).map(|capacity| {
                         data[..4].copy_from_slice(&(capacity as u32).to_le_bytes());
@@ -180,6 +192,8 @@ pub fn handle_provider_request(
                 | wire::CONTROL_TAKE_ERROR
                 | wire::CONTROL_GET_RECEIVE_CAPACITY
                 | wire::CONTROL_SET_RECEIVE_CAPACITY
+                | wire::CONTROL_GET_SEND_CAPACITY
+                | wire::CONTROL_SET_SEND_CAPACITY
                 | wire::CONTROL_SET_OPTIONS
                 | wire::CONTROL_SHUTDOWN
                 | wire::CONTROL_READINESS => Err(-22),

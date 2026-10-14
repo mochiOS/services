@@ -35,6 +35,63 @@ fn fixture() -> (PosixService<u32>, PeerIdentity, Streams, Create) {
 }
 
 #[test]
+fn send_limit_controls_queued_bytes_and_readiness_without_discarding_data() {
+    let (service, peer, mut streams, request) = fixture();
+    let [a, b] = service
+        .create_socket_pair(peer, request, &mut streams)
+        .unwrap();
+    streams.set_send_capacity(a, 1024).unwrap();
+    assert_eq!(streams.send_capacity(a), Ok(1024));
+    assert_eq!(streams.write(a, &[b'x'; 2048]), Ok(1024));
+    assert!(!streams.readiness(a).unwrap().writable);
+    streams.set_send_capacity(a, 256).unwrap();
+    assert_eq!(streams.write(a, b"!"), Err(-11));
+    assert_eq!(streams.read(b, &mut [0; 769]), Ok(769));
+    assert!(streams.readiness(a).unwrap().writable);
+    assert_eq!(streams.write(a, b"!!"), Ok(1));
+    assert_eq!(streams.write(a, b"!"), Err(-11));
+    streams.set_send_capacity(a, 512).unwrap();
+    assert!(streams.readiness(a).unwrap().writable);
+    let mut bytes = [0; 256];
+    assert_eq!(streams.read(b, &mut bytes), Ok(256));
+    assert_eq!(&bytes[..255], &[b'x'; 255]);
+    assert_eq!(bytes[255], b'!');
+    // The other direction and the receiver's setting are independent.
+    assert_eq!(
+        streams.send_capacity(b),
+        Ok(posix_service::socket::SEND_CAPACITY)
+    );
+    assert_eq!(streams.receive_capacity(b), Ok(RECEIVE_CAPACITY));
+    streams.set_receive_capacity(b, 256).unwrap();
+    assert_eq!(streams.write(a, &[0; 512]), Ok(256));
+    streams.set_send_capacity(a, 0).unwrap();
+    assert_eq!(streams.send_capacity(a), Ok(256));
+    assert_eq!(streams.set_send_capacity(a, u32::MAX), Err(-22));
+    assert_eq!(streams.send_capacity(a), Ok(256));
+    assert_eq!(streams.set_send_capacity(u64::MAX, 512), Err(-9));
+}
+
+#[test]
+fn queued_connections_snapshot_listener_send_limit_before_accept() {
+    let (service, peer, mut streams, request) = fixture();
+    let listener = service.create_socket(peer, request, &mut streams).unwrap();
+    let client = service.create_socket(peer, request, &mut streams).unwrap();
+    streams.listen(listener, 2).unwrap();
+    streams.set_send_capacity(listener, 512).unwrap();
+    let accepted = streams.connect(client, listener).unwrap();
+    streams.set_send_capacity(listener, 1024).unwrap();
+    let ticket = streams.begin_accept(listener).unwrap();
+    streams.commit_accept(ticket, (501, 20), 0).unwrap();
+    assert_eq!(streams.send_capacity(accepted), Ok(512));
+    assert_eq!(streams.write(accepted, &[0; 1024]), Ok(512));
+    assert_eq!(streams.write(accepted, b"x"), Err(-11));
+    assert_eq!(
+        streams.send_capacity(client),
+        Ok(posix_service::socket::SEND_CAPACITY)
+    );
+}
+
+#[test]
 fn creation_uses_registered_credentials_and_rejects_unknown_sender() {
     let (service, peer, mut streams, request) = fixture();
     assert_eq!(

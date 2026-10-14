@@ -223,6 +223,78 @@ fn libc_socket_option_tags_and_values_do_not_leak_wire_numbers() {
 }
 
 #[test]
+fn send_capacity_controls_require_handle_authority_and_validate_frames() {
+    let (mut streams, [a, b]) = fixture();
+    let flags = mnu_abi::IPC_DELIVERY_NATIVE_OBJECT;
+    let set = frame(
+        provider::OP_CONTROL,
+        a,
+        wire::CONTROL_SET_SEND_CAPACITY,
+        0,
+        &512u32.to_le_bytes(),
+    );
+    assert_eq!(call(&mut streams, &set, 0, 0).0.status, -13);
+    assert_eq!(call(&mut streams, &set, flags, 1).0.status, -22);
+    for (length, payload) in [(0, vec![]), (0, vec![0; 3]), (4, vec![0; 4])] {
+        let invalid = frame(
+            provider::OP_CONTROL,
+            a,
+            wire::CONTROL_SET_SEND_CAPACITY,
+            length,
+            &payload,
+        );
+        assert_eq!(call(&mut streams, &invalid, flags, 0).0.status, -22);
+    }
+    assert_eq!(
+        handle_provider_request(&mut streams, &set, flags, 0, &mut []),
+        Err(-22)
+    );
+    assert_eq!(
+        streams.send_capacity(a),
+        Ok(posix_service::socket::SEND_CAPACITY)
+    );
+    assert_eq!(call(&mut streams, &set, flags, 0).0.status, 0);
+    let get = frame(
+        provider::OP_CONTROL,
+        a,
+        wire::CONTROL_GET_SEND_CAPACITY,
+        4,
+        &[],
+    );
+    assert_eq!(call(&mut streams, &get, flags, 0).1, 512u32.to_le_bytes());
+    assert_eq!(streams.write(a, &[0; 1024]), Ok(512));
+    assert_eq!(streams.write(b, &[0; 1024]), Ok(1024));
+}
+
+#[test]
+fn libc_send_capacity_tags_preserve_validation_and_reject_negative_limits() {
+    use mochios_posix_client::socket::{
+        newlib_getsockopt_tag, newlib_getsockopt_value, newlib_setsockopt,
+    };
+    assert_eq!(
+        newlib_getsockopt_tag(1, 7),
+        Ok(wire::CONTROL_GET_SEND_CAPACITY)
+    );
+    assert_eq!(
+        newlib_setsockopt(1, 7, 512),
+        Ok((wire::CONTROL_SET_SEND_CAPACITY, 512u32.to_le_bytes()))
+    );
+    assert_eq!(newlib_setsockopt(1, 7, -1), Err(-22));
+    assert_eq!(
+        newlib_getsockopt_value(wire::CONTROL_GET_SEND_CAPACITY, &512u32.to_le_bytes()),
+        Ok(512)
+    );
+    assert_eq!(
+        newlib_getsockopt_value(wire::CONTROL_GET_SEND_CAPACITY, &[0; 4]),
+        Err(-5)
+    );
+    assert_eq!(
+        newlib_getsockopt_value(wire::CONTROL_GET_SEND_CAPACITY, &[0; 3]),
+        Err(-5)
+    );
+}
+
+#[test]
 fn receive_capacity_controls_require_native_authority_and_validate_before_mutation() {
     let (mut streams, [a, b]) = fixture();
     let flags = mnu_abi::IPC_DELIVERY_NATIVE_OBJECT;

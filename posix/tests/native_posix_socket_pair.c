@@ -26,6 +26,65 @@
     }                                                                          \
   } while (0)
 static int blocking_fd;
+static int verify_send_capacity(void) {
+  int fds[2];
+  CHECK(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, fds) == 0);
+  int alias = dup(fds[0]);
+  CHECK(alias >= 0);
+  int capacity = 1024;
+  CHECK(setsockopt(alias, SOL_SOCKET, SO_SNDBUF, &capacity, sizeof(capacity)) ==
+        0);
+  socklen_t length = sizeof(capacity);
+  CHECK(getsockopt(fds[0], SOL_SOCKET, SO_SNDBUF, &capacity, &length) == 0 &&
+        capacity == 1024);
+  char data[2048];
+  memset(data, 's', sizeof(data));
+  CHECK(write(fds[0], data, sizeof(data)) == 1024);
+  CHECK(write(alias, "x", 1) == -1 && errno == EAGAIN);
+  struct pollfd sender = {.fd = alias, .events = POLLOUT};
+  CHECK(poll(&sender, 1, 0) == 0);
+  capacity = 256;
+  CHECK(setsockopt(alias, SOL_SOCKET, SO_SNDBUF, &capacity, sizeof(capacity)) ==
+        0);
+  CHECK(read(fds[1], data, 769) == 769);
+  CHECK(write(fds[0], "!more", 5) == 1);
+  CHECK(poll(&sender, 1, 0) == 0);
+  capacity = 512;
+  CHECK(setsockopt(fds[0], SOL_SOCKET, SO_SNDBUF, &capacity,
+                   sizeof(capacity)) == 0);
+  CHECK(poll(&sender, 1, 0) == 1 && sender.revents == POLLOUT);
+  CHECK(read(fds[1], data, sizeof(data)) == 256 && data[255] == '!');
+  for (unsigned i = 0; i < 255; ++i)
+    CHECK(data[i] == 's');
+  capacity = -1;
+  CHECK(setsockopt(alias, SOL_SOCKET, SO_SNDBUF, &capacity, sizeof(capacity)) ==
+            -1 &&
+        errno == EINVAL);
+  CHECK(setsockopt(alias, SOL_SOCKET, SO_SNDBUF, NULL, sizeof(capacity)) ==
+            -1 &&
+        errno == EFAULT);
+  CHECK(setsockopt(alias, SOL_SOCKET, SO_SNDBUF, &capacity, 1) == -1 &&
+        errno == EINVAL);
+  CHECK(getsockopt(fds[0], SOL_SOCKET, SO_SNDBUF, &capacity, &length) == 0 &&
+        capacity == 512);
+  pid_t child = fork();
+  CHECK(child >= 0);
+  if (child == 0) {
+    capacity = 768;
+    _exit(setsockopt(alias, SOL_SOCKET, SO_SNDBUF, &capacity,
+                     sizeof(capacity)) == 0
+              ? 0
+              : 1);
+  }
+  int status = 0;
+  CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) &&
+        WEXITSTATUS(status) == 0);
+  CHECK(getsockopt(fds[0], SOL_SOCKET, SO_SNDBUF, &capacity, &length) == 0 &&
+        capacity == 768);
+  CHECK(close(alias) == 0 && close(fds[0]) == 0 && close(fds[1]) == 0);
+  puts("posix-socket-send-capacity: PASS");
+  return 0;
+}
 static uint64_t find_process_label(const char *label) {
   uint64_t result;
   __asm__ volatile("syscall"
@@ -570,6 +629,7 @@ int main(int argc, char **argv) {
   CHECK(verify_path_binding() == 0);
   CHECK(verify_exact_process_lookup() == 0);
   CHECK(verify_receive_capacity() == 0);
+  CHECK(verify_send_capacity() == 0);
   CHECK(verify_socket_errors() == 0);
   puts("posix-socket-options: PASS");
   CHECK(verify_connect_interrupts() == 0);

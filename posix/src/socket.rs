@@ -7,6 +7,8 @@ use std::collections::VecDeque;
 
 pub const RECEIVE_CAPACITY: usize = 64 * 1024;
 pub const MIN_RECEIVE_CAPACITY: usize = 256;
+pub const SEND_CAPACITY: usize = 64 * 1024;
+pub const MIN_SEND_CAPACITY: usize = 256;
 pub const MAX_ENDPOINTS: usize = 1024;
 pub const MAX_BACKLOG: usize = 128;
 /// Private Provider namespace: bit 62 distinguishes connection wait jobs.
@@ -66,6 +68,7 @@ struct Endpoint {
     credentials: (u32, u32),
     incoming: VecDeque<u8>,
     receive_capacity: usize,
+    send_capacity: usize,
     error: u32,
     read_shutdown: bool,
     write_shutdown: bool,
@@ -159,6 +162,7 @@ impl Streams {
             credentials,
             incoming: VecDeque::new(),
             receive_capacity: RECEIVE_CAPACITY,
+            send_capacity: SEND_CAPACITY,
             error: 0,
             read_shutdown: false,
             write_shutdown: false,
@@ -193,6 +197,7 @@ impl Streams {
                 credentials,
                 incoming: VecDeque::new(),
                 receive_capacity: RECEIVE_CAPACITY,
+                send_capacity: SEND_CAPACITY,
                 error: 0,
                 read_shutdown: false,
                 write_shutdown: false,
@@ -286,6 +291,22 @@ impl Streams {
         Ok(())
     }
 
+    pub fn send_capacity(&self, id: u64) -> Result<usize, i32> {
+        Ok(self.endpoint(id)?.send_capacity)
+    }
+
+    /// Each UNIX stream has one peer, so its queued outgoing bytes are the
+    /// peer's incoming queue. Bound that same queue without a second copy.
+    /// Shrinking never discards bytes already accepted by a successful write.
+    pub fn set_send_capacity(&mut self, id: u64, requested: u32) -> Result<(), i32> {
+        let entry = self.endpoint_mut(id)?;
+        if requested > i32::MAX as u32 {
+            return Err(-22);
+        }
+        entry.send_capacity = (requested as usize).clamp(MIN_SEND_CAPACITY, SEND_CAPACITY);
+        Ok(())
+    }
+
     pub fn write(&mut self, id: u64, input: &[u8]) -> Result<usize, i32> {
         let entry = self.endpoint(id)?;
         if input.is_empty() {
@@ -295,6 +316,7 @@ impl Streams {
             return Err(-32);
         }
         let peer = entry.peer.ok_or(-107)?;
+        let send_capacity = entry.send_capacity;
         let receiver = self.endpoint_mut(peer).map_err(|_| -32)?;
         if receiver.read_shutdown {
             return Err(-32);
@@ -302,6 +324,7 @@ impl Streams {
         let count = input.len().min(
             receiver
                 .receive_capacity
+                .min(send_capacity)
                 .saturating_sub(receiver.incoming.len()),
         );
         if count == 0 {
@@ -429,6 +452,7 @@ impl Streams {
         }
         let credentials = target.credentials;
         let receive_capacity = target.receive_capacity;
+        let send_capacity = target.send_capacity;
         let client_index = self
             .entries
             .iter()
@@ -455,6 +479,7 @@ impl Streams {
             credentials,
             incoming: VecDeque::new(),
             receive_capacity,
+            send_capacity,
             error: 0,
             read_shutdown: false,
             write_shutdown: false,
@@ -605,7 +630,9 @@ impl Streams {
         Ok(Readiness {
             readable: !entry.incoming.is_empty() || read_closed,
             writable: !write_closed
-                && peer.is_some_and(|peer| peer.incoming.len() < peer.receive_capacity),
+                && peer.is_some_and(|peer| {
+                    peer.incoming.len() < peer.receive_capacity.min(entry.send_capacity)
+                }),
             read_closed,
             write_closed,
             write_error,
