@@ -78,11 +78,15 @@ fn dispatch_requires_real_delivery_metadata_and_finishes_bookkeeping_before_rest
     assert!(scoped.contains("ThreadUpcallInspect"));
     assert!(scoped.contains("ThreadUpcallReturnContext"));
     assert!(!scoped.contains("ThreadUpcallReturn,"));
-    assert!(source.contains("dispatch_signal(delivery, None, context, native, &mut preparation)"));
+    let compact_source: String = source.chars().filter(|ch| !ch.is_whitespace()).collect();
+    let compact_source = compact_source.replace(",)", ")");
+    assert!(compact_source
+        .contains("dispatch_signal(delivery,None,context,native,&mutpreparation,scope.as_mut())"));
     let fault = include_str!("../../../user/crates/newlib-runtime/src/fault_signal.rs");
     let compact: String = fault.chars().filter(|ch| !ch.is_whitespace()).collect();
-    assert!(
-        compact.contains("dispatch_signal(fault.signal,Some(info),context,true,&mutpreparation)")
-    );
+    let compact = compact.replace(",)", ")");
+    assert!(compact.contains(
+        "dispatch_signal(fault.signal,Some(info),context,true,&mutpreparation,scope.as_mut())"
+    ));
     assert!(scoped.contains("if delivered.is_ok()"));
 }

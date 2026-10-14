@@ -29,6 +29,17 @@ mod mochios_posix_client {pub mod signal_context{pub type SigInfo=crate::SigInfo
 struct UContext;
 struct ThreadControl;static CONTROL:ThreadControl=ThreadControl;
 struct Preparation{epoch:u64,started:bool}
+mod signal_scope {
+    use super::*;
+    pub struct Scope {delivery:posix_protocol::SignalDelivery,epoch:u64}
+    impl Scope {
+        pub fn new(_:&'static ThreadControl,delivery:posix_protocol::SignalDelivery,epoch:u64)->Result<Self,i32>{Ok(Self{delivery,epoch})}
+        pub fn complete(self:core::pin::Pin<&mut Self>)->Result<(),i32>{
+            if FORK_EPOCH.load(Ordering::Acquire)!=self.epoch{return Ok(())}
+            CLIENT.complete_signal_delivery(self.delivery)
+        }
+    }
+}
 impl Preparation{
     fn new(_:&'static ThreadControl)->Result<Self,i32>{Ok(Self{epoch:FORK_EPOCH.load(Ordering::Acquire),started:false})}
     fn started(&self)->bool{self.started}
@@ -74,7 +85,7 @@ impl Client{
     }
     fn report_process_signaled(&self,_:posix_protocol::SignalDelivery)->Result<(),i32>{panic!("unexpected fatal report")}
 }
-fn dispatch_signal(delivery:posix_protocol::SignalDelivery,info:Option<SigInfo>,_:&mut UContext,_:bool,preparation:&mut Preparation)->Result<i32,i32>{
+fn dispatch_signal(delivery:posix_protocol::SignalDelivery,info:Option<SigInfo>,_:&mut UContext,_:bool,preparation:&mut Preparation,_:core::pin::Pin<&mut signal_scope::Scope>)->Result<i32,i32>{
     assert_eq!(delivery.token,OWNER.load(Ordering::Acquire),"dispatched another image's token");
     assert_eq!(info.is_some(),FAULT.load(Ordering::Acquire)!=0);
     let call=DISPATCHES.fetch_add(1,Ordering::AcqRel);

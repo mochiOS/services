@@ -67,19 +67,14 @@ fn copied_handlers_never_complete_parent_tokens_or_free_live_native_frames() {
         .unwrap();
     let owner = drain.find("let epoch = preparation.epoch").unwrap();
     let received = drain.find("thread_dequeue_signal_delivery()").unwrap();
-    let invoke = drain.find("dispatch_signal(delivery").unwrap();
+    let invoke = drain.find("dispatch_signal(").unwrap();
     let before = drain.find("!= epoch").unwrap();
     let check = invoke + drain[invoke..].find("!= epoch").unwrap();
-    let complete = drain.find("complete_signal_delivery(delivery)").unwrap();
+    let complete = drain.find("scope.as_mut().complete()").unwrap();
     assert!(owner < received && received < before && before < invoke);
     assert!(invoke < check && check < complete);
     let fault = include_str!("../../../user/crates/newlib-runtime/src/fault_signal.rs");
-    assert!(
-        fault.find("!= epoch").unwrap()
-            < fault
-                .find("complete_signal_delivery(fault.signal)")
-                .unwrap()
-    );
+    assert!(fault.find("!= epoch").unwrap() < fault.find("scope.as_mut().complete()").unwrap());
     let native = include_str!("../../../user/crates/newlib-runtime/src/signal_delivery.rs");
     assert!(native.contains("owner != frame.owner"));
     assert!(native.contains("active_native_signal_frame"));
