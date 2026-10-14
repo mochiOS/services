@@ -431,7 +431,7 @@ fn creation_backend_retains_before_publication_and_never_weakens_grants() {
         "read_all(image_handle",
         "authorization.executable_digest",
         "export_inherited_handles(Some(owner), &specs)",
-        "Some(startup)",
+        "ImageLaunch::Created(startup)",
     ] {
         assert!(native.contains(required));
     }
