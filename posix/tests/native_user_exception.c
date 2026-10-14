@@ -4,14 +4,21 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-enum { MAP = 582, UNMAP = 583, PROTECT = 584, INSTALL = 654, RETURN = 655,
+enum { MAP = 582, UNMAP = 583, PROTECT = 584, INSTALL = 654, RETURN = 655, INSPECT = 688,
        CREATE_MEMORY = 671 };
+struct snapshot {
+    uint64_t instruction, stack_pointer, flags, argument;
+    struct { uint64_t rax, rbx, rcx, rdx, rsi, rbp, r8, r9, r10, r11, r12, r13, r14, r15; } registers;
+    unsigned char fx_state[512];
+} __attribute__((aligned(16)));
+_Static_assert(sizeof(struct snapshot) == 656, "native snapshot ABI");
 static unsigned char entry_stack[16384] __attribute__((aligned(4096)));
 static volatile uint64_t expected_address;
 static volatile uint64_t expected_cause = 2;
 static volatile unsigned exceptions;
 static volatile int recursive;
 static volatile int report_only;
+static volatile uint64_t last_token;
 
 static inline uint64_t native(uint64_t n, uint64_t a, uint64_t b, uint64_t c,
                               uint64_t d, uint64_t e, uint64_t f) {
@@ -50,6 +57,19 @@ static void handler(uint64_t vector, uint64_t token, uint64_t kind,
         _exit(90);
     }
     if (report_only) _exit(70 + (int)cause);
+    struct snapshot captured, again;
+    if ((int64_t)native(INSPECT, token + 1, (uintptr_t)&captured, sizeof(captured), 0, 0, 0) != -22 ||
+        (int64_t)native(INSPECT, token, 0, sizeof(captured), 0, 0, 0) != -14 ||
+        (int64_t)native(INSPECT, token, (uintptr_t)&captured, sizeof(captured) - 1, 0, 0, 0) != -22 ||
+        native(INSPECT, token, (uintptr_t)&captured, sizeof(captured), 0, 0, 0)) _exit(101);
+    if (captured.instruction != instruction || !captured.stack_pointer ||
+        !(captured.flags & (1 << 10)) || captured.registers.rcx != UINT64_C(0x1122334455667788) ||
+        captured.registers.r11 != UINT64_C(0x8877665544332211)) _exit(102);
+    captured.instruction = 0;
+    captured.registers.rcx = 0;
+    if (native(INSPECT, token, (uintptr_t)&again, sizeof(again), 0, 0, 0) ||
+        again.instruction != instruction || !again.registers.rcx) _exit(103);
+    last_token = token;
     ++exceptions;
     if (recursive) invalid_access();
     if (native(PROTECT, address, 4096, 3, 0, 0, 0)) _exit(91);
@@ -88,12 +108,15 @@ int main(void) {
     sigaddset(&blocked, SIGCHLD);
     if (sigprocmask(SIG_BLOCK, &blocked, NULL)) return 1;
     if (install(2) != -22 || install(1)) return 1;
+    if ((int64_t)native(INSPECT, 0, 0, sizeof(struct snapshot), 0, 0, 0) != -22) return 7;
     for (unsigned attempt = 1; attempt <= 3; ++attempt) {
         int result = recover();
         if (result || exceptions != attempt) {
             fprintf(stderr, "user-exception: recovery FAIL %d count=%u\n", result, exceptions);
             return 2;
         }
+        struct snapshot stale;
+        if ((int64_t)native(INSPECT, last_token, (uintptr_t)&stale, sizeof(stale), 0, 0, 0) != -22) return 8;
     }
     /* Both private copies and shared pins must report absent backing, not
        manufacture pages. The unmapped-address case is a distinct cause. */
@@ -138,6 +161,6 @@ int main(void) {
         if (waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
             WEXITSTATUS(status) != 255) return 4;
     }
-    puts("user-exception: PASS opt-in, native causes, backing bounds, repair/retry, full registers, COW and recursive rejection");
+    puts("user-exception: PASS opt-in, native causes, token-bound snapshot, backing bounds, repair/retry, full registers, COW and recursive rejection");
     return 0;
 }

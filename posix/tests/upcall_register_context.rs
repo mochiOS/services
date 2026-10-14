@@ -9,10 +9,22 @@ fn production_interrupt_register_conversion_preserves_every_word_and_validates_r
     let end = begin + thread[begin..].find("\n}\n").unwrap() + 3;
     let mut program = String::from("#[derive(Clone, Copy, Debug, PartialEq, Eq)]\n");
     program.push_str(&thread[begin..end]);
+    let abi = include_str!("../../../core/crates/abi/src/lib.rs");
+    program.push_str("mod mnu_abi {\n");
+    for declaration in [
+        "pub struct ThreadInitialRegisters {",
+        "pub struct ThreadUpcallSnapshot {",
+    ] {
+        let start = abi.find(declaration).unwrap();
+        let end = start + abi[start..].find("\n}\n").unwrap() + 3;
+        program.push_str(&abi[start..end]);
+    }
+    program.push_str("}\n");
     for name in [
         "valid_user_return",
         "read_interrupt_context",
         "write_interrupt_context",
+        "snapshot_context",
     ] {
         let start = source.find(&format!("fn {name}(")).unwrap();
         let end = start + source[start..].find("\n}\n").unwrap() + 3;
@@ -24,6 +36,14 @@ fn main() {
     let mut frame = core::array::from_fn::<_,20,_>(|index|index as u64+100);
     let original=frame;
     let context=read_interrupt_context(&frame);
+    let snapshot=snapshot_context(context,[0xa7;512]);
+    let registers=snapshot.registers;
+    assert_eq!([snapshot.instruction,snapshot.stack_pointer,snapshot.rflags,snapshot.argument],
+        [115,118,117,108]);
+    assert_eq!([registers.rax,registers.rbx,registers.rcx,registers.rdx,registers.rsi,registers.rbp,
+        registers.r8,registers.r9,registers.r10,registers.r11,registers.r12,registers.r13,registers.r14,registers.r15],
+        [114,111,113,112,109,110,107,106,105,104,103,102,101,100]);
+    assert_eq!(snapshot.fx_state,[0xa7;512]);
     assert_eq!([context.r15,context.r14,context.r13,context.r12,context.r11,context.r10,
         context.r9,context.r8,context.rdi,context.rsi,context.rbp,context.rbx,
         context.rdx,context.rcx,context.rax,context.user_rip,context.user_rflags,context.user_rsp],

@@ -163,9 +163,15 @@ fn native_exception_entry_is_opt_in_and_runs_after_vm_recovery_without_posix_pol
         ("PROTECT", mnu_abi::SyscallNumber::MemoryProtect),
         ("INSTALL", mnu_abi::SyscallNumber::ThreadUpcallInstall),
         ("RETURN", mnu_abi::SyscallNumber::ThreadUpcallReturn),
+        ("INSPECT", mnu_abi::SyscallNumber::ThreadUpcallInspect),
     ] {
         assert!(probe.contains(&format!("{name} = {}", value as u64)));
     }
+    assert_eq!(core::mem::size_of::<mnu_abi::ThreadUpcallSnapshot>(), 656);
+    assert_eq!(
+        core::mem::offset_of!(mnu_abi::ThreadUpcallSnapshot, fx_state),
+        144
+    );
 }
 
 #[test]

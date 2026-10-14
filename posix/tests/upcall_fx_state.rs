@@ -11,11 +11,28 @@ fn actual_upcall_state_restores_fx_only_for_its_valid_one_shot_return() {
     let last = thread.find("// L4 風").unwrap();
     let mut program = String::from("mod task { pub mod context {\n");
     program.push_str(&context[start..end]);
+    program.push_str(
+        r#"
+pub fn verify_reserved_snapshot_bytes() {
+    let state=FxSaveArea {bytes:[0xa7;512]};
+    let bytes=state.snapshot_bytes();
+    assert_eq!(bytes[5],0);
+    assert!(bytes[416..].iter().all(|byte|*byte==0));
+    for slot in 0..8 {
+        assert!(bytes[32+slot*16..32+slot*16+10].iter().all(|byte|*byte==0xa7));
+        assert!(bytes[32+slot*16+10..32+slot*16+16].iter().all(|byte|*byte==0));
+    }
+    assert!(bytes[160..416].iter().all(|byte|*byte==0xa7));
+    assert_eq!(state.bytes,[0xa7;512]);
+}
+"#,
+    );
     program.push_str("\n} pub mod thread {\n");
     program.push_str(&thread[first..last]);
     program.push_str(
         r#"
 pub fn probe() {
+    super::context::verify_reserved_snapshot_bytes();
     let mut original = super::context::FxSaveArea::initial();
     original.save_current();
     let mut state = ThreadUpcallState::new();
@@ -26,12 +43,23 @@ pub fn probe() {
     let pattern = [0xa7u8;16]; let changed = [0x5bu8;16];
     let initial=0x3f80u32; let clobbered=0x5f80u32;
     state.install(0x1000,0x8000,false).unwrap();
+    assert_eq!(state.snapshot(0),Err(ThreadUpcallError::InvalidToken));
     for _ in 0..3 {
         assert!(state.begin(user).is_none());
         state.enqueue(7).unwrap();
         unsafe { core::arch::asm!("movdqu xmm15, [{}]", "ldmxcsr [{}]",
             in(reg) pattern.as_ptr(),in(reg) &initial,out("xmm15") _,options(nostack)); }
         let delivery=state.begin(user).unwrap();
+        assert_eq!(state.snapshot(delivery.token+1),Err(ThreadUpcallError::InvalidToken));
+        let (captured,mut fx)=state.snapshot(delivery.token).unwrap();
+        assert_eq!(captured,user);
+        assert_eq!(&fx[400..416],&pattern);
+        assert_eq!(u32::from_le_bytes(fx[24..28].try_into().unwrap()),initial);
+        assert_eq!(fx[5],0);
+        assert!(fx[416..].iter().all(|byte|*byte==0));
+        for slot in 0..8 {assert!(fx[32+slot*16+10..32+slot*16+16].iter().all(|byte|*byte==0));}
+        fx.fill(0xff);
+        assert_ne!(state.snapshot(delivery.token).unwrap().1,fx);
         unsafe { core::arch::asm!("movdqu xmm15, [{}]", "ldmxcsr [{}]",
             in(reg) changed.as_ptr(),in(reg) &clobbered,out("xmm15") _,options(nostack)); }
         assert!(state.begin(user).is_none());
@@ -41,7 +69,9 @@ pub fn probe() {
         unsafe { core::arch::asm!("stmxcsr [{}]",in(reg) &mut value,options(nostack)); }
         assert_eq!(value,clobbered);
         state.request_return(delivery.token).unwrap();
+        assert_eq!(state.snapshot(delivery.token),Err(ThreadUpcallError::InvalidToken));
         assert_eq!(state.take_restored_context(),Some(user));
+        assert_eq!(state.snapshot(delivery.token),Err(ThreadUpcallError::InvalidToken));
         let mut bytes=[0u8;16];
         unsafe { core::arch::asm!("movdqu [{}], xmm15", "stmxcsr [{}]",
             in(reg) bytes.as_mut_ptr(),in(reg) &mut value,options(nostack)); }
