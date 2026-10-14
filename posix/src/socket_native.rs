@@ -134,6 +134,7 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
     let mut jobs = posix_service::socket_connect::Connections::new();
     let mut receive_waits = posix_service::socket_receive_wait::ReceiveWaits::new();
     let mut routes = posix_service::socket_route::Routes::new();
+    let mut transfers = posix_service::socket_transfer::Transfers::new(1024);
     let mut request = vec![0; provider::REQUEST_HEADER_LEN + provider::MAX_DATA_LEN];
     let mut response = vec![0; provider::RESPONSE_HEADER_LEN + provider::MAX_DATA_LEN];
     loop {
@@ -152,7 +153,17 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
         let sender = message >> 32;
         let bytes = &request[..(message as u32 as usize).min(request.len())];
         let mut retained_receive_source = false;
-        if bytes.starts_with(&mochios_posix_protocol::socket_route::MAGIC) {
+        let mut consumed_attachments = 0u8;
+        if bytes.starts_with(&mochios_posix_protocol::socket_transfer::MAGIC) {
+            consumed_attachments = super::socket_transfer_native::dispatch(
+                endpoint,
+                &streams,
+                &mut transfers,
+                sender,
+                bytes,
+                &attachments,
+            );
+        } else if bytes.starts_with(&mochios_posix_protocol::socket_route::MAGIC) {
             retained_receive_source = super::socket_route_native::prepare(
                 endpoint, &service, &streams, &bindings, &mut routes, sender, bytes, &attachments,
             );
@@ -282,6 +293,20 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                 .filter(|(header, _)| native && header.opcode == provider::OP_RELEASE)
                 .and_then(|(header, _)| streams.release_observers(header.object_id).ok());
             if let Some((header, payload)) = decoded {
+                if posix_service::socket_transfer::job_id(header.object_id).is_ok() {
+                    super::socket_transfer_native::provider_request(
+                        &mut transfers,
+                        sender,
+                        header,
+                        attachments.delivery_flags,
+                        attachments.count,
+                        &mut response,
+                    );
+                    for attached in attachments.handles.iter().take(attachments.count as usize) {
+                        let _ = platform::handle::close(attached.handle);
+                    }
+                    continue;
+                }
                 if posix_service::socket_route::is_route(header.object_id) {
                     super::socket_route_native::provider_request(&mut routes, sender, header, attachments.delivery_flags, attachments.count, &mut response);
                     for attached in attachments.handles.iter().take(attachments.count as usize) {
@@ -449,13 +474,16 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                 ),
             }
         }
-        for attached in attachments
+        consumed_attachments |= u8::from(retained_receive_source);
+        for (index, attached) in attachments
             .handles
             .iter()
             .take(attachments.count as usize)
-            .skip(usize::from(retained_receive_source))
+            .enumerate()
         {
-            let _ = platform::handle::close(attached.handle);
+            if consumed_attachments & (1 << index) == 0 {
+                let _ = platform::handle::close(attached.handle);
+            }
         }
         super::socket_connect_native::pump(&mut streams, &bindings, &mut jobs);
         super::socket_receive_wait_native::pump(&streams, &mut receive_waits);

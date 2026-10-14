@@ -61,7 +61,10 @@ static uint32_t word(const unsigned char *bytes) {
   memcpy(&value, bytes, 4);
   return value;
 }
-int main(void) {
+#ifndef SOCKET_RECORD_TEST_ENTRY
+#define SOCKET_RECORD_TEST_ENTRY main
+#endif
+int SOCKET_RECORD_TEST_ENTRY(void) {
   CHECK(run_native_stream_regressions() == 0);
   uint64_t key;
   memcpy(&key, "POSXCTRL", 8);

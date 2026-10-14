@@ -11,6 +11,7 @@ pub mod socket;
 pub mod socket_record;
 pub mod socket_record_io;
 pub mod socket_rights;
+pub mod socket_transfer;
 pub mod socket_route;
 pub mod socket_provider;
 pub mod socket_binding;

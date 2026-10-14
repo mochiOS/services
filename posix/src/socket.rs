@@ -11,9 +11,9 @@ pub const SEND_CAPACITY: usize = 64 * 1024;
 pub const MIN_SEND_CAPACITY: usize = 256;
 pub const MAX_ENDPOINTS: usize = 1024;
 pub const MAX_BACKLOG: usize = 128;
-/// Private Provider namespace: bits 60/61/62 distinguish send routes and jobs.
+/// Private Provider namespace: bits 59..62 distinguish transfers, routes and jobs.
 /// Stay within the native Provider's signed 64-bit object identity range.
-pub const MAX_DESCRIPTION_ID: u64 = (1 << 60) - 1;
+pub const MAX_DESCRIPTION_ID: u64 = (1 << 59) - 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shutdown {
