@@ -1,9 +1,11 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -45,6 +47,32 @@ static int verify_exec(char **argv) {
   return 0;
 }
 
+static int verify_multiplex(int fd) {
+  struct pollfd item = {
+      fd, POLLIN | POLLOUT | POLLPRI | POLLRDNORM | POLLRDBAND | POLLWRBAND, 0};
+  CHECK(poll(&item, 1, 0) == 1 &&
+        item.revents == (POLLIN | POLLOUT | POLLRDNORM));
+  item.events = POLLPRI | POLLRDBAND | POLLWRBAND;
+  CHECK(poll(&item, 1, 0) == 0 && item.revents == 0);
+  fd_set reads, writes, exceptions;
+  FD_ZERO(&reads);
+  FD_ZERO(&writes);
+  FD_ZERO(&exceptions);
+  FD_SET(fd, &reads);
+  FD_SET(fd, &writes);
+  FD_SET(fd, &exceptions);
+  struct timeval timeout = {0, 0};
+  CHECK(select(fd + 1, &reads, &writes, &exceptions, &timeout) == 2);
+  CHECK(FD_ISSET(fd, &reads) && FD_ISSET(fd, &writes) &&
+        !FD_ISSET(fd, &exceptions));
+  FD_SET(fd, &exceptions);
+  timeout.tv_sec = 0;
+  timeout.tv_usec = 0;
+  CHECK(select(fd + 1, NULL, NULL, &exceptions, &timeout) == 0 &&
+        !FD_ISSET(fd, &exceptions));
+  return 0;
+}
+
 int main(int argc, char **argv) {
   if (argc == 5 && strcmp(argv[1], "--verify-shm-exec") == 0)
     return verify_exec(argv);
@@ -67,6 +95,10 @@ int main(int argc, char **argv) {
   shared[4096] = 42;
   int reader = shm_open(name, O_RDONLY, 0);
   CHECK(reader >= 0 && ftruncate(reader, 0) == -1 && errno == EBADF);
+  CHECK(verify_multiplex(fd) == 0 && verify_multiplex(reader) == 0);
+  int ordinary = open("/system/services/compositor.service", O_RDONLY);
+  CHECK(ordinary >= 0 && verify_multiplex(ordinary) == 0);
+  CHECK(close(ordinary) == 0);
   CHECK(fstat(reader, &observed) == 0 && observed.st_ino == original.st_ino &&
         observed.st_size == 8192);
   CHECK(mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, reader, 0) ==
