@@ -238,6 +238,7 @@ pub fn handle_provider_request<H: Copy, B: Backing<H>>(
         match header.opcode {
             provider::OP_READ | provider::OP_READ_AT => header.length as usize,
             provider::OP_READ_WITH_POSITION => header.length as usize + provider::READ_POSITION_LEN,
+            provider::OP_CONTROL => header.length as usize,
             _ => 0,
         }
     };
@@ -288,7 +289,25 @@ pub fn handle_provider_request<H: Copy, B: Backing<H>>(
             provider::OP_SYNC => descriptions
                 .length(header.object_id, backend)
                 .map(|_| (0, Vec::new())),
-            // Control, attached-buffer reads and mapping delegation require
+            provider::OP_CONTROL => {
+                use mochios_posix_protocol::shared_memory as wire;
+                match header.basis {
+                    wire::CONTROL_LENGTH if payload.is_empty() && header.length == 8 => {
+                        descriptions
+                            .length(header.object_id, backend)
+                            .map(|length| (8, length.to_le_bytes().to_vec()))
+                    }
+                    wire::CONTROL_RESIZE if payload.len() == 8 && header.length == 0 => {
+                        let length = u64::from_le_bytes(payload.try_into().unwrap());
+                        descriptions
+                            .resize(header.object_id, length, backend)
+                            .map(|_| (0, Vec::new()))
+                    }
+                    wire::CONTROL_LENGTH | wire::CONTROL_RESIZE => Err(-22),
+                    _ => Err(-95),
+                }
+            }
+            // Attached-buffer reads and mapping delegation require
             // their own validated handlers; never pretend they succeeded.
             _ => Err(-95),
         }

@@ -357,3 +357,76 @@ fn provider_seek_positioned_io_and_unsupported_requests_have_valid_responses() {
     );
     assert_eq!(ram.bytes, b"\0\0xy");
 }
+
+#[test]
+fn provider_extent_control_enforces_access_and_exact_wire_lengths() {
+    use mnu_abi::{IPC_DELIVERY_NATIVE_OBJECT, provider};
+    use mochios_posix_protocol::shared_memory as wire;
+    use posix_service::shared_memory_file::handle_provider_request;
+    let mut descriptions = Descriptions::new();
+    let mut ram = Ram::default();
+    let writable = descriptions.open(1, true, &mut ram).unwrap();
+    let readonly = descriptions.open(1, false, &mut ram).unwrap();
+    let mut reply = [0; provider::RESPONSE_HEADER_LEN + 8];
+    for (id, code, input, capacity, expected_status, expected_length) in [
+        (
+            readonly,
+            wire::CONTROL_RESIZE,
+            5u64.to_le_bytes().to_vec(),
+            0,
+            -9,
+            0,
+        ),
+        (writable, wire::CONTROL_RESIZE, vec![0; 7], 0, -22, 0),
+        (
+            writable,
+            wire::CONTROL_RESIZE,
+            5u64.to_le_bytes().to_vec(),
+            1,
+            -22,
+            0,
+        ),
+        (
+            writable,
+            wire::CONTROL_RESIZE,
+            u64::MAX.to_le_bytes().to_vec(),
+            0,
+            -22,
+            0,
+        ),
+        (
+            writable,
+            wire::CONTROL_RESIZE,
+            5u64.to_le_bytes().to_vec(),
+            0,
+            0,
+            5,
+        ),
+        (readonly, wire::CONTROL_LENGTH, vec![], 7, -22, 5),
+        (readonly, wire::CONTROL_LENGTH, vec![0], 8, -22, 5),
+        (readonly, wire::CONTROL_LENGTH, vec![], 8, 0, 5),
+    ] {
+        let request = frame(provider::OP_CONTROL, id, code, 0, capacity, &input);
+        let length = handle_provider_request(
+            &mut descriptions,
+            &request,
+            IPC_DELIVERY_NATIVE_OBJECT,
+            0,
+            &mut ram,
+            &mut reply,
+        )
+        .unwrap()
+        .unwrap();
+        let (header, data) = provider::ResponseHeader::decode(&reply[..length]).unwrap();
+        assert_eq!(header.status, expected_status);
+        assert_eq!(ram.bytes.len(), expected_length);
+        if code == wire::CONTROL_LENGTH && header.status == 0 {
+            assert_eq!(data, &5u64.to_le_bytes());
+        }
+    }
+    assert_eq!(
+        descriptions.seek(writable, 0, HANDLE_SEEK_CURRENT, &mut ram),
+        Ok(0)
+    );
+    assert_eq!(ram.bytes, [0; 5]);
+}
