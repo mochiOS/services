@@ -55,6 +55,33 @@ fn backing_keys_share_ordering_without_serializing_unrelated_objects() {
 }
 
 #[test]
+fn owner_admission_never_waits_for_an_outstanding_caller() {
+    let mut registry = object_io::Registry::new();
+    let first = gate(&mut registry, 7);
+    let alias = gate(&mut registry, 7);
+    let other = gate(&mut registry, 8);
+    let request = first.try_lock().expect("first caller acquires");
+    for _ in 0..64 {
+        assert!(alias.try_lock().is_none());
+    }
+    let independent = other.try_lock().expect("different backing stays available");
+    drop(independent);
+    // Failed owner admission must not unlock the caller's critical section.
+    assert!(first.try_lock().is_none());
+    drop(request);
+    let owner = alias.try_lock().expect("retry after caller completion");
+    drop(first);
+    drop(alias);
+    // The guard alone keeps canonical ownership alive across handle teardown.
+    let survivor = registry
+        .try_get(7, || -> Result<_, ()> { panic!("live guard lost") }, ())
+        .unwrap();
+    assert!(survivor.try_lock().is_none());
+    drop(owner);
+    assert!(survivor.try_lock().is_some());
+}
+
+#[test]
 fn concurrent_writeback_and_write_sections_do_not_overlap() {
     let mut registry = object_io::Registry::new();
     let gate = gate(&mut registry, 7);

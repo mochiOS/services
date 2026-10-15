@@ -536,6 +536,57 @@ fn unrelated_backing_changes_do_not_invalidate_extent_or_page_installations() {
 }
 
 #[test]
+fn extent_reservation_excludes_io_without_waiting_or_allocating_on_contention() {
+    let _test = TEST_LOCK.lock().unwrap();
+    reset_lower(b"old");
+    let provider = Arc::new(task::ProviderObject {
+        endpoint_thread_id: 17,
+        endpoint_slot: 2,
+        endpoint_generation: 8,
+    });
+    let object = vm_object::VmObject::provider(provider.clone(), 93).unwrap();
+    let alias = vm_object::VmObject::provider(provider.clone(), 93).unwrap();
+    let other = vm_object::VmObject::provider(provider.clone(), 94).unwrap();
+    let generation = object.memory_generation();
+    // Model a caller waiting on this provider, including the interval between
+    // its reply and cache publication. The owner must return, never wait here.
+    let request = vm_object::lock_provider_io(&provider, 93).unwrap();
+    assert!(matches!(
+        without_allocations(|| alias.prepare_extent(3, 1, |_| {
+            panic!("busy admission must precede boundary allocation")
+        })),
+        Err(syscall::EAGAIN)
+    ));
+    assert_eq!(object.memory_generation(), generation);
+    let independent = other
+        .prepare_extent(3, 1, |bytes| Ok(Arc::new(bytes)))
+        .unwrap();
+    drop(independent);
+    drop(request);
+
+    let prepared = object
+        .prepare_extent(3, 1, |bytes| Ok(Arc::new(bytes)))
+        .unwrap();
+    assert!(matches!(
+        alias.prepare_extent(3, 1, |_| panic!("reservation still owns I/O")),
+        Err(syscall::EAGAIN)
+    ));
+    // Cancellation releases admission, but never publishes a shorter extent.
+    drop(prepared);
+    assert_eq!(object.memory_generation(), generation);
+    assert_eq!(LOWER.lock().unwrap().bytes, b"old");
+    let prepared = alias
+        .prepare_extent(3, 1, |bytes| Ok(Arc::new(bytes)))
+        .unwrap();
+    LOWER.lock().unwrap().bytes.truncate(1);
+    without_allocations(|| prepared.commit()).unwrap();
+    // Successful publication must release the same reservation too.
+    let request = vm_object::lock_provider_io(&provider, 93).unwrap();
+    drop(request);
+    object.invalidate();
+}
+
+#[test]
 fn production_extent_commit_preserves_dirty_prefix_and_discards_removed_storage() {
     let _test = TEST_LOCK.lock().unwrap();
     let object = provider_object();
@@ -591,7 +642,9 @@ fn production_extent_commit_preserves_dirty_prefix_and_discards_removed_storage(
     let prepared = object
         .prepare_extent(3, 1, |bytes| Ok(Arc::new(bytes)))
         .unwrap();
-    object.write_at(2, b"!").unwrap();
+    // A mapping/cache mutation can still invalidate the preparation before
+    // the VM coordinator establishes its PTE/TLB exclusion barrier.
+    object.stage_write_at(2, b"!").unwrap();
     assert_eq!(
         without_allocations(|| prepared.commit()),
         Err(syscall::EAGAIN)
