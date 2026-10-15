@@ -576,6 +576,8 @@ fn test_filesystem_with_storage(
 #[derive(Debug, PartialEq, Eq)]
 enum UpdateEvent {
     Prepare(u64, u64, u64),
+    Admit(u64, u64, u64, Option<u32>),
+    Queue(u64),
     Begin,
     Publish,
     Drop { begun: bool, published: bool },
@@ -594,6 +596,39 @@ struct RecordingUpdate {
     published: bool,
 }
 impl filesystem_service::memory_updates::MemoryUpdates for RecordingUpdates {
+    fn queue(
+        &self,
+        identity: u64,
+    ) -> Result<filesystem_service::memory_updates::AdmissionReference, i32> {
+        self.0
+            .lock()
+            .unwrap()
+            .events
+            .push(UpdateEvent::Queue(identity));
+        Ok(filesystem_service::memory_updates::AdmissionReference::Borrowed(900))
+    }
+
+    fn prepare_admitted(
+        &self,
+        identity: u64,
+        old: u64,
+        new: u64,
+        incoming: Option<u32>,
+    ) -> Result<filesystem_service::memory_updates::Preparation, i32> {
+        use filesystem_service::memory_updates::{AdmissionReference, Preparation};
+        let mut trace = self.0.lock().unwrap();
+        trace
+            .events
+            .push(UpdateEvent::Admit(identity, old, new, incoming));
+        if trace.fail == Some("admitted_wait") {
+            return Ok(Preparation::Wait(AdmissionReference::Borrowed(
+                incoming.unwrap_or(900),
+            )));
+        }
+        drop(trace);
+        self.prepare(identity, old, new).map(Preparation::Ready)
+    }
+
     fn prepare(
         &self,
         identity: u64,
@@ -669,6 +704,219 @@ fn seed_update_file(service: &mut FilesystemService, opened: u64) {
     for _ in 0..2 {
         assert_eq!(service.provider_write(opened, &[0x55; 4096]), Ok(4096));
     }
+}
+
+#[test]
+fn admitted_mutations_return_before_storage_and_resume_with_same_backing() {
+    use filesystem_service::memory_updates::MutationResult;
+    for operation in 0..3 {
+        let trace = Arc::new(Mutex::new(UpdateTrace::default()));
+        let (mut service, image) =
+            test_filesystem_with_storage(Some(Box::new(RecordingUpdates(trace.clone()))));
+        let opened = open_update_file(
+            &mut service,
+            protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+        );
+        seed_update_file(&mut service, opened);
+        let identity = service.provider_memory_object(opened).unwrap();
+        let before = image.0.lock().unwrap().clone();
+        image.2.lock().unwrap().attempts = 0;
+        trace.lock().unwrap().fail = Some("admitted_wait");
+        let invoke = |service: &mut FilesystemService, incoming| match operation {
+            0 => service.truncate_handle_admitted(
+                protocol::Header {
+                    offset: 5000,
+                    ..Default::default()
+                },
+                opened,
+                incoming,
+            ),
+            1 => service.truncate_at_admitted(
+                protocol::Header {
+                    open_id: 5000,
+                    ..Default::default()
+                },
+                b"/update-order",
+                PathAnchors::default(),
+                root_credentials(),
+                incoming,
+            ),
+            _ => service.open_at_admitted(
+                protocol::Header {
+                    flags: protocol::OPEN_AT_READ
+                        | protocol::OPEN_AT_WRITE
+                        | protocol::OPEN_AT_TRUNCATE,
+                    ..Default::default()
+                },
+                b"/update-order",
+                PathAnchors::default(),
+                root_credentials(),
+                incoming,
+            ),
+        };
+        let ticket = match invoke(&mut service, None) {
+            MutationResult::Wait(ticket) => ticket,
+            _ => panic!("expected nonblocking admission"),
+        };
+        assert_eq!(ticket.handle(), 900);
+        assert_eq!(*image.0.lock().unwrap(), before);
+        assert_eq!(image.2.lock().unwrap().attempts, 0);
+        assert_eq!(
+            trace.lock().unwrap().events,
+            [UpdateEvent::Admit(
+                identity,
+                8192,
+                if operation == 2 { 0 } else { 5000 },
+                None
+            )]
+        );
+        // The service is free to handle other requests while the client waits.
+        assert_eq!(service.provider_read_at(opened, 0, 1).unwrap(), [0x55]);
+        trace.lock().unwrap().fail = None;
+        assert!(matches!(
+            invoke(&mut service, Some(ticket.handle())),
+            MutationResult::Complete(Ok(_))
+        ));
+        assert_eq!(
+            service.provider_read_at(opened, 4999, 2).unwrap().len(),
+            if operation == 2 { 0 } else { 1 }
+        );
+        assert!(trace.lock().unwrap().events.contains(&UpdateEvent::Admit(
+            identity,
+            8192,
+            if operation == 2 { 0 } else { 5000 },
+            Some(900)
+        )));
+        // Request scope must be gone after both Wait and Complete.
+        trace.lock().unwrap().events.clear();
+        service
+            .truncate_handle(
+                protocol::Header {
+                    offset: 2,
+                    ..Default::default()
+                },
+                opened,
+            )
+            .unwrap();
+        assert!(matches!(
+            trace.lock().unwrap().events.first(),
+            Some(UpdateEvent::Prepare(_, _, 2))
+        ));
+    }
+}
+
+#[test]
+fn admitted_begin_contention_requeues_but_publication_errors_never_retry() {
+    use filesystem_service::memory_updates::MutationResult;
+    for failure in ["begin_busy", "publish_busy"] {
+        let trace = Arc::new(Mutex::new(UpdateTrace::default()));
+        let (mut service, image) =
+            test_filesystem_with_storage(Some(Box::new(RecordingUpdates(trace.clone()))));
+        let opened = open_update_file(
+            &mut service,
+            protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+        );
+        seed_update_file(&mut service, opened);
+        let identity = service.provider_memory_object(opened).unwrap();
+        image.2.lock().unwrap().attempts = 0;
+        trace.lock().unwrap().fail = Some(failure);
+        let result = service.truncate_handle_admitted(
+            protocol::Header {
+                offset: 5000,
+                ..Default::default()
+            },
+            opened,
+            Some(42),
+        );
+        if failure == "begin_busy" {
+            assert!(matches!(result, MutationResult::Wait(_)));
+            assert_eq!(image.2.lock().unwrap().attempts, 0);
+            assert_eq!(
+                trace.lock().unwrap().events,
+                [
+                    UpdateEvent::Admit(identity, 8192, 5000, Some(42)),
+                    UpdateEvent::Prepare(identity, 8192, 5000),
+                    UpdateEvent::Begin,
+                    UpdateEvent::Drop {
+                        begun: false,
+                        published: false
+                    },
+                    UpdateEvent::Queue(identity)
+                ]
+            );
+        } else {
+            assert!(matches!(result, MutationResult::Complete(Err(11))));
+            assert!(image.2.lock().unwrap().attempts > 0);
+            assert!(
+                !trace
+                    .lock()
+                    .unwrap()
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, UpdateEvent::Queue(_)))
+            );
+            assert_eq!(service.provider_read_at(opened, 4999, 2).unwrap().len(), 1);
+        }
+    }
+}
+
+#[test]
+fn admitted_permissions_and_limits_are_checked_before_queueing() {
+    use filesystem_service::memory_updates::MutationResult;
+    let trace = Arc::new(Mutex::new(UpdateTrace {
+        fail: Some("admitted_wait"),
+        ..Default::default()
+    }));
+    let (mut service, _) =
+        test_filesystem_with_storage(Some(Box::new(RecordingUpdates(trace.clone()))));
+    let opened = open_update_file(
+        &mut service,
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+    );
+    seed_update_file(&mut service, opened);
+    assert!(matches!(
+        service.truncate_handle_admitted(
+            protocol::Header {
+                flags: protocol::TRUNCATE_GROWTH_BOUNDED,
+                node_id: 8192,
+                offset: 8193,
+                ..Default::default()
+            },
+            opened,
+            Some(42)
+        ),
+        MutationResult::Complete(Err(protocol::ERROR_GROWTH_LIMIT))
+    ));
+    assert!(matches!(
+        service.truncate_at_admitted(
+            protocol::Header {
+                open_id: 1,
+                ..Default::default()
+            },
+            b"/update-order",
+            PathAnchors::default(),
+            credentials(501, 20, &[]),
+            Some(42)
+        ),
+        MutationResult::Complete(Err(13))
+    ));
+    assert!(trace.lock().unwrap().events.is_empty());
+    // Neither rejection may leave a borrowed reference in the next scope.
+    assert!(matches!(
+        service.truncate_handle_admitted(
+            protocol::Header {
+                offset: 1,
+                ..Default::default()
+            },
+            opened,
+            None
+        ),
+        MutationResult::Wait(_)
+    ));
+    assert!(matches!(
+        trace.lock().unwrap().events.as_slice(),
+        [UpdateEvent::Admit(_, 8192, 1, None)]
+    ));
 }
 
 #[test]

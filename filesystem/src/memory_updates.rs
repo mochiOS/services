@@ -23,6 +23,11 @@ pub trait Update: Send {
 pub trait MemoryUpdates: Send {
     fn prepare(&self, identity: u64, old_length: u64, length: u64) -> Result<Box<dyn Update>, i32>;
 
+    /// Queue a new position without preparing or beginning a storage update.
+    fn queue(&self, _identity: u64) -> Result<AdmissionReference, i32> {
+        Err(95)
+    }
+
     /// Nonblocking preparation with a transferable FIFO position. Backends
     /// without admission support must fail explicitly, not silently barge.
     /// The incoming reference remains owned by the IPC request on every path.
@@ -58,6 +63,18 @@ pub enum Preparation {
     Wait(AdmissionReference),
 }
 
+/// Only a pre-storage failure may carry a retry position. All other errors,
+/// including publication failures, are terminal for this invocation.
+pub enum MutationResult<T> {
+    Complete(Result<T, i32>),
+    Wait(AdmissionReference),
+}
+
+pub(crate) struct AdmissionScope {
+    pub incoming: Option<mochi_user_platform::handle::Handle>,
+    pub waiting: Option<AdmissionReference>,
+}
+
 pub struct ProviderUpdates {
     endpoint: mochi_user_platform::handle::Handle,
 }
@@ -70,6 +87,12 @@ impl ProviderUpdates {
 }
 
 impl MemoryUpdates for ProviderUpdates {
+    fn queue(&self, identity: u64) -> Result<AdmissionReference, i32> {
+        mochi_user_platform::handle::create_provider_memory_admission(self.endpoint, identity)
+            .map(AdmissionReference::Owned)
+            .map_err(native_error)
+    }
+
     fn prepare(&self, identity: u64, old_length: u64, length: u64) -> Result<Box<dyn Update>, i32> {
         let update = mochi_user_platform::handle::prepare_provider_memory_update(
             self.endpoint,
@@ -89,11 +112,7 @@ impl MemoryUpdates for ProviderUpdates {
         incoming: Option<mochi_user_platform::handle::Handle>,
     ) -> Result<Preparation, i32> {
         use mochi_user_platform::handle;
-        let fresh = || {
-            handle::create_provider_memory_admission(self.endpoint, identity)
-                .map(AdmissionReference::Owned)
-                .map_err(native_error)
-        };
+        let fresh = || self.queue(identity);
         let ticket = match incoming {
             Some(handle) => AdmissionReference::Borrowed(handle),
             None => fresh()?,

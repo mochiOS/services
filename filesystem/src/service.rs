@@ -64,6 +64,7 @@ pub struct FilesystemService {
     orphans: HashMap<u64, Orphan>,
     next_open_id: u64,
     memory_updates: Option<Box<dyn crate::memory_updates::MemoryUpdates>>,
+    memory_admission: Option<crate::memory_updates::AdmissionScope>,
 }
 
 pub(crate) struct OpenFile {
@@ -105,6 +106,7 @@ impl FilesystemService {
             orphans: HashMap::new(),
             next_open_id: 1,
             memory_updates: None,
+            memory_admission: None,
         }
     }
 
@@ -120,6 +122,96 @@ impl FilesystemService {
         }
         self.memory_updates = Some(updates);
         Ok(())
+    }
+
+    fn with_memory_admission<T>(
+        &mut self,
+        incoming: Option<mochi_user_platform::handle::Handle>,
+        operation: impl FnOnce(&mut Self) -> Result<T, i32>,
+    ) -> crate::memory_updates::MutationResult<T> {
+        use crate::memory_updates::{AdmissionScope, MutationResult};
+        if self.memory_admission.is_some() {
+            return MutationResult::Complete(Err(EBUSY));
+        }
+        self.memory_admission = Some(AdmissionScope {
+            incoming,
+            waiting: None,
+        });
+        let result = operation(self);
+        // Always clear request-local state, including permission and storage
+        // failures. A subsequent request must never inherit another's ticket.
+        let waiting = self.memory_admission.take().and_then(|scope| scope.waiting);
+        match (result, waiting) {
+            (Err(protocol::ERROR_MEMORY_ADMISSION_BUSY), Some(ticket)) => {
+                MutationResult::Wait(ticket)
+            }
+            (Err(protocol::ERROR_MEMORY_ADMISSION_BUSY), None) => {
+                MutationResult::Complete(Err(EIO))
+            }
+            (result, None) => MutationResult::Complete(result),
+            // A queued response cannot accompany successful or uncertain I/O.
+            (_, Some(_)) => MutationResult::Complete(Err(EIO)),
+        }
+    }
+
+    pub fn open_at_admitted(
+        &mut self,
+        request: protocol::Header,
+        payload: &[u8],
+        anchors: PathAnchors,
+        credentials: protocol::Credentials,
+        incoming: Option<mochi_user_platform::handle::Handle>,
+    ) -> crate::memory_updates::MutationResult<Response> {
+        self.with_memory_admission(incoming, |service| {
+            service.open_at(request, payload, anchors, credentials)
+        })
+    }
+
+    pub fn truncate_at_admitted(
+        &mut self,
+        request: protocol::Header,
+        payload: &[u8],
+        anchors: PathAnchors,
+        credentials: protocol::Credentials,
+        incoming: Option<mochi_user_platform::handle::Handle>,
+    ) -> crate::memory_updates::MutationResult<Response> {
+        self.with_memory_admission(incoming, |service| {
+            service.truncate_at(request, payload, anchors, credentials)
+        })
+    }
+
+    pub fn truncate_handle_admitted(
+        &mut self,
+        request: protocol::Header,
+        open_id: u64,
+        incoming: Option<mochi_user_platform::handle::Handle>,
+    ) -> crate::memory_updates::MutationResult<Response> {
+        self.with_memory_admission(incoming, |service| {
+            service.truncate_handle(request, open_id)
+        })
+    }
+
+    fn prepare_memory_update(
+        &mut self,
+        identity: u64,
+        old_length: u64,
+        length: u64,
+    ) -> Result<Box<dyn crate::memory_updates::Update>, i32> {
+        use crate::memory_updates::Preparation;
+        let backend = self.memory_updates.as_ref().ok_or(ENOTSUP)?;
+        if let Some(scope) = self.memory_admission.as_mut() {
+            match backend.prepare_admitted(identity, old_length, length, scope.incoming)? {
+                Preparation::Ready(update) => Ok(update),
+                Preparation::Wait(ticket) => {
+                    scope.waiting = Some(ticket);
+                    Err(protocol::ERROR_MEMORY_ADMISSION_BUSY)
+                }
+            }
+        } else {
+            backend
+                .prepare(identity, old_length, length)
+                .map_err(crate::memory_updates::admission_error)
+        }
     }
 
     /// Service-owned mount configuration; callers must already hold the volume.
@@ -3138,16 +3230,28 @@ impl FilesystemService {
         // over live data and zero it, or free the same extents more than once.
         let mut file = File::open_inode(&filesystem, current).map_err(errno)?;
         let mut update = identity
-            .map(|identity| {
-                self.memory_updates
-                    .as_ref()
-                    .ok_or(ENOTSUP)?
-                    .prepare(identity, old_length, length)
-                    .map_err(crate::memory_updates::admission_error)
-            })
+            .map(|identity| self.prepare_memory_update(identity, old_length, length))
             .transpose()?;
-        if let Some(update) = update.as_mut() {
-            update.begin().map_err(crate::memory_updates::admission_error)?;
+        if let Some(prepared) = update.as_mut() {
+            if let Err(error) = prepared.begin() {
+                if self.memory_admission.is_some() {
+                    if error == 11 {
+                        // Failed BEGIN is still pre-storage. Release the
+                        // prepared transaction before queueing a new position;
+                        // native deferred cleanup restores its old mappings.
+                        drop(update.take());
+                        let ticket = self
+                            .memory_updates
+                            .as_ref()
+                            .ok_or(ENOTSUP)?
+                            .queue(identity.ok_or(EIO)?)?;
+                        self.memory_admission.as_mut().ok_or(EIO)?.waiting = Some(ticket);
+                        return Err(protocol::ERROR_MEMORY_ADMISSION_BUSY);
+                    }
+                    return Err(error);
+                }
+                return Err(crate::memory_updates::admission_error(error));
+            }
         }
         // A backend error may follow partial writes. Never interpret it as
         // "unchanged": dropping an in-flight owner quarantines all aliases.
