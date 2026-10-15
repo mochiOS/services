@@ -29,9 +29,11 @@ fn newlib_heap_growth_commits_its_reserved_arena() {
         .split("pub extern \"C\" fn sbrk(")
         .next()
         .unwrap();
-    assert!(heap.contains("HEAP_RESERVATION_BYTES"));
-    assert!(heap.contains("SyscallNumber::MemoryProtect"));
-    assert!(!heap.contains("MEMORY_MAP_EXACT"));
+    assert!(heap.contains(".adjust(increment, image_data_bytes, data_limit)"));
+    let arena = include_str!("../../../user/crates/newlib-runtime/src/heap.rs");
+    assert!(arena.contains("RESERVATION_BYTES"));
+    assert!(arena.contains("SyscallNumber::MemoryProtect"));
+    assert!(!arena.contains("MEMORY_MAP_EXACT"));
     let kernel = include_str!("../../../core/src/syscall/process.rs");
     let mapping = kernel
         .split("pub fn memory_map(")
