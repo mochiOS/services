@@ -15,7 +15,12 @@ fn only_the_resumed_child_advances_the_epoch_before_installing_delivery() {
     let (parent, child) = fork.split_once("if image == 0 {").unwrap();
     assert!(!parent.contains("FORK_EPOCH"));
     let epoch = child.find("FORK_EPOCH").unwrap();
-    assert!(epoch < child.find("setup_signal_delivery(thread_control)").unwrap());
+    assert!(
+        epoch
+            < child
+                .find("setup_signal_delivery(thread_control, None)")
+                .unwrap()
+    );
     assert!(child[epoch..].contains("epoch.checked_add(1)"));
     assert_eq!(runtime.matches("epoch.checked_add(1)").count(), 1);
 }

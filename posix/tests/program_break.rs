@@ -42,6 +42,35 @@ fn align_up(value: usize, alignment: usize) -> Option<usize> {
         .checked_add(alignment - 1)
         .map(|v| v & !(alignment - 1))
 }
+mod address_space {
+    #[derive(Clone, Copy)]
+    pub struct Limit(pub u64);
+    impl Limit {
+        pub const UNLIMITED: Self = Self(u64::MAX);
+        pub fn map(
+            self,
+            address: u64,
+            length: u64,
+            access: u64,
+            options: u64,
+            handle: u64,
+            offset: u64,
+        ) -> Result<u64, i32> {
+            if length > self.0 {
+                return Err(super::ENOMEM);
+            }
+            super::syscall::raw_syscall6(
+                super::syscall::SyscallNumber::MemoryMap,
+                address,
+                length,
+                access,
+                options,
+                handle,
+                offset,
+            )
+        }
+    }
+}
 mod syscall {
     use super::*;
     #[derive(Debug, PartialEq, Eq)]
@@ -129,19 +158,61 @@ fn snapshot(heap: &HeapState) -> [usize; 6] {
 }
 
 #[test]
+fn address_space_limit_applies_to_reservation_not_already_reserved_growth() {
+    let _serial = SERIAL.lock().unwrap();
+    let mut heap = initial();
+    let before = snapshot(&heap);
+    assert_eq!(
+        heap.adjust(1, 0, INFINITY, address_space::Limit(0)),
+        Err(ENOMEM)
+    );
+    assert_eq!(
+        heap.adjust(0, 0, INFINITY, address_space::Limit(0)),
+        Err(ENOMEM)
+    );
+    assert_eq!(snapshot(&heap), before);
+    assert_eq!(VM.lock().unwrap().maps, 0);
+    assert_eq!(
+        heap.adjust(1, 0, INFINITY, address_space::Limit::UNLIMITED),
+        Ok(BASE)
+    );
+    assert_eq!(
+        heap.adjust(4096, 0, INFINITY, address_space::Limit(0)),
+        Ok(BASE + 1)
+    );
+    assert_eq!(
+        heap.adjust(-4097, 0, INFINITY, address_space::Limit(0)),
+        Ok(BASE + 4097)
+    );
+    assert_eq!(VM.lock().unwrap().maps, 1);
+}
+
+#[test]
 fn image_and_byte_limit_are_checked_before_any_reservation() {
     let _serial = SERIAL.lock().unwrap();
     let mut heap = initial();
     let before = snapshot(&heap);
-    assert_eq!(heap.adjust(1, 8192, 8192), Err(ENOMEM));
-    assert_eq!(heap.adjust(1, 8192, 0), Err(ENOMEM));
+    assert_eq!(
+        heap.adjust(1, 8192, 8192, address_space::Limit::UNLIMITED),
+        Err(ENOMEM)
+    );
+    assert_eq!(
+        heap.adjust(1, 8192, 0, address_space::Limit::UNLIMITED),
+        Err(ENOMEM)
+    );
     assert_eq!(snapshot(&heap), before);
     assert_eq!(VM.lock().unwrap().maps, 0);
-    assert_eq!(heap.adjust(1, 8192, 8193), Ok(BASE));
+    assert_eq!(
+        heap.adjust(1, 8192, 8193, address_space::Limit::UNLIMITED),
+        Ok(BASE)
+    );
     assert_eq!(heap.current_break, BASE + 1);
     assert_eq!(VM.lock().unwrap().protects, [(BASE, 4096)]);
     // The rest of this already writable page cannot bypass a byte limit.
-    assert_eq!(heap.adjust(1, 8192, 8193), Err(ENOMEM));
+    assert_eq!(
+        heap.adjust(1, 8192, 8193, address_space::Limit::UNLIMITED),
+        Err(ENOMEM)
+    );
     assert_eq!(heap.current_break, BASE + 1);
 }
 
@@ -149,12 +220,27 @@ fn image_and_byte_limit_are_checked_before_any_reservation() {
 fn lowered_limit_allows_query_and_shrink_but_not_regrowth() {
     let _serial = SERIAL.lock().unwrap();
     let mut heap = initial();
-    assert_eq!(heap.adjust(8193, 0, INFINITY), Ok(BASE));
-    assert_eq!(heap.adjust(0, 8192, 0), Ok(BASE + 8193));
-    assert_eq!(heap.adjust(-8193, 8192, 0), Ok(BASE + 8193));
+    assert_eq!(
+        heap.adjust(8193, 0, INFINITY, address_space::Limit::UNLIMITED),
+        Ok(BASE)
+    );
+    assert_eq!(
+        heap.adjust(0, 8192, 0, address_space::Limit::UNLIMITED),
+        Ok(BASE + 8193)
+    );
+    assert_eq!(
+        heap.adjust(-8193, 8192, 0, address_space::Limit::UNLIMITED),
+        Ok(BASE + 8193)
+    );
     assert_eq!(heap.current_break, BASE);
-    assert_eq!(heap.adjust(1, 8192, 0), Err(ENOMEM));
-    assert_eq!(heap.adjust(1, 8192, 8193), Ok(BASE));
+    assert_eq!(
+        heap.adjust(1, 8192, 0, address_space::Limit::UNLIMITED),
+        Err(ENOMEM)
+    );
+    assert_eq!(
+        heap.adjust(1, 8192, 8193, address_space::Limit::UNLIMITED),
+        Ok(BASE)
+    );
     assert_eq!(VM.lock().unwrap().protects, [(BASE, 12288)]);
 }
 
@@ -164,32 +250,50 @@ fn failed_first_mapping_and_protection_leave_no_published_arena() {
     let mut heap = initial();
     let before = snapshot(&heap);
     VM.lock().unwrap().fail_map = true;
-    assert_eq!(heap.adjust(1, 0, INFINITY), Err(ENOMEM));
+    assert_eq!(
+        heap.adjust(1, 0, INFINITY, address_space::Limit::UNLIMITED),
+        Err(ENOMEM)
+    );
     assert_eq!(snapshot(&heap), before);
     assert!(VM.lock().unwrap().unmaps.is_empty());
     VM.lock().unwrap().fail_map = false;
     VM.lock().unwrap().fail_protect = true;
-    assert_eq!(heap.adjust(1, 0, INFINITY), Err(ENOMEM));
+    assert_eq!(
+        heap.adjust(1, 0, INFINITY, address_space::Limit::UNLIMITED),
+        Err(ENOMEM)
+    );
     assert_eq!(snapshot(&heap), before);
     assert_eq!(VM.lock().unwrap().unmaps, [(BASE, RESERVE)]);
     VM.lock().unwrap().fail_protect = false;
-    assert_eq!(heap.adjust(1, 0, INFINITY), Ok(BASE));
+    assert_eq!(
+        heap.adjust(1, 0, INFINITY, address_space::Limit::UNLIMITED),
+        Ok(BASE)
+    );
 }
 
 #[test]
 fn failed_existing_growth_preserves_break_and_committed_extent() {
     let _serial = SERIAL.lock().unwrap();
     let mut heap = initial();
-    assert_eq!(heap.adjust(4096, 0, INFINITY), Ok(BASE));
+    assert_eq!(
+        heap.adjust(4096, 0, INFINITY, address_space::Limit::UNLIMITED),
+        Ok(BASE)
+    );
     let before = snapshot(&heap);
     VM.lock().unwrap().fail_protect = true;
-    assert_eq!(heap.adjust(8192, 0, INFINITY), Err(ENOMEM));
+    assert_eq!(
+        heap.adjust(8192, 0, INFINITY, address_space::Limit::UNLIMITED),
+        Err(ENOMEM)
+    );
     assert_eq!(snapshot(&heap), before);
     assert!(VM.lock().unwrap().unmaps.is_empty());
     assert_eq!(VM.lock().unwrap().revoked, [(BASE + 4096, 8192)]);
     assert_eq!(VM.lock().unwrap().writable_end, BASE + 4096);
     VM.lock().unwrap().fail_protect = false;
-    assert_eq!(heap.adjust(1, 0, 4097), Ok(BASE + 4096));
+    assert_eq!(
+        heap.adjust(1, 0, 4097, address_space::Limit::UNLIMITED),
+        Ok(BASE + 4096)
+    );
     assert_eq!(
         VM.lock().unwrap().protects,
         [(BASE, 4096), (BASE + 4096, 4096)]
@@ -201,14 +305,31 @@ fn arithmetic_and_arena_bounds_fail_without_mutation() {
     let _serial = SERIAL.lock().unwrap();
     let mut heap = initial();
     let before = snapshot(&heap);
-    assert_eq!(heap.adjust(isize::MIN, 0, INFINITY), Err(EINVAL));
-    assert_eq!(heap.adjust(1, usize::MAX, INFINITY), Err(ENOMEM));
-    assert_eq!(heap.adjust(RESERVE as isize + 1, 0, INFINITY), Err(ENOMEM));
+    assert_eq!(
+        heap.adjust(isize::MIN, 0, INFINITY, address_space::Limit::UNLIMITED),
+        Err(EINVAL)
+    );
+    assert_eq!(
+        heap.adjust(1, usize::MAX, INFINITY, address_space::Limit::UNLIMITED),
+        Err(ENOMEM)
+    );
+    assert_eq!(
+        heap.adjust(
+            RESERVE as isize + 1,
+            0,
+            INFINITY,
+            address_space::Limit::UNLIMITED
+        ),
+        Err(ENOMEM)
+    );
     assert_eq!(snapshot(&heap), before);
     assert_eq!(VM.lock().unwrap().maps, 0);
     for address in [usize::MAX - RESERVE + 1, 0] {
         VM.lock().unwrap().address = address;
-        assert_eq!(heap.adjust(1, 0, INFINITY), Err(ENOMEM));
+        assert_eq!(
+            heap.adjust(1, 0, INFINITY, address_space::Limit::UNLIMITED),
+            Err(ENOMEM)
+        );
         assert_eq!(snapshot(&heap), before);
     }
     assert_eq!(VM.lock().unwrap().unmaps.len(), 2);
@@ -219,12 +340,18 @@ fn stack_ceiling_and_uninitialized_heap_are_respected() {
     let _serial = SERIAL.lock().unwrap();
     let mut heap = initial();
     heap.initialized = false;
-    assert_eq!(heap.adjust(0, 0, INFINITY), Err(ENOMEM));
+    assert_eq!(
+        heap.adjust(0, 0, INFINITY, address_space::Limit::UNLIMITED),
+        Err(ENOMEM)
+    );
     assert_eq!(VM.lock().unwrap().maps, 0);
     heap.initialized = true;
     heap.maximum_end = BASE + RESERVE - 1;
     let before = snapshot(&heap);
-    assert_eq!(heap.adjust(1, 0, INFINITY), Err(ENOMEM));
+    assert_eq!(
+        heap.adjust(1, 0, INFINITY, address_space::Limit::UNLIMITED),
+        Err(ENOMEM)
+    );
     assert_eq!(snapshot(&heap), before);
     assert_eq!(VM.lock().unwrap().unmaps, [(BASE, RESERVE)]);
 }
@@ -233,11 +360,17 @@ fn stack_ceiling_and_uninitialized_heap_are_respected() {
 fn querying_an_empty_arena_does_not_commit_pages() {
     let _serial = SERIAL.lock().unwrap();
     let mut heap = initial();
-    assert_eq!(heap.adjust(0, 8192, 0), Ok(BASE));
+    assert_eq!(
+        heap.adjust(0, 8192, 0, address_space::Limit::UNLIMITED),
+        Ok(BASE)
+    );
     assert_eq!(heap.current_break, BASE);
     assert_eq!(heap.mapped_end, BASE);
     assert!(VM.lock().unwrap().protects.is_empty());
-    assert_eq!(heap.adjust(-1, 0, INFINITY), Err(EINVAL));
+    assert_eq!(
+        heap.adjust(-1, 0, INFINITY, address_space::Limit::UNLIMITED),
+        Err(EINVAL)
+    );
 }
 
 #[test]
@@ -252,7 +385,8 @@ fn wrapper_discovers_policy_before_state_and_sdk_exports_image_extent() {
         .unwrap();
     assert!(wrapper.find("resource_policy::read").unwrap() < wrapper.find("state()").unwrap());
     assert!(wrapper.contains("increment > 0 && has_posix_environment()?"));
-    assert!(wrapper.contains(".adjust(increment, image_data_bytes, data_limit)"));
+    assert!(wrapper.contains(".adjust(increment, image_data_bytes, data_limit, memory_limit)"));
+    assert!(wrapper.find("address_space::current()").unwrap() < wrapper.find("state()").unwrap());
     let script = include_str!("../../../user/runtime/linker.ld");
     assert!(
         script.find("__mochios_data_start").unwrap() < script.find("*(.data .data.*)").unwrap()

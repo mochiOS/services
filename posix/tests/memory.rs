@@ -29,7 +29,7 @@ fn newlib_heap_growth_commits_its_reserved_arena() {
         .split("pub extern \"C\" fn sbrk(")
         .next()
         .unwrap();
-    assert!(heap.contains(".adjust(increment, image_data_bytes, data_limit)"));
+    assert!(heap.contains(".adjust(increment, image_data_bytes, data_limit, memory_limit)"));
     let arena = include_str!("../../../user/crates/newlib-runtime/src/heap.rs");
     assert!(arena.contains("RESERVATION_BYTES"));
     assert!(arena.contains("SyscallNumber::MemoryProtect"));

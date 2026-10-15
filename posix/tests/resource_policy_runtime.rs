@@ -38,6 +38,11 @@ struct Backend {
     length: u64,
     fail: Option<syscall::SyscallNumber>,
     request_error: bool,
+    limit_error: bool,
+    limit_queries: usize,
+    bounded_maps: usize,
+    map_ceiling: u64,
+    bootstrap_soft: u64,
 }
 impl Backend {
     fn new() -> Self {
@@ -53,6 +58,11 @@ impl Backend {
             length: PAGE_SIZE as u64,
             fail: None,
             request_error: false,
+            limit_error: false,
+            limit_queries: 0,
+            bounded_maps: 0,
+            map_ceiling: 0,
+            bootstrap_soft: posix_protocol::RLIM_INFINITY,
         }
     }
 }
@@ -83,6 +93,27 @@ fn close_object_handle(handle: u32) {
     BACKEND.lock().unwrap().as_mut().unwrap().closes += 1;
 }
 impl Client {
+    fn resource_limit(
+        &self,
+        process: i64,
+        resource: u32,
+        replacement: Option<ResourceLimit>,
+    ) -> Result<ResourceLimit, i32> {
+        assert_eq!(
+            (process, resource, replacement),
+            (0, posix_protocol::RLIMIT_AS, None)
+        );
+        let mut backend = BACKEND.lock().unwrap();
+        let backend = backend.as_mut().unwrap();
+        backend.limit_queries += 1;
+        if backend.limit_error {
+            return Err(EIO);
+        }
+        Ok(ResourceLimit {
+            soft: backend.bootstrap_soft,
+            hard: posix_protocol::RLIM_INFINITY,
+        })
+    }
     fn resource_policy_handle(&self) -> Result<Attachment, i32> {
         let mut backend = BACKEND.lock().unwrap();
         let backend = backend.as_mut().unwrap();
@@ -96,6 +127,36 @@ impl Client {
 }
 mod syscall {
     use super::*;
+    pub mod memory {
+        pub use mnu_abi::memory_map::Request;
+        pub struct Error(pub i64);
+        impl Error {
+            pub fn raw(self) -> i64 {
+                self.0
+            }
+        }
+        pub fn map_bounded(request: Request) -> Result<u64, Error> {
+            {
+                let mut backend = super::BACKEND.lock().unwrap();
+                let backend = backend.as_mut().unwrap();
+                backend.bounded_maps += 1;
+                backend.map_ceiling = request.byte_ceiling;
+            }
+            if request.byte_ceiling < request.length {
+                return Err(Error(-12));
+            }
+            super::raw_syscall6(
+                super::SyscallNumber::MemoryMap,
+                request.address,
+                request.length,
+                request.access,
+                request.options,
+                request.backing_handle,
+                request.backing_offset,
+            )
+            .map_err(|error| Error(-i64::from(error)))
+        }
+    }
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SyscallNumber {
         HandleRightsGet,
@@ -179,6 +240,15 @@ mod syscall {
 #[path = "../../../user/crates/newlib-runtime/src/resource_policy.rs"]
 mod resource_policy;
 
+fn has_posix_environment() -> Result<bool, i32> {
+    Ok(true)
+}
+fn map_kernel_errno(raw: i64) -> i32 {
+    (-raw) as i32
+}
+#[path = "../../../user/crates/newlib-runtime/src/address_space.rs"]
+mod address_space;
+
 fn reset() {
     resource_policy::reset_child(&mut resource_policy::freeze_for_clone());
 }
@@ -190,6 +260,58 @@ fn start() -> MutexGuard<'static, ()> {
 }
 fn read() -> u64 {
     resource_policy::read(RLIMIT_NOFILE).unwrap().soft
+}
+
+#[test]
+fn bootstrap_policy_mapping_requires_a_limit_and_uses_bounded_admission() {
+    let _serial = start();
+    BACKEND.lock().unwrap().as_mut().unwrap().limit_error = true;
+    assert_eq!(resource_policy::read(RLIMIT_NOFILE), Err(EIO));
+    {
+        let backend = BACKEND.lock().unwrap();
+        let backend = backend.as_ref().unwrap();
+        assert_eq!((backend.requests, backend.closes, backend.maps), (0, 0, 0));
+    }
+    BACKEND.lock().unwrap().as_mut().unwrap().limit_error = false;
+    BACKEND.lock().unwrap().as_mut().unwrap().bootstrap_soft = 0;
+    assert_eq!(resource_policy::read(RLIMIT_NOFILE), Err(12));
+    {
+        let backend = BACKEND.lock().unwrap();
+        let backend = backend.as_ref().unwrap();
+        assert_eq!(
+            (
+                backend.requests,
+                backend.closes,
+                backend.maps,
+                backend.bounded_maps
+            ),
+            (1, 1, 0, 1)
+        );
+        assert_eq!(backend.map_ceiling, 0);
+    }
+    BACKEND.lock().unwrap().as_mut().unwrap().bootstrap_soft = PAGE_SIZE as u64;
+    assert_eq!(read(), 9);
+    for _ in 0..100 {
+        assert_eq!(read(), 9);
+    }
+    {
+        let backend = BACKEND.lock().unwrap();
+        let backend = backend.as_ref().unwrap();
+        assert_eq!(
+            (
+                backend.limit_queries,
+                backend.requests,
+                backend.closes,
+                backend.maps
+            ),
+            (3, 2, 2, 1)
+        );
+        assert_eq!(
+            (backend.bounded_maps, backend.map_ceiling),
+            (2, PAGE_SIZE as u64)
+        );
+    }
+    reset();
 }
 
 #[test]
@@ -370,10 +492,13 @@ fn runtime_routes_own_reads_to_page_and_freezes_after_allocator_before_state() {
         clone.find("atfork::freeze_allocator()").unwrap()
             < clone.find("resource_policy::freeze_for_clone()").unwrap()
     );
-    assert!(clone.find("resource_policy::freeze_for_clone()").unwrap()
-        < clone.find("let guard = state()").unwrap());
-    assert!(clone.find("drop(policy_guard)").unwrap()
-        < clone.find("drop(allocator_guard)").unwrap());
+    assert!(
+        clone.find("resource_policy::freeze_for_clone()").unwrap()
+            < clone.find("let guard = state()").unwrap()
+    );
+    assert!(
+        clone.find("drop(policy_guard)").unwrap() < clone.find("drop(allocator_guard)").unwrap()
+    );
     assert!(
         clone
             .find("resource_policy::reset_child(&mut policy_guard)")

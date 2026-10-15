@@ -12,7 +12,8 @@ fn actual_registration_defers_callbacks_until_stack_metadata_is_published() {
 extern crate self as mochios_posix_client;
 use core::sync::atomic::{AtomicU32,AtomicUsize,Ordering};
 #[allow(non_camel_case_types)]type c_int=i32;
-const EOVERFLOW:i32=75;const SIGNAL_UPCALL_STACK_SIZE:usize=65536;const NATIVE_READ_WRITE:u64=3;
+const EOVERFLOW:i32=75;const EINVAL:i32=22;const SIGNAL_UPCALL_STACK_SIZE:usize=65536;const NATIVE_READ_WRITE:u64=3;
+static MAPS:AtomicU32=AtomicU32::new(0);
 static FAILURE:AtomicU32=AtomicU32::new(0);
 static STAGE:AtomicU32=AtomicU32::new(0);
 static DEPTH:AtomicU32=AtomicU32::new(0);
@@ -32,6 +33,13 @@ fn stage()->Result<(),i32>{
     if FAILURE.load(Ordering::Acquire)==stage{Err(5)}else{Ok(())}
 }
 fn has_posix_environment()->Result<bool,i32>{Ok(true)}
+mod address_space {
+    pub struct Limit;
+    pub fn current()->Result<Limit,i32>{Ok(Limit)}
+    impl Limit { pub fn map(self,a:u64,b:u64,c:u64,d:u64,e:u64,f:u64)->Result<u64,i32>{
+        super::syscall::raw_syscall6(super::syscall::SyscallNumber::MemoryMap,a,b,c,d,e,f)
+    }}
+}
 mod posix_protocol{pub const SIGNAL_MASK_INITIALIZE:u32=3;}
 fn service_signal_mask(_:&ThreadControl,operation:u32,mask:u32)->Result<(),i32>{
     assert_eq!(operation,3);assert_eq!(mask,37);stage()
@@ -69,6 +77,7 @@ mod syscall {
         }
     }
     pub fn raw_syscall6(_:SyscallNumber,a:u64,b:u64,c:u64,d:u64,e:u64,f:u64)->Result<u64,i32>{
+        MAPS.fetch_add(1,Ordering::Relaxed);
         assert_eq!((a,b,c,d,e,f),(0,65536,3,0,0,0));stage()?;Ok(0x10000)
     }
 }
@@ -89,7 +98,7 @@ fn main(){
             CONTROL.native_handle.store(61,Ordering::Release);
             CONTROL.signal_upcall_stack.store(0x20000,Ordering::Release);
             CONTROL.signal_upcall_stack_size.store(8192,Ordering::Release);
-            let result=setup_signal_delivery(&CONTROL);
+            let result=setup_signal_delivery(&CONTROL,None);
             assert_eq!(result,if failure==0{Ok(())}else{Err(5)},"failure stage {failure}");
             assert_eq!(CONTROL.native_delivery_defer.load(Ordering::Acquire),depth);
             if failure==0{
@@ -102,9 +111,15 @@ fn main(){
             }
         }
     }
+    FAILURE.store(0,Ordering::Release);STAGE.store(0,Ordering::Release);
+    INSTALLED.store(0,Ordering::Release);DEPTH.store(0,Ordering::Release);
+    CONTROL.native_delivery_defer.store(0,Ordering::Release);MAPS.store(0,Ordering::Relaxed);
+    assert_eq!(setup_signal_delivery(&CONTROL,Some(0x10000)),Ok(()));
+    assert_eq!(STAGE.load(Ordering::Acquire),5);
+    assert_eq!(MAPS.load(Ordering::Relaxed),0);
     STAGE.store(0,Ordering::Release);
     CONTROL.native_delivery_defer.store(u32::MAX,Ordering::Release);
-    assert_eq!(setup_signal_delivery(&CONTROL),Err(EOVERFLOW));
+    assert_eq!(setup_signal_delivery(&CONTROL,None),Err(EOVERFLOW));
     assert_eq!(STAGE.load(Ordering::Acquire),0);
     assert_eq!(CONTROL.native_delivery_defer.load(Ordering::Acquire),u32::MAX);
 }

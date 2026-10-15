@@ -71,10 +71,7 @@ fn runtime_publishes_readiness_after_handle_registration_and_uses_posix_return_c
         .split("fn __getreent(")
         .next()
         .unwrap();
-    assert!(
-        entry.find("setup_signal_delivery(control)").unwrap()
-            < entry.find("THREAD_RUNNING").unwrap()
-    );
+    assert!(entry.find("setup_signal_delivery(").unwrap() < entry.find("THREAD_RUNNING").unwrap());
     assert!(entry.contains("native_mutex_wake_all(&control.state)"));
     let send = runtime
         .split("fn pthread_kill(")

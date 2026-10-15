@@ -59,6 +59,26 @@ impl Transport for Endpoint<'_> {
     type Error = ();
     fn call(&self, request: &[u8], response: &mut [u8]) -> Result<usize, ()> {
         let (header, payload) = wire::decode(request).unwrap();
+        if header.opcode == wire::OP_RESOURCE_LIMIT {
+            let query = wire::decode_resource_limit_request(payload).unwrap();
+            assert_eq!(
+                (query.process_id, query.resource, query.flags),
+                (0, wire::RLIMIT_AS, 0)
+            );
+            let mut body = [0; wire::RESOURCE_LIMIT_LEN];
+            wire::encode_resource_limit(wire::ResourceLimit::INFINITY, &mut body).unwrap();
+            return Ok(wire::encode(
+                wire::Header {
+                    opcode: wire::OP_STATUS,
+                    request_id: header.request_id,
+                    payload_len: body.len() as u32,
+                    ..Default::default()
+                },
+                &body,
+                response,
+            )
+            .unwrap());
+        }
         assert_eq!(header.opcode, wire::OP_SESSION_REGISTER);
         assert!(payload.is_empty());
         Ok(wire::encode(
@@ -148,6 +168,10 @@ fn bootstrap_discovery_validation_and_cleanup_do_not_touch_the_allocator() {
         {
             let _monitor = Monitored::enter();
             client.register_session().unwrap();
+            assert_eq!(
+                client.resource_limit(0, wire::RLIMIT_AS, None).unwrap(),
+                wire::ResourceLimit::INFINITY
+            );
             result = client.resource_policy_handle();
         }
         assert_eq!(
