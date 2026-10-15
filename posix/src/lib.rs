@@ -24,6 +24,7 @@ pub mod filesystem_transport;
 mod fault_signal;
 mod signal_origin;
 mod fork_state;
+pub mod resource_policy;
 pub use fork_state::validate_fork_child;
 
 pub const STATUS_EINVAL: i32 = -22;
@@ -608,6 +609,7 @@ pub struct ControllingTerminal {
 
 #[derive(Debug)]
 pub struct PosixService<H: Copy = u32> {
+    resource_policies: Vec<(u64, Box<dyn resource_policy::Published<H>>)>,
     prepared_forks: Vec<(u64, fork_state::ForkState<H>)>,
     next_fork_token: u64,
     bootstrap_process_id: Option<u64>,
@@ -644,6 +646,7 @@ pub struct PosixService<H: Copy = u32> {
 impl PosixService<u32> {
     pub const fn new() -> Self {
         Self {
+            resource_policies: Vec::new(),
             prepared_forks: Vec::new(),
             next_fork_token: 1,
             bootstrap_process_id: None,
@@ -997,6 +1000,7 @@ impl<H: Copy> PosixService<H> {
                     && !has_children
                     && !self.controlling_terminals.contains_key(child_id)
                     && !self.needs_parent_exit_observation(*child_id)
+                    && !self.resource_policies.iter().any(|(owner, _)| *owner == *child_id)
                 {
                     return None;
                 }
@@ -1066,6 +1070,7 @@ impl<H: Copy> PosixService<H> {
             return Ok(());
         }
         let connected_before = self.non_orphaned_groups();
+        self.resource_policies.retain(|(owner, _)| *owner != process_id);
         self.hangup_exited_controlling_process(process_id)?;
         self.process_wait_states
             .get_mut(&process_id)
@@ -1280,6 +1285,7 @@ impl<H: Copy> PosixService<H> {
                 Some(state)
                     if (!state.exit_notified && self.parents.contains_key(child_id))
                         || self.prepared_forks.iter().any(|(_, state)| state.owned_by(*child_id))
+                        || self.resource_policies.iter().any(|(owner, _)| *owner == *child_id)
                         || self.has_reparentable_children(*child_id)
                         || self.needs_parent_exit_observation(*child_id)
                         || self.controlling_terminals.contains_key(child_id) =>
@@ -1807,6 +1813,7 @@ impl<H: Copy> PosixService<H> {
     ) -> Result<(), i32> {
         self.observe_process_exit(child_id)?;
         self.cancel_owned_forks(child_id, filesystem);
+        self.resource_policies.retain(|(owner, _)| *owner != child_id);
         self.orphaned_processes.remove(&child_id);
         if let Some(children) = self.children.get_mut(&parent_id) {
             children.remove(&child_id);
@@ -2292,7 +2299,20 @@ impl<H: Copy> PosixService<H> {
             if request.limit.hard > previous.hard && caller.effective_uid != 0 {
                 return Err(protocol::STATUS_EPERM);
             }
-            self.resource_limits.insert(key, request.limit);
+            // Keep the service map and every published reader synchronized.
+            // Reserve/insert before publication, and restore the override if
+            // publication fails; no client may observe a silently stale page.
+            let overridden = self.resource_limits.insert(key, request.limit);
+            if let Some((_, page)) = self.resource_policies.iter().find(|(owner, _)| *owner == target_id) {
+                if let Err(error) = page.publish(request.resource, request.limit) {
+                    if let Some(old) = overridden {
+                        *self.resource_limits.get_mut(&key).unwrap() = old;
+                    } else {
+                        self.resource_limits.remove(&key);
+                    }
+                    return Err(error);
+                }
+            }
         }
 
         let mut output = vec![0; protocol::RESOURCE_LIMIT_LEN];
@@ -3176,6 +3196,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_FORK_PREPARE
             | protocol::OP_FORK_COMMIT
             | protocol::OP_FORK_CANCEL
+            | protocol::OP_RESOURCE_POLICY
             | protocol::OP_PROCESS_SPAWNED
             | protocol::OP_PROCESS_SESSION_INFO
             | protocol::OP_PROCESS_LAUNCHED

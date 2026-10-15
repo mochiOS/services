@@ -1,5 +1,8 @@
 /* Run real callback dispatch and allocator/registration contention in one
  * isolated process, including the registry inherited by subsequent forks. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #define main handle_capture_probe
 #include "native_handle_capture.c"
 #undef main
@@ -27,6 +30,10 @@
 #define main fork_reent_probe
 #include "native_fork_reent.c"
 #undef main
+#undef CHECK
+#define main resource_policy_probe
+#include "native_resource_policy.c"
+#undef main
 
 int main(void) {
     int result = handle_capture_probe();
@@ -40,5 +47,7 @@ int main(void) {
     result = fork_capture_probe();
     if (result) return result;
     result = fork_reent_probe();
+    if (result) return result;
+    result = resource_policy_probe();
     return result ? result : callback_probe();
 }

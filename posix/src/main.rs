@@ -1,5 +1,10 @@
+#![cfg_attr(target_os = "mochios", feature(allocator_api))]
+
 #[cfg(target_os = "mochios")]
 mod process_control;
+
+#[cfg(target_os = "mochios")]
+mod resource_policy_native;
 
 #[cfg(target_os = "mochios")]
 mod named_semaphore_native;
@@ -470,6 +475,12 @@ fn main() {
             {
                 Some(service.handle_shared_memory(peer, header, payload, &attachments,
                     &mut shared_memory_backend))
+            }
+            (Some(peer), Some((header, payload)), true)
+                if header.opcode == protocol::OP_RESOURCE_POLICY =>
+            {
+                Some(service.handle_resource_policy(peer, header, payload, &attachments,
+                    &mut resource_policy_native::NativeFactory))
             }
             (Some(peer), Some((header, payload)), true)
                 if matches!(header.opcode, protocol::OP_SEMAPHORE_OPEN | protocol::OP_SEMAPHORE_UNLINK) =>
