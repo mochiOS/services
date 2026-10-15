@@ -9,6 +9,7 @@
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <errno.h>
 
 #define CHECK(x) do { if (!(x)) { printf("resource-policy: FAIL line=%d\n", __LINE__); return 1; } } while (0)
 static int64_t rp_native(uint64_t number, uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e, uint64_t f) {
@@ -70,9 +71,16 @@ int main(void) {
     CHECK(pipe(ready) == 0 && pipe(go) == 0);
     struct rlimit changed = original; changed.rlim_cur = 7;
     CHECK(setrlimit(RLIMIT_NOFILE, &changed) == 0 && rp_limit(parent_page, RLIMIT_NOFILE, 7));
+    struct rlimit observed;
+    for (unsigned i = 0; i < 1000; ++i) {
+        CHECK(getrlimit(RLIMIT_NOFILE, &observed) == 0 && observed.rlim_cur == 7);
+    }
+    errno = 0;
+    CHECK(dup(ready[0]) == -1 && errno == EMFILE);
     pid_t child = fork(); CHECK(child >= 0);
     if (child == 0) {
         close(ready[0]); close(go[1]);
+        if (getrlimit(RLIMIT_NOFILE, &observed) || observed.rlim_cur != 7) _exit(16);
         uint32_t child_object = rp_get();
         if (!child_object) _exit(11);
         uint64_t child_page = rp_map(child_object);
@@ -80,9 +88,16 @@ int main(void) {
         struct rlimit own = changed; own.rlim_cur = 3;
         if (setrlimit(RLIMIT_NOFILE, &own) || !rp_limit(child_page, RLIMIT_NOFILE, 3)
             || !rp_limit(parent_page, RLIMIT_NOFILE, 7)) _exit(13);
+        if (getrlimit(RLIMIT_NOFILE, &observed) || observed.rlim_cur != 3) _exit(17);
+        errno = 0;
+        if (dup(ready[1]) != -1 || errno != EMFILE) _exit(18);
+        if (dup2(ready[1], ready[1]) != ready[1]) _exit(19);
         char byte = 'r';
         if (write(ready[1], &byte, 1) != 1 || read(go[0], &byte, 1) != 1) _exit(14);
         if (!rp_limit(child_page, RLIMIT_NOFILE, 5) || !rp_limit(parent_page, RLIMIT_NOFILE, 7)) _exit(15);
+        if (getrlimit(RLIMIT_NOFILE, &observed) || observed.rlim_cur != 5) _exit(20);
+        int copy = dup(ready[1]);
+        if (copy < 0 || copy >= 5 || close(copy)) _exit(21);
         RP(583, child_page, 4096, 0, 0, 0);
         _exit(0);
     }
@@ -92,6 +107,7 @@ int main(void) {
     changed.rlim_cur = 5;
     CHECK(prlimit(child, RLIMIT_NOFILE, &changed, NULL) == 0);
     CHECK(rp_limit(parent_page, RLIMIT_NOFILE, 7));
+    CHECK(getrlimit(RLIMIT_NOFILE, &observed) == 0 && observed.rlim_cur == 7);
     CHECK(write(go[1], "g", 1) == 1);
     int status;
     CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status));
@@ -101,6 +117,6 @@ int main(void) {
     CHECK(setrlimit(RLIMIT_NOFILE, &original) == 0);
     CHECK(rp_limit(parent_page, RLIMIT_NOFILE, original.rlim_cur));
     CHECK(RP(583, parent_page, 4096, 0, 0, 0) == 0);
-    puts("resource-policy: PASS READ|MAP-only delegation, denied write/map/protect escalation, live setrlimit/prlimit and independent child pages");
+    puts("resource-policy: PASS READ|MAP-only delegation, denied write/map/protect escalation, cached runtime reads, live setrlimit/prlimit, FD limits and independent child pages");
     return 0;
 }
