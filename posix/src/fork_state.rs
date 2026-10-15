@@ -86,6 +86,7 @@ impl<H: Copy> PosixService<H> {
         let token = self.next_fork_token;
         let next = token.checked_add(1).ok_or(STATUS_EOVERFLOW)?;
         let session = *self.sessions.get(&owner).ok_or(protocol::STATUS_ESRCH)?;
+        self.check_fork_process_limit(&session)?;
         let group = *self
             .process_groups
             .get(&owner)
@@ -144,6 +145,39 @@ impl<H: Copy> PosixService<H> {
         ));
         self.next_fork_token = next;
         Ok(token)
+    }
+
+    fn check_fork_process_limit(&self, session: &Session) -> Result<(), i32> {
+        let limit = self
+            .resource_limits
+            .get(&(session.process_id, protocol::RLIMIT_NPROC))
+            .copied()
+            .unwrap_or_default()
+            .soft;
+        // BSD-style NPROC counts processes, not threads, by stored real UID.
+        // The root exemption is only POSIX policy: native Capability checks
+        // and the service's preparation quotas still apply without exception.
+        if session.real_uid == 0 || limit == protocol::RLIM_INFINITY {
+            return Ok(());
+        }
+        // Registered children remain charged until reaped. An admitted token
+        // reserves one additional slot using its frozen child credentials;
+        // commit atomically trades that token for a registered process under
+        // the same service state lock. Cancellation needs no separate counter.
+        let processes = self.processes.keys().filter(|process| {
+            self.sessions
+                .get(process)
+                .is_some_and(|other| other.real_uid == session.real_uid)
+        });
+        let prepared = self
+            .prepared_forks
+            .iter()
+            .filter(|(_, state)| state.session.real_uid == session.real_uid);
+        let count = processes.count() as u128 + prepared.count() as u128;
+        if count >= u128::from(limit) {
+            return Err(protocol::STATUS_EAGAIN);
+        }
+        Ok(())
     }
 
     fn fork_index(&self, peer: PeerIdentity, token: u64) -> Result<usize, i32> {

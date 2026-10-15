@@ -21,6 +21,9 @@ mod child_signal_info;
 #[path = "support/default_ignored_signals.rs"]
 mod default_ignored_signals;
 
+#[path = "support/fork_process_limit.rs"]
+mod fork_process_limit;
+
 struct LocalTransport {
     service: RefCell<PosixService>,
     peer: PeerIdentity,
