@@ -64,7 +64,7 @@ mod actual {
     for entry in [
         "    pub fn shared_memory(",
         "    pub fn provider(",
-        "    fn object_key(",
+        "    pub(crate) fn object_key(",
     ] {
         let start = source.find(entry).unwrap();
         let end = start + source[start..].find("\n    }\n").unwrap() + 7;

@@ -16,10 +16,10 @@ mod interrupt {
 #[macro_export]
 macro_rules! warn { ($($args:tt)*) => { let _ = format_args!($($args)*); }; }
 mod task {
-    pub struct Object(pub u64);
+    pub struct Object(pub super::vm_object::ObjectKey);
     impl Object {
-        pub fn memory_identity(&self) -> Option<u64> {
-            Some(self.0)
+        pub fn object_key(&self) -> super::vm_object::ObjectKey {
+            self.0
         }
     }
     pub struct MemoryRegion {
@@ -46,6 +46,20 @@ mod task {
         }
     }
 }
+// Key construction/isolation is exercised against the production VmObject in
+// kernel_vm_cache_surface; this probe exercises actual detached-root ownership.
+mod vm_object {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum ObjectKey {
+        Memory(u64),
+        Provider {
+            endpoint_thread_id: u64,
+            endpoint_slot: u16,
+            endpoint_generation: u64,
+            identity: u64,
+        },
+    }
+}
 fn destroyed() -> &'static Mutex<Vec<u64>> {
     static STATE: OnceLock<Mutex<Vec<u64>>> = OnceLock::new();
     STATE.get_or_init(Default::default)
@@ -65,12 +79,47 @@ mod detached_roots;
 fn weak_discovery_pins_physical_ownership_until_revocation_and_hands_off_at_publication() {
     use detached_roots::{snapshot, Root};
     let region = task::MemoryRegion {
-        object: Some(task::Object(7)),
+        object: Some(task::Object(vm_object::ObjectKey::Memory(7))),
         start: 0x5000,
         length: 4096,
         offset: 8192,
     };
-    let root = Root::new(0x1000, &[region]).unwrap();
+    let provider = vm_object::ObjectKey::Provider {
+        endpoint_thread_id: 17,
+        endpoint_slot: 2,
+        endpoint_generation: 8,
+        identity: 7,
+    };
+    let replacement = vm_object::ObjectKey::Provider {
+        endpoint_thread_id: 17,
+        endpoint_slot: 2,
+        endpoint_generation: 9,
+        identity: 7,
+    };
+    let provider_region = task::MemoryRegion {
+        object: Some(task::Object(provider)),
+        start: 0xa000,
+        length: 8192,
+        offset: 4096,
+    };
+    let replacement_region = task::MemoryRegion {
+        object: Some(task::Object(replacement)),
+        start: 0xc000,
+        length: 4096,
+        offset: 0,
+    };
+    let anonymous = task::MemoryRegion {
+        object: None,
+        start: 0xd000,
+        length: 4096,
+        offset: 0,
+    };
+    let root = Root::new(
+        0x1000,
+        &[region, provider_region, replacement_region, anonymous],
+    )
+    .unwrap();
+    assert_eq!(root.mappings().len(), 3);
     let mapping = &root.mappings()[0];
     assert_eq!(
         (
@@ -79,8 +128,21 @@ fn weak_discovery_pins_physical_ownership_until_revocation_and_hands_off_at_publ
             mapping.length,
             mapping.offset
         ),
-        (7, 0x5000, 4096, 8192)
+        (vm_object::ObjectKey::Memory(7), 0x5000, 4096, 8192)
     );
+    let mapping = &root.mappings()[1];
+    assert_eq!(
+        (
+            mapping.identity,
+            mapping.start,
+            mapping.length,
+            mapping.offset
+        ),
+        (provider, 0xa000, 8192, 4096)
+    );
+    assert_eq!(root.mappings()[2].identity, replacement);
+    assert_ne!(root.mappings()[0].identity, provider);
+    assert_ne!(root.mappings()[1].identity, replacement);
     let alias = root.clone();
     let pins = snapshot().unwrap();
     assert_eq!(pins.len(), 1);
