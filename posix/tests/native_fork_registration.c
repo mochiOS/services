@@ -82,6 +82,10 @@
 #define main fd_lease_probe
 #include "native_fd_lease.c"
 #undef main
+#undef CHECK
+#define main provider_release_probe
+#include "native_provider_release.c"
+#undef main
 
 int main(int argc, char **argv) {
     int mode = image_limit_child(argc, argv);
@@ -123,5 +127,7 @@ int main(int argc, char **argv) {
     result = process_limit_probe();
     if (result) return result;
     result = fd_lease_probe();
+    if (result) return result;
+    result = provider_release_probe();
     return result ? result : callback_probe();
 }
