@@ -1448,6 +1448,7 @@ impl FilesystemService {
             return Ok(payload);
         }
         let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
+        refresh_provider_file(open)?;
         let file = open.file.as_mut().ok_or(EISDIR)?;
         let mut payload = vec![0u8; length.min(mnu_abi::provider::MAX_DATA_LEN)];
         let (done, _) = crate::positioned_io::sequential(
@@ -1500,6 +1501,7 @@ impl FilesystemService {
                 .read_into(output).map(|count| (count, 0));
         }
         let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
+        refresh_provider_file(open)?;
         let file = open.file.as_mut().ok_or(EISDIR)?;
         crate::positioned_io::sequential(
             &mut open.offset,
@@ -1530,10 +1532,17 @@ impl FilesystemService {
                 .write(payload).map(|count| (count, 0));
         }
         let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
-        let file = open.file.as_mut().ok_or(EISDIR)?;
+        if open.file.is_none() {
+            return Err(EISDIR);
+        }
         if payload.is_empty() {
             return Ok((0, open.offset));
         }
+        // Another description can have changed the inode/extent map since
+        // this one was opened. Select append position from current backing
+        // while the provider worker still owns mutation serialization.
+        refresh_provider_file(open)?;
+        let file = open.file.as_mut().ok_or(EISDIR)?;
         let mut cursor = if open.status_flags & protocol::OPEN_STATUS_APPEND != 0 {
             file.inode().metadata().len()
         } else {
@@ -1549,6 +1558,7 @@ impl FilesystemService {
             },
         )?;
         open.offset = cursor;
+        open.inode = file.inode().clone();
         Ok(result)
     }
 
@@ -1563,6 +1573,7 @@ impl FilesystemService {
             return Ok(Vec::new());
         }
         let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
+        refresh_provider_file(open)?;
         let file = open.file.as_mut().ok_or(EISDIR)?;
         let mut payload = vec![0u8; length.min(mnu_abi::provider::MAX_DATA_LEN)];
         let done =
@@ -1587,6 +1598,7 @@ impl FilesystemService {
             return open.null.as_ref().ok_or(EISDIR)?.write_at(payload, offset);
         }
         let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
+        refresh_provider_file(open)?;
         let file = open.file.as_mut().ok_or(EISDIR)?;
         crate::positioned_io::transfer(offset, payload.len(), true, |done, position, _| {
             file.write_bytes_at(&payload[done..], position)
@@ -1653,7 +1665,15 @@ impl FilesystemService {
             mnu_abi::HANDLE_SEEK_START => 0,
             mnu_abi::HANDLE_SEEK_CURRENT => current,
             mnu_abi::HANDLE_SEEK_END => {
-                i128::from(open.file.as_ref().ok_or(EISDIR)?.inode().metadata().len())
+                if open.file.is_none() {
+                    return Err(EISDIR);
+                }
+                i128::from(
+                    Inode::read(&open.filesystem, open.inode.index)
+                        .map_err(errno)?
+                        .metadata()
+                        .len(),
+                )
             }
             _ => return Err(EINVAL),
         };
@@ -3573,6 +3593,18 @@ pub fn permission_allows(
         mode & 0o7
     };
     requested & !granted == 0
+}
+
+/// A description owns a cursor, not a private version of its inode or extents.
+/// Called within the provider worker's serialized operation, without RPC.
+fn refresh_provider_file(open: &mut OpenFile) -> Result<(), i32> {
+    if open.file.is_none() {
+        return Err(EISDIR);
+    }
+    let inode = Inode::read(&open.filesystem, open.inode.index).map_err(errno)?;
+    open.file = Some(File::open_inode(&open.filesystem, inode.clone()).map_err(errno)?);
+    open.inode = inode;
+    Ok(())
 }
 
 pub(crate) fn errno(error: Ext4Error) -> i32 {

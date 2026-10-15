@@ -106,6 +106,55 @@ fn test_filesystem() -> FilesystemService {
 }
 
 #[test]
+fn independent_provider_descriptions_observe_current_data_size_and_extents() {
+    let mut fs = test_filesystem();
+    let header = protocol::Header {
+        opcode: protocol::OP_OPEN_AT,
+        flags: protocol::OPEN_AT_READ
+            | protocol::OPEN_AT_WRITE
+            | protocol::OPEN_AT_CREATE
+            | protocol::OPEN_AT_APPEND,
+        mode: 0o600,
+        ..Default::default()
+    };
+    let a = fs
+        .open_at(
+            header,
+            b"/current-inode",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap()
+        .header
+        .open_id;
+    let b = fs
+        .open_at(
+            header,
+            b"/current-inode",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap()
+        .header
+        .open_id;
+    assert_eq!(fs.provider_write(a, b"abc"), Ok(3));
+    assert_eq!(fs.provider_write(b, b"def"), Ok(3));
+    assert_eq!(fs.provider_read(a, 3).unwrap(), b"def");
+    assert_eq!(fs.provider_write_at(b, 100, b"x"), Ok(1));
+    assert_eq!(fs.provider_seek(a, 0, mnu_abi::HANDLE_SEEK_END), Ok(101));
+    assert_eq!(fs.provider_write_at(a, 0, b"X"), Ok(1));
+    assert_eq!(fs.provider_read_at(b, 100, 1).unwrap(), b"x");
+    assert_eq!(fs.provider_seek(b, 0, HANDLE_SEEK_START), Ok(0));
+    let mut output = [0; 6];
+    assert_eq!(fs.provider_read_into(b, &mut output), Ok((6, 0)));
+    assert_eq!(&output, b"Xbcdef");
+    assert_eq!(
+        fs.provider_seek(a, 0, mnu_abi::HANDLE_SEEK_CURRENT),
+        Ok(101)
+    );
+}
+
+#[test]
 fn truncate_zeroes_retained_tail_without_materializing_sparse_growth() {
     let mut filesystem = test_filesystem();
     let file = filesystem
@@ -470,7 +519,9 @@ fn provider_reads_return_the_completed_prefix_after_a_storage_failure() {
         filesystem
             .provider_seek(open_id, 1, HANDLE_SEEK_START)
             .unwrap();
-        *failure.lock().unwrap() = Some(1);
+        // One inode reload and one successful data read precede the injected
+        // failure. The refreshed description must still report that prefix.
+        *failure.lock().unwrap() = Some(2);
         let mut output = vec![0xa5; 4096];
         let done = if shared {
             let (done, start) = filesystem.provider_read_into(open_id, &mut output).unwrap();
