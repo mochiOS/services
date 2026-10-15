@@ -23,6 +23,7 @@ fn reserved_later_mapping_rejects_the_entire_edit_before_any_side_effect() {
         r#"
 use std::{cell::{Cell,RefCell},sync::Arc};
 const EINVAL:u64=(-22i64) as u64; const EAGAIN:u64=(-11i64) as u64;
+const EIO:u64=(-5i64) as u64;
 const EFAULT:u64=(-14i64) as u64; const ENOMEM:u64=(-12i64) as u64;
 const ENOSYS:u64=(-38i64) as u64; const EPERM:u64=(-1i64) as u64;
 const ESRCH:u64=(-3i64) as u64; const EACCES:u64=(-13i64) as u64; const SUCCESS:u64=0;
@@ -48,12 +49,13 @@ mod task {
     use super::*;
     pub mod ids {pub type ProcessId=u64;}
     #[path="@RANGE@"] pub mod memory_range;
-    pub struct Object {pub busy:bool}
+    pub struct Object {pub busy:bool,pub unavailable:bool}
     impl Object {
         pub fn memory_generation(&self)->Option<u64>{Some(1)}
         pub fn with_memory_generation<T>(&self, generation:Option<u64>, install:impl FnOnce()->Result<T,u64>)->Result<T,u64>{
-            locked();assert_eq!(generation,Some(1));if self.busy {Err(EAGAIN)} else {install()}
+            locked();assert_eq!(generation,Some(1));if self.unavailable {Err(EIO)} else if self.busy {Err(EAGAIN)} else {install()}
         }
+        pub fn check_mapping_removal(&self)->Result<(),u64>{locked();if self.busy {Err(EAGAIN)} else {Ok(())}}
         pub fn flush_range(&self,_:u64,_:u64)->Result<(),u64>{Ok(())}
     }
     #[derive(Clone)] pub struct MemoryRegion {pub start:u64,pub object:Option<Arc<Object>>,pub access:u64}
@@ -120,28 +122,40 @@ mod syscall {
     program.push_str("\n}}\n");
     program.push_str(unmap);
     program.push_str(r#"
-fn reset(busy:bool) {
+fn reset(busy:bool,unavailable:bool) {
     PROCESS.with(|process|process.borrow_mut().regions=vec![
         task::MemoryRegion{start:0x1000,object:None,access:3},
-        task::MemoryRegion{start:0x2000,object:Some(Arc::new(task::Object{busy})),access:3},
+        task::MemoryRegion{start:0x2000,object:Some(Arc::new(task::Object{busy,unavailable})),access:3},
     ]);
     EDITS.with(|value|value.set(0));SYNCS.with(|value|value.set(0));
     PLANS.with(|value|value.set(0));METADATA.with(|value|value.set(0));
 }
 fn main() {
     for protection in [false,true] {
-        reset(true);
+        reset(true,false);
         let result=if protection {syscall::memory::protect(0x1000,8192,1)} else {memory_unmap(0x1000,8192)};
         assert_eq!(result,EAGAIN);assert_eq!(EDITS.with(Cell::get),0);assert_eq!(METADATA.with(Cell::get),0);
         assert_eq!(PLANS.with(Cell::get),0);assert_eq!(SYNCS.with(Cell::get),0);
         assert!(!LOCKED.with(Cell::get));
         PROCESS.with(|process|assert!(process.borrow().regions.iter().all(|region|region.access==3)));
-        reset(true);
+        reset(true,false);
         let result=if protection {syscall::memory::protect(0x1000,4096,1)} else {memory_unmap(0x1000,4096)};
         assert_eq!(result,SUCCESS);assert_eq!(EDITS.with(Cell::get),1);
-        reset(false);
+        reset(false,false);
         let result=if protection {syscall::memory::protect(0x1000,8192,1)} else {memory_unmap(0x1000,8192)};
         assert_eq!(result,SUCCESS);assert!(EDITS.with(Cell::get)>0);assert!(METADATA.with(Cell::get)>0);
+        reset(false,true);
+        let result=if protection {syscall::memory::protect(0x1000,8192,1)} else {memory_unmap(0x1000,8192)};
+        if protection {
+            assert_eq!(result,EIO);assert_eq!(EDITS.with(Cell::get),0);assert_eq!(METADATA.with(Cell::get),0);
+            assert_eq!(PLANS.with(Cell::get),0);assert_eq!(SYNCS.with(Cell::get),0);
+        } else {
+            assert_eq!(result,SUCCESS);assert_eq!(EDITS.with(Cell::get),1);assert!(METADATA.with(Cell::get)>0);
+        }
+        reset(true,true);
+        assert_eq!(memory_unmap(0x1000,8192),EAGAIN);
+        assert_eq!(EDITS.with(Cell::get),0);assert_eq!(METADATA.with(Cell::get),0);
+        assert_eq!(PLANS.with(Cell::get),0);assert_eq!(SYNCS.with(Cell::get),0);
     }
 }
 "#);

@@ -56,6 +56,7 @@ mod task {
         pub fn with_memory_generation<T>(&self,generation:Option<u64>,install:impl FnOnce()->Result<T,u64>)->Result<T,u64>{
             locked();assert_eq!(generation,Some(1));if self.busy.load(Ordering::Acquire){Err(syscall::EAGAIN)}else{install()}
         }
+        pub fn check_mapping_removal(&self)->Result<(),u64>{self.with_memory_generation(Some(1),||Ok(()))}
     }
     pub struct MemoryRegion {pub start:u64,pub object:Option<Arc<Object>>}
     impl MemoryRegion {

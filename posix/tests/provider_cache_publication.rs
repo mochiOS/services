@@ -11,6 +11,8 @@ thread_local! {
     static DENY_COMMIT_ALLOC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static COMMIT_ALLOC_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static PHYSICAL_OFFSET: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(Some(0)) };
+    static CAPTURE_GATE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static CAPTURED_GATE: RefCell<Option<object_io::IoLock>> = const { RefCell::new(None) };
 }
 struct FaultAllocator;
 unsafe impl std::alloc::GlobalAlloc for FaultAllocator {
@@ -311,9 +313,13 @@ mod mem {
             if crate::FAIL_GATE_ALLOC.load(std::sync::atomic::Ordering::Relaxed) {
                 return Err(crate::syscall::ENOMEM);
             }
-            Ok(crate::object_io::IoLock::from_allocated(
-                std::sync::Arc::new(crate::object_io::State::new()),
-            ))
+            let gate = crate::object_io::IoLock::from_allocated(std::sync::Arc::new(
+                crate::object_io::State::new(),
+            ));
+            if crate::CAPTURE_GATE.with(std::cell::Cell::get) {
+                crate::CAPTURED_GATE.with(|slot| *slot.borrow_mut() = Some(gate.clone()));
+            }
+            Ok(gate)
         }
     }
 }
@@ -961,6 +967,103 @@ fn provider_writeback_key_is_owned_by_its_live_io_guard() {
     drop(next);
     object.invalidate().unwrap();
     other.invalidate().unwrap();
+}
+
+#[test]
+fn unavailable_cached_backing_cannot_lose_failure_when_original_owners_drop() {
+    let _test = TEST_LOCK.lock().unwrap();
+    reset_lower(b"old");
+    let provider = Arc::new(task::ProviderObject {
+        endpoint_thread_id: 17,
+        endpoint_slot: 2,
+        endpoint_generation: 8,
+    });
+    CAPTURE_GATE.with(|capture| capture.set(true));
+    let object = Arc::new(vm_object::VmObject::provider(provider.clone(), 0xf00d_531).unwrap());
+    CAPTURE_GATE.with(|capture| capture.set(false));
+    let gate = CAPTURED_GATE.with(|slot| slot.borrow_mut().take()).unwrap();
+    let pin = object.prepare_shared_page(0).unwrap();
+    let calls = MAPPING_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+    let reads = LOWER.lock().unwrap().reads;
+    // No PTE is installed in this fixture, and TEST_LOCK excludes every
+    // modeled cache writer while the primitive failure latch is exercised.
+    let reservation = gate.try_lock().unwrap().unwrap().reserve();
+    without_allocations(|| reservation.mark_unavailable());
+    let regions = [task::MemoryRegion {
+        start: 0x2000,
+        length: 4096,
+        object: Some(object.clone()),
+    }];
+    assert_eq!(
+        without_allocations(|| mapping_admission::check_unmap(&regions, 0x1000, 0x3000)),
+        Err(syscall::EAGAIN)
+    );
+    assert_eq!(pin.map_to(4096, 8192, false, false), Err(syscall::EIO));
+    assert_eq!(
+        MAPPING_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+        calls
+    );
+    drop(pin);
+    drop(reservation);
+    assert_eq!(
+        without_allocations(|| mapping_admission::check(&regions, 0x1000, 0x3000)),
+        Err(syscall::EIO)
+    );
+    assert_eq!(
+        without_allocations(|| mapping_admission::check_access(&regions, 0x2000, 1)),
+        Err(Kernel::Memory(result::Memory::InvalidAddress))
+    );
+    assert_eq!(
+        without_allocations(|| mapping_admission::check_unmap(&regions, 0x1000, 0x3000)),
+        Ok(())
+    );
+    drop(regions);
+    drop(object);
+    drop(gate);
+    // Only the cached page now retains the canonical I/O state. Reopening
+    // must reuse its unavailable state rather than a fresh healthy generation.
+    let allocations = GATE_ALLOCS.load(std::sync::atomic::Ordering::Relaxed);
+    let alias = vm_object::VmObject::provider(provider.clone(), 0xf00d_531).unwrap();
+    assert_eq!(
+        GATE_ALLOCS.load(std::sync::atomic::Ordering::Relaxed),
+        allocations
+    );
+    assert!(matches!(
+        alias.page(0),
+        Err(vm_object::VmPageError::Operation(syscall::EIO))
+    ));
+    assert!(matches!(
+        alias.prepare_shared_page(0),
+        Err(vm_object::VmPageError::Operation(syscall::EIO))
+    ));
+    assert_eq!(alias.read_at(0, &mut [0; 8]), Err(syscall::EIO));
+    assert_eq!(alias.write_at(0, b"new"), Err(syscall::EIO));
+    assert_eq!(alias.stage_write_at(0, b"new"), Err(syscall::EIO));
+    assert_eq!(alias.mark_page_dirty(0), Err(syscall::EIO));
+    assert_eq!(alias.flush(), Err(syscall::EIO));
+    assert!(matches!(
+        alias.prepare_extent(3, 1, |_| panic!("unavailable backing allocated boundary")),
+        Err(syscall::EIO)
+    ));
+    assert_eq!(
+        alias.with_memory_generation(alias.memory_generation(), || panic!(
+            "failed backing installed PTE"
+        )),
+        Err::<(), _>(syscall::EIO)
+    );
+    assert_eq!(LOWER.lock().unwrap().reads, reads);
+    assert_eq!(&LOWER.lock().unwrap().bytes, b"old");
+    let other = provider_object();
+    assert_eq!(other.read_at(0, &mut [0; 8]), Ok(3));
+    other.invalidate().unwrap();
+    // Explicit eviction can discard unusable cached data, but cannot repair
+    // an existing object's failure. No provider is called by this cleanup.
+    alias.invalidate().unwrap();
+    assert!(matches!(
+        alias.page(0),
+        Err(vm_object::VmPageError::Operation(syscall::EIO))
+    ));
+    assert!(FRAMES.lock().unwrap().is_empty());
 }
 
 #[test]

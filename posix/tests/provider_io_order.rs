@@ -40,18 +40,24 @@ fn backing_keys_share_ordering_without_serializing_unrelated_objects() {
     let first = gate(&mut registry, 7);
     let alias = gate(&mut registry, 7);
     let other = gate(&mut registry, 8);
-    let guard = first.lock(|| panic!("first owner must acquire"));
-    let independent = other.lock(|| panic!("unrelated backing must not wait"));
+    let guard = first.lock(|| panic!("first owner must acquire")).unwrap();
+    let independent = other
+        .lock(|| panic!("unrelated backing must not wait"))
+        .unwrap();
     drop(independent);
     let mut waited = false;
     let mut owner = Some(guard);
-    let acquired = alias.lock(|| {
-        waited = true;
-        drop(owner.take());
-    });
+    let acquired = alias
+        .lock(|| {
+            waited = true;
+            drop(owner.take());
+        })
+        .unwrap();
     assert!(waited);
     drop(acquired);
-    let _again = first.lock(|| panic!("drop must release ownership"));
+    let _again = first
+        .lock(|| panic!("drop must release ownership"))
+        .unwrap();
 }
 
 #[test]
@@ -60,25 +66,31 @@ fn owner_admission_never_waits_for_an_outstanding_caller() {
     let first = gate(&mut registry, 7);
     let alias = gate(&mut registry, 7);
     let other = gate(&mut registry, 8);
-    let request = first.try_lock().expect("first caller acquires");
+    let request = first.try_lock().unwrap().expect("first caller acquires");
     for _ in 0..64 {
-        assert!(alias.try_lock().is_none());
+        assert!(alias.try_lock().unwrap().is_none());
     }
-    let independent = other.try_lock().expect("different backing stays available");
+    let independent = other
+        .try_lock()
+        .unwrap()
+        .expect("different backing stays available");
     drop(independent);
     // Failed owner admission must not unlock the caller's critical section.
-    assert!(first.try_lock().is_none());
+    assert!(first.try_lock().unwrap().is_none());
     drop(request);
-    let owner = alias.try_lock().expect("retry after caller completion");
+    let owner = alias
+        .try_lock()
+        .unwrap()
+        .expect("retry after caller completion");
     drop(first);
     drop(alias);
     // The guard alone keeps canonical ownership alive across handle teardown.
     let survivor = registry
         .try_get(7, || -> Result<_, ()> { panic!("live guard lost") }, ())
         .unwrap();
-    assert!(survivor.try_lock().is_none());
+    assert!(survivor.try_lock().unwrap().is_none());
     drop(owner);
-    assert!(survivor.try_lock().is_some());
+    assert!(survivor.try_lock().unwrap().is_some());
 }
 
 #[test]
@@ -86,18 +98,94 @@ fn reservation_invalidates_snapshots_and_releases_admission_on_cancel() {
     let mut registry = object_io::Registry::new();
     let gate = gate(&mut registry, 7);
     let generation = gate.generation();
-    let request = gate.try_lock().unwrap();
+    let request = gate.try_lock().unwrap().unwrap();
     assert!(!gate.is_reserved());
     assert_eq!(gate.generation(), generation);
     let reservation = request.reserve();
     assert!(gate.is_reserved());
     assert_ne!(gate.generation(), generation);
-    assert!(gate.try_lock().is_none());
+    assert!(gate.try_lock().unwrap().is_none());
     let reserved_generation = gate.generation();
     drop(reservation);
     assert!(!gate.is_reserved());
     assert_eq!(gate.generation(), reserved_generation);
-    assert!(gate.try_lock().is_some());
+    assert!(gate.try_lock().unwrap().is_some());
+}
+
+#[test]
+fn unavailable_reservation_is_sticky_idempotent_and_isolated_from_other_backings() {
+    let mut registry = object_io::Registry::new();
+    let first = gate(&mut registry, 7);
+    let alias = gate(&mut registry, 7);
+    let other = gate(&mut registry, 8);
+    let owner = first.try_lock().unwrap().unwrap().reserve();
+    let generation = first.generation();
+    owner.mark_unavailable();
+    assert!(alias.is_unavailable());
+    assert_ne!(alias.generation(), generation);
+    let failed_generation = alias.generation();
+    owner.mark_unavailable();
+    assert_eq!(alias.generation(), failed_generation);
+    assert_eq!(alias.try_lock().err(), Some(object_io::Unavailable));
+    assert_eq!(
+        alias.lock(|| panic!("unavailable is not busy")).err(),
+        Some(object_io::Unavailable)
+    );
+    drop(owner);
+    assert!(!alias.is_reserved());
+    assert!(alias.is_unavailable());
+    assert_eq!(alias.try_lock().err(), Some(object_io::Unavailable));
+    let independent = other
+        .lock(|| panic!("unrelated backing must stay available"))
+        .unwrap();
+    drop(independent);
+    let retained = registry
+        .try_get(7, || -> Result<_, ()> { panic!("lost live failure") }, ())
+        .unwrap();
+    assert!(retained.is_unavailable());
+}
+
+#[test]
+fn waiting_io_stops_when_the_current_owner_marks_backing_unavailable() {
+    let mut registry = object_io::Registry::new();
+    let first = gate(&mut registry, 7);
+    let alias = gate(&mut registry, 7);
+    let mut owner = Some(first.try_lock().unwrap().unwrap().reserve());
+    let mut waits = 0;
+    let result = alias.lock(|| {
+        waits += 1;
+        owner.as_ref().unwrap().mark_unavailable();
+        drop(owner.take());
+    });
+    assert_eq!(result.err(), Some(object_io::Unavailable));
+    assert_eq!(waits, 1);
+}
+
+#[test]
+fn concurrent_waiters_never_acquire_after_unavailable_owner_releases() {
+    for _ in 0..16 {
+        let mut registry = object_io::Registry::new();
+        let gate = gate(&mut registry, 7);
+        let owner = gate.try_lock().unwrap().unwrap().reserve();
+        let ready = Arc::new(std::sync::Barrier::new(9));
+        std::thread::scope(|scope| {
+            let mut workers = Vec::new();
+            for _ in 0..8 {
+                let gate = gate.clone();
+                let ready = ready.clone();
+                workers.push(scope.spawn(move || {
+                    ready.wait();
+                    gate.lock(std::thread::yield_now).err()
+                }));
+            }
+            ready.wait();
+            owner.mark_unavailable();
+            drop(owner);
+            for worker in workers {
+                assert_eq!(worker.join().unwrap(), Some(object_io::Unavailable));
+            }
+        });
+    }
 }
 
 #[test]
@@ -113,7 +201,7 @@ fn concurrent_writeback_and_write_sections_do_not_overlap() {
             let finished = finished.clone();
             scope.spawn(move || {
                 for _ in 0..64 {
-                    let _guard = gate.lock(std::thread::yield_now);
+                    let _guard = gate.lock(std::thread::yield_now).unwrap();
                     assert_eq!(active.fetch_add(1, Ordering::SeqCst), 0);
                     std::thread::yield_now();
                     assert_eq!(active.fetch_sub(1, Ordering::SeqCst), 1);
@@ -137,12 +225,14 @@ fn failed_gate_creation_does_not_publish_and_live_gates_do_not_allocate() {
             99,
         )
         .unwrap();
-    let mut owner = Some(first.lock(|| panic!("uncontended gate")));
+    let mut owner = Some(first.lock(|| panic!("uncontended gate")).unwrap());
     let mut waited = false;
-    let acquired = alias.lock(|| {
-        waited = true;
-        drop(owner.take());
-    });
+    let acquired = alias
+        .lock(|| {
+            waited = true;
+            drop(owner.take());
+        })
+        .unwrap();
     assert!(waited);
     drop(acquired);
     drop(first);

@@ -139,7 +139,7 @@ pub fn verify_gate_allocations() {
     let first=registry.try_get(7,object_io_native::new_lock,crate::syscall::ENOMEM).unwrap();
     DENY.store(true,Ordering::Relaxed);
     let alias=registry.try_get(7,||panic!("live gate must not allocate"),crate::syscall::ENOMEM).unwrap();
-    let owner=first.lock(||panic!("uncontended gate"));
+    let owner=first.lock(||panic!("uncontended gate")).unwrap();
     drop(owner);drop(first);drop(alias);
     assert_eq!(ATTEMPTS.load(Ordering::Relaxed),0);
     DENY.store(false,Ordering::Relaxed);
