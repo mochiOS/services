@@ -88,7 +88,7 @@ static void *worker(void *unused) {
     return jumped == 37 ? (void *)0x37 : (void *)1;
   char first[3] = {0}, second[4] = {0};
   char bytes[8] = "abcDEFG";
-  struct iovec vectors[2] = {
+  struct iovec vectors[9] = {
       {kind & 1 ? (void *)bytes : (void *)first, 3},
       {kind & 1 ? (void *)(bytes + 3) : (void *)second, 4}};
   atomic_store_explicit(&entered, 1, memory_order_release);
@@ -101,10 +101,10 @@ static void *worker(void *unused) {
     result = write(source, bytes, 7);
     break;
   case 2:
-    result = readv(source, vectors, 2);
+    result = readv(source, vectors, 9);
     break;
   case 3:
-    result = writev(source, vectors, 2);
+    result = writev(source, vectors, 9);
     break;
   default:
     result = pwrite(source, bytes, 7, 0);
