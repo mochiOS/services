@@ -8,6 +8,7 @@ fn production_sleeps_check_cancellation_and_close_the_check_to_wait_race() {
     let mut program = format!(
         r#"
 use std::ffi::c_void;
+use std::ptr;
 use std::sync::atomic::{{AtomicU32, AtomicU64, Ordering}};
 type c_int = i32;
 type Pthread = usize;
@@ -102,6 +103,8 @@ mod mochios_posix_client {{
             .display()
     );
     for entry in [
+        "pub extern \"C\" fn sleep(",
+        "pub extern \"C\" fn usleep(",
         "pub unsafe extern \"C\" fn nanosleep(",
         "pub unsafe extern \"C\" fn clock_nanosleep(",
         "pub extern \"C\" fn pthread_cancel(",
@@ -134,20 +137,28 @@ fn main() {
         return;
     }
     let result = unsafe {
-        if args[2] == "clock" { clock_nanosleep(4, 0, &request, &mut remaining) }
-        else { nanosleep(&request, &mut remaining) }
+        match args[2].as_str() {
+            "clock" => clock_nanosleep(4, 0, &request, &mut remaining),
+            "sleep" => sleep(request.tv_sec as u32) as i32,
+            "usleep" => usleep(request.tv_sec as u64 * 1_000_000),
+            _ => nanosleep(&request, &mut remaining),
+        }
     };
     assert!(case == 3 || case == 4 || case == 5, "enabled cancellation returned");
     if case == 4 {
-        assert_eq!(result, if args[2] == "clock" { EINTR } else { -1 });
-        assert_eq!(remaining.tv_sec, 1);
-        assert_eq!(remaining.tv_nsec, 0);
+        assert_eq!(result, match args[2].as_str() {
+            "clock" => EINTR, "sleep" => 1, _ => -1,
+        });
+        if args[2] == "clock" || args[2] == "nano" {
+            assert_eq!(remaining.tv_sec, 1);
+            assert_eq!(remaining.tv_nsec, 0);
+        }
         assert_eq!(WAITS.load(Ordering::Acquire), 0);
     } else {
         assert_eq!(result, 0);
         assert_eq!(WAITS.load(Ordering::Acquire), 2);
     }
-    if args[2] == "clock" { assert_eq!(unsafe { ERRNO }, 123); }
+    if args[2] == "clock" || args[2] == "sleep" { assert_eq!(unsafe { ERRNO }, 123); }
     if case == 3 { assert_eq!(CONTROL.cancel_pending.load(Ordering::Acquire), 1); }
 }
 "#,
@@ -163,7 +174,13 @@ fn main() {
     std::fs::create_dir(&directory).unwrap();
     let executable = directory.join("probe");
     let mut compiler = Command::new("rustc")
-        .args(["--edition=2021", "-Awarnings", "-"])
+        .args([
+            "--edition=2021",
+            "-Awarnings",
+            "-Cdebuginfo=0",
+            "-Cstrip=symbols",
+            "-",
+        ])
         .arg("-o")
         .arg(&executable)
         .stdin(Stdio::piped())
@@ -182,7 +199,7 @@ fn main() {
         "{}",
         String::from_utf8_lossy(&compiled.stderr)
     );
-    for kind in ["nano", "clock"] {
+    for kind in ["nano", "clock", "sleep", "usleep"] {
         for case in 0..7 {
             let executed = Command::new(&executable)
                 .args([&case.to_string(), kind])
@@ -197,8 +214,15 @@ fn main() {
             );
         }
     }
-    let invalid_ids = Command::new(&executable).args(["7", "clock"]).output().unwrap();
-    assert!(invalid_ids.status.success(), "{}", String::from_utf8_lossy(&invalid_ids.stderr));
+    let invalid_ids = Command::new(&executable)
+        .args(["7", "clock"])
+        .output()
+        .unwrap();
+    assert!(
+        invalid_ids.status.success(),
+        "{}",
+        String::from_utf8_lossy(&invalid_ids.stderr)
+    );
     std::fs::remove_dir_all(directory).unwrap();
 }
 

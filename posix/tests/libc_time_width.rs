@@ -15,7 +15,7 @@ fn generated_libc_time_t_selects_sdk_64bit_seconds_for_mochios() {
     assert!(
         Command::new("rustc")
             .arg(libc.join("build.rs"))
-            .args(["--edition=2021", "-o"])
+            .args(["--edition=2021", "-Cdebuginfo=0", "-Cstrip=symbols", "-o"])
             .arg(&build)
             .status()
             .unwrap()
@@ -42,10 +42,16 @@ fn generated_libc_time_t_selects_sdk_64bit_seconds_for_mochios() {
         .unwrap();
     let microseconds = &generated[microsecond_start..];
     let microsecond_end = microseconds.find("cfg_if!").unwrap();
+    let unsigned_start = generated
+        .find("#[cfg(target_os = \"mochios\")]\npub type useconds_t")
+        .unwrap();
+    let unsigned = &generated[unsigned_start..];
+    let unsigned_end = unsigned.find("cfg_if!").unwrap();
     let source = format!(
         r#"
 type c_longlong = i64;
 type c_long = i64;
+type c_ulong = u64;
 macro_rules! cfg_if {{
     (if #[cfg($condition:meta)] {{ $($yes:tt)* }} else {{ $($no:tt)* }}) => {{
         #[cfg($condition)] mod selected {{ use super::*; $($yes)* }}
@@ -55,12 +61,20 @@ macro_rules! cfg_if {{
 }}
 {}
 {}
+{}
 const _: [(); 8] = [(); core::mem::size_of::<time_t>()];
 const _: [(); 8] = [(); core::mem::size_of::<suseconds_t>()];
-fn main() {{ let seconds: time_t = 5_000_000_000; assert_eq!(seconds, 5_000_000_000); }}
+const _: [(); 8] = [(); core::mem::size_of::<useconds_t>()];
+fn main() {{
+    let seconds: time_t = 5_000_000_000;
+    let microseconds: useconds_t = 5_000_000_000;
+    assert_eq!(seconds, 5_000_000_000);
+    assert_eq!(microseconds, 5_000_000_000);
+}}
 "#,
         &branch[..end],
-        &microseconds[..microsecond_end]
+        &microseconds[..microsecond_end],
+        &unsigned[..unsigned_end]
     );
     fs::write(temp.join("time.rs"), source).unwrap();
     let binary = temp.join("time");
@@ -71,6 +85,8 @@ fn main() {{ let seconds: time_t = 5_000_000_000; assert_eq!(seconds, 5_000_000_
                 "--cfg",
                 "target_os=\"mochios\"",
                 "-Aexplicit_builtin_cfgs_in_flags",
+                "-Cdebuginfo=0",
+                "-Cstrip=symbols",
                 "-o"
             ])
             .arg(&binary)
