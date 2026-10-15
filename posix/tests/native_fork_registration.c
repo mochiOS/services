@@ -66,6 +66,10 @@
 #define main child_startup_probe
 #include "native_child_startup.c"
 #undef main
+#undef CHECK
+#define main shm_size_limit_probe
+#include "native_shared_memory_size_limit.c"
+#undef main
 
 int main(int argc, char **argv) {
     int mode = image_limit_child(argc, argv);
@@ -85,6 +89,8 @@ int main(int argc, char **argv) {
     result = resource_policy_probe();
     if (result) return result;
     result = file_size_limit_probe();
+    if (result) return result;
+    result = shm_size_limit_probe();
     if (result) return result;
     result = bounded_write_probe();
     if (result) return result;

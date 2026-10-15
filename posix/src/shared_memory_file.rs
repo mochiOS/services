@@ -137,12 +137,28 @@ impl<H: Copy> Descriptions<H> {
     }
 
     pub fn resize<B: Backing<H>>(&self, id: u64, length: u64, backend: &mut B) -> Result<(), i32> {
+        self.resize_bounded(id, length, u64::MAX, backend)
+    }
+
+    /// All extent changes, including other descriptions and namespace
+    /// truncation, hold the same manager lock through native resize. Mapping
+    /// delegations never grant CONTROL over the service-owned RAM backing.
+    pub fn resize_bounded<B: Backing<H>>(
+        &self,
+        id: u64,
+        length: u64,
+        ceiling: u64,
+        backend: &mut B,
+    ) -> Result<(), i32> {
         let entry = self.entries.get(&id).ok_or(-9)?;
         if !entry.writable {
             return Err(-9);
         }
         if length > i64::MAX as u64 {
             return Err(-22);
+        }
+        if ceiling != u64::MAX && length > ceiling && length > backend.length(entry.backing)? {
+            return Err(mnu_abi::provider::STATUS_BOUND_REACHED as i32);
         }
         // ftruncate does not change an open description's file position.
         backend.resize(entry.backing, length)
@@ -395,6 +411,13 @@ pub fn handle_provider_request<H: Copy, B: Backing<H>>(
                             .resize(header.object_id, length, backend)
                             .map(|_| (0, Vec::new()))
                     }
+                    wire::CONTROL_RESIZE_BOUNDED if payload.len() == 16 && header.length == 0 => {
+                        let length = u64::from_le_bytes(payload[..8].try_into().unwrap());
+                        let ceiling = u64::from_le_bytes(payload[8..].try_into().unwrap());
+                        descriptions
+                            .resize_bounded(header.object_id, length, ceiling, backend)
+                            .map(|_| (0, Vec::new()))
+                    }
                     wire::CONTROL_GET_FLAGS if payload.is_empty() && header.length == 4 => {
                         descriptions
                             .status_flags(header.object_id)
@@ -430,6 +453,7 @@ pub fn handle_provider_request<H: Copy, B: Backing<H>>(
                     }
                     wire::CONTROL_LENGTH
                     | wire::CONTROL_RESIZE
+                    | wire::CONTROL_RESIZE_BOUNDED
                     | wire::CONTROL_GET_FLAGS
                     | wire::CONTROL_SET_FLAGS
                     | wire::CONTROL_UPDATE_FLAGS

@@ -7,6 +7,8 @@ struct Ram {
     references: usize,
     fail: bool,
     oversized_read: bool,
+    length_error: Option<i32>,
+    resizes: usize,
 }
 
 impl Backing<u32> for Ram {
@@ -25,9 +27,13 @@ impl Backing<u32> for Ram {
         Ok(())
     }
     fn length(&mut self, _: u32) -> Result<u64, i32> {
+        if let Some(error) = self.length_error {
+            return Err(error);
+        }
         Ok(self.bytes.len() as u64)
     }
     fn resize(&mut self, _: u32, length: u64) -> Result<(), i32> {
+        self.resizes += 1;
         if self.fail {
             return Err(-12);
         }
@@ -54,6 +60,144 @@ impl Backing<u32> for Ram {
         self.bytes[start..start + input.len()].copy_from_slice(input);
         Ok(input.len())
     }
+}
+
+#[test]
+fn bounded_resize_uses_live_extent_without_changing_cursor_or_masking_backend_errors() {
+    let mut descriptions = Descriptions::new();
+    let mut ram = Ram::default();
+    let first = descriptions.open(1, true, &mut ram).unwrap();
+    let second = descriptions.open(1, true, &mut ram).unwrap();
+    let readonly = descriptions.open(1, false, &mut ram).unwrap();
+    descriptions.write(first, b"abcdefgh", &mut ram).unwrap();
+    descriptions
+        .seek(first, 3, HANDLE_SEEK_START, &mut ram)
+        .unwrap();
+    descriptions.resize_bounded(second, 8, 5, &mut ram).unwrap();
+    descriptions.resize_bounded(second, 7, 5, &mut ram).unwrap();
+    let count = ram.resizes;
+    assert_eq!(
+        descriptions.resize_bounded(first, 8, 5, &mut ram),
+        Err(mnu_abi::provider::STATUS_BOUND_REACHED as i32)
+    );
+    assert_eq!(ram.resizes, count);
+    assert_eq!(ram.bytes, b"abcdefg");
+    assert_eq!(
+        descriptions.seek(first, 0, HANDLE_SEEK_CURRENT, &mut ram),
+        Ok(3)
+    );
+    assert_eq!(
+        descriptions.resize_bounded(readonly, 8, 0, &mut ram),
+        Err(-9)
+    );
+    assert_eq!(
+        descriptions.resize_bounded(first, u64::MAX, 0, &mut ram),
+        Err(-22)
+    );
+    ram.length_error = Some(-5);
+    assert_eq!(descriptions.resize_bounded(first, 8, 5, &mut ram), Err(-5));
+    ram.length_error = None;
+    ram.fail = true;
+    assert_eq!(
+        descriptions.resize_bounded(first, 10, 10, &mut ram),
+        Err(-12)
+    );
+    ram.fail = false;
+    descriptions.resize_bounded(first, 0, 0, &mut ram).unwrap();
+    assert_eq!(
+        descriptions.resize_bounded(second, 1, 0, &mut ram),
+        Err(mnu_abi::provider::STATUS_BOUND_REACHED as i32)
+    );
+    descriptions
+        .resize_bounded(second, 2, u64::MAX, &mut ram)
+        .unwrap();
+    assert_eq!(ram.bytes, [0; 2]);
+    // Mapping aliases cannot resize outside the shared manager lock.
+    assert_eq!(
+        mochios_posix_protocol::shared_memory::mapping_rights(true) & mnu_abi::HANDLE_RIGHT_CONTROL,
+        0
+    );
+}
+
+#[test]
+fn bounded_resize_provider_control_authentication_and_wire_failures_are_nonmutating() {
+    use mnu_abi::{IPC_DELIVERY_NATIVE_OBJECT, provider};
+    use mochios_posix_protocol::shared_memory as wire;
+    use posix_service::shared_memory_file::handle_provider_request;
+    let mut descriptions = Descriptions::new();
+    let mut ram = Ram::default();
+    let id = descriptions.open(1, true, &mut ram).unwrap();
+    let mut payload = [0; 16];
+    payload[..8].copy_from_slice(&6u64.to_le_bytes());
+    payload[8..].copy_from_slice(&5u64.to_le_bytes());
+    let mut response = [0; provider::RESPONSE_HEADER_LEN + 1];
+    for (flags, attachments, size, output, expected) in [
+        (0, 0, 16, 0, -13),
+        (IPC_DELIVERY_NATIVE_OBJECT, 1, 16, 0, -22),
+        (IPC_DELIVERY_NATIVE_OBJECT, 0, 0, 0, -22),
+        (IPC_DELIVERY_NATIVE_OBJECT, 0, 8, 0, -22),
+        (IPC_DELIVERY_NATIVE_OBJECT, 0, 15, 0, -22),
+        (IPC_DELIVERY_NATIVE_OBJECT, 0, 16, 1, -22),
+        (
+            IPC_DELIVERY_NATIVE_OBJECT,
+            0,
+            16,
+            0,
+            provider::STATUS_BOUND_REACHED,
+        ),
+    ] {
+        let request = frame(
+            provider::OP_CONTROL,
+            id,
+            wire::CONTROL_RESIZE_BOUNDED,
+            0,
+            output,
+            &payload[..size],
+        );
+        let length = handle_provider_request(
+            &mut descriptions,
+            &request,
+            flags,
+            attachments,
+            &mut ram,
+            &mut response,
+        )
+        .unwrap()
+        .unwrap();
+        let (reply, data) = provider::ResponseHeader::decode(&response[..length]).unwrap();
+        assert_eq!(reply.status, expected);
+        assert!(data.is_empty());
+        assert!(ram.bytes.is_empty());
+        assert_eq!(ram.resizes, 0);
+    }
+    payload[..8].copy_from_slice(&5u64.to_le_bytes());
+    let request = frame(
+        provider::OP_CONTROL,
+        id,
+        wire::CONTROL_RESIZE_BOUNDED,
+        0,
+        0,
+        &payload,
+    );
+    let n = handle_provider_request(
+        &mut descriptions,
+        &request,
+        IPC_DELIVERY_NATIVE_OBJECT,
+        0,
+        &mut ram,
+        &mut response,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        provider::ResponseHeader::decode(&response[..n])
+            .unwrap()
+            .0
+            .status,
+        0
+    );
+    assert_eq!(ram.bytes, [0; 5]);
+    assert_eq!(ram.resizes, 1);
 }
 
 #[test]
