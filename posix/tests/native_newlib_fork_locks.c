@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/wait.h>
+#include <sys/resource.h>
 #include <time.h>
 #include <unistd.h>
 #ifdef __mochios__
@@ -20,6 +21,7 @@ static _LOCK_RECURSIVE_T allocator_lock = &__lock___malloc_recursive_mutex;
 #ifdef __mochios__
 static atomic_int arena_ready, fork_entered, fork_finished, arena_copied_early, arena_stop;
 static atomic_int registration_error;
+static atomic_int policy_error;
 static void *arena_writer(void *unused) {
     (void)unused;
     __lock_acquire_recursive(allocator_lock);
@@ -28,6 +30,10 @@ static void *arena_writer(void *unused) {
     struct timespec delay = { .tv_nsec = 100000000 };
     while (nanosleep(&delay, &delay) && errno == EINTR) {}
     atomic_store(&arena_copied_early, atomic_load(&fork_finished));
+    /* Fork must not hold POLICY while waiting for this allocator lock.
+     * This is also the lock order needed by future sbrk limit checks. */
+    struct rlimit limit;
+    atomic_store(&policy_error, getrlimit(RLIMIT_DATA, &limit));
     /* Fork must not hold REGISTRY while waiting for this allocator lock. */
     atomic_store(&registration_error, pthread_atfork(NULL, NULL, NULL));
     __lock_release_recursive(allocator_lock);
@@ -48,9 +54,10 @@ static int serialized_arena(void) {
     void *result;
     CHECK(pthread_join(thread, &result) == 0 && result == NULL);
     CHECK(child == -1 && error == EAGAIN && !atomic_load(&arena_copied_early)
-        && !atomic_load(&registration_error));
+        && !atomic_load(&registration_error) && !atomic_load(&policy_error));
     puts("newlib-fork-locks: PASS clone waits for allocator mutation and releases locks after EAGAIN");
     puts("newlib-fork-locks: PASS atfork registration under allocator ownership does not invert clone locks");
+    puts("newlib-fork-locks: PASS resource policy reads under allocator ownership do not invert fork locks");
     return 0;
 }
 #endif

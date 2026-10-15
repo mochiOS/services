@@ -357,7 +357,7 @@ fn invalid_resource_never_discovers_and_busy_reader_retries_after_unlock() {
 }
 
 #[test]
-fn runtime_routes_own_reads_to_page_and_freezes_before_allocator_and_state() {
+fn runtime_routes_own_reads_to_page_and_freezes_after_allocator_before_state() {
     let source = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
     let clone = source
         .split("fn clone_registered_process()")
@@ -367,9 +367,13 @@ fn runtime_routes_own_reads_to_page_and_freezes_before_allocator_and_state() {
         .next()
         .unwrap();
     assert!(
-        clone.find("resource_policy::freeze_for_clone()").unwrap()
-            < clone.find("atfork::freeze_allocator()").unwrap()
+        clone.find("atfork::freeze_allocator()").unwrap()
+            < clone.find("resource_policy::freeze_for_clone()").unwrap()
     );
+    assert!(clone.find("resource_policy::freeze_for_clone()").unwrap()
+        < clone.find("let guard = state()").unwrap());
+    assert!(clone.find("drop(policy_guard)").unwrap()
+        < clone.find("drop(allocator_guard)").unwrap());
     assert!(
         clone
             .find("resource_policy::reset_child(&mut policy_guard)")
