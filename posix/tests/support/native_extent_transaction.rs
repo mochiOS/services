@@ -529,11 +529,9 @@ fn irrevocable_cache_failure_retains_retired_root_until_publication_finishes() {
     crate::without_allocations(extent_transaction::flush);
     crate::PHYSICAL_OFFSET.with(|offset| offset.set(Some(0)));
     assert_eq!(paging::DESTROYED.load(Ordering::Relaxed), destroyed);
-    assert!(
-        physical
-            .iter()
-            .all(|frame| crate::FRAMES.lock().unwrap().contains_key(frame))
-    );
+    assert!(physical
+        .iter()
+        .all(|frame| crate::FRAMES.lock().unwrap().contains_key(frame)));
     assert!(matches!(
         object.page(0),
         Err(crate::vm_object::VmPageError::Operation(
@@ -542,11 +540,9 @@ fn irrevocable_cache_failure_retains_retired_root_until_publication_finishes() {
     ));
     crate::without_allocations(extent_transaction::flush);
     assert_eq!(paging::DESTROYED.load(Ordering::Relaxed), destroyed + 1);
-    assert!(
-        physical
-            .iter()
-            .all(|frame| !crate::FRAMES.lock().unwrap().contains_key(frame))
-    );
+    assert!(physical
+        .iter()
+        .all(|frame| !crate::FRAMES.lock().unwrap().contains_key(frame)));
     assert_eq!(object.read_at(0, &mut [0; 64]), Ok(17));
     drop(pin);
     object.invalidate().unwrap();
@@ -582,19 +578,15 @@ fn retired_root_stays_alive_until_deferred_mapping_cancellation_finishes() {
     process::replace(process::ProcessTable(Vec::new()));
     paging::destroy_user_page_table(ROOT).unwrap();
     assert_eq!(paging::DESTROYED.load(Ordering::Relaxed), destroyed);
-    assert!(
-        physical
-            .iter()
-            .all(|frame| crate::FRAMES.lock().unwrap().contains_key(frame))
-    );
+    assert!(physical
+        .iter()
+        .all(|frame| crate::FRAMES.lock().unwrap().contains_key(frame)));
     crate::without_allocations(|| drop(owner));
     crate::without_allocations(extent_transaction::flush);
     assert_eq!(paging::DESTROYED.load(Ordering::Relaxed), destroyed + 1);
-    assert!(
-        physical
-            .iter()
-            .all(|frame| !crate::FRAMES.lock().unwrap().contains_key(frame))
-    );
+    assert!(physical
+        .iter()
+        .all(|frame| !crate::FRAMES.lock().unwrap().contains_key(frame)));
     assert_eq!(object.read_at(0, &mut [0; 8192]), Ok(8192));
     drop(pin);
     object.invalidate().unwrap();
@@ -703,5 +695,373 @@ fn partial_growth_zeros_only_the_newly_valid_private_boundary_suffix() {
     assert!(boundary[..904].iter().all(|byte| *byte == 0xb7));
     assert!(boundary[904..].iter().all(|byte| *byte == 0));
     assert_eq!(paging::flags(ROOT, BASE + 4096), Some(0x805));
+    cleanup(object, pin);
+}
+
+#[test]
+fn external_preparation_suspends_prefix_but_can_cancel_before_io_begins() {
+    let _test = crate::TEST_LOCK.lock().unwrap();
+    let (object, pin, physical) = setup();
+    let owner =
+        extent_transaction::ExtentTransaction::prepare_external(&object, 8192, 5000).unwrap();
+    // The first page is outside the resize's affected range, but would also
+    // expose stale bytes if an uncertain storage update lost its owner.
+    for address in [BASE, BASE + 4096] {
+        assert_eq!(paging::flags(ROOT, address), Some(0x804));
+    }
+    crate::without_allocations(|| drop(owner));
+    crate::without_allocations(extent_transaction::flush);
+    for (index, frame) in physical.iter().enumerate() {
+        assert_eq!(paging::flags(ROOT, BASE + index as u64 * 4096), Some(0x805));
+        assert_eq!(
+            unsafe { *(*frame as *const u8) },
+            if index == 0 { 0x5a } else { 0xb7 }
+        );
+    }
+    assert_eq!(object.read_at(0, &mut [0; 8192]), Ok(8192));
+    cleanup(object, pin);
+}
+
+#[test]
+fn external_prepare_cannot_authorize_io_before_all_cpu_tlb_acknowledgement() {
+    let _test = crate::TEST_LOCK.lock().unwrap();
+    let (object, pin, _) = setup();
+    tlb_shootdown::FAIL.store(true, Ordering::Relaxed);
+    let result = extent_transaction::ExtentTransaction::prepare_external(&object, 8192, 5000);
+    tlb_shootdown::FAIL.store(false, Ordering::Relaxed);
+    assert!(matches!(result, Err(crate::syscall::EIO)));
+    assert_eq!(paging::flags(ROOT, BASE), Some(0x804));
+    assert_eq!(paging::flags(ROOT, BASE + 4096), Some(0x804));
+    assert_eq!(object.read_at(0, &mut [0; 1]), Err(crate::syscall::EAGAIN));
+    crate::without_allocations(extent_transaction::flush);
+    assert_eq!(paging::flags(ROOT, BASE), Some(0x805));
+    assert_eq!(paging::flags(ROOT, BASE + 4096), Some(0x805));
+    assert_eq!(object.read_at(0, &mut [0; 8192]), Ok(8192));
+    cleanup(object, pin);
+}
+
+#[test]
+fn failed_external_begin_still_cancels_and_local_owner_cannot_begin_external_io() {
+    let _test = crate::TEST_LOCK.lock().unwrap();
+    for full_scope in [false, true] {
+        let (object, pin, _) = setup();
+        let mut owner = if full_scope {
+            extent_transaction::ExtentTransaction::prepare_external(&object, 8192, 17)
+        } else {
+            extent_transaction::ExtentTransaction::prepare(&object, 8192, 17)
+        }
+        .unwrap();
+        if full_scope {
+            paging::LOOKUPS.store(0, Ordering::Relaxed);
+            paging::FAIL_LOOKUP.store(1, Ordering::Relaxed);
+            assert_eq!(
+                crate::without_allocations(|| owner.begin_external()),
+                Err(crate::syscall::EFAULT)
+            );
+            paging::FAIL_LOOKUP.store(0, Ordering::Relaxed);
+            crate::PHYSICAL_OFFSET.with(|offset| offset.set(None));
+            let result = crate::without_allocations(|| owner.begin_external());
+            crate::PHYSICAL_OFFSET.with(|offset| offset.set(Some(0)));
+            assert_eq!(result, Err(crate::syscall::EIO));
+        } else {
+            assert_eq!(owner.begin_external(), Err(crate::syscall::EINVAL));
+        }
+        assert_eq!(owner.confirm_unchanged(), Err(crate::syscall::EINVAL));
+        crate::without_allocations(|| drop(owner));
+        crate::without_allocations(extent_transaction::flush);
+        assert_eq!(object.read_at(0, &mut [0; 8192]), Ok(8192));
+        assert_eq!(paging::flags(ROOT, BASE), Some(0x805));
+        assert_eq!(paging::flags(ROOT, BASE + 4096), Some(0x805));
+        cleanup(object, pin);
+    }
+}
+
+#[test]
+fn uncertain_external_owner_death_discards_every_mapping_without_querying_storage() {
+    let _test = crate::TEST_LOCK.lock().unwrap();
+    for length in [0, 4096, 5000, 8192, 12288] {
+        let (object, pin, physical) = setup();
+        let reads = crate::LOWER.lock().unwrap().reads;
+        let mut owner =
+            extent_transaction::ExtentTransaction::prepare_external(&object, 8192, length).unwrap();
+        crate::without_allocations(|| owner.begin_external()).unwrap();
+        assert_eq!(owner.begin_external(), Err(crate::syscall::EINVAL));
+        assert_eq!(owner.publish_local(), Err(crate::syscall::EINVAL));
+        // Model a partial lower mutation, not a confirmed resize. Cleanup
+        // must neither infer success from length nor call the lower provider.
+        crate::LOWER.lock().unwrap().bytes.truncate(3000);
+        crate::without_allocations(|| {
+            process::with_mapping_table(|_| {
+                drop(owner);
+                extent_transaction::flush();
+                assert_eq!(paging::flags(ROOT, BASE), Some(0x804));
+            })
+        });
+        assert_eq!(object.read_at(0, &mut [0; 1]), Err(crate::syscall::EAGAIN));
+        crate::without_allocations(extent_transaction::flush);
+        assert_eq!(object.read_at(0, &mut [0; 1]), Err(crate::syscall::EIO));
+        assert_eq!(object.write_at(0, b"x"), Err(crate::syscall::EIO));
+        assert_eq!(crate::LOWER.lock().unwrap().reads, reads);
+        assert_eq!(crate::LOWER.lock().unwrap().bytes.len(), 3000);
+        for (index, frame) in physical.iter().enumerate() {
+            assert_eq!(paging::flags(ROOT, BASE + index as u64 * 4096), None);
+            assert!(!crate::FRAMES.lock().unwrap().contains_key(frame));
+        }
+        process::with_mapping_table(|table| {
+            let regions = table.iter().next().unwrap().memory_regions();
+            assert_eq!(
+                crate::mapping_admission::check_unmap(regions, BASE, BASE + 8192),
+                Ok(())
+            );
+            assert_eq!(
+                crate::mapping_admission::check(regions, BASE, BASE + 8192),
+                Err(crate::syscall::EIO)
+            );
+        });
+        cleanup(object, pin);
+    }
+}
+
+#[test]
+fn confirmed_unchanged_outcome_survives_partial_cleanup_and_cannot_be_published() {
+    let _test = crate::TEST_LOCK.lock().unwrap();
+    for fail_lookup in [1, 3] {
+        let (object, pin, physical) = setup();
+        let mut owner =
+            extent_transaction::ExtentTransaction::prepare_external(&object, 8192, 5000).unwrap();
+        crate::without_allocations(|| owner.begin_external()).unwrap();
+        paging::LOOKUPS.store(0, Ordering::Relaxed);
+        paging::FAIL_LOOKUP.store(fail_lookup, Ordering::Relaxed);
+        assert_eq!(
+            crate::without_allocations(|| owner.confirm_unchanged()),
+            Err(crate::syscall::EFAULT)
+        );
+        assert_eq!(owner.request_publication(), Err(crate::syscall::EINVAL));
+        assert_eq!(owner.publish_local(), Err(crate::syscall::EINVAL));
+        paging::FAIL_LOOKUP.store(0, Ordering::Relaxed);
+        crate::without_allocations(|| owner.confirm_unchanged()).unwrap();
+        assert_eq!(owner.confirm_unchanged(), Err(crate::syscall::EINVAL));
+        crate::without_allocations(|| drop(owner));
+        crate::without_allocations(extent_transaction::flush);
+        assert_eq!(object.read_at(0, &mut [0; 8192]), Ok(8192));
+        for (index, frame) in physical.iter().enumerate() {
+            assert_eq!(paging::flags(ROOT, BASE + index as u64 * 4096), Some(0x805));
+            let bytes = unsafe { std::slice::from_raw_parts(*frame as *const u8, 4096) };
+            assert!(bytes
+                .iter()
+                .all(|byte| *byte == if index == 0 { 0x5a } else { 0xb7 }));
+        }
+        cleanup(object, pin);
+    }
+}
+
+#[test]
+fn confirmed_external_publication_restores_prefix_and_only_zeros_changed_boundary() {
+    let _test = crate::TEST_LOCK.lock().unwrap();
+    for (old_length, length) in [
+        (8192, 0),
+        (8192, 17),
+        (8192, 4096),
+        (8192, 5000),
+        (8192, 8192),
+        (8192, 12288),
+        (5000, 8192),
+    ] {
+        let (object, pin, physical) = setup();
+        crate::LOWER
+            .lock()
+            .unwrap()
+            .bytes
+            .truncate(old_length as usize);
+        let mut owner =
+            extent_transaction::ExtentTransaction::prepare_external(&object, old_length, length)
+                .unwrap();
+        crate::without_allocations(|| owner.begin_external()).unwrap();
+        assert_eq!(paging::flags(ROOT, BASE), Some(0x804));
+        crate::LOWER
+            .lock()
+            .unwrap()
+            .bytes
+            .resize(length as usize, 0);
+        crate::without_allocations(|| owner.request_publication()).unwrap();
+        assert_eq!(owner.confirm_unchanged(), Err(crate::syscall::EINVAL));
+        let capacity = (length + 4095) & !4095;
+        let boundary = old_length.min(length);
+        for (index, frame) in physical.iter().enumerate() {
+            let offset = index as u64 * 4096;
+            if offset >= capacity {
+                assert_eq!(paging::flags(ROOT, BASE + offset), None);
+                assert!(!crate::FRAMES.lock().unwrap().contains_key(frame));
+            } else {
+                assert_eq!(paging::flags(ROOT, BASE + offset), Some(0x805));
+                let bytes = unsafe { std::slice::from_raw_parts(*frame as *const u8, 4096) };
+                for (within, byte) in bytes.iter().enumerate() {
+                    let zero = length != old_length
+                        && boundary & 4095 != 0
+                        && offset == boundary & !4095
+                        && within as u64 >= boundary & 4095;
+                    assert_eq!(
+                        *byte,
+                        if zero {
+                            0
+                        } else if index == 0 {
+                            0x5a
+                        } else {
+                            0xb7
+                        }
+                    );
+                }
+            }
+        }
+        assert_eq!(object.read_at(0, &mut [0; 16384]), Ok(length as usize));
+        cleanup(object, pin);
+    }
+}
+
+#[test]
+fn uncertain_cleanup_latches_failure_before_retry_and_keeps_retired_root_pinned() {
+    let _test = crate::TEST_LOCK.lock().unwrap();
+    let (object, pin, physical) = setup();
+    let mut owner =
+        extent_transaction::ExtentTransaction::prepare_external(&object, 8192, 5000).unwrap();
+    crate::without_allocations(|| owner.begin_external()).unwrap();
+    let destroyed = paging::DESTROYED.load(Ordering::Relaxed);
+    process::replace(process::ProcessTable(Vec::new()));
+    paging::destroy_user_page_table(ROOT).unwrap();
+    crate::without_allocations(|| drop(owner));
+    paging::LOOKUPS.store(0, Ordering::Relaxed);
+    paging::FAIL_LOOKUP.store(1, Ordering::Relaxed);
+    crate::without_allocations(extent_transaction::flush);
+    let failed_generation = object.memory_generation();
+    assert_eq!(object.read_at(0, &mut [0; 1]), Err(crate::syscall::EIO));
+    assert_eq!(paging::DESTROYED.load(Ordering::Relaxed), destroyed);
+    assert_eq!(object.check_mapping_removal(), Err(crate::syscall::EAGAIN));
+    assert!(physical
+        .iter()
+        .all(|frame| crate::FRAMES.lock().unwrap().contains_key(frame)));
+    paging::FAIL_LOOKUP.store(0, Ordering::Relaxed);
+    crate::without_allocations(extent_transaction::flush);
+    assert_eq!(object.memory_generation(), failed_generation);
+    assert_eq!(object.check_mapping_removal(), Ok(()));
+    assert_eq!(paging::DESTROYED.load(Ordering::Relaxed), destroyed + 1);
+    assert!(physical
+        .iter()
+        .all(|frame| !crate::FRAMES.lock().unwrap().contains_key(frame)));
+    drop(pin);
+    object.invalidate().unwrap();
+    assert!(crate::FRAMES.lock().unwrap().is_empty());
+}
+
+#[test]
+fn uncertain_cleanup_covers_detached_prefix_and_leaves_unrelated_mapping_usable() {
+    let _test = crate::TEST_LOCK.lock().unwrap();
+    let (object, pin, _) = setup();
+    let other = Arc::new(
+        vm_object::VmObject::provider(
+            Arc::new(crate::task::ProviderObject {
+                endpoint_thread_id: 17,
+                endpoint_slot: 2,
+                endpoint_generation: 8,
+            }),
+            0x9876,
+        )
+        .unwrap(),
+    );
+    let detached_root = 0x2000;
+    let detached_address = BASE + 0x10000;
+    let other_address = BASE + 8192;
+    let detached_frame = crate::frame::allocate_zeroed_frame()
+        .unwrap()
+        .start_address()
+        .as_u64();
+    let other_frame = crate::frame::allocate_zeroed_frame()
+        .unwrap()
+        .start_address()
+        .as_u64();
+    paging::install(detached_root, detached_address, detached_frame);
+    paging::install(ROOT, other_address, other_frame);
+    process::replace(process::ProcessTable(vec![process::Process {
+        root: ROOT,
+        regions: vec![
+            MemoryRegion {
+                start: BASE,
+                length: 8192,
+                object: Some(object.clone()),
+            },
+            MemoryRegion {
+                start: other_address,
+                length: 4096,
+                object: Some(other.clone()),
+            },
+        ],
+    }]));
+    let detached = process::with_mapping_table(|_| {
+        detached_roots::Root::new(
+            detached_root,
+            &[MemoryRegion {
+                start: detached_address,
+                length: 4096,
+                object: Some(object.clone()),
+            }],
+        )
+        .unwrap()
+    });
+    let mut owner =
+        extent_transaction::ExtentTransaction::prepare_external(&object, 8192, 5000).unwrap();
+    crate::without_allocations(|| owner.begin_external()).unwrap();
+    assert_eq!(paging::flags(detached_root, detached_address), Some(0x804));
+    assert_eq!(paging::flags(ROOT, other_address), Some(0x805));
+    let destroyed = paging::DESTROYED.load(Ordering::Relaxed);
+    process::with_mapping_table(|_| drop(detached));
+    assert_eq!(paging::DESTROYED.load(Ordering::Relaxed), destroyed);
+    crate::without_allocations(|| drop(owner));
+    crate::without_allocations(extent_transaction::flush);
+    assert_eq!(paging::DESTROYED.load(Ordering::Relaxed), destroyed + 1);
+    assert!(!crate::FRAMES.lock().unwrap().contains_key(&detached_frame));
+    assert_eq!(paging::flags(ROOT, BASE), None);
+    assert_eq!(paging::flags(ROOT, BASE + 4096), None);
+    assert_eq!(paging::flags(ROOT, other_address), Some(0x805));
+    assert!(crate::FRAMES.lock().unwrap().contains_key(&other_frame));
+    assert_eq!(object.read_at(0, &mut [0; 1]), Err(crate::syscall::EIO));
+    assert_eq!(other.read_at(0, &mut [0; 1]), Ok(1));
+    other.invalidate().unwrap();
+    cleanup(object, pin);
+}
+
+#[test]
+fn confirmed_external_publication_keeps_decision_after_failed_check_and_owner_loss() {
+    let _test = crate::TEST_LOCK.lock().unwrap();
+    let (object, pin, physical) = setup();
+    let mut owner =
+        extent_transaction::ExtentTransaction::prepare_external(&object, 8192, 5000).unwrap();
+    crate::without_allocations(|| owner.begin_external()).unwrap();
+    crate::LOWER.lock().unwrap().bytes.truncate(5000);
+    paging::LOOKUPS.store(0, Ordering::Relaxed);
+    paging::FAIL_LOOKUP.store(1, Ordering::Relaxed);
+    assert_eq!(
+        crate::without_allocations(|| owner.request_publication()),
+        Err(crate::syscall::EFAULT)
+    );
+    assert_eq!(owner.confirm_unchanged(), Err(crate::syscall::EINVAL));
+    crate::without_allocations(|| drop(owner));
+    paging::FAIL_LOOKUP.store(0, Ordering::Relaxed);
+    crate::without_allocations(extent_transaction::flush);
+    assert_eq!(object.read_at(0, &mut [0; 8192]), Ok(5000));
+    for (index, frame) in physical.iter().enumerate() {
+        assert_eq!(paging::flags(ROOT, BASE + index as u64 * 4096), Some(0x805));
+        let bytes = unsafe { std::slice::from_raw_parts(*frame as *const u8, 4096) };
+        for (within, byte) in bytes.iter().enumerate() {
+            assert_eq!(
+                *byte,
+                if index == 0 {
+                    0x5a
+                } else if within < 904 {
+                    0xb7
+                } else {
+                    0
+                }
+            );
+        }
+    }
     cleanup(object, pin);
 }
