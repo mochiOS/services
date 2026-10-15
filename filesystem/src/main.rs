@@ -162,6 +162,16 @@ fn main() {
                     }
                     continue;
                 }
+                if filesystem_service::admission_ipc::requested(header) {
+                    let result = handle_admitted_mutation(&mut service, header, payload, &attached);
+                    reply_admitted_mutation(
+                        &mut service, endpoint, sender, header, result, &mut response_bytes,
+                    );
+                    // In particular, keep an incoming borrowed ticket alive
+                    // until reply_object_handles has copied its reference.
+                    close_attached_handles(&attached);
+                    continue;
+                }
                 if matches!(
                     header.opcode,
                     protocol::OP_OPEN_AT
@@ -743,6 +753,148 @@ fn main() {
             let _ = platform::ipc::reply(sender, &response_bytes[..length]);
         }
     }
+}
+
+#[cfg(target_os = "mochios")]
+fn handle_admitted_mutation(
+    service: &mut filesystem_service::service::FilesystemService,
+    header: mochios_filesystem_protocol::Header,
+    payload: &[u8],
+    attached: &mochi_user_platform::ipc::IpcObjectHandles,
+) -> filesystem_service::memory_updates::MutationResult<filesystem_service::service::Response> {
+    use filesystem_service::memory_updates::MutationResult;
+    use mochios_filesystem_protocol as protocol;
+    let result = (|| {
+        let request = filesystem_service::admission_ipc::Request::decode(header, attached)?;
+        let header = request.header;
+        match header.opcode {
+            protocol::OP_OPEN_AT | protocol::OP_TRUNCATE_AT => {
+                let (credentials, payload) =
+                    protocol::decode_credentials_payload(payload).map_err(|_| 22)?;
+                let (root, base) = if header.opcode == protocol::OP_OPEN_AT {
+                    (
+                        protocol::OPEN_AT_ROOT_ATTACHED,
+                        protocol::OPEN_AT_BASE_ATTACHED,
+                    )
+                } else {
+                    (
+                        protocol::TRUNCATE_AT_ROOT_ATTACHED,
+                        protocol::TRUNCATE_AT_BASE_ATTACHED,
+                    )
+                };
+                let anchors = decode_path_anchors(header.flags, root, base, &request.sources)?;
+                Ok(if header.opcode == protocol::OP_OPEN_AT {
+                    service.open_at_admitted(header, payload, anchors, credentials, request.ticket)
+                } else {
+                    service.truncate_at_admitted(
+                        header,
+                        payload,
+                        anchors,
+                        credentials,
+                        request.ticket,
+                    )
+                })
+            }
+            protocol::OP_TRUNCATE_HANDLE => {
+                if !payload.is_empty() {
+                    return Err(22);
+                }
+                let open_id = decode_single_open(&request.sources)?;
+                filesystem_service::handle_access::authorize(
+                    header.opcode,
+                    request.sources.handles[0].rights,
+                )?;
+                Ok(service.truncate_handle_admitted(header, open_id, request.ticket))
+            }
+            _ => Err(22),
+        }
+    })();
+    result.unwrap_or_else(|error| MutationResult::Complete(Err(error)))
+}
+
+#[cfg(target_os = "mochios")]
+fn reply_admitted_mutation(
+    service: &mut filesystem_service::service::FilesystemService,
+    endpoint: mochi_user_platform::handle::Handle,
+    sender: u64,
+    request: mochios_filesystem_protocol::Header,
+    result: filesystem_service::memory_updates::MutationResult<
+        filesystem_service::service::Response,
+    >,
+    bytes: &mut [u8],
+) {
+    use filesystem_service::memory_updates::MutationResult;
+    use filesystem_service::service::Response;
+    use mochi_user_platform as platform;
+    use mochios_filesystem_protocol as protocol;
+    let failure = |error: i32| Response {
+        header: protocol::Header {
+            opcode: protocol::OP_STATUS,
+            request_id: request.request_id,
+            status: -error,
+            ..Default::default()
+        },
+        payload: Vec::new(),
+    };
+    let (mut response, ticket) = match result {
+        MutationResult::Wait(ticket) => {
+            (failure(protocol::ERROR_MEMORY_ADMISSION_BUSY), Some(ticket))
+        }
+        MutationResult::Complete(Ok(response)) => (response, None),
+        MutationResult::Complete(Err(error)) => {
+            // An error without a position must never advertise queued replay.
+            (
+                failure(if error == protocol::ERROR_MEMORY_ADMISSION_BUSY {
+                    5
+                } else {
+                    error
+                }),
+                None,
+            )
+        }
+    };
+    let mut outgoing = platform::ipc::IpcObjectHandles::default();
+    let mut opened = None;
+    if let Some(ticket) = ticket.as_ref() {
+        outgoing = filesystem_service::admission_ipc::reply_attachment(ticket.handle());
+    } else if response.header.status == 0 && request.opcode == protocol::OP_OPEN_AT {
+        let rights = open_handle_rights(request.flags);
+        let open_id = response.header.open_id;
+        match platform::handle::create_provider_object(endpoint, open_id, rights) {
+            Ok(handle) => {
+                opened = Some((handle, open_id));
+                outgoing.count = 1;
+                outgoing.handles[0] = platform::ipc::IpcObjectHandle {
+                    handle,
+                    reserved: 0,
+                    rights,
+                };
+            }
+            Err(_) => {
+                let _ = service.provider_close(open_id);
+                response = failure(5);
+            }
+        }
+    }
+    let sent = protocol::encode(response.header, &response.payload, bytes)
+        .map_err(|_| ())
+        .and_then(|length| {
+            if outgoing.count == 0 {
+                platform::ipc::reply(sender, &bytes[..length]).map_err(|_| ())
+            } else {
+                platform::ipc::reply_object_handles(sender, &bytes[..length], &outgoing)
+                    .map_err(|_| ())
+            }
+        });
+    if let Some((handle, open_id)) = opened {
+        if sent.is_err() {
+            let _ = service.provider_close(open_id);
+        }
+        let _ = platform::handle::close(handle);
+    }
+    // Owned positions are closed here on success AND encode/send failure.
+    // Borrowed positions remain the original request cleanup's responsibility.
+    drop(ticket);
 }
 
 #[cfg(target_os = "mochios")]
