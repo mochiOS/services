@@ -201,6 +201,7 @@ mod paging {
         pub destroyed: Vec<u64>,
         pub failed: bool,
         pub calls: usize,
+        pub context_walks: usize,
     }
     thread_local! { pub static STATE: RefCell<Backend> = RefCell::default(); }
     pub fn clone_user_page_table(
@@ -247,6 +248,7 @@ mod paging {
         table: u64,
         context: &mnu_abi::ThreadCreateContext,
     ) -> bool {
+        STATE.with(|state| state.borrow_mut().context_walks += 1);
         LIVE_TABLES.lock().unwrap().contains(&table)
             && context.entry == 0x9000
             && context.stack_pointer == 0xa000
@@ -374,6 +376,75 @@ fn concurrent_aliases_have_exactly_one_vm_owner() {
             vec![crate::paging::cloned_table()]
         )
     });
+}
+
+#[test]
+fn image_captured_before_reservation_is_not_consumed_or_walked_until_retry() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    for (selected, measured) in [(0, false), (1, false), (0, true), (1, true)] {
+        let mut source = source();
+        source.measured = measured;
+        let backing = Arc::new(task::VmObject {
+            reserved: AtomicBool::new(false),
+        });
+        source.regions[selected].object = Some(backing.clone());
+        let captured = address_space::CloneSource::capture(&source)
+            .ok()
+            .unwrap()
+            .clone_image()
+            .ok()
+            .unwrap();
+        let object = Arc::new(address_space::AddressSpaceObject::new(captured));
+        let alias = object.clone();
+        let mut invalid = initial_context();
+        invalid.entry = 0;
+        backing.reserved.store(true, Ordering::Release);
+        for context in [initial_context(), invalid] {
+            assert_eq!(
+                alias
+                    .consume(&task::process::PendingExecSecurity, &context)
+                    .err(),
+                Some(if measured {
+                    address_space::ConsumeError::BackingBusy
+                } else {
+                    address_space::ConsumeError::Authorization
+                })
+            );
+        }
+        paging::STATE.with(|state| {
+            assert_eq!(state.borrow().context_walks, 0);
+            assert!(state.borrow().destroyed.is_empty());
+        });
+        backing.reserved.store(false, Ordering::Release);
+        if !measured {
+            assert!(matches!(
+                alias.consume(&task::process::PendingExecSecurity, &initial_context()),
+                Err(address_space::ConsumeError::Authorization)
+            ));
+            drop(alias);
+            drop(object);
+            paging::STATE
+                .with(|state| assert_eq!(state.borrow().destroyed, [paging::cloned_table()]));
+            continue;
+        }
+        assert!(matches!(
+            object.consume(&task::process::PendingExecSecurity, &invalid),
+            Err(address_space::ConsumeError::Context)
+        ));
+        let image = alias
+            .consume(&task::process::PendingExecSecurity, &initial_context())
+            .unwrap();
+        assert!(matches!(
+            object.consume(&task::process::PendingExecSecurity, &initial_context()),
+            Err(address_space::ConsumeError::Consumed)
+        ));
+        paging::STATE.with(|state| assert_eq!(state.borrow().context_walks, 2));
+        drop(alias);
+        drop(object);
+        paging::STATE.with(|state| assert!(state.borrow().destroyed.is_empty()));
+        drop(image);
+        paging::STATE.with(|state| assert_eq!(state.borrow().destroyed, [paging::cloned_table()]));
+    }
 }
 
 #[test]
