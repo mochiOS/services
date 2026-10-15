@@ -167,7 +167,11 @@ fn native_local_commit_is_ordered_after_tlb_ack_before_frame_release_and_can_rol
             assert!(state.synchronized);
             assert_eq!(state.released, 0);
             assert_eq!(state.entries, suspended);
-            if fail_commit { Err(17) } else { Ok(37) }
+            if fail_commit {
+                Err(17)
+            } else {
+                Ok(37)
+            }
         });
         let state = state().lock().unwrap();
         if fail_commit {
@@ -216,23 +220,23 @@ fn boundary_private_bytes_and_flags_survive_success_but_never_change_on_failure(
             assert_eq!(state.released, 0);
             assert!(state.entries.values().all(|flags| flags & 1 == 0));
             assert!(state.frames[&(4096, 4096)].iter().all(|byte| *byte == 0x5a));
-            if mode == 2 { Err(17) } else { Ok(37) }
+            if mode == 2 {
+                Err(17)
+            } else {
+                Ok(37)
+            }
         });
         let state = state().lock().unwrap();
         if mode == 0 {
             assert_eq!(result, Ok(37));
             assert_eq!(state.entries, BTreeMap::from([((4096, 4096), 0x405)]));
             assert_eq!(state.released, 1);
-            assert!(
-                state.frames[&(4096, 4096)][..17]
-                    .iter()
-                    .all(|byte| *byte == 0x5a)
-            );
-            assert!(
-                state.frames[&(4096, 4096)][17..]
-                    .iter()
-                    .all(|byte| *byte == 0)
-            );
+            assert!(state.frames[&(4096, 4096)][..17]
+                .iter()
+                .all(|byte| *byte == 0x5a));
+            assert!(state.frames[&(4096, 4096)][17..]
+                .iter()
+                .all(|byte| *byte == 0));
         } else {
             assert_eq!(
                 result,
@@ -251,6 +255,116 @@ fn boundary_private_bytes_and_flags_survive_success_but_never_change_on_failure(
 }
 
 #[test]
+fn owned_backend_and_boundary_plan_outlive_every_journal_finish_action() {
+    use mapping_preservation_native::{FrameBackend, PreservedPage, Preserving};
+    use mapping_revocation::{Backend, Suspension};
+    use mapping_revocation_native::Native;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use task::process::{Process, ProcessTable};
+    struct Leased<'a> {
+        native: Native<'a>,
+        alive: Arc<AtomicBool>,
+        published: bool,
+    }
+    impl Drop for Leased<'_> {
+        fn drop(&mut self) {
+            let state = state().lock().unwrap();
+            assert_eq!(state.released, usize::from(self.published));
+            assert_eq!(state.entries.len(), if self.published { 1 } else { 2 });
+            assert!(self.alive.swap(false, Ordering::AcqRel));
+        }
+    }
+    impl Backend for Leased<'_> {
+        type Page = paging::SuspendedUserPage;
+        type Error = u64;
+        fn next_page(&mut self, t: u64, s: u64, e: u64) -> Result<Option<u64>, u64> {
+            self.native.next_page(t, s, e)
+        }
+        fn suspend(&mut self, t: u64, a: u64) -> Result<Option<Self::Page>, u64> {
+            self.native.suspend(t, a)
+        }
+        fn restore(&mut self, p: Self::Page) {
+            assert!(self.alive.load(Ordering::Acquire));
+            self.native.restore(p)
+        }
+        fn synchronize(&mut self) -> Result<(), u64> {
+            self.native.synchronize()
+        }
+        fn release(&mut self, p: Self::Page) {
+            assert!(self.alive.load(Ordering::Acquire));
+            self.native.release(p)
+        }
+    }
+    impl FrameBackend for Leased<'_> {
+        fn owns_ram_frames(&self) -> bool {
+            self.native.owns_ram_frames()
+        }
+    }
+    let _test = TEST_LOCK.lock().unwrap();
+    let table = ProcessTable(vec![Process(4096)]);
+    for mode in 0..3 {
+        let commit = mode == 1;
+        *state().lock().unwrap() = State {
+            entries: BTreeMap::from([((4096, 4096), 0x405), ((4096, 8192), 0x207)]),
+            frames: BTreeMap::from([
+                ((4096, 4096), Box::new([0x5a; 4096])),
+                ((4096, 8192), Box::new([0xb7; 4096])),
+            ]),
+            ..Default::default()
+        };
+        let alive = Arc::new(AtomicBool::new(true));
+        // Only the fake table owner is borrowed; the adapter owns the plan and
+        // the backend-specific lease, just as a persistent owner will need to.
+        let native = unsafe { Native::new(&table) };
+        let backend = Preserving::new(
+            Leased {
+                native,
+                alive: alive.clone(),
+                published: false,
+            },
+            vec![PreservedPage {
+                table: 4096,
+                address: 4096,
+                zero_from: 17,
+            }],
+        )
+        .unwrap();
+        let journal = Suspension::new([(4096, 4096, 12288)], backend).unwrap();
+        assert!(alive.load(Ordering::Acquire));
+        if commit {
+            journal
+                .commit_with(|backend| {
+                    backend.inner_mut().published = true;
+                    Ok(())
+                })
+                .unwrap();
+        } else if mode == 2 {
+            assert_eq!(
+                journal.commit_with(|backend| {
+                    assert!(backend.inner_mut().alive.load(Ordering::Acquire));
+                    Err::<(), _>(17)
+                }),
+                Err(mapping_revocation::Error::Backend(17))
+            );
+        } else {
+            drop(journal);
+        }
+        assert!(!alive.load(Ordering::Acquire));
+        let state = state().lock().unwrap();
+        assert!(state.frames[&(4096, 4096)][..17]
+            .iter()
+            .all(|byte| *byte == 0x5a));
+        assert!(state.frames[&(4096, 4096)][17..]
+            .iter()
+            .all(|byte| *byte == if commit { 0 } else { 0x5a }));
+        assert_eq!(state.entries[&(4096, 4096)], 0x405);
+    }
+}
+
+#[test]
 fn boundary_selection_checks_offset_geometry_without_interpreting_backing_identity() {
     use mapping_preservation_native::PreservedPage;
     let page = PreservedPage::for_mapping(4096, 0x5000, 8192, 4096, 5000)
@@ -260,16 +374,12 @@ fn boundary_selection_checks_offset_geometry_without_interpreting_backing_identi
         (page.table, page.address, page.zero_from),
         (4096, 0x5000, 904)
     );
-    assert!(
-        PreservedPage::for_mapping(4096, 0x5000, 4096, 8192, 5000)
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        PreservedPage::for_mapping(4096, 0x5000, 8192, 4096, 4096)
-            .unwrap()
-            .is_none()
-    );
+    assert!(PreservedPage::for_mapping(4096, 0x5000, 4096, 8192, 5000)
+        .unwrap()
+        .is_none());
+    assert!(PreservedPage::for_mapping(4096, 0x5000, 8192, 4096, 4096)
+        .unwrap()
+        .is_none());
     assert!(PreservedPage::for_mapping(4096, 0x5001, 8192, 4096, 5000).is_err());
     assert!(PreservedPage::for_mapping(4096, 0x5000, 8192, 1, 5000).is_err());
     let process = task::process::Process(4096);
