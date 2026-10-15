@@ -154,6 +154,7 @@ mod shared_memory {
 }
 
 static FRAMES: Mutex<BTreeMap<u64, usize>> = Mutex::new(BTreeMap::new());
+static MAPPING_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 mod frame {
     pub struct Frame(pub u64);
     impl Frame {
@@ -213,6 +214,7 @@ mod paging {
         _: bool,
     ) -> Result<(), ()> {
         assert!(crate::FRAMES.lock().unwrap().contains_key(&frame));
+        crate::MAPPING_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 }
@@ -344,6 +346,62 @@ fn production_cache_never_republishes_invalidated_lower_snapshots() {
     assert_eq!(LOWER.lock().unwrap().reads, before + 3);
     assert_eq!(FRAMES.lock().unwrap().len(), CACHE_PAGES);
     drop(pins);
+    object.invalidate();
+    assert!(FRAMES.lock().unwrap().is_empty());
+
+    // Private-page preparation must not publish bytes loaded before a cache
+    // invalidation. A missing stamp is not permission to bypass validation.
+    reset_lower(b"old");
+    let generation = object.memory_generation();
+    assert!(generation.is_some());
+    let private = object.page(0).unwrap();
+    object.invalidate();
+    LOWER.lock().unwrap().bytes = b"new".to_vec();
+    assert_eq!(
+        object.with_memory_generation(generation, || {
+            panic!("stale private bytes reached the installer")
+        }),
+        Err::<(), _>(syscall::EAGAIN)
+    );
+    assert_eq!(
+        object.with_memory_generation(None, || {
+            panic!("missing generation reached the installer")
+        }),
+        Err::<(), _>(syscall::EINVAL)
+    );
+    assert_eq!(&private[..3], b"old");
+    assert_eq!(&object.page(0).unwrap()[..3], b"new");
+    assert_eq!(
+        object.with_memory_generation(object.memory_generation(), || Ok(37)),
+        Ok(37)
+    );
+    object.invalidate();
+
+    // Retaining a frame keeps physical storage alive, but does not authorize
+    // installing it after its backing generation has been invalidated.
+    reset_lower(b"old");
+    let prepared = object.prepare_shared_page(0).unwrap();
+    let before = MAPPING_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+    object.invalidate();
+    assert_eq!(
+        prepared.map_to(4096, 8192, false, false),
+        Err(syscall::EAGAIN)
+    );
+    assert_eq!(
+        MAPPING_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+        before
+    );
+    drop(prepared);
+    object.invalidate();
+    assert!(FRAMES.lock().unwrap().is_empty());
+    LOWER.lock().unwrap().bytes = b"new".to_vec();
+    let current = object.prepare_shared_page(0).unwrap();
+    assert_eq!(current.map_to(4096, 8192, false, false), Ok(()));
+    assert_eq!(
+        MAPPING_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+        before + 1
+    );
+    drop(current);
     object.invalidate();
     assert!(FRAMES.lock().unwrap().is_empty());
 }
