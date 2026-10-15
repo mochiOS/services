@@ -21,6 +21,7 @@ pub mod socket_binding;
 pub mod socket_connect;
 pub mod socket_receive_wait;
 pub mod filesystem_transport;
+pub mod mutation_admission;
 mod fault_signal;
 mod signal_origin;
 mod fork_state;
@@ -229,6 +230,28 @@ pub struct OpenedObject<H> {
     pub rights: u64,
 }
 
+/// A Wait reference is newly owned by this service, not borrowed from the
+/// request. It grants waiting/transfer only, never mutation authorization.
+pub enum MutationError<H> {
+    Failed(i32),
+    Wait(OpenedObject<H>),
+}
+
+impl<H> From<i32> for MutationError<H> {
+    fn from(status: i32) -> Self {
+        Self::Failed(status)
+    }
+}
+
+impl<H> MutationError<H> {
+    pub fn map_status(self, map: impl FnOnce(i32) -> i32) -> Self {
+        match self {
+            Self::Failed(status) => Self::Failed(map(status)),
+            Self::Wait(ticket) => Self::Wait(ticket),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PathObjects<H> {
     pub root: AttachedObject<H>,
@@ -272,7 +295,16 @@ pub trait FilesystemBackend<H: Copy> {
         paths: PathObjects<H>,
     ) -> Result<OpenedObject<H>, i32>;
 
-    /// Resolves a directory and checks search permission without granting a
+    fn open_at_admitted(
+        &mut self,
+        _request: &PreparedOpen,
+        _paths: PathObjects<H>,
+        _ticket: Option<AttachedObject<H>>,
+    ) -> Result<OpenedObject<H>, MutationError<H>> {
+        Err(MutationError::Failed(-95))
+    }
+
+/// Resolves a directory and checks search permission without granting a
     /// client-visible readable file description.
     fn open_directory_at(
         &mut self,
@@ -296,6 +328,16 @@ pub trait FilesystemBackend<H: Copy> {
         length: u64,
         growth_ceiling: u64,
     ) -> Result<(), i32>;
+
+    fn ftruncate_admitted(
+        &mut self,
+        _file: AttachedObject<H>,
+        _length: u64,
+        _growth_ceiling: u64,
+        _ticket: Option<AttachedObject<H>>,
+    ) -> Result<(), MutationError<H>> {
+        Err(MutationError::Failed(-95))
+    }
 
     fn fchmod(
         &mut self,
@@ -343,6 +385,15 @@ pub trait FilesystemBackend<H: Copy> {
 
     fn truncate_at(&mut self, request: &PreparedTruncate, paths: PathObjects<H>)
     -> Result<(), i32>;
+
+    fn truncate_at_admitted(
+        &mut self,
+        _request: &PreparedTruncate,
+        _paths: PathObjects<H>,
+        _ticket: Option<AttachedObject<H>>,
+    ) -> Result<(), MutationError<H>> {
+        Err(MutationError::Failed(-95))
+    }
 
     fn symlink_at(&mut self, request: &PreparedSymlink, paths: PathObjects<H>) -> Result<(), i32>;
 
@@ -3289,6 +3340,13 @@ impl<H: Copy> PosixService<H> {
         handles: &[AttachedObject<H>],
         filesystem: &mut F,
     ) -> ObjectResponse<H> {
+        let envelope = match mutation_admission::Request::decode(header, handles) {
+            Ok(envelope) => envelope,
+            Err(status) => return object_error(header.request_id, status),
+        };
+        let header = envelope.header;
+        let handles = envelope.sources;
+        let admission = envelope.admission;
         if matches!(
             header.opcode,
             protocol::OP_FORK_PREPARE | protocol::OP_FORK_CANCEL
@@ -3409,12 +3467,16 @@ impl<H: Copy> PosixService<H> {
                     Ok(paths) => paths,
                     Err(status) => return object_error(header.request_id, status),
                 };
-                match filesystem.open_at(&prepared, paths) {
+                let result = match admission {
+                    Some(ticket) => filesystem.open_at_admitted(&prepared, paths, ticket),
+                    None => filesystem.open_at(&prepared, paths).map_err(MutationError::Failed),
+                };
+                match result {
                     Ok(opened) => ObjectResponse {
                         response: status_response(header.request_id, protocol::STATUS_OK),
                         handles: vec![opened],
                     },
-                    Err(status) => object_error(header.request_id, status),
+                    Err(error) => object_mutation_error(header.request_id, error, admission.is_some(), filesystem),
                 }
             }
             protocol::OP_STAT_AT => {
@@ -3556,9 +3618,13 @@ impl<H: Copy> PosixService<H> {
                 let ceiling = self.resource_limits
                     .get(&(peer.process_id, protocol::RLIMIT_FSIZE))
                     .copied().unwrap_or_default().soft;
-                match filesystem.ftruncate(handles[0], length, ceiling) {
+                let result = match admission {
+                    Some(ticket) => filesystem.ftruncate_admitted(handles[0], length, ceiling, ticket),
+                    None => filesystem.ftruncate(handles[0], length, ceiling).map_err(MutationError::Failed),
+                };
+                match result {
                     Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
-                    Err(status) => object_error(header.request_id, status),
+                    Err(error) => object_mutation_error(header.request_id, error, admission.is_some(), filesystem),
                 }
             }
             protocol::OP_FCHMOD => {
@@ -3755,9 +3821,13 @@ impl<H: Copy> PosixService<H> {
                     Ok(paths) => paths,
                     Err(status) => return object_error(header.request_id, status),
                 };
-                match filesystem.truncate_at(&prepared, paths) {
+                let result = match admission {
+                    Some(ticket) => filesystem.truncate_at_admitted(&prepared, paths, ticket),
+                    None => filesystem.truncate_at(&prepared, paths).map_err(MutationError::Failed),
+                };
+                match result {
                     Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
-                    Err(status) => object_error(header.request_id, status),
+                    Err(error) => object_mutation_error(header.request_id, error, admission.is_some(), filesystem),
                 }
             }
             protocol::OP_SYMLINK_AT => {
@@ -4545,6 +4615,37 @@ fn object_error<H>(request_id: u64, status: i32) -> ObjectResponse<H> {
     ObjectResponse {
         response: status_response(request_id, status),
         handles: Vec::new(),
+    }
+}
+
+fn object_mutation_error<H: Copy>(
+    request_id: u64,
+    error: MutationError<H>,
+    queued: bool,
+    filesystem: &mut impl FilesystemBackend<H>,
+) -> ObjectResponse<H> {
+    match error {
+        MutationError::Failed(status) => object_error(
+            request_id,
+            if queued && status == protocol::STATUS_MEMORY_ADMISSION_BUSY {
+                protocol::STATUS_EIO
+            } else {
+                status
+            },
+        ),
+        MutationError::Wait(ticket) if ticket.rights == mutation_admission::TICKET_RIGHTS => {
+            ObjectResponse {
+                response: status_response(request_id, protocol::STATUS_MEMORY_ADMISSION_BUSY),
+                handles: vec![ticket],
+            }
+        }
+        MutationError::Wait(ticket) => {
+            filesystem.release_object(AttachedObject {
+                handle: ticket.handle,
+                rights: ticket.rights,
+            });
+            object_error(request_id, protocol::STATUS_EIO)
+        }
     }
 }
 

@@ -1927,7 +1927,187 @@ impl posix_service::ProcessBackend<u32> for RuntimeProcesses {
 }
 
 #[cfg(target_os = "mochios")]
+type FilesystemMutationRequest = (
+    mochios_filesystem_protocol::Header,
+    Vec<u8>,
+    mochi_user_platform::ipc::IpcObjectHandles,
+);
+
+#[cfg(target_os = "mochios")]
 impl RuntimeFilesystem {
+    fn open_request(
+        &self,
+        request: &posix_service::PreparedOpen,
+        paths: posix_service::PathObjects<mochi_user_platform::handle::Handle>,
+    ) -> Result<FilesystemMutationRequest, i32> {
+        use mochios_filesystem_protocol as filesystem;
+        use mochios_posix_protocol as posix;
+
+        let mut flags = filesystem::OPEN_AT_ROOT_ATTACHED;
+        if paths.base.is_some() {
+            flags |= filesystem::OPEN_AT_BASE_ATTACHED;
+        }
+        for (source, target) in [
+            (posix::OPEN_READ, filesystem::OPEN_AT_READ),
+            (posix::OPEN_WRITE, filesystem::OPEN_AT_WRITE),
+            (posix::OPEN_CREATE, filesystem::OPEN_AT_CREATE),
+            (posix::OPEN_EXCLUSIVE, filesystem::OPEN_AT_EXCLUSIVE),
+            (posix::OPEN_TRUNCATE, filesystem::OPEN_AT_TRUNCATE),
+            (posix::OPEN_APPEND, filesystem::OPEN_AT_APPEND),
+            (posix::OPEN_NONBLOCK, filesystem::OPEN_AT_NONBLOCK),
+            (posix::OPEN_DIRECTORY, filesystem::OPEN_AT_DIRECTORY),
+            (posix::OPEN_NOFOLLOW, filesystem::OPEN_AT_NOFOLLOW),
+        ] {
+            if request.options & source != 0 {
+                flags |= target;
+            }
+        }
+        let header = filesystem::Header {
+            opcode: filesystem::OP_OPEN_AT,
+            request_id: 1,
+            flags,
+            mode: request.mode,
+            ..filesystem::Header::default()
+        };
+        let payload = Self::credential_payload(
+            request.effective_uid,
+            request.effective_gid,
+            &request.supplementary_groups,
+            request.path.as_bytes(),
+        )?;
+        let header = filesystem::Header {
+            length: payload.len() as u32,
+            ..header
+        };
+        let handles = Self::path_handles(paths)?;
+        Ok((header, payload, handles))
+    }
+
+    fn truncate_handle_request(
+        &self,
+        file: posix_service::AttachedObject<mochi_user_platform::handle::Handle>,
+        length: u64,
+        growth_ceiling: u64,
+    ) -> Result<FilesystemMutationRequest, i32> {
+        use mochios_filesystem_protocol as filesystem;
+
+        Ok((
+            filesystem::Header {
+                opcode: filesystem::OP_TRUNCATE_HANDLE,
+                request_id: 6,
+                offset: length,
+                node_id: growth_ceiling,
+                flags: filesystem::TRUNCATE_GROWTH_BOUNDED,
+                ..filesystem::Header::default()
+            },
+            Vec::new(),
+            file_handle_with_rights(file, mnu_abi::HANDLE_RIGHT_WRITE)?,
+        ))
+    }
+
+    fn truncate_path_request(
+        &self,
+        request: &posix_service::PreparedTruncate,
+        paths: posix_service::PathObjects<mochi_user_platform::handle::Handle>,
+    ) -> Result<FilesystemMutationRequest, i32> {
+        use mochios_filesystem_protocol as filesystem;
+
+        let mut flags = filesystem::TRUNCATE_AT_ROOT_ATTACHED | filesystem::TRUNCATE_GROWTH_BOUNDED;
+        if paths.base.is_some() {
+            flags |= filesystem::TRUNCATE_AT_BASE_ATTACHED;
+        }
+        let payload = Self::credential_payload(
+            request.effective_uid,
+            request.effective_gid,
+            &request.supplementary_groups,
+            request.path.as_bytes(),
+        )?;
+        Ok((
+            filesystem::Header {
+                opcode: filesystem::OP_TRUNCATE_AT,
+                request_id: 13,
+                open_id: request.length,
+                node_id: request.growth_ceiling,
+                length: payload.len() as u32,
+                flags,
+                ..filesystem::Header::default()
+            },
+            payload,
+            Self::path_handles(paths)?,
+        ))
+    }
+
+    fn mutation_call(
+        &self,
+        (mut header, payload, mut handles): FilesystemMutationRequest,
+        ticket: Option<posix_service::AttachedObject<u32>>,
+        success_objects: usize,
+    ) -> Result<Option<posix_service::OpenedObject<u32>>, posix_service::MutationError<u32>> {
+        use mochi_user_platform as platform;
+        use mochios_filesystem_protocol as filesystem;
+        use posix_service::{
+            MutationError, OpenedObject,
+            filesystem_transport::{MutationReply, mutation_status},
+        };
+        header.flags |= filesystem::MUTATION_ADMISSION;
+        if let Some(ticket) = ticket {
+            if ticket.handle == 0
+                || ticket.rights != posix_service::mutation_admission::TICKET_RIGHTS
+            {
+                return Err(MutationError::Failed(-13));
+            }
+            let index = handles.count as usize;
+            if index >= handles.handles.len() {
+                return Err(MutationError::Failed(-22));
+            }
+            handles.handles[index] = platform::ipc::IpcObjectHandle {
+                handle: ticket.handle,
+                reserved: 0,
+                rights: ticket.rights,
+            };
+            handles.count += 1;
+            header.flags |= filesystem::MUTATION_ADMISSION_ATTACHED;
+        }
+        let mut request = vec![0; filesystem::HEADER_LEN + payload.len()];
+        let length = filesystem::encode(header, &payload, &mut request).map_err(|_| -22)?;
+        let mut reply = [0; filesystem::HEADER_LEN];
+        if !self
+            .call(&request[..length], &mut reply, &mut handles)
+            .is_ok_and(|result| result as u32 as usize == filesystem::HEADER_LEN)
+        {
+            close_runtime_handles(&handles);
+            return Err(MutationError::Failed(-5));
+        }
+        let result = filesystem::decode(&reply)
+            .map_err(|_| -5)
+            .and_then(|(response, payload)| {
+                mutation_status(
+                    response,
+                    header.request_id,
+                    payload,
+                    &handles,
+                    success_objects,
+                )
+            });
+        match result {
+            Ok(kind) => {
+                let object = (handles.count == 1).then(|| OpenedObject {
+                    handle: handles.handles[0].handle,
+                    rights: handles.handles[0].rights,
+                });
+                // Returned references now belong to the response, not cleanup.
+                match kind {
+                    MutationReply::Ready => Ok(object),
+                    MutationReply::Wait => Err(MutationError::Wait(object.ok_or(-5)?)),
+                }
+            }
+            Err(status) => {
+                close_runtime_handles(&handles);
+                Err(MutationError::Failed(status))
+            }
+        }
+    }
+
     fn call(
         &self,
         request: &[u8],
@@ -2293,50 +2473,21 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
     fn open_at(
         &mut self,
         request: &posix_service::PreparedOpen,
-        paths: posix_service::PathObjects<mochi_user_platform::handle::Handle>,
-    ) -> Result<posix_service::OpenedObject<mochi_user_platform::handle::Handle>, i32> {
-        use mochios_filesystem_protocol as filesystem;
-        use mochios_posix_protocol as posix;
-
-        let mut flags = filesystem::OPEN_AT_ROOT_ATTACHED;
-        if paths.base.is_some() {
-            flags |= filesystem::OPEN_AT_BASE_ATTACHED;
-        }
-        for (source, target) in [
-            (posix::OPEN_READ, filesystem::OPEN_AT_READ),
-            (posix::OPEN_WRITE, filesystem::OPEN_AT_WRITE),
-            (posix::OPEN_CREATE, filesystem::OPEN_AT_CREATE),
-            (posix::OPEN_EXCLUSIVE, filesystem::OPEN_AT_EXCLUSIVE),
-            (posix::OPEN_TRUNCATE, filesystem::OPEN_AT_TRUNCATE),
-            (posix::OPEN_APPEND, filesystem::OPEN_AT_APPEND),
-            (posix::OPEN_NONBLOCK, filesystem::OPEN_AT_NONBLOCK),
-            (posix::OPEN_DIRECTORY, filesystem::OPEN_AT_DIRECTORY),
-            (posix::OPEN_NOFOLLOW, filesystem::OPEN_AT_NOFOLLOW),
-        ] {
-            if request.options & source != 0 {
-                flags |= target;
-            }
-        }
-        let header = filesystem::Header {
-            opcode: filesystem::OP_OPEN_AT,
-            request_id: 1,
-            flags,
-            mode: request.mode,
-            ..filesystem::Header::default()
-        };
-        let payload = Self::credential_payload(
-            request.effective_uid,
-            request.effective_gid,
-            &request.supplementary_groups,
-            request.path.as_bytes(),
-        )?;
-        let header = filesystem::Header {
-            length: payload.len() as u32,
-            ..header
-        };
-        let handles = Self::path_handles(paths)?;
+        paths: posix_service::PathObjects<u32>,
+    ) -> Result<posix_service::OpenedObject<u32>, i32> {
+        let (header, payload, handles) = self.open_request(request, paths)?;
         self.open_call(header, &payload, handles)
             .map_err(posix_service::mutation_filesystem_status)
+    }
+
+    fn open_at_admitted(
+        &mut self,
+        request: &posix_service::PreparedOpen,
+        paths: posix_service::PathObjects<u32>,
+        ticket: Option<posix_service::AttachedObject<u32>>,
+    ) -> Result<posix_service::OpenedObject<u32>, posix_service::MutationError<u32>> {
+        self.mutation_call(self.open_request(request, paths)?, ticket, 1)?
+            .ok_or(posix_service::MutationError::Failed(-5))
     }
 
     fn open_directory_at(
@@ -2437,25 +2588,30 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
 
     fn ftruncate(
         &mut self,
-        file: posix_service::AttachedObject<mochi_user_platform::handle::Handle>,
+        file: posix_service::AttachedObject<u32>,
         length: u64,
         growth_ceiling: u64,
     ) -> Result<(), i32> {
-        use mochios_filesystem_protocol as filesystem;
+        let (header, payload, handles) =
+            self.truncate_handle_request(file, length, growth_ceiling)?;
+        self.empty_call(header, &payload, handles)
+            .map_err(posix_service::truncate_filesystem_status)
+    }
 
-        self.empty_call(
-            filesystem::Header {
-                opcode: filesystem::OP_TRUNCATE_HANDLE,
-                request_id: 6,
-                offset: length,
-                node_id: growth_ceiling,
-                flags: filesystem::TRUNCATE_GROWTH_BOUNDED,
-                ..filesystem::Header::default()
-            },
-            &[],
-            file_handle_with_rights(file, mnu_abi::HANDLE_RIGHT_WRITE)?,
+    fn ftruncate_admitted(
+        &mut self,
+        file: posix_service::AttachedObject<u32>,
+        length: u64,
+        growth_ceiling: u64,
+        ticket: Option<posix_service::AttachedObject<u32>>,
+    ) -> Result<(), posix_service::MutationError<u32>> {
+        self.mutation_call(
+            self.truncate_handle_request(file, length, growth_ceiling)?,
+            ticket,
+            0,
         )
-        .map_err(posix_service::truncate_filesystem_status)
+        .map(|_| ())
+        .map_err(|error| error.map_status(posix_service::truncate_filesystem_status))
     }
 
     fn fchmod(
@@ -2757,34 +2913,22 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
     fn truncate_at(
         &mut self,
         request: &posix_service::PreparedTruncate,
-        paths: posix_service::PathObjects<mochi_user_platform::handle::Handle>,
+        paths: posix_service::PathObjects<u32>,
     ) -> Result<(), i32> {
-        use mochios_filesystem_protocol as filesystem;
+        let (header, payload, handles) = self.truncate_path_request(request, paths)?;
+        self.empty_call(header, &payload, handles)
+            .map_err(posix_service::truncate_filesystem_status)
+    }
 
-        let mut flags = filesystem::TRUNCATE_AT_ROOT_ATTACHED | filesystem::TRUNCATE_GROWTH_BOUNDED;
-        if paths.base.is_some() {
-            flags |= filesystem::TRUNCATE_AT_BASE_ATTACHED;
-        }
-        let payload = Self::credential_payload(
-            request.effective_uid,
-            request.effective_gid,
-            &request.supplementary_groups,
-            request.path.as_bytes(),
-        )?;
-        self.empty_call(
-            filesystem::Header {
-                opcode: filesystem::OP_TRUNCATE_AT,
-                request_id: 13,
-                open_id: request.length,
-                node_id: request.growth_ceiling,
-                length: payload.len() as u32,
-                flags,
-                ..filesystem::Header::default()
-            },
-            &payload,
-            Self::path_handles(paths)?,
-        )
-        .map_err(posix_service::truncate_filesystem_status)
+    fn truncate_at_admitted(
+        &mut self,
+        request: &posix_service::PreparedTruncate,
+        paths: posix_service::PathObjects<u32>,
+        ticket: Option<posix_service::AttachedObject<u32>>,
+    ) -> Result<(), posix_service::MutationError<u32>> {
+        self.mutation_call(self.truncate_path_request(request, paths)?, ticket, 0)
+            .map(|_| ())
+            .map_err(|error| error.map_status(posix_service::truncate_filesystem_status))
     }
 
     fn symlink_at(

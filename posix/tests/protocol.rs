@@ -21,6 +21,9 @@ mod child_signal_info;
 #[path = "support/default_ignored_signals.rs"]
 mod default_ignored_signals;
 
+#[path = "support/metadata_admission.rs"]
+mod metadata_admission;
+
 #[path = "support/fork_process_limit.rs"]
 mod fork_process_limit;
 
@@ -1331,6 +1334,8 @@ fn client_transfers_directory_handles_for_chdir_chroot_and_fchdir() {
 
 #[derive(Default)]
 struct RecordingFilesystem {
+    admission_calls: Vec<(u16, Option<AttachedObject<u32>>)>,
+    admission_response: Option<Result<OpenedObject<u32>, i32>>,
     request: Option<PreparedOpen>,
     directory_request: Option<PreparedStat>,
     stat_request: Option<PreparedStat>,
@@ -1363,6 +1368,21 @@ struct RecordingFilesystem {
     released: Vec<AttachedObject<u32>>,
     path_query: Option<(AttachedObject<u32>, AttachedObject<u32>)>,
     directory_path: Vec<u8>,
+}
+
+impl RecordingFilesystem {
+    fn admit(
+        &mut self,
+        opcode: u16,
+        ticket: Option<AttachedObject<u32>>,
+    ) -> Result<(), posix_service::MutationError<u32>> {
+        self.admission_calls.push((opcode, ticket));
+        match self.admission_response {
+            Some(Ok(ticket)) => Err(posix_service::MutationError::Wait(ticket)),
+            Some(Err(status)) => Err(posix_service::MutationError::Failed(status)),
+            None => Ok(()),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -1433,6 +1453,37 @@ impl ProcessBackend<u32> for RecordingProcesses {
 }
 
 impl FilesystemBackend<u32> for RecordingFilesystem {
+    fn open_at_admitted(
+        &mut self,
+        request: &PreparedOpen,
+        paths: PathObjects<u32>,
+        ticket: Option<AttachedObject<u32>>,
+    ) -> Result<OpenedObject<u32>, posix_service::MutationError<u32>> {
+        self.admit(protocol::OP_OPEN_AT, ticket)?;
+        self.open_at(request, paths).map_err(Into::into)
+    }
+
+    fn ftruncate_admitted(
+        &mut self,
+        file: AttachedObject<u32>,
+        length: u64,
+        ceiling: u64,
+        ticket: Option<AttachedObject<u32>>,
+    ) -> Result<(), posix_service::MutationError<u32>> {
+        self.admit(protocol::OP_FTRUNCATE, ticket)?;
+        self.ftruncate(file, length, ceiling).map_err(Into::into)
+    }
+
+    fn truncate_at_admitted(
+        &mut self,
+        request: &posix_service::PreparedTruncate,
+        paths: PathObjects<u32>,
+        ticket: Option<AttachedObject<u32>>,
+    ) -> Result<(), posix_service::MutationError<u32>> {
+        self.admit(protocol::OP_TRUNCATE_AT, ticket)?;
+        self.truncate_at(request, paths).map_err(Into::into)
+    }
+
     fn open_session_root(
         &mut self,
         _effective_uid: u32,

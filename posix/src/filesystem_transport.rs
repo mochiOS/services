@@ -2,6 +2,63 @@
 
 use mnu_abi::IpcObjectHandles;
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum MutationReply {
+    Ready,
+    Wait,
+}
+
+/// Only opted-in mutation calls may receive an error carrying an object.
+/// All malformed envelopes and object-free busy errors fail closed, without
+/// granting a replay guarantee. Ownership remains with the caller's cleanup.
+pub fn mutation_status(
+    response: mochios_filesystem_protocol::Header,
+    request_id: u64,
+    payload: &[u8],
+    objects: &IpcObjectHandles,
+    success_objects: usize,
+) -> Result<MutationReply, i32> {
+    use mochios_filesystem_protocol as filesystem;
+    if response.opcode != filesystem::OP_STATUS
+        || response.request_id != request_id
+        || response.flags != 0
+        || response.length != 0
+        || !payload.is_empty()
+        || response.status > 0
+        || objects.count as usize > objects.handles.len()
+    {
+        return Err(-5);
+    }
+    if response.status == -filesystem::ERROR_MEMORY_ADMISSION_BUSY {
+        if objects.count == 1 {
+            let ticket = objects.handles[0];
+            if ticket.handle != 0
+                && ticket.reserved == 0
+                && ticket.rights == crate::mutation_admission::TICKET_RIGHTS
+            {
+                return Ok(MutationReply::Wait);
+            }
+        }
+        return Err(-5);
+    }
+    metadata_status(
+        response,
+        request_id,
+        payload,
+        objects.count as usize,
+        success_objects,
+    )?;
+    if objects
+        .handles
+        .iter()
+        .take(objects.count as usize)
+        .any(|object| object.handle == 0 || object.reserved != 0)
+    {
+        return Err(-5);
+    }
+    Ok(MutationReply::Ready)
+}
+
 /// Validate the complete metadata reply before trusting a retry guarantee.
 /// Error replies never transfer objects; a successful open transfers one.
 pub fn metadata_status(

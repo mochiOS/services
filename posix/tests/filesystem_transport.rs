@@ -64,3 +64,124 @@ fn empty_successful_reply_does_not_republish_request_attachments() {
     );
     assert_eq!(handles, IpcObjectHandles::default());
 }
+
+#[test]
+fn queued_mutation_reply_requires_an_exact_empty_authenticated_envelope() {
+    use mochios_filesystem_protocol as wire;
+    use posix_service::filesystem_transport::{MutationReply, mutation_status};
+    let header = wire::Header {
+        opcode: wire::OP_STATUS,
+        request_id: 7,
+        status: -wire::ERROR_MEMORY_ADMISSION_BUSY,
+        ..Default::default()
+    };
+    let mut objects = IpcObjectHandles::default();
+    objects.count = 1;
+    objects.handles[0] = IpcObjectHandle {
+        handle: 90,
+        reserved: 0,
+        rights: posix_service::mutation_admission::TICKET_RIGHTS,
+    };
+    for success_objects in [0, 1] {
+        assert_eq!(
+            mutation_status(header, 7, &[], &objects, success_objects),
+            Ok(MutationReply::Wait)
+        );
+        assert_eq!(
+            mutation_status(header, 8, &[], &objects, success_objects),
+            Err(-5)
+        );
+        assert_eq!(
+            mutation_status(header, 7, &[1], &objects, success_objects),
+            Err(-5)
+        );
+    }
+    for malformed in [
+        wire::Header {
+            opcode: wire::OP_READ,
+            ..header
+        },
+        wire::Header { flags: 1, ..header },
+        wire::Header {
+            length: 1,
+            ..header
+        },
+        wire::Header {
+            status: 11,
+            ..header
+        },
+        wire::Header {
+            status: -11,
+            ..header
+        },
+    ] {
+        assert_eq!(mutation_status(malformed, 7, &[], &objects, 0), Err(-5));
+    }
+    for count in [0, 2, u32::MAX] {
+        let mut bad = objects;
+        bad.count = count;
+        assert_eq!(mutation_status(header, 7, &[], &bad, 0), Err(-5));
+    }
+    for bad_object in [
+        IpcObjectHandle {
+            handle: 0,
+            ..objects.handles[0]
+        },
+        IpcObjectHandle {
+            reserved: 1,
+            ..objects.handles[0]
+        },
+        IpcObjectHandle {
+            rights: HANDLE_RIGHT_TRANSFER,
+            ..objects.handles[0]
+        },
+        IpcObjectHandle {
+            rights: objects.handles[0].rights | HANDLE_RIGHT_READ,
+            ..objects.handles[0]
+        },
+    ] {
+        let mut bad = objects;
+        bad.handles[0] = bad_object;
+        assert_eq!(mutation_status(header, 7, &[], &bad, 0), Err(-5));
+    }
+    assert_eq!(
+        objects.handles[0].handle, 90,
+        "validation never steals ownership"
+    );
+}
+
+#[test]
+fn ordinary_errors_and_successes_do_not_become_wait_replies() {
+    use mochios_filesystem_protocol as wire;
+    use posix_service::filesystem_transport::{MutationReply, mutation_status};
+    let header = wire::Header {
+        opcode: wire::OP_STATUS,
+        request_id: 7,
+        ..Default::default()
+    };
+    let mut objects = IpcObjectHandles::default();
+    assert_eq!(
+        mutation_status(header, 7, &[], &objects, 0),
+        Ok(MutationReply::Ready)
+    );
+    assert_eq!(mutation_status(header, 7, &[], &objects, 1), Err(-5));
+    for status in [-11, -5, -wire::ERROR_GROWTH_LIMIT] {
+        assert_eq!(
+            mutation_status(wire::Header { status, ..header }, 7, &[], &objects, 0),
+            Err(status)
+        );
+    }
+    objects.count = 1;
+    objects.handles[0] = IpcObjectHandle {
+        handle: 90,
+        rights: HANDLE_RIGHT_READ | HANDLE_RIGHT_TRANSFER,
+        reserved: 0,
+    };
+    assert_eq!(
+        mutation_status(header, 7, &[], &objects, 1),
+        Ok(MutationReply::Ready)
+    );
+    assert_eq!(mutation_status(header, 7, &[], &objects, 0), Err(-5));
+    objects.handles[0].handle = 0;
+    assert_eq!(mutation_status(header, 7, &[], &objects, 1), Err(-5));
+}
