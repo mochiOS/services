@@ -60,8 +60,13 @@ mod task {
     pub mod process {pub struct ProcessObject;}
     pub mod ids {
         #[derive(Clone,Copy,PartialEq,Eq)] pub struct ThreadId(u64);
-        impl ThreadId {pub fn as_u64(&self)->u64{self.0}}
+        impl ThreadId {
+            pub fn as_u64(&self)->u64{self.0}
+            pub fn from_u64(id:u64)->Self{Self(id)}
+        }
     }
+    pub use ids::ThreadId;
+    pub fn wake_registered_waiter(_:ThreadId){panic!("release-only fixture has no I/O waiters")}
     pub struct ThreadQueue;
     impl ThreadQueue{pub const MAX_THREADS:usize=64;}
     pub fn thread_id_exists(_:u64)->bool{true}

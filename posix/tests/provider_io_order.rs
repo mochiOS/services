@@ -20,6 +20,66 @@ mod object_io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+thread_local! {
+    static WAKES: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+    static CALLBACK_GATE: std::cell::RefCell<Option<object_io::IoLock>> = const { std::cell::RefCell::new(None) };
+}
+fn notified(waiter: u64) {
+    WAKES.with(|wakes| wakes.borrow_mut().push(waiter));
+    // The callback must run after releasing admission, even on Drop paths.
+    CALLBACK_GATE.with(|gate| {
+        if let Some(gate) = gate.borrow().as_ref() {
+            drop(gate.try_lock());
+        }
+    });
+}
+
+#[test]
+fn wait_registration_rechecks_and_wakes_on_release_cancel_consume_and_failure() {
+    WAKES.with(|wakes| wakes.borrow_mut().clear());
+    let lock = object_io::IoLock::from_allocated(Arc::new(object_io::State::new(notified)));
+    CALLBACK_GATE.with(|gate| *gate.borrow_mut() = Some(lock.clone()));
+    let owner = lock.try_lock().unwrap().unwrap();
+    let mut first = lock.intent().unwrap();
+    let second = lock.intent().unwrap();
+    assert!(!first.ready().unwrap());
+    first.register_waiter(1, 2).unwrap();
+    first.register_waiter(1, 2).unwrap(); // idempotent, not another slot
+    second.register_waiter(2, 2).unwrap();
+    assert_eq!(
+        second.register_waiter(3, 2),
+        Err(object_io::IntentError::Exhausted)
+    );
+    second.remove_waiter(2);
+    drop(owner);
+    WAKES.with(|wakes| assert_eq!(*wakes.borrow(), vec![1]));
+    assert!(first.ready().unwrap());
+    assert!(first.ready().unwrap()); // observation must not consume the position
+    assert!(!second.ready().unwrap());
+    // A release BEFORE registration is safe because the subsequent recheck
+    // sees readiness, rather than sleeping in reliance on an old notification.
+    first.register_waiter(3, 2).unwrap();
+    assert!(first.ready().unwrap());
+    let owner = first.try_acquire().unwrap().unwrap();
+    WAKES.with(|wakes| assert_eq!(*wakes.borrow(), vec![1, 3]));
+    assert_eq!(first.ready(), Err(object_io::IntentError::Consumed));
+    second.register_waiter(4, 2).unwrap();
+    let reservation = owner.reserve();
+    reservation.mark_unavailable();
+    WAKES.with(|wakes| assert_eq!(*wakes.borrow(), vec![1, 3, 4]));
+    assert_eq!(second.ready(), Err(object_io::IntentError::Unavailable));
+    drop(reservation);
+    CALLBACK_GATE.with(|gate| *gate.borrow_mut() = None);
+
+    let lock = object_io::IoLock::from_allocated(Arc::new(object_io::State::new(notified)));
+    let first = lock.intent().unwrap();
+    let second = lock.intent().unwrap();
+    second.register_waiter(5, 2).unwrap();
+    drop(first);
+    assert!(second.ready().unwrap());
+    WAKES.with(|wakes| assert_eq!(*wakes.borrow(), vec![1, 3, 4, 5]));
+}
+
 #[test]
 fn cache_generations_follow_backing_identity_not_unrelated_io() {
     let mut registry = object_io::Registry::new();
@@ -40,7 +100,7 @@ fn gate(registry: &mut object_io::Registry<u64>, key: u64) -> object_io::IoLock 
             key,
             || {
                 Ok(object_io::IoLock::from_allocated(Arc::new(
-                    object_io::State::new(),
+                    object_io::State::new(|_| {}),
                 )))
             },
             (),

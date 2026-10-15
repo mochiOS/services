@@ -26,6 +26,13 @@ fn native_provider_memory_update_probe_tracks_the_authoritative_abi() {
 }
 
 #[test]
+fn native_memory_admission_probe_uses_the_current_wait_and_creation_abi() {
+    let probe = include_str!("native_memory_admission.c");
+    assert!(probe.contains(&format!("HANDLE_WAIT_MANY = {}", mnu_abi::SyscallNumber::HandleWaitMany as u64)));
+    assert!(probe.contains(&format!("PROVIDER_MEMORY_ADMISSION_CREATE = {}", mnu_abi::SyscallNumber::ProviderMemoryAdmissionCreate as u64)));
+}
+
+#[test]
 fn owned_native_extent_composes_real_cache_records_and_cleanup_without_vm_lock_across_wait() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -37,9 +44,7 @@ fn owned_native_extent_composes_real_cache_records_and_cleanup_without_vm_lock_a
         .replace("pub mod process {", "pub mod process { pub(crate) use crate::native_extent_probe::process::*;")
         .replace("mod paging {", "mod paging { pub(crate) use crate::native_extent_probe::paging::*;")
         .replace("mod mem {", "mod mem { pub(crate) use crate::native_extent_probe::{mapping_targets, tlb_shootdown, extent_transaction};")
-        .replace("mod syscall {", "mod syscall { pub const EFAULT:u64=(-14i64) as u64;")
-        .replace("pub fn lock(&self) -> std::sync::MutexGuard<'_, T> {",
-            "pub fn try_lock(&self) -> Option<std::sync::MutexGuard<'_, T>> { self.0.try_lock().ok() } pub fn lock(&self) -> std::sync::MutexGuard<'_, T> {");
+        .replace("mod syscall {", "mod syscall { pub const EFAULT:u64=(-14i64) as u64;");
     let probe = include_str!("support/native_extent_transaction.rs")
         .replace(
             "\"../../../../core/",
@@ -50,10 +55,12 @@ fn owned_native_extent_composes_real_cache_records_and_cleanup_without_vm_lock_a
             &format!("\"{}/core/", root.display()),
         );
     let mut program = format!(
-        "#![feature(allocator_api)]\n{fixture}\nextern crate self as mnu_abi;\npub const HANDLE_SEEK_START:u64={}; pub const HANDLE_SEEK_CURRENT:u64={}; pub const HANDLE_SEEK_END:u64={};\n#[path={:?}] pub mod provider;\nmod native_extent_probe {{ {probe} }}\nmod cpu {{ pub struct SmapSmepGuard; impl SmapSmepGuard {{ pub fn new()->Self {{Self}} }} }}\n",
+        "#![feature(allocator_api)]\n{fixture}\nextern crate self as mnu_abi;\npub const HANDLE_SEEK_START:u64={}; pub const HANDLE_SEEK_CURRENT:u64={}; pub const HANDLE_SEEK_END:u64={};\npub const HANDLE_SIGNAL_READABLE:u64={}; pub const HANDLE_SIGNAL_PEER_CLOSED:u64={};\n#[path={:?}] pub mod provider;\nmod native_extent_probe {{ {probe} }}\nmod cpu {{ pub struct SmapSmepGuard; impl SmapSmepGuard {{ pub fn new()->Self {{Self}} }} }}\n",
         mnu_abi::HANDLE_SEEK_START,
         mnu_abi::HANDLE_SEEK_CURRENT,
         mnu_abi::HANDLE_SEEK_END,
+        mnu_abi::HANDLE_SIGNAL_READABLE,
+        mnu_abi::HANDLE_SIGNAL_PEER_CLOSED,
         root.join("core/crates/abi/src/provider.rs")
     );
     let scheduler = include_str!("../../../core/src/task/scheduler.rs");

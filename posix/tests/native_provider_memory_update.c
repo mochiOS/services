@@ -73,8 +73,13 @@ static void *update_provider(void *unused) {
       put64(response + 24, count);
       memcpy(response + 32, &count, sizeof(count));
       memset(response + 40, offset ? 'b' : 'a', count);
+#ifdef BEFORE_PROVIDER_READ_REPLY
+      BEFORE_PROVIDER_READ_REPLY();
+#endif
     } else if (opcode == 5 && get64(request + 24) == 100) {
       stored_length = 5000; /* explicit lower mutation, no kernel policy */
+    } else if (opcode == 8) {
+      /* OP_SYNC: this test provider has only RAM state, no persistent medium. */
     } else {
       return (void *)6;
     }
@@ -86,7 +91,10 @@ static void *update_provider(void *unused) {
   return native(HANDLE_CLOSE, endpoint, 0, 0, 0, 0, 0) ? (void *)8 : NULL;
 }
 
-int main(void) {
+#ifndef PROVIDER_MEMORY_UPDATE_MAIN
+#define PROVIDER_MEMORY_UPDATE_MAIN main
+#endif
+int PROVIDER_MEMORY_UPDATE_MAIN(void) {
   pthread_t thread;
   CHECK(pthread_create(&thread, NULL, update_provider, NULL) == 0);
   int64_t object;

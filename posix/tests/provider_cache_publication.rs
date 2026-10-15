@@ -41,7 +41,7 @@ static ALLOCATOR: FaultAllocator = FaultAllocator;
 
 #[test]
 fn failed_intent_allocation_leaves_backing_admission_unchanged() {
-    let lock = object_io::IoLock::from_allocated(Arc::new(object_io::State::new()));
+    let lock = object_io::IoLock::from_allocated(Arc::new(object_io::State::new(|_| {})));
     let generation = lock.generation();
     let existing = lock.try_lock().unwrap().unwrap();
     DENY_COMMIT_ALLOC.with(|deny| deny.set(true));
@@ -59,7 +59,7 @@ fn failed_intent_allocation_leaves_backing_admission_unchanged() {
 
 #[test]
 fn intent_polling_cancellation_and_guard_handoff_never_allocate() {
-    let lock = object_io::IoLock::from_allocated(Arc::new(object_io::State::new()));
+    let lock = object_io::IoLock::from_allocated(Arc::new(object_io::State::new(|_| {})));
     let existing = lock.try_lock().unwrap().unwrap();
     let mut first = lock.intent().unwrap();
     let middle = lock.intent().unwrap();
@@ -128,6 +128,9 @@ mod interrupt {
                 crate::cache_edge::<T>();
                 self.0.lock().unwrap()
             }
+            pub fn try_lock(&self) -> Option<std::sync::MutexGuard<'_, T>> {
+                self.0.try_lock().ok()
+            }
         }
     }
 }
@@ -180,6 +183,7 @@ static LOWER: Mutex<Lower> = Mutex::new(Lower {
 });
 
 mod syscall {
+    pub const EACCES: u64 = (-13i64) as u64;
     pub const EINVAL: u64 = (-22i64) as u64;
     pub const ENOMEM: u64 = (-12i64) as u64;
     pub const EIO: u64 = (-5i64) as u64;
@@ -359,7 +363,7 @@ mod mem {
                 return Err(crate::syscall::ENOMEM);
             }
             let gate = crate::object_io::IoLock::from_allocated(std::sync::Arc::new(
-                crate::object_io::State::new(),
+                crate::object_io::State::new(|_| {}),
             ));
             if crate::CAPTURE_GATE.with(std::cell::Cell::get) {
                 crate::CAPTURED_GATE.with(|slot| *slot.borrow_mut() = Some(gate.clone()));
@@ -370,15 +374,88 @@ mod mem {
 }
 
 fn provider_object() -> vm_object::VmObject {
+    provider_object_for_endpoint(17)
+}
+
+fn provider_object_for_endpoint(thread_id: u64) -> vm_object::VmObject {
     vm_object::VmObject::provider(
         Arc::new(task::ProviderObject {
-            endpoint_thread_id: 17,
+            endpoint_thread_id: thread_id,
             endpoint_slot: 2,
             endpoint_generation: 8,
         }),
         93,
     )
     .unwrap()
+}
+
+#[test]
+fn scoped_admission_cannot_be_retargeted_or_consumed_twice_and_preserves_guard_identity() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    let object = provider_object_for_endpoint(117);
+    let key = object.object_key();
+    let admission = vm_object::ProviderAdmission::new(key).unwrap();
+    assert_eq!(admission.signals(), mnu_abi::HANDLE_SIGNAL_READABLE);
+    let wrong = vm_object::ObjectKey::Provider {
+        endpoint_thread_id: 117,
+        endpoint_slot: 2,
+        endpoint_generation: 8,
+        identity: 94,
+    };
+    assert!(matches!(admission.acquire(wrong), Err(syscall::EACCES)));
+    assert_eq!(admission.signals(), mnu_abi::HANDLE_SIGNAL_READABLE);
+    let guard = admission.acquire(key).unwrap();
+    assert_eq!(guard.key(), key);
+    assert_eq!(admission.signals(), mnu_abi::HANDLE_SIGNAL_PEER_CLOSED);
+    assert!(matches!(admission.acquire(key), Err(syscall::EINVAL)));
+    let mut extent =
+        vm_object::PreparedExtent::prepare_admitted(guard, 3, 1, |bytes| Ok(Arc::new(bytes)))
+            .unwrap();
+    // Cancelling an acquired ticket cannot unlock a prepared update.
+    drop(admission);
+    assert!(matches!(
+        object.prepare_extent(3, 1, |_| panic!("must stay excluded")),
+        Err(syscall::EAGAIN)
+    ));
+    extent.preflight().unwrap();
+    drop(extent);
+    assert!(object.prepare_extent(3, 1, |bytes| Ok(Arc::new(bytes))).is_ok());
+}
+
+#[test]
+fn admitted_prepare_failure_consumes_position_but_releases_io_without_invalidating_data() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    let object = provider_object_for_endpoint(118);
+    let key = object.object_key();
+    let generation = object.memory_generation();
+    let first = vm_object::ProviderAdmission::new(key).unwrap();
+    let second = vm_object::ProviderAdmission::new(key).unwrap();
+    let guard = first.acquire(key).unwrap();
+    assert!(matches!(
+        vm_object::PreparedExtent::prepare_admitted(guard, 3, 1, |_| Err(syscall::ENOMEM)),
+        Err(syscall::ENOMEM)
+    ));
+    assert_eq!(first.signals(), mnu_abi::HANDLE_SIGNAL_PEER_CLOSED);
+    assert_eq!(second.signals(), mnu_abi::HANDLE_SIGNAL_READABLE);
+    assert_eq!(object.memory_generation(), generation);
+    drop(second);
+    assert!(object.prepare_extent(3, 1, |bytes| Ok(Arc::new(bytes))).is_ok());
+}
+
+#[test]
+fn waiter_allocation_failure_does_not_change_queue_readiness_or_reserve_data() {
+    let lock = object_io::IoLock::from_allocated(Arc::new(object_io::State::new(|_| {})));
+    let intent = lock.intent().unwrap();
+    let generation = lock.generation();
+    DENY_COMMIT_ALLOC.with(|deny| deny.set(true));
+    let result = intent.register_waiter(1, 10);
+    DENY_COMMIT_ALLOC.with(|deny| deny.set(false));
+    assert_eq!(result, Err(object_io::IntentError::NoMemory));
+    assert!(intent.ready().unwrap());
+    assert!(!lock.is_reserved());
+    assert_eq!(lock.generation(), generation);
+    intent.register_waiter(1, 10).unwrap();
+    without_allocations(|| intent.remove_waiter(1));
 }
 
 fn reset_lower(bytes: &[u8]) {
