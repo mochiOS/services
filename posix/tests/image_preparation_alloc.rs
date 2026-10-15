@@ -265,6 +265,19 @@ fn zeroing_capacity_overflow_copy_errors_and_empty_storage_are_explicit() {
 }
 
 #[test]
+fn borrowed_identity_preparation_is_fallible_and_preserves_exact_opaque_text() {
+    let identity = "opaque:image/日本語#42";
+    FAIL_NEXT.with(|fail| fail.set(true));
+    assert_eq!(storage::text(identity), Err(mnu_abi::ENOMEM));
+    assert!(!FAIL_NEXT.with(|fail| fail.replace(false)));
+    assert_eq!(storage::text(identity).unwrap(), identity);
+    FAIL_NEXT.with(|fail| fail.set(true));
+    assert_eq!(storage::text("").unwrap(), "");
+    // Empty text needs no allocation, so the injected failure is still pending.
+    assert!(FAIL_NEXT.with(|fail| fail.replace(false)));
+}
+
+#[test]
 fn object_snapshot_does_not_call_backend_after_allocation_failure() {
     FAIL_NEXT.with(|fail| fail.set(true));
     let result = snapshot::read(4096, 4096, |_| panic!("copy after ENOMEM"));
