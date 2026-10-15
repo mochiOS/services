@@ -54,6 +54,10 @@
 #define main address_space_limit_probe
 #include "native_address_space_limit.c"
 #undef main
+#undef CHECK
+#define main heap_reservation_probe
+#include "native_heap_reservation.c"
+#undef main
 
 int main(void) {
     int result = handle_capture_probe();
@@ -77,6 +81,8 @@ int main(void) {
     result = program_break_probe();
     if (result) return result;
     result = mapping_budget_probe();
+    if (result) return result;
+    result = heap_reservation_probe();
     if (result) return result;
     result = address_space_limit_probe();
     return result ? result : callback_probe();

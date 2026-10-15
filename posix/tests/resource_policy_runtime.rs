@@ -246,6 +246,9 @@ fn has_posix_environment() -> Result<bool, i32> {
 fn map_kernel_errno(raw: i64) -> i32 {
     (-raw) as i32
 }
+fn trim_heap_reservation() -> Result<(), i32> {
+    Ok(())
+}
 #[path = "../../../user/crates/newlib-runtime/src/address_space.rs"]
 mod address_space;
 

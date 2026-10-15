@@ -9,10 +9,18 @@ struct Backend {
     policy_error: Option<i32>,
     native_error: Option<i32>,
     reads: usize,
+    trims: usize,
+    trim_error: Option<i32>,
     calls: Vec<(bool, mnu_abi::memory_map::Request)>,
 }
 static BACKEND: Mutex<Option<Backend>> = Mutex::new(None);
 static SERIAL: Mutex<()> = Mutex::new(());
+fn trim_heap_reservation() -> Result<(), i32> {
+    let mut backend = BACKEND.lock().unwrap();
+    let backend = backend.as_mut().unwrap();
+    backend.trims += 1;
+    backend.trim_error.map_or(Ok(()), Err)
+}
 fn has_posix_environment() -> Result<bool, i32> {
     BACKEND.lock().unwrap().as_ref().unwrap().environment
 }
@@ -97,6 +105,8 @@ fn reset(environment: Result<bool, i32>, soft: u64) {
         policy_error: None,
         native_error: None,
         reads: 0,
+        trims: 0,
+        trim_error: None,
         calls: Vec::new(),
     });
 }
@@ -113,6 +123,7 @@ fn finite_limits_use_atomic_native_admission_with_every_argument_unchanged() {
         let backend = BACKEND.lock().unwrap();
         let backend = backend.as_ref().unwrap();
         assert_eq!(backend.reads, 1);
+        assert_eq!(backend.trims, 1);
         assert_eq!(
             backend.calls,
             [(
@@ -141,6 +152,7 @@ fn unlimited_or_non_posix_processes_keep_the_direct_native_path() {
         let backend = BACKEND.lock().unwrap();
         let backend = backend.as_ref().unwrap();
         assert_eq!(backend.reads, reads);
+        assert_eq!(backend.trims, 0);
         assert_eq!(backend.calls.len(), 1);
         assert!(!backend.calls[0].0);
     }
@@ -176,6 +188,10 @@ fn policy_and_native_errors_propagate_without_retrying_an_unbounded_map() {
     assert_eq!(map(), Err(5));
     assert!(BACKEND.lock().unwrap().as_ref().unwrap().calls.is_empty());
     reset(Ok(true), 4096);
+    BACKEND.lock().unwrap().as_mut().unwrap().trim_error = Some(12);
+    assert_eq!(map(), Err(12));
+    assert!(BACKEND.lock().unwrap().as_ref().unwrap().calls.is_empty());
+    reset(Ok(true), 4096);
     BACKEND.lock().unwrap().as_mut().unwrap().policy_error = Some(5);
     assert_eq!(map(), Err(5));
     assert!(BACKEND.lock().unwrap().as_ref().unwrap().calls.is_empty());
@@ -185,6 +201,19 @@ fn policy_and_native_errors_propagate_without_retrying_an_unbounded_map() {
         assert_eq!(map(), Err(error));
         assert_eq!(BACKEND.lock().unwrap().as_ref().unwrap().calls.len(), 1);
     }
+}
+
+#[test]
+fn heap_snapshot_does_not_reenter_state_before_the_heap_lock() {
+    let _serial = SERIAL.lock().unwrap();
+    reset(Ok(true), 4096);
+    production::snapshot().unwrap();
+    let backend = BACKEND.lock().unwrap();
+    let backend = backend.as_ref().unwrap();
+    assert_eq!(
+        (backend.reads, backend.trims, backend.calls.len()),
+        (1, 0, 0)
+    );
 }
 
 #[test]

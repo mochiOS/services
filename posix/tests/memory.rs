@@ -33,7 +33,8 @@ fn newlib_heap_growth_commits_its_reserved_arena() {
     let arena = include_str!("../../../user/crates/newlib-runtime/src/heap.rs");
     assert!(arena.contains("RESERVATION_BYTES"));
     assert!(arena.contains("SyscallNumber::MemoryProtect"));
-    assert!(!arena.contains("MEMORY_MAP_EXACT"));
+    assert!(arena.contains("MEMORY_MAP_EXACT"));
+    assert!(arena.contains("if mapped != next.reserved_end"));
     let kernel = include_str!("../../../core/src/syscall/process.rs");
     let mapping = kernel
         .split("pub fn memory_map(")

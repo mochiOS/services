@@ -68,10 +68,12 @@ int main(void) {
     CHECK(mprotect(view, 8192, PROT_READ | PROT_WRITE) == 0);
     view[0] = 31; view[4096] = 47;
     CHECK(munmap(view + 4096, 4096) == 0 && view[0] == 31);
-    /* The break arena was already reserved and charged: activating a page
-     * inside it does not create a new address-space reservation. */
+    /* Finite admission returns the unused arena tail. Growth beyond the
+     * active pages must now acquire address space, even inside its window. */
     unsigned char *before = sbrk(0);
-    CHECK(before != (void *)-1 && sbrk(1) == before && sbrk(-1) == before + 1);
+    CHECK(before != (void *)-1);
+    errno = 0;
+    CHECK(sbrk(4096) == (void *)-1 && errno == ENOMEM && sbrk(0) == before);
     errno = 0;
     CHECK(malloc((size_t)512 * 1024 * 1024) == NULL && errno == ENOMEM);
     CHECK(sbrk(0) == before);
