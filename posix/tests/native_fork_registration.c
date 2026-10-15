@@ -46,6 +46,10 @@
 #define main program_break_probe
 #include "native_program_break.c"
 #undef main
+#undef CHECK
+#define main mapping_budget_probe
+#include "native_mapping_budget.c"
+#undef main
 
 int main(void) {
     int result = handle_capture_probe();
@@ -67,5 +71,7 @@ int main(void) {
     result = bounded_write_probe();
     if (result) return result;
     result = program_break_probe();
+    if (result) return result;
+    result = mapping_budget_probe();
     return result ? result : callback_probe();
 }
