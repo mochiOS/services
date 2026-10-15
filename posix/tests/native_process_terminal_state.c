@@ -35,10 +35,54 @@ struct context {
   uint64_t registers[14];
 };
 static unsigned char stack[65536] __attribute__((aligned(16)));
+static unsigned char worker_stacks[6][32768] __attribute__((aligned(16)));
+struct shared_state {
+  uint64_t ticks, ready, go, failed;
+};
+static struct shared_state *shared;
 static const char path[] = "/system/services/compositor.service";
 static const char label[] = "terminal-child";
 static void put32(void *p, uint32_t value) { memcpy(p, &value, 4); }
+static uint64_t load(uint64_t *p) {
+  return __atomic_load_n(p, __ATOMIC_SEQ_CST);
+}
+static void store(uint64_t *p, uint64_t value) {
+  __atomic_store_n(p, value, __ATOMIC_SEQ_CST);
+}
+__attribute__((used, noreturn)) static void worker(uint64_t mode) {
+  __atomic_fetch_add(&shared->ready, 1, __ATOMIC_SEQ_CST);
+  for (;;) {
+    __atomic_fetch_add(&shared->ticks, 1, __ATOMIC_SEQ_CST);
+    if (mode && load(&shared->go)) {
+      N(mode == 1 ? 574 : 578, 37, 0, 0);
+      __builtin_unreachable();
+    }
+  }
+}
+__attribute__((naked)) static void worker_entry(void) {
+  __asm__ volatile("call worker\n\tud2");
+}
 __attribute__((used, noreturn)) static void child(uint64_t code) {
+  if (code >= 256) {
+    unsigned mode = (unsigned)(code - 256);
+    for (unsigned index = 0; index < (mode == 2 ? 1 : 6); ++index) {
+      struct context context = {0};
+      context.entry = (uint64_t)worker_entry;
+      context.stack =
+          (uint64_t)(worker_stacks[index] + sizeof(worker_stacks[0]));
+      context.argument = index == 0 ? mode : 0;
+      int64_t result = N(577, &context, sizeof(context), 0);
+      if (result < 0 && result != -ENOSYS)
+        store(&shared->failed, (uint64_t)-result);
+    }
+    for (;;) {
+      __atomic_fetch_add(&shared->ticks, 1, __ATOMIC_SEQ_CST);
+      if (mode == 2 && load(&shared->go)) {
+        N(578, 37, 0, 0);
+        __builtin_unreachable();
+      }
+    }
+  }
   N(574, code, 0, 0);
   __builtin_unreachable();
 }
@@ -108,7 +152,13 @@ int main(void) {
     } else {
       if (attempt > 2)
         CHECK(N(645, handle, 0, 0) == 0);
-      int64_t result = N(646, handle, UINT64_MAX, 0);
+      int64_t result;
+      unsigned retries = 0;
+      do {
+        result = N(646, handle, UINT64_MAX, 0);
+        if (result == -EAGAIN)
+          N(517, 1, 0, 0);
+      } while (result == -EAGAIN && ++retries < 1000);
       CHECK(result == 0 || result == -ESRCH);
       expected = result == 0 ? UINT64_MAX : code;
       forced += result == 0;
@@ -128,5 +178,53 @@ int main(void) {
           "terminal-state: PASS 20 trials, natural=%u forced=%u, zero "
           "and full-width codes, races, retained handles\n",
           natural, forced);
+  int64_t memory = N(671, 4096, 0, 0);
+  CHECK(memory > 0);
+  int64_t address = native6(582, 0, 4096, 3, 2, (uint64_t)memory, 0);
+  CHECK(address > 0);
+  shared = (struct shared_state *)(uintptr_t)address;
+  for (unsigned index = 0; index < 6; ++index)
+    for (size_t page = 0; page < sizeof(worker_stacks[0]); page += 4096)
+      worker_stacks[index][page] = 1;
+  for (unsigned mode = 0; mode < 3; ++mode) {
+    for (unsigned attempt = 0; attempt < 8; ++attempt) {
+      memset(shared, 0, sizeof(*shared));
+      int64_t handle = create((uint64_t)authority, 256 + mode);
+      CHECK(handle > 0);
+      CHECK(N(645, handle, 0, 0) == 0);
+      unsigned spins;
+      for (spins = 0;
+           spins < 5000 && (!load(&shared->ready) || !load(&shared->ticks));
+           ++spins)
+        CHECK(N(517, 1, 0, 0) == 0);
+      CHECK(load(&shared->ready) && load(&shared->ticks));
+      if (mode == 0)
+        CHECK(N(646, handle, 137, 0) == 0);
+      else
+        store(&shared->go, 1);
+      struct status status = {0};
+      /* Deadline bounds a missing last-thread publication without polling it.
+       */
+      struct {
+        uint64_t seconds;
+        uint32_t nanoseconds, reserved;
+      } now = {0};
+      CHECK(N(640, UINT64_C(0x4d4e55434c4b0002), &now, 0) == 0);
+      uint64_t deadline =
+          (now.seconds + 10) * UINT64_C(1000000000) + now.nanoseconds;
+      CHECK(N(643, handle, deadline, &status) == 0);
+      CHECK(status.state == 2 && status.code == (mode == 0 ? 137 : 37));
+      uint64_t stopped = load(&shared->ticks);
+      CHECK(N(517, 5, 0, 0) == 0);
+      CHECK(load(&shared->ticks) == stopped && !load(&shared->failed));
+      CHECK(N(626, handle, 0, 0) == 0);
+    }
+    fprintf(stderr, "process-quiescence: mode=%u PASS 8 trials\n", mode);
+  }
+  CHECK(N(583, address, 4096, 0) == 0);
+  CHECK(N(626, memory, 0, 0) == 0);
+  fprintf(stderr, "process-quiescence: PASS external termination, self exit "
+                  "during creation, concurrent last-thread exit; shared "
+                  "heartbeat stops before exit is observable\n");
   return 0;
 }
