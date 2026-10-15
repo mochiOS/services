@@ -10,6 +10,7 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define CHECK(x)                                                               \
@@ -55,6 +56,10 @@ int main(void) {
     CHECK(sched_yield() == 0);
   CHECK(atomic_load(&reads) != 0 && atomic_load(&reader_error) == 0);
   fprintf(stderr, "file-admission: reader active\n");
+#if !defined(FILE_ADMISSION_FTRUNCATE_ONLY) && \
+    !defined(FILE_ADMISSION_PATH_TRUNCATE_ONLY)
+  int expected_open_fd = -1;
+#endif
   for (unsigned i = 0; i < 64; ++i) {
 #ifdef FILE_ADMISSION_PATH_TRUNCATE_ONLY
     CHECK(truncate(path, i % 2 ? 8192 : 5000) == 0);
@@ -64,8 +69,14 @@ int main(void) {
 #if !defined(FILE_ADMISSION_FTRUNCATE_ONLY) && \
     !defined(FILE_ADMISSION_PATH_TRUNCATE_ONLY)
     if (i % 8 == 0) {
+      CHECK(open(path, O_RDONLY | O_DIRECTORY) == -1 && errno == ENOTDIR);
       int opened = open(path, O_RDWR | O_TRUNC);
       CHECK(opened >= 0);
+      if (expected_open_fd < 0)
+        expected_open_fd = opened;
+      CHECK(opened == expected_open_fd);
+      struct stat status;
+      CHECK(fstat(opened, &status) == 0 && status.st_size == 0);
       CHECK(close(opened) == 0);
       CHECK(truncate(path, 8192) == 0);
       fprintf(stderr, "file-admission: completed iteration %u\n", i);

@@ -353,7 +353,13 @@ fn libc_path_truncate_encodes_before_callbacks_reopen() {
     assert!(exported.contains("file_mutation::truncate("));
     assert!(!exported.contains("client.truncate_at("));
     let source = include_str!("../../../user/crates/newlib-runtime/src/file_mutation.rs");
-    let operation = source.split("pub(super) fn truncate(").nth(1).unwrap();
+    let operation = source
+        .split("pub(super) fn truncate(")
+        .nth(1)
+        .unwrap()
+        .split("struct OpenResources")
+        .next()
+        .unwrap();
     let snapshot = operation.find("prepare_truncate_at(").unwrap();
     assert!(operation.find("let native = delivery(control)").unwrap() < snapshot);
     assert!(snapshot < operation.find("drop(native)").unwrap());
@@ -361,4 +367,45 @@ fn libc_path_truncate_encodes_before_callbacks_reopen() {
         operation.find("retire()").unwrap() < operation.find("drain_pending_signals()").unwrap()
     );
     assert_eq!(operation.matches("c_bytes(path)").count(), 1);
+}
+
+#[test]
+fn libc_open_owns_the_reply_until_dispatch_then_installs_without_a_callback_gap() {
+    let runtime = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
+    let exported = runtime
+        .split("fn _open(")
+        .nth(1)
+        .unwrap()
+        .split("#[unsafe(no_mangle)]")
+        .next()
+        .unwrap();
+    assert!(exported.contains("file_mutation::open(path, flags, mode)"));
+    assert!(!runtime.contains("fn open_posix_object("));
+    let source = include_str!("../../../user/crates/newlib-runtime/src/file_mutation.rs");
+    let operation = source.split("pub(super) fn open(").nth(1).unwrap();
+    assert!(
+        operation.find("let native = delivery(control)").unwrap()
+            < operation.find("PendingFdReservation(").unwrap()
+    );
+    assert!(operation.find("activate()").unwrap() < operation.find("drop(native)").unwrap());
+    assert!(
+        operation.find("source.opened = Some(opened)").unwrap()
+            < operation.find("client.fstat(opened)").unwrap()
+    );
+    assert!(
+        operation.find("drain_pending_signals()?").unwrap()
+            < operation.find("commit_reservation(").unwrap()
+    );
+    assert!(
+        operation
+            .find("completion_delivery = Some(native)")
+            .unwrap()
+            < operation.find("commit_reservation(").unwrap()
+    );
+    assert!(operation.find("source.opened = None").unwrap() < operation.find("retire()").unwrap());
+    assert!(
+        operation.find("retire()").unwrap() < operation.find("drop(completion_delivery)").unwrap()
+    );
+    assert!(source.contains("if let Some(opened) = self.opened.take()"));
+    assert!(source.contains("close_object_handle(opened.handle)"));
 }
