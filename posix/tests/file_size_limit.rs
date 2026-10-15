@@ -70,6 +70,7 @@ fn runtime_checks_access_and_size_limited_object_kind_before_policy_or_signal() 
     assert!(positioned.contains("generate_thread_signal(posix_protocol::SIGNAL_XFSZ)?"));
     assert!(positioned.contains("return Err(EFBIG)"));
     assert!(!positioned.contains("HandleSeek"));
-    assert!(runtime.contains("0o100000 => FdKind::ObjectFile"));
-    assert!(runtime.contains("_ => FdKind::ObjectSpecial"));
+    let opened = include_str!("../../../user/crates/newlib-runtime/src/file_mutation.rs");
+    assert!(opened.contains("0o100000 => FdKind::ObjectFile"));
+    assert!(opened.contains("_ => FdKind::ObjectSpecial"));
 }

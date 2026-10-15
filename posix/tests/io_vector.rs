@@ -86,8 +86,8 @@ fn excessive_vector_count_matches_host_writev_without_writing_a_prefix() {
 fn both_runtime_vector_operations_validate_before_the_first_io() {
     let source = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
     for (name, io) in [
-        ("writev", "syscall_write(entry,"),
-        ("readv", "syscall_read(entry,"),
+        ("writev", "syscall_write(**entry,"),
+        ("readv", "syscall_read(**entry,"),
     ] {
         let start = source
             .find(&format!("pub unsafe extern \"C\" fn {name}("))
