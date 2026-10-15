@@ -434,11 +434,7 @@ impl Inode {
             return Err(CorruptKind::SymlinkTarget(self.index).into());
         }
 
-        // Symlink targets of up to 59 bytes are stored inline. Longer
-        // targets are stored as regular file data.
-        const MAX_INLINE_SYMLINK_LEN: u64 = 59;
-
-        if self.size_in_bytes() <= MAX_INLINE_SYMLINK_LEN {
+        if self.is_fast_symlink(ext4)? {
             // OK to unwrap since we checked the size above.
             let len = usize::try_from(self.size_in_bytes()).unwrap();
             let target = &self.inline_data()[..len];
@@ -450,6 +446,31 @@ impl Inode {
             PathBuf::try_from(data)
                 .map_err(|_| CorruptKind::SymlinkTarget(self.index).into())
         }
+    }
+
+    /// Inline link bytes are not a block map. An external attribute block
+    /// contributes to i_blocks but does not turn a fast link into file data.
+    pub(crate) fn is_fast_symlink(
+        &self,
+        ext4: &Ext4,
+    ) -> Result<bool, Ext4Error> {
+        if !self.file_type.is_symlink()
+            || self.flags().contains(InodeFlags::EXTENTS)
+        {
+            return Ok(false);
+        }
+        let attribute_blocks = u64::from(self.file_acl() != 0);
+        let blocks = self.fs_blocks(ext4)?;
+        if blocks < attribute_blocks {
+            return Err(CorruptKind::SymlinkTarget(self.index).into());
+        }
+        if blocks != attribute_blocks {
+            return Ok(false);
+        }
+        if self.size_in_bytes() > Self::INLINE_DATA_LEN as u64 {
+            return Err(CorruptKind::SymlinkTarget(self.index).into());
+        }
+        Ok(true)
     }
 
     /// Get the size of the inode

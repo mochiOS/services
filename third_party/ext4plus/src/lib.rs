@@ -1489,8 +1489,10 @@ impl Ext4 {
         &self,
         mut inode: Inode,
     ) -> Result<(), Ext4Error> {
-        let blocks = FileBlocks::from_inode(&inode, self.clone())?;
-        blocks.free_all().await?;
+        if !inode.is_fast_symlink(self)? {
+            let blocks = FileBlocks::from_inode(&inode, self.clone())?;
+            blocks.free_all().await?;
+        }
         inode.set_size_in_bytes(0);
         inode.set_links_count(0);
         inode.write(self).await?;
@@ -1574,7 +1576,7 @@ impl Ext4 {
                 flags: InodeFlags::empty(),
             })
             .await?;
-        if target.as_ref().len() <= 60 {
+        if target.as_ref().len() < 60 {
             // Fast symlink: store the target in the inode itself.
             let mut target_bytes = [0; 60];
             target_bytes[..target.as_ref().len()]
