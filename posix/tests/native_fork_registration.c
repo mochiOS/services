@@ -23,6 +23,10 @@
 #define main fork_capture_probe
 #include "native_fork_capture.c"
 #undef main
+#undef CHECK
+#define main fork_reent_probe
+#include "native_fork_reent.c"
+#undef main
 
 int main(void) {
     int result = handle_capture_probe();
@@ -34,5 +38,7 @@ int main(void) {
     result = newlib_lock_probe();
     if (result) return result;
     result = fork_capture_probe();
+    if (result) return result;
+    result = fork_reent_probe();
     return result ? result : callback_probe();
 }
