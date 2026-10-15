@@ -135,7 +135,7 @@ fn runtime_uses_retained_cleanup_for_all_failed_clone_and_spawn_branches() {
     let source = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
     let start = source.find("fn clone_registered_process()").unwrap();
     let end = source[start..]
-        .find("fn create_spawn_status_stream()")
+        .find("struct CloneStartup")
         .unwrap()
         + start;
     let clone = &source[start..end];

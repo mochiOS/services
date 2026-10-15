@@ -62,6 +62,10 @@
 #define main image_limit_probe
 #include "native_exec_address_space.c"
 #undef main
+#undef CHECK
+#define main child_startup_probe
+#include "native_child_startup.c"
+#undef main
 
 int main(int argc, char **argv) {
     int mode = image_limit_child(argc, argv);
@@ -93,5 +97,7 @@ int main(int argc, char **argv) {
     result = address_space_limit_probe();
     if (result) return result;
     result = image_limit_probe(0, NULL);
+    if (result) return result;
+    result = child_startup_probe();
     return result ? result : callback_probe();
 }
