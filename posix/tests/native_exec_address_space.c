@@ -11,11 +11,17 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
+#include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #define CHECK(x) do { if (!(x)) { printf("image-as-limit: FAIL line=%d errno=%d\n", __LINE__, errno); return 1; } } while (0)
 static _Atomic(unsigned) ei_counter, ei_stop;
+static uint64_t ei_handles(void) {
+    uint64_t number = 680;
+    __asm__ volatile("syscall" : "+a"(number) : "D"(0), "S"(0) : "rcx", "r11", "memory");
+    return number;
+}
 static void *ei_worker(void *unused) {
     (void)unused;
     while (!atomic_load_explicit(&ei_stop, memory_order_acquire)) {
@@ -27,6 +33,22 @@ static void *ei_worker(void *unused) {
 
 static int image_limit_child(int argc, char **argv) {
     if (argc != 4 || strcmp(argv[1], "--verify-image-as") != 0) return -1;
+    extern char **environ;
+    char **cursor = environ;
+    while (*cursor) ++cursor;
+    uintptr_t *auxiliary = (uintptr_t *)(cursor + 1);
+    uintptr_t policy = 0, upcall = 0, heap = 0;
+    while (auxiliary[0]) {
+        if (auxiliary[0] == 0x6d000001) policy = auxiliary[1];
+        if (auxiliary[0] == 0x6d000002) upcall = auxiliary[1];
+        if (auxiliary[0] == 0x6d000003) heap = auxiliary[1];
+        auxiliary += 2;
+    }
+    CHECK(policy && upcall && heap && policy != upcall && upcall != heap);
+    errno = 0;
+    CHECK(mprotect((void *)policy, 4096, PROT_READ | PROT_WRITE) == -1 && errno == EACCES);
+    volatile unsigned char *prepared = (volatile unsigned char *)upcall;
+    prepared[0] = 37; CHECK(prepared[0] == 37);
     int channel = atoi(argv[2]), closed = atoi(argv[3]);
     struct rlimit limit;
     CHECK(getrlimit(RLIMIT_AS, &limit) == 0 && limit.rlim_cur == 32 * 1024 * 1024);
@@ -34,6 +56,7 @@ static int image_limit_child(int argc, char **argv) {
     errno = 0;
     CHECK(fcntl(closed, F_GETFD, 0) == -1 && errno == EBADF);
     unsigned char *allocation = malloc(65536); CHECK(allocation != NULL);
+    CHECK((uintptr_t)allocation >= heap && (uintptr_t)allocation < heap + 131072);
     for (unsigned i = 0; i < 65536; i += 4096) allocation[i] = (unsigned char)(i / 4096 + 3);
     for (unsigned i = 0; i < 65536; i += 4096) CHECK(allocation[i] == i / 4096 + 3);
     free(allocation);
@@ -64,8 +87,10 @@ int main(int argc, char **argv) {
         CHECK(getrlimit(RLIMIT_AS, &original) == 0);
         limit = original; limit.rlim_cur = 0;
         CHECK(setrlimit(RLIMIT_AS, &limit) == 0);
+        uint64_t handles = ei_handles();
         errno = 0;
         CHECK(execve("/system/services/compositor.service", arguments, environment) == -1 && errno == ENOMEM);
+        CHECK(ei_handles() == handles);
         unsigned count = atomic_load_explicit(&ei_counter, memory_order_acquire);
         for (unsigned spin = 0; spin < 100000 && atomic_load_explicit(&ei_counter, memory_order_acquire) == count; ++spin) sched_yield();
         CHECK(atomic_load_explicit(&ei_counter, memory_order_acquire) != count);
@@ -92,6 +117,6 @@ int main(int argc, char **argv) {
     int status;
     CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
     CHECK(close(channel[0]) == 0);
-    puts("image-as-limit: PASS failed exec preserves siblings and CLOEXEC FDs; finite-AS replacement inherits policy, closes descriptors and allocates under 32MiB");
+    puts("image-as-limit: PASS failed exec preserves siblings and CLOEXEC FDs; prepared policy/upcall/heap regions, read-only ceiling and finite-AS replacement work under 32MiB");
     return 0;
 }

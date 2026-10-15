@@ -261,6 +261,33 @@ fn start() -> MutexGuard<'static, ()> {
     *BACKEND.lock().unwrap() = Some(Backend::new());
     serial
 }
+
+#[test]
+fn prepared_page_is_adopted_without_discovery_or_mapping_and_duplicate_adoption_is_safe() {
+    let _serial = start();
+    let address = {
+        let backend = BACKEND.lock().unwrap();
+        std::ptr::from_ref(&backend.as_ref().unwrap().pages[0].policy) as u64
+    };
+    resource_policy::adopt_initial(address).unwrap();
+    assert_eq!(read(), 9);
+    assert_eq!(resource_policy::adopt_initial(address), Err(EIO));
+    assert_eq!(read(), 9);
+    {
+        let backend = BACKEND.lock().unwrap();
+        let backend = backend.as_ref().unwrap();
+        assert_eq!(
+            (
+                backend.requests,
+                backend.maps,
+                backend.closes,
+                backend.unmaps
+            ),
+            (0, 0, 0, 0)
+        );
+    }
+    reset();
+}
 fn read() -> u64 {
     resource_policy::read(RLIMIT_NOFILE).unwrap().soft
 }
