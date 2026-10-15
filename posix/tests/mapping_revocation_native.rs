@@ -5,6 +5,7 @@ mod mapping_revocation;
 mod mapping_revocation_native;
 use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
+static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 mod syscall {
     pub const EFAULT: u64 = (-14i64) as u64;
@@ -130,7 +131,45 @@ mod detached_roots {
 }
 
 #[test]
+fn native_local_commit_is_ordered_after_tlb_ack_before_frame_release_and_can_roll_back() {
+    let _test = TEST_LOCK.lock().unwrap();
+    use mapping_revocation::{revoke_with, Error};
+    use mapping_revocation_native::Native;
+    use task::process::{Process, ProcessTable};
+    let table = ProcessTable(vec![Process(4096)]);
+    let original = BTreeMap::from([((4096, 4096), 0x105), ((4096, 8192), 0x207)]);
+    let suspended = BTreeMap::from([((4096, 4096), 0x104), ((4096, 8192), 0x206)]);
+    for fail_commit in [true, false] {
+        *state().lock().unwrap() = State {
+            entries: original.clone(),
+            ..Default::default()
+        };
+        // As in production, the caller retains mapping exclusion and table
+        // ownership while the local commit inspects suspended PTEs.
+        let mut native = unsafe { Native::new(&table) };
+        let result = revoke_with([(4096, 4096, 12288)], &mut native, || {
+            let state = state().lock().unwrap();
+            assert!(state.synchronized);
+            assert_eq!(state.released, 0);
+            assert_eq!(state.entries, suspended);
+            if fail_commit { Err(17) } else { Ok(37) }
+        });
+        let state = state().lock().unwrap();
+        if fail_commit {
+            assert_eq!(result, Err(Error::Backend(17)));
+            assert_eq!(state.entries, original);
+            assert_eq!(state.released, 0);
+        } else {
+            assert_eq!(result, Ok(37));
+            assert!(state.entries.is_empty());
+            assert_eq!(state.released, 2);
+        }
+    }
+}
+
+#[test]
 fn actual_native_adapter_checks_owned_roots_restores_on_sync_failure_and_releases_only_after_ack() {
+    let _test = TEST_LOCK.lock().unwrap();
     use mapping_revocation::{revoke, Backend, Error};
     use mapping_revocation_native::Native;
     use task::process::{Process, ProcessTable};

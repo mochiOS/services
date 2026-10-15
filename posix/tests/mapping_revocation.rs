@@ -1,7 +1,7 @@
 extern crate alloc;
 #[path = "../../../core/src/mem/mapping_revocation.rs"]
 mod mapping_revocation;
-use mapping_revocation::{revoke, virtual_overlap, Backend, Error};
+use mapping_revocation::{revoke, revoke_with, virtual_overlap, Backend, Error};
 
 #[derive(Default)]
 struct Vm {
@@ -92,6 +92,57 @@ fn editing_and_sync_failures_restore_ownership_without_freeing() {
         ]
     );
     assert!(!vm.events.iter().any(|(event, _)| *event == "release"));
+}
+
+#[test]
+fn failed_local_commit_restores_every_frame_without_releasing_ownership() {
+    let mut vm = Vm::default();
+    let mut called = 0;
+    let result = revoke_with([(4096, 4096, 12288)], &mut vm, || {
+        called += 1;
+        Err::<(), _>(11)
+    });
+    assert_eq!(result, Err(Error::Backend(11)));
+    assert_eq!(called, 1);
+    assert_eq!(
+        vm.events,
+        [
+            ("suspend", 4096),
+            ("suspend", 8192),
+            ("synchronize", 0),
+            ("restore", 8192),
+            ("restore", 4096),
+        ]
+    );
+}
+
+#[test]
+fn preparation_failures_never_enter_commit_and_empty_plans_still_commit() {
+    for mut vm in [
+        Vm {
+            fail_page: Some(8192),
+            ..Default::default()
+        },
+        Vm {
+            fail_sync: true,
+            ..Default::default()
+        },
+    ] {
+        assert!(
+            revoke_with([(4096, 4096, 12288)], &mut vm, || -> Result<(), u8> {
+                panic!("commit before preparation succeeded")
+            })
+            .is_err()
+        );
+    }
+    let mut vm = Vm::default();
+    assert_eq!(revoke_with([], &mut vm, || Ok(37)), Ok(37));
+    assert!(vm.events.is_empty());
+    assert_eq!(
+        revoke_with([], &mut vm, || Err::<(), _>(11)),
+        Err(Error::Backend(11))
+    );
+    assert!(vm.events.is_empty());
 }
 #[test]
 fn all_ranges_are_validated_before_the_first_edit() {
