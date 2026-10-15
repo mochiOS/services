@@ -34,6 +34,10 @@
 #define main resource_policy_probe
 #include "native_resource_policy.c"
 #undef main
+#undef CHECK
+#define main file_size_limit_probe
+#include "native_file_size_limit.c"
+#undef main
 
 int main(void) {
     int result = handle_capture_probe();
@@ -49,5 +53,7 @@ int main(void) {
     result = fork_reent_probe();
     if (result) return result;
     result = resource_policy_probe();
+    if (result) return result;
+    result = file_size_limit_probe();
     return result ? result : callback_probe();
 }
