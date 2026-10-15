@@ -2010,9 +2010,9 @@ impl RuntimeFilesystem {
         let mut request = vec![0u8; filesystem::HEADER_LEN + payload.len()];
         let request_len = filesystem::encode(header, payload, &mut request).map_err(|_| -22)?;
         let mut response = [0u8; filesystem::HEADER_LEN];
-        if self
+        if !self
             .call(&request[..request_len], &mut response, &mut handles)
-            .is_err()
+            .is_ok_and(|result| result as u32 as usize == filesystem::HEADER_LEN)
         {
             close_runtime_handles(&handles);
             return Err(-5);
@@ -2024,17 +2024,15 @@ impl RuntimeFilesystem {
                 return Err(-5);
             }
         };
-        if handles.count != 0 {
-            close_runtime_handles(&handles);
-            return Err(-5);
-        }
-        if response.opcode != filesystem::OP_STATUS || !payload.is_empty() || response.status != 0 {
-            return Err(if response.status < 0 {
-                response.status
-            } else {
-                -5
-            });
-        }
+        let status = posix_service::filesystem_transport::metadata_status(
+            response,
+            header.request_id,
+            payload,
+            handles.count as usize,
+            0,
+        );
+        close_runtime_handles(&handles);
+        status?;
         Ok(())
     }
 
@@ -2127,9 +2125,9 @@ impl RuntimeFilesystem {
         let mut request = vec![0u8; filesystem::HEADER_LEN + path.len()];
         let request_len = filesystem::encode(header, path, &mut request).map_err(|_| -22)?;
         let mut reply = vec![0u8; filesystem::HEADER_LEN];
-        if self
+        if !self
             .call(&request[..request_len], &mut reply, &mut handles)
-            .is_err()
+            .is_ok_and(|result| result as u32 as usize == filesystem::HEADER_LEN)
         {
             close_runtime_handles(&handles);
             return Err(-5);
@@ -2141,13 +2139,15 @@ impl RuntimeFilesystem {
                 return Err(-5);
             }
         };
-        if response.opcode != filesystem::OP_STATUS || !payload.is_empty() || response.status != 0 {
+        if let Err(error) = posix_service::filesystem_transport::metadata_status(
+            response,
+            header.request_id,
+            payload,
+            handles.count as usize,
+            1,
+        ) {
             close_runtime_handles(&handles);
-            return Err(if response.status < 0 {
-                response.status
-            } else {
-                -5
-            });
+            return Err(error);
         }
         if handles.count != 1 || handles.handles[0].reserved != 0 {
             close_runtime_handles(&handles);
@@ -2336,6 +2336,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         };
         let handles = Self::path_handles(paths)?;
         self.open_call(header, &payload, handles)
+            .map_err(posix_service::mutation_filesystem_status)
     }
 
     fn open_directory_at(

@@ -619,6 +619,9 @@ impl filesystem_service::memory_updates::Update for RecordingUpdate {
         if trace.fail == Some("begin") {
             return Err(5);
         }
+        if trace.fail == Some("begin_busy") {
+            return Err(11);
+        }
         self.begun = true;
         Ok(())
     }
@@ -628,6 +631,9 @@ impl filesystem_service::memory_updates::Update for RecordingUpdate {
         self.published = true; // the native request is irrevocable even on error
         if trace.fail == Some("publish") {
             return Err(5);
+        }
+        if trace.fail == Some("publish_busy") {
+            return Err(11);
         }
         Ok(())
     }
@@ -697,7 +703,7 @@ fn truncate_requires_configured_updates_and_configuration_cannot_change_after_op
 
 #[test]
 fn truncate_preparation_and_begin_failures_precede_all_storage_writes() {
-    for failure in ["prepare", "begin"] {
+    for failure in ["prepare", "begin", "begin_busy"] {
         let trace = Arc::new(Mutex::new(UpdateTrace {
             fail: Some(failure),
             ..Default::default()
@@ -719,11 +725,13 @@ fn truncate_preparation_and_begin_failures_precede_all_storage_writes() {
             },
             opened,
         );
-        assert!(matches!(result, Err(error) if error == if failure == "prepare" {11} else {5}));
+        assert!(
+            matches!(result, Err(error) if error == if failure == "begin" {5} else {protocol::ERROR_MEMORY_ADMISSION_BUSY})
+        );
         assert_eq!(image.2.lock().unwrap().attempts, 0);
         assert_eq!(*image.0.lock().unwrap(), before);
         let mut expected = vec![UpdateEvent::Prepare(identity, 8192, 5000)];
-        if failure == "begin" {
+        if failure != "prepare" {
             expected.extend([
                 UpdateEvent::Begin,
                 UpdateEvent::Drop {
@@ -734,6 +742,67 @@ fn truncate_preparation_and_begin_failures_precede_all_storage_writes() {
         }
         assert_eq!(trace.lock().unwrap().events, expected);
     }
+}
+
+#[test]
+fn truncating_open_retries_only_before_mutation_and_never_replays_creation() {
+    let trace = Arc::new(Mutex::new(UpdateTrace {
+        fail: Some("prepare"),
+        ..Default::default()
+    }));
+    let (mut service, image) =
+        test_filesystem_with_storage(Some(Box::new(RecordingUpdates(trace.clone()))));
+    let access = protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE;
+    // The file is new and already empty: O_EXCL|O_TRUNC must not enter
+    // admission after creation and then ask the client to repeat O_EXCL.
+    let opened = open_update_file(
+        &mut service,
+        access | protocol::OPEN_AT_EXCLUSIVE | protocol::OPEN_AT_TRUNCATE,
+    );
+    assert!(trace.lock().unwrap().events.is_empty());
+    seed_update_file(&mut service, opened);
+    let header = protocol::Header {
+        opcode: protocol::OP_OPEN_AT,
+        flags: access | protocol::OPEN_AT_TRUNCATE,
+        mode: 0o600,
+        ..Default::default()
+    };
+    let before = image.0.lock().unwrap().clone();
+    image.2.lock().unwrap().attempts = 0;
+    assert!(matches!(
+        service.open_at(
+            header,
+            b"/update-order",
+            PathAnchors::default(),
+            root_credentials()
+        ),
+        Err(protocol::ERROR_MEMORY_ADMISSION_BUSY)
+    ));
+    assert_eq!(image.2.lock().unwrap().attempts, 0);
+    assert_eq!(*image.0.lock().unwrap(), before);
+    assert!(matches!(
+        service.open_at(
+            protocol::Header {
+                flags: header.flags | protocol::OPEN_AT_EXCLUSIVE,
+                ..header
+            },
+            b"/update-order",
+            PathAnchors::default(),
+            root_credentials()
+        ),
+        Err(17)
+    ));
+    trace.lock().unwrap().fail = None;
+    let retried = service
+        .open_at(
+            header,
+            b"/update-order",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    assert_eq!(retried.header.open_id, opened + 1);
+    assert_eq!(service.provider_read_at(opened, 0, 8192).unwrap(), b"");
 }
 
 #[test]
@@ -813,35 +882,37 @@ fn open_truncate_uses_existing_backing_identity_and_refreshes_every_description_
 
 #[test]
 fn publication_error_does_not_restore_old_storage_or_stale_open_metadata() {
-    let trace = Arc::new(Mutex::new(UpdateTrace {
-        fail: Some("publish"),
-        ..Default::default()
-    }));
-    let (mut service, _) =
-        test_filesystem_with_storage(Some(Box::new(RecordingUpdates(trace.clone()))));
-    let access = protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE;
-    let a = open_update_file(&mut service, access);
-    let b = open_update_file(&mut service, access);
-    service.provider_write(a, b"original").unwrap();
-    assert!(matches!(
-        service.truncate_handle(
-            protocol::Header {
-                offset: 3,
-                ..Default::default()
-            },
-            b
-        ),
-        Err(5)
-    ));
-    assert_eq!(service.provider_read_at(a, 0, 20).unwrap(), b"ori");
-    assert_eq!(service.provider_read_at(b, 0, 20).unwrap(), b"ori");
-    assert!(trace.lock().unwrap().events.ends_with(&[
-        UpdateEvent::Publish,
-        UpdateEvent::Drop {
-            begun: true,
-            published: true
-        }
-    ]));
+    for (failure, expected_error) in [("publish", 5), ("publish_busy", 11)] {
+        let trace = Arc::new(Mutex::new(UpdateTrace {
+            fail: Some(failure),
+            ..Default::default()
+        }));
+        let (mut service, _) =
+            test_filesystem_with_storage(Some(Box::new(RecordingUpdates(trace.clone()))));
+        let access = protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE;
+        let a = open_update_file(&mut service, access);
+        let b = open_update_file(&mut service, access);
+        service.provider_write(a, b"original").unwrap();
+        assert!(matches!(
+            service.truncate_handle(
+                protocol::Header {
+                    offset: 3,
+                    ..Default::default()
+                },
+                b
+            ),
+            Err(error) if error == expected_error
+        ));
+        assert_eq!(service.provider_read_at(a, 0, 20).unwrap(), b"ori");
+        assert_eq!(service.provider_read_at(b, 0, 20).unwrap(), b"ori");
+        assert!(trace.lock().unwrap().events.ends_with(&[
+            UpdateEvent::Publish,
+            UpdateEvent::Drop {
+                begun: true,
+                published: true
+            }
+        ]));
+    }
 }
 
 #[test]

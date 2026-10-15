@@ -400,7 +400,9 @@ impl FilesystemService {
         let open_id = self.next_open_id;
         let next_open_id = self.next_open_id.checked_add(1).ok_or(EIO)?;
         self.opens.try_reserve(1).map_err(|_| ENOMEM)?;
-        if request.flags & protocol::OPEN_AT_TRUNCATE != 0 {
+        // A newly created file is already empty. In particular, never return
+        // a retryable admission status after creating its directory entry.
+        if !created && request.flags & protocol::OPEN_AT_TRUNCATE != 0 {
             inode = self.truncate_scoped_inode(inode, filesystem.clone(), node_id, 0, None)?;
         }
         let file = if kind.is_dir() {
@@ -3141,10 +3143,11 @@ impl FilesystemService {
                     .as_ref()
                     .ok_or(ENOTSUP)?
                     .prepare(identity, old_length, length)
+                    .map_err(crate::memory_updates::admission_error)
             })
             .transpose()?;
         if let Some(update) = update.as_mut() {
-            update.begin()?;
+            update.begin().map_err(crate::memory_updates::admission_error)?;
         }
         // A backend error may follow partial writes. Never interpret it as
         // "unchanged": dropping an in-flight owner quarantines all aliases.

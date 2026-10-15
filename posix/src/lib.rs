@@ -36,6 +36,17 @@ pub const fn truncate_filesystem_status(status: i32) -> i32 {
     if status == -mochios_filesystem_protocol::ERROR_GROWTH_LIMIT {
         protocol::STATUS_FILE_SIZE_LIMIT
     } else {
+        mutation_filesystem_status(status)
+    }
+}
+
+/// Preserve the filesystem's pre-mutation retry guarantee, not an errno-based
+/// guess. The service returns immediately so other clients can finish I/O or
+/// send SIGCONT; it must not wait for admission in its serialized RPC loop.
+pub const fn mutation_filesystem_status(status: i32) -> i32 {
+    if status == -mochios_filesystem_protocol::ERROR_MEMORY_ADMISSION_BUSY {
+        protocol::STATUS_MEMORY_ADMISSION_BUSY
+    } else {
         status
     }
 }

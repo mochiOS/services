@@ -1,8 +1,22 @@
 //! Provider-memory coordination stays in user space. The endpoint capability
 //! scopes native operations; inode/path interpretation never reaches mnu.
 
+/// Use only for preparation and BEGIN, before storage is touched. A failed
+/// BEGIN leaves the transaction prepared; dropping it restores old mappings.
+/// Never apply this conversion to publication or storage errors.
+pub(crate) fn admission_error(error: i32) -> i32 {
+    if error == 11 {
+        mochios_filesystem_protocol::ERROR_MEMORY_ADMISSION_BUSY
+    } else {
+        error
+    }
+}
+
 pub trait Update: Send {
+    /// Failure must leave storage unchanged and must not cross the in-flight
+    /// boundary. Only a successful BEGIN permits the caller to mutate storage.
     fn begin(&mut self) -> Result<(), i32>;
+    /// Failure can follow an irrevocable publication request: never replay it.
     fn publish(&mut self) -> Result<(), i32>;
 }
 
