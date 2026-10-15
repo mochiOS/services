@@ -162,6 +162,81 @@ fn truncate_zeroes_retained_tail_without_materializing_sparse_growth() {
     );
 }
 
+#[test]
+fn truncate_once_preserves_data_with_stale_independent_descriptions() {
+    let mut filesystem = test_filesystem();
+    let open = protocol::Header {
+        opcode: protocol::OP_OPEN_AT,
+        flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+        mode: 0o600,
+        ..Default::default()
+    };
+    let first = filesystem
+        .open_at(
+            open,
+            b"/truncate-once",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap()
+        .header
+        .open_id;
+    let second = filesystem
+        .open_at(
+            open,
+            b"/truncate-once",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap()
+        .header
+        .open_id;
+    filesystem.provider_write(first, b"abcdefgh").unwrap();
+    filesystem
+        .provider_seek(first, 2, HANDLE_SEEK_START)
+        .unwrap();
+    filesystem
+        .truncate_handle(
+            protocol::Header {
+                offset: 6,
+                ..Default::default()
+            },
+            second,
+        )
+        .unwrap();
+    for description in [first, second] {
+        assert_eq!(
+            filesystem.provider_read_at(description, 0, 20).unwrap(),
+            b"abcdef"
+        );
+    }
+    assert_eq!(filesystem.provider_read(first, 2).unwrap(), b"cd");
+    filesystem
+        .truncate_handle(
+            protocol::Header {
+                offset: 2,
+                ..Default::default()
+            },
+            first,
+        )
+        .unwrap();
+    filesystem
+        .truncate_handle(
+            protocol::Header {
+                offset: 4,
+                ..Default::default()
+            },
+            second,
+        )
+        .unwrap();
+    for description in [first, second] {
+        assert_eq!(
+            filesystem.provider_read_at(description, 0, 20).unwrap(),
+            b"ab\0\0"
+        );
+    }
+}
+
 fn test_filesystem_with_read_failure() -> (FilesystemService, Arc<Mutex<Option<usize>>>) {
     let temporary = TempTree::create();
     let source = temporary.0.join("source");

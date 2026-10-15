@@ -3030,22 +3030,18 @@ impl FilesystemService {
         node_id: u64,
         length: u64,
     ) -> Result<(), i32> {
-        let mut matched = false;
+        // Open descriptions can retain stale inode/extent caches. Mutate the
+        // authoritative backing once, then refresh views without changing OFD
+        // offsets or status flags. Repeating truncate can zero live data.
+        let current = Inode::read(&filesystem, inode.index).map_err(errno)?;
+        let mut file = File::open_inode(&filesystem, current).map_err(errno)?;
+        file.truncate(length).map_err(errno)?;
+        let updated = file.into_inode();
         for open in self.opens.values_mut() {
             if open.node_id == node_id {
-                open.file
-                    .as_mut()
-                    .ok_or(EISDIR)?
-                    .truncate(length)
-                    .map_err(errno)?;
-                matched = true;
+                open.file = Some(File::open_inode(&filesystem, updated.clone()).map_err(errno)?);
+                open.inode = updated.clone();
             }
-        }
-        if !matched {
-            File::open_inode(&filesystem, inode)
-                .map_err(errno)?
-                .truncate(length)
-                .map_err(errno)?;
         }
         Ok(())
     }
