@@ -358,6 +358,62 @@ fn allocation_or_first_delegation_failure_leaves_no_cached_publisher() {
 }
 
 struct Processes(Result<ProcessLifecycle, i32>);
+struct CpuProcesses;
+impl ProcessBackend<u32> for CpuProcesses {
+    fn status(&mut self, _: u32) -> Result<ProcessLifecycle, i32> {
+        Ok(ProcessLifecycle::Running)
+    }
+    fn execution_usage(&mut self, _: u32) -> Result<mnu_abi::ProcessExecutionUsage, i32> {
+        Ok(mnu_abi::ProcessExecutionUsage {
+            user_ticks: 600,
+            kernel_ticks: 0,
+            ticks_per_second: 500,
+            reserved: 0,
+        })
+    }
+    fn suspend(&mut self, _: u32) -> Result<(), i32> {
+        panic!("soft budget must not suspend")
+    }
+    fn terminate(&mut self, _: u32, _: u64) -> Result<(), i32> {
+        panic!("hard budget not exceeded")
+    }
+    fn release(&mut self, _: u32) {
+        panic!("live process must remain owned")
+    }
+}
+
+#[test]
+fn failed_cpu_policy_publication_preserves_the_soft_notification_interval() {
+    let mut service = service();
+    let state = Arc::new(State::default());
+    let mut backend = Backend(Arc::clone(&state));
+    request(&mut service, &mut backend, 41);
+    let budget = wire::ResourceLimit { soft: 1, hard: 5 };
+    assert_eq!(
+        limit(&mut service, 41, 0, wire::RLIMIT_CPU, Some(budget))
+            .header
+            .status,
+        0
+    );
+    assert_eq!(service.enforce_cpu_limits(&mut CpuProcesses), Ok(1));
+    state.publish_error.store(-11, Ordering::SeqCst);
+    assert_eq!(
+        limit(&mut service, 41, 0, wire::RLIMIT_CPU, Some(budget))
+            .header
+            .status,
+        -11
+    );
+    assert_eq!(service.enforce_cpu_limits(&mut CpuProcesses), Ok(0));
+    state.publish_error.store(0, Ordering::SeqCst);
+    assert_eq!(
+        limit(&mut service, 41, 0, wire::RLIMIT_CPU, Some(budget))
+            .header
+            .status,
+        0
+    );
+    assert_eq!(service.enforce_cpu_limits(&mut CpuProcesses), Ok(1));
+}
+
 impl ProcessBackend<u32> for Processes {
     fn status(&mut self, _: u32) -> Result<ProcessLifecycle, i32> {
         self.0

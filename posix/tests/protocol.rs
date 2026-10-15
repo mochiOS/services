@@ -15,6 +15,9 @@ use posix_service::{
 #[path = "support/child_cpu_state.rs"]
 mod child_cpu_state;
 
+#[path = "support/cpu_limit.rs"]
+mod cpu_limit;
+
 #[path = "support/child_signal_info.rs"]
 mod child_signal_info;
 
