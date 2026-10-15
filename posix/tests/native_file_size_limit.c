@@ -23,6 +23,11 @@ int main(void) {
     CHECK(write(file, "abcdefgh", 8) == 8 && lseek(file, 3, SEEK_SET) == 3);
     int null = open("/dev/null", O_RDWR);
     CHECK(null >= 0);
+    const char *resize_path = "/tmp/native-truncate-limit";
+    int resize = open(resize_path, O_CREAT | O_TRUNC | O_RDWR, 0600);
+    int resize_alias = open(resize_path, O_RDWR);
+    CHECK(resize >= 0 && resize_alias >= 0 && write(resize, "abcdefgh", 8) == 8);
+    CHECK(lseek(resize, 2, SEEK_SET) == 2);
     struct rlimit original, limit;
     CHECK(getrlimit(RLIMIT_FSIZE, &original) == 0);
     limit = original; limit.rlim_cur = 5;
@@ -74,9 +79,33 @@ int main(void) {
     }
     int result;
     CHECK(waitpid(child, &result, 0) == child && WIFSIGNALED(result) && WTERMSIG(result) == SIGXFSZ);
+    action.sa_handler = fl_handler;
+    CHECK(sigaction(SIGXFSZ, &action, NULL) == 0);
+    /* Both descriptions were opened while empty. Shrink from current size,
+     * not their stale open-time inode sizes; preserve the written prefix. */
+    CHECK(ftruncate(resize_alias, 6) == 0 && fl_signals == 2);
+    memset(bytes, 0, sizeof(bytes));
+    CHECK(pread(resize, bytes, 6, 0) == 6 && !strcmp(bytes, "abcdef"));
+    errno = 0;
+    CHECK(truncate(resize_path, 7) == -1 && errno == EFBIG && fl_signals == 3);
+    CHECK(fstat(resize, &status) == 0 && status.st_size == 6);
+    CHECK(truncate(resize_path, 4) == 0 && ftruncate(resize_alias, 5) == 0);
+    memset(bytes, 0xff, sizeof(bytes));
+    CHECK(pread(resize, bytes, 5, 0) == 5 && !memcmp(bytes, "abcd\0", 5));
+    CHECK(lseek(resize, 0, SEEK_CUR) == 2);
+    errno = 0;
+    CHECK(ftruncate(resize, 6) == -1 && errno == EFBIG && fl_signals == 4);
+    CHECK(fstat(resize_alias, &status) == 0 && status.st_size == 5);
+    errno = 0;
+    CHECK(truncate("/tmp/absent-truncate-target", 9) == -1 && errno == ENOENT && fl_signals == 4);
+    errno = 0;
+    CHECK(ftruncate(null, 9) == -1 && errno == EINVAL && fl_signals == 4);
+    CHECK(unlink(resize_path) == 0 && ftruncate(resize_alias, 3) == 0);
+    CHECK(close(resize_alias) == 0 && close(resize) == 0);
     CHECK(setrlimit(RLIMIT_FSIZE, &original) == 0);
     CHECK(sigaction(SIGXFSZ, &previous, NULL) == 0);
     CHECK(close(null) == 0 && close(alias) == 0 && close(readonly) == 0 && close(file) == 0);
     puts("file-size-limit: PASS pwrite prefix, unchanged OFD cursor, append independence, special-file exemption, caught/blocked/ignored/default SIGXFSZ and errno");
+    puts("truncate-limit: PASS authoritative inode size, single backing mutation, bounded growth, shrink above limit, anchored path and unlinked descriptor, zero extension, cursor preservation and SIGXFSZ");
     return 0;
 }

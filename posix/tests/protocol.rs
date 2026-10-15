@@ -1338,6 +1338,7 @@ struct RecordingFilesystem {
     stat_file: Option<AttachedObject<u32>>,
     stat_mode: Option<u32>,
     truncated: Option<(AttachedObject<u32>, u64)>,
+    truncate_ceiling: Option<u64>,
     chmod_file: Option<(AttachedObject<u32>, u32, u32, u32)>,
     chown_file: Option<(AttachedObject<u32>, u32, u32, u32, u32)>,
     synced: Option<AttachedObject<u32>>,
@@ -1496,8 +1497,14 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         Ok(status)
     }
 
-    fn ftruncate(&mut self, file: AttachedObject<u32>, length: u64) -> Result<(), i32> {
+    fn ftruncate(
+        &mut self,
+        file: AttachedObject<u32>,
+        length: u64,
+        growth_ceiling: u64,
+    ) -> Result<(), i32> {
         self.truncated = Some((file, length));
+        self.truncate_ceiling = Some(growth_ceiling);
         Ok(())
     }
 
@@ -7568,9 +7575,111 @@ fn truncate_path_uses_authenticated_session_and_explicit_base_handle() {
     let prepared = filesystem.truncate_request.unwrap();
     assert_eq!(prepared.path, "file");
     assert_eq!(prepared.length, 1234);
+    assert_eq!(prepared.growth_ceiling, protocol::RLIM_INFINITY);
     assert_eq!(prepared.effective_uid, 502);
     assert_eq!(prepared.effective_gid, 21);
     assert_eq!(filesystem.directory, Some(directory));
+}
+
+#[test]
+fn truncate_ceiling_comes_from_authenticated_process_policy_not_request_identity() {
+    let peer = PeerIdentity {
+        process_id: 192,
+        effective_uid: 501,
+        effective_gid: 20,
+    };
+    let mut service = service_for(peer);
+    assert_eq!(
+        service
+            .handle(
+                peer,
+                protocol::Header {
+                    opcode: protocol::OP_SESSION_REGISTER,
+                    ..Default::default()
+                },
+                &[]
+            )
+            .header
+            .status,
+        0
+    );
+    let mut payload = [0; protocol::RESOURCE_LIMIT_REQUEST_LEN];
+    protocol::encode_resource_limit_request(
+        protocol::ResourceLimitRequest {
+            process_id: 0,
+            resource: protocol::RLIMIT_FSIZE,
+            flags: protocol::RESOURCE_LIMIT_SET,
+            limit: protocol::ResourceLimit { soft: 5, hard: 10 },
+        },
+        &mut payload,
+    )
+    .unwrap();
+    assert_eq!(
+        service
+            .handle(
+                peer,
+                protocol::Header {
+                    opcode: protocol::OP_RESOURCE_LIMIT,
+                    ..Default::default()
+                },
+                &payload
+            )
+            .header
+            .status,
+        0
+    );
+    let mut filesystem = RecordingFilesystem::default();
+    let file = AttachedObject {
+        handle: 70,
+        rights: mnu_abi::HANDLE_RIGHT_WRITE | mnu_abi::HANDLE_RIGHT_TRANSFER,
+    };
+    let forged = PeerIdentity {
+        effective_uid: 0,
+        effective_gid: 0,
+        ..peer
+    };
+    let mut length = [0; 8];
+    protocol::encode_file_length(123, &mut length).unwrap();
+    assert_eq!(
+        service
+            .handle_objects(
+                forged,
+                protocol::Header {
+                    opcode: protocol::OP_FTRUNCATE,
+                    ..Default::default()
+                },
+                &length,
+                &[file],
+                &mut filesystem
+            )
+            .response
+            .header
+            .status,
+        0
+    );
+    assert_eq!(filesystem.truncated, Some((file, 123)));
+    assert_eq!(filesystem.truncate_ceiling, Some(5));
+    let mut path = [0; protocol::TRUNCATE_AT_HEADER_LEN + 8];
+    let length = protocol::encode_truncate_at(
+        protocol::TruncateAtRequest {
+            base: protocol::OpenBase::ProcessCwd,
+            length: 123,
+            path: "file",
+        },
+        &mut path,
+    )
+    .unwrap();
+    let prepared = service
+        .prepare_truncate_at(forged, &path[..length], 0)
+        .unwrap();
+    assert_eq!((prepared.effective_uid, prepared.growth_ceiling), (501, 5));
+    assert_eq!(
+        posix_service::truncate_filesystem_status(-filesystem_protocol::ERROR_GROWTH_LIMIT),
+        protocol::STATUS_FILE_SIZE_LIMIT
+    );
+    for error in [-27, -13, -5] {
+        assert_eq!(posix_service::truncate_filesystem_status(error), error);
+    }
 }
 
 #[test]

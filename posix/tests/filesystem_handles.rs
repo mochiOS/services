@@ -237,6 +237,140 @@ fn truncate_once_preserves_data_with_stale_independent_descriptions() {
     }
 }
 
+#[test]
+fn truncate_growth_ceiling_is_atomic_with_current_inode_size_and_permissions() {
+    let mut filesystem = test_filesystem();
+    let header = protocol::Header {
+        opcode: protocol::OP_OPEN_AT,
+        flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+        mode: 0o600,
+        ..Default::default()
+    };
+    let first = filesystem
+        .open_at(
+            header,
+            b"/growth-bound",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap()
+        .header
+        .open_id;
+    // This second description predates the write; its open-time inode size is
+    // stale. The bound must compare against current backing, not that cache.
+    let second = filesystem
+        .open_at(
+            header,
+            b"/growth-bound",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap()
+        .header
+        .open_id;
+    filesystem.provider_write(first, b"abcdefgh").unwrap();
+    let bounded = protocol::Header {
+        opcode: protocol::OP_TRUNCATE_HANDLE,
+        flags: protocol::TRUNCATE_GROWTH_BOUNDED,
+        node_id: 4,
+        offset: 6,
+        ..Default::default()
+    };
+    filesystem.truncate_handle(bounded, second).unwrap();
+    assert_eq!(
+        filesystem.provider_read_at(first, 0, 20).unwrap(),
+        b"abcdef"
+    );
+    assert!(matches!(
+        filesystem.truncate_handle(
+            protocol::Header {
+                offset: 7,
+                ..bounded
+            },
+            first
+        ),
+        Err(protocol::ERROR_GROWTH_LIMIT)
+    ));
+    assert_eq!(
+        filesystem.provider_read_at(second, 0, 20).unwrap(),
+        b"abcdef"
+    );
+    // Equal size and shrink remain legal even if the process lowered its cap.
+    filesystem.truncate_handle(bounded, first).unwrap();
+    filesystem
+        .truncate_handle(
+            protocol::Header {
+                offset: 3,
+                ..bounded
+            },
+            second,
+        )
+        .unwrap();
+    filesystem
+        .truncate_handle(
+            protocol::Header {
+                offset: 4,
+                ..bounded
+            },
+            first,
+        )
+        .unwrap();
+    assert!(matches!(
+        filesystem.truncate_handle(
+            protocol::Header {
+                offset: 5,
+                ..bounded
+            },
+            first
+        ),
+        Err(protocol::ERROR_GROWTH_LIMIT)
+    ));
+    let at = protocol::Header {
+        opcode: protocol::OP_TRUNCATE_AT,
+        flags: protocol::TRUNCATE_GROWTH_BOUNDED,
+        node_id: 4,
+        open_id: 5,
+        ..Default::default()
+    };
+    assert!(matches!(
+        filesystem.truncate_at(
+            at,
+            b"/growth-bound",
+            PathAnchors::default(),
+            root_credentials()
+        ),
+        Err(protocol::ERROR_GROWTH_LIMIT)
+    ));
+    assert!(matches!(
+        filesystem.truncate_at(
+            at,
+            b"/growth-bound",
+            PathAnchors::default(),
+            credentials(501, 20, &[])
+        ),
+        Err(13)
+    ));
+    filesystem
+        .truncate_at(
+            protocol::Header { open_id: 2, ..at },
+            b"/growth-bound",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    assert_eq!(filesystem.provider_read_at(first, 0, 20).unwrap(), b"ab");
+    assert!(matches!(
+        filesystem.truncate_handle(
+            protocol::Header {
+                flags: 1 << 31,
+                ..bounded
+            },
+            first
+        ),
+        Err(22)
+    ));
+}
+
 fn test_filesystem_with_read_failure() -> (FilesystemService, Arc<Mutex<Option<usize>>>) {
     let temporary = TempTree::create();
     let source = temporary.0.join("source");

@@ -3,6 +3,8 @@ use mochios_posix_protocol as wire;
 
 #[test]
 fn positioned_write_returns_exact_prefix_without_subtraction_overflow() {
+    assert_eq!(mochios_posix_client::newlib_errno::from_status(wire::STATUS_FILE_SIZE_LIMIT as i64),
+        mochios_posix_client::newlib_errno::EFBIG);
     for soft in 0..16u64 {
         for offset in 0..24u64 {
             for length in 0..32usize {

@@ -842,7 +842,13 @@ impl FilesystemService {
             return Err(EACCES);
         }
         let node_id = scoped_node_id(volume, &inode);
-        self.truncate_scoped_inode(inode, filesystem, node_id, request.open_id)?;
+        self.truncate_scoped_inode(
+            inode,
+            filesystem,
+            node_id,
+            request.open_id,
+            (request.flags & protocol::TRUNCATE_GROWTH_BOUNDED != 0).then_some(request.node_id),
+        )?;
         Ok(self.success(request))
     }
 
@@ -3010,6 +3016,9 @@ impl FilesystemService {
     }
 
     fn truncate(&mut self, request: protocol::Header) -> Result<Response, i32> {
+        if request.flags & !protocol::TRUNCATE_GROWTH_BOUNDED != 0 {
+            return Err(EINVAL);
+        }
         let open = self.opens.get(&request.open_id).ok_or(EBADF)?;
         if open.file.is_none() {
             return Err(EISDIR);
@@ -3019,6 +3028,7 @@ impl FilesystemService {
             open.filesystem.clone(),
             open.node_id,
             request.offset,
+            (request.flags & protocol::TRUNCATE_GROWTH_BOUNDED != 0).then_some(request.node_id),
         )?;
         Ok(self.success(request))
     }
@@ -3029,11 +3039,20 @@ impl FilesystemService {
         filesystem: Ext4,
         node_id: u64,
         length: u64,
+        growth_ceiling: Option<u64>,
     ) -> Result<(), i32> {
-        // Open descriptions can retain stale inode/extent caches. Mutate the
-        // authoritative backing once, then refresh views without changing OFD
-        // offsets or status flags. Repeating truncate can zero live data.
+        // OpenFile.inode may predate writes through another description. Read
+        // the authoritative size under this service's mutation serialization,
+        // not in a separate stat RPC or from the cached open-time metadata.
         let current = Inode::read(&filesystem, inode.index).map_err(errno)?;
+        if let Some(ceiling) = growth_ceiling {
+            if length > current.metadata().len() && length > ceiling {
+                return Err(protocol::ERROR_GROWTH_LIMIT);
+            }
+        }
+        // Mutate the backing exactly once. Repeating truncate on each File's
+        // stale inode/extent cache can extend a previously empty description
+        // over live data and zero it, or free the same extents more than once.
         let mut file = File::open_inode(&filesystem, current).map_err(errno)?;
         file.truncate(length).map_err(errno)?;
         let updated = file.into_inode();

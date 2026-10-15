@@ -30,6 +30,16 @@ pub use fork_state::validate_fork_child;
 pub const STATUS_EINVAL: i32 = -22;
 pub const STATUS_EOVERFLOW: i32 = -75;
 
+/// Translate the generic filesystem growth rejection without confusing it
+/// with an ordinary filesystem EFBIG (which must not generate SIGXFSZ).
+pub const fn truncate_filesystem_status(status: i32) -> i32 {
+    if status == -mochios_filesystem_protocol::ERROR_GROWTH_LIMIT {
+        protocol::STATUS_FILE_SIZE_LIMIT
+    } else {
+        status
+    }
+}
+
 /// Validates a delegated signal-thread object against kernel-authenticated
 /// sender identity. An IPC endpoint number is not a native thread identifier.
 pub fn signal_thread_registration_matches(
@@ -128,6 +138,7 @@ pub struct PreparedTruncate {
     pub base: protocol::OpenBase,
     pub path: String,
     pub length: u64,
+    pub growth_ceiling: u64,
     pub effective_uid: u32,
     pub effective_gid: u32,
     pub supplementary_groups: Vec<u32>,
@@ -268,7 +279,12 @@ pub trait FilesystemBackend<H: Copy> {
     /// Reads metadata from the open file description identified by `file`.
     fn fstat(&mut self, file: AttachedObject<H>) -> Result<protocol::FileStatus, i32>;
 
-    fn ftruncate(&mut self, file: AttachedObject<H>, length: u64) -> Result<(), i32>;
+    fn ftruncate(
+        &mut self,
+        file: AttachedObject<H>,
+        length: u64,
+        growth_ceiling: u64,
+    ) -> Result<(), i32>;
 
     fn fchmod(
         &mut self,
@@ -3526,7 +3542,10 @@ impl<H: Copy> PosixService<H> {
                     Ok(length) => length,
                     Err(_) => return object_error(header.request_id, STATUS_EINVAL),
                 };
-                match filesystem.ftruncate(handles[0], length) {
+                let ceiling = self.resource_limits
+                    .get(&(peer.process_id, protocol::RLIMIT_FSIZE))
+                    .copied().unwrap_or_default().soft;
+                match filesystem.ftruncate(handles[0], length, ceiling) {
                     Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
                     Err(status) => object_error(header.request_id, status),
                 }
@@ -4078,6 +4097,9 @@ impl<H: Copy> PosixService<H> {
             base: request.base,
             path: request.path.to_owned(),
             length: request.length,
+            growth_ceiling: self.resource_limits
+                .get(&(peer.process_id, protocol::RLIMIT_FSIZE))
+                .copied().unwrap_or_default().soft,
             effective_uid: session.effective_uid,
             effective_gid: session.effective_gid,
             supplementary_groups: self

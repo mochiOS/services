@@ -2438,6 +2438,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         &mut self,
         file: posix_service::AttachedObject<mochi_user_platform::handle::Handle>,
         length: u64,
+        growth_ceiling: u64,
     ) -> Result<(), i32> {
         use mochios_filesystem_protocol as filesystem;
 
@@ -2446,11 +2447,14 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
                 opcode: filesystem::OP_TRUNCATE_HANDLE,
                 request_id: 6,
                 offset: length,
+                node_id: growth_ceiling,
+                flags: filesystem::TRUNCATE_GROWTH_BOUNDED,
                 ..filesystem::Header::default()
             },
             &[],
             file_handle_with_rights(file, mnu_abi::HANDLE_RIGHT_WRITE)?,
         )
+        .map_err(posix_service::truncate_filesystem_status)
     }
 
     fn fchmod(
@@ -2756,7 +2760,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
     ) -> Result<(), i32> {
         use mochios_filesystem_protocol as filesystem;
 
-        let mut flags = filesystem::TRUNCATE_AT_ROOT_ATTACHED;
+        let mut flags = filesystem::TRUNCATE_AT_ROOT_ATTACHED | filesystem::TRUNCATE_GROWTH_BOUNDED;
         if paths.base.is_some() {
             flags |= filesystem::TRUNCATE_AT_BASE_ATTACHED;
         }
@@ -2771,6 +2775,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
                 opcode: filesystem::OP_TRUNCATE_AT,
                 request_id: 13,
                 open_id: request.length,
+                node_id: request.growth_ceiling,
                 length: payload.len() as u32,
                 flags,
                 ..filesystem::Header::default()
@@ -2778,6 +2783,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             &payload,
             Self::path_handles(paths)?,
         )
+        .map_err(posix_service::truncate_filesystem_status)
     }
 
     fn symlink_at(
