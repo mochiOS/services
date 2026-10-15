@@ -976,8 +976,8 @@ impl ObjectTransport for ChildRegistrationTransport {
         handles: &mut ObjectHandles<Self::Handle>,
     ) -> Result<usize, Self::Error> {
         let (header, payload) = protocol::decode(request).map_err(|_| ())?;
-        if header.opcode == protocol::OP_PROCESS_FORKED {
-            assert!(payload.is_empty());
+        if header.opcode == protocol::OP_FORK_COMMIT {
+            assert_eq!(protocol::fork::decode_token(payload), Ok(77));
         } else {
             assert_eq!(header.opcode, protocol::OP_PROCESS_SPAWNED);
             let mut groups = [0; protocol::MAX_SUPPLEMENTARY_GROUPS];
@@ -1013,10 +1013,13 @@ impl ObjectTransport for ChildRegistrationTransport {
 #[test]
 fn client_registers_a_child_only_by_transferring_its_process_handle() {
     Client::new(ChildRegistrationTransport)
-        .register_child(ObjectHandleAttachment {
-            handle: 52,
-            rights: mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_SIGNAL,
-        })
+        .commit_fork(
+            77,
+            ObjectHandleAttachment {
+                handle: 52,
+                rights: mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_SIGNAL,
+            },
+        )
         .unwrap();
     Client::new(ChildRegistrationTransport)
         .register_spawned_child(

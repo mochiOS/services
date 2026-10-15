@@ -158,7 +158,6 @@ fn invoke(client: &Client<&Replies>, opcode: u16) -> Result<(), ClientError<u8>>
     match opcode {
         wire::OP_SIGNAL_THREAD_REGISTER => client.register_signal_thread(handle),
         wire::OP_SIGNAL_THREAD_SEND => client.send_thread_signal(10, handle),
-        wire::OP_PROCESS_FORKED => client.register_child(handle),
         wire::OP_FORK_PREPARE => client.prepare_fork().map(|token| assert_eq!(token, 77)),
         wire::OP_FORK_COMMIT => client.commit_fork(77, handle),
         wire::OP_FORK_CANCEL => client.cancel_fork(77),
@@ -203,7 +202,6 @@ fn process_and_thread_replies_preserve_borrowed_objects_and_original_errors_with
     for opcode in [
         wire::OP_SIGNAL_THREAD_REGISTER,
         wire::OP_SIGNAL_THREAD_SEND,
-        wire::OP_PROCESS_FORKED,
         wire::OP_FORK_PREPARE,
         wire::OP_FORK_COMMIT,
         wire::OP_FORK_CANCEL,

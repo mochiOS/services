@@ -889,15 +889,9 @@ fn main() {
             (Some(peer), Some((header, payload)), true)
                 if matches!(
                     header.opcode,
-                    protocol::OP_PROCESS_FORKED
-                        | protocol::OP_PROCESS_SPAWNED
-                        | protocol::OP_FORK_COMMIT
+                    protocol::OP_PROCESS_SPAWNED | protocol::OP_FORK_COMMIT
                 ) && header.flags == 0
                     && header.status == 0
-                    && (matches!(
-                        header.opcode,
-                        protocol::OP_PROCESS_SPAWNED | protocol::OP_FORK_COMMIT
-                    ) || payload.is_empty())
                     && attachments.len() == 1 =>
             {
                 match adopt_sender_child(

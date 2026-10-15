@@ -55,6 +55,19 @@ fn fork_labels_are_removed_without_closing_handles_and_only_explicit_control_key
     let resumed = clone.split("if image == 0 {").nth(1).unwrap();
     assert!(resumed.find("capture.disarm_child()").unwrap() < resumed.find("drop(guard)").unwrap());
     assert!(
+        resumed.find("preparation.disarm_child()").unwrap() < resumed.find("drop(guard)").unwrap()
+    );
+    assert!(
+        clone.find("fork_policy::Preparation::new(client)").unwrap()
+            < clone.find("snapshot::capture_native(").unwrap()
+    );
+    assert!(
+        clone.find(".commit(ObjectHandleAttachment").unwrap()
+            < clone
+                .find("syscall::SyscallNumber::ProcessHandleResume")
+                .unwrap()
+    );
+    assert!(
         !clone
             .split("fn create_spawn_status_stream")
             .next()

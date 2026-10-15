@@ -3173,7 +3173,6 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_SET_REAL_EFFECTIVE_GID
             | protocol::OP_RESET_EFFECTIVE_IDS
             | protocol::OP_GROUPS_SET
-            | protocol::OP_PROCESS_FORKED
             | protocol::OP_FORK_PREPARE
             | protocol::OP_FORK_COMMIT
             | protocol::OP_FORK_CANCEL
