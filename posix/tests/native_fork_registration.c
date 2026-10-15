@@ -58,8 +58,14 @@
 #define main heap_reservation_probe
 #include "native_heap_reservation.c"
 #undef main
+#undef CHECK
+#define main image_limit_probe
+#include "native_exec_address_space.c"
+#undef main
 
-int main(void) {
+int main(int argc, char **argv) {
+    int mode = image_limit_child(argc, argv);
+    if (mode >= 0) return mode;
     int result = handle_capture_probe();
     if (result) return result;
     result = snapshot_probe();
@@ -85,5 +91,7 @@ int main(void) {
     result = heap_reservation_probe();
     if (result) return result;
     result = address_space_limit_probe();
+    if (result) return result;
+    result = image_limit_probe(0, NULL);
     return result ? result : callback_probe();
 }
