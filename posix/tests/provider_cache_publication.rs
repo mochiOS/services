@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 thread_local! {
     static DENY_COMMIT_ALLOC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static COMMIT_ALLOC_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PHYSICAL_OFFSET: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(Some(0)) };
 }
 struct FaultAllocator;
 unsafe impl std::alloc::GlobalAlloc for FaultAllocator {
@@ -251,7 +252,7 @@ mod frame {
 }
 mod paging {
     pub fn physical_memory_offset() -> Option<u64> {
-        Some(0)
+        crate::PHYSICAL_OFFSET.with(std::cell::Cell::get)
     }
     pub fn retain_shared_user_frame(frame: u64) -> Result<(), ()> {
         *crate::FRAMES.lock().unwrap().get_mut(&frame).ok_or(())? += 1;
@@ -960,6 +961,89 @@ fn provider_writeback_key_is_owned_by_its_live_io_guard() {
     drop(next);
     object.invalidate().unwrap();
     other.invalidate().unwrap();
+}
+
+#[test]
+fn preflight_does_not_retain_cache_positions_across_unrelated_eviction() {
+    let _test = TEST_LOCK.lock().unwrap();
+    reset_lower(&vec![0x11; 8192]);
+    let object = provider_object();
+    let other = vm_object::VmObject::provider(
+        Arc::new(task::ProviderObject {
+            endpoint_thread_id: 17,
+            endpoint_slot: 2,
+            endpoint_generation: 8,
+        }),
+        94,
+    )
+    .unwrap();
+    // Remove an earlier entry between preflight and publication, moving the
+    // reserved boundary inside the shared Vec without changing its identity.
+    other.page(0).unwrap();
+    object.page(0).unwrap();
+    let mut prepared = object
+        .prepare_extent(8192, 17, |bytes| Ok(Arc::new(bytes)))
+        .unwrap();
+    without_allocations(|| prepared.preflight()).unwrap();
+    other.invalidate().unwrap();
+    LOWER.lock().unwrap().bytes.truncate(17);
+    without_allocations(|| prepared.publish()).unwrap();
+    drop(prepared);
+    assert_eq!(object.read_at(0, &mut [0; 64]), Ok(17));
+    let bytes = object.page(0).unwrap();
+    assert!(bytes[..17].iter().all(|byte| *byte == 0x11));
+    assert!(bytes[17..].iter().all(|byte| *byte == 0));
+    object.invalidate().unwrap();
+}
+
+#[test]
+fn cache_preflight_and_failed_publication_preserve_boundary_buffer_for_retry() {
+    let _test = TEST_LOCK.lock().unwrap();
+    reset_lower(&vec![0x11; 8192]);
+    let object = provider_object();
+    let pin = object.prepare_shared_page(0).unwrap();
+    object.mark_page_dirty(0).unwrap();
+    let frame = *FRAMES.lock().unwrap().keys().next().unwrap();
+    let mut prepared = object
+        .prepare_extent(8192, 17, |bytes| Ok(Arc::new(bytes)))
+        .unwrap();
+    let generation = object.memory_generation();
+    for offset in [None, Some(u64::MAX - 4096)] {
+        PHYSICAL_OFFSET.with(|value| value.set(offset));
+        let preflight = without_allocations(|| prepared.preflight());
+        let publication = without_allocations(|| prepared.publish());
+        PHYSICAL_OFFSET.with(|value| value.set(Some(0)));
+        assert_eq!(preflight, Err(syscall::EIO));
+        assert_eq!(publication, Err(syscall::EIO));
+        assert_eq!(object.memory_generation(), generation);
+        assert_eq!(LOWER.lock().unwrap().bytes.len(), 8192);
+        assert!(
+            unsafe { std::slice::from_raw_parts(frame as *const u8, 4096) }
+                .iter()
+                .all(|byte| *byte == 0x11)
+        );
+    }
+    without_allocations(|| prepared.preflight()).unwrap();
+    without_allocations(|| prepared.preflight()).unwrap();
+    assert_eq!(object.memory_generation(), generation);
+    // Preflight does not snapshot bytes. Preserve even the last modeled user
+    // store before the coordinator's TLB barrier/publication contract.
+    unsafe {
+        std::ptr::write_volatile((frame + 8) as *mut u8, b'Q');
+    }
+    LOWER.lock().unwrap().bytes.truncate(17);
+    without_allocations(|| prepared.publish()).unwrap();
+    assert_eq!(prepared.preflight(), Err(syscall::EINVAL));
+    drop(prepared);
+    let bytes = object.page(0).unwrap();
+    assert_eq!(bytes[8], b'Q');
+    assert!(bytes[17..].iter().all(|byte| *byte == 0));
+    object.flush().unwrap();
+    assert_eq!(LOWER.lock().unwrap().bytes[8], b'Q');
+    assert_eq!(LOWER.lock().unwrap().bytes.len(), 17);
+    drop(pin);
+    object.invalidate().unwrap();
+    assert!(FRAMES.lock().unwrap().is_empty());
 }
 
 #[test]

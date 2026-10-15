@@ -163,7 +163,7 @@ pub(crate) mod paging {
     pub static FAIL_LOOKUP: AtomicUsize = AtomicUsize::new(0);
     pub static DESTROYED: AtomicUsize = AtomicUsize::new(0);
     fn physical_memory_offset() -> Option<u64> {
-        Some(0)
+        frames::physical_memory_offset()
     }
     fn with_user_leaf_entry_mut<T>(
         root: u64,
@@ -244,11 +244,15 @@ pub(crate) mod paging {
 pub(crate) mod tlb_shootdown {
     use super::*;
     pub static FAIL: AtomicBool = AtomicBool::new(false);
+    pub static DROP_OFFSET_AFTER_ACK: AtomicBool = AtomicBool::new(false);
     pub fn invalidate_all() -> std::result::Result<(), ()> {
         assert!(VM_HELD.with(Cell::get));
         if FAIL.load(Ordering::Relaxed) {
             Err(())
         } else {
+            if DROP_OFFSET_AFTER_ACK.load(Ordering::Relaxed) {
+                crate::PHYSICAL_OFFSET.with(|offset| offset.set(None));
+            }
             Ok(())
         }
     }
@@ -293,6 +297,38 @@ fn cleanup(object: Arc<crate::vm_object::VmObject>, pin: CachePin) {
     object.invalidate().unwrap();
     drop(object);
     assert!(crate::FRAMES.lock().unwrap().is_empty());
+}
+
+#[test]
+fn cache_preflight_failure_after_tlb_ack_keeps_records_until_deferred_rollback() {
+    let _test = crate::TEST_LOCK.lock().unwrap();
+    let (object, pin, physical) = setup();
+    let reads = crate::LOWER.lock().unwrap().reads;
+    tlb_shootdown::DROP_OFFSET_AFTER_ACK.store(true, Ordering::Relaxed);
+    let owner = extent_transaction::ExtentTransaction::prepare(&object, 8192, 17);
+    tlb_shootdown::DROP_OFFSET_AFTER_ACK.store(false, Ordering::Relaxed);
+    crate::PHYSICAL_OFFSET.with(|offset| offset.set(Some(0)));
+    assert!(matches!(owner, Err(crate::syscall::EIO)));
+    assert_eq!(crate::LOWER.lock().unwrap().reads, reads);
+    assert_eq!(crate::LOWER.lock().unwrap().bytes.len(), 8192);
+    assert_eq!(paging::flags(ROOT, BASE), Some(0x804));
+    assert_eq!(paging::flags(ROOT, BASE + 4096), Some(0x804));
+    assert!(matches!(
+        object.page(0),
+        Err(crate::vm_object::VmPageError::Operation(
+            crate::syscall::EAGAIN
+        ))
+    ));
+    crate::without_allocations(extent_transaction::flush);
+    assert_eq!(paging::flags(ROOT, BASE), Some(0x805));
+    assert_eq!(paging::flags(ROOT, BASE + 4096), Some(0x805));
+    assert!(
+        unsafe { std::slice::from_raw_parts(physical[0] as *const u8, 4096) }
+            .iter()
+            .all(|byte| *byte == 0x5a)
+    );
+    assert_eq!(object.read_at(0, &mut [0; 8192]), Ok(8192));
+    cleanup(object, pin);
 }
 
 #[test]
