@@ -82,6 +82,45 @@ mod syscall {
 #[path = "../../../core/src/syscall/exec/storage.rs"]
 mod storage;
 
+struct InitialUserStack {
+    stack_base_vaddr: u64,
+    stack_end_vaddr: u64,
+    initial_rsp: u64,
+    page_data: Vec<u8>,
+}
+#[path = "../../../core/src/syscall/exec/bootstrap_stack.rs"]
+mod bootstrap_stack;
+
+#[test]
+fn bootstrap_entry_is_empty_aligned_bounded_and_fallible() {
+    let stack = bootstrap_stack::empty(0x800000, 32).unwrap();
+    assert_eq!(
+        (stack.stack_base_vaddr, stack.stack_end_vaddr),
+        (0x7e0000, 0x800000)
+    );
+    assert_eq!(stack.initial_rsp, 0x7ff000);
+    assert!(stack.page_data.len() == 4096 && stack.page_data.iter().all(|&byte| byte == 0));
+    for (end, pages) in [
+        (0, 32),
+        (4096, 32),
+        (0x800001, 32),
+        (1u64 << 48, 32),
+        (0x800000, 0),
+        (0x800000, 1),
+        (0x800000, usize::MAX),
+    ] {
+        assert_eq!(
+            bootstrap_stack::empty(end, pages).err(),
+            Some(mnu_abi::EINVAL)
+        );
+    }
+    FAIL_NEXT.with(|fail| fail.set(true));
+    let result = bootstrap_stack::empty(0x800000, 32);
+    let consumed = FAIL_NEXT.with(|fail| !fail.replace(false));
+    assert!(consumed);
+    assert_eq!(result.err(), Some(mnu_abi::ENOMEM));
+}
+
 // Fixed ELF/page-table doubles keep every observed allocation in the actual
 // production segment/reservation preparation, not in the test backend.
 #[allow(dead_code)]
