@@ -35,9 +35,14 @@ int main(void) {
   CHECK(alias >= 0 && ftruncate(file, 8192) == 0);
   unsigned char *view =
       mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_SHARED, file, 0);
-  CHECK(view != MAP_FAILED);
+  unsigned char *private =
+      mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE, file, 0);
+  CHECK(view != MAP_FAILED && private != MAP_FAILED);
   view[0] = 31;
   view[6999] = 77;
+  private[0] = 99;
+  private[6999] = 66;
+  private[7000] = 55;
   CHECK(lseek(file, 3, SEEK_SET) == 3);
   struct rlimit original, limit;
   CHECK(getrlimit(RLIMIT_FSIZE, &original) == 0);
@@ -55,6 +60,7 @@ int main(void) {
   struct stat status;
   CHECK(fstat(file, &status) == 0 && status.st_size == 7000);
   CHECK(lseek(alias, 0, SEEK_CUR) == 3 && view[0] == 31 && view[6999] == 77);
+  CHECK(private[0] == 99 && private[6999] == 66 && private[7000] == 0);
   errno = 0;
   CHECK(ftruncate(readonly, 7001) == -1 && errno == EBADF && sf_signals == 1);
   errno = 0;
@@ -91,10 +97,17 @@ int main(void) {
   CHECK(setrlimit(RLIMIT_FSIZE, &original) == 0 &&
         sigaction(SIGXFSZ, &previous, NULL) == 0);
   CHECK(ftruncate(alias, 8192) == 0 && view[0] == 0 && view[6999] == 0);
-  CHECK(munmap(view, 8192) == 0 && close(file) == 0 && close(alias) == 0 &&
-        close(readonly) == 0);
+  view[4106] = 31;
+  private[4106] = 99;
+  CHECK(ftruncate(file, 5000) == 0 && private[4106] == 99 && view[4106] == 31);
+  private[5000] = 55;
+  CHECK(ftruncate(file, 8192) == 0 && private[4106] == 99 &&
+        private[5000] == 0 && view[4106] == 31);
+  CHECK(munmap(private, 8192) == 0 && munmap(view, 8192) == 0 &&
+        close(file) == 0 && close(alias) == 0 && close(readonly) == 0);
   puts("shm-size-limit: PASS bounded growth, shrink above lowered limit, "
-       "unlinked aliases, cursor/data preservation and "
+       "unlinked aliases, private boundary prefix/tail preservation, "
+       "cursor/data preservation and "
        "caught/blocked/ignored/default SIGXFSZ");
   return 0;
 }

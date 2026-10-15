@@ -1,4 +1,6 @@
 extern crate alloc;
+#[path = "../../../core/src/mem/mapping_preservation_native.rs"]
+mod mapping_preservation_native;
 #[path = "../../../core/src/mem/mapping_revocation.rs"]
 mod mapping_revocation;
 #[path = "../../../core/src/mem/mapping_revocation_native.rs"]
@@ -10,6 +12,7 @@ static TEST_LOCK: Mutex<()> = Mutex::new(());
 mod syscall {
     pub const EFAULT: u64 = (-14i64) as u64;
     pub const EIO: u64 = (-5i64) as u64;
+    pub const EINVAL: u64 = (-22i64) as u64;
 }
 mod task {
     pub mod process {
@@ -33,6 +36,7 @@ struct State {
     synchronized: bool,
     fail_sync: bool,
     released: usize,
+    frames: BTreeMap<(u64, u64), Box<[u8; 4096]>>,
 }
 fn state() -> &'static Mutex<State> {
     static STATE: OnceLock<Mutex<State>> = OnceLock::new();
@@ -77,6 +81,17 @@ mod paging {
         }))
     }
     impl SuspendedUserPage {
+        pub fn suffix_address(&self, offset: usize) -> Result<(u64, usize), ()> {
+            if offset > 4096 {
+                return Err(());
+            }
+            let mut state = super::state().lock().unwrap();
+            let frame = state
+                .frames
+                .get_mut(&(self.table, self.address))
+                .ok_or(())?;
+            Ok((frame.as_mut_ptr() as u64 + offset as u64, 4096 - offset))
+        }
         pub unsafe fn restore(self) {
             super::state()
                 .lock()
@@ -165,6 +180,101 @@ fn native_local_commit_is_ordered_after_tlb_ack_before_frame_release_and_can_rol
             assert_eq!(state.released, 2);
         }
     }
+}
+
+#[test]
+fn boundary_private_bytes_and_flags_survive_success_but_never_change_on_failure() {
+    let _test = TEST_LOCK.lock().unwrap();
+    use mapping_preservation_native::{PreservedPage, Preserving};
+    use mapping_revocation::{revoke_with, Error};
+    use mapping_revocation_native::Native;
+    use task::process::{Process, ProcessTable};
+    let table = ProcessTable(vec![Process(4096)]);
+    let original = BTreeMap::from([((4096, 4096), 0x405), ((4096, 8192), 0x207)]);
+    for mode in 0..4 {
+        *state().lock().unwrap() = State {
+            entries: original.clone(),
+            frames: BTreeMap::from([
+                ((4096, 4096), Box::new([0x5a; 4096])),
+                ((4096, 8192), Box::new([0xb7; 4096])),
+            ]),
+            fail_sync: mode == 1,
+            ..Default::default()
+        };
+        let preserved = [PreservedPage {
+            table: 4096,
+            address: if mode == 3 { 8192 } else { 4096 },
+            zero_from: if mode == 3 { 4097 } else { 17 },
+        }];
+        // The test owns the complete mock table throughout this transaction.
+        let native = unsafe { Native::new(&table) };
+        let mut backend = Preserving::new(native, &preserved).unwrap();
+        let result = revoke_with([(4096, 4096, 12288)], &mut backend, || {
+            assert!(mode != 1 && mode != 3, "preparation failed before commit");
+            let state = state().lock().unwrap();
+            assert!(state.synchronized);
+            assert_eq!(state.released, 0);
+            assert!(state.entries.values().all(|flags| flags & 1 == 0));
+            assert!(state.frames[&(4096, 4096)].iter().all(|byte| *byte == 0x5a));
+            if mode == 2 { Err(17) } else { Ok(37) }
+        });
+        let state = state().lock().unwrap();
+        if mode == 0 {
+            assert_eq!(result, Ok(37));
+            assert_eq!(state.entries, BTreeMap::from([((4096, 4096), 0x405)]));
+            assert_eq!(state.released, 1);
+            assert!(
+                state.frames[&(4096, 4096)][..17]
+                    .iter()
+                    .all(|byte| *byte == 0x5a)
+            );
+            assert!(
+                state.frames[&(4096, 4096)][17..]
+                    .iter()
+                    .all(|byte| *byte == 0)
+            );
+        } else {
+            assert_eq!(
+                result,
+                Err(Error::Backend(match mode {
+                    1 => syscall::EIO,
+                    2 => 17,
+                    _ => syscall::EFAULT,
+                }))
+            );
+            assert_eq!(state.entries, original);
+            assert_eq!(state.released, 0);
+            assert!(state.frames[&(4096, 4096)].iter().all(|byte| *byte == 0x5a));
+            assert!(state.frames[&(4096, 8192)].iter().all(|byte| *byte == 0xb7));
+        }
+    }
+}
+
+#[test]
+fn boundary_selection_checks_offset_geometry_without_interpreting_backing_identity() {
+    use mapping_preservation_native::PreservedPage;
+    let page = PreservedPage::for_mapping(4096, 0x5000, 8192, 4096, 5000)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (page.table, page.address, page.zero_from),
+        (4096, 0x5000, 904)
+    );
+    assert!(
+        PreservedPage::for_mapping(4096, 0x5000, 4096, 8192, 5000)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        PreservedPage::for_mapping(4096, 0x5000, 8192, 4096, 4096)
+            .unwrap()
+            .is_none()
+    );
+    assert!(PreservedPage::for_mapping(4096, 0x5001, 8192, 4096, 5000).is_err());
+    assert!(PreservedPage::for_mapping(4096, 0x5000, 8192, 1, 5000).is_err());
+    let process = task::process::Process(4096);
+    let borrowed = unsafe { mapping_revocation_native::Native::for_process(&process, false) };
+    assert!(mapping_preservation_native::Preserving::new(borrowed, &[]).is_err());
 }
 
 #[test]

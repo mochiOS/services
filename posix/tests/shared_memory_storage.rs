@@ -391,6 +391,51 @@ fn final_installation_holds_size_and_generation_stable_against_concurrent_resize
 }
 
 #[test]
+fn backing_commit_runs_inside_mapping_exclusion_before_retained_pages_are_restored() {
+    let memory = shared_memory::SharedMemory::new(8192, 2).unwrap();
+    memory.write_at(4096, &[0x5a; 4096]).unwrap();
+    let frame = memory.retain_page(1).unwrap();
+    let generation = memory.generation();
+    assert_eq!(
+        memory.resize_transaction(4113, |start, end, _commit| {
+            assert_eq!((start, end), (4096, 8192));
+            Err(syscall::EIO)
+        }),
+        Err(syscall::EIO)
+    );
+    assert_eq!(memory.length(), 8192);
+    assert_eq!(memory.generation(), generation);
+    assert_eq!(
+        unsafe { core::ptr::read_volatile((frame + 17) as *const u8) },
+        0x5a
+    );
+    memory
+        .resize_transaction(4113, |start, end, commit| {
+            assert_eq!((start, end), (4096, 8192));
+            // The VM adapter still owns suspended mappings at this point.
+            assert_eq!(
+                unsafe { core::ptr::read_volatile((frame + 17) as *const u8) },
+                0x5a
+            );
+            let committed = commit.commit();
+            // Restoring a retained PTE is safe only after both operations finish.
+            assert_eq!(
+                unsafe { core::ptr::read_volatile((frame + 16) as *const u8) },
+                0x5a
+            );
+            assert_eq!(
+                unsafe { core::ptr::read_volatile((frame + 17) as *const u8) },
+                0
+            );
+            Ok(committed)
+        })
+        .unwrap();
+    assert_eq!(memory.length(), 4113);
+    assert_ne!(memory.generation(), generation);
+    paging::release_user_frame(frame);
+}
+
+#[test]
 fn private_byte_snapshot_is_rejected_after_resize_even_when_size_returns_to_original() {
     let memory = shared_memory::SharedMemory::new(4096, 1).unwrap();
     memory.write_at(17, &[0xa7]).unwrap();
