@@ -105,6 +105,63 @@ fn test_filesystem() -> FilesystemService {
     test_filesystem_with_read_failure().0
 }
 
+#[test]
+fn truncate_zeroes_retained_tail_without_materializing_sparse_growth() {
+    let mut filesystem = test_filesystem();
+    let file = filesystem
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+                mode: 0o600,
+                ..Default::default()
+            },
+            b"/truncate-tail",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap()
+        .header
+        .open_id;
+    filesystem.provider_write(file, b"abcdefgh").unwrap();
+    filesystem
+        .truncate_handle(
+            protocol::Header {
+                offset: 2,
+                ..Default::default()
+            },
+            file,
+        )
+        .unwrap();
+    filesystem
+        .truncate_handle(
+            protocol::Header {
+                offset: 4,
+                ..Default::default()
+            },
+            file,
+        )
+        .unwrap();
+    assert_eq!(filesystem.provider_read_at(file, 0, 20).unwrap(), b"ab\0\0");
+    // Larger than this test volume: growing a sparse extent must not write
+    // zeroes across the entire range or allocate data blocks for its holes.
+    filesystem
+        .truncate_handle(
+            protocol::Header {
+                offset: 16 * 1024 * 1024,
+                ..Default::default()
+            },
+            file,
+        )
+        .unwrap();
+    assert_eq!(
+        filesystem
+            .provider_read_at(file, 14 * 1024 * 1024, 2)
+            .unwrap(),
+        b"\0\0"
+    );
+}
+
 fn test_filesystem_with_read_failure() -> (FilesystemService, Arc<Mutex<Option<usize>>>) {
     let temporary = TempTree::create();
     let source = temporary.0.join("source");

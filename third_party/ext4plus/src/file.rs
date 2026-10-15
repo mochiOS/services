@@ -16,7 +16,7 @@ use crate::Ext4;
 use crate::block_index::FileBlockIndex;
 use crate::error::{CorruptKind, Ext4Error};
 use crate::file_blocks::FileBlocks;
-use crate::inode::Inode;
+use crate::inode::{Inode, InodeFlags};
 use crate::path::Path;
 use crate::resolve::FollowSymlinks;
 use crate::util::{u64_from_usize, usize_from_u32};
@@ -139,6 +139,8 @@ impl File {
     /// Truncate the file to `new_size` bytes.
     #[maybe_async::maybe_async]
     pub async fn truncate(&mut self, new_size: u64) -> Result<(), Ext4Error> {
+        zero_truncate_tail(&self.fs, &self.file_blocks, &self.inode, new_size)
+            .await?;
         self.file_blocks.truncate(&mut self.inode, new_size).await
     }
 
@@ -366,5 +368,40 @@ pub async fn truncate(
     new_size: u64,
 ) -> Result<(), Ext4Error> {
     let mut file_blocks = FileBlocks::from_inode(inode, ext4.clone())?;
+    zero_truncate_tail(ext4, &file_blocks, inode, new_size).await?;
     file_blocks.truncate(inode, new_size).await
+}
+
+/// Keep a retained partial block zero beyond the new EOF. Otherwise growing
+/// the inode later exposes bytes removed by truncate. Do not allocate a block
+/// for a sparse hole/uninitialized extent or materialize a large sparse range.
+#[maybe_async::maybe_async]
+async fn zero_truncate_tail(
+    ext4: &Ext4,
+    blocks: &FileBlocks,
+    inode: &Inode,
+    new_size: u64,
+) -> Result<(), Ext4Error> {
+    let block_size = ext4.0.superblock.block_size().to_u64();
+    let mut within = new_size % block_size;
+    if new_size >= inode.size_in_bytes() || within == 0 {
+        return Ok(());
+    }
+    if inode.flags().contains(InodeFlags::IMMUTABLE) {
+        return Err(Ext4Error::Readonly);
+    }
+    let index = FileBlockIndex::try_from(new_size / block_size)
+        .map_err(|_| Ext4Error::FileTooLarge)?;
+    let physical = blocks.get_block(index).await?;
+    if physical == 0 {
+        return Ok(());
+    }
+    let zeroes = [0u8; 1024];
+    while within < block_size {
+        let count = (block_size - within).min(zeroes.len() as u64) as usize;
+        ext4.write_to_block(physical, within as u32, &zeroes[..count])
+            .await?;
+        within += count as u64;
+    }
+    Ok(())
 }
