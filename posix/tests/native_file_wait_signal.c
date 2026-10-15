@@ -25,18 +25,29 @@
     }                                                                          \
   } while (0)
 _Static_assert(ATOMIC_INT_LOCK_FREE == 2, "signal-safe handshake");
+#define ORIGINAL_SIZE 65536
 struct handle_info {
   uint32_t handle, reserved;
   uint64_t rights;
 };
-static int source, reader_fd;
+static int source, reader_fd, directory_fd;
 static const char *replacement_path;
+static const char *replacement_directory;
 static char supplied_path[128];
 static pthread_t target;
 static unsigned baseline_waits;
 static atomic_uint active, sent, reads;
 static atomic_int stopping, ready, busy, sender_error, reader_error;
 static volatile sig_atomic_t handler_error, qualified, operation_kind;
+
+static long native_handle_count(void) {
+  uint64_t number = 680;
+  __asm__ volatile("syscall"
+                   : "+a"(number)
+                   : "D"(0ULL), "S"(0ULL)
+                   : "rcx", "r11", "memory");
+  return (long)number;
+}
 
 /* Caller-local metadata only; no Handle acquisition and no foreign PID/FD. */
 static int wait_positions(void) {
@@ -73,8 +84,16 @@ static void handler(int signal) {
       handler_error = 3;
       return;
     }
-    if (status.st_size == 8192) {
-      if (operation_kind != 0) {
+    if (status.st_size == ORIGINAL_SIZE) {
+      if (operation_kind == 3) {
+        if (close(directory_fd) ||
+            open(replacement_directory, O_RDONLY | O_DIRECTORY) != directory_fd)
+          handler_error = 6;
+        else {
+          strcpy(supplied_path, replacement_path);
+          qualified = 1;
+        }
+      } else if (operation_kind != 0) {
         strcpy(supplied_path, replacement_path);
         qualified = 1;
       } else if (close(source))
@@ -93,7 +112,7 @@ static void handler(int signal) {
 
 static void *read_continuously(void *unused) {
   (void)unused;
-  char bytes[4096];
+  char bytes[ORIGINAL_SIZE];
   while (!atomic_load_explicit(&stopping, memory_order_acquire)) {
     if (pread(reader_fd, bytes, sizeof(bytes), 0) < 0) {
       atomic_store(&reader_error, errno);
@@ -132,18 +151,77 @@ static void *notify_waiter(void *unused) {
   return NULL;
 }
 
+/* The existing SDK builds mkdtemp without HAVE_MKDIR. Use atomic mkdir for
+ * this fixture; never use stat-then-create or remove another owner's path. */
+static int make_directory(char *path, size_t capacity, const char *tag) {
+  for (unsigned attempt = 0; attempt < 128; ++attempt) {
+    int length = snprintf(path, capacity, "/tmp/file-wait-%s-%d-%u", tag,
+                          (int)getpid(), attempt);
+    if (length <= 0 || (size_t)length >= capacity)
+      return -1;
+    if (mkdir(path, 0700) == 0)
+      return 0;
+    if (errno != EEXIST)
+      return -1;
+  }
+  return -1;
+}
+
 int main(void) {
   fprintf(stderr, "file-wait-signal: starting observed waits and FD reuse\n");
-  char original[] = "/tmp/file-wait-original-XXXXXX";
-  char replacement[] = "/tmp/file-wait-replacement-XXXXXX";
-  source = mkstemp(original);
-  CHECK(source >= 0 && ftruncate(source, 8192) == 0);
+  char original_directory[128], other_directory[128];
+  CHECK(make_directory(original_directory, sizeof(original_directory),
+                       "original") == 0);
+  CHECK(make_directory(other_directory, sizeof(other_directory),
+                       "replacement") == 0);
+  char original[128], replacement[128];
+  CHECK(snprintf(original, sizeof(original), "%s/entry", original_directory) >
+        0);
+  CHECK(snprintf(replacement, sizeof(replacement), "%s/entry",
+                 other_directory) > 0);
+  source = open(original, O_CREAT | O_EXCL | O_RDWR, 0600);
+  CHECK(source >= 0 && ftruncate(source, ORIGINAL_SIZE) == 0);
   reader_fd = dup(source);
   CHECK(reader_fd >= 0);
-  int other = mkstemp(replacement);
+  directory_fd = open(original_directory, O_RDONLY | O_DIRECTORY);
+  CHECK(directory_fd >= 0);
+  int other = open(replacement, O_CREAT | O_EXCL | O_RDWR, 0600);
   CHECK(other >= 0 && ftruncate(other, 1234) == 0 && close(other) == 0);
   int expected_open_fd = other;
   replacement_path = replacement;
+  replacement_directory = other_directory;
+  /* Public C ABI, atomic creation, directory selection and error semantics. */
+  int created = openat(directory_fd, "created",
+                       O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600);
+  CHECK(created == expected_open_fd && (fcntl(created, F_GETFD) & FD_CLOEXEC));
+  CHECK(write(created, "x", 1) == 1 && close(created) == 0);
+  CHECK(openat(directory_fd, "created", O_CREAT | O_EXCL | O_RDWR, 0600) ==
+            -1 &&
+        errno == EEXIST);
+  created = openat(directory_fd, "created", O_RDONLY);
+  char byte = 0;
+  CHECK(created == expected_open_fd && read(created, &byte, 1) == 1 &&
+        byte == 'x' && close(created) == 0);
+  CHECK(unlinkat(directory_fd, "created", 0) == 0);
+  CHECK(openat(-123, "entry", O_RDONLY) == -1 && errno == EBADF);
+  CHECK(openat(source, "entry", O_RDONLY) == -1 && errno == ENOTDIR);
+  CHECK(openat(directory_fd, "", O_RDONLY) == -1 && errno == ENOENT);
+  char too_long[8193];
+  memset(too_long, 'x', sizeof(too_long) - 1);
+  too_long[sizeof(too_long) - 1] = 0;
+  CHECK(openat(directory_fd, too_long, O_RDONLY) == -1 &&
+        errno == ENAMETOOLONG);
+  created = openat(-123, original, O_RDONLY);
+  CHECK(created == expected_open_fd && close(created) == 0);
+  char cwd[1024], moved[128];
+  CHECK(getcwd(cwd, sizeof(cwd)) && chdir(original_directory) == 0);
+  created = openat(AT_FDCWD, "entry", O_RDONLY);
+  CHECK(created == expected_open_fd && close(created) == 0 && chdir(cwd) == 0);
+  CHECK(snprintf(moved, sizeof(moved), "%s-moved", original_directory) > 0);
+  CHECK(rename(original_directory, moved) == 0);
+  created = openat(directory_fd, "entry", O_RDONLY);
+  CHECK(created == expected_open_fd && close(created) == 0);
+  CHECK(rename(moved, original_directory) == 0);
   target = pthread_self();
   struct sigaction action = {0};
   sigemptyset(&action.sa_mask);
@@ -163,22 +241,26 @@ int main(void) {
   CHECK(count >= 0);
   baseline_waits = (unsigned)count;
   unsigned epoch = 0;
-  for (unsigned kind = 0; kind < 3; ++kind) {
+  for (unsigned kind = 0; kind < 4; ++kind) {
     operation_kind = kind;
     for (unsigned restart = 0; restart < 2; ++restart) {
       action.sa_flags = restart ? SA_RESTART : 0;
       CHECK(sigaction(SIGUSR1, &action, NULL) == 0);
       unsigned successes = 0;
       for (unsigned attempt = 0; attempt < 256 && successes < 4; ++attempt) {
-        CHECK(ftruncate(reader_fd, 8192) == 0);
-        strcpy(supplied_path, original);
+        CHECK(ftruncate(reader_fd, ORIGINAL_SIZE) == 0);
+        strcpy(supplied_path, kind == 3 ? "entry" : original);
         qualified = 0;
+        long baseline_handles = native_handle_count();
+        CHECK(baseline_handles > 0);
         CHECK(pthread_sigmask(SIG_UNBLOCK, &blocked, NULL) == 0);
         atomic_store_explicit(&active, ++epoch, memory_order_release);
         errno = 0;
-        int result = kind == 0   ? ftruncate(source, 5000)
-                     : kind == 1 ? truncate(supplied_path, 5000)
-                                 : open(supplied_path, O_RDWR | O_TRUNC);
+        int result =
+            kind == 0   ? ftruncate(source, 5000)
+            : kind == 1 ? truncate(supplied_path, 5000)
+            : kind == 2 ? open(supplied_path, O_RDWR | O_TRUNC)
+                        : openat(directory_fd, supplied_path, O_RDWR | O_TRUNC);
         int operation_errno = errno;
         atomic_store_explicit(&active, 0, memory_order_release);
         CHECK(pthread_sigmask(SIG_BLOCK, &blocked, NULL) == 0);
@@ -195,11 +277,12 @@ int main(void) {
           pending = sigtimedwait(&blocked, NULL, &zero);
         } while (pending == SIGUSR1);
         CHECK(pending == -1 && errno == EAGAIN);
-        CHECK((kind == 2 ? result >= 0 : result == 0) ||
+        CHECK((kind >= 2 ? result >= 0 : result == 0) ||
               (result == -1 && operation_errno == EINTR));
         if (!qualified) {
-          if (kind == 2 && result >= 0)
+          if (kind >= 2 && result >= 0)
             CHECK(close(result) == 0);
+          CHECK(native_handle_count() == baseline_handles);
           continue;
         }
         if (kind != 0)
@@ -207,17 +290,17 @@ int main(void) {
         struct stat old_status, new_status;
         CHECK(fstat(reader_fd, &old_status) == 0);
         other = open(replacement, O_RDONLY);
-        CHECK(other == expected_open_fd + (kind == 2 && result >= 0));
+        CHECK(other == expected_open_fd + (kind >= 2 && result >= 0));
         CHECK(fstat(other, &new_status) == 0 && close(other) == 0);
         CHECK(new_status.st_size == 1234);
         if (restart)
-          CHECK((kind == 2 ? result >= 0 : result == 0) &&
-                old_status.st_size == (kind == 2 ? 0 : 5000));
+          CHECK((kind >= 2 ? result >= 0 : result == 0) &&
+                old_status.st_size == (kind >= 2 ? 0 : 5000));
         else
           CHECK(result == -1 && operation_errno == EINTR &&
-                old_status.st_size == 8192);
+                old_status.st_size == ORIGINAL_SIZE);
         CHECK(wait_positions() == (int)baseline_waits);
-        if (kind == 2 && result >= 0) {
+        if (kind >= 2 && result >= 0) {
           struct stat opened_status;
           CHECK(result == expected_open_fd &&
                 fstat(result, &opened_status) == 0);
@@ -230,8 +313,20 @@ int main(void) {
           int reopened = open(original, O_RDWR);
           CHECK(reopened == source);
         }
+        if (kind == 3) {
+          CHECK(close(directory_fd) == 0);
+          CHECK(open(original_directory, O_RDONLY | O_DIRECTORY) ==
+                directory_fd);
+        }
+        CHECK(native_handle_count() == baseline_handles);
         ++successes;
       }
+      if (successes != 4)
+        fprintf(stderr,
+                "file-wait-signal: observations kind=%u restart=%u "
+                "qualified=%u sent=%u epochs=%u reads=%u\n",
+                kind, restart, successes, atomic_load(&sent), epoch,
+                atomic_load(&reads));
       CHECK(successes == 4);
       fprintf(
           stderr,
@@ -244,9 +339,12 @@ int main(void) {
   CHECK(pthread_join(sender, NULL) == 0 && pthread_join(reader, NULL) == 0);
   CHECK(!handler_error && !atomic_load(&sender_error) &&
         !atomic_load(&reader_error));
-  CHECK(close(source) == 0 && close(reader_fd) == 0);
+  CHECK(close(source) == 0 && close(reader_fd) == 0 &&
+        close(directory_fd) == 0);
   CHECK(unlink(original) == 0 && unlink(replacement) == 0);
-  printf("file-wait-signal: PASS all three mutations, EINTR, SA_RESTART, FD "
+  CHECK(rmdir(original_directory) == 0 && rmdir(other_directory) == 0);
+  printf("file-wait-signal: PASS all four mutations, EINTR, SA_RESTART, "
+         "directory FD "
          "reuse, "
          "captured paths and no live "
          "ticket during C handlers (%u concurrent reads)\n",

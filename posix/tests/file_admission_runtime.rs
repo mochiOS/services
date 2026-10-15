@@ -1,4 +1,34 @@
 #[test]
+fn openat_captures_directory_authority_and_tracks_it_before_reopening_callbacks() {
+    let runtime = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
+    let exported = runtime
+        .split("pub extern \"C\" fn openat(")
+        .nth(1)
+        .unwrap()
+        .split("#[unsafe(no_mangle)]")
+        .next()
+        .unwrap();
+    assert!(exported.contains("file_mutation::open_at(dirfd, path, flags, mode)"));
+    assert!(
+        exported.find("pthread_testcancel()").unwrap()
+            < exported.find("file_mutation::open_at(").unwrap()
+    );
+    let mutation = include_str!("../../../user/crates/newlib-runtime/src/file_mutation.rs");
+    assert!(mutation.contains("_directory: Option<fd_lease::Lease>"));
+    let slot = mutation.split("fn open_in_slot(").nth(1).unwrap();
+    assert!(
+        slot.find("let native = delivery(control)").unwrap()
+            < slot.find("rename_posix_base(dirfd, path)").unwrap()
+    );
+    assert!(slot.find("prepare_open_at(base,").unwrap() < slot.find("drop(native)").unwrap());
+    assert!(slot.find("_directory: directory").unwrap() < slot.find("activate()").unwrap());
+    assert_eq!(slot.matches("c_bytes(path)").count(), 1);
+    for error in ["return Err(ENOENT)", "return Err(ENAMETOOLONG)"] {
+        assert!(slot.find(error).unwrap() < slot.find("prepare_open_at(base,").unwrap());
+    }
+}
+
+#[test]
 fn runtime_waits_outside_global_state_and_keeps_file_lease_for_replay() {
     let source = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
     let resize = source
@@ -62,7 +92,7 @@ fn spawn_actions_use_the_live_child_table_and_the_same_queued_open_owner() {
     );
     assert!(child.contains("execve_with_launch_context("));
     let mutation = include_str!("../../../user/crates/newlib-runtime/src/file_mutation.rs");
-    assert!(mutation.contains("open_in_slot(path, flags, mode, Some(fd))"));
+    assert!(mutation.contains("open_in_slot(-2, path, flags, mode, Some(fd))"));
     let slot = mutation.split("fn open_in_slot(").nth(1).unwrap();
     assert!(
         slot.find("close_for_spawn(fd").unwrap()
