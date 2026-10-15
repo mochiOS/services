@@ -40,6 +40,13 @@ fn actual_vm_object_cache_keys_keep_provider_identity_separate_from_memory_objec
         r#"
 extern crate alloc;
 use std::sync::Arc;
+mod interrupt {pub mod spinlock {
+    pub struct SpinLock<T>(std::sync::Mutex<T>);
+    impl<T> SpinLock<T> {
+        pub const fn new(value:T)->Self {Self(std::sync::Mutex::new(value))}
+        pub fn lock(&self)->std::sync::MutexGuard<'_,T> {self.0.lock().unwrap()}
+    }
+}}
 mod syscall {pub const ENOMEM:u64=(-12i64) as u64;}
 mod mem {pub mod object_io_native {
     pub fn new_lock()->Result<crate::object_io::IoLock,u64>{

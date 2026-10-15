@@ -39,6 +39,48 @@ unsafe impl std::alloc::GlobalAlloc for FaultAllocator {
 #[global_allocator]
 static ALLOCATOR: FaultAllocator = FaultAllocator;
 
+#[test]
+fn failed_intent_allocation_leaves_backing_admission_unchanged() {
+    let lock = object_io::IoLock::from_allocated(Arc::new(object_io::State::new()));
+    let generation = lock.generation();
+    let existing = lock.try_lock().unwrap().unwrap();
+    DENY_COMMIT_ALLOC.with(|deny| deny.set(true));
+    let result = lock.intent();
+    DENY_COMMIT_ALLOC.with(|deny| deny.set(false));
+    assert!(matches!(result, Err(object_io::IntentError::NoMemory)));
+    assert_eq!(lock.generation(), generation);
+    assert!(!lock.is_reserved());
+    assert!(lock.try_lock().unwrap().is_none());
+    drop(existing);
+    assert!(lock.try_lock().unwrap().is_some());
+    let mut retry = lock.intent().unwrap();
+    assert!(retry.try_acquire().unwrap().is_some());
+}
+
+#[test]
+fn intent_polling_cancellation_and_guard_handoff_never_allocate() {
+    let lock = object_io::IoLock::from_allocated(Arc::new(object_io::State::new()));
+    let existing = lock.try_lock().unwrap().unwrap();
+    let mut first = lock.intent().unwrap();
+    let middle = lock.intent().unwrap();
+    let mut last = lock.intent().unwrap();
+    without_allocations(|| {
+        assert!(first.try_acquire().unwrap().is_none());
+        drop(middle);
+        assert!(last.try_acquire().unwrap().is_none());
+        drop(existing);
+        assert!(lock.try_lock().unwrap().is_none());
+        let owner = first.try_acquire().unwrap().unwrap();
+        drop(first);
+        assert!(last.try_acquire().unwrap().is_none());
+        drop(owner);
+        let owner = last.try_acquire().unwrap().unwrap();
+        drop(last);
+        drop(owner);
+        assert!(lock.try_lock().unwrap().is_some());
+    });
+}
+
 fn without_allocations<T>(operation: impl FnOnce() -> T) -> T {
     COMMIT_ALLOC_ATTEMPTS.with(|count| count.set(0));
     DENY_COMMIT_ALLOC.with(|deny| deny.set(true));
