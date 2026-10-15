@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use mochios_posix_client::fd::{
     Entry, FD_CLOEXEC, FdTable, HandleOps, LaunchContextOps, LaunchFdDescription, LaunchFdError,
-    restore_launch_context, stage_launch_context,
+    plan_launch_context, restore_launch_context, stage_launch_context,
 };
 use mochios_posix_protocol as protocol;
 
@@ -87,6 +87,74 @@ fn describe(object: Object) -> Option<LaunchFdDescription> {
         open_flags: object.open_flags,
         has_handle: object.has_handle,
     })
+}
+
+#[test]
+fn private_image_edits_match_staged_metadata_without_touching_a_context() {
+    use mnu_abi::process_image::ContextUpdate as U;
+    let mut table = FdTable::new();
+    table
+        .install(Entry {
+            handle: object(0, protocol::INHERITED_FD_KIND_STDIN, 0, false),
+            rights: 0,
+            descriptor_flags: 0,
+        })
+        .unwrap();
+    table
+        .install(Entry {
+            handle: object(41, protocol::INHERITED_FD_KIND_FILE, 2, true),
+            rights: 1,
+            descriptor_flags: 0,
+        })
+        .unwrap();
+    table
+        .install(Entry {
+            handle: object(42, protocol::INHERITED_FD_KIND_FILE, 2, true),
+            rights: 1,
+            descriptor_flags: FD_CLOEXEC,
+        })
+        .unwrap();
+    let mut expected = Context::default();
+    stage_launch_context(&table, 4, &mut expected, describe).unwrap();
+    let mut edits = [U {
+        kind: 0,
+        key: 0,
+        value: 0,
+    }; 8];
+    assert_eq!(
+        plan_launch_context(&table, 4, &mut edits, describe, |object| Some(object.id)),
+        Ok(8)
+    );
+    let mut actual = Context::default();
+    for edit in edits {
+        match edit.kind {
+            U::SET_HANDLE => {
+                actual.handles.insert(
+                    edit.key,
+                    object(edit.value, protocol::INHERITED_FD_KIND_FILE, 2, true),
+                );
+            }
+            U::REMOVE_HANDLE => {
+                actual.handles.remove(&edit.key);
+            }
+            U::SET_VALUE => {
+                actual.values.insert(edit.key, edit.value);
+            }
+            U::REMOVE_VALUE => {
+                actual.values.remove(&edit.key);
+            }
+            _ => panic!("unknown edit"),
+        }
+    }
+    assert_eq!(actual.values, expected.values);
+    assert_eq!(actual.handles, expected.handles);
+    assert_eq!(
+        plan_launch_context(&table, 4, &mut edits[..7], describe, |object| Some(
+            object.id
+        )),
+        Err(LaunchFdError::InvalidDescriptor)
+    );
+    assert!(plan_launch_context(&table, 4, &mut edits, describe, |_| Some(0)).is_err());
 }
 
 #[test]

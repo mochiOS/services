@@ -22,6 +22,7 @@ static uint64_t ei_handles(void) {
     __asm__ volatile("syscall" : "+a"(number) : "D"(0), "S"(0) : "rcx", "r11", "memory");
     return number;
 }
+#include "native_image_context.h"
 static void *ei_worker(void *unused) {
     (void)unused;
     while (!atomic_load_explicit(&ei_stop, memory_order_acquire)) {
@@ -50,6 +51,7 @@ static int image_limit_child(int argc, char **argv) {
     volatile unsigned char *prepared = (volatile unsigned char *)upcall;
     prepared[0] = 37; CHECK(prepared[0] == 37);
     int channel = atoi(argv[2]), closed = atoi(argv[3]);
+    CHECK(ei_context_after_image(closed) == 0);
     struct rlimit limit;
     CHECK(getrlimit(RLIMIT_AS, &limit) == 0 && limit.rlim_cur == 32 * 1024 * 1024);
     CHECK(getenv("IMAGE_AS_TOKEN") != NULL && !strcmp(getenv("IMAGE_AS_TOKEN"), "kept"));
@@ -75,6 +77,8 @@ int main(int argc, char **argv) {
         CHECK(file >= 0 && unlink("/tmp/native-image-as") == 0);
         CHECK(write(file, "abcdef", 6) == 6 && lseek(file, 3, SEEK_SET) == 3);
         CHECK(fcntl(file, F_SETFD, FD_CLOEXEC) == 0);
+        uint64_t reference;
+        CHECK(ei_context_seed(file, &reference) == 0);
         char channel_argument[16], closed_argument[16];
         snprintf(channel_argument, sizeof(channel_argument), "%d", channel[1]);
         snprintf(closed_argument, sizeof(closed_argument), "%d", file);
@@ -91,12 +95,14 @@ int main(int argc, char **argv) {
         errno = 0;
         CHECK(execve("/system/services/compositor.service", arguments, environment) == -1 && errno == ENOMEM);
         CHECK(ei_handles() == handles);
+        CHECK(ei_context_unchanged(file, reference) == 0);
         unsigned count = atomic_load_explicit(&ei_counter, memory_order_acquire);
         for (unsigned spin = 0; spin < 100000 && atomic_load_explicit(&ei_counter, memory_order_acquire) == count; ++spin) sched_yield();
         CHECK(atomic_load_explicit(&ei_counter, memory_order_acquire) != count);
         CHECK(fcntl(file, F_GETFD, 0) == FD_CLOEXEC && lseek(file, 0, SEEK_CUR) == 3);
         char bytes[4] = {0}; CHECK(read(file, bytes, 3) == 3 && !strcmp(bytes, "def"));
         CHECK(setrlimit(RLIMIT_AS, &original) == 0);
+        CHECK(ei_context_capacity_failure(file, reference, arguments, environment) == 0);
         atomic_store_explicit(&ei_stop, 1, memory_order_release);
         void *result;
         CHECK(pthread_join(worker, &result) == 0 && result == (void *)29);
@@ -123,6 +129,6 @@ int main(int argc, char **argv) {
     int status;
     CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
     CHECK(close(channel[0]) == 0);
-    puts("image-as-limit: PASS failed exec preserves siblings and CLOEXEC FDs; successful finite-AS replacement retires a live sibling and adopts prepared policy/upcall/heap regions");
+    puts("image-as-limit: PASS failed exec preserves context, siblings and CLOEXEC FDs; capacity failure rolls back; successful finite-AS replacement atomically applies FD edits, preserves opaque keys/rights and adopts prepared regions");
     return 0;
 }
