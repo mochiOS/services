@@ -57,6 +57,7 @@ int main(void) {
   fprintf(stderr, "file-admission: reader active\n");
   for (unsigned i = 0; i < 64; ++i) {
     CHECK(ftruncate(source, i % 2 ? 8192 : 5000) == 0);
+#ifndef FILE_ADMISSION_FTRUNCATE_ONLY
     if (i % 8 == 0) {
       int opened = open(path, O_RDWR | O_TRUNC);
       CHECK(opened >= 0);
@@ -64,12 +65,17 @@ int main(void) {
       CHECK(truncate(path, 8192) == 0);
       fprintf(stderr, "file-admission: completed iteration %u\n", i);
     }
+#endif
   }
   atomic_store(&stop_reader, 1);
   CHECK(pthread_join(reader, NULL) == 0);
   CHECK(atomic_load(&reader_error) == 0);
   CHECK(close(source) == 0 && unlink(path) == 0);
+#ifdef FILE_ADMISSION_FTRUNCATE_ONLY
+  printf("ftruncate-admission: PASS concurrent pread/ftruncate (%u "
+#else
   printf("file-admission: PASS concurrent pread/ftruncate/truncate/O_TRUNC (%u "
+#endif
          "reads)\n",
          atomic_load(&reads));
   return 0;

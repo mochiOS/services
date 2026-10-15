@@ -304,3 +304,38 @@ fn runtime_notifications_do_not_dequeue_c_signals_while_the_owner_is_deferred() 
         drain.find("callback_resources.is_deferred()").unwrap() < drain.find("run_with(").unwrap()
     );
 }
+
+#[test]
+fn libc_ftruncate_tracks_the_source_and_returns_from_wait_before_dispatch() {
+    let runtime = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
+    let exported = runtime
+        .split("fn _ftruncate(")
+        .nth(1)
+        .unwrap()
+        .split("#[unsafe(no_mangle)]")
+        .next()
+        .unwrap();
+    assert!(exported.contains("file_mutation::ftruncate("));
+    assert!(!exported.contains("client.ftruncate("));
+    let mutation = include_str!("../../../user/crates/newlib-runtime/src/file_mutation.rs");
+    let wait = mutation
+        .split("fn wait(")
+        .nth(1)
+        .unwrap()
+        .split("fn execute")
+        .next()
+        .unwrap();
+    assert!(wait.contains("HandleWaitManyGuarded"));
+    assert!(wait.contains("notification_pending()"));
+    assert!(!wait.contains("drain_pending_signals"));
+    assert!(!wait.contains("ThreadYield"));
+    let operation = mutation.split("pub(super) fn ftruncate(").nth(1).unwrap();
+    assert!(
+        operation.find("let native = delivery(control)").unwrap()
+            < operation.find("source: with_fd_entry(fd)?").unwrap()
+    );
+    assert!(operation.find("activate()").unwrap() < operation.find("drop(native)").unwrap());
+    assert!(
+        operation.find("retire()").unwrap() < operation.find("drain_pending_signals()").unwrap()
+    );
+}
