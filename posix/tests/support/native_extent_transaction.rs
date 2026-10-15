@@ -463,6 +463,117 @@ fn published_owner_death_retries_remaining_finish_instead_of_restoring_old_exten
 }
 
 #[test]
+fn irrevocable_request_keeps_publication_intent_across_preflight_errors_and_owner_drop() {
+    let _test = crate::TEST_LOCK.lock().unwrap();
+    let (object, pin, physical) = setup();
+    let mut owner = extent_transaction::ExtentTransaction::prepare(&object, 8192, 17).unwrap();
+    crate::LOWER.lock().unwrap().bytes.truncate(17);
+    let generation = object.memory_generation();
+    paging::LOOKUPS.store(0, Ordering::Relaxed);
+    paging::FAIL_LOOKUP.store(1, Ordering::Relaxed);
+    assert_eq!(
+        crate::without_allocations(|| owner.request_publication()),
+        Err(crate::syscall::EFAULT)
+    );
+    assert_eq!(object.memory_generation(), generation);
+    // A local retry cannot downgrade an already irrevocable decision.
+    paging::LOOKUPS.store(0, Ordering::Relaxed);
+    assert_eq!(
+        crate::without_allocations(|| owner.publish_local()),
+        Err(crate::syscall::EFAULT)
+    );
+    crate::without_allocations(|| drop(owner));
+    for _ in 0..3 {
+        paging::LOOKUPS.store(0, Ordering::Relaxed);
+        crate::without_allocations(extent_transaction::flush);
+        assert_eq!(object.memory_generation(), generation);
+        assert_eq!(paging::flags(ROOT, BASE), Some(0x804));
+        assert_eq!(paging::flags(ROOT, BASE + 4096), Some(0x804));
+        assert!(matches!(
+            object.page(0),
+            Err(crate::vm_object::VmPageError::Operation(
+                crate::syscall::EAGAIN
+            ))
+        ));
+    }
+    paging::FAIL_LOOKUP.store(0, Ordering::Relaxed);
+    crate::without_allocations(extent_transaction::flush);
+    assert_eq!(paging::flags(ROOT, BASE), Some(0x805));
+    assert_eq!(paging::flags(ROOT, BASE + 4096), None);
+    let bytes = unsafe { std::slice::from_raw_parts(physical[0] as *const u8, 4096) };
+    assert!(bytes[..17].iter().all(|byte| *byte == 0x5a));
+    assert!(bytes[17..].iter().all(|byte| *byte == 0));
+    assert_eq!(object.read_at(0, &mut [0; 64]), Ok(17));
+    let published_generation = object.memory_generation();
+    assert_ne!(published_generation, generation);
+    crate::without_allocations(extent_transaction::flush);
+    assert_eq!(object.memory_generation(), published_generation);
+    cleanup(object, pin);
+}
+
+#[test]
+fn irrevocable_cache_failure_retains_retired_root_until_publication_finishes() {
+    let _test = crate::TEST_LOCK.lock().unwrap();
+    let (object, pin, physical) = setup();
+    let mut owner = extent_transaction::ExtentTransaction::prepare(&object, 8192, 17).unwrap();
+    crate::LOWER.lock().unwrap().bytes.truncate(17);
+    crate::PHYSICAL_OFFSET.with(|offset| offset.set(None));
+    let result = crate::without_allocations(|| owner.request_publication());
+    crate::PHYSICAL_OFFSET.with(|offset| offset.set(Some(0)));
+    assert_eq!(result, Err(crate::syscall::EIO));
+    let destroyed = paging::DESTROYED.load(Ordering::Relaxed);
+    process::replace(process::ProcessTable(Vec::new()));
+    paging::destroy_user_page_table(ROOT).unwrap();
+    crate::without_allocations(|| drop(owner));
+    crate::PHYSICAL_OFFSET.with(|offset| offset.set(None));
+    crate::without_allocations(extent_transaction::flush);
+    crate::PHYSICAL_OFFSET.with(|offset| offset.set(Some(0)));
+    assert_eq!(paging::DESTROYED.load(Ordering::Relaxed), destroyed);
+    assert!(
+        physical
+            .iter()
+            .all(|frame| crate::FRAMES.lock().unwrap().contains_key(frame))
+    );
+    assert!(matches!(
+        object.page(0),
+        Err(crate::vm_object::VmPageError::Operation(
+            crate::syscall::EAGAIN
+        ))
+    ));
+    crate::without_allocations(extent_transaction::flush);
+    assert_eq!(paging::DESTROYED.load(Ordering::Relaxed), destroyed + 1);
+    assert!(
+        physical
+            .iter()
+            .all(|frame| !crate::FRAMES.lock().unwrap().contains_key(frame))
+    );
+    assert_eq!(object.read_at(0, &mut [0; 64]), Ok(17));
+    drop(pin);
+    object.invalidate().unwrap();
+    assert!(crate::FRAMES.lock().unwrap().is_empty());
+}
+
+#[test]
+fn irrevocable_request_can_finish_synchronously_and_disarm_its_owner() {
+    let _test = crate::TEST_LOCK.lock().unwrap();
+    let (object, pin, _) = setup();
+    let mut owner = extent_transaction::ExtentTransaction::prepare(&object, 8192, 0).unwrap();
+    crate::LOWER.lock().unwrap().bytes.clear();
+    assert_eq!(
+        crate::without_allocations(|| owner.request_publication()),
+        Ok(())
+    );
+    assert_eq!(owner.request_publication(), Err(crate::syscall::EINVAL));
+    assert_eq!(owner.publish_local(), Err(crate::syscall::EINVAL));
+    drop(owner);
+    crate::without_allocations(extent_transaction::flush);
+    assert_eq!(paging::flags(ROOT, BASE), None);
+    assert_eq!(paging::flags(ROOT, BASE + 4096), None);
+    assert_eq!(object.read_at(0, &mut [0; 64]), Ok(0));
+    cleanup(object, pin);
+}
+
+#[test]
 fn retired_root_stays_alive_until_deferred_mapping_cancellation_finishes() {
     let _test = crate::TEST_LOCK.lock().unwrap();
     let (object, pin, physical) = setup();
