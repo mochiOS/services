@@ -26,6 +26,7 @@ mod fault_signal;
 mod signal_origin;
 mod fork_state;
 pub mod resource_policy;
+pub mod cpu_limit;
 pub use fork_state::validate_fork_child;
 
 pub const STATUS_EINVAL: i32 = -22;
@@ -707,6 +708,7 @@ pub struct PosixService<H: Copy = u32> {
     named_semaphores: named_semaphore::Namespace<H>,
     shared_memory: shared_memory::Namespace<H>,
     resource_limits: BTreeMap<(u64, u32), protocol::ResourceLimit>,
+    cpu_notifications: BTreeMap<u64, u128>,
     signals: BTreeMap<u64, ProcessSignalState>,
     // Native identities arrive only from authenticated endpoint metadata.
     signal_masks: BTreeMap<(u64, u64), u64>,
@@ -744,6 +746,7 @@ impl PosixService<u32> {
             named_semaphores: named_semaphore::Namespace::new(),
             shared_memory: shared_memory::Namespace::new(),
             resource_limits: BTreeMap::new(),
+            cpu_notifications: BTreeMap::new(),
             signals: BTreeMap::new(),
             signal_masks: BTreeMap::new(),
             signal_delivery_epochs: BTreeMap::new(),
@@ -1909,6 +1912,7 @@ impl<H: Copy> PosixService<H> {
         self.supplementary_groups.remove(&child_id);
         self.resource_limits
             .retain(|(process_id, _), _| *process_id != child_id);
+        self.cpu_notifications.remove(&child_id);
         self.signals.remove(&child_id);
         self.signal_masks.retain(|(process, _), _| *process != child_id);
         self.signal_delivery_epochs.retain(|(process, _), _| *process != child_id);
@@ -2393,6 +2397,13 @@ impl<H: Copy> PosixService<H> {
             }
         }
 
+        if request.flags & protocol::RESOURCE_LIMIT_SET != 0
+            && request.resource == protocol::RLIMIT_CPU
+        {
+            // Publication succeeded; never alter repeat accounting on a
+            // rejected limit or failed shared-policy-page update.
+            self.cpu_notifications.remove(&target_id);
+        }
         let mut output = vec![0; protocol::RESOURCE_LIMIT_LEN];
         protocol::encode_resource_limit(previous, &mut output).map_err(|_| STATUS_EINVAL)?;
         Ok(output)

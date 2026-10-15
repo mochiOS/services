@@ -179,6 +179,7 @@ fn main() {
     // Native ThreadHandles are not yet wait-many targets. Observe their
     // lifecycle periodically, not by scanning every handle on every RPC.
     let mut thread_sweep_deadline_ms = 0;
+    let mut cpu_sweep_deadline_ms = 0;
     let mut request_bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
     let mut response_bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
     loop {
@@ -199,8 +200,38 @@ fn main() {
             platform::logln!("posix.service: orphan reap pending errno={}", error);
         }
         if let Err(error) = service.reap_discarded_children(&mut filesystem, &mut processes) {
-            platform::logln!("posix.service: discarded child reap pending errno={}", error);
+            platform::logln!(
+                "posix.service: discarded child reap pending errno={}",
+                error
+            );
         }
+        let cpu_deadline = if service.has_finite_cpu_limits() {
+            let now = match platform::time::monotonic_milliseconds() {
+                Ok(now) => now,
+                Err(error) => {
+                    platform::logln!(
+                        "posix.service: CPU budget clock failed errno={}",
+                        error.raw()
+                    );
+                    platform::thread::yield_now();
+                    continue;
+                }
+            };
+            if now >= cpu_sweep_deadline_ms {
+                if let Err(error) = service.enforce_cpu_limits(&mut processes) {
+                    platform::logln!(
+                        "posix.service: CPU budget observation failed errno={}",
+                        error
+                    );
+                }
+                cpu_sweep_deadline_ms =
+                    now.saturating_add(posix_service::cpu_limit::SWEEP_INTERVAL_MS);
+            }
+            cpu_sweep_deadline_ms.saturating_mul(1_000_000)
+        } else {
+            cpu_sweep_deadline_ms = 0;
+            platform::syscall::HANDLE_WAIT_INFINITE
+        };
         deliver_process_resume_notifications(&mut service);
         complete_pending_signal_waits(&mut pending_signal_waits, &mut service);
         complete_pending_waits(
@@ -237,7 +268,7 @@ fn main() {
         let deadline = pending_signal_waits
             .iter()
             .filter_map(|wait: &PendingSignalWait| wait.deadline)
-            .fold(deadline, u64::min);
+            .fold(deadline.min(cpu_deadline), u64::min);
         let lifecycle_handles = service.child_lifecycle_handles();
         drop(service);
         match wait_for_request_or_child(endpoint_handle, lifecycle_handles, deadline) {
