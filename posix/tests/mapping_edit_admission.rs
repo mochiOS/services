@@ -56,13 +56,13 @@ mod task {
             locked();assert_eq!(generation,Some(1));if self.unavailable {Err(EIO)} else if self.busy {Err(EAGAIN)} else {install()}
         }
         pub fn check_mapping_removal(&self)->Result<(),u64>{locked();if self.busy {Err(EAGAIN)} else {Ok(())}}
-        pub fn flush_range(&self,_:u64,_:u64)->Result<(),u64>{Ok(())}
+        pub fn flush_unmapped_range(&self,_:u64,_:u64)->Result<(),u64>{Ok(())}
     }
     #[derive(Clone)] pub struct MemoryRegion {pub start:u64,pub object:Option<Arc<Object>>,pub access:u64}
     impl MemoryRegion {
         pub fn start(&self)->u64{self.start} pub fn len(&self)->u64{4096} pub fn end(&self)->Option<u64>{Some(self.start+4096)}
         pub fn backing(&self)->&Self{self} pub fn file_object(&self)->Option<&Arc<Object>>{self.object.as_ref()}
-        pub fn file_offset(&self)->u64{0} pub fn is_shared(&self)->bool{false} pub fn dirty_pages(&self)->&[u64]{&[]}
+        pub fn file_offset(&self)->u64{0} pub fn is_shared(&self)->bool{true} pub fn dirty_pages(&self)->&[u64]{&[]}
         pub fn permits_access(&self,_:u64)->bool{true}
         pub fn set_access(&mut self,_:u64,_:u64,access:u64)->bool{locked();METADATA.with(|value|value.set(value.get()+1));self.access=access;true}
     }
@@ -77,8 +77,10 @@ mod task {
         pub fn find_dma_buffer_by_addr(&self,_:u64,_:u64)->Option<&Mapping>{None}
         pub fn find_mmio_mapping_by_addr(&self,_:u64,_:u64)->Option<&Mapping>{None}
         pub fn remove_mmio_mapping(&mut self,_:u64,_:u64){}
-        pub fn prepare_remove_memory_range(&self,_:u64,_:u64)->Option<(Vec<MemoryRegion>,Vec<MemoryRegion>)>{
-            locked();PLANS.with(|value|value.set(value.get()+1));Some((self.regions.clone(),Vec::new()))
+        pub fn prepare_remove_memory_range(&self,start:u64,length:u64)->Option<(Vec<MemoryRegion>,Vec<MemoryRegion>)>{
+            locked();PLANS.with(|value|value.set(value.get()+1));
+            let (removed,retained)=self.regions.iter().cloned().partition(|region|region.start>=start&&region.start<start+length);
+            Some((retained,removed))
         }
         pub fn set_memory_regions(&mut self,regions:Vec<MemoryRegion>){locked();METADATA.with(|value|value.set(value.get()+1));self.regions=regions;}
     }

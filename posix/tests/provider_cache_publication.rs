@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 extern crate alloc;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -51,6 +51,8 @@ fn without_allocations<T>(operation: impl FnOnce() -> T) -> T {
 thread_local! {
     static CACHE_EDGE: RefCell<Option<(usize, Box<dyn FnOnce()>)>> = RefCell::new(None);
     static LOWER_EDGE: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+    static SYNC_ERROR: Cell<Option<u64>> = const { Cell::new(None) };
+    static SYNC_CALLS: Cell<usize> = const { Cell::new(0) };
 }
 
 fn cache_edge<T>() {
@@ -175,7 +177,8 @@ mod syscall {
             Ok(input.len())
         }
         pub fn provider_sync(_: &crate::task::ProviderObject) -> Result<(), u64> {
-            Ok(())
+            crate::SYNC_CALLS.with(|calls| calls.set(calls.get() + 1));
+            crate::SYNC_ERROR.with(|error| error.get().map_or(Ok(()), Err))
         }
     }
 }
@@ -1041,6 +1044,9 @@ fn unavailable_cached_backing_cannot_lose_failure_when_original_owners_drop() {
     assert_eq!(alias.stage_write_at(0, b"new"), Err(syscall::EIO));
     assert_eq!(alias.mark_page_dirty(0), Err(syscall::EIO));
     assert_eq!(alias.flush(), Err(syscall::EIO));
+    let syncs = SYNC_CALLS.with(Cell::get);
+    assert_eq!(alias.flush_unmapped_range(0, 4096), Ok(()));
+    assert_eq!(SYNC_CALLS.with(Cell::get), syncs);
     assert!(matches!(
         alias.prepare_extent(3, 1, |_| panic!("unavailable backing allocated boundary")),
         Err(syscall::EIO)
@@ -1064,6 +1070,20 @@ fn unavailable_cached_backing_cannot_lose_failure_when_original_owners_drop() {
         Err(vm_object::VmPageError::Operation(syscall::EIO))
     ));
     assert!(FRAMES.lock().unwrap().is_empty());
+}
+
+#[test]
+fn unmap_writeback_does_not_hide_io_errors_on_an_available_backing() {
+    let _test = TEST_LOCK.lock().unwrap();
+    reset_lower(b"old");
+    let object = provider_object();
+    SYNC_ERROR.with(|error| error.set(Some(syscall::EIO)));
+    let result = object.flush_unmapped_range(0, 4096);
+    SYNC_ERROR.with(|error| error.set(None));
+    assert_eq!(result, Err(syscall::EIO));
+    assert_eq!(object.flush_unmapped_range(0, 4096), Ok(()));
+    assert_eq!(object.read_at(0, &mut [0; 3]), Ok(3));
+    object.invalidate().unwrap();
 }
 
 #[test]
