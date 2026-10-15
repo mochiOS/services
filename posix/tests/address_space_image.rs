@@ -181,6 +181,14 @@ mod task {
 
 mod paging {
     use std::cell::RefCell;
+    static NEXT_TABLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0xc000);
+    static LIVE_TABLES: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+    thread_local! {
+        static CLONED_TABLE: u64 = NEXT_TABLE.fetch_add(4096, std::sync::atomic::Ordering::Relaxed);
+    }
+    pub fn cloned_table() -> u64 {
+        CLONED_TABLE.with(|table| *table)
+    }
     #[derive(Debug, PartialEq, Eq)]
     pub enum ForkPagePolicy {
         Exclude,
@@ -210,11 +218,28 @@ mod paging {
             if state.failed {
                 Err(())
             } else {
-                Ok(0xcafe)
+                let table = cloned_table();
+                let mut live = LIVE_TABLES.lock().unwrap();
+                assert!(!live.contains(&table));
+                live.push(table);
+                Ok(table)
             }
         })
     }
     pub fn destroy_user_page_table(table: u64) -> Result<(), ()> {
+        if super::root_lifetime::retire(table) {
+            return Ok(());
+        }
+        destroy_user_page_table_unpinned(table)
+    }
+    pub fn destroy_user_page_table_unpinned(table: u64) -> Result<(), ()> {
+        let mut live = LIVE_TABLES.lock().unwrap();
+        let index = live
+            .iter()
+            .position(|existing| *existing == table)
+            .expect("double or unknown root destruction");
+        live.swap_remove(index);
+        drop(live);
         STATE.with(|state| state.borrow_mut().destroyed.push(table));
         Ok(())
     }
@@ -222,7 +247,17 @@ mod paging {
         table: u64,
         context: &mnu_abi::ThreadCreateContext,
     ) -> bool {
-        table == 0xcafe && context.entry == 0x9000 && context.stack_pointer == 0xa000
+        LIVE_TABLES.lock().unwrap().contains(&table)
+            && context.entry == 0x9000
+            && context.stack_pointer == 0xa000
+    }
+}
+
+#[path = "../../../core/src/mem/root_lifetime.rs"]
+mod root_lifetime;
+mod root_lifetime_native {
+    pub fn pin(table: u64) -> Result<super::root_lifetime::Pin, ()> {
+        super::root_lifetime::pin_with(table, |state| Ok(std::sync::Arc::new(state)))
     }
 }
 
@@ -296,7 +331,12 @@ fn one_shot_consumption_is_shared_across_duplicate_references() {
     drop(alias);
     paging::STATE.with(|state| assert!(state.borrow().destroyed.is_empty()));
     drop(image);
-    paging::STATE.with(|state| assert_eq!(state.borrow().destroyed, vec![0xcafe]));
+    paging::STATE.with(|state| {
+        assert_eq!(
+            state.borrow().destroyed,
+            vec![crate::paging::cloned_table()]
+        )
+    });
 }
 
 #[test]
@@ -328,7 +368,12 @@ fn concurrent_aliases_have_exactly_one_vm_owner() {
     drop(object);
     paging::STATE.with(|state| assert!(state.borrow().destroyed.is_empty()));
     drop(results);
-    paging::STATE.with(|state| assert_eq!(state.borrow().destroyed, vec![0xcafe]));
+    paging::STATE.with(|state| {
+        assert_eq!(
+            state.borrow().destroyed,
+            vec![crate::paging::cloned_table()]
+        )
+    });
 }
 
 #[test]
@@ -345,7 +390,12 @@ fn invalid_target_context_does_not_consume_the_image() {
         .unwrap();
     drop(image);
     drop(object);
-    paging::STATE.with(|state| assert_eq!(state.borrow().destroyed, vec![0xcafe]));
+    paging::STATE.with(|state| {
+        assert_eq!(
+            state.borrow().destroyed,
+            vec![crate::paging::cloned_table()]
+        )
+    });
 }
 
 #[test]
@@ -366,7 +416,12 @@ fn anonymous_image_is_not_consumed_on_authorization_failure() {
         ));
     }
     drop(object);
-    paging::STATE.with(|state| assert_eq!(state.borrow().destroyed, vec![0xcafe]));
+    paging::STATE.with(|state| {
+        assert_eq!(
+            state.borrow().destroyed,
+            vec![crate::paging::cloned_table()]
+        )
+    });
 }
 
 #[test]
@@ -387,7 +442,12 @@ fn final_reference_releases_table_and_backing_once() {
     paging::STATE.with(|state| assert!(state.borrow().destroyed.is_empty()));
     drop(duplicate);
     assert_eq!(Arc::strong_count(&source.regions[0].backing), 1);
-    paging::STATE.with(|state| assert_eq!(state.borrow().destroyed, vec![0xcafe]));
+    paging::STATE.with(|state| {
+        assert_eq!(
+            state.borrow().destroyed,
+            vec![crate::paging::cloned_table()]
+        )
+    });
 }
 
 #[test]
@@ -401,7 +461,7 @@ fn installation_moves_only_vm_state_into_empty_container() {
         .unwrap();
     let mut target = task::Process::default();
     image.install(&mut target).unwrap();
-    assert_eq!(target.table, Some(0xcafe));
+    assert_eq!(target.table, Some(crate::paging::cloned_table()));
     assert_eq!(target.bounds, source.bounds);
     assert_eq!(target.regions.len(), 2);
     assert!(target.dma.is_empty() && !target.mmio);
@@ -421,7 +481,12 @@ fn occupied_target_is_unchanged_and_caller_retains_image() {
     assert_eq!(target.table, Some(0xbeef));
     paging::STATE.with(|state| assert!(state.borrow().destroyed.is_empty()));
     drop(image);
-    paging::STATE.with(|state| assert_eq!(state.borrow().destroyed, vec![0xcafe]));
+    paging::STATE.with(|state| {
+        assert_eq!(
+            state.borrow().destroyed,
+            vec![crate::paging::cloned_table()]
+        )
+    });
 }
 
 #[test]
@@ -475,7 +540,8 @@ fn reserved_shared_or_private_backing_rejects_capture_before_cow_and_root_creati
             .unwrap();
         paging::STATE.with(|state| assert_eq!(state.borrow().calls, 1));
         drop(image);
-        paging::STATE.with(|state| assert_eq!(state.borrow().destroyed, [0xcafe]));
+        paging::STATE
+            .with(|state| assert_eq!(state.borrow().destroyed, [crate::paging::cloned_table()]));
     }
 }
 

@@ -66,10 +66,27 @@ fn destroyed() -> &'static Mutex<Vec<u64>> {
 }
 mod paging {
     pub fn destroy_user_page_table(table: u64) -> Result<(), ()> {
+        if super::root_lifetime::retire(table) {
+            return Ok(());
+        }
+        destroy_user_page_table_unpinned(table)
+    }
+    pub fn destroy_user_page_table_unpinned(table: u64) -> Result<(), ()> {
         let mut destroyed = super::destroyed().lock().unwrap();
         assert!(!destroyed.contains(&table), "double page-table destruction");
         destroyed.push(table);
         Ok(())
+    }
+}
+#[path = "../../../core/src/mem/root_lifetime.rs"]
+mod root_lifetime;
+mod root_lifetime_native {
+    pub static FAIL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    pub fn pin(table: u64) -> Result<super::root_lifetime::Pin, ()> {
+        if FAIL.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            return Err(());
+        }
+        super::root_lifetime::pin_with(table, |state| Ok(std::sync::Arc::new(state)))
     }
 }
 #[path = "../../../core/src/mem/detached_roots.rs"]
@@ -166,4 +183,24 @@ fn weak_discovery_pins_physical_ownership_until_revocation_and_hands_off_at_publ
     // The published process/creation-failure guard now owns raw-table cleanup.
     paging::destroy_user_page_table(0x2000).unwrap();
     assert_eq!(&*destroyed().lock().unwrap(), &[0x1000, 0x2000]);
+
+    // A revocation snapshot can cross publication and owner retirement without
+    // freeing the physical root out from under the retained snapshot.
+    let image = Root::new(0x3000, &[]).unwrap();
+    let pins = snapshot().unwrap();
+    image.publish();
+    drop(image);
+    paging::destroy_user_page_table(0x3000).unwrap();
+    assert_eq!(&*destroyed().lock().unwrap(), &[0x1000, 0x2000]);
+    assert_eq!(pins[0].table(), 0x3000);
+    drop(pins);
+    assert_eq!(&*destroyed().lock().unwrap(), &[0x1000, 0x2000, 0x3000]);
+
+    root_lifetime_native::FAIL.store(true, std::sync::atomic::Ordering::Release);
+    assert!(Root::new(0x4000, &[]).is_err());
+    assert_eq!(
+        &*destroyed().lock().unwrap(),
+        &[0x1000, 0x2000, 0x3000, 0x4000]
+    );
+    assert!(snapshot().unwrap().is_empty());
 }
