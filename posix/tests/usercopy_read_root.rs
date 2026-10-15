@@ -38,7 +38,10 @@ thread_local! {{
 mod security {{ pub fn current_process_id() -> Option<u64> {{ super::PID.with(|pid| pid.get()) }} }}
 mod task {{
     pub struct Process;
-    impl Process {{ pub fn page_table(&self) -> Option<u64> {{ super::ROOT.with(|root| root.get()) }} }}
+    impl Process {{
+        pub fn page_table(&self) -> Option<u64> {{ super::ROOT.with(|root| root.get()) }}
+        pub fn memory_regions(&self) -> &[()] {{ &[] }}
+    }}
     pub fn with_process<T>(pid: u64, f: impl FnOnce(&Process) -> T) -> Option<T> {{
         assert_eq!(pid, 7);
         if !super::PRESENT.with(|present| present.get()) {{ return None; }}
@@ -48,7 +51,11 @@ mod task {{
         Some(value)
     }}
 }}
-mod mem {{ pub mod paging {{
+mod mem {{
+pub mod mapping_admission {{
+    pub fn check_access(_: &[()], _: u64, _: u64) -> crate::result::Result<()> {{ Ok(()) }}
+}}
+pub mod paging {{
     pub fn copy_from_user_in_table(table: u64, address: u64, bytes: &mut [u8]) -> crate::result::Result<()> {{
         assert!(crate::LOCKED.with(|locked| locked.get()));
         assert_eq!(crate::ROOT.with(|root| root.get()), Some(table));

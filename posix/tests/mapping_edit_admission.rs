@@ -27,7 +27,10 @@ const EFAULT:u64=(-14i64) as u64; const ENOMEM:u64=(-12i64) as u64;
 const ENOSYS:u64=(-38i64) as u64; const EPERM:u64=(-1i64) as u64;
 const ESRCH:u64=(-3i64) as u64; const EACCES:u64=(-13i64) as u64; const SUCCESS:u64=0;
 #[derive(Debug)] pub enum Kernel {Memory(result::Memory),InvalidParam}
-mod result {#[derive(Debug)] pub enum Memory {NotMapped,OutOfMemory,PermissionDenied,InvalidAddress,AlignmentError}}
+mod result {
+    #[derive(Debug)] pub enum Memory {Busy,NotMapped,OutOfMemory,PermissionDenied,InvalidAddress,AlignmentError}
+    pub type Result<T> = core::result::Result<T,crate::Kernel>;
+}
 mod mnu_abi {pub const MEMORY_ACCESS_WRITE:u64=2;pub const MEMORY_ACCESS_EXECUTE:u64=4;pub const MEMORY_ACCESS_ALL:u64=7;}
 thread_local! {
     static LOCKED:Cell<bool>=const {Cell::new(false)};

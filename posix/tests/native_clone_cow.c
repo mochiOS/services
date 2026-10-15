@@ -158,6 +158,10 @@ int main(void) {
     if (child == 0) {
         if (private_map[0] != 0x7f || shared_map[0] != 0x21 ||
             allocated_map[0] != 0x21) _exit(97);
+        /* A kernel copy into a still-COW destination must isolate it too,
+         * without moving the shared open-file description's offset. */
+        if (pread(source, (void *)private_map, 1, 0) != 1 ||
+            private_map[0] != 0x7f || lseek(source, 0, SEEK_CUR) != 4) _exit(96);
         private_map[0] = 0x5a;
         shared_map[0] = 0x3c;
         allocated_map[0] = 0x6d;
@@ -172,6 +176,7 @@ int main(void) {
     CHECK(close(alias) == 0 && close(source) == 0);
     fprintf(stderr, "native-fork: PASS parent/child and dup aliases share the same file offset\n");
     fprintf(stderr, "native-fork: PASS file-backed private COW, anonymous shared mappings and handle-owned RAM\n");
+    fprintf(stderr, "native-fork: PASS kernel usercopy isolates a private file-backed COW destination\n");
     int thread_result = native_thread_register_probe();
     if (thread_result != 0) fprintf(stderr, "thread-registers: FAIL case %d\n", thread_result);
     CHECK(thread_result == 0);

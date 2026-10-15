@@ -214,6 +214,18 @@ static FRAMES: Mutex<BTreeMap<u64, usize>> = Mutex::new(BTreeMap::new());
 static MAPPING_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static GATE_ALLOCS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static FAIL_GATE_ALLOC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kernel {
+    Memory(result::Memory),
+}
+mod result {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Memory {
+        Busy,
+        InvalidAddress,
+    }
+    pub type Result<T> = core::result::Result<T, crate::Kernel>;
+}
 mod frame {
     pub struct Frame(pub u64);
     impl Frame {
@@ -767,6 +779,18 @@ fn mapping_edits_preflight_every_overlapping_backing_without_ipc_or_allocation()
     assert_eq!(
         without_allocations(|| mapping_admission::check(&regions, 0x1000, 0x3000)),
         Err(syscall::EAGAIN)
+    );
+    assert_eq!(
+        without_allocations(|| mapping_admission::check_access(&regions, 0x1000, 8192)),
+        Err(Kernel::Memory(result::Memory::Busy))
+    );
+    assert_eq!(
+        mapping_admission::check_access(&regions, u64::MAX, 1),
+        Err(Kernel::Memory(result::Memory::InvalidAddress))
+    );
+    assert_eq!(
+        without_allocations(|| mapping_admission::check_access(&regions, 0x2000, 0)),
+        Ok(())
     );
     // A reservation elsewhere in this address space must not reject an edit
     // which ends exactly at its boundary, including an unbacked/anonymous range.
