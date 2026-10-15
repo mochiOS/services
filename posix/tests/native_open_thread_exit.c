@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define CHECK(x)                                                               \
@@ -31,8 +32,10 @@ static const char *filename;
 static int expected_fd;
 static long baseline;
 static unsigned baseline_waits;
+static unsigned mode;
 static _Atomic(pthread_t) target;
-static atomic_uint active, go, deliveries, abandoned, escapes, cleanups;
+static atomic_uint active, go, deliveries, abandoned, escapes, cleanups,
+    returned;
 static atomic_int fault, stopping, sender_ready, sender_busy, worker_ready;
 
 static long snapshot(unsigned *waits) {
@@ -65,12 +68,13 @@ static void cleanup(void *unused) {
   unsigned waits;
   long count = snapshot(&waits);
   uint32_t retired = atomic_load(&abandoned);
-  if (!retired || count != baseline || waits != baseline_waits) {
+  if ((mode != 3 && !retired) || count != baseline || waits != baseline_waits) {
     atomic_store(&fault, 4);
     return;
   }
   for (long i = 0; i < count; ++i) {
-    if (records[i].handle == retired || !was_present(records[i].handle)) {
+    if ((retired && records[i].handle == retired) ||
+        !was_present(records[i].handle)) {
       atomic_store(&fault, 5);
       return;
     }
@@ -114,7 +118,10 @@ static void handler(int signal) {
         atomic_store(&abandoned, file);
         atomic_store_explicit(&active, 0, memory_order_release);
         atomic_fetch_add(&escapes, 1);
-        pthread_exit((void *)0x55);
+        if (mode == 0)
+          pthread_exit((void *)0x55);
+        if (pthread_cancel(pthread_self()))
+          atomic_store(&fault, 10);
       }
     }
   }
@@ -132,15 +139,31 @@ static void *worker(void *argument) {
     atomic_store(&fault, 3);
     return (void *)1;
   }
+  if (mode == 2 && pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL)) {
+    atomic_store(&fault, 11);
+    return (void *)1;
+  }
   pthread_cleanup_push(cleanup, NULL);
   atomic_store_explicit(&worker_ready, 1, memory_order_release);
   while (atomic_load_explicit(&go, memory_order_acquire) != epoch)
     sched_yield();
-  atomic_store_explicit(&active, epoch, memory_order_release);
+  if (mode == 3) {
+    if (pthread_cancel(pthread_self()))
+      atomic_store(&fault, 12);
+  } else
+    atomic_store_explicit(&active, epoch, memory_order_release);
   for (unsigned attempt = 0; attempt < 256; ++attempt) {
     fd = open(filename, O_RDWR | O_TRUNC);
+    if (mode == 3 || atomic_load(&abandoned))
+      atomic_store(&returned, 1);
     if (fd != expected_fd || close(fd)) {
       atomic_store(&fault, 8);
+      break;
+    }
+    if (mode == 2 && atomic_load(&abandoned)) {
+      if (pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL))
+        atomic_store(&fault, 13);
+      pthread_testcancel();
       break;
     }
   }
@@ -200,34 +223,51 @@ int main(void) {
   CHECK(pthread_create(&notifier, NULL, sender, NULL) == 0);
   while (!atomic_load_explicit(&sender_ready, memory_order_acquire))
     CHECK(!atomic_load(&fault) && sched_yield() == 0);
-  for (unsigned iteration = 0; iteration < 16; ++iteration) {
-    atomic_store(&worker_ready, 0);
-    atomic_store(&abandoned, 0);
-    pthread_t thread;
-    CHECK(pthread_create(&thread, NULL, worker,
-                         (void *)(uintptr_t)(iteration + 1)) == 0);
-    while (!atomic_load_explicit(&worker_ready, memory_order_acquire))
-      CHECK(!atomic_load(&fault) && sched_yield() == 0);
-    atomic_store_explicit(&target, thread, memory_order_release);
-    baseline = snapshot(&baseline_waits);
-    CHECK(baseline > 0);
-    for (long i = 0; i < baseline; ++i)
-      baseline_handles[i] = records[i].handle;
-    atomic_store_explicit(&go, iteration + 1, memory_order_release);
-    void *result = NULL;
-    CHECK(pthread_join(thread, &result) == 0 && result == (void *)0x55);
-    while (atomic_load_explicit(&sender_busy, memory_order_acquire))
-      CHECK(sched_yield() == 0);
-    CHECK(!atomic_load(&fault) && atomic_load(&escapes) == iteration + 1 &&
-          atomic_load(&cleanups) == iteration + 1);
-    probe = open(path, O_RDONLY);
-    CHECK(probe == expected_fd && close(probe) == 0);
+  unsigned iteration = 0, expected_escapes = 0;
+  for (mode = 0; mode < 4; ++mode) {
+    for (unsigned cycle = 0; cycle < (mode < 2 ? 16u : 4u); ++cycle) {
+      CHECK(ftruncate(source, 8192) == 0);
+      atomic_store(&worker_ready, 0);
+      atomic_store(&abandoned, 0);
+      atomic_store(&returned, 0);
+      pthread_t thread;
+      CHECK(pthread_create(&thread, NULL, worker,
+                           (void *)(uintptr_t)(iteration + 1)) == 0);
+      while (!atomic_load_explicit(&worker_ready, memory_order_acquire))
+        CHECK(!atomic_load(&fault) && sched_yield() == 0);
+      atomic_store_explicit(&target, thread, memory_order_release);
+      baseline = snapshot(&baseline_waits);
+      CHECK(baseline > 0);
+      for (long i = 0; i < baseline; ++i)
+        baseline_handles[i] = records[i].handle;
+      atomic_store_explicit(&go, iteration + 1, memory_order_release);
+      void *result = NULL;
+      CHECK(pthread_join(thread, &result) == 0 &&
+            result == (mode == 0 ? (void *)0x55 : PTHREAD_CANCELED));
+      while (atomic_load_explicit(&sender_busy, memory_order_acquire))
+        CHECK(sched_yield() == 0);
+      if (mode != 3)
+        ++expected_escapes;
+      CHECK(!atomic_load(&fault) && atomic_load(&escapes) == expected_escapes &&
+            atomic_load(&cleanups) == iteration + 1);
+      CHECK(atomic_load(&returned) == (mode == 2 ? 1u : 0u));
+      if (mode == 3) {
+        struct stat status;
+        CHECK(fstat(source, &status) == 0 && status.st_size == 8192);
+      }
+      probe = open(path, O_RDONLY);
+      CHECK(probe == expected_fd && close(probe) == 0);
+      ++iteration;
+    }
+    fprintf(stderr,
+            "open-thread-exit: mode=%u cleanup/cancellation checks PASS\n",
+            mode);
   }
   atomic_store_explicit(&stopping, 1, memory_order_release);
   CHECK(pthread_join(notifier, NULL) == 0 && !atomic_load(&fault));
   CHECK(close(source) == 0 && unlink(path) == 0);
   printf(
-      "open-thread-exit: PASS 16 observed pthread_exit escapes; exact Handle "
-      "set and FD reservations restored before application cleanup\n");
+      "open-thread-exit: PASS 40 exit/cancel cases; pending-entry, unpublished "
+      "reply, disabled cancellation and cleanup ownership\n");
   return 0;
 }
