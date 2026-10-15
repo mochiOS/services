@@ -290,7 +290,7 @@ fn cleanup(object: Arc<crate::vm_object::VmObject>, pin: CachePin) {
     process::replace(process::ProcessTable(Vec::new()));
     paging::destroy_user_page_table(ROOT).unwrap();
     drop(pin);
-    object.invalidate();
+    object.invalidate().unwrap();
     drop(object);
     assert!(crate::FRAMES.lock().unwrap().is_empty());
 }
@@ -356,7 +356,7 @@ fn successful_local_publication_keeps_private_prefix_and_completes_once() {
 }
 
 #[test]
-fn failed_tlb_ack_and_cache_epoch_preserve_cancellation_ownership() {
+fn failed_tlb_ack_and_reserved_invalidation_preserve_cancellation_ownership() {
     let _test = crate::TEST_LOCK.lock().unwrap();
     for fail_tlb in [false, true] {
         let (object, pin, physical) = setup();
@@ -366,12 +366,13 @@ fn failed_tlb_ack_and_cache_epoch_preserve_cancellation_ownership() {
         if fail_tlb {
             assert!(matches!(owner, Err(crate::syscall::EIO)));
         } else {
-            let mut owner = owner.unwrap();
-            object.invalidate();
+            let owner = owner.unwrap();
+            let generation = object.memory_generation();
             assert_eq!(
-                crate::without_allocations(|| owner.publish_local()),
+                crate::without_allocations(|| object.invalidate()),
                 Err(crate::syscall::EAGAIN)
             );
+            assert_eq!(object.memory_generation(), generation);
             drop(owner);
         }
         assert_eq!(paging::flags(ROOT, BASE), Some(0x804));
@@ -400,6 +401,12 @@ fn published_owner_death_retries_remaining_finish_instead_of_restoring_old_exten
             crate::without_allocations(|| owner.publish_local()),
             Err(crate::syscall::EFAULT)
         );
+        let generation = object.memory_generation();
+        assert_eq!(
+            crate::without_allocations(|| object.invalidate()),
+            Err(crate::syscall::EAGAIN)
+        );
+        assert_eq!(object.memory_generation(), generation);
         assert!(matches!(
             object.page(0),
             Err(crate::vm_object::VmPageError::Operation(
@@ -443,7 +450,7 @@ fn retired_root_stays_alive_until_deferred_mapping_cancellation_finishes() {
     );
     assert_eq!(object.read_at(0, &mut [0; 8192]), Ok(8192));
     drop(pin);
-    object.invalidate();
+    object.invalidate().unwrap();
     assert!(crate::FRAMES.lock().unwrap().is_empty());
 }
 

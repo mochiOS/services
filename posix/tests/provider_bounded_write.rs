@@ -109,8 +109,8 @@ pub fn lock_provider_io(_: &ProviderObject,identity:u64)->Result<Guard,u64>{{
 assert_eq!(identity,77);let s=STATE.lock().unwrap();
 if s.mode==8 || (s.mode==9 && s.calls==1){{return Err((-12i64) as u64)}}
 drop(s);assert!(!LOCKED.swap(true,Ordering::SeqCst));Ok(Guard)}}
-pub fn update_provider_range(_: &ProviderObject,identity:u64,_start:u64,bytes:&[u8]){{
-assert_eq!(identity,77);assert!(LOCKED.load(Ordering::SeqCst));STATE.lock().unwrap().updated+=bytes.len();
+pub fn update_provider_range(_: &Guard,_start:u64,bytes:&[u8]){{
+assert!(LOCKED.load(Ordering::SeqCst));STATE.lock().unwrap().updated+=bytes.len();
 }}
 }}}}
 pub mod syscall {{use super::*;
