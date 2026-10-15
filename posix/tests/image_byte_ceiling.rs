@@ -116,7 +116,7 @@ fn bounded_preparation_precedes_all_old_image_mutations_and_uses_the_shared_auth
         assert!(preparation.find(operation).unwrap() < check);
     }
     for operation in [
-        "remap_kernel_stack_user_table(",
+        "prepare_kernel_stack_user_table(",
         "retire_image_siblings(",
         "release_process_borrowed_mappings(",
         "thread.set_fs_base(",

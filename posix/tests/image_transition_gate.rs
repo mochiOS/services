@@ -148,7 +148,7 @@ fn old_image_is_retired_only_after_preparation_and_before_page_table_commit() {
     let gate = replacement
         .find("begin_image_transition(process_id)")
         .unwrap();
-    let prepare = replacement.find("remap_kernel_stack_user_table(").unwrap();
+    let prepare = replacement.find("prepare_kernel_stack_user_table(").unwrap();
     let retire = replacement
         .find("retire_image_siblings(pid, current_tid)")
         .unwrap();

@@ -100,6 +100,12 @@ int main(int argc, char **argv) {
         atomic_store_explicit(&ei_stop, 1, memory_order_release);
         void *result;
         CHECK(pthread_join(worker, &result) == 0 && result == (void *)29);
+        /* Success must retire a live sibling only after reversible image
+         * preparation has finished, not require a single-threaded caller. */
+        atomic_store_explicit(&ei_stop, 0, memory_order_release);
+        atomic_store_explicit(&ei_counter, 0, memory_order_release);
+        CHECK(pthread_create(&worker, NULL, ei_worker, NULL) == 0);
+        while (!atomic_load_explicit(&ei_counter, memory_order_acquire)) sched_yield();
         CHECK(write(channel[1], "P", 1) == 1);
         limit.rlim_cur = 32 * 1024 * 1024;
         CHECK(setrlimit(RLIMIT_AS, &limit) == 0);
@@ -117,6 +123,6 @@ int main(int argc, char **argv) {
     int status;
     CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
     CHECK(close(channel[0]) == 0);
-    puts("image-as-limit: PASS failed exec preserves siblings and CLOEXEC FDs; prepared policy/upcall/heap regions, read-only ceiling and finite-AS replacement work under 32MiB");
+    puts("image-as-limit: PASS failed exec preserves siblings and CLOEXEC FDs; successful finite-AS replacement retires a live sibling and adopts prepared policy/upcall/heap regions");
     return 0;
 }
