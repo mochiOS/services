@@ -86,6 +86,25 @@ mod interrupt {
 }
 
 mod task {
+    pub struct MemoryRegion {
+        pub start: u64,
+        pub length: u64,
+        pub object: Option<std::sync::Arc<crate::vm_object::VmObject>>,
+    }
+    impl MemoryRegion {
+        pub fn start(&self) -> u64 {
+            self.start
+        }
+        pub fn end(&self) -> Option<u64> {
+            self.start.checked_add(self.length)
+        }
+        pub fn backing(&self) -> &Self {
+            self
+        }
+        pub fn file_object(&self) -> Option<&std::sync::Arc<crate::vm_object::VmObject>> {
+            self.object.as_ref()
+        }
+    }
     pub struct ProviderObject {
         pub endpoint_thread_id: u64,
         pub endpoint_slot: u16,
@@ -263,6 +282,8 @@ mod paging {
 pub mod byte_extent;
 #[path = "../../../core/src/mem/cache_range.rs"]
 pub mod cache_range;
+#[path = "../../../core/src/mem/mapping_admission.rs"]
+mod mapping_admission;
 #[path = "../../../core/src/mem/object_io.rs"]
 pub mod object_io;
 #[path = "../../../core/src/mem/shared_pages.rs"]
@@ -721,6 +742,61 @@ fn unrelated_cache_pressure_cannot_evict_reserved_boundary_storage() {
     );
     object.invalidate();
     other.invalidate();
+}
+
+#[test]
+fn mapping_edits_preflight_every_overlapping_backing_without_ipc_or_allocation() {
+    let _test = TEST_LOCK.lock().unwrap();
+    reset_lower(b"old");
+    let object = Arc::new(provider_object());
+    let regions = [
+        task::MemoryRegion {
+            start: 0x1000,
+            length: 4096,
+            object: None,
+        },
+        task::MemoryRegion {
+            start: 0x2000,
+            length: 4096,
+            object: Some(object.clone()),
+        },
+    ];
+    let prepared = object
+        .prepare_extent(3, 1, |bytes| Ok(Arc::new(bytes)))
+        .unwrap();
+    assert_eq!(
+        without_allocations(|| mapping_admission::check(&regions, 0x1000, 0x3000)),
+        Err(syscall::EAGAIN)
+    );
+    // A reservation elsewhere in this address space must not reject an edit
+    // which ends exactly at its boundary, including an unbacked/anonymous range.
+    assert_eq!(
+        without_allocations(|| mapping_admission::check(&regions, 0x1000, 0x2000)),
+        Ok(())
+    );
+    assert_eq!(
+        without_allocations(|| mapping_admission::check(&regions, 0x3000, 0x4000)),
+        Ok(())
+    );
+    assert_eq!(
+        mapping_admission::check(&regions, 0x2000, 0x2000),
+        Err(syscall::EINVAL)
+    );
+    assert_eq!(LOWER.lock().unwrap().reads, 0);
+    drop(prepared);
+    assert_eq!(
+        without_allocations(|| mapping_admission::check(&regions, 0x1000, 0x3000)),
+        Ok(())
+    );
+    let invalid = [task::MemoryRegion {
+        start: u64::MAX,
+        length: 1,
+        object: None,
+    }];
+    assert_eq!(
+        mapping_admission::check(&invalid, 0x1000, 0x2000),
+        Err(syscall::EINVAL)
+    );
 }
 
 #[test]

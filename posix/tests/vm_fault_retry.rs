@@ -9,6 +9,7 @@ fn native_retry_probe_uses_the_authoritative_native_abi() {
     for (name, number) in [
         ("MEMORY_MAP", mnu_abi::SyscallNumber::MemoryMap),
         ("MEMORY_UNMAP", mnu_abi::SyscallNumber::MemoryUnmap),
+        ("MEMORY_PROTECT", mnu_abi::SyscallNumber::MemoryProtect),
         ("HANDLE_CLOSE", mnu_abi::SyscallNumber::HandleClose),
         ("ENDPOINT_CREATE", mnu_abi::SyscallNumber::IpcCreateHandle),
         ("IPC_RECV", mnu_abi::SyscallNumber::IpcRecvObjectHandles),

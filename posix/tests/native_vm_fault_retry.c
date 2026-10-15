@@ -13,6 +13,7 @@
 enum {
   MEMORY_MAP = 582,
   MEMORY_UNMAP = 583,
+  MEMORY_PROTECT = 584,
   HANDLE_CLOSE = 626,
   ENDPOINT_CREATE = 629,
   IPC_RECV = 631,
@@ -143,6 +144,11 @@ int main(void) {
   volatile unsigned char *shared_bytes = (void *)(uintptr_t)shared_address;
   CHECK(private_bytes[0] == 'a' && private_bytes[4095] == 'a');
   CHECK(shared_bytes[0] == 'b' && shared_bytes[4095] == 'b');
+  CHECK(native(MEMORY_PROTECT, private_address, 4096, 0, 0, 0, 0) == 0);
+  CHECK(native(MEMORY_PROTECT, shared_address, 4096, 0, 0, 0, 0) == 0);
+  CHECK(native(MEMORY_PROTECT, private_address, 4096, 1, 0, 0, 0) == 0);
+  CHECK(native(MEMORY_PROTECT, shared_address, 4096, 1, 0, 0, 0) == 0);
+  CHECK(private_bytes[0] == 'a' && shared_bytes[0] == 'b');
   CHECK(native(MEMORY_UNMAP, private_address, 4096, 0, 0, 0, 0) == 0);
   CHECK(native(MEMORY_UNMAP, shared_address, 4096, 0, 0, 0, 0) == 0);
   CHECK(native(HANDLE_CLOSE, handle, 0, 0, 0, 0, 0) == 0);
@@ -151,5 +157,7 @@ int main(void) {
   CHECK(reads[0] == 4 && reads[1] == 4);
   puts("vm-fault-retry: PASS private/shared hardware faults retry three EAGAIN "
        "replies without exceptions");
+  puts("mapping-edit-admission: PASS provider mappings protect NONE/READ and "
+       "unmap after publication");
   return 0;
 }
