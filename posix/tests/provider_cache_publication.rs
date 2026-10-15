@@ -513,15 +513,21 @@ fn unrelated_backing_changes_do_not_invalidate_extent_or_page_installations() {
         94,
     )
     .unwrap();
-    let generation = object.memory_generation();
     let pinned = object.prepare_shared_page(0).unwrap();
     let prepared = object
         .prepare_extent(3, 1, |bytes| Ok(Arc::new(bytes)))
         .unwrap();
+    let generation = object.memory_generation();
     other.write_at(0, b"x").unwrap();
     assert_eq!(object.memory_generation(), generation);
-    assert_eq!(object.with_memory_generation(generation, || Ok(37)), Ok(37));
-    assert_eq!(pinned.map_to(4096, 8192, false, false), Ok(()));
+    assert_eq!(
+        object.with_memory_generation(generation, || panic!("reserved private install")),
+        Err::<(), _>(syscall::EAGAIN)
+    );
+    assert_eq!(
+        pinned.map_to(4096, 8192, false, false),
+        Err(syscall::EAGAIN)
+    );
     without_allocations(|| prepared.commit()).unwrap();
     assert_eq!(
         pinned.map_to(4096, 8192, false, false),
@@ -529,6 +535,12 @@ fn unrelated_backing_changes_do_not_invalidate_extent_or_page_installations() {
     );
     let mut output = [0; 8];
     assert_eq!(object.read_at(0, &mut output).unwrap(), 1);
+    drop(pinned);
+    let pinned = object.prepare_shared_page(0).unwrap();
+    let generation = object.memory_generation();
+    other.write_at(0, b"x").unwrap();
+    assert_eq!(object.with_memory_generation(generation, || Ok(37)), Ok(37));
+    assert_eq!(pinned.map_to(4096, 8192, false, false), Ok(()));
     drop(pinned);
     object.invalidate();
     other.invalidate();
@@ -573,7 +585,8 @@ fn extent_reservation_excludes_io_without_waiting_or_allocating_on_contention() 
     ));
     // Cancellation releases admission, but never publishes a shorter extent.
     drop(prepared);
-    assert_eq!(object.memory_generation(), generation);
+    // Snapshots prepared before reservation stay invalid after cancellation.
+    assert_ne!(object.memory_generation(), generation);
     assert_eq!(LOWER.lock().unwrap().bytes, b"old");
     let prepared = alias
         .prepare_extent(3, 1, |bytes| Ok(Arc::new(bytes)))
@@ -584,6 +597,130 @@ fn extent_reservation_excludes_io_without_waiting_or_allocating_on_contention() 
     let request = vm_object::lock_provider_io(&provider, 93).unwrap();
     drop(request);
     object.invalidate();
+}
+
+#[test]
+fn reserved_backing_rejects_population_dirtying_and_both_final_install_paths() {
+    let _test = TEST_LOCK.lock().unwrap();
+    reset_lower(b"old");
+    let object = provider_object();
+    let pin = object.prepare_shared_page(0).unwrap();
+    let old_generation = object.memory_generation();
+    let reads = LOWER.lock().unwrap().reads;
+    let mappings = MAPPING_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+    let prepared = object
+        .prepare_extent(3, 1, |bytes| Ok(Arc::new(bytes)))
+        .unwrap();
+    for page in [0, 1] {
+        assert!(matches!(
+            object.page(page),
+            Err(vm_object::VmPageError::Operation(syscall::EAGAIN))
+        ));
+        assert!(matches!(
+            object.prepare_shared_page(page),
+            Err(vm_object::VmPageError::Operation(syscall::EAGAIN))
+        ));
+    }
+    assert_eq!(object.mark_page_dirty(0), Err(syscall::EAGAIN));
+    assert_eq!(object.stage_write_at(0, b"new"), Err(syscall::EAGAIN));
+    assert_eq!(pin.map_to(4096, 8192, false, false), Err(syscall::EAGAIN));
+    for generation in [old_generation, object.memory_generation()] {
+        assert_eq!(
+            object.with_memory_generation(generation, || panic!("private install must not run")),
+            Err::<(), _>(syscall::EAGAIN)
+        );
+    }
+    assert_eq!(LOWER.lock().unwrap().reads, reads);
+    assert_eq!(
+        MAPPING_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+        mappings
+    );
+    assert_eq!(LOWER.lock().unwrap().bytes, b"old");
+    drop(prepared);
+    // Cancellation reopens admission but does not revive old page pins.
+    assert_eq!(pin.map_to(4096, 8192, false, false), Err(syscall::EAGAIN));
+    drop(pin);
+    assert_eq!(&object.page(0).unwrap()[..3], b"old");
+    let pin = object.prepare_shared_page(0).unwrap();
+    assert_eq!(pin.map_to(4096, 8192, false, false), Ok(()));
+    drop(pin);
+    object.invalidate();
+    assert!(FRAMES.lock().unwrap().is_empty());
+}
+
+#[test]
+fn reservation_wins_at_lower_reply_frame_and_staged_write_admission_edges() {
+    let _test = TEST_LOCK.lock().unwrap();
+    for mode in 0..3 {
+        reset_lower(b"old");
+        let object = provider_object();
+        let held = std::rc::Rc::new(RefCell::new(None));
+        let holder = held.clone();
+        let reserve = Box::new(move || {
+            *holder.borrow_mut() = Some(
+                provider_object()
+                    .prepare_extent(3, 1, |bytes| Ok(Arc::new(bytes)))
+                    .unwrap(),
+            );
+        });
+        if mode != 0 {
+            // cached lookup, lower snapshot admission, then frame admission.
+            CACHE_EDGE.with(|edge| *edge.borrow_mut() = Some((3, reserve)));
+            if mode == 1 {
+                assert!(matches!(
+                    object.prepare_shared_page(0),
+                    Err(vm_object::VmPageError::Operation(syscall::EAGAIN))
+                ));
+            } else {
+                assert_eq!(object.stage_write_at(0, b"new"), Err(syscall::EAGAIN));
+            }
+        } else {
+            LOWER_EDGE.with(|edge| *edge.borrow_mut() = Some(reserve));
+            assert!(matches!(
+                object.page(0),
+                Err(vm_object::VmPageError::Operation(syscall::EAGAIN))
+            ));
+        }
+        assert!(held.borrow().is_some());
+        assert!(FRAMES.lock().unwrap().is_empty());
+        assert_eq!(LOWER.lock().unwrap().reads, 1);
+        drop(held.borrow_mut().take());
+        assert_eq!(&object.page(0).unwrap()[..3], b"old");
+        object.invalidate();
+    }
+}
+
+#[test]
+fn unrelated_cache_pressure_cannot_evict_reserved_boundary_storage() {
+    let _test = TEST_LOCK.lock().unwrap();
+    reset_lower(&vec![0x11; 256 * 4096]);
+    let object = provider_object();
+    let other = vm_object::VmObject::provider(
+        Arc::new(task::ProviderObject {
+            endpoint_thread_id: 17,
+            endpoint_slot: 2,
+            endpoint_generation: 8,
+        }),
+        94,
+    )
+    .unwrap();
+    object.page(0).unwrap();
+    let prepared = object
+        .prepare_extent(4096, 17, |bytes| Ok(Arc::new(bytes)))
+        .unwrap();
+    for index in 0..256 {
+        other.page(index).unwrap();
+    }
+    let reads = LOWER.lock().unwrap().reads;
+    drop(prepared);
+    assert_eq!(object.page(0).unwrap()[0], 0x11);
+    assert_eq!(
+        LOWER.lock().unwrap().reads,
+        reads,
+        "reserved boundary was evicted"
+    );
+    object.invalidate();
+    other.invalidate();
 }
 
 #[test]
@@ -642,14 +779,13 @@ fn production_extent_commit_preserves_dirty_prefix_and_discards_removed_storage(
     let prepared = object
         .prepare_extent(3, 1, |bytes| Ok(Arc::new(bytes)))
         .unwrap();
-    // A mapping/cache mutation can still invalidate the preparation before
-    // the VM coordinator establishes its PTE/TLB exclusion barrier.
-    object.stage_write_at(2, b"!").unwrap();
+    // Explicit invalidation still cancels a reservation's publication stamp.
+    object.invalidate();
     assert_eq!(
         without_allocations(|| prepared.commit()),
         Err(syscall::EAGAIN)
     );
-    assert_eq!(&object.page(0).unwrap()[..3], b"ol!");
+    assert_eq!(&object.page(0).unwrap()[..3], b"old");
     assert_eq!(object.read_at(0, &mut output).unwrap(), 3);
     object.invalidate();
 

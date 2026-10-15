@@ -82,6 +82,25 @@ fn owner_admission_never_waits_for_an_outstanding_caller() {
 }
 
 #[test]
+fn reservation_invalidates_snapshots_and_releases_admission_on_cancel() {
+    let mut registry = object_io::Registry::new();
+    let gate = gate(&mut registry, 7);
+    let generation = gate.generation();
+    let request = gate.try_lock().unwrap();
+    assert!(!gate.is_reserved());
+    assert_eq!(gate.generation(), generation);
+    let reservation = request.reserve();
+    assert!(gate.is_reserved());
+    assert_ne!(gate.generation(), generation);
+    assert!(gate.try_lock().is_none());
+    let reserved_generation = gate.generation();
+    drop(reservation);
+    assert!(!gate.is_reserved());
+    assert_eq!(gate.generation(), reserved_generation);
+    assert!(gate.try_lock().is_some());
+}
+
+#[test]
 fn concurrent_writeback_and_write_sections_do_not_overlap() {
     let mut registry = object_io::Registry::new();
     let gate = gate(&mut registry, 7);
