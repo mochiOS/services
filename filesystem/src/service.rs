@@ -1524,10 +1524,31 @@ impl FilesystemService {
         open_id: u64,
         payload: &[u8],
     ) -> Result<(usize, u64), i32> {
+        self.provider_write_range(open_id, payload, None)
+    }
+
+    pub fn provider_write_bounded(
+        &mut self,
+        open_id: u64,
+        payload: &[u8],
+        byte_end: u64,
+    ) -> Result<(usize, u64), i32> {
+        self.provider_write_range(open_id, payload, Some(byte_end))
+    }
+
+    fn provider_write_range(
+        &mut self,
+        open_id: u64,
+        payload: &[u8],
+        byte_end: Option<u64>,
+    ) -> Result<(usize, u64), i32> {
         if payload.len() > mnu_abi::provider::MAX_DATA_LEN {
             return Err(EINVAL);
         }
         if let Some(open) = self.opens.device(open_id) {
+            if byte_end.is_some() {
+                return Err(ENOTSUP);
+            }
             return open.null.as_ref().ok_or(EISDIR)?
                 .write(payload).map(|count| (count, 0));
         }
@@ -1548,12 +1569,20 @@ impl FilesystemService {
         } else {
             open.offset
         };
+        let length = if let Some(end) = byte_end {
+            if cursor >= end {
+                return Err((-mnu_abi::provider::STATUS_BOUND_REACHED) as i32);
+            }
+            (end - cursor).min(payload.len() as u64) as usize
+        } else {
+            payload.len()
+        };
         let result = crate::positioned_io::sequential(
             &mut cursor,
-            payload.len(),
+            length,
             true,
             |done, position, _| {
-                file.write_bytes_at(&payload[done..], position)
+                file.write_bytes_at(&payload[done..length], position)
                     .map_err(errno)
             },
         )?;

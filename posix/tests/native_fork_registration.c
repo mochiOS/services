@@ -38,6 +38,10 @@
 #define main file_size_limit_probe
 #include "native_file_size_limit.c"
 #undef main
+#undef CHECK
+#define main bounded_write_probe
+#include "native_bounded_write.c"
+#undef main
 
 int main(void) {
     int result = handle_capture_probe();
@@ -55,5 +59,7 @@ int main(void) {
     result = resource_policy_probe();
     if (result) return result;
     result = file_size_limit_probe();
+    if (result) return result;
+    result = bounded_write_probe();
     return result ? result : callback_probe();
 }

@@ -155,6 +155,57 @@ fn independent_provider_descriptions_observe_current_data_size_and_extents() {
 }
 
 #[test]
+fn bounded_provider_writes_select_current_append_position_and_exact_prefix_atomically() {
+    let mut fs = test_filesystem();
+    let header = protocol::Header {
+        opcode: protocol::OP_OPEN_AT,
+        flags: protocol::OPEN_AT_READ
+            | protocol::OPEN_AT_WRITE
+            | protocol::OPEN_AT_CREATE
+            | protocol::OPEN_AT_APPEND,
+        mode: 0o600,
+        ..Default::default()
+    };
+    let a = fs
+        .open_at(
+            header,
+            b"/bounded-write",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap()
+        .header
+        .open_id;
+    let b = fs
+        .open_at(
+            header,
+            b"/bounded-write",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap()
+        .header
+        .open_id;
+    assert_eq!(fs.provider_write_bounded(a, b"abc", 5), Ok((3, 0)));
+    assert_eq!(fs.provider_write_bounded(b, b"defgh", 5), Ok((2, 3)));
+    assert_eq!(fs.provider_read_at(a, 0, 20).unwrap(), b"abcde");
+    assert_eq!(fs.provider_read_at(b, 0, 20).unwrap(), b"abcde");
+    assert_eq!(fs.provider_seek(a, 0, mnu_abi::HANDLE_SEEK_CURRENT), Ok(3));
+    let bound_error = (-mnu_abi::provider::STATUS_BOUND_REACHED) as i32;
+    assert_eq!(fs.provider_write_bounded(a, b"!", 5), Err(bound_error));
+    assert_eq!(fs.provider_seek(a, 0, mnu_abi::HANDLE_SEEK_CURRENT), Ok(3));
+    assert_eq!(fs.provider_write_bounded(a, b"", 0), Ok((0, 3)));
+    assert_eq!(fs.provider_seek(a, 0, mnu_abi::HANDLE_SEEK_END), Ok(5));
+    // An unbounded write through the other description is immediately visible
+    // to this one's append selection and extent/size reads.
+    assert_eq!(fs.provider_write(b, b"FG"), Ok(2));
+    assert_eq!(fs.provider_write_bounded(a, b"HIJ", 9), Ok((2, 7)));
+    assert_eq!(fs.provider_read_at(b, 0, 20).unwrap(), b"abcdeFGHI");
+    assert_eq!(fs.provider_write_bounded(a, b"!", 9), Err(bound_error));
+    assert_eq!(fs.provider_write_bounded(u64::MAX, b"", 0), Err(9));
+}
+
+#[test]
 fn truncate_zeroes_retained_tail_without_materializing_sparse_growth() {
     let mut filesystem = test_filesystem();
     let file = filesystem

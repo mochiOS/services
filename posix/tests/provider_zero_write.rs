@@ -27,7 +27,7 @@ fn empty_provider_writes_delegate_once_and_validate_the_owner_reply() {
         r#"
 extern crate self as mnu_abi;
 pub mod provider {{
-pub const OP_WRITE:u16=2; pub const RESPONSE_HEADER_LEN:usize=32;
+pub const OP_WRITE:u16=2; pub const OP_WRITE_BOUNDED:u16=12; pub const RESPONSE_HEADER_LEN:usize=32;
 pub struct RequestHeader {{pub opcode:u16,pub object_id:u64,pub argument:u64,pub basis:u64,pub length:u32,pub data_length:u32}}
 pub struct ResponseHeader {{pub value:u64}}
 }}
@@ -44,7 +44,7 @@ match MODE.with(|m|m.get()){{
 2=>Ok((provider::ResponseHeader{{value:1}},0)),3=>Ok((provider::ResponseHeader{{value:0}},1)),
 4=>Err((-13i64) as u64),_=>Err((-12i64) as u64)}}
 }}
-fn empty_write(provider:&ProviderObject,length:usize)->u64{{{branch} panic!("only empty writes are tested")}}
+fn empty_write(provider:&ProviderObject,length:usize)->u64{{let byte_end:Option<u64>=None;{branch} panic!("only empty writes are tested")}}
 fn main(){{for mode in 0..6{{MODE.with(|m|m.set(mode));CALLS.with(|n|n.set(0));
 assert_eq!(empty_write(&ProviderObject{{object_id:17}},0),match mode{{0|1=>0,2|3=>EIO,4=>(-13i64) as u64,_=>(-12i64) as u64}});
 CALLS.with(|n|assert_eq!(n.get(),1));}}}}

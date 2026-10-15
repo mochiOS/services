@@ -923,6 +923,9 @@ fn handle_provider_request(
         provider::OP_WRITE => service
             .provider_write_with_offset(header.object_id, payload)
             .map(|(written, start)| (written as u64, start.to_le_bytes().to_vec())),
+        provider::OP_WRITE_BOUNDED => service
+            .provider_write_bounded(header.object_id, payload, header.basis)
+            .map(|(written, start)| (written as u64, start.to_le_bytes().to_vec())),
         provider::OP_READ_AT => service
             .provider_read_at(header.object_id, header.basis, header.length as usize)
             .map(|data| (data.len() as u64, data)),
