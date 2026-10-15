@@ -5,6 +5,29 @@ use super::*;
 const MAX_PREPARED_FORKS: usize = 1024;
 const MAX_PREPARED_FORKS_PER_PROCESS: usize = 64;
 
+/// `status` must have been read from this exact attached object through the
+/// native Handle API, never decoded from client request bytes. mnu enforces
+/// the Process object type and WAIT right when producing that status.
+pub fn validate_fork_child(
+    object: AttachedObject<u32>,
+    status: mnu_abi::ProcessStatus,
+) -> Result<AuthenticatedProcess<u32>, i32> {
+    if object.handle == 0
+        || object.rights != mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_SIGNAL
+        || status.process_id == 0
+        || status.reserved != 0
+    {
+        return Err(STATUS_EINVAL);
+    }
+    if status.state != mnu_abi::PROCESS_STATE_RUNNING {
+        return Err(protocol::STATUS_ESRCH);
+    }
+    Ok(AuthenticatedProcess {
+        handle: object.handle,
+        process_id: status.process_id,
+    })
+}
+
 #[derive(Debug)]
 pub(super) struct ForkState<H: Copy> {
     owner: u64,

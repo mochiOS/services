@@ -32,13 +32,18 @@ impl ObjectTransport for &Replies {
         let (header, payload) = wire::decode(input).unwrap();
         assert_eq!(header.opcode, self.opcode);
         assert_eq!(header.flags, 0);
-        let expected = if self.opcode == wire::OP_PROCESS_LAUNCHED {
+        let expected = if matches!(self.opcode, wire::OP_FORK_PREPARE | wire::OP_FORK_CANCEL) {
+            vec![]
+        } else if self.opcode == wire::OP_PROCESS_LAUNCHED {
             vec![source(7), source(11)]
         } else {
             vec![source(7)]
         };
         assert_eq!(handles.iter().collect::<Vec<_>>(), expected);
         match self.opcode {
+            wire::OP_FORK_COMMIT | wire::OP_FORK_CANCEL => {
+                assert_eq!(wire::fork::decode_token(payload), Ok(77));
+            }
             wire::OP_PROCESS_INITIALIZE | wire::OP_PROCESS_SPAWNED => {
                 let mut groups = [0; 2];
                 assert_eq!(
@@ -88,6 +93,8 @@ impl ObjectTransport for &Replies {
             )
             .unwrap();
             bytes
+        } else if self.opcode == wire::OP_FORK_PREPARE {
+            77u64.to_le_bytes().to_vec()
         } else {
             vec![]
         };
@@ -152,6 +159,9 @@ fn invoke(client: &Client<&Replies>, opcode: u16) -> Result<(), ClientError<u8>>
         wire::OP_SIGNAL_THREAD_REGISTER => client.register_signal_thread(handle),
         wire::OP_SIGNAL_THREAD_SEND => client.send_thread_signal(10, handle),
         wire::OP_PROCESS_FORKED => client.register_child(handle),
+        wire::OP_FORK_PREPARE => client.prepare_fork().map(|token| assert_eq!(token, 77)),
+        wire::OP_FORK_COMMIT => client.commit_fork(77, handle),
+        wire::OP_FORK_CANCEL => client.cancel_fork(77),
         wire::OP_PROCESS_INITIALIZE => client.initialize_process(handle, 501, 20, &[20, 30]),
         wire::OP_PROCESS_SPAWNED => client.register_spawned_child(handle, 501, 20, &[20, 30]),
         wire::OP_PROCESS_LAUNCHED => client.register_launched_child(handle, source(11)),
@@ -167,11 +177,36 @@ fn invoke(client: &Client<&Replies>, opcode: u16) -> Result<(), ClientError<u8>>
 }
 
 #[test]
+fn zero_fork_tokens_do_not_send_or_close_the_callers_borrowed_handle() {
+    for opcode in [wire::OP_FORK_COMMIT, wire::OP_FORK_CANCEL] {
+        let replies = Replies {
+            opcode,
+            mode: 0,
+            incoming: vec![8],
+            closed: RefCell::new(vec![]),
+            calls: Cell::new(0),
+        };
+        let client = Client::new(&replies);
+        let result = if opcode == wire::OP_FORK_COMMIT {
+            client.commit_fork(0, source(7))
+        } else {
+            client.cancel_fork(0)
+        };
+        assert!(matches!(result, Err(ClientError::Protocol(_))));
+        assert_eq!(replies.calls.get(), 0);
+        assert!(replies.closed.borrow().is_empty());
+    }
+}
+
+#[test]
 fn process_and_thread_replies_preserve_borrowed_objects_and_original_errors_without_replay() {
     for opcode in [
         wire::OP_SIGNAL_THREAD_REGISTER,
         wire::OP_SIGNAL_THREAD_SEND,
         wire::OP_PROCESS_FORKED,
+        wire::OP_FORK_PREPARE,
+        wire::OP_FORK_COMMIT,
+        wire::OP_FORK_CANCEL,
         wire::OP_PROCESS_INITIALIZE,
         wire::OP_PROCESS_SPAWNED,
         wire::OP_PROCESS_LAUNCHED,
@@ -202,7 +237,8 @@ fn process_and_thread_replies_preserve_borrowed_objects_and_original_errors_with
                 let mut expected = vec![];
                 for handle in &replies.incoming {
                     if *handle != 0
-                        && *handle != 7
+                        && (*handle != 7
+                            || matches!(opcode, wire::OP_FORK_PREPARE | wire::OP_FORK_CANCEL))
                         && !(opcode == wire::OP_PROCESS_LAUNCHED && *handle == 11)
                         && !expected.contains(handle)
                     {

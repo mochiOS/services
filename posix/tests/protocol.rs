@@ -1919,6 +1919,167 @@ fn prepared_fork_keeps_policy_and_directory_objects_from_preparation_not_commit(
 }
 
 #[test]
+fn fork_control_wire_rejects_self_claimed_identity_and_foreign_or_malformed_tokens() {
+    let mut sentinel = [0xff; 8];
+    assert!(protocol::fork::encode_token(0, &mut sentinel).is_err());
+    assert!(protocol::fork::encode_token(1, &mut sentinel[..7]).is_err());
+    assert_eq!(sentinel, [0xff; 8]);
+    let owner = PeerIdentity {
+        process_id: 701,
+        effective_uid: 0,
+        effective_gid: 0,
+    };
+    let foreign = PeerIdentity {
+        process_id: 702,
+        ..owner
+    };
+    let mut service = service_for(owner);
+    let mut filesystem = RecordingFilesystem::default();
+    let prepare = protocol::Header {
+        opcode: protocol::OP_FORK_PREPARE,
+        request_id: 71,
+        ..Default::default()
+    };
+    for (header, payload, handles) in [
+        (prepare, &701u64.to_le_bytes()[..], vec![]),
+        (
+            protocol::Header {
+                flags: 1,
+                ..prepare
+            },
+            &[][..],
+            vec![],
+        ),
+        (
+            protocol::Header {
+                status: 1,
+                ..prepare
+            },
+            &[][..],
+            vec![],
+        ),
+        (
+            prepare,
+            &[][..],
+            vec![AttachedObject {
+                handle: 42,
+                rights: mnu_abi::HANDLE_RIGHT_ALL,
+            }],
+        ),
+    ] {
+        assert_eq!(
+            service
+                .handle_objects(owner, header, payload, &handles, &mut filesystem)
+                .response
+                .header
+                .status,
+            STATUS_EINVAL
+        );
+    }
+    let prepared = service.handle_objects(owner, prepare, &[], &[], &mut filesystem);
+    assert!(prepared.handles.is_empty());
+    assert_eq!(prepared.response.header.request_id, 71);
+    assert_eq!(prepared.response.header.status, 0);
+    let token = protocol::fork::decode_token(&prepared.response.payload).unwrap();
+    let mut bytes = [0; protocol::fork::TOKEN_LEN];
+    protocol::fork::encode_token(token, &mut bytes).unwrap();
+    assert_eq!(
+        protocol::fork::decode_token(&[0; 8]),
+        Err(protocol::ProtocolError::InvalidLength)
+    );
+    for length in 0..8 {
+        assert!(protocol::fork::decode_token(&bytes[..length]).is_err());
+    }
+    assert!(protocol::fork::decode_token(&[1; 9]).is_err());
+    let cancel = protocol::Header {
+        opcode: protocol::OP_FORK_CANCEL,
+        ..prepare
+    };
+    assert_eq!(
+        service
+            .handle_objects(foreign, cancel, &bytes, &[], &mut filesystem)
+            .response
+            .header
+            .status,
+        protocol::STATUS_EPERM
+    );
+    assert_eq!(
+        service
+            .handle_objects(owner, cancel, &[0; 8], &[], &mut filesystem)
+            .response
+            .header
+            .status,
+        STATUS_EINVAL
+    );
+    assert_eq!(
+        service
+            .handle_objects(owner, cancel, &bytes, &[], &mut filesystem)
+            .response
+            .header
+            .status,
+        0
+    );
+    assert_eq!(
+        service
+            .handle_objects(owner, cancel, &bytes, &[], &mut filesystem)
+            .response
+            .header
+            .status,
+        protocol::STATUS_ESRCH
+    );
+}
+
+#[test]
+fn fork_commit_requires_exact_process_rights_and_live_native_status() {
+    use posix_service::validate_fork_child;
+    let object = AttachedObject {
+        handle: 42,
+        rights: mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_SIGNAL,
+    };
+    let status = mnu_abi::ProcessStatus {
+        process_id: 705,
+        state: mnu_abi::PROCESS_STATE_RUNNING,
+        ..Default::default()
+    };
+    assert_eq!(
+        validate_fork_child(object, status),
+        Ok(AuthenticatedProcess {
+            handle: 42,
+            process_id: 705
+        })
+    );
+    for rights in [
+        0,
+        mnu_abi::HANDLE_RIGHT_WAIT,
+        mnu_abi::HANDLE_RIGHT_SIGNAL,
+        mnu_abi::HANDLE_RIGHT_ALL,
+    ] {
+        assert_eq!(
+            validate_fork_child(AttachedObject { rights, ..object }, status),
+            Err(STATUS_EINVAL)
+        );
+    }
+    for invalid in [
+        mnu_abi::ProcessStatus {
+            process_id: 0,
+            ..status
+        },
+        mnu_abi::ProcessStatus {
+            reserved: 1,
+            ..status
+        },
+    ] {
+        assert_eq!(validate_fork_child(object, invalid), Err(STATUS_EINVAL));
+    }
+    for state in [0, mnu_abi::PROCESS_STATE_EXITED, u32::MAX] {
+        assert_eq!(
+            validate_fork_child(object, mnu_abi::ProcessStatus { state, ..status }),
+            Err(protocol::STATUS_ESRCH)
+        );
+    }
+}
+
+#[test]
 fn fork_preparation_is_owned_bounded_cancelable_and_commit_failure_does_not_consume_it() {
     let owner = PeerIdentity {
         process_id: 501,

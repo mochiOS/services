@@ -24,6 +24,7 @@ pub mod filesystem_transport;
 mod fault_signal;
 mod signal_origin;
 mod fork_state;
+pub use fork_state::validate_fork_child;
 
 pub const STATUS_EINVAL: i32 = -22;
 pub const STATUS_EOVERFLOW: i32 = -75;
@@ -3173,6 +3174,9 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_RESET_EFFECTIVE_IDS
             | protocol::OP_GROUPS_SET
             | protocol::OP_PROCESS_FORKED
+            | protocol::OP_FORK_PREPARE
+            | protocol::OP_FORK_COMMIT
+            | protocol::OP_FORK_CANCEL
             | protocol::OP_PROCESS_SPAWNED
             | protocol::OP_PROCESS_SESSION_INFO
             | protocol::OP_PROCESS_LAUNCHED
@@ -3238,6 +3242,42 @@ impl<H: Copy> PosixService<H> {
         handles: &[AttachedObject<H>],
         filesystem: &mut F,
     ) -> ObjectResponse<H> {
+        if matches!(
+            header.opcode,
+            protocol::OP_FORK_PREPARE | protocol::OP_FORK_CANCEL
+        ) {
+            let result = if header.flags != 0 || header.status != 0 || !handles.is_empty() {
+                Err(STATUS_EINVAL)
+            } else if header.opcode == protocol::OP_FORK_PREPARE {
+                if !payload.is_empty() {
+                    Err(STATUS_EINVAL)
+                } else {
+                    self.prepare_fork(peer, filesystem)
+                        .map(|token| token.to_le_bytes().to_vec())
+                }
+            } else {
+                protocol::fork::decode_token(payload)
+                    .map_err(|_| STATUS_EINVAL)
+                    .and_then(|token| self.cancel_fork(peer, token, filesystem))
+                    .map(|()| Vec::new())
+            };
+            let response = match result {
+                Ok(payload) => Response {
+                    header: protocol::Header {
+                        opcode: protocol::OP_STATUS,
+                        request_id: header.request_id,
+                        payload_len: payload.len() as u32,
+                        ..Default::default()
+                    },
+                    payload,
+                },
+                Err(status) => status_response(header.request_id, status),
+            };
+            return ObjectResponse {
+                response,
+                handles: Vec::new(),
+            };
+        }
         if !matches!(
             header.opcode,
             protocol::OP_OPEN_AT

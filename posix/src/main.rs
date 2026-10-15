@@ -889,9 +889,15 @@ fn main() {
             (Some(peer), Some((header, payload)), true)
                 if matches!(
                     header.opcode,
-                    protocol::OP_PROCESS_FORKED | protocol::OP_PROCESS_SPAWNED
+                    protocol::OP_PROCESS_FORKED
+                        | protocol::OP_PROCESS_SPAWNED
+                        | protocol::OP_FORK_COMMIT
                 ) && header.flags == 0
-                    && (header.opcode == protocol::OP_PROCESS_SPAWNED || payload.is_empty())
+                    && header.status == 0
+                    && (matches!(
+                        header.opcode,
+                        protocol::OP_PROCESS_SPAWNED | protocol::OP_FORK_COMMIT
+                    ) || payload.is_empty())
                     && attachments.len() == 1 =>
             {
                 match adopt_sender_child(
@@ -899,6 +905,7 @@ fn main() {
                     peer,
                     attachments[0],
                     (header.opcode == protocol::OP_PROCESS_SPAWNED).then_some(payload),
+                    (header.opcode == protocol::OP_FORK_COMMIT).then_some(payload),
                     &mut filesystem,
                 ) {
                     Ok(()) => {
@@ -938,13 +945,21 @@ fn main() {
         let Some(object_response) = object_response else {
             continue;
         };
-        if let Ok(response_len) = protocol::encode(
+        let prepared_fork = if decoded
+            .is_some_and(|(header, _)| header.opcode == protocol::OP_FORK_PREPARE)
+            && object_response.response.header.status == 0
+        {
+            peer.zip(protocol::fork::decode_token(&object_response.response.payload).ok())
+        } else {
+            None
+        };
+        let reply_queued = if let Ok(response_len) = protocol::encode(
             object_response.response.header,
             &object_response.response.payload,
             &mut response_bytes,
         ) {
             if object_response.handles.is_empty() {
-                let _ = platform::ipc::reply(sender, &response_bytes[..response_len]);
+                platform::ipc::reply(sender, &response_bytes[..response_len]).is_ok()
             } else {
                 let mut outgoing = platform::ipc::IpcObjectHandles::default();
                 outgoing.count = object_response.handles.len() as u32;
@@ -959,11 +974,21 @@ fn main() {
                         rights: opened.rights,
                     };
                 }
-                let _ = platform::ipc::reply_object_handles(
+                platform::ipc::reply_object_handles(
                     sender,
                     &response_bytes[..response_len],
                     &outgoing,
-                );
+                )
+                .is_ok()
+            }
+        } else {
+            false
+        };
+        // Enqueue success is not a client acknowledgment. Unacknowledged
+        // preparations remain bounded and are also reclaimed on owner exit.
+        if !reply_queued {
+            if let Some((peer, token)) = prepared_fork {
+                let _ = service.cancel_fork(peer, token, &mut filesystem);
             }
         }
         for opened in object_response.handles {
@@ -1714,6 +1739,7 @@ fn adopt_sender_child(
     peer: posix_service::PeerIdentity,
     process: posix_service::AttachedObject<u32>,
     credentials: Option<&[u8]>,
+    preparation: Option<&[u8]>,
     filesystem: &mut RuntimeFilesystem,
 ) -> Result<(), i32> {
     use mochi_user_platform as platform;
@@ -1725,6 +1751,12 @@ fn adopt_sender_child(
     }
     let status =
         platform::process::handle_status(process.handle).map_err(|error| error.raw() as i32)?;
+    if let Some(preparation) = preparation {
+        let token = mochios_posix_protocol::fork::decode_token(preparation)
+            .map_err(|_| posix_service::STATUS_EINVAL)?;
+        let child = posix_service::validate_fork_child(process, status)?;
+        return service.commit_fork(peer, token, child);
+    }
     let process = posix_service::AuthenticatedProcess {
         handle: process.handle,
         process_id: status.process_id,

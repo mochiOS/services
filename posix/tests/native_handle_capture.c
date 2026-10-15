@@ -21,6 +21,7 @@ static void hc_put32(void *p, uint32_t value) { memcpy(p, &value, 4); }
 static void hc_put64(void *p, uint64_t value) { memcpy(p, &value, 8); }
 static uint32_t hc_get32(const void *p) { uint32_t value; memcpy(&value, p, 4); return value; }
 static uint64_t hc_get64(const void *p) { uint64_t value; memcpy(&value, p, 8); return value; }
+#include "native_fork_policy.h"
 static const char hc_path[] = "/system/services/compositor.service";
 static const char hc_label[] = "captured-handles-child";
 static int hc_authorize(uint64_t endpoint) {
@@ -94,6 +95,9 @@ int main(void) {
     CHECK(hc_native(674, replacement, (uint64_t)"new", 3, 0, 0) == 3);
     int64_t authority = HC(518, "capability.service", strlen("capability.service"), 0);
     CHECK(authority > 0);
+    mode_t previous_umask;
+    uint64_t fork_policy = fp_begin(&previous_umask);
+    CHECK(fork_policy != 0);
     uint64_t tls; __asm__ volatile("movq %%fs:0,%0" : "=r"(tls));
     struct hc_context context = {0};
     uint64_t image = mochios_posix_capture_snapshot(&context, tls, hc_capture_vm);
@@ -126,6 +130,7 @@ int main(void) {
     size_t length = hc_creation(bytes, &context, (uint32_t)delegation, (uint32_t)source, read, 1);
     CHECK(hc_authorize(authority));
     int64_t child = HC(676, image, bytes, length); CHECK(child > 0);
+    CHECK(fp_commit(fork_policy, (uint32_t)child));
     CHECK(HC(626, image, 0, 0) == 0);
     CHECK(HC(626, capture, 0, 0) == 0 && HC(626, readonly, 0, 0) == 0);
     CHECK(HC(626, delegation, 0, 0) == 0 && HC(626, nested, 0, 0) == 0);
@@ -133,7 +138,12 @@ int main(void) {
     CHECK(HC(645, child, 0, 0) == 0);
     struct hc_status status = {0};
     CHECK(HC(643, child, UINT64_MAX, &status) == 0 && status.state == 2 && status.code == 37);
+    int wait_status = 0;
+    CHECK(waitpid((pid_t)status.pid, &wait_status, 0) == (pid_t)status.pid
+        && WIFEXITED(wait_status) && WEXITSTATUS(wait_status) == 37);
+    CHECK(umask(previous_umask) == 077);
     CHECK(HC(626, child, 0, 0) == 0);
     puts("native-handle-capture: PASS stable captured grants after same-slot reuse, CONTROL/TRANSFER checks, rights attenuation and child lifetime");
+    puts("fork-policy: PASS authenticated prepare/cancel, ProcessHandle validation and prepared policy committed before child resume");
     return 0;
 }
