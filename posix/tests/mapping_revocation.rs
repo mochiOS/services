@@ -3,6 +3,58 @@ extern crate alloc;
 mod mapping_revocation;
 use mapping_revocation::{revoke, revoke_with, virtual_overlap, Backend, Error};
 
+thread_local! {
+    static DENY_FINISH_ALLOC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FINISH_ALLOC_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+struct Allocator;
+unsafe impl std::alloc::GlobalAlloc for Allocator {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        if DENY_FINISH_ALLOC
+            .try_with(|value| value.get())
+            .unwrap_or(false)
+        {
+            FINISH_ALLOC_ATTEMPTS.with(|value| value.set(value.get() + 1));
+            core::ptr::null_mut()
+        } else {
+            unsafe { std::alloc::System.alloc(layout) }
+        }
+    }
+    unsafe fn realloc(&self, pointer: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
+        if DENY_FINISH_ALLOC
+            .try_with(|value| value.get())
+            .unwrap_or(false)
+        {
+            FINISH_ALLOC_ATTEMPTS.with(|value| value.set(value.get() + 1));
+            core::ptr::null_mut()
+        } else {
+            unsafe { std::alloc::System.realloc(pointer, layout, size) }
+        }
+    }
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
+        unsafe { std::alloc::System.dealloc(pointer, layout) }
+    }
+}
+#[global_allocator]
+static ALLOCATOR: Allocator = Allocator;
+
+fn without_allocations<T>(operation: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            DENY_FINISH_ALLOC.with(|value| value.set(false));
+        }
+    }
+    FINISH_ALLOC_ATTEMPTS.with(|value| value.set(0));
+    DENY_FINISH_ALLOC.with(|value| value.set(true));
+    let reset = Reset;
+    let result = operation();
+    drop(reset);
+    assert_eq!(FINISH_ALLOC_ATTEMPTS.with(|value| value.get()), 0);
+    result
+}
+use mapping_revocation::Suspension;
+
 #[derive(Default)]
 struct Vm {
     events: Vec<(&'static str, u64)>,
@@ -40,6 +92,154 @@ impl Backend for Vm {
             "never free frames before remote acknowledgement"
         );
         self.events.push(("release", address));
+    }
+}
+
+struct Owned {
+    state: std::sync::Arc<std::sync::Mutex<Vm>>,
+    alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+impl Drop for Owned {
+    fn drop(&mut self) {
+        let state = self.state.lock().unwrap();
+        let suspended = state
+            .events
+            .iter()
+            .filter(|(event, _)| *event == "suspend")
+            .count();
+        let resolved = state
+            .events
+            .iter()
+            .filter(|(event, _)| matches!(*event, "restore" | "release"))
+            .count();
+        assert_eq!(
+            suspended, resolved,
+            "backend leases released before every PTE resolved"
+        );
+        assert!(self.alive.swap(false, std::sync::atomic::Ordering::AcqRel));
+    }
+}
+impl Backend for Owned {
+    type Page = (u64, u64);
+    type Error = u8;
+    fn next_page(&mut self, table: u64, start: u64, end: u64) -> Result<Option<u64>, u8> {
+        self.state.lock().unwrap().next_page(table, start, end)
+    }
+    fn suspend(&mut self, table: u64, address: u64) -> Result<Option<Self::Page>, u8> {
+        self.state.lock().unwrap().suspend(table, address)
+    }
+    fn restore(&mut self, page: Self::Page) {
+        assert!(self.alive.load(std::sync::atomic::Ordering::Acquire));
+        self.state.lock().unwrap().restore(page);
+    }
+    fn synchronize(&mut self) -> Result<(), u8> {
+        self.state.lock().unwrap().synchronize()
+    }
+    fn release(&mut self, page: Self::Page) {
+        assert!(self.alive.load(std::sync::atomic::Ordering::Acquire));
+        self.state.lock().unwrap().release(page);
+    }
+}
+
+#[test]
+fn owned_journal_keeps_backend_leases_until_cancel_or_commit_resolves_every_page() {
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
+    fn handoff(journal: Suspension<Owned>) -> Suspension<Owned> {
+        journal
+    }
+    for mode in 0..3 {
+        let state = Arc::new(Mutex::new(Vm {
+            events: Vec::with_capacity(16),
+            ..Default::default()
+        }));
+        let alive = Arc::new(AtomicBool::new(true));
+        let journal = Suspension::new(
+            [(4096, 4096, 12288)],
+            Owned {
+                state: state.clone(),
+                alive: alive.clone(),
+            },
+        )
+        .unwrap();
+        assert!(alive.load(Ordering::Acquire));
+        assert_eq!(
+            state.lock().unwrap().events,
+            [("suspend", 4096), ("suspend", 8192), ("synchronize", 0)]
+        );
+        let journal = handoff(journal);
+        if mode == 0 {
+            without_allocations(|| drop(journal));
+        } else {
+            let result = without_allocations(|| {
+                journal.commit_with(|backend| {
+                    assert!(backend.alive.load(Ordering::Acquire));
+                    backend.state.lock().unwrap().events.push(("commit", 0));
+                    if mode == 1 {
+                        Err(23)
+                    } else {
+                        Ok(37)
+                    }
+                })
+            });
+            assert_eq!(
+                result,
+                if mode == 1 {
+                    Err(Error::Backend(23))
+                } else {
+                    Ok(37)
+                }
+            );
+        }
+        assert!(!alive.load(Ordering::Acquire));
+        let state = state.lock().unwrap();
+        let expected = if mode == 2 {
+            [("release", 4096), ("release", 8192)]
+        } else {
+            [("restore", 8192), ("restore", 4096)]
+        };
+        assert_eq!(&state.events[state.events.len() - 2..], expected);
+    }
+}
+
+#[test]
+fn owned_constructor_failures_and_callback_unwind_restore_before_backend_drop() {
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
+    for mode in 0..3 {
+        let state = Arc::new(Mutex::new(Vm {
+            events: Vec::with_capacity(16),
+            fail_page: (mode == 0).then_some(8192),
+            fail_sync: mode == 1,
+            ..Default::default()
+        }));
+        let alive = Arc::new(AtomicBool::new(true));
+        let result = Suspension::new(
+            [(4096, 4096, 12288)],
+            Owned {
+                state: state.clone(),
+                alive: alive.clone(),
+            },
+        );
+        if mode < 2 {
+            assert!(result.is_err());
+        } else {
+            let journal = result.unwrap();
+            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = journal.commit_with(|_| -> Result<(), u8> {
+                    panic!("cancel while local publication unwinds")
+                });
+            }))
+            .is_err());
+        }
+        assert!(!alive.load(Ordering::Acquire));
+        let state = state.lock().unwrap();
+        assert!(!state.events.iter().any(|(event, _)| *event == "release"));
+        assert_eq!(state.events.last(), Some(&("restore", 4096)));
     }
 }
 
