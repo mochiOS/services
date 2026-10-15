@@ -9,6 +9,7 @@ pub mod path_walk;
 pub mod platform_storage;
 pub mod provider_buffer;
 pub mod positioned_io;
+pub mod memory_updates;
 pub mod service;
 pub mod handle_access;
 pub mod storage;

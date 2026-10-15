@@ -12,6 +12,8 @@ use filesystem_service::namespace::{Namespace, Node};
 use filesystem_service::path_walk::{Credentials, Resolution};
 use filesystem_service::service::{FilesystemService, PathAnchors, RenameAnchors};
 use mochios_filesystem_protocol as protocol;
+#[path = "support/unmapped_updates.rs"]
+mod unmapped_updates;
 
 #[derive(Clone)]
 struct Image(Arc<Mutex<Vec<u8>>>);
@@ -2554,6 +2556,9 @@ fn open(
 fn service_open_descriptions_keep_volume_identity_for_io_metadata_and_pager() {
     let fixture = Fixture::new();
     let mut service = FilesystemService::new(fixture.volume("data"));
+    service
+        .configure_memory_updates(Box::new(unmapped_updates::UnmappedUpdates))
+        .unwrap();
     service
         .mount_volume(b"/mount", fixture.volume("system"))
         .unwrap();

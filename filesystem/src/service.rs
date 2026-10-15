@@ -63,6 +63,7 @@ pub struct FilesystemService {
     opens: OpenTable,
     orphans: HashMap<u64, Orphan>,
     next_open_id: u64,
+    memory_updates: Option<Box<dyn crate::memory_updates::MemoryUpdates>>,
 }
 
 pub(crate) struct OpenFile {
@@ -103,7 +104,22 @@ impl FilesystemService {
             opens: OpenTable::default(),
             orphans: HashMap::new(),
             next_open_id: 1,
+            memory_updates: None,
         }
+    }
+
+    /// Install the provider owner's update mechanism before opening resources.
+    /// Without it, mutations affecting existing opens fail before storage I/O.
+    /// Standalone image users may explicitly install their own coordinator.
+    pub fn configure_memory_updates(
+        &mut self,
+        updates: Box<dyn crate::memory_updates::MemoryUpdates>,
+    ) -> Result<(), i32> {
+        if self.next_open_id != 1 {
+            return Err(EBUSY);
+        }
+        self.memory_updates = Some(updates);
+        Ok(())
     }
 
     /// Service-owned mount configuration; callers must already hold the volume.
@@ -319,7 +335,7 @@ impl FilesystemService {
         }
         let (resolution, filesystem, volume) =
             self.resolve_open_path(payload, anchors, follow, uid, gid, groups)?;
-        let (inode, created) = match resolution {
+        let (mut inode, created) = match resolution {
             Resolution::Found { inode, .. } => {
                 if request.flags & protocol::OPEN_AT_CREATE != 0
                     && request.flags & protocol::OPEN_AT_EXCLUSIVE != 0
@@ -381,16 +397,18 @@ impl FilesystemService {
             return Err(EACCES);
         }
         let node_id = scoped_node_id(volume, &inode);
-        let mut file = if kind.is_dir() {
+        let open_id = self.next_open_id;
+        let next_open_id = self.next_open_id.checked_add(1).ok_or(EIO)?;
+        self.opens.try_reserve(1).map_err(|_| ENOMEM)?;
+        if request.flags & protocol::OPEN_AT_TRUNCATE != 0 {
+            inode = self.truncate_scoped_inode(inode, filesystem.clone(), node_id, 0, None)?;
+        }
+        let file = if kind.is_dir() {
             None
         } else {
             Some(File::open_inode(&filesystem, inode.clone()).map_err(errno)?)
         };
-        if request.flags & protocol::OPEN_AT_TRUNCATE != 0 {
-            file.as_mut().ok_or(EISDIR)?.truncate(0).map_err(errno)?;
-        }
-        let open_id = self.next_open_id;
-        self.next_open_id = self.next_open_id.checked_add(1).ok_or(EIO)?;
+        self.next_open_id = next_open_id;
         let memory_object_id = self.memory_identity_for(node_id, open_id);
         self.opens.insert(
             open_id,
@@ -3089,20 +3107,47 @@ impl FilesystemService {
         node_id: u64,
         length: u64,
         growth_ceiling: Option<u64>,
-    ) -> Result<(), i32> {
+    ) -> Result<Inode, i32> {
         // OpenFile.inode may predate writes through another description. Read
         // the authoritative size under this service's mutation serialization,
         // not in a separate stat RPC or from the cached open-time metadata.
         let current = Inode::read(&filesystem, inode.index).map_err(errno)?;
+        // These are known non-mutating failures. Reject them before marking
+        // native aliases in flight; immutable System reads must stay usable.
+        if filesystem.is_read_only() {
+            return Err(EROFS);
+        }
+        if current.flags().contains(InodeFlags::IMMUTABLE) {
+            return Err(EPERM);
+        }
         if let Some(ceiling) = growth_ceiling {
             if length > current.metadata().len() && length > ceiling {
                 return Err(protocol::ERROR_GROWTH_LIMIT);
             }
         }
+        let old_length = current.metadata().len();
+        let identity = self
+            .opens
+            .values()
+            .find(|open| open.node_id == node_id)
+            .map(|open| open.memory_object_id);
         // Mutate the backing exactly once. Repeating truncate on each File's
         // stale inode/extent cache can extend a previously empty description
         // over live data and zero it, or free the same extents more than once.
         let mut file = File::open_inode(&filesystem, current).map_err(errno)?;
+        let mut update = identity
+            .map(|identity| {
+                self.memory_updates
+                    .as_ref()
+                    .ok_or(ENOTSUP)?
+                    .prepare(identity, old_length, length)
+            })
+            .transpose()?;
+        if let Some(update) = update.as_mut() {
+            update.begin()?;
+        }
+        // A backend error may follow partial writes. Never interpret it as
+        // "unchanged": dropping an in-flight owner quarantines all aliases.
         file.truncate(length).map_err(errno)?;
         let updated = file.into_inode();
         for open in self.opens.values_mut() {
@@ -3111,7 +3156,10 @@ impl FilesystemService {
                 open.inode = updated.clone();
             }
         }
-        Ok(())
+        if let Some(update) = update.as_mut() {
+            update.publish()?;
+        }
+        Ok(updated)
     }
 
     fn chmod_scoped_inode(

@@ -12,6 +12,10 @@ use filesystem_service::service::{FilesystemService, PathAnchors, RenameAnchors}
 use mochi_user_platform::handle::HANDLE_SEEK_START;
 use mochios_filesystem_protocol as protocol;
 
+#[path = "support/unmapped_updates.rs"]
+mod unmapped_updates;
+use unmapped_updates::UnmappedUpdates;
+
 fn credentials(uid: u32, gid: u32, groups: &[u32]) -> protocol::Credentials {
     let mut payload = [0u8; protocol::CREDENTIALS_MAX_LEN];
     let length = protocol::encode_credentials_payload(uid, gid, groups, &[], &mut payload).unwrap();
@@ -25,7 +29,17 @@ fn root_credentials() -> protocol::Credentials {
 }
 
 #[derive(Clone)]
-struct SharedImage(Arc<Mutex<Vec<u8>>>, Arc<Mutex<Option<usize>>>);
+struct SharedImage(
+    Arc<Mutex<Vec<u8>>>,
+    Arc<Mutex<Option<usize>>>,
+    Arc<Mutex<WriteFault>>,
+);
+
+#[derive(Default)]
+struct WriteFault {
+    remaining: Option<usize>,
+    attempts: usize,
+}
 
 impl Ext4Read for SharedImage {
     fn read(
@@ -64,6 +78,15 @@ impl Ext4Write for SharedImage {
         start_byte: u64,
         source: &[u8],
     ) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
+        let mut fault = self.2.lock().unwrap();
+        fault.attempts += 1;
+        if let Some(remaining) = fault.remaining.as_mut() {
+            if *remaining == 0 {
+                return Err(io::Error::other("injected write failure").into());
+            }
+            *remaining -= 1;
+        }
+        drop(fault);
         let start = usize::try_from(start_byte)?;
         let end = start
             .checked_add(source.len())
@@ -472,6 +495,19 @@ fn truncate_growth_ceiling_is_atomic_with_current_inode_size_and_permissions() {
 }
 
 fn test_filesystem_with_read_failure() -> (FilesystemService, Arc<Mutex<Option<usize>>>) {
+    test_filesystem_with_updates(Some(Box::new(UnmappedUpdates)))
+}
+
+fn test_filesystem_with_updates(
+    updates: Option<Box<dyn filesystem_service::memory_updates::MemoryUpdates>>,
+) -> (FilesystemService, Arc<Mutex<Option<usize>>>) {
+    let (service, image) = test_filesystem_with_storage(updates);
+    (service, image.1)
+}
+
+fn test_filesystem_with_storage(
+    updates: Option<Box<dyn filesystem_service::memory_updates::MemoryUpdates>>,
+) -> (FilesystemService, SharedImage) {
     let temporary = TempTree::create();
     let source = temporary.0.join("source");
     let directory = source.join("removed");
@@ -506,10 +542,14 @@ fn test_filesystem_with_read_failure() -> (FilesystemService, Arc<Mutex<Option<u
     let image = SharedImage(
         Arc::new(Mutex::new(fs::read(image_path).unwrap())),
         failure.clone(),
+        Arc::new(Mutex::new(WriteFault::default())),
     );
     let filesystem =
-        Ext4::load_with_writer(Box::new(image.clone()), Some(Box::new(image))).unwrap();
+        Ext4::load_with_writer(Box::new(image.clone()), Some(Box::new(image.clone()))).unwrap();
     let mut service = FilesystemService::new(filesystem);
+    if let Some(updates) = updates {
+        service.configure_memory_updates(updates).unwrap();
+    }
     let restricted = service.handle(
         protocol::Header {
             opcode: protocol::OP_SETATTR,
@@ -530,7 +570,362 @@ fn test_filesystem_with_read_failure() -> (FilesystemService, Arc<Mutex<Option<u
         b"/search-only",
     );
     assert_eq!(search_only.header.status, 0);
-    (service, failure)
+    (service, image)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum UpdateEvent {
+    Prepare(u64, u64, u64),
+    Begin,
+    Publish,
+    Drop { begun: bool, published: bool },
+}
+
+#[derive(Default)]
+struct UpdateTrace {
+    events: Vec<UpdateEvent>,
+    fail: Option<&'static str>,
+}
+
+struct RecordingUpdates(Arc<Mutex<UpdateTrace>>);
+struct RecordingUpdate {
+    trace: Arc<Mutex<UpdateTrace>>,
+    begun: bool,
+    published: bool,
+}
+impl filesystem_service::memory_updates::MemoryUpdates for RecordingUpdates {
+    fn prepare(
+        &self,
+        identity: u64,
+        old: u64,
+        new: u64,
+    ) -> Result<Box<dyn filesystem_service::memory_updates::Update>, i32> {
+        let mut trace = self.0.lock().unwrap();
+        trace.events.push(UpdateEvent::Prepare(identity, old, new));
+        if trace.fail == Some("prepare") {
+            return Err(11);
+        }
+        Ok(Box::new(RecordingUpdate {
+            trace: self.0.clone(),
+            begun: false,
+            published: false,
+        }))
+    }
+}
+impl filesystem_service::memory_updates::Update for RecordingUpdate {
+    fn begin(&mut self) -> Result<(), i32> {
+        let mut trace = self.trace.lock().unwrap();
+        trace.events.push(UpdateEvent::Begin);
+        if trace.fail == Some("begin") {
+            return Err(5);
+        }
+        self.begun = true;
+        Ok(())
+    }
+    fn publish(&mut self) -> Result<(), i32> {
+        let mut trace = self.trace.lock().unwrap();
+        trace.events.push(UpdateEvent::Publish);
+        self.published = true; // the native request is irrevocable even on error
+        if trace.fail == Some("publish") {
+            return Err(5);
+        }
+        Ok(())
+    }
+}
+impl Drop for RecordingUpdate {
+    fn drop(&mut self) {
+        self.trace.lock().unwrap().events.push(UpdateEvent::Drop {
+            begun: self.begun,
+            published: self.published,
+        });
+    }
+}
+
+fn open_update_file(service: &mut FilesystemService, flags: u32) -> u64 {
+    service
+        .open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags,
+                mode: 0o600,
+                ..Default::default()
+            },
+            b"/update-order",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap()
+        .header
+        .open_id
+}
+
+fn seed_update_file(service: &mut FilesystemService, opened: u64) {
+    for _ in 0..2 {
+        assert_eq!(service.provider_write(opened, &[0x55; 4096]), Ok(4096));
+    }
+}
+
+#[test]
+fn truncate_requires_configured_updates_and_configuration_cannot_change_after_open() {
+    let (mut service, image) = test_filesystem_with_storage(None);
+    let opened = open_update_file(
+        &mut service,
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+    );
+    service.provider_write(opened, b"original").unwrap();
+    let before = image.0.lock().unwrap().clone();
+    assert!(matches!(
+        service.truncate_handle(
+            protocol::Header {
+                offset: 1,
+                ..Default::default()
+            },
+            opened
+        ),
+        Err(95)
+    ));
+    assert_eq!(*image.0.lock().unwrap(), before);
+    assert_eq!(
+        service.provider_read_at(opened, 0, 20).unwrap(),
+        b"original"
+    );
+    assert_eq!(
+        service.configure_memory_updates(Box::new(UnmappedUpdates)),
+        Err(16)
+    );
+}
+
+#[test]
+fn truncate_preparation_and_begin_failures_precede_all_storage_writes() {
+    for failure in ["prepare", "begin"] {
+        let trace = Arc::new(Mutex::new(UpdateTrace {
+            fail: Some(failure),
+            ..Default::default()
+        }));
+        let (mut service, image) =
+            test_filesystem_with_storage(Some(Box::new(RecordingUpdates(trace.clone()))));
+        let opened = open_update_file(
+            &mut service,
+            protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+        );
+        seed_update_file(&mut service, opened);
+        let identity = service.provider_memory_object(opened).unwrap();
+        let before = image.0.lock().unwrap().clone();
+        image.2.lock().unwrap().attempts = 0;
+        let result = service.truncate_handle(
+            protocol::Header {
+                offset: 5000,
+                ..Default::default()
+            },
+            opened,
+        );
+        assert!(matches!(result, Err(error) if error == if failure == "prepare" {11} else {5}));
+        assert_eq!(image.2.lock().unwrap().attempts, 0);
+        assert_eq!(*image.0.lock().unwrap(), before);
+        let mut expected = vec![UpdateEvent::Prepare(identity, 8192, 5000)];
+        if failure == "begin" {
+            expected.extend([
+                UpdateEvent::Begin,
+                UpdateEvent::Drop {
+                    begun: false,
+                    published: false,
+                },
+            ]);
+        }
+        assert_eq!(trace.lock().unwrap().events, expected);
+    }
+}
+
+#[test]
+fn partial_truncate_storage_failure_drops_uncertain_owner_without_publication() {
+    let trace = Arc::new(Mutex::new(UpdateTrace::default()));
+    let (mut service, image) =
+        test_filesystem_with_storage(Some(Box::new(RecordingUpdates(trace.clone()))));
+    let opened = open_update_file(
+        &mut service,
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+    );
+    seed_update_file(&mut service, opened);
+    let identity = service.provider_memory_object(opened).unwrap();
+    let before = image.0.lock().unwrap().clone();
+    image.2.lock().unwrap().remaining = Some(1);
+    let result = service.truncate_handle(
+        protocol::Header {
+            offset: 5000,
+            ..Default::default()
+        },
+        opened,
+    );
+    image.2.lock().unwrap().remaining = None;
+    assert!(matches!(result, Err(5)));
+    assert_ne!(
+        *image.0.lock().unwrap(),
+        before,
+        "failure must follow an actual partial write"
+    );
+    assert_eq!(
+        trace.lock().unwrap().events,
+        [
+            UpdateEvent::Prepare(identity, 8192, 5000),
+            UpdateEvent::Begin,
+            UpdateEvent::Drop {
+                begun: true,
+                published: false
+            }
+        ]
+    );
+}
+
+#[test]
+fn open_truncate_uses_existing_backing_identity_and_refreshes_every_description_once() {
+    let trace = Arc::new(Mutex::new(UpdateTrace::default()));
+    let (mut service, _) =
+        test_filesystem_with_storage(Some(Box::new(RecordingUpdates(trace.clone()))));
+    let access = protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE;
+    let a = open_update_file(&mut service, access);
+    let b = open_update_file(&mut service, access);
+    seed_update_file(&mut service, a);
+    let identity = service.provider_memory_object(a).unwrap();
+    let c = open_update_file(&mut service, access | protocol::OPEN_AT_TRUNCATE);
+    for opened in [a, b, c] {
+        assert_eq!(service.provider_memory_object(opened), Ok(identity));
+        assert_eq!(
+            service.provider_seek(opened, 0, mnu_abi::HANDLE_SEEK_END),
+            Ok(0)
+        );
+    }
+    assert_eq!(
+        trace.lock().unwrap().events,
+        [
+            UpdateEvent::Prepare(identity, 8192, 0),
+            UpdateEvent::Begin,
+            UpdateEvent::Publish,
+            UpdateEvent::Drop {
+                begun: true,
+                published: true
+            }
+        ]
+    );
+    service.provider_write_at(c, 0, b"new").unwrap();
+    assert_eq!(service.provider_read_at(a, 0, 20).unwrap(), b"new");
+    assert_eq!(service.provider_read_at(b, 0, 20).unwrap(), b"new");
+}
+
+#[test]
+fn publication_error_does_not_restore_old_storage_or_stale_open_metadata() {
+    let trace = Arc::new(Mutex::new(UpdateTrace {
+        fail: Some("publish"),
+        ..Default::default()
+    }));
+    let (mut service, _) =
+        test_filesystem_with_storage(Some(Box::new(RecordingUpdates(trace.clone()))));
+    let access = protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE;
+    let a = open_update_file(&mut service, access);
+    let b = open_update_file(&mut service, access);
+    service.provider_write(a, b"original").unwrap();
+    assert!(matches!(
+        service.truncate_handle(
+            protocol::Header {
+                offset: 3,
+                ..Default::default()
+            },
+            b
+        ),
+        Err(5)
+    ));
+    assert_eq!(service.provider_read_at(a, 0, 20).unwrap(), b"ori");
+    assert_eq!(service.provider_read_at(b, 0, 20).unwrap(), b"ori");
+    assert!(trace.lock().unwrap().events.ends_with(&[
+        UpdateEvent::Publish,
+        UpdateEvent::Drop {
+            begun: true,
+            published: true
+        }
+    ]));
+}
+
+#[test]
+fn readonly_and_immutable_failures_do_not_begin_or_quarantine_live_backing() {
+    for readonly in [false, true] {
+        let (_, image) = test_filesystem_with_storage(None);
+        let disk = if readonly {
+            Ext4::load(Box::new(image.clone())).unwrap()
+        } else {
+            Ext4::load_with_writer(Box::new(image.clone()), Some(Box::new(image))).unwrap()
+        };
+        assert_eq!(disk.is_read_only(), readonly);
+        if !readonly {
+            let mut inode = disk
+                .path_to_inode(
+                    "/blocked/child".try_into().unwrap(),
+                    ext4plus::FollowSymlinks::All,
+                )
+                .unwrap();
+            inode.set_flags(inode.flags() | ext4plus::inode::InodeFlags::IMMUTABLE);
+            inode.write(&disk).unwrap();
+        }
+        let trace = Arc::new(Mutex::new(UpdateTrace::default()));
+        let mut service = FilesystemService::new(disk);
+        service
+            .configure_memory_updates(Box::new(RecordingUpdates(trace.clone())))
+            .unwrap();
+        let opened = service
+            .open_at(
+                protocol::Header {
+                    flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE,
+                    ..Default::default()
+                },
+                b"/blocked/child",
+                PathAnchors::default(),
+                root_credentials(),
+            )
+            .unwrap()
+            .header
+            .open_id;
+        assert!(
+            matches!(service.truncate_handle(protocol::Header { offset:1, ..Default::default() }, opened),
+            Err(error) if error == if readonly {30} else {1})
+        );
+        assert!(trace.lock().unwrap().events.is_empty());
+        assert_eq!(service.provider_read_at(opened, 0, 20).unwrap(), b"private");
+    }
+}
+
+#[test]
+fn permission_and_growth_ceiling_rejections_precede_memory_update_admission() {
+    let trace = Arc::new(Mutex::new(UpdateTrace::default()));
+    let (mut service, _) =
+        test_filesystem_with_storage(Some(Box::new(RecordingUpdates(trace.clone()))));
+    let opened = open_update_file(
+        &mut service,
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+    );
+    seed_update_file(&mut service, opened);
+    assert!(matches!(
+        service.truncate_handle(
+            protocol::Header {
+                flags: protocol::TRUNCATE_GROWTH_BOUNDED,
+                node_id: 8192,
+                offset: 8193,
+                ..Default::default()
+            },
+            opened
+        ),
+        Err(protocol::ERROR_GROWTH_LIMIT)
+    ));
+    assert!(matches!(
+        service.truncate_at(
+            protocol::Header {
+                open_id: 0,
+                ..Default::default()
+            },
+            b"/update-order",
+            PathAnchors::default(),
+            credentials(501, 20, &[])
+        ),
+        Err(13)
+    ));
+    assert!(trace.lock().unwrap().events.is_empty());
 }
 
 #[test]

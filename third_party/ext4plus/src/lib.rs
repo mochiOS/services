@@ -317,6 +317,13 @@ impl Ext4 {
         &self.0.superblock
     }
 
+    /// Whether this loaded filesystem has no writable backend, including
+    /// filesystems forced read-only by incompatible on-disk features.
+    #[must_use]
+    pub fn is_read_only(&self) -> bool {
+        self.0.writer.is_none()
+    }
+
     /// Read the inode of the root `/` directory.
     #[maybe_async::maybe_async]
     pub async fn read_root_inode(&self) -> Result<Inode, Ext4Error> {

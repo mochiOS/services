@@ -40,6 +40,9 @@ fn filesystem_service_owns_namespace_and_delegates_only_a_generic_endpoint() {
         assert!(!source.contains(removed));
     }
     assert!(source.contains("FilesystemService::new(fs)"));
+    assert!(source.contains("memory_updates::ProviderUpdates::new(endpoint)"));
+    assert!(source.find("service.configure_memory_updates(").unwrap()
+        < source.find("platform::service_ready::notify_handle(").unwrap());
     assert!(source.contains("mount_named_volume(b\"/\", b\"system\", system, b\"/system\")"));
     assert!(source.contains("platform::ipc::create_handle()"));
     assert!(source.contains(

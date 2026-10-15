@@ -75,6 +75,13 @@ fn main() {
             platform::process::exit(1);
         }
     };
+    if let Err(error) = service.configure_memory_updates(Box::new(
+        filesystem_service::memory_updates::ProviderUpdates::new(endpoint),
+    )) {
+        platform::logln!("filesystem.service: memory-update setup failed: {error}");
+        let _ = platform::service_ready::notify(ready_target, -1);
+        platform::process::exit(1);
+    }
     let delegated_rights = platform::handle::HANDLE_RIGHT_SEND
         | platform::handle::HANDLE_RIGHT_DUPLICATE
         | platform::handle::HANDLE_RIGHT_TRANSFER;
