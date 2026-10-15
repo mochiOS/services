@@ -824,6 +824,85 @@ fn mapping_edits_preflight_every_overlapping_backing_without_ipc_or_allocation()
 }
 
 #[test]
+fn cache_publication_keeps_backing_reserved_through_journal_completion() {
+    let _test = TEST_LOCK.lock().unwrap();
+    reset_lower(&vec![0x11; 8192]);
+    let object = provider_object();
+    let alias = provider_object();
+    let pin = object.prepare_shared_page(0).unwrap();
+    let mut prepared = object
+        .prepare_extent(8192, 17, |bytes| Ok(Arc::new(bytes)))
+        .unwrap();
+    LOWER.lock().unwrap().bytes.truncate(17);
+    without_allocations(|| prepared.publish()).unwrap();
+    // Publication is not the release of mapping exclusion: a native journal
+    // may still own non-present PTEs which have not been restored/released.
+    assert_eq!(
+        without_allocations(|| prepared.publish()),
+        Err(syscall::EINVAL)
+    );
+    assert!(matches!(
+        alias.page(0),
+        Err(vm_object::VmPageError::Operation(syscall::EAGAIN))
+    ));
+    assert_eq!(
+        alias.with_memory_generation(alias.memory_generation(), || panic!(
+            "PTE installation before journal completion"
+        )),
+        Err::<(), _>(syscall::EAGAIN)
+    );
+    assert!(matches!(
+        alias.prepare_extent(17, 0, |_| panic!(
+            "admission released before PTE completion"
+        )),
+        Err(syscall::EAGAIN)
+    ));
+    drop(prepared);
+    assert_eq!(alias.read_at(0, &mut [0; 64]), Ok(17));
+    let page = alias.page(0).unwrap();
+    assert!(page[..17].iter().all(|byte| *byte == 0x11));
+    assert!(page[17..].iter().all(|byte| *byte == 0));
+    let next = alias
+        .prepare_extent(17, 0, |bytes| Ok(Arc::new(bytes)))
+        .unwrap();
+    drop(next);
+    drop(pin);
+    object.invalidate();
+    assert!(FRAMES.lock().unwrap().is_empty());
+}
+
+#[test]
+fn unchanged_or_failed_cache_publication_retains_admission_until_owner_drop() {
+    let _test = TEST_LOCK.lock().unwrap();
+    for fail in [false, true] {
+        reset_lower(b"old");
+        let object = provider_object();
+        let mut prepared = object
+            .prepare_extent(3, if fail { 1 } else { 3 }, |bytes| Ok(Arc::new(bytes)))
+            .unwrap();
+        if fail {
+            object.invalidate();
+        }
+        let generation = object.memory_generation();
+        assert_eq!(
+            without_allocations(|| prepared.publish()),
+            if fail { Err(syscall::EAGAIN) } else { Ok(()) }
+        );
+        assert_eq!(object.memory_generation(), generation);
+        if !fail {
+            assert_eq!(prepared.publish(), Err(syscall::EINVAL));
+        }
+        assert!(matches!(
+            object.page(0),
+            Err(vm_object::VmPageError::Operation(syscall::EAGAIN))
+        ));
+        drop(prepared);
+        assert_eq!(object.read_at(0, &mut [0; 8]), Ok(3));
+        object.invalidate();
+    }
+}
+
+#[test]
 fn production_extent_commit_preserves_dirty_prefix_and_discards_removed_storage() {
     let _test = TEST_LOCK.lock().unwrap();
     let object = provider_object();
