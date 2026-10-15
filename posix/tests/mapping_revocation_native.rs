@@ -1,10 +1,16 @@
 extern crate alloc;
+#[path = "../../../core/src/mem/detached_roots.rs"]
+mod detached_roots;
 #[path = "../../../core/src/mem/mapping_preservation_native.rs"]
 mod mapping_preservation_native;
 #[path = "../../../core/src/mem/mapping_revocation.rs"]
 mod mapping_revocation;
 #[path = "../../../core/src/mem/mapping_revocation_native.rs"]
 mod mapping_revocation_native;
+#[path = "../../../core/src/mem/mapping_targets.rs"]
+mod mapping_targets;
+#[path = "../../../core/src/mem/root_lifetime.rs"]
+mod root_lifetime;
 use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
 static TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -13,13 +19,86 @@ mod syscall {
     pub const EFAULT: u64 = (-14i64) as u64;
     pub const EIO: u64 = (-5i64) as u64;
     pub const EINVAL: u64 = (-22i64) as u64;
+    pub const ENOMEM: u64 = (-12i64) as u64;
+}
+mod interrupt {
+    pub mod spinlock {
+        pub struct SpinLock<T>(std::sync::Mutex<T>);
+        impl<T> SpinLock<T> {
+            pub const fn new(value: T) -> Self {
+                Self(std::sync::Mutex::new(value))
+            }
+            pub fn lock(&self) -> std::sync::MutexGuard<'_, T> {
+                self.0.lock().unwrap()
+            }
+        }
+    }
+}
+#[macro_export]
+macro_rules! warn { ($($args:tt)*) => { let _ = format_args!($($args)*); }; }
+
+mod vm_object {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum ObjectKey {
+        Memory(u64),
+        Provider {
+            endpoint_thread_id: u64,
+            endpoint_slot: u16,
+            endpoint_generation: u64,
+            identity: u64,
+        },
+    }
+}
+mod root_lifetime_native {
+    pub static FAIL_ROOT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    pub fn pin(table: u64) -> Result<super::root_lifetime::Pin, ()> {
+        if FAIL_ROOT.load(std::sync::atomic::Ordering::Relaxed) == table {
+            return Err(());
+        }
+        super::root_lifetime::pin_with(table, |state| Ok(std::sync::Arc::new(state)))
+    }
 }
 mod task {
+    pub struct Object(pub super::vm_object::ObjectKey);
+    impl Object {
+        pub fn object_key(&self) -> super::vm_object::ObjectKey {
+            self.0
+        }
+    }
+    pub struct MemoryRegion {
+        pub object: Option<Object>,
+        pub start: u64,
+        pub length: u64,
+        pub offset: u64,
+    }
+    impl MemoryRegion {
+        pub fn backing(&self) -> &Self {
+            self
+        }
+        pub fn file_object(&self) -> Option<&Object> {
+            self.object.as_ref()
+        }
+        pub fn start(&self) -> u64 {
+            self.start
+        }
+        pub fn len(&self) -> u64 {
+            self.length
+        }
+        pub fn file_offset(&self) -> u64 {
+            self.offset
+        }
+    }
     pub mod process {
-        pub struct Process(pub u64);
+        pub struct Process(pub u64, pub Vec<super::MemoryRegion>);
         impl Process {
+            pub fn empty(table: u64) -> Self {
+                Self(table, Vec::new())
+            }
             pub fn page_table(&self) -> Option<u64> {
                 Some(self.0)
+            }
+            pub fn memory_regions(&self) -> &[super::MemoryRegion] {
+                &self.1
             }
         }
         pub struct ProcessTable(pub Vec<Process>);
@@ -37,12 +116,25 @@ struct State {
     fail_sync: bool,
     released: usize,
     frames: BTreeMap<(u64, u64), Box<[u8; 4096]>>,
+    destroyed: Vec<u64>,
 }
 fn state() -> &'static Mutex<State> {
     static STATE: OnceLock<Mutex<State>> = OnceLock::new();
     STATE.get_or_init(Default::default)
 }
 mod paging {
+    pub fn destroy_user_page_table(table: u64) -> Result<(), ()> {
+        if super::root_lifetime::retire(table) {
+            return Ok(());
+        }
+        destroy_user_page_table_unpinned(table)
+    }
+    pub fn destroy_user_page_table_unpinned(table: u64) -> Result<(), ()> {
+        let mut state = super::state().lock().unwrap();
+        assert!(!state.destroyed.contains(&table), "double root destruction");
+        state.destroyed.push(table);
+        Ok(())
+    }
     pub unsafe fn next_user_page_entry(
         table: u64,
         start: u64,
@@ -130,28 +222,13 @@ mod tlb_shootdown {
     }
 }
 
-mod detached_roots {
-    pub struct Root {
-        pub table: u64,
-        pub published: bool,
-    }
-    impl Root {
-        pub fn table(&self) -> u64 {
-            self.table
-        }
-        pub fn published(&self) -> bool {
-            self.published
-        }
-    }
-}
-
 #[test]
 fn native_local_commit_is_ordered_after_tlb_ack_before_frame_release_and_can_roll_back() {
     let _test = TEST_LOCK.lock().unwrap();
     use mapping_revocation::{revoke_with, Error};
     use mapping_revocation_native::Native;
     use task::process::{Process, ProcessTable};
-    let table = ProcessTable(vec![Process(4096)]);
+    let table = ProcessTable(vec![Process::empty(4096)]);
     let original = BTreeMap::from([((4096, 4096), 0x105), ((4096, 8192), 0x207)]);
     let suspended = BTreeMap::from([((4096, 4096), 0x104), ((4096, 8192), 0x206)]);
     for fail_commit in [true, false] {
@@ -167,11 +244,7 @@ fn native_local_commit_is_ordered_after_tlb_ack_before_frame_release_and_can_rol
             assert!(state.synchronized);
             assert_eq!(state.released, 0);
             assert_eq!(state.entries, suspended);
-            if fail_commit {
-                Err(17)
-            } else {
-                Ok(37)
-            }
+            if fail_commit { Err(17) } else { Ok(37) }
         });
         let state = state().lock().unwrap();
         if fail_commit {
@@ -193,7 +266,7 @@ fn boundary_private_bytes_and_flags_survive_success_but_never_change_on_failure(
     use mapping_revocation::{revoke_with, Error};
     use mapping_revocation_native::Native;
     use task::process::{Process, ProcessTable};
-    let table = ProcessTable(vec![Process(4096)]);
+    let table = ProcessTable(vec![Process::empty(4096)]);
     let original = BTreeMap::from([((4096, 4096), 0x405), ((4096, 8192), 0x207)]);
     for mode in 0..4 {
         *state().lock().unwrap() = State {
@@ -220,23 +293,23 @@ fn boundary_private_bytes_and_flags_survive_success_but_never_change_on_failure(
             assert_eq!(state.released, 0);
             assert!(state.entries.values().all(|flags| flags & 1 == 0));
             assert!(state.frames[&(4096, 4096)].iter().all(|byte| *byte == 0x5a));
-            if mode == 2 {
-                Err(17)
-            } else {
-                Ok(37)
-            }
+            if mode == 2 { Err(17) } else { Ok(37) }
         });
         let state = state().lock().unwrap();
         if mode == 0 {
             assert_eq!(result, Ok(37));
             assert_eq!(state.entries, BTreeMap::from([((4096, 4096), 0x405)]));
             assert_eq!(state.released, 1);
-            assert!(state.frames[&(4096, 4096)][..17]
-                .iter()
-                .all(|byte| *byte == 0x5a));
-            assert!(state.frames[&(4096, 4096)][17..]
-                .iter()
-                .all(|byte| *byte == 0));
+            assert!(
+                state.frames[&(4096, 4096)][..17]
+                    .iter()
+                    .all(|byte| *byte == 0x5a)
+            );
+            assert!(
+                state.frames[&(4096, 4096)][17..]
+                    .iter()
+                    .all(|byte| *byte == 0)
+            );
         } else {
             assert_eq!(
                 result,
@@ -304,7 +377,7 @@ fn owned_backend_and_boundary_plan_outlive_every_journal_finish_action() {
         }
     }
     let _test = TEST_LOCK.lock().unwrap();
-    let table = ProcessTable(vec![Process(4096)]);
+    let table = ProcessTable(vec![Process::empty(4096)]);
     for mode in 0..3 {
         let commit = mode == 1;
         *state().lock().unwrap() = State {
@@ -354,12 +427,16 @@ fn owned_backend_and_boundary_plan_outlive_every_journal_finish_action() {
         }
         assert!(!alive.load(Ordering::Acquire));
         let state = state().lock().unwrap();
-        assert!(state.frames[&(4096, 4096)][..17]
-            .iter()
-            .all(|byte| *byte == 0x5a));
-        assert!(state.frames[&(4096, 4096)][17..]
-            .iter()
-            .all(|byte| *byte == if commit { 0 } else { 0x5a }));
+        assert!(
+            state.frames[&(4096, 4096)][..17]
+                .iter()
+                .all(|byte| *byte == 0x5a)
+        );
+        assert!(
+            state.frames[&(4096, 4096)][17..]
+                .iter()
+                .all(|byte| *byte == if commit { 0 } else { 0x5a })
+        );
         assert_eq!(state.entries[&(4096, 4096)], 0x405);
     }
 }
@@ -374,15 +451,19 @@ fn boundary_selection_checks_offset_geometry_without_interpreting_backing_identi
         (page.table, page.address, page.zero_from),
         (4096, 0x5000, 904)
     );
-    assert!(PreservedPage::for_mapping(4096, 0x5000, 4096, 8192, 5000)
-        .unwrap()
-        .is_none());
-    assert!(PreservedPage::for_mapping(4096, 0x5000, 8192, 4096, 4096)
-        .unwrap()
-        .is_none());
+    assert!(
+        PreservedPage::for_mapping(4096, 0x5000, 4096, 8192, 5000)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        PreservedPage::for_mapping(4096, 0x5000, 8192, 4096, 4096)
+            .unwrap()
+            .is_none()
+    );
     assert!(PreservedPage::for_mapping(4096, 0x5001, 8192, 4096, 5000).is_err());
     assert!(PreservedPage::for_mapping(4096, 0x5000, 8192, 1, 5000).is_err());
-    let process = task::process::Process(4096);
+    let process = task::process::Process::empty(4096);
     let borrowed = unsafe { mapping_revocation_native::Native::for_process(&process, false) };
     assert!(mapping_preservation_native::Preserving::new(borrowed, &[]).is_err());
 }
@@ -393,7 +474,7 @@ fn actual_native_adapter_checks_owned_roots_restores_on_sync_failure_and_release
     use mapping_revocation::{revoke, Backend, Error};
     use mapping_revocation_native::Native;
     use task::process::{Process, ProcessTable};
-    let table = ProcessTable(vec![Process(4096), Process(8192)]);
+    let table = ProcessTable(vec![Process::empty(4096), Process::empty(8192)]);
     // Host owns the entire mock table and PTE map throughout this transaction.
     let mut native = unsafe { Native::new(&table) };
     assert!(matches!(
@@ -435,18 +516,195 @@ fn actual_native_adapter_checks_owned_roots_restores_on_sync_failure_and_release
     revoke([(4096, 4096, 8192)], &mut device).unwrap();
     assert_eq!(state().lock().unwrap().released, 2);
     let roots = [
-        std::sync::Arc::new(detached_roots::Root {
-            table: 12288,
-            published: false,
-        }),
-        std::sync::Arc::new(detached_roots::Root {
-            table: 16384,
-            published: true,
-        }),
+        detached_roots::Root::new(12288, &[]).ok().unwrap(),
+        detached_roots::Root::new(16384, &[]).ok().unwrap(),
     ];
+    roots[1].publish();
     let mut staging = unsafe { Native::with_detached(&table, &roots) };
     assert!(matches!(staging.suspend(16384, 4096), Err(syscall::EFAULT)));
     state().lock().unwrap().entries.insert((12288, 4096), 0x105);
     revoke([(12288, 4096, 8192)], &mut staging).unwrap();
     assert_eq!(state().lock().unwrap().released, 3);
+}
+
+fn region(
+    identity: vm_object::ObjectKey,
+    start: u64,
+    length: u64,
+    offset: u64,
+) -> task::MemoryRegion {
+    task::MemoryRegion {
+        object: Some(task::Object(identity)),
+        start,
+        length,
+        offset,
+    }
+}
+
+#[test]
+fn owned_targets_bind_exact_spans_and_pin_published_and_detached_roots() {
+    use mapping_revocation::Backend;
+    use mapping_revocation_native::Native;
+    use mapping_targets::Targets;
+    use task::process::{Process, ProcessTable};
+    use vm_object::ObjectKey;
+    let _test = TEST_LOCK.lock().unwrap();
+    *state().lock().unwrap() = State::default();
+    let identity = ObjectKey::Provider {
+        endpoint_thread_id: 7,
+        endpoint_slot: 3,
+        endpoint_generation: 11,
+        identity: 41,
+    };
+    let foreign = ObjectKey::Provider {
+        endpoint_thread_id: 7,
+        endpoint_slot: 3,
+        endpoint_generation: 12,
+        identity: 41,
+    };
+    let table = ProcessTable(vec![
+        Process(4096, vec![region(identity, 0x4000, 0x4000, 0x1000)]),
+        Process(8192, vec![region(identity, 0x8000, 0x2000, 0x2000)]),
+        Process(16384, vec![region(foreign, 0x8000, 0x2000, 0x2000)]),
+    ]);
+    let detached = detached_roots::Root::new(12288, &[region(identity, 0x10000, 0x3000, 0x1000)])
+        .ok()
+        .unwrap();
+    let targets = Targets::capture(&table, identity, 0x2000, 0x4000, 0x2345).unwrap();
+    assert_eq!(targets.identity(), identity);
+    assert_eq!(
+        targets.ranges().collect::<Vec<_>>(),
+        [
+            (4096, 0x5000, 0x7000),
+            (8192, 0x8000, 0xa000),
+            (12288, 0x11000, 0x13000),
+        ]
+    );
+    let mut preserved = targets
+        .preserved()
+        .iter()
+        .map(|page| (page.table, page.address, page.zero_from))
+        .collect::<Vec<_>>();
+    preserved.sort_unstable();
+    assert_eq!(
+        preserved,
+        [
+            (4096, 0x5000, 0x345),
+            (8192, 0x8000, 0x345),
+            (12288, 0x11000, 0x345)
+        ]
+    );
+    // Neither process records nor the not-yet-published image own the captured
+    // plan. Publication/retirement does not discard the selected physical roots.
+    detached.publish();
+    drop(detached);
+    drop(table);
+    for root in [4096, 8192, 12288] {
+        paging::destroy_user_page_table(root).unwrap();
+    }
+    assert!(state().lock().unwrap().destroyed.is_empty());
+    let table = ProcessTable(Vec::new());
+    let mut native = unsafe { Native::for_targets(&table, &targets) };
+    {
+        let mut state = state().lock().unwrap();
+        state.entries = BTreeMap::from([
+            ((4096, 0x4000), 0x105),
+            ((4096, 0x5000), 0x205),
+            ((4096, 0x7000), 0x305),
+            ((16384, 0x8000), 0x405),
+        ]);
+    }
+    // A pinned root is not authority to walk or edit its other mappings.
+    assert!(matches!(
+        native.next_page(4096, 0x4000, 0x7000),
+        Err(syscall::EFAULT)
+    ));
+    for (root, address) in [(4096, 0x4000), (4096, 0x7000), (16384, 0x8000)] {
+        assert!(matches!(
+            native.suspend(root, address),
+            Err(syscall::EFAULT)
+        ));
+    }
+    assert!(matches!(
+        native.suspend(4096, u64::MAX - 4095),
+        Err(syscall::EFAULT)
+    ));
+    assert_eq!(native.next_page(4096, 0x5000, 0x7000), Ok(Some(0x5000)));
+    let page = native.suspend(4096, 0x5000).unwrap().unwrap();
+    assert_eq!(state().lock().unwrap().entries[&(4096, 0x5000)], 0x204);
+    native.restore(page);
+    assert_eq!(state().lock().unwrap().entries[&(4096, 0x5000)], 0x205);
+    drop(native);
+    drop(targets);
+    let mut destroyed = state().lock().unwrap().destroyed.clone();
+    destroyed.sort_unstable();
+    assert_eq!(destroyed, [4096, 8192, 12288]);
+}
+
+#[test]
+fn target_capture_failure_never_edits_mappings_or_takes_root_ownership() {
+    use mapping_targets::Targets;
+    use task::process::{Process, ProcessTable};
+    use vm_object::ObjectKey;
+    let _test = TEST_LOCK.lock().unwrap();
+    *state().lock().unwrap() = State {
+        entries: BTreeMap::from([((4096, 0x4000), 0x105), ((8192, 0x8000), 0x205)]),
+        ..Default::default()
+    };
+    let original = state().lock().unwrap().entries.clone();
+    let identity = ObjectKey::Memory(13);
+    let table = ProcessTable(vec![
+        Process(4096, vec![region(identity, 0x4000, 4096, 0)]),
+        Process(8192, vec![region(identity, 0x8000, 4096, 0)]),
+    ]);
+    root_lifetime_native::FAIL_ROOT.store(8192, std::sync::atomic::Ordering::Relaxed);
+    assert!(matches!(
+        Targets::capture(&table, identity, 0, 4096, 17),
+        Err(syscall::ENOMEM)
+    ));
+    root_lifetime_native::FAIL_ROOT.store(0, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(state().lock().unwrap().entries, original);
+    assert!(state().lock().unwrap().destroyed.is_empty());
+    // Failure must drop the first acquired pin rather than strand a root.
+    assert!(!root_lifetime::retire(4096));
+    assert!(!root_lifetime::retire(8192));
+    for (start, end) in [(1, 4096), (0, 4097), (8192, 4096)] {
+        assert!(matches!(
+            Targets::capture(&table, identity, start, end, 17),
+            Err(syscall::EINVAL)
+        ));
+    }
+    let duplicate = ProcessTable(vec![Process(
+        4096,
+        vec![
+            region(identity, 0x4000, 8192, 0),
+            region(identity, 0x5000, 4096, 0),
+        ],
+    )]);
+    assert!(matches!(
+        Targets::capture(&duplicate, identity, 0, 8192, 17),
+        Err(syscall::EINVAL)
+    ));
+    assert!(!root_lifetime::retire(4096));
+    assert_eq!(state().lock().unwrap().entries, original);
+    // Source misalignment must not be hidden by aligned intersection endpoints
+    // or an aligned boundary (which does not need suffix preservation).
+    for invalid in [
+        region(identity, 0x4001, 8191, 1),
+        region(identity, 0x0000_7fff_ffff_f000, 8192, 0),
+        region(identity, u64::MAX - 4095, 8192, 0),
+    ] {
+        let malformed = ProcessTable(vec![Process(4096, vec![invalid])]);
+        assert!(matches!(
+            Targets::capture(&malformed, identity, 4096, 8192, 0),
+            Err(syscall::EINVAL)
+        ));
+        assert!(!root_lifetime::retire(4096));
+    }
+    let other = Targets::capture(&table, ObjectKey::Memory(14), 0, 4096, 17).unwrap();
+    assert_eq!(other.ranges().count(), 0);
+    assert!(!root_lifetime::retire(4096));
+    let empty = Targets::capture(&table, identity, 4096, 4096, 17).unwrap();
+    assert_eq!(empty.ranges().count(), 0);
+    assert!(!empty.contains(4096, 0x4000, 0x5000));
 }
