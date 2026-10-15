@@ -6,12 +6,26 @@ mod object_io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+fn gate(registry: &mut object_io::Registry<u64>, key: u64) -> object_io::IoLock {
+    registry
+        .try_get(
+            key,
+            || {
+                Ok(object_io::IoLock::from_allocated(Arc::new(
+                    std::sync::atomic::AtomicBool::new(false),
+                )))
+            },
+            (),
+        )
+        .unwrap()
+}
+
 #[test]
 fn backing_keys_share_ordering_without_serializing_unrelated_objects() {
     let mut registry = object_io::Registry::new();
-    let first = registry.get(7);
-    let alias = registry.get(7);
-    let other = registry.get(8);
+    let first = gate(&mut registry, 7);
+    let alias = gate(&mut registry, 7);
+    let other = gate(&mut registry, 8);
     let guard = first.lock(|| panic!("first owner must acquire"));
     let independent = other.lock(|| panic!("unrelated backing must not wait"));
     drop(independent);
@@ -29,7 +43,7 @@ fn backing_keys_share_ordering_without_serializing_unrelated_objects() {
 #[test]
 fn concurrent_writeback_and_write_sections_do_not_overlap() {
     let mut registry = object_io::Registry::new();
-    let gate = registry.get(7);
+    let gate = gate(&mut registry, 7);
     let active = Arc::new(AtomicUsize::new(0));
     let finished = Arc::new(AtomicUsize::new(0));
     std::thread::scope(|scope| {
@@ -49,4 +63,34 @@ fn concurrent_writeback_and_write_sections_do_not_overlap() {
         }
     });
     assert_eq!(finished.load(Ordering::SeqCst), 512);
+}
+
+#[test]
+fn failed_gate_creation_does_not_publish_and_live_gates_do_not_allocate() {
+    let mut registry = object_io::Registry::new();
+    assert_eq!(registry.try_get(7, || Err(12), 99).err(), Some(12));
+    let first = gate(&mut registry, 7);
+    let alias = registry
+        .try_get(
+            7,
+            || -> Result<_, u8> { panic!("live registration must not invoke the allocator") },
+            99,
+        )
+        .unwrap();
+    let mut owner = Some(first.lock(|| panic!("uncontended gate")));
+    let mut waited = false;
+    let acquired = alias.lock(|| {
+        waited = true;
+        drop(owner.take());
+    });
+    assert!(waited);
+    drop(acquired);
+    drop(first);
+    // A surviving alias keeps the weak registration reusable across gaps.
+    let survivor = registry
+        .try_get(7, || -> Result<_, u8> { panic!("alias lost identity") }, 99)
+        .unwrap();
+    drop(alias);
+    drop(survivor);
+    assert_eq!(registry.try_get(7, || Err(12), 99).err(), Some(12));
 }

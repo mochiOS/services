@@ -38,16 +38,35 @@ fn actual_vm_object_cache_keys_keep_provider_identity_separate_from_memory_objec
     let source = include_str!("../../../core/src/mem/vm_object.rs");
     let mut program = String::from(
         r#"
+extern crate alloc;
 use std::sync::Arc;
+mod syscall {pub const ENOMEM:u64=(-12i64) as u64;}
+mod mem {pub mod object_io_native {
+    pub fn new_lock()->Result<crate::object_io::IoLock,u64>{
+        Ok(crate::object_io::IoLock::from_allocated(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))))
+    }
+}}
 struct ProviderObject { endpoint_thread_id: u64, endpoint_slot: u16, endpoint_generation: u64 }
 mod shared_memory {
     pub struct SharedMemory(pub u64);
     impl SharedMemory { pub fn id(&self) -> u64 { self.0 } }
 }
-mod actual {
-    use super::*;
 "#,
     );
+    program.push_str(&format!(
+        "#[path={:?}] mod object_io;\n",
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../core/src/mem/object_io.rs")
+            .canonicalize()
+            .unwrap()
+    ));
+    program.push_str(r#"
+mod actual {
+    use super::*;
+    struct RegistryLock(std::sync::Mutex<object_io::Registry<ObjectKey>>);
+    impl RegistryLock { fn lock(&self)->std::sync::MutexGuard<'_,object_io::Registry<ObjectKey>>{self.0.lock().unwrap()} }
+    static PROVIDER_IO:RegistryLock=RegistryLock(std::sync::Mutex::new(object_io::Registry::new()));
+"#);
     for entry in [
         "enum ObjectKey {",
         "enum VmObjectSource {",
@@ -74,19 +93,19 @@ mod actual {
 }
 pub fn verify() {
     let object = Arc::new(ProviderObject { endpoint_thread_id: 7, endpoint_slot: 2, endpoint_generation: 3 });
-    let first = VmObject::provider(Arc::clone(&object), 11);
-    let duplicate = VmObject::provider(Arc::clone(&object), 11);
+    let first = VmObject::provider(Arc::clone(&object), 11).unwrap();
+    let duplicate = VmObject::provider(Arc::clone(&object), 11).unwrap();
     assert_eq!(first.object_key(), duplicate.object_key());
     assert_eq!(first.object_key(), ObjectKey::Provider {
         endpoint_thread_id: 7, endpoint_slot: 2, endpoint_generation: 3, identity: 11,
     });
-    assert_ne!(first.object_key(), VmObject::provider(Arc::clone(&object), 12).object_key());
+    assert_ne!(first.object_key(), VmObject::provider(Arc::clone(&object), 12).unwrap().object_key());
     for replacement in [
         ProviderObject { endpoint_thread_id: 8, endpoint_slot: 2, endpoint_generation: 3 },
         ProviderObject { endpoint_thread_id: 7, endpoint_slot: 4, endpoint_generation: 3 },
         ProviderObject { endpoint_thread_id: 7, endpoint_slot: 2, endpoint_generation: 4 },
     ] {
-        assert_ne!(first.object_key(), VmObject::provider(Arc::new(replacement), 11).object_key());
+        assert_ne!(first.object_key(), VmObject::provider(Arc::new(replacement), 11).unwrap().object_key());
     }
     let memory = VmObject::shared_memory(Arc::new(shared_memory::SharedMemory(11)));
     assert_ne!(first.object_key(), memory.object_key());

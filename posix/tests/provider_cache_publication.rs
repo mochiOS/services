@@ -155,6 +155,8 @@ mod shared_memory {
 
 static FRAMES: Mutex<BTreeMap<u64, usize>> = Mutex::new(BTreeMap::new());
 static MAPPING_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static GATE_ALLOCS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static FAIL_GATE_ALLOC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 mod frame {
     pub struct Frame(pub u64);
     impl Frame {
@@ -227,6 +229,17 @@ pub mod object_io;
 pub mod vm_object;
 mod mem {
     pub(crate) use crate::{frame, paging};
+    pub(crate) mod object_io_native {
+        pub fn new_lock() -> Result<crate::object_io::IoLock, u64> {
+            crate::GATE_ALLOCS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if crate::FAIL_GATE_ALLOC.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(crate::syscall::ENOMEM);
+            }
+            Ok(crate::object_io::IoLock::from_allocated(
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            ))
+        }
+    }
 }
 
 fn provider_object() -> vm_object::VmObject {
@@ -238,6 +251,7 @@ fn provider_object() -> vm_object::VmObject {
         }),
         93,
     )
+    .unwrap()
 }
 
 fn reset_lower(bytes: &[u8]) {
@@ -249,6 +263,7 @@ fn reset_lower(bytes: &[u8]) {
 
 #[test]
 fn production_cache_never_republishes_invalidated_lower_snapshots() {
+    let initial_gates = GATE_ALLOCS.load(std::sync::atomic::Ordering::Relaxed);
     let object = provider_object();
     reset_lower(b"old");
     // The lower read has copied old bytes, but a completed write did not find
@@ -404,4 +419,33 @@ fn production_cache_never_republishes_invalidated_lower_snapshots() {
     drop(current);
     object.invalidate();
     assert!(FRAMES.lock().unwrap().is_empty());
+    assert_eq!(
+        GATE_ALLOCS.load(std::sync::atomic::Ordering::Relaxed),
+        initial_gates + 1
+    );
+    // The VM object, not a transient read/write, pins the canonical gate.
+    FAIL_GATE_ALLOC.store(true, std::sync::atomic::Ordering::Relaxed);
+    let alias = provider_object();
+    drop(object);
+    let survivor = provider_object();
+    drop(alias);
+    assert_eq!(
+        GATE_ALLOCS.load(std::sync::atomic::Ordering::Relaxed),
+        initial_gates + 1
+    );
+    drop(survivor);
+    // Once the last owner disappears, a failed replacement is reported as
+    // ENOMEM without publishing an object or a dangling live registration.
+    let owner = Arc::new(task::ProviderObject {
+        endpoint_thread_id: 17,
+        endpoint_slot: 2,
+        endpoint_generation: 8,
+    });
+    assert!(matches!(
+        vm_object::VmObject::provider(owner.clone(), 93),
+        Err(syscall::ENOMEM)
+    ));
+    FAIL_GATE_ALLOC.store(false, std::sync::atomic::Ordering::Relaxed);
+    let retry = vm_object::VmObject::provider(owner, 93).unwrap();
+    drop(retry);
 }

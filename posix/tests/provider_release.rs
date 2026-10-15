@@ -80,7 +80,7 @@ mod task {
         r#"
     }
 }
-mod syscall {pub mod ipc {
+mod syscall {pub const ENOMEM:u64=(-12i64) as u64;pub mod ipc {
     use crate::{AtomicBool,AtomicUsize,Ordering};
     #[derive(Clone,Copy)] pub struct IpcEndpoint {pub thread_id:u64,pub slot:u16,pub generation:u64}
     pub static BLOCK:AtomicBool=AtomicBool::new(true);
@@ -111,7 +111,37 @@ mod flush {
     ));
     // The production flush function only uses the provider submodule of ABI.
     program.push_str(&handle[begin..end].replace("mnu_abi::provider", "wire::provider"));
+    program.push_str(&format!(
+        "#[path={:?}] mod object_io; #[path={:?}] mod object_io_native;\n",
+        root.join("core/src/mem/object_io.rs"),
+        root.join("core/src/mem/object_io_native.rs"),
+    ));
     program.push_str(r#"
+pub fn verify_gate_allocations() {
+    use crate::{DENY,ATTEMPTS,Ordering};
+    let mut registry=object_io::Registry::new();
+    DENY.store(true,Ordering::Relaxed);
+    assert!(matches!(object_io_native::new_lock(),Err(crate::syscall::ENOMEM)));
+    DENY.store(false,Ordering::Relaxed);
+    assert_eq!(ATTEMPTS.swap(0,Ordering::Relaxed),1);
+    DENY.store(true,Ordering::Relaxed);
+    assert!(matches!(registry.try_get(7,object_io_native::new_lock,crate::syscall::ENOMEM),Err(crate::syscall::ENOMEM)));
+    DENY.store(false,Ordering::Relaxed);
+    assert_eq!(ATTEMPTS.swap(0,Ordering::Relaxed),1);
+    // Reserve the weak slot, but fail the factory before publishing anything.
+    assert_eq!(registry.try_get(7,||Err(99),crate::syscall::ENOMEM).err(),Some(99));
+    DENY.store(true,Ordering::Relaxed);
+    assert!(matches!(registry.try_get(7,object_io_native::new_lock,crate::syscall::ENOMEM),Err(crate::syscall::ENOMEM)));
+    DENY.store(false,Ordering::Relaxed);
+    assert_eq!(ATTEMPTS.swap(0,Ordering::Relaxed),1);
+    let first=registry.try_get(7,object_io_native::new_lock,crate::syscall::ENOMEM).unwrap();
+    DENY.store(true,Ordering::Relaxed);
+    let alias=registry.try_get(7,||panic!("live gate must not allocate"),crate::syscall::ENOMEM).unwrap();
+    let owner=first.lock(||panic!("uncontended gate"));
+    drop(owner);drop(first);drop(alias);
+    assert_eq!(ATTEMPTS.load(Ordering::Relaxed),0);
+    DENY.store(false,Ordering::Relaxed);
+}
 }
 fn make(id:u64)->std::sync::Arc<task::handle_table::ProviderObject> {
     let object=std::sync::Arc::try_new(task::handle_table::ProviderObject::new(31,4,8,id).unwrap()).unwrap();
@@ -191,6 +221,7 @@ fn main(){
     assert!(h::take_provider_releases().pop().is_none());
     assert_eq!(ATTEMPTS.load(Ordering::Relaxed),0);
     DENY.store(false,Ordering::Relaxed);
+    flush::verify_gate_allocations();
 }
 
 "#);
