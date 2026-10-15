@@ -3,6 +3,13 @@ extern crate alloc;
 
 use std::sync::Arc;
 
+mod vm_object {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum ObjectKey {
+        Memory(u64),
+    }
+}
+
 mod interrupt {
     pub mod spinlock {
         pub struct SpinLock<T>(std::sync::Mutex<T>);
@@ -44,6 +51,7 @@ mod task {
         pub start: u64,
         pub shared: bool,
         pub backing: Arc<()>,
+        pub object: Option<Arc<VmObject>>,
     }
     impl MemoryRegion {
         pub fn start(&self) -> u64 {
@@ -59,7 +67,7 @@ mod task {
             0
         }
         pub fn file_object(&self) -> Option<&VmObject> {
-            None
+            self.object.as_deref()
         }
         pub fn contains(&self, address: u64) -> bool {
             address == self.start
@@ -68,10 +76,30 @@ mod task {
             self.shared
         }
     }
-    pub struct VmObject;
+    pub struct VmObject {
+        pub reserved: std::sync::atomic::AtomicBool,
+    }
     impl VmObject {
         pub fn memory_identity(&self) -> Option<u64> {
             None
+        }
+        pub fn object_key(&self) -> crate::vm_object::ObjectKey {
+            crate::vm_object::ObjectKey::Memory(7)
+        }
+        pub fn memory_generation(&self) -> Option<u64> {
+            Some(1)
+        }
+        pub fn with_memory_generation<T>(
+            &self,
+            generation: Option<u64>,
+            install: impl FnOnce() -> Result<T, u64>,
+        ) -> Result<T, u64> {
+            assert_eq!(generation, Some(1));
+            if self.reserved.load(std::sync::atomic::Ordering::Acquire) {
+                Err((-11i64) as u64)
+            } else {
+                install()
+            }
         }
     }
     pub struct DmaBuffer {
@@ -213,11 +241,13 @@ fn source() -> task::Process {
                 start: 0x1000,
                 shared: false,
                 backing: Arc::new(()),
+                object: None,
             },
             task::MemoryRegion {
                 start: 0x2000,
                 shared: true,
                 backing: Arc::new(()),
+                object: None,
             },
         ],
         dma: vec![task::DmaBuffer {
@@ -418,6 +448,38 @@ fn borrowed_mapping_and_absent_source_are_rejected_before_allocation() {
 }
 
 #[test]
+fn reserved_shared_or_private_backing_rejects_capture_before_cow_and_root_creation() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    for selected in 0..2 {
+        let mut source = source();
+        let object = Arc::new(task::VmObject {
+            reserved: AtomicBool::new(true),
+        });
+        source.regions[selected].object = Some(object.clone());
+        assert!(matches!(
+            address_space::CloneSource::capture(&source),
+            Err(address_space::CloneError::BackingBusy)
+        ));
+        paging::STATE.with(|state| {
+            assert_eq!(state.borrow().calls, 0);
+            assert!(state.borrow().destroyed.is_empty());
+        });
+        assert_eq!(source.table, Some(0xbeef));
+        assert_eq!(Arc::strong_count(&source.regions[0].backing), 1);
+        object.reserved.store(false, Ordering::Release);
+        let image = address_space::CloneSource::capture(&source)
+            .ok()
+            .unwrap()
+            .clone_image()
+            .ok()
+            .unwrap();
+        paging::STATE.with(|state| assert_eq!(state.borrow().calls, 1));
+        drop(image);
+        paging::STATE.with(|state| assert_eq!(state.borrow().destroyed, [0xcafe]));
+    }
+}
+
+#[test]
 fn failed_clone_publishes_no_owner_and_leaves_source_intact() {
     let source = source();
     paging::STATE.with(|state| state.borrow_mut().failed = true);
@@ -445,7 +507,8 @@ fn native_entrypoint_does_not_create_execution_or_capture_other_processes() {
         .unwrap();
     assert!(clone.contains("caller_has_process_spawn_capability()"));
     assert!(clone.contains("current_process_id()"));
-    assert!(clone.contains("if live_threads != 1"));
+    assert!(clone.contains("begin_image_transition(pid)"));
+    assert!(clone.contains("quiesce_image_siblings(pid, owner)"));
     for forbidden in [
         "add_process(",
         "add_thread(",
@@ -465,7 +528,10 @@ fn native_probe_numbers_match_authoritative_abi() {
         ("RIGHTS_GET", mnu_abi::SyscallNumber::HandleRightsGet),
         ("DUPLICATE", mnu_abi::SyscallNumber::HandleDuplicate),
         ("SAME_OBJECT", mnu_abi::SyscallNumber::HandleSameObject),
-        ("MEMORY_OBJECT_CREATE", mnu_abi::SyscallNumber::MemoryObjectCreate),
+        (
+            "MEMORY_OBJECT_CREATE",
+            mnu_abi::SyscallNumber::MemoryObjectCreate,
+        ),
         ("MEMORY_MAP", mnu_abi::SyscallNumber::MemoryMap),
     ] {
         assert!(probe.contains(&format!("{name} = {}", number as u64)));
