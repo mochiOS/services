@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -30,11 +31,12 @@ struct handle_info {
 };
 static int source, reader_fd;
 static const char *replacement_path;
+static char supplied_path[128];
 static pthread_t target;
 static unsigned baseline_waits;
 static atomic_uint active, sent, reads;
 static atomic_int stopping, ready, busy, sender_error, reader_error;
-static volatile sig_atomic_t handler_error, qualified;
+static volatile sig_atomic_t handler_error, qualified, operation_kind;
 
 /* Caller-local metadata only; no Handle acquisition and no foreign PID/FD. */
 static int wait_positions(void) {
@@ -72,7 +74,10 @@ static void handler(int signal) {
       return;
     }
     if (status.st_size == 8192) {
-      if (close(source))
+      if (operation_kind != 0) {
+        strcpy(supplied_path, replacement_path);
+        qualified = 1;
+      } else if (close(source))
         handler_error = 4;
       else {
         int replacement = open(replacement_path, O_RDWR);
@@ -137,6 +142,7 @@ int main(void) {
   CHECK(reader_fd >= 0);
   int other = mkstemp(replacement);
   CHECK(other >= 0 && ftruncate(other, 1234) == 0 && close(other) == 0);
+  int expected_open_fd = other;
   replacement_path = replacement;
   target = pthread_self();
   struct sigaction action = {0};
@@ -157,55 +163,82 @@ int main(void) {
   CHECK(count >= 0);
   baseline_waits = (unsigned)count;
   unsigned epoch = 0;
-  for (unsigned restart = 0; restart < 2; ++restart) {
-    action.sa_flags = restart ? SA_RESTART : 0;
-    CHECK(sigaction(SIGUSR1, &action, NULL) == 0);
-    unsigned successes = 0;
-    for (unsigned attempt = 0; attempt < 256 && successes < 4; ++attempt) {
-      CHECK(ftruncate(reader_fd, 8192) == 0);
-      qualified = 0;
-      CHECK(pthread_sigmask(SIG_UNBLOCK, &blocked, NULL) == 0);
-      atomic_store_explicit(&active, ++epoch, memory_order_release);
-      errno = 0;
-      int result = ftruncate(source, 5000);
-      int operation_errno = errno;
-      atomic_store_explicit(&active, 0, memory_order_release);
-      CHECK(pthread_sigmask(SIG_BLOCK, &blocked, NULL) == 0);
-      while (atomic_load_explicit(&busy, memory_order_acquire))
-        CHECK(sched_yield() == 0);
-      CHECK(!handler_error && !atomic_load(&sender_error) &&
-            !atomic_load(&reader_error));
-      /* Discard any delivery that lost the race with operation completion.
-       * A fresh epoch cannot mistake that old signal for a new wait sample. */
-      struct timespec zero = {0, 0};
-      int pending;
-      do {
-        pending = sigtimedwait(&blocked, NULL, &zero);
-      } while (pending == SIGUSR1);
-      CHECK(pending == -1 && errno == EAGAIN);
-      CHECK(result == 0 || (result == -1 && operation_errno == EINTR));
-      if (!qualified)
-        continue;
-      struct stat old_status, new_status;
-      CHECK(fstat(reader_fd, &old_status) == 0 &&
-            fstat(source, &new_status) == 0);
-      CHECK(new_status.st_size == 1234);
-      if (restart)
-        CHECK(result == 0 && old_status.st_size == 5000);
-      else
-        CHECK(result == -1 && operation_errno == EINTR &&
-              old_status.st_size == 8192);
-      CHECK(wait_positions() == (int)baseline_waits);
-      CHECK(close(source) == 0);
-      int reopened = open(original, O_RDWR);
-      CHECK(reopened == source);
-      ++successes;
+  for (unsigned kind = 0; kind < 3; ++kind) {
+    operation_kind = kind;
+    for (unsigned restart = 0; restart < 2; ++restart) {
+      action.sa_flags = restart ? SA_RESTART : 0;
+      CHECK(sigaction(SIGUSR1, &action, NULL) == 0);
+      unsigned successes = 0;
+      for (unsigned attempt = 0; attempt < 256 && successes < 4; ++attempt) {
+        CHECK(ftruncate(reader_fd, 8192) == 0);
+        strcpy(supplied_path, original);
+        qualified = 0;
+        CHECK(pthread_sigmask(SIG_UNBLOCK, &blocked, NULL) == 0);
+        atomic_store_explicit(&active, ++epoch, memory_order_release);
+        errno = 0;
+        int result = kind == 0   ? ftruncate(source, 5000)
+                     : kind == 1 ? truncate(supplied_path, 5000)
+                                 : open(supplied_path, O_RDWR | O_TRUNC);
+        int operation_errno = errno;
+        atomic_store_explicit(&active, 0, memory_order_release);
+        CHECK(pthread_sigmask(SIG_BLOCK, &blocked, NULL) == 0);
+        while (atomic_load_explicit(&busy, memory_order_acquire))
+          CHECK(sched_yield() == 0);
+        CHECK(!handler_error && !atomic_load(&sender_error) &&
+              !atomic_load(&reader_error));
+        /* Discard any delivery that lost the race with operation completion.
+         * A fresh epoch cannot mistake that old signal for a new wait sample.
+         */
+        struct timespec zero = {0, 0};
+        int pending;
+        do {
+          pending = sigtimedwait(&blocked, NULL, &zero);
+        } while (pending == SIGUSR1);
+        CHECK(pending == -1 && errno == EAGAIN);
+        CHECK((kind == 2 ? result >= 0 : result == 0) ||
+              (result == -1 && operation_errno == EINTR));
+        if (!qualified) {
+          if (kind == 2 && result >= 0)
+            CHECK(close(result) == 0);
+          continue;
+        }
+        if (kind != 0)
+          CHECK(strcmp(supplied_path, replacement) == 0);
+        struct stat old_status, new_status;
+        CHECK(fstat(reader_fd, &old_status) == 0);
+        other = open(replacement, O_RDONLY);
+        CHECK(other == expected_open_fd + (kind == 2 && result >= 0));
+        CHECK(fstat(other, &new_status) == 0 && close(other) == 0);
+        CHECK(new_status.st_size == 1234);
+        if (restart)
+          CHECK((kind == 2 ? result >= 0 : result == 0) &&
+                old_status.st_size == (kind == 2 ? 0 : 5000));
+        else
+          CHECK(result == -1 && operation_errno == EINTR &&
+                old_status.st_size == 8192);
+        CHECK(wait_positions() == (int)baseline_waits);
+        if (kind == 2 && result >= 0) {
+          struct stat opened_status;
+          CHECK(result == expected_open_fd &&
+                fstat(result, &opened_status) == 0);
+          CHECK(opened_status.st_ino == old_status.st_ino &&
+                opened_status.st_dev == old_status.st_dev);
+          CHECK(close(result) == 0);
+        }
+        if (kind == 0) {
+          CHECK(close(source) == 0);
+          int reopened = open(original, O_RDWR);
+          CHECK(reopened == source);
+        }
+        ++successes;
+      }
+      CHECK(successes == 4);
+      fprintf(
+          stderr,
+          "file-wait-signal: operation=%u restart=%u four observed pre-storage "
+          "interruptions PASS\n",
+          kind, restart);
     }
-    CHECK(successes == 4);
-    fprintf(stderr,
-            "file-wait-signal: restart=%u four observed pre-storage "
-            "interruptions PASS\n",
-            restart);
   }
   atomic_store_explicit(&stopping, 1, memory_order_release);
   CHECK(pthread_join(sender, NULL) == 0 && pthread_join(reader, NULL) == 0);
@@ -213,9 +246,10 @@ int main(void) {
         !atomic_load(&reader_error));
   CHECK(close(source) == 0 && close(reader_fd) == 0);
   CHECK(unlink(original) == 0 && unlink(replacement) == 0);
-  printf(
-      "file-wait-signal: PASS EINTR, SA_RESTART, retired FD lease and no live "
-      "ticket during C handlers (%u concurrent reads)\n",
-      atomic_load(&reads));
+  printf("file-wait-signal: PASS all three mutations, EINTR, SA_RESTART, FD "
+         "reuse, "
+         "captured paths and no live "
+         "ticket during C handlers (%u concurrent reads)\n",
+         atomic_load(&reads));
   return 0;
 }
