@@ -33,3 +33,60 @@ fn runtime_waits_outside_global_state_and_keeps_file_lease_for_replay() {
     assert!(resize.contains("scope.as_mut().activate()"));
     assert!(resize.contains("scope.as_mut().retire()"));
 }
+
+#[test]
+fn spawn_actions_use_the_live_child_table_and_the_same_queued_open_owner() {
+    let runtime = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
+    assert!(!runtime.contains("fn open_posix_entry("));
+    assert!(!runtime.contains("fn file_mutation<T>("));
+    let actions = runtime
+        .split("fn apply_spawn_file_actions(")
+        .nth(1)
+        .unwrap()
+        .split("unsafe fn read_exec_vector")
+        .next()
+        .unwrap();
+    assert!(!actions.contains("fds: &mut FdTable"));
+    assert!(actions.contains("state().fds.close_for_spawn"));
+    assert!(actions.contains("file_mutation::open_for_spawn("));
+    let child = runtime
+        .split("pub extern \"C\" fn _posix_spawn(")
+        .nth(1)
+        .unwrap()
+        .split("#[unsafe(no_mangle)]")
+        .next()
+        .unwrap();
+    assert!(
+        child.find("state().fds = desired_fds").unwrap()
+            < child.find("apply_spawn_file_actions(").unwrap()
+    );
+    assert!(child.contains("execve_with_launch_context("));
+    let mutation = include_str!("../../../user/crates/newlib-runtime/src/file_mutation.rs");
+    assert!(mutation.contains("open_in_slot(path, flags, mode, Some(fd))"));
+    let slot = mutation.split("fn open_in_slot(").nth(1).unwrap();
+    assert!(
+        slot.find("close_for_spawn(fd").unwrap()
+            < slot.find("reserve_from(minimum, limit)").unwrap()
+    );
+    assert!(slot.contains("(fd, fd + 1)"));
+}
+
+#[test]
+fn exec_snapshot_pins_are_registered_before_application_callbacks_can_run() {
+    let source = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
+    let operation = source
+        .split("fn execve_with_launch_context(")
+        .nth(1)
+        .unwrap()
+        .split("fn clone_registered_process(")
+        .next()
+        .unwrap();
+    assert!(
+        operation.find("Guard::enter(").unwrap()
+            < operation.find("clone_current_fd_table()").unwrap()
+    );
+    assert!(operation.find("activate()").unwrap() < operation.find("drop(delivery)").unwrap());
+    assert!(
+        operation.find("replace_process_image(").unwrap() < operation.find("retire()").unwrap()
+    );
+}

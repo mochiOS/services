@@ -111,7 +111,8 @@ fn runtime_pins_escaped_metadata_and_captures_the_book_with_native_handles() {
     assert!(locked < fork.find("handle_capture::Capture::new()?").unwrap());
     assert!(fork.find("drop(fd_borrows);").unwrap() < fork.find("drop(guard);").unwrap());
     assert!(source.contains("fd_lease::Lease::new(state.fds.get(fd).ok_or(EBADF)?)"));
-    assert!(source.contains("let (fds, _leases) = clone_current_fd_table()?;"));
+    assert!(source.contains("let captured = clone_current_fd_table()?;"));
+    assert!(source.contains("&scope.as_ref().get_ref().resource().unwrap().0"));
     assert!(source.contains("let mut leases = [const { None }; MAX_FDS];"));
     assert!(source.contains("**leases[poll_index].as_ref().unwrap()"));
     assert!(!source.contains("*with_fd_entry(pollfds[poll_index].fd)?"));
