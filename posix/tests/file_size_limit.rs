@@ -3,8 +3,10 @@ use mochios_posix_protocol as wire;
 
 #[test]
 fn positioned_write_returns_exact_prefix_without_subtraction_overflow() {
-    assert_eq!(mochios_posix_client::newlib_errno::from_status(wire::STATUS_FILE_SIZE_LIMIT as i64),
-        mochios_posix_client::newlib_errno::EFBIG);
+    assert_eq!(
+        mochios_posix_client::newlib_errno::from_status(wire::STATUS_FILE_SIZE_LIMIT as i64),
+        mochios_posix_client::newlib_errno::EFBIG
+    );
     for soft in 0..16u64 {
         for offset in 0..24u64 {
             for length in 0..32usize {
@@ -44,7 +46,7 @@ fn special_files_keep_their_kind_and_authority_requirement_across_handoff() {
 }
 
 #[test]
-fn runtime_checks_access_and_regular_file_type_before_policy_or_signal() {
+fn runtime_checks_access_and_size_limited_object_kind_before_policy_or_signal() {
     let runtime = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
     let positioned = runtime
         .split("fn positioned_file_io(")
@@ -57,7 +59,14 @@ fn runtime_checks_access_and_regular_file_type_before_policy_or_signal() {
         positioned.find("if !allowed").unwrap()
             < positioned.find("resource_policy::read(").unwrap()
     );
-    assert!(positioned.contains("write && length != 0 && entry.handle.kind == FdKind::ObjectFile"));
+    assert!(positioned.contains("FdKind::ObjectFile | FdKind::ObjectSharedMemory"));
+    assert!(
+        positioned
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .contains("write && length != 0")
+    );
     assert!(positioned.contains("generate_thread_signal(posix_protocol::SIGNAL_XFSZ)?"));
     assert!(positioned.contains("return Err(EFBIG)"));
     assert!(!positioned.contains("HandleSeek"));

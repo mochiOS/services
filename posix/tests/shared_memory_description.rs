@@ -324,6 +324,140 @@ fn frame(opcode: u16, id: u64, basis: u64, argument: i64, length: u32, data: &[u
 }
 
 #[test]
+fn bounded_write_selects_append_and_cursor_prefix_without_mutating_rejected_operations() {
+    let mut descriptions = Descriptions::new();
+    let mut ram = Ram::default();
+    let first = descriptions.open(1, true, &mut ram).unwrap();
+    let second = descriptions.open(1, true, &mut ram).unwrap();
+    let readonly = descriptions.open(1, false, &mut ram).unwrap();
+    descriptions.write(first, b"abcdefgh", &mut ram).unwrap();
+    descriptions
+        .seek(first, 3, HANDLE_SEEK_START, &mut ram)
+        .unwrap();
+    assert_eq!(
+        descriptions.write_bounded(first, b"WXYZ", 5, &mut ram),
+        Ok((3, 2))
+    );
+    assert_eq!(ram.bytes, b"abcWXfgh");
+    let resizes = ram.resizes;
+    assert_eq!(
+        descriptions.write_bounded(first, b"!", 5, &mut ram),
+        Err(mnu_abi::provider::STATUS_BOUND_REACHED as i32)
+    );
+    assert_eq!(ram.resizes, resizes);
+    assert_eq!(
+        descriptions.seek(first, 0, HANDLE_SEEK_CURRENT, &mut ram),
+        Ok(5)
+    );
+    descriptions.set_append(second, true).unwrap();
+    assert_eq!(
+        descriptions.write_bounded(second, b"1234", 10, &mut ram),
+        Ok((8, 2))
+    );
+    assert_eq!(ram.bytes, b"abcWXfgh12");
+    assert_eq!(
+        descriptions.seek(first, 0, HANDLE_SEEK_CURRENT, &mut ram),
+        Ok(5)
+    );
+    assert_eq!(
+        descriptions.write_bounded(second, b"!", 10, &mut ram),
+        Err(mnu_abi::provider::STATUS_BOUND_REACHED as i32)
+    );
+    descriptions.resize(first, 6, &mut ram).unwrap();
+    assert_eq!(
+        descriptions.write_bounded(second, b"xyz", 8, &mut ram),
+        Ok((6, 2))
+    );
+    assert_eq!(ram.bytes, b"abcWXfxy");
+    assert_eq!(
+        descriptions.write_bounded(readonly, b"", 0, &mut ram),
+        Err(-9)
+    );
+    assert_eq!(
+        descriptions.write_bounded(second, b"", 0, &mut ram),
+        Ok((8, 0))
+    );
+    assert_eq!(ram.bytes, b"abcWXfxy");
+}
+
+#[test]
+fn provider_bounded_write_preflights_position_reply_and_authentication() {
+    use mnu_abi::{IPC_DELIVERY_NATIVE_OBJECT, provider};
+    use posix_service::shared_memory_file::handle_provider_request;
+    let mut descriptions = Descriptions::new();
+    let mut ram = Ram::default();
+    let id = descriptions.open(1, true, &mut ram).unwrap();
+    let request = frame(provider::OP_WRITE_BOUNDED, id, 2, 0, 4, b"abcd");
+    let mut response = [0; provider::RESPONSE_HEADER_LEN + 8];
+    for capacity in [
+        provider::RESPONSE_HEADER_LEN - 1,
+        provider::RESPONSE_HEADER_LEN,
+        provider::RESPONSE_HEADER_LEN + 7,
+    ] {
+        assert_eq!(
+            handle_provider_request(
+                &mut descriptions,
+                &request,
+                IPC_DELIVERY_NATIVE_OBJECT,
+                0,
+                &mut ram,
+                &mut response[..capacity]
+            ),
+            Err(-22)
+        );
+        assert!(ram.bytes.is_empty());
+    }
+    for (flags, attachments, expected) in [(0, 0, -13), (IPC_DELIVERY_NATIVE_OBJECT, 1, -22)] {
+        let n = handle_provider_request(
+            &mut descriptions,
+            &request,
+            flags,
+            attachments,
+            &mut ram,
+            &mut response,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            provider::ResponseHeader::decode(&response[..n])
+                .unwrap()
+                .0
+                .status,
+            expected
+        );
+        assert!(ram.bytes.is_empty());
+    }
+    let n = handle_provider_request(
+        &mut descriptions,
+        &request,
+        IPC_DELIVERY_NATIVE_OBJECT,
+        0,
+        &mut ram,
+        &mut response,
+    )
+    .unwrap()
+    .unwrap();
+    let (header, data) = provider::ResponseHeader::decode(&response[..n]).unwrap();
+    assert_eq!((header.status, header.value), (0, 2));
+    assert_eq!(data, 0u64.to_le_bytes());
+    assert_eq!(ram.bytes, b"ab");
+    let n = handle_provider_request(
+        &mut descriptions,
+        &request,
+        IPC_DELIVERY_NATIVE_OBJECT,
+        0,
+        &mut ram,
+        &mut response,
+    )
+    .unwrap()
+    .unwrap();
+    let (header, data) = provider::ResponseHeader::decode(&response[..n]).unwrap();
+    assert_eq!(header.status, provider::STATUS_BOUND_REACHED);
+    assert!(data.is_empty());
+    assert_eq!(ram.bytes, b"ab");
+}
+
+#[test]
 fn provider_frames_require_native_delivery_and_preflight_reply_capacity() {
     use mnu_abi::{IPC_DELIVERY_NATIVE_OBJECT, provider};
     use posix_service::shared_memory_file::handle_provider_request;

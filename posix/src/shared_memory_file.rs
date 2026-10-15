@@ -240,18 +240,39 @@ impl<H: Copy> Descriptions<H> {
         input: &[u8],
         backend: &mut B,
     ) -> Result<usize, i32> {
+        self.write_bounded(id, input, u64::MAX, backend)
+            .map(|(_, written)| written)
+    }
+
+    /// Select append/current position, permitted prefix and extent mutation
+    /// under the manager lock. No client-side cursor/size query may race this.
+    pub fn write_bounded<B: Backing<H>>(
+        &mut self,
+        id: u64,
+        input: &[u8],
+        byte_end: u64,
+        backend: &mut B,
+    ) -> Result<(u64, usize), i32> {
         let entry = self.entries.get_mut(&id).ok_or(-9)?;
         if !entry.writable {
             return Err(-9);
         }
         if input.is_empty() {
-            return Ok(0);
+            return Ok((entry.cursor, 0));
         }
         let position = if entry.status_flags & mochios_posix_protocol::OPEN_APPEND != 0 {
             backend.length(entry.backing)?
         } else {
             entry.cursor
         };
+        let available = byte_end
+            .checked_sub(position)
+            .filter(|&bytes| bytes != 0)
+            .ok_or(mnu_abi::provider::STATUS_BOUND_REACHED as i32)?;
+        let permitted = usize::try_from(available)
+            .unwrap_or(usize::MAX)
+            .min(input.len());
+        let input = &input[..permitted];
         let end = position
             .checked_add(input.len() as u64)
             .filter(|end| *end <= i64::MAX as u64)
@@ -264,7 +285,7 @@ impl<H: Copy> Descriptions<H> {
             return Err(-5);
         }
         entry.cursor = position + written as u64;
-        Ok(written)
+        Ok((position, written))
     }
 
     pub fn write_at<B: Backing<H>>(
@@ -346,6 +367,7 @@ pub fn handle_provider_request<H: Copy, B: Backing<H>>(
         match header.opcode {
             provider::OP_READ | provider::OP_READ_AT => header.length as usize,
             provider::OP_READ_WITH_POSITION => header.length as usize + provider::READ_POSITION_LEN,
+            provider::OP_WRITE_BOUNDED => core::mem::size_of::<u64>(),
             provider::OP_CONTROL => header.length as usize,
             _ => 0,
         }
@@ -388,6 +410,9 @@ pub fn handle_provider_request<H: Copy, B: Backing<H>>(
             provider::OP_WRITE => descriptions
                 .write(header.object_id, payload, backend)
                 .map(|written| (written as u64, Vec::new())),
+            provider::OP_WRITE_BOUNDED => descriptions
+                .write_bounded(header.object_id, payload, header.basis, backend)
+                .map(|(position, written)| (written as u64, position.to_le_bytes().to_vec())),
             provider::OP_WRITE_AT => descriptions
                 .write_at(header.object_id, header.basis, payload, backend)
                 .map(|written| (written as u64, Vec::new())),
