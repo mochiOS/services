@@ -313,3 +313,104 @@ fn insufficient_source_rights_are_rejected_without_rpc() {
     assert_eq!(replies.calls.get(), 0);
     assert!(replies.closed.borrow().is_empty());
 }
+
+#[test]
+fn interrupted_wait_releases_position_but_keeps_an_independent_input_snapshot() {
+    for opcode in [wire::OP_OPEN_AT, wire::OP_TRUNCATE_AT] {
+        let replies = Replies::new(opcode, 0, false);
+        let client = Client::new(&replies);
+        let mut path = String::from("file");
+        let prepared = if opcode == wire::OP_OPEN_AT {
+            client
+                .prepare_open_at(
+                    OpenAtBase::ProcessRoot,
+                    wire::OPEN_WRITE | wire::OPEN_CREATE | wire::OPEN_EXCLUSIVE,
+                    0o600,
+                    &path,
+                )
+                .unwrap()
+        } else {
+            client
+                .prepare_truncate_at(StatAtBase::ProcessCwd, &path, 5000)
+                .unwrap()
+        };
+        path.clear();
+        path.push_str("the application changed its original buffer");
+        drop(path);
+        let result = client.execute_file_mutation(&prepared, |_| Err(4u8));
+        assert_eq!(result, Err(Error::Wait(4)));
+        assert_eq!(
+            *replies.closed.borrow(),
+            [90],
+            "cancel before application signal delivery"
+        );
+        // A second invocation starts a new position, not a consumed label.
+        // Simulate native label reuse in a fresh transport script phase.
+        replies.calls.set(0);
+        replies.closed.borrow_mut().clear();
+        let result = client
+            .execute_file_mutation(&prepared, |_| Ok::<(), u8>(()))
+            .unwrap();
+        assert_eq!(result.is_some(), opcode == wire::OP_OPEN_AT);
+        assert_eq!(*replies.closed.borrow(), [90, 91]);
+        let payloads = replies.payloads.borrow();
+        assert_eq!(payloads.len(), 4);
+        assert!(payloads.windows(2).all(|pair| pair[0] == pair[1]));
+        if opcode == wire::OP_OPEN_AT {
+            let input = wire::decode_open_at(&payloads[0]).unwrap();
+            assert_eq!(input.path, "file");
+            assert_eq!(
+                input.options,
+                wire::OPEN_WRITE | wire::OPEN_CREATE | wire::OPEN_EXCLUSIVE
+            );
+        } else {
+            let input = wire::decode_truncate_at(&payloads[0]).unwrap();
+            assert_eq!(input.path, "file");
+            assert_eq!(input.length, 5000);
+        }
+    }
+}
+
+#[test]
+fn prepared_length_and_maximum_path_keep_exact_wire_bounds() {
+    let replies = Replies::new(wire::OP_FTRUNCATE, 0, true);
+    let client = Client::new(&replies);
+    let mut original = Object {
+        handle: 7,
+        rights: mnu_abi::HANDLE_RIGHT_ALL,
+    };
+    let prepared = client.prepare_ftruncate(original, 5000).unwrap();
+    original.handle = 8; // The caller changed its own argument, not the lease.
+    assert_eq!(original.handle, 8);
+    assert_eq!(
+        client.execute_file_mutation(&prepared, |_| Err(4u8)),
+        Err(Error::Wait(4))
+    );
+    assert_eq!(
+        wire::decode_file_length(&replies.payloads.borrow()[0]),
+        Ok(5000)
+    );
+    assert_eq!(*replies.closed.borrow(), [90]);
+
+    let replies = Replies::new(wire::OP_OPEN_AT, 0, false);
+    let client = Client::new(&replies);
+    let path = "x".repeat(wire::MAX_PATH_LEN);
+    let prepared = client
+        .prepare_open_at(OpenAtBase::ProcessRoot, wire::OPEN_READ, 0, &path)
+        .unwrap();
+    drop(path);
+    assert_eq!(
+        client.execute_file_mutation(&prepared, |_| Err(4u8)),
+        Err(Error::Wait(4))
+    );
+    assert_eq!(
+        replies.payloads.borrow()[0].len(),
+        wire::OPEN_AT_HEADER_LEN + wire::MAX_PATH_LEN
+    );
+    let path = "x".repeat(wire::MAX_PATH_LEN + 1);
+    assert!(matches!(
+        client.prepare_open_at(OpenAtBase::ProcessRoot, wire::OPEN_READ, 0, &path),
+        Err(ClientError::Protocol(_))
+    ));
+    assert_eq!(replies.calls.get(), 1, "invalid input must not reach IPC");
+}
