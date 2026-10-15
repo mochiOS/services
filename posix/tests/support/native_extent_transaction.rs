@@ -702,8 +702,12 @@ fn partial_growth_zeros_only_the_newly_valid_private_boundary_suffix() {
 fn external_preparation_suspends_prefix_but_can_cancel_before_io_begins() {
     let _test = crate::TEST_LOCK.lock().unwrap();
     let (object, pin, physical) = setup();
-    let owner =
+    let mut owner =
         extent_transaction::ExtentTransaction::prepare_external(&object, 8192, 5000).unwrap();
+    assert_eq!(
+        owner.request_external_publication(),
+        Err(crate::syscall::EINVAL)
+    );
     // The first page is outside the resize's affected range, but would also
     // expose stale bytes if an uncertain storage update lost its owner.
     for address in [BASE, BASE + 4096] {
@@ -765,6 +769,10 @@ fn failed_external_begin_still_cancels_and_local_owner_cannot_begin_external_io(
             assert_eq!(result, Err(crate::syscall::EIO));
         } else {
             assert_eq!(owner.begin_external(), Err(crate::syscall::EINVAL));
+            assert_eq!(
+                owner.request_external_publication(),
+                Err(crate::syscall::EINVAL)
+            );
         }
         assert_eq!(owner.confirm_unchanged(), Err(crate::syscall::EINVAL));
         crate::without_allocations(|| drop(owner));
@@ -883,7 +891,7 @@ fn confirmed_external_publication_restores_prefix_and_only_zeros_changed_boundar
             .unwrap()
             .bytes
             .resize(length as usize, 0);
-        crate::without_allocations(|| owner.request_publication()).unwrap();
+        crate::without_allocations(|| owner.request_external_publication()).unwrap();
         assert_eq!(owner.confirm_unchanged(), Err(crate::syscall::EINVAL));
         let capacity = (length + 4095) & !4095;
         let boundary = old_length.min(length);
@@ -1039,7 +1047,7 @@ fn confirmed_external_publication_keeps_decision_after_failed_check_and_owner_lo
     paging::LOOKUPS.store(0, Ordering::Relaxed);
     paging::FAIL_LOOKUP.store(1, Ordering::Relaxed);
     assert_eq!(
-        crate::without_allocations(|| owner.request_publication()),
+        crate::without_allocations(|| owner.request_external_publication()),
         Err(crate::syscall::EFAULT)
     );
     assert_eq!(owner.confirm_unchanged(), Err(crate::syscall::EINVAL));

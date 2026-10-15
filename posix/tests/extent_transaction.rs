@@ -4,6 +4,28 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 #[test]
+fn native_provider_memory_update_probe_tracks_the_authoritative_abi() {
+    use mnu_abi::SyscallNumber as Number;
+    let probe = include_str!("native_provider_memory_update.c");
+    for (name, number) in [
+        ("HANDLE_DUPLICATE", Number::HandleDuplicate),
+        ("IPC_SEND", Number::IpcSendObjectHandles),
+        ("HANDLE_RIGHTS_GET", Number::HandleRightsGet),
+        ("HANDLE_CONTROL", Number::HandleControl),
+        ("HANDLE_READ_AT", Number::HandleReadAt),
+        (
+            "PROVIDER_MEMORY_UPDATE_CREATE",
+            Number::ProviderMemoryUpdateCreate,
+        ),
+    ] {
+        assert!(probe.contains(&format!("{name} = {}", number as u64)));
+    }
+    assert_eq!(mnu_abi::memory_update::BEGIN, 1);
+    assert_eq!(mnu_abi::memory_update::UNCHANGED, 2);
+    assert_eq!(mnu_abi::memory_update::PUBLISH, 3);
+}
+
+#[test]
 fn owned_native_extent_composes_real_cache_records_and_cleanup_without_vm_lock_across_wait() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
