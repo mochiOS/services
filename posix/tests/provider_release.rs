@@ -13,13 +13,7 @@ fn production_release_owner_queue_and_retry_survive_allocation_denial() {
     let end = table
         .find("#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]")
         .unwrap();
-    let table = table[..end].replace(
-        "mod provider_release;",
-        &format!(
-            "#[path={:?}] mod provider_release;",
-            root.join("core/src/task/handle_table/provider_release.rs")
-        ),
-    );
+    let table = &table[..end];
     let handle = include_str!("../../../core/src/syscall/handle.rs");
     let begin = handle
         .find("pub(crate) fn flush_provider_releases()")
@@ -52,6 +46,7 @@ mod interrupt {pub mod spinlock {
     impl<T> SpinLock<T>{
         pub const fn new(value:T)->Self{Self(std::sync::Mutex::new(value))}
         pub fn lock(&self)->std::sync::MutexGuard<'_,T>{self.0.lock().unwrap()}
+        pub fn try_lock(&self)->Option<std::sync::MutexGuard<'_,T>>{self.0.try_lock().ok()}
     }
 }}
 extern crate self as mnu_abi;
@@ -75,7 +70,14 @@ mod task {
         use crate::mnu_abi;
 "#,
     );
-    program.push_str(&table);
+    program = program.replace(
+        "mod task {",
+        &format!(
+            "mod task {{ #[path={:?}] pub mod deferred;",
+            root.join("core/src/task/deferred.rs")
+        ),
+    );
+    program.push_str(table);
     program.push_str(
         r#"
     }
@@ -193,8 +195,8 @@ fn main(){
     assert!(detached.pop().is_none());
     h::requeue_provider_release(retry);
     let mut batch=h::take_provider_releases();
-    assert_eq!(batch.pop().unwrap().release().object_id,20001);
-    assert_eq!(batch.pop().unwrap().release().object_id,20000);
+    assert_eq!(batch.pop().unwrap().value().object_id,20001);
+    assert_eq!(batch.pop().unwrap().value().object_id,20000);
     assert!(batch.pop().is_none());
     // Large batches and final destruction must be iterative and allocation-free.
     let mut objects=Vec::new();
@@ -222,9 +224,14 @@ fn main(){
     assert_eq!(ATTEMPTS.load(Ordering::Relaxed),0);
     DENY.store(false,Ordering::Relaxed);
     flush::verify_gate_allocations();
+    deferred_cleanup_probe::verify();
 }
 
 "#);
+    program.push_str(&format!(
+        "#[path={:?}] mod deferred_cleanup_probe;\n",
+        root.join("services/posix/tests/support/deferred_cleanup.rs")
+    ));
     let directory = std::env::temp_dir().join(format!(
         "mochios-provider-release-{}-{}",
         std::process::id(),
