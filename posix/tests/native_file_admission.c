@@ -56,8 +56,13 @@ int main(void) {
   CHECK(atomic_load(&reads) != 0 && atomic_load(&reader_error) == 0);
   fprintf(stderr, "file-admission: reader active\n");
   for (unsigned i = 0; i < 64; ++i) {
+#ifdef FILE_ADMISSION_PATH_TRUNCATE_ONLY
+    CHECK(truncate(path, i % 2 ? 8192 : 5000) == 0);
+#else
     CHECK(ftruncate(source, i % 2 ? 8192 : 5000) == 0);
-#ifndef FILE_ADMISSION_FTRUNCATE_ONLY
+#endif
+#if !defined(FILE_ADMISSION_FTRUNCATE_ONLY) && \
+    !defined(FILE_ADMISSION_PATH_TRUNCATE_ONLY)
     if (i % 8 == 0) {
       int opened = open(path, O_RDWR | O_TRUNC);
       CHECK(opened >= 0);
@@ -73,6 +78,8 @@ int main(void) {
   CHECK(close(source) == 0 && unlink(path) == 0);
 #ifdef FILE_ADMISSION_FTRUNCATE_ONLY
   printf("ftruncate-admission: PASS concurrent pread/ftruncate (%u "
+#elif defined(FILE_ADMISSION_PATH_TRUNCATE_ONLY)
+  printf("truncate-admission: PASS concurrent pread/truncate (%u "
 #else
   printf("file-admission: PASS concurrent pread/ftruncate/truncate/O_TRUNC (%u "
 #endif

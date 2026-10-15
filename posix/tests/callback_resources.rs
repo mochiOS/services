@@ -339,3 +339,26 @@ fn libc_ftruncate_tracks_the_source_and_returns_from_wait_before_dispatch() {
         operation.find("retire()").unwrap() < operation.find("drain_pending_signals()").unwrap()
     );
 }
+
+#[test]
+fn libc_path_truncate_encodes_before_callbacks_reopen() {
+    let runtime = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
+    let exported = runtime
+        .split("fn truncate(")
+        .nth(1)
+        .unwrap()
+        .split("#[unsafe(no_mangle)]")
+        .next()
+        .unwrap();
+    assert!(exported.contains("file_mutation::truncate("));
+    assert!(!exported.contains("client.truncate_at("));
+    let source = include_str!("../../../user/crates/newlib-runtime/src/file_mutation.rs");
+    let operation = source.split("pub(super) fn truncate(").nth(1).unwrap();
+    let snapshot = operation.find("prepare_truncate_at(").unwrap();
+    assert!(operation.find("let native = delivery(control)").unwrap() < snapshot);
+    assert!(snapshot < operation.find("drop(native)").unwrap());
+    assert!(
+        operation.find("retire()").unwrap() < operation.find("drain_pending_signals()").unwrap()
+    );
+    assert_eq!(operation.matches("c_bytes(path)").count(), 1);
+}
