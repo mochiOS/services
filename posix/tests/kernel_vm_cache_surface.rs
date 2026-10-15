@@ -43,7 +43,7 @@ use std::sync::Arc;
 mod syscall {pub const ENOMEM:u64=(-12i64) as u64;}
 mod mem {pub mod object_io_native {
     pub fn new_lock()->Result<crate::object_io::IoLock,u64>{
-        Ok(crate::object_io::IoLock::from_allocated(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))))
+        Ok(crate::object_io::IoLock::from_allocated(std::sync::Arc::new(crate::object_io::State::new())))
     }
 }}
 struct ProviderObject { endpoint_thread_id: u64, endpoint_slot: u16, endpoint_generation: u64 }

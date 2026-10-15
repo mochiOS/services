@@ -6,13 +6,27 @@ mod object_io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[test]
+fn cache_generations_follow_backing_identity_not_unrelated_io() {
+    let mut registry = object_io::Registry::new();
+    let first = gate(&mut registry, 7);
+    let alias = gate(&mut registry, 7);
+    let other = gate(&mut registry, 8);
+    let initial = first.generation();
+    alias.advance_generation();
+    assert_eq!(first.generation(), initial + 1);
+    assert_eq!(other.generation(), initial);
+    assert_eq!(registry.existing(&7).unwrap().generation(), initial + 1);
+    assert!(registry.existing(&9).is_none());
+}
+
 fn gate(registry: &mut object_io::Registry<u64>, key: u64) -> object_io::IoLock {
     registry
         .try_get(
             key,
             || {
                 Ok(object_io::IoLock::from_allocated(Arc::new(
-                    std::sync::atomic::AtomicBool::new(false),
+                    object_io::State::new(),
                 )))
             },
             (),
