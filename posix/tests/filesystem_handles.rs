@@ -2708,7 +2708,17 @@ fn chown_at_updates_ownership_and_rejects_a_non_owner() {
 
 #[test]
 fn open_directory_paths_follow_rename_and_reject_unlinked_cwds() {
+    check_open_directory_path_lifetime(false);
+    check_open_directory_path_lifetime(true);
+}
+
+fn check_open_directory_path_lifetime(mounted_namespace: bool) {
     let mut filesystem = test_filesystem();
+    if mounted_namespace {
+        filesystem
+            .mount_devices(b"/dev", filesystem_service::devfs::DeviceFilesystem::default())
+            .unwrap();
+    }
     let root = filesystem
         .open_at(
             protocol::Header {
@@ -2792,7 +2802,7 @@ fn open_directory_paths_follow_rename_and_reject_unlinked_cwds() {
         root,
         cwd,
     );
-    assert!(matches!(missing, Err(2)));
+    assert!(matches!(missing, Err(2)), "mounted namespace: {mounted_namespace}");
 }
 
 #[test]
