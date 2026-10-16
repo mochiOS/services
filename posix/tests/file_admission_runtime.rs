@@ -22,10 +22,12 @@ fn openat_captures_directory_authority_and_tracks_it_before_reopening_callbacks(
     );
     assert!(slot.find("prepare_open_at(base,").unwrap() < slot.find("drop(native)").unwrap());
     assert!(slot.find("_directory: directory").unwrap() < slot.find("activate()").unwrap());
-    assert_eq!(slot.matches("c_bytes(path)").count(), 1);
-    for error in ["return Err(ENOENT)", "return Err(ENAMETOOLONG)"] {
-        assert!(slot.find(error).unwrap() < slot.find("prepare_open_at(base,").unwrap());
-    }
+    assert!(!slot.contains("c_bytes(path)"));
+    assert_eq!(slot.matches("path_io::capture(path,").count(), 1);
+    assert!(
+        slot.find("path_io::capture(path,").unwrap()
+            < slot.find("rename_posix_base(dirfd, path)").unwrap()
+    );
 }
 
 #[test]

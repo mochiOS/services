@@ -530,6 +530,47 @@ fn linkat_flag_matches_the_newlib_public_header() {
 }
 
 #[test]
+fn bounded_capture_keeps_raw_bytes_and_accepts_the_exact_wire_limit() {
+    for length in [
+        1,
+        255,
+        posix_protocol::MAX_PATH_LEN - 1,
+        posix_protocol::MAX_PATH_LEN,
+    ] {
+        let mut input = vec![0xffu8; length];
+        input.push(0);
+        let mut output = [0xa5; posix_protocol::MAX_PATH_LEN];
+        assert_eq!(
+            implementation::capture(input.as_ptr().cast(), &mut output),
+            Ok(length)
+        );
+        assert!(output[..length].iter().all(|byte| *byte == 0xff));
+        assert!(output[length..].iter().all(|byte| *byte == 0xa5));
+    }
+}
+
+#[test]
+fn bounded_capture_rejects_empty_null_and_unterminated_overlong_inputs() {
+    let mut output = [0xa5; posix_protocol::MAX_PATH_LEN];
+    assert_eq!(
+        implementation::capture(std::ptr::null(), &mut output),
+        Err(EFAULT)
+    );
+    assert_eq!(
+        implementation::capture(c"".as_ptr(), &mut output),
+        Err(ENOENT)
+    );
+    assert!(output.iter().all(|byte| *byte == 0xa5));
+    // Exactly MAX+1 readable non-NUL bytes suffice to prove overflow; there
+    // need not be any terminator or readable memory after this snapshot.
+    let input = [0xffu8; posix_protocol::MAX_PATH_LEN + 1];
+    assert_eq!(
+        implementation::capture(input.as_ptr().cast(), &mut output),
+        Err(ENAMETOOLONG)
+    );
+}
+
+#[test]
 fn byte_paths_are_snapshotted_without_unicode_conversion_in_both_inputs() {
     let _serial = SERIAL.lock().unwrap();
     reset();

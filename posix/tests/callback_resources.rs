@@ -366,7 +366,9 @@ fn libc_path_truncate_encodes_before_callbacks_reopen() {
     assert!(
         operation.find("retire()").unwrap() < operation.find("drain_pending_signals()").unwrap()
     );
-    assert_eq!(operation.matches("c_bytes(path)").count(), 1);
+    assert!(!operation.contains("c_bytes(path)"));
+    assert_eq!(operation.matches("path_io::capture(path,").count(), 1);
+    assert!(operation.find("path_io::capture(path,").unwrap() < snapshot);
 }
 
 #[test]
