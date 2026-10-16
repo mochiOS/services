@@ -47,7 +47,11 @@ fn object_native(raw:u64,rights:HandleRights)->Result<KernelObject,Error>{
 }
 fn provider_endpoint(_: &ProviderObject)->syscall::ipc::IpcEndpoint{endpoint()}
 fn endpoint()->syscall::ipc::IpcEndpoint{syscall::ipc::IpcEndpoint{thread_id:7,slot:0,generation:9}}
-mod task{pub type ProcessId=u64;pub struct FileHandle;}
+mod task{
+    pub type ProcessId=u64;pub struct FileHandle;
+    #[derive(Clone,Copy)]pub struct ThreadId(pub u64);
+    impl ThreadId{pub fn as_u64(self)->u64{self.0}}
+}
 mod mem{pub mod vm_object{
     pub struct ProviderAdmission(pub u64);
     impl ProviderAdmission{pub fn signals(&self)->u64{self.0}}
@@ -67,14 +71,16 @@ mod syscall{
         use std::sync::{Mutex,MutexGuard};
         #[derive(Clone,Copy)]pub struct IpcEndpoint{pub thread_id:u64,pub slot:u16,pub generation:u64}
         pub fn endpoint_is_valid(_:IpcEndpoint)->bool{crate::VALID.get()}
-        struct Mailbox{count:usize}
-        static MAILBOXES:Mutex<[Mailbox;2]>=Mutex::new([Mailbox{count:0},Mailbox{count:1}]);
+        struct Mailbox{count:usize,waiter:u64}
+        static MAILBOXES:Mutex<[Mailbox;2]>=Mutex::new([Mailbox{count:0,waiter:0},Mailbox{count:1,waiter:0}]);
         fn lock_mailboxes()->MutexGuard<'static,[Mailbox;2]>{MAILBOXES.lock().unwrap()}
+        pub fn force_waiter(waiter:u64){MAILBOXES.lock().unwrap()[0].waiter=waiter;}
+        pub fn waiter()->u64{MAILBOXES.lock().unwrap()[0].waiter}
 "#);
     program.push_str(probe::between(
         include_str!("../../../core/src/syscall/ipc.rs"),
         "pub(crate) fn endpoint_wait_ready(",
-        "pub(crate) fn register_endpoint_waiter(",
+        "fn process_local_endpoint(",
     ));
     program.push_str("}}\n");
     program.push_str(probe::between(
@@ -89,6 +95,26 @@ fn failure(mut item:HandleWaitItem,source:Option<&Weak<mem::vm_object::ProviderA
     assert!(matches!(wait_item_signal(&mut item,source),Err(raw) if raw==error.into_raw()));
 }
 fn main(){
+    let owner=task::ThreadId(7);
+    assert_eq!(syscall::ipc::register_endpoint_waiter(endpoint(),owner),Ok(()));
+    assert_eq!(syscall::ipc::register_endpoint_waiter(endpoint(),owner),Ok(()));
+    assert_eq!(syscall::ipc::waiter(),7);
+    assert_eq!(syscall::ipc::register_endpoint_waiter(endpoint(),task::ThreadId(8)),Err(Error::AccessDenied.into_raw()));
+    syscall::ipc::remove_endpoint_waiter(endpoint(),task::ThreadId(8));
+    assert_eq!(syscall::ipc::waiter(),7,"foreign removal must not clear the owner");
+    VALID.set(false);
+    assert_eq!(syscall::ipc::register_endpoint_waiter(endpoint(),owner),Err(Error::NotFound.into_raw()));
+    assert_eq!(syscall::ipc::waiter(),7);VALID.set(true);
+    syscall::ipc::remove_endpoint_waiter(endpoint(),owner);
+    syscall::ipc::remove_endpoint_waiter(endpoint(),owner);
+    assert_eq!(syscall::ipc::waiter(),0);
+    syscall::ipc::force_waiter(22);
+    assert_eq!(syscall::ipc::register_endpoint_waiter(endpoint(),owner),Err(Error::ResourceUnavailable.into_raw()));
+    assert_eq!(syscall::ipc::waiter(),22);syscall::ipc::force_waiter(0);
+    let mut invalid=endpoint();invalid.slot=u16::MAX;
+    assert_eq!(syscall::ipc::register_endpoint_waiter(invalid,owner),Err(Error::InvalidArgument.into_raw()));
+    syscall::ipc::remove_endpoint_waiter(invalid,owner);
+    assert_eq!(syscall::ipc::waiter(),0);
     let all=HANDLE_SIGNAL_READABLE|HANDLE_SIGNAL_WRITABLE|HANDLE_SIGNAL_PEER_CLOSED|HANDLE_SIGNAL_IDLE;
     let admission=Arc::new(mem::vm_object::ProviderAdmission(HANDLE_SIGNAL_READABLE|HANDLE_SIGNAL_PEER_CLOSED));
     let weak=Arc::downgrade(&admission);
@@ -115,7 +141,6 @@ fn main(){
         failure(item(HANDLE_SIGNAL_WRITABLE),None,Error::InvalidArgument);
         VALID.set(false);failure(query,None,Error::NotFound);VALID.set(true);
     }
-    let mut invalid=endpoint();invalid.slot=u16::MAX;
     assert_eq!(syscall::ipc::endpoint_wait_ready(invalid),Err(Error::InvalidArgument.into_raw()));
     set(KernelObject::MemoryAdmission(admission.clone()));
     let mut query=item(HANDLE_SIGNAL_READABLE);

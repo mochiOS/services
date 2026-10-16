@@ -143,7 +143,7 @@ mod syscall {
     pub mod ipc {
         #[derive(Clone,Copy)]pub struct IpcEndpoint(pub u64);
         pub fn register_endpoint_waiter(_:IpcEndpoint,_:u64)->Result<(),u64>{
-            if !crate::stage(){return Err(crate::EAGAIN);}crate::add(2);Ok(())
+            if !crate::stage(){return Err(crate::Error::ResourceUnavailable.into_raw());}crate::add(2);Ok(())
         }
         pub fn remove_endpoint_waiter(_:IpcEndpoint,_:u64){crate::remove(2)}
         pub mod lifetime {
@@ -231,7 +231,7 @@ fn main(){
     // backend deliberately arms before failing, to exercise unconditional Drop.
     for index in 1..=8 {
         reset();FAIL_STAGE.set(index);
-        let expected=if [1,5,8].contains(&index){Error::ResourceUnavailable.into_raw()}else{EAGAIN};
+        let expected=if [1,2,5,8].contains(&index){Error::ResourceUnavailable.into_raw()}else{EAGAIN};
         assert_eq!(handle::wait_many(1,5,100,0),expected);clean();assert_eq!(SLEEPS.get(),0);
     }
     // Failure during the post-registration readiness scan must clean all kinds.
