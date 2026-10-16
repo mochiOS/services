@@ -304,7 +304,10 @@ fn native_storage_keeps_allocation_and_usercopy_failure_categories() {
 fn borrowed_identity_preparation_is_fallible_and_preserves_exact_opaque_text() {
     let identity = "opaque:image/日本語#42";
     FAIL_NEXT.with(|fail| fail.set(true));
-    assert_eq!(storage::text(identity), Err(mnu_abi::ENOMEM));
+    assert_eq!(
+        storage::text(identity),
+        Err(mnu_abi::status::Error::ResourceUnavailable)
+    );
     assert!(!FAIL_NEXT.with(|fail| fail.replace(false)));
     assert_eq!(storage::text(identity).unwrap(), identity);
     FAIL_NEXT.with(|fail| fail.set(true));
