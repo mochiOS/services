@@ -2,6 +2,10 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#define NATIVE_INVALID_ARGUMENT INT64_C(-262139)
+#define NATIVE_INVALID_ADDRESS INT64_C(-262142)
+#define NATIVE_NOT_FOUND INT64_C(-262135)
+
 #ifdef FREESTANDING_PROBE
 /* Test the native boundary without any libc bootstrap dependency. */
 __asm__(".global _start\n_start:\n"
@@ -45,9 +49,9 @@ int main(void) {
     static struct { struct security_identity record; uint64_t guard; } output;
     unsigned char *bytes = (unsigned char *)&output;
     for (unsigned i = 0; i < sizeof(output); ++i) bytes[i] = 0x5a;
-    CHECK(native3(617, 0, (uint64_t)&output.record, 319) == -22);
+    CHECK(native3(617, 0, (uint64_t)&output.record, 319) == NATIVE_INVALID_ARGUMENT);
     for (unsigned i = 0; i < sizeof(output); ++i) CHECK(bytes[i] == 0x5a);
-    CHECK(native3(617, 0, 0, 320) == -14);
+    CHECK(native3(617, 0, 0, 320) == NATIVE_INVALID_ADDRESS);
     CHECK(native3(617, 0, (uint64_t)&output.record, 320) == 0);
     CHECK(output.guard == UINT64_C(0x5a5a5a5a5a5a5a5a));
     CHECK(output.record.process == caller.process && output.record.thread == caller.thread);
@@ -60,7 +64,7 @@ int main(void) {
     CHECK(endpoint > 0);
     CHECK(native3(617, endpoint, (uint64_t)&output.record, 320) == 0);
     CHECK(output.record.process == caller.process && output.record.thread == caller.thread);
-    CHECK(native3(617, UINT64_MAX, (uint64_t)&output.record, 320) == -22);
+    CHECK(native3(617, UINT64_MAX, (uint64_t)&output.record, 320) == NATIVE_NOT_FOUND);
     static const char relative_grant[] = "fs.scope.read@relative.txt\x1f"
                                           "/system/services/capability.service";
     static const char absolute_grant[] = "fs.scope.read@/native-scope-check\x1f"

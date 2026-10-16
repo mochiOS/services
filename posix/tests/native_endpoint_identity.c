@@ -3,6 +3,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#define NATIVE_INVALID_ARGUMENT INT64_C(-262139)
+#define NATIVE_INVALID_ADDRESS INT64_C(-262142)
+#define NATIVE_ACCESS_DENIED INT64_C(-262138)
+
 enum { IPC_CREATE = 587, EXECUTION_IDENTITY_READ = 677, IPC_ENDPOINT_IDENTITY_READ = 678 };
 struct identity { uint64_t process, thread; };
 _Static_assert(sizeof(struct identity) == 16, "native execution identity ABI");
@@ -94,10 +98,10 @@ int main(void) {
         uint64_t guard;
     } security;
     memset(&security, 0x5a, sizeof(security));
-    CHECK(native3(617, 0, (uint64_t)&security.identity, sizeof(security.identity) - 1) == -22);
+    CHECK(native3(617, 0, (uint64_t)&security.identity, sizeof(security.identity) - 1) == NATIVE_INVALID_ARGUMENT);
     for (unsigned i = 0; i < sizeof(security); ++i)
         CHECK(((unsigned char *)&security)[i] == 0x5a);
-    CHECK(native3(617, 0, 0, sizeof(security.identity)) == -14);
+    CHECK(native3(617, 0, 0, sizeof(security.identity)) == NATIVE_INVALID_ADDRESS);
     CHECK(native3(617, 0, (uint64_t)&security.identity, sizeof(security.identity)) == 0);
     CHECK(security.guard == UINT64_C(0x5a5a5a5a5a5a5a5a));
     CHECK(security.identity.process == caller.process && security.identity.thread == caller.thread);
@@ -105,7 +109,7 @@ int main(void) {
     CHECK(security.identity.package_length == sizeof("org.mochios.input") - 1);
     CHECK(memcmp(security.identity.package, "org.mochios.input", security.identity.package_length) == 0);
 #ifdef EXPECT_INSPECTION_DENIED
-    CHECK(native3(617, endpoint, (uint64_t)&security.identity, sizeof(security.identity)) == -1);
+    CHECK(native3(617, endpoint, (uint64_t)&security.identity, sizeof(security.identity)) == NATIVE_ACCESS_DENIED);
 #endif
     fprintf(stderr, "endpoint-identity: PASS credential-free security identity, "
                     "exact-size output, package authentication and inspection gate\n");

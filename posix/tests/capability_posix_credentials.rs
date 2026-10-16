@@ -18,12 +18,14 @@ pub mod syscall {
 #[derive(Default)]
 struct State {
     events: Vec<&'static str>,
+    fail_identity: Option<i64>,
     fail_open: bool,
     fail_status: bool,
     different_process: bool,
 }
 static STATE: Mutex<State> = Mutex::new(State {
     events: Vec::new(),
+    fail_identity: None,
     fail_open: false,
     fail_status: false,
     different_process: false,
@@ -48,6 +50,9 @@ pub mod process {
     ) -> Result<crate::syscall::ThreadSecurityContext, crate::syscall::SysError> {
         assert_eq!(endpoint, 12);
         crate::STATE.lock().unwrap().events.push("native-identity");
+        if let Some(error) = crate::STATE.lock().unwrap().fail_identity {
+            return Err(crate::syscall::SysError::from_raw(error));
+        }
         Ok(crate::syscall::ThreadSecurityContext {
             process_id: 31,
             package_id: [0x34; mnu_abi::APPLICATION_ID_FIELD_LEN],
@@ -125,6 +130,25 @@ fn credentials_never_fall_back_to_native_root_and_every_acquired_handle_is_close
             "close"
         ]
     );
+    for error in [
+        mnu_abi::status::Error::AccessDenied,
+        mnu_abi::status::Error::NotFound,
+        mnu_abi::status::Error::NotReady,
+        mnu_abi::status::Error::InvalidAddress,
+        mnu_abi::status::Error::ResourceUnavailable,
+        mnu_abi::status::Error::BackingFailure,
+    ] {
+        let raw = error.into_raw() as i64;
+        *STATE.lock().unwrap() = State {
+            fail_identity: Some(raw),
+            ..Default::default()
+        };
+        assert_eq!(
+            production::read(12, |_| panic!("must not query unauthenticated credentials")),
+            Err(syscall::SysError::from_raw(raw))
+        );
+        assert_eq!(STATE.lock().unwrap().events, ["native-identity"]);
+    }
     for error in [-3, -13, -5, -11] {
         *STATE.lock().unwrap() = State::default();
         assert_eq!(
