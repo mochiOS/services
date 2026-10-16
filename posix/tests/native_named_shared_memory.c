@@ -136,7 +136,7 @@ int main(void) {
   CHECK(resize(first, 4097) == 0);
   uint32_t first_ram = backing(endpoint, first, 1);
   CHECK(first_ram != 0);
-  CHECK((int64_t)native(RESIZE, first_ram, 0, 0, 0, 0, 0) == -13);
+  CHECK((int64_t)native(RESIZE, first_ram, 0, 0, 0, 0, 0) == INT64_C(-262138));
   uint64_t mapped = native(MAP, 0, 8192, 3, 2, first_ram, 0);
   CHECK((int64_t)mapped > 0);
   volatile unsigned char *bytes = (volatile unsigned char *)(uintptr_t)mapped;

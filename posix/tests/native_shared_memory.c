@@ -82,7 +82,7 @@ static int probe(void) {
 
     uint64_t endpoint = native(IPC_CREATE, 0, 0, 0, 0, 0, 0);
     if ((int64_t)endpoint < 0) return 14;
-    if ((int64_t)native(MEMORY_OBJECT_LENGTH, endpoint, 0, 0, 0, 0, 0) != -13) return 36;
+    if ((int64_t)native(MEMORY_OBJECT_LENGTH, endpoint, 0, 0, 0, 0, 0) != INT64_C(-262138)) return 36;
     pid_t child = fork();
     if (child < 0) return 15;
     fprintf(stderr, "shared-memory: fork %d\n", (int)child);

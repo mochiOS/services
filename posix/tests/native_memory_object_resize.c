@@ -44,7 +44,7 @@ int main(void) {
   CHECK(native(CREATE, UINT64_MAX, 1, 0, 0, 0, 0) == INT64_C(-262141));
   int64_t fixed = native(CREATE, 4096, 0, 0, 0, 0, 0);
   CHECK(fixed > 0 && !(native(RIGHTS, fixed, 0, 0, 0, 0, 0) & 256));
-  CHECK(native(RESIZE, fixed, 8192, 0, 0, 0, 0) == -13);
+  CHECK(native(RESIZE, fixed, 8192, 0, 0, 0, 0) == INT64_C(-262138));
   CHECK(native(CLOSE, fixed, 0, 0, 0, 0, 0) == 0);
   int64_t object = native(CREATE, 0, 1, 0, 0, 0, 0);
   CHECK(object > 0 && (native(RIGHTS, object, 0, 0, 0, 0, 0) & 256));
@@ -65,8 +65,18 @@ int main(void) {
   written = 0;
   CHECK(native(WRITE_AT, object, (uintptr_t)&written, 1, 0, 0, 0) == 1);
   int64_t readonly = native(DUPLICATE, object, 65, 0, 0, 0, 0);
-  CHECK(readonly > 0 && native(RESIZE, readonly, 1, 0, 0, 0, 0) == -13);
-  CHECK(native(RESIZE, 0, 0, 0, 0, 0, 0) == -9);
+  CHECK(readonly > 0 &&
+        native(RESIZE, readonly, 1, 0, 0, 0, 0) == INT64_C(-262138));
+  CHECK(native(RESIZE, 0, 0, 0, 0, 0, 0) == INT64_C(-262139));
+  CHECK(native(RESIZE, UINT64_MAX, 0, 0, 0, 0, 0) == INT64_C(-262139));
+  CHECK(native(LENGTH, 0, 0, 0, 0, 0, 0) == INT64_C(-262139));
+  CHECK(native(LENGTH, UINT64_MAX, 0, 0, 0, 0, 0) == INT64_C(-262139));
+  int64_t control_only = native(DUPLICATE, object, 256, 0, 0, 0, 0);
+  CHECK(control_only > 0);
+  CHECK(native(LENGTH, control_only, 0, 0, 0, 0, 0) == INT64_C(-262138));
+  CHECK(native(CLOSE, control_only, 0, 0, 0, 0, 0) == 0);
+  CHECK(native(LENGTH, control_only, 0, 0, 0, 0, 0) == INT64_C(-262139));
+  CHECK(native(RESIZE, control_only, 0, 0, 0, 0, 0) == INT64_C(-262139));
   CHECK(native(RESIZE, object, UINT64_MAX, 0, 0, 0, 0) == INT64_C(-262141));
   CHECK(native(LENGTH, object, 0, 0, 0, 0, 0) == 12288);
   int64_t mapped = native(MAP, 0, 16384, 3, 2, object, 0);
