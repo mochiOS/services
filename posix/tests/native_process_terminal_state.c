@@ -5,6 +5,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#define NATIVE_RESOURCE_UNAVAILABLE INT64_C(-262141)
+
 static int64_t native6(uint64_t number, uint64_t a, uint64_t b, uint64_t c,
                        uint64_t d, uint64_t e, uint64_t f) {
   register uint64_t r10 __asm__("r10") = d;
@@ -72,7 +74,7 @@ __attribute__((used, noreturn)) static void child(uint64_t code) {
           (uint64_t)(worker_stacks[index] + sizeof(worker_stacks[0]));
       context.argument = index == 0 ? mode : 0;
       int64_t result = N(577, &context, sizeof(context), 0);
-      if (result < 0 && result != -ENOSYS)
+      if (result < 0 && result != NATIVE_RESOURCE_UNAVAILABLE)
         store(&shared->failed, (uint64_t)-result);
     }
     for (;;) {

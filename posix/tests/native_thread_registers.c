@@ -5,6 +5,7 @@
 static unsigned char register_stack[65536] __attribute__((aligned(16)));
 static volatile uint64_t register_result[18];
 static uint64_t register_tls = UINT64_C(0xabcddcba11223344);
+#define NATIVE_INVALID_ARGUMENT INT64_C(-262139)
 extern void native_register_entry(void);
 __asm__(
     ".text\n"
@@ -59,12 +60,12 @@ int native_thread_register_probe(void) {
         context.registers[i] = UINT64_C(0xdead123400000000) + i;
     }
     /* The old, shorter ABI must be rejected rather than reading past it. */
-    if (register_native(577, (uint64_t)&context, 64) != -22) return 1;
+    if (register_native(577, (uint64_t)&context, 64) != NATIVE_INVALID_ARGUMENT) return 1;
     context.flags = 1;
-    if (register_native(577, (uint64_t)&context, sizeof(context)) != -22) return 2;
+    if (register_native(577, (uint64_t)&context, sizeof(context)) != NATIVE_INVALID_ARGUMENT) return 2;
     context.flags = 0;
     context.reserved[0] = 1;
-    if (register_native(577, (uint64_t)&context, sizeof(context)) != -22) return 23;
+    if (register_native(577, (uint64_t)&context, sizeof(context)) != NATIVE_INVALID_ARGUMENT) return 23;
     context.reserved[0] = 0;
     if (register_native(577, (uint64_t)&context, sizeof(context)) <= 0) return 3;
     for (unsigned i = 0; i < 1000 && !register_result[17]; ++i) {
