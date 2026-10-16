@@ -44,6 +44,11 @@ static int flags_match(int fd) {
          !!(status & O_NONBLOCK) == !!options &&
          !!(descriptor & FD_CLOEXEC) == !!options;
 }
+static int create_pair(int kind, int *output) {
+  if (type == 2)
+    return pipe2(output, options ? O_NONBLOCK | O_CLOEXEC : 0);
+  return socketpair(AF_UNIX, kind, 0, output);
+}
 int main(void) {
   struct sigaction action = {0};
   action.sa_handler = fault_handler;
@@ -57,7 +62,7 @@ int main(void) {
   CHECK(write(warm_pair[0], "w", 1) == 1 &&
         read(warm_pair[1], &warm_byte, 1) == 1 && warm_byte == 'w');
   CHECK(close(warm_pair[0]) == 0 && close(warm_pair[1]) == 0);
-  for (type = 0; type < 2; ++type) {
+  for (type = 0; type < 3; ++type) {
     for (options = 0; options < 2; ++options) {
       int kind = (type ? SOCK_DGRAM : SOCK_STREAM) |
                  (options ? SOCK_NONBLOCK | SOCK_CLOEXEC : 0);
@@ -77,13 +82,17 @@ int main(void) {
         faulted = 0;
         int jumped = sigsetjmp(destination, 1);
         if (!jumped) {
-          CHECK(socketpair(AF_UNIX, kind, 0, output) == 0 && fault_case == 0);
+          CHECK(create_pair(kind, output) == 0 && fault_case == 0);
           CHECK(output[0] == single && output[1] >= 0 &&
                 output[0] != output[1]);
           CHECK(flags_match(output[0]) && flags_match(output[1]));
-          CHECK(write(output[0], "q", 1) == 1);
+          if (type == 2) {
+            CHECK((fcntl(output[0], F_GETFL) & O_ACCMODE) == O_RDONLY);
+            CHECK((fcntl(output[1], F_GETFL) & O_ACCMODE) == O_WRONLY);
+          }
+          CHECK(write(output[type == 2 ? 1 : 0], "q", 1) == 1);
           char byte = 0;
-          CHECK(read(output[1], &byte, 1) == 1 && byte == 'q');
+          CHECK(read(output[type == 2 ? 0 : 1], &byte, 1) == 1 && byte == 'q');
           CHECK(close(output[0]) == 0 && close(output[1]) == 0);
         } else {
           CHECK(jumped == 37 && faulted && fault_case != 0);
@@ -113,15 +122,15 @@ int main(void) {
     CHECK(setrlimit(RLIMIT_NOFILE, &limited) == 0);
     int output[2] = {-123, -123};
     int64_t baseline = native(680, 0, 0, 0);
-    CHECK(socketpair(AF_UNIX, type ? SOCK_DGRAM : SOCK_STREAM, 0, output) ==
-              -1 &&
+    CHECK(create_pair(type ? SOCK_DGRAM : SOCK_STREAM, output) == -1 &&
           errno == EMFILE && output[0] == -123 && output[1] == -123);
     CHECK(native(680, 0, 0, 0) == baseline);
     int single = socket(AF_UNIX, type ? SOCK_DGRAM : SOCK_STREAM, 0);
     CHECK(single == next && close(single) == 0);
     CHECK(setrlimit(RLIMIT_NOFILE, &original) == 0);
   }
-  puts("socket-creation: PASS 12 pair publication/fault cases, 4 socket flag "
-       "cases and 2 descriptor-limit cases; no hidden FDs or Handles");
+  puts("socket-creation: PASS 18 socket/pipe publication/fault cases, 6 socket "
+       "flag "
+       "cases and 3 descriptor-limit cases; no hidden FDs or Handles");
   return 0;
 }
