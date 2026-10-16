@@ -48,7 +48,7 @@ unsafe impl std::alloc::GlobalAlloc for Allocator {{
 #[derive(Debug)] pub struct HandleInfo {{ pub handle:u32,pub reserved:u32,pub rights:u64 }}
 mod task {{
     pub mod handle_table {{
-        use alloc::{{boxed::Box,collections::BTreeMap,sync::Arc,vec::Vec}};
+        use alloc::{{boxed::Box,collections::BTreeMap,sync::Arc}};
         pub const PROCESS_MAX_OBJECT_HANDLES:usize=4096;
         #[derive(Clone,Debug)] pub struct KernelObject(pub Arc<u64>);
         {identity}
@@ -66,6 +66,15 @@ fn main() {{
     let rights=HandleRights::READ.union(HandleRights::TRANSFER);
     let handle=table.insert(entry(&original,rights)).unwrap();
     assert!(table.duplicate_restricted(handle,HandleRights::READ).is_none());
+    FAIL_NEXT.store(true,Ordering::Relaxed);
+    let mut description=table.describe();
+    let count=description.len();
+    let described=description.next().unwrap();
+    drop(description);
+    assert!(FAIL_NEXT.swap(false,Ordering::Relaxed),"metadata iteration must not allocate");
+    assert_eq!(count,1);
+    assert_eq!((described.handle,described.rights),(handle.raw(),rights.bits()));
+    assert_eq!(Arc::strong_count(&original),2,"metadata must not retain objects");
     let snapshot=table.capture().unwrap();
     assert_eq!(snapshot.len(),1);
     let metadata:Vec<_>=snapshot.describe().collect();
