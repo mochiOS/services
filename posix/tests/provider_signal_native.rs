@@ -123,7 +123,8 @@ fn main() {
     use mnu_abi::status::Error;
     assert!(notification_is_retired(Error::InvalidArgument.into_raw() as i64));
     for error in [Error::NotReady,Error::AccessDenied,Error::ResourceUnavailable,
-        Error::BackingFailure,Error::LimitExceeded,Error::InvalidAddress,Error::AlreadyExists] {
+        Error::BackingFailure,Error::LimitExceeded,Error::InvalidAddress,Error::AlreadyExists,
+        Error::NotFound] {
         assert!(!notification_is_retired(error.into_raw() as i64));
     }
     for raw in [0,-9,-22,i64::MIN,i64::MAX,(Error::InvalidArgument.into_raw()|0xffff) as i64] {

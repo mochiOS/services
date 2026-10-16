@@ -34,6 +34,7 @@ fn main() {
         (Error::LimitExceeded, -75),
         (Error::InvalidAddress, -14),
         (Error::AlreadyExists, -17),
+        (Error::NotFound, -2),
     ] {
         assert_eq!(reference_count_status(native.into_raw() as i64), expected);
     }
@@ -83,6 +84,7 @@ fn main() {
         (Error::NotReady,-11),(Error::BackingFailure,-5),
         (Error::ResourceUnavailable,-12),(Error::LimitExceeded,-75),
         (Error::InvalidAddress,-14),(Error::AlreadyExists,-17),
+        (Error::NotFound,-2),
     ] {
         assert_eq!(identify_status(native.into_raw() as i64),Err(expected));
     }

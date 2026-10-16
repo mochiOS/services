@@ -188,6 +188,7 @@ fn native_error(error: mochi_user_platform::syscall::SysError) -> i32 {
             Error::AccessDenied => 13,
             Error::NotReady => 11,
             Error::AlreadyExists => 17,
+            Error::NotFound => 2,
         };
     }
     error
