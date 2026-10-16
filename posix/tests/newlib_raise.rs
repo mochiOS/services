@@ -106,6 +106,9 @@ fn pipe_signal_generation_occurs_before_partial_progress_hides_the_error() {
     assert!(write[..signal].contains("if matches!(result, Err(EPIPE))"));
     assert!(signal < write.find(".map_err(|error| match error").unwrap());
     let sdk = include_str!("../../../user/scripts/build-newlib.sh");
-    assert!(sdk.contains("x86_64-elf-ar d \"$SDK/sysroot/lib/libc.a\" libc_a-raise.o"));
+    assert!(sdk.contains("for runtime_library in libc.a libg.a; do"));
+    assert!(sdk.contains("runtime_archive=\"$SDK/sysroot/lib/$runtime_library\""));
+    assert!(sdk.contains("for runtime_member in libc_a-raise.o libc_a-setjmp.o; do"));
+    assert!(sdk.contains("x86_64-elf-ar d \"$runtime_archive\" \"$runtime_member\""));
     assert!(!sdk.contains("x86_64-elf-ar d \"$SYSROOT/lib/libc.a\""));
 }
