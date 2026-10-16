@@ -8,9 +8,9 @@ fn actual_guarded_address_wait_admission_wakeup_timeout_and_error_cleanup() {
         r#"
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 type ThreadId = u64;
-const EAGAIN: u64 = (-11i64) as u64;
-const EFAULT: u64 = (-14i64) as u64;
-const EINVAL: u64 = (-22i64) as u64;
+const EAGAIN: u64 = Error::NotReady.into_raw();
+const EFAULT: u64 = Error::InvalidAddress.into_raw();
+const EINVAL: u64 = Error::InvalidArgument.into_raw();
 const MAX_WAITERS: usize = 4;
 struct SpinLock<T>(std::sync::Mutex<T>);
 impl<T> SpinLock<T> {
@@ -24,6 +24,8 @@ mod mnu_abi {
 static NOW: AtomicU64 = AtomicU64::new(0);
 static ACTION: AtomicU64 = AtomicU64::new(0);
 static UPCALL: AtomicU32 = AtomicU32::new(0);
+static CURRENT: AtomicU32 = AtomicU32::new(1);
+thread_local!{static COPY_ERROR:std::cell::Cell<Option<Error>>=const{std::cell::Cell::new(None)};}
 mod upcall {
     pub fn current_has_deliverable_upcall()->bool {crate::UPCALL.load(std::sync::atomic::Ordering::Acquire)!=0}
 }
@@ -36,7 +38,7 @@ mod syscall { pub mod time {
     pub fn disarm_thread_deadline(_: u64) { crate::DISARMS.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
 } }
 mod task {
-    pub fn current_thread_id() -> Option<u64> { Some(7) }
+    pub fn current_thread_id() -> Option<u64> { (crate::CURRENT.load(std::sync::atomic::Ordering::Relaxed)!=0).then_some(7) }
     pub struct Thread;
     impl Thread { pub fn has_deliverable_upcall(&self) -> bool { crate::UPCALL.load(std::sync::atomic::Ordering::Acquire) != 0 } }
     pub fn with_thread<T>(_: u64, callback: impl FnOnce(&Thread) -> T) -> Option<T> { Some(callback(&Thread)) }
@@ -52,9 +54,10 @@ mod task {
     }
     pub fn yield_now() {}
 }
-fn read_user_u64(address: u64) -> Result<u64, u64> {
-    if address < 4096 { return Err(EFAULT); }
-    Ok(unsafe { (address as *const u64).read_unaligned() })
+fn copy_from_user_native(address: u64, bytes: &mut [u8]) -> Result<(), Error> {
+    if let Some(error)=COPY_ERROR.with(|value|value.get()){return Err(error);}
+    if address < 4096 || address.checked_add(bytes.len() as u64).is_none() { return Err(Error::InvalidAddress); }
+    bytes.copy_from_slice(unsafe { core::slice::from_raw_parts(address as *const u8,bytes.len()) });Ok(())
 }
 mod actual {
 use super::*;
@@ -73,6 +76,13 @@ fn load_value(key: AddressKey, size: u64) -> Result<u64, u64> {
 }
 static WAITERS: SpinLock<[Option<AddressWaiter>; MAX_WAITERS]> = SpinLock::new([None; MAX_WAITERS]);
 "#,
+    );
+    program.insert_str(
+        0,
+        &format!(
+            "mod status {{\n{}\n}}\nuse status::Error;\n",
+            include_str!("../../../core/crates/abi/src/status.rs")
+        ),
     );
     for entry in [
         "struct AddressKey {",
@@ -102,6 +112,15 @@ pub fn test() {
     let guard_address = &notification as *const AtomicU64 as u64;
     let descriptor = [guard_address, 0u64];
     let guard = descriptor.as_ptr() as u64;
+    for error in [Error::InvalidAddress,Error::ResourceUnavailable,Error::BackingFailure]{
+        COPY_ERROR.with(|value|value.set(Some(error)));
+        assert_eq!(wait_guarded(primary,0,8,u64::MAX,guard),error.into_raw());
+        assert!(WAITERS.lock().iter().all(Option::is_none));
+    }
+    COPY_ERROR.with(|value|value.set(None));
+    CURRENT.store(0,Ordering::Relaxed);
+    assert_eq!(wait_guarded(primary,0,8,u64::MAX,guard),Error::NotReady.into_raw());
+    assert!(WAITERS.lock().iter().all(Option::is_none));CURRENT.store(1,Ordering::Relaxed);
     assert_eq!(wait_guarded(primary, 0, 8, u64::MAX, 0), EFAULT);
     assert_eq!(wait_guarded(primary, 0, 8, u64::MAX, u64::MAX), EFAULT);
     assert_eq!(wait_guarded(0, 0, 8, u64::MAX, guard), EFAULT);
@@ -132,7 +151,7 @@ pub fn test() {
     assert_eq!(wait_guarded(primary, 0, 8, 5, guard), 2);
     NOW.store(0, Ordering::Release);
     ARM_OK.store(0, Ordering::Release);
-    assert_eq!(wait_guarded(primary, 0, 8, 5, guard), EAGAIN);
+    assert_eq!(wait_guarded(primary, 0, 8, 5, guard), Error::ResourceUnavailable.into_raw());
     assert!(WAITERS.lock().iter().all(Option::is_none));
     ARM_OK.store(1, Ordering::Release);
     ACTION.store(2, Ordering::Release);
@@ -152,7 +171,7 @@ pub fn test() {
     for (index, slot) in WAITERS.lock().iter_mut().enumerate() {
         *slot = Some(AddressWaiter { thread: index as u64 + 1, key, guard: None });
     }
-    assert_eq!(wait_guarded(primary, 0, 8, u64::MAX, guard), EAGAIN);
+    assert_eq!(wait_guarded(primary, 0, 8, u64::MAX, guard), Error::ResourceUnavailable.into_raw());
     assert_eq!(WAITERS.lock().iter().flatten().count(), 4);
     WAITERS.lock()[0].as_mut().unwrap().thread = 7;
     assert_eq!(wait_guarded(primary, 0, 8, u64::MAX, guard), EAGAIN);

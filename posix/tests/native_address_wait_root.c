@@ -41,7 +41,7 @@ int main(void) {
     if (page == MAP_FAILED) return 1;
     page[0] = 0x71;
     if (wait_value() != 1 || mprotect((void *)page, 4096, PROT_NONE)
-        || wait_value() != -14 || mprotect((void *)page, 4096, PROT_READ)) return 2;
+        || wait_value() != INT64_C(-262142) || mprotect((void *)page, 4096, PROT_READ)) return 2;
     pthread_t thread;
     if (pthread_create(&thread, NULL, change_mapping, NULL)) return 3;
     unsigned changed = 0, rejected = 0;
@@ -49,11 +49,11 @@ int main(void) {
     while (!__atomic_load_n(&stopped, __ATOMIC_ACQUIRE)) {
         int64_t result = wait_value();
         if (result == 1) ++changed;
-        else if (result == -14) ++rejected;
+        else if (result == INT64_C(-262142)) ++rejected;
         else { fprintf(stderr, "address-wait-root: FAIL result=%ld\n", (long)result); return 4; }
     }
     if (pthread_join(thread, NULL) || worker_error || (!changed && !rejected)) return 5;
-    if (wait_value() != 1 || munmap((void *)page, 4096) || wait_value() != -14) return 6;
+    if (wait_value() != 1 || munmap((void *)page, 4096) || wait_value() != INT64_C(-262142)) return 6;
     fprintf(stderr, "address-wait-root: PASS concurrent protection/unmap/remap changed=%u rejected=%u\n", changed, rejected);
     return 0;
 }

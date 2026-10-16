@@ -8,9 +8,9 @@ fn actual_guard_registration_shares_wake_table_and_releases_every_subscription()
         r#"
 use std::sync::atomic::{AtomicU64, Ordering};
 type ThreadId = u64;
-const EAGAIN: u64 = (-11i64) as u64;
-const EFAULT: u64 = (-14i64) as u64;
-const EINVAL: u64 = (-22i64) as u64;
+const EAGAIN: u64 = Error::NotReady.into_raw();
+const EFAULT: u64 = Error::InvalidAddress.into_raw();
+const EINVAL: u64 = Error::InvalidArgument.into_raw();
 const MAX_WAITERS: usize = 4;
 struct SpinLock<T>(std::sync::Mutex<T>);
 impl<T> SpinLock<T> {
@@ -31,6 +31,13 @@ fn load_value(key: AddressKey, size: u64) -> Result<u64, u64> {
     Ok(unsafe { &*(key.physical_address as *const AtomicU64) }.load(Ordering::Acquire))
 }
 "#,
+    );
+    program.insert_str(
+        0,
+        &format!(
+            "mod status {{\n{}\n}}\nuse status::Error;\n",
+            include_str!("../../../core/crates/abi/src/status.rs")
+        ),
     );
     for entry in [
         "struct AddressKey {",
@@ -53,6 +60,7 @@ fn load_value(key: AddressKey, size: u64) -> Result<u64, u64> {
     program.push_str(r#"
 static WAITERS: SpinLock<[Option<AddressWaiter>; MAX_WAITERS]> = SpinLock::new([None; MAX_WAITERS]);
 fn main() {
+    assert_eq!(wake(0,0),0);
     let word = AtomicU64::new(0);
     let other = AtomicU64::new(0);
     let address = &word as *const AtomicU64 as u64;
@@ -73,7 +81,7 @@ fn main() {
     { let _guard = register_guard(7, address, 1).unwrap(); }
     assert_eq!(wake(address, u64::MAX), 0);
     let mut guards: Vec<_> = (1..=4).map(|thread| register_guard(thread, address, 1).unwrap()).collect();
-    assert_eq!(register_guard(5, address, 1).err(), Some(EAGAIN));
+    assert_eq!(register_guard(5, address, 1).err(), Some(Error::ResourceUnavailable.into_raw()));
     assert_eq!(wake(address, 2), 2);
     assert_eq!(wake(address, u64::MAX), 2);
     guards.clear();

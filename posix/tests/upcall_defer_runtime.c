@@ -34,13 +34,13 @@ static int native_deferral(void) {
         uint64_t entry, base, size, flags, defer_word, reserved[3];
     } config = {(uintptr_t)defer_handler, (uintptr_t)defer_stack, sizeof(defer_stack), 1, 0, {0}};
     config.defer_word = 1;
-    CHECK((int64_t)defer_call(D_INSTALL, (uintptr_t)&config, sizeof(config), 0) == -22);
+    CHECK((int64_t)defer_call(D_INSTALL, (uintptr_t)&config, sizeof(config), 0) == INT64_C(-262139));
     config.defer_word = UINT64_C(0xffff800000000000);
-    CHECK((int64_t)defer_call(D_INSTALL, (uintptr_t)&config, sizeof(config), 0) == -22);
+    CHECK((int64_t)defer_call(D_INSTALL, (uintptr_t)&config, sizeof(config), 0) == INT64_C(-262139));
     void *missing = mmap(NULL, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     CHECK(missing != MAP_FAILED && munmap(missing, 4096) == 0);
     config.defer_word = (uintptr_t)missing;
-    CHECK((int64_t)defer_call(D_INSTALL, (uintptr_t)&config, sizeof(config), 0) == -14);
+    CHECK((int64_t)defer_call(D_INSTALL, (uintptr_t)&config, sizeof(config), 0) == INT64_C(-262142));
     config.defer_word = (uintptr_t)word;
     CHECK(defer_call(D_INSTALL, (uintptr_t)&config, sizeof(config), 0) == 0);
     uint64_t thread = defer_call(D_THREAD, 0, 0, 0);

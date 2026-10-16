@@ -22,6 +22,8 @@ thread_local! {
     static PRESENT:Cell<bool>=const{Cell::new(true)};
     static LOCKED:Cell<bool>=const{Cell::new(false)};
     static COPY_ERROR:Cell<Option<status::Error>>=const{Cell::new(None)};
+    static WRITE_ERROR:Cell<Option<status::Error>>=const{Cell::new(None)};
+    static DEFER_ERROR:Cell<Option<status::Error>>=const{Cell::new(None)};
     static READS:Cell<usize>=const{Cell::new(0)};
     static WRITES:Cell<usize>=const{Cell::new(0)};
     static THREAD:RefCell<task::Thread>=RefCell::new(task::Thread::new());
@@ -48,6 +50,10 @@ thread_local! {
 pub struct Thread{state:ThreadUpcallState}
 impl Thread {
     pub fn new()->Self{Self{state:ThreadUpcallState::new()}}
+    pub fn install_upcall(&mut self,entry:u64,stack:u64,exceptions:bool,defer:u64)->Result<(),ThreadUpcallError>{
+        self.state.install(entry,stack,exceptions)?;self.state.defer_word=defer;Ok(())
+    }
+    pub fn settings(&self)->(u64,u64,bool,u64){(self.state.entry,self.state.stack_top,self.state.exceptions,self.state.defer_word)}
     pub fn start(&mut self,context:UserUpcallContext)->u64{
         self.state.install(0x1000,0x9000,true).unwrap();self.state.enqueue(u64::MAX).unwrap();
         self.state.begin(context).unwrap().token
@@ -79,12 +85,24 @@ fn copy_from_user_native(pointer:u64,bytes:&mut[u8])->Result<(),status::Error>{
 fn copy_to_user_native(pointer:u64,bytes:&[u8])->Result<(),status::Error>{
     assert!(!LOCKED.get());WRITES.set(WRITES.get()+1);
     if let Some(error)=COPY_ERROR.get(){return Err(error);}
+    if let Some(error)=WRITE_ERROR.get(){return Err(error);}
     if pointer<4096{return Err(status::Error::InvalidAddress);}
     unsafe{core::slice::from_raw_parts_mut(pointer as *mut u8,bytes.len()).copy_from_slice(bytes);}Ok(())
+}
+fn is_canonical_user_range(pointer:u64,length:u64)->bool{
+    pointer>=4096&&pointer.checked_add(length).is_some_and(|end|end<(1<<47))
+}
+fn validate_user_ptr(pointer:u64,length:u64)->bool{is_canonical_user_range(pointer,length)}
+mod address_wait {
+    pub fn read_upcall_defer_word(pointer:u64)->Result<u32,u64>{
+        assert_eq!(pointer,0x2000);assert!(!crate::LOCKED.get());
+        crate::DEFER_ERROR.get().map_or(Ok(0),|error|Err(error.into_raw()))
+    }
 }
 mod actual {use crate::{task,mnu_abi,UserUpcallContext,ThreadUpcallError,SUCCESS};
 "#);
     for name in [
+        "install",
         "return_from_context",
         "restore_context",
         "return_from",
@@ -102,6 +120,34 @@ mod actual {use crate::{task,mnu_abi,UserUpcallContext,ThreadUpcallError,SUCCESS
 }
 fn main(){
     use actual::*;use status::Error;
+    let mut stack=[0xa5u8;128];
+    let config=ThreadUpcallConfig{entry:0x1000,stack_base:stack.as_mut_ptr()as u64,stack_size:128,
+        flags:THREAD_UPCALL_EXCEPTIONS,defer_word:0x2000,reserved:[0;3]};
+    let config_size=core::mem::size_of_val(&config)as u64;
+    assert_eq!(install(0,config_size),Error::InvalidAddress.into_raw());
+    assert_eq!(install(&config as *const _ as u64,config_size-1),Error::InvalidArgument.into_raw());
+    let original_settings=THREAD.with_borrow(|thread|thread.settings());
+    for error in [Error::InvalidAddress,Error::ResourceUnavailable,Error::BackingFailure]{
+        for phase in 0..3{
+            if phase==0{COPY_ERROR.set(Some(error))}else if phase==1{DEFER_ERROR.set(Some(error))}else{WRITE_ERROR.set(Some(error))}
+            assert_eq!(install(&config as *const _ as u64,config_size),error.into_raw());
+            assert_eq!(THREAD.with_borrow(|thread|thread.settings()),original_settings);
+            COPY_ERROR.set(None);DEFER_ERROR.set(None);WRITE_ERROR.set(None);
+        }
+    }
+    for (field,value) in [(0,0),(1,0),(2,15),(3,2),(4,1),(4,0xffff800000000000),(5,1)]{
+        let mut bad=config;
+        match field{0=>bad.entry=value,1=>bad.stack_base=value,2=>bad.stack_size=value,3=>bad.flags=value,
+            4=>bad.defer_word=value,_=>bad.reserved[0]=value}
+        assert_eq!(install(&bad as *const _ as u64,config_size),Error::InvalidArgument.into_raw());
+        assert_eq!(THREAD.with_borrow(|thread|thread.settings()),original_settings);
+    }
+    assert_eq!(install(&config as *const _ as u64,config_size),0);
+    let top=((config.stack_base+128)&!15)-24;
+    assert_eq!(THREAD.with_borrow(|thread|thread.settings()),(0x1000,top,true,0x2000));
+    let offset=(top-config.stack_base)as usize;
+    assert_eq!(&stack[offset..offset+8],&[0;8]);
+    assert!(stack[..offset].iter().all(|byte|*byte==0xa5));assert!(stack[offset+8..].iter().all(|byte|*byte==0xa5));
     let mut image=unsafe{core::mem::zeroed::<ThreadUpcallSnapshot>()};
     image.instruction=0x4000;image.stack_pointer=0x8000;image.rflags=0x202;image.argument=u64::MAX;
     image.fx_state=task::initial_fx();
@@ -110,6 +156,9 @@ fn main(){
     let original=return_context(&image).unwrap();
     let token=THREAD.with_borrow_mut(|thread|thread.start(original));
     let before=THREAD.with_borrow(|thread|thread.upcall_snapshot(token).unwrap());
+    let active_settings=THREAD.with_borrow(|thread|thread.settings());
+    assert_eq!(install(&config as *const _ as u64,config_size),Error::NotReady.into_raw());
+    assert_eq!(THREAD.with_borrow(|thread|thread.settings()),active_settings);
     let input=&image as *const _ as u64;
     let mut output=image;let pointer=&mut output as *mut _ as u64;
     for error in [Error::InvalidAddress,Error::ResourceUnavailable,Error::BackingFailure]{
@@ -141,7 +190,7 @@ fn main(){
     assert_eq!(restore_context(input,size),Error::NotReady.into_raw());
     for context_missing in [false,true]{
         if context_missing{CURRENT.set(false)}else{PRESENT.set(false)}
-        for result in [return_from_context(token,input,size),return_from(token),inspect(token,pointer,size),restore_context(input,size)]{
+        for result in [install(&config as *const _ as u64,config_size),return_from_context(token,input,size),return_from(token),inspect(token,pointer,size),restore_context(input,size)]{
             assert_eq!(result,Error::NotReady.into_raw());
         }
         CURRENT.set(true);PRESENT.set(true);

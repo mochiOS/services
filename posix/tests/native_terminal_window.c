@@ -376,14 +376,14 @@ int main(void) {
     _Atomic uint64_t epoch = 9;
     struct native_wait_guard guard = {(uintptr_t)&epoch, 8};
     // A pre-delivered notification must prevent an infinite empty-object wait.
-    CHECK(guarded_native_wait(&guard, UINT64_MAX) == -EAGAIN);
+    CHECK(guarded_native_wait(&guard, UINT64_MAX) == INT64_C(-262137));
     guard.expected = 9;
     CHECK(guarded_native_wait(&guard, 0) == -EAGAIN);
     CHECK(guarded_native_wait(NULL, 0) == -EINVAL);
     guard.address = (uintptr_t)&epoch + 1;
-    CHECK(guarded_native_wait(&guard, 0) == -EINVAL);
+    CHECK(guarded_native_wait(&guard, 0) == INT64_C(-262139));
     guard.address = 0;
-    CHECK(guarded_native_wait(&guard, 0) == -EFAULT);
+    CHECK(guarded_native_wait(&guard, 0) == INT64_C(-262142));
     CHECK(guarded_native_wait((const struct native_wait_guard *)(uintptr_t)(UINT64_MAX - 7), 0) == -EFAULT);
     uint32_t native_pair[2];
     CHECK(native_call4(649, 0, 0, 0, 0) == INT64_C(-262142));

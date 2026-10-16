@@ -16,7 +16,7 @@ fn actual_wait_key_and_atomic_load_retain_root_and_reject_replaced_frames() {
     let mut program = String::from(
         r#"
 use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
-const EFAULT:u64=14; const EINVAL:u64=22;
+const EFAULT:u64=Error::InvalidAddress.into_raw(); const EINVAL:u64=Error::InvalidArgument.into_raw();
 thread_local! {
     static PID:std::cell::Cell<Option<u64>>=const {std::cell::Cell::new(Some(7))};
     static ROOT:std::cell::Cell<Option<u64>>=const {std::cell::Cell::new(Some(4096))};
@@ -25,10 +25,15 @@ thread_local! {
     static LOCKED:std::cell::Cell<bool>=const {std::cell::Cell::new(false)};
     static PHYSICAL:std::cell::Cell<u64>=const {std::cell::Cell::new(0)};
     static LOADS:std::cell::Cell<u64>=const {std::cell::Cell::new(0)};
+    static COPY_ERROR:std::cell::Cell<Option<Error>>=const {std::cell::Cell::new(None)};
+    static OFFSET:std::cell::Cell<Option<u64>>=const {std::cell::Cell::new(Some(0))};
 }
 fn locked() {assert!(LOCKED.with(|v|v.get()));}
 fn validate_user_ptr(_:u64,_:u64)->bool {assert!(!LOCKED.with(|v|v.get()));true}
-fn copy_from_user(_:u64,bytes:&mut[u8])->Result<(),u64> {assert!(!LOCKED.with(|v|v.get()));bytes.fill(0);Ok(())}
+fn copy_from_user_native(_:u64,bytes:&mut[u8])->Result<(),Error> {
+    assert!(!LOCKED.with(|v|v.get()));if let Some(error)=COPY_ERROR.with(|v|v.get()){return Err(error);}
+    bytes.fill(0);Ok(())
+}
 mod security {pub fn current_process_id()->Option<u64> {crate::PID.with(|v|v.get())}}
 mod task {
     pub struct Process;
@@ -51,16 +56,24 @@ mod mem {pub mod paging {
         Some((crate::Physical(crate::PHYSICAL.with(|v|v.get())),()))
     }
     pub fn physical_memory_offset()->Option<u64> {
-        crate::locked();crate::LOADS.with(|v|v.set(v.get()+1));Some(0)
+        crate::locked();crate::LOADS.with(|v|v.set(v.get()+1));crate::OFFSET.with(|v|v.get())
     }
 }}
 mod cpu {pub struct SmapSmepGuard; impl SmapSmepGuard {pub fn new()->Self {crate::locked();Self}}}
 mod actual {use super::*;
 "#,
     );
+    program.insert_str(
+        0,
+        &format!(
+            "mod status {{\n{}\n}}\nuse status::Error;\n",
+            include_str!("../../../core/crates/abi/src/status.rs")
+        ),
+    );
     for entry in [
         "struct AddressKey {",
         "fn resolve_key(",
+        "pub(crate) fn read_upcall_defer_word(",
         "fn load_value(",
         "fn load_resident_value(",
     ] {
@@ -80,6 +93,18 @@ pub fn test() {
     for (size,expected) in [(1,0x78),(2,0x5678),(4,0x12345678),(8,0x12345678)] {
         assert_eq!(load_value(key,size),Ok(expected));
     }
+    assert_eq!(LOADS.with(|v|v.get()),4);
+    assert_eq!(read_upcall_defer_word(8192),Ok(0x12345678));
+    for error in [Error::InvalidAddress,Error::ResourceUnavailable,Error::BackingFailure]{
+        COPY_ERROR.with(|v|v.set(Some(error)));
+        assert_eq!(resolve_key(8192,8).err(),Some(error.into_raw()));
+        assert_eq!(read_upcall_defer_word(8192),Err(error.into_raw()));
+    }
+    COPY_ERROR.with(|v|v.set(None));
+    for offset in [None,Some(u64::MAX)]{
+        OFFSET.with(|v|v.set(offset));assert_eq!(load_value(key,8),Err(Error::BackingFailure.into_raw()));
+    }
+    OFFSET.with(|v|v.set(Some(0)));
     assert_eq!(load_value(key,3),Err(EINVAL));
     let unaligned=AddressKey {virtual_address:8193,..key};
     assert_eq!(load_value(unaligned,8),Err(EINVAL));
@@ -91,9 +116,9 @@ pub fn test() {
     assert_eq!(load_value(key,8),Err(EFAULT));
     ROOT.with(|v|v.set(None)); assert_eq!(load_value(key,8),Err(EFAULT));
     assert!(resolve_key(8192,8).is_err());
-    PRESENT.with(|v|v.set(false));assert_eq!(load_value(key,8),Err(EFAULT));
-    PID.with(|v|v.set(None));assert_eq!(load_value(key,8),Err(EFAULT));
-    assert_eq!(LOADS.with(|v|v.get()),4); assert!(!LOCKED.with(|v|v.get()));
+    PRESENT.with(|v|v.set(false));assert_eq!(load_value(key,8),Err(Error::NotReady.into_raw()));
+    PID.with(|v|v.set(None));assert_eq!(load_value(key,8),Err(Error::NotReady.into_raw()));
+    assert_eq!(LOADS.with(|v|v.get()),7); assert!(!LOCKED.with(|v|v.get()));
 }
 }
 fn main() {actual::test();}

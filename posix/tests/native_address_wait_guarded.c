@@ -49,10 +49,10 @@ static int await_flag(_Atomic unsigned *flag) {
 }
 int main(void) {
     struct guard guard = {(uintptr_t)&notification, 0};
-    CHECK(native_call(684, (uintptr_t)&primary, 0, 8, UINT64_MAX, 0) == -14);
-    CHECK(native_call(684, (uintptr_t)&primary, 0, 3, UINT64_MAX, (uintptr_t)&guard) == -22);
+    CHECK(native_call(684, (uintptr_t)&primary, 0, 8, UINT64_MAX, 0) == INT64_C(-262142));
+    CHECK(native_call(684, (uintptr_t)&primary, 0, 3, UINT64_MAX, (uintptr_t)&guard) == INT64_C(-262139));
     struct guard bad = {(uintptr_t)&notification + 1, 0};
-    CHECK(native_call(684, (uintptr_t)&primary, 0, 8, UINT64_MAX, (uintptr_t)&bad) == -22);
+    CHECK(native_call(684, (uintptr_t)&primary, 0, 8, UINT64_MAX, (uintptr_t)&bad) == INT64_C(-262139));
     atomic_store(&primary, 1);
     CHECK(native_call(684, (uintptr_t)&primary, 0, 8, UINT64_MAX, (uintptr_t)&guard) == 1);
     atomic_store(&primary, 0);

@@ -130,7 +130,7 @@ int main(void) {
     sigemptyset(&blocked);
     sigaddset(&blocked, SIGCHLD);
     if (sigprocmask(SIG_BLOCK, &blocked, NULL)) return 1;
-    if (install(2) != -22 || install(1)) return 1;
+    if (install(2) != INT64_C(-262139) || install(1)) return 1;
     if ((int64_t)native(INSPECT, 0, 0, sizeof(struct snapshot), 0, 0, 0) != INT64_C(-262139)) return 7;
     for (unsigned attempt = 1; attempt <= 3; ++attempt) {
         int result = recover();

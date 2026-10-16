@@ -67,12 +67,12 @@ int main(void) {
         address_wakes += (unsigned)count;
         CHECK(await_flag(&finished)); // No timeout or upcall wakes the native wait.
         void *result = NULL;
-        CHECK(pthread_join(waiter, &result) == 0 && (intptr_t)result == -11);
+        CHECK(pthread_join(waiter, &result) == 0 && (intptr_t)result == INT64_C(-262137));
         CHECK(native_call(653, (uintptr_t)&word, UINT64_MAX, 0, 0) == 0);
     }
     CHECK(address_wakes > 0); // At least one wait really blocked, rather than racing admission.
     struct wait_guard changed = {(uintptr_t)&word, 0};
-    CHECK(native_call(682, 0, 0, UINT64_MAX, (uintptr_t)&changed) == -11);
+    CHECK(native_call(682, 0, 0, UINT64_MAX, (uintptr_t)&changed) == INT64_C(-262137));
     CHECK(native_call(653, (uintptr_t)&word, UINT64_MAX, 0, 0) == 0);
     debug("native-guard-wake: PASS 32 address wakeups of infinite guarded waits\n");
     return 0;
