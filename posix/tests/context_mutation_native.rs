@@ -47,7 +47,7 @@ mod mnu_abi {pub mod status {
         "    pub fn get(",
         "    /// Captures transferable references",
     ));
-    program.push_str("}\nmod launch {use crate::ObjectHandle;\n");
+    program.push_str("}\nmod launch {use crate::{ObjectHandle,Error};\n");
     // Only single-key mutations are in this boundary. Image-transition
     // preparation is separate and still has its own error migration pending.
     program.push_str(probe::between(

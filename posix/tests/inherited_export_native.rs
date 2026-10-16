@@ -1,4 +1,4 @@
-//! Execute both export paths with real tables, rights and immutable snapshots.
+//! Execute export and installation with real tables, snapshots and contexts.
 #[allow(dead_code)]
 #[path = "support/native_error_probe.rs"]
 mod probe;
@@ -65,14 +65,30 @@ mod task {
         "#[path={:?}]pub mod handle_snapshot;\n",
         root.join("core/src/task/handle_snapshot.rs")
     ));
+    program.push_str("pub mod launch_context {\n");
+    let context = include_str!("../../../core/src/task/launch_context.rs");
+    program.push_str(
+        &context[..context
+            .find("    /// Prepare a replacement off to the side.")
+            .unwrap()],
+    );
+    program.push_str("}}\n");
     program.push_str(
         r#"
     pub use handle_table::{ObjectHandle,HandleRights,ObjectHandleEntry,KernelObject};
     pub type ProcessId=u64;
-    pub struct Process {pub table:Box<handle_table::ObjectHandleTable>}
+    pub struct Process {pub table:Box<handle_table::ObjectHandleTable>,launch:Box<launch_context::LaunchContext>,published:bool,pub fail_context:bool}
     impl Process {
-        pub fn new()->Self {Self{table:handle_table::ObjectHandleTable::new_boxed()}}
-        pub fn object_handles(&self)->&handle_table::ObjectHandleTable {assert!(crate::LOCKED.get());&self.table}
+        pub fn new()->Self {let mut process=Self::unpublished();process.published=true;process}
+        pub fn unpublished()->Self {Self{table:handle_table::ObjectHandleTable::new_boxed(),launch:launch_context::LaunchContext::new_boxed(),published:false,fail_context:false}}
+        pub fn object_handles(&self)->&handle_table::ObjectHandleTable {assert!(!self.published || crate::LOCKED.get());&self.table}
+        pub fn object_handles_mut(&mut self)->&mut handle_table::ObjectHandleTable {assert!(!self.published);&mut self.table}
+        pub fn launch_context(&self)->&launch_context::LaunchContext {&self.launch}
+        pub fn launch_context_mut(&mut self)->&mut launch_context::LaunchContext {
+            assert!(!self.published);
+            if self.fail_context {self.fail_context=false;crate::FAIL_NEXT.store(true,crate::Ordering::Relaxed);}
+            &mut self.launch
+        }
     }
     pub fn with_process<T>(id:u64,body:impl FnOnce(&Process)->T)->Option<T> {
         if id!=19 || !crate::PRESENT.get() {return None;}
@@ -101,13 +117,18 @@ mod syscall {
     program.push_str(probe::between(
         exec,
         "#[derive(Clone, Copy, Debug, PartialEq, Eq)]\nstruct InheritedHandleSpec",
-        "#[derive(Clone, Copy, Debug, PartialEq, Eq)]\nstruct InheritedValueSpec",
+        "struct InitialUserStack",
     ));
-    program.push_str("mod production {use crate::{InheritedHandleSpec,InheritedHandleGrant};\n");
+    program.push_str("mod production {use crate::{InheritedHandleSpec,InheritedHandleGrant,InheritedValueSpec};\n");
     program.push_str(probe::between(
         exec,
         "fn export_inherited_handles(",
         "fn install_inherited_handles(",
+    ));
+    program.push_str(probe::between(
+        exec,
+        "fn install_inherited_handles(",
+        "fn valid_security_identity(",
     ));
     program.push_str("mod captured_handles {\n");
     program.push_str(include_str!(
@@ -118,11 +139,83 @@ mod syscall {
     }
     pub fn live(owner:Option<u64>,specs:&[InheritedHandleSpec])->Result<Vec<InheritedHandleGrant>,crate::Error> {export_inherited_handles(owner,specs)}
     pub fn captured(handle:u64,specs:&[InheritedHandleSpec])->Result<Vec<InheritedHandleGrant>,crate::Error> {captured_handles::export(handle,specs)}
+    pub fn install_handles(process:&mut crate::task::Process,grants:&[InheritedHandleGrant])->Result<(),crate::Error> {install_inherited_handles(process,grants)}
+    pub fn install_values(process:&mut crate::task::Process,values:&[InheritedValueSpec])->Result<(),crate::Error> {install_inherited_values(process,values)}
 }
 fn spec(source:u32,rights:HandleRights)->InheritedHandleSpec {
     InheritedHandleSpec{key:u64::MAX,source:ObjectHandle::from_raw(source).unwrap(),target:41,rights}
 }
 fn object(entry:&ObjectHandleEntry)->&Arc<u64> {match entry.object() {KernelObject::Resource(value)=>value,_=>panic!("wrong object")}}
+fn grant(key:u64,target:u32,entry:&ObjectHandleEntry)->InheritedHandleGrant {InheritedHandleGrant{key,target,entry:entry.clone()}}
+fn install_plan(grants:&[InheritedHandleGrant],values:&[InheritedValueSpec],fail_context:bool)->Result<task::Process,Error> {
+    let mut destination=task::Process::unpublished();destination.fail_context=fail_context;
+    production::install_handles(&mut destination,grants)?;
+    production::install_values(&mut destination,values)?;
+    Ok(destination)
+}
+fn install_cases(entry:&ObjectHandleEntry) {
+    let resource=object(entry);let baseline=Arc::strong_count(resource);
+    // Automatic placement is deliberately serialized first. Explicit slot 1
+    // must still be reserved before that automatic allocation takes slot 2.
+    let grants=[grant(10,0,entry),grant(11,1,&ObjectHandleEntry::new(KernelObject::Resource(resource.clone()),HandleRights::empty()))];
+    let values=[InheritedValueSpec{key:10,value:Error::NotFound.into_raw()},InheritedValueSpec{key:u64::MAX,value:u64::MAX}];
+    let destination=install_plan(&grants,&values,false).unwrap();
+    assert_eq!(destination.launch_context().get(10),ObjectHandle::from_raw(2));
+    assert_eq!(destination.launch_context().get(11),ObjectHandle::from_raw(1));
+    assert_eq!(destination.launch_context().value(10),Some(Error::NotFound.into_raw()));
+    assert_eq!(destination.launch_context().value(u64::MAX),Some(u64::MAX));
+    assert_eq!(destination.table.describe().len(),2,"never implicitly copy the creator table");
+    assert_eq!(destination.table.get(ObjectHandle::from_raw(1).unwrap()).unwrap().rights(),HandleRights::empty());
+    assert_eq!(destination.table.get(ObjectHandle::from_raw(2).unwrap()).unwrap().rights(),entry.rights());
+    drop(destination);let pins=Arc::strong_count(resource);
+    for (failed,expected) in [
+        ([grant(1,1,entry),grant(2,4097,entry)],Error::InvalidArgument),
+        ([grant(1,1,entry),grant(2,1,entry)],Error::AlreadyExists),
+        ([grant(1,1,entry),grant(1,2,entry)],Error::AlreadyExists),
+    ] {
+        let before=Arc::strong_count(resource);
+        assert!(matches!(install_plan(&failed,&[],false),Err(error) if error==expected));
+        assert_eq!(Arc::strong_count(resource),before,"drop every partial destination reference");
+    }
+    assert_eq!(Arc::strong_count(resource),pins);
+    assert!(matches!(install_plan(&grants,&[],true),Err(Error::ResourceUnavailable)));
+    assert!(!FAIL_NEXT.load(Ordering::Relaxed));assert_eq!(Arc::strong_count(resource),pins);
+    // The same failure for scalar storage also drops previously installed Handles.
+    let mut destination=task::Process::unpublished();
+    production::install_handles(&mut destination,&grants).unwrap();destination.fail_context=true;
+    assert_eq!(production::install_values(&mut destination,&values),Err(Error::ResourceUnavailable));
+    assert!(!FAIL_NEXT.load(Ordering::Relaxed));drop(destination);assert_eq!(Arc::strong_count(resource),pins);
+    let duplicate=[InheritedValueSpec{key:7,value:1},InheritedValueSpec{key:7,value:2}];
+    assert!(matches!(install_plan(&grants,&duplicate,false),Err(Error::AlreadyExists)));
+    assert_eq!(Arc::strong_count(resource),pins);
+    // Duplicate keys must not install an orphan selector or replace rights.
+    let mut destination=task::Process::unpublished();
+    production::install_handles(&mut destination,&grants[..1]).unwrap();
+    assert_eq!(production::install_handles(&mut destination,&[grant(10,3,entry)]),Err(Error::AlreadyExists));
+    assert_eq!(destination.table.describe().len(),1);drop(destination);
+    // Full table exhaustion differs from a duplicate explicit target.
+    let mut destination=task::Process::unpublished();
+    for raw in 1..=task::handle_table::PROCESS_MAX_OBJECT_HANDLES as u32 {
+        assert!(destination.table.insert_at(ObjectHandle::from_raw(raw).unwrap(),entry.clone()));
+    }
+    assert_eq!(production::install_handles(&mut destination,&[grant(1,0,entry)]),Err(Error::ResourceUnavailable));
+    assert_eq!(production::install_handles(&mut destination,&[grant(1,1,entry)]),Err(Error::AlreadyExists));
+    drop(destination);assert_eq!(Arc::strong_count(resource),pins);
+    let mut context=task::launch_context::LaunchContext::new_boxed();
+    let handle=ObjectHandle::from_raw(7).unwrap();
+    FAIL_NEXT.store(true,Ordering::Relaxed);assert_eq!(context.install(0,handle),Err(Error::ResourceUnavailable));
+    assert_eq!(context.get(0),None);
+    FAIL_NEXT.store(true,Ordering::Relaxed);assert_eq!(context.install_value(0,42),Err(Error::ResourceUnavailable));
+    assert_eq!(context.value(0),None);
+    for key in 0..256 {context.install(key,handle).unwrap();context.install_value(key,key).unwrap();}
+    assert_eq!(context.install(256,handle),Err(Error::ResourceUnavailable));
+    assert_eq!(context.install_value(256,1),Err(Error::ResourceUnavailable));
+    FAIL_NEXT.store(true,Ordering::Relaxed);assert_eq!(context.install(0,handle),Err(Error::AlreadyExists));
+    assert!(FAIL_NEXT.swap(false,Ordering::Relaxed));
+    FAIL_NEXT.store(true,Ordering::Relaxed);assert_eq!(context.install_value(0,99),Err(Error::AlreadyExists));
+    assert!(FAIL_NEXT.swap(false,Ordering::Relaxed));assert_eq!(context.value(0),Some(0));
+    drop(grants);assert_eq!(Arc::strong_count(resource),baseline);
+}
 fn main() {
     let original=Arc::new(17);let private=Arc::new(29);
     let full=HandleRights::READ.union(HandleRights::WRITE).union(HandleRights::TRANSFER);
@@ -188,6 +281,8 @@ fn main() {
     });
     let old=production::captured(31,&read).unwrap();let live=production::live(Some(19),&read).unwrap();
     assert!(Arc::ptr_eq(object(&old[0].entry),&original));assert!(Arc::ptr_eq(object(&live[0].entry),&replacement));
+    install_cases(&old[0].entry);
+    PROCESS.with_borrow(|p|assert_eq!(p.launch_context().get(10),None));
     drop(old);drop(live);drop(snapshot);
     PROCESS.with_borrow_mut(|p|{p.table.retain(|_|false);});
     assert_eq!(Arc::strong_count(&original),1);assert_eq!(Arc::strong_count(&replacement),1);assert_eq!(Arc::strong_count(&private),1);
