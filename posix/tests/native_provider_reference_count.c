@@ -12,8 +12,10 @@ static int foreign_work(void) {
   CHECK((int64_t)native(691, 42, 0, 0, 0, 0, 0) == INT64_C(-262139));
   CHECK((int64_t)native(638, atomic_load(&parent_object), 0, 0, 0, 0, 0) ==
         INT64_C(-262138));
+  CHECK((int64_t)native(667, 42, 4, 2, 0, 0, 0) == INT64_C(-262139));
   int64_t own = native(637, endpoint, 42, 1, 0, 0, 0);
   CHECK(own > 0 && native(691, 42, 0, 0, 0, 0, 0) == 1);
+  CHECK(native(667, 42, 4, 0, 0, 0, 0) == 0);
   CHECK(native(626, own, 0, 0, 0, 0, 0) == 0);
   CHECK((int64_t)native(691, 42, 0, 0, 0, 0, 0) == INT64_C(-262139));
   CHECK(native(626, endpoint, 0, 0, 0, 0, 0) == 0);
@@ -32,10 +34,22 @@ int main(void) {
   CHECK((int64_t)native(638, 0, 0, 0, 0, 0, 0) == INT64_C(-262139));
   CHECK((int64_t)native(638, (UINT64_C(1) << 32) | endpoint, 0, 0, 0, 0, 0) ==
         INT64_C(-262139));
-  uint64_t rights = (UINT64_C(3) << 62) | 1;
+  uint64_t rights = (UINT64_C(3) << 62) | 1 | 16;
   int64_t object = native(637, endpoint, 42, rights, 0, 0, 0);
   CHECK(object > 0 && native(691, 42, 0, 0, 0, 0, 0) == 1);
   CHECK(native(638, object, 0, 0, 0, 0, 0) == 42);
+  uint64_t observed;
+  CHECK(native(667, 42, 30, 0, 0, 0, 0) == 0);
+  CHECK(wait_ready(object, 30, &observed) == 0 && observed == 30);
+  CHECK((int64_t)native(667, 42, 1, 0, 0, 0, 0) == INT64_C(-262139));
+  CHECK((int64_t)native(667, 42, 2, 2, 0, 0, 0) == INT64_C(-262139));
+  CHECK((int64_t)native(667, UINT64_MAX, 0, 0, 0, 0, 0) == INT64_C(-262139));
+  CHECK(wait_ready(object, 30, &observed) == 0 && observed == 30);
+  CHECK(native(667, 42, 0, 2, 0, 0, 0) == 0);
+  CHECK(wait_ready(object, 30, &observed) == 0 && observed == 28);
+  CHECK(native(667, 42, 0, 30, 0, 0, 0) == 0);
+  CHECK(wait_ready(object, 30, &observed) == -11 && observed == 0);
+  CHECK(native(667, 42, 2, 0, 0, 0, 0) == 0);
   int64_t metadata_only = native(627, object, 0, 0, 0, 0, 0);
   CHECK(metadata_only > 0 && native(638, metadata_only, 0, 0, 0, 0, 0) == 42);
   CHECK(native(626, metadata_only, 0, 0, 0, 0, 0) == 0);
@@ -45,6 +59,7 @@ int main(void) {
   pthread_t worker;
   CHECK(pthread_create(&worker, NULL, foreign, NULL) == 0);
   CHECK(pthread_join(worker, NULL) == 0 && !atomic_load(&foreign_error));
+  CHECK(wait_ready(object, 30, &observed) == 0 && observed == 2);
   CHECK(native(691, 42, 0, 0, 0, 0, 0) == 2);
   CHECK(native(626, alias, 0, 0, 0, 0, 0) == 0);
   CHECK(native(691, 42, 0, 0, 0, 0, 0) == 1);
@@ -69,7 +84,10 @@ int main(void) {
   CHECK(native(626, object, 0, 0, 0, 0, 0) == 0);
   CHECK((int64_t)native(638, object, 0, 0, 0, 0, 0) == INT64_C(-262139));
   CHECK((int64_t)native(691, 42, 0, 0, 0, 0, 0) == INT64_C(-262139));
+  CHECK((int64_t)native(667, 42, 2, 0, 0, 0, 0) == INT64_C(-262139));
   CHECK(native(626, endpoint, 0, 0, 0, 0, 0) == 0);
+  puts("provider-signal: PASS native errors, readiness masks, clearing and "
+       "exact endpoint isolation");
   puts("provider-reference-count: PASS aliases, queued IPC leases, release, "
        "exact endpoint namespace, no query pin");
   fflush(stdout);

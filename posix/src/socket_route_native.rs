@@ -110,9 +110,9 @@ pub fn pump(streams: &Streams, routes: &Routes<u32>) {
                 set,
                 mnu_abi::HANDLE_SIGNAL_WRITABLE & !set,
             ) {
-                if error.raw() != -9 {
+                if !super::socket_native::notification_is_retired(error.raw()) {
                     platform::logln!(
-                        "posix.service: send route readiness failed errno={}",
+                        "posix.service: send route readiness failed status={}",
                         error.raw()
                     );
                 }

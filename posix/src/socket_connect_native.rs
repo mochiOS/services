@@ -219,9 +219,9 @@ pub fn pump(streams: &mut Streams, bindings: &Bindings<u32>, jobs: &mut Connecti
                 if let Err(error) =
                     platform::handle::signal_provider_object(id, mnu_abi::HANDLE_SIGNAL_READABLE, 0)
                 {
-                    if error.raw() != -9 {
+                    if !super::socket_native::notification_is_retired(error.raw()) {
                         platform::logln!(
-                            "posix.service: connect job signal failed errno={}",
+                            "posix.service: connect job signal failed status={}",
                             error.raw()
                         );
                     }

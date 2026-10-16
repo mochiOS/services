@@ -116,15 +116,23 @@ pub(super) fn signal(
             };
             if let Err(error) = platform::handle::signal_provider_object(id, set, SIGNALS & !set) {
                 // A final close can race notification; no remaining observer.
-                if error.raw() != -9 {
+                if !notification_is_retired(error.raw()) {
                     platform::logln!(
-                        "posix.service: socket readiness failed errno={}",
+                        "posix.service: socket readiness failed status={}",
                         error.raw()
                     );
                 }
             }
         }
     }
+}
+
+pub(super) fn notification_is_retired(raw: i64) -> bool {
+    // Callers supply validated local IDs and constant supported signal masks.
+    // InvalidArgument therefore means the last reference was already closed,
+    // not a zero-readiness result or a reason to retry a foreign namespace.
+    mnu_abi::status::Error::from_raw(raw as u64)
+        == Some(mnu_abi::status::Error::InvalidArgument)
 }
 
 fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>>>) -> ! {
