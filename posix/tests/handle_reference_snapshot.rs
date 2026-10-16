@@ -48,7 +48,7 @@ unsafe impl std::alloc::GlobalAlloc for Allocator {{
 #[derive(Debug)] pub struct HandleInfo {{ pub handle:u32,pub reserved:u32,pub rights:u64 }}
 mod task {{
     pub mod handle_table {{
-        use alloc::{{boxed::Box,collections::BTreeMap,sync::Arc}};
+        use alloc::{{boxed::Box,vec::Vec,sync::Arc}};
         pub const PROCESS_MAX_OBJECT_HANDLES:usize=4096;
         #[derive(Clone,Debug)] pub struct KernelObject(pub Arc<u64>);
         {identity}

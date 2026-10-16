@@ -49,7 +49,7 @@ mod syscall {pub mod security {
 }}
 mod task {
     use super::*;
-    pub struct Table {pub entries:BTreeMap<ObjectHandle,Entry>}
+    pub struct Table {pub entries:Vec<(ObjectHandle,Entry)>}
     impl Table {
 "#,
     );
@@ -75,7 +75,7 @@ mod task {
     }
     pub struct Process {pub table:Table,pub launch:Launch}
     impl Process {
-        pub const fn new()->Self {Self{table:Table{entries:BTreeMap::new()},launch:Launch{inherited_handles:BTreeMap::new()}}}
+        pub const fn new()->Self {Self{table:Table{entries:Vec::new()},launch:Launch{inherited_handles:BTreeMap::new()}}}
         pub fn object_handles_mut(&mut self)->&mut Table {assert!(LOCKED.get());TABLE_CALLS.set(TABLE_CALLS.get()+1);&mut self.table}
         pub fn launch_context_mut(&mut self)->&mut Launch {assert!(LOCKED.get());CLEANUPS.set(CLEANUPS.get()+1);&mut self.launch}
     }
@@ -107,12 +107,12 @@ fn main() {
     DROPS.set(0);
     let shared=Arc::new(Resource);
     FIRST.with_borrow_mut(|p|{
-        p.table.entries.insert(ObjectHandle(7),Entry(shared.clone(),0));
-        p.table.entries.insert(ObjectHandle(8),Entry(shared.clone(),0));
+        p.table.entries.push((ObjectHandle(7),Entry(shared.clone(),0)));
+        p.table.entries.push((ObjectHandle(8),Entry(shared.clone(),0)));
         p.launch.inherited_handles.extend([(11,ObjectHandle(7)),(12,ObjectHandle(7)),(13,ObjectHandle(8))]);
     });
     drop(shared);
-    SECOND.with_borrow_mut(|p|{p.table.entries.insert(ObjectHandle(9),Entry(Arc::new(Resource),0));p.launch.inherited_handles.insert(14,ObjectHandle(9));});
+    SECOND.with_borrow_mut(|p|{p.table.entries.push((ObjectHandle(9),Entry(Arc::new(Resource),0)));p.launch.inherited_handles.insert(14,ObjectHandle(9));});
     for raw in [0,1u64<<32,(1u64<<32)|7,u64::MAX] {check(raw,Error::InvalidArgument.into_raw());}
     assert_eq!(TABLE_CALLS.get(),0);assert_eq!(CLEANUPS.get(),0);
     CONTEXT.set(None);check(7,Error::NotReady.into_raw());CONTEXT.set(Some(19));
@@ -120,7 +120,7 @@ fn main() {
     assert_eq!(TABLE_CALLS.get(),0);assert_eq!(CLEANUPS.get(),0);
     check(9,Error::InvalidArgument.into_raw());assert_eq!(CLEANUPS.get(),0);
     check(7,0);assert_eq!(CLEANUPS.get(),1);assert_eq!(DROPS.get(),0);
-    FIRST.with_borrow(|p|{assert!(!p.table.entries.contains_key(&ObjectHandle(7)));assert_eq!(p.launch.inherited_handles.len(),1);assert_eq!(p.launch.inherited_handles[&13],ObjectHandle(8));});
+    FIRST.with_borrow(|p|{assert!(p.table.entries.iter().all(|(handle,_)|*handle!=ObjectHandle(7)));assert_eq!(p.launch.inherited_handles.len(),1);assert_eq!(p.launch.inherited_handles[&13],ObjectHandle(8));});
     check(7,Error::InvalidArgument.into_raw());assert_eq!(CLEANUPS.get(),1);
     SECOND.with_borrow(|p|{assert_eq!(p.table.entries.len(),1);assert_eq!(p.launch.inherited_handles.len(),1);});
     CONTEXT.set(Some(20));check(9,0);assert_eq!(DROPS.get(),1);

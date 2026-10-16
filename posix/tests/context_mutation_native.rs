@@ -40,7 +40,7 @@ mod mnu_abi {pub mod status {
         "#[derive(Clone, Debug)]\npub struct ObjectHandleTable",
     ));
     program.push_str(
-        "struct Table {entries:BTreeMap<ObjectHandle,ObjectHandleEntry>}\nimpl Table {\n",
+        "struct Table {entries:Vec<(ObjectHandle,ObjectHandleEntry)>}\nimpl Table {\n",
     );
     program.push_str(probe::between(
         table,
@@ -83,7 +83,7 @@ mod task {
     use super::*;
     pub struct Process {pub table:Table,pub launch:Box<launch::LaunchContext>}
     impl Process {
-        pub fn new()->Self {Self{table:Table{entries:BTreeMap::new()},launch:launch::LaunchContext::new_boxed()}}
+        pub fn new()->Self {Self{table:Table{entries:Vec::new()},launch:launch::LaunchContext::new_boxed()}}
         pub fn object_handles(&self)->&Table {assert!(LOCKED.get());LOOKUPS.set(LOOKUPS.get()+1);&self.table}
         pub fn launch_context_mut(&mut self)->&mut launch::LaunchContext {assert!(LOCKED.get());LOOKUPS.set(LOOKUPS.get()+1);&mut self.launch}
     }
@@ -115,10 +115,10 @@ fn snapshot()->String {FIRST.with_borrow(|p|format!("{:?}",p.launch))}
 fn main() {
     let first=Arc::new(());let second=Arc::new(());let foreign=Arc::new(());
     FIRST.with_borrow_mut(|p|{
-        p.table.entries.insert(ObjectHandle(7),ObjectHandleEntry::new(KernelObject(first.clone()),HandleRights::empty()));
-        p.table.entries.insert(ObjectHandle(8),ObjectHandleEntry::new(KernelObject(second.clone()),HandleRights::ALL));
+        p.table.entries.push((ObjectHandle(7),ObjectHandleEntry::new(KernelObject(first.clone()),HandleRights::empty())));
+        p.table.entries.push((ObjectHandle(8),ObjectHandleEntry::new(KernelObject(second.clone()),HandleRights::ALL)));
     });
-    SECOND.with_borrow_mut(|p|{p.table.entries.insert(ObjectHandle(9),ObjectHandleEntry::new(KernelObject(foreign.clone()),HandleRights::ALL));});
+    SECOND.with_borrow_mut(|p|{p.table.entries.push((ObjectHandle(9),ObjectHandleEntry::new(KernelObject(foreign.clone()),HandleRights::ALL)));});
     for raw in [0,1u64<<32,(1u64<<32)|7,u64::MAX] {
         LOOKUPS.set(0);check(||production::context_handle_set(0,raw),Error::InvalidArgument.into_raw());assert_eq!(LOOKUPS.get(),0);
     }

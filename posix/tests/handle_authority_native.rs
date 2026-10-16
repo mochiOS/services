@@ -43,7 +43,7 @@ fn queries_and_restricted_duplicates_keep_caller_scope_and_native_failures() {
         r#"
 #![allow(dead_code)]
 extern crate alloc;
-use std::{cell::{Cell,RefCell},collections::BTreeMap,sync::{Arc,atomic::{AtomicBool,Ordering}}};
+use std::{cell::{Cell,RefCell},sync::{Arc,atomic::{AtomicBool,Ordering}}};
 static DENY:AtomicBool=AtomicBool::new(false);
 struct Allocator;
 unsafe impl std::alloc::GlobalAlloc for Allocator {
@@ -81,9 +81,9 @@ mod mnu_abi {pub mod status {
     program.push_str(
         r#"
 const PROCESS_MAX_OBJECT_HANDLES:usize=mnu_abi::PROCESS_MAX_OBJECT_HANDLES;
-struct ObjectHandleTable {entries:BTreeMap<ObjectHandle,ObjectHandleEntry>,next:u32}
+struct ObjectHandleTable {entries:Vec<(ObjectHandle,ObjectHandleEntry)>,next:u32}
 impl ObjectHandleTable {
-    const fn new()->Self {Self{entries:BTreeMap::new(),next:1}}
+    const fn new()->Self {Self{entries:Vec::new(),next:1}}
 "#,
     );
     for (start, end) in [
@@ -171,8 +171,8 @@ fn main() {
         assert_eq!(p.0.insert(ObjectHandleEntry::new(KernelObject(resource.clone()),HandleRights::empty())),ObjectHandle::from_raw(2));
         assert_eq!(p.0.insert(ObjectHandleEntry::new(KernelObject(resource.clone()),HandleRights::READ)),ObjectHandle::from_raw(3));
     });
-    SECOND.with_borrow_mut(|p|{p.0.entries.insert(ObjectHandle(1),ObjectHandleEntry::new(KernelObject(foreign.clone()),HandleRights::WRITE));
-        p.0.entries.insert(ObjectHandle(99),ObjectHandleEntry::new(KernelObject(foreign.clone()),HandleRights::ALL));});
+    SECOND.with_borrow_mut(|p|{p.0.entries.push((ObjectHandle(1),ObjectHandleEntry::new(KernelObject(foreign.clone()),HandleRights::WRITE)));
+        p.0.entries.push((ObjectHandle(99),ObjectHandleEntry::new(KernelObject(foreign.clone()),HandleRights::ALL)));});
     query(1,full);query(2,0);query(3,HandleRights::READ.bits());
     for invalid in [0,1u64<<32,(1u64<<32)|1,u64::MAX] {
         LOOKUPS.set(0);query(invalid,Error::InvalidArgument.into_raw());
@@ -198,7 +198,7 @@ fn main() {
     let empty=production::duplicate(first,0);assert_eq!(empty,6);query(empty,0);
     assert_eq!(Arc::strong_count(&resource),7);
     FIRST.with_borrow(|p|{
-        for raw in [first,second,empty] {assert!(Arc::ptr_eq(&p.0.entries[&ObjectHandle(raw as u32)].object().0,&resource));}
+        for raw in [first,second,empty] {assert!(Arc::ptr_eq(&p.0.get(ObjectHandle(raw as u32)).unwrap().object().0,&resource));}
     });
     // The same selector in another process still describes that process only.
     CONTEXT.set(Some(20));query(1,HandleRights::WRITE.bits());reject(1,0,Error::AccessDenied);CONTEXT.set(Some(19));

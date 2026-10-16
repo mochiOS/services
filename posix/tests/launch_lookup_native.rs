@@ -94,7 +94,7 @@ mod mnu_abi {pub mod status {
         "#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]",
         "#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]",
     ));
-    program.push_str("type ObjectHandleEntry=Arc<()>;\nstruct Table {entries:BTreeMap<ObjectHandle,ObjectHandleEntry>}\nimpl Table {\n");
+    program.push_str("type ObjectHandleEntry=Arc<()>;\nstruct Table {entries:Vec<(ObjectHandle,ObjectHandleEntry)>}\nimpl Table {\n");
     program.push_str(probe::between(
         table,
         "    pub fn get(",
@@ -129,7 +129,7 @@ mod task {
     use super::*;
     pub struct Process {pub table:Table,pub launch:Launch}
     impl Process {
-        pub const fn new()->Self {Self{table:Table{entries:BTreeMap::new()},launch:Launch{inherited_handles:BTreeMap::new(),inherited_values:BTreeMap::new()}}}
+        pub const fn new()->Self {Self{table:Table{entries:Vec::new()},launch:Launch{inherited_handles:BTreeMap::new(),inherited_values:BTreeMap::new()}}}
         pub fn object_handles(&self)->&Table {assert!(LOCKED.get());&self.table}
         pub fn launch_context(&self)->&Launch {assert!(LOCKED.get());&self.launch}
     }
@@ -214,7 +214,7 @@ fn check<T:std::fmt::Debug+PartialEq>(operation:impl FnOnce()->T,expected:T) {
 fn main() {
     let resource=Arc::new(());let control=posix_protocol::CONTROL_HANDLE_KEY;
     FIRST.with_borrow_mut(|p|{
-        p.table.entries.insert(ObjectHandle(7),resource.clone());
+        p.table.entries.push((ObjectHandle(7),resource.clone()));
         p.launch.inherited_handles.extend([(control,ObjectHandle(7)),(u64::MAX,ObjectHandle(7)),(1,ObjectHandle(99))]);
         p.launch.inherited_values.extend([(0,0),(u64::MAX,u64::MAX),(1,Error::NotFound.into_raw())]);
     });
