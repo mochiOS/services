@@ -58,6 +58,7 @@ thread_local! {
     static UPCALL:Cell<bool>=const{Cell::new(false)};
     static COPY_FAILURE:Cell<bool>=const{Cell::new(false)};
     static READ_ERROR:Cell<Option<Error>>=const{Cell::new(None)};
+    static LOOKUP_ERROR:Cell<Option<Error>>=const{Cell::new(None)};
     static WRITE_ERROR:Cell<Option<Error>>=const{Cell::new(None)};
     static CURRENT:Cell<bool>=const{Cell::new(true)};
     static GUARD_COPIES:Cell<usize>=const{Cell::new(0)};
@@ -85,7 +86,8 @@ enum KernelObject{MemoryAdmission(Arc<mem::vm_object::ProviderAdmission>),Other}
 static ADMISSION:OnceLock<Arc<mem::vm_object::ProviderAdmission>>=OnceLock::new();
 static FILE:OnceLock<Arc<task::FileHandle>>=OnceLock::new();
 static PROVIDER:OnceLock<Arc<ProviderObject>>=OnceLock::new();
-fn object(raw:u64,_:HandleRights)->Result<KernelObject,u64> {
+fn object_native(raw:u64,_:HandleRights)->Result<KernelObject,Error> {
+    if let Some(error)=LOOKUP_ERROR.get(){return Err(error);}
     Ok(if raw==5{KernelObject::MemoryAdmission(ADMISSION.get().unwrap().clone())}else{KernelObject::Other})
 }
 fn provider_endpoint(_: &ProviderObject)->syscall::ipc::IpcEndpoint{syscall::ipc::IpcEndpoint(4)}
@@ -209,7 +211,7 @@ fn clean(){
 }
 fn reset(){
     clean();READY.set(false);UPCALL.set(false);COPY_FAILURE.set(false);
-    READ_ERROR.set(None);WRITE_ERROR.set(None);CURRENT.set(true);
+    READ_ERROR.set(None);LOOKUP_ERROR.set(None);WRITE_ERROR.set(None);CURRENT.set(true);
     GUARD_COPIES.set(0);GUARD_READS.set(0);GUARD_EXPECTED.set(5);GUARD_VALUE.set(5);
     STAGE.set(0);FAIL_STAGE.set(0);SCANS.set(0);FAIL_SCAN.set(0);SLEEPS.set(0);
     NOW.set(0);SIGNAL_ON_ARM.set(false);
@@ -265,6 +267,11 @@ fn main(){
     reset();assert_eq!(handle::wait_many(0,5,0,0),Error::InvalidAddress.into_raw());clean();
     reset();assert_eq!(handle::wait_many(1,5,0,u64::MAX),Error::InvalidAddress.into_raw());clean();
     reset();CURRENT.set(false);assert_eq!(handle::wait_many(1,5,100,0),Error::NotReady.into_raw());clean();
+    for error in [Error::InvalidArgument,Error::AccessDenied,Error::NotReady] {
+        reset();LOOKUP_ERROR.set(Some(error));
+        assert_eq!(handle::wait_many(1,5,100,0),error.into_raw());
+        assert_eq!(STAGE.get(),0);clean();
+    }
     reset();assert_eq!(handle::wait_many(1,5,100,2),0);
     assert_eq!(GUARD_COPIES.get(),1);assert!(GUARD_READS.get()>1);clean();
     reset();GUARD_VALUE.set(6);

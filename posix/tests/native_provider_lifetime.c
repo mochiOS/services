@@ -224,12 +224,12 @@ int main(int argc, char **argv) {
   uint64_t started, finished;
   CHECK(life_now(&started) == 0);
   CHECK((int64_t)life_native(647, (uintptr_t)&item, 1, started + 3000000000, 0,
-                             0, 0) == -3);
+                             0, 0) == INT64_C(-262135));
   CHECK(life_now(&finished) == 0 && finished >= started);
   CHECK(finished - started >= 60000000 && finished - started < 2000000000);
   CHECK(pthread_join(terminator, NULL) == 0);
   CHECK(pthread_join(provider, NULL) == 0 && !atomic_load(&life_error));
-  CHECK((int64_t)life_native(647, (uintptr_t)&item, 1, 0, 0, 0, 0) == -3);
+  CHECK((int64_t)life_native(647, (uintptr_t)&item, 1, 0, 0, 0, 0) == INT64_C(-262135));
   char output[2];
   CHECK((int64_t)life_native(634, item.handle, (uintptr_t)output, 2, 0, 0, 0) ==
         -3);

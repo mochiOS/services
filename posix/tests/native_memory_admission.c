@@ -197,7 +197,7 @@ int MEMORY_ADMISSION_MAIN(void) {
   void *provider_result;
   CHECK(pthread_join(provider_thread, &provider_result) == 0 &&
         provider_result == NULL);
-  CHECK(poll_ticket(orphan, &observed) == -3);
+  CHECK(poll_ticket(orphan, &observed) == INT64_C(-262135));
   CHECK(native(HANDLE_CLOSE, orphan, 0, 0, 0, 0, 0) == 0);
   CHECK(native(HANDLE_CLOSE, other_endpoint, 0, 0, 0, 0, 0) == 0);
   puts("memory-admission: PASS authority, IPC transfer, cancellation, FIFO "
