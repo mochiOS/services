@@ -196,3 +196,37 @@ fn terminal_entry_points_keep_leases_tracked_through_callbacks_and_user_copies()
         }
     }
 }
+
+#[test]
+fn descriptor_metadata_and_sync_paths_keep_the_source_tracked_until_return() {
+    let source = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
+    for name in [
+        "fchmod",
+        "fchown",
+        "_lseek",
+        "sync_file_descriptor",
+        "_fstat",
+    ] {
+        let signature = format!("fn {name}(");
+        let start = source.find(&signature).unwrap();
+        let end = start + source[start..].find("\n}\n").unwrap();
+        let body = &source[start..end];
+        assert!(body.contains("io_resources::with"), "{name}");
+        assert!(body.contains("|| with_fd_entry(fd)"), "{name}");
+        if name == "_fstat" {
+            for kind in [
+                "ObjectSharedMemory",
+                "is_socket()",
+                "ObjectFile",
+                "ObjectSpecial",
+                "ObjectDirectory",
+                "ObjectStreamRead",
+                "ObjectStreamWrite",
+                "ObjectPty",
+            ] {
+                assert!(body.contains(kind), "{kind}");
+            }
+            assert!(body.contains("ptr::write(stat_buf.cast::<NewlibStat>()"));
+        }
+    }
+}
