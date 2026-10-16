@@ -15,7 +15,9 @@ fn posix_flags_are_translated_not_forwarded_to_the_native_abi() {
     assert_eq!(
         native_map(MAP_SHARED | MAP_FIXED),
         Some(NativeMap {
-            options: mnu_abi::MEMORY_MAP_SHARED | mnu_abi::MEMORY_MAP_EXACT,
+            options: mnu_abi::MEMORY_MAP_SHARED
+                | mnu_abi::MEMORY_MAP_EXACT
+                | mnu_abi::MEMORY_MAP_REPLACE,
             anonymous: false,
         })
     );
