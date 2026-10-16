@@ -15,5 +15,5 @@ fn exec_retains_explicit_labels_without_filesystem_alias_or_basename_policy() {
     let begin = exec.find("pub fn process_create_syscall(").unwrap();
     let end = begin + exec[begin..].find("\n}\n").unwrap() + 3;
     assert!(exec[begin..end].contains("request.label"));
-    assert!(exec.contains("Process::new(process_name, privilege, priority)"));
+    assert!(exec.contains("Process::try_new(process_name, privilege, priority)"));
 }
