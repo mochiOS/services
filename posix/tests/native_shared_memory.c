@@ -40,8 +40,12 @@ static int probe(void) {
     /* Retired native entry, not newlib errno: unknown syscall is -38. */
     if ((int64_t)native(585, 0, 0, 0, 0, 0, 0) != -38) return 52;
     fprintf(stderr, "shared-memory: legacy entry retired\n");
-    if ((int64_t)native(MEMORY_OBJECT_CREATE, 0, 0, 0, 0, 0, 0) != -22) return 1;
-    if ((int64_t)native(MEMORY_OBJECT_CREATE, 4096, 2, 0, 0, 0, 0) != -22) return 2;
+    if ((int64_t)native(MEMORY_OBJECT_CREATE, 0, 0, 0, 0, 0, 0) !=
+        INT64_C(-262139))
+      return 1;
+    if ((int64_t)native(MEMORY_OBJECT_CREATE, 4096, 2, 0, 0, 0, 0) !=
+        INT64_C(-262139))
+      return 2;
     uint64_t object = native(MEMORY_OBJECT_CREATE, 8192, 0, 0, 0, 0, 0);
     if ((int64_t)object < 0) return 3;
     if (native(MEMORY_OBJECT_LENGTH, object, 0, 0, 0, 0, 0) != 8192) return 35;

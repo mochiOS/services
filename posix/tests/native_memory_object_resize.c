@@ -36,8 +36,10 @@ static int64_t native(uint64_t number, uint64_t a, uint64_t b, uint64_t c,
   } while (0)
 
 int main(void) {
-  CHECK(native(CREATE, 0, 0, 0, 0, 0, 0) == -22);
-  CHECK(native(CREATE, 4096, 2, 0, 0, 0, 0) == -22);
+  CHECK(native(CREATE, 0, 0, 0, 0, 0, 0) == INT64_C(-262139));
+  CHECK(native(CREATE, 4096, 2, 0, 0, 0, 0) == INT64_C(-262139));
+  CHECK(native(CREATE, 1, 0, 0, 0, 0, 0) == INT64_C(-262139));
+  CHECK(native(CREATE, UINT64_MAX, 1, 0, 0, 0, 0) == INT64_C(-262141));
   int64_t fixed = native(CREATE, 4096, 0, 0, 0, 0, 0);
   CHECK(fixed > 0 && !(native(RIGHTS, fixed, 0, 0, 0, 0, 0) & 256));
   CHECK(native(RESIZE, fixed, 8192, 0, 0, 0, 0) == -13);

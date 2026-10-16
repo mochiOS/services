@@ -172,6 +172,14 @@ fn empty_byte_object_grows_lazily_and_keeps_its_original_ceiling() {
 
 #[test]
 fn byte_creation_checks_rounded_capacity_without_rounding_logical_length() {
+    assert!(matches!(
+        shared_memory::SharedMemory::new(0, 1),
+        Err(NativeError::InvalidArgument)
+    ));
+    assert!(matches!(
+        shared_memory::SharedMemory::new(1, 1),
+        Err(NativeError::InvalidArgument)
+    ));
     let memory = shared_memory::SharedMemory::new_resizable(4097, 2).unwrap();
     assert_eq!(memory.length(), 4097);
     assert!(memory.contains_range(4096, 1));
@@ -182,11 +190,11 @@ fn byte_creation_checks_rounded_capacity_without_rounding_logical_length() {
     assert_eq!(bytes[0], 23);
     assert!(matches!(
         shared_memory::SharedMemory::new_resizable(4097, 1),
-        Err(syscall::ENOMEM)
+        Err(NativeError::ResourceUnavailable)
     ));
     assert!(matches!(
         shared_memory::SharedMemory::new_resizable(u64::MAX, u64::MAX),
-        Err(syscall::ENOMEM)
+        Err(NativeError::ResourceUnavailable)
     ));
     assert!(shared_memory::SharedMemory::new_resizable(0, 0).is_ok());
 }

@@ -53,6 +53,14 @@ impl Drop for Temporary {
 }
 
 pub fn run(program: &str) {
+    run_with(program, None);
+}
+
+pub fn run_with_toolchain(program: &str, toolchain: &str) {
+    run_with(program, Some(toolchain));
+}
+
+fn run_with(program: &str, toolchain: Option<&str>) {
     let temporary = Temporary(std::env::temp_dir().join(format!(
         "mochios-native-error-{}-{}",
         std::process::id(),
@@ -63,7 +71,15 @@ pub fn run(program: &str) {
     )));
     std::fs::create_dir(&temporary.0).unwrap();
     let binary = temporary.0.join("probe");
-    let mut compiler = Command::new("rustc")
+    let mut command = match toolchain {
+        Some(toolchain) => {
+            let mut command = Command::new("rustup");
+            command.args(["run", toolchain, "rustc"]);
+            command
+        }
+        None => Command::new("rustc"),
+    };
+    let mut compiler = command
         .args(["--edition=2024", "-", "-o"])
         .arg(&binary)
         .stdin(Stdio::piped())
