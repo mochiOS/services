@@ -52,7 +52,7 @@ __asm__(
 static void handler(uint64_t payload, uint64_t token) {
     struct snapshot before, after;
     if (payload != 0x55 || native(INSPECT, token, (uintptr_t)&before, sizeof(before))
-        || (int64_t)native(RESTORE, (uintptr_t)&selected, sizeof(selected), 0) != -11
+        || (int64_t)native(RESTORE, (uintptr_t)&selected, sizeof(selected), 0) != INT64_C(-262137)
         || native(INSPECT, token, (uintptr_t)&after, sizeof(after))
         || memcmp(&before, &after, sizeof(before))) _exit(91);
     callback_seen = 1;
@@ -69,21 +69,21 @@ int main(void) {
     uint64_t *registers = (uint64_t *)&selected.registers;
     for (unsigned i = 0; i < 14; ++i) registers[i] = UINT64_C(0x1234567800000000) + i;
     struct snapshot invalid = selected;
-    CHECK((int64_t)native(RESTORE, 0, sizeof(selected), 0) == -22);
-    CHECK((int64_t)native(RESTORE, 1, sizeof(selected), 0) == -14);
-    CHECK((int64_t)native(RESTORE, (uintptr_t)&selected, sizeof(selected) - 1, 0) == -22);
+    CHECK((int64_t)native(RESTORE, 0, sizeof(selected), 0) == INT64_C(-262142));
+    CHECK((int64_t)native(RESTORE, 1, sizeof(selected), 0) == INT64_C(-262142));
+    CHECK((int64_t)native(RESTORE, (uintptr_t)&selected, sizeof(selected) - 1, 0) == INT64_C(-262139));
     invalid.flags |= 3u << 12;
-    CHECK((int64_t)native(RESTORE, (uintptr_t)&invalid, sizeof(invalid), 0) == -22);
+    CHECK((int64_t)native(RESTORE, (uintptr_t)&invalid, sizeof(invalid), 0) == INT64_C(-262139));
     invalid = selected; invalid.stack_pointer = 0;
-    CHECK((int64_t)native(RESTORE, (uintptr_t)&invalid, sizeof(invalid), 0) == -22);
+    CHECK((int64_t)native(RESTORE, (uintptr_t)&invalid, sizeof(invalid), 0) == INT64_C(-262139));
     invalid = selected; invalid.instruction = UINT64_C(0xffff800000000000);
-    CHECK((int64_t)native(RESTORE, (uintptr_t)&invalid, sizeof(invalid), 0) == -22);
+    CHECK((int64_t)native(RESTORE, (uintptr_t)&invalid, sizeof(invalid), 0) == INT64_C(-262139));
     invalid = selected; invalid.stack_pointer = UINT64_C(0xffff800000000000);
-    CHECK((int64_t)native(RESTORE, (uintptr_t)&invalid, sizeof(invalid), 0) == -22);
+    CHECK((int64_t)native(RESTORE, (uintptr_t)&invalid, sizeof(invalid), 0) == INT64_C(-262139));
     invalid = selected;
     invalid.fx_state[27] = 0x80;
     memset(invalid.fx_state + 28, 0xff, 4);
-    CHECK((int64_t)native(RESTORE, (uintptr_t)&invalid, sizeof(invalid), 0) == -22);
+    CHECK((int64_t)native(RESTORE, (uintptr_t)&invalid, sizeof(invalid), 0) == INT64_C(-262139));
     struct { uint64_t entry, base, size, flags, reserved[4]; } config = {
         (uintptr_t)handler, (uintptr_t)callback_stack, sizeof(callback_stack), 0, {0}
     };

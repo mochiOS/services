@@ -12,6 +12,9 @@ fn production_restore_copies_before_commit_and_rejects_invalid_self_contexts() {
     program.push_str("#[derive(Clone, Copy, Debug, PartialEq, Eq)]\n");
     program.push_str(&thread[start..end]);
     program.push_str("mod mnu_abi {\n");
+    program.push_str("pub mod status {\n");
+    program.push_str(include_str!("../../../core/crates/abi/src/status.rs"));
+    program.push_str("}\n");
     for name in [
         "pub struct ThreadInitialRegisters {",
         "pub struct ThreadUpcallSnapshot {",
@@ -23,13 +26,14 @@ fn production_restore_copies_before_commit_and_rejects_invalid_self_contexts() {
     }
     program.push_str(r#"
 }
-const EINVAL:u64=(-22i64) as u64;const EFAULT:u64=(-14i64) as u64;
-const ESRCH:u64=(-3i64) as u64;const EAGAIN:u64=(-11i64) as u64;const SUCCESS:u64=0;
+const INVALID_ARGUMENT:u64=mnu_abi::status::Error::InvalidArgument.into_raw();
+const INVALID_ADDRESS:u64=mnu_abi::status::Error::InvalidAddress.into_raw();
+const NOT_READY:u64=mnu_abi::status::Error::NotReady.into_raw();const SUCCESS:u64=0;
 #[derive(Debug)] enum ThreadUpcallError { Active, InvalidContext }
 thread_local! {static MODE:std::cell::Cell<u8>=const {std::cell::Cell::new(0)};
 static COMMITS:std::cell::Cell<usize>=const {std::cell::Cell::new(0)};}
-fn copy_from_user(pointer:u64,bytes:&mut [u8])->Result<(),u64> {
-    if pointer==1 {return Err(EFAULT)}
+fn copy_from_user_native(pointer:u64,bytes:&mut [u8])->Result<(),mnu_abi::status::Error> {
+    if pointer==1 {return Err(mnu_abi::status::Error::InvalidAddress)}
     unsafe {bytes.copy_from_slice(core::slice::from_raw_parts(pointer as *const u8,bytes.len()));}
     Ok(())
 }
@@ -66,16 +70,16 @@ fn main(){
     good.instruction=0x4000;good.stack_pointer=0x8000;good.rflags=0x202;
     good.registers.rcx=0x1234;good.fx_state[160]=0x5b;
     let size=core::mem::size_of_val(&good) as u64;
-    assert_eq!(restore_context(0,size),EINVAL);assert_eq!(restore_context(1,size),EFAULT);
-    assert_eq!(restore_context(&good as *const _ as u64,size-1),EINVAL);
+    assert_eq!(restore_context(0,size),INVALID_ADDRESS);assert_eq!(restore_context(1,size),INVALID_ADDRESS);
+    assert_eq!(restore_context(&good as *const _ as u64,size-1),INVALID_ARGUMENT);
     for (field,value) in [(0,0),(0,0x800000000000),(0,0xffff800000000000),
         (1,0),(1,15),(1,0xffff800000000000),(2,0),(2,0x3202),(2,0x202|(1<<63))] {
         let mut bad=good;
         match field {0=>bad.instruction=value,1=>bad.stack_pointer=value,_=>bad.rflags=value}
-        assert_eq!(restore_context(&bad as *const _ as u64,size),EINVAL);
+        assert_eq!(restore_context(&bad as *const _ as u64,size),INVALID_ARGUMENT);
         assert_eq!(COMMITS.with(|v|v.get()),0);
     }
-    for (mode,error) in [(1,ESRCH),(2,EAGAIN),(3,EINVAL)] {
+    for (mode,error) in [(1,NOT_READY),(2,NOT_READY),(3,INVALID_ARGUMENT)] {
         MODE.with(|v|v.set(mode));assert_eq!(restore_context(&good as *const _ as u64,size),error);
         assert_eq!(COMMITS.with(|v|v.get()),0);
     }

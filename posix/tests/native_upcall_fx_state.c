@@ -38,7 +38,7 @@ static void handler(uint64_t payload, uint64_t token) {
     __asm__ volatile("movdqu %0, %%xmm0\nmovdqu %0, %%xmm15\nldmxcsr %1\nfldcw %2"
                      : : "m"(changed), "m"(handler_mxcsr), "m"(handler_x87)
                      : "xmm0", "xmm15", "memory");
-    if ((int64_t)return_upcall(token + 1) != -22) handler_failed = 2;
+    if ((int64_t)return_upcall(token + 1) != INT64_C(-262139)) handler_failed = 2;
     uint32_t retained;
     __asm__ volatile("stmxcsr %0" : "=m"(retained));
     if (retained != handler_mxcsr) handler_failed = 3;

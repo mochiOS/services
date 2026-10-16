@@ -59,9 +59,9 @@ static void handler(uint64_t vector, uint64_t token, uint64_t kind,
     }
     if (report_only) _exit(70 + (int)cause);
     struct snapshot captured, again;
-    if ((int64_t)native(INSPECT, token + 1, (uintptr_t)&captured, sizeof(captured), 0, 0, 0) != -22 ||
-        (int64_t)native(INSPECT, token, 0, sizeof(captured), 0, 0, 0) != -14 ||
-        (int64_t)native(INSPECT, token, (uintptr_t)&captured, sizeof(captured) - 1, 0, 0, 0) != -22 ||
+    if ((int64_t)native(INSPECT, token + 1, (uintptr_t)&captured, sizeof(captured), 0, 0, 0) != INT64_C(-262139) ||
+        (int64_t)native(INSPECT, token, 0, sizeof(captured), 0, 0, 0) != INT64_C(-262142) ||
+        (int64_t)native(INSPECT, token, (uintptr_t)&captured, sizeof(captured) - 1, 0, 0, 0) != INT64_C(-262139) ||
         native(INSPECT, token, (uintptr_t)&captured, sizeof(captured), 0, 0, 0)) _exit(101);
     if (captured.instruction != instruction || !captured.stack_pointer ||
         !(captured.flags & (1 << 10)) || captured.registers.rcx != UINT64_C(0x1122334455667788) ||
@@ -71,18 +71,18 @@ static void handler(uint64_t vector, uint64_t token, uint64_t kind,
     if (native(INSPECT, token, (uintptr_t)&again, sizeof(again), 0, 0, 0) ||
         again.instruction != instruction || !again.registers.rcx) _exit(103);
     captured = again;
-    if ((int64_t)native(RETURN_CONTEXT, token + 1, (uintptr_t)&captured, sizeof(captured), 0, 0, 0) != -22) _exit(109);
+    if ((int64_t)native(RETURN_CONTEXT, token + 1, (uintptr_t)&captured, sizeof(captured), 0, 0, 0) != INT64_C(-262139)) _exit(109);
     captured.flags |= 3u << 12;
-    if ((int64_t)native(RETURN_CONTEXT, token, (uintptr_t)&captured, sizeof(captured), 0, 0, 0) != -22) _exit(104);
+    if ((int64_t)native(RETURN_CONTEXT, token, (uintptr_t)&captured, sizeof(captured), 0, 0, 0) != INT64_C(-262139)) _exit(104);
     captured = again; captured.instruction = UINT64_C(0xffff800000000000);
-    if ((int64_t)native(RETURN_CONTEXT, token, (uintptr_t)&captured, sizeof(captured), 0, 0, 0) != -22) _exit(105);
+    if ((int64_t)native(RETURN_CONTEXT, token, (uintptr_t)&captured, sizeof(captured), 0, 0, 0) != INT64_C(-262139)) _exit(105);
     captured = again; captured.stack_pointer = UINT64_C(0xffff800000000000);
-    if ((int64_t)native(RETURN_CONTEXT, token, (uintptr_t)&captured, sizeof(captured), 0, 0, 0) != -22) _exit(106);
+    if ((int64_t)native(RETURN_CONTEXT, token, (uintptr_t)&captured, sizeof(captured), 0, 0, 0) != INT64_C(-262139)) _exit(106);
     captured = again;
     captured.fx_state[27] = 0x80;
     for (unsigned i = 28; i < 32; ++i) captured.fx_state[i] = 0xff;
-    if ((int64_t)native(RETURN_CONTEXT, token, 0, sizeof(captured), 0, 0, 0) != -22 ||
-        (int64_t)native(RETURN_CONTEXT, token, 1, sizeof(captured), 0, 0, 0) != -14) _exit(108);
+    if ((int64_t)native(RETURN_CONTEXT, token, 0, sizeof(captured), 0, 0, 0) != INT64_C(-262142) ||
+        (int64_t)native(RETURN_CONTEXT, token, 1, sizeof(captured), 0, 0, 0) != INT64_C(-262142)) _exit(108);
     captured = again;
     captured.flags |= 1;
     captured.registers.rcx = UINT64_C(0x123456789abcdef0);
@@ -131,7 +131,7 @@ int main(void) {
     sigaddset(&blocked, SIGCHLD);
     if (sigprocmask(SIG_BLOCK, &blocked, NULL)) return 1;
     if (install(2) != -22 || install(1)) return 1;
-    if ((int64_t)native(INSPECT, 0, 0, sizeof(struct snapshot), 0, 0, 0) != -22) return 7;
+    if ((int64_t)native(INSPECT, 0, 0, sizeof(struct snapshot), 0, 0, 0) != INT64_C(-262139)) return 7;
     for (unsigned attempt = 1; attempt <= 3; ++attempt) {
         int result = recover();
         if (result || exceptions != attempt) {
@@ -139,8 +139,8 @@ int main(void) {
             return 2;
         }
         struct snapshot stale;
-        if ((int64_t)native(INSPECT, last_token, (uintptr_t)&stale, sizeof(stale), 0, 0, 0) != -22) return 8;
-        if ((int64_t)native(RETURN_CONTEXT, last_token, (uintptr_t)&stale, sizeof(stale), 0, 0, 0) != -22) return 9;
+        if ((int64_t)native(INSPECT, last_token, (uintptr_t)&stale, sizeof(stale), 0, 0, 0) != INT64_C(-262139)) return 8;
+        if ((int64_t)native(RETURN_CONTEXT, last_token, (uintptr_t)&stale, sizeof(stale), 0, 0, 0) != INT64_C(-262139)) return 9;
     }
     /* Both private copies and shared pins must report absent backing, not
        manufacture pages. The unmapped-address case is a distinct cause. */
