@@ -15,7 +15,18 @@ pub fn collect(streams: &mut Streams) -> Result<Vec<u64>, i32> {
         },
         |id| {
             platform::handle::provider_object_reference_count(id)
-                .map_err(|error| error.raw() as i32)
+                .map_err(|error| reference_count_status(error.raw()))
         },
     )
+}
+
+fn reference_count_status(raw: i64) -> i32 {
+    if mnu_abi::status::Error::from_raw(raw as u64) == Some(mnu_abi::status::Error::InvalidArgument)
+    {
+        // These IDs came from our own stream table. A missing Provider means
+        // its release may still be queued: retry the entire observation,
+        // never infer zero references or discard queues from a partial graph.
+        return -11;
+    }
+    mochios_posix_protocol::status::normalize_failure(raw)
 }
