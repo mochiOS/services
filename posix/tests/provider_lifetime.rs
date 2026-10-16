@@ -95,12 +95,24 @@ fn retire(endpoint: IpcEndpoint) {
 #[test]
 fn production_subscriptions_close_retirement_races_and_preserve_generation_identity() {
     use lifetime::{observe, remove_waiter};
+    use mnu_abi::status::Error;
     use task::ThreadId;
     let owner = endpoint(10, 1);
     let unrelated = endpoint(11, 1);
     publish(owner);
     publish(unrelated);
     SLOTS.lock().unwrap().extend([(1, 0), (2, 1)]);
+    assert!(
+        matches!(observe(owner, ThreadId(999)), Err(error) if error==Error::NotReady.into_raw())
+    );
+    SLOTS
+        .lock()
+        .unwrap()
+        .insert(999, task::ThreadQueue::MAX_THREADS);
+    assert!(
+        matches!(observe(owner, ThreadId(999)), Err(error) if error==Error::NotReady.into_raw())
+    );
+    SLOTS.lock().unwrap().remove(&999);
     let first = observe(owner, ThreadId(1)).unwrap();
     let duplicate = observe(owner, ThreadId(1)).unwrap();
     let second = observe(owner, ThreadId(2)).unwrap();
@@ -108,7 +120,7 @@ fn production_subscriptions_close_retirement_races_and_preserve_generation_ident
     drop(first); // another guard still owns the subscription
     retire(owner);
     assert_eq!(*WOKEN.lock().unwrap(), [1, 2]);
-    assert!(matches!(observe(owner, ThreadId(1)), Err(e) if e == (-3i64) as u64));
+    assert!(matches!(observe(owner, ThreadId(1)), Err(e) if e == Error::NotFound.into_raw()));
     drop(duplicate);
     drop(second);
     WOKEN.lock().unwrap().clear();
@@ -158,9 +170,26 @@ fn production_subscriptions_close_retirement_races_and_preserve_generation_ident
     }
     let extra = endpoint(164, 1);
     publish(extra);
-    assert!(matches!(observe(extra, ThreadId(2)), Err(e) if e == (-11i64) as u64));
+    assert!(
+        matches!(observe(extra, ThreadId(2)), Err(e) if e == Error::ResourceUnavailable.into_raw())
+    );
     drop(guards);
     drop(observe(extra, ThreadId(2)).unwrap());
+
+    // Saturating the explicit duplicate-reference field must not wrap it or
+    // consume existing references. Releasing one reference admits another.
+    let mut duplicates = Vec::with_capacity(usize::from(u16::MAX));
+    for _ in 0..u16::MAX {
+        duplicates.push(observe(extra, ThreadId(2)).unwrap());
+    }
+    assert!(matches!(observe(extra, ThreadId(2)), Err(error)
+        if error==Error::ResourceUnavailable.into_raw()));
+    drop(duplicates.pop().unwrap());
+    duplicates.push(observe(extra, ThreadId(2)).unwrap());
+    WOKEN.lock().unwrap().clear();
+    retire(extra);
+    assert_eq!(*WOKEN.lock().unwrap(), [2]);
+    drop(duplicates);
 
     // Race actual production subscribe against published retirement repeatedly.
     // Either registration fails closed, or retirement wakes the subscribed thread.
@@ -181,7 +210,7 @@ fn production_subscriptions_close_retirement_races_and_preserve_generation_ident
                     assert_eq!(*WOKEN.lock().unwrap(), [2]);
                     drop(guard);
                 }
-                Err(error) => assert_eq!(error, (-3i64) as u64),
+                Err(error) => assert_eq!(error, Error::NotFound.into_raw()),
             }
         });
     }

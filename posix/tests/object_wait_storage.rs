@@ -150,7 +150,7 @@ mod syscall {
             pub struct Observation(u64);
             impl Drop for Observation{fn drop(&mut self){crate::LIFETIMES.set(crate::LIFETIMES.get()-1)}}
             pub fn observe(endpoint:super::IpcEndpoint,_:u64)->Result<Observation,u64>{
-                if !crate::stage(){return Err(crate::EAGAIN);}
+                if !crate::stage(){return Err(crate::Error::ResourceUnavailable.into_raw());}
                 crate::LIFETIMES.set(crate::LIFETIMES.get()+1);Ok(Observation(endpoint.0))
             }
         }
@@ -231,7 +231,7 @@ fn main(){
     // backend deliberately arms before failing, to exercise unconditional Drop.
     for index in 1..=8 {
         reset();FAIL_STAGE.set(index);
-        let expected=if [1,2,5,8].contains(&index){Error::ResourceUnavailable.into_raw()}else{EAGAIN};
+        let expected=if [1,2,4,5,6,8].contains(&index){Error::ResourceUnavailable.into_raw()}else{EAGAIN};
         assert_eq!(handle::wait_many(1,5,100,0),expected);clean();assert_eq!(SLEEPS.get(),0);
     }
     // Failure during the post-registration readiness scan must clean all kinds.
