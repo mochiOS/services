@@ -1,4 +1,5 @@
 extern crate alloc;
+use mnu_abi::status::Error as NativeError;
 #[path = "../../../core/src/mem/detached_roots.rs"]
 mod detached_roots;
 #[path = "../../../core/src/mem/mapping_preservation_native.rs"]
@@ -16,8 +17,6 @@ use std::sync::{Mutex, OnceLock};
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 mod syscall {
-    pub const EFAULT: u64 = (-14i64) as u64;
-    pub const EIO: u64 = (-5i64) as u64;
     pub const EINVAL: u64 = (-22i64) as u64;
     pub const ENOMEM: u64 = (-12i64) as u64;
 }
@@ -225,7 +224,7 @@ mod tlb_shootdown {
 #[test]
 fn native_local_commit_is_ordered_after_tlb_ack_before_frame_release_and_can_roll_back() {
     let _test = TEST_LOCK.lock().unwrap();
-    use mapping_revocation::{revoke_with, Error};
+    use mapping_revocation::{Error, revoke_with};
     use mapping_revocation_native::Native;
     use task::process::{Process, ProcessTable};
     let table = ProcessTable(vec![Process::empty(4096)]);
@@ -244,11 +243,15 @@ fn native_local_commit_is_ordered_after_tlb_ack_before_frame_release_and_can_rol
             assert!(state.synchronized);
             assert_eq!(state.released, 0);
             assert_eq!(state.entries, suspended);
-            if fail_commit { Err(17) } else { Ok(37) }
+            if fail_commit {
+                Err(NativeError::AccessDenied)
+            } else {
+                Ok(37)
+            }
         });
         let state = state().lock().unwrap();
         if fail_commit {
-            assert_eq!(result, Err(Error::Backend(17)));
+            assert_eq!(result, Err(Error::Backend(NativeError::AccessDenied)));
             assert_eq!(state.entries, original);
             assert_eq!(state.released, 0);
         } else {
@@ -263,7 +266,7 @@ fn native_local_commit_is_ordered_after_tlb_ack_before_frame_release_and_can_rol
 fn boundary_private_bytes_and_flags_survive_success_but_never_change_on_failure() {
     let _test = TEST_LOCK.lock().unwrap();
     use mapping_preservation_native::{PreservedPage, Preserving};
-    use mapping_revocation::{revoke_with, Error};
+    use mapping_revocation::{Error, revoke_with};
     use mapping_revocation_native::Native;
     use task::process::{Process, ProcessTable};
     let table = ProcessTable(vec![Process::empty(4096)]);
@@ -293,7 +296,11 @@ fn boundary_private_bytes_and_flags_survive_success_but_never_change_on_failure(
             assert_eq!(state.released, 0);
             assert!(state.entries.values().all(|flags| flags & 1 == 0));
             assert!(state.frames[&(4096, 4096)].iter().all(|byte| *byte == 0x5a));
-            if mode == 2 { Err(17) } else { Ok(37) }
+            if mode == 2 {
+                Err(NativeError::AccessDenied)
+            } else {
+                Ok(37)
+            }
         });
         let state = state().lock().unwrap();
         if mode == 0 {
@@ -314,9 +321,9 @@ fn boundary_private_bytes_and_flags_survive_success_but_never_change_on_failure(
             assert_eq!(
                 result,
                 Err(Error::Backend(match mode {
-                    1 => syscall::EIO,
-                    2 => 17,
-                    _ => syscall::EFAULT,
+                    1 => NativeError::BackingFailure,
+                    2 => NativeError::AccessDenied,
+                    _ => NativeError::InvalidAddress,
                 }))
             );
             assert_eq!(state.entries, original);
@@ -352,18 +359,18 @@ fn owned_backend_and_boundary_plan_outlive_every_journal_finish_action() {
     }
     impl Backend for Leased<'_> {
         type Page = paging::SuspendedUserPage;
-        type Error = u64;
-        fn next_page(&mut self, t: u64, s: u64, e: u64) -> Result<Option<u64>, u64> {
+        type Error = NativeError;
+        fn next_page(&mut self, t: u64, s: u64, e: u64) -> Result<Option<u64>, NativeError> {
             self.native.next_page(t, s, e)
         }
-        fn suspend(&mut self, t: u64, a: u64) -> Result<Option<Self::Page>, u64> {
+        fn suspend(&mut self, t: u64, a: u64) -> Result<Option<Self::Page>, NativeError> {
             self.native.suspend(t, a)
         }
         fn restore(&mut self, p: Self::Page) {
             assert!(self.alive.load(Ordering::Acquire));
             self.native.restore(p)
         }
-        fn synchronize(&mut self) -> Result<(), u64> {
+        fn synchronize(&mut self) -> Result<(), NativeError> {
             self.native.synchronize()
         }
         fn release(&mut self, p: Self::Page) {
@@ -418,9 +425,11 @@ fn owned_backend_and_boundary_plan_outlive_every_journal_finish_action() {
             assert_eq!(
                 journal.commit_with(|backend| {
                     assert!(backend.inner_mut().alive.load(Ordering::Acquire));
-                    Err::<(), _>(17)
+                    Err::<(), _>(NativeError::AccessDenied)
                 }),
-                Err(mapping_revocation::Error::Backend(17))
+                Err(mapping_revocation::Error::Backend(
+                    NativeError::AccessDenied
+                ))
             );
         } else {
             drop(journal);
@@ -471,7 +480,7 @@ fn boundary_selection_checks_offset_geometry_without_interpreting_backing_identi
 #[test]
 fn actual_native_adapter_checks_owned_roots_restores_on_sync_failure_and_releases_only_after_ack() {
     let _test = TEST_LOCK.lock().unwrap();
-    use mapping_revocation::{revoke, Backend, Error};
+    use mapping_revocation::{Backend, Error, revoke};
     use mapping_revocation_native::Native;
     use task::process::{Process, ProcessTable};
     let table = ProcessTable(vec![Process::empty(4096), Process::empty(8192)]);
@@ -479,9 +488,12 @@ fn actual_native_adapter_checks_owned_roots_restores_on_sync_failure_and_release
     let mut native = unsafe { Native::new(&table) };
     assert!(matches!(
         native.next_page(12288, 4096, 8192),
-        Err(syscall::EFAULT)
+        Err(NativeError::InvalidAddress)
     ));
-    assert!(matches!(native.suspend(12288, 4096), Err(syscall::EFAULT)));
+    assert!(matches!(
+        native.suspend(12288, 4096),
+        Err(NativeError::InvalidAddress)
+    ));
     assert_eq!(native.suspend(4096, 4096).unwrap().is_none(), true);
     *state().lock().unwrap() = State {
         entries: BTreeMap::from([((4096, 4096), 0x104), ((8192, 8192), 0x205)]),
@@ -491,7 +503,7 @@ fn actual_native_adapter_checks_owned_roots_restores_on_sync_failure_and_release
     let ranges = [(4096, 0, 1 << 40), (8192, 0, 1 << 40)];
     assert_eq!(
         revoke(ranges, &mut native),
-        Err(Error::Backend(syscall::EIO))
+        Err(Error::Backend(NativeError::BackingFailure))
     );
     {
         let state = state().lock().unwrap();
@@ -512,7 +524,10 @@ fn actual_native_adapter_checks_owned_roots_restores_on_sync_failure_and_release
     // aperture as an allocator-owned RAM frame.
     state().lock().unwrap().entries.insert((4096, 4096), 0x105);
     let mut device = unsafe { Native::for_process(&table.0[0], false) };
-    assert!(matches!(device.suspend(8192, 4096), Err(syscall::EFAULT)));
+    assert!(matches!(
+        device.suspend(8192, 4096),
+        Err(NativeError::InvalidAddress)
+    ));
     revoke([(4096, 4096, 8192)], &mut device).unwrap();
     assert_eq!(state().lock().unwrap().released, 2);
     let roots = [
@@ -521,7 +536,10 @@ fn actual_native_adapter_checks_owned_roots_restores_on_sync_failure_and_release
     ];
     roots[1].publish();
     let mut staging = unsafe { Native::with_detached(&table, &roots) };
-    assert!(matches!(staging.suspend(16384, 4096), Err(syscall::EFAULT)));
+    assert!(matches!(
+        staging.suspend(16384, 4096),
+        Err(NativeError::InvalidAddress)
+    ));
     state().lock().unwrap().entries.insert((12288, 4096), 0x105);
     revoke([(12288, 4096, 8192)], &mut staging).unwrap();
     assert_eq!(state().lock().unwrap().released, 3);
@@ -617,17 +635,17 @@ fn owned_targets_bind_exact_spans_and_pin_published_and_detached_roots() {
     // A pinned root is not authority to walk or edit its other mappings.
     assert!(matches!(
         native.next_page(4096, 0x4000, 0x7000),
-        Err(syscall::EFAULT)
+        Err(NativeError::InvalidAddress)
     ));
     for (root, address) in [(4096, 0x4000), (4096, 0x7000), (16384, 0x8000)] {
         assert!(matches!(
             native.suspend(root, address),
-            Err(syscall::EFAULT)
+            Err(NativeError::InvalidAddress)
         ));
     }
     assert!(matches!(
         native.suspend(4096, u64::MAX - 4095),
-        Err(syscall::EFAULT)
+        Err(NativeError::InvalidAddress)
     ));
     assert_eq!(native.next_page(4096, 0x5000, 0x7000), Ok(Some(0x5000)));
     let page = native.suspend(4096, 0x5000).unwrap().unwrap();

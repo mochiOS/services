@@ -123,7 +123,7 @@ mod mem {
     }
     pub mod mapping_revocation {
         pub enum Error<T>{InvalidRange,Allocation,Backend(T)}
-        pub fn revoke(ranges:impl IntoIterator<Item=(u64,u64,u64)>,_:&mut super::mapping_revocation_native::Native)->Result<(),Error<u64>>{
+        pub fn revoke(ranges:impl IntoIterator<Item=(u64,u64,u64)>,_:&mut super::mapping_revocation_native::Native)->Result<(),Error<crate::status::Error>>{
             crate::locked();assert_eq!(ranges.into_iter().count(),1);crate::EDITS.with(|value|value.set(value.get()+1));Ok(())
         }
     }

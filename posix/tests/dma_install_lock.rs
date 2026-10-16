@@ -45,10 +45,10 @@ mod mem {
         impl<'a> Native<'a> {pub unsafe fn for_process(process:&'a crate::task::Process,owned:bool)->Self {crate::locked();assert!(!owned);Self(process)}}
     }
     pub mod mapping_revocation {
-        pub enum Error {InvalidRange,Allocation,Backend(u64)}
+        pub enum Error {InvalidRange,Allocation,Backend(crate::native_status::Error)}
         pub fn revoke(ranges:impl IntoIterator<Item=(u64,u64,u64)>,backend:&mut super::mapping_revocation_native::Native<'_>)->Result<(),Error> {
             crate::locked();assert!(backend.0.record);assert_eq!(ranges.into_iter().collect::<Vec<_>>(),[(4096,0x10000,0x12000)]);
-            if crate::MODE.load(crate::Ordering::Acquire)==6 {return Err(Error::Backend((-5i64) as u64));}crate::ACKED.store(true,crate::Ordering::Release);Ok(())
+            if crate::MODE.load(crate::Ordering::Acquire)==6 {return Err(Error::Backend(crate::native_status::Error::BackingFailure));}crate::ACKED.store(true,crate::Ordering::Release);Ok(())
         }
     }
 }
@@ -63,13 +63,16 @@ fn main() {
         let mut process=task::Process {end:initial,record:false};
         let result=install_dma_buffer(&mut process,1,4096,7,0x20000,8192,2);
         let actual=match result {Ok(start)=>(0,start),Err(InstallError::Unpublished(e))=>(1,e),Err(InstallError::Retained(e))=>(2,e)};
-        assert_eq!(actual,match mode {0=>(0,0x10000),4|5=>(1,ENOMEM),6=>(2,(-5i64) as u64),_=>(1,EINVAL)});
+        assert_eq!(actual,match mode {0=>(0,0x10000),4|5=>(1,ENOMEM),6=>(2,crate::native_status::Error::BackingFailure.into_raw()),_=>(1,EINVAL)});
         assert_eq!(process.record,mode==0||mode==6);
         assert_eq!(process.end,if mode==0||mode==6 {0x12000} else {initial});
         assert_eq!(MAPS.load(Ordering::Acquire),match mode {0|5|6=>2,4=>1,_=>0});LOCKED.store(false,Ordering::Release);
     }
 }
 "#);
+    program.push_str("\nmod native_status {\n");
+    program.push_str(include_str!("../../../core/crates/abi/src/status.rs"));
+    program.push_str("\n}\n");
     let directory = std::env::temp_dir().join(format!(
         "mochios-dma-install-{}-{}",
         std::process::id(),

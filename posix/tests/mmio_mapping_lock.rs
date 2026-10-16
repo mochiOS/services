@@ -89,11 +89,11 @@ mod mem {
         impl<'a> Native<'a> {pub unsafe fn for_process(p:&'a crate::task::Process,owned:bool)->Self {crate::locked();assert!(!owned);Self(p)}}
     }
     pub mod mapping_revocation {
-        pub enum Error {InvalidRange,Allocation,Backend(u64)}
+        pub enum Error {InvalidRange,Allocation,Backend(crate::native_status::Error)}
         pub fn revoke(ranges:impl IntoIterator<Item=(u64,u64,u64)>,_: &mut super::mapping_revocation_native::Native<'_>)->Result<(),Error> {
             crate::locked();assert_eq!(ranges.into_iter().collect::<Vec<_>>(),[(4096,0x10000,0x12000)]);
             assert!(crate::RECORD.load(crate::Ordering::Acquire));
-            if crate::MODE.load(crate::Ordering::Acquire)==5 {return Err(Error::Backend((-5i64) as u64));}
+            if crate::MODE.load(crate::Ordering::Acquire)==5 {return Err(Error::Backend(crate::native_status::Error::BackingFailure));}
             crate::ACKED.store(true,crate::Ordering::Release);crate::MAPPED.store(false,crate::Ordering::Release);Ok(())
         }
     }
@@ -104,7 +104,7 @@ mod mem {
     program.push_str(r#"
 fn main() {
     use syscall::types::*;
-    for (mode,expected,record,mapped) in [(0,0,true,true),(1,EINVAL,false,false),(2,EINVAL,false,false),(3,ENOMEM,false,false),(4,ENOMEM,false,false),(5,(-5i64) as u64,true,true),(6,ENOMEM,false,false),(7,EACCES,false,false),(8,EPERM,false,false)] {
+    for (mode,expected,record,mapped) in [(0,0,true,true),(1,EINVAL,false,false),(2,EINVAL,false,false),(3,ENOMEM,false,false),(4,ENOMEM,false,false),(5,crate::native_status::Error::BackingFailure.into_raw(),true,true),(6,ENOMEM,false,false),(7,EACCES,false,false),(8,EPERM,false,false)] {
         MODE.store(mode,Ordering::Release);RECORD.store(false,Ordering::Release);MAPPED.store(false,Ordering::Release);ACKED.store(false,Ordering::Release);
         assert_eq!(map_physical_range(0x10000,0xf0000000,8192),expected);
         assert_eq!(RECORD.load(Ordering::Acquire),record);assert_eq!(MAPPED.load(Ordering::Acquire),mapped);assert!(!LOCKED.load(Ordering::Acquire));
@@ -112,6 +112,9 @@ fn main() {
     assert_eq!(map_physical_range(1,0xf0000000,8192),EINVAL);
 }
 "#);
+    program.push_str("\nmod native_status {\n");
+    program.push_str(include_str!("../../../core/crates/abi/src/status.rs"));
+    program.push_str("\n}\n");
     let directory = std::env::temp_dir().join(format!(
         "mochios-mmio-lock-{}-{}",
         std::process::id(),

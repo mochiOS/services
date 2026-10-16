@@ -59,10 +59,10 @@ mod mem {
         pub struct Native<'a>(pub &'a crate::Process);impl<'a> Native<'a> {pub unsafe fn for_process(p:&'a crate::Process,owned:bool)->Self {crate::locked();assert!(!owned);Self(p)}}
     }
     pub mod mapping_revocation {
-        pub enum Error {InvalidRange,Allocation,Backend(u64)}
+        pub enum Error {InvalidRange,Allocation,Backend(crate::native_status::Error)}
         pub fn revoke(ranges:impl IntoIterator<Item=(u64,u64,u64)>,backend:&mut super::mapping_revocation_native::Native<'_>)->Result<(),Error> {
             crate::locked();assert_eq!(backend.0.mmio.len(),1);assert_eq!(backend.0.dma.len(),1);assert_eq!(ranges.into_iter().collect::<Vec<_>>(),[(4096,0x10000,0x11000),(4096,0x20000,0x22000)]);
-            if crate::MODE.load(crate::Ordering::Acquire)==1 {return Err(Error::Backend((-5i64) as u64));}crate::ACKED.store(true,crate::Ordering::Release);Ok(())
+            if crate::MODE.load(crate::Ordering::Acquire)==1 {return Err(Error::Backend(crate::native_status::Error::BackingFailure));}crate::ACKED.store(true,crate::Ordering::Release);Ok(())
         }
     }
 }
@@ -71,7 +71,7 @@ mod mem {
     program.push_str(&source[start..end]);
     program.push_str(r#"
 fn main() {
-    for (mode,expected) in [(0,Ok(())),(1,Err((-5i64) as u64)),(2,Err(syscall::EINVAL)),(3,Err(syscall::EINVAL)),(4,Ok(())),(5,Err(syscall::ESRCH))] {
+    for (mode,expected) in [(0,Ok(())),(1,Err(crate::native_status::Error::BackingFailure.into_raw())),(2,Err(syscall::EINVAL)),(3,Err(syscall::EINVAL)),(4,Ok(())),(5,Err(syscall::ESRCH))] {
         MODE.store(mode,Ordering::Release);ACKED.store(false,Ordering::Release);RELEASED.store(0,Ordering::Release);
         PROCESS.with(|p| {let mut p=p.borrow_mut();p.mmio=if mode==4 {vec![]} else {vec![Mapping(0x10000,0x11000)]};p.dma=if mode==4 {vec![]} else {vec![Mapping(0x20000,0x22000)]};p.arena=0x22000;});
         assert_eq!(release_process_borrowed_mappings(1),expected);
@@ -81,6 +81,9 @@ fn main() {
     }
 }
 "#);
+    program.push_str("\nmod native_status {\n");
+    program.push_str(include_str!("../../../core/crates/abi/src/status.rs"));
+    program.push_str("\n}\n");
     let directory = std::env::temp_dir().join(format!(
         "mochios-borrowed-cleanup-{}-{}",
         std::process::id(),

@@ -63,10 +63,10 @@ mod mem {
         impl<'a> Native<'a> {pub unsafe fn for_process(process:&'a crate::task::Process,owned:bool)->Self {crate::locked();assert!(!owned);Self(process)}}
     }
     pub mod mapping_revocation {
-        pub enum Error {InvalidRange,Allocation,Backend(u64)}
+        pub enum Error {InvalidRange,Allocation,Backend(crate::native_status::Error)}
         pub fn revoke(ranges:impl IntoIterator<Item=(u64,u64,u64)>,_: &mut super::mapping_revocation_native::Native<'_>)->Result<(),Error> {
             crate::locked();assert!(crate::RECORD.load(crate::Ordering::Acquire));assert_eq!(ranges.into_iter().collect::<Vec<_>>(),[(4096,0x10000,0x12000)]);
-            if crate::MODE.load(crate::Ordering::Acquire)==3 {return Err(Error::Backend((-5i64) as u64));}
+            if crate::MODE.load(crate::Ordering::Acquire)==3 {return Err(Error::Backend(crate::native_status::Error::BackingFailure));}
             crate::ACKED.store(true,crate::Ordering::Release);Ok(())
         }
     }
@@ -76,13 +76,16 @@ mod mem {
     program.push_str(&source[start..]);
     program.push_str(r#"
 fn main() {
-    for (mode,expected) in [(0,0),(1,EINVAL),(2,EINVAL),(3,(-5i64) as u64),(4,EACCES),(5,ENOMEM)] {
+    for (mode,expected) in [(0,0),(1,EINVAL),(2,EINVAL),(3,crate::native_status::Error::BackingFailure.into_raw()),(4,EACCES),(5,ENOMEM)] {
         MODE.store(mode,Ordering::Release);RECORD.store(true,Ordering::Release);ACKED.store(false,Ordering::Release);RELEASED.store(0,Ordering::Release);
         assert_eq!(free(7),expected);assert_eq!(RECORD.load(Ordering::Acquire),mode!=0);assert_eq!(RELEASED.load(Ordering::Acquire),if mode==0 {2} else {0});assert!(!LOCKED.load(Ordering::Acquire));
     }
     MODE.store(0,Ordering::Release);assert_eq!(free(0),EINVAL);
 }
 "#);
+    program.push_str("\nmod native_status {\n");
+    program.push_str(include_str!("../../../core/crates/abi/src/status.rs"));
+    program.push_str("\n}\n");
     let directory = std::env::temp_dir().join(format!(
         "mochios-dma-free-{}-{}",
         std::process::id(),

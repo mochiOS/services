@@ -83,11 +83,11 @@ mod mem {
         pub struct Native<'a>(&'a crate::task::Process);
         impl<'a> Native<'a> {pub unsafe fn for_process(p:&'a crate::task::Process,owns:bool)->Self {assert!(owns);Self(p)}}
         impl super::mapping_revocation::Backend for Native<'_> {
-            type Page=u64;type Error=u64;
-            fn next_page(&mut self,t:u64,s:u64,e:u64)->Result<Option<u64>,u64>{unsafe{super::paging::next_user_page_entry(t,s,e)}}
-            fn suspend(&mut self,_:u64,a:u64)->Result<Option<u64>,u64>{crate::EVENTS.with_borrow_mut(|e|e.push("suspend"));Ok(Some(a))}
+            type Page=u64;type Error=crate::status::Error;
+            fn next_page(&mut self,t:u64,s:u64,e:u64)->Result<Option<u64>,Self::Error>{unsafe{super::paging::next_user_page_entry(t,s,e)}.map_err(|_|crate::status::Error::InvalidAddress)}
+            fn suspend(&mut self,_:u64,a:u64)->Result<Option<u64>,Self::Error>{crate::EVENTS.with_borrow_mut(|e|e.push("suspend"));Ok(Some(a))}
             fn restore(&mut self,_:u64){crate::EVENTS.with_borrow_mut(|e|e.push("restore"));}
-            fn synchronize(&mut self)->Result<(),u64>{crate::EVENTS.with_borrow_mut(|e|e.push("sync"));if crate::FAIL_SYNC.with(|v|v.get()){Err(crate::syscall::EIO)}else{Ok(())}}
+            fn synchronize(&mut self)->Result<(),Self::Error>{crate::EVENTS.with_borrow_mut(|e|e.push("sync"));if crate::FAIL_SYNC.with(|v|v.get()){Err(crate::status::Error::BackingFailure)}else{Ok(())}}
             fn release(&mut self,a:u64){crate::EVENTS.with_borrow_mut(|e|e.push("release"));crate::PAGES.with_borrow_mut(|p|p.retain(|&p|p!=a));}
         }
     }
@@ -165,7 +165,7 @@ fn main() {
         if mode==2 {process.memory_regions[0]=MemoryRegion::file_backed(0x1000,0x4000,3,2,Arc::new(mem::vm_object::VmObject{busy:true}),0,true,true,3);}
         FAIL_SYNC.set(mode==4);
         let result=replace(&mut process,replacement(),Some(if mode==3 {4*4096}else{5*4096}));
-        assert_eq!(result.unwrap_err(),match mode {0|1=>syscall::EPERM,2=>status::Error::NotReady.into_raw(),3=>syscall::ENOMEM,_=>syscall::EIO});
+        assert_eq!(result.unwrap_err(),match mode {0|1=>syscall::EPERM,2=>status::Error::NotReady.into_raw(),3=>syscall::ENOMEM,_=>status::Error::BackingFailure.into_raw()});
         assert_eq!(process.memory_regions.len(),1);
         assert_eq!(process.memory_regions[0].len(),0x4000);
         PAGES.with_borrow(|p|assert_eq!(p.as_slice(),[0x1000,0x2000,0x4000,0x9000]));
