@@ -13,6 +13,7 @@ use mnu_abi::status::Error;
 mod syscall {pub(crate) use crate::mochi_user_syscall::{EAGAIN,EIO};}
 struct Memory {pages:Mutex<()>,generation:AtomicU64}
 impl Memory {
+    fn generation(&self)->u64{self.generation.load(Ordering::Relaxed)}
 "#,
     );
     program.push_str(probe::between(
@@ -40,6 +41,11 @@ impl VmObject {
         "    pub(crate) fn with_memory_generation_native<T>(",
         "    /// Removing an existing mapping",
     ));
+    program.push_str(probe::between(
+        include_str!("../../../core/src/mem/vm_object.rs"),
+        "    pub(crate) fn check_mapping_removal(",
+        "    pub fn provider(",
+    ));
     program.push_str("}\n");
     program.push_str(
         &probe::between(
@@ -64,6 +70,7 @@ fn main() {
     assert_eq!(memory.with_generation(6,||Ok(1)),Err(EAGAIN));
     assert_eq!(memory.with_generation(7,||{assert!(memory.pages.try_lock().is_err());Err::<(),_>(EACCES)}),Err(EACCES));
     let object=VmObject{source:VmObjectSource::Memory(memory.clone())};
+    assert_eq!(object.check_mapping_removal(),Ok(()));
     assert_eq!(object.with_memory_generation_native(None,||Ok(1)),Err(Error::InvalidArgument));
     assert_eq!(object.with_memory_generation_native(Some(7),||{
         assert!(memory.pages.try_lock().is_err());Ok(42)
@@ -85,6 +92,13 @@ fn main() {
     assert_eq!(object.with_memory_generation_native(Some(7),||{assert!(PAGE_CACHE.try_lock().is_err());Err::<(),_>(Error::InvalidAddress)}),Err(Error::InvalidAddress));
     assert_eq!(object.with_memory_generation_native(Some(7),||{assert!(PAGE_CACHE.try_lock().is_err());Ok(99)}),Ok(99));
     assert!(PAGE_CACHE.try_lock().is_ok());
+    for reserved in [false,true] {
+        for unavailable in [false,true] {
+            let object=VmObject{source:VmObjectSource::Provider{_io_lock:Gate{generation:7,reserved,unavailable}}};
+            assert_eq!(object.check_mapping_removal(),if reserved{Err(Error::NotReady)}else{Ok(())});
+            assert!(PAGE_CACHE.try_lock().is_ok());
+        }
+    }
 }
 "#);
     probe::run(&program);

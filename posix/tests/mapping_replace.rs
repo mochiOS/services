@@ -31,11 +31,11 @@ mod syscall {
     pub const EFAULT:u64=(-14i64) as u64; pub const EPERM:u64=(-1i64) as u64;
     pub const EAGAIN:u64=(-11i64) as u64; pub const EIO:u64=(-5i64) as u64;
 }
-mod mnu_abi {
-    pub const MEMORY_ACCESS_READ:u64=1; pub const MEMORY_ACCESS_WRITE:u64=2;
-    pub const MEMORY_ACCESS_EXECUTE:u64=4; pub const MEMORY_ACCESS_ALL:u64=7;
-    pub const MEMORY_MAP_SHARED:u64=2;
-}
+extern crate self as mnu_abi;
+#[path="@ROOT@/core/crates/abi/src/status.rs"] pub mod status;
+pub const MEMORY_ACCESS_READ:u64=1; pub const MEMORY_ACCESS_WRITE:u64=2;
+pub const MEMORY_ACCESS_EXECUTE:u64=4; pub const MEMORY_ACCESS_ALL:u64=7;
+pub const MEMORY_MAP_SHARED:u64=2;
 thread_local! {
     static PAGES:RefCell<Vec<u64>>=const {RefCell::new(Vec::new())};
     static EVENTS:RefCell<Vec<&'static str>>=const {RefCell::new(Vec::new())};
@@ -65,9 +65,9 @@ mod mem {
     pub mod vm_object {
         #[derive(Debug)] pub struct VmObject {pub busy:bool}
         impl VmObject {
-            pub fn check_mapping_removal(&self)->Result<(),u64> {if self.busy {Err(crate::syscall::EAGAIN)} else {Ok(())}}
+            pub fn check_mapping_removal(&self)->Result<(),mnu_abi::status::Error> {if self.busy {Err(mnu_abi::status::Error::NotReady)} else {Ok(())}}
             pub fn memory_generation(&self)->Option<u64>{Some(1)}
-            pub fn with_memory_generation<T>(&self,_:Option<u64>,f:impl FnOnce()->Result<T,u64>)->Result<T,u64>{self.check_mapping_removal()?;f()}
+            pub fn with_memory_generation_native<T>(&self,_:Option<u64>,f:impl FnOnce()->Result<T,mnu_abi::status::Error>)->Result<T,mnu_abi::status::Error>{self.check_mapping_removal()?;f()}
         }
     }
     #[path="@ROOT@/core/src/mem/mapping_usage.rs"] pub mod mapping_usage;
@@ -165,7 +165,7 @@ fn main() {
         if mode==2 {process.memory_regions[0]=MemoryRegion::file_backed(0x1000,0x4000,3,2,Arc::new(mem::vm_object::VmObject{busy:true}),0,true,true,3);}
         FAIL_SYNC.set(mode==4);
         let result=replace(&mut process,replacement(),Some(if mode==3 {4*4096}else{5*4096}));
-        assert_eq!(result.unwrap_err(),match mode {0|1=>syscall::EPERM,2=>syscall::EAGAIN,3=>syscall::ENOMEM,_=>syscall::EIO});
+        assert_eq!(result.unwrap_err(),match mode {0|1=>syscall::EPERM,2=>status::Error::NotReady.into_raw(),3=>syscall::ENOMEM,_=>syscall::EIO});
         assert_eq!(process.memory_regions.len(),1);
         assert_eq!(process.memory_regions[0].len(),0x4000);
         PAGES.with_borrow(|p|assert_eq!(p.as_slice(),[0x1000,0x2000,0x4000,0x9000]));

@@ -67,7 +67,7 @@ mod task {
         pub fn with_memory_generation<T>(&self, generation:Option<u64>, install:impl FnOnce()->Result<T,u64>)->Result<T,u64>{
             locked();assert_eq!(generation,Some(1));if self.unavailable {Err(EIO)} else if self.busy {Err(EAGAIN)} else {install()}
         }
-        pub fn check_mapping_removal(&self)->Result<(),u64>{locked();if self.busy {Err(EAGAIN)} else {Ok(())}}
+        pub fn check_mapping_removal(&self)->Result<(),status::Error>{locked();if self.busy {Err(status::Error::NotReady)} else {Ok(())}}
         pub fn flush_unmapped_range(&self,_:u64,_:u64)->Result<(),u64>{Ok(())}
     }
     #[derive(Clone)] pub struct MemoryRegion {pub start:u64,pub object:Option<Arc<Object>>,pub access:u64}
@@ -172,7 +172,7 @@ fn main() {
     for protection in [false,true] {
         reset(true,false);
         let result=if protection {syscall::memory::protect(0x1000,8192,1)} else {memory_unmap(0x1000,8192)};
-        assert_eq!(result,if protection {status::Error::NotReady.into_raw()} else {EAGAIN});assert_eq!(EDITS.with(Cell::get),0);assert_eq!(METADATA.with(Cell::get),0);
+        assert_eq!(result,status::Error::NotReady.into_raw());assert_eq!(EDITS.with(Cell::get),0);assert_eq!(METADATA.with(Cell::get),0);
         assert_eq!(PLANS.with(Cell::get),0);assert_eq!(SYNCS.with(Cell::get),0);
         assert!(!LOCKED.with(Cell::get));
         PROCESS.with(|process|assert!(process.borrow().regions.iter().all(|region|region.access==3)));
@@ -191,7 +191,7 @@ fn main() {
             assert_eq!(result,SUCCESS);assert_eq!(EDITS.with(Cell::get),1);assert!(METADATA.with(Cell::get)>0);
         }
         reset(true,true);
-        assert_eq!(memory_unmap(0x1000,8192),EAGAIN);
+        assert_eq!(memory_unmap(0x1000,8192),status::Error::NotReady.into_raw());
         assert_eq!(EDITS.with(Cell::get),0);assert_eq!(METADATA.with(Cell::get),0);
         assert_eq!(PLANS.with(Cell::get),0);assert_eq!(SYNCS.with(Cell::get),0);
     }

@@ -943,7 +943,7 @@ fn uncertain_cleanup_latches_failure_before_retry_and_keeps_retired_root_pinned(
     let failed_generation = object.memory_generation();
     assert_eq!(object.read_at(0, &mut [0; 1]), Err(crate::syscall::EIO));
     assert_eq!(paging::DESTROYED.load(Ordering::Relaxed), destroyed);
-    assert_eq!(object.check_mapping_removal(), Err(crate::syscall::EAGAIN));
+    assert_eq!(object.check_mapping_removal(), Err(mnu_abi::status::Error::NotReady));
     assert!(physical
         .iter()
         .all(|frame| crate::FRAMES.lock().unwrap().contains_key(frame)));

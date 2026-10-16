@@ -1133,7 +1133,7 @@ fn unavailable_cached_backing_cannot_lose_failure_when_original_owners_drop() {
     }];
     assert_eq!(
         without_allocations(|| mapping_admission::check_unmap(&regions, 0x1000, 0x3000)),
-        Err(syscall::EAGAIN)
+        Err(mnu_abi::status::Error::NotReady)
     );
     assert_eq!(pin.map_to(4096, 8192, false, false), Err(syscall::EIO));
     assert_eq!(

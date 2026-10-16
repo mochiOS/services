@@ -24,9 +24,12 @@ fn reserved_cow_and_full_span_usercopy_retry_after_unlock_and_revalidate_root() 
     let mut program = String::from(
         r#"
 use std::{cell::{Cell,RefCell},sync::{Arc,atomic::{AtomicBool,Ordering}}};
+extern crate self as mnu_abi;
+#[path="@STATUS@"] pub mod status;
+#[path="@USERCOPY_ERROR@"] mod usercopy_error;
 #[derive(Clone,Copy,Debug,PartialEq,Eq)] pub enum Kernel {Memory(result::Memory)}
 mod result {
-    #[derive(Clone,Copy,Debug,PartialEq,Eq)] pub enum Memory {Busy,InvalidAddress,PermissionDenied}
+    #[derive(Clone,Copy,Debug,PartialEq,Eq)] pub enum Memory {Busy,InvalidAddress,PermissionDenied,OutOfMemory}
     pub type Result<T> = core::result::Result<T,crate::Kernel>;
 }
 mod security {pub fn current_process_id()->Option<u64>{Some(7)}}
@@ -53,10 +56,10 @@ mod task {
     pub struct Object {pub busy:AtomicBool}
     impl Object {
         pub fn memory_generation(&self)->Option<u64>{Some(1)}
-        pub fn with_memory_generation<T>(&self,generation:Option<u64>,install:impl FnOnce()->Result<T,u64>)->Result<T,u64>{
-            locked();assert_eq!(generation,Some(1));if self.busy.load(Ordering::Acquire){Err(syscall::EAGAIN)}else{install()}
+        pub fn with_memory_generation_native<T>(&self,generation:Option<u64>,install:impl FnOnce()->Result<T,status::Error>)->Result<T,status::Error>{
+            locked();assert_eq!(generation,Some(1));if self.busy.load(Ordering::Acquire){Err(status::Error::NotReady)}else{install()}
         }
-        pub fn check_mapping_removal(&self)->Result<(),u64>{self.with_memory_generation(Some(1),||Ok(()))}
+        pub fn check_mapping_removal(&self)->Result<(),status::Error>{self.with_memory_generation_native(Some(1),||Ok(()))}
     }
     pub struct MemoryRegion {pub start:u64,pub object:Option<Arc<Object>>}
     impl MemoryRegion {
@@ -137,11 +140,18 @@ fn interrupt_cow(){
 "#);
     // The actual interrupt path resolves through the syscall module.
     program = program.replace(
+        "@STATUS@",
+        root.join("core/crates/abi/src/status.rs").to_str().unwrap(),
+    );
+    program = program.replace(
         "pub mod security {pub use crate::security::*;}",
         r#"pub mod security {pub use crate::security::*;}
 pub mod process {
     pub(crate) use crate::resolve_user_copy_on_write;
-    #[derive(Clone,Copy)] pub struct Fault(bool);impl Fault{pub fn is_retryable(self)->bool{self.0}}
+    #[derive(Clone,Copy)] pub struct Fault(bool);impl Fault{
+        pub fn is_retryable(self)->bool{self.0}
+        pub fn cause(self)->mnu_abi::MemoryFaultCause{mnu_abi::MemoryFaultCause::AccessDenied}
+    }
     pub fn handle_user_memory_fault(address:u64,_:bool,_:bool)->Result<(),Fault>{
         assert!(!crate::LOCKED.with(std::cell::Cell::get));assert_eq!(address,0x1000);
         crate::FAULTS.with(|count|count.set(count.get()+1));
@@ -167,11 +177,11 @@ fn reset(mode:u8){
 }
 fn main(){
     for write in [false,true]{
-        reset(0);assert!(fault_in_user_range(4096,0x1000,4096,write));
+        reset(0);assert_eq!(fault_in_user_range(4096,0x1000,4096,write),Ok(()));
         assert_eq!(YIELDS.with(Cell::get),3);assert_eq!(FAULTS.with(Cell::get),4);
-        reset(1);assert!(!fault_in_user_range(4096,0x1000,4096,write));
+        reset(1);assert_eq!(fault_in_user_range(4096,0x1000,4096,write),Err(status::Error::InvalidAddress));
         assert_eq!(YIELDS.with(Cell::get),1);assert_eq!(FAULTS.with(Cell::get),1);
-        reset(2);assert!(!fault_in_user_range(4096,0x1000,4096,write));
+        reset(2);assert_eq!(fault_in_user_range(4096,0x1000,4096,write),Err(status::Error::InvalidAddress));
         assert_eq!(YIELDS.with(Cell::get),1);assert_eq!(FAULTS.with(Cell::get),2);
     }
     for write in [false,true]{
@@ -197,6 +207,15 @@ fn main(){
 }
 "#);
     program.push_str("\nuse crate::syscall::process;\nfn is_canonical_user_range(start:u64,length:u64)->bool{length!=0&&start.checked_add(length).is_some_and(|end|end<0x800000000000)}\n");
+    let abi = include_str!("../../../core/crates/abi/src/lib.rs");
+    let cause_start = abi.find("pub enum MemoryFaultCause {").unwrap();
+    let cause_end = cause_start + abi[cause_start..].find("\n}").unwrap() + 2;
+    program.push_str("\n#[derive(Clone,Copy)]\n");
+    program.push_str(&abi[cause_start..cause_end]);
+    program = program.replace(
+        "@USERCOPY_ERROR@",
+        root.join("core/src/syscall/usercopy_error.rs").to_str().unwrap(),
+    );
     program = program.replace(
         "@ADMISSION@",
         root.join("core/src/mem/mapping_admission.rs")
