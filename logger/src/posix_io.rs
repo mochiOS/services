@@ -60,7 +60,7 @@ pub fn ensure_directory(path: &str, mode: u32) -> Result<(), mochi_user_syscall:
     match with_client(|client| client.stat_at(StatAtBase::ProcessRoot, 0, path)) {
         Ok(status) if status.mode & FILE_TYPE_MASK == DIRECTORY => Ok(()),
         Ok(_) => Err(sys_error(mochi_user_syscall::ENOTDIR)),
-        Err(error) if error.errno() == Some(mochi_user_syscall::ENOENT) => {
+        Err(error) if error.raw() == mochi_user_syscall::ENOENT as i64 => {
             with_client(|client| client.mkdir_at(OpenAtBase::ProcessRoot, mode, path))
         }
         Err(error) => Err(error),
