@@ -68,9 +68,6 @@ mod util {
     pub(crate) use crate::snapshot as object_snapshot;
 }
 mod syscall {
-    pub mod types {
-        pub const EINVAL: u64 = mnu_abi::EINVAL;
-    }
     pub fn copy_from_user_native(
         pointer: u64,
         bytes: &mut [u8],
@@ -113,14 +110,17 @@ fn bootstrap_entry_is_empty_aligned_bounded_and_fallible() {
     ] {
         assert_eq!(
             bootstrap_stack::empty(end, pages).err(),
-            Some(mnu_abi::EINVAL)
+            Some(mnu_abi::status::Error::InvalidArgument)
         );
     }
     FAIL_NEXT.with(|fail| fail.set(true));
     let result = bootstrap_stack::empty(0x800000, 32);
     let consumed = FAIL_NEXT.with(|fail| !fail.replace(false));
     assert!(consumed);
-    assert_eq!(result.err(), Some(mnu_abi::ENOMEM));
+    assert_eq!(
+        result.err(),
+        Some(mnu_abi::status::Error::ResourceUnavailable)
+    );
 }
 
 // Fixed ELF/page-table doubles keep every observed allocation in the actual
@@ -259,8 +259,11 @@ fn allocator_failure_returns_native_error_without_copy_or_allocation_error_handl
 
 #[test]
 fn zeroing_capacity_overflow_copy_errors_and_empty_storage_are_explicit() {
-    assert_eq!(snapshot::zeroed(usize::MAX), Err(mnu_abi::ENOMEM));
-    assert_eq!(snapshot::zeroed(32).unwrap(), [0; 32]);
+    assert_eq!(
+        snapshot::zeroed_native(usize::MAX),
+        Err(mnu_abi::status::Error::ResourceUnavailable)
+    );
+    assert_eq!(snapshot::zeroed_native(32).unwrap(), [0; 32]);
     COPY_ERROR.with(|error| error.set(Some(mnu_abi::status::Error::InvalidAddress)));
     let result = storage::from_user_native(42, 256);
     COPY_ERROR.with(|error| error.set(None));
@@ -349,7 +352,7 @@ fn native_image_preparation_routes_owned_storage_through_fallible_paths() {
             .split("\nfn ")
             .next()
             .unwrap();
-        assert!(body.contains("object_snapshot::zeroed("));
+        assert!(body.contains("object_snapshot::zeroed_native("));
         assert!(!body.contains("vec!["));
     }
     let image = include_str!("../../../core/src/syscall/exec/image.rs");
