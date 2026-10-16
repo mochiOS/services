@@ -145,6 +145,37 @@ fn main(){
  assert_eq!(result,0);assert!(reference.upgrade().is_some());
  OWNERS.lock().unwrap().remove(&7);retire_endpoint(old);assert!(reference.upgrade().is_none());
  assert!(RETIRED.load(Ordering::SeqCst)>=55);
+
+ // Queue saturation must return the rejected message to the sender. Its
+ // resource destructor asserts that MAILBOXES is unlocked when it runs.
+ OWNERS.lock().unwrap().insert(7,(0,1));
+ let mut queued=Vec::new();
+ for tag in 0..MAILBOX_CAP-1{
+   let(mut message,reference)=make_message(7,1,0,500+tag as u64);
+   message.is_reply=false;enqueue(0,message);queued.push(reference);
+ }
+ let(message,rejected)=make_message(7,1,0,600);
+ let result=send_to_thread_id_with_attachments(7,99,600,b"z".as_ptr()as u64,1,false,false,message.object_handles);
+ assert_eq!(result,EAGAIN);assert!(rejected.upgrade().is_none());
+ {let boxes=MAILBOXES.lock();assert_eq!((boxes[0].count,boxes[0].free_count),(MAILBOX_CAP-1,1));}
+ assert!(queued.iter().all(|reference|reference.upgrade().is_some()));
+
+ // An ordinary message cannot consume the final reply reservation. A reply
+ // can, but a fully occupied queue must reject both kinds without lock-held
+ // destruction or disturbing any already enqueued authority.
+ let(message,reply)=make_message(7,1,0,601);
+ assert_eq!(send_to_thread_id_with_attachments(7,99,601,b"r".as_ptr()as u64,1,true,false,message.object_handles),0);
+ assert!(reply.upgrade().is_some());
+ for is_reply in [false,true]{
+   let(message,rejected)=make_message(7,1,0,602);
+   assert_eq!(send_to_thread_id_with_attachments(7,99,602,b"f".as_ptr()as u64,1,is_reply,false,message.object_handles),EAGAIN);
+   assert!(rejected.upgrade().is_none());
+   let boxes=MAILBOXES.lock();assert_eq!((boxes[0].count,boxes[0].free_count),(MAILBOX_CAP,0));
+ }
+ assert!(queued.iter().all(|reference|reference.upgrade().is_some()));
+ OWNERS.lock().unwrap().remove(&7);retire_endpoint(old);
+ assert!(queued.iter().all(|reference|reference.upgrade().is_none()));assert!(reply.upgrade().is_none());
+ {let boxes=MAILBOXES.lock();assert_eq!((boxes[0].count,boxes[0].free_count),(0,MAILBOX_CAP));}
 }
 "#);
     let directory = std::env::temp_dir().join(format!(
