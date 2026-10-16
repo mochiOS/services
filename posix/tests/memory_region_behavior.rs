@@ -84,8 +84,8 @@ fn main() {
     assert!(!slice.allows_execute_at(0x3000));
     assert!(slice.set_access(0x2000, 0x1000, MEMORY_ACCESS_READ | MEMORY_ACCESS_WRITE));
     assert!(slice.allows_write_range(0x2000, 0x2000));
-    assert!(region.slice(0, 0x2000).is_none());
-    assert!(region.slice(0x2000, 0x2000).is_none());
+    assert_eq!(region.slice(0, 0x2000).unwrap_err(), MemoryRangeError::InvalidRange);
+    assert_eq!(region.slice(0x2000, 0x2000).unwrap_err(), MemoryRangeError::InvalidRange);
     let mut restricted = MemoryRegion::file_backed(0x1000, 0x2000,
         MEMORY_ACCESS_READ, MEMORY_MAP_SHARED, object.clone(), 0,
         false, true, MEMORY_ACCESS_READ);
@@ -108,7 +108,11 @@ fn main() {
     assert_eq!(removed.len(), 1);
     assert_eq!(removed[0].backing().file_offset(), 12288);
     assert!(!removed[0].allows_write_at(0x2000));
-    assert!(process.prepare_remove_memory_range(u64::MAX, 4096).is_none());
+    assert_eq!(process.prepare_remove_memory_range(u64::MAX, 4096).unwrap_err(), MemoryRangeError::InvalidRange);
+    assert_eq!(process.prepare_remove_memory_range(0x1000, 0).unwrap_err(), MemoryRangeError::InvalidRange);
+    let invalid_offset = MemoryRegion::file_backed(0x1000,0x2000,
+        MEMORY_ACCESS_READ,0,Arc::new(mem::vm_object::VmObject),u64::MAX,false,false,MEMORY_ACCESS_READ);
+    assert_eq!(invalid_offset.slice(0x2000,0x3000).unwrap_err(),MemoryRangeError::InvalidRange);
 }
 "#);
     let nonce = SystemTime::now()

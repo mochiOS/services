@@ -110,6 +110,8 @@ mod mem {
     program.push_str(r#"
 mod task {
     pub use crate::MemoryRegion;
+    use crate::MemoryRangeError;
+    pub mod process { pub use crate::MemoryRangeError; }
     #[derive(Clone)] pub struct Borrowed;
     impl Borrowed {pub fn virt_start(&self)->u64{0x2000} pub fn end(&self)->Option<u64>{Some(0x3000)}}
     pub struct Process {pub memory_regions:Vec<MemoryRegion>, pub dma:bool,pub mmio:bool}

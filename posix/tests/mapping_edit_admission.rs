@@ -38,6 +38,7 @@ thread_local! {
     static EDITS:Cell<usize>=const {Cell::new(0)};
     static SYNCS:Cell<usize>=const {Cell::new(0)};
     static PLANS:Cell<usize>=const {Cell::new(0)};
+    static PLAN_FAILURE:Cell<Option<task::process::MemoryRangeError>>=const {Cell::new(None)};
     static METADATA:Cell<usize>=const {Cell::new(0)};
     static PROCESS:RefCell<task::Process>=RefCell::new(task::Process{regions:Vec::new()});
 }
@@ -47,6 +48,9 @@ fn is_user_range(start:u64,length:u64)->bool {start>0&&start.checked_add(length)
 fn current_thread_id()->Option<u64> {Some(1)}
 mod task {
     use super::*;
+    pub mod process {
+        #[derive(Clone,Copy)] pub enum MemoryRangeError {InvalidRange,Allocation}
+    }
     pub mod ids {pub type ProcessId=u64;}
     #[path="@RANGE@"] pub mod memory_range;
     pub struct Object {pub busy:bool,pub unavailable:bool}
@@ -77,10 +81,11 @@ mod task {
         pub fn find_dma_buffer_by_addr(&self,_:u64,_:u64)->Option<&Mapping>{None}
         pub fn find_mmio_mapping_by_addr(&self,_:u64,_:u64)->Option<&Mapping>{None}
         pub fn remove_mmio_mapping(&mut self,_:u64,_:u64){}
-        pub fn prepare_remove_memory_range(&self,start:u64,length:u64)->Option<(Vec<MemoryRegion>,Vec<MemoryRegion>)>{
+        pub fn prepare_remove_memory_range(&self,start:u64,length:u64)->Result<(Vec<MemoryRegion>,Vec<MemoryRegion>),process::MemoryRangeError>{
             locked();PLANS.with(|value|value.set(value.get()+1));
+            if let Some(error)=PLAN_FAILURE.with(Cell::get) {return Err(error);}
             let (removed,retained)=self.regions.iter().cloned().partition(|region|region.start>=start&&region.start<start+length);
-            Some((retained,removed))
+            Ok((retained,removed))
         }
         pub fn set_memory_regions(&mut self,regions:Vec<MemoryRegion>){locked();METADATA.with(|value|value.set(value.get()+1));self.regions=regions;}
     }
@@ -131,6 +136,7 @@ fn reset(busy:bool,unavailable:bool) {
     ]);
     EDITS.with(|value|value.set(0));SYNCS.with(|value|value.set(0));
     PLANS.with(|value|value.set(0));METADATA.with(|value|value.set(0));
+    PLAN_FAILURE.set(None);
 }
 fn main() {
     for protection in [false,true] {
@@ -158,6 +164,18 @@ fn main() {
         assert_eq!(memory_unmap(0x1000,8192),EAGAIN);
         assert_eq!(EDITS.with(Cell::get),0);assert_eq!(METADATA.with(Cell::get),0);
         assert_eq!(PLANS.with(Cell::get),0);assert_eq!(SYNCS.with(Cell::get),0);
+    }
+    for (error,expected) in [
+        (task::process::MemoryRangeError::InvalidRange,EINVAL),
+        (task::process::MemoryRangeError::Allocation,ENOMEM),
+    ] {
+        reset(false,false);
+        PLAN_FAILURE.set(Some(error));
+        assert_eq!(memory_unmap(0x1000,8192),expected);
+        assert_eq!(PLANS.with(Cell::get),1);
+        assert_eq!(EDITS.with(Cell::get),0);assert_eq!(SYNCS.with(Cell::get),0);
+        assert_eq!(METADATA.with(Cell::get),0);assert!(!LOCKED.with(Cell::get));
+        PROCESS.with_borrow(|process|assert_eq!(process.regions.len(),2));
     }
 }
 "#);
