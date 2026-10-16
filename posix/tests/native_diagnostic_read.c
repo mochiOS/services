@@ -41,6 +41,10 @@ static int verify_persistence(const unsigned char *expected, size_t length) {
 #error DIAGNOSTIC_AUTHORIZED must be specified
 #endif
 
+#define NATIVE_ACCESS_DENIED INT64_C(-262138)
+#define NATIVE_INVALID_ARGUMENT INT64_C(-262139)
+#define NATIVE_INVALID_ADDRESS INT64_C(-262142)
+
 #define CHECK(condition)                                                       \
   do {                                                                         \
     if (!(condition)) {                                                        \
@@ -74,29 +78,31 @@ int main(void) {
   struct read_result metadata = {0};
   if (!DIAGNOSTIC_AUTHORIZED) {
     CHECK(diagnostic_read(UINT64_MAX, (void *)UINT64_MAX, UINT64_MAX,
-                          (void *)UINT64_MAX) == -13);
-    CHECK(diagnostic_read(0, bytes, sizeof(bytes), &metadata) == -13);
+                          (void *)UINT64_MAX) == NATIVE_ACCESS_DENIED);
+    CHECK(diagnostic_read(0, bytes, sizeof(bytes), &metadata) == NATIVE_ACCESS_DENIED);
     puts("native-diagnostic-read: denied PASS");
     return 0;
   }
 
   CHECK(sizeof(metadata) == 16);
-  CHECK(diagnostic_read(0, bytes, 4097, &metadata) == -22);
-  CHECK(diagnostic_read(0, NULL, 1, &metadata) == -14);
-  CHECK(diagnostic_read(0, bytes, sizeof(bytes), NULL) == -14);
-  CHECK(diagnostic_read(0, bytes, sizeof(bytes), (void *)UINT64_MAX) == -14);
-  CHECK(diagnostic_read(0, bytes, 32, (void *)(bytes + 8)) == -22);
-  CHECK(diagnostic_read(UINT64_MAX, bytes, sizeof(bytes), &metadata) == -22);
+  CHECK(diagnostic_read(0, bytes, 4097, &metadata) == NATIVE_INVALID_ARGUMENT);
+  CHECK(diagnostic_read(0, NULL, 1, &metadata) == NATIVE_INVALID_ADDRESS);
+  CHECK(diagnostic_read(0, bytes, sizeof(bytes), NULL) == NATIVE_INVALID_ADDRESS);
+  CHECK(diagnostic_read(0, bytes, sizeof(bytes), (void *)UINT64_MAX) ==
+        NATIVE_INVALID_ADDRESS);
+  CHECK(diagnostic_read(0, bytes, 32, (void *)(bytes + 8)) == NATIVE_INVALID_ARGUMENT);
+  CHECK(diagnostic_read(UINT64_MAX, bytes, sizeof(bytes), &metadata) ==
+        NATIVE_INVALID_ARGUMENT);
 
   CHECK(diagnostic_read(0, NULL, 0, &metadata) == 0);
   CHECK(metadata.next_cursor == metadata.dropped);
   /* A real usercopy refusal supplies an audit record even on a quiet boot. */
-  CHECK(diagnostic_read(0, NULL, 0, (void *)&read_only) == -14);
+  CHECK(diagnostic_read(0, NULL, 0, (void *)&read_only) == NATIVE_INVALID_ADDRESS);
   metadata.next_cursor = UINT64_MAX;
-  CHECK(diagnostic_read(0, (void *)&read_only, 1, &metadata) == -14);
+  CHECK(diagnostic_read(0, (void *)&read_only, 1, &metadata) == NATIVE_INVALID_ADDRESS);
   CHECK(metadata.next_cursor == UINT64_MAX);
   const int64_t copied = diagnostic_read(0, bytes, sizeof(bytes), &metadata);
-  CHECK(copied > 0 && copied <= sizeof(bytes));
+  CHECK(copied > 0 && (uint64_t)copied <= sizeof(bytes));
   CHECK(metadata.next_cursor == metadata.dropped + (uint64_t)copied);
 
   /* A reader's position is its own, not consumed globally by another read. */

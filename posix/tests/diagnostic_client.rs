@@ -1,4 +1,5 @@
 use mnu_abi::diagnostic::ReadResult;
+use mnu_abi::status::Error;
 use std::cell::Cell;
 
 thread_local! {
@@ -8,7 +9,7 @@ thread_local! {
 }
 
 mod syscall {
-    pub use mochi_user_platform::syscall::{EINVAL, EIO, SysError, SysResult, SyscallNumber};
+    pub use mochi_user_syscall::{SysError, SysResult, SyscallNumber};
 
     pub fn call4(
         number: SyscallNumber,
@@ -63,17 +64,29 @@ fn native_result_and_gap_are_returned_without_advancing_shared_state() {
 fn oversized_requests_are_rejected_before_calling_the_kernel() {
     response(0, 0, 0);
     assert_eq!(
-        diagnostic::read(0, &mut [0; 4097]).unwrap_err().errno(),
-        Some(22)
+        diagnostic::read(0, &mut [0; 4097])
+            .unwrap_err()
+            .native_error(),
+        Some(Error::InvalidArgument)
     );
     assert_eq!(CALLS.get(), 0);
 }
 
 #[test]
 fn native_failures_are_preserved() {
-    response(0, 0, 0);
-    FAILURE.set(Some(-13));
-    assert_eq!(diagnostic::read(0, &mut []).unwrap_err().errno(), Some(13));
+    for error in [
+        Error::AccessDenied,
+        Error::InvalidAddress,
+        Error::ResourceUnavailable,
+        Error::BackingFailure,
+        Error::InvalidArgument,
+    ] {
+        response(0, 0, 0);
+        FAILURE.set(Some(error.into_raw() as i64));
+        let result = diagnostic::read(0, &mut []).unwrap_err();
+        assert_eq!(result.native_error(), Some(error));
+        assert_eq!(result.errno(), None);
+    }
 }
 
 #[test]
@@ -87,8 +100,10 @@ fn inconsistent_metadata_is_rejected() {
     ] {
         response(copied, next, dropped);
         assert_eq!(
-            diagnostic::read(cursor, &mut [0; 4]).unwrap_err().errno(),
-            Some(5)
+            diagnostic::read(cursor, &mut [0; 4])
+                .unwrap_err()
+                .native_error(),
+            Some(Error::BackingFailure)
         );
     }
 }

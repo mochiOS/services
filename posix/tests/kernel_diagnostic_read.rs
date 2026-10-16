@@ -1,13 +1,11 @@
 use mnu_abi::diagnostic::{READ_MAX_BYTES, RESULT_LEN, ReadResult};
+use mnu_abi::status::Error;
 use std::cell::{Cell, RefCell};
 
 #[path = "../../../core/src/util/diagnostic_buffer.rs"]
 mod buffer;
 mod util {
     pub(crate) use crate::buffer as diagnostic_buffer;
-}
-mod types {
-    pub use mnu_abi::{EACCES, EFAULT, EINVAL};
 }
 mod capability {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,6 +18,7 @@ thread_local! {
     static AUTHORIZED: Cell<bool> = const { Cell::new(false) };
     static REGIONS: RefCell<Vec<(u64, u64)>> = const { RefCell::new(Vec::new()) };
     static COPY_FAIL: Cell<usize> = const { Cell::new(0) };
+    static COPY_ERROR: Cell<Error> = const { Cell::new(Error::InvalidAddress) };
     static COPY_COUNT: Cell<usize> = const { Cell::new(0) };
     static HISTORY: RefCell<buffer::ByteRing<8>> = const { RefCell::new(buffer::ByteRing::new()) };
 }
@@ -50,11 +49,14 @@ mod syscall {
                 .any(|&(base, size)| pointer >= base && end <= base + size)
         })
     }
-    pub fn copy_to_user(pointer: u64, bytes: &[u8]) -> Result<(), u64> {
+    pub fn copy_to_user_native(pointer: u64, bytes: &[u8]) -> Result<(), mnu_abi::status::Error> {
         let count = crate::COPY_COUNT.get() + 1;
         crate::COPY_COUNT.set(count);
-        if crate::COPY_FAIL.get() == count || !validate_user_ptr(pointer, bytes.len() as u64) {
-            return Err(mnu_abi::EFAULT);
+        if crate::COPY_FAIL.get() == count {
+            return Err(crate::COPY_ERROR.get());
+        }
+        if !validate_user_ptr(pointer, bytes.len() as u64) {
+            return Err(mnu_abi::status::Error::InvalidAddress);
         }
         // Only live test-owned mutable ranges registered by the caller reach
         // this stub. It exercises the real syscall's usercopy ordering.
@@ -71,6 +73,7 @@ fn initialize() {
     AUTHORIZED.set(true);
     REGIONS.with(|regions| regions.borrow_mut().clear());
     COPY_FAIL.set(0);
+    COPY_ERROR.set(Error::InvalidAddress);
     COPY_COUNT.set(0);
     HISTORY.with(|history| {
         *history.borrow_mut() = buffer::ByteRing::new();
@@ -112,7 +115,7 @@ fn authorization_precedes_all_pointer_and_history_access() {
     AUTHORIZED.set(false);
     assert_eq!(
         diagnostic::read(u64::MAX, u64::MAX, u64::MAX, u64::MAX),
-        mnu_abi::EACCES
+        Error::AccessDenied.into_raw()
     );
     assert_eq!(COPY_COUNT.get(), 0);
 }
@@ -130,13 +133,13 @@ fn bounds_overlap_and_future_cursors_fail_without_writing_outputs() {
             output,
             READ_MAX_BYTES as u64 + 1,
             result,
-            mnu_abi::EINVAL,
+            Error::InvalidArgument.into_raw(),
         ),
-        (0, 0, 4, result, mnu_abi::EFAULT),
-        (0, output, 4, 0, mnu_abi::EFAULT),
-        (0, output, 4, u64::MAX, mnu_abi::EFAULT),
-        (0, output, 16, output + 8, mnu_abi::EINVAL),
-        (12, output, 4, result, mnu_abi::EINVAL),
+        (0, 0, 4, result, Error::InvalidAddress.into_raw()),
+        (0, output, 4, 0, Error::InvalidAddress.into_raw()),
+        (0, output, 4, u64::MAX, Error::InvalidAddress.into_raw()),
+        (0, output, 16, output + 8, Error::InvalidArgument.into_raw()),
+        (12, output, 4, result, Error::InvalidArgument.into_raw()),
     ] {
         assert_eq!(diagnostic::read(cursor, data, length, meta), error);
     }
@@ -147,18 +150,26 @@ fn bounds_overlap_and_future_cursors_fail_without_writing_outputs() {
 
 #[test]
 fn failed_payload_or_metadata_copy_never_advances_a_kernel_owned_cursor() {
-    for fail in [1, 2] {
-        initialize();
-        let mut bytes = [0; 4];
-        let mut metadata = [0; RESULT_LEN];
-        let output = register(&mut bytes);
-        let result = register(&mut metadata);
-        COPY_FAIL.set(fail);
-        assert_eq!(diagnostic::read(0, output, 4, result), mnu_abi::EFAULT);
-        COPY_FAIL.set(0);
-        assert_eq!(diagnostic::read(0, output, 4, result), 4);
-        assert_eq!(&bytes, b"defg");
-        assert_eq!(ReadResult::from_bytes(&metadata).unwrap().next_cursor, 7);
+    for error in [
+        Error::InvalidAddress,
+        Error::ResourceUnavailable,
+        Error::BackingFailure,
+    ] {
+        for fail in [1, 2] {
+            initialize();
+            let mut bytes = [0; 4];
+            let mut metadata = [0; RESULT_LEN];
+            let output = register(&mut bytes);
+            let result = register(&mut metadata);
+            COPY_FAIL.set(fail);
+            COPY_ERROR.set(error);
+            assert_eq!(diagnostic::read(0, output, 4, result), error.into_raw());
+            assert_eq!(COPY_COUNT.get(), fail);
+            COPY_FAIL.set(0);
+            assert_eq!(diagnostic::read(0, output, 4, result), 4);
+            assert_eq!(&bytes, b"defg");
+            assert_eq!(ReadResult::from_bytes(&metadata).unwrap().next_cursor, 7);
+        }
     }
 }
 
