@@ -760,8 +760,8 @@ impl BootstrapOperations for Runtime {
                     endpoint,
                 ) {
                     platform::logln!(
-                        "service-manager.service: local POSIX endpoint bind failed errno={}",
-                        crate::spawn_support::errno(error)
+                        "service-manager.service: local POSIX endpoint bind failed status={}",
+                        error.raw()
                     );
                     return false;
                 }
