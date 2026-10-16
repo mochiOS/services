@@ -20,6 +20,34 @@ fn posix_protection_flags_translate_to_native_vm_access() {
 }
 
 #[test]
+fn protection_failure_is_translated_by_operation_not_as_a_copy_fault() {
+    use mnu_abi::status::Error;
+    use mochios_posix_client::{memory::protection_errno, newlib_errno};
+    assert_eq!(
+        protection_errno(Error::InvalidAddress.into_raw() as i64),
+        newlib_errno::ENOMEM
+    );
+    assert_eq!(
+        newlib_errno::from_status(Error::InvalidAddress.into_raw() as i64),
+        newlib_errno::EFAULT
+    );
+    for (error, expected) in [
+        (Error::InvalidArgument, 22),
+        (Error::AccessDenied, 13),
+        (Error::NotReady, 11),
+        (Error::ResourceUnavailable, 12),
+        (Error::BackingFailure, 5),
+    ] {
+        assert_eq!(protection_errno(error.into_raw() as i64), expected);
+    }
+    let kernel = include_str!("../../../core/src/syscall/memory.rs");
+    for errno in ["EINVAL", "EFAULT", "ENOMEM", "EACCES", "ESRCH"] {
+        assert!(!kernel.contains(&format!("return {errno};")));
+    }
+    assert!(!kernel.contains("super::types::{E"));
+}
+
+#[test]
 fn newlib_heap_growth_commits_its_reserved_arena() {
     let runtime = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
     let heap = runtime
@@ -57,7 +85,7 @@ fn posix_mapping_flags_translate_to_native_options() {
     assert!(native_map(MAP_PRIVATE | MAP_ANONYMOUS).unwrap().anonymous);
     assert_eq!(
         native_map(MAP_SHARED | MAP_FIXED).unwrap().options,
-        mnu_abi::MEMORY_MAP_SHARED | mnu_abi::MEMORY_MAP_EXACT
+        mnu_abi::MEMORY_MAP_SHARED | mnu_abi::MEMORY_MAP_EXACT | mnu_abi::MEMORY_MAP_REPLACE
     );
     assert_eq!(
         native_map(MAP_PRIVATE | MAP_STACK | MAP_NORESERVE)

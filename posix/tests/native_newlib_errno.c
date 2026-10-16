@@ -21,7 +21,7 @@ int main(void) {
     CHECK(munmap(page, 4096) == 0);
     /* Native MemoryProtect rejects an unmapped page. The resulting native
      * error must retain its meaning at the C errno boundary. */
-    CHECK(mprotect(page, 4096, PROT_READ) == -1 && (errno == ENOMEM || errno == EFAULT));
+    CHECK(mprotect(page, 4096, PROT_READ) == -1 && errno == ENOMEM);
     fprintf(stderr, "newlib-errno: pass deadlock=%d unsupported=%d overflow=%d\n",
             EDEADLK, ENOSYS, EOVERFLOW);
     return 0;

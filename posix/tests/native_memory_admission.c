@@ -164,7 +164,8 @@ int main(void) {
                0) == -22);
   CHECK(native(HANDLE_CLOSE, first, 0, 0, 0, 0, 0) == 0);
   CHECK(control(update, 1) == 0);
-  CHECK(native(MEMORY_PROTECT, private_address, 8192, 1, 0, 0, 0) == -11);
+  CHECK(native(MEMORY_PROTECT, private_address, 8192, 1, 0, 0, 0) ==
+        INT64_C(-262137));
   CHECK(control(object, 100) ==
         0); // provider makes the new extent authoritative
   CHECK(control(update, 3) == 0);

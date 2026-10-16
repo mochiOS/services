@@ -32,7 +32,9 @@ mod result {
     #[derive(Debug)] pub enum Memory {Busy,NotMapped,OutOfMemory,PermissionDenied,InvalidAddress,AlignmentError}
     pub type Result<T> = core::result::Result<T,crate::Kernel>;
 }
-mod mnu_abi {pub const MEMORY_ACCESS_WRITE:u64=2;pub const MEMORY_ACCESS_EXECUTE:u64=4;pub const MEMORY_ACCESS_ALL:u64=7;}
+extern crate self as mnu_abi;
+pub const MEMORY_ACCESS_WRITE:u64=2;pub const MEMORY_ACCESS_EXECUTE:u64=4;pub const MEMORY_ACCESS_ALL:u64=7;
+#[path="@STATUS@"] pub mod status;
 thread_local! {
     static LOCKED:Cell<bool>=const {Cell::new(false)};
     static EDITS:Cell<usize>=const {Cell::new(0)};
@@ -41,6 +43,9 @@ thread_local! {
     static PLAN_FAILURE:Cell<Option<task::process::MemoryRangeError>>=const {Cell::new(None)};
     static METADATA:Cell<usize>=const {Cell::new(0)};
     static PROCESS:RefCell<task::Process>=RefCell::new(task::Process{regions:Vec::new()});
+    static CONTEXT:Cell<bool>=const {Cell::new(true)};
+    static DENIED:Cell<bool>=const {Cell::new(false)};
+    static PAGE_ERROR:Cell<bool>=const {Cell::new(false)};
 }
 fn locked() {assert!(LOCKED.with(Cell::get));}
 fn page_align_up(address:u64)->Option<u64> {address.checked_add(4095).map(|address|address&!4095)}
@@ -67,7 +72,7 @@ mod task {
         pub fn start(&self)->u64{self.start} pub fn len(&self)->u64{4096} pub fn end(&self)->Option<u64>{Some(self.start+4096)}
         pub fn backing(&self)->&Self{self} pub fn file_object(&self)->Option<&Arc<Object>>{self.object.as_ref()}
         pub fn file_offset(&self)->u64{0} pub fn is_shared(&self)->bool{true} pub fn dirty_pages(&self)->&[u64]{&[]}
-        pub fn permits_access(&self,_:u64)->bool{true}
+        pub fn permits_access(&self,_:u64)->bool{!DENIED.get()}
         pub fn set_access(&mut self,_:u64,_:u64,access:u64)->bool{locked();METADATA.with(|value|value.set(value.get()+1));self.access=access;true}
     }
     pub struct Mapping;
@@ -90,7 +95,7 @@ mod task {
         pub fn set_memory_regions(&mut self,regions:Vec<MemoryRegion>){locked();METADATA.with(|value|value.set(value.get()+1));self.regions=regions;}
     }
     pub struct Thread;impl Thread {pub fn process_id(&self)->u64{7}}
-    pub fn current_thread_id()->Option<u64>{Some(1)}
+    pub fn current_thread_id()->Option<u64>{CONTEXT.get().then_some(1)}
     pub fn with_thread<T>(id:u64,body:impl FnOnce(&Thread)->T)->Option<T>{assert_eq!(id,1);Some(body(&Thread))}
     pub fn with_process_mut<T>(id:u64,body:impl FnOnce(&mut Process)->T)->Option<T>{
         assert_eq!(id,7);LOCKED.with(|slot|assert!(!slot.replace(true)));
@@ -101,8 +106,10 @@ mod task {
 mod mem {
     #[path="@ADMISSION@"] pub mod mapping_admission;
     pub mod paging {
-        pub fn has_user_page_entry_in_table(_:u64,_:u64)->bool{crate::locked();true}
-        pub unsafe fn next_user_page_entry(_:u64,start:u64,end:u64)->Result<Option<u64>,crate::Kernel>{crate::locked();Ok((start<end).then_some(start))}
+        pub fn has_user_page_entry_in_table(_:u64,address:u64)->bool{crate::locked();(0x1000..0x3000).contains(&address)}
+        pub unsafe fn next_user_page_entry(_:u64,start:u64,end:u64)->Result<Option<u64>,crate::Kernel>{crate::locked();
+            if crate::PAGE_ERROR.get() {return Err(crate::Kernel::Memory(crate::result::Memory::OutOfMemory));}
+            Ok((start<end).then_some(start))}
         pub fn protect_user_page_if_mapped(_:u64,_:u64,_:bool,_:bool,_:bool)->Result<bool,crate::Kernel>{
             crate::locked();crate::EDITS.with(|value|value.set(value.get()+1));Ok(true)
         }
@@ -122,7 +129,6 @@ mod syscall {
     pub(crate) use crate::{EINVAL,EAGAIN};
     pub mod types {pub(crate) use crate::{EACCES,EFAULT,EINVAL,ENOMEM,ESRCH,SUCCESS};}
     pub mod memory {
-        use crate::mnu_abi;
 "#,
     );
     program.push_str(&protection);
@@ -137,12 +143,33 @@ fn reset(busy:bool,unavailable:bool) {
     EDITS.with(|value|value.set(0));SYNCS.with(|value|value.set(0));
     PLANS.with(|value|value.set(0));METADATA.with(|value|value.set(0));
     PLAN_FAILURE.set(None);
+    CONTEXT.set(true); DENIED.set(false); PAGE_ERROR.set(false);
 }
 fn main() {
+    use status::Error;
+    for (address,length,access,expected) in [
+        (0,0,999,SUCCESS), (0x1000,4096,8,Error::InvalidArgument.into_raw()),
+        (0,4096,1,Error::InvalidAddress.into_raw()),
+        (u64::MAX,4096,1,Error::InvalidAddress.into_raw()),
+        (0x4000,4096,1,Error::InvalidAddress.into_raw()),
+        (0x1000,4096,6,Error::InvalidArgument.into_raw()),
+    ] {
+        reset(false,false);
+        assert_eq!(syscall::memory::protect(address,length,access),expected);
+        assert_eq!(EDITS.get(),0); assert_eq!(METADATA.get(),0);
+    }
+    reset(false,false); CONTEXT.set(false);
+    assert_eq!(syscall::memory::protect(0x1000,4096,1),Error::NotReady.into_raw());
+    reset(false,false); DENIED.set(true);
+    assert_eq!(syscall::memory::protect(0x1000,8192,1),Error::AccessDenied.into_raw());
+    assert_eq!(EDITS.get(),0); assert_eq!(METADATA.get(),0);
+    reset(false,false); PAGE_ERROR.set(true);
+    assert_eq!(syscall::memory::protect(0x1000,8192,1),Error::ResourceUnavailable.into_raw());
+    assert_eq!(EDITS.get(),0); assert_eq!(SYNCS.get(),1); assert_eq!(METADATA.get(),0);
     for protection in [false,true] {
         reset(true,false);
         let result=if protection {syscall::memory::protect(0x1000,8192,1)} else {memory_unmap(0x1000,8192)};
-        assert_eq!(result,EAGAIN);assert_eq!(EDITS.with(Cell::get),0);assert_eq!(METADATA.with(Cell::get),0);
+        assert_eq!(result,if protection {status::Error::NotReady.into_raw()} else {EAGAIN});assert_eq!(EDITS.with(Cell::get),0);assert_eq!(METADATA.with(Cell::get),0);
         assert_eq!(PLANS.with(Cell::get),0);assert_eq!(SYNCS.with(Cell::get),0);
         assert!(!LOCKED.with(Cell::get));
         PROCESS.with(|process|assert!(process.borrow().regions.iter().all(|region|region.access==3)));
@@ -155,7 +182,7 @@ fn main() {
         reset(false,true);
         let result=if protection {syscall::memory::protect(0x1000,8192,1)} else {memory_unmap(0x1000,8192)};
         if protection {
-            assert_eq!(result,EIO);assert_eq!(EDITS.with(Cell::get),0);assert_eq!(METADATA.with(Cell::get),0);
+            assert_eq!(result,status::Error::BackingFailure.into_raw());assert_eq!(EDITS.with(Cell::get),0);assert_eq!(METADATA.with(Cell::get),0);
             assert_eq!(PLANS.with(Cell::get),0);assert_eq!(SYNCS.with(Cell::get),0);
         } else {
             assert_eq!(result,SUCCESS);assert_eq!(EDITS.with(Cell::get),1);assert!(METADATA.with(Cell::get)>0);
@@ -180,6 +207,10 @@ fn main() {
 }
 "#);
     program = program
+        .replace(
+            "@STATUS@",
+            root.join("core/crates/abi/src/status.rs").to_str().unwrap(),
+        )
         .replace(
             "@RANGE@",
             root.join("core/src/task/memory_range.rs").to_str().unwrap(),

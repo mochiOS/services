@@ -143,14 +143,16 @@ int PROVIDER_MEMORY_UPDATE_MAIN(void) {
   CHECK(control(update, 999) == -38);
   CHECK(control(update, 3) == -22); /* BEGIN cannot be skipped */
   CHECK(native(HANDLE_CONTROL, update, 1, 0, 1, 0, 0) == -22);
-  CHECK(native(MEMORY_PROTECT, private_address, 8192, 1, 0, 0, 0) == -11);
+  CHECK(native(MEMORY_PROTECT, private_address, 8192, 1, 0, 0, 0) ==
+        INT64_C(-262137));
   CHECK(native(HANDLE_CLOSE, update, 0, 0, 0, 0, 0) == 0); /* before BEGIN */
   CHECK(p[0] == 'P' && p[8191] == 'b');
   update =
       native(PROVIDER_MEMORY_UPDATE_CREATE, endpoint, 77, 8192, 5000, 0, 0);
   CHECK(update > 0 && control(update, 1) == 0);
   CHECK(control(update, 1) == -22);
-  CHECK(native(MEMORY_PROTECT, shared_address, 8192, 1, 0, 0, 0) == -11);
+  CHECK(native(MEMORY_PROTECT, shared_address, 8192, 1, 0, 0, 0) ==
+        INT64_C(-262137));
   CHECK(control(update, 2) == 0); /* confirmed unchanged */
   CHECK(native(HANDLE_CLOSE, update, 0, 0, 0, 0, 0) == 0);
   CHECK(p[0] == 'P' && p[8191] == 'b' && s[8191] == 'b');
@@ -165,8 +167,10 @@ int PROVIDER_MEMORY_UPDATE_MAIN(void) {
   update = native(PROVIDER_MEMORY_UPDATE_CREATE, endpoint, 77, 5000, 0, 0, 0);
   CHECK(update > 0 && control(update, 1) == 0);
   CHECK(native(HANDLE_CLOSE, update, 0, 0, 0, 0, 0) == 0); /* unknown outcome */
-  CHECK(native(MEMORY_PROTECT, private_address, 8192, 1, 0, 0, 0) == -5);
-  CHECK(native(MEMORY_PROTECT, shared_address, 8192, 1, 0, 0, 0) == -5);
+  CHECK(native(MEMORY_PROTECT, private_address, 8192, 1, 0, 0, 0) ==
+        INT64_C(-262140));
+  CHECK(native(MEMORY_PROTECT, shared_address, 8192, 1, 0, 0, 0) ==
+        INT64_C(-262140));
   unsigned char byte;
   CHECK(native(HANDLE_READ_AT, object, (uintptr_t)&byte, 1, 0, 0, 0) == -5);
   CHECK(native(MEMORY_UNMAP, private_address, 8192, 0, 0, 0, 0) == 0);
