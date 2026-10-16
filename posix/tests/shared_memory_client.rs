@@ -348,14 +348,16 @@ fn newlib_shm_flags_and_inherited_descriptor_kind_are_canonical() {
         protocol::inherited_fd_kind_requires_handle(metadata.kind),
         Some(true)
     );
-    let runtime = include_str!("../../../user/crates/newlib-runtime/src/shared_memory.rs");
+    let runtime =
+        include_str!("../../../user/crates/newlib-runtime/src/shared_memory_namespace.rs");
     assert!(runtime.contains("(flags & 3) | O_CLOEXEC"));
     assert!(runtime.contains("reserve_from(0, limit)"));
     assert!(runtime.contains("commit_reservation"));
     let backing = include_str!("../../../user/crates/newlib-runtime/src/mapping_backing.rs");
-    assert!(backing.contains("impl Drop for Reply"));
+    let reply = include_str!("../../../user/crates/newlib-runtime/src/object_reply.rs");
+    assert!(reply.contains("impl Drop for Reply"));
     assert!(backing.contains("io_resources::with("));
-    assert!(backing.contains("&mut reply.native as *mut syscall::IpcObjectHandles"));
+    assert!(reply.contains("&mut self.native as *mut syscall::IpcObjectHandles"));
 }
 #[test]
 fn valid_response_transfers_one_owned_reference_and_all_failed_shapes_close_attachments() {

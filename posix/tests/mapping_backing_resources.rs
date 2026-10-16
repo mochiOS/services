@@ -14,6 +14,8 @@ mod callback_resources;
 mod implementation;
 #[path = "../../../user/crates/newlib-runtime/src/io_resources.rs"]
 mod io_resources;
+#[path = "../../../user/crates/newlib-runtime/src/object_reply.rs"]
+mod object_reply;
 const EAGAIN: c_int = 11;
 const EBADF: c_int = 9;
 const EIO: c_int = 5;
