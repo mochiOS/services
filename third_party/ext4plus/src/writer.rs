@@ -3,8 +3,16 @@ use crate::error::BoxedError;
 #[cfg(not(feature = "sync"))]
 use async_trait::async_trait;
 
-#[cfg(not(feature = "sync"))]
 use alloc::boxed::Box;
+
+#[derive(Debug)]
+struct FlushUnsupported;
+impl core::fmt::Display for FlushUnsupported {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("storage writer does not support a durability barrier")
+    }
+}
+impl core::error::Error for FlushUnsupported {}
 
 #[cfg(feature = "std")]
 use std::sync::Mutex;
@@ -32,6 +40,12 @@ pub trait Ext4Write {
         start_byte: u64,
         src: &[u8],
     ) -> Result<(), BoxedError>;
+
+    /// Complete previous writes in this backend's durability domain. Writers
+    /// must explicitly support this; lack of a barrier is never success.
+    async fn flush(&self) -> Result<(), BoxedError> {
+        Err(Box::new(FlushUnsupported) as BoxedError)
+    }
 }
 
 /// Interface used by [`Ext4`] to write the filesystem data to a storage
@@ -42,6 +56,11 @@ pub trait Ext4Write {
 pub trait Ext4Write {
     /// Write bytes from `src`, starting at `start_byte`.
     fn write(&self, start_byte: u64, src: &[u8]) -> Result<(), BoxedError>;
+
+    /// Complete previous writes in this backend's durability domain.
+    fn flush(&self) -> Result<(), BoxedError> {
+        Err(Box::new(FlushUnsupported))
+    }
 }
 
 /// Interface used by [`Ext4`] to write the filesystem data to a storage
@@ -57,6 +76,11 @@ pub trait Ext4Write: Send + Sync {
         start_byte: u64,
         src: &[u8],
     ) -> Result<(), BoxedError>;
+
+    /// Complete previous writes in this backend's durability domain.
+    async fn flush(&self) -> Result<(), BoxedError> {
+        Err(Box::new(FlushUnsupported) as BoxedError)
+    }
 }
 
 /// Interface used by [`Ext4`] to write the filesystem data to a storage
@@ -67,6 +91,11 @@ pub trait Ext4Write: Send + Sync {
 pub trait Ext4Write: Send + Sync {
     /// Write bytes from `src`, starting at `start_byte`.
     fn write(&self, start_byte: u64, src: &[u8]) -> Result<(), BoxedError>;
+
+    /// Complete previous writes in this backend's durability domain.
+    fn flush(&self) -> Result<(), BoxedError> {
+        Err(Box::new(FlushUnsupported))
+    }
 }
 
 #[cfg(all(
@@ -76,6 +105,9 @@ pub trait Ext4Write: Send + Sync {
 ))]
 #[async_trait(?Send)]
 impl Ext4Write for Mutex<Vec<u8>> {
+    async fn flush(&self) -> Result<(), BoxedError> {
+        Ok(())
+    }
     async fn write(
         &self,
         start_byte: u64,
@@ -96,6 +128,9 @@ impl Ext4Write for Mutex<Vec<u8>> {
 #[cfg(all(feature = "std", feature = "multi-threaded", not(feature = "sync")))]
 #[async_trait]
 impl Ext4Write for Mutex<Vec<u8>> {
+    async fn flush(&self) -> Result<(), BoxedError> {
+        Ok(())
+    }
     async fn write(
         &self,
         start_byte: u64,
@@ -115,6 +150,9 @@ impl Ext4Write for Mutex<Vec<u8>> {
 
 #[cfg(all(feature = "std", feature = "sync"))]
 impl Ext4Write for Mutex<Vec<u8>> {
+    fn flush(&self) -> Result<(), BoxedError> {
+        Ok(())
+    }
     fn write(&self, start_byte: u64, src: &[u8]) -> Result<(), BoxedError> {
         let mut guard = self.lock().unwrap();
         write_to_bytes(guard.as_mut(), start_byte, src).ok_or_else(|| {
@@ -134,6 +172,9 @@ impl<T> Ext4Write for alloc::rc::Rc<T>
 where
     T: Ext4Write,
 {
+    async fn flush(&self) -> Result<(), BoxedError> {
+        (**self).flush().await
+    }
     async fn write(
         &self,
         start_byte: u64,
@@ -148,6 +189,9 @@ impl<T> Ext4Write for alloc::rc::Rc<T>
 where
     T: Ext4Write,
 {
+    fn flush(&self) -> Result<(), BoxedError> {
+        (**self).flush()
+    }
     fn write(&self, start_byte: u64, src: &[u8]) -> Result<(), BoxedError> {
         (**self).write(start_byte, src)
     }
@@ -159,6 +203,9 @@ impl<T> Ext4Write for alloc::sync::Arc<T>
 where
     T: Ext4Write,
 {
+    async fn flush(&self) -> Result<(), BoxedError> {
+        (**self).flush().await
+    }
     async fn write(
         &self,
         start_byte: u64,
@@ -173,6 +220,9 @@ impl<T> Ext4Write for alloc::sync::Arc<T>
 where
     T: Ext4Write,
 {
+    fn flush(&self) -> Result<(), BoxedError> {
+        (**self).flush()
+    }
     fn write(&self, start_byte: u64, src: &[u8]) -> Result<(), BoxedError> {
         (**self).write(start_byte, src)
     }
@@ -186,6 +236,10 @@ where
 ))]
 #[async_trait(?Send)]
 impl Ext4Write for std::fs::File {
+    async fn flush(&self) -> Result<(), BoxedError> {
+        self.sync_all()
+            .map_err(|error| Box::new(error) as BoxedError)
+    }
     async fn write(
         &self,
         start_byte: u64,
@@ -214,6 +268,10 @@ impl Ext4Write for std::fs::File {
 ))]
 #[async_trait]
 impl Ext4Write for std::fs::File {
+    async fn flush(&self) -> Result<(), BoxedError> {
+        self.sync_all()
+            .map_err(|error| Box::new(error) as BoxedError)
+    }
     async fn write(
         &self,
         start_byte: u64,
@@ -236,6 +294,10 @@ impl Ext4Write for std::fs::File {
 
 #[cfg(all(feature = "std", feature = "sync", target_family = "unix"))]
 impl Ext4Write for std::fs::File {
+    fn flush(&self) -> Result<(), BoxedError> {
+        self.sync_all()
+            .map_err(|error| Box::new(error) as BoxedError)
+    }
     fn write(&self, start_byte: u64, src: &[u8]) -> Result<(), BoxedError> {
         use std::os::unix::fs::FileExt;
 

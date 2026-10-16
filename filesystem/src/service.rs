@@ -1764,10 +1764,7 @@ impl FilesystemService {
             return Err(EINVAL);
         }
         let open = self.opens.get(&open_id).ok_or(EBADF)?;
-        if open.file.is_none() {
-            return Err(EISDIR);
-        }
-        Ok(())
+        open.filesystem.flush().map_err(errno)
     }
 
     pub fn provider_memory_object(&self, open_id: u64) -> Result<u64, i32> {
@@ -3468,10 +3465,7 @@ impl FilesystemService {
     }
 
     pub fn sync_handle(&self, request: protocol::Header, open_id: u64) -> Result<Response, i32> {
-        if self.opens.device(open_id).is_some() {
-            return Err(EINVAL);
-        }
-        self.opens.get(&open_id).ok_or(EBADF)?;
+        self.provider_sync(open_id)?;
         Ok(self.success(request))
     }
 

@@ -46,6 +46,12 @@ where
     D: SectorDevice + Send,
     D::Error: Error + Send + Sync + 'static,
 {
+    fn flush(&self) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
+        self.partition
+            .flush()
+            .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync + 'static>)
+    }
+
     fn write(
         &self,
         start_byte: u64,

@@ -317,6 +317,17 @@ impl Ext4 {
         &self.0.superblock
     }
 
+    /// Complete prior filesystem writes through the selected storage writer.
+    /// A read-only mount owns no pending writes. A writable backend without a
+    /// real durability barrier returns an error rather than claiming success.
+    #[maybe_async::maybe_async]
+    pub async fn flush(&self) -> Result<(), Ext4Error> {
+        match self.0.writer.as_ref() {
+            Some(writer) => writer.flush().await.map_err(Ext4Error::Io),
+            None => Ok(()),
+        }
+    }
+
     /// Whether this loaded filesystem has no writable backend, including
     /// filesystems forced read-only by incompatible on-disk features.
     #[must_use]

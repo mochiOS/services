@@ -133,7 +133,6 @@ fn main() {
             }
             let response_len = handle_provider_request(
                 &mut service,
-                partition.as_ref(),
                 request,
                 &mut response_bytes,
                 &attached,
@@ -410,23 +409,7 @@ fn main() {
                         _ => unreachable!(),
                     });
                     match result {
-                        Ok(response) => {
-                            if header.opcode == protocol::OP_SYNC_HANDLE
-                                && partition.flush().is_err()
-                            {
-                                filesystem_service::service::Response {
-                                    header: protocol::Header {
-                                        opcode: protocol::OP_STATUS,
-                                        request_id: header.request_id,
-                                        status: -5,
-                                        ..protocol::Header::default()
-                                    },
-                                    payload: Vec::new(),
-                                }
-                            } else {
-                                response
-                            }
-                        }
+                        Ok(response) => response,
                         Err(error) => filesystem_service::service::Response {
                             header: protocol::Header {
                                 opcode: protocol::OP_STATUS,
@@ -1034,9 +1017,6 @@ fn close_attached_handles(handles: &mochi_user_platform::ipc::IpcObjectHandles) 
 #[cfg(target_os = "mochios")]
 fn handle_provider_request(
     service: &mut filesystem_service::service::FilesystemService,
-    partition: &filesystem_service::storage::PartitionIo<
-        filesystem_service::platform_storage::MochiDisk,
-    >,
     request: &[u8],
     response: &mut [u8],
     attached: &mochi_user_platform::ipc::IpcObjectHandles,
@@ -1075,7 +1055,6 @@ fn handle_provider_request(
             .map(|written| (written as u64, Vec::new())),
         provider::OP_SYNC => service
             .provider_sync(header.object_id)
-            .and_then(|_| partition.flush().map_err(|_| 5))
             .map(|_| (0, Vec::new())),
         provider::OP_MEMORY_OBJECT => service
             .provider_memory_object(header.object_id)

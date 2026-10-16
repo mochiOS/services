@@ -73,6 +73,10 @@ impl Ext4Read for SharedImage {
 }
 
 impl Ext4Write for SharedImage {
+    // This explicitly selected host backend commits writes directly to RAM.
+    fn flush(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        Ok(())
+    }
     fn write(
         &self,
         start_byte: u64,
@@ -1504,6 +1508,158 @@ fn truncate_and_sync_address_an_open_object_without_a_path() {
             open_id,
         )
         .unwrap();
+}
+
+struct BufferedDiskState {
+    working: Vec<u8>,
+    durable: Vec<u8>,
+    flushes: usize,
+    fail_flush: bool,
+}
+
+struct BufferedDisk(Arc<Mutex<BufferedDiskState>>);
+impl filesystem_service::storage::SectorDevice for BufferedDisk {
+    type Error = io::Error;
+    fn read_sectors(&mut self, lba: u64, output: &mut [u8]) -> Result<(), io::Error> {
+        let state = self.0.lock().unwrap();
+        let start = lba as usize * 512;
+        output.copy_from_slice(&state.working[start..start + output.len()]);
+        Ok(())
+    }
+    fn write_sectors(&mut self, lba: u64, input: &[u8]) -> Result<(), io::Error> {
+        let mut state = self.0.lock().unwrap();
+        let start = lba as usize * 512;
+        state.working[start..start + input.len()].copy_from_slice(input);
+        Ok(())
+    }
+    fn flush(&mut self) -> Result<(), io::Error> {
+        let mut state = self.0.lock().unwrap();
+        state.flushes += 1;
+        if state.fail_flush {
+            return Err(io::Error::other("injected device flush failure"));
+        }
+        state.durable = state.working.clone();
+        Ok(())
+    }
+}
+
+fn buffered_filesystem() -> (Ext4, Arc<Mutex<BufferedDiskState>>) {
+    use filesystem_service::{ext4::Ext4Storage, storage::PartitionIo};
+    let (service, image) = test_filesystem_with_storage(None);
+    drop(service);
+    let bytes = image.0.lock().unwrap().clone();
+    let sectors = (bytes.len() / 512) as u64;
+    let state = Arc::new(Mutex::new(BufferedDiskState {
+        durable: bytes.clone(),
+        working: bytes,
+        flushes: 0,
+        fail_flush: false,
+    }));
+    // The Arc wrapper must delegate the barrier, not inherit an unsupported
+    // default or accidentally sync a different filesystem's writer.
+    let storage = Arc::new(Ext4Storage::new(Arc::new(PartitionIo::new(
+        BufferedDisk(state.clone()),
+        0,
+        sectors,
+    ))));
+    let filesystem =
+        Ext4::load_with_writer(Box::new(storage.clone()), Some(Box::new(storage))).unwrap();
+    (filesystem, state)
+}
+
+#[test]
+fn sync_uses_the_open_objects_actual_volume_and_propagates_device_flush_failure() {
+    let (root, data) = buffered_filesystem();
+    let (mounted, other) = buffered_filesystem();
+    let mut service = FilesystemService::new(root);
+    service
+        .configure_memory_updates(Box::new(UnmappedUpdates))
+        .unwrap();
+    service.mount_volume(b"/outside", mounted).unwrap();
+    let open = |service: &mut FilesystemService, path: &[u8]| {
+        service
+            .open_at(
+                protocol::Header {
+                    flags: protocol::OPEN_AT_READ
+                        | protocol::OPEN_AT_WRITE
+                        | protocol::OPEN_AT_CREATE,
+                    mode: 0o600,
+                    ..Default::default()
+                },
+                path,
+                PathAnchors::default(),
+                root_credentials(),
+            )
+            .unwrap()
+            .header
+            .open_id
+    };
+    let first = open(&mut service, b"/flush-target");
+    let second = open(&mut service, b"/outside/flush-target");
+    service.provider_write(first, b"one").unwrap();
+    service.provider_write(second, b"two").unwrap();
+    {
+        let state = data.lock().unwrap();
+        assert_ne!(state.working, state.durable);
+    }
+    service
+        .sync_handle(protocol::Header::default(), second)
+        .unwrap();
+    assert_eq!(data.lock().unwrap().flushes, 0);
+    {
+        let state = other.lock().unwrap();
+        assert_eq!(state.flushes, 1);
+        assert_eq!(state.durable, state.working);
+    }
+    data.lock().unwrap().fail_flush = true;
+    assert_eq!(service.provider_sync(first), Err(5));
+    assert_eq!(
+        service
+            .sync_handle(protocol::Header::default(), first)
+            .err(),
+        Some(5)
+    );
+    assert_eq!(data.lock().unwrap().flushes, 2);
+    assert_eq!(service.provider_sync(u64::MAX), Err(9));
+    assert_eq!(data.lock().unwrap().flushes, 2);
+    data.lock().unwrap().fail_flush = false;
+    let directory = service
+        .open_at(
+            protocol::Header {
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+                ..Default::default()
+            },
+            b"/",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap()
+        .header
+        .open_id;
+    service.provider_sync(directory).unwrap();
+    {
+        let state = data.lock().unwrap();
+        assert_eq!(state.flushes, 3);
+        assert_eq!(state.durable, state.working);
+    }
+    service.provider_close(first).unwrap();
+    service.provider_close(second).unwrap();
+    service.provider_close(directory).unwrap();
+}
+
+#[test]
+fn a_writer_without_a_barrier_cannot_claim_a_successful_flush() {
+    struct WriteOnly(SharedImage);
+    impl Ext4Write for WriteOnly {
+        fn write(&self, offset: u64, bytes: &[u8]) -> Result<(), Box<dyn Error + Send + Sync>> {
+            self.0.write(offset, bytes)
+        }
+    }
+    let (service, image) = test_filesystem_with_storage(None);
+    drop(service);
+    let filesystem =
+        Ext4::load_with_writer(Box::new(image.clone()), Some(Box::new(WriteOnly(image)))).unwrap();
+    assert!(filesystem.flush().is_err());
 }
 
 #[test]
