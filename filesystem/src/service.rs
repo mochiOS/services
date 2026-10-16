@@ -2621,8 +2621,8 @@ impl FilesystemService {
         if source_volume != destination_volume {
             return Err(EXDEV);
         }
-        let old_name = std::str::from_utf8(&old_name).map_err(|_| EINVAL)?;
-        let new_name = std::str::from_utf8(&new_name).map_err(|_| EINVAL)?;
+        let old_name = old_name.as_slice();
+        let new_name = new_name.as_slice();
         let same_parent = old_parent_inode.index == new_parent_inode.index;
         if same_parent && old_name == new_name {
             return Ok(self.success(request));
@@ -2896,7 +2896,7 @@ impl FilesystemService {
         &self,
         filesystem: &Ext4,
         parent: &mut Dir,
-        name: &str,
+        name: impl AsRef<[u8]>,
         backup_name: &str,
         destination: Option<(u64, ext4plus::inode::Inode)>,
     ) {
@@ -2904,7 +2904,7 @@ impl FilesystemService {
             return;
         };
         let (Ok(name), Ok(backup_name)) = (
-            DirEntryName::try_from(name),
+            DirEntryName::try_from(name.as_ref()),
             DirEntryName::try_from(backup_name),
         ) else {
             return;
@@ -2924,7 +2924,7 @@ impl FilesystemService {
         &self,
         filesystem: &Ext4,
         parent: &mut Dir,
-        name: &str,
+        name: impl AsRef<[u8]>,
         backup_name: &str,
         destination: Option<&(u64, Inode)>,
     ) -> Result<(), i32> {
@@ -2937,7 +2937,7 @@ impl FilesystemService {
         let backup_name = DirEntryName::try_from(backup_name).map_err(|_| EIO)?;
         parent.link(backup_name, &mut inode).map_err(errno)?;
         if let Err(error) = parent.unlink(
-            DirEntryName::try_from(name).map_err(|_| EINVAL)?,
+            DirEntryName::try_from(name.as_ref()).map_err(|_| EINVAL)?,
             inode.clone(),
         ) {
             let _ = parent.unlink(backup_name, inode);
@@ -2969,12 +2969,12 @@ impl FilesystemService {
         old_parent: &mut Dir,
         new_parent: &mut Dir,
         same_parent: bool,
-        old_name: &str,
-        new_name: &str,
+        old_name: impl AsRef<[u8]>,
+        new_name: impl AsRef<[u8]>,
         mut source_inode: Inode,
     ) -> Result<(), i32> {
-        let new_name = DirEntryName::try_from(new_name).map_err(|_| EINVAL)?;
-        let old_name = DirEntryName::try_from(old_name).map_err(|_| EINVAL)?;
+        let new_name = DirEntryName::try_from(new_name.as_ref()).map_err(|_| EINVAL)?;
+        let old_name = DirEntryName::try_from(old_name.as_ref()).map_err(|_| EINVAL)?;
         if same_parent {
             let parent_links = new_parent.inode().links_count();
             new_parent

@@ -19,6 +19,9 @@ use unmapped_updates::UnmappedUpdates;
 #[path = "support/canonical_path.rs"]
 mod canonical_path;
 
+#[path = "support/byte_path_filesystem.rs"]
+mod byte_path_filesystem;
+
 fn credentials(uid: u32, gid: u32, groups: &[u32]) -> protocol::Credentials {
     let mut payload = [0u8; protocol::CREDENTIALS_MAX_LEN];
     let length = protocol::encode_credentials_payload(uid, gid, groups, &[], &mut payload).unwrap();
