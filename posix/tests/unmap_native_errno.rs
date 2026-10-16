@@ -24,12 +24,14 @@ pub const STATUS_EIO:i32=-5;pub const STATUS_EAGAIN:i32=-11;
 use std::cell::Cell;
 use core::ffi::c_void;
 type c_int=i32;
-use newlib_errno::EINVAL;
+use newlib_errno::{{EINVAL,ENOSYS}};
+const PAGE_SIZE:usize=4096;
 use mnu_abi::status::Error;
 thread_local! {{
     static RESULT:Cell<u64>=const{{Cell::new(0)}};
     static ERRNO:Cell<i32>=const{{Cell::new(123)}};
     static CALLS:Cell<usize>=const{{Cell::new(0)}};
+    static SYNC_CALLS:Cell<usize>=const{{Cell::new(0)}};
     static EXPECTED:Cell<(u64,u64)>=const{{Cell::new((4096,4096))}};
 }}
 fn result_with_errno<T:Copy>(result:Result<T,i32>,failure:T)->T{{
@@ -53,7 +55,11 @@ use mnu_abi::status::Error as NativeError;
         constants.push_str(line);
         constants.push('\n');
     }
-    program = program.replacen("pub mod status {", &format!("{constants}\npub mod status {{"), 1);
+    program = program.replacen(
+        "pub mod status {",
+        &format!("{constants}\npub mod status {{"),
+        1,
+    );
     program.push_str(probe::between(
         include_str!("../../../user/crates/syscall/src/lib.rs"),
         "#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub struct SysError",
@@ -61,9 +67,14 @@ use mnu_abi::status::Error as NativeError;
     ));
     program.push_str(
         r#"
-pub enum SyscallNumber{MemoryUnmap}
+#[derive(Debug,PartialEq)]pub enum SyscallNumber{MemoryUnmap,MemorySync}
 pub fn raw_syscall2(_:SyscallNumber,address:u64,length:u64)->RawSyscallResult{
     assert_eq!((address,length),crate::EXPECTED.get());crate::CALLS.set(crate::CALLS.get()+1);
+    RawSyscallResult::new(crate::RESULT.get())
+}
+pub fn raw_syscall3(number:SyscallNumber,address:u64,length:u64,options:u64)->RawSyscallResult{
+    assert_eq!(number,SyscallNumber::MemorySync);assert_eq!(options,0);
+    assert_eq!((address,length),crate::EXPECTED.get());crate::SYNC_CALLS.set(crate::SYNC_CALLS.get()+1);
     RawSyscallResult::new(crate::RESULT.get())
 }
 }
@@ -73,6 +84,11 @@ pub fn raw_syscall2(_:SyscallNumber,address:u64,length:u64)->RawSyscallResult{
         include_str!("../../../user/crates/newlib-runtime/src/lib.rs"),
         "#[unsafe(no_mangle)]\npub extern \"C\" fn munmap(",
         "#[unsafe(no_mangle)]\npub extern \"C\" fn mprotect(",
+    ));
+    program.push_str(probe::between(
+        include_str!("../../../user/crates/newlib-runtime/src/lib.rs"),
+        "#[unsafe(no_mangle)]\npub extern \"C\" fn msync(",
+        "#[unsafe(no_mangle)]\npub extern \"C\" fn sysconf(",
     ));
     program.push_str(
         r#"
@@ -99,12 +115,34 @@ fn main(){
     RESULT.set(0);ERRNO.set(123);EXPECTED.set((4096,8192));
     assert_eq!(munmap(4096 as *mut c_void,4097),0);assert_eq!(ERRNO.get(),123);
     assert_eq!(CALLS.get(),14);
+    EXPECTED.set((4096,4097));
+    for (native,expected) in [(Error::InvalidAddress,12),(Error::AccessDenied,13),
+        (Error::InvalidArgument,22),(Error::ResourceUnavailable,12),(Error::NotReady,11),
+        (Error::BackingFailure,5),(Error::LimitExceeded,139),(Error::AlreadyExists,17),
+        (Error::NotFound,2),(Error::PeerClosed,32)] {
+        RESULT.set(native.into_raw());assert_eq!(msync(4096 as *mut c_void,4097,4),-1);
+        assert_eq!(ERRNO.get(),expected);
+    }
+    for (legacy,expected) in [(-5i64,5),(-28,28),(-75,139)] {
+        RESULT.set(legacy as u64);assert_eq!(msync(4096 as *mut c_void,4097,4),-1);
+        assert_eq!(ERRNO.get(),expected);
+    }
+    let before=SYNC_CALLS.get();
+    for (address,length,flags,expected) in [(0,4096,4,22),(4097,4096,4,22),
+        (4096,0,4,22),(4096,4096,0,22),(4096,4096,5,22),
+        (4096,4096,1,88),(4096,4096,6,88)] {
+        assert_eq!(msync(address as *mut c_void,length,flags),-1);assert_eq!(ERRNO.get(),expected);
+    }
+    assert_eq!(SYNC_CALLS.get(),before);
+    RESULT.set(0);ERRNO.set(123);assert_eq!(msync(4096 as *mut c_void,4097,4),0);
+    assert_eq!(ERRNO.get(),123);assert_eq!(SYNC_CALLS.get(),14);
 }
 "#,
     );
     // Do not interpose the host libc's munmap during std's own teardown.
     let program = program
         .replace("#[unsafe(no_mangle)]", "")
-        .replace("munmap(", "production_munmap(");
+        .replace("munmap(", "production_munmap(")
+        .replace("msync(", "production_msync(");
     probe::run(&program);
 }
