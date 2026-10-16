@@ -76,6 +76,13 @@ mod task {
 "#,
     );
     program = program.replace(
+        "extern crate self as mnu_abi;",
+        &format!(
+            "extern crate self as mnu_abi; #[path={:?}] pub mod status;",
+            root.join("core/crates/abi/src/status.rs")
+        ),
+    );
+    program = program.replace(
         "mod task {",
         &format!(
             "mod task {{ #[path={:?}] pub mod deferred;",
@@ -126,24 +133,25 @@ mod flush {
     program.push_str(r#"
 pub fn verify_gate_allocations() {
     use crate::{DENY,ATTEMPTS,Ordering};
+    use crate::status::Error;
     let mut registry=object_io::Registry::new();
     DENY.store(true,Ordering::Relaxed);
-    assert!(matches!(object_io_native::new_lock(),Err(crate::syscall::ENOMEM)));
+    assert!(matches!(object_io_native::new_lock(),Err(Error::ResourceUnavailable)));
     DENY.store(false,Ordering::Relaxed);
     assert_eq!(ATTEMPTS.swap(0,Ordering::Relaxed),1);
     DENY.store(true,Ordering::Relaxed);
-    assert!(matches!(registry.try_get(7,object_io_native::new_lock,crate::syscall::ENOMEM),Err(crate::syscall::ENOMEM)));
+    assert!(matches!(registry.try_get(7,object_io_native::new_lock,Error::ResourceUnavailable),Err(Error::ResourceUnavailable)));
     DENY.store(false,Ordering::Relaxed);
     assert_eq!(ATTEMPTS.swap(0,Ordering::Relaxed),1);
     // Reserve the weak slot, but fail the factory before publishing anything.
-    assert_eq!(registry.try_get(7,||Err(99),crate::syscall::ENOMEM).err(),Some(99));
+    assert_eq!(registry.try_get(7,||Err(Error::AccessDenied),Error::ResourceUnavailable).err(),Some(Error::AccessDenied));
     DENY.store(true,Ordering::Relaxed);
-    assert!(matches!(registry.try_get(7,object_io_native::new_lock,crate::syscall::ENOMEM),Err(crate::syscall::ENOMEM)));
+    assert!(matches!(registry.try_get(7,object_io_native::new_lock,Error::ResourceUnavailable),Err(Error::ResourceUnavailable)));
     DENY.store(false,Ordering::Relaxed);
     assert_eq!(ATTEMPTS.swap(0,Ordering::Relaxed),1);
-    let first=registry.try_get(7,object_io_native::new_lock,crate::syscall::ENOMEM).unwrap();
+    let first=registry.try_get(7,object_io_native::new_lock,Error::ResourceUnavailable).unwrap();
     DENY.store(true,Ordering::Relaxed);
-    let alias=registry.try_get(7,||panic!("live gate must not allocate"),crate::syscall::ENOMEM).unwrap();
+    let alias=registry.try_get(7,||panic!("live gate must not allocate"),Error::ResourceUnavailable).unwrap();
     let owner=first.lock(||panic!("uncontended gate")).unwrap();
     drop(owner);drop(first);drop(alias);
     assert_eq!(ATTEMPTS.load(Ordering::Relaxed),0);

@@ -808,7 +808,10 @@ fn uncertain_external_owner_death_discards_every_mapping_without_querying_storag
         assert_eq!(object.read_at(0, &mut [0; 1]), Err(crate::syscall::EAGAIN));
         crate::without_allocations(extent_transaction::flush);
         assert_eq!(object.read_at(0, &mut [0; 1]), Err(crate::syscall::EIO));
-        assert_eq!(object.write_at(0, b"x"), Err(crate::syscall::EIO));
+        assert_eq!(
+            object.write_at(0, b"x"),
+            Err(mnu_abi::status::Error::BackingFailure.into_raw())
+        );
         assert_eq!(crate::LOWER.lock().unwrap().reads, reads);
         assert_eq!(crate::LOWER.lock().unwrap().bytes.len(), 3000);
         for (index, frame) in physical.iter().enumerate() {

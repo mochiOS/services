@@ -178,7 +178,8 @@ int PROVIDER_MEMORY_UPDATE_MAIN(void) {
         INT64_C(-262140));
   CHECK(native(IMAGE_CLONE, 0, 0, 0, 0, 0, 0) == INT64_C(-262140));
   unsigned char byte;
-  CHECK(native(HANDLE_READ_AT, object, (uintptr_t)&byte, 1, 0, 0, 0) == -5);
+  CHECK(native(HANDLE_READ_AT, object, (uintptr_t)&byte, 1, 0, 0, 0) ==
+        INT64_C(-262140));
   CHECK(native(MEMORY_UNMAP, private_address, 8192, 0, 0, 0, 0) == 0);
   CHECK(native(MEMORY_UNMAP, shared_address, 8192, 0, 0, 0, 0) == 0);
   CHECK(native(HANDLE_CLOSE, object, 0, 0, 0, 0, 0) == 0);

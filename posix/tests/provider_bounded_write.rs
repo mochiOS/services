@@ -83,10 +83,12 @@ fn function<'a>(source: &'a str, name: &str) -> &'a str {
 fn actual_kernel_write_loop_checks_bounds_partial_progress_and_copy_lock_order() {
     let source = include_str!("../../../core/src/syscall/handle.rs");
     let implementation = function(source, "fn provider_write_impl(");
+    let native_status = include_str!("../../../core/crates/abi/src/status.rs");
     let program = format!(
         r#"
 extern crate alloc;
 extern crate self as mnu_abi;
+pub mod status {{ {native_status} }}
 use std::sync::{{Mutex,atomic::{{AtomicBool,Ordering}}}};
 pub mod provider {{
 pub const OP_WRITE:u16=2; pub const OP_WRITE_BOUNDED:u16=12;
@@ -105,9 +107,9 @@ pub mod mem {{pub mod vm_object {{
 use super::super::*;
 pub struct Guard;
 impl Drop for Guard {{fn drop(&mut self){{assert!(LOCKED.swap(false,Ordering::SeqCst));}}}}
-pub fn lock_provider_io(_: &ProviderObject,identity:u64)->Result<Guard,u64>{{
+pub fn lock_provider_io(_: &ProviderObject,identity:u64)->Result<Guard,status::Error>{{
 assert_eq!(identity,77);let s=STATE.lock().unwrap();
-if s.mode==8 || (s.mode==9 && s.calls==1){{return Err((-12i64) as u64)}}
+if s.mode==8 || (s.mode==9 && s.calls==1){{return Err(status::Error::ResourceUnavailable)}}
 drop(s);assert!(!LOCKED.swap(true,Ordering::SeqCst));Ok(Guard)}}
 pub fn update_provider_range(_: &Guard,_start:u64,bytes:&[u8]){{
 assert!(LOCKED.load(Ordering::SeqCst));STATE.lock().unwrap().updated+=bytes.len();
@@ -149,7 +151,7 @@ reset(0,99);assert_eq!(run(0,Some(0)),0);
 for mode in [1,2,4,5,7]{{reset(mode,0);assert_eq!(run(4,Some(5)),EIO);assert_eq!(STATE.lock().unwrap().updated,0);}}
 for mode in [3,6]{{reset(mode,0);assert_eq!(run(8192,Some(10000)),4096);assert_eq!(STATE.lock().unwrap().updated,4096);}}
 reset(0,0);assert_eq!(run(5,None),5);assert_eq!(STATE.lock().unwrap().updated,5);
-reset(8,0);assert_eq!(run(8192,None),(-12i64) as u64);
+reset(8,0);assert_eq!(run(8192,None),status::Error::ResourceUnavailable.into_raw());
 {{let s=STATE.lock().unwrap();assert_eq!((s.calls,s.updated),(0,0));}}
 reset(9,0);assert_eq!(run(8192,None),4096);
 {{let s=STATE.lock().unwrap();assert_eq!((s.calls,s.updated),(1,4096));}}

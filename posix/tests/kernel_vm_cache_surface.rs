@@ -39,6 +39,7 @@ fn actual_vm_object_cache_keys_keep_provider_identity_separate_from_memory_objec
     let mut program = String::from(
         r#"
 extern crate alloc;
+extern crate self as mnu_abi;
 use std::sync::Arc;
 mod interrupt {pub mod spinlock {
     pub struct SpinLock<T>(std::sync::Mutex<T>);
@@ -49,7 +50,7 @@ mod interrupt {pub mod spinlock {
 }}
 mod syscall {pub const ENOMEM:u64=(-12i64) as u64;}
 mod mem {pub mod object_io_native {
-    pub fn new_lock()->Result<crate::object_io::IoLock,u64>{
+    pub fn new_lock()->Result<crate::object_io::IoLock,crate::status::Error>{
         Ok(crate::object_io::IoLock::from_allocated(std::sync::Arc::new(crate::object_io::State::new(|_| {}))))
     }
 }}
@@ -60,6 +61,9 @@ mod shared_memory {
 }
 "#,
     );
+    program.push_str("\npub mod status {\n");
+    program.push_str(include_str!("../../../core/crates/abi/src/status.rs"));
+    program.push_str("\n}\n");
     program.push_str(&format!(
         "#[path={:?}] mod object_io;\n",
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

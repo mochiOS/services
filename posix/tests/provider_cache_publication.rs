@@ -362,10 +362,10 @@ pub mod vm_object;
 mod mem {
     pub(crate) use crate::{byte_extent, frame, paging};
     pub(crate) mod object_io_native {
-        pub fn new_lock() -> Result<crate::object_io::IoLock, u64> {
+        pub fn new_lock() -> Result<crate::object_io::IoLock, mnu_abi::status::Error> {
             crate::GATE_ALLOCS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if crate::FAIL_GATE_ALLOC.load(std::sync::atomic::Ordering::Relaxed) {
-                return Err(crate::syscall::ENOMEM);
+                return Err(mnu_abi::status::Error::ResourceUnavailable);
             }
             let gate = crate::object_io::IoLock::from_allocated(std::sync::Arc::new(
                 crate::object_io::State::new(|_| {}),
@@ -659,7 +659,7 @@ fn production_cache_never_republishes_invalidated_lower_snapshots() {
     survivor.invalidate().unwrap();
     drop(survivor);
     // Once the last owner disappears, a failed replacement is reported as
-    // ENOMEM without publishing an object or a dangling live registration.
+    // native ResourceUnavailable without publishing a dangling registration.
     let owner = Arc::new(task::ProviderObject {
         endpoint_thread_id: 17,
         endpoint_slot: 2,
@@ -667,7 +667,12 @@ fn production_cache_never_republishes_invalidated_lower_snapshots() {
     });
     assert!(matches!(
         vm_object::VmObject::provider(owner.clone(), 93),
-        Err(syscall::ENOMEM)
+        Err(error) if mnu_abi::status::Error::from_raw(error)
+            == Some(mnu_abi::status::Error::ResourceUnavailable)
+    ));
+    assert!(matches!(
+        vm_object::lock_provider_io(&owner, 93),
+        Err(mnu_abi::status::Error::ResourceUnavailable)
     ));
     FAIL_GATE_ALLOC.store(false, std::sync::atomic::Ordering::Relaxed);
     let retry = vm_object::VmObject::provider(owner, 93).unwrap();
@@ -1204,10 +1209,20 @@ fn unavailable_cached_backing_cannot_lose_failure_when_original_owners_drop() {
         Err(vm_object::VmPageError::Operation(syscall::EIO))
     ));
     assert_eq!(alias.read_at(0, &mut [0; 8]), Err(syscall::EIO));
-    assert_eq!(alias.write_at(0, b"new"), Err(syscall::EIO));
+    assert!(matches!(
+        without_allocations(|| vm_object::lock_provider_io(&provider, 0xf00d_531)),
+        Err(mnu_abi::status::Error::BackingFailure)
+    ));
+    assert_eq!(
+        alias.write_at(0, b"new"),
+        Err(mnu_abi::status::Error::BackingFailure.into_raw())
+    );
     assert_eq!(alias.stage_write_at(0, b"new"), Err(syscall::EIO));
     assert_eq!(alias.mark_page_dirty(0), Err(syscall::EIO));
-    assert_eq!(alias.flush(), Err(syscall::EIO));
+    assert_eq!(
+        alias.flush(),
+        Err(mnu_abi::status::Error::BackingFailure.into_raw())
+    );
     let syncs = SYNC_CALLS.with(Cell::get);
     assert_eq!(alias.flush_unmapped_range(0, 4096), Ok(()));
     assert_eq!(SYNC_CALLS.with(Cell::get), syncs);
@@ -1241,10 +1256,15 @@ fn unmap_writeback_does_not_hide_io_errors_on_an_available_backing() {
     let _test = TEST_LOCK.lock().unwrap();
     reset_lower(b"old");
     let object = provider_object();
-    SYNC_ERROR.with(|error| error.set(Some(syscall::EIO)));
-    let result = object.flush_unmapped_range(0, 4096);
+    for failure in [
+        syscall::EIO,
+        mnu_abi::status::Error::BackingFailure.into_raw(),
+        mnu_abi::status::Error::NotReady.into_raw(),
+    ] {
+        SYNC_ERROR.with(|error| error.set(Some(failure)));
+        assert_eq!(object.flush_unmapped_range(0, 4096), Err(failure));
+    }
     SYNC_ERROR.with(|error| error.set(None));
-    assert_eq!(result, Err(syscall::EIO));
     assert_eq!(object.flush_unmapped_range(0, 4096), Ok(()));
     assert_eq!(object.read_at(0, &mut [0; 3]), Ok(3));
     object.invalidate().unwrap();
