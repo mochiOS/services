@@ -1,7 +1,24 @@
 extern crate alloc;
 use mnu_abi::process_image::{self as wire, ContextUpdate as U};
+use mnu_abi::status::Error;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
+
+#[test]
+fn native_context_probe_distinguishes_mechanism_status_from_c_errno() {
+    let source = include_str!("native_image_context.h");
+    for (name, error) in [
+        ("EI_NATIVE_NOT_FOUND", Error::NotFound),
+        ("EI_NATIVE_ACCESS_DENIED", Error::AccessDenied),
+        ("EI_NATIVE_RESOURCE_UNAVAILABLE", Error::ResourceUnavailable),
+    ] {
+        assert!(source.contains(&format!(
+            "#define {name} INT64_C({})",
+            error.into_raw() as i64
+        )));
+    }
+    assert!(source.contains("errno == ENOMEM"));
+}
 
 thread_local! { static FAIL_AFTER: Cell<Option<usize>> = const { Cell::new(None) }; }
 struct FaultAllocator;
@@ -181,18 +198,69 @@ fn preparation_is_private_and_preserves_unmentioned_keys_and_handle_aliases() {
 }
 
 #[test]
+fn invalid_native_selectors_and_operations_fail_before_allocating_or_editing_context() {
+    let mut live = LaunchContext::new_boxed();
+    assert!(live.set(1, handle(3)) && live.set_value(1, 44));
+    for invalid in [0, 1u64 << 32, (1u64 << 32) | 4, u64::MAX] {
+        FAIL_AFTER.with(|slot| slot.set(Some(0)));
+        let result = live.patched([update(U::SET_HANDLE, 1, invalid)].into_iter(), |_| true);
+        let remaining = FAIL_AFTER.with(|slot| slot.replace(None));
+        assert!(matches!(result, Err(Error::InvalidArgument)));
+        assert_eq!(remaining, Some(0), "validation must precede reservation");
+        assert_eq!(live.get(1), Some(handle(3)));
+        assert_eq!(live.value(1), Some(44));
+    }
+    for kind in [0, u32::MAX] {
+        FAIL_AFTER.with(|slot| slot.set(Some(0)));
+        let result = live.patched([update(kind, 1, 0)].into_iter(), |_| true);
+        let remaining = FAIL_AFTER.with(|slot| slot.replace(None));
+        assert!(matches!(result, Err(Error::InvalidArgument)));
+        assert_eq!(remaining, Some(0));
+        assert_eq!(live.get(1), Some(handle(3)));
+        assert_eq!(live.value(1), Some(44));
+    }
+}
+
+#[test]
+fn prepared_commit_is_allocation_free_and_keeps_opaque_scalar_bits() {
+    let mut live = LaunchContext::new_boxed();
+    assert!(live.set(1, handle(3)) && live.set_value(1, 44));
+    let prepared = live
+        .patched(
+            [
+                update(U::REMOVE_HANDLE, 1, 0),
+                update(U::SET_HANDLE, u64::MAX, 4),
+                update(U::SET_VALUE, u64::MAX, Error::NotFound.into_raw()),
+            ]
+            .into_iter(),
+            |handle| handle.raw() == 4,
+        )
+        .unwrap();
+    assert_eq!(live.get(u64::MAX), None);
+    assert_eq!(live.value(u64::MAX), None);
+    FAIL_AFTER.with(|slot| slot.set(Some(0)));
+    *live = prepared;
+    let remaining = FAIL_AFTER.with(|slot| slot.replace(None));
+    assert_eq!(remaining, Some(0), "commit must not reserve or allocate");
+    assert_eq!(live.get(1), None);
+    assert_eq!(live.value(1), Some(44));
+    assert_eq!(live.get(u64::MAX), Some(handle(4)));
+    assert_eq!(live.value(u64::MAX), Some(Error::NotFound.into_raw()));
+}
+
+#[test]
 fn invalid_handles_capacity_and_each_allocation_failure_leave_live_context_intact() {
     let mut live = LaunchContext::new_boxed();
     assert!(live.set(1, handle(3)) && live.set_value(1, 44));
     let edits = [update(U::SET_HANDLE, 2, 4), update(U::SET_VALUE, 2, 55)];
     assert!(matches!(
         live.patched(edits.into_iter(), |_| false),
-        Err(mnu_abi::EBADF)
+        Err(Error::InvalidArgument)
     ));
     for fail_after in [0, 1] {
         FAIL_AFTER.with(|slot| slot.set(Some(fail_after)));
         let prepared = live.patched(edits.into_iter(), |_| true);
-        assert!(matches!(prepared, Err(mnu_abi::ENOMEM)));
+        assert!(matches!(prepared, Err(Error::ResourceUnavailable)));
         assert_eq!(live.get(1), Some(handle(3)));
         assert_eq!(live.get(2), None);
         assert_eq!(live.value(1), Some(44));
@@ -204,7 +272,7 @@ fn invalid_handles_capacity_and_each_allocation_failure_leave_live_context_intac
     }
     assert!(matches!(
         live.patched([update(U::SET_VALUE, 999, 1)].into_iter(), |_| true),
-        Err(mnu_abi::ENOSPC)
+        Err(Error::ResourceUnavailable)
     ));
     // Serialized additions may precede removals, even at full capacity.
     let prepared = live
@@ -221,7 +289,7 @@ fn invalid_handles_capacity_and_each_allocation_failure_leave_live_context_intac
     }
     assert!(matches!(
         live.patched([update(U::SET_HANDLE, 999, 4)].into_iter(), |_| true),
-        Err(mnu_abi::ENOSPC)
+        Err(Error::ResourceUnavailable)
     ));
     let prepared = live
         .patched(

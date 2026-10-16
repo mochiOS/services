@@ -15,6 +15,9 @@ static int64_t ei_context_native(uint64_t number, uint64_t a, uint64_t b,
 #define EI_OPAQUE_VALUE UINT64_C(0x696d675f63747831)
 #define EI_OPAQUE_HANDLE UINT64_C(0x696d675f63747832)
 #define EI_SENTINEL UINT64_C(0xfedcba9876543210)
+#define EI_NATIVE_NOT_FOUND INT64_C(-262135)
+#define EI_NATIVE_ACCESS_DENIED INT64_C(-262138)
+#define EI_NATIVE_RESOURCE_UNAVAILABLE INT64_C(-262141)
 
 static int ei_context_seed(int closed, uint64_t *reference) {
   int64_t memory = ei_context_native(671, 4096, 0, 0);
@@ -47,8 +50,8 @@ static int ei_context_unchanged(int closed, uint64_t reference) {
 static int ei_context_after_image(int closed) {
   uint64_t value = 0;
   CHECK(ei_context_native(639, EI_FD_METADATA(closed), (uintptr_t)&value, 0) ==
-        -9);
-  CHECK(ei_context_native(628, EI_FD_HANDLE(closed), 0, 0) == -9);
+        EI_NATIVE_NOT_FOUND);
+  CHECK(ei_context_native(628, EI_FD_HANDLE(closed), 0, 0) == EI_NATIVE_NOT_FOUND);
   CHECK(ei_context_native(639, EI_OPAQUE_VALUE, (uintptr_t)&value, 0) == 0 &&
         value == 987);
   int64_t reference = ei_context_native(628, EI_OPAQUE_HANDLE, 0, 0);
@@ -59,7 +62,7 @@ static int ei_context_after_image(int closed) {
   CHECK(ei_context_native(673, reference, (uintptr_t)bytes, 3) == 3 &&
         !memcmp(bytes, "ctx", 3));
   CHECK(ei_context_native(674, reference, (uintptr_t) "bad", 3) == -13);
-  CHECK(ei_context_native(627, reference, 1, 0) == -13);
+  CHECK(ei_context_native(627, reference, 1, 0) == EI_NATIVE_ACCESS_DENIED);
   CHECK(ei_context_native(626, reference, 0, 0) == 0);
   return 0;
 }
@@ -70,7 +73,7 @@ static int ei_context_capacity_failure(int closed, uint64_t reference,
   unsigned count;
   for (count = 0; count < 256; ++count) {
     int64_t result = ei_context_native(662, prefix + count, 500 + count, 0);
-    if (result == -28)
+    if (result == EI_NATIVE_RESOURCE_UNAVAILABLE)
       break;
     CHECK(result == 0);
   }
@@ -79,7 +82,7 @@ static int ei_context_capacity_failure(int closed, uint64_t reference,
   errno = 0;
   CHECK(execve("/system/services/compositor.service", arguments, environment) ==
             -1 &&
-        errno == ENOSPC);
+        errno == ENOMEM);
   CHECK(ei_handles() == handles);
   CHECK(ei_context_unchanged(closed, reference) == 0);
   unsigned before = atomic_load_explicit(&ei_counter, memory_order_acquire);
