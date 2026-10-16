@@ -21,7 +21,6 @@ mod task {{
     pub struct MemoryRegion(pub u64,pub u64);
     impl MemoryRegion {{ pub fn start(&self)->u64{{self.0}} pub fn end(&self)->Option<u64>{{Some(self.1)}} }}
 }}
-mod syscall {{ pub mod types {{pub const EFAULT:u64=(-14i64)as u64;pub const ENOMEM:u64=(-12i64)as u64;}} }}
 mod mem {{
     pub(crate) use crate::mapping_usage;
     pub mod paging {{
@@ -35,25 +34,31 @@ mod mem {{
 }}
 "#
     );
+    program.push_str("mod mnu_abi {pub mod status {\n");
+    program.push_str(include_str!("../../../core/crates/abi/src/status.rs"));
+    program.push_str("}}\n");
     program.push_str(&source[start..end]);
     program.push_str(
         r#"
 fn main(){
     use task::MemoryRegion;
-    use syscall::types::{EFAULT,ENOMEM};
+    use mnu_abi::status::Error;
     // Eager image, one faulted BSS page, stack, TLS and two initial heap pages.
     // The BSS reservation must be included, but its retained page only once.
     *PAGES.lock().unwrap()=vec![0x400000,0x600000,0x800000,0x900000,0xa00000,0xa01000];
     let reservations=[MemoryRegion(0x600000,0x604000)];
     assert_eq!(check_image_byte_ceiling(2,&reservations,9*4096),Ok(()));
-    assert_eq!(check_image_byte_ceiling(2,&reservations,9*4096-1),Err(ENOMEM));
-    assert_eq!(check_image_byte_ceiling(2,&reservations,0),Err(ENOMEM));
-    assert_eq!(check_image_byte_ceiling(2,&[MemoryRegion(1,4096)],1<<30),Err(EFAULT));
+    assert_eq!(check_image_byte_ceiling(2,&reservations,9*4096-1),Err(Error::ResourceUnavailable));
+    assert_eq!(check_image_byte_ceiling(2,&reservations,0),Err(Error::ResourceUnavailable));
+    assert_eq!(check_image_byte_ceiling(2,&[MemoryRegion(1,4096)],1<<30),Err(Error::InvalidAddress));
+    assert_eq!(check_image_byte_ceiling(2,&[MemoryRegion(0x600000,0x604000),MemoryRegion(0x601000,0x602000)],1<<30),Err(Error::InvalidAddress));
     *FAIL.lock().unwrap()=true;
-    assert_eq!(check_image_byte_ceiling(2,&reservations,1<<30),Err(EFAULT));
+    assert_eq!(check_image_byte_ceiling(2,&reservations,1<<30),Err(Error::BackingFailure));
     *READS.lock().unwrap()=0;
     assert_eq!(check_image_byte_ceiling(2,&reservations,u64::MAX),Ok(()));
     assert_eq!(*READS.lock().unwrap(),0);
+    *FAIL.lock().unwrap()=false;PAGES.lock().unwrap().clear();
+    assert_eq!(check_image_byte_ceiling(2,&[],0),Ok(()));
 }
 "#,
     );
