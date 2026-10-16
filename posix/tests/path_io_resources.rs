@@ -25,6 +25,8 @@ static RETIRED: AtomicU32 = AtomicU32::new(0);
 static CALLS: AtomicU32 = AtomicU32::new(0);
 static CASE: AtomicU32 = AtomicU32::new(0);
 static INPUT: AtomicU64 = AtomicU64::new(0);
+static SECOND_INPUT: AtomicU64 = AtomicU64::new(0);
+static DROPS: AtomicU32 = AtomicU32::new(0);
 static MUTATION: Mutex<Option<(u32, u32, u32, u32)>> = Mutex::new(None);
 struct ThreadControl {
     callback_resources: callback_resources::Chain,
@@ -49,6 +51,7 @@ mod fd_lease {
         fn drop(&mut self) {
             assert_ne!(CONTROL.native.load(Ordering::Relaxed), 0);
             let before = PINS.fetch_sub(1, Ordering::Relaxed);
+            DROPS.fetch_add(1, Ordering::Relaxed);
             assert_ne!(before, 0);
             if before == 1 && RETIRED.load(Ordering::Relaxed) != 0 {
                 CLOSED.fetch_add(1, Ordering::Relaxed);
@@ -88,6 +91,56 @@ fn map_posix_client_error(error: c_int) -> c_int {
     error
 }
 impl Client {
+    fn paired(&self, pins: u32) -> Result<(), c_int> {
+        assert_eq!(PINS.load(Ordering::Relaxed), pins);
+        assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
+        assert!(!CONTROL.callback_resources.is_empty());
+        CALLS.fetch_add(1, Ordering::Relaxed);
+        match CASE.load(Ordering::Relaxed) {
+            1 => return Err(13),
+            2 => {
+                RETIRED.store(1, Ordering::Relaxed);
+                assert_eq!(CLOSED.load(Ordering::Relaxed), 0);
+            }
+            3 => unsafe {
+                (INPUT.load(Ordering::Relaxed) as *mut u8).write(b'X');
+                (SECOND_INPUT.load(Ordering::Relaxed) as *mut u8).write(b'Y');
+            },
+            _ => {}
+        }
+        Ok(())
+    }
+    fn rename_at(
+        &self,
+        old_base: StatAtBase<u32>,
+        old: &str,
+        new_base: StatAtBase<u32>,
+        new: &str,
+    ) -> Result<(), c_int> {
+        self.paired(2)?;
+        assert_eq!((old, new), ("target", "next"));
+        assert_eq!(old_base, new_base);
+        *MUTATION.lock().unwrap() = Some((4, 0, 0, 0));
+        Ok(())
+    }
+    fn link_at(
+        &self,
+        old_base: StatAtBase<u32>,
+        old: &str,
+        new_base: StatAtBase<u32>,
+        new: &str,
+        flags: u32,
+    ) -> Result<(), c_int> {
+        self.rename_at(old_base, old, new_base, new)?;
+        *MUTATION.lock().unwrap() = Some((5, flags, 0, 0));
+        Ok(())
+    }
+    fn symlink_at(&self, target: &str, _: StatAtBase<u32>, path: &str) -> Result<(), c_int> {
+        self.paired(1)?;
+        assert_eq!((target, path), ("../literal", "next"));
+        *MUTATION.lock().unwrap() = Some((6, 0, 0, 0));
+        Ok(())
+    }
     fn mutation(
         &self,
         base: StatAtBase<u32>,
@@ -162,7 +215,73 @@ fn reset() {
     CLOSED.store(0, Ordering::Relaxed);
     RETIRED.store(0, Ordering::Relaxed);
     CALLS.store(0, Ordering::Relaxed);
+    DROPS.store(0, Ordering::Relaxed);
 }
+#[test]
+fn paired_operations_capture_both_inputs_and_retire_both_borrows_on_rpc_escape_paths() {
+    let _serial = SERIAL.lock().unwrap();
+    for operation in 0..3 {
+        for case in 0..4 {
+            reset();
+            CASE.store(case, Ordering::Relaxed);
+            *MUTATION.lock().unwrap() = None;
+            let mut old = if operation == 2 {
+                b"../literal\0".to_vec()
+            } else {
+                b"target\0".to_vec()
+            };
+            let mut new = *b"next\0";
+            INPUT.store(old.as_mut_ptr() as u64, Ordering::Relaxed);
+            SECOND_INPUT.store(new.as_mut_ptr() as u64, Ordering::Relaxed);
+            let result = match operation {
+                0 => implementation::rename(7, old.as_ptr().cast(), 7, new.as_ptr().cast()),
+                1 => implementation::link(7, old.as_ptr().cast(), 7, new.as_ptr().cast(), 1),
+                _ => implementation::symlink(old.as_ptr().cast(), 7, new.as_ptr().cast()),
+            };
+            assert_eq!(result, if case == 1 { Err(13) } else { Ok(()) });
+            assert_eq!(
+                *MUTATION.lock().unwrap(),
+                if case == 1 {
+                    None
+                } else {
+                    Some((4 + operation, u32::from(operation == 1), 0, 0))
+                }
+            );
+            assert_eq!(
+                DROPS.load(Ordering::Relaxed),
+                if operation == 2 { 1 } else { 2 }
+            );
+            assert_eq!(PINS.load(Ordering::Relaxed), 0);
+            assert_eq!(CLOSED.load(Ordering::Relaxed), u32::from(case == 2));
+            assert_eq!(CALLS.load(Ordering::Relaxed), 1);
+            assert!(CONTROL.callback_resources.is_empty());
+            assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
+        }
+    }
+}
+
+#[test]
+fn second_input_failures_release_the_first_directory_before_any_rpc() {
+    let _serial = SERIAL.lock().unwrap();
+    for (fd, path, error) in [
+        (7, c"".as_ptr(), ENOENT),
+        (7, std::ptr::null(), EFAULT),
+        (7, b"\xff\0".as_ptr().cast(), EINVAL),
+        (-9, c"next".as_ptr(), EBADF),
+    ] {
+        reset();
+        assert_eq!(
+            implementation::pair(7, c"target".as_ptr(), fd, path, |_, _, _, _| Ok(1)),
+            Err(error)
+        );
+        assert_eq!(DROPS.load(Ordering::Relaxed), 1);
+        assert_eq!(PINS.load(Ordering::Relaxed), 0);
+        assert_eq!(CALLS.load(Ordering::Relaxed), 0);
+        assert!(CONTROL.callback_resources.is_empty());
+        assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
+    }
+}
+
 #[test]
 fn mutations_keep_arguments_and_directory_authority_through_all_rpc_outcomes() {
     let _serial = SERIAL.lock().unwrap();
