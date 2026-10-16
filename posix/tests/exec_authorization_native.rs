@@ -60,7 +60,7 @@ pub mod capability {
     }
     pub struct CapabilitySet(pub u64);
     impl CapabilitySet {
-        pub fn empty()->Self{Self(0)}pub fn insert(&mut self,c:Capability){self.0|=c.bit();}
+        pub fn empty()->Self{Self(0)}pub fn try_insert(&mut self,c:Capability)->Result<(),crate::Error>{self.0|=c.bit();Ok(())}
         pub fn contains(&self,c:Capability)->bool{self.0&c.bit()!=0}pub fn is_subset_of(&self,other:&Self)->bool{self.0&!other.0==0}
     }
     pub struct KernelAuthoritySet(pub u64);
