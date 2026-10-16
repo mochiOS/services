@@ -32,13 +32,28 @@ fn production_region_preserves_authority_offsets_and_access_when_sliced() {
          mod mem {{ pub mod vm_object {{ #[derive(Debug)] pub struct VmObject; }} }}\n\
          mod mnu_abi {{ pub const MEMORY_ACCESS_READ:u64={};\n\
          pub const MEMORY_ACCESS_WRITE:u64={}; pub const MEMORY_ACCESS_EXECUTE:u64={};\n\
-         pub const MEMORY_ACCESS_ALL:u64={}; pub const MEMORY_MAP_SHARED:u64={}; }}\n",
+         pub const MEMORY_ACCESS_ALL:u64={}; pub const MEMORY_MAP_SHARED:u64={}; pub mod status {{\n{status}\n}} }}\n",
         mnu_abi::MEMORY_ACCESS_READ,
         mnu_abi::MEMORY_ACCESS_WRITE,
         mnu_abi::MEMORY_ACCESS_EXECUTE,
         mnu_abi::MEMORY_ACCESS_ALL,
         mnu_abi::MEMORY_MAP_SHARED,
+        status = include_str!("../../../core/crates/abi/src/status.rs"),
     );
+    probe.push_str(r#"
+use std::{cell::Cell,sync::atomic::{AtomicUsize,Ordering}};
+thread_local!{static FAIL_AFTER:Cell<Option<usize>>=const{Cell::new(None)};}
+static LIVE:AtomicUsize=AtomicUsize::new(0);
+struct Allocator;
+unsafe impl std::alloc::GlobalAlloc for Allocator {
+    unsafe fn alloc(&self,layout:std::alloc::Layout)->*mut u8 {
+        if FAIL_AFTER.with(|s|match s.get(){Some(0)=>{s.set(None);true},Some(n)=>{s.set(Some(n-1));false},None=>false}){return std::ptr::null_mut();}
+        let p=unsafe{std::alloc::System.alloc(layout)};if !p.is_null(){LIVE.fetch_add(1,Ordering::Relaxed);}p
+    }
+    unsafe fn dealloc(&self,p:*mut u8,layout:std::alloc::Layout){LIVE.fetch_sub(1,Ordering::Relaxed);unsafe{std::alloc::System.dealloc(p,layout)}}
+}
+#[global_allocator]static ALLOCATOR:Allocator=Allocator;
+"#);
     probe.push_str(&source[definitions_start..definitions_end]);
     probe.push_str(&source[implementation_start..implementation_end]);
     // Also compile the production two-phase removal planner. Metadata remains
@@ -72,6 +87,14 @@ fn main() {
     assert!(!region.allows_write_at(0x2000));
     assert!(region.allows_write_at(0x3000));
     for page in 0..4 { region.mark_dirty_page(page); }
+    for allocation in 0..2 {
+        let pins=Arc::strong_count(&object);let live=LIVE.load(Ordering::Relaxed);FAIL_AFTER.set(Some(allocation));
+        assert_eq!(region.try_clone().err(),Some(mnu_abi::status::Error::ResourceUnavailable));
+        assert_eq!(FAIL_AFTER.get(),None);assert_eq!(Arc::strong_count(&object),pins);assert_eq!(LIVE.load(Ordering::Relaxed),live);
+    }
+    let mut copied=region.try_clone().unwrap();assert_eq!(copied.backing().file_offset(),8192);assert!(Arc::ptr_eq(copied.backing().file_object().unwrap(),&object));
+    assert_eq!(copied.dirty_pages(),region.dirty_pages());assert_eq!(copied.max_access,region.max_access);assert_eq!(copied.options,region.options);assert!(!copied.allows_write_at(0x2000));
+    copied.clear_dirty_pages(0,4);assert_eq!(region.dirty_pages(),&[0,1,2,3]);drop(copied);
     let mut slice = region.slice(0x2000, 0x4000).unwrap();
     assert_eq!(slice.start(), 0x2000);
     assert_eq!(slice.len(), 0x2000);
@@ -96,8 +119,19 @@ fn main() {
         MEMORY_ACCESS_READ | MEMORY_ACCESS_WRITE, 0, object, 0, true, false, MEMORY_ACCESS_ALL);
     assert!(!private.is_shared());
     assert!(!private.backing().file_shared());
-    let anonymous = MemoryRegion::anonymous(0x1000, 0x2000, MEMORY_ACCESS_WRITE, MEMORY_MAP_SHARED, true, true);
+    let mut anonymous = MemoryRegion::anonymous(0x1000, 0x2000, MEMORY_ACCESS_WRITE, MEMORY_MAP_SHARED, true, true);
     assert!(anonymous.is_shared());
+    if let MemoryBacking::Anonymous{data,..}=&mut anonymous.backing {*data=vec![7;8192];}
+    assert!(anonymous.set_access(0x1000,4096,MEMORY_ACCESS_READ));
+    for page in [0,1,17] {anonymous.mark_dirty_page(page);}
+    for allocation in 0..3 {
+        let live=LIVE.load(Ordering::Relaxed);FAIL_AFTER.set(Some(allocation));
+        assert_eq!(anonymous.try_clone().err(),Some(mnu_abi::status::Error::ResourceUnavailable));assert_eq!(FAIL_AFTER.get(),None);assert_eq!(LIVE.load(Ordering::Relaxed),live);
+    }
+    let mut copied=anonymous.try_clone().unwrap();assert_eq!(copied.dirty_pages(),&[0,1,17]);assert_eq!(copied.access_ranges.len(),anonymous.access_ranges.len());
+    for (a,b) in copied.access_ranges.iter().zip(&anonymous.access_ranges){assert_eq!((a.start,a.end,a.access),(b.start,b.end,b.access));}
+    if let MemoryBacking::Anonymous{data,writable,shared}=&mut copied.backing {assert_eq!(data,&vec![7;8192]);assert!(*writable);assert!(*shared);data[0]=9;}
+    if let MemoryBacking::Anonymous{data,..}=&anonymous.backing {assert_eq!(data[0],7);}
     let process = removal::Process { memory_regions: vec![region.clone()] };
     let (retained, removed) = process.prepare_remove_memory_range(0x2000, 0x2000).unwrap();
     assert_eq!(process.memory_regions.len(), 1);

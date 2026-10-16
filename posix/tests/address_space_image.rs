@@ -3,6 +3,37 @@ extern crate alloc;
 
 use std::sync::Arc;
 
+thread_local! {
+    static FAIL_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static FAIL_REGION: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+struct FaultAllocator;
+unsafe impl std::alloc::GlobalAlloc for FaultAllocator {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        let fail = FAIL_AFTER.with(|state| match state.get() {
+            Some(0) => {
+                state.set(None);
+                true
+            }
+            Some(count) => {
+                state.set(Some(count - 1));
+                false
+            }
+            None => false,
+        });
+        if fail {
+            std::ptr::null_mut()
+        } else {
+            unsafe { std::alloc::System.alloc(layout) }
+        }
+    }
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
+        unsafe { std::alloc::System.dealloc(pointer, layout) }
+    }
+}
+#[global_allocator]
+static ALLOCATOR: FaultAllocator = FaultAllocator;
+
 mod vm_object {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum ObjectKey {
@@ -62,6 +93,13 @@ mod task {
         pub object: Option<Arc<VmObject>>,
     }
     impl MemoryRegion {
+        pub fn try_clone(&self) -> Result<Self, mnu_abi::status::Error> {
+            if crate::FAIL_REGION.with(std::cell::Cell::get) == Some(self.start) {
+                Err(mnu_abi::status::Error::ResourceUnavailable)
+            } else {
+                Ok(self.clone())
+            }
+        }
         pub fn start(&self) -> u64 {
             self.start
         }
@@ -573,6 +611,33 @@ fn occupied_target_is_unchanged_and_caller_retains_image() {
             vec![crate::paging::cloned_table()]
         )
     });
+}
+
+#[test]
+fn capture_storage_failures_drop_partial_metadata_before_cow() {
+    for allocation in 0..2 {
+        let source = source();
+        let pins = Arc::strong_count(&source.regions[0].backing);
+        FAIL_AFTER.with(|state| state.set(Some(allocation)));
+        let result = address_space::CloneSource::capture(&source);
+        assert_eq!(FAIL_AFTER.with(std::cell::Cell::get), None);
+        assert!(matches!(result, Err(address_space::CloneError::Allocation)));
+        assert_eq!(Arc::strong_count(&source.regions[0].backing), pins);
+        paging::STATE.with(|state| assert_eq!(state.borrow().calls, 0));
+    }
+    let source = source();
+    let pins = Arc::strong_count(&source.regions[0].backing);
+    FAIL_REGION.with(|state| state.set(Some(source.regions[1].start)));
+    let result = address_space::CloneSource::capture(&source);
+    FAIL_REGION.with(|state| state.set(None));
+    assert!(matches!(
+        result,
+        Err(address_space::CloneError::Backing(
+            mnu_abi::status::Error::ResourceUnavailable
+        ))
+    ));
+    assert_eq!(Arc::strong_count(&source.regions[0].backing), pins);
+    paging::STATE.with(|state| assert_eq!(state.borrow().calls, 0));
 }
 
 #[test]
