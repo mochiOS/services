@@ -8,6 +8,7 @@
 #include <sys/wait.h>
 
 enum { MEMORY_COPY = 699, COPY_LIMIT = 4096 };
+#define NATIVE_LIMIT_EXCEEDED INT64_C(-262143)
 static int64_t copy_memory(void *destination, const void *source,
                            uint64_t length) {
   uint64_t result = MEMORY_COPY;
@@ -35,7 +36,8 @@ int main(void) {
   inaccessible = pages + COPY_LIMIT * 2;
   CHECK(mprotect(inaccessible, COPY_LIMIT, PROT_NONE) == 0);
   CHECK(copy_memory(NULL, NULL, 0) == 0);
-  CHECK(copy_memory(pages, pages, COPY_LIMIT + 1) == -EINVAL);
+  CHECK(copy_memory(pages, pages, COPY_LIMIT + 1) == NATIVE_LIMIT_EXCEEDED);
+  CHECK(copy_memory(NULL, NULL, UINT64_MAX) == NATIVE_LIMIT_EXCEEDED);
   for (unsigned index = 0; index < COPY_LIMIT; ++index)
     pages[index] = index;
   CHECK(copy_memory(pages + COPY_LIMIT, pages, COPY_LIMIT) == COPY_LIMIT);

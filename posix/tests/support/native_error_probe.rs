@@ -11,7 +11,11 @@ pub fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
 pub fn program() -> String {
     let syscall = include_str!("../../../../user/crates/syscall/src/lib.rs");
     let mut program =
-        String::from("#![allow(dead_code)]\nextern crate alloc;\nmod mochi_user_syscall {\n");
+        String::from("#![allow(dead_code)]\nextern crate alloc;\nmod mnu_abi {pub mod status {\n");
+    program.push_str(include_str!("../../../../core/crates/abi/src/status.rs"));
+    program.push_str(
+        "}\n}\nmod mochi_user_syscall {\nuse crate::mnu_abi::status::Error as NativeError;\n",
+    );
     program.push_str(between(
         syscall,
         "#[derive(Clone, Copy, Debug, PartialEq, Eq)]",

@@ -5,9 +5,6 @@ use std::cell::RefCell;
 #[path = "../../../core/src/syscall/memory_copy.rs"]
 mod implementation;
 
-mod types {
-    pub const EINVAL: u64 = (-22i64) as u64;
-}
 const EFAULT: u64 = (-14i64) as u64;
 #[derive(Default)]
 struct State {
@@ -58,7 +55,10 @@ fn zero_length_and_oversized_operations_touch_neither_pointer() {
     reset();
     assert_eq!(implementation::copy(u64::MAX, u64::MAX, 0), 0);
     for length in [MAX_BYTES as u64 + 1, u64::MAX] {
-        assert_eq!(implementation::copy(0, 0, length), types::EINVAL);
+        assert_eq!(
+            implementation::copy(0, 0, length),
+            mnu_abi::status::Error::LimitExceeded.into_raw()
+        );
     }
     STATE.with_borrow(|state| assert_eq!((state.reads, state.writes), (0, 0)));
 }
@@ -111,6 +111,10 @@ fn probe_and_dispatch_use_the_same_published_native_abi() {
         mnu_abi::SyscallNumber::MemoryCopy as u64
     )));
     assert!(probe.contains(&format!("COPY_LIMIT = {MAX_BYTES}")));
+    assert!(probe.contains(&format!(
+        "NATIVE_LIMIT_EXCEEDED INT64_C({})",
+        mnu_abi::status::Error::LimitExceeded.into_raw() as i64
+    )));
     let dispatch = include_str!("../../../core/src/syscall/mod.rs");
     assert!(
         dispatch
