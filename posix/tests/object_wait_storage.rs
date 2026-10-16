@@ -57,6 +57,13 @@ thread_local! {
     static READY:Cell<bool>=const{Cell::new(false)};
     static UPCALL:Cell<bool>=const{Cell::new(false)};
     static COPY_FAILURE:Cell<bool>=const{Cell::new(false)};
+    static READ_ERROR:Cell<Option<Error>>=const{Cell::new(None)};
+    static WRITE_ERROR:Cell<Option<Error>>=const{Cell::new(None)};
+    static CURRENT:Cell<bool>=const{Cell::new(true)};
+    static GUARD_COPIES:Cell<usize>=const{Cell::new(0)};
+    static GUARD_EXPECTED:Cell<u64>=const{Cell::new(5)};
+    static GUARD_VALUE:Cell<u64>=const{Cell::new(5)};
+    static GUARD_READS:Cell<usize>=const{Cell::new(0)};
     static STAGE:Cell<usize>=const{Cell::new(0)};
     static FAIL_STAGE:Cell<usize>=const{Cell::new(0)};
     static SCANS:Cell<usize>=const{Cell::new(0)};
@@ -85,22 +92,34 @@ mod task {
     pub type ThreadId=u64;
     pub type ProcessId=u64;
     pub struct FileHandle;
-    pub fn current_thread_id()->Option<u64>{Some(99)}
+    pub fn current_thread_id()->Option<u64>{crate::CURRENT.get().then_some(99)}
     pub fn register_process_exit_waiter(_:u64,_:u64)->bool{if !crate::stage(){return false;}crate::add(1);true}
     pub fn remove_process_exit_waiters(_:u64){crate::remove(1)}
     pub fn sleep_thread_unless_woken(_:u64)->bool{crate::SLEEPS.set(crate::SLEEPS.get()+1);true}
     pub fn yield_now(){crate::READY.set(true)}
 }
 mod syscall {
-    pub fn validate_user_ptr(_:u64,_:u64)->bool{true}
-    pub fn copy_from_user(_:u64,bytes:&mut[u8])->Result<(),u64> {
+    pub fn copy_from_user_native(pointer:u64,bytes:&mut[u8])->Result<(),crate::Error> {
+        if pointer==2 { crate::GUARD_COPIES.set(crate::GUARD_COPIES.get()+1); }
+        if let Some(error)=crate::READ_ERROR.get(){return Err(error);}
+        if pointer==0 || pointer.checked_add(bytes.len()as u64).is_none(){return Err(crate::Error::InvalidAddress);}
+        if pointer==2 {
+            assert_eq!(bytes.len(),16);
+            bytes[..8].copy_from_slice(&8u64.to_ne_bytes());
+            bytes[8..].copy_from_slice(&crate::GUARD_EXPECTED.get().to_ne_bytes());
+            return Ok(());
+        }
         let items:[crate::HandleWaitItem;5]=std::array::from_fn(|index|crate::HandleWaitItem{
             handle:index as u32+1,interests:1,..Default::default()
         });
         let source=unsafe{std::slice::from_raw_parts(items.as_ptr().cast::<u8>(),std::mem::size_of_val(&items))};
         bytes.copy_from_slice(&source[..bytes.len()]);Ok(())
     }
-    pub fn copy_to_user(_:u64,_:&[u8])->Result<(),u64>{if crate::COPY_FAILURE.get(){Err(crate::EFAULT)}else{Ok(())}}
+    pub fn copy_to_user_native(_:u64,bytes:&[u8])->Result<(),crate::Error>{
+        if bytes.is_empty(){return Ok(());}
+        if let Some(error)=crate::WRITE_ERROR.get(){return Err(error);}
+        if crate::COPY_FAILURE.get(){Err(crate::Error::InvalidAddress)}else{Ok(())}
+    }
     pub mod time {
         pub fn monotonic_deadline_tick(value:u64)->u64{value}
         pub fn monotonic_nanoseconds()->u64{0}
@@ -129,9 +148,13 @@ mod syscall {
         }
     }
 }
-fn read_user_u64(_:u64)->Result<u64,u64>{Ok(0)}
 mod address_wait {
-    pub fn read_guard_value(_:u64)->Result<u64,u64>{Ok(0)}
+    pub fn read_guard_value(address:u64)->Result<u64,u64>{
+        assert_eq!(address,8);crate::GUARD_READS.set(crate::GUARD_READS.get()+1);
+        // A user may edit its descriptor after it was copied. Later predicate
+        // checks must use the captured expected value, not reread that field.
+        crate::GUARD_EXPECTED.set(999);Ok(crate::GUARD_VALUE.get())
+    }
     pub fn register_guard(_:u64,_:u64,_:u64)->Result<usize,u64>{Ok(0)}
 }
 mod upcall{pub fn current_has_deliverable_upcall()->bool{crate::UPCALL.get()}}
@@ -180,6 +203,8 @@ fn clean(){
 }
 fn reset(){
     clean();READY.set(false);UPCALL.set(false);COPY_FAILURE.set(false);
+    READ_ERROR.set(None);WRITE_ERROR.set(None);CURRENT.set(true);
+    GUARD_COPIES.set(0);GUARD_READS.set(0);GUARD_EXPECTED.set(5);GUARD_VALUE.set(5);
     STAGE.set(0);FAIL_STAGE.set(0);SCANS.set(0);FAIL_SCAN.set(0);SLEEPS.set(0);
 }
 fn main(){
@@ -205,10 +230,32 @@ fn main(){
     assert_eq!(handle::wait_many(1,5,100,0),0);
     assert_eq!(ALLOCS.load(Ordering::Relaxed)-before,8,"retry must reuse reserved storage");
     assert_eq!(SLEEPS.get(),1);clean();
-    reset();COPY_FAILURE.set(true);assert_eq!(handle::wait_many(1,5,100,0),EFAULT);clean();
+    reset();COPY_FAILURE.set(true);assert_eq!(handle::wait_many(1,5,100,0),Error::InvalidAddress.into_raw());clean();
     reset();UPCALL.set(true);assert_eq!(handle::wait_many(1,5,100,0),EAGAIN);clean();
     reset();assert_eq!(handle::wait_many(1,5,0,0),EAGAIN);clean();
     reset();assert_eq!(handle::wait_many(0,0,0,0),EAGAIN);clean();
+    // Preserve each native resident/fault-in error at all three copy phases.
+    for error in [Error::InvalidAddress,Error::ResourceUnavailable,Error::BackingFailure] {
+        reset();READ_ERROR.set(Some(error));
+        assert_eq!(handle::wait_many(1,5,100,0),error.into_raw());
+        assert_eq!(STAGE.get(),0);clean();
+        reset();READ_ERROR.set(Some(error));let before=ALLOCS.load(Ordering::Relaxed);
+        assert_eq!(handle::wait_many(1,5,100,2),error.into_raw());
+        assert_eq!(ALLOCS.load(Ordering::Relaxed),before);assert_eq!(GUARD_COPIES.get(),1);
+        assert_eq!(GUARD_READS.get(),0);clean();
+        reset();WRITE_ERROR.set(Some(error));
+        assert_eq!(handle::wait_many(1,5,100,0),error.into_raw());
+        assert_eq!(SLEEPS.get(),1);clean();
+    }
+    reset();assert_eq!(handle::wait_many(1,65,0,0),Error::InvalidArgument.into_raw());clean();
+    reset();assert_eq!(handle::wait_many(0,5,0,0),Error::InvalidAddress.into_raw());clean();
+    reset();assert_eq!(handle::wait_many(1,5,0,u64::MAX),Error::InvalidAddress.into_raw());clean();
+    reset();CURRENT.set(false);assert_eq!(handle::wait_many(1,5,100,0),Error::NotReady.into_raw());clean();
+    reset();assert_eq!(handle::wait_many(1,5,100,2),0);
+    assert_eq!(GUARD_COPIES.get(),1);assert!(GUARD_READS.get()>1);clean();
+    reset();GUARD_VALUE.set(6);
+    assert_eq!(handle::wait_many(1,5,100,2),Error::NotReady.into_raw());
+    assert_eq!(GUARD_COPIES.get(),1);assert_eq!(SLEEPS.get(),0);clean();
 }
 "#);
     probe::run(&program);

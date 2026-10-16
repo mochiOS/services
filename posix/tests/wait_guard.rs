@@ -22,8 +22,8 @@ fn kernel_checks_only_readable_aligned_values_after_waiter_cleanup() {
         .split("pub fn process_resume(")
         .next()
         .unwrap();
-    assert!(wait.contains("guard_ptr.checked_add(8)"));
-    assert!(wait.contains("super::read_user_u64(guard_ptr)"));
+    assert!(wait.contains("copy_from_user_native(guard_ptr, &mut bytes)"));
+    assert!(!wait.contains("read_user_u64"));
     let check = wait.find("read_guard_value(guard.address)").unwrap();
     assert!(wait[..check].contains("remove_provider_waiters(current"));
     assert!(
