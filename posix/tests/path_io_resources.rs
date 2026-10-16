@@ -12,6 +12,12 @@ mod callback_resources;
 #[path = "../../../user/crates/newlib-runtime/src/path_io.rs"]
 mod implementation;
 use implementation as path_io;
+#[path = "../../../user/crates/newlib-runtime/src/user_copy.rs"]
+mod user_copy;
+#[path = "support/user_copy_native.rs"]
+mod user_copy_native;
+use user_copy_native::{syscall, syscall_errno};
+const PAGE_SIZE: usize = 4096;
 #[path = "../../../user/crates/newlib-runtime/src/io_resources.rs"]
 mod io_resources;
 #[path = "../../../user/crates/newlib-runtime/src/file_metadata.rs"]

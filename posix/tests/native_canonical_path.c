@@ -70,15 +70,17 @@ int main(void) {
   CHECK(unreadable != MAP_FAILED && readonly != MAP_FAILED);
   int64_t baseline = native_count();
   for (unsigned round = 0; round < 16; ++round) {
+    CHECK(realpath(unreadable, output) == NULL && errno == EFAULT);
+    CHECK(realpath(".", readonly) == NULL && errno == EFAULT);
     int jumped = sigsetjmp(destination, 1);
     if (!jumped) {
-      (void)realpath(unreadable, output);
+      (void)*(volatile char *)unreadable;
       CHECK(0);
     }
     CHECK(jumped == 37 && native_count() == baseline);
     jumped = sigsetjmp(destination, 1);
     if (!jumped) {
-      (void)realpath(".", readonly);
+      *(volatile char *)readonly = 1;
       CHECK(0);
     }
     CHECK(jumped == 37 && native_count() == baseline);
@@ -92,6 +94,7 @@ int main(void) {
   CHECK(realpath(".", output) == NULL && errno == ENOENT);
   CHECK(chdir(original) == 0 && native_count() == baseline);
   puts("canonical-path: PASS symlinks, existence, rename, deleted cwd, "
-       "allocation, 32 reentrant input/output faults and reference recovery");
+       "allocation, EFAULT input/output, 32 ordinary memory faults and "
+       "reference recovery");
   return 0;
 }

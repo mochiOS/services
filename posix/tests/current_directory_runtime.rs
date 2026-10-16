@@ -6,6 +6,14 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 #[path = "../../../user/crates/newlib-runtime/src/current_directory.rs"]
 mod implementation;
+#[path = "../../../user/crates/newlib-runtime/src/user_copy.rs"]
+mod user_copy;
+#[path = "support/user_copy_native.rs"]
+mod user_copy_native;
+use user_copy_native::{syscall, syscall_errno};
+const PAGE_SIZE: usize = 4096;
+const ENOENT: c_int = 2;
+const ENAMETOOLONG: c_int = 91;
 const EINVAL: c_int = 22;
 const EIO: c_int = 5;
 const ERANGE: c_int = 34;

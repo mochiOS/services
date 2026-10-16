@@ -25,7 +25,8 @@ int main(void) {
   snprintf(expected, sizeof(expected), "/tmp/cwd-moved-%d", (int)getpid());
   CHECK(mkdir(directory, 0700) == 0 && chdir(directory) == 0);
   CHECK(rename(directory, expected) == 0);
-  CHECK(getcwd(output, sizeof(output)) == output && strcmp(output, expected) == 0);
+  CHECK(getcwd(output, sizeof(output)) == output &&
+        strcmp(output, expected) == 0);
   memset(output, 0x5a, sizeof(output));
   CHECK(getcwd(output, strlen(expected) + 1) == output &&
         strcmp(output, expected) == 0 && output[strlen(expected) + 1] == 0x5a);
@@ -40,20 +41,23 @@ int main(void) {
   action.sa_handler = failed_copy;
   sigemptyset(&action.sa_mask);
   CHECK(sigaction(SIGSEGV, &action, NULL) == 0);
-  void *readonly = mmap(NULL, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  void *readonly =
+      mmap(NULL, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   CHECK(readonly != MAP_FAILED);
   int64_t baseline = native_count();
   for (unsigned round = 0; round < 16; ++round) {
+    CHECK(getcwd(readonly, 4096) == NULL && errno == EFAULT);
     faulted = 0;
     int jumped = sigsetjmp(destination, 1);
     if (!jumped) {
-      (void)getcwd(readonly, 4096);
+      *(volatile char *)readonly = 1;
       CHECK(0);
     } else {
       CHECK(jumped == 37 && faulted);
     }
     CHECK(native_count() == baseline);
-    CHECK(getcwd(output, sizeof(output)) == output && strcmp(output, expected) == 0);
+    CHECK(getcwd(output, sizeof(output)) == output &&
+          strcmp(output, expected) == 0);
   }
   CHECK(munmap(readonly, 4096) == 0);
   int retained = open(".", O_RDONLY | O_DIRECTORY);
@@ -71,7 +75,8 @@ int main(void) {
         errno == ENOENT);
   int parent = openat(retained, "..", O_RDONLY | O_DIRECTORY);
   CHECK(parent >= 0 && fchdir(parent) == 0);
-  CHECK(getcwd(output, sizeof(output)) == output && strcmp(output, "/tmp") == 0);
+  CHECK(getcwd(output, sizeof(output)) == output &&
+        strcmp(output, "/tmp") == 0);
   CHECK(fchdir(retained) == 0);
   errno = 0;
   CHECK(getcwd(output, sizeof(output)) == NULL && errno == ENOENT);
@@ -79,6 +84,6 @@ int main(void) {
   CHECK(native_count() == baseline);
   puts("current-directory: PASS exact/short buffers, live rename, retained "
        "deleted cwd and parent identity, "
-       "16 reentrant copyout faults and reference recovery");
+       "EFAULT copyout, 16 ordinary memory faults and reference recovery");
   return 0;
 }

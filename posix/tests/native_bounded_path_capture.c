@@ -49,10 +49,13 @@ int main(void) {
           errno == ENAMETOOLONG);
     errno = 0;
     CHECK(truncate(overlong, 1) == -1 && errno == ENAMETOOLONG);
+    CHECK(openat(directory_fd, memory + 8192, O_RDONLY) == -1 &&
+          errno == EFAULT);
+    CHECK(truncate(memory + 8192, 1) == -1 && errno == EFAULT);
     expected_fault = 1;
     int jumped = sigsetjmp(destination, 1);
     if (!jumped) {
-      (void)openat(directory_fd, memory + 8192, O_RDONLY);
+      (void)*(volatile char *)(memory + 8192);
       CHECK(0);
     }
     CHECK(jumped == 37 && native_count() == baseline);
@@ -60,7 +63,7 @@ int main(void) {
     expected_fault = 1;
     jumped = sigsetjmp(destination, 1);
     if (!jumped) {
-      (void)truncate(memory + 8192, 1);
+      (void)*(volatile char *)(memory + 8192);
       CHECK(0);
     }
     CHECK(jumped == 37 && native_count() == baseline);
@@ -68,7 +71,8 @@ int main(void) {
   }
   CHECK(munmap(memory, 12288) == 0 && close(directory_fd) == 0 &&
         rmdir(directory) == 0);
-  puts("bounded-path: PASS guard-page open/openat/truncate limits, 32 nested "
-       "input faults and stable Handle counts");
+  puts("bounded-path: PASS guard-page open/openat/truncate limits, EFAULT "
+       "inputs, "
+       "32 ordinary memory faults and stable Handle counts");
   return 0;
 }

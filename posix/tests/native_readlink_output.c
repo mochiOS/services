@@ -51,15 +51,19 @@ int main(void) {
   CHECK(unreadable != MAP_FAILED && readonly != MAP_FAILED);
   int64_t baseline = native_count();
   for (unsigned round = 0; round < 16; ++round) {
+    CHECK(readlinkat(directory_fd, unreadable, output, sizeof(output)) == -1 &&
+          errno == EFAULT);
+    CHECK(readlinkat(directory_fd, link_name, readonly, 4096) == -1 &&
+          errno == EFAULT);
     int jumped = sigsetjmp(destination, 1);
     if (!jumped) {
-      (void)readlinkat(directory_fd, unreadable, output, sizeof(output));
+      (void)*(volatile char *)unreadable;
       CHECK(0);
     }
     CHECK(jumped == 37 && native_count() == baseline);
     jumped = sigsetjmp(destination, 1);
     if (!jumped) {
-      (void)readlinkat(directory_fd, link_name, readonly, 4096);
+      *(volatile char *)readonly = 1;
       CHECK(0);
     }
     CHECK(jumped == 37 && native_count() == baseline);
@@ -70,7 +74,7 @@ int main(void) {
   CHECK(unlinkat(directory_fd, link_name, 0) == 0 && close(directory_fd) == 0 &&
         rmdir(directory) == 0);
   puts("readlink-output: PASS raw targets, prefix/no NUL, large capacity, "
-       "32 nested input/copyout faults and stable "
+       "EFAULT input/copyout, 32 ordinary memory faults and stable "
        "Handle counts");
   return 0;
 }

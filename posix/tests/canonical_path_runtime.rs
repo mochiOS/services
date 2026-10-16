@@ -14,6 +14,13 @@ use std::{
 mod callback_resources;
 #[path = "../../../user/crates/newlib-runtime/src/canonical_path.rs"]
 mod implementation;
+#[path = "../../../user/crates/newlib-runtime/src/user_copy.rs"]
+mod user_copy;
+#[path = "support/user_copy_native.rs"]
+mod user_copy_native;
+use user_copy_native::{syscall, syscall_errno};
+const PAGE_SIZE: usize = 4096;
+const ENOENT: c_int = 2;
 #[path = "../../../user/crates/newlib-runtime/src/io_resources.rs"]
 mod io_resources;
 const EIO: c_int = 5;
