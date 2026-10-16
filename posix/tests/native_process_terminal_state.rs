@@ -22,6 +22,7 @@ fn terminal_publication_is_immutable_and_termination_reports_the_winner() {
     let handles = include_str!("../../../core/src/syscall/handle.rs");
     let threads = include_str!("../../../core/src/task/thread.rs");
     let scheduler = include_str!("../../../core/src/task/scheduler.rs");
+    let process_syscall = include_str!("../../../core/src/syscall/process.rs");
     let mut program = String::from(
         r#"
 extern crate alloc;
@@ -31,6 +32,7 @@ type ProcessId = u64;
 type ThreadId = u64;
 mod mnu_abi { pub const PROCESS_STATE_RUNNING: u64 = 1; pub const PROCESS_STATE_EXITED: u64 = 2; }
 #[macro_export] macro_rules! warn { ($($arg:tt)*) => {{ let _ = format_args!($($arg)*); }}; }
+#[macro_export] macro_rules! sprintln { ($($arg:tt)*) => {{ let _ = format_args!($($arg)*); }}; }
 "#,
     );
     program.push_str(body(process, "pub struct ProcessObject {", ""));
@@ -71,9 +73,10 @@ static CASE: AtomicUsize = AtomicUsize::new(0);
 static YIELDS: AtomicUsize = AtomicUsize::new(0);
 static CPU_REFERENCE: AtomicU64 = AtomicU64::new(0);
 static NATURAL_RACE: AtomicBool = AtomicBool::new(false);
+static CURRENT_PROCESS: AtomicU64 = AtomicU64::new(0);
 struct Limits { max_threads: usize }
 mod audit { pub enum AuditEventKind { Fault } pub fn log(_: AuditEventKind, _: &str) {} }
-#[derive(Clone, Copy, PartialEq)] enum ThreadState { Running, Ready, Terminated }
+#[derive(Clone, Copy, Debug, PartialEq)] enum ThreadState { Running, Ready, Terminated }
 struct Thread { id: u64, state: ThreadState, process_object: Option<Arc<ProcessObject>> }
 impl Thread {
     fn id(&self) -> u64 { self.id }
@@ -129,7 +132,11 @@ fn object_native(raw: u64, _: HandleRights) -> Result<KernelObject, mnu_abi::sta
         }
     }
 }
-mod syscall { pub mod security { pub fn current_process_id() -> Option<u64> { None } } }
+mod syscall { pub mod security {
+    pub fn current_process_id() -> Option<u64> {
+        match crate::CURRENT_PROCESS.load(crate::Ordering::Relaxed) { 0 => None, id => Some(id) }
+    }
+} }
 mod percpu { pub fn thread_is_cpu_referenced(id: u64) -> bool { crate::CPU_REFERENCE.load(crate::Ordering::Acquire) == id } }
 impl ThreadIdExt for u64 { fn as_u64(self) -> u64 { self } }
 trait ThreadIdExt { fn as_u64(self) -> u64; }
@@ -173,7 +180,11 @@ mod task {
     }
     pub mod scheduler {
         use super::*;
-        pub fn exit_current_process(_: i32) -> ! { unreachable!() }
+        fn current_thread_id() -> Option<u64> { Some(1) }
+        fn with_thread<R>(id: u64, f: impl FnOnce(&Thread) -> R) -> Option<R> {
+            super::with_thread(id, f)
+        }
+        fn exit_current_task(code: u64) -> ! { std::panic::panic_any(code) }
         fn terminate_thread(id: u64) {
             let mut queue = THREAD_QUEUE.lock();
             if queue.get(id).is_some() { queue.set_state(id, ThreadState::Terminated); }
@@ -194,6 +205,7 @@ mod task {
                 "crate::syscall_address_wait",
             ),
     );
+    program.push_str(body(scheduler, "pub fn exit_current_process(", ""));
     program.push_str(
         r#"
     }
@@ -208,10 +220,13 @@ mod task {
         ),
     );
     program.push_str(body(handles, "pub fn process_terminate(", ""));
+    program.push_str("\nuse task::scheduler::exit_current_process;\n");
+    program.push_str(body(process_syscall, "pub fn exit(exit_code:", ""));
     program.push_str(
         r#"
 fn reset(case: usize) -> Arc<ProcessObject> {
     CASE.store(case, Ordering::Relaxed);
+    CURRENT_PROCESS.store(0, Ordering::Relaxed);
     NATURAL_RACE.store(false, Ordering::Relaxed);
     for counter in [&WAKES, &RECLAIMS, &CLEANUPS, &TERMINATED] { counter.store(0, Ordering::Relaxed); }
     let object = Arc::new(ProcessObject::new(7));
@@ -231,6 +246,29 @@ fn terminal(object: &ProcessObject, code: u64) {
     assert_eq!(process.exit_code, Some(code));
     assert_eq!(WAKES.load(Ordering::Relaxed), 1);
     assert_eq!(RECLAIMS.load(Ordering::Relaxed), 1);
+}
+#[test] fn every_process_exit_path_preserves_the_same_opaque_scalar() {
+    for code in [0, 0x8000_0000, 0x1_0000_0000, 0x1234_5678_9abc_def0, u64::MAX] {
+        for path in 0..3 {
+            let object = reset(0);
+            if path == 2 {
+                assert_eq!(process_terminate(2, code), SUCCESS);
+                assert_eq!(THREAD_QUEUE.lock().count, 0);
+            } else {
+                CURRENT_PROCESS.store(7, Ordering::Relaxed);
+                let stopped = std::panic::catch_unwind(|| {
+                    if path == 0 { exit(code) } else { process_terminate(2, code); }
+                }).expect_err("self termination must not return to the image");
+                assert_eq!(*stopped.downcast::<u64>().unwrap(), code);
+                let queue = THREAD_QUEUE.lock();
+                assert_eq!(queue.count, 1, "only the executing stack remains until task exit");
+                assert_eq!(queue.get(1).unwrap().state(), ThreadState::Running);
+            }
+            terminal(&object, code);
+            PROCESS_TABLE.lock().0 = None;
+            assert_eq!(object.exit_code(), code, "retained metadata survives reclamation");
+        }
+    }
 }
 #[test] fn zero_is_a_real_terminal_code() {
     let object = reset(0);
@@ -401,5 +439,5 @@ fn terminal(object: &ProcessObject, code: u64) {
         String::from_utf8_lossy(&run.stdout),
         String::from_utf8_lossy(&run.stderr)
     );
-    assert!(String::from_utf8_lossy(&run.stdout).contains("13 passed"));
+    assert!(String::from_utf8_lossy(&run.stdout).contains("14 passed"));
 }
