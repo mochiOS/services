@@ -137,7 +137,7 @@ pub fn rename(old_path: &str, new_path: &str) -> Result<(), mochi_user_syscall::
 pub fn path_exists(path: &str) -> Result<bool, mochi_user_syscall::SysError> {
     match with_client(|client| client.stat_at(StatAtBase::ProcessRoot, 0, path)) {
         Ok(_) => Ok(true),
-        Err(error) if error.errno() == Some(mochi_user_syscall::ENOENT) => Ok(false),
+        Err(error) if error.raw() == mochi_user_syscall::ENOENT as i64 => Ok(false),
         Err(error) => Err(error),
     }
 }
