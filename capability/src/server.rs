@@ -19,7 +19,18 @@ use crate::state::CapabilityServiceState;
 
 const REPLY_OK: u64 = 0;
 
+// This protocol carries positive POSIX wire errors, not native mechanism tags
+// or newlib C errno values. Only successful replies may carry zero.
+fn error_status(error: mochi_user_syscall::SysError) -> u64 {
+    u64::from(mochios_posix_protocol::status::normalize_failure(error.raw()).unsigned_abs())
+}
+
 fn capability_reply(sender: u64, status: u64) {
+    let status = if status == REPLY_OK {
+        REPLY_OK
+    } else {
+        error_status(mochi_user_syscall::SysError::from_raw(status as i64))
+    };
     let _ = platform::ipc::reply(sender, &status.to_le_bytes());
 }
 
@@ -43,7 +54,7 @@ fn reply_capabilities(sender: u64, result: Result<Vec<String>, mochi_user_syscal
     let (status, capabilities) = match result {
         Ok(caps) => (REPLY_OK, encode_nul_list(&caps)),
         Err(err) => {
-            let status = err.errno().unwrap_or(mochi_user_syscall::EIO);
+            let status = error_status(err);
             (status, Vec::new())
         }
     };
@@ -61,11 +72,7 @@ fn reply_execution_security(
             encode_nul_list(&identity),
             encode_nul_list(&capabilities),
         ),
-        Err(error) => (
-            error.errno().unwrap_or(mochi_user_syscall::EIO),
-            Vec::new(),
-            Vec::new(),
-        ),
+        Err(error) => (error_status(error), Vec::new(), Vec::new()),
     };
     let reply = platform::capability::encode_resolve_execution_security_reply(
         status,
@@ -88,8 +95,7 @@ fn reply_spawn(sender: u64, result: Result<u64, mochi_user_syscall::SysError>) {
             reply[8..16].copy_from_slice(&pid.to_le_bytes());
         }
         Err(err) => {
-            reply[..8]
-                .copy_from_slice(&err.errno().unwrap_or(mochi_user_syscall::EIO).to_le_bytes());
+            reply[..8].copy_from_slice(&error_status(err).to_le_bytes());
         }
     }
     let _ = platform::ipc::reply(sender, &reply);
@@ -157,12 +163,17 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                         state.refresh_package_index()
                     })
                     .map(|_| REPLY_OK)
-                    .unwrap_or_else(|error| error.errno().unwrap_or(mochi_user_syscall::EIO))
+                    .unwrap_or_else(error_status)
             };
             close_received_handles(&attached);
             if status != REPLY_OK {
-                let _ = platform::write_fmt(platform::io::STDERR,
-                    format_args!("capability.service: POSIX endpoint handoff failed status={}\n", status as i64));
+                let _ = platform::write_fmt(
+                    platform::io::STDERR,
+                    format_args!(
+                        "capability.service: POSIX endpoint handoff failed status={}\n",
+                        status as i64
+                    ),
+                );
             }
             capability_reply(sender, status);
             continue;
@@ -237,7 +248,7 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                     // On success IPC owns the receiver reference. On failure
                     // only this local owner exists; either way Drop is correct.
                 }
-                Err(error) => capability_reply(sender, error.errno().unwrap_or(5)),
+                Err(error) => capability_reply(sender, error_status(error)),
             }
             continue;
         }
@@ -407,9 +418,7 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                 });
             capability_reply(
                 sender,
-                result
-                    .map(|_| REPLY_OK)
-                    .unwrap_or_else(|error| error.errno().unwrap_or(mochi_user_syscall::EIO)),
+                result.map(|_| REPLY_OK).unwrap_or_else(error_status),
             );
             continue;
         }
@@ -422,7 +431,7 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                 state
                     .refresh_package_index()
                     .map(|_| REPLY_OK)
-                    .unwrap_or_else(|error| error.errno().unwrap_or(mochi_user_syscall::EIO))
+                    .unwrap_or_else(error_status)
             };
             capability_reply(sender, status);
             continue;
@@ -441,7 +450,7 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                         )
                     })
                     .map(|_| REPLY_OK)
-                    .unwrap_or_else(|error| error.errno().unwrap_or(mochi_user_syscall::EIO))
+                    .unwrap_or_else(error_status)
             };
             capability_reply(sender, status);
             continue;
@@ -452,7 +461,7 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                     authorize_persistent_capability(&state.package_index, sender, &request)
                 })
                 .map(|_| REPLY_OK)
-                .unwrap_or_else(|err| err.errno().unwrap_or(mochi_user_syscall::EIO));
+                .unwrap_or_else(error_status);
             capability_reply(sender, status);
             continue;
         }
