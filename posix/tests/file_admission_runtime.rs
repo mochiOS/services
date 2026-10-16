@@ -92,7 +92,7 @@ fn spawn_actions_use_the_live_child_table_and_the_same_queued_open_owner() {
     );
     assert!(child.contains("execve_with_launch_context("));
     let mutation = include_str!("../../../user/crates/newlib-runtime/src/file_mutation.rs");
-    assert!(mutation.contains("open_in_slot(-2, path, flags, mode, Some(fd))"));
+    assert!(mutation.contains("open_in_slot(-2, path, flags, mode, Some(fd), None)"));
     let slot = mutation.split("fn open_in_slot(").nth(1).unwrap();
     assert!(
         slot.find("close_for_spawn(fd").unwrap()

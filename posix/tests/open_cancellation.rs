@@ -116,7 +116,8 @@ fn internal_open_returns_through_libc_and_checks_cancellation_before_fd_publicat
         .split("struct RuntimeLaunchContext")
         .next()
         .unwrap();
-    assert!(retry.contains("let result = file_mutation::open(path, flags, mode);"));
+    assert!(retry.contains("file_mutation::open(path, flags, mode)"));
+    assert!(retry.contains("let result = retry();"));
     assert!(retry.contains("drop_capability(capability)"));
     assert!(!retry.contains("file_mutation::open(path, flags, mode)?"));
 }

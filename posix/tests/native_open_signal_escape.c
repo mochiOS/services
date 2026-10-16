@@ -13,11 +13,51 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+#ifdef DIRECTORY_OPEN_TEST
+#include <dirent.h>
+#include <malloc.h>
+#include <sys/stat.h>
+static DIR *directory_streams[64];
+static size_t directory_heap_baseline;
+static int directory_setup_source(char *path) {
+  // The dedicated fixture is fresh; no temporary-name helper is required.
+  if (mkdir(path, 0700))
+    return -1;
+  return open(path, O_RDONLY | O_DIRECTORY);
+}
+static int directory_open_as_fd(const char *path, int flags) {
+  (void)flags;
+  DIR *stream = opendir(path);
+  if (!stream)
+    return -1;
+  int fd = dirfd(stream);
+  if (fd < 0 || fd >= 64) {
+    closedir(stream);
+    errno = EMFILE;
+    return -1;
+  }
+  directory_streams[fd] = stream;
+  return fd;
+}
+static int directory_close_fd(int fd) {
+  if (fd >= 0 && fd < 64 && directory_streams[fd]) {
+    DIR *stream = directory_streams[fd];
+    directory_streams[fd] = NULL;
+    return closedir(stream);
+  }
+  return close(fd);
+}
+#define mkstemp directory_setup_source
+#define open directory_open_as_fd
+#define close directory_close_fd
+#define unlink rmdir
+#endif
+
 #define CHECK(x)                                                               \
   do {                                                                         \
     if (!(x)) {                                                                \
       fprintf(stderr, "open-signal-escape: FAIL line=%u errno=%d: %s\n",       \
-              __LINE__, errno, #x);                                             \
+              __LINE__, errno, #x);                                            \
       return 1;                                                                \
     }                                                                          \
   } while (0)
@@ -33,7 +73,8 @@ static uint32_t baseline_handles[4096];
 static sigjmp_buf escape, nested_escape;
 static atomic_int armed, stopping, ready, busy, sender_error;
 static atomic_uint deliveries;
-static volatile sig_atomic_t handler_error, escapes, nested_escapes, parents_preserved;
+static volatile sig_atomic_t handler_error, escapes, nested_escapes,
+    parents_preserved;
 static pthread_t target;
 static const char *test_path;
 static int expected_fd;
@@ -72,9 +113,14 @@ static uint32_t unpublished_file(long count) {
   for (long i = 0; i < count; ++i) {
     if (was_present(records[i].handle))
       continue;
-    /* READ | WRITE | SEEK: the observed extra reference must be a file, not
-     * a lazy runtime allocation or another generic notification object. */
+      /* READ | WRITE | SEEK: the observed extra reference must be a file, not
+       * a lazy runtime allocation or another generic notification object. */
+#ifdef DIRECTORY_OPEN_TEST
+    if (found ||
+        (records[i].rights & 131) != 1) /* Directory READ, no WRITE/SEEK. */
+#else
     if (found || (records[i].rights & 131) != 131)
+#endif
       return 0;
     found = records[i].handle;
   }
@@ -106,8 +152,7 @@ static void handler(int signal) {
       siglongjmp(nested_escape, 19);
     }
     if (signal == SIGUSR1 && phase == 1 && count == baseline + 1 &&
-        fcntl(expected_fd, F_GETFD) == -1 &&
-        errno == EBADF) {
+        fcntl(expected_fd, F_GETFD) == -1 && errno == EBADF) {
       uint32_t parent_handle = unpublished_file(count);
       if (!parent_handle) {
         errno = previous_errno;
@@ -200,12 +245,16 @@ int main(void) {
   while (!atomic_load_explicit(&ready, memory_order_acquire))
     CHECK(sched_yield() == 0);
   CHECK(atomic_load(&sender_error) == 0);
-  CHECK(raise(SIGUSR1) == 0); /* Warm the signal path before counting Handles. */
+  CHECK(raise(SIGUSR1) ==
+        0); /* Warm the signal path before counting Handles. */
   CHECK(raise(SIGUSR2) == 0);
   baseline = snapshot(&baseline_waits);
   CHECK(baseline > 0);
   for (long i = 0; i < baseline; ++i)
     baseline_handles[i] = records[i].handle;
+#ifdef DIRECTORY_OPEN_TEST
+  directory_heap_baseline = mallinfo().uordblks;
+#endif
   for (volatile unsigned round = 0; round < 16; ++round) {
     int result = sigsetjmp(escape, 1);
     if (!result) {
@@ -224,6 +273,9 @@ int main(void) {
     CHECK(atomic_load(&sender_error) == 0);
     unsigned waits;
     CHECK(snapshot(&waits) == baseline && waits == baseline_waits);
+#ifdef DIRECTORY_OPEN_TEST
+    CHECK(mallinfo().uordblks == directory_heap_baseline);
+#endif
     for (long i = 0; i < baseline; ++i)
       CHECK(was_present(records[i].handle));
     CHECK(fcntl(expected_fd, F_GETFD) == -1 && errno == EBADF);
@@ -235,8 +287,9 @@ int main(void) {
   CHECK(escapes == 16 && nested_escapes == 16 && parents_preserved == 16 &&
         !handler_error && !atomic_load(&sender_error));
   CHECK(close(source) == 0 && unlink(path) == 0);
-  printf("open-signal-escape: PASS %d outer escapes, %d reentrant open escapes, "
-         "%d preserved parents; Handles and FD reservations reclaimed\n",
-         (int)escapes, (int)nested_escapes, (int)parents_preserved);
+  printf(
+      "open-signal-escape: PASS %d outer escapes, %d reentrant open escapes, "
+      "%d preserved parents; Handles and FD reservations reclaimed\n",
+      (int)escapes, (int)nested_escapes, (int)parents_preserved);
   return 0;
 }

@@ -1,6 +1,7 @@
 //! Execute the production refill adapter, including reentrant close and errors.
 #![allow(dead_code)]
-use std::ffi::c_int;
+use std::ffi::{c_int, c_char, c_void};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use mochios_posix_client::upcall_guard::Guard;
 #[path = "../../../user/crates/newlib-runtime/src/callback_resources.rs"]
@@ -12,11 +13,91 @@ mod io_resources;
 const EBADF: c_int = 9;
 const EAGAIN: c_int = 11;
 const EIO: c_int = 5;
+const EACCES: c_int = 13;
+const EPERM: c_int = 1;
+const ENOMEM: c_int = 12;
+const O_CLOEXEC: c_int = 0x40000;
+static SERIAL: Mutex<()> = Mutex::new(());
+static OPEN_CASE: AtomicU32 = AtomicU32::new(0);
+static OPEN_CALLS: AtomicU32 = AtomicU32::new(0);
+static LIVE_MEMORY: AtomicU32 = AtomicU32::new(0);
+static PROMPTS: AtomicU32 = AtomicU32::new(0);
 struct DirStream {
     fd: c_int,
     buffer: [u8; 16],
     buffer_offset: usize,
     buffer_len: usize,
+}
+impl DirStream {
+    fn new(fd: c_int) -> Self {
+        Self {
+            fd,
+            buffer: [0; 16],
+            buffer_offset: 0,
+            buffer_len: 0,
+        }
+    }
+}
+unsafe fn malloc(size: usize) -> *mut c_void {
+    assert_ne!(CONTROL.native.load(Ordering::Relaxed), 0);
+    if OPEN_CASE.load(Ordering::Relaxed) == 1 {
+        return std::ptr::null_mut();
+    }
+    assert_eq!(size, std::mem::size_of::<DirStream>());
+    let pointer = unsafe { std::alloc::alloc(std::alloc::Layout::new::<DirStream>()) };
+    assert!(!pointer.is_null());
+    LIVE_MEMORY.fetch_add(1, Ordering::Relaxed);
+    pointer.cast()
+}
+unsafe fn free(pointer: *mut c_void) {
+    assert_ne!(CONTROL.native.load(Ordering::Relaxed), 0);
+    assert_eq!(LIVE_MEMORY.fetch_sub(1, Ordering::Relaxed), 1);
+    unsafe { std::alloc::dealloc(pointer.cast(), std::alloc::Layout::new::<DirStream>()) };
+}
+mod file_mutation {
+    use super::*;
+    pub fn open_with_handoff(
+        _: *const c_char,
+        flags: c_int,
+        mode: c_int,
+        handoff: &mut dyn FnMut(c_int) -> Result<(), c_int>,
+    ) -> Result<c_int, c_int> {
+        assert_eq!(flags, 0x200000 | O_CLOEXEC);
+        assert_eq!(mode, 0);
+        assert_eq!(
+            CONTROL.native.load(Ordering::Relaxed),
+            0,
+            "deferred across open"
+        );
+        assert!(!CONTROL.callback_resources.is_empty());
+        assert_eq!(LIVE_MEMORY.load(Ordering::Relaxed), 1);
+        let call = OPEN_CALLS.fetch_add(1, Ordering::Relaxed);
+        match OPEN_CASE.load(Ordering::Relaxed) {
+            2 => return Err(2),
+            3 if call == 0 => return Err(EACCES),
+            5 => return Err(4),
+            _ => {}
+        }
+        let _native = defer_native_delivery();
+        handoff(7)?;
+        if OPEN_CASE.load(Ordering::Relaxed) == 4 {
+            return Err(EIO);
+        }
+        Ok(7)
+    }
+}
+fn retry_open_with_prompt_using(
+    _: *const c_char,
+    _: c_int,
+    retry: impl FnOnce() -> Result<c_int, c_int>,
+) -> Result<c_int, c_int> {
+    assert_eq!(
+        CONTROL.native.load(Ordering::Relaxed),
+        0,
+        "deferred across prompt"
+    );
+    PROMPTS.fetch_add(1, Ordering::Relaxed);
+    retry()
 }
 #[derive(Clone, Copy, PartialEq)]
 enum FdKind {
@@ -115,6 +196,7 @@ mod syscall {
 }
 #[test]
 fn refills_release_pins_after_data_eof_errors_and_reentrant_close() {
+    let _serial = SERIAL.lock().unwrap();
     for case in 0..10 {
         CASE.store(case, Ordering::Relaxed);
         CALLS.store(0, Ordering::Relaxed);
@@ -151,4 +233,56 @@ fn refills_release_pins_after_data_eof_errors_and_reentrant_close() {
         assert!(CONTROL.callback_resources.is_empty());
         assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
     }
+}
+
+#[test]
+fn directory_allocation_is_tracked_before_open_and_handoff_is_guarded_until_retirement() {
+    let _serial = SERIAL.lock().unwrap();
+    for case in 0..6 {
+        OPEN_CASE.store(case, Ordering::Relaxed);
+        OPEN_CALLS.store(0, Ordering::Relaxed);
+        PROMPTS.store(0, Ordering::Relaxed);
+        let result = implementation::open(c"/directory".as_ptr());
+        if matches!(case, 0 | 3) {
+            let pointer = result.unwrap();
+            assert_eq!(unsafe { (*pointer.cast::<DirStream>()).fd }, 7);
+            assert_eq!(LIVE_MEMORY.load(Ordering::Relaxed), 1);
+            let _native = defer_native_delivery();
+            unsafe { free(pointer) };
+        } else {
+            assert_eq!(
+                result,
+                Err(match case {
+                    1 => ENOMEM,
+                    2 => 2,
+                    4 => EIO,
+                    _ => 4,
+                })
+            );
+        }
+        assert_eq!(LIVE_MEMORY.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            OPEN_CALLS.load(Ordering::Relaxed),
+            match case {
+                1 => 0,
+                3 => 2,
+                _ => 1,
+            }
+        );
+        assert_eq!(PROMPTS.load(Ordering::Relaxed), u32::from(case == 3));
+        assert!(CONTROL.callback_resources.is_empty());
+        assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[test]
+fn handoff_precedes_fd_installation_and_callback_retirement_is_still_guarded() {
+    let source = include_str!("../../../user/crates/newlib-runtime/src/file_mutation.rs");
+    let body = source.split("fn open_in_slot(").nth(1).unwrap();
+    assert!(
+        body.find("completion_delivery = Some(native)").unwrap()
+            < body.find("handoff(fd)?").unwrap()
+    );
+    assert!(body.find("handoff(fd)?").unwrap() < body.find("commit_reservation(").unwrap());
+    assert!(body.find("retire()").unwrap() < body.find("drop(completion_delivery)").unwrap());
 }
