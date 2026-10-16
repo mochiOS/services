@@ -15,6 +15,9 @@
 static unsigned type, options, fault_case;
 static volatile sig_atomic_t faulted;
 static sigjmp_buf destination;
+static int retry_kind;
+static int *retry_output;
+static int create_pair(int kind, int *output);
 #define CHECK(x)                                                               \
   do {                                                                         \
     if (!(x)) {                                                                \
@@ -36,6 +39,10 @@ static void fault_handler(int signal) {
   if (signal != SIGSEGV)
     _exit(91);
   faulted = 1;
+  int64_t baseline = native(680, 0, 0, 0);
+  if (create_pair(retry_kind, retry_output) != -1 || errno != EFAULT ||
+      native(680, 0, 0, 0) != baseline)
+    _exit(92);
   siglongjmp(destination, 37);
 }
 static int flags_match(int fd) {
@@ -80,9 +87,18 @@ int main(void) {
           CHECK(mprotect(page + (fault_case == 2 ? 4096 : 0), 4096,
                          PROT_READ) == 0);
         faulted = 0;
+        retry_kind = kind;
+        retry_output = output;
         int jumped = sigsetjmp(destination, 1);
         if (!jumped) {
-          CHECK(create_pair(kind, output) == 0 && fault_case == 0);
+          int result = create_pair(kind, output);
+          if (fault_case) {
+            CHECK(result == -1 && errno == EFAULT);
+            CHECK(native(680, 0, 0, 0) == baseline);
+            *(volatile char *)(page + (fault_case == 2 ? 4096 : 0)) = 1;
+            CHECK(0);
+          }
+          CHECK(result == 0);
           CHECK(output[0] == single && output[1] >= 0 &&
                 output[0] != output[1]);
           CHECK(flags_match(output[0]) && flags_match(output[1]));
@@ -99,8 +115,10 @@ int main(void) {
           if (fault_case == 1)
             CHECK(output[0] == -123 && output[1] == -123);
           else {
-            CHECK(output[0] == single && output[1] == -123);
-            CHECK(fcntl(output[0], F_GETFD) == -1 && errno == EBADF);
+            /* MemoryCopy may reject the entire range or copy a prefix.
+             * Neither form may publish a descriptor on failure. */
+            CHECK((output[0] == single || output[0] == -123) && output[1] == -123);
+            CHECK(fcntl(single, F_GETFD) == -1 && errno == EBADF);
           }
         }
         CHECK(faulted == (fault_case != 0));
@@ -129,7 +147,7 @@ int main(void) {
     CHECK(single == next && close(single) == 0);
     CHECK(setrlimit(RLIMIT_NOFILE, &original) == 0);
   }
-  puts("socket-creation: PASS 18 socket/pipe publication/fault cases, 6 socket "
+  puts("socket-creation: PASS 18 socket/pipe publication/EFAULT cases with active handlers, 6 socket "
        "flag "
        "cases and 3 descriptor-limit cases; no hidden FDs or Handles");
   return 0;

@@ -1,12 +1,13 @@
 //! Execute the actual pipe adapter with a deterministic failing native backend.
-use std::ffi::c_int;
-use std::sync::{Mutex, MutexGuard};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use mochios_posix_client::upcall_guard::Guard;
 use mochios_posix_client::{
     ObjectHandleAttachment,
     fd::{Entry, FdReservation, FdTable},
 };
-use mochios_posix_client::upcall_guard::Guard;
+use mochios_posix_protocol as posix_protocol;
+use std::ffi::{c_char, c_int};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 #[path = "../../../user/crates/newlib-runtime/src/callback_resources.rs"]
 mod callback_resources;
 #[path = "../../../user/crates/newlib-runtime/src/fd_creation.rs"]
@@ -15,10 +16,18 @@ mod fd_creation;
 mod implementation;
 #[path = "../../../user/crates/newlib-runtime/src/io_resources.rs"]
 mod io_resources;
+#[path = "../../../user/crates/newlib-runtime/src/user_copy.rs"]
+mod user_copy;
+#[path = "support/user_copy_native.rs"]
+mod user_copy_native;
 
 const EAGAIN: c_int = 11;
 const EMFILE: c_int = 24;
 const EIO: c_int = 5;
+const EFAULT: c_int = 14;
+const ENOENT: c_int = 2;
+const ENAMETOOLONG: c_int = 91;
+const PAGE_SIZE: usize = 4096;
 const O_NONBLOCK: c_int = 0x4000;
 const O_CLOEXEC: c_int = 0x80000;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,12 +110,23 @@ fn syscall_errno(raw: u64) -> Result<u64, i32> {
 mod syscall {
     use super::*;
     pub use mnu_abi::{
-        HANDLE_RIGHT_WAIT, HANDLE_RIGHT_CONTROL, HANDLE_RIGHT_DUPLICATE, HANDLE_RIGHT_TRANSFER,
-        HANDLE_RIGHT_READ, HANDLE_RIGHT_WRITE, HANDLE_OPTION_NONBLOCKING,
+        HANDLE_OPTION_NONBLOCKING, HANDLE_RIGHT_CONTROL, HANDLE_RIGHT_DUPLICATE, HANDLE_RIGHT_READ,
+        HANDLE_RIGHT_TRANSFER, HANDLE_RIGHT_WAIT, HANDLE_RIGHT_WRITE,
     };
     pub enum SyscallNumber {
         StreamPairCreate,
         HandleOptionsSet,
+        MemoryCopy,
+    }
+    pub fn raw_syscall3(number: SyscallNumber, destination: u64, source: u64, length: u64) -> u64 {
+        assert!(matches!(number, SyscallNumber::MemoryCopy));
+        user_copy_native::syscall::raw_syscall3(
+            mnu_abi::SyscallNumber::MemoryCopy,
+            destination,
+            source,
+            length,
+        )
+        .unwrap_or_else(|errno| (-i64::from(errno)) as u64)
     }
     #[derive(Default)]
     pub struct StreamPair {
@@ -148,7 +168,7 @@ mod syscall {
 #[test]
 fn native_failures_release_both_handles_and_every_reserved_slot_before_return() {
     let _serial = SERIAL.lock().unwrap();
-    for case in 0..7 {
+    for case in 0..8 {
         assert!(CONTROL.callback_resources.is_empty());
         assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
         state().fds = FdTable::new();
@@ -163,7 +183,14 @@ fn native_failures_release_both_handles_and_every_reserved_slot_before_return() 
             0
         };
         let mut output = [-123; 2];
-        let result = implementation::create(output.as_mut_ptr(), flags);
+        let result = implementation::create(
+            if case == 7 {
+                1usize as *mut _
+            } else {
+                output.as_mut_ptr()
+            },
+            flags,
+        );
         if case < 2 {
             assert_eq!(result, Ok(0));
             assert_eq!(output, [0, 1]);
@@ -198,6 +225,7 @@ fn native_failures_release_both_handles_and_every_reserved_slot_before_return() 
                     2 => EMFILE,
                     3 => 12,
                     4 | 5 => EIO,
+                    7 => EFAULT,
                     _ => EAGAIN,
                 })
             );
@@ -205,7 +233,7 @@ fn native_failures_release_both_handles_and_every_reserved_slot_before_return() 
             assert!(LIVE.lock().unwrap().is_empty());
             assert_eq!(
                 *CLOSED.lock().unwrap(),
-                if matches!(case, 4 | 5) {
+                if matches!(case, 4 | 5 | 7) {
                     vec![10, 11]
                 } else {
                     vec![]
@@ -231,5 +259,27 @@ fn native_failures_release_both_handles_and_every_reserved_slot_before_return() 
         );
         assert!(CONTROL.callback_resources.is_empty());
         assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[test]
+fn pair_copy_preserves_c_integer_layout_and_never_installs_reserved_descriptors() {
+    let _serial = SERIAL.lock().unwrap();
+    let _native = defer_native_delivery();
+    state().fds = FdTable::new();
+    let pair = fd_creation::PendingPair(state().fds.reserve_pair_from(0, 2).unwrap());
+    let mut bytes = [0xa5u8; 10];
+    pair.copy_descriptors(bytes.as_mut_ptr().wrapping_add(1).cast())
+        .unwrap();
+    assert_eq!(&bytes[1..5], 0i32.to_ne_bytes());
+    assert_eq!(&bytes[5..9], 1i32.to_ne_bytes());
+    assert_eq!((bytes[0], bytes[9]), (0xa5, 0xa5));
+    assert_eq!(pair.copy_descriptors(1usize as *mut _), Err(EFAULT));
+    assert_eq!(pair.copy_descriptors(usize::MAX as *mut _), Err(EFAULT));
+    assert!(state().fds.get(0).is_none() && state().fds.get(1).is_none());
+    drop(pair);
+    let reused = state().fds.reserve_pair_from(0, 2).unwrap();
+    for reservation in &reused {
+        assert!(state().fds.cancel_reservation(reservation));
     }
 }
