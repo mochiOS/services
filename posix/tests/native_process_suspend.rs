@@ -5,6 +5,67 @@ use mnu_abi::SyscallNumber;
 mod probe;
 
 #[test]
+fn self_suspension_requires_context_and_observed_resumption() {
+    let mut program = probe::program();
+    program.push_str(
+        r#"
+use std::cell::Cell;
+use mnu_abi::status::Error;
+const SUCCESS:u64=0;
+thread_local! {
+    static PROCESS:Cell<bool>=const{Cell::new(true)};
+    static THREAD:Cell<bool>=const{Cell::new(true)};
+    static PRESENT:Cell<bool>=const{Cell::new(true)};
+    static ELIGIBLE:Cell<usize>=const{Cell::new(1)};
+    static SUSPENDED:Cell<bool>=const{Cell::new(true)};
+    static CALLS:Cell<usize>=const{Cell::new(0)};
+    static YIELDS:Cell<usize>=const{Cell::new(0)};
+    static RETIRE:Cell<bool>=const{Cell::new(false)};
+}
+mod syscall{pub mod security{
+    pub fn current_process_id()->Option<u64>{crate::PROCESS.get().then_some(7)}
+}}
+mod task {
+    pub struct Thread;
+    impl Thread{pub fn is_scheduling_suspended(&self)->bool{crate::SUSPENDED.get()}}
+    pub fn current_thread_id()->Option<u64>{crate::THREAD.get().then_some(9)}
+    pub fn with_thread<T>(id:u64,body:impl FnOnce(&Thread)->T)->Option<T>{
+        assert_eq!(id,9);crate::PRESENT.get().then(||body(&Thread))
+    }
+    pub fn suspend_process_threads(id:u64)->usize{
+        assert_eq!(id,7);crate::CALLS.set(crate::CALLS.get()+1);crate::ELIGIBLE.get()
+    }
+    pub fn yield_now(){
+        let count=crate::YIELDS.get()+1;crate::YIELDS.set(count);
+        if crate::RETIRE.get(){crate::PRESENT.set(false);}
+        else if count==3{crate::SUSPENDED.set(false);}
+        assert!(count<=3,"self-suspension failed to observe resumption");
+    }
+}
+"#,
+    );
+    program.push_str(probe::between(
+        include_str!("../../../core/src/syscall/process.rs"),
+        "pub fn suspend_current_process()",
+        "/// Sleepシステムコール",
+    ));
+    program.push_str(r#"
+fn main(){
+    PROCESS.set(false);assert_eq!(suspend_current_process(),Error::NotReady.into_raw());assert_eq!(CALLS.get(),0);
+    PROCESS.set(true);THREAD.set(false);assert_eq!(suspend_current_process(),Error::NotReady.into_raw());assert_eq!(CALLS.get(),0);
+    THREAD.set(true);ELIGIBLE.set(0);assert_eq!(suspend_current_process(),Error::NotReady.into_raw());assert_eq!(CALLS.get(),1);
+    ELIGIBLE.set(1);PRESENT.set(false);assert_eq!(suspend_current_process(),Error::NotReady.into_raw());assert_eq!(YIELDS.get(),0);
+    PRESENT.set(true);CALLS.set(0);assert_eq!(suspend_current_process(),0);assert_eq!(CALLS.get(),1);assert_eq!(YIELDS.get(),3);
+    // An immediate resume between suspension and the first read is success.
+    CALLS.set(0);YIELDS.set(0);assert_eq!(suspend_current_process(),0);assert_eq!(CALLS.get(),1);assert_eq!(YIELDS.get(),0);
+    SUSPENDED.set(true);RETIRE.set(true);CALLS.set(0);
+    assert_eq!(suspend_current_process(),Error::NotReady.into_raw());assert_eq!(CALLS.get(),1);assert_eq!(YIELDS.get(),1);
+}
+"#);
+    probe::run(&program);
+}
+
+#[test]
 fn control_entries_require_signal_authority_and_preserve_native_failures() {
     let mut program = probe::program();
     program.push_str(r#"
