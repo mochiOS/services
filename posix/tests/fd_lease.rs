@@ -118,7 +118,17 @@ fn runtime_pins_escaped_metadata_and_captures_the_book_with_native_handles() {
     assert!(!source.contains("*with_fd_entry(pollfds[poll_index].fd)?"));
     assert!(source.contains("Ok((base, Some(entry)))"));
     assert!(source.contains("Ok((entry, attachment))"));
-    assert!(source.contains("let backing_lease;"));
+    // mmap now keeps the source lease in a callback-safe owner and lends the
+    // received backing through a separate owner, rather than a stack local.
+    let mapping = source
+        .split("pub extern \"C\" fn mmap(")
+        .nth(1)
+        .unwrap()
+        .split("pub extern \"C\" fn munmap(")
+        .next()
+        .unwrap();
+    assert!(mapping.contains("mapping_io::with_source(mapping.anonymous, fd, |entry|"));
+    assert!(mapping.contains("return mapping_backing::with(entry, writable, map);"));
     let kernel = include_str!("../../../core/src/task/handle_table.rs");
     assert!(
         kernel.contains("PROCESS_MAX_OBJECT_HANDLES: usize = mnu_abi::PROCESS_MAX_OBJECT_HANDLES")
