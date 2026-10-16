@@ -522,11 +522,15 @@ impl ProcessWaitState {
 
     fn take_status(&mut self, options: u32) -> Option<u32> {
         if options & protocol::WAIT_UNTRACED != 0 && self.stopped && !self.stop_reported {
-            self.stop_reported = true;
+            if options & protocol::WAIT_NOWAIT == 0 {
+                self.stop_reported = true;
+            }
             return Some((self.stop_signal << 8) | 0x7f);
         }
         if options & protocol::WAIT_CONTINUED != 0 && self.continued_pending {
-            self.continued_pending = false;
+            if options & protocol::WAIT_NOWAIT == 0 {
+                self.continued_pending = false;
+            }
             return Some(protocol::WAIT_STATUS_CONTINUED);
         }
         None
@@ -1778,6 +1782,12 @@ impl<H: Copy> PosixService<H> {
                     .and_then(|state| state.termination_signal)
                     .map(|signal| signal & 0x7f)
                     .unwrap_or_else(|| ((exit_code & 0xff) as u32) << 8);
+                if request.options & protocol::WAIT_NOWAIT != 0 {
+                    return Ok(protocol::WaitResult {
+                        process_id: child,
+                        status,
+                    });
+                }
                 let usage = processes.execution_usage(handle)?;
                 if usage.ticks_per_second == 0 || usage.reserved != 0 {
                     return Err(protocol::STATUS_EIO);
