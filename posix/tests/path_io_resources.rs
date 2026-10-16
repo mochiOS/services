@@ -1,6 +1,8 @@
 //! Execute the actual path scope, including input mutation and reentrant close.
 #![allow(dead_code)]
-use mochios_posix_client::{ObjectHandleAttachment, OpenAtBase, StatAtBase, upcall_guard::Guard};
+use mochios_posix_client::{
+    AccessAtBase, ObjectHandleAttachment, OpenAtBase, StatAtBase, upcall_guard::Guard,
+};
 use mochios_posix_protocol as posix_protocol;
 use std::ffi::{c_char, c_int};
 use std::sync::Mutex;
@@ -135,6 +137,20 @@ fn map_posix_client_error(error: c_int) -> c_int {
     error
 }
 impl Client {
+    fn access_at(
+        &self,
+        base: AccessAtBase<u32>,
+        flags: u32,
+        modes: u32,
+        path: &str,
+    ) -> Result<(), c_int> {
+        let base = match base {
+            AccessAtBase::ProcessRoot => StatAtBase::ProcessRoot,
+            AccessAtBase::ProcessCwd => StatAtBase::ProcessCwd,
+            AccessAtBase::Directory(handle) => StatAtBase::Directory(handle),
+        };
+        self.mutation(base, path, (9, modes, flags, 0))
+    }
     fn stat_at(&self, base: StatAtBase<u32>, flags: u32, path: &str) -> Result<u32, c_int> {
         assert_eq!(flags, STAT_FLAGS.load(Ordering::Relaxed));
         assert!(!CONTROL.callback_resources.is_deferred());
@@ -276,6 +292,47 @@ fn reset() {
     CALLS.store(0, Ordering::Relaxed);
     DROPS.store(0, Ordering::Relaxed);
 }
+#[test]
+fn access_preserves_all_modes_and_id_follow_options_with_scoped_authority() {
+    let _serial = SERIAL.lock().unwrap();
+    for mode in 0..8 {
+        for flags in 0..4 {
+            for case in 0..4 {
+                reset();
+                CASE.store(case, Ordering::Relaxed);
+                *MUTATION.lock().unwrap() = None;
+                let mut input = *b"target\0";
+                INPUT.store(input.as_mut_ptr() as u64, Ordering::Relaxed);
+                assert_eq!(
+                    implementation::access(7, input.as_ptr().cast(), mode, flags),
+                    if case == 1 { Err(13) } else { Ok(()) }
+                );
+                assert_eq!(
+                    *MUTATION.lock().unwrap(),
+                    if case == 1 {
+                        None
+                    } else {
+                        Some((9, mode as u32, flags as u32, 0))
+                    }
+                );
+                assert_eq!(PINS.load(Ordering::Relaxed), 0);
+                assert_eq!(CLOSED.load(Ordering::Relaxed), u32::from(case == 2));
+                assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
+                assert!(CONTROL.callback_resources.is_empty());
+            }
+        }
+    }
+    reset();
+    for (mode, flags) in [(-1, 0), (8, 0), (0, -1), (0, 4), (0, 16)] {
+        assert_eq!(
+            implementation::access(7, c"target".as_ptr(), mode, flags),
+            Err(EINVAL)
+        );
+    }
+    assert_eq!(CALLS.load(Ordering::Relaxed), 0);
+    assert_eq!(PINS.load(Ordering::Relaxed), 0);
+}
+
 #[test]
 fn metadata_uses_the_actual_path_snapshot_without_deferring_callbacks_across_rpc() {
     let _serial = SERIAL.lock().unwrap();
