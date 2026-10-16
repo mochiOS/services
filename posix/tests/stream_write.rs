@@ -95,7 +95,7 @@ fn pipe_buf_matches_the_public_headers_and_native_stream_checks_rights() {
     assert!(abi.contains("StreamWrite = 675"));
     let start = handler.find("pub fn stream_write(").unwrap();
     let end = handler[start..].find("pub fn seek(").unwrap() + start;
-    assert!(handler[start..end].contains("object(raw, HandleRights::WRITE)"));
+    assert!(handler[start..end].contains("object_native(raw, HandleRights::WRITE)"));
     assert!(handler[start..end].contains("options & !mnu_abi::STREAM_WRITE_OPTIONS_ALL"));
     let kernel = include_str!("../../../core/src/syscall/fs.rs");
     assert!(!kernel.contains("PIPE_BUF:"));

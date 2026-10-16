@@ -47,7 +47,7 @@ fn legacy_blocking_streams_release_their_waiter_before_upcall_delivery() {
         let release = function[check..]
             .find("remove_stream_waiter(pipe_id, current)")
             .unwrap();
-        assert!(release < function[check..].find("return EAGAIN").unwrap());
+        assert!(release < function[check..].find("return Error::NotReady.into_raw()").unwrap());
     }
 }
 

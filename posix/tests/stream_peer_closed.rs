@@ -9,7 +9,7 @@ fn actual_stream_writer_handles_peer_closure_and_allocation_failure_without_muta
     probe::constants(
         &mut program,
         include_str!("../../../core/crates/abi/src/lib.rs"),
-        &["HANDLE_OPTION_NONBLOCKING"],
+        &["HANDLE_OPTION_NONBLOCKING","HANDLE_SIGNAL_READABLE","HANDLE_SIGNAL_WRITABLE","HANDLE_SIGNAL_PEER_CLOSED"],
     );
     program.push_str(probe::between(
         source,
@@ -22,11 +22,20 @@ fn actual_stream_writer_handles_peer_closure_and_allocation_failure_without_muta
         "struct PipeState {",
         "impl PipeState {",
     ));
+    program.push_str(&probe::between(source,"impl PipeState {","static PIPE_TABLE:")
+        .replace("mnu_abi::HANDLE_","HANDLE_"));
     program.push_str(
         r#"
 use std::sync::Mutex;
 use std::cell::Cell;
-thread_local!{static FAIL_AFTER:Cell<Option<usize>>=const{Cell::new(None)};}
+use mnu_abi::status::Error;
+thread_local!{
+    static FAIL_AFTER:Cell<Option<usize>>=const{Cell::new(None)};
+    static COPY_FAILURE:Cell<Option<Error>>=const{Cell::new(None)};
+    static CURRENT:Cell<Option<u64>>=const{Cell::new(Some(7))};
+    static UPCALL:Cell<bool>=const{Cell::new(false)};
+}
+static OUTPUT:Mutex<Vec<u8>>=Mutex::new(Vec::new());
 struct FaultAllocator;
 unsafe impl std::alloc::GlobalAlloc for FaultAllocator {
     unsafe fn alloc(&self,layout:std::alloc::Layout)->*mut u8 {
@@ -44,7 +53,7 @@ unsafe impl std::alloc::GlobalAlloc for FaultAllocator {
 #[global_allocator] static ALLOCATOR:FaultAllocator=FaultAllocator;
 static WOKEN:Mutex<Vec<u64>>=Mutex::new(Vec::new());
 struct FileHandle{stream:usize}
-impl FileHandle{fn stream_endpoint(&self)->Option<(usize,bool)>{Some((self.stream,false))}}
+impl FileHandle{fn stream_endpoint(&self)->Option<(usize,bool)>{Some((self.stream,self.stream==1))}}
 mod interrupt {pub mod spinlock {
     pub struct SpinLock<T>(std::sync::Mutex<T>);
     impl<T> SpinLock<T>{
@@ -54,21 +63,25 @@ mod interrupt {pub mod spinlock {
 }}
 mod task {
     pub type ThreadId=u64;
-    pub fn current_thread_id()->Option<u64>{Some(7)}
+    pub fn current_thread_id()->Option<u64>{crate::CURRENT.get()}
     pub fn wake_registered_waiter(tid:u64){crate::WOKEN.lock().unwrap().push(tid);}
     pub fn sleep_thread_unless_woken(_:u64){panic!("closed peer must not wait")}
     pub fn yield_now(){panic!("closed peer must not yield")}
 }
 mod performance {pub fn record_vfs_temporary_buffer(_:usize){}}
 mod syscall {
-    pub fn copy_to_user(_:u64,_:&[u8])->Result<(),u64>{panic!("empty reader must not copy")}
-    pub fn copy_from_user(pointer:u64,bytes:&mut [u8])->Result<(),u64>{
+    pub fn copy_to_user_native(pointer:u64,bytes:&[u8])->Result<(),crate::Error>{
+        if let Some(error)=crate::COPY_FAILURE.get(){return Err(error);}
+        assert_eq!(pointer,1);*crate::OUTPUT.lock().unwrap()=bytes.to_vec();Ok(())
+    }
+    pub fn copy_from_user_native(pointer:u64,bytes:&mut [u8])->Result<(),crate::Error>{
+        if let Some(error)=crate::COPY_FAILURE.get(){return Err(error);}
         assert_ne!(pointer,0);
         unsafe{std::ptr::copy_nonoverlapping(pointer as *const u8,bytes.as_mut_ptr(),bytes.len());}
         Ok(())
     }
 }
-mod upcall {pub fn current_has_deliverable_upcall()->bool{false}}
+mod upcall {pub fn current_has_deliverable_upcall()->bool{crate::UPCALL.get()}}
 "#,
     );
     program.push_str(probe::between(
@@ -80,6 +93,11 @@ mod upcall {pub fn current_has_deliverable_upcall()->bool{false}}
         source,
         "pub fn close_pipe_endpoint_from_kernel(",
         "pub(crate) fn stream_signals(",
+    ));
+    program.push_str(probe::between(
+        source,
+        "pub(crate) fn stream_signals(",
+        "pub(crate) fn register_stream_waiter(",
     ));
     program.push_str(probe::between(
         source,
@@ -172,6 +190,42 @@ fn main(){
     let pending=FAIL_AFTER.replace(None);
     assert_eq!(pending,Some(0));assert_eq!(result,Ok(2));
     assert_eq!(PIPE_TABLE.lock()[2].as_ref().unwrap().waiters,vec![7]);
+    // Native copy failures preserve queued bytes and existing waiters.
+    PIPE_TABLE.lock()[2]=Some(PipeState{data:b"old".to_vec(),readers:1,writers:1,waiters:vec![9]});
+    for error in [Error::InvalidAddress,Error::ResourceUnavailable,Error::BackingFailure] {
+        COPY_FAILURE.set(Some(error));
+        assert_eq!(io::read_pipe(2,0,1,3),error.into_raw());
+        assert_eq!(io::write_pipe(2,0,input.as_ptr() as u64,3,true),error.into_raw());
+        let table=PIPE_TABLE.lock();let pipe=table[2].as_ref().unwrap();
+        assert_eq!(pipe.data,b"old");assert_eq!(pipe.waiters,vec![9]);
+        assert!(OUTPUT.lock().unwrap().is_empty());
+    }
+    COPY_FAILURE.set(None);
+    assert_eq!(io::read_pipe(2,0,1,2),2);assert_eq!(*OUTPUT.lock().unwrap(),b"ol");
+    assert_eq!(PIPE_TABLE.lock()[2].as_ref().unwrap().data,b"d");
+    // A missing context is not a POSIX bad descriptor.
+    CURRENT.set(None);
+    assert_eq!(io::read_pipe(2,0,1,1),Error::NotReady.into_raw());
+    assert_eq!(io::write_pipe(2,0,input.as_ptr() as u64,3,true),Error::NotReady.into_raw());
+    CURRENT.set(Some(7));
+    assert_eq!(io::read_pipe(MAX_PIPES,0,1,1),Error::InvalidArgument.into_raw());
+    assert_eq!(io::write_pipe(MAX_PIPES,0,input.as_ptr() as u64,3,true),Error::InvalidArgument.into_raw());
+    PIPE_TABLE.lock()[2]=Some(PipeState{data:Vec::new(),readers:1,writers:1,waiters:Vec::new()});
+    assert_eq!(io::read_pipe(2,HANDLE_OPTION_NONBLOCKING,1,1),Error::NotReady.into_raw());
+    UPCALL.set(true);
+    assert_eq!(io::read_pipe(2,0,1,1),Error::NotReady.into_raw());
+    assert!(PIPE_TABLE.lock()[2].as_ref().unwrap().waiters.is_empty());
+    PIPE_TABLE.lock()[2].as_mut().unwrap().writers=0;
+    assert_eq!(io::read_pipe(2,0,1,1),0);
+    PIPE_TABLE.lock()[2]=Some(PipeState{data:vec![1;PIPE_BUFFER_CAP],readers:1,writers:1,waiters:Vec::new()});
+    assert_eq!(io::write_pipe(2,HANDLE_OPTION_NONBLOCKING,input.as_ptr() as u64,3,true),Error::NotReady.into_raw());
+    assert_eq!(io::write_pipe(2,0,input.as_ptr() as u64,3,true),Error::NotReady.into_raw());
+    assert!(PIPE_TABLE.lock()[2].as_ref().unwrap().waiters.is_empty());
+    UPCALL.set(false);
+    assert_eq!(stream_signals_for_capacity(&FileHandle{stream:1},512),Ok(HANDLE_SIGNAL_WRITABLE));
+    assert_eq!(stream_signals_for_capacity(&FileHandle{stream:1},u32::MAX),Err(Error::InvalidArgument.into_raw()));
+    assert_eq!(stream_signals_for_capacity(&FileHandle{stream:2},1),Err(Error::InvalidArgument.into_raw()));
+    assert_eq!(stream_signals_for_capacity(&FileHandle{stream:MAX_PIPES},0),Err(Error::InvalidArgument.into_raw()));
 }
 "#,
     );

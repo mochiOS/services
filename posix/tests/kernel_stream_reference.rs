@@ -12,6 +12,7 @@ fn actual_native_stream_references_share_options_and_close_only_at_last_referenc
 extern crate alloc;
 extern crate self as mnu_abi;
 pub const HANDLE_OPTION_NONBLOCKING: u64 = 1;
+pub const HANDLE_OPTIONS_ALL: u64 = HANDLE_OPTION_NONBLOCKING;
 use std::sync::atomic::{AtomicUsize, Ordering};
 static READ_CLOSED: AtomicUsize = AtomicUsize::new(0);
 static WRITE_CLOSED: AtomicUsize = AtomicUsize::new(0);
@@ -33,14 +34,17 @@ mod syscall {
 } }
 "#,
     );
+    program.push_str("pub mod status {\n");
+    program.push_str(&include_str!("../../../core/crates/abi/src/status.rs").replace("//!", "//"));
+    program.push_str("}\nuse status::Error;\n");
     program.push_str(&format!("#[path = {source:?}] mod objects;\n"));
     program.push_str(
         r#"
 mod io {
     use super::*;
     use objects::{FileHandle, FileHandleCap};
-    pub const EFAULT: u64 = (-14i64) as u64;
-    pub const EACCES: u64 = (-13i64) as u64;
+    pub const EFAULT: u64 = crate::Error::InvalidAddress.into_raw();
+    pub const EACCES: u64 = crate::Error::AccessDenied.into_raw();
     const ENOTSUP: u64 = (-95i64) as u64;
     fn read_pipe(id: usize, options: u64, pointer: u64, len: u64) -> u64 {
         assert_eq!((id, options, pointer), (42, HANDLE_OPTION_NONBLOCKING, 1)); len
@@ -52,6 +56,8 @@ mod io {
     );
     let filesystem = include_str!("../../../core/src/syscall/fs.rs");
     for entry in [
+        "pub(crate) fn file_handle_options(",
+        "pub(crate) fn set_file_handle_options(",
         "pub(crate) fn read_file_handle(",
         "pub(crate) fn write_file_handle(",
     ] {
@@ -79,6 +85,16 @@ fn main() {
     reader.open.lock().io_options = HANDLE_OPTION_NONBLOCKING;
     assert_eq!(duplicate.open.lock().io_options, HANDLE_OPTION_NONBLOCKING);
     assert_eq!(writer.open.lock().io_options, 0);
+    assert_eq!(io::file_handle_options(&duplicate),Ok(HANDLE_OPTION_NONBLOCKING));
+    assert_eq!(io::set_file_handle_options(&duplicate,2),Err(Error::InvalidArgument.into_raw()));
+    assert_eq!(io::file_handle_options(&reader),Ok(HANDLE_OPTION_NONBLOCKING));
+    assert_eq!(io::set_file_handle_options(&duplicate,0),Ok(()));
+    assert_eq!(io::file_handle_options(&reader),Ok(0));
+    assert_eq!(io::set_file_handle_options(&reader,HANDLE_OPTION_NONBLOCKING),Ok(()));
+    let unsupported=FileHandle::new(objects::OpenFile{pipe_id:None,pipe_write:false,io_options:0},FileHandleCap::READ);
+    assert_eq!(io::file_handle_options(&unsupported),Err(Error::InvalidArgument.into_raw()));
+    assert_eq!(io::set_file_handle_options(&unsupported,0),Err(Error::InvalidArgument.into_raw()));
+    assert_eq!(unsupported.open.lock().io_options,0);
     assert_eq!(io::read_file_handle(&reader, 1, 7), 7);
     assert_eq!(io::write_file_handle(&writer, 1, 8), 8);
     assert_eq!(io::read_file_handle(&writer, 1, 7), io::EACCES);

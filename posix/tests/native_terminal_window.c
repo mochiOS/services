@@ -403,7 +403,7 @@ int main(void) {
     memset(capacity_block, 'c', sizeof(capacity_block));
     for (;;) {
         int64_t count = native_call4(675, native_pair[1], (uintptr_t)capacity_block, sizeof(capacity_block), 3);
-        if (count < 0) { CHECK(count == -EAGAIN); break; }
+        if (count < 0) { CHECK(count == INT64_C(-262137)); break; }
         CHECK(count == 512);
     }
     struct native_wait_item capacity_wait = {native_pair[1], 512, 4, 0};
@@ -418,10 +418,10 @@ int main(void) {
     CHECK((capacity_wait.observed & 4) != 0);
     CHECK(native_call4(675, native_pair[1], (uintptr_t)capacity_block, 512, 3) == 512);
     capacity_wait.minimum_write_bytes = UINT32_MAX;
-    CHECK(native_call4(647, (uintptr_t)&capacity_wait, 1, 0, 0) == -EINVAL);
+    CHECK(native_call4(647, (uintptr_t)&capacity_wait, 1, 0, 0) == INT64_C(-262139));
     capacity_wait.minimum_write_bytes = 512;
     capacity_wait.handle = native_pair[0];
-    CHECK(native_call4(647, (uintptr_t)&capacity_wait, 1, 0, 0) == -EINVAL);
+    CHECK(native_call4(647, (uintptr_t)&capacity_wait, 1, 0, 0) == INT64_C(-262139));
     CHECK(native_call4(626, native_pair[0], 0, 0, 0) == 0);
     CHECK(native_call4(675, native_pair[1], (uintptr_t)capacity_block, 512, 3) == INT64_C(-262134));
     CHECK(native_call4(626, native_pair[1], 0, 0, 0) == 0);
