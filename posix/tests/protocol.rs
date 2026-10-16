@@ -30,6 +30,9 @@ mod metadata_admission;
 #[path = "support/fork_process_limit.rs"]
 mod fork_process_limit;
 
+#[path = "support/canonical_path_protocol.rs"]
+mod canonical_path_protocol;
+
 struct LocalTransport {
     service: RefCell<PosixService>,
     peer: PeerIdentity,
@@ -1532,6 +1535,17 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
             handle: 200,
             rights: 0x81,
         })
+    }
+
+    fn canonical_path_at(
+        &mut self,
+        request: &PreparedStat,
+        paths: PathObjects<u32>,
+    ) -> Result<Vec<u8>, i32> {
+        self.stat_request = Some(request.clone());
+        self.root = Some(paths.root);
+        self.directory = paths.base;
+        Ok(b"/resolved/target".to_vec())
     }
 
     fn stat_at(

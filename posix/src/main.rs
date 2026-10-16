@@ -2554,6 +2554,38 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         )
     }
 
+    fn canonical_path_at(
+        &mut self,
+        request: &posix_service::PreparedStat,
+        paths: posix_service::PathObjects<mochi_user_platform::handle::Handle>,
+    ) -> Result<Vec<u8>, i32> {
+        use mochios_filesystem_protocol as filesystem;
+        let flags = filesystem::STAT_AT_ROOT_ATTACHED
+            | if paths.base.is_some() {
+                filesystem::STAT_AT_BASE_ATTACHED
+            } else {
+                0
+            };
+        let handles = Self::path_handles(paths)?;
+        let payload = Self::credential_payload(
+            request.effective_uid,
+            request.effective_gid,
+            &request.supplementary_groups,
+            request.path.as_bytes(),
+        )?;
+        self.payload_call(
+            filesystem::Header {
+                opcode: filesystem::OP_CANONICAL_PATH_AT,
+                request_id: 22,
+                flags,
+                length: payload.len() as u32,
+                ..Default::default()
+            },
+            &payload,
+            handles,
+        )
+    }
+
     fn stat_at(
         &mut self,
         request: &posix_service::PreparedStat,

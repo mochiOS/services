@@ -320,6 +320,15 @@ pub trait FilesystemBackend<H: Copy> {
         paths: PathObjects<H>,
     ) -> Result<protocol::FileStatus, i32>;
 
+    /// Resolves and reconstructs an existing pathname in one filesystem call.
+    fn canonical_path_at(
+        &mut self,
+        _request: &PreparedStat,
+        _paths: PathObjects<H>,
+    ) -> Result<Vec<u8>, i32> {
+        Err(protocol::STATUS_ENOSYS)
+    }
+
     /// Reads metadata from the open file description identified by `file`.
     fn fstat(&mut self, file: AttachedObject<H>) -> Result<protocol::FileStatus, i32>;
 
@@ -3268,6 +3277,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_GROUPS_GET
             | protocol::OP_OPEN_AT
             | protocol::OP_STAT_AT
+            | protocol::OP_CANONICAL_PATH_AT
             | protocol::OP_FSTAT
             | protocol::OP_ACCESS_AT
             | protocol::OP_CHDIR_AT
@@ -3398,6 +3408,7 @@ impl<H: Copy> PosixService<H> {
             header.opcode,
             protocol::OP_OPEN_AT
                 | protocol::OP_STAT_AT
+                | protocol::OP_CANONICAL_PATH_AT
                 | protocol::OP_FSTAT
                 | protocol::OP_ACCESS_AT
                 | protocol::OP_CHDIR_AT
@@ -3449,6 +3460,7 @@ impl<H: Copy> PosixService<H> {
             header.opcode,
             protocol::OP_OPEN_AT
                 | protocol::OP_STAT_AT
+                | protocol::OP_CANONICAL_PATH_AT
                 | protocol::OP_ACCESS_AT
                 | protocol::OP_CHDIR_AT
                 | protocol::OP_CHROOT_AT
@@ -3488,6 +3500,21 @@ impl<H: Copy> PosixService<H> {
                         handles: vec![opened],
                     },
                     Err(error) => object_mutation_error(header.request_id, error, admission.is_some(), filesystem),
+                }
+            }
+            protocol::OP_CANONICAL_PATH_AT => {
+                let prepared = match self.prepare_stat_at(peer, payload, handles.len()) {
+                    Ok(prepared) if prepared.flags == 0 => prepared,
+                    Ok(_) => return object_error(header.request_id, STATUS_EINVAL),
+                    Err(status) => return object_error(header.request_id, status),
+                };
+                let paths = match self.path_objects(peer.process_id, prepared.base, handles) {
+                    Ok(paths) => paths,
+                    Err(status) => return object_error(header.request_id, status),
+                };
+                match filesystem.canonical_path_at(&prepared, paths) {
+                    Ok(path) => object_payload(header.request_id, path),
+                    Err(status) => object_error(header.request_id, status),
                 }
             }
             protocol::OP_STAT_AT => {
