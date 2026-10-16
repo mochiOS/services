@@ -423,6 +423,7 @@ int main(void) {
     capacity_wait.handle = native_pair[0];
     CHECK(native_call4(647, (uintptr_t)&capacity_wait, 1, 0, 0) == -EINVAL);
     CHECK(native_call4(626, native_pair[0], 0, 0, 0) == 0);
+    CHECK(native_call4(675, native_pair[1], (uintptr_t)capacity_block, 512, 3) == INT64_C(-262134));
     CHECK(native_call4(626, native_pair[1], 0, 0, 0) == 0);
     debug("native-terminal-window: capacity thresholds passed\n");
     for (uintptr_t iteration = 1; iteration <= 128; ++iteration) {
