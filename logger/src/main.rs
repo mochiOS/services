@@ -142,8 +142,12 @@ fn append_log_line(line: &[u8]) -> platform::syscall::SysResult<()> {
     posix_io::append_and_sync(&path, line, 0o640)
 }
 
+fn error_errno(error: platform::syscall::SysError) -> u64 {
+    u64::from(mochios_posix_protocol::status::normalize_failure(error.raw()).unsigned_abs())
+}
+
 fn report_persistence_error(error: platform::syscall::SysError) {
-    let errno = error.errno().unwrap_or(5);
+    let errno = error_errno(error);
     let _ = platform::write_fmt(
         platform::io::STDERR,
         format_args!("logger.service: log persistence failed errno={errno}\n"),
@@ -206,7 +210,14 @@ fn main() {
                         Ok(())
                     })
                     .map(|_| 0)
-                    .unwrap_or_else(|error| error.errno().unwrap_or(mochi_user_syscall::EIO))
+                    .unwrap_or_else(error_errno)
+            };
+            // Direct validation failures above are signed native constants;
+            // the legacy handoff reply carries a positive POSIX magnitude.
+            let status = if status == 0 {
+                0
+            } else {
+                error_errno(platform::syscall::SysError::from_raw(status as i64))
             };
             close_received_handles(&attached);
             let _ = platform::ipc::reply(sender, &status.to_le_bytes());
