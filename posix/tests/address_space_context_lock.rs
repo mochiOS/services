@@ -27,9 +27,9 @@ mod task {
         let result=f(&());crate::LOCKED.with(|v|v.set(false));Some(result)
     }
 }
-mod mnu_abi {pub struct ThreadCreateContext;}
+mod mnu_abi {pub struct ThreadCreateContext;pub mod status { @STATUS@ }}
 mod mem {pub mod address_space {
-    pub enum ConsumeError {Consumed,Authorization,BackingBusy,Context}
+    pub enum ConsumeError {Consumed,Authorization,Backing(crate::mnu_abi::status::Error),Context}
     #[derive(Debug,PartialEq)]pub struct AddressSpaceImage;
     pub struct AddressSpaceObject;
     impl AddressSpaceObject {
@@ -39,7 +39,12 @@ mod mem {pub mod address_space {
             crate::CALLS.with(|v|v.set(v.get()+1));
             match crate::MODE.with(|v|v.get()) {
                 0=>Ok(AddressSpaceImage),1=>Err(ConsumeError::Consumed),
-                2=>Err(ConsumeError::Authorization),4=>Err(ConsumeError::BackingBusy),_=>Err(ConsumeError::Context),
+                2=>Err(ConsumeError::Authorization),
+                4=>Err(ConsumeError::Backing(crate::mnu_abi::status::Error::NotReady)),
+                5=>Err(ConsumeError::Backing(crate::mnu_abi::status::Error::BackingFailure)),
+                6=>Err(ConsumeError::Backing(crate::mnu_abi::status::Error::AccessDenied)),
+                7=>Err(ConsumeError::Backing(crate::mnu_abi::status::Error::ResourceUnavailable)),
+                _=>Err(ConsumeError::Context),
             }
         }
     }
@@ -52,7 +57,11 @@ fn main() {
     let image=mem::address_space::AddressSpaceObject;
     let authorization=task::process::PendingExecSecurity;let context=mnu_abi::ThreadCreateContext;
     assert_eq!(consume_address_space_for_create(&image,&authorization,&context),Ok(mem::address_space::AddressSpaceImage));
-    for (mode,error) in [(1,11),(2,13),(3,14),(4,11)] {
+    for (mode,error) in [(1,11),(2,13),(3,14),
+        (4,mnu_abi::status::Error::NotReady.into_raw()),
+        (5,mnu_abi::status::Error::BackingFailure.into_raw()),
+        (6,mnu_abi::status::Error::AccessDenied.into_raw()),
+        (7,mnu_abi::status::Error::ResourceUnavailable.into_raw())] {
         MODE.with(|v|v.set(mode));
         assert_eq!(consume_address_space_for_create(&image,&authorization,&context),Err(error));
     }
@@ -60,9 +69,13 @@ fn main() {
     assert_eq!(consume_address_space_for_create(&image,&authorization,&context),Err(13));
     PID.with(|v|v.set(None));
     assert_eq!(consume_address_space_for_create(&image,&authorization,&context),Err(13));
-    assert_eq!(CALLS.with(|v|v.get()),5);assert!(!LOCKED.with(|v|v.get()));
+    assert_eq!(CALLS.with(|v|v.get()),8);assert!(!LOCKED.with(|v|v.get()));
 }
 "#);
+    program = program.replace(
+        "@STATUS@",
+        include_str!("../../../core/crates/abi/src/status.rs"),
+    );
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -101,7 +114,9 @@ fn native_creation_uses_locked_image_consumption_only() {
         .split("fn create_from_address_space(")
         .nth(1)
         .unwrap();
-    assert!(creation.contains("consume_address_space_for_create(&image, &authorization, &context)"));
+    assert!(
+        creation.contains("consume_address_space_for_create(&image, &authorization, &context)")
+    );
     assert!(!creation.contains("image.consume("));
     assert_eq!(source.matches("image.consume(").count(), 1);
 }

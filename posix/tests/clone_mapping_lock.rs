@@ -39,7 +39,7 @@ mod mem {
         if crate::MODE.load(crate::Ordering::Acquire)==3 {Err(())} else {Ok(())}
     } }
     pub mod address_space {
-        pub enum CloneError { BorrowedMapping, BackingBusy, MissingPageTable, Allocation }
+        pub enum CloneError { BorrowedMapping, Backing(crate::mnu_abi::status::Error), MissingPageTable, Allocation }
         pub struct CloneSource;
         pub struct Image;
         impl Drop for Image {fn drop(&mut self) {
@@ -52,7 +52,10 @@ mod mem {
                 assert!(crate::QUIESCENT.load(crate::Ordering::Acquire));
                 match crate::MODE.load(crate::Ordering::Acquire) {
                     1 => Err(CloneError::BorrowedMapping),
-                    5 => Err(CloneError::BackingBusy),
+                    5 => Err(CloneError::Backing(crate::mnu_abi::status::Error::NotReady)),
+                    8 => Err(CloneError::Backing(crate::mnu_abi::status::Error::BackingFailure)),
+                    9 => Err(CloneError::Backing(crate::mnu_abi::status::Error::AccessDenied)),
+                    10 => Err(CloneError::Backing(crate::mnu_abi::status::Error::ResourceUnavailable)),
                     6 => Err(CloneError::Allocation),
                     7 => Err(CloneError::MissingPageTable),
                     _ => Ok(Self),
@@ -119,7 +122,11 @@ mod task {
     program.push_str(&source[start..end]);
     program.push_str(r#"
 fn main() {
-    for (mode, expected, sync) in [(0,7,true),(1,EPERM,false),(2,ENOMEM,true),(3,syscall::EIO,true),(4,ENOSPC,true),(5,EAGAIN,false),(6,ENOMEM,false),(7,ENOSYS,false)] {
+    for (mode, expected, sync) in [(0,7,true),(1,EPERM,false),(2,ENOMEM,true),(3,syscall::EIO,true),(4,ENOSPC,true),
+        (5,mnu_abi::status::Error::NotReady.into_raw(),false),(6,ENOMEM,false),(7,ENOSYS,false),
+        (8,mnu_abi::status::Error::BackingFailure.into_raw(),false),
+        (9,mnu_abi::status::Error::AccessDenied.into_raw(),false),
+        (10,mnu_abi::status::Error::ResourceUnavailable.into_raw(),false)] {
         MODE.store(mode,Ordering::Release); SYNCED.store(false,Ordering::Release);
         assert_eq!(clone_address_space(),expected);
         assert_eq!(SYNCED.load(Ordering::Acquire),sync);
@@ -137,6 +144,9 @@ fn main() {
     ALLOWED.store(false,Ordering::Release); assert_eq!(clone_address_space(),EPERM);
 }
 "#);
+    program.push_str("\nmod mnu_abi {pub mod status {\n");
+    program.push_str(include_str!("../../../core/crates/abi/src/status.rs"));
+    program.push_str("\n}}\n");
     let directory = std::env::temp_dir().join(format!(
         "mochios-clone-lock-{}-{}",
         std::process::id(),

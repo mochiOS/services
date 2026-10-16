@@ -13,6 +13,7 @@ fn native_provider_memory_update_probe_tracks_the_authoritative_abi() {
         ("HANDLE_RIGHTS_GET", Number::HandleRightsGet),
         ("HANDLE_CONTROL", Number::HandleControl),
         ("HANDLE_READ_AT", Number::HandleReadAt),
+        ("IMAGE_CLONE", Number::AddressSpaceClone),
         (
             "PROVIDER_MEMORY_UPDATE_CREATE",
             Number::ProviderMemoryUpdateCreate,

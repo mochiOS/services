@@ -11,6 +11,7 @@ enum {
   HANDLE_RIGHTS_GET = 664,
   HANDLE_CONTROL = 668,
   HANDLE_READ_AT = 673,
+  IMAGE_CLONE = 679,
   PROVIDER_MEMORY_UPDATE_CREATE = 697
 };
 static _Atomic int64_t owner_endpoint;
@@ -145,6 +146,7 @@ int PROVIDER_MEMORY_UPDATE_MAIN(void) {
   CHECK(native(HANDLE_CONTROL, update, 1, 0, 1, 0, 0) == -22);
   CHECK(native(MEMORY_PROTECT, private_address, 8192, 1, 0, 0, 0) ==
         INT64_C(-262137));
+  CHECK(native(IMAGE_CLONE, 0, 0, 0, 0, 0, 0) == INT64_C(-262137));
   CHECK(native(HANDLE_CLOSE, update, 0, 0, 0, 0, 0) == 0); /* before BEGIN */
   CHECK(p[0] == 'P' && p[8191] == 'b');
   update =
@@ -171,6 +173,7 @@ int PROVIDER_MEMORY_UPDATE_MAIN(void) {
         INT64_C(-262140));
   CHECK(native(MEMORY_PROTECT, shared_address, 8192, 1, 0, 0, 0) ==
         INT64_C(-262140));
+  CHECK(native(IMAGE_CLONE, 0, 0, 0, 0, 0, 0) == INT64_C(-262140));
   unsigned char byte;
   CHECK(native(HANDLE_READ_AT, object, (uintptr_t)&byte, 1, 0, 0, 0) == -5);
   CHECK(native(MEMORY_UNMAP, private_address, 8192, 0, 0, 0, 0) == 0);
@@ -179,6 +182,7 @@ int PROVIDER_MEMORY_UPDATE_MAIN(void) {
   void *result;
   CHECK(pthread_join(thread, &result) == 0 && result == NULL);
   puts("provider-memory-update: PASS owner authority, private Handle, "
-       "cancellation, publication and unknown-outcome cleanup");
+       "cancellation, publication, clone failure provenance and "
+       "unknown-outcome cleanup");
   return 0;
 }

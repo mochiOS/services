@@ -78,6 +78,7 @@ mod task {
     }
     pub struct VmObject {
         pub reserved: std::sync::atomic::AtomicBool,
+        pub failure: std::sync::atomic::AtomicU64,
     }
     impl VmObject {
         pub fn memory_identity(&self) -> Option<u64> {
@@ -95,6 +96,11 @@ mod task {
             install: impl FnOnce() -> Result<T, mnu_abi::status::Error>,
         ) -> Result<T, mnu_abi::status::Error> {
             assert_eq!(generation, Some(1));
+            if let Some(error) = mnu_abi::status::Error::from_raw(
+                self.failure.load(std::sync::atomic::Ordering::Acquire),
+            ) {
+                return Err(error);
+            }
             if self.reserved.load(std::sync::atomic::Ordering::Acquire) {
                 Err(mnu_abi::status::Error::NotReady)
             } else {
@@ -386,6 +392,7 @@ fn image_captured_before_reservation_is_not_consumed_or_walked_until_retry() {
         source.measured = measured;
         let backing = Arc::new(task::VmObject {
             reserved: AtomicBool::new(false),
+            failure: std::sync::atomic::AtomicU64::new(0),
         });
         source.regions[selected].object = Some(backing.clone());
         let captured = address_space::CloneSource::capture(&source)
@@ -405,7 +412,7 @@ fn image_captured_before_reservation_is_not_consumed_or_walked_until_retry() {
                     .consume(&task::process::PendingExecSecurity, &context)
                     .err(),
                 Some(if measured {
-                    address_space::ConsumeError::BackingBusy
+                    address_space::ConsumeError::Backing(mnu_abi::status::Error::NotReady)
                 } else {
                     address_space::ConsumeError::Authorization
                 })
@@ -590,11 +597,14 @@ fn reserved_shared_or_private_backing_rejects_capture_before_cow_and_root_creati
         let mut source = source();
         let object = Arc::new(task::VmObject {
             reserved: AtomicBool::new(true),
+            failure: std::sync::atomic::AtomicU64::new(0),
         });
         source.regions[selected].object = Some(object.clone());
         assert!(matches!(
             address_space::CloneSource::capture(&source),
-            Err(address_space::CloneError::BackingBusy)
+            Err(address_space::CloneError::Backing(
+                mnu_abi::status::Error::NotReady
+            ))
         ));
         paging::STATE.with(|state| {
             assert_eq!(state.borrow().calls, 0);
@@ -613,6 +623,54 @@ fn reserved_shared_or_private_backing_rejects_capture_before_cow_and_root_creati
         drop(image);
         paging::STATE
             .with(|state| assert_eq!(state.borrow().destroyed, [crate::paging::cloned_table()]));
+    }
+}
+
+#[test]
+fn backing_failures_keep_their_native_cause_and_do_not_consume_the_image() {
+    use mnu_abi::status::Error;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    for selected in 0..2 {
+        for failure in [
+            Error::BackingFailure,
+            Error::AccessDenied,
+            Error::ResourceUnavailable,
+        ] {
+            let mut source = source();
+            source.measured = true;
+            let backing = Arc::new(task::VmObject {
+                reserved: AtomicBool::new(false),
+                failure: AtomicU64::new(failure.into_raw()),
+            });
+            source.regions[selected].object = Some(backing.clone());
+            assert!(matches!(address_space::CloneSource::capture(&source),
+                Err(address_space::CloneError::Backing(error)) if error==failure));
+            paging::STATE.with(|state| assert_eq!(state.borrow().calls, 0));
+            backing.failure.store(0, Ordering::Release);
+            let image = address_space::CloneSource::capture(&source)
+                .ok()
+                .unwrap()
+                .clone_image()
+                .ok()
+                .unwrap();
+            let object = address_space::AddressSpaceObject::new(image);
+            backing.failure.store(failure.into_raw(), Ordering::Release);
+            for _ in 0..2 {
+                assert!(
+                    matches!(object.consume(&task::process::PendingExecSecurity, &initial_context()),
+                    Err(address_space::ConsumeError::Backing(error)) if error==failure)
+                );
+            }
+            paging::STATE.with(|state| {
+                assert_eq!(state.borrow().context_walks, 0);
+                assert!(state.borrow().destroyed.is_empty());
+            });
+            // Failure retained ownership: discarding the object still reclaims
+            // the complete image exactly once, without needing a retry loop.
+            drop(object);
+            paging::STATE
+                .with(|state| assert_eq!(state.borrow().destroyed, [paging::cloned_table()]));
+        }
     }
 }
 
