@@ -211,10 +211,26 @@ static int blocked_cases(void) {
 
 static volatile sig_atomic_t output_fault;
 static sigjmp_buf output_escape;
+static struct sockaddr *bad_address;
+static socklen_t *bad_length;
 static void bad_output(int signal) {
   if (signal != SIGSEGV)
     _exit(91);
   output_fault = 1;
+  int64_t baseline = native(680, 0, 0, 0);
+  int nested_client = -1;
+  if (outcome == 1 || outcome == 2) {
+    nested_client = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (nested_client < 0 || connect(nested_client, (struct sockaddr *)&destination,
+                                     destination_length))
+      _exit(92);
+  }
+  if (accept4(listener, bad_address, bad_length, SOCK_NONBLOCK | SOCK_CLOEXEC) != -1 ||
+      errno != EFAULT)
+    _exit(93);
+  if ((nested_client >= 0 && close(nested_client)) ||
+      native(680, 0, 0, 0) != baseline)
+    _exit(94);
   siglongjmp(output_escape, 37);
 }
 int main(void) {
@@ -224,7 +240,7 @@ int main(void) {
   action.sa_handler = bad_output;
   sigemptyset(&action.sa_mask);
   CHECK(sigaction(SIGSEGV, &action, NULL) == 0);
-  for (outcome = 0; outcome < 3; ++outcome) {
+  for (outcome = 0; outcome < 8; ++outcome) {
     snprintf(destination.sun_path, sizeof(destination.sun_path),
              "/tmp/accept-output-%d-%u", (int)getpid(), outcome);
     destination_length = 2 + strlen(destination.sun_path) + 1;
@@ -241,25 +257,43 @@ int main(void) {
     unsigned char *page = mmap(NULL, 8192, PROT_READ | PROT_WRITE,
                                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     CHECK(page != MAP_FAILED);
+    memset(page, 0xa5, 4096);
     socklen_t *length = (socklen_t *)(page + 4096);
-    *length = 110;
+    *length = outcome == 5 ? 0 : outcome == 6 ? 1 : 110;
     int expected = dup(listener);
     CHECK(expected >= 0 && close(expected) == 0);
     int64_t baseline = native(680, 0, 0, 0);
-    if (outcome)
+    if (outcome == 1 || outcome == 2 || outcome == 5)
       CHECK(mprotect(page + (outcome == 2 ? 4096 : 0), 4096, PROT_READ) == 0);
+    if (outcome == 3 || outcome == 7)
+      CHECK(mprotect(page + 4096, 4096, PROT_NONE) == 0);
+    bad_address = outcome == 4 ? NULL : (struct sockaddr *)(page + (outcome == 6 ? 1 : 0));
+    bad_length = outcome == 4 ? (socklen_t *)1 : outcome == 7 ? NULL : length;
     output_fault = 0;
     int jumped = sigsetjmp(output_escape, 1);
     if (!jumped) {
-      int accepted = accept4(listener, (struct sockaddr *)page, length,
+      int accepted = accept4(listener, bad_address, bad_length,
                              SOCK_NONBLOCK | SOCK_CLOEXEC);
-      CHECK(outcome == 0 && accepted == expected);
+      if (outcome == 1 || outcome == 2 || outcome == 3 || outcome == 7) {
+        CHECK(accepted == -1 && errno == EFAULT);
+        CHECK(native(680, 0, 0, 0) == baseline);
+        *(volatile char *)(page + (outcome == 1 ? 0 : 4096)) = 1;
+        CHECK(0);
+      }
+      CHECK(accepted == expected);
       CHECK((fcntl(accepted, F_GETFL) & O_NONBLOCK) &&
             (fcntl(accepted, F_GETFD) & FD_CLOEXEC));
+      if (outcome == 5 || outcome == 6)
+        CHECK(*length == 2 && page[0] == 0xa5 && page[2] == 0xa5);
       CHECK(close(accepted) == 0);
     } else
       CHECK(outcome != 0 && jumped == 37 && output_fault);
-    CHECK(output_fault == (outcome != 0));
+    CHECK(output_fault == (outcome == 1 || outcome == 2 || outcome == 3 || outcome == 7));
+    if (outcome == 3 || outcome == 7) {
+      /* A rejected input length must not consume the queued connection. */
+      int retained = accept(listener, NULL, NULL);
+      CHECK(retained == expected && close(retained) == 0);
+    }
     CHECK(native(680, 0, 0, 0) == baseline);
     int duplicate = dup(listener);
     CHECK(duplicate == expected && close(duplicate) == 0);
@@ -268,7 +302,7 @@ int main(void) {
     CHECK(unlink(destination.sun_path) == 0 && native(680, 0, 0, 0) == start);
     fprintf(stderr, "connection-resources: output=%u PASS\n", outcome);
   }
-  puts("connection-resources: PASS 8 blocked connect/accept and 3 accept "
-       "publication cases");
+  puts("connection-resources: PASS 8 blocked connect/accept and 8 accept "
+       "publication/EFAULT cases including active handlers and optional/truncated addresses");
   return 0;
 }

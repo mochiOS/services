@@ -106,3 +106,28 @@ fn invalid_addresses_fail_without_a_rust_reference_or_losing_copy_errors() {
         );
     }
 }
+
+#[test]
+fn accept_copies_length_before_acquiring_a_slot_and_output_before_publication() {
+    let source = include_str!("../../../user/crates/newlib-runtime/src/socket.rs");
+    let begin = source.find("unsafe fn accept_io(").unwrap();
+    let end = begin + source[begin..].find("\nstruct PendingAccepted").unwrap();
+    let input = &source[begin..end];
+    assert!(input.contains("io_resources::with_initialized"));
+    assert!(
+        input.find("socket_memory::read_length(length)").unwrap()
+            < input.find("reserve_from(0, limit)").unwrap()
+    );
+    let begin = source.find("unsafe fn accept_entry(").unwrap();
+    let end = begin + source[begin..].find("\n#[unsafe(no_mangle)]").unwrap();
+    let output = &source[begin..end];
+    assert!(
+        output.find("*accepted = Some(PendingAccepted").unwrap()
+            < output.find("socket_memory::write_output(").unwrap()
+    );
+    assert!(
+        output.find("socket_memory::write_output(").unwrap()
+            < output.find(".commit_reservation(").unwrap()
+    );
+    assert!(!output.contains("ptr::copy_nonoverlapping"));
+}
