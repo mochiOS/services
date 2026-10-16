@@ -8,16 +8,23 @@ pub fn collect(streams: &mut Streams) -> Result<Vec<u64>, i32> {
     streams.collect_record_cycles(
         |handle| match platform::handle::identify_provider_object(handle) {
             Ok(id) => Ok(Some(id)),
-            // RAM/streams and foreign Providers are not this socket namespace.
-            // Any indirect/native references they keep are conservative roots.
-            Err(error) if matches!(error.raw(), -9 | -13) => Ok(None),
-            Err(error) => Err(error.raw() as i32),
+            Err(error) => identify_status(error.raw()),
         },
         |id| {
             platform::handle::provider_object_reference_count(id)
                 .map_err(|error| reference_count_status(error.raw()))
         },
     )
+}
+
+fn identify_status(raw: i64) -> Result<Option<u64>, i32> {
+    use mnu_abi::status::Error;
+    match Error::from_raw(raw as u64) {
+        // Non-provider objects and foreign Providers are not our namespace.
+        // Their indirect/native references remain conservative roots.
+        Some(Error::InvalidArgument | Error::AccessDenied) => Ok(None),
+        _ => Err(mochios_posix_protocol::status::normalize_failure(raw)),
+    }
 }
 
 fn reference_count_status(raw: i64) -> i32 {
