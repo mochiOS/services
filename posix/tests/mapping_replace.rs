@@ -40,7 +40,27 @@ thread_local! {
     static PAGES:RefCell<Vec<u64>>=const {RefCell::new(Vec::new())};
     static EVENTS:RefCell<Vec<&'static str>>=const {RefCell::new(Vec::new())};
     static FAIL_SYNC:Cell<bool>=const {Cell::new(false)};
+    static FAIL_ALLOCATION:Cell<Option<usize>>=const {Cell::new(None)};
+    static ALLOCATION_FAILED:Cell<bool>=const {Cell::new(false)};
 }
+struct Allocator;
+fn deny_allocation()->bool {
+    FAIL_ALLOCATION.try_with(|slot|match slot.get() {
+        None=>false,
+        Some(0)=>{slot.set(None);ALLOCATION_FAILED.with(|failed|failed.set(true));true},
+        Some(left)=>{slot.set(Some(left-1));false},
+    }).unwrap_or(false)
+}
+unsafe impl std::alloc::GlobalAlloc for Allocator {
+    unsafe fn alloc(&self,layout:std::alloc::Layout)->*mut u8 {
+        if deny_allocation(){std::ptr::null_mut()}else{unsafe{std::alloc::System.alloc(layout)}}
+    }
+    unsafe fn realloc(&self,pointer:*mut u8,layout:std::alloc::Layout,size:usize)->*mut u8 {
+        if deny_allocation(){std::ptr::null_mut()}else{unsafe{std::alloc::System.realloc(pointer,layout,size)}}
+    }
+    unsafe fn dealloc(&self,pointer:*mut u8,layout:std::alloc::Layout){unsafe{std::alloc::System.dealloc(pointer,layout)}}
+}
+#[global_allocator] static ALLOCATOR:Allocator=Allocator;
 mod mem {
     pub mod vm_object {
         #[derive(Debug)] pub struct VmObject {pub busy:bool}
@@ -115,7 +135,7 @@ mod task {
 }
 fn reset()->task::Process {
     PAGES.with_borrow_mut(|p|*p=vec![0x1000,0x2000,0x4000,0x9000]);
-    EVENTS.with_borrow_mut(Vec::clear); FAIL_SYNC.set(false);
+    EVENTS.with_borrow_mut(|events|{events.clear();events.reserve(16);}); FAIL_SYNC.set(false);
     let mut old=MemoryRegion::file_backed(0x1000,0x4000,3,2,
         Arc::new(mem::vm_object::VmObject{busy:false}),8192,true,true,3);
     assert!(old.set_access(0x4000,0x1000,1));
@@ -153,6 +173,55 @@ fn main() {
     PAGES.with_borrow_mut(Vec::clear);
     replace(&mut process,replacement(),Some(4*4096)).unwrap();
     EVENTS.with_borrow(|e|assert_eq!(e.as_slice(),["publish"]));
+    let mut verified=0;
+    for anonymous in [false,true] {
+        let mut completed=false;
+        for nth in 0..128 {
+            let mut process=reset();
+            if anonymous {
+                *process.memory_regions[0].backing_mut()=MemoryBacking::Anonymous{
+                    data:(0..0x4000).map(|index|(index/4096) as u8).collect(),writable:true,shared:false,
+                };
+            }
+            ALLOCATION_FAILED.set(false);
+            FAIL_ALLOCATION.set(Some(nth));
+            let result=replace(&mut process,replacement(),None);
+            FAIL_ALLOCATION.set(None);
+            if !ALLOCATION_FAILED.with(Cell::get) {
+                let removed=result.unwrap();
+                if anonymous {
+                    match removed[0].backing() {
+                        MemoryBacking::Anonymous{data,..}=>assert!(data.len()==8192&&data.iter().enumerate().all(|(i,&b)|b==1+(i/4096) as u8)),
+                        _=>panic!("anonymous backing changed type"),
+                    }
+                    for region in process.memory_regions.iter().filter(|region|region.start()!=0x2000) {
+                        match region.backing() {
+                            MemoryBacking::Anonymous{data,..}=>assert!(data.len()==4096&&data.iter().all(|&b|b==if region.start()==0x1000 {0}else{3})),
+                            _=>panic!("retained backing changed type"),
+                        }
+                    }
+                }
+                completed=true;break;
+            }
+            assert_eq!(result.unwrap_err(),syscall::ENOMEM);
+            assert_eq!(process.memory_regions.len(),1);
+            let old=&process.memory_regions[0];
+            assert_eq!((old.start(),old.len()),(0x1000,0x4000));
+            assert_eq!(old.dirty_pages(),[0,1,2,3]);
+            assert!(!old.allows_write_at(0x4000));
+            assert!(old.allows_write_at(0x2000));
+            match old.backing() {
+                MemoryBacking::File{object,offset,..}=>{assert_eq!(Arc::strong_count(object),1);assert_eq!(*offset,8192);},
+                MemoryBacking::Anonymous{data,..}=>assert!(data.len()==0x4000&&data.iter().enumerate().all(|(i,&b)|b==(i/4096) as u8)),
+            }
+            PAGES.with_borrow(|pages|assert_eq!(pages.as_slice(),[0x1000,0x2000,0x4000,0x9000]));
+            EVENTS.with_borrow(|events|assert!(events.is_empty()));
+            verified+=1;
+        }
+        assert!(completed);
+    }
+    assert!(verified>=12);
+    println!("mapping-replace: verified {verified} individual allocation failures without VM edits or leaked backing references");
 }
 "#);
     let program = program.replace("@ROOT@", root.to_str().unwrap());
@@ -188,6 +257,7 @@ fn main() {
     );
     let result = Command::new(&executable).output().unwrap();
     drop(cleanup);
+    print!("{}", String::from_utf8_lossy(&result.stdout));
     assert!(
         result.status.success(),
         "{}",
