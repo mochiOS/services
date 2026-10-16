@@ -30,6 +30,10 @@ thread_local!{{
     static COPY:Cell<[u8;72]>=const{{Cell::new([0;72])}};
     static COPY_ERROR:Cell<Option<Error>>=const{{Cell::new(None)}};
     static COPY_CALLS:Cell<usize>=const{{Cell::new(0)}};
+    static RECEIVER:Cell<bool>=const{{Cell::new(true)}};
+    static OUTPUT:Cell<[u8;72]>=const{{Cell::new([0;72])}};
+    static OUTPUT_ERROR:Cell<Option<Error>>=const{{Cell::new(None)}};
+    static OUTPUT_CALLS:Cell<usize>=const{{Cell::new(0)}};
     static PROCESS:RefCell<task::Process>=RefCell::new(task::Process{{table:task::handle_table::ObjectHandleTable::new_boxed()}});
 }}
 mod task{{
@@ -77,11 +81,20 @@ mod task{{
     pub struct Process{{pub table:Box<handle_table::ObjectHandleTable>}}
     impl Process{{pub fn object_handles(&self)->&handle_table::ObjectHandleTable{{
         assert!(crate::LOCKED.get());&self.table
+    }}
+    pub fn object_handles_mut(&mut self)->&mut handle_table::ObjectHandleTable{{
+        assert!(crate::LOCKED.get());&mut self.table
     }}}}
+    pub fn thread_to_process_id(id:u64)->Option<u64>{{assert_eq!(id,101);crate::RECEIVER.get().then_some(7)}}
     pub fn with_process<T>(id:u64,body:impl FnOnce(&Process)->T)->Option<T>{{
         assert_eq!(id,7);if !crate::PRESENT.get(){{return None;}}
         assert!(!crate::LOCKED.replace(true));
         let result=crate::PROCESS.with_borrow(body);crate::LOCKED.set(false);Some(result)
+    }}
+    pub fn with_process_mut<T>(id:u64,body:impl FnOnce(&mut Process)->T)->Option<T>{{
+        assert_eq!(id,7);if !crate::PRESENT.get(){{return None;}}
+        assert!(!crate::LOCKED.replace(true));
+        let result=crate::PROCESS.with_borrow_mut(body);crate::LOCKED.set(false);Some(result)
     }}
 }}
 use task::handle_table::{{ObjectHandle,HandleRights,ObjectHandleEntry,KernelObject}};
@@ -90,6 +103,12 @@ mod syscall{{
         assert_eq!(pointer,4096);crate::COPY_CALLS.set(crate::COPY_CALLS.get()+1);
         if let Some(error)=crate::COPY_ERROR.get(){{return Err(error);}}
         output.copy_from_slice(&crate::COPY.get());Ok(())
+    }}
+    pub fn copy_to_user_native(pointer:u64,bytes:&[u8])->Result<(),crate::Error>{{
+        assert_eq!(pointer,8192);assert!(!crate::LOCKED.get());
+        crate::OUTPUT_CALLS.set(crate::OUTPUT_CALLS.get()+1);
+        if let Some(error)=crate::OUTPUT_ERROR.get(){{return Err(error);}}
+        crate::OUTPUT.set(bytes.try_into().unwrap());Ok(())
     }}
     pub mod security{{pub fn current_process_id()->Option<u64>{{crate::CONTEXT.get().then_some(7)}}}}
 }}
@@ -127,6 +146,11 @@ fn call_endpoint_with_attachments_from_kernel(
         ipc,
         "fn export_object_handle(",
         "fn install_received_object_handles(",
+    ));
+    program.push_str(probe::between(
+        ipc,
+        "fn install_received_object_handles(",
+        "#[derive(Debug)]\nstruct ObjectHandleAttachments",
     ));
     program.push_str(probe::between(
         ipc,
@@ -228,6 +252,64 @@ fn main(){
     }
     RESULT.set(Ok(3));assert_eq!(call_provider_from_kernel(endpoint,b"request",&mut reply),Ok(3));
     assert_eq!(CALLS.get(),15);assert!(!LOCKED.get());
+    fn incoming(object:&Arc<u64>,count:usize)->ObjectHandleAttachments{
+        let mut value=ObjectHandleAttachments::empty();value.count=count;
+        value.delivery_flags=IPC_DELIVERY_NATIVE_OBJECT;
+        for index in 0..count.min(4){
+            let rights=match index{0=>HandleRights::READ,1=>HandleRights::empty(),_=>HandleRights::TRANSFER};
+            value.handles[index]=Some(ObjectHandleEntry::new(KernelObject(object.clone()),rights));
+        }value
+    }
+    let baseline=PROCESS.with_borrow(|p|p.table.describe().len());
+    // Missing entries must be rejected before the first valid one is inserted.
+    for malformed in [false,true]{
+        let mut attachments=incoming(&object,if malformed{5}else{3});
+        if !malformed{attachments.handles[1]=None;}
+        let before=OUTPUT_CALLS.get();
+        assert_eq!(install_received_object_handles(101,attachments,8192),Err(Error::BackingFailure.into_raw()));
+        assert_eq!(OUTPUT_CALLS.get(),before);assert_eq!(Arc::strong_count(&object),2);
+        assert_eq!(PROCESS.with_borrow(|p|p.table.describe().len()),baseline);
+    }
+    for receiver in [false,true]{
+        RECEIVER.set(receiver);PRESENT.set(!receiver);
+        assert_eq!(install_received_object_handles(101,incoming(&object,3),8192),Err(Error::NotReady.into_raw()));
+        assert_eq!(Arc::strong_count(&object),2);
+    }
+    RECEIVER.set(true);PRESENT.set(true);
+    for free in 0..3{
+        let mut fillers=Vec::new();let dummy=Arc::new(77);
+        PROCESS.with_borrow_mut(|p|while p.table.describe().len()<4096-free{
+            fillers.push(p.table.insert(ObjectHandleEntry::new(KernelObject(dummy.clone()),HandleRights::READ)).unwrap());
+        });
+        let before=OUTPUT_CALLS.get();
+        assert_eq!(install_received_object_handles(101,incoming(&object,3),8192),Err(Error::ResourceUnavailable.into_raw()));
+        assert_eq!(OUTPUT_CALLS.get(),before);assert_eq!(Arc::strong_count(&object),2);
+        PROCESS.with_borrow_mut(|p|{
+            assert_eq!(p.table.describe().len(),4096-free);
+            for handle in fillers{assert!(p.table.close(handle));}
+            assert_eq!(p.table.describe().len(),baseline);
+        });
+    }
+    for error in [Error::InvalidAddress,Error::ResourceUnavailable,Error::BackingFailure]{
+        OUTPUT_ERROR.set(Some(error));
+        assert_eq!(install_received_object_handles(101,incoming(&object,3),8192),Err(error.into_raw()));
+        assert_eq!(Arc::strong_count(&object),2);
+        assert_eq!(PROCESS.with_borrow(|p|p.table.describe().len()),baseline);
+    }
+    OUTPUT_ERROR.set(None);
+    assert_eq!(install_received_object_handles(101,incoming(&object,3),8192),Ok(()));
+    let output=OUTPUT.get();assert_eq!(u32::from_le_bytes(output[..4].try_into().unwrap()),3);
+    assert_eq!(u32::from_le_bytes(output[4..8].try_into().unwrap()),IPC_DELIVERY_NATIVE_OBJECT);
+    for index in 0..3{
+        let start=8+16*index;
+        let handle=ObjectHandle::from_raw(u32::from_le_bytes(output[start..start+4].try_into().unwrap())).unwrap();
+        let rights=u64::from_le_bytes(output[start+8..start+16].try_into().unwrap());
+        let expected=match index{0=>HandleRights::READ,1=>HandleRights::empty(),_=>HandleRights::TRANSFER};
+        assert_eq!(rights,expected.bits());assert_eq!(&output[start+4..start+8],&[0;4]);
+        PROCESS.with_borrow_mut(|p|{assert_eq!(p.table.get(handle).unwrap().rights(),expected);assert!(p.table.close(handle));});
+    }
+    assert_eq!(&output[56..],&[0;16]);assert_eq!(Arc::strong_count(&object),2);
+    assert_eq!(PROCESS.with_borrow(|p|p.table.describe().len()),baseline);
 }
 "#);
     probe::run(&program);
