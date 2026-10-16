@@ -16,6 +16,7 @@ mod implementation;
 #[path = "../../../user/crates/newlib-runtime/src/io_resources.rs"]
 mod io_resources;
 const EBADF: c_int = 9;
+const EACCES: c_int = 13;
 const EAGAIN: c_int = 11;
 const EINVAL: c_int = 22;
 const ENOTTY: c_int = 25;
@@ -64,6 +65,8 @@ static CALLS: AtomicU32 = AtomicU32::new(0);
 // 2 selects fcntl; 0/1 select a disabled/enabled FIONBIO request.
 static OPTION_MODE: AtomicU32 = AtomicU32::new(2);
 static LAST_ERROR: AtomicU32 = AtomicU32::new(0);
+static NATIVE_FAILURE: AtomicU64 =
+    AtomicU64::new(mnu_abi::status::Error::BackingFailure.into_raw());
 fn expected_flags() -> c_int {
     match OPTION_MODE.load(Ordering::Relaxed) {
         0 => 0,
@@ -261,7 +264,7 @@ mod syscall {
     pub fn raw_syscall1(_: SyscallNumber, handle: u64) -> u64 {
         match super::backend(handle) {
             Ok(()) => 1,
-            Err(error) => (-(error as i64)) as u64,
+            Err(_) => super::NATIVE_FAILURE.load(super::Ordering::Relaxed),
         }
     }
     pub fn raw_syscall2(_: SyscallNumber, handle: u64, options: u64) -> u64 {
@@ -271,13 +274,15 @@ mod syscall {
         );
         match super::backend(handle) {
             Ok(()) => 0,
-            Err(error) => (-(error as i64)) as u64,
+            Err(_) => super::NATIVE_FAILURE.load(super::Ordering::Relaxed),
         }
     }
 }
 fn syscall_errno(value: u64) -> Result<u64, c_int> {
-    if value >= (-4095i64) as u64 {
-        Err(-(value as i64) as c_int)
+    if mnu_abi::status::is_error(value) || value >= (-4095i64) as u64 {
+        Err(mochios_posix_client::newlib_errno::from_status(
+            value as i64,
+        ))
     } else {
         Ok(value)
     }
@@ -351,6 +356,67 @@ fn provider_status_calls_run_without_state_lock_and_retain_the_original_referenc
             }
         }
     }
+}
+
+#[test]
+fn native_option_errors_become_errno_without_losing_reentrant_fd_ownership() {
+    use mnu_abi::status::Error;
+    let _serial = SERIAL.lock().unwrap();
+    for (error, errno) in [
+        (Error::InvalidArgument, EINVAL),
+        (Error::AccessDenied, EACCES),
+        (Error::NotReady, EAGAIN),
+    ] {
+        NATIVE_FAILURE.store(error.into_raw(), Ordering::Relaxed);
+        for kind in [
+            FdKind::ObjectStreamRead,
+            FdKind::ObjectStreamWrite,
+            FdKind::ObjectPty,
+        ] {
+            for command in [F_GETFL, F_SETFL, -1] {
+                for case in [1, 3] {
+                    state().fds = FdTable::new();
+                    *BOOK.lock().unwrap() = Book::new();
+                    CLOSED.lock().unwrap().clear();
+                    CASE.store(case, Ordering::Relaxed);
+                    CALLS.store(0, Ordering::Relaxed);
+                    OPTION_MODE.store(if command == -1 { 1 } else { 2 }, Ordering::Relaxed);
+                    let source = entry(kind, 10, 2);
+                    *SOURCE.lock().unwrap() = Some(source);
+                    state().fds.install_from(0, 32, source).unwrap();
+                    state()
+                        .fds
+                        .install_from(0, 32, entry(FdKind::Stdin, 0, 0))
+                        .unwrap();
+                    if command == -1 {
+                        assert_eq!(implementation::__mochios_fd_set_nonblocking(0, 1), -1);
+                        assert_eq!(LAST_ERROR.load(Ordering::Relaxed), errno as u32);
+                    } else {
+                        assert_eq!(
+                            implementation::status(0, command, 2 | O_NONBLOCK),
+                            Err(errno)
+                        );
+                    }
+                    assert_eq!(CALLS.load(Ordering::Relaxed), 1);
+                    if case == 3 {
+                        assert_eq!(*CLOSED.lock().unwrap(), [10]);
+                        assert_eq!(state().fds.get(0).unwrap().handle.lower_handle, 20);
+                    } else {
+                        assert!(CLOSED.lock().unwrap().is_empty());
+                    }
+                    remove(0);
+                    assert_eq!(
+                        *CLOSED.lock().unwrap(),
+                        if case == 3 { vec![10, 20] } else { vec![10] }
+                    );
+                    assert!(CONTROL.callback_resources.is_empty());
+                    assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
+                }
+            }
+        }
+    }
+    NATIVE_FAILURE.store(Error::BackingFailure.into_raw(), Ordering::Relaxed);
+    OPTION_MODE.store(2, Ordering::Relaxed);
 }
 
 #[test]

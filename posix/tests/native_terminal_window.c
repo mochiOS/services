@@ -388,6 +388,12 @@ int main(void) {
     uint32_t native_pair[2];
     CHECK(native_call4(649, 0, 0, 0, 0) == INT64_C(-262142));
     CHECK(native_call4(649, (uintptr_t)native_pair, 0, 0, 0) == 0);
+    CHECK(native_call4(650, 0, 0, 0, 0) == INT64_C(-262139));
+    CHECK(native_call4(651, native_pair[0], 2, 0, 0) == INT64_C(-262139));
+    CHECK(native_call4(650, native_pair[0], 0, 0, 0) == 0);
+    CHECK(native_call4(651, native_pair[0], 1, 0, 0) == 0);
+    CHECK(native_call4(650, native_pair[0], 0, 0, 0) == 1);
+    CHECK(native_call4(651, native_pair[0], 0, 0, 0) == 0);
     struct native_execution_usage usage_before, usage_after;
     CHECK(native_call4(683, 0, (uintptr_t)&usage_before, sizeof(usage_before), 0) == 0);
     CHECK(usage_before.ticks_per_second > 0 && usage_before.reserved == 0);
@@ -397,6 +403,8 @@ int main(void) {
     CHECK(native_call4(683, native_pair[0], (uintptr_t)&usage_before, sizeof(usage_before), 0) == -EBADF);
     int64_t read_only_native = native_call4(627, native_pair[0], 1, 0, 0);
     CHECK(read_only_native > 0);
+    CHECK(native_call4(650, (uint64_t)read_only_native, 0, 0, 0) == INT64_C(-262138));
+    CHECK(native_call4(651, (uint64_t)read_only_native, 1, 0, 0) == INT64_C(-262138));
     CHECK(native_call4(683, (uint64_t)read_only_native, (uintptr_t)&usage_before,
                        sizeof(usage_before), 0) == -EACCES);
     CHECK(native_call4(626, (uint64_t)read_only_native, 0, 0, 0) == 0);
