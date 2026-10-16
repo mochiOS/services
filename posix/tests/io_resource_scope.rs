@@ -164,3 +164,35 @@ fn every_public_io_path_tracks_its_owned_lease_and_vector_storage() {
         );
     }
 }
+
+#[test]
+fn terminal_entry_points_keep_leases_tracked_through_callbacks_and_user_copies() {
+    let source = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
+    for name in [
+        "tcgetwinsize",
+        "tcsetwinsize",
+        "_isatty",
+        "tcgetattr",
+        "tcsetattr",
+        "tcdrain",
+        "tcflush",
+        "tcflow",
+        "tcgetpgrp",
+        "tcsetpgrp",
+        "login_tty",
+    ] {
+        let signature = format!("fn {name}(");
+        let start = source.find(&signature).unwrap();
+        let end = start + source[start..].find("\n}\n").unwrap();
+        let body = &source[start..end];
+        assert!(body.contains("io_resources::with"), "{name}");
+        if matches!(name, "tcsetattr" | "tcsetwinsize") {
+            assert!(body.contains("io_resources::with_initialized"), "{name}");
+            assert!(body.find("with_fd_entry(fd)").unwrap() < body.find(".read()").unwrap());
+        }
+        if name == "tcdrain" {
+            assert!(body.contains("pthread_testcancel()"));
+            assert!(body.contains("finish_io_cancellation(result_with_errno(result, -1))"));
+        }
+    }
+}
