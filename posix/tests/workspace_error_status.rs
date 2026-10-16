@@ -17,7 +17,8 @@ fn workspace_error_survives_wire_encoding_and_client_decoding() {
         (syscall::ENOENT, 2),
         (syscall::ENOSPC, 28),
         (syscall::EAGAIN, 11),
-        (syscall::EISDIR, 21),
+        (mochios_posix_protocol::STATUS_EISDIR as u64, 21),
+        (mochios_posix_protocol::STATUS_ENOTDIR as u64, 20),
     ] {
         let mut bytes = [0; protocol::HEADER_LEN + 24];
         let length = protocol::encode_status(42, native as i32, 7, 0, &mut bytes).unwrap();

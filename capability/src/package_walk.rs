@@ -35,7 +35,10 @@ fn collect_manifest_paths(
         }
         let entries = match read_directory(path) {
             Ok(entries) => entries,
-            Err(error) if depth > 0 && error.raw() == syscall::ENOTDIR as i64 => {
+            Err(error)
+                if depth > 0
+                    && error.raw() == i64::from(mochios_posix_protocol::STATUS_ENOTDIR) =>
+            {
                 return Ok(());
             }
             Err(error) if depth == 0 && optional_root && error.raw() == syscall::ENOENT as i64 => {

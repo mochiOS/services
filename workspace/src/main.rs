@@ -1167,7 +1167,7 @@ impl WorkspaceService {
                 self.reply_status(
                     sender,
                     request.request_id,
-                    mochi_user_syscall::EISDIR as i32,
+                    mochios_posix_protocol::STATUS_EISDIR,
                     0,
                 );
                 return;
@@ -1605,7 +1605,9 @@ fn validate_panel_selection(pending: &PendingFilePanel, selected: &str) -> Resul
     let validated = if pending.mode == protocol::FILE_PANEL_MODE_OPEN {
         let canonical = fs::canonicalize(path).map_err(errno)?;
         if !canonical.is_file() {
-            return Err(error::status_errno(mochi_user_syscall::EISDIR as i64));
+            return Err(error::status_errno(i64::from(
+                mochios_posix_protocol::STATUS_EISDIR,
+            )));
         }
         canonical
     } else {
@@ -1617,11 +1619,15 @@ fn validate_panel_selection(pending: &PendingFilePanel, selected: &str) -> Resul
         let parent = path.parent().ok_or(error::status_errno(mochi_user_syscall::EINVAL as i64))?;
         let parent = fs::canonicalize(parent).map_err(errno)?;
         if !parent.is_dir() {
-            return Err(error::status_errno(mochi_user_syscall::ENOTDIR as i64));
+            return Err(error::status_errno(i64::from(
+                mochios_posix_protocol::STATUS_ENOTDIR,
+            )));
         }
         let destination = parent.join(name);
         if destination.is_dir() {
-            return Err(error::status_errno(mochi_user_syscall::EISDIR as i64));
+            return Err(error::status_errno(i64::from(
+                mochios_posix_protocol::STATUS_EISDIR,
+            )));
         }
         destination
     };

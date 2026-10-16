@@ -132,7 +132,7 @@ fn process_terminal_and_readonly_policy_errors_are_not_native_abi_exports() {
         .split("};")
         .next()
         .unwrap();
-    for name in ["ECHILD", "ENOTTY", "EROFS"] {
+    for name in ["ECHILD", "ENOTTY", "EROFS", "ENOTDIR", "EISDIR"] {
         assert!(
             !abi.contains(&format!("pub const {name}:")),
             "native definition: {name}"
@@ -150,4 +150,12 @@ fn process_terminal_and_readonly_policy_errors_are_not_native_abi_exports() {
     assert_eq!(from_status(-10), errno::ECHILD);
     assert_eq!(from_status(-25), errno::ENOTTY);
     assert_eq!(from_status(-30), sdk_errno("EROFS"));
+    assert_eq!(
+        from_status(i64::from(mochios_posix_protocol::STATUS_ENOTDIR)),
+        errno::ENOTDIR
+    );
+    assert_eq!(
+        from_status(i64::from(mochios_posix_protocol::STATUS_EISDIR)),
+        errno::EISDIR
+    );
 }

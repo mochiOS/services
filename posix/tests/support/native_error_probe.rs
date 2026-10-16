@@ -23,7 +23,13 @@ pub fn program() -> String {
             program.push('\n');
         }
     }
-    program.push_str("}\nuse mochi_user_syscall::*;\n");
+    program.push_str("}\nuse mochi_user_syscall::*;\nmod mochios_posix_protocol {\n");
+    constants(
+        &mut program,
+        include_str!("../../../../user/crates/posix-protocol/src/lib.rs"),
+        &["STATUS_ENOTDIR", "STATUS_EISDIR"],
+    );
+    program.push_str("}\n");
     program
 }
 

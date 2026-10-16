@@ -28,7 +28,7 @@ fn collects_both_roots_and_ignores_non_directory_children() {
     let paths = package_walk::manifest_paths(|path| match path {
         "/system/packages" => Ok(vec!["core".into(), "notes.txt".into()]),
         "/system/packages/core" => Ok(vec!["manifest.toml".into()]),
-        "/system/packages/notes.txt" => Err(error(syscall::ENOTDIR)),
+        "/system/packages/notes.txt" => Err(error(mochios_posix_protocol::STATUS_ENOTDIR as u64)),
         "/var/lib/packages" => Ok(vec!["app".into()]),
         "/var/lib/packages/app" => Ok(vec!["manifest.toml".into()]),
         _ => panic!("unexpected read {path}"),
@@ -54,7 +54,7 @@ fn only_an_absent_data_root_is_optional() {
     assert_eq!(paths, ["/system/packages/manifest.toml"]);
     for errno in [
         syscall::ENOENT,
-        syscall::ENOTDIR,
+        mochios_posix_protocol::STATUS_ENOTDIR as u64,
         syscall::EACCES,
         syscall::EIO,
     ] {
@@ -63,7 +63,11 @@ fn only_an_absent_data_root_is_optional() {
             Err(error(errno))
         );
     }
-    for errno in [syscall::ENOTDIR, syscall::EACCES, syscall::EIO] {
+    for errno in [
+        mochios_posix_protocol::STATUS_ENOTDIR as u64,
+        syscall::EACCES,
+        syscall::EIO,
+    ] {
         assert_eq!(
             package_walk::manifest_paths(|path| {
                 if path == "/system/packages" {

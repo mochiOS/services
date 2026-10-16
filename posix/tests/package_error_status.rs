@@ -108,7 +108,7 @@ mod posix_io {
 fn exists(){
     STATE.set(State::default());assert_eq!(posix_io::path_exists("/target"),Ok(true));
     STATE.with_borrow_mut(|s|s.stat=Err(error(ENOENT)));assert_eq!(posix_io::path_exists("/target"),Ok(false));
-    for status in [EACCES,EIO,ENOTDIR] {
+    for status in [EACCES,EIO,mochios_posix_protocol::STATUS_ENOTDIR as u64] {
         STATE.with_borrow_mut(|s|s.stat=Err(error(status)));assert_eq!(posix_io::path_exists("/target"),Err(error(status)));
     }
 }
@@ -148,7 +148,7 @@ fn rollback(){
 fn owner(){
     STATE.set(State{read:Err(error(ENOENT)),..State::default()});
     assert_eq!(validate_update_owner("/record",&verified()),Ok(SignerContinuity::NewInstall));
-    for status in [EACCES,EIO,ENOTDIR] {
+    for status in [EACCES,EIO,mochios_posix_protocol::STATUS_ENOTDIR as u64] {
         STATE.with_borrow_mut(|s|s.read=Err(error(status)));
         assert_eq!(validate_update_owner("/record",&verified()),Err(error(status)));
     }

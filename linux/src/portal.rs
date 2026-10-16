@@ -371,7 +371,7 @@ fn copy_directory(
 ) -> Result<(), i32> {
     let metadata = fs::symlink_metadata(root).map_err(io_status)?;
     if !metadata.is_dir() {
-        return Err(mochi_user_syscall::ENOTDIR as i32);
+        return Err(mochios_posix_protocol::STATUS_ENOTDIR);
     }
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
