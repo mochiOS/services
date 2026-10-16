@@ -6,6 +6,9 @@
 #include <sys/mman.h>
 
 enum { PAGE = 4096, STACK = 32768 };
+_Static_assert(sizeof(pthread_attr_t) == 40, "SDK pthread attribute storage");
+_Static_assert(_Alignof(pthread_attr_t) == 8,
+               "SDK pthread attribute alignment");
 static uint64_t native6(uint64_t number, uint64_t a, uint64_t b, uint64_t c,
                         uint64_t d, uint64_t e, uint64_t f) {
   register uint64_t r10 __asm__("r10") = d;
@@ -22,10 +25,15 @@ static int readable(uintptr_t address) {
   return native6(699, (uintptr_t)&byte, address, 1, 0, 0, 0) == 1;
 }
 static void *owned_stack(void *argument) {
-  (void)argument;
+  size_t guard_size = ((uintptr_t)argument + PAGE - 1) & ~(size_t)(PAGE - 1);
   uintptr_t sp;
   __asm__ volatile("mov %%rsp,%0" : "=r"(sp));
   uintptr_t page = sp & ~(uintptr_t)(PAGE - 1);
+  uintptr_t base = page + PAGE - STACK - guard_size;
+  if (!readable(base + guard_size))
+    return NULL;
+  if (guard_size == 0)
+    return (void *)base;
   unsigned count = 0;
   while (count < STACK / PAGE + 1 && readable(page)) {
     page -= PAGE;
@@ -46,7 +54,13 @@ static void *owned_stack(void *argument) {
       native6(583, (uint64_t)result, PAGE, 0, 0, 0, 0);
     return NULL;
   }
-  return (void *)page;
+  /* Every requested guard page is inaccessible and remains reserved. */
+  for (size_t offset = 0; offset < guard_size; offset += PAGE) {
+    if (readable(base + offset) ||
+        (int64_t)native6(582, base + offset, PAGE, 3, 1, 0, 0) != -22)
+      return NULL;
+  }
+  return (void *)base;
 }
 static void *caller_stack(void *argument) {
   return readable((uintptr_t)argument) ? argument : NULL;
@@ -54,17 +68,29 @@ static void *caller_stack(void *argument) {
 int main(void) {
   pthread_attr_t attr;
   CHECK(pthread_attr_init(&attr) == 0);
+  size_t actual_guard = 0;
+  CHECK(pthread_attr_getguardsize(&attr, &actual_guard) == 0 &&
+        actual_guard == PAGE);
   CHECK(pthread_attr_setstacksize(&attr, STACK) == 0);
   for (unsigned pass = 0; pass < 16; ++pass) {
+    const size_t requests[] = {PAGE, 0, 1, PAGE + 1};
+    size_t requested = requests[pass % 4];
+    size_t rounded = (requested + PAGE - 1) & ~(size_t)(PAGE - 1);
+    CHECK(pthread_attr_setguardsize(&attr, requested) == 0);
+    CHECK(pthread_attr_getguardsize(&attr, &actual_guard) == 0 &&
+          actual_guard == requested);
     pthread_t thread;
     void *guard = NULL;
-    CHECK(pthread_create(&thread, &attr, owned_stack, NULL) == 0);
+    CHECK(pthread_create(&thread, &attr, owned_stack, (void *)requested) == 0);
     CHECK(pthread_join(thread, &guard) == 0 && guard != NULL);
     /* Join must release both usable stack and guard, not just the RW suffix. */
-    CHECK(native6(582, (uintptr_t)guard, STACK + PAGE, 3, 1, 0, 0) ==
+    CHECK(native6(582, (uintptr_t)guard, STACK + rounded, 3, 1, 0, 0) ==
           (uintptr_t)guard);
-    CHECK(native6(583, (uintptr_t)guard, STACK + PAGE, 0, 0, 0, 0) == 0);
+    CHECK(native6(583, (uintptr_t)guard, STACK + rounded, 0, 0, 0, 0) == 0);
   }
+  pthread_t failed;
+  CHECK(pthread_attr_setguardsize(&attr, SIZE_MAX) == 0);
+  CHECK(pthread_create(&failed, &attr, owned_stack, NULL) == EINVAL);
   void *stack = mmap(NULL, STACK, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   CHECK(stack != MAP_FAILED);

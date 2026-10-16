@@ -98,7 +98,7 @@ fn run(
     MAP.set(map);
     PROTECT.set(protect);
     EVENTS.with_borrow_mut(Vec::clear);
-    assert_eq!(runtime::allocate(8193), expected);
+    assert_eq!(runtime::allocate(8193, PAGE_SIZE), expected);
     EVENTS.with_borrow(|v| assert_eq!(v, events));
 }
 
@@ -110,6 +110,24 @@ fn allocator_reserves_inaccessible_guard_then_protects_only_usable_stack() {
         Ok((0x10000, 16384)),
         &[(1, 16384, 0), (2, 0x11000, 12288)],
     );
+}
+
+#[test]
+fn allocator_supports_disabled_and_rounded_guards() {
+    for (guard, size, usable) in [
+        (0, 12288, 0x10000),
+        (1, 16384, 0x11000),
+        (4097, 20480, 0x12000),
+    ] {
+        MAP.set(Ok(0x10000));
+        PROTECT.set(Ok(0));
+        EVENTS.with_borrow_mut(Vec::clear);
+        assert_eq!(runtime::allocate(8193, guard), Ok((0x10000, size)));
+        EVENTS.with_borrow(|v| assert_eq!(v, &[(1, size as u64, 0), (2, usable, 12288)]));
+    }
+    EVENTS.with_borrow_mut(Vec::clear);
+    assert_eq!(runtime::allocate(8193, usize::MAX), Err(EINVAL));
+    EVENTS.with_borrow(|v| assert!(v.is_empty()));
 }
 
 #[test]
