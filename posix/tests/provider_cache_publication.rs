@@ -250,6 +250,13 @@ mod shared_memory {
         ) -> Result<T, u64> {
             unreachable!()
         }
+        pub fn with_generation_native<T>(
+            &self,
+            _: u64,
+            _: impl FnOnce() -> Result<T, mnu_abi::status::Error>,
+        ) -> Result<T, mnu_abi::status::Error> {
+            unreachable!()
+        }
         pub fn read_at(&self, _: u64, _: &mut [u8]) -> Result<usize, u64> {
             unreachable!()
         }
@@ -419,7 +426,11 @@ fn scoped_admission_cannot_be_retargeted_or_consumed_twice_and_preserves_guard_i
     ));
     extent.preflight().unwrap();
     drop(extent);
-    assert!(object.prepare_extent(3, 1, |bytes| Ok(Arc::new(bytes))).is_ok());
+    assert!(
+        object
+            .prepare_extent(3, 1, |bytes| Ok(Arc::new(bytes)))
+            .is_ok()
+    );
 }
 
 #[test]
@@ -439,7 +450,11 @@ fn admitted_prepare_failure_consumes_position_but_releases_io_without_invalidati
     assert_eq!(second.signals(), mnu_abi::HANDLE_SIGNAL_READABLE);
     assert_eq!(object.memory_generation(), generation);
     drop(second);
-    assert!(object.prepare_extent(3, 1, |bytes| Ok(Arc::new(bytes))).is_ok());
+    assert!(
+        object
+            .prepare_extent(3, 1, |bytes| Ok(Arc::new(bytes)))
+            .is_ok()
+    );
 }
 
 #[test]

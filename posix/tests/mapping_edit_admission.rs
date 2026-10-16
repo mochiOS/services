@@ -61,6 +61,9 @@ mod task {
     pub struct Object {pub busy:bool,pub unavailable:bool}
     impl Object {
         pub fn memory_generation(&self)->Option<u64>{Some(1)}
+        pub fn with_memory_generation_native<T>(&self, generation:Option<u64>, install:impl FnOnce()->Result<T,status::Error>)->Result<T,status::Error>{
+            locked();assert_eq!(generation,Some(1));if self.unavailable {Err(status::Error::BackingFailure)} else if self.busy {Err(status::Error::NotReady)} else {install()}
+        }
         pub fn with_memory_generation<T>(&self, generation:Option<u64>, install:impl FnOnce()->Result<T,u64>)->Result<T,u64>{
             locked();assert_eq!(generation,Some(1));if self.unavailable {Err(EIO)} else if self.busy {Err(EAGAIN)} else {install()}
         }
