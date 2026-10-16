@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "native-object-delivery: FAIL line %d\n", __LINE__); return 1; } } while (0)
+#define NATIVE_INVALID_ARGUMENT INT64_C(-262139)
 
 struct provider_request {
     char magic[4]; uint16_t version, opcode;
@@ -49,10 +50,10 @@ static int object_delivery_probe(void) {
     /* User payloads cannot set the receiver-only native-object proof. */
     handles.flags = 1;
     CHECK((int64_t)call(632, endpoint, (uintptr_t)&request, sizeof(request),
-          (uintptr_t)&response, sizeof(response), (uintptr_t)&handles) == -22);
+          (uintptr_t)&response, sizeof(response), (uintptr_t)&handles) == NATIVE_INVALID_ARGUMENT);
     handles.flags = 2;
     CHECK((int64_t)call(632, endpoint, (uintptr_t)&request, sizeof(request),
-          (uintptr_t)&response, sizeof(response), (uintptr_t)&handles) == -22);
+          (uintptr_t)&response, sizeof(response), (uintptr_t)&handles) == NATIVE_INVALID_ARGUMENT);
     handles.flags = 0;
     /* Even a valid provider request with a plausible object ID has no authority. */
     uint64_t result = call(632, endpoint, (uintptr_t)&request, sizeof(request),
