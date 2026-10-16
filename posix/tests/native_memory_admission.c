@@ -146,8 +146,8 @@ int MEMORY_ADMISSION_MAIN(void) {
   CHECK(native(HANDLE_CLOSE, first, 0, 0, 0, 0, 0) == 0);
   first = received.items[0].handle;
   uint64_t observed;
-  CHECK(poll_ticket(first, &observed) == -11 && observed == 0);
-  CHECK(poll_ticket(second, &observed) == -11 && observed == 0);
+  CHECK(poll_ticket(first, &observed) == INT64_C(-262137) && observed == 0);
+  CHECK(poll_ticket(second, &observed) == INT64_C(-262137) && observed == 0);
   CHECK(pthread_create(&next_reader, NULL, read_second, NULL) == 0);
   wait_handle = first;
   CHECK(pthread_create(&waiter, NULL, wait_ticket, NULL) == 0);

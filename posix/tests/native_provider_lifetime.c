@@ -184,7 +184,7 @@ static int life_unread_queue(void) {
     CHECK(queued != 0);
     CHECK(life_native(626, handles[1], 0, 0, 0, 0, 0) == 0);
     struct life_wait eof = {.handle = handles[0], .interests = 2};
-    CHECK((int64_t)life_native(647, (uintptr_t)&eof, 1, 0, 0, 0, 0) == -11);
+    CHECK((int64_t)life_native(647, (uintptr_t)&eof, 1, 0, 0, 0, 0) == INT64_C(-262137));
     // The receiver never reads these ordinary messages. It can still receive
     // its thread-cleanup RPC reply through the queue's reserved reply slot.
     atomic_store(&life_release, 1);

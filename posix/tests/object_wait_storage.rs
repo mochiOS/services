@@ -69,6 +69,8 @@ thread_local! {
     static SCANS:Cell<usize>=const{Cell::new(0)};
     static FAIL_SCAN:Cell<usize>=const{Cell::new(0)};
     static SLEEPS:Cell<usize>=const{Cell::new(0)};
+    static NOW:Cell<u64>=const{Cell::new(0)};
+    static SIGNAL_ON_ARM:Cell<bool>=const{Cell::new(false)};
 }
 fn stage()->bool {let next=STAGE.get()+1;STAGE.set(next);next!=FAIL_STAGE.get()}
 fn add(bit:u32){ACTIVE.set(ACTIVE.get()|bit)}
@@ -122,9 +124,13 @@ mod syscall {
     }
     pub mod time {
         pub fn monotonic_deadline_tick(value:u64)->u64{value}
-        pub fn monotonic_nanoseconds()->u64{0}
+        pub fn monotonic_nanoseconds()->u64{crate::NOW.get()}
         pub fn disarm_thread_deadline(_:u64){crate::ARMED.set(false)}
-        pub fn arm_thread_deadline(_:u64,_:u64)->bool{crate::ARMED.set(true);crate::stage()}
+        pub fn arm_thread_deadline(_:u64,_:u64)->bool{
+            crate::ARMED.set(true);
+            if crate::SIGNAL_ON_ARM.get(){crate::READY.set(true);}
+            crate::stage()
+        }
     }
     pub mod fs {
         pub fn register_stream_waiter(_: &crate::task::FileHandle,_:u64)->Result<usize,u64>{
@@ -206,6 +212,7 @@ fn reset(){
     READ_ERROR.set(None);WRITE_ERROR.set(None);CURRENT.set(true);
     GUARD_COPIES.set(0);GUARD_READS.set(0);GUARD_EXPECTED.set(5);GUARD_VALUE.set(5);
     STAGE.set(0);FAIL_STAGE.set(0);SCANS.set(0);FAIL_SCAN.set(0);SLEEPS.set(0);
+    NOW.set(0);SIGNAL_ON_ARM.set(false);
 }
 fn main(){
     ADMISSION.set(Arc::new(mem::vm_object::ProviderAdmission)).ok().unwrap();
@@ -222,7 +229,8 @@ fn main(){
     // backend deliberately arms before failing, to exercise unconditional Drop.
     for index in 1..=8 {
         reset();FAIL_STAGE.set(index);
-        assert_eq!(handle::wait_many(1,5,100,0),EAGAIN);clean();assert_eq!(SLEEPS.get(),0);
+        let expected=if [1,5,8].contains(&index){Error::ResourceUnavailable.into_raw()}else{EAGAIN};
+        assert_eq!(handle::wait_many(1,5,100,0),expected);clean();assert_eq!(SLEEPS.get(),0);
     }
     // Failure during the post-registration readiness scan must clean all kinds.
     reset();FAIL_SCAN.set(6);assert_eq!(handle::wait_many(1,5,100,0),EINVAL);clean();
@@ -231,9 +239,15 @@ fn main(){
     assert_eq!(ALLOCS.load(Ordering::Relaxed)-before,8,"retry must reuse reserved storage");
     assert_eq!(SLEEPS.get(),1);clean();
     reset();COPY_FAILURE.set(true);assert_eq!(handle::wait_many(1,5,100,0),Error::InvalidAddress.into_raw());clean();
-    reset();UPCALL.set(true);assert_eq!(handle::wait_many(1,5,100,0),EAGAIN);clean();
-    reset();assert_eq!(handle::wait_many(1,5,0,0),EAGAIN);clean();
-    reset();assert_eq!(handle::wait_many(0,0,0,0),EAGAIN);clean();
+    reset();UPCALL.set(true);assert_eq!(handle::wait_many(1,5,100,0),Error::NotReady.into_raw());clean();
+    reset();assert_eq!(handle::wait_many(1,5,0,0),Error::NotReady.into_raw());clean();
+    reset();assert_eq!(handle::wait_many(0,0,0,0),Error::NotReady.into_raw());clean();
+    reset();NOW.set(100);assert_eq!(handle::wait_many(1,5,100,0),Error::NotReady.into_raw());
+    assert_eq!(STAGE.get(),0);assert_eq!(SLEEPS.get(),0);clean();
+    reset();NOW.set(101);assert_eq!(handle::wait_many(0,0,100,0),Error::NotReady.into_raw());clean();
+    reset();UPCALL.set(true);READY.set(true);assert_eq!(handle::wait_many(1,5,0,0),0);clean();
+    reset();SIGNAL_ON_ARM.set(true);assert_eq!(handle::wait_many(1,5,100,0),0);
+    assert_eq!(SLEEPS.get(),0);clean();
     // Preserve each native resident/fault-in error at all three copy phases.
     for error in [Error::InvalidAddress,Error::ResourceUnavailable,Error::BackingFailure] {
         reset();READ_ERROR.set(Some(error));

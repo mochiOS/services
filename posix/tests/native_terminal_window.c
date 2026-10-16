@@ -378,13 +378,13 @@ int main(void) {
     // A pre-delivered notification must prevent an infinite empty-object wait.
     CHECK(guarded_native_wait(&guard, UINT64_MAX) == INT64_C(-262137));
     guard.expected = 9;
-    CHECK(guarded_native_wait(&guard, 0) == -EAGAIN);
-    CHECK(guarded_native_wait(NULL, 0) == -EINVAL);
+    CHECK(guarded_native_wait(&guard, 0) == INT64_C(-262137));
+    CHECK(guarded_native_wait(NULL, 0) == INT64_C(-262137));
     guard.address = (uintptr_t)&epoch + 1;
     CHECK(guarded_native_wait(&guard, 0) == INT64_C(-262139));
     guard.address = 0;
     CHECK(guarded_native_wait(&guard, 0) == INT64_C(-262142));
-    CHECK(guarded_native_wait((const struct native_wait_guard *)(uintptr_t)(UINT64_MAX - 7), 0) == -EFAULT);
+    CHECK(guarded_native_wait((const struct native_wait_guard *)(uintptr_t)(UINT64_MAX - 7), 0) == INT64_C(-262142));
     uint32_t native_pair[2];
     CHECK(native_call4(649, 0, 0, 0, 0) == INT64_C(-262142));
     CHECK(native_call4(649, (uintptr_t)native_pair, 0, 0, 0) == 0);
@@ -416,9 +416,9 @@ int main(void) {
         CHECK(count == 512);
     }
     struct native_wait_item capacity_wait = {native_pair[1], 512, 4, 0};
-    CHECK(native_call4(647, (uintptr_t)&capacity_wait, 1, 0, 0) == -EAGAIN);
+    CHECK(native_call4(647, (uintptr_t)&capacity_wait, 1, 0, 0) == INT64_C(-262137));
     CHECK(native_call4(681, native_pair[0], (uintptr_t)capacity_block, 1, 2) == 1);
-    CHECK(native_call4(647, (uintptr_t)&capacity_wait, 1, 0, 0) == -EAGAIN);
+    CHECK(native_call4(647, (uintptr_t)&capacity_wait, 1, 0, 0) == INT64_C(-262137));
     capacity_wait.minimum_write_bytes = 0;
     CHECK(native_call4(647, (uintptr_t)&capacity_wait, 1, 0, 0) == 0);
     capacity_wait.minimum_write_bytes = 512;
