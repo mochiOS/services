@@ -28,7 +28,8 @@ use status::Error;
 #[derive(Clone)]enum KernelObject {
     Process(Arc<Process>),IpcEndpoint{thread_id:u64,slot:u16,generation:u64},
     MemoryAdmission(Arc<mem::vm_object::ProviderAdmission>),File(Arc<task::FileHandle>),
-    Provider(Arc<ProviderObject>),Other,
+    Provider(Arc<ProviderObject>),Event(u64),Thread(u64),VmObject(Arc<()>),
+    MemoryUpdate(Arc<()>),AddressSpace(Arc<()>),HandleSnapshot(Arc<()>),Other,
 }
 struct Process{exit:bool}impl Process{fn id(&self)->u64{7}fn is_exited(&self)->bool{self.exit}}
 struct ProviderObject{signals:u64}impl ProviderObject{fn signals(&self)->u64{self.signals}}
@@ -84,17 +85,63 @@ mod syscall{
     ));
     program.push_str("}}\n");
     program.push_str(probe::between(
-        handle,
-        "#[derive(Clone)]\nenum WaitTarget",
-        "fn remove_endpoint_waiters(",
+        include_str!("../../../core/src/task/handle_table.rs"),
+        "impl KernelObject {",
+        "impl core::fmt::Debug for KernelObject",
     ));
+    program.push_str(
+        &probe::between(
+            handle,
+            "#[derive(Clone)]\nenum WaitTarget",
+            "fn remove_endpoint_waiters(",
+        )
+        .replace("fn wait_item_signal(", "fn production_wait_item_signal("),
+    );
     program.push_str(r#"
 fn set(object:KernelObject){OBJECT.with_borrow_mut(|slot|*slot=object)}
 fn item(interests:u64)->HandleWaitItem{HandleWaitItem{handle:41,interests,..Default::default()}}
+fn wait_item_signal(item:&mut HandleWaitItem,source:Option<&Weak<mem::vm_object::ProviderAdmission>>)->Result<(WaitTarget,bool),u64>{
+    let source=match source {
+        Some(weak)=>WaitSource::MemoryAdmission(weak.clone()),
+        None=>WaitSource::capture(OBJECT.with_borrow(Clone::clone)),
+    };
+    production_wait_item_signal(item,&source)
+}
 fn failure(mut item:HandleWaitItem,source:Option<&Weak<mem::vm_object::ProviderAdmission>>,error:Error){
     assert!(matches!(wait_item_signal(&mut item,source),Err(raw) if raw==error.into_raw()));
 }
 fn main(){
+    // Close/reuse must not retarget any supported kind, including identical
+    // metadata in a distinct allocation and a new IPC generation in one slot.
+    let originals=[
+        KernelObject::Process(Arc::new(Process{exit:false})),
+        KernelObject::IpcEndpoint{thread_id:7,slot:0,generation:9},
+        KernelObject::File(Arc::new(task::FileHandle)),
+        KernelObject::Provider(Arc::new(ProviderObject{signals:2})),
+        KernelObject::MemoryAdmission(Arc::new(mem::vm_object::ProviderAdmission(2))),
+    ];
+    let replacements=[
+        KernelObject::Process(Arc::new(Process{exit:false})),
+        KernelObject::IpcEndpoint{thread_id:7,slot:0,generation:10},
+        KernelObject::File(Arc::new(task::FileHandle)),
+        KernelObject::Provider(Arc::new(ProviderObject{signals:2})),
+        KernelObject::MemoryAdmission(Arc::new(mem::vm_object::ProviderAdmission(2))),
+    ];
+    for (original,replacement) in originals.into_iter().zip(replacements) {
+        let source=WaitSource::capture(original.clone());
+        assert!(source.matches(&original));assert!(!source.matches(&replacement));
+        set(replacement);let mut query=item(HANDLE_SIGNAL_READABLE);
+        assert!(matches!(production_wait_item_signal(&mut query,&source),Err(raw) if raw==Error::InvalidArgument.into_raw()));
+    }
+    let file=Arc::new(task::FileHandle);
+    let source=WaitSource::capture(KernelObject::File(file.clone()));
+    assert_eq!(Arc::strong_count(&file),2);drop(source);assert_eq!(Arc::strong_count(&file),1);
+    let admission=Arc::new(mem::vm_object::ProviderAdmission(0));
+    let source=WaitSource::capture(KernelObject::MemoryAdmission(admission.clone()));
+    assert_eq!(Arc::strong_count(&admission),1,"waiting must not prevent admission cancellation");
+    drop(admission);
+    assert!(matches!(source,WaitSource::MemoryAdmission(weak) if weak.upgrade().is_none()));
+    set(KernelObject::Other);
     let owner=task::ThreadId(7);
     assert_eq!(syscall::ipc::register_endpoint_waiter(endpoint(),owner),Ok(()));
     assert_eq!(syscall::ipc::register_endpoint_waiter(endpoint(),owner),Ok(()));

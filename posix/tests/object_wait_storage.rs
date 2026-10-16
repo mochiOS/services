@@ -72,6 +72,8 @@ thread_local! {
     static SLEEPS:Cell<usize>=const{Cell::new(0)};
     static NOW:Cell<u64>=const{Cell::new(0)};
     static SIGNAL_ON_ARM:Cell<bool>=const{Cell::new(false)};
+    static REUSE_MODE:Cell<u8>=const{Cell::new(0)};
+    static REUSED:Cell<bool>=const{Cell::new(false)};
 }
 fn stage()->bool {let next=STAGE.get()+1;STAGE.set(next);next!=FAIL_STAGE.get()}
 fn add(bit:u32){ACTIVE.set(ACTIVE.get()|bit)}
@@ -83,12 +85,13 @@ impl ProviderObject {
 }
 struct HandleRights;impl HandleRights{const WAIT:Self=Self;}
 enum KernelObject{MemoryAdmission(Arc<mem::vm_object::ProviderAdmission>),Other}
+impl KernelObject{fn is_same_object(&self,other:&Self)->bool{matches!((self,other),(Self::Other,Self::Other))}}
 static ADMISSION:OnceLock<Arc<mem::vm_object::ProviderAdmission>>=OnceLock::new();
 static FILE:OnceLock<Arc<task::FileHandle>>=OnceLock::new();
 static PROVIDER:OnceLock<Arc<ProviderObject>>=OnceLock::new();
 fn object_native(raw:u64,_:HandleRights)->Result<KernelObject,Error> {
     if let Some(error)=LOOKUP_ERROR.get(){return Err(error);}
-    Ok(if raw==5{KernelObject::MemoryAdmission(ADMISSION.get().unwrap().clone())}else{KernelObject::Other})
+    Ok(if raw==5 || (raw==1 && REUSED.get()){KernelObject::MemoryAdmission(ADMISSION.get().unwrap().clone())}else{KernelObject::Other})
 }
 fn provider_endpoint(_: &ProviderObject)->syscall::ipc::IpcEndpoint{syscall::ipc::IpcEndpoint(4)}
 mod mem {pub mod vm_object{pub struct ProviderAdmission;}}
@@ -100,7 +103,7 @@ mod task {
     pub fn register_process_exit_waiter(_:u64,_:u64)->bool{if !crate::stage(){return false;}crate::add(1);true}
     pub fn remove_process_exit_waiters(_:u64){crate::remove(1)}
     pub fn sleep_thread_unless_woken(_:u64)->bool{crate::SLEEPS.set(crate::SLEEPS.get()+1);true}
-    pub fn yield_now(){crate::READY.set(true)}
+    pub fn yield_now(){crate::READY.set(true);if crate::REUSE_MODE.get()==1{crate::REUSED.set(true);}}
 }
 mod syscall {
     pub fn copy_from_user_native(pointer:u64,bytes:&mut[u8])->Result<(),crate::Error> {
@@ -131,6 +134,7 @@ mod syscall {
         pub fn arm_thread_deadline(_:u64,_:u64)->bool{
             crate::ARMED.set(true);
             if crate::SIGNAL_ON_ARM.get(){crate::READY.set(true);}
+            if crate::REUSE_MODE.get()==2{crate::REUSED.set(true);}
             crate::stage()
         }
     }
@@ -185,7 +189,8 @@ use crate::*;
         "fn wait_item_signal(",
     ));
     program.push_str(r#"
-fn wait_item_signal(item:&mut HandleWaitItem,_:Option<&Weak<mem::vm_object::ProviderAdmission>>)->Result<(WaitTarget,bool),u64>{
+fn wait_item_signal(item:&mut HandleWaitItem,source:&WaitSource)->Result<(WaitTarget,bool),u64>{
+    if !source.matches(&object_native(u64::from(item.handle),HandleRights::WAIT).map_err(Error::into_raw)?){return Err(Error::InvalidArgument.into_raw());}
     let scan=SCANS.get()+1;SCANS.set(scan);
     if scan==FAIL_SCAN.get(){return Err(EINVAL);}
     let target=match item.handle {
@@ -215,6 +220,7 @@ fn reset(){
     GUARD_COPIES.set(0);GUARD_READS.set(0);GUARD_EXPECTED.set(5);GUARD_VALUE.set(5);
     STAGE.set(0);FAIL_STAGE.set(0);SCANS.set(0);FAIL_SCAN.set(0);SLEEPS.set(0);
     NOW.set(0);SIGNAL_ON_ARM.set(false);
+    REUSE_MODE.set(0);REUSED.set(false);
 }
 fn main(){
     ADMISSION.set(Arc::new(mem::vm_object::ProviderAdmission)).ok().unwrap();
@@ -250,6 +256,11 @@ fn main(){
     reset();UPCALL.set(true);READY.set(true);assert_eq!(handle::wait_many(1,5,0,0),0);clean();
     reset();SIGNAL_ON_ARM.set(true);assert_eq!(handle::wait_many(1,5,100,0),0);
     assert_eq!(SLEEPS.get(),0);clean();
+    for mode in [1,2] {
+        reset();REUSE_MODE.set(mode);
+        assert_eq!(handle::wait_many(1,5,100,0),Error::InvalidArgument.into_raw());
+        assert_eq!(SLEEPS.get(),usize::from(mode==1));clean();
+    }
     // Preserve each native resident/fault-in error at all three copy phases.
     for error in [Error::InvalidAddress,Error::ResourceUnavailable,Error::BackingFailure] {
         reset();READ_ERROR.set(Some(error));
