@@ -165,7 +165,7 @@ fn make(id:u64)->std::sync::Arc<task::handle_table::ProviderObject> {
 fn main(){
     use task::handle_table as h;
     DENY.store(true,Ordering::Relaxed);
-    assert!(matches!(h::ProviderObject::new(31,4,8,99),Err(mnu_abi::ENOMEM)));
+    assert!(matches!(h::ProviderObject::new(31,4,8,99),Err(mnu_abi::status::Error::ResourceUnavailable)));
     DENY.store(false,Ordering::Relaxed);
     assert_eq!(ATTEMPTS.swap(0,Ordering::Relaxed),1);
     assert!(h::take_provider_releases().pop().is_none());

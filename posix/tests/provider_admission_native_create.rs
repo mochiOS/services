@@ -13,8 +13,6 @@ extern crate alloc;
 use alloc::sync::Arc;
 use std::{cell::{Cell,RefCell},sync::atomic::{AtomicBool,Ordering}};
 use mnu_abi::status::Error;
-const EINVAL:u64=(-22i64) as u64;const ENOMEM:u64=(-12i64) as u64;
-const EEXIST:u64=(-17i64) as u64;const ENOSPC:u64=(-28i64) as u64;
 static FAIL:AtomicBool=AtomicBool::new(false);
 struct Allocator;
 unsafe impl std::alloc::GlobalAlloc for Allocator {
@@ -55,10 +53,10 @@ impl ProviderAdmission {fn new(key:ObjectKey)->Result<Self,Error>{
 }}
 impl Drop for ProviderAdmission {fn drop(&mut self){LIVE.set(LIVE.get()-1);}}
 struct ProviderObject;
-impl ProviderObject {fn new(thread:u64,slot:u16,generation:u64,identity:u64)->Result<Self,u64>{
+impl ProviderObject {fn new(thread:u64,slot:u16,generation:u64,identity:u64)->Result<Self,Error>{
     assert_eq!((thread,slot,generation,identity),(119,2,8,77));
     CREATED.set(CREATED.get()+1);
-    if MODE.get()==6{return Err(ENOMEM);}
+    if MODE.get()==6{return Err(Error::ResourceUnavailable);}
     LIVE.set(LIVE.get()+1);
     if MODE.get()==7{FAIL.store(true,Ordering::Relaxed);}
     Ok(Self)
@@ -115,7 +113,7 @@ mod syscall {
         "pub(crate) fn resolve_provider_endpoint_native(",
         "fn resolve_call_destination(",
     ));
-    program.push_str("\n}}\nmod production {use crate::{mnu_abi,ObjectKey,ProviderAdmission,ProviderObject,Arc,Error,HandleRights,KernelObject,ObjectHandleEntry,EINVAL,EEXIST,ENOSPC};\nfn current_process()->Result<u64,u64>{crate::syscall::security::current_process_id().ok_or(EINVAL)}\n");
+    program.push_str("\n}}\nmod production {use crate::{mnu_abi,ObjectKey,ProviderAdmission,ProviderObject,Arc,Error,HandleRights,KernelObject,ObjectHandleEntry};\n");
     program.push_str(probe::between(
         include_str!("../../../core/src/syscall/handle/memory_update.rs"),
         "fn provider_key(",
@@ -154,14 +152,15 @@ fn main(){
     assert_eq!(LIVE.get(),1);
     PROCESS.with_borrow_mut(|p|p.0.0=None);
     assert_eq!(LIVE.get(),0);
-    // Only endpoint validation is migrated here; preserve other creation
-    // errors until their native contracts are migrated separately.
+    // The full provider creation boundary is native, including allocation
+    // failures, duplicate identity and vanished execution context.
     for (mode,error,created,inserts) in [
-        (1,EINVAL,0,0),(2,Error::AccessDenied.into_raw(),0,0),
+        (1,Error::NotReady.into_raw(),0,0),(2,Error::AccessDenied.into_raw(),0,0),
         (3,Error::InvalidArgument.into_raw(),0,0),(4,Error::InvalidArgument.into_raw(),0,0),
-        (5,Error::InvalidArgument.into_raw(),0,0),(6,ENOMEM,1,0),(7,ENOMEM,1,0),
-        (8,ENOSPC,1,1),(9,EINVAL,1,0),(10,Error::BackingFailure.into_raw(),0,0),
-        (12,EEXIST,1,0),
+        (5,Error::InvalidArgument.into_raw(),0,0),
+        (6,Error::ResourceUnavailable.into_raw(),1,0),(7,Error::ResourceUnavailable.into_raw(),1,0),
+        (8,Error::ResourceUnavailable.into_raw(),1,1),(9,Error::NotReady.into_raw(),1,0),
+        (10,Error::BackingFailure.into_raw(),0,0),(12,Error::AlreadyExists.into_raw(),1,0),
     ]{
         MODE.set(mode);CREATED.set(0);INSERTS.set(0);
         assert_eq!(production::provider_object_create(7,77,1),error);
@@ -170,8 +169,8 @@ fn main(){
         PROCESS.with_borrow(|p|assert!(p.0.0.is_none()));
     }
     MODE.set(0);LOOKUPS.set(0);
-    assert_eq!(production::provider_object_create(7,u64::MAX,1),EINVAL);
-    assert_eq!(production::provider_object_create(7,77,u64::MAX),EINVAL);
+    assert_eq!(production::provider_object_create(7,u64::MAX,1),Error::InvalidArgument.into_raw());
+    assert_eq!(production::provider_object_create(7,77,u64::MAX),Error::InvalidArgument.into_raw());
     assert_eq!(LOOKUPS.get(),0);
     assert_eq!(production::provider_object_create(7,77,1),31);
     PROCESS.with_borrow_mut(|p|p.0.0=None);
