@@ -102,6 +102,31 @@ mod mochios_posix_client {{
             .unwrap()
             .display()
     );
+    // Exercise the runtime's byte-format conversion too. All pointers in this
+    // probe refer to live local request/remaining values; real fault handling
+    // is covered separately by time_memory_runtime.
+    program.push_str(r#"
+#[repr(C)]
+struct Tms { tms_utime:u64,tms_stime:u64,tms_cutime:u64,tms_cstime:u64 }
+mod user_copy {
+    pub fn read(source:*const u8,bytes:&mut [u8])->Result<(),i32>{
+        if source.is_null(){return Err(crate::EFAULT);}
+        unsafe{std::ptr::copy_nonoverlapping(source,bytes.as_mut_ptr(),bytes.len());}
+        Ok(())
+    }
+    pub fn write(destination:*mut u8,bytes:&[u8])->Result<(),i32>{
+        if destination.is_null(){return Err(crate::EFAULT);}
+        unsafe{std::ptr::copy_nonoverlapping(bytes.as_ptr(),destination,bytes.len());}
+        Ok(())
+    }
+}
+mod time_memory {
+"#);
+    program.push_str(
+        &include_str!("../../../user/crates/newlib-runtime/src/time_memory.rs")
+            .replace("//!", "//"),
+    );
+    program.push_str("}\n");
     for entry in [
         "pub extern \"C\" fn sleep(",
         "pub extern \"C\" fn usleep(",
