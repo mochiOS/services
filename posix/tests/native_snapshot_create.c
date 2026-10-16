@@ -5,6 +5,12 @@
 #include <stdio.h>
 #include <string.h>
 
+#define SC_NATIVE_NOT_READY INT64_C(-262137)
+#define SC_NATIVE_ACCESS_DENIED INT64_C(-262138)
+#define SC_NATIVE_INVALID_ADDRESS INT64_C(-262142)
+#define SC_NATIVE_INVALID_ARGUMENT INT64_C(-262139)
+#define SC_NATIVE_LIMIT_EXCEEDED INT64_C(-262143)
+
 enum {
   SLEEP = 517,
   FIND_PROCESS = 518,
@@ -87,7 +93,7 @@ __attribute__((used, noreturn)) static void child(void) {
        call6(READ_AT, 41, (uint64_t)&memory, 8, 0, 0, 0) == 8 &&
        memory == UINT64_C(0x5555abcdef123456) &&
        call6(WRITE_AT, 41, (uint64_t)&memory, 8, 0, 0, 0) == -EACCES &&
-       N(DUP, 41, 1, 0) == -EACCES;
+       N(DUP, 41, 1, 0) == SC_NATIVE_ACCESS_DENIED;
   N(EXIT, ok ? 37 : 99, 0, 0);
   for (;;)
     __asm__ volatile("pause");
@@ -153,7 +159,7 @@ int main(void) {
   CHECK(count > 1 && count <= 64);
   struct handle_info owned[64];
   memset(owned, 0xa5, sizeof(owned));
-  CHECK(N(TABLE_READ, owned, count - 1, 0) == -ENOSPC);
+  CHECK(N(TABLE_READ, owned, count - 1, 0) == SC_NATIVE_LIMIT_EXCEEDED);
   const unsigned char *sentinel = (const unsigned char *)owned;
   for (size_t i = 0; i < sizeof(owned); i++)
     CHECK(sentinel[i] == 0xa5);
@@ -168,9 +174,9 @@ int main(void) {
       found = 1;
   }
   CHECK(found);
-  CHECK(N(TABLE_READ, 0, 1, 0) == -EFAULT);
-  CHECK(N(TABLE_READ, owned, 0, 0) == -EINVAL);
-  CHECK(N(TABLE_READ, owned, 4097, 0) == -EINVAL);
+  CHECK(N(TABLE_READ, 0, 1, 0) == SC_NATIVE_INVALID_ADDRESS);
+  CHECK(N(TABLE_READ, owned, 0, 0) == SC_NATIVE_INVALID_ARGUMENT);
+  CHECK(N(TABLE_READ, owned, 4097, 0) == SC_NATIVE_INVALID_ARGUMENT);
   /* Touch every stack page before capture so initial entry has resident VM. */
   for (size_t i = 0; i < sizeof(stack); i += 4096)
     stack[i] = 1;
@@ -221,7 +227,7 @@ int main(void) {
       bad.tls = UINT64_C(0xffff800000001000);
     length = metadata(bytes, bad);
     CHECK(authorize((uint64_t)authority));
-    CHECK(N(CREATE, image, bytes, length) == -EFAULT);
+    CHECK(N(CREATE, image, bytes, length) == SC_NATIVE_INVALID_ADDRESS);
   }
   length = metadata(bytes, context);
   CHECK(authorize((uint64_t)authority));
@@ -231,7 +237,7 @@ int main(void) {
   CHECK(N(CREATE, image, bytes, length) == -EACCES);
   /* Reauthorization cannot revive an already consumed image through aliases. */
   CHECK(authorize((uint64_t)authority));
-  CHECK(N(CREATE, alias, bytes, length) == -EAGAIN);
+  CHECK(N(CREATE, alias, bytes, length) == SC_NATIVE_NOT_READY);
   CHECK(N(CLOSE, image, 0, 0) == 0 && N(CLOSE, alias, 0, 0) == 0);
   CHECK(N(CLOSE, memory, 0, 0) == 0);
   struct status state = {0};

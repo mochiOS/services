@@ -16,7 +16,6 @@ thread_local! {
     static CALLS:std::cell::Cell<u64>=const {std::cell::Cell::new(0)};
 }
 mod syscall {
-    pub mod types {pub const EACCES:u64=13;pub const EAGAIN:u64=11;pub const EFAULT:u64=14;}
     pub mod security {pub fn current_process_id()->Option<u64> {crate::PID.with(|v|v.get())}}
 }
 mod task {
@@ -44,6 +43,7 @@ mod mem {pub mod address_space {
                 5=>Err(ConsumeError::Backing(crate::mnu_abi::status::Error::BackingFailure)),
                 6=>Err(ConsumeError::Backing(crate::mnu_abi::status::Error::AccessDenied)),
                 7=>Err(ConsumeError::Backing(crate::mnu_abi::status::Error::ResourceUnavailable)),
+                8=>Err(ConsumeError::Backing(crate::mnu_abi::status::Error::NotFound)),
                 _=>Err(ConsumeError::Context),
             }
         }
@@ -54,22 +54,21 @@ mod mem {pub mod address_space {
     program.push_str(&source[start..end]);
     program.push_str(r#"
 fn main() {
+    use mnu_abi::status::Error;
     let image=mem::address_space::AddressSpaceObject;
     let authorization=task::process::PendingExecSecurity;let context=mnu_abi::ThreadCreateContext;
     assert_eq!(consume_address_space_for_create(&image,&authorization,&context),Ok(mem::address_space::AddressSpaceImage));
-    for (mode,error) in [(1,11),(2,13),(3,14),
-        (4,mnu_abi::status::Error::NotReady.into_raw()),
-        (5,mnu_abi::status::Error::BackingFailure.into_raw()),
-        (6,mnu_abi::status::Error::AccessDenied.into_raw()),
-        (7,mnu_abi::status::Error::ResourceUnavailable.into_raw())] {
+    for (mode,error) in [(1,Error::NotReady),(2,Error::AccessDenied),(3,Error::InvalidAddress),
+        (4,Error::NotReady),(5,Error::BackingFailure),(6,Error::AccessDenied),
+        (7,Error::ResourceUnavailable),(8,Error::NotFound)] {
         MODE.with(|v|v.set(mode));
         assert_eq!(consume_address_space_for_create(&image,&authorization,&context),Err(error));
     }
     PRESENT.with(|v|v.set(false));
-    assert_eq!(consume_address_space_for_create(&image,&authorization,&context),Err(13));
+    assert_eq!(consume_address_space_for_create(&image,&authorization,&context),Err(Error::NotReady));
     PID.with(|v|v.set(None));
-    assert_eq!(consume_address_space_for_create(&image,&authorization,&context),Err(13));
-    assert_eq!(CALLS.with(|v|v.get()),8);assert!(!LOCKED.with(|v|v.get()));
+    assert_eq!(consume_address_space_for_create(&image,&authorization,&context),Err(Error::NotReady));
+    assert_eq!(CALLS.with(|v|v.get()),9);assert!(!LOCKED.with(|v|v.get()));
 }
 "#);
     program = program.replace(
@@ -119,4 +118,24 @@ fn native_creation_uses_locked_image_consumption_only() {
     );
     assert!(!creation.contains("image.consume("));
     assert_eq!(source.matches("image.consume(").count(), 1);
+}
+
+#[test]
+fn snapshot_probe_uses_native_statuses_for_consumption_and_reference_queries() {
+    use mnu_abi::status::Error;
+    let source = include_str!("native_snapshot_create.c");
+    for (name, error) in [
+        ("SC_NATIVE_NOT_READY", Error::NotReady),
+        ("SC_NATIVE_ACCESS_DENIED", Error::AccessDenied),
+        ("SC_NATIVE_INVALID_ADDRESS", Error::InvalidAddress),
+        ("SC_NATIVE_INVALID_ARGUMENT", Error::InvalidArgument),
+        ("SC_NATIVE_LIMIT_EXCEEDED", Error::LimitExceeded),
+    ] {
+        assert!(source.contains(&format!(
+            "#define {name} INT64_C({})",
+            error.into_raw() as i64
+        )));
+    }
+    assert!(source.contains("N(CREATE, image, bytes, length) == SC_NATIVE_INVALID_ADDRESS"));
+    assert!(source.contains("N(CREATE, alias, bytes, length) == SC_NATIVE_NOT_READY"));
 }
