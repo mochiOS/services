@@ -4,7 +4,7 @@ use std::sync::Mutex;
 type c_int = i32;
 const EIO: c_int = 5;
 const EAGAIN: c_int = 11;
-const EOVERFLOW: c_int = 75;
+const EOVERFLOW: c_int = 139;
 static CLOSED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 static CREATED: Mutex<Result<u64, c_int>> = Mutex::new(Ok(91));
 static CONTENT: Mutex<Result<Vec<u8>, c_int>> = Mutex::new(Ok(Vec::new()));
@@ -34,7 +34,7 @@ mod syscall {
     }
 }
 fn syscall_errno(value: Result<u64, c_int>) -> Result<u64, c_int> {
-    value
+    value.map_err(|status| mochios_posix_client::newlib_errno::from_status(i64::from(status)))
 }
 fn close_object_handle(handle: u32) {
     CLOSED.lock().unwrap().push(handle);
@@ -77,5 +77,16 @@ fn parent_releases_on_success_and_error_but_child_never_closes_copied_number() {
     assert_eq!(*CLOSED.lock().unwrap(), [91, 91, 91]);
     *CREATED.lock().unwrap() = Err(12);
     assert!(matches!(Capture::new(), Err(12)));
+    for (native, expected) in [
+        (mnu_abi::status::Error::ResourceUnavailable, 12),
+        (mnu_abi::status::Error::NotReady, EAGAIN),
+    ] {
+        *CREATED.lock().unwrap() = Err(native.into_raw() as i32);
+        assert!(matches!(Capture::new(), Err(error) if error == expected));
+    }
+    for (returned, expected) in [(0, EIO), (u64::from(u32::MAX) + 1, EOVERFLOW)] {
+        *CREATED.lock().unwrap() = Ok(returned);
+        assert!(matches!(Capture::new(), Err(error) if error == expected));
+    }
     assert_eq!(*CLOSED.lock().unwrap(), [91, 91, 91]);
 }
