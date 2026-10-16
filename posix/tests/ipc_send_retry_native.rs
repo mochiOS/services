@@ -53,26 +53,45 @@ fn main(){
 fn synchronous_calls_retry_queue_pressure_but_propagate_allocation_failure() {
     let mut program = probe::program();
     program.push_str(r#"
-use std::{cell::RefCell,collections::VecDeque,sync::atomic::{AtomicU64,Ordering}};
+use std::{cell::{Cell,RefCell},collections::VecDeque,sync::atomic::{AtomicU64,Ordering}};
+thread_local!{
+    static CAPS:Cell<bool>=const{Cell::new(true)};
+    static CONTEXT:Cell<bool>=const{Cell::new(true)};
+    static REGISTER:Cell<bool>=const{Cell::new(true)};
+    static TARGET:Cell<bool>=const{Cell::new(true)};
+    static VALID:Cell<bool>=const{Cell::new(true)};
+    static DIE_ON_YIELD:Cell<bool>=const{Cell::new(false)};
+    static OBSERVE_ERROR:Cell<u64>=const{Cell::new(0)};
+    static DECODE_ERROR:Cell<u64>=const{Cell::new(0)};
+    static OBSERVERS:Cell<usize>=const{Cell::new(0)};
+}
 struct State{replies:VecDeque<u64>,calls:usize,yields:usize,receives:usize,decodes:usize}
 thread_local!{static STATE:RefCell<State>=RefCell::new(State{replies:VecDeque::new(),calls:0,yields:0,receives:0,decodes:0});}
 static NEXT_CALL_ID:AtomicU64=AtomicU64::new(1);
 #[derive(Clone,Copy)]struct IpcEndpoint;
 struct ObjectHandleAttachments{delivery_flags:u32}
 mod capability{pub enum Capability{IpcClient,IpcServer}}
-mod syscall{pub mod security{pub fn caller_has_any_capability(_:&[crate::capability::Capability])->bool{true}}}
+mod syscall{pub mod security{pub fn caller_has_any_capability(_:&[crate::capability::Capability])->bool{crate::CAPS.get()}}}
 mod task{
     pub struct ThreadId(u64);impl ThreadId{pub fn as_u64(&self)->u64{self.0}pub fn from_u64(id:u64)->Self{Self(id)}}
-    pub fn current_thread_id()->Option<ThreadId>{Some(ThreadId(7))}
-    pub fn yield_now(){crate::STATE.with_borrow_mut(|s|s.yields+=1);}
+    pub fn current_thread_id()->Option<ThreadId>{crate::CONTEXT.get().then_some(ThreadId(7))}
+    pub fn yield_now(){crate::STATE.with_borrow_mut(|s|s.yields+=1);if crate::DIE_ON_YIELD.get(){crate::VALID.set(false);}}
 }
-mod lifetime{pub fn observe(_:crate::IpcEndpoint,_:crate::task::ThreadId)->Result<(),u64>{Ok(())}}
+mod lifetime{
+    pub struct Observation;
+    impl Drop for Observation{fn drop(&mut self){crate::OBSERVERS.set(crate::OBSERVERS.get()-1);}}
+    pub fn observe(_:crate::IpcEndpoint,_:crate::task::ThreadId)->Result<Observation,u64>{
+        let error=crate::OBSERVE_ERROR.get();if error!=0{return Err(error);}
+        crate::OBSERVERS.set(crate::OBSERVERS.get()+1);Ok(Observation)
+    }
+}
 fn resolve_call_destination(_:u64)->Result<(u64,u64,u32),u64>{Ok((8,88,2))}
-fn ensure_endpoint_for_thread(_:u64)->Option<u64>{Some(77)}
-fn endpoint_for_thread(_:u64)->Option<IpcEndpoint>{Some(IpcEndpoint)}
-fn endpoint_is_valid(_:IpcEndpoint)->bool{true}
+fn ensure_endpoint_for_thread(_:u64)->Option<u64>{REGISTER.get().then_some(77)}
+fn endpoint_for_thread(_:u64)->Option<IpcEndpoint>{TARGET.get().then_some(IpcEndpoint)}
+fn endpoint_is_valid(_:IpcEndpoint)->bool{VALID.get()}
 fn decode_outgoing_object_handles(pointer:u64)->Result<ObjectHandleAttachments,u64>{
-    assert_eq!(pointer,99);STATE.with_borrow_mut(|s|s.decodes+=1);Ok(ObjectHandleAttachments{delivery_flags:0})
+    assert_eq!(pointer,99);STATE.with_borrow_mut(|s|s.decodes+=1);
+    let error=DECODE_ERROR.get();if error!=0{return Err(error);}Ok(ObjectHandleAttachments{delivery_flags:0})
 }
 fn send_call_to_thread_id(dest:u64,sender:u64,id:u64,pointer:u64,length:u64,flags:u32)->u64{
     assert_eq!((dest,sender,pointer,length,flags),(8,77,11,3,2));assert!(id>0);
@@ -99,6 +118,11 @@ fn run(handles:bool)->u64{
     if handles{production::call_object_handles(8,11,3,22,4,99)}
     else{production::call(8,11,3,22,4)}
 }
+fn reset(){
+    CAPS.set(true);CONTEXT.set(true);REGISTER.set(true);TARGET.set(true);VALID.set(true);DIE_ON_YIELD.set(false);OBSERVE_ERROR.set(0);DECODE_ERROR.set(0);
+    assert_eq!(OBSERVERS.get(),0);
+    STATE.set(State{replies:VecDeque::new(),calls:0,yields:0,receives:0,decodes:0});
+}
 fn main(){
     for handles in [false,true]{
         STATE.set(State{replies:vec![NativeError::NotReady.into_raw(),0].into(),calls:0,yields:0,receives:0,decodes:0});
@@ -110,6 +134,28 @@ fn main(){
             STATE.with_borrow(|s|{assert_eq!((s.calls,s.yields,s.receives),(1,0,0));assert_eq!(s.decodes,usize::from(handles));assert!(s.replies.is_empty());});
         }
     }
+    for handles in [false,true]{
+        for stage in 0..6{
+            reset();let expected=match stage{
+                0=>{CAPS.set(false);NativeError::AccessDenied},
+                1=>{CONTEXT.set(false);NativeError::NotReady},
+                2=>{REGISTER.set(false);NativeError::ResourceUnavailable},
+                3=>{TARGET.set(false);NativeError::NotFound},
+                4=>{VALID.set(false);NativeError::NotFound},
+                _=>{OBSERVE_ERROR.set(NativeError::ResourceUnavailable.into_raw());NativeError::ResourceUnavailable},
+            };
+            assert_eq!(run(handles),expected.into_raw());assert_eq!(OBSERVERS.get(),0);
+            STATE.with_borrow(|s|assert_eq!((s.calls,s.yields,s.receives,s.decodes),(0,0,0,0)));
+        }
+        reset();DIE_ON_YIELD.set(true);
+        STATE.with_borrow_mut(|s|s.replies.push_back(NativeError::NotReady.into_raw()));
+        assert_eq!(run(handles),NativeError::NotFound.into_raw());assert_eq!(OBSERVERS.get(),0);
+        STATE.with_borrow(|s|assert_eq!((s.calls,s.yields,s.receives),(1,1,0)));
+    }
+    reset();assert_eq!(production::call_object_handles(8,11,3,22,4,0),NativeError::InvalidAddress.into_raw());
+    reset();DECODE_ERROR.set(NativeError::AccessDenied.into_raw());
+    assert_eq!(run(true),NativeError::AccessDenied.into_raw());assert_eq!(OBSERVERS.get(),0);
+    STATE.with_borrow(|s|assert_eq!((s.calls,s.receives,s.decodes),(0,0,1)));
 }
 "#);
     probe::run(&program);
