@@ -41,7 +41,16 @@ mod production;
 fn explicit_ceiling_and_all_native_errors_are_preserved_without_fallback() {
     let _serial = SERIAL.lock().unwrap();
     for ceiling in [0, 4096, u64::MAX] {
-        for error in [-12, -13, -9, -14, -22, -38] {
+        for error in [
+            mnu_abi::status::Error::InvalidArgument.into_raw() as i64,
+            mnu_abi::status::Error::AccessDenied.into_raw() as i64,
+            mnu_abi::status::Error::NotReady.into_raw() as i64,
+            mnu_abi::status::Error::ResourceUnavailable.into_raw() as i64,
+            mnu_abi::status::Error::InvalidAddress.into_raw() as i64,
+            mnu_abi::status::Error::BackingFailure.into_raw() as i64,
+            // Unmigrated image-preparation backends still return these.
+            -12, -13, -9, -14, -22, -38,
+        ] {
             CALLS.lock().unwrap().clear();
             *RESULT.lock().unwrap() = Err(SysError(error));
             assert_eq!(

@@ -6,7 +6,7 @@ use std::cell::Cell;
 thread_local! {
     static FAIL_NEXT: Cell<bool> = const { Cell::new(false) };
     static COPIES: Cell<usize> = const { Cell::new(0) };
-    static COPY_ERROR: Cell<Option<u64>> = const { Cell::new(None) };
+    static COPY_ERROR: Cell<Option<mnu_abi::status::Error>> = const { Cell::new(None) };
     static FAIL_AFTER: Cell<Option<usize>> = const { Cell::new(None) };
     static MAPS: Cell<usize> = const { Cell::new(0) };
 }
@@ -72,20 +72,14 @@ mod syscall {
         pub const EINVAL: u64 = mnu_abi::EINVAL;
         pub const ENOMEM: u64 = mnu_abi::ENOMEM;
     }
-    pub fn copy_from_user(pointer: u64, bytes: &mut [u8]) -> Result<(), u64> {
-        assert_eq!(pointer, 42);
-        crate::COPIES.with(|copies| copies.set(copies.get() + 1));
-        bytes.fill(0xa5);
-        crate::COPY_ERROR.with(|error| error.get().map_or(Ok(()), Err))
-    }
     pub fn copy_from_user_native(
         pointer: u64,
         bytes: &mut [u8],
     ) -> Result<(), mnu_abi::status::Error> {
-        copy_from_user(pointer, bytes).map_err(|raw| {
-            mnu_abi::status::Error::from_raw(raw)
-                .unwrap_or(mnu_abi::status::Error::InvalidAddress)
-        })
+        assert_eq!(pointer, 42);
+        crate::COPIES.with(|copies| copies.set(copies.get() + 1));
+        bytes.fill(0xa5);
+        crate::COPY_ERROR.with(|error| error.get().map_or(Ok(()), Err))
     }
 }
 #[path = "../../../core/src/syscall/exec/storage.rs"]
@@ -246,31 +240,31 @@ fn elf_metadata_allocation_failures_precede_page_table_mutation() {
 }
 
 #[test]
-fn allocator_failure_returns_enomem_without_copy_or_allocation_error_handler() {
+fn allocator_failure_returns_native_error_without_copy_or_allocation_error_handler() {
     COPIES.with(|copies| copies.set(0));
     for length in [1, 256, 4096, 8192, 65536] {
         FAIL_NEXT.with(|fail| fail.set(true));
-        let result = storage::from_user(42, length);
+        let result = storage::from_user_native(42, length);
         let consumed = FAIL_NEXT.with(|fail| !fail.replace(false));
         assert!(consumed);
-        assert_eq!(result, Err(mnu_abi::ENOMEM));
+        assert_eq!(result, Err(mnu_abi::status::Error::ResourceUnavailable));
         assert_eq!(COPIES.with(Cell::get), 0);
     }
     // Fault injection is scoped to the failed allocation, not a persistent
     // process limit: a subsequent preparation can allocate and copy normally.
-    assert_eq!(storage::from_user(42, 8).unwrap(), [0xa5; 8]);
+    assert_eq!(storage::from_user_native(42, 8).unwrap(), [0xa5; 8]);
 }
 
 #[test]
 fn zeroing_capacity_overflow_copy_errors_and_empty_storage_are_explicit() {
     assert_eq!(snapshot::zeroed(usize::MAX), Err(mnu_abi::ENOMEM));
     assert_eq!(snapshot::zeroed(32).unwrap(), [0; 32]);
-    COPY_ERROR.with(|error| error.set(Some(mnu_abi::EFAULT)));
-    let result = storage::from_user(42, 256);
+    COPY_ERROR.with(|error| error.set(Some(mnu_abi::status::Error::InvalidAddress)));
+    let result = storage::from_user_native(42, 256);
     COPY_ERROR.with(|error| error.set(None));
-    assert_eq!(result, Err(mnu_abi::EFAULT));
-    assert_eq!(storage::from_user(42, 0).unwrap(), []);
-    assert_eq!(storage::from_user(42, 256).unwrap(), [0xa5; 256]);
+    assert_eq!(result, Err(mnu_abi::status::Error::InvalidAddress));
+    assert_eq!(storage::from_user_native(42, 0).unwrap(), []);
+    assert_eq!(storage::from_user_native(42, 256).unwrap(), [0xa5; 256]);
 }
 
 #[test]
@@ -293,7 +287,7 @@ fn native_storage_keeps_allocation_and_usercopy_failure_categories() {
         Error::ResourceUnavailable,
         Error::BackingFailure,
     ] {
-        COPY_ERROR.with(|value| value.set(Some(error.into_raw())));
+        COPY_ERROR.with(|value| value.set(Some(error)));
         let result = storage::from_user_native(42, 256);
         COPY_ERROR.with(|value| value.set(None));
         assert_eq!(result, Err(error));
@@ -337,7 +331,9 @@ fn native_image_preparation_routes_owned_storage_through_fallible_paths() {
         .next()
         .unwrap();
     for buffer in ["identity", "startup"] {
-        assert!(replace.contains(&format!("storage::from_user({buffer}_ptr, {buffer}_len)")));
+        assert!(replace.contains(&format!(
+            "storage::from_user_native({buffer}_ptr, {buffer}_len)"
+        )));
     }
     let create = exec.split("pub fn process_create_syscall(").nth(1).unwrap();
     assert!(create.contains("storage::from_user_native(request_ptr, length)"));
