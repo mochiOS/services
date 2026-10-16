@@ -523,12 +523,7 @@ fn reply_transfer_status(sender: u64, request_id: u64, status: i32) {
 }
 
 fn reply_error(sender: u64, request_id: u64, status: u64) {
-    let raw_status = status as i64;
-    let status = if raw_status > 0 {
-        -(raw_status as i32)
-    } else {
-        raw_status as i32
-    };
+    let status = mochios_posix_protocol::status::normalize_failure(status as i64);
     diagnostic(&alloc::format!(
         "signature.service: request failed id={} status={}",
         request_id,
@@ -538,6 +533,15 @@ fn reply_error(sender: u64, request_id: u64, status: u64) {
     let response = ErrorResponse { request_id, status };
     if let Ok(length) = response.encode(&mut buffer) {
         let _ = platform::ipc::reply(sender, &buffer[..length]);
+    }
+}
+
+// The early endpoint handoff uses a signed status in a 64-bit legacy payload.
+// Never truncate a native tag or let a malformed failure become success.
+fn endpoint_reply_status(result: Result<(), u64>) -> u64 {
+    match result {
+        Ok(()) => 0,
+        Err(error) => i64::from(mochios_posix_protocol::status::normalize_failure(error as i64)) as u64,
     }
 }
 
@@ -607,7 +611,7 @@ fn run_server() -> ! {
         let len = (msg & 0xffff_ffff) as usize;
         let request = &buf[..len.min(buf.len())];
         if request == mochios_signature_protocol::INSTALL_POSIX_ENDPOINT_OPCODE.to_le_bytes() {
-            let status = endpoint_handoff::validate(
+            let result = endpoint_handoff::validate(
                 &attached,
                 platform::capability::check_thread(sender, "capabilities.manage") == Ok(1),
             )
@@ -617,9 +621,8 @@ fn run_server() -> ! {
             })
             .map(|_| {
                 database = load_active_database();
-                0u64
-            })
-            .unwrap_or_else(|error| error);
+            });
+            let status = endpoint_reply_status(result);
             close_received_handles(&attached);
             let _ = platform::ipc::reply(sender, &status.to_le_bytes());
             continue;
