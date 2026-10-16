@@ -397,16 +397,16 @@ int main(void) {
     struct native_execution_usage usage_before, usage_after;
     CHECK(native_call4(683, 0, (uintptr_t)&usage_before, sizeof(usage_before), 0) == 0);
     CHECK(usage_before.ticks_per_second > 0 && usage_before.reserved == 0);
-    CHECK(native_call4(683, 0, (uintptr_t)&usage_before, sizeof(usage_before) - 1, 0) == -EINVAL);
-    CHECK(native_call4(683, 0, 0, sizeof(usage_before), 0) == -EFAULT);
-    CHECK(native_call4(683, UINT32_MAX, (uintptr_t)&usage_before, sizeof(usage_before), 0) == -EBADF);
-    CHECK(native_call4(683, native_pair[0], (uintptr_t)&usage_before, sizeof(usage_before), 0) == -EBADF);
+    CHECK(native_call4(683, 0, (uintptr_t)&usage_before, sizeof(usage_before) - 1, 0) == INT64_C(-262139));
+    CHECK(native_call4(683, 0, 0, sizeof(usage_before), 0) == INT64_C(-262142));
+    CHECK(native_call4(683, UINT32_MAX, (uintptr_t)&usage_before, sizeof(usage_before), 0) == INT64_C(-262139));
+    CHECK(native_call4(683, native_pair[0], (uintptr_t)&usage_before, sizeof(usage_before), 0) == INT64_C(-262139));
     int64_t read_only_native = native_call4(627, native_pair[0], 1, 0, 0);
     CHECK(read_only_native > 0);
     CHECK(native_call4(650, (uint64_t)read_only_native, 0, 0, 0) == INT64_C(-262138));
     CHECK(native_call4(651, (uint64_t)read_only_native, 1, 0, 0) == INT64_C(-262138));
     CHECK(native_call4(683, (uint64_t)read_only_native, (uintptr_t)&usage_before,
-                       sizeof(usage_before), 0) == -EACCES);
+                       sizeof(usage_before), 0) == INT64_C(-262138));
     CHECK(native_call4(626, (uint64_t)read_only_native, 0, 0, 0) == 0);
     char capacity_block[512];
     memset(capacity_block, 'c', sizeof(capacity_block));

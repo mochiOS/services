@@ -46,11 +46,11 @@ int main(void) {
         CHECK(image > 0);
         CHECK((uint64_t)native3(RIGHTS_GET, image, 0, 0)
               == (control | duplicate | transfer));
-        CHECK(native3(DUPLICATE, image, 1 /* READ */, 0) == -13);
+        CHECK(native3(DUPLICATE, image, 1 /* READ */, 0) == INT64_C(-262138));
         int64_t copy = native3(DUPLICATE, image, control, 0);
         CHECK(copy > 0);
         CHECK(native3(SAME_OBJECT, image, copy, 0) == 1);
-        CHECK(native3(642 /* ProcessHandleStatus */, image, (uint64_t)&status, 0) == -13);
+        CHECK(native3(642 /* ProcessHandleStatus */, image, (uint64_t)&status, 0) == INT64_C(-262138));
         CHECK(native3(CLOSE, image, 0, 0) == 0);
         CHECK(native3(RIGHTS_GET, copy, 0, 0) == (int64_t)control);
         private_value = 0x22;
