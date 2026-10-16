@@ -72,7 +72,7 @@ fn success_and_error_retire_before_return_without_delaying_callbacks() {
     PREPARE_FAIL.store(1, Ordering::Relaxed);
     assert_eq!(
         implementation::with(prepare, |_| panic!("failed preparation reached I/O")),
-        Err(9)
+        Err::<isize, _>(9)
     );
     assert!(CONTROL.callback_resources.is_empty());
     assert_eq!(DROPS.load(Ordering::Relaxed), 0);
@@ -129,6 +129,21 @@ fn initialization_runs_after_tracking_but_before_any_delivery_reopens() {
         assert!(CONTROL.callback_resources.is_empty());
         assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
     }
+}
+
+#[test]
+fn copied_record_outcome_owns_no_resource_after_the_scope_retires() {
+    let _lock = LOCK.lock().unwrap();
+    reset();
+    let result = implementation::with(prepare, |resource| {
+        assert!(!CONTROL.callback_resources.is_empty());
+        assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
+        Ok((resource.0, [17u8; 128], Some(9isize)))
+    });
+    assert_eq!(result, Ok((7, [17; 128], Some(9))));
+    assert_eq!(DROPS.load(Ordering::Relaxed), 1);
+    assert!(CONTROL.callback_resources.is_empty());
+    assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
 }
 
 #[test]
