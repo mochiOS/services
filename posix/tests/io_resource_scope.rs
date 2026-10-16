@@ -250,3 +250,29 @@ fn socket_control_paths_keep_the_source_tracked_through_user_memory_access() {
         assert!(body.contains("|| with_fd_entry(fd)"), "{name}");
     }
 }
+
+#[test]
+fn multiplex_waits_own_partial_lease_arrays_and_snapshot_poll_inputs_before_callbacks() {
+    let source = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
+    for name in ["select_with_deadline", "poll_with_deadline"] {
+        let start = source.find(&format!("fn {name}(")).unwrap();
+        let end = start + source[start..].find("\n}\n").unwrap();
+        let body = &source[start..end];
+        assert!(body.contains("io_resources::with"), "{name}");
+        assert!(
+            !body.contains("let mut leases ="),
+            "untracked lease array: {name}"
+        );
+        assert!(
+            body.contains("defer_native_delivery()"),
+            "publication gap: {name}"
+        );
+        if name == "poll_with_deadline" {
+            assert!(body.contains("io_resources::with_initialized"));
+            assert!(
+                body.find("fds.add(index).read()").unwrap()
+                    < body.find("socket::poll_events(").unwrap()
+            );
+        }
+    }
+}

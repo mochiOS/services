@@ -28,7 +28,11 @@ fn ordinary_readiness_never_generates_priority_band_or_error_events() {
     assert!(poll.contains(
         "const WRITE_EVENTS: i16 = mochios_posix_client::multiplex::NORMAL_WRITE_EVENTS;"
     ));
-    assert!(poll.contains("multiplex::immediate_file_events(pollfds[index].events)"));
+    let compact = poll
+        .split_whitespace()
+        .collect::<String>()
+        .replace(",)", ")");
+    assert!(compact.contains("multiplex::immediate_file_events(pollfds[index].events)"));
     assert!(!poll.contains("POLLPRI"));
     assert!(!poll.contains("POLLRDBAND"));
     assert!(!poll.contains("POLLWRBAND"));
