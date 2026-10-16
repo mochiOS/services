@@ -9,8 +9,11 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 mod callback_resources;
 #[path = "../../../user/crates/newlib-runtime/src/path_io.rs"]
 mod implementation;
+use implementation as path_io;
 #[path = "../../../user/crates/newlib-runtime/src/io_resources.rs"]
 mod io_resources;
+#[path = "../../../user/crates/newlib-runtime/src/file_metadata.rs"]
+mod metadata;
 const EAGAIN: c_int = 11;
 const EFAULT: c_int = 14;
 const EINVAL: c_int = 22;
@@ -18,6 +21,29 @@ const EIO: c_int = 5;
 const ENOENT: c_int = 2;
 const ENAMETOOLONG: c_int = 91;
 const EBADF: c_int = 9;
+const EOVERFLOW: c_int = 139;
+const AT_SYMLINK_NOFOLLOW: u64 = 2;
+const STAT_NOFOLLOW: u32 = 1;
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct NewlibStat(u32);
+static STAT_FLAGS: AtomicU32 = AtomicU32::new(0);
+static TRANSLATE_FAIL: AtomicU32 = AtomicU32::new(0);
+static DRAINS: AtomicU32 = AtomicU32::new(0);
+fn translate_posix_stat(value: &u32) -> Result<NewlibStat, c_int> {
+    if TRANSLATE_FAIL.load(Ordering::Relaxed) != 0 {
+        Err(EOVERFLOW)
+    } else {
+        Ok(NewlibStat(*value))
+    }
+}
+fn drain_pending_signals() -> Result<(), c_int> {
+    assert_eq!(PINS.load(Ordering::Relaxed), 0);
+    assert!(CONTROL.callback_resources.is_empty());
+    assert!(!CONTROL.callback_resources.is_deferred());
+    assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
+    DRAINS.fetch_add(1, Ordering::Relaxed);
+    Ok(())
+}
 static SERIAL: Mutex<()> = Mutex::new(());
 static PINS: AtomicU32 = AtomicU32::new(0);
 static CLOSED: AtomicU32 = AtomicU32::new(0);
@@ -109,6 +135,12 @@ fn map_posix_client_error(error: c_int) -> c_int {
     error
 }
 impl Client {
+    fn stat_at(&self, base: StatAtBase<u32>, flags: u32, path: &str) -> Result<u32, c_int> {
+        assert_eq!(flags, STAT_FLAGS.load(Ordering::Relaxed));
+        assert!(!CONTROL.callback_resources.is_deferred());
+        self.readlink_at(base, path, &mut [])?;
+        Ok(42)
+    }
     fn chdir_at(&self, base: StatAtBase<u32>, path: &str) -> Result<(), c_int> {
         self.paired(0)?;
         assert_eq!(base, StatAtBase::ProcessCwd);
@@ -244,6 +276,41 @@ fn reset() {
     CALLS.store(0, Ordering::Relaxed);
     DROPS.store(0, Ordering::Relaxed);
 }
+#[test]
+fn metadata_uses_the_actual_path_snapshot_without_deferring_callbacks_across_rpc() {
+    let _serial = SERIAL.lock().unwrap();
+    for flags in [0, AT_SYMLINK_NOFOLLOW] {
+        for case in 0..4 {
+            reset();
+            CASE.store(case, Ordering::Relaxed);
+            STAT_FLAGS.store(u32::from(flags != 0), Ordering::Relaxed);
+            DRAINS.store(0, Ordering::Relaxed);
+            let mut input = *b"target\0";
+            INPUT.store(input.as_mut_ptr() as u64, Ordering::Relaxed);
+            assert_eq!(
+                metadata::at(7, input.as_ptr().cast(), flags),
+                if case == 1 {
+                    Err(13)
+                } else {
+                    Ok(NewlibStat(42))
+                }
+            );
+            assert_eq!(DRAINS.load(Ordering::Relaxed), 1);
+            assert_eq!(PINS.load(Ordering::Relaxed), 0);
+            assert_eq!(CLOSED.load(Ordering::Relaxed), u32::from(case == 2));
+        }
+    }
+    reset();
+    CASE.store(0, Ordering::Relaxed);
+    STAT_FLAGS.store(0, Ordering::Relaxed);
+    TRANSLATE_FAIL.store(1, Ordering::Relaxed);
+    assert_eq!(metadata::at(7, c"target".as_ptr(), 0), Err(EOVERFLOW));
+    TRANSLATE_FAIL.store(0, Ordering::Relaxed);
+    reset();
+    assert_eq!(metadata::at(7, c"target".as_ptr(), u64::MAX), Err(EINVAL));
+    assert_eq!(CALLS.load(Ordering::Relaxed), 0);
+}
+
 #[test]
 fn directory_policy_captures_paths_and_keeps_fd_authority_through_reentrant_rpc() {
     let _serial = SERIAL.lock().unwrap();
