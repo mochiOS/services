@@ -70,7 +70,6 @@ mod util {
 mod syscall {
     pub mod types {
         pub const EINVAL: u64 = mnu_abi::EINVAL;
-        pub const ENOMEM: u64 = mnu_abi::ENOMEM;
     }
     pub fn copy_from_user_native(
         pointer: u64,
@@ -212,8 +211,8 @@ impl ExecMeasurement {
         f()
     }
 }
-fn mapping_error_errno(_: ()) -> u64 {
-    mnu_abi::EFAULT
+fn mapping_error_native(_: ()) -> mnu_abi::status::Error {
+    mnu_abi::status::Error::InvalidArgument
 }
 #[path = "../../../core/src/syscall/exec/image.rs"]
 mod image;
@@ -226,7 +225,10 @@ fn elf_metadata_allocation_failures_precede_page_table_mutation() {
         let result = image::map_elf_image(&[0; 8192], 1, &mut ExecMeasurement);
         let consumed = FAIL_AFTER.with(|fail| fail.replace(None).is_none());
         assert!(consumed);
-        assert_eq!(result.err(), Some(mnu_abi::ENOMEM));
+        assert_eq!(
+            result.err(),
+            Some(mnu_abi::status::Error::ResourceUnavailable)
+        );
         assert_eq!(MAPS.with(Cell::get), 0);
     }
     let layout = image::map_elf_image(&[0; 8192], 1, &mut ExecMeasurement).unwrap();
