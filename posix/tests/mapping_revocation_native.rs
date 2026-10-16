@@ -16,10 +16,6 @@ use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
-mod syscall {
-    pub const EINVAL: u64 = (-22i64) as u64;
-    pub const ENOMEM: u64 = (-12i64) as u64;
-}
 mod interrupt {
     pub mod spinlock {
         pub struct SpinLock<T>(std::sync::Mutex<T>);
@@ -480,6 +476,8 @@ fn boundary_selection_checks_offset_geometry_without_interpreting_backing_identi
 #[test]
 fn actual_native_adapter_checks_owned_roots_restores_on_sync_failure_and_releases_only_after_ack() {
     let _test = TEST_LOCK.lock().unwrap();
+    // The empty-table assertion must not inherit PTEs from another test.
+    *state().lock().unwrap() = State::default();
     use mapping_revocation::{Backend, Error, revoke};
     use mapping_revocation_native::Native;
     use task::process::{Process, ProcessTable};
@@ -678,7 +676,7 @@ fn target_capture_failure_never_edits_mappings_or_takes_root_ownership() {
     root_lifetime_native::FAIL_ROOT.store(8192, std::sync::atomic::Ordering::Relaxed);
     assert!(matches!(
         Targets::capture(&table, identity, 0, 4096, 17),
-        Err(syscall::ENOMEM)
+        Err(NativeError::ResourceUnavailable)
     ));
     root_lifetime_native::FAIL_ROOT.store(0, std::sync::atomic::Ordering::Relaxed);
     assert_eq!(state().lock().unwrap().entries, original);
@@ -689,7 +687,7 @@ fn target_capture_failure_never_edits_mappings_or_takes_root_ownership() {
     for (start, end) in [(1, 4096), (0, 4097), (8192, 4096)] {
         assert!(matches!(
             Targets::capture(&table, identity, start, end, 17),
-            Err(syscall::EINVAL)
+            Err(NativeError::InvalidArgument)
         ));
     }
     let duplicate = ProcessTable(vec![Process(
@@ -701,7 +699,7 @@ fn target_capture_failure_never_edits_mappings_or_takes_root_ownership() {
     )]);
     assert!(matches!(
         Targets::capture(&duplicate, identity, 0, 8192, 17),
-        Err(syscall::EINVAL)
+        Err(NativeError::InvalidArgument)
     ));
     assert!(!root_lifetime::retire(4096));
     assert_eq!(state().lock().unwrap().entries, original);
@@ -715,7 +713,7 @@ fn target_capture_failure_never_edits_mappings_or_takes_root_ownership() {
         let malformed = ProcessTable(vec![Process(4096, vec![invalid])]);
         assert!(matches!(
             Targets::capture(&malformed, identity, 4096, 8192, 0),
-            Err(syscall::EINVAL)
+            Err(NativeError::InvalidArgument)
         ));
         assert!(!root_lifetime::retire(4096));
     }
