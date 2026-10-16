@@ -61,10 +61,21 @@ fn main() {
             VmObjectSource::Provider => VmPageError::Operation(syscall::EINVAL),
         };
         assert_eq!(object.page(7), Err(expected));
+        for error in [mnu_abi::status::Error::InvalidArgument, mnu_abi::status::Error::ResourceUnavailable, mnu_abi::status::Error::BackingFailure] {
+            object.outcome=Err(error.into_raw());
+            let expected=match (&object.source,error) {
+                (VmObjectSource::Memory(_),mnu_abi::status::Error::InvalidArgument)=>VmPageError::OutsideBacking,
+                _=>VmPageError::Operation(error.into_raw()),
+            };
+            assert_eq!(object.page(7),Err(expected));
+        }
     }
 }
 "#,
     );
+    program.push_str("\nmod mnu_abi {pub mod status {\n");
+    program.push_str(include_str!("../../../core/crates/abi/src/status.rs"));
+    program.push_str("\n}}\n");
     let directory = std::env::temp_dir().join(format!(
         "mochios-vm-fault-backing-{}-{}",
         std::process::id(),

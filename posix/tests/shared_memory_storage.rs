@@ -19,12 +19,6 @@ mod interrupt {
         }
     }
 }
-mod syscall {
-    pub const EINVAL: u64 = (-22i64) as u64;
-    pub const ENOMEM: u64 = (-12i64) as u64;
-    pub const EIO: u64 = (-5i64) as u64;
-    pub const EAGAIN: u64 = (-11i64) as u64;
-}
 #[path = "../../../core/src/mem/shared_memory.rs"]
 mod shared_memory;
 #[path = "../../../core/src/mem/shared_pages.rs"]
@@ -40,6 +34,8 @@ fn frames() -> &'static std::sync::Mutex<std::collections::BTreeMap<u64, usize>>
 }
 thread_local! {
     static PHYSICAL_OFFSET: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(Some(0)) };
+    static FAIL_FRAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FAIL_RETAIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 mod frame {
     pub struct Frame(u64);
@@ -55,6 +51,9 @@ mod frame {
         }
     }
     pub fn allocate_zeroed_frame() -> Result<Frame, ()> {
+        if super::FAIL_FRAME.get() {
+            return Err(());
+        }
         let layout = std::alloc::Layout::from_size_align(4096, 4096).unwrap();
         let pointer = unsafe { std::alloc::alloc_zeroed(layout) };
         if pointer.is_null() {
@@ -69,6 +68,9 @@ mod paging {
         super::PHYSICAL_OFFSET.get()
     }
     pub fn retain_shared_user_frame(address: u64) -> Result<(), ()> {
+        if super::FAIL_RETAIN.get() {
+            return Err(());
+        }
         let mut frames = super::frames().lock().unwrap();
         *frames.get_mut(&address).ok_or(())? += 1;
         Ok(())
@@ -108,10 +110,16 @@ fn production_shared_storage_reads_across_pages_and_clips_at_its_end() {
     assert_eq!(memory.read_at(3 * 4096, &mut output), Ok(0));
     assert_eq!(
         memory.read_at(3 * 4096 + 1, &mut output),
-        Err(syscall::EINVAL)
+        Err(NativeError::InvalidArgument)
     );
-    assert_eq!(memory.write_at(u64::MAX, b"x"), Err(syscall::EINVAL));
-    assert_eq!(memory.write_at(3 * 4096 - 1, b"xy"), Err(syscall::EINVAL));
+    assert_eq!(
+        memory.write_at(u64::MAX, b"x"),
+        Err(NativeError::InvalidArgument)
+    );
+    assert_eq!(
+        memory.write_at(3 * 4096 - 1, b"xy"),
+        Err(NativeError::InvalidArgument)
+    );
     assert_eq!(memory.read_at(3 * 4096 - 1, &mut output[..1]), Ok(1));
     assert_eq!(output[0], 0);
 }
@@ -123,7 +131,7 @@ fn retained_physical_storage_outlives_the_object_and_is_released_once() {
     let frame = memory.retain_page(0).unwrap();
     let alias = memory.retain_page(0).unwrap();
     assert_eq!(frame, alias);
-    assert_eq!(memory.retain_page(1), Err(syscall::EINVAL));
+    assert_eq!(memory.retain_page(1), Err(NativeError::InvalidArgument));
     assert_eq!(*frames().lock().unwrap().get(&frame).unwrap(), 3);
     drop(memory);
     assert_eq!(*frames().lock().unwrap().get(&frame).unwrap(), 2);
@@ -141,16 +149,16 @@ fn retained_physical_storage_outlives_the_object_and_is_released_once() {
 fn empty_byte_object_grows_lazily_and_keeps_its_original_ceiling() {
     let memory = shared_memory::SharedMemory::new_resizable(0, 2).unwrap();
     assert_eq!(memory.length(), 0);
-    assert_eq!(memory.prepare_page(0), Err(syscall::EINVAL));
+    assert_eq!(memory.prepare_page(0), Err(NativeError::InvalidArgument));
     assert_eq!(memory.read_at(0, &mut [1]), Ok(0));
-    assert_eq!(memory.write_at(0, &[1]), Err(syscall::EINVAL));
+    assert_eq!(memory.write_at(0, &[1]), Err(NativeError::InvalidArgument));
     memory
         .resize_with(1, |_, _| panic!("no old mapping"))
         .unwrap();
     assert_eq!(memory.length(), 1);
     assert_eq!(memory.write_at(0, &[17]), Ok(1));
     let (frame, _) = memory.prepare_page(0).unwrap();
-    assert_eq!(memory.prepare_page(1), Err(syscall::EINVAL));
+    assert_eq!(memory.prepare_page(1), Err(NativeError::InvalidArgument));
     memory
         .resize_with(8192, |start, end| {
             assert_eq!((start, end), (0, 4096));
@@ -203,15 +211,15 @@ fn byte_creation_checks_rounded_capacity_without_rounding_logical_length() {
 fn page_population_uses_live_extent_including_its_partial_final_page() {
     let memory = shared_memory::SharedMemory::new_resizable(4097, 3).unwrap();
     let (partial, epoch) = memory.prepare_page(1).unwrap();
-    assert_eq!(memory.prepare_page(2), Err(syscall::EINVAL));
+    assert_eq!(memory.prepare_page(2), Err(NativeError::InvalidArgument));
     memory.resize_with(12288, |_, _| Ok(())).unwrap();
     let (future, _) = memory.prepare_page(2).unwrap();
     memory.resize_with(4096, |_, _| Ok(())).unwrap();
-    assert_eq!(memory.prepare_page(1), Err(syscall::EINVAL));
-    assert_eq!(memory.prepare_page(2), Err(syscall::EINVAL));
+    assert_eq!(memory.prepare_page(1), Err(NativeError::InvalidArgument));
+    assert_eq!(memory.prepare_page(2), Err(NativeError::InvalidArgument));
     assert_eq!(
         memory.with_generation(epoch, || Ok(())),
-        Err(syscall::EAGAIN)
+        Err(NativeError::NotReady.into_raw())
     );
     // Outstanding pins retain storage but cannot authorize a stale install.
     assert!(frames().lock().unwrap().contains_key(&partial));
@@ -239,7 +247,10 @@ fn byte_resize_preserves_prefix_and_clears_padding_before_growth() {
         8
     );
     memory.resize_with(5000, |_, _| Ok(())).unwrap();
-    assert_eq!(memory.write_at(5000, &[1]), Err(syscall::EINVAL));
+    assert_eq!(
+        memory.write_at(5000, &[1]),
+        Err(NativeError::InvalidArgument)
+    );
     let mut output = [0; 3];
     assert_eq!(memory.read_at(4999, &mut output), Ok(1));
     assert_eq!(output[0], 7);
@@ -258,7 +269,7 @@ fn byte_resize_preserves_prefix_and_clears_padding_before_growth() {
     assert_eq!(output[0], 0);
     assert_eq!(
         memory.with_generation(epoch, || Ok(())),
-        Err(syscall::EAGAIN)
+        Err(NativeError::NotReady.into_raw())
     );
     let alias = memory.retain_page(1).unwrap();
     assert_eq!(alias, frame);
@@ -280,7 +291,7 @@ fn concurrent_byte_io_and_resize_preserve_prefix_and_validate_extent() {
                     assert_eq!(bytes, [6, 6]);
                     assert!(matches!(
                         memory.write_at(6000, &[3]),
-                        Ok(1) | Err(syscall::EINVAL)
+                        Ok(1) | Err(NativeError::InvalidArgument)
                     ));
                 }
             });
@@ -314,7 +325,7 @@ fn shrink_and_regrowth_reject_old_prepared_generations_without_recycling_pins() 
         memory.with_generation(old_generation, || -> Result<(), u64> {
             panic!("old prepared page must not be installed")
         }),
-        Err(syscall::EAGAIN)
+        Err(NativeError::NotReady.into_raw())
     );
     memory
         .resize_with(4096, |_, _| -> Result<(), NativeError> {
@@ -397,7 +408,7 @@ fn final_installation_holds_size_and_generation_stable_against_concurrent_resize
     });
     assert_eq!(
         memory.with_generation(generation, || Ok(())),
-        Err(syscall::EAGAIN)
+        Err(NativeError::NotReady.into_raw())
     );
     paging::release_user_frame(frame);
 }
@@ -461,7 +472,7 @@ fn private_byte_snapshot_is_rejected_after_resize_even_when_size_returns_to_orig
         memory.with_generation(generation, || -> Result<(), u64> {
             panic!("size equality alone must not authorize stale private bytes")
         }),
-        Err(syscall::EAGAIN)
+        Err(NativeError::NotReady.into_raw())
     );
     let current = memory.generation();
     memory.read_at(0, &mut snapshot).unwrap();
@@ -498,4 +509,33 @@ fn resize_preparation_and_coordinator_failures_preserve_bytes_length_and_generat
     memory.read_at(4096, &mut bytes).unwrap();
     assert_eq!(&bytes[..17], &[0x5a; 17]);
     assert!(bytes[17..].iter().all(|&byte| byte == 0));
+}
+
+#[test]
+fn population_and_pin_failures_keep_storage_owned_and_can_be_retried() {
+    let memory = shared_memory::SharedMemory::new(4096, 1).unwrap();
+    FAIL_FRAME.set(true);
+    let failed = memory.prepare_page(0);
+    FAIL_FRAME.set(false);
+    assert_eq!(failed, Err(NativeError::ResourceUnavailable));
+    FAIL_RETAIN.set(true);
+    let failed = memory.prepare_page(0);
+    FAIL_RETAIN.set(false);
+    assert_eq!(failed, Err(NativeError::ResourceUnavailable));
+    let (frame, _) = memory.prepare_page(0).unwrap();
+    assert_eq!(*frames().lock().unwrap().get(&frame).unwrap(), 2);
+    PHYSICAL_OFFSET.set(None);
+    let mut byte = [0xa5];
+    let read = memory.read_at(0, &mut byte);
+    let write = memory.write_at(0, &[0x5a]);
+    PHYSICAL_OFFSET.set(Some(0));
+    assert_eq!(read, Err(NativeError::BackingFailure));
+    assert_eq!(write, Err(NativeError::BackingFailure));
+    assert_eq!(byte, [0xa5]);
+    memory.read_at(0, &mut byte).unwrap();
+    assert_eq!(byte, [0]);
+    drop(memory);
+    assert_eq!(*frames().lock().unwrap().get(&frame).unwrap(), 1);
+    paging::release_user_frame(frame);
+    assert!(!frames().lock().unwrap().contains_key(&frame));
 }

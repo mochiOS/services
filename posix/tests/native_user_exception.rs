@@ -182,6 +182,7 @@ fn production_fault_causes_preserve_origin_instead_of_guessing_from_errno() {
     let mut program = String::from(
         r#"
 const ENOMEM:u64=(-12i64) as u64;
+const EAGAIN:u64=(-11i64) as u64;
 mod mem { pub mod vm_object {
     #[derive(Clone,Copy,Debug,PartialEq,Eq)]
     pub enum VmPageError { OutsideBacking, Operation(u64) }
@@ -193,6 +194,9 @@ mod mnu_abi {
     let start = abi.find("pub enum MemoryFaultCause {").unwrap();
     let end = start + abi[start..].find("\n}\n").unwrap() + 3;
     program.push_str(&abi[start..end]);
+    program.push_str("\npub mod status {\n");
+    program.push_str(include_str!("../../../core/crates/abi/src/status.rs"));
+    program.push_str("\n}\n");
     program.push_str("}\n#[derive(Debug,PartialEq,Eq)]\n");
     let start = process.find("pub(crate) enum MemoryFault {").unwrap();
     let end = process[start..].find("/// Resolves one page,").unwrap() + start;
@@ -211,6 +215,12 @@ fn main() {
     }
     assert_eq!(MemoryFault::Operation(ENOMEM).cause(),ResourceUnavailable);
     assert_eq!(MemoryFault::Backing(VmPageError::Operation(ENOMEM)).cause(),ResourceUnavailable);
+    for (error,cause) in [(mnu_abi::status::Error::ResourceUnavailable,ResourceUnavailable),
+        (mnu_abi::status::Error::BackingFailure,BackingFailure),
+        (mnu_abi::status::Error::AccessDenied,AccessDenied)] {
+        assert_eq!(MemoryFault::Operation(error.into_raw()).cause(),cause);
+        assert_eq!(MemoryFault::Backing(VmPageError::Operation(error.into_raw())).cause(),cause);
+    }
 }
 "#,
     );

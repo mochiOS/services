@@ -8,6 +8,8 @@ enum {
   CREATE = 671,
   LENGTH = 672,
   RESIZE = 686,
+  READ_AT = 673,
+  WRITE_AT = 674,
   MAP = 582,
   UNMAP = 583,
   CLOSE = 626,
@@ -49,6 +51,19 @@ int main(void) {
   CHECK(native(LENGTH, object, 0, 0, 0, 0, 0) == 0);
   CHECK(native(RESIZE, object, 12288, 0, 0, 0, 0) == 0);
   CHECK(native(LENGTH, object, 0, 0, 0, 0, 0) == 12288);
+  unsigned char written = 0x42, observed = 0xa5;
+  CHECK(native(WRITE_AT, object, (uintptr_t)&written, 1, 0, 0, 0) == 1);
+  CHECK(native(READ_AT, object, (uintptr_t)&observed, 1, 0, 0, 0) == 1 &&
+        observed == written);
+  observed = 0xa5;
+  CHECK(native(READ_AT, object, (uintptr_t)&observed, 1, 12288, 0, 0) == 0 &&
+        observed == 0xa5);
+  CHECK(native(READ_AT, object, (uintptr_t)&observed, 1, 12289, 0, 0) ==
+        INT64_C(-262139));
+  CHECK(native(WRITE_AT, object, (uintptr_t)&written, 1, 12288, 0, 0) ==
+        INT64_C(-262139));
+  written = 0;
+  CHECK(native(WRITE_AT, object, (uintptr_t)&written, 1, 0, 0, 0) == 1);
   int64_t readonly = native(DUPLICATE, object, 65, 0, 0, 0, 0);
   CHECK(readonly > 0 && native(RESIZE, readonly, 1, 0, 0, 0, 0) == -13);
   CHECK(native(RESIZE, 0, 0, 0, 0, 0, 0) == -9);

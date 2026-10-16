@@ -79,6 +79,8 @@ fn native_resize_probe_matches_mechanism_abi() {
         ("CREATE", Number::MemoryObjectCreate),
         ("LENGTH", Number::MemoryObjectLength),
         ("RESIZE", Number::MemoryObjectResize),
+        ("READ_AT", Number::HandleReadAt),
+        ("WRITE_AT", Number::HandleWriteAt),
         ("MAP", Number::MemoryMap),
         ("UNMAP", Number::MemoryUnmap),
         ("CLOSE", Number::HandleClose),

@@ -44,6 +44,7 @@ fn transient_vm_faults_yield_without_exception_or_register_changes() {
         r#"
 use std::cell::Cell;
 mod mnu_abi {
+    pub mod status { @STATUS@ }
     #[derive(Clone,Copy,Debug,PartialEq,Eq)]
     pub enum MemoryFaultCause {Unmapped,AccessDenied,OutsideBacking,ResourceUnavailable,BackingFailure,Unresolved}
 }
@@ -125,6 +126,17 @@ fn main() {
     for fault in [Fault::Operation(syscall::EAGAIN),Fault::Backing(Backing::Operation(syscall::EAGAIN))] {
         assert!(fault.is_retryable()); run(Err(fault),1,None);
     }
+    let busy=mnu_abi::status::Error::NotReady.into_raw();
+    for fault in [Fault::Operation(busy),Fault::Backing(Backing::Operation(busy))] {
+        assert!(fault.is_retryable());run(Err(fault),1,None);
+    }
+    for (error,cause) in [(mnu_abi::status::Error::ResourceUnavailable,Cause::ResourceUnavailable),
+        (mnu_abi::status::Error::BackingFailure,Cause::BackingFailure),
+        (mnu_abi::status::Error::AccessDenied,Cause::AccessDenied)] {
+        for fault in [Fault::Operation(error.into_raw()),Fault::Backing(Backing::Operation(error.into_raw()))] {
+            assert!(!fault.is_retryable());run(Err(fault),0,Some(cause));
+        }
+    }
     for (fault,cause) in [
         (Fault::Unmapped,Cause::Unmapped), (Fault::AccessDenied,Cause::AccessDenied),
         (Fault::Backing(Backing::OutsideBacking),Cause::OutsideBacking),
@@ -143,6 +155,10 @@ fn main() {
     assert_eq!(registers,[0x77;21]);
 }
 "#);
+    program = program.replace(
+        "@STATUS@",
+        include_str!("../../../core/crates/abi/src/status.rs"),
+    );
     let directory = std::env::temp_dir().join(format!(
         "mochios-vm-retry-{}-{}",
         std::process::id(),

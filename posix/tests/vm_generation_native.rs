@@ -10,6 +10,7 @@ fn typed_gates_keep_exclusion_and_do_not_translate_callback_failures() {
         r#"
 use std::{cell::Cell,sync::{Arc,Mutex},sync::atomic::{AtomicU64,Ordering}};
 use mnu_abi::status::Error;
+use mnu_abi::status::Error as NativeError;
 mod syscall {pub(crate) use crate::mochi_user_syscall::{EAGAIN,EIO};}
 struct Memory {pages:Mutex<()>,generation:AtomicU64}
 impl Memory {
@@ -67,7 +68,7 @@ fn main() {
             assert!(memory.pages.try_lock().is_err());Err::<(),_>(error)
         }),Err(error));
     }
-    assert_eq!(memory.with_generation(6,||Ok(1)),Err(EAGAIN));
+    assert_eq!(memory.with_generation(6,||Ok(1)),Err(Error::NotReady.into_raw()));
     assert_eq!(memory.with_generation(7,||{assert!(memory.pages.try_lock().is_err());Err::<(),_>(EACCES)}),Err(EACCES));
     let object=VmObject{source:VmObjectSource::Memory(memory.clone())};
     assert_eq!(object.check_mapping_removal(),Ok(()));

@@ -257,13 +257,13 @@ mod shared_memory {
         ) -> Result<T, mnu_abi::status::Error> {
             unreachable!()
         }
-        pub fn read_at(&self, _: u64, _: &mut [u8]) -> Result<usize, u64> {
+        pub fn read_at(&self, _: u64, _: &mut [u8]) -> Result<usize, mnu_abi::status::Error> {
             unreachable!()
         }
-        pub fn write_at(&self, _: u64, _: &[u8]) -> Result<usize, u64> {
+        pub fn write_at(&self, _: u64, _: &[u8]) -> Result<usize, mnu_abi::status::Error> {
             unreachable!()
         }
-        pub fn prepare_page(&self, _: u64) -> Result<(u64, u64), u64> {
+        pub fn prepare_page(&self, _: u64) -> Result<(u64, u64), mnu_abi::status::Error> {
             unreachable!()
         }
     }
