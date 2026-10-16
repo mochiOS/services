@@ -29,7 +29,7 @@ fn payload(opcode: u16) -> Vec<u8> {
                 base: protocol::OpenBase::AttachedDirectory,
                 options: protocol::OPEN_WRITE | protocol::OPEN_TRUNCATE,
                 mode: 0,
-                path: "file",
+                path: b"file",
             },
             &mut bytes,
         )
@@ -38,7 +38,7 @@ fn payload(opcode: u16) -> Vec<u8> {
             protocol::TruncateAtRequest {
                 base: protocol::OpenBase::AttachedDirectory,
                 length: 5000,
-                path: "file",
+                path: b"file",
             },
             &mut bytes,
         )

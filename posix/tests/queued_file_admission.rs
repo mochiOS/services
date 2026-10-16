@@ -244,7 +244,7 @@ fn validated_positions_are_reattached_in_order_and_closed_exactly_once() {
             match opcode {
                 wire::OP_OPEN_AT => {
                     let input = wire::decode_open_at(&payloads[0]).unwrap();
-                    assert_eq!(input.path, "file");
+                    assert_eq!(input.path, b"file");
                     assert_eq!(input.mode, 0o600);
                 }
                 wire::OP_FTRUNCATE => assert_eq!(wire::decode_file_length(&payloads[0]), Ok(5000)),
@@ -358,14 +358,14 @@ fn interrupted_wait_releases_position_but_keeps_an_independent_input_snapshot() 
         assert!(payloads.windows(2).all(|pair| pair[0] == pair[1]));
         if opcode == wire::OP_OPEN_AT {
             let input = wire::decode_open_at(&payloads[0]).unwrap();
-            assert_eq!(input.path, "file");
+            assert_eq!(input.path, b"file");
             assert_eq!(
                 input.options,
                 wire::OPEN_WRITE | wire::OPEN_CREATE | wire::OPEN_EXCLUSIVE
             );
         } else {
             let input = wire::decode_truncate_at(&payloads[0]).unwrap();
-            assert_eq!(input.path, "file");
+            assert_eq!(input.path, b"file");
             assert_eq!(input.length, 5000);
         }
     }

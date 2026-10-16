@@ -107,11 +107,11 @@ fn change_directory_entry(entry: u32) -> Result<(), c_int> {
 }
 fn rename_posix_base(
     fd: c_int,
-    path: &str,
+    path: &[u8],
 ) -> Result<(StatAtBase<u32>, Option<fd_lease::Lease>), c_int> {
     assert_ne!(CONTROL.native.load(Ordering::Relaxed), 0);
     assert!(!CONTROL.callback_resources.is_empty());
-    if path.starts_with('/') {
+    if path.first() == Some(&b'/') {
         return Ok((StatAtBase::ProcessRoot, None));
     }
     if fd == -2 {
@@ -142,7 +142,7 @@ impl Client {
         base: AccessAtBase<u32>,
         flags: u32,
         modes: u32,
-        path: &str,
+        path: &[u8],
     ) -> Result<(), c_int> {
         let base = match base {
             AccessAtBase::ProcessRoot => StatAtBase::ProcessRoot,
@@ -151,19 +151,19 @@ impl Client {
         };
         self.mutation(base, path, (9, modes, flags, 0))
     }
-    fn stat_at(&self, base: StatAtBase<u32>, flags: u32, path: &str) -> Result<u32, c_int> {
+    fn stat_at(&self, base: StatAtBase<u32>, flags: u32, path: &[u8]) -> Result<u32, c_int> {
         assert_eq!(flags, STAT_FLAGS.load(Ordering::Relaxed));
         assert!(!CONTROL.callback_resources.is_deferred());
         self.readlink_at(base, path, &mut [])?;
         Ok(42)
     }
-    fn chdir_at(&self, base: StatAtBase<u32>, path: &str) -> Result<(), c_int> {
+    fn chdir_at(&self, base: StatAtBase<u32>, path: &[u8]) -> Result<(), c_int> {
         self.paired(0)?;
         assert_eq!(base, StatAtBase::ProcessCwd);
-        assert_eq!(path, "target");
+        assert_eq!(path, b"target");
         Ok(())
     }
-    fn chroot_at(&self, base: StatAtBase<u32>, path: &str) -> Result<(), c_int> {
+    fn chroot_at(&self, base: StatAtBase<u32>, path: &[u8]) -> Result<(), c_int> {
         self.chdir_at(base, path)
     }
     fn paired(&self, pins: u32) -> Result<(), c_int> {
@@ -188,12 +188,12 @@ impl Client {
     fn rename_at(
         &self,
         old_base: StatAtBase<u32>,
-        old: &str,
+        old: &[u8],
         new_base: StatAtBase<u32>,
-        new: &str,
+        new: &[u8],
     ) -> Result<(), c_int> {
         self.paired(2)?;
-        assert_eq!((old, new), ("target", "next"));
+        assert_eq!((old, new), (b"target".as_slice(), b"next".as_slice()));
         assert_eq!(old_base, new_base);
         *MUTATION.lock().unwrap() = Some((4, 0, 0, 0));
         Ok(())
@@ -201,25 +201,28 @@ impl Client {
     fn link_at(
         &self,
         old_base: StatAtBase<u32>,
-        old: &str,
+        old: &[u8],
         new_base: StatAtBase<u32>,
-        new: &str,
+        new: &[u8],
         flags: u32,
     ) -> Result<(), c_int> {
         self.rename_at(old_base, old, new_base, new)?;
         *MUTATION.lock().unwrap() = Some((5, flags, 0, 0));
         Ok(())
     }
-    fn symlink_at(&self, target: &str, _: StatAtBase<u32>, path: &str) -> Result<(), c_int> {
+    fn symlink_at(&self, target: &[u8], _: StatAtBase<u32>, path: &[u8]) -> Result<(), c_int> {
         self.paired(1)?;
-        assert_eq!((target, path), ("../literal", "next"));
+        assert_eq!(
+            (target, path),
+            (b"../literal".as_slice(), b"next".as_slice())
+        );
         *MUTATION.lock().unwrap() = Some((6, 0, 0, 0));
         Ok(())
     }
     fn mutation(
         &self,
         base: StatAtBase<u32>,
-        path: &str,
+        path: &[u8],
         arguments: (u32, u32, u32, u32),
     ) -> Result<(), c_int> {
         let mut unused = [];
@@ -227,23 +230,23 @@ impl Client {
         *MUTATION.lock().unwrap() = Some(arguments);
         Ok(())
     }
-    fn chmod_at(&self, base: StatAtBase<u32>, path: &str, mode: u32) -> Result<(), c_int> {
+    fn chmod_at(&self, base: StatAtBase<u32>, path: &[u8], mode: u32) -> Result<(), c_int> {
         self.mutation(base, path, (0, mode, 0, 0))
     }
     fn chown_at(
         &self,
         base: StatAtBase<u32>,
-        path: &str,
+        path: &[u8],
         uid: u32,
         gid: u32,
         flags: u32,
     ) -> Result<(), c_int> {
         self.mutation(base, path, (1, uid, gid, flags))
     }
-    fn unlink_at(&self, base: StatAtBase<u32>, flags: u32, path: &str) -> Result<(), c_int> {
+    fn unlink_at(&self, base: StatAtBase<u32>, flags: u32, path: &[u8]) -> Result<(), c_int> {
         self.mutation(base, path, (2, flags, 0, 0))
     }
-    fn mkdir_at(&self, base: OpenAtBase<u32>, mode: u32, path: &str) -> Result<(), c_int> {
+    fn mkdir_at(&self, base: OpenAtBase<u32>, mode: u32, path: &[u8]) -> Result<(), c_int> {
         let base = match base {
             OpenAtBase::ProcessRoot => StatAtBase::ProcessRoot,
             OpenAtBase::ProcessCwd => StatAtBase::ProcessCwd,
@@ -254,7 +257,7 @@ impl Client {
     fn readlink_at(
         &self,
         base: StatAtBase<u32>,
-        path: &str,
+        path: &[u8],
         output: &mut [u8],
     ) -> Result<usize, c_int> {
         assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
@@ -277,7 +280,7 @@ impl Client {
             3 => unsafe { (INPUT.load(Ordering::Relaxed) as *mut u8).write(b'X') },
             _ => {}
         }
-        assert_eq!(path, "target");
+        assert_eq!(path, b"target");
         let count = output.len().min(b"destination".len());
         output[..count].copy_from_slice(&b"destination"[..count]);
         Ok(count)
@@ -510,12 +513,45 @@ fn linkat_flag_matches_the_newlib_public_header() {
 }
 
 #[test]
+fn byte_paths_are_snapshotted_without_unicode_conversion_in_both_inputs() {
+    let _serial = SERIAL.lock().unwrap();
+    reset();
+    let mut first = *b"name-\xff\0";
+    let mut second = *b"next-\xfe\0";
+    let first_pointer = first.as_mut_ptr();
+    let second_pointer = second.as_mut_ptr();
+    assert_eq!(
+        implementation::pair(
+            7,
+            first_pointer.cast(),
+            7,
+            second_pointer.cast(),
+            |_, old, _, new| {
+                assert_eq!(PINS.load(Ordering::Relaxed), 2);
+                unsafe {
+                    first_pointer.write(b'X');
+                    second_pointer.write(b'Y');
+                }
+                assert_eq!(old, b"name-\xff");
+                assert_eq!(new, b"next-\xfe");
+                Ok(1)
+            },
+        ),
+        Ok(1)
+    );
+    assert_eq!(first[0], b'X');
+    assert_eq!(second[0], b'Y');
+    assert_eq!(PINS.load(Ordering::Relaxed), 0);
+    assert_eq!(DROPS.load(Ordering::Relaxed), 2);
+    assert!(CONTROL.callback_resources.is_empty());
+}
+
+#[test]
 fn second_input_failures_release_the_first_directory_before_any_rpc() {
     let _serial = SERIAL.lock().unwrap();
     for (fd, path, error) in [
         (7, c"".as_ptr(), ENOENT),
         (7, std::ptr::null(), EFAULT),
-        (7, b"\xff\0".as_ptr().cast(), EINVAL),
         (-9, c"next".as_ptr(), EBADF),
     ] {
         reset();
@@ -600,11 +636,7 @@ fn invalid_paths_fail_before_borrowing_a_directory_or_calling_the_provider() {
     let _serial = SERIAL.lock().unwrap();
     let mut overlong = vec![b'a'; posix_protocol::MAX_PATH_LEN + 1];
     overlong.push(0);
-    for (path, error) in [
-        (b"\0".as_slice(), ENOENT),
-        (b"\xff\0", EINVAL),
-        (&overlong, ENAMETOOLONG),
-    ] {
+    for (path, error) in [(b"\0".as_slice(), ENOENT), (&overlong, ENAMETOOLONG)] {
         reset();
         assert_eq!(
             implementation::at(7, path.as_ptr().cast(), |_, _| Ok(0)),
@@ -629,7 +661,7 @@ fn absolute_and_cwd_paths_ignore_irrelevant_dirfds_and_nested_scopes_keep_parent
     assert_eq!(
         implementation::at(-9, c"/absolute".as_ptr(), |base, path| {
             assert_eq!(base, StatAtBase::ProcessRoot);
-            assert_eq!(path, "/absolute");
+            assert_eq!(path, b"/absolute");
             Ok(1)
         }),
         Ok(1)
@@ -668,7 +700,7 @@ fn the_maximum_wire_path_is_captured_without_requiring_a_shorter_buffer() {
     assert_eq!(
         implementation::at(7, input.as_ptr().cast(), |_, path| {
             assert_eq!(path.len(), posix_protocol::MAX_PATH_LEN);
-            assert!(path.as_bytes().iter().all(|byte| *byte == b'x'));
+            assert!(path.iter().all(|byte| *byte == b'x'));
             Ok(1)
         }),
         Ok(1)

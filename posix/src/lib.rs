@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::string::String;
 
 use mochios_posix_protocol as protocol;
 
@@ -97,7 +96,7 @@ pub struct PreparedOpen {
     pub base: protocol::OpenBase,
     pub options: u32,
     pub mode: u32,
-    pub path: String,
+    pub path: Vec<u8>,
     pub effective_uid: u32,
     pub effective_gid: u32,
     pub supplementary_groups: Vec<u32>,
@@ -107,7 +106,7 @@ pub struct PreparedOpen {
 pub struct PreparedMkdir {
     pub base: protocol::OpenBase,
     pub mode: u32,
-    pub path: String,
+    pub path: Vec<u8>,
     pub effective_uid: u32,
     pub effective_gid: u32,
     pub supplementary_groups: Vec<u32>,
@@ -117,7 +116,7 @@ pub struct PreparedMkdir {
 pub struct PreparedUnlink {
     pub base: protocol::OpenBase,
     pub flags: u32,
-    pub path: String,
+    pub path: Vec<u8>,
     pub effective_uid: u32,
     pub effective_gid: u32,
     pub supplementary_groups: Vec<u32>,
@@ -127,8 +126,8 @@ pub struct PreparedUnlink {
 pub struct PreparedRename {
     pub old_base: protocol::OpenBase,
     pub new_base: protocol::OpenBase,
-    pub old_path: String,
-    pub new_path: String,
+    pub old_path: Vec<u8>,
+    pub new_path: Vec<u8>,
     pub effective_uid: u32,
     pub effective_gid: u32,
     pub supplementary_groups: Vec<u32>,
@@ -139,8 +138,8 @@ pub struct PreparedLink {
     pub old_base: protocol::OpenBase,
     pub new_base: protocol::OpenBase,
     pub flags: u32,
-    pub old_path: String,
-    pub new_path: String,
+    pub old_path: Vec<u8>,
+    pub new_path: Vec<u8>,
     pub effective_uid: u32,
     pub effective_gid: u32,
     pub supplementary_groups: Vec<u32>,
@@ -149,7 +148,7 @@ pub struct PreparedLink {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedTruncate {
     pub base: protocol::OpenBase,
-    pub path: String,
+    pub path: Vec<u8>,
     pub length: u64,
     pub growth_ceiling: u64,
     pub effective_uid: u32,
@@ -160,8 +159,8 @@ pub struct PreparedTruncate {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedSymlink {
     pub base: protocol::OpenBase,
-    pub target: String,
-    pub link_path: String,
+    pub target: Vec<u8>,
+    pub link_path: Vec<u8>,
     pub effective_uid: u32,
     pub effective_gid: u32,
     pub supplementary_groups: Vec<u32>,
@@ -170,7 +169,7 @@ pub struct PreparedSymlink {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedReadlink {
     pub base: protocol::OpenBase,
-    pub path: String,
+    pub path: Vec<u8>,
     pub effective_uid: u32,
     pub effective_gid: u32,
     pub supplementary_groups: Vec<u32>,
@@ -179,7 +178,7 @@ pub struct PreparedReadlink {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedChmod {
     pub base: protocol::OpenBase,
-    pub path: String,
+    pub path: Vec<u8>,
     pub mode: u32,
     pub effective_uid: u32,
     pub effective_gid: u32,
@@ -189,7 +188,7 @@ pub struct PreparedChmod {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedChown {
     pub base: protocol::OpenBase,
-    pub path: String,
+    pub path: Vec<u8>,
     pub flags: u32,
     pub uid: u32,
     pub gid: u32,
@@ -202,7 +201,7 @@ pub struct PreparedChown {
 pub struct PreparedStat {
     pub base: protocol::OpenBase,
     pub flags: u32,
-    pub path: String,
+    pub path: Vec<u8>,
     pub effective_uid: u32,
     pub effective_gid: u32,
     pub supplementary_groups: Vec<u32>,
@@ -213,7 +212,7 @@ pub struct PreparedAccess {
     pub base: protocol::OpenBase,
     pub flags: u32,
     pub modes: u32,
-    pub path: String,
+    pub path: Vec<u8>,
     pub uid: u32,
     pub gid: u32,
     pub supplementary_groups: Vec<u32>,

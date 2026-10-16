@@ -14,7 +14,7 @@ fn service_uses_stored_credentials_and_attached_directory_authority() {
         protocol::StatAtRequest {
             base: protocol::OpenBase::AttachedDirectory,
             flags: 0,
-            path: "link/../file",
+            path: b"link/../file",
         },
         &mut payload,
     )
@@ -43,7 +43,7 @@ fn service_uses_stored_credentials_and_attached_directory_authority() {
     assert!(reply.handles.is_empty());
     let prepared = filesystem.stat_request.as_ref().unwrap();
     assert_eq!((prepared.effective_uid, prepared.effective_gid), (501, 20));
-    assert_eq!(prepared.path, "link/../file");
+    assert_eq!(prepared.path, b"link/../file");
     assert_eq!(filesystem.directory, Some(directory));
     assert!(filesystem.root.is_some());
 }
@@ -78,7 +78,7 @@ fn service_rejects_flags_missing_authority_and_extra_attachments() {
             protocol::StatAtRequest {
                 base,
                 flags,
-                path: "/file",
+                path: b"/file",
             },
             &mut payload,
         )
@@ -121,7 +121,7 @@ impl ObjectTransport for CanonicalTransport {
         let request = protocol::decode_stat_at(payload).unwrap();
         assert_eq!(request.base, protocol::OpenBase::AttachedDirectory);
         assert_eq!(request.flags, 0);
-        assert_eq!(request.path, "relative");
+        assert_eq!(request.path, b"relative");
         assert_eq!(handles.len(), 1);
         assert_eq!(handles.get(0).unwrap().handle, 19);
         handles.clear();

@@ -2005,7 +2005,7 @@ impl RuntimeFilesystem {
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
-            request.path.as_bytes(),
+            &request.path,
         )?;
         let header = filesystem::Header {
             length: payload.len() as u32,
@@ -2052,7 +2052,7 @@ impl RuntimeFilesystem {
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
-            request.path.as_bytes(),
+            &request.path,
         )?;
         Ok((
             filesystem::Header {
@@ -2551,7 +2551,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
-            request.path.as_bytes(),
+            &request.path,
         )?;
         self.open_call(
             filesystem::Header {
@@ -2583,7 +2583,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
-            request.path.as_bytes(),
+            &request.path,
         )?;
         self.payload_call(
             filesystem::Header {
@@ -2617,7 +2617,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
-            request.path.as_bytes(),
+            &request.path,
         )?;
         let status = self.status_call(
             filesystem::Header {
@@ -2856,7 +2856,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
-            request.path.as_bytes(),
+            &request.path,
         )?;
         self.empty_call(
             filesystem::Header {
@@ -2891,7 +2891,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
-            request.path.as_bytes(),
+            &request.path,
         )?;
         self.empty_call(
             filesystem::Header {
@@ -2922,8 +2922,8 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         }
         let old_length = u32::try_from(request.old_path.len()).map_err(|_| -22)?;
         let mut operation = Vec::with_capacity(request.old_path.len() + request.new_path.len());
-        operation.extend_from_slice(request.old_path.as_bytes());
-        operation.extend_from_slice(request.new_path.as_bytes());
+        operation.extend_from_slice(&request.old_path);
+        operation.extend_from_slice(&request.new_path);
         let payload = Self::credential_payload(
             request.effective_uid,
             request.effective_gid,
@@ -2964,8 +2964,8 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         }
         let old_length = u32::try_from(request.old_path.len()).map_err(|_| -22)?;
         let mut operation = Vec::with_capacity(request.old_path.len() + request.new_path.len());
-        operation.extend_from_slice(request.old_path.as_bytes());
-        operation.extend_from_slice(request.new_path.as_bytes());
+        operation.extend_from_slice(&request.old_path);
+        operation.extend_from_slice(&request.new_path);
         let payload = Self::credential_payload(
             request.effective_uid,
             request.effective_gid,
@@ -3020,8 +3020,8 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         }
         let target_length = u32::try_from(request.target.len()).map_err(|_| -22)?;
         let mut operation = Vec::with_capacity(request.target.len() + request.link_path.len());
-        operation.extend_from_slice(request.target.as_bytes());
-        operation.extend_from_slice(request.link_path.as_bytes());
+        operation.extend_from_slice(&request.target);
+        operation.extend_from_slice(&request.link_path);
         let payload = Self::credential_payload(
             request.effective_uid,
             request.effective_gid,
@@ -3057,7 +3057,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
-            request.path.as_bytes(),
+            &request.path,
         )?;
         self.payload_call(
             filesystem::Header {
@@ -3087,7 +3087,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
-            request.path.as_bytes(),
+            &request.path,
         )?;
         self.empty_call(
             filesystem::Header {
@@ -3122,7 +3122,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
-            request.path.as_bytes(),
+            &request.path,
         )?;
         self.empty_call(
             filesystem::Header {
@@ -3166,7 +3166,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             request.uid,
             request.gid,
             &request.supplementary_groups,
-            request.path.as_bytes(),
+            &request.path,
         )?;
         self.empty_call(
             filesystem::Header {

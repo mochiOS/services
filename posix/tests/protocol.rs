@@ -33,6 +33,9 @@ mod fork_process_limit;
 #[path = "support/canonical_path_protocol.rs"]
 mod canonical_path_protocol;
 
+#[path = "support/byte_path_protocol.rs"]
+mod byte_path_protocol;
+
 struct LocalTransport {
     service: RefCell<PosixService>,
     peer: PeerIdentity,
@@ -730,7 +733,7 @@ fn stat_at_wire_format_is_strict_and_contains_no_descriptor() {
         protocol::StatAtRequest {
             base: protocol::OpenBase::AttachedDirectory,
             flags: protocol::STAT_NOFOLLOW,
-            path: "child",
+            path: b"child",
         },
         &mut bytes,
     )
@@ -740,7 +743,7 @@ fn stat_at_wire_format_is_strict_and_contains_no_descriptor() {
         protocol::StatAtRequest {
             base: protocol::OpenBase::AttachedDirectory,
             flags: protocol::STAT_NOFOLLOW,
-            path: "child",
+            path: b"child",
         }
     );
     bytes[1] = 1;
@@ -758,7 +761,7 @@ fn access_at_wire_format_is_strict_and_contains_no_descriptor() {
             base: protocol::OpenBase::ProcessCwd,
             flags: protocol::ACCESS_EFFECTIVE_IDS,
             modes: protocol::ACCESS_READ | protocol::ACCESS_WRITE,
-            path: "child",
+            path: b"child",
         },
         &mut bytes,
     )
@@ -770,7 +773,7 @@ fn access_at_wire_format_is_strict_and_contains_no_descriptor() {
         decoded.modes,
         protocol::ACCESS_READ | protocol::ACCESS_WRITE
     );
-    assert_eq!(decoded.path, "child");
+    assert_eq!(decoded.path, b"child");
     bytes[2] = 1;
     assert_eq!(
         protocol::decode_access_at(&bytes[..length]),
@@ -822,7 +825,7 @@ fn maximum_path_fits_in_a_control_message() {
             base: protocol::OpenBase::ProcessCwd,
             options: protocol::OPEN_READ,
             mode: 0,
-            path,
+            path: path.as_bytes(),
         },
         &mut payload,
     )
@@ -833,8 +836,8 @@ fn maximum_path_fits_in_a_control_message() {
         protocol::RenameAtRequest {
             old_base: protocol::OpenBase::ProcessCwd,
             new_base: protocol::OpenBase::ProcessCwd,
-            old_path: path,
-            new_path: path,
+            old_path: path.as_bytes(),
+            new_path: path.as_bytes(),
         },
         &mut payload,
     )
@@ -1079,7 +1082,7 @@ fn open_at_wire_format_is_strict_and_contains_no_descriptor_number() {
             base: protocol::OpenBase::AttachedDirectory,
             options: protocol::OPEN_READ | protocol::OPEN_NOFOLLOW,
             mode: 0o640,
-            path: "child.txt",
+            path: b"child.txt",
         },
         &mut bytes,
     )
@@ -1091,7 +1094,7 @@ fn open_at_wire_format_is_strict_and_contains_no_descriptor_number() {
         protocol::OPEN_READ | protocol::OPEN_NOFOLLOW
     );
     assert_eq!(decoded.mode, 0o640);
-    assert_eq!(decoded.path, "child.txt");
+    assert_eq!(decoded.path, b"child.txt");
 
     bytes[1] = 1;
     assert_eq!(
@@ -1134,7 +1137,7 @@ fn service_prepares_open_with_authenticated_credentials_and_umask() {
             base: protocol::OpenBase::ProcessCwd,
             options: protocol::OPEN_READ | protocol::OPEN_WRITE | protocol::OPEN_CREATE,
             mode: 0o666,
-            path: "notes.txt",
+            path: b"notes.txt",
         },
         &mut payload,
     )
@@ -1145,7 +1148,7 @@ fn service_prepares_open_with_authenticated_credentials_and_umask() {
     assert_eq!(open.mode, 0o640);
     assert_eq!(open.effective_uid, 504);
     assert_eq!(open.effective_gid, 23);
-    assert_eq!(open.path, "notes.txt");
+    assert_eq!(open.path, b"notes.txt");
     assert_eq!(
         service.prepare_open_at(peer, &payload[..length], 1),
         Err(posix_service::STATUS_EINVAL)
@@ -1190,7 +1193,7 @@ fn prepared_filesystem_request_carries_supplementary_groups() {
             base: protocol::OpenBase::ProcessCwd,
             options: protocol::OPEN_READ,
             mode: 0,
-            path: "notes.txt",
+            path: b"notes.txt",
         },
         &mut payload,
     )
@@ -1230,7 +1233,7 @@ impl ObjectTransport for OpenTransport {
         assert!(handles.is_empty());
         let open = protocol::decode_open_at(payload).map_err(|_| ())?;
         assert_eq!(open.base, protocol::OpenBase::ProcessCwd);
-        assert_eq!(open.path, "document.txt");
+        assert_eq!(open.path, b"document.txt");
         handles
             .push(ObjectHandleAttachment {
                 handle: 91,
@@ -1296,7 +1299,7 @@ impl ObjectTransport for DirectoryChangeTransport {
                 let request = protocol::decode_stat_at(payload).map_err(|_| ())?;
                 assert_eq!(request.base, protocol::OpenBase::AttachedDirectory);
                 assert_eq!(request.flags, 0);
-                assert_eq!(request.path, "child");
+                assert_eq!(request.path, b"child");
             }
             protocol::OP_FCHDIR => assert!(payload.is_empty()),
             _ => return Err(()),
@@ -6943,7 +6946,7 @@ fn service_submits_open_as_one_atomic_filesystem_operation() {
             base: protocol::OpenBase::AttachedDirectory,
             options: protocol::OPEN_WRITE | protocol::OPEN_CREATE | protocol::OPEN_EXCLUSIVE,
             mode: 0o666,
-            path: "result.txt",
+            path: b"result.txt",
         },
         &mut payload,
     )
@@ -6973,7 +6976,7 @@ fn service_submits_open_as_one_atomic_filesystem_operation() {
     assert_eq!(filesystem.root.unwrap().handle, 100);
     assert_eq!(filesystem.directory, Some(directory));
     let request = filesystem.request.unwrap();
-    assert_eq!(request.path, "result.txt");
+    assert_eq!(request.path, b"result.txt");
     assert_eq!(request.effective_uid, 505);
     assert_eq!(request.effective_gid, 24);
     assert_eq!(request.mode, 0o644);
@@ -7004,7 +7007,7 @@ fn service_submits_stat_as_one_atomic_filesystem_operation() {
         protocol::StatAtRequest {
             base: protocol::OpenBase::AttachedDirectory,
             flags: protocol::STAT_NOFOLLOW,
-            path: "result.txt",
+            path: b"result.txt",
         },
         &mut payload,
     )
@@ -7037,7 +7040,7 @@ fn service_submits_stat_as_one_atomic_filesystem_operation() {
     assert_eq!(filesystem.directory, Some(directory));
     assert_eq!(filesystem.root.unwrap().handle, 100);
     let request = filesystem.stat_request.unwrap();
-    assert_eq!(request.path, "result.txt");
+    assert_eq!(request.path, b"result.txt");
     assert_eq!(request.flags, protocol::STAT_NOFOLLOW);
     assert_eq!(request.effective_uid, 506);
     assert_eq!(request.effective_gid, 25);
@@ -7379,7 +7382,7 @@ fn mkdir_uses_session_umask_credentials_and_directory_handles() {
             base: protocol::OpenBase::AttachedDirectory,
             options: 0,
             mode: 0o777,
-            path: "child",
+            path: b"child",
         },
         &mut payload,
     )
@@ -7398,7 +7401,7 @@ fn mkdir_uses_session_umask_credentials_and_directory_handles() {
 
     assert_eq!(result.response.header.status, protocol::STATUS_OK);
     let request = filesystem.mkdir_request.unwrap();
-    assert_eq!(request.path, "child");
+    assert_eq!(request.path, b"child");
     assert_eq!(request.mode, 0o750);
     assert_eq!(request.effective_uid, 505);
     assert_eq!(request.effective_gid, 24);
@@ -7430,7 +7433,7 @@ fn unlink_uses_authenticated_credentials_and_directory_handles() {
         protocol::StatAtRequest {
             base: protocol::OpenBase::AttachedDirectory,
             flags: protocol::UNLINK_REMOVE_DIRECTORY,
-            path: "child",
+            path: b"child",
         },
         &mut payload,
     )
@@ -7449,7 +7452,7 @@ fn unlink_uses_authenticated_credentials_and_directory_handles() {
 
     assert_eq!(result.response.header.status, protocol::STATUS_OK);
     let request = filesystem.unlink_request.unwrap();
-    assert_eq!(request.path, "child");
+    assert_eq!(request.path, b"child");
     assert_eq!(request.flags, protocol::UNLINK_REMOVE_DIRECTORY);
     assert_eq!(request.effective_uid, 504);
     assert_eq!(request.effective_gid, 23);
@@ -7461,8 +7464,8 @@ fn rename_wire_and_service_preserve_two_distinct_directory_handles() {
     let request = protocol::RenameAtRequest {
         old_base: protocol::OpenBase::AttachedDirectory,
         new_base: protocol::OpenBase::AttachedDirectory,
-        old_path: "old/file",
-        new_path: "new/file",
+        old_path: b"old/file",
+        new_path: b"new/file",
     };
     let mut encoded = [0; protocol::RENAME_AT_HEADER_LEN + protocol::MAX_PATH_LEN * 2];
     let length = protocol::encode_rename_at(request, &mut encoded).unwrap();
@@ -7507,8 +7510,8 @@ fn rename_wire_and_service_preserve_two_distinct_directory_handles() {
 
     assert_eq!(result.response.header.status, protocol::STATUS_OK);
     let prepared = filesystem.rename_request.unwrap();
-    assert_eq!(prepared.old_path, "old/file");
-    assert_eq!(prepared.new_path, "new/file");
+    assert_eq!(prepared.old_path, b"old/file");
+    assert_eq!(prepared.new_path, b"new/file");
     assert_eq!(prepared.effective_uid, 503);
     assert_eq!(prepared.effective_gid, 22);
     let paths = filesystem.rename_paths.unwrap();
@@ -7523,8 +7526,8 @@ fn link_wire_and_service_preserve_flags_credentials_and_two_directory_handles() 
         old_base: protocol::OpenBase::AttachedDirectory,
         new_base: protocol::OpenBase::AttachedDirectory,
         flags: protocol::LINK_FOLLOW_SOURCE,
-        old_path: "old/source",
-        new_path: "new/link",
+        old_path: b"old/source",
+        new_path: b"new/link",
     };
     let mut encoded = [0; protocol::LINK_AT_HEADER_LEN + protocol::MAX_PATH_LEN * 2];
     let length = protocol::encode_link_at(request, &mut encoded).unwrap();
@@ -7588,8 +7591,8 @@ fn link_wire_and_service_preserve_flags_credentials_and_two_directory_handles() 
 
     assert_eq!(result.response.header.status, protocol::STATUS_OK);
     let prepared = filesystem.link_request.unwrap();
-    assert_eq!(prepared.old_path, "old/source");
-    assert_eq!(prepared.new_path, "new/link");
+    assert_eq!(prepared.old_path, b"old/source");
+    assert_eq!(prepared.new_path, b"new/link");
     assert_eq!(prepared.flags, protocol::LINK_FOLLOW_SOURCE);
     assert_eq!(prepared.effective_uid, 0);
     assert_eq!(prepared.effective_gid, 23);
@@ -7625,7 +7628,7 @@ fn truncate_path_uses_authenticated_session_and_explicit_base_handle() {
         protocol::TruncateAtRequest {
             base: protocol::OpenBase::AttachedDirectory,
             length: 1234,
-            path: "file",
+            path: b"file",
         },
         &mut payload,
     )
@@ -7644,7 +7647,7 @@ fn truncate_path_uses_authenticated_session_and_explicit_base_handle() {
 
     assert_eq!(result.response.header.status, protocol::STATUS_OK);
     let prepared = filesystem.truncate_request.unwrap();
-    assert_eq!(prepared.path, "file");
+    assert_eq!(prepared.path, b"file");
     assert_eq!(prepared.length, 1234);
     assert_eq!(prepared.growth_ceiling, protocol::RLIM_INFINITY);
     assert_eq!(prepared.effective_uid, 502);
@@ -7735,7 +7738,7 @@ fn truncate_ceiling_comes_from_authenticated_process_policy_not_request_identity
         protocol::TruncateAtRequest {
             base: protocol::OpenBase::ProcessCwd,
             length: 123,
-            path: "file",
+            path: b"file",
         },
         &mut path,
     )
@@ -7757,8 +7760,8 @@ fn truncate_ceiling_comes_from_authenticated_process_policy_not_request_identity
 fn symlink_wire_and_service_preserve_target_credentials_and_directory_handle() {
     let request = protocol::SymlinkAtRequest {
         base: protocol::OpenBase::AttachedDirectory,
-        target: "../target",
-        link_path: "links/name",
+        target: b"../target",
+        link_path: b"links/name",
     };
     let mut encoded = [0; protocol::SYMLINK_AT_HEADER_LEN + protocol::MAX_PATH_LEN * 2];
     let length = protocol::encode_symlink_at(request, &mut encoded).unwrap();
@@ -7799,8 +7802,8 @@ fn symlink_wire_and_service_preserve_target_credentials_and_directory_handle() {
 
     assert_eq!(result.response.header.status, protocol::STATUS_OK);
     let prepared = filesystem.symlink_request.unwrap();
-    assert_eq!(prepared.target, "../target");
-    assert_eq!(prepared.link_path, "links/name");
+    assert_eq!(prepared.target, b"../target");
+    assert_eq!(prepared.link_path, b"links/name");
     assert_eq!(prepared.effective_uid, 501);
     assert_eq!(prepared.effective_gid, 20);
     assert_eq!(filesystem.directory, Some(directory));
@@ -7831,7 +7834,7 @@ fn readlink_uses_authenticated_session_and_returns_only_the_target_bytes() {
         protocol::StatAtRequest {
             base: protocol::OpenBase::AttachedDirectory,
             flags: 0,
-            path: "links/name",
+            path: b"links/name",
         },
         &mut payload,
     )
@@ -7851,7 +7854,7 @@ fn readlink_uses_authenticated_session_and_returns_only_the_target_bytes() {
     assert_eq!(result.response.header.status, protocol::STATUS_OK);
     assert_eq!(result.response.payload, b"../target");
     let prepared = filesystem.readlink_request.unwrap();
-    assert_eq!(prepared.path, "links/name");
+    assert_eq!(prepared.path, b"links/name");
     assert_eq!(prepared.effective_uid, 500);
     assert_eq!(prepared.effective_gid, 19);
     assert_eq!(filesystem.directory, Some(directory));
@@ -7883,7 +7886,7 @@ fn chmod_uses_authenticated_session_and_an_explicit_directory_handle() {
             base: protocol::OpenBase::AttachedDirectory,
             options: 0,
             mode: 0o2750,
-            path: "file",
+            path: b"file",
         },
         &mut payload,
     )
@@ -7902,7 +7905,7 @@ fn chmod_uses_authenticated_session_and_an_explicit_directory_handle() {
 
     assert_eq!(result.response.header.status, protocol::STATUS_OK);
     let prepared = filesystem.chmod_request.unwrap();
-    assert_eq!(prepared.path, "file");
+    assert_eq!(prepared.path, b"file");
     assert_eq!(prepared.mode, 0o2750);
     assert_eq!(prepared.effective_uid, 499);
     assert_eq!(prepared.effective_gid, 18);
@@ -7916,7 +7919,7 @@ fn chown_wire_and_service_use_authenticated_credentials() {
         flags: protocol::CHOWN_NOFOLLOW,
         uid: 42,
         gid: u32::MAX,
-        path: "link",
+        path: b"link",
     };
     let mut payload = [0; protocol::CHOWN_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
     let length = protocol::encode_chown_at(request, &mut payload).unwrap();
@@ -7957,7 +7960,7 @@ fn chown_wire_and_service_use_authenticated_credentials() {
 
     assert_eq!(result.response.header.status, protocol::STATUS_OK);
     let prepared = filesystem.chown_request.unwrap();
-    assert_eq!(prepared.path, "link");
+    assert_eq!(prepared.path, b"link");
     assert_eq!(prepared.uid, 42);
     assert_eq!(prepared.gid, u32::MAX);
     assert_eq!(prepared.flags, protocol::CHOWN_NOFOLLOW);
@@ -7988,7 +7991,7 @@ fn access_uses_authenticated_session_credentials_and_one_atomic_operation() {
             base: protocol::OpenBase::ProcessCwd,
             flags: protocol::ACCESS_EFFECTIVE_IDS,
             modes: protocol::ACCESS_READ | protocol::ACCESS_EXECUTE,
-            path: "tool",
+            path: b"tool",
         },
         &mut payload,
     )
@@ -8027,7 +8030,7 @@ fn access_uses_authenticated_session_credentials_and_one_atomic_operation() {
     assert_eq!(repeated.response.header.status, protocol::STATUS_OK);
     assert_eq!(filesystem.roots_opened, 1);
     let request = filesystem.access_request.unwrap();
-    assert_eq!(request.path, "tool");
+    assert_eq!(request.path, b"tool");
     assert_eq!(request.uid, peer.effective_uid);
     assert_eq!(request.gid, peer.effective_gid);
     assert_eq!(
@@ -8057,7 +8060,7 @@ fn chdir_replaces_the_session_cwd_with_an_open_directory() {
         protocol::StatAtRequest {
             base: protocol::OpenBase::ProcessCwd,
             flags: 0,
-            path: "work",
+            path: b"work",
         },
         &mut payload,
     )
@@ -8080,7 +8083,7 @@ fn chdir_replaces_the_session_cwd_with_an_open_directory() {
     assert_eq!(result.response.header.status, protocol::STATUS_OK);
     assert!(result.handles.is_empty());
     let request = filesystem.directory_request.as_ref().unwrap();
-    assert_eq!(request.path, "work");
+    assert_eq!(request.path, b"work");
     assert_eq!(request.flags, 0);
     assert_eq!(filesystem.directory.unwrap().handle, 101);
     assert_eq!(
@@ -8121,7 +8124,7 @@ fn chroot_replaces_only_the_privileged_sessions_root_handle() {
         protocol::StatAtRequest {
             base: protocol::OpenBase::ProcessCwd,
             flags: 0,
-            path: "jail",
+            path: b"jail",
         },
         &mut payload,
     )
@@ -8143,7 +8146,7 @@ fn chroot_replaces_only_the_privileged_sessions_root_handle() {
 
     assert_eq!(result.response.header.status, protocol::STATUS_OK);
     let request = filesystem.directory_request.as_ref().unwrap();
-    assert_eq!(request.path, "jail");
+    assert_eq!(request.path, b"jail");
     assert_eq!(request.flags, 0);
     assert_eq!(filesystem.root.unwrap().handle, 100);
     assert_eq!(filesystem.directory.unwrap().handle, 101);
@@ -8206,7 +8209,7 @@ fn chroot_rejects_an_unprivileged_session_before_resolving_the_path() {
         protocol::StatAtRequest {
             base: protocol::OpenBase::ProcessCwd,
             flags: 0,
-            path: "jail",
+            path: b"jail",
         },
         &mut payload,
     )

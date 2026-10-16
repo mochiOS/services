@@ -36,7 +36,7 @@ impl ObjectTransport for &Replies {
             open.options,
             wire::OPEN_READ | wire::OPEN_WRITE | wire::OPEN_CREATE | wire::OPEN_EXCLUSIVE
         );
-        assert_eq!(open.path, "new-file");
+        assert_eq!(open.path, b"new-file");
         assert_eq!(
             handles.iter().map(|entry| entry.handle).collect::<Vec<_>>(),
             self.borrowed.into_iter().collect::<Vec<_>>()
