@@ -17,6 +17,9 @@
 static unsigned mode;
 static volatile sig_atomic_t faulted;
 static sigjmp_buf destination;
+static int *retry_master, *retry_slave;
+static struct termios *retry_attributes;
+static struct winsize *retry_window;
 #define CHECK(x)                                                               \
   do {                                                                         \
     if (!(x)) {                                                                \
@@ -36,6 +39,10 @@ static void fault_handler(int signal) {
   if (signal != SIGSEGV)
     _exit(91);
   faulted = 1;
+  int64_t baseline = native(680, 0, 0, 0);
+  if (openpty(retry_master, retry_slave, NULL, retry_attributes, retry_window) != -1 ||
+      errno != EFAULT || native(680, 0, 0, 0) != baseline)
+    _exit(92);
   siglongjmp(destination, 37);
 }
 int main(void) {
@@ -79,6 +86,10 @@ int main(void) {
       CHECK(mprotect(page + (mode == 4 ? 8192 : 12288), 4096, PROT_NONE) == 0);
     if (mode == 6)
       attributes->c_lflag |= UINT32_C(0x80000000);
+    retry_master = master;
+    retry_slave = slave;
+    retry_attributes = attributes;
+    retry_window = window;
     faulted = 0;
     int jumped = sigsetjmp(destination, 1);
     if (!jumped) {
@@ -102,8 +113,16 @@ int main(void) {
         CHECK(read(*master, &byte, 1) == 1 && byte == 'q');
         CHECK(close(*master) == 0 && close(*slave) == 0);
       } else {
-        CHECK(result == -1 && errno == (mode == 6 ? ENOTSUP : EMFILE));
-        CHECK(*master == -123 && *slave == -123);
+        CHECK(result == -1 &&
+              errno == (mode < 6 ? EFAULT : mode == 6 ? ENOTSUP : EMFILE));
+        CHECK(*master == (mode == 3 ? expected[0] : -123) && *slave == -123);
+        CHECK(native(680, 0, 0, 0) == baseline);
+        if (mode < 6) {
+          unsigned offset = mode == 2 ? 0 : mode == 3 ? 4096 :
+                            mode == 4 ? 8192 : 12288;
+          *(volatile char *)(page + offset) = 1;
+          CHECK(0);
+        }
       }
     } else {
       CHECK(jumped == 37 && faulted && mode >= 2 && mode <= 5);
@@ -124,8 +143,7 @@ int main(void) {
     CHECK(native(680, 0, 0, 0) == baseline);
     fprintf(stderr, "pty-creation: mode=%u PASS\n", mode);
   }
-  puts("pty-creation: PASS 8 configuration, input/output fault and FD-limit "
-       "cases; "
-       "both references and reservations reclaimed");
+  puts("pty-creation: PASS 8 configuration, EFAULT input/output and FD-limit "
+       "cases including active handlers; both references and reservations reclaimed");
   return 0;
 }

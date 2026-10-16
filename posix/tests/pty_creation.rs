@@ -1,13 +1,14 @@
 //! Run the production PTY adapter against deterministic acquisition/control failures.
 #![allow(dead_code)]
-use std::ffi::c_int;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use mochios_posix_client::upcall_guard::Guard;
 use mochios_posix_client::{
     ObjectHandleAttachment,
     fd::{Entry, FdReservation, FdTable},
 };
-use mochios_posix_client::upcall_guard::Guard;
+use mochios_posix_protocol as posix_protocol;
+use std::ffi::{c_char, c_int};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 #[path = "../../../user/crates/newlib-runtime/src/callback_resources.rs"]
 mod callback_resources;
 #[path = "../../../user/crates/newlib-runtime/src/fd_creation.rs"]
@@ -16,15 +17,27 @@ mod fd_creation;
 mod implementation;
 #[path = "../../../user/crates/newlib-runtime/src/io_resources.rs"]
 mod io_resources;
+#[path = "../../../user/crates/newlib-runtime/src/terminal_memory.rs"]
+mod terminal_memory;
+#[path = "../../../user/crates/newlib-runtime/src/user_copy.rs"]
+mod user_copy;
+#[path = "support/user_copy_native.rs"]
+mod user_copy_native;
+use user_copy_native::syscall_errno;
 const EAGAIN: c_int = 11;
 const EACCES: c_int = 13;
+const EFAULT: c_int = 14;
+const ENOENT: c_int = 2;
+const ENAMETOOLONG: c_int = 91;
+const PAGE_SIZE: usize = 4096;
 const EMFILE: c_int = 24;
 const EIO: c_int = 5;
 const TCSANOW: c_int = 0;
 mod syscall {
+    pub use super::user_copy_native::syscall::{SyscallNumber, raw_syscall3};
     pub use mnu_abi::{
-        HANDLE_RIGHT_READ, HANDLE_RIGHT_WRITE, HANDLE_RIGHT_WAIT, HANDLE_RIGHT_CONTROL,
-        HANDLE_RIGHT_DUPLICATE, HANDLE_RIGHT_TRANSFER,
+        HANDLE_RIGHT_CONTROL, HANDLE_RIGHT_DUPLICATE, HANDLE_RIGHT_READ, HANDLE_RIGHT_TRANSFER,
+        HANDLE_RIGHT_WAIT, HANDLE_RIGHT_WRITE,
     };
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,10 +87,25 @@ fn register_current_thread() -> Option<(u32, &'static ThreadControl)> {
 fn defer_native_delivery() -> Option<Guard<'static>> {
     Guard::enter(&CONTROL.native)
 }
-#[derive(Clone, Copy)]
-struct NewlibTermios(u32);
-#[derive(Clone, Copy)]
-struct NewlibWinSize(u32);
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct NewlibTermios {
+    c_iflag: u32,
+    c_oflag: u32,
+    c_cflag: u32,
+    c_lflag: u32,
+    c_cc: [u8; posix_protocol::TERMINAL_CONTROL_CHARACTERS],
+    c_ispeed: u32,
+    c_ospeed: u32,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct NewlibWinSize {
+    ws_row: u16,
+    ws_col: u16,
+    ws_xpixel: u16,
+    ws_ypixel: u16,
+}
 static CASE: AtomicU32 = AtomicU32::new(0);
 static CREATES: AtomicU32 = AtomicU32::new(0);
 static CONFIGURED: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
@@ -160,7 +188,7 @@ fn set_terminal_attributes(
 ) -> Result<(), c_int> {
     check_control(entry);
     assert_eq!(action, TCSANOW);
-    assert_eq!(attributes.0, 123);
+    assert_eq!(attributes.c_iflag, 123);
     CONFIGURED.lock().unwrap().push("attributes");
     if CASE.load(Ordering::Relaxed) == 6 {
         Err(EIO)
@@ -170,7 +198,7 @@ fn set_terminal_attributes(
 }
 fn set_terminal_window_size(entry: FdEntry, window: NewlibWinSize) -> Result<(), c_int> {
     check_control(entry);
-    assert_eq!(window.0, 456);
+    assert_eq!(window.ws_row, 456);
     CONFIGURED.lock().unwrap().push("window");
     if CASE.load(Ordering::Relaxed) == 7 {
         Err(EIO)
@@ -180,7 +208,7 @@ fn set_terminal_window_size(entry: FdEntry, window: NewlibWinSize) -> Result<(),
 }
 #[test]
 fn configuration_precedes_publication_and_failures_reclaim_both_references_and_slots() {
-    for case in 0..8 {
+    for case in 0..12 {
         state().fds = FdTable::new();
         CASE.store(case, Ordering::Relaxed);
         CREATES.store(0, Ordering::Relaxed);
@@ -188,18 +216,38 @@ fn configuration_precedes_publication_and_failures_reclaim_both_references_and_s
         CLOSED.lock().unwrap().clear();
         CONFIGURED.lock().unwrap().clear();
         let (mut master, mut slave) = (-123, -123);
+        let attributes = NewlibTermios {
+            c_iflag: 123,
+            ..Default::default()
+        };
+        let window = NewlibWinSize {
+            ws_row: 456,
+            ..Default::default()
+        };
         let result = implementation::create(
-            &mut master,
-            &mut slave,
-            if case == 1 {
-                std::ptr::null()
+            if case == 10 {
+                1usize as *mut _
             } else {
-                &NewlibTermios(123)
+                &mut master
+            },
+            if case == 11 {
+                1usize as *mut _
+            } else {
+                &mut slave
             },
             if case == 1 {
                 std::ptr::null()
+            } else if case == 8 {
+                1usize as *const _
             } else {
-                &NewlibWinSize(456)
+                &attributes
+            },
+            if case == 1 {
+                std::ptr::null()
+            } else if case == 9 {
+                1usize as *const _
+            } else {
+                &window
             },
         );
         if case < 2 {
@@ -225,10 +273,12 @@ fn configuration_precedes_publication_and_failures_reclaim_both_references_and_s
                     2 => EMFILE,
                     3 => EAGAIN,
                     5 => EACCES,
+                    8..=11 => EFAULT,
                     _ => EIO,
                 })
             );
-            assert_eq!((master, slave), (-123, -123));
+            assert_eq!((master, slave), (if case == 11 { 0 } else { -123 }, -123));
+            assert!(state().fds.get(0).is_none() && state().fds.get(1).is_none());
             assert!(LIVE.lock().unwrap().is_empty());
             assert_eq!(
                 *CLOSED.lock().unwrap(),
@@ -250,7 +300,7 @@ fn configuration_precedes_publication_and_failures_reclaim_both_references_and_s
         assert_eq!(
             *CONFIGURED.lock().unwrap(),
             match case {
-                0 | 7 => vec!["attributes", "window"],
+                0 | 7 | 10 | 11 => vec!["attributes", "window"],
                 6 => vec!["attributes"],
                 _ => vec![],
             }
