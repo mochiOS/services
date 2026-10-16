@@ -28,7 +28,7 @@ use status::Error;
 #[derive(Clone)]enum KernelObject {
     Process(Arc<Process>),IpcEndpoint{thread_id:u64,slot:u16,generation:u64},
     MemoryAdmission(Arc<mem::vm_object::ProviderAdmission>),File(Arc<task::FileHandle>),
-    Provider(Arc<ProviderObject>),Event(u64),Thread(u64),VmObject(Arc<()>),
+    Provider(Arc<ProviderObject>),Thread(u64),VmObject(Arc<()>),
     MemoryUpdate(Arc<()>),AddressSpace(Arc<()>),HandleSnapshot(Arc<()>),Other,
 }
 struct Process{exit:bool}impl Process{fn id(&self)->u64{7}fn is_exited(&self)->bool{self.exit}}
