@@ -3562,7 +3562,9 @@ impl FilesystemService {
         let mut response = self.success(request);
         response.payload.resize(protocol::NODE_STATUS_LEN, 0);
         let status = protocol::NodeStatus {
-            device: request.mount_id,
+            // Node identity, not a caller-selected request field, identifies
+            // the backing volume (also for delegated Handles).
+            device: node_id >> 32,
             node_id,
             size: metadata.len(),
             blocks: metadata.len().div_ceil(512),

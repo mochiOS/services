@@ -2686,6 +2686,7 @@ fn service_open_descriptions_keep_volume_identity_for_io_metadata_and_pager() {
         .stat_handle(protocol::Header::default(), system.open_id)
         .unwrap();
     let status = protocol::decode_node_status(&status.payload).unwrap();
+    assert_eq!(status.device, system.node_id >> 32);
     assert_eq!(
         (
             status.node_id,

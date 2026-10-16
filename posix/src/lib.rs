@@ -20,6 +20,7 @@ pub mod socket_binding;
 pub mod socket_connect;
 pub mod socket_receive_wait;
 pub mod filesystem_transport;
+pub mod filesystem_metadata;
 pub mod mutation_admission;
 mod fault_signal;
 mod signal_origin;
