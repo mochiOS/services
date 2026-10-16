@@ -1714,12 +1714,7 @@ fn wait_for_request_or_child(
     }
     match process::wait_many(&mut items, deadline) {
         Ok(index) => Ok(index == 0),
-        Err(error)
-            if deadline != syscall::HANDLE_WAIT_INFINITE
-                && error.raw() == -(syscall::EAGAIN as i64) =>
-        {
-            Ok(false)
-        }
+        Err(error) if error.native_error() == Some(mnu_abi::status::Error::NotReady) => Ok(false),
         Err(error) => Err(error.raw()),
     }
 }

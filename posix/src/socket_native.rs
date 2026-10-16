@@ -178,7 +178,7 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                             observed: 0,
                         }];
                         if let Err(error) = platform::process::wait_many(&mut wait, gc_deadline) {
-                            if error.raw() != -11 {
+                            if error.native_error() != Some(mnu_abi::status::Error::NotReady) {
                                 platform::thread::yield_now();
                             }
                             continue;
