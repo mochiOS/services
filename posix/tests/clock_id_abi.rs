@@ -14,6 +14,11 @@ const EINVAL: i32 = 22;
 const EIO: i32 = 5;
 const EOVERFLOW: i32 = 75;
 #[repr(C)] struct Timespec { tv_sec: i64, tv_nsec: i64 }
+mod time_memory {
+    pub fn write_timespec(output:*mut super::Timespec,value:super::Timespec)->Result<(),i32>{
+        unsafe {output.write_unaligned(value);} Ok(())
+    }
+}
 static mut ERRNO: i32 = 123;
 static mut CALLS: usize = 0;
 fn set_errno(error: i32) { unsafe { ERRNO = error; } }
