@@ -4,6 +4,40 @@
 mod probe;
 
 #[test]
+fn initial_process_probe_uses_the_current_native_abi() {
+    use mnu_abi::{SyscallNumber as N, status::Error};
+    let source = include_str!("native_launch_lookup.c");
+    for (name, call) in [
+        ("HANDLE_CLOSE", N::HandleClose),
+        ("LAUNCH_HANDLE_GET", N::LaunchHandleGet),
+        ("THREAD_YIELD", N::ThreadYield),
+        ("LAUNCH_VALUE_GET", N::LaunchValueGet),
+        ("CONTEXT_HANDLE_SET", N::ContextHandleSet),
+        ("CONTEXT_HANDLE_REMOVE", N::ContextHandleRemove),
+        ("CONTEXT_VALUE_SET", N::ContextValueSet),
+        ("CONTEXT_VALUE_REMOVE", N::ContextValueRemove),
+        ("HANDLE_RIGHTS_GET", N::HandleRightsGet),
+        ("MEMORY_OBJECT_CREATE", N::MemoryObjectCreate),
+    ] {
+        assert!(source.contains(&format!("{name} = {}", call as u64)));
+    }
+    for (name, error) in [
+        ("NATIVE_NOT_FOUND", Error::NotFound),
+        ("NATIVE_INVALID_ARGUMENT", Error::InvalidArgument),
+        ("NATIVE_INVALID_ADDRESS", Error::InvalidAddress),
+    ] {
+        assert!(source.contains(&format!(
+            "#define {name} INT64_C({})",
+            error.into_raw() as i64
+        )));
+    }
+    assert!(source.contains(&format!(
+        "control = UINT64_C({:#x})",
+        mochios_posix_protocol::CONTROL_HANDLE_KEY
+    )));
+}
+
+#[test]
 fn only_native_missing_keys_are_absent_and_other_lookup_failures_survive() {
     let kernel = include_str!("../../../core/src/syscall/handle.rs");
     let table = include_str!("../../../core/src/task/handle_table.rs");
