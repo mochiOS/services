@@ -138,6 +138,29 @@ int main(void) {
   CHECK(sigaction(SIGUSR1, &alias, &alias) == 0 && alias.sa_handler == SIG_IGN);
   CHECK(sigaction(SIGUSR1, NULL, &queried) == 0 &&
         queried.sa_handler == caught);
+  sigset_t unblock, mask_before;
+  CHECK(sigemptyset(&unblock) == 0 && sigaddset(&unblock, SIGUSR1) == 0);
+  CHECK(pthread_sigmask(SIG_SETMASK, NULL, &mask_before) == 0);
+  for (unsigned api = 0; api < 2; ++api) {
+    for (unsigned mode = 0; mode < 2; ++mode) {
+      CHECK(pthread_sigmask(SIG_BLOCK, &unblock, NULL) == 0);
+      sig_atomic_t before = delivered;
+      CHECK(raise(SIGUSR1) == 0 && delivered == before);
+      errno = E2BIG;
+      const sigset_t *requested = mode ? &mask_before : &unblock;
+      int how = mode ? SIG_SETMASK : SIG_UNBLOCK;
+      if (api == 0)
+        CHECK(sigprocmask(how, requested, readonly) == -1 && errno == EFAULT);
+      else
+        CHECK(pthread_sigmask(how, requested, readonly) == EFAULT &&
+              errno == E2BIG);
+      CHECK(delivered == before + 1);
+      sigset_t pending, current;
+      CHECK(sigpending(&pending) == 0 && sigismember(&pending, SIGUSR1) == 0);
+      CHECK(pthread_sigmask(SIG_SETMASK, NULL, &current) == 0 &&
+            current == mask_before);
+    }
+  }
   CHECK(sigaction(SIGUSR1, &previous, NULL) == 0);
   sigset_t mask_alias;
   CHECK(sigemptyset(&mask_alias) == 0 && sigaddset(&mask_alias, SIGUSR1) == 0);
@@ -155,6 +178,7 @@ int main(void) {
   CHECK(munmap(pages, 8192) == 0 && handles() == baseline);
   puts("signal-memory: PASS 20 EFAULT cases including active handlers, direct "
        "errno conventions, consumed wait notifications, committed disposition "
-       "coherence and aliased inputs/outputs");
+       "coherence, aliased inputs/outputs and 4 committed-unblock copy "
+       "failures");
   return 0;
 }
