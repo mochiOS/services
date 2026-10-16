@@ -201,7 +201,7 @@ int main(void) {
   size_t grant_offset = 32 + sizeof(path) - 1 + sizeof(label) - 1 + 176;
   put32(bytes + grant_offset + 8, (uint32_t)nontransferable);
   CHECK(authorize((uint64_t)authority));
-  CHECK(N(CREATE, image, bytes, length) == -EACCES);
+  CHECK(N(CREATE, image, bytes, length) == SC_NATIVE_ACCESS_DENIED);
   CHECK(N(CLOSE, nontransferable, 0, 0) == 0);
   int64_t readonly = N(DUP, memory, 1 | (UINT64_C(1) << 63), 0);
   CHECK(readonly > 0);
@@ -209,7 +209,7 @@ int main(void) {
   put32(bytes + grant_offset + 8, (uint32_t)readonly);
   put64(bytes + grant_offset + 16, 2);
   CHECK(authorize((uint64_t)authority));
-  CHECK(N(CREATE, image, bytes, length) == -EACCES);
+  CHECK(N(CREATE, image, bytes, length) == SC_NATIVE_ACCESS_DENIED);
   CHECK(N(CLOSE, readonly, 0, 0) == 0);
   length = metadata(bytes, context);
   put32(bytes + grant_offset + 12, 4097);
