@@ -1765,8 +1765,10 @@ impl<H: Copy> PosixService<H> {
         self.matching_child_ids(peer, request)?;
         self.reap_discarded_children_for(Some(peer.process_id), filesystem, processes)?;
         let candidates = self.matching_child_ids(peer, request)?;
+        let mut can_change = false;
         for child in candidates {
             if self.reap_is_pinned(child) {
+                can_change = true;
                 continue;
             }
             let handle = self
@@ -1776,6 +1778,9 @@ impl<H: Copy> PosixService<H> {
                 .ok_or(protocol::STATUS_ESRCH)?;
             if let ProcessLifecycle::Exited { exit_code } = processes.status(handle)? {
                 self.note_child_exited(child, exit_code)?;
+                if !protocol::wait_selects_exit(request.options) {
+                    continue;
+                }
                 let status = self
                     .process_wait_states
                     .get(&child)
@@ -1817,6 +1822,7 @@ impl<H: Copy> PosixService<H> {
                     status,
                 });
             }
+            can_change = true;
             if let Some(status) = self
                 .process_wait_states
                 .get_mut(&child)
@@ -1827,6 +1833,12 @@ impl<H: Copy> PosixService<H> {
                     status,
                 });
             }
+        }
+        // An exited child cannot subsequently stop or continue. Keep it
+        // waitable for an exit-selecting caller, but do not block or spin on
+        // its permanently-ready native exit Handle for an unrelated event.
+        if !can_change {
+            return Err(protocol::STATUS_ECHILD);
         }
         if request.options & protocol::WAIT_NOHANG != 0 {
             Ok(protocol::WaitResult::default())
@@ -1854,6 +1866,14 @@ impl<H: Copy> PosixService<H> {
         self.matching_child_ids(peer, request)?
             .into_iter()
             .filter(|child| !self.reap_is_pinned(*child))
+            .filter(|child| {
+                protocol::wait_selects_exit(request.options)
+                    || !self.process_wait_states.get(child).is_some_and(|state| {
+                        // wait_child can discover an exit before the global
+                        // teardown pass has marked exit_observed.
+                        state.exit_observed || state.exit_notified
+                    })
+            })
             .map(|child| {
                 self.processes
                     .get(&child)
@@ -1868,7 +1888,7 @@ impl<H: Copy> PosixService<H> {
         peer: PeerIdentity,
         request: protocol::WaitRequest,
     ) -> Result<Vec<u64>, i32> {
-        if request.options & !protocol::WAIT_OPTIONS_ALL != 0 {
+        if !protocol::wait_options_valid(request.options) {
             return Err(STATUS_EINVAL);
         }
         let caller_group = self

@@ -18,6 +18,9 @@ mod child_cpu_state;
 #[path = "support/wait_observation.rs"]
 mod wait_observation;
 
+#[path = "support/wait_selection.rs"]
+mod wait_selection;
+
 #[path = "support/cpu_limit.rs"]
 mod cpu_limit;
 
