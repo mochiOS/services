@@ -47,6 +47,12 @@ fn defer_native_delivery() -> Option<Guard<'static>> {
 mod fd_lease {
     use super::*;
     pub struct Lease;
+    impl std::ops::Deref for Lease {
+        type Target = u32;
+        fn deref(&self) -> &u32 {
+            &42
+        }
+    }
     impl Drop for Lease {
         fn drop(&mut self) {
             assert_ne!(CONTROL.native.load(Ordering::Relaxed), 0);
@@ -58,6 +64,18 @@ mod fd_lease {
             }
         }
     }
+}
+fn with_fd_entry(fd: c_int) -> Result<fd_lease::Lease, c_int> {
+    assert_ne!(CONTROL.native.load(Ordering::Relaxed), 0);
+    if fd != 7 {
+        return Err(EBADF);
+    }
+    PINS.fetch_add(1, Ordering::Relaxed);
+    Ok(fd_lease::Lease)
+}
+fn change_directory_entry(entry: u32) -> Result<(), c_int> {
+    assert_eq!(entry, 42);
+    Client.paired(1)
 }
 fn rename_posix_base(
     fd: c_int,
@@ -91,6 +109,15 @@ fn map_posix_client_error(error: c_int) -> c_int {
     error
 }
 impl Client {
+    fn chdir_at(&self, base: StatAtBase<u32>, path: &str) -> Result<(), c_int> {
+        self.paired(0)?;
+        assert_eq!(base, StatAtBase::ProcessCwd);
+        assert_eq!(path, "target");
+        Ok(())
+    }
+    fn chroot_at(&self, base: StatAtBase<u32>, path: &str) -> Result<(), c_int> {
+        self.chdir_at(base, path)
+    }
     fn paired(&self, pins: u32) -> Result<(), c_int> {
         assert_eq!(PINS.load(Ordering::Relaxed), pins);
         assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
@@ -217,6 +244,36 @@ fn reset() {
     CALLS.store(0, Ordering::Relaxed);
     DROPS.store(0, Ordering::Relaxed);
 }
+#[test]
+fn directory_policy_captures_paths_and_keeps_fd_authority_through_reentrant_rpc() {
+    let _serial = SERIAL.lock().unwrap();
+    for operation in 0..3 {
+        for case in 0..4 {
+            reset();
+            CASE.store(case, Ordering::Relaxed);
+            let mut input = *b"target\0";
+            let mut second = *b"unused\0";
+            INPUT.store(input.as_mut_ptr() as u64, Ordering::Relaxed);
+            SECOND_INPUT.store(second.as_mut_ptr() as u64, Ordering::Relaxed);
+            let result = match operation {
+                0 => implementation::chdir(input.as_ptr().cast()),
+                1 => implementation::chroot(input.as_ptr().cast()),
+                _ => implementation::fchdir(7),
+            };
+            assert_eq!(result, if case == 1 { Err(13) } else { Ok(()) });
+            assert_eq!(DROPS.load(Ordering::Relaxed), u32::from(operation == 2));
+            assert_eq!(
+                CLOSED.load(Ordering::Relaxed),
+                u32::from(operation == 2 && case == 2)
+            );
+            assert_eq!(PINS.load(Ordering::Relaxed), 0);
+            assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
+            assert!(CONTROL.callback_resources.is_empty());
+        }
+    }
+    assert_eq!(implementation::fchdir(-1), Err(EBADF));
+}
+
 #[test]
 fn paired_operations_capture_both_inputs_and_retire_both_borrows_on_rpc_escape_paths() {
     let _serial = SERIAL.lock().unwrap();
