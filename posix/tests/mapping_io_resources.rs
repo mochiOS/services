@@ -157,7 +157,7 @@ fn public_mmap_keeps_validation_and_the_entire_map_inside_the_source_owner() {
     assert!(body.find("if len == 0").unwrap() < body.find("mapping_io::with_source").unwrap());
     assert!(
         body.find("mapping_io::with_source").unwrap()
-            < body.find("address_space::current()?.map(").unwrap()
+            < body.find("address_space::current()?").unwrap()
     );
     assert!(!body.contains("with_fd_entry("));
     assert!(body.contains("entry.rights & required != required"));

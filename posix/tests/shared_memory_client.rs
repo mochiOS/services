@@ -352,7 +352,10 @@ fn newlib_shm_flags_and_inherited_descriptor_kind_are_canonical() {
     assert!(runtime.contains("(flags & 3) | O_CLOEXEC"));
     assert!(runtime.contains("reserve_from(0, limit)"));
     assert!(runtime.contains("commit_reservation"));
-    assert!(runtime.contains("impl Drop for MappingBacking"));
+    let backing = include_str!("../../../user/crates/newlib-runtime/src/mapping_backing.rs");
+    assert!(backing.contains("impl Drop for Reply"));
+    assert!(backing.contains("io_resources::with("));
+    assert!(backing.contains("&mut reply.native as *mut syscall::IpcObjectHandles"));
 }
 #[test]
 fn valid_response_transfers_one_owned_reference_and_all_failed_shapes_close_attachments() {
