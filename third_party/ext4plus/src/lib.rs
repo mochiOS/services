@@ -1480,6 +1480,22 @@ impl Ext4 {
         Ok(())
     }
 
+    /// Reclaim a zero-link inode retained after removing its last name.
+    /// The owner must serialize this call with all remaining references; an
+    /// inode number is not a reference or permission to reclaim a live file.
+    /// Reads current metadata and rejects linked inodes before freeing blocks.
+    #[maybe_async::maybe_async]
+    pub async fn reclaim_unlinked_inode(
+        &self,
+        inode: Inode,
+    ) -> Result<(), Ext4Error> {
+        let current = Inode::read(self, inode.index).await?;
+        if current.links_count() != 0 {
+            return Err(Ext4Error::Readonly);
+        }
+        self.delete_file(current).await
+    }
+
     /// Frees all blocks and deletes file.
     ///
     /// # Errors

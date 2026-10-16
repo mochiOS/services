@@ -1408,6 +1408,61 @@ fn an_open_directory_remains_a_valid_object_after_unlink() {
 }
 
 #[test]
+fn detached_directory_keeps_blocks_and_inode_allocated_until_explicit_reclaim() {
+    use ext4plus::dir::Dir;
+    use ext4plus::inode::{Inode, InodeCreationOptions, InodeFlags, InodeMode};
+    use ext4plus::{DirEntryName, FileType};
+    let (service, image) = test_filesystem_with_storage(None);
+    drop(service);
+    let filesystem =
+        Ext4::load_with_writer(Box::new(image.clone()), Some(Box::new(image))).unwrap();
+    let mut root = Dir::open_inode(&filesystem, filesystem.read_root_inode().unwrap()).unwrap();
+    let name = DirEntryName::try_from("removed").unwrap();
+    let mut directory = root.get_entry(name).unwrap();
+    let identity = directory.index;
+    let free_before = filesystem.superblock().free_inodes_count();
+    assert!(filesystem.reclaim_unlinked_inode(directory.clone()).is_err());
+    assert_eq!(root.get_entry(name).unwrap().index, identity);
+    let parent_links = root.inode().links_count();
+    root.inode_mut().set_links_count(parent_links - 1);
+    root.inode_mut().write(&filesystem).unwrap();
+    directory.set_links_count(1);
+    directory.write(&filesystem).unwrap();
+    let retained = root.unlink_retained(name, directory).unwrap();
+    assert_eq!(retained.links_count(), 0);
+    assert!(matches!(
+        root.get_entry(name),
+        Err(ext4plus::error::Ext4Error::NotFound)
+    ));
+    assert_eq!(filesystem.superblock().free_inodes_count(), free_before);
+    let current = Inode::read(&filesystem, identity).unwrap();
+    let old_directory = Dir::open_inode(&filesystem, current).unwrap();
+    assert_eq!(
+        old_directory.get_entry(DirEntryName::try_from(".").unwrap()).unwrap().index,
+        identity
+    );
+    assert_eq!(
+        old_directory.get_entry(DirEntryName::try_from("..").unwrap()).unwrap().index,
+        root.inode().index
+    );
+    // Allocation pressure must not reuse the detached identity.
+    let other = filesystem
+        .create_inode(InodeCreationOptions {
+            file_type: FileType::Regular,
+            mode: InodeMode::S_IFREG,
+            uid: 0,
+            gid: 0,
+            time: std::time::Duration::ZERO,
+            flags: InodeFlags::empty(),
+        })
+        .unwrap();
+    assert_ne!(other.index, identity);
+    filesystem.reclaim_unlinked_inode(other).unwrap();
+    filesystem.reclaim_unlinked_inode(retained).unwrap();
+    assert_eq!(filesystem.superblock().free_inodes_count(), free_before + 1);
+}
+
+#[test]
 fn truncate_and_sync_address_an_open_object_without_a_path() {
     let mut filesystem = test_filesystem();
     let opened = filesystem

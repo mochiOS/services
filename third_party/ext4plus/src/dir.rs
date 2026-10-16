@@ -799,8 +799,29 @@ impl Dir {
     pub async fn unlink(
         &mut self,
         name: DirEntryName<'_>,
-        mut inode: Inode,
+        inode: Inode,
     ) -> Result<Option<Inode>, Ext4Error> {
+        let inode = self.unlink_retained(name, inode).await?;
+        if inode.links_count() == 0 {
+            self.fs.delete_file(inode).await?;
+            Ok(None)
+        } else {
+            Ok(Some(inode))
+        }
+    }
+
+    /// Remove a name without reclaiming the inode or its blocks at zero links.
+    /// The caller must serialize reference ownership and eventually call
+    /// `Ext4::reclaim_unlinked_inode` after all open and namespace references
+    /// are gone. This operation does not create a hidden directory entry or
+    /// change a directory's `..`. Directory emptiness and parent link counts
+    /// remain the caller's responsibility, as for `unlink`.
+    #[maybe_async::maybe_async]
+    pub async fn unlink_retained(
+        &mut self,
+        name: DirEntryName<'_>,
+        mut inode: Inode,
+    ) -> Result<Inode, Ext4Error> {
         if name.0 == b"." || name.0 == b".." {
             return Err(Ext4Error::DotEntry);
         }
@@ -816,12 +837,7 @@ impl Dir {
         inode.set_links_count(old.saturating_sub(1));
         inode.write(&self.fs).await?;
         remove_dir_entry(&self.fs, &mut self.inode, name).await?;
-        if inode.links_count() == 0 {
-            self.fs.delete_file(inode).await?;
-            Ok(None)
-        } else {
-            Ok(Some(inode))
-        }
+        Ok(inode)
     }
 
     /// Return the inode for this directory.
