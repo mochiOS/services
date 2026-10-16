@@ -1,6 +1,6 @@
 //! Execute the actual path scope, including input mutation and reentrant close.
 #![allow(dead_code)]
-use mochios_posix_client::{ObjectHandleAttachment, StatAtBase, upcall_guard::Guard};
+use mochios_posix_client::{ObjectHandleAttachment, OpenAtBase, StatAtBase, upcall_guard::Guard};
 use mochios_posix_protocol as posix_protocol;
 use std::ffi::{c_char, c_int};
 use std::sync::Mutex;
@@ -25,6 +25,7 @@ static RETIRED: AtomicU32 = AtomicU32::new(0);
 static CALLS: AtomicU32 = AtomicU32::new(0);
 static CASE: AtomicU32 = AtomicU32::new(0);
 static INPUT: AtomicU64 = AtomicU64::new(0);
+static MUTATION: Mutex<Option<(u32, u32, u32, u32)>> = Mutex::new(None);
 struct ThreadControl {
     callback_resources: callback_resources::Chain,
     active_signal_scope_id: AtomicU64,
@@ -87,6 +88,41 @@ fn map_posix_client_error(error: c_int) -> c_int {
     error
 }
 impl Client {
+    fn mutation(
+        &self,
+        base: StatAtBase<u32>,
+        path: &str,
+        arguments: (u32, u32, u32, u32),
+    ) -> Result<(), c_int> {
+        let mut unused = [];
+        self.readlink_at(base, path, &mut unused)?;
+        *MUTATION.lock().unwrap() = Some(arguments);
+        Ok(())
+    }
+    fn chmod_at(&self, base: StatAtBase<u32>, path: &str, mode: u32) -> Result<(), c_int> {
+        self.mutation(base, path, (0, mode, 0, 0))
+    }
+    fn chown_at(
+        &self,
+        base: StatAtBase<u32>,
+        path: &str,
+        uid: u32,
+        gid: u32,
+        flags: u32,
+    ) -> Result<(), c_int> {
+        self.mutation(base, path, (1, uid, gid, flags))
+    }
+    fn unlink_at(&self, base: StatAtBase<u32>, flags: u32, path: &str) -> Result<(), c_int> {
+        self.mutation(base, path, (2, flags, 0, 0))
+    }
+    fn mkdir_at(&self, base: OpenAtBase<u32>, mode: u32, path: &str) -> Result<(), c_int> {
+        let base = match base {
+            OpenAtBase::ProcessRoot => StatAtBase::ProcessRoot,
+            OpenAtBase::ProcessCwd => StatAtBase::ProcessCwd,
+            OpenAtBase::Directory(handle) => StatAtBase::Directory(handle),
+        };
+        self.mutation(base, path, (3, mode, 0, 0))
+    }
     fn readlink_at(
         &self,
         base: StatAtBase<u32>,
@@ -127,6 +163,43 @@ fn reset() {
     RETIRED.store(0, Ordering::Relaxed);
     CALLS.store(0, Ordering::Relaxed);
 }
+#[test]
+fn mutations_keep_arguments_and_directory_authority_through_all_rpc_outcomes() {
+    let _serial = SERIAL.lock().unwrap();
+    for operation in 0..4 {
+        for case in 0..4 {
+            reset();
+            *MUTATION.lock().unwrap() = None;
+            CASE.store(case, Ordering::Relaxed);
+            let mut input = *b"target\0";
+            INPUT.store(input.as_mut_ptr() as u64, Ordering::Relaxed);
+            let path = input.as_ptr().cast();
+            let result = match operation {
+                0 => implementation::chmod(7, path, 0o640),
+                1 => implementation::chown(7, path, u32::MAX, 20, 1),
+                2 => implementation::unlink(7, path, 1),
+                _ => implementation::mkdir(7, path, 0o750),
+            };
+            assert_eq!(result, if case == 1 { Err(13) } else { Ok(()) });
+            let expected = match operation {
+                0 => (0, 0o640, 0, 0),
+                1 => (1, u32::MAX, 20, 1),
+                2 => (2, 1, 0, 0),
+                _ => (3, 0o750, 0, 0),
+            };
+            assert_eq!(
+                *MUTATION.lock().unwrap(),
+                if case == 1 { None } else { Some(expected) }
+            );
+            assert_eq!(PINS.load(Ordering::Relaxed), 0);
+            assert_eq!(CLOSED.load(Ordering::Relaxed), u32::from(case == 2));
+            assert_eq!(CALLS.load(Ordering::Relaxed), 1);
+            assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
+            assert!(CONTROL.callback_resources.is_empty());
+        }
+    }
+}
+
 #[test]
 fn readlink_owns_input_and_directory_through_errors_copyout_and_reentrant_close() {
     let _serial = SERIAL.lock().unwrap();
