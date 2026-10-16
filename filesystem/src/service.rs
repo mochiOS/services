@@ -17,6 +17,8 @@ type Resolution = path_walk::Resolution<Inode>;
 mod device_operations;
 #[path = "removed_directories.rs"]
 mod removed_directories;
+#[path = "canonical_path.rs"]
+mod canonical_path;
 
 const EIO: i32 = 5;
 const EXDEV: i32 = 18;
@@ -1271,55 +1273,16 @@ impl FilesystemService {
             return Ok(response);
         }
         let root = self.opens.get(&root_open_id).ok_or(EBADF)?.inode.clone();
-        let mut current = self
+        let current = self
             .opens
             .get(&directory_open_id)
             .ok_or(EBADF)?
             .inode
             .clone();
-        if !root.file_type().is_dir() || !current.file_type().is_dir() {
-            return Err(ENOTDIR);
-        }
-        let mut components = Vec::new();
-        while current.index != root.index {
-            if components.len() >= protocol::MAX_PATH_LEN {
-                return Err(EIO);
-            }
-            let directory = Dir::open_inode(&self.fs, current.clone()).map_err(errno)?;
-            let parent = directory
-                .get_entry(DirEntryName::try_from("..").map_err(|_| EIO)?)
-                .map_err(errno)?;
-            if parent.index == current.index {
-                return Err(EACCES);
-            }
-            let parent_directory = Dir::open_inode(&self.fs, parent.clone()).map_err(errno)?;
-            let mut name = None;
-            for entry in parent_directory.read_dir().map_err(errno)? {
-                let entry = entry.map_err(errno)?;
-                if entry.file_name() != "."
-                    && entry.file_name() != ".."
-                    && entry.inode.get() == current.index.get()
-                {
-                    name = Some(entry.file_name().as_str().map_err(|_| EIO)?.to_owned());
-                    break;
-                }
-            }
-            components.push(name.ok_or(ENOENT)?);
-            current = parent;
-        }
-        let mut path = String::from("/");
-        for (index, component) in components.iter().rev().enumerate() {
-            if index != 0 {
-                path.push('/');
-            }
-            path.push_str(component);
-            if path.len() > protocol::MAX_PATH_LEN {
-                return Err(ENAMETOOLONG);
-            }
-        }
+        let path = Self::inode_directory_path(&self.fs, root, current)?;
         let mut response = self.success(request);
         response.header.length = path.len() as u32;
-        response.payload = path.into_bytes();
+        response.payload = path;
         Ok(response)
     }
 

@@ -16,6 +16,9 @@ use mochios_filesystem_protocol as protocol;
 mod unmapped_updates;
 use unmapped_updates::UnmappedUpdates;
 
+#[path = "support/canonical_path.rs"]
+mod canonical_path;
+
 fn credentials(uid: u32, gid: u32, groups: &[u32]) -> protocol::Credentials {
     let mut payload = [0u8; protocol::CREDENTIALS_MAX_LEN];
     let length = protocol::encode_credentials_payload(uid, gid, groups, &[], &mut payload).unwrap();
@@ -530,6 +533,9 @@ fn test_filesystem_with_storage(
     symlink("/blocked/child", source.join("redirect")).unwrap();
     symlink("target", create_base.join("dangling")).unwrap();
     symlink("/outside", jail.join("escape")).unwrap();
+    symlink("/jail/inside", source.join("directory-link")).unwrap();
+    symlink("loop", source.join("loop")).unwrap();
+    symlink("jail/inside", source.join("relative-link")).unwrap();
     let output = Command::new("mke2fs")
         .args(["-q", "-t", "ext4", "-F", "-d"])
         .arg(&source)
