@@ -25,6 +25,7 @@ struct handle_info {
 static struct handle_info before[128], after[128];
 static unsigned kind, outcome;
 static int pipes[2], source, peer;
+static int transfer_pipe[2];
 static uint32_t source_handle, second_socket_handle;
 static atomic_int entered;
 static atomic_uint worker_handle;
@@ -61,7 +62,7 @@ static int present(uint32_t id, int count) {
   return 0;
 }
 static void handler(int signal) {
-  if (!armed || signal != (kind == 8 ? SIGXFSZ : SIGUSR1))
+  if (!armed || signal != (kind == 12 ? SIGXFSZ : SIGUSR1))
     return;
   armed = 0;
   if (close(source) != 0)
@@ -80,7 +81,7 @@ static void handler(int signal) {
     siglongjmp(destination, 37);
   if (outcome == 2)
     pthread_exit((void *)0x55);
-  if (kind == 8)
+  if (kind == 12)
     return;
   char bytes[512];
   if (kind & 1) {
@@ -99,7 +100,7 @@ static void *worker(void *unused) {
   struct iovec vectors[9] = {
       {kind & 1 ? (void *)bytes : (void *)first, 3},
       {kind & 1 ? (void *)(bytes + 3) : (void *)second, 4}};
-  if (kind < 8) {
+  if (kind < 12) {
     int64_t handle = native(656, 0, 0, 0);
     if (handle <= 0)
       return (void *)6;
@@ -125,15 +126,41 @@ static void *worker(void *unused) {
     result = recv(source, bytes, 7, 0);
     break;
   case 5:
-    result = send(source, bytes, 7, 0);
+    if (outcome < 2) {
+      struct msghdr message = {.msg_iov = vectors, .msg_iovlen = 9};
+      result = sendmsg(source, &message, 0);
+    } else
+      result = send(source, bytes, 7, 0);
     break;
   case 6:
     result = outcome < 2 ? recvfrom(source, bytes, 7, 0, NULL, NULL)
                          : recv(source, bytes, 7, 0);
     break;
   case 7:
-    result = send(source, bytes, 7, 0);
+    if (outcome < 2) {
+      struct msghdr message = {.msg_iov = vectors, .msg_iovlen = 9};
+      result = sendmsg(source, &message, 0);
+    } else
+      result = send(source, bytes, 7, 0);
     break;
+  case 9:
+  case 11: {
+    union {
+      struct cmsghdr alignment;
+      unsigned char bytes[CMSG_SPACE(sizeof(int))];
+    } ancillary = {0};
+    struct msghdr message = {.msg_iov = vectors,
+                             .msg_iovlen = 9,
+                             .msg_control = ancillary.bytes,
+                             .msg_controllen = sizeof(ancillary.bytes)};
+    struct cmsghdr *header = CMSG_FIRSTHDR(&message);
+    header->cmsg_level = SOL_SOCKET;
+    header->cmsg_type = SCM_RIGHTS;
+    header->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(header), &transfer_pipe[0], sizeof(int));
+    result = sendmsg(source, &message, 0);
+    break;
+  }
   default:
     result = pwrite(source, bytes, 7, 0);
     return result == -1 && errno == EFBIG ? NULL : (void *)5;
@@ -169,14 +196,19 @@ int main(void) {
   CHECK(send(pipes[0], "w", 1, 0) == 1 && recv(pipes[1], &warm, 1, 0) == 1 &&
         warm == 'w');
   CHECK(close(pipes[0]) == 0 && close(pipes[1]) == 0);
+  CHECK(pipe(transfer_pipe) == 0);
   fprintf(stderr, "io-escape: start blocked scalar/vector/socket I/O\n");
-  for (kind = 0; kind < 8; ++kind) {
+  for (kind = 0; kind < 12; ++kind) {
+    if (kind == 8 || kind == 10)
+      continue;
     for (outcome = 0; outcome < 4; ++outcome) {
       int baseline = snapshot(before);
       CHECK(baseline > 0 && baseline < 126);
-      CHECK(kind < 4 ? pipe(pipes) == 0
-                     : socketpair(AF_UNIX, kind < 6 ? SOCK_STREAM : SOCK_DGRAM,
-                                  0, pipes) == 0);
+      CHECK(kind < 4
+                ? pipe(pipes) == 0
+                : socketpair(AF_UNIX,
+                             kind < 6 || kind == 9 ? SOCK_STREAM : SOCK_DGRAM,
+                             0, pipes) == 0);
       int count = snapshot(after);
       CHECK(count == baseline + 2);
       source = pipes[kind & 1];
@@ -222,7 +254,8 @@ int main(void) {
           /* Two sockets, the runtime's own thread Handle, this observer's
            * thread Handle, staged RAM, and (send only) the wait-job Handle.
            * A worker RPC alone does not prove these resources exist yet. */
-          if (kind < 6 || native(680, 0, 0, 0) == baseline + 5 + (kind & 1))
+          if (kind < 6 || native(680, 0, 0, 0) ==
+                              baseline + (kind >= 9 ? 7 : 5 + (kind & 1)))
             break;
         }
         CHECK(status.state != 5);
@@ -248,13 +281,14 @@ int main(void) {
       fprintf(stderr, "io-escape: kind=%u outcome=%u PASS\n", kind, outcome);
     }
   }
+  CHECK(close(transfer_pipe[0]) == 0 && close(transfer_pipe[1]) == 0);
   struct rlimit original, limited;
   CHECK(getrlimit(RLIMIT_FSIZE, &original) == 0);
   limited = original;
   limited.rlim_cur = 0;
   char path[96];
   snprintf(path, sizeof(path), "/tmp/io-resource-escape-%d", (int)getpid());
-  kind = 8;
+  kind = 12;
   second_socket_handle = 0;
   for (outcome = 0; outcome < 3; ++outcome) {
     int baseline = snapshot(before);
@@ -284,7 +318,7 @@ int main(void) {
     fprintf(stderr, "io-escape: pwrite outcome=%u PASS\n", outcome);
   }
   puts(
-      "io-escape: PASS 35 qualified scalar/vector/socket/positioned I/O cases; "
+      "io-escape: PASS 43 qualified scalar/vector/socket/positioned I/O cases; "
       "returning handlers, siglongjmp, pthread_exit, cancellation, descriptor "
       "reuse and native Handle reclamation");
   return 0;
