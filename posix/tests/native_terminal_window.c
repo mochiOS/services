@@ -386,6 +386,7 @@ int main(void) {
     CHECK(guarded_native_wait(&guard, 0) == -EFAULT);
     CHECK(guarded_native_wait((const struct native_wait_guard *)(uintptr_t)(UINT64_MAX - 7), 0) == -EFAULT);
     uint32_t native_pair[2];
+    CHECK(native_call4(649, 0, 0, 0, 0) == INT64_C(-262142));
     CHECK(native_call4(649, (uintptr_t)native_pair, 0, 0, 0) == 0);
     struct native_execution_usage usage_before, usage_after;
     CHECK(native_call4(683, 0, (uintptr_t)&usage_before, sizeof(usage_before), 0) == 0);

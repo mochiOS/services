@@ -101,8 +101,8 @@ fn close_object_handle(handle: u32) {
     CLOSED.lock().unwrap().push(handle);
 }
 fn syscall_errno(raw: u64) -> Result<u64, i32> {
-    if raw >= (-4095i64) as u64 {
-        Err(-(raw as i64) as i32)
+    if mnu_abi::status::is_error(raw) || raw >= (-4095i64) as u64 {
+        Err(mochios_posix_client::newlib_errno::from_status(raw as i64))
     } else {
         Ok(raw)
     }
@@ -141,7 +141,10 @@ mod syscall {
         );
         CREATES.fetch_add(1, Ordering::Relaxed);
         if CASE.load(Ordering::Relaxed) == 3 {
-            return (-12i64) as u64;
+            return mnu_abi::status::Error::ResourceUnavailable.into_raw();
+        }
+        if CASE.load(Ordering::Relaxed) == 8 {
+            return mnu_abi::status::Error::NotReady.into_raw();
         }
         unsafe {
             (output as *mut StreamPair).write(StreamPair {
@@ -168,7 +171,7 @@ mod syscall {
 #[test]
 fn native_failures_release_both_handles_and_every_reserved_slot_before_return() {
     let _serial = SERIAL.lock().unwrap();
-    for case in 0..8 {
+    for case in 0..9 {
         assert!(CONTROL.callback_resources.is_empty());
         assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
         state().fds = FdTable::new();

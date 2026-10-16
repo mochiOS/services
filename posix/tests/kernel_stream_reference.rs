@@ -9,6 +9,7 @@ fn actual_native_stream_references_share_options_and_close_only_at_last_referenc
         .unwrap();
     let mut program = String::from(
         r#"
+#![feature(allocator_api)]
 extern crate alloc;
 extern crate self as mnu_abi;
 pub const HANDLE_OPTION_NONBLOCKING: u64 = 1;
@@ -125,8 +126,8 @@ fn main() {
     ));
     std::fs::create_dir(&directory).unwrap();
     let executable = directory.join("probe");
-    let mut compiler = Command::new("rustc")
-        .args(["--edition=2024", "-Awarnings", "-"])
+    let mut compiler = Command::new("rustup")
+        .args(["run", "nightly-2026-07-16", "rustc", "--edition=2024", "-Awarnings", "-"])
         .arg("-o")
         .arg(&executable)
         .stdin(Stdio::piped())
