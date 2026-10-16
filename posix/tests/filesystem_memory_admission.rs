@@ -1,8 +1,10 @@
 //! Exercise the production filesystem coordinator. Native calls are scripted;
 //! the real native FIFO/VM implementation has separate integration probes.
+extern crate self as mnu_abi;
 extern crate self as mochi_user_platform;
 extern crate self as mochios_filesystem_protocol;
-extern crate self as mnu_abi;
+#[path = "../../../core/crates/abi/src/status.rs"]
+pub mod status;
 
 pub const ERROR_MEMORY_ADMISSION_BUSY: i32 = 0x10002;
 pub const HANDLE_SIGNAL_READABLE: u64 = 1;
@@ -46,8 +48,15 @@ pub mod syscall {
     #[derive(Clone, Copy)]
     pub struct SysError(pub i32);
     impl SysError {
+        pub fn native_error(self) -> Option<crate::status::Error> {
+            crate::status::Error::from_raw(i64::from(self.0) as u64)
+        }
         pub fn errno(self) -> Option<u64> {
-            Some(self.0 as u64)
+            if crate::status::is_error(i64::from(self.0) as u64) {
+                None
+            } else {
+                Some(self.0 as u64)
+            }
         }
     }
     #[derive(Default)]
@@ -302,4 +311,40 @@ fn unsupported_backend_cannot_silently_drop_admission() {
         Legacy.prepare_admitted(9, 8192, 5000, Some(42)),
         Err(95)
     ));
+}
+
+#[test]
+fn native_busy_and_denied_statuses_preserve_borrowed_ticket_policy() {
+    setup(Err(status::Error::NotReady.into_raw() as i32), Err(11));
+    drop(waiting(prepare(Some(42))));
+    calls(&[Call::Prepare(9, 8192, 5000, 42), Call::Poll(42)]);
+
+    setup(Err(status::Error::AccessDenied.into_raw() as i32), Err(5));
+    drop(waiting(prepare(Some(42))));
+    calls(&[
+        Call::Prepare(9, 8192, 5000, 42),
+        Call::Create(9),
+        Call::Close(100),
+    ]);
+}
+
+#[test]
+fn native_terminal_failures_are_translated_without_retry_or_ticket_replacement() {
+    for (native, expected) in [
+        (status::Error::LimitExceeded, 75),
+        (status::Error::InvalidAddress, 14),
+        (status::Error::ResourceUnavailable, 12),
+        (status::Error::BackingFailure, 5),
+        (status::Error::InvalidArgument, 22),
+    ] {
+        setup(Err(native.into_raw() as i32), Err(5));
+        assert!(matches!(prepare(Some(42)), Err(error) if error == expected));
+        calls(&[Call::Prepare(9, 8192, 5000, 42)]);
+    }
+    setup(Ok(()), Err(5));
+    script(|s| {
+        s.create = VecDeque::from([Err(status::Error::ResourceUnavailable.into_raw() as i32)])
+    });
+    assert!(matches!(prepare(None), Err(12)));
+    calls(&[Call::Create(9)]);
 }

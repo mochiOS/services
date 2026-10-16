@@ -118,13 +118,13 @@ int main(void) {
   CHECK(native(HANDLE_DUPLICATE, first, rights, 0, 0, 0, 0) == -13);
   CHECK(control(first, 1) == -13);
   CHECK(native(PROVIDER_MEMORY_UPDATE_CREATE, endpoint, 77, 8192, 5000, first,
-               0) == -11);
+               0) == INT64_C(-262137));
   CHECK(native(PROVIDER_MEMORY_UPDATE_CREATE, endpoint, 78, 8192, 5000, first,
-               0) == -13);
+               0) == INT64_C(-262138));
   int64_t other_endpoint = native(ENDPOINT_CREATE, 0, 0, 0, 0, 0, 0);
   CHECK(other_endpoint > 0);
   CHECK(native(PROVIDER_MEMORY_UPDATE_CREATE, other_endpoint, 77, 8192, 5000,
-               first, 0) == -13);
+               first, 0) == INT64_C(-262138));
   // IPC installs a distinct receiver reference; closing the original does not
   // cancel the surviving position. Receiver rights remain attenuated.
   struct attachments outgoing = {
@@ -155,13 +155,13 @@ int main(void) {
         waiter_observed == 2);
   CHECK(!atomic_load(&second_done));
   CHECK(native(PROVIDER_MEMORY_UPDATE_CREATE, endpoint, 77, 8192, 5000, second,
-               0) == -11);
+               0) == INT64_C(-262137));
   int64_t update =
       native(PROVIDER_MEMORY_UPDATE_CREATE, endpoint, 77, 8192, 5000, first, 0);
   CHECK(update > 0);
   CHECK(poll_ticket(first, &observed) == 0 && observed == 8);
   CHECK(native(PROVIDER_MEMORY_UPDATE_CREATE, endpoint, 77, 8192, 5000, first,
-               0) == -22);
+               0) == INT64_C(-262139));
   CHECK(native(HANDLE_CLOSE, first, 0, 0, 0, 0, 0) == 0);
   CHECK(control(update, 1) == 0);
   CHECK(native(MEMORY_PROTECT, private_address, 8192, 1, 0, 0, 0) ==

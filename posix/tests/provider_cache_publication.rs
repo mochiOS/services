@@ -407,12 +407,18 @@ fn scoped_admission_cannot_be_retargeted_or_consumed_twice_and_preserves_guard_i
         endpoint_generation: 8,
         identity: 94,
     };
-    assert!(matches!(admission.acquire(wrong), Err(syscall::EACCES)));
+    assert!(matches!(
+        admission.acquire(wrong),
+        Err(mnu_abi::status::Error::AccessDenied)
+    ));
     assert_eq!(admission.signals(), mnu_abi::HANDLE_SIGNAL_READABLE);
     let guard = admission.acquire(key).unwrap();
     assert_eq!(guard.key(), key);
     assert_eq!(admission.signals(), mnu_abi::HANDLE_SIGNAL_PEER_CLOSED);
-    assert!(matches!(admission.acquire(key), Err(syscall::EINVAL)));
+    assert!(matches!(
+        admission.acquire(key),
+        Err(mnu_abi::status::Error::InvalidArgument)
+    ));
     let mut extent =
         vm_object::PreparedExtent::prepare_admitted(guard, 3, 1, |bytes| Ok(Arc::new(bytes)))
             .unwrap();
@@ -429,6 +435,45 @@ fn scoped_admission_cannot_be_retargeted_or_consumed_twice_and_preserves_guard_i
             .prepare_extent(3, 1, |bytes| Ok(Arc::new(bytes)))
             .is_ok()
     );
+}
+
+#[test]
+fn native_admission_distinguishes_contention_capacity_consumption_and_failure() {
+    use mnu_abi::status::Error;
+    let _serial = TEST_LOCK.lock().unwrap();
+    let provider = Arc::new(task::ProviderObject {
+        endpoint_thread_id: 119,
+        endpoint_slot: 2,
+        endpoint_generation: 8,
+    });
+    CAPTURE_GATE.set(true);
+    let object = vm_object::VmObject::provider(provider.clone(), 93).unwrap();
+    CAPTURE_GATE.set(false);
+    let gate = CAPTURED_GATE.with(|slot| slot.borrow_mut().take()).unwrap();
+    let key = object.object_key();
+    let owner = vm_object::lock_provider_io(&provider, 93).unwrap();
+    let admission = vm_object::ProviderAdmission::new(key).unwrap();
+    assert!(matches!(admission.acquire(key), Err(Error::NotReady)));
+    admission.register_waiter(7, 1).unwrap();
+    admission.register_waiter(7, 0).unwrap(); // Existing registration is idempotent.
+    assert_eq!(admission.register_waiter(8, 1), Err(Error::LimitExceeded));
+    admission.remove_waiter(7);
+    admission.register_waiter(8, 1).unwrap();
+    drop(owner);
+    let acquired = admission.acquire(key).unwrap();
+    assert!(matches!(admission.acquire(key), Err(Error::InvalidArgument)));
+    drop(acquired);
+    let reservation = gate.try_lock().unwrap().unwrap().reserve();
+    reservation.mark_unavailable();
+    assert!(matches!(
+        vm_object::ProviderAdmission::new(key),
+        Err(Error::BackingFailure)
+    ));
+    drop(reservation);
+    assert!(matches!(
+        vm_object::ProviderAdmission::new(vm_object::ObjectKey::Memory(1)),
+        Err(Error::InvalidArgument)
+    ));
 }
 
 #[test]

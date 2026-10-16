@@ -176,6 +176,19 @@ impl Update for mochi_user_platform::handle::ProviderMemoryUpdate {
 }
 
 fn native_error(error: mochi_user_platform::syscall::SysError) -> i32 {
+    use mnu_abi::status::Error;
+    if let Some(error) = error.native_error() {
+        // Filesystem protocol errors are not newlib's C errno namespace.
+        return match error {
+            Error::LimitExceeded => 75,
+            Error::InvalidAddress => 14,
+            Error::ResourceUnavailable => 12,
+            Error::BackingFailure => 5,
+            Error::InvalidArgument => 22,
+            Error::AccessDenied => 13,
+            Error::NotReady => 11,
+        };
+    }
     error
         .errno()
         .and_then(|error| i32::try_from(error).ok())
