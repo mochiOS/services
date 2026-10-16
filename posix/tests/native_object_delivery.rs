@@ -11,8 +11,8 @@ fn actual_outgoing_decoder_rejects_forged_native_delivery_flags() {
 extern crate self as mnu_abi;
 #[repr(C)] struct IpcObjectHandles { count: u32, delivery_flags: u32, handles: [u64; 8] }
 const MAX_OBJECT_HANDLES: usize = 4;
-const EFAULT: u64 = (-14i64) as u64;
-const EINVAL: u64 = (-22i64) as u64;
+const EFAULT: u64 = status::Error::InvalidAddress.into_raw();
+const EINVAL: u64 = status::Error::InvalidArgument.into_raw();
 const EBADF: u64 = (-9i64) as u64;
 #[derive(Debug)] struct ObjectHandle(u32);
 impl ObjectHandle { fn from_raw(raw: u32) -> Option<Self> { (raw != 0).then_some(Self(raw)) } }
@@ -22,7 +22,7 @@ impl HandleRights { fn from_bits(bits: u64) -> Option<Self> { (bits <= 511).then
 impl ObjectHandleAttachments { fn empty() -> Self { Self { count: 0, handles: [None; 4] } } }
 static EXPORTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 mod syscall {
-    pub fn copy_from_user(pointer: u64, output: &mut [u8]) -> Result<(), u64> {
+    pub fn copy_from_user_native(pointer: u64, output: &mut [u8]) -> Result<(), crate::status::Error> {
         unsafe { output.copy_from_slice(std::slice::from_raw_parts(pointer as *const u8, output.len())); }
         Ok(())
     }
@@ -35,6 +35,9 @@ fn export_object_handle(pid: u64, handle: ObjectHandle, rights: HandleRights) ->
 }
 "#,
     );
+    program.push_str("pub mod status {\n");
+    program.push_str(include_str!("../../../core/crates/abi/src/status.rs"));
+    program.push_str("}\n");
     program.push_str(&source[start..end]);
     program.push_str(
         r#"
