@@ -242,7 +242,7 @@ pub(crate) fn send_event(endpoint: u64, surface_token: u64, kind: u32, a: i32, b
     for _ in 0..RELIABLE_SEND_RETRIES {
         match platform::ipc::send(endpoint, &event) {
             Ok(_) => break,
-            Err(error) if error.errno() == Some(mochi_user_syscall::EAGAIN) => {
+            Err(error) if error.raw() == mochi_user_syscall::EAGAIN as i64 => {
                 platform::thread::yield_now();
             }
             Err(_) => break,
