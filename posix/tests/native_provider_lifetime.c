@@ -204,6 +204,15 @@ static int life_unread_queue(void) {
        "endpoint exit PASS");
   return 0;
 }
+static int life_now(uint64_t *nanoseconds) {
+  struct timespec value;
+  if (clock_gettime(CLOCK_MONOTONIC, &value) != 0)
+    return -1;
+  *nanoseconds = (uint64_t)value.tv_sec * UINT64_C(1000000000) +
+                 (uint64_t)value.tv_nsec;
+  return 0;
+}
+
 int main(int argc, char **argv) {
   if (argc == 5 && !strcmp(argv[1], "--socket-exec"))
     return run_socket_peek_regressions(argc, argv);
@@ -212,10 +221,12 @@ int main(int argc, char **argv) {
   CHECK(life_start(0, &provider) == 0);
   CHECK(pthread_create(&terminator, NULL, life_delayed_exit, NULL) == 0);
   struct life_wait item = {.handle = atomic_load(&life_object), .interests = 2};
-  uint64_t started = now();
+  uint64_t started, finished;
+  CHECK(life_now(&started) == 0);
   CHECK((int64_t)life_native(647, (uintptr_t)&item, 1, started + 3000000000, 0,
                              0, 0) == -3);
-  CHECK(now() - started >= 60000000 && now() - started < 2000000000);
+  CHECK(life_now(&finished) == 0 && finished >= started);
+  CHECK(finished - started >= 60000000 && finished - started < 2000000000);
   CHECK(pthread_join(terminator, NULL) == 0);
   CHECK(pthread_join(provider, NULL) == 0 && !atomic_load(&life_error));
   CHECK((int64_t)life_native(647, (uintptr_t)&item, 1, 0, 0, 0, 0) == -3);
