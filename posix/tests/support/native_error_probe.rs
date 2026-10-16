@@ -14,7 +14,7 @@ pub fn program() -> String {
         String::from("#![allow(dead_code)]\nextern crate alloc;\nmod mnu_abi {pub mod status {\n");
     program.push_str(include_str!("../../../../core/crates/abi/src/status.rs"));
     program.push_str(
-        "}\n}\nmod mochi_user_syscall {\nuse crate::mnu_abi::status::Error as NativeError;\n",
+        "}\n}\nmod mochi_user_syscall {\npub use crate::mnu_abi::status::Error as NativeError;\n",
     );
     program.push_str(between(
         syscall,

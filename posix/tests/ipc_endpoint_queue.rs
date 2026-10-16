@@ -25,12 +25,17 @@ fn production_retirement_releases_only_exact_destinations_and_rejects_late_sends
     let send_end = source[send..].find("\n}\n").unwrap() + send + 3;
     let mut program = String::from(
         r#"
-use std::{alloc::{alloc,Layout},collections::BTreeMap,sync::{Arc,Mutex,atomic::{AtomicUsize,AtomicBool,Ordering}}};
+use std::{alloc::{alloc as system_alloc,Layout},collections::BTreeMap,sync::{Arc,Mutex,atomic::{AtomicUsize,AtomicBool,Ordering}}};
+use status::Error;
 const MAX_OBJECT_HANDLES:usize=4;const MAX_MSG_SIZE:usize=256;const MAX_THREADS:usize=2;
 const MAILBOX_CAP:usize=4;const MESSAGE_CACHE_CAP:usize=4;
-const EINVAL:u64=(-22i64)as u64;const EAGAIN:u64=(-11i64)as u64;const ESRCH:u64=(-3i64)as u64;
-const EFAULT:u64=(-14i64)as u64;
 static COPY_RACE:AtomicBool=AtomicBool::new(false);
+static FAIL_ALLOC:AtomicBool=AtomicBool::new(false);
+static COPY_ERROR:AtomicUsize=AtomicUsize::new(0);
+unsafe fn alloc(layout:Layout)->*mut u8{
+ if FAIL_ALLOC.swap(false,Ordering::SeqCst){return std::ptr::null_mut();}
+ unsafe{system_alloc(layout)}
+}
 static DROPPED:AtomicUsize=AtomicUsize::new(0);static RETIRED:AtomicUsize=AtomicUsize::new(0);
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]struct IpcEndpoint{thread_id:u64,slot:u16,generation:u64}
 #[derive(Debug)]struct Resource;
@@ -49,7 +54,12 @@ mod task{
  pub fn wake_registered_waiter(_:ThreadId){}
 }
 mod syscall{
- pub fn copy_from_user(input:u64,output:&mut[u8])->Result<(),u64>{
+ pub fn copy_from_user_native(input:u64,output:&mut[u8])->Result<(),crate::Error>{
+  assert!(crate::MAILBOXES.0.try_lock().is_ok(),"user copy ran under mailbox lock");
+  match crate::COPY_ERROR.swap(0,crate::Ordering::SeqCst){
+   0=>{},1=>return Err(crate::Error::InvalidAddress),
+   2=>return Err(crate::Error::ResourceUnavailable),_=>return Err(crate::Error::BackingFailure),
+  }
   if crate::COPY_RACE.swap(false,crate::Ordering::SeqCst){
     crate::OWNERS.lock().unwrap().remove(&7);
     crate::retire_endpoint(crate::IpcEndpoint{thread_id:7,slot:0,generation:1});
@@ -60,6 +70,14 @@ mod syscall{
 mod lifetime{pub fn retire(_:crate::IpcEndpoint){assert!(crate::MAILBOXES.0.try_lock().is_ok());crate::RETIRED.fetch_add(1,crate::Ordering::SeqCst);}}
 fn endpoint_is_valid(endpoint:IpcEndpoint)->bool{OWNERS.lock().unwrap().get(&endpoint.thread_id)==Some(&(endpoint.slot as usize,endpoint.generation))}
 "#,
+    );
+    let status = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../core/crates/abi/src/status.rs")
+        .canonicalize()
+        .unwrap();
+    program.insert_str(
+        0,
+        &format!("extern crate self as mnu_abi;\n#[path={status:?}] mod status;\n"),
     );
     program.push_str(&source[types..mailbox]);
     program.push_str(&source[mailbox..constructor_end]);
@@ -75,9 +93,7 @@ fn lock_mailboxes()->std::sync::MutexGuard<'static,[Mailbox;MAX_THREADS]>{MAILBO
 "#,
     );
     program.push_str(&source[retire..retire_end]);
-    // super::ESRCH is the real kernel's parent module; use the same constant
-    // in this independently compiled production-function harness.
-    program.push_str(&source[send..send_end].replace("super::ESRCH", "ESRCH"));
+    program.push_str(&source[send..send_end]);
     program.push_str(r#"
 fn make_message(to:u64,generation:u64,slot:u16,tag:u64)->(Box<Message>,std::sync::Weak<Resource>){
  let resource=Arc::new(Resource);let weak=Arc::downgrade(&resource);
@@ -134,7 +150,7 @@ fn main(){
  let(message,reference)=make_message(7,1,0,1);
  let attachments=message.object_handles;COPY_RACE.store(true,Ordering::SeqCst);
  let result=send_to_thread_id_with_attachments(7,99,1,b"x".as_ptr()as u64,1,false,true,attachments);
- assert_eq!(result,ESRCH);assert!(reference.upgrade().is_none());
+ assert_eq!(result,Error::NotFound.into_raw());assert!(reference.upgrade().is_none());
  assert_eq!(MAILBOXES.lock()[0].count,0);
 
  // A live destination still accepts normal messages without dropping their
@@ -156,7 +172,7 @@ fn main(){
  }
  let(message,rejected)=make_message(7,1,0,600);
  let result=send_to_thread_id_with_attachments(7,99,600,b"z".as_ptr()as u64,1,false,false,message.object_handles);
- assert_eq!(result,EAGAIN);assert!(rejected.upgrade().is_none());
+ assert_eq!(result,Error::NotReady.into_raw());assert!(rejected.upgrade().is_none());
  {let boxes=MAILBOXES.lock();assert_eq!((boxes[0].count,boxes[0].free_count),(MAILBOX_CAP-1,1));}
  assert!(queued.iter().all(|reference|reference.upgrade().is_some()));
 
@@ -168,7 +184,7 @@ fn main(){
  assert!(reply.upgrade().is_some());
  for is_reply in [false,true]{
    let(message,rejected)=make_message(7,1,0,602);
-   assert_eq!(send_to_thread_id_with_attachments(7,99,602,b"f".as_ptr()as u64,1,is_reply,false,message.object_handles),EAGAIN);
+   assert_eq!(send_to_thread_id_with_attachments(7,99,602,b"f".as_ptr()as u64,1,is_reply,false,message.object_handles),Error::NotReady.into_raw());
    assert!(rejected.upgrade().is_none());
    let boxes=MAILBOXES.lock();assert_eq!((boxes[0].count,boxes[0].free_count),(MAILBOX_CAP,0));
  }
@@ -176,6 +192,38 @@ fn main(){
  OWNERS.lock().unwrap().remove(&7);retire_endpoint(old);
  assert!(queued.iter().all(|reference|reference.upgrade().is_none()));assert!(reply.upgrade().is_none());
  {let boxes=MAILBOXES.lock();assert_eq!((boxes[0].count,boxes[0].free_count),(0,MAILBOX_CAP));}
+
+ // Admission and copy failures preserve native categories and consume no
+ // queue entries. Even failure before message allocation releases authority.
+ OWNERS.lock().unwrap().insert(7,(0,1));
+ OWNERS.lock().unwrap().insert(8,(MAX_THREADS,1));
+ for(to,pointer,length,error)in[
+   (0,0,0,Error::InvalidArgument),
+   (7,0,MAX_MSG_SIZE as u64+1,Error::LimitExceeded),
+   (7,0,u64::MAX,Error::LimitExceeded),
+   (7,0,1,Error::InvalidAddress),
+   (99,0,0,Error::NotFound),
+   (8,0,0,Error::BackingFailure),
+ ]{
+   let(message,reference)=make_message(to,1,0,700);
+   assert_eq!(send_to_thread_id_with_attachments(to,99,700,pointer,length,false,false,message.object_handles),error.into_raw());
+   assert!(reference.upgrade().is_none());assert_eq!(MAILBOXES.lock()[0].count,0);
+ }
+ for(code,error)in[(1,Error::InvalidAddress),(2,Error::ResourceUnavailable),(3,Error::BackingFailure)]{
+   COPY_ERROR.store(code,Ordering::SeqCst);
+   let(message,reference)=make_message(7,1,0,701);
+   assert_eq!(send_to_thread_id_with_attachments(7,99,701,b"x".as_ptr()as u64,1,false,false,message.object_handles),error.into_raw());
+   assert!(reference.upgrade().is_none());assert_eq!(MAILBOXES.lock()[0].count,0);
+ }
+ while let Some(message)=MESSAGE_CACHE.lock().take(){drop(message);}
+ FAIL_ALLOC.store(true,Ordering::SeqCst);
+ let(message,reference)=make_message(7,1,0,702);
+ assert_eq!(send_to_thread_id_with_attachments(7,99,702,0,0,false,false,message.object_handles),Error::ResourceUnavailable.into_raw());
+ assert!(!FAIL_ALLOC.load(Ordering::SeqCst));assert!(reference.upgrade().is_none());
+ assert_eq!(MAILBOXES.lock()[0].count,0);
+ // A zero-length message accepts a null data pointer and publishes normally.
+ assert_eq!(send_to_thread_id_with_attachments(7,99,703,0,0,false,false,ObjectHandleAttachments::empty()),0);
+ OWNERS.lock().unwrap().remove(&7);retire_endpoint(old);
 }
 "#);
     let directory = std::env::temp_dir().join(format!(

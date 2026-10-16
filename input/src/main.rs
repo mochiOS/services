@@ -337,7 +337,9 @@ fn send_event_reliably(subscribers: &[u64; MAX_SUBSCRIBERS], bytes: &[u8]) {
         for _ in 0..RELIABLE_SEND_RETRIES {
             match platform::ipc::send(subscriber, bytes) {
                 Ok(_) => break,
-                Err(error) if error.raw() == mochi_user_syscall::EAGAIN as i64 => {
+                Err(error)
+                    if error.native_error() == Some(mochi_user_syscall::NativeError::NotReady) =>
+                {
                     platform::thread::yield_now();
                 }
                 Err(_) => break,
