@@ -188,7 +188,10 @@ fn terminal_entry_points_keep_leases_tracked_through_callbacks_and_user_copies()
         assert!(body.contains("io_resources::with"), "{name}");
         if matches!(name, "tcsetattr" | "tcsetwinsize") {
             assert!(body.contains("io_resources::with_initialized"), "{name}");
-            assert!(body.find("with_fd_entry(fd)").unwrap() < body.find(".read()").unwrap());
+            assert!(
+                body.find("with_fd_entry(fd)").unwrap()
+                    < body.find("terminal_memory::read_").unwrap()
+            );
         }
         if name == "tcdrain" {
             assert!(body.contains("pthread_testcancel()"));

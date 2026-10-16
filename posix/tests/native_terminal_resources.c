@@ -14,6 +14,11 @@
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
+#include <stddef.h>
+_Static_assert(sizeof(struct termios) == 56, "newlib terminal ABI size");
+_Static_assert(offsetof(struct termios, c_cc) == 16, "newlib control characters");
+_Static_assert(offsetof(struct termios, c_ispeed) == 48, "newlib input speed");
+_Static_assert(sizeof(struct winsize) == 8, "newlib window ABI size");
 
 static unsigned operation, outcome;
 static int master, operation_fd, replacement;
@@ -22,6 +27,16 @@ static struct termios attributes;
 static atomic_uint observer;
 static volatile sig_atomic_t qualified, handler_error;
 static sigjmp_buf destination;
+static void *bad_memory;
+static int caller_copy(void *memory) {
+  switch (operation) {
+  case 3: return tcgetattr(operation_fd, memory);
+  case 4: return tcsetattr(operation_fd, TCSANOW, memory);
+  case 5: return tcgetwinsize(operation_fd, memory);
+  case 6: return tcsetwinsize(operation_fd, memory);
+  default: return -2;
+  }
+}
 struct handle_record {
   uint32_t handle, reserved;
   uint64_t rights;
@@ -171,6 +186,11 @@ static int blocked_cases(void) {
 static void bad_copy(int signal) {
   if (signal != SIGSEGV)
     _exit(91);
+  if (caller_copy(bad_memory) != -1 || errno != EFAULT)
+    _exit(93);
+  struct termios valid;
+  if (tcgetattr(operation_fd, &valid))
+    _exit(94);
   if (close(operation_fd))
     _exit(92);
   siglongjmp(destination, 37);
@@ -187,25 +207,23 @@ int main(void) {
     int slave;
     CHECK(openpty(&master, &slave, NULL, NULL, NULL) == 0);
     operation_fd = slave;
-    void *page =
+    void *volatile page =
         mmap(NULL, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     CHECK(page != MAP_FAILED);
+    struct termios before, after;
+    CHECK(tcgetattr(operation_fd, &before) == 0);
+    bad_memory = page;
+    CHECK(caller_copy(page) == -1 && errno == EFAULT);
+    CHECK(tcgetattr(operation_fd, &after) == 0 &&
+          memcmp(&before, &after, sizeof(before)) == 0);
+    if (operation == 3 || operation == 5) {
+      CHECK(mprotect(page, 4096, PROT_READ) == 0);
+      CHECK(caller_copy(page) == -1 && errno == EFAULT);
+      CHECK(mprotect(page, 4096, PROT_NONE) == 0);
+    }
     int jumped = sigsetjmp(destination, 1);
     if (!jumped) {
-      switch (operation) {
-      case 3:
-        tcgetattr(operation_fd, page);
-        break;
-      case 4:
-        tcsetattr(operation_fd, TCSANOW, page);
-        break;
-      case 5:
-        tcgetwinsize(operation_fd, page);
-        break;
-      case 6:
-        tcsetwinsize(operation_fd, page);
-        break;
-      }
+      *(volatile char *)page = 1;
       CHECK(0);
     }
     CHECK(jumped == 37 && close(master) == 0 && munmap(page, 4096) == 0);
@@ -213,6 +231,6 @@ int main(void) {
     fprintf(stderr, "terminal-resources: fault op=%u PASS\n", operation);
   }
   puts("terminal-resources: PASS 10 blocked return/jump/exit/cancel and 4 "
-       "caller-copy fault cases");
+       "EFAULT copy cases including active ordinary-fault handlers");
   return 0;
 }

@@ -82,3 +82,20 @@ fn ordinary_capture_batches_bytes_and_copyout_splits_at_the_native_limit() {
     assert_eq!(&destination[..output.len()], output);
     assert_eq!(&destination[output.len()..], &[0, 0xa5]);
 }
+
+#[test]
+fn fixed_input_copy_is_bounded_and_keeps_the_callers_storage_unborrowed() {
+    let source = vec![0x6b; mnu_abi::memory_copy::MAX_BYTES + 17];
+    let mut destination = vec![0; source.len()];
+    user_copy_native::CALLS.with_borrow_mut(Vec::clear);
+    user_copy::read(source.as_ptr(), &mut destination).unwrap();
+    assert_eq!(destination, source);
+    user_copy_native::CALLS.with_borrow(|calls| {
+        assert_eq!(calls.as_slice(), &[mnu_abi::memory_copy::MAX_BYTES, 17]);
+    });
+    assert_eq!(
+        user_copy::read(usize::MAX as *const _, &mut destination),
+        Err(EFAULT)
+    );
+    assert_eq!(user_copy::read(std::ptr::null(), &mut []), Ok(()));
+}
