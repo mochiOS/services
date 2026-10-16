@@ -96,7 +96,7 @@ fn positioned_file_io(fd:i32, _: *mut c_void, length:usize, offset:i64, writing:
     }})
 }}
 fn escape_if_requested() {{
-    if matches!(CASE.load(Ordering::Relaxed), 3..=6 | 10 | 11) {{
+    if matches!(CASE.load(Ordering::Relaxed), 3..=6 | 10 | 11 | 27 | 28) {{
         CONTROL.active_signal_scope_id.store(7, Ordering::Relaxed);
         {{ let _native = defer_native_delivery(); unsafe {{ CONTROL.callback_resources.abandon_from(0) }}; }}
         unsafe {{ mochios_test_io_jump() }}
@@ -131,6 +131,16 @@ fn syscall_read(_: FdEntry, buffer: *mut c_void, length: usize) -> Result<isize,
 #[path = "{root_dir}/user/crates/newlib-runtime/src/io_resources.rs"] mod io_resources;
 #[path = "{root_dir}/user/crates/newlib-runtime/src/vector_metadata.rs"] mod vector_metadata;
 use vector_metadata::VectorMetadata;
+fn message_entry(_: FdEntry, _: u64, length: usize, flags: i32, sending: bool) -> Result<isize, i32> {{
+    let case = CASE.load(Ordering::Relaxed);
+    assert_eq!((length, flags, sending), (7, 0, case % 2 == 1));
+    assert_eq!(PINS.load(Ordering::Relaxed), 1);
+    assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
+    assert!(!CONTROL.callback_resources.is_empty());
+    escape_if_requested();
+    PENDING.store(1, Ordering::Release);
+    if case >= 31 {{Ok(3)}} else {{Err(EINTR)}}
+}}
 "#,
         root_dir = root.canonicalize().unwrap().display()
     );
@@ -151,9 +161,27 @@ use vector_metadata::VectorMetadata;
         let end = start + runtime[start..].find("\n}\n").unwrap() + 3;
         program.push_str(&runtime[start..end]);
     }
+    let socket = include_str!("../../../user/crates/newlib-runtime/src/socket.rs");
+    for entry in [
+        "fn message_io(",
+        "pub extern \"C\" fn send(",
+        "pub extern \"C\" fn recv(",
+    ] {
+        let start = socket.find(entry).unwrap();
+        let end = start + socket[start..].find("\n}\n").unwrap() + 3;
+        program.push_str(&socket[start..end]);
+    }
     program.push_str(
         r#"
 extern "C" fn operation(case: u32) {
+    if case >= 27 {
+        let mut bytes = [0u8; 7];
+        let result = if case % 2 == 1 {send(3, bytes.as_ptr().cast(), 7, 0)}
+                     else {recv(3, bytes.as_mut_ptr().cast(), 7, 0)};
+        assert_eq!(result, 3);
+        assert_eq!(CHECKS.load(Ordering::Relaxed), 1);
+        return;
+    }
     if case >= 22 {
         let mut first = [0u8;3]; let mut second = [0u8;4]; let mut decoy = [0u8;16];
         let mut vectors = [const {IoVecMut {iov_base:std::ptr::null_mut(),iov_len:0}};9];
@@ -224,7 +252,7 @@ extern "C" fn operation(case: u32) {
 fn main() {
     let case: u32 = std::env::args().nth(1).unwrap().parse().unwrap();
     CASE.store(case, Ordering::Release);
-    if matches!(case, 3..=6 | 10 | 11) {
+    if matches!(case, 3..=6 | 10 | 11 | 27 | 28) {
         assert_eq!(unsafe { mochios_test_io_escape(operation, case) }, 73);
         assert_eq!(PINS.load(Ordering::Relaxed), 0);
         assert!(ALLOCATIONS.lock().unwrap().is_empty(), "nonlocal exit leaked allocation");
@@ -235,7 +263,7 @@ fn main() {
         assert_eq!(PINS.load(Ordering::Relaxed), 0);
         assert!(ALLOCATIONS.lock().unwrap().is_empty());
         assert!(CONTROL.callback_resources.is_empty());
-        assert_eq!(PENDING.load(Ordering::Relaxed), u32::from(matches!(case, 9 | 14 | 18)));
+        assert_eq!(PENDING.load(Ordering::Relaxed), u32::from(matches!(case, 9 | 14 | 18 | 31 | 32)));
     }
 }
 "#,
@@ -291,18 +319,20 @@ fn main() {
         "{}",
         String::from_utf8_lossy(&compiled.stderr)
     );
-    for case in 0..27 {
+    for case in 0..33 {
         let executed = Command::new(&executable)
             .arg(case.to_string())
             .output()
             .unwrap();
         assert_eq!(
             executed.status.code(),
-            Some(if matches!(case, 0..=2 | 12 | 13 | 15 | 16 | 17 | 19) {
-                73
-            } else {
-                0
-            }),
+            Some(
+                if matches!(case, 0..=2 | 12 | 13 | 15 | 16 | 17 | 19 | 29 | 30) {
+                    73
+                } else {
+                    0
+                }
+            ),
             "case {case}: {}",
             String::from_utf8_lossy(&executed.stderr)
         );
