@@ -62,7 +62,10 @@ static void *wait_ticket(void *unused) {
   return NULL;
 }
 
-int main(void) {
+#ifndef MEMORY_ADMISSION_MAIN
+#define MEMORY_ADMISSION_MAIN main
+#endif
+int MEMORY_ADMISSION_MAIN(void) {
   fprintf(stderr,
           "memory-admission: starting native ownership/wakeup checks\n");
   pthread_t provider_thread, reader, next_reader, waiter;
@@ -73,14 +76,16 @@ int main(void) {
   CHECK(object > 0);
   int64_t endpoint = atomic_load(&owner_endpoint);
   CHECK(native(PROVIDER_MEMORY_ADMISSION_CREATE, object, 77, 0, 0, 0, 0) ==
-        -13);
+        INT64_C(-262138));
   CHECK(native(PROVIDER_MEMORY_ADMISSION_CREATE, endpoint, 0, 0, 0, 0, 0) ==
-        -22);
+        INT64_C(-262139));
   int64_t send_only = native(HANDLE_DUPLICATE, endpoint, 4, 0, 0, 0, 0);
   CHECK(send_only > 0);
   CHECK(native(PROVIDER_MEMORY_ADMISSION_CREATE, send_only, 77, 0, 0, 0, 0) ==
-        -13);
+        INT64_C(-262138));
   CHECK(native(HANDLE_CLOSE, send_only, 0, 0, 0, 0, 0) == 0);
+  CHECK(native(PROVIDER_MEMORY_ADMISSION_CREATE, send_only, 77, 0, 0, 0, 0) ==
+        INT64_C(-262139));
   int64_t private_address = native(MEMORY_MAP, 0, 8192, 3, 0, object, 0);
   int64_t shared_address = native(MEMORY_MAP, 0, 8192, 1, 2, object, 0);
   CHECK(private_address > 0 && shared_address > 0);
