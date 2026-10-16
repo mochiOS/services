@@ -265,7 +265,13 @@ fn main() {
         String::from_utf8_lossy(&compiled_c.stderr)
     );
     let mut compiler = Command::new("rustc")
-        .args(["--edition=2021", "-Awarnings", "-"])
+        .args([
+            "--edition=2021",
+            "-Awarnings",
+            "-Cdebuginfo=0",
+            "-Cstrip=symbols",
+            "-",
+        ])
         .arg(format!("-Clink-arg={}", trampoline.display()))
         .arg("-o")
         .arg(&executable)
