@@ -4,14 +4,6 @@
 use mnu_abi::status::Error;
 use std::cell::{Cell, RefCell};
 
-mod types {
-    pub use mnu_abi::{EFAULT, EINVAL, EPERM};
-}
-mod capability {
-    pub enum Capability {
-        ProcessInspect,
-    }
-}
 thread_local! {
     static COPY_ERROR: Cell<Option<Error>> = const { Cell::new(None) };
     static BAD_ADDRESS: Cell<u64> = const { Cell::new(0) };
@@ -51,16 +43,8 @@ mod task {
         }
     }
     pub type ProcessId = u64;
-    pub enum PrivilegeLevel {
-        Core,
-        Service,
-        User,
-    }
     pub struct Process;
     impl Process {
-        pub fn privilege(&self) -> PrivilegeLevel {
-            PrivilegeLevel::User
-        }
         pub fn page_table(&self) -> Option<u64> {
             Some(0x9000)
         }
@@ -89,14 +73,8 @@ mod task {
     }
     pub struct Thread;
     impl Thread {
-        pub fn id(&self) -> ThreadId {
-            ThreadId(7)
-        }
         pub fn process_id(&self) -> ProcessId {
             3
-        }
-        pub fn name(&self) -> &str {
-            "test"
         }
         pub fn new_user_resume(
             pid: ProcessId,
@@ -120,9 +98,6 @@ mod task {
     pub fn with_thread<T>(tid: ThreadId, operation: impl FnOnce(&Thread) -> T) -> Option<T> {
         assert_eq!(tid.0, 7);
         super::PRESENT.get().then(|| operation(&Thread))
-    }
-    pub fn for_each_thread(mut operation: impl FnMut(&Thread)) {
-        operation(&Thread);
     }
     pub fn with_process<T>(pid: ProcessId, operation: impl FnOnce(&Process) -> T) -> Option<T> {
         assert_eq!(pid, 3);
@@ -161,15 +136,6 @@ mod task {
     }
 }
 mod syscall {
-    pub use mnu_abi::ENOENT;
-    pub mod security {
-        pub fn caller_has_any_capability(_: &[crate::capability::Capability]) -> bool {
-            true
-        }
-        pub fn caller_is_core() -> bool {
-            false
-        }
-    }
     pub fn validate_user_ptr(pointer: u64, length: u64) -> bool {
         pointer != 0 && pointer != crate::BAD_ADDRESS.get() && pointer.checked_add(length).is_some()
     }
@@ -183,9 +149,6 @@ mod syscall {
             std::ptr::copy_nonoverlapping(pointer as *const u8, bytes.as_mut_ptr(), bytes.len());
         }
         Ok(())
-    }
-    pub fn copy_from_user(_: u64, _: &mut [u8]) -> Result<(), u64> {
-        unreachable!()
     }
 }
 #[path = "../../../core/src/syscall/task.rs"]
