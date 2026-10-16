@@ -2146,9 +2146,21 @@ impl RuntimeFilesystem {
         reply: &mut [u8],
         handles: &mut mochi_user_platform::ipc::IpcObjectHandles,
     ) -> mochi_user_platform::syscall::SysResult<u64> {
-        posix_service::filesystem_transport::call_native(handles, |exchanged| {
+        use mochi_user_platform::syscall::SysError;
+        use posix_service::filesystem_transport::{call_native, reply_frame};
+        let (header, _) = mochios_filesystem_protocol::decode(request).map_err(|_| {
+            // No call occurred; these are still borrowed request references.
+            *handles = Default::default();
+            SysError::from_raw(-22)
+        })?;
+        let result = call_native(handles, |exchanged| {
             mochi_user_platform::ipc::call_object_handles(self.endpoint, request, reply, exchanged)
-        })
+        })?;
+        // Returned attachments remain owned by the caller even if framing is
+        // malformed. Its existing error path closes them, never request Handles.
+        reply_frame(reply, result, header.request_id)
+            .map_err(|error| SysError::from_raw(i64::from(error)))?;
+        Ok(result)
     }
 
     fn credential_payload(

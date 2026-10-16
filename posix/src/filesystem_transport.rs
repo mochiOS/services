@@ -2,6 +2,30 @@
 
 use mnu_abi::IpcObjectHandles;
 
+/// Decode only the bytes delivered by native IPC, not the reply buffer's
+/// capacity. The high word identifies the native sender; endpoint authority
+/// and sender matching are enforced by IPC, not by a self-reported wire ID.
+/// This checks framing, not operation-specific payload/object ownership.
+pub fn reply_frame(
+    buffer: &[u8],
+    native_result: u64,
+    request_id: u64,
+) -> Result<(mochios_filesystem_protocol::Header, &[u8]), i32> {
+    use mochios_filesystem_protocol as filesystem;
+    let length = native_result as u32 as usize;
+    let bytes = buffer.get(..length).ok_or(-5)?;
+    let (header, payload) = filesystem::decode(bytes).map_err(|_| -5)?;
+    if header.opcode != filesystem::OP_STATUS
+        || header.request_id != request_id
+        || header.status > 0
+        || filesystem::HEADER_LEN + payload.len() != length
+        || (header.status < 0 && !payload.is_empty())
+    {
+        return Err(-5);
+    }
+    Ok((header, payload))
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum MutationReply {
     Ready,

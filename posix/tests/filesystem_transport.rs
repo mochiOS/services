@@ -1,6 +1,9 @@
 use mnu_abi::{HANDLE_RIGHT_READ, HANDLE_RIGHT_TRANSFER, IpcObjectHandle, IpcObjectHandles};
 use posix_service::filesystem_transport::call_native;
 
+#[path = "support/filesystem_reply_frame.rs"]
+mod filesystem_reply_frame;
+
 fn borrowed() -> IpcObjectHandles {
     let mut handles = IpcObjectHandles::default();
     handles.count = 2;
