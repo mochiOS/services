@@ -123,7 +123,10 @@ int PROVIDER_MEMORY_UPDATE_MAIN(void) {
   volatile unsigned char *p = (void *)(uintptr_t)private_address;
   volatile unsigned char *s = (void *)(uintptr_t)shared_address;
   CHECK(p[0] == 'a' && p[8191] == 'b' && s[0] == 'a' && s[8191] == 'b');
+  int64_t image = native(IMAGE_CLONE, 0, 0, 0, 0, 0, 0);
+  CHECK(image > 0);
   p[0] = 'P'; /* unaffected private prefix must survive publication */
+  CHECK(native(HANDLE_CLOSE, image, 0, 0, 0, 0, 0) == 0);
   int64_t unrelated_endpoint = native(ENDPOINT_CREATE, 0, 0, 0, 0, 0, 0);
   CHECK(unrelated_endpoint > 0);
   int64_t isolated = native(PROVIDER_MEMORY_UPDATE_CREATE, unrelated_endpoint,

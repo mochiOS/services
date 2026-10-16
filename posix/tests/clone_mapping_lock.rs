@@ -1,5 +1,6 @@
-use std::io::Write;
-use std::process::{Command, Stdio};
+#[allow(dead_code)]
+#[path = "support/native_error_probe.rs"]
+mod probe;
 
 #[test]
 fn actual_clone_dispatcher_keeps_vm_lock_through_cow_sync_and_publication() {
@@ -10,10 +11,21 @@ fn actual_clone_dispatcher_keeps_vm_lock_through_cow_sync_and_publication() {
     let end = source[start..].find("/// Suspends every thread").unwrap() + start;
     let mut program = String::from(
         r#"
+#![feature(allocator_api)]
+#![allow(dead_code)]
 extern crate alloc;
-use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}};
-const EPERM:u64=(-1i64) as u64; const ENOSYS:u64=(-38i64) as u64;
-const ENOMEM:u64=(-12i64) as u64; const ENOSPC:u64=(-28i64) as u64; const EAGAIN:u64=(-11i64) as u64;
+use alloc::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+static FAIL_ALLOCATION:AtomicBool=AtomicBool::new(false);
+struct Allocator;
+unsafe impl std::alloc::GlobalAlloc for Allocator {
+    unsafe fn alloc(&self, layout:std::alloc::Layout)->*mut u8 {
+        if FAIL_ALLOCATION.swap(false,Ordering::Relaxed) {return std::ptr::null_mut();}
+        unsafe {std::alloc::System.alloc(layout)}
+    }
+    unsafe fn dealloc(&self,p:*mut u8,layout:std::alloc::Layout){unsafe {std::alloc::System.dealloc(p,layout)}}
+}
+#[global_allocator] static ALLOCATOR:Allocator=Allocator;
 static LOCKED:AtomicBool=AtomicBool::new(false);
 static MODE:AtomicUsize=AtomicUsize::new(0);
 static LIVE:AtomicUsize=AtomicUsize::new(1);
@@ -29,8 +41,10 @@ mod interrupt { pub mod spinlock {
         pub fn lock(&self)->std::sync::MutexGuard<'_,T> { self.0.lock().unwrap() }
     }
 } }
-mod syscall { pub const EIO:u64=(-5i64) as u64;
-    pub mod security { pub fn current_process_id()->Option<u64> {Some(1)} }
+mod syscall {
+    pub mod security { pub fn current_process_id()->Option<u64> {
+        (crate::MODE.load(crate::Ordering::Acquire)!=12).then_some(1)
+    } }
 }
 mod mem {
     pub mod tlb_shootdown { pub fn invalidate_all()->Result<(),()> {
@@ -64,7 +78,11 @@ mod mem {
             pub fn clone_image(self)->Result<Image,CloneError> {
                 assert!(crate::LOCKED.load(crate::Ordering::Acquire));
                 if crate::MODE.load(crate::Ordering::Acquire)==2 {return Err(CloneError::Allocation)}
-                crate::IMAGES.fetch_add(1,crate::Ordering::Release); Ok(Image)
+                crate::IMAGES.fetch_add(1,crate::Ordering::Release);
+                if crate::MODE.load(crate::Ordering::Acquire)==11 {
+                    crate::FAIL_ALLOCATION.store(true,crate::Ordering::Release);
+                }
+                Ok(Image)
             }
         }
         pub struct AddressSpaceObject(pub Image);
@@ -73,7 +91,9 @@ mod mem {
 }
 mod task {
     pub type ProcessId = u64;
-    pub fn current_thread_id()->Option<u64> { Some(1) }
+    pub fn current_thread_id()->Option<u64> {
+        (crate::MODE.load(crate::Ordering::Acquire)!=13).then_some(1)
+    }
     #[path="@IMAGE_TRANSITION@"] pub mod image_transition;
     pub mod scheduler {
         pub struct Quiescence;
@@ -107,6 +127,7 @@ mod task {
     pub struct Process(Handles);
     impl Process {pub fn object_handles_mut(&mut self)->&mut Handles {&mut self.0}}
     pub fn with_process_mut<T>(pid:u64, f:impl FnOnce(&mut Process)->T)->Option<T> {
+        if crate::MODE.load(crate::Ordering::Acquire)==14 {return None;}
         assert_eq!(pid,1); assert!(!crate::LOCKED.swap(true,crate::Ordering::AcqRel));
         let mut process=Process(Handles(Vec::new())); let value=f(&mut process); drop(process);
         crate::LOCKED.store(false,crate::Ordering::Release); Some(value)
@@ -122,66 +143,35 @@ mod task {
     program.push_str(&source[start..end]);
     program.push_str(r#"
 fn main() {
-    for (mode, expected, sync) in [(0,7,true),(1,EPERM,false),(2,ENOMEM,true),(3,syscall::EIO,true),(4,ENOSPC,true),
-        (5,mnu_abi::status::Error::NotReady.into_raw(),false),(6,ENOMEM,false),(7,ENOSYS,false),
-        (8,mnu_abi::status::Error::BackingFailure.into_raw(),false),
-        (9,mnu_abi::status::Error::AccessDenied.into_raw(),false),
-        (10,mnu_abi::status::Error::ResourceUnavailable.into_raw(),false)] {
+    use mnu_abi::status::Error;
+    for (mode, expected, sync) in [(0,7,true),(1,Error::AccessDenied.into_raw(),false),
+        (2,Error::ResourceUnavailable.into_raw(),true),(3,Error::BackingFailure.into_raw(),true),
+        (4,Error::ResourceUnavailable.into_raw(),true),(5,Error::NotReady.into_raw(),false),
+        (6,Error::ResourceUnavailable.into_raw(),false),(7,Error::NotReady.into_raw(),false),
+        (8,Error::BackingFailure.into_raw(),false),(9,Error::AccessDenied.into_raw(),false),
+        (10,Error::ResourceUnavailable.into_raw(),false),(11,Error::ResourceUnavailable.into_raw(),true),
+        (12,Error::NotReady.into_raw(),false),(13,Error::NotReady.into_raw(),false),
+        (14,Error::NotReady.into_raw(),false)] {
         MODE.store(mode,Ordering::Release); SYNCED.store(false,Ordering::Release);
         assert_eq!(clone_address_space(),expected);
         assert_eq!(SYNCED.load(Ordering::Acquire),sync);
         assert!(!LOCKED.load(Ordering::Acquire)); assert_eq!(IMAGES.load(Ordering::Acquire),0);
         assert!(!QUIESCENT.load(Ordering::Acquire));
         assert!(task::image_transition::begin_thread_creation(1).is_some());
+        assert!(!FAIL_ALLOCATION.load(Ordering::Acquire));
     }
     MODE.store(0,Ordering::Release);
     let creating=task::image_transition::begin_thread_creation(1).unwrap();
     SYNCED.store(false,Ordering::Release);
-    assert_eq!(clone_address_space(),EAGAIN); assert!(!SYNCED.load(Ordering::Acquire));
+    assert_eq!(clone_address_space(),Error::NotReady.into_raw()); assert!(!SYNCED.load(Ordering::Acquire));
     assert!(!QUIESCENT.load(Ordering::Acquire));
     drop(creating);
     assert_eq!(clone_address_space(),7);
-    ALLOWED.store(false,Ordering::Release); assert_eq!(clone_address_space(),EPERM);
+    ALLOWED.store(false,Ordering::Release); assert_eq!(clone_address_space(),Error::AccessDenied.into_raw());
 }
 "#);
     program.push_str("\nmod mnu_abi {pub mod status {\n");
     program.push_str(include_str!("../../../core/crates/abi/src/status.rs"));
     program.push_str("\n}}\n");
-    let directory = std::env::temp_dir().join(format!(
-        "mochios-clone-lock-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir(&directory).unwrap();
-    let executable = directory.join("probe");
-    let mut compiler = Command::new("rustc")
-        .args(["--edition=2024", "-Awarnings", "-"])
-        .arg("-o")
-        .arg(&executable)
-        .stdin(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    compiler
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(program.as_bytes())
-        .unwrap();
-    let result = compiler.wait_with_output().unwrap();
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let result = Command::new(&executable).output().unwrap();
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    std::fs::remove_dir_all(directory).unwrap();
+    probe::run_with_toolchain(&program, "nightly-2026-07-16");
 }

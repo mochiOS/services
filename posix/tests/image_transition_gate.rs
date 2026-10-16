@@ -17,7 +17,7 @@ fn production_gate_excludes_creators_and_image_operations_and_releases_on_failur
     let program = format!(
         r#"
 extern crate alloc;
-const EPERM:u64=1; const ENOSYS:u64=38; const EAGAIN:u64=11;
+mod mnu_abi {{pub mod status {{{status}}}}}
 fn caller_has_process_spawn_capability()->bool {{ true }}
 mod syscall {{ pub mod security {{ pub fn current_process_id()->Option<u64> {{ Some(7) }} }} }}
 mod mem {{ pub mod address_space {{ pub enum CloneError {{}} pub struct CloneSource; }} }}
@@ -52,10 +52,10 @@ fn clone_admission()->u64 {{
 fn main() {{
     assert_eq!(clone_admission(),0);
     let creating=begin_thread_creation(7).unwrap();
-    assert_eq!(clone_admission(),EAGAIN);
+    assert_eq!(clone_admission(),mnu_abi::status::Error::NotReady.into_raw());
     drop(creating);
     let image=begin_image_transition(7).unwrap();
-    assert_eq!(clone_admission(),EAGAIN);
+    assert_eq!(clone_admission(),mnu_abi::status::Error::NotReady.into_raw());
     drop(image);
     let first = begin_thread_creation(7).unwrap();
     let second = begin_thread_creation(7).unwrap();
@@ -95,6 +95,7 @@ fn main() {{
 "#,
         path = implementation,
         capture = capture,
+        status = include_str!("../../../core/crates/abi/src/status.rs"),
     );
     let directory = std::env::temp_dir().join(format!(
         "mochios-image-gate-{}-{}",
@@ -148,7 +149,9 @@ fn old_image_is_retired_only_after_preparation_and_before_page_table_commit() {
     let gate = replacement
         .find("begin_image_transition(process_id)")
         .unwrap();
-    let prepare = replacement.find("prepare_kernel_stack_user_table(").unwrap();
+    let prepare = replacement
+        .find("prepare_kernel_stack_user_table(")
+        .unwrap();
     let retire = replacement
         .find("retire_image_siblings(pid, current_tid)")
         .unwrap();
