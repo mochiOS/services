@@ -921,8 +921,8 @@ fn mapping_edits_preflight_every_overlapping_backing_without_ipc_or_allocation()
         .prepare_extent(3, 1, |bytes| Ok(Arc::new(bytes)))
         .unwrap();
     assert_eq!(
-        without_allocations(|| mapping_admission::check(&regions, 0x1000, 0x3000)),
-        Err(syscall::EAGAIN)
+        without_allocations(|| mapping_admission::check_native(&regions, 0x1000, 0x3000)),
+        Err(mnu_abi::status::Error::NotReady)
     );
     assert_eq!(
         without_allocations(|| mapping_admission::check_access(&regions, 0x1000, 8192)),
@@ -939,21 +939,21 @@ fn mapping_edits_preflight_every_overlapping_backing_without_ipc_or_allocation()
     // A reservation elsewhere in this address space must not reject an edit
     // which ends exactly at its boundary, including an unbacked/anonymous range.
     assert_eq!(
-        without_allocations(|| mapping_admission::check(&regions, 0x1000, 0x2000)),
+        without_allocations(|| mapping_admission::check_native(&regions, 0x1000, 0x2000)),
         Ok(())
     );
     assert_eq!(
-        without_allocations(|| mapping_admission::check(&regions, 0x3000, 0x4000)),
+        without_allocations(|| mapping_admission::check_native(&regions, 0x3000, 0x4000)),
         Ok(())
     );
     assert_eq!(
-        mapping_admission::check(&regions, 0x2000, 0x2000),
-        Err(syscall::EINVAL)
+        mapping_admission::check_native(&regions, 0x2000, 0x2000),
+        Err(mnu_abi::status::Error::InvalidArgument)
     );
     assert_eq!(LOWER.lock().unwrap().reads, 0);
     drop(prepared);
     assert_eq!(
-        without_allocations(|| mapping_admission::check(&regions, 0x1000, 0x3000)),
+        without_allocations(|| mapping_admission::check_native(&regions, 0x1000, 0x3000)),
         Ok(())
     );
     let invalid = [task::MemoryRegion {
@@ -962,8 +962,8 @@ fn mapping_edits_preflight_every_overlapping_backing_without_ipc_or_allocation()
         object: None,
     }];
     assert_eq!(
-        mapping_admission::check(&invalid, 0x1000, 0x2000),
-        Err(syscall::EINVAL)
+        mapping_admission::check_native(&invalid, 0x1000, 0x2000),
+        Err(mnu_abi::status::Error::BackingFailure)
     );
 }
 
@@ -1143,8 +1143,8 @@ fn unavailable_cached_backing_cannot_lose_failure_when_original_owners_drop() {
     drop(pin);
     drop(reservation);
     assert_eq!(
-        without_allocations(|| mapping_admission::check(&regions, 0x1000, 0x3000)),
-        Err(syscall::EIO)
+        without_allocations(|| mapping_admission::check_native(&regions, 0x1000, 0x3000)),
+        Err(mnu_abi::status::Error::BackingFailure)
     );
     assert_eq!(
         without_allocations(|| mapping_admission::check_access(&regions, 0x2000, 1)),

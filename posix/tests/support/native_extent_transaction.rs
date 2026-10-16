@@ -822,8 +822,8 @@ fn uncertain_external_owner_death_discards_every_mapping_without_querying_storag
                 Ok(())
             );
             assert_eq!(
-                crate::mapping_admission::check(regions, BASE, BASE + 8192),
-                Err(crate::syscall::EIO)
+                crate::mapping_admission::check_native(regions, BASE, BASE + 8192),
+                Err(mnu_abi::status::Error::BackingFailure)
             );
         });
         cleanup(object, pin);

@@ -63,6 +63,12 @@ fn owned_native_extent_composes_real_cache_records_and_cleanup_without_vm_lock_a
         mnu_abi::HANDLE_SIGNAL_PEER_CLOSED,
         root.join("core/crates/abi/src/provider.rs")
     );
+    // The production generation gate uses the native error domain. Keep the
+    // composed fixture on that ABI too, rather than supplying errno stubs.
+    program.push_str(&format!(
+        "#[path={:?}] pub mod status;\n",
+        root.join("core/crates/abi/src/status.rs")
+    ));
     let scheduler = include_str!("../../../core/src/task/scheduler.rs");
     let start = scheduler.find("pub fn yield_now() {").unwrap();
     let end = start + scheduler[start..].find("\n}\n").unwrap() + 3;
