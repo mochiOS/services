@@ -11,11 +11,12 @@
     return 1; } } while (0)
 _Static_assert(TIMER_ABSTIME == 4, "newlib timer flag");
 static volatile sig_atomic_t caught;
+static pthread_t sleeper;
 static void handler(int signal) { (void)signal; ++caught; errno = EDOM; }
 static void *sender(void *unused) {
     (void)unused;
     const struct timespec delay = {0, 50000000};
-    if (nanosleep(&delay, 0) || kill(getpid(), SIGUSR1))
+    if (nanosleep(&delay, 0) || pthread_kill(sleeper, SIGUSR1))
         return (void *)1;
     return 0;
 }
@@ -30,6 +31,7 @@ static int reached(struct timespec now, struct timespec target) {
         (now.tv_sec == target.tv_sec && now.tv_nsec >= target.tv_nsec);
 }
 int main(void) {
+    sleeper = pthread_self();
     struct timespec zero = {0}, remaining = {123, 456};
     errno = E2BIG;
     CHECK(clock_nanosleep(CLOCK_MONOTONIC, 0, &zero, &remaining) == 0);
