@@ -80,7 +80,11 @@ fn capacity_conditions_keep_wait_rights_and_reject_wrong_resource_kinds() {
     assert!(wait.contains("stream_signals_for_capacity"));
     let runtime = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
     assert!(runtime.contains("u32::try_from(remaining).map_err(|_| EOVERFLOW)?"));
-    assert!(runtime.contains(
-        "wait_for_handle_capacity(entry, interests, control, caught, minimum_write_bytes)"
+    let compact: String = runtime
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    assert!(compact.contains(
+        "wait_for_handle_capacity(entry,interests,control,caught,minimum_write_bytes,wait.deadline(entry)?,)"
     ));
 }
