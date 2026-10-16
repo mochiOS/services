@@ -153,7 +153,8 @@ int PROVIDER_MEMORY_UPDATE_MAIN(void) {
       native(PROVIDER_MEMORY_UPDATE_CREATE, endpoint, 77, 8192, 5000, 0, 0);
   CHECK(update > 0);
   CHECK(native(HANDLE_RIGHTS_GET, update, 0, 0, 0, 0, 0) == 256);
-  CHECK(native(HANDLE_DUPLICATE, update, 256, 0, 0, 0, 0) == -13);
+  CHECK(native(HANDLE_DUPLICATE, update, 256, 0, 0, 0, 0) ==
+        INT64_C(-262138));
   struct attachments outgoing = {.count = 1,
                                  .items = {{.handle = update, .rights = 256}}};
   CHECK(native(IPC_SEND, endpoint, 0, 0, (uintptr_t)&outgoing, 0, 0) == -13);

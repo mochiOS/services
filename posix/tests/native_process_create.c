@@ -84,7 +84,7 @@ static int child(void) {
     CHECK(native6(HANDLE_READ_AT, file, (uint64_t)elf, sizeof(elf), 0, 0, 0) == 4);
     CHECK(memcmp(elf, "\177ELF", 4) == 0);
     CHECK(N(HANDLE_WRITE, file, elf, sizeof(elf)) == -EACCES);
-    CHECK(N(HANDLE_DUPLICATE, file, 1, 0) == -EACCES);
+    CHECK(N(HANDLE_DUPLICATE, file, 1, 0) == INT64_C(-262138));
     CHECK(N(HANDLE_CLOSE, file, 0, 0) == 0);
 #ifdef TREE_LIFECYCLE_PROBE
     for (;;) CHECK(N(SLEEP, 10, 0, 0) == 0);
