@@ -2861,6 +2861,252 @@ fn check_open_directory_path_lifetime(mounted_namespace: bool) {
 }
 
 #[test]
+fn removed_directory_children_pin_parent_identity_until_the_last_reference_closes() {
+    for mounted in [false, true] {
+        let (mut service, image) = test_filesystem_with_storage(None);
+        if mounted {
+            service
+                .mount_devices(
+                    b"/dev",
+                    filesystem_service::devfs::DeviceFilesystem::default(),
+                )
+                .unwrap();
+        }
+        let count = || {
+            Ext4::load(Box::new(image.clone()))
+                .unwrap()
+                .superblock()
+                .free_inodes_count()
+        };
+        let open = |service: &mut FilesystemService, path: &[u8], base: Option<u64>| {
+            service
+                .open_at(
+                    protocol::Header {
+                        flags: protocol::OPEN_AT_READ
+                            | protocol::OPEN_AT_DIRECTORY
+                            | if base.is_some() {
+                                protocol::OPEN_AT_BASE_ATTACHED
+                            } else {
+                                0
+                            },
+                        ..Default::default()
+                    },
+                    path,
+                    PathAnchors {
+                        root_open_id: None,
+                        base_open_id: base,
+                    },
+                    root_credentials(),
+                )
+                .unwrap()
+                .header
+        };
+        let child = open(&mut service, b"/jail/inside", None);
+        let alias = open(&mut service, b"/jail/inside", None);
+        let parent = service
+            .stat_at(
+                protocol::Header::default(),
+                b"/jail",
+                PathAnchors::default(),
+                root_credentials(),
+            )
+            .unwrap();
+        let parent = protocol::decode_node_status(&parent.payload)
+            .unwrap()
+            .node_id;
+        assert_eq!(
+            service
+                .handle(
+                    protocol::Header {
+                        opcode: protocol::OP_UNLINK,
+                        ..Default::default()
+                    },
+                    b"/jail/escape"
+                )
+                .header
+                .status,
+            0
+        );
+        let before = count();
+        for path in [b"/jail/inside".as_slice(), b"/jail"] {
+            let removed = service.handle(
+                protocol::Header {
+                    opcode: protocol::OP_UNLINK,
+                    flags: protocol::NODE_TYPE_DIRECTORY,
+                    ..Default::default()
+                },
+                path,
+            );
+            assert_eq!(removed.header.status, 0);
+        }
+        assert_eq!(count(), before);
+        let retained_parent = open(&mut service, b"..", Some(child.open_id));
+        assert_eq!(retained_parent.node_id, parent);
+        let status = service
+            .stat_handle(protocol::Header::default(), child.open_id)
+            .unwrap();
+        assert_eq!(
+            protocol::decode_node_status(&status.payload)
+                .unwrap()
+                .link_count,
+            0
+        );
+        assert!(matches!(
+            service.open_at(
+                protocol::Header {
+                    flags: protocol::OPEN_AT_READ
+                        | protocol::OPEN_AT_WRITE
+                        | protocol::OPEN_AT_CREATE
+                        | protocol::OPEN_AT_BASE_ATTACHED,
+                    mode: 0o600,
+                    ..Default::default()
+                },
+                b"resurrect",
+                PathAnchors {
+                    root_open_id: None,
+                    base_open_id: Some(child.open_id)
+                },
+                root_credentials()
+            ),
+            Err(2)
+        ));
+        // Neither removed identity can be recycled by allocation pressure.
+        service
+            .mkdir_at(
+                protocol::Header {
+                    mode: 0o700,
+                    ..Default::default()
+                },
+                b"/created",
+                PathAnchors::default(),
+                root_credentials(),
+            )
+            .unwrap();
+        let created = service
+            .stat_at(
+                protocol::Header::default(),
+                b"/created",
+                PathAnchors::default(),
+                root_credentials(),
+            )
+            .unwrap();
+        let created = protocol::decode_node_status(&created.payload)
+            .unwrap()
+            .node_id;
+        assert_ne!(created, parent);
+        assert_ne!(created, child.node_id);
+        assert_eq!(
+            service
+                .handle(
+                    protocol::Header {
+                        opcode: protocol::OP_UNLINK,
+                        flags: protocol::NODE_TYPE_DIRECTORY,
+                        ..Default::default()
+                    },
+                    b"/created"
+                )
+                .header
+                .status,
+            0
+        );
+        assert_eq!(count(), before);
+        service.provider_close(child.open_id).unwrap();
+        assert_eq!(count(), before);
+        service.provider_close(alias.open_id).unwrap();
+        assert_eq!(count(), before + 1);
+        service.provider_close(retained_parent.open_id).unwrap();
+        assert_eq!(count(), before + 2);
+    }
+}
+
+#[test]
+fn replacing_an_open_directory_retains_its_identity_until_close() {
+    for mounted in [false, true] {
+        let (mut service, image) = test_filesystem_with_storage(None);
+        if mounted {
+            service
+                .mount_devices(
+                    b"/dev",
+                    filesystem_service::devfs::DeviceFilesystem::default(),
+                )
+                .unwrap();
+        }
+        let old = service
+            .open_at(
+                protocol::Header {
+                    flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+                    ..Default::default()
+                },
+                b"/removed",
+                PathAnchors::default(),
+                root_credentials(),
+            )
+            .unwrap()
+            .header;
+        let before = Ext4::load(Box::new(image.clone()))
+            .unwrap()
+            .superblock()
+            .free_inodes_count();
+        let mut paths = b"/create-base".to_vec();
+        paths.extend_from_slice(b"/removed");
+        service
+            .rename_at(
+                protocol::Header {
+                    mode: 12,
+                    ..Default::default()
+                },
+                &paths,
+                RenameAnchors::default(),
+                root_credentials(),
+            )
+            .unwrap();
+        let current = service
+            .stat_at(
+                protocol::Header::default(),
+                b"/removed",
+                PathAnchors::default(),
+                root_credentials(),
+            )
+            .unwrap();
+        assert_ne!(
+            protocol::decode_node_status(&current.payload)
+                .unwrap()
+                .node_id,
+            old.node_id
+        );
+        let status = service
+            .stat_handle(protocol::Header::default(), old.open_id)
+            .unwrap();
+        assert_eq!(
+            protocol::decode_node_status(&status.payload)
+                .unwrap()
+                .node_id,
+            old.node_id
+        );
+        assert_eq!(
+            protocol::decode_node_status(&status.payload)
+                .unwrap()
+                .link_count,
+            0
+        );
+        assert!(
+            !service
+                .provider_read(old.open_id, protocol::MAX_IO_LEN)
+                .unwrap()
+                .is_empty()
+        );
+        service.provider_close(old.open_id).unwrap();
+        assert_eq!(
+            Ext4::load(Box::new(image))
+                .unwrap()
+                .superblock()
+                .free_inodes_count(),
+            before + 1
+        );
+    }
+}
+
+#[test]
 fn symlink_targets_enforce_search_permission_on_the_actual_directory() {
     let mut filesystem = test_filesystem();
     let result = filesystem.stat_at(

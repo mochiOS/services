@@ -55,13 +55,30 @@ int main(void) {
     CHECK(native_count() == baseline);
     CHECK(getcwd(output, sizeof(output)) == output && strcmp(output, expected) == 0);
   }
-  CHECK(munmap(readonly, 4096) == 0 && rmdir(expected) == 0);
+  CHECK(munmap(readonly, 4096) == 0);
+  int retained = open(".", O_RDONLY | O_DIRECTORY);
+  CHECK(retained >= 0);
+  struct stat before, after;
+  CHECK(fstat(retained, &before) == 0 && rmdir(expected) == 0);
+  CHECK(fstat(retained, &after) == 0 && after.st_ino == before.st_ino &&
+        after.st_nlink == 0);
   memset(output, 0x5a, sizeof(output));
   errno = 0;
   CHECK(getcwd(output, sizeof(output)) == NULL && errno == ENOENT);
-  CHECK(output[0] == 0x5a && chdir(original) == 0);
+  CHECK(output[0] == 0x5a);
+  errno = 0;
+  CHECK(openat(retained, "resurrect", O_CREAT | O_RDWR, 0600) == -1 &&
+        errno == ENOENT);
+  int parent = openat(retained, "..", O_RDONLY | O_DIRECTORY);
+  CHECK(parent >= 0 && fchdir(parent) == 0);
+  CHECK(getcwd(output, sizeof(output)) == output && strcmp(output, "/tmp") == 0);
+  CHECK(fchdir(retained) == 0);
+  errno = 0;
+  CHECK(getcwd(output, sizeof(output)) == NULL && errno == ENOENT);
+  CHECK(chdir(original) == 0 && close(parent) == 0 && close(retained) == 0);
   CHECK(native_count() == baseline);
-  puts("current-directory: PASS exact/short buffers, live rename, deleted cwd, "
+  puts("current-directory: PASS exact/short buffers, live rename, retained "
+       "deleted cwd and parent identity, "
        "16 reentrant copyout faults and reference recovery");
   return 0;
 }

@@ -15,6 +15,8 @@ type Resolution = path_walk::Resolution<Inode>;
 
 #[path = "device_operations.rs"]
 mod device_operations;
+#[path = "removed_directories.rs"]
+mod removed_directories;
 
 const EIO: i32 = 5;
 const EXDEV: i32 = 18;
@@ -62,6 +64,7 @@ pub struct FilesystemService {
     node_ids: HashMap<String, u64>,
     opens: OpenTable,
     orphans: HashMap<u64, Orphan>,
+    removed_directories: HashMap<u64, removed_directories::RetainedDirectory>,
     next_open_id: u64,
     memory_updates: Option<Box<dyn crate::memory_updates::MemoryUpdates>>,
     memory_admission: Option<crate::memory_updates::AdmissionScope>,
@@ -105,6 +108,7 @@ impl FilesystemService {
             node_ids,
             opens: OpenTable::default(),
             orphans: HashMap::new(),
+            removed_directories: HashMap::new(),
             next_open_id: 1,
             memory_updates: None,
             memory_admission: None,
@@ -1231,7 +1235,10 @@ impl FilesystemService {
         }
         let open = self.opens.get(&open_id).ok_or(EBADF)?;
         let node_id = open.node_id;
-        let metadata = if open.file.is_some() || open.inode.file_type().is_socket() {
+        let metadata = if open.file.is_some()
+            || open.inode.file_type().is_socket()
+            || open.inode.file_type().is_dir()
+        {
             Inode::read(&open.filesystem, open.inode.index)
                 .map_err(errno)?
                 .metadata()
@@ -1440,11 +1447,9 @@ impl FilesystemService {
         let Some(resolution) = self.resolve_namespace_path(path, anchors, follow, uid, gid, groups)?
         else {
             let (root, base) = self.resolve_anchors(path, anchors)?;
-            return Ok((
-                self.resolve_path_at(root, base, path, follow, uid, gid, groups)?,
-                self.fs.clone(),
-                0,
-            ));
+            let resolution = self.resolve_path_at(root, base, path, follow, uid, gid, groups)?;
+            self.check_missing_directory(&resolution, 0)?;
+            return Ok((resolution, self.fs.clone(), 0));
         };
         let namespace = self.namespace.as_ref().ok_or(EIO)?;
         let node = match &resolution {
@@ -1465,6 +1470,7 @@ impl FilesystemService {
                 name,
             },
         };
+        self.check_missing_directory(&resolution, volume)?;
         Ok((resolution, filesystem, volume))
     }
 
@@ -1848,6 +1854,11 @@ impl FilesystemService {
         }
         let open = self.opens.get(&request.open_id).ok_or(EBADF)?;
         let node_id = open.node_id;
+        if self.removed_directories.contains_key(&node_id) {
+            self.opens.remove(&request.open_id);
+            self.collect_removed_directories(node_id)?;
+            return Ok(self.success(request));
+        }
         let is_last_open = self
             .opens
             .values()
@@ -2230,27 +2241,7 @@ impl FilesystemService {
                 Inode::read(filesystem, parent_inode.index).map_err(errno)?,
             )
             .map_err(errno)?;
-            let original_parent_links = parent.inode().links_count();
-            let parent_links = original_parent_links.checked_sub(1).ok_or(EIO)?;
-            parent.inode_mut().set_links_count(parent_links);
-            parent.inode_mut().write(filesystem).map_err(errno)?;
-            let original_links = inode.links_count();
-            inode.set_links_count(1);
-            if let Err(error) = inode.write(filesystem) {
-                parent.inode_mut().set_links_count(original_parent_links);
-                let _ = parent.inode_mut().write(filesystem);
-                return Err(errno(error));
-            }
-            if let Err(error) = parent.unlink(
-                DirEntryName::try_from(name).map_err(|_| EINVAL)?,
-                inode.clone(),
-            ) {
-                inode.set_links_count(original_links);
-                let _ = inode.write(filesystem);
-                parent.inode_mut().set_links_count(original_parent_links);
-                let _ = parent.inode_mut().write(filesystem);
-                return Err(errno(error));
-            }
+            self.remove_replaced_directory(filesystem, volume, &mut parent, name, inode)?;
             if let Some(path) = path_hint {
                 if let Some(node_id) = self.node_ids.remove(path) {
                     self.nodes.remove(&node_id);
@@ -2492,8 +2483,9 @@ impl FilesystemService {
             if let Some((destination_node_id, destination_inode)) = destination {
                 self.remove_replaced_directory(
                     &filesystem,
+                    0,
                     &mut new_parent,
-                    &backup_name,
+                    backup_name.as_bytes(),
                     destination_inode,
                 )?;
                 self.node_ids.remove(new_path);
@@ -2756,8 +2748,9 @@ impl FilesystemService {
             if let Some((destination_node_id, destination_inode)) = destination {
                 self.remove_replaced_directory(
                     &filesystem,
+                    destination_volume,
                     &mut new_parent,
-                    &backup_name,
+                    backup_name.as_bytes(),
                     destination_inode,
                 )?;
                 self.forget_node_paths(destination_node_id);
@@ -3090,12 +3083,18 @@ impl FilesystemService {
     }
 
     fn remove_replaced_directory(
-        &self,
+        &mut self,
         filesystem: &Ext4,
+        volume: u32,
         parent: &mut Dir,
-        name: &str,
+        name: &[u8],
         mut inode: Inode,
     ) -> Result<(), i32> {
+        let node_id = scoped_node_id(volume, &inode);
+        let retained = self.directory_is_referenced(node_id);
+        if retained {
+            self.removed_directories.try_reserve(1).map_err(|_| ENOMEM)?;
+        }
         let original_parent_links = parent.inode().links_count();
         let parent_links = original_parent_links.checked_sub(1).ok_or(EIO)?;
         parent.inode_mut().set_links_count(parent_links);
@@ -3107,15 +3106,31 @@ impl FilesystemService {
             let _ = parent.inode_mut().write(filesystem);
             return Err(errno(error));
         }
-        if let Err(error) = parent.unlink(
-            DirEntryName::try_from(name).map_err(|_| EINVAL)?,
-            inode.clone(),
-        ) {
-            inode.set_links_count(original_links);
-            let _ = inode.write(filesystem);
-            parent.inode_mut().set_links_count(original_parent_links);
-            let _ = parent.inode_mut().write(filesystem);
-            return Err(errno(error));
+        let name = DirEntryName::try_from(name).map_err(|_| EINVAL)?;
+        let result = if retained {
+            parent.unlink_retained(name, inode.clone()).map(Some)
+        } else {
+            parent.unlink(name, inode.clone())
+        };
+        let detached = match result {
+            Ok(detached) => detached,
+            Err(error) => {
+                inode.set_links_count(original_links);
+                let _ = inode.write(filesystem);
+                parent.inode_mut().set_links_count(original_parent_links);
+                let _ = parent.inode_mut().write(filesystem);
+                return Err(errno(error));
+            }
+        };
+        if let Some(inode) = detached {
+            self.removed_directories.insert(
+                node_id,
+                removed_directories::RetainedDirectory {
+                    filesystem: filesystem.clone(),
+                    inode,
+                    parent: scoped_node_id(volume, parent.inode()),
+                },
+            );
         }
         Ok(())
     }
