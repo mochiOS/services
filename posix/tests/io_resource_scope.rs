@@ -274,7 +274,7 @@ fn multiplex_waits_own_partial_lease_arrays_and_snapshot_poll_inputs_before_call
         if name == "poll_with_deadline" {
             assert!(body.contains("io_resources::with_initialized"));
             assert!(
-                body.find("fds.add(index).read()").unwrap()
+                body.find("multiplex_memory::read_pollfd(fds, index)").unwrap()
                     < body.find("socket::poll_events(").unwrap()
             );
         }

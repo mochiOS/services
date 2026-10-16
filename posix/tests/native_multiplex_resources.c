@@ -201,13 +201,57 @@ static int blocked_cases(void) {
       }
   return 0;
 }
+static fd_set *copy_readset, *copy_writeset;
+static struct pollfd *copy_items;
+static nfds_t copy_count;
 static void bad_copy(int signal) {
   if (signal != SIGSEGV)
     _exit(91);
+  if (invoke(copy_readset, copy_writeset, copy_items, copy_count, 1) != -1 || errno != EFAULT)
+    _exit(93);
   if (close(operation_fd))
     _exit(92);
   faulted = 1;
   siglongjmp(destination, 37);
+}
+static void *bad_metadata;
+static int invalid_metadata(void) {
+  switch (api) {
+  case 0: return select(0, NULL, NULL, NULL, bad_metadata);
+  case 1: return pselect(0, NULL, NULL, NULL, bad_metadata, NULL);
+  case 2: return ppoll(NULL, 0, bad_metadata, NULL);
+  case 3: return pselect(0, NULL, NULL, NULL, NULL, bad_metadata);
+  default: return ppoll(NULL, 0, NULL, bad_metadata);
+  }
+}
+static void metadata_fault(int signal) {
+  if (signal != SIGSEGV || invalid_metadata() != -1 || errno != EFAULT)
+    _exit(94);
+  siglongjmp(destination, 37);
+}
+static int metadata_errors(void) {
+  bad_metadata = mmap(NULL, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  CHECK(bad_metadata != MAP_FAILED);
+  struct sigaction action = {0};
+  action.sa_handler = metadata_fault;
+  sigemptyset(&action.sa_mask);
+  CHECK(sigaction(SIGSEGV, &action, NULL) == 0);
+  sigset_t before, after;
+  CHECK(pthread_sigmask(SIG_SETMASK, NULL, &before) == 0);
+  int64_t baseline = native(680, 0, 0, 0);
+  for (api = 0; api < 5; ++api) {
+    CHECK(invalid_metadata() == -1 && errno == EFAULT);
+    int jumped = sigsetjmp(destination, 1);
+    if (!jumped) {
+      *(volatile char *)bad_metadata = 1;
+      CHECK(0);
+    }
+    CHECK(jumped == 37);
+    CHECK(pthread_sigmask(SIG_SETMASK, NULL, &after) == 0 && before == after);
+    CHECK(native(680, 0, 0, 0) == baseline);
+  }
+  CHECK(munmap(bad_metadata, 4096) == 0);
+  return 0;
 }
 int main(void) {
   if (blocked_cases())
@@ -244,10 +288,19 @@ int main(void) {
       if (outcome == 3)
         CHECK(mprotect(page + 4096, 4096, PROT_READ) == 0);
       faulted = 0;
+      copy_readset = readset;
+      copy_writeset = writeset;
+      copy_items = items;
+      copy_count = outcome == 3 ? 2 : 1;
       int jumped = sigsetjmp(destination, 1);
       if (!jumped) {
-        CHECK(invoke(readset, writeset, items, outcome == 3 ? 2 : 1, 1) == 1 &&
-              outcome == 0);
+        int result = invoke(readset, writeset, items, copy_count, 1);
+        if (outcome != 0) {
+          CHECK(result == -1 && errno == EFAULT);
+          *(volatile char *)(page + (outcome == 3 ? 4096 : 0)) = 1;
+          CHECK(0);
+        }
+        CHECK(result == 1);
         CHECK(close(operation_fd) == 0);
       } else
         CHECK(jumped == 37 && outcome != 0 && faulted);
@@ -257,7 +310,8 @@ int main(void) {
       fprintf(stderr, "multiplex-resources: copy api=%u outcome=%u PASS\n", api,
               outcome);
     }
-  puts("multiplex-resources: PASS 32 blocked return/jump/exit/cancel and 16 "
-       "input/output copy cases");
+  CHECK(metadata_errors() == 0);
+  puts("multiplex-resources: PASS 32 blocked return/jump/exit/cancel, 16 "
+       "EFAULT input/output and 5 timeout/mask cases including active handlers");
   return 0;
 }
