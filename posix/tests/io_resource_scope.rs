@@ -226,7 +226,8 @@ fn descriptor_metadata_and_sync_paths_keep_the_source_tracked_until_return() {
             ] {
                 assert!(body.contains(kind), "{kind}");
             }
-            assert!(body.contains("ptr::write(stat_buf.cast::<NewlibStat>()"));
+            assert!(body.contains("stat_output::write(stat_buf,"));
+            assert!(!body.contains("ptr::write(stat_buf.cast::<NewlibStat>()"));
         }
     }
 }
