@@ -1,4 +1,6 @@
 /* Native VM enforcement of user-space pthread stack guard policy. */
+/* Expose optional declarations only in this test, not in the shipped SDK. */
+#define _POSIX_THREAD_PRIORITY_SCHEDULING 200809L
 #define main directory_baseline_main
 #include "native_directory_io.c"
 #undef main
@@ -68,11 +70,27 @@ static void *caller_stack(void *argument) {
 int main(void) {
   pthread_attr_t attr;
   CHECK(pthread_attr_init(&attr) == 0);
+  int value;
+  CHECK(pthread_attr_getscope(&attr, &value) == 0 &&
+        value == PTHREAD_SCOPE_SYSTEM);
+  CHECK(pthread_attr_setscope(&attr, PTHREAD_SCOPE_PROCESS) == ENOTSUP);
+  CHECK(pthread_attr_setschedpolicy(&attr, SCHED_FIFO) == ENOTSUP);
+  CHECK(pthread_attr_setschedpolicy(&attr, SCHED_RR) == ENOTSUP);
+  CHECK(pthread_attr_getschedpolicy(&attr, &value) == 0 &&
+        value == SCHED_OTHER);
+  struct sched_param parameter = {.sched_priority = 1};
+  CHECK(pthread_attr_setschedparam(&attr, &parameter) == EINVAL);
+  CHECK(pthread_attr_getschedparam(&attr, &parameter) == 0 &&
+        parameter.sched_priority == 0);
   size_t actual_guard = 0;
   CHECK(pthread_attr_getguardsize(&attr, &actual_guard) == 0 &&
         actual_guard == PAGE);
   CHECK(pthread_attr_setstacksize(&attr, STACK) == 0);
   for (unsigned pass = 0; pass < 16; ++pass) {
+    int inheritance = pass % 2 ? PTHREAD_INHERIT_SCHED : PTHREAD_EXPLICIT_SCHED;
+    CHECK(pthread_attr_setinheritsched(&attr, inheritance) == 0);
+    CHECK(pthread_attr_getinheritsched(&attr, &value) == 0 &&
+          value == inheritance);
     const size_t requests[] = {PAGE, 0, 1, PAGE + 1};
     size_t requested = requests[pass % 4];
     size_t rounded = (requested + PAGE - 1) & ~(size_t)(PAGE - 1);
@@ -94,7 +112,10 @@ int main(void) {
   void *stack = mmap(NULL, STACK, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   CHECK(stack != MAP_FAILED);
-  CHECK(pthread_attr_setstack(&attr, stack, STACK) == 0);
+  CHECK(pthread_attr_setstackaddr(&attr, stack) == 0);
+  void *stack_address = NULL;
+  CHECK(pthread_attr_getstackaddr(&attr, &stack_address) == 0 &&
+        stack_address == stack);
   pthread_t thread;
   void *returned = NULL;
   CHECK(pthread_create(&thread, &attr, caller_stack, stack) == 0);
@@ -102,7 +123,7 @@ int main(void) {
   CHECK(readable((uintptr_t)stack));
   CHECK(munmap(stack, STACK) == 0);
   CHECK(pthread_attr_destroy(&attr) == 0);
-  puts("thread-stack: PASS reserved guard, usable size, join reclamation and "
-       "caller ownership");
+  puts("thread-stack: PASS guards, attributes, unsupported scheduling, join "
+       "reclamation and caller ownership");
   return 0;
 }

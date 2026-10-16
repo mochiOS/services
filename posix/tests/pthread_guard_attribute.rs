@@ -32,12 +32,45 @@ fn opaque_attribute_preserves_storage_size_and_requested_guard_value() {
         )
         .replace("#[unsafe(no_mangle)]", ""),
     );
+    program.push_str("const ENOTSUP:c_int=134;\n#[repr(C)] pub struct SchedParam {sched_priority:c_int}\nmod attributes {\n");
+    program.push_str(
+        &include_str!("../../../user/crates/newlib-runtime/src/pthread_attr.rs")
+            .replace("#[unsafe(no_mangle)]", ""),
+    );
+    program.push_str("}\nuse attributes::*;\n");
     program.push_str(
         r#"
     fn main() { unsafe {
         let mut storage = core::mem::MaybeUninit::<PthreadAttr>::uninit();
         let attr = storage.as_mut_ptr();
         assert_eq!(pthread_attr_init(attr),0);
+        let mut value=99;
+        assert_eq!(pthread_attr_getscope(attr,&mut value),0); assert_eq!(value,1);
+        assert_eq!(pthread_attr_setscope(attr,0),ENOTSUP);
+        assert_eq!(pthread_attr_setscope(attr,99),EINVAL);
+        assert_eq!(pthread_attr_setscope(attr,1),0);
+        assert_eq!(pthread_attr_getinheritsched(attr,&mut value),0); assert_eq!(value,1);
+        for inherit in [2,1,2] {
+            assert_eq!(pthread_attr_setinheritsched(attr,inherit),0);
+            assert_eq!(pthread_attr_setinheritsched(attr,0),EINVAL);
+            assert_eq!(pthread_attr_getinheritsched(attr,&mut value),0); assert_eq!(value,inherit);
+        }
+        for (policy,result) in [(0,0),(1,ENOTSUP),(2,ENOTSUP),(99,EINVAL)] {
+            assert_eq!(pthread_attr_setschedpolicy(attr,policy),result);
+            assert_eq!(pthread_attr_getschedpolicy(attr,&mut value),0); assert_eq!(value,0);
+        }
+        let mut param=SchedParam{sched_priority:99};
+        assert_eq!(pthread_attr_getschedparam(attr,&mut param),0); assert_eq!(param.sched_priority,0);
+        assert_eq!(pthread_attr_setschedparam(attr,&param),0);
+        param.sched_priority=1; assert_eq!(pthread_attr_setschedparam(attr,&param),EINVAL);
+        assert_eq!(pthread_attr_getschedparam(attr,&mut param),0); assert_eq!(param.sched_priority,0);
+        assert_eq!(pthread_attr_setstackaddr(attr,0x10000usize as *mut c_void),0);
+        let mut address=ptr::null_mut();
+        assert_eq!(pthread_attr_getstackaddr(attr,&mut address),0); assert_eq!(address as usize,0x10000);
+        assert_eq!(pthread_attr_setstackaddr(attr,ptr::null_mut()),EINVAL);
+        assert_eq!(pthread_attr_getscope(ptr::null(),&mut value),EINVAL);
+        assert_eq!(pthread_attr_getinheritsched(attr,ptr::null_mut()),EINVAL);
+        assert_eq!(pthread_attr_getschedparam(attr,ptr::null_mut()),EINVAL);
         let mut guard = 0;
         assert_eq!(pthread_attr_getguardsize(attr,&mut guard),0);
         assert_eq!(guard,PAGE_SIZE);
@@ -60,6 +93,9 @@ fn opaque_attribute_preserves_storage_size_and_requested_guard_value() {
         assert_eq!(pthread_attr_getguardsize(attr,ptr::null_mut()),EINVAL);
         assert_eq!(pthread_attr_setguardsize(ptr::null_mut(),0),EINVAL);
         assert_eq!(pthread_attr_destroy(attr),0);
+        assert_eq!(pthread_attr_getscope(attr,&mut value),EINVAL);
+        assert_eq!(pthread_attr_setinheritsched(attr,1),EINVAL);
+        assert_eq!(pthread_attr_getstackaddr(attr,&mut address),EINVAL);
         assert_eq!(pthread_attr_getguardsize(attr,&mut guard),EINVAL);
         assert_eq!(pthread_attr_setguardsize(attr,1),EINVAL);
     }}
