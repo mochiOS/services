@@ -1,9 +1,9 @@
 //! Execute the production refill adapter, including reentrant close and errors.
 #![allow(dead_code)]
-use std::ffi::{c_int, c_char, c_void};
+use mochios_posix_client::upcall_guard::Guard;
+use std::ffi::{c_char, c_int, c_void};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use mochios_posix_client::upcall_guard::Guard;
 #[path = "../../../user/crates/newlib-runtime/src/callback_resources.rs"]
 mod callback_resources;
 #[path = "../../../user/crates/newlib-runtime/src/directory_io.rs"]
@@ -16,6 +16,7 @@ const EIO: c_int = 5;
 const EACCES: c_int = 13;
 const EPERM: c_int = 1;
 const ENOMEM: c_int = 12;
+const ENOTDIR: c_int = 20;
 const O_CLOEXEC: c_int = 0x40000;
 static SERIAL: Mutex<()> = Mutex::new(());
 static OPEN_CASE: AtomicU32 = AtomicU32::new(0);
@@ -124,6 +125,45 @@ enum FdKind {
 struct Object {
     kind: FdKind,
     lower_handle: u64,
+    open_flags: c_int,
+}
+static ADOPT_CASE: AtomicU32 = AtomicU32::new(0);
+struct Entry {
+    handle: Object,
+    rights: u64,
+}
+struct Table;
+impl Table {
+    fn get(&self, fd: c_int) -> Option<Entry> {
+        assert_ne!(CONTROL.native.load(Ordering::Relaxed), 0);
+        let case = ADOPT_CASE.load(Ordering::Relaxed);
+        if fd != 7 || case == 1 {
+            return None;
+        }
+        Some(Entry {
+            handle: Object {
+                kind: if case == 2 {
+                    FdKind::ObjectFile
+                } else {
+                    FdKind::ObjectDirectory
+                },
+                lower_handle: 10,
+                open_flags: if case == 3 { 1 } else { 0 },
+            },
+            rights: if case == 4 {
+                0
+            } else {
+                syscall::HANDLE_RIGHT_READ
+            },
+        })
+    }
+}
+struct State {
+    fds: Table,
+}
+static STATE: Mutex<State> = Mutex::new(State { fds: Table });
+fn state() -> std::sync::MutexGuard<'static, State> {
+    STATE.lock().unwrap()
 }
 struct Lease {
     handle: Object,
@@ -167,6 +207,7 @@ fn with_fd_entry(fd: c_int) -> Result<Lease, c_int> {
     PINS.fetch_add(1, Ordering::Relaxed);
     Ok(Lease {
         handle: Object {
+            open_flags: 0,
             lower_handle: 10,
             kind: if CASE.load(Ordering::Relaxed) == 9 {
                 FdKind::ObjectFile
@@ -185,6 +226,7 @@ fn syscall_errno(raw: u64) -> Result<u64, c_int> {
 }
 mod syscall {
     use super::*;
+    pub const HANDLE_RIGHT_READ: u64 = 1;
     pub enum SyscallNumber {
         HandleRead,
     }
@@ -209,6 +251,44 @@ mod syscall {
             2 => (-5i64) as u64,
             _ => 17, // Malformed provider count must not become a slice bound.
         }
+    }
+}
+
+#[test]
+fn adoption_consumes_only_successful_directory_descriptors_without_provider_calls() {
+    let _serial = SERIAL.lock().unwrap();
+    CLOSE_FAILURE.store(0, Ordering::Relaxed);
+    for case in 0..6 {
+        ADOPT_CASE.store(case, Ordering::Relaxed);
+        OPEN_CASE.store(u32::from(case == 5), Ordering::Relaxed);
+        OPEN_CALLS.store(0, Ordering::Relaxed);
+        CLOSE_CALLS.store(0, Ordering::Relaxed);
+        let result = implementation::adopt(7);
+        if case == 0 {
+            let pointer = result.unwrap().cast::<DirStream>();
+            let stream = unsafe { &*pointer };
+            assert_eq!(
+                (stream.fd, stream.buffer_offset, stream.buffer_len),
+                (7, 0, 0)
+            );
+            assert_eq!(CLOSE_CALLS.load(Ordering::Relaxed), 0);
+            assert_eq!(unsafe { implementation::close(pointer) }, 0);
+            assert_eq!(CLOSE_CALLS.load(Ordering::Relaxed), 1);
+        } else {
+            assert_eq!(
+                result,
+                Err(match case {
+                    2 => ENOTDIR,
+                    5 => ENOMEM,
+                    _ => EBADF,
+                })
+            );
+            assert_eq!(CLOSE_CALLS.load(Ordering::Relaxed), 0);
+        }
+        assert_eq!(OPEN_CALLS.load(Ordering::Relaxed), 0);
+        assert_eq!(LIVE_MEMORY.load(Ordering::Relaxed), 0);
+        assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
+        assert!(CONTROL.callback_resources.is_empty());
     }
 }
 #[test]
