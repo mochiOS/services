@@ -130,7 +130,8 @@ fn runtime_writes_only_after_all_samples_and_conversion_succeed_and_clock_stays_
     assert!(times.contains("syscall::execution::usage(None)"));
     assert!(times.contains(".waited_child_cpu_usage()"));
     assert!(
-        times.find("tms_cstime: clock_ticks").unwrap() < times.find("buf.write(value)").unwrap()
+        times.find("tms_cstime: clock_ticks").unwrap()
+            < times.find("time_memory::write_accounting(buf, value)").unwrap()
     );
     assert!(!times.contains("SyscallNumber::TimeNow"));
     let clock = source

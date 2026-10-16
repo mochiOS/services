@@ -28,6 +28,15 @@ static mut ERRNO: i32 = 123;
 static mut CALLS: usize = 0;
 static mut STATUS: u64 = 0;
 static mut QUANTUM: u64 = 1_000_000_003;
+static mut OUTPUT_ERROR: i32 = 0;
+mod time_memory {
+    pub fn write_timespec(destination: *mut super::Timespec, value: super::Timespec) -> Result<(), i32> {
+        let error = unsafe { super::OUTPUT_ERROR };
+        if error != 0 { return Err(error); }
+        unsafe { destination.write(value); }
+        Ok(())
+    }
+}
 fn set_errno(error: i32) { unsafe { ERRNO = error; } }
 fn syscall_errno(raw: u64) -> Result<u64, i32> {
     if (raw as i64) < 0 { Err(-(raw as i64) as i32) } else { Ok(raw) }
@@ -87,6 +96,11 @@ fn main() {
     assert_eq!(clock_getres(4, &mut output), -1);
     assert_eq!(unsafe { ERRNO }, 5);
     assert_eq!((output.tv_sec, output.tv_nsec), (99, 98));
+    unsafe { QUANTUM = 1; OUTPUT_ERROR = 14; }
+    assert_eq!(clock_getres(4, &mut output), -1);
+    assert_eq!(unsafe { ERRNO }, 14);
+    assert_eq!((output.tv_sec, output.tv_nsec), (99, 98));
+    assert_eq!(clock_getres(4, std::ptr::null_mut()), 0);
 }
 "#,
     );
