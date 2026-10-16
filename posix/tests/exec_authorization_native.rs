@@ -53,6 +53,7 @@ pub mod capability {
     pub use crate::abi::capability::*;
     #[derive(Clone,Copy)]pub enum Capability {CapabilitiesManage,ProcessSpawn,MemoryPhysMap,Read,Existing}
     impl Capability {
+        pub fn try_intern(name:&str)->Result<Self,crate::Error>{Self::intern(name).ok_or(crate::Error::InvalidArgument)}
         pub fn intern(name:&str)->Option<Self>{match name{"process.spawn"=>Some(Self::ProcessSpawn),"memory.phys.map"=>Some(Self::MemoryPhysMap),"fs.read.all"=>Some(Self::Read),_=>None}}
         pub fn from_str(name:&str)->Option<Self>{if name=="custom.existing"{Some(Self::Existing)}else{Self::intern(name)}}
         fn bit(self)->u64{match self {Self::ProcessSpawn=>1,Self::Read=>2,Self::Existing=>4,_=>8}}
@@ -63,7 +64,7 @@ pub mod capability {
         pub fn contains(&self,c:Capability)->bool{self.0&c.bit()!=0}pub fn is_subset_of(&self,other:&Self)->bool{self.0&!other.0==0}
     }
     pub struct KernelAuthoritySet(pub u64);
-    impl KernelAuthoritySet {pub fn empty()->Self{Self(0)}pub fn insert(&mut self,_:()){self.0=1;}pub fn is_subset_of(&self,other:&Self)->bool{self.0&!other.0==0}}
+    impl KernelAuthoritySet {pub fn empty()->Self{Self(0)}pub fn try_insert(&mut self,_:())->Result<(),crate::Error>{self.0=1;Ok(())}pub fn is_subset_of(&self,other:&Self)->bool{self.0&!other.0==0}}
     pub fn parse_kernel_authority_spec(spec:&str)->Option<()>{(spec=="memory.phys.map@0x1000:4096").then_some(())}
 }
 use capability::{Capability,CapabilitySet,KernelAuthoritySet,parse_kernel_authority_spec};
