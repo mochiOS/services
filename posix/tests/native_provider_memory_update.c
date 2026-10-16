@@ -106,13 +106,21 @@ int PROVIDER_MEMORY_UPDATE_MAIN(void) {
   int64_t endpoint =
       atomic_load_explicit(&owner_endpoint, memory_order_acquire);
   CHECK(endpoint > 0);
+  CHECK(native(PROVIDER_CREATE, object, 102, 1, 0, 0, 0) ==
+        INT64_C(-262138));
+  /* Duplicate registration must not release or replace the live object. */
+  CHECK(native(PROVIDER_CREATE, endpoint, 101, 1, 0, 0, 0) == -17);
   CHECK(native(PROVIDER_MEMORY_UPDATE_CREATE, object, 77, 8192, 5000, 0, 0) ==
         INT64_C(-262138));
   int64_t send_only = native(HANDLE_DUPLICATE, endpoint, 4, 0, 0, 0, 0);
   CHECK(send_only > 0);
+  CHECK(native(PROVIDER_CREATE, send_only, 102, 1, 0, 0, 0) ==
+        INT64_C(-262138));
   CHECK(native(PROVIDER_MEMORY_UPDATE_CREATE, send_only, 77, 8192, 5000, 0,
                0) == INT64_C(-262138));
   CHECK(native(HANDLE_CLOSE, send_only, 0, 0, 0, 0, 0) == 0);
+  CHECK(native(PROVIDER_CREATE, send_only, 102, 1, 0, 0, 0) ==
+        INT64_C(-262139));
   CHECK(native(PROVIDER_MEMORY_UPDATE_CREATE, send_only, 77, 8192, 5000, 0,
                0) == INT64_C(-262139));
   CHECK(native(PROVIDER_MEMORY_UPDATE_CREATE, endpoint, 0, 8192, 5000, 0, 0) ==
