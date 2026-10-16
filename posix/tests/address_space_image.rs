@@ -35,11 +35,19 @@ mod task {
         pub struct PendingExecSecurity;
     }
     pub mod image_origin {
+        thread_local! {
+            pub static FAILURE: std::cell::Cell<Option<mnu_abi::status::Error>> = const { std::cell::Cell::new(None) };
+        }
         #[derive(Clone)]
         pub struct ImageOrigin;
         impl ImageOrigin {
-            pub fn capture(process: &super::Process) -> Option<Self> {
-                process.measured.then_some(Self)
+            pub fn capture(
+                process: &super::Process,
+            ) -> Result<Option<Self>, mnu_abi::status::Error> {
+                if let Some(error) = FAILURE.with(std::cell::Cell::get) {
+                    return Err(error);
+                }
+                Ok(process.measured.then_some(Self))
             }
             pub fn permits(&self, _: &super::process::PendingExecSecurity) -> bool {
                 true
@@ -564,6 +572,27 @@ fn occupied_target_is_unchanged_and_caller_retains_image() {
             state.borrow().destroyed,
             vec![crate::paging::cloned_table()]
         )
+    });
+}
+
+#[test]
+fn origin_capture_failure_is_not_an_unmeasured_clone() {
+    let source = source();
+    let pins = Arc::strong_count(&source.regions[0].backing);
+    task::image_origin::FAILURE
+        .with(|failure| failure.set(Some(mnu_abi::status::Error::ResourceUnavailable)));
+    let result = address_space::CloneSource::capture(&source);
+    task::image_origin::FAILURE.with(|failure| failure.set(None));
+    assert!(matches!(
+        result,
+        Err(address_space::CloneError::Backing(
+            mnu_abi::status::Error::ResourceUnavailable
+        ))
+    ));
+    assert_eq!(Arc::strong_count(&source.regions[0].backing), pins);
+    paging::STATE.with(|state| {
+        assert_eq!(state.borrow().calls, 0);
+        assert!(state.borrow().destroyed.is_empty());
     });
 }
 

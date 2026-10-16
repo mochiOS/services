@@ -6,6 +6,9 @@ mod capability {
     #[derive(Clone)]
     pub struct CapabilitySet(pub u64);
     impl CapabilitySet {
+        pub fn try_clone(&self) -> Result<Self, mnu_abi::status::Error> {
+            Ok(self.clone())
+        }
         pub fn is_subset_of(&self, other: &Self) -> bool {
             self.0 & !other.0 == 0
         }
@@ -32,6 +35,11 @@ mod task {
             pub developer: String,
             pub signer: [u8; 32],
             pub provenance: u8,
+        }
+        impl ApplicationIdentity {
+            pub fn try_clone(&self) -> Result<Self, mnu_abi::status::Error> {
+                Ok(self.clone())
+            }
         }
         #[derive(Clone, Copy, PartialEq, Eq)]
         pub enum PendingExecKind {
@@ -109,16 +117,16 @@ fn authorization(process: &Process) -> PendingExecSecurity {
 fn requires_both_identity_and_measurement() {
     let mut process = source();
     process.identity = None;
-    assert!(ImageOrigin::capture(&process).is_none());
+    assert!(ImageOrigin::capture(&process).unwrap().is_none());
     let mut process = source();
     process.digest = None;
-    assert!(ImageOrigin::capture(&process).is_none());
+    assert!(ImageOrigin::capture(&process).unwrap().is_none());
 }
 
 #[test]
 fn authority_subset_matrix() {
     let process = source();
-    let origin = ImageOrigin::capture(&process).unwrap();
+    let origin = ImageOrigin::capture(&process).unwrap().unwrap();
     for capabilities in 0..16 {
         for authorities in 0..16 {
             let mut request = authorization(&process);
@@ -135,7 +143,7 @@ fn authority_subset_matrix() {
 #[test]
 fn rejects_every_identity_component_and_measurement_change() {
     let process = source();
-    let origin = ImageOrigin::capture(&process).unwrap();
+    let origin = ImageOrigin::capture(&process).unwrap().unwrap();
     for component in 0..5 {
         let mut request = authorization(&process);
         match component {
@@ -158,7 +166,7 @@ fn rejects_replace_and_user_privilege_increase() {
     ] {
         let mut process = source();
         process.privilege = privilege;
-        let origin = ImageOrigin::capture(&process).unwrap();
+        let origin = ImageOrigin::capture(&process).unwrap().unwrap();
         let mut request = authorization(&process);
         assert!(origin.permits(&request));
         request.execution_class = mnu_abi::exec::ExecutionClass::Privileged;
@@ -172,7 +180,7 @@ fn rejects_replace_and_user_privilege_increase() {
 fn capture_is_immutable_not_a_live_process_reference() {
     let mut process = source();
     let request = authorization(&process);
-    let origin = ImageOrigin::capture(&process).unwrap();
+    let origin = ImageOrigin::capture(&process).unwrap().unwrap();
     process.capabilities = CapabilitySet(0);
     process.authorities = CapabilitySet(0);
     process.identity = None;
@@ -189,5 +197,7 @@ fn production_creation_replacement_and_vm_snapshot_preserve_measurement() {
     assert!(snapshot.contains("ImageOrigin::capture(process)"));
     assert!(snapshot.contains("origin: self.origin"));
     assert!(exec.contains("consume_address_space_for_create(&image, &authorization, &context)"));
-    assert!(exec.contains("crate::task::with_process(pid, |_| image.consume(authorization, context))"));
+    assert!(
+        exec.contains("crate::task::with_process(pid, |_| image.consume(authorization, context))")
+    );
 }

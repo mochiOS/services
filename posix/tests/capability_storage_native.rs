@@ -55,6 +55,43 @@ fn with_dynamic_registry<R>(body:impl FnOnce(&mut DynamicCapabilityRegistry)->R)
     ));
     program.push_str(
         r#"
+mod task {
+    #[derive(Clone,Copy,Debug)]pub struct ThreadId(pub u64);
+    #[derive(Clone,Copy,PartialEq)]pub enum PrivilegeLevel{User,Service}
+    pub mod process {
+        use crate::{CapabilitySet,KernelAuthoritySet};
+        // Match the kernel module's single-parameter Result alias context.
+        type Result<T> = core::result::Result<T, ()>;
+        #[derive(Clone,Copy,Debug,PartialEq,Eq)]pub enum ApplicationProvenance{BuiltIn,VerifiedPackage,Development}
+"#,
+    );
+    program.push_str(probe::between(
+        include_str!("../../../core/src/task/process.rs"),
+        "#[derive(Clone, Debug, PartialEq, Eq)]\npub struct ApplicationIdentity",
+        "/// プロセス構造体",
+    ));
+    program.push_str(
+        r#"
+    }
+    pub struct Process{pub identity:Option<process::ApplicationIdentity>,pub digest:Option<[u8;32]>,pub caps:crate::CapabilitySet,pub authorities:crate::KernelAuthoritySet}
+    impl Process {
+        pub fn application_identity(&self)->Option<&process::ApplicationIdentity>{self.identity.as_ref()}
+        pub fn image_digest(&self)->Option<[u8;32]>{self.digest}
+        pub fn capabilities(&self)->&crate::CapabilitySet{&self.caps}
+        pub fn kernel_authorities(&self)->&crate::KernelAuthoritySet{&self.authorities}
+        pub fn privilege(&self)->PrivilegeLevel{PrivilegeLevel::User}
+    }
+}
+use task::{Process,PrivilegeLevel};use task::process;
+pub mod capability {pub use crate::abi::capability::*;pub use crate::{CapabilitySet,KernelAuthoritySet};}
+"#,
+    );
+    program.push_str(&format!(
+        "#[path={:?}]mod origin;\n",
+        root.join("core/src/task/image_origin.rs")
+    ));
+    program.push_str(
+        r#"
 fn clear(){FAIL_AFTER.set(None);REGISTRY.with_borrow_mut(|r|r.names=Vec::new());}
 fn main(){
     for invalid in ["","Bad.Name","bad..name","trailing."] {
@@ -100,6 +137,14 @@ fn main(){
     let requests=vec!["process.spawn".to_string(),"memory.phys.map@0x1000:4096".to_string()];
     for allocation in 0..2 {let live=LIVE.load(Ordering::Relaxed);FAIL_AFTER.set(Some(allocation));assert_eq!(parse_requested_exec_grants(&requests).err(),Some(Error::ResourceUnavailable));assert_eq!(FAIL_AFTER.get(),None);assert_eq!(LIVE.load(Ordering::Relaxed),live);}
     let (caps,authorities)=parse_requested_exec_grants(&requests).unwrap();assert!(caps.contains_exact(Capability::ProcessSpawn));assert_eq!(caps.len(),1);assert!(authorities.contains_exact(&first));assert_eq!(authorities.len(),1);
+    let mut process=Process{identity:Some(process::ApplicationIdentity::new("app.example".into(),"developer".into(),[7;32],process::ApplicationProvenance::BuiltIn)),digest:Some([9;32]),caps:caps.try_clone().unwrap(),authorities:authorities.try_clone().unwrap()};
+    for allocation in 0..4 {let live=LIVE.load(Ordering::Relaxed);FAIL_AFTER.set(Some(allocation));assert_eq!(origin::ImageOrigin::capture(&process).err(),Some(Error::ResourceUnavailable));assert_eq!(FAIL_AFTER.get(),None);assert_eq!(LIVE.load(Ordering::Relaxed),live);assert!(process.caps.contains_exact(Capability::ProcessSpawn));assert!(process.authorities.contains_exact(&first));}
+    let captured=origin::ImageOrigin::capture(&process).unwrap().unwrap();
+    let mut authorization=process::PendingExecSecurity{path:String::new(),authorized_thread:task::ThreadId(23),executable_digest:[9;32],capabilities:process.caps.try_clone().unwrap(),kernel_authorities:process.authorities.try_clone().unwrap(),identity:process.identity.as_ref().unwrap().try_clone().unwrap(),kind:process::PendingExecKind::Spawn,execution_class:mnu_abi::exec::ExecutionClass::Unprivileged};
+    process.caps.remove(Capability::ProcessSpawn);process.authorities.remove_exact(&first);process.identity=None;process.digest=None;
+    assert!(captured.permits(&authorization));authorization.capabilities.try_insert(Capability::FsReadAll).unwrap();assert!(!captured.permits(&authorization));
+    FAIL_AFTER.set(Some(0));assert!(origin::ImageOrigin::capture(&process).unwrap().is_none());assert_eq!(FAIL_AFTER.get(),Some(0));FAIL_AFTER.set(None);
+    FAIL_AFTER.set(Some(0));assert!(CapabilitySet::empty().try_clone().unwrap().is_empty());assert!(KernelAuthoritySet::empty().try_clone().unwrap().is_empty());assert_eq!(FAIL_AFTER.get(),Some(0));FAIL_AFTER.set(None);
 }
 "#,
     );
