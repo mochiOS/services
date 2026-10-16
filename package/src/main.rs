@@ -992,21 +992,29 @@ fn parse_package_request(
     }
 }
 
+// Package replies use POSIX wire errors, not native tags or newlib C errno.
+// The legacy reply carries a positive magnitude; the versioned reply negates it.
+fn reply_errno(result: Result<(), mochi_user_syscall::SysError>) -> u64 {
+    match result {
+        Ok(()) => 0,
+        Err(error) => u64::from(
+            mochios_posix_protocol::status::normalize_failure(error.raw()).unsigned_abs(),
+        ),
+    }
+}
+
 fn reply_status(
     sender: u64,
     request_id: u64,
     legacy: bool,
     result: Result<(), mochi_user_syscall::SysError>,
 ) {
-    let errno = match result {
-        Ok(_) => 0,
-        Err(err) => err.errno().unwrap_or(mochi_user_syscall::EIO),
-    };
+    let errno = reply_errno(result);
     if legacy {
         let _ = platform::ipc::reply(sender, &errno.to_le_bytes());
         return;
     }
-    let status = -i32::try_from(errno).unwrap_or(mochi_user_syscall::EIO as i32);
+    let status = -(errno as i32);
     let mut reply = [0u8; package_protocol::HEADER_LEN];
     if let Ok(length) = package_protocol::encode_status(request_id, status, &mut reply) {
         let _ = platform::ipc::reply(sender, &reply[..length]);
@@ -1215,17 +1223,18 @@ fn run_server() -> ! {
                 && attached.handles[0].handle != 0
                 && attached.handles[0].reserved == 0
                 && attached.handles[0].rights & platform::handle::HANDLE_RIGHT_SEND != 0;
-            let status = if !valid {
-                mochi_user_syscall::EINVAL
+            let result = if !valid {
+                Err(invalid_request())
             } else if platform::capability::check_thread(sender, "capabilities.manage") != Ok(1) {
-                mochi_user_syscall::EACCES
+                Err(mochi_user_syscall::SysError::from_raw(
+                    mochi_user_syscall::EACCES as i64,
+                ))
             } else {
                 let posix_endpoint = attached.handles[0].handle;
                 attached.handles[0].handle = 0;
                 posix_io::install_endpoint(posix_endpoint)
-                    .map(|_| 0)
-                    .unwrap_or_else(|error| error.errno().unwrap_or(mochi_user_syscall::EIO))
             };
+            let status = reply_errno(result);
             for handle in attached.handles.iter().take(attached.count as usize) {
                 if handle.handle != 0 {
                     let _ = platform::handle::close(handle.handle);
