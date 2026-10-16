@@ -724,6 +724,12 @@ fn all_253_delivered_files_are_published_together_or_rolled_back_on_late_failure
     for fail_last in [false, true] {
         let mut table = FdTable::<u32>::new();
         let group = table.reserve_up_to(3, 256, 253).unwrap();
+        for index in 0..253 {
+            assert_eq!(group.descriptor(index), Some(3 + index as i32));
+            assert!(table.get(group.descriptor(index).unwrap()).is_none());
+        }
+        assert_eq!(group.descriptor(253), None);
+        assert_eq!(group.descriptor(usize::MAX), None);
         let mut entries = vec![];
         let mut closed = vec![];
         let mut offset = 0;

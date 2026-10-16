@@ -143,6 +143,21 @@ static void *worker(void *unused) {
     } else
       result = send(source, bytes, 7, 0);
     break;
+  case 8:
+  case 10: {
+    union {
+      struct cmsghdr alignment;
+      unsigned char bytes[CMSG_SPACE(sizeof(int))];
+    } ancillary = {0};
+    struct msghdr message = {.msg_iov = vectors,
+                             .msg_iovlen = 9,
+                             .msg_control = ancillary.bytes,
+                             .msg_controllen = sizeof(ancillary.bytes)};
+    result = recvmsg(source, &message, 0);
+    if (message.msg_controllen != 0)
+      return (void *)7;
+    break;
+  }
   case 9:
   case 11: {
     union {
@@ -169,7 +184,8 @@ static void *worker(void *unused) {
     return (void *)2;
   if ((kind == 0 || kind == 4 || kind == 6) && memcmp(bytes, "abcDEFG", 7))
     return (void *)3;
-  if (kind == 2 && (memcmp(first, "abc", 3) || memcmp(second, "DEFG", 4)))
+  if ((kind == 2 || kind == 8 || kind == 10) &&
+      (memcmp(first, "abc", 3) || memcmp(second, "DEFG", 4)))
     return (void *)4;
   return NULL;
 }
@@ -199,15 +215,14 @@ int main(void) {
   CHECK(pipe(transfer_pipe) == 0);
   fprintf(stderr, "io-escape: start blocked scalar/vector/socket I/O\n");
   for (kind = 0; kind < 12; ++kind) {
-    if (kind == 8 || kind == 10)
-      continue;
     for (outcome = 0; outcome < 4; ++outcome) {
       int baseline = snapshot(before);
       CHECK(baseline > 0 && baseline < 126);
       CHECK(kind < 4
                 ? pipe(pipes) == 0
                 : socketpair(AF_UNIX,
-                             kind < 6 || kind == 9 ? SOCK_STREAM : SOCK_DGRAM,
+                             kind < 6 || kind == 8 || kind == 9 ? SOCK_STREAM
+                                                                : SOCK_DGRAM,
                              0, pipes) == 0);
       int count = snapshot(after);
       CHECK(count == baseline + 2);
@@ -254,8 +269,9 @@ int main(void) {
           /* Two sockets, the runtime's own thread Handle, this observer's
            * thread Handle, staged RAM, and (send only) the wait-job Handle.
            * A worker RPC alone does not prove these resources exist yet. */
-          if (kind < 6 || native(680, 0, 0, 0) ==
-                              baseline + (kind >= 9 ? 7 : 5 + (kind & 1)))
+          if (kind < 6 ||
+              native(680, 0, 0, 0) ==
+                  baseline + (kind == 9 || kind == 11 ? 7 : 5 + (kind & 1)))
             break;
         }
         CHECK(status.state != 5);
@@ -318,7 +334,7 @@ int main(void) {
     fprintf(stderr, "io-escape: pwrite outcome=%u PASS\n", outcome);
   }
   puts(
-      "io-escape: PASS 43 qualified scalar/vector/socket/positioned I/O cases; "
+      "io-escape: PASS 51 qualified scalar/vector/socket/positioned I/O cases; "
       "returning handlers, siglongjmp, pthread_exit, cancellation, descriptor "
       "reuse and native Handle reclamation");
   return 0;
