@@ -30,6 +30,7 @@ const STAT_NOFOLLOW: u32 = 1;
 struct NewlibStat(u32);
 static STAT_FLAGS: AtomicU32 = AtomicU32::new(0);
 static TRANSLATE_FAIL: AtomicU32 = AtomicU32::new(0);
+static READLINK_OUTPUT: AtomicU64 = AtomicU64::new(0);
 static DRAINS: AtomicU32 = AtomicU32::new(0);
 fn translate_posix_stat(value: &u32) -> Result<NewlibStat, c_int> {
     if TRANSLATE_FAIL.load(Ordering::Relaxed) != 0 {
@@ -278,6 +279,22 @@ impl Client {
                 assert_eq!(CLOSED.load(Ordering::Relaxed), 0);
             }
             3 => unsafe { (INPUT.load(Ordering::Relaxed) as *mut u8).write(b'X') },
+            4 => {
+                let caller = READLINK_OUTPUT.load(Ordering::Relaxed) as usize;
+                let borrowed = output.as_ptr() as usize..output.as_ptr() as usize + output.len();
+                assert!(
+                    !borrowed.contains(&caller),
+                    "caller output borrowed across IPC"
+                );
+                unsafe { (caller as *mut u8).write(0x5a) };
+            }
+            5 => return Ok(output.len() + 1),
+            7 => return Ok(posix_protocol::MAX_PATH_LEN + 1),
+            6 => {
+                assert!(output.len() <= posix_protocol::MAX_PATH_LEN);
+                output.fill(0xff);
+                return Ok(output.len());
+            }
             _ => {}
         }
         assert_eq!(path, b"target");
@@ -629,6 +646,70 @@ fn readlink_owns_input_and_directory_through_errors_copyout_and_reentrant_close(
         assert_eq!(CALLS.load(Ordering::Relaxed), 1);
         assert!(CONTROL.callback_resources.is_empty());
         assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[test]
+fn readlink_receives_into_private_storage_while_handler_writes_caller_output() {
+    let _serial = SERIAL.lock().unwrap();
+    reset();
+    CASE.store(4, Ordering::Relaxed);
+    let mut output = [0xa5; 32];
+    READLINK_OUTPUT.store(output.as_mut_ptr() as u64, Ordering::Relaxed);
+    assert_eq!(
+        implementation::readlink(7, c"target".as_ptr(), output.as_mut_ptr().cast(), 8),
+        Ok(8)
+    );
+    assert_eq!(&output[..8], b"destinat");
+    assert!(output[8..].iter().all(|byte| *byte == 0xa5));
+    assert_eq!(PINS.load(Ordering::Relaxed), 0);
+    assert!(CONTROL.callback_resources.is_empty());
+}
+
+#[test]
+fn readlink_rejects_malformed_lengths_without_partial_caller_writes() {
+    let _serial = SERIAL.lock().unwrap();
+    for case in [5, 7] {
+        reset();
+        CASE.store(case, Ordering::Relaxed);
+        let mut output = [0xa5u8; 32];
+        assert_eq!(
+            implementation::readlink(
+                7,
+                c"target".as_ptr(),
+                output.as_mut_ptr().cast(),
+                output.len()
+            ),
+            Err(EIO)
+        );
+        assert_eq!(output, [0xa5; 32]);
+        assert_eq!(PINS.load(Ordering::Relaxed), 0);
+        assert!(CONTROL.callback_resources.is_empty());
+    }
+}
+
+#[test]
+fn readlink_only_copies_bounded_prefix_bytes_without_nul_even_with_large_capacity() {
+    let _serial = SERIAL.lock().unwrap();
+    for capacity in [
+        1,
+        8,
+        posix_protocol::MAX_PATH_LEN,
+        posix_protocol::MAX_PATH_LEN + 1,
+        isize::MAX as usize,
+    ] {
+        reset();
+        CASE.store(6, Ordering::Relaxed);
+        let mut output = vec![0xa5u8; posix_protocol::MAX_PATH_LEN + 2];
+        let expected = capacity.min(posix_protocol::MAX_PATH_LEN);
+        assert_eq!(
+            implementation::readlink(7, c"target".as_ptr(), output.as_mut_ptr().cast(), capacity),
+            Ok(expected as isize)
+        );
+        assert!(output[..expected].iter().all(|byte| *byte == 0xff));
+        assert!(output[expected..].iter().all(|byte| *byte == 0xa5));
+        assert_eq!(PINS.load(Ordering::Relaxed), 0);
+        assert!(CONTROL.callback_resources.is_empty());
     }
 }
 #[test]
