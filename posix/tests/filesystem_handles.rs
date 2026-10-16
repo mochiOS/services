@@ -1560,13 +1560,41 @@ fn sequential_read_returns_its_original_position_and_preserves_offset_on_error()
 }
 
 #[test]
+fn legacy_directory_descriptions_keep_the_original_stream_format() {
+    let mut filesystem = test_filesystem();
+    let opened = filesystem
+        .open_at(
+            protocol::Header {
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+                ..Default::default()
+            },
+            b"/",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    let bytes = filesystem.provider_read(opened.header.open_id, 4096).unwrap();
+    assert!(!bytes.is_empty());
+    let mut remaining = bytes.as_slice();
+    while !remaining.is_empty() {
+        let (header, name, consumed) = protocol::decode_dir_entry(remaining).unwrap();
+        assert_eq!(header.next_position, None);
+        assert_eq!(consumed, protocol::DIRENT_HEADER_LEN + name.len());
+        remaining = &remaining[consumed..];
+    }
+    filesystem.provider_close(opened.header.open_id).unwrap();
+}
+
+#[test]
 fn directory_provider_declines_pager_identity_without_disabling_stream_reads() {
     let mut filesystem = test_filesystem();
     let open_id = filesystem
         .open_at(
             protocol::Header {
                 opcode: protocol::OP_OPEN_AT,
-                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+                flags: protocol::OPEN_AT_READ
+                    | protocol::OPEN_AT_DIRECTORY
+                    | protocol::OPEN_AT_CURSOR_RECORDS,
                 ..protocol::Header::default()
             },
             b"/",
@@ -1580,9 +1608,23 @@ fn directory_provider_declines_pager_identity_without_disabling_stream_reads() {
     let bytes = filesystem.provider_read(open_id, 4096).unwrap();
     assert!(!bytes.is_empty());
     let mut remaining = bytes.as_slice();
+    let mut records = Vec::new();
     while !remaining.is_empty() {
-        let (_, _, consumed) = protocol::decode_dir_entry(remaining).unwrap();
+        let (header, name, consumed) = protocol::decode_dir_entry(remaining).unwrap();
+        records.push((header.next_position.unwrap(), name.to_vec()));
         remaining = &remaining[consumed..];
+    }
+    for (index, (position, _)) in records.iter().enumerate() {
+        assert_eq!(
+            filesystem.provider_seek(open_id, *position as i64, HANDLE_SEEK_START),
+            Ok(*position)
+        );
+        let rest = filesystem.provider_read(open_id, 4096).unwrap();
+        if let Some((_, next_name)) = records.get(index + 1) {
+            assert_eq!(protocol::decode_dir_entry(&rest).unwrap().1, next_name);
+        } else {
+            assert!(rest.is_empty());
+        }
     }
     assert_eq!(filesystem.provider_memory_object(u64::MAX), Err(9));
 }

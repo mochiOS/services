@@ -1988,6 +1988,7 @@ impl RuntimeFilesystem {
             (posix::OPEN_NONBLOCK, filesystem::OPEN_AT_NONBLOCK),
             (posix::OPEN_DIRECTORY, filesystem::OPEN_AT_DIRECTORY),
             (posix::OPEN_NOFOLLOW, filesystem::OPEN_AT_NOFOLLOW),
+            (posix::OPEN_CURSOR_RECORDS, filesystem::OPEN_AT_CURSOR_RECORDS),
         ] {
             if request.options & source != 0 {
                 flags |= target;

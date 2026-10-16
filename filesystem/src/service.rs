@@ -82,6 +82,7 @@ pub(crate) struct OpenFile {
     file: Option<File>,
     offset: u64,
     status_flags: u32,
+    cursor_records: bool,
 }
 
 #[derive(Clone)]
@@ -358,6 +359,7 @@ impl FilesystemService {
                 file: Some(file),
                 offset: 0,
                 status_flags: 0,
+                cursor_records: false,
             },
         );
         let mut response = self.success(request);
@@ -514,6 +516,7 @@ impl FilesystemService {
                 inode,
                 file,
                 offset: 0,
+                cursor_records: request.flags & protocol::OPEN_AT_CURSOR_RECORDS != 0,
                 status_flags: (if request.flags & protocol::OPEN_AT_APPEND != 0 {
                     protocol::OPEN_STATUS_APPEND
                 } else {
@@ -684,6 +687,7 @@ impl FilesystemService {
                 file: None,
                 offset: 0,
                 status_flags: 0,
+                cursor_records: false,
             },
         );
         response.header.open_id = open_id;
@@ -1549,12 +1553,14 @@ impl FilesystemService {
             let filesystem = open.filesystem.clone();
             let volume = open.volume;
             let start_entry = open.offset;
+            let cursor_records = open.cursor_records;
             let (payload, next_entry) = self.read_open_directory_payload(
                 &filesystem,
                 volume,
                 inode,
                 start_entry,
                 length.min(mnu_abi::provider::MAX_DATA_LEN),
+                cursor_records,
             )?;
             self.opens.get_mut(&open_id).ok_or(EBADF)?.offset = next_entry;
             return Ok(payload);
@@ -2083,6 +2089,7 @@ impl FilesystemService {
         inode: Inode,
         start_entry: u64,
         max_length: usize,
+        cursor_records: bool,
     ) -> Result<(Vec<u8>, u64), i32> {
         let start_entry = usize::try_from(start_entry).map_err(|_| EINVAL)?;
         let node = self
@@ -2140,7 +2147,12 @@ impl FilesystemService {
                 next_entry = next_entry.checked_add(1).ok_or(EIO)?;
                 continue;
             }
-            let record_length = protocol::DIRENT_HEADER_LEN + name.len();
+            let header_length = if cursor_records {
+                protocol::CURSOR_DIRENT_HEADER_LEN
+            } else {
+                protocol::DIRENT_HEADER_LEN
+            };
+            let record_length = header_length + name.len();
             if payload.len().saturating_add(record_length) > max_length {
                 if payload.is_empty() {
                     return Err(ENOSPC);
@@ -2149,9 +2161,19 @@ impl FilesystemService {
             }
             let offset = payload.len();
             payload.resize(offset + record_length, 0);
-            protocol::encode_dir_entry(node_id, kind, &name, &mut payload[offset..])
-                .map_err(|_| EIO)?;
             next_entry = next_entry.checked_add(1).ok_or(EIO)?;
+            if cursor_records {
+                protocol::encode_cursor_dir_entry(
+                    node_id,
+                    kind,
+                    &name,
+                    next_entry as u64,
+                    &mut payload[offset..],
+                )
+            } else {
+                protocol::encode_dir_entry(node_id, kind, &name, &mut payload[offset..])
+            }
+            .map_err(|_| EIO)?;
         }
         Ok((payload, next_entry as u64))
     }

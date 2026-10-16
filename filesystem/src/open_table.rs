@@ -11,6 +11,7 @@ pub(crate) struct DeviceOpen {
     pub null: Option<NullDescription>,
     pub offset: u64,
     pub directory_flags: u32,
+    pub cursor_records: bool,
 }
 
 enum Description {

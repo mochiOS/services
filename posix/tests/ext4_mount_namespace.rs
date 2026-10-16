@@ -636,6 +636,43 @@ fn device_provider_uses_one_id_space_and_never_allocates_regular_file_backing() 
 }
 
 #[test]
+fn device_directory_cursor_records_are_opt_in_and_resume_at_the_exact_entry() {
+    let fixture = Fixture::new();
+    let mut service = FilesystemService::new(fixture.volume("device-cursor"));
+    service
+        .mount_devices(b"/mount", filesystem_service::devfs::DeviceFilesystem::default())
+        .unwrap();
+    for cursor in [false, true] {
+        let flags = protocol::OPEN_AT_READ
+            | protocol::OPEN_AT_DIRECTORY
+            | if cursor { protocol::OPEN_AT_CURSOR_RECORDS } else { 0 };
+        let directory = device_open(&mut service, b"/mount", flags, PathAnchors::default()).unwrap();
+        let mut names = Vec::new();
+        loop {
+            let bytes = service
+                .provider_read(directory, protocol::CURSOR_DIRENT_HEADER_LEN + 4)
+                .unwrap();
+            if bytes.is_empty() {
+                break;
+            }
+            let (header, name, consumed) = protocol::decode_dir_entry(&bytes).unwrap();
+            assert_eq!(consumed, bytes.len());
+            names.push(name.to_vec());
+            assert_eq!(header.next_position, cursor.then_some(names.len() as u64));
+            if cursor {
+                let next = header.next_position.unwrap();
+                assert_eq!(
+                    service.provider_seek(directory, next as i64, mnu_abi::HANDLE_SEEK_START),
+                    Ok(next)
+                );
+            }
+        }
+        assert_eq!(names, [b".".to_vec(), b"..".to_vec(), b"null".to_vec()]);
+        service.provider_close(directory).unwrap();
+    }
+}
+
+#[test]
 fn device_directory_handles_support_relative_open_cwd_and_confined_roots() {
     let fixture = Fixture::new();
     let mut service = FilesystemService::new(fixture.volume("device-directories"));
@@ -702,7 +739,7 @@ fn device_directory_handles_support_relative_open_cwd_and_confined_roots() {
     let mut names = Vec::new();
     loop {
         let bytes = service
-            .provider_read(directory, protocol::DIRENT_HEADER_LEN + 4)
+            .provider_read(directory, protocol::CURSOR_DIRENT_HEADER_LEN + 4)
             .unwrap();
         if bytes.is_empty() {
             break;
@@ -1567,16 +1604,32 @@ fn private_retention_entries_are_inaccessible_but_prefixed_user_names_remain_vis
         let directory = open(
             &mut service,
             directory_path.as_bytes(),
-            protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+            protocol::OPEN_AT_READ
+                | protocol::OPEN_AT_DIRECTORY
+                | protocol::OPEN_AT_CURSOR_RECORDS,
             PathAnchors::default(),
         );
         let payload = service.provider_read(directory.open_id, 4096).unwrap();
         let mut remaining = payload.as_slice();
         let mut names = Vec::new();
+        let mut positions = Vec::new();
         while !remaining.is_empty() {
-            let (_, name, length) = protocol::decode_dir_entry(remaining).unwrap();
+            let (header, name, length) = protocol::decode_dir_entry(remaining).unwrap();
             names.push(name.to_vec());
+            positions.push(header.next_position.unwrap());
             remaining = &remaining[length..];
+        }
+        assert!(positions.windows(2).any(|pair| pair[1] > pair[0] + 1));
+        for (index, position) in positions.iter().enumerate() {
+            service
+                .provider_seek(directory.open_id, *position as i64, mnu_abi::HANDLE_SEEK_START)
+                .unwrap();
+            let rest = service.provider_read(directory.open_id, 4096).unwrap();
+            if let Some(next) = names.get(index + 1) {
+                assert_eq!(protocol::decode_dir_entry(&rest).unwrap().1, next);
+            } else {
+                assert!(rest.is_empty());
+            }
         }
         assert!(names.iter().any(|name| name == b".mochios-orphan-user"));
         assert!(names

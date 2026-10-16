@@ -205,6 +205,7 @@ impl FilesystemService {
                 null,
                 offset: 0,
                 directory_flags: flags,
+                cursor_records: request.flags & protocol::OPEN_AT_CURSOR_RECORDS != 0,
             },
         );
         let mut response = self.success(request);
@@ -239,10 +240,15 @@ impl FilesystemService {
             .ok_or(EIO)?
             .device_entries(&open.node)?;
         let start = usize::try_from(open.offset).map_err(|_| EINVAL)?;
+        let cursor_records = open.cursor_records;
         let mut payload = Vec::new();
         let mut next = start;
         for (id, kind, name) in entries.into_iter().skip(start) {
-            let size = protocol::DIRENT_HEADER_LEN + name.len();
+            let size = if cursor_records {
+                protocol::CURSOR_DIRENT_HEADER_LEN
+            } else {
+                protocol::DIRENT_HEADER_LEN
+            } + name.len();
             if payload.len().saturating_add(size) > length {
                 if payload.is_empty() {
                     return Err(ENOSPC);
@@ -251,14 +257,20 @@ impl FilesystemService {
             }
             let offset = payload.len();
             payload.resize(offset + size, 0);
-            protocol::encode_dir_entry(
-                (id.volume << 32) | u64::from(id.inode),
-                kind,
-                &name,
-                &mut payload[offset..],
-            )
-            .map_err(|_| EIO)?;
             next = next.checked_add(1).ok_or(EIO)?;
+            let node_id = (id.volume << 32) | u64::from(id.inode);
+            if cursor_records {
+                protocol::encode_cursor_dir_entry(
+                    node_id,
+                    kind,
+                    &name,
+                    next as u64,
+                    &mut payload[offset..],
+                )
+            } else {
+                protocol::encode_dir_entry(node_id, kind, &name, &mut payload[offset..])
+            }
+            .map_err(|_| EIO)?;
         }
         self.opens.device_mut(open_id).ok_or(EBADF)?.offset = next as u64;
         Ok(payload)

@@ -17,6 +17,9 @@ const EACCES: c_int = 13;
 const EPERM: c_int = 1;
 const ENOMEM: c_int = 12;
 const ENOTDIR: c_int = 20;
+const EINVAL: c_int = 22;
+const EOVERFLOW: c_int = 139;
+const ENOTSUP: c_int = 134;
 const O_CLOEXEC: c_int = 0x40000;
 static SERIAL: Mutex<()> = Mutex::new(());
 static OPEN_CASE: AtomicU32 = AtomicU32::new(0);
@@ -45,6 +48,7 @@ struct DirStream {
     buffer: [u8; 16],
     buffer_offset: usize,
     buffer_len: usize,
+    next_position: Option<u64>,
 }
 impl DirStream {
     fn new(fd: c_int) -> Self {
@@ -53,6 +57,7 @@ impl DirStream {
             buffer: [0; 16],
             buffer_offset: 0,
             buffer_len: 0,
+            next_position: None,
         }
     }
 }
@@ -228,6 +233,7 @@ mod syscall {
     use super::*;
     pub const HANDLE_RIGHT_READ: u64 = 1;
     pub const HANDLE_SEEK_START: u64 = 0;
+    pub const HANDLE_SEEK_CURRENT: u64 = 1;
     pub enum SyscallNumber {
         HandleRead,
         HandleSeek,
@@ -235,7 +241,10 @@ mod syscall {
     pub fn raw_syscall3(op: SyscallNumber, handle: u64, output: u64, capacity: u64) -> u64 {
         assert_eq!(handle, 10);
         if matches!(op, SyscallNumber::HandleSeek) {
-            assert_eq!((output, capacity), (0, HANDLE_SEEK_START));
+            assert!(capacity == HANDLE_SEEK_START || capacity == HANDLE_SEEK_CURRENT);
+            if capacity == HANDLE_SEEK_CURRENT {
+                assert_eq!(output, 0);
+            }
             assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
             assert!(!CONTROL.callback_resources.is_empty());
             assert_eq!(PINS.load(Ordering::Relaxed), 1);
@@ -245,7 +254,13 @@ mod syscall {
                 RETIRED.store(1, Ordering::Relaxed);
                 assert_eq!(CLOSED.load(Ordering::Relaxed), 0);
             }
-            return if case % 4 == 1 { (-5i64) as u64 } else { 0 };
+            return if case % 4 == 1 {
+                (-5i64) as u64
+            } else if capacity == HANDLE_SEEK_CURRENT {
+                123
+            } else {
+                output
+            };
         }
         assert_eq!(capacity, 16);
         assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
@@ -266,6 +281,95 @@ mod syscall {
             2 => (-5i64) as u64,
             _ => 17, // Malformed provider count must not become a slice bound.
         }
+    }
+}
+
+#[test]
+fn tell_uses_record_cookies_not_the_providers_prefetched_end() {
+    let _serial = SERIAL.lock().unwrap();
+    let mut stream = DirStream::new(7);
+    stream.buffer_offset = 3;
+    stream.buffer_len = 9;
+    CALLS.store(0, Ordering::Relaxed);
+    for position in [0, 7, i64::MAX as u64] {
+        stream.next_position = Some(position);
+        assert_eq!(implementation::tell(&mut stream), Ok(position as i64));
+    }
+    stream.next_position = Some(u64::MAX);
+    assert_eq!(implementation::tell(&mut stream), Err(EOVERFLOW));
+    stream.next_position = None;
+    assert_eq!(implementation::tell(&mut stream), Err(ENOTSUP));
+    assert_eq!(CALLS.load(Ordering::Relaxed), 0);
+    assert_eq!((stream.buffer_offset, stream.buffer_len), (3, 9));
+}
+
+#[test]
+fn tell_queries_adopted_position_only_when_no_unconsumed_legacy_data_exists() {
+    let _serial = SERIAL.lock().unwrap();
+    for case in [0, 1, 4, 5, 8, 9] {
+        CASE.store(case, Ordering::Relaxed);
+        CALLS.store(0, Ordering::Relaxed);
+        RETIRED.store(0, Ordering::Relaxed);
+        CLOSED.store(0, Ordering::Relaxed);
+        let mut stream = DirStream::new(7);
+        assert_eq!(
+            implementation::tell(&mut stream),
+            match case {
+                0 | 4 => Ok(123),
+                1 | 5 => Err(EIO),
+                _ => Err(EBADF),
+            }
+        );
+        assert_eq!(
+            stream.next_position,
+            if case == 0 || case == 4 {
+                Some(123)
+            } else {
+                None
+            }
+        );
+        assert_eq!(CALLS.load(Ordering::Relaxed), u32::from(case < 8));
+        assert_eq!(PINS.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            CLOSED.load(Ordering::Relaxed),
+            u32::from(case == 4 || case == 5)
+        );
+        assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
+        assert!(CONTROL.callback_resources.is_empty());
+    }
+}
+
+#[test]
+fn seek_preserves_prefetch_on_failure_and_rejects_negative_locations() {
+    let _serial = SERIAL.lock().unwrap();
+    for case in [0, 1] {
+        CASE.store(case, Ordering::Relaxed);
+        RETIRED.store(0, Ordering::Relaxed);
+        CLOSED.store(0, Ordering::Relaxed);
+        let mut stream = DirStream::new(7);
+        stream.buffer_offset = 3;
+        stream.buffer_len = 9;
+        stream.next_position = Some(17);
+        assert_eq!(implementation::seek(&mut stream, -1), Err(EINVAL));
+        assert_eq!(
+            implementation::seek(&mut stream, 9000),
+            if case == 0 { Ok(()) } else { Err(EIO) }
+        );
+        assert_eq!(
+            (
+                stream.buffer_offset,
+                stream.buffer_len,
+                stream.next_position
+            ),
+            if case == 0 {
+                (0, 0, Some(9000))
+            } else {
+                (3, 9, Some(17))
+            }
+        );
+        assert_eq!(PINS.load(Ordering::Relaxed), 0);
+        assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
+        assert!(CONTROL.callback_resources.is_empty());
     }
 }
 
@@ -357,6 +461,7 @@ fn refills_release_pins_after_data_eof_errors_and_reentrant_close() {
             buffer: [0; 16],
             buffer_offset: 3,
             buffer_len: 4,
+            next_position: None,
         };
         let result = implementation::refill(&mut stream);
         assert_eq!(
