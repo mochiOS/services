@@ -271,7 +271,7 @@ int main(int argc, char **argv) {
     CHECK(N(PROCESS_WAIT, process, 0, &status) == -EAGAIN);
     CHECK(N(SLEEP, 100, 0, 0) == 0);
     CHECK(N(PROCESS_STATUS, process, &status, 0) == 0 && status.state == 1);
-    CHECK(N(PROCESS_CREATE, image, metadata, length) == -EACCES);
+    CHECK(N(PROCESS_CREATE, image, metadata, length) == INT64_C(-262138));
     CHECK(N(PROCESS_RESUME, process, 0, 0) == 0);
     for (unsigned attempt = 0; attempt < 500; ++attempt) {
         CHECK(N(PROCESS_STATUS, process, &status, 0) == 0);

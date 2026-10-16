@@ -78,6 +78,15 @@ mod syscall {
         bytes.fill(0xa5);
         crate::COPY_ERROR.with(|error| error.get().map_or(Ok(()), Err))
     }
+    pub fn copy_from_user_native(
+        pointer: u64,
+        bytes: &mut [u8],
+    ) -> Result<(), mnu_abi::status::Error> {
+        copy_from_user(pointer, bytes).map_err(|raw| {
+            mnu_abi::status::Error::from_raw(raw)
+                .unwrap_or(mnu_abi::status::Error::InvalidAddress)
+        })
+    }
 }
 #[path = "../../../core/src/syscall/exec/storage.rs"]
 mod storage;
@@ -265,6 +274,34 @@ fn zeroing_capacity_overflow_copy_errors_and_empty_storage_are_explicit() {
 }
 
 #[test]
+fn native_storage_keeps_allocation_and_usercopy_failure_categories() {
+    use mnu_abi::status::Error;
+
+    assert_eq!(
+        snapshot::zeroed_native(usize::MAX),
+        Err(Error::ResourceUnavailable)
+    );
+    assert_eq!(snapshot::zeroed_native(32).unwrap(), [0; 32]);
+    COPIES.with(|copies| copies.set(0));
+    FAIL_NEXT.with(|fail| fail.set(true));
+    let result = storage::from_user_native(42, 256);
+    assert!(!FAIL_NEXT.with(|fail| fail.replace(false)));
+    assert_eq!(result, Err(Error::ResourceUnavailable));
+    assert_eq!(COPIES.with(Cell::get), 0);
+    for error in [
+        Error::InvalidAddress,
+        Error::ResourceUnavailable,
+        Error::BackingFailure,
+    ] {
+        COPY_ERROR.with(|value| value.set(Some(error.into_raw())));
+        let result = storage::from_user_native(42, 256);
+        COPY_ERROR.with(|value| value.set(None));
+        assert_eq!(result, Err(error));
+    }
+    assert_eq!(storage::from_user_native(42, 8).unwrap(), [0xa5; 8]);
+}
+
+#[test]
 fn borrowed_identity_preparation_is_fallible_and_preserves_exact_opaque_text() {
     let identity = "opaque:image/日本語#42";
     FAIL_NEXT.with(|fail| fail.set(true));
@@ -300,7 +337,7 @@ fn native_image_preparation_routes_owned_storage_through_fallible_paths() {
         assert!(replace.contains(&format!("storage::from_user({buffer}_ptr, {buffer}_len)")));
     }
     let create = exec.split("pub fn process_create_syscall(").nth(1).unwrap();
-    assert!(create.contains("storage::from_user(request_ptr, length)"));
+    assert!(create.contains("storage::from_user_native(request_ptr, length)"));
     assert!(create.contains("specs.try_reserve_exact(request.handles().count())"));
     assert!(create.contains("values.try_reserve_exact(request.values().count())"));
     for name in ["map_initial_tls", "build_relocatable_user_stack"] {

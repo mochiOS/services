@@ -214,7 +214,7 @@ int main(void) {
   length = metadata(bytes, context);
   put32(bytes + grant_offset + 12, 4097);
   CHECK(authorize((uint64_t)authority));
-  CHECK(N(CREATE, image, bytes, length) == -EINVAL);
+  CHECK(N(CREATE, image, bytes, length) == SC_NATIVE_INVALID_ARGUMENT);
   for (unsigned invalid = 0; invalid < 4; invalid++) {
     struct context bad = context;
     if (invalid == 0)
@@ -234,7 +234,7 @@ int main(void) {
   int64_t process = N(CREATE, image, bytes, length);
   fprintf(stderr, "snapshot-create: result %lld\n", (long long)process);
   CHECK(process > 0);
-  CHECK(N(CREATE, image, bytes, length) == -EACCES);
+  CHECK(N(CREATE, image, bytes, length) == SC_NATIVE_ACCESS_DENIED);
   /* Reauthorization cannot revive an already consumed image through aliases. */
   CHECK(authorize((uint64_t)authority));
   CHECK(N(CREATE, alias, bytes, length) == SC_NATIVE_NOT_READY);
