@@ -40,7 +40,8 @@ int main(void) {
   CHECK(base[4096] == 0);
   base[4096] = 55;
   request.ceiling = used - 4096;
-  CHECK(mb_call(695, (uintptr_t)&request, sizeof(request), 0) == -ENOMEM);
+  CHECK(mb_call(695, (uintptr_t)&request, sizeof(request), 0) ==
+        INT64_C(-262141)); /* native ResourceUnavailable, not a C errno */
   CHECK(base[4096] == 55);
   request.ceiling = UINT64_MAX;
   request.options = 4;

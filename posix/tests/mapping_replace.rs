@@ -26,11 +26,6 @@ pub mod result {
     pub enum Memory {InvalidAddress,Busy}
     pub type Result<T> = core::result::Result<T,crate::Kernel>;
 }
-mod syscall {
-    pub const EINVAL:u64=(-22i64) as u64; pub const ENOMEM:u64=(-12i64) as u64;
-    pub const EFAULT:u64=(-14i64) as u64; pub const EPERM:u64=(-1i64) as u64;
-    pub const EAGAIN:u64=(-11i64) as u64; pub const EIO:u64=(-5i64) as u64;
-}
 extern crate self as mnu_abi;
 #[path="@ROOT@/core/crates/abi/src/status.rs"] pub mod status;
 pub const MEMORY_ACCESS_READ:u64=1; pub const MEMORY_ACCESS_WRITE:u64=2;
@@ -40,6 +35,8 @@ thread_local! {
     static PAGES:RefCell<Vec<u64>>=const {RefCell::new(Vec::new())};
     static EVENTS:RefCell<Vec<&'static str>>=const {RefCell::new(Vec::new())};
     static FAIL_SYNC:Cell<bool>=const {Cell::new(false)};
+    static FAIL_WALK:Cell<bool>=const {Cell::new(false)};
+    static HAS_ROOT:Cell<bool>=const {Cell::new(true)};
     static FAIL_ALLOCATION:Cell<Option<usize>>=const {Cell::new(None)};
     static ALLOCATION_FAILED:Cell<bool>=const {Cell::new(false)};
 }
@@ -76,6 +73,7 @@ mod mem {
     #[path="@ROOT@/core/src/mem/mapping_replace.rs"] pub mod mapping_replace;
     pub mod paging {
         pub unsafe fn next_user_page_entry(_:u64,start:u64,end:u64)->Result<Option<u64>,u64> {
+            if crate::FAIL_WALK.get(){return Err(1);}
             Ok(crate::PAGES.with_borrow(|pages| pages.iter().copied().filter(|&p|p>=start&&p<end).min()))
         }
     }
@@ -116,7 +114,7 @@ mod task {
     impl Borrowed {pub fn virt_start(&self)->u64{0x2000} pub fn end(&self)->Option<u64>{Some(0x3000)}}
     pub struct Process {pub memory_regions:Vec<MemoryRegion>, pub dma:bool,pub mmio:bool}
     impl Process {
-        pub fn page_table(&self)->Option<u64>{Some(4096)}
+        pub fn page_table(&self)->Option<u64>{crate::HAS_ROOT.get().then_some(4096)}
         pub fn find_dma_buffer_by_addr(&self,_:u64,_:u64)->Option<Borrowed>{self.dma.then_some(Borrowed)}
         pub fn find_mmio_mapping_by_addr(&self,_:u64,_:u64)->Option<Borrowed>{self.mmio.then_some(Borrowed)}
         pub fn memory_regions(&self)->&[MemoryRegion]{&self.memory_regions}
@@ -138,6 +136,7 @@ mod task {
 fn reset()->task::Process {
     PAGES.with_borrow_mut(|p|*p=vec![0x1000,0x2000,0x4000,0x9000]);
     EVENTS.with_borrow_mut(|events|{events.clear();events.reserve(16);}); FAIL_SYNC.set(false);
+    FAIL_WALK.set(false);HAS_ROOT.set(true);
     let mut old=MemoryRegion::file_backed(0x1000,0x4000,3,2,
         Arc::new(mem::vm_object::VmObject{busy:false}),8192,true,true,3);
     assert!(old.set_access(0x4000,0x1000,1));
@@ -159,13 +158,18 @@ fn main() {
     assert_eq!(tail.dirty_pages(),[0]);
     PAGES.with_borrow(|p|assert_eq!(p.as_slice(),[0x1000,0x4000,0x9000]));
     EVENTS.with_borrow(|e|assert_eq!(e.as_slice(),["suspend","sync","release","publish"]));
-    for mode in 0..5 {
+    for mode in 0..7 {
         let mut process=reset();
         process.dma=mode==0; process.mmio=mode==1;
         if mode==2 {process.memory_regions[0]=MemoryRegion::file_backed(0x1000,0x4000,3,2,Arc::new(mem::vm_object::VmObject{busy:true}),0,true,true,3);}
         FAIL_SYNC.set(mode==4);
+        FAIL_WALK.set(mode==5);HAS_ROOT.set(mode!=6);
         let result=replace(&mut process,replacement(),Some(if mode==3 {4*4096}else{5*4096}));
-        assert_eq!(result.unwrap_err(),match mode {0|1=>syscall::EPERM,2=>status::Error::NotReady.into_raw(),3=>syscall::ENOMEM,_=>status::Error::BackingFailure.into_raw()});
+        assert_eq!(result.unwrap_err(),match mode {
+            0|1=>status::Error::AccessDenied,2|6=>status::Error::NotReady,
+            3=>status::Error::ResourceUnavailable,4=>status::Error::BackingFailure,
+            _=>status::Error::InvalidAddress,
+        });
         assert_eq!(process.memory_regions.len(),1);
         assert_eq!(process.memory_regions[0].len(),0x4000);
         PAGES.with_borrow(|p|assert_eq!(p.as_slice(),[0x1000,0x2000,0x4000,0x9000]));
@@ -205,7 +209,7 @@ fn main() {
                 }
                 completed=true;break;
             }
-            assert_eq!(result.unwrap_err(),syscall::ENOMEM);
+            assert_eq!(result.unwrap_err(),status::Error::ResourceUnavailable);
             assert_eq!(process.memory_regions.len(),1);
             let old=&process.memory_regions[0];
             assert_eq!((old.start(),old.len()),(0x1000,0x4000));
