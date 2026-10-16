@@ -6,9 +6,11 @@
 #include <signal.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
+#include <time.h>
 
 enum { MEMORY_COPY = 699, COPY_LIMIT = 4096 };
 #define NATIVE_LIMIT_EXCEEDED INT64_C(-262143)
+#define NATIVE_INVALID_ADDRESS INT64_C(-262142)
 static int64_t copy_memory(void *destination, const void *source,
                            uint64_t length) {
   uint64_t result = MEMORY_COPY;
@@ -23,9 +25,13 @@ static void *inaccessible;
 static volatile sig_atomic_t caught;
 static void handler(int signal) {
   char output[16];
-  if (signal != SIGSEGV || copy_memory(output, inaccessible, 1) != -EFAULT ||
+  if (signal != SIGSEGV ||
+      copy_memory(output, inaccessible, 1) != NATIVE_INVALID_ADDRESS ||
       copy_memory(output, "nested", 7) != 7 || strcmp(output, "nested"))
     _exit(91);
+  errno = 0;
+  if (clock_gettime(CLOCK_MONOTONIC, inaccessible) != -1 || errno != EFAULT)
+    _exit(93);
   caught = 1;
   siglongjmp(jump_target, 37);
 }
@@ -35,6 +41,8 @@ int main(void) {
   CHECK(pages != MAP_FAILED);
   inaccessible = pages + COPY_LIMIT * 2;
   CHECK(mprotect(inaccessible, COPY_LIMIT, PROT_NONE) == 0);
+  errno = 0;
+  CHECK(clock_gettime(CLOCK_MONOTONIC, inaccessible) == -1 && errno == EFAULT);
   CHECK(copy_memory(NULL, NULL, 0) == 0);
   CHECK(copy_memory(pages, pages, COPY_LIMIT + 1) == NATIVE_LIMIT_EXCEEDED);
   CHECK(copy_memory(NULL, NULL, UINT64_MAX) == NATIVE_LIMIT_EXCEEDED);
@@ -46,13 +54,13 @@ int main(void) {
   for (unsigned index = 0; index < 64; ++index)
     CHECK(pages[index + 1] == (unsigned char)index);
   for (unsigned round = 0; round < 16; ++round) {
-    CHECK(copy_memory(pages, inaccessible, 1) == -EFAULT);
-    CHECK(copy_memory(inaccessible, pages, 1) == -EFAULT);
-    CHECK(copy_memory(pages, NULL, 1) == -EFAULT);
-    CHECK(copy_memory(pages, (void *)UINTPTR_MAX, 1) == -EFAULT);
+    CHECK(copy_memory(pages, inaccessible, 1) == NATIVE_INVALID_ADDRESS);
+    CHECK(copy_memory(inaccessible, pages, 1) == NATIVE_INVALID_ADDRESS);
+    CHECK(copy_memory(pages, NULL, 1) == NATIVE_INVALID_ADDRESS);
+    CHECK(copy_memory(pages, (void *)UINTPTR_MAX, 1) == NATIVE_INVALID_ADDRESS);
   }
   CHECK(mprotect(pages + COPY_LIMIT, COPY_LIMIT, PROT_READ) == 0);
-  CHECK(copy_memory(pages + COPY_LIMIT, pages, 1) == -EFAULT);
+  CHECK(copy_memory(pages + COPY_LIMIT, pages, 1) == NATIVE_INVALID_ADDRESS);
   strcpy((char *)pages, "parent");
   pid_t child = fork();
   CHECK(child >= 0);
