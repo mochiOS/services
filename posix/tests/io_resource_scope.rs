@@ -230,3 +230,23 @@ fn descriptor_metadata_and_sync_paths_keep_the_source_tracked_until_return() {
         }
     }
 }
+
+#[test]
+fn socket_control_paths_keep_the_source_tracked_through_user_memory_access() {
+    let source = include_str!("../../../user/crates/newlib-runtime/src/socket.rs");
+    for name in [
+        "setsockopt",
+        "getsockopt",
+        "bind",
+        "listen",
+        "socket_name",
+        "shutdown",
+    ] {
+        let signature = format!("fn {name}(");
+        let start = source.find(&signature).unwrap();
+        let end = start + source[start..].find("\n}\n").unwrap();
+        let body = &source[start..end];
+        assert!(body.contains("io_resources::with"), "{name}");
+        assert!(body.contains("|| with_fd_entry(fd)"), "{name}");
+    }
+}
