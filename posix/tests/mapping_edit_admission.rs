@@ -46,11 +46,18 @@ thread_local! {
     static CONTEXT:Cell<bool>=const {Cell::new(true)};
     static DENIED:Cell<bool>=const {Cell::new(false)};
     static PAGE_ERROR:Cell<bool>=const {Cell::new(false)};
+    static THREAD_PRESENT:Cell<bool>=const {Cell::new(true)};
+    static PROCESS_PRESENT:Cell<bool>=const {Cell::new(true)};
+    static TABLE_PRESENT:Cell<bool>=const {Cell::new(true)};
+    static DMA:Cell<bool>=const {Cell::new(false)};
+    static MMIO:Cell<bool>=const {Cell::new(false)};
+    static REVOKE_ERROR:Cell<Option<status::Error>>=const {Cell::new(None)};
+    static REVOKE_FAILURE:Cell<u8>=const {Cell::new(0)};
 }
 fn locked() {assert!(LOCKED.with(Cell::get));}
 fn page_align_up(address:u64)->Option<u64> {address.checked_add(4095).map(|address|address&!4095)}
 fn is_user_range(start:u64,length:u64)->bool {start>0&&start.checked_add(length).is_some_and(|end|end<=0x800000000000)}
-fn current_thread_id()->Option<u64> {Some(1)}
+fn current_thread_id()->Option<u64> {CONTEXT.get().then_some(1)}
 mod task {
     use super::*;
     pub mod process {
@@ -76,15 +83,15 @@ mod task {
         pub fn set_access(&mut self,_:u64,_:u64,access:u64)->bool{locked();METADATA.with(|value|value.set(value.get()+1));self.access=access;true}
     }
     pub struct Mapping;
-    impl Mapping {pub fn virt_start(&self)->u64{0} pub fn len(&self)->u64{0}}
+    impl Mapping {pub fn virt_start(&self)->u64{0x1000} pub fn len(&self)->u64{4096}}
     pub struct Process {pub regions:Vec<MemoryRegion>}
     impl Process {
-        pub fn page_table(&self)->Option<u64>{Some(4096)}
+        pub fn page_table(&self)->Option<u64>{TABLE_PRESENT.get().then_some(4096)}
         pub fn memory_regions(&self)->&[MemoryRegion]{&self.regions}
         pub fn memory_regions_mut(&mut self)->&mut [MemoryRegion]{&mut self.regions}
         pub fn find_memory_region(&self,address:u64)->Option<&MemoryRegion>{self.regions.iter().find(|region|address>=region.start&&address<region.start+4096)}
-        pub fn find_dma_buffer_by_addr(&self,_:u64,_:u64)->Option<&Mapping>{None}
-        pub fn find_mmio_mapping_by_addr(&self,_:u64,_:u64)->Option<&Mapping>{None}
+        pub fn find_dma_buffer_by_addr(&self,_:u64,_:u64)->Option<&Mapping>{DMA.get().then_some(&Mapping)}
+        pub fn find_mmio_mapping_by_addr(&self,_:u64,_:u64)->Option<&Mapping>{MMIO.get().then_some(&Mapping)}
         pub fn remove_mmio_mapping(&mut self,_:u64,_:u64){}
         pub fn prepare_remove_memory_range(&self,start:u64,length:u64)->Result<(Vec<MemoryRegion>,Vec<MemoryRegion>),process::MemoryRangeError>{
             locked();PLANS.with(|value|value.set(value.get()+1));
@@ -96,8 +103,9 @@ mod task {
     }
     pub struct Thread;impl Thread {pub fn process_id(&self)->u64{7}}
     pub fn current_thread_id()->Option<u64>{CONTEXT.get().then_some(1)}
-    pub fn with_thread<T>(id:u64,body:impl FnOnce(&Thread)->T)->Option<T>{assert_eq!(id,1);Some(body(&Thread))}
+    pub fn with_thread<T>(id:u64,body:impl FnOnce(&Thread)->T)->Option<T>{assert_eq!(id,1);THREAD_PRESENT.get().then(||body(&Thread))}
     pub fn with_process_mut<T>(id:u64,body:impl FnOnce(&mut Process)->T)->Option<T>{
+        if !PROCESS_PRESENT.get(){return None;}
         assert_eq!(id,7);LOCKED.with(|slot|assert!(!slot.replace(true)));
         let result=PROCESS.with(|process|body(&mut process.borrow_mut()));
         LOCKED.with(|slot|slot.set(false));Some(result)
@@ -121,7 +129,10 @@ mod mem {
     pub mod mapping_revocation {
         pub enum Error<T>{InvalidRange,Allocation,Backend(T)}
         pub fn revoke(ranges:impl IntoIterator<Item=(u64,u64,u64)>,_:&mut super::mapping_revocation_native::Native)->Result<(),Error<crate::status::Error>>{
-            crate::locked();assert_eq!(ranges.into_iter().count(),1);crate::EDITS.with(|value|value.set(value.get()+1));Ok(())
+            crate::locked();assert_eq!(ranges.into_iter().count(),1);
+            match crate::REVOKE_FAILURE.get(){1=>return Err(Error::InvalidRange),2=>return Err(Error::Allocation),_=>{}}
+            if let Some(error)=crate::REVOKE_ERROR.get(){return Err(Error::Backend(error));}
+            crate::EDITS.with(|value|value.set(value.get()+1));Ok(())
         }
     }
 }
@@ -144,9 +155,45 @@ fn reset(busy:bool,unavailable:bool) {
     PLANS.with(|value|value.set(0));METADATA.with(|value|value.set(0));
     PLAN_FAILURE.set(None);
     CONTEXT.set(true); DENIED.set(false); PAGE_ERROR.set(false);
+    THREAD_PRESENT.set(true);PROCESS_PRESENT.set(true);TABLE_PRESENT.set(true);
+    DMA.set(false);MMIO.set(false);REVOKE_ERROR.set(None);REVOKE_FAILURE.set(0);
 }
 fn main() {
     use status::Error;
+    for (address,length,expected) in [
+        (0,0,Error::InvalidArgument),(0x1000,0,Error::InvalidArgument),
+        (0,4096,Error::InvalidAddress),(u64::MAX,1,Error::InvalidAddress),
+        (0x1000,u64::MAX,Error::InvalidAddress),(0x800000000000,4096,Error::InvalidAddress),
+    ] {
+        reset(false,false);assert_eq!(memory_unmap(address,length),expected.into_raw());
+        assert_eq!((EDITS.get(),PLANS.get(),METADATA.get()),(0,0,0));assert!(!LOCKED.get());
+    }
+    for missing in 0..4 {
+        reset(false,false);
+        match missing{0=>CONTEXT.set(false),1=>THREAD_PRESENT.set(false),2=>PROCESS_PRESENT.set(false),3=>TABLE_PRESENT.set(false),_=>unreachable!()}
+        assert_eq!(memory_unmap(0x1000,4096),Error::NotReady.into_raw());
+        assert_eq!((EDITS.get(),PLANS.get(),METADATA.get()),(0,0,0));assert!(!LOCKED.get());
+    }
+    reset(false,false);DMA.set(true);
+    assert_eq!(memory_unmap(0x1000,4096),Error::AccessDenied.into_raw());
+    assert_eq!((EDITS.get(),PLANS.get(),METADATA.get()),(0,0,0));
+    reset(false,false);MMIO.set(true);
+    assert_eq!(memory_unmap(0x1000,8192),Error::InvalidArgument.into_raw());
+    assert_eq!((EDITS.get(),PLANS.get(),METADATA.get()),(0,0,0));
+    for (failure,expected) in [(1,Error::InvalidArgument),(2,Error::ResourceUnavailable)] {
+        reset(false,false);REVOKE_FAILURE.set(failure);
+        assert_eq!(memory_unmap(0x1000,8192),expected.into_raw());
+        assert_eq!((EDITS.get(),PLANS.get(),METADATA.get()),(0,1,0));assert!(!LOCKED.get());
+        PROCESS.with_borrow(|process|assert_eq!(process.regions.len(),2));
+    }
+    for error in [Error::InvalidAddress,Error::ResourceUnavailable,Error::BackingFailure,
+        Error::InvalidArgument,Error::AccessDenied,Error::NotReady,Error::NotFound,
+        Error::LimitExceeded,Error::AlreadyExists,Error::PeerClosed] {
+        reset(false,false);REVOKE_ERROR.set(Some(error));
+        assert_eq!(memory_unmap(0x1000,8192),error.into_raw());
+        assert_eq!((EDITS.get(),PLANS.get(),METADATA.get()),(0,1,0));assert!(!LOCKED.get());
+        PROCESS.with_borrow(|process|assert_eq!(process.regions.len(),2));
+    }
     for (address,length,access,expected) in [
         (0,0,999,SUCCESS), (0x1000,4096,8,Error::InvalidArgument.into_raw()),
         (0,4096,1,Error::InvalidAddress.into_raw()),
@@ -193,8 +240,8 @@ fn main() {
         assert_eq!(PLANS.with(Cell::get),0);assert_eq!(SYNCS.with(Cell::get),0);
     }
     for (error,expected) in [
-        (task::process::MemoryRangeError::InvalidRange,EINVAL),
-        (task::process::MemoryRangeError::Allocation,ENOMEM),
+        (task::process::MemoryRangeError::InvalidRange,Error::InvalidArgument.into_raw()),
+        (task::process::MemoryRangeError::Allocation,Error::ResourceUnavailable.into_raw()),
     ] {
         reset(false,false);
         PLAN_FAILURE.set(Some(error));
