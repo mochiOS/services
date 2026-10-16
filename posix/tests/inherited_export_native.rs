@@ -41,10 +41,11 @@ unsafe impl std::alloc::GlobalAlloc for Allocator {
         r#"
 use status::Error;
 mod task {
+    use alloc::sync::Arc;
     pub mod handle_table {
         use alloc::{boxed::Box,collections::BTreeMap,sync::Arc};
         pub const PROCESS_MAX_OBJECT_HANDLES:usize=4096;
-        #[derive(Clone)]pub enum KernelObject {Resource(Arc<u64>),HandleSnapshot(Arc<super::handle_snapshot::HandleSnapshot>)}
+        #[derive(Clone)]pub enum KernelObject {Resource(Arc<u64>),Process(Arc<u64>),HandleSnapshot(Arc<super::handle_snapshot::HandleSnapshot>)}
         impl std::fmt::Debug for KernelObject {
             fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {f.write_str("object")}
         }
@@ -77,15 +78,16 @@ mod task {
         r#"
     pub use handle_table::{ObjectHandle,HandleRights,ObjectHandleEntry,KernelObject};
     pub type ProcessId=u64;
-    pub struct Process {pub table:Box<handle_table::ObjectHandleTable>,launch:Box<launch_context::LaunchContext>,published:bool,pub fail_context:bool}
+    pub struct Process {pub table:Box<handle_table::ObjectHandleTable>,launch:Box<launch_context::LaunchContext>,published:bool,pub fail_context:bool,pub token:Arc<u64>}
     impl Process {
         pub fn new()->Self {let mut process=Self::unpublished();process.published=true;process}
-        pub fn unpublished()->Self {Self{table:handle_table::ObjectHandleTable::new_boxed(),launch:launch_context::LaunchContext::new_boxed(),published:false,fail_context:false}}
+        pub fn unpublished()->Self {Self{table:handle_table::ObjectHandleTable::new_boxed(),launch:launch_context::LaunchContext::new_boxed(),published:false,fail_context:false,token:Arc::new(999)}}
+        pub fn process_object(&self)->Arc<u64> {self.token.clone()}
         pub fn object_handles(&self)->&handle_table::ObjectHandleTable {assert!(!self.published || crate::LOCKED.get());&self.table}
-        pub fn object_handles_mut(&mut self)->&mut handle_table::ObjectHandleTable {assert!(!self.published);&mut self.table}
+        pub fn object_handles_mut(&mut self)->&mut handle_table::ObjectHandleTable {assert!(!self.published || crate::LOCKED.get());&mut self.table}
         pub fn launch_context(&self)->&launch_context::LaunchContext {&self.launch}
         pub fn launch_context_mut(&mut self)->&mut launch_context::LaunchContext {
-            assert!(!self.published);
+            assert!(!self.published || crate::LOCKED.get());
             if self.fail_context {self.fail_context=false;crate::FAIL_NEXT.store(true,crate::Ordering::Relaxed);}
             &mut self.launch
         }
@@ -94,6 +96,11 @@ mod task {
         if id!=19 || !crate::PRESENT.get() {return None;}
         assert!(!crate::LOCKED.replace(true));
         let result=crate::PROCESS.with_borrow(body);assert!(crate::LOCKED.replace(false));Some(result)
+    }
+    pub fn with_process_mut<T>(id:u64,body:impl FnOnce(&mut Process)->T)->Option<T> {
+        if id!=19 || !crate::PRESENT.get() {return None;}
+        assert!(!crate::LOCKED.replace(true));
+        let result=crate::PROCESS.with_borrow_mut(body);assert!(crate::LOCKED.replace(false));Some(result)
     }
 }
 thread_local! {
@@ -105,7 +112,7 @@ thread_local! {
 use task::{ObjectHandle,HandleRights,ObjectHandleEntry,KernelObject};
 mod syscall {
     pub mod security {pub fn current_process_id()->Option<u64> {crate::CONTEXT.get()}}
-    pub mod handle {use crate::task::{ObjectHandle,HandleRights,KernelObject};
+    pub mod handle {use crate::task::{ObjectHandle,HandleRights,KernelObject,ObjectHandleEntry};const SUCCESS:u64=0;
 "#,
     );
     program.push_str(probe::between(
@@ -113,7 +120,23 @@ mod syscall {
         "pub(crate) fn object_native(",
         "pub(crate) fn object(",
     ));
-    program.push_str("}}\n");
+    let handle_source = include_str!("../../../core/src/syscall/handle.rs");
+    program.push_str(probe::between(
+        handle_source,
+        "pub fn close(",
+        "pub fn duplicate(",
+    ));
+    program.push_str(probe::between(
+        handle_source,
+        "const PROCESS_HANDLE_RIGHTS:",
+        "fn insert_process_handle(",
+    ));
+    program.push_str("}\npub fn retain(target:&crate::task::Process)->Result<u64,crate::Error>{handle::retain_created_process(target)}\n}\n");
+    program.push_str(probe::between(
+        exec,
+        "struct CreatedProcessHandle(",
+        "impl UserPageTableGuard {",
+    ));
     program.push_str(probe::between(
         exec,
         "#[derive(Clone, Copy, Debug, PartialEq, Eq)]\nstruct InheritedHandleSpec",
@@ -146,6 +169,45 @@ fn spec(source:u32,rights:HandleRights)->InheritedHandleSpec {
     InheritedHandleSpec{key:u64::MAX,source:ObjectHandle::from_raw(source).unwrap(),target:41,rights}
 }
 fn object(entry:&ObjectHandleEntry)->&Arc<u64> {match entry.object() {KernelObject::Resource(value)=>value,_=>panic!("wrong object")}}
+fn retention_cases() {
+    let target=task::Process::unpublished();let before=Arc::strong_count(&target.token);
+    CONTEXT.set(None);assert_eq!(syscall::retain(&target),Err(Error::NotReady));CONTEXT.set(Some(19));
+    assert_eq!(Arc::strong_count(&target.token),before);
+    PRESENT.set(false);assert_eq!(syscall::retain(&target),Err(Error::NotReady));PRESENT.set(true);
+    assert_eq!(Arc::strong_count(&target.token),before);
+    let filler=Arc::new(123);
+    PROCESS.with_borrow_mut(|p|{
+        for raw in 1..=task::handle_table::PROCESS_MAX_OBJECT_HANDLES as u32 {
+            assert!(p.table.insert_at(ObjectHandle::from_raw(raw).unwrap(),ObjectHandleEntry::new(KernelObject::Resource(filler.clone()),HandleRights::empty())));
+        }
+    });
+    FAIL_NEXT.store(true,Ordering::Relaxed);
+    assert_eq!(syscall::retain(&target),Err(Error::ResourceUnavailable));
+    assert!(FAIL_NEXT.swap(false,Ordering::Relaxed),"full-table rejection must not allocate");
+    assert_eq!(Arc::strong_count(&target.token),before);
+    PROCESS.with_borrow_mut(|p|p.table.retain(|_|false));assert_eq!(Arc::strong_count(&filler),1);
+    drop(target);
+    for handoff in [false,true] {
+        let target=task::Process::unpublished();let weak=Arc::downgrade(&target.token);
+        let raw=syscall::retain(&target).unwrap();let selector=ObjectHandle::from_raw(raw as u32).unwrap();
+        PROCESS.with_borrow(|p|{
+            assert_eq!(p.table.describe().len(),1,"retention installs only the new reference");
+            let entry=p.table.get(selector).unwrap();
+            assert_eq!(entry.rights(),HandleRights::WAIT.union(HandleRights::SIGNAL).union(HandleRights::DUPLICATE).union(HandleRights::TRANSFER));
+            match entry.object() {KernelObject::Process(object)=>assert!(Arc::ptr_eq(object,&target.token)),_=>panic!("wrong target")}
+        });
+        drop(target);assert!(weak.upgrade().is_some());
+        let mut guard=CreatedProcessHandle(Some(raw));
+        if handoff {assert_eq!(guard.0.take(),Some(raw));}
+        drop(guard);
+        if handoff {
+            assert!(weak.upgrade().is_some(),"handoff must not close a published reference");
+            assert_eq!(syscall::handle::close(raw),0);
+        }
+        assert!(weak.upgrade().is_none(),"a failed creation guard must release its reference");
+        PROCESS.with_borrow(|p|assert_eq!(p.table.describe().len(),0));
+    }
+}
 fn grant(key:u64,target:u32,entry:&ObjectHandleEntry)->InheritedHandleGrant {InheritedHandleGrant{key,target,entry:entry.clone()}}
 fn install_plan(grants:&[InheritedHandleGrant],values:&[InheritedValueSpec],fail_context:bool)->Result<task::Process,Error> {
     let mut destination=task::Process::unpublished();destination.fail_context=fail_context;
@@ -286,6 +348,7 @@ fn main() {
     drop(old);drop(live);drop(snapshot);
     PROCESS.with_borrow_mut(|p|{p.table.retain(|_|false);});
     assert_eq!(Arc::strong_count(&original),1);assert_eq!(Arc::strong_count(&replacement),1);assert_eq!(Arc::strong_count(&private),1);
+    retention_cases();
 }
 "#,
     );

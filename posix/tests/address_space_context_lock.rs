@@ -118,6 +118,11 @@ fn native_creation_uses_locked_image_consumption_only() {
     );
     assert!(!creation.contains("image.consume("));
     assert_eq!(source.matches("image.consume(").count(), 1);
+    assert!(creation.contains("handle::object_native(image_handle"));
+    assert!(creation.contains("Err(error) => return error.into_raw()"));
+    for legacy in ["return ENOMEM", "return EINVAL", "syscall::types::"] {
+        assert!(!creation.contains(legacy));
+    }
 }
 
 #[test]

@@ -194,7 +194,7 @@ int main(void) {
   CHECK(reduced > 0);
   size_t length = metadata(bytes, context);
   CHECK(authorize((uint64_t)authority));
-  CHECK(N(CREATE, reduced, bytes, length) == -EACCES);
+  CHECK(N(CREATE, reduced, bytes, length) == SC_NATIVE_ACCESS_DENIED);
   CHECK(N(CLOSE, reduced, 0, 0) == 0);
   int64_t nontransferable = N(DUP, memory, 1, 0);
   CHECK(nontransferable > 0);
