@@ -4,12 +4,11 @@ use mochios_posix_client::ClientError;
 // Internal Result errors are positive errno values; only the wire reply
 // boundary negates them. Native and remote statuses can already be negative.
 pub(crate) fn status_errno(status: i64) -> u64 {
-    let errno = status.unsigned_abs();
-    if errno == 0 || errno > i32::MAX as u64 {
-        (syscall::EIO as i64).unsigned_abs()
-    } else {
-        errno
-    }
+    u64::from(mochios_posix_protocol::status::normalize_failure(status).unsigned_abs())
+}
+
+pub(crate) fn native_errno(error: syscall::SysError) -> u64 {
+    status_errno(error.raw())
 }
 
 pub(crate) fn io_errno(error: std::io::Error) -> u64 {

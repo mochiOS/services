@@ -6,10 +6,8 @@ pub mod handle {
 
 pub struct Error(i32);
 impl Error {
-    pub fn errno(&self) -> Option<u32> {
-        self.0
-            .checked_neg()
-            .and_then(|value| u32::try_from(value).ok())
+    pub fn raw(&self) -> i64 {
+        i64::from(self.0)
     }
 }
 
@@ -22,6 +20,12 @@ pub mod process {
             }),
             53 => Ok(mnu_abi::ProcessStatus::default()),
             54 => Err(crate::Error(-22)), // wrong native object type
+            56 => Err(crate::Error(
+                mnu_abi::status::Error::AccessDenied.into_raw() as i32,
+            )),
+            57 => Err(crate::Error(
+                mnu_abi::status::Error::NotReady.into_raw() as i32
+            )),
             _ => Err(crate::Error(-9)),
         }
     }
@@ -59,7 +63,14 @@ fn tree_root_rejects_missing_or_excess_rights_and_invalid_objects() {
             Err(-22)
         );
     }
-    for (object, status) in [(0, -22), (53, -22), (54, -22), (55, -9)] {
+    for (object, status) in [
+        (0, -22),
+        (53, -22),
+        (54, -22),
+        (55, -9),
+        (56, -13),
+        (57, -11),
+    ] {
         assert_eq!(
             production::authenticated_tree_root(root(object, required)),
             Err(status)

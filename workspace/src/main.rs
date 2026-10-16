@@ -796,7 +796,7 @@ impl WorkspaceService {
             .map(|_| ())
             .map_err(|error| {
                 self.application_endpoints.remove(&process);
-                error.errno().unwrap_or(error::status_errno(mochi_user_syscall::EIO as i64))
+                error::native_errno(error)
             })
     }
 
@@ -1679,7 +1679,7 @@ fn selection_matches_content_types(path: &Path, allowed: &str) -> bool {
 
 fn grant_selected_path(pending: &PendingFilePanel, path: &str) -> Result<(), u64> {
     let service = platform::process::find_by_name(CAPABILITY_SERVICE_NAME)
-        .map_err(|error| error.errno().unwrap_or(error::status_errno(mochi_user_syscall::ENOENT as i64)))?;
+        .map_err(error::native_errno)?;
     if service == 0 {
         return Err(error::status_errno(mochi_user_syscall::ENOENT as i64));
     }
@@ -1714,7 +1714,7 @@ fn grant_selected_path(pending: &PendingFilePanel, path: &str) -> Result<(), u64
         .map_err(|_| error::status_errno(mochi_user_syscall::EINVAL as i64))?;
     let mut reply = [0u8; 8];
     let message = platform::ipc::call(service, &encoded[..length], &mut reply)
-        .map_err(|error| error.errno().unwrap_or(error::status_errno(mochi_user_syscall::EIO as i64)))?;
+        .map_err(error::native_errno)?;
     if (message & 0xffff_ffff) as usize != reply.len() {
         return Err(error::status_errno(mochi_user_syscall::EINVAL as i64));
     }
@@ -1737,7 +1737,7 @@ fn set_process_modal(opcode: u32, owner_process: u64, modal_process: u64) -> Res
         return Err(error::status_errno(mochi_user_syscall::EINVAL as i64));
     }
     let compositor = platform::process::find_by_name(COMPOSITOR_SERVICE_NAME)
-        .map_err(|error| error.errno().unwrap_or(error::status_errno(mochi_user_syscall::ENOENT as i64)))?;
+        .map_err(error::native_errno)?;
     if compositor == 0 {
         return Err(error::status_errno(mochi_user_syscall::ENOENT as i64));
     }
@@ -1747,7 +1747,7 @@ fn set_process_modal(opcode: u32, owner_process: u64, modal_process: u64) -> Res
     request[12..20].copy_from_slice(&modal_process.to_le_bytes());
     let mut reply = [0u8; 16];
     let message = platform::ipc::call(compositor, &request, &mut reply)
-        .map_err(|error| error.errno().unwrap_or(error::status_errno(mochi_user_syscall::EIO as i64)))?;
+        .map_err(error::native_errno)?;
     let length = (message & 0xffff_ffff) as usize;
     let status = reply
         .get(..length)
@@ -2216,7 +2216,7 @@ fn launch_application(application: &InstalledApplication) -> Result<u64, u64> {
 
 fn launch_executable(executable: &str, arguments: &[String]) -> Result<u64, u64> {
     let service = platform::process::find_by_name(CAPABILITY_SERVICE_NAME)
-        .map_err(|error| error.errno().unwrap_or(error::status_errno(mochi_user_syscall::ENOENT as i64)))?;
+        .map_err(error::native_errno)?;
     if service == 0 {
         return Err(error::status_errno(mochi_user_syscall::ENOENT as i64));
     }
@@ -2224,7 +2224,7 @@ fn launch_executable(executable: &str, arguments: &[String]) -> Result<u64, u64>
     items.push(executable.to_owned());
     items.extend(arguments.iter().cloned());
     let posix_endpoint = platform::handle::inherited(mochios_posix_protocol::CONTROL_HANDLE_KEY)
-        .map_err(|error| error.errno().unwrap_or(error::status_errno(mochi_user_syscall::EBADF as i64)))?;
+        .map_err(error::native_errno)?;
     let posix_rights = platform::handle::HANDLE_RIGHT_SEND
         | platform::handle::HANDLE_RIGHT_DUPLICATE
         | platform::handle::HANDLE_RIGHT_TRANSFER;
@@ -2254,7 +2254,7 @@ fn launch_executable(executable: &str, arguments: &[String]) -> Result<u64, u64>
     let destination = u32::try_from(service)
         .map_err(|_| error::status_errno(mochi_user_syscall::EOVERFLOW as i64))?;
     let message = platform::ipc::call_object_handles(destination, &request, &mut reply, &mut handles)
-        .map_err(|error| error.errno().unwrap_or(error::status_errno(mochi_user_syscall::EIO as i64)))?;
+        .map_err(error::native_errno)?;
     if handles.count != 0 || (message & 0xffff_ffff) as usize != reply.len() {
         for attachment in handles.handles.iter().take(handles.count as usize) {
             let _ = platform::handle::close(attachment.handle);

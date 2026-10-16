@@ -75,3 +75,29 @@ fn high_bit_success_values_and_legacy_errors_keep_their_existing_contract() {
         assert_eq!(error.errno(), Some(status.unsigned_abs()));
     }
 }
+
+#[test]
+fn wire_normalization_is_idempotent_and_distinct_from_c_errno() {
+    use mochios_posix_protocol::status::normalize_failure;
+    for (native, wire, c_errno) in [
+        (Error::LimitExceeded, -75, newlib_errno::EOVERFLOW),
+        (Error::AccessDenied, -13, newlib_errno::EACCES),
+        (Error::NotReady, -11, newlib_errno::EAGAIN),
+    ] {
+        for raw in [native.into_raw() as i64, -(native.into_raw() as i64)] {
+            assert_eq!(normalize_failure(raw), wire);
+            assert_eq!(normalize_failure(i64::from(normalize_failure(raw))), wire);
+            assert_eq!(
+                newlib_errno::from_status(i64::from(normalize_failure(raw))),
+                c_errno
+            );
+        }
+    }
+    assert_ne!(newlib_errno::EOVERFLOW, 75);
+    for raw in [0, i64::MIN, i64::MAX, i64::from(i32::MIN)] {
+        assert_eq!(normalize_failure(raw), -5);
+    }
+    for raw in [13, -13, 75, -75, 0x10001, -0x10001] {
+        assert_eq!(normalize_failure(raw), -(raw.unsigned_abs() as i32));
+    }
+}

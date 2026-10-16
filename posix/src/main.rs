@@ -1732,7 +1732,7 @@ fn initialize_sender_process(
         return Err(posix_service::STATUS_EINVAL);
     }
     let status = platform::process::handle_status(process.handle)
-        .map_err(|error| error.errno().map_or(-5, |errno| -(errno as i32)))?;
+        .map_err(|error| mochios_posix_protocol::status::normalize_failure(error.raw()))?;
     let mut groups = [0; mochios_posix_protocol::MAX_SUPPLEMENTARY_GROUPS];
     let (uid, gid, count) = mochios_posix_protocol::decode_spawn_credentials(payload, &mut groups)
         .map_err(|_| posix_service::STATUS_EINVAL)?;

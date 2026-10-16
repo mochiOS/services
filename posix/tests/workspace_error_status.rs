@@ -110,4 +110,51 @@ fn workspace_server_does_not_double_negate_native_errors() {
         .collect();
     assert!(!compact.contains("-(mochi_user_syscall::E"));
     assert!(compact.contains("protocol::encode_status("));
+    assert!(!compact.contains("error.errno()"));
+}
+
+#[test]
+fn tagged_native_failures_are_translated_before_workspace_wire_encoding() {
+    use mnu_abi::status::Error;
+    use mochios_posix_client::ClientError;
+    for (error, expected) in [
+        (Error::LimitExceeded, 75),
+        (Error::InvalidAddress, 14),
+        (Error::ResourceUnavailable, 12),
+        (Error::BackingFailure, 5),
+        (Error::InvalidArgument, 22),
+        (Error::AccessDenied, 13),
+        (Error::NotReady, 11),
+    ] {
+        let raw = error.into_raw() as i64;
+        assert_eq!(
+            server_error::native_errno(syscall::SysError::from_raw(raw)),
+            expected
+        );
+        for raw in [raw, -raw] {
+            assert_eq!(server_error::status_errno(raw), expected);
+        }
+        assert_eq!(
+            server_error::posix_errno(ClientError::Transport(syscall::SysError::from_raw(raw))),
+            expected
+        );
+        assert_eq!(
+            server_error::posix_errno(ClientError::Remote(raw as i32)),
+            expected
+        );
+        let mut bytes = [0; protocol::HEADER_LEN + 24];
+        let length = protocol::encode_status(
+            42,
+            -(server_error::status_errno(raw) as i32),
+            7,
+            0,
+            &mut bytes,
+        )
+        .unwrap();
+        let (status, _, _) =
+            protocol::decode_status(protocol::decode(&bytes[..length]).unwrap()).unwrap();
+        assert_eq!(response::status_error(status).errno(), Some(expected));
+    }
+    let unknown = (Error::LimitExceeded.into_raw() & !0xffff) | 0xffff;
+    assert_eq!(server_error::status_errno(unknown as i64), 5);
 }
