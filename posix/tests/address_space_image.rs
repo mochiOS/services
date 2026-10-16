@@ -1,4 +1,5 @@
 //! Runs the production image ownership code with a mock page-table backend.
+#![feature(allocator_api)]
 extern crate alloc;
 
 use std::sync::Arc;
@@ -6,6 +7,7 @@ use std::sync::Arc;
 thread_local! {
     static FAIL_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
     static FAIL_REGION: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    static FAIL_ROOT_ARC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 struct FaultAllocator;
 unsafe impl std::alloc::GlobalAlloc for FaultAllocator {
@@ -311,7 +313,13 @@ mod paging {
 mod root_lifetime;
 mod root_lifetime_native {
     pub fn pin(table: u64) -> Result<super::root_lifetime::Pin, ()> {
-        super::root_lifetime::pin_with(table, |state| Ok(std::sync::Arc::new(state)))
+        let pin = super::root_lifetime::pin_with(table, |state| {
+            std::sync::Arc::try_new(state).map_err(|_| ())
+        })?;
+        if crate::FAIL_ROOT_ARC.with(|state| state.replace(false)) {
+            crate::FAIL_AFTER.with(|state| state.set(Some(0)));
+        }
+        Ok(pin)
     }
 }
 
@@ -610,6 +618,23 @@ fn occupied_target_is_unchanged_and_caller_retains_image() {
             state.borrow().destroyed,
             vec![crate::paging::cloned_table()]
         )
+    });
+}
+
+#[test]
+fn cloned_root_arc_failure_destroys_only_the_unpublished_target() {
+    let source = source();
+    let pins = Arc::strong_count(&source.regions[0].backing);
+    let captured = address_space::CloneSource::capture(&source).ok().unwrap();
+    FAIL_ROOT_ARC.with(|state| state.set(true));
+    let result = captured.clone_image();
+    assert!(!FAIL_ROOT_ARC.with(std::cell::Cell::get));
+    assert_eq!(FAIL_AFTER.with(std::cell::Cell::get), None);
+    assert!(matches!(result, Err(address_space::CloneError::Allocation)));
+    assert_eq!(Arc::strong_count(&source.regions[0].backing), pins);
+    paging::STATE.with(|state| {
+        assert_eq!(state.borrow().calls, 1);
+        assert_eq!(state.borrow().destroyed, vec![paging::cloned_table()]);
     });
 }
 

@@ -1,5 +1,37 @@
+#![feature(allocator_api)]
 extern crate alloc;
 use std::sync::{Mutex, OnceLock};
+thread_local! {
+    static FAIL_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static ALLOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+struct FaultAllocator;
+unsafe impl std::alloc::GlobalAlloc for FaultAllocator {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        ALLOCATIONS.with(|count| count.set(count.get() + 1));
+        let fail = FAIL_AFTER.with(|state| match state.get() {
+            Some(0) => {
+                state.set(None);
+                true
+            }
+            Some(count) => {
+                state.set(Some(count - 1));
+                false
+            }
+            None => false,
+        });
+        if fail {
+            std::ptr::null_mut()
+        } else {
+            unsafe { std::alloc::System.alloc(layout) }
+        }
+    }
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
+        unsafe { std::alloc::System.dealloc(pointer, layout) }
+    }
+}
+#[global_allocator]
+static ALLOCATOR: FaultAllocator = FaultAllocator;
 mod interrupt {
     pub mod spinlock {
         pub struct SpinLock<T>(std::sync::Mutex<T>);
@@ -86,7 +118,9 @@ mod root_lifetime_native {
         if FAIL.swap(false, std::sync::atomic::Ordering::AcqRel) {
             return Err(());
         }
-        super::root_lifetime::pin_with(table, |state| Ok(std::sync::Arc::new(state)))
+        super::root_lifetime::pin_with(table, |state| {
+            std::sync::Arc::try_new(state).map_err(|_| ())
+        })
     }
 }
 #[path = "../../../core/src/mem/detached_roots.rs"]
@@ -203,4 +237,38 @@ fn weak_discovery_pins_physical_ownership_until_revocation_and_hands_off_at_publ
         &[0x1000, 0x2000, 0x3000, 0x4000]
     );
     assert!(snapshot().unwrap().is_empty());
+
+    // Warm registry capacity first, then fail every actual allocation for one
+    // mapped root: lifetime state, mapping records and the root's own Arc.
+    fn backing_region() -> task::MemoryRegion {
+        task::MemoryRegion {
+            object: Some(task::Object(vm_object::ObjectKey::Memory(7))),
+            start: 0x5000,
+            length: 4096,
+            offset: 8192,
+        }
+    }
+    ALLOCATIONS.with(|count| count.set(0));
+    let root = Root::new(0x5000, &[backing_region()]).unwrap();
+    let allocations = ALLOCATIONS.with(std::cell::Cell::get);
+    assert!(allocations >= 3);
+    let references = std::sync::Arc::strong_count(&root);
+    FAIL_AFTER.with(|state| state.set(Some(0)));
+    assert!(snapshot().is_err());
+    assert_eq!(FAIL_AFTER.with(std::cell::Cell::get), None);
+    assert_eq!(std::sync::Arc::strong_count(&root), references);
+    drop(root);
+    for allocation in 0..allocations {
+        let table = 0x6000 + allocation as u64 * 4096;
+        let before = destroyed().lock().unwrap().len();
+        FAIL_AFTER.with(|state| state.set(Some(allocation)));
+        let result = Root::new(table, &[backing_region()]);
+        assert_eq!(FAIL_AFTER.with(std::cell::Cell::get), None);
+        assert!(result.is_err());
+        let destroyed = destroyed().lock().unwrap();
+        assert_eq!(destroyed.len(), before + 1);
+        assert_eq!(destroyed.last(), Some(&table));
+        drop(destroyed);
+        assert!(snapshot().unwrap().is_empty());
+    }
 }

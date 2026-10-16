@@ -1,3 +1,4 @@
+#![feature(allocator_api)]
 extern crate alloc;
 use mnu_abi::status::Error as NativeError;
 #[path = "../../../core/src/mem/detached_roots.rs"]
