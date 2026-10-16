@@ -167,7 +167,7 @@ mod task {
         pub fn resize_shared_memory(
             _: &crate::shared_memory::SharedMemory,
             _: u64,
-        ) -> Result<(), u64> {
+        ) -> Result<(), mnu_abi::status::Error> {
             unreachable!("provider-only probe")
         }
     }

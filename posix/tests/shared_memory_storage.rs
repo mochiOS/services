@@ -1,4 +1,5 @@
 extern crate alloc;
+use mnu_abi::status::Error as NativeError;
 
 #[path = "../../../core/src/mem/byte_extent.rs"]
 mod byte_extent;
@@ -37,6 +38,9 @@ fn frames() -> &'static std::sync::Mutex<std::collections::BTreeMap<u64, usize>>
         std::sync::OnceLock::new();
     FRAMES.get_or_init(Default::default)
 }
+thread_local! {
+    static PHYSICAL_OFFSET: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(Some(0)) };
+}
 mod frame {
     pub struct Frame(u64);
     pub struct Address(u64);
@@ -62,7 +66,7 @@ mod frame {
 }
 mod paging {
     pub fn physical_memory_offset() -> Option<u64> {
-        Some(0)
+        super::PHYSICAL_OFFSET.get()
     }
     pub fn retain_shared_user_frame(address: u64) -> Result<(), ()> {
         let mut frames = super::frames().lock().unwrap();
@@ -159,7 +163,7 @@ fn empty_byte_object_grows_lazily_and_keeps_its_original_ceiling() {
     let epoch = memory.generation();
     assert_eq!(
         memory.resize_with(8193, |_, _| panic!("quota before revoke")),
-        Err(syscall::ENOMEM)
+        Err(NativeError::ResourceUnavailable)
     );
     assert_eq!(memory.length(), 8192);
     assert_eq!(memory.with_generation(epoch, || Ok(())), Ok(()));
@@ -216,9 +220,9 @@ fn byte_resize_preserves_prefix_and_clears_padding_before_growth() {
     assert_eq!(
         memory.resize_with(5000, |start, end| {
             assert_eq!((start, end), (4096, 8192));
-            Err(syscall::EIO)
+            Err(NativeError::BackingFailure)
         }),
-        Err(syscall::EIO)
+        Err(NativeError::BackingFailure)
     );
     assert_eq!(memory.length(), 8192);
     assert_eq!(memory.with_generation(epoch, || Ok(())), Ok(()));
@@ -305,7 +309,7 @@ fn shrink_and_regrowth_reject_old_prepared_generations_without_recycling_pins() 
         Err(syscall::EAGAIN)
     );
     memory
-        .resize_with(4096, |_, _| -> Result<(), u64> {
+        .resize_with(4096, |_, _| -> Result<(), NativeError> {
             panic!("growth never revokes")
         })
         .unwrap();
@@ -334,16 +338,16 @@ fn failed_resize_and_noop_preserve_current_size_and_prepared_generation() {
     let (frame, generation) = memory.prepare_page(1).unwrap();
     assert_eq!(
         memory.resize_with(12288, |_, _| Ok(())),
-        Err(syscall::ENOMEM)
+        Err(NativeError::ResourceUnavailable)
     );
     assert_eq!(
-        memory.resize_with(4096, |_, _| Err(syscall::EIO)),
-        Err(syscall::EIO)
+        memory.resize_with(4096, |_, _| Err(NativeError::BackingFailure)),
+        Err(NativeError::BackingFailure)
     );
     assert_eq!(memory.length(), 8192);
     assert_eq!(memory.with_generation(generation, || Ok(())), Ok(()));
     memory
-        .resize_with(8192, |_, _| -> Result<(), u64> { panic!("no-op") })
+        .resize_with(8192, |_, _| -> Result<(), NativeError> { panic!("no-op") })
         .unwrap();
     assert_eq!(memory.with_generation(generation, || Ok(())), Ok(()));
     paging::release_user_frame(frame);
@@ -399,9 +403,9 @@ fn backing_commit_runs_inside_mapping_exclusion_before_retained_pages_are_restor
     assert_eq!(
         memory.resize_transaction(4113, |start, end, _commit| {
             assert_eq!((start, end), (4096, 8192));
-            Err(syscall::EIO)
+            Err(NativeError::BackingFailure)
         }),
-        Err(syscall::EIO)
+        Err(NativeError::BackingFailure)
     );
     assert_eq!(memory.length(), 8192);
     assert_eq!(memory.generation(), generation);
@@ -455,4 +459,35 @@ fn private_byte_snapshot_is_rejected_after_resize_even_when_size_returns_to_orig
     memory.read_at(0, &mut snapshot).unwrap();
     assert_eq!(snapshot[17], 0);
     assert_eq!(memory.with_generation(current, || Ok(snapshot[17])), Ok(0));
+}
+
+#[test]
+fn resize_preparation_and_coordinator_failures_preserve_bytes_length_and_generation() {
+    let memory = shared_memory::SharedMemory::new(8192, 2).unwrap();
+    memory.write_at(4096, &[0x5a; 4096]).unwrap();
+    let generation = memory.generation();
+    PHYSICAL_OFFSET.set(None);
+    let preparation = memory.resize_with(4113, |_, _| panic!("preflight must precede coordinator"));
+    PHYSICAL_OFFSET.set(Some(0));
+    assert_eq!(preparation, Err(NativeError::BackingFailure));
+    for error in [
+        NativeError::AccessDenied,
+        NativeError::NotReady,
+        NativeError::ResourceUnavailable,
+    ] {
+        assert_eq!(memory.resize_with(4113, |_, _| Err(error)), Err(error));
+        assert_eq!(memory.length(), 8192);
+        assert_eq!(memory.generation(), generation);
+        let mut bytes = [0; 4096];
+        assert_eq!(memory.read_at(4096, &mut bytes), Ok(bytes.len()));
+        assert_eq!(bytes, [0x5a; 4096]);
+    }
+    memory.resize_with(4113, |_, _| Ok(())).unwrap();
+    assert_eq!(memory.length(), 4113);
+    assert_ne!(memory.generation(), generation);
+    memory.resize_with(8192, |_, _| Ok(())).unwrap();
+    let mut bytes = [1; 4096];
+    memory.read_at(4096, &mut bytes).unwrap();
+    assert_eq!(&bytes[..17], &[0x5a; 17]);
+    assert!(bytes[17..].iter().all(|&byte| byte == 0));
 }

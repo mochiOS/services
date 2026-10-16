@@ -14,8 +14,8 @@ impl HandleRights {const CONTROL:Self=Self(256);}
 enum KernelObject {VmObject(Memory),Other}
 struct Memory;
 thread_local! {static CALLS:std::cell::Cell<u64>=const {std::cell::Cell::new(0)};}
-impl Memory {fn resize_memory(&self,length:u64)->Result<(),u64> {
-    CALLS.with(|v|v.set(v.get()+1)); if length==u64::MAX {Err(5)} else {Ok(())}
+impl Memory {fn resize_memory(&self,length:u64)->Result<(),status::Error> {
+    CALLS.with(|v|v.set(v.get()+1)); if length==u64::MAX {Err(status::Error::ResourceUnavailable)} else {Ok(())}
 }}
 fn object(raw:u64,rights:HandleRights)->Result<KernelObject,u64> {
     assert_eq!(rights,HandleRights::CONTROL);
@@ -28,13 +28,16 @@ fn object(raw:u64,rights:HandleRights)->Result<KernelObject,u64> {
         r#"
 fn main() {
     assert_eq!(memory_object_resize(7,0),0);assert_eq!(memory_object_resize(7,4097),0);
-    assert_eq!(memory_object_resize(7,u64::MAX),5);
+    assert_eq!(memory_object_resize(7,u64::MAX),status::Error::ResourceUnavailable.into_raw());
     assert_eq!(memory_object_resize(8,4097),13);assert_eq!(memory_object_resize(9,0),22);
     assert_eq!(memory_object_resize(0,0),9);assert_eq!(memory_object_resize(u64::MAX,0),9);
     assert_eq!(CALLS.with(|v|v.get()),3);
 }
 "#,
     );
+    program.push_str("\nextern crate self as mnu_abi;\npub mod status {\n");
+    program.push_str(include_str!("../../../core/crates/abi/src/status.rs"));
+    program.push_str("\n}\n");
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()

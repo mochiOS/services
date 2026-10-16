@@ -50,7 +50,7 @@ int main(void) {
   int64_t readonly = native(DUPLICATE, object, 65, 0, 0, 0, 0);
   CHECK(readonly > 0 && native(RESIZE, readonly, 1, 0, 0, 0, 0) == -13);
   CHECK(native(RESIZE, 0, 0, 0, 0, 0, 0) == -9);
-  CHECK(native(RESIZE, object, UINT64_MAX, 0, 0, 0, 0) < 0);
+  CHECK(native(RESIZE, object, UINT64_MAX, 0, 0, 0, 0) == INT64_C(-262141));
   CHECK(native(LENGTH, object, 0, 0, 0, 0, 0) == 12288);
   int64_t mapped = native(MAP, 0, 16384, 3, 2, object, 0);
   CHECK(mapped > 0);
