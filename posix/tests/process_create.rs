@@ -485,8 +485,13 @@ fn explicit_placement_cannot_overwrite_entries_or_capture_a_foreign_table() {
     let insert =
         &table[table.find("pub fn insert_at(").unwrap()..table.find("pub fn retain(").unwrap()];
     assert!(insert.contains("PROCESS_MAX_OBJECT_HANDLES"));
-    assert!(insert.contains("Entry::Vacant"));
-    assert!(!insert.contains("Entry::Occupied"));
+    // Actual occupied-slot rejection and reference preservation are exercised
+    // against production storage by handle_storage_native.rs. Here also check
+    // that admission precedes reservation/publication in the current layout.
+    let vacant = insert.find("let Err(index)").unwrap();
+    let reserve = insert.find("try_reserve(1)").unwrap();
+    let publish = insert.find("self.entries.insert(index, (handle, entry))").unwrap();
+    assert!(vacant < reserve && reserve < publish);
     let exec = include_str!("../../../core/src/syscall/exec.rs");
     let install = &exec[exec.find("fn install_inherited_handles(").unwrap()
         ..exec.find("fn install_inherited_values(").unwrap()];
