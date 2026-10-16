@@ -110,8 +110,8 @@ fn actual_destination_resolver_marks_only_validated_send_handles() {
         r#"
 extern crate self as mnu_abi;
 const IPC_DELIVERY_ENDPOINT_HANDLE: u32 = 2;
-const EINVAL: u64 = (-22i64) as u64;
-const EACCES: u64 = (-13i64) as u64;
+const NOT_FOUND: u64 = status::Error::NotFound.into_raw();
+const EACCES: u64 = status::Error::AccessDenied.into_raw();
 mod task { pub const PROCESS_MAX_OBJECT_HANDLES: usize = 4096; }
 struct HandleRights;
 impl HandleRights { const SEND: Self = Self; }
@@ -145,10 +145,13 @@ fn main() {
     assert_eq!(resolve_call_destination(8), Err(EACCES));
     assert_eq!(resolve_call_destination(5001), Ok((19, 5001, 0)));
     assert_eq!(resolve_call_destination(5002), Err(EACCES));
-    assert_eq!(resolve_call_destination(6000), Err(EINVAL));
+    assert_eq!(resolve_call_destination(6000), Err(NOT_FOUND));
 }
 "#,
     );
+    program.push_str("pub mod status {\n");
+    program.push_str(include_str!("../../../core/crates/abi/src/status.rs"));
+    program.push_str("}\n");
     run_probe(&program);
 }
 
