@@ -1,3 +1,4 @@
+use mnu_abi::status::Error;
 pub use mnu_abi::{ExecutionIdentity, ProcessExecutionUsage, SyscallNumber};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -60,9 +61,42 @@ fn client_rejects_invalid_identity_and_propagates_errors_without_fallback() {
         ),
         (-13, 70, 7, Err(SysError(-13))),
         (-38, 70, 7, Err(SysError(-38))),
-        (1, 70, 7, Err(SysError(mnu_abi::EIO as i64))),
-        (0, 0, 7, Err(SysError(mnu_abi::EIO as i64))),
-        (0, 70, 0, Err(SysError(mnu_abi::EIO as i64))),
+        (
+            Error::AccessDenied.into_raw() as i64,
+            70,
+            7,
+            Err(SysError(Error::AccessDenied.into_raw() as i64)),
+        ),
+        (
+            Error::NotFound.into_raw() as i64,
+            70,
+            7,
+            Err(SysError(Error::NotFound.into_raw() as i64)),
+        ),
+        (
+            Error::ResourceUnavailable.into_raw() as i64,
+            70,
+            7,
+            Err(SysError(Error::ResourceUnavailable.into_raw() as i64)),
+        ),
+        (
+            1,
+            70,
+            7,
+            Err(SysError(Error::BackingFailure.into_raw() as i64)),
+        ),
+        (
+            0,
+            0,
+            7,
+            Err(SysError(Error::BackingFailure.into_raw() as i64)),
+        ),
+        (
+            0,
+            70,
+            0,
+            Err(SysError(Error::BackingFailure.into_raw() as i64)),
+        ),
     ] {
         *REPLY.lock().unwrap() = Reply {
             status,
@@ -76,7 +110,7 @@ fn client_rejects_invalid_identity_and_propagates_errors_without_fallback() {
         assert_eq!(REPLY.lock().unwrap().calls, 2);
         assert_eq!(
             production::endpoint_identity(0),
-            Err(SysError(mnu_abi::EINVAL as i64))
+            Err(SysError(Error::InvalidArgument.into_raw() as i64))
         );
         assert_eq!(REPLY.lock().unwrap().calls, 2);
     }

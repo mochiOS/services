@@ -6,6 +6,7 @@
 #define NATIVE_INVALID_ARGUMENT INT64_C(-262139)
 #define NATIVE_INVALID_ADDRESS INT64_C(-262142)
 #define NATIVE_ACCESS_DENIED INT64_C(-262138)
+#define NATIVE_NOT_FOUND INT64_C(-262135)
 
 enum { IPC_CREATE = 587, EXECUTION_IDENTITY_READ = 677, IPC_ENDPOINT_IDENTITY_READ = 678 };
 struct identity { uint64_t process, thread; };
@@ -116,27 +117,27 @@ int main(void) {
     memset(&endpoint_owner, 0x5a, sizeof(endpoint_owner));
     struct identity unchanged = endpoint_owner;
     CHECK(native3(IPC_ENDPOINT_IDENTITY_READ, (uint64_t)&endpoint_owner,
-                  sizeof(endpoint_owner) - 1, endpoint) == -22);
+                  sizeof(endpoint_owner) - 1, endpoint) == NATIVE_INVALID_ARGUMENT);
     CHECK(memcmp(&endpoint_owner, &unchanged, sizeof(unchanged)) == 0);
 #ifdef EXPECT_INSPECTION_DENIED
     CHECK(native3(IPC_ENDPOINT_IDENTITY_READ, (uint64_t)&endpoint_owner,
-                  sizeof(endpoint_owner), endpoint) == -13);
+                  sizeof(endpoint_owner), endpoint) == NATIVE_ACCESS_DENIED);
     CHECK(memcmp(&endpoint_owner, &unchanged, sizeof(unchanged)) == 0);
     CHECK(native3(IPC_ENDPOINT_IDENTITY_READ, (uint64_t)&endpoint_owner,
-                  sizeof(endpoint_owner), UINT64_MAX) == -13);
+                  sizeof(endpoint_owner), UINT64_MAX) == NATIVE_ACCESS_DENIED);
     fprintf(stderr, "endpoint-identity: PASS caller identity without inspection; "
                     "endpoint inspection denied; malformed size leaves output untouched\n");
 #else
     CHECK(native3(IPC_ENDPOINT_IDENTITY_READ, (uint64_t)&endpoint_owner,
                   sizeof(endpoint_owner), endpoint) == 0);
     CHECK(endpoint_owner.process == caller.process && endpoint_owner.thread == caller.thread);
-    CHECK(native3(IPC_ENDPOINT_IDENTITY_READ, 0, sizeof(endpoint_owner), endpoint) == -14);
+    CHECK(native3(IPC_ENDPOINT_IDENTITY_READ, 0, sizeof(endpoint_owner), endpoint) == NATIVE_INVALID_ADDRESS);
     memset(&endpoint_owner, 0x5a, sizeof(endpoint_owner));
     CHECK(native3(IPC_ENDPOINT_IDENTITY_READ, (uint64_t)&endpoint_owner,
-                  sizeof(endpoint_owner), UINT64_MAX) == -22);
+                  sizeof(endpoint_owner), UINT64_MAX) == NATIVE_NOT_FOUND);
     CHECK(memcmp(&endpoint_owner, &unchanged, sizeof(unchanged)) == 0);
     CHECK(native3(IPC_ENDPOINT_IDENTITY_READ, (uint64_t)&endpoint_owner,
-                  sizeof(endpoint_owner), caller.thread) == -22);
+                  sizeof(endpoint_owner), caller.thread) == NATIVE_NOT_FOUND);
     CHECK(memcmp(&endpoint_owner, &unchanged, sizeof(unchanged)) == 0);
     fprintf(stderr, "endpoint-identity: PASS inspected endpoint matches native caller; "
                     "raw TID and invalid endpoint rejected; invalid output rejected\n");

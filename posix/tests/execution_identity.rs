@@ -1,7 +1,9 @@
+use mnu_abi::status::Error;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static CURRENT: AtomicU64 = AtomicU64::new(7);
 static COPIES: AtomicU64 = AtomicU64::new(0);
+static COPY_ERROR: AtomicU64 = AtomicU64::new(0);
 static BYTES: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
 
 pub mod task {
@@ -32,25 +34,27 @@ pub mod task {
         }
     }
 }
-pub const EINVAL: u64 = mnu_abi::EINVAL;
-pub const ESRCH: u64 = mnu_abi::ESRCH;
 pub mod ipc {
-    pub fn endpoint_execution_identity(endpoint: u64) -> Result<mnu_abi::ExecutionIdentity, u64> {
+    pub fn endpoint_execution_identity(
+        endpoint: u64,
+    ) -> Result<mnu_abi::ExecutionIdentity, mnu_abi::status::Error> {
         match endpoint {
             0x4000_0005 => Ok(mnu_abi::ExecutionIdentity {
                 process_id: 90,
                 thread_id: 9,
             }),
-            8 => Err(mnu_abi::EACCES),
-            9 => Err(mnu_abi::ESRCH),
-            _ => Err(mnu_abi::EINVAL),
+            8 => Err(mnu_abi::status::Error::AccessDenied),
+            _ => Err(mnu_abi::status::Error::NotFound),
         }
     }
 }
-pub fn copy_to_user(address: u64, bytes: &[u8]) -> Result<(), u64> {
+pub fn copy_to_user_native(address: u64, bytes: &[u8]) -> Result<(), Error> {
     COPIES.fetch_add(1, Ordering::Relaxed);
     if address == 0 {
-        return Err(mnu_abi::EFAULT);
+        return Err(Error::InvalidAddress);
+    }
+    if let Some(error) = Error::from_raw(COPY_ERROR.load(Ordering::Relaxed)) {
+        return Err(error);
     }
     *BYTES.lock().unwrap() = bytes.to_vec();
     Ok(())
@@ -68,10 +72,10 @@ fn execution_identity_reads_only_caller_or_authenticated_endpoint_and_has_no_pol
         8
     );
     for length in [0, 15, 17, u64::MAX] {
-        assert_eq!(identity_read(1, length), mnu_abi::EINVAL);
+        assert_eq!(identity_read(1, length), Error::InvalidArgument.into_raw());
     }
     assert_eq!(COPIES.load(Ordering::Relaxed), 0);
-    assert_eq!(identity_read(0, 16), mnu_abi::EFAULT);
+    assert_eq!(identity_read(0, 16), Error::InvalidAddress.into_raw());
     for (thread, process) in [(7u64, 70u64), (9, 90)] {
         CURRENT.store(thread, Ordering::Relaxed);
         assert_eq!(identity_read(1, 16), mnu_abi::SUCCESS);
@@ -81,25 +85,49 @@ fn execution_identity_reads_only_caller_or_authenticated_endpoint_and_has_no_pol
     }
     for missing in [0, 8] {
         CURRENT.store(missing, Ordering::Relaxed);
-        assert_eq!(identity_read(1, 16), mnu_abi::ESRCH);
+        let copies = COPIES.load(Ordering::Relaxed);
+        assert_eq!(identity_read(1, 16), Error::NotReady.into_raw());
+        assert_eq!(COPIES.load(Ordering::Relaxed), copies);
     }
-    assert_eq!(endpoint_identity_read(1, 16, 0), mnu_abi::EINVAL);
-    assert_eq!(endpoint_identity_read(1, 15, 0x4000_0005), mnu_abi::EINVAL);
+    assert_eq!(
+        endpoint_identity_read(1, 16, 0),
+        Error::InvalidArgument.into_raw()
+    );
+    assert_eq!(
+        endpoint_identity_read(1, 15, 0x4000_0005),
+        Error::InvalidArgument.into_raw()
+    );
     for (endpoint, error) in [
-        (7, mnu_abi::EINVAL),
-        (8, mnu_abi::EACCES),
-        (9, mnu_abi::ESRCH),
+        (7, Error::NotFound.into_raw()),
+        (8, Error::AccessDenied.into_raw()),
+        (9, Error::NotFound.into_raw()),
     ] {
         let copies = COPIES.load(Ordering::Relaxed);
         assert_eq!(endpoint_identity_read(1, 16, endpoint), error);
         assert_eq!(COPIES.load(Ordering::Relaxed), copies);
     }
-    assert_eq!(endpoint_identity_read(0, 16, 0x4000_0005), mnu_abi::EFAULT);
+    assert_eq!(
+        endpoint_identity_read(0, 16, 0x4000_0005),
+        Error::InvalidAddress.into_raw()
+    );
     assert_eq!(endpoint_identity_read(1, 16, 0x4000_0005), mnu_abi::SUCCESS);
     assert_eq!(
         *BYTES.lock().unwrap(),
         [90u64.to_ne_bytes(), 9u64.to_ne_bytes()].concat()
     );
+    for error in [
+        Error::InvalidAddress,
+        Error::ResourceUnavailable,
+        Error::BackingFailure,
+    ] {
+        COPY_ERROR.store(error.into_raw(), Ordering::Relaxed);
+        CURRENT.store(7, Ordering::Relaxed);
+        let before = BYTES.lock().unwrap().clone();
+        assert_eq!(identity_read(1, 16), error.into_raw());
+        assert_eq!(endpoint_identity_read(1, 16, 0x4000_0005), error.into_raw());
+        assert_eq!(*BYTES.lock().unwrap(), before);
+    }
+    COPY_ERROR.store(0, Ordering::Relaxed);
     let ipc = include_str!("../../../core/src/syscall/ipc.rs");
     let resolver = ipc
         .split("pub fn endpoint_execution_identity(")
@@ -109,7 +137,7 @@ fn execution_identity_reads_only_caller_or_authenticated_endpoint_and_has_no_pol
         .next()
         .unwrap();
     assert!(resolver.contains("Capability::ProcessInspect"));
-    assert!(resolver.contains("endpoint_record_from_handle(handle).ok_or(EINVAL)?"));
+    assert!(resolver.contains("endpoint_record_from_handle(handle).ok_or(Error::NotFound)?"));
     assert!(!resolver.contains("security_context"));
     let runtime = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
     assert!(!runtime.contains("SyscallNumber::GetThreadSecurityContext"));
@@ -132,7 +160,7 @@ fn execution_identity_reads_only_caller_or_authenticated_endpoint_and_has_no_pol
         mnu_abi::SyscallNumber::IpcCreate as u64
     )));
     assert!(probe.contains("EXPECT_INSPECTION_DENIED"));
-    assert!(probe.contains("caller.thread) == -22"));
+    assert!(probe.contains("caller.thread) == NATIVE_NOT_FOUND"));
     assert!(probe.contains("sizeof(caller), UINT64_MAX) == 0"));
     for (name, number) in [
         (
