@@ -317,10 +317,13 @@ fn borrowed_identity_preparation_is_fallible_and_preserves_exact_opaque_text() {
 #[test]
 fn object_snapshot_does_not_call_backend_after_allocation_failure() {
     FAIL_NEXT.with(|fail| fail.set(true));
-    let result = snapshot::read(4096, 4096, |_| panic!("copy after ENOMEM"));
+    let result = snapshot::read(4096, 4096, |_| panic!("copy after allocation failure"));
     let consumed = FAIL_NEXT.with(|fail| !fail.replace(false));
     assert!(consumed);
-    assert_eq!(result, Err(mnu_abi::ENOMEM));
+    assert_eq!(
+        result,
+        Err(mnu_abi::status::Error::ResourceUnavailable.into_raw())
+    );
 }
 
 #[test]
@@ -362,6 +365,6 @@ fn native_image_preparation_routes_owned_storage_through_fallible_paths() {
         .split("\n}")
         .next()
         .unwrap();
-    assert!(read.contains("object_snapshot::zeroed(length)?"));
+    assert!(read.contains("object_snapshot::zeroed_native(length)"));
     assert!(!read.contains("vec!["));
 }

@@ -3,6 +3,8 @@ extern crate alloc;
 #[path = "../../../core/src/util/object_snapshot.rs"]
 mod snapshot;
 
+use mnu_abi::status::Error;
+
 #[test]
 fn snapshot_is_exact_bounded_and_owned_without_a_seekable_file() {
     let mut source = b"image".to_vec();
@@ -26,14 +28,17 @@ fn snapshot_is_exact_bounded_and_owned_without_a_seekable_file() {
 fn extent_errors_and_short_reads_never_produce_an_executable_snapshot() {
     assert_eq!(
         snapshot::read(6, 5, |_| panic!("oversized read")),
-        Err(mnu_abi::EFBIG)
+        Err(Error::LimitExceeded.into_raw())
     );
     assert_eq!(
         snapshot::read(u64::MAX, 5, |_| panic!("oversized read")),
-        Err(mnu_abi::EFBIG)
+        Err(Error::LimitExceeded.into_raw())
     );
     for count in [0, 4, 6] {
-        assert_eq!(snapshot::read(5, 5, |_| Ok(count)), Err(mnu_abi::EIO));
+        assert_eq!(
+            snapshot::read(5, 5, |_| Ok(count)),
+            Err(Error::BackingFailure.into_raw())
+        );
     }
     assert_eq!(
         snapshot::read(5, 5, |_| Err(mnu_abi::EACCES)),
