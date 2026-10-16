@@ -416,7 +416,13 @@ fn paired_operations_capture_both_inputs_and_retire_both_borrows_on_rpc_escape_p
             SECOND_INPUT.store(new.as_mut_ptr() as u64, Ordering::Relaxed);
             let result = match operation {
                 0 => implementation::rename(7, old.as_ptr().cast(), 7, new.as_ptr().cast()),
-                1 => implementation::link(7, old.as_ptr().cast(), 7, new.as_ptr().cast(), 1),
+                1 => implementation::link(
+                    7,
+                    old.as_ptr().cast(),
+                    7,
+                    new.as_ptr().cast(),
+                    implementation::AT_SYMLINK_FOLLOW,
+                ),
                 _ => implementation::symlink(old.as_ptr().cast(), 7, new.as_ptr().cast()),
             };
             assert_eq!(result, if case == 1 { Err(13) } else { Ok(()) });
@@ -439,6 +445,68 @@ fn paired_operations_capture_both_inputs_and_retire_both_borrows_on_rpc_escape_p
             assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
         }
     }
+}
+
+#[test]
+fn linkat_translates_newlib_flags_and_rejects_foreign_bits_before_reading_paths() {
+    let _serial = SERIAL.lock().unwrap();
+    for (native, wire) in [
+        (0, 0),
+        (
+            implementation::AT_SYMLINK_FOLLOW,
+            posix_protocol::LINK_FOLLOW_SOURCE,
+        ),
+    ] {
+        reset();
+        implementation::link(7, c"target".as_ptr(), 7, c"next".as_ptr(), native).unwrap();
+        assert_eq!(*MUTATION.lock().unwrap(), Some((5, wire, 0, 0)));
+        assert_eq!(PINS.load(Ordering::Relaxed), 0);
+        assert!(CONTROL.callback_resources.is_empty());
+    }
+    for flags in [-1, 1, 2, 8, 16, 0x400, 0x404, c_int::MAX] {
+        reset();
+        assert_eq!(
+            implementation::link(-1, std::ptr::null(), -1, std::ptr::null(), flags),
+            Err(EINVAL)
+        );
+        assert_eq!(CALLS.load(Ordering::Relaxed), 0);
+        assert_eq!(PINS.load(Ordering::Relaxed), 0);
+        assert!(CONTROL.callback_resources.is_empty());
+    }
+}
+
+#[test]
+fn linkat_flag_matches_the_newlib_public_header() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut compiler = Command::new("cc")
+        .args([
+            "-std=c11",
+            "-D__mochios__",
+            "-D_POSIX_C_SOURCE=200809L",
+            "-I",
+        ])
+        .arg(root.join("out/newlib-port/sdk/sysroot/include"))
+        .arg("-include")
+        .arg(root.join("libraries/newlib/newlib/libc/include/sys/_default_fcntl.h"))
+        .args(["-x", "c", "-fsyntax-only", "-"])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    write!(
+        compiler.stdin.take().unwrap(),
+        "_Static_assert(AT_SYMLINK_FOLLOW == {}, \"linkat flag ABI mismatch\");\n",
+        implementation::AT_SYMLINK_FOLLOW
+    )
+    .unwrap();
+    let result = compiler.wait_with_output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
 }
 
 #[test]
