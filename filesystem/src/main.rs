@@ -1021,25 +1021,7 @@ fn decode_two_path_anchors(
 
 #[cfg(target_os = "mochios")]
 fn open_handle_rights(flags: u32) -> u64 {
-    use mochios_filesystem_protocol as protocol;
-    // CONTROL permits metadata/status operations, subject also to POSIX
-    // credentials. It never grants byte-write access; delegations may drop it.
-    let mut rights = mochi_user_platform::handle::HANDLE_RIGHT_DUPLICATE
-        | mochi_user_platform::handle::HANDLE_RIGHT_CONTROL
-        | mochi_user_platform::handle::HANDLE_RIGHT_TRANSFER;
-    if flags & (protocol::OPEN_AT_READ | protocol::OPEN_AT_SEARCH) != 0 {
-        rights |= mochi_user_platform::handle::HANDLE_RIGHT_READ;
-    }
-    if flags & protocol::OPEN_AT_WRITE != 0 {
-        rights |= mochi_user_platform::handle::HANDLE_RIGHT_WRITE;
-    }
-    if flags & protocol::OPEN_AT_DIRECTORY == 0 {
-        rights |= mochi_user_platform::handle::HANDLE_RIGHT_SEEK;
-        if flags & protocol::OPEN_AT_READ != 0 {
-            rights |= mochi_user_platform::handle::HANDLE_RIGHT_MAP;
-        }
-    }
-    rights
+    filesystem_service::handle_access::open_rights(flags)
 }
 
 #[cfg(target_os = "mochios")]

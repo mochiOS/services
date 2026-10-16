@@ -227,11 +227,26 @@ fn syscall_errno(raw: u64) -> Result<u64, c_int> {
 mod syscall {
     use super::*;
     pub const HANDLE_RIGHT_READ: u64 = 1;
+    pub const HANDLE_SEEK_START: u64 = 0;
     pub enum SyscallNumber {
         HandleRead,
+        HandleSeek,
     }
-    pub fn raw_syscall3(_: SyscallNumber, handle: u64, output: u64, capacity: u64) -> u64 {
+    pub fn raw_syscall3(op: SyscallNumber, handle: u64, output: u64, capacity: u64) -> u64 {
         assert_eq!(handle, 10);
+        if matches!(op, SyscallNumber::HandleSeek) {
+            assert_eq!((output, capacity), (0, HANDLE_SEEK_START));
+            assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
+            assert!(!CONTROL.callback_resources.is_empty());
+            assert_eq!(PINS.load(Ordering::Relaxed), 1);
+            CALLS.fetch_add(1, Ordering::Relaxed);
+            let case = CASE.load(Ordering::Relaxed);
+            if case >= 4 {
+                RETIRED.store(1, Ordering::Relaxed);
+                assert_eq!(CLOSED.load(Ordering::Relaxed), 0);
+            }
+            return if case % 4 == 1 { (-5i64) as u64 } else { 0 };
+        }
         assert_eq!(capacity, 16);
         assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
         assert!(!CONTROL.callback_resources.is_empty());
@@ -251,6 +266,44 @@ mod syscall {
             2 => (-5i64) as u64,
             _ => 17, // Malformed provider count must not become a slice bound.
         }
+    }
+}
+
+#[test]
+fn rewind_discards_prefetch_only_after_success_and_retires_the_source_pin() {
+    let _serial = SERIAL.lock().unwrap();
+    for case in [0, 1, 4, 5, 8, 9] {
+        CASE.store(case, Ordering::Relaxed);
+        CALLS.store(0, Ordering::Relaxed);
+        RETIRED.store(0, Ordering::Relaxed);
+        CLOSED.store(0, Ordering::Relaxed);
+        let mut stream = DirStream::new(7);
+        stream.buffer_offset = 3;
+        stream.buffer_len = 9;
+        assert_eq!(
+            implementation::rewind(&mut stream),
+            match case {
+                0 | 4 => Ok(()),
+                1 | 5 => Err(EIO),
+                _ => Err(EBADF),
+            }
+        );
+        assert_eq!(
+            (stream.buffer_offset, stream.buffer_len),
+            if case == 0 || case == 4 {
+                (0, 0)
+            } else {
+                (3, 9)
+            }
+        );
+        assert_eq!(CALLS.load(Ordering::Relaxed), u32::from(case < 8));
+        assert_eq!(PINS.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            CLOSED.load(Ordering::Relaxed),
+            u32::from(case == 4 || case == 5)
+        );
+        assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
+        assert!(CONTROL.callback_resources.is_empty());
     }
 }
 
