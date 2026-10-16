@@ -11,6 +11,7 @@ thread_local! {
     static DENY_COMMIT_ALLOC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static COMMIT_ALLOC_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static PHYSICAL_OFFSET: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(Some(0)) };
+    static FAIL_MAPPING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static CAPTURE_GATE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static CAPTURED_GATE: RefCell<Option<object_io::IoLock>> = const { RefCell::new(None) };
 }
@@ -243,13 +244,6 @@ mod shared_memory {
         pub fn generation(&self) -> u64 {
             unreachable!()
         }
-        pub fn with_generation<T>(
-            &self,
-            _: u64,
-            _: impl FnOnce() -> Result<T, u64>,
-        ) -> Result<T, u64> {
-            unreachable!()
-        }
         pub fn with_generation_native<T>(
             &self,
             _: u64,
@@ -345,7 +339,11 @@ mod paging {
     ) -> Result<(), ()> {
         assert!(crate::FRAMES.lock().unwrap().contains_key(&frame));
         crate::MAPPING_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Ok(())
+        if crate::FAIL_MAPPING.get() {
+            Err(())
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -595,21 +593,21 @@ fn production_cache_never_republishes_invalidated_lower_snapshots() {
     object.invalidate().unwrap();
     LOWER.lock().unwrap().bytes = b"new".to_vec();
     assert_eq!(
-        object.with_memory_generation(generation, || {
+        object.with_memory_generation_native(generation, || {
             panic!("stale private bytes reached the installer")
         }),
-        Err::<(), _>(syscall::EAGAIN)
+        Err::<(), _>(mnu_abi::status::Error::NotReady)
     );
     assert_eq!(
-        object.with_memory_generation(None, || {
+        object.with_memory_generation_native(None, || {
             panic!("missing generation reached the installer")
         }),
-        Err::<(), _>(syscall::EINVAL)
+        Err::<(), _>(mnu_abi::status::Error::InvalidArgument)
     );
     assert_eq!(&private[..3], b"old");
     assert_eq!(&object.page(0).unwrap()[..3], b"new");
     assert_eq!(
-        object.with_memory_generation(object.memory_generation(), || Ok(37)),
+        object.with_memory_generation_native(object.memory_generation(), || Ok(37)),
         Ok(37)
     );
     object.invalidate().unwrap();
@@ -622,7 +620,7 @@ fn production_cache_never_republishes_invalidated_lower_snapshots() {
     object.invalidate().unwrap();
     assert_eq!(
         prepared.map_to(4096, 8192, false, false),
-        Err(syscall::EAGAIN)
+        Err(mnu_abi::status::Error::NotReady)
     );
     assert_eq!(
         MAPPING_CALLS.load(std::sync::atomic::Ordering::Relaxed),
@@ -698,17 +696,17 @@ fn unrelated_backing_changes_do_not_invalidate_extent_or_page_installations() {
     other.write_at(0, b"x").unwrap();
     assert_eq!(object.memory_generation(), generation);
     assert_eq!(
-        object.with_memory_generation(generation, || panic!("reserved private install")),
-        Err::<(), _>(syscall::EAGAIN)
+        object.with_memory_generation_native(generation, || panic!("reserved private install")),
+        Err::<(), _>(mnu_abi::status::Error::NotReady)
     );
     assert_eq!(
         pinned.map_to(4096, 8192, false, false),
-        Err(syscall::EAGAIN)
+        Err(mnu_abi::status::Error::NotReady)
     );
     without_allocations(|| prepared.commit()).unwrap();
     assert_eq!(
         pinned.map_to(4096, 8192, false, false),
-        Err(syscall::EAGAIN)
+        Err(mnu_abi::status::Error::NotReady)
     );
     let mut output = [0; 8];
     assert_eq!(object.read_at(0, &mut output).unwrap(), 1);
@@ -716,7 +714,10 @@ fn unrelated_backing_changes_do_not_invalidate_extent_or_page_installations() {
     let pinned = object.prepare_shared_page(0).unwrap();
     let generation = object.memory_generation();
     other.write_at(0, b"x").unwrap();
-    assert_eq!(object.with_memory_generation(generation, || Ok(37)), Ok(37));
+    assert_eq!(
+        object.with_memory_generation_native(generation, || Ok(37)),
+        Ok(37)
+    );
     assert_eq!(pinned.map_to(4096, 8192, false, false), Ok(()));
     drop(pinned);
     object.invalidate().unwrap();
@@ -800,11 +801,16 @@ fn reserved_backing_rejects_population_dirtying_and_both_final_install_paths() {
     }
     assert_eq!(object.mark_page_dirty(0), Err(syscall::EAGAIN));
     assert_eq!(object.stage_write_at(0, b"new"), Err(syscall::EAGAIN));
-    assert_eq!(pin.map_to(4096, 8192, false, false), Err(syscall::EAGAIN));
+    assert_eq!(
+        pin.map_to(4096, 8192, false, false),
+        Err(mnu_abi::status::Error::NotReady)
+    );
     for generation in [old_generation, object.memory_generation()] {
         assert_eq!(
-            object.with_memory_generation(generation, || panic!("private install must not run")),
-            Err::<(), _>(syscall::EAGAIN)
+            object.with_memory_generation_native(generation, || panic!(
+                "private install must not run"
+            )),
+            Err::<(), _>(mnu_abi::status::Error::NotReady)
         );
     }
     assert_eq!(LOWER.lock().unwrap().reads, reads);
@@ -815,7 +821,10 @@ fn reserved_backing_rejects_population_dirtying_and_both_final_install_paths() {
     assert_eq!(LOWER.lock().unwrap().bytes, b"old");
     drop(prepared);
     // Cancellation reopens admission but does not revive old page pins.
-    assert_eq!(pin.map_to(4096, 8192, false, false), Err(syscall::EAGAIN));
+    assert_eq!(
+        pin.map_to(4096, 8192, false, false),
+        Err(mnu_abi::status::Error::NotReady)
+    );
     drop(pin);
     assert_eq!(&object.page(0).unwrap()[..3], b"old");
     let pin = object.prepare_shared_page(0).unwrap();
@@ -968,6 +977,24 @@ fn mapping_edits_preflight_every_overlapping_backing_without_ipc_or_allocation()
 }
 
 #[test]
+fn final_mapping_failure_keeps_pin_and_generation_available_for_retry() {
+    let _test = TEST_LOCK.lock().unwrap();
+    reset_lower(b"old");
+    let object = provider_object();
+    let generation = object.memory_generation();
+    let pin = object.prepare_shared_page(0).unwrap();
+    FAIL_MAPPING.set(true);
+    let failed = pin.map_to(4096, 8192, false, false);
+    FAIL_MAPPING.set(false);
+    assert_eq!(failed, Err(mnu_abi::status::Error::ResourceUnavailable));
+    assert_eq!(object.memory_generation(), generation);
+    assert_eq!(pin.map_to(4096, 8192, false, false), Ok(()));
+    drop(pin);
+    object.invalidate().unwrap();
+    assert!(FRAMES.lock().unwrap().is_empty());
+}
+
+#[test]
 fn cache_publication_keeps_backing_reserved_through_journal_completion() {
     let _test = TEST_LOCK.lock().unwrap();
     reset_lower(&vec![0x11; 8192]);
@@ -990,10 +1017,10 @@ fn cache_publication_keeps_backing_reserved_through_journal_completion() {
         Err(vm_object::VmPageError::Operation(syscall::EAGAIN))
     ));
     assert_eq!(
-        alias.with_memory_generation(alias.memory_generation(), || panic!(
+        alias.with_memory_generation_native(alias.memory_generation(), || panic!(
             "PTE installation before journal completion"
         )),
-        Err::<(), _>(syscall::EAGAIN)
+        Err::<(), _>(mnu_abi::status::Error::NotReady)
     );
     assert!(matches!(
         alias.prepare_extent(17, 0, |_| panic!(
@@ -1135,7 +1162,10 @@ fn unavailable_cached_backing_cannot_lose_failure_when_original_owners_drop() {
         without_allocations(|| mapping_admission::check_unmap(&regions, 0x1000, 0x3000)),
         Err(mnu_abi::status::Error::NotReady)
     );
-    assert_eq!(pin.map_to(4096, 8192, false, false), Err(syscall::EIO));
+    assert_eq!(
+        pin.map_to(4096, 8192, false, false),
+        Err(mnu_abi::status::Error::BackingFailure)
+    );
     assert_eq!(
         MAPPING_CALLS.load(std::sync::atomic::Ordering::Relaxed),
         calls
@@ -1186,10 +1216,10 @@ fn unavailable_cached_backing_cannot_lose_failure_when_original_owners_drop() {
         Err(syscall::EIO)
     ));
     assert_eq!(
-        alias.with_memory_generation(alias.memory_generation(), || panic!(
+        alias.with_memory_generation_native(alias.memory_generation(), || panic!(
             "failed backing installed PTE"
         )),
-        Err::<(), _>(syscall::EIO)
+        Err::<(), _>(mnu_abi::status::Error::BackingFailure)
     );
     assert_eq!(LOWER.lock().unwrap().reads, reads);
     assert_eq!(&LOWER.lock().unwrap().bytes, b"old");
@@ -1338,7 +1368,7 @@ fn production_extent_commit_preserves_dirty_prefix_and_discards_removed_storage(
     assert_eq!(LOWER.lock().unwrap().bytes[8], b'Q');
     assert_eq!(
         pinned.map_to(4096, 8192, false, false),
-        Err(syscall::EAGAIN)
+        Err(mnu_abi::status::Error::NotReady)
     );
     drop(pinned);
     object.invalidate().unwrap();
@@ -1350,7 +1380,10 @@ fn production_extent_commit_preserves_dirty_prefix_and_discards_removed_storage(
         object.prepare_extent(3, 1, |_| Err(syscall::ENOMEM)),
         Err(syscall::ENOMEM)
     ));
-    assert_eq!(object.with_memory_generation(generation, || Ok(())), Ok(()));
+    assert_eq!(
+        object.with_memory_generation_native(generation, || Ok(())),
+        Ok(())
+    );
     let shared = Arc::new([0; 4096]);
     assert!(matches!(
         object.prepare_extent(3, 1, |_| Ok(shared.clone())),

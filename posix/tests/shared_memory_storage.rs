@@ -174,7 +174,7 @@ fn empty_byte_object_grows_lazily_and_keeps_its_original_ceiling() {
         Err(NativeError::ResourceUnavailable)
     );
     assert_eq!(memory.length(), 8192);
-    assert_eq!(memory.with_generation(epoch, || Ok(())), Ok(()));
+    assert_eq!(memory.with_generation_native(epoch, || Ok(())), Ok(()));
     paging::release_user_frame(frame);
 }
 
@@ -218,8 +218,8 @@ fn page_population_uses_live_extent_including_its_partial_final_page() {
     assert_eq!(memory.prepare_page(1), Err(NativeError::InvalidArgument));
     assert_eq!(memory.prepare_page(2), Err(NativeError::InvalidArgument));
     assert_eq!(
-        memory.with_generation(epoch, || Ok(())),
-        Err(NativeError::NotReady.into_raw())
+        memory.with_generation_native(epoch, || Ok(())),
+        Err(NativeError::NotReady)
     );
     // Outstanding pins retain storage but cannot authorize a stale install.
     assert!(frames().lock().unwrap().contains_key(&partial));
@@ -241,7 +241,7 @@ fn byte_resize_preserves_prefix_and_clears_padding_before_growth() {
         Err(NativeError::BackingFailure)
     );
     assert_eq!(memory.length(), 8192);
-    assert_eq!(memory.with_generation(epoch, || Ok(())), Ok(()));
+    assert_eq!(memory.with_generation_native(epoch, || Ok(())), Ok(()));
     assert_eq!(
         unsafe { std::ptr::read_volatile((frame + 904) as *const u8) },
         8
@@ -268,8 +268,8 @@ fn byte_resize_preserves_prefix_and_clears_padding_before_growth() {
     assert_eq!(memory.read_at(5000, &mut output[..1]), Ok(1));
     assert_eq!(output[0], 0);
     assert_eq!(
-        memory.with_generation(epoch, || Ok(())),
-        Err(NativeError::NotReady.into_raw())
+        memory.with_generation_native(epoch, || Ok(())),
+        Err(NativeError::NotReady)
     );
     let alias = memory.retain_page(1).unwrap();
     assert_eq!(alias, frame);
@@ -322,10 +322,10 @@ fn shrink_and_regrowth_reject_old_prepared_generations_without_recycling_pins() 
         .unwrap();
     assert_eq!(memory.length(), 0);
     assert_eq!(
-        memory.with_generation(old_generation, || -> Result<(), u64> {
+        memory.with_generation_native(old_generation, || -> Result<(), NativeError> {
             panic!("old prepared page must not be installed")
         }),
-        Err(NativeError::NotReady.into_raw())
+        Err(NativeError::NotReady)
     );
     memory
         .resize_with(4096, |_, _| -> Result<(), NativeError> {
@@ -344,7 +344,7 @@ fn shrink_and_regrowth_reject_old_prepared_generations_without_recycling_pins() 
         0
     );
     assert_eq!(
-        memory.with_generation(fresh_generation, || Ok(42u32)),
+        memory.with_generation_native(fresh_generation, || Ok(42u32)),
         Ok(42)
     );
     paging::release_user_frame(old_frame);
@@ -364,11 +364,11 @@ fn failed_resize_and_noop_preserve_current_size_and_prepared_generation() {
         Err(NativeError::BackingFailure)
     );
     assert_eq!(memory.length(), 8192);
-    assert_eq!(memory.with_generation(generation, || Ok(())), Ok(()));
+    assert_eq!(memory.with_generation_native(generation, || Ok(())), Ok(()));
     memory
         .resize_with(8192, |_, _| -> Result<(), NativeError> { panic!("no-op") })
         .unwrap();
-    assert_eq!(memory.with_generation(generation, || Ok(())), Ok(()));
+    assert_eq!(memory.with_generation_native(generation, || Ok(())), Ok(()));
     paging::release_user_frame(frame);
 }
 
@@ -383,7 +383,7 @@ fn final_installation_holds_size_and_generation_stable_against_concurrent_resize
     let installed = AtomicBool::new(false);
     std::thread::scope(|scope| {
         let installer = scope.spawn(|| {
-            memory.with_generation(generation, || {
+            memory.with_generation_native(generation, || {
                 entered.wait();
                 finish.wait();
                 installed.store(true, Ordering::Release);
@@ -407,8 +407,8 @@ fn final_installation_holds_size_and_generation_stable_against_concurrent_resize
         assert_eq!(resize.join().unwrap(), Ok(()));
     });
     assert_eq!(
-        memory.with_generation(generation, || Ok(())),
-        Err(NativeError::NotReady.into_raw())
+        memory.with_generation_native(generation, || Ok(())),
+        Err(NativeError::NotReady)
     );
     paging::release_user_frame(frame);
 }
@@ -469,15 +469,18 @@ fn private_byte_snapshot_is_rejected_after_resize_even_when_size_returns_to_orig
     memory.resize_with(0, |_, _| Ok(())).unwrap();
     memory.resize_with(4096, |_, _| Ok(())).unwrap();
     assert_eq!(
-        memory.with_generation(generation, || -> Result<(), u64> {
+        memory.with_generation_native(generation, || -> Result<(), NativeError> {
             panic!("size equality alone must not authorize stale private bytes")
         }),
-        Err(NativeError::NotReady.into_raw())
+        Err(NativeError::NotReady)
     );
     let current = memory.generation();
     memory.read_at(0, &mut snapshot).unwrap();
     assert_eq!(snapshot[17], 0);
-    assert_eq!(memory.with_generation(current, || Ok(snapshot[17])), Ok(0));
+    assert_eq!(
+        memory.with_generation_native(current, || Ok(snapshot[17])),
+        Ok(0)
+    );
 }
 
 #[test]

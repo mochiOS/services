@@ -64,9 +64,6 @@ mod task {
         pub fn with_memory_generation_native<T>(&self, generation:Option<u64>, install:impl FnOnce()->Result<T,status::Error>)->Result<T,status::Error>{
             locked();assert_eq!(generation,Some(1));if self.unavailable {Err(status::Error::BackingFailure)} else if self.busy {Err(status::Error::NotReady)} else {install()}
         }
-        pub fn with_memory_generation<T>(&self, generation:Option<u64>, install:impl FnOnce()->Result<T,u64>)->Result<T,u64>{
-            locked();assert_eq!(generation,Some(1));if self.unavailable {Err(EIO)} else if self.busy {Err(EAGAIN)} else {install()}
-        }
         pub fn check_mapping_removal(&self)->Result<(),status::Error>{locked();if self.busy {Err(status::Error::NotReady)} else {Ok(())}}
         pub fn flush_unmapped_range(&self,_:u64,_:u64)->Result<(),u64>{Ok(())}
     }
@@ -271,11 +268,11 @@ fn native_new_mapping_checks_backing_before_region_publication() {
         .nth(1)
         .unwrap();
     assert!(
-        body.find("object.with_memory_generation(").unwrap()
+        body.find("object.with_memory_generation_native(").unwrap()
             < body.find("MemoryRegion::file_backed(").unwrap()
     );
     assert!(
-        body.find("object.with_memory_generation(").unwrap()
+        body.find("object.with_memory_generation_native(").unwrap()
             < body.find("process.add_memory_region(").unwrap()
     );
 }

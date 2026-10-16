@@ -89,14 +89,14 @@ mod task {
         pub fn memory_generation(&self) -> Option<u64> {
             Some(1)
         }
-        pub fn with_memory_generation<T>(
+        pub fn with_memory_generation_native<T>(
             &self,
             generation: Option<u64>,
-            install: impl FnOnce() -> Result<T, u64>,
-        ) -> Result<T, u64> {
+            install: impl FnOnce() -> Result<T, mnu_abi::status::Error>,
+        ) -> Result<T, mnu_abi::status::Error> {
             assert_eq!(generation, Some(1));
             if self.reserved.load(std::sync::atomic::Ordering::Acquire) {
-                Err((-11i64) as u64)
+                Err(mnu_abi::status::Error::NotReady)
             } else {
                 install()
             }
