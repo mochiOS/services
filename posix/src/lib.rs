@@ -2741,7 +2741,7 @@ impl<H: Copy> PosixService<H> {
 
     /// Consumes a native status observation for a retained ThreadHandle.
     /// This is a service/backend boundary, never a client-supplied IPC status.
-    /// Only confirmed termination or native ESRCH permits reclamation.
+    /// Only confirmed termination or native NotFound permits reclamation.
     pub fn retire_signal_thread(
         &mut self,
         identity: mnu_abi::ExecutionIdentity,
@@ -2751,7 +2751,12 @@ impl<H: Copy> PosixService<H> {
             return Err(protocol::STATUS_EPERM);
         }
         let terminated = match status {
-            Err(protocol::STATUS_ESRCH) => true,
+            Err(error)
+                if mnu_abi::status::Error::from_raw(error as i64 as u64)
+                    == Some(mnu_abi::status::Error::NotFound) =>
+            {
+                true
+            }
             Err(error) => return Err(error),
             Ok(status) => {
                 if status.process_id != identity.process_id || status.thread_id != identity.thread_id

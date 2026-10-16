@@ -723,7 +723,10 @@ fn wait_guard_rejects_untrusted_identity_and_reclaims_epochs_only_after_thread_e
     assert_eq!(first.thread_signal_epoch().unwrap(), 0);
     service
         .borrow_mut()
-        .retire_signal_thread(identity, Err(protocol::STATUS_ESRCH))
+        .retire_signal_thread(
+            identity,
+            Err(mnu_abi::status::Error::NotFound.into_raw() as i32),
+        )
         .unwrap();
     assert_eq!(
         first.thread_signal_epoch(),
@@ -843,7 +846,7 @@ fn thread_exit_discards_its_pending_signal_without_leaking_to_another_thread() {
                 process_id: 101,
                 thread_id: 501,
             },
-            Err(protocol::STATUS_ESRCH),
+            Err(mnu_abi::status::Error::NotFound.into_raw() as i32),
         )
         .unwrap();
     first
@@ -1319,7 +1322,7 @@ fn confirmed_thread_exit_reclaims_only_its_mask_and_preserves_process_signals() 
             state: mnu_abi::THREAD_STATE_TERMINATED,
             reserved: 0,
         }),
-        Err(protocol::STATUS_ESRCH),
+        Err(mnu_abi::status::Error::NotFound.into_raw() as i32),
     ] {
         let service = service();
         let exited = client(&service, 101, 501);
@@ -1396,6 +1399,8 @@ fn live_threads_and_failed_or_mismatched_observations_are_not_reclaimed() {
         );
     }
     for (status, expected) in [
+        // Old ESRCH is not evidence from the native lifecycle API anymore.
+        (Err(protocol::STATUS_ESRCH), protocol::STATUS_ESRCH),
         (Err(-5), -5),
         (Err(-11), -11),
         (Err(-9), -9),
@@ -1434,6 +1439,24 @@ fn live_threads_and_failed_or_mismatched_observations_are_not_reclaimed() {
             1 << 29
         );
     }
+    for error in [
+        mnu_abi::status::Error::InvalidArgument,
+        mnu_abi::status::Error::AccessDenied,
+        mnu_abi::status::Error::NotReady,
+        mnu_abi::status::Error::InvalidAddress,
+        mnu_abi::status::Error::ResourceUnavailable,
+        mnu_abi::status::Error::BackingFailure,
+    ] {
+        let raw = error.into_raw() as i32;
+        assert_eq!(
+            service.borrow_mut().retire_signal_thread(identity, Err(raw)),
+            Err(raw)
+        );
+        assert_eq!(
+            caller.thread_signal_mask(protocol::SIGNAL_MASK_QUERY, 0).unwrap(),
+            1 << 29
+        );
+    }
     for invalid in [
         ExecutionIdentity {
             process_id: 0,
@@ -1447,7 +1470,10 @@ fn live_threads_and_failed_or_mismatched_observations_are_not_reclaimed() {
         assert_eq!(
             service
                 .borrow_mut()
-                .retire_signal_thread(invalid, Err(protocol::STATUS_ESRCH)),
+                .retire_signal_thread(
+                    invalid,
+                    Err(mnu_abi::status::Error::NotFound.into_raw() as i32),
+                ),
             Err(protocol::STATUS_EPERM)
         );
     }
@@ -1499,7 +1525,10 @@ fn reclaiming_abandoned_deliveries_frees_capacity_without_touching_live_owners()
     assert_eq!(
         service
             .borrow_mut()
-            .retire_signal_thread(identity, Err(protocol::STATUS_ESRCH)),
+            .retire_signal_thread(
+                identity,
+                Err(mnu_abi::status::Error::NotFound.into_raw() as i32),
+            ),
         Ok(true)
     );
     for delivery in abandoned {
