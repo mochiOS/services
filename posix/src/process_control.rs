@@ -1,6 +1,15 @@
 use mochi_user_platform as platform;
 use posix_service::{AttachedObject, AuthenticatedProcess, STATUS_EINVAL};
 
+/// Missing native lifecycle targets are POSIX processes, not pathname entries.
+pub(crate) fn lifecycle_failure(raw: i64) -> i32 {
+    if mnu_abi::status::Error::from_raw(raw as u64) == Some(mnu_abi::status::Error::NotFound) {
+        mochios_posix_protocol::STATUS_ESRCH
+    } else {
+        mochios_posix_protocol::status::normalize_failure(raw)
+    }
+}
+
 /// Authenticate the explicit root object, never a PID supplied in IPC bytes.
 /// Native handle status enforces Process object type and WAIT authority.
 pub(crate) fn authenticated_tree_root(

@@ -1979,12 +1979,12 @@ impl posix_service::ProcessBackend<u32> for RuntimeProcesses {
 
     fn suspend(&mut self, process: u32) -> Result<(), i32> {
         mochi_user_platform::process::suspend_handle(process)
-            .map_err(|error| i32::try_from(error.raw()).unwrap_or(-5))
+            .map_err(|error| process_control::lifecycle_failure(error.raw()))
     }
 
     fn terminate(&mut self, process: u32, exit_code: u64) -> Result<(), i32> {
         mochi_user_platform::process::terminate_handle(process, exit_code)
-            .map_err(|error| i32::try_from(error.raw()).unwrap_or(-5))
+            .map_err(|error| process_control::lifecycle_failure(error.raw()))
     }
 
     fn release(&mut self, process: u32) {

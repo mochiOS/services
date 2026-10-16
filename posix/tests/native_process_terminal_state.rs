@@ -112,16 +112,16 @@ fn defer_process_reclaim(_: u64) { RECLAIMS.fetch_add(1, Ordering::Relaxed); }
     program.push_str(
         r#"
 const SUCCESS: u64 = 0;
-const ESRCH: u64 = 3;
-const EBADF: u64 = 9;
-const EACCES: u64 = 13;
-const EAGAIN: u64 = 11;
+const ESRCH: u64 = mnu_abi::status::Error::NotFound.into_raw();
+const EBADF: u64 = mnu_abi::status::Error::InvalidArgument.into_raw();
+const EACCES: u64 = mnu_abi::status::Error::AccessDenied.into_raw();
+const EAGAIN: u64 = mnu_abi::status::Error::NotReady.into_raw();
 struct HandleRights;
 impl HandleRights { const SIGNAL: Self = Self; }
 enum KernelObject { Process(Arc<ProcessObject>), Other }
-fn object(raw: u64, _: HandleRights) -> Result<KernelObject, u64> {
+fn object_native(raw: u64, _: HandleRights) -> Result<KernelObject, mnu_abi::status::Error> {
     match raw {
-        0 => Err(EACCES),
+        0 => Err(mnu_abi::status::Error::AccessDenied),
         1 => Ok(KernelObject::Other),
         _ => {
             if CASE.load(Ordering::Relaxed) == 1 { NATURAL_RACE.store(true, Ordering::Relaxed); }
@@ -199,6 +199,13 @@ mod task {
     }
 }
 "#,
+    );
+    program = program.replace(
+        "mod mnu_abi {",
+        &format!(
+            "mod mnu_abi {{pub mod status {{\n{}\n}}\n",
+            include_str!("../../../core/crates/abi/src/status.rs")
+        ),
     );
     program.push_str(body(handles, "pub fn process_terminate(", ""));
     program.push_str(

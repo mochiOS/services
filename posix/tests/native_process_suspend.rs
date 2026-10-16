@@ -1,5 +1,62 @@
 use mnu_abi::SyscallNumber;
 
+#[allow(dead_code)]
+#[path = "support/native_error_probe.rs"]
+mod probe;
+
+#[test]
+fn control_entries_require_signal_authority_and_preserve_native_failures() {
+    let mut program = probe::program();
+    program.push_str(r#"
+use std::cell::Cell;
+use mnu_abi::status::Error;
+const SUCCESS:u64=0;
+thread_local!{
+    static FAILURE:Cell<Option<Error>>=const{Cell::new(None)};
+    static EXITED:Cell<bool>=const{Cell::new(false)};
+    static PRESENT:Cell<bool>=const{Cell::new(true)};
+    static RESUMED:Cell<Option<usize>>=const{Cell::new(Some(1))};
+    static SUSPENDED:Cell<usize>=const{Cell::new(1)};
+    static CALLS:Cell<usize>=const{Cell::new(0)};
+}
+struct HandleRights;impl HandleRights{const SIGNAL:Self=Self;}
+struct Process;impl Process{fn id(&self)->u64{7}fn is_exited(&self)->bool{EXITED.get()}}
+enum KernelObject{Process(Process),Other}
+fn object_native(raw:u64,_:HandleRights)->Result<KernelObject,Error>{
+    if let Some(error)=FAILURE.get(){return Err(error);}
+    Ok(if raw==1{KernelObject::Process(Process)}else{KernelObject::Other})
+}
+mod task{
+    pub fn with_process<T>(id:u64,body:impl FnOnce(())->T)->Option<T>{assert_eq!(id,7);crate::PRESENT.get().then(||body(()))}
+    pub fn resume_process_threads(id:u64)->Option<usize>{assert_eq!(id,7);crate::CALLS.set(crate::CALLS.get()+1);crate::RESUMED.get()}
+    pub fn suspend_process_threads(id:u64)->usize{assert_eq!(id,7);crate::CALLS.set(crate::CALLS.get()+1);crate::SUSPENDED.get()}
+}
+"#);
+    program.push_str(probe::between(
+        include_str!("../../../core/src/syscall/handle.rs"),
+        "pub fn process_resume(",
+        "pub fn process_terminate(",
+    ));
+    program.push_str(r#"
+fn main(){
+    for operation in [process_resume as fn(u64)->u64,process_suspend as fn(u64)->u64]{
+        CALLS.set(0);
+        for error in [Error::InvalidArgument,Error::AccessDenied,Error::NotReady]{
+            FAILURE.set(Some(error));assert_eq!(operation(1),error.into_raw());assert_eq!(CALLS.get(),0);
+        }
+        FAILURE.set(None);assert_eq!(operation(2),Error::InvalidArgument.into_raw());assert_eq!(CALLS.get(),0);
+        EXITED.set(true);assert_eq!(operation(1),Error::NotFound.into_raw());assert_eq!(CALLS.get(),0);EXITED.set(false);
+        PRESENT.set(false);assert_eq!(operation(1),Error::NotFound.into_raw());assert_eq!(CALLS.get(),0);PRESENT.set(true);
+        assert_eq!(operation(1),0);assert_eq!(CALLS.get(),1);
+    }
+    RESUMED.set(None);assert_eq!(process_resume(1),Error::NotFound.into_raw());
+    RESUMED.set(Some(0));assert_eq!(process_resume(1),0);
+    SUSPENDED.set(0);assert_eq!(process_suspend(1),Error::NotReady.into_raw());
+}
+"#);
+    probe::run(&program);
+}
+
 #[test]
 fn native_process_suspension_is_generic_and_outside_the_posix_protocol() {
     assert_eq!(SyscallNumber::ProcessSuspendCurrent as u64, 669);
@@ -25,8 +82,10 @@ fn native_process_suspension_is_generic_and_outside_the_posix_protocol() {
         .find(".report_process_stopped(delivery)")
         .expect("default stop action must report authenticated process state");
     assert!(runtime.contains("PosixClientError::Remote(posix_protocol::STATUS_EAGAIN)"));
-    assert!(!runtime[report..report + 256.min(runtime.len() - report)]
-        .contains("ProcessSuspendCurrent"));
+    assert!(
+        !runtime[report..report + 256.min(runtime.len() - report)]
+            .contains("ProcessSuspendCurrent")
+    );
     assert!(runtime.contains(".report_process_signaled(delivery)"));
     assert!(runtime.contains(".complete_signal_delivery(delivery)"));
 

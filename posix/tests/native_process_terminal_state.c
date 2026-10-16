@@ -158,19 +158,19 @@ int main(void) {
       unsigned retries = 0;
       do {
         result = N(646, handle, UINT64_MAX, 0);
-        if (result == -EAGAIN)
+        if (result == INT64_C(-262137))
           N(517, 1, 0, 0);
-      } while (result == -EAGAIN && ++retries < 1000);
-      CHECK(result == 0 || result == -ESRCH);
+      } while (result == INT64_C(-262137) && ++retries < 1000);
+      CHECK(result == 0 || result == INT64_C(-262135));
       expected = result == 0 ? UINT64_MAX : code;
       forced += result == 0;
-      natural += result == -ESRCH;
+      natural += result == INT64_C(-262135);
       CHECK(N(643, handle, UINT64_MAX, &status) == 0);
     }
     CHECK(status.state == 2 && status.reserved == 0 && status.code == expected);
     /* Retain the handle across reclamation and attempt to replace its code. */
     CHECK(N(517, 2, 0, 0) == 0);
-    CHECK(N(646, handle, 123, 0) == -ESRCH);
+    CHECK(N(646, handle, 123, 0) == INT64_C(-262135));
     CHECK(N(642, handle, &status, 0) == 0);
     CHECK(status.state == 2 && status.code == expected);
     CHECK(N(626, handle, 0, 0) == 0);

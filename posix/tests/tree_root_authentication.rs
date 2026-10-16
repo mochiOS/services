@@ -34,6 +34,28 @@ pub mod process {
 #[path = "../src/process_control.rs"]
 mod production;
 
+#[test]
+fn native_lifecycle_absence_maps_to_process_errno_only_in_userspace() {
+    use mnu_abi::status::Error;
+    for (native, wire) in [
+        (Error::NotFound, -3),
+        (Error::NotReady, -11),
+        (Error::InvalidArgument, -22),
+        (Error::AccessDenied, -13),
+        (Error::ResourceUnavailable, -12),
+        (Error::BackingFailure, -5),
+    ] {
+        assert_eq!(
+            production::lifecycle_failure(native.into_raw() as i64),
+            wire
+        );
+    }
+    assert_eq!(
+        mochios_posix_protocol::status::normalize_failure(Error::NotFound.into_raw() as i64),
+        -2
+    );
+}
+
 fn root(handle: u32, rights: u64) -> posix_service::AttachedObject<u32> {
     posix_service::AttachedObject { handle, rights }
 }
