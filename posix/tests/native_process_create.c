@@ -268,7 +268,7 @@ int main(int argc, char **argv) {
     /* Legacy name lookup returns a thread ID, not status.process (a PID). */
     CHECK(N(FIND_PROCESS, label, strlen(label), 0) > 0);
     CHECK(N(FIND_PROCESS, image_path, strlen(image_path), 0) == 0);
-    CHECK(N(PROCESS_WAIT, process, 0, &status) == -EAGAIN);
+    CHECK(N(PROCESS_WAIT, process, 0, &status) == INT64_C(-262137));
     CHECK(N(SLEEP, 100, 0, 0) == 0);
     CHECK(N(PROCESS_STATUS, process, &status, 0) == 0 && status.state == 1);
     CHECK(N(PROCESS_CREATE, image, metadata, length) == INT64_C(-262138));

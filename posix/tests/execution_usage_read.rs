@@ -117,6 +117,7 @@ fn object_native(raw: u64, right: HandleRights) -> Result<KernelObject, Error> {
 }
 mod task {
     use super::*;
+    pub mod process {pub use crate::lifecycle::ProcessObject;}
     pub fn with_process<R>(id: u64, read: impl FnOnce(&Process) -> R) -> Option<R> {
         // The remote process has already left the process table. Its retained
         // native object is still observable through the explicit handle.
