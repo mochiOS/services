@@ -61,6 +61,16 @@ static SERIAL: Mutex<()> = Mutex::new(());
 static SOURCE: Mutex<Option<FdEntry>> = Mutex::new(None);
 static CASE: AtomicU32 = AtomicU32::new(0);
 static CALLS: AtomicU32 = AtomicU32::new(0);
+// 2 selects fcntl; 0/1 select a disabled/enabled FIONBIO request.
+static OPTION_MODE: AtomicU32 = AtomicU32::new(2);
+static LAST_ERROR: AtomicU32 = AtomicU32::new(0);
+fn expected_flags() -> c_int {
+    match OPTION_MODE.load(Ordering::Relaxed) {
+        0 => 0,
+        1 => O_NONBLOCK,
+        _ => 2 | O_NONBLOCK,
+    }
+}
 mod fd_lease {
     use super::*;
     pub(super) struct Lease {
@@ -70,15 +80,17 @@ mod fd_lease {
     impl Lease {
         pub fn new(entry: FdEntry) -> Result<Self, c_int> {
             assert_ne!(CONTROL.native.load(Ordering::Relaxed), 0);
-            let pin = BOOK
-                .lock()
-                .unwrap()
-                .pin(entry.handle.lower_handle)
-                .ok_or(EBADF)?;
-            Ok(Self {
-                entry,
-                pin: Some(pin),
-            })
+            let pin = if entry.handle.lower_handle == 0 {
+                None
+            } else {
+                Some(
+                    BOOK.lock()
+                        .unwrap()
+                        .pin(entry.handle.lower_handle)
+                        .ok_or(EBADF)?,
+                )
+            };
+            Ok(Self { entry, pin })
         }
     }
     impl std::ops::Deref for Lease {
@@ -90,9 +102,10 @@ mod fd_lease {
     impl Drop for Lease {
         fn drop(&mut self) {
             assert_ne!(CONTROL.native.load(Ordering::Relaxed), 0);
-            let close = BOOK.lock().unwrap().release(self.pin.take().unwrap());
-            if close {
-                close_object_handle(self.entry.handle.lower_handle as u32);
+            if let Some(pin) = self.pin.take() {
+                if BOOK.lock().unwrap().release(pin) {
+                    close_object_handle(self.entry.handle.lower_handle as u32);
+                }
             }
         }
     }
@@ -181,13 +194,16 @@ mod socket {
     }
     pub fn set_status_flags(entry: FdEntry, flags: c_int) -> Result<(), c_int> {
         validate(entry);
-        assert_eq!(flags, 2 | O_NONBLOCK);
+        assert_eq!(flags, expected_flags());
         backend(entry.handle.lower_handle)
     }
 }
 mod shared_memory {
     pub use super::socket::{get_status_flags, set_status_flags};
-    pub fn update_status_flags(entry: super::FdEntry, _: u32, _: u32) -> Result<(), i32> {
+    pub fn update_status_flags(entry: super::FdEntry, mask: u32, flags: u32) -> Result<(), i32> {
+        super::validate(entry);
+        assert_eq!(mask, super::O_NONBLOCK as u32);
+        assert_eq!(flags, super::expected_flags() as u32);
         super::backend(entry.handle.lower_handle)
     }
 }
@@ -225,10 +241,13 @@ impl Client {
     fn update_status_flags(
         self,
         handle: ObjectHandleAttachment<u32>,
-        _: u32,
-        _: u32,
+        mask: u32,
+        flags: u32,
         _: fn(u32),
     ) -> Result<(), c_int> {
+        assert_eq!(handle.rights, 7);
+        assert_eq!(mask, O_NONBLOCK as u32);
+        assert_eq!(flags, expected_flags() as u32);
         backend(handle.handle.into())
     }
 }
@@ -246,7 +265,10 @@ mod syscall {
         }
     }
     pub fn raw_syscall2(_: SyscallNumber, handle: u64, options: u64) -> u64 {
-        assert_eq!(options, 1);
+        assert_eq!(
+            options,
+            u64::from(super::expected_flags() & super::O_NONBLOCK != 0)
+        );
         match super::backend(handle) {
             Ok(()) => 0,
             Err(error) => (-(error as i64)) as u64,
@@ -261,11 +283,18 @@ fn syscall_errno(value: u64) -> Result<u64, c_int> {
     }
 }
 fn result_with_errno(result: Result<c_int, c_int>, fallback: c_int) -> c_int {
-    result.unwrap_or(fallback)
+    match result {
+        Ok(value) => value,
+        Err(error) => {
+            LAST_ERROR.store(error as u32, Ordering::Relaxed);
+            fallback
+        }
+    }
 }
 #[test]
 fn provider_status_calls_run_without_state_lock_and_retain_the_original_reference_on_reentry() {
     let _serial = SERIAL.lock().unwrap();
+    OPTION_MODE.store(2, Ordering::Relaxed);
     for kind in [
         FdKind::ObjectFile,
         FdKind::ObjectSpecial,
@@ -381,4 +410,78 @@ fn fcntl_routes_shared_status_before_locking_the_descriptor_table() {
     );
     assert!(!body.contains(".get_status_flags("));
     assert!(!body.contains(".set_status_flags("));
+}
+
+#[test]
+fn nonblocking_updates_retain_source_authority_and_release_it_on_every_result() {
+    let _serial = SERIAL.lock().unwrap();
+    for kind in [
+        FdKind::ObjectFile,
+        FdKind::ObjectSpecial,
+        FdKind::ObjectDirectory,
+        FdKind::ObjectSharedMemory,
+        FdKind::ObjectSocket,
+        FdKind::ObjectDatagram,
+        FdKind::ObjectStreamRead,
+        FdKind::ObjectStreamWrite,
+        FdKind::ObjectPty,
+    ] {
+        for enabled in [-1, 0, 1] {
+            for case in 0..4 {
+                state().fds = FdTable::new();
+                *BOOK.lock().unwrap() = Book::new();
+                CLOSED.lock().unwrap().clear();
+                CASE.store(case, Ordering::Relaxed);
+                OPTION_MODE.store(u32::from(enabled != 0), Ordering::Relaxed);
+                CALLS.store(0, Ordering::Relaxed);
+                let source = entry(kind, 10, 2);
+                *SOURCE.lock().unwrap() = Some(source);
+                state().fds.install_from(0, 32, source).unwrap();
+                state()
+                    .fds
+                    .install_from(0, 32, entry(FdKind::Stdin, 0, 0))
+                    .unwrap();
+                assert_eq!(
+                    implementation::__mochios_fd_set_nonblocking(0, enabled),
+                    if case % 2 == 0 { 0 } else { -1 }
+                );
+                assert_eq!(CALLS.load(Ordering::Relaxed), 1);
+                if case >= 2 {
+                    assert_eq!(*CLOSED.lock().unwrap(), [10]);
+                    assert_eq!(
+                        state().fds.get(0).unwrap().handle,
+                        entry(FdKind::ObjectFile, 20, 123).handle
+                    );
+                } else {
+                    assert!(CLOSED.lock().unwrap().is_empty());
+                }
+                remove(0);
+                assert_eq!(
+                    *CLOSED.lock().unwrap(),
+                    if case >= 2 { vec![10, 20] } else { vec![10] }
+                );
+                assert!(CONTROL.callback_resources.is_empty());
+                assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
+            }
+        }
+    }
+    OPTION_MODE.store(2, Ordering::Relaxed);
+}
+
+#[test]
+fn nonblocking_local_and_missing_descriptors_fail_without_calling_the_provider() {
+    let _serial = SERIAL.lock().unwrap();
+    state().fds = FdTable::new();
+    CALLS.store(0, Ordering::Relaxed);
+    state()
+        .fds
+        .install_from(0, 32, entry(FdKind::Stdin, 0, 0))
+        .unwrap();
+    assert_eq!(implementation::__mochios_fd_set_nonblocking(0, 1), -1);
+    assert_eq!(LAST_ERROR.load(Ordering::Relaxed), ENOTTY as u32);
+    assert_eq!(implementation::__mochios_fd_set_nonblocking(1, 1), -1);
+    assert_eq!(LAST_ERROR.load(Ordering::Relaxed), EBADF as u32);
+    assert_eq!(CALLS.load(Ordering::Relaxed), 0);
+    assert!(CONTROL.callback_resources.is_empty());
+    assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
 }

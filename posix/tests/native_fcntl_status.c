@@ -4,6 +4,7 @@
 #include <pty.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -81,6 +82,10 @@ int main(void) {
       int flags = access | persistent | (iteration & 1 ? O_NONBLOCK : 0);
       CHECK(fcntl(iteration & 2 ? alias : fd, F_SETFL, flags) == 0);
       CHECK(fcntl(alias, F_GETFL) == flags && fcntl(fd, F_GETFL) == flags);
+      int enabled = iteration & 1 ? 0 : -1;
+      CHECK(ioctl(iteration & 2 ? fd : alias, FIONBIO, &enabled) == 0);
+      int changed = access | persistent | (enabled ? O_NONBLOCK : 0);
+      CHECK(fcntl(alias, F_GETFL) == changed && fcntl(fd, F_GETFL) == changed);
       CHECK(fcntl(alias, F_GETFD) == FD_CLOEXEC &&
             fcntl(fd, F_GETFD) == descriptor_flags);
       CHECK(native_count() == baseline);
@@ -92,7 +97,8 @@ int main(void) {
     fprintf(stderr, "fcntl-status: kind=%u PASS\n", kind);
   }
   CHECK(unlink(path) == 0);
-  puts("fcntl-status: PASS 9 description kinds, 108 shared status updates, "
+  puts("fcntl-status: PASS 9 description kinds, 108 fcntl and 108 FIONBIO "
+       "updates, "
        "descriptor-local CLOEXEC and reference recovery");
   return 0;
 }
