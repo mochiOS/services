@@ -119,3 +119,35 @@ fn native_and_wire_failures_translate_by_meaning_not_numeric_identity() {
     // A C errno must not be translated a second time: wire 88 means ENOTSOCK.
     assert_ne!(from_status(i64::from(errno::ENOSYS)), errno::ENOSYS);
 }
+
+#[test]
+fn process_terminal_and_readonly_policy_errors_are_not_native_abi_exports() {
+    let abi = include_str!("../../../core/crates/abi/src/lib.rs");
+    let kernel = include_str!("../../../core/src/syscall/types.rs");
+    let binding = include_str!("../../../user/crates/syscall/src/lib.rs");
+    let binding_exports = binding
+        .split("pub use mnu_abi::{")
+        .nth(1)
+        .unwrap()
+        .split("};")
+        .next()
+        .unwrap();
+    for name in ["ECHILD", "ENOTTY", "EROFS"] {
+        assert!(
+            !abi.contains(&format!("pub const {name}:")),
+            "native definition: {name}"
+        );
+        for exports in [kernel, binding_exports] {
+            assert!(
+                !exports
+                    .split(|c: char| !c.is_alphanumeric() && c != '_')
+                    .any(|token| token == name),
+                "native re-export: {name}"
+            );
+        }
+    }
+    // Removing unused native exports must not erase userspace POSIX meaning.
+    assert_eq!(from_status(-10), errno::ECHILD);
+    assert_eq!(from_status(-25), errno::ENOTTY);
+    assert_eq!(from_status(-30), sdk_errno("EROFS"));
+}
