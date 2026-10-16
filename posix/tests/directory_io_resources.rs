@@ -22,6 +22,23 @@ static OPEN_CASE: AtomicU32 = AtomicU32::new(0);
 static OPEN_CALLS: AtomicU32 = AtomicU32::new(0);
 static LIVE_MEMORY: AtomicU32 = AtomicU32::new(0);
 static PROMPTS: AtomicU32 = AtomicU32::new(0);
+static CLOSE_FAILURE: AtomicU32 = AtomicU32::new(0);
+static CLOSE_CALLS: AtomicU32 = AtomicU32::new(0);
+fn _close(fd: c_int) -> c_int {
+    assert_eq!(fd, 7);
+    assert_ne!(
+        CONTROL.native.load(Ordering::Relaxed),
+        0,
+        "delivery reopened between free and close"
+    );
+    assert_eq!(LIVE_MEMORY.load(Ordering::Relaxed), 0);
+    CLOSE_CALLS.fetch_add(1, Ordering::Relaxed);
+    if CLOSE_FAILURE.load(Ordering::Relaxed) != 0 {
+        -1
+    } else {
+        0
+    }
+}
 struct DirStream {
     fd: c_int,
     buffer: [u8; 16],
@@ -285,4 +302,33 @@ fn handoff_precedes_fd_installation_and_callback_retirement_is_still_guarded() {
     );
     assert!(body.find("handoff(fd)?").unwrap() < body.find("commit_reservation(").unwrap());
     assert!(body.find("retire()").unwrap() < body.find("drop(completion_delivery)").unwrap());
+}
+
+#[test]
+fn directory_close_keeps_delivery_closed_through_both_free_and_fd_retirement() {
+    let _serial = SERIAL.lock().unwrap();
+    for fail in [0, 1] {
+        OPEN_CASE.store(0, Ordering::Relaxed);
+        CLOSE_FAILURE.store(fail, Ordering::Relaxed);
+        CLOSE_CALLS.store(0, Ordering::Relaxed);
+        let pointer = implementation::open(c"/directory".as_ptr()).unwrap();
+        assert_eq!(LIVE_MEMORY.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            unsafe { implementation::close(pointer.cast()) },
+            if fail != 0 { -1 } else { 0 }
+        );
+        assert_eq!(CLOSE_CALLS.load(Ordering::Relaxed), 1);
+        assert_eq!(LIVE_MEMORY.load(Ordering::Relaxed), 0);
+        assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
+        assert!(CONTROL.callback_resources.is_empty());
+    }
+    let source = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
+    let body = source
+        .split("fn closedir(")
+        .nth(1)
+        .unwrap()
+        .split("#[unsafe(no_mangle)]")
+        .next()
+        .unwrap();
+    assert!(body.contains("directory_io::close(dirp.cast())"));
 }
