@@ -877,12 +877,15 @@ fn main() {
             (Some(peer), Some((header, payload)), true)
                 if matches!(
                     header.opcode,
-                    protocol::OP_WAIT_CHILD | protocol::OP_WAIT_CHILD_GUARDED
+                    protocol::OP_WAIT_CHILD
+                        | protocol::OP_WAIT_CHILD_GUARDED
+                        | protocol::OP_WAIT_CHILD_INFO
                 )
                     && header.flags == 0
                     && attachments.is_empty() =>
             {
-                let parsed = if header.opcode == protocol::OP_WAIT_CHILD_GUARDED {
+                let detailed = header.opcode == protocol::OP_WAIT_CHILD_INFO;
+                let parsed = if header.opcode != protocol::OP_WAIT_CHILD {
                     protocol::decode_guarded_wait_request(payload)
                         .map_err(|_| posix_service::STATUS_EINVAL)
                         .and_then(|(request, epoch)| {
@@ -904,7 +907,7 @@ fn main() {
                             None => Ok(()),
                         };
                         match validated.and_then(|()| {
-                            service.wait_child(peer, request, &mut filesystem, &mut processes)
+                            service.wait_child_info(peer, request, &mut filesystem, &mut processes)
                         }) {
                             Err(protocol::STATUS_EAGAIN) => {
                                 pending_waits.push(PendingWait {
@@ -913,17 +916,18 @@ fn main() {
                                     request_id: header.request_id,
                                     request,
                                     guard,
+                                    detailed,
                                 });
                                 None
                             }
                             response => Some(posix_service::ObjectResponse {
-                                response: wait_response(header.request_id, response),
+                                response: wait_info_response(header.request_id, response, detailed),
                                 handles: Vec::new(),
                             }),
                         }
                     }
                     Err(error) => Some(posix_service::ObjectResponse {
-                        response: wait_response(header.request_id, Err(error)),
+                        response: wait_info_response(header.request_id, Err(error), detailed),
                         handles: Vec::new(),
                     }),
                 }
@@ -1650,6 +1654,7 @@ struct PendingWait {
     request_id: u64,
     request: mochios_posix_protocol::WaitRequest,
     guard: Option<(mnu_abi::ExecutionIdentity, u64)>,
+    detailed: bool,
 }
 
 #[cfg(target_os = "mochios")]
@@ -1672,12 +1677,12 @@ fn complete_pending_waits(
             None => Ok(()),
         };
         let result = validated
-            .and_then(|()| service.wait_child(wait.peer, wait.request, filesystem, processes));
+            .and_then(|()| service.wait_child_info(wait.peer, wait.request, filesystem, processes));
         if result == Err(protocol::STATUS_EAGAIN) {
             index += 1;
             continue;
         }
-        let response = wait_response(wait.request_id, result);
+        let response = wait_info_response(wait.request_id, result, wait.detailed);
         let mut bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
         if let Ok(length) = protocol::encode(response.header, &response.payload, &mut bytes) {
             let _ = platform::ipc::reply(wait.sender, &bytes[..length]);
@@ -1874,6 +1879,36 @@ fn success_response(request_id: u64) -> posix_service::Response {
             ..mochios_posix_protocol::Header::default()
         },
         payload: Vec::new(),
+    }
+}
+
+#[cfg(target_os = "mochios")]
+fn wait_info_response(
+    request_id: u64,
+    result: Result<mochios_posix_protocol::WaitInfo, i32>,
+    detailed: bool,
+) -> posix_service::Response {
+    use mochios_posix_protocol as protocol;
+    if !detailed {
+        return wait_response(request_id, result.map(|info| info.result));
+    }
+    match result {
+        Ok(info) => {
+            let mut payload = vec![0; protocol::WAIT_INFO_LEN];
+            if protocol::encode_wait_info(info, &mut payload).is_err() {
+                return invalid_response(request_id);
+            }
+            posix_service::Response {
+                header: protocol::Header {
+                    opcode: protocol::OP_STATUS,
+                    request_id,
+                    payload_len: payload.len() as u32,
+                    ..Default::default()
+                },
+                payload,
+            }
+        }
+        Err(status) => status_response(request_id, status),
     }
 }
 

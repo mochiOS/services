@@ -1762,6 +1762,19 @@ impl<H: Copy> PosixService<H> {
         filesystem: &mut F,
         processes: &mut P,
     ) -> Result<protocol::WaitResult, i32> {
+        self.wait_child_info(peer, request, filesystem, processes)
+            .map(|info| info.result)
+    }
+
+    /// Captures the child's real POSIX UID in the same transaction as event
+    /// selection and reaping; callers cannot query an already-reaped identity.
+    pub fn wait_child_info<F: FilesystemBackend<H>, P: ProcessBackend<H>>(
+        &mut self,
+        peer: PeerIdentity,
+        request: protocol::WaitRequest,
+        filesystem: &mut F,
+        processes: &mut P,
+    ) -> Result<protocol::WaitInfo, i32> {
         self.matching_child_ids(peer, request)?;
         self.reap_discarded_children_for(Some(peer.process_id), filesystem, processes)?;
         let candidates = self.matching_child_ids(peer, request)?;
@@ -1776,6 +1789,8 @@ impl<H: Copy> PosixService<H> {
                 .get(&child)
                 .copied()
                 .ok_or(protocol::STATUS_ESRCH)?;
+            let real_uid = self.sessions.get(&child)
+                .ok_or(protocol::STATUS_ESRCH)?.real_uid;
             if let ProcessLifecycle::Exited { exit_code } = processes.status(handle)? {
                 self.note_child_exited(child, exit_code)?;
                 if !protocol::wait_selects_exit(request.options) {
@@ -1788,9 +1803,12 @@ impl<H: Copy> PosixService<H> {
                     .map(|signal| signal & 0x7f)
                     .unwrap_or_else(|| ((exit_code & 0xff) as u32) << 8);
                 if request.options & protocol::WAIT_NOWAIT != 0 {
-                    return Ok(protocol::WaitResult {
-                        process_id: child,
-                        status,
+                    return Ok(protocol::WaitInfo {
+                        result: protocol::WaitResult {
+                            process_id: child,
+                            status,
+                        },
+                        real_uid,
                     });
                 }
                 let usage = processes.execution_usage(handle)?;
@@ -1817,9 +1835,12 @@ impl<H: Copy> PosixService<H> {
                 self.reap_child(peer.process_id, child, filesystem, processes)?;
                 self.process_wait_states.get_mut(&peer.process_id)
                     .unwrap().waited_cpu = total;
-                return Ok(protocol::WaitResult {
-                    process_id: child,
-                    status,
+                return Ok(protocol::WaitInfo {
+                    result: protocol::WaitResult {
+                        process_id: child,
+                        status,
+                    },
+                    real_uid,
                 });
             }
             can_change = true;
@@ -1828,9 +1849,12 @@ impl<H: Copy> PosixService<H> {
                 .get_mut(&child)
                 .and_then(|state| state.take_status(request.options))
             {
-                return Ok(protocol::WaitResult {
-                    process_id: child,
-                    status,
+                return Ok(protocol::WaitInfo {
+                    result: protocol::WaitResult {
+                        process_id: child,
+                        status,
+                    },
+                    real_uid,
                 });
             }
         }
@@ -1841,7 +1865,7 @@ impl<H: Copy> PosixService<H> {
             return Err(protocol::STATUS_ECHILD);
         }
         if request.options & protocol::WAIT_NOHANG != 0 {
-            Ok(protocol::WaitResult::default())
+            Ok(protocol::WaitInfo::default())
         } else {
             Err(protocol::STATUS_EAGAIN)
         }
@@ -1888,7 +1912,9 @@ impl<H: Copy> PosixService<H> {
         peer: PeerIdentity,
         request: protocol::WaitRequest,
     ) -> Result<Vec<u64>, i32> {
-        if !protocol::wait_options_valid(request.options) {
+        if !protocol::wait_options_valid(request.options)
+            || (request.options & protocol::WAIT_SELECT_GROUP != 0 && request.selector < 0)
+        {
             return Err(STATUS_EINVAL);
         }
         let caller_group = self
@@ -1912,6 +1938,10 @@ impl<H: Copy> PosixService<H> {
             .iter()
             .copied()
             .filter(|child| match request.selector {
+                group if request.options & protocol::WAIT_SELECT_GROUP != 0 => {
+                    let group = if group == 0 { caller_group } else { group as u64 };
+                    self.process_groups.get(child).copied() == Some(group)
+                }
                 selector if selector > 0 => *child == selector as u64,
                 -1 => true,
                 0 => self.process_groups.get(child).copied() == Some(caller_group),

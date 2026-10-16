@@ -21,6 +21,9 @@ mod wait_observation;
 #[path = "support/wait_selection.rs"]
 mod wait_selection;
 
+#[path = "support/wait_info.rs"]
+mod wait_info;
+
 #[path = "support/cpu_limit.rs"]
 mod cpu_limit;
 
