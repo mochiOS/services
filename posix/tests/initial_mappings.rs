@@ -1,6 +1,30 @@
 extern crate alloc;
 use mnu_abi::process_image::{self as wire, InitialMapping};
+use mnu_abi::status::Error;
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::sync::Arc;
+
+thread_local! {
+    static FAIL: Cell<bool> = const { Cell::new(false) };
+    static LOOKUPS: Cell<usize> = const { Cell::new(0) };
+    static DROPS: Cell<usize> = const { Cell::new(0) };
+}
+struct Allocator;
+unsafe impl GlobalAlloc for Allocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if FAIL.with(|state| state.replace(false)) {
+            std::ptr::null_mut()
+        } else {
+            unsafe { System.alloc(layout) }
+        }
+    }
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(pointer, layout) }
+    }
+}
+#[global_allocator]
+static ALLOCATOR: Allocator = Allocator;
 
 mod task {
     use super::Arc;
@@ -17,10 +41,15 @@ mod task {
             self.0 & other.0 == other.0
         }
     }
-    pub struct Object;
+    pub struct Object(pub Option<u64>);
     impl Object {
         pub fn memory_length(&self) -> Option<u64> {
-            Some(4096)
+            self.0
+        }
+    }
+    impl Drop for Object {
+        fn drop(&mut self) {
+            crate::DROPS.with(|count| count.set(count.get() + 1));
         }
     }
     pub enum KernelObject {
@@ -69,19 +98,19 @@ mod task {
     }
 }
 mod syscall {
-    pub mod types {
-        pub const EINVAL: u64 = mnu_abi::EINVAL;
-        pub const ENOMEM: u64 = mnu_abi::ENOMEM;
-        pub const EACCES: u64 = mnu_abi::EACCES;
-    }
     pub mod handle {
         use crate::task::*;
-        pub fn object_with_rights(
+        pub fn object_with_rights_native(
             handle: u64,
             needed: HandleRights,
-        ) -> Result<(KernelObject, HandleRights), u64> {
+        ) -> Result<(KernelObject, HandleRights), mnu_abi::status::Error> {
+            use mnu_abi::status::Error;
+            crate::LOOKUPS.with(|count| count.set(count.get() + 1));
             if handle == 99 {
-                return Err(mnu_abi::EBADF);
+                return Err(Error::InvalidArgument);
+            }
+            if handle == 98 {
+                return Err(Error::NotReady);
             }
             let rights = if handle == 2 {
                 HandleRights::READ
@@ -91,13 +120,15 @@ mod syscall {
                 HandleRights::READ.union(HandleRights::MAP)
             };
             if !rights.contains(needed) {
-                return Err(mnu_abi::EACCES);
+                return Err(Error::AccessDenied);
             }
             Ok((
                 if handle == 3 {
                     KernelObject::Other
                 } else {
-                    KernelObject::VmObject(std::sync::Arc::new(Object))
+                    KernelObject::VmObject(std::sync::Arc::new(Object(
+                        (handle != 4).then_some(4096),
+                    )))
                 },
                 rights,
             ))
@@ -194,12 +225,14 @@ fn prepared_regions_preserve_ram_authority_and_reject_conflicts_and_invalid_obje
     assert_eq!(regions[0].max, 1);
     assert!(regions[0].object.is_some());
     for (mut plan, expected) in [
-        (mapping(), mnu_abi::EACCES),
-        (mapping(), mnu_abi::EBADF),
-        (mapping(), mnu_abi::EINVAL),
-        (mapping(), mnu_abi::EINVAL),
-        (mapping(), mnu_abi::EACCES),
-        (mapping(), mnu_abi::EINVAL),
+        (mapping(), Error::AccessDenied),
+        (mapping(), Error::InvalidArgument),
+        (mapping(), Error::InvalidArgument),
+        (mapping(), Error::InvalidArgument),
+        (mapping(), Error::AccessDenied),
+        (mapping(), Error::InvalidArgument),
+        (mapping(), Error::InvalidArgument),
+        (mapping(), Error::NotReady),
     ]
     .into_iter()
     .enumerate()
@@ -210,7 +243,9 @@ fn prepared_regions_preserve_ram_authority_and_reject_conflicts_and_invalid_obje
             2 => p.backing_handle = 3,
             3 => p.length = 8192,
             4 => p.access = 4,
-            _ => p.address = 0x400000,
+            5 => p.address = 0x400000,
+            6 => p.backing_handle = 4,
+            _ => p.backing_handle = 98,
         }
         (p, e)
     }) {
@@ -230,8 +265,36 @@ fn prepared_regions_preserve_ram_authority_and_reject_conflicts_and_invalid_obje
     }
     assert_eq!(
         production::prepare(17, wire::decode(&bytes[..length]).unwrap(), &mut regions),
-        Err(mnu_abi::EINVAL)
+        Err(Error::InvalidArgument)
     );
+}
+
+#[test]
+fn preparation_reserves_before_lookup_and_releases_partial_owned_regions() {
+    let (bytes, length) = encoded(&[mapping()]);
+    let startup = wire::decode(&bytes[..length]).unwrap();
+    let mut regions = Vec::new();
+    LOOKUPS.with(|count| count.set(0));
+    FAIL.with(|state| state.set(true));
+    let result = production::prepare(17, startup, &mut regions);
+    assert!(!FAIL.with(|state| state.replace(false)));
+    assert_eq!(result, Err(Error::ResourceUnavailable));
+    assert_eq!(LOOKUPS.with(Cell::get), 0);
+    assert!(regions.is_empty());
+
+    let mut invalid = mapping();
+    invalid.address += 4096;
+    invalid.backing_handle = 99;
+    let (bytes, length) = encoded(&[mapping(), invalid]);
+    DROPS.with(|count| count.set(0));
+    assert_eq!(
+        production::prepare(17, wire::decode(&bytes[..length]).unwrap(), &mut regions),
+        Err(Error::InvalidArgument)
+    );
+    assert_eq!(regions.len(), 1);
+    assert_eq!(DROPS.with(Cell::get), 0);
+    drop(regions);
+    assert_eq!(DROPS.with(Cell::get), 1);
 }
 
 #[test]

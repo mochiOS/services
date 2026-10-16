@@ -287,6 +287,16 @@ fn main() {
             assert!(p.table.insert_at(ObjectHandle::from_raw(raw).unwrap(),ObjectHandleEntry::new(KernelObject::Resource(resource),rights)));
         }
     });
+    // Native lookup returns the retained object and its exact rights from one
+    // table access; asking for READ must not attenuate or invent other bits.
+    let before=Arc::strong_count(&original);
+    let (retained,rights)=syscall::handle::object_with_rights_native(7,HandleRights::READ).unwrap();
+    assert_eq!(rights,full);assert_eq!(Arc::strong_count(&original),before+1);
+    match &retained {KernelObject::Resource(resource)=>assert!(Arc::ptr_eq(resource,&original)),_=>panic!("wrong object")}
+    drop(retained);assert_eq!(Arc::strong_count(&original),before);
+    assert!(matches!(syscall::handle::object_with_rights_native(7,HandleRights::CONTROL),Err(Error::AccessDenied)));
+    assert!(matches!(syscall::handle::object_with_rights_native(99,HandleRights::READ),Err(Error::InvalidArgument)));
+    CONTEXT.set(None);assert!(matches!(syscall::handle::object_with_rights_native(7,HandleRights::READ),Err(Error::NotReady)));CONTEXT.set(Some(19));
     let snapshot=PROCESS.with_borrow(|p|Arc::new(p.table.capture().unwrap()));
     PROCESS.with_borrow_mut(|p|{
         assert!(p.table.insert_at(ObjectHandle::from_raw(31).unwrap(),ObjectHandleEntry::new(KernelObject::HandleSnapshot(snapshot.clone()),HandleRights::CONTROL)));
