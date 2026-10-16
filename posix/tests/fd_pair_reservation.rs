@@ -23,6 +23,7 @@ fn pair_reserves_two_lowest_free_slots_and_publishes_descriptor_local_flags() {
     let mut table = FdTable::new();
     table.install_at(1, entry(10, 0), &mut NeverClose).unwrap();
     let pair = table.reserve_pair_from(0, 4).unwrap();
+    assert_eq!([pair[0].descriptor(), pair[1].descriptor()], [0, 2]);
     assert_eq!(table.get(0), None);
     assert_eq!(table.get(2), None);
     assert_eq!(
