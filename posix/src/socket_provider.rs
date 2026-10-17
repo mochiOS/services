@@ -58,6 +58,7 @@ pub fn handle_provider_request(
         Err(-22)
     } else {
         match header.opcode {
+            provider::OP_MEMORY_OBJECT => streams.options(header.object_id).map(|_| (0, 0)),
             provider::OP_READ => streams
                 .read(header.object_id, &mut data[..header.length as usize])
                 .map(|count| (count as u64, count)),

@@ -1,5 +1,5 @@
 use mnu_abi::provider;
-use posix_service::pty::{handle_provider_request, PtyManager, ENOTSUP};
+use posix_service::pty::{ENOTSUP, PtyManager, handle_provider_request};
 
 #[test]
 fn generic_file_and_pager_requests_are_rejected_without_killing_the_byte_stream() {
@@ -29,7 +29,14 @@ fn generic_file_and_pager_requests_are_rejected_without_killing_the_byte_stream(
         let count = handle_provider_request(&mut manager, &request, &mut response).unwrap();
         let (header, payload) = provider::ResponseHeader::decode(&response[..count]).unwrap();
         assert_eq!(header.opcode, opcode);
-        assert_eq!(header.status, -(i64::from(ENOTSUP)));
+        assert_eq!(
+            header.status,
+            if opcode == provider::OP_MEMORY_OBJECT {
+                0
+            } else {
+                -(i64::from(ENOTSUP))
+            }
+        );
         assert_eq!(header.value, 0);
         assert!(payload.is_empty());
     }

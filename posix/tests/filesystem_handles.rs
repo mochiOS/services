@@ -1824,7 +1824,7 @@ fn directory_provider_declines_pager_identity_without_disabling_stream_reads() {
         .unwrap()
         .header
         .open_id;
-    assert_eq!(filesystem.provider_memory_object(open_id), Err(95));
+    assert_eq!(filesystem.provider_memory_object(open_id), Ok(0));
     let bytes = filesystem.provider_read(open_id, 4096).unwrap();
     assert!(!bytes.is_empty());
     let mut remaining = bytes.as_slice();

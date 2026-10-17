@@ -101,6 +101,20 @@ fn call(
 }
 
 #[test]
+fn memory_backing_query_is_explicit_authenticated_and_validates_object_identity() {
+    let flags = mnu_abi::IPC_DELIVERY_NATIVE_OBJECT;
+    let (mut streams, [a, _]) = fixture();
+    let request = frame(provider::OP_MEMORY_OBJECT, a, 0, 0, &[]);
+    let (reply, data) = call(&mut streams, &request, flags, 0);
+    assert_eq!((reply.status, reply.value), (0, 0));
+    assert!(data.is_empty());
+    assert_eq!(call(&mut streams, &request, 0, 0).0.status, -13);
+    assert_eq!(call(&mut streams, &request, flags, 1).0.status, -22);
+    let missing = frame(provider::OP_MEMORY_OBJECT, u64::MAX, 0, 0, &[]);
+    assert_eq!(call(&mut streams, &missing, flags, 0).0.status, -9);
+}
+
+#[test]
 fn native_read_write_frames_preserve_stream_data_and_return_backpressure() {
     let (mut streams, [a, b]) = fixture();
     let flags = mnu_abi::IPC_DELIVERY_NATIVE_OBJECT;

@@ -99,7 +99,7 @@ static void *life_provider(void *unused) {
                                        .opcode = header.opcode,
                                        .object = header.object};
       if (header.opcode == 9)
-        response.status = -95; /* no stable memory backing */
+        response.value = 0; /* successful query: no stable memory backing */
       else if (header.opcode == 1 && (life_mode == 2 || life_mode == 5)) {
         response.value = 2;
         response.data_length = 2;

@@ -589,7 +589,7 @@ fn device_provider_uses_one_id_space_and_never_allocates_regular_file_backing() 
     ] {
         assert_eq!(service.provider_seek(writer, i64::MIN, basis), Ok(0));
     }
-    assert_eq!(service.provider_memory_object(reader), Err(95));
+    assert_eq!(service.provider_memory_object(reader), Ok(0));
     assert_eq!(service.provider_sync(writer), Err(22));
     let status = service
         .stat_handle(protocol::Header::default(), writer)

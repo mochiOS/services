@@ -598,7 +598,7 @@ fn provider_seek_positioned_io_and_unsupported_requests_have_valid_responses() {
             frame(provider::OP_MEMORY_OBJECT, id, 0, 0, 0, &[]),
             0,
             &b""[..],
-            -95,
+            0,
         ),
         (
             frame(provider::OP_READ, id + 1, 0, 0, 0, &[]),

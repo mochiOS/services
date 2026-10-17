@@ -422,6 +422,11 @@ pub fn handle_provider_request<H: Copy, B: Backing<H>>(
             provider::OP_SYNC => descriptions
                 .length(header.object_id, backend)
                 .map(|_| (0, Vec::new())),
+            // Clients receive the RAM MemoryObject separately. This stream
+            // description does not define another provider pager identity.
+            provider::OP_MEMORY_OBJECT => descriptions
+                .length(header.object_id, backend)
+                .map(|_| (0, Vec::new())),
             provider::OP_CONTROL => {
                 use mochios_posix_protocol::shared_memory as wire;
                 match header.basis {

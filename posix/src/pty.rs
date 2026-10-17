@@ -863,6 +863,9 @@ pub fn handle_provider_request(
                 header.length as usize,
             )
             .map(|data| (data.len() as u64, data)),
+        provider::OP_MEMORY_OBJECT => ptys
+            .object_ids(header.object_id)
+            .map(|_| (0, Vec::new())),
         // The generic decoder also accepts optional file/pager operations.
         // A terminal is a byte stream, not a file-backed memory object.
         _ => Err(ENOTSUP),
