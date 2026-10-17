@@ -17,7 +17,7 @@ extern crate self as mnu_abi;
 use status::Error;
 use std::sync::Arc;
 use std::cell::{{Cell,RefCell}};
-const SUCCESS:u64=0;const MEMORY_ACCESS_WRITE:u64=2;
+const SUCCESS:u64=0;
 thread_local! {{
     static CONTEXT:Cell<bool>=const{{Cell::new(true)}};
     static PRESENT:Cell<bool>=const{{Cell::new(true)}};
@@ -50,12 +50,12 @@ mod task {{
             Ok(())
         }}
     }}
-    pub struct Region {{pub start:u64,pub end:Option<u64>,pub offset:u64,pub shared:bool,pub writable:bool,pub object:Option<Arc<Object>>}}
+    pub struct Region {{pub start:u64,pub end:Option<u64>,pub offset:u64,pub shared:bool,pub readable:bool,pub writable:bool,pub object:Option<Arc<Object>>}}
     impl Region {{
         pub fn start(&self)->u64{{self.start}}
         pub fn end(&self)->Option<u64>{{self.end}}
         pub fn is_shared(&self)->bool{{self.shared}}
-        pub fn permits_access(&self,access:u64)->bool{{assert_eq!(access,2);self.writable}}
+        pub fn permits_access(&self,access:u64)->bool{{match access{{1=>self.readable,2=>self.writable,_=>panic!("unknown access")}}}}
         pub fn backing(&self)->&Self{{self}}
         pub fn file_offset(&self)->u64{{self.offset}}
         pub fn file_object(&self)->Option<&Arc<Object>>{{self.object.as_ref()}}
@@ -77,7 +77,12 @@ mod task {{
     probe::constants(
         &mut program,
         include_str!("../../../core/crates/abi/src/lib.rs"),
-        &["MEMORY_SYNC_DEFERRED", "MEMORY_SYNC_REFRESH"],
+        &[
+            "MEMORY_ACCESS_READ",
+            "MEMORY_ACCESS_WRITE",
+            "MEMORY_SYNC_DEFERRED",
+            "MEMORY_SYNC_REFRESH",
+        ],
     );
     program.push_str(probe::between(
         include_str!("../../../core/src/syscall/process.rs"),
@@ -89,8 +94,8 @@ fn reset(){
     CONTEXT.set(true);PRESENT.set(true);LOCKED.set(false);IO.with_borrow_mut(Vec::clear);
     FAILURE.set(None);REPLACE.set(false);REFRESH.set(false);
     PROCESS.with_borrow_mut(|p|p.regions=vec![
-        task::Region{start:4096,end:Some(12288),offset:65536,shared:true,writable:true,object:Some(Arc::new(task::Object(1)))},
-        task::Region{start:12288,end:Some(20480),offset:131072,shared:true,writable:true,object:Some(Arc::new(task::Object(2)))},
+        task::Region{start:4096,end:Some(12288),offset:65536,shared:true,readable:true,writable:true,object:Some(Arc::new(task::Object(1)))},
+        task::Region{start:12288,end:Some(20480),offset:131072,shared:true,readable:true,writable:true,object:Some(Arc::new(task::Object(2)))},
     ]);
 }
 fn no_io(){assert!(!LOCKED.get());IO.with_borrow(|io|assert!(io.is_empty()));}
@@ -134,6 +139,8 @@ fn main(){
     assert_eq!(memory_sync(4096,12288,MEMORY_SYNC_DEFERRED),Error::InvalidAddress.into_raw());no_io();
     reset();assert_eq!(memory_sync(8192,8192,3),19);assert!(REFRESH.get());no_io();
     reset();PROCESS.with_borrow_mut(|p|p.regions[1].writable=false);
+    assert_eq!(memory_sync(8192,8192,3),19);assert!(REFRESH.get());no_io();
+    reset();PROCESS.with_borrow_mut(|p|p.regions[1].readable=false);
     assert_eq!(memory_sync(8192,8192,3),Error::AccessDenied.into_raw());
     assert!(!REFRESH.get());no_io();
 }

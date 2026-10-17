@@ -36,6 +36,7 @@ _Static_assert(sizeof(struct context) == 176, "ThreadCreateContext");
 _Static_assert(sizeof(struct wait_item) == 24, "HandleWaitItem");
 static _Alignas(16) unsigned char stack[32768];
 static _Atomic uint64_t backing;
+static _Atomic uint64_t read_backing;
 static _Atomic unsigned allow_sync, entered, syncs, writes, failed;
 static _Atomic unsigned change_on_sync;
 static _Atomic unsigned char stored = 'a';
@@ -96,20 +97,26 @@ __attribute__((noreturn)) static void provider(void) {
   int64_t object = native(PROVIDER, endpoint, 101, 1 | 2 | 64, 0, 0, 0);
   if (object <= 0)
     fail(__LINE__, object);
+  int64_t read_object = native(PROVIDER, endpoint, 102, 1 | 64, 0, 0, 0);
+  if (read_object <= 0)
+    fail(__LINE__, read_object);
+  atomic_store_explicit(&read_backing, read_object, memory_order_release);
   atomic_store_explicit(&backing, object, memory_order_release);
   for (;;) {
     unsigned char request[48 + 4096], response[40 + 4096] = {0};
     struct attachments in = {0}, out = {0};
     int64_t received = native(RECEIVE, (uintptr_t)request, sizeof(request),
                               (uintptr_t)&in, endpoint, 0, 0);
-    if (received < 0 || in.count || in.flags != 1 || get64(request + 8) != 101)
+    uint64_t object_id = get64(request + 8);
+    if (received < 0 || in.count || in.flags != 1 ||
+        (object_id != 101 && object_id != 102))
       fail(__LINE__, received);
     unsigned opcode = request[6] | (unsigned)request[7] << 8;
     if (opcode == 4)
       continue;
     for (unsigned i = 0; i < 8; ++i)
       response[i] = request[i];
-    put64(response + 16, 101);
+    put64(response + 16, object_id);
     unsigned length = 40;
     if (opcode == 9)
       put64(response + 24, 77);
@@ -123,6 +130,8 @@ __attribute__((noreturn)) static void provider(void) {
             i ? 'a' : atomic_load_explicit(&stored, memory_order_acquire);
       length += 4096;
     } else if (opcode == 7) {
+      CHECK(object_id,
+            101); /* read-only description must NEVER receive writes */
       CHECK(get64(request + 24), 0);
       CHECK((uint32_t)get64(request + 32), 4096);
       if (request[48] != 'Q' && request[48] != 'R' && request[48] != 'N')
@@ -185,6 +194,13 @@ __attribute__((used, noreturn)) static void probe_main(void) {
   volatile unsigned char *private_bytes = (void *)(uintptr_t)private_address;
   CHECK(private_bytes[0], 'a');
   private_bytes[0] = 'P';
+  uint64_t read_object =
+      atomic_load_explicit(&read_backing, memory_order_acquire);
+  int64_t read_address = native(MAP, 0, 4096, 1, 2, read_object, 0);
+  if (read_address <= 0)
+    fail(__LINE__, read_address);
+  volatile unsigned char *read_bytes = (void *)(uintptr_t)read_address;
+  CHECK(read_bytes[0], 'a');
   p[0] = 'Q';
   int64_t completion = submit(address);
   while (!atomic_load_explicit(&entered, memory_order_acquire))
@@ -220,33 +236,37 @@ __attribute__((used, noreturn)) static void probe_main(void) {
   atomic_store_explicit(&allow_sync, 1, memory_order_release);
   while (atomic_load_explicit(&syncs, memory_order_acquire) < 3)
     native(YIELD, 0, 0, 0, 0, 0, 0);
+  CHECK(native(CLOSE, object, 0, 0, 0, 0, 0), 0);
   atomic_store_explicit(&change_on_sync, 1, memory_order_release);
-  completion = native(SYNC, address, 4096, 3, 0, 0, 0);
+  completion = native(SYNC, read_address, 4096, 3, 0, 0, 0);
   if (completion <= 0)
     fail(__LINE__, completion);
   wait_result(completion, 1, 0);
   CHECK(native(CLOSE, completion, 0, 0, 0, 0, 0), 0);
   CHECK(p[0], 'N'); /* old shared PTE/cache must not survive refresh */
+  CHECK(read_bytes[0], 'N');
   CHECK(p[4095], 'a');
   CHECK(private_bytes[0], 'P'); /* independent private/COW data survives */
   p[0] = 'R';
   atomic_store_explicit(&failed, 1, memory_order_release);
-  completion = native(SYNC, address, 4096, 3, 0, 0, 0);
+  completion = native(SYNC, read_address, 4096, 3, 0, 0, 0);
   if (completion <= 0)
     fail(__LINE__, completion);
   wait_result(completion, 2, (uint64_t)INT64_C(-5));
   CHECK(native(CLOSE, completion, 0, 0, 0, 0, 0), 0);
   CHECK(p[0], 'R'); /* failed refresh restores the original dirty mapping */
+  CHECK(read_bytes[0], 'R');
   CHECK(private_bytes[0], 'P');
   atomic_store_explicit(&failed, 0, memory_order_release);
   CHECK(native(UNMAP, private_address, 4096, 0, 0, 0, 0), 0);
+  CHECK(native(UNMAP, read_address, 4096, 0, 0, 0, 0), 0);
   CHECK(native(UNMAP, address, 4096, 0, 0, 0, 0), 0);
-  CHECK(native(CLOSE, object, 0, 0, 0, 0, 0), 0);
+  CHECK(native(CLOSE, read_object, 0, 0, 0, 0, 0), 0);
   if (atomic_load_explicit(&writes, memory_order_acquire) < 3)
     fail(__LINE__, atomic_load(&writes));
   text("native-async-writeback: PASS pending, wake, success, opaque failure, "
        "rights, close-before-completion, shared refresh, private preservation, "
-       "rollback\n");
+       "rollback, read-only refresh uses original writer after handle close\n");
   for (;;)
     native(YIELD, 0, 0, 0, 0, 0, 0);
 }
