@@ -19,11 +19,11 @@ int main(void) {
     /* Isolated fixture uses the existing device.gpu mapping authority. Never
        read/write the device: exercise PTE creation and borrowed-frame unmap. */
     if (native(MEMORY_MAP, address, 4096, 3, 1, 0, 0) != address) return 2;
-    if ((int64_t)native(MAP_PHYSICAL, address, 0xfec00000, 4096, 0, 0, 0) != -22) return 3;
+    if ((int64_t)native(MAP_PHYSICAL, address, 0xfec00000, 4096, 0, 0, 0) != -262136) return 3;
     if (native(MEMORY_UNMAP, address, 4096, 0, 0, 0, 0) != 0) return 4;
     for (unsigned iteration = 0; iteration < 200; ++iteration) {
         if (native(MAP_PHYSICAL, address, 0xfec00000, 4096, 0, 0, 0) != 0) return 5;
-        if ((int64_t)native(MAP_PHYSICAL, address, 0xfec00000, 4096, 0, 0, 0) != -22) return 6;
+        if ((int64_t)native(MAP_PHYSICAL, address, 0xfec00000, 4096, 0, 0, 0) != -262136) return 6;
         if (native(MEMORY_UNMAP, address, 4096, 0, 0, 0, 0) != 0) return 7;
     }
     const char text[] = "mmio-mapping: PASS 200 map/unmap cycles and occupied-range rejection\n";

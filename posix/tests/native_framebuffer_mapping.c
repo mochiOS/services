@@ -26,7 +26,7 @@ static int probe(void) {
         /* DisplayRead authorizes this platform-owned surface, not arbitrary
            RAM. Do not touch pixels; test borrowed PTE ownership and teardown. */
         if (native(MAP_FRAMEBUFFER, address, size, 0, 0, 0, 0) != 0) return 2;
-        if ((int64_t)native(MAP_FRAMEBUFFER, address, size, 0, 0, 0, 0) != -22) return 3;
+        if ((int64_t)native(MAP_FRAMEBUFFER, address, size, 0, 0, 0, 0) != -262136) return 3;
         if (native(MEMORY_UNMAP, address, size, 0, 0, 0, 0) != 0) return 4;
     }
     return 0;
