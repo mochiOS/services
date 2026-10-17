@@ -30,7 +30,7 @@ thread_local! {{
 fn page_align_up(value:u64)->Option<u64>{{value.checked_add(4095).map(|v|v&!4095)}}
 fn is_user_range(start:u64,length:u64)->bool{{start>0&&start.checked_add(length).is_some_and(|end|end<=0x800000000000)}}
 mod syscall {{pub mod security {{pub fn current_process_id()->Option<u64>{{crate::CONTEXT.get().then_some(7)}}}}}}
-mod mem {{#[path={plan:?}]pub mod range_plan;}}
+mod mem {{#[path={plan:?}]pub mod range_plan;#[path={writeback:?}]pub mod writeback;}}
 mod task {{
     use super::*;
     pub struct Object(pub u64);
@@ -65,6 +65,7 @@ mod task {{
 "#,
         status = root.join("core/crates/abi/src/status.rs"),
         plan = root.join("core/src/mem/range_plan.rs"),
+        writeback = root.join("core/src/mem/writeback.rs"),
     );
     program.push_str(probe::between(
         include_str!("../../../core/src/syscall/process.rs"),
