@@ -171,16 +171,22 @@ fn provider_dispatch_requires_native_origin_and_abi_layout_is_unchanged() {
     let ipc = include_str!("../../../core/src/syscall/ipc.rs");
     let native = &ipc[ipc
         .find("pub(crate) fn call_provider_from_kernel(")
-        .unwrap()..ipc.find("fn call_endpoint_from_kernel(").unwrap()];
+        .unwrap()..ipc.find("pub(crate) fn call_provider_with_handle_from_kernel(").unwrap()];
     assert!(native.contains("attachments.delivery_flags = mnu_abi::IPC_DELIVERY_NATIVE_OBJECT"));
     assert!(
         ipc.contains("output[4..8].copy_from_slice(&attachments.delivery_flags.to_le_bytes())")
     );
-    let generic = &ipc[ipc.find("pub fn call_from_kernel(").unwrap()
-        ..ipc
-            .find("pub(crate) fn call_provider_from_kernel(")
-            .unwrap()];
+    let generic = &ipc[ipc.find("pub fn call(").unwrap()
+        ..ipc.find("pub fn call_object_handles(").unwrap()];
     assert!(!generic.contains("IPC_DELIVERY_NATIVE_OBJECT"));
+    assert!(generic.contains("send_call_to_thread_id("));
+    for retired in [
+        "pub fn call_from_kernel(",
+        "fn call_endpoint_from_kernel(",
+        "pub fn send_to_endpoint(",
+    ] {
+        assert!(!ipc.contains(retired));
+    }
 }
 
 #[test]

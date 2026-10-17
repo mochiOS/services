@@ -197,7 +197,7 @@ fn call_endpoint_with_attachments_from_kernel(
     program.push_str(probe::between(
         ipc,
         "pub(crate) fn call_provider_from_kernel(",
-        "fn call_endpoint_from_kernel(",
+        "/// Attach only handles from the authenticated caller's own table, through the",
     ));
     program.push_str(probe::between(
         ipc,

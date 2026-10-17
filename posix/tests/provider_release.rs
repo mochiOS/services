@@ -311,7 +311,7 @@ fn cleanup_reuses_reserved_nodes_and_does_not_register_sender_endpoints() {
         .split("pub(crate) fn send_provider_from_kernel(")
         .nth(1)
         .unwrap()
-        .split("pub fn call_from_kernel(")
+        .split("pub(crate) fn call_provider_from_kernel(")
         .next()
         .unwrap();
     assert!(send.contains("endpoint_handle_for_thread(thread.as_u64())"));

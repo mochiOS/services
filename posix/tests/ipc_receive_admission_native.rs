@@ -68,7 +68,7 @@ fn finish_user_receive(receiver:u64,message:UserReceive,handles:Option<u64>)->Re
     program.push_str(probe::between(
         source,
         "fn current_receiver(",
-        "pub fn send_to_endpoint(",
+        "#[inline]\nfn ipc_mailbox_cap(",
     ));
     program.push_str(&source[source.find("fn recv_from_thread_nonblocking(").unwrap()..]);
     program.push_str(r#"
