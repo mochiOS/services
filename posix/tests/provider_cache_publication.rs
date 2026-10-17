@@ -563,6 +563,105 @@ fn reset_lower(bytes: &[u8]) {
     };
 }
 
+#[test]
+fn refresh_cancel_and_failed_writeback_keep_dirty_bytes_for_retry() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    let object = provider_object_for_endpoint(0x1b01);
+    reset_lower(b"old");
+    assert_eq!(&object.page(0).unwrap()[..3], b"old");
+    object.stage_write_at(0, b"new").unwrap();
+    let mut refresh = object.prepare_refresh(0, 4096).unwrap();
+    assert_eq!(without_allocations(|| refresh.publish()), Err(EXTENT_NOT_READY));
+    assert_eq!(LOWER.lock().unwrap().bytes, b"old");
+    drop(refresh);
+    assert_eq!(&object.page(0).unwrap()[..3], b"new");
+    for error in [EXTENT_BACKING_FAILURE, syscall::EIO] {
+        let mut refresh = object.prepare_refresh(0, 4096).unwrap();
+        SYNC_ERROR.with(|value| value.set(Some(error)));
+        assert_eq!(refresh.writeback(), Err(error));
+        assert_eq!(without_allocations(|| refresh.publish()), Err(EXTENT_NOT_READY));
+        drop(refresh);
+        SYNC_ERROR.with(|value| value.set(None));
+        assert_eq!(&object.page(0).unwrap()[..3], b"new");
+        // A failed sync must keep dirty data even if lower writes succeeded.
+        INVALID_WRITE_COUNT.with(|value| value.set(true));
+        assert_eq!(object.flush_range(0, 4096), Err(EXTENT_BACKING_FAILURE));
+        INVALID_WRITE_COUNT.with(|value| value.set(false));
+    }
+    object.flush_range(0, 4096).unwrap();
+    object.invalidate().unwrap();
+}
+
+#[test]
+fn refresh_publication_is_range_scoped_and_keeps_reservation_until_pte_cleanup() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    let object = provider_object_for_endpoint(0x1b02);
+    reset_lower(&vec![b'a'; 8192]);
+    object.page(0).unwrap();
+    object.page(1).unwrap();
+    let pin = object.prepare_shared_page(0).unwrap();
+    let mut refresh = object.prepare_refresh(0, 4096).unwrap();
+    assert!(matches!(object.page(0), Err(vm_object::VmPageError::Operation(EXTENT_NOT_READY))));
+    refresh.writeback().unwrap();
+    without_allocations(|| refresh.publish()).unwrap();
+    assert_eq!(without_allocations(|| refresh.publish()), Err(EXTENT_INVALID_ARGUMENT));
+    assert!(matches!(object.page(1), Err(vm_object::VmPageError::Operation(EXTENT_NOT_READY))));
+    drop(refresh);
+    assert_eq!(pin.map_to(4096, 8192, false, false), Err(mnu_abi::status::Error::NotReady));
+    LOWER.lock().unwrap().bytes.fill(b'n');
+    assert_eq!(object.page(0).unwrap()[0], b'n');
+    assert_eq!(object.page(1).unwrap()[0], b'a');
+    assert_eq!(LOWER.lock().unwrap().reads, 3);
+    drop(pin);
+    object.invalidate().unwrap();
+    assert!(FRAMES.lock().unwrap().is_empty());
+}
+
+#[test]
+fn refresh_rejects_bad_geometry_or_busy_backing_without_mutation() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    let object = provider_object_for_endpoint(0x1b03);
+    reset_lower(b"old");
+    object.page(0).unwrap();
+    let generation = object.memory_generation();
+    for (start, length) in [(0, 0), (1, 4096), (0, 4095), (u64::MAX & !4095, 4096)] {
+        assert!(matches!(object.prepare_refresh(start, length), Err(EXTENT_INVALID_ARGUMENT)));
+        assert_eq!(object.memory_generation(), generation);
+    }
+    let guard = vm_object::lock_provider_io(&task::ProviderObject {
+        endpoint_thread_id: 0x1b03, endpoint_slot: 2, endpoint_generation: 8,
+    }, 93).unwrap();
+    assert!(matches!(object.prepare_refresh(0, 4096), Err(EXTENT_NOT_READY)));
+    assert_eq!(object.memory_generation(), generation);
+    drop(guard);
+    assert_eq!(&object.page(0).unwrap()[..3], b"old");
+    object.invalidate().unwrap();
+}
+
+#[test]
+fn refresh_snapshot_allocation_failure_never_starts_lower_io_or_allows_publication() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    let object = provider_object_for_endpoint(0x1b04);
+    reset_lower(b"old");
+    object.stage_write_at(0, b"new").unwrap();
+    let mut refresh = object.prepare_refresh(0, 4096).unwrap();
+    let syncs = SYNC_CALLS.with(Cell::get);
+    COMMIT_ALLOC_ATTEMPTS.with(|count| count.set(0));
+    DENY_COMMIT_ALLOC.with(|deny| deny.set(true));
+    let result = refresh.writeback();
+    DENY_COMMIT_ALLOC.with(|deny| deny.set(false));
+    assert_eq!(result, Err(mnu_abi::status::Error::ResourceUnavailable.into_raw()));
+    assert!(COMMIT_ALLOC_ATTEMPTS.with(Cell::get) > 0);
+    assert_eq!(SYNC_CALLS.with(Cell::get), syncs);
+    assert_eq!(LOWER.lock().unwrap().bytes, b"old");
+    assert_eq!(without_allocations(|| refresh.publish()), Err(EXTENT_NOT_READY));
+    refresh.writeback().unwrap();
+    without_allocations(|| refresh.publish()).unwrap();
+    drop(refresh);
+    assert_eq!(&object.page(0).unwrap()[..3], b"new");
+    object.invalidate().unwrap();
+}
+
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
