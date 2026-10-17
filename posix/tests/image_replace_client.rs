@@ -1,4 +1,5 @@
 use mnu_abi::SyscallNumber;
+use mnu_abi::status::Error as NativeError;
 use std::sync::Mutex;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,7 +50,12 @@ fn explicit_ceiling_and_all_native_errors_are_preserved_without_fallback() {
             mnu_abi::status::Error::InvalidAddress.into_raw() as i64,
             mnu_abi::status::Error::BackingFailure.into_raw() as i64,
             // Unmigrated image-preparation backends still return these.
-            -12, -13, -9, -14, -22, -38,
+            -12,
+            -13,
+            -9,
+            -14,
+            -22,
+            -38,
         ] {
             CALLS.lock().unwrap().clear();
             *RESULT.lock().unwrap() = Err(SysError(error));
@@ -70,7 +76,7 @@ fn unexpected_returned_success_is_not_a_returning_successful_exec() {
         *RESULT.lock().unwrap() = Ok(status);
         assert_eq!(
             production::replace_bounded(7, "opaque:target", b"startup-bytes", 4096),
-            Err(SysError(-5))
+            Err(SysError(NativeError::BackingFailure.into_raw() as i64))
         );
         assert_eq!(*CALLS.lock().unwrap(), [4096]);
     }
