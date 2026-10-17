@@ -125,9 +125,9 @@ int main(void) {
     CHECK(native(HANDLE_WRITE_AT, write_only, (uint64_t)tag, sizeof(tag), 4094) == sizeof(tag));
     CHECK(native(HANDLE_READ_AT, read_only, (uint64_t)actual, sizeof(tag), 4094) == sizeof(tag));
     CHECK(!memcmp(actual, tag, sizeof(tag)));
-    CHECK(native(HANDLE_WRITE_AT, read_only, (uint64_t)tag, 1, 0) == -13);
-    CHECK(native(HANDLE_READ_AT, write_only, (uint64_t)actual, 1, 0) == -13);
-    CHECK(native(HANDLE_READ_AT, object, (uint64_t)actual, 1, UINT64_MAX) == -22);
+    CHECK(native(HANDLE_WRITE_AT, read_only, (uint64_t)tag, 1, 0) == -262138);
+    CHECK(native(HANDLE_READ_AT, write_only, (uint64_t)actual, 1, 0) == -262138);
+    CHECK(native(HANDLE_READ_AT, object, (uint64_t)actual, 1, UINT64_MAX) == -262143);
     CHECK(native(HANDLE_READ_AT, object, (uint64_t)actual, sizeof(actual), 8190) == 2);
     CHECK(native(HANDLE_READ_AT, object, (uint64_t)actual, 1, 8192) == 0);
     CHECK(native(HANDLE_CLOSE, read_only, 0, 0, 0) == 0);
