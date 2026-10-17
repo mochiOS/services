@@ -23,15 +23,15 @@ fn main() {
     assert_eq!(
         syscall::call2(SyscallNumber::ProcessorDescribe, pointer, size - 1)
             .unwrap_err()
-            .raw(),
-        -22
+            .native_error(),
+        Some(mnu_abi::status::Error::InvalidArgument)
     );
     assert_eq!(info, saved);
     assert_eq!(
         syscall::call2(SyscallNumber::ProcessorDescribe, 0, size)
             .unwrap_err()
-            .raw(),
-        -14
+            .native_error(),
+        Some(mnu_abi::status::Error::InvalidAddress)
     );
     assert_eq!(unsafe { sysconf(9) }, i64::from(info.configured));
     assert_eq!(unsafe { sysconf(10) }, i64::from(info.online));
