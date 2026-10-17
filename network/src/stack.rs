@@ -474,8 +474,12 @@ impl NetworkStack {
         payload: &[u8],
         now: u64,
     ) -> Result<(), u64> {
-        let config = self.config.ok_or(mochi_user_syscall::ENXIO)?;
-        let hop = next_hop(config, destination).ok_or(mochi_user_syscall::ENXIO)?;
+        let config = self.config.ok_or(
+            mochios_net_device_protocol::STATUS_NETWORK_UNAVAILABLE as i64 as u64,
+        )?;
+        let hop = next_hop(config, destination).ok_or(
+            mochios_net_device_protocol::STATUS_NETWORK_UNAVAILABLE as i64 as u64,
+        )?;
         if let Some(mac) = self.resolve(hop, now)? {
             return self.send_ipv4(destination, protocol, payload, mac);
         }
@@ -611,7 +615,7 @@ impl NetworkStack {
             .config
             .map(|config| config.dns)
             .filter(|address| *address != [0; 4])
-            .ok_or(mochi_user_syscall::ENXIO)?;
+            .ok_or(mochios_net_device_protocol::STATUS_NETWORK_UNAVAILABLE as i64 as u64)?;
         if let Some(address) = self.dns_cache.lookup(&name, started) {
             self.stats.dns_cache_hits = self.stats.dns_cache_hits.saturating_add(1);
             return Ok((address, true));
@@ -721,7 +725,7 @@ impl NetworkStack {
         let source = self
             .config
             .map(|config| config.address)
-            .ok_or(mochi_user_syscall::ENXIO)?;
+            .ok_or(mochios_net_device_protocol::STATUS_NETWORK_UNAVAILABLE as i64 as u64)?;
         let mut udp = [0u8; 1_500];
         let length = UdpDatagram {
             source_port,
@@ -748,7 +752,7 @@ impl NetworkStack {
         let local_address = self
             .config
             .map(|config| config.address)
-            .ok_or(mochi_user_syscall::ENXIO)?;
+            .ok_or(mochios_net_device_protocol::STATUS_NETWORK_UNAVAILABLE as i64 as u64)?;
         let local_port = self.tcp.allocate_port(random as u16).map_err(tcp_errno)?;
         let handle = self
             .tcp
