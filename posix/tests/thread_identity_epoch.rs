@@ -35,13 +35,23 @@ fn actual_thread_lookup_retries_identity_copied_across_a_handler_fork() {
 use core::sync::atomic::{AtomicU32,AtomicU64,Ordering};
 type Pthread=u64;
 const THREAD_FREE:u32=0;const THREAD_REAPING:u32=4;const RUNNING:u32=2;
-struct ThreadControl{state:AtomicU32,native_id:AtomicU64}
-impl ThreadControl{const fn new()->Self{Self{state:AtomicU32::new(THREAD_FREE),native_id:AtomicU64::new(0)}}}
+struct ThreadControl{state:AtomicU32,native_id:AtomicU64,thread_local_base:AtomicU64}
+impl ThreadControl{const fn new()->Self{Self{state:AtomicU32::new(THREAD_FREE),native_id:AtomicU64::new(0),thread_local_base:AtomicU64::new(0)}}}
 static THREADS:[ThreadControl;2]=[const{ThreadControl::new()};2];
 static FORK_EPOCH:AtomicU64=AtomicU64::new(0);
 static CURRENT:AtomicU64=AtomicU64::new(11);
 static CALLS:AtomicU32=AtomicU32::new(0);
 static MODE:AtomicU32=AtomicU32::new(0);
+static LOCAL_BASE:AtomicU64=AtomicU64::new(0);
+static LOCAL_CALLS:AtomicU32=AtomicU32::new(0);
+static TOKENS:AtomicU32=AtomicU32::new(0);
+mod thread_lookup{
+    pub fn local_base()->Option<u64>{
+        crate::LOCAL_CALLS.fetch_add(1,crate::Ordering::Relaxed);
+        let base=crate::LOCAL_BASE.load(crate::Ordering::Relaxed);
+        (base!=0).then_some(base)
+    }
+}
 fn child_snapshot(){
     let new=CURRENT.fetch_add(1,Ordering::AcqRel)+1;
     THREADS[0].native_id.store(new,Ordering::Release);
@@ -62,6 +72,7 @@ fn native_thread_id()->Result<u64,()>{
     Ok(observed)
 }
 fn thread_token_for(index:usize,_:&ThreadControl)->Option<Pthread>{
+    if MODE.load(Ordering::Acquire)==6 && TOKENS.fetch_add(1,Ordering::Relaxed)==0 {child_snapshot()}
     if MODE.load(Ordering::Acquire)==3 && CALLS.load(Ordering::Acquire)==1 {child_snapshot()}
     Some(index as u64+1)
 }
@@ -74,6 +85,9 @@ fn reset(mode:u32){
     CALLS.store(0,Ordering::Release);MODE.store(mode,Ordering::Release);
     THREADS[0].state.store(RUNNING,Ordering::Release);THREADS[0].native_id.store(11,Ordering::Release);
     THREADS[1].state.store(RUNNING,Ordering::Release);THREADS[1].native_id.store(99,Ordering::Release);
+    THREADS[0].thread_local_base.store(0x1000,Ordering::Release);
+    THREADS[1].thread_local_base.store(0x2000,Ordering::Release);
+    LOCAL_BASE.store(0,Ordering::Relaxed);LOCAL_CALLS.store(0,Ordering::Relaxed);TOKENS.store(0,Ordering::Relaxed);
 }
 fn main(){
     for (mode,queries) in [(0,1),(1,2),(2,4),(3,2),(4,2)] {
@@ -90,6 +104,32 @@ fn main(){
     assert!(current_thread_control().is_none());
     reset(5);assert!(current_thread_control().is_none());
     assert_eq!(CALLS.load(Ordering::Acquire),1);
+    // Private TLS selects the current record without any native query, even
+    // when the fallback is deliberately unavailable.
+    reset(5);LOCAL_BASE.store(0x1000,Ordering::Relaxed);
+    for _ in 0..1000 {assert_eq!(current_thread_control().unwrap().0,1)}
+    assert_eq!(CALLS.load(Ordering::Acquire),0);
+    reset(5);LOCAL_BASE.store(0x2000,Ordering::Relaxed);
+    assert_eq!(current_thread_control().unwrap().0,2);
+    assert_eq!(CALLS.load(Ordering::Acquire),0);
+    reset(0);LOCAL_BASE.store(0x3000,Ordering::Relaxed);
+    assert_eq!(current_thread_control().unwrap().0,1);
+    assert_eq!(CALLS.load(Ordering::Acquire),1);
+    reset(0);LOCAL_BASE.store(0x1000,Ordering::Relaxed);
+    THREADS[1].thread_local_base.store(0x1000,Ordering::Relaxed);
+    assert_eq!(current_thread_control().unwrap().0,1);
+    assert_eq!(CALLS.load(Ordering::Acquire),1);
+    for state in [THREAD_FREE,THREAD_REAPING]{
+        reset(5);LOCAL_BASE.store(0x1000,Ordering::Relaxed);
+        THREADS[0].state.store(state,Ordering::Relaxed);
+        assert!(current_thread_control().is_none());
+        assert_eq!(CALLS.load(Ordering::Acquire),1);
+    }
+    reset(6);LOCAL_BASE.store(0x1000,Ordering::Relaxed);
+    let (_,control)=current_thread_control().unwrap();
+    assert_eq!(control.native_id.load(Ordering::Relaxed),CURRENT.load(Ordering::Relaxed));
+    assert_eq!(LOCAL_CALLS.load(Ordering::Relaxed),2);
+    assert_eq!(CALLS.load(Ordering::Acquire),0);
 }
 "#);
     let directory =
