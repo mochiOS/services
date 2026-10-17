@@ -45,6 +45,7 @@ mod syscall {pub mod security {
         crate::STATE.with_borrow(|s|s.authorized)
     }
 }}
+mod super_status {pub const SUCCESS:u64=0;}
 mod task {
     pub struct Id(u64);impl Id{pub fn as_u64(self)->u64{self.0}}
     pub fn thread_to_process_id(thread:u64)->Option<Id>{
@@ -76,14 +77,40 @@ fn with_endpoints_mut<T>(operation:impl FnOnce(&mut BTreeMap<u64,EndpointRecord>
     program.push_str(
         &probe::between(
             source,
-            "pub fn endpoint_execution_identity(",
+            "pub fn endpoint_alive(",
             "pub fn endpoint_is_owned_by(",
         )
-        .replace("mnu_abi::ExecutionIdentity", "ExecutionIdentity"),
+        .replace("mnu_abi::ExecutionIdentity", "ExecutionIdentity")
+        .replace("super::SUCCESS", "super_status::SUCCESS"),
     );
     program.push_str(
         r#"
 fn main(){
+    // Both public endpoint queries execute the same generation validation as
+    // the richer identity lookup; only identity inspection requires authority.
+    STATE.set(State::default());
+    assert_eq!(endpoint_alive(0x40000005),0);
+    assert_eq!(endpoint_owner_process(0x40000005),90);
+    for endpoint in [0,9,u64::MAX,0x40000006] {
+        STATE.set(State::default());
+        assert_eq!(endpoint_alive(endpoint),Error::NotFound.into_raw());
+        assert_eq!(endpoint_owner_process(endpoint),Error::NotFound.into_raw());
+    }
+    for live in [None,Some((2,4)),Some((3,3))] {
+        STATE.set(State{live,..State::default()});
+        assert_eq!(endpoint_alive(0x40000005),Error::NotFound.into_raw());
+        assert_eq!(endpoint_owner_process(0x40000005),Error::NotFound.into_raw());
+    }
+    for endpoint in [0x40000005,0,9,u64::MAX] {
+        STATE.set(State{authorized:false,..State::default()});
+        assert_eq!(endpoint_owner_process(endpoint),Error::AccessDenied.into_raw());
+        STATE.with_borrow(|s|assert_eq!((s.lookups,s.thread_checks,s.process_checks),(0,0,0)));
+    }
+    STATE.set(State{authorized:false,..State::default()});
+    assert_eq!(endpoint_alive(0x40000005),0);
+    STATE.set(State{process:false,..State::default()});
+    assert_eq!(endpoint_owner_process(0x40000005),Error::NotFound.into_raw());
+
     STATE.set(State::default());
     assert_eq!(endpoint_execution_identity(0x40000005),
         Ok(ExecutionIdentity{process_id:90,thread_id:9}));
