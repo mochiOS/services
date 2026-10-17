@@ -32,6 +32,8 @@ fn freestanding_ipc_probe_matches_current_native_abi() {
     assert_eq!(core::mem::size_of::<mnu_abi::IpcObjectHandles>(), 72);
     assert_eq!(mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE, 2);
     assert_eq!(mnu_abi::HANDLE_RIGHT_READ, 1);
+    assert!(source.contains("output, receive_endpoint)"));
+    assert!(source.contains("receive_endpoint = (uint64_t)endpoint;"));
     assert!(!source.contains("#include <stdio.h>"));
     assert!(!source.contains("#include <unistd.h>"));
     let application_probe = include_str!("native_object_delivery.c");

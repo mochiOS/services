@@ -13,6 +13,7 @@ struct item { uint32_t handle, reserved; uint64_t rights; };
 struct attachments { uint32_t count, flags; struct item items[4]; };
 _Static_assert(sizeof(struct attachments) == 72, "IPC attachment ABI");
 static uint32_t fillers[4096];
+static uint64_t receive_endpoint;
 
 static int64_t native(uint64_t number, uint64_t a, uint64_t b, uint64_t c,
                       uint64_t d) {
@@ -52,7 +53,7 @@ static int64_t send(uint64_t endpoint, struct attachments *a) {
 }
 static int64_t receive(uint64_t output) {
   char message = 0;
-  int64_t result = native(RECEIVE, (uintptr_t)&message, 1, output, 0);
+  int64_t result = native(RECEIVE, (uintptr_t)&message, 1, output, receive_endpoint);
   if ((uint32_t)result == 1 && message != 'm') fail(__LINE__, message);
   return result;
 }
@@ -83,6 +84,9 @@ __attribute__((used, noreturn)) static void probe_main(void) {
     fail(__LINE__, result);
   uint32_t limited = received.items[0].handle;
   if (limited == pair[0] || count() != baseline + 1) fail(__LINE__, limited);
+  /* The first receive above was nonblocking. Exercise the blocking entry
+     point for subsequent copy-failure and table-exhaustion rollback checks. */
+  receive_endpoint = (uint64_t)endpoint;
   static const char byte = 'w';
   CHECK(native(WRITE, limited, (uintptr_t)&byte, 1, 0), ACCESS_DENIED);
   a.items[0].handle = limited; CHECK(send((uint64_t)endpoint, &a), ACCESS_DENIED);
@@ -119,7 +123,7 @@ __attribute__((used, noreturn)) static void probe_main(void) {
   CHECK(native(WRITE, pair[1], (uintptr_t)&byte, 1, 0), PEER_CLOSED);
   CHECK(native(CLOSE, pair[1], 0, 0, 0), 0);
   CHECK(native(CLOSE, (uint64_t)endpoint, 0, 0, 0), 0);
-  text("ipc-handles-initial: PASS native decode errors, attenuation, copy rollback, table exhaustion and reference lifetime\n");
+  text("ipc-handles-initial: PASS nonblocking/blocking receive, native decode errors, attenuation, copy rollback, table exhaustion and reference lifetime\n");
   for (;;) native(YIELD, 0, 0, 0, 0);
 }
 __attribute__((naked, noreturn, section(".text._start"))) void _start(void) {
