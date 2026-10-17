@@ -26,6 +26,8 @@ fn actual_batch_cleanup_keeps_records_until_ack_and_preserves_failed_batches() {
     let mut program = String::from(
         r#"
 extern crate self as x86_64;
+extern crate self as mnu_abi;
+pub use native_status as status;
 use std::sync::atomic::{AtomicBool,AtomicUsize,Ordering};
 type ProcessId=u64;
 static LOCKED:AtomicBool=AtomicBool::new(false);static MODE:AtomicUsize=AtomicUsize::new(0);
@@ -35,7 +37,6 @@ pub struct PhysAddr(u64);impl PhysAddr {pub fn new(v:u64)->Self {Self(v)}}
 pub mod structures {pub mod paging {
     pub struct PhysFrame(pub u64);impl PhysFrame {pub fn containing_address(v:crate::PhysAddr)->Self {Self(v.0)}}
 }}
-mod syscall {pub const EINVAL:u64=(-22i64) as u64;pub const ENOMEM:u64=(-12i64) as u64;pub const ESRCH:u64=(-3i64) as u64;}
 struct Mapping(u64,u64);
 impl Mapping {fn virt_start(&self)->u64 {self.0} fn end(&self)->Option<u64> {if MODE.load(Ordering::Acquire)==2 && self.0==0x20000 {None} else {Some(self.1)}}fn page_count(&self)->usize {2}fn phys_start(&self)->u64 {0x30000}}
 struct Process {mmio:Vec<Mapping>,dma:Vec<Mapping>,arena:u64}
@@ -62,7 +63,11 @@ mod mem {
         pub enum Error {InvalidRange,Allocation,Backend(crate::native_status::Error)}
         pub fn revoke(ranges:impl IntoIterator<Item=(u64,u64,u64)>,backend:&mut super::mapping_revocation_native::Native<'_>)->Result<(),Error> {
             crate::locked();assert_eq!(backend.0.mmio.len(),1);assert_eq!(backend.0.dma.len(),1);assert_eq!(ranges.into_iter().collect::<Vec<_>>(),[(4096,0x10000,0x11000),(4096,0x20000,0x22000)]);
-            if crate::MODE.load(crate::Ordering::Acquire)==1 {return Err(Error::Backend(crate::native_status::Error::BackingFailure));}crate::ACKED.store(true,crate::Ordering::Release);Ok(())
+            match crate::MODE.load(crate::Ordering::Acquire) {
+                1=>return Err(Error::Backend(crate::native_status::Error::BackingFailure)),
+                6=>return Err(Error::InvalidRange),7=>return Err(Error::Allocation),_=>{}
+            }
+            crate::ACKED.store(true,crate::Ordering::Release);Ok(())
         }
     }
 }
@@ -71,7 +76,7 @@ mod mem {
     program.push_str(&source[start..end]);
     program.push_str(r#"
 fn main() {
-    for (mode,expected) in [(0,Ok(())),(1,Err(crate::native_status::Error::BackingFailure.into_raw())),(2,Err(syscall::EINVAL)),(3,Err(syscall::EINVAL)),(4,Ok(())),(5,Err(syscall::ESRCH))] {
+    for (mode,expected) in [(0,Ok(())),(1,Err(crate::native_status::Error::BackingFailure.into_raw())),(2,Err(native_status::Error::InvalidArgument.into_raw())),(3,Err(native_status::Error::InvalidArgument.into_raw())),(4,Ok(())),(5,Err(native_status::Error::NotFound.into_raw())),(6,Err(native_status::Error::InvalidArgument.into_raw())),(7,Err(native_status::Error::ResourceUnavailable.into_raw()))] {
         MODE.store(mode,Ordering::Release);ACKED.store(false,Ordering::Release);RELEASED.store(0,Ordering::Release);
         PROCESS.with(|p| {let mut p=p.borrow_mut();p.mmio=if mode==4 {vec![]} else {vec![Mapping(0x10000,0x11000)]};p.dma=if mode==4 {vec![]} else {vec![Mapping(0x20000,0x22000)]};p.arena=0x22000;});
         assert_eq!(release_process_borrowed_mappings(1),expected);
@@ -81,7 +86,7 @@ fn main() {
     }
 }
 "#);
-    program.push_str("\nmod native_status {\n");
+    program.push_str("\npub mod native_status {\n");
     program.push_str(include_str!("../../../core/crates/abi/src/status.rs"));
     program.push_str("\n}\n");
     let directory = std::env::temp_dir().join(format!(

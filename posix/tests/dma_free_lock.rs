@@ -23,7 +23,8 @@ fn actual_dma_free_preserves_ownership_on_failure_and_releases_only_after_ack() 
     let mut program = String::from(
         r#"
 use std::sync::atomic::{AtomicBool,AtomicUsize,Ordering};
-const EACCES:u64=(-13i64) as u64;const EINVAL:u64=(-22i64) as u64;const ENOMEM:u64=(-12i64) as u64;const SUCCESS:u64=0;
+use native_status::Error;
+const SUCCESS:u64=0;
 static LOCKED:AtomicBool=AtomicBool::new(false);
 static MODE:AtomicUsize=AtomicUsize::new(0);
 static RECORD:AtomicBool=AtomicBool::new(true);
@@ -67,6 +68,8 @@ mod mem {
         pub fn revoke(ranges:impl IntoIterator<Item=(u64,u64,u64)>,_: &mut super::mapping_revocation_native::Native<'_>)->Result<(),Error> {
             crate::locked();assert!(crate::RECORD.load(crate::Ordering::Acquire));assert_eq!(ranges.into_iter().collect::<Vec<_>>(),[(4096,0x10000,0x12000)]);
             if crate::MODE.load(crate::Ordering::Acquire)==3 {return Err(Error::Backend(crate::native_status::Error::BackingFailure));}
+            if crate::MODE.load(crate::Ordering::Acquire)==6 {return Err(Error::InvalidRange);}
+            if crate::MODE.load(crate::Ordering::Acquire)==7 {return Err(Error::Allocation);}
             crate::ACKED.store(true,crate::Ordering::Release);Ok(())
         }
     }
@@ -76,11 +79,11 @@ mod mem {
     program.push_str(&source[start..]);
     program.push_str(r#"
 fn main() {
-    for (mode,expected) in [(0,0),(1,EINVAL),(2,EINVAL),(3,crate::native_status::Error::BackingFailure.into_raw()),(4,EACCES),(5,ENOMEM)] {
+    for (mode,expected) in [(0,0),(1,Error::InvalidArgument.into_raw()),(2,Error::NotReady.into_raw()),(3,crate::native_status::Error::BackingFailure.into_raw()),(4,Error::AccessDenied.into_raw()),(5,Error::NotReady.into_raw()),(6,Error::InvalidArgument.into_raw()),(7,Error::ResourceUnavailable.into_raw())] {
         MODE.store(mode,Ordering::Release);RECORD.store(true,Ordering::Release);ACKED.store(false,Ordering::Release);RELEASED.store(0,Ordering::Release);
         assert_eq!(free(7),expected);assert_eq!(RECORD.load(Ordering::Acquire),mode!=0);assert_eq!(RELEASED.load(Ordering::Acquire),if mode==0 {2} else {0});assert!(!LOCKED.load(Ordering::Acquire));
     }
-    MODE.store(0,Ordering::Release);assert_eq!(free(0),EINVAL);
+    MODE.store(0,Ordering::Release);assert_eq!(free(0),Error::InvalidArgument.into_raw());
 }
 "#);
     program.push_str("\nmod native_status {\n");

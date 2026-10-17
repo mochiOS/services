@@ -10,7 +10,7 @@ fn actual_dma_install_serializes_admission_mapping_and_retained_rollback_failure
         r#"
 use std::sync::atomic::{AtomicBool,AtomicUsize,Ordering};
 use task::{DmaBuffer,ProcessId};
-const EINVAL:u64=(-22i64) as u64;const ENOMEM:u64=(-12i64) as u64;
+use native_status::Error;
 static LOCKED:AtomicBool=AtomicBool::new(false);static MODE:AtomicUsize=AtomicUsize::new(0);
 static MAPS:AtomicUsize=AtomicUsize::new(0);static ACKED:AtomicBool=AtomicBool::new(false);
 fn locked() {assert!(LOCKED.load(Ordering::Acquire));}
@@ -37,7 +37,7 @@ mod mem {
         pub fn is_user_range_occupied_in_table(_:u64,_:u64,_:u64)->bool {crate::locked();crate::MODE.load(crate::Ordering::Acquire)==2}
         pub fn map_page_in_table(table:u64,virt:u64,phys:u64,user:bool,write:bool)->Result<(),()> {
             crate::locked();let index=crate::MAPS.fetch_add(1,crate::Ordering::AcqRel);assert_eq!(table,4096);assert_eq!(virt,0x10000+index as u64*4096);assert_eq!(phys,0x20000+index as u64*4096);assert!(user&&write);
-            let mode=crate::MODE.load(crate::Ordering::Acquire);if mode==4 || ((mode==5||mode==6)&&index==1) {Err(())} else {Ok(())}
+            let mode=crate::MODE.load(crate::Ordering::Acquire);if mode==4 || ((mode==5||mode==6||mode>=9)&&index==1) {Err(())} else {Ok(())}
         }
     }
     pub mod mapping_revocation_native {
@@ -48,7 +48,11 @@ mod mem {
         pub enum Error {InvalidRange,Allocation,Backend(crate::native_status::Error)}
         pub fn revoke(ranges:impl IntoIterator<Item=(u64,u64,u64)>,backend:&mut super::mapping_revocation_native::Native<'_>)->Result<(),Error> {
             crate::locked();assert!(backend.0.record);assert_eq!(ranges.into_iter().collect::<Vec<_>>(),[(4096,0x10000,0x12000)]);
-            if crate::MODE.load(crate::Ordering::Acquire)==6 {return Err(Error::Backend(crate::native_status::Error::BackingFailure));}crate::ACKED.store(true,crate::Ordering::Release);Ok(())
+            match crate::MODE.load(crate::Ordering::Acquire) {
+                6=>return Err(Error::Backend(crate::native_status::Error::BackingFailure)),
+                9=>return Err(Error::InvalidRange),10=>return Err(Error::Allocation),_=>{}
+            }
+            crate::ACKED.store(true,crate::Ordering::Release);Ok(())
         }
     }
 }
@@ -57,16 +61,16 @@ mod mem {
     program.push_str(&source[start..end]);
     program.push_str(r#"
 fn main() {
-    for mode in 0..9 {
+    for mode in 0..11 {
         MODE.store(mode,Ordering::Release);MAPS.store(0,Ordering::Release);ACKED.store(false,Ordering::Release);LOCKED.store(true,Ordering::Release);
         let initial=if mode==8 {u64::MAX-4095} else {0x10000};
         let mut process=task::Process {end:initial,record:false};
         let result=install_dma_buffer(&mut process,1,4096,7,0x20000,8192,2);
         let actual=match result {Ok(start)=>(0,start),Err(InstallError::Unpublished(e))=>(1,e),Err(InstallError::Retained(e))=>(2,e)};
-        assert_eq!(actual,match mode {0=>(0,0x10000),4|5=>(1,ENOMEM),6=>(2,crate::native_status::Error::BackingFailure.into_raw()),_=>(1,EINVAL)});
-        assert_eq!(process.record,mode==0||mode==6);
-        assert_eq!(process.end,if mode==0||mode==6 {0x12000} else {initial});
-        assert_eq!(MAPS.load(Ordering::Acquire),match mode {0|5|6=>2,4=>1,_=>0});LOCKED.store(false,Ordering::Release);
+        assert_eq!(actual,match mode {0=>(0,0x10000),4|5=>(1,Error::ResourceUnavailable.into_raw()),6=>(2,crate::native_status::Error::BackingFailure.into_raw()),7=>(1,Error::NotReady.into_raw()),8=>(1,Error::LimitExceeded.into_raw()),9=>(2,Error::InvalidArgument.into_raw()),10=>(2,Error::ResourceUnavailable.into_raw()),_=>(1,Error::InvalidArgument.into_raw())});
+        assert_eq!(process.record,matches!(mode,0|6|9|10));
+        assert_eq!(process.end,if matches!(mode,0|6|9|10) {0x12000} else {initial});
+        assert_eq!(MAPS.load(Ordering::Acquire),match mode {0|5|6|9|10=>2,4=>1,_=>0});LOCKED.store(false,Ordering::Release);
     }
 }
 "#);
