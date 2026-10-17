@@ -26,6 +26,7 @@ thread_local! {{
     static FAILURE:Cell<Option<(u64,u64)>>=const{{Cell::new(None)}};
     static REPLACE:Cell<bool>=const{{Cell::new(false)}};
     static REFRESH:Cell<bool>=const{{Cell::new(false)}};
+    static QUEUED:RefCell<Vec<(u64,u64,u64)>>=const{{RefCell::new(Vec::new())}};
     static PROCESS:RefCell<task::Process>=const{{RefCell::new(task::Process{{regions:Vec::new()}})}};
 }}
 fn page_align_up(value:u64)->Option<u64>{{value.checked_add(4095).map(|v|v&!4095)}}
@@ -33,8 +34,11 @@ fn is_user_range(start:u64,length:u64)->bool{{start>0&&start.checked_add(length)
 mod syscall {{pub mod security {{pub fn current_process_id()->Option<u64>{{crate::CONTEXT.get().then_some(7)}}}}}}
 mod mem {{#[path={plan:?}]pub mod range_plan;#[path={writeback:?}]pub mod writeback;
     pub mod writeback_worker {{
-        pub fn submit(pid:u64,_work:super::writeback::Batch<std::sync::Arc<crate::task::Object>>,refresh:bool)->u64 {{
-            assert_eq!(pid,7);assert!(!crate::LOCKED.get());crate::REFRESH.set(refresh);19
+        pub fn submit(pid:u64,work:super::writeback::Batch<std::sync::Arc<crate::task::Object>>,refresh:bool)->u64 {{
+            assert_eq!(pid,7);assert!(!crate::LOCKED.get());crate::REFRESH.set(refresh);
+            work.execute(|object,offset,length|{{
+                crate::QUEUED.with_borrow_mut(|queued|queued.push((object.0,offset,length)));Ok(())
+            }}).unwrap();19
         }}
     }}
 }}
@@ -92,7 +96,7 @@ mod task {{
     program.push_str(r#"
 fn reset(){
     CONTEXT.set(true);PRESENT.set(true);LOCKED.set(false);IO.with_borrow_mut(Vec::clear);
-    FAILURE.set(None);REPLACE.set(false);REFRESH.set(false);
+    FAILURE.set(None);REPLACE.set(false);REFRESH.set(false);QUEUED.with_borrow_mut(Vec::clear);
     PROCESS.with_borrow_mut(|p|p.regions=vec![
         task::Region{start:4096,end:Some(12288),offset:65536,shared:true,readable:true,writable:true,object:Some(Arc::new(task::Object(1)))},
         task::Region{start:12288,end:Some(20480),offset:131072,shared:true,readable:true,writable:true,object:Some(Arc::new(task::Object(2)))},
@@ -119,8 +123,8 @@ fn main(){
     reset();REPLACE.set(true);assert_eq!(memory_sync(8192,8192,0),0);
     IO.with_borrow(|io|assert_eq!(*io,[(1,69632,4096),(2,131072,4096)]));
     PROCESS.with_borrow(|p|assert!(p.regions.is_empty()));
-    for skip in 0..3{reset();PROCESS.with_borrow_mut(|p|match skip{
-        0=>p.regions[1].shared=false,1=>p.regions[1].writable=false,2=>p.regions[1].object=None,_=>unreachable!()});
+    for skip in 0..2{reset();PROCESS.with_borrow_mut(|p|match skip{
+        0=>p.regions[1].shared=false,1=>p.regions[1].object=None,_=>unreachable!()});
         assert_eq!(memory_sync(4096,16384,0),0);
         IO.with_borrow(|io|assert_eq!(*io,[(1,65536,8192)]));
     }
@@ -135,6 +139,26 @@ fn main(){
     assert_eq!(memory_sync(4096,16384,0),(-5i64)as u64);
     IO.with_borrow(|io|assert_eq!(io.len(),2));
     reset();assert_eq!(memory_sync(8192,8192,MEMORY_SYNC_DEFERRED),19);no_io();
+    for options in [0,MEMORY_SYNC_DEFERRED]{
+        reset();PROCESS.with_borrow_mut(|p|p.regions[1].writable=false);
+        assert_eq!(memory_sync(8192,8192,options),if options==0{0}else{19});
+        let expected=[(1,69632,4096),(2,131072,4096)];
+        if options==0{IO.with_borrow(|io|assert_eq!(*io,expected));}
+        else{no_io();QUEUED.with_borrow(|queued|assert_eq!(*queued,expected));}
+        reset();PROCESS.with_borrow_mut(|p|{
+            p.regions[1].readable=false;p.regions[1].writable=false;
+        });
+        assert_eq!(memory_sync(8192,8192,options),Error::AccessDenied.into_raw());no_io();
+        QUEUED.with_borrow(|queued|assert!(queued.is_empty()));
+    }
+    // Existing write-only mappings retain authority for ordinary writeback.
+    reset();PROCESS.with_borrow_mut(|p|p.regions[1].readable=false);
+    assert_eq!(memory_sync(8192,8192,0),0);
+    IO.with_borrow(|io|assert_eq!(*io,[(1,69632,4096),(2,131072,4096)]));
+    reset();PROCESS.with_borrow_mut(|p|p.regions[1].writable=false);
+    FAILURE.set(Some((2,(-5i64)as u64)));
+    assert_eq!(memory_sync(8192,8192,0),(-5i64)as u64);
+    IO.with_borrow(|io|assert_eq!(io.len(),2));
     reset();PROCESS.with_borrow_mut(|p|{p.regions.pop();});
     assert_eq!(memory_sync(4096,12288,MEMORY_SYNC_DEFERRED),Error::InvalidAddress.into_raw());no_io();
     reset();assert_eq!(memory_sync(8192,8192,3),19);assert!(REFRESH.get());no_io();
