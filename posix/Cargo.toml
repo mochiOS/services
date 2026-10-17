@@ -58,6 +58,11 @@ path = "tests/rust_thread_lifecycle.rs"
 harness = false
 
 [[test]]
+name = "native_rust_dictionary_read"
+path = "tests/native_rust_dictionary_read.rs"
+harness = false
+
+[[test]]
 name = "native_queued_file_admission"
 path = "tests/native_queued_file_admission.rs"
 harness = false
