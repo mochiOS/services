@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 type c_int = i32;
 const EINVAL: i32 = 22;
 const EAGAIN: i32 = 11;
+const EOVERFLOW: i32 = 139;
 const PTHREAD_CANCEL_ENABLE: u32 = 0;
 const PTHREAD_CANCEL_DISABLE: u32 = 1;
 const PTHREAD_CANCEL_DEFERRED: u32 = 0;
@@ -18,21 +19,38 @@ const THREAD_EXITED: u32 = 3;
 struct ThreadControl {
     cancel_state: AtomicU32, cancel_type: AtomicU32, cancel_pending: AtomicU32,
     result: AtomicUsize, state: AtomicU32, cleanup_head: AtomicUsize,
+    native_delivery_defer: AtomicU32, callback_resources: callback_resources::Chain,
 }
 static CONTROL: ThreadControl = ThreadControl {
     cancel_state: AtomicU32::new(PTHREAD_CANCEL_ENABLE),
     cancel_type: AtomicU32::new(PTHREAD_CANCEL_DEFERRED), cancel_pending: AtomicU32::new(0),
     result: AtomicUsize::new(0), state: AtomicU32::new(2), cleanup_head: AtomicUsize::new(0),
+    native_delivery_defer: AtomicU32::new(0), callback_resources: callback_resources::Chain::new(),
 };
 static AFTER_ENABLE: AtomicU32 = AtomicU32::new(0);
 static DESTRUCTOR_RETURNED: AtomicU32 = AtomicU32::new(0);
+static RESOURCES_DROPPED: AtomicU32 = AtomicU32::new(0);
+struct Resource;
+impl Drop for Resource {
+    fn drop(&mut self) {
+        assert_eq!(CONTROL.native_delivery_defer.load(Ordering::Acquire), 1);
+        assert_eq!(CONTROL.cancel_state.load(Ordering::Acquire), PTHREAD_CANCEL_DISABLE);
+        assert_eq!(RESOURCES_DROPPED.fetch_add(1, Ordering::AcqRel), 0);
+    }
+}
+fn process_exit(error:c_int)->! {panic!("unexpected process exit {error}")}
 fn register_current_thread() -> Option<((), &'static ThreadControl)> { Some(((), &CONTROL)) }
 fn current_thread_control() -> Option<((), &'static ThreadControl)> { Some(((), &CONTROL)) }
 fn native_mutex_wake_all(_: &AtomicU32) {}
 fn notify_join_waiter(_: &ThreadControl) {}
 mod thread_cleanup {
     use super::*;
-    pub unsafe fn drain(head: &AtomicUsize) { assert_eq!(head.load(Ordering::Acquire), 0); }
+    pub unsafe fn drain(head: &AtomicUsize) {
+        assert_eq!(head.load(Ordering::Acquire), 0);
+        assert_eq!(RESOURCES_DROPPED.load(Ordering::Acquire), 1);
+        assert!(CONTROL.callback_resources.is_empty());
+        assert_eq!(CONTROL.native_delivery_defer.load(Ordering::Acquire), 0);
+    }
 }
 fn run_thread_specific_destructors(control: &ThreadControl) {
     assert_eq!(control.cancel_state.load(Ordering::Acquire), PTHREAD_CANCEL_DISABLE);
@@ -48,11 +66,21 @@ mod syscall {
         assert_eq!(DESTRUCTOR_RETURNED.load(Ordering::Acquire), 1);
         assert_eq!(CONTROL.state.load(Ordering::Acquire), THREAD_EXITED);
         assert_eq!(CONTROL.result.load(Ordering::Acquire), usize::MAX);
+        assert_eq!(RESOURCES_DROPPED.load(Ordering::Acquire), 1);
         std::process::exit(0)
     }
 }
 "#,
     );
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    program.push_str(&format!(
+        "extern crate self as mochios_posix_client;\n#[path={:?}]pub mod upcall_guard;\n#[path={:?}]mod callback_resources;\n",
+        root.join("user/crates/posix-client/src/upcall_guard.rs"),
+        root.join("user/crates/newlib-runtime/src/callback_resources.rs"),
+    ));
     for entry in [
         "fn finish_thread(",
         "pub unsafe extern \"C\" fn pthread_setcancelstate(",
@@ -65,6 +93,11 @@ mod syscall {
     program.push_str(
         r#"
 fn main() {
+    let mut resource=core::pin::pin!(callback_resources::Scope::new(&CONTROL.callback_resources,1,Resource));
+    {
+        let _guard=upcall_guard::Guard::enter(&CONTROL.native_delivery_defer).unwrap();
+        unsafe{resource.as_mut().activate()};
+    }
     let mut previous = 99;
     assert_eq!(unsafe { pthread_setcancelstate(99, &mut previous) }, EINVAL);
     assert_eq!(previous, 99);
