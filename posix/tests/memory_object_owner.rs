@@ -1,5 +1,7 @@
 extern crate alloc;
 
+#[path = "../../../user/crates/platform/src/handle_result.rs"]
+mod handle_result;
 #[path = "../../../user/crates/platform/src/memory_object.rs"]
 mod memory_object;
 
@@ -679,6 +681,7 @@ fn native_compositor_gate_uses_current_ipc_abi() {
 }
 
 mod syscall {
+    pub use mnu_abi::status::Error as NativeError;
     pub use mnu_abi::{
         EACCES, EINVAL, EIO, ENOMEM, HANDLE_RIGHT_MAP, HANDLE_RIGHT_READ, MEMORY_ACCESS_ALL,
         MEMORY_ACCESS_READ, MEMORY_ACCESS_WRITE, MEMORY_MAP_SHARED, MEMORY_OBJECT_RESIZABLE,
