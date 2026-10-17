@@ -7,6 +7,7 @@ fn production_fault_page_gate_rejects_eof_without_confusing_provider_errors() {
     let mut program = String::from(
         r#"
 use std::sync::Arc;
+use mnu_abi::status::Error;
 const PAGE_BYTES: usize = 4096;
 mod syscall { pub const EINVAL: u64 = (-22i64) as u64; }
 enum VmObjectSource { Memory(()), Provider }
@@ -56,11 +57,9 @@ fn main() {
         object.outcome = Err((-5i64) as u64);
         assert_eq!(object.page(7), Err(VmPageError::Operation((-5i64) as u64)));
         object.outcome = Err(syscall::EINVAL);
-        let expected = match object.source {
-            VmObjectSource::Memory(_) => VmPageError::OutsideBacking,
-            VmObjectSource::Provider => VmPageError::Operation(syscall::EINVAL),
-        };
-        assert_eq!(object.page(7), Err(expected));
+        // Compatibility-looking values from a backing are opaque. Only the
+        // RAM implementation's native invalid-index result denotes its EOF.
+        assert_eq!(object.page(7), Err(VmPageError::Operation(syscall::EINVAL)));
         for error in [mnu_abi::status::Error::InvalidArgument, mnu_abi::status::Error::ResourceUnavailable, mnu_abi::status::Error::BackingFailure] {
             object.outcome=Err(error.into_raw());
             let expected=match (&object.source,error) {

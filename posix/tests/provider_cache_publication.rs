@@ -18,6 +18,8 @@ thread_local! {
     static FAIL_MAPPING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static CAPTURE_GATE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static CAPTURED_GATE: RefCell<Option<object_io::IoLock>> = const { RefCell::new(None) };
+    static FAIL_FRAME_ALLOC: Cell<bool> = const { Cell::new(false) };
+    static FAIL_FRAME_RETAIN: Cell<bool> = const { Cell::new(false) };
 }
 struct FaultAllocator;
 unsafe impl std::alloc::GlobalAlloc for FaultAllocator {
@@ -248,16 +250,18 @@ mod syscall {
     }
 }
 
-// Only provider backing is used. RAM is a separate production implementation
-// with its own generation/revocation tests.
+// RAM storage/generation has separate production tests. This byte store only
+// exercises the actual VmObject wrapper's EOF and invalid-index handling.
 mod shared_memory {
-    pub struct SharedMemory;
+    pub struct SharedMemory {
+        pub length: u64,
+    }
     impl SharedMemory {
         pub fn id(&self) -> u64 {
             unreachable!()
         }
         pub fn length(&self) -> u64 {
-            unreachable!()
+            self.length
         }
         pub fn generation(&self) -> u64 {
             unreachable!()
@@ -269,14 +273,26 @@ mod shared_memory {
         ) -> Result<T, mnu_abi::status::Error> {
             unreachable!()
         }
-        pub fn read_at(&self, _: u64, _: &mut [u8]) -> Result<usize, mnu_abi::status::Error> {
-            unreachable!()
+        pub fn read_at(
+            &self,
+            offset: u64,
+            output: &mut [u8],
+        ) -> Result<usize, mnu_abi::status::Error> {
+            let count = self.length.saturating_sub(offset).min(output.len() as u64) as usize;
+            output[..count].fill(0x4b);
+            Ok(count)
         }
         pub fn write_at(&self, _: u64, _: &[u8]) -> Result<usize, mnu_abi::status::Error> {
             unreachable!()
         }
-        pub fn prepare_page(&self, _: u64) -> Result<(u64, u64), mnu_abi::status::Error> {
-            unreachable!()
+        pub fn prepare_page(&self, index: u64) -> Result<(u64, u64), mnu_abi::status::Error> {
+            if index
+                .checked_mul(4096)
+                .is_none_or(|offset| offset >= self.length)
+            {
+                return Err(mnu_abi::status::Error::InvalidArgument);
+            }
+            unreachable!("this probe does not allocate RAM frames")
         }
     }
 }
@@ -311,6 +327,9 @@ mod frame {
         }
     }
     pub fn allocate_zeroed_frame() -> Result<Frame, ()> {
+        if crate::FAIL_FRAME_ALLOC.with(|failure| failure.replace(false)) {
+            return Err(());
+        }
         let frame = Box::into_raw(Box::new([0u8; 4096])) as u64;
         crate::FRAMES.lock().unwrap().insert(frame, 1);
         Ok(Frame(frame))
@@ -325,6 +344,9 @@ mod paging {
         crate::PHYSICAL_OFFSET.with(std::cell::Cell::get)
     }
     pub fn retain_shared_user_frame(frame: u64) -> Result<(), ()> {
+        if crate::FAIL_FRAME_RETAIN.with(|failure| failure.replace(false)) {
+            return Err(());
+        }
         *crate::FRAMES.lock().unwrap().get_mut(&frame).ok_or(())? += 1;
         Ok(())
     }
@@ -905,6 +927,105 @@ fn unrelated_backing_changes_do_not_invalidate_extent_or_page_installations() {
 }
 
 #[test]
+fn ram_wrapper_keeps_eof_distinct_from_native_invalid_index_failures() {
+    let _test = TEST_LOCK.lock().unwrap();
+    let object =
+        vm_object::VmObject::shared_memory(Arc::new(shared_memory::SharedMemory { length: 3 }));
+    let page = object.page(0).unwrap();
+    assert!(page[..3].iter().all(|byte| *byte == 0x4b));
+    assert!(page[3..].iter().all(|byte| *byte == 0));
+    for index in [1, u64::MAX] {
+        assert!(matches!(
+            object.page(index),
+            Err(vm_object::VmPageError::OutsideBacking)
+        ));
+        assert!(matches!(
+            object.prepare_shared_page(index),
+            Err(vm_object::VmPageError::OutsideBacking)
+        ));
+        assert_eq!(object.mark_page_dirty(index), Err(EXTENT_INVALID_ARGUMENT));
+    }
+    assert_eq!(object.read_at(3, &mut [0; 8]), Ok(0));
+}
+
+#[test]
+fn shared_frame_failures_use_native_errors_and_keep_cache_ownership_retryable() {
+    let _test = TEST_LOCK.lock().unwrap();
+    reset_lower(b"old");
+    let object = provider_object();
+    object.page(0).unwrap();
+    let generation = object.memory_generation();
+    let reads = LOWER.lock().unwrap().reads;
+
+    FAIL_FRAME_ALLOC.set(true);
+    assert!(matches!(
+        object.prepare_shared_page(0),
+        Err(vm_object::VmPageError::Operation(error))
+            if error == mnu_abi::status::Error::ResourceUnavailable.into_raw()
+    ));
+    assert!(FRAMES.lock().unwrap().is_empty());
+    assert_eq!(object.memory_generation(), generation);
+
+    PHYSICAL_OFFSET.set(None);
+    let failed = object.prepare_shared_page(0);
+    PHYSICAL_OFFSET.set(Some(0));
+    assert!(matches!(
+        failed,
+        Err(vm_object::VmPageError::Operation(EXTENT_BACKING_FAILURE))
+    ));
+    // A frame allocated before a rejected physical copy must be released.
+    assert!(FRAMES.lock().unwrap().is_empty());
+
+    FAIL_FRAME_RETAIN.set(true);
+    assert!(matches!(
+        object.prepare_shared_page(0),
+        Err(vm_object::VmPageError::Operation(error))
+            if error == mnu_abi::status::Error::ResourceUnavailable.into_raw()
+    ));
+    // The cache keeps its own frame, but the failed pin owns no reference.
+    assert_eq!(
+        FRAMES.lock().unwrap().values().copied().collect::<Vec<_>>(),
+        [1]
+    );
+    let pin = object.prepare_shared_page(0).unwrap();
+    assert_eq!(
+        FRAMES.lock().unwrap().values().copied().collect::<Vec<_>>(),
+        [2]
+    );
+    assert_eq!(&object.page(0).unwrap()[..3], b"old");
+    assert_eq!(LOWER.lock().unwrap().reads, reads);
+    assert_eq!(object.memory_generation(), generation);
+    drop(pin);
+    object.invalidate().unwrap();
+    assert!(FRAMES.lock().unwrap().is_empty());
+}
+
+#[test]
+fn invalid_cache_operations_fail_natively_without_lower_io_or_dirty_publication() {
+    let _test = TEST_LOCK.lock().unwrap();
+    reset_lower(b"old");
+    let object = provider_object();
+    object.page(0).unwrap();
+    let generation = object.memory_generation();
+    let reads = LOWER.lock().unwrap().reads;
+    assert_eq!(
+        object.stage_write_at(u64::MAX, b"new"),
+        Err(mnu_abi::status::Error::LimitExceeded.into_raw())
+    );
+    assert_eq!(object.mark_page_dirty(1), Err(EXTENT_BACKING_FAILURE));
+    assert!(matches!(
+        object.page(u64::MAX),
+        Err(vm_object::VmPageError::Operation(EXTENT_INVALID_ARGUMENT))
+    ));
+    assert_eq!(object.memory_generation(), generation);
+    assert_eq!(LOWER.lock().unwrap().reads, reads);
+    assert_eq!(&object.page(0).unwrap()[..3], b"old");
+    object.flush().unwrap();
+    assert_eq!(&LOWER.lock().unwrap().bytes, b"old");
+    object.invalidate().unwrap();
+}
+
+#[test]
 fn extent_geometry_and_allocation_failures_leave_admission_and_cache_unchanged() {
     let _test = TEST_LOCK.lock().unwrap();
     reset_lower(b"old");
@@ -1041,15 +1162,15 @@ fn reserved_backing_rejects_population_dirtying_and_both_final_install_paths() {
     for page in [0, 1] {
         assert!(matches!(
             object.page(page),
-            Err(vm_object::VmPageError::Operation(syscall::EAGAIN))
+            Err(vm_object::VmPageError::Operation(EXTENT_NOT_READY))
         ));
         assert!(matches!(
             object.prepare_shared_page(page),
-            Err(vm_object::VmPageError::Operation(syscall::EAGAIN))
+            Err(vm_object::VmPageError::Operation(EXTENT_NOT_READY))
         ));
     }
-    assert_eq!(object.mark_page_dirty(0), Err(syscall::EAGAIN));
-    assert_eq!(object.stage_write_at(0, b"new"), Err(syscall::EAGAIN));
+    assert_eq!(object.mark_page_dirty(0), Err(EXTENT_NOT_READY));
+    assert_eq!(object.stage_write_at(0, b"new"), Err(EXTENT_NOT_READY));
     assert_eq!(
         pin.map_to(4096, 8192, false, false),
         Err(mnu_abi::status::Error::NotReady)
@@ -1104,16 +1225,16 @@ fn reservation_wins_at_lower_reply_frame_and_staged_write_admission_edges() {
             if mode == 1 {
                 assert!(matches!(
                     object.prepare_shared_page(0),
-                    Err(vm_object::VmPageError::Operation(syscall::EAGAIN))
+                    Err(vm_object::VmPageError::Operation(EXTENT_NOT_READY))
                 ));
             } else {
-                assert_eq!(object.stage_write_at(0, b"new"), Err(syscall::EAGAIN));
+                assert_eq!(object.stage_write_at(0, b"new"), Err(EXTENT_NOT_READY));
             }
         } else {
             LOWER_EDGE.with(|edge| *edge.borrow_mut() = Some(reserve));
             assert!(matches!(
                 object.page(0),
-                Err(vm_object::VmPageError::Operation(syscall::EAGAIN))
+                Err(vm_object::VmPageError::Operation(EXTENT_NOT_READY))
             ));
         }
         assert!(held.borrow().is_some());
@@ -1263,7 +1384,7 @@ fn cache_publication_keeps_backing_reserved_through_journal_completion() {
     );
     assert!(matches!(
         alias.page(0),
-        Err(vm_object::VmPageError::Operation(syscall::EAGAIN))
+        Err(vm_object::VmPageError::Operation(EXTENT_NOT_READY))
     ));
     assert_eq!(
         alias.with_memory_generation_native(alias.memory_generation(), || panic!(
@@ -1303,7 +1424,7 @@ fn reserved_invalidation_cannot_change_epoch_or_release_publication_admission() 
         let generation = object.memory_generation();
         assert_eq!(
             without_allocations(|| object.invalidate()),
-            Err(syscall::EAGAIN)
+            Err(EXTENT_NOT_READY)
         );
         assert_eq!(object.memory_generation(), generation);
         if changed {
@@ -1313,13 +1434,13 @@ fn reserved_invalidation_cannot_change_epoch_or_release_publication_admission() 
         let published_generation = object.memory_generation();
         assert_eq!(
             without_allocations(|| object.invalidate()),
-            Err(syscall::EAGAIN)
+            Err(EXTENT_NOT_READY)
         );
         assert_eq!(object.memory_generation(), published_generation);
         assert_eq!(prepared.publish(), Err(EXTENT_INVALID_ARGUMENT));
         assert!(matches!(
             object.page(0),
-            Err(vm_object::VmPageError::Operation(syscall::EAGAIN))
+            Err(vm_object::VmPageError::Operation(EXTENT_NOT_READY))
         ));
         drop(prepared);
         assert_eq!(
@@ -1446,13 +1567,13 @@ fn unavailable_cached_backing_cannot_lose_failure_when_original_owners_drop() {
     );
     assert!(matches!(
         alias.page(0),
-        Err(vm_object::VmPageError::Operation(syscall::EIO))
+        Err(vm_object::VmPageError::Operation(EXTENT_BACKING_FAILURE))
     ));
     assert!(matches!(
         alias.prepare_shared_page(0),
-        Err(vm_object::VmPageError::Operation(syscall::EIO))
+        Err(vm_object::VmPageError::Operation(EXTENT_BACKING_FAILURE))
     ));
-    assert_eq!(alias.read_at(0, &mut [0; 8]), Err(syscall::EIO));
+    assert_eq!(alias.read_at(0, &mut [0; 8]), Err(EXTENT_BACKING_FAILURE));
     assert!(matches!(
         without_allocations(|| vm_object::lock_provider_io(&provider, 0xf00d_531)),
         Err(mnu_abi::status::Error::BackingFailure)
@@ -1461,8 +1582,8 @@ fn unavailable_cached_backing_cannot_lose_failure_when_original_owners_drop() {
         alias.write_at(0, b"new"),
         Err(mnu_abi::status::Error::BackingFailure.into_raw())
     );
-    assert_eq!(alias.stage_write_at(0, b"new"), Err(syscall::EIO));
-    assert_eq!(alias.mark_page_dirty(0), Err(syscall::EIO));
+    assert_eq!(alias.stage_write_at(0, b"new"), Err(EXTENT_BACKING_FAILURE));
+    assert_eq!(alias.mark_page_dirty(0), Err(EXTENT_BACKING_FAILURE));
     assert_eq!(
         alias.flush(),
         Err(mnu_abi::status::Error::BackingFailure.into_raw())
@@ -1490,7 +1611,7 @@ fn unavailable_cached_backing_cannot_lose_failure_when_original_owners_drop() {
     alias.invalidate().unwrap();
     assert!(matches!(
         alias.page(0),
-        Err(vm_object::VmPageError::Operation(syscall::EIO))
+        Err(vm_object::VmPageError::Operation(EXTENT_BACKING_FAILURE))
     ));
     assert!(FRAMES.lock().unwrap().is_empty());
 }
@@ -1660,7 +1781,7 @@ fn production_extent_commit_preserves_dirty_prefix_and_discards_removed_storage(
     // cancels preparation without changing cache bytes or backing length.
     assert_eq!(
         without_allocations(|| object.invalidate()),
-        Err(syscall::EAGAIN)
+        Err(EXTENT_NOT_READY)
     );
     drop(prepared);
     assert_eq!(&object.page(0).unwrap()[..3], b"old");

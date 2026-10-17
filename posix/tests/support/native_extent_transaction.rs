@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use crate::interrupt::spinlock::SpinLock;
+const NATIVE_NOT_READY: u64 = mnu_abi::status::Error::NotReady.into_raw();
 const NATIVE_INVALID_ARGUMENT: u64 = mnu_abi::status::Error::InvalidArgument.into_raw();
 const NATIVE_BACKING_FAILURE: u64 = mnu_abi::status::Error::BackingFailure.into_raw();
 const NATIVE_RESOURCE_UNAVAILABLE: u64 = mnu_abi::status::Error::ResourceUnavailable.into_raw();
@@ -319,7 +320,7 @@ fn cache_preflight_failure_after_tlb_ack_keeps_records_until_deferred_rollback()
     assert!(matches!(
         object.page(0),
         Err(crate::vm_object::VmPageError::Operation(
-            crate::syscall::EAGAIN
+            NATIVE_NOT_READY
         ))
     ));
     crate::without_allocations(extent_transaction::flush);
@@ -352,7 +353,7 @@ fn owner_drop_inside_vm_lock_only_enqueues_then_restores_without_allocations() {
     assert!(matches!(
         object.page(0),
         Err(crate::vm_object::VmPageError::Operation(
-            crate::syscall::EAGAIN
+            NATIVE_NOT_READY
         ))
     ));
     crate::without_allocations(|| {
@@ -409,7 +410,7 @@ fn failed_tlb_ack_and_reserved_invalidation_preserve_cancellation_ownership() {
             let generation = object.memory_generation();
             assert_eq!(
                 crate::without_allocations(|| object.invalidate()),
-                Err(crate::syscall::EAGAIN)
+                Err(NATIVE_NOT_READY)
             );
             assert_eq!(object.memory_generation(), generation);
             drop(owner);
@@ -443,13 +444,13 @@ fn published_owner_death_retries_remaining_finish_instead_of_restoring_old_exten
         let generation = object.memory_generation();
         assert_eq!(
             crate::without_allocations(|| object.invalidate()),
-            Err(crate::syscall::EAGAIN)
+            Err(NATIVE_NOT_READY)
         );
         assert_eq!(object.memory_generation(), generation);
         assert!(matches!(
             object.page(0),
             Err(crate::vm_object::VmPageError::Operation(
-                crate::syscall::EAGAIN
+                NATIVE_NOT_READY
             ))
         ));
         crate::without_allocations(|| drop(owner));
@@ -495,7 +496,7 @@ fn irrevocable_request_keeps_publication_intent_across_preflight_errors_and_owne
         assert!(matches!(
             object.page(0),
             Err(crate::vm_object::VmPageError::Operation(
-                crate::syscall::EAGAIN
+                NATIVE_NOT_READY
             ))
         ));
     }
@@ -538,7 +539,7 @@ fn irrevocable_cache_failure_retains_retired_root_until_publication_finishes() {
     assert!(matches!(
         object.page(0),
         Err(crate::vm_object::VmPageError::Operation(
-            crate::syscall::EAGAIN
+            NATIVE_NOT_READY
         ))
     ));
     crate::without_allocations(extent_transaction::flush);
@@ -610,7 +611,7 @@ fn deferred_rejection_retains_original_ticket_roots_and_admission_for_retry() {
     assert!(matches!(
         object.page(0),
         Err(crate::vm_object::VmPageError::Operation(
-            crate::syscall::EAGAIN
+            NATIVE_NOT_READY
         ))
     ));
     paging::FAIL_LOOKUP.store(0, Ordering::Relaxed);
@@ -739,7 +740,7 @@ fn external_prepare_cannot_authorize_io_before_all_cpu_tlb_acknowledgement() {
     assert!(matches!(result, Err(NATIVE_BACKING_FAILURE)));
     assert_eq!(paging::flags(ROOT, BASE), Some(0x804));
     assert_eq!(paging::flags(ROOT, BASE + 4096), Some(0x804));
-    assert_eq!(object.read_at(0, &mut [0; 1]), Err(crate::syscall::EAGAIN));
+    assert_eq!(object.read_at(0, &mut [0; 1]), Err(NATIVE_NOT_READY));
     crate::without_allocations(extent_transaction::flush);
     assert_eq!(paging::flags(ROOT, BASE), Some(0x805));
     assert_eq!(paging::flags(ROOT, BASE + 4096), Some(0x805));
@@ -808,9 +809,9 @@ fn uncertain_external_owner_death_discards_every_mapping_without_querying_storag
                 assert_eq!(paging::flags(ROOT, BASE), Some(0x804));
             })
         });
-        assert_eq!(object.read_at(0, &mut [0; 1]), Err(crate::syscall::EAGAIN));
+        assert_eq!(object.read_at(0, &mut [0; 1]), Err(NATIVE_NOT_READY));
         crate::without_allocations(extent_transaction::flush);
-        assert_eq!(object.read_at(0, &mut [0; 1]), Err(crate::syscall::EIO));
+        assert_eq!(object.read_at(0, &mut [0; 1]), Err(NATIVE_BACKING_FAILURE));
         assert_eq!(
             object.write_at(0, b"x"),
             Err(mnu_abi::status::Error::BackingFailure.into_raw())
@@ -947,7 +948,7 @@ fn uncertain_cleanup_latches_failure_before_retry_and_keeps_retired_root_pinned(
     paging::FAIL_LOOKUP.store(1, Ordering::Relaxed);
     crate::without_allocations(extent_transaction::flush);
     let failed_generation = object.memory_generation();
-    assert_eq!(object.read_at(0, &mut [0; 1]), Err(crate::syscall::EIO));
+    assert_eq!(object.read_at(0, &mut [0; 1]), Err(NATIVE_BACKING_FAILURE));
     assert_eq!(paging::DESTROYED.load(Ordering::Relaxed), destroyed);
     assert_eq!(object.check_mapping_removal(), Err(mnu_abi::status::Error::NotReady));
     assert!(physical
@@ -1036,7 +1037,7 @@ fn uncertain_cleanup_covers_detached_prefix_and_leaves_unrelated_mapping_usable(
     assert_eq!(paging::flags(ROOT, BASE + 4096), None);
     assert_eq!(paging::flags(ROOT, other_address), Some(0x805));
     assert!(crate::FRAMES.lock().unwrap().contains_key(&other_frame));
-    assert_eq!(object.read_at(0, &mut [0; 1]), Err(crate::syscall::EIO));
+    assert_eq!(object.read_at(0, &mut [0; 1]), Err(NATIVE_BACKING_FAILURE));
     assert_eq!(other.read_at(0, &mut [0; 1]), Ok(1));
     other.invalidate().unwrap();
     cleanup(object, pin);
