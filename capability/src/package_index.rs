@@ -114,7 +114,7 @@ pub(crate) fn package_manifest_by_id(
 ) -> Result<(platform::package::PackageManifest, String), platform::syscall::SysError> {
     if index.duplicate {
         return Err(platform::syscall::SysError::from_raw(
-            platform::syscall::EEXIST as i64,
+            mochios_posix_protocol::STATUS_EEXIST as i64,
         ));
     }
     if let Some(record) = index.by_package.get(package_id) {

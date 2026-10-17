@@ -20,7 +20,7 @@ pub(crate) fn initialize() -> SysResult<()> {
     platform::handle::remove_context_handle(wire::BOOTSTRAP_READ_HANDLE_KEY)?;
     let mut reader = READER.lock().map_err(|_| error(syscall::EIO))?;
     if reader.is_some() {
-        return Err(error(syscall::EEXIST));
+        return Err(error(syscall::NativeError::AlreadyExists.into_raw()));
     }
     *reader = Some(Client::new(handle, native_call as Transport));
     Ok(())

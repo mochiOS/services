@@ -102,7 +102,7 @@ fn ensure_policy_dir() -> Result<(), mochi_user_syscall::SysError> {
     for path in ["/var", "/var/lib", POLICY_DIR] {
         let result = with_client(|client| client.mkdir_at(OpenAtBase::ProcessRoot, 0o755, path));
         if let Err(error) = result
-            && error.raw() != mochi_user_syscall::EEXIST as i64
+            && error.raw() != posix::STATUS_EEXIST as i64
         {
             return Err(error);
         }

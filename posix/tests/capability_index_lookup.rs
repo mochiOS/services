@@ -63,7 +63,9 @@ fn ambiguous_index_rejects_even_an_existing_package_id() {
     let calls = IO_CALLS.get();
     assert_eq!(
         package_index::package_manifest_by_id(&index, "org.mochios.capability").err(),
-        Some(SysError::from_raw(syscall::EEXIST as i64))
+        Some(SysError::from_raw(
+            mochios_posix_protocol::STATUS_EEXIST as i64
+        ))
     );
     assert_eq!(IO_CALLS.get(), calls);
 }

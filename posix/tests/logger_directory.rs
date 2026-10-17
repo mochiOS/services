@@ -51,7 +51,7 @@ fn main() {
     for status in [EACCES, EIO, EAGAIN] {
         run(Err(sys_error(status)), Ok(()), Err(sys_error(status)), &["stat"]);
     }
-    for status in [EACCES, EIO, EEXIST] {
+    for status in [EACCES, EIO, (-17_i64) as u64, NativeError::AlreadyExists.into_raw()] {
         run(Err(sys_error(ENOENT)), Err(sys_error(status)), Err(sys_error(status)), &["stat", "mkdir"]);
     }
 }

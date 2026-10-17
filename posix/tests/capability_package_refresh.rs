@@ -58,7 +58,11 @@ fn initial_index_failure_and_duplicate_index_do_not_publish_service_state() {
     for (error, duplicate, expected) in [
         (Some(syscall::EIO), false, syscall::EIO),
         (Some(syscall::EACCES), false, syscall::EACCES),
-        (None, true, syscall::EEXIST),
+        (
+            None,
+            true,
+            mochios_posix_protocol::STATUS_EEXIST as i64 as u64,
+        ),
     ] {
         INDEX_ERROR.set(error.map(|raw| SysError::from_raw(raw as i64)));
         DUPLICATE.set(duplicate);
@@ -77,7 +81,12 @@ fn publishes_the_new_index_and_policy_only_after_both_reads_succeed() {
     for (index_error, policy_error, duplicate, expected) in [
         (Some(syscall::EIO), None, false, Some(syscall::EIO)),
         (None, Some(syscall::EACCES), false, Some(syscall::EACCES)),
-        (None, None, true, Some(syscall::EEXIST)),
+        (
+            None,
+            None,
+            true,
+            Some(mochios_posix_protocol::STATUS_EEXIST as i64 as u64),
+        ),
         (None, None, false, None),
     ] {
         INDEX_ERROR.set(index_error.map(|raw| SysError::from_raw(raw as i64)));

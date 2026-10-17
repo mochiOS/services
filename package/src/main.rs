@@ -249,7 +249,7 @@ fn write_file(path: &str, data: &[u8], mode: u64) -> Result<(), mochi_user_sysca
                 current.push_str(seg);
                 match posix_io::create_dir(&current, FILE_MODE_755) {
                     Ok(_) => {}
-                    Err(err) if err.raw() == mochi_user_syscall::EEXIST as i64 => {}
+                    Err(err) if err.raw() == mochios_posix_protocol::STATUS_EEXIST as i64 => {}
                     Err(err) => {
                         diagnostic(&alloc::format!(
                             "package.service: parent directory create failed path={} errno={}",
@@ -353,7 +353,7 @@ fn notify_package_index_changed() -> Result<(), mochi_user_syscall::SysError> {
 fn require_path_absent(path: &str) -> Result<(), mochi_user_syscall::SysError> {
     match posix_io::path_exists(path)? {
         true => Err(mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::EEXIST as i64,
+            mochios_posix_protocol::STATUS_EEXIST as i64,
         )),
         false => Ok(()),
     }
@@ -628,7 +628,7 @@ fn install_package(
         (PackageMutation::Install, SignerContinuity::NewInstall) => {}
         (PackageMutation::Install, _) => {
             return Err(mochi_user_syscall::SysError::from_raw(
-                mochi_user_syscall::EEXIST as i64,
+                mochios_posix_protocol::STATUS_EEXIST as i64,
             ));
         }
         (PackageMutation::Update, SignerContinuity::NewInstall) => {

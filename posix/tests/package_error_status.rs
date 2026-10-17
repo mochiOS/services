@@ -4,6 +4,17 @@ mod probe;
 fn run(test: &str) {
     let source = include_str!("../../package/src/main.rs");
     let mut program = probe::program();
+    let mut statuses = String::new();
+    probe::constants(
+        &mut statuses,
+        include_str!("../../../user/crates/posix-protocol/src/lib.rs"),
+        &["STATUS_EEXIST"],
+    );
+    program = program.replacen(
+        "mod mochios_posix_protocol {\n",
+        &format!("mod mochios_posix_protocol {{\n{statuses}"),
+        1,
+    );
     program.push_str("mod signature_protocol {\n");
     program.push_str(
         include_str!("../../../user/crates/signature-protocol/src/lib.rs")
@@ -126,12 +137,13 @@ fn signature(){
     }
 }
 fn parents(){
-    for results in [vec![Ok(()),Ok(())],vec![Err(error(EEXIST)),Err(error(EEXIST))],vec![Ok(()),Err(error(EEXIST))]] {
+    let exists = mochios_posix_protocol::STATUS_EEXIST as i64 as u64;
+    for results in [vec![Ok(()),Ok(())],vec![Err(error(exists)),Err(error(exists))],vec![Ok(()),Err(error(exists))]] {
         STATE.set(State{mkdir:results.into(),..State::default()});
         assert_eq!(write_file("/applications/Test.app/main",b"payload",0o644),Ok(()));
         STATE.with_borrow(|s|assert_eq!(s.events,["mkdir:/applications","mkdir:/applications/Test.app","open","write","sync","close"]));
     }
-    for status in [EACCES,EIO] {
+    for status in [EACCES,EIO,NativeError::AlreadyExists.into_raw()] {
         STATE.set(State{mkdir:vec![Err(error(status))].into(),..State::default()});
         assert_eq!(write_file("/applications/Test.app/main",b"payload",0o644),Err(error(status)));
         STATE.with_borrow(|s|assert_eq!(s.events,["mkdir:/applications"]));

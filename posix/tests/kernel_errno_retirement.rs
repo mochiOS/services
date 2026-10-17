@@ -13,7 +13,7 @@ fn retired_errno_are_not_exported_by_native_layers() {
     let abi = include_str!("../../../core/crates/abi/src/lib.rs");
     let syscall = include_str!("../../../user/crates/syscall/src/lib.rs");
     for name in [
-        "ENODATA", "EMSGSIZE", "ESRCH", "EMFILE", "ENXIO", "EPIPE", "EFAULT", "EBADF",
+        "ENODATA", "EMSGSIZE", "ESRCH", "EMFILE", "ENXIO", "EPIPE", "EFAULT", "EBADF", "EEXIST",
     ] {
         assert!(!abi.contains(&format!("pub const {name}:")));
         assert!(
