@@ -22,8 +22,7 @@ fn function<'a>(source: &'a str, name: &str) -> &'a str {
     panic!("unterminated function {name}");
 }
 
-#[test]
-fn native_handle_results_reject_malformed_success_and_preserve_failures() {
+fn wrapper_program() -> String {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
@@ -55,6 +54,8 @@ pub fn call0(n:SyscallNumber)->SysResult<u64>{call(n,&[])}
 pub fn call1(n:SyscallNumber,a:u64)->SysResult<u64>{call(n,&[a])}
 pub fn call2(n:SyscallNumber,a:u64,b:u64)->SysResult<u64>{call(n,&[a,b])}
 pub fn call3(n:SyscallNumber,a:u64,b:u64,c:u64)->SysResult<u64>{call(n,&[a,b,c])}
+pub fn call4(n:SyscallNumber,a:u64,b:u64,c:u64,d:u64)->SysResult<u64>{call(n,&[a,b,c,d])}
+pub fn call6(n:SyscallNumber,a:u64,b:u64,c:u64,d:u64,e:u64,f:u64)->SysResult<u64>{call(n,&[a,b,c,d,e,f])}
 }
 mod production {
 use crate::syscall::{self,SysResult,SysError,SyscallNumber};
@@ -75,12 +76,29 @@ type Handle=u32;
         program.push_str(function(source, name));
         program.push('\n');
     }
+    let handles = &source[source.find("pub mod handle {").unwrap()..];
+    for name in [
+        "pub fn read(",
+        "pub fn write(",
+        "pub fn read_at(",
+        "pub fn write_at(",
+        "pub fn control(",
+    ] {
+        program.push_str(function(handles, name));
+        program.push('\n');
+    }
     program.push_str("pub struct MemoryObject{pub handle:u32}\nimpl MemoryObject{\n");
     program.push_str(function(
         include_str!("../../../user/crates/platform/src/memory_object.rs"),
         "fn create_with_options(",
     ));
     program.push_str("pub fn create()->SysResult<u32>{Self::create_with_options(4096,0).map(|o|o.handle)}\n}\n}\n");
+    program
+}
+
+#[test]
+fn native_handle_results_reject_malformed_success_and_preserve_failures() {
+    let mut program = wrapper_program();
     program.push_str(r#"
 fn main(){
     use syscall::{SysError,SysResult};
@@ -120,6 +138,60 @@ fn main(){
             syscall::result(Err(SysError::from_raw(raw)));
             assert_eq!(factory(),Err(SysError::from_raw(raw)));
             assert_eq!(syscall::calls(),vec![(number,args.clone())]);
+        }
+    }
+}
+"#);
+    probe::run(&program);
+}
+
+#[test]
+fn native_io_results_are_bounded_by_the_supplied_buffer_without_retries() {
+    let mut program = wrapper_program();
+    program.push_str(r#"
+fn main(){
+    use syscall::{SysError,SysResult};
+    use status::Error;
+    let input=[0x71;3];
+    for operation in 0..5 {
+        for capacity in [0,1,8] {
+            let mut buffer=[0x53;8];
+            let pointer=buffer.as_ptr() as u64;
+            let number=match operation {
+                0=>SyscallNumber::HandleRead,1=>SyscallNumber::HandleWrite,
+                2=>SyscallNumber::HandleReadAt,3=>SyscallNumber::HandleWriteAt,
+                _=>SyscallNumber::HandleControl,
+            };
+            let mut args=vec![17,pointer,capacity as u64];
+            if operation==2 || operation==3 {args.push(u64::MAX);}
+            if operation==4 {args=vec![17,91,input.as_ptr() as u64,3,pointer,capacity as u64];}
+            let mut invoke=||->SysResult<usize>{
+                let bytes=&mut buffer[..capacity];
+                match operation {
+                    0=>production::read(17,bytes),
+                    1=>production::write(17,bytes),
+                    2=>production::read_at(17,bytes,u64::MAX),
+                    3=>production::write_at(17,bytes,u64::MAX),
+                    _=>production::control(17,91,&input,bytes),
+                }
+            };
+            for raw in [0,capacity as u64/2,capacity as u64] {
+                syscall::result(Ok(raw));
+                assert_eq!(invoke(),Ok(raw as usize));
+                assert_eq!(syscall::calls(),vec![(number,args.clone())]);
+            }
+            for raw in [capacity as u64+1,u32::MAX as u64,u64::MAX] {
+                syscall::result(Ok(raw));
+                assert_eq!(invoke(),Err(SysError::from_raw(Error::BackingFailure.into_raw() as i64)));
+                assert_eq!(syscall::calls(),vec![(number,args.clone())]);
+            }
+            for raw in [Error::AccessDenied.into_raw() as i64,Error::BackingFailure.into_raw() as i64,
+                        Error::ResourceUnavailable.into_raw() as i64,-9,-12,-22,-38] {
+                syscall::result(Err(SysError::from_raw(raw)));
+                assert_eq!(invoke(),Err(SysError::from_raw(raw)));
+                assert_eq!(syscall::calls(),vec![(number,args.clone())]);
+            }
+            assert_eq!(buffer,[0x53;8]);
         }
     }
 }
