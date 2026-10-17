@@ -103,6 +103,10 @@ thread_local! {
     static SYNC_EDGE: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
     static SYNC_ERROR: Cell<Option<u64>> = const { Cell::new(None) };
     static SYNC_CALLS: Cell<usize> = const { Cell::new(0) };
+    static READ_ONLY_PROVIDER: Cell<Option<usize>> = const { Cell::new(None) };
+    static LAST_WRITE_PROVIDER: Cell<usize> = const { Cell::new(0) };
+    static LAST_SYNC_PROVIDER: Cell<usize> = const { Cell::new(0) };
+    static WRITE_CALLS: Cell<usize> = const { Cell::new(0) };
     static INVALID_READ_COUNT: Cell<bool> = const { Cell::new(false) };
     static INVALID_WRITE_COUNT: Cell<bool> = const { Cell::new(false) };
     static READ_FAILURE: Cell<Option<(u64, u64)>> = const { Cell::new(None) };
@@ -231,10 +235,16 @@ mod syscall {
             Ok(count)
         }
         pub fn provider_write_at(
-            _: &crate::task::ProviderObject,
+            provider: &crate::task::ProviderObject,
             offset: u64,
             input: &[u8],
         ) -> Result<usize, u64> {
+            let identity = provider as *const _ as usize;
+            if crate::READ_ONLY_PROVIDER.with(|value| value.get()) == Some(identity) {
+                return Err(mnu_abi::status::Error::AccessDenied.into_raw());
+            }
+            crate::LAST_WRITE_PROVIDER.with(|value| value.set(identity));
+            crate::WRITE_CALLS.with(|value| value.set(value.get()+1));
             if crate::INVALID_WRITE_COUNT.with(|value| value.get()) {
                 return Ok(input.len() + 1);
             }
@@ -245,7 +255,8 @@ mod syscall {
             lower.bytes[start..start + input.len()].copy_from_slice(input);
             Ok(input.len())
         }
-        pub fn provider_sync(_: &crate::task::ProviderObject) -> Result<(), u64> {
+        pub fn provider_sync(provider: &crate::task::ProviderObject) -> Result<(), u64> {
+            crate::LAST_SYNC_PROVIDER.with(|value| value.set(provider as *const _ as usize));
             crate::SYNC_CALLS.with(|calls| calls.set(calls.get() + 1));
             let hook = crate::SYNC_EDGE.with(|edge| edge.borrow_mut().take());
             if let Some(hook) = hook { hook(); }
@@ -565,6 +576,98 @@ fn reset_lower(bytes: &[u8]) {
         bytes: bytes.to_vec(),
         reads: 0,
     };
+}
+
+#[test]
+fn read_only_alias_flushes_through_retained_writer_and_releases_only_after_sync_success() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    reset_lower(b"old");
+    let provider = || Arc::new(task::ProviderObject {
+        endpoint_thread_id: 0x1d01, endpoint_slot: 2, endpoint_generation: 8,
+    });
+    let writable = provider();
+    let original = Arc::as_ptr(&writable) as usize;
+    let retained = Arc::downgrade(&writable);
+    let reader_source = provider();
+    READ_ONLY_PROVIDER.with(|value| value.set(Some(Arc::as_ptr(&reader_source) as usize)));
+    let writer = vm_object::VmObject::provider(writable.clone(), 93).unwrap();
+    let reader = vm_object::VmObject::provider(reader_source, 93).unwrap();
+    writer.stage_write_at(0, b"new").unwrap();
+    drop(writer);
+    drop(writable);
+    assert!(retained.upgrade().is_some(), "dirty data lost its write reference");
+    SYNC_ERROR.with(|value| value.set(Some(syscall::EIO)));
+    assert_eq!(reader.flush_range(0,4096), Err(syscall::EIO));
+    assert_eq!(LAST_WRITE_PROVIDER.with(Cell::get), original);
+    assert_eq!(LAST_SYNC_PROVIDER.with(Cell::get), original);
+    assert!(retained.upgrade().is_some(), "failed sync discarded write authority");
+    SYNC_ERROR.with(|value| value.set(None));
+    reader.flush_range(0,4096).unwrap();
+    assert!(retained.upgrade().is_none(), "clean cache kept an unnecessary grant");
+    assert_eq!(&reader.page(0).unwrap()[..3], b"new");
+    reader.invalidate().unwrap();
+    READ_ONLY_PROVIDER.with(|value| value.set(None));
+}
+
+#[test]
+fn dirty_pages_keep_each_original_writer_and_sync_each_description_once() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    reset_lower(&vec![b'x'; 12288]);
+    let source = || Arc::new(task::ProviderObject {
+        endpoint_thread_id: 0x1d02, endpoint_slot: 2, endpoint_generation: 8,
+    });
+    let first = source();
+    let second = source();
+    let first_retained = Arc::downgrade(&first);
+    let second_retained = Arc::downgrade(&second);
+    let second_identity = Arc::as_ptr(&second) as usize;
+    let first = vm_object::VmObject::provider(first,93).unwrap();
+    let second = vm_object::VmObject::provider(second,93).unwrap();
+    let read_source = source();
+    READ_ONLY_PROVIDER.with(|value| value.set(Some(Arc::as_ptr(&read_source) as usize)));
+    let reader = vm_object::VmObject::provider(read_source,93).unwrap();
+    first.stage_write_at(0,b"a").unwrap();
+    first.stage_write_at(4096,b"b").unwrap();
+    second.stage_write_at(8192,b"c").unwrap();
+    drop(first);
+    drop(second);
+    WRITE_CALLS.with(|value| value.set(0));
+    let syncs = SYNC_CALLS.with(Cell::get);
+    reader.flush_range(0,12288).unwrap();
+    assert_eq!(WRITE_CALLS.with(Cell::get),3);
+    assert_eq!(SYNC_CALLS.with(Cell::get)-syncs,2);
+    assert_eq!(LAST_WRITE_PROVIDER.with(Cell::get),second_identity);
+    assert_eq!(LAST_SYNC_PROVIDER.with(Cell::get),second_identity);
+    assert!(first_retained.upgrade().is_none());
+    assert!(second_retained.upgrade().is_none());
+    let lower = LOWER.lock().unwrap();
+    assert_eq!((lower.bytes[0],lower.bytes[4096],lower.bytes[8192]),(b'a',b'b',b'c'));
+    drop(lower);
+    reader.invalidate().unwrap();
+    READ_ONLY_PROVIDER.with(|value| value.set(None));
+}
+
+#[test]
+fn dirty_mapped_frame_keeps_its_writer_until_last_alias_is_gone_and_synced() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    reset_lower(b"old");
+    let source = || Arc::new(task::ProviderObject {
+        endpoint_thread_id: 0x1d03, endpoint_slot: 2, endpoint_generation: 8,
+    });
+    let original = source();
+    let retained = Arc::downgrade(&original);
+    let writer = vm_object::VmObject::provider(original,93).unwrap();
+    let reader = vm_object::VmObject::provider(source(),93).unwrap();
+    let pin = writer.prepare_shared_page(0).unwrap();
+    writer.mark_page_dirty(0).unwrap();
+    drop(writer);
+    reader.flush_range(0,4096).unwrap();
+    assert!(retained.upgrade().is_some());
+    drop(pin);
+    reader.flush_range(0,4096).unwrap();
+    assert!(retained.upgrade().is_none());
+    reader.invalidate().unwrap();
+    assert!(FRAMES.lock().unwrap().is_empty());
 }
 
 #[test]
