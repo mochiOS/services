@@ -6,22 +6,22 @@ mod handle_result;
 mod memory_object;
 
 use crate as platform;
+#[path = "../../mboot-agent/src/stage_mapping.rs"]
+mod agent_stage_mapping;
+#[path = "../../../applications/binder/src/platform/mochios/decoration_buffer.rs"]
+mod binder_decoration_buffer;
 #[path = "../../compositor/src/frame_buffer.rs"]
 mod compositor_frame_buffer;
 #[path = "../../compositor/src/received_buffer.rs"]
 mod compositor_received_buffer;
+#[path = "../../../binaries/coreutils/src/gui_buffer.rs"]
+mod coreutils_gui_buffer;
 #[path = "../../display/src/shared_buffer.rs"]
 mod display_shared_buffer;
 #[path = "../../linux/src/compositor_buffer.rs"]
 mod linux_compositor_buffer;
 #[path = "../../linux/src/stage_buffer.rs"]
 mod linux_stage_buffer;
-#[path = "../../mboot-agent/src/stage_mapping.rs"]
-mod agent_stage_mapping;
-#[path = "../../../applications/binder/src/platform/mochios/decoration_buffer.rs"]
-mod binder_decoration_buffer;
-#[path = "../../../binaries/coreutils/src/gui_buffer.rs"]
-mod coreutils_gui_buffer;
 #[derive(Debug)]
 struct DecorationError(u64);
 type HostError = CompositorError;
@@ -84,6 +84,7 @@ use std::cell::RefCell;
 #[derive(Default)]
 struct State {
     calls: Vec<(syscall::SyscallNumber, Vec<u64>)>,
+    native_failure: Option<(syscall::SyscallNumber, i64)>,
     fail_create: bool,
     fail_resize: bool,
     fail_map: bool,
@@ -692,6 +693,11 @@ mod syscall {
         super::STATE.with(|state| {
             let mut state = state.borrow_mut();
             state.calls.push((number, args.to_vec()));
+            if let Some((expected, raw)) = state.native_failure {
+                if expected == number {
+                    return Err(SysError::from_raw(raw));
+                }
+            }
             match number {
                 SyscallNumber::MemoryObjectCreate if state.fail_create => {
                     Err(SysError::from_raw(-12))
@@ -728,6 +734,131 @@ mod syscall {
         f: u64,
     ) -> SysResult<u64> {
         call(number, &[a, b, c, d, e, f])
+    }
+}
+
+#[test]
+fn local_memory_validation_uses_native_categories_without_issuing_io() {
+    use syscall::NativeError as E;
+    reset();
+    for length in [0, 1, 4095, 4097] {
+        assert_eq!(
+            MemoryObject::create(length).err().unwrap().native_error(),
+            Some(E::InvalidArgument)
+        );
+    }
+    assert_eq!(
+        memory_object::ReadOnlyOffer::decode(&[0; 32])
+            .unwrap_err()
+            .native_error(),
+        Some(E::InvalidArgument)
+    );
+    STATE.with(|state| assert!(state.borrow().calls.is_empty()));
+    let object = MemoryObject::create(8192).unwrap();
+    for (offset, length, access, expected) in [
+        (1, 4096, 1, E::InvalidArgument),
+        (0, 0, 1, E::InvalidArgument),
+        (0, 4096, 8, E::InvalidArgument),
+        (0, u64::MAX, 1, E::LimitExceeded),
+        (u64::MAX - 4095, 4096, 1, E::LimitExceeded),
+    ] {
+        assert_eq!(
+            object
+                .map(offset, length, access)
+                .err()
+                .unwrap()
+                .native_error(),
+            Some(expected)
+        );
+    }
+    STATE.with(|state| assert_eq!(state.borrow().calls.len(), 1));
+    drop(object);
+}
+
+#[test]
+fn received_memory_distinguishes_size_policy_authority_and_invalid_extent() {
+    use syscall::NativeError as E;
+    for (offer, limit, extra_rights, expected) in [
+        (
+            memory_object::ReadOnlyOffer {
+                offset: 0,
+                length: 4096,
+            },
+            4095,
+            0,
+            E::LimitExceeded,
+        ),
+        (
+            memory_object::ReadOnlyOffer {
+                offset: 0,
+                length: 4096,
+            },
+            4096,
+            mnu_abi::HANDLE_RIGHT_WRITE,
+            E::AccessDenied,
+        ),
+        (
+            memory_object::ReadOnlyOffer {
+                offset: 8192,
+                length: 1,
+            },
+            4096,
+            0,
+            E::InvalidArgument,
+        ),
+    ] {
+        reset();
+        STATE.with(|state| state.borrow_mut().extra_rights = extra_rights);
+        // SAFETY: the fixture transfers its one simulated received reference.
+        let object = unsafe { MemoryObject::from_owned_handle(19) };
+        let error = memory_object::receive_readonly_offer(&offer.encode().unwrap(), object, limit)
+            .err()
+            .unwrap();
+        assert_eq!(error.native_error(), Some(expected));
+        STATE.with(|state| {
+            let state = state.borrow();
+            assert!(
+                !state
+                    .calls
+                    .iter()
+                    .any(|c| c.0 == syscall::SyscallNumber::MemoryMap)
+            );
+            assert_eq!(
+                state
+                    .calls
+                    .iter()
+                    .filter(|c| c.0 == syscall::SyscallNumber::HandleClose)
+                    .count(),
+                1
+            );
+            assert_eq!(state.calls.last().unwrap().1, [19]);
+        });
+    }
+}
+
+#[test]
+fn memory_backing_errors_are_propagated_without_posix_translation_or_fake_cleanup() {
+    use syscall::{NativeError as E, SyscallNumber as N};
+    for raw in [
+        E::AccessDenied.into_raw() as i64,
+        E::ResourceUnavailable.into_raw() as i64,
+        ((E::LimitExceeded.into_raw() & !0xffff) | 0xffff) as i64,
+        -13,
+    ] {
+        reset();
+        STATE.with(|state| state.borrow_mut().native_failure = Some((N::MemoryObjectCreate, raw)));
+        assert_eq!(MemoryObject::create(4096).err().unwrap().raw(), raw);
+        STATE.with(|state| assert_eq!(state.borrow().calls.len(), 1));
+        reset();
+        let object = MemoryObject::create(4096).unwrap();
+        STATE.with(|state| state.borrow_mut().native_failure = Some((N::MemoryMap, raw)));
+        assert_eq!(object.map(0, 4096, 1).err().unwrap().raw(), raw);
+        drop(object);
+        STATE.with(|state| {
+            let state = state.borrow();
+            assert!(!state.calls.iter().any(|c| c.0 == N::MemoryUnmap));
+            assert_eq!(state.calls.last().unwrap(), &(N::HandleClose, vec![7]));
+        });
     }
 }
 mod handle {
@@ -1115,7 +1246,12 @@ fn raw_namespace_ownership_transfer_does_not_close_the_returned_reference() {
     assert_eq!(raw, 7);
     STATE.with(|state| assert_eq!(state.borrow().calls.len(), 1));
     handle::close(raw).unwrap();
-    STATE.with(|state| assert_eq!(state.borrow().calls.last().unwrap().0, syscall::SyscallNumber::HandleClose));
+    STATE.with(|state| {
+        assert_eq!(
+            state.borrow().calls.last().unwrap().0,
+            syscall::SyscallNumber::HandleClose
+        )
+    });
 }
 
 #[test]
