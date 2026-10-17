@@ -1,4 +1,5 @@
 /* Exercise retirement and the existing native launch/exec regression together. */
+#include "support/native_status.h"
 #define main socket_regression_main
 #include "native_posix_socket_pair.c"
 #undef main
@@ -14,7 +15,7 @@ int main(int argc, char **argv) {
                      "r"(fourth), "r"(fifth), "r"(sixth)
                    : "rcx", "r11", "memory");
   /* Raw native ABI errors are not newlib errno values (ENOSYS is 88 there). */
-  if ((int64_t)result != -38) {
+  if ((int64_t)result != MNU_NATIVE_UNSUPPORTED) {
     fprintf(stderr, "native-manifest-launch-retired: FAIL raw=%lld\n",
             (long long)(int64_t)result);
     return 1;

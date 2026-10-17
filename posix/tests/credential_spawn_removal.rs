@@ -21,7 +21,7 @@ fn credential_spawn_has_no_kernel_abi_dispatch_or_implementation() {
             .nth(1)
             .is_some_and(|value| value.trim().trim_end_matches(',') == "608")
     }));
-    assert!(dispatch.contains("_ => ENOSYS"));
+    assert!(dispatch.contains("_ => mnu_abi::status::Error::Unsupported.into_raw()"));
     // Native creation remains explicit, not a retired pathname ABI shim.
     assert!(dispatch.contains("exec::process_create_syscall(arg0, arg1, arg2)"));
 }

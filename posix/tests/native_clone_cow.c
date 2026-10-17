@@ -1,6 +1,7 @@
 /* Isolated Compositor-slot probe using its existing process.spawn authority.
  * All execution cloning uses newlib's AddressSpaceClone + ProcessCreate path.
  * Immediate source-TLB isolation is covered by native_snapshot_continuation.c. */
+#include "support/native_status.h"
 #include <stdint.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -34,7 +35,7 @@ static int64_t native3(uint64_t number, uint64_t a, uint64_t b, uint64_t c) {
 } while (0)
 
 int main(void) {
-    CHECK(native3(644 /* removed combined-clone ABI */, 0, 0, 0) == -38);
+    CHECK(native3(644 /* removed combined-clone ABI */, 0, 0, 0) == MNU_NATIVE_UNSUPPORTED);
     enum { CLOSE = 626, SPACE_CLONE = 679, RIGHTS_GET = 664,
            DUPLICATE = 627, SAME_OBJECT = 666, MEMORY_OBJECT_CREATE = 671, MEMORY_MAP = 582 };
     struct status { uint64_t id; uint32_t state, reserved; uint64_t code; } status;

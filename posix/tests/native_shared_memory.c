@@ -1,3 +1,4 @@
+#include "support/native_status.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -37,8 +38,8 @@ static uint64_t map(uint64_t handle, uint64_t size, uint64_t access, uint64_t of
 
 static int probe(void) {
     fprintf(stderr, "shared-memory: start\n");
-    /* Retired native entry, not newlib errno: unknown syscall is -38. */
-    if ((int64_t)native(585, 0, 0, 0, 0, 0, 0) != -38) return 52;
+    /* Retired native entry: no POSIX errno or compatibility fallback. */
+    if ((int64_t)native(585, 0, 0, 0, 0, 0, 0) != MNU_NATIVE_UNSUPPORTED) return 52;
     fprintf(stderr, "shared-memory: legacy entry retired\n");
     if ((int64_t)native(MEMORY_OBJECT_CREATE, 0, 0, 0, 0, 0, 0) !=
         INT64_C(-262139))

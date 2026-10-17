@@ -74,7 +74,7 @@ fn probe() -> Result<u64, String> {
             in("rsi") u64::MAX, in("rdx") 1u64, in("r10") 0u64,
             lateout("rcx") _, lateout("r11") _, options(nostack));
         }
-        if unknown as i64 != -38 {
+        if unknown != syscall::NativeError::Unsupported.into_raw() {
             return Err(format!("removed syscall returned {unknown:#x}"));
         }
     }

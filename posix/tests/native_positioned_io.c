@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "support/native_status.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -108,11 +109,11 @@ int main(void) {
     denied = native(676, 0, 0, 0, 0);
     CHECK(denied == -EPERM || denied == -EINVAL);
     fprintf(stderr, "positioned-io: native ProcessCreate rejects absent authorization and invalid metadata ok\n");
-    CHECK(native(565, 0, 0, 0, 0) == -38);
+    CHECK(native(565, 0, 0, 0, 0) == MNU_NATIVE_UNSUPPORTED);
     for (uint64_t number = 560; number <= 563; ++number) {
-        CHECK(native(number, 0, 0, 0, 0) == -38);
+        CHECK(native(number, 0, 0, 0, 0) == MNU_NATIVE_UNSUPPORTED);
     }
-    CHECK(native(569, 0, 0, 0, 0) == -38);
+    CHECK(native(569, 0, 0, 0, 0) == MNU_NATIVE_UNSUPPORTED);
     fprintf(stderr, "positioned-io: retired FileOpen/Close/Read/ReadDir ABI rejects calls ok\n");
     fprintf(stderr, "positioned-io: retired FileSeek ABI rejects calls ok\n");
     int64_t object = native(MEMORY_OBJECT_CREATE, 8192, 0, 0, 0);

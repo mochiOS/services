@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <sys/mman.h>
+#include "support/native_status.h"
 
 /* Historical numbers live only in this rejection test, not the public ABI. */
 static int64_t obsolete_translation(uint64_t address) {
@@ -14,9 +15,9 @@ int main(void) {
         MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
     if (page == MAP_FAILED) return 1;
     page[0] = 0x71;
-    if (obsolete_translation(0) != -38
-        || obsolete_translation(UINT64_MAX) != -38
-        || obsolete_translation((uint64_t)page) != -38) {
+    if (obsolete_translation(0) != MNU_NATIVE_UNSUPPORTED
+        || obsolete_translation(UINT64_MAX) != MNU_NATIVE_UNSUPPORTED
+        || obsolete_translation((uint64_t)page) != MNU_NATIVE_UNSUPPORTED) {
         fprintf(stderr, "physical-retirement: FAIL obsolete translation not rejected\n");
         return 2;
     }

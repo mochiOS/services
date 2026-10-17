@@ -42,7 +42,7 @@ fn pathname_manifest_launch_has_no_abi_dispatch_handler_or_argument_parser() {
             "kernel argv policy parser: {parser}"
         );
     }
-    assert!(dispatch.contains("_ => ENOSYS"));
+    assert!(dispatch.contains("_ => mnu_abi::status::Error::Unsupported.into_raw()"));
     assert!(dispatch.contains("exec::process_create_syscall(arg0, arg1, arg2)"));
     assert!(dispatch.contains("exec::process_image_replace_syscall(arg0, arg1, arg2, arg3, arg4)"));
 }
