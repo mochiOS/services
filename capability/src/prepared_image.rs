@@ -1,7 +1,6 @@
 //! Trusted launchers receive only the bytes authorized for this IPC caller.
 //! Neither filesystem discovery nor executable pathname policy enters mnu.
 
-use mnu_abi::EFBIG;
 use mochi_user_platform as platform;
 use platform::syscall::{EACCES, EINVAL, EIO, ENOENT, SysError};
 
@@ -31,7 +30,7 @@ pub(crate) fn prepare(
         crate::resolver::application_identity(&record.manifest, &record.manifest_path, read)?;
     let bytes = read(path)?;
     if bytes.len() > 64 * 1024 * 1024 {
-        return Err(SysError::from_raw(EFBIG as i64));
+        return Err(SysError::from_raw(mochios_posix_protocol::STATUS_EFBIG as i64));
     }
     let image = platform::memory_object::MemoryObject::create_resizable(bytes.len() as u64)?;
     let mut written = 0;

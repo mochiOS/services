@@ -232,6 +232,24 @@ mod client;
 mod server;
 
 #[test]
+fn oversized_image_uses_userspace_file_size_status_before_allocating_or_authorizing() {
+    fn oversized_read(_: &str) -> Result<Vec<u8>, syscall::SysError> {
+        event("read oversized");
+        Ok(vec![0; 64 * 1024 * 1024 + 1])
+    }
+    STATE.set(State::default());
+    assert_eq!(
+        server::prepare(&fixture(), 17, 2, "/image", oversized_read).err(),
+        Some(syscall::SysError(mochios_posix_protocol::STATUS_EFBIG as i64))
+    );
+    STATE.with_borrow(|state| {
+        assert!(state.events.contains(&"read oversized"));
+        assert!(!state.events.contains(&"allocate"));
+        assert!(!state.events.contains(&"authorize"));
+    });
+}
+
+#[test]
 fn image_preparation_requires_all_authenticated_authority_before_reading() {
     for denied in ["capabilities.manage", "fs.read.all", "process.spawn"] {
         STATE.set(State {
