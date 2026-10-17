@@ -20,7 +20,7 @@ pub(crate) fn prepare_execution_image(
 }
 
 pub(crate) fn errno(error: mochi_user_syscall::SysError) -> u64 {
-    error.errno().map_or(0, |errno| errno)
+    u64::from(crate::portal_status::failure_status(error.raw() as u64).unsigned_abs())
 }
 
 pub(crate) fn sys_error(errno: u64) -> mochi_user_syscall::SysError {
