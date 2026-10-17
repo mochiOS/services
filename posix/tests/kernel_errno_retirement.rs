@@ -9,6 +9,20 @@ fn migrated_file_size_status_is_not_part_of_the_kernel_abi() {
 }
 
 #[test]
+fn retired_data_and_message_errno_are_not_exported_by_native_layers() {
+    let abi = include_str!("../../../core/crates/abi/src/lib.rs");
+    let syscall = include_str!("../../../user/crates/syscall/src/lib.rs");
+    for name in ["ENODATA", "EMSGSIZE"] {
+        assert!(!abi.contains(&format!("pub const {name}:")));
+        assert!(
+            !syscall
+                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .any(|token| token == name)
+        );
+    }
+}
+
+#[test]
 fn kernel_implementation_does_not_import_or_select_posix_errno_identifiers() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/src");
     let forbidden = [
