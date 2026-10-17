@@ -277,7 +277,7 @@ impl HttpManager {
         {
             mochi_user_syscall::EACCES
         } else {
-            mochi_user_syscall::EBADF
+            mochios_net_device_protocol::STATUS_INVALID_STREAM as i64 as u64
         };
         Err(error(errno, HttpFailure::InvalidState))
     }

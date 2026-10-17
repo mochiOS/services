@@ -372,7 +372,7 @@ impl TlsManager {
         let errno = if self.sessions.iter().any(|session| session.handle == handle) {
             mochi_user_syscall::EACCES
         } else {
-            mochi_user_syscall::EBADF
+            mochios_net_device_protocol::STATUS_INVALID_STREAM as i64 as u64
         };
         Err(operation_error(errno, TlsFailure::InvalidState))
     }
