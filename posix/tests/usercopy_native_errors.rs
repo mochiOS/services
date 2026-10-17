@@ -3,6 +3,34 @@
 mod probe;
 
 #[test]
+fn obsolete_errno_copy_and_scalar_helpers_are_removed() {
+    let source = include_str!("../../../core/src/syscall/mod.rs");
+    for name in [
+        "copy_from_user",
+        "copy_to_user",
+        "read_user_u64",
+        "read_user_u32",
+        "read_user_i64",
+        "read_user_i32",
+        "read_user_u16",
+        "write_user_u64",
+        "write_user_u32",
+        "write_user_i32",
+        "write_user_u16",
+    ] {
+        assert!(!source.contains(&format!("pub fn {name}(")), "{name}");
+    }
+    assert!(
+        include_str!("../../../core/src/syscall/process.rs")
+            .contains("copy_from_user_native(name_ptr")
+    );
+    assert!(
+        include_str!("../../../core/src/syscall/upcall.rs")
+            .contains("copy_to_user_native(delivery.stack_top")
+    );
+}
+
+#[test]
 fn production_usercopy_preserves_fault_categories_and_retry_boundaries() {
     let abi = include_str!("../../../core/crates/abi/src/lib.rs");
     let cause = probe::between(abi, "pub enum MemoryFaultCause {", "\n}");
@@ -37,7 +65,6 @@ impl Default for State {fn default()->Self{Self{
     reads:0,writes:0,yields:0,audits:0,locked:false,
 }}}
 thread_local! {static STATE:RefCell<State>=RefCell::new(State::default());}
-const EFAULT:u64=(-14_i64)as u64;
 fn current_user_page_table()->Option<u64>{STATE.with_borrow(|s|s.root)}
 fn is_canonical_user_range(address:u64,len:u64)->bool{address!=0&&len!=0&&address.checked_add(len).is_some_and(|end|end<=1<<47)}
 fn last_syscall_snapshot()->(u64,[u64;6]){(699,[0;6])}
@@ -78,13 +105,13 @@ fn copy_into_current_root(_:u64,_:u64,_:&[u8])->result::Result<()>{STATE.with_bo
     ));
     program.push_str(probe::between(
         source,
-        "pub fn copy_from_user(",
+        "pub fn copy_from_user_native(",
         "/// Resident usercopy",
     ));
     program.push_str(probe::between(
         source,
-        "pub fn copy_to_user(",
-        "pub fn read_user_u64(",
+        "pub fn copy_to_user_native(",
+        "pub use types::*;",
     ));
     program.push_str(r#"
 fn main(){
@@ -126,8 +153,6 @@ fn main(){
     assert_eq!(copy_from_user_native(4096,&mut bytes),Err(Error::InvalidAddress));
     assert_eq!(copy_to_user_native(8192,&bytes),Err(Error::InvalidAddress));
     assert_eq!(copy_from_user_native(0,&mut []),Ok(()));assert_eq!(copy_to_user_native(0,&[]),Ok(()));
-    // The not-yet-migrated entry points keep their old result convention.
-    assert_eq!(copy_from_user(4096,&mut bytes),Err(EFAULT));assert_eq!(copy_to_user(8192,&bytes),Err(EFAULT));
     for address in [0,u64::MAX] {assert_eq!(fault_in_user_range(1,address,4,false),Err(Error::InvalidAddress));}
     STATE.with_borrow(|s|assert_eq!(s.reads+s.writes,0));
 }

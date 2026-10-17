@@ -103,7 +103,7 @@ fn main() {{
 fn native_read_and_fault_preparation_revalidate_the_retained_root() {
     let source = include_str!("../../../core/src/syscall/mod.rs");
     let read = source
-        .split("pub fn copy_from_user(")
+        .split("pub fn copy_from_user_native(")
         .nth(1)
         .unwrap()
         .split("fn fault_in_user_range(")

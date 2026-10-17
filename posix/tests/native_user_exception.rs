@@ -15,7 +15,7 @@ thread_local! {
     static SAVED:std::cell::Cell<Option<UserUpcallContext>>=const {std::cell::Cell::new(None)};
     static METADATA:std::cell::Cell<Option<(u64,u64)>>=const {std::cell::Cell::new(None)};
 }
-fn copy_to_user(address:u64, bytes:&[u8])->Result<(),()> {
+fn copy_to_user_native(address:u64, bytes:&[u8])->Result<(),()> {
     if MODE.with(|v|v.get())==4 {return Err(());}
     METADATA.with(|v|v.set(Some((address,u64::from_ne_bytes(bytes.try_into().unwrap())))));
     Ok(())
@@ -181,8 +181,6 @@ fn production_fault_causes_preserve_origin_instead_of_guessing_from_errno() {
     let abi = include_str!("../../../core/crates/abi/src/lib.rs");
     let mut program = String::from(
         r#"
-const ENOMEM:u64=(-12i64) as u64;
-const EAGAIN:u64=(-11i64) as u64;
 mod mem { pub mod vm_object {
     #[derive(Clone,Copy,Debug,PartialEq,Eq)]
     pub enum VmPageError { OutsideBacking, Operation(u64) }
@@ -209,12 +207,13 @@ fn main() {
     assert_eq!(MemoryFault::Unmapped.cause(),Unmapped);
     assert_eq!(MemoryFault::AccessDenied.cause(),AccessDenied);
     assert_eq!(MemoryFault::Backing(VmPageError::OutsideBacking).cause(),OutsideBacking);
-    for error in [(-5i64) as u64,(-22i64) as u64,(-13i64) as u64] {
+    // Legacy numeric errno values must not be interpreted as native fault
+    // categories. Only explicit native tags carry resource/retry semantics.
+    for error in [(-5i64) as u64,(-22i64) as u64,(-13i64) as u64,(-12i64) as u64,(-11i64) as u64] {
         assert_eq!(MemoryFault::Backing(VmPageError::Operation(error)).cause(),BackingFailure);
         assert_eq!(MemoryFault::Operation(error).cause(),Unresolved);
+        assert!(!MemoryFault::Operation(error).is_retryable());
     }
-    assert_eq!(MemoryFault::Operation(ENOMEM).cause(),ResourceUnavailable);
-    assert_eq!(MemoryFault::Backing(VmPageError::Operation(ENOMEM)).cause(),ResourceUnavailable);
     for (error,cause) in [(mnu_abi::status::Error::ResourceUnavailable,ResourceUnavailable),
         (mnu_abi::status::Error::BackingFailure,BackingFailure),
         (mnu_abi::status::Error::AccessDenied,AccessDenied)] {

@@ -58,7 +58,7 @@ fn live_cow_fault_and_usercopy_keep_root_locked_and_revalidate_identity() {
         .split("fn copy_into_current_root(")
         .nth(1)
         .unwrap()
-        .split("pub fn copy_to_user(")
+        .split("pub fn copy_to_user_native(")
         .next()
         .unwrap();
     assert!(copy.contains("with_process_mut"));
