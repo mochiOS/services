@@ -1487,13 +1487,14 @@ fn close_retired_signal_thread(thread_id: u64, thread: RegisteredSignalThread) -
     use mochi_user_platform as platform;
 
     if let Err(error) = platform::handle::close(thread.handle) {
-        if error.raw() != -(platform::syscall::EBADF as i64) {
-            platform::logln!(
-                "posix.service: retired thread handle close failed errno={}",
-                error.raw()
-            );
-            return false;
-        }
+        // A lifecycle observation does not discard our native reference.
+        // Keep ownership on every close failure; POSIX EBADF (of either sign)
+        // is not proof that this particular reference was released.
+        platform::logln!(
+            "posix.service: retired thread handle close failed errno={}",
+            error.raw()
+        );
+        return false;
     }
     let _ = platform::logger::write_status_fmt(format_args!(
         "posix.service: reclaimed signal thread pid={} tid={}\n",
