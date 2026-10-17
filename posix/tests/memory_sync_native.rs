@@ -17,7 +17,7 @@ extern crate self as mnu_abi;
 use status::Error;
 use std::sync::Arc;
 use std::cell::{{Cell,RefCell}};
-const SUCCESS:u64=0;const MEMORY_ACCESS_WRITE:u64=2;const MEMORY_SYNC_DEFERRED:u64=1;
+const SUCCESS:u64=0;const MEMORY_ACCESS_WRITE:u64=2;
 thread_local! {{
     static CONTEXT:Cell<bool>=const{{Cell::new(true)}};
     static PRESENT:Cell<bool>=const{{Cell::new(true)}};
@@ -25,6 +25,7 @@ thread_local! {{
     static IO:RefCell<Vec<(u64,u64,u64)>>=const{{RefCell::new(Vec::new())}};
     static FAILURE:Cell<Option<(u64,u64)>>=const{{Cell::new(None)}};
     static REPLACE:Cell<bool>=const{{Cell::new(false)}};
+    static REFRESH:Cell<bool>=const{{Cell::new(false)}};
     static PROCESS:RefCell<task::Process>=const{{RefCell::new(task::Process{{regions:Vec::new()}})}};
 }}
 fn page_align_up(value:u64)->Option<u64>{{value.checked_add(4095).map(|v|v&!4095)}}
@@ -32,8 +33,8 @@ fn is_user_range(start:u64,length:u64)->bool{{start>0&&start.checked_add(length)
 mod syscall {{pub mod security {{pub fn current_process_id()->Option<u64>{{crate::CONTEXT.get().then_some(7)}}}}}}
 mod mem {{#[path={plan:?}]pub mod range_plan;#[path={writeback:?}]pub mod writeback;
     pub mod writeback_worker {{
-        pub fn submit(pid:u64,_work:super::writeback::Batch<std::sync::Arc<crate::task::Object>>)->u64 {{
-            assert_eq!(pid,7);assert!(!crate::LOCKED.get());19
+        pub fn submit(pid:u64,_work:super::writeback::Batch<std::sync::Arc<crate::task::Object>>,refresh:bool)->u64 {{
+            assert_eq!(pid,7);assert!(!crate::LOCKED.get());crate::REFRESH.set(refresh);19
         }}
     }}
 }}
@@ -73,6 +74,11 @@ mod task {{
         plan = root.join("core/src/mem/range_plan.rs"),
         writeback = root.join("core/src/mem/writeback.rs"),
     );
+    probe::constants(
+        &mut program,
+        include_str!("../../../core/crates/abi/src/lib.rs"),
+        &["MEMORY_SYNC_DEFERRED", "MEMORY_SYNC_REFRESH"],
+    );
     program.push_str(probe::between(
         include_str!("../../../core/src/syscall/process.rs"),
         "pub fn memory_sync(",
@@ -81,7 +87,7 @@ mod task {{
     program.push_str(r#"
 fn reset(){
     CONTEXT.set(true);PRESENT.set(true);LOCKED.set(false);IO.with_borrow_mut(Vec::clear);
-    FAILURE.set(None);REPLACE.set(false);
+    FAILURE.set(None);REPLACE.set(false);REFRESH.set(false);
     PROCESS.with_borrow_mut(|p|p.regions=vec![
         task::Region{start:4096,end:Some(12288),offset:65536,shared:true,writable:true,object:Some(Arc::new(task::Object(1)))},
         task::Region{start:12288,end:Some(20480),offset:131072,shared:true,writable:true,object:Some(Arc::new(task::Object(2)))},
@@ -126,6 +132,10 @@ fn main(){
     reset();assert_eq!(memory_sync(8192,8192,MEMORY_SYNC_DEFERRED),19);no_io();
     reset();PROCESS.with_borrow_mut(|p|{p.regions.pop();});
     assert_eq!(memory_sync(4096,12288,MEMORY_SYNC_DEFERRED),Error::InvalidAddress.into_raw());no_io();
+    reset();assert_eq!(memory_sync(8192,8192,3),19);assert!(REFRESH.get());no_io();
+    reset();PROCESS.with_borrow_mut(|p|p.regions[1].writable=false);
+    assert_eq!(memory_sync(8192,8192,3),Error::AccessDenied.into_raw());
+    assert!(!REFRESH.get());no_io();
 }
 "#);
     probe::run(&program);

@@ -37,6 +37,8 @@ _Static_assert(sizeof(struct wait_item) == 24, "HandleWaitItem");
 static _Alignas(16) unsigned char stack[32768];
 static _Atomic uint64_t backing;
 static _Atomic unsigned allow_sync, entered, syncs, writes, failed;
+static _Atomic unsigned change_on_sync;
+static _Atomic unsigned char stored = 'a';
 void *memset(void *target, int byte, __SIZE_TYPE__ length) {
   volatile unsigned char *p = target;
   while (length--)
@@ -117,13 +119,15 @@ __attribute__((noreturn)) static void provider(void) {
       put64(response + 24, 4096);
       response[33] = 16;
       for (unsigned i = 0; i < 4096; ++i)
-        response[40 + i] = 'a';
+        response[40 + i] =
+            i ? 'a' : atomic_load_explicit(&stored, memory_order_acquire);
       length += 4096;
     } else if (opcode == 7) {
       CHECK(get64(request + 24), 0);
       CHECK((uint32_t)get64(request + 32), 4096);
-      if (request[48] != 'Q' && request[48] != 'R')
+      if (request[48] != 'Q' && request[48] != 'R' && request[48] != 'N')
         fail(__LINE__, request[48]);
+      atomic_store_explicit(&stored, request[48], memory_order_release);
       atomic_fetch_add_explicit(&writes, 1, memory_order_release);
       put64(response + 24, 4096);
     } else if (opcode == 8) {
@@ -132,6 +136,9 @@ __attribute__((noreturn)) static void provider(void) {
         native(YIELD, 0, 0, 0, 0, 0, 0);
       if (atomic_load_explicit(&failed, memory_order_acquire))
         put64(response + 8, (uint64_t)INT64_C(-5));
+      else if (atomic_exchange_explicit(&change_on_sync, 0,
+                                        memory_order_acq_rel))
+        atomic_store_explicit(&stored, 'N', memory_order_release);
       atomic_fetch_add_explicit(&syncs, 1, memory_order_release);
     } else
       fail(__LINE__, opcode);
@@ -172,6 +179,12 @@ __attribute__((used, noreturn)) static void probe_main(void) {
     fail(__LINE__, address);
   volatile unsigned char *p = (void *)(uintptr_t)address;
   CHECK(p[0], 'a');
+  int64_t private_address = native(MAP, 0, 4096, 3, 0, object, 0);
+  if (private_address <= 0)
+    fail(__LINE__, private_address);
+  volatile unsigned char *private_bytes = (void *)(uintptr_t)private_address;
+  CHECK(private_bytes[0], 'a');
+  private_bytes[0] = 'P';
   p[0] = 'Q';
   int64_t completion = submit(address);
   while (!atomic_load_explicit(&entered, memory_order_acquire))
@@ -207,12 +220,33 @@ __attribute__((used, noreturn)) static void probe_main(void) {
   atomic_store_explicit(&allow_sync, 1, memory_order_release);
   while (atomic_load_explicit(&syncs, memory_order_acquire) < 3)
     native(YIELD, 0, 0, 0, 0, 0, 0);
+  atomic_store_explicit(&change_on_sync, 1, memory_order_release);
+  completion = native(SYNC, address, 4096, 3, 0, 0, 0);
+  if (completion <= 0)
+    fail(__LINE__, completion);
+  wait_result(completion, 1, 0);
+  CHECK(native(CLOSE, completion, 0, 0, 0, 0, 0), 0);
+  CHECK(p[0], 'N'); /* old shared PTE/cache must not survive refresh */
+  CHECK(p[4095], 'a');
+  CHECK(private_bytes[0], 'P'); /* independent private/COW data survives */
+  p[0] = 'R';
+  atomic_store_explicit(&failed, 1, memory_order_release);
+  completion = native(SYNC, address, 4096, 3, 0, 0, 0);
+  if (completion <= 0)
+    fail(__LINE__, completion);
+  wait_result(completion, 2, (uint64_t)INT64_C(-5));
+  CHECK(native(CLOSE, completion, 0, 0, 0, 0, 0), 0);
+  CHECK(p[0], 'R'); /* failed refresh restores the original dirty mapping */
+  CHECK(private_bytes[0], 'P');
+  atomic_store_explicit(&failed, 0, memory_order_release);
+  CHECK(native(UNMAP, private_address, 4096, 0, 0, 0, 0), 0);
   CHECK(native(UNMAP, address, 4096, 0, 0, 0, 0), 0);
   CHECK(native(CLOSE, object, 0, 0, 0, 0, 0), 0);
   if (atomic_load_explicit(&writes, memory_order_acquire) < 3)
     fail(__LINE__, atomic_load(&writes));
   text("native-async-writeback: PASS pending, wake, success, opaque failure, "
-       "rights, close-before-completion\n");
+       "rights, close-before-completion, shared refresh, private preservation, "
+       "rollback\n");
   for (;;)
     native(YIELD, 0, 0, 0, 0, 0, 0);
 }

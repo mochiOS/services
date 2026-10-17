@@ -73,7 +73,9 @@ mod worker{{
 use super::*;
 use task::handle_table::{{HandleRights,KernelObject,ObjectHandleEntry}};
 use executor::Executor;
-type Work=writeback::Batch<Arc<Backing>>;
+use writeback::Batch;
+type VmObject=Backing;
+type Work=(writeback::Batch<Arc<Backing>>,bool);
 static EXECUTOR:Executor<Work,32>=Executor::new();
 "#,
         status = root.join("core/crates/abi/src/status.rs"),
@@ -86,25 +88,26 @@ static EXECUTOR:Executor<Work,32>=Executor::new();
     program.push_str(&source[source.find("pub(crate) fn submit(").unwrap()..]);
     program.push_str(r#"
 pub fn start(){EXECUTOR.install_worker(7).unwrap();}
-pub fn drain(){while EXECUTOR.run_one(|work|work.execute(|_,_,_|{assert!(!LOCKED.get());IO.set(IO.get()+1);Ok(())}),||{}){}}
+pub fn drain(){while EXECUTOR.run_one(|(work,_)|work.execute(|_,_,_|{assert!(!LOCKED.get());IO.set(IO.get()+1);Ok(())}),||{}){}}
+pub fn enqueue(process:u64,work:writeback::Batch<Arc<Backing>>)->u64{submit(process,work,false)}
 }
 fn work(drops:&Arc<AtomicUsize>)->writeback::Batch<Arc<Backing>>{writeback::Batch::new(vec![((Arc::new(Backing(drops.clone())),4096),8192)])}
 fn count()->usize{PROCESS.with_borrow(|p|p.table.entries.len())}
 fn main(){
     PROCESS.with_borrow_mut(|p|p.table.entries.reserve(40));
     let drops=Arc::new(AtomicUsize::new(0));
-    assert_eq!(worker::submit(3,work(&drops)),Error::NotReady.into_raw());
+    assert_eq!(worker::enqueue(3,work(&drops)),Error::NotReady.into_raw());
     assert_eq!((count(),WAKES.get(),IO.get(),drops.load(Ordering::SeqCst)),(0,0,0,1));
     worker::start();
     for allowance in [0,1]{
-        let work=work(&drops);FAIL_AFTER.set(Some(allowance));let result=worker::submit(3,work);FAIL_AFTER.set(None);
+        let work=work(&drops);FAIL_AFTER.set(Some(allowance));let result=worker::enqueue(3,work);FAIL_AFTER.set(None);
         assert_eq!(result,Error::ResourceUnavailable.into_raw());assert_eq!((count(),WAKES.get(),IO.get()),(0,0,0));
     }
-    PRESENT.set(false);assert_eq!(worker::submit(3,work(&drops)),Error::NotReady.into_raw());PRESENT.set(true);
-    FAIL_TABLE.set(true);assert_eq!(worker::submit(3,work(&drops)),Error::ResourceUnavailable.into_raw());FAIL_TABLE.set(false);
+    PRESENT.set(false);assert_eq!(worker::enqueue(3,work(&drops)),Error::NotReady.into_raw());PRESENT.set(true);
+    FAIL_TABLE.set(true);assert_eq!(worker::enqueue(3,work(&drops)),Error::ResourceUnavailable.into_raw());FAIL_TABLE.set(false);
     assert_eq!((count(),WAKES.get(),IO.get(),drops.load(Ordering::SeqCst)),(0,0,0,5));
-    for _ in 0..32{assert!(worker::submit(3,work(&drops))<4096);}
-    assert_eq!(worker::submit(3,work(&drops)),Error::ResourceUnavailable.into_raw());
+    for _ in 0..32{assert!(worker::enqueue(3,work(&drops))<4096);}
+    assert_eq!(worker::enqueue(3,work(&drops)),Error::ResourceUnavailable.into_raw());
     assert_eq!((count(),WAKES.get(),IO.get(),drops.load(Ordering::SeqCst)),(32,32,0,6));
     worker::drain();assert_eq!(IO.get(),32);assert_eq!(drops.load(Ordering::SeqCst),38);
     PROCESS.with_borrow(|p|for (_,entry) in &p.table.entries{let task::handle_table::KernelObject::Completion(receipt)=&entry.0;assert_eq!(receipt.result(),Some(Ok(())));});
