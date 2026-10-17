@@ -66,7 +66,7 @@ mod syscall{
     program.push_str(probe::between(
         include_str!("../../../core/src/syscall/handle.rs"),
         "pub(crate) fn object_native(",
-        "pub(crate) fn object(",
+        "pub(crate) fn object_with_rights(",
     ));
     program.push_str(r#"
 }}

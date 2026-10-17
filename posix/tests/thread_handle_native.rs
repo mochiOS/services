@@ -148,7 +148,7 @@ mod syscall {
     program.push_str(probe::between(
         include_str!("../../../core/src/syscall/handle.rs"),
         "pub(crate) fn object_native(",
-        "pub(crate) fn object(raw:",
+        "pub(crate) fn object_with_rights(",
     ));
     program.push_str("}\nmod upcall {use crate::{HandleRights,KernelObject,ObjectHandleEntry,ThreadUpcallError,SUCCESS};\n");
     program.push_str(probe::between(

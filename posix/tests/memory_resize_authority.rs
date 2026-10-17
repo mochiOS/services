@@ -66,7 +66,7 @@ mod task {
     program.push_str(probe::between(
         source,
         "pub fn memory_object_length(",
-        "pub(crate) fn object(raw:",
+        "pub(crate) fn object_with_rights(",
     ));
     program.push_str(
         r#"

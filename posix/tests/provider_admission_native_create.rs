@@ -29,18 +29,38 @@ thread_local! {
     static CREATED:Cell<usize>=const {Cell::new(0)};
     static INSERTS:Cell<usize>=const {Cell::new(0)};
     static LIVE:Cell<usize>=const {Cell::new(0)};
+    static LIVE_UPDATES:Cell<usize>=const {Cell::new(0)};
+    static PREPARED:Cell<usize>=const {Cell::new(0)};
+    static ADMITTED:Cell<bool>=const {Cell::new(false)};
     static PROCESS:RefCell<task::Process>=const {RefCell::new(task::Process(task::Table(None)))};
 }
 #[derive(Clone,Copy,Debug,PartialEq)]struct HandleRights(u64);
 impl HandleRights {
     const RECEIVE:Self=Self(8);const WAIT:Self=Self(16);const TRANSFER:Self=Self(1<<63);
+    const CONTROL:Self=Self(256);
     fn union(self,other:Self)->Self{Self(self.0|other.0)}
     fn from_bits(bits:u64)->Option<Self>{(bits&!3==0).then_some(Self(bits))}
 }
-enum KernelObject {IpcEndpoint{thread_id:u64,slot:u16,generation:u64},MemoryAdmission(Arc<ProviderAdmission>),Provider(Arc<ProviderObject>),Other}
+enum KernelObject {IpcEndpoint{thread_id:u64,slot:u16,generation:u64},MemoryAdmission(Arc<ProviderAdmission>),MemoryUpdate(Arc<SpinLock<ExtentTransaction>>),Provider(Arc<ProviderObject>),Other}
 struct ObjectHandleEntry(KernelObject,HandleRights);
 impl ObjectHandleEntry {fn new(object:KernelObject,rights:HandleRights)->Self{Self(object,rights)}}
-enum ObjectKey {Provider{endpoint_thread_id:u64,endpoint_slot:u16,endpoint_generation:u64,identity:u64}}
+#[derive(Clone,Copy,Debug,PartialEq)]enum ObjectKey {Provider{endpoint_thread_id:u64,endpoint_slot:u16,endpoint_generation:u64,identity:u64}}
+struct SpinLock<T>(T);impl<T> SpinLock<T>{fn new(value:T)->Self{Self(value)}}
+struct ExtentTransaction;
+impl ExtentTransaction {
+    fn prepare_provider(key:ObjectKey,old:u64,new:u64)->Result<Self,u64>{
+        assert_eq!(key,ObjectKey::Provider{endpoint_thread_id:119,endpoint_slot:2,endpoint_generation:8,identity:77});
+        assert_eq!((old,new),(10,20));PREPARED.set(PREPARED.get()+1);
+        if MODE.get()==6{return Err(Error::BackingFailure.into_raw());}
+        LIVE_UPDATES.set(LIVE_UPDATES.get()+1);
+        if MODE.get()==7{FAIL.store(true,Ordering::Relaxed);}
+        Ok(Self)
+    }
+    fn prepare_admitted(key:ObjectKey,old:u64,new:u64)->Result<Self,u64>{
+        ADMITTED.set(true);Self::prepare_provider(key,old,new)
+    }
+}
+impl Drop for ExtentTransaction{fn drop(&mut self){LIVE_UPDATES.set(LIVE_UPDATES.get()-1);}}
 struct ProviderAdmission;
 impl ProviderAdmission {fn new(key:ObjectKey)->Result<Self,Error>{
     let ObjectKey::Provider{endpoint_thread_id,endpoint_slot,endpoint_generation,identity}=key;
@@ -52,6 +72,15 @@ impl ProviderAdmission {fn new(key:ObjectKey)->Result<Self,Error>{
     Ok(Self)
 }}
 impl Drop for ProviderAdmission {fn drop(&mut self){LIVE.set(LIVE.get()-1);}}
+impl ProviderAdmission {fn acquire(&self,key:ObjectKey)->Result<ObjectKey,Error>{
+    if MODE.get()==24{Err(Error::NotReady)}else{Ok(key)}
+}}
+fn object_native(raw:u64,rights:HandleRights)->Result<KernelObject,Error>{
+    assert_eq!(rights,HandleRights::WAIT);assert_eq!(raw,11);
+    match MODE.get(){20=>return Err(Error::AccessDenied),21=>return Err(Error::InvalidArgument),
+        22=>return Ok(KernelObject::Other),23=>return Err(Error::NotReady),_=>{}}
+    LIVE.set(LIVE.get()+1);Ok(KernelObject::MemoryAdmission(Arc::new(ProviderAdmission)))
+}
 struct ProviderObject;
 impl ProviderObject {fn new(thread:u64,slot:u16,generation:u64,identity:u64)->Result<Self,Error>{
     assert_eq!((thread,slot,generation,identity),(119,2,8,77));
@@ -72,6 +101,8 @@ mod task {
         crate::INSERTS.set(crate::INSERTS.get()+1);
         if matches!(&entry.0,crate::KernelObject::MemoryAdmission(_)){
             assert_eq!(entry.1,crate::HandleRights::WAIT.union(crate::HandleRights::TRANSFER));
+        }else if matches!(&entry.0,crate::KernelObject::MemoryUpdate(_)){
+            assert_eq!(entry.1,crate::HandleRights::CONTROL);
         }else{assert_eq!(entry.1.0,1);}
         assert!(self.0.is_none());
         if crate::MODE.get()==8{return None;}
@@ -113,11 +144,11 @@ mod syscall {
         "pub(crate) fn resolve_provider_endpoint_native(",
         "fn resolve_call_destination(",
     ));
-    program.push_str("\n}}\nmod production {use crate::{mnu_abi,ObjectKey,ProviderAdmission,ProviderObject,Arc,Error,HandleRights,KernelObject,ObjectHandleEntry};\n");
+    program.push_str("\n}}\nmod production {use crate::{mnu_abi,ObjectKey,ProviderAdmission,ProviderObject,ExtentTransaction,SpinLock,Arc,Error,HandleRights,KernelObject,ObjectHandleEntry};\n");
     program.push_str(probe::between(
         include_str!("../../../core/src/syscall/handle/memory_update.rs"),
         "fn provider_key(",
-        "pub fn create(endpoint:",
+        "pub(super) fn admission_endpoint(",
     ));
     program.push_str(probe::between(
         include_str!("../../../core/src/syscall/handle.rs"),
@@ -175,6 +206,36 @@ fn main(){
     assert_eq!(production::provider_object_create(7,77,1),31);
     PROCESS.with_borrow_mut(|p|p.0.0=None);
     assert_eq!(LIVE.get(),0);
+    // Private update creation uses the same native authority, including a
+    // caller-held WAIT admission. No failed operation publishes an owner.
+    for admission in [0,11]{
+        for (mode,error,prepared,inserts) in [
+            (1,Error::NotReady,0,0),(2,Error::AccessDenied,0,0),
+            (3,Error::InvalidArgument,0,0),(4,Error::InvalidArgument,0,0),
+            (5,Error::InvalidArgument,0,0),(6,Error::BackingFailure,1,0),
+            (7,Error::ResourceUnavailable,1,0),(8,Error::ResourceUnavailable,1,1),
+            (9,Error::NotReady,1,0),
+        ]{
+            MODE.set(mode);PREPARED.set(0);INSERTS.set(0);
+            assert_eq!(production::create(7,77,10,20,admission),error.into_raw());
+            assert_eq!((PREPARED.get(),INSERTS.get()),(prepared,inserts));
+            assert_eq!((LIVE.get(),LIVE_UPDATES.get()),(0,0));assert!(!FAIL.load(Ordering::Relaxed));
+            PROCESS.with_borrow(|p|assert!(p.0.0.is_none()));
+        }
+    }
+    for (mode,error) in [(20,Error::AccessDenied),(21,Error::InvalidArgument),
+        (22,Error::InvalidArgument),(23,Error::NotReady),(24,Error::NotReady)]{
+        MODE.set(mode);PREPARED.set(0);INSERTS.set(0);
+        assert_eq!(production::create(7,77,10,20,11),error.into_raw());
+        assert_eq!((PREPARED.get(),INSERTS.get(),LIVE.get(),LIVE_UPDATES.get()),(0,0,0,0));
+    }
+    MODE.set(0);LOOKUPS.set(0);assert_eq!(production::create(7,0,10,20,11),Error::InvalidArgument.into_raw());
+    assert_eq!(LOOKUPS.get(),0);
+    for admission in [0,11]{
+        ADMITTED.set(false);assert_eq!(production::create(7,77,10,20,admission),31);
+        assert_eq!(ADMITTED.get(),admission!=0);assert_eq!(LIVE_UPDATES.get(),1);assert_eq!(LIVE.get(),0);
+        PROCESS.with_borrow_mut(|p|p.0.0=None);assert_eq!(LIVE_UPDATES.get(),0);
+    }
 }
 "#,
     );
