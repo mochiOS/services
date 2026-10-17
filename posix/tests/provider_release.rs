@@ -18,7 +18,7 @@ fn production_release_owner_queue_and_retry_survive_allocation_denial() {
     let begin = handle
         .find("pub(crate) fn flush_provider_releases()")
         .unwrap();
-    let end = handle[begin..].find("\nfn current_process()").unwrap() + begin;
+    let end = handle[begin..].find("\n}\n").unwrap() + begin + 3;
     let mut program = String::from(
         r#"
 #![feature(allocator_api)]
@@ -45,7 +45,9 @@ mod interrupt {pub mod spinlock {
     pub struct SpinLock<T>(std::sync::Mutex<T>);
     impl<T> SpinLock<T>{
         pub const fn new(value:T)->Self{Self(std::sync::Mutex::new(value))}
-        pub fn lock(&self)->std::sync::MutexGuard<'_,T>{self.0.lock().unwrap()}
+        pub fn lock(&self)->std::sync::MutexGuard<'_,T>{
+            self.0.try_lock().expect("recursive provider cleanup lock")
+        }
         pub fn try_lock(&self)->Option<std::sync::MutexGuard<'_,T>>{self.0.try_lock().ok()}
     }
 }}
@@ -89,9 +91,38 @@ mod task {
             root.join("core/src/task/deferred.rs")
         ),
     );
-    program.push_str(table);
+    // Inject only the concurrent final-close edge immediately after the real
+    // Weak::upgrade. Registry decisions and ProviderObject::drop stay intact.
+    program.push_str(&table.replace(".and_then(Weak::upgrade)", ".and_then(racing_upgrade)"));
     program.push_str(
         r#"
+        static LAST_OWNER:std::sync::Mutex<Option<Arc<ProviderObject>>>=std::sync::Mutex::new(None);
+        fn racing_upgrade(weak:&Weak<ProviderObject>)->Option<Arc<ProviderObject>>{
+            let upgraded=weak.upgrade();
+            let owner=LAST_OWNER.lock().unwrap().take();
+            drop(owner);
+            upgraded
+        }
+        pub fn verify_registration_final_close(){
+            let owner=Arc::new(ProviderObject::new(31,4,8,50000).unwrap());
+            assert!(register_provider_object(&owner));
+            let duplicate=Arc::new(ProviderObject::new(31,4,8,50000).unwrap());
+            *LAST_OWNER.lock().unwrap()=Some(owner);
+            // The upgraded temporary becomes the only strong reference while
+            // the duplicate registration still holds the registry lock.
+            assert!(!register_provider_object(&duplicate));
+            assert!(provider_object(31,4,8,50000).is_none());
+            drop(duplicate);
+            let mut releases=take_provider_releases();
+            assert_eq!(releases.pop().unwrap().value().object_id,50000);
+            assert!(releases.pop().is_none());
+            let replacement=Arc::new(ProviderObject::new(31,4,8,50000).unwrap());
+            assert!(register_provider_object(&replacement));
+            drop(replacement);
+            let mut releases=take_provider_releases();
+            assert_eq!(releases.pop().unwrap().value().object_id,50000);
+            assert!(releases.pop().is_none());
+        }
     }
 }
 mod syscall {pub const ENOMEM:u64=(-12i64) as u64;pub mod ipc {
@@ -238,6 +269,7 @@ fn main(){
     DENY.store(false,Ordering::Relaxed);
     flush::verify_gate_allocations();
     deferred_cleanup_probe::verify();
+    h::verify_registration_final_close();
 }
 
 "#);
