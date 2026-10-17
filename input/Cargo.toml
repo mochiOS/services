@@ -21,3 +21,8 @@ path = "src/main.rs"
 test = false
 bench = false
 harness = false
+
+[[test]]
+name = "native_ime_load"
+path = "../posix/tests/native_ime_load.rs"
+harness = false
