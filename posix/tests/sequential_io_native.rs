@@ -71,7 +71,7 @@ extern crate self as mnu_abi;
 mod util{{#[path={storage:?}]pub mod object_snapshot;}}
 use status::Error;
 use std::cell::Cell;
-const SUCCESS:u64=0;const ENOSYS:u64=(-38i64)as u64;const ENOTSUP:u64=(-95i64)as u64;
+const SUCCESS:u64=0;
 thread_local!{{
     static LOCKED:Cell<bool>=const{{Cell::new(false)}};
     static IDENTITY:Cell<bool>=const{{Cell::new(false)}};
@@ -94,7 +94,7 @@ unsafe impl std::alloc::GlobalAlloc for Allocator{{
 #[global_allocator]static ALLOCATOR:Allocator=Allocator;
 struct ProviderObject{{object_id:u64}}
 fn provider_cache_identity(_: &ProviderObject)->Result<Option<u64>,u64>{{Ok(IDENTITY.get().then_some(77))}}
-fn provider_read_shared(_: &ProviderObject,_:u64,_:u64,_:usize)->u64{{panic!("not the inline read path")}}
+fn provider_read_shared(_: &ProviderObject,_:u64,_:u64,_:usize)->Option<u64>{{panic!("not the inline read path")}}
 mod mem{{pub mod vm_object{{
     pub struct Guard;
     impl Drop for Guard{{fn drop(&mut self){{assert!(crate::LOCKED.replace(false));}}}}

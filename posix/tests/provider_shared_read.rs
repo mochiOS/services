@@ -70,7 +70,11 @@ fn shared_read_reply_reports_count_and_position_not_contents() {
                 ..reply
             }
             .encode(&[], &mut bytes),
-            Err(DecodeError::InvalidFields)
+            if count == 0 {
+                Ok(RESPONSE_HEADER_LEN)
+            } else {
+                Err(DecodeError::InvalidFields)
+            }
         );
     }
     let failed = ResponseHeader {
@@ -84,5 +88,25 @@ fn shared_read_reply_reports_count_and_position_not_contents() {
     assert_eq!(
         ResponseHeader::decode(&bytes[..length]),
         Ok((failed, &[][..]))
+    );
+}
+
+#[test]
+fn empty_success_declines_transport_but_does_not_encode_eof_or_a_byte_count() {
+    let reply = ResponseHeader {
+        opcode: OP_READ_SHARED,
+        object_id: 7,
+        status: 0,
+        value: 0,
+        data_length: 0,
+    };
+    let mut bytes = [0; RESPONSE_HEADER_LEN];
+    assert_eq!(reply.encode(&[], &mut bytes), Ok(RESPONSE_HEADER_LEN));
+    assert_eq!(ResponseHeader::decode(&bytes), Ok((reply, &[][..])));
+    // A provider cannot claim consumed bytes while requesting inline retry.
+    bytes[24..32].copy_from_slice(&1u64.to_le_bytes());
+    assert_eq!(
+        ResponseHeader::decode(&bytes),
+        Err(DecodeError::InvalidFields)
     );
 }
