@@ -48,12 +48,12 @@ unsafe impl std::alloc::GlobalAlloc for Allocator{{
 #[derive(Debug,PartialEq)]struct HandleRights(bool);
 impl HandleRights{{const READ:Self=Self(false);const WRITE:Self=Self(true);}}
 struct ProviderObject;struct Memory;struct Snapshot;
-enum KernelObject{{Provider(ProviderObject),VmObject(Memory),HandleSnapshot(Snapshot),Other}}
+enum KernelObject{{Provider(ProviderObject),VmObject(Memory),HandleSnapshot(Snapshot),Completion(Snapshot),Other}}
 fn object_native(raw:u64,right:HandleRights)->Result<KernelObject,Error>{{
     assert_eq!(right,HandleRights(WRITE.get()));
     if let Some(error)=ADMISSION.get(){{return Err(error);}}
     match raw{{1=>Ok(KernelObject::VmObject(Memory)),2=>Ok(KernelObject::Provider(ProviderObject)),
-        3=>Ok(KernelObject::HandleSnapshot(Snapshot)),_=>Ok(KernelObject::Other)}}
+        3=>Ok(KernelObject::HandleSnapshot(Snapshot)),5=>Ok(KernelObject::Completion(Snapshot)),_=>Ok(KernelObject::Other)}}
 }}
 fn backend(position:u64,length:usize)->Result<usize,u64>{{
     POSITIONS.with_borrow_mut(|p|p.push(position));
@@ -124,7 +124,7 @@ fn invoke(raw:u64,pointer:u64,length:u64,offset:u64)->u64{
 fn main(){
     let chunk=provider::MAX_DATA_LEN as u64;
     for write in [false,true]{
-        for raw in [1,2,3].into_iter().filter(|raw|!write||*raw!=3){
+        for raw in [1,2,3,5].into_iter().filter(|raw|!write||![3,5].contains(raw)){
             reset(write);assert_eq!(invoke(raw,4096,chunk+3,81),chunk+3);
             POSITIONS.with_borrow(|p|assert_eq!(p,&[81,81+chunk]));
             assert_eq!(COPIES.get(),2);assert!(!LOCKED.get());
@@ -165,6 +165,7 @@ fn main(){
         reset(write);IDENTITY.set(false);assert_eq!(invoke(2,1,8,0),8);assert!(!LOCKED.get());
     }
     reset(true);assert_eq!(invoke(3,1,8,0),Error::InvalidArgument.into_raw());
+    reset(true);assert_eq!(invoke(5,1,8,0),Error::InvalidArgument.into_raw());
 }
 "#);
     probe::run(&program);

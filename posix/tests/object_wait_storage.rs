@@ -96,6 +96,15 @@ fn object_native(raw:u64,_:HandleRights)->Result<KernelObject,Error> {
 fn provider_endpoint(_: &ProviderObject)->syscall::ipc::IpcEndpoint{syscall::ipc::IpcEndpoint(4)}
 mod mem {pub mod vm_object{pub struct ProviderAdmission;}}
 mod task {
+    pub mod owned_executor {
+        #[derive(Clone)]pub struct Receipt;
+        pub struct Subscription(u64);
+        impl Drop for Subscription {fn drop(&mut self){crate::remove(32)}}
+        impl Receipt {pub fn subscribe(&self,thread:u64)->Result<Option<Subscription>,crate::Error>{
+            if !crate::stage(){return Err(crate::Error::ResourceUnavailable);}
+            crate::add(32);Ok(Some(Subscription(thread)))
+        }}
+    }
     pub type ThreadId=u64;
     pub type ProcessId=u64;
     pub struct FileHandle;
@@ -116,8 +125,8 @@ mod syscall {
             bytes[8..].copy_from_slice(&crate::GUARD_EXPECTED.get().to_ne_bytes());
             return Ok(());
         }
-        let items:[crate::HandleWaitItem;5]=std::array::from_fn(|index|crate::HandleWaitItem{
-            handle:index as u32+1,interests:1,..Default::default()
+        let items:[crate::HandleWaitItem;6]=std::array::from_fn(|index|crate::HandleWaitItem{
+            handle:if pointer==3 {6} else {index as u32+1},interests:1,..Default::default()
         });
         let source=unsafe{std::slice::from_raw_parts(items.as_ptr().cast::<u8>(),std::mem::size_of_val(&items))};
         bytes.copy_from_slice(&source[..bytes.len()]);Ok(())
@@ -182,6 +191,8 @@ mod memory_update {
 }
 mod handle {
 use crate::*;
+trait ThreadNumber{fn as_u64(self)->u64;}
+impl ThreadNumber for u64{fn as_u64(self)->u64{self}}
 "#);
     program.push_str(probe::between(
         handle,
@@ -196,7 +207,8 @@ fn wait_item_signal(item:&mut HandleWaitItem,source:&WaitSource)->Result<(WaitTa
     let target=match item.handle {
         1=>WaitTarget::Process(1),2=>WaitTarget::IpcEndpoint(syscall::ipc::IpcEndpoint(2)),
         3=>WaitTarget::Stream(FILE.get().unwrap().clone()),4=>WaitTarget::Provider(PROVIDER.get().unwrap().clone()),
-        5=>WaitTarget::MemoryAdmission(ADMISSION.get().unwrap().clone()),_=>unreachable!(),
+        5=>WaitTarget::MemoryAdmission(ADMISSION.get().unwrap().clone()),
+        6=>WaitTarget::Completion(task::owned_executor::Receipt),_=>unreachable!(),
     };
     item.observed=u64::from(READY.get());Ok((target,READY.get()))
 }
@@ -225,9 +237,8 @@ fn reset(){
 fn main(){
     ADMISSION.set(Arc::new(mem::vm_object::ProviderAdmission)).ok().unwrap();
     FILE.set(Arc::new(task::FileHandle)).ok().unwrap();PROVIDER.set(Arc::new(ProviderObject)).ok().unwrap();
-    // Eight actual allocation sites: items, three explicit registries,
-    // endpoint observations, admission guards, identity sources and targets.
-    for index in 0..8 {
+    // Nine allocation sites, including nonzero-sized completion guards.
+    for index in 0..9 {
         reset();FAIL.store(index,Ordering::Relaxed);
         let result=handle::wait_many(1,5,100,0);
         FAIL.store(-1,Ordering::Relaxed);
@@ -244,7 +255,7 @@ fn main(){
     reset();FAIL_SCAN.set(6);assert_eq!(handle::wait_many(1,5,100,0),EINVAL);clean();
     reset();let before=ALLOCS.load(Ordering::Relaxed);
     assert_eq!(handle::wait_many(1,5,100,0),0);
-    assert_eq!(ALLOCS.load(Ordering::Relaxed)-before,8,"retry must reuse reserved storage");
+    assert_eq!(ALLOCS.load(Ordering::Relaxed)-before,9,"retry must reuse reserved storage");
     assert_eq!(SLEEPS.get(),1);clean();
     reset();COPY_FAILURE.set(true);assert_eq!(handle::wait_many(1,5,100,0),Error::InvalidAddress.into_raw());clean();
     reset();UPCALL.set(true);assert_eq!(handle::wait_many(1,5,100,0),Error::NotReady.into_raw());clean();
@@ -288,6 +299,15 @@ fn main(){
     reset();GUARD_VALUE.set(6);
     assert_eq!(handle::wait_many(1,5,100,2),Error::NotReady.into_raw());
     assert_eq!(GUARD_COPIES.get(),1);assert_eq!(SLEEPS.get(),0);clean();
+    reset();assert_eq!(handle::wait_many(3,1,100,0),0);clean();
+    for stage in [1,2] {
+        reset();FAIL_STAGE.set(stage);
+        assert_eq!(handle::wait_many(3,1,100,0),Error::ResourceUnavailable.into_raw());clean();
+    }
+    reset();FAIL_SCAN.set(2);
+    assert_eq!(handle::wait_many(3,1,100,0),EINVAL);clean();
+    reset();WRITE_ERROR.set(Some(Error::InvalidAddress));
+    assert_eq!(handle::wait_many(3,1,100,0),Error::InvalidAddress.into_raw());clean();
 }
 "#);
     probe::run(&program);

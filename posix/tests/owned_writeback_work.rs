@@ -5,6 +5,8 @@
 extern crate alloc;
 extern crate self as mnu_abi;
 
+#[path = "../../../core/crates/abi/src/completion.rs"]
+pub mod completion;
 #[path = "../../../core/crates/abi/src/status.rs"]
 pub mod status;
 #[path = "../../../core/src/task/owned_work.rs"]
@@ -29,6 +31,23 @@ thread_local! {
     static DENY:Cell<bool>=const{Cell::new(false)};
     static LOCKED:Cell<bool>=const{Cell::new(false)};
     static FAIL_AFTER:Cell<Option<usize>>=const{Cell::new(None)};
+    static WAKES:std::cell::RefCell<Vec<u64>>=const{std::cell::RefCell::new(Vec::new())};
+}
+mod task {
+    pub struct ThreadQueue;
+    impl ThreadQueue {
+        pub const MAX_THREADS: usize = 64;
+    }
+    pub struct ThreadId(u64);
+    impl ThreadId {
+        pub fn from_u64(id: u64) -> Self {
+            Self(id)
+        }
+    }
+    pub fn wake_registered_waiter(thread: ThreadId) {
+        assert!(!crate::LOCKED.get(), "wakeup under result or queue lock");
+        crate::WAKES.with_borrow_mut(|wakes| wakes.push(thread.0));
+    }
 }
 // Exercise the production executor with exclusion that detects allocation,
 // destruction, I/O and reentrant callbacks inside its critical sections.
@@ -246,6 +265,101 @@ fn concurrent_reader_sees_pending_until_worker_finishes() {
     });
     assert_eq!(receipt.result(), Some(Err(u64::MAX)));
     assert!(executor.submit(75, |_| {}).is_ok());
+}
+
+#[test]
+fn completion_subscriptions_are_bounded_refcounted_and_removed_on_drop() {
+    let executor = executor::Executor::<(), 1>::new();
+    executor.install_worker(1).unwrap();
+    let receipt = executor.submit((), |_| {}).ok().unwrap();
+    assert!(receipt.is_same(&receipt.clone()));
+    assert!(matches!(receipt.subscribe(0), Err(Error::InvalidArgument)));
+    let mut subscriptions = Vec::new();
+    for thread in 1..=64 {
+        subscriptions.push(receipt.subscribe(thread).unwrap().unwrap());
+    }
+    assert!(matches!(
+        receipt.subscribe(65),
+        Err(Error::ResourceUnavailable)
+    ));
+    let duplicate = receipt.subscribe(1).unwrap().unwrap();
+    drop(subscriptions.remove(0));
+    // Dropping the first registration does not remove its duplicate.
+    assert!(matches!(
+        receipt.subscribe(65),
+        Err(Error::ResourceUnavailable)
+    ));
+    drop(duplicate);
+    let replacement = receipt.subscribe(65).unwrap().unwrap();
+    // Cancelled waiters must not be notified; reusing a slot is safe.
+    drop(subscriptions);
+    WAKES.with_borrow_mut(Vec::clear);
+    assert!(executor.run_one(|_| Err(0), || {}));
+    WAKES.with_borrow(|wakes| assert_eq!(wakes.as_slice(), [65]));
+    assert!(receipt.subscribe(66).unwrap().is_none());
+    drop(replacement);
+    assert_eq!(receipt.result(), Some(Err(0)));
+}
+
+#[test]
+fn completion_record_is_read_only_positioned_and_preserves_failure_zero() {
+    for result in [
+        Ok(()),
+        Err(0),
+        Err(u64::MAX),
+        Err(Error::BackingFailure.into_raw()),
+    ] {
+        let executor = executor::Executor::<(), 1>::new();
+        executor.install_worker(1).unwrap();
+        let receipt = executor.submit((), |_| {}).ok().unwrap();
+        let mut bytes = [0xff; 20];
+        assert_eq!(receipt.read_at(0, &mut bytes), 16);
+        assert_eq!(&bytes[..16], &[0; 16]);
+        assert_eq!(&bytes[16..], &[0xff; 4]);
+        assert!(executor.run_one(|_| result, || {}));
+        assert_eq!(receipt.read_at(0, &mut bytes), 16);
+        let expected_phase = if result.is_ok() {
+            completion::SUCCEEDED
+        } else {
+            completion::FAILED
+        };
+        assert_eq!(&bytes[..8], &expected_phase.to_le_bytes());
+        assert_eq!(&bytes[8..16], &result.err().unwrap_or(0).to_le_bytes());
+        let mut tail = [0; 8];
+        assert_eq!(receipt.read_at(8, &mut tail), 8);
+        assert_eq!(&tail, &bytes[8..16]);
+        assert_eq!(receipt.read_at(16, &mut tail), 0);
+        assert_eq!(receipt.read_at(u64::MAX, &mut tail), 0);
+        assert_eq!(receipt.read_at(0, &mut []), 0);
+    }
+}
+
+#[test]
+fn completion_racing_subscription_is_either_observed_or_notified() {
+    for _ in 0..100 {
+        let executor = executor::Executor::<(), 1>::new();
+        executor.install_worker(1).unwrap();
+        let receipt = executor.submit((), |_| {}).ok().unwrap();
+        let start = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                WAKES.with_borrow_mut(Vec::clear);
+                start.wait();
+                assert!(executor.run_one(|_| Err(0), || {}));
+                WAKES.with_borrow(Clone::clone)
+            });
+            start.wait();
+            let subscription = receipt.subscribe(41).unwrap();
+            let wakes = worker.join().unwrap();
+            if subscription.is_some() {
+                assert_eq!(wakes, [41]);
+            } else {
+                assert!(wakes.is_empty());
+            }
+            assert_eq!(receipt.result(), Some(Err(0)));
+            drop(subscription);
+        });
+    }
 }
 #[global_allocator]
 static ALLOCATOR: Allocator = Allocator;

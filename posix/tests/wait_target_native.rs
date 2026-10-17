@@ -30,6 +30,7 @@ use status::Error;
     MemoryAdmission(Arc<mem::vm_object::ProviderAdmission>),File(Arc<task::FileHandle>),
     Provider(Arc<ProviderObject>),Thread(u64),VmObject(Arc<()>),
     MemoryUpdate(Arc<()>),AddressSpace(Arc<()>),HandleSnapshot(Arc<()>),Other,
+    Completion(task::owned_executor::Receipt),
 }
 struct Process{exit:bool}impl Process{fn id(&self)->u64{7}fn is_exited(&self)->bool{self.exit}}
 struct ProviderObject{signals:u64}impl ProviderObject{fn signals(&self)->u64{self.signals}}
@@ -49,6 +50,13 @@ fn object_native(raw:u64,rights:HandleRights)->Result<KernelObject,Error>{
 fn provider_endpoint(_: &ProviderObject)->syscall::ipc::IpcEndpoint{endpoint()}
 fn endpoint()->syscall::ipc::IpcEndpoint{syscall::ipc::IpcEndpoint{thread_id:7,slot:0,generation:9}}
 mod task{
+    pub mod owned_executor {
+        #[derive(Clone)]pub struct Receipt(pub std::sync::Arc<Option<Result<(),u64>>>);
+        impl Receipt {
+            pub fn is_same(&self,other:&Self)->bool{std::sync::Arc::ptr_eq(&self.0,&other.0)}
+            pub fn result(&self)->Option<Result<(),u64>>{*self.0}
+        }
+    }
     pub type ProcessId=u64;pub struct FileHandle;
     #[derive(Clone,Copy)]pub struct ThreadId(pub u64);
     impl ThreadId{pub fn as_u64(self)->u64{self.0}}
@@ -119,6 +127,7 @@ fn main(){
         KernelObject::File(Arc::new(task::FileHandle)),
         KernelObject::Provider(Arc::new(ProviderObject{signals:2})),
         KernelObject::MemoryAdmission(Arc::new(mem::vm_object::ProviderAdmission(2))),
+        KernelObject::Completion(task::owned_executor::Receipt(Arc::new(None))),
     ];
     let replacements=[
         KernelObject::Process(Arc::new(Process{exit:false})),
@@ -126,6 +135,7 @@ fn main(){
         KernelObject::File(Arc::new(task::FileHandle)),
         KernelObject::Provider(Arc::new(ProviderObject{signals:2})),
         KernelObject::MemoryAdmission(Arc::new(mem::vm_object::ProviderAdmission(2))),
+        KernelObject::Completion(task::owned_executor::Receipt(Arc::new(None))),
     ];
     for (original,replacement) in originals.into_iter().zip(replacements) {
         let source=WaitSource::capture(original.clone());
@@ -170,6 +180,15 @@ fn main(){
         failure(item(HANDLE_SIGNAL_READABLE),Some(&weak),error);
     }
     ERROR.set(None);assert_eq!(STREAM_CALLS.get(),0);
+    for result in [None,Some(Ok(())),Some(Err(0)),Some(Err(u64::MAX))] {
+        set(KernelObject::Completion(task::owned_executor::Receipt(Arc::new(result))));
+        let mut query=item(HANDLE_SIGNAL_READABLE);
+        assert!(matches!(wait_item_signal(&mut query,None),Ok((WaitTarget::Completion(_),ready)) if ready==result.is_some()));
+        assert_eq!(query.observed,if result.is_some(){HANDLE_SIGNAL_READABLE}else{0});
+        failure(item(HANDLE_SIGNAL_WRITABLE),None,Error::InvalidArgument);
+        query.minimum_write_bytes=1;failure(query,None,Error::InvalidArgument);
+    }
+    set(KernelObject::Other);
     failure(item(0),None,Error::InvalidArgument);
     failure(item(HANDLE_SIGNAL_READABLE),None,Error::InvalidArgument); // Unsupported kind.
     for exited in [false,true]{
