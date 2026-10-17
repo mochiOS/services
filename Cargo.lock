@@ -2364,7 +2364,6 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 [[package]]
 name = "plugkit"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/mnu#829522f5737b96a50140961cdede28451805ad51"
 dependencies = [
  "plugkit-macros",
  "plugkit-sys",
@@ -2373,12 +2372,10 @@ dependencies = [
 [[package]]
 name = "plugkit-macros"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/mnu#829522f5737b96a50140961cdede28451805ad51"
 
 [[package]]
 name = "plugkit-sys"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/mnu#829522f5737b96a50140961cdede28451805ad51"
 dependencies = [
  "spin 0.9.9",
 ]

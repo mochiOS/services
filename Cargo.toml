@@ -33,6 +33,7 @@ mboot-protocol = { path = "mboot-protocol" }
 
 [patch."https://github.com/mochiOS/mnu"]
 mnu-abi = { path = "../core/crates/abi" }
+plugkit = { path = "../core/crates/PlugKit/plugkit" }
 
 [patch."https://github.com/mochiOS/syscalls"]
 mochi-user-platform = { path = "../user/crates/platform" }
