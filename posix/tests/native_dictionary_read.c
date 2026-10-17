@@ -8,6 +8,8 @@
 #include <unistd.h>
 
 enum { EXECUTION_IDENTITY_READ = 677 };
+/* Native mechanism failures are tagged statuses, not POSIX/newlib errno. */
+#define NATIVE_FAILURE(code) ((int64_t)(UINT64_C(0xfffffffffffc0000) | (code)))
 struct execution_identity { uint64_t process, thread; };
 static int64_t identity_read(struct execution_identity *identity, size_t length) {
     uint64_t number = EXECUTION_IDENTITY_READ;
@@ -31,8 +33,8 @@ int main(void) {
     if (identity_read(&first, sizeof(first)) || !first.process || !first.thread) return 17;
     if (identity_read(&second, sizeof(second)) || first.process != second.process
         || first.thread != second.thread) return 18;
-    if (identity_read(&second, sizeof(second) - 1) != -22
-        || identity_read(NULL, sizeof(second)) != -14) return 19;
+    if (identity_read(&second, sizeof(second) - 1) != NATIVE_FAILURE(5)
+        || identity_read(NULL, sizeof(second)) != NATIVE_FAILURE(2)) return 19;
     fprintf(stderr, "dictionary-read: native execution identity ok\n");
     /* ext4plus's indirect-block reads allocate a zeroed filesystem block.
      * Measure that runtime cost independently of IPC and storage access. */
