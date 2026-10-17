@@ -122,7 +122,7 @@ int MEMORY_ADMISSION_MAIN(void) {
   CHECK((uint64_t)native(HANDLE_RIGHTS_GET, first, 0, 0, 0, 0, 0) == rights);
   CHECK(native(HANDLE_DUPLICATE, first, rights, 0, 0, 0, 0) ==
         INT64_C(-262138));
-  CHECK(control(first, 1) == -13);
+  CHECK(control(first, 1) == INT64_C(-262138));
   CHECK(native(PROVIDER_MEMORY_UPDATE_CREATE, endpoint, 77, 8192, 5000, first,
                0) == INT64_C(-262137));
   CHECK(native(PROVIDER_MEMORY_UPDATE_CREATE, endpoint, 78, 8192, 5000, first,

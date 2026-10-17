@@ -157,10 +157,10 @@ int PROVIDER_MEMORY_UPDATE_MAIN(void) {
         INT64_C(-262138));
   struct attachments outgoing = {.count = 1,
                                  .items = {{.handle = update, .rights = 256}}};
-  CHECK(native(IPC_SEND, endpoint, 0, 0, (uintptr_t)&outgoing, 0, 0) == -13);
+  CHECK(native(IPC_SEND, endpoint, 0, 0, (uintptr_t)&outgoing, 0, 0) == INT64_C(-262138));
   CHECK(control(update, 999) == -38);
-  CHECK(control(update, 3) == -22); /* BEGIN cannot be skipped */
-  CHECK(native(HANDLE_CONTROL, update, 1, 0, 1, 0, 0) == -22);
+  CHECK(control(update, 3) == INT64_C(-262139)); /* BEGIN cannot be skipped */
+  CHECK(native(HANDLE_CONTROL, update, 1, 0, 1, 0, 0) == INT64_C(-262139));
   CHECK(native(MEMORY_PROTECT, private_address, 8192, 1, 0, 0, 0) ==
         INT64_C(-262137));
   CHECK(native(IMAGE_CLONE, 0, 0, 0, 0, 0, 0) == INT64_C(-262137));
@@ -169,7 +169,7 @@ int PROVIDER_MEMORY_UPDATE_MAIN(void) {
   update =
       native(PROVIDER_MEMORY_UPDATE_CREATE, endpoint, 77, 8192, 5000, 0, 0);
   CHECK(update > 0 && control(update, 1) == 0);
-  CHECK(control(update, 1) == -22);
+  CHECK(control(update, 1) == INT64_C(-262139));
   CHECK(native(MEMORY_PROTECT, shared_address, 8192, 1, 0, 0, 0) ==
         INT64_C(-262137));
   CHECK(control(update, 2) == 0); /* confirmed unchanged */

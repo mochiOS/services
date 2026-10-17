@@ -4,6 +4,9 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use crate::interrupt::spinlock::SpinLock;
+const NATIVE_INVALID_ARGUMENT: u64 = mnu_abi::status::Error::InvalidArgument.into_raw();
+const NATIVE_BACKING_FAILURE: u64 = mnu_abi::status::Error::BackingFailure.into_raw();
+const NATIVE_RESOURCE_UNAVAILABLE: u64 = mnu_abi::status::Error::ResourceUnavailable.into_raw();
 
 #[macro_export]
 macro_rules! warn { ($($args:tt)*) => { let _ = format_args!($($args)*); }; }
@@ -379,7 +382,7 @@ fn successful_local_publication_keeps_private_prefix_and_completes_once() {
     crate::LOWER.lock().unwrap().bytes.truncate(17);
     let result = crate::without_allocations(|| owner.publish_local());
     assert_eq!(result, Ok(()));
-    assert_eq!(owner.publish_local(), Err(crate::syscall::EINVAL));
+    assert_eq!(owner.publish_local(), Err(NATIVE_INVALID_ARGUMENT));
     assert_eq!(paging::flags(ROOT, BASE), Some(0x805));
     assert_eq!(paging::flags(ROOT, BASE + 4096), None);
     let bytes = unsafe { std::slice::from_raw_parts(physical[0] as *const u8, 4096) };
@@ -400,7 +403,7 @@ fn failed_tlb_ack_and_reserved_invalidation_preserve_cancellation_ownership() {
         let owner = extent_transaction::ExtentTransaction::prepare(&object, 8192, 17);
         tlb_shootdown::FAIL.store(false, Ordering::Relaxed);
         if fail_tlb {
-            assert!(matches!(owner, Err(crate::syscall::EIO)));
+            assert!(matches!(owner, Err(NATIVE_BACKING_FAILURE)));
         } else {
             let owner = owner.unwrap();
             let generation = object.memory_generation();
@@ -435,7 +438,7 @@ fn published_owner_death_retries_remaining_finish_instead_of_restoring_old_exten
         paging::FAIL_LOOKUP.store(fail_lookup, Ordering::Relaxed);
         assert_eq!(
             crate::without_allocations(|| owner.publish_local()),
-            Err(crate::syscall::EFAULT)
+            Err(NATIVE_BACKING_FAILURE)
         );
         let generation = object.memory_generation();
         assert_eq!(
@@ -473,14 +476,14 @@ fn irrevocable_request_keeps_publication_intent_across_preflight_errors_and_owne
     paging::FAIL_LOOKUP.store(1, Ordering::Relaxed);
     assert_eq!(
         crate::without_allocations(|| owner.request_publication()),
-        Err(crate::syscall::EFAULT)
+        Err(NATIVE_BACKING_FAILURE)
     );
     assert_eq!(object.memory_generation(), generation);
     // A local retry cannot downgrade an already irrevocable decision.
     paging::LOOKUPS.store(0, Ordering::Relaxed);
     assert_eq!(
         crate::without_allocations(|| owner.publish_local()),
-        Err(crate::syscall::EFAULT)
+        Err(NATIVE_BACKING_FAILURE)
     );
     crate::without_allocations(|| drop(owner));
     for _ in 0..3 {
@@ -559,8 +562,8 @@ fn irrevocable_request_can_finish_synchronously_and_disarm_its_owner() {
         crate::without_allocations(|| owner.request_publication()),
         Ok(())
     );
-    assert_eq!(owner.request_publication(), Err(crate::syscall::EINVAL));
-    assert_eq!(owner.publish_local(), Err(crate::syscall::EINVAL));
+    assert_eq!(owner.request_publication(), Err(NATIVE_INVALID_ARGUMENT));
+    assert_eq!(owner.publish_local(), Err(NATIVE_INVALID_ARGUMENT));
     drop(owner);
     crate::without_allocations(extent_transaction::flush);
     assert_eq!(paging::flags(ROOT, BASE), None);
@@ -627,7 +630,7 @@ fn pte_preflight_failure_precedes_cache_publication_and_node_failure_precedes_al
     crate::DENY_COMMIT_ALLOC.with(|deny| deny.set(true));
     let failed = extent_transaction::ExtentTransaction::prepare(&object, 8192, 17);
     crate::DENY_COMMIT_ALLOC.with(|deny| deny.set(false));
-    assert!(matches!(failed, Err(crate::syscall::ENOMEM)));
+    assert!(matches!(failed, Err(NATIVE_RESOURCE_UNAVAILABLE)));
     assert_eq!(crate::COMMIT_ALLOC_ATTEMPTS.with(|count| count.get()), 1);
     assert_eq!(object.memory_generation(), generation);
     assert_eq!(paging::flags(ROOT, BASE), Some(0x805));
@@ -637,7 +640,7 @@ fn pte_preflight_failure_precedes_cache_publication_and_node_failure_precedes_al
     paging::FAIL_LOOKUP.store(2, Ordering::Relaxed);
     assert_eq!(
         crate::without_allocations(|| owner.publish_local()),
-        Err(crate::syscall::EFAULT)
+        Err(NATIVE_BACKING_FAILURE)
     );
     assert_eq!(object.memory_generation(), generation);
     drop(owner);
@@ -706,7 +709,7 @@ fn external_preparation_suspends_prefix_but_can_cancel_before_io_begins() {
         extent_transaction::ExtentTransaction::prepare_external(&object, 8192, 5000).unwrap();
     assert_eq!(
         owner.request_external_publication(),
-        Err(crate::syscall::EINVAL)
+        Err(NATIVE_INVALID_ARGUMENT)
     );
     // The first page is outside the resize's affected range, but would also
     // expose stale bytes if an uncertain storage update lost its owner.
@@ -733,7 +736,7 @@ fn external_prepare_cannot_authorize_io_before_all_cpu_tlb_acknowledgement() {
     tlb_shootdown::FAIL.store(true, Ordering::Relaxed);
     let result = extent_transaction::ExtentTransaction::prepare_external(&object, 8192, 5000);
     tlb_shootdown::FAIL.store(false, Ordering::Relaxed);
-    assert!(matches!(result, Err(crate::syscall::EIO)));
+    assert!(matches!(result, Err(NATIVE_BACKING_FAILURE)));
     assert_eq!(paging::flags(ROOT, BASE), Some(0x804));
     assert_eq!(paging::flags(ROOT, BASE + 4096), Some(0x804));
     assert_eq!(object.read_at(0, &mut [0; 1]), Err(crate::syscall::EAGAIN));
@@ -760,7 +763,7 @@ fn failed_external_begin_still_cancels_and_local_owner_cannot_begin_external_io(
             paging::FAIL_LOOKUP.store(1, Ordering::Relaxed);
             assert_eq!(
                 crate::without_allocations(|| owner.begin_external()),
-                Err(crate::syscall::EFAULT)
+                Err(NATIVE_BACKING_FAILURE)
             );
             paging::FAIL_LOOKUP.store(0, Ordering::Relaxed);
             crate::PHYSICAL_OFFSET.with(|offset| offset.set(None));
@@ -768,13 +771,13 @@ fn failed_external_begin_still_cancels_and_local_owner_cannot_begin_external_io(
             crate::PHYSICAL_OFFSET.with(|offset| offset.set(Some(0)));
             assert_eq!(result, Err(crate::syscall::EIO));
         } else {
-            assert_eq!(owner.begin_external(), Err(crate::syscall::EINVAL));
+            assert_eq!(owner.begin_external(), Err(NATIVE_INVALID_ARGUMENT));
             assert_eq!(
                 owner.request_external_publication(),
-                Err(crate::syscall::EINVAL)
+                Err(NATIVE_INVALID_ARGUMENT)
             );
         }
-        assert_eq!(owner.confirm_unchanged(), Err(crate::syscall::EINVAL));
+        assert_eq!(owner.confirm_unchanged(), Err(NATIVE_INVALID_ARGUMENT));
         crate::without_allocations(|| drop(owner));
         crate::without_allocations(extent_transaction::flush);
         assert_eq!(object.read_at(0, &mut [0; 8192]), Ok(8192));
@@ -793,8 +796,8 @@ fn uncertain_external_owner_death_discards_every_mapping_without_querying_storag
         let mut owner =
             extent_transaction::ExtentTransaction::prepare_external(&object, 8192, length).unwrap();
         crate::without_allocations(|| owner.begin_external()).unwrap();
-        assert_eq!(owner.begin_external(), Err(crate::syscall::EINVAL));
-        assert_eq!(owner.publish_local(), Err(crate::syscall::EINVAL));
+        assert_eq!(owner.begin_external(), Err(NATIVE_INVALID_ARGUMENT));
+        assert_eq!(owner.publish_local(), Err(NATIVE_INVALID_ARGUMENT));
         // Model a partial lower mutation, not a confirmed resize. Cleanup
         // must neither infer success from length nor call the lower provider.
         crate::LOWER.lock().unwrap().bytes.truncate(3000);
@@ -845,13 +848,13 @@ fn confirmed_unchanged_outcome_survives_partial_cleanup_and_cannot_be_published(
         paging::FAIL_LOOKUP.store(fail_lookup, Ordering::Relaxed);
         assert_eq!(
             crate::without_allocations(|| owner.confirm_unchanged()),
-            Err(crate::syscall::EFAULT)
+            Err(NATIVE_BACKING_FAILURE)
         );
-        assert_eq!(owner.request_publication(), Err(crate::syscall::EINVAL));
-        assert_eq!(owner.publish_local(), Err(crate::syscall::EINVAL));
+        assert_eq!(owner.request_publication(), Err(NATIVE_INVALID_ARGUMENT));
+        assert_eq!(owner.publish_local(), Err(NATIVE_INVALID_ARGUMENT));
         paging::FAIL_LOOKUP.store(0, Ordering::Relaxed);
         crate::without_allocations(|| owner.confirm_unchanged()).unwrap();
-        assert_eq!(owner.confirm_unchanged(), Err(crate::syscall::EINVAL));
+        assert_eq!(owner.confirm_unchanged(), Err(NATIVE_INVALID_ARGUMENT));
         crate::without_allocations(|| drop(owner));
         crate::without_allocations(extent_transaction::flush);
         assert_eq!(object.read_at(0, &mut [0; 8192]), Ok(8192));
@@ -895,7 +898,7 @@ fn confirmed_external_publication_restores_prefix_and_only_zeros_changed_boundar
             .bytes
             .resize(length as usize, 0);
         crate::without_allocations(|| owner.request_external_publication()).unwrap();
-        assert_eq!(owner.confirm_unchanged(), Err(crate::syscall::EINVAL));
+        assert_eq!(owner.confirm_unchanged(), Err(NATIVE_INVALID_ARGUMENT));
         let capacity = (length + 4095) & !4095;
         let boundary = old_length.min(length);
         for (index, frame) in physical.iter().enumerate() {
@@ -1051,9 +1054,9 @@ fn confirmed_external_publication_keeps_decision_after_failed_check_and_owner_lo
     paging::FAIL_LOOKUP.store(1, Ordering::Relaxed);
     assert_eq!(
         crate::without_allocations(|| owner.request_external_publication()),
-        Err(crate::syscall::EFAULT)
+        Err(NATIVE_BACKING_FAILURE)
     );
-    assert_eq!(owner.confirm_unchanged(), Err(crate::syscall::EINVAL));
+    assert_eq!(owner.confirm_unchanged(), Err(NATIVE_INVALID_ARGUMENT));
     crate::without_allocations(|| drop(owner));
     paging::FAIL_LOOKUP.store(0, Ordering::Relaxed);
     crate::without_allocations(extent_transaction::flush);
