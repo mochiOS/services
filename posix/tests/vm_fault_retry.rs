@@ -26,6 +26,23 @@ fn native_retry_probe_uses_the_authoritative_native_abi() {
     assert_eq!(mnu_abi::provider::OP_MEMORY_OBJECT, 9);
     assert_eq!(mnu_abi::provider::OP_READ_AT, 6);
     assert_eq!(mnu_abi::provider::OP_RELEASE, 4);
+    let initial = include_str!("native_fault_initial.c");
+    for (name, number) in [
+        ("THREAD_CREATE", mnu_abi::SyscallNumber::ThreadCreate),
+        ("MEMORY_MAP", mnu_abi::SyscallNumber::MemoryMap),
+        ("MEMORY_UNMAP", mnu_abi::SyscallNumber::MemoryUnmap),
+        ("MEMORY_PROTECT", mnu_abi::SyscallNumber::MemoryProtect),
+        ("RECEIVE", mnu_abi::SyscallNumber::IpcRecvObjectHandles),
+        ("REPLY", mnu_abi::SyscallNumber::IpcReplyObjectHandles),
+    ] {
+        assert!(initial.contains(&format!("{name} = {}", number as u64)));
+    }
+    let native_ready = format!(
+        "INT64_C({})",
+        mnu_abi::status::Error::NotReady.into_raw() as i64
+    );
+    assert!(initial.contains(&native_ready));
+    assert!(probe.contains(&native_ready));
 }
 
 #[test]
@@ -52,9 +69,8 @@ mod mem {pub mod vm_object {
     #[derive(Clone,Copy,Debug,PartialEq,Eq)] pub enum VmPageError {OutsideBacking,Operation(u64)}
 }}
 mod syscall {
-    pub const EAGAIN:u64=(-11i64) as u64; pub const ENOMEM:u64=(-12i64) as u64;
     pub mod process {
-        use crate::{mnu_abi,syscall::{EAGAIN,ENOMEM}};
+        use crate::mnu_abi;
         #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 "#,
     );
@@ -123,9 +139,6 @@ fn run(outcome:Result<(),Fault>, expected_yields:usize, expected_cause:Option<Ca
 }
 fn main() {
     run(Ok(()),0,None);
-    for fault in [Fault::Operation(syscall::EAGAIN),Fault::Backing(Backing::Operation(syscall::EAGAIN))] {
-        assert!(fault.is_retryable()); run(Err(fault),1,None);
-    }
     let busy=mnu_abi::status::Error::NotReady.into_raw();
     for fault in [Fault::Operation(busy),Fault::Backing(Backing::Operation(busy))] {
         assert!(fault.is_retryable());run(Err(fault),1,None);
@@ -140,12 +153,17 @@ fn main() {
     for (fault,cause) in [
         (Fault::Unmapped,Cause::Unmapped), (Fault::AccessDenied,Cause::AccessDenied),
         (Fault::Backing(Backing::OutsideBacking),Cause::OutsideBacking),
-        (Fault::Operation(syscall::ENOMEM),Cause::ResourceUnavailable),
-        (Fault::Backing(Backing::Operation(syscall::ENOMEM)),Cause::ResourceUnavailable),
         (Fault::Backing(Backing::Operation((-5i64) as u64)),Cause::BackingFailure),
         (Fault::Operation((-22i64) as u64),Cause::Unresolved),
     ] {assert!(!fault.is_retryable());run(Err(fault),0,Some(cause));}
-    OUTCOME.with(|slot|slot.set(Err(Fault::Operation(syscall::EAGAIN))));
+    // Opaque provider values are not native readiness or allocation signals.
+    for raw in [-11i64,-12,-5,-22,-38] {
+        for (fault,cause) in [(Fault::Operation(raw as u64),Cause::Unresolved),
+            (Fault::Backing(Backing::Operation(raw as u64)),Cause::BackingFailure)] {
+            assert!(!fault.is_retryable());run(Err(fault),0,Some(cause));
+        }
+    }
+    OUTCOME.with(|slot|slot.set(Err(Fault::Operation(busy))));
     YIELDS.with(|slot|slot.set(0)); LEAVES.with(|slot|slot.set(0));
     FATAL.with(|slot|slot.set(0)); RESOLVES.with(|slot|slot.set(0));
     let mut registers=[0x77;21];

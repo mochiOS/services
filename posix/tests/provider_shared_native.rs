@@ -175,7 +175,7 @@ fn main(){
     // A positioned zero count remains EOF and must not fall back.
     reset();MODE.set(10);assert_eq!(read(8192),0);assert_eq!(INLINE_CALLS.get(),0);
     for mode in [5,11,12]{reset();MODE.set(mode);assert_eq!(read(8192),Error::BackingFailure.into_raw());assert_eq!(INLINE_CALLS.get(),0);}
-    for status in [-95,-38,-11]{
+    for status in [-95,-38,-11,Error::NotReady.into_raw()as i64,Error::ResourceUnavailable.into_raw()as i64]{
         reset();WIRE_ERROR.set(status);assert_eq!(read(8192),status as u64);assert_eq!(INLINE_CALLS.get(),0);
         reset();IPC_ERROR.set(status as u64);assert_eq!(read(8192),status as u64);assert_eq!(INLINE_CALLS.get(),0);
         reset();WIRE_ERROR.set(status);FAIL_AFTER.set(1);assert_eq!(read(chunk+8),chunk as u64);assert_eq!(INLINE_CALLS.get(),0);

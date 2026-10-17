@@ -1,4 +1,4 @@
-/* Deterministic hardware-fault retry: a native provider returns EAGAIN three
+/* Deterministic hardware-fault retry: a native provider returns NotReady three
  * times for each private/shared page, then supplies the actual backing bytes.
  */
 #include <pthread.h>
@@ -105,7 +105,7 @@ static void *provider(void *argument) {
         return (void *)4;
       unsigned page = (unsigned)(offset / 4096);
       if (++reads[page] <= 3) {
-        put64(response + 8, (uint64_t)(int64_t)-11);
+        put64(response + 8, (uint64_t)INT64_C(-262137));
       } else {
         data_length = 4096;
         put64(response + 24, data_length);
@@ -155,7 +155,7 @@ int main(void) {
   void *result;
   CHECK(pthread_join(thread, &result) == 0 && result == NULL);
   CHECK(reads[0] == 4 && reads[1] == 4);
-  puts("vm-fault-retry: PASS private/shared hardware faults retry three EAGAIN "
+  puts("vm-fault-retry: PASS private/shared hardware faults retry three NotReady "
        "replies without exceptions");
   puts("mapping-edit-admission: PASS provider mappings protect NONE/READ and "
        "unmap after publication");

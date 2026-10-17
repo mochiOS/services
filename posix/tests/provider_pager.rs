@@ -4,6 +4,61 @@ use mnu_abi::provider::{
 };
 
 #[test]
+fn provider_failures_preserve_native_tags_and_opaque_statuses_without_success_payloads() {
+    use mnu_abi::status::Error;
+    let mut bytes = [0; RESPONSE_HEADER_LEN + 1];
+    for status in [
+        Error::NotReady.into_raw() as i64,
+        Error::ResourceUnavailable.into_raw() as i64,
+        Error::BackingFailure.into_raw() as i64,
+        Error::PeerClosed.into_raw() as i64,
+        (Error::NotReady.into_raw() | 0xffff) as i64,
+        -1,
+        -11,
+        -12,
+        -4095,
+    ] {
+        let header = ResponseHeader {
+            opcode: OP_READ_AT,
+            status,
+            object_id: 19,
+            value: 0,
+            data_length: 0,
+        };
+        assert_eq!(header.encode(&[], &mut bytes), Ok(RESPONSE_HEADER_LEN));
+        assert_eq!(
+            ResponseHeader::decode(&bytes[..RESPONSE_HEADER_LEN]),
+            Ok((header, &[][..]))
+        );
+        assert_eq!(
+            ResponseHeader { value: 1, ..header }.encode(&[], &mut bytes),
+            Err(DecodeError::InvalidFields)
+        );
+        assert_eq!(
+            ResponseHeader {
+                data_length: 1,
+                ..header
+            }
+            .encode(&[0], &mut bytes),
+            Err(DecodeError::InvalidFields)
+        );
+    }
+    for status in [1, -4096, i64::MIN, -0x40001] {
+        let header = ResponseHeader {
+            opcode: OP_READ_AT,
+            status,
+            object_id: 19,
+            value: 0,
+            data_length: 0,
+        };
+        assert_eq!(
+            header.encode(&[], &mut bytes),
+            Err(DecodeError::InvalidFields)
+        );
+    }
+}
+
+#[test]
 fn sequential_read_response_captures_position_including_eof() {
     use mnu_abi::provider::{MAX_POSITIONED_READ_LEN, OP_READ_WITH_POSITION, READ_POSITION_LEN};
     let request = RequestHeader {
@@ -162,6 +217,7 @@ fn write_response_captures_position_and_memory_identity_is_nonzero() {
             value: 0,
             ..identity
         }
-        .encode(&[], &mut wire).is_ok()
+        .encode(&[], &mut wire)
+        .is_ok()
     );
 }
