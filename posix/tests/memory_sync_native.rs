@@ -17,7 +17,7 @@ extern crate self as mnu_abi;
 use status::Error;
 use std::sync::Arc;
 use std::cell::{{Cell,RefCell}};
-const SUCCESS:u64=0;const MEMORY_ACCESS_WRITE:u64=2;
+const SUCCESS:u64=0;const MEMORY_ACCESS_WRITE:u64=2;const MEMORY_SYNC_DEFERRED:u64=1;
 thread_local! {{
     static CONTEXT:Cell<bool>=const{{Cell::new(true)}};
     static PRESENT:Cell<bool>=const{{Cell::new(true)}};
@@ -30,7 +30,13 @@ thread_local! {{
 fn page_align_up(value:u64)->Option<u64>{{value.checked_add(4095).map(|v|v&!4095)}}
 fn is_user_range(start:u64,length:u64)->bool{{start>0&&start.checked_add(length).is_some_and(|end|end<=0x800000000000)}}
 mod syscall {{pub mod security {{pub fn current_process_id()->Option<u64>{{crate::CONTEXT.get().then_some(7)}}}}}}
-mod mem {{#[path={plan:?}]pub mod range_plan;#[path={writeback:?}]pub mod writeback;}}
+mod mem {{#[path={plan:?}]pub mod range_plan;#[path={writeback:?}]pub mod writeback;
+    pub mod writeback_worker {{
+        pub fn submit(pid:u64,_work:super::writeback::Batch<std::sync::Arc<crate::task::Object>>)->u64 {{
+            assert_eq!(pid,7);assert!(!crate::LOCKED.get());19
+        }}
+    }}
+}}
 mod task {{
     use super::*;
     pub struct Object(pub u64);
@@ -85,7 +91,7 @@ fn no_io(){assert!(!LOCKED.get());IO.with_borrow(|io|assert!(io.is_empty()));}
 fn main(){
     for (address,length,options,error) in [(0,4096,0,Error::InvalidAddress),
         (4096,0,0,Error::InvalidArgument),(4097,4096,0,Error::InvalidArgument),
-        (4096,4096,1,Error::InvalidArgument),(4096,u64::MAX,0,Error::InvalidAddress),
+        (4096,4096,2,Error::InvalidArgument),(4096,u64::MAX,0,Error::InvalidAddress),
         (0x800000000000,4096,0,Error::InvalidAddress)]{
         reset();assert_eq!(memory_sync(address,length,options),error.into_raw());no_io();
     }
@@ -117,6 +123,9 @@ fn main(){
     reset();FAILURE.set(Some((2,(-5i64)as u64)));
     assert_eq!(memory_sync(4096,16384,0),(-5i64)as u64);
     IO.with_borrow(|io|assert_eq!(io.len(),2));
+    reset();assert_eq!(memory_sync(8192,8192,MEMORY_SYNC_DEFERRED),19);no_io();
+    reset();PROCESS.with_borrow_mut(|p|{p.regions.pop();});
+    assert_eq!(memory_sync(4096,12288,MEMORY_SYNC_DEFERRED),Error::InvalidAddress.into_raw());no_io();
 }
 "#);
     probe::run(&program);
