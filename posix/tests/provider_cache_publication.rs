@@ -7,6 +7,10 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+const EXTENT_NOT_READY: u64 = mnu_abi::status::Error::NotReady.into_raw();
+const EXTENT_BACKING_FAILURE: u64 = mnu_abi::status::Error::BackingFailure.into_raw();
+const EXTENT_INVALID_ARGUMENT: u64 = mnu_abi::status::Error::InvalidArgument.into_raw();
+
 thread_local! {
     static DENY_COMMIT_ALLOC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static COMMIT_ALLOC_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -374,7 +378,7 @@ pub mod shared_pages;
 #[path = "../../../core/src/mem/vm_object.rs"]
 pub mod vm_object;
 mod mem {
-    pub(crate) use crate::{byte_extent, frame, paging};
+    pub(crate) use crate::{byte_extent, frame, paging, shared_pages};
     pub(crate) mod object_io_native {
         pub fn new_lock() -> Result<crate::object_io::IoLock, mnu_abi::status::Error> {
             crate::GATE_ALLOCS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -440,7 +444,7 @@ fn scoped_admission_cannot_be_retargeted_or_consumed_twice_and_preserves_guard_i
     drop(admission);
     assert!(matches!(
         object.prepare_extent(3, 1, |_| panic!("must stay excluded")),
-        Err(syscall::EAGAIN)
+        Err(EXTENT_NOT_READY)
     ));
     extent.preflight().unwrap();
     drop(extent);
@@ -901,6 +905,76 @@ fn unrelated_backing_changes_do_not_invalidate_extent_or_page_installations() {
 }
 
 #[test]
+fn extent_geometry_and_allocation_failures_leave_admission_and_cache_unchanged() {
+    let _test = TEST_LOCK.lock().unwrap();
+    reset_lower(b"old");
+    let object = provider_object();
+    object.page(0).unwrap();
+    let generation = object.memory_generation();
+    let reads = LOWER.lock().unwrap().reads;
+    for (old_length, length) in [(3, u64::MAX), (u64::MAX, 3)] {
+        let result = without_allocations(|| {
+            object.prepare_extent(old_length, length, |_| panic!("invalid geometry allocated"))
+        });
+        assert!(
+            matches!(result, Err(error) if error == mnu_abi::status::Error::LimitExceeded.into_raw())
+        );
+        assert_eq!(object.memory_generation(), generation);
+    }
+    // Allocation is the coordinator's policy. Preserve its error verbatim,
+    // including an opaque lower-layer value, and release the acquired gate.
+    for error in [
+        mnu_abi::status::Error::ResourceUnavailable.into_raw(),
+        syscall::ENOMEM,
+        0xfedc_ba98,
+    ] {
+        let result = without_allocations(|| object.prepare_extent(3, 1, |_| Err(error)));
+        assert!(matches!(result, Err(actual) if actual == error));
+        assert_eq!(object.memory_generation(), generation);
+        assert_eq!(&object.page(0).unwrap()[..3], b"old");
+    }
+    assert_eq!(LOWER.lock().unwrap().reads, reads);
+    let retry = object
+        .prepare_extent(3, 1, |bytes| Ok(Arc::new(bytes)))
+        .unwrap();
+    drop(retry);
+    object.invalidate().unwrap();
+}
+
+#[test]
+fn extent_rejects_stale_epoch_without_publishing_and_releases_reservation() {
+    let _test = TEST_LOCK.lock().unwrap();
+    reset_lower(b"old");
+    CAPTURE_GATE.with(|capture| capture.set(true));
+    let object = provider_object();
+    CAPTURE_GATE.with(|capture| capture.set(false));
+    let gate = CAPTURED_GATE.with(|slot| slot.borrow_mut().take()).unwrap();
+    object.page(0).unwrap();
+    let mut prepared = object
+        .prepare_extent(3, 1, |bytes| Ok(Arc::new(bytes)))
+        .unwrap();
+    // Model invalidation of this token at the actual cache-lock boundary.
+    CACHE_EDGE
+        .with(|edge| *edge.borrow_mut() = Some((0, Box::new(move || gate.advance_generation()))));
+    assert_eq!(
+        without_allocations(|| prepared.preflight()),
+        Err(EXTENT_NOT_READY)
+    );
+    assert_eq!(
+        without_allocations(|| prepared.publish()),
+        Err(EXTENT_NOT_READY)
+    );
+    assert_eq!(&LOWER.lock().unwrap().bytes, b"old");
+    drop(prepared);
+    assert_eq!(&object.page(0).unwrap()[..3], b"old");
+    let retry = object
+        .prepare_extent(3, 1, |bytes| Ok(Arc::new(bytes)))
+        .unwrap();
+    drop(retry);
+    object.invalidate().unwrap();
+}
+
+#[test]
 fn extent_reservation_excludes_io_without_waiting_or_allocating_on_contention() {
     let _test = TEST_LOCK.lock().unwrap();
     reset_lower(b"old");
@@ -920,7 +994,7 @@ fn extent_reservation_excludes_io_without_waiting_or_allocating_on_contention() 
         without_allocations(|| alias.prepare_extent(3, 1, |_| {
             panic!("busy admission must precede boundary allocation")
         })),
-        Err(syscall::EAGAIN)
+        Err(EXTENT_NOT_READY)
     ));
     assert_eq!(object.memory_generation(), generation);
     let independent = other
@@ -934,7 +1008,7 @@ fn extent_reservation_excludes_io_without_waiting_or_allocating_on_contention() 
         .unwrap();
     assert!(matches!(
         alias.prepare_extent(3, 1, |_| panic!("reservation still owns I/O")),
-        Err(syscall::EAGAIN)
+        Err(EXTENT_NOT_READY)
     ));
     // Cancellation releases admission, but never publishes a shorter extent.
     drop(prepared);
@@ -1185,7 +1259,7 @@ fn cache_publication_keeps_backing_reserved_through_journal_completion() {
     // may still own non-present PTEs which have not been restored/released.
     assert_eq!(
         without_allocations(|| prepared.publish()),
-        Err(syscall::EINVAL)
+        Err(EXTENT_INVALID_ARGUMENT)
     );
     assert!(matches!(
         alias.page(0),
@@ -1201,7 +1275,7 @@ fn cache_publication_keeps_backing_reserved_through_journal_completion() {
         alias.prepare_extent(17, 0, |_| panic!(
             "admission released before PTE completion"
         )),
-        Err(syscall::EAGAIN)
+        Err(EXTENT_NOT_READY)
     ));
     drop(prepared);
     assert_eq!(alias.read_at(0, &mut [0; 64]), Ok(17));
@@ -1242,7 +1316,7 @@ fn reserved_invalidation_cannot_change_epoch_or_release_publication_admission() 
             Err(syscall::EAGAIN)
         );
         assert_eq!(object.memory_generation(), published_generation);
-        assert_eq!(prepared.publish(), Err(syscall::EINVAL));
+        assert_eq!(prepared.publish(), Err(EXTENT_INVALID_ARGUMENT));
         assert!(matches!(
             object.page(0),
             Err(vm_object::VmPageError::Operation(syscall::EAGAIN))
@@ -1282,7 +1356,7 @@ fn provider_writeback_key_is_owned_by_its_live_io_guard() {
     let guard = vm_object::lock_provider_io(&provider, 93).unwrap();
     assert!(matches!(
         alias.prepare_extent(3, 1, |_| panic!("I/O owner lost")),
-        Err(syscall::EAGAIN)
+        Err(EXTENT_NOT_READY)
     ));
     // The same numeric provider identity in another endpoint generation must
     // remain independent. No separate identity can be supplied for writeback.
@@ -1398,7 +1472,7 @@ fn unavailable_cached_backing_cannot_lose_failure_when_original_owners_drop() {
     assert_eq!(SYNC_CALLS.with(Cell::get), syncs);
     assert!(matches!(
         alias.prepare_extent(3, 1, |_| panic!("unavailable backing allocated boundary")),
-        Err(syscall::EIO)
+        Err(EXTENT_BACKING_FAILURE)
     ));
     assert_eq!(
         alias.with_memory_generation_native(alias.memory_generation(), || panic!(
@@ -1490,8 +1564,8 @@ fn cache_preflight_and_failed_publication_preserve_boundary_buffer_for_retry() {
         let preflight = without_allocations(|| prepared.preflight());
         let publication = without_allocations(|| prepared.publish());
         PHYSICAL_OFFSET.with(|value| value.set(Some(0)));
-        assert_eq!(preflight, Err(syscall::EIO));
-        assert_eq!(publication, Err(syscall::EIO));
+        assert_eq!(preflight, Err(EXTENT_BACKING_FAILURE));
+        assert_eq!(publication, Err(EXTENT_BACKING_FAILURE));
         assert_eq!(object.memory_generation(), generation);
         assert_eq!(LOWER.lock().unwrap().bytes.len(), 8192);
         assert!(
@@ -1510,7 +1584,7 @@ fn cache_preflight_and_failed_publication_preserve_boundary_buffer_for_retry() {
     }
     LOWER.lock().unwrap().bytes.truncate(17);
     without_allocations(|| prepared.publish()).unwrap();
-    assert_eq!(prepared.preflight(), Err(syscall::EINVAL));
+    assert_eq!(prepared.preflight(), Err(EXTENT_INVALID_ARGUMENT));
     drop(prepared);
     let bytes = object.page(0).unwrap();
     assert_eq!(bytes[8], b'Q');
@@ -1577,7 +1651,7 @@ fn production_extent_commit_preserves_dirty_prefix_and_discards_removed_storage(
     let shared = Arc::new([0; 4096]);
     assert!(matches!(
         object.prepare_extent(3, 1, |_| Ok(shared.clone())),
-        Err(syscall::EINVAL)
+        Err(EXTENT_INVALID_ARGUMENT)
     ));
     let prepared = object
         .prepare_extent(3, 1, |bytes| Ok(Arc::new(bytes)))

@@ -311,7 +311,7 @@ fn cache_preflight_failure_after_tlb_ack_keeps_records_until_deferred_rollback()
     let owner = extent_transaction::ExtentTransaction::prepare(&object, 8192, 17);
     tlb_shootdown::DROP_OFFSET_AFTER_ACK.store(false, Ordering::Relaxed);
     crate::PHYSICAL_OFFSET.with(|offset| offset.set(Some(0)));
-    assert!(matches!(owner, Err(crate::syscall::EIO)));
+    assert!(matches!(owner, Err(NATIVE_BACKING_FAILURE)));
     assert_eq!(crate::LOWER.lock().unwrap().reads, reads);
     assert_eq!(crate::LOWER.lock().unwrap().bytes.len(), 8192);
     assert_eq!(paging::flags(ROOT, BASE), Some(0x804));
@@ -523,7 +523,7 @@ fn irrevocable_cache_failure_retains_retired_root_until_publication_finishes() {
     crate::PHYSICAL_OFFSET.with(|offset| offset.set(None));
     let result = crate::without_allocations(|| owner.request_publication());
     crate::PHYSICAL_OFFSET.with(|offset| offset.set(Some(0)));
-    assert_eq!(result, Err(crate::syscall::EIO));
+    assert_eq!(result, Err(NATIVE_BACKING_FAILURE));
     let destroyed = paging::DESTROYED.load(Ordering::Relaxed);
     process::replace(process::ProcessTable(Vec::new()));
     paging::destroy_user_page_table(ROOT).unwrap();
@@ -769,7 +769,7 @@ fn failed_external_begin_still_cancels_and_local_owner_cannot_begin_external_io(
             crate::PHYSICAL_OFFSET.with(|offset| offset.set(None));
             let result = crate::without_allocations(|| owner.begin_external());
             crate::PHYSICAL_OFFSET.with(|offset| offset.set(Some(0)));
-            assert_eq!(result, Err(crate::syscall::EIO));
+            assert_eq!(result, Err(NATIVE_BACKING_FAILURE));
         } else {
             assert_eq!(owner.begin_external(), Err(NATIVE_INVALID_ARGUMENT));
             assert_eq!(
