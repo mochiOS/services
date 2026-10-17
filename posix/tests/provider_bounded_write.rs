@@ -84,12 +84,26 @@ fn actual_kernel_write_loop_checks_bounds_partial_progress_and_copy_lock_order()
     let source = include_str!("../../../core/src/syscall/handle.rs");
     let implementation = function(source, "fn provider_write_impl(");
     let native_status = include_str!("../../../core/crates/abi/src/status.rs");
+    let native_storage = include_str!("../../../core/src/util/object_snapshot.rs");
     let program = format!(
         r#"
 extern crate alloc;
 extern crate self as mnu_abi;
 pub mod status {{ {native_status} }}
-use std::sync::{{Mutex,atomic::{{AtomicBool,Ordering}}}};
+pub mod util {{pub mod object_snapshot {{ {native_storage} }}}}
+use std::sync::{{Mutex,atomic::{{AtomicBool,AtomicUsize,Ordering}}}};
+static ALLOCATION:AtomicUsize=AtomicUsize::new(usize::MAX);
+struct Allocator;
+unsafe impl std::alloc::GlobalAlloc for Allocator{{
+unsafe fn alloc(&self,l:std::alloc::Layout)->*mut u8{{
+let remaining=ALLOCATION.load(Ordering::Relaxed);
+if remaining==0{{return std::ptr::null_mut();}}
+if remaining!=usize::MAX{{ALLOCATION.store(remaining-1,Ordering::Relaxed);}}
+unsafe{{std::alloc::System.alloc(l)}}
+}}
+unsafe fn dealloc(&self,p:*mut u8,l:std::alloc::Layout){{unsafe{{std::alloc::System.dealloc(p,l)}}}}
+}}
+#[global_allocator]static ALLOCATOR:Allocator=Allocator;
 pub mod provider {{
 pub const OP_WRITE:u16=2; pub const OP_WRITE_BOUNDED:u16=12;
 pub const MAX_DATA_LEN:usize=4096; pub const RESPONSE_HEADER_LEN:usize=40;
@@ -116,9 +130,9 @@ assert!(LOCKED.load(Ordering::SeqCst));STATE.lock().unwrap().updated+=bytes.len(
 }}
 }}}}
 pub mod syscall {{use super::*;
-pub fn copy_from_user(address:u64,bytes:&mut[u8])->Result<(),u64>{{
+pub fn copy_from_user_native(address:u64,bytes:&mut[u8])->Result<(),status::Error>{{
 assert!(!LOCKED.load(Ordering::SeqCst)); let mut s=STATE.lock().unwrap();s.copies+=1;
-if s.mode==6 && address>=4096 {{return Err((-14i64) as u64)}}
+if s.mode==6 && address>=4096 {{return Err(status::Error::InvalidAddress)}}
 bytes.fill(0x7a);Ok(())
 }}
 }}
@@ -148,13 +162,22 @@ assert_eq!(run(1,Some(4096)),provider::STATUS_BOUND_REACHED as u64);
 reset(0,3);assert_eq!(run(7,Some(5)),2);assert_eq!(STATE.lock().unwrap().updated,2);
 reset(0,99);assert_eq!(run(0,Some(0)),0);
 {{let s=STATE.lock().unwrap();assert_eq!((s.calls,s.copies,s.updated),(1,0,0));}}
-for mode in [1,2,4,5,7]{{reset(mode,0);assert_eq!(run(4,Some(5)),EIO);assert_eq!(STATE.lock().unwrap().updated,0);}}
+for mode in [1,2,4,5]{{reset(mode,0);assert_eq!(run(4,Some(5)),status::Error::BackingFailure.into_raw());assert_eq!(STATE.lock().unwrap().updated,0);}}
+reset(7,0);assert_eq!(run(4,Some(5)),EIO);
 for mode in [3,6]{{reset(mode,0);assert_eq!(run(8192,Some(10000)),4096);assert_eq!(STATE.lock().unwrap().updated,4096);}}
 reset(0,0);assert_eq!(run(5,None),5);assert_eq!(STATE.lock().unwrap().updated,5);
 reset(8,0);assert_eq!(run(8192,None),status::Error::ResourceUnavailable.into_raw());
 {{let s=STATE.lock().unwrap();assert_eq!((s.calls,s.updated),(0,0));}}
 reset(9,0);assert_eq!(run(8192,None),4096);
 {{let s=STATE.lock().unwrap();assert_eq!((s.calls,s.updated),(1,4096));}}
+for allocation in [0,1]{{
+reset(0,0);ALLOCATION.store(allocation,Ordering::Relaxed);let result=run(5,None);
+ALLOCATION.store(usize::MAX,Ordering::Relaxed);
+assert_eq!(result,status::Error::ResourceUnavailable.into_raw());
+let s=STATE.lock().unwrap();assert_eq!((s.calls,s.copies,s.updated),(0,0,0));
+}}
+reset(0,0);assert_eq!(run(u64::MAX,None),status::Error::LimitExceeded.into_raw());
+assert_eq!(STATE.lock().unwrap().calls,0);
 }}
 "#
     );
