@@ -7,7 +7,8 @@ fn receive_copy_failures_keep_messages_and_attenuated_authority_retryable() {
     let source = include_str!("../../../core/src/syscall/ipc.rs");
     let mut program = probe::program();
     program.push_str(r#"
-use std::{cell::Cell,sync::{Arc,atomic::{AtomicUsize,Ordering}}};
+use std::{cell::Cell,sync::{Arc,atomic::{AtomicU64,AtomicUsize,Ordering}}};
+static NEXT_MESSAGE_ID:AtomicU64=AtomicU64::new(1);
 use mnu_abi::status::Error;
 const MAX_OBJECT_HANDLES:usize=4;const MAX_MSG_SIZE:usize=32;const MAILBOX_CAP:usize=4;
 static DROPPED:AtomicUsize=AtomicUsize::new(0);

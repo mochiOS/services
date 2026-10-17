@@ -47,6 +47,7 @@ fn owned()->Box<Message>{
  message
 }
 fn empty(message:&Message){
+ assert_eq!(message.message_id,0);
  assert_eq!((message.from,message.to,message.to_slot,message.to_generation,message.call_id,message.len),(0,0,0,0,0,0));
  assert!(!message.is_reply&&!message.expects_reply);
  assert!(message.data.iter().all(|byte|*byte==0));

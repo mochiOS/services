@@ -25,7 +25,8 @@ fn production_retirement_releases_only_exact_destinations_and_rejects_late_sends
     let send_end = source[send..].find("\n}\n").unwrap() + send + 3;
     let mut program = String::from(
         r#"
-use std::{alloc::{alloc as system_alloc,Layout},collections::BTreeMap,sync::{Arc,Mutex,atomic::{AtomicUsize,AtomicBool,Ordering}}};
+use std::{alloc::{alloc as system_alloc,Layout},collections::BTreeMap,sync::{Arc,Mutex,atomic::{AtomicU64,AtomicUsize,AtomicBool,Ordering}}};
+static NEXT_MESSAGE_ID:AtomicU64=AtomicU64::new(1);
 use status::Error;
 const MAX_OBJECT_HANDLES:usize=4;const MAX_MSG_SIZE:usize=256;const MAX_THREADS:usize=2;
 const MAILBOX_CAP:usize=4;const MESSAGE_CACHE_CAP:usize=4;
