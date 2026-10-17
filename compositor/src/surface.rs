@@ -1039,7 +1039,7 @@ pub(crate) fn handle_request(
                 (None, PopupPlacement::default())
             };
             let Some(index) = surfaces.iter().position(|s| !s.live) else {
-                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ENOSPC));
+                put_u32(&mut reply, 0, STATUS_CAPACITY_EXCEEDED);
                 return reply;
             };
             let z = if role == SurfaceRole::Background {
@@ -1058,7 +1058,7 @@ pub(crate) fn handle_request(
             let handle = SurfaceHandle(token);
             let (window_id, window_token, window_slot) = if role == SurfaceRole::Toplevel {
                 let Some(slot) = windows.iter().position(|window| !window.live) else {
-                    put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ENOSPC));
+                    put_u32(&mut reply, 0, STATUS_CAPACITY_EXCEEDED);
                     return reply;
                 };
                 *next_window_id = next_window_id.wrapping_add(1).max(1);

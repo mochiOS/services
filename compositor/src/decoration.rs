@@ -175,7 +175,7 @@ pub(crate) fn handle_request(
                 return reply;
             };
             let Some(index) = surfaces.iter().position(|surface| !surface.live) else {
-                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ENOSPC));
+                put_u32(&mut reply, 0, STATUS_CAPACITY_EXCEEDED);
                 return reply;
             };
             let token = match generate_surface_token(surfaces) {

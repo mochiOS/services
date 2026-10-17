@@ -68,6 +68,11 @@ pub(crate) const WINDOW_STATE_NORMAL: u32 = 0;
 pub(crate) const WINDOW_STATE_MINIMIZED: u32 = 1;
 pub(crate) const WINDOW_STATE_MAXIMIZED: u32 = 2;
 
+/// Compositor-owned client/surface/window/modal capacity is exhausted.
+/// Unlike workspace and Linux launch replies, this protocol uses positive
+/// failure codes; keep the existing wire value independent of kernel errno.
+pub(crate) const STATUS_CAPACITY_EXCEEDED: u32 = 28;
+
 pub(crate) fn read_u32(buf: &[u8], offset: usize) -> Option<u32> {
     let bytes = buf.get(offset..offset + 4)?;
     Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))

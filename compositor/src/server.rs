@@ -341,7 +341,7 @@ fn handle_request(
                         modal_process,
                     });
                 } else {
-                    put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ENOSPC));
+                    put_u32(&mut reply, 0, STATUS_CAPACITY_EXCEEDED);
                     return reply;
                 }
                 *pointer_grab = None;
@@ -741,7 +741,7 @@ pub(crate) fn run() -> ! {
         let client = client_id_for_sender(&mut state.clients, sender, &mut state.next_client_id);
         if client == ClientId(0) {
             let mut reply = [0u8; 16];
-            put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ENOSPC));
+            put_u32(&mut reply, 0, STATUS_CAPACITY_EXCEEDED);
             let _ = platform::ipc::reply(sender, &reply);
             continue;
         }

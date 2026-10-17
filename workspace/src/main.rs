@@ -865,7 +865,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                mochi_user_syscall::ENOSPC as i32,
+                protocol::STATUS_CAPACITY_EXCEEDED,
                 0,
             );
             return;
@@ -1295,7 +1295,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                mochi_user_syscall::ENOSPC as i32,
+                protocol::STATUS_CAPACITY_EXCEEDED,
                 0,
             );
             return;
@@ -1304,7 +1304,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                mochi_user_syscall::ENOSPC as i32,
+                protocol::STATUS_CAPACITY_EXCEEDED,
                 0,
             );
             return;

@@ -15,7 +15,7 @@ fn workspace_error_survives_wire_encoding_and_client_decoding() {
         (syscall::EIO, 5),
         (syscall::EPERM, 1),
         (syscall::ENOENT, 2),
-        (syscall::ENOSPC, 28),
+        (protocol::STATUS_CAPACITY_EXCEEDED as i64 as u64, 28),
         (syscall::EAGAIN, 11),
         (mochios_posix_protocol::STATUS_EISDIR as u64, 21),
         (mochios_posix_protocol::STATUS_ENOTDIR as u64, 20),

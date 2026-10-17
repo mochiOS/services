@@ -183,7 +183,7 @@ fn handle_bundle_launch(
     let result = if !authorized {
         Err(mochi_user_syscall::EPERM as i32)
     } else if instances.len() >= MAX_INSTANCES {
-        Err(mochi_user_syscall::ENOSPC as i32)
+        Err(mochios_linux_gui_protocol::STATUS_INSTANCE_LIMIT)
     } else {
         decoded
             .map_err(|_| mochi_user_syscall::EINVAL as i32)
@@ -318,7 +318,7 @@ fn handle_launch(
     let result = if !authorized {
         Err(mochi_user_syscall::EPERM as i32)
     } else if instances.len() >= MAX_INSTANCES {
-        Err(mochi_user_syscall::ENOSPC as i32)
+        Err(mochios_linux_gui_protocol::STATUS_INSTANCE_LIMIT)
     } else {
         decoded
             .map_err(|_| mochi_user_syscall::EINVAL as i32)
