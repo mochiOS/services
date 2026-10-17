@@ -1072,16 +1072,12 @@ fn call_status(
 
 fn create_home(user: &UserRecord) -> Result<(), SetupError> {
     let home = Path::new(&user.home);
-    match fs::symlink_metadata(home) {
-        Ok(_) => {
-            return Err(SetupError::Storage(mochi_user_syscall::EEXIST as i32));
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(storage_error(error)),
+    if let Some(parent) = home.parent() {
+        fs::create_dir_all(parent).map_err(storage_error)?;
     }
-    if let Err(error) = fs::create_dir_all(home) {
-        return Err(storage_error(error));
-    }
+    // Only a successful exclusive mkdir establishes ownership for initialization
+    // and rollback. An existing home (including a symlink) must remain untouched.
+    fs::create_dir(home).map_err(storage_error)?;
     for directory in HOME_DIRECTORIES {
         if let Err(error) = fs::create_dir(home.join(directory)) {
             remove_home(user);
