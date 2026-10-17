@@ -21,6 +21,7 @@ pub use wire::normalize_failure;
 pub const STATUS_EIO:i32=-5;pub const STATUS_EAGAIN:i32=-11;
 #[path={errno:?}]pub mod newlib_errno;
 #[path={memory:?}]pub mod memory;
+#[path={guard:?}]pub mod upcall_guard;
 use std::cell::Cell;
 use core::ffi::c_void;
 type c_int=i32;
@@ -33,7 +34,13 @@ thread_local! {{
     static CALLS:Cell<usize>=const{{Cell::new(0)}};
     static SYNC_CALLS:Cell<usize>=const{{Cell::new(0)}};
     static EXPECTED:Cell<(u64,u64)>=const{{Cell::new((4096,4096))}};
+    static ASYNC:Cell<bool>=const{{Cell::new(false)}};
+    static CLOSED:Cell<usize>=const{{Cell::new(0)}};
 }}
+static DELIVERY:core::sync::atomic::AtomicU32=core::sync::atomic::AtomicU32::new(0);
+fn guarded()->bool{{DELIVERY.load(core::sync::atomic::Ordering::Acquire)!=0}}
+fn defer_native_delivery()->Option<upcall_guard::Guard<'static>>{{upcall_guard::Guard::enter(&DELIVERY)}}
+fn close_object_handle(handle:u32){{assert!(guarded());assert_eq!(handle,19);CLOSED.set(CLOSED.get()+1);}}
 fn result_with_errno<T:Copy>(result:Result<T,i32>,failure:T)->T{{
     match result{{Ok(value)=>value,Err(error)=>{{ERRNO.set(error);failure}}}}
 }}
@@ -45,12 +52,15 @@ use mnu_abi::status::Error as NativeError;
         status = root.join("user/crates/posix-protocol/src/status.rs"),
         errno = root.join("user/crates/posix-client/src/newlib_errno.rs"),
         memory = root.join("user/crates/posix-client/src/memory.rs"),
+        guard = root.join("user/crates/posix-client/src/upcall_guard.rs"),
     );
     // The memory module uses the real native access/option constants too.
     let abi = include_str!("../../../core/crates/abi/src/lib.rs");
     let mut constants = String::new();
     for line in abi.lines().filter(|line| {
-        line.starts_with("pub const MEMORY_ACCESS_") || line.starts_with("pub const MEMORY_MAP_")
+        line.starts_with("pub const MEMORY_ACCESS_")
+            || line.starts_with("pub const MEMORY_MAP_")
+            || line.starts_with("pub const MEMORY_SYNC_")
     }) {
         constants.push_str(line);
         constants.push('\n');
@@ -73,7 +83,8 @@ pub fn raw_syscall2(_:SyscallNumber,address:u64,length:u64)->RawSyscallResult{
     RawSyscallResult::new(crate::RESULT.get())
 }
 pub fn raw_syscall3(number:SyscallNumber,address:u64,length:u64,options:u64)->RawSyscallResult{
-    assert_eq!(number,SyscallNumber::MemorySync);assert_eq!(options,0);
+    assert_eq!(number,SyscallNumber::MemorySync);assert_eq!(options,if crate::ASYNC.get(){crate::MEMORY_SYNC_DEFERRED}else{0});
+    assert_eq!(crate::guarded(),crate::ASYNC.get());
     assert_eq!((address,length),crate::EXPECTED.get());crate::SYNC_CALLS.set(crate::SYNC_CALLS.get()+1);
     RawSyscallResult::new(crate::RESULT.get())
 }
@@ -130,12 +141,21 @@ fn main(){
     let before=SYNC_CALLS.get();
     for (address,length,flags,expected) in [(0,4096,4,22),(4097,4096,4,22),
         (4096,0,4,22),(4096,4096,0,22),(4096,4096,5,22),
-        (4096,4096,1,88),(4096,4096,6,88)] {
+        (4096,4096,3,88),(4096,4096,6,88)] {
         assert_eq!(msync(address as *mut c_void,length,flags),-1);assert_eq!(ERRNO.get(),expected);
     }
     assert_eq!(SYNC_CALLS.get(),before);
     RESULT.set(0);ERRNO.set(123);assert_eq!(msync(4096 as *mut c_void,4097,4),0);
     assert_eq!(ERRNO.get(),123);assert_eq!(SYNC_CALLS.get(),14);
+    ASYNC.set(true);RESULT.set(19);ERRNO.set(123);
+    assert_eq!(msync(4096 as *mut c_void,4097,1),0);
+    assert_eq!(ERRNO.get(),123);assert_eq!(CLOSED.get(),1);assert!(!guarded());
+    for (native,expected) in [(Error::InvalidAddress,12),(Error::AccessDenied,13),
+        (Error::InvalidArgument,22),(Error::ResourceUnavailable,12),(Error::NotReady,11),
+        (Error::BackingFailure,5)]{
+        RESULT.set(native.into_raw());assert_eq!(msync(4096 as *mut c_void,4097,1),-1);
+        assert_eq!(ERRNO.get(),expected);assert_eq!(CLOSED.get(),1);assert!(!guarded());
+    }
 }
 "#,
     );

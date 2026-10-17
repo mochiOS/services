@@ -79,6 +79,7 @@ int main(void) {
     if (write(fd, source, 1) != 1 || shared[40] != 0x77) return 34;
     if (munmap(source, page) != 0) return 35;
     STAGE("writeback");
+    if (msync(shared, page, MS_ASYNC) != 0) return 36;
     if (msync(shared, page, MS_SYNC) != 0) return 8;
     if (lseek(fd, (off_t)page + 37, SEEK_SET) != (off_t)page + 37) return 9;
     observed = 0;
@@ -117,6 +118,7 @@ int main(void) {
     if (restricted[37] != 0x77 || private[37] != 0x99) return 17;
     shared[38] = 0x88;
     STAGE("retained writeback");
+    if (msync(shared, page, MS_ASYNC) != 0) return 37;
     if (msync(shared, page, MS_SYNC) != 0 || restricted[38] != 0x88) return 18;
     STAGE("unmap");
     if (munmap(private, page) != 0 || munmap(restricted, page) != 0 ||
