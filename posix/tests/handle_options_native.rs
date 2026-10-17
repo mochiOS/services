@@ -130,7 +130,7 @@ mod syscall {
     program.push_str(probe::between(
         syscall,
         "pub(crate) fn object_native(",
-        "pub(crate) fn object_with_rights(",
+        "pub fn read(",
     ));
     program.push_str(probe::between(
         syscall,

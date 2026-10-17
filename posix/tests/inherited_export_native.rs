@@ -118,7 +118,7 @@ mod syscall {
     program.push_str(probe::between(
         include_str!("../../../core/src/syscall/handle.rs"),
         "pub(crate) fn object_native(",
-        "pub(crate) fn object_with_rights(",
+        "pub fn read(",
     ));
     let handle_source = include_str!("../../../core/src/syscall/handle.rs");
     program.push_str(probe::between(

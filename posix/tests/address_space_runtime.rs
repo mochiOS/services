@@ -1,4 +1,9 @@
 //! Compile and run the production AS adapter with a controlled native boundary.
+extern crate self as mochios_posix_client;
+#[path = "../../../user/crates/posix-client/src/memory.rs"]
+pub mod memory;
+#[path = "../../../user/crates/posix-client/src/newlib_errno.rs"]
+pub mod newlib_errno;
 use core::ffi::c_int;
 use mochios_posix_protocol as posix_protocol;
 use std::sync::Mutex;
@@ -24,12 +29,6 @@ fn trim_heap_reservation() -> Result<(), i32> {
 fn has_posix_environment() -> Result<bool, i32> {
     BACKEND.lock().unwrap().as_ref().unwrap().environment
 }
-fn map_kernel_errno(raw: i64) -> i32 {
-    (-raw) as i32
-}
-fn syscall_errno(result: Result<u64, i32>) -> Result<u64, i32> {
-    result
-}
 mod resource_policy {
     use super::*;
     pub fn read(resource: u32) -> Result<posix_protocol::ResourceLimit, i32> {
@@ -52,6 +51,12 @@ mod syscall {
     pub enum SyscallNumber {
         MemoryMap,
     }
+    pub struct RawResult(Result<u64, memory::Error>);
+    impl RawResult {
+        pub fn into_result(self) -> Result<u64, memory::Error> {
+            self.0
+        }
+    }
     pub fn raw_syscall6(
         number: SyscallNumber,
         address: u64,
@@ -60,25 +65,28 @@ mod syscall {
         options: u64,
         backing_handle: u64,
         backing_offset: u64,
-    ) -> Result<u64, i32> {
+    ) -> RawResult {
         assert_eq!(number, SyscallNumber::MemoryMap);
-        native(
-            false,
-            mnu_abi::memory_map::Request {
-                address,
-                length,
-                access,
-                options,
-                backing_handle,
-                backing_offset,
-                byte_ceiling: u64::MAX,
-                reserved: 0,
-            },
+        RawResult(
+            native(
+                false,
+                mnu_abi::memory_map::Request {
+                    address,
+                    length,
+                    access,
+                    options,
+                    backing_handle,
+                    backing_offset,
+                    byte_ceiling: u64::MAX,
+                    reserved: 0,
+                },
+            )
+            .map_err(|error| memory::Error(-i64::from(error))),
         )
     }
     pub mod memory {
         pub use mnu_abi::memory_map::Request;
-        pub struct Error(i64);
+        pub struct Error(pub i64);
         impl Error {
             pub fn raw(self) -> i64 {
                 self.0
@@ -195,10 +203,10 @@ fn policy_and_native_errors_propagate_without_retrying_an_unbounded_map() {
     BACKEND.lock().unwrap().as_mut().unwrap().policy_error = Some(5);
     assert_eq!(map(), Err(5));
     assert!(BACKEND.lock().unwrap().as_ref().unwrap().calls.is_empty());
-    for error in [12, 13, 38, 22, 14] {
+    for (error, expected) in [(12, 12), (13, 13), (38, 88), (22, 22), (14, 14)] {
         reset(Ok(true), 4096);
         BACKEND.lock().unwrap().as_mut().unwrap().native_error = Some(error);
-        assert_eq!(map(), Err(error));
+        assert_eq!(map(), Err(expected));
         assert_eq!(BACKEND.lock().unwrap().as_ref().unwrap().calls.len(), 1);
     }
 }

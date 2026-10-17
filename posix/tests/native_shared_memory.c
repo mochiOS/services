@@ -69,7 +69,7 @@ static int probe(void) {
     uint64_t future = map(object, 4096, READ, 8192);
     if ((int64_t)future < 0) return 7;
     if (native(MEMORY_UNMAP, future, 4096, 0, 0, 0, 0) != 0) return 44;
-    if ((int64_t)map(object, 8192, READ, UINT64_MAX & ~UINT64_C(4095)) != -22) return 45;
+    if ((int64_t)map(object, 8192, READ, UINT64_MAX & ~UINT64_C(4095)) != INT64_C(-262143)) return 45;
     if ((int64_t)map(object, 4096, READ | 4, 0) >= 0) return 8;
     if (native(HANDLE_CLOSE, object, 0, 0, 0, 0, 0) != 0) return 9;
     if (private_bytes[4096 + 37] != 0x61) return 42;

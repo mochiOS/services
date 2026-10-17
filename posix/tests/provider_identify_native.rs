@@ -82,7 +82,7 @@ use crate::{mnu_abi, task::{HandleRights,KernelObject,ObjectHandle}};
     program.push_str(probe::between(
         source,
         "pub(crate) fn object_native(",
-        "pub(crate) fn object_with_rights(",
+        "pub fn read(",
     ));
     program.push_str(probe::between(
         source,
