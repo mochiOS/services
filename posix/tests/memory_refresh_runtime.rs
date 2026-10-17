@@ -90,10 +90,7 @@ pub use native_status::Error as NativeError;
     ));
     program.push_str(r#"
 #[derive(PartialEq,Debug)]pub enum SyscallNumber{MemorySync,HandleReadAt,HandleWaitManyGuarded}
-pub const HANDLE_SIGNAL_READABLE:u64=1;
-pub const HANDLE_WAIT_INFINITE:u64=u64::MAX;
-#[derive(Default)]pub struct HandleWaitItem{pub handle:u32,pub minimum_write_bytes:u32,pub interests:u64,pub observed:u64}
-pub struct HandleWaitGuard{pub address:u64,pub expected:u64}
+pub use crate::{HANDLE_SIGNAL_READABLE,HANDLE_WAIT_INFINITE,HandleWaitItem,HandleWaitGuard};
 pub fn raw_syscall3(number:SyscallNumber,address:u64,length:u64,options:u64)->RawSyscallResult{
     assert_eq!(number,SyscallNumber::MemorySync);assert_eq!((address,length,options),(4096,4097,3));
     assert!(guarded());let error=SUBMIT_ERROR.get();RawSyscallResult::new(if error!=0{error}else{19})
@@ -132,6 +129,9 @@ pub fn raw_syscall4(number:SyscallNumber,a:u64,b:u64,c:u64,d:u64)->RawSyscallRes
 }
 }
 fn main(){
+    for (flags,options) in [(1,1),(3,3),(4,0),(6,3)]{
+        assert_eq!(memory::sync_policy(flags).unwrap().native_options(),options);
+    }
     for (mode,expected) in [(0,Ok(())),(1,Err(28)),(2,Err(5)),(3,Err(12)),
         (4,Ok(())),(5,Err(32)),(6,Err(5)),(7,Err(32)),(8,Ok(())),
         (9,Err(4)),(10,Err(4)),(11,Err(5)),(12,Err(5)),(13,Err(5)),(14,Ok(()))]{
@@ -147,6 +147,20 @@ fn main(){
 }
 "#);
     let abi = include_str!("../../../core/crates/abi/src/lib.rs");
+    for name in ["HandleWaitItem", "HandleWaitGuard"] {
+        program.push_str("#[repr(C)]\n#[derive(Default)]\n");
+        program.push_str(probe::between(
+            abi,
+            &format!("pub struct {name} {{"),
+            "\n}\n",
+        ));
+        program.push_str("\n}\n");
+    }
+    probe::constants(
+        &mut program,
+        abi,
+        &["HANDLE_SIGNAL_READABLE", "HANDLE_WAIT_INFINITE"],
+    );
     let constants: String = abi
         .lines()
         .filter(|line| {
