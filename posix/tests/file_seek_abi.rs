@@ -1,4 +1,3 @@
-
 #[test]
 fn legacy_seek_is_removed_from_abi_dispatch_and_kernel_fd_semantics() {
     let abi = include_str!("../../../core/crates/abi/src/lib.rs");
@@ -15,6 +14,14 @@ fn legacy_seek_is_removed_from_abi_dispatch_and_kernel_fd_semantics() {
     assert!(dispatch.contains("SyscallNumber::HandleSeek"));
     assert!(!filesystem.contains("fn seek_file_handle("));
     let handles = include_str!("../../../core/src/syscall/handle.rs");
-    assert!(handles.contains("KernelObject::File(_) => ENOTSUP"));
+    let seek = handles
+        .split("pub fn seek(")
+        .nth(1)
+        .unwrap()
+        .split("pub fn read_at(")
+        .next()
+        .unwrap();
+    assert!(!seek.contains("KernelObject::File("));
+    assert!(seek.contains("object_native(raw, HandleRights::SEEK)"));
     assert!(handles.contains("KernelObject::Provider(provider) => provider_seek("));
 }
