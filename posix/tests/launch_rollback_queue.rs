@@ -155,16 +155,27 @@ fn real_rollback_queue_retains_owner_across_native_and_ipc_failures() {
         9,
         b"metadata",
         |_| Err(syscall::SysError(-13)),
-        |owner| production::retain_failed_launch(owner, 41),
+        |owner| {
+            assert_eq!(
+                owner.retry_rollback(|_| panic!("unconfirmed exit must not reclaim")),
+                Err(syscall::SysError(
+                    mnu_abi::status::Error::NotReady.into_raw() as i64
+                ))
+            );
+            production::retain_failed_launch(owner, 41);
+        },
     );
     assert_eq!(result.unwrap_err(), syscall::SysError(-13));
     assert!(production::has_failed_launch_cleanup());
-    assert_eq!(STATE.lock().unwrap().events, ["terminate"]);
+    assert_eq!(STATE.lock().unwrap().events, ["terminate", "terminate"]);
 
     STATE.lock().unwrap().status_error = true;
     production::retry_failed_launch_cleanup();
     assert!(production::has_failed_launch_cleanup());
-    assert_eq!(STATE.lock().unwrap().events, ["terminate", "throttle"]);
+    assert_eq!(
+        STATE.lock().unwrap().events,
+        ["terminate", "terminate", "throttle"]
+    );
 
     STATE.lock().unwrap().status_error = false;
     // Even an ESRCH response cannot close a process whose exit is unconfirmed.
@@ -216,7 +227,7 @@ fn real_rollback_queue_retains_owner_across_native_and_ipc_failures() {
             .iter()
             .filter(|event| **event == "terminate")
             .count(),
-        2
+        3
     );
 
     // The ordinary acknowledged-success path likewise closes once.

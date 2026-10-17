@@ -63,7 +63,7 @@ impl NativeProcess {
             status = platform::process::handle_status(self.handle)?;
             if status.state != mnu_abi::PROCESS_STATE_EXITED {
                 return Err(platform::syscall::SysError::from_raw(
-                    mnu_abi::EAGAIN as i64,
+                    mnu_abi::status::Error::NotReady.into_raw() as i64,
                 ));
             }
         }
