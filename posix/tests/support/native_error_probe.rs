@@ -53,14 +53,18 @@ impl Drop for Temporary {
 }
 
 pub fn run(program: &str) {
-    run_with(program, None);
+    run_with(program, None, None);
 }
 
 pub fn run_with_toolchain(program: &str, toolchain: &str) {
-    run_with(program, Some(toolchain));
+    run_with(program, Some(toolchain), None);
 }
 
-fn run_with(program: &str, toolchain: Option<&str>) {
+pub fn run_with_cfg(program: &str, cfg: &str) {
+    run_with(program, None, Some(cfg));
+}
+
+fn run_with(program: &str, toolchain: Option<&str>, cfg: Option<&str>) {
     let temporary = Temporary(std::env::temp_dir().join(format!(
         "mochios-native-error-{}-{}",
         std::process::id(),
@@ -79,6 +83,9 @@ fn run_with(program: &str, toolchain: Option<&str>) {
         }
         None => Command::new("rustc"),
     };
+    if let Some(cfg) = cfg {
+        command.arg("--cfg").arg(cfg);
+    }
     let mut compiler = command
         .args(["--edition=2024", "-", "-o"])
         .arg(&binary)

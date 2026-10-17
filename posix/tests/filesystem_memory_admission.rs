@@ -339,6 +339,7 @@ fn native_terminal_failures_are_translated_without_retry_or_ticket_replacement()
         (status::Error::AlreadyExists, 17),
         (status::Error::NotFound, 2),
         (status::Error::PeerClosed, 32),
+        (status::Error::Unsupported, 95),
     ] {
         setup(Err(native.into_raw() as i32), Err(5));
         assert!(matches!(prepare(Some(42)), Err(error) if error == expected));

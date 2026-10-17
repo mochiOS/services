@@ -111,7 +111,7 @@ fn main(){
         }
         for error in [Error::LimitExceeded,Error::InvalidAddress,Error::ResourceUnavailable,
             Error::BackingFailure,Error::InvalidArgument,Error::AccessDenied,Error::NotReady,
-            Error::AlreadyExists,Error::NotFound,Error::PeerClosed]{
+            Error::AlreadyExists,Error::NotFound,Error::PeerClosed,Error::Unsupported]{
             MODE.set(10);FAILURE.set(error.into_raw());assert_eq!(invoke(&owner,opcode),Err(error.into_raw()));
         }
         for status in [-28i64,-95,provider::STATUS_BOUND_REACHED]{

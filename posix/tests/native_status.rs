@@ -24,7 +24,7 @@ fn mechanism_failure_is_typed_not_an_errno_and_survives_signed_wire_status() {
 #[test]
 fn unknown_native_codes_remain_errors_without_becoming_posix_numbers() {
     let tag = Error::LimitExceeded.into_raw() & !0xffff;
-    for code in [0, 11, 0xffff] {
+    for code in [0, 12, 0xffff] {
         let raw = tag | code;
         assert!(status::is_error(raw));
         assert_eq!(Error::from_raw(raw), None);
@@ -50,6 +50,7 @@ fn native_categories_translate_only_at_posix_boundary() {
         (Error::AlreadyExists, newlib_errno::EEXIST),
         (Error::NotFound, newlib_errno::ENOENT),
         (Error::PeerClosed, newlib_errno::EPIPE),
+        (Error::Unsupported, newlib_errno::ENOTSUP),
     ] {
         let raw = native.into_raw();
         assert_eq!(Error::from_raw(raw), Some(native));
@@ -89,6 +90,7 @@ fn wire_normalization_is_idempotent_and_distinct_from_c_errno() {
         (Error::AlreadyExists, -17, newlib_errno::EEXIST),
         (Error::NotFound, -2, newlib_errno::ENOENT),
         (Error::PeerClosed, -32, newlib_errno::EPIPE),
+        (Error::Unsupported, -95, newlib_errno::ENOTSUP),
     ] {
         for raw in [native.into_raw() as i64, -(native.into_raw() as i64)] {
             assert_eq!(normalize_failure(raw), wire);
