@@ -43,6 +43,45 @@ fn account_status_accepts_both_errno_forms_and_rejects_unrepresentable_errors() 
 }
 
 #[test]
+fn account_protocol_translates_native_tags_at_the_userspace_boundary() {
+    use syscall::NativeError;
+    for (error, expected) in [
+        (NativeError::LimitExceeded, -75),
+        (NativeError::InvalidAddress, -14),
+        (NativeError::ResourceUnavailable, -12),
+        (NativeError::BackingFailure, -5),
+        (NativeError::InvalidArgument, -22),
+        (NativeError::AccessDenied, -13),
+        (NativeError::NotReady, -11),
+        (NativeError::AlreadyExists, -17),
+        (NativeError::NotFound, -2),
+        (NativeError::PeerClosed, -32),
+        (NativeError::Unsupported, -95),
+    ] {
+        let raw = error.into_raw();
+        for input in [raw, (raw as i64).unsigned_abs()] {
+            let reply = Status {
+                request_id: 5,
+                status: account_status::wire_status(input),
+                generation: 9,
+            };
+            let mut bytes = [0; mochios_user_protocol::STATUS_LEN];
+            let length = reply.encode(&mut bytes).unwrap();
+            let decoded = Status::decode(&bytes[..length]).unwrap();
+            assert_eq!(decoded.status, expected);
+            assert_eq!(decoded.request_id, 5);
+            assert_eq!(decoded.generation, 9);
+        }
+    }
+    let unknown = (NativeError::Unsupported.into_raw() & !0xffff) | 0xffff;
+    assert_eq!(account_status::wire_status(unknown), -5);
+    assert_eq!(
+        account_status::wire_status((unknown as i64).unsigned_abs()),
+        -5
+    );
+}
+
+#[test]
 fn session_rejection_retains_signed_status_and_session_identity() {
     for raw in [
         syscall::EINVAL,
