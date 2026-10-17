@@ -13,6 +13,9 @@ enum {
   RECEIVE = 631,
   REPLY = 633,
   PROVIDER = 637,
+  STREAM_PAIR = 649,
+  STREAM_READ = 634,
+  STREAM_WRITE = 635,
   WAIT = 647,
   DEBUG = 660,
   READ = 673,
@@ -32,6 +35,9 @@ struct wait_item {
   uint32_t handle, minimum;
   uint64_t interests, observed;
 };
+struct stream_pair {
+  uint32_t read, write;
+};
 _Static_assert(sizeof(struct context) == 176, "ThreadCreateContext");
 _Static_assert(sizeof(struct wait_item) == 24, "HandleWaitItem");
 static _Alignas(16) unsigned char stack[32768];
@@ -39,6 +45,8 @@ static _Atomic uint64_t backing;
 static _Atomic uint64_t read_backing;
 static _Atomic unsigned allow_sync, entered, syncs, writes, failed;
 static _Atomic unsigned change_on_sync;
+static _Atomic uint64_t fault_stream;
+static _Atomic unsigned stream_probe, stream_calls;
 static _Atomic unsigned char stored = 'a';
 void *memset(void *target, int byte, __SIZE_TYPE__ length) {
   volatile unsigned char *p = target;
@@ -121,6 +129,14 @@ __attribute__((noreturn)) static void provider(void) {
     if (opcode == 9)
       put64(response + 24, 77);
     else if (opcode == 6) {
+      if (atomic_exchange_explicit(&stream_probe, 0, memory_order_acq_rel)) {
+        unsigned char heartbeat = 'h';
+        CHECK(native(STREAM_WRITE,
+                     atomic_load_explicit(&fault_stream, memory_order_acquire),
+                     (uintptr_t)&heartbeat, 1, 0, 0, 0),
+              1);
+        atomic_fetch_add_explicit(&stream_calls, 1, memory_order_release);
+      }
       CHECK(get64(request + 24), 0);
       CHECK((uint32_t)get64(request + 32), 4096);
       put64(response + 24, 4096);
@@ -173,6 +189,12 @@ static void wait_result(uint64_t handle, uint64_t phase, uint64_t error) {
 }
 __attribute__((used, noreturn)) static void probe_main(void) {
   text("native-async-writeback: start\n");
+  struct stream_pair input, heartbeat;
+  CHECK(native(STREAM_PAIR, (uintptr_t)&input, 0, 0, 0, 0, 0), 0);
+  CHECK(native(STREAM_PAIR, (uintptr_t)&heartbeat, 0, 0, 0, 0, 0), 0);
+  atomic_store_explicit(&fault_stream, heartbeat.write, memory_order_release);
+  unsigned char byte = 'a';
+  CHECK(native(STREAM_WRITE, input.write, (uintptr_t)&byte, 1, 0, 0, 0), 1);
   struct context context = {0};
   context.entry = (uintptr_t)provider;
   context.stack = (uintptr_t)(stack + sizeof(stack) - 8);
@@ -187,6 +209,17 @@ __attribute__((used, noreturn)) static void probe_main(void) {
   if (address <= 0)
     fail(__LINE__, address);
   volatile unsigned char *p = (void *)(uintptr_t)address;
+  // The absent output page's provider uses another stream during preparation.
+  // The input read must not retain PIPE across that provider IPC.
+  atomic_store_explicit(&stream_probe, 1, memory_order_release);
+  CHECK(native(STREAM_READ, input.read, address, 1, 0, 0, 0), 1);
+  CHECK(atomic_load_explicit(&stream_calls, memory_order_acquire), 1);
+  CHECK(native(STREAM_READ, heartbeat.read, (uintptr_t)&byte, 1, 0, 0, 0), 1);
+  CHECK(byte, 'h');
+  CHECK(native(CLOSE, input.read, 0, 0, 0, 0, 0), 0);
+  CHECK(native(CLOSE, input.write, 0, 0, 0, 0, 0), 0);
+  CHECK(native(CLOSE, heartbeat.read, 0, 0, 0, 0, 0), 0);
+  CHECK(native(CLOSE, heartbeat.write, 0, 0, 0, 0, 0), 0);
   CHECK(p[0], 'a');
   int64_t private_address = native(MAP, 0, 4096, 3, 0, object, 0);
   if (private_address <= 0)
@@ -277,7 +310,7 @@ __attribute__((used, noreturn)) static void probe_main(void) {
   text("native-async-writeback: PASS pending, wake, success, opaque failure, "
        "rights, close-before-completion, shared refresh, private preservation, "
        "rollback, read-only sync and refresh use original writer after handle "
-       "close\n");
+       "close, provider stream I/O during receive fault\n");
   for (;;)
     native(YIELD, 0, 0, 0, 0, 0, 0);
 }
