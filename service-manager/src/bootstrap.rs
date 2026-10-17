@@ -1209,9 +1209,9 @@ fn resident(
                         request.action,
                         session.id,
                         match error {
-                            TeardownError::InvalidRoot => mochi_user_syscall::EINVAL,
-                            TeardownError::MissingOwner => mochi_user_syscall::ESRCH,
-                        } as i32,
+                            TeardownError::InvalidRoot => mochi_user_syscall::EINVAL as i32,
+                            TeardownError::MissingOwner => mochios_posix_protocol::STATUS_ESRCH,
+                        },
                     ),
                 }
             }

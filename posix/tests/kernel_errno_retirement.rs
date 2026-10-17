@@ -9,10 +9,10 @@ fn migrated_file_size_status_is_not_part_of_the_kernel_abi() {
 }
 
 #[test]
-fn retired_data_and_message_errno_are_not_exported_by_native_layers() {
+fn retired_errno_are_not_exported_by_native_layers() {
     let abi = include_str!("../../../core/crates/abi/src/lib.rs");
     let syscall = include_str!("../../../user/crates/syscall/src/lib.rs");
-    for name in ["ENODATA", "EMSGSIZE"] {
+    for name in ["ENODATA", "EMSGSIZE", "ESRCH"] {
         assert!(!abi.contains(&format!("pub const {name}:")));
         assert!(
             !syscall
@@ -20,6 +20,16 @@ fn retired_data_and_message_errno_are_not_exported_by_native_layers() {
                 .any(|token| token == name)
         );
     }
+}
+
+#[test]
+fn session_teardown_missing_owner_is_a_userspace_posix_status() {
+    let bootstrap = include_str!("../../service-manager/src/bootstrap.rs");
+    assert!(
+        bootstrap.contains("TeardownError::MissingOwner => mochios_posix_protocol::STATUS_ESRCH")
+    );
+    let protocol = include_str!("../../../user/crates/posix-protocol/src/lib.rs");
+    assert!(protocol.contains("pub const STATUS_ESRCH: i32 = -3;"));
 }
 
 #[test]
