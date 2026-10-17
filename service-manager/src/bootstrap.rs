@@ -763,27 +763,27 @@ impl BootstrapOperations for Runtime {
                     mochios_posix_protocol::CONTROL_HANDLE_KEY,
                     endpoint,
                 ) {
-                    platform::logln!(
+                    boot_status(format_args!(
                         "service-manager.service: local POSIX endpoint bind failed status={}",
                         error.raw()
-                    );
+                    ));
                     return false;
                 }
                 if let Err(error) = crate::spawn_support::install_early_posix_endpoints(
                     endpoint,
                     self.logger_endpoint,
                 ) {
-                    platform::logln!(
+                    boot_status(format_args!(
                         "service-manager.service: capability POSIX endpoint install failed errno={}",
                         crate::spawn_support::errno(error)
-                    );
+                    ));
                     return false;
                 }
                 self.posix_endpoint = Some(endpoint);
-                platform::logln!(
+                boot_status(format_args!(
                     "service-manager.service: posix.service ready endpoint={}",
                     endpoint
-                );
+                ));
                 true
             }
             Err(error) => {

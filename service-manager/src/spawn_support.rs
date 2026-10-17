@@ -40,8 +40,15 @@ fn install_posix_endpoint_for(
     opcode: u32,
     endpoint: platform::handle::Handle,
 ) -> Result<(), mochi_user_syscall::SysError> {
-    let destination = platform::process::find_by_name(service_name)?;
-    install_posix_endpoint_at(destination, opcode, endpoint)
+    let result = platform::process::find_by_name(service_name)
+        .and_then(|destination| install_posix_endpoint_at(destination, opcode, endpoint));
+    if let Err(error) = result {
+        let _ = platform::logger::write_status_fmt(format_args!(
+            "service-manager.service: POSIX endpoint handoff to {service_name} failed status={}\n",
+            error.raw()
+        ));
+    }
+    result
 }
 
 fn install_posix_endpoint_at(
