@@ -5534,6 +5534,44 @@ fn controlling_terminals_are_bound_to_sessions_and_foreground_groups() {
         protocol::decode_process_id_request(&response.payload),
         Ok(142)
     );
+    for caller in [leader, member] {
+        let response = service.handle_terminal(
+            caller,
+            terminal_identity(caller),
+            terminal_request(protocol::OP_TERMINAL_GET_SESSION),
+            &[],
+            77,
+        );
+        assert_eq!(response.header.status, protocol::STATUS_OK);
+        assert_eq!(
+            protocol::decode_process_id_request(&response.payload),
+            Ok(141)
+        );
+        for (flags, payload) in [(1, &[][..]), (0, &[1][..])] {
+            let response = service.handle_terminal(
+                caller,
+                terminal_identity(caller),
+                protocol::Header {
+                    flags,
+                    ..terminal_request(protocol::OP_TERMINAL_GET_SESSION)
+                },
+                payload,
+                77,
+            );
+            assert_eq!(response.header.status, STATUS_EINVAL);
+        }
+        let response = service.handle_terminal(
+            caller,
+            mnu_abi::ExecutionIdentity {
+                process_id: 999,
+                thread_id: 1,
+            },
+            terminal_request(protocol::OP_TERMINAL_GET_SESSION),
+            &[],
+            77,
+        );
+        assert_eq!(response.header.status, protocol::STATUS_EPERM);
+    }
     assert_eq!(
         service.signal_terminal_foreground_group(77, protocol::SIGNAL_TSTP),
         Ok(1)
@@ -5564,19 +5602,21 @@ fn controlling_terminals_are_bound_to_sessions_and_foreground_groups() {
         &[],
     );
     assert_eq!(response.header.status, protocol::STATUS_OK);
-    assert_eq!(
-        service
-            .handle_terminal(
-                other_leader,
-                terminal_identity(other_leader),
-                terminal_request(protocol::OP_TERMINAL_GET_FOREGROUND),
-                &[],
-                77,
-            )
-            .header
-            .status,
-        protocol::STATUS_ENOTTY
-    );
+    for opcode in [protocol::OP_TERMINAL_GET_FOREGROUND, protocol::OP_TERMINAL_GET_SESSION] {
+        assert_eq!(
+            service
+                .handle_terminal(
+                    other_leader,
+                    terminal_identity(other_leader),
+                    terminal_request(opcode),
+                    &[],
+                    77,
+                )
+                .header
+                .status,
+            protocol::STATUS_ENOTTY
+        );
+    }
     assert_eq!(
         service
             .handle_terminal(
@@ -5617,6 +5657,16 @@ fn controlling_terminals_are_bound_to_sessions_and_foreground_groups() {
         protocol::STATUS_OK
     );
     assert!(service.controlling_terminal(77).is_none());
+    for (caller, terminal) in [(leader, 77), (member, 77), (leader, 999), (other_leader, 77)] {
+        let response = service.handle_terminal(
+            caller,
+            terminal_identity(caller),
+            terminal_request(protocol::OP_TERMINAL_GET_SESSION),
+            &[],
+            terminal,
+        );
+        assert_eq!(response.header.status, protocol::STATUS_ENOTTY);
+    }
 }
 
 fn terminal_exit_family() -> (

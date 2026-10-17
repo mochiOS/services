@@ -2377,21 +2377,35 @@ impl<H: Copy> PosixService<H> {
             protocol::OP_TERMINAL_RELEASE if header.flags == 0 && payload.is_empty() => self
                 .release_controlling_terminal(peer.process_id, terminal_id)
                 .map(|_| Vec::new()),
-            protocol::OP_TERMINAL_GET_FOREGROUND if header.flags == 0 && payload.is_empty() => self
-                .terminal_foreground_process_group(peer.process_id, terminal_id)
-                .and_then(|group| {
-                    let group = i64::try_from(group).map_err(|_| STATUS_EINVAL)?;
-                    let mut output = vec![0; protocol::PROCESS_ID_REQUEST_LEN];
-                    protocol::encode_process_id_request(group, &mut output)
-                        .map_err(|_| STATUS_EINVAL)?;
-                    Ok(output)
-                }),
+            protocol::OP_TERMINAL_GET_FOREGROUND | protocol::OP_TERMINAL_GET_SESSION
+                if header.flags == 0 && payload.is_empty() =>
+            {
+                // Reuse the same controlling-terminal authorization for both
+                // queries. State remains locked throughout this observation.
+                self.terminal_foreground_process_group(peer.process_id, terminal_id)
+                    .and_then(|foreground| {
+                        let group = if header.opcode == protocol::OP_TERMINAL_GET_SESSION {
+                            self.session_ids
+                                .get(&peer.process_id)
+                                .copied()
+                                .ok_or(protocol::STATUS_ESRCH)?
+                        } else {
+                            foreground
+                        };
+                        let group = i64::try_from(group).map_err(|_| STATUS_EINVAL)?;
+                        let mut output = vec![0; protocol::PROCESS_ID_REQUEST_LEN];
+                        protocol::encode_process_id_request(group, &mut output)
+                            .map_err(|_| STATUS_EINVAL)?;
+                        Ok(output)
+                    })
+            }
             protocol::OP_TERMINAL_SET_FOREGROUND if header.flags == 0 => self
                 .set_terminal_foreground_process_group(sender, terminal_id, payload)
                 .map(|_| Vec::new()),
             protocol::OP_TERMINAL_ACQUIRE
             | protocol::OP_TERMINAL_RELEASE
             | protocol::OP_TERMINAL_GET_FOREGROUND
+            | protocol::OP_TERMINAL_GET_SESSION
             | protocol::OP_TERMINAL_SET_FOREGROUND => Err(STATUS_EINVAL),
             _ => Err(protocol::STATUS_ENOSYS),
         };
@@ -3335,6 +3349,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_TERMINAL_ACQUIRE
             | protocol::OP_TERMINAL_RELEASE
             | protocol::OP_TERMINAL_GET_FOREGROUND
+            | protocol::OP_TERMINAL_GET_SESSION
             | protocol::OP_TERMINAL_SET_FOREGROUND
             | protocol::OP_SESSION_INFO
             | protocol::OP_WAITED_CHILD_CPU_USAGE

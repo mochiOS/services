@@ -85,7 +85,10 @@ impl ObjectTransport for &Replies {
             output[0] = 0;
             return Ok(1);
         }
-        let mut payload = if self.opcode == wire::OP_TERMINAL_GET_FOREGROUND {
+        let mut payload = if matches!(
+            self.opcode,
+            wire::OP_TERMINAL_GET_FOREGROUND | wire::OP_TERMINAL_GET_SESSION
+        ) {
             let group: i64 = match self.mode {
                 8 => 0,
                 9 => -1,
@@ -172,9 +175,13 @@ fn terminal_controls_never_close_the_borrowed_terminal_or_replay_a_mutation() {
         wire::OP_TERMINAL_ACQUIRE,
         wire::OP_TERMINAL_RELEASE,
         wire::OP_TERMINAL_GET_FOREGROUND,
+        wire::OP_TERMINAL_GET_SESSION,
         wire::OP_TERMINAL_SET_FOREGROUND,
     ] {
-        for mode in 0..if opcode == wire::OP_TERMINAL_GET_FOREGROUND {
+        for mode in 0..if matches!(
+            opcode,
+            wire::OP_TERMINAL_GET_FOREGROUND | wire::OP_TERMINAL_GET_SESSION
+        ) {
             10
         } else {
             8
@@ -198,6 +205,9 @@ fn terminal_controls_never_close_the_borrowed_terminal_or_replay_a_mutation() {
                     wire::OP_TERMINAL_SET_FOREGROUND => {
                         client.set_terminal_foreground_process_group(terminal, 71)
                     }
+                    wire::OP_TERMINAL_GET_SESSION => client
+                        .terminal_session_id(terminal)
+                        .map(|session| assert_eq!(session, 71)),
                     _ => client
                         .terminal_foreground_process_group(terminal)
                         .map(|group| assert_eq!(group, 71)),

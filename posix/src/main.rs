@@ -327,6 +327,7 @@ fn main() {
                 header.opcode,
                 protocol::OP_TERMINAL_ACQUIRE | protocol::OP_TERMINAL_RELEASE
                     | protocol::OP_TERMINAL_GET_FOREGROUND | protocol::OP_TERMINAL_SET_FOREGROUND
+                    | protocol::OP_TERMINAL_GET_SESSION
             ))
         {
             Some(identify_pty_terminal(
@@ -689,6 +690,7 @@ fn main() {
                     protocol::OP_TERMINAL_ACQUIRE
                         | protocol::OP_TERMINAL_RELEASE
                         | protocol::OP_TERMINAL_GET_FOREGROUND
+                        | protocol::OP_TERMINAL_GET_SESSION
                         | protocol::OP_TERMINAL_SET_FOREGROUND
                 ) && attachments.len() == 1
                     && attachments[0].rights == platform::handle::HANDLE_RIGHT_TRANSFER =>
