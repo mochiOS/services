@@ -474,12 +474,11 @@ impl NetworkStack {
         payload: &[u8],
         now: u64,
     ) -> Result<(), u64> {
-        let config = self.config.ok_or(
-            mochios_net_device_protocol::STATUS_NETWORK_UNAVAILABLE as i64 as u64,
-        )?;
-        let hop = next_hop(config, destination).ok_or(
-            mochios_net_device_protocol::STATUS_NETWORK_UNAVAILABLE as i64 as u64,
-        )?;
+        let config = self
+            .config
+            .ok_or(mochios_net_device_protocol::STATUS_NETWORK_UNAVAILABLE as i64 as u64)?;
+        let hop = next_hop(config, destination)
+            .ok_or(mochios_net_device_protocol::STATUS_NETWORK_UNAVAILABLE as i64 as u64)?;
         if let Some(mac) = self.resolve(hop, now)? {
             return self.send_ipv4(destination, protocol, payload, mac);
         }
@@ -806,7 +805,7 @@ impl NetworkStack {
                 self.remove_tcp_connection(handle, owner);
                 self.stats.tcp_connections_failed =
                     self.stats.tcp_connections_failed.saturating_add(1);
-                return Err(mochi_user_syscall::EPIPE);
+                return Err(mochios_net_device_protocol::STATUS_PEER_CLOSED as i64 as u64);
             }
             if now >= deadline {
                 self.tcp.get_mut(handle, owner).map_err(tcp_errno)?.abort();
@@ -855,7 +854,7 @@ impl NetworkStack {
             }
             if matches!(connection.state, TcpState::Reset | TcpState::Closed) {
                 self.remove_tcp_connection(handle, owner);
-                return Err(mochi_user_syscall::EPIPE);
+                return Err(mochios_net_device_protocol::STATUS_PEER_CLOSED as i64 as u64);
             }
             if now >= deadline {
                 connection.abort();
@@ -887,7 +886,7 @@ impl NetworkStack {
                 let connection = self.tcp.get_mut(handle, owner).map_err(tcp_errno)?;
                 if connection.state == TcpState::Reset {
                     self.remove_tcp_connection(handle, owner);
-                    return Err(mochi_user_syscall::EPIPE);
+                    return Err(mochios_net_device_protocol::STATUS_PEER_CLOSED as i64 as u64);
                 }
                 let previous_window = connection.local_window();
                 let length = connection.receive(out);
@@ -942,7 +941,7 @@ impl NetworkStack {
             }
             if connection.state == TcpState::Reset {
                 self.remove_tcp_connection(handle, owner);
-                return Err(mochi_user_syscall::EPIPE);
+                return Err(mochios_net_device_protocol::STATUS_PEER_CLOSED as i64 as u64);
             }
             if now >= deadline {
                 connection.abort();
@@ -1070,7 +1069,9 @@ fn tcp_errno(error: TcpConnectionError) -> u64 {
         | TcpConnectionError::ReceiveBufferFull
         | TcpConnectionError::Capacity
         | TcpConnectionError::PortUnavailable => mochi_user_syscall::EAGAIN,
-        TcpConnectionError::ConnectionReset => mochi_user_syscall::EPIPE,
+        TcpConnectionError::ConnectionReset => {
+            mochios_net_device_protocol::STATUS_PEER_CLOSED as i64 as u64
+        }
         TcpConnectionError::Timeout | TcpConnectionError::RetryLimit => mochi_user_syscall::EAGAIN,
         TcpConnectionError::InvalidState | TcpConnectionError::InvalidAcknowledgment => {
             mochi_user_syscall::EINVAL

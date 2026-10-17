@@ -41,7 +41,7 @@ mod input {
         setup(vec![Err(SysError::from(NativeError::NotReady.into_raw())),Ok(1),Ok(1)]);
         send_event_reliably(&subscribers,b"key");check(3,1);
         STATE.with_borrow(|s|assert_eq!(s.sends,vec![(41,b"key".to_vec()),(41,b"key".to_vec()),(42,b"key".to_vec())]));
-        for status in [EAGAIN,EACCES,EPIPE,NativeError::ResourceUnavailable.into_raw(),NativeError::NotFound.into_raw()] {
+        for status in [EAGAIN,EACCES,(-32_i64) as u64,NativeError::ResourceUnavailable.into_raw(),NativeError::NotFound.into_raw(),NativeError::PeerClosed.into_raw()] {
             setup(vec![Err(SysError::from(status)),Ok(1)]);
             send_event_reliably(&subscribers,b"key");check(2,0);
         }
@@ -88,7 +88,7 @@ mod compositor {
                 assert_eq!(s.sends[0],s.sends[1]);assert_eq!(s.sends[0].0,41);
                 assert_eq!(s.sends[0].1,encode_surface_event(57,kind,-2,3,4));
             });
-            for status in [EAGAIN,EACCES,EPIPE,NativeError::ResourceUnavailable.into_raw(),NativeError::NotFound.into_raw()] {
+            for status in [EAGAIN,EACCES,(-32_i64) as u64,NativeError::ResourceUnavailable.into_raw(),NativeError::NotFound.into_raw(),NativeError::PeerClosed.into_raw()] {
                 setup(vec![Err(SysError::from(status))]);send_event(41,57,kind,-2,3,4);check(1,0);
             }
             setup(vec![Err(SysError::from(NativeError::NotReady.into_raw()));RELIABLE_SEND_RETRIES]);

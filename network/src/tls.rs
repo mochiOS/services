@@ -501,7 +501,7 @@ fn receive_one_tls(
         .map_err(transport_error)?;
     if length == 0 {
         return Err(operation_error(
-            mochi_user_syscall::EPIPE,
+            mochios_net_device_protocol::STATUS_PEER_CLOSED as i64 as u64,
             TlsFailure::Protocol,
         ));
     }

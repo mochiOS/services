@@ -552,9 +552,14 @@ fn bootstrap_client_rejects_corrupt_replies_and_propagates_transport_failure() {
         assert_eq!(client.read_file("/file", 16).unwrap_err().raw(), -5);
     }
     let mut client = bootstrap_file::Client::new(4, |_, _: &[u8], _: &mut [u8]| {
-        Err(SysError::from_raw(syscall::EPIPE as i64))
+        Err(SysError::from_raw(
+            syscall::NativeError::PeerClosed.into_raw() as i64,
+        ))
     });
-    assert_eq!(client.read_file("/file", 16).unwrap_err().raw(), -32);
+    assert_eq!(
+        client.read_file("/file", 16).unwrap_err().native_error(),
+        Some(syscall::NativeError::PeerClosed)
+    );
     let mut client = bootstrap_file::Client::new(4, |_, request: &[u8], reply: &mut [u8]| {
         let (header, _) = wire::decode(request).unwrap();
         Ok(wire::encode(

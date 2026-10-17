@@ -34,6 +34,16 @@ mod production {
     include!("../../network/src/stack.rs");
 
     #[test]
+    fn reset_maps_to_the_network_wire_status_without_posix_kernel_errno() {
+        let raw = tcp_errno(TcpConnectionError::ConnectionReset);
+        assert_eq!(raw as i64, -32);
+        assert_eq!(
+            raw,
+            mochios_net_device_protocol::STATUS_PEER_CLOSED as i64 as u64
+        );
+    }
+
+    #[test]
     fn missing_configuration_rejects_routed_udp_dns_and_tcp_before_io() {
         let mut stack = NetworkStack::new(DriverClient, 7).unwrap();
         let failure = mochios_net_device_protocol::STATUS_NETWORK_UNAVAILABLE as i64 as u64;

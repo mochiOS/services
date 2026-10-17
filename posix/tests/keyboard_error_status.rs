@@ -44,7 +44,7 @@ fn main(){
         assert_eq!(s.yields,2);assert_eq!(s.packets.len(),3);assert!(s.replies.is_empty());
         assert!(s.packets.iter().all(|p|p==&[platform::input::RAW_KIND_KEYBOARD,0,0,0,0x1e,0,0,0]));
     });
-    for status in [EAGAIN,EACCES,EPIPE,ENOENT,NativeError::ResourceUnavailable.into_raw(),NativeError::NotFound.into_raw()] {
+    for status in [EAGAIN,EACCES,(-32_i64) as u64,ENOENT,NativeError::ResourceUnavailable.into_raw(),NativeError::NotFound.into_raw(),NativeError::PeerClosed.into_raw()] {
         STATE.set(State{replies:vec![Err(SysError::from(status))].into(),..State::default()});
         let mut endpoint=41;send_keyboard_byte(&mut endpoint,0x9e);assert_eq!(endpoint,0);
         STATE.with_borrow(|s|{assert_eq!(s.yields,0);assert_eq!(s.packets.len(),1);assert!(s.replies.is_empty());});
