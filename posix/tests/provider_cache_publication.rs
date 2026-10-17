@@ -96,6 +96,8 @@ thread_local! {
     static LOWER_EDGE: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
     static SYNC_ERROR: Cell<Option<u64>> = const { Cell::new(None) };
     static SYNC_CALLS: Cell<usize> = const { Cell::new(0) };
+    static INVALID_READ_COUNT: Cell<bool> = const { Cell::new(false) };
+    static INVALID_WRITE_COUNT: Cell<bool> = const { Cell::new(false) };
 }
 
 fn cache_edge<T>() {
@@ -195,6 +197,9 @@ mod syscall {
             offset: u64,
             output: &mut [u8],
         ) -> Result<usize, u64> {
+            if crate::INVALID_READ_COUNT.with(|value| value.get()) {
+                return Ok(output.len() + 1);
+            }
             let count = {
                 let mut lower = crate::LOWER.lock().unwrap();
                 lower.reads += 1;
@@ -216,6 +221,9 @@ mod syscall {
             offset: u64,
             input: &[u8],
         ) -> Result<usize, u64> {
+            if crate::INVALID_WRITE_COUNT.with(|value| value.get()) {
+                return Ok(input.len() + 1);
+            }
             let start = usize::try_from(offset).map_err(|_| super::EINVAL)?;
             let mut lower = crate::LOWER.lock().unwrap();
             let length = (start + input.len()).max(lower.bytes.len());
@@ -524,6 +532,63 @@ fn reset_lower(bytes: &[u8]) {
 }
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[test]
+fn native_vm_io_rejects_overflow_before_backing_access_and_empty_writes_do_no_io() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    reset_lower(b"unchanged");
+    let object = provider_object_for_endpoint(0x1a01);
+    let mut output = [0x5a; 2];
+    for offset in [u64::MAX, u64::MAX - 1] {
+        assert_eq!(
+            object.read_at(offset, &mut output),
+            Err(mnu_abi::status::Error::LimitExceeded.into_raw())
+        );
+        assert_eq!(
+            object.write_at(offset, b"xy"),
+            Err(mnu_abi::status::Error::LimitExceeded.into_raw())
+        );
+    }
+    assert_eq!(output, [0x5a; 2]);
+    assert_eq!(object.read_at(u64::MAX, &mut []), Ok(0));
+    assert_eq!(object.write_at(u64::MAX, &[]), Ok(0));
+    let owner = task::ProviderObject {
+        endpoint_thread_id: 0x1a01,
+        endpoint_slot: 1,
+        endpoint_generation: 1,
+    };
+    assert_eq!(
+        vm_object::overlay_provider_range(&owner, 93, u64::MAX, &mut output),
+        Err(mnu_abi::status::Error::LimitExceeded.into_raw())
+    );
+    assert_eq!(output, [0x5a; 2]);
+    let lower = LOWER.lock().unwrap();
+    assert_eq!(lower.reads, 0);
+    assert_eq!(lower.bytes, b"unchanged");
+}
+
+#[test]
+fn impossible_backing_counts_return_native_failure_without_publishing_cache_bytes() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    reset_lower(b"old");
+    let object = provider_object_for_endpoint(0x1a02);
+    let mut output = [0x5a; 3];
+    INVALID_READ_COUNT.with(|value| value.set(true));
+    let result = object.read_at(0, &mut output);
+    INVALID_READ_COUNT.with(|value| value.set(false));
+    assert_eq!(result, Err(mnu_abi::status::Error::BackingFailure.into_raw()));
+    assert_eq!(output, [0x5a; 3]);
+    assert_eq!(object.read_at(0, &mut output), Ok(3));
+    assert_eq!(&output, b"old");
+
+    INVALID_WRITE_COUNT.with(|value| value.set(true));
+    let result = object.write_at(0, b"new");
+    INVALID_WRITE_COUNT.with(|value| value.set(false));
+    assert_eq!(result, Err(mnu_abi::status::Error::BackingFailure.into_raw()));
+    assert_eq!(object.read_at(0, &mut output), Ok(3));
+    assert_eq!(&output, b"old");
+    assert_eq!(LOWER.lock().unwrap().bytes, b"old");
+}
 
 #[test]
 fn production_cache_never_republishes_invalidated_lower_snapshots() {
