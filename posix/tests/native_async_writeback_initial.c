@@ -237,6 +237,16 @@ __attribute__((used, noreturn)) static void probe_main(void) {
   while (atomic_load_explicit(&syncs, memory_order_acquire) < 3)
     native(YIELD, 0, 0, 0, 0, 0, 0);
   CHECK(native(CLOSE, object, 0, 0, 0, 0, 0), 0);
+  unsigned writes_before = atomic_load_explicit(&writes, memory_order_acquire);
+  atomic_store_explicit(&failed, 1, memory_order_release);
+  CHECK(native(SYNC, read_address, 4096, 0, 0, 0, 0), INT64_C(-5));
+  if (atomic_load_explicit(&writes, memory_order_acquire) <= writes_before)
+    fail(__LINE__, atomic_load(&writes));
+  atomic_store_explicit(&failed, 0, memory_order_release);
+  CHECK(native(SYNC, read_address, 4096, 0, 0, 0, 0), 0);
+  completion = submit(read_address);
+  wait_result(completion, 1, 0);
+  CHECK(native(CLOSE, completion, 0, 0, 0, 0, 0), 0);
   atomic_store_explicit(&change_on_sync, 1, memory_order_release);
   completion = native(SYNC, read_address, 4096, 3, 0, 0, 0);
   if (completion <= 0)
@@ -266,7 +276,8 @@ __attribute__((used, noreturn)) static void probe_main(void) {
     fail(__LINE__, atomic_load(&writes));
   text("native-async-writeback: PASS pending, wake, success, opaque failure, "
        "rights, close-before-completion, shared refresh, private preservation, "
-       "rollback, read-only refresh uses original writer after handle close\n");
+       "rollback, read-only sync and refresh use original writer after handle "
+       "close\n");
   for (;;)
     native(YIELD, 0, 0, 0, 0, 0, 0);
 }
