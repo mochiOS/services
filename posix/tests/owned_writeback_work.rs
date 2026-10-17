@@ -271,3 +271,75 @@ fn failed_batch_retains_all_targets_and_never_executes_a_later_span() {
     assert_eq!(seen, [(17, 8192, 4096), (23, 65536, 8192), (29, 0, 4096)]);
     drop(retired(editing(|| queue.complete(claim, Ok(())))));
 }
+
+#[test]
+fn acknowledged_failure_releases_capacity_but_cleanup_waits_until_after_unlock() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let mut queue = Queue::<Backing, 1>::new();
+    submit(
+        &mut queue,
+        Backing {
+            id: 31,
+            drops: Arc::clone(&drops),
+        },
+    );
+    let claim = editing(|| queue.claim()).unwrap();
+    let raw = Error::BackingFailure.into_raw();
+    let claim = match editing(|| queue.complete(claim, Err(raw))) {
+        Ok(Completion::Failed { error, claim }) => {
+            assert_eq!(error, raw);
+            claim
+        }
+        _ => panic!("failure lost"),
+    };
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    let (error, retired) = match editing(|| queue.acknowledge_failure(claim)) {
+        Ok(result) => result,
+        Err(_) => panic!("acknowledgement rejected"),
+    };
+    assert_eq!(error, raw);
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    submit(
+        &mut queue,
+        Backing {
+            id: 32,
+            drops: Arc::clone(&drops),
+        },
+    );
+    drop(retired);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    assert_eq!(editing(|| queue.claim()).unwrap().value().id, 32);
+    drop(queue);
+    assert_eq!(drops.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn failure_acknowledgement_cannot_cancel_running_or_foreign_work() {
+    let mut a = Queue::<u64, 1>::new();
+    let mut b = Queue::<u64, 1>::new();
+    submit(&mut a, 17);
+    submit(&mut b, 23);
+    let a_claim = editing(|| a.claim()).unwrap();
+    let b_claim = editing(|| b.claim()).unwrap();
+    let a_claim = match editing(|| a.acknowledge_failure(a_claim)) {
+        Err(claim) => claim,
+        Ok(_) => panic!("running operation was retired"),
+    };
+    let a_claim = match editing(|| a.complete(a_claim, Err(12345))) {
+        Ok(Completion::Failed { claim, .. }) => claim,
+        _ => panic!("failure lost"),
+    };
+    let a_claim = match editing(|| b.acknowledge_failure(a_claim)) {
+        Err(claim) => claim,
+        Ok(_) => panic!("foreign failed operation was retired"),
+    };
+    // A foreign error acknowledgement must not disturb the actual running job.
+    assert_eq!(*b_claim.value(), 23);
+    drop(retired(editing(|| b.complete(b_claim, Ok(())))));
+    let (error, retired) = match editing(|| a.acknowledge_failure(a_claim)) {
+        Ok(result) => result,
+        Err(_) => panic!("matching failure rejected"),
+    };
+    assert_eq!(error, 12345);
+    drop(retired);
+}
