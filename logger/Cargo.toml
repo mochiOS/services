@@ -12,6 +12,10 @@ mochios-posix-protocol = { git = "https://github.com/mochiOS/syscalls", package 
 
 [build-dependencies]
 
+[features]
+# Opt-in trusted debugging only: early boot logs can contain privileged data.
+early-serial-diagnostics = []
+
 [[bin]]
 name = "logger"
 path = "src/main.rs"

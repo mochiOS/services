@@ -5,6 +5,7 @@ use mochi_user_platform as platform;
 
 mod diagnostic;
 mod diagnostic_drain;
+mod early_diagnostics;
 mod posix_io;
 
 const LOG_ROOT: &str = "/var/log/services";
@@ -237,6 +238,9 @@ fn main() {
                 platform::syscall::EINVAL as i64,
             ));
             continue;
+        }
+        if !persistence_enabled {
+            early_diagnostics::mirror_boot_line(&buf[..len]);
         }
         pending.push(&buf[..len]);
         if persistence_enabled {
