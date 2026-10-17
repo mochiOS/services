@@ -81,6 +81,18 @@ mod syscall {
         Ok(())
     }
 }
+// This fixture controls usercopy failures; actual residency/lock ordering is
+// exercised with the production helper in stream_read_resident.rs.
+fn with_user_output_native<T>(
+    pointer:u64,maximum:usize,
+    operation:impl FnOnce(&mut dyn FnMut(&[u8])->Result<(),Error>)->Result<T,Error>,
+)->Result<T,Error>{
+    if let Some(error)=COPY_FAILURE.get(){return Err(error);}
+    operation(&mut |bytes| {
+        if bytes.len()>maximum{return Err(Error::InvalidArgument);}
+        syscall::copy_to_user_native(pointer,bytes)
+    })
+}
 mod upcall {pub fn current_has_deliverable_upcall()->bool{crate::UPCALL.get()}}
 "#,
     );
