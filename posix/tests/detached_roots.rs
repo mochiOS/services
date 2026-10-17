@@ -55,12 +55,14 @@ mod task {
         }
     }
     pub struct MemoryRegion {
+        pub shared: bool,
         pub object: Option<Object>,
         pub start: u64,
         pub length: u64,
         pub offset: u64,
     }
     impl MemoryRegion {
+        pub fn is_shared(&self) -> bool { self.shared }
         pub fn backing(&self) -> &Self {
             self
         }
@@ -130,6 +132,7 @@ mod detached_roots;
 fn weak_discovery_pins_physical_ownership_until_revocation_and_hands_off_at_publication() {
     use detached_roots::{snapshot, Root};
     let region = task::MemoryRegion {
+        shared: true,
         object: Some(task::Object(vm_object::ObjectKey::Memory(7))),
         start: 0x5000,
         length: 4096,
@@ -148,18 +151,21 @@ fn weak_discovery_pins_physical_ownership_until_revocation_and_hands_off_at_publ
         identity: 7,
     };
     let provider_region = task::MemoryRegion {
+        shared: false,
         object: Some(task::Object(provider)),
         start: 0xa000,
         length: 8192,
         offset: 4096,
     };
     let replacement_region = task::MemoryRegion {
+        shared: true,
         object: Some(task::Object(replacement)),
         start: 0xc000,
         length: 4096,
         offset: 0,
     };
     let anonymous = task::MemoryRegion {
+        shared: false,
         object: None,
         start: 0xd000,
         length: 4096,
@@ -171,6 +177,9 @@ fn weak_discovery_pins_physical_ownership_until_revocation_and_hands_off_at_publ
     )
     .unwrap();
     assert_eq!(root.mappings().len(), 3);
+    assert!(root.mappings()[0].shared);
+    assert!(!root.mappings()[1].shared);
+    assert!(root.mappings()[2].shared);
     let mapping = &root.mappings()[0];
     assert_eq!(
         (
@@ -242,6 +251,7 @@ fn weak_discovery_pins_physical_ownership_until_revocation_and_hands_off_at_publ
     // mapped root: lifetime state, mapping records and the root's own Arc.
     fn backing_region() -> task::MemoryRegion {
         task::MemoryRegion {
+            shared: false,
             object: Some(task::Object(vm_object::ObjectKey::Memory(7))),
             start: 0x5000,
             length: 4096,

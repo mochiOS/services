@@ -304,6 +304,83 @@ fn cleanup(object: Arc<crate::vm_object::VmObject>, pin: CachePin) {
 }
 
 #[test]
+fn refresh_journal_suspends_only_selected_pages_and_writes_outside_vm_exclusion() {
+    let _serial = crate::TEST_LOCK.lock().unwrap();
+    let (object, pin, physical) = setup();
+    object.stage_write_at(0, b"new").unwrap();
+    let mut owner = extent_transaction::ExtentTransaction::prepare_refresh(&object, 0, 4096).unwrap();
+    assert_eq!(paging::flags(ROOT, BASE), Some(0x804));
+    assert_eq!(paging::flags(ROOT, BASE + 4096), Some(0x805));
+    assert_eq!(owner.publish_local(), Err(NATIVE_NOT_READY));
+    assert_eq!(owner.request_publication(), Err(NATIVE_INVALID_ARGUMENT));
+    assert_eq!(owner.begin_external(), Err(NATIVE_INVALID_ARGUMENT));
+    crate::SYNC_EDGE.with(|edge| *edge.borrow_mut() = Some(Box::new(|| {
+        assert!(!VM_HELD.with(Cell::get), "provider I/O under VM exclusion");
+        process::with_mapping_table(|_| {
+            assert_eq!(paging::flags(ROOT, BASE), Some(0x804));
+            assert_eq!(paging::flags(ROOT, BASE + 4096), Some(0x805));
+        });
+    })));
+    owner.writeback_refresh().unwrap();
+    crate::without_allocations(|| owner.publish_local()).unwrap();
+    assert_eq!(paging::flags(ROOT, BASE), None);
+    assert_eq!(paging::flags(ROOT, BASE + 4096), Some(0x805));
+    assert!(!crate::FRAMES.lock().unwrap().contains_key(&physical[0]));
+    assert!(crate::FRAMES.lock().unwrap().contains_key(&physical[1]));
+    assert_eq!(&crate::LOWER.lock().unwrap().bytes[..3], b"new");
+    assert_eq!(owner.writeback_refresh(), Err(NATIVE_INVALID_ARGUMENT));
+    cleanup(object, pin);
+}
+
+#[test]
+fn refresh_writeback_failure_restores_original_pages_and_releases_admission_only_after_cleanup() {
+    let _serial = crate::TEST_LOCK.lock().unwrap();
+    let (object, pin, physical) = setup();
+    object.stage_write_at(0, b"new").unwrap();
+    let mut owner = extent_transaction::ExtentTransaction::prepare_refresh(&object, 0, 4096).unwrap();
+    crate::SYNC_ERROR.with(|error| error.set(Some(NATIVE_BACKING_FAILURE)));
+    assert_eq!(owner.writeback_refresh(), Err(NATIVE_BACKING_FAILURE));
+    crate::SYNC_ERROR.with(|error| error.set(None));
+    assert_eq!(owner.publish_local(), Err(NATIVE_NOT_READY));
+    process::with_mapping_table(|_| {
+        drop(owner);
+        extent_transaction::flush(); // cannot recurse into VM exclusion
+        assert_eq!(paging::flags(ROOT, BASE), Some(0x804));
+    });
+    assert!(matches!(object.page(0), Err(vm_object::VmPageError::Operation(NATIVE_NOT_READY))));
+    crate::without_allocations(extent_transaction::flush);
+    assert_eq!(paging::flags(ROOT, BASE), Some(0x805));
+    assert!(physical.iter().all(|frame| crate::FRAMES.lock().unwrap().contains_key(frame)));
+    assert_eq!(&object.page(0).unwrap()[..3], b"new");
+    cleanup(object, pin);
+}
+
+#[test]
+fn refresh_cleanup_failure_distinguishes_prepublication_rollback_from_committed_release() {
+    let _serial = crate::TEST_LOCK.lock().unwrap();
+    for failure in [1, 2] {
+        let (object, pin, physical) = setup();
+        let mut owner = extent_transaction::ExtentTransaction::prepare_refresh(&object, 0, 4096).unwrap();
+        owner.writeback_refresh().unwrap();
+        paging::LOOKUPS.store(0, Ordering::Relaxed);
+        paging::FAIL_LOOKUP.store(failure, Ordering::Relaxed);
+        assert_eq!(crate::without_allocations(|| owner.publish_local()), Err(NATIVE_BACKING_FAILURE));
+        drop(owner);
+        paging::FAIL_LOOKUP.store(0, Ordering::Relaxed);
+        crate::without_allocations(extent_transaction::flush);
+        if failure == 1 {
+            assert_eq!(paging::flags(ROOT, BASE), Some(0x805));
+            assert!(crate::FRAMES.lock().unwrap().contains_key(&physical[0]));
+        } else {
+            assert_eq!(paging::flags(ROOT, BASE), None);
+            assert!(!crate::FRAMES.lock().unwrap().contains_key(&physical[0]));
+        }
+        assert_eq!(paging::flags(ROOT, BASE + 4096), Some(0x805));
+        cleanup(object, pin);
+    }
+}
+
+#[test]
 fn cache_preflight_failure_after_tlb_ack_keeps_records_until_deferred_rollback() {
     let _test = crate::TEST_LOCK.lock().unwrap();
     let (object, pin, physical) = setup();

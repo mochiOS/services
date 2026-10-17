@@ -100,6 +100,7 @@ fn without_allocations<T>(operation: impl FnOnce() -> T) -> T {
 thread_local! {
     static CACHE_EDGE: RefCell<Option<(usize, Box<dyn FnOnce()>)>> = RefCell::new(None);
     static LOWER_EDGE: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+    static SYNC_EDGE: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
     static SYNC_ERROR: Cell<Option<u64>> = const { Cell::new(None) };
     static SYNC_CALLS: Cell<usize> = const { Cell::new(0) };
     static INVALID_READ_COUNT: Cell<bool> = const { Cell::new(false) };
@@ -152,6 +153,7 @@ mod task {
         pub object: Option<std::sync::Arc<crate::vm_object::VmObject>>,
     }
     impl MemoryRegion {
+        pub fn is_shared(&self) -> bool { true }
         pub fn start(&self) -> u64 {
             self.start
         }
@@ -245,6 +247,8 @@ mod syscall {
         }
         pub fn provider_sync(_: &crate::task::ProviderObject) -> Result<(), u64> {
             crate::SYNC_CALLS.with(|calls| calls.set(calls.get() + 1));
+            let hook = crate::SYNC_EDGE.with(|edge| edge.borrow_mut().take());
+            if let Some(hook) = hook { hook(); }
             crate::SYNC_ERROR.with(|error| error.get().map_or(Ok(()), Err))
         }
     }

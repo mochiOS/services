@@ -106,6 +106,8 @@ mod x86_64 {pub mod instructions {pub mod interrupts {
             "--test",
             "-Awarnings",
             "-Cstrip=symbols",
+            "-Copt-level=1",
+            "-Ccodegen-units=1",
             "-",
         ])
         .arg("-o")

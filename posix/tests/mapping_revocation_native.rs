@@ -62,12 +62,14 @@ mod task {
         }
     }
     pub struct MemoryRegion {
+        pub shared: bool,
         pub object: Option<Object>,
         pub start: u64,
         pub length: u64,
         pub offset: u64,
     }
     impl MemoryRegion {
+        pub fn is_shared(&self) -> bool { self.shared }
         pub fn backing(&self) -> &Self {
             self
         }
@@ -108,6 +110,7 @@ mod task {
 #[derive(Default)]
 struct State {
     entries: BTreeMap<(u64, u64), u64>,
+    expected_untouched: Vec<(u64, u64)>,
     synchronized: bool,
     fail_sync: bool,
     released: usize,
@@ -209,7 +212,11 @@ mod paging {
 mod tlb_shootdown {
     pub fn invalidate_all() -> Result<(), ()> {
         let mut state = super::state().lock().unwrap();
-        assert!(state.entries.values().all(|flags| flags & 1 == 0));
+        assert!(state.entries.iter().all(|(location, flags)|
+            flags & 1 == 0 || state.expected_untouched.contains(location)));
+        for location in &state.expected_untouched {
+            assert!(state.entries.get(location).is_some_and(|flags| flags & 1 != 0));
+        }
         if state.fail_sync {
             return Err(());
         }
@@ -551,11 +558,64 @@ fn region(
     offset: u64,
 ) -> task::MemoryRegion {
     task::MemoryRegion {
+        shared: true,
         object: Some(task::Object(identity)),
         start,
         length,
         offset,
     }
+}
+
+#[test]
+fn shared_targets_exclude_private_cow_in_live_and_detached_roots() {
+    use mapping_revocation_native::Native;
+    use mapping_targets::Targets;
+    use task::process::{Process, ProcessTable};
+    let _serial = TEST_LOCK.lock().unwrap();
+    *state().lock().unwrap() = State::default();
+    let identity = vm_object::ObjectKey::Memory(0x1c01);
+    let private = |address| {
+        let mut mapping = region(identity, address, 4096, 0);
+        mapping.shared = false;
+        mapping
+    };
+    let table = ProcessTable(vec![
+        Process(4096, vec![region(identity, 0x4000, 4096, 0), private(0x5000)]),
+        Process(16384, vec![private(0x6000)]),
+    ]);
+    let detached = detached_roots::Root::new(
+        8192, &[region(identity, 0x8000, 4096, 0), private(0x9000)]
+    ).unwrap();
+    // A private-only root need not be pinned or even inspected by this plan.
+    root_lifetime_native::FAIL_ROOT.store(16384, std::sync::atomic::Ordering::Relaxed);
+    let targets = Targets::capture_shared(&table, identity, 0, 4096).unwrap();
+    root_lifetime_native::FAIL_ROOT.store(0, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(targets.ranges().collect::<Vec<_>>(),
+        [(4096, 0x4000, 0x5000), (8192, 0x8000, 0x9000)]);
+    assert!(targets.preserved().is_empty());
+    {
+        let mut state = state().lock().unwrap();
+        state.expected_untouched = vec![(4096, 0x5000), (8192, 0x9000)];
+        for address in [(4096,0x4000),(4096,0x5000),(8192,0x8000),(8192,0x9000)] {
+            state.entries.insert(address,0x105);
+        }
+    }
+    let mut backend = unsafe { Native::for_targets(&table, &targets) };
+    mapping_revocation::revoke(targets.ranges(), &mut backend).unwrap();
+    drop(backend);
+    {
+        let state = state().lock().unwrap();
+        assert!(!state.entries.contains_key(&(4096,0x4000)));
+        assert!(!state.entries.contains_key(&(8192,0x8000)));
+        assert!(state.entries.contains_key(&(4096,0x5000)));
+        assert!(state.entries.contains_key(&(8192,0x9000)));
+        assert_eq!(state.released,2);
+        assert!(state.synchronized);
+    }
+    drop(detached);
+    assert!(!state().lock().unwrap().destroyed.contains(&8192));
+    drop(targets);
+    assert!(state().lock().unwrap().destroyed.contains(&8192));
 }
 
 #[test]
