@@ -81,9 +81,9 @@ mod mnu_abi {pub mod status {
     program.push_str(
         r#"
 const PROCESS_MAX_OBJECT_HANDLES:usize=mnu_abi::PROCESS_MAX_OBJECT_HANDLES;
-struct ObjectHandleTable {entries:Vec<(ObjectHandle,ObjectHandleEntry)>,next:u32}
+struct ObjectHandleTable {entries:Vec<(ObjectHandle,ObjectHandleEntry)>,next:u32,pending:HandleReservations,next_reservation:u64}
 impl ObjectHandleTable {
-    const fn new()->Self {Self{entries:Vec::new(),next:1}}
+    const fn new()->Self {Self{entries:Vec::new(),next:1,pending:HandleReservations(Vec::new()),next_reservation:1}}
 "#,
     );
     for (start, end) in [

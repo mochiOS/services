@@ -161,7 +161,7 @@ mod task {
     }
     pub mod thread {
         use super::*;
-        fn clear_thread_wait_registrations(_: u64) {}
+        fn clear_thread_wait_registrations(_: u64, _: u64) {}
 "#,
     );
     program.push_str(

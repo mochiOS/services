@@ -87,6 +87,11 @@ mod config {
     program.push_str("type ObjectHandle=u32;type ObjectHandleEntry=();\n");
     program.push_str(probe::between(
         table,
+        "/// Kernel-owned publication ticket",
+        "#[derive(Clone, Debug)]\npub struct ObjectHandleTable",
+    ));
+    program.push_str(probe::between(
+        table,
         "#[derive(Clone, Debug)]\npub struct ObjectHandleTable",
         "    pub fn new_boxed()",
     ));

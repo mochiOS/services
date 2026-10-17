@@ -34,13 +34,29 @@ thread_local!{{
     static OUTPUT:Cell<[u8;72]>=const{{Cell::new([0;72])}};
     static OUTPUT_ERROR:Cell<Option<Error>>=const{{Cell::new(None)}};
     static OUTPUT_CALLS:Cell<usize>=const{{Cell::new(0)}};
+    static RACE:Cell<bool>=const{{Cell::new(false)}};
+    static PUBLISH_AFTER_COPY:Cell<bool>=const{{Cell::new(false)}};
+    static RACED_HANDLE:Cell<Option<ObjectHandle>>=const{{Cell::new(None)}};
+    static FAIL_ALLOCATION:Cell<bool>=const{{Cell::new(false)}};
     static PROCESS:RefCell<task::Process>=RefCell::new(task::Process{{table:task::handle_table::ObjectHandleTable::new_boxed()}});
 }}
+struct TestAllocator;
+unsafe impl std::alloc::GlobalAlloc for TestAllocator{{
+    unsafe fn alloc(&self,layout:std::alloc::Layout)->*mut u8{{
+        if FAIL_ALLOCATION.try_with(|flag|flag.replace(false)).unwrap_or(false){{return std::ptr::null_mut();}}
+        unsafe{{std::alloc::System.alloc(layout)}}
+    }}
+    unsafe fn dealloc(&self,pointer:*mut u8,layout:std::alloc::Layout){{unsafe{{std::alloc::System.dealloc(pointer,layout)}}}}
+}}
+#[global_allocator]static TEST_ALLOCATOR:TestAllocator=TestAllocator;
 mod task{{
     pub mod handle_table{{
         use alloc::{{boxed::Box,vec::Vec,sync::Arc}};
         pub const PROCESS_MAX_OBJECT_HANDLES:usize=4096;
         #[derive(Clone,Debug)]pub struct KernelObject(pub Arc<u64>);
+        impl Drop for KernelObject{{fn drop(&mut self){{
+            if Arc::strong_count(&self.0)==1{{assert!(!crate::LOCKED.get(),"final object reference dropped under process lock");}}
+        }}}}
 "#,
         status = root.join("core/crates/abi/src/status.rs"),
         wire = root.join("core/crates/abi/src/handle_snapshot.rs"),
@@ -99,6 +115,9 @@ mod task{{
 }}
 use task::handle_table::{{ObjectHandle,HandleRights,ObjectHandleEntry,KernelObject}};
 mod syscall{{
+    pub mod ipc{{pub mod lifetime{{pub fn remove_waiter(_:crate::ThreadId){{assert!(!crate::LOCKED.get());}}}}}}
+    pub mod address_wait{{pub fn remove_waiter(_:crate::ThreadId){{assert!(!crate::LOCKED.get());}}}}
+    pub mod time{{pub fn disarm_thread_deadline(_:crate::ThreadId){{assert!(!crate::LOCKED.get());}}}}
     pub fn copy_from_user_native(pointer:u64,output:&mut[u8])->Result<(),crate::Error>{{
         assert_eq!(pointer,4096);crate::COPY_CALLS.set(crate::COPY_CALLS.get()+1);
         if let Some(error)=crate::COPY_ERROR.get(){{return Err(error);}}
@@ -107,6 +126,29 @@ mod syscall{{
     pub fn copy_to_user_native(pointer:u64,bytes:&[u8])->Result<(),crate::Error>{{
         assert_eq!(pointer,8192);assert!(!crate::LOCKED.get());
         crate::OUTPUT_CALLS.set(crate::OUTPUT_CALLS.get()+1);
+        if crate::RACE.get(){{
+            let count=u32::from_le_bytes(bytes[..4].try_into().unwrap())as usize;
+            crate::PROCESS.with_borrow_mut(|process|{{
+                let visible=process.table.describe().len();
+                let snapshot=process.table.capture().unwrap();assert_eq!(snapshot.len(),visible);
+                let clone=process.table.clone();assert_eq!(clone.describe().len(),visible);
+                for index in 0..count{{
+                    let start=8+16*index;let handle=crate::ObjectHandle::from_raw(u32::from_le_bytes(bytes[start..start+4].try_into().unwrap())).unwrap();
+                    assert!(process.table.get(handle).is_none(),"authority published before output copy");
+                    assert!(!process.table.close(handle),"unpublished selector was closable");
+                    assert!(process.table.duplicate_restricted(handle,crate::HandleRights::READ).is_none());
+                    assert!(process.table.export_restricted(handle,crate::HandleRights::READ).is_none());
+                    let entry=crate::ObjectHandleEntry::new(crate::KernelObject(crate::Arc::new(77)),crate::HandleRights::READ);
+                    assert!(!process.table.insert_at(handle,entry),"reserved selector was replaceable");
+                }}
+                // A concurrently installed unrelated object must survive any
+                // later receive rollback, including reuse after cancellation.
+                if !crate::PUBLISH_AFTER_COPY.get(){{
+                    let unrelated=process.table.insert(crate::ObjectHandleEntry::new(crate::KernelObject(crate::Arc::new(91)),crate::HandleRights::READ)).unwrap();
+                    crate::RACED_HANDLE.set(Some(unrelated));
+                }}
+            }});
+        }}
         if let Some(error)=crate::OUTPUT_ERROR.get(){{return Err(error);}}
         crate::OUTPUT.set(bytes.try_into().unwrap());Ok(())
     }}
@@ -162,6 +204,19 @@ fn call_endpoint_with_attachments_from_kernel(
         "pub(crate) fn call_provider_with_handle_from_kernel(",
         "fn call_endpoint_with_attachments_from_kernel(",
     ));
+    program.push_str(r#"
+#[derive(Clone,Copy)]struct ThreadId(u64);impl ThreadId{fn as_u64(self)->u64{self.0}}
+mod process{pub use crate::task::with_process_mut;pub fn remove_process_exit_waiters(_:crate::ThreadId){assert!(!crate::LOCKED.get());}}
+mod thread_cleanup{use crate::ThreadId;type ProcessId=u64;
+"#);
+    program.push_str(probe::between(
+        include_str!("../../../core/src/task/thread.rs"),
+        "fn clear_thread_wait_registrations(",
+        "fn retire_thread_endpoint(",
+    ));
+    program.push_str(
+        "pub fn run(owner:u64){clear_thread_wait_registrations(ThreadId(owner),7);}\n}\n",
+    );
     program.push_str(r#"
 fn main(){
     let endpoint=IpcEndpoint{thread_id:99,slot:3,generation:123};
@@ -297,6 +352,11 @@ fn main(){
         assert_eq!(PROCESS.with_borrow(|p|p.table.describe().len()),baseline);
     }
     OUTPUT_ERROR.set(None);
+    RACE.set(true);OUTPUT_ERROR.set(Some(Error::InvalidAddress));
+    assert_eq!(install_received_object_handles(101,incoming(&object,3),8192),Err(Error::InvalidAddress.into_raw()));
+    let raced=RACED_HANDLE.take().unwrap();PROCESS.with_borrow_mut(|p|{{assert!(p.table.get(raced).is_some());assert!(p.table.close(raced));}});
+    assert_eq!(Arc::strong_count(&object),2);assert_eq!(PROCESS.with_borrow(|p|p.table.describe().len()),baseline);
+    OUTPUT_ERROR.set(None);PUBLISH_AFTER_COPY.set(true);
     assert_eq!(install_received_object_handles(101,incoming(&object,3),8192),Ok(()));
     let output=OUTPUT.get();assert_eq!(u32::from_le_bytes(output[..4].try_into().unwrap()),3);
     assert_eq!(u32::from_le_bytes(output[4..8].try_into().unwrap()),IPC_DELIVERY_NATIVE_OBJECT);
@@ -310,6 +370,57 @@ fn main(){
     }
     assert_eq!(&output[56..],&[0;16]);assert_eq!(Arc::strong_count(&object),2);
     assert_eq!(PROCESS.with_borrow(|p|p.table.describe().len()),baseline);
+    // Publication itself must not allocate, even if unrelated visible
+    // insertions happen while the receiving operation is copying its result.
+    {
+        let mut table=task::handle_table::ObjectHandleTable::new();
+        let mut tickets=Vec::new();
+        for _ in 0..4{tickets.push(table.reserve(101,ObjectHandleEntry::new(KernelObject(object.clone()),HandleRights::READ)).unwrap());}
+        for _ in 0..20{table.insert(ObjectHandleEntry::new(KernelObject(object.clone()),HandleRights::READ)).unwrap();}
+        FAIL_ALLOCATION.set(true);for ticket in tickets{assert!(table.publish_reserved(ticket));}
+        assert!(FAIL_ALLOCATION.replace(false),"publication allocated storage");assert_eq!(table.describe().len(),24);
+    }
+    // A canceled ticket cannot cancel or publish a newer reservation which
+    // reuses precisely the same selector. Pending selectors count toward the
+    // capacity bound but are never get/close/capture/clone-visible.
+    {
+        let mut table=task::handle_table::ObjectHandleTable::new();
+        let old=table.reserve(101,ObjectHandleEntry::new(KernelObject(object.clone()),HandleRights::READ)).unwrap();
+        assert_eq!(table.clone().describe().len(),0);assert_eq!(table.capture().unwrap().len(),0);
+        assert!(table.cancel_reserved(old).is_some());
+        for _ in 0..4095{table.insert(ObjectHandleEntry::new(KernelObject(object.clone()),HandleRights::READ)).unwrap();}
+        let current=table.reserve(101,ObjectHandleEntry::new(KernelObject(object.clone()),HandleRights::READ)).unwrap();
+        assert_eq!(old.handle(),current.handle());assert_ne!(old,current);assert!(!table.is_reserved(old));assert!(table.is_reserved(current));
+        assert!(table.cancel_reserved(old).is_none());assert!(!table.publish_reserved(old));
+        assert!(table.insert(ObjectHandleEntry::new(KernelObject(object.clone()),HandleRights::READ)).is_none());
+        assert!(table.reserve(103,ObjectHandleEntry::new(KernelObject(object.clone()),HandleRights::READ)).is_err());
+        assert!(table.get(current.handle()).is_none());assert!(!table.close(current.handle()));
+        assert!(table.take_reservation_for(102).is_none());assert!(table.is_reserved(current));
+        assert!(table.take_reservation_for(101).is_some());assert!(!table.is_reserved(current));
+        assert!(table.insert_at(current.handle(),ObjectHandleEntry::new(KernelObject(object.clone()),HandleRights::READ)));
+        assert!(table.cancel_reserved(current).is_none());assert!(table.get(current.handle()).is_some());
+    }
+    // Both Vec allocations are fallible. Failure returns the original owned
+    // reference; no selector or authority is left published or reserved.
+    for pending_allocation in [false,true]{
+        let mut table=task::handle_table::ObjectHandleTable::new();
+        if pending_allocation{let handle=table.insert(ObjectHandleEntry::new(KernelObject(object.clone()),HandleRights::READ)).unwrap();assert!(table.close(handle));}
+        let entry=ObjectHandleEntry::new(KernelObject(object.clone()),HandleRights::READ);
+        FAIL_ALLOCATION.set(true);assert!(table.reserve(101,entry).is_err());assert!(!FAIL_ALLOCATION.get());
+        assert_eq!(table.describe().len(),0);assert!(table.take_reservation_for(101).is_none());
+    }
+    assert_eq!(Arc::strong_count(&object),2);
+    // Thread teardown runs the production cleanup after queue removal. It
+    // releases only that thread's reservations, outside the process lock.
+    {
+        let abandoned=Arc::new(991);let weak=Arc::downgrade(&abandoned);
+        let own=PROCESS.with_borrow_mut(|p|p.table.reserve(101,ObjectHandleEntry::new(KernelObject(abandoned),HandleRights::READ)).unwrap());
+        let other=PROCESS.with_borrow_mut(|p|p.table.reserve(102,ObjectHandleEntry::new(KernelObject(object.clone()),HandleRights::READ)).unwrap());
+        let cloned=PROCESS.with_borrow(|p|p.table.clone());let captured=PROCESS.with_borrow(|p|p.table.capture().unwrap());
+        thread_cleanup::run(101);assert!(weak.upgrade().is_none());
+        PROCESS.with_borrow(|p|{assert!(!p.table.is_reserved(own));assert!(p.table.is_reserved(other));});
+        thread_cleanup::run(102);drop(cloned);drop(captured);assert_eq!(Arc::strong_count(&object),2);
+    }
 }
 "#);
     probe::run(&program);
