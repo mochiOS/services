@@ -1,6 +1,14 @@
 //! Guard the kernel implementation, not the separate userspace compatibility
 //! clients or the still-to-be-migrated ABI compatibility constants.
 #[test]
+fn migrated_file_size_status_is_not_part_of_the_kernel_abi() {
+    let abi = include_str!("../../../core/crates/abi/src/lib.rs");
+    assert!(!abi.contains("pub const EFBIG:"));
+    let protocol = include_str!("../../../user/crates/posix-protocol/src/lib.rs");
+    assert!(protocol.contains("pub const STATUS_EFBIG: i32 = -27;"));
+}
+
+#[test]
 fn kernel_implementation_does_not_import_or_select_posix_errno_identifiers() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/src");
     let forbidden = [

@@ -2,7 +2,7 @@ extern crate self as mochi_user_platform;
 use std::{cell::RefCell, collections::BTreeMap};
 
 pub mod syscall {
-    pub use mnu_abi::{EACCES, EFBIG, EINVAL, EIO, ENOENT};
+    pub use mnu_abi::{EACCES, EINVAL, EIO, ENOENT};
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct SysError(pub i64);
     impl SysError {
