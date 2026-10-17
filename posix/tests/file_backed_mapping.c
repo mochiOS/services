@@ -120,6 +120,11 @@ int main(void) {
     STAGE("retained writeback");
     if (msync(shared, page, MS_ASYNC) != 0) return 37;
     if (msync(shared, page, MS_SYNC) != 0 || restricted[38] != 0x88) return 18;
+    STAGE("read-only refresh after descriptor close");
+    shared[41] = 0x66;
+    if (msync(restricted, page, MS_SYNC | MS_INVALIDATE) != 0) return 58;
+    if (shared[41] != 0x66 || restricted[41] != 0x66 || private[37] != 0x99)
+        return 59;
     STAGE("unmap");
     if (munmap(private, page) != 0 || munmap(restricted, page) != 0 ||
         munmap(shared, page) != 0) return 19;

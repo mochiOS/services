@@ -35,12 +35,17 @@ thread_local! {{
     static SYNC_CALLS:Cell<usize>=const{{Cell::new(0)}};
     static EXPECTED:Cell<(u64,u64)>=const{{Cell::new((4096,4096))}};
     static ASYNC:Cell<bool>=const{{Cell::new(false)}};
+    static INVALIDATE:Cell<bool>=const{{Cell::new(false)}};
     static CLOSED:Cell<usize>=const{{Cell::new(0)}};
 }}
 static DELIVERY:core::sync::atomic::AtomicU32=core::sync::atomic::AtomicU32::new(0);
 fn guarded()->bool{{DELIVERY.load(core::sync::atomic::Ordering::Acquire)!=0}}
 fn defer_native_delivery()->Option<upcall_guard::Guard<'static>>{{upcall_guard::Guard::enter(&DELIVERY)}}
 fn close_object_handle(handle:u32){{assert!(guarded());assert_eq!(handle,19);CLOSED.set(CLOSED.get()+1);}}
+mod memory_refresh {{pub fn synchronize(address:u64,length:u64)->Result<(),i32>{{
+    assert_eq!((address,length),crate::EXPECTED.get());
+    assert!(!crate::guarded());assert!(crate::INVALIDATE.get());Ok(())
+}}}}
 fn result_with_errno<T:Copy>(result:Result<T,i32>,failure:T)->T{{
     match result{{Ok(value)=>value,Err(error)=>{{ERRNO.set(error);failure}}}}
 }}
@@ -83,7 +88,9 @@ pub fn raw_syscall2(_:SyscallNumber,address:u64,length:u64)->RawSyscallResult{
     RawSyscallResult::new(crate::RESULT.get())
 }
 pub fn raw_syscall3(number:SyscallNumber,address:u64,length:u64,options:u64)->RawSyscallResult{
-    assert_eq!(number,SyscallNumber::MemorySync);assert_eq!(options,if crate::ASYNC.get(){crate::MEMORY_SYNC_DEFERRED}else{0});
+    assert_eq!(number,SyscallNumber::MemorySync);assert_eq!(options,
+        if crate::ASYNC.get(){crate::MEMORY_SYNC_DEFERRED |
+            if crate::INVALIDATE.get(){crate::MEMORY_SYNC_REFRESH}else{0}}else{0});
     assert_eq!(crate::guarded(),crate::ASYNC.get());
     assert_eq!((address,length),crate::EXPECTED.get());crate::SYNC_CALLS.set(crate::SYNC_CALLS.get()+1);
     RawSyscallResult::new(crate::RESULT.get())
@@ -141,7 +148,7 @@ fn main(){
     let before=SYNC_CALLS.get();
     for (address,length,flags,expected) in [(0,4096,4,22),(4097,4096,4,22),
         (4096,0,4,22),(4096,4096,0,22),(4096,4096,5,22),
-        (4096,4096,3,88),(4096,4096,6,88)] {
+        (4096,4096,2,22),(4096,4096,7,22)] {
         assert_eq!(msync(address as *mut c_void,length,flags),-1);assert_eq!(ERRNO.get(),expected);
     }
     assert_eq!(SYNC_CALLS.get(),before);
@@ -156,6 +163,16 @@ fn main(){
         RESULT.set(native.into_raw());assert_eq!(msync(4096 as *mut c_void,4097,1),-1);
         assert_eq!(ERRNO.get(),expected);assert_eq!(CLOSED.get(),1);assert!(!guarded());
     }
+    INVALIDATE.set(true);RESULT.set(19);ERRNO.set(123);
+    assert_eq!(msync(4096 as *mut c_void,4097,3),0);
+    assert_eq!(CLOSED.get(),2);assert_eq!(ERRNO.get(),123);assert!(!guarded());
+    RESULT.set(Error::NotReady.into_raw());
+    assert_eq!(msync(4096 as *mut c_void,4097,3),-1);
+    assert_eq!(CLOSED.get(),2);assert_eq!(ERRNO.get(),11);assert!(!guarded());
+    ERRNO.set(123);
+    ASYNC.set(false);
+    assert_eq!(msync(4096 as *mut c_void,4097,6),0);
+    assert_eq!(CLOSED.get(),2);assert_eq!(ERRNO.get(),123);assert!(!guarded());
 }
 "#,
     );
