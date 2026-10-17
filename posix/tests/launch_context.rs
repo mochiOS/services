@@ -90,6 +90,134 @@ fn describe(object: Object) -> Option<LaunchFdDescription> {
 }
 
 #[test]
+fn explicitly_empty_or_all_cloexec_tables_suppress_stdio_bootstrap() {
+    for close_on_exec in [false, true] {
+        let mut source = FdTable::new();
+        if close_on_exec {
+            source
+                .install(Entry {
+                    handle: object(0, protocol::INHERITED_FD_KIND_STDOUT, 1, false),
+                    rights: 0,
+                    descriptor_flags: FD_CLOEXEC,
+                })
+                .unwrap();
+        }
+        for limit in [0, 4] {
+            let mut context = Context::default();
+            stage_launch_context(&source, limit, &mut context, describe).unwrap();
+            let mut restored = FdTable::new();
+            let mut operations = Objects::default();
+            assert_eq!(
+                restore_launch_context(
+                    &mut restored,
+                    limit,
+                    &mut context,
+                    &mut operations,
+                    |_, _| panic!("no descriptor should survive this exec"),
+                ),
+                Ok(true),
+                "an explicit empty table must not bootstrap stdio"
+            );
+            assert!(restored.inherited().next().is_none());
+            assert!(operations.0.is_empty());
+        }
+    }
+}
+
+#[test]
+fn private_image_round_trip_keeps_an_explicitly_empty_fd_table() {
+    use mnu_abi::process_image::{self as image, ContextUpdate as U};
+    let source = FdTable::<Object>::new();
+    for limit in [0, 4] {
+        let sentinel = U {
+            kind: 99,
+            key: 88,
+            value: 77,
+        };
+        let mut edits = [sentinel; 10];
+        let count =
+            plan_launch_context(&source, limit, &mut edits, |_| panic!(), |_| panic!()).unwrap();
+        assert_eq!(count, limit * 2 + 1);
+        assert_eq!(edits[count].kind, sentinel.kind);
+        let mut bytes = [0; 1024];
+        let length = image::encode(0, &[0; 16], &[], &mut bytes).unwrap();
+        let length = image::attach_context(&mut bytes, length, &edits[..count]).unwrap();
+        let decoded = image::decode(&bytes[..length]).unwrap();
+        let mut context = Context::default();
+        for edit in decoded.context_updates() {
+            match edit.kind {
+                U::SET_VALUE => {
+                    context.values.insert(edit.key, edit.value);
+                }
+                U::REMOVE_VALUE => {
+                    context.values.remove(&edit.key);
+                }
+                U::REMOVE_HANDLE => {
+                    context.handles.remove(&edit.key);
+                }
+                _ => panic!("an empty FD table must not retain a Handle"),
+            }
+        }
+        assert_eq!(
+            context.values.get(&protocol::FD_TABLE_KEY),
+            Some(&protocol::FD_TABLE_VERSION)
+        );
+        let mut restored = FdTable::new();
+        assert_eq!(
+            restore_launch_context(
+                &mut restored,
+                limit,
+                &mut context,
+                &mut Objects::default(),
+                |_, _| panic!(),
+            ),
+            Ok(true)
+        );
+        assert!(restored.inherited().next().is_none());
+    }
+}
+
+#[test]
+fn native_bootstrap_is_distinct_from_an_unknown_fd_table_version() {
+    let mut table = FdTable::new();
+    assert_eq!(
+        restore_launch_context(
+            &mut table,
+            4,
+            &mut Context::default(),
+            &mut Objects::default(),
+            |_, _| panic!(),
+        ),
+        Ok(false)
+    );
+    let entry = Entry {
+        handle: object(0, protocol::INHERITED_FD_KIND_STDIN, 0, false),
+        rights: 0,
+        descriptor_flags: 0,
+    };
+    table.install(entry).unwrap();
+    for version in [0, protocol::FD_TABLE_VERSION + 1, u64::MAX] {
+        let mut context = Context::default();
+        context.values.insert(protocol::FD_TABLE_KEY, version);
+        assert_eq!(
+            restore_launch_context(
+                &mut table,
+                4,
+                &mut context,
+                &mut Objects::default(),
+                |_, _| panic!(),
+            ),
+            Err(LaunchFdError::InvalidMetadata)
+        );
+        assert_eq!(table.get(0), Some(entry));
+    }
+    assert_eq!(
+        protocol::inherited_fd_from_key(protocol::FD_TABLE_KEY),
+        None
+    );
+}
+
+#[test]
 fn private_image_edits_match_staged_metadata_without_touching_a_context() {
     use mnu_abi::process_image::ContextUpdate as U;
     let mut table = FdTable::new();
@@ -120,10 +248,10 @@ fn private_image_edits_match_staged_metadata_without_touching_a_context() {
         kind: 0,
         key: 0,
         value: 0,
-    }; 8];
+    }; 9];
     assert_eq!(
         plan_launch_context(&table, 4, &mut edits, describe, |object| Some(object.id)),
-        Ok(8)
+        Ok(9)
     );
     let mut actual = Context::default();
     for edit in edits {
@@ -149,7 +277,7 @@ fn private_image_edits_match_staged_metadata_without_touching_a_context() {
     assert_eq!(actual.values, expected.values);
     assert_eq!(actual.handles, expected.handles);
     assert_eq!(
-        plan_launch_context(&table, 4, &mut edits[..7], describe, |object| Some(
+        plan_launch_context(&table, 4, &mut edits[..8], describe, |object| Some(
             object.id
         )),
         Err(LaunchFdError::InvalidDescriptor)
