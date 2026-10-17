@@ -98,6 +98,7 @@ thread_local! {
     static SYNC_CALLS: Cell<usize> = const { Cell::new(0) };
     static INVALID_READ_COUNT: Cell<bool> = const { Cell::new(false) };
     static INVALID_WRITE_COUNT: Cell<bool> = const { Cell::new(false) };
+    static READ_FAILURE: Cell<Option<(u64, u64)>> = const { Cell::new(None) };
 }
 
 fn cache_edge<T>() {
@@ -197,6 +198,11 @@ mod syscall {
             offset: u64,
             output: &mut [u8],
         ) -> Result<usize, u64> {
+            if let Some((start, error)) = crate::READ_FAILURE.with(|value| value.get()) {
+                if offset >= start {
+                    return Err(error);
+                }
+            }
             if crate::INVALID_READ_COUNT.with(|value| value.get()) {
                 return Ok(output.len() + 1);
             }
@@ -532,6 +538,60 @@ fn reset_lower(bytes: &[u8]) {
 }
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[test]
+fn backing_read_errors_preserve_completed_prefix_without_caching_a_false_eof() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    let object = provider_object_for_endpoint(0x1a03);
+    let mut backing = vec![b'a'; 4096];
+    backing.extend_from_slice(&[b'b'; 4096]);
+    for error in [
+        mnu_abi::status::Error::BackingFailure.into_raw(),
+        mnu_abi::status::Error::ResourceUnavailable.into_raw(),
+        mnu_abi::status::Error::PeerClosed.into_raw(),
+        syscall::EIO,
+        syscall::EAGAIN,
+    ] {
+        object.invalidate().unwrap();
+        reset_lower(&backing);
+        READ_FAILURE.with(|value| value.set(Some((4096, error))));
+        let mut output = [0x5a; 8192];
+        let result = object.read_at(0, &mut output);
+        READ_FAILURE.with(|value| value.set(None));
+        assert_eq!(result, Ok(4096));
+        assert_eq!(&output[..4096], &[b'a'; 4096]);
+        assert_eq!(&output[4096..], &[0x5a; 4096]);
+
+        // A failed later page is not EOF. A new read beginning at that page
+        // must still report the error, and recovery must retry its backing.
+        READ_FAILURE.with(|value| value.set(Some((4096, error))));
+        let result = object.read_at(4096, &mut output[..4096]);
+        let fault = object.page(1);
+        READ_FAILURE.with(|value| value.set(None));
+        assert_eq!(result, Err(error));
+        assert!(matches!(fault, Err(vm_object::VmPageError::Operation(value)) if value == error));
+        assert_eq!(object.read_at(4096, &mut output[..4096]), Ok(4096));
+        assert_eq!(&output[..4096], &[b'b'; 4096]);
+
+        object.invalidate().unwrap();
+        READ_FAILURE.with(|value| value.set(Some((4096, error))));
+        let mut unaligned = [0x5a; 12];
+        let result = object.read_at(4090, &mut unaligned);
+        READ_FAILURE.with(|value| value.set(None));
+        assert_eq!(result, Ok(6));
+        assert_eq!(&unaligned[..6], &[b'a'; 6]);
+        assert_eq!(&unaligned[6..], &[0x5a; 6]);
+
+        object.invalidate().unwrap();
+        READ_FAILURE.with(|value| value.set(Some((0, error))));
+        let mut untouched = [0x5a; 8];
+        let result = object.read_at(0, &mut untouched);
+        READ_FAILURE.with(|value| value.set(None));
+        assert_eq!(result, Err(error));
+        assert_eq!(untouched, [0x5a; 8]);
+    }
+    object.invalidate().unwrap();
+}
 
 #[test]
 fn native_vm_io_rejects_overflow_before_backing_access_and_empty_writes_do_no_io() {
