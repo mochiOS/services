@@ -153,7 +153,11 @@ fn drain_running_requests(controller: &mut DiscoveryController) {
     loop {
         let message = match platform::ipc::try_wait(&mut buffer) {
             Ok(message) => message,
-            Err(err) if err.raw() == mochi_user_syscall::EAGAIN as i64 => return,
+            Err(err)
+                if err.native_error() == Some(mochi_user_syscall::NativeError::NotReady) =>
+            {
+                return;
+            }
             Err(_) => return,
         };
         if !is_manager_request(message >> 32) {

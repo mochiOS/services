@@ -32,19 +32,7 @@ pub(crate) fn call_with_wait(
     request: &[u8],
     reply: &mut [u8],
 ) -> Result<u64, mochi_user_syscall::SysError> {
-    match platform::ipc::call(service_tid, request, reply) {
-        Ok(message) => Ok(message),
-        Err(error) if error.raw() == mochi_user_syscall::EAGAIN as i64 => loop {
-            match platform::ipc::try_wait(reply) {
-                Ok(message) => break Ok(message),
-                Err(error) if error.raw() == mochi_user_syscall::EAGAIN as i64 => {
-                    platform::thread::yield_now();
-                }
-                Err(error) => break Err(error),
-            }
-        },
-        Err(error) => Err(error),
-    }
+    platform::ipc::call(service_tid, request, reply)
 }
 
 fn install_posix_endpoint_for(

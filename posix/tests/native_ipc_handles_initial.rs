@@ -8,6 +8,8 @@ fn freestanding_ipc_probe_matches_current_native_abi() {
         ("CREATE_ENDPOINT", S::IpcCreateHandle),
         ("SEND", S::IpcSendObjectHandles),
         ("RECEIVE", S::IpcRecvObjectHandles),
+        ("RECV", S::IpcRecv),
+        ("WAIT", S::IpcWait),
         ("PAIR", S::StreamPairCreate),
         ("DEBUG", S::DebugWrite),
         ("WRITE", S::StreamWrite),
@@ -23,6 +25,7 @@ fn freestanding_ipc_probe_matches_current_native_abi() {
         ("ACCESS_DENIED", Error::AccessDenied),
         ("RESOURCE_UNAVAILABLE", Error::ResourceUnavailable),
         ("PEER_CLOSED", Error::PeerClosed),
+        ("NOT_READY", Error::NotReady),
     ] {
         assert!(source.contains(&format!(
             "#define {name} INT64_C({})",

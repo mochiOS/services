@@ -2,13 +2,15 @@
 #include <stdint.h>
 
 enum { CLOSE = 626, DUPLICATE = 627, CREATE_ENDPOINT = 629,
-       SEND = 630, RECEIVE = 631, PAIR = 649, DEBUG = 660,
+       SEND = 630, RECEIVE = 631, RECV = 515, WAIT = 590,
+       PAIR = 649, DEBUG = 660,
        WRITE = 675, TABLE = 680, READ = 681, YIELD = 579 };
 #define INVALID_ARGUMENT INT64_C(-262139)
 #define INVALID_ADDRESS INT64_C(-262142)
 #define ACCESS_DENIED INT64_C(-262138)
 #define RESOURCE_UNAVAILABLE INT64_C(-262141)
 #define PEER_CLOSED INT64_C(-262134)
+#define NOT_READY INT64_C(-262137)
 struct item { uint32_t handle, reserved; uint64_t rights; };
 struct attachments { uint32_t count, flags; struct item items[4]; };
 _Static_assert(sizeof(struct attachments) == 72, "IPC attachment ABI");
@@ -61,6 +63,10 @@ __attribute__((used, noreturn)) static void probe_main(void) {
   text("ipc-handles-initial: start\n");
   int64_t endpoint = native(CREATE_ENDPOINT, 0, 0, 0, 0);
   if (endpoint <= 0) fail(__LINE__, endpoint);
+  struct attachments empty = {0};
+  CHECK(receive((uintptr_t)&empty), NOT_READY);
+  CHECK(native(RECV, 0, 0, 0, 0), NOT_READY);
+  CHECK(native(WAIT, 0, 0, 0, 0), NOT_READY);
   uint32_t pair[2] = {0};
   CHECK(native(PAIR, (uintptr_t)pair, 0, 0, 0), 0);
   uint64_t baseline = count();
@@ -123,7 +129,7 @@ __attribute__((used, noreturn)) static void probe_main(void) {
   CHECK(native(WRITE, pair[1], (uintptr_t)&byte, 1, 0), PEER_CLOSED);
   CHECK(native(CLOSE, pair[1], 0, 0, 0), 0);
   CHECK(native(CLOSE, (uint64_t)endpoint, 0, 0, 0), 0);
-  text("ipc-handles-initial: PASS nonblocking/blocking receive, native decode errors, attenuation, copy rollback, table exhaustion and reference lifetime\n");
+  text("ipc-handles-initial: PASS native empty status, nonblocking/blocking receive, native decode errors, attenuation, copy rollback, table exhaustion and reference lifetime\n");
   for (;;) native(YIELD, 0, 0, 0, 0);
 }
 __attribute__((naked, noreturn, section(".text._start"))) void _start(void) {

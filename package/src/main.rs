@@ -892,19 +892,7 @@ fn prepare_linux_bundle(
         .encode(&mut encoded)
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     let mut reply = [0u8; PREPARE_BUNDLE_RESPONSE_LEN];
-    let message = match platform::ipc::call(service, &encoded[..length], &mut reply) {
-        Ok(message) => message,
-        Err(error) if error.raw() == mochi_user_syscall::EAGAIN as i64 => loop {
-            match platform::ipc::try_wait(&mut reply) {
-                Ok(message) => break message,
-                Err(error) if error.raw() == mochi_user_syscall::EAGAIN as i64 => {
-                    platform::thread::yield_now();
-                }
-                Err(error) => return Err(error),
-            }
-        },
-        Err(error) => return Err(error),
-    };
+    let message = platform::ipc::call(service, &encoded[..length], &mut reply)?;
     let reply_length = (message & 0xffff_ffff) as usize;
     let response = reply
         .get(..reply_length)

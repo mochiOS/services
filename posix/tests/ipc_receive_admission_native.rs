@@ -70,11 +70,7 @@ fn finish_user_receive(receiver:u64,message:UserReceive,handles:Option<u64>)->Re
         "fn current_receiver(",
         "pub fn send_to_endpoint(",
     ));
-    program.push_str(probe::between(
-        source,
-        "fn recv_from_thread_nonblocking(",
-        "/// カーネル内部から、特定送信元のIPCをノンブロッキング受信する",
-    ));
+    program.push_str(&source[source.find("fn recv_from_thread_nonblocking(").unwrap()..]);
     program.push_str(r#"
 fn reset(mode:u8){
     CONTEXT.set(true);REGISTER.set(true);RECORD.set(true);RIGHTS.set(true);RESOLVE.set(true);SLOT.set(Some((0,9)));
@@ -108,7 +104,7 @@ fn main(){
         }
     }
     for mode in [3,5]{reset(mode);RESOLVE.set(false);assert_eq!(run(mode),Error::AccessDenied.into_raw());assert_eq!(CALLS.get(),0);}
-    for mode in [0,2,4]{reset(mode);STAGE.set(0);assert_eq!(run(mode),EAGAIN);assert_eq!(CALLS.get(),1);}
+    for mode in [0,2,4]{reset(mode);STAGE.set(0);assert_eq!(run(mode),Error::NotReady.into_raw());assert_eq!(CALLS.get(),1);}
     reset(4);assert_eq!(recv_object_handles(11,64,0,0),Error::InvalidAddress.into_raw());assert_eq!((CALLS.get(),REGISTRATIONS.get()),(0,0));
 }
 "#);

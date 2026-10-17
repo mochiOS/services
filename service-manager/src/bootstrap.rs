@@ -1080,7 +1080,9 @@ fn resident(
         } else {
             match platform::ipc::try_wait(&mut request_bytes) {
                 Ok(received) => received,
-                Err(error) if error.raw() == mochi_user_syscall::EAGAIN as i64 => {
+                Err(error)
+                    if error.native_error() == Some(mochi_user_syscall::NativeError::NotReady) =>
+                {
                     platform::thread::yield_now();
                     continue;
                 }

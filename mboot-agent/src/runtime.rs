@@ -119,7 +119,11 @@ fn receive_ipc_request(
         &mut request, &mut attachments.handles,
     ) {
         Ok(received) => received,
-        Err(error) if error.raw() == mochi_user_syscall::EAGAIN as i64 => return,
+        Err(error)
+            if error.native_error() == Some(mochi_user_syscall::NativeError::NotReady) =>
+        {
+            return
+        }
         Err(_) => return,
     };
     let sender = received >> 32;

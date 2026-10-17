@@ -5,12 +5,15 @@ extern crate self as mochi_user_syscall;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-pub const EAGAIN: u64 = 11;
+pub use mochi_user_platform_real::syscall::NativeError;
 #[derive(Debug)]
 pub struct SysError;
 impl SysError {
     pub fn raw(&self) -> i64 {
-        EAGAIN as i64
+        NativeError::NotReady.into_raw() as i64
+    }
+    pub fn native_error(&self) -> Option<NativeError> {
+        Some(NativeError::NotReady)
     }
 }
 

@@ -542,7 +542,11 @@ fn receive_notification() -> Result<Option<ReceivedNotification>, ReadyError> {
     let mut handles = platform::ipc::IpcObjectHandles::default();
     let received = match platform::ipc::try_wait_object_handles(&mut message, &mut handles) {
         Ok(received) => received,
-        Err(error) if error.raw() == mochi_user_syscall::EAGAIN as i64 => return Ok(None),
+        Err(error)
+            if error.native_error() == Some(mochi_user_syscall::NativeError::NotReady) =>
+        {
+            return Ok(None);
+        }
         Err(error) => return Err(ReadyError::Ipc(error.raw().unsigned_abs())),
     };
     let length = (received & 0xffff_ffff) as usize;

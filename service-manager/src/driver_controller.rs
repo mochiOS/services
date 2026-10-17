@@ -207,7 +207,9 @@ fn wait_for_message(
                     Err(DriverControlError::UnexpectedMessage)
                 };
             }
-            Err(error) if error.raw() == mochi_user_syscall::EAGAIN as i64 => {}
+            Err(error)
+                if error.native_error() == Some(mochi_user_syscall::NativeError::NotReady) =>
+            {}
             Err(error) => return Err(DriverControlError::Ipc(error.raw().unsigned_abs())),
         }
         if let Some(status) = process

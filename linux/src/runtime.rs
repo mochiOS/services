@@ -93,7 +93,9 @@ pub(crate) fn run() -> ! {
                     Err(_) => handle_event(message, &mut instances, &mut host),
                 }
             }
-            Err(error) if error.raw() == mochi_user_syscall::EAGAIN as i64 => {}
+            Err(error)
+                if error.native_error() == Some(mochi_user_syscall::NativeError::NotReady) =>
+            {}
             Err(_) => {}
         }
 
