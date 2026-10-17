@@ -120,7 +120,7 @@ fn kernel_memory_mapping_uses_handles_and_native_options() {
         .and_then(|body| body.split("pub fn memory_unmap(").next())
         .expect("native MemoryMap implementation");
     assert!(mapping.contains("MEMORY_MAP_OPTIONS_ALL"));
-    assert!(mapping.contains("handle::object_with_rights(backing_handle"));
+    assert!(mapping.contains("handle::object_with_rights_native(backing_handle"));
     assert!(mapping.contains("KernelObject::Provider"));
     assert!(!mapping.contains("MAX_MEMORY_BACKING_BYTES"));
     assert!(!mapping.contains("PROT_"));
