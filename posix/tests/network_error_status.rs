@@ -5,6 +5,85 @@ use mochi_user_platform::syscall;
 use mochios_net_device_protocol::{self as wire, Header, Opcode};
 
 #[test]
+fn service_connection_limits_keep_their_status_and_typed_wire_failure() {
+    assert_eq!(wire::STATUS_CONNECTION_LIMIT, -24);
+    let raw = wire::STATUS_CONNECTION_LIMIT as i64 as u64;
+    assert_eq!(network_status::failure_status(raw), -24);
+    let mut bytes = [0; 256];
+    let http = wire::HttpRequestResult {
+        request_id: 71,
+        status: wire::STATUS_CONNECTION_LIMIT,
+        failure: wire::HttpFailure::ConnectionLimit,
+        status_code: 0,
+        handle: 0,
+        body_length: 0,
+        headers_length: 0,
+        content_type: "",
+    };
+    let length = wire::encode_http_request_result(
+        http.request_id,
+        http.status,
+        http.failure,
+        http.status_code,
+        http.handle,
+        http.body_length,
+        http.headers_length,
+        http.content_type,
+        &mut bytes,
+    )
+    .unwrap();
+    let decoded = wire::decode_http_request_result(&bytes[..length]).unwrap();
+    assert_eq!(decoded.request_id, 71);
+    assert_eq!(decoded.status, -24);
+    assert_eq!(decoded.failure, wire::HttpFailure::ConnectionLimit);
+    assert_eq!(decoded.handle, 0);
+    let tls = wire::TlsConnectResult {
+        request_id: 72,
+        status: wire::STATUS_CONNECTION_LIMIT,
+        failure: wire::TlsFailure::ConnectionLimit,
+        handle: 0,
+        address: [0; 4],
+        port: 0,
+        protocol_version: 0,
+        cipher_suite: 0,
+        hostname: "",
+        certificate_subject: "",
+        certificate_issuer: "",
+        certificate_not_before: 0,
+        certificate_not_after: 0,
+    };
+    let length = wire::encode_tls_connect_result(
+        tls.request_id,
+        tls.status,
+        tls.failure,
+        tls.handle,
+        tls.address,
+        tls.port,
+        tls.protocol_version,
+        tls.cipher_suite,
+        tls.hostname,
+        tls.certificate_subject,
+        tls.certificate_issuer,
+        tls.certificate_not_before,
+        tls.certificate_not_after,
+        &mut bytes,
+    )
+    .unwrap();
+    let decoded = wire::decode_tls_connect_result(&bytes[..length]).unwrap();
+    assert_eq!(decoded.request_id, 72);
+    assert_eq!(decoded.status, -24);
+    assert_eq!(decoded.failure, wire::TlsFailure::ConnectionLimit);
+    assert_eq!(decoded.handle, 0);
+    for source in [
+        include_str!("../../network/src/http.rs"),
+        include_str!("../../network/src/tls.rs"),
+    ] {
+        assert!(!source.contains("mochi_user_syscall::EMFILE"));
+        assert!(source.contains("mochios_net_device_protocol::STATUS_CONNECTION_LIMIT"));
+    }
+}
+
+#[test]
 fn outgoing_failures_normalize_native_and_positive_errno() {
     for (raw, expected) in [
         (13, -13),

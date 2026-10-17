@@ -103,7 +103,7 @@ impl TlsManager {
     ) -> Result<TlsConnectSuccess, TlsOperationError> {
         if self.sessions.len() >= MAX_TLS_CONNECTIONS {
             return Err(operation_error(
-                mochi_user_syscall::EMFILE,
+                mochios_net_device_protocol::STATUS_CONNECTION_LIMIT as i64 as u64,
                 TlsFailure::ConnectionLimit,
             ));
         }

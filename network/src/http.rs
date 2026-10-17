@@ -127,7 +127,7 @@ impl HttpManager {
     ) -> Result<HttpRequestSuccess, HttpOperationError> {
         if self.responses.len() >= MAX_HTTP_RESPONSES {
             return Err(error(
-                mochi_user_syscall::EMFILE,
+                mochios_net_device_protocol::STATUS_CONNECTION_LIMIT as i64 as u64,
                 HttpFailure::ConnectionLimit,
             ));
         }
