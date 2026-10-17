@@ -5,7 +5,7 @@
 mod probe;
 
 #[test]
-fn restriction_is_atomic_on_allocation_failure_and_never_increases_authority() {
+fn local_capability_operations_preserve_authority_and_native_failures() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
@@ -56,6 +56,10 @@ impl Process {
     fn kernel_authorities_mut(&mut self)->&mut KernelAuthoritySet{&mut self.authorities}
 }
 mod task {
+    pub mod process {
+        pub fn process_has_capability(id:u64,cap:crate::Capability)->bool{assert_eq!(id,23);crate::PROCESS.with_borrow(|p|p.as_ref().is_some_and(|p|p.caps.contains(cap)))}
+        pub fn process_has_kernel_authority(id:u64,cap:&crate::KernelAuthority)->bool{assert_eq!(id,23);crate::PROCESS.with_borrow(|p|p.as_ref().is_some_and(|p|p.authorities.implies(cap)))}
+    }
     pub fn with_process_mut<R>(id:u64,f:impl FnOnce(&mut crate::Process)->R)->Option<R>{
         assert_eq!(id,23);assert!(!crate::LOCKED.replace(true));
         let result=crate::PROCESS.with_borrow_mut(|p|p.as_mut().map(f));crate::LOCKED.set(false);result
@@ -79,6 +83,7 @@ mod util {pub mod object_snapshot {use alloc::vec::Vec;
     let syscall = include_str!("../../../core/src/syscall/capability.rs");
     for (start, end) in [
         ("#[derive(Clone, Copy)]", "/// 指定スレッド"),
+        ("pub fn clone_capability(", "pub fn transfer_capability("),
         ("pub fn restrict_capability(", "fn current_process("),
         (
             "fn read_capability_spec_from_user(",
@@ -119,6 +124,24 @@ fn main(){
     set("fs.read.all",None);assert_eq!(restrict("fs.read.all","memory.phys.map@4096:4096"),Error::InvalidArgument.into_raw());assert!(contains("fs.read.all"));assert_eq!(count(),1);
     for invalid in ["unknown.capability", "bad..name"]{set("fs.read.all",None);assert_eq!(restrict("fs.read.all",invalid),Error::InvalidArgument.into_raw());assert!(contains("fs.read.all"));}
     set("memory.phys.map@4096:4096",None);assert_eq!(restrict("memory.phys.map@4096:4096","memory.phys.map@8192:4096"),Error::AccessDenied.into_raw());assert!(contains("memory.phys.map@4096:4096"));
+    for (parent,child) in [("fs.read.all","fs.read.tmp"),("memory.phys.map@4096:8192","memory.phys.map@4096:4096")] {
+        let args=(parent.as_ptr() as u64,parent.len() as u64);let narrowed=(child.as_ptr() as u64,child.len() as u64);
+        set(parent,None);assert_eq!(clone_capability(args.0,args.1),SUCCESS);assert_eq!(clone_capability(narrowed.0,narrowed.1),SUCCESS);assert!(contains(parent));assert!(!contains(child));assert_eq!(count(),1);
+        assert_eq!(drop_capability(narrowed.0,narrowed.1),Error::AccessDenied.into_raw());assert!(contains(parent));assert_eq!(count(),1);
+        assert_eq!(drop_capability(args.0,args.1),SUCCESS);assert_eq!(count(),0);assert_eq!(clone_capability(args.0,args.1),Error::AccessDenied.into_raw());assert_eq!(drop_capability(args.0,args.1),Error::AccessDenied.into_raw());
+        for operation in [clone_capability as fn(u64,u64)->u64,drop_capability] {
+            set(parent,None);FAIL_AFTER.set(Some(0));assert_eq!(operation(args.0,args.1),Error::ResourceUnavailable.into_raw());assert!(contains(parent));assert_eq!(count(),1);
+            // No allocation follows the input snapshot, even for exact removal.
+            set(parent,None);FAIL_AFTER.set(Some(1));assert_eq!(operation(args.0,args.1),SUCCESS);assert_eq!(FAIL_AFTER.replace(None),Some(0));
+            for error in [Error::InvalidAddress,Error::ResourceUnavailable,Error::AccessDenied,Error::BackingFailure,Error::NotReady] {
+                set(parent,None);COPY_ERROR.set(Some(error));assert_eq!(operation(args.0,args.1),error.into_raw());assert!(contains(parent));assert_eq!(count(),1);
+            }
+            set(parent,None);CONTEXT.set(false);assert_eq!(operation(args.0,args.1),Error::NotReady.into_raw());assert_eq!(COPIES.get(),0);assert!(contains(parent));
+            set(parent,None);assert_eq!(operation(0,args.1),Error::InvalidAddress.into_raw());assert!(contains(parent));assert_eq!(operation(args.0,0),Error::InvalidArgument.into_raw());assert!(contains(parent));
+            set(parent,None);let unknown="unknown.capability";assert_eq!(operation(unknown.as_ptr() as u64,unknown.len() as u64),Error::InvalidArgument.into_raw());assert!(contains(parent));
+        }
+        set(parent,None);PROCESS.set(None);assert_eq!(drop_capability(args.0,args.1),Error::NotReady.into_raw());
+    }
 }
 "#);
     probe::run(&program);
