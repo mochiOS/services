@@ -647,19 +647,19 @@ impl BootstrapOperations for Runtime {
             self.posix_endpoint,
         ) {
             Ok(process_id) => {
-                platform::logln!(
+                boot_status(format_args!(
                     "service-manager.service: {} spawned pid={}",
                     service_name(service),
                     process_id
-                );
+                ));
                 Some(process_id)
             }
             Err(error) => {
-                platform::logln!(
+                boot_status(format_args!(
                     "service-manager.service: {} spawn failed errno={}",
                     service_name(service),
                     errno(error)
-                );
+                ));
                 None
             }
         }
@@ -720,7 +720,9 @@ impl BootstrapOperations for Runtime {
     }
 
     fn wait_filesystem_ready(&mut self, process_id: u64) -> bool {
-        platform::logln!("service-manager.service: waiting for filesystem.service ready");
+        boot_status(format_args!(
+            "service-manager.service: waiting for filesystem.service ready"
+        ));
         let result = self
             .ready
             .as_mut()
@@ -731,10 +733,10 @@ impl BootstrapOperations for Runtime {
         match result {
             Ok(endpoint) => {
                 self.filesystem_endpoint = Some(endpoint);
-                platform::logln!(
+                boot_status(format_args!(
                     "service-manager.service: filesystem.service ready endpoint={}",
                     endpoint
-                );
+                ));
                 true
             }
             Err(error) => {
@@ -745,7 +747,9 @@ impl BootstrapOperations for Runtime {
     }
 
     fn wait_posix_ready(&mut self, process_id: u64) -> bool {
-        platform::logln!("service-manager.service: waiting for posix.service ready");
+        boot_status(format_args!(
+            "service-manager.service: waiting for posix.service ready"
+        ));
         let result = self
             .ready
             .as_mut()
@@ -867,7 +871,7 @@ impl BootstrapOperations for Runtime {
 }
 
 pub(crate) fn run() -> ! {
-    platform::logln!("service-manager.service: start");
+    boot_status(format_args!("service-manager.service: start"));
     let logger_endpoint = platform::logger::endpoint().map_or(0, |endpoint| endpoint);
     let (outcome, mut runtime) = match Runtime::create(logger_endpoint) {
         Ok(mut runtime) => {
@@ -882,10 +886,10 @@ pub(crate) fn run() -> ! {
             (BootstrapOutcome::initialization_failed(), None)
         }
     };
-    platform::logln!(
+    boot_status(format_args!(
         "service-manager.service: resident phase reason={:?}",
         outcome.reason
-    );
+    ));
     if outcome.children.binder.is_some()
         // KVM accelerates the CPU but does not imply an emulated VT-d/AMD-Vi
         // device. Do not show a physical-firmware warning inside a VM.
@@ -959,7 +963,16 @@ fn service_name(service: FixedService) -> &'static str {
     }
 }
 
+fn boot_status(message: core::fmt::Arguments<'_>) {
+    let _ = platform::logger::write_status_fmt(format_args!("{message}\n"));
+}
+
 fn log_ready_error(service: ReadyService, error: ReadyError) {
+    boot_status(format_args!(
+        "service-manager.service: {} readiness failed: {:?}",
+        service.name(),
+        error
+    ));
     // Startup failures must remain visible before logger persistence is ready.
     eprintln!(
         "service-manager.service: {} readiness failed: {:?}",
