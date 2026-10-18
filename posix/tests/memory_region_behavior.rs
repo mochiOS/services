@@ -132,6 +132,30 @@ fn main() {
     for (a,b) in copied.access_ranges.iter().zip(&anonymous.access_ranges){assert_eq!((a.start,a.end,a.access),(b.start,b.end,b.access));}
     if let MemoryBacking::Anonymous{data,writable,shared}=&mut copied.backing {assert_eq!(data,&vec![7;8192]);assert!(*writable);assert!(*shared);data[0]=9;}
     if let MemoryBacking::Anonymous{data,..}=&anonymous.backing {assert_eq!(data[0],7);}
+    // Exercise the production dirty-page set with nonsequential/repeated faults.
+    let mut dirty = MemoryRegion::anonymous(0x1000, 16 * 4096,
+        MEMORY_ACCESS_READ | MEMORY_ACCESS_WRITE, 0, true, false);
+    for page in [9, 2, 15, 0, 9, 7, 2, 15, 1] { dirty.mark_dirty_page(page); }
+    assert_eq!(dirty.dirty_pages(), &[0, 1, 2, 7, 9, 15]);
+    let mut cloned = dirty.try_clone().unwrap();
+    cloned.mark_dirty_page(3);
+    assert_eq!(cloned.dirty_pages(), &[0, 1, 2, 3, 7, 9, 15]);
+    assert_eq!(dirty.dirty_pages(), &[0, 1, 2, 7, 9, 15]);
+    let mut sliced = dirty.slice(0x3000, 0xb000).unwrap();
+    assert_eq!(sliced.dirty_pages(), &[0, 5, 7]);
+    sliced.mark_dirty_page(2);
+    sliced.clear_dirty_pages(2, 4);
+    assert_eq!(sliced.take_dirty_pages(), &[0, 7]);
+    assert!(sliced.dirty_pages().is_empty());
+    sliced.mark_dirty_page(1);
+    assert_eq!(sliced.dirty_pages(), &[1]);
+    // Large monotonic first-write workloads retain every page exactly once.
+    let mut sequential = MemoryRegion::anonymous(0x1000, 100_000 * 4096,
+        MEMORY_ACCESS_READ | MEMORY_ACCESS_WRITE, 0, true, false);
+    for page in 0..100_000 { sequential.mark_dirty_page(page); }
+    for page in (0..100_000).rev() { sequential.mark_dirty_page(page); }
+    assert_eq!(sequential.dirty_pages().len(), 100_000);
+    assert!(sequential.dirty_pages().iter().copied().eq(0..100_000));
     let process = removal::Process { memory_regions: vec![region.clone()] };
     let (retained, removed) = process.prepare_remove_memory_range(0x2000, 0x2000).unwrap();
     assert_eq!(process.memory_regions.len(), 1);
@@ -160,7 +184,7 @@ fn main() {
     fs::create_dir(&temporary.0).unwrap();
     let binary = temporary.0.join("probe");
     let mut compiler = Command::new("rustc")
-        .args(["--edition=2021", "-Awarnings", "-"])
+        .args(["--edition=2021", "-Awarnings", "-Cstrip=symbols", "-"])
         .arg("-o")
         .arg(&binary)
         .stdin(Stdio::piped())
