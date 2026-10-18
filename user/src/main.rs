@@ -34,15 +34,15 @@ impl UserService {
 
     fn save_candidate(&mut self, operation: &str, candidate: UserDatabase) -> Result<(), u64> {
         storage::save(Path::new(DATABASE_PATH), &candidate).map_err(|error| {
-            let errno = error.errno();
+            let status = error.status();
             diagnostic(&format!(
-                "user.service: database save failed operation={} storage_operation={} errno={} error={}",
+                "user.service: database save failed operation={} storage_operation={} status={} error={}",
                 operation,
                 error.operation(),
-                errno,
+                status,
                 error,
             ));
-            errno
+            i64::from(status) as u64
         })?;
 
         self.database = candidate;
@@ -241,12 +241,6 @@ impl UserService {
     }
 }
 
-fn errno(error: &std::io::Error) -> u64 {
-    error
-        .raw_os_error()
-        .unwrap_or(mochi_user_syscall::EIO as i32) as u64
-}
-
 fn main() {
     let _ = platform::logger::init_from_env();
     platform::logln!("user.service: start");
@@ -261,7 +255,10 @@ fn main() {
                 "user.service: database load failed error={}",
                 error
             ));
-            let _ = platform::service_ready::notify(ready_target, -(errno(&error) as i32));
+            let _ = platform::service_ready::notify(
+                ready_target,
+                user_service::status::io_status(&error),
+            );
             platform::process::exit(1);
         }
     };

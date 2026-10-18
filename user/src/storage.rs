@@ -21,10 +21,8 @@ impl SaveError {
         self.operation
     }
 
-    pub fn errno(&self) -> u64 {
-        self.source
-            .raw_os_error()
-            .unwrap_or(mochi_user_syscall::EIO as i32) as u64
+    pub fn status(&self) -> i32 {
+        crate::status::io_status(&self.source)
     }
 }
 

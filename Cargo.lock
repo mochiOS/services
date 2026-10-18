@@ -3556,6 +3556,7 @@ dependencies = [
  "hmac",
  "mochi-user-platform",
  "mochi-user-syscall",
+ "mochios-posix-client",
  "mochios-posix-protocol",
  "mochios-user-database",
  "mochios-user-protocol",

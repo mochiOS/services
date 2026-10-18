@@ -8,6 +8,32 @@ use mochi_user_platform::{session_control, syscall};
 use mochios_user_protocol::Status;
 
 #[test]
+fn io_errors_are_converted_before_account_reply_or_readiness_notification() {
+    for raw in [2, 5, 13, 22, 36, 38, 75, 95] {
+        let error = std::io::Error::from_raw_os_error(raw);
+        let status = account_status::io_status(&error);
+        assert_eq!(status, -raw);
+        assert_eq!(
+            account_status::wire_status(i64::from(status) as u64),
+            status
+        );
+    }
+    for error in [
+        std::io::Error::other("no OS errno"),
+        std::io::Error::from_raw_os_error(0),
+        std::io::Error::from_raw_os_error(-91),
+    ] {
+        assert_eq!(account_status::io_status(&error), -5);
+    }
+    let storage = include_str!("../../user/src/storage.rs");
+    assert!(storage.contains("crate::status::io_status(&self.source)"));
+    let main = include_str!("../../user/src/main.rs");
+    assert!(main.contains("let status = error.status();"));
+    assert!(main.contains("user_service::status::io_status(&error)"));
+    assert!(!main.contains("fn errno(error:"));
+}
+
+#[test]
 fn authentication_denial_preserves_eacces_through_the_account_protocol() {
     for raw in [13, syscall::EACCES] {
         let status = account_status::wire_status(raw);
