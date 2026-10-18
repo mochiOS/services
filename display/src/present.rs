@@ -1,9 +1,11 @@
-use mochi_user_syscall::{EINVAL, ERANGE};
+use mochi_user_syscall::{EINVAL, NativeError};
 
 pub(crate) const PIXEL_FORMAT_XRGB8888: u32 = 1;
 pub(crate) const PIXEL_FORMAT_ARGB8888_PREMULTIPLIED: u32 = 2;
 pub(crate) const BYTES_PER_PIXEL: usize = 4;
 pub(crate) const MAX_DIMENSION: u32 = 4096;
+/// Native size/geometry failure; this is not a POSIX ERANGE status.
+pub(crate) const SIZE_LIMIT: u64 = NativeError::LimitExceeded.into_raw();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DisplayGeometry {
@@ -28,7 +30,7 @@ impl DisplayGeometry {
         (self.stride as usize)
             .checked_mul(BYTES_PER_PIXEL)
             .and_then(|row| row.checked_mul(self.height as usize))
-            .ok_or(ERANGE)
+            .ok_or(SIZE_LIMIT)
     }
 
     pub(crate) fn panel_byte_len(self) -> Result<usize, u64> {
@@ -84,8 +86,8 @@ impl DamageRect {
         if self.is_empty() {
             return Ok(());
         }
-        let right = self.x.checked_add(self.width).ok_or(ERANGE)?;
-        let bottom = self.y.checked_add(self.height).ok_or(ERANGE)?;
+        let right = self.x.checked_add(self.width).ok_or(SIZE_LIMIT)?;
+        let bottom = self.y.checked_add(self.height).ok_or(SIZE_LIMIT)?;
         if right > geometry.width || bottom > geometry.height {
             return Err(EINVAL);
         }
@@ -171,7 +173,7 @@ mod tests {
                 height: 1,
             }
             .validate(GEOMETRY),
-            Err(ERANGE)
+            Err(SIZE_LIMIT)
         );
     }
 

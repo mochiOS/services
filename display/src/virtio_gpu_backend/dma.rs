@@ -4,7 +4,7 @@ use mochi_user_platform as platform;
 use mochios_virtio_gpu_protocol::MemoryEntry;
 use plugkit::virtio::{DmaMemory, VirtioResult};
 
-use crate::present::BYTES_PER_PIXEL;
+use crate::present::{BYTES_PER_PIXEL, SIZE_LIMIT};
 
 const BACKING_CHUNK_SIZE: usize = 1024 * 1024;
 
@@ -92,7 +92,7 @@ impl BackingStore {
             let region = DmaRegion::allocate(chunk)?;
             entries.push(MemoryEntry {
                 address: region.physical_address(),
-                length: u32::try_from(chunk).map_err(|_| mochi_user_syscall::ERANGE)?,
+                length: u32::try_from(chunk).map_err(|_| SIZE_LIMIT)?,
             });
             regions.push(region);
             remaining -= chunk;
@@ -124,14 +124,14 @@ impl BackingStore {
 
     pub(super) fn write_all(&mut self, bytes: &[u8]) -> Result<(), u64> {
         if bytes.len() > self.length {
-            return Err(mochi_user_syscall::ERANGE);
+            return Err(SIZE_LIMIT);
         }
         self.write_at(0, bytes)
     }
 
     pub(super) fn read_u32_at(&mut self, mut offset: usize) -> Result<u32, u64> {
         if offset.checked_add(4).is_none_or(|end| end > self.length) {
-            return Err(mochi_user_syscall::ERANGE);
+            return Err(SIZE_LIMIT);
         }
         for region in &mut self.regions {
             region.sync_for_cpu().map_err(|_| mochi_user_syscall::EIO)?;
@@ -142,10 +142,10 @@ impl BackingStore {
             let bytes = region
                 .bytes()
                 .get(offset..offset + 4)
-                .ok_or(mochi_user_syscall::ERANGE)?;
+                .ok_or(SIZE_LIMIT)?;
             return Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
         }
-        Err(mochi_user_syscall::ERANGE)
+        Err(SIZE_LIMIT)
     }
 
     pub(super) fn copy_rect(
@@ -157,32 +157,32 @@ impl BackingStore {
     ) -> Result<(), u64> {
         let source_row = (source_stride as usize)
             .checked_mul(BYTES_PER_PIXEL)
-            .ok_or(mochi_user_syscall::ERANGE)?;
+            .ok_or(SIZE_LIMIT)?;
         let destination_row = (destination_stride as usize)
             .checked_mul(BYTES_PER_PIXEL)
-            .ok_or(mochi_user_syscall::ERANGE)?;
+            .ok_or(SIZE_LIMIT)?;
         let x = (rect.x as usize)
             .checked_mul(BYTES_PER_PIXEL)
-            .ok_or(mochi_user_syscall::ERANGE)?;
+            .ok_or(SIZE_LIMIT)?;
         let width = (rect.width as usize)
             .checked_mul(BYTES_PER_PIXEL)
-            .ok_or(mochi_user_syscall::ERANGE)?;
+            .ok_or(SIZE_LIMIT)?;
         let bottom = rect
             .y
             .checked_add(rect.height)
-            .ok_or(mochi_user_syscall::ERANGE)?;
+            .ok_or(SIZE_LIMIT)?;
         for y in rect.y as usize..bottom as usize {
             let source_offset = y
                 .checked_mul(source_row)
                 .and_then(|offset| offset.checked_add(x))
-                .ok_or(mochi_user_syscall::ERANGE)?;
+                .ok_or(SIZE_LIMIT)?;
             let destination_offset = y
                 .checked_mul(destination_row)
                 .and_then(|offset| offset.checked_add(x))
-                .ok_or(mochi_user_syscall::ERANGE)?;
+                .ok_or(SIZE_LIMIT)?;
             let source_end = source_offset
                 .checked_add(width)
-                .ok_or(mochi_user_syscall::ERANGE)?;
+                .ok_or(SIZE_LIMIT)?;
             let row = source
                 .get(source_offset..source_end)
                 .ok_or(mochi_user_syscall::EINVAL)?;
@@ -196,7 +196,7 @@ impl BackingStore {
             .checked_add(bytes.len())
             .is_none_or(|end| end > self.length)
         {
-            return Err(mochi_user_syscall::ERANGE);
+            return Err(SIZE_LIMIT);
         }
         for region in &mut self.regions {
             if offset >= region.len() {
@@ -212,7 +212,7 @@ impl BackingStore {
                 return Ok(());
             }
         }
-        Err(mochi_user_syscall::ERANGE)
+        Err(SIZE_LIMIT)
     }
 }
 
@@ -225,12 +225,12 @@ fn cursor_bgra(width: u32, height: u32, row_pixels: u32, rgba: &[u8]) -> Result<
                 .and_then(|height| width.checked_mul(height))
         })
         .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or(mochi_user_syscall::ERANGE)?;
+        .ok_or(SIZE_LIMIT)?;
     let destination_len = usize::try_from(row_pixels)
         .ok()
         .and_then(|width| width.checked_mul(width))
         .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or(mochi_user_syscall::ERANGE)?;
+        .ok_or(SIZE_LIMIT)?;
     if width == 0
         || height == 0
         || width > row_pixels

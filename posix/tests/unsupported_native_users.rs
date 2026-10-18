@@ -5,6 +5,11 @@ mod probe;
 #[test]
 fn platform_and_display_unsupported_paths_use_native_errors_not_enosys() {
     let mut program = probe::program();
+    probe::constants(
+        &mut program,
+        include_str!("../../display/src/present.rs"),
+        &["SIZE_LIMIT"],
+    );
     program.push_str(
         r#"
 extern crate self as mochi_user_platform;
@@ -91,6 +96,10 @@ fn main() {
     framebuffer.pixels=pixels.as_mut_ptr();
     assert_eq!(framebuffer.present_gpu_scene(&[]),Err(unsupported));
     assert_eq!(COMMITS.get(),0);
+    framebuffer.mapped_size=2;
+    assert_eq!(framebuffer.present_gpu_scene(&[1,2,3]),Err(NativeError::LimitExceeded.into_raw()));
+    assert_eq!(pixels,[0xa5;8]);assert_eq!(COMMITS.get(),0);
+    framebuffer.mapped_size=8;
     assert_eq!(framebuffer.present_gpu_scene(&[1,2,3]),Ok(()));
     assert_eq!(pixels,[1,2,3,0xa5,0xa5,0xa5,0xa5,0xa5]);assert_eq!(COMMITS.get(),1);
     let mut backend=DisplayBackend::Framebuffer(framebuffer);

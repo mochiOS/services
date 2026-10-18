@@ -1,7 +1,7 @@
 use mochi_user_platform as platform;
-use mochi_user_syscall::{EIO, ERANGE};
+use mochi_user_syscall::EIO;
 
-use crate::present::{BYTES_PER_PIXEL, DisplayGeometry, PresentFrame};
+use crate::present::{BYTES_PER_PIXEL, DisplayGeometry, PresentFrame, SIZE_LIMIT};
 
 const FB_VIRT: u64 = 0x0000_6000_0000_0000;
 const FORMAT_MEDIATED_FIRMWARE: u32 = 1 << 31;
@@ -56,7 +56,7 @@ impl FramebufferBackend {
             let transfer_limit = platform::memory::framebuffer_transfer_limit()
                 .map_err(|error| error.errno().unwrap_or(EIO))?;
             if transfer_limit < BYTES_PER_PIXEL {
-                return Err(ERANGE);
+                return Err(SIZE_LIMIT);
             }
             platform::logln!(
                 "display.driver: backend={}",
@@ -79,7 +79,7 @@ impl FramebufferBackend {
             });
         }
         let offset = info.addr & 0xfff;
-        let mapped_size = page_align_up(info.size.checked_add(offset).ok_or(ERANGE)?)?;
+        let mapped_size = page_align_up(info.size.checked_add(offset).ok_or(SIZE_LIMIT)?)?;
         platform::memory::map_framebuffer(FB_VIRT, mapped_size).map_err(|_| EIO)?;
         Ok(Self {
             geometry,
@@ -107,7 +107,7 @@ impl FramebufferBackend {
             return Err(mochi_user_syscall::NativeError::Unsupported.into_raw());
         }
         if bytes.len() as u64 > self.mapped_size || bytes.len() > u32::MAX as usize {
-            return Err(ERANGE);
+            return Err(SIZE_LIMIT);
         }
         unsafe {
             core::ptr::copy_nonoverlapping(bytes.as_ptr(), self.pixels, bytes.len());
@@ -146,13 +146,13 @@ impl FramebufferBackend {
             .damage
             .x
             .checked_add(frame.damage.width)
-            .ok_or(ERANGE)?
+            .ok_or(SIZE_LIMIT)?
             .min(self.geometry.width);
         let copy_bottom = frame
             .damage
             .y
             .checked_add(frame.damage.height)
-            .ok_or(ERANGE)?
+            .ok_or(SIZE_LIMIT)?
             .min(self.geometry.height);
         let copy_width = copy_right
             .saturating_sub(frame.damage.x)
@@ -162,16 +162,16 @@ impl FramebufferBackend {
         }
         let bytes = (copy_width as usize)
             .checked_mul(BYTES_PER_PIXEL)
-            .ok_or(ERANGE)?;
+            .ok_or(SIZE_LIMIT)?;
         let source_row = (frame.geometry.stride as usize)
             .checked_mul(BYTES_PER_PIXEL)
-            .ok_or(ERANGE)?;
+            .ok_or(SIZE_LIMIT)?;
         let destination_row = (self.geometry.stride as usize)
             .checked_mul(BYTES_PER_PIXEL)
-            .ok_or(ERANGE)?;
+            .ok_or(SIZE_LIMIT)?;
         let x_offset = (frame.damage.x as usize)
             .checked_mul(BYTES_PER_PIXEL)
-            .ok_or(ERANGE)?;
+            .ok_or(SIZE_LIMIT)?;
         if self.mdriver || self.firmware_mediated {
             return self.present_mediated(frame, copy_right, copy_bottom, source_row);
         }
@@ -179,13 +179,13 @@ impl FramebufferBackend {
             let source = y
                 .checked_mul(source_row)
                 .and_then(|offset| offset.checked_add(x_offset))
-                .ok_or(ERANGE)?;
+                .ok_or(SIZE_LIMIT)?;
             let destination = y
                 .checked_mul(destination_row)
                 .and_then(|offset| offset.checked_add(x_offset))
-                .ok_or(ERANGE)?;
-            let source_end = source.checked_add(bytes).ok_or(ERANGE)?;
-            let source = frame.pixels.get(source..source_end).ok_or(ERANGE)?;
+                .ok_or(SIZE_LIMIT)?;
+            let source_end = source.checked_add(bytes).ok_or(SIZE_LIMIT)?;
+            let source = frame.pixels.get(source..source_end).ok_or(SIZE_LIMIT)?;
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     source.as_ptr(),
@@ -215,27 +215,27 @@ impl FramebufferBackend {
     ) -> Result<(), u64> {
         let max_width = self.transfer_limit / BYTES_PER_PIXEL;
         if max_width == 0 {
-            return Err(ERANGE);
+            return Err(SIZE_LIMIT);
         }
         let mut x = frame.damage.x as usize;
         while x < copy_right as usize {
             let tile_width = core::cmp::min(copy_right as usize - x, max_width);
-            let tile_bytes = tile_width.checked_mul(BYTES_PER_PIXEL).ok_or(ERANGE)?;
+            let tile_bytes = tile_width.checked_mul(BYTES_PER_PIXEL).ok_or(SIZE_LIMIT)?;
             let rows_per_transfer = (self.transfer_limit / tile_bytes).max(1);
             let mut y = frame.damage.y as usize;
             while y < copy_bottom as usize {
                 let rows = core::cmp::min(copy_bottom as usize - y, rows_per_transfer);
-                let byte_len = tile_bytes.checked_mul(rows).ok_or(ERANGE)?;
+                let byte_len = tile_bytes.checked_mul(rows).ok_or(SIZE_LIMIT)?;
                 let source = y
                     .checked_mul(source_row)
                     .and_then(|offset| {
                         x.checked_mul(BYTES_PER_PIXEL)
                             .and_then(|x_offset| offset.checked_add(x_offset))
                     })
-                    .ok_or(ERANGE)?;
+                    .ok_or(SIZE_LIMIT)?;
                 if tile_bytes == source_row {
-                    let source_end = source.checked_add(byte_len).ok_or(ERANGE)?;
-                    let pixels = frame.pixels.get(source..source_end).ok_or(ERANGE)?;
+                    let source_end = source.checked_add(byte_len).ok_or(SIZE_LIMIT)?;
+                    let pixels = frame.pixels.get(source..source_end).ok_or(SIZE_LIMIT)?;
                     platform::memory::present_framebuffer(
                         x as u32,
                         y as u32,
@@ -248,13 +248,13 @@ impl FramebufferBackend {
                     self.transfer_buffer.resize(byte_len, 0);
                     for row in 0..rows {
                         let source_start = source
-                            .checked_add(row.checked_mul(source_row).ok_or(ERANGE)?)
-                            .ok_or(ERANGE)?;
-                        let source_end = source_start.checked_add(tile_bytes).ok_or(ERANGE)?;
-                        let destination = row.checked_mul(tile_bytes).ok_or(ERANGE)?;
+                            .checked_add(row.checked_mul(source_row).ok_or(SIZE_LIMIT)?)
+                            .ok_or(SIZE_LIMIT)?;
+                        let source_end = source_start.checked_add(tile_bytes).ok_or(SIZE_LIMIT)?;
+                        let destination = row.checked_mul(tile_bytes).ok_or(SIZE_LIMIT)?;
                         self.transfer_buffer[destination..destination + tile_bytes]
                             .copy_from_slice(
-                                frame.pixels.get(source_start..source_end).ok_or(ERANGE)?,
+                                frame.pixels.get(source_start..source_end).ok_or(SIZE_LIMIT)?,
                             );
                     }
                     platform::memory::present_framebuffer(
@@ -285,16 +285,16 @@ impl Drop for FramebufferBackend {
 fn visible_height(info: &platform::memory::FramebufferInfo) -> Result<u32, u64> {
     let row_bytes = (info.stride as usize)
         .checked_mul(BYTES_PER_PIXEL)
-        .ok_or(ERANGE)?;
+        .ok_or(SIZE_LIMIT)?;
     if row_bytes == 0 {
-        return Err(ERANGE);
+        return Err(SIZE_LIMIT);
     }
-    let reported = usize::try_from(info.height).map_err(|_| ERANGE)?;
+    let reported = usize::try_from(info.height).map_err(|_| SIZE_LIMIT)?;
     if reported == 0
         || reported > crate::present::MAX_DIMENSION as usize
-        || row_bytes.checked_mul(reported).ok_or(ERANGE)? > info.size as usize
+        || row_bytes.checked_mul(reported).ok_or(SIZE_LIMIT)? > info.size as usize
     {
-        return Err(ERANGE);
+        return Err(SIZE_LIMIT);
     }
     Ok(info.height)
 }
@@ -303,5 +303,5 @@ fn page_align_up(value: u64) -> Result<u64, u64> {
     value
         .checked_add(0xfff)
         .map(|value| value & !0xfff)
-        .ok_or(ERANGE)
+        .ok_or(SIZE_LIMIT)
 }
