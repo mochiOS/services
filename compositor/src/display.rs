@@ -176,7 +176,7 @@ pub(crate) fn display_present_gpu_panel(
 
 pub(crate) fn display_present_gpu_scene(display_tid: u64, byte_len: usize) -> u32 {
     let Ok(byte_len) = u32::try_from(byte_len) else {
-        return errno_status(mochi_user_syscall::ERANGE);
+        return errno_status(crate::protocol::SIZE_LIMIT);
     };
     let request = unsafe {
         core::slice::from_raw_parts_mut(

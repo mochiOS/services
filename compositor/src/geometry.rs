@@ -96,12 +96,12 @@ pub(crate) fn validate_damage_rect(
     let y = u32::try_from(rect.y).map_err(|_| errno_status(mochi_user_syscall::EINVAL))?;
     let right = x
         .checked_add(rect.width)
-        .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+        .ok_or_else(|| errno_status(crate::protocol::SIZE_LIMIT))?;
     let bottom = y
         .checked_add(rect.height)
-        .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+        .ok_or_else(|| errno_status(crate::protocol::SIZE_LIMIT))?;
     if right > surface_width || bottom > surface_height {
-        return Err(errno_status(mochi_user_syscall::ERANGE));
+        return Err(errno_status(crate::protocol::SIZE_LIMIT));
     }
     Ok(rect)
 }

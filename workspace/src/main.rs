@@ -962,7 +962,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                mochi_user_syscall::ERANGE as i32,
+                mochios_posix_protocol::STATUS_ERANGE,
                 0,
             );
             return;

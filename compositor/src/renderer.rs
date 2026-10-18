@@ -44,13 +44,13 @@ struct RendererMetrics {
 impl PresentFrame {
     fn pixels(&mut self, pixel_count: usize, byte_count: usize) -> Result<&mut [u32], u32> {
         let page_count = shared_page_count(byte_count)
-            .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+            .ok_or_else(|| errno_status(crate::protocol::SIZE_LIMIT))?;
         if page_count == 0 || page_count > MAX_SHARED_PAGES {
-            return Err(errno_status(mochi_user_syscall::ERANGE));
+            return Err(errno_status(crate::protocol::SIZE_LIMIT));
         }
         let capacity = page_count
             .checked_mul(PAGE_SIZE)
-            .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+            .ok_or_else(|| errno_status(crate::protocol::SIZE_LIMIT))?;
         if self.buffer
             .as_ref()
             .is_none_or(|buffer| buffer.capacity() < capacity as u64)
@@ -64,7 +64,7 @@ impl PresentFrame {
             .as_ref()
             .ok_or_else(|| errno_status(mochi_user_syscall::EIO))?;
         if buffer.capacity() / 4 < pixel_count as u64 {
-            return Err(errno_status(mochi_user_syscall::ERANGE));
+            return Err(errno_status(crate::protocol::SIZE_LIMIT));
         }
         // SAFETY: this process is the sole writer, the retained mapping covers
         // the checked slice, and attached display handles are read-only.
@@ -82,7 +82,7 @@ impl PresentFrame {
         let pixel_count = byte_count
             .checked_add(3)
             .map(|bytes| bytes / 4)
-            .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+            .ok_or_else(|| errno_status(crate::protocol::SIZE_LIMIT))?;
         let pixels = self.pixels(pixel_count, byte_count)?;
         Ok(unsafe {
             core::slice::from_raw_parts_mut(pixels.as_mut_ptr().cast::<u8>(), pixel_count * 4)
@@ -373,13 +373,13 @@ pub(crate) fn composite_and_present(
         }
     }
     let Some((frame_w, frame_h)) = choose_frame_size(display_width, display_height) else {
-        return errno_status(mochi_user_syscall::ERANGE);
+        return errno_status(crate::protocol::SIZE_LIMIT);
     };
     let Some(frame_pixels) = frame_w.checked_mul(frame_h) else {
-        return errno_status(mochi_user_syscall::ERANGE);
+        return errno_status(crate::protocol::SIZE_LIMIT);
     };
     let Some(frame_bytes) = frame_pixels.checked_mul(4) else {
-        return errno_status(mochi_user_syscall::ERANGE);
+        return errno_status(crate::protocol::SIZE_LIMIT);
     };
     // A newly allocated shared frame has no preserved pixels outside the damage
     // rectangle. Rebuild the complete image before its first transfer, and also
@@ -404,12 +404,12 @@ pub(crate) fn composite_and_present(
         };
         for y in rect_top..rect_bottom {
             let Some(row) = y.checked_mul(frame_w) else {
-                return errno_status(mochi_user_syscall::ERANGE);
+                return errno_status(crate::protocol::SIZE_LIMIT);
             };
             for x in rect_left..rect_right {
                 let shade = 0x00c8_c8c8u32;
                 let Some(pixel) = frame.get_mut(row + x) else {
-                    return errno_status(mochi_user_syscall::ERANGE);
+                    return errno_status(crate::protocol::SIZE_LIMIT);
                 };
                 *pixel = 0xff00_0000 | shade;
             }
@@ -484,7 +484,7 @@ pub(crate) fn composite_and_present(
                         .checked_mul(frame_w)
                         .and_then(|row| row.checked_add(dx as usize))
                     else {
-                        return errno_status(mochi_user_syscall::ERANGE);
+                        return errno_status(crate::protocol::SIZE_LIMIT);
                     };
                     let Some(pixel) = read_current_pixel(surface, sx, sy) else {
                         continue;
@@ -496,7 +496,7 @@ pub(crate) fn composite_and_present(
                         continue;
                     }
                     let Some(slot) = frame.get_mut(dst) else {
-                        return errno_status(mochi_user_syscall::ERANGE);
+                        return errno_status(crate::protocol::SIZE_LIMIT);
                     };
                     *slot = blend_surface_pixel(*slot, pixel, surface.current_format, coverage);
                     if let Some((_, window_frame, true)) = window_style {
@@ -545,10 +545,10 @@ pub(crate) fn composite_and_present(
                     };
                     let Some(dst) = dy.checked_mul(frame_w).and_then(|row| row.checked_add(dx))
                     else {
-                        return errno_status(mochi_user_syscall::ERANGE);
+                        return errno_status(crate::protocol::SIZE_LIMIT);
                     };
                     let Some(slot) = frame.get_mut(dst) else {
-                        return errno_status(mochi_user_syscall::ERANGE);
+                        return errno_status(crate::protocol::SIZE_LIMIT);
                     };
                     *slot = blend_premultiplied_argb_over_xrgb(*slot, pixel);
                 }

@@ -416,7 +416,7 @@ fn update_gpu_surface_state(
                 .and_then(|height| width.checked_mul(height))
         })
         .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+        .ok_or_else(|| errno_status(crate::protocol::SIZE_LIMIT))?;
     let mut gpu = current.unwrap_or_default();
     let atlas_reallocated = gpu.atlas_width != scene.atlas_width
         || gpu.atlas_height != scene.atlas_height
@@ -431,14 +431,14 @@ fn update_gpu_surface_state(
     let row_bytes = usize::try_from(scene.atlas_width)
         .ok()
         .and_then(|width| width.checked_mul(4))
-        .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+        .ok_or_else(|| errno_status(crate::protocol::SIZE_LIMIT))?;
     let atlas_offset = usize::try_from(scene.atlas_data_y)
         .ok()
         .and_then(|y| y.checked_mul(row_bytes))
-        .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+        .ok_or_else(|| errno_status(crate::protocol::SIZE_LIMIT))?;
     let atlas_end = atlas_offset
         .checked_add(scene.atlas.len())
-        .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+        .ok_or_else(|| errno_status(crate::protocol::SIZE_LIMIT))?;
     let Some(destination) = gpu.atlas.get_mut(atlas_offset..atlas_end) else {
         return Err(errno_status(mochi_user_syscall::EINVAL));
     };
@@ -700,10 +700,10 @@ fn copy_surface_buffer(buffer: &SurfaceBuffer) -> Result<Vec<u32>, u32> {
         usize::try_from(buffer.height).map_err(|_| errno_status(mochi_user_syscall::EINVAL))?;
     let row_bytes = stride
         .checked_mul(4)
-        .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+        .ok_or_else(|| errno_status(crate::protocol::SIZE_LIMIT))?;
     let needed = row_bytes
         .checked_mul(height)
-        .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+        .ok_or_else(|| errno_status(crate::protocol::SIZE_LIMIT))?;
     if buffer.byte_len < needed {
         return Err(errno_status(mochi_user_syscall::EINVAL));
     }
@@ -712,21 +712,21 @@ fn copy_surface_buffer(buffer: &SurfaceBuffer) -> Result<Vec<u32>, u32> {
     for y in 0..height {
         let src_row = y
             .checked_mul(stride)
-            .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+            .ok_or_else(|| errno_status(crate::protocol::SIZE_LIMIT))?;
         let dst_row = y
             .checked_mul(width)
-            .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+            .ok_or_else(|| errno_status(crate::protocol::SIZE_LIMIT))?;
         for x in 0..width {
             let src = src_row
                 .checked_add(x)
                 .and_then(|offset| offset.checked_mul(4))
-                .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+                .ok_or_else(|| errno_status(crate::protocol::SIZE_LIMIT))?;
             let Some(pixel) = read_pixel(source, src) else {
                 return Err(errno_status(mochi_user_syscall::EINVAL));
             };
             let dst = dst_row
                 .checked_add(x)
-                .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+                .ok_or_else(|| errno_status(crate::protocol::SIZE_LIMIT))?;
             let Some(slot) = pixels.get_mut(dst) else {
                 return Err(errno_status(mochi_user_syscall::EINVAL));
             };
@@ -755,10 +755,10 @@ fn copy_surface_buffer_rect(
         .map_err(|_| errno_status(mochi_user_syscall::EINVAL))?;
     let row_bytes = stride
         .checked_mul(4)
-        .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+        .ok_or_else(|| errno_status(crate::protocol::SIZE_LIMIT))?;
     let needed = row_bytes
         .checked_mul(height)
-        .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+        .ok_or_else(|| errno_status(crate::protocol::SIZE_LIMIT))?;
     if buffer.byte_len < needed || destination.len() < width.saturating_mul(height) {
         return Err(errno_status(mochi_user_syscall::EINVAL));
     }
@@ -771,21 +771,21 @@ fn copy_surface_buffer_rect(
     for y in top..bottom {
         let src_row = y
             .checked_mul(stride)
-            .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+            .ok_or_else(|| errno_status(crate::protocol::SIZE_LIMIT))?;
         let dst_row = y
             .checked_mul(width)
-            .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+            .ok_or_else(|| errno_status(crate::protocol::SIZE_LIMIT))?;
         for x in left..right {
             let src = src_row
                 .checked_add(x)
                 .and_then(|offset| offset.checked_mul(4))
-                .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+                .ok_or_else(|| errno_status(crate::protocol::SIZE_LIMIT))?;
             let Some(pixel) = read_pixel(source, src) else {
                 return Err(errno_status(mochi_user_syscall::EINVAL));
             };
             let dst = dst_row
                 .checked_add(x)
-                .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+                .ok_or_else(|| errno_status(crate::protocol::SIZE_LIMIT))?;
             let Some(slot) = destination.get_mut(dst) else {
                 return Err(errno_status(mochi_user_syscall::EINVAL));
             };
@@ -826,17 +826,17 @@ fn validate_buffer_layout(
         usize::try_from(stride).map_err(|_| errno_status(mochi_user_syscall::EINVAL))?;
     let row_bytes = row_pixels
         .checked_mul(4)
-        .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+        .ok_or_else(|| errno_status(crate::protocol::SIZE_LIMIT))?;
     let height_usize =
         usize::try_from(height).map_err(|_| errno_status(mochi_user_syscall::EINVAL))?;
     let needed_bytes = row_bytes
         .checked_mul(height_usize)
-        .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+        .ok_or_else(|| errno_status(crate::protocol::SIZE_LIMIT))?;
     let width_usize =
         usize::try_from(width).map_err(|_| errno_status(mochi_user_syscall::EINVAL))?;
     let pixels = width_usize
         .checked_mul(height_usize)
-        .ok_or_else(|| errno_status(mochi_user_syscall::ERANGE))?;
+        .ok_or_else(|| errno_status(crate::protocol::SIZE_LIMIT))?;
     Ok((row_bytes, needed_bytes, pixels))
 }
 
@@ -1206,7 +1206,7 @@ pub(crate) fn handle_request(
                 surface.awaiting_buffer = true;
             } else {
                 if needed > MAX_SHARED_BYTES {
-                    put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ERANGE));
+                    put_u32(&mut reply, 0, errno_status(crate::protocol::SIZE_LIMIT));
                     return reply;
                 }
                 if request.len() < 28 + needed {
@@ -1220,11 +1220,11 @@ pub(crate) fn handle_request(
                 }
                 for y in 0..height as usize {
                     let Some(src_row) = y.checked_mul(row_bytes) else {
-                        put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ERANGE));
+                        put_u32(&mut reply, 0, errno_status(crate::protocol::SIZE_LIMIT));
                         return reply;
                     };
                     let Some(dst_row) = y.checked_mul(width as usize) else {
-                        put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ERANGE));
+                        put_u32(&mut reply, 0, errno_status(crate::protocol::SIZE_LIMIT));
                         return reply;
                     };
                     for x in 0..width as usize {
@@ -1232,7 +1232,7 @@ pub(crate) fn handle_request(
                             .checked_add(x.saturating_mul(4))
                             .and_then(|offset| offset.checked_add(28))
                         else {
-                            put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ERANGE));
+                            put_u32(&mut reply, 0, errno_status(crate::protocol::SIZE_LIMIT));
                             return reply;
                         };
                         let Some(pixel) = read_pixel(request, src) else {
@@ -1240,7 +1240,7 @@ pub(crate) fn handle_request(
                             return reply;
                         };
                         let Some(dst) = dst_row.checked_add(x) else {
-                            put_u32(&mut reply, 0, errno_status(mochi_user_syscall::ERANGE));
+                            put_u32(&mut reply, 0, errno_status(crate::protocol::SIZE_LIMIT));
                             return reply;
                         };
                         let Some(slot) = pending.get_mut(dst) else {

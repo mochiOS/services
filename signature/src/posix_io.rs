@@ -1,8 +1,8 @@
 use mochi_user_platform as platform;
 use mochios_posix_client::{Client, ClientError, EndpointTransport, OpenAtBase};
-use mochios_posix_protocol::OPEN_READ;
+use mochios_posix_protocol::{OPEN_READ, STATUS_ERANGE};
 use platform::package::{MpkgReader, NativeMpkgReader};
-use platform::syscall::{EAGAIN, EIO, ENOMEM, ERANGE, SysError};
+use platform::syscall::{EAGAIN, EIO, ENOMEM, SysError};
 use std::sync::Mutex;
 
 static CLIENT: Mutex<Option<Client<EndpointTransport>>> = Mutex::new(None);
@@ -61,9 +61,10 @@ pub(crate) fn with_reader<T>(
 
 pub(crate) fn read_file(path: &str, limit: usize) -> Result<Vec<u8>, SysError> {
     with_reader(path, |reader| {
-        let size = usize::try_from(reader.len()?).map_err(|_| SysError::from_raw(ERANGE as i64))?;
+        let size = usize::try_from(reader.len()?)
+            .map_err(|_| SysError::from_raw(i64::from(STATUS_ERANGE)))?;
         if size > limit {
-            return Err(SysError::from_raw(ERANGE as i64));
+            return Err(SysError::from_raw(i64::from(STATUS_ERANGE)));
         }
         let mut bytes = Vec::new();
         bytes
@@ -97,7 +98,9 @@ impl mochios_certificate_database::storage::StorageBackend for DatabaseBackend {
         match read_file(path, limit) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(error) if error.raw() == platform::syscall::ENOENT as i64 => Ok(None),
-            Err(error) if error.raw() == ERANGE as i64 => Err(StorageError::InvalidSnapshot),
+            Err(error) if error.raw() == i64::from(STATUS_ERANGE) => {
+                Err(StorageError::InvalidSnapshot)
+            }
             Err(_) => Err(StorageError::Backend),
         }
     }

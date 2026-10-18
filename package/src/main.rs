@@ -498,7 +498,7 @@ fn stage_update_file(
     if temporary.len() >= 256 || backup.len() >= 256 {
         rollback_update(staged, 0);
         return Err(mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::ERANGE as i64,
+            i64::from(mochios_posix_protocol::STATUS_ERANGE),
         ));
     }
     let preparation = (|| {
@@ -1087,7 +1087,7 @@ fn reply_package_list(sender: u64, request_id: u64) -> Result<(), mochi_user_sys
                 flags,
             })
             .map_err(|_| {
-                mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ERANGE as i64)
+                mochi_user_syscall::SysError::from_raw(i64::from(mochios_posix_protocol::STATUS_ERANGE))
             })?;
     }
     let length = encoder.finish().map_err(|_| invalid_request())?;
@@ -1146,7 +1146,7 @@ fn remove_package(package_id: &str) -> Result<(), mochi_user_syscall::SysError> 
         if backup.len() >= 256 {
             rollback_removal(&staged);
             return Err(mochi_user_syscall::SysError::from_raw(
-                mochi_user_syscall::ERANGE as i64,
+                i64::from(mochios_posix_protocol::STATUS_ERANGE),
             ));
         }
         if let Err(error) = require_path_absent(&backup)

@@ -94,7 +94,11 @@ impl UserService {
         };
         let offset = usize::try_from(request.offset).unwrap_or(usize::MAX);
         if offset >= bytes.len() {
-            self.reply_status(sender, request.request_id, mochi_user_syscall::ERANGE);
+            self.reply_status(
+                sender,
+                request.request_id,
+                mochios_posix_protocol::STATUS_ERANGE as i64 as u64,
+            );
             return;
         }
         let length = (request.length as usize)

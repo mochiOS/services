@@ -22,7 +22,7 @@ fn signature_error_reply_carries_a_posix_failure_not_a_native_tag() {
     probe::constants(
         &mut program,
         include_str!("../../../user/crates/posix-protocol/src/lib.rs"),
-        &["STATUS_EIO", "STATUS_EAGAIN"],
+        &["STATUS_EIO", "STATUS_EAGAIN", "STATUS_ERANGE"],
     );
     program.push_str(
         "fn diagnostic(_: &str) {}\nmod platform {pub mod ipc {
@@ -42,6 +42,7 @@ fn signature_error_reply_carries_a_posix_failure_not_a_native_tag() {
         assert_eq!(endpoint_reply_status(Ok(())),0);
         for (raw,expected) in [
             (-13,-13),(13,-13),
+            (i64::from(STATUS_ERANGE),-34),
             (Error::LimitExceeded.into_raw() as i64,-75),
             (Error::InvalidAddress.into_raw() as i64,-14),
             (Error::ResourceUnavailable.into_raw() as i64,-12),

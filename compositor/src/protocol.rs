@@ -1,3 +1,6 @@
+/// Native byte/geometry capacity failure, independent of POSIX errno values.
+pub(crate) const SIZE_LIMIT: u64 = mochi_user_syscall::NativeError::LimitExceeded.into_raw();
+
 pub(crate) const OP_CREATE_SURFACE: u32 = 1;
 pub(crate) const OP_ATTACH_BUFFER: u32 = 2;
 pub(crate) const OP_DAMAGE: u32 = 3;

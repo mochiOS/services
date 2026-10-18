@@ -23,7 +23,7 @@ fn package_reply_preserves_native_failures_in_both_wire_formats() {
     probe::constants(
         &mut program,
         include_str!("../../../user/crates/posix-protocol/src/lib.rs"),
-        &["STATUS_EIO", "STATUS_EAGAIN"],
+        &["STATUS_EIO", "STATUS_EAGAIN", "STATUS_ERANGE"],
     );
     program.push_str(
         "mod platform {pub mod ipc {
@@ -45,6 +45,7 @@ fn package_reply_preserves_native_failures_in_both_wire_formats() {
         for legacy in [true, false] {
             for (raw, expected) in [
                 (0, 0), (-13, 13), (13, 13),
+                (i64::from(STATUS_ERANGE), 34),
                 (Error::LimitExceeded.into_raw() as i64, 75),
                 (Error::InvalidAddress.into_raw() as i64, 14),
                 (Error::InvalidArgument.into_raw() as i64, 22),

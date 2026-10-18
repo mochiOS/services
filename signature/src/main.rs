@@ -571,7 +571,11 @@ fn reply_verified(sender: u64, request_id: u64, verification: &Verification) {
         Ok(length) => {
             let _ = platform::ipc::reply(sender, &buffer[..length]);
         }
-        Err(_) => reply_error(sender, request_id, mochi_user_syscall::ERANGE),
+        Err(_) => reply_error(
+            sender,
+            request_id,
+            mochios_posix_protocol::STATUS_ERANGE as i64 as u64,
+        ),
     }
 }
 
@@ -656,7 +660,11 @@ fn run_server() -> ! {
                     }
                     let expected_len = usize::try_from(begin.package_len).unwrap_or(usize::MAX);
                     if expected_len == 0 || expected_len > MAX_PACKAGE_LEN {
-                        reply_error(sender, begin.request_id, mochi_user_syscall::ERANGE);
+                        reply_error(
+                            sender,
+                            begin.request_id,
+                            mochios_posix_protocol::STATUS_ERANGE as i64 as u64,
+                        );
                         continue;
                     }
                     let mut bytes = Vec::new();
@@ -739,7 +747,11 @@ fn run_server() -> ! {
                     let expected_len = usize::try_from(file.package_len).unwrap_or(usize::MAX);
                     let metadata_only = expected_len == 0 && file.package_digest == [0; 32];
                     if (!metadata_only && expected_len == 0) || expected_len > MAX_PACKAGE_LEN {
-                        reply_error(sender, file.request_id, mochi_user_syscall::ERANGE);
+                        reply_error(
+                            sender,
+                            file.request_id,
+                            mochios_posix_protocol::STATUS_ERANGE as i64 as u64,
+                        );
                         continue;
                     }
                     let Some(database) = database.as_ref() else {
