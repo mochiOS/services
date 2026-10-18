@@ -74,7 +74,7 @@ fn handle_storage(
     let result = AuthorizeStorageRequest::decode(request_bytes)
         .map_err(|_| mochi_user_syscall::EINVAL)
         .and_then(|request| {
-            let session = session.ok_or(mochi_user_syscall::EPERM)?;
+            let session = session.ok_or(mochios_posix_protocol::STATUS_EPERM as i64 as u64)?;
             authorize_storage(sender, session, &request)?;
             let action = match request.action {
                 PortalStorageAction::Use => StorageAction::Use,
@@ -113,7 +113,7 @@ fn authorize_storage(
     request: &AuthorizeStorageRequest<'_>,
 ) -> Result<(), u64> {
     if request.session_id != session.id || request.bundle_id != "org.mochios.installer" {
-        return Err(mochi_user_syscall::EPERM);
+        return Err(mochios_posix_protocol::STATUS_EPERM as i64 as u64);
     }
     if sender_process(sender).is_none()
         || platform::capability::check_thread(sender, "device.storage") != Ok(1)
@@ -138,7 +138,7 @@ fn handle_directory(
     let result = GrantDirectoryRequest::decode(request_bytes)
         .map_err(|_| mochi_user_syscall::EINVAL)
         .and_then(|request| {
-            let session = session.ok_or(mochi_user_syscall::EPERM)?;
+            let session = session.ok_or(mochios_posix_protocol::STATUS_EPERM as i64 as u64)?;
             authorize_request(sender, session, &request)?;
             prompt(logger_endpoint, prompt_process, &request)
         });
@@ -168,7 +168,7 @@ fn handle_network(
     let result = RequestNetworkRequest::decode(request_bytes)
         .map_err(|_| mochi_user_syscall::EINVAL)
         .and_then(|request| {
-            let session = session.ok_or(mochi_user_syscall::EPERM)?;
+            let session = session.ok_or(mochios_posix_protocol::STATUS_EPERM as i64 as u64)?;
             authorize_network(sender, session, &request)?;
             prompt_network(logger_endpoint, prompt_process, request.bundle_id)
         });
@@ -187,14 +187,17 @@ fn authorize_network(
     session: ActiveSession,
     request: &RequestNetworkRequest<'_>,
 ) -> Result<(), u64> {
-    let linux_pid = session.linux_pid.ok_or(mochi_user_syscall::EPERM)?;
+    let linux_pid = session
+        .linux_pid
+        .ok_or(mochios_posix_protocol::STATUS_EPERM as i64 as u64)?;
     if request.session_id != session.id || Some(linux_pid) != sender_process(sender) {
-        return Err(mochi_user_syscall::EPERM);
+        return Err(mochios_posix_protocol::STATUS_EPERM as i64 as u64);
     }
-    let user = user_for_uid(session.identity.uid).ok_or(mochi_user_syscall::EPERM)?;
+    let user = user_for_uid(session.identity.uid)
+        .ok_or(mochios_posix_protocol::STATUS_EPERM as i64 as u64)?;
     (request.user == user.name)
         .then_some(())
-        .ok_or(mochi_user_syscall::EPERM)
+        .ok_or(mochios_posix_protocol::STATUS_EPERM as i64 as u64)
 }
 
 fn prompt_network(
@@ -238,13 +241,16 @@ fn authorize_request(
     session: ActiveSession,
     request: &GrantDirectoryRequest<'_>,
 ) -> Result<(), u64> {
-    let linux_pid = session.linux_pid.ok_or(mochi_user_syscall::EPERM)?;
+    let linux_pid = session
+        .linux_pid
+        .ok_or(mochios_posix_protocol::STATUS_EPERM as i64 as u64)?;
     if request.session_id != session.id || Some(linux_pid) != sender_process(sender) {
-        return Err(mochi_user_syscall::EPERM);
+        return Err(mochios_posix_protocol::STATUS_EPERM as i64 as u64);
     }
-    let user = user_for_uid(session.identity.uid).ok_or(mochi_user_syscall::EPERM)?;
+    let user = user_for_uid(session.identity.uid)
+        .ok_or(mochios_posix_protocol::STATUS_EPERM as i64 as u64)?;
     if request.user != user.name {
-        return Err(mochi_user_syscall::EPERM);
+        return Err(mochios_posix_protocol::STATUS_EPERM as i64 as u64);
     }
     let home = alloc::format!("/home/{}", user.name);
     let in_home = request.path == home

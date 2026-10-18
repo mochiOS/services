@@ -40,7 +40,7 @@ pub(crate) fn request_network(instance: u64, bundle_id: &str, user: &str) -> Res
     )
     .map_err(|_| mochi_user_syscall::EINVAL as i32)?;
     if response.request_id != request_id {
-        return Err(mochi_user_syscall::EPERM as i32);
+        return Err(mochios_posix_protocol::STATUS_EPERM);
     }
     (response.status == 0).then_some(()).ok_or(response.status)
 }
@@ -339,7 +339,7 @@ fn request_grant(
     )
     .map_err(|_| mochi_user_syscall::EINVAL as i32)?;
     if response.request_id != request_id {
-        return Err(mochi_user_syscall::EPERM as i32);
+        return Err(mochios_posix_protocol::STATUS_EPERM);
     }
     if response.status != 0 {
         return Err(response.status);
@@ -352,7 +352,7 @@ fn session_id() -> Result<u64, i32> {
         .ok()
         .and_then(|value| value.parse().ok())
         .filter(|value| *value != 0)
-        .ok_or(mochi_user_syscall::EPERM as i32)
+        .ok_or(mochios_posix_protocol::STATUS_EPERM)
 }
 
 fn service_manager() -> Result<u64, i32> {

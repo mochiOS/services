@@ -111,7 +111,7 @@ fn account_protocol_translates_native_tags_at_the_userspace_boundary() {
 fn session_rejection_retains_signed_status_and_session_identity() {
     for raw in [
         syscall::EINVAL,
-        syscall::EPERM,
+        mochios_posix_protocol::STATUS_EPERM as i64 as u64,
         syscall::EACCES,
         syscall::EIO,
     ] {

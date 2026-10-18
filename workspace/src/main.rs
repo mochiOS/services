@@ -814,7 +814,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                mochi_user_syscall::EPERM as i32,
+                mochios_posix_protocol::STATUS_EPERM,
                 0,
             );
             return;
@@ -1260,7 +1260,7 @@ impl WorkspaceService {
             self.reply_status(
                 sender,
                 request.request_id,
-                mochi_user_syscall::EPERM as i32,
+                mochios_posix_protocol::STATUS_EPERM,
                 0,
             );
             return;

@@ -1148,7 +1148,7 @@ fn resident(
                 sender,
                 request.action,
                 request.session_id,
-                mochi_user_syscall::EPERM as i32,
+                mochios_posix_protocol::STATUS_EPERM,
             );
             continue;
         };
@@ -1158,7 +1158,7 @@ fn resident(
                 sender,
                 request.action,
                 request.session_id,
-                mochi_user_syscall::EPERM as i32,
+                mochios_posix_protocol::STATUS_EPERM,
             );
             continue;
         }

@@ -117,7 +117,7 @@ fn handle_prepare_bundle(
     let package_service = platform::process::find_by_name("package.service").ok();
     let authorized = owner.is_some() && owner == package_service;
     let status = if !authorized {
-        mochi_user_syscall::EPERM as i32
+        mochios_posix_protocol::STATUS_EPERM
     } else {
         decoded
             .map_err(|_| mochi_user_syscall::EINVAL as i32)
@@ -181,7 +181,7 @@ fn handle_bundle_launch(
         Ok(1)
     );
     let result = if !authorized {
-        Err(mochi_user_syscall::EPERM as i32)
+        Err(mochios_posix_protocol::STATUS_EPERM)
     } else if instances.len() >= MAX_INSTANCES {
         Err(mochios_linux_gui_protocol::STATUS_INSTANCE_LIMIT)
     } else {
@@ -316,7 +316,7 @@ fn handle_launch(
         Ok(1)
     );
     let result = if !authorized {
-        Err(mochi_user_syscall::EPERM as i32)
+        Err(mochios_posix_protocol::STATUS_EPERM)
     } else if instances.len() >= MAX_INSTANCES {
         Err(mochios_linux_gui_protocol::STATUS_INSTANCE_LIMIT)
     } else {
@@ -355,7 +355,7 @@ fn handle_status(request: &[u8], sender: u64, instances: &[LinuxInstance]) {
         Ok(1)
     );
     let (status, instance, running) = if !authorized {
-        (mochi_user_syscall::EPERM as i32, 0, false)
+        (mochios_posix_protocol::STATUS_EPERM, 0, false)
     } else {
         match decoded {
             Ok(request) => (

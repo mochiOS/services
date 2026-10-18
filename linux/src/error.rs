@@ -8,8 +8,8 @@ pub(crate) enum HostError {
     Rejected(ErrorCode),
 }
 
-// Native error constants already encode a negative status. Never negate them
-// again when reporting a Linux service failure through its wire protocol.
+// These replies carry signed userspace policy failures. Never negate an
+// already-negative value when reporting it through the Linux service protocol.
 pub(crate) fn launch_status(error: HostError) -> i32 {
     match error {
         HostError::Rejected(ErrorCode::PermissionDenied) => syscall::EACCES as i32,
@@ -24,7 +24,7 @@ pub(crate) fn portal_status(error: HostError) -> i32 {
     match error {
         HostError::Unavailable => syscall::EIO as i32,
         HostError::InvalidReply => syscall::EINVAL as i32,
-        HostError::Rejected(_) => syscall::EPERM as i32,
+        HostError::Rejected(_) => mochios_posix_protocol::STATUS_EPERM,
     }
 }
 

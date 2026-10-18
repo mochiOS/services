@@ -51,8 +51,8 @@ fn io_failure_normalization_never_reports_zero_positive_or_overflow() {
 }
 
 #[test]
-fn native_error_constants_are_already_signed_and_consumers_do_not_negate_them() {
-    assert_eq!(syscall::EPERM as i32, -1);
+fn wire_policy_failures_keep_their_sign_without_native_permission_errno() {
+    assert_eq!(mochios_posix_protocol::STATUS_EPERM, -1);
     assert_eq!(mochios_linux_gui_protocol::STATUS_INSTANCE_LIMIT, -28);
     assert_eq!(syscall::EOVERFLOW as i64, -75);
     for source in [
