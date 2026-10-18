@@ -419,7 +419,7 @@ fn verify_package_bytes(
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     if header.compression != 0 {
         return Err(mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::ENOTSUP as i64,
+            mochi_user_syscall::NativeError::Unsupported.into_raw() as i64,
         ));
     }
     let tar = bytes

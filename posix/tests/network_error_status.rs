@@ -5,6 +5,28 @@ use mochi_user_platform::syscall;
 use mochios_net_device_protocol::{self as wire, Header, Opcode};
 
 #[test]
+fn unsupported_dns_record_is_a_userspace_wire_status() {
+    assert_eq!(wire::STATUS_UNSUPPORTED_RECORD, -95);
+    let status = network_status::failure_status(wire::STATUS_UNSUPPORTED_RECORD as i64 as u64);
+    let mut bytes = [0; 128];
+    let length = wire::encode_resolve_ipv4_result(37, status, [0; 4], false, &mut bytes).unwrap();
+    let (request_id, status, address, cached) =
+        wire::decode_resolve_ipv4_result(&bytes[..length]).unwrap();
+    assert_eq!(
+        (request_id, status, address, cached),
+        (37, -95, [0; 4], false)
+    );
+    assert!(
+        include_str!("../../network/src/stack.rs")
+            .contains("mochios_net_device_protocol::STATUS_UNSUPPORTED_RECORD")
+    );
+    assert!(
+        include_str!("../../../build/mmake/toolchain.mk")
+            .contains("mochios-net-device-protocol.path='$(ROOT)/user/crates/net-device-protocol'")
+    );
+}
+
+#[test]
 fn service_connection_limits_keep_their_status_and_typed_wire_failure() {
     assert_eq!(wire::STATUS_CONNECTION_LIMIT, -24);
     let raw = wire::STATUS_CONNECTION_LIMIT as i64 as u64;

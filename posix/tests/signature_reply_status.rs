@@ -49,6 +49,7 @@ fn signature_error_reply_carries_a_posix_failure_not_a_native_tag() {
             (Error::InvalidArgument.into_raw() as i64,-22),
             (Error::AccessDenied.into_raw() as i64,-13),
             (Error::NotReady.into_raw() as i64,-11),
+            (Error::Unsupported.into_raw() as i64,-95),
             (((Error::LimitExceeded.into_raw() & !0xffff)|0xffff) as i64,-5),
             (0,-5),(i64::MIN,-5),(i64::MAX,-5),(1_i64 <<32,-5),
         ] {

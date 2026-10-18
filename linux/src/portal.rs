@@ -137,7 +137,7 @@ fn requested_paths(
     for declared in write_paths {
         let path = resolve_user_path(declared, user)?;
         if path == home {
-            return Err(mochi_user_syscall::ENOTSUP as i32);
+            return Err(mochios_posix_protocol::STATUS_ENOTSUP);
         }
         if let Some(existing) = requested
             .iter_mut()
@@ -408,7 +408,7 @@ fn copy_directory(
                 )
                 .map_err(host_status)?;
             } else {
-                return Err(mochi_user_syscall::ENOTSUP as i32);
+                return Err(mochios_posix_protocol::STATUS_ENOTSUP);
             }
         }
     }

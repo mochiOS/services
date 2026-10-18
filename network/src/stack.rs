@@ -1056,7 +1056,7 @@ fn dns_errno(error: DnsError) -> u64 {
         | DnsError::Timeout
         | DnsError::RetryLimit => mochi_user_syscall::EAGAIN,
         DnsError::CacheCapacity => mochi_user_syscall::ENOMEM,
-        DnsError::UnsupportedRecord => mochi_user_syscall::ENOTSUP,
+        DnsError::UnsupportedRecord => mochios_net_device_protocol::STATUS_UNSUPPORTED_RECORD as i64 as u64,
         _ => mochi_user_syscall::EINVAL,
     }
 }

@@ -341,7 +341,7 @@ pub(crate) fn composite_and_present(
     damage: Option<Rect>,
 ) -> u32 {
     if display_format != PIXEL_FORMAT_XRGB8888 {
-        return errno_status(mochi_user_syscall::ENOTSUP);
+        return errno_status(mochi_user_syscall::NativeError::Unsupported.into_raw());
     }
     if renderer_caps & crate::protocol::RENDERER_CAP_GPU_SCENE != 0 {
         return try_gpu_scene_present(

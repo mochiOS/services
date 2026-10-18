@@ -48,6 +48,7 @@ fn package_reply_preserves_native_failures_in_both_wire_formats() {
                 (Error::LimitExceeded.into_raw() as i64, 75),
                 (Error::InvalidAddress.into_raw() as i64, 14),
                 (Error::ResourceUnavailable.into_raw() as i64, 12),
+                (Error::Unsupported.into_raw() as i64, 95),
                 (Error::BackingFailure.into_raw() as i64, 5),
                 (Error::InvalidArgument.into_raw() as i64, 22),
                 (Error::AccessDenied.into_raw() as i64, 13),

@@ -212,7 +212,7 @@ pub(crate) fn authorize_dynamic_capability(
     // launch gate or for a future operation-specific authority protocol.
     if decision == platform::capability::CapabilityDecision::AllowOnce {
         return Err(mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::ENOTSUP as i64,
+            mochi_user_syscall::NativeError::Unsupported.into_raw() as i64,
         ));
     }
     if request.capability_class != platform::capability::CapabilityClass::UserGrantable {

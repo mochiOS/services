@@ -604,7 +604,7 @@ fn install_package(
             manifest.package_abi
         ));
         return Err(mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::ENOTSUP as i64,
+            mochi_user_syscall::NativeError::Unsupported.into_raw() as i64,
         ));
     }
     if verification.verified_package_id != manifest.package_id
@@ -764,7 +764,7 @@ fn install_package(
     if mutation == PackageMutation::Update {
         if linux_stage.is_some() {
             return Err(mochi_user_syscall::SysError::from_raw(
-                mochi_user_syscall::ENOTSUP as i64,
+                mochi_user_syscall::NativeError::Unsupported.into_raw() as i64,
             ));
         }
         return update_package_files(
@@ -1118,7 +1118,7 @@ fn remove_package(package_id: &str) -> Result<(), mochi_user_syscall::SysError> 
     if manifest.package_id != package_id || manifest.linux.is_some() {
         return Err(mochi_user_syscall::SysError::from_raw(
             if manifest.linux.is_some() {
-                mochi_user_syscall::ENOTSUP as i64
+                mochi_user_syscall::NativeError::Unsupported.into_raw() as i64
             } else {
                 mochi_user_syscall::EACCES as i64
             },
