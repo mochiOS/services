@@ -9,6 +9,7 @@ use mochios_posix_client::handle_borrow::Book;
 
 type c_int = i32;
 const EBADF: c_int = 9;
+const MAX_FDS: usize = 256;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FdObject {
@@ -66,12 +67,14 @@ fn book_checks_labels_and_defers_exactly_one_close_to_the_last_pin() {
     let mut book = Book::<3>::new();
     for label in [0, 4, u64::MAX] {
         assert!(book.pin(label).is_none());
+        assert_eq!(book.retain(label), None);
         assert_eq!(book.retire(label), None);
     }
     let first = book.pin(1).unwrap();
     let second = book.pin(1).unwrap();
     let other = book.pin(3).unwrap();
     assert_eq!(book.retire(1), Some(false));
+    assert_eq!(book.retain(1), None);
     assert!(book.pin(1).is_none());
     assert_eq!(book.retire(1), None);
     assert!(!book.release(second));
@@ -98,6 +101,71 @@ fn retired_descriptors_can_outnumber_the_posix_fd_limit_without_losing_pins() {
 }
 
 #[test]
+fn aliased_owners_keep_the_label_pinnable_until_the_last_fd_closes() {
+    let mut book = Book::<2>::new();
+    book.retain(1).unwrap();
+    book.retain(1).unwrap();
+    let first = book.pin(1).unwrap();
+    assert_eq!(book.retire(1), Some(false));
+    let second = book.pin(1).unwrap();
+    assert!(!book.release(first));
+    assert_eq!(book.retire(1), Some(false));
+    assert!(!book.release(second));
+    let last = book.pin(1).unwrap();
+    assert_eq!(book.retire(1), Some(false));
+    assert!(book.pin(1).is_none());
+    assert!(book.release(last));
+    // No stale owner count may survive native label reuse.
+    assert_eq!(book.retire(1), Some(true));
+    book.retain(1).unwrap();
+    assert_eq!(book.retire(1), Some(false));
+    assert_eq!(book.retire(1), Some(true));
+}
+
+#[test]
+fn restored_aliases_use_real_runtime_ownership_without_duplicate_rights() {
+    CLOSED.lock().unwrap().clear();
+    assert!(NATIVE.lock().unwrap().is_empty());
+    let mut restored = fd_lease::RestoreReferences::new();
+    for label in [0, mnu_abi::PROCESS_MAX_OBJECT_HANDLES as u64 + 1, u64::MAX] {
+        assert_eq!(restored.register(entry(label).handle), Err(EBADF));
+    }
+    let file = entry(11);
+    NATIVE
+        .lock()
+        .unwrap()
+        .insert(11, "one inherited native reference");
+    for _ in 0..3 {
+        restored.register(file.handle).unwrap();
+    }
+    // The first two closes must neither dispatch native close nor retire pins.
+    fd_lease::retire(file.handle).unwrap();
+    let first = fd_lease::Lease::new(file).unwrap();
+    fd_lease::retire(file.handle).unwrap();
+    let last = fd_lease::Lease::new(file).unwrap();
+    drop(first);
+    assert!(CLOSED.lock().unwrap().is_empty());
+    fd_lease::retire(file.handle).unwrap();
+    assert!(fd_lease::Lease::new(file).is_err());
+    assert!(CLOSED.lock().unwrap().is_empty());
+    drop(last);
+    assert_eq!(*CLOSED.lock().unwrap(), [11]);
+    assert!(NATIVE.lock().unwrap().is_empty());
+
+    // A new image and reused label start with exactly one implicit owner.
+    let mut restored = fd_lease::RestoreReferences::new();
+    NATIVE.lock().unwrap().insert(11, "reused label");
+    restored.register(file.handle).unwrap();
+    restored.register(file.handle).unwrap();
+    fd_lease::retire(file.handle).unwrap();
+    assert_eq!(*CLOSED.lock().unwrap(), [11]);
+    fd_lease::retire(file.handle).unwrap();
+    assert_eq!(*CLOSED.lock().unwrap(), [11, 11]);
+    assert!(NATIVE.lock().unwrap().is_empty());
+    CLOSED.lock().unwrap().clear();
+}
+
+#[test]
 fn runtime_pins_escaped_metadata_and_captures_the_book_with_native_handles() {
     let source = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
     let fork = source
@@ -114,6 +182,8 @@ fn runtime_pins_escaped_metadata_and_captures_the_book_with_native_handles() {
     assert!(source.contains("let captured = clone_current_fd_table()?;"));
     assert!(source.contains("&scope.as_ref().get_ref().resource().unwrap().0"));
     assert!(source.contains("let mut leases = [const { None }; MAX_FDS];"));
+    assert!(source.contains("let mut references = fd_lease::RestoreReferences::new();"));
+    assert!(source.contains("references.register(object).ok()?;"));
     assert!(source.contains("**leases[poll_index].as_ref().unwrap()"));
     assert!(!source.contains("*with_fd_entry(pollfds[poll_index].fd)?"));
     assert!(source.contains("Ok((base, Some(entry)))"));
