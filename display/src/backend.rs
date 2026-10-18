@@ -97,7 +97,7 @@ impl DisplayBackend {
                 );
                 error.errno()
             }),
-            Self::Framebuffer(_) => Err(mochi_user_syscall::ENOSYS),
+            Self::Framebuffer(_) => Err(mochi_user_syscall::NativeError::Unsupported.into_raw()),
         }
     }
 

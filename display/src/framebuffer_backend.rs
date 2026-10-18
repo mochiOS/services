@@ -104,7 +104,7 @@ impl FramebufferBackend {
 
     pub(crate) fn present_gpu_scene(&mut self, bytes: &[u8]) -> Result<(), u64> {
         if !self.shared_surface || self.pixels.is_null() || bytes.is_empty() {
-            return Err(mochi_user_syscall::ENOSYS);
+            return Err(mochi_user_syscall::NativeError::Unsupported.into_raw());
         }
         if bytes.len() as u64 > self.mapped_size || bytes.len() > u32::MAX as usize {
             return Err(ERANGE);
