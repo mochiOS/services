@@ -1110,10 +1110,7 @@ fn create_home(user: &UserRecord) -> Result<(), SetupError> {
 }
 
 fn storage_error(error: io::Error) -> SetupError {
-    let errno = error
-        .raw_os_error()
-        .unwrap_or(mochi_user_syscall::EIO as i32);
-    SetupError::Storage(-errno.abs())
+    SetupError::Storage(crate::storage_status::io_status(&error))
 }
 
 fn remove_home(user: &UserRecord) {

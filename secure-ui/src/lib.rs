@@ -6,6 +6,7 @@ mod permission_server;
 mod portal_prompt;
 mod setup;
 mod storage_prompt;
+mod storage_status;
 mod virtualization_warning;
 mod wallpaper;
 

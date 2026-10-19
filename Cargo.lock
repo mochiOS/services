@@ -2977,6 +2977,7 @@ dependencies = [
  "mochi-user-syscall",
  "mochios-linux-portal-protocol",
  "mochios-permission-prompt-protocol",
+ "mochios-posix-client",
  "mochios-user-database",
  "mochios-user-protocol",
  "viewkit",
