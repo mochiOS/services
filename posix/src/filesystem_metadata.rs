@@ -29,12 +29,11 @@ pub fn translate(status: filesystem::NodeStatus) -> Result<FileStatus, i32> {
         size: i64::try_from(status.size).map_err(|_| -75)?,
         block_size: i64::from(status.block_size),
         blocks: i64::try_from(status.blocks).map_err(|_| -75)?,
-        access_time_seconds: i64::try_from(status.access_time_seconds).map_err(|_| -75)?,
+        access_time_seconds: status.access_time_seconds,
         access_time_nanoseconds: i64::from(status.access_time_nanoseconds),
-        modification_time_seconds: i64::try_from(status.modification_time_seconds)
-            .map_err(|_| -75)?,
+        modification_time_seconds: status.modification_time_seconds,
         modification_time_nanoseconds: i64::from(status.modification_time_nanoseconds),
-        change_time_seconds: i64::try_from(status.change_time_seconds).map_err(|_| -75)?,
+        change_time_seconds: status.change_time_seconds,
         change_time_nanoseconds: i64::from(status.change_time_nanoseconds),
     })
 }

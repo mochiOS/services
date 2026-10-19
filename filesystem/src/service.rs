@@ -19,6 +19,8 @@ mod device_operations;
 mod removed_directories;
 #[path = "canonical_path.rs"]
 mod canonical_path;
+#[path = "inode_time.rs"]
+mod inode_time;
 
 const EIO: i32 = 5;
 const EXDEV: i32 = 18;
@@ -3559,6 +3561,15 @@ impl FilesystemService {
         } else {
             physical_links
         };
+        let Some((atime_seconds, atime_nanoseconds)) = inode_time::decode(metadata.atime) else {
+            return self.error(request, EIO);
+        };
+        let Some((mtime_seconds, mtime_nanoseconds)) = inode_time::decode(metadata.mtime) else {
+            return self.error(request, EIO);
+        };
+        let Some((ctime_seconds, ctime_nanoseconds)) = inode_time::decode(metadata.ctime) else {
+            return self.error(request, EIO);
+        };
         let mut response = self.success(request);
         response.payload.resize(protocol::NODE_STATUS_LEN, 0);
         let status = protocol::NodeStatus {
@@ -3575,12 +3586,12 @@ impl FilesystemService {
             gid: metadata.gid(),
             link_count,
             special_device: 0,
-            access_time_seconds: metadata.atime.as_secs(),
-            access_time_nanoseconds: metadata.atime.subsec_nanos(),
-            modification_time_seconds: metadata.mtime.as_secs(),
-            modification_time_nanoseconds: metadata.mtime.subsec_nanos(),
-            change_time_seconds: metadata.ctime.as_secs(),
-            change_time_nanoseconds: metadata.ctime.subsec_nanos(),
+            access_time_seconds: atime_seconds,
+            access_time_nanoseconds: atime_nanoseconds,
+            modification_time_seconds: mtime_seconds,
+            modification_time_nanoseconds: mtime_nanoseconds,
+            change_time_seconds: ctime_seconds,
+            change_time_nanoseconds: ctime_nanoseconds,
         };
         protocol::encode_node_status(status, &mut response.payload)
             .expect("fixed-size node status response");
