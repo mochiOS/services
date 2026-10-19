@@ -27,6 +27,10 @@ use bitflags::bitflags;
 use core::num::{NonZeroU16, NonZeroU32};
 use core::time::Duration;
 
+#[path = "inode_timestamps.rs"]
+mod timestamps;
+pub use timestamps::{InodeTimestamp, TimestampError};
+
 /// Inode index.
 ///
 /// This is always nonzero.
