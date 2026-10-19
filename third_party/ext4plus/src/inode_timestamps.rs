@@ -68,6 +68,48 @@ fn encode(
 }
 
 impl Inode {
+    /// Check the layout of a newly allocated inode before changing a bitmap.
+    pub(crate) fn validate_creation_timestamp(
+        fs: &crate::Ext4,
+        value: InodeTimestamp,
+    ) -> Result<(), TimestampError> {
+        let record = usize::from(fs.0.superblock.inode_size());
+        let declared = if record >= 130 {
+            128 + usize::from(32u16.min(fs.0.superblock.min_extra_isize()))
+        } else {
+            128
+        };
+        if declared > record {
+            return Err(TimestampError::InvalidInodeLayout);
+        }
+        // Access has the last of the three required extra words.
+        encode(value, declared >= 0x90)?;
+        if declared >= 0x94 {
+            encode(value, declared >= 0x98)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn set_initial_signed_timestamps(
+        &mut self,
+        value: InodeTimestamp,
+    ) -> Result<(), TimestampError> {
+        self.set_signed_timestamps(Some(value), Some(value), Some(value))?;
+        let declared = if self.inode_data.len() >= 130 {
+            128 + usize::from(read_u16le(&self.inode_data, 0x80))
+        } else {
+            128
+        };
+        if declared >= 0x94 {
+            let (low, extra) = encode(value, declared >= 0x98)?;
+            write_u32le(&mut self.inode_data, 0x90, low);
+            if declared >= 0x98 {
+                write_u32le(&mut self.inode_data, 0x94, extra);
+            }
+        }
+        Ok(())
+    }
+
     /// Stage access, modification and change times, preserving `None` fields.
     ///
     /// All requested values and the inode layout are checked before changing

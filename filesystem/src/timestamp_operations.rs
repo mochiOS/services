@@ -13,6 +13,19 @@ pub(super) fn timestamp_error(error: TimestampError) -> i32 {
 }
 
 impl FilesystemService {
+    pub(super) fn prepare_creation_parent(
+        &self,
+        filesystem: &Ext4,
+        parent: &mut Dir,
+    ) -> Result<InodeTimestamp, i32> {
+        let now = self.metadata_change_time(parent.inode(), filesystem)?;
+        parent
+            .inode_mut()
+            .set_signed_timestamps(None, Some(now), Some(now))
+            .map_err(timestamp_error)?;
+        Ok(now)
+    }
+
     pub(super) fn metadata_change_time(
         &self,
         inode: &Inode,

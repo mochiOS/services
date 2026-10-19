@@ -782,6 +782,9 @@ impl Dir {
             target_inode.file_type(),
         )
         .await?;
+        // Adding to existing slack need not change directory size or extents.
+        // Persist any caller-staged metadata on that path as well.
+        self.inode.write(&self.fs).await?;
         Ok(())
     }
 

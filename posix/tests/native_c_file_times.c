@@ -9,9 +9,13 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -32,6 +36,42 @@ static int same_data_times(const struct stat *a, const struct stat *b) {
     return a->st_atim.tv_sec == b->st_atim.tv_sec && a->st_atim.tv_nsec == b->st_atim.tv_nsec &&
            a->st_mtim.tv_sec == b->st_mtim.tv_sec && a->st_mtim.tv_nsec == b->st_mtim.tv_nsec;
 }
+static int created_times(const struct stat *child, const struct stat *parent) {
+    return child->st_atim.tv_sec == child->st_mtim.tv_sec && child->st_atim.tv_nsec == child->st_mtim.tv_nsec &&
+           child->st_mtim.tv_sec == child->st_ctim.tv_sec && child->st_mtim.tv_nsec == child->st_ctim.tv_nsec &&
+           child->st_mtim.tv_sec == parent->st_mtim.tv_sec && child->st_mtim.tv_nsec == parent->st_mtim.tv_nsec &&
+           parent->st_mtim.tv_sec == parent->st_ctim.tv_sec && parent->st_mtim.tv_nsec == parent->st_ctim.tv_nsec &&
+           parent->st_atim.tv_sec == -1 && parent->st_atim.tv_nsec == 123456789 && child->st_mtim.tv_sec != INT64_C(2147483648);
+}
+static int creation_checks(int directory) {
+    const struct timespec old[2] = {{-1, 123456789}, {INT64_C(2147483648), 987654321}};
+    const char *names[] = {"native-c-created-file", "native-c-created-dir", "native-c-created-link"};
+    struct stat child, parent;
+    for (unsigned kind = 0; kind < 3; ++kind) {
+        CHECK(futimens(directory, old) == 0);
+        if (kind == 0) {
+            int created = openat(directory, names[kind], O_CREAT | O_EXCL | O_WRONLY, 0600);
+            CHECK(created >= 0 && close(created) == 0);
+        } else if (kind == 1) {
+            CHECK(mkdirat(directory, names[kind], 0700) == 0);
+        } else {
+            CHECK(symlinkat("native-c-created-file", directory, names[kind]) == 0);
+        }
+        CHECK(fstatat(directory, names[kind], &child, AT_SYMLINK_NOFOLLOW) == 0 && fstat(directory, &parent) == 0);
+        CHECK(created_times(&child, &parent));
+    }
+    CHECK(futimens(directory, old) == 0);
+    int local = socket(AF_UNIX, SOCK_STREAM, 0);
+    CHECK(local >= 0);
+    struct sockaddr_un address = {0};
+    address.sun_family = AF_UNIX;
+    strcpy(address.sun_path, "/tmp/native-c-created-socket");
+    CHECK(bind(local, (const struct sockaddr *)&address, offsetof(struct sockaddr_un, sun_path) + strlen(address.sun_path) + 1) == 0);
+    CHECK(lstat(address.sun_path, &child) == 0 && fstat(directory, &parent) == 0);
+    CHECK(S_ISSOCK(child.st_mode) && created_times(&child, &parent));
+    CHECK(close(local) == 0);
+    return 0;
+}
 int main(void) {
     puts("c-file-times: starting real C ABI checks");
     const char *path = "/tmp/native-c-file-times";
@@ -43,6 +83,7 @@ int main(void) {
     CHECK(file >= 0);
     int directory = open("/tmp", O_RDONLY | O_DIRECTORY);
     CHECK(directory >= 0);
+    CHECK(creation_checks(directory) == 0);
     CHECK(futimens(file, explicit) == 0 && fstat(file, &before) == 0);
     CHECK(before.st_atim.tv_sec == -1 && before.st_atim.tv_nsec == 123456789);
     CHECK(before.st_mtim.tv_sec == INT64_C(2147483648) && before.st_mtim.tv_nsec == 987654321);
@@ -154,6 +195,6 @@ int main(void) {
     CHECK(pipe(streams) == 0);
     FAILS(futimens(streams[0], NULL), ENOTSUP); /* metadata provider still needed */
     CHECK(close(streams[0]) == 0 && close(streams[1]) == 0);
-    puts("c-file-times: PASS C ABI, sentinels, signed dates, pointer faults, errno, path anchors, permissions, nofollow, unlinked FD, chmod/chown, truncate, write/pwrite/append and msync times");
+    puts("c-file-times: PASS C ABI, sentinels, signed dates, pointer faults, errno, path anchors, permissions, nofollow, unlinked FD, chmod/chown, truncate, write/pwrite/append, msync and creation times");
     return 0;
 }

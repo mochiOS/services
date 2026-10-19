@@ -7,6 +7,9 @@ mod truncate;
 #[path = "write_timestamps.rs"]
 mod write;
 
+#[path = "creation_timestamps.rs"]
+mod creation;
+
 thread_local! {
     static CLOCK: RefCell<(Result<Time, i32>, usize)> = const {
         RefCell::new((Ok(Time { seconds: 10, nanoseconds: 20 }), 0))

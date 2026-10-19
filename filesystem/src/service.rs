@@ -586,15 +586,19 @@ impl FilesystemService {
             Err(Ext4Error::NotFound) => {}
             Err(error) => return Err(errno(error)),
         }
+        let now = self.prepare_creation_parent(filesystem, &mut directory)?;
         let mut inode = filesystem
-            .create_inode(InodeCreationOptions {
-                file_type: FileType::Regular,
-                mode: InodeMode::from_bits_truncate((mode as u16) & 0x0fff) | InodeMode::S_IFREG,
-                uid,
-                gid,
-                time: Duration::default(),
-                flags: InodeFlags::empty(),
-            })
+            .create_inode_with_timestamps(
+                InodeCreationOptions {
+                    file_type: FileType::Regular,
+                    mode: InodeMode::from_bits_truncate((mode as u16) & 0x0fff) | InodeMode::S_IFREG,
+                    uid,
+                    gid,
+                    time: Duration::default(),
+                    flags: InodeFlags::empty(),
+                },
+                now,
+            )
             .map_err(errno)?;
         directory.link(name, &mut inode).map_err(errno)?;
         Ok(inode)
@@ -770,16 +774,20 @@ impl FilesystemService {
         }
         let name = DirEntryName::try_from(name.as_slice()).map_err(|_| EINVAL)?;
         let mut parent = Dir::open_inode(&filesystem, parent).map_err(errno)?;
+        let now = self.prepare_creation_parent(&filesystem, &mut parent)?;
         let mut inode = filesystem
-            .create_inode(InodeCreationOptions {
-                file_type: FileType::Socket,
-                mode: InodeMode::from_bits_truncate((request.mode as u16) & 0o7777)
-                    | InodeMode::S_IFSOCK,
-                uid,
-                gid,
-                time: Duration::default(),
-                flags: InodeFlags::empty(),
-            })
+            .create_inode_with_timestamps(
+                InodeCreationOptions {
+                    file_type: FileType::Socket,
+                    mode: InodeMode::from_bits_truncate((request.mode as u16) & 0o7777)
+                        | InodeMode::S_IFSOCK,
+                    uid,
+                    gid,
+                    time: Duration::default(),
+                    flags: InodeFlags::empty(),
+                },
+                now,
+            )
             .map_err(errno)?;
         parent.link(name, &mut inode).map_err(errno)?;
         let node_id = scoped_node_id(volume, &inode);
@@ -836,16 +844,20 @@ impl FilesystemService {
             return Err(EACCES);
         }
         let mut parent = Dir::open_inode(&filesystem, parent).map_err(errno)?;
+        let now = self.prepare_creation_parent(&filesystem, &mut parent)?;
         let inode = filesystem
-            .create_inode(InodeCreationOptions {
-                file_type: FileType::Directory,
-                mode: InodeMode::from_bits_truncate((request.mode as u16) & 0o7777)
-                    | InodeMode::S_IFDIR,
-                uid,
-                gid,
-                time: Duration::default(),
-                flags: InodeFlags::empty(),
-            })
+            .create_inode_with_timestamps(
+                InodeCreationOptions {
+                    file_type: FileType::Directory,
+                    mode: InodeMode::from_bits_truncate((request.mode as u16) & 0o7777)
+                        | InodeMode::S_IFDIR,
+                    uid,
+                    gid,
+                    time: Duration::default(),
+                    flags: InodeFlags::empty(),
+                },
+                now,
+            )
             .map_err(errno)?;
         let parent_index = parent
             .read_dir()
@@ -1046,14 +1058,15 @@ impl FilesystemService {
             return Err(EACCES);
         }
         let mut parent = Dir::open_inode(&filesystem, parent).map_err(errno)?;
+        let now = self.prepare_creation_parent(&filesystem, &mut parent)?;
         filesystem
-            .symlink(
+            .symlink_with_timestamps(
                 &mut parent,
                 DirEntryName::try_from(name.as_slice()).map_err(|_| EINVAL)?,
                 PathBuf::try_from(target).map_err(|_| EINVAL)?,
                 uid,
                 gid,
-                Duration::default(),
+                now,
             )
             .map_err(errno)?;
         Ok(self.success(request))
@@ -1377,7 +1390,10 @@ impl FilesystemService {
 
     fn resolve_anchors(&self, path: &[u8], anchors: PathAnchors) -> Result<(Inode, Inode), i32> {
         let root = match anchors.root_open_id {
-            Some(open_id) => self.opens.get(&open_id).ok_or(EBADF)?.inode.clone(),
+            Some(open_id) => {
+                let open = self.opens.get(&open_id).ok_or(EBADF)?;
+                Inode::read(&open.filesystem, open.inode.index).map_err(errno)?
+            }
             None => self.fs.read_root_inode().map_err(errno)?,
         };
         if !root.file_type().is_dir() {
@@ -1387,7 +1403,10 @@ impl FilesystemService {
             root.clone()
         } else {
             match anchors.base_open_id {
-                Some(open_id) => self.opens.get(&open_id).ok_or(EBADF)?.inode.clone(),
+                Some(open_id) => {
+                    let open = self.opens.get(&open_id).ok_or(EBADF)?;
+                    Inode::read(&open.filesystem, open.inode.index).map_err(errno)?
+                }
                 None => root.clone(),
             }
         };
@@ -1931,6 +1950,7 @@ impl FilesystemService {
             )
             .map_err(errno)?;
         let mut parent = Dir::open_inode(&self.fs, parent_inode).map_err(errno)?;
+        let now = self.prepare_creation_parent(&self.fs, &mut parent)?;
         let permissions = InodeMode::from_bits_truncate((request.mode as u16) & 0x0fff);
         let uid = request.offset as u32;
         let gid = (request.offset >> 32) as u32;
@@ -1941,14 +1961,17 @@ impl FilesystemService {
         };
         let mut inode = self
             .fs
-            .create_inode(InodeCreationOptions {
-                file_type,
-                mode: permissions | type_mode,
-                uid,
-                gid,
-                time: Duration::default(),
-                flags: InodeFlags::empty(),
-            })
+            .create_inode_with_timestamps(
+                InodeCreationOptions {
+                    file_type,
+                    mode: permissions | type_mode,
+                    uid,
+                    gid,
+                    time: Duration::default(),
+                    flags: InodeFlags::empty(),
+                },
+                now,
+            )
             .map_err(errno)?;
         if file_type == FileType::Directory {
             // ext4plus keeps the InodeIndex type private, but the public `.`
@@ -2331,15 +2354,16 @@ impl FilesystemService {
             )
             .map_err(errno)?;
         let mut parent = Dir::open_inode(&self.fs, parent_inode).map_err(errno)?;
+        let now = self.prepare_creation_parent(&self.fs, &mut parent)?;
         let inode = self
             .fs
-            .symlink(
+            .symlink_with_timestamps(
                 &mut parent,
                 DirEntryName::try_from(name).map_err(|_| EINVAL)?,
                 PathBuf::try_from(target).map_err(|_| EINVAL)?,
                 uid,
                 gid,
-                Duration::default(),
+                now,
             )
             .map_err(errno)?;
         let node_id = self.remember_node(link_path, FollowSymlinks::ExcludeFinalComponent)?;
@@ -3818,6 +3842,7 @@ fn refresh_provider_file(open: &mut OpenFile) -> Result<(), i32> {
 
 pub(crate) fn errno(error: Ext4Error) -> i32 {
     match error {
+        Ext4Error::Timestamp(error) => timestamp_operations::timestamp_error(error),
         Ext4Error::NotFound => ENOENT,
         Ext4Error::IsADirectory => EISDIR,
         Ext4Error::NotADirectory => ENOTDIR,

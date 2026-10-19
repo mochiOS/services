@@ -262,6 +262,7 @@ impl Inode {
         index: InodeIndex,
         inode_creation_data: InodeCreationOptions,
         ext4: &Ext4,
+        signed_time: Option<InodeTimestamp>,
     ) -> Result<Self, Ext4Error> {
         let inode_data = vec![0; usize::from(ext4.0.superblock.inode_size())];
         let mut checksum_base =
@@ -286,9 +287,15 @@ impl Inode {
         inode.set_dtime(Duration::from_secs(0));
         inode.set_crtime(inode_creation_data.time);
         inode.set_links_count(0);
-        inode.set_extra_size(
-            (0x9C + 4 - 128).min(ext4.0.superblock.min_extra_isize()),
-        ); // All fields up to and including i_projid
+        if inode.inode_data.len() >= 0x82 {
+            inode.set_extra_size(
+                (0x9C + 4 - 128).min(ext4.0.superblock.min_extra_isize()),
+            ); // All fields up to and including i_projid
+        }
+        if let Some(time) = signed_time {
+            inode.set_initial_signed_timestamps(time)
+                .map_err(crate::Ext4Error::Timestamp)?;
+        }
         let mut flags = inode_creation_data.flags;
         if ext4
             .0

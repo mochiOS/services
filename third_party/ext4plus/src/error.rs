@@ -27,6 +27,8 @@ pub(crate) type BoxedError = Box<dyn Error + Send + Sync + 'static>;
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Ext4Error {
+    /// A supplied inode timestamp has an invalid range, fraction or layout.
+    Timestamp(crate::inode::TimestampError),
     /// An operation that requires an absolute path was attempted on a
     /// relative path.
     NotAbsolute,
@@ -127,6 +129,7 @@ impl Ext4Error {
 impl Display for Ext4Error {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Timestamp(error) => write!(f, "invalid inode timestamp: {error}"),
             Self::NotAbsolute => write!(f, "path is not absolute"),
             Self::NotASymlink => write!(f, "path is not a symlink"),
             Self::NotFound => write!(f, "file not found"),
@@ -173,6 +176,7 @@ impl From<Ext4Error> for std::io::Error {
 
         // TODO: Rust 1.87 adds InvalidFilename; use after bumping the MSRV.
         match e {
+            Ext4Error::Timestamp(_) => InvalidInput.into(),
             Ext4Error::IsASpecialFile
             | Ext4Error::MalformedPath
             | Ext4Error::InvalidXattrName

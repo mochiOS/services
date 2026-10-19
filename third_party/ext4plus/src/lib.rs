@@ -1536,7 +1536,22 @@ impl Ext4 {
     ) -> Result<Inode, Ext4Error> {
         // TODO: for the purposes of fscking during recovery, it is proper to write inode data, then mark as used
         let inode_index = self.alloc_inode(options.file_type).await?;
-        Inode::create(inode_index, options, self).await
+        Inode::create(inode_index, options, self, None).await
+    }
+
+    /// Create an inode with checked signed access, modification, change and
+    /// (when present) birth times. Overrides `options.time`. Timestamp range
+    /// and layout errors are rejected before allocating an inode or blocks.
+    #[maybe_async::maybe_async]
+    pub async fn create_inode_with_timestamps(
+        &self,
+        options: InodeCreationOptions,
+        time: inode::InodeTimestamp,
+    ) -> Result<Inode, Ext4Error> {
+        Inode::validate_creation_timestamp(self, time)
+            .map_err(Ext4Error::Timestamp)?;
+        let index = self.alloc_inode(options.file_type).await?;
+        Inode::create(index, options, self, Some(time)).await
     }
 
     /// Read the entire contents of a file into a `Vec<u8>`.
@@ -1593,7 +1608,7 @@ impl Ext4 {
         gid: u32,
         time: Duration,
     ) -> Result<Inode, Ext4Error> {
-        let mut inode = self
+        let inode = self
             .create_inode(InodeCreationOptions {
                 file_type: FileType::Symlink,
                 mode: InodeMode::S_IFLNK,
@@ -1603,6 +1618,45 @@ impl Ext4 {
                 flags: InodeFlags::empty(),
             })
             .await?;
+        self.finish_symlink(parent_dir, name, target, inode).await
+    }
+
+    /// Create a symbolic link with checked signed timestamps, rejecting time
+    /// errors before any inode allocation or directory-entry publication.
+    #[maybe_async::maybe_async]
+    pub async fn symlink_with_timestamps(
+        &self,
+        parent_dir: &mut Dir,
+        name: DirEntryName<'_>,
+        target: PathBuf,
+        uid: u32,
+        gid: u32,
+        time: inode::InodeTimestamp,
+    ) -> Result<Inode, Ext4Error> {
+        let inode = self
+            .create_inode_with_timestamps(
+                InodeCreationOptions {
+                    file_type: FileType::Symlink,
+                    mode: InodeMode::S_IFLNK,
+                    uid,
+                    gid,
+                    time: Duration::default(),
+                    flags: InodeFlags::empty(),
+                },
+                time,
+            )
+            .await?;
+        self.finish_symlink(parent_dir, name, target, inode).await
+    }
+
+    #[maybe_async::maybe_async]
+    async fn finish_symlink(
+        &self,
+        parent_dir: &mut Dir,
+        name: DirEntryName<'_>,
+        target: PathBuf,
+        mut inode: Inode,
+    ) -> Result<Inode, Ext4Error> {
         if target.as_ref().len() < 60 {
             // Fast symlink: store the target in the inode itself.
             let mut target_bytes = [0; 60];
