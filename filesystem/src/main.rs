@@ -377,6 +377,7 @@ fn main() {
                         | protocol::OP_UPDATE_FLAGS_HANDLE
                         | protocol::OP_CHMOD_HANDLE
                         | protocol::OP_CHOWN_HANDLE
+                        | protocol::OP_SET_TIMES_HANDLE
                 ) {
                     let open_id = decode_single_open(&attached).and_then(|id| {
                         filesystem_service::handle_access::authorize(
@@ -413,6 +414,20 @@ fn main() {
                                     Err(22)
                                 }
                             }),
+                        protocol::OP_SET_TIMES_HANDLE => {
+                            protocol::decode_credentials_payload(payload)
+                                .map_err(|_| 22)
+                                .and_then(|(credentials, payload)| {
+                                    let (times, remaining) =
+                                        protocol::decode_time_update(payload).map_err(|_| 22)?;
+                                    if !remaining.is_empty() {
+                                        return Err(22);
+                                    }
+                                    service.set_times_handle(
+                                        header, open_id, credentials, times, realtime_timestamp,
+                                    )
+                                })
+                        }
                         _ => unreachable!(),
                     });
                     match result {
@@ -691,6 +706,33 @@ fn main() {
                             payload: Vec::new(),
                         },
                     }
+                } else if header.opcode == protocol::OP_SET_TIMES_AT {
+                    let result = decode_path_anchors(
+                        header.flags,
+                        protocol::SET_TIMES_AT_ROOT_ATTACHED,
+                        protocol::SET_TIMES_AT_BASE_ATTACHED,
+                        &attached,
+                    )
+                    .and_then(|anchors| {
+                        let (credentials, payload) =
+                            protocol::decode_credentials_payload(payload).map_err(|_| 22)?;
+                        let (times, path) = protocol::decode_time_update(payload).map_err(|_| 22)?;
+                        service.set_times_at(
+                            header, path, anchors, credentials, times, realtime_timestamp,
+                        )
+                    });
+                    match result {
+                        Ok(response) => response,
+                        Err(error) => filesystem_service::service::Response {
+                            header: protocol::Header {
+                                opcode: protocol::OP_STATUS,
+                                request_id: header.request_id,
+                                status: -error,
+                                ..protocol::Header::default()
+                            },
+                            payload: Vec::new(),
+                        },
+                    }
                 } else if attached.count != 0 {
                     filesystem_service::service::Response {
                         header: protocol::Header {
@@ -906,6 +948,29 @@ fn decode_open_pair(
             platform::handle::identify_provider_object(object.handle).map_err(|_| 9)?;
     }
     Ok((open_ids[0], open_ids[1]))
+}
+
+#[cfg(target_os = "mochios")]
+fn realtime_timestamp() -> Result<ext4plus::inode::InodeTimestamp, i32> {
+    use mochi_user_platform::syscall;
+    let mut instant = mnu_abi::ClockInstant::default();
+    syscall::call2(
+        syscall::SyscallNumber::ClockRead,
+        mnu_abi::ClockId::Realtime as u64,
+        (&mut instant as *mut mnu_abi::ClockInstant) as u64,
+    )
+    .map_err(|error| match error.native_error() {
+        Some(syscall::NativeError::AccessDenied) => 13,
+        Some(syscall::NativeError::NotReady) => 11,
+        _ => 5,
+    })?;
+    if instant.reserved != 0 || instant.nanoseconds >= 1_000_000_000 {
+        return Err(5);
+    }
+    Ok(ext4plus::inode::InodeTimestamp {
+        seconds: i64::try_from(instant.seconds).map_err(|_| 75)?,
+        nanoseconds: instant.nanoseconds,
+    })
 }
 
 #[cfg(target_os = "mochios")]

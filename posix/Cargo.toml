@@ -66,3 +66,8 @@ harness = false
 name = "native_queued_file_admission"
 path = "tests/native_queued_file_admission.rs"
 harness = false
+
+[[test]]
+name = "native_filesystem_times"
+path = "tests/native_filesystem_times.rs"
+harness = false

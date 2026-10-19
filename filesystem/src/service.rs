@@ -21,6 +21,8 @@ mod removed_directories;
 mod canonical_path;
 #[path = "inode_time.rs"]
 mod inode_time;
+#[path = "timestamp_operations.rs"]
+mod timestamp_operations;
 
 const EIO: i32 = 5;
 const EXDEV: i32 = 18;
@@ -318,7 +320,9 @@ impl FilesystemService {
             | protocol::OP_CHMOD_AT
             | protocol::OP_CHOWN_AT
             | protocol::OP_CHMOD_HANDLE
-            | protocol::OP_CHOWN_HANDLE => Err(EINVAL),
+            | protocol::OP_CHOWN_HANDLE
+            | protocol::OP_SET_TIMES_AT
+            | protocol::OP_SET_TIMES_HANDLE => Err(EINVAL),
             _ => Err(ENOSYS),
         };
         result.unwrap_or_else(|errno| self.error(request, errno))

@@ -62,6 +62,10 @@ fn run(command: &mut Command) {
 
 impl Fixture {
     fn new(inode_size: usize, extra_size: Option<u16>) -> Self {
+        Self::create(inode_size, extra_size, false)
+    }
+
+    fn create(inode_size: usize, extra_size: Option<u16>, tree: bool) -> Self {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -91,6 +95,16 @@ impl Fixture {
             // shortened below it. Keep the partial-layout fixtures checksum
             // free; the normal 256-byte fixtures verify metadata checksums.
             format.args(["-O", "^metadata_csum"]);
+        }
+        if tree {
+            let source = directory.join("source");
+            for child in ["work", "hidden", "dev", "system"] {
+                std::fs::create_dir_all(source.join(child)).unwrap();
+            }
+            std::fs::write(source.join("work/target"), b"data").unwrap();
+            std::fs::write(source.join("hidden/target"), b"private").unwrap();
+            std::os::unix::fs::symlink("target", source.join("work/link")).unwrap();
+            format.arg("-d").arg(&source);
         }
         run(format.arg(&path));
         if let Some(extra_size) = extra_size {
@@ -130,6 +144,9 @@ impl Fixture {
         path
     }
 }
+
+#[path = "support/filesystem_time_policy.rs"]
+mod policy;
 
 impl Drop for Fixture {
     fn drop(&mut self) {

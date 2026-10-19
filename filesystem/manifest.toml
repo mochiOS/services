@@ -12,4 +12,5 @@ requires = [
     "device.storage",
     "ipc.client",
     "ipc.server",
+    "system.time.read",
 ]

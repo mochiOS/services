@@ -31,6 +31,7 @@ pub fn authorize(opcode: u16, rights: u64) -> Result<(), i32> {
             wire::OP_TRUNCATE_HANDLE => mnu_abi::HANDLE_RIGHT_WRITE,
             wire::OP_CHMOD_HANDLE
             | wire::OP_CHOWN_HANDLE
+            | wire::OP_SET_TIMES_HANDLE
             | wire::OP_SET_FLAGS_HANDLE
             | wire::OP_UPDATE_FLAGS_HANDLE => mnu_abi::HANDLE_RIGHT_CONTROL,
             wire::OP_SYNC_HANDLE | wire::OP_GET_FLAGS_HANDLE => 0,
