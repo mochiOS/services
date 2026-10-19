@@ -94,7 +94,8 @@ fn bootstrap_and_thread_entry_failures_use_native_categories() {
             .find("crate::performance::increment(")
             .unwrap()
             + start];
-    assert!(missing.contains("Error::NotFound.into_raw()"));
+    assert!(missing.contains("Error::InvalidArgument.into_raw()"));
+    assert!(missing.contains("Error::LimitExceeded.into_raw()"));
     let threads = include_str!("../../../core/src/task/thread.rs");
     assert_eq!(
         threads
