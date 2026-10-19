@@ -286,6 +286,7 @@ fn mounted_and_unlinked_descriptions_update_the_retained_inode_not_its_former_pa
     service.mount_volume(b"/system", mounted.clone()).unwrap();
     let file = open(&mut service, b"/system/work/target", false);
     let bytes = root.image.0.lock().unwrap().clone();
+    set_clock(Ok(time(599, 699)));
     service
         .unlink_at(
             request(wire::OP_UNLINK_AT, 0),
@@ -299,7 +300,7 @@ fn mounted_and_unlinked_descriptions_update_the_retained_inode_not_its_former_pa
     assert_eq!(calls(), 1);
     assert_eq!(
         status_times(status(&mut service, file)),
-        [(600, 700), (2_147_483_648, 22), (3, 33)]
+        [(600, 700), (2_147_483_648, 22), (599, 699)]
     );
     assert_eq!(*root.image.0.lock().unwrap(), bytes);
 }

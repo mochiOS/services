@@ -2200,11 +2200,18 @@ impl FilesystemService {
         path_hint: Option<&str>,
     ) -> Result<(), i32> {
         let mut parent = Dir::open_inode(filesystem, parent_inode.clone()).map_err(errno)?;
+        let entry_name = DirEntryName::try_from(name).map_err(|_| EINVAL)?;
         if inode.file_type().is_dir() {
             if !remove_directory {
                 return Err(EISDIR);
             }
-            if !self.prepare_empty_directory(filesystem, volume, &inode)? {
+            let retained = self
+                .empty_directory_private_entries(filesystem, volume, &inode)?
+                .ok_or(ENOTEMPTY)?;
+            // Even hidden-link evacuation changes storage. Clock and all
+            // timestamp validation must finish before moving a retention pin.
+            let now = self.prepare_unlink_times(filesystem, &mut parent, &mut inode)?;
+            if !self.evacuate_directory_private_entries(filesystem, volume, &inode, retained)? {
                 return Err(ENOTEMPTY);
             }
             // Moving private retention links may have grown the volume root.
@@ -2214,6 +2221,14 @@ impl FilesystemService {
                 Inode::read(filesystem, parent_inode.index).map_err(errno)?,
             )
             .map_err(errno)?;
+            inode = Inode::read(filesystem, inode.index).map_err(errno)?;
+            parent
+                .inode_mut()
+                .set_signed_timestamps(None, Some(now), Some(now))
+                .map_err(timestamp_operations::timestamp_error)?;
+            inode
+                .set_signed_timestamps(None, None, Some(now))
+                .map_err(timestamp_operations::timestamp_error)?;
             self.remove_replaced_directory(filesystem, volume, &mut parent, name, inode)?;
             if let Some(path) = path_hint {
                 if let Some(node_id) = self.node_ids.remove(path) {
@@ -2225,6 +2240,7 @@ impl FilesystemService {
         if remove_directory {
             return Err(ENOTDIR);
         }
+        self.prepare_unlink_times(filesystem, &mut parent, &mut inode)?;
         let node_id = scoped_node_id(volume, &inode);
         let is_open = self.opens.values().any(|open| open.node_id == node_id);
         // Public hard links already keep the inode alive. Create one private
@@ -2254,10 +2270,7 @@ impl FilesystemService {
         } else {
             None
         };
-        if let Err(error) = parent.unlink(
-            DirEntryName::try_from(name).map_err(|_| EINVAL)?,
-            inode.clone(),
-        ) {
+        if let Err(error) = parent.unlink(entry_name, inode.clone()) {
             if let Some(orphan) = retained {
                 let holder = if orphan.parent.index == parent.inode().index {
                     &mut parent
@@ -2281,6 +2294,10 @@ impl FilesystemService {
         } else if !is_open {
             self.nodes.remove(&node_id);
         }
+        // Publish retention ownership before a fallible metadata write: the
+        // public name is already gone, even when persisting parent times fails.
+        // Removing an entry from existing slack need not save the parent inode.
+        parent.inode_mut().write(filesystem).map_err(errno)?;
         Ok(())
     }
 
@@ -3116,7 +3133,19 @@ impl FilesystemService {
         volume: u32,
         inode: &Inode,
     ) -> Result<bool, i32> {
-        let mut directory = Dir::open_inode(filesystem, inode.clone()).map_err(errno)?;
+        let Some(retained) = self.empty_directory_private_entries(filesystem, volume, inode)? else {
+            return Ok(false);
+        };
+        self.evacuate_directory_private_entries(filesystem, volume, inode, retained)
+    }
+
+    fn empty_directory_private_entries(
+        &self,
+        filesystem: &Ext4,
+        volume: u32,
+        inode: &Inode,
+    ) -> Result<Option<Vec<u64>>, i32> {
+        let directory = Dir::open_inode(filesystem, inode.clone()).map_err(errno)?;
         let mut retained = Vec::new();
         for entry in directory.read_dir().map_err(errno)? {
             let entry = entry.map_err(errno)?;
@@ -3127,15 +3156,26 @@ impl FilesystemService {
                         && orphan.name.as_bytes() == entry.file_name().as_ref()
                 });
                 if !private {
-                    return Ok(false);
+                    return Ok(None);
                 }
                 retained.try_reserve(1).map_err(|_| ENOMEM)?;
                 retained.push(node_id);
             }
         }
+        Ok(Some(retained))
+    }
+
+    fn evacuate_directory_private_entries(
+        &mut self,
+        filesystem: &Ext4,
+        volume: u32,
+        inode: &Inode,
+        retained: Vec<u64>,
+    ) -> Result<bool, i32> {
         if retained.is_empty() {
             return Ok(true);
         }
+        let mut directory = Dir::open_inode(filesystem, inode.clone()).map_err(errno)?;
         let mut root = Dir::open_inode(filesystem, filesystem.read_root_inode().map_err(errno)?)
             .map_err(errno)?;
         if root.inode().index == inode.index {

@@ -16,6 +16,9 @@ mod read;
 #[path = "link_timestamps.rs"]
 mod link;
 
+#[path = "unlink_timestamps.rs"]
+mod unlink;
+
 thread_local! {
     static CLOCK: RefCell<(Result<Time, i32>, usize)> = const {
         RefCell::new((Ok(Time { seconds: 10, nanoseconds: 20 }), 0))
