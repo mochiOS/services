@@ -1,5 +1,68 @@
+use filesystem_service::provider_buffer::publish_native;
 use filesystem_service::provider_buffer::{ProviderReadBuffer, publish};
 use mnu_abi::provider::MAX_SHARED_READ_LEN;
+use mochi_user_platform::syscall::{NativeError, SysError};
+
+#[test]
+fn native_publication_failures_use_wire_errors_not_native_tag_magnitudes() {
+    for (native, expected) in [
+        (NativeError::LimitExceeded, 75),
+        (NativeError::InvalidAddress, 14),
+        (NativeError::ResourceUnavailable, 12),
+        (NativeError::BackingFailure, 5),
+        (NativeError::InvalidArgument, 22),
+        (NativeError::AccessDenied, 13),
+        (NativeError::NotReady, 11),
+        (NativeError::AlreadyExists, 17),
+        (NativeError::NotFound, 2),
+        (NativeError::PeerClosed, 32),
+        (NativeError::Unsupported, 95),
+    ] {
+        let mut calls = 0;
+        assert_eq!(
+            publish_native(b"abc", 7, |bytes, offset| {
+                calls += 1;
+                assert_eq!(bytes, b"abc");
+                assert_eq!(offset, 7);
+                Err(SysError::from_raw(native.into_raw() as i64))
+            }),
+            Err(expected)
+        );
+        assert_eq!(calls, 1);
+        assert_ne!(expected, (native.into_raw() as i64).unsigned_abs() as i32);
+    }
+}
+
+#[test]
+fn native_failure_after_short_publication_is_terminal_and_unknown_codes_are_io_errors() {
+    let mut calls = 0;
+    assert_eq!(
+        publish_native(b"abc", 7, |bytes, offset| {
+            calls += 1;
+            if calls == 1 {
+                assert_eq!((bytes, offset), (b"abc".as_slice(), 7));
+                Ok(1)
+            } else {
+                assert_eq!((bytes, offset), (b"bc".as_slice(), 8));
+                Err(SysError::from_raw(
+                    NativeError::AccessDenied.into_raw() as i64
+                ))
+            }
+        }),
+        Err(13)
+    );
+    assert_eq!(calls, 2);
+    let tag = NativeError::LimitExceeded.into_raw() & !0xffff;
+    for raw in [tag, tag | 12, tag | 0xffff, i64::MIN as u64] {
+        assert_eq!(
+            publish_native(b"abc", 0, |_, _| Err(SysError::from_raw(raw as i64))),
+            Err(5)
+        );
+    }
+    let source = include_str!("../../filesystem/src/main.rs");
+    assert!(source.contains("provider_buffer::publish_native("));
+    assert!(!source.contains("error.raw().unsigned_abs() as i32"));
+}
 
 #[test]
 fn bounded_scratch_storage_reuses_resident_bytes_between_requests() {

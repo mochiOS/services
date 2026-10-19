@@ -1156,10 +1156,11 @@ fn read_provider_shared(
     let (count, start) = service.provider_read_into(header.object_id, output)?;
     // Native positioned I/O already supports anonymous VM objects. Avoid a
     // temporary address-space mapping and one user fault per destination page.
-    filesystem_service::provider_buffer::publish(&output[..count], header.basis, |bytes, offset| {
-        handle::write_at(attachment.handle, bytes, offset)
-            .map_err(|error| error.raw().unsigned_abs() as i32)
-    })?;
+    filesystem_service::provider_buffer::publish_native(
+        &output[..count],
+        header.basis,
+        |bytes, offset| handle::write_at(attachment.handle, bytes, offset),
+    )?;
     Ok((count as u64, start.to_le_bytes().to_vec()))
 }
 

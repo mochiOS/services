@@ -24,6 +24,19 @@ impl ProviderReadBuffer {
 }
 
 /// Publish only the initialized read prefix into a transferred memory object.
+/// Translate native write failures at the filesystem wire boundary, not by
+/// taking their numeric magnitude. Native status tags are not POSIX errno.
+pub fn publish_native(
+    bytes: &[u8],
+    offset: u64,
+    mut write: impl FnMut(&[u8], u64) -> Result<usize, mochi_user_platform::syscall::SysError>,
+) -> Result<(), i32> {
+    publish(bytes, offset, |bytes, offset| {
+        write(bytes, offset).map_err(crate::memory_updates::native_error)
+    })
+}
+
+/// Publish only the initialized read prefix into a transferred memory object.
 /// A short write is retried at its new offset; never acknowledge stale bytes.
 pub fn publish(
     bytes: &[u8],

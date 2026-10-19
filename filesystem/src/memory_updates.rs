@@ -175,7 +175,7 @@ impl Update for mochi_user_platform::handle::ProviderMemoryUpdate {
     }
 }
 
-fn native_error(error: mochi_user_platform::syscall::SysError) -> i32 {
+pub(crate) fn native_error(error: mochi_user_platform::syscall::SysError) -> i32 {
     use mnu_abi::status::Error;
     if let Some(error) = error.native_error() {
         // Filesystem protocol errors are not newlib's C errno namespace.
