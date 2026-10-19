@@ -138,8 +138,8 @@ fn bootstrap_directory_limits_and_non_directory_errors_are_explicit() {
             .read_directory("/file", 0, 2, 100)
             .err()
             .unwrap()
-            .raw_os_error(),
-        Some(20)
+            .kind(),
+        std::io::ErrorKind::NotADirectory
     );
     for (entries, bytes) in [(0, 100), (1, 0), (2, 1)] {
         assert!(
@@ -184,15 +184,15 @@ fn bootstrap_errors_preserve_path_and_object_failures() {
         std::io::ErrorKind::NotFound
     );
     assert_eq!(
-        reader.read("/directory", 1024).unwrap_err().raw_os_error(),
-        Some(21)
+        reader.read("/directory", 1024).unwrap_err().kind(),
+        std::io::ErrorKind::IsADirectory
     );
     assert_eq!(
         reader
             .read_at("/directory", 0, &mut output)
             .unwrap_err()
-            .raw_os_error(),
-        Some(21)
+            .kind(),
+        std::io::ErrorKind::IsADirectory
     );
     for path in ["relative", "/file\0suffix"] {
         assert_eq!(
@@ -518,8 +518,11 @@ fn bootstrap_client_round_trips_real_immutable_filesystem_and_propagates_errors(
         expected
     );
     assert_eq!(
-        client.read_dir_names("/long-names", 100).unwrap_err().raw(),
-        -75
+        client
+            .read_dir_names("/long-names", 100)
+            .unwrap_err()
+            .native_error(),
+        Some(syscall::NativeError::LimitExceeded)
     );
     assert_eq!(client.read_file("/file", 16).unwrap(), b"0123456789abcdef");
 }

@@ -21,6 +21,13 @@ use crate::bootstrap_read::BootstrapReader;
 pub use wire::{BOOTSTRAP_EOF as EOF, BOOTSTRAP_MAX_TRANSFER as MAX_TRANSFER};
 const MAX_ENTRIES: usize = 128;
 
+enum Failure {
+    InvalidRequest,
+    UnsupportedOperation,
+    Encoding,
+    Filesystem(io::Error),
+}
+
 /// Format a reply into caller-owned storage. Malformed requests receive EINVAL
 /// (request ID zero if their header cannot be decoded); unknown operations
 /// receive ENOSYS. Only an undersized reply buffer prevents an error reply.
@@ -36,7 +43,7 @@ pub fn respond(reader: &BootstrapReader, request: &[u8], reply: &mut [u8]) -> io
         ..wire::Header::default()
     };
     let result = wire::decode(request)
-        .map_err(|_| io::Error::from_raw_os_error(22))
+        .map_err(|_| Failure::InvalidRequest)
         .and_then(|(header, path)| {
             response.request_id = header.request_id;
             if request.len() != wire::HEADER_LEN + path.len()
@@ -46,10 +53,10 @@ pub fn respond(reader: &BootstrapReader, request: &[u8], reply: &mut [u8]) -> io
                 || header.status != 0
                 || header.mode != 0
             {
-                return Err(io::Error::from_raw_os_error(22));
+                return Err(Failure::InvalidRequest);
             }
             if !matches!(header.opcode, wire::OP_READ | wire::OP_READDIR) {
-                return Err(io::Error::from_raw_os_error(38));
+                return Err(Failure::UnsupportedOperation);
             }
             let budget = header.flags as usize;
             if budget == 0
@@ -57,39 +64,43 @@ pub fn respond(reader: &BootstrapReader, request: &[u8], reply: &mut [u8]) -> io
                 || path.is_empty()
                 || path.len() > wire::MAX_PATH_LEN
             {
-                return Err(io::Error::from_raw_os_error(22));
+                return Err(Failure::InvalidRequest);
             }
-            let path = std::str::from_utf8(path).map_err(|_| io::Error::from_raw_os_error(22))?;
+            let path = std::str::from_utf8(path).map_err(|_| Failure::InvalidRequest)?;
             if !path.starts_with('/') || path.contains('\0') {
-                return Err(io::Error::from_raw_os_error(22));
+                return Err(Failure::InvalidRequest);
             }
             // Reject rather than silently truncate a caller's declared budget.
             let output = reply
                 .get_mut(wire::HEADER_LEN..wire::HEADER_LEN + budget)
-                .ok_or_else(|| io::Error::from_raw_os_error(22))?;
+                .ok_or(Failure::InvalidRequest)?;
             if header.opcode == wire::OP_READ {
-                let count = reader.read_at(path, header.offset, output)?;
+                let count = reader
+                    .read_at(path, header.offset, output)
+                    .map_err(Failure::Filesystem)?;
                 response.offset = header.offset + count as u64;
                 response.flags = if count < budget { EOF } else { 0 };
                 Ok(count)
             } else {
                 if budget <= wire::DIRENT_HEADER_LEN {
-                    return Err(io::Error::from_raw_os_error(22));
+                    return Err(Failure::InvalidRequest);
                 }
                 // Reserve per-record overhead before passing the remaining name
                 // budget to the reader. Thus even 255-byte names fit precisely.
                 let entries =
                     (budget / (wire::DIRENT_HEADER_LEN + wire::MAX_NAME_LEN)).clamp(1, MAX_ENTRIES);
-                let page = reader.read_directory(
-                    path,
-                    header.offset,
-                    entries,
-                    budget - entries * wire::DIRENT_HEADER_LEN,
-                )?;
+                let page = reader
+                    .read_directory(
+                        path,
+                        header.offset,
+                        entries,
+                        budget - entries * wire::DIRENT_HEADER_LEN,
+                    )
+                    .map_err(Failure::Filesystem)?;
                 let mut length = 0;
                 for name in page.names {
                     length += wire::encode_dir_entry(0, 0, name.as_bytes(), &mut output[length..])
-                        .map_err(|_| io::Error::from_raw_os_error(5))?;
+                        .map_err(|_| Failure::Encoding)?;
                 }
                 response.offset = page.next_entry;
                 response.flags = if page.eof { EOF } else { 0 };
@@ -99,7 +110,12 @@ pub fn respond(reader: &BootstrapReader, request: &[u8], reply: &mut [u8]) -> io
     let length = match result {
         Ok(length) => length,
         Err(error) => {
-            response.status = -errno(&error);
+            response.status = -match error {
+                Failure::InvalidRequest => 22,
+                Failure::UnsupportedOperation => 38,
+                Failure::Encoding => 5,
+                Failure::Filesystem(error) => errno(&error),
+            };
             response.offset = 0;
             response.flags = 0;
             0
@@ -117,15 +133,24 @@ pub fn respond(reader: &BootstrapReader, request: &[u8], reply: &mut [u8]) -> io
         &[],
         &mut header,
     )
-    .map_err(|_| io::Error::from_raw_os_error(5))?;
+    .map_err(|_| io::Error::other("bootstrap reply encoding failed"))?;
     header[48..52].copy_from_slice(&response.length.to_le_bytes());
     reply[..wire::HEADER_LEN].copy_from_slice(&header);
     Ok(wire::HEADER_LEN + length)
 }
 
 fn errno(error: &io::Error) -> i32 {
-    if let Some(code) = error.raw_os_error().filter(|code| *code > 0) {
-        return code;
+    // The source preserves ext4's typed path failures. Do not interpret a
+    // newlib (or host) raw errno as a filesystem-protocol status number.
+    if let Some(source) = error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<ext4plus::error::Ext4Error>())
+    {
+        match source {
+            ext4plus::error::Ext4Error::PathTooLong => return 36,
+            ext4plus::error::Ext4Error::TooManySymlinks => return 40,
+            _ => {}
+        }
     }
     match error.kind() {
         io::ErrorKind::NotFound => 2,

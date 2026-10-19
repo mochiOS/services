@@ -43,8 +43,7 @@ fn filesystem_error(error: Ext4Error) -> io::Error {
         Ext4Error::FileTooLarge => io::ErrorKind::FileTooLarge,
         Ext4Error::AlreadyExists => io::ErrorKind::AlreadyExists,
         Ext4Error::NoSpace => io::ErrorKind::StorageFull,
-        Ext4Error::PathTooLong => return io::Error::from_raw_os_error(36),
-        Ext4Error::TooManySymlinks => return io::Error::from_raw_os_error(40),
+        Ext4Error::PathTooLong | Ext4Error::TooManySymlinks => io::ErrorKind::InvalidInput,
         _ => io::ErrorKind::Other,
     };
     io::Error::new(kind, error)
@@ -81,7 +80,10 @@ impl BootstrapReader {
     fn regular_inode(&self, path: &str) -> io::Result<Inode> {
         let inode = self.inode(path)?;
         if inode.file_type().is_dir() {
-            return Err(io::Error::from_raw_os_error(21));
+            return Err(io::Error::new(
+                io::ErrorKind::IsADirectory,
+                "regular file required",
+            ));
         }
         if !inode.file_type().is_regular_file() {
             return Err(io::Error::new(
@@ -165,7 +167,10 @@ impl BootstrapReader {
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         let inode = self.inode(path)?;
         if !inode.file_type().is_dir() {
-            return Err(io::Error::from_raw_os_error(20));
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                "directory required",
+            ));
         }
         let directory = Dir::open_inode(&self.filesystem, inode).map_err(filesystem_error)?;
         let mut page = BootstrapDirectoryPage {
