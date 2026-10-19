@@ -45,6 +45,9 @@ mod canonical_path_protocol;
 #[path = "support/byte_path_protocol.rs"]
 mod byte_path_protocol;
 
+#[path = "support/file_time_protocol.rs"]
+mod file_time_protocol;
+
 struct LocalTransport {
     service: RefCell<PosixService>,
     peer: PeerIdentity,
@@ -1367,6 +1370,9 @@ struct RecordingFilesystem {
     truncate_ceiling: Option<u64>,
     chmod_file: Option<(AttachedObject<u32>, u32, u32, u32)>,
     chown_file: Option<(AttachedObject<u32>, u32, u32, u32, u32)>,
+    time_file: Option<(AttachedObject<u32>, protocol::file_time::Update, u32, u32, Vec<u32>)>,
+    time_request: Option<posix_service::PreparedFileTimes>,
+    time_error: Option<i32>,
     synced: Option<AttachedObject<u32>>,
     status_flags: u32,
     flags_file: Option<AttachedObject<u32>>,
@@ -1614,6 +1620,29 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
     ) -> Result<(), i32> {
         self.chown_file = Some((file, uid, gid, effective_uid, effective_gid));
         Ok(())
+    }
+
+    fn futimens(
+        &mut self,
+        file: AttachedObject<u32>,
+        times: protocol::file_time::Update,
+        uid: u32,
+        gid: u32,
+        groups: &[u32],
+    ) -> Result<(), i32> {
+        self.time_file = Some((file, times, uid, gid, groups.to_vec()));
+        self.time_error.map_or(Ok(()), Err)
+    }
+
+    fn utimens_at(
+        &mut self,
+        request: &posix_service::PreparedFileTimes,
+        paths: PathObjects<u32>,
+    ) -> Result<(), i32> {
+        self.time_request = Some(request.clone());
+        self.root = Some(paths.root);
+        self.directory = paths.base;
+        self.time_error.map_or(Ok(()), Err)
     }
 
     fn fsync(&mut self, file: AttachedObject<u32>) -> Result<(), i32> {

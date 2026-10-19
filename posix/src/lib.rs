@@ -27,6 +27,7 @@ mod signal_origin;
 mod fork_state;
 pub mod resource_policy;
 pub mod cpu_limit;
+pub mod filesystem_times;
 pub use fork_state::validate_fork_child;
 
 pub const STATUS_EINVAL: i32 = -22;
@@ -209,6 +210,12 @@ pub struct PreparedStat {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedFileTimes {
+    pub target: PreparedStat,
+    pub times: protocol::file_time::Update,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedAccess {
     pub base: protocol::OpenBase,
     pub flags: u32,
@@ -367,6 +374,21 @@ pub trait FilesystemBackend<H: Copy> {
         effective_gid: u32,
         supplementary_groups: &[u32],
     ) -> Result<(), i32>;
+
+    fn futimens(
+        &mut self,
+        _file: AttachedObject<H>,
+        _times: protocol::file_time::Update,
+        _effective_uid: u32,
+        _effective_gid: u32,
+        _supplementary_groups: &[u32],
+    ) -> Result<(), i32> {
+        Err(protocol::STATUS_ENOSYS)
+    }
+
+    fn utimens_at(&mut self, _request: &PreparedFileTimes, _paths: PathObjects<H>) -> Result<(), i32> {
+        Err(protocol::STATUS_ENOSYS)
+    }
 
     fn fsync(&mut self, file: AttachedObject<H>) -> Result<(), i32>;
 
@@ -3414,7 +3436,9 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_CHMOD_AT
             | protocol::OP_CHOWN_AT
             | protocol::OP_FCHMOD
-            | protocol::OP_FCHOWN => Err(STATUS_EINVAL),
+            | protocol::OP_FCHOWN
+            | protocol::OP_FUTIMENS
+            | protocol::OP_UTIMENS_AT => Err(STATUS_EINVAL),
             _ => Err(protocol::STATUS_ENOSYS),
         };
         let (status, payload) = match result {
@@ -3511,6 +3535,8 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_CHOWN_AT
                 | protocol::OP_FCHMOD
                 | protocol::OP_FCHOWN
+                | protocol::OP_FUTIMENS
+                | protocol::OP_UTIMENS_AT
         ) {
             let response = if handles.is_empty() {
                 self.handle(peer, header, payload)
@@ -3555,6 +3581,7 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_READLINK_AT
                 | protocol::OP_CHMOD_AT
                 | protocol::OP_CHOWN_AT
+                | protocol::OP_UTIMENS_AT
         ) {
             if let Err(status) = self.ensure_session_directories(peer.process_id, filesystem) {
                 return object_error(header.request_id, status);
@@ -3743,6 +3770,27 @@ impl<H: Copy> PosixService<H> {
                 match result {
                     Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
                     Err(error) => object_mutation_error(header.request_id, error, admission.is_some(), filesystem),
+                }
+            }
+            protocol::OP_FUTIMENS => {
+                let times = match protocol::file_time::decode(payload) {
+                    Ok(times) => times,
+                    Err(_) => return object_error(header.request_id, STATUS_EINVAL),
+                };
+                let session = match self.sessions.get(&peer.process_id) {
+                    Some(session) => *session,
+                    None => return object_error(header.request_id, protocol::STATUS_ESRCH),
+                };
+                let groups = self
+                    .supplementary_groups
+                    .get(&peer.process_id)
+                    .cloned()
+                    .unwrap_or_default();
+                match filesystem.futimens(
+                    handles[0], times, session.effective_uid, session.effective_gid, &groups,
+                ) {
+                    Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
+                    Err(status) => object_error(header.request_id, status),
                 }
             }
             protocol::OP_FCHMOD => {
@@ -3973,6 +4021,20 @@ impl<H: Copy> PosixService<H> {
                 };
                 match filesystem.readlink_at(&prepared, paths) {
                     Ok(target) => object_payload(header.request_id, target),
+                    Err(status) => object_error(header.request_id, status),
+                }
+            }
+            protocol::OP_UTIMENS_AT => {
+                let prepared = match self.prepare_utimens_at(peer, payload, handles.len()) {
+                    Ok(prepared) => prepared,
+                    Err(status) => return object_error(header.request_id, status),
+                };
+                let paths = match self.path_objects(peer.process_id, prepared.target.base, handles) {
+                    Ok(paths) => paths,
+                    Err(status) => return object_error(header.request_id, status),
+                };
+                match filesystem.utimens_at(&prepared, paths) {
+                    Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
                     Err(status) => object_error(header.request_id, status),
                 }
             }
@@ -4363,6 +4425,37 @@ impl<H: Copy> PosixService<H> {
                 .get(&peer.process_id)
                 .cloned()
                 .unwrap_or_default(),
+        })
+    }
+
+    pub fn prepare_utimens_at(
+        &self,
+        peer: PeerIdentity,
+        payload: &[u8],
+        attached_handles: usize,
+    ) -> Result<PreparedFileTimes, i32> {
+        let session = self
+            .sessions
+            .get(&peer.process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let request = protocol::file_time::decode_at(payload).map_err(|_| STATUS_EINVAL)?;
+        if attached_handles != usize::from(request.target.base == protocol::OpenBase::AttachedDirectory) {
+            return Err(STATUS_EINVAL);
+        }
+        Ok(PreparedFileTimes {
+            target: PreparedStat {
+                base: request.target.base,
+                flags: request.target.flags,
+                path: request.target.path.to_owned(),
+                effective_uid: session.effective_uid,
+                effective_gid: session.effective_gid,
+                supplementary_groups: self
+                    .supplementary_groups
+                    .get(&peer.process_id)
+                    .cloned()
+                    .unwrap_or_default(),
+            },
+            times: request.times,
         })
     }
 

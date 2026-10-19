@@ -2723,6 +2723,32 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         .map_err(|error| error.map_status(posix_service::truncate_filesystem_status))
     }
 
+    fn futimens(
+        &mut self,
+        file: posix_service::AttachedObject<mochi_user_platform::handle::Handle>,
+        times: mochios_posix_protocol::file_time::Update,
+        effective_uid: u32,
+        effective_gid: u32,
+        supplementary_groups: &[u32],
+    ) -> Result<(), i32> {
+        use mochios_filesystem_protocol as filesystem;
+        let mut body = [0; filesystem::TIME_UPDATE_LEN];
+        filesystem::encode_time_update(posix_service::filesystem_times::translate(times), &mut body)
+            .map_err(|_| -22)?;
+        let payload =
+            Self::credential_payload(effective_uid, effective_gid, supplementary_groups, &body)?;
+        self.empty_call(
+            filesystem::Header {
+                opcode: filesystem::OP_SET_TIMES_HANDLE,
+                request_id: 43,
+                length: payload.len() as u32,
+                ..Default::default()
+            },
+            &payload,
+            controlled_file_handle(file)?,
+        )
+    }
+
     fn fchmod(
         &mut self,
         file: posix_service::AttachedObject<mochi_user_platform::handle::Handle>,
@@ -3099,6 +3125,45 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
                 length: payload.len() as u32,
                 flags,
                 ..filesystem::Header::default()
+            },
+            &payload,
+            Self::path_handles(paths)?,
+        )
+    }
+
+    fn utimens_at(
+        &mut self,
+        request: &posix_service::PreparedFileTimes,
+        paths: posix_service::PathObjects<mochi_user_platform::handle::Handle>,
+    ) -> Result<(), i32> {
+        use mochios_filesystem_protocol as filesystem;
+        let target = &request.target;
+        let mut flags = filesystem::SET_TIMES_AT_ROOT_ATTACHED;
+        if paths.base.is_some() {
+            flags |= filesystem::SET_TIMES_AT_BASE_ATTACHED;
+        }
+        if target.flags & mochios_posix_protocol::STAT_NOFOLLOW != 0 {
+            flags |= filesystem::SET_TIMES_AT_NOFOLLOW;
+        }
+        let mut body = vec![0; filesystem::TIME_UPDATE_LEN];
+        filesystem::encode_time_update(
+            posix_service::filesystem_times::translate(request.times), &mut body,
+        )
+        .map_err(|_| -22)?;
+        body.extend_from_slice(&target.path);
+        let payload = Self::credential_payload(
+            target.effective_uid,
+            target.effective_gid,
+            &target.supplementary_groups,
+            &body,
+        )?;
+        self.empty_call(
+            filesystem::Header {
+                opcode: filesystem::OP_SET_TIMES_AT,
+                request_id: 42,
+                length: payload.len() as u32,
+                flags,
+                ..Default::default()
             },
             &payload,
             Self::path_handles(paths)?,

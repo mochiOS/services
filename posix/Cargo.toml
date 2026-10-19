@@ -71,3 +71,8 @@ harness = false
 name = "native_filesystem_times"
 path = "tests/native_filesystem_times.rs"
 harness = false
+
+[[test]]
+name = "native_posix_times"
+path = "tests/native_posix_times.rs"
+harness = false
