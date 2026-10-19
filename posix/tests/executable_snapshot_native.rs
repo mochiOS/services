@@ -73,7 +73,7 @@ enum KernelObject {VmObject(Memory),Provider(Arc<Provider>),Other}
 thread_local! {static PROVIDER:Arc<Provider>=Arc::new(Provider);}
 fn object_native(raw:u64,rights:HandleRights)->Result<KernelObject,Error> {
     assert_eq!(raw,7);let query=QUERIES.get();QUERIES.set(query+1);
-    assert_eq!(rights,if query==0 {HandleRights::READ}else{HandleRights::READ.union(HandleRights::SEEK)});
+    assert_eq!(rights,HandleRights::READ);
     if let Some(error)=AUTH_ERROR.get(){return Err(error);}
     Ok(match MODE.get(){0|3=>KernelObject::VmObject(Memory),1=>KernelObject::Provider(PROVIDER.with(Arc::clone)),_=>KernelObject::Other})
 }
@@ -83,6 +83,9 @@ mod mem {pub mod vm_object {
     impl Drop for Guard {fn drop(&mut self){crate::UNLOCKS.set(crate::UNLOCKS.get()+1);}}
     pub fn lock_provider_io(_:&crate::Provider,identity:u64)->Result<Guard,crate::Error> {
         assert_eq!(identity,11);crate::LOCKS.set(crate::LOCKS.get()+1);Ok(Guard)
+    }
+    pub fn overlay_provider_range(_:&crate::Provider,identity:u64,_:u64,_:&mut [u8])->Result<(),u64> {
+        assert_eq!(identity,11);assert_eq!(crate::LOCKS.get()-crate::UNLOCKS.get(),1);Ok(())
     }
 }}
 fn provider_cache_identity(_:&Provider)->Result<Option<u64>,u64> {Ok(IDENTITY.get())}
@@ -96,6 +99,14 @@ fn provider_read_chunk<'a>(_:&Provider,identity:Option<u64>,length:usize,storage
     assert_eq!(LOCKS.get()-UNLOCKS.get(),usize::from(identity.is_some()));
     READS.set(READS.get()+1);let count=if SHORT.get(){0}else{length.min(2)};
     storage[..count].fill(b'x');Ok(&storage[..count])
+}
+fn provider_read_at(_: &Provider,offset:u64,bytes:&mut [u8])->Result<usize,u64> {
+    assert_eq!(LOCKS.get()-UNLOCKS.get(),usize::from(IDENTITY.get().is_some()));
+    READS.set(READS.get()+1);
+    if let Some(error)=BACKEND_ERROR.get(){return Err(error);}
+    if SHORT.get(){return Ok(bytes.len()+1);}
+    let count=(LENGTH.get().saturating_sub(offset)as usize).min(bytes.len()).min(2);
+    bytes[..count].fill(b'x');Ok(count)
 }
 "#,
     );
@@ -125,20 +136,20 @@ fn main() {
             reset(mode);AUTH_ERROR.set(Some(denied));error(denied.into_raw());assert_eq!(READS.get(),0);assert_eq!(SEEKS.get(),0);
         }
         for length in [6,u64::MAX] {
-            reset(mode);LENGTH.set(length);error(Error::LimitExceeded.into_raw());assert_eq!(READS.get(),0);
-            assert_eq!(SEEKS.get(),usize::from(mode==1));
+            reset(mode);LENGTH.set(length);error(Error::LimitExceeded.into_raw());
+            assert_eq!(READS.get()==0,mode==0);assert_eq!(SEEKS.get(),0);
         }
         reset(mode);SHORT.set(true);error(Error::BackingFailure.into_raw());
         for downstream in [Error::BackingFailure.into_raw(),Error::ResourceUnavailable.into_raw(),mnu_abi::EACCES,(-42i64) as u64] {
             reset(mode);BACKEND_ERROR.set(Some(downstream));error(downstream);
         }
-        for allocation in 0..if mode==0 {1}else{2} {
+        for allocation in 0..1 {
             reset(mode);FAIL_AFTER.set(Some(allocation));error(Error::ResourceUnavailable.into_raw());
             assert_eq!(FAIL_AFTER.get(),None);assert_eq!(READS.get(),0);
         }
         for identity in [None,Some(11)] {
             reset(mode);IDENTITY.set(identity);assert_eq!(read_all(7,5).unwrap(),b"xxxxx");
-            assert_eq!(QUERIES.get(),if mode==0 {1}else{2});assert_eq!(LOCKS.get(),UNLOCKS.get());
+            assert_eq!(QUERIES.get(),1);assert_eq!(SEEKS.get(),0);assert_eq!(LOCKS.get(),UNLOCKS.get());
         }
         reset(mode);LENGTH.set(0);assert!(read_all(7,0).unwrap().is_empty());assert_eq!(LOCKS.get(),UNLOCKS.get());
     }

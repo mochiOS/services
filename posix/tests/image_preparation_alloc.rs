@@ -329,6 +329,24 @@ fn object_snapshot_does_not_call_backend_after_allocation_failure() {
 }
 
 #[test]
+fn positional_snapshot_growth_failure_stops_before_the_next_provider_read() {
+    COPIES.with(|copies| copies.set(0));
+    FAIL_AFTER.with(|fail| fail.set(Some(1)));
+    let result = snapshot::read_to_end(10, 2, |offset, bytes| {
+        assert_eq!(offset, COPIES.with(Cell::get) as u64 * 2);
+        COPIES.with(|copies| copies.set(copies.get() + 1));
+        bytes.fill(1);
+        Ok(bytes.len())
+    });
+    assert_eq!(FAIL_AFTER.with(|fail| fail.replace(None)), None);
+    assert_eq!(
+        result,
+        Err(mnu_abi::status::Error::ResourceUnavailable.into_raw())
+    );
+    assert_eq!(COPIES.with(Cell::get), 2);
+}
+
+#[test]
 fn native_image_preparation_routes_owned_storage_through_fallible_paths() {
     let exec = include_str!("../../../core/src/syscall/exec.rs");
     let replace = exec
@@ -369,6 +387,9 @@ fn native_image_preparation_routes_owned_storage_through_fallible_paths() {
         .split("\n}")
         .next()
         .unwrap();
-    assert!(read.contains("object_snapshot::zeroed_native(length)"));
+    assert!(read.contains("object_snapshot::read(length, maximum_length"));
+    assert!(read.contains("object_snapshot::read_to_end("));
+    assert!(!read.contains("provider_seek_result("));
+    assert!(!read.contains("HandleRights::SEEK"));
     assert!(!read.contains("vec!["));
 }
