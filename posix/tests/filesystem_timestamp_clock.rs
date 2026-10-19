@@ -2,6 +2,9 @@
 #[path = "support/native_error_probe.rs"]
 mod probe;
 
+#[path = "../../filesystem/src/clock.rs"]
+mod clock;
+
 #[test]
 fn production_clock_adapter_validates_native_results_and_never_uses_errno_as_native_status() {
     let abi = include_str!("../../../core/crates/abi/src/lib.rs");
@@ -41,9 +44,9 @@ use mnu_abi::ClockInstant;
 static STATE:std::sync::Mutex<(ClockInstant,Option<u64>,usize)>=std::sync::Mutex::new((ClockInstant{seconds:0,nanoseconds:0,reserved:0},None,0));
 "#);
     program.push_str(probe::between(
-        include_str!("../../filesystem/src/main.rs"),
-        "fn realtime_timestamp()",
-        "#[cfg(target_os = \"mochios\")]\nfn decode_single_open",
+        include_str!("../../filesystem/src/clock.rs"),
+        "pub fn realtime_timestamp()",
+        "#[cfg(not(target_os = \"mochios\"))]",
     ));
     program.push_str(r#"
 fn call(instant:ClockInstant,error:Option<u64>)->Result<ext4plus::inode::InodeTimestamp,i32>{
@@ -65,7 +68,36 @@ assert_eq!(call(ClockInstant{nanoseconds:1000000000,..valid},None),Err(5));
 assert_eq!(call(ClockInstant{seconds:u64::MAX,..valid},None),Err(75));
 }
 "#);
+    // The production adapter imports only this type, not the whole ext4 API.
+    program = program.replacen(
+        "pub fn realtime_timestamp()",
+        "use ext4plus::inode::InodeTimestamp;\npub fn realtime_timestamp()",
+        1,
+    );
     probe::run(&program);
     let manifest = include_str!("../../filesystem/manifest.toml");
     assert!(manifest.contains("\"system.time.read\""));
+}
+
+#[test]
+fn host_wall_clock_conversion_normalizes_pre_epoch_fractional_seconds() {
+    use std::time::{Duration, UNIX_EPOCH};
+    for (time, expected) in [
+        (UNIX_EPOCH, (0, 0)),
+        (
+            UNIX_EPOCH + Duration::new(2_147_483_648, 999_999_999),
+            (2_147_483_648, 999_999_999),
+        ),
+        (UNIX_EPOCH - Duration::new(0, 1), (-1, 999_999_999)),
+        (UNIX_EPOCH - Duration::new(1, 0), (-1, 0)),
+        (
+            UNIX_EPOCH - Duration::new(2_147_483_647, 999_999_999),
+            (-2_147_483_648, 1),
+        ),
+    ] {
+        let result = clock::from_system_time(time).unwrap();
+        assert_eq!((result.seconds, result.nanoseconds), expected);
+    }
+    let result = clock::realtime_timestamp().unwrap();
+    assert!(result.nanoseconds < 1_000_000_000);
 }

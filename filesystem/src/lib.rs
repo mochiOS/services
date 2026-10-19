@@ -1,3 +1,4 @@
+pub mod clock;
 pub mod ext4;
 pub mod devfs;
 pub mod namespace;

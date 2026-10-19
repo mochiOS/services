@@ -28,6 +28,10 @@ static int same_times(const struct stat *a, const struct stat *b) {
            a->st_mtim.tv_sec == b->st_mtim.tv_sec && a->st_mtim.tv_nsec == b->st_mtim.tv_nsec &&
            a->st_ctim.tv_sec == b->st_ctim.tv_sec && a->st_ctim.tv_nsec == b->st_ctim.tv_nsec;
 }
+static int same_data_times(const struct stat *a, const struct stat *b) {
+    return a->st_atim.tv_sec == b->st_atim.tv_sec && a->st_atim.tv_nsec == b->st_atim.tv_nsec &&
+           a->st_mtim.tv_sec == b->st_mtim.tv_sec && a->st_mtim.tv_nsec == b->st_mtim.tv_nsec;
+}
 int main(void) {
     puts("c-file-times: starting real C ABI checks");
     const char *path = "/tmp/native-c-file-times";
@@ -44,6 +48,13 @@ int main(void) {
     CHECK(before.st_mtim.tv_sec == INT64_C(2147483648) && before.st_mtim.tv_nsec == 987654321);
     CHECK(futimens(file, omit) == 0 && fstat(file, &after) == 0 && same_times(&before, &after));
     CHECK(utimensat(-777, path, explicit, 0) == 0); /* absolute path ignores dirfd */
+    const struct timespec pause = {0, 20000000};
+    CHECK(fstat(file, &before) == 0 && nanosleep(&pause, NULL) == 0);
+    CHECK(fchmod(file, 0640) == 0 && fstat(file, &after) == 0);
+    CHECK(same_data_times(&before, &after) && !same_times(&before, &after));
+    before = after;
+    CHECK(nanosleep(&pause, NULL) == 0 && fchown(file, 0, 0) == 0 && fstat(file, &after) == 0);
+    CHECK(same_data_times(&before, &after) && !same_times(&before, &after));
     CHECK(utimensat(directory, "native-c-file-times", current, 0) == 0);
     CHECK(fstat(file, &after) == 0);
     CHECK(after.st_atim.tv_sec == after.st_mtim.tv_sec && after.st_atim.tv_nsec == after.st_mtim.tv_nsec);
@@ -103,6 +114,6 @@ int main(void) {
     CHECK(pipe(streams) == 0);
     FAILS(futimens(streams[0], NULL), ENOTSUP); /* metadata provider still needed */
     CHECK(close(streams[0]) == 0 && close(streams[1]) == 0);
-    puts("c-file-times: PASS C ABI, sentinels, signed dates, pointer faults, errno, path anchors, permissions, nofollow and unlinked FD");
+    puts("c-file-times: PASS C ABI, sentinels, signed dates, pointer faults, errno, path anchors, permissions, nofollow, unlinked FD and chmod/chown ctime");
     return 0;
 }

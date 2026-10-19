@@ -65,6 +65,7 @@ pub struct RenameAnchors {
 
 pub struct FilesystemService {
     fs: Ext4,
+    clock: crate::clock::Clock,
     namespace: Option<Namespace>,
     nodes: HashMap<u64, String>,
     node_ids: HashMap<String, u64>,
@@ -102,6 +103,12 @@ struct Orphan {
 
 impl FilesystemService {
     pub fn new(fs: Ext4) -> Self {
+        Self::new_with_clock(fs, crate::clock::realtime_timestamp)
+    }
+
+    /// The embedding owner selects the trusted clock before serving requests.
+    /// No IPC field can replace it or confer clock-read authority.
+    pub fn new_with_clock(fs: Ext4, clock: crate::clock::Clock) -> Self {
         let mut nodes = HashMap::new();
         let mut node_ids = HashMap::new();
         // ext4 reserves inode 2 for the filesystem root.
@@ -109,6 +116,7 @@ impl FilesystemService {
         node_ids.insert("/".to_owned(), 2);
         Self {
             fs,
+            clock,
             namespace: None,
             nodes,
             node_ids,
@@ -3281,9 +3289,13 @@ impl FilesystemService {
     ) -> Result<(), i32> {
         let mut inode = Inode::read(&filesystem, inode.index).map_err(errno)?;
         let file_type = inode.mode().bits() & 0xf000;
+        let current = self.metadata_change_time(&inode, &filesystem)?;
         inode
             .set_mode(InodeMode::from_bits_retain(file_type | permissions))
             .map_err(errno)?;
+        inode
+            .set_signed_timestamps(None, None, Some(current))
+            .map_err(timestamp_operations::timestamp_error)?;
         inode.write(&filesystem).map_err(errno)?;
         for open in self.opens.values_mut() {
             if open.node_id == node_id {
@@ -3311,6 +3323,7 @@ impl FilesystemService {
             uid: Option<u32>,
             gid: Option<u32>,
             clear_set_id: bool,
+            current: ext4plus::inode::InodeTimestamp,
         ) -> Result<(), i32> {
             if let Some(uid) = uid {
                 inode.set_uid(uid);
@@ -3324,11 +3337,15 @@ impl FilesystemService {
                     .set_mode(InodeMode::from_bits_retain(mode))
                     .map_err(errno)?;
             }
+            inode
+                .set_signed_timestamps(None, None, Some(current))
+                .map_err(timestamp_operations::timestamp_error)?;
             inode.write(filesystem).map_err(errno)
         }
 
         let mut inode = Inode::read(&filesystem, inode.index).map_err(errno)?;
-        update(&filesystem, &mut inode, uid, gid, clear_set_id)?;
+        let current = self.metadata_change_time(&inode, &filesystem)?;
+        update(&filesystem, &mut inode, uid, gid, clear_set_id, current)?;
         for open in self.opens.values_mut() {
             if open.node_id == node_id {
                 open.inode = inode.clone();

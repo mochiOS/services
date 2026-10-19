@@ -403,6 +403,7 @@ version = "0.1.0"
 dependencies = [
  "mochi-user-platform",
  "mochi-user-syscall",
+ "mochios-omochi",
  "mochios-viewkit-gpu-protocol",
 ]
 
@@ -1678,6 +1679,10 @@ version = "0.1.0"
 name = "mochios-network-stack"
 version = "0.1.0"
 source = "git+https://github.com/mochiOS/syscalls#38b10ca1d8b95d8ad638e24a2f83adae6aa17034"
+
+[[package]]
+name = "mochios-omochi"
+version = "0.1.0"
 
 [[package]]
 name = "mochios-package-protocol"
@@ -3630,6 +3635,7 @@ dependencies = [
  "image",
  "mochi-user-platform",
  "mochi-user-syscall",
+ "mochios-omochi",
  "mochios-viewkit-gpu-protocol",
  "pollster",
  "postcard",

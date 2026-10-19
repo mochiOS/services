@@ -9,6 +9,9 @@ use mochios_filesystem_protocol::{
 #[path = "unmapped_updates.rs"]
 mod unmapped_updates;
 
+#[path = "metadata_timestamps.rs"]
+mod metadata;
+
 fn credentials(uid: u32, gid: u32, groups: &[u32]) -> wire::Credentials {
     let mut bytes = [0; wire::CREDENTIALS_MAX_LEN];
     let length = wire::encode_credentials_payload(uid, gid, groups, &[], &mut bytes).unwrap();

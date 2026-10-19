@@ -4,7 +4,29 @@ use super::*;
 use ext4plus::inode::{InodeTimestamp, TimestampError};
 use protocol::{FileTimeUpdate, TimestampUpdate};
 
+pub(super) fn timestamp_error(error: TimestampError) -> i32 {
+    match error {
+        TimestampError::InvalidNanoseconds => EINVAL,
+        TimestampError::OutOfRange => 75, // filesystem wire EOVERFLOW, not a native status
+        TimestampError::InvalidInodeLayout => EIO,
+    }
+}
+
 impl FilesystemService {
+    pub(super) fn metadata_change_time(
+        &self,
+        inode: &Inode,
+        filesystem: &Ext4,
+    ) -> Result<InodeTimestamp, i32> {
+        if filesystem.is_read_only() {
+            return Err(EROFS);
+        }
+        if inode.flags().contains(InodeFlags::IMMUTABLE) {
+            return Err(EPERM);
+        }
+        (self.clock)()
+    }
+
     pub fn set_times_at(
         &mut self,
         request: protocol::Header,
@@ -157,11 +179,7 @@ impl FilesystemService {
                 resolve(times.modification),
                 Some(current),
             )
-            .map_err(|error| match error {
-                TimestampError::InvalidNanoseconds => EINVAL,
-                TimestampError::OutOfRange => 75, // filesystem protocol EOVERFLOW, not a native error
-                TimestampError::InvalidInodeLayout => EIO,
-            })?;
+            .map_err(timestamp_error)?;
         inode.write(&filesystem).map_err(errno)?;
         for open in self.opens.values_mut() {
             if open.node_id == node_id {

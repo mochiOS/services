@@ -3,6 +3,7 @@ fn main() {
     use std::sync::Arc;
 
     use ext4plus::Ext4;
+    use filesystem_service::clock::realtime_timestamp;
     use filesystem_service::ext4::{Ext4Storage, ImmutableExt4Storage};
     use filesystem_service::platform_storage::{
         MochiDisk, find_data_partition, find_system_partition,
@@ -948,29 +949,6 @@ fn decode_open_pair(
             platform::handle::identify_provider_object(object.handle).map_err(|_| 9)?;
     }
     Ok((open_ids[0], open_ids[1]))
-}
-
-#[cfg(target_os = "mochios")]
-fn realtime_timestamp() -> Result<ext4plus::inode::InodeTimestamp, i32> {
-    use mochi_user_platform::syscall;
-    let mut instant = mnu_abi::ClockInstant::default();
-    syscall::call2(
-        syscall::SyscallNumber::ClockRead,
-        mnu_abi::ClockId::Realtime as u64,
-        (&mut instant as *mut mnu_abi::ClockInstant) as u64,
-    )
-    .map_err(|error| match error.native_error() {
-        Some(syscall::NativeError::AccessDenied) => 13,
-        Some(syscall::NativeError::NotReady) => 11,
-        _ => 5,
-    })?;
-    if instant.reserved != 0 || instant.nanoseconds >= 1_000_000_000 {
-        return Err(5);
-    }
-    Ok(ext4plus::inode::InodeTimestamp {
-        seconds: i64::try_from(instant.seconds).map_err(|_| 75)?,
-        nanoseconds: instant.nanoseconds,
-    })
 }
 
 #[cfg(target_os = "mochios")]
