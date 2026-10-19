@@ -3216,7 +3216,7 @@ impl FilesystemService {
         // OpenFile.inode may predate writes through another description. Read
         // the authoritative size under this service's mutation serialization,
         // not in a separate stat RPC or from the cached open-time metadata.
-        let current = Inode::read(&filesystem, inode.index).map_err(errno)?;
+        let mut current = Inode::read(&filesystem, inode.index).map_err(errno)?;
         // These are known non-mutating failures. Reject them before marking
         // native aliases in flight; immutable System reads must stay usable.
         if filesystem.is_read_only() {
@@ -3231,6 +3231,13 @@ impl FilesystemService {
             }
         }
         let old_length = current.metadata().len();
+        // Validate and stage both times before BEGIN or any backing write.
+        // The truncate backend commits this inode with the new size; do not
+        // add a second, fallible metadata write after changing file contents.
+        let now = (self.clock)()?;
+        current
+            .set_signed_timestamps(None, Some(now), Some(now))
+            .map_err(timestamp_operations::timestamp_error)?;
         let identity = self
             .opens
             .values()
@@ -3267,6 +3274,11 @@ impl FilesystemService {
         // A backend error may follow partial writes. Never interpret it as
         // "unchanged": dropping an in-flight owner quarantines all aliases.
         file.truncate(length).map_err(errno)?;
+        if length == old_length {
+            // The extent and block-map backends deliberately skip their inode
+            // write for a size no-op. POSIX ftruncate still marks both times.
+            file.inode_mut().write(&filesystem).map_err(errno)?;
+        }
         let updated = file.into_inode();
         for open in self.opens.values_mut() {
             if open.node_id == node_id {

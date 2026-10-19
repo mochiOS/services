@@ -52,6 +52,24 @@ int main(void) {
     CHECK(fstat(file, &before) == 0 && nanosleep(&pause, NULL) == 0);
     CHECK(fchmod(file, 0640) == 0 && fstat(file, &after) == 0);
     CHECK(same_data_times(&before, &after) && !same_times(&before, &after));
+    const off_t lengths[] = {0, 2, 8192, 8192, 0};
+    for (unsigned i = 0; i < sizeof(lengths) / sizeof(lengths[0]); ++i) {
+        before = after;
+        CHECK(nanosleep(&pause, NULL) == 0 && ftruncate(file, lengths[i]) == 0);
+        CHECK(fstat(file, &after) == 0 && after.st_size == lengths[i]);
+        CHECK(before.st_atim.tv_sec == after.st_atim.tv_sec && before.st_atim.tv_nsec == after.st_atim.tv_nsec);
+        CHECK(after.st_mtim.tv_sec == after.st_ctim.tv_sec && after.st_mtim.tv_nsec == after.st_ctim.tv_nsec);
+        CHECK(!same_data_times(&before, &after));
+    }
+    CHECK(utimensat(AT_FDCWD, path, explicit, 0) == 0 && truncate(path, 4) == 0);
+    CHECK(fstat(file, &after) == 0 && after.st_size == 4 && after.st_mtim.tv_sec == after.st_ctim.tv_sec);
+    CHECK(after.st_mtim.tv_sec != explicit[1].tv_sec && after.st_atim.tv_sec == explicit[0].tv_sec);
+    CHECK(utimensat(AT_FDCWD, path, explicit, 0) == 0);
+    int truncated = open(path, O_WRONLY | O_TRUNC);
+    CHECK(truncated >= 0 && fstat(file, &after) == 0 && after.st_size == 0);
+    CHECK(after.st_mtim.tv_sec == after.st_ctim.tv_sec && after.st_mtim.tv_nsec == after.st_ctim.tv_nsec);
+    CHECK(after.st_mtim.tv_sec != explicit[1].tv_sec && after.st_atim.tv_sec == explicit[0].tv_sec);
+    CHECK(close(truncated) == 0);
     before = after;
     CHECK(nanosleep(&pause, NULL) == 0 && fchown(file, 0, 0) == 0 && fstat(file, &after) == 0);
     CHECK(same_data_times(&before, &after) && !same_times(&before, &after));
@@ -114,6 +132,6 @@ int main(void) {
     CHECK(pipe(streams) == 0);
     FAILS(futimens(streams[0], NULL), ENOTSUP); /* metadata provider still needed */
     CHECK(close(streams[0]) == 0 && close(streams[1]) == 0);
-    puts("c-file-times: PASS C ABI, sentinels, signed dates, pointer faults, errno, path anchors, permissions, nofollow, unlinked FD and chmod/chown ctime");
+    puts("c-file-times: PASS C ABI, sentinels, signed dates, pointer faults, errno, path anchors, permissions, nofollow, unlinked FD, chmod/chown ctime and truncate times");
     return 0;
 }

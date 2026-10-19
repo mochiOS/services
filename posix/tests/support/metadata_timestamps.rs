@@ -1,6 +1,9 @@
 use super::*;
 use std::cell::RefCell;
 
+#[path = "truncate_timestamps.rs"]
+mod truncate;
+
 thread_local! {
     static CLOCK: RefCell<(Result<Time, i32>, usize)> = const {
         RefCell::new((Ok(Time { seconds: 10, nanoseconds: 20 }), 0))
