@@ -13,6 +13,30 @@ pub(super) fn timestamp_error(error: TimestampError) -> i32 {
 }
 
 impl FilesystemService {
+    pub(super) fn prepare_link_times(
+        &self,
+        filesystem: &Ext4,
+        parent: &mut Dir,
+        target: &mut Inode,
+    ) -> Result<(), i32> {
+        // Known failures precede clock access and every inode/directory write.
+        if target.flags().contains(InodeFlags::IMMUTABLE) {
+            return Err(EPERM);
+        }
+        if target.links_count() == u16::MAX {
+            return Err(EMLINK);
+        }
+        let now = self.metadata_change_time(parent.inode(), filesystem)?;
+        parent
+            .inode_mut()
+            .set_signed_timestamps(None, Some(now), Some(now))
+            .map_err(timestamp_error)?;
+        target
+            .set_signed_timestamps(None, None, Some(now))
+            .map_err(timestamp_error)?;
+        Ok(())
+    }
+
     pub(super) fn prepare_creation_parent(
         &self,
         filesystem: &Ext4,

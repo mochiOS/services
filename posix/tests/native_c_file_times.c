@@ -42,6 +42,29 @@ static int only_access_changed(const struct stat *a, const struct stat *b) {
            a->st_mtim.tv_sec == b->st_mtim.tv_sec && a->st_mtim.tv_nsec == b->st_mtim.tv_nsec &&
            a->st_ctim.tv_sec == b->st_ctim.tv_sec && a->st_ctim.tv_nsec == b->st_ctim.tv_nsec;
 }
+static int link_checks(int file, int directory) {
+    const struct timespec old[2] = {{-1, 123456789}, {INT64_C(2147483648), 987654321}};
+    const struct timespec pause = {0, 20000000};
+    struct stat before, after, parent, alias;
+    const char *names[] = {"/tmp/native-c-linked", "/tmp/native-c-linked-at"};
+    for (unsigned kind = 0; kind < 2; ++kind) {
+        CHECK(futimens(file, old) == 0 && futimens(directory, old) == 0 && fstat(file, &before) == 0);
+        CHECK(nanosleep(&pause, NULL) == 0);
+        if (kind == 0) {
+            CHECK(link("/tmp/native-c-file-times", names[kind]) == 0);
+        } else {
+            CHECK(linkat(directory, "native-c-file-times", directory, "native-c-linked-at", 0) == 0);
+        }
+        CHECK(fstat(file, &after) == 0 && fstat(directory, &parent) == 0 && stat(names[kind], &alias) == 0);
+        CHECK(same_data_times(&before, &after) && !same_times(&before, &after));
+        CHECK(after.st_nlink == before.st_nlink + 1 && alias.st_ino == after.st_ino);
+        CHECK(parent.st_atim.tv_sec == old[0].tv_sec && parent.st_atim.tv_nsec == old[0].tv_nsec);
+        CHECK(parent.st_mtim.tv_sec == after.st_ctim.tv_sec && parent.st_mtim.tv_nsec == after.st_ctim.tv_nsec);
+        CHECK(parent.st_ctim.tv_sec == after.st_ctim.tv_sec && parent.st_ctim.tv_nsec == after.st_ctim.tv_nsec);
+        CHECK(unlink(names[kind]) == 0);
+    }
+    return 0;
+}
 static int read_checks(int file, int directory) {
     const struct timespec old[2] = {{-1, 123456789}, {INT64_C(2147483648), 987654321}};
     struct stat before, after;
@@ -154,6 +177,7 @@ int main(void) {
     CHECK(after.st_mtim.tv_sec != explicit[1].tv_sec && after.st_mtim.tv_sec == after.st_ctim.tv_sec);
     CHECK(close(append) == 0);
     CHECK(read_checks(file, directory) == 0 && fstat(file, &after) == 0);
+    CHECK(link_checks(file, directory) == 0 && fstat(file, &after) == 0);
     const off_t lengths[] = {0, 2, 8192, 8192, 0};
     for (unsigned i = 0; i < sizeof(lengths) / sizeof(lengths[0]); ++i) {
         before = after;
@@ -234,6 +258,6 @@ int main(void) {
     CHECK(pipe(streams) == 0);
     FAILS(futimens(streams[0], NULL), ENOTSUP); /* metadata provider still needed */
     CHECK(close(streams[0]) == 0 && close(streams[1]) == 0);
-    puts("c-file-times: PASS C ABI, sentinels, signed dates, pointer faults, errno, path anchors, permissions, nofollow, unlinked FD, chmod/chown, truncate, write/pwrite/append, msync, creation and access times");
+    puts("c-file-times: PASS C ABI, sentinels, signed dates, pointer faults, errno, path anchors, permissions, nofollow, unlinked FD, chmod/chown, truncate, write/pwrite/append, msync, creation, access and link times");
     return 0;
 }

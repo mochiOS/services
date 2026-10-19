@@ -40,6 +40,7 @@ const EEXIST: i32 = 17;
 const EINVAL: i32 = 22;
 const ENOSPC: i32 = 28;
 const EROFS: i32 = 30;
+const EMLINK: i32 = 31;
 const ENAMETOOLONG: i32 = 36;
 const EISDIR: i32 = 21;
 const ENOTDIR: i32 = 20;
@@ -2890,6 +2891,7 @@ impl FilesystemService {
             return Err(EACCES);
         }
         let mut new_parent = Dir::open_inode(&filesystem, new_parent_inode).map_err(errno)?;
+        self.prepare_link_times(&filesystem, &mut new_parent, &mut source_inode)?;
         new_parent
             .link(
                 DirEntryName::try_from(new_name.as_slice()).map_err(|_| EINVAL)?,
