@@ -31,7 +31,9 @@ fn collect_manifest_paths(
         read_directory: &mut impl FnMut(&str) -> Result<Vec<String>, SysError>,
     ) -> Result<(), SysError> {
         if depth > 64 {
-            return Err(SysError::from_raw(syscall::EOVERFLOW as i64));
+            return Err(SysError::from_raw(
+                syscall::NativeError::LimitExceeded.into_raw() as i64,
+            ));
         }
         let entries = match read_directory(path) {
             Ok(entries) => entries,

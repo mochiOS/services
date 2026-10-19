@@ -22,7 +22,9 @@ pub(crate) fn posix_errno(error: ClientError<syscall::SysError>) -> u64 {
     match error {
         ClientError::Transport(error) => status_errno(error.raw()),
         ClientError::Remote(status) => status_errno(i64::from(status)),
-        ClientError::RequestTooLarge => status_errno(syscall::EOVERFLOW as i64),
+        ClientError::RequestTooLarge => {
+            status_errno(i64::from(mochios_posix_protocol::STATUS_EOVERFLOW))
+        }
         ClientError::Protocol(_)
         | ClientError::ResponseTooLarge
         | ClientError::MismatchedResponse => status_errno(syscall::EIO as i64),

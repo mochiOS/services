@@ -112,7 +112,9 @@ impl<F: FnMut(u32, &[u8], &mut [u8]) -> SysResult<usize>> Client<F> {
             return Err(error(syscall::EINVAL));
         }
         let id = self.next_request;
-        self.next_request = id.checked_add(1).ok_or_else(|| error(syscall::EOVERFLOW))?;
+        self.next_request = id
+            .checked_add(1)
+            .ok_or_else(|| error(syscall::NativeError::LimitExceeded.into_raw()))?;
         let mut request = buffer(wire::HEADER_LEN + path.len())?;
         wire::encode(
             wire::Header {
@@ -198,7 +200,7 @@ impl<F: FnMut(u32, &[u8], &mut [u8]) -> SysResult<usize>> Client<F> {
             total = total
                 .checked_add(bytes.len())
                 .filter(|total| *total <= maximum)
-                .ok_or_else(|| error(syscall::EOVERFLOW))?;
+                .ok_or_else(|| error(syscall::NativeError::LimitExceeded.into_raw()))?;
             let mut payload = bytes.as_slice();
             while !payload.is_empty() {
                 let (entry, name, consumed) =

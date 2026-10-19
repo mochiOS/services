@@ -2251,8 +2251,9 @@ fn launch_executable(executable: &str, arguments: &[String]) -> Result<u64, u64>
     handles.count = 1;
     handles.handles[0].handle = posix_endpoint;
     handles.handles[0].rights = posix_rights;
-    let destination = u32::try_from(service)
-        .map_err(|_| error::status_errno(mochi_user_syscall::EOVERFLOW as i64))?;
+    let destination = u32::try_from(service).map_err(|_| {
+        error::status_errno(mochi_user_syscall::NativeError::LimitExceeded.into_raw() as i64)
+    })?;
     let message = platform::ipc::call_object_handles(destination, &request, &mut reply, &mut handles)
         .map_err(error::native_errno)?;
     if handles.count != 0 || (message & 0xffff_ffff) as usize != reply.len() {

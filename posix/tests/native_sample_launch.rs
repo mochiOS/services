@@ -2,7 +2,8 @@ extern crate self as mochi_user_platform;
 use std::cell::RefCell;
 
 pub mod syscall {
-    pub use mnu_abi::{EINVAL, EIO, ENOENT, EOVERFLOW};
+    pub use mnu_abi::status::Error as NativeError;
+    pub use mnu_abi::{EINVAL, EIO, ENOENT};
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct SysError(pub i64);
     impl SysError {
@@ -13,6 +14,7 @@ pub mod syscall {
 }
 #[derive(Default)]
 struct State {
+    endpoint: Option<u64>,
     fail: Option<&'static str>,
     events: Vec<&'static str>,
     exited: bool,
@@ -69,7 +71,7 @@ pub mod process {
     pub fn find_by_name(name: &str) -> Result<u64, SysError> {
         assert_eq!(name, "capability.service");
         step("discover")?;
-        Ok(9)
+        Ok(STATE.with_borrow(|state| state.endpoint.unwrap_or(9)))
     }
     pub fn create_stopped(image: u32, metadata: &[u8]) -> Result<u32, SysError> {
         assert_eq!(image, 32);
@@ -129,6 +131,21 @@ pub mod handle {
 }
 #[path = "../../../core/examples/user/src/native_launch.rs"]
 mod production;
+
+#[test]
+fn oversized_endpoint_fails_before_preparing_or_creating_a_child() {
+    STATE.set(State {
+        endpoint: Some(u64::from(u32::MAX) + 1),
+        ..Default::default()
+    });
+    assert_eq!(
+        production::spawn("/image").err(),
+        Some(syscall::SysError(
+            syscall::NativeError::LimitExceeded.into_raw() as i64
+        ))
+    );
+    STATE.with_borrow(|state| assert_eq!(state.events, ["discover"]));
+}
 
 #[test]
 fn authorized_image_precedes_creation_and_wait_keeps_the_exact_child_reference() {

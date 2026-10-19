@@ -15,7 +15,11 @@ pub(crate) fn prepare_execution_image(
     if endpoint == 0 {
         return Err(sys_error(mochi_user_syscall::ENOENT));
     }
-    let endpoint = u32::try_from(endpoint).map_err(|_| sys_error(mochi_user_syscall::EOVERFLOW))?;
+    let endpoint = u32::try_from(endpoint).map_err(|_| {
+        mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::NativeError::LimitExceeded.into_raw() as i64,
+        )
+    })?;
     platform::capability::prepare_execution_image(endpoint, path, class)
 }
 
@@ -84,8 +88,11 @@ fn install_posix_endpoint_at(
         mochios_posix_client::ClientError::Remote(errno) => sys_error(errno.unsigned_abs() as u64),
         _ => sys_error(mochi_user_syscall::EIO),
     })?;
-    let destination =
-        u32::try_from(destination).map_err(|_| sys_error(mochi_user_syscall::EOVERFLOW))?;
+    let destination = u32::try_from(destination).map_err(|_| {
+        mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::NativeError::LimitExceeded.into_raw() as i64,
+        )
+    })?;
     let request = opcode.to_le_bytes();
     let mut reply = [0u8; core::mem::size_of::<u64>()];
     let mut handles = platform::ipc::IpcObjectHandles::default();

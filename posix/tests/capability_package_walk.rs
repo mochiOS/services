@@ -102,7 +102,7 @@ fn bounds_recursion_and_rejects_non_component_directory_names() {
             calls += 1;
             Ok(vec!["loop".into()])
         }),
-        Err(error(syscall::EOVERFLOW))
+        Err(error(syscall::NativeError::LimitExceeded.into_raw()))
     );
     assert_eq!(calls, 65);
     for name in ["", ".", "..", "../escape", "a/b", "a\0b"] {

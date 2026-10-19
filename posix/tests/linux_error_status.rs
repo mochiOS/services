@@ -54,7 +54,7 @@ fn io_failure_normalization_never_reports_zero_positive_or_overflow() {
 fn wire_policy_failures_keep_their_sign_without_native_permission_errno() {
     assert_eq!(mochios_posix_protocol::STATUS_EPERM, -1);
     assert_eq!(mochios_linux_gui_protocol::STATUS_INSTANCE_LIMIT, -28);
-    assert_eq!(syscall::EOVERFLOW as i64, -75);
+    assert_eq!(mochios_posix_protocol::STATUS_EOVERFLOW, -75);
     for source in [
         include_str!("../../linux/src/runtime.rs"),
         include_str!("../../linux/src/portal.rs"),

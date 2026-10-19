@@ -11,6 +11,7 @@ fn bootstrap_reads_preserve_native_transport_failures_without_retry_or_translati
         NativeError::AccessDenied,
         NativeError::NotReady,
         NativeError::ResourceUnavailable,
+        NativeError::LimitExceeded,
     ] {
         for directory in [false, true] {
             let mut calls = 0;
@@ -31,4 +32,28 @@ fn bootstrap_reads_preserve_native_transport_failures_without_retry_or_translati
             assert_eq!(calls, 1);
         }
     }
+}
+
+#[test]
+fn directory_budget_exhaustion_is_a_native_limit_not_a_posix_errno() {
+    use mochios_filesystem_protocol as wire;
+    let mut client = bootstrap_file::Client::new(7, |_, request: &[u8], reply: &mut [u8]| {
+        let (request, _) = wire::decode(request).unwrap();
+        wire::encode(
+            wire::Header {
+                opcode: wire::OP_STATUS,
+                request_id: request.request_id,
+                offset: 1,
+                flags: wire::BOOTSTRAP_EOF,
+                length: 1,
+                ..Default::default()
+            },
+            &[0],
+            reply,
+        )
+        .map_err(|_| SysError::from_raw(-5))
+    });
+    let error = client.read_dir_names("/directory", 0).unwrap_err();
+    assert_eq!(error.native_error(), Some(NativeError::LimitExceeded));
+    assert_ne!(error.raw(), -75);
 }
