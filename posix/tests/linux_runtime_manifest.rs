@@ -1,3 +1,5 @@
+#[path = "../../linux/src/error.rs"]
+mod error;
 #[path = "../../linux/src/manifest_io.rs"]
 mod manifest_io;
 
@@ -5,7 +7,7 @@ use mochi_user_platform::syscall;
 
 #[test]
 fn runtime_manifest_preserves_native_posix_io_status_and_does_not_retry() {
-    for errno in [2, 5, 13, 11, -13] {
+    for errno in [2, 5, 13, 11] {
         let mut calls = 0;
         let error = manifest_io::read_manifest("/var/lib/packages/test/manifest.toml", |path| {
             calls += 1;
@@ -22,7 +24,7 @@ fn runtime_manifest_preserves_native_posix_io_status_and_does_not_retry() {
             .err()
             .unwrap();
     assert_eq!(error, syscall::EIO as i32);
-    for errno in [0, i32::MIN] {
+    for errno in [0, -13, i32::MIN] {
         let error =
             manifest_io::read_manifest("/test", |_| Err(std::io::Error::from_raw_os_error(errno)))
                 .err()

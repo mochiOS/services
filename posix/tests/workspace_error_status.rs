@@ -70,11 +70,7 @@ fn server_normalizes_native_remote_and_io_errors_before_reply_negation() {
         assert_eq!(server_error::status_errno(status), 5);
     }
     for status in [13, -13, 0, i32::MIN] {
-        let expected = if status == 0 || status == i32::MIN {
-            5
-        } else {
-            13
-        };
+        let expected = if status <= 0 { 5 } else { 13 };
         assert_eq!(
             server_error::io_errno(std::io::Error::from_raw_os_error(status)),
             expected

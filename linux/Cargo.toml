@@ -12,6 +12,7 @@ mochios-linux-gui-protocol = { git = "https://github.com/mochiOS/syscalls", rev 
 mochios-linux-portal-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-linux-portal-protocol" }
 
 [target.'cfg(target_os = "mochios")'.dependencies]
+mochios-posix-client = { path = "../../user/crates/posix-client", default-features = false }
 mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }
 mochi-user-syscall = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-syscall" }
 mochios-posix-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-posix-protocol" }

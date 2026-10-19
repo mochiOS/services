@@ -12,10 +12,18 @@ pub(crate) fn native_errno(error: syscall::SysError) -> u64 {
 }
 
 pub(crate) fn io_errno(error: std::io::Error) -> u64 {
-    error.raw_os_error().map_or_else(
-        || status_errno(syscall::EIO as i64),
-        |status| status_errno(i64::from(status)),
-    )
+    let Some(errno) = error.raw_os_error().filter(|errno| *errno > 0) else {
+        return status_errno(i64::from(mochios_posix_protocol::STATUS_EIO));
+    };
+    #[cfg(target_os = "mochios")]
+    {
+        // The workspace wire format uses positive POSIX magnitudes, not C errno.
+        u64::from(mochios_posix_client::newlib_errno::to_status(errno).unsigned_abs())
+    }
+    #[cfg(not(target_os = "mochios"))]
+    {
+        status_errno(i64::from(errno))
+    }
 }
 
 pub(crate) fn posix_errno(error: ClientError<syscall::SysError>) -> u64 {

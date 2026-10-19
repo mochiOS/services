@@ -38,13 +38,13 @@ fn portal_failures_keep_their_existing_errno_policy_with_the_correct_sign() {
 
 #[test]
 fn io_failure_normalization_never_reports_zero_positive_or_overflow() {
-    for errno in [1, 2, 5, 11, 13, 22, -13] {
+    for errno in [1, 2, 5, 11, 13, 22] {
         assert_eq!(
             io_status(std::io::Error::from_raw_os_error(errno)),
             -errno.abs()
         );
     }
-    for errno in [0, i32::MIN] {
+    for errno in [0, -13, i32::MIN] {
         assert_eq!(io_status(std::io::Error::from_raw_os_error(errno)), -5);
     }
     assert_eq!(io_status(std::io::Error::other("transport failure")), -5);

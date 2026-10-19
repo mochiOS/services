@@ -29,9 +29,16 @@ pub(crate) fn portal_status(error: HostError) -> i32 {
 }
 
 pub(crate) fn io_status(error: std::io::Error) -> i32 {
-    error
-        .raw_os_error()
-        .and_then(i32::checked_abs)
-        .filter(|errno| *errno != 0)
-        .map_or(syscall::EIO as i32, |errno| -errno)
+    let Some(errno) = error.raw_os_error().filter(|errno| *errno > 0) else {
+        return mochios_posix_protocol::STATUS_EIO;
+    };
+    // std::io carries the target libc's errno, not native or wire statuses.
+    #[cfg(target_os = "mochios")]
+    {
+        mochios_posix_client::newlib_errno::to_status(errno)
+    }
+    #[cfg(not(target_os = "mochios"))]
+    {
+        mochios_posix_protocol::status::normalize_failure(i64::from(errno))
+    }
 }
