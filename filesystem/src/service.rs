@@ -939,6 +939,7 @@ impl FilesystemService {
         ) {
             return Err(EACCES);
         }
+        check_sticky_removal(&parent, &inode, uid)?;
         self.unlink_entry(
             &filesystem,
             volume,
@@ -2685,6 +2686,10 @@ impl FilesystemService {
         {
             return Ok(self.success(request));
         }
+        check_sticky_removal(old_parent.inode(), &source_inode, uid)?;
+        if let Some(inode) = destination_inode.as_ref() {
+            check_sticky_removal(new_parent.inode(), inode, uid)?;
+        }
         let mut destination = match destination_inode {
             Some(inode) if source_is_directory && inode.file_type().is_dir() => {
                 Some((scoped_node_id(destination_volume, &inode), inode))
@@ -3831,6 +3836,21 @@ fn node_type(file_type: FileType) -> u32 {
     } else {
         protocol::NODE_TYPE_SPECIAL
     }
+}
+
+// The provider serializes path resolution, permission checks and mutation.
+// Call only with freshly resolved objects, before timestamps or retention pins
+// are modified. POSIX uid 0 bypasses this mode check, not Handle/Capability checks.
+fn check_sticky_removal(parent: &Inode, entry: &Inode, uid: u32) -> Result<(), i32> {
+    let parent = parent.metadata();
+    if parent.mode() & 0o1000 != 0
+        && uid != 0
+        && uid != parent.uid()
+        && uid != entry.metadata().uid()
+    {
+        return Err(EPERM);
+    }
+    Ok(())
 }
 
 pub fn permission_allows(

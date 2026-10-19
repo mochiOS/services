@@ -22,6 +22,9 @@ mod unlink;
 #[path = "rename_timestamps.rs"]
 mod rename;
 
+#[path = "sticky_permissions.rs"]
+mod sticky;
+
 thread_local! {
     static CLOCK: RefCell<(Result<Time, i32>, usize)> = const {
         RefCell::new((Ok(Time { seconds: 10, nanoseconds: 20 }), 0))
