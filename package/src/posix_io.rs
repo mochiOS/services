@@ -200,12 +200,17 @@ pub fn read_dir_names(path: &str) -> Result<Vec<String>, mochi_user_syscall::Sys
     Ok(output)
 }
 
+fn file_length(handle: platform::handle::Handle) -> Result<u64, mochi_user_syscall::SysError> {
+    let status = with_client(|client| client.fstat(attachment(handle)))?;
+    u64::try_from(status.size).map_err(|_| sys_error(mochi_user_syscall::EIO))
+}
+
 pub fn index_mpkg(
     path: &str,
 ) -> Result<platform::package::MpkgIndex, mochi_user_syscall::SysError> {
     let handle = open_path(path, 0, 0)?;
     let result = platform::package::index_mpkg_reader(
-        &mut platform::package::NativeMpkgReader::from_borrowed_handle(handle),
+        &mut platform::package::NativeMpkgReader::from_borrowed_handle(handle, file_length),
     );
     let close_result = close(handle);
     match result {
@@ -224,7 +229,7 @@ pub fn read_mpkg_range(
 ) -> Result<Vec<u8>, mochi_user_syscall::SysError> {
     let handle = open_path(path, 0, 0)?;
     let result = platform::package::read_mpkg_range_reader(
-        &mut platform::package::NativeMpkgReader::from_borrowed_handle(handle),
+        &mut platform::package::NativeMpkgReader::from_borrowed_handle(handle, file_length),
         offset,
         size,
     );

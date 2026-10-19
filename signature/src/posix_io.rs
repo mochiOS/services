@@ -39,6 +39,20 @@ pub(crate) fn install_endpoint(endpoint: platform::handle::Handle) -> Result<(),
     result
 }
 
+fn file_length(handle: platform::handle::Handle) -> Result<u64, SysError> {
+    let installed = CLIENT.lock().map_err(|_| SysError::from_raw(EIO as i64))?;
+    let client = installed
+        .as_ref()
+        .ok_or_else(|| SysError::from_raw(EAGAIN as i64))?;
+    let status = client
+        .fstat(mochios_posix_client::ObjectHandleAttachment {
+            handle,
+            rights: platform::handle::HANDLE_RIGHT_TRANSFER,
+        })
+        .map_err(client_error)?;
+    u64::try_from(status.size).map_err(|_| SysError::from_raw(EIO as i64))
+}
+
 pub(crate) fn with_reader<T>(
     path: &str,
     operation: impl FnOnce(&mut NativeMpkgReader) -> Result<T, SysError>,
@@ -52,7 +66,10 @@ pub(crate) fn with_reader<T>(
             .open_at(OpenAtBase::ProcessRoot, OPEN_READ, 0, path)
             .map_err(client_error)?
     };
-    let result = operation(&mut NativeMpkgReader::from_borrowed_handle(file.handle));
+    let result = operation(&mut NativeMpkgReader::from_borrowed_handle(
+        file.handle,
+        file_length,
+    ));
     let closed = platform::handle::close(file.handle);
     let value = result?;
     closed?;

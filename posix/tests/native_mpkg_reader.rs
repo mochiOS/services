@@ -6,7 +6,7 @@ mod package {
 }
 mod handle {
     use super::syscall::SysError;
-    pub use mochi_user_platform::handle::{HANDLE_SEEK_END, Handle};
+    pub use mochi_user_platform::handle::Handle;
     use std::cell::RefCell;
 
     #[derive(Default)]
@@ -18,17 +18,20 @@ mod handle {
         pub error_after: usize,
         pub invalid_count: bool,
         pub positions: Vec<u64>,
+        pub length: Option<u64>,
+        pub length_error: Option<SysError>,
+        pub length_queries: usize,
     }
     thread_local! { pub static STATE: RefCell<State> = RefCell::new(State::default()); }
 
-    pub fn seek(handle: Handle, offset: i64, basis: u64) -> Result<u64, SysError> {
+    pub fn metadata_length(handle: Handle) -> Result<u64, SysError> {
         assert_eq!(handle, 47);
         STATE.with_borrow_mut(|state| {
             state.calls += 1;
-            assert_eq!(basis, HANDLE_SEEK_END, "positioned reads must not seek");
-            assert_eq!(offset, 0);
-            state.cursor = 40;
-            Ok(state.cursor as u64)
+            state.length_queries += 1;
+            state
+                .length_error
+                .map_or(Ok(state.length.unwrap_or(40)), Err)
         })
     }
     pub fn read_at(handle: Handle, output: &mut [u8], offset: u64) -> Result<usize, SysError> {
@@ -59,7 +62,11 @@ use package::MpkgReader;
 
 #[test]
 fn production_reader_handles_offsets_and_short_reads_without_reopening() {
-    let mut reader = NativeMpkgReader::from_borrowed_handle(47);
+    handle::STATE.set(handle::State {
+        cursor: 19,
+        ..Default::default()
+    });
+    let mut reader = NativeMpkgReader::from_borrowed_handle(47, handle::metadata_length);
     assert_eq!(reader.len().unwrap(), 40);
     let mut output = [0; 10];
     reader.read_exact_at(7, &mut output).unwrap();
@@ -68,15 +75,15 @@ fn production_reader_handles_offsets_and_short_reads_without_reopening() {
         assert_eq!(state.calls, 5);
         assert_eq!(state.positions, [7, 10, 13, 16]);
         assert_eq!(
-            state.cursor, 40,
-            "read_exact_at must leave the shared offset alone"
+            state.cursor, 19,
+            "both len and read_exact_at must leave the shared offset alone"
         );
     });
 }
 
 #[test]
 fn production_reader_rejects_overflow_eof_and_invalid_native_counts() {
-    let mut reader = NativeMpkgReader::from_borrowed_handle(47);
+    let mut reader = NativeMpkgReader::from_borrowed_handle(47, handle::metadata_length);
     assert_eq!(
         reader.read_exact_at(u64::MAX, &mut [0]).unwrap_err().raw(),
         syscall::NativeError::LimitExceeded.into_raw() as i64
@@ -106,7 +113,7 @@ fn production_reader_rejects_overflow_eof_and_invalid_native_counts() {
 
 #[test]
 fn positioned_reads_accept_unsigned_offsets_and_empty_reads_do_no_io() {
-    let mut reader = NativeMpkgReader::from_borrowed_handle(47);
+    let mut reader = NativeMpkgReader::from_borrowed_handle(47, handle::metadata_length);
     reader.read_exact_at(u64::MAX, &mut []).unwrap();
     handle::STATE.with_borrow(|state| assert_eq!(state.calls, 0));
     for offset in [i64::MAX as u64, i64::MAX as u64 + 1, u64::MAX - 10] {
@@ -142,7 +149,7 @@ fn positioned_reads_accept_unsigned_offsets_and_empty_reads_do_no_io() {
 #[test]
 fn native_read_failures_are_preserved_without_retry_or_cursor_mutation() {
     use syscall::{NativeError, SysError};
-    let mut reader = NativeMpkgReader::from_borrowed_handle(47);
+    let mut reader = NativeMpkgReader::from_borrowed_handle(47, handle::metadata_length);
     for raw in [
         NativeError::AccessDenied.into_raw() as i64,
         NativeError::InvalidArgument.into_raw() as i64,
@@ -176,7 +183,7 @@ fn a_failure_after_a_short_read_preserves_the_error_and_stops_at_that_offset() {
         error_after: 1,
         ..Default::default()
     });
-    let mut reader = NativeMpkgReader::from_borrowed_handle(47);
+    let mut reader = NativeMpkgReader::from_borrowed_handle(47, handle::metadata_length);
     let mut output = [0x55; 8];
     assert_eq!(reader.read_exact_at(7, &mut output), Err(error));
     assert_eq!(output, [7, 8, 9, 0x55, 0x55, 0x55, 0x55, 0x55]);
@@ -193,7 +200,7 @@ fn package_service_uses_shared_native_reader_and_keeps_handle_cleanup() {
     assert!(!source.contains("struct HandleReader"));
     assert_eq!(
         source
-            .matches("NativeMpkgReader::from_borrowed_handle(handle)")
+            .matches("NativeMpkgReader::from_borrowed_handle(handle, file_length)")
             .count(),
         2
     );
@@ -204,4 +211,45 @@ fn package_service_uses_shared_native_reader_and_keeps_handle_cleanup() {
     let reader = include_str!("../../../user/crates/platform/src/native_mpkg_reader.rs");
     assert!(!reader.contains("file::"));
     assert!(!reader.contains("open("));
+    assert!(!reader.contains("handle::seek"));
+}
+
+#[test]
+fn metadata_queries_preserve_cursor_report_current_length_and_propagate_failures() {
+    use syscall::{NativeError, SysError};
+    let mut reader = NativeMpkgReader::from_borrowed_handle(47, handle::metadata_length);
+    for length in [0, 7, i64::MAX as u64 + 1, u64::MAX] {
+        handle::STATE.set(handle::State {
+            cursor: 23,
+            length: Some(length),
+            ..Default::default()
+        });
+        assert_eq!(reader.len(), Ok(length));
+        handle::STATE.with_borrow(|state| {
+            assert_eq!(state.cursor, 23);
+            assert_eq!(state.length_queries, 1);
+            assert!(state.positions.is_empty());
+        });
+    }
+    for raw in [
+        NativeError::AccessDenied.into_raw() as i64,
+        NativeError::PeerClosed.into_raw() as i64,
+        NativeError::BackingFailure.into_raw() as i64,
+        -5,
+        -13,
+    ] {
+        let error = SysError::from_raw(raw);
+        handle::STATE.set(handle::State {
+            cursor: 23,
+            length_error: Some(error),
+            ..Default::default()
+        });
+        assert_eq!(reader.len(), Err(error));
+        handle::STATE.with_borrow(|state| {
+            assert_eq!(state.cursor, 23);
+            assert_eq!(state.length_queries, 1);
+            assert_eq!(state.calls, 1);
+            assert!(state.positions.is_empty());
+        });
+    }
 }
