@@ -1,5 +1,5 @@
 #[test]
-fn exec_retains_explicit_labels_without_filesystem_alias_or_basename_policy() {
+fn runtime_creation_retains_explicit_labels_without_filesystem_alias_or_basename_policy() {
     let exec = include_str!("../../../core/src/syscall/exec.rs");
     let process = include_str!("../../../core/src/task/process.rs");
     let config = include_str!("../../../core/src/config.rs");
@@ -11,7 +11,9 @@ fn exec_retains_explicit_labels_without_filesystem_alias_or_basename_policy() {
     assert!(!exec.contains("name_override"));
     let begin = exec.find("pub(crate) fn launch_bootstrap_image(").unwrap();
     let end = begin + exec[begin..].find("\n}\n").unwrap() + 3;
-    assert!(exec[begin..end].contains("\n        name,\n        path,"));
+    assert!(exec[begin..end].contains("boot_module::decode"));
+    assert!(!exec[begin..end].contains("name: &str"));
+    assert!(!exec[begin..end].contains("path: &str"));
     let begin = exec.find("pub fn process_create_syscall(").unwrap();
     let end = begin + exec[begin..].find("\n}\n").unwrap() + 3;
     assert!(exec[begin..end].contains("request.label"));

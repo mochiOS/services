@@ -2,7 +2,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 #[test]
-fn bootstrap_loads_only_initfs_and_preserves_explicit_label_and_loader_errors() {
+fn bootstrap_loads_selected_bytes_and_preserves_grants_measurement_and_loader_errors() {
     let source = include_str!("../../../core/src/syscall/exec.rs");
     let begin = source
         .find("pub(crate) fn launch_bootstrap_image(")
@@ -18,11 +18,20 @@ static CALLS: AtomicU64 = AtomicU64::new(0);
 static BYTES: AtomicU64 = AtomicU64::new(0);
 static RESULT: AtomicU64 = AtomicU64::new(77);
 mod task { #[derive(Clone,Copy,Debug,PartialEq,Eq)] pub enum PrivilegeLevel { Service } }
-mod syscall { pub mod types { pub const ENOENT:u64=(-2i64) as u64; } }
 mod init { pub mod fs {
-    pub fn read_initfs(path:&str)->Option<Vec<u8>> {
-        assert_eq!(path,"/chosen/image");
-        crate::PRESENT.load(crate::Ordering::Relaxed).then(||vec![1,2,3])
+    static MODULE:std::sync::OnceLock<Vec<u8>>=std::sync::OnceLock::new();
+    pub fn boot_module_bytes()->&'static [u8] {
+        if !crate::PRESENT.load(crate::Ordering::Relaxed) {return &[]}
+        MODULE.get_or_init(||{
+            let mut bytes=vec![0;67];
+            bytes[..8].copy_from_slice(&crate::mnu_abi::boot_module::MAGIC);
+            bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
+            bytes[12..16].copy_from_slice(&64u32.to_le_bytes());
+            bytes[16..24].copy_from_slice(&64u64.to_le_bytes());
+            bytes[24..32].copy_from_slice(&64u64.to_le_bytes());
+            bytes[32..40].copy_from_slice(&3u64.to_le_bytes());
+            bytes[64..].copy_from_slice(&[1,2,3]);bytes
+        }).as_slice()
     }
 }}
 mod performance {
@@ -36,12 +45,11 @@ impl ExecMeasurement {
     fn start()->Self { Self }
     fn finish(self,result:u64)->u64 { result }
 }
-fn exec_with_data(data:&[u8],name:&str,path:&str,args:&[&str],env:&[&str],
+fn exec_with_data(data:&[u8],name:&str,path:&str,
     caps:Option<u64>,authorities:Option<u64>,privilege:Option<task::PrivilegeLevel>,
     identity:Option<()>,handles:&[()],values:&[()],launch:ImageLaunch,_:&mut ExecMeasurement)->u64 {
-    assert_eq!(data,[1,2,3]); assert_eq!(path,"/chosen/image");
-    assert!(["Compiler worker","/opaque/label","任意の名前",""].contains(&name));
-    assert!(args.is_empty()&&env.is_empty()&&handles.is_empty()&&values.is_empty());
+    assert_eq!(data,[1,2,3]); assert!(name.is_empty()&&path.is_empty());
+    assert!(handles.is_empty()&&values.is_empty());
     assert_eq!((caps,authorities,privilege),(Some(7),Some(9),Some(task::PrivilegeLevel::Service)));
     assert!(identity.is_none()&&matches!(launch,ImageLaunch::Bootstrap));
     CALLS.fetch_add(1,Ordering::Relaxed);
@@ -49,20 +57,26 @@ fn exec_with_data(data:&[u8],name:&str,path:&str,args:&[&str],env:&[&str],
 }
 "#,
     );
+    program.push_str("mod mnu_abi {pub mod status {\n");
+    program.push_str(include_str!("../../../core/crates/abi/src/status.rs"));
+    program.push_str("}\npub mod boot_module {\n");
+    program.push_str(include_str!("../../../core/crates/abi/src/boot_module.rs"));
+    program.push_str("}}\n");
     program.push_str(&source[begin..end]);
     program.push_str(r#"
 fn main(){
-    assert_eq!(launch_bootstrap_image("/chosen/image","Compiler worker",7,9,task::PrivilegeLevel::Service),syscall::types::ENOENT);
+    assert_eq!(launch_bootstrap_image(7,9,task::PrivilegeLevel::Service),mnu_abi::status::Error::InvalidArgument.into_raw());
     assert_eq!(CALLS.load(Ordering::Relaxed),0);
     assert_eq!(BYTES.load(Ordering::Relaxed),0);
     PRESENT.store(true,Ordering::Relaxed);
-    for label in ["Compiler worker","/opaque/label","任意の名前",""] {
-        assert_eq!(launch_bootstrap_image("/chosen/image",label,7,9,task::PrivilegeLevel::Service),77);
+    for _ in 0..4 {
+        assert_eq!(launch_bootstrap_image(7,9,task::PrivilegeLevel::Service),77);
     }
     assert_eq!(CALLS.load(Ordering::Relaxed),4);
     assert_eq!(BYTES.load(Ordering::Relaxed),12);
-    RESULT.store((-12i64) as u64,Ordering::Relaxed);
-    assert_eq!(launch_bootstrap_image("/chosen/image","Compiler worker",7,9,task::PrivilegeLevel::Service),(-12i64) as u64);
+    let failure=mnu_abi::status::Error::ResourceUnavailable.into_raw();
+    RESULT.store(failure,Ordering::Relaxed);
+    assert_eq!(launch_bootstrap_image(7,9,task::PrivilegeLevel::Service),failure);
 }
 "#);
     let directory = std::env::temp_dir().join(format!(

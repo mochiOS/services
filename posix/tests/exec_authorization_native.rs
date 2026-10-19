@@ -130,7 +130,7 @@ mod task {
         ),
         (
             "fn valid_security_identity(",
-            "/// Launches the boot-selected initial image",
+            "pub(crate) fn launch_bootstrap_image(",
         ),
     ] {
         program.push_str(probe::between(exec, start, end));
