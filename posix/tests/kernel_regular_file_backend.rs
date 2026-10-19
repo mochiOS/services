@@ -41,7 +41,7 @@ fn native_mapping_and_file_io_keep_the_provider_path_and_boot_loader_authority()
     assert!(!mapping.contains("KernelObject::File("));
     assert!(mapping.contains("KernelObject::Provider(provider)"));
     assert!(mapping.contains("KernelObject::VmObject(object)"));
-    assert!(mapping.contains("object_with_rights(backing_handle, rights)"));
+    assert!(mapping.contains("object_with_rights_native(backing_handle, rights)"));
     assert!(mapping.contains("provider_memory_object(&provider)"));
     let handles = include_str!("../../../core/src/syscall/handle.rs");
     assert!(handles.contains("provider_read(&provider, buffer, length)"));
@@ -49,7 +49,9 @@ fn native_mapping_and_file_io_keep_the_provider_path_and_boot_loader_authority()
     assert!(handles.contains("provider_seek(&provider, offset as i64, basis)"));
     let exec = include_str!("../../../core/src/syscall/exec.rs");
     assert!(!exec.contains("ensure_fs_path_executable_for_process"));
-    assert!(exec.contains("crate::init::fs::read_initfs(path)"));
+    assert!(!exec.contains("crate::init::fs::read_initfs(path)"));
+    assert!(exec.contains("mnu_abi::boot_module::decode(crate::init::fs::boot_module_bytes())"));
+    assert!(exec.contains("let data = selected.initial_image;"));
     for fallback in [
         "crate::cext::fs::read_all",
         "crate::init::fs::read_rootfs",
