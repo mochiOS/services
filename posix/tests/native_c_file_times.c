@@ -52,6 +52,28 @@ int main(void) {
     CHECK(fstat(file, &before) == 0 && nanosleep(&pause, NULL) == 0);
     CHECK(fchmod(file, 0640) == 0 && fstat(file, &after) == 0);
     CHECK(same_data_times(&before, &after) && !same_times(&before, &after));
+    CHECK(utimensat(AT_FDCWD, path, explicit, 0) == 0);
+    CHECK(write(file, "abc", 3) == 3 && fstat(file, &after) == 0);
+    CHECK(after.st_atim.tv_sec == explicit[0].tv_sec && after.st_atim.tv_nsec == explicit[0].tv_nsec);
+    CHECK(after.st_mtim.tv_sec != explicit[1].tv_sec && after.st_mtim.tv_sec == after.st_ctim.tv_sec);
+    CHECK(after.st_mtim.tv_nsec == after.st_ctim.tv_nsec);
+    before = after;
+    CHECK(write(file, NULL, 0) == 0 && fstat(file, &after) == 0 && same_times(&before, &after));
+    CHECK(utimensat(AT_FDCWD, path, explicit, 0) == 0 && pwrite(file, "z", 1, 0) == 1);
+    CHECK(lseek(file, 0, SEEK_CUR) == 3 && fstat(file, &after) == 0);
+    CHECK(after.st_mtim.tv_sec != explicit[1].tv_sec && after.st_mtim.tv_sec == after.st_ctim.tv_sec);
+    CHECK(ftruncate(file, 4096) == 0 && utimensat(AT_FDCWD, path, explicit, 0) == 0);
+    unsigned char *shared = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, file, 0);
+    CHECK(shared != MAP_FAILED);
+    shared[7] = 42;
+    CHECK(msync(shared, 4096, MS_SYNC) == 0 && fstat(file, &after) == 0);
+    CHECK(after.st_mtim.tv_sec != explicit[1].tv_sec && after.st_mtim.tv_sec == after.st_ctim.tv_sec);
+    CHECK(after.st_atim.tv_sec == explicit[0].tv_sec && munmap(shared, 4096) == 0);
+    int append = open(path, O_WRONLY | O_APPEND);
+    CHECK(append >= 0 && utimensat(AT_FDCWD, path, explicit, 0) == 0);
+    CHECK(write(append, "!", 1) == 1 && fstat(file, &after) == 0 && after.st_size == 4097);
+    CHECK(after.st_mtim.tv_sec != explicit[1].tv_sec && after.st_mtim.tv_sec == after.st_ctim.tv_sec);
+    CHECK(close(append) == 0);
     const off_t lengths[] = {0, 2, 8192, 8192, 0};
     for (unsigned i = 0; i < sizeof(lengths) / sizeof(lengths[0]); ++i) {
         before = after;
@@ -132,6 +154,6 @@ int main(void) {
     CHECK(pipe(streams) == 0);
     FAILS(futimens(streams[0], NULL), ENOTSUP); /* metadata provider still needed */
     CHECK(close(streams[0]) == 0 && close(streams[1]) == 0);
-    puts("c-file-times: PASS C ABI, sentinels, signed dates, pointer faults, errno, path anchors, permissions, nofollow, unlinked FD, chmod/chown ctime and truncate times");
+    puts("c-file-times: PASS C ABI, sentinels, signed dates, pointer faults, errno, path anchors, permissions, nofollow, unlinked FD, chmod/chown, truncate, write/pwrite/append and msync times");
     return 0;
 }

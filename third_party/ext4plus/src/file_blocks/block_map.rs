@@ -615,8 +615,10 @@ impl BlockMap {
                 .await?;
             if new_size > inode.size_in_bytes() {
                 inode.set_size_in_bytes(new_size);
-                inode.write(&self.fs).await?;
             }
+            // Persist caller-staged metadata even for an in-place overwrite,
+            // just as the extent backend does at its write completion boundary.
+            inode.write(&self.fs).await?;
             Ok(to_write)
         } else {
             let to_write = core::cmp::min(buf.len(), block_size_usize);
@@ -645,8 +647,8 @@ impl BlockMap {
             self.fs.write_to_block(fs_block, 0, write_buf).await?;
             if new_size > inode.size_in_bytes() {
                 inode.set_size_in_bytes(new_size);
-                inode.write(&self.fs).await?;
             }
+            inode.write(&self.fs).await?;
             Ok(write_buf.len())
         }
     }

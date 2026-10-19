@@ -23,6 +23,8 @@ mod canonical_path;
 mod inode_time;
 #[path = "timestamp_operations.rs"]
 mod timestamp_operations;
+#[path = "data_writes.rs"]
+mod data_writes;
 
 const EIO: i32 = 5;
 const EXDEV: i32 = 18;
@@ -1678,15 +1680,11 @@ impl FilesystemService {
         } else {
             payload.len()
         };
-        let result = crate::positioned_io::sequential(
-            &mut cursor,
-            length,
-            true,
-            |done, position, _| {
-                file.write_bytes_at(&payload[done..length], position)
-                    .map_err(errno)
-            },
+        let done = data_writes::write(
+            file, &open.filesystem, self.clock, cursor, &payload[..length],
         )?;
+        let result = (done, cursor);
+        cursor += done as u64; // the entire range was checked before any write
         open.offset = cursor;
         open.inode = file.inode().clone();
         Ok(result)
@@ -1730,10 +1728,9 @@ impl FilesystemService {
         let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
         refresh_provider_file(open)?;
         let file = open.file.as_mut().ok_or(EISDIR)?;
-        crate::positioned_io::transfer(offset, payload.len(), true, |done, position, _| {
-            file.write_bytes_at(&payload[done..], position)
-                .map_err(errno)
-        })
+        let done = data_writes::write(file, &open.filesystem, self.clock, offset, payload)?;
+        open.inode = file.inode().clone();
+        Ok(done)
     }
 
     pub fn provider_sync(&self, open_id: u64) -> Result<(), i32> {
@@ -1889,23 +1886,11 @@ impl FilesystemService {
         if payload.len() > protocol::MAX_IO_LEN {
             return Err(EINVAL);
         }
-        let file = self
-            .opens
-            .get_mut(&request.open_id)
-            .ok_or(EBADF)?
-            .file
-            .as_mut()
-            .ok_or(EISDIR)?;
-        let mut done = 0;
-        while done < payload.len() {
-            let count = file
-                .write_bytes_at(&payload[done..], request.offset + done as u64)
-                .map_err(errno)?;
-            if count == 0 {
-                return Err(EIO);
-            }
-            done += count;
-        }
+        let open = self.opens.get_mut(&request.open_id).ok_or(EBADF)?;
+        refresh_provider_file(open)?;
+        let file = open.file.as_mut().ok_or(EISDIR)?;
+        let done = data_writes::write(file, &open.filesystem, self.clock, request.offset, payload)?;
+        open.inode = file.inode().clone();
         let mut response = self.success(request);
         response.header.offset = done as u64;
         Ok(response)

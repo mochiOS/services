@@ -116,10 +116,7 @@ impl File {
         &mut self,
         buf: &[u8],
     ) -> Result<usize, Ext4Error> {
-        let written = self
-            .file_blocks
-            .write_at(&mut self.inode, buf, self.position)
-            .await?;
+        let written = self.write_bytes_at(buf, self.position).await?;
         self.position = add_to_file_offset(self.position, written)?;
         Ok(written)
     }
@@ -133,7 +130,19 @@ impl File {
         buf: &[u8],
         pos: u64,
     ) -> Result<usize, Ext4Error> {
-        self.file_blocks.write_at(&mut self.inode, buf, pos).await
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        // Report a completed block prefix before attempting another block.
+        // Otherwise a later I/O error inside an extent run hides bytes that
+        // callers must not replay. The public API already permits short writes.
+        let block_size = self.fs.0.superblock.block_size().to_usize();
+        let within = usize::try_from(pos % block_size as u64)
+            .map_err(|_| Ext4Error::FileTooLarge)?;
+        let length = buf.len().min(block_size - within);
+        self.file_blocks
+            .write_at(&mut self.inode, &buf[..length], pos)
+            .await
     }
 
     /// Truncate the file to `new_size` bytes.
