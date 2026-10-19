@@ -25,6 +25,8 @@ mod inode_time;
 mod timestamp_operations;
 #[path = "data_writes.rs"]
 mod data_writes;
+#[path = "data_reads.rs"]
+mod data_reads;
 
 const EIO: i32 = 5;
 const EXDEV: i32 = 18;
@@ -1099,11 +1101,13 @@ impl FilesystemService {
         if !inode.file_type().is_symlink() {
             return Err(EINVAL);
         }
+        let access = data_reads::prepare(&inode, &filesystem, self.clock, true)?;
         let target = inode.symlink_target(&filesystem).map_err(errno)?;
         let payload = target.as_ref().to_vec();
         if payload.len() > protocol::MAX_PATH_LEN {
             return Err(EFBIG);
         }
+        data_reads::commit(access, &filesystem)?;
         let mut response = self.success(request);
         response.header.length = payload.len() as u32;
         response.payload = payload;
@@ -1573,15 +1577,9 @@ impl FilesystemService {
         refresh_provider_file(open)?;
         let file = open.file.as_mut().ok_or(EISDIR)?;
         let mut payload = vec![0u8; length.min(mnu_abi::provider::MAX_DATA_LEN)];
-        let (done, _) = crate::positioned_io::sequential(
-            &mut open.offset,
-            payload.len(),
-            false,
-            |done, position, _| {
-                file.read_bytes_at(&mut payload[done..], position)
-                    .map_err(errno)
-            },
-        )?;
+        let done = data_reads::read(file, &open.filesystem, self.clock, open.offset, &mut payload)?;
+        open.offset += done as u64;
+        open.inode = file.inode().clone();
         payload.truncate(done);
         Ok(payload)
     }
@@ -1625,15 +1623,11 @@ impl FilesystemService {
         let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
         refresh_provider_file(open)?;
         let file = open.file.as_mut().ok_or(EISDIR)?;
-        crate::positioned_io::sequential(
-            &mut open.offset,
-            output.len(),
-            false,
-            |done, position, _| {
-                file.read_bytes_at(&mut output[done..], position)
-                    .map_err(errno)
-            },
-        )
+        let start = open.offset;
+        let done = data_reads::read(file, &open.filesystem, self.clock, start, output)?;
+        open.offset += done as u64;
+        open.inode = file.inode().clone();
+        Ok((done, start))
     }
 
     pub fn provider_write(&mut self, open_id: u64, payload: &[u8]) -> Result<usize, i32> {
@@ -1723,11 +1717,8 @@ impl FilesystemService {
         refresh_provider_file(open)?;
         let file = open.file.as_mut().ok_or(EISDIR)?;
         let mut payload = vec![0u8; length.min(mnu_abi::provider::MAX_DATA_LEN)];
-        let done =
-            crate::positioned_io::transfer(offset, payload.len(), false, |done, position, _| {
-                file.read_bytes_at(&mut payload[done..], position)
-                    .map_err(errno)
-            })?;
+        let done = data_reads::read(file, &open.filesystem, self.clock, offset, &mut payload)?;
+        open.inode = file.inode().clone();
         payload.truncate(done);
         Ok(payload)
     }
@@ -1876,24 +1867,12 @@ impl FilesystemService {
 
     fn read(&mut self, request: protocol::Header) -> Result<Response, i32> {
         let length = (request.flags as usize).min(protocol::MAX_IO_LEN);
-        let file = self
-            .opens
-            .get_mut(&request.open_id)
-            .ok_or(EBADF)?
-            .file
-            .as_mut()
-            .ok_or(EISDIR)?;
+        let open = self.opens.get_mut(&request.open_id).ok_or(EBADF)?;
+        refresh_provider_file(open)?;
+        let file = open.file.as_mut().ok_or(EISDIR)?;
         let mut payload = vec![0u8; length];
-        let mut done = 0;
-        while done < payload.len() {
-            let count = file
-                .read_bytes_at(&mut payload[done..], request.offset + done as u64)
-                .map_err(errno)?;
-            if count == 0 {
-                break;
-            }
-            done += count;
-        }
+        let done = data_reads::read(file, &open.filesystem, self.clock, request.offset, &mut payload)?;
+        open.inode = file.inode().clone();
         payload.truncate(done);
         let mut response = self.success(request);
         response.header.length = done as u32;
@@ -2030,6 +2009,10 @@ impl FilesystemService {
             .fs
             .path_to_inode(path.as_str().try_into().map_err(|_| EINVAL)?, FollowSymlinks::All)
             .map_err(errno)?;
+        if max_length == 0 {
+            return Ok((payload, start_entry as u64));
+        }
+        let access = data_reads::prepare(&parent, &self.fs, self.clock, true)?;
         for entry in self
             .fs
             .read_dir(path.as_str())
@@ -2069,6 +2052,7 @@ impl FilesystemService {
                 .map_err(|_| EIO)?;
             next_entry = next_entry.checked_add(1).ok_or(EIO)?;
         }
+        data_reads::commit(access, &self.fs)?;
         Ok((payload, next_entry as u64))
     }
 
@@ -2084,6 +2068,11 @@ impl FilesystemService {
         max_length: usize,
         cursor_records: bool,
     ) -> Result<(Vec<u8>, u64), i32> {
+        if max_length == 0 {
+            return Ok((Vec::new(), start_entry));
+        }
+        let inode = Inode::read(filesystem, inode.index).map_err(errno)?;
+        let access = data_reads::prepare(&inode, filesystem, self.clock, true)?;
         let start_entry = usize::try_from(start_entry).map_err(|_| EINVAL)?;
         let node = self
             .namespace
@@ -2168,6 +2157,7 @@ impl FilesystemService {
             }
             .map_err(|_| EIO)?;
         }
+        data_reads::commit(access, filesystem)?;
         Ok((payload, next_entry as u64))
     }
 
@@ -3526,11 +3516,22 @@ impl FilesystemService {
 
     fn read_link(&self, request: protocol::Header) -> Result<Response, i32> {
         let path = self.nodes.get(&request.node_id).ok_or(ENOENT)?;
-        let target = self.fs.read_link(path.as_str()).map_err(errno)?;
+        let inode = self.fs
+            .path_to_inode(
+                path.as_str().try_into().map_err(|_| EINVAL)?,
+                FollowSymlinks::ExcludeFinalComponent,
+            )
+            .map_err(errno)?;
+        if !inode.file_type().is_symlink() {
+            return Err(EINVAL);
+        }
+        let access = data_reads::prepare(&inode, &self.fs, self.clock, true)?;
+        let target = inode.symlink_target(&self.fs).map_err(errno)?;
         let payload = target.as_ref().to_vec();
         if payload.len() > protocol::MAX_IO_LEN {
             return Err(EFBIG);
         }
+        data_reads::commit(access, &self.fs)?;
         let mut response = self.success(request);
         response.header.length = payload.len() as u32;
         response.payload = payload;

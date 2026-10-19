@@ -10,6 +10,9 @@ mod write;
 #[path = "creation_timestamps.rs"]
 mod creation;
 
+#[path = "read_timestamps.rs"]
+mod read;
+
 thread_local! {
     static CLOCK: RefCell<(Result<Time, i32>, usize)> = const {
         RefCell::new((Ok(Time { seconds: 10, nanoseconds: 20 }), 0))

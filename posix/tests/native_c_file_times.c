@@ -7,6 +7,7 @@
 #define _GNU_SOURCE 1
 #endif
 #include <errno.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -35,6 +36,43 @@ static int same_times(const struct stat *a, const struct stat *b) {
 static int same_data_times(const struct stat *a, const struct stat *b) {
     return a->st_atim.tv_sec == b->st_atim.tv_sec && a->st_atim.tv_nsec == b->st_atim.tv_nsec &&
            a->st_mtim.tv_sec == b->st_mtim.tv_sec && a->st_mtim.tv_nsec == b->st_mtim.tv_nsec;
+}
+static int only_access_changed(const struct stat *a, const struct stat *b) {
+    return (a->st_atim.tv_sec != b->st_atim.tv_sec || a->st_atim.tv_nsec != b->st_atim.tv_nsec) &&
+           a->st_mtim.tv_sec == b->st_mtim.tv_sec && a->st_mtim.tv_nsec == b->st_mtim.tv_nsec &&
+           a->st_ctim.tv_sec == b->st_ctim.tv_sec && a->st_ctim.tv_nsec == b->st_ctim.tv_nsec;
+}
+static int read_checks(int file, int directory) {
+    const struct timespec old[2] = {{-1, 123456789}, {INT64_C(2147483648), 987654321}};
+    struct stat before, after;
+    char byte;
+    CHECK(lseek(file, 0, SEEK_SET) == 0 && futimens(file, old) == 0 && fstat(file, &before) == 0);
+    CHECK(read(file, &byte, 1) == 1 && fstat(file, &after) == 0 && only_access_changed(&before, &after));
+    CHECK(futimens(file, old) == 0 && fstat(file, &before) == 0);
+    CHECK(pread(file, &byte, 1, 1) == 1 && lseek(file, 0, SEEK_CUR) == 1);
+    CHECK(fstat(file, &after) == 0 && only_access_changed(&before, &after));
+    CHECK(futimens(file, old) == 0 && fstat(file, &before) == 0);
+    CHECK(read(file, NULL, 0) == 0 && fstat(file, &after) == 0 && same_times(&before, &after));
+    CHECK(lseek(file, 0, SEEK_END) == 4097);
+    CHECK(read(file, &byte, 1) == 0 && fstat(file, &after) == 0 && only_access_changed(&before, &after));
+    CHECK(lseek(file, 0, SEEK_SET) == 0 && futimens(file, old) == 0 && fstat(file, &before) == 0);
+    unsigned char large[8192];
+    CHECK(read(file, large, sizeof(large)) == 4097 && fstat(file, &after) == 0);
+    CHECK(only_access_changed(&before, &after));
+    CHECK(futimens(directory, old) == 0 && fstat(directory, &before) == 0);
+    DIR *entries = opendir("/tmp");
+    CHECK(entries != NULL && readdir(entries) != NULL);
+    CHECK(fstat(directory, &after) == 0 && only_access_changed(&before, &after));
+    CHECK(closedir(entries) == 0);
+    const char *link = "/tmp/native-c-created-link";
+    CHECK(utimensat(AT_FDCWD, link, old, AT_SYMLINK_NOFOLLOW) == 0 && lstat(link, &before) == 0);
+    char target[64];
+    CHECK(readlink(link, target, sizeof(target)) > 0 && lstat(link, &after) == 0);
+    CHECK(only_access_changed(&before, &after));
+    int system = open("/system/services/posix.service", O_RDONLY);
+    CHECK(system >= 0 && fstat(system, &before) == 0 && pread(system, &byte, 1, 0) == 1);
+    CHECK(fstat(system, &after) == 0 && same_times(&before, &after) && close(system) == 0);
+    return 0;
 }
 static int created_times(const struct stat *child, const struct stat *parent) {
     return child->st_atim.tv_sec == child->st_mtim.tv_sec && child->st_atim.tv_nsec == child->st_mtim.tv_nsec &&
@@ -109,12 +147,13 @@ int main(void) {
     shared[7] = 42;
     CHECK(msync(shared, 4096, MS_SYNC) == 0 && fstat(file, &after) == 0);
     CHECK(after.st_mtim.tv_sec != explicit[1].tv_sec && after.st_mtim.tv_sec == after.st_ctim.tv_sec);
-    CHECK(after.st_atim.tv_sec == explicit[0].tv_sec && munmap(shared, 4096) == 0);
+    CHECK(after.st_atim.tv_sec != explicit[0].tv_sec && munmap(shared, 4096) == 0);
     int append = open(path, O_WRONLY | O_APPEND);
     CHECK(append >= 0 && utimensat(AT_FDCWD, path, explicit, 0) == 0);
     CHECK(write(append, "!", 1) == 1 && fstat(file, &after) == 0 && after.st_size == 4097);
     CHECK(after.st_mtim.tv_sec != explicit[1].tv_sec && after.st_mtim.tv_sec == after.st_ctim.tv_sec);
     CHECK(close(append) == 0);
+    CHECK(read_checks(file, directory) == 0 && fstat(file, &after) == 0);
     const off_t lengths[] = {0, 2, 8192, 8192, 0};
     for (unsigned i = 0; i < sizeof(lengths) / sizeof(lengths[0]); ++i) {
         before = after;
@@ -195,6 +234,6 @@ int main(void) {
     CHECK(pipe(streams) == 0);
     FAILS(futimens(streams[0], NULL), ENOTSUP); /* metadata provider still needed */
     CHECK(close(streams[0]) == 0 && close(streams[1]) == 0);
-    puts("c-file-times: PASS C ABI, sentinels, signed dates, pointer faults, errno, path anchors, permissions, nofollow, unlinked FD, chmod/chown, truncate, write/pwrite/append, msync and creation times");
+    puts("c-file-times: PASS C ABI, sentinels, signed dates, pointer faults, errno, path anchors, permissions, nofollow, unlinked FD, chmod/chown, truncate, write/pwrite/append, msync, creation and access times");
     return 0;
 }

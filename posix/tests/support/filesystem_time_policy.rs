@@ -79,7 +79,7 @@ fn fixture() -> (Fixture, Ext4, FilesystemService) {
             .unwrap();
         inode.write(&disk).unwrap();
     }
-    let mut service = FilesystemService::new(disk.clone());
+    let mut service = FilesystemService::new_with_clock(disk.clone(), now);
     service
         .configure_memory_updates(Box::new(unmapped_updates::UnmappedUpdates))
         .unwrap();
@@ -750,7 +750,7 @@ fn symlinks_anchors_and_unlinked_descriptions_keep_their_object_identity() {
     );
     assert_eq!(
         status_times(status(&mut service, second))[0],
-        (-1, 123_456_789)
+        (now().unwrap().seconds, now().unwrap().nanoseconds)
     );
     service.provider_close(first).unwrap();
     service
