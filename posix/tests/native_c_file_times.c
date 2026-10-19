@@ -103,6 +103,55 @@ static int unlink_checks(int directory) {
     }
     return 0;
 }
+static int rename_checks(int directory) {
+    const struct timespec old[2] = {{-1, 123456789}, {INT64_C(2147483648), 987654321}};
+    const struct timespec pause = {0, 20000000};
+    CHECK(mkdir("/tmp/native-c-rename-dir", 0700) == 0);
+    int new_parent = open("/tmp/native-c-rename-dir", O_RDONLY | O_DIRECTORY);
+    CHECK(new_parent >= 0);
+    const char *sources[] = {"/tmp/native-c-rename-from-0", "/tmp/native-c-rename-from-1"};
+    const char *targets[] = {"/tmp/native-c-rename-to-0", "/tmp/native-c-rename-dir/to"};
+    struct stat before, replaced_before, after, replaced, parent, other;
+    for (unsigned kind = 0; kind < 2; ++kind) {
+        int source = open(sources[kind], O_CREAT | O_EXCL | O_RDWR, 0600);
+        int target = open(targets[kind], O_CREAT | O_EXCL | O_RDWR, 0600);
+        CHECK(source >= 0 && target >= 0 && write(source, "from", 4) == 4 && write(target, "to", 2) == 2);
+        CHECK(futimens(source, old) == 0 && futimens(target, old) == 0);
+        CHECK(futimens(directory, old) == 0 && futimens(new_parent, old) == 0);
+        CHECK(fstat(source, &before) == 0 && fstat(target, &replaced_before) == 0 && nanosleep(&pause, NULL) == 0);
+        if (kind) { CHECK(renameat(directory, "native-c-rename-from-1", new_parent, "to") == 0); }
+        else { CHECK(rename(sources[kind], targets[kind]) == 0); }
+        CHECK(fstat(source, &after) == 0 && fstat(target, &replaced) == 0 && fstat(directory, &parent) == 0);
+        CHECK(same_data_times(&before, &after) && !same_times(&before, &after));
+        CHECK(same_data_times(&replaced_before, &replaced) && !same_times(&replaced_before, &replaced));
+        CHECK(after.st_nlink == 1 && replaced.st_nlink == 0);
+        CHECK(after.st_ctim.tv_sec == replaced.st_ctim.tv_sec && after.st_ctim.tv_nsec == replaced.st_ctim.tv_nsec);
+        CHECK(parent.st_mtim.tv_sec == after.st_ctim.tv_sec && parent.st_mtim.tv_nsec == after.st_ctim.tv_nsec);
+        CHECK(parent.st_ctim.tv_sec == after.st_ctim.tv_sec && parent.st_ctim.tv_nsec == after.st_ctim.tv_nsec);
+        CHECK(parent.st_atim.tv_sec == old[0].tv_sec && parent.st_atim.tv_nsec == old[0].tv_nsec);
+        if (kind) {
+            CHECK(fstat(new_parent, &other) == 0 && other.st_mtim.tv_sec == after.st_ctim.tv_sec && other.st_mtim.tv_nsec == after.st_ctim.tv_nsec);
+            CHECK(other.st_ctim.tv_sec == after.st_ctim.tv_sec && other.st_ctim.tv_nsec == after.st_ctim.tv_nsec);
+        }
+        char data[4];
+        CHECK(pread(source, data, 4, 0) == 4 && memcmp(data, "from", 4) == 0);
+        CHECK(pread(target, data, 2, 0) == 2 && memcmp(data, "to", 2) == 0);
+        CHECK(close(source) == 0 && close(target) == 0 && unlink(targets[kind]) == 0);
+    }
+    CHECK(close(new_parent) == 0);
+    const char *from = "/tmp/native-c-directory-from", *to = "/tmp/native-c-directory-to";
+    CHECK(mkdir(from, 0700) == 0 && mkdir(to, 0700) == 0);
+    int source = open(from, O_RDONLY | O_DIRECTORY), target = open(to, O_RDONLY | O_DIRECTORY);
+    CHECK(source >= 0 && target >= 0 && futimens(source, old) == 0 && futimens(target, old) == 0);
+    CHECK(futimens(directory, old) == 0 && fstat(source, &before) == 0 && fstat(target, &replaced_before) == 0);
+    CHECK(nanosleep(&pause, NULL) == 0 && rename(from, to) == 0);
+    CHECK(fstat(source, &after) == 0 && fstat(target, &replaced) == 0 && fstat(directory, &parent) == 0);
+    CHECK(same_data_times(&before, &after) && !same_times(&before, &after));
+    CHECK(same_data_times(&replaced_before, &replaced) && !same_times(&replaced_before, &replaced));
+    CHECK(replaced.st_nlink == 0 && parent.st_mtim.tv_sec == after.st_ctim.tv_sec && parent.st_mtim.tv_nsec == after.st_ctim.tv_nsec);
+    CHECK(close(source) == 0 && close(target) == 0 && rmdir(to) == 0);
+    return 0;
+}
 static int read_checks(int file, int directory) {
     const struct timespec old[2] = {{-1, 123456789}, {INT64_C(2147483648), 987654321}};
     struct stat before, after;
@@ -217,6 +266,7 @@ int main(void) {
     CHECK(read_checks(file, directory) == 0 && fstat(file, &after) == 0);
     CHECK(link_checks(file, directory) == 0 && fstat(file, &after) == 0);
     CHECK(unlink_checks(directory) == 0);
+    CHECK(rename_checks(directory) == 0);
     const off_t lengths[] = {0, 2, 8192, 8192, 0};
     for (unsigned i = 0; i < sizeof(lengths) / sizeof(lengths[0]); ++i) {
         before = after;
@@ -297,6 +347,6 @@ int main(void) {
     CHECK(pipe(streams) == 0);
     FAILS(futimens(streams[0], NULL), ENOTSUP); /* metadata provider still needed */
     CHECK(close(streams[0]) == 0 && close(streams[1]) == 0);
-    puts("c-file-times: PASS C ABI, sentinels, signed dates, pointer faults, errno, path anchors, permissions, nofollow, unlinked FD, chmod/chown, truncate, write/pwrite/append, msync, creation, access, link and unlink/rmdir times");
+    puts("c-file-times: PASS C ABI, sentinels, signed dates, pointer faults, errno, path anchors, permissions, nofollow, unlinked FD, chmod/chown, truncate, write/pwrite/append, msync, creation, access, link, unlink/rmdir and rename times");
     return 0;
 }

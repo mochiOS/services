@@ -27,6 +27,8 @@ mod timestamp_operations;
 mod data_writes;
 #[path = "data_reads.rs"]
 mod data_reads;
+#[path = "rename_timestamps.rs"]
+mod rename_timestamps;
 
 const EIO: i32 = 5;
 const EXDEV: i32 = 18;
@@ -2384,9 +2386,6 @@ impl FilesystemService {
         let (old_path, new_path) = payload.split_at_checked(split).ok_or(EINVAL)?;
         let old_path = decode_path(old_path)?;
         let new_path = decode_path(new_path)?;
-        if old_path == new_path {
-            return Ok(self.success(request));
-        }
         let (old_parent_path, old_name) = split_parent(old_path)?;
         let (new_parent_path, new_name) = split_parent(new_path)?;
         let old_parent_inode = self
@@ -2411,12 +2410,11 @@ impl FilesystemService {
         let source_is_directory = source_inode.file_type().is_dir();
         self.remember_node(old_path, FollowSymlinks::ExcludeFinalComponent)?;
 
-        let destination =
+        let same_parent = old_parent.inode().index == new_parent.inode().index;
+        let mut destination =
             match new_parent.get_entry(DirEntryName::try_from(new_name).map_err(|_| EINVAL)?) {
+                Ok(inode) if inode.index == source_inode.index => return Ok(self.success(request)),
                 Ok(inode) if source_is_directory && inode.file_type().is_dir() => {
-                    if !self.prepare_empty_directory(&filesystem, 0, &inode)? {
-                        return Err(ENOTEMPTY);
-                    }
                     let node_id =
                         self.remember_node(new_path, FollowSymlinks::ExcludeFinalComponent)?;
                     Some((node_id, inode))
@@ -2431,20 +2429,15 @@ impl FilesystemService {
                 Err(Ext4Error::NotFound) => None,
                 Err(error) => return Err(errno(error)),
             };
+        let now = self.prepare_rename_times(
+            &filesystem,
+            0,
+            &mut old_parent,
+            &mut new_parent,
+            &mut source_inode,
+            &mut destination,
+        )?;
         if source_is_directory {
-            old_parent = Dir::open_inode(
-                &filesystem,
-                Inode::read(&filesystem, old_parent.inode().index).map_err(errno)?,
-            )
-            .map_err(errno)?;
-            new_parent = Dir::open_inode(
-                &filesystem,
-                Inode::read(&filesystem, new_parent.inode().index).map_err(errno)?,
-            )
-            .map_err(errno)?;
-            if self.directory_is_at_or_below(&filesystem, &source_inode, new_parent_inode)? {
-                return Err(EINVAL);
-            }
             let backup_name = format!(".mochios-orphan-rename-{}", request.request_id);
             self.stage_rename_destination(
                 &filesystem,
@@ -2457,7 +2450,7 @@ impl FilesystemService {
                 &filesystem,
                 &mut old_parent,
                 &mut new_parent,
-                old_parent_path == new_parent_path,
+                same_parent,
                 old_name,
                 new_name,
                 source_inode,
@@ -2483,6 +2476,7 @@ impl FilesystemService {
                 self.nodes.remove(&destination_node_id);
             }
             self.rename_node_paths(old_path, new_path);
+            self.finish_rename_times(&filesystem, &old_parent, &new_parent, now)?;
             return Ok(self.success(request));
         }
         let backup_name = format!(".mochios-orphan-rename-{}", request.request_id);
@@ -2518,6 +2512,9 @@ impl FilesystemService {
             );
             return Err(errno(error));
         }
+        if same_parent {
+            old_parent = Dir::open_inode(&filesystem, new_parent.inode().clone()).map_err(errno)?;
+        }
         if let Err(error) = old_parent.unlink(
             DirEntryName::try_from(old_name).map_err(|_| EINVAL)?,
             source_inode.clone(),
@@ -2536,6 +2533,9 @@ impl FilesystemService {
             return Err(errno(error));
         }
 
+        if same_parent {
+            new_parent = Dir::open_inode(&filesystem, old_parent.inode().clone()).map_err(errno)?;
+        }
         if let Some((destination_node_id, destination_inode)) = destination {
             self.node_ids.remove(new_path);
             if self
@@ -2563,6 +2563,7 @@ impl FilesystemService {
             }
         }
         self.rename_node_paths(old_path, new_path);
+        self.finish_rename_times(&filesystem, &old_parent, &new_parent, now)?;
         Ok(self.success(request))
     }
 
@@ -2684,11 +2685,8 @@ impl FilesystemService {
         {
             return Ok(self.success(request));
         }
-        let destination = match destination_inode {
+        let mut destination = match destination_inode {
             Some(inode) if source_is_directory && inode.file_type().is_dir() => {
-                if !self.prepare_empty_directory(&filesystem, destination_volume, &inode)? {
-                    return Err(ENOTEMPTY);
-                }
                 Some((scoped_node_id(destination_volume, &inode), inode))
             }
             Some(_) if source_is_directory => return Err(ENOTDIR),
@@ -2696,20 +2694,15 @@ impl FilesystemService {
             Some(inode) => Some((scoped_node_id(destination_volume, &inode), inode)),
             None => None,
         };
+        let now = self.prepare_rename_times(
+            &filesystem,
+            source_volume,
+            &mut old_parent,
+            &mut new_parent,
+            &mut source_inode,
+            &mut destination,
+        )?;
         if source_is_directory {
-            old_parent = Dir::open_inode(
-                &filesystem,
-                Inode::read(&filesystem, old_parent.inode().index).map_err(errno)?,
-            )
-            .map_err(errno)?;
-            new_parent = Dir::open_inode(
-                &filesystem,
-                Inode::read(&filesystem, new_parent.inode().index).map_err(errno)?,
-            )
-            .map_err(errno)?;
-            if self.directory_is_at_or_below(&filesystem, &source_inode, new_parent_inode)? {
-                return Err(EINVAL);
-            }
             let backup_name = format!(".mochios-orphan-rename-{}", request.request_id);
             self.stage_rename_destination(
                 &filesystem,
@@ -2747,6 +2740,7 @@ impl FilesystemService {
                 self.forget_node_paths(destination_node_id);
             }
             self.forget_node_paths(source_node_id);
+            self.finish_rename_times(&filesystem, &old_parent, &new_parent, now)?;
             return Ok(self.success(request));
         }
         let backup_name = format!(".mochios-orphan-rename-{}", request.request_id);
@@ -2781,6 +2775,9 @@ impl FilesystemService {
             );
             return Err(errno(error));
         }
+        if same_parent {
+            old_parent = Dir::open_inode(&filesystem, new_parent.inode().clone()).map_err(errno)?;
+        }
         if let Err(error) = old_parent.unlink(
             DirEntryName::try_from(old_name).map_err(|_| EINVAL)?,
             source_inode.clone(),
@@ -2797,6 +2794,9 @@ impl FilesystemService {
                 destination,
             );
             return Err(errno(error));
+        }
+        if same_parent {
+            new_parent = Dir::open_inode(&filesystem, old_parent.inode().clone()).map_err(errno)?;
         }
         if let Some((destination_node_id, destination_inode)) = destination {
             if self
@@ -2824,6 +2824,7 @@ impl FilesystemService {
             }
         }
         self.forget_node_paths(source_node_id);
+        self.finish_rename_times(&filesystem, &old_parent, &new_parent, now)?;
         Ok(self.success(request))
     }
 
@@ -3019,10 +3020,12 @@ impl FilesystemService {
                 let _ = new_parent.inode_mut().write(filesystem);
                 return Err(errno(error));
             }
+            *old_parent = Dir::open_inode(filesystem, new_parent.inode().clone()).map_err(errno)?;
             if let Err(error) = old_parent.unlink(old_name, source_inode.clone()) {
                 let _ = new_parent.unlink(new_name, source_inode);
                 return Err(errno(error));
             }
+            *new_parent = Dir::open_inode(filesystem, old_parent.inode().clone()).map_err(errno)?;
             return Ok(());
         }
 
@@ -3125,18 +3128,6 @@ impl FilesystemService {
             );
         }
         Ok(())
-    }
-
-    fn prepare_empty_directory(
-        &mut self,
-        filesystem: &Ext4,
-        volume: u32,
-        inode: &Inode,
-    ) -> Result<bool, i32> {
-        let Some(retained) = self.empty_directory_private_entries(filesystem, volume, inode)? else {
-            return Ok(false);
-        };
-        self.evacuate_directory_private_entries(filesystem, volume, inode, retained)
     }
 
     fn empty_directory_private_entries(
