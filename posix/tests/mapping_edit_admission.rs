@@ -315,11 +315,11 @@ fn native_new_mapping_checks_backing_before_region_publication() {
         .nth(1)
         .unwrap();
     assert!(
-        body.find("object.with_memory_generation_native(").unwrap()
+        body.find(".with_memory_generation_native(").unwrap()
             < body.find("MemoryRegion::file_backed(").unwrap()
     );
     assert!(
-        body.find("object.with_memory_generation_native(").unwrap()
+        body.find(".with_memory_generation_native(").unwrap()
             < body.find("process.add_memory_region(").unwrap()
     );
 }

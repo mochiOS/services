@@ -248,6 +248,11 @@ thread_local!{{static RESULT:Cell<u64>=const{{Cell::new(0)}};static BOUNDED:Cell
             program.push('\n');
         }
     }
+    probe::constants(
+        &mut program,
+        include_str!("../../../core/crates/abi/src/lib.rs"),
+        &["MEMORY_SYNC_DEFERRED", "MEMORY_SYNC_REFRESH"],
+    );
     program.push_str(
         "mod syscall {\nuse crate::mnu_abi;\nuse mnu_abi::status::Error as NativeError;\n",
     );
