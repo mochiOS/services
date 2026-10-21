@@ -3,6 +3,53 @@ use super::*;
 
 const SECOND: u64 = 1_000_000_000;
 
+#[derive(Clone, Copy, Debug)]
+pub(super) struct RealTimer {
+    deadline: Option<u64>,
+    interval: u64,
+}
+
+impl RealTimer {
+    fn value(self, now: u64) -> protocol::interval_timer::Value {
+        protocol::interval_timer::Value {
+            interval_ns: self.interval,
+            remaining_ns: self.deadline.map_or(0, |end| end.saturating_sub(now)),
+        }
+    }
+
+    fn new(now: u64, value: protocol::interval_timer::Value) -> Result<Self, i32> {
+        let deadline = if value.remaining_ns == 0 {
+            None
+        } else {
+            Some(
+                now.checked_add(value.remaining_ns)
+                    .filter(|&end| end != mnu_abi::HANDLE_WAIT_INFINITE)
+                    .ok_or(STATUS_EOVERFLOW)?,
+            )
+        };
+        Ok(Self {
+            deadline,
+            interval: value.interval_ns,
+        })
+    }
+
+    fn after_expiration(self, now: u64) -> Self {
+        let deadline = self.deadline.and_then(|end| {
+            if self.interval == 0 {
+                return None;
+            }
+            // Advance from the scheduled deadline, not observation time. A
+            // delayed reactor coalesces missed expirations without phase drift
+            // or an unbounded replay loop. No finite deadline means disarmed.
+            let steps = u128::from(now - end) / u128::from(self.interval) + 1;
+            u64::try_from(u128::from(end) + steps * u128::from(self.interval))
+                .ok()
+                .filter(|&end| end != mnu_abi::HANDLE_WAIT_INFINITE)
+        });
+        Self { deadline, ..self }
+    }
+}
+
 impl<H: Copy> PosixService<H> {
     /// Supply the reactor's native monotonic clock. Never use wall time:
     /// changing the civil clock must not change an outstanding alarm.
@@ -12,11 +59,14 @@ impl<H: Copy> PosixService<H> {
     }
 
     pub fn next_alarm_deadline(&self) -> Option<u64> {
-        self.alarm_deadlines.values().copied().min()
+        self.real_timers
+            .values()
+            .filter_map(|timer| timer.deadline)
+            .min()
     }
 
     pub fn expire_alarms(&mut self) -> Result<usize, i32> {
-        if self.alarm_deadlines.is_empty() {
+        if self.next_alarm_deadline().is_none() {
             return Ok(0);
         }
         let now = self.monotonic_clock.ok_or(protocol::STATUS_EIO)?()?;
@@ -25,23 +75,35 @@ impl<H: Copy> PosixService<H> {
 
     fn expire_alarms_at(&mut self, now: u64) -> Result<usize, i32> {
         let due: Vec<_> = self
-            .alarm_deadlines
+            .real_timers
             .iter()
-            .filter_map(|(&owner, &deadline)| (deadline <= now).then_some(owner))
+            .filter_map(|(&owner, timer)| {
+                timer
+                    .deadline
+                    .filter(|&deadline| deadline <= now)
+                    .map(|_| (owner, *timer))
+            })
             .collect();
         let mut count = 0;
-        for owner in due {
+        for (owner, timer) in due {
             // Existing delivery handles ignored and blocked dispositions,
             // coalescing, provenance and native thread notification.
             self.enqueue_signal(owner, protocol::SIGNAL_ALRM)?;
-            self.alarm_deadlines.remove(&owner);
+            self.store_real_timer(owner, timer.after_expiration(now));
             count += 1;
         }
         Ok(count)
     }
 
-    pub(super) fn alarm_payload(&mut self, owner: u64, payload: &[u8]) -> Result<Vec<u8>, i32> {
-        let seconds = u32::from_le_bytes(payload.try_into().map_err(|_| STATUS_EINVAL)?);
+    fn store_real_timer(&mut self, owner: u64, timer: RealTimer) {
+        if timer.deadline.is_none() && timer.interval == 0 {
+            self.real_timers.remove(&owner);
+        } else {
+            self.real_timers.insert(owner, timer);
+        }
+    }
+
+    fn timer_clock(&self, owner: u64) -> Result<u64, i32> {
         if !self.sessions.contains_key(&owner)
             || self
                 .process_wait_states
@@ -50,30 +112,52 @@ impl<H: Copy> PosixService<H> {
         {
             return Err(protocol::STATUS_ESRCH);
         }
-        let now = self.monotonic_clock.ok_or(protocol::STATUS_EIO)?()?;
-        let deadline = if seconds == 0 {
-            None
-        } else {
-            Some(
-                now.checked_add(u64::from(seconds) * SECOND)
-                    // This value means "wait forever" to the native reactor,
-                    // not a representable finite timer deadline.
-                    .filter(|&end| end != mnu_abi::HANDLE_WAIT_INFINITE)
-                    .ok_or(STATUS_EOVERFLOW)?,
-            )
-        };
+        self.monotonic_clock.ok_or(protocol::STATUS_EIO)?()
+    }
+
+    pub(super) fn real_timer_payload(
+        &mut self,
+        owner: u64,
+        replacement: Option<protocol::interval_timer::Value>,
+    ) -> Result<Vec<u8>, i32> {
+        let now = self.timer_clock(owner)?;
+        // Reject unrepresentable replacement before expiring or changing state.
+        let replacement = replacement
+            .map(|value| RealTimer::new(now, value))
+            .transpose()?;
         self.expire_alarms_at(now)?;
         let previous = self
-            .alarm_deadlines
+            .real_timers
             .get(&owner)
-            .map_or(0, |&end| end.saturating_sub(now).div_ceil(SECOND));
+            .map_or(protocol::interval_timer::Value::default(), |timer| {
+                timer.value(now)
+            });
+        let mut output = vec![0; protocol::interval_timer::LEN];
+        protocol::interval_timer::encode(previous, &mut output).map_err(|_| STATUS_EINVAL)?;
+        if let Some(timer) = replacement {
+            self.store_real_timer(owner, timer);
+        }
+        Ok(output)
+    }
+
+    pub(super) fn alarm_payload(&mut self, owner: u64, payload: &[u8]) -> Result<Vec<u8>, i32> {
+        let seconds = u32::from_le_bytes(payload.try_into().map_err(|_| STATUS_EINVAL)?);
+        let now = self.timer_clock(owner)?;
+        let replacement = RealTimer::new(
+            now,
+            protocol::interval_timer::Value {
+                interval_ns: 0,
+                remaining_ns: u64::from(seconds) * SECOND,
+            },
+        )?;
+        self.expire_alarms_at(now)?;
+        let previous = self
+            .real_timers
+            .get(&owner)
+            .map_or(0, |timer| timer.value(now).remaining_ns.div_ceil(SECOND));
         let previous = u32::try_from(previous).map_err(|_| STATUS_EOVERFLOW)?;
         let output = previous.to_le_bytes().to_vec();
-        if let Some(deadline) = deadline {
-            self.alarm_deadlines.insert(owner, deadline);
-        } else {
-            self.alarm_deadlines.remove(&owner);
-        }
+        self.store_real_timer(owner, replacement);
         Ok(output)
     }
 }

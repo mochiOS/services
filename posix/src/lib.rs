@@ -725,7 +725,7 @@ pub struct ControllingTerminal {
 #[derive(Debug)]
 pub struct PosixService<H: Copy = u32> {
     monotonic_clock: Option<fn() -> Result<u64, i32>>,
-    alarm_deadlines: BTreeMap<u64, u64>,
+    real_timers: BTreeMap<u64, alarm::RealTimer>,
     resource_policies: Vec<(u64, Box<dyn resource_policy::Published<H>>)>,
     prepared_forks: Vec<(u64, fork_state::ForkState<H>)>,
     next_fork_token: u64,
@@ -765,7 +765,7 @@ impl PosixService<u32> {
     pub const fn new() -> Self {
         Self {
             monotonic_clock: None,
-            alarm_deadlines: BTreeMap::new(),
+            real_timers: BTreeMap::new(),
             resource_policies: Vec::new(),
             prepared_forks: Vec::new(),
             next_fork_token: 1,
@@ -1122,7 +1122,7 @@ impl<H: Copy> PosixService<H> {
                     && !self.controlling_terminals.contains_key(child_id)
                     && !self.needs_parent_exit_observation(*child_id)
                     && !self.resource_policies.iter().any(|(owner, _)| *owner == *child_id)
-                    && !self.alarm_deadlines.contains_key(child_id)
+                    && !self.real_timers.contains_key(child_id)
                 {
                     return None;
                 }
@@ -1192,7 +1192,7 @@ impl<H: Copy> PosixService<H> {
             return Ok(());
         }
         let connected_before = self.non_orphaned_groups();
-        self.alarm_deadlines.remove(&process_id);
+        self.real_timers.remove(&process_id);
         self.resource_policies.retain(|(owner, _)| *owner != process_id);
         self.hangup_exited_controlling_process(process_id)?;
         self.process_wait_states
@@ -1422,7 +1422,7 @@ impl<H: Copy> PosixService<H> {
                         || self.has_reparentable_children(*child_id)
                         || self.needs_parent_exit_observation(*child_id)
                         || self.controlling_terminals.contains_key(child_id)
-                        || (!state.exit_observed && self.alarm_deadlines.contains_key(child_id)) =>
+                        || (!state.exit_observed && self.real_timers.contains_key(child_id)) =>
                 {
                     self.processes.get(child_id).copied()
                 }
@@ -2033,7 +2033,7 @@ impl<H: Copy> PosixService<H> {
         self.signal_notifications.remove(&child_id);
         self.process_resume_notifications.remove(&child_id);
         self.sessions.remove(&child_id);
-        self.alarm_deadlines.remove(&child_id);
+        self.real_timers.remove(&child_id);
         if let Some(directories) = self.directories.remove(&child_id) {
             filesystem.release_object(directories.root);
             filesystem.release_object(directories.cwd);
@@ -3333,6 +3333,14 @@ impl<H: Copy> PosixService<H> {
             }
             protocol::OP_UMASK_SET if header.flags == 0 => self.set_umask(peer.process_id, payload),
             protocol::OP_ALARM if header.flags == 0 => self.alarm_payload(peer.process_id, payload),
+            protocol::OP_REAL_TIMER_GET if header.flags == 0 && payload.is_empty() => {
+                self.real_timer_payload(peer.process_id, None)
+            }
+            protocol::OP_REAL_TIMER_SET if header.flags == 0 => {
+                protocol::interval_timer::decode(payload)
+                    .map_err(|_| STATUS_EINVAL)
+                    .and_then(|value| self.real_timer_payload(peer.process_id, Some(value)))
+            }
             protocol::OP_SET_UID if header.flags == 0 => {
                 self.set_uid(peer.process_id, payload).map(|_| Vec::new())
             }
@@ -3410,6 +3418,8 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_FCHDIR
             | protocol::OP_GETCWD => Err(STATUS_EINVAL),
             protocol::OP_SET_UID
+            | protocol::OP_REAL_TIMER_GET
+            | protocol::OP_REAL_TIMER_SET
             | protocol::OP_SET_GID
             | protocol::OP_SET_EFFECTIVE_UID
             | protocol::OP_SET_EFFECTIVE_GID
