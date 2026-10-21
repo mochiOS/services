@@ -1,4 +1,4 @@
-use mochios_posix_client::newlib_errno::{EFAULT, EINVAL, EIO, ENOSYS, EOVERFLOW};
+use mochios_posix_client::newlib_errno::{EFAULT, EINVAL, EIO, EOVERFLOW};
 use mochios_posix_protocol as posix_protocol;
 use posix_protocol::interval_timer::Value;
 use std::cell::Cell;
@@ -14,6 +14,7 @@ thread_local! {
     static ERRNO: Cell<i32> = const { Cell::new(123) };
     static CALLS: Cell<usize> = const { Cell::new(0) };
     static STATE: Cell<Value> = Cell::new(Value::default());
+    static CPU_STATE: Cell<[Value; 2]> = Cell::new([Value::default(); 2]);
     static FAILURE: Cell<i32> = const { Cell::new(0) };
 }
 fn set_errno(value: i32) {
@@ -46,6 +47,24 @@ impl Client {
     fn set_real_timer(&self, value: Value) -> Result<Value, i32> {
         let old = self.real_timer()?;
         STATE.set(value);
+        Ok(old)
+    }
+    fn cpu_timer(&self, clock: posix_protocol::interval_timer::CpuClock) -> Result<Value, i32> {
+        CALLS.set(CALLS.get() + 1);
+        if FAILURE.get() != 0 {
+            return Err(FAILURE.get());
+        }
+        Ok(CPU_STATE.get()[clock as usize - 1])
+    }
+    fn set_cpu_timer(
+        &self,
+        clock: posix_protocol::interval_timer::CpuClock,
+        value: Value,
+    ) -> Result<Value, i32> {
+        let old = self.cpu_timer(clock)?;
+        let mut state = CPU_STATE.get();
+        state[clock as usize - 1] = value;
+        CPU_STATE.set(state);
         Ok(old)
     }
 }
@@ -86,6 +105,7 @@ fn reset() {
     ERRNO.set(123);
     CALLS.set(0);
     STATE.set(Value::default());
+    CPU_STATE.set([Value::default(); 2]);
     FAILURE.set(0);
 }
 
@@ -130,6 +150,44 @@ fn c_timer_wrappers_convert_canonical_values_and_preserve_errno_and_aliasing() {
 }
 
 #[test]
+fn c_cpu_timer_kinds_route_to_distinct_cpu_state_without_changing_real_timer() {
+    reset();
+    for kind in [1, 2] {
+        let input = encoded([0, kind, kind, 1]);
+        let mut output = [0xaa; 32];
+        assert_eq!(
+            production::setitimer(
+                kind as c_int,
+                input.as_ptr().cast(),
+                output.as_mut_ptr().cast()
+            ),
+            0
+        );
+        assert_eq!(output, [0; 32]);
+        assert_eq!(
+            production::getitimer(kind as c_int, output.as_mut_ptr().cast()),
+            0
+        );
+        assert_eq!(output, input);
+        assert_eq!(STATE.get(), Value::default());
+        assert_eq!(ERRNO.get(), 123);
+        FAILURE.set(EIO);
+        assert_eq!(
+            production::getitimer(kind as c_int, output.as_mut_ptr().cast()),
+            -1
+        );
+        assert_eq!(ERRNO.get(), EIO);
+        assert_eq!(
+            production::setitimer(kind as c_int, input.as_ptr().cast(), std::ptr::null_mut()),
+            -1
+        );
+        assert_eq!(ERRNO.get(), EIO);
+        FAILURE.set(0);
+        ERRNO.set(123);
+    }
+}
+
+#[test]
 fn c_timer_invalid_values_and_kinds_do_not_reach_transport() {
     reset();
     for (fields, error) in [
@@ -149,7 +207,7 @@ fn c_timer_invalid_values_and_kinds_do_not_reach_transport() {
         );
         assert_eq!(ERRNO.get(), error);
     }
-    for (kind, error) in [(-1, EINVAL), (3, EINVAL), (1, ENOSYS), (2, ENOSYS)] {
+    for (kind, error) in [(-1, EINVAL), (3, EINVAL)] {
         assert_eq!(production::getitimer(kind, std::ptr::null_mut()), -1);
         assert_eq!(ERRNO.get(), error);
         assert_eq!(

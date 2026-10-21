@@ -19,6 +19,8 @@ static FAIL:Cell<u32>=const{Cell::new(0)};
 static CLOCK_CALLS:Cell<u32>=const{Cell::new(0)};
 static LOGS:Cell<u32>=const{Cell::new(0)};
 static NOTIFICATIONS:Cell<u32>=const{Cell::new(0)};
+static CPU_ONLY:Cell<bool>=const{Cell::new(false)};
+static TIMER_SWEEPS:Cell<u32>=const{Cell::new(0)};
 }
 #[macro_export]macro_rules! logln{($($argument:tt)*)=>{crate::LOGS.set(crate::LOGS.get()+1)}}
 pub mod syscall{pub const HANDLE_WAIT_INFINITE:u64=u64::MAX;}
@@ -32,7 +34,9 @@ mod posix_service{pub mod cpu_limit{pub const SWEEP_INTERVAL_MS:u64=100;}}
 struct Service {deadline:u64,cpu_sweeps:u32}
 impl Service {
 fn expire_alarms(&mut self)->Result<usize,i32>{if FAIL.get()&1!=0{Err(-5)}else{Ok(0)}}
-fn has_finite_cpu_limits(&self)->bool{true}
+fn has_finite_cpu_limits(&self)->bool{!CPU_ONLY.get()}
+fn has_cpu_timers(&self)->bool{CPU_ONLY.get()}
+fn expire_cpu_timers(&mut self,_:&mut())->Result<usize,i32>{TIMER_SWEEPS.set(TIMER_SWEEPS.get()+1);Ok(0)}
 fn enforce_cpu_limits(&mut self,_:&mut())->Result<(),i32>{self.cpu_sweeps+=1;Ok(())}
 fn next_alarm_deadline(&self)->Option<u64>{Some(self.deadline)}
 fn child_lifecycle_handles(&self)->Vec<u32>{vec![7]}
@@ -72,6 +76,11 @@ for failure in [1,2,4,7] {
  FAIL.set(failure);CLOCK_CALLS.set(0);assert!(plan(&mut service,&mut reported).1);
  assert_eq!(LOGS.get(),2);
 }
+// CPU timers alone must keep the idle reactor's native wait deadline finite.
+CPU_ONLY.set(true);FAIL.set(0);CLOCK_CALLS.set(0);TIMER_SWEEPS.set(0);
+let mut service=Service{deadline:5_000_000_000,cpu_sweeps:0};let mut reported=false;
+assert_eq!(plan(&mut service,&mut reported),(2_010_000_000,false));
+assert_eq!(TIMER_SWEEPS.get(),1);
 }
 "#,
     );

@@ -28,6 +28,7 @@ mod alarm;
 mod fork_state;
 pub mod resource_policy;
 pub mod cpu_limit;
+mod cpu_timer;
 pub mod filesystem_times;
 pub use fork_state::validate_fork_child;
 
@@ -726,6 +727,7 @@ pub struct ControllingTerminal {
 pub struct PosixService<H: Copy = u32> {
     monotonic_clock: Option<fn() -> Result<u64, i32>>,
     real_timers: BTreeMap<u64, alarm::RealTimer>,
+    cpu_timers: BTreeMap<(u64, u32), cpu_timer::CpuTimer>,
     resource_policies: Vec<(u64, Box<dyn resource_policy::Published<H>>)>,
     prepared_forks: Vec<(u64, fork_state::ForkState<H>)>,
     next_fork_token: u64,
@@ -766,6 +768,7 @@ impl PosixService<u32> {
         Self {
             monotonic_clock: None,
             real_timers: BTreeMap::new(),
+            cpu_timers: BTreeMap::new(),
             resource_policies: Vec::new(),
             prepared_forks: Vec::new(),
             next_fork_token: 1,
@@ -1123,6 +1126,7 @@ impl<H: Copy> PosixService<H> {
                     && !self.needs_parent_exit_observation(*child_id)
                     && !self.resource_policies.iter().any(|(owner, _)| *owner == *child_id)
                     && !self.real_timers.contains_key(child_id)
+                    && !self.has_cpu_timer_state(*child_id)
                 {
                     return None;
                 }
@@ -1193,6 +1197,7 @@ impl<H: Copy> PosixService<H> {
         }
         let connected_before = self.non_orphaned_groups();
         self.real_timers.remove(&process_id);
+        self.cpu_timers.retain(|&(owner, _), _| owner != process_id);
         self.resource_policies.retain(|(owner, _)| *owner != process_id);
         self.hangup_exited_controlling_process(process_id)?;
         self.process_wait_states
@@ -1422,7 +1427,8 @@ impl<H: Copy> PosixService<H> {
                         || self.has_reparentable_children(*child_id)
                         || self.needs_parent_exit_observation(*child_id)
                         || self.controlling_terminals.contains_key(child_id)
-                        || (!state.exit_observed && self.real_timers.contains_key(child_id)) =>
+                        || (!state.exit_observed && (self.real_timers.contains_key(child_id)
+                            || self.has_cpu_timer_state(*child_id))) =>
                 {
                     self.processes.get(child_id).copied()
                 }
@@ -2034,6 +2040,7 @@ impl<H: Copy> PosixService<H> {
         self.process_resume_notifications.remove(&child_id);
         self.sessions.remove(&child_id);
         self.real_timers.remove(&child_id);
+        self.cpu_timers.retain(|&(owner, _), _| owner != child_id);
         if let Some(directories) = self.directories.remove(&child_id) {
             filesystem.release_object(directories.root);
             filesystem.release_object(directories.cwd);

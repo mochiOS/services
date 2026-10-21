@@ -216,9 +216,17 @@ fn main() {
             }
             clock_failed = true;
         }
-        let cpu_deadline = if service.has_finite_cpu_limits() {
+        let cpu_deadline = if service.has_finite_cpu_limits() || service.has_cpu_timers() {
             match platform::time::monotonic_milliseconds() {
                 Ok(now) => {
+                    // Timers use a 10 ms observation cadence even when no
+                    // finite CPU budget or further client RPC exists.
+                    let interval = if service.has_cpu_timers() {
+                        10
+                    } else {
+                        posix_service::cpu_limit::SWEEP_INTERVAL_MS
+                    };
+                    cpu_sweep_deadline_ms = cpu_sweep_deadline_ms.min(now.saturating_add(interval));
                     if now >= cpu_sweep_deadline_ms {
                         if let Err(error) = service.enforce_cpu_limits(&mut processes) {
                             platform::logln!(
@@ -226,8 +234,12 @@ fn main() {
                                 error
                             );
                         }
-                        cpu_sweep_deadline_ms =
-                            now.saturating_add(posix_service::cpu_limit::SWEEP_INTERVAL_MS);
+                        if let Err(error) = service.expire_cpu_timers(&mut processes) {
+                            platform::logln!(
+                                "posix.service: CPU timer observation failed errno={}", error
+                            );
+                        }
+                        cpu_sweep_deadline_ms = now.saturating_add(interval);
                     }
                     cpu_sweep_deadline_ms.saturating_mul(1_000_000)
                 }
@@ -570,6 +582,15 @@ fn main() {
                     response,
                     handles: Vec::new(),
                 })
+            }
+            (Some(peer), Some((header, payload)), true)
+                if matches!(
+                    header.opcode, protocol::OP_CPU_TIMER_GET | protocol::OP_CPU_TIMER_SET
+                ) =>
+            {
+                Some(service.handle_cpu_timer_request(
+                    peer, header, payload, &attachments, &mut processes,
+                ))
             }
             (Some(peer), Some((header, payload)), true)
                 if header.opcode == protocol::OP_PTY_OPEN

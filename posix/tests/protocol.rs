@@ -33,6 +33,9 @@ mod wait_info;
 #[path = "support/cpu_limit.rs"]
 mod cpu_limit;
 
+#[path = "support/cpu_timer.rs"]
+mod cpu_timer;
+
 #[path = "support/child_signal_info.rs"]
 mod child_signal_info;
 
