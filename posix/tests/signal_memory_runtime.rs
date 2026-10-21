@@ -22,7 +22,7 @@ pub struct SignalAction {
     sa_mask: u64,
     sa_flags: c_int,
 }
-use mochios_posix_client::signal_context::SigInfo;
+use mochios_posix_client::signal_context::{SigInfo, Stack};
 fn action() -> SignalAction {
     SignalAction {
         handler: usize::MAX - 1,
@@ -58,6 +58,25 @@ fn signal_action_uses_c_offsets_and_zeroes_padding_without_borrowing_callers() {
     assert_eq!(&bytes[21..25], [0; 4]);
     assert_eq!((bytes[0], bytes[25]), (0xa5, 0xa5));
 }
+#[test]
+fn alternate_stack_bytes_use_c_offsets_zero_padding_and_accept_unaligned_pointers() {
+    let value = Stack {
+        ss_sp: 0x123456789abc,
+        ss_flags: -17,
+        ss_size: 0x112233445566,
+    };
+    let mut bytes = [0xa5; 26];
+    let pointer = bytes.as_mut_ptr().wrapping_add(1).cast();
+    implementation::write_stack(pointer, value).unwrap();
+    assert_eq!(implementation::read_stack(pointer), Ok(value));
+    let mut expected = [0; 24];
+    expected[..8].copy_from_slice(&value.ss_sp.to_ne_bytes());
+    expected[8..12].copy_from_slice(&value.ss_flags.to_ne_bytes());
+    expected[16..24].copy_from_slice(&value.ss_size.to_ne_bytes());
+    assert_eq!(bytes[1..25], expected);
+    assert_eq!((bytes[0], bytes[25]), (0xa5, 0xa5));
+}
+
 #[test]
 fn signal_sets_and_selected_signal_preserve_full_width_and_neighboring_bytes() {
     let mut bytes = [0xa5; 10];
@@ -103,6 +122,18 @@ fn optional_info_still_validates_origin_and_overflow() {
 #[test]
 fn invalid_application_memory_returns_efault_for_each_metadata_format() {
     for address in [0, 1, usize::MAX] {
+        assert_eq!(implementation::read_stack(address as *const _), Err(EFAULT));
+        assert_eq!(
+            implementation::write_stack(
+                address as *mut _,
+                Stack {
+                    ss_sp: 0x10000,
+                    ss_flags: 0,
+                    ss_size: 8192,
+                }
+            ),
+            Err(EFAULT)
+        );
         assert_eq!(
             implementation::read_action(address as *const _),
             Err(EFAULT)

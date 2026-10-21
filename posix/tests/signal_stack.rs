@@ -177,7 +177,7 @@ fn configuration_and_switch_setup_exclude_reentrant_delivery_until_the_stack_is_
             < configure.find(".replace(").unwrap()
     );
     assert!(
-        configure.find("previous.write(old)").unwrap()
+        configure.find("signal_memory::write_stack(previous, old)").unwrap()
             < configure.find("SIGNAL_MASK_SET, mask").unwrap()
     );
     let callback = runtime
