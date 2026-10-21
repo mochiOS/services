@@ -56,6 +56,9 @@ impl<H: Copy> PosixService<H> {
         } else {
             Some(
                 now.checked_add(u64::from(seconds) * SECOND)
+                    // This value means "wait forever" to the native reactor,
+                    // not a representable finite timer deadline.
+                    .filter(|&end| end != mnu_abi::HANDLE_WAIT_INFINITE)
                     .ok_or(STATUS_EOVERFLOW)?,
             )
         };

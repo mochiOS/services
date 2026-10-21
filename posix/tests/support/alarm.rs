@@ -156,6 +156,38 @@ fn invalid_input_clock_failure_and_deadline_overflow_preserve_the_alarm() {
 }
 
 #[test]
+fn alarm_rejects_infinite_wait_sentinel_but_expires_last_finite_deadline() {
+    let peer = PeerIdentity {
+        process_id: 717,
+        effective_uid: 505,
+        effective_gid: 24,
+    };
+    let mut service = service_for(peer).with_monotonic_clock(clock);
+    NOW.set(Ok(0));
+    assert_eq!(alarm(&mut service, peer, 5), Ok(0));
+
+    NOW.set(Ok(u64::MAX - 1_000_000_000));
+    assert_eq!(
+        alarm(&mut service, peer, 1),
+        Err(posix_service::STATUS_EOVERFLOW)
+    );
+    assert_eq!(service.next_alarm_deadline(), Some(5_000_000_000));
+    assert_eq!(service.signal_state(peer.process_id).unwrap().pending(), 0);
+
+    // The deadline immediately below the sentinel is still finite and valid.
+    let mut service = service_for(peer).with_monotonic_clock(clock);
+    NOW.set(Ok(u64::MAX - 1_000_000_001));
+    assert_eq!(alarm(&mut service, peer, 1), Ok(0));
+    assert_eq!(service.next_alarm_deadline(), Some(u64::MAX - 1));
+    NOW.set(Ok(u64::MAX - 2));
+    assert_eq!(service.expire_alarms(), Ok(0));
+    NOW.set(Ok(u64::MAX - 1));
+    assert_eq!(service.expire_alarms(), Ok(1));
+    assert_eq!(service.next_alarm_deadline(), None);
+    assert_ne!(service.signal_state(peer.process_id).unwrap().pending(), 0);
+}
+
+#[test]
 fn root_process_exit_cancels_alarm_and_is_observed_without_a_posix_parent() {
     let (service, init, _, _, _, mut processes) = orphan_family();
     let mut service = service.with_monotonic_clock(clock);
