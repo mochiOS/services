@@ -32,6 +32,7 @@ fn public_runtime_group_arrays_match_newlib_headers() {
     assert!(runtime.contains("grouplist: *mut groups::Gid"));
     assert!(runtime.contains("grouplist: *const groups::Gid"));
     assert!(
-        runtime.contains("groups::store(&groups[..count], destination).map_err(|_| EOVERFLOW)?")
+        runtime.contains("groups_memory::write(grouplist, &groups[..count])?")
     );
+    assert!(runtime.contains("groups_memory::read(grouplist, &mut groups[..count])?"));
 }
