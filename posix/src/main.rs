@@ -182,10 +182,12 @@ fn main() {
     // lifecycle periodically, not by scanning every handle on every RPC.
     let mut thread_sweep_deadline_ms = 0;
     let mut cpu_sweep_deadline_ms = 0;
+    let mut clock_failure_reported = false;
     let mut request_bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
     let mut response_bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
     loop {
         let mut service = service_state.lock().unwrap();
+        let mut clock_failed = false;
         if let Err(error) = service.refresh_child_exit_notifications(&mut processes) {
             platform::logln!(
                 "posix.service: child lifecycle refresh failed errno={}",
@@ -208,33 +210,39 @@ fn main() {
             );
         }
         if let Err(error) = service.expire_alarms() {
-            platform::logln!("posix.service: alarm clock failed errno={}", error);
-            platform::thread::yield_now();
-            continue;
+            if !clock_failure_reported {
+                platform::logln!("posix.service: alarm clock failed errno={}", error);
+                clock_failure_reported = true;
+            }
+            clock_failed = true;
         }
         let cpu_deadline = if service.has_finite_cpu_limits() {
-            let now = match platform::time::monotonic_milliseconds() {
-                Ok(now) => now,
+            match platform::time::monotonic_milliseconds() {
+                Ok(now) => {
+                    if now >= cpu_sweep_deadline_ms {
+                        if let Err(error) = service.enforce_cpu_limits(&mut processes) {
+                            platform::logln!(
+                                "posix.service: CPU budget observation failed errno={}",
+                                error
+                            );
+                        }
+                        cpu_sweep_deadline_ms =
+                            now.saturating_add(posix_service::cpu_limit::SWEEP_INTERVAL_MS);
+                    }
+                    cpu_sweep_deadline_ms.saturating_mul(1_000_000)
+                }
                 Err(error) => {
-                    platform::logln!(
-                        "posix.service: CPU budget clock failed errno={}",
-                        error.raw()
-                    );
-                    platform::thread::yield_now();
-                    continue;
+                    if !clock_failure_reported {
+                        platform::logln!(
+                            "posix.service: CPU budget clock failed errno={}",
+                            error.raw()
+                        );
+                        clock_failure_reported = true;
+                    }
+                    clock_failed = true;
+                    platform::syscall::HANDLE_WAIT_INFINITE
                 }
-            };
-            if now >= cpu_sweep_deadline_ms {
-                if let Err(error) = service.enforce_cpu_limits(&mut processes) {
-                    platform::logln!(
-                        "posix.service: CPU budget observation failed errno={}",
-                        error
-                    );
-                }
-                cpu_sweep_deadline_ms =
-                    now.saturating_add(posix_service::cpu_limit::SWEEP_INTERVAL_MS);
             }
-            cpu_sweep_deadline_ms.saturating_mul(1_000_000)
         } else {
             cpu_sweep_deadline_ms = 0;
             platform::syscall::HANDLE_WAIT_INFINITE
@@ -251,25 +259,29 @@ fn main() {
         let deadline = if signal_threads.is_empty() {
             platform::syscall::HANDLE_WAIT_INFINITE
         } else {
-            let now = match platform::time::monotonic_milliseconds() {
-                Ok(now) => now,
-                Err(error) => {
-                    platform::logln!(
-                        "posix.service: thread lifecycle clock failed errno={}",
-                        error.raw()
-                    );
-                    platform::thread::yield_now();
-                    continue;
+            match platform::time::monotonic_milliseconds() {
+                Ok(now) => {
+                    if now >= thread_sweep_deadline_ms {
+                        reap_signal_threads(&mut service, &mut signal_threads);
+                        thread_sweep_deadline_ms = now.saturating_add(1_000);
+                    }
+                    if signal_threads.is_empty() {
+                        platform::syscall::HANDLE_WAIT_INFINITE
+                    } else {
+                        thread_sweep_deadline_ms.saturating_mul(1_000_000)
+                    }
                 }
-            };
-            if now >= thread_sweep_deadline_ms {
-                reap_signal_threads(&mut service, &mut signal_threads);
-                thread_sweep_deadline_ms = now.saturating_add(1_000);
-            }
-            if signal_threads.is_empty() {
-                platform::syscall::HANDLE_WAIT_INFINITE
-            } else {
-                thread_sweep_deadline_ms.saturating_mul(1_000_000)
+                Err(error) => {
+                    if !clock_failure_reported {
+                        platform::logln!(
+                            "posix.service: thread lifecycle clock failed errno={}",
+                            error.raw()
+                        );
+                        clock_failure_reported = true;
+                    }
+                    clock_failed = true;
+                    platform::syscall::HANDLE_WAIT_INFINITE
+                }
             }
         };
         let deadline = pending_signal_waits
@@ -281,8 +293,11 @@ fn main() {
                     .unwrap_or(platform::syscall::HANDLE_WAIT_INFINITE),
             );
         let lifecycle_handles = service.child_lifecycle_handles();
+        if !clock_failed {
+            clock_failure_reported = false;
+        }
         drop(service);
-        match wait_for_request_or_child(endpoint_handle, lifecycle_handles, deadline) {
+        match wait_for_request_or_child(endpoint_handle, lifecycle_handles, deadline, clock_failed) {
             Ok(true) => {}
             Ok(false) => continue,
             Err(error) => {
@@ -1710,6 +1725,7 @@ fn wait_for_request_or_child(
     endpoint: u32,
     lifecycle_handles: Vec<u32>,
     deadline: u64,
+    clock_failed: bool,
 ) -> Result<bool, i64> {
     use mochi_user_platform::{process, syscall};
 
@@ -1726,9 +1742,26 @@ fn wait_for_request_or_child(
             ..syscall::HandleWaitItem::default()
         });
     }
+    // ClockRead failure must not block endpoint processing, invent a new
+    // expiration, or discard an outstanding timer. Native polling checks
+    // readiness without needing an absolute user-space clock observation.
+    let deadline = if clock_failed {
+        syscall::HANDLE_WAIT_POLL
+    } else {
+        deadline
+    };
     match process::wait_many(&mut items, deadline) {
         Ok(index) => Ok(index == 0),
-        Err(error) if error.native_error() == Some(mnu_abi::status::Error::NotReady) => Ok(false),
+        Err(error) if error.native_error() == Some(mnu_abi::status::Error::NotReady) => {
+            if clock_failed {
+                // Relative native sleep needs no ClockRead. Only back off
+                // while idle, after the caller has released POSIX state.
+                if mochi_user_platform::thread::sleep_milliseconds(1).is_err() {
+                    mochi_user_platform::thread::yield_now();
+                }
+            }
+            Ok(false)
+        }
         Err(error) => Err(error.raw()),
     }
 }

@@ -23,12 +23,23 @@ thread_local! {
     static RESULT:Cell<Result<usize,mochi_user_syscall::SysError>>=const{Cell::new(Ok(0))};
     static DEADLINE:Cell<u64>=const{Cell::new(0)};
     static CALLS:Cell<usize>=const{Cell::new(0)};
+    static SLEEPS:Cell<usize>=const{Cell::new(0)};
+    static YIELDS:Cell<usize>=const{Cell::new(0)};
+    static SLEEP_FAILS:Cell<bool>=const{Cell::new(false)};
 }
 mod mochi_user_platform {
     pub mod syscall {
         pub use crate::HandleWaitItem;
         pub const HANDLE_SIGNAL_READABLE:u64=crate::HANDLE_SIGNAL_READABLE;
         pub const HANDLE_SIGNAL_TERMINATED:u64=crate::HANDLE_SIGNAL_TERMINATED;
+        pub const HANDLE_WAIT_POLL:u64=0;
+    }
+    pub mod thread {
+        pub fn sleep_milliseconds(milliseconds:u64)->Result<(),()> {
+            assert_eq!(milliseconds,1);crate::SLEEPS.set(crate::SLEEPS.get()+1);
+            if crate::SLEEP_FAILS.get(){Err(())}else{Ok(())}
+        }
+        pub fn yield_now(){crate::YIELDS.set(crate::YIELDS.get()+1);}
     }
     pub mod process {
         pub fn wait_many(items:&mut[crate::HandleWaitItem],deadline:u64)->Result<usize,crate::mochi_user_syscall::SysError>{
@@ -49,7 +60,7 @@ mod mochi_user_platform {
     ));
     program.push_str(r#"
 fn invoke(deadline:u64)->Result<bool,i64>{
-    DEADLINE.set(deadline);wait_for_request_or_child(42,vec![7,8],deadline)
+    DEADLINE.set(deadline);wait_for_request_or_child(42,vec![7,8],deadline,false)
 }
 fn main(){
     for deadline in [0,100,u64::MAX] {
@@ -71,6 +82,17 @@ fn main(){
         }
     }
     assert_eq!(CALLS.get(),51);
+    assert_eq!(SLEEPS.get(),0);
+    for result in [Ok(0),Ok(1),Err(mochi_user_syscall::SysError::from_raw(Error::NotReady.into_raw()as i64)),Err(mochi_user_syscall::SysError::from_raw(Error::AccessDenied.into_raw()as i64))] {
+        for sleep_fails in [false,true] {
+            DEADLINE.set(0);RESULT.set(result);SLEEP_FAILS.set(sleep_fails);SLEEPS.set(0);YIELDS.set(0);
+            let actual=wait_for_request_or_child(42,vec![7,8],u64::MAX,true);
+            let idle=matches!(result,Err(error)if error.native_error()==Some(Error::NotReady));
+            assert_eq!(actual,match result{Ok(index)=>Ok(index==0),Err(_)if idle=>Ok(false),Err(error)=>Err(error.raw())});
+            assert_eq!(SLEEPS.get(),usize::from(idle));
+            assert_eq!(YIELDS.get(),usize::from(idle&&sleep_fails));
+        }
+    }
 }
 "#);
     probe::run(&program);
