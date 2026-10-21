@@ -3276,6 +3276,7 @@ impl FilesystemService {
             }
         }
         let old_length = current.metadata().len();
+        let previous_mtime = current.mtime();
         // Validate and stage both times before BEGIN or any backing write.
         // The truncate backend commits this inode with the new size; do not
         // add a second, fallible metadata write after changing file contents.
@@ -3318,6 +3319,16 @@ impl FilesystemService {
         }
         // A backend error may follow partial writes. Never interpret it as
         // "unchanged": dropping an in-flight owner quarantines all aliases.
+        if length != old_length && file.inode().mode().bits() & 0o6000 != 0 {
+            // WRITE authority permits resizing, not preserving execution
+            // privileges. Persist revocation before zeroing a retained tail or
+            // releasing blocks: the final inode write can fail after either.
+            let mode = file.inode().mode() & !InodeMode::from_bits_retain(0o6000);
+            file.inode_mut().set_mode(mode).map_err(errno)?;
+            let mut invalidated = file.inode().clone();
+            invalidated.set_mtime(previous_mtime);
+            invalidated.write(&filesystem).map_err(errno)?;
+        }
         file.truncate(length).map_err(errno)?;
         if length == old_length {
             // The extent and block-map backends deliberately skip their inode

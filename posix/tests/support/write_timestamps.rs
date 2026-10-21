@@ -292,6 +292,178 @@ fn write_invalidates_privilege_before_data_even_if_later_storage_writes_fail() {
 }
 
 #[test]
+fn truncate_paths_drop_setid_before_changing_contents() {
+    for size in [128, 256] {
+        for route in 0..4 {
+            for length in [17, 8192] {
+                let (fixture, _fault, mut service, _) = populated(size);
+                let file = open(&mut service, b"/work/target", false);
+                let other = open(&mut service, b"/work/target", false);
+                privileged(&fixture);
+                set_clock(Ok(time(130, 0)));
+                let header = wire::Header {
+                    offset: length,
+                    ..request(wire::OP_TRUNCATE_HANDLE, 0)
+                };
+                match route {
+                    0 => {
+                        service.truncate_handle(header, file).unwrap();
+                    }
+                    1 => {
+                        service
+                            .truncate_at(
+                                wire::Header {
+                                    open_id: length,
+                                    ..request(wire::OP_TRUNCATE_AT, 0)
+                                },
+                                b"/work/target",
+                                PathAnchors::default(),
+                                credentials(0, 0, &[]),
+                            )
+                            .unwrap();
+                    }
+                    2 => {
+                        let opened = service
+                            .open_at(
+                                request(
+                                    wire::OP_OPEN_AT,
+                                    wire::OPEN_AT_WRITE | wire::OPEN_AT_TRUNCATE,
+                                ),
+                                b"/work/target",
+                                PathAnchors::default(),
+                                credentials(0, 0, &[]),
+                            )
+                            .unwrap();
+                        service.provider_close(opened.header.open_id).unwrap();
+                    }
+                    _ => {
+                        assert_eq!(
+                            service
+                                .handle(
+                                    wire::Header {
+                                        opcode: wire::OP_TRUNCATE,
+                                        open_id: file,
+                                        ..header
+                                    },
+                                    &[]
+                                )
+                                .header
+                                .status,
+                            0
+                        );
+                    }
+                }
+                for id in [file, other] {
+                    let current = status(&mut service, id);
+                    assert_eq!(current.mode, 0o751, "inode size {size}, route {route}");
+                    assert_eq!(current.size, if route == 2 { 0 } else { length });
+                    assert_eq!(status_times(current), [(-1, 0), (130, 0), (130, 0)]);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn truncate_revocation_failure_blocks_data_and_later_failures_cannot_keep_setid() {
+    for size in [128, 256] {
+        for stage in 0..3 {
+            let (fixture, fault, mut service, blocks) = populated(size);
+            let file = open(&mut service, b"/work/target", false);
+            let inode = privileged(&fixture);
+            let before = fixture.image.0.lock().unwrap().clone();
+            let table = u32::from_le_bytes(before[2056..2060].try_into().unwrap()) as usize;
+            let inode_offset = (table * 1024 + (inode.index.get() as usize - 1) * size) as u64;
+            *fault.fail.lock().unwrap() = Some(if stage == 1 {
+                blocks[0] + 17
+            } else {
+                inode_offset
+            });
+            *fault.skip_failures.lock().unwrap() = usize::from(stage == 2);
+            set_clock(Ok(time(131, 0)));
+            assert_eq!(
+                service
+                    .truncate_handle(
+                        wire::Header {
+                            offset: 17,
+                            ..request(wire::OP_TRUNCATE_HANDLE, 0)
+                        },
+                        file
+                    )
+                    .err(),
+                Some(5)
+            );
+            let current = status(&mut service, file);
+            assert_eq!(current.mode, if stage == 0 { 0o6751 } else { 0o751 });
+            assert_eq!(current.size, 4096);
+            assert_eq!(current.modification_time_seconds, 2);
+            let after = fixture.image.0.lock().unwrap();
+            if stage == 0 {
+                assert_eq!(*after, before);
+            }
+            let tail = blocks[0] as usize + 17..blocks[0] as usize + 1024;
+            assert!(
+                after[tail]
+                    .iter()
+                    .all(|byte| *byte == if stage == 2 { 0 } else { 0x11 })
+            );
+        }
+    }
+}
+
+#[test]
+fn truncate_prevalidation_and_admission_failure_do_not_revoke_setid() {
+    struct Rejected;
+    impl filesystem_service::memory_updates::MemoryUpdates for Rejected {
+        fn prepare(
+            &self,
+            _: u64,
+            _: u64,
+            _: u64,
+        ) -> Result<Box<dyn filesystem_service::memory_updates::Update>, i32> {
+            Err(13)
+        }
+    }
+    let (fixture, fault, mut service, _) = populated(256);
+    let file = open(&mut service, b"/work/target", false);
+    privileged(&fixture);
+    let before = fixture.image.0.lock().unwrap().clone();
+    let request = wire::Header {
+        offset: 17,
+        ..request(wire::OP_TRUNCATE_HANDLE, 0)
+    };
+    for now in [Err(5), Ok(time(i64::MAX, 0)), Ok(time(1, 1_000_000_000))] {
+        set_clock(now);
+        assert!(service.truncate_handle(request, file).is_err());
+        assert_eq!(*fixture.image.0.lock().unwrap(), before);
+    }
+    set_clock(Ok(time(132, 0)));
+    // A size no-op updates times but cannot change any data or privileges.
+    service
+        .truncate_handle(
+            wire::Header {
+                offset: 4096,
+                ..request
+            },
+            file,
+        )
+        .unwrap();
+    assert_eq!(status(&mut service, file).mode, 0o6751);
+    let before = fixture.image.0.lock().unwrap().clone();
+    let disk =
+        Ext4::load_with_writer(Box::new(fault.clone()), Some(Box::new(fault.clone()))).unwrap();
+    let mut service = FilesystemService::new_with_clock(disk, clock);
+    service
+        .configure_memory_updates(Box::new(Rejected))
+        .unwrap();
+    let file = open(&mut service, b"/work/target", false);
+    fault.attempts.lock().unwrap().clear();
+    assert_eq!(service.truncate_handle(request, file).err(), Some(13));
+    assert_eq!(*fixture.image.0.lock().unwrap(), before);
+    assert!(fault.attempts.lock().unwrap().is_empty());
+}
+
+#[test]
 fn empty_and_prevalidation_failures_do_not_revoke_setid() {
     let (fixture, _fault, mut service, _) = populated(256);
     let file = open(&mut service, b"/work/target", false);
