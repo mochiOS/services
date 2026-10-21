@@ -145,37 +145,13 @@ fn actual_libc_generator_updates_every_matching_sync_size_branch() {
     ));
     std::fs::create_dir_all(directory.join(".generated")).unwrap();
     std::fs::create_dir(directory.join("out")).unwrap();
-    // The generator transforms text; this fixture exercises all its required
-    // anchors and duplicate size branches without a staged upstream checkout.
-    let fixture = r#"
-mod generic;
-pub type pthread_t = c_ulong;
-if #[cfg(target_os = "espidf")] {
-        pub const O_CLOEXEC: c_int = 0x40000;
-    } else if #[cfg(target_arch = "arm")] {
-pub struct pthread_mutex_t {
-pub struct pthread_mutexattr_t {
-pub struct pthread_cond_t {
-pub struct pthread_condattr_t {
-pub struct sem_t {
-pub struct pthread_rwlock_t {
-pub struct pthread_rwlockattr_t {
-pub const PTHREAD_MUTEX_INITIALIZER: pthread_mutex_t =
-pub const PTHREAD_COND_INITIALIZER: pthread_cond_t =
-pub const PTHREAD_RWLOCK_INITIALIZER: pthread_rwlock_t =
-pub const __SIZEOF_PTHREAD_RWLOCK_T: usize = 56;
-pub const __SIZEOF_PTHREAD_RWLOCK_T: usize = 32;
-pub const __SIZEOF_PTHREAD_RWLOCKATTR_T: usize = 4;
-pub const __SIZEOF_PTHREAD_RWLOCKATTR_T: usize = 12;
-pub const __SIZEOF_PTHREAD_BARRIER_T: usize = 4;
-pub const __SIZEOF_PTHREAD_MUTEX_T: usize = 40;
-pub const __SIZEOF_PTHREAD_MUTEXATTR_T: usize = 4;
-pub const __SIZEOF_PTHREAD_MUTEXATTR_T: usize = 4;
-pub const __SIZEOF_PTHREAD_COND_T: usize = 48;
-pub const __SIZEOF_PTHREAD_CONDATTR_T: usize = 4;
-pub const __SIZEOF_PTHREAD_CONDATTR_T: usize = 4;
-"#;
-    std::fs::write(directory.join(".generated/upstream-newlib-mod.rs"), fixture).unwrap();
+    // Use the tracked upstream input, not a partial handwritten set of build
+    // anchors which misses newer time/socket ABI transformations. Extra copies
+    // still prove that the generator updates every matching size declaration.
+    let mut fixture =
+        include_str!("../../../libraries/libc/.generated/upstream-newlib-mod.rs").to_owned();
+    fixture.push_str("\npub const __SIZEOF_PTHREAD_MUTEXATTR_T: usize = 4;\npub const __SIZEOF_PTHREAD_CONDATTR_T: usize = 4;\n");
+    std::fs::write(directory.join(".generated/upstream-newlib-mod.rs"), &fixture).unwrap();
     let executable = directory.join("generator");
     let compiled = std::process::Command::new("rustc")
         .args(["--edition=2021", "../../../libraries/libc/build.rs", "-o"])
@@ -205,9 +181,18 @@ pub const __SIZEOF_PTHREAD_CONDATTR_T: usize = 4;
     ] {
         let lines: Vec<_> = output
             .lines()
-            .filter(|line| line.contains(declaration))
+            .filter(|line| {
+                line.trim_start().starts_with(&format!("pub const {declaration}:"))
+            })
+            .filter(|line| line.contains("else { 4 }"))
             .collect();
-        assert_eq!(lines.len(), 2);
+        let original = format!("pub const {declaration}: usize = 4;");
+        let expected = fixture
+            .lines()
+            .filter(|line| line.trim() == original)
+            .count();
+        assert!(expected >= 2);
+        assert_eq!(lines.len(), expected);
         assert!(lines.iter().all(|line| line.contains("{ 12 } else { 4 }")));
     }
     assert!(output.contains("{ 24 } else { 48 }"));
@@ -220,7 +205,7 @@ pub const __SIZEOF_PTHREAD_CONDATTR_T: usize = 4;
         output
             .matches("#[cfg(not(target_os = \"mochios\"))]")
             .count(),
-        11
-    ); // Types, initializers, pthread_t.
+        36
+    ); // Eight structures, three initializers, three scalar types, 22 socket declarations.
     std::fs::remove_dir_all(directory).unwrap();
 }
