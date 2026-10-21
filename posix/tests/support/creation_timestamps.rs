@@ -8,11 +8,28 @@ fn create(
     kind: u8,
     name: &[u8],
 ) -> Result<(), i32> {
+    create_as(
+        service,
+        directory,
+        kind,
+        name,
+        None,
+        credentials(1001, 77, &[]),
+    )
+}
+
+fn create_as(
+    service: &mut FilesystemService,
+    directory: u64,
+    kind: u8,
+    name: &[u8],
+    mode: Option<u32>,
+    credentials: wire::Credentials,
+) -> Result<(), i32> {
     let anchors = PathAnchors {
         root_open_id: None,
         base_open_id: Some(directory),
     };
-    let credentials = credentials(1001, 77, &[]);
     match kind {
         0 => service.open_at(
             mode_request(
@@ -21,14 +38,18 @@ fn create(
                     | wire::OPEN_AT_CREATE
                     | wire::OPEN_AT_EXCLUSIVE
                     | wire::OPEN_AT_WRITE,
-                0o600,
+                mode.unwrap_or(0o600),
             ),
             name,
             anchors,
             credentials,
         ),
         1 => service.mkdir_at(
-            mode_request(wire::OP_MKDIR_AT, wire::MKDIR_AT_BASE_ATTACHED, 0o700),
+            mode_request(
+                wire::OP_MKDIR_AT,
+                wire::MKDIR_AT_BASE_ATTACHED,
+                mode.unwrap_or(0o700),
+            ),
             name,
             anchors,
             credentials,
@@ -55,7 +76,7 @@ fn create(
             mode_request(
                 wire::OP_CREATE_SOCKET_AT,
                 wire::SOCKET_AT_BASE_ATTACHED,
-                0o600,
+                mode.unwrap_or(0o600),
             ),
             name,
             anchors,
@@ -64,6 +85,135 @@ fn create(
         _ => unreachable!(),
     }
     .map(|_| ())
+}
+
+#[test]
+fn creation_inherits_current_setgid_parent_group_and_propagates_only_to_directories() {
+    for mounted in [false, true] {
+        let (root, root_disk, mut service) = metadata_fixture();
+        let (_mounted_fixture, mounted_disk, _) = metadata_fixture();
+        let (disk, path) = if mounted {
+            service
+                .mount_volume(b"/system", mounted_disk.clone())
+                .unwrap();
+            (mounted_disk, b"/system/work".as_slice())
+        } else {
+            (root_disk, b"/work".as_slice())
+        };
+        // Retain an anchor before changing its inode, so cached metadata
+        // cannot accidentally satisfy the group-inheritance checks.
+        let directory = open(&mut service, path, true);
+        for (round, parent_mode, parent_gid) in [(0, 0o2777, 88), (1, 0o777, 99)] {
+            let mut parent = disk
+                .path_to_inode("/work".try_into().unwrap(), FollowSymlinks::All)
+                .unwrap();
+            parent.set_gid(parent_gid);
+            parent
+                .set_mode(InodeMode::S_IFDIR | InodeMode::from_bits_retain(parent_mode))
+                .unwrap();
+            parent.write(&disk).unwrap();
+            let before = root.image.0.lock().unwrap().clone();
+            for kind in 0..5 {
+                let name = format!("group-{round}-{kind}");
+                create(&mut service, directory, kind, name.as_bytes()).unwrap();
+                let child = disk
+                    .path_to_inode(
+                        format!("/work/{name}").as_str().try_into().unwrap(),
+                        FollowSymlinks::ExcludeFinalComponent,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    (child.uid(), child.gid()),
+                    (1001, if round == 0 { 88 } else { 77 })
+                );
+                assert_eq!(
+                    child.mode().bits() & 0o2000,
+                    if round == 0 && kind == 1 { 0o2000 } else { 0 }
+                );
+            }
+            if mounted {
+                assert_eq!(*root.image.0.lock().unwrap(), before);
+            }
+        }
+        let mut nested = path.to_vec();
+        nested.extend_from_slice(b"/group-0-1");
+        let nested = open(&mut service, &nested, true);
+        create(&mut service, nested, 0, b"grandchild").unwrap();
+        let child = disk
+            .path_to_inode(
+                "/work/group-0-1/grandchild".try_into().unwrap(),
+                FollowSymlinks::All,
+            )
+            .unwrap();
+        assert_eq!(child.gid(), 88);
+    }
+}
+
+#[test]
+fn inheriting_setgid_does_not_make_the_creator_a_member_of_the_parent_group() {
+    let (fixture, disk, mut service) = metadata_fixture();
+    let directory = open(&mut service, b"/work", true);
+    let mut parent = disk
+        .path_to_inode("/work".try_into().unwrap(), FollowSymlinks::All)
+        .unwrap();
+    parent.set_uid(2000);
+    parent.set_gid(88);
+    parent
+        .set_mode(InodeMode::S_IFDIR | InodeMode::from_bits_retain(0o2770))
+        .unwrap();
+    parent.write(&disk).unwrap();
+    let before = fixture.image.0.lock().unwrap().clone();
+    set_clock(Err(5));
+    for kind in 0..5 {
+        assert_eq!(create(&mut service, directory, kind, b"forbidden"), Err(13));
+        assert_eq!(calls(), 0);
+        assert_eq!(*fixture.image.0.lock().unwrap(), before);
+    }
+}
+
+#[test]
+fn inherited_group_does_not_authorize_a_foreign_setgid_executable() {
+    let (_fixture, disk, mut service) = metadata_fixture();
+    let directory = open(&mut service, b"/work", true);
+    let mut parent = disk
+        .path_to_inode("/work".try_into().unwrap(), FollowSymlinks::All)
+        .unwrap();
+    parent.set_gid(88);
+    parent
+        .set_mode(InodeMode::S_IFDIR | InodeMode::from_bits_retain(0o2777))
+        .unwrap();
+    parent.write(&disk).unwrap();
+    for (label, caller, keep_setgid) in [
+        ("foreign", credentials(1001, 77, &[]), false),
+        ("supplementary", credentials(1001, 77, &[88]), true),
+        ("primary", credentials(1001, 88, &[]), true),
+        ("root", credentials(0, 77, &[]), true),
+    ] {
+        for kind in [0, 1, 3] {
+            let name = format!("{label}-{kind}");
+            create_as(
+                &mut service,
+                directory,
+                kind,
+                name.as_bytes(),
+                Some(0o2670),
+                caller,
+            )
+            .unwrap();
+            let child = disk
+                .path_to_inode(
+                    format!("/work/{name}").as_str().try_into().unwrap(),
+                    FollowSymlinks::All,
+                )
+                .unwrap();
+            assert_eq!(child.gid(), 88);
+            assert_eq!(
+                child.mode().bits() & 0o2000,
+                if keep_setgid || kind == 1 { 0o2000 } else { 0 }
+            );
+            assert_eq!(child.mode().bits() & 0o777, 0o670);
+        }
+    }
 }
 
 #[test]

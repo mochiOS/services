@@ -29,6 +29,8 @@ mod data_writes;
 mod data_reads;
 #[path = "rename_timestamps.rs"]
 mod rename_timestamps;
+#[path = "creation_policy.rs"]
+mod creation_policy;
 
 const EIO: i32 = 5;
 const EXDEV: i32 = 18;
@@ -584,6 +586,7 @@ impl FilesystemService {
         ) {
             return Err(EACCES);
         }
+        let (mode, gid) = creation_policy::identity(metadata, false, mode, uid, gid, groups);
         let mut directory = Dir::open_inode(filesystem, parent).map_err(errno)?;
         let name = DirEntryName::try_from(name).map_err(|_| EINVAL)?;
         match directory.get_entry(name) {
@@ -596,7 +599,7 @@ impl FilesystemService {
             .create_inode_with_timestamps(
                 InodeCreationOptions {
                     file_type: FileType::Regular,
-                    mode: InodeMode::from_bits_truncate((mode as u16) & 0x0fff) | InodeMode::S_IFREG,
+                    mode: InodeMode::from_bits_retain(mode) | InodeMode::S_IFREG,
                     uid,
                     gid,
                     time: Duration::default(),
@@ -777,6 +780,8 @@ impl FilesystemService {
         ) {
             return Err(EACCES);
         }
+        let (mode, gid) =
+            creation_policy::identity(metadata, false, request.mode, uid, gid, groups);
         let name = DirEntryName::try_from(name.as_slice()).map_err(|_| EINVAL)?;
         let mut parent = Dir::open_inode(&filesystem, parent).map_err(errno)?;
         let now = self.prepare_creation_parent(&filesystem, &mut parent)?;
@@ -784,8 +789,7 @@ impl FilesystemService {
             .create_inode_with_timestamps(
                 InodeCreationOptions {
                     file_type: FileType::Socket,
-                    mode: InodeMode::from_bits_truncate((request.mode as u16) & 0o7777)
-                        | InodeMode::S_IFSOCK,
+                    mode: InodeMode::from_bits_retain(mode) | InodeMode::S_IFSOCK,
                     uid,
                     gid,
                     time: Duration::default(),
@@ -848,14 +852,15 @@ impl FilesystemService {
         ) {
             return Err(EACCES);
         }
+        let (mode, gid) =
+            creation_policy::identity(metadata, true, request.mode, uid, gid, groups);
         let mut parent = Dir::open_inode(&filesystem, parent).map_err(errno)?;
         let now = self.prepare_creation_parent(&filesystem, &mut parent)?;
         let inode = filesystem
             .create_inode_with_timestamps(
                 InodeCreationOptions {
                     file_type: FileType::Directory,
-                    mode: InodeMode::from_bits_truncate((request.mode as u16) & 0o7777)
-                        | InodeMode::S_IFDIR,
+                    mode: InodeMode::from_bits_retain(mode) | InodeMode::S_IFDIR,
                     uid,
                     gid,
                     time: Duration::default(),
@@ -1063,6 +1068,7 @@ impl FilesystemService {
         ) {
             return Err(EACCES);
         }
+        let (_, gid) = creation_policy::identity(metadata, false, 0o777, uid, gid, groups);
         let mut parent = Dir::open_inode(&filesystem, parent).map_err(errno)?;
         let now = self.prepare_creation_parent(&filesystem, &mut parent)?;
         filesystem
