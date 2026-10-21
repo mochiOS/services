@@ -7,6 +7,15 @@ mod probe;
 fn home_creation_claims_only_a_new_directory_before_initialization_or_rollback() {
     let source = include_str!("../../secure-ui/src/setup.rs");
     let mut program = probe::program();
+    // Include the actual host I/O-to-wire boundary too. This probe does not
+    // run target libc errno conversion (covered separately by setup_storage_status).
+    let storage = include_str!("../../secure-ui/src/storage_status.rs");
+    program.push_str(&format!(
+        "mod storage_status {{use std::io; mod newlib_errno {{pub const EIO:i32={};}}\n",
+        mochios_posix_client::newlib_errno::EIO,
+    ));
+    program.push_str(&storage[storage.find("pub(crate) fn io_status(").unwrap()..]);
+    program.push_str("}\n");
     program.push_str(
         r#"
 use std::{io, path::Path, cell::{Cell, RefCell}};
