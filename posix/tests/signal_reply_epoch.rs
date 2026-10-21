@@ -19,6 +19,8 @@ static COMPLETIONS:AtomicU32=AtomicU32::new(0);
 static DEFAULTS:AtomicU32=AtomicU32::new(0);
 static CLIENTS:AtomicU32=AtomicU32::new(0);
 static FAULT:AtomicU32=AtomicU32::new(0);
+static DEFERRED:AtomicU32=AtomicU32::new(0);
+static NOTIFICATION:AtomicU32=AtomicU32::new(0);
 mod posix_protocol {
     #[derive(Clone,Copy)] pub struct SignalDelivery{pub signal:u32,pub token:u64}
     pub const SIGNAL_DISPOSITION_CAUGHT:u32=2;
@@ -27,7 +29,15 @@ mod posix_protocol {
 impl SigInfo{fn memory_fault(_:u64,_:usize)->Result<Self,()>{Ok(Self{si_signo:11})}}
 mod mochios_posix_client {pub mod signal_context{pub type SigInfo=crate::SigInfo;}}
 struct UContext;
-struct ThreadControl;static CONTROL:ThreadControl=ThreadControl;
+struct CallbackResources;
+impl CallbackResources {
+    fn is_deferred(&self)->bool{DEFERRED.load(Ordering::Acquire)!=0}
+    fn take_notification(&self)->bool{
+        assert!(!self.is_deferred());NOTIFICATION.swap(0,Ordering::AcqRel)!=0
+    }
+}
+struct ThreadControl{callback_resources:CallbackResources}
+static CONTROL:ThreadControl=ThreadControl{callback_resources:CallbackResources};
 struct Preparation{epoch:u64,started:bool}
 mod signal_scope {
     use super::*;
@@ -117,9 +127,20 @@ fn apply_default_signal_action(delivery:posix_protocol::SignalDelivery)->Result<
 fn reset(mode:u32,fault:bool){
     MODE.store(mode,Ordering::Release);FAULT.store(fault as u32,Ordering::Release);
     OWNER.store(11,Ordering::Release);FORK_EPOCH.store(0,Ordering::Release);
+    DEFERRED.store(0,Ordering::Release);NOTIFICATION.store(1,Ordering::Release);
     for value in [&REQUESTS,&DISPATCHES,&COMPLETIONS,&DEFAULTS,&CLIENTS]{value.store(0,Ordering::Release)}
 }
 fn main(){
+    reset(0,false);DEFERRED.store(1,Ordering::Release);
+    assert_eq!(drain_pending_signals_with_context(&mut UContext,false),Ok(()));
+    assert_eq!(REQUESTS.load(Ordering::Acquire),0);
+    assert_eq!(DISPATCHES.load(Ordering::Acquire),0);
+    assert_eq!(COMPLETIONS.load(Ordering::Acquire),0);
+    assert_eq!(NOTIFICATION.load(Ordering::Acquire),1);
+    DEFERRED.store(0,Ordering::Release);
+    assert_eq!(drain_pending_signals_with_context(&mut UContext,false),Ok(()));
+    assert_eq!(COMPLETIONS.load(Ordering::Acquire),1);
+    assert_eq!(NOTIFICATION.load(Ordering::Acquire),0);
     for mode in [0,1,2,3,4,5,6,7,8,9,10,12,13,14,15,16,17,18,19] {
         reset(mode,false);
         let result=drain_pending_signals_with_context(&mut UContext,false);
