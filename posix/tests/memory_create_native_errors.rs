@@ -98,7 +98,7 @@ use task::{HandleRights,KernelObject,ObjectHandleEntry};
     program.push_str(probe::between(
         include_str!("../../../core/src/syscall/handle.rs"),
         "pub fn memory_object_create(",
-        "\nfn decode_handle(",
+        "pub fn memory_object_length(",
     ));
     program.push_str(r#"
 fn reset(){
