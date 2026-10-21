@@ -150,6 +150,62 @@ fn chmod_and_chown_commit_ctime_with_metadata_and_refresh_all_descriptions() {
 }
 
 #[test]
+fn retained_metadata_authorization_uses_live_owner_and_group_after_alias_changes() {
+    for supplementary_member in [false, true] {
+        let (fixture, disk, mut service) = metadata_fixture();
+        service.mount_volume(b"/system", disk.clone()).unwrap();
+        let original = open(&mut service, b"/work/target", false);
+        let alias = open(&mut service, b"/system/work/target", false);
+        set_clock(Ok(time(80, 0)));
+        service
+            .chown_handle(
+                owner_request(wire::OP_CHOWN_HANDLE, 0, 1002, 88),
+                alias,
+                credentials(0, 0, &[]),
+            )
+            .unwrap();
+        assert_eq!(status(&mut service, original).uid, 1002);
+        let before = fixture.image.0.lock().unwrap().clone();
+        set_clock(Err(5));
+        // Retaining a Handle does not retain its former owner's chmod/chown
+        // authority. Both denials must precede even the timestamp clock.
+        assert_eq!(
+            service.chmod_handle(
+                mode_request(wire::OP_CHMOD_HANDLE, 0, 0o600),
+                original,
+                credentials(1001, 77, &[]),
+            ).err(),
+            Some(1),
+        );
+        assert_eq!(
+            service.chown_handle(
+                owner_request(wire::OP_CHOWN_HANDLE, 0, 1001, 77),
+                original,
+                credentials(1001, 77, &[]),
+            ).err(),
+            Some(1),
+        );
+        assert_eq!(calls(), 0);
+        assert_eq!(*fixture.image.0.lock().unwrap(), before);
+        let groups = if supplementary_member { &[88][..] } else { &[][..] };
+        set_clock(Ok(time(81, 0)));
+        service.chmod_handle(
+            mode_request(wire::OP_CHMOD_HANDLE, 0, 0o2750),
+            original,
+            credentials(1002, 77, groups),
+        ).unwrap();
+        let current = status(&mut service, original);
+        assert_eq!(current.mode, if supplementary_member { 0o2750 } else { 0o750 });
+        assert_eq!((current.uid, current.gid), (1002, 88));
+        service.chown_handle(
+            owner_request(wire::OP_CHOWN_HANDLE, 0, u32::MAX, u32::MAX),
+            original,
+            credentials(1002, 77, groups),
+        ).unwrap();
+    }
+}
+
+#[test]
 fn failed_clock_or_unrepresentable_time_cannot_partially_change_mode_or_ownership() {
     let (fixture, _disk, mut service) = metadata_fixture();
     let file = open(&mut service, b"/work/target", false);
