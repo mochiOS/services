@@ -74,6 +74,72 @@ fn initial_credentials_come_from_userspace_and_reregistration_cannot_replace_the
 }
 
 #[test]
+fn single_id_updates_reject_the_reserved_sentinel_without_changing_credentials() {
+    for (uid, gid) in [(0, 0), (501, 20)] {
+        let mut service = PosixService::new();
+        service
+            .initialize_bootstrap_process(
+                AuthenticatedProcess {
+                    handle: 7,
+                    process_id: 70,
+                },
+                uid,
+                gid,
+                &[42, 43],
+            )
+            .unwrap();
+        let peer = PeerIdentity {
+            process_id: 70,
+            effective_uid: 0,
+            effective_gid: 0,
+        };
+        let before = *service.session(70).unwrap();
+        let mut payload = [0; protocol::CREDENTIAL_ID_PAYLOAD_LEN];
+        protocol::encode_credential_id(protocol::CREDENTIAL_ID_UNCHANGED, &mut payload).unwrap();
+        for opcode in [
+            protocol::OP_SET_UID,
+            protocol::OP_SET_GID,
+            protocol::OP_SET_EFFECTIVE_UID,
+            protocol::OP_SET_EFFECTIVE_GID,
+        ] {
+            let response = service.handle(
+                peer,
+                protocol::Header {
+                    opcode,
+                    ..Default::default()
+                },
+                &payload,
+            );
+            assert_eq!(
+                response.header.status,
+                posix_service::STATUS_EINVAL,
+                "opcode {opcode}"
+            );
+            assert_eq!(*service.session(70).unwrap(), before);
+            assert_eq!(service.process_handle(70), Some(7));
+        }
+        // Only paired updates give the reserved value its "unchanged" meaning.
+        let mut pair = [0; protocol::CREDENTIAL_PAIR_PAYLOAD_LEN];
+        protocol::encode_credential_pair(u32::MAX, u32::MAX, &mut pair).unwrap();
+        for opcode in [
+            protocol::OP_SET_REAL_EFFECTIVE_UID,
+            protocol::OP_SET_REAL_EFFECTIVE_GID,
+        ] {
+            let response = service.handle(
+                peer,
+                protocol::Header {
+                    opcode,
+                    ..Default::default()
+                },
+                &pair,
+            );
+            assert_eq!(response.header.status, 0);
+            assert_eq!(*service.session(70).unwrap(), before);
+        }
+    }
+}
+
+#[test]
 fn bootstrap_is_one_time_and_invalid_initialization_does_not_bind_a_process() {
     let process = AuthenticatedProcess {
         handle: 7,

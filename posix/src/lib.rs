@@ -4672,6 +4672,9 @@ impl<H: Copy> PosixService<H> {
 
     fn set_uid(&mut self, process_id: u64, payload: &[u8]) -> Result<(), i32> {
         let requested = protocol::decode_credential_id(payload).map_err(|_| STATUS_EINVAL)?;
+        if requested == protocol::CREDENTIAL_ID_UNCHANGED {
+            return Err(STATUS_EINVAL);
+        }
         let session = self
             .sessions
             .get_mut(&process_id)
@@ -4691,6 +4694,9 @@ impl<H: Copy> PosixService<H> {
 
     fn set_gid(&mut self, process_id: u64, payload: &[u8]) -> Result<(), i32> {
         let requested = protocol::decode_credential_id(payload).map_err(|_| STATUS_EINVAL)?;
+        if requested == protocol::CREDENTIAL_ID_UNCHANGED {
+            return Err(STATUS_EINVAL);
+        }
         let session = self
             .sessions
             .get_mut(&process_id)
@@ -4710,6 +4716,9 @@ impl<H: Copy> PosixService<H> {
 
     fn set_effective_uid(&mut self, process_id: u64, payload: &[u8]) -> Result<(), i32> {
         let requested = protocol::decode_credential_id(payload).map_err(|_| STATUS_EINVAL)?;
+        if requested == protocol::CREDENTIAL_ID_UNCHANGED {
+            return Err(STATUS_EINVAL);
+        }
         let session = self
             .sessions
             .get_mut(&process_id)
@@ -4727,6 +4736,9 @@ impl<H: Copy> PosixService<H> {
 
     fn set_effective_gid(&mut self, process_id: u64, payload: &[u8]) -> Result<(), i32> {
         let requested = protocol::decode_credential_id(payload).map_err(|_| STATUS_EINVAL)?;
+        if requested == protocol::CREDENTIAL_ID_UNCHANGED {
+            return Err(STATUS_EINVAL);
+        }
         let session = self
             .sessions
             .get_mut(&process_id)
