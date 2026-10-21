@@ -15,6 +15,9 @@ use posix_service::{
 #[path = "support/child_cpu_state.rs"]
 mod child_cpu_state;
 
+#[path = "support/orphan_group_transition.rs"]
+mod orphan_group_transition;
+
 #[path = "support/wait_observation.rs"]
 mod wait_observation;
 

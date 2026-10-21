@@ -1193,6 +1193,16 @@ impl<H: Copy> PosixService<H> {
             .ok_or(protocol::STATUS_ESRCH)?
             .exit_observed = true;
         self.reparent_children_of_exited(process_id);
+        self.notify_newly_orphaned_groups(connected_before)
+    }
+
+    /// Exit, setsid and setpgid can all remove the last outside-parent link
+    /// from a group. Notify only on a connected-to-orphaned transition, and
+    /// only when the remaining live group contains a stopped process.
+    fn notify_newly_orphaned_groups(
+        &mut self,
+        connected_before: BTreeSet<(u64, u64)>,
+    ) -> Result<(), i32> {
         let connected_after = self.non_orphaned_groups();
         for &(session, group) in connected_before.difference(&connected_after) {
             let members: Vec<u64> = self
@@ -2098,8 +2108,9 @@ impl<H: Copy> PosixService<H> {
         {
             return Err(protocol::STATUS_EPERM);
         }
+        let connected_before = self.non_orphaned_groups();
         self.process_groups.insert(target, group);
-        Ok(())
+        self.notify_newly_orphaned_groups(connected_before)
     }
 
     fn create_session(&mut self, process_id: u64) -> Result<protocol::ProcessInfo, i32> {
@@ -2113,8 +2124,10 @@ impl<H: Copy> PosixService<H> {
         if !self.processes.contains_key(&process_id) {
             return Err(protocol::STATUS_ESRCH);
         }
+        let connected_before = self.non_orphaned_groups();
         self.process_groups.insert(process_id, process_id);
         self.session_ids.insert(process_id, process_id);
+        self.notify_newly_orphaned_groups(connected_before)?;
         self.process_info_for(process_id)
     }
 
