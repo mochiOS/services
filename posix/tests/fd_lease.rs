@@ -30,6 +30,9 @@ impl<T> RuntimeMutex<T> {
 
 static CLOSED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 static NATIVE: Mutex<BTreeMap<u64, &'static str>> = Mutex::new(BTreeMap::new());
+// These two runtime tests share the process-local BORROWS/native backend.
+// Their worker threads still race close/reuse deterministically within a test.
+static RUNTIME_TEST: Mutex<()> = Mutex::new(());
 
 fn close_object_handle(handle: u32) {
     assert!(NATIVE.lock().unwrap().remove(&u64::from(handle)).is_some());
@@ -124,6 +127,7 @@ fn aliased_owners_keep_the_label_pinnable_until_the_last_fd_closes() {
 
 #[test]
 fn restored_aliases_use_real_runtime_ownership_without_duplicate_rights() {
+    let _runtime = RUNTIME_TEST.lock().unwrap();
     CLOSED.lock().unwrap().clear();
     assert!(NATIVE.lock().unwrap().is_empty());
     let mut restored = fd_lease::RestoreReferences::new();
@@ -207,6 +211,9 @@ fn runtime_pins_escaped_metadata_and_captures_the_book_with_native_handles() {
 
 #[test]
 fn real_runtime_guard_survives_close_replacement_early_error_and_native_label_reuse() {
+    let _runtime = RUNTIME_TEST.lock().unwrap();
+    CLOSED.lock().unwrap().clear();
+    assert!(NATIVE.lock().unwrap().is_empty());
     let table = Mutex::new(FdTable::new());
     table.lock().unwrap().install(entry(7)).unwrap();
     NATIVE
