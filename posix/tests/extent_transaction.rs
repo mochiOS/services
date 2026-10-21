@@ -56,7 +56,7 @@ fn owned_native_extent_composes_real_cache_records_and_cleanup_without_vm_lock_a
             &format!("\"{}/core/", root.display()),
         );
     let mut program = format!(
-        "#![feature(allocator_api)]\n{fixture}\nextern crate self as mnu_abi;\npub const HANDLE_SEEK_START:u64={}; pub const HANDLE_SEEK_CURRENT:u64={}; pub const HANDLE_SEEK_END:u64={};\npub const HANDLE_SIGNAL_READABLE:u64={}; pub const HANDLE_SIGNAL_PEER_CLOSED:u64={};\n#[path={:?}] pub mod provider;\nmod native_extent_probe {{ {probe} }}\nmod cpu {{ pub struct SmapSmepGuard; impl SmapSmepGuard {{ pub fn new()->Self {{Self}} }} }}\n",
+        "{fixture}\nextern crate self as mnu_abi;\npub const HANDLE_SEEK_START:u64={}; pub const HANDLE_SEEK_CURRENT:u64={}; pub const HANDLE_SEEK_END:u64={};\npub const HANDLE_SIGNAL_READABLE:u64={}; pub const HANDLE_SIGNAL_PEER_CLOSED:u64={};\n#[path={:?}] pub mod provider;\nmod native_extent_probe {{ {probe} }}\nmod cpu {{ pub struct SmapSmepGuard; impl SmapSmepGuard {{ pub fn new()->Self {{Self}} }} }}\n",
         mnu_abi::HANDLE_SEEK_START,
         mnu_abi::HANDLE_SEEK_CURRENT,
         mnu_abi::HANDLE_SEEK_END,
