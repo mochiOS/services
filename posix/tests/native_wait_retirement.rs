@@ -43,6 +43,7 @@ fn production_thread_removal_reclaims_wait_slots_without_holding_queue_lock() {
 use std::sync::{Mutex, MutexGuard};
 use std::sync::atomic::{AtomicU64, Ordering};
 type ThreadId = u64;
+type ProcessId = u64;
 struct SpinLock<T>(Mutex<T>);
 impl<T> SpinLock<T> {
     const fn new(value:T)->Self { Self(Mutex::new(value)) }
@@ -88,10 +89,33 @@ mod process {
     struct ProcessExitWaiter { thread:ThreadId, processes:Vec<u64> }
     static PROCESS_EXIT_WAITERS:SpinLock<[Option<ProcessExitWaiter>;64]>=
         SpinLock::new([const {None};64]);
+    pub struct Reservation;
+    impl Drop for Reservation {fn drop(&mut self){
+        assert!(crate::THREAD_QUEUE.0.try_lock().is_ok());
+        assert!(TABLE.0.try_lock().is_ok());
+        RELEASED.fetch_add(1,Ordering::Relaxed);
+    }}
+    static RELEASED:AtomicU64=AtomicU64::new(0);
+    pub struct Handles(Vec<(u64,Reservation)>);
+    impl Handles {
+        pub fn take_reservation_for(&mut self,thread:u64)->Option<Reservation>{
+            let index=self.0.iter().position(|(owner,_)|*owner==thread)?;
+            Some(self.0.remove(index).1)
+        }
+    }
+    pub struct Process{handles:Handles}
+    impl Process{pub fn object_handles_mut(&mut self)->&mut Handles{&mut self.handles}}
+    static TABLE:SpinLock<Process>=SpinLock::new(Process{handles:Handles(Vec::new())});
+    pub fn with_process_mut<T>(id:u64,f:impl FnOnce(&mut Process)->T)->Option<T>{
+        assert_eq!(id,90);assert!(crate::THREAD_QUEUE.0.try_lock().is_ok());
+        Some(f(&mut TABLE.lock()))
+    }
+    pub fn released()->u64{RELEASED.load(Ordering::Relaxed)}
     pub fn register(thread:ThreadId) {
         let mut slots=PROCESS_EXIT_WAITERS.lock();
         *slots.iter_mut().find(|slot|slot.is_none()).expect("wait slots exhausted")=
             Some(ProcessExitWaiter{thread,processes:vec![90]});
+        TABLE.lock().handles.0.extend([(thread,Reservation),(thread,Reservation)]);
     }
 "#,
     );
@@ -105,7 +129,7 @@ mod process {
 struct Thread { id:ThreadId, state:ThreadState }
 impl Thread { fn state(&self)->ThreadState {
     match self.state { ThreadState::Ready=>ThreadState::Ready, _=>ThreadState::Terminated }
-} }
+} fn process_id(&self)->u64{90} }
 struct Queue(Vec<Thread>);
 impl Queue {
     fn slot_index_and_generation(&self,id:ThreadId)->Option<(usize,u64)> {
@@ -147,6 +171,7 @@ fn main() {
     assert!(!arm_thread_deadline(165,u64::MAX-1));
     for id in 100..165 { disarm_thread_deadline(id); }
     add(2,ThreadState::Ready); add(3,ThreadState::Terminated);
+    process::register(2);
     assert!(implementation::remove_quiescent_terminated_thread(2).is_none());
     assert!(implementation::remove_quiescent_terminated_thread(3).is_none());
     // Repeated exec/exit retirement must not exhaust either 64-entry registry.
@@ -158,6 +183,7 @@ fn main() {
         else { assert!(implementation::remove_quiescent_terminated_thread(id).is_some()); }
         assert!(implementation::remove_thread(id).is_none());
     }
+    assert_eq!(process::released(),400);
     // A live thread's registrations survive an unsuccessful reap.
     assert!(arm_thread_deadline(2,u64::MAX-1));
     assert!(implementation::remove_quiescent_terminated_thread(2).is_none());
