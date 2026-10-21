@@ -3455,8 +3455,8 @@ impl FilesystemService {
         let effective_gid = credentials.effective_gid;
         let groups = credentials.supplementary_groups();
         let open = self.opens.get(&open_id).ok_or(EBADF)?;
-        let inode = open.inode.clone();
         let filesystem = open.filesystem.clone();
+        let inode = Inode::read(&filesystem, open.inode.index).map_err(errno)?;
         let node_id = open.node_id;
         let metadata = inode.metadata();
         if effective_uid != 0 && effective_uid != metadata.uid() {
@@ -3491,8 +3491,8 @@ impl FilesystemService {
         let requested_uid = request.node_id as u32;
         let requested_gid = (request.node_id >> 32) as u32;
         let open = self.opens.get(&open_id).ok_or(EBADF)?;
-        let inode = open.inode.clone();
         let filesystem = open.filesystem.clone();
+        let inode = Inode::read(&filesystem, open.inode.index).map_err(errno)?;
         let node_id = open.node_id;
         let metadata = inode.metadata();
         if effective_uid != 0
