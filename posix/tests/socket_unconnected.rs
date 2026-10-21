@@ -105,7 +105,9 @@ fn never_connected_socket_has_real_identity_but_no_peer_or_data() {
         assert_eq!(streams.shutdown(id, how), Err(-107));
     }
     assert_eq!(streams.read(id, &mut []), Ok(0));
-    assert_eq!(streams.write(id, &[]), Ok(0));
+    // Empty sends still validate connection state; they cannot manufacture a
+    // successful operation on a never-connected stream.
+    assert_eq!(streams.write(id, &[]), Err(-107));
     assert_eq!(streams.peer_address(id), Err(-107));
     assert_eq!(streams.status(id).unwrap().inode, id);
     streams.release(id).unwrap();
