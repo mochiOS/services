@@ -106,7 +106,9 @@ mod task {
     #[derive(Clone,Copy)]pub struct Id;impl Id{pub fn as_u64(self)->u64{7}}
     pub struct PrivilegeLevel;pub struct MemoryRegion;pub struct Process;
     impl Process {
-        pub fn new(_:&str,_:PrivilegeLevel,_:u8)->Self{Self}
+        pub fn try_new(_:&str,_:PrivilegeLevel,_:u8)->Result<Self,crate::Error>{
+            if crate::STAGE.get()==14{Err(crate::Error::ResourceUnavailable)}else{Ok(Self)}
+        }
         pub fn id(&self)->Id{Id}pub fn name(&self)->&str{"name"}
         pub fn set_image_digest(&mut self,_:[u8;32]){}pub fn set_application_identity(&mut self,_:()){}
         pub fn set_foreground(&mut self,_:bool){}pub fn set_capabilities_for_exec(&mut self,_:()){}
@@ -141,7 +143,8 @@ fn main(){
     for native in [false,true] {
         for (stage,error) in [(1,Error::ResourceUnavailable),(2,Error::InvalidArgument),(3,Error::ResourceUnavailable),
             (4,Error::ResourceUnavailable),(5,Error::ResourceUnavailable),(8,Error::ResourceUnavailable),
-            (9,Error::ResourceUnavailable),(10,Error::ResourceUnavailable),(12,Error::AccessDenied),(13,Error::AlreadyExists)] {
+            (9,Error::ResourceUnavailable),(10,Error::ResourceUnavailable),(12,Error::AccessDenied),
+            (13,Error::AlreadyExists),(14,Error::ResourceUnavailable)] {
             reset(stage);let launch=if native{ImageLaunch::Created(&())}else{ImageLaunch::Bootstrap};
             assert_eq!(exec_with_data(&[],"name","opaque:target",None,None,None,None,&[],&[],launch,&mut ExecMeasurement),error.into_raw());
             assert_eq!(DESTROYS.get(),usize::from(stage!=1));assert_eq!(PROCESSES.get(),0);
