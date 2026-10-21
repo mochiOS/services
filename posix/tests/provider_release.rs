@@ -41,16 +41,7 @@ unsafe impl GlobalAlloc for FaultAllocator {
     unsafe fn dealloc(&self,p:*mut u8,l:Layout) {unsafe{System.dealloc(p,l)}}
 }
 #[global_allocator] static ALLOCATOR:FaultAllocator=FaultAllocator;
-mod interrupt {pub mod spinlock {
-    pub struct SpinLock<T>(std::sync::Mutex<T>);
-    impl<T> SpinLock<T>{
-        pub const fn new(value:T)->Self{Self(std::sync::Mutex::new(value))}
-        pub fn lock(&self)->std::sync::MutexGuard<'_,T>{
-            self.0.try_lock().expect("recursive provider cleanup lock")
-        }
-        pub fn try_lock(&self)->Option<std::sync::MutexGuard<'_,T>>{self.0.try_lock().ok()}
-    }
-}}
+mod interrupt {pub use crate::spinlock_probe as spinlock;}
 extern crate self as mnu_abi;
 pub const ENOMEM:u64=(-12i64) as u64;
 pub const PROCESS_MAX_OBJECT_HANDLES:usize=4096;
@@ -194,6 +185,7 @@ fn make(id:u64)->std::sync::Arc<task::handle_table::ProviderObject> {
     assert!(task::handle_table::register_provider_object(&object)); object
 }
 fn main(){
+    spinlock_probe::verify();
     use task::handle_table as h;
     DENY.store(true,Ordering::Relaxed);
     assert!(matches!(h::ProviderObject::new(31,4,8,99),Err(mnu_abi::status::Error::ResourceUnavailable)));
@@ -274,6 +266,10 @@ fn main(){
 
 "#);
     program.push_str(&format!(
+        "#[path={:?}] pub mod spinlock_probe;\n",
+        root.join("services/posix/tests/support/provider_spinlock.rs")
+    ));
+    program.push_str(&format!(
         "#[path={:?}] mod deferred_cleanup_probe;\n",
         root.join("services/posix/tests/support/deferred_cleanup.rs")
     ));
@@ -317,13 +313,20 @@ fn main(){
         "{}",
         String::from_utf8_lossy(&compiled.stderr)
     );
-    let executed = Command::new(&binary).output().unwrap();
+    // Every run must pass. Reuse the compiled probe while varying native host
+    // scheduling of the 16 concurrent cleanup producers; never retry failures.
+    for run in 0..8 {
+        let executed = Command::new(&binary).output().unwrap();
+        if !executed.status.success() {
+            std::fs::remove_dir_all(&directory).unwrap();
+        }
+        assert!(
+            executed.status.success(),
+            "run {run}: {}",
+            String::from_utf8_lossy(&executed.stderr)
+        );
+    }
     std::fs::remove_dir_all(&directory).unwrap();
-    assert!(
-        executed.status.success(),
-        "{}",
-        String::from_utf8_lossy(&executed.stderr)
-    );
 }
 
 #[test]
