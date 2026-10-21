@@ -2,7 +2,7 @@ extern crate self as mochi_user_platform;
 
 use std::cell::RefCell;
 pub mod syscall {
-    pub use mnu_abi::{EINVAL, EIO};
+    pub use mochi_user_syscall::{EINVAL, EIO};
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct SysError(i64);
     impl SysError {

@@ -41,8 +41,8 @@ fn extent_errors_and_short_reads_never_produce_an_executable_snapshot() {
         );
     }
     assert_eq!(
-        snapshot::read(5, 5, |_| Err(mnu_abi::EACCES)),
-        Err(mnu_abi::EACCES)
+        snapshot::read(5, 5, |_| Err((-13i64) as u64)),
+        Err((-13i64) as u64)
     );
 }
 

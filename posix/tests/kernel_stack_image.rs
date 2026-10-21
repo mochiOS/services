@@ -140,9 +140,9 @@ fn later_preparation_failure_drops_only_the_new_alias_and_restores_stack_ownersh
         assert_eq!(KSTACK_SLOTS.lock()[0].user_page_table, 4096);
         assert_eq!(KSTACK_SLOTS.lock()[0].mapped_pages, KSTACK_SLOT_RESERVED);
         assert_eq!(BACKEND.lock().unwrap().maps.len(), 6);
-        Err(mnu_abi::EIO) // A borrowed-PTE transaction can still fail here.
+        Err(mnu_abi::status::Error::BackingFailure.into_raw()) // A borrowed-PTE transaction can still fail here.
     })();
-    assert_eq!(failed, Err(mnu_abi::EIO));
+    assert_eq!(failed, Err(mnu_abi::status::Error::BackingFailure.into_raw()));
     assert_original();
 }
 

@@ -8,7 +8,10 @@ pub mod process_creation;
 
 use std::sync::Mutex;
 
-pub const EIO: u64 = mnu_abi::EIO;
+#[allow(dead_code)]
+#[path = "../../../user/crates/syscall/src/compatibility_status.rs"]
+mod compatibility_status;
+pub const EIO: u64 = compatibility_status::EIO;
 pub mod syscall {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct SysError(pub i64);

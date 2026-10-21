@@ -28,12 +28,13 @@ fn wrapper_program() -> String {
         .canonicalize()
         .unwrap();
     let mut program = format!(
-        "#![allow(dead_code)]\nextern crate self as mnu_abi;\n#[path={:?}]mod abi;pub use abi::*;\n#[path={:?}]mod handle_result;\n",
+        "#![allow(dead_code)]\nextern crate self as mnu_abi;\n#[path={:?}]mod abi;pub use abi::*;\n#[path={:?}]mod handle_result;\n#[path={:?}]mod compatibility_status;\n",
         root.join("core/crates/abi/src/lib.rs"),
         root.join("user/crates/platform/src/handle_result.rs"),
+        root.join("user/crates/syscall/src/compatibility_status.rs"),
     );
     program.push_str(
-        "mod syscall {pub use crate::{SyscallNumber,status::Error as NativeError,EINVAL};\n",
+        "mod syscall {pub use crate::{SyscallNumber,status::Error as NativeError,compatibility_status::EINVAL};\n",
     );
     program.push_str(probe::between(
         include_str!("../../../user/crates/syscall/src/lib.rs"),

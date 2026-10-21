@@ -140,7 +140,7 @@ fn main() {
             assert_eq!(READS.get()==0,mode==0);assert_eq!(SEEKS.get(),0);
         }
         reset(mode);SHORT.set(true);error(Error::BackingFailure.into_raw());
-        for downstream in [Error::BackingFailure.into_raw(),Error::ResourceUnavailable.into_raw(),mnu_abi::EACCES,(-42i64) as u64] {
+        for downstream in [Error::BackingFailure.into_raw(),Error::ResourceUnavailable.into_raw(),(-13i64) as u64,(-42i64) as u64] {
             reset(mode);BACKEND_ERROR.set(Some(downstream));error(downstream);
         }
         for allocation in 0..1 {

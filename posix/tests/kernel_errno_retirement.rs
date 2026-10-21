@@ -1,5 +1,25 @@
-//! Guard the kernel implementation, not the separate userspace compatibility
-//! clients or the still-to-be-migrated ABI compatibility constants.
+//! Guard kernel implementation and ABI, not userspace service-status payloads.
+
+#[test]
+fn remaining_service_statuses_belong_to_userspace_not_the_kernel_abi() {
+    let abi = include_str!("../../../core/crates/abi/src/lib.rs");
+    for (name, value, expected) in [
+        ("ENOENT", mochi_user_syscall::ENOENT, -2i64),
+        ("EIO", mochi_user_syscall::EIO, -5),
+        ("EAGAIN", mochi_user_syscall::EAGAIN, -11),
+        ("ENOMEM", mochi_user_syscall::ENOMEM, -12),
+        ("EACCES", mochi_user_syscall::EACCES, -13),
+        ("EINVAL", mochi_user_syscall::EINVAL, -22),
+    ] {
+        assert!(!abi.contains(&format!("pub const {name}:")));
+        assert_eq!(value as i64, expected);
+        assert_eq!(mnu_abi::status::Error::from_raw(value), None);
+    }
+    let sample = include_str!("../../../core/examples/user/src/main.rs");
+    assert!(!sample.contains("mnu_abi::EAGAIN"));
+    assert!(sample.contains("clone_result == 0 || is_error(clone_result)"));
+    assert!(sample.contains("user::file_close(clone_result)"));
+}
 #[test]
 fn migrated_file_size_status_is_not_part_of_the_kernel_abi() {
     let abi = include_str!("../../../core/crates/abi/src/lib.rs");

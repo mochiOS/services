@@ -143,12 +143,12 @@ fn main() {
         let lengths=reset();PROCESS.with_borrow_mut(|p|match rejected {0=>p.authorization=None,1=>p.authorization.as_mut().unwrap().kind=task::process::PendingExecKind::Spawn,_=>p.authorization.as_mut().unwrap().execution_class=ExecutionClass::Privileged});
         check(lengths,Error::AccessDenied.into_raw());assert!(!authorized());assert_eq!(READS.get(),0);
     }
-    for error in [Error::InvalidArgument.into_raw(),Error::BackingFailure.into_raw(),mnu_abi::EIO] {
+    for error in [Error::InvalidArgument.into_raw(),Error::BackingFailure.into_raw(),(-5i64) as u64] {
         let lengths=reset();READ_ERROR.set(Some(error));check(lengths,error);assert!(!authorized());assert_eq!(REPLACES.get(),0);
     }
     let lengths=reset();PROCESS.with_borrow_mut(|p|p.authorization.as_mut().unwrap().executable_digest=[8;32]);
     check(lengths,Error::AccessDenied.into_raw());assert!(!authorized());assert_eq!(REPLACES.get(),0);
-    for error in [Error::NotReady.into_raw(),Error::ResourceUnavailable.into_raw(),mnu_abi::ENOMEM] {
+    for error in [Error::NotReady.into_raw(),Error::ResourceUnavailable.into_raw(),(-12i64) as u64] {
         let lengths=reset();REPLACE_ERROR.set(error);check(lengths,error);assert!(!authorized());assert_eq!(REPLACES.get(),1);
         check(lengths,Error::AccessDenied.into_raw());assert_eq!(REPLACES.get(),1,"consumed authorization cannot be replayed");
     }

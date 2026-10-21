@@ -2,7 +2,7 @@ extern crate self as mochi_user_platform;
 use std::{cell::RefCell, collections::BTreeMap};
 
 pub mod syscall {
-    pub use mnu_abi::{EACCES, EINVAL, EIO, ENOENT};
+    pub use mochi_user_syscall::{EACCES, EINVAL, EIO, ENOENT};
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct SysError(pub i64);
     impl SysError {
@@ -96,7 +96,7 @@ pub mod handle {
         assert_eq!(handle, 32);
         crate::STATE.with_borrow_mut(|s| {
             if s.fail_write {
-                return Err(crate::error(mnu_abi::EIO));
+                return Err(crate::error(mochi_user_syscall::EIO));
             }
             assert_eq!(s.image.len(), offset as usize);
             let count = bytes.len().min(2);
@@ -131,7 +131,7 @@ pub mod ipc {
         assert_eq!((class, path), (2, "/image"));
         crate::STATE.with_borrow(|s| {
             if s.reply.fail_call {
-                return Err(crate::error(mnu_abi::EIO));
+                return Err(crate::error(mochi_user_syscall::EIO));
             }
             reply.copy_from_slice(&s.reply.status.to_le_bytes());
             handles.count = s.reply.count;
@@ -197,7 +197,7 @@ mod resolver {
             assert_eq!(bytes, &s.image);
             s.events.push("authorize");
             if s.fail_authorize {
-                Err(crate::error(mnu_abi::EACCES))
+                Err(crate::error(mochi_user_syscall::EACCES))
             } else {
                 Ok(())
             }
@@ -207,7 +207,7 @@ mod resolver {
 fn read(_: &str) -> Result<Vec<u8>, syscall::SysError> {
     event("read");
     if STATE.with_borrow(|s| s.fail_read) {
-        Err(error(mnu_abi::EIO))
+        Err(error(mochi_user_syscall::EIO))
     } else {
         Ok(b"image".to_vec())
     }
@@ -258,7 +258,7 @@ fn image_preparation_requires_all_authenticated_authority_before_reading() {
         });
         assert_eq!(
             server::prepare(&fixture(), 17, 2, "/image", read).err(),
-            Some(error(mnu_abi::EACCES))
+            Some(error(mochi_user_syscall::EACCES))
         );
         STATE.with_borrow(|s| assert!(s.events.is_empty()));
     }
@@ -314,7 +314,7 @@ fn malformed_or_overprivileged_replies_close_all_received_references_once() {
     });
     assert_eq!(
         client::prepare_execution_image(9, "/image", service::ExecutionClass::Privileged).err(),
-        Some(error(mnu_abi::EACCES))
+        Some(error(mochi_user_syscall::EACCES))
     );
     STATE.with_borrow(|s| assert!(s.closed.is_empty()));
     for invalid in 0..8 {

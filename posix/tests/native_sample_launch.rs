@@ -3,7 +3,7 @@ use std::cell::RefCell;
 
 pub mod syscall {
     pub use mnu_abi::status::Error as NativeError;
-    pub use mnu_abi::{EINVAL, EIO, ENOENT};
+    pub use mochi_user_syscall::{EINVAL, EIO, ENOENT};
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct SysError(pub i64);
     impl SysError {
@@ -26,7 +26,7 @@ fn step(name: &'static str) -> Result<(), syscall::SysError> {
         state.events.push(name);
         if state.fail == Some(name) {
             state.fail = None;
-            Err(syscall::SysError(mnu_abi::EIO as i64))
+            Err(syscall::SysError(mochi_user_syscall::EIO as i64))
         } else {
             Ok(())
         }
@@ -184,7 +184,7 @@ fn launch_failures_preserve_errors_and_reap_unconfirmed_children_before_close() 
         });
         assert_eq!(
             production::spawn("/image").err(),
-            Some(syscall::SysError(mnu_abi::EIO as i64))
+            Some(syscall::SysError(mochi_user_syscall::EIO as i64))
         );
         STATE.with_borrow(|state| {
             assert_eq!(

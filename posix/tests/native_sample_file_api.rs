@@ -21,7 +21,7 @@ fn sample_open_flags_are_normalized_in_userspace() {
         assert_eq!(file_options::open_options(flags), Ok(expected));
     }
     for flags in [3, 0x8000, u64::MAX] {
-        assert_eq!(file_options::open_options(flags), Err(mnu_abi::EINVAL));
+        assert_eq!(file_options::open_options(flags), Err(mochi_user_syscall::EINVAL));
     }
 }
 

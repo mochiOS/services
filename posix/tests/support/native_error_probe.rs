@@ -21,7 +21,7 @@ pub fn program() -> String {
         "#[derive(Clone, Copy, Debug, PartialEq, Eq)]",
         "#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub struct RawSyscallResult",
     ));
-    for line in include_str!("../../../../core/crates/abi/src/lib.rs").lines() {
+    for line in include_str!("../../../../user/crates/syscall/src/compatibility_status.rs").lines() {
         if line.starts_with("pub const E") && line.contains(": u64 = (-") {
             program.push_str(line);
             program.push('\n');
