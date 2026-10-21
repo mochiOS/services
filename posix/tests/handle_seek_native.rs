@@ -62,7 +62,7 @@ fn provider_call(owner:&ProviderObject,request:provider::RequestHeader,input:&[u
     program.push_str(probe::between(
         source,
         "fn provider_seek_result(",
-        "/// Reads one seekable object",
+        "/// Reads one positional object",
     ));
     program.push_str(r#"
 fn main(){
