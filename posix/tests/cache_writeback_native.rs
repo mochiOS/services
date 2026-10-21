@@ -30,12 +30,14 @@ thread_local!{
     static LOWER_ERROR:Cell<Option<u64>>=const{Cell::new(None)};
     static FAIL_WRITE:Cell<usize>=const{Cell::new(1)};
     static SYNC_ERROR:Cell<Option<u64>>=const{Cell::new(None)};
+    static FAIL_SYNC:Cell<usize>=const{Cell::new(1)};
     static SHORT:Cell<bool>=const{Cell::new(false)};
     static REWRITE:Cell<bool>=const{Cell::new(false)};
     static SHARED_FRAME:Cell<bool>=const{Cell::new(false)};
     static OFFSET_PRESENT:Cell<bool>=const{Cell::new(true)};
     static WRITES:Cell<usize>=const{Cell::new(0)};
     static SYNCS:Cell<usize>=const{Cell::new(0)};
+    static SYNC_WRITERS:Cell<u64>=const{Cell::new(0)};
 }
 struct Allocator;
 fn fail()->bool{FAIL.try_with(|slot|match slot.get(){
@@ -53,7 +55,7 @@ impl Cache{fn lock(&'static self)->CacheGuard{assert!(!CACHE_LOCKED.replace(true
 impl Deref for CacheGuard{type Target=Vec<CachedPage>;fn deref(&self)->&Self::Target{&self.0}}
 impl DerefMut for CacheGuard{fn deref_mut(&mut self)->&mut Self::Target{&mut self.0}}
 impl Drop for CacheGuard{fn drop(&mut self){assert!(CACHE_LOCKED.replace(false));}}
-struct CachedPage{key:PageKey,bytes:Arc<[u8;PAGE_BYTES]>,frame_phys:Option<u64>,dirty_range:Option<(usize,usize)>,version:u64,last_used:u64}
+struct CachedPage{key:PageKey,bytes:Arc<[u8;PAGE_BYTES]>,frame_phys:Option<u64>,dirty_range:Option<(usize,usize)>,writer:Option<Arc<usize>>,version:u64,last_used:u64}
 static PAGE_CACHE:Cache=Cache(std::sync::Mutex::new(Vec::new()));
 static FRAME:[u8;PAGE_BYTES]=[0x5a;PAGE_BYTES];
 static CLOCK:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(1);
@@ -69,12 +71,18 @@ mod mem{pub mod paging{
     pub fn physical_memory_offset()->Option<u64>{crate::OFFSET_PRESENT.get().then_some(0)}
 }}
 mod syscall{pub mod handle{
-    pub fn provider_sync(_:&())->Result<(),u64>{
+    pub fn provider_write_at(writer:&usize,offset:u64,input:&[u8])->Result<usize,u64>{
+        assert!([7,8].contains(writer),"writeback used read-only alias rather than retained writer");
+        crate::write_lower(writer,offset,input)
+    }
+    pub fn provider_sync(writer:&usize)->Result<(),u64>{
         assert!(!crate::CACHE_LOCKED.get());assert!(crate::IO_LOCKED.get());
-        crate::SYNCS.set(crate::SYNCS.get()+1);crate::SYNC_ERROR.get().map_or(Ok(()),Err)
+        crate::SYNC_WRITERS.set(crate::SYNC_WRITERS.get()|(1<<writer));
+        crate::SYNCS.set(crate::SYNCS.get()+1);
+        if crate::SYNCS.get()==crate::FAIL_SYNC.get(){crate::SYNC_ERROR.get().map_or(Ok(()),Err)}else{Ok(())}
     }
 }}
-enum VmObjectSource{Memory(()),Provider{object:()}}
+enum VmObjectSource{Memory(()),Provider{object:Arc<usize>}}
 struct VmObject{source:VmObjectSource}
 impl VmObject{fn object_key(&self)->ObjectKey{ObjectKey::Memory(1)}
 "#);
@@ -95,7 +103,7 @@ impl VmObject{fn object_key(&self)->ObjectKey{ObjectKey::Memory(1)}
         "fn copy_to_frame(",
     ));
     program.push_str(r#"
-fn write_lower(_:&VmObjectSource,offset:u64,input:&[u8])->Result<usize,u64>{
+fn write_lower(_:&usize,offset:u64,input:&[u8])->Result<usize,u64>{
     assert!(!CACHE_LOCKED.get());assert!(IO_LOCKED.get());assert_eq!(offset%4096,7);
     assert_eq!(input.len(),12);assert!(input.iter().all(|b|*b==0x5a));
     WRITES.set(WRITES.get()+1);
@@ -106,12 +114,13 @@ fn write_lower(_:&VmObjectSource,offset:u64,input:&[u8])->Result<usize,u64>{
 fn reset(count:usize,resident:bool)->Arc<[u8;PAGE_BYTES]>{
     FAIL.set(None);GATE_ERROR.set(None);LOWER_ERROR.set(None);SYNC_ERROR.set(None);
     SHORT.set(false);REWRITE.set(false);SHARED_FRAME.set(false);OFFSET_PRESENT.set(true);
-    WRITES.set(0);SYNCS.set(0);FAIL_WRITE.set(1);
+    WRITES.set(0);SYNCS.set(0);SYNC_WRITERS.set(0);FAIL_WRITE.set(1);FAIL_SYNC.set(1);
     let bytes=Arc::new([0x5a;PAGE_BYTES]);
+    let writer=Arc::new(7);
     *PAGE_CACHE.lock()=(0..count).map(|index|CachedPage{
         key:PageKey{object:ObjectKey::Memory(1),page_index:index as u64},
         bytes:Arc::clone(&bytes),frame_phys:resident.then_some(FRAME.as_ptr()as u64),
-        dirty_range:Some((7,19)),version:1,last_used:0,
+        dirty_range:Some((7,19)),writer:Some(Arc::clone(&writer)),version:1,last_used:0,
     }).collect();
     bytes
 }
@@ -119,7 +128,7 @@ fn dirty(){assert!(!CACHE_LOCKED.get());assert!(!IO_LOCKED.get());
     assert!(PAGE_CACHE.lock().iter().all(|page|page.dirty_range==Some((7,19))));
 }
 fn main(){
-    let object=VmObject{source:VmObjectSource::Provider{object:()}};
+    let object=VmObject{source:VmObjectSource::Provider{object:Arc::new(3)}};
     for allocations in [0,1]{
         let bytes=reset(6,false);FAIL.set(Some(allocations));
         let result=object.flush_range(0,6*4096);FAIL.set(None);
@@ -154,6 +163,24 @@ fn main(){
     assert_eq!(object.flush_range(0,4096),Err(Error::BackingFailure.into_raw()));dirty();
     SYNC_ERROR.set(None);assert_eq!(object.flush_range(0,4096),Ok(()));
     assert_eq!(WRITES.get(),2);assert_eq!(PAGE_CACHE.lock()[0].dirty_range,None);
+    // A read-only alias must not replace the actual writers. Failure at the
+    // second writer's sync retains all pages and both authorities for retry.
+    reset(3,false);
+    let first=PAGE_CACHE.lock()[0].writer.as_ref().unwrap().clone();
+    let second=Arc::new(8);
+    PAGE_CACHE.lock()[2].writer=Some(second.clone());
+    SYNC_ERROR.set(Some(Error::BackingFailure.into_raw()));FAIL_SYNC.set(2);
+    assert_eq!(object.flush_range(0,3*4096),Err(Error::BackingFailure.into_raw()));dirty();
+    assert_eq!(SYNCS.get(),2);assert_eq!(SYNC_WRITERS.get(),(1<<7)|(1<<8));
+    assert_eq!(Arc::strong_count(&first),3);assert_eq!(Arc::strong_count(&second),2);
+    SYNC_ERROR.set(None);assert_eq!(object.flush_range(0,3*4096),Ok(()));
+    assert_eq!(SYNCS.get(),4);assert_eq!(WRITES.get(),6);
+    assert_eq!(Arc::strong_count(&first),1);assert_eq!(Arc::strong_count(&second),1);
+    assert!(PAGE_CACHE.lock().iter().all(|page|page.dirty_range.is_none()&&page.writer.is_none()));
+    // No write authority is invented when a malformed dirty entry has none.
+    reset(1,false);PAGE_CACHE.lock()[0].writer=None;
+    assert_eq!(object.flush_range(0,4096),Err(Error::BackingFailure.into_raw()));dirty();
+    assert_eq!(WRITES.get(),0);assert_eq!(SYNCS.get(),0);
     for (offset,length) in [(u64::MAX,1),(4096,u64::MAX)]{
         reset(1,false);assert_eq!(object.flush_range(offset,length),Err(Error::InvalidArgument.into_raw()));dirty();
         assert_eq!(WRITES.get(),0);assert_eq!(SYNCS.get(),0);
