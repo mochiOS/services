@@ -95,6 +95,7 @@ struct Fault {
     image: Image,
     fail: Arc<Mutex<Option<u64>>>,
     attempts: Arc<Mutex<Vec<u64>>>,
+    skip_failures: Arc<Mutex<usize>>,
 }
 impl Ext4Read for Fault {
     fn read(&self, offset: u64, output: &mut [u8]) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -108,7 +109,11 @@ impl Ext4Write for Fault {
     fn write(&self, offset: u64, bytes: &[u8]) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.attempts.lock().unwrap().push(offset);
         if *self.fail.lock().unwrap() == Some(offset) {
-            return Err("injected backing failure".into());
+            let mut skip = self.skip_failures.lock().unwrap();
+            if *skip == 0 {
+                return Err("injected backing failure".into());
+            }
+            *skip -= 1;
         }
         self.image.write(offset, bytes)
     }
@@ -146,6 +151,7 @@ fn populated(inode_size: usize) -> (Fixture, Fault, FilesystemService, Vec<u64>)
         image: fixture.image.clone(),
         fail: Arc::new(Mutex::new(None)),
         attempts: Arc::new(Mutex::new(Vec::new())),
+        skip_failures: Arc::new(Mutex::new(0)),
     };
     let disk =
         Ext4::load_with_writer(Box::new(fault.clone()), Some(Box::new(fault.clone()))).unwrap();
@@ -154,6 +160,152 @@ fn populated(inode_size: usize) -> (Fixture, Fault, FilesystemService, Vec<u64>)
         .configure_memory_updates(Box::new(unmapped_updates::UnmappedUpdates))
         .unwrap();
     (fixture, fault, service, blocks)
+}
+
+fn privileged(fixture: &Fixture) -> Inode {
+    let disk = fixture.load();
+    let mut inode = disk
+        .path_to_inode("/work/target".try_into().unwrap(), FollowSymlinks::All)
+        .unwrap();
+    inode
+        .set_mode(InodeMode::S_IFREG | InodeMode::from_bits_retain(0o6751))
+        .unwrap();
+    inode.write(&disk).unwrap();
+    inode
+}
+
+#[test]
+fn all_write_paths_drop_setid_without_changing_ordinary_permissions() {
+    for size in [128, 256] {
+        for mode in 0..5 {
+            let (fixture, _fault, mut service, _) = populated(size);
+            let file = if mode == 4 {
+                service
+                    .open_at(
+                        request(wire::OP_OPEN_AT, wire::OPEN_AT_WRITE | wire::OPEN_AT_APPEND),
+                        b"/work/target",
+                        PathAnchors::default(),
+                        credentials(0, 0, &[]),
+                    )
+                    .unwrap()
+                    .header
+                    .open_id
+            } else {
+                open(&mut service, b"/work/target", false)
+            };
+            let other = open(&mut service, b"/work/target", false);
+            privileged(&fixture);
+            set_clock(Ok(time(110, 123)));
+            let count = match mode {
+                0 | 4 => service.provider_write(file, b"x").unwrap(),
+                1 => service.provider_write_at(file, 1, b"x").unwrap(),
+                2 => service.provider_write_bounded(file, b"x", 1).unwrap().0,
+                _ => {
+                    let reply = service.handle(
+                        wire::Header {
+                            open_id: file,
+                            ..request(wire::OP_WRITE, 0)
+                        },
+                        b"x",
+                    );
+                    assert_eq!(reply.header.status, 0);
+                    reply.header.offset as usize
+                }
+            };
+            assert_eq!(count, 1);
+            assert_eq!(calls(), 1);
+            for id in [file, other] {
+                let current = status(&mut service, id);
+                assert_eq!(current.mode, 0o751);
+                assert_eq!(
+                    status_times(current),
+                    [
+                        (-1, 0),
+                        (110, if size == 128 { 0 } else { 123 }),
+                        (110, if size == 128 { 0 } else { 123 })
+                    ]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn write_invalidates_privilege_before_data_even_if_later_storage_writes_fail() {
+    for size in [128, 256] {
+        // 0: revocation fails; 1: data fails; 2: inode commit fails after data;
+        // 3: a later data block fails after a committed prefix.
+        for stage in 0..4 {
+            let (fixture, fault, mut service, blocks) = populated(size);
+            let file = open(&mut service, b"/work/target", false);
+            let inode = privileged(&fixture);
+            let bytes = fixture.image.0.lock().unwrap();
+            let table = u32::from_le_bytes(bytes[2056..2060].try_into().unwrap()) as usize;
+            let inode_offset = (table * 1024 + (inode.index.get() as usize - 1) * size) as u64;
+            drop(bytes);
+            *fault.fail.lock().unwrap() = Some(match stage {
+                0 | 2 => inode_offset,
+                1 => blocks[0] + if size == 128 { 17 } else { 0 },
+                _ => blocks[1],
+            });
+            *fault.skip_failures.lock().unwrap() = usize::from(stage == 2);
+            set_clock(Ok(time(120, 0)));
+            let result = service.provider_write_at(file, 17, &[0x22; 3072]);
+            if stage == 3 {
+                assert_eq!(result, Ok(1007));
+            } else {
+                assert_eq!(
+                    result,
+                    Err(5),
+                    "inode size {size}, failure stage {stage}, writes {:?}",
+                    fault.attempts.lock().unwrap()
+                );
+            }
+            assert_eq!(calls(), 1);
+            let current = status(&mut service, file);
+            assert_eq!(current.mode, if stage == 0 { 0o6751 } else { 0o751 });
+            assert_eq!(
+                current.modification_time_seconds,
+                if stage == 3 { 120 } else { 2 }
+            );
+            if stage == 0 {
+                assert!(!fault.attempts.lock().unwrap().iter().any(|offset| {
+                    blocks
+                        .iter()
+                        .any(|block| (*block..*block + 1024).contains(offset))
+                }));
+            }
+            *fault.fail.lock().unwrap() = None;
+            let data = service.provider_read_at(file, 0, 4096).unwrap();
+            assert_eq!(&data[..17], &[0x11; 17]);
+            assert_eq!(
+                &data[17..1024],
+                if stage < 2 {
+                    &[0x11; 1007]
+                } else {
+                    &[0x22; 1007]
+                }
+            );
+            assert_eq!(&data[1024..], &[0x11; 3072]);
+        }
+    }
+}
+
+#[test]
+fn empty_and_prevalidation_failures_do_not_revoke_setid() {
+    let (fixture, _fault, mut service, _) = populated(256);
+    let file = open(&mut service, b"/work/target", false);
+    privileged(&fixture);
+    let before = fixture.image.0.lock().unwrap().clone();
+    assert_eq!(service.provider_write(file, b""), Ok(0));
+    assert_eq!(service.provider_write_at(file, u64::MAX, b""), Ok(0));
+    assert_eq!(service.provider_write_at(file, u64::MAX, b"x"), Err(27));
+    for now in [Err(5), Ok(time(i64::MAX, 0)), Ok(time(1, 1_000_000_000))] {
+        set_clock(now);
+        assert!(service.provider_write_at(file, 0, b"x").is_err());
+        assert_eq!(*fixture.image.0.lock().unwrap(), before);
+    }
+    assert_eq!(status(&mut service, file).mode, 0o6751);
 }
 
 #[test]
