@@ -1905,7 +1905,11 @@ impl FilesystemService {
     fn stat(&self, request: protocol::Header) -> Result<Response, i32> {
         let (node_id, metadata) = if request.open_id != 0 {
             let open = self.opens.get(&request.open_id).ok_or(EBADF)?;
-            (open.node_id, open.inode.metadata())
+            // An open description retains identity, not a private metadata
+            // snapshot. Resolve the inode on its owning volume, never by the
+            // pathname which may have been renamed, unlinked or replaced.
+            let inode = Inode::read(&open.filesystem, open.inode.index).map_err(errno)?;
+            (open.node_id, inode.metadata())
         } else {
             let path = self.nodes.get(&request.node_id).ok_or(ENOENT)?;
             (

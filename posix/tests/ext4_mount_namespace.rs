@@ -1262,6 +1262,76 @@ fn root_credentials() -> protocol::Credentials {
 }
 
 #[test]
+fn retained_stat_refreshes_metadata_from_its_volume_without_reopening_the_path() {
+    let fixture = Fixture::new();
+    let mut service = FilesystemService::new(fixture.volume("stat-root"));
+    service
+        .configure_memory_updates(Box::new(unmapped_updates::UnmappedUpdates))
+        .unwrap();
+    service
+        .mount_volume(b"/mount", fixture.volume("stat-mounted"))
+        .unwrap();
+    for path in [b"/file".as_slice(), b"/mount/file".as_slice()] {
+        let reader = open(
+            &mut service,
+            path,
+            protocol::OPEN_AT_READ,
+            PathAnchors::default(),
+        );
+        let writer = open(
+            &mut service,
+            path,
+            protocol::OPEN_AT_WRITE,
+            PathAnchors::default(),
+        );
+        let contents = b"metadata must reflect the other open description";
+        assert_eq!(
+            service.provider_write_at(writer.open_id, 0, contents),
+            Ok(contents.len())
+        );
+        let query = protocol::Header {
+            opcode: protocol::OP_STAT,
+            open_id: reader.open_id,
+            ..Default::default()
+        };
+        let status = service.handle(query, &[]);
+        assert_eq!(status.header.status, 0);
+        assert_eq!(status.header.node_id, reader.node_id);
+        assert_eq!(status.header.offset, contents.len() as u64);
+        service
+            .truncate_handle(
+                protocol::Header { offset: 3, ..Default::default() },
+                writer.open_id,
+            )
+            .unwrap();
+        assert_eq!(service.handle(query, &[]).header.offset, 3);
+        service
+            .unlink_at(
+                protocol::Header::default(),
+                path,
+                PathAnchors::default(),
+                root_credentials(),
+            )
+            .unwrap();
+        let replaced = open(
+            &mut service,
+            path,
+            protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+            PathAnchors::default(),
+        );
+        assert_ne!(replaced.node_id, reader.node_id);
+        assert_eq!(service.handle(query, &[]).header.offset, 3);
+        let status = service
+            .stat_handle(protocol::Header::default(), reader.open_id)
+            .unwrap();
+        assert_eq!(protocol::decode_node_status(&status.payload).unwrap().size, 3);
+        for open_id in [reader.open_id, writer.open_id, replaced.open_id] {
+            service.provider_close(open_id).unwrap();
+        }
+    }
+}
+
+#[test]
 fn node_status_reports_allocated_sectors_not_logical_length_across_mounts() {
     let fixture = Fixture::new();
     let data = fixture.volume_with_block_size("allocation-data", Some(1024));
