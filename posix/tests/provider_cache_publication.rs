@@ -1,6 +1,7 @@
 //! Production VM object/cache code; substitute only IPC, scheduling, physical
 //! frames and interrupt locks. Interleave mutations at the actual lock edges.
 #![allow(dead_code)]
+#![feature(allocator_api)]
 extern crate alloc;
 
 use std::cell::{Cell, RefCell};

@@ -129,12 +129,7 @@ mod syscall {
     use super::*;
     pub mod memory {
         pub use mnu_abi::memory_map::Request;
-        pub struct Error(pub i64);
-        impl Error {
-            pub fn raw(self) -> i64 {
-                self.0
-            }
-        }
+        pub use mochi_user_syscall::SysError as Error;
         pub fn map_bounded(request: Request) -> Result<u64, Error> {
             {
                 let mut backend = super::BACKEND.lock().unwrap();
@@ -143,7 +138,7 @@ mod syscall {
                 backend.map_ceiling = request.byte_ceiling;
             }
             if request.byte_ceiling < request.length {
-                return Err(Error(-12));
+                return Err(Error::from_raw(-12));
             }
             super::raw_syscall6(
                 super::SyscallNumber::MemoryMap,
@@ -154,7 +149,7 @@ mod syscall {
                 request.backing_handle,
                 request.backing_offset,
             )
-            .map_err(|error| Error(-i64::from(error)))
+            .into_result()
         }
     }
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -186,7 +181,7 @@ mod syscall {
         options: u64,
         handle: u64,
         offset: u64,
-    ) -> Result<u64, i32> {
+    ) -> mochi_user_syscall::RawSyscallResult {
         assert_eq!(number, SyscallNumber::MemoryMap);
         assert_eq!(
             (address, length, access, options, handle, offset),
@@ -202,10 +197,12 @@ mod syscall {
         let mut backend = BACKEND.lock().unwrap();
         let backend = backend.as_mut().unwrap();
         if backend.fail == Some(number) {
-            return Err(EIO);
+            return mochi_user_syscall::RawSyscallResult::new((-i64::from(EIO)) as u64);
         }
         backend.maps += 1;
-        Ok(std::ptr::from_ref(&backend.pages[backend.selected].policy) as u64)
+        mochi_user_syscall::RawSyscallResult::new(
+            std::ptr::from_ref(&backend.pages[backend.selected].policy) as u64,
+        )
     }
     pub fn raw_syscall2(number: SyscallNumber, address: u64, length: u64) -> Result<u64, i32> {
         assert_eq!(number, SyscallNumber::MemoryUnmap);

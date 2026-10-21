@@ -16,6 +16,12 @@ mochios-posix-protocol = { git = "https://github.com/mochiOS/syscalls", package 
 mochios-posix-client = { git = "https://github.com/mochiOS/syscalls", package = "mochios-posix-client", default-features = false }
 
 [dev-dependencies]
+mochi-user-syscall = { path = "../../user/crates/syscall" }
+mochios-network-stack = { path = "../../user/crates/network-stack" }
+mochios-linux-gui-protocol = { path = "../../user/crates/linux-gui-protocol" }
+tiny-skia = "0.12.0"
+libc = { path = "../../libraries/libc" }
+async-trait = "0.1"
 mochios-capability-protocol = { path = "../../user/crates/capability-protocol" }
 mochios-viewkit-gpu-protocol = { path = "../../user/crates/viewkit-gpu-protocol" }
 mochios-net-device-protocol = { path = "../../user/crates/net-device-protocol" }

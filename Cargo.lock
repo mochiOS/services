@@ -72,7 +72,7 @@ dependencies = [
  "bitflags 2.13.1",
  "cc",
  "jni",
- "libc",
+ "libc 0.2.190 (registry+https://github.com/rust-lang/crates.io-index)",
  "log",
  "ndk",
  "ndk-context",
@@ -93,7 +93,7 @@ version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae221649c9976a6f6c56ae1facf410f3ddb33cc661c4b7b61020a912d4237fbc"
 dependencies = [
- "libc",
+ "libc 0.2.190 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -312,7 +312,7 @@ checksum = "5add81bb678e6cb321aff7fa0dc7689ad82b112dbc032cea19f91d6b8e3582b9"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
- "libc",
+ "libc 0.2.190 (registry+https://github.com/rust-lang/crates.io-index)",
  "shlex",
 ]
 
@@ -433,7 +433,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91e195e091a93c46f7102ec7818a2aa394e1e1771c3ab4825963fa03e45afb8f"
 dependencies = [
  "core-foundation-sys",
- "libc",
+ "libc 0.2.190 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -452,7 +452,7 @@ dependencies = [
  "core-foundation",
  "core-graphics-types",
  "foreign-types",
- "libc",
+ "libc 0.2.190 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -463,7 +463,7 @@ checksum = "45390e6114f68f718cc7a830514a96f903cccd70d02a8f6d9f643ac4ba45afaf"
 dependencies = [
  "bitflags 1.3.2",
  "core-foundation",
- "libc",
+ "libc 0.2.190 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -505,7 +505,7 @@ version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280"
 dependencies = [
- "libc",
+ "libc 0.2.190 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -795,7 +795,7 @@ version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
- "libc",
+ "libc 0.2.190 (registry+https://github.com/rust-lang/crates.io-index)",
  "windows-sys 0.61.2",
 ]
 
@@ -1024,7 +1024,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
 dependencies = [
  "cfg-if",
- "libc",
+ "libc 0.2.190 (registry+https://github.com/rust-lang/crates.io-index)",
  "wasi",
 ]
 
@@ -1035,7 +1035,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
 dependencies = [
  "cfg-if",
- "libc",
+ "libc 0.2.190 (registry+https://github.com/rust-lang/crates.io-index)",
  "r-efi 5.3.0",
  "wasip2",
 ]
@@ -1047,7 +1047,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0de51e6874e94e7bf76d726fc5d13ba782deca734ff60d5bb2fb2607c7406555"
 dependencies = [
  "cfg-if",
- "libc",
+ "libc 0.2.190 (registry+https://github.com/rust-lang/crates.io-index)",
  "r-efi 6.0.0",
  "wasip2",
  "wasip3",
@@ -1356,7 +1356,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3"
 dependencies = [
  "getrandom 0.4.2",
- "libc",
+ "libc 0.2.190 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -1376,7 +1376,7 @@ version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6aae1df220ece3c0ada96b8153459b67eebe9ae9212258bb0134ae60416fdf76"
 dependencies = [
- "libc",
+ "libc 0.2.190 (registry+https://github.com/rust-lang/crates.io-index)",
  "libloading",
  "pkg-config",
 ]
@@ -1417,6 +1417,10 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 [[package]]
 name = "libc"
 version = "0.2.190"
+
+[[package]]
+name = "libc"
+version = "0.2.190"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 
@@ -1443,7 +1447,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f02ab6bace2054fb888a3c16f990117b579d14a3088e472d63c6011fa185c9d3"
 dependencies = [
  "bitflags 2.13.1",
- "libc",
+ "libc 0.2.190 (registry+https://github.com/rust-lang/crates.io-index)",
  "plain",
  "redox_syscall 0.8.1",
 ]
@@ -1461,7 +1465,7 @@ dependencies = [
  "mboot-protocol",
  "mochi-user-platform",
  "mochi-user-syscall",
- "mochios-linux-gui-protocol",
+ "mochios-linux-gui-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls?rev=814cb3f1f5e0dab5fc199f1de5a443bd61fe566e)",
  "mochios-linux-portal-protocol",
  "mochios-posix-client",
  "mochios-posix-protocol",
@@ -1547,7 +1551,7 @@ version = "0.9.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
 dependencies = [
- "libc",
+ "libc 0.2.190 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -1642,6 +1646,10 @@ source = "git+https://github.com/mochiOS/syscalls#38b10ca1d8b95d8ad638e24a2f83ad
 [[package]]
 name = "mochios-linux-gui-protocol"
 version = "0.1.0"
+
+[[package]]
+name = "mochios-linux-gui-protocol"
+version = "0.1.0"
 source = "git+https://github.com/mochiOS/syscalls?rev=814cb3f1f5e0dab5fc199f1de5a443bd61fe566e#814cb3f1f5e0dab5fc199f1de5a443bd61fe566e"
 
 [[package]]
@@ -1661,6 +1669,10 @@ version = "0.1.0"
 name = "mochios-net-device-protocol"
 version = "0.1.0"
 source = "git+https://github.com/mochiOS/syscalls#38b10ca1d8b95d8ad638e24a2f83adae6aa17034"
+
+[[package]]
+name = "mochios-network-stack"
+version = "0.1.0"
 
 [[package]]
 name = "mochios-network-stack"
@@ -1842,7 +1854,7 @@ dependencies = [
  "mochi-user-syscall",
  "mochios-http-client",
  "mochios-net-device-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
- "mochios-network-stack",
+ "mochios-network-stack 0.1.0 (git+https://github.com/mochiOS/syscalls)",
  "mochios-tls-client",
 ]
 
@@ -1946,7 +1958,7 @@ checksum = "e4e89ad9e3d7d297152b17d39ed92cd50ca8063a89a9fa569046d41568891eff"
 dependencies = [
  "bitflags 2.13.1",
  "block2",
- "libc",
+ "libc 0.2.190 (registry+https://github.com/rust-lang/crates.io-index)",
  "objc2 0.5.2",
  "objc2-core-data",
  "objc2-core-image",
@@ -2053,7 +2065,7 @@ dependencies = [
  "bitflags 2.13.1",
  "block2",
  "dispatch",
- "libc",
+ "libc 0.2.190 (registry+https://github.com/rust-lang/crates.io-index)",
  "objc2 0.5.2",
 ]
 
@@ -2213,7 +2225,7 @@ version = "0.3.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5df339f526ea9a60e371768d50efc2f2508c7203290731565d1f7a6f71d21747"
 dependencies = [
- "libc",
+ "libc 0.2.190 (registry+https://github.com/rust-lang/crates.io-index)",
  "libredox",
 ]
 
@@ -2256,7 +2268,7 @@ version = "0.1.0"
 dependencies = [
  "mochi-user-platform",
  "mochi-user-syscall",
- "mochios-linux-gui-protocol",
+ "mochios-linux-gui-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls?rev=814cb3f1f5e0dab5fc199f1de5a443bd61fe566e)",
  "mochios-package-protocol",
  "mochios-posix-client",
  "mochios-posix-protocol",
@@ -2281,7 +2293,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1"
 dependencies = [
  "cfg-if",
- "libc",
+ "libc 0.2.190 (registry+https://github.com/rust-lang/crates.io-index)",
  "redox_syscall 0.5.18",
  "smallvec",
  "windows-link",
@@ -2487,15 +2499,20 @@ dependencies = [
 name = "posix-service"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "ext4plus",
  "filesystem-service",
+ "libc 0.2.190",
  "mboot-protocol",
  "mnu-abi",
  "mochi-user-platform",
+ "mochi-user-syscall",
  "mochios-capability-protocol",
  "mochios-certificate-database 0.1.0",
  "mochios-filesystem-protocol",
+ "mochios-linux-gui-protocol 0.1.0",
  "mochios-net-device-protocol 0.1.0",
+ "mochios-network-stack 0.1.0",
  "mochios-posix-client",
  "mochios-posix-protocol",
  "mochios-signature-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
@@ -2503,6 +2520,7 @@ dependencies = [
  "mochios-viewkit-gpu-protocol 0.1.0",
  "mochios-workspace-protocol",
  "sha2",
+ "tiny-skia",
 ]
 
 [[package]]
@@ -2761,7 +2779,7 @@ dependencies = [
  "cc",
  "cfg-if",
  "getrandom 0.2.17",
- "libc",
+ "libc 0.2.190 (registry+https://github.com/rust-lang/crates.io-index)",
  "untrusted",
  "windows-sys 0.52.0",
 ]
@@ -2825,7 +2843,7 @@ checksum = "fdb5bc1ae2baa591800df16c9ca78619bf65c0488b41b96ccec5d11220d8c154"
 dependencies = [
  "bitflags 2.13.1",
  "errno",
- "libc",
+ "libc 0.2.190 (registry+https://github.com/rust-lang/crates.io-index)",
  "linux-raw-sys 0.4.15",
  "windows-sys 0.52.0",
 ]
@@ -2838,7 +2856,7 @@ checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
 dependencies = [
  "bitflags 2.13.1",
  "errno",
- "libc",
+ "libc 0.2.190 (registry+https://github.com/rust-lang/crates.io-index)",
  "linux-raw-sys 0.12.1",
  "windows-sys 0.61.2",
 ]
@@ -3178,7 +3196,7 @@ dependencies = [
  "calloop",
  "calloop-wayland-source",
  "cursor-icon",
- "libc",
+ "libc 0.2.190 (registry+https://github.com/rust-lang/crates.io-index)",
  "log",
  "memmap2",
  "rustix 0.38.44",
@@ -3337,7 +3355,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8eab9a99a024a169fe8a903cf9d4a3b3601109bcc13bd9e3c6fff259138626c4"
 dependencies = [
- "libc",
+ "libc 0.2.190 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -4001,7 +4019,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "js-sys",
  "khronos-egl",
- "libc",
+ "libc 0.2.190 (registry+https://github.com/rust-lang/crates.io-index)",
  "libloading",
  "log",
  "naga",
@@ -4278,7 +4296,7 @@ dependencies = [
  "cursor-icon",
  "dpi",
  "js-sys",
- "libc",
+ "libc 0.2.190 (registry+https://github.com/rust-lang/crates.io-index)",
  "memmap2",
  "ndk",
  "objc2 0.5.2",
@@ -4430,7 +4448,7 @@ version = "2.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "38735924fedd5314a6e548792904ed8c6de6636285cb9fec04d5b1db85c1516f"
 dependencies = [
- "libc",
+ "libc 0.2.190 (registry+https://github.com/rust-lang/crates.io-index)",
  "once_cell",
  "pkg-config",
 ]
@@ -4443,7 +4461,7 @@ checksum = "9993aa5be5a26815fe2c3eacfc1fde061fc1a1f094bf1ad2a18bf9c495dd7414"
 dependencies = [
  "as-raw-xcb-connection",
  "gethostname",
- "libc",
+ "libc 0.2.190 (registry+https://github.com/rust-lang/crates.io-index)",
  "libloading",
  "once_cell",
  "rustix 1.1.4",
