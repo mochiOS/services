@@ -18,6 +18,9 @@ mod child_cpu_state;
 #[path = "support/orphan_group_transition.rs"]
 mod orphan_group_transition;
 
+#[path = "support/alarm.rs"]
+mod alarm;
+
 #[path = "support/wait_observation.rs"]
 mod wait_observation;
 

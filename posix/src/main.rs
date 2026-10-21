@@ -83,7 +83,9 @@ fn main() {
             platform::process::exit(1);
         }
     };
-    let service_state = Arc::new(Mutex::new(PosixService::new()));
+    let service_state = Arc::new(Mutex::new(PosixService::new().with_monotonic_clock(|| {
+        platform::time::monotonic_nanoseconds().map_err(|_| protocol::STATUS_EIO)
+    })));
     let socket_endpoint = match socket_native::start(Arc::clone(&service_state)) {
         Ok(endpoint) => endpoint,
         Err(error) => {
@@ -205,6 +207,11 @@ fn main() {
                 error
             );
         }
+        if let Err(error) = service.expire_alarms() {
+            platform::logln!("posix.service: alarm clock failed errno={}", error);
+            platform::thread::yield_now();
+            continue;
+        }
         let cpu_deadline = if service.has_finite_cpu_limits() {
             let now = match platform::time::monotonic_milliseconds() {
                 Ok(now) => now,
@@ -268,7 +275,11 @@ fn main() {
         let deadline = pending_signal_waits
             .iter()
             .filter_map(|wait: &PendingSignalWait| wait.deadline)
-            .fold(deadline.min(cpu_deadline), u64::min);
+            .fold(deadline.min(cpu_deadline), u64::min)
+            .min(
+                service.next_alarm_deadline()
+                    .unwrap_or(platform::syscall::HANDLE_WAIT_INFINITE),
+            );
         let lifecycle_handles = service.child_lifecycle_handles();
         drop(service);
         match wait_for_request_or_child(endpoint_handle, lifecycle_handles, deadline) {
