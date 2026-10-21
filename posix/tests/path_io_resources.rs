@@ -317,6 +317,26 @@ fn reset() {
     RETIRED.store(0, Ordering::Relaxed);
     CALLS.store(0, Ordering::Relaxed);
     DROPS.store(0, Ordering::Relaxed);
+    // Fault injection must not retain pointers into a completed test's stack
+    // or freed Vec. A later test may exercise the default backend directly.
+    CASE.store(0, Ordering::Relaxed);
+    INPUT.store(0, Ordering::Relaxed);
+    SECOND_INPUT.store(0, Ordering::Relaxed);
+    READLINK_OUTPUT.store(0, Ordering::Relaxed);
+}
+
+#[test]
+fn reset_retires_fault_injection_and_all_borrowed_caller_addresses() {
+    let _serial = SERIAL.lock().unwrap();
+    CASE.store(3, Ordering::Relaxed);
+    INPUT.store(1, Ordering::Relaxed);
+    SECOND_INPUT.store(2, Ordering::Relaxed);
+    READLINK_OUTPUT.store(3, Ordering::Relaxed);
+    reset();
+    assert_eq!(CASE.load(Ordering::Relaxed), 0);
+    assert_eq!(INPUT.load(Ordering::Relaxed), 0);
+    assert_eq!(SECOND_INPUT.load(Ordering::Relaxed), 0);
+    assert_eq!(READLINK_OUTPUT.load(Ordering::Relaxed), 0);
 }
 #[test]
 fn access_preserves_all_modes_and_id_follow_options_with_scoped_authority() {
