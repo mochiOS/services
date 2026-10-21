@@ -57,6 +57,7 @@ fn runtime_accepts_nodefer_without_accepting_unknown_or_misplaced_child_flags() 
 use std::sync::atomic::{AtomicI32,Ordering};
 const EINVAL:i32=22;
 const SA_NODEFER:i32=0x40000000;const SA_RESTART:i32=0x10000000;
+const SA_RESETHAND:i32=i32::MIN;
 const SA_SIGINFO:i32=4;const SA_ONSTACK:i32=8;
 const SA_NOCLDSTOP:i32=1;const SA_NOCLDWAIT:i32=2;
 mod posix_protocol{pub const SIGNAL_CHLD:u32=20;}
@@ -72,7 +73,7 @@ fn valid(signal:i32,flags:i32)->i32{let replacement=Action{sa_flags:flags};
 0}
 fn main(){
 for signal in [1,20,30] {
- for flags in [SA_NODEFER,SA_NODEFER|SA_RESTART|SA_SIGINFO|SA_ONSTACK] {assert_eq!(valid(signal,flags),0);}
+ for flags in [SA_NODEFER,SA_RESETHAND,SA_RESETHAND|SA_NODEFER,SA_NODEFER|SA_RESTART|SA_SIGINFO|SA_ONSTACK] {assert_eq!(valid(signal,flags),0);}
  assert_eq!(valid(signal,SA_NODEFER|0x20000000),-1);
  assert_eq!(ERRNO.load(Ordering::Relaxed),EINVAL);
  assert_eq!(valid(signal,SA_NODEFER|SA_NOCLDWAIT),if signal==20{0}else{-1});
@@ -95,8 +96,8 @@ fn c_header_exports_the_same_nodefer_bit_without_a_generated_sdk() {
     let header = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../user/libc-port/include/sys/_mochios_sigaction.h");
     let source = format!(
-        "typedef void (*_sig_func_ptr)(int);\ntypedef unsigned long sigset_t;\n#include {:?}\n_Static_assert(SA_NODEFER == {}, \"SA_NODEFER ABI\");\n",
-        header, SA_NODEFER
+        "typedef void (*_sig_func_ptr)(int);\ntypedef unsigned long sigset_t;\n#include {:?}\n_Static_assert(SA_NODEFER == {}, \"SA_NODEFER ABI\");\n_Static_assert(SA_RESETHAND == {}, \"SA_RESETHAND ABI\");\n_Static_assert(sizeof(SA_RESETHAND) == sizeof(int), \"signed flag ABI\");\n",
+        header, SA_NODEFER, signal::SA_RESETHAND
     );
     let mut compiler = Command::new("cc")
         .args(["-std=c11", "-x", "c", "-fsyntax-only", "-"])
@@ -118,6 +119,7 @@ fn c_header_exports_the_same_nodefer_bit_without_a_generated_sdk() {
     );
     let rust_libc = include_str!("../../../libraries/libc/newlib/mochios.rs");
     assert!(rust_libc.contains("pub const SA_NODEFER: c_int = 0x4000_0000;"));
+    assert!(rust_libc.contains("pub const SA_RESETHAND: c_int = c_int::MIN;"));
 }
 
 #[test]
@@ -134,9 +136,16 @@ extern crate self as mochios_posix_client;
 use std::{ffi::c_int,pin::Pin,sync::atomic::{AtomicU64,Ordering}};
 const EINVAL:i32=22;const EOVERFLOW:i32=75;const EIO:i32=5;
 const SA_SIGINFO:i32=4;const SA_RESTART:i32=0x10000000;
+const SA_RESETHAND:i32=i32::MIN;
+const SA_NOCLDSTOP:i32=1;const SA_NOCLDWAIT:i32=2;
 mod posix_protocol {
 pub const SIGNAL_MAX:u32=64;pub const SIGNAL_KILL:u32=9;pub const SIGNAL_STOP:u32=17;
 pub const SIGNAL_MASK_BLOCK:u32=2;pub const SIGNAL_MASK_SET:u32=1;
+pub const SIGNAL_ILL:u32=4;pub const SIGNAL_TRAP:u32=5;
+pub const SIGNAL_CHLD:u32=20;
+pub const SIGNAL_CHILD_OPTION_NOCLDSTOP:u32=1;pub const SIGNAL_CHILD_OPTION_NOCLDWAIT:u32=2;
+pub const SIGNAL_DISPOSITION_DEFAULT:u32=0;
+pub struct SignalDisposition{pub signal:u32,pub kind:u32,pub child_options:u32}
 #[derive(Clone,Copy)]pub struct SignalDelivery{pub signal:u32}
 }
 extern crate self as mochios_posix_protocol;
@@ -152,9 +161,15 @@ pub mod signal {
 }
 mod signal_context{pub enum InfoError{Overflow,Other}}
 #[derive(Clone,Copy)]struct Action{handler:usize,sa_flags:i32,sa_mask:u64}
+type SignalAction=Action;
+impl Action{fn default_action()->Self{Self{handler:0,sa_flags:0,sa_mask:0}}}
 struct Actions(std::sync::Mutex<[Action;64]>);
 impl Actions{fn lock(&self)->std::sync::MutexGuard<'_,[Action;64]>{self.0.lock().unwrap()}}
 static SIGNAL_ACTIONS:Actions=Actions(std::sync::Mutex::new([Action{handler:2,sa_flags:0,sa_mask:0};64]));
+struct Update(std::sync::Mutex<()>);
+impl Update{fn lock(&self)->std::sync::MutexGuard<'_,()>{self.0.lock().unwrap()}}
+static SIGNAL_ACTION_UPDATE:Update=Update(std::sync::Mutex::new(()));
+static REMOTE_DISPOSITION:AtomicU64=AtomicU64::new(2);
 struct ThreadControl{caught_signal_generation:AtomicU64,restart_signal_generation:AtomicU64,nonrestart_signal_generation:AtomicU64}
 static CONTROL:ThreadControl=ThreadControl{caught_signal_generation:AtomicU64::new(0),restart_signal_generation:AtomicU64::new(0),nonrestart_signal_generation:AtomicU64::new(0)};
 struct Preparation{control:&'static ThreadControl}
@@ -164,6 +179,9 @@ impl SigInfo {fn from_origin(_:u32,_:())->Result<Self,signal_context::InfoError>
 struct Client;
 fn posix_client()->Result<Client,i32>{Ok(Client)}
 impl Client{fn signal_delivery_origin(&self,_:posix_protocol::SignalDelivery)->Result<(),i32>{Ok(())}}
+impl Client{fn set_signal_disposition(&self,action:posix_protocol::SignalDisposition)->Result<(),i32>{
+assert_eq!(action.signal,30);assert_eq!(action.child_options,0);
+REMOTE_DISPOSITION.store(action.kind as u64,Ordering::SeqCst);Ok(())}}
 fn map_posix_client_error(value:i32)->i32{value}
 #[derive(Clone,Copy,Default)]struct Machine;
 impl Machine{fn checked_return(&self,_:&Self)->Option<Self>{Some(*self)}}
@@ -191,12 +209,22 @@ let depth=DEPTH.fetch_add(1,Ordering::SeqCst)+1;
 MAX_DEPTH.fetch_max(depth,Ordering::SeqCst);
 if depth==1&&MASK.load(Ordering::SeqCst)&OWN==0{
 let mut nested=UContext::default();let mut prep=Preparation{control:&CONTROL};let mut scope=std::pin::pin!(signal_scope::Scope);
-assert_eq!(dispatch_signal(posix_protocol::SignalDelivery{signal:signal as u32},None,&mut nested,false,&mut prep,scope.as_mut()),Ok(0));
+let expected=if action.sa_flags&SA_RESETHAND!=0{1}else{0};
+assert_eq!(dispatch_signal(posix_protocol::SignalDelivery{signal:signal as u32},None,&mut nested,false,&mut prep,scope.as_mut()),Ok(expected));
 assert_eq!(MASK.load(Ordering::SeqCst),ORIGINAL|OTHER);
+}
+if action.sa_flags&SA_RESETHAND!=0{
+assert_eq!(SIGNAL_ACTIONS.lock()[signal as usize-1].handler,0);
+assert_eq!(SIGNAL_ACTIONS.lock()[signal as usize-1].sa_flags,action.sa_flags&!SA_SIGINFO);
+assert_eq!(REMOTE_DISPOSITION.load(Ordering::SeqCst),0);
+assert!(SIGNAL_ACTION_UPDATE.0.try_lock().is_ok(),"handler entered under update lock");
 }
 DEPTH.fetch_sub(1,Ordering::SeqCst);let _=action;Ok(())
 }}
 "#);
+    program.push_str("mod signal_action {\n");
+    program.push_str(include_str!("../../../user/crates/newlib-runtime/src/signal_action.rs"));
+    program.push_str("}\n");
     program.push_str(dispatch);
     program.push_str(r#"
 fn main(){
@@ -210,6 +238,15 @@ assert_eq!(dispatch_signal(posix_protocol::SignalDelivery{signal:30},None,&mut c
 assert_eq!(MASK.load(Ordering::SeqCst),ORIGINAL);
 assert_eq!(MAX_DEPTH.load(Ordering::SeqCst),if fail{0}else if blocked{1}else{2});
 }}}
+for explicit in [false,true]{
+SIGNAL_ACTIONS.lock()[29]=Action{handler:2,sa_flags:SA_RESETHAND|SA_SIGINFO|SA_RESTART,sa_mask:OTHER|if explicit{OWN}else{0}};
+MASK.store(ORIGINAL,Ordering::SeqCst);MAX_DEPTH.store(0,Ordering::SeqCst);DEPTH.store(0,Ordering::SeqCst);
+FAIL.store(0,Ordering::SeqCst);EXPECT_BLOCKED.store(if explicit{OWN}else{0},Ordering::SeqCst);
+let mut context=UContext::default();let mut prep=Preparation{control:&CONTROL};let mut scope=std::pin::pin!(signal_scope::Scope);
+assert_eq!(dispatch_signal(posix_protocol::SignalDelivery{signal:30},None,&mut context,false,&mut prep,scope.as_mut()),Ok(0));
+assert_eq!(MASK.load(Ordering::SeqCst),ORIGINAL);assert_eq!(MAX_DEPTH.load(Ordering::SeqCst),1);
+assert_eq!(SIGNAL_ACTIONS.lock()[29].handler,0);
+}
 }
 "#);
     probe::run(&program);
