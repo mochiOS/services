@@ -618,7 +618,7 @@ impl Inode {
     #[must_use]
     pub fn blocks(&self) -> u64 {
         let i_blocks_lo = read_u32le(&self.inode_data, 0x1c);
-        let i_blocks_high = read_u32le(&self.inode_data, 0x74);
+        let i_blocks_high = u32::from(read_u16le(&self.inode_data, 0x74));
         u64_from_hilo(i_blocks_high, i_blocks_lo)
     }
 
@@ -626,7 +626,9 @@ impl Inode {
     pub(crate) fn set_blocks(&mut self, blocks: u64) {
         let (i_blocks_high, i_blocks_lo) = u64_to_hilo(blocks);
         write_u32le(&mut self.inode_data, 0x1c, i_blocks_lo);
-        write_u32le(&mut self.inode_data, 0x74, i_blocks_high);
+        // The high half is only 16 bits. The adjacent field at 0x76 belongs
+        // to the external attribute block pointer and must remain untouched.
+        write_u16le(&mut self.inode_data, 0x74, i_blocks_high as u16);
     }
 
     /// Get the number of filesystem blocks allocated to the inode.
@@ -658,6 +660,9 @@ impl Inode {
                 .checked_mul(ext4.0.superblock.block_size().to_u64() / 512)
                 .ok_or(CorruptKind::TooManyBlocksInFile)?
         };
+        if real_blocks >> 48 != 0 {
+            return Err(CorruptKind::TooManyBlocksInFile.into());
+        }
         self.set_blocks(real_blocks);
         Ok(real_blocks)
     }

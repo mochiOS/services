@@ -64,6 +64,10 @@ impl Fixture {
     }
 
     fn volume(&self, name: &str) -> Ext4 {
+        self.volume_with_block_size(name, None)
+    }
+
+    fn volume_with_block_size(&self, name: &str, block_size: Option<u32>) -> Ext4 {
         let source = self.0.join(name);
         fs::create_dir(&source).unwrap();
         fs::create_dir(source.join("mount")).unwrap();
@@ -78,8 +82,13 @@ impl Fixture {
         symlink("/file", source.join("absolute")).unwrap();
         symlink("../file", source.join("relative")).unwrap();
         let image = self.0.join(format!("{name}.ext4"));
-        let output = Command::new("mke2fs")
-            .args(["-q", "-t", "ext4", "-F", "-d"])
+        let mut format = Command::new("mke2fs");
+        format.args(["-q", "-t", "ext4", "-F"]);
+        if let Some(block_size) = block_size {
+            format.arg("-b").arg(block_size.to_string());
+        }
+        let output = format
+            .arg("-d")
             .arg(source)
             .arg(&image)
             .arg("8192")
@@ -1250,6 +1259,152 @@ fn root_credentials() -> protocol::Credentials {
     protocol::decode_credentials_payload(&bytes[..size])
         .unwrap()
         .0
+}
+
+#[test]
+fn node_status_reports_allocated_sectors_not_logical_length_across_mounts() {
+    let fixture = Fixture::new();
+    let data = fixture.volume_with_block_size("allocation-data", Some(1024));
+    let mounted = fixture.volume_with_block_size("allocation-mounted", Some(4096));
+    let block_size = data.block_size_bytes();
+    assert_eq!(block_size, 1024);
+    let mut service = FilesystemService::new(data);
+    service
+        .configure_memory_updates(Box::new(unmapped_updates::UnmappedUpdates))
+        .unwrap();
+    service.mount_volume(b"/mount", mounted).unwrap();
+    for (prefix, block_size) in [("", 1024), ("/mount", 4096)] {
+        let path = format!("{prefix}/file");
+        let opened = open(
+            &mut service,
+            path.as_bytes(),
+            protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE,
+            PathAnchors::default(),
+        );
+        let status = |service: &mut FilesystemService| {
+            let by_path = service
+                .stat_at(
+                    protocol::Header::default(),
+                    path.as_bytes(),
+                    PathAnchors::default(),
+                    root_credentials(),
+                )
+                .unwrap();
+            let by_handle = service
+                .stat_handle(protocol::Header::default(), opened.open_id)
+                .unwrap();
+            let by_path = protocol::decode_node_status(&by_path.payload).unwrap();
+            assert_eq!(
+                by_path,
+                protocol::decode_node_status(&by_handle.payload).unwrap()
+            );
+            assert_eq!(by_path.block_size, block_size);
+            by_path
+        };
+        let before = status(&mut service);
+        assert!(before.size > 0 && before.size < 512);
+        assert_eq!(before.blocks, u64::from(block_size) / 512);
+        service
+            .truncate_handle(
+                protocol::Header {
+                    offset: 2 * 1024 * 1024,
+                    ..Default::default()
+                },
+                opened.open_id,
+            )
+            .unwrap();
+        let sparse = status(&mut service);
+        assert_eq!(sparse.size, 2 * 1024 * 1024);
+        assert_eq!(sparse.blocks, before.blocks);
+        service
+            .truncate_handle(protocol::Header::default(), opened.open_id)
+            .unwrap();
+        let empty = status(&mut service);
+        assert_eq!((empty.size, empty.blocks), (0, 0));
+        service.provider_close(opened.open_id).unwrap();
+
+        let link = format!("{prefix}/absolute");
+        let response = service
+            .stat_at(
+                protocol::Header {
+                    flags: protocol::STAT_AT_NOFOLLOW,
+                    ..Default::default()
+                },
+                link.as_bytes(),
+                PathAnchors::default(),
+                root_credentials(),
+            )
+            .unwrap();
+        let link = protocol::decode_node_status(&response.payload).unwrap();
+        assert_eq!(link.kind, protocol::NODE_TYPE_SYMLINK);
+        assert_eq!(link.size, 5);
+        assert_eq!(link.blocks, 0);
+        assert_eq!(link.block_size, block_size);
+    }
+}
+
+#[test]
+fn inode_sector_count_does_not_include_or_overwrite_adjacent_acl_bits() {
+    let fixture = Fixture::new();
+    drop(fixture.volume_with_block_size("allocation-fields", Some(1024)));
+    let path = fixture.0.join("allocation-fields.ext4");
+    for field in ["blocks_hi 4660", "file_acl_hi 22136"] {
+        let output = Command::new("debugfs")
+            .args(["-w", "-R"])
+            .arg(format!("set_inode_field /file {field}"))
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let image = Image(Arc::new(Mutex::new(fs::read(path).unwrap())));
+    let filesystem =
+        Ext4::load_with_writer(Box::new(image.clone()), Some(Box::new(image.clone()))).unwrap();
+    let mut inode = filesystem
+        .path_to_inode("/file".try_into().unwrap(), ext4plus::FollowSymlinks::All)
+        .unwrap();
+    assert_eq!(inode.blocks(), (4660u64 << 32) | 2);
+    let bytes = image.0.lock().unwrap();
+    let table = u32::from_le_bytes(bytes[2056..2060].try_into().unwrap()) as usize;
+    let inode_size = u16::from_le_bytes(bytes[1112..1114].try_into().unwrap()) as usize;
+    let record = table * 1024 + (inode.index.get() as usize - 1) * inode_size;
+    assert_eq!(
+        &bytes[record + 0x76..record + 0x78],
+        &22136u16.to_le_bytes()
+    );
+    drop(bytes);
+    assert_eq!(inode.set_fs_blocks(17, &filesystem).unwrap(), 34);
+    inode.write(&filesystem).unwrap();
+    assert_eq!(
+        &image.0.lock().unwrap()[record + 0x76..record + 0x78],
+        &22136u16.to_le_bytes()
+    );
+    let prior = inode.blocks();
+    assert!(inode.set_fs_blocks(1 << 47, &filesystem).is_err());
+    assert_eq!(inode.blocks(), prior);
+
+    // Exercise HUGE_FILE's different unit without allocating a giant file.
+    // This synthetic inode is used only for metadata conversion, not data I/O.
+    inode.set_flags(inode.flags() | ext4plus::inode::InodeFlags::HUGE_FILE);
+    assert!(inode.set_fs_blocks(1 << 48, &filesystem).is_err());
+    assert_eq!(inode.blocks(), prior);
+    assert_eq!(inode.set_fs_blocks(3, &filesystem).unwrap(), 3);
+    inode.write(&filesystem).unwrap();
+    let mut service = FilesystemService::new(filesystem);
+    let response = service
+        .stat_at(
+            protocol::Header::default(),
+            b"/file",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    let status = protocol::decode_node_status(&response.payload).unwrap();
+    assert_eq!((status.blocks, status.block_size), (6, 1024));
 }
 
 #[test]

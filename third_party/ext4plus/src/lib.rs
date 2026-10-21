@@ -317,6 +317,12 @@ impl Ext4 {
         &self.0.superblock
     }
 
+    /// Size in bytes of one filesystem allocation block.
+    #[must_use]
+    pub fn block_size_bytes(&self) -> u32 {
+        self.0.superblock.block_size().to_u32()
+    }
+
     /// Complete prior filesystem writes through the selected storage writer.
     /// A read-only mount owns no pending writes. A writable backend without a
     /// real durability barrier returns an error rather than claiming success.

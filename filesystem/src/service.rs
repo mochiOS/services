@@ -701,7 +701,7 @@ impl FilesystemService {
         next_open: u64,
     ) -> Result<Response, i32> {
         let node_id = scoped_node_id(volume, &inode);
-        let mut response = self.node_status_response(request, node_id, inode.metadata());
+        let mut response = self.node_status_response(request, node_id, &inode, &filesystem);
         if response.header.status != 0 {
             return Err(-response.header.status);
         }
@@ -799,7 +799,7 @@ impl FilesystemService {
         if let Some(next_open) = next_open {
             self.retain_socket_description(request, filesystem, volume, inode, next_open)
         } else {
-            Ok(self.node_status_response(request, node_id, inode.metadata()))
+            Ok(self.node_status_response(request, node_id, &inode, &filesystem))
         }
     }
 
@@ -1257,10 +1257,10 @@ impl FilesystemService {
                 _ => {}
             }
         }
-        let (inode, _, volume) =
+        let (inode, filesystem, volume) =
             self.resolve_scoped_inode(payload, anchors, follow, uid, gid, groups)?;
         let node_id = scoped_node_id(volume, &inode);
-        Ok(self.node_status_response(request, node_id, inode.metadata()))
+        Ok(self.node_status_response(request, node_id, &inode, &filesystem))
     }
 
     /// Obtains metadata from an existing provider object. The caller must
@@ -1274,17 +1274,15 @@ impl FilesystemService {
         }
         let open = self.opens.get(&open_id).ok_or(EBADF)?;
         let node_id = open.node_id;
-        let metadata = if open.file.is_some()
+        let inode = if open.file.is_some()
             || open.inode.file_type().is_socket()
             || open.inode.file_type().is_dir()
         {
-            Inode::read(&open.filesystem, open.inode.index)
-                .map_err(errno)?
-                .metadata()
+            Inode::read(&open.filesystem, open.inode.index).map_err(errno)?
         } else {
-            open.inode.metadata()
+            open.inode.clone()
         };
-        Ok(self.node_status_response(request, node_id, metadata))
+        Ok(self.node_status_response(request, node_id, &inode, &open.filesystem))
     }
 
     /// Reconstructs the current pathname of an open directory below an open
@@ -3631,8 +3629,22 @@ impl FilesystemService {
         &self,
         request: protocol::Header,
         node_id: u64,
-        metadata: Metadata,
+        inode: &Inode,
+        filesystem: &Ext4,
     ) -> Response {
+        let metadata = inode.metadata();
+        let block_size = filesystem.block_size_bytes();
+        // ext4 i_blocks normally counts 512-byte sectors, independent of
+        // logical file length. HUGE_FILE switches that field to filesystem
+        // blocks; holes and inline symlinks must never count as allocated data.
+        let blocks = if inode.flags().contains(InodeFlags::HUGE_FILE) {
+            match inode.blocks().checked_mul(u64::from(block_size) / 512) {
+                Some(blocks) => blocks,
+                None => return self.error(request, EIO),
+            }
+        } else {
+            inode.blocks()
+        };
         let physical_links = u32::from(metadata.links_count);
         let link_count = if self.orphans.contains_key(&node_id) {
             match physical_links.checked_sub(1) {
@@ -3659,8 +3671,8 @@ impl FilesystemService {
             device: node_id >> 32,
             node_id,
             size: metadata.len(),
-            blocks: metadata.len().div_ceil(512),
-            block_size: 4096,
+            blocks,
+            block_size,
             kind: node_type(metadata.file_type()),
             mode: u32::from(metadata.mode()),
             uid: metadata.uid(),
