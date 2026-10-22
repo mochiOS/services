@@ -39,6 +39,7 @@ enum FdKind {
     ObjectStreamRead,
     ObjectStreamWrite,
     ObjectPty,
+    ObjectTerminalFile,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Object {
@@ -310,6 +311,7 @@ fn provider_status_calls_run_without_state_lock_and_retain_the_original_referenc
         FdKind::ObjectStreamRead,
         FdKind::ObjectStreamWrite,
         FdKind::ObjectPty,
+        FdKind::ObjectTerminalFile,
     ] {
         for command in [F_GETFL, F_SETFL] {
             for case in 0..4 {
@@ -372,6 +374,7 @@ fn native_option_errors_become_errno_without_losing_reentrant_fd_ownership() {
             FdKind::ObjectStreamRead,
             FdKind::ObjectStreamWrite,
             FdKind::ObjectPty,
+            FdKind::ObjectTerminalFile,
         ] {
             for command in [F_GETFL, F_SETFL, -1] {
                 for case in [1, 3] {
@@ -449,6 +452,7 @@ fn native_streams_reject_unsupported_status_bits_before_calling_the_backend() {
         FdKind::ObjectStreamRead,
         FdKind::ObjectStreamWrite,
         FdKind::ObjectPty,
+        FdKind::ObjectTerminalFile,
     ] {
         state().fds = FdTable::new();
         *BOOK.lock().unwrap() = Book::new();
@@ -491,6 +495,7 @@ fn nonblocking_updates_retain_source_authority_and_release_it_on_every_result() 
         FdKind::ObjectStreamRead,
         FdKind::ObjectStreamWrite,
         FdKind::ObjectPty,
+        FdKind::ObjectTerminalFile,
     ] {
         for enabled in [-1, 0, 1] {
             for case in 0..4 {

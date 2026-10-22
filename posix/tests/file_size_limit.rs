@@ -71,6 +71,8 @@ fn runtime_checks_access_and_size_limited_object_kind_before_policy_or_signal() 
     assert!(positioned.contains("return Err(EFBIG)"));
     assert!(!positioned.contains("HandleSeek"));
     let opened = include_str!("../../../user/crates/newlib-runtime/src/file_mutation.rs");
-    assert!(opened.contains("0o100000 => FdKind::ObjectFile"));
-    assert!(opened.contains("_ => FdKind::ObjectSpecial"));
+    assert!(opened.contains("file_kind::opened(opened, status.mode)?"));
+    let kind = include_str!("../../../user/crates/newlib-runtime/src/file_kind.rs");
+    assert!(kind.contains("0o100000 => Ok(FdKind::ObjectFile)"));
+    assert!(kind.contains("_ => Ok(FdKind::ObjectSpecial)"));
 }

@@ -18,7 +18,7 @@ extern crate self as mnu_abi;
 type c_int=i32;
 const ENOTTY:i32=25;const ENOTSUP:i32=95;const ENOSYS:i32=38;
 const EIO:i32=5;const EOVERFLOW:i32=75;const EFAULT:i32=14;
-#[derive(Clone,Copy,PartialEq)]enum FdKind{{Stdin,Stdout,Stderr,ObjectPty,ObjectSpecial,ObjectFile}}
+#[derive(Clone,Copy,PartialEq)]enum FdKind{{Stdin,Stdout,Stderr,ObjectPty,ObjectSpecial,ObjectFile,ObjectTerminalFile}}
 #[derive(Clone,Copy)]struct Object{{kind:FdKind,lower_handle:u64}}
 #[derive(Clone,Copy)]struct FdEntry{{handle:Object}}
 thread_local!{{
@@ -74,7 +74,7 @@ mod terminal_memory{{pub fn write_attributes(ptr:*mut super::NewlibTermios,value
     ));
     program.push_str(r#"
 fn main(){
- for kind in [FdKind::ObjectSpecial,FdKind::ObjectPty]{
+ for kind in [FdKind::ObjectSpecial,FdKind::ObjectPty,FdKind::ObjectTerminalFile]{
   KIND.set(kind);CALLS.set(0);ERROR.set(0);SHORT.set(false);
   assert_eq!(_isatty(4),1);assert_eq!(CALLS.get(),1);assert_eq!(LEASES.get(),0);
   let mut attributes=NewlibTermios::default();
@@ -101,7 +101,7 @@ fn ordinary_special_terminal_attachments_attenuate_authority_and_keep_fd_leased(
         r#"
 #![allow(dead_code,non_camel_case_types)]
 type c_int=i32;const EBADF:i32=9;const ENOTTY:i32=25;const EACCES:i32=13;
-#[derive(Clone,Copy,PartialEq)]enum FdKind{ObjectPty,ObjectSpecial,ObjectFile}
+#[derive(Clone,Copy,PartialEq)]enum FdKind{ObjectPty,ObjectSpecial,ObjectFile,ObjectTerminalFile}
 #[derive(Clone,Copy)]struct Object{kind:FdKind,lower_handle:u64}
 #[derive(Clone,Copy)]pub struct FdEntry{handle:Object,rights:u64}
 struct ObjectHandleAttachment<H>{handle:H,rights:u64}
@@ -125,7 +125,7 @@ fn with_fd_entry(fd:i32)->Result<fd_lease::Lease,i32>{if fd!=4{return Err(EBADF)
     ));
     program.push_str(r#"
 fn main(){
- for kind in [FdKind::ObjectSpecial,FdKind::ObjectPty]{
+ for kind in [FdKind::ObjectSpecial,FdKind::ObjectPty,FdKind::ObjectTerminalFile]{
   ENTRY.set(FdEntry{handle:Object{kind,lower_handle:41},rights:255});
   let (lease,attached)=terminal_attachment(4).unwrap();
   assert_eq!(LIVE.get(),1);assert_eq!(attached.handle,41);assert_eq!(attached.rights,2);
