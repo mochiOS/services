@@ -261,12 +261,22 @@ impl FilesystemService {
                 write,
                 flags,
             )?),
-            // External data Handles must be published by their actual owner;
-            // until that publication path is attached, never expose a null
-            // stream or filesystem directory Handle for an external device.
-            crate::devfs::NodeKind::External => return Err(ENOTSUP),
+            crate::devfs::NodeKind::External => {
+                DeviceBacking::ExternalMetadata(namespace.open_external_device(
+                    &node,
+                    path_walk::Credentials {
+                        uid: credentials.effective_uid,
+                        gid: credentials.effective_gid,
+                        groups: credentials.supplementary_groups(),
+                    },
+                    read,
+                    write,
+                    flags,
+                )?)
+            }
         };
         let open_id = self.next_open_id;
+        self.opens.try_reserve(1).map_err(|_| ENOMEM)?;
         self.next_open_id = open_id.checked_add(1).ok_or(EIO)?;
         let id = node.id();
         self.opens.insert_device(open_id, DeviceOpen { node, backing });
@@ -298,6 +308,7 @@ impl FilesystemService {
                 return Ok(Vec::new());
             }
             DeviceBacking::Directory(directory) => directory,
+            DeviceBacking::ExternalMetadata(_) => return Err(ENOTSUP),
         };
         let entries = self
             .namespace

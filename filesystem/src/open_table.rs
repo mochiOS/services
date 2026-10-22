@@ -8,6 +8,7 @@ use crate::service::OpenFile;
 
 const ENOTDIR: i32 = 20;
 const EISDIR: i32 = 21;
+const ENOTSUP: i32 = 95;
 
 pub(crate) struct DeviceOpen {
     pub node: Node,
@@ -17,6 +18,7 @@ pub(crate) struct DeviceOpen {
 pub(crate) enum DeviceBacking {
     Directory(DirectoryOpen),
     Null(NullDescription),
+    ExternalMetadata(crate::devfs::ExternalOpen),
 }
 
 pub(crate) struct DirectoryOpen {
@@ -30,24 +32,28 @@ impl DeviceOpen {
         match &self.backing {
             DeviceBacking::Null(null) => Ok(null),
             DeviceBacking::Directory(_) => Err(EISDIR),
+            DeviceBacking::ExternalMetadata(_) => Err(ENOTSUP),
         }
     }
     pub fn directory_mut(&mut self) -> Result<&mut DirectoryOpen, i32> {
         match &mut self.backing {
             DeviceBacking::Directory(directory) => Ok(directory),
             DeviceBacking::Null(_) => Err(ENOTDIR),
+            DeviceBacking::ExternalMetadata(_) => Err(ENOTDIR),
         }
     }
     pub fn is_directory(&self) -> bool {
         match &self.backing {
             DeviceBacking::Directory(_) => true,
             DeviceBacking::Null(_) => false,
+            DeviceBacking::ExternalMetadata(_) => false,
         }
     }
-    pub fn flags(&self) -> u32 {
+    pub fn flags(&self) -> Result<u32, i32> {
         match &self.backing {
-            DeviceBacking::Directory(directory) => directory.flags,
-            DeviceBacking::Null(null) => null.flags(),
+            DeviceBacking::Directory(directory) => Ok(directory.flags),
+            DeviceBacking::Null(null) => Ok(null.flags()),
+            DeviceBacking::ExternalMetadata(_) => Err(ENOTSUP),
         }
     }
     pub fn set_flags(&mut self, flags: u32) -> Result<(), i32> {
@@ -57,6 +63,7 @@ impl DeviceOpen {
                 Ok(())
             }
             DeviceBacking::Null(null) => null.set_flags(flags),
+            DeviceBacking::ExternalMetadata(_) => Err(ENOTSUP),
         }
     }
 }

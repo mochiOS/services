@@ -17,6 +17,7 @@ pub mod memory_updates;
 pub mod admission_ipc;
 pub mod service;
 pub mod handle_access;
+pub mod open_publication;
 pub mod storage;
 pub mod bootstrap_read;
 pub mod bootstrap_ipc;

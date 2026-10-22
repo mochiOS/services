@@ -72,6 +72,9 @@ pub struct ExternalOpen {
     request: protocol::device_open::Request,
 }
 impl ExternalOpen {
+    pub fn data_rights(&self) -> u64 {
+        self.request.rights
+    }
     pub fn node(&self) -> &Node {
         &self.node
     }

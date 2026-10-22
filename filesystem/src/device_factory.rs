@@ -11,6 +11,8 @@ use mochios_filesystem_protocol::device_open::Request;
 pub trait Factory: std::fmt::Debug + Send + Sync {
     /// Metadata is borrowed locally and explicitly attached to the creation
     /// request. Success returns one newly owned data reference, exact rights.
+    /// Creation runs on the serialized filesystem worker: retain metadata
+    /// without synchronously querying that same worker until creation returns.
     fn open(&self, metadata: IpcObjectHandle, request: Request) -> Result<IpcObjectHandle, i32>;
 }
 

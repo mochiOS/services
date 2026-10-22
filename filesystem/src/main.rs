@@ -224,19 +224,19 @@ fn main() {
                             } else {
                                 open_handle_rights(header.flags)
                             };
-                            let opened = match platform::handle::create_provider_object(
+                            let opened = match filesystem_service::open_publication::publish_native(
+                                &mut service,
                                 endpoint,
                                 response.header.open_id,
                                 rights,
                             ) {
                                 Ok(opened) => opened,
-                                Err(_) => {
-                                    let _ = service.provider_close(response.header.open_id);
+                                Err(error) => {
                                     let failed = filesystem_service::service::Response {
                                         header: protocol::Header {
                                             opcode: protocol::OP_STATUS,
                                             request_id: header.request_id,
-                                            status: -5,
+                                            status: -error,
                                             ..protocol::Header::default()
                                         },
                                         payload: Vec::new(),
@@ -259,21 +259,14 @@ fn main() {
                             ) {
                                 let mut outgoing = platform::ipc::IpcObjectHandles::default();
                                 outgoing.count = 1;
-                                outgoing.handles[0] = platform::ipc::IpcObjectHandle {
-                                    handle: opened,
-                                    reserved: 0,
-                                    rights,
-                                };
-                                let sent = platform::ipc::reply_object_handles(
+                                outgoing.handles[0] = opened;
+                                let _ = platform::ipc::reply_object_handles(
                                     sender,
                                     &response_bytes[..length],
                                     &outgoing,
                                 );
-                                if sent.is_err() {
-                                    let _ = service.provider_close(response.header.open_id);
-                                }
                             }
-                            let _ = platform::handle::close(opened);
+                            let _ = platform::handle::close(opened.handle);
                             continue;
                         }
                         Err(error) => {
@@ -930,23 +923,18 @@ fn reply_admitted_mutation(
     } else if response.header.status == 0 && request.opcode == protocol::OP_OPEN_AT {
         let rights = open_handle_rights(request.flags);
         let open_id = response.header.open_id;
-        match platform::handle::create_provider_object(endpoint, open_id, rights) {
+        match filesystem_service::open_publication::publish_native(service, endpoint, open_id, rights) {
             Ok(handle) => {
-                opened = Some((handle, open_id));
+                opened = Some(handle.handle);
                 outgoing.count = 1;
-                outgoing.handles[0] = platform::ipc::IpcObjectHandle {
-                    handle,
-                    reserved: 0,
-                    rights,
-                };
+                outgoing.handles[0] = handle;
             }
-            Err(_) => {
-                let _ = service.provider_close(open_id);
-                response = failure(5);
+            Err(error) => {
+                response = failure(error);
             }
         }
     }
-    let sent = protocol::encode(response.header, &response.payload, bytes)
+    let _sent = protocol::encode(response.header, &response.payload, bytes)
         .map_err(|_| ())
         .and_then(|length| {
             if outgoing.count == 0 {
@@ -956,10 +944,7 @@ fn reply_admitted_mutation(
                     .map_err(|_| ())
             }
         });
-    if let Some((handle, open_id)) = opened {
-        if sent.is_err() {
-            let _ = service.provider_close(open_id);
-        }
+    if let Some(handle) = opened {
         let _ = platform::handle::close(handle);
     }
     // Owned positions are closed here on success AND encode/send failure.

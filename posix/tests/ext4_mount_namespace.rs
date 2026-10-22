@@ -18,6 +18,8 @@ mod unmapped_updates;
 mod external_namespace;
 #[path = "support/external_registration.rs"]
 mod external_registration;
+#[path = "support/external_publication.rs"]
+mod external_publication;
 
 #[derive(Clone)]
 struct Image(Arc<Mutex<Vec<u8>>>);

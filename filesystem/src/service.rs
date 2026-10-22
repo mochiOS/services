@@ -1809,6 +1809,7 @@ impl FilesystemService {
                     return null.seek(offset, basis);
                 }
                 DeviceBacking::Directory(directory) => directory,
+                DeviceBacking::ExternalMetadata(_) => return Err(ENOTSUP),
             };
             let base = match basis {
                 mnu_abi::HANDLE_SEEK_START => 0,
@@ -1844,6 +1845,18 @@ impl FilesystemService {
         }
         open.offset = next as u64;
         Ok(open.offset)
+    }
+
+    /// An external description is metadata only; its data stream belongs to
+    /// the registered factory's native owner, not this service.
+    pub fn external_open(&self, open_id: u64) -> Result<Option<&crate::devfs::ExternalOpen>, i32> {
+        if let Some(open) = self.opens.device(open_id) {
+            return Ok(match &open.backing {
+                DeviceBacking::ExternalMetadata(external) => Some(external),
+                _ => None,
+            });
+        }
+        self.opens.get(&open_id).map(|_| None).ok_or(EBADF)
     }
 
     pub fn provider_close(&mut self, open_id: u64) -> Result<(), i32> {
@@ -3549,7 +3562,7 @@ impl FilesystemService {
     ) -> Result<Response, i32> {
         let mut response = self.success(request);
         if let Some(open) = self.opens.device(open_id) {
-            response.header.flags = open.flags();
+            response.header.flags = open.flags()?;
             return Ok(response);
         }
         response.header.flags = self.opens.get(&open_id).ok_or(EBADF)?.status_flags;
@@ -3577,7 +3590,7 @@ impl FilesystemService {
         }
         let update = |old: u32| (old & !mask) | request.flags;
         if let Some(open) = self.opens.device_mut(open_id) {
-            open.set_flags(update(open.flags()))?;
+            open.set_flags(update(open.flags()?))?;
             return Ok(self.success(request));
         }
         let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
