@@ -511,8 +511,8 @@ fn main() {
         } else {
             None
         };
-        let opened_socket = if let (Some(peer), Some((header, payload)), true) =
-            (peer, decoded, attachments_valid)
+        let opened_socket = if let (Some(peer), Some((header, payload)), true, Some(_)) =
+            (peer, decoded, attachments_valid, request_image)
         {
             if matches!(
                 header.opcode,
@@ -737,17 +737,19 @@ fn main() {
                     .and_then(|()| inspected_file.unwrap());
                 Some(posix_service::filesystem_metadata::fstat_response(header.request_id, result))
             }
-            (Some(_), Some((header, _)), true)
-                if matches!(
-                    header.opcode,
-                    protocol::OP_SOCKET_CREATE
-                        | protocol::OP_SOCKET_PAIR
-                        | protocol::OP_SOCKET_ACCEPT
-                        | protocol::OP_SOCKET_CONNECT
-                        | protocol::OP_SOCKET_RECEIVE_WAIT
-                        | protocol::OP_SOCKET_RECORD_ENDPOINT
-                ) => {
-                opened_socket
+            (Some(peer), Some(_), true) if opened_socket.is_some() => {
+                let validation = request_image
+                    .ok_or(protocol::STATUS_EPERM)
+                    .and_then(|image| {
+                        validate_pending_request_image(
+                            sender, peer, image, &mut service, &mut processes,
+                        )
+                    });
+                Some(posix_service::open_request::finish(
+                    opened_socket.unwrap(),
+                    validation,
+                    &mut filesystem,
+                ))
             }
             (Some(_peer), Some((header, payload)), true)
                 if header.opcode == protocol::OP_SHARED_MEMORY_BACKING =>

@@ -1,5 +1,119 @@
 use super::*;
 
+#[test]
+fn socket_results_do_not_cross_an_exec_or_failed_native_image_observation() {
+    for (opcode, count) in [
+        (protocol::OP_SOCKET_CREATE, 1),
+        (protocol::OP_SOCKET_PAIR, 2),
+        (protocol::OP_SOCKET_ACCEPT, 1),
+        (protocol::OP_SOCKET_CONNECT, 1),
+        (protocol::OP_SOCKET_CONNECT, 0),
+        (protocol::OP_SOCKET_RECEIVE_WAIT, 1),
+        (protocol::OP_SOCKET_RECORD_ENDPOINT, 1),
+    ] {
+        for observation in 0..4 {
+            let (mut service, _, peer, _, mut fs, mut processes) = orphan_family();
+            let image = service.capture_request_image(peer).unwrap();
+            let expected = match observation {
+                0 => 0,
+                1 => {
+                    processes
+                        .images
+                        .insert(141, Ok(native_image(peer.process_id, 1)));
+                    protocol::STATUS_ESRCH
+                }
+                2 => {
+                    processes.images.insert(141, Err(protocol::STATUS_EIO));
+                    protocol::STATUS_EIO
+                }
+                _ => {
+                    let mut exited = native_image(peer.process_id, 0);
+                    exited.state = mnu_abi::PROCESS_STATE_EXITED;
+                    processes.images.insert(141, Ok(exited));
+                    protocol::STATUS_ESRCH
+                }
+            };
+            let payload = opcode.to_le_bytes().to_vec();
+            let handles: Vec<_> = (0..count)
+                .map(|index| posix_service::OpenedObject {
+                    handle: 200 + index,
+                    rights: mnu_abi::HANDLE_RIGHT_TRANSFER,
+                })
+                .collect();
+            let response = posix_service::ObjectResponse {
+                response: posix_service::Response {
+                    header: protocol::Header {
+                        opcode: protocol::OP_STATUS,
+                        request_id: 87,
+                        payload_len: payload.len() as u32,
+                        ..Default::default()
+                    },
+                    payload: payload.clone(),
+                },
+                handles,
+            };
+            let validation = service.validate_request_image(peer, image, &mut processes);
+            let response = posix_service::open_request::finish(response, validation, &mut fs);
+            assert_eq!(response.response.header.status, expected, "opcode {opcode}");
+            assert_eq!(response.response.header.request_id, 87);
+            if expected == 0 {
+                assert_eq!(response.handles.len(), count as usize);
+                assert_eq!(response.response.payload, payload);
+                assert!(fs.released.is_empty());
+            } else {
+                assert!(response.handles.is_empty());
+                assert!(response.response.payload.is_empty());
+                assert_eq!(response.response.header.payload_len, 0);
+                assert_eq!(
+                    fs.released
+                        .iter()
+                        .map(|object| object.handle)
+                        .collect::<Vec<_>>(),
+                    (200..200 + count).collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn native_socket_preflight_and_publication_both_require_authenticated_image_provenance() {
+    // Structural wiring only. The preceding test runs the real image-state
+    // validation and owned-result cleanup, not native IPC provenance checks.
+    let source = include_str!("../../src/main.rs");
+    let preflight = source
+        .split("let opened_socket =")
+        .nth(1)
+        .unwrap()
+        .split("let prepared_filesystem =")
+        .next()
+        .unwrap();
+    assert!(preflight.contains("attachments_valid, request_image)"));
+    for opcode in [
+        "OP_SOCKET_CREATE",
+        "OP_SOCKET_PAIR",
+        "OP_SOCKET_ACCEPT",
+        "OP_SOCKET_CONNECT",
+        "OP_SOCKET_RECEIVE_WAIT",
+        "OP_SOCKET_RECORD_ENDPOINT",
+    ] {
+        assert!(
+            preflight.contains(opcode),
+            "uncovered socket path: {opcode}"
+        );
+    }
+    let publication = source
+        .split("if opened_socket.is_some() =>")
+        .nth(1)
+        .unwrap()
+        .split("protocol::OP_SHARED_MEMORY_BACKING")
+        .next()
+        .unwrap();
+    assert!(publication.contains("validate_pending_request_image("));
+    assert!(publication.contains("posix_service::open_request::finish("));
+    assert!(publication.contains("opened_socket.unwrap()"));
+}
+
 fn native_image(process_id: u64, revision: u64) -> mnu_abi::ProcessStatus {
     mnu_abi::ProcessStatus {
         process_id,
