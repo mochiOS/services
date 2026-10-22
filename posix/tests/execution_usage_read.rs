@@ -96,6 +96,7 @@ mod mnu_abi {
 }
 use lifecycle::ProcessObject as Counter;
 #[derive(Debug,Clone,Copy)]struct ProcessId(u64);impl ProcessId{fn as_u64(self)->u64{self.0}}
+impl From<ProcessId> for u64{fn from(id:ProcessId)->Self{id.0}}
 fn remote()->Arc<Counter>{
     static OBJECT:std::sync::OnceLock<Arc<Counter>>=std::sync::OnceLock::new();
     OBJECT.get_or_init(||lifecycle::create(42,13,17)).clone()
@@ -118,10 +119,10 @@ fn object_native(raw: u64, right: HandleRights) -> Result<KernelObject, Error> {
 mod task {
     use super::*;
     pub mod process {pub use crate::lifecycle::ProcessObject;}
-    pub fn with_process<R>(id: u64, read: impl FnOnce(&Process) -> R) -> Option<R> {
+    pub fn with_process<R>(id: impl Into<u64>, read: impl FnOnce(&Process) -> R) -> Option<R> {
         // The remote process has already left the process table. Its retained
         // native object is still observable through the explicit handle.
-        (id == 1 && PRESENT.with(|v|v.get())).then(|| read(&Process { object: lifecycle::create(1,7,11) }))
+        (id.into() == 1 && PRESENT.with(|v|v.get())).then(|| read(&Process { object: lifecycle::create(1,7,11) }))
     }
     pub mod thread {
         use super::*;
