@@ -3,6 +3,8 @@ use mochios_posix_protocol as posix_protocol;
 use std::ffi::{c_char, c_int, c_void};
 #[path = "../../../user/crates/newlib-runtime/src/socket_message_memory.rs"]
 mod memory;
+#[path = "../../../user/crates/newlib-runtime/src/vector_memory.rs"]
+mod vector_memory;
 #[path = "../../../user/crates/newlib-runtime/src/user_copy.rs"]
 mod user_copy;
 #[path = "support/user_copy_native.rs"]

@@ -93,7 +93,7 @@ fn both_runtime_vector_operations_validate_before_the_first_io() {
             .find(&format!("pub unsafe extern \"C\" fn {name}("))
             .unwrap();
         let body = &source[start..];
-        assert!(body.find("io_vector::validate(iovcnt").unwrap() < body.find(io).unwrap());
+        assert!(body.find("capture_vector_metadata(").unwrap() < body.find(io).unwrap());
         let end = body[1..].find("#[unsafe(no_mangle)]").unwrap() + 1;
         let body = &body[..end];
         assert_eq!(body.matches(io).count(), 1);
@@ -112,7 +112,10 @@ fn gathered_write_is_one_operation_and_preserves_vector_order() {
         4,
         &mut vec![0; total],
         |i| vectors[i].len(),
-        |i, bytes| bytes.copy_from_slice(&vectors[i][..bytes.len()]),
+        |i, bytes| {
+            bytes.copy_from_slice(&vectors[i][..bytes.len()]);
+            Ok(())
+        },
         |bytes| {
             calls += 1;
             assert_eq!(bytes, b"abcdef");
@@ -133,7 +136,10 @@ fn short_read_scatters_only_returned_bytes_without_a_second_read() {
         3,
         &mut [0; 8],
         |i| lengths[i],
-        |i, bytes| vectors[i][..bytes.len()].copy_from_slice(bytes),
+        |i, bytes| {
+            vectors[i][..bytes.len()].copy_from_slice(bytes);
+            Ok(())
+        },
         |bytes| {
             calls += 1;
             bytes[..3].copy_from_slice(b"abc");
@@ -154,7 +160,10 @@ fn bounded_transfer_returns_a_prefix_without_splitting_the_io() {
             2,
             &mut [0; 4],
             |i| vectors[i].len(),
-            |i, bytes| bytes.copy_from_slice(&vectors[i][..bytes.len()]),
+            |i, bytes| {
+                bytes.copy_from_slice(&vectors[i][..bytes.len()]);
+                Ok(())
+            },
             |bytes| {
                 assert_eq!(bytes, b"abcd");
                 Ok::<_, i32>(bytes.len())
@@ -184,7 +193,16 @@ fn failed_read_and_invalid_backend_count_never_touch_output_vectors() {
         );
     }
     assert_eq!(
-        write(1, &mut [0; 1], |_| 1, |_, b| b[0] = 1, |_| Ok::<_, i32>(2)),
+        write(
+            1,
+            &mut [0; 1],
+            |_| 1,
+            |_, b| {
+                b[0] = 1;
+                Ok(())
+            },
+            |_| Ok::<_, i32>(2)
+        ),
         Err(TransferError::InvalidResult)
     );
 }
@@ -215,4 +233,62 @@ fn empty_vectors_still_check_the_backend_without_dereferencing_buffers() {
         ),
         Ok(0)
     );
+}
+
+#[test]
+fn failed_gather_never_submits_a_valid_earlier_prefix_to_the_backend() {
+    use mochios_posix_client::io_vector::{TransferError, write};
+    let mut copies = 0;
+    assert_eq!(
+        write(
+            2,
+            &mut [0; 8],
+            |_| 4,
+            |index, bytes| {
+                copies += 1;
+                if index == 0 {
+                    bytes.fill(0x5a);
+                    Ok(())
+                } else {
+                    Err(14)
+                }
+            },
+            |_| panic!("a failed gather must not perform partial I/O")
+        ),
+        Err(TransferError::Io(14))
+    );
+    assert_eq!(copies, 2);
+}
+
+#[test]
+fn failed_scatter_reports_only_fully_copied_vector_prefixes_without_replaying_read() {
+    use mochios_posix_client::io_vector::{TransferError, read};
+    for fail_at in [0, 1, 2] {
+        let mut calls = 0;
+        let mut copies = Vec::new();
+        let result = read(
+            3,
+            &mut [0; 9],
+            |_| 3,
+            |index, bytes| {
+                copies.push((index, bytes.to_vec()));
+                if index == fail_at { Err(14) } else { Ok(()) }
+            },
+            |bytes| {
+                calls += 1;
+                bytes.copy_from_slice(b"abcdefghi");
+                Ok(9)
+            },
+        );
+        assert_eq!(
+            result,
+            if fail_at == 0 {
+                Err(TransferError::Io(14))
+            } else {
+                Ok(fail_at * 3)
+            }
+        );
+        assert_eq!(calls, 1);
+        assert_eq!(copies.len(), fail_at + 1);
+    }
 }
