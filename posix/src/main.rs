@@ -960,8 +960,11 @@ fn main() {
                     } else {
                         0
                     };
-                    match service.poll_wait_signal_info(peer, identity, mask, epoch, deadline, now) {
-                        Ok(None) => {
+                    match service.poll_wait_signal_info_with_reply(
+                        peer, identity, mask, epoch, deadline, now,
+                        |accepted| reply_signal_wait(sender, header.request_id, Ok(accepted)),
+                    ) {
+                        Ok(posix_service::SignalWaitCompletion::Pending) => {
                             pending_signal_waits.push(PendingSignalWait {
                                 sender,
                                 peer,
@@ -972,17 +975,17 @@ fn main() {
                                 deadline,
                                 image,
                             });
-                            Ok(None)
+                            Ok(posix_service::SignalWaitCompletion::Pending)
                         }
                         result => result,
                     }
                 });
                 match result {
-                    Ok(None) => None,
-                    result => Some(posix_service::ObjectResponse {
+                    Ok(_) => None,
+                    Err(error) => Some(posix_service::ObjectResponse {
                         response: signal_wait_response(
                             header.request_id,
-                            result.map(|signal| signal.unwrap()),
+                            Err(error),
                         ),
                         handles: Vec::new(),
                     }),
@@ -1731,6 +1734,25 @@ fn validate_pending_request_image(
 }
 
 #[cfg(target_os = "mochios")]
+fn reply_signal_wait(
+    sender: u64,
+    request_id: u64,
+    result: Result<mochios_posix_protocol::signal_wait::Accepted, i32>,
+) -> bool {
+    use mochi_user_platform as platform;
+    use mochios_posix_protocol as protocol;
+
+    let was_success = result.is_ok();
+    let response = signal_wait_response(request_id, result);
+    let publishes_signal = !was_success || response.header.status == 0;
+    let mut bytes = vec![0; protocol::HEADER_LEN + protocol::signal_wait::LEN];
+    match protocol::encode(response.header, &response.payload, &mut bytes) {
+        Ok(length) => platform::ipc::reply(sender, &bytes[..length]).is_ok() && publishes_signal,
+        Err(_) => false,
+    }
+}
+
+#[cfg(target_os = "mochios")]
 fn complete_pending_signal_waits(
     pending: &mut Vec<PendingSignalWait>,
     service: &mut posix_service::PosixService<u32>,
@@ -1753,21 +1775,20 @@ fn complete_pending_signal_waits(
             }
         })
         .and_then(|now| {
-            service.poll_wait_signal_info(
+            service.poll_wait_signal_info_with_reply(
                 wait.peer, wait.identity, wait.mask, wait.epoch, wait.deadline, now,
+                |accepted| reply_signal_wait(wait.sender, wait.request_id, Ok(accepted)),
             )
         });
-        let result = match result {
-            Ok(None) => {
+        match result {
+            Ok(posix_service::SignalWaitCompletion::Pending) => {
                 index += 1;
                 continue;
             }
-            result => result.map(|accepted| accepted.unwrap()),
-        };
-        let response = signal_wait_response(wait.request_id, result);
-        let mut bytes = vec![0; protocol::HEADER_LEN + protocol::signal_wait::LEN];
-        if let Ok(length) = protocol::encode(response.header, &response.payload, &mut bytes) {
-            let _ = platform::ipc::reply(wait.sender, &bytes[..length]);
+            Err(error) => {
+                reply_signal_wait(wait.sender, wait.request_id, Err(error));
+            }
+            Ok(_) => {}
         }
         pending.swap_remove(index);
     }

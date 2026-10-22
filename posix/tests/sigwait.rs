@@ -132,7 +132,15 @@ fn server_retains_waits_and_services_them_before_async_notifications() {
         .split("fn signal_wait_response(")
         .next()
         .unwrap();
-    assert!(pending.contains("Ok(None) =>"));
-    assert!(pending.contains("platform::ipc::reply(wait.sender"));
+    assert!(pending.contains("SignalWaitCompletion::Pending"));
+    assert!(pending.contains("reply_signal_wait(wait.sender"));
+    let publication = source
+        .split("fn reply_signal_wait(")
+        .nth(1)
+        .unwrap()
+        .split("fn complete_pending_signal_waits(")
+        .next()
+        .unwrap();
+    assert!(publication.contains("platform::ipc::reply(sender"));
     assert!(!pending.contains("thread::yield"));
 }

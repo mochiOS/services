@@ -577,6 +577,14 @@ pub struct ProcessSignalState {
     caught: u64,
 }
 
+/// Server-local outcome; none of these values are part of the wire protocol.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignalWaitCompletion {
+    Pending,
+    Replied,
+    Undelivered,
+}
+
 impl ProcessSignalState {
     pub const fn pending(self) -> u64 {
         self.pending
@@ -3256,6 +3264,47 @@ impl<H: Copy> PosixService<H> {
         requested: u64,
         expected_epoch: u64,
     ) -> Result<protocol::signal_wait::Accepted, i32> {
+        self.try_wait_signal_info_with_reply(peer, sender, requested, expected_epoch, |_| true)?
+            .ok_or(protocol::STATUS_EIO)
+    }
+
+    /// An expired wait still selects a pending signal first. Failed reply
+    /// publication leaves that exact signal and its origin pending, but is
+    /// distinct from a request that must remain deferred awaiting a signal.
+    pub fn poll_wait_signal_info_with_reply<R>(
+        &mut self,
+        peer: PeerIdentity,
+        sender: mnu_abi::ExecutionIdentity,
+        requested: u64,
+        expected_epoch: u64,
+        deadline: Option<u64>,
+        now: u64,
+        reply: R,
+    ) -> Result<SignalWaitCompletion, i32>
+    where
+        R: FnOnce(protocol::signal_wait::Accepted) -> bool,
+    {
+        match self.try_wait_signal_info_with_reply(peer, sender, requested, expected_epoch, reply) {
+            Err(protocol::STATUS_EAGAIN) if deadline.is_none_or(|deadline| now < deadline) => {
+                Ok(SignalWaitCompletion::Pending)
+            }
+            Ok(Some(_)) => Ok(SignalWaitCompletion::Replied),
+            Ok(None) => Ok(SignalWaitCompletion::Undelivered),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn try_wait_signal_info_with_reply<R>(
+        &mut self,
+        peer: PeerIdentity,
+        sender: mnu_abi::ExecutionIdentity,
+        requested: u64,
+        expected_epoch: u64,
+        reply: R,
+    ) -> Result<Option<protocol::signal_wait::Accepted>, i32>
+    where
+        R: FnOnce(protocol::signal_wait::Accepted) -> bool,
+    {
         self.validate_wait_delivery_epoch(peer, sender, expected_epoch)?;
         let key = (sender.process_id, sender.thread_id);
         let blocked = self.signal_masks[&key];
@@ -3273,9 +3322,13 @@ impl<H: Copy> PosixService<H> {
                 .get(&(sender.process_id, sender.thread_id, signal))
                 .copied()
                 .ok_or(protocol::STATUS_EIO)?;
+            let accepted = protocol::signal_wait::Accepted { signal, origin };
+            if !reply(accepted) {
+                return Ok(None);
+            }
             *self.thread_pending_signals.get_mut(&key).unwrap() &= !signal_bit(signal);
             self.signal_origins.remove(&(sender.process_id, sender.thread_id, signal));
-            return Ok(protocol::signal_wait::Accepted { signal, origin });
+            return Ok(Some(accepted));
         }
         let state = self.signals.get_mut(&sender.process_id).unwrap();
         let selected = state.pending() & requested;
@@ -3288,9 +3341,13 @@ impl<H: Copy> PosixService<H> {
             .get(&(sender.process_id, 0, signal))
             .copied()
             .ok_or(protocol::STATUS_EIO)?;
+        let accepted = protocol::signal_wait::Accepted { signal, origin };
+        if !reply(accepted) {
+            return Ok(None);
+        }
         state.pending &= !signal_bit(signal);
         self.signal_origins.remove(&(sender.process_id, 0, signal));
-        Ok(protocol::signal_wait::Accepted { signal, origin })
+        Ok(Some(accepted))
     }
 
     /// Validate before examining/reaping a child. `sender` is native endpoint

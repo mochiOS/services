@@ -45,6 +45,9 @@ mod request_image;
 #[path = "support/wait_reply.rs"]
 mod wait_reply;
 
+#[path = "support/sigwait_reply.rs"]
+mod sigwait_reply;
+
 #[path = "support/alarm.rs"]
 mod alarm;
 

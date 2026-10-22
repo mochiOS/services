@@ -28,7 +28,8 @@ static STATUS:Cell<i32>=const{Cell::new(0)};
 pub const STATUS_EAGAIN:i32=-11;pub const STATUS_ESRCH:i32=-3;
 pub const STATUS_EPERM:i32=-1;pub const STATUS_EIO:i32=-5;
 pub const HEADER_LEN:usize=24;pub const MAX_MESSAGE_LEN:usize=256;
-pub mod signal_wait {pub const LEN:usize=64;}
+pub mod signal_wait {pub const LEN:usize=64;pub type Accepted=u32;}
+pub enum SignalWaitCompletion {Pending,Replied,Undelivered}
 pub mod mnu_abi {
 #[derive(Clone,Copy,PartialEq,Eq)]pub struct ExecutionIdentity{pub process_id:u64,pub thread_id:u64}
 }
@@ -47,8 +48,8 @@ fn validate_wait_delivery_epoch(&self,_:PeerIdentity,_:mnu_abi::ExecutionIdentit
 fn wait_child_info_with_reply<R:FnOnce(i32)->bool>(&mut self,_:PeerIdentity,_:WaitRequest,_:&mut RuntimeFilesystem,_:&mut RuntimeProcesses,reply:R)->Result<Option<i32>,i32>{
  if reply(37){CONSUMED.set(CONSUMED.get()+1);Ok(Some(37))}else{Ok(None)}
 }
-fn poll_wait_signal_info(&mut self,_:PeerIdentity,_:mnu_abi::ExecutionIdentity,_:u64,_:u64,_:Option<u64>,_:u64)->Result<Option<u32>,i32>{
- CONSUMED.set(CONSUMED.get()+1);Ok(Some(10))
+fn poll_wait_signal_info_with_reply<R:FnOnce(u32)->bool>(&mut self,_:PeerIdentity,_:mnu_abi::ExecutionIdentity,_:u64,_:u64,_:Option<u64>,_:u64,reply:R)->Result<SignalWaitCompletion,i32>{
+ if reply(10){CONSUMED.set(CONSUMED.get()+1);Ok(SignalWaitCompletion::Replied)}else{Ok(SignalWaitCompletion::Undelivered)}
 }
 }
 pub struct RuntimeProcesses;pub struct RuntimeFilesystem;
@@ -66,7 +67,7 @@ mod time {pub fn monotonic_nanoseconds()->Result<u64,crate::NativeError>{Ok(100)
 pub struct Header{status:i32}pub struct Response{header:Header,payload:Vec<u8>}
 pub fn encode(header:Header,_:&[u8],out:&mut[u8])->Result<usize,()> {if ENCODE_FAILURE.get(){return Err(())}out[..4].copy_from_slice(&header.status.to_le_bytes());Ok(4)}
 fn wait_info_response(_:u64,result:Result<i32,i32>,_:bool)->Response{if PAYLOAD_FAILURE.get(){response(Err(-22))}else{response(result.map(|_|()))}}
-fn signal_wait_response(_:u64,result:Result<u32,i32>)->Response{response(result.map(|_|()))}
+fn signal_wait_response(_:u64,result:Result<u32,i32>)->Response{if PAYLOAD_FAILURE.get(){response(Err(-22))}else{response(result.map(|_|()))}}
 fn response(result:Result<(),i32>)->Response{Response{header:Header{status:result.err().unwrap_or(0)},payload:vec![]}}
 #[derive(Clone,Copy)]struct PendingWait {
 sender:u64,peer:PeerIdentity,request_id:u64,request:WaitRequest,
@@ -81,6 +82,11 @@ mask:u64,epoch:u64,deadline:Option<u64>,image:RequestImage,
     program.push_str(probe::between(
         main,
         "fn validate_pending_request_image(",
+        "#[cfg(target_os = \"mochios\")]\nfn reply_signal_wait(",
+    ));
+    program.push_str(probe::between(
+        main,
+        "fn reply_signal_wait(",
         "#[cfg(target_os = \"mochios\")]\nfn complete_pending_signal_waits(",
     ));
     program.push_str(probe::between(
@@ -102,7 +108,6 @@ mask:u64,epoch:u64,deadline:Option<u64>,image:RequestImage,
         r#"
 fn main(){
 for signal in [false,true] {for guarded in [false,true] {for mode in 0..9 {
- if signal&&mode>=6{continue}
  IMAGE.set(if mode==1{1}else{0});FAILURE.set(match mode{2=>-5,5=>-3,_=>0});
  ENDPOINT_OWNER.set(if mode==4{2}else{1});IMAGE_READS.set(0);
  REPLY_FAILURE.set(mode==6);
