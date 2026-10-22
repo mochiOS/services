@@ -235,6 +235,27 @@ impl Namespace {
     }
 
     pub fn unregister_device_node(&mut self, parent: &Node, name: &[u8]) -> Result<Node, i32> {
+        self.unregister_device_node_checked(parent, name, None)
+    }
+
+    /// Expected identity narrows removal; it never supplies node authority.
+    /// Lookup, comparison and unlink share this exclusive namespace borrow.
+    pub(crate) fn unregister_device_node_if_same(
+        &mut self,
+        parent: &Node,
+        name: &[u8],
+        device: u64,
+        node_id: u64,
+    ) -> Result<Node, i32> {
+        self.unregister_device_node_checked(parent, name, Some((device, node_id)))
+    }
+
+    fn unregister_device_node_checked(
+        &mut self,
+        parent: &Node,
+        name: &[u8],
+        expected: Option<(u64, u64)>,
+    ) -> Result<Node, i32> {
         self.validate(parent)?;
         if self.named_mounts.contains_key(&(parent.id(), name.to_vec())) {
             return Err(EBUSY);
@@ -248,6 +269,12 @@ impl Namespace {
             volume: parent.volume,
             inode: child.id(),
         };
+        // Match the exported NodeStatus identity, whose node_id includes the
+        // volume prefix just like directory entries and stat replies.
+        let exported_id = (id.volume << 32) | u64::from(id.inode);
+        if expected.is_some_and(|expected| expected != (id.volume, exported_id)) {
+            return Err(116); // ESTALE: leave a replacement node untouched.
+        }
         if self.mounts.contains_key(&id) || self.named_mounts.keys().any(|(at, _)| *at == id) {
             return Err(EBUSY);
         }

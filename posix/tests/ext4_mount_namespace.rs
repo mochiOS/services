@@ -24,6 +24,8 @@ mod external_publication;
 mod device_attributes;
 #[path = "support/terminal_namespace_bootstrap.rs"]
 mod terminal_namespace_bootstrap;
+#[path = "support/device_removal.rs"]
+mod device_removal;
 
 #[derive(Clone)]
 struct Image(Arc<Mutex<Vec<u8>>>);
