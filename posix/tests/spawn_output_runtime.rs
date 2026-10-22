@@ -5,7 +5,7 @@ use mochios_posix_protocol as posix_protocol;
 use std::ffi::{c_char, c_int};
 use std::sync::{
     Mutex,
-    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering},
 };
 #[path = "../../../user/crates/newlib-runtime/src/callback_resources.rs"]
 mod callback_resources;
@@ -30,6 +30,13 @@ static REGISTER: AtomicBool = AtomicBool::new(true);
 static COPY_MODE: AtomicU32 = AtomicU32::new(0);
 static COPY_CALLS: AtomicU32 = AtomicU32::new(0);
 static COPIED: AtomicBool = AtomicBool::new(false);
+static QUERY_PID: AtomicU64 = AtomicU64::new(37);
+static QUERY_STATE: AtomicU32 = AtomicU32::new(mnu_abi::PROCESS_STATE_RUNNING);
+static QUERY_REVISION: AtomicU64 = AtomicU64::new(1);
+static QUERY_RESERVED: AtomicU32 = AtomicU32::new(0);
+static QUERY_ERROR: AtomicI32 = AtomicI32::new(0);
+static QUERY_RESULT: AtomicU64 = AtomicU64::new(0);
+static QUERY_CALLS: AtomicU32 = AtomicU32::new(0);
 static CLOSED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 static CLEANED: Mutex<Vec<(u64, bool)>> = Mutex::new(Vec::new());
 struct ThreadControl {
@@ -63,7 +70,30 @@ fn close_object_handle(handle: u32) {
     CLOSED.lock().unwrap().push(handle);
 }
 mod syscall {
-    pub use mnu_abi::SyscallNumber;
+    pub use mnu_abi::{PROCESS_STATE_EXITED, PROCESS_STATE_RUNNING, ProcessStatus, SyscallNumber};
+    pub fn raw_syscall2(number: SyscallNumber, handle: u64, output: u64) -> Result<u64, i32> {
+        use super::*;
+        assert_eq!(number, SyscallNumber::ProcessHandleStatus);
+        assert_eq!(handle, u64::from(HANDLE));
+        assert!(!CONTROL.callback_resources.is_empty());
+        assert_ne!(CONTROL.native.load(Ordering::Relaxed), 0);
+        QUERY_CALLS.fetch_add(1, Ordering::Relaxed);
+        let error = QUERY_ERROR.load(Ordering::Relaxed);
+        if error != 0 {
+            return Err(error);
+        }
+        let status = ProcessStatus {
+            process_id: QUERY_PID.load(Ordering::Relaxed),
+            state: QUERY_STATE.load(Ordering::Relaxed),
+            reserved: QUERY_RESERVED.load(Ordering::Relaxed),
+            exit_code: 127,
+            image_revision: QUERY_REVISION.load(Ordering::Relaxed),
+        };
+        unsafe {
+            (output as *mut ProcessStatus).write(status);
+        }
+        Ok(QUERY_RESULT.load(Ordering::Relaxed))
+    }
     pub fn raw_syscall3(
         number: SyscallNumber,
         destination: u64,
@@ -96,6 +126,13 @@ fn reset() {
     COPY_MODE.store(0, Ordering::Relaxed);
     COPY_CALLS.store(0, Ordering::Relaxed);
     COPIED.store(false, Ordering::Relaxed);
+    QUERY_PID.store(37, Ordering::Relaxed);
+    QUERY_STATE.store(mnu_abi::PROCESS_STATE_RUNNING, Ordering::Relaxed);
+    QUERY_REVISION.store(1, Ordering::Relaxed);
+    QUERY_RESERVED.store(0, Ordering::Relaxed);
+    QUERY_ERROR.store(0, Ordering::Relaxed);
+    QUERY_RESULT.store(0, Ordering::Relaxed);
+    QUERY_CALLS.store(0, Ordering::Relaxed);
     CLOSED.lock().unwrap().clear();
     CLEANED.lock().unwrap().clear();
 }
@@ -121,6 +158,7 @@ fn success_publishes_exact_pid_before_releasing_the_process_reference() {
     let _serial = SERIAL.lock().unwrap();
     for process_id in [1, 37, c_int::MAX as u64] {
         reset();
+        QUERY_PID.store(process_id, Ordering::Relaxed);
         let mut bytes = [0xa5; 6];
         assert_eq!(
             implementation::publish(
@@ -220,4 +258,59 @@ fn read_only_pid_storage_returns_efault_and_rolls_back_the_owned_child() {
     assert_eq!(implementation::publish(37, HANDLE, page.0.cast()), EFAULT);
     assert_eq!(unsafe { page.0.cast::<c_int>().read() }, -37);
     assert_retired(false);
+}
+
+#[test]
+fn eof_without_committed_exec_and_malformed_metadata_cannot_publish_a_pid() {
+    let _serial = SERIAL.lock().unwrap();
+    for mode in 0..7 {
+        reset();
+        match mode {
+            0 => QUERY_REVISION.store(0, Ordering::Relaxed),
+            1 => {
+                QUERY_STATE.store(mnu_abi::PROCESS_STATE_EXITED, Ordering::Relaxed);
+                QUERY_REVISION.store(0, Ordering::Relaxed);
+            }
+            2 => QUERY_PID.store(38, Ordering::Relaxed),
+            3 => QUERY_RESERVED.store(1, Ordering::Relaxed),
+            4 => QUERY_STATE.store(0, Ordering::Relaxed),
+            5 => QUERY_STATE.store(u32::MAX, Ordering::Relaxed),
+            _ => QUERY_RESULT.store(7, Ordering::Relaxed),
+        }
+        let mut pid = -37;
+        assert_eq!(implementation::publish(37, HANDLE, &mut pid), EIO);
+        assert_eq!(pid, -37);
+        assert_eq!(QUERY_CALLS.load(Ordering::Relaxed), 1);
+        assert_eq!(COPY_CALLS.load(Ordering::Relaxed), 0);
+        assert_retired(false);
+    }
+    for error in [5, 9, 13, 88] {
+        reset();
+        QUERY_ERROR.store(error, Ordering::Relaxed);
+        let mut pid = -37;
+        assert_eq!(implementation::publish(37, HANDLE, &mut pid), error);
+        assert_eq!(pid, -37);
+        assert_eq!(COPY_CALLS.load(Ordering::Relaxed), 0);
+        assert_retired(false);
+    }
+}
+
+#[test]
+fn committed_exec_succeeds_even_when_the_new_image_has_already_exited() {
+    let _serial = SERIAL.lock().unwrap();
+    for revision in [1, 2, u64::MAX] {
+        for state in [
+            mnu_abi::PROCESS_STATE_RUNNING,
+            mnu_abi::PROCESS_STATE_EXITED,
+        ] {
+            reset();
+            QUERY_REVISION.store(revision, Ordering::Relaxed);
+            QUERY_STATE.store(state, Ordering::Relaxed);
+            let mut pid = -37;
+            assert_eq!(implementation::publish(37, HANDLE, &mut pid), 0);
+            assert_eq!(pid, 37);
+            assert_eq!(QUERY_CALLS.load(Ordering::Relaxed), 1);
+            assert_retired(true);
+        }
+    }
 }
