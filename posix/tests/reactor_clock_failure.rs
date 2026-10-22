@@ -23,6 +23,8 @@ static CPU_ONLY:Cell<bool>=const{Cell::new(false)};
 static TIMER_SWEEPS:Cell<u32>=const{Cell::new(0)};
 static DEFERRED:Cell<bool>=const{Cell::new(false)};
 static DEFERRED_FAILURE:Cell<bool>=const{Cell::new(false)};
+static RESUME:Cell<bool>=const{Cell::new(false)};
+static RESUME_FAILURE:Cell<bool>=const{Cell::new(false)};
 }
 #[macro_export]macro_rules! logln{($($argument:tt)*)=>{crate::LOGS.set(crate::LOGS.get()+1)}}
 pub mod syscall{pub const HANDLE_WAIT_INFINITE:u64=u64::MAX;}
@@ -45,6 +47,9 @@ fn enforce_cpu_limits(&mut self,_:&mut())->Result<(),i32>{self.cpu_sweeps+=1;Ok(
 fn next_alarm_deadline(&self)->Option<u64>{Some(self.deadline)}
 fn child_lifecycle_handles(&self)->Vec<u32>{vec![7]}
 fn has_deferred_child_notifications(&self)->bool{DEFERRED.get()}
+fn process_resume_notification_processes(&self)->impl Iterator<Item=u64>{
+ RESUME.get().then_some(7).into_iter()
+}
 fn refresh_child_notifications(&mut self,_:&mut())->Result<usize,i32>{
  if DEFERRED.get()&&DEFERRED_FAILURE.get(){return Err(-5)}
  let count=usize::from(DEFERRED.get());DEFERRED.set(false);Ok(count)
@@ -52,7 +57,10 @@ fn refresh_child_notifications(&mut self,_:&mut())->Result<usize,i32>{
 }
 struct PendingSignalWait{deadline:Option<u64>}
 fn reap_signal_threads(_:&mut Service,_:&mut Vec<()>){ }
-fn deliver_process_resume_notifications(_:&mut Service){NOTIFICATIONS.set(NOTIFICATIONS.get()+1);}
+fn deliver_process_resume_notifications(_:&mut Service,_:&mut()){
+ NOTIFICATIONS.set(NOTIFICATIONS.get()+1);
+ if RESUME.get()&&!RESUME_FAILURE.get(){RESUME.set(false);}
+}
 fn complete_pending_signal_waits(_:&mut Vec<PendingSignalWait>,_:&mut Service,_:&mut()){}
 fn complete_pending_waits(_:&mut Vec<()>,_:&mut Service,_:&mut(),_:&mut()){}
 fn deliver_signal_notifications(_:&mut Service,_:&mut Vec<()>){}
@@ -104,6 +112,16 @@ assert!(DEFERRED.get());
 DEFERRED_FAILURE.set(false);CLOCK_CALLS.set(0);
 assert_eq!(plan(&mut service,&mut reported),(2_100_000_000,false));
 assert!(!DEFERRED.get());
+// A failed native resume, including SIGKILL with no continued notification,
+// independently keeps the retry deadline finite and survives clock failures.
+RESUME.set(true);RESUME_FAILURE.set(true);FAIL.set(0);CLOCK_CALLS.set(0);
+assert_eq!(plan(&mut service,&mut reported),(2_010_000_000,false));
+assert!(RESUME.get());assert!(!DEFERRED.get());
+FAIL.set(8);CLOCK_CALLS.set(0);
+assert!(plan(&mut service,&mut reported).1);assert!(RESUME.get());
+FAIL.set(0);RESUME_FAILURE.set(false);CLOCK_CALLS.set(0);
+assert_eq!(plan(&mut service,&mut reported),(2_100_000_000,false));
+assert!(!RESUME.get());assert!(!DEFERRED.get());
 }
 "#,
     );

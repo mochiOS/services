@@ -211,6 +211,9 @@ fn observing_stop_and_continue_does_not_consume_the_next_waitpid_event() {
         0
     );
     send_signal(&mut service, parent, child, protocol::SIGNAL_CONT);
+    service
+        .apply_process_resume(child.process_id, &mut processes)
+        .unwrap();
     let continued = protocol::WAIT_NOHANG | protocol::WAIT_CONTINUED;
     for _ in 0..3 {
         assert_eq!(

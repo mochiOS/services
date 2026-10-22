@@ -482,6 +482,8 @@ struct ProcessWaitState {
     stop_signal: u32,
     stop_reported: bool,
     continued_pending: bool,
+    // Signal enqueue requests this transition; only native resume commits it.
+    resume_continued: bool,
     exit_observed: bool,
     exit_notified: bool,
     discard_exit_status: bool,
@@ -510,7 +512,6 @@ impl ProcessWaitState {
     }
 
     fn continued(&mut self) -> bool {
-        self.cancel_stop_deliveries();
         if !self.stopped {
             return false;
         }
@@ -694,6 +695,10 @@ pub trait ProcessBackend<H: Copy> {
     /// Reads the retained native process object, not client-supplied metrics.
     fn execution_usage(&mut self, process: H) -> Result<mnu_abi::ProcessExecutionUsage, i32>;
     fn suspend(&mut self, process: H) -> Result<(), i32>;
+    /// Resume a retained native object; success confirms completion, not queuing.
+    fn resume(&mut self, _process: H) -> Result<(), i32> {
+        Err(protocol::STATUS_ENOSYS)
+    }
     fn terminate(&mut self, process: H, exit_code: u64) -> Result<(), i32>;
     fn release(&mut self, process: H);
 }
@@ -981,8 +986,61 @@ impl<H: Copy> PosixService<H> {
         self.process_resume_notifications.iter().copied()
     }
 
-    pub fn acknowledge_process_resume_notification(&mut self, process_id: u64) {
+    /// Complete queued signal policy through the already-retained native
+    /// process reference. Failed native operations leave all effects pending.
+    /// True means one pending action completed or was retired after native exit.
+    pub fn apply_process_resume<P: ProcessBackend<H>>(
+        &mut self,
+        process_id: u64,
+        processes: &mut P,
+    ) -> Result<bool, i32> {
+        if !self.process_resume_notifications.contains(&process_id) {
+            return Ok(false);
+        }
+        let handle = self
+            .processes
+            .get(&process_id)
+            .copied()
+            .ok_or(protocol::STATUS_ESRCH)?;
+        if !self.process_wait_states.contains_key(&process_id) {
+            return Err(protocol::STATUS_ESRCH);
+        }
+        if matches!(processes.status(handle)?, ProcessLifecycle::Exited { .. }) {
+            self.cancel_unconfirmed_resume(process_id);
+            return Ok(true);
+        }
+        let continued = self.process_wait_states[&process_id].resume_continued;
+        let notification = if continued {
+            self.prepare_child_resume(process_id)?
+        } else {
+            None
+        };
+        if notification.is_some() {
+            self.deferred_child_notifications
+                .try_reserve(1)
+                .map_err(|_| protocol::STATUS_ENOMEM)?;
+        }
+        processes.resume(handle)?;
+        // No fallible observation/publication follows a successful resume.
+        // STOP tokens generated after SIGCONT must remain valid; cancellation
+        // belongs to signal generation, not to this later native completion.
         self.process_resume_notifications.remove(&process_id);
+        if let Some(state) = self.process_wait_states.get_mut(&process_id) {
+            state.resume_continued = false;
+            if continued && state.continued() {
+                if let Some(notification) = notification {
+                    self.deferred_child_notifications.push_back(notification);
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    fn cancel_unconfirmed_resume(&mut self, process_id: u64) {
+        self.process_resume_notifications.remove(&process_id);
+        if let Some(state) = self.process_wait_states.get_mut(&process_id) {
+            state.resume_continued = false;
+        }
     }
 
     fn enqueue_signal(&mut self, process_id: u64, signal: u32) -> Result<(), i32> {
@@ -1036,31 +1094,21 @@ impl<H: Copy> PosixService<H> {
         self.signal_origins.retain(|(process, _, signal), _| {
             *process != process_id || signal_bit(*signal) & cancelled == 0
         });
-        let continued = if signal == protocol::SIGNAL_CONT {
-            self.process_wait_states
+        if signal == protocol::SIGNAL_CONT {
+            let wait = self
+                .process_wait_states
                 .get_mut(&process_id)
-                .ok_or(protocol::STATUS_ESRCH)?
-                .continued()
+                .ok_or(protocol::STATUS_ESRCH)?;
+            wait.cancel_stop_deliveries();
+            wait.resume_continued |= wait.stopped;
         } else if signal == protocol::SIGNAL_KILL {
             self.process_wait_states
                 .get_mut(&process_id)
                 .ok_or(protocol::STATUS_ESRCH)?
                 .cancel_stop_deliveries();
-            false
-        } else {
-            false
-        };
+        }
         if matches!(signal, protocol::SIGNAL_KILL | protocol::SIGNAL_CONT) {
             self.process_resume_notifications.insert(process_id);
-        }
-        if continued {
-            self.defer_parent_of_child_change(
-                process_id,
-                protocol::signal_origin::ChildStatus {
-                    event: protocol::signal_origin::CONTINUED,
-                    status: protocol::SIGNAL_CONT,
-                },
-            )?;
         }
         Ok(())
     }
@@ -1232,6 +1280,7 @@ impl<H: Copy> PosixService<H> {
         process_id: u64,
         processes: &mut P,
     ) -> Result<(), i32> {
+        self.cancel_unconfirmed_resume(process_id);
         self.refresh_child_notifications_for_child(process_id, processes)?;
         self.refresh_parent_image(process_id, processes)?;
         if self.parents.get(&process_id).is_some_and(|parent| self.discards_child_status(*parent)) {
@@ -3439,6 +3488,9 @@ impl<H: Copy> PosixService<H> {
                 return Ok(());
             }
         }
+        // A later stop cannot overtake an earlier queued native resume.
+        // Failure leaves this new stop token available for a retry.
+        self.apply_process_resume(peer.process_id, processes)?;
         // The parent may have committed exec without sending a new request.
         // Observe it before consuming the token or suspending the child, so a
         // failed observation leaves this authenticated stop retryable.

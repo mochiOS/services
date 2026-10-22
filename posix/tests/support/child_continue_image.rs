@@ -33,6 +33,9 @@ fn continued_notification_observes_exec_that_removed_nocldstop_without_parent_rp
     // image has not entered request admission at all.
     let sender = service.registered_peer(1400).unwrap();
     send_signal(&mut service, sender, child, protocol::SIGNAL_CONT);
+    service
+        .apply_process_resume(child.process_id, &mut processes)
+        .unwrap();
     assert_eq!(
         service.refresh_child_exit_notifications(&mut processes),
         Ok(0)
@@ -49,6 +52,9 @@ fn parent_observation_failure_keeps_continued_notification_for_retry() {
     processes.images.insert(141, Err(protocol::STATUS_EIO));
     let sender = service.registered_peer(1400).unwrap();
     send_signal(&mut service, sender, child, protocol::SIGNAL_CONT);
+    service
+        .apply_process_resume(child.process_id, &mut processes)
+        .unwrap();
     assert_eq!(
         service.refresh_child_exit_notifications(&mut processes),
         Err(protocol::STATUS_EIO)
@@ -86,6 +92,9 @@ fn same_image_action_changes_do_not_rewrite_already_generated_notifications() {
             flags(suppress_at_generation),
         );
         send_signal(&mut service, parent, child, protocol::SIGNAL_CONT);
+        service
+            .apply_process_resume(child.process_id, &mut processes)
+            .unwrap();
         set_child_signal_policy(
             &mut service,
             parent,
@@ -133,6 +142,9 @@ fn direct_wait_flushes_the_earlier_continue_before_reaping_the_child() {
     let (mut service, parent, child, mut processes) = stopped_family();
     set_child_signal_policy(&mut service, parent, protocol::SIGNAL_DISPOSITION_CAUGHT, 0);
     send_signal(&mut service, parent, child, protocol::SIGNAL_CONT);
+    service
+        .apply_process_resume(child.process_id, &mut processes)
+        .unwrap();
     processes
         .states
         .insert(142, ProcessLifecycle::Exited { exit_code: 37 });
@@ -186,6 +198,12 @@ fn one_failed_parent_does_not_block_another_parents_notification() {
     set_child_signal_policy(&mut service, child, protocol::SIGNAL_DISPOSITION_CAUGHT, 0);
     send_signal(&mut service, parent, child, protocol::SIGNAL_CONT);
     send_signal(&mut service, child, grandchild, protocol::SIGNAL_CONT);
+    service
+        .apply_process_resume(child.process_id, &mut processes)
+        .unwrap();
+    service
+        .apply_process_resume(grandchild.process_id, &mut processes)
+        .unwrap();
     processes.images.insert(141, Err(protocol::STATUS_EIO));
     assert_eq!(
         service.refresh_child_notifications(&mut processes),
@@ -213,8 +231,21 @@ fn repeated_continue_for_an_already_running_child_does_not_accumulate_events() {
     for _ in 0..100 {
         send_signal(&mut service, parent, child, protocol::SIGNAL_CONT);
     }
+    assert!(!service.has_deferred_child_notifications());
+    assert_eq!(service.refresh_child_notifications(&mut processes), Ok(0));
+    service
+        .apply_process_resume(child.process_id, &mut processes)
+        .unwrap();
     assert!(service.has_deferred_child_notifications());
     assert_eq!(service.refresh_child_notifications(&mut processes), Ok(1));
+    assert!(!service.has_deferred_child_notifications());
+    assert_eq!(service.refresh_child_notifications(&mut processes), Ok(0));
+    for _ in 0..100 {
+        send_signal(&mut service, parent, child, protocol::SIGNAL_CONT);
+    }
+    service
+        .apply_process_resume(child.process_id, &mut processes)
+        .unwrap();
     assert!(!service.has_deferred_child_notifications());
     assert_eq!(service.refresh_child_notifications(&mut processes), Ok(0));
 }

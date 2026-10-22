@@ -97,6 +97,9 @@ fn coalescing_preserves_the_first_stop_event_and_a_fresh_continue_has_its_own_st
             .unwrap();
         if coalesce {
             send_signal(&mut service, parent, child, protocol::SIGNAL_CONT);
+            service
+                .apply_process_resume(child.process_id, &mut processes)
+                .unwrap();
             service.refresh_child_notifications(&mut processes).unwrap();
         }
         let origin = notification(&mut service, parent);
@@ -114,6 +117,9 @@ fn coalescing_preserves_the_first_stop_event_and_a_fresh_continue_has_its_own_st
         );
     }
     send_signal(&mut service, parent, child, protocol::SIGNAL_CONT);
+    service
+        .apply_process_resume(child.process_id, &mut processes)
+        .unwrap();
     service.refresh_child_notifications(&mut processes).unwrap();
     let origin = notification(&mut service, parent);
     assert_eq!(

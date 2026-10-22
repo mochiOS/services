@@ -8,6 +8,28 @@ use posix_service::{AuthenticatedProcess, PeerIdentity, PosixService};
 #[path = "support/image_observation.rs"]
 mod image_observation;
 
+struct ResumeOnly;
+impl posix_service::ProcessBackend<u32> for ResumeOnly {
+    fn status(&mut self, _: u32) -> Result<posix_service::ProcessLifecycle, i32> {
+        Ok(posix_service::ProcessLifecycle::Running)
+    }
+    fn resume(&mut self, _: u32) -> Result<(), i32> {
+        Ok(())
+    }
+    fn execution_usage(&mut self, _: u32) -> Result<mnu_abi::ProcessExecutionUsage, i32> {
+        panic!("not execution accounting")
+    }
+    fn suspend(&mut self, _: u32) -> Result<(), i32> {
+        panic!("not suspension")
+    }
+    fn terminate(&mut self, _: u32, _: u64) -> Result<(), i32> {
+        panic!("not termination")
+    }
+    fn release(&mut self, _: u32) {
+        panic!("retain signal target")
+    }
+}
+
 #[derive(Clone)]
 struct LocalTransport {
     service: Rc<RefCell<PosixService>>,
@@ -418,8 +440,12 @@ fn signal_wire_format_rejects_invalid_numbers_and_reserved_bytes() {
         Ok(protocol::SIGNAL_CHILD_OPTION_NOCLDSTOP)
     );
     assert!(protocol::encode_signal_child_options(4, &mut options).is_err());
-    protocol::encode_signal_child_options(protocol::SIGNAL_CHILD_OPTIONS_ALL, &mut options).unwrap();
-    assert_eq!(protocol::decode_signal_child_options(&options), Ok(protocol::SIGNAL_CHILD_OPTIONS_ALL));
+    protocol::encode_signal_child_options(protocol::SIGNAL_CHILD_OPTIONS_ALL, &mut options)
+        .unwrap();
+    assert_eq!(
+        protocol::decode_signal_child_options(&options),
+        Ok(protocol::SIGNAL_CHILD_OPTIONS_ALL)
+    );
     assert!(protocol::decode_signal_child_options(&[0; 5]).is_err());
 }
 
@@ -496,7 +522,9 @@ fn child_signal_options_round_trip_through_the_client() {
     client
         .set_signal_child_options(protocol::SIGNAL_CHILD_OPTION_NOCLDSTOP)
         .unwrap();
-    client.set_signal_child_options(protocol::SIGNAL_CHILD_OPTIONS_ALL).unwrap();
+    client
+        .set_signal_child_options(protocol::SIGNAL_CHILD_OPTIONS_ALL)
+        .unwrap();
     assert!(matches!(
         client.set_signal_child_options(4),
         Err(ClientError::Protocol(
@@ -531,7 +559,8 @@ fn sigcont_requests_native_resume_and_replaces_pending_stop_signals() {
 
     service
         .borrow_mut()
-        .acknowledge_process_resume_notification(152);
+        .apply_process_resume(152, &mut ResumeOnly)
+        .unwrap();
     assert!(
         service
             .borrow()
@@ -549,7 +578,8 @@ fn sigcont_requests_native_resume_and_replaces_pending_stop_signals() {
 
     service
         .borrow_mut()
-        .acknowledge_process_resume_notification(152);
+        .apply_process_resume(152, &mut ResumeOnly)
+        .unwrap();
     sender.send_signal(152, protocol::SIGNAL_KILL).unwrap();
     assert_eq!(
         service

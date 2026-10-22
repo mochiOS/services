@@ -107,6 +107,9 @@ fn unselected_stops_and_continues_remain_available_to_a_later_wait() {
     .unwrap();
     assert_eq!(stopped.status, (protocol::SIGNAL_STOP << 8) | 0x7f);
     send_signal(&mut service, parent, child, protocol::SIGNAL_CONT);
+    service
+        .apply_process_resume(child.process_id, &mut processes)
+        .unwrap();
     assert_eq!(
         selected_wait(
             &mut service,

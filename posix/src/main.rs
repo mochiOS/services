@@ -259,7 +259,7 @@ fn main() {
             cpu_sweep_deadline_ms = 0;
             platform::syscall::HANDLE_WAIT_INFINITE
         };
-        deliver_process_resume_notifications(&mut service);
+        deliver_process_resume_notifications(&mut service, &mut processes);
         if let Err(error) = service.refresh_child_notifications(&mut processes) {
             platform::logln!(
                 "posix.service: deferred child notification pending errno={}",
@@ -302,9 +302,11 @@ fn main() {
                 }
             }
         };
-        // A failed image observation must retry even when no process exits or
-        // client sends another RPC. Use the existing native wait deadline.
-        let child_notification_deadline = if service.has_deferred_child_notifications() {
+        // A failed image observation or native resume must retry even without
+        // a process exit or another RPC. Use the existing native wait deadline.
+        let child_notification_deadline = if service.has_deferred_child_notifications()
+            || service.process_resume_notification_processes().next().is_some()
+        {
             match platform::time::monotonic_nanoseconds() {
                 Ok(now) => now.saturating_add(10_000_000),
                 Err(_) => {
@@ -1687,18 +1689,13 @@ fn deliver_signal_notifications(
 }
 
 #[cfg(target_os = "mochios")]
-fn deliver_process_resume_notifications(service: &mut posix_service::PosixService<u32>) {
-    use mochi_user_platform as platform;
-
-    let processes: Vec<u64> = service.process_resume_notification_processes().collect();
-    for process_id in processes {
-        let Some(handle) = service.process_handle(process_id) else {
-            service.acknowledge_process_resume_notification(process_id);
-            continue;
-        };
-        if platform::process::resume_handle(handle).is_ok() {
-            service.acknowledge_process_resume_notification(process_id);
-        }
+fn deliver_process_resume_notifications(
+    service: &mut posix_service::PosixService<u32>,
+    processes: &mut RuntimeProcesses,
+) {
+    let pending: Vec<u64> = service.process_resume_notification_processes().collect();
+    for process_id in pending {
+        let _ = service.apply_process_resume(process_id, processes);
     }
 }
 
@@ -2199,6 +2196,11 @@ impl posix_service::ProcessBackend<u32> for RuntimeProcesses {
 
     fn suspend(&mut self, process: u32) -> Result<(), i32> {
         mochi_user_platform::process::suspend_handle(process)
+            .map_err(|error| process_control::lifecycle_failure(error.raw()))
+    }
+
+    fn resume(&mut self, process: u32) -> Result<(), i32> {
+        mochi_user_platform::process::resume_handle(process)
             .map_err(|error| process_control::lifecycle_failure(error.raw()))
     }
 

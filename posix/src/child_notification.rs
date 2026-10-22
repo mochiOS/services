@@ -1,6 +1,6 @@
 //! SIGCONT can originate in backend-free policy paths (including terminal and
-//! orphan handling). Keep its notification until native parent image policy is
-//! observed; never decide SA_NOCLDSTOP using a stale cached disposition.
+//! orphan handling). Admit its notification before native resume, publish only
+//! after success, and retain it until native parent image policy is observed.
 use super::*;
 
 #[derive(Clone, Copy, Debug)]
@@ -12,13 +12,9 @@ pub(super) struct Deferred {
 }
 
 impl<H: Copy> PosixService<H> {
-    pub(super) fn defer_parent_of_child_change(
-        &mut self,
-        child_id: u64,
-        child: protocol::signal_origin::ChildStatus,
-    ) -> Result<(), i32> {
+    pub(super) fn prepare_child_resume(&self, child_id: u64) -> Result<Option<Deferred>, i32> {
         let Some(parent_id) = self.parents.get(&child_id).copied() else {
-            return Ok(());
+            return Ok(None);
         };
         let parent_image_revision = self
             .process_wait_states
@@ -36,9 +32,10 @@ impl<H: Copy> PosixService<H> {
             .get(&child_id)
             .ok_or(protocol::STATUS_ESRCH)?
             .real_uid;
-        // Capture the event's original relationship and identity. Reparenting
-        // or later credential changes must not rewrite an already generated event.
-        self.deferred_child_notifications.push_back(Deferred {
+        // Snapshot immediately before native admission, not at signal enqueue.
+        // Failed attempts discard this value; a retry uses the current parent,
+        // credentials and policy. Successful events are immutable afterward.
+        Ok(Some(Deferred {
             parent_id,
             parent_image_revision,
             suppress,
@@ -46,10 +43,12 @@ impl<H: Copy> PosixService<H> {
                 source: protocol::signal_origin::CHILD,
                 real_uid,
                 process_id: child_id,
-                child,
+                child: protocol::signal_origin::ChildStatus {
+                    event: protocol::signal_origin::CONTINUED,
+                    status: protocol::SIGNAL_CONT,
+                },
             },
-        });
-        Ok(())
+        }))
     }
 
     pub fn has_deferred_child_notifications(&self) -> bool {

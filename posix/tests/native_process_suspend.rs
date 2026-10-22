@@ -172,7 +172,8 @@ fn suspension_preserves_wait_state_and_resume_does_not_wake_blocked_threads() {
     assert!(!thread.contains("ThreadState::Suspended"));
 
     let service = include_str!("../src/main.rs");
-    assert!(service.contains("platform::process::resume_handle(handle)"));
+    assert!(service.contains("mochi_user_platform::process::resume_handle(process)"));
+    assert!(service.contains("service.apply_process_resume(process_id, processes)"));
 
     let native_handles = include_str!("../../../core/src/syscall/handle.rs");
     assert!(native_handles.contains("crate::capability::Capability::ProcessKill"));

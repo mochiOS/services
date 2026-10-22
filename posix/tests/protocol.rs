@@ -39,6 +39,9 @@ mod child_stop_image;
 #[path = "support/child_continue_image.rs"]
 mod child_continue_image;
 
+#[path = "support/process_resume.rs"]
+mod process_resume;
+
 #[path = "support/request_image.rs"]
 mod request_image;
 
@@ -1457,10 +1460,14 @@ struct RecordingProcesses {
     image_reads: Vec<u32>,
     usage: BTreeMap<u32, Result<mnu_abi::ProcessExecutionUsage, i32>>,
     suspend_error: Option<i32>,
+    resume_error: Option<i32>,
+    resume_failure: Option<(u32, i32)>,
     terminate_error: Option<i32>,
     terminate_failure: Option<(u32, i32)>,
     termination_pending: bool,
     suspended: Vec<u32>,
+    resumed: Vec<u32>,
+    control_events: Vec<(u32, &'static str)>,
     terminated: Vec<(u32, u64)>,
     released: Vec<u32>,
 }
@@ -1519,6 +1526,24 @@ impl ProcessBackend<u32> for RecordingProcesses {
             return Err(-3);
         }
         self.suspended.push(process);
+        self.control_events.push((process, "suspend"));
+        Ok(())
+    }
+
+    fn resume(&mut self, process: u32) -> Result<(), i32> {
+        if let Some(error) = self.resume_error {
+            return Err(error);
+        }
+        if let Some((target, error)) = self.resume_failure {
+            if target == process {
+                return Err(error);
+            }
+        }
+        if !self.states.contains_key(&process) {
+            return Err(protocol::STATUS_ESRCH);
+        }
+        self.resumed.push(process);
+        self.control_events.push((process, "resume"));
         Ok(())
     }
 
@@ -4743,6 +4768,7 @@ fn nocldstop_is_inherited_and_suppresses_only_stop_continue_notifications() {
     }
 
     send_signal(&mut service, parent, child, protocol::SIGNAL_CONT);
+    service.apply_process_resume(child.process_id, &mut processes).unwrap();
     service.refresh_child_notifications(&mut processes).unwrap();
     assert_eq!(service.signal_state(parent.process_id).unwrap().pending(), 0);
 
@@ -5157,6 +5183,7 @@ fn wait_reports_authenticated_stop_and_continue_transitions_once() {
     );
 
     send_signal(&mut service, parent, child, protocol::SIGNAL_CONT);
+    service.apply_process_resume(child.process_id, &mut processes).unwrap();
     service.refresh_child_notifications(&mut processes).unwrap();
     let child_change = dequeue_signal(&mut service, parent);
     assert_eq!(child_change.signal, protocol::SIGNAL_CHLD);
@@ -6698,6 +6725,9 @@ fn parent_exit_continues_the_whole_newly_orphaned_job_once_without_reaping_it() 
     );
     assert!(processes.released.is_empty());
     assert!(processes.terminated.is_empty());
+    for member in [first, second] {
+        service.apply_process_resume(member.process_id, &mut processes).unwrap();
+    }
     let continued = service
         .wait_child(
             init,

@@ -63,6 +63,9 @@ fn rejected_stop_and_continue_replies_leave_the_exact_event_available() {
     ] {
         if options == protocol::WAIT_CONTINUED {
             send_signal(&mut service, parent, child, protocol::SIGNAL_CONT);
+            service
+                .apply_process_resume(child.process_id, &mut processes)
+                .unwrap();
         }
         let request = protocol::WaitRequest {
             selector: child.process_id as i64,
