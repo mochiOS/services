@@ -9,7 +9,17 @@ impl<H: Copy> PosixService<H> {
         peer: PeerIdentity,
         processes: &mut P,
     ) -> Result<(), i32> {
-        let owner = peer.process_id;
+        self.refresh_process_image_state(peer.process_id, false, processes)
+    }
+
+    /// Lifecycle observers may still need the last image policy of an exited
+    /// parent whose retained native object and POSIX environment remain owned.
+    pub(super) fn refresh_process_image_state<P: ProcessBackend<H>>(
+        &mut self,
+        owner: u64,
+        allow_exited: bool,
+        processes: &mut P,
+    ) -> Result<(), i32> {
         let handle = self
             .processes
             .get(&owner)
@@ -21,6 +31,7 @@ impl<H: Copy> PosixService<H> {
         }
         match image.state {
             mnu_abi::PROCESS_STATE_RUNNING => {}
+            mnu_abi::PROCESS_STATE_EXITED if allow_exited => {}
             mnu_abi::PROCESS_STATE_EXITED => return Err(protocol::STATUS_ESRCH),
             _ => return Err(protocol::STATUS_EIO),
         }

@@ -1091,7 +1091,26 @@ impl<H: Copy> PosixService<H> {
         )
     }
 
-    fn note_child_exited(&mut self, child_id: u64, exit_code: u64) -> Result<bool, i32> {
+    // The parent and its native Handle come only from service-owned state.
+    // Refresh before deciding whether an exit status may be discarded.
+    fn refresh_parent_image<P: ProcessBackend<H>>(
+        &mut self,
+        child_id: u64,
+        processes: &mut P,
+    ) -> Result<(), i32> {
+        if let Some(parent) = self.parents.get(&child_id).copied() {
+            self.refresh_process_image_state(parent, true, processes)?;
+        }
+        Ok(())
+    }
+
+    fn note_child_exited<P: ProcessBackend<H>>(
+        &mut self,
+        child_id: u64,
+        exit_code: u64,
+        processes: &mut P,
+    ) -> Result<bool, i32> {
+        self.refresh_parent_image(child_id, processes)?;
         let wait_state = self
             .process_wait_states
             .get_mut(&child_id)
@@ -1151,8 +1170,10 @@ impl<H: Copy> PosixService<H> {
         let mut notified = 0;
         for (child_id, handle) in candidates {
             if let ProcessLifecycle::Exited { exit_code } = processes.status(handle)? {
-                self.observe_process_exit(child_id)?;
-                if self.parents.contains_key(&child_id) && self.note_child_exited(child_id, exit_code)? {
+                self.observe_process_exit(child_id, processes)?;
+                if self.parents.contains_key(&child_id)
+                    && self.note_child_exited(child_id, exit_code, processes)?
+                {
                     notified += 1;
                 }
             }
@@ -1192,7 +1213,12 @@ impl<H: Copy> PosixService<H> {
             .collect()
     }
 
-    fn observe_process_exit(&mut self, process_id: u64) -> Result<(), i32> {
+    fn observe_process_exit<P: ProcessBackend<H>>(
+        &mut self,
+        process_id: u64,
+        processes: &mut P,
+    ) -> Result<(), i32> {
+        self.refresh_parent_image(process_id, processes)?;
         if self.parents.get(&process_id).is_some_and(|parent| self.discards_child_status(*parent)) {
             self.process_wait_states
                 .get_mut(&process_id)
@@ -1341,7 +1367,7 @@ impl<H: Copy> PosixService<H> {
             if !matches!(processes.status(handle)?, ProcessLifecycle::Exited { .. }) {
                 continue;
             }
-            self.observe_process_exit(process_id)?;
+            self.observe_process_exit(process_id, processes)?;
             let parent = *self
                 .parents
                 .get(&process_id)
@@ -1406,15 +1432,32 @@ impl<H: Copy> PosixService<H> {
             .collect();
         let mut reaped = 0;
         for (child, parent) in candidates {
+            // A native exec can clear SA_NOCLDWAIT without a request from
+            // the parent. Never turn an old cached flag into a lost status.
+            self.refresh_parent_image(child, processes)?;
+            let discarded = self
+                .process_wait_states
+                .get(&child)
+                .is_some_and(|state| state.discard_exit_status);
+            if !discarded && !self.discards_child_status(parent) {
+                continue;
+            }
             let handle = *self.processes.get(&child).ok_or(protocol::STATUS_ESRCH)?;
             if !matches!(processes.status(handle)?, ProcessLifecycle::Exited { .. }) {
                 continue;
             }
-            self.observe_process_exit(child)?;
-            self.process_wait_states
-                .get_mut(&child)
+            self.observe_process_exit(child, processes)?;
+            if !self
+                .process_wait_states
+                .get(&child)
                 .ok_or(protocol::STATUS_ESRCH)?
-                .discard_exit_status = true;
+                .discard_exit_status
+            {
+                // Exit observation re-read the parent's image. An exec may
+                // have cleared NOCLDWAIT after this candidate was selected;
+                // only an actual discard decision authorizes reclamation.
+                continue;
+            }
             if self.reap_is_pinned(child) {
                 continue;
             }
@@ -1865,7 +1908,7 @@ impl<H: Copy> PosixService<H> {
             let real_uid = self.sessions.get(&child)
                 .ok_or(protocol::STATUS_ESRCH)?.real_uid;
             if let ProcessLifecycle::Exited { exit_code } = processes.status(handle)? {
-                self.note_child_exited(child, exit_code)?;
+                self.note_child_exited(child, exit_code, processes)?;
                 if !protocol::wait_selects_exit(request.options) {
                     continue;
                 }
@@ -2034,7 +2077,7 @@ impl<H: Copy> PosixService<H> {
         filesystem: &mut F,
         processes: &mut P,
     ) -> Result<(), i32> {
-        self.observe_process_exit(child_id)?;
+        self.observe_process_exit(child_id, processes)?;
         self.cancel_owned_forks(child_id, filesystem);
         self.resource_policies.retain(|(owner, _)| *owner != child_id);
         self.orphaned_processes.remove(&child_id);

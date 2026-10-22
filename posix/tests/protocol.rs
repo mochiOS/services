@@ -30,6 +30,9 @@ mod image_signal_state;
 #[path = "support/fork_image_state.rs"]
 mod fork_image_state;
 
+#[path = "support/child_exit_image.rs"]
+mod child_exit_image;
+
 #[path = "support/alarm.rs"]
 mod alarm;
 
@@ -1434,6 +1437,8 @@ impl RecordingFilesystem {
 struct RecordingProcesses {
     states: BTreeMap<u32, ProcessLifecycle>,
     images: BTreeMap<u32, Result<mnu_abi::ProcessStatus, i32>>,
+    image_script: BTreeMap<u32, std::collections::VecDeque<Result<mnu_abi::ProcessStatus, i32>>>,
+    identities: BTreeMap<u32, u64>,
     image_reads: Vec<u32>,
     usage: BTreeMap<u32, Result<mnu_abi::ProcessExecutionUsage, i32>>,
     suspend_error: Option<i32>,
@@ -1448,12 +1453,27 @@ struct RecordingProcesses {
 impl ProcessBackend<u32> for RecordingProcesses {
     fn image_status(&mut self, process: u32) -> Result<mnu_abi::ProcessStatus, i32> {
         self.image_reads.push(process);
+        if let Some(image) = self
+            .image_script
+            .get_mut(&process)
+            .and_then(|script| script.pop_front())
+        {
+            return image;
+        }
         self.images.get(&process).copied().unwrap_or_else(|| {
-            self.status(process).map(|lifecycle| mnu_abi::ProcessStatus {
-                process_id: u64::from(process),
-                state: match lifecycle {
-                    ProcessLifecycle::Running => mnu_abi::PROCESS_STATE_RUNNING,
-                    ProcessLifecycle::Exited { .. } => mnu_abi::PROCESS_STATE_EXITED,
+            // Policy fixtures normally assign selectors equal to their native
+            // PID and keep unscripted actors alive. Nonidentity selectors and
+            // observation faults are modeled explicitly, independently of the
+            // lifecycle-query script in `states`.
+            Ok(mnu_abi::ProcessStatus {
+                process_id: self
+                    .identities
+                    .get(&process)
+                    .copied()
+                    .unwrap_or(u64::from(process)),
+                state: match self.states.get(&process) {
+                    Some(ProcessLifecycle::Exited { .. }) => mnu_abi::PROCESS_STATE_EXITED,
+                    _ => mnu_abi::PROCESS_STATE_RUNNING,
                 },
                 ..Default::default()
             })
@@ -3320,6 +3340,7 @@ fn launched_tree_fixture() -> (
     let mut processes = RecordingProcesses::default();
     for handle in [1030, 1040, 1050] {
         processes.states.insert(handle, ProcessLifecycle::Running);
+        processes.identities.insert(handle, u64::from(handle - 1000));
     }
     (service, creator, filesystem, processes)
 }
@@ -4150,6 +4171,7 @@ fn orphan_family() -> (
     for handle in [140, 141, 142] {
         processes.states.insert(handle, ProcessLifecycle::Running);
     }
+    processes.identities.extend([(140, 1400), (141, 1401), (142, 1402)]);
     (service, init, parent, child, filesystem, processes)
 }
 
