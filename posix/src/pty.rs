@@ -216,10 +216,16 @@ impl PseudoTerminal {
 
     fn read_input(&mut self, maximum: usize) -> Result<Vec<u8>, i32> {
         let Some(record) = self.input_records.front_mut() else {
-            return if self.master_open {
-                Err(EAGAIN)
-            } else {
+            // In polling mode an empty read completes, rather than making
+            // the runtime wait for a readability event. This policy lives
+            // with the line discipline, not in the generic Handle reader.
+            let polling = self.attributes.local_flags & posix_protocol::TERMINAL_LFLAG_ICANON == 0
+                && self.attributes.control_characters[posix_protocol::TERMINAL_CC_VMIN] == 0
+                && self.attributes.control_characters[posix_protocol::TERMINAL_CC_VTIME] == 0;
+            return if !self.master_open || polling {
                 Ok(Vec::new())
+            } else {
+                Err(EAGAIN)
             };
         };
         if record.remaining == 0 {

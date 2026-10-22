@@ -23,6 +23,88 @@ fn make_raw(ptys: &mut PtyManager, object_id: u64) {
 }
 
 #[test]
+fn noncanonical_zero_minimum_zero_timer_reads_poll_without_waiting_or_closing() {
+    let mut ptys = PtyManager::new();
+    let pair = ptys.open().unwrap();
+    let mut attributes = raw_attributes();
+    attributes.control_characters[protocol::TERMINAL_CC_VMIN] = 0;
+    ptys.set_attributes(pair.slave_object_id, attributes)
+        .unwrap();
+
+    // This applies to slave input only, not the terminal emulator's output.
+    for _ in 0..2 {
+        assert_eq!(ptys.read(pair.slave_object_id, 32), Ok(Vec::new()));
+        assert_eq!(ptys.read(pair.master_object_id, 32), Err(EAGAIN));
+    }
+    assert_eq!(ptys.write(pair.master_object_id, b"input"), Ok(5));
+    assert_eq!(ptys.read(pair.slave_object_id, 2), Ok(b"in".to_vec()));
+    assert_eq!(ptys.read(pair.slave_object_id, 32), Ok(b"put".to_vec()));
+    assert_eq!(ptys.read(pair.slave_object_id, 32), Ok(Vec::new()));
+    // Returning zero did not close the endpoint or consume future input.
+    assert_eq!(ptys.write(pair.master_object_id, b"next"), Ok(4));
+    assert_eq!(ptys.read(pair.slave_object_id, 32), Ok(b"next".to_vec()));
+
+    // Changing attributes affects the next read without recreating the OFD.
+    attributes.control_characters[protocol::TERMINAL_CC_VMIN] = 1;
+    ptys.set_attributes(pair.slave_object_id, attributes)
+        .unwrap();
+    assert_eq!(ptys.read(pair.slave_object_id, 32), Err(EAGAIN));
+    attributes.control_characters[protocol::TERMINAL_CC_VMIN] = 0;
+    attributes.control_characters[protocol::TERMINAL_CC_VTIME] = 1;
+    ptys.set_attributes(pair.slave_object_id, attributes)
+        .unwrap();
+    // A timed read is not the immediate polling mode; it still needs a wait.
+    assert_eq!(ptys.read(pair.slave_object_id, 32), Err(EAGAIN));
+    attributes.control_characters[protocol::TERMINAL_CC_VTIME] = 0;
+    attributes.local_flags |= protocol::TERMINAL_LFLAG_ICANON;
+    ptys.set_attributes(pair.slave_object_id, attributes)
+        .unwrap();
+    assert_eq!(ptys.read(pair.slave_object_id, 32), Err(EAGAIN));
+    assert_eq!(ptys.write(pair.master_object_id, b"partial"), Ok(7));
+    assert_eq!(ptys.read(pair.slave_object_id, 32), Err(EAGAIN));
+    assert_eq!(ptys.write(pair.master_object_id, b"\n"), Ok(1));
+    assert_eq!(
+        ptys.read(pair.slave_object_id, 32),
+        Ok(b"partial\n".to_vec())
+    );
+}
+
+#[test]
+fn provider_polling_uses_an_ordinary_read_request_and_preserves_future_input() {
+    let mut ptys = PtyManager::new();
+    let pair = ptys.open().unwrap();
+    let mut attributes = raw_attributes();
+    attributes.control_characters[protocol::TERMINAL_CC_VMIN] = 0;
+    ptys.set_attributes(pair.slave_object_id, attributes)
+        .unwrap();
+    let mut request = [0; provider::REQUEST_HEADER_LEN];
+    let mut response = [0; provider::RESPONSE_HEADER_LEN + provider::MAX_DATA_LEN];
+    let request_len = provider::RequestHeader {
+        opcode: provider::OP_READ,
+        object_id: pair.slave_object_id,
+        argument: 0,
+        basis: 0,
+        length: 32,
+        data_length: 0,
+    }
+    .encode(&[], &mut request)
+    .unwrap();
+    let response_len =
+        handle_provider_request(&mut ptys, &request[..request_len], &mut response).unwrap();
+    let (header, payload) = provider::ResponseHeader::decode(&response[..response_len]).unwrap();
+    assert_eq!(header.status, 0);
+    assert_eq!(header.value, 0);
+    assert!(payload.is_empty());
+    assert_eq!(ptys.write(pair.master_object_id, b"data"), Ok(4));
+    let response_len =
+        handle_provider_request(&mut ptys, &request[..request_len], &mut response).unwrap();
+    let (header, payload) = provider::ResponseHeader::decode(&response[..response_len]).unwrap();
+    assert_eq!(header.status, 0);
+    assert_eq!(header.value, 4);
+    assert_eq!(payload, b"data");
+}
+
+#[test]
 fn master_and_slave_exchange_bytes_in_opposite_directions() {
     let mut ptys = PtyManager::new();
     let pair = ptys.open().unwrap();
