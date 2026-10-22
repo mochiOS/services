@@ -1,12 +1,12 @@
-//! Service-owned immutable device filesystem. Nodes, not paths, select devices.
-
-use std::sync::Arc;
-
-use mochios_filesystem_protocol as protocol;
+//! Service-owned device namespace. Registration uses retained Nodes, not paths
+//! or caller-selected inode numbers. Open descriptions outlive unpublication.
+use std::collections::BTreeMap;
+use std::sync::{Arc, RwLock};
 
 use crate::null_device::{self, NullDescription};
 use crate::path_walk::{Backend, Credentials};
 use crate::service::permission_allows;
+use mochios_filesystem_protocol as protocol;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeKind {
@@ -14,42 +14,105 @@ pub enum NodeKind {
     Null,
 }
 
-/// Only the owning filesystem constructs node references. Numeric IDs alone
-/// cannot be used to manufacture authority or import another filesystem's node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Attributes {
+    /// Permission/special bits only; node kind is immutable.
+    pub mode: u16,
+    pub uid: u32,
+    pub gid: u32,
+}
+
+struct Metadata {
+    attributes: Attributes,
+    links: u32,
+}
+struct Record {
+    id: u32,
+    kind: NodeKind,
+    parent: Option<Node>,
+    metadata: RwLock<Metadata>,
+}
+
+/// Only this filesystem constructs references. Arc ownership seals both the
+/// namespace and the inode lifetime; removed numeric IDs are never reused.
 #[derive(Clone)]
 pub struct Node {
     owner: Arc<()>,
-    kind: NodeKind,
+    record: Arc<Record>,
 }
-
 impl Node {
     pub fn id(&self) -> u32 {
-        match self.kind {
-            NodeKind::Directory => 1,
-            NodeKind::Null => 2,
-        }
+        self.record.id
     }
-
     pub fn kind(&self) -> NodeKind {
-        self.kind
+        self.record.kind
     }
 }
 
-#[derive(Default)]
 pub struct DeviceFilesystem {
     owner: Arc<()>,
+    root: Node,
+    children: BTreeMap<u32, BTreeMap<Vec<u8>, Node>>,
+    next_id: u64,
+}
+
+impl Default for DeviceFilesystem {
+    fn default() -> Self {
+        let owner = Arc::new(());
+        let root = Self::node(
+            &owner,
+            1,
+            NodeKind::Directory,
+            None,
+            Attributes {
+                mode: 0o555,
+                uid: 0,
+                gid: 0,
+            },
+        );
+        let null = Self::node(
+            &owner,
+            2,
+            NodeKind::Null,
+            Some(root.clone()),
+            Attributes {
+                mode: 0o666,
+                uid: 0,
+                gid: 0,
+            },
+        );
+        Self {
+            owner,
+            root,
+            children: BTreeMap::from([(1, BTreeMap::from([(b"null".to_vec(), null)]))]),
+            next_id: 3,
+        }
+    }
 }
 
 impl DeviceFilesystem {
-    pub fn root(&self) -> Node {
-        self.node(NodeKind::Directory)
-    }
-
-    fn node(&self, kind: NodeKind) -> Node {
+    fn node(
+        owner: &Arc<()>,
+        id: u32,
+        kind: NodeKind,
+        parent: Option<Node>,
+        attributes: Attributes,
+    ) -> Node {
         Node {
-            owner: self.owner.clone(),
-            kind,
+            owner: owner.clone(),
+            record: Arc::new(Record {
+                id,
+                kind,
+                parent,
+                metadata: RwLock::new(Metadata {
+                    attributes,
+                    links: if kind == NodeKind::Directory { 2 } else { 1 },
+                }),
+            }),
         }
+    }
+    pub fn root(&self) -> Node {
+        self.root.clone()
     }
 
     fn validate(&self, node: &Node) -> Result<(), i32> {
@@ -59,31 +122,157 @@ impl DeviceFilesystem {
             Err(13)
         }
     }
+    fn directory(&self, node: &Node) -> Result<(), i32> {
+        self.validate(node)?;
+        if node.kind() == NodeKind::Directory {
+            Ok(())
+        } else {
+            Err(20)
+        }
+    }
+    fn name(name: &[u8]) -> Result<(), i32> {
+        if name.len() > 255 {
+            return Err(36);
+        }
+        if name.is_empty()
+            || name == b"."
+            || name == b".."
+            || name.contains(&0)
+            || name.contains(&b'/')
+        {
+            return Err(22);
+        }
+        Ok(())
+    }
 
-    /// The mount namespace supplies its volume ID; this is not a wire operation.
+    /// Owner-only configuration, not an untrusted credential-bearing wire API.
+    /// Namespace/IPC admission must retain this filesystem authority separately.
+    pub fn register(
+        &mut self,
+        parent: &Node,
+        name: &[u8],
+        kind: NodeKind,
+        attributes: Attributes,
+    ) -> Result<Node, i32> {
+        self.directory(parent)?;
+        Self::name(name)?;
+        if attributes.mode & !0o7777 != 0 {
+            return Err(22);
+        }
+        if self
+            .children
+            .get(&parent.id())
+            .is_some_and(|children| children.contains_key(name))
+        {
+            return Err(17);
+        }
+        let mut metadata = parent.record.metadata.write().map_err(|_| 5)?;
+        if metadata.links == 0 {
+            return Err(2);
+        }
+        let links = metadata
+            .links
+            .checked_add(u32::from(kind == NodeKind::Directory))
+            .ok_or(28)?;
+        let id = u32::try_from(self.next_id).map_err(|_| 28)?;
+        let node = Self::node(&self.owner, id, kind, Some(parent.clone()), attributes);
+        self.next_id += 1;
+        self.children
+            .entry(parent.id())
+            .or_default()
+            .insert(name.to_vec(), node.clone());
+        if kind == NodeKind::Directory {
+            self.children.insert(id, BTreeMap::new());
+        }
+        metadata.links = links;
+        Ok(node)
+    }
+
+    pub fn unregister(&mut self, parent: &Node, name: &[u8]) -> Result<Node, i32> {
+        self.directory(parent)?;
+        Self::name(name)?;
+        let node = self
+            .children
+            .get(&parent.id())
+            .and_then(|children| children.get(name))
+            .cloned()
+            .ok_or(2)?;
+        if node.kind() == NodeKind::Directory
+            && self
+                .children
+                .get(&node.id())
+                .is_some_and(|children| !children.is_empty())
+        {
+            return Err(39);
+        }
+        let mut parent_metadata = parent.record.metadata.write().map_err(|_| 5)?;
+        let mut metadata = node.record.metadata.write().map_err(|_| 5)?;
+        let links = parent_metadata
+            .links
+            .checked_sub(u32::from(node.kind() == NodeKind::Directory))
+            .ok_or(5)?;
+        self.children
+            .get_mut(&parent.id())
+            .ok_or(5)?
+            .remove(name)
+            .ok_or(5)?;
+        self.children.remove(&node.id());
+        parent_metadata.links = links;
+        metadata.links = 0;
+        drop(metadata);
+        Ok(node)
+    }
+
+    pub fn set_attributes(&mut self, node: &Node, attributes: Attributes) -> Result<(), i32> {
+        self.validate(node)?;
+        if attributes.mode & !0o7777 != 0 {
+            return Err(22);
+        }
+        node.record.metadata.write().map_err(|_| 5)?.attributes = attributes;
+        Ok(())
+    }
+
+    pub fn parent(&self, node: &Node) -> Result<Node, i32> {
+        self.validate(node)?;
+        Ok(node.record.parent.clone().unwrap_or_else(|| node.clone()))
+    }
+
+    /// The namespace supplies its volume ID. Removed retained Nodes report
+    /// link_count zero, while already open descriptions keep their authority.
     pub fn status(&self, node: &Node, volume: u64) -> Result<protocol::NodeStatus, i32> {
         self.validate(node)?;
-        Ok(match node.kind {
+        let metadata = node.record.metadata.read().map_err(|_| 5)?;
+        let mut status = match node.kind() {
             NodeKind::Directory => protocol::NodeStatus {
                 device: volume,
                 node_id: u64::from(node.id()),
                 kind: protocol::NODE_TYPE_DIRECTORY,
-                mode: 0o040555,
-                link_count: 2,
+                mode: 0o040000,
                 block_size: 4096,
                 ..protocol::NodeStatus::default()
             },
             NodeKind::Null => null_device::node_status(volume, u64::from(node.id())),
-        })
+        };
+        status.mode = (status.mode & 0o170000) | u32::from(metadata.attributes.mode);
+        status.uid = metadata.attributes.uid;
+        status.gid = metadata.attributes.gid;
+        status.link_count = metadata.links;
+        Ok(status)
     }
 
-    /// Real children only. The mount namespace supplies virtual `.`/`..` edges.
+    /// Real children only; the namespace owns virtual `.`/`..` mount edges.
     pub fn children(&self, node: &Node) -> Result<Vec<(Vec<u8>, Node)>, i32> {
-        self.validate(node)?;
-        if node.kind != NodeKind::Directory {
-            return Err(20);
-        }
-        Ok(vec![(b"null".to_vec(), self.node(NodeKind::Null))])
+        self.directory(node)?;
+        Ok(self
+            .children
+            .get(&node.id())
+            .map(|children| {
+                children
+                    .iter()
+                    .map(|(name, child)| (name.clone(), child.clone()))
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 
     pub fn open_null(
@@ -95,7 +284,7 @@ impl DeviceFilesystem {
         flags: u32,
     ) -> Result<NullDescription, i32> {
         self.validate(node)?;
-        if node.kind != NodeKind::Null {
+        if node.kind() != NodeKind::Null {
             return Err(21);
         }
         let status = self.status(node, 0)?;
@@ -119,20 +308,14 @@ impl DeviceFilesystem {
 
 impl Backend for DeviceFilesystem {
     type Node = Node;
-
     fn is_directory(&self, node: &Node) -> bool {
-        self.validate(node).is_ok() && node.kind == NodeKind::Directory
+        self.directory(node).is_ok()
     }
-
     fn is_symlink(&self, _node: &Node) -> bool {
         false
     }
-
     fn search(&self, node: &Node, credentials: Credentials<'_>) -> Result<(), i32> {
-        self.validate(node)?;
-        if !self.is_directory(node) {
-            return Err(20);
-        }
+        self.directory(node)?;
         let status = self.status(node, 0)?;
         if permission_allows(
             u16::try_from(status.mode).map_err(|_| 22)?,
@@ -149,29 +332,37 @@ impl Backend for DeviceFilesystem {
             Err(13)
         }
     }
-
     fn child(&self, node: &Node, name: &[u8]) -> Result<Node, i32> {
-        self.validate(node)?;
-        if !self.is_directory(node) {
-            return Err(20);
-        }
-        match name {
-            b"null" => Ok(self.node(NodeKind::Null)),
-            _ => Err(2),
-        }
+        self.directory(node)?;
+        self.children
+            .get(&node.id())
+            .and_then(|children| children.get(name))
+            .cloned()
+            .ok_or(2)
     }
-
     fn symlink(&self, node: &Node) -> Result<Vec<u8>, i32> {
         self.validate(node)?;
         Err(22)
     }
-
-    fn ancestry(&self, root: &Node, base: Node) -> Result<Vec<Node>, i32> {
-        self.validate(root)?;
-        self.validate(&base)?;
-        if !self.is_directory(root) || !self.is_directory(&base) {
-            return Err(20);
+    fn ancestry(&self, root: &Node, mut base: Node) -> Result<Vec<Node>, i32> {
+        self.directory(root)?;
+        self.directory(&base)?;
+        let mut nodes = Vec::new();
+        loop {
+            if nodes.len() >= 1024 {
+                return Err(40);
+            }
+            let at_root = base.id() == root.id();
+            nodes.push(base.clone());
+            if at_root {
+                nodes.reverse();
+                return Ok(nodes);
+            }
+            let parent = self.parent(&base)?;
+            if parent.id() == base.id() {
+                return Err(13);
+            }
+            base = parent;
         }
-        Ok(vec![base])
     }
 }

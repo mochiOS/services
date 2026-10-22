@@ -183,6 +183,72 @@ impl Namespace {
         }
     }
 
+    /// Service-owner registration anchored to an existing device directory.
+    /// No public wire operation can manufacture this retained Node authority.
+    pub fn register_device_node(
+        &mut self,
+        parent: &Node,
+        name: &[u8],
+        kind: NodeKind,
+        attributes: crate::devfs::Attributes,
+    ) -> Result<Node, i32> {
+        self.validate(parent)?;
+        if self.named_mounts.contains_key(&(parent.id(), name.to_vec())) {
+            return Err(EEXIST);
+        }
+        let device = parent.device_node().ok_or(95)?;
+        let Some(Volume::Device(filesystem)) = self.volumes.get_mut(parent.volume as usize) else {
+            return Err(95);
+        };
+        let registered = filesystem.register(device, name, kind, attributes)?;
+        Ok(Node {
+            owner: self.owner.clone(),
+            volume: parent.volume,
+            backing: NodeBacking::Device(registered),
+        })
+    }
+
+    pub fn unregister_device_node(&mut self, parent: &Node, name: &[u8]) -> Result<Node, i32> {
+        self.validate(parent)?;
+        if self.named_mounts.contains_key(&(parent.id(), name.to_vec())) {
+            return Err(EBUSY);
+        }
+        let device = parent.device_node().ok_or(95)?;
+        let child = match self.volumes.get(parent.volume as usize) {
+            Some(Volume::Device(filesystem)) => filesystem.child(device, name)?,
+            _ => return Err(95),
+        };
+        let id = NodeId {
+            volume: parent.volume,
+            inode: child.id(),
+        };
+        if self.mounts.contains_key(&id) || self.named_mounts.keys().any(|(at, _)| *at == id) {
+            return Err(EBUSY);
+        }
+        let Some(Volume::Device(filesystem)) = self.volumes.get_mut(parent.volume as usize) else {
+            return Err(95);
+        };
+        let removed = filesystem.unregister(device, name)?;
+        Ok(Node {
+            owner: self.owner.clone(),
+            volume: parent.volume,
+            backing: NodeBacking::Device(removed),
+        })
+    }
+
+    pub fn set_device_attributes(
+        &mut self,
+        node: &Node,
+        attributes: crate::devfs::Attributes,
+    ) -> Result<(), i32> {
+        self.validate(node)?;
+        let device = node.device_node().ok_or(95)?;
+        match self.volumes.get_mut(node.volume as usize) {
+            Some(Volume::Device(filesystem)) => filesystem.set_attributes(device, attributes),
+            _ => Err(95),
+        }
+    }
+
     pub(crate) fn open_null(
         &self,
         node: &Node,
@@ -362,22 +428,33 @@ impl Namespace {
                 if parent.id() == current.id() {
                     return Err(EACCES);
                 }
-                let directory = Dir::open_inode(self.filesystem(&parent)?, parent.inode()?.clone())
-                    .map_err(errno)?;
-                let mut name = None;
-                for entry in directory.read_dir().map_err(errno)? {
-                    let entry = entry.map_err(errno)?;
-                    let file_name = entry.file_name();
-                    let bytes = file_name.as_ref();
-                    if bytes != b"."
-                        && bytes != b".."
-                        && entry.inode == entry_node.inode()?.index
-                        && parent.volume == entry_node.volume
-                    {
-                        name = Some(bytes.to_vec());
-                        break;
+                let name = if let (Some(Volume::Device(filesystem)), NodeBacking::Device(device)) =
+                    (self.volumes.get(parent.volume as usize), &parent.backing)
+                {
+                    filesystem.children(device)?.into_iter()
+                        .find_map(|(name, child)| {
+                            (entry_node.volume == parent.volume
+                                && child.id() == entry_node.id().inode).then_some(name)
+                        })
+                } else {
+                    let directory = Dir::open_inode(self.filesystem(&parent)?, parent.inode()?.clone())
+                        .map_err(errno)?;
+                    let mut name = None;
+                    for entry in directory.read_dir().map_err(errno)? {
+                        let entry = entry.map_err(errno)?;
+                        let file_name = entry.file_name();
+                        let bytes = file_name.as_ref();
+                        if bytes != b"."
+                            && bytes != b".."
+                            && entry.inode == entry_node.inode()?.index
+                            && parent.volume == entry_node.volume
+                        {
+                            name = Some(bytes.to_vec());
+                            break;
+                        }
                     }
-                }
+                    name
+                };
                 let name = name.ok_or(2)?;
                 (parent, name)
             };
@@ -489,6 +566,15 @@ impl Namespace {
             return self.refresh(parent.clone());
         }
         let node = self.covered.get(&node.id()).unwrap_or(node);
+        if let (Some(Volume::Device(filesystem)), NodeBacking::Device(device)) =
+            (self.volumes.get(node.volume as usize), &node.backing)
+        {
+            return Ok(Node {
+                owner: self.owner.clone(),
+                volume: node.volume,
+                backing: NodeBacking::Device(filesystem.parent(device)?),
+            });
+        }
         let filesystem = self.filesystem(node)?;
         let current = Inode::read(filesystem, node.inode()?.index).map_err(errno)?;
         let inode = Dir::open_inode(filesystem, current)

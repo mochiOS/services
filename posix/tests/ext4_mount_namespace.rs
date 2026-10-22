@@ -156,6 +156,272 @@ fn device_open(
 }
 
 #[test]
+fn registered_device_subtrees_resolve_mount_parents_and_keep_removed_nodes_distinct() {
+    use filesystem_service::devfs::{Attributes, DeviceFilesystem, NodeKind};
+    let fixture = Fixture::new();
+    let mut namespace = Namespace::new(fixture.volume("registered-devices")).unwrap();
+    let root = namespace.root();
+    let devices = namespace
+        .mount_named_devices(root.clone(), b"devices", DeviceFilesystem::default())
+        .unwrap();
+    let attrs = Attributes {
+        mode: 0o755,
+        uid: 501,
+        gid: 20,
+    };
+    let group = namespace
+        .register_device_node(&devices, b"session", NodeKind::Directory, attrs)
+        .unwrap();
+    let nested = namespace
+        .register_device_node(&group, b"nested", NodeKind::Directory, attrs)
+        .unwrap();
+    let leaf = namespace
+        .register_device_node(
+            &nested,
+            b"object",
+            NodeKind::Null,
+            Attributes {
+                mode: 0o600,
+                ..attrs
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        walk(&namespace, root.clone(), b"/devices/session/nested/object").id(),
+        leaf.id()
+    );
+    assert_eq!(walk(&namespace, nested.clone(), b"..").id(), group.id());
+    assert_eq!(
+        walk(&namespace, nested.clone(), b"../..").id(),
+        devices.id()
+    );
+    assert_eq!(
+        walk(&namespace, nested.clone(), b"../../..").id(),
+        root.id()
+    );
+    assert_eq!(
+        found(namespace.resolve(
+            group.clone(),
+            nested.clone(),
+            b"../../nested/object",
+            true,
+            credentials()
+        ))
+        .id(),
+        leaf.id()
+    );
+    namespace
+        .set_device_attributes(
+            &group,
+            Attributes {
+                uid: 999,
+                mode: 0o700,
+                ..attrs
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        namespace.resolve(
+            root.clone(),
+            root.clone(),
+            b"/devices/session/nested",
+            true,
+            credentials()
+        ),
+        Err(13)
+    ));
+    namespace.set_device_attributes(&group, attrs).unwrap();
+    namespace
+        .unregister_device_node(&nested, b"object")
+        .unwrap();
+    assert_eq!(namespace.device_status(&leaf).unwrap().link_count, 0);
+    let replacement = namespace
+        .register_device_node(
+            &nested,
+            b"object",
+            NodeKind::Null,
+            Attributes {
+                mode: 0o600,
+                ..attrs
+            },
+        )
+        .unwrap();
+    assert_ne!(replacement.id(), leaf.id());
+    assert!(matches!(
+        namespace.unregister_device_node(&group, b"nested"),
+        Err(39)
+    ));
+    namespace
+        .unregister_device_node(&nested, b"object")
+        .unwrap();
+    namespace.unregister_device_node(&group, b"nested").unwrap();
+    assert_eq!(namespace.device_status(&nested).unwrap().link_count, 0);
+    assert!(matches!(
+        namespace.register_device_node(&nested, b"orphan", NodeKind::Null, attrs),
+        Err(2)
+    ));
+}
+
+#[test]
+fn registered_device_directories_use_real_open_readdir_and_root_relative_paths() {
+    use filesystem_service::devfs::{Attributes, DeviceFilesystem, NodeKind};
+    let fixture = Fixture::new();
+    let mut devices = DeviceFilesystem::default();
+    let attrs = Attributes {
+        mode: 0o755,
+        uid: 0,
+        gid: 0,
+    };
+    let group = devices
+        .register(&devices.root(), b"session", NodeKind::Directory, attrs)
+        .unwrap();
+    let nested = devices
+        .register(&group, b"nested", NodeKind::Directory, attrs)
+        .unwrap();
+    devices
+        .register(
+            &nested,
+            b"object",
+            NodeKind::Null,
+            Attributes {
+                mode: 0o600,
+                ..attrs
+            },
+        )
+        .unwrap();
+    let mut service = FilesystemService::new(fixture.volume("registered-device-opens"));
+    service.mount_devices(b"/devices", devices).unwrap();
+    let flags =
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY | protocol::OPEN_AT_CURSOR_RECORDS;
+    let root = device_open(&mut service, b"/", flags, PathAnchors::default()).unwrap();
+    let jail = device_open(
+        &mut service,
+        b"/devices/session",
+        flags,
+        PathAnchors::default(),
+    )
+    .unwrap();
+    let directory = device_open(
+        &mut service,
+        b"/devices/session/nested",
+        flags,
+        PathAnchors::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        service
+            .path_handle(protocol::Header::default(), root, directory)
+            .unwrap()
+            .payload,
+        b"/devices/session/nested"
+    );
+    assert_eq!(
+        service
+            .path_handle(protocol::Header::default(), jail, directory)
+            .unwrap()
+            .payload,
+        b"/nested"
+    );
+    assert!(matches!(
+        service.path_handle(protocol::Header::default(), jail, root),
+        Err(13)
+    ));
+    let bytes = service.provider_read(directory, 4096).unwrap();
+    let mut tail = bytes.as_slice();
+    let mut names = Vec::new();
+    while !tail.is_empty() {
+        let (_, name, length) = protocol::decode_dir_entry(tail).unwrap();
+        names.push(name.to_vec());
+        tail = &tail[length..];
+    }
+    assert_eq!(names, [b".".to_vec(), b"..".to_vec(), b"object".to_vec()]);
+    let object = device_open(
+        &mut service,
+        b"object",
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_BASE_ATTACHED,
+        PathAnchors {
+            base_open_id: Some(directory),
+            root_open_id: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(service.provider_read(object, 32), Ok(vec![]));
+    let parent = device_open(
+        &mut service,
+        b"..",
+        flags | protocol::OPEN_AT_BASE_ATTACHED,
+        PathAnchors {
+            base_open_id: Some(directory),
+            root_open_id: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        service
+            .path_handle(protocol::Header::default(), root, parent)
+            .unwrap()
+            .payload,
+        b"/devices/session"
+    );
+}
+
+#[test]
+fn registration_cannot_replace_mounts_or_cross_namespace_node_authority() {
+    use filesystem_service::devfs::{Attributes, DeviceFilesystem, NodeKind};
+    let fixture = Fixture::new();
+    let mut namespace = Namespace::new(fixture.volume("registered-device-mounts")).unwrap();
+    let devices = namespace
+        .mount_named_devices(namespace.root(), b"devices", DeviceFilesystem::default())
+        .unwrap();
+    let attrs = Attributes {
+        mode: 0o755,
+        uid: 0,
+        gid: 0,
+    };
+    let group = namespace
+        .register_device_node(&devices, b"group", NodeKind::Directory, attrs)
+        .unwrap();
+    namespace
+        .mount_named_devices(group.clone(), b"mounted", DeviceFilesystem::default())
+        .unwrap();
+    assert!(matches!(
+        namespace.unregister_device_node(&devices, b"group"),
+        Err(16)
+    ));
+    assert!(matches!(
+        namespace.register_device_node(&group, b"mounted", NodeKind::Directory, attrs),
+        Err(17)
+    ));
+    assert!(matches!(
+        namespace.unregister_device_node(&group, b"mounted"),
+        Err(16)
+    ));
+    let covered = namespace
+        .register_device_node(&devices, b"covered", NodeKind::Directory, attrs)
+        .unwrap();
+    namespace
+        .mount_devices(covered, DeviceFilesystem::default())
+        .unwrap();
+    assert!(matches!(
+        namespace.unregister_device_node(&devices, b"covered"),
+        Err(16)
+    ));
+    let mut other = Namespace::new(fixture.volume("foreign-registered-device-mounts")).unwrap();
+    let foreign = other
+        .mount_named_devices(other.root(), b"devices", DeviceFilesystem::default())
+        .unwrap();
+    assert!(matches!(
+        namespace.register_device_node(&foreign, b"node", NodeKind::Null, attrs),
+        Err(13)
+    ));
+    assert!(matches!(
+        namespace.unregister_device_node(&foreign, b"null"),
+        Err(13)
+    ));
+    assert_eq!(namespace.set_device_attributes(&foreign, attrs), Err(13));
+}
+
+#[test]
 fn device_path_operations_preserve_existing_missing_and_wrong_type_errors() {
     let fixture = Fixture::new();
     let mut service = FilesystemService::new(fixture.volume("device-path-errors"));
