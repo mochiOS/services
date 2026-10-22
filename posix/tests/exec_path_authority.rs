@@ -18,7 +18,7 @@ static CALLS: AtomicU64 = AtomicU64::new(0);
 static BYTES: AtomicU64 = AtomicU64::new(0);
 static RESULT: AtomicU64 = AtomicU64::new(77);
 mod task { #[derive(Clone,Copy,Debug,PartialEq,Eq)] pub enum PrivilegeLevel { Service } }
-mod init { pub mod fs {
+mod init { pub mod boot_data {
     static MODULE:std::sync::OnceLock<Vec<u8>>=std::sync::OnceLock::new();
     pub fn boot_module_bytes()->&'static [u8] {
         if !crate::PRESENT.load(crate::Ordering::Relaxed) {return &[]}
