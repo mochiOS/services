@@ -141,7 +141,7 @@ fn main(){
   let raw=error.into_raw() as i64;
   for stage in [1,2]{
    reset();CREATE_AT.set(stage);NATIVE.set(raw);
-   let result=open_pty_response(&manager,11,9);
+   let result=open_pty_response(&manager,11,9, |_|Ok(()));
    assert_eq!((result.response.header.request_id,result.response.header.status),(9,expected));
    assert!(result.handles.is_empty());assert_eq!(DISCARDS.get(),1);
    if stage==1{closed(&[])}else{closed(&[101])}
@@ -150,7 +150,7 @@ fn main(){
   assert_eq!(identify_pty_terminal(11,77),Err(expected));closed(&[]);
   assert_eq!(notify_terminal_signal(&state,11,pty::TerminalSignal{terminal_id:37,signal:SIGNAL_HUP}),Err(expected));
   reset();WIRE.set(raw);
-  let result=open_pty_response(&manager,11,9);
+  let result=open_pty_response(&manager,11,9, |_|Ok(()));
   assert_eq!(result.response.header.status,expected);assert!(result.handles.is_empty());
   closed(&[101,102]);assert_eq!(DISCARDS.get(),1);
   reset();NATIVE.set(raw);
@@ -173,10 +173,13 @@ fn main(){
  reset();POLICY.set(-1);
  assert_eq!(notify_terminal_signal(&state,11,pty::TerminalSignal{terminal_id:37,signal:SIGNAL_HUP}),Err(-1));
  assert_eq!(SENDS.get(),0);
- reset();let result=open_pty_response(&manager,11,9);
+ reset();let result=open_pty_response(&manager,11,9, |_|Ok(()));
  assert_eq!(result.response.header.status,0);
  assert_eq!(result.handles.iter().map(|object|object.handle).collect::<Vec<_>>(),[101,102]);
  assert_eq!(DISCARDS.get(),0);closed(&[]);
+ reset();let result=open_pty_response(&manager,11,9, |_|Err(-13));
+ assert_eq!(result.response.header.status,-13);assert!(result.handles.is_empty());
+ assert_eq!(DISCARDS.get(),1);closed(&[101,102]);
  reset();let retained=RuntimeFilesystem.retain_object(AttachedObject{handle:44,rights:HANDLE_RIGHT_READ|HANDLE_RIGHT_DUPLICATE}).unwrap();
  assert_eq!((retained.handle,retained.rights),(55,HANDLE_RIGHT_READ|HANDLE_RIGHT_DUPLICATE));closed(&[]);
  assert_eq!(RuntimeFilesystem.retain_object(AttachedObject{handle:44,rights:HANDLE_RIGHT_READ}).err(),Some(-13));

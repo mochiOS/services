@@ -106,6 +106,7 @@ struct PseudoTerminal {
     output_stopped: bool,
     output_manually_stopped: bool,
     literal_next: bool,
+    name: Option<crate::terminal_publication::Lease>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -131,6 +132,7 @@ impl PseudoTerminal {
             output_stopped: false,
             output_manually_stopped: false,
             literal_next: false,
+            name: None,
         }
     }
 
@@ -615,6 +617,28 @@ impl PtyManager {
         Ok(object_id)
     }
 
+    /// Service-owned publication follows registration while the creator still
+    /// owns the original master Handle. Dropping a lease only queues cleanup.
+    pub fn attach_slave_name(
+        &mut self,
+        master_object_id: u64,
+        name: crate::terminal_publication::Lease,
+    ) -> Result<(), i32> {
+        let (id, side) = self.endpoint(master_object_id)?;
+        if side != PtySide::Master {
+            return Err(EBADF);
+        }
+        let terminal = self.terminals.get_mut(&id).ok_or(EBADF)?;
+        if !terminal.master_open {
+            return Err(EBADF);
+        }
+        if terminal.name.is_some() {
+            return Err(EINVAL);
+        }
+        terminal.name = Some(name);
+        Ok(())
+    }
+
     /// The adapter must identify an explicitly attached native factory Handle;
     /// a numeric ID supplied by a requester must never reach this method.
     /// Namespace admission and native object publication remain its obligation.
@@ -966,6 +990,9 @@ impl PtyManager {
             match side {
                 PtySide::Master if terminal.master_open => {
                     terminal.master_open = false;
+                    // Never perform filesystem RPC from this provider path.
+                    // The cleanup worker owns the name after lease retirement.
+                    drop(terminal.name.take());
                     self.pending_signals.push_back(TerminalSignal {
                         terminal_id: id,
                         signal: posix_protocol::SIGNAL_HUP,

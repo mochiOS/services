@@ -10,6 +10,7 @@ pub mod pty_open;
 pub mod pty_request;
 pub mod terminal_identity;
 pub mod terminal_namespace;
+pub mod terminal_publication;
 pub mod named_semaphore;
 pub mod shared_memory;
 pub mod shared_memory_file;

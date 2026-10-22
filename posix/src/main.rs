@@ -176,6 +176,19 @@ fn main() {
             platform::process::exit(1);
         }
     };
+    let pty_publisher = match posix_service::terminal_publication::Publisher::start(
+        _pty_namespace.object,
+        filesystem_endpoint,
+        provider_endpoint_handle,
+        service_process_id,
+    ) {
+        Ok(publisher) => publisher,
+        Err(error) => {
+            platform::logln!("posix.service: terminal publisher startup failed errno={error}");
+            let _ = platform::service_ready::notify(ready_target, error);
+            platform::process::exit(1);
+        }
+    };
     let mut processes = RuntimeProcesses;
     if let Err(error) =
         platform::service_ready::notify_handle(ready_target, 0, endpoint_handle, delegated_rights)
@@ -480,7 +493,20 @@ fn main() {
                 header,
                 payload,
                 &attachments,
-                || open_pty_response(&ptys, provider_endpoint_handle, header.request_id),
+                || {
+                    open_pty_response(
+                        &ptys,
+                        provider_endpoint_handle,
+                        header.request_id,
+                        |pair| posix_service::terminal_publication::publish_created_pair(
+                            &ptys,
+                            provider_endpoint_handle,
+                            pair,
+                            &pty_publisher,
+                            peer.unwrap(),
+                        ),
+                    )
+                },
             ))
         } else {
             None
@@ -1668,6 +1694,7 @@ fn open_pty_response(
     ptys: &std::sync::Mutex<posix_service::pty::PtyManager>,
     endpoint: u32,
     request_id: u64,
+    publish: impl FnOnce(posix_service::pty::PtyPair) -> Result<(), i32>,
 ) -> posix_service::ObjectResponse<u32> {
     use mochi_user_platform as platform;
 
@@ -1716,6 +1743,15 @@ fn open_pty_response(
             }
         };
     if let Err(status) = sync_pty_provider(endpoint, pair) {
+        let _ = platform::handle::close(master);
+        let _ = platform::handle::close(slave);
+        ptys.lock().unwrap().discard(pair);
+        return posix_service::ObjectResponse {
+            response: status_response(request_id, status),
+            handles: Vec::new(),
+        };
+    }
+    if let Err(status) = publish(pair) {
         let _ = platform::handle::close(master);
         let _ = platform::handle::close(slave);
         ptys.lock().unwrap().discard(pair);
