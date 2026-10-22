@@ -25,7 +25,8 @@ const SUPPORTED_INPUT_FLAGS: u32 = posix_protocol::TERMINAL_IFLAG_ISTRIP
     | posix_protocol::TERMINAL_IFLAG_INLCR
     | posix_protocol::TERMINAL_IFLAG_IGNCR
     | posix_protocol::TERMINAL_IFLAG_ICRNL
-    | posix_protocol::TERMINAL_IFLAG_IXON;
+    | posix_protocol::TERMINAL_IFLAG_IXON
+    | posix_protocol::TERMINAL_IFLAG_IXANY;
 const SUPPORTED_OUTPUT_FLAGS: u32 =
     posix_protocol::TERMINAL_OFLAG_OPOST | posix_protocol::TERMINAL_OFLAG_ONLCR;
 const SUPPORTED_LOCAL_FLAGS: u32 = posix_protocol::TERMINAL_LFLAG_ICANON
@@ -337,6 +338,19 @@ impl PseudoTerminal {
                 consumed += 1;
                 continue;
             };
+            let flow = self.attributes.input_flags & posix_protocol::TERMINAL_IFLAG_IXON != 0;
+            let stop = self.attributes.control_characters[posix_protocol::TERMINAL_CC_VSTOP];
+            // Restart output before admission of ordinary input/echo. Even a
+            // full input queue must not prevent draining stopped output. The
+            // byte still follows normal processing and is not consumed here.
+            // Quoted bytes bypass this path, and tcflow's manual stop remains
+            // independent of software START/STOP.
+            if flow
+                && self.attributes.input_flags & posix_protocol::TERMINAL_IFLAG_IXANY != 0
+                && (stop == 0 || byte != stop)
+            {
+                self.output_stopped = false;
+            }
             if let Some(signal) = self.signal_for_input(byte) {
                 self.flush_for_signal();
                 signals.push(signal);
@@ -345,11 +359,14 @@ impl PseudoTerminal {
             }
             // Flow characters never enter the input/echo queues. Process
             // them before capacity checks so a full queue cannot trap STOP.
-            if self.attributes.input_flags & posix_protocol::TERMINAL_IFLAG_IXON != 0 {
+            if flow {
                 let start = self.attributes.control_characters[posix_protocol::TERMINAL_CC_VSTART];
-                let stop = self.attributes.control_characters[posix_protocol::TERMINAL_CC_VSTOP];
                 if stop != 0 && byte == stop {
-                    self.output_stopped = true;
+                    self.output_stopped = if stop == start {
+                        !self.output_stopped
+                    } else {
+                        true
+                    };
                     consumed += 1;
                     continue;
                 }
