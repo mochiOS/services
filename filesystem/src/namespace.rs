@@ -192,6 +192,32 @@ impl Namespace {
         kind: NodeKind,
         attributes: crate::devfs::Attributes,
     ) -> Result<Node, i32> {
+        self.register_device(parent, name, |filesystem, device| {
+            filesystem.register(device, name, kind, attributes)
+        })
+    }
+
+    pub fn register_external_device(
+        &mut self,
+        parent: &Node,
+        name: &[u8],
+        attributes: crate::devfs::Attributes,
+        definition: crate::devfs::ExternalDevice,
+    ) -> Result<Node, i32> {
+        self.register_device(parent, name, |filesystem, device| {
+            filesystem.register_external(device, name, attributes, definition)
+        })
+    }
+
+    fn register_device(
+        &mut self,
+        parent: &Node,
+        name: &[u8],
+        register: impl FnOnce(
+            &mut DeviceFilesystem,
+            &crate::devfs::Node,
+        ) -> Result<crate::devfs::Node, i32>,
+    ) -> Result<Node, i32> {
         self.validate(parent)?;
         if self.named_mounts.contains_key(&(parent.id(), name.to_vec())) {
             return Err(EEXIST);
@@ -200,7 +226,7 @@ impl Namespace {
         let Some(Volume::Device(filesystem)) = self.volumes.get_mut(parent.volume as usize) else {
             return Err(95);
         };
-        let registered = filesystem.register(device, name, kind, attributes)?;
+        let registered = register(filesystem, device)?;
         Ok(Node {
             owner: self.owner.clone(),
             volume: parent.volume,
@@ -283,6 +309,25 @@ impl Namespace {
         match (self.volumes.get(node.volume as usize), &node.backing) {
             (Some(Volume::Device(filesystem)), NodeBacking::Device(device)) => {
                 filesystem.open_null(device, credentials, read, write, flags)
+            }
+            _ => Err(95),
+        }
+    }
+
+    /// Service-internal credentials must already be authenticated. A retained
+    /// namespace Node, not a numeric inode or a path prefix, selects the device.
+    pub fn open_external_device(
+        &self,
+        node: &Node,
+        credentials: Credentials<'_>,
+        read: bool,
+        write: bool,
+        flags: u32,
+    ) -> Result<crate::devfs::ExternalOpen, i32> {
+        self.validate(node)?;
+        match (self.volumes.get(node.volume as usize), &node.backing) {
+            (Some(Volume::Device(filesystem)), NodeBacking::Device(device)) => {
+                filesystem.open_external(device, credentials, read, write, flags)
             }
             _ => Err(95),
         }

@@ -14,6 +14,8 @@ use filesystem_service::service::{FilesystemService, PathAnchors, RenameAnchors}
 use mochios_filesystem_protocol as protocol;
 #[path = "support/unmapped_updates.rs"]
 mod unmapped_updates;
+#[path = "support/external_namespace.rs"]
+mod external_namespace;
 
 #[derive(Clone)]
 struct Image(Arc<Mutex<Vec<u8>>>);

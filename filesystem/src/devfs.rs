@@ -12,6 +12,14 @@ use mochios_filesystem_protocol as protocol;
 pub enum NodeKind {
     Directory,
     Null,
+    External,
+}
+
+/// Service-owner registration data, not a path or caller-chosen object ID.
+/// The factory owns the explicit capabilities needed to create this device.
+pub struct ExternalDevice {
+    pub special_device: u64,
+    pub factory: Arc<dyn crate::device_factory::Factory>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,6 +39,7 @@ struct Record {
     kind: NodeKind,
     parent: Option<Node>,
     metadata: RwLock<Metadata>,
+    external: Option<ExternalDevice>,
 }
 
 /// Only this filesystem constructs references. Arc ownership seals both the
@@ -56,6 +65,30 @@ pub struct DeviceFilesystem {
     next_id: u64,
 }
 
+/// An admitted open retains exactly its inode/factory across unpublication.
+/// Access mode is frozen here; each publication asks for a fresh native OFD.
+pub struct ExternalOpen {
+    node: Node,
+    request: protocol::device_open::Request,
+}
+impl ExternalOpen {
+    pub fn node(&self) -> &Node {
+        &self.node
+    }
+    pub fn publish(
+        &self,
+        metadata: mnu_abi::IpcObjectHandle,
+    ) -> Result<mnu_abi::IpcObjectHandle, i32> {
+        self.node
+            .record
+            .external
+            .as_ref()
+            .ok_or(5)?
+            .factory
+            .open(metadata, self.request)
+    }
+}
+
 impl Default for DeviceFilesystem {
     fn default() -> Self {
         let owner = Arc::new(());
@@ -69,6 +102,7 @@ impl Default for DeviceFilesystem {
                 uid: 0,
                 gid: 0,
             },
+            None,
         );
         let null = Self::node(
             &owner,
@@ -80,6 +114,7 @@ impl Default for DeviceFilesystem {
                 uid: 0,
                 gid: 0,
             },
+            None,
         );
         Self {
             owner,
@@ -97,6 +132,7 @@ impl DeviceFilesystem {
         kind: NodeKind,
         parent: Option<Node>,
         attributes: Attributes,
+        external: Option<ExternalDevice>,
     ) -> Node {
         Node {
             owner: owner.clone(),
@@ -108,6 +144,7 @@ impl DeviceFilesystem {
                     attributes,
                     links: if kind == NodeKind::Directory { 2 } else { 1 },
                 }),
+                external,
             }),
         }
     }
@@ -154,6 +191,30 @@ impl DeviceFilesystem {
         kind: NodeKind,
         attributes: Attributes,
     ) -> Result<Node, i32> {
+        if kind == NodeKind::External {
+            return Err(22);
+        }
+        self.register_node(parent, name, kind, attributes, None)
+    }
+
+    pub fn register_external(
+        &mut self,
+        parent: &Node,
+        name: &[u8],
+        attributes: Attributes,
+        device: ExternalDevice,
+    ) -> Result<Node, i32> {
+        self.register_node(parent, name, NodeKind::External, attributes, Some(device))
+    }
+
+    fn register_node(
+        &mut self,
+        parent: &Node,
+        name: &[u8],
+        kind: NodeKind,
+        attributes: Attributes,
+        external: Option<ExternalDevice>,
+    ) -> Result<Node, i32> {
         self.directory(parent)?;
         Self::name(name)?;
         if attributes.mode & !0o7777 != 0 {
@@ -175,7 +236,14 @@ impl DeviceFilesystem {
             .checked_add(u32::from(kind == NodeKind::Directory))
             .ok_or(28)?;
         let id = u32::try_from(self.next_id).map_err(|_| 28)?;
-        let node = Self::node(&self.owner, id, kind, Some(parent.clone()), attributes);
+        let node = Self::node(
+            &self.owner,
+            id,
+            kind,
+            Some(parent.clone()),
+            attributes,
+            external,
+        );
         self.next_id += 1;
         self.children
             .entry(parent.id())
@@ -252,6 +320,15 @@ impl DeviceFilesystem {
                 ..protocol::NodeStatus::default()
             },
             NodeKind::Null => null_device::node_status(volume, u64::from(node.id())),
+            NodeKind::External => protocol::NodeStatus {
+                device: volume,
+                node_id: u64::from(node.id()),
+                kind: protocol::NODE_TYPE_SPECIAL,
+                mode: 0o020000,
+                special_device: node.record.external.as_ref().ok_or(5)?.special_device,
+                block_size: 4096,
+                ..protocol::NodeStatus::default()
+            },
         };
         status.mode = (status.mode & 0o170000) | u32::from(metadata.attributes.mode);
         status.uid = metadata.attributes.uid;
@@ -303,6 +380,62 @@ impl DeviceFilesystem {
             return Err(13);
         }
         NullDescription::new(read, write, flags)
+    }
+
+    /// Namespace traversal and native capability admission precede this call.
+    /// Node owner, mode, uid/gid/groups and access mode are checked before the
+    /// factory is exposed through the admitted open; no factory RPC occurs here.
+    pub fn open_external(
+        &self,
+        node: &Node,
+        credentials: Credentials<'_>,
+        read: bool,
+        write: bool,
+        flags: u32,
+    ) -> Result<ExternalOpen, i32> {
+        self.validate(node)?;
+        if node.kind() != NodeKind::External {
+            return Err(95);
+        }
+        if (!read && !write)
+            || flags & !(protocol::OPEN_STATUS_APPEND | protocol::OPEN_STATUS_NONBLOCK) != 0
+        {
+            return Err(22);
+        }
+        let status = self.status(node, 0)?;
+        let access = u32::from(read) * protocol::ACCESS_AT_READ
+            | u32::from(write) * protocol::ACCESS_AT_WRITE;
+        if !permission_allows(
+            u16::try_from(status.mode).map_err(|_| 22)?,
+            status.kind,
+            status.uid,
+            status.gid,
+            credentials.uid,
+            credentials.gid,
+            credentials.groups,
+            access,
+        ) {
+            return Err(13);
+        }
+        let rights = mnu_abi::HANDLE_RIGHT_CONTROL
+            | mnu_abi::HANDLE_RIGHT_DUPLICATE
+            | mnu_abi::HANDLE_RIGHT_TRANSFER
+            | mnu_abi::HANDLE_RIGHT_WAIT
+            | if read { mnu_abi::HANDLE_RIGHT_READ } else { 0 }
+            | if write {
+                mnu_abi::HANDLE_RIGHT_WRITE
+            } else {
+                0
+            };
+        let options = if flags & protocol::OPEN_STATUS_NONBLOCK != 0 {
+            mnu_abi::HANDLE_OPTION_NONBLOCKING
+        } else {
+            0
+        };
+        Ok(ExternalOpen {
+            node: node.clone(),
+            request: protocol::device_open::Request { rights, options },
+        })
     }
 }
 
