@@ -41,6 +41,13 @@ impl Drop for Resource {
 fn process_exit(error:c_int)->! {panic!("unexpected process exit {error}")}
 fn register_current_thread() -> Option<((), &'static ThreadControl)> { Some(((), &CONTROL)) }
 fn current_thread_control() -> Option<((), &'static ThreadControl)> { Some(((), &CONTROL)) }
+mod user_copy {
+    pub fn write(destination:*mut u8, bytes:&[u8])->Result<(),i32> {
+        assert_eq!(super::CONTROL.native_delivery_defer.load(super::Ordering::Acquire),1);
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(),destination,bytes.len()); }
+        Ok(())
+    }
+}
 fn native_mutex_wake_all(_: &AtomicU32) {}
 fn notify_join_waiter(_: &ThreadControl) {}
 mod thread_cleanup {
@@ -83,6 +90,7 @@ mod syscall {
     ));
     for entry in [
         "fn finish_thread(",
+        "fn update_cancel_control(",
         "pub unsafe extern \"C\" fn pthread_setcancelstate(",
         "pub extern \"C\" fn pthread_testcancel(",
     ] {
