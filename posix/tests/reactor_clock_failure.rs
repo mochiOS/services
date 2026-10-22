@@ -53,7 +53,7 @@ fn refresh_child_notifications(&mut self,_:&mut())->Result<usize,i32>{
 struct PendingSignalWait{deadline:Option<u64>}
 fn reap_signal_threads(_:&mut Service,_:&mut Vec<()>){ }
 fn deliver_process_resume_notifications(_:&mut Service){NOTIFICATIONS.set(NOTIFICATIONS.get()+1);}
-fn complete_pending_signal_waits(_:&mut Vec<PendingSignalWait>,_:&mut Service){}
+fn complete_pending_signal_waits(_:&mut Vec<PendingSignalWait>,_:&mut Service,_:&mut()){}
 fn complete_pending_waits(_:&mut Vec<()>,_:&mut Service,_:&mut(),_:&mut()){}
 fn deliver_signal_notifications(_:&mut Service,_:&mut Vec<()>){}
 fn plan(mut service:&mut Service,reported:&mut bool)->(u64,bool) {

@@ -266,7 +266,7 @@ fn main() {
                 error
             );
         }
-        complete_pending_signal_waits(&mut pending_signal_waits, &mut service);
+        complete_pending_signal_waits(&mut pending_signal_waits, &mut service, &mut processes);
         complete_pending_waits(
             &mut pending_waits,
             &mut service,
@@ -381,11 +381,16 @@ fn main() {
         // Reconcile successful native image changes before any request can
         // apply credentials or open resources. Do not interpret a client
         // startup notification as proof that replacement committed.
+        let mut request_image = None;
         let image_state_error = if let (Some(peer), Some(_), true) =
             (peer, decoded, attachments_valid)
         {
             match service_state.lock() {
-                Ok(mut service) => service.refresh_image_state(peer, &mut processes).err(),
+                Ok(mut service) => service
+                    .refresh_image_state(peer, &mut processes)
+                    .and_then(|()| service.capture_request_image(peer))
+                    .map(|image| request_image = Some(image))
+                    .err(),
                 Err(_) => Some(protocol::STATUS_EIO),
             }
         } else {
@@ -937,6 +942,7 @@ fn main() {
                     Ok((identity, mask, epoch, deadline))
                 });
                 let result = parsed.and_then(|(identity, mask, epoch, deadline)| {
+                    let image = request_image.ok_or(protocol::STATUS_EPERM)?;
                     // Bound deferred requests and disallow duplicates before
                     // consuming any signal, including malicious async sends.
                     if pending_signal_waits.len() >= 1024
@@ -946,6 +952,9 @@ fn main() {
                     {
                         return Err(protocol::STATUS_EAGAIN);
                     }
+                    validate_pending_request_image(
+                        sender, peer, image, &mut service, &mut processes,
+                    )?;
                     let now = if deadline.is_some() {
                         platform::time::monotonic_nanoseconds().map_err(|_| protocol::STATUS_EIO)?
                     } else {
@@ -961,6 +970,7 @@ fn main() {
                                 mask,
                                 epoch,
                                 deadline,
+                                image,
                             });
                             Ok(None)
                         }
@@ -1002,14 +1012,22 @@ fn main() {
                         .map(|request| (request, None))
                         .map_err(|_| posix_service::STATUS_EINVAL)
                 };
+                let parsed = parsed.and_then(|(request, guard)| {
+                    request_image
+                        .map(|image| (request, guard, image))
+                        .ok_or(protocol::STATUS_EPERM)
+                });
                 match parsed {
-                    Ok((request, guard)) => {
-                        let validated = match guard {
+                    Ok((request, guard, image)) => {
+                        let validated = validate_pending_request_image(
+                            sender, peer, image, &mut service, &mut processes,
+                        )
+                        .and_then(|()| match guard {
                             Some((identity, epoch)) => {
                                 service.validate_wait_delivery_epoch(peer, identity, epoch)
                             }
                             None => Ok(()),
-                        };
+                        });
                         match validated.and_then(|()| {
                             service.wait_child_info(peer, request, &mut filesystem, &mut processes)
                         }) {
@@ -1021,6 +1039,7 @@ fn main() {
                                     request,
                                     guard,
                                     detailed,
+                                    image,
                                 });
                                 None
                             }
@@ -1686,12 +1705,32 @@ struct PendingSignalWait {
     mask: u64,
     epoch: u64,
     deadline: Option<u64>,
+    image: posix_service::RequestImage,
+}
+
+#[cfg(target_os = "mochios")]
+fn validate_pending_request_image(
+    sender: u64,
+    peer: posix_service::PeerIdentity,
+    image: posix_service::RequestImage,
+    service: &mut posix_service::PosixService<u32>,
+    processes: &mut RuntimeProcesses,
+) -> Result<(), i32> {
+    // Endpoint generations also reject a request whose original thread exited
+    // without replacing its image. Never resolve a self-reported PID/TID.
+    let identity = mochi_user_platform::ipc::endpoint_execution_identity(sender)
+        .map_err(|error| process_control::lifecycle_failure(error.raw()))?;
+    if identity.process_id != peer.process_id {
+        return Err(mochios_posix_protocol::STATUS_EPERM);
+    }
+    service.validate_request_image(peer, image, processes)
 }
 
 #[cfg(target_os = "mochios")]
 fn complete_pending_signal_waits(
     pending: &mut Vec<PendingSignalWait>,
     service: &mut posix_service::PosixService<u32>,
+    processes: &mut RuntimeProcesses,
 ) {
     use mochi_user_platform as platform;
     use mochios_posix_protocol as protocol;
@@ -1699,11 +1738,16 @@ fn complete_pending_signal_waits(
     let mut index = 0;
     while index < pending.len() {
         let wait = pending[index];
-        let result = if wait.deadline.is_some() {
-            platform::time::monotonic_nanoseconds().map_err(|_| protocol::STATUS_EIO)
-        } else {
-            Ok(0)
-        }
+        let result = validate_pending_request_image(
+            wait.sender, wait.peer, wait.image, service, processes,
+        )
+        .and_then(|()| {
+            if wait.deadline.is_some() {
+                platform::time::monotonic_nanoseconds().map_err(|_| protocol::STATUS_EIO)
+            } else {
+                Ok(0)
+            }
+        })
         .and_then(|now| {
             service.poll_wait_signal_info(
                 wait.peer, wait.identity, wait.mask, wait.epoch, wait.deadline, now,
@@ -1760,6 +1804,7 @@ struct PendingWait {
     request: mochios_posix_protocol::WaitRequest,
     guard: Option<(mnu_abi::ExecutionIdentity, u64)>,
     detailed: bool,
+    image: posix_service::RequestImage,
 }
 
 #[cfg(target_os = "mochios")]
@@ -1775,12 +1820,15 @@ fn complete_pending_waits(
     let mut index = 0;
     while index < pending.len() {
         let wait = pending[index];
-        let validated = match wait.guard {
+        let validated = validate_pending_request_image(
+            wait.sender, wait.peer, wait.image, service, processes,
+        )
+        .and_then(|()| match wait.guard {
             Some((identity, epoch)) => {
                 service.validate_wait_delivery_epoch(wait.peer, identity, epoch)
             }
             None => Ok(()),
-        };
+        });
         let result = validated
             .and_then(|()| service.wait_child_info(wait.peer, wait.request, filesystem, processes));
         if result == Err(protocol::STATUS_EAGAIN) {

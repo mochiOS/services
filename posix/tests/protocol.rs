@@ -39,6 +39,9 @@ mod child_stop_image;
 #[path = "support/child_continue_image.rs"]
 mod child_continue_image;
 
+#[path = "support/request_image.rs"]
+mod request_image;
+
 #[path = "support/alarm.rs"]
 mod alarm;
 

@@ -1,7 +1,47 @@
 //! POSIX image-local policy follows native commits, never startup claims.
 use super::*;
 
+/// Service-local request provenance, never decoded from client request bytes.
+#[derive(Clone, Copy, Debug)]
+pub struct RequestImage {
+    process_id: u64,
+    revision: u64,
+}
+
 impl<H: Copy> PosixService<H> {
+    /// Capture immediately after authenticated admission observes native state.
+    pub fn capture_request_image(&self, peer: PeerIdentity) -> Result<RequestImage, i32> {
+        self.processes
+            .get(&peer.process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let state = self
+            .process_wait_states
+            .get(&peer.process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        Ok(RequestImage {
+            process_id: peer.process_id,
+            revision: state.observed_image_revision,
+        })
+    }
+
+    /// A deferred request from an old image must not consume a new image's
+    /// child status or pending signals, even if its native thread ID survives.
+    pub fn validate_request_image<P: ProcessBackend<H>>(
+        &mut self,
+        peer: PeerIdentity,
+        image: RequestImage,
+        processes: &mut P,
+    ) -> Result<(), i32> {
+        if image.process_id != peer.process_id {
+            return Err(protocol::STATUS_EPERM);
+        }
+        self.refresh_image_state(peer, processes)?;
+        if self.process_wait_states[&peer.process_id].observed_image_revision != image.revision {
+            return Err(protocol::STATUS_ESRCH);
+        }
+        Ok(())
+    }
+
     /// Call at authenticated request admission, before executing POSIX policy.
     /// Frequent native I/O paths do not enter this service or need this check.
     pub fn refresh_image_state<P: ProcessBackend<H>>(

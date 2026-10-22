@@ -31,6 +31,7 @@ pub mod cpu_limit;
 mod cpu_timer;
 mod process_group;
 mod image_state;
+pub use image_state::RequestImage;
 mod child_notification;
 pub mod filesystem_times;
 pub use fork_state::validate_fork_child;
