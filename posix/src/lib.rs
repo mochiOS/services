@@ -7,6 +7,7 @@ pub mod pty_factory;
 pub mod pty_metadata;
 pub mod pty_metadata_ipc;
 pub mod pty_open;
+pub mod pty_request;
 pub mod terminal_identity;
 pub mod terminal_namespace;
 pub mod named_semaphore;

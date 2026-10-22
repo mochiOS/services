@@ -469,16 +469,18 @@ fn main() {
             None
         };
         let opened_pty = if peer.is_some()
+            && request_image.is_some()
             && attachments_valid
-            && attachments.is_empty()
-            && decoded.is_some_and(|(header, payload)| {
-                header.opcode == protocol::OP_PTY_OPEN && header.flags == 0 && payload.is_empty()
+            && decoded.is_some_and(|(header, _)| {
+                header.opcode == protocol::OP_PTY_OPEN
             })
         {
-            Some(open_pty_response(
-                &ptys,
-                provider_endpoint_handle,
-                decoded.unwrap().0.request_id,
+            let (header, payload) = decoded.unwrap();
+            Some(posix_service::pty_request::execute(
+                header,
+                payload,
+                &attachments,
+                || open_pty_response(&ptys, provider_endpoint_handle, header.request_id),
             ))
         } else {
             None
@@ -802,20 +804,15 @@ fn main() {
                     peer, header, payload, &attachments, &mut processes,
                 ))
             }
-            (Some(peer), Some((header, payload)), true)
-                if header.opcode == protocol::OP_PTY_OPEN
-                    && header.flags == 0
-                    && payload.is_empty()
-                    && attachments.is_empty() =>
+            (Some(peer), Some(_), true) if opened_pty.is_some() =>
             {
-                Some(if service.session(peer.process_id).is_some() {
-                    opened_pty.unwrap()
-                } else {
-                    posix_service::ObjectResponse {
-                        response: invalid_response(header.request_id),
-                        handles: Vec::new(),
-                    }
-                })
+                let validation = request_image.ok_or(protocol::STATUS_EPERM)
+                    .and_then(|image| validate_pending_request_image(
+                        sender, peer, image, &mut service, &mut processes,
+                    ));
+                Some(posix_service::open_request::finish(
+                    opened_pty.unwrap(), validation, &mut filesystem,
+                ))
             }
             (Some(peer), Some((header, payload)), true)
                 if header.opcode == protocol::OP_PROCESS_SESSION_INFO

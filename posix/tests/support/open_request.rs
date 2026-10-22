@@ -1,6 +1,136 @@
 use super::*;
 use std::sync::{Arc, Mutex};
 
+#[test]
+fn pty_request_rejects_malformed_envelopes_before_allocating() {
+    let valid = protocol::Header {
+        opcode: protocol::OP_PTY_OPEN,
+        request_id: 351,
+        ..Default::default()
+    };
+    let unexpected = [AttachedObject {
+        handle: 77,
+        rights: 1,
+    }];
+    for (header, payload, handles) in [
+        (
+            protocol::Header {
+                opcode: protocol::OP_PING,
+                ..valid
+            },
+            &[][..],
+            &[][..],
+        ),
+        (protocol::Header { flags: 1, ..valid }, &[][..], &[][..]),
+        (
+            protocol::Header {
+                status: -22,
+                ..valid
+            },
+            &[][..],
+            &[][..],
+        ),
+        (protocol::Header { status: 1, ..valid }, &[][..], &[][..]),
+        (
+            protocol::Header {
+                payload_len: 1,
+                ..valid
+            },
+            &[][..],
+            &[][..],
+        ),
+        (valid, &[1][..], &[][..]),
+        (valid, &[][..], &unexpected[..]),
+    ] {
+        let result = posix_service::pty_request::execute(header, payload, handles, || {
+            panic!("invalid request must not allocate a PTY")
+        });
+        assert_eq!(result.response.header.status, -22);
+        assert_eq!(result.response.header.request_id, 351);
+        assert!(result.handles.is_empty());
+    }
+}
+
+#[test]
+fn pty_pair_is_released_if_execution_image_validation_fails() {
+    for validation in [
+        Ok(()),
+        Err(protocol::STATUS_ESRCH),
+        Err(protocol::STATUS_EPERM),
+    ] {
+        let mut fs = RecordingFilesystem::default();
+        let mut allocations = 0;
+        let response = posix_service::pty_request::execute(
+            protocol::Header {
+                opcode: protocol::OP_PTY_OPEN,
+                request_id: 352,
+                ..Default::default()
+            },
+            &[],
+            &[],
+            || {
+                allocations += 1;
+                posix_service::ObjectResponse {
+                    response: posix_service::Response {
+                        header: protocol::Header {
+                            request_id: 352,
+                            ..Default::default()
+                        },
+                        payload: Vec::new(),
+                    },
+                    handles: vec![
+                        posix_service::OpenedObject {
+                            handle: 201,
+                            rights: 3,
+                        },
+                        posix_service::OpenedObject {
+                            handle: 202,
+                            rights: 3,
+                        },
+                    ],
+                }
+            },
+        );
+        let response = posix_service::open_request::finish(response, validation, &mut fs);
+        assert_eq!(allocations, 1);
+        assert_eq!(response.response.header.request_id, 352);
+        if let Err(status) = validation {
+            assert_eq!(response.response.header.status, status);
+            assert!(response.handles.is_empty());
+            assert_eq!(
+                fs.released.iter().map(|h| h.handle).collect::<Vec<_>>(),
+                [201, 202]
+            );
+        } else {
+            assert_eq!(response.handles.len(), 2);
+            assert!(fs.released.is_empty());
+        }
+    }
+}
+
+#[test]
+fn native_pty_dispatch_validates_image_after_unlocked_allocation() {
+    let source = include_str!("../../src/main.rs");
+    let preflight = source
+        .split("let opened_pty =")
+        .nth(1)
+        .unwrap()
+        .split("let opened_socket =")
+        .next()
+        .unwrap();
+    assert!(preflight.contains("request_image.is_some()"));
+    assert!(preflight.contains("posix_service::pty_request::execute("));
+    let finish = source
+        .split("if opened_pty.is_some() =>")
+        .nth(1)
+        .unwrap()
+        .split("protocol::OP_PROCESS_SESSION_INFO")
+        .next()
+        .unwrap();
+    assert!(finish.contains("validate_pending_request_image("));
+    assert!(finish.contains("posix_service::open_request::finish("));
+}
+
 fn setup(
     base: protocol::OpenBase,
     flags: u32,
