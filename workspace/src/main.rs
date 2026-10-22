@@ -67,7 +67,6 @@ struct PendingFilePanel {
     picker_process: u64,
     token: [u8; protocol::FILE_PANEL_TOKEN_LEN],
     mode: u16,
-    executable: String,
     allowed_content_types: String,
 }
 
@@ -1345,7 +1344,8 @@ impl WorkspaceService {
         // establish process modality. The picker has already been launched;
         // failing the request here would strand that visible window and make
         // the application report that no panel was opened. The trusted picker
-        // and scoped capability grant still enforce the security boundary.
+        // still authenticates the selection; actual file I/O remains subject
+        // to the requester's existing authority until Handle delegation is used.
         let _ = set_process_modal(
             COMPOSITOR_BEGIN_PROCESS_MODAL,
             context.process_id,
@@ -1360,7 +1360,6 @@ impl WorkspaceService {
             picker_process,
             token,
             mode: options.mode,
-            executable: options.executable.to_owned(),
             allowed_content_types: options.allowed_content_types.to_owned(),
         });
         // The request intentionally remains unanswered until the trusted picker
@@ -1427,7 +1426,7 @@ impl WorkspaceService {
         let outcome = {
             let pending = &self.pending_file_panels[index];
             validate_panel_selection(pending, result.path).and_then(|path| {
-                grant_selected_path(pending, &path)?;
+                require_file_panel_authority(pending)?;
                 Ok(path)
             })
         };
@@ -1677,53 +1676,28 @@ fn selection_matches_content_types(path: &Path, allowed: &str) -> bool {
     })
 }
 
-fn grant_selected_path(pending: &PendingFilePanel, path: &str) -> Result<(), u64> {
-    let service = platform::process::find_by_name(CAPABILITY_SERVICE_NAME)
-        .map_err(error::native_errno)?;
-    if service == 0 {
-        return Err(error::status_errno(mochi_user_syscall::ENOENT as i64));
-    }
-    let capability = if pending.mode == protocol::FILE_PANEL_MODE_SAVE {
-        "fs.write.user"
-    } else {
-        "fs.read.user"
+fn require_file_panel_authority(pending: &PendingFilePanel) -> Result<(), u64> {
+    // This legacy panel returns a path, not an opened resource. It must not
+    // claim that selection granted authority, nor depend on the retired
+    // kernel pathname registry. Existing file capabilities keep working;
+    // otherwise a broker returning a rights-restricted FileHandle is required.
+    let capabilities = match pending.mode {
+        protocol::FILE_PANEL_MODE_OPEN => ["fs.read.user", "fs.read.all"],
+        protocol::FILE_PANEL_MODE_SAVE => ["fs.write.user", "fs.write.all"],
+        _ => return Err(error::status_errno(mochi_user_syscall::EINVAL as i64)),
     };
-    let request = platform::capability::CapabilityRequest::new_prompt(
-        pending.requester_process,
-        &pending.executable,
-        [0; 32],
-        capability,
-        Some(path),
-        Some(if pending.mode == protocol::FILE_PANEL_MODE_SAVE {
-            "Save the selected file"
-        } else {
-            "Open the selected file"
-        }),
-        true,
-        platform::capability::CapabilityClass::UserGrantable,
-    )
-    .map_err(|_| error::status_errno(mochi_user_syscall::EINVAL as i64))?;
-    let mut decision = platform::capability::CapabilityDecisionRequest::new(
-        platform::capability::CapabilityDecision::AllowForProcess,
-        request,
-    );
-    decision.reserved = pending.grant_endpoint;
-    let mut encoded =
-        vec![0u8; core::mem::size_of::<platform::capability::CapabilityDecisionRequest>()];
-    let length = platform::capability::encode_decision_request(&decision, &mut encoded)
-        .map_err(|_| error::status_errno(mochi_user_syscall::EINVAL as i64))?;
-    let mut reply = [0u8; 8];
-    let message = platform::ipc::call(service, &encoded[..length], &mut reply)
-        .map_err(error::native_errno)?;
-    if (message & 0xffff_ffff) as usize != reply.len() {
-        return Err(error::status_errno(mochi_user_syscall::EINVAL as i64));
+    for capability in capabilities {
+        match platform::capability::check_thread(pending.grant_endpoint, capability)
+            .map_err(error::native_errno)?
+        {
+            1 => return Ok(()),
+            0 => {}
+            _ => return Err(error::status_errno(mochi_user_syscall::EIO as i64)),
+        }
     }
-    let status = u64::from_le_bytes(reply);
-    if status == 0 {
-        Ok(())
-    } else {
-        Err(error::status_errno(status as i64))
-    }
+    Err(error::status_errno(
+        mochi_user_syscall::NativeError::Unsupported.into_raw() as i64,
+    ))
 }
 
 fn set_process_modal(opcode: u32, owner_process: u64, modal_process: u64) -> Result<(), u64> {
