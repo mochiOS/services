@@ -3,6 +3,31 @@
 use super::*;
 
 impl FilesystemService {
+    pub(crate) fn register_external_device(
+        &mut self,
+        request: protocol::Header,
+        config: protocol::device_registration::Request<'_>,
+        parent_open_id: u64,
+        factory: std::sync::Arc<dyn crate::device_factory::Factory>,
+    ) -> Result<Response, i32> {
+        let parent = self.retained_namespace_node(parent_open_id)?;
+        let namespace = self.namespace.as_mut().ok_or(ENOTSUP)?;
+        let node = namespace.register_external_device(
+            &parent,
+            config.name,
+            crate::devfs::Attributes {
+                mode: config.mode,
+                uid: config.uid,
+                gid: config.gid,
+            },
+            crate::devfs::ExternalDevice {
+                special_device: config.special_device,
+                factory,
+            },
+        )?;
+        self.device_status_response(request, &node)
+    }
+
     /// Parent is supplied only by native identification of an attachment, not
     /// an inline caller-selected open ID. This is service-owner configuration.
     pub(crate) fn configure_device_node(

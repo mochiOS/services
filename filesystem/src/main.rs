@@ -296,6 +296,24 @@ fn main() {
                             continue;
                         }
                     }
+                } else if header.opcode == protocol::OP_DEVICE_NODE_REGISTER_EXTERNAL {
+                    match filesystem_service::device_registration_ipc::handle_native(
+                        &mut service,
+                        header,
+                        payload,
+                        &mut attached,
+                    ) {
+                        Ok(response) => response,
+                        Err(error) => filesystem_service::service::Response {
+                            header: protocol::Header {
+                                opcode: protocol::OP_STATUS,
+                                request_id: header.request_id,
+                                status: -error,
+                                ..protocol::Header::default()
+                            },
+                            payload: Vec::new(),
+                        },
+                    }
                 } else if filesystem_service::device_namespace_ipc::requested(header) {
                     match filesystem_service::device_namespace_ipc::handle(
                         &mut service,
@@ -1079,7 +1097,9 @@ fn open_handle_rights(flags: u32) -> u64 {
 #[cfg(target_os = "mochios")]
 fn close_attached_handles(handles: &mochi_user_platform::ipc::IpcObjectHandles) {
     for attached in handles.handles.iter().take(handles.count as usize) {
-        let _ = mochi_user_platform::handle::close(attached.handle);
+        if attached.handle != 0 {
+            let _ = mochi_user_platform::handle::close(attached.handle);
+        }
     }
 }
 

@@ -3,6 +3,7 @@ pub mod ext4;
 pub mod devfs;
 pub mod device_factory;
 pub mod device_namespace_ipc;
+pub mod device_registration_ipc;
 pub mod namespace;
 mod open_table;
 pub mod null_device;

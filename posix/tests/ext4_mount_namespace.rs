@@ -16,6 +16,8 @@ use mochios_filesystem_protocol as protocol;
 mod unmapped_updates;
 #[path = "support/external_namespace.rs"]
 mod external_namespace;
+#[path = "support/external_registration.rs"]
+mod external_registration;
 
 #[derive(Clone)]
 struct Image(Arc<Mutex<Vec<u8>>>);

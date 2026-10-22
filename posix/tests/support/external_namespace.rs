@@ -3,7 +3,7 @@ use filesystem_service::devfs::{Attributes, DeviceFilesystem, NodeKind};
 use filesystem_service::path_walk::{Credentials, Resolution};
 use std::sync::{Arc, Mutex};
 #[path = "external_factory.rs"]
-mod factory;
+pub(super) mod factory;
 use factory::{Calls, definition, metadata};
 fn attrs() -> Attributes {
     Attributes {
