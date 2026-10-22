@@ -1,6 +1,5 @@
 use mochios_filesystem_protocol as fs;
-#[path = "../src/filesystem_metadata.rs"]
-mod filesystem_metadata;
+use posix_service::filesystem_metadata;
 
 #[test]
 fn scoped_node_identity_is_split_without_losing_volume_or_inode() {

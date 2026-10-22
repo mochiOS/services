@@ -3,6 +3,54 @@
 use mochios_filesystem_protocol as filesystem;
 use mochios_posix_protocol::FileStatus;
 
+/// Probe the native filesystem owner first. Only an owner-identification
+/// rejection (EBADF), not an ordinary filesystem error, permits resolving the
+/// explicitly attached data Handle through its device provider. Run outside
+/// the POSIX-state lock: that provider also authorizes concurrent terminal IO.
+pub fn through_provider<T>(
+    source: mnu_abi::IpcObjectHandle,
+    mut stat: impl FnMut(mnu_abi::IpcObjectHandle) -> Result<T, i32>,
+    query: impl FnOnce(mnu_abi::IpcObjectHandle) -> Result<crate::OpenedObject<u32>, i32>,
+    mut close: impl FnMut(u32),
+) -> Result<T, i32> {
+    let transfer = mnu_abi::HANDLE_RIGHT_TRANSFER;
+    if source.handle == 0 || source.reserved != 0 || source.rights & transfer == 0 {
+        return Err(-13);
+    }
+    let source = mnu_abi::IpcObjectHandle {
+        rights: transfer,
+        ..source
+    };
+    match stat(source) {
+        Err(-9) => {}
+        result => return result,
+    }
+    let metadata = query(source)?;
+    if metadata.handle == 0 || metadata.handle == source.handle || metadata.rights != transfer {
+        if metadata.handle != 0 && metadata.handle != source.handle {
+            close(metadata.handle);
+        }
+        return Err(-5);
+    }
+    let result = stat(mnu_abi::IpcObjectHandle {
+        handle: metadata.handle,
+        reserved: 0,
+        rights: transfer,
+    });
+    close(metadata.handle);
+    result
+}
+
+pub fn fstat_response<H>(
+    request_id: u64,
+    result: Result<FileStatus, i32>,
+) -> crate::ObjectResponse<H> {
+    match result {
+        Ok(status) => crate::object_status(request_id, status),
+        Err(status) => crate::object_error(request_id, status),
+    }
+}
+
 pub fn translate(status: filesystem::NodeStatus) -> Result<FileStatus, i32> {
     // Filesystem node IDs are volume-scoped: high 32 bits are the volume,
     // low 32 bits are its inode. Keep both halves, without truncating either

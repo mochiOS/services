@@ -430,6 +430,32 @@ fn main() {
         } else {
             None
         };
+        // Provider queries must not run under service_state: a queued native
+        // terminal request can be waiting for that same mutex for job control.
+        let inspected_file = if peer.is_some()
+            && request_image.is_some()
+            && attachments_valid
+            && attachments.len() == 1
+            && decoded.is_some_and(|(header, payload)| {
+                header.opcode == protocol::OP_FSTAT && header.flags == 0
+                    && header.status == 0 && payload.is_empty()
+            })
+        {
+            let source = received_handles.handles[0];
+            Some(posix_service::filesystem_metadata::through_provider(
+                source,
+                |object| posix_service::FilesystemBackend::fstat(
+                    &mut filesystem,
+                    AttachedObject { handle: object.handle, rights: object.rights },
+                ),
+                |object| posix_service::pty_metadata_ipc::query(
+                    provider_endpoint_handle, object, platform::handle::HANDLE_RIGHT_TRANSFER,
+                ),
+                |handle| { let _ = platform::handle::close(handle); },
+            ))
+        } else {
+            None
+        };
         let opened_pty = if peer.is_some()
             && attachments_valid
             && attachments.is_empty()
@@ -561,6 +587,14 @@ fn main() {
         }
         let mut retained_handle = None;
         let object_response = match (peer, decoded, attachments_valid) {
+            (Some(peer), Some((header, _)), true) if inspected_file.is_some() => {
+                let result = request_image.ok_or(protocol::STATUS_EPERM)
+                    .and_then(|image| validate_pending_request_image(
+                        sender, peer, image, &mut service, &mut processes,
+                    ))
+                    .and_then(|()| inspected_file.unwrap());
+                Some(posix_service::filesystem_metadata::fstat_response(header.request_id, result))
+            }
             (Some(_), Some((header, _)), true)
                 if matches!(
                     header.opcode,
@@ -1242,6 +1276,12 @@ fn run_pty_provider(
         let length = (message & 0xffff_ffff) as usize;
         let request_length = length.min(request.len());
         let count = (attachments.count as usize).min(attachments.handles.len());
+        if request[..request_length].starts_with(&mochios_filesystem_protocol::device_metadata::MAGIC) {
+            posix_service::pty_metadata_ipc::serve(
+                &ptys, sender, &request[..request_length], attachments,
+            );
+            continue;
+        }
         if request[..request_length].starts_with(&mochios_filesystem_protocol::device_open::MAGIC) {
             posix_service::pty_open::serve(
                 &ptys, endpoint, sender, &request[..request_length], attachments,

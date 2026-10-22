@@ -6,8 +6,7 @@ use ext4plus::{Ext4, Ext4Read};
 use filesystem_service::service::{FilesystemService, PathAnchors};
 use mochios_filesystem_protocol as wire;
 
-#[path = "../src/filesystem_metadata.rs"]
-mod filesystem_metadata;
+use posix_service::filesystem_metadata;
 #[path = "../../filesystem/src/inode_time.rs"]
 mod inode_time;
 
