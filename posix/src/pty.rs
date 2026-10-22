@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::vec::Vec;
 
 use mnu_abi::provider;
@@ -92,6 +92,8 @@ enum PtySide {
 
 #[derive(Debug)]
 struct PseudoTerminal {
+    pair: PtyPair,
+    live_objects: BTreeSet<u64>,
     master_open: bool,
     slave_open: bool,
     input: VecDeque<u8>,
@@ -113,8 +115,10 @@ struct InputRecord {
 }
 
 impl PseudoTerminal {
-    fn new() -> Self {
+    fn new(pair: PtyPair) -> Self {
         Self {
+            pair,
+            live_objects: BTreeSet::from([pair.master_object_id, pair.slave_object_id]),
             master_open: true,
             slave_open: true,
             input: VecDeque::new(),
@@ -536,7 +540,9 @@ impl PseudoTerminal {
 #[derive(Debug, Default)]
 pub struct PtyManager {
     next_id: u64,
+    next_object_id: u64,
     terminals: BTreeMap<u64, PseudoTerminal>,
+    objects: BTreeMap<u64, (u64, PtySide)>,
     pending_signals: VecDeque<TerminalSignal>,
 }
 
@@ -544,25 +550,66 @@ impl PtyManager {
     pub fn new() -> Self {
         Self {
             next_id: 1,
+            next_object_id: 2,
             terminals: BTreeMap::new(),
+            objects: BTreeMap::new(),
             pending_signals: VecDeque::new(),
         }
     }
 
     pub fn open(&mut self) -> Result<PtyPair, i32> {
         let id = self.allocate_id().ok_or(EAGAIN)?;
-        self.terminals.insert(id, PseudoTerminal::new());
-        Ok(PtyPair {
-            master_object_id: encode_object_id(id, PtySide::Master),
-            slave_object_id: encode_object_id(id, PtySide::Slave),
-        })
+        let master_object_id = self.allocate_object_id().ok_or(EAGAIN)?;
+        self.objects.insert(master_object_id, (id, PtySide::Master));
+        let slave_object_id = match self.allocate_object_id() {
+            Some(object_id) => object_id,
+            None => {
+                self.objects.remove(&master_object_id);
+                return Err(EAGAIN);
+            }
+        };
+        let pair = PtyPair {
+            master_object_id,
+            slave_object_id,
+        };
+        self.terminals.insert(id, PseudoTerminal::new(pair));
+        self.objects.insert(pair.slave_object_id, (id, PtySide::Slave));
+        Ok(pair)
+    }
+
+    /// Create a distinct slave open after the caller's namespace/permission
+    /// admission. This service-private method conveys no authority via an IPC
+    /// object number. Each returned ID must get exactly one native provider
+    /// object, with duplicates retaining that same object's lifetime.
+    pub fn reopen_slave(&mut self, master_object_id: u64) -> Result<u64, i32> {
+        let (id, side) = self.endpoint(master_object_id)?;
+        if side != PtySide::Master {
+            return Err(EBADF);
+        }
+        let object_id = self.allocate_object_id().ok_or(EAGAIN)?;
+        let terminal = self.terminals.get_mut(&id).ok_or(EBADF)?;
+        terminal.live_objects.insert(object_id);
+        terminal.slave_open = true;
+        self.objects.insert(object_id, (id, PtySide::Slave));
+        Ok(object_id)
+    }
+
+    fn endpoint(&self, object_id: u64) -> Result<(u64, PtySide), i32> {
+        self.objects.get(&object_id).copied().ok_or(EBADF)
+    }
+
+    /// All live open objects on this terminal must observe queue transitions.
+    pub fn signal_object_ids(&self, object_id: u64) -> Result<Vec<u64>, i32> {
+        let (id, _) = self.endpoint(object_id)?;
+        let terminal = self.terminals.get(&id).ok_or(EBADF)?;
+        Ok(terminal.live_objects.iter().copied().collect())
     }
 
     pub fn read(&mut self, object_id: u64, maximum: usize) -> Result<Vec<u8>, i32> {
         if maximum == 0 {
             return Ok(Vec::new());
         }
-        let (id, side) = decode_object_id(object_id).ok_or(EBADF)?;
+        let (id, side) = self.endpoint(object_id)?;
         let terminal = self.terminals.get_mut(&id).ok_or(EBADF)?;
         if side == PtySide::Slave {
             return terminal.read_input(maximum);
@@ -584,7 +631,7 @@ impl PtyManager {
     }
 
     pub fn write(&mut self, object_id: u64, bytes: &[u8]) -> Result<usize, i32> {
-        let (id, side) = decode_object_id(object_id).ok_or(EBADF)?;
+        let (id, side) = self.endpoint(object_id)?;
         let terminal = self.terminals.get_mut(&id).ok_or(EBADF)?;
         if bytes.is_empty() {
             return Ok(0);
@@ -608,13 +655,13 @@ impl PtyManager {
     }
 
     pub fn seek(&self, object_id: u64) -> Result<u64, i32> {
-        let (id, _) = decode_object_id(object_id).ok_or(EBADF)?;
+        let (id, _) = self.endpoint(object_id)?;
         self.terminals.contains_key(&id).then_some(0).ok_or(EBADF)?;
         Err(ESPIPE)
     }
 
     pub fn attributes(&self, object_id: u64) -> Result<posix_protocol::TerminalAttributes, i32> {
-        let (id, _) = decode_object_id(object_id).ok_or(EBADF)?;
+        let (id, _) = self.endpoint(object_id)?;
         self.terminals
             .get(&id)
             .map(|terminal| terminal.attributes)
@@ -629,7 +676,7 @@ impl PtyManager {
         if !terminal_attributes_supported(attributes) {
             return Err(ENOTSUP);
         }
-        let (id, _) = decode_object_id(object_id).ok_or(EBADF)?;
+        let (id, _) = self.endpoint(object_id)?;
         let terminal = self.terminals.get_mut(&id).ok_or(EBADF)?;
         let was_canonical =
             terminal.attributes.local_flags & posix_protocol::TERMINAL_LFLAG_ICANON != 0;
@@ -659,7 +706,7 @@ impl PtyManager {
         if !terminal_attributes_supported(attributes) {
             return Err(ENOTSUP);
         }
-        let (id, _) = decode_object_id(object_id).ok_or(EBADF)?;
+        let (id, _) = self.endpoint(object_id)?;
         {
             let terminal = self.terminals.get_mut(&id).ok_or(EBADF)?;
             if !terminal.output.is_empty() && terminal.master_open {
@@ -680,7 +727,7 @@ impl PtyManager {
     }
 
     fn drain_output(&mut self, object_id: u64) -> Result<(), i32> {
-        let (id, _) = decode_object_id(object_id).ok_or(EBADF)?;
+        let (id, _) = self.endpoint(object_id)?;
         let terminal = self.terminals.get_mut(&id).ok_or(EBADF)?;
         if !terminal.output.is_empty() && terminal.master_open {
             return Err(EAGAIN);
@@ -693,7 +740,7 @@ impl PtyManager {
     }
 
     fn flush_queues(&mut self, object_id: u64, flags: u32) -> Result<(), i32> {
-        let (id, _) = decode_object_id(object_id).ok_or(EBADF)?;
+        let (id, _) = self.endpoint(object_id)?;
         let terminal = self.terminals.get_mut(&id).ok_or(EBADF)?;
         if flags & posix_protocol::TERMINAL_FLUSH_INPUT != 0 {
             terminal.input.clear();
@@ -721,7 +768,7 @@ impl PtyManager {
                     return Err(EINVAL);
                 }
                 let action = posix_protocol::decode_terminal_flow(input).map_err(|_| EINVAL)?;
-                let (id, _) = decode_object_id(object_id).ok_or(EBADF)?;
+                let (id, _) = self.endpoint(object_id)?;
                 let terminal = self.terminals.get_mut(&id).ok_or(EBADF)?;
                 match action {
                     posix_protocol::TERMINAL_FLOW_OUTPUT_STOP => {
@@ -761,7 +808,7 @@ impl PtyManager {
                 {
                     return Err(EINVAL);
                 }
-                let (id, _) = decode_object_id(object_id).ok_or(EBADF)?;
+                let (id, _) = self.endpoint(object_id)?;
                 let terminal = self.terminals.get(&id).ok_or(EBADF)?;
                 let mut output = vec![0; posix_protocol::TERMINAL_WINDOW_SIZE_LEN];
                 posix_protocol::encode_terminal_window_size(terminal.window_size, &mut output)
@@ -773,7 +820,7 @@ impl PtyManager {
                     return Err(EINVAL);
                 }
                 let size = posix_protocol::decode_terminal_window_size(input).map_err(|_| EINVAL)?;
-                let (id, _) = decode_object_id(object_id).ok_or(EBADF)?;
+                let (id, _) = self.endpoint(object_id)?;
                 let terminal = self.terminals.get_mut(&id).ok_or(EBADF)?;
                 if terminal.window_size != size {
                     terminal.window_size = size;
@@ -838,9 +885,11 @@ impl PtyManager {
     }
 
     pub fn release(&mut self, object_id: u64) -> Result<(), i32> {
-        let (id, side) = decode_object_id(object_id).ok_or(EBADF)?;
+        let (id, side) = self.endpoint(object_id)?;
+        self.objects.remove(&object_id);
         let remove = {
             let terminal = self.terminals.get_mut(&id).ok_or(EBADF)?;
+            terminal.live_objects.remove(&object_id);
             match side {
                 PtySide::Master if terminal.master_open => {
                     terminal.master_open = false;
@@ -850,9 +899,11 @@ impl PtyManager {
                     });
                 }
                 PtySide::Slave if terminal.slave_open => {
-                    terminal.slave_open = false;
-                    terminal.output_stopped = false;
-                    terminal.output_manually_stopped = false;
+                    if terminal.live_objects.len() == usize::from(terminal.master_open) {
+                        terminal.slave_open = false;
+                        terminal.output_stopped = false;
+                        terminal.output_manually_stopped = false;
+                    }
                 }
                 _ => return Err(EBADF),
             }
@@ -865,24 +916,26 @@ impl PtyManager {
     }
 
     pub fn discard(&mut self, pair: PtyPair) {
-        if let Some((id, _)) = decode_object_id(pair.master_object_id) {
+        // A native provider's final release can arrive before failed-launch
+        // cleanup. Match the exact owned pair even if its master is retired.
+        let id = self.terminals.iter().find_map(|(id, terminal)| {
+            (terminal.pair == pair).then_some(*id)
+        });
+        if let Some(id) = id {
             self.terminals.remove(&id);
+            self.objects.retain(|_, (terminal, _)| *terminal != id);
+            self.pending_signals.retain(|signal| signal.terminal_id != id);
         }
     }
 
     pub fn object_ids(&self, object_id: u64) -> Result<[u64; 2], i32> {
-        let (id, _) = decode_object_id(object_id).ok_or(EBADF)?;
-        self.terminals
-            .contains_key(&id)
-            .then_some([
-                encode_object_id(id, PtySide::Master),
-                encode_object_id(id, PtySide::Slave),
-            ])
-            .ok_or(EBADF)
+        let (id, _) = self.endpoint(object_id)?;
+        let pair = self.terminals.get(&id).ok_or(EBADF)?.pair;
+        Ok([pair.master_object_id, pair.slave_object_id])
     }
 
     pub fn slave_terminal_id(&self, object_id: u64) -> Result<u64, i32> {
-        let (id, side) = decode_object_id(object_id).ok_or(EBADF)?;
+        let (id, side) = self.endpoint(object_id)?;
         if side != PtySide::Slave || !self.terminals.contains_key(&id) {
             return Err(EBADF);
         }
@@ -920,7 +973,7 @@ impl PtyManager {
     }
 
     pub fn signals(&self, object_id: u64) -> Result<u64, i32> {
-        let (id, side) = decode_object_id(object_id).ok_or(EBADF)?;
+        let (id, side) = self.endpoint(object_id)?;
         let terminal = self.terminals.get(&id).ok_or(EBADF)?;
         let (readable, writable, peer_closed) = match side {
             PtySide::Master => (
@@ -974,7 +1027,7 @@ impl PtyManager {
         if !input.is_empty() || capacity < posix_protocol::TERMINAL_READ_SETTINGS_LEN {
             return Err(EINVAL);
         }
-        let (id, side) = decode_object_id(object_id).ok_or(EBADF)?;
+        let (id, side) = self.endpoint(object_id)?;
         let terminal = self.terminals.get(&id).ok_or(EBADF)?;
         let noncanonical = side == PtySide::Slave
             && terminal.attributes.local_flags & posix_protocol::TERMINAL_LFLAG_ICANON == 0;
@@ -994,6 +1047,18 @@ impl PtyManager {
         let mut output = vec![0; posix_protocol::TERMINAL_READ_SETTINGS_LEN];
         posix_protocol::encode_terminal_read_settings(settings, &mut output).map_err(|_| EIO)?;
         Ok(output)
+    }
+
+    fn allocate_object_id(&mut self) -> Option<u64> {
+        const MAX_ID: u64 = i64::MAX as u64;
+        for _ in 0..self.objects.len().saturating_add(1) {
+            let id = self.next_object_id.clamp(2, MAX_ID);
+            self.next_object_id = if id == MAX_ID { 2 } else { id + 1 };
+            if !self.objects.contains_key(&id) {
+                return Some(id);
+            }
+        }
+        None
     }
 
     fn allocate_id(&mut self) -> Option<u64> {
@@ -1060,25 +1125,4 @@ pub fn handle_provider_request(
     }
     .encode(&data, response)
     .ok()
-}
-
-const fn encode_object_id(id: u64, side: PtySide) -> u64 {
-    (id << 1)
-        | match side {
-            PtySide::Master => 0,
-            PtySide::Slave => 1,
-        }
-}
-
-const fn decode_object_id(object_id: u64) -> Option<(u64, PtySide)> {
-    let id = object_id >> 1;
-    if id == 0 || object_id > i64::MAX as u64 {
-        return None;
-    }
-    let side = if object_id & 1 == 0 {
-        PtySide::Master
-    } else {
-        PtySide::Slave
-    };
-    Some((id, side))
 }

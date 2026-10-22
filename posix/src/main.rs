@@ -1337,14 +1337,17 @@ fn run_pty_provider(
         let (response_len, signal_states, terminal_signals) = if let Ok(mut manager) = ptys.lock() {
             let object_ids = provider::RequestHeader::decode(&request[..request_length])
                 .ok()
-                .and_then(|(header, _)| manager.object_ids(header.object_id).ok());
+                .and_then(|(header, _)| manager.signal_object_ids(header.object_id).ok());
             let response_len = posix_service::pty::handle_provider_request(
                 &mut manager,
                 &request[..request_length],
                 &mut response,
             );
-            let signal_states = object_ids
-                .map(|ids| ids.map(|object_id| (object_id, manager.signals(object_id).ok())));
+            let signal_states = object_ids.map(|ids| {
+                ids.into_iter()
+                    .map(|object_id| (object_id, manager.signals(object_id).ok()))
+                    .collect::<Vec<_>>()
+            });
             let mut terminal_signals = Vec::new();
             while let Some(signal) = manager.take_terminal_signal() {
                 terminal_signals.push(signal);
