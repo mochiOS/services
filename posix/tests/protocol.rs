@@ -18,6 +18,9 @@ mod child_cpu_state;
 #[path = "support/orphan_group_transition.rs"]
 mod orphan_group_transition;
 
+#[path = "support/process_group_image.rs"]
+mod process_group_image;
+
 #[path = "support/alarm.rs"]
 mod alarm;
 
@@ -1421,6 +1424,8 @@ impl RecordingFilesystem {
 #[derive(Default)]
 struct RecordingProcesses {
     states: BTreeMap<u32, ProcessLifecycle>,
+    images: BTreeMap<u32, Result<mnu_abi::ProcessStatus, i32>>,
+    image_reads: Vec<u32>,
     usage: BTreeMap<u32, Result<mnu_abi::ProcessExecutionUsage, i32>>,
     suspend_error: Option<i32>,
     terminate_error: Option<i32>,
@@ -1432,6 +1437,19 @@ struct RecordingProcesses {
 }
 
 impl ProcessBackend<u32> for RecordingProcesses {
+    fn image_status(&mut self, process: u32) -> Result<mnu_abi::ProcessStatus, i32> {
+        self.image_reads.push(process);
+        self.images.get(&process).copied().unwrap_or_else(|| {
+            self.status(process).map(|lifecycle| mnu_abi::ProcessStatus {
+                process_id: u64::from(process),
+                state: match lifecycle {
+                    ProcessLifecycle::Running => mnu_abi::PROCESS_STATE_RUNNING,
+                    ProcessLifecycle::Exited { .. } => mnu_abi::PROCESS_STATE_EXITED,
+                },
+                ..Default::default()
+            })
+        })
+    }
     fn execution_usage(&mut self, process: u32) -> Result<mnu_abi::ProcessExecutionUsage, i32> {
         if !self.states.contains_key(&process) {
             return Err(protocol::STATUS_ESRCH);
@@ -5531,16 +5549,21 @@ fn controlling_terminals_are_bound_to_sessions_and_foreground_groups() {
 
     let mut group_request = [0u8; protocol::PROCESS_GROUP_REQUEST_LEN];
     protocol::encode_process_group_request(142, 142, &mut group_request).unwrap();
+    let mut processes = RecordingProcesses::default();
+    processes.states.insert(142, ProcessLifecycle::Running);
     assert_eq!(
         service
-            .handle(
+            .handle_process_group_request(
                 leader,
                 protocol::Header {
                     opcode: protocol::OP_SET_PROCESS_GROUP,
                     ..protocol::Header::default()
                 },
                 &group_request,
+                &[],
+                &mut processes,
             )
+            .response
             .header
             .status,
         protocol::STATUS_OK
@@ -5754,6 +5777,12 @@ fn terminal_exit_family() -> (
             )
             .unwrap();
     }
+    let mut processes = RecordingProcesses::default();
+    for peer in peers {
+        processes
+            .states
+            .insert(peer.process_id as u32, ProcessLifecycle::Running);
+    }
     for child in [first, second] {
         let mut group = [0; protocol::PROCESS_GROUP_REQUEST_LEN];
         protocol::encode_process_group_request(
@@ -5764,7 +5793,14 @@ fn terminal_exit_family() -> (
         .unwrap();
         assert_eq!(
             service
-                .handle(leader, header(protocol::OP_SET_PROCESS_GROUP), &group)
+                .handle_process_group_request(
+                    leader,
+                    header(protocol::OP_SET_PROCESS_GROUP),
+                    &group,
+                    &[],
+                    &mut processes,
+                )
+                .response
                 .header
                 .status,
             0
@@ -5792,12 +5828,6 @@ fn terminal_exit_family() -> (
             .status,
         0
     );
-    let mut processes = RecordingProcesses::default();
-    for peer in peers {
-        processes
-            .states
-            .insert(peer.process_id as u32, ProcessLifecycle::Running);
-    }
     (service, peers, filesystem, processes)
 }
 
@@ -5951,7 +5981,8 @@ fn request_foreground(
 
 #[test]
 fn background_tcsetpgrp_signals_the_whole_group_without_changing_foreground() {
-    let (mut service, [_, leader, first, second, background], _, _) = terminal_exit_family();
+    let (mut service, [_, leader, first, second, background], _, mut processes) =
+        terminal_exit_family();
     set_own_job_group(&mut service, background);
     let mut bytes = [0; protocol::PROCESS_GROUP_REQUEST_LEN];
     protocol::encode_process_group_request(
@@ -5962,14 +5993,17 @@ fn background_tcsetpgrp_signals_the_whole_group_without_changing_foreground() {
     .unwrap();
     assert_eq!(
         service
-            .handle(
+            .handle_process_group_request(
                 leader,
                 protocol::Header {
                     opcode: protocol::OP_SET_PROCESS_GROUP,
                     ..Default::default()
                 },
-                &bytes
+                &bytes,
+                &[],
+                &mut processes,
             )
+            .response
             .header
             .status,
         0
@@ -6691,16 +6725,20 @@ fn another_live_parent_keeps_the_job_connected_until_its_own_exit() {
         &mut group,
     )
     .unwrap();
+    processes.states.insert(4105, ProcessLifecycle::Running);
     assert_eq!(
         service
-            .handle(
+            .handle_process_group_request(
                 connector,
                 protocol::Header {
                     opcode: protocol::OP_SET_PROCESS_GROUP,
                     ..Default::default()
                 },
-                &group
+                &group,
+                &[],
+                &mut processes,
             )
+            .response
             .header
             .status,
         0

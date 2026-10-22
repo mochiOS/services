@@ -38,7 +38,7 @@ int main(void) {
     CHECK(native3(644 /* removed combined-clone ABI */, 0, 0, 0) == MNU_NATIVE_UNSUPPORTED);
     enum { CLOSE = 626, SPACE_CLONE = 679, RIGHTS_GET = 664,
            DUPLICATE = 627, SAME_OBJECT = 666, MEMORY_OBJECT_CREATE = 671, MEMORY_MAP = 582 };
-    struct status { uint64_t id; uint32_t state, reserved; uint64_t code; } status;
+    struct status { uint64_t id; uint32_t state, reserved; uint64_t code, image_revision; } status;
     const uint64_t control = UINT64_C(1) << 8;
     const uint64_t duplicate = UINT64_C(1) << 62;
     const uint64_t transfer = UINT64_C(1) << 63;

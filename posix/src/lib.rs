@@ -29,6 +29,7 @@ mod fork_state;
 pub mod resource_policy;
 pub mod cpu_limit;
 mod cpu_timer;
+mod process_group;
 pub mod filesystem_times;
 pub use fork_state::validate_fork_child;
 
@@ -469,6 +470,10 @@ pub enum ProcessLifecycle {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ProcessWaitState {
     waited_cpu: WaitedChildCpuUsage,
+    // A launcher registered a fresh executable, not a pre-exec fork image.
+    // Native image revisions count replacements only; initial loaded images
+    // already cross the POSIX spawn/exec boundary without a replacement.
+    fresh_image: bool,
     stopped: bool,
     stop_signal: u32,
     stop_reported: bool,
@@ -669,6 +674,11 @@ fn default_signal_terminates(signal: u32) -> bool {
 
 pub trait ProcessBackend<H: Copy> {
     fn status(&mut self, process: H) -> Result<ProcessLifecycle, i32>;
+    /// Observe an owned native process reference, including committed image
+    /// revision. Missing support must never mean that no replacement occurred.
+    fn image_status(&mut self, _process: H) -> Result<mnu_abi::ProcessStatus, i32> {
+        Err(protocol::STATUS_ENOSYS)
+    }
     /// Reads the retained native process object, not client-supplied metrics.
     fn execution_usage(&mut self, process: H) -> Result<mnu_abi::ProcessExecutionUsage, i32>;
     fn suspend(&mut self, process: H) -> Result<(), i32>;
@@ -1574,6 +1584,10 @@ impl<H: Copy> PosixService<H> {
         child.saved_gid = gid;
         self.supplementary_groups
             .insert(process.process_id, groups.to_vec());
+        self.process_wait_states
+            .get_mut(&process.process_id)
+            .unwrap()
+            .fresh_image = true;
         // Fresh-image launchers need the same failure cleanup authority as a
         // broker. This records only this authenticated creator, not UID zero.
         self.launch_creators.insert(process.process_id, peer.process_id);
@@ -1608,6 +1622,10 @@ impl<H: Copy> PosixService<H> {
             effective_gid: parent.effective_gid,
         };
         self.adopt_child(parent_peer, child, filesystem)?;
+        self.process_wait_states
+            .get_mut(&child.process_id)
+            .unwrap()
+            .fresh_image = true;
         self.launch_creators
             .insert(child.process_id, peer.process_id);
         Ok(())
@@ -2086,7 +2104,12 @@ impl<H: Copy> PosixService<H> {
         })
     }
 
-    fn set_process_group(&mut self, caller_id: u64, payload: &[u8]) -> Result<(), i32> {
+    fn set_process_group(
+        &mut self,
+        caller_id: u64,
+        payload: &[u8],
+        image_status: impl FnOnce(H) -> Result<mnu_abi::ProcessStatus, i32>,
+    ) -> Result<(), i32> {
         let (process_id, process_group_id) =
             protocol::decode_process_group_request(payload).map_err(|_| STATUS_EINVAL)?;
         if process_id < 0 || process_group_id < 0 {
@@ -2099,6 +2122,31 @@ impl<H: Copy> PosixService<H> {
         };
         if target != caller_id && self.parents.get(&target).copied() != Some(caller_id) {
             return Err(protocol::STATUS_ESRCH);
+        }
+        if target != caller_id {
+            let handle = self
+                .processes
+                .get(&target)
+                .copied()
+                .ok_or(protocol::STATUS_ESRCH)?;
+            let image = image_status(handle)?;
+            if image.process_id != target || image.reserved != 0 {
+                return Err(protocol::STATUS_EIO);
+            }
+            match image.state {
+                mnu_abi::PROCESS_STATE_RUNNING => {}
+                mnu_abi::PROCESS_STATE_EXITED => return Err(protocol::STATUS_ESRCH),
+                _ => return Err(protocol::STATUS_EIO),
+            }
+            if image.image_revision != 0
+                || self
+                    .process_wait_states
+                    .get(&target)
+                    .ok_or(protocol::STATUS_ESRCH)?
+                    .fresh_image
+            {
+                return Err(-13); // EACCES: this child has a new executable image.
+            }
         }
         let caller_session = self
             .session_ids
@@ -3379,7 +3427,7 @@ impl<H: Copy> PosixService<H> {
                 self.process_info_payload(peer.process_id, payload)
             }
             protocol::OP_SET_PROCESS_GROUP if header.flags == 0 => self
-                .set_process_group(peer.process_id, payload)
+                .set_process_group(peer.process_id, payload, |_| Err(protocol::STATUS_ENOSYS))
                 .map(|_| Vec::new()),
             protocol::OP_CREATE_SESSION if header.flags == 0 && payload.is_empty() => self
                 .create_session(peer.process_id)

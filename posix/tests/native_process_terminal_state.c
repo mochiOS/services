@@ -31,6 +31,7 @@ struct status {
   uint64_t pid;
   uint32_t state, reserved;
   uint64_t code;
+  uint64_t image_revision;
 };
 struct context {
   uint64_t entry, stack, argument, tls, flags, reserved[3];
@@ -131,7 +132,7 @@ static int64_t create(uint64_t authority, uint64_t code) {
 }
 int main(void) {
   _Static_assert(sizeof(struct context) == 176, "native creation context");
-  _Static_assert(sizeof(struct status) == 24, "native retained status");
+  _Static_assert(sizeof(struct status) == 32, "native retained status");
   fprintf(stderr, "terminal-state: start\n");
   int64_t authority =
       N(518, "capability.service", strlen("capability.service"), 0);

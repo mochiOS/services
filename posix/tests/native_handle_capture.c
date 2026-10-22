@@ -5,7 +5,7 @@
 #include <string.h>
 
 struct hc_context { uint64_t entry, stack, argument, tls, flags, reserved[3], registers[14]; };
-struct hc_status { uint64_t pid; uint32_t state, reserved; uint64_t code; };
+struct hc_status { uint64_t pid; uint32_t state, reserved; uint64_t code, image_revision; };
 extern uint64_t mochios_posix_capture_snapshot(struct hc_context *, uint64_t, uint64_t (*)(void))
     __attribute__((returns_twice));
 static int64_t hc_native(uint64_t number, uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e) {

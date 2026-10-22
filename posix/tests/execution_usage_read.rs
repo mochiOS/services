@@ -61,7 +61,7 @@ fn native_accounting_layout_has_only_execution_domains_and_sampling_rate() {
     assert_eq!(std::mem::size_of::<mnu_abi::ProcessExecutionUsage>(), 32);
     assert_eq!(std::mem::align_of::<mnu_abi::ProcessExecutionUsage>(), 8);
     assert_eq!(mnu_abi::ProcessExecutionUsage::default().reserved, 0);
-    assert_eq!(std::mem::size_of::<mnu_abi::ProcessStatus>(), 24);
+    assert_eq!(std::mem::size_of::<mnu_abi::ProcessStatus>(), 32);
 }
 
 #[test]
@@ -145,7 +145,7 @@ mod syscall {
     let status = include_str!("../../../core/crates/abi/src/status.rs");
     program = program.replace("mod mnu_abi {", &format!("mod mnu_abi {{pub mod status {{\n{status}\n}}\n\
         pub const PROCESS_STATE_RUNNING:u32=1;pub const PROCESS_STATE_EXITED:u32=2;\n\
-        #[repr(C)]#[derive(Default,Debug,PartialEq,Clone,Copy)]pub struct ProcessStatus {{pub process_id:u64,pub state:u32,pub reserved:u32,pub exit_code:u64}}\n"));
+        #[repr(C)]#[derive(Default,Debug,PartialEq,Clone,Copy)]pub struct ProcessStatus {{pub process_id:u64,pub state:u32,pub reserved:u32,pub exit_code:u64,pub image_revision:u64}}\n"));
     let process = include_str!("../../../core/src/task/process.rs");
     let object = &process[process
         .find("#[derive(Debug)]\npub struct ProcessObject")

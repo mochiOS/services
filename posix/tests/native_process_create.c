@@ -58,9 +58,10 @@ struct process_status {
     uint64_t process;
     uint32_t state, reserved;
     uint64_t exit_code;
+    uint64_t image_revision;
 };
 _Static_assert(sizeof(struct attachments) == 72, "native IPC attachment layout");
-_Static_assert(sizeof(struct process_status) == 24, "native process status layout");
+_Static_assert(sizeof(struct process_status) == 32, "native process status layout");
 static uint32_t get32(const void *source) {
     uint32_t value;
     memcpy(&value, source, 4);

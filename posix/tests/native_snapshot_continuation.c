@@ -12,6 +12,7 @@ struct status {
   uint64_t pid;
   uint32_t state, reserved;
   uint64_t code;
+  uint64_t image_revision;
 };
 extern uint64_t mochios_posix_capture_snapshot(struct context *, uint64_t,
                                                uint64_t (*)(void))

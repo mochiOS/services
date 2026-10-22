@@ -59,6 +59,7 @@ struct process_status {
   uint64_t process;
   uint32_t state, reserved;
   uint64_t exit_code;
+  uint64_t image_revision;
 };
 static uint32_t get32(const void *p) {
   uint32_t v;

@@ -101,6 +101,7 @@ pub mod process {
                 mnu_abi::PROCESS_STATE_RUNNING
             },
             exit_code: 127,
+            image_revision: 0,
             reserved: 0,
         })
     }

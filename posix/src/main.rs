@@ -584,6 +584,13 @@ fn main() {
                 })
             }
             (Some(peer), Some((header, payload)), true)
+                if header.opcode == protocol::OP_SET_PROCESS_GROUP =>
+            {
+                Some(service.handle_process_group_request(
+                    peer, header, payload, &attachments, &mut processes,
+                ))
+            }
+            (Some(peer), Some((header, payload)), true)
                 if matches!(
                     header.opcode, protocol::OP_CPU_TIMER_GET | protocol::OP_CPU_TIMER_SET
                 ) =>
@@ -2021,6 +2028,11 @@ struct RuntimeProcesses;
 
 #[cfg(target_os = "mochios")]
 impl posix_service::ProcessBackend<u32> for RuntimeProcesses {
+    fn image_status(&mut self, process: u32) -> Result<mnu_abi::ProcessStatus, i32> {
+        mochi_user_platform::process::handle_status(process)
+            .map_err(|error| process_control::lifecycle_failure(error.raw()))
+    }
+
     fn execution_usage(&mut self, process: u32) -> Result<mnu_abi::ProcessExecutionUsage, i32> {
         mochi_user_platform::process::execution_usage(Some(process))
             .map_err(|error| i32::try_from(error.raw()).unwrap_or(-5))
