@@ -20,6 +20,9 @@ static ENDPOINT_OWNER:Cell<u64>=const{Cell::new(1)};
 static IMAGE_READS:Cell<u32>=const{Cell::new(0)};
 static CONSUMED:Cell<u32>=const{Cell::new(0)};
 static REPLIES:Cell<u32>=const{Cell::new(0)};
+static REPLY_FAILURE:Cell<bool>=const{Cell::new(false)};
+static ENCODE_FAILURE:Cell<bool>=const{Cell::new(false)};
+static PAYLOAD_FAILURE:Cell<bool>=const{Cell::new(false)};
 static STATUS:Cell<i32>=const{Cell::new(0)};
 }
 pub const STATUS_EAGAIN:i32=-11;pub const STATUS_ESRCH:i32=-3;
@@ -32,6 +35,7 @@ pub mod mnu_abi {
 #[derive(Clone,Copy)]pub struct PeerIdentity{pub process_id:u64}
 #[derive(Clone,Copy)]pub struct RequestImage(u64);
 #[derive(Clone,Copy)]pub struct WaitRequest;
+pub type WaitInfo=i32;
 pub struct PosixService<T=u32>(std::marker::PhantomData<T>);
 impl PosixService<u32> {
 fn validate_request_image(&mut self,_:PeerIdentity,image:RequestImage,_:&mut RuntimeProcesses)->Result<(),i32>{
@@ -40,8 +44,8 @@ fn validate_request_image(&mut self,_:PeerIdentity,image:RequestImage,_:&mut Run
  if image.0!=IMAGE.get(){Err(STATUS_ESRCH)}else{Ok(())}
 }
 fn validate_wait_delivery_epoch(&self,_:PeerIdentity,_:mnu_abi::ExecutionIdentity,_:u64)->Result<(),i32>{Ok(())}
-fn wait_child_info(&mut self,_:PeerIdentity,_:WaitRequest,_:&mut RuntimeFilesystem,_:&mut RuntimeProcesses)->Result<i32,i32>{
- CONSUMED.set(CONSUMED.get()+1);Ok(37)
+fn wait_child_info_with_reply<R:FnOnce(i32)->bool>(&mut self,_:PeerIdentity,_:WaitRequest,_:&mut RuntimeFilesystem,_:&mut RuntimeProcesses,reply:R)->Result<Option<i32>,i32>{
+ if reply(37){CONSUMED.set(CONSUMED.get()+1);Ok(Some(37))}else{Ok(None)}
 }
 fn poll_wait_signal_info(&mut self,_:PeerIdentity,_:mnu_abi::ExecutionIdentity,_:u64,_:u64,_:Option<u64>,_:u64)->Result<Option<u32>,i32>{
  CONSUMED.set(CONSUMED.get()+1);Ok(Some(10))
@@ -55,14 +59,15 @@ pub fn endpoint_execution_identity(_:u64)->Result<crate::mnu_abi::ExecutionIdent
  if crate::ENDPOINT_FAILURE.get(){Err(crate::NativeError)}else{Ok(crate::mnu_abi::ExecutionIdentity{process_id:crate::ENDPOINT_OWNER.get(),thread_id:11})}
 }
 pub fn reply(_:u64,bytes:&[u8])->Result<u64,crate::NativeError>{
- crate::REPLIES.set(crate::REPLIES.get()+1);crate::STATUS.set(i32::from_le_bytes(bytes[..4].try_into().unwrap()));Ok(0)
+ crate::REPLIES.set(crate::REPLIES.get()+1);crate::STATUS.set(i32::from_le_bytes(bytes[..4].try_into().unwrap()));
+ if crate::REPLY_FAILURE.get(){Err(crate::NativeError)}else{Ok(0)}
 }}
 mod time {pub fn monotonic_nanoseconds()->Result<u64,crate::NativeError>{Ok(100)}}
-pub struct Header{i:i32}pub struct Response{header:Header,payload:Vec<u8>}
-pub fn encode(header:Header,_:&[u8],out:&mut[u8])->Result<usize,()> {out[..4].copy_from_slice(&header.i.to_le_bytes());Ok(4)}
-fn wait_info_response(_:u64,result:Result<i32,i32>,_:bool)->Response{response(result.map(|_|()))}
+pub struct Header{status:i32}pub struct Response{header:Header,payload:Vec<u8>}
+pub fn encode(header:Header,_:&[u8],out:&mut[u8])->Result<usize,()> {if ENCODE_FAILURE.get(){return Err(())}out[..4].copy_from_slice(&header.status.to_le_bytes());Ok(4)}
+fn wait_info_response(_:u64,result:Result<i32,i32>,_:bool)->Response{if PAYLOAD_FAILURE.get(){response(Err(-22))}else{response(result.map(|_|()))}}
 fn signal_wait_response(_:u64,result:Result<u32,i32>)->Response{response(result.map(|_|()))}
-fn response(result:Result<(),i32>)->Response{Response{header:Header{i:result.err().unwrap_or(0)},payload:vec![]}}
+fn response(result:Result<(),i32>)->Response{Response{header:Header{status:result.err().unwrap_or(0)},payload:vec![]}}
 #[derive(Clone,Copy)]struct PendingWait {
 sender:u64,peer:PeerIdentity,request_id:u64,request:WaitRequest,
 guard:Option<(mnu_abi::ExecutionIdentity,u64)>,detailed:bool,image:RequestImage,
@@ -85,15 +90,23 @@ mask:u64,epoch:u64,deadline:Option<u64>,image:RequestImage,
     ));
     program.push_str(probe::between(
         main,
+        "fn reply_wait_info(",
+        "#[cfg(target_os = \"mochios\")]\nfn complete_pending_waits(",
+    ));
+    program.push_str(probe::between(
+        main,
         "fn complete_pending_waits(",
         "#[cfg(target_os = \"mochios\")]\nfn wait_for_request_or_child(",
     ));
     program.push_str(
         r#"
 fn main(){
-for signal in [false,true] {for guarded in [false,true] {for mode in 0..6 {
+for signal in [false,true] {for guarded in [false,true] {for mode in 0..9 {
+ if signal&&mode>=6{continue}
  IMAGE.set(if mode==1{1}else{0});FAILURE.set(match mode{2=>-5,5=>-3,_=>0});
  ENDPOINT_OWNER.set(if mode==4{2}else{1});IMAGE_READS.set(0);
+ REPLY_FAILURE.set(mode==6);
+ ENCODE_FAILURE.set(mode==7);PAYLOAD_FAILURE.set(mode==8);
  ENDPOINT_FAILURE.set(mode==3);CONSUMED.set(0);REPLIES.set(0);STATUS.set(99);
  let mut service=PosixService(std::marker::PhantomData);let mut processes=RuntimeProcesses;
  if signal {
@@ -114,8 +127,8 @@ for signal in [false,true] {for guarded in [false,true] {for mode in 0..6 {
  assert!(pending.is_empty());
  }
  assert_eq!(CONSUMED.get(),u32::from(mode==0),"signal={signal}, mode={mode}");
- assert_eq!(REPLIES.get(),1);
- assert_eq!(STATUS.get(),match mode{0=>0,2=>-5,4=>-1,_=>-3});
+ assert_eq!(REPLIES.get(),u32::from(mode!=7));
+ assert_eq!(STATUS.get(),match mode{0|6=>0,2=>-5,4=>-1,7=>99,8=>-22,_=>-3});
  assert_eq!(IMAGE_READS.get(),u32::from(![3,4].contains(&mode)));
 }}}
 }

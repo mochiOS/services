@@ -1898,6 +1898,26 @@ impl<H: Copy> PosixService<H> {
         filesystem: &mut F,
         processes: &mut P,
     ) -> Result<protocol::WaitInfo, i32> {
+        self.wait_child_info_with_reply(peer, request, filesystem, processes, |_| true)?
+            .ok_or(protocol::STATUS_EIO)
+    }
+
+    /// Select under exclusive service access, but consume only when the
+    /// transport accepts the reply. `Ok(None)` means delivery failed; the
+    /// event and waited CPU accounting remain available to another waiter.
+    pub fn wait_child_info_with_reply<F, P, R>(
+        &mut self,
+        peer: PeerIdentity,
+        request: protocol::WaitRequest,
+        filesystem: &mut F,
+        processes: &mut P,
+        reply: R,
+    ) -> Result<Option<protocol::WaitInfo>, i32>
+    where
+        F: FilesystemBackend<H>,
+        P: ProcessBackend<H>,
+        R: FnOnce(protocol::WaitInfo) -> bool,
+    {
         self.matching_child_ids(peer, request)?;
         self.reap_discarded_children_for(Some(peer.process_id), filesystem, processes)?;
         let candidates = self.matching_child_ids(peer, request)?;
@@ -1926,13 +1946,14 @@ impl<H: Copy> PosixService<H> {
                     .map(|signal| signal & 0x7f)
                     .unwrap_or_else(|| ((exit_code & 0xff) as u32) << 8);
                 if request.options & protocol::WAIT_NOWAIT != 0 {
-                    return Ok(protocol::WaitInfo {
+                    let info = protocol::WaitInfo {
                         result: protocol::WaitResult {
                             process_id: child,
                             status,
                         },
                         real_uid,
-                    });
+                    };
+                    return Ok(reply(info).then_some(info));
                 }
                 let usage = processes.execution_usage(handle)?;
                 if usage.ticks_per_second == 0 || usage.reserved != 0 {
@@ -1955,30 +1976,41 @@ impl<H: Copy> PosixService<H> {
                     .checked_add(descendant)?;
                 // Compute and validate first. Backend failures and overflow
                 // leave the child waitable and do not partially add its time.
-                self.reap_child(peer.process_id, child, filesystem, processes)?;
-                self.process_wait_states.get_mut(&peer.process_id)
-                    .unwrap().waited_cpu = total;
-                return Ok(protocol::WaitInfo {
+                self.observe_process_exit(child, processes)?;
+                let info = protocol::WaitInfo {
                     result: protocol::WaitResult {
                         process_id: child,
                         status,
                     },
                     real_uid,
-                });
+                };
+                if !reply(info) {
+                    return Ok(None);
+                }
+                // No fallible observation or accounting follows publication.
+                self.reap_observed_child(peer.process_id, child, filesystem, processes);
+                self.process_wait_states.get_mut(&peer.process_id)
+                    .unwrap().waited_cpu = total;
+                return Ok(Some(info));
             }
             can_change = true;
             if let Some(status) = self
                 .process_wait_states
                 .get_mut(&child)
-                .and_then(|state| state.take_status(request.options))
+                .and_then(|state| state.take_status(request.options | protocol::WAIT_NOWAIT))
             {
-                return Ok(protocol::WaitInfo {
+                let info = protocol::WaitInfo {
                     result: protocol::WaitResult {
                         process_id: child,
                         status,
                     },
                     real_uid,
-                });
+                };
+                if !reply(info) {
+                    return Ok(None);
+                }
+                self.process_wait_states.get_mut(&child).unwrap().take_status(request.options);
+                return Ok(Some(info));
             }
         }
         // An exited child cannot subsequently stop or continue. Keep it
@@ -1988,7 +2020,8 @@ impl<H: Copy> PosixService<H> {
             return Err(protocol::STATUS_ECHILD);
         }
         if request.options & protocol::WAIT_NOHANG != 0 {
-            Ok(protocol::WaitInfo::default())
+            let info = protocol::WaitInfo::default();
+            Ok(reply(info).then_some(info))
         } else {
             Err(protocol::STATUS_EAGAIN)
         }
@@ -2085,6 +2118,19 @@ impl<H: Copy> PosixService<H> {
         processes: &mut P,
     ) -> Result<(), i32> {
         self.observe_process_exit(child_id, processes)?;
+        self.reap_observed_child(parent_id, child_id, filesystem, processes);
+        Ok(())
+    }
+
+    // The caller has completed all fallible exit observations. Keep cleanup
+    // infallible so a published wait reply cannot leave a waitable duplicate.
+    fn reap_observed_child<F: FilesystemBackend<H>, P: ProcessBackend<H>>(
+        &mut self,
+        parent_id: u64,
+        child_id: u64,
+        filesystem: &mut F,
+        processes: &mut P,
+    ) {
         self.cancel_owned_forks(child_id, filesystem);
         self.resource_policies.retain(|(owner, _)| *owner != child_id);
         self.orphaned_processes.remove(&child_id);
@@ -2126,7 +2172,6 @@ impl<H: Copy> PosixService<H> {
         if let Some(handle) = self.processes.remove(&child_id) {
             processes.release(handle);
         }
-        Ok(())
     }
 
     fn process_info_payload(&self, caller_id: u64, payload: &[u8]) -> Result<Vec<u8>, i32> {

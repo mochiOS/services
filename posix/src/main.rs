@@ -1029,7 +1029,10 @@ fn main() {
                             None => Ok(()),
                         });
                         match validated.and_then(|()| {
-                            service.wait_child_info(peer, request, &mut filesystem, &mut processes)
+                            service.wait_child_info_with_reply(
+                                peer, request, &mut filesystem, &mut processes,
+                                |info| reply_wait_info(sender, header.request_id, Ok(info), detailed),
+                            )
                         }) {
                             Err(protocol::STATUS_EAGAIN) => {
                                 pending_waits.push(PendingWait {
@@ -1043,8 +1046,9 @@ fn main() {
                                 });
                                 None
                             }
-                            response => Some(posix_service::ObjectResponse {
-                                response: wait_info_response(header.request_id, response, detailed),
+                            Ok(_) => None,
+                            Err(error) => Some(posix_service::ObjectResponse {
+                                response: wait_info_response(header.request_id, Err(error), detailed),
                                 handles: Vec::new(),
                             }),
                         }
@@ -1808,6 +1812,28 @@ struct PendingWait {
 }
 
 #[cfg(target_os = "mochios")]
+fn reply_wait_info(
+    sender: u64,
+    request_id: u64,
+    result: Result<mochios_posix_protocol::WaitInfo, i32>,
+    detailed: bool,
+) -> bool {
+    use mochi_user_platform as platform;
+    use mochios_posix_protocol as protocol;
+
+    let was_success = result.is_ok();
+    let response = wait_info_response(request_id, result, detailed);
+    // An encoding fallback may produce an error response, not a successful
+    // publication of the selected event. Never consume on that fallback.
+    let publishes_event = !was_success || response.header.status == 0;
+    let mut bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
+    match protocol::encode(response.header, &response.payload, &mut bytes) {
+        Ok(length) => platform::ipc::reply(sender, &bytes[..length]).is_ok() && publishes_event,
+        Err(_) => false,
+    }
+}
+
+#[cfg(target_os = "mochios")]
 fn complete_pending_waits(
     pending: &mut Vec<PendingWait>,
     service: &mut posix_service::PosixService<u32>,
@@ -1829,16 +1855,18 @@ fn complete_pending_waits(
             }
             None => Ok(()),
         });
-        let result = validated
-            .and_then(|()| service.wait_child_info(wait.peer, wait.request, filesystem, processes));
+        let result = validated.and_then(|()| {
+            service.wait_child_info_with_reply(
+                wait.peer, wait.request, filesystem, processes,
+                |info| reply_wait_info(wait.sender, wait.request_id, Ok(info), wait.detailed),
+            )
+        });
         if result == Err(protocol::STATUS_EAGAIN) {
             index += 1;
             continue;
         }
-        let response = wait_info_response(wait.request_id, result, wait.detailed);
-        let mut bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
-        if let Ok(length) = protocol::encode(response.header, &response.payload, &mut bytes) {
-            let _ = platform::ipc::reply(wait.sender, &bytes[..length]);
+        if let Err(error) = result {
+            reply_wait_info(wait.sender, wait.request_id, Err(error), wait.detailed);
         }
         pending.swap_remove(index);
     }

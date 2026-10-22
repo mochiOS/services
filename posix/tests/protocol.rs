@@ -42,6 +42,9 @@ mod child_continue_image;
 #[path = "support/request_image.rs"]
 mod request_image;
 
+#[path = "support/wait_reply.rs"]
+mod wait_reply;
+
 #[path = "support/alarm.rs"]
 mod alarm;
 
