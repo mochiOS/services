@@ -105,6 +105,9 @@ mod directory_request;
 #[path = "support/fchdir_request.rs"]
 mod fchdir_request;
 
+#[path = "support/file_request.rs"]
+mod file_request;
+
 #[path = "support/file_time_protocol.rs"]
 mod file_time_protocol;
 
@@ -1419,6 +1422,9 @@ struct RecordingFilesystem {
     open_hook: Option<Box<dyn FnMut()>>,
     query_hook: Option<Box<dyn FnMut() -> Result<(), i32>>>,
     mutation_hook: Option<Box<dyn FnMut() -> Result<(), i32>>>,
+    file_hook: Option<Box<dyn FnMut(u16) -> Result<(), i32>>>,
+    chmod_groups: Vec<u32>,
+    chown_groups: Vec<u32>,
     root_credentials: Option<(u32, u32, Vec<u32>)>,
     admission_calls: Vec<(u16, Option<AttachedObject<u32>>)>,
     admission_response: Option<Result<OpenedObject<u32>, i32>>,
@@ -1730,6 +1736,9 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         length: u64,
         growth_ceiling: u64,
     ) -> Result<(), i32> {
+        if let Some(hook) = &mut self.file_hook {
+            hook(protocol::OP_FTRUNCATE)?;
+        }
         self.truncated = Some((file, length));
         self.truncate_ceiling = Some(growth_ceiling);
         Ok(())
@@ -1741,9 +1750,13 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         mode: u32,
         effective_uid: u32,
         effective_gid: u32,
-        _supplementary_groups: &[u32],
+        supplementary_groups: &[u32],
     ) -> Result<(), i32> {
+        if let Some(hook) = &mut self.file_hook {
+            hook(protocol::OP_FCHMOD)?;
+        }
         self.chmod_file = Some((file, mode, effective_uid, effective_gid));
+        self.chmod_groups = supplementary_groups.to_vec();
         Ok(())
     }
 
@@ -1754,9 +1767,13 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         gid: u32,
         effective_uid: u32,
         effective_gid: u32,
-        _supplementary_groups: &[u32],
+        supplementary_groups: &[u32],
     ) -> Result<(), i32> {
+        if let Some(hook) = &mut self.file_hook {
+            hook(protocol::OP_FCHOWN)?;
+        }
         self.chown_file = Some((file, uid, gid, effective_uid, effective_gid));
+        self.chown_groups = supplementary_groups.to_vec();
         Ok(())
     }
 
@@ -1768,6 +1785,9 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         gid: u32,
         groups: &[u32],
     ) -> Result<(), i32> {
+        if let Some(hook) = &mut self.file_hook {
+            hook(protocol::OP_FUTIMENS)?;
+        }
         self.time_file = Some((file, times, uid, gid, groups.to_vec()));
         self.time_error.map_or(Ok(()), Err)
     }
@@ -1787,16 +1807,25 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
     }
 
     fn fsync(&mut self, file: AttachedObject<u32>) -> Result<(), i32> {
+        if let Some(hook) = &mut self.file_hook {
+            hook(protocol::OP_FSYNC)?;
+        }
         self.synced = Some(file);
         Ok(())
     }
 
     fn get_status_flags(&mut self, file: AttachedObject<u32>) -> Result<u32, i32> {
+        if let Some(hook) = &mut self.file_hook {
+            hook(protocol::OP_FGETFL)?;
+        }
         self.flags_file = Some(file);
         Ok(self.status_flags)
     }
 
     fn set_status_flags(&mut self, file: AttachedObject<u32>, flags: u32) -> Result<(), i32> {
+        if let Some(hook) = &mut self.file_hook {
+            hook(protocol::OP_FSETFL)?;
+        }
         self.flags_file = Some(file);
         self.status_flags = flags;
         Ok(())
@@ -1808,6 +1837,9 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         mask: u32,
         flags: u32,
     ) -> Result<(), i32> {
+        if let Some(hook) = &mut self.file_hook {
+            hook(protocol::OP_FUPDATEFL)?;
+        }
         self.flags_file = Some(file);
         self.status_flags = (self.status_flags & !mask) | flags;
         Ok(())

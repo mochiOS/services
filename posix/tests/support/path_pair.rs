@@ -438,7 +438,7 @@ fn runtime_only_dispatches_pair_operations_before_locking_posix_state() {
     }
     // Structural wiring only, not native OS integration evidence.
     let source = include_str!("../../src/main.rs");
-    let preflight = source.split("let prepared_path = ").nth(1).unwrap();
+    let preflight = source.split("let prepared_filesystem = ").nth(1).unwrap();
     assert!(
         preflight.find("path_pair::execute(").unwrap()
             < preflight

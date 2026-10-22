@@ -314,7 +314,7 @@ fn replaced_image_cannot_receive_query_payload_and_unknown_operations_are_not_di
     }
     // Structural wiring check only; this is not a native OS integration test.
     let source = include_str!("../../src/main.rs");
-    let preflight = source.split("let prepared_path = ").nth(1).unwrap();
+    let preflight = source.split("let prepared_filesystem = ").nth(1).unwrap();
     assert!(
         preflight.find("path_query::execute(").unwrap()
             < preflight
@@ -322,7 +322,7 @@ fn replaced_image_cannot_receive_query_payload_and_unknown_operations_are_not_di
                 .unwrap()
     );
     let completion = preflight
-        .split("if prepared_path.is_some()")
+        .split("if prepared_filesystem.is_some()")
         .nth(1)
         .unwrap();
     assert!(

@@ -33,6 +33,7 @@ pub mod path_query;
 pub mod path_mutation;
 pub mod path_pair;
 pub mod directory_request;
+pub mod file_request;
 mod fault_signal;
 mod signal_origin;
 mod alarm;
@@ -3876,14 +3877,6 @@ impl<H: Copy> PosixService<H> {
                 handles: Vec::new(),
             };
         }
-        if let Some(required) = protocol::file_mutation_rights(header.opcode) {
-            if handles.len() != 1 {
-                return object_error(header.request_id, STATUS_EINVAL);
-            }
-            if handles[0].rights & required != required {
-                return object_error(header.request_id, -13);
-            }
-        }
         if matches!(
             header.opcode,
             protocol::OP_OPEN_AT
@@ -3943,168 +3936,15 @@ impl<H: Copy> PosixService<H> {
             protocol::OP_CHDIR_AT | protocol::OP_CHROOT_AT | protocol::OP_FCHDIR => {
                 directory_request::dispatch(self, peer, header, payload, handles, filesystem)
             }
-            protocol::OP_FTRUNCATE => {
-                if handles.len() != 1 {
-                    return object_error(header.request_id, STATUS_EINVAL);
-                }
-                if !self.sessions.contains_key(&peer.process_id) {
-                    return object_error(header.request_id, protocol::STATUS_ESRCH);
-                }
-                let length = match protocol::decode_file_length(payload) {
-                    Ok(length) => length,
-                    Err(_) => return object_error(header.request_id, STATUS_EINVAL),
-                };
-                let ceiling = self.resource_limits
-                    .get(&(peer.process_id, protocol::RLIMIT_FSIZE))
-                    .copied().unwrap_or_default().soft;
-                let result = match admission {
-                    Some(ticket) => filesystem.ftruncate_admitted(handles[0], length, ceiling, ticket),
-                    None => filesystem.ftruncate(handles[0], length, ceiling).map_err(MutationError::Failed),
-                };
-                match result {
-                    Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
-                    Err(error) => object_mutation_error(header.request_id, error, admission.is_some(), filesystem),
-                }
-            }
-            protocol::OP_FUTIMENS => {
-                let times = match protocol::file_time::decode(payload) {
-                    Ok(times) => times,
-                    Err(_) => return object_error(header.request_id, STATUS_EINVAL),
-                };
-                let session = match self.sessions.get(&peer.process_id) {
-                    Some(session) => *session,
-                    None => return object_error(header.request_id, protocol::STATUS_ESRCH),
-                };
-                let groups = self
-                    .supplementary_groups
-                    .get(&peer.process_id)
-                    .cloned()
-                    .unwrap_or_default();
-                match filesystem.futimens(
-                    handles[0], times, session.effective_uid, session.effective_gid, &groups,
-                ) {
-                    Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
-                    Err(status) => object_error(header.request_id, status),
-                }
-            }
-            protocol::OP_FCHMOD => {
-                if handles.len() != 1 || payload.len() != 4 {
-                    return object_error(header.request_id, STATUS_EINVAL);
-                }
-                let session = match self.sessions.get(&peer.process_id) {
-                    Some(session) => *session,
-                    None => return object_error(header.request_id, protocol::STATUS_ESRCH),
-                };
-                let mode = u32::from_le_bytes(payload.try_into().unwrap());
-                if mode & !0o7777 != 0 {
-                    return object_error(header.request_id, STATUS_EINVAL);
-                }
-                let supplementary_groups = self
-                    .supplementary_groups
-                    .get(&peer.process_id)
-                    .cloned()
-                    .unwrap_or_default();
-                match filesystem.fchmod(
-                    handles[0],
-                    mode,
-                    session.effective_uid,
-                    session.effective_gid,
-                    &supplementary_groups,
-                ) {
-                    Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
-                    Err(status) => object_error(header.request_id, status),
-                }
-            }
-            protocol::OP_FCHOWN => {
-                if handles.len() != 1 {
-                    return object_error(header.request_id, STATUS_EINVAL);
-                }
-                let session = match self.sessions.get(&peer.process_id) {
-                    Some(session) => *session,
-                    None => return object_error(header.request_id, protocol::STATUS_ESRCH),
-                };
-                let (uid, gid) = match protocol::decode_file_owner(payload) {
-                    Ok(owner) => owner,
-                    Err(_) => return object_error(header.request_id, STATUS_EINVAL),
-                };
-                let supplementary_groups = self
-                    .supplementary_groups
-                    .get(&peer.process_id)
-                    .cloned()
-                    .unwrap_or_default();
-                match filesystem.fchown(
-                    handles[0],
-                    uid,
-                    gid,
-                    session.effective_uid,
-                    session.effective_gid,
-                    &supplementary_groups,
-                ) {
-                    Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
-                    Err(status) => object_error(header.request_id, status),
-                }
-            }
-            protocol::OP_FSYNC => {
-                if !payload.is_empty() || handles.len() != 1 {
-                    return object_error(header.request_id, STATUS_EINVAL);
-                }
-                if !self.sessions.contains_key(&peer.process_id) {
-                    return object_error(header.request_id, protocol::STATUS_ESRCH);
-                }
-                match filesystem.fsync(handles[0]) {
-                    Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
-                    Err(status) => object_error(header.request_id, status),
-                }
-            }
-            protocol::OP_FGETFL => {
-                if !payload.is_empty() || handles.len() != 1 {
-                    return object_error(header.request_id, STATUS_EINVAL);
-                }
-                if !self.sessions.contains_key(&peer.process_id) {
-                    return object_error(header.request_id, protocol::STATUS_ESRCH);
-                }
-                match filesystem.get_status_flags(handles[0]) {
-                    Ok(flags) => {
-                        let mut payload = vec![0; protocol::FILE_FLAGS_PAYLOAD_LEN];
-                        if protocol::encode_file_flags(flags, &mut payload).is_err() {
-                            return object_error(header.request_id, STATUS_EINVAL);
-                        }
-                        object_payload(header.request_id, payload)
-                    }
-                    Err(status) => object_error(header.request_id, status),
-                }
-            }
-            protocol::OP_FSETFL => {
-                if handles.len() != 1 {
-                    return object_error(header.request_id, STATUS_EINVAL);
-                }
-                if !self.sessions.contains_key(&peer.process_id) {
-                    return object_error(header.request_id, protocol::STATUS_ESRCH);
-                }
-                let flags = match protocol::decode_file_flags(payload) {
-                    Ok(flags) if flags & !protocol::MUTABLE_STATUS_FLAGS == 0 => flags,
-                    _ => return object_error(header.request_id, STATUS_EINVAL),
-                };
-                match filesystem.set_status_flags(handles[0], flags) {
-                    Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
-                    Err(status) => object_error(header.request_id, status),
-                }
-            }
-            protocol::OP_FUPDATEFL => {
-                if handles.len() != 1 {
-                    return object_error(header.request_id, STATUS_EINVAL);
-                }
-                if !self.sessions.contains_key(&peer.process_id) {
-                    return object_error(header.request_id, protocol::STATUS_ESRCH);
-                }
-                let (mask, flags) = match protocol::decode_file_flags_update(payload) {
-                    Ok(update) => update,
-                    Err(_) => return object_error(header.request_id, STATUS_EINVAL),
-                };
-                match filesystem.update_status_flags(handles[0], mask, flags) {
-                    Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
-                    Err(status) => object_error(header.request_id, status),
-                }
+            protocol::OP_FTRUNCATE
+            | protocol::OP_FUTIMENS
+            | protocol::OP_FCHMOD
+            | protocol::OP_FCHOWN
+            | protocol::OP_FSYNC
+            | protocol::OP_FGETFL
+            | protocol::OP_FSETFL
+            | protocol::OP_FUPDATEFL => {
+                file_request::dispatch(self, peer, header, payload, handles, admission, filesystem)
             }
             protocol::OP_MKDIR_AT
             | protocol::OP_UNLINK_AT

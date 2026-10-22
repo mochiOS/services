@@ -577,7 +577,7 @@ fn main() {
         } else {
             None
         };
-        let prepared_path = if let (Some(peer), Some((header, payload)), true) =
+        let prepared_filesystem = if let (Some(peer), Some((header, payload)), true) =
             (peer, decoded, attachments_valid)
         {
             if header.opcode == protocol::OP_OPEN_AT && request_image.is_some() {
@@ -609,6 +609,15 @@ fn main() {
                 ))
             } else if posix_service::path_pair::supports(header.opcode) && request_image.is_some() {
                 Some(posix_service::path_pair::execute(
+                    &service_state,
+                    peer,
+                    header,
+                    payload,
+                    &attachments,
+                    &mut filesystem,
+                ))
+            } else if posix_service::file_request::supports(header.opcode) && request_image.is_some() {
+                Some(posix_service::file_request::execute(
                     &service_state,
                     peer,
                     header,
@@ -666,7 +675,7 @@ fn main() {
                     &mut filesystem,
                 ))
             }
-            (Some(peer), Some(_), true) if prepared_path.is_some() => {
+            (Some(peer), Some(_), true) if prepared_filesystem.is_some() => {
                 let validation = request_image
                     .ok_or(protocol::STATUS_EPERM)
                     .and_then(|image| {
@@ -675,7 +684,7 @@ fn main() {
                         )
                     });
                 Some(posix_service::open_request::finish(
-                    prepared_path.unwrap(),
+                    prepared_filesystem.unwrap(),
                     validation,
                     &mut filesystem,
                 ))

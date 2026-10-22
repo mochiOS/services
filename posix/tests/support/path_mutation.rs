@@ -566,7 +566,7 @@ fn image_rejection_discards_ticket_and_runtime_dispatch_precedes_the_state_lock(
     }
     // Structural wiring check only; real IPC still needs a native OS test.
     let source = include_str!("../../src/main.rs");
-    let preflight = source.split("let prepared_path = ").nth(1).unwrap();
+    let preflight = source.split("let prepared_filesystem = ").nth(1).unwrap();
     assert!(
         preflight.find("path_mutation::execute(").unwrap()
             < preflight
