@@ -1,6 +1,7 @@
 pub mod clock;
 pub mod ext4;
 pub mod devfs;
+pub mod device_factory;
 pub mod device_namespace_ipc;
 pub mod namespace;
 mod open_table;
