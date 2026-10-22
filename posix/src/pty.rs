@@ -543,6 +543,8 @@ pub struct PtyManager {
     next_object_id: u64,
     terminals: BTreeMap<u64, PseudoTerminal>,
     objects: BTreeMap<u64, (u64, PtySide)>,
+    // Separate provider objects: a factory keeps identity, not a data open.
+    slave_factories: BTreeMap<u64, u64>,
     pending_signals: VecDeque<TerminalSignal>,
 }
 
@@ -553,6 +555,7 @@ impl PtyManager {
             next_object_id: 2,
             terminals: BTreeMap::new(),
             objects: BTreeMap::new(),
+            slave_factories: BTreeMap::new(),
             pending_signals: VecDeque::new(),
         }
     }
@@ -592,6 +595,34 @@ impl PtyManager {
         terminal.slave_open = true;
         self.objects.insert(object_id, (id, PtySide::Slave));
         Ok(object_id)
+    }
+
+    /// Allocate a resource-scoped factory object, not another master open.
+    ///
+    /// These are service-private object IDs, never wire authority. The IPC
+    /// adapter must identify an explicitly attached, sufficiently authorized
+    /// master Handle before minting, publish a DUPLICATE|TRANSFER-only native
+    /// provider object, and discard it on failed publication.
+    pub fn create_slave_factory(&mut self, master_object_id: u64) -> Result<u64, i32> {
+        let (terminal_id, side) = self.endpoint(master_object_id)?;
+        if side != PtySide::Master {
+            return Err(EBADF);
+        }
+        let object_id = self.allocate_object_id().ok_or(EAGAIN)?;
+        self.slave_factories.insert(object_id, terminal_id);
+        Ok(object_id)
+    }
+
+    /// The adapter must identify an explicitly attached native factory Handle;
+    /// a numeric ID supplied by a requester must never reach this method.
+    /// Namespace admission and native object publication remain its obligation.
+    pub fn open_slave_from_factory(&mut self, factory_object_id: u64) -> Result<u64, i32> {
+        let terminal_id = *self.slave_factories.get(&factory_object_id).ok_or(EBADF)?;
+        let terminal = self.terminals.get(&terminal_id).ok_or(EBADF)?;
+        if !terminal.master_open {
+            return Err(EBADF);
+        }
+        self.reopen_slave(terminal.pair.master_object_id)
     }
 
     fn endpoint(&self, object_id: u64) -> Result<(u64, PtySide), i32> {
@@ -885,6 +916,17 @@ impl PtyManager {
     }
 
     pub fn release(&mut self, object_id: u64) -> Result<(), i32> {
+        if let Some(id) = self.slave_factories.remove(&object_id) {
+            if self
+                .terminals
+                .get(&id)
+                .is_some_and(|terminal| !terminal.master_open && !terminal.slave_open)
+                && !self.slave_factories.values().any(|terminal| *terminal == id)
+            {
+                self.terminals.remove(&id);
+            }
+            return Ok(());
+        }
         let (id, side) = self.endpoint(object_id)?;
         self.objects.remove(&object_id);
         let remove = {
@@ -907,7 +949,9 @@ impl PtyManager {
                 }
                 _ => return Err(EBADF),
             }
-            !terminal.master_open && !terminal.slave_open
+            !terminal.master_open
+                && !terminal.slave_open
+                && !self.slave_factories.values().any(|terminal| *terminal == id)
         };
         if remove {
             self.terminals.remove(&id);
@@ -924,6 +968,7 @@ impl PtyManager {
         if let Some(id) = id {
             self.terminals.remove(&id);
             self.objects.retain(|_, (terminal, _)| *terminal != id);
+            self.slave_factories.retain(|_, terminal| *terminal != id);
             self.pending_signals.retain(|signal| signal.terminal_id != id);
         }
     }
@@ -1051,10 +1096,15 @@ impl PtyManager {
 
     fn allocate_object_id(&mut self) -> Option<u64> {
         const MAX_ID: u64 = i64::MAX as u64;
-        for _ in 0..self.objects.len().saturating_add(1) {
+        for _ in 0..self
+            .objects
+            .len()
+            .saturating_add(self.slave_factories.len())
+            .saturating_add(1)
+        {
             let id = self.next_object_id.clamp(2, MAX_ID);
             self.next_object_id = if id == MAX_ID { 2 } else { id + 1 };
-            if !self.objects.contains_key(&id) {
+            if !self.objects.contains_key(&id) && !self.slave_factories.contains_key(&id) {
                 return Some(id);
             }
         }
