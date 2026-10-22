@@ -96,6 +96,7 @@ struct PseudoTerminal {
     live_objects: BTreeSet<u64>,
     master_open: bool,
     slave_open: bool,
+    slave_locked: bool,
     input: VecDeque<u8>,
     input_records: VecDeque<InputRecord>,
     canonical_input: VecDeque<u8>,
@@ -116,12 +117,13 @@ struct InputRecord {
 }
 
 impl PseudoTerminal {
-    fn new(pair: PtyPair) -> Self {
+    fn new(pair: PtyPair, slave_locked: bool) -> Self {
         Self {
             pair,
             live_objects: BTreeSet::from([pair.master_object_id, pair.slave_object_id]),
             master_open: true,
             slave_open: true,
+            slave_locked,
             input: VecDeque::new(),
             input_records: VecDeque::new(),
             canonical_input: VecDeque::new(),
@@ -565,6 +567,13 @@ impl PtyManager {
     }
 
     pub fn open(&mut self) -> Result<PtyPair, i32> {
+        self.open_with_slave_lock(false)
+    }
+
+    /// Internal pair preparation. A master-only allocator must select the
+    /// locked mode before publishing a factory/name and retire the initial
+    /// slave before returning its master. openpty deliberately stays unlocked.
+    pub fn open_with_slave_lock(&mut self, slave_locked: bool) -> Result<PtyPair, i32> {
         let id = self.allocate_id().ok_or(EAGAIN)?;
         let master_object_id = self.allocate_object_id().ok_or(EAGAIN)?;
         self.objects.insert(master_object_id, (id, PtySide::Master));
@@ -579,7 +588,8 @@ impl PtyManager {
             master_object_id,
             slave_object_id,
         };
-        self.terminals.insert(id, PseudoTerminal::new(pair));
+        self.terminals
+            .insert(id, PseudoTerminal::new(pair, slave_locked));
         self.objects.insert(pair.slave_object_id, (id, PtySide::Slave));
         Ok(pair)
     }
@@ -592,6 +602,15 @@ impl PtyManager {
         let (id, side) = self.endpoint(master_object_id)?;
         if side != PtySide::Master {
             return Err(EBADF);
+        }
+        // Check admission before allocating an ID or changing live-object /
+        // readiness state. All factory opens converge here under this lock.
+        let terminal = self.terminals.get(&id).ok_or(EBADF)?;
+        if !terminal.master_open {
+            return Err(EBADF);
+        }
+        if terminal.slave_locked {
+            return Err(EIO);
         }
         let object_id = self.allocate_object_id().ok_or(EAGAIN)?;
         let terminal = self.terminals.get_mut(&id).ok_or(EBADF)?;
@@ -848,6 +867,36 @@ impl PtyManager {
         output_capacity: usize,
     ) -> Result<Vec<u8>, i32> {
         match code {
+            posix_protocol::PTY_CONTROL_SET_SLAVE_LOCK
+            | posix_protocol::PTY_CONTROL_GET_SLAVE_LOCK => {
+                let setting = code == posix_protocol::PTY_CONTROL_SET_SLAVE_LOCK;
+                let value = if setting {
+                    if input.len() != 4 || output_capacity != 0 {
+                        return Err(EINVAL);
+                    }
+                    match u32::from_le_bytes(input.try_into().unwrap()) {
+                        0 => false,
+                        1 => true,
+                        _ => return Err(EINVAL),
+                    }
+                } else {
+                    if !input.is_empty() || output_capacity < 4 {
+                        return Err(EINVAL);
+                    }
+                    false
+                };
+                let (id, side) = self.endpoint(object_id)?;
+                if side != PtySide::Master {
+                    return Err(EINVAL);
+                }
+                let terminal = self.terminals.get_mut(&id).ok_or(EBADF)?;
+                if setting {
+                    terminal.slave_locked = value;
+                    Ok(Vec::new())
+                } else {
+                    Ok(u32::from(terminal.slave_locked).to_le_bytes().to_vec())
+                }
+            }
             posix_protocol::PTY_CONTROL_GET_SLAVE_NAME => {
                 if !input.is_empty() {
                     return Err(EINVAL);

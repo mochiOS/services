@@ -16,6 +16,7 @@
 
 extern int ptsname_r(int, char *, size_t);
 extern char *ptsname(int);
+extern int unlockpt(int);
 extern int tcgetwinsize(int, struct winsize *);
 
 static unsigned mode;
@@ -55,6 +56,11 @@ int main(void) {
   struct termios raw;
   char created_name[64];
   CHECK(openpty(&warm_master, &warm_slave, created_name, NULL, NULL) == 0);
+  CHECK(unlockpt(-1) == -1 && errno == EBADF);
+  CHECK(unlockpt(warm_slave) == -1 && errno == EINVAL);
+  errno = EDOM;
+  CHECK(unlockpt(warm_master) == 0 && errno == EDOM);
+  CHECK(unlockpt(warm_master) == 0 && errno == EDOM);
   char name[64], short_name[1] = {'x'};
   CHECK(ptsname_r(warm_master, name, sizeof(name)) == 0);
   CHECK(strcmp(name, created_name) == 0);

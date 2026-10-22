@@ -93,6 +93,35 @@ fn request(rights: u64) -> Request {
 }
 
 #[test]
+fn locked_slave_admission_reclaims_metadata_without_native_publication() {
+    let mut manager = PtyManager::new();
+    let pair = manager.open_with_slave_lock(true).unwrap();
+    let factory = manager.create_slave_factory(pair.master_object_id).unwrap();
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let mut attached = attachments();
+    let mut publisher = Published::default();
+    assert_eq!(
+        open(
+            &mut manager,
+            &request(R | T).encode(),
+            &mut attached,
+            |_| Ok(factory),
+            |object| adopt(&dropped, object),
+            &mut publisher,
+        ),
+        Err(posix_service::pty::EIO)
+    );
+    assert_eq!(attached.handles[1].handle, 0);
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    assert_eq!(publisher.calls, 0);
+    assert!(publisher.created.is_empty());
+    assert_eq!(
+        manager.signal_object_ids(pair.master_object_id).unwrap(),
+        [pair.master_object_id, pair.slave_object_id]
+    );
+}
+
+#[test]
 fn independent_opens_consume_only_metadata_and_publish_exact_requested_rights() {
     let mut manager = PtyManager::new();
     let pair = manager.open().unwrap();
