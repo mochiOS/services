@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::namespace::{Namespace, Node};
-use crate::open_table::{DeviceOpen, OpenTable};
+use crate::open_table::{DeviceBacking, DeviceOpen, DirectoryOpen, OpenTable};
 use crate::path_walk;
 use ext4plus::dir::Dir;
 use ext4plus::error::Ext4Error;
@@ -1619,7 +1619,7 @@ impl FilesystemService {
             return Err(EINVAL);
         }
         if let Some(open) = self.opens.device(open_id) {
-            open.null.as_ref().ok_or(EISDIR)?.read_into(&mut [])?;
+            open.null()?.read_into(&mut [])?;
             return Ok((Vec::new(), 0));
         }
         let open = self.opens.get(&open_id).ok_or(EBADF)?;
@@ -1643,8 +1643,7 @@ impl FilesystemService {
             return Err(EINVAL);
         }
         if let Some(open) = self.opens.device(open_id) {
-            return open.null.as_ref().ok_or(EISDIR)?
-                .read_into(output).map(|count| (count, 0));
+            return open.null()?.read_into(output).map(|count| (count, 0));
         }
         let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
         refresh_provider_file(open)?;
@@ -1691,8 +1690,7 @@ impl FilesystemService {
             if byte_end.is_some() {
                 return Err(ENOTSUP);
             }
-            return open.null.as_ref().ok_or(EISDIR)?
-                .write(payload).map(|count| (count, 0));
+            return open.null()?.write(payload).map(|count| (count, 0));
         }
         let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
         if open.file.is_none() {
@@ -1736,7 +1734,7 @@ impl FilesystemService {
         length: usize,
     ) -> Result<Vec<u8>, i32> {
         if let Some(open) = self.opens.device(open_id) {
-            open.null.as_ref().ok_or(EISDIR)?.read_at(&mut [], offset)?;
+            open.null()?.read_at(&mut [], offset)?;
             return Ok(Vec::new());
         }
         let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
@@ -1759,7 +1757,7 @@ impl FilesystemService {
             return Err(EINVAL);
         }
         if let Some(open) = self.opens.device(open_id) {
-            return open.null.as_ref().ok_or(EISDIR)?.write_at(payload, offset);
+            return open.null()?.write_at(payload, offset);
         }
         let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
         refresh_provider_file(open)?;
@@ -1800,24 +1798,27 @@ impl FilesystemService {
 
     pub fn provider_seek(&mut self, open_id: u64, offset: i64, basis: u64) -> Result<u64, i32> {
         if let Some(open) = self.opens.device_mut(open_id) {
-            if let Some(null) = &open.null {
-                let basis = match basis {
-                    mnu_abi::HANDLE_SEEK_START => 0,
-                    mnu_abi::HANDLE_SEEK_CURRENT => 1,
-                    mnu_abi::HANDLE_SEEK_END => 2,
-                    _ => return Err(EINVAL),
-                };
-                return null.seek(offset, basis);
-            }
+            let directory = match &mut open.backing {
+                DeviceBacking::Null(null) => {
+                    let basis = match basis {
+                        mnu_abi::HANDLE_SEEK_START => 0,
+                        mnu_abi::HANDLE_SEEK_CURRENT => 1,
+                        mnu_abi::HANDLE_SEEK_END => 2,
+                        _ => return Err(EINVAL),
+                    };
+                    return null.seek(offset, basis);
+                }
+                DeviceBacking::Directory(directory) => directory,
+            };
             let base = match basis {
                 mnu_abi::HANDLE_SEEK_START => 0,
-                mnu_abi::HANDLE_SEEK_CURRENT => i128::from(open.offset),
+                mnu_abi::HANDLE_SEEK_CURRENT => i128::from(directory.offset),
                 mnu_abi::HANDLE_SEEK_END => return Err(EISDIR),
                 _ => return Err(EINVAL),
             };
             let next = base.checked_add(i128::from(offset)).ok_or(EINVAL)?;
-            open.offset = u64::try_from(next).map_err(|_| EINVAL)?;
-            return Ok(open.offset);
+            directory.offset = u64::try_from(next).map_err(|_| EINVAL)?;
+            return Ok(directory.offset);
         }
         let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
         let current = i128::from(open.offset);
@@ -3449,7 +3450,7 @@ impl FilesystemService {
         open_id: u64,
     ) -> Result<Response, i32> {
         if let Some(open) = self.opens.device(open_id) {
-            return Err(if open.null.is_some() { EINVAL } else { EISDIR });
+            return Err(if open.is_directory() { EISDIR } else { EINVAL });
         }
         request.open_id = open_id;
         self.truncate(request)
@@ -3548,8 +3549,7 @@ impl FilesystemService {
     ) -> Result<Response, i32> {
         let mut response = self.success(request);
         if let Some(open) = self.opens.device(open_id) {
-            response.header.flags = open.null.as_ref()
-                .map_or(open.directory_flags, |null| null.flags());
+            response.header.flags = open.flags();
             return Ok(response);
         }
         response.header.flags = self.opens.get(&open_id).ok_or(EBADF)?.status_flags;
@@ -3577,11 +3577,7 @@ impl FilesystemService {
         }
         let update = |old: u32| (old & !mask) | request.flags;
         if let Some(open) = self.opens.device_mut(open_id) {
-            if let Some(null) = &mut open.null {
-                null.set_flags(update(null.flags()))?;
-            } else {
-                open.directory_flags = update(open.directory_flags);
-            }
+            open.set_flags(update(open.flags()))?;
             return Ok(self.success(request));
         }
         let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;

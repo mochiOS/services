@@ -6,12 +6,59 @@ use crate::namespace::Node;
 use crate::null_device::NullDescription;
 use crate::service::OpenFile;
 
+const ENOTDIR: i32 = 20;
+const EISDIR: i32 = 21;
+
 pub(crate) struct DeviceOpen {
     pub node: Node,
-    pub null: Option<NullDescription>,
+    pub backing: DeviceBacking,
+}
+
+pub(crate) enum DeviceBacking {
+    Directory(DirectoryOpen),
+    Null(NullDescription),
+}
+
+pub(crate) struct DirectoryOpen {
     pub offset: u64,
-    pub directory_flags: u32,
+    pub flags: u32,
     pub cursor_records: bool,
+}
+
+impl DeviceOpen {
+    pub fn null(&self) -> Result<&NullDescription, i32> {
+        match &self.backing {
+            DeviceBacking::Null(null) => Ok(null),
+            DeviceBacking::Directory(_) => Err(EISDIR),
+        }
+    }
+    pub fn directory_mut(&mut self) -> Result<&mut DirectoryOpen, i32> {
+        match &mut self.backing {
+            DeviceBacking::Directory(directory) => Ok(directory),
+            DeviceBacking::Null(_) => Err(ENOTDIR),
+        }
+    }
+    pub fn is_directory(&self) -> bool {
+        match &self.backing {
+            DeviceBacking::Directory(_) => true,
+            DeviceBacking::Null(_) => false,
+        }
+    }
+    pub fn flags(&self) -> u32 {
+        match &self.backing {
+            DeviceBacking::Directory(directory) => directory.flags,
+            DeviceBacking::Null(null) => null.flags(),
+        }
+    }
+    pub fn set_flags(&mut self, flags: u32) -> Result<(), i32> {
+        match &mut self.backing {
+            DeviceBacking::Directory(directory) => {
+                directory.flags = flags;
+                Ok(())
+            }
+            DeviceBacking::Null(null) => null.set_flags(flags),
+        }
+    }
 }
 
 enum Description {

@@ -244,10 +244,13 @@ impl FilesystemService {
         } else {
             0
         };
-        let null = if directory {
-            None
-        } else {
-            Some(namespace.open_null(
+        let backing = match node.device_node().ok_or(EIO)?.kind() {
+            crate::devfs::NodeKind::Directory => DeviceBacking::Directory(DirectoryOpen {
+                offset: 0,
+                flags,
+                cursor_records: request.flags & protocol::OPEN_AT_CURSOR_RECORDS != 0,
+            }),
+            crate::devfs::NodeKind::Null => DeviceBacking::Null(namespace.open_null(
                 &node,
                 path_walk::Credentials {
                     uid: credentials.effective_uid,
@@ -257,21 +260,16 @@ impl FilesystemService {
                 read,
                 write,
                 flags,
-            )?)
+            )?),
+            // External data Handles must be published by their actual owner;
+            // until that publication path is attached, never expose a null
+            // stream or filesystem directory Handle for an external device.
+            crate::devfs::NodeKind::External => return Err(ENOTSUP),
         };
         let open_id = self.next_open_id;
         self.next_open_id = open_id.checked_add(1).ok_or(EIO)?;
         let id = node.id();
-        self.opens.insert_device(
-            open_id,
-            DeviceOpen {
-                node,
-                null,
-                offset: 0,
-                directory_flags: flags,
-                cursor_records: request.flags & protocol::OPEN_AT_CURSOR_RECORDS != 0,
-            },
-        );
+        self.opens.insert_device(open_id, DeviceOpen { node, backing });
         let mut response = self.success(request);
         response.header.open_id = open_id;
         response.header.node_id = (id.volume << 32) | u64::from(id.inode);
@@ -294,17 +292,20 @@ impl FilesystemService {
 
     pub(super) fn read_device(&mut self, open_id: u64, length: usize) -> Result<Vec<u8>, i32> {
         let open = self.opens.device(open_id).ok_or(EBADF)?;
-        if let Some(null) = &open.null {
-            null.read_into(&mut [])?;
-            return Ok(Vec::new());
-        }
+        let directory = match &open.backing {
+            DeviceBacking::Null(null) => {
+                null.read_into(&mut [])?;
+                return Ok(Vec::new());
+            }
+            DeviceBacking::Directory(directory) => directory,
+        };
         let entries = self
             .namespace
             .as_ref()
             .ok_or(EIO)?
             .device_entries(&open.node)?;
-        let start = usize::try_from(open.offset).map_err(|_| EINVAL)?;
-        let cursor_records = open.cursor_records;
+        let start = usize::try_from(directory.offset).map_err(|_| EINVAL)?;
+        let cursor_records = directory.cursor_records;
         let mut payload = Vec::new();
         let mut next = start;
         for (id, kind, name) in entries.into_iter().skip(start) {
@@ -336,7 +337,11 @@ impl FilesystemService {
             }
             .map_err(|_| EIO)?;
         }
-        self.opens.device_mut(open_id).ok_or(EBADF)?.offset = next as u64;
+        self.opens
+            .device_mut(open_id)
+            .ok_or(EBADF)?
+            .directory_mut()?
+            .offset = next as u64;
         Ok(payload)
     }
 }

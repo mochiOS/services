@@ -1398,6 +1398,89 @@ fn device_directory_cursor_records_are_opt_in_and_resume_at_the_exact_entry() {
 }
 
 #[test]
+fn explicit_device_backings_keep_directory_cursor_and_null_flags_in_their_own_descriptions() {
+    let fixture = Fixture::new();
+    let mut service = FilesystemService::new(fixture.volume("device-backing-state"));
+    service
+        .mount_devices(
+            b"/dev",
+            filesystem_service::devfs::DeviceFilesystem::default(),
+        )
+        .unwrap();
+    let flags =
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY | protocol::OPEN_AT_CURSOR_RECORDS;
+    let first = device_open(&mut service, b"/dev", flags, PathAnchors::default()).unwrap();
+    let second = device_open(&mut service, b"/dev", flags, PathAnchors::default()).unwrap();
+    let null = device_open(
+        &mut service,
+        b"/dev/null",
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE,
+        PathAnchors::default(),
+    )
+    .unwrap();
+    let bytes = service
+        .provider_read(first, protocol::CURSOR_DIRENT_HEADER_LEN + 1)
+        .unwrap();
+    let (entry, name, _) = protocol::decode_dir_entry(&bytes).unwrap();
+    assert_eq!((entry.next_position, name), (Some(1), b".".as_slice()));
+    service
+        .set_flags_handle(
+            protocol::Header {
+                flags: protocol::OPEN_STATUS_NONBLOCK,
+                ..Default::default()
+            },
+            first,
+        )
+        .unwrap();
+    service
+        .set_flags_handle(
+            protocol::Header {
+                flags: protocol::OPEN_STATUS_APPEND,
+                ..Default::default()
+            },
+            null,
+        )
+        .unwrap();
+    assert_eq!(
+        service.provider_seek(first, 0, mnu_abi::HANDLE_SEEK_CURRENT),
+        Ok(1)
+    );
+    assert_eq!(
+        service.provider_seek(second, 0, mnu_abi::HANDLE_SEEK_CURRENT),
+        Ok(0)
+    );
+    let bytes = service
+        .provider_read(first, protocol::CURSOR_DIRENT_HEADER_LEN + 2)
+        .unwrap();
+    let (entry, name, _) = protocol::decode_dir_entry(&bytes).unwrap();
+    assert_eq!((entry.next_position, name), (Some(2), b"..".as_slice()));
+    for (id, flags) in [
+        (first, protocol::OPEN_STATUS_NONBLOCK),
+        (second, 0),
+        (null, protocol::OPEN_STATUS_APPEND),
+    ] {
+        assert_eq!(
+            service
+                .get_flags_handle(protocol::Header::default(), id)
+                .unwrap()
+                .header
+                .flags,
+            flags
+        );
+    }
+    assert_eq!(service.provider_read_with_offset(first, 1), Err(21));
+    assert_eq!(service.provider_write(first, b"x"), Err(21));
+    assert_eq!(service.provider_read_with_offset(null, 1), Ok((vec![], 0)));
+    assert_eq!(service.provider_write(null, b"discard"), Ok(7));
+    service.provider_close(first).unwrap();
+    assert_eq!(service.provider_read(first, 1), Err(9));
+    assert_eq!(
+        service.provider_seek(second, 0, mnu_abi::HANDLE_SEEK_CURRENT),
+        Ok(0)
+    );
+}
+
+#[test]
 fn device_directory_handles_support_relative_open_cwd_and_confined_roots() {
     let fixture = Fixture::new();
     let mut service = FilesystemService::new(fixture.volume("device-directories"));
