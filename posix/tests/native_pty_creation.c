@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 extern int ptsname_r(int, char *, size_t);
+extern char *ptsname(int);
 extern int tcgetwinsize(int, struct winsize *);
 
 static unsigned mode;
@@ -57,6 +58,9 @@ int main(void) {
   char name[64], short_name[1] = {'x'};
   CHECK(ptsname_r(warm_master, name, sizeof(name)) == 0);
   CHECK(strcmp(name, created_name) == 0);
+  char *cached_name = ptsname(warm_master);
+  CHECK(cached_name != NULL && strcmp(cached_name, name) == 0);
+  CHECK(ptsname(warm_slave) == NULL && errno == ENOTTY);
   CHECK(strncmp(name, "/dev/pts/", 9) == 0);
   CHECK(ptsname_r(warm_master, short_name, sizeof(short_name)) == ERANGE);
   CHECK(short_name[0] == 'x');
