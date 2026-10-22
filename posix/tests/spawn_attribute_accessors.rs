@@ -21,7 +21,7 @@ extern crate self as mochios_posix_client;
 #[derive(Debug,PartialEq)]pub enum SyscallNumber{{MemoryCopy}}
 pub mod memory_copy{{pub const MAX_BYTES:usize=4096;}}
 mod posix_protocol{{pub const MAX_PATH_LEN:usize=4096;}}
-const EFAULT:i32=14;const EINVAL:i32=22;const EIO:i32=5;
+const EFAULT:i32=14;const EINVAL:i32=22;const EIO:i32=5;const ENOMEM:i32=12;
 const ENOSYS:i32=88;const ENOENT:i32=2;const ENAMETOOLONG:i32=91;
 const PAGE_SIZE:usize=4096;
 #[path={:?}]pub mod spawn;
@@ -33,6 +33,20 @@ static NATIVE:AtomicU32=AtomicU32::new(0);
 static CALLS:AtomicU32=AtomicU32::new(0);
 static FAIL_AT:AtomicU32=AtomicU32::new(0);
 static SHORT_AT:AtomicU32=AtomicU32::new(0);
+static LIVE:AtomicU32=AtomicU32::new(0);
+static ALLOC_FAIL:std::sync::atomic::AtomicBool=std::sync::atomic::AtomicBool::new(false);
+unsafe fn malloc(length:usize)->*mut c_void{{
+ assert_ne!(NATIVE.load(Ordering::Relaxed),0);
+ assert_eq!(length,std::mem::size_of::<PosixSpawnAttr>());
+ if ALLOC_FAIL.load(Ordering::Relaxed){{return ptr::null_mut()}}
+ LIVE.fetch_add(1,Ordering::Relaxed);
+ Box::into_raw(Box::new(PosixSpawnAttr::new())).cast()
+}}
+unsafe fn free(value:*mut c_void){{
+ assert_ne!(NATIVE.load(Ordering::Relaxed),0);
+ assert!(LIVE.fetch_sub(1,Ordering::Relaxed)>0);
+ unsafe{{drop(Box::from_raw(value.cast::<PosixSpawnAttr>()))}};
+}}
 fn defer_native_delivery()->Option<upcall_guard::Guard<'static>>{{upcall_guard::Guard::enter(&NATIVE)}}
 fn syscall_errno(result:Result<u64,i32>)->Result<u64,i32>{{result}}
 mod syscall{{
@@ -72,7 +86,7 @@ unsafe extern "C"{{
     program.push_str(
         &probe::between(
             runtime,
-            "#[unsafe(no_mangle)]\npub extern \"C\" fn posix_spawnattr_getflags(",
+            "#[unsafe(no_mangle)]\npub extern \"C\" fn posix_spawnattr_init(",
             "#[unsafe(no_mangle)]\npub extern \"C\" fn posix_spawn_file_actions_init(",
         )
         .replace("#[unsafe(no_mangle)]", ""),
@@ -80,6 +94,42 @@ unsafe extern "C"{{
     program.push_str(
         r#"
 fn main(){
+ // Lifecycle owns its allocation until checked publication succeeds, and
+ // destruction never frees an object while its handle could not be cleared.
+ reset();assert_eq!(posix_spawnattr_init(ptr::null_mut()),EINVAL);
+ reset();assert_eq!(posix_spawnattr_destroy(ptr::null_mut()),EINVAL);
+ let mut empty: *mut PosixSpawnAttr=ptr::null_mut();
+ reset();assert_eq!(posix_spawnattr_destroy(&mut empty),EINVAL);
+ reset();assert_eq!(posix_spawnattr_init(1usize as *mut _),EFAULT);
+ assert_eq!(LIVE.load(Ordering::Relaxed),0);
+ reset();assert_eq!(posix_spawnattr_destroy(1usize as *mut _),EFAULT);
+ ALLOC_FAIL.store(true,Ordering::Relaxed);
+ reset();assert_eq!(posix_spawnattr_init(&mut empty),ENOMEM);
+ assert!(empty.is_null());ALLOC_FAIL.store(false,Ordering::Relaxed);
+ for short in [false,true]{
+  reset();if short{SHORT_AT.store(1,Ordering::Relaxed)}else{FAIL_AT.store(1,Ordering::Relaxed)};
+  assert_eq!(posix_spawnattr_init(&mut empty),if short{EIO}else{EFAULT});
+  assert!(empty.is_null());assert_eq!(LIVE.load(Ordering::Relaxed),0);
+ }
+ // Opaque handles need not be Rust-aligned. The allocated object still is.
+ let mut storage=[0u8;9];let attr=storage.as_mut_ptr().wrapping_add(1).cast();
+ reset();assert_eq!(posix_spawnattr_init(attr),0);
+ assert_eq!(LIVE.load(Ordering::Relaxed),1);
+ let saved=storage;
+ let snapshot=spawn_attributes::read_optional(attr.cast()).unwrap().unwrap();
+ assert_eq!(snapshot.sa_flags,0);assert_eq!(snapshot.sa_pgroup,0);
+ assert_eq!(snapshot.sa_schedparam.sched_priority,0);assert_eq!(snapshot.sa_schedpolicy,0);
+ assert_eq!(snapshot.sa_sigdefault,0);assert_eq!(snapshot.sa_sigmask,0);
+ for call in [1,2]{
+  for short in [false,true]{
+   reset();if short{SHORT_AT.store(call,Ordering::Relaxed)}else{FAIL_AT.store(call,Ordering::Relaxed)};
+   assert_eq!(posix_spawnattr_destroy(attr),if short{EIO}else{EFAULT});
+   assert_eq!(storage,saved);assert_eq!(LIVE.load(Ordering::Relaxed),1);
+  }
+ }
+ reset();assert_eq!(posix_spawnattr_destroy(attr),0);
+ assert_eq!(storage,[0u8;9]);assert_eq!(LIVE.load(Ordering::Relaxed),0);
+ reset();assert_eq!(posix_spawnattr_destroy(attr),EINVAL);
  type Get=fn(*const *mut PosixSpawnAttr,*mut u8)->i32;
  type Set=fn(*mut *mut PosixSpawnAttr,*const u8)->i32;
  let cases:[(usize,usize,Get,Set,&[u8]);6]=[
@@ -188,6 +238,21 @@ fn main(){
  let previous=object.sa_sigmask;
  reset();assert_eq!(posix_spawnattr_setsigmask(&mut handle,truncated.cast()),EFAULT);
  assert_eq!(object.sa_sigmask,previous);
+ // A readable but read-only handle can be decoded, not cleared. Keep the
+ // allocation alive so restoring write access permits a real retry.
+ let protected=pages.cast::<*mut PosixSpawnAttr>();
+ reset();assert_eq!(posix_spawnattr_init(protected),0);
+ let retained=unsafe{ptr::read(protected)};
+ assert_eq!(unsafe{mprotect(pages,4096,1)},0);
+ reset();assert_eq!(posix_spawnattr_destroy(protected),EFAULT);
+ assert_eq!(LIVE.load(Ordering::Relaxed),1);
+ assert_eq!(unsafe{ptr::read(protected)},retained);
+ reset();assert_eq!(posix_spawnattr_init(protected),EFAULT);
+ assert_eq!(LIVE.load(Ordering::Relaxed),1);
+ assert_eq!(unsafe{ptr::read(protected)},retained);
+ assert_eq!(unsafe{mprotect(pages,4096,3)},0);
+ reset();assert_eq!(posix_spawnattr_destroy(protected),0);
+ assert_eq!(LIVE.load(Ordering::Relaxed),0);
  assert_eq!(unsafe{munmap(pages,8192)},0);
  // Known-but-unsupported scheduler flags are storable. Admission, not the
  // attribute accessors, rejects them when the caller actually spawns.
