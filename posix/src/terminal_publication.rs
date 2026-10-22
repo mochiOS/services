@@ -23,6 +23,9 @@ pub struct Lease {
     retire: mpsc::Sender<Name>,
 }
 impl Lease {
+    pub(crate) fn component(&self) -> Option<&[u8]> {
+        self.name.as_ref().map(|name| name.component.as_slice())
+    }
     /// Only service-owned records obtained from successful registration belong
     /// here. This constructor is not reachable through a client wire request.
     pub fn new(name: Name, retire: mpsc::Sender<Name>) -> Self {

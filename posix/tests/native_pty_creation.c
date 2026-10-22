@@ -14,6 +14,9 @@
 #include <termios.h>
 #include <unistd.h>
 
+extern int ptsname_r(int, char *, size_t);
+extern int tcgetwinsize(int, struct winsize *);
+
 static unsigned mode;
 static volatile sig_atomic_t faulted;
 static sigjmp_buf destination;
@@ -49,6 +52,16 @@ int main(void) {
   int warm_master, warm_slave;
   struct termios raw;
   CHECK(openpty(&warm_master, &warm_slave, NULL, NULL, NULL) == 0);
+  char name[64], short_name[1] = {'x'};
+  CHECK(ptsname_r(warm_master, name, sizeof(name)) == 0);
+  CHECK(strncmp(name, "/dev/pts/", 9) == 0);
+  CHECK(ptsname_r(warm_master, short_name, sizeof(short_name)) == ERANGE);
+  CHECK(short_name[0] == 'x');
+  CHECK(ptsname_r(warm_slave, name, sizeof(name)) == ENOTTY);
+  CHECK(ptsname_r(warm_master, name, sizeof(name)) == 0);
+  int reopened = open(name, O_RDWR | O_NOCTTY);
+  CHECK(reopened >= 0 && isatty(reopened) == 1);
+  CHECK(close(reopened) == 0);
   CHECK(tcgetattr(warm_slave, &raw) == 0);
   raw.c_lflag &= ~(ICANON | ECHO | ISIG);
   raw.c_oflag &= ~OPOST;

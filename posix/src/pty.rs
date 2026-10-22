@@ -848,6 +848,31 @@ impl PtyManager {
         output_capacity: usize,
     ) -> Result<Vec<u8>, i32> {
         match code {
+            posix_protocol::PTY_CONTROL_GET_SLAVE_NAME => {
+                if !input.is_empty() {
+                    return Err(EINVAL);
+                }
+                let (id, side) = self.endpoint(object_id)?;
+                if side != PtySide::Master {
+                    return Err(25); // ENOTTY
+                }
+                let component = self
+                    .terminals
+                    .get(&id)
+                    .ok_or(EBADF)?
+                    .name
+                    .as_ref()
+                    .and_then(|name| name.component())
+                    .ok_or(6)?; // ENXIO
+                let mut output = vec![0; posix_protocol::pty_name::MAX_LEN];
+                let length = posix_protocol::pty_name::encode(component, &mut output)
+                    .map_err(|_| EIO)?;
+                if output_capacity < length {
+                    return Err(34); // ERANGE
+                }
+                output.truncate(length);
+                Ok(output)
+            }
             posix_protocol::PTY_CONTROL_FLOW => {
                 if output_capacity != 0 {
                     return Err(EINVAL);
