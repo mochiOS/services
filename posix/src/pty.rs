@@ -4,6 +4,8 @@ use std::vec::Vec;
 use mnu_abi::provider;
 use mochios_posix_protocol as posix_protocol;
 
+mod editing;
+
 pub const EIO: i32 = 5;
 pub const EACCES: i32 = 13;
 pub const EAGAIN: i32 = 11;
@@ -95,6 +97,7 @@ struct PseudoTerminal {
     input_records: VecDeque<InputRecord>,
     canonical_input: VecDeque<u8>,
     output: VecDeque<u8>,
+    edit_echo: VecDeque<u8>,
     attributes: posix_protocol::TerminalAttributes,
     window_size: posix_protocol::TerminalWindowSize,
     output_stopped: bool,
@@ -117,6 +120,7 @@ impl PseudoTerminal {
             input_records: VecDeque::new(),
             canonical_input: VecDeque::new(),
             output: VecDeque::new(),
+            edit_echo: VecDeque::new(),
             attributes: posix_protocol::TerminalAttributes::sane(),
             window_size: posix_protocol::TerminalWindowSize::default(),
             output_stopped: false,
@@ -132,10 +136,12 @@ impl PseudoTerminal {
     fn has_input_capacity(&self) -> bool {
         // VEOF can queue a zero-byte record. Bound metadata as well as data;
         // leave a slot for any pending canonical line before accepting bytes.
-        self.input_occupancy() < BUFFER_CAPACITY && self.input_records.len() < BUFFER_CAPACITY
+        self.edit_echo.is_empty()
+            && self.input_occupancy() < BUFFER_CAPACITY
+            && self.input_records.len() < BUFFER_CAPACITY
     }
 
-    fn canonical_erase_length(&self) -> usize {
+    fn canonical_erase_length(&self, end: usize) -> usize {
         if self.attributes.input_flags & posix_protocol::TERMINAL_IFLAG_IUTF8 == 0 {
             return 1;
         }
@@ -143,7 +149,7 @@ impl PseudoTerminal {
         // Invalid/incomplete encodings remain bytewise: never eat a preceding
         // character just because untrusted input ends in continuation bytes.
         let mut suffix = [0u8; 4];
-        for (index, byte) in self.canonical_input.iter().rev().take(4).enumerate() {
+        for (index, byte) in self.canonical_input.range(..end).rev().take(4).enumerate() {
             suffix[3 - index] = *byte;
             if byte & 0xc0 != 0x80 {
                 return if core::str::from_utf8(&suffix[3 - index..]).is_ok() {
@@ -168,6 +174,9 @@ impl PseudoTerminal {
     }
 
     fn can_append_output(&self, bytes: &[u8]) -> bool {
+        if !self.edit_echo.is_empty() {
+            return false;
+        }
         let required = bytes.iter().copied().fold(0usize, |total, byte| {
             total.saturating_add(self.output_bytes_for(byte))
         });
@@ -289,6 +298,7 @@ impl PseudoTerminal {
         self.canonical_input.clear();
         self.literal_next = false;
         self.output.clear();
+        self.edit_echo.clear();
     }
 
     fn write_master(&mut self, bytes: &[u8]) -> Result<(usize, Vec<u32>), i32> {
@@ -350,8 +360,15 @@ impl PseudoTerminal {
                 }
             }
             if canonical {
-                // IEXTEN currently enables literal-next; word erase/reprint
-                // and output-discard remain unimplemented extension functions.
+                match self.extended_edit(byte) {
+                    Ok(true) => {
+                        consumed += 1;
+                        continue;
+                    }
+                    Err(()) => break,
+                    Ok(false) => {}
+                }
+                // Output-discard remains an unimplemented extension function.
                 let literal =
                     self.attributes.control_characters[posix_protocol::TERMINAL_CC_VLNEXT];
                 if self.attributes.local_flags & posix_protocol::TERMINAL_LFLAG_IEXTEN != 0
@@ -399,7 +416,8 @@ impl PseudoTerminal {
                     if !self.can_append_output(echo) {
                         break;
                     }
-                    let remaining = self.canonical_input.len() - self.canonical_erase_length();
+                    let remaining = self.canonical_input.len()
+                        - self.canonical_erase_length(self.canonical_input.len());
                     self.canonical_input.truncate(remaining);
                     for byte in echo.iter().copied() {
                         self.append_output(byte);
@@ -531,7 +549,9 @@ impl PtyManager {
         }
         let length = maximum.min(terminal.output.len());
         if length != 0 {
-            return Ok(terminal.output.drain(..length).collect());
+            let bytes = terminal.output.drain(..length).collect();
+            terminal.refill_edit_echo();
+            return Ok(bytes);
         }
         if terminal.slave_open {
             Err(EAGAIN)
@@ -624,6 +644,7 @@ impl PtyManager {
             }
             if !terminal.master_open {
                 terminal.output.clear();
+                terminal.edit_echo.clear();
             }
             if flush_input {
                 terminal.input.clear();
@@ -643,6 +664,7 @@ impl PtyManager {
         }
         if !terminal.master_open {
             terminal.output.clear();
+            terminal.edit_echo.clear();
         }
         Ok(())
     }
@@ -658,6 +680,7 @@ impl PtyManager {
         }
         if flags & posix_protocol::TERMINAL_FLUSH_OUTPUT != 0 {
             terminal.output.clear();
+            terminal.edit_echo.clear();
         }
         Ok(())
     }
@@ -892,7 +915,9 @@ impl PtyManager {
             ),
             PtySide::Slave => (
                 !terminal.input_records.is_empty(),
-                terminal.master_open && terminal.output.len() < BUFFER_CAPACITY,
+                terminal.master_open
+                    && terminal.edit_echo.is_empty()
+                    && terminal.output.len() < BUFFER_CAPACITY,
                 !terminal.master_open,
             ),
         };
