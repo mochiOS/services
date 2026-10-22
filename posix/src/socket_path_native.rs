@@ -56,7 +56,10 @@ pub(super) fn snapshot_process(
             .then_some(peer)
     };
     if let Some(peer) = initialize {
-        let mut filesystem = super::RuntimeFilesystem { endpoint };
+        let mut filesystem = super::RuntimeFilesystem {
+            endpoint,
+            device_endpoint: None,
+        };
         posix_service::directory_request::initialize(state, peer, &mut filesystem)?;
     }
     let state = state.lock().map_err(|_| -5)?;

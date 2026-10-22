@@ -162,6 +162,7 @@ fn main() {
         };
     let mut filesystem = RuntimeFilesystem {
         endpoint: filesystem_endpoint,
+        device_endpoint: Some(provider_endpoint_handle),
     };
     let mut processes = RuntimeProcesses;
     if let Err(error) =
@@ -2333,6 +2334,7 @@ fn wait_response(
 #[cfg(target_os = "mochios")]
 struct RuntimeFilesystem {
     endpoint: mochi_user_platform::handle::Handle,
+    device_endpoint: Option<mochi_user_platform::handle::Handle>,
 }
 
 #[cfg(target_os = "mochios")]
@@ -2396,6 +2398,38 @@ type FilesystemMutationRequest = (
 
 #[cfg(target_os = "mochios")]
 impl RuntimeFilesystem {
+    fn metadata_call(
+        &mut self,
+        file: posix_service::AttachedObject<u32>,
+        header: mochios_filesystem_protocol::Header,
+        payload: &[u8],
+    ) -> Result<(), i32> {
+        let endpoint = self.device_endpoint;
+        posix_service::filesystem_metadata::mutate_through_provider(
+            mnu_abi::IpcObjectHandle {
+                handle: file.handle,
+                reserved: 0,
+                rights: file.rights,
+            },
+            |object| {
+                self.empty_call(
+                    header,
+                    payload,
+                    controlled_file_handle(posix_service::AttachedObject {
+                        handle: object.handle,
+                        rights: object.rights,
+                    })?,
+                )
+            },
+            |object| {
+                posix_service::pty_metadata_ipc::query(endpoint.ok_or(-9)?, object, object.rights)
+            },
+            |handle| {
+                let _ = mochi_user_platform::handle::close(handle);
+            },
+        )
+    }
+
     fn open_request(
         &self,
         request: &posix_service::PreparedOpen,
@@ -3113,7 +3147,8 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             .map_err(|_| -22)?;
         let payload =
             Self::credential_payload(effective_uid, effective_gid, supplementary_groups, &body)?;
-        self.empty_call(
+        self.metadata_call(
+            file,
             filesystem::Header {
                 opcode: filesystem::OP_SET_TIMES_HANDLE,
                 request_id: 43,
@@ -3121,7 +3156,6 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
                 ..Default::default()
             },
             &payload,
-            controlled_file_handle(file)?,
         )
     }
 
@@ -3137,7 +3171,8 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
 
         let payload =
             Self::credential_payload(effective_uid, effective_gid, supplementary_groups, &[])?;
-        self.empty_call(
+        self.metadata_call(
+            file,
             filesystem::Header {
                 opcode: filesystem::OP_CHMOD_HANDLE,
                 request_id: 18,
@@ -3146,7 +3181,6 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
                 ..filesystem::Header::default()
             },
             &payload,
-            controlled_file_handle(file)?,
         )
     }
 
@@ -3163,7 +3197,8 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
 
         let payload =
             Self::credential_payload(effective_uid, effective_gid, supplementary_groups, &[])?;
-        self.empty_call(
+        self.metadata_call(
+            file,
             filesystem::Header {
                 opcode: filesystem::OP_CHOWN_HANDLE,
                 request_id: 19,
@@ -3172,7 +3207,6 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
                 ..filesystem::Header::default()
             },
             &payload,
-            controlled_file_handle(file)?,
         )
     }
 

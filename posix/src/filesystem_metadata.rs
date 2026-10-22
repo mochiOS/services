@@ -9,33 +9,58 @@ use mochios_posix_protocol::FileStatus;
 /// the POSIX-state lock: that provider also authorizes concurrent terminal IO.
 pub fn through_provider<T>(
     source: mnu_abi::IpcObjectHandle,
-    mut stat: impl FnMut(mnu_abi::IpcObjectHandle) -> Result<T, i32>,
+    stat: impl FnMut(mnu_abi::IpcObjectHandle) -> Result<T, i32>,
+    query: impl FnOnce(mnu_abi::IpcObjectHandle) -> Result<crate::OpenedObject<u32>, i32>,
+    close: impl FnMut(u32),
+) -> Result<T, i32> {
+    operate(source, mnu_abi::HANDLE_RIGHT_TRANSFER, stat, query, close)
+}
+
+/// Metadata mutations require CONTROL on the explicitly attached data object.
+/// Only EBADF from owner identification permits provider resolution: permission
+/// and mutation errors must never be retried through a different authority.
+/// Like `through_provider`, this must run outside the POSIX-state lock.
+pub fn mutate_through_provider<T>(
+    source: mnu_abi::IpcObjectHandle,
+    operation: impl FnMut(mnu_abi::IpcObjectHandle) -> Result<T, i32>,
+    query: impl FnOnce(mnu_abi::IpcObjectHandle) -> Result<crate::OpenedObject<u32>, i32>,
+    close: impl FnMut(u32),
+) -> Result<T, i32> {
+    operate(
+        source,
+        mnu_abi::HANDLE_RIGHT_CONTROL | mnu_abi::HANDLE_RIGHT_TRANSFER,
+        operation,
+        query,
+        close,
+    )
+}
+
+fn operate<T>(
+    source: mnu_abi::IpcObjectHandle,
+    rights: u64,
+    mut operation: impl FnMut(mnu_abi::IpcObjectHandle) -> Result<T, i32>,
     query: impl FnOnce(mnu_abi::IpcObjectHandle) -> Result<crate::OpenedObject<u32>, i32>,
     mut close: impl FnMut(u32),
 ) -> Result<T, i32> {
-    let transfer = mnu_abi::HANDLE_RIGHT_TRANSFER;
-    if source.handle == 0 || source.reserved != 0 || source.rights & transfer == 0 {
+    if source.handle == 0 || source.reserved != 0 || source.rights & rights != rights {
         return Err(-13);
     }
-    let source = mnu_abi::IpcObjectHandle {
-        rights: transfer,
-        ..source
-    };
-    match stat(source) {
+    let source = mnu_abi::IpcObjectHandle { rights, ..source };
+    match operation(source) {
         Err(-9) => {}
         result => return result,
     }
     let metadata = query(source)?;
-    if metadata.handle == 0 || metadata.handle == source.handle || metadata.rights != transfer {
+    if metadata.handle == 0 || metadata.handle == source.handle || metadata.rights != rights {
         if metadata.handle != 0 && metadata.handle != source.handle {
             close(metadata.handle);
         }
         return Err(-5);
     }
-    let result = stat(mnu_abi::IpcObjectHandle {
+    let result = operation(mnu_abi::IpcObjectHandle {
         handle: metadata.handle,
         reserved: 0,
-        rights: transfer,
+        rights,
     });
     close(metadata.handle);
     result

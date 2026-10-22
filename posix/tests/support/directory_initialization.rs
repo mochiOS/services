@@ -186,7 +186,7 @@ fn socket_worker_initializes_before_reading_directory_policy_but_not_under_the_s
     assert!(initialization < captured);
     assert!(
         snapshot[..initialization]
-            .contains("let mut filesystem = super::RuntimeFilesystem { endpoint }")
+            .contains("let mut filesystem = super::RuntimeFilesystem {")
     );
     assert!(snapshot[..initialization].contains("let initialize = {"));
     let after_initialization = &snapshot[initialization..];
