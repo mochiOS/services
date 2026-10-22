@@ -21,8 +21,13 @@ pub struct InputMethod {
 
 impl InputMethod {
     pub fn open_system_dictionary() -> Self {
+        Self::open_dictionary(DICTIONARY_PATH)
+    }
+
+    /// Opens the same conversion engine against an explicitly supplied dictionary.
+    pub fn open_dictionary(path: impl AsRef<std::path::Path>) -> Self {
         Self {
-            engine: Engine::open(DICTIONARY_PATH).ok(),
+            engine: Engine::open(path).ok(),
             enabled: false,
         }
     }
