@@ -545,6 +545,7 @@ pub struct PtyManager {
     objects: BTreeMap<u64, (u64, PtySide)>,
     // Separate provider objects: a factory keeps identity, not a data open.
     slave_factories: BTreeMap<u64, u64>,
+    metadata: BTreeMap<u64, crate::pty_metadata::Reference>,
     pending_signals: VecDeque<TerminalSignal>,
 }
 
@@ -556,6 +557,7 @@ impl PtyManager {
             terminals: BTreeMap::new(),
             objects: BTreeMap::new(),
             slave_factories: BTreeMap::new(),
+            metadata: BTreeMap::new(),
             pending_signals: VecDeque::new(),
         }
     }
@@ -623,6 +625,34 @@ impl PtyManager {
             return Err(EBADF);
         }
         self.reopen_slave(terminal.pair.master_object_id)
+    }
+
+    /// Retain the admitted filesystem metadata reference for this independent
+    /// open, not the terminal or factory lifetime. Failed native publication
+    /// must release the returned open ID; dup/fork share that same native open.
+    pub fn open_slave_with_metadata(
+        &mut self,
+        factory_object_id: u64,
+        metadata: crate::pty_metadata::Reference,
+    ) -> Result<u64, i32> {
+        let object_id = self.open_slave_from_factory(factory_object_id)?;
+        self.metadata.insert(object_id, metadata);
+        Ok(object_id)
+    }
+
+    /// Only the adapter's native identification of an attached data Handle may
+    /// select an open. Inline IDs and caller-reported rights are not authority.
+    pub fn duplicate_slave_metadata(
+        &self,
+        object_id: u64,
+        source_rights: u64,
+        requested_rights: u64,
+    ) -> Result<u32, i32> {
+        self.slave_terminal_id(object_id)?;
+        self.metadata
+            .get(&object_id)
+            .ok_or(ENOTSUP)?
+            .duplicate(source_rights, requested_rights)
     }
 
     fn endpoint(&self, object_id: u64) -> Result<(u64, PtySide), i32> {
@@ -929,6 +959,7 @@ impl PtyManager {
         }
         let (id, side) = self.endpoint(object_id)?;
         self.objects.remove(&object_id);
+        self.metadata.remove(&object_id);
         let remove = {
             let terminal = self.terminals.get_mut(&id).ok_or(EBADF)?;
             terminal.live_objects.remove(&object_id);
@@ -966,6 +997,11 @@ impl PtyManager {
             (terminal.pair == pair).then_some(*id)
         });
         if let Some(id) = id {
+            if let Some(terminal) = self.terminals.get(&id) {
+                for object_id in &terminal.live_objects {
+                    self.metadata.remove(object_id);
+                }
+            }
             self.terminals.remove(&id);
             self.objects.retain(|_, (terminal, _)| *terminal != id);
             self.slave_factories.retain(|_, terminal| *terminal != id);
