@@ -108,6 +108,9 @@ mod fchdir_request;
 #[path = "support/file_request.rs"]
 mod file_request;
 
+#[path = "support/directory_initialization.rs"]
+mod directory_initialization;
+
 #[path = "support/file_time_protocol.rs"]
 mod file_time_protocol;
 
@@ -1426,6 +1429,8 @@ struct RecordingFilesystem {
     chmod_groups: Vec<u32>,
     chown_groups: Vec<u32>,
     root_credentials: Option<(u32, u32, Vec<u32>)>,
+    root_error: Option<i32>,
+    root_base: Option<u32>,
     admission_calls: Vec<(u16, Option<AttachedObject<u32>>)>,
     admission_response: Option<Result<OpenedObject<u32>, i32>>,
     request: Option<PreparedOpen>,
@@ -1641,16 +1646,19 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
     ) -> Result<SessionDirectories<u32>, i32> {
         self.roots_opened += 1;
         self.root_credentials = Some((effective_uid, effective_gid, supplementary_groups.to_vec()));
+        if let Some(error) = self.root_error {
+            return Err(error);
+        }
         if let Some(hook) = &mut self.root_hook {
             hook();
         }
         Ok(SessionDirectories {
             root: AttachedObject {
-                handle: 100,
+                handle: self.root_base.unwrap_or(100),
                 rights: 0x81,
             },
             cwd: AttachedObject {
-                handle: 101,
+                handle: self.root_base.unwrap_or(100) + 1,
                 rights: 0x81,
             },
         })

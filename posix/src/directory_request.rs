@@ -23,6 +23,29 @@ pub fn supports(opcode: u16) -> bool {
     )
 }
 
+/// Establish default root/cwd for an authenticated session before a worker
+/// captures pathname policy. Root lookup runs outside state; concurrent policy
+/// changes are revalidated by the shared pathname preparation helper.
+pub fn initialize<H: Copy, F: FilesystemBackend<H>>(
+    state: &Mutex<PosixService<H>>,
+    peer: PeerIdentity,
+    filesystem: &mut F,
+) -> Result<(), i32> {
+    path_request::with_paths(
+        state,
+        peer,
+        &[],
+        filesystem,
+        |service| {
+            if service.registered_peer(peer.process_id).is_none() {
+                return Err(protocol::STATUS_ESRCH);
+            }
+            Ok(((), protocol::OpenBase::ProcessRoot))
+        },
+        |_, _, _| (),
+    )
+}
+
 fn target(opcode: u16) -> Result<Target, i32> {
     match opcode {
         protocol::OP_CHDIR_AT | protocol::OP_FCHDIR => Ok(Target::Cwd),

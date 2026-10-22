@@ -47,6 +47,18 @@ pub(super) fn snapshot_process(
 ) -> Result<Snapshot, i32> {
     let endpoint =
         platform::handle::inherited(fs::CONTROL_HANDLE_KEY).map_err(|e| e.raw() as i32)?;
+    let initialize = {
+        let state = state.lock().map_err(|_| -5)?;
+        let peer = state.registered_peer(process_id).ok_or(-1)?;
+        state
+            .session_directories(process_id)
+            .is_none()
+            .then_some(peer)
+    };
+    if let Some(peer) = initialize {
+        let mut filesystem = super::RuntimeFilesystem { endpoint };
+        posix_service::directory_request::initialize(state, peer, &mut filesystem)?;
+    }
     let state = state.lock().map_err(|_| -5)?;
     let peer = state.registered_peer(process_id).ok_or(-1)?;
     let session = state.session(peer.process_id).ok_or(-1)?;
