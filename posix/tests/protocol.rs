@@ -21,6 +21,9 @@ mod orphan_group_transition;
 #[path = "support/process_group_image.rs"]
 mod process_group_image;
 
+#[path = "support/image_credentials.rs"]
+mod image_credentials;
+
 #[path = "support/alarm.rs"]
 mod alarm;
 

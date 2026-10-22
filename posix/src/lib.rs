@@ -30,6 +30,7 @@ pub mod resource_policy;
 pub mod cpu_limit;
 mod cpu_timer;
 mod process_group;
+mod image_credentials;
 pub mod filesystem_times;
 pub use fork_state::validate_fork_child;
 
@@ -474,6 +475,7 @@ struct ProcessWaitState {
     // Native image revisions count replacements only; initial loaded images
     // already cross the POSIX spawn/exec boundary without a replacement.
     fresh_image: bool,
+    credential_image_revision: u64,
     stopped: bool,
     stop_signal: u32,
     stop_reported: bool,
@@ -1622,6 +1624,11 @@ impl<H: Copy> PosixService<H> {
             effective_gid: parent.effective_gid,
         };
         self.adopt_child(parent_peer, child, filesystem)?;
+        // This is a fresh executable, not a fork continuation: do not retain
+        // the requester's old saved identities across this image boundary.
+        let session = self.sessions.get_mut(&child.process_id).unwrap();
+        session.saved_uid = session.effective_uid;
+        session.saved_gid = session.effective_gid;
         self.process_wait_states
             .get_mut(&child.process_id)
             .unwrap()

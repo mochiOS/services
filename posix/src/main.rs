@@ -356,9 +356,35 @@ fn main() {
         let decoded = request_bytes
             .get(..length)
             .and_then(|bytes| protocol::decode(bytes).ok());
+        // Reconcile successful native image changes before any request can
+        // apply credentials or open resources. Do not interpret a client
+        // startup notification as proof that replacement committed.
+        let image_credentials_error = if let (Some(peer), Some(_), true) =
+            (peer, decoded, attachments_valid)
+        {
+            match service_state.lock() {
+                Ok(mut service) => service.refresh_image_credentials(peer, &mut processes).err(),
+                Err(_) => Some(protocol::STATUS_EIO),
+            }
+        } else {
+            None
+        };
+        if let (Some(status), Some((header, _))) = (image_credentials_error, decoded) {
+            // Nothing has been retained or opened yet. Retire every incoming
+            // reference and return the observation error without policy work.
+            for attachment in received_handles.handles.iter().take(attached_count) {
+                let _ = platform::handle::close(attachment.handle);
+            }
+            let response = status_response(header.request_id, status);
+            if let Ok(length) = protocol::encode(response.header, &[], &mut response_bytes) {
+                let _ = platform::ipc::reply(sender, &response_bytes[..length]);
+            }
+            continue;
+        }
         // Do not hold POSIX state across provider RPC: concurrent terminal I/O
         // must be able to acquire that same state to authorize its caller.
-        let identified_terminal = if attachments_valid
+        let identified_terminal = if peer.is_some()
+            && attachments_valid
             && attachments.len() == 1
             && attachments[0].rights == platform::handle::HANDLE_RIGHT_TRANSFER
             && decoded.is_some_and(|(header, _)| matches!(
