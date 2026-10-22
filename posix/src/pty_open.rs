@@ -8,7 +8,7 @@ use mnu_abi::{
     HANDLE_RIGHT_CONTROL as CONTROL, HANDLE_RIGHT_DUPLICATE as DUPLICATE,
     HANDLE_RIGHT_TRANSFER as TRANSFER, IpcObjectHandle, IpcObjectHandles,
 };
-use mochios_posix_protocol::pty_open as wire;
+use mochios_filesystem_protocol::device_open as wire;
 
 /// All methods are local native operations, never peer RPC. `create` owns its
 /// returned reference; failed initialization closes it before returning error.
@@ -35,6 +35,13 @@ pub fn open(
         return Err(EACCES);
     }
     let request = wire::Request::decode(bytes).map_err(|status| -status)?;
+    if request.rights & !crate::pty_factory::MASTER_RIGHTS != 0
+        || request.rights & TRANSFER == 0
+        || request.rights & (mnu_abi::HANDLE_RIGHT_READ | mnu_abi::HANDLE_RIGHT_WRITE) == 0
+        || request.options & !mnu_abi::HANDLE_OPTION_NONBLOCKING != 0
+    {
+        return Err(EINVAL);
+    }
     if attached.count != 2 {
         return Err(EINVAL);
     }

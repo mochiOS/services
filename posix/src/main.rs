@@ -1242,7 +1242,7 @@ fn run_pty_provider(
         let length = (message & 0xffff_ffff) as usize;
         let request_length = length.min(request.len());
         let count = (attachments.count as usize).min(attachments.handles.len());
-        if request[..request_length].starts_with(&mochios_posix_protocol::pty_open::MAGIC) {
+        if request[..request_length].starts_with(&mochios_filesystem_protocol::device_open::MAGIC) {
             posix_service::pty_open::serve(
                 &ptys, endpoint, sender, &request[..request_length], attachments,
             );

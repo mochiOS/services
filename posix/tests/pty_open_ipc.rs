@@ -2,7 +2,7 @@ use mnu_abi::{
     HANDLE_RIGHT_CONTROL as C, HANDLE_RIGHT_DUPLICATE as D, HANDLE_RIGHT_READ as R,
     HANDLE_RIGHT_TRANSFER as T, HANDLE_RIGHT_WRITE as W, IpcObjectHandle, IpcObjectHandles,
 };
-use mochios_posix_protocol::pty_open::Request;
+use mochios_filesystem_protocol::device_open::Request;
 use posix_service::{
     pty::{EBADF, PtyManager},
     pty_metadata::{Backend, Reference},
@@ -104,7 +104,7 @@ fn independent_opens_consume_only_metadata_and_publish_exact_requested_rights() 
         let mut publisher = Published::default();
         let opened = open(
             &mut manager,
-            &request(rights).encode().unwrap(),
+            &request(rights).encode(),
             &mut attached,
             |handle| {
                 assert_eq!(handle, 73);
@@ -162,7 +162,7 @@ fn each_publication_failure_reclaims_open_and_metadata_and_restores_master_peer_
         assert_eq!(
             open(
                 &mut manager,
-                &request(R | T).encode().unwrap(),
+                &request(R | T).encode(),
                 &mut attached,
                 |_| Ok(factory),
                 |object| adopt(&dropped, object),
@@ -222,7 +222,7 @@ fn malformed_attachments_never_reach_identify_or_adoption() {
         assert!(
             open(
                 &mut manager,
-                &request(R | T).encode().unwrap(),
+                &request(R | T).encode(),
                 &mut attached,
                 |_| panic!("invalid admission"),
                 |_| panic!("invalid admission"),
@@ -252,7 +252,7 @@ fn only_an_explicitly_identified_live_factory_can_open_and_failures_preserve_own
         assert_eq!(
             open(
                 &mut manager,
-                &request(R | T).encode().unwrap(),
+                &request(R | T).encode(),
                 &mut attached,
                 |_| Ok(id),
                 |object| adopt(&dropped, object),
@@ -267,7 +267,7 @@ fn only_an_explicitly_identified_live_factory_can_open_and_failures_preserve_own
     assert_eq!(
         open(
             &mut manager,
-            &request(R | T).encode().unwrap(),
+            &request(R | T).encode(),
             &mut attached,
             |_| Err(EBADF),
             |_| panic!("foreign native owner"),
@@ -280,7 +280,7 @@ fn only_an_explicitly_identified_live_factory_can_open_and_failures_preserve_own
     assert_eq!(
         open(
             &mut manager,
-            &request(R | T).encode().unwrap(),
+            &request(R | T).encode(),
             &mut attached,
             |_| Ok(factory),
             |_| {
@@ -298,7 +298,7 @@ fn only_an_explicitly_identified_live_factory_can_open_and_failures_preserve_own
 #[test]
 fn wire_roundtrip_rejects_bad_version_reserved_trailing_rights_and_options() {
     let valid = request(R | W | D | T);
-    let encoded = valid.encode().unwrap();
+    let encoded = valid.encode();
     assert_eq!(Request::decode(&encoded), Ok(valid));
     for index in [0, 4, 6] {
         let mut bytes = encoded;
@@ -309,6 +309,7 @@ fn wire_roundtrip_rejects_bad_version_reserved_trailing_rights_and_options() {
     let mut extra = encoded.to_vec();
     extra.push(0);
     assert_eq!(Request::decode(&extra), Err(-22));
+    let mut rejected = Vec::new();
     for rights in [
         0,
         R,
@@ -317,17 +318,32 @@ fn wire_roundtrip_rejects_bad_version_reserved_trailing_rights_and_options() {
         R | T | mnu_abi::HANDLE_RIGHT_RECEIVE,
         u64::MAX,
     ] {
-        assert_eq!(request(rights).encode(), Err(-22));
+        rejected.push(request(rights).encode());
     }
-    assert_eq!(
+    rejected.push(
         Request {
             options: 2,
             ..valid
         }
         .encode(),
-        Err(-22)
     );
     let mut bytes = encoded;
     bytes[23] |= 0x80;
-    assert_eq!(Request::decode(&bytes), Err(-22));
+    rejected.push(bytes);
+    for bytes in rejected {
+        // Generic framing accepts opaque rights/options. The PTY resource
+        // owner rejects unsupported authority before touching attachments.
+        assert!(Request::decode(&bytes).is_ok());
+        assert_eq!(
+            open(
+                &mut PtyManager::new(),
+                &bytes,
+                &mut attachments(),
+                |_| panic!("unsupported terminal authority"),
+                |_| panic!("unsupported terminal authority"),
+                &mut Published::default()
+            ),
+            Err(22)
+        );
+    }
 }
