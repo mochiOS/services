@@ -598,6 +598,15 @@ fn main() {
                     &attachments,
                     &mut filesystem,
                 ))
+            } else if posix_service::path_mutation::supports(header.opcode) && request_image.is_some() {
+                Some(posix_service::path_mutation::execute(
+                    &service_state,
+                    peer,
+                    header,
+                    payload,
+                    &attachments,
+                    &mut filesystem,
+                ))
             } else {
                 None
             }

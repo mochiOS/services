@@ -93,6 +93,9 @@ mod open_request;
 #[path = "support/path_query.rs"]
 mod path_query;
 
+#[path = "support/path_mutation.rs"]
+mod path_mutation;
+
 #[path = "support/file_time_protocol.rs"]
 mod file_time_protocol;
 
@@ -1406,6 +1409,7 @@ struct RecordingFilesystem {
     root_hook: Option<Box<dyn FnMut()>>,
     open_hook: Option<Box<dyn FnMut()>>,
     query_hook: Option<Box<dyn FnMut() -> Result<(), i32>>>,
+    mutation_hook: Option<Box<dyn FnMut() -> Result<(), i32>>>,
     root_credentials: Option<(u32, u32, Vec<u32>)>,
     admission_calls: Vec<(u16, Option<AttachedObject<u32>>)>,
     admission_response: Option<Result<OpenedObject<u32>, i32>>,
@@ -1758,6 +1762,9 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         request: &posix_service::PreparedFileTimes,
         paths: PathObjects<u32>,
     ) -> Result<(), i32> {
+        if let Some(hook) = &mut self.mutation_hook {
+            hook()?;
+        }
         self.time_request = Some(request.clone());
         self.root = Some(paths.root);
         self.directory = paths.base;
@@ -1796,6 +1803,9 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         request: &posix_service::PreparedMkdir,
         paths: PathObjects<u32>,
     ) -> Result<(), i32> {
+        if let Some(hook) = &mut self.mutation_hook {
+            hook()?;
+        }
         self.mkdir_request = Some(request.clone());
         self.root = Some(paths.root);
         self.directory = paths.base;
@@ -1807,6 +1817,9 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         request: &posix_service::PreparedUnlink,
         paths: PathObjects<u32>,
     ) -> Result<(), i32> {
+        if let Some(hook) = &mut self.mutation_hook {
+            hook()?;
+        }
         self.unlink_request = Some(request.clone());
         self.root = Some(paths.root);
         self.directory = paths.base;
@@ -1838,6 +1851,9 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         request: &posix_service::PreparedTruncate,
         paths: PathObjects<u32>,
     ) -> Result<(), i32> {
+        if let Some(hook) = &mut self.mutation_hook {
+            hook()?;
+        }
         self.truncate_request = Some(request.clone());
         self.root = Some(paths.root);
         self.directory = paths.base;
@@ -1849,6 +1865,9 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         request: &posix_service::PreparedSymlink,
         paths: PathObjects<u32>,
     ) -> Result<(), i32> {
+        if let Some(hook) = &mut self.mutation_hook {
+            hook()?;
+        }
         self.symlink_request = Some(request.clone());
         self.root = Some(paths.root);
         self.directory = paths.base;
@@ -1874,6 +1893,9 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         request: &posix_service::PreparedChmod,
         paths: PathObjects<u32>,
     ) -> Result<(), i32> {
+        if let Some(hook) = &mut self.mutation_hook {
+            hook()?;
+        }
         self.chmod_request = Some(request.clone());
         self.root = Some(paths.root);
         self.directory = paths.base;
@@ -1885,6 +1907,9 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         request: &posix_service::PreparedChown,
         paths: PathObjects<u32>,
     ) -> Result<(), i32> {
+        if let Some(hook) = &mut self.mutation_hook {
+            hook()?;
+        }
         self.chown_request = Some(request.clone());
         self.root = Some(paths.root);
         self.directory = paths.base;

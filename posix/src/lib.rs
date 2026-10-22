@@ -30,6 +30,7 @@ mod open_flags;
 pub mod open_request;
 mod path_request;
 pub mod path_query;
+pub mod path_mutation;
 mod fault_signal;
 mod signal_origin;
 mod alarm;
@@ -4184,33 +4185,14 @@ impl<H: Copy> PosixService<H> {
                     Err(status) => object_error(header.request_id, status),
                 }
             }
-            protocol::OP_MKDIR_AT => {
-                let prepared = match self.prepare_mkdir_at(peer, payload, handles.len()) {
-                    Ok(prepared) => prepared,
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                let paths = match self.path_objects(peer.process_id, prepared.base, handles) {
-                    Ok(paths) => paths,
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                match filesystem.mkdir_at(&prepared, paths) {
-                    Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
-                    Err(status) => object_error(header.request_id, status),
-                }
-            }
-            protocol::OP_UNLINK_AT => {
-                let prepared = match self.prepare_unlink_at(peer, payload, handles.len()) {
-                    Ok(prepared) => prepared,
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                let paths = match self.path_objects(peer.process_id, prepared.base, handles) {
-                    Ok(paths) => paths,
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                match filesystem.unlink_at(&prepared, paths) {
-                    Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
-                    Err(status) => object_error(header.request_id, status),
-                }
+            protocol::OP_MKDIR_AT
+            | protocol::OP_UNLINK_AT
+            | protocol::OP_TRUNCATE_AT
+            | protocol::OP_SYMLINK_AT
+            | protocol::OP_UTIMENS_AT
+            | protocol::OP_CHMOD_AT
+            | protocol::OP_CHOWN_AT => {
+                path_mutation::dispatch(self, peer, header, payload, handles, admission, filesystem)
             }
             protocol::OP_RENAME_AT => {
                 let prepared = match self.prepare_rename_at(peer, payload, handles.len()) {
@@ -4246,80 +4228,6 @@ impl<H: Copy> PosixService<H> {
                     Err(status) => return object_error(header.request_id, status),
                 };
                 match filesystem.link_at(&prepared, paths) {
-                    Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
-                    Err(status) => object_error(header.request_id, status),
-                }
-            }
-            protocol::OP_TRUNCATE_AT => {
-                let prepared = match self.prepare_truncate_at(peer, payload, handles.len()) {
-                    Ok(prepared) => prepared,
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                let paths = match self.path_objects(peer.process_id, prepared.base, handles) {
-                    Ok(paths) => paths,
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                let result = match admission {
-                    Some(ticket) => filesystem.truncate_at_admitted(&prepared, paths, ticket),
-                    None => filesystem.truncate_at(&prepared, paths).map_err(MutationError::Failed),
-                };
-                match result {
-                    Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
-                    Err(error) => object_mutation_error(header.request_id, error, admission.is_some(), filesystem),
-                }
-            }
-            protocol::OP_SYMLINK_AT => {
-                let prepared = match self.prepare_symlink_at(peer, payload, handles.len()) {
-                    Ok(prepared) => prepared,
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                let paths = match self.path_objects(peer.process_id, prepared.base, handles) {
-                    Ok(paths) => paths,
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                match filesystem.symlink_at(&prepared, paths) {
-                    Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
-                    Err(status) => object_error(header.request_id, status),
-                }
-            }
-            protocol::OP_UTIMENS_AT => {
-                let prepared = match self.prepare_utimens_at(peer, payload, handles.len()) {
-                    Ok(prepared) => prepared,
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                let paths = match self.path_objects(peer.process_id, prepared.target.base, handles) {
-                    Ok(paths) => paths,
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                match filesystem.utimens_at(&prepared, paths) {
-                    Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
-                    Err(status) => object_error(header.request_id, status),
-                }
-            }
-            protocol::OP_CHMOD_AT => {
-                let prepared = match self.prepare_chmod_at(peer, payload, handles.len()) {
-                    Ok(prepared) => prepared,
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                let paths = match self.path_objects(peer.process_id, prepared.base, handles) {
-                    Ok(paths) => paths,
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                match filesystem.chmod_at(&prepared, paths) {
-                    Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
-                    Err(status) => object_error(header.request_id, status),
-                }
-            }
-            protocol::OP_CHOWN_AT => {
-                let prepared = match self.prepare_chown_at(peer, payload, handles.len()) {
-                    Ok(prepared) => prepared,
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                let paths = match self.path_objects(peer.process_id, prepared.base, handles) {
-                    Ok(paths) => paths,
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                match filesystem.chown_at(&prepared, paths) {
                     Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
                     Err(status) => object_error(header.request_id, status),
                 }
