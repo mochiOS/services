@@ -19,6 +19,7 @@ pub const READINESS_SIGNALS: u64 = mnu_abi::HANDLE_SIGNAL_READABLE
     | mnu_abi::HANDLE_SIGNAL_IDLE;
 
 const SUPPORTED_INPUT_FLAGS: u32 = posix_protocol::TERMINAL_IFLAG_ISTRIP
+    | posix_protocol::TERMINAL_IFLAG_IUTF8
     | posix_protocol::TERMINAL_IFLAG_INLCR
     | posix_protocol::TERMINAL_IFLAG_IGNCR
     | posix_protocol::TERMINAL_IFLAG_ICRNL
@@ -123,6 +124,27 @@ impl PseudoTerminal {
 
     fn input_occupancy(&self) -> usize {
         self.input.len() + self.canonical_input.len()
+    }
+
+    fn canonical_erase_length(&self) -> usize {
+        if self.attributes.input_flags & posix_protocol::TERMINAL_IFLAG_IUTF8 == 0 {
+            return 1;
+        }
+        // Inspect at most one scalar, including when VecDeque storage wraps.
+        // Invalid/incomplete encodings remain bytewise: never eat a preceding
+        // character just because untrusted input ends in continuation bytes.
+        let mut suffix = [0u8; 4];
+        for (index, byte) in self.canonical_input.iter().rev().take(4).enumerate() {
+            suffix[3 - index] = *byte;
+            if byte & 0xc0 != 0x80 {
+                return if core::str::from_utf8(&suffix[3 - index..]).is_ok() {
+                    index + 1
+                } else {
+                    1
+                };
+            }
+        }
+        1
     }
 
     fn output_bytes_for(&self, byte: u8) -> usize {
@@ -318,7 +340,8 @@ impl PseudoTerminal {
                     if !self.can_append_output(echo) {
                         break;
                     }
-                    self.canonical_input.pop_back();
+                    let remaining = self.canonical_input.len() - self.canonical_erase_length();
+                    self.canonical_input.truncate(remaining);
                     for byte in echo.iter().copied() {
                         self.append_output(byte);
                     }
