@@ -1398,23 +1398,17 @@ fn run_pty_provider(
             continue;
         }
         if request[..request_length] == PTY_IDENTIFY_MAGIC {
-            let status = if attachments.count == 1
-                && count == 1
-                && attachments.handles[0].handle != 0
-                && attachments.handles[0].reserved == 0
-            {
-                platform::handle::identify_provider_object(attachments.handles[0].handle)
-                    .map_err(|_| 9)
-                    .and_then(|object_id| {
-                        ptys.lock()
-                            .map_err(|_| 5)
-                            .and_then(|manager| manager.slave_terminal_id(object_id))
+            let status = ptys
+                .lock()
+                .map_err(|_| 5)
+                .and_then(|manager| {
+                    posix_service::terminal_identity::lookup(&manager, &attachments, |handle| {
+                        platform::handle::identify_provider_object(handle)
+                            .map_err(|error| error.raw())
                     })
-                    .and_then(|terminal_id| i64::try_from(terminal_id).map_err(|_| 22))
-                    .unwrap_or_else(|errno| -(i64::from(errno)))
-            } else {
-                -22
-            };
+                })
+                .and_then(|terminal_id| i64::try_from(terminal_id).map_err(|_| 75))
+                .unwrap_or_else(|errno| -(i64::from(errno)));
             for attachment in attachments.handles.iter().take(count) {
                 let _ = platform::handle::close(attachment.handle);
             }

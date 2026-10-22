@@ -94,3 +94,49 @@ fn main(){
 "#);
     probe::run(&program);
 }
+
+#[test]
+fn ordinary_special_terminal_attachments_attenuate_authority_and_keep_fd_leased() {
+    let mut program = String::from(
+        r#"
+#![allow(dead_code,non_camel_case_types)]
+type c_int=i32;const EBADF:i32=9;const ENOTTY:i32=25;const EACCES:i32=13;
+#[derive(Clone,Copy,PartialEq)]enum FdKind{ObjectPty,ObjectSpecial,ObjectFile}
+#[derive(Clone,Copy)]struct Object{kind:FdKind,lower_handle:u64}
+#[derive(Clone,Copy)]pub struct FdEntry{handle:Object,rights:u64}
+struct ObjectHandleAttachment<H>{handle:H,rights:u64}
+thread_local!{
+ static ENTRY:std::cell::Cell<FdEntry>=const{std::cell::Cell::new(FdEntry{handle:Object{kind:FdKind::ObjectSpecial,lower_handle:41},rights:255})};
+ static LIVE:std::cell::Cell<u32>=const{std::cell::Cell::new(0)};
+}
+mod syscall{pub const HANDLE_RIGHT_TRANSFER:u64=2;}
+mod fd_lease{
+ pub struct Lease(pub super::FdEntry);
+ impl std::ops::Deref for Lease{type Target=super::FdEntry;fn deref(&self)->&Self::Target{&self.0}}
+ impl Drop for Lease{fn drop(&mut self){super::LIVE.set(super::LIVE.get()-1)}}
+}
+fn with_fd_entry(fd:i32)->Result<fd_lease::Lease,i32>{if fd!=4{return Err(EBADF)}LIVE.set(LIVE.get()+1);Ok(fd_lease::Lease(ENTRY.get()))}
+"#,
+    );
+    program.push_str(probe::between(
+        include_str!("../../../user/crates/newlib-runtime/src/lib.rs"),
+        "fn terminal_attachment(",
+        "fn set_terminal_attributes(",
+    ));
+    program.push_str(r#"
+fn main(){
+ for kind in [FdKind::ObjectSpecial,FdKind::ObjectPty]{
+  ENTRY.set(FdEntry{handle:Object{kind,lower_handle:41},rights:255});
+  let (lease,attached)=terminal_attachment(4).unwrap();
+  assert_eq!(LIVE.get(),1);assert_eq!(attached.handle,41);assert_eq!(attached.rights,2);
+  drop(lease);assert_eq!(LIVE.get(),0);
+ }
+ for (kind,handle,rights,error) in [(FdKind::ObjectSpecial,41,1,13),(FdKind::ObjectFile,41,255,25),(FdKind::ObjectSpecial,u64::MAX,255,9)]{
+  ENTRY.set(FdEntry{handle:Object{kind,lower_handle:handle},rights});
+  assert_eq!(terminal_attachment(4).err(),Some(error));assert_eq!(LIVE.get(),0);
+ }
+ assert_eq!(terminal_attachment(-1).err(),Some(9));assert_eq!(LIVE.get(),0);
+}
+"#);
+    probe::run(&program);
+}
