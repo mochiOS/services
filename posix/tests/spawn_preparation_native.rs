@@ -77,9 +77,9 @@ fn map_elf_image(_:&[u8],table:u64,_:&mut ExecMeasurement)->Result<ElfImageLayou
 fn build_relocatable_user_stack(_:u64,_:(),_:u64,_:u64,_:u64,_:u64)->Result<InitialUserStack,Error>{bootstrap_stack::empty(0x800000,32)}
 fn map_initial_tls(table:u64,_:u64)->Result<u64,Error>{assert_eq!(table,17);if STAGE.get()==5 {Err(Error::ResourceUnavailable)}else{Ok(0x600000)}}
 mod config {
-    pub struct Exec {pub stack_top_base:u64,pub stack_aslr_max_pages:u64,pub user_stack_size_pages:usize,pub brk_heap_base_min:u64,pub brk_heap_aslr_max_pages:u64,pub kernel_thread_stack_size:usize}
+    pub struct Exec {pub stack_top_base:u64,pub stack_aslr_max_pages:u64,pub user_stack_size_pages:usize,pub kernel_thread_stack_size:usize}
     pub struct Config{pub exec:Exec}
-    pub fn kernel()->Config{Config{exec:Exec{stack_top_base:0x800000,stack_aslr_max_pages:0,user_stack_size_pages:32,brk_heap_base_min:0x900000,brk_heap_aslr_max_pages:0,kernel_thread_stack_size:16384}}}
+    pub fn kernel()->Config{Config{exec:Exec{stack_top_base:0x800000,stack_aslr_max_pages:0,user_stack_size_pages:32,kernel_thread_stack_size:16384}}}
 }
 mod kernel {pub fn early_serial(_:&str){}}
 mod cpu {pub struct SmapSmepGuard;impl SmapSmepGuard{pub fn new()->Self{Self}}}
@@ -90,7 +90,7 @@ mod mem {
         pub fn destroy_user_page_table(table:u64)->Result<(),()>{assert_eq!(table,17);crate::DESTROYS.set(crate::DESTROYS.get()+1);Ok(())}
         pub fn map_and_copy_segment_to(table:u64,_:u64,_:u64,_:u64,_:&[u8],_:bool,_:bool)->Result<(),()>{
             assert_eq!(table,17);let call=crate::MAPS.get()+1;crate::MAPS.set(call);
-            if matches!((crate::STAGE.get(),call),(3,1)|(4,2)|(11,3)){Err(())}else{Ok(())}
+            if matches!((crate::STAGE.get(),call),(3,1)|(4,2)){Err(())}else{Ok(())}
         }
     }
 }
@@ -115,7 +115,6 @@ mod task {
         pub fn set_kernel_authorities_for_exec(&mut self,_:()){}pub fn set_page_table(&mut self,table:u64){assert_eq!(table,17);}
         pub fn set_memory_regions(&mut self,_:Vec<MemoryRegion>){}pub fn set_stack_bottom(&mut self,_:u64){}
         pub fn set_stack_top(&mut self,_:u64){}pub fn set_exe_path(&mut self,identity:String){assert_eq!(identity,"opaque:target");}
-        pub fn set_heap_start(&mut self,_:u64){}pub fn set_heap_end(&mut self,_:u64){}
     }
     pub fn add_process(_:Process)->Option<Id>{if crate::STAGE.get()==8{None}else{crate::PROCESSES.set(crate::PROCESSES.get()+1);Some(Id)}}
     pub fn remove_process(_:Id)->Option<Process>{assert_eq!(crate::PROCESSES.get(),1);crate::PROCESSES.set(0);Some(Process)}
@@ -152,9 +151,12 @@ fn main(){
             assert_eq!(RELEASES.get(),usize::from(!native&&matches!(stage,8|9|10)));
             assert_eq!(FREES.get(),usize::from(stage==10));
         }
-        for stage in [0,11] {reset(stage);let launch=if native{ImageLaunch::Created(&())}else{ImageLaunch::Bootstrap};
+        {reset(0);let launch=if native{ImageLaunch::Created(&())}else{ImageLaunch::Bootstrap};
             assert_eq!(exec_with_data(&[],"name","opaque:target",None,None,None,None,&[],&[],launch,&mut ExecMeasurement),if native{91}else{7});
             assert_eq!(DESTROYS.get(),0);assert_eq!(PROCESSES.get(),1);assert_eq!(CLOSES.get(),0);assert_eq!(RELEASES.get(),0);assert_eq!(FREES.get(),0);
+            // Only the two stack mapping operations are implicit. User heaps
+            // must be requested explicitly through native VM APIs.
+            assert_eq!(MAPS.get(),2);
         }
     }
     reset(6);assert_eq!(exec_with_data(&[],"name","opaque:target",None,None,None,None,&[],&[],ImageLaunch::Created(&()),&mut ExecMeasurement),Error::NotReady.into_raw());assert_eq!(DESTROYS.get(),1);assert_eq!(PROCESSES.get(),0);assert_eq!(CLOSES.get(),0);

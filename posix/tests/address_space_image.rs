@@ -175,7 +175,7 @@ mod task {
         pub regions: Vec<MemoryRegion>,
         pub dma: Vec<DmaBuffer>,
         pub mmio: bool,
-        pub bounds: [u64; 5],
+        pub bounds: [u64; 4],
         pub root: Option<Arc<crate::detached_roots::Root>>,
     }
     impl Process {
@@ -194,20 +194,17 @@ mod task {
         pub fn dma_buffers(&self) -> &[DmaBuffer] {
             &self.dma
         }
-        pub fn heap_start(&self) -> u64 {
+        pub fn mapping_cursor(&self) -> u64 {
             self.bounds[0]
         }
-        pub fn heap_end(&self) -> u64 {
+        pub fn ipc_mapping_end(&self) -> u64 {
             self.bounds[1]
         }
-        pub fn ipc_mapping_end(&self) -> u64 {
+        pub fn stack_bottom(&self) -> u64 {
             self.bounds[2]
         }
-        pub fn stack_bottom(&self) -> u64 {
-            self.bounds[3]
-        }
         pub fn stack_top(&self) -> u64 {
-            self.bounds[4]
+            self.bounds[3]
         }
         pub fn set_page_table(&mut self, table: u64) {
             self.table = Some(table);
@@ -215,20 +212,17 @@ mod task {
         pub fn set_memory_regions(&mut self, regions: Vec<MemoryRegion>) {
             self.regions = regions;
         }
-        pub fn set_heap_start(&mut self, value: u64) {
+        pub fn set_mapping_cursor(&mut self, value: u64) {
             self.bounds[0] = value;
         }
-        pub fn set_heap_end(&mut self, value: u64) {
+        pub fn set_ipc_mapping_end(&mut self, value: u64) {
             self.bounds[1] = value;
         }
-        pub fn set_ipc_mapping_end(&mut self, value: u64) {
+        pub fn set_stack_bottom(&mut self, value: u64) {
             self.bounds[2] = value;
         }
-        pub fn set_stack_bottom(&mut self, value: u64) {
-            self.bounds[3] = value;
-        }
         pub fn set_stack_top(&mut self, value: u64) {
-            self.bounds[4] = value;
+            self.bounds[3] = value;
         }
     }
 }
@@ -352,7 +346,7 @@ fn source() -> task::Process {
             end: Some(0x4000),
         }],
         mmio: false,
-        bounds: [1, 2, 3, 4, 5],
+        bounds: [1, 3, 4, 5],
         root: None,
     }
 }

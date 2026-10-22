@@ -33,7 +33,7 @@ impl MmioMapping{{
 }}
 struct Process{{
     mmio_mappings:Vec<MmioMapping>,memory_regions:Vec<MmioMapping>,dma_buffers:Vec<MmioMapping>,
-    heap_start:u64,heap_end:u64,stack_bottom:u64,stack_top:u64,
+    mapping_cursor:u64,stack_bottom:u64,stack_top:u64,
 }}
 impl Process{{
 "#,
@@ -46,7 +46,7 @@ impl Process{{
     ));
     program.push_str(r#"
 }
-fn fresh()->Process{Process{mmio_mappings:Vec::new(),memory_regions:Vec::new(),dma_buffers:Vec::new(),heap_start:0,heap_end:0,stack_bottom:0,stack_top:0}}
+fn fresh()->Process{Process{mmio_mappings:Vec::new(),memory_regions:Vec::new(),dma_buffers:Vec::new(),mapping_cursor:0,stack_bottom:0,stack_top:0}}
 fn range(start:u64)->MmioMapping{MmioMapping{start,length:4096}}
 fn main(){
     let mut p=fresh();FAIL.store(true,Ordering::Relaxed);
@@ -59,11 +59,13 @@ fn main(){
     assert!(FAIL.swap(false,Ordering::Relaxed));assert_eq!(p.mmio_mappings.len(),1);
     assert_eq!(p.add_mmio_mapping(range(8192)),Ok(()));
     assert_eq!(p.add_mmio_mapping(range(u64::MAX)),Err(Error::InvalidAddress));
-    for overlap in 0..4{
+    // A VM placement hint is not a reservation; only actual ranges conflict.
+    let mut p=fresh();p.mapping_cursor=8192;
+    assert_eq!(p.add_mmio_mapping(range(4096)),Ok(()));
+    for overlap in 0..3{
         let mut p=fresh();match overlap{
             0=>p.memory_regions.push(range(4096)),1=>p.dma_buffers.push(range(4096)),
-            2=>{p.heap_start=4096;p.heap_end=8192;},
-            3=>{p.stack_bottom=4096;p.stack_top=8192;},_=>unreachable!()
+            2=>{p.stack_bottom=4096;p.stack_top=8192;},_=>unreachable!()
         }
         FAIL.store(true,Ordering::Relaxed);
         assert_eq!(p.add_mmio_mapping(range(4096)),Err(Error::AlreadyExists));

@@ -39,7 +39,7 @@ thread_local!{{
  static WALK_FAIL:Cell<bool>=const{{Cell::new(false)}};
  static OCCUPIED:Cell<bool>=const{{Cell::new(false)}};
  static FAIL_ALLOC:Cell<bool>=const{{Cell::new(false)}};
- static STATE:RefCell<task::Process>=const{{RefCell::new(task::Process{{regions:Vec::new(),start:0,end:0}})}};
+ static STATE:RefCell<task::Process>=const{{RefCell::new(task::Process{{regions:Vec::new(),cursor:0}})}};
 }}
 struct Allocator;
 unsafe impl std::alloc::GlobalAlloc for Allocator{{
@@ -50,7 +50,7 @@ unsafe impl std::alloc::GlobalAlloc for Allocator{{
 }}
 #[global_allocator]static ALLOCATOR:Allocator=Allocator;
 fn current_thread_id()->Option<u64>{{THREAD.get().then_some(1)}}
-fn randomized_heap_base(_:u64,floor:u64,_:u64)->u64{{assert!(LOCKED.get());floor}}
+fn randomized_mapping_base(_:u64,floor:u64,_:u64)->u64{{assert!(LOCKED.get());floor}}
 mod config{{pub struct Exec{{pub memory_map_base_min:u64,pub memory_map_aslr_max_pages:u64}}
  pub struct Config{{pub exec:Exec}} pub fn kernel()->Config{{Config{{exec:Exec{{memory_map_base_min:0x10000,memory_map_aslr_max_pages:1}}}}}}}}
 mod mem{{
@@ -97,10 +97,10 @@ mod task{{
   assert_eq!(id,2);if !PROCESS.get(){{return None;}}assert!(!LOCKED.replace(true));
   let r=STATE.with_borrow_mut(f);assert!(LOCKED.replace(false));Some(r)
  }}
- pub struct Process{{pub regions:Vec<MemoryRegion>,pub start:u64,pub end:u64}}
+ pub struct Process{{pub regions:Vec<MemoryRegion>,pub cursor:u64}}
  impl Process{{
-  pub fn heap_start(&self)->u64{{self.start}}pub fn heap_end(&self)->u64{{self.end}}
-  pub fn set_heap_start(&mut self,x:u64){{self.start=x;}}pub fn set_heap_end(&mut self,x:u64){{self.end=x;}}
+  pub fn mapping_cursor(&self)->u64{{self.cursor}}
+  pub fn set_mapping_cursor(&mut self,x:u64){{self.cursor=x;}}
   pub fn page_table(&self)->Option<u64>{{ROOT.get().then_some(4096)}}
   pub fn memory_regions(&self)->&[MemoryRegion]{{&self.regions}}
   pub fn mmio_mappings(&self)->&[Borrowed]{{&[]}}pub fn dma_buffers(&self)->&[Borrowed]{{&[]}}
@@ -165,12 +165,21 @@ fn reset(){
  assert!(!LOCKED.get());THREAD.set(true);OWNER.set(true);PROCESS.set(true);ROOT.set(true);
  LOOKUPS.set(0);GRANTED.set(67);KIND.set(0);GATE.set(None);LOWER.set(0);FLUSH.set(0);COPY.set(None);
  WALK_FAIL.set(false);OCCUPIED.set(false);EXPECT_WRITE.set(false);ABSENT.set(false);
- STATE.with_borrow_mut(|p|{p.regions.clear();p.regions.reserve(4);p.start=0;p.end=0;});
+ STATE.with_borrow_mut(|p|{p.regions.clear();p.regions.reserve(4);p.cursor=0;});
 }
 fn map(handle:u64)->u64{memory_map(0,4096,3,0,handle,0)}
-fn unchanged(){STATE.with_borrow(|p|{assert!(p.regions.is_empty());assert_eq!((p.start,p.end),(0,0));});}
+fn unchanged(){STATE.with_borrow(|p|{assert!(p.regions.is_empty());assert_eq!(p.cursor,0);});}
 fn main(){
  reset();assert_eq!(map(0),0x10000);assert_eq!(LOOKUPS.get(),0);
+ STATE.with_borrow(|p|assert_eq!(p.cursor,0x11000));
+ assert_eq!(map(0),0x11000);STATE.with_borrow(|p|assert_eq!(p.cursor,0x12000));
+ // Exact placement does not advance the hint or reserve its intervening gap.
+ reset();assert_eq!(memory_map(0x800000,4096,3,1,0,0),0x800000);
+ STATE.with_borrow(|p|assert_eq!(p.cursor,0));
+ assert_eq!(map(0),0x10000);
+ reset();STATE.with_borrow_mut(|p|p.cursor=0x800000);
+ assert_eq!(memory_map(0x10000,4096,3,1,0,0),0x10000);
+ STATE.with_borrow(|p|assert_eq!(p.cursor,0x800000));
  reset();assert_eq!(map(17),0x10000);assert_eq!(LOOKUPS.get(),1);
  reset();KIND.set(1);assert_eq!(map(17),0x10000);STATE.with_borrow(|p|assert_eq!(p.regions[0].max,3));
  reset();GRANTED.set(65);assert_eq!(map(17),0x10000); // private COW needs no backing WRITE

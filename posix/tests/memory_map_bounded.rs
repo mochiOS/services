@@ -70,7 +70,7 @@ fn authoritative_usage_and_insertion_share_the_native_process_lock() {
     let check = body.find("mapping_usage::permits(").unwrap();
     let insertion = body.find("process.add_memory_region(").unwrap();
     assert!(lock < accounting && accounting < check && check < insertion);
-    assert!(!body[accounting..insertion].contains("set_heap_end("));
+    assert!(!body[accounting..insertion].contains("set_mapping_cursor("));
     let wrapper = source
         .split("pub fn memory_map_bounded(")
         .nth(1)
