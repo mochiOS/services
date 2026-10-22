@@ -17,8 +17,16 @@ mod user_copy;
 #[path = "support/user_copy_native.rs"]
 mod user_copy_native;
 use user_copy_native::{syscall, syscall_errno};
+#[path = "../../../user/crates/newlib-runtime/src/exec_inputs.rs"]
+mod exec_inputs;
+#[path = "../../../user/crates/newlib-runtime/src/exec_interpreter.rs"]
+mod exec_interpreter;
 #[path = "../../../user/crates/newlib-runtime/src/exec_search.rs"]
 mod implementation;
+const MAX_EXEC_VECTOR_ENTRIES: usize = 256;
+const MAX_EXECUTABLE_PATH_LEN: usize = 256;
+const ENOEXEC: c_int = 8;
+const E2BIG: c_int = 7;
 const EFAULT: c_int = 14;
 const EIO: c_int = 5;
 const EINVAL: c_int = 22;
@@ -62,6 +70,9 @@ static CALLS: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
 static REPLIES: Mutex<std::collections::VecDeque<c_int>> =
     Mutex::new(std::collections::VecDeque::new());
 static EXPECT: Mutex<[usize; 6]> = Mutex::new([0; 6]);
+static SHELL_ARGUMENTS: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+static SHELL_ENVIRONMENT: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+static SHELL_MUTATIONS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 static mut environ: *mut *mut c_char = std::ptr::null_mut();
 struct ThreadControl {
     callback_resources: callback_resources::Chain,
@@ -120,9 +131,27 @@ fn execve_with_launch_context(
     argv: *const *const c_char,
     envp: *const *const c_char,
 ) -> Result<(), c_int> {
-    let expected = EXPECT.lock().unwrap();
-    assert_eq!([argv as usize, envp as usize], [expected[4], expected[5]]);
-    drop(expected);
+    if unsafe { CStr::from_ptr(path) }.to_bytes() == b"/bin/sh" {
+        for address in SHELL_MUTATIONS.lock().unwrap().drain(..) {
+            unsafe { (address as *mut u8).write(b'z') };
+        }
+        let read = |vector: *const *const c_char| {
+            let mut result = Vec::new();
+            for index in 0..MAX_EXEC_VECTOR_ENTRIES {
+                let pointer = unsafe { vector.add(index).read() };
+                if pointer.is_null() {
+                    return result;
+                }
+                result.push(unsafe { CStr::from_ptr(pointer) }.to_bytes().to_vec());
+            }
+            panic!("interpreter vector is not terminated");
+        };
+        *SHELL_ARGUMENTS.lock().unwrap() = read(argv);
+        *SHELL_ENVIRONMENT.lock().unwrap() = read(envp);
+    } else {
+        let expected = EXPECT.lock().unwrap();
+        assert_eq!([argv as usize, envp as usize], [expected[4], expected[5]]);
+    }
     let error = execute(path);
     if error == 0 { Ok(()) } else { Err(error) }
 }
@@ -163,7 +192,169 @@ fn reset(path: *const c_char, replies: &[c_int]) {
     CALLS.lock().unwrap().clear();
     *REPLIES.lock().unwrap() = replies.iter().copied().collect();
     *EXPECT.lock().unwrap() = [0; 6];
+    SHELL_ARGUMENTS.lock().unwrap().clear();
+    SHELL_ENVIRONMENT.lock().unwrap().clear();
+    SHELL_MUTATIONS.lock().unwrap().clear();
     user_copy_native::DENIED.with_borrow_mut(|denied| *denied = None);
+}
+
+fn call_exec(file: *const c_char, argv: *const *const c_char, envp: *const *const c_char) -> c_int {
+    unsafe {
+        environ = envp.cast_mut().cast();
+    }
+    *EXPECT.lock().unwrap() = [0, 0, 0, 0, argv as usize, envp as usize];
+    let result = implementation::execvp(file, argv.cast());
+    assert_eq!(ALLOCATIONS.load(Ordering::Relaxed), 0);
+    assert!(CONTROL.callback_resources.is_empty());
+    assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
+    if result == -1 {
+        ERRNO.load(Ordering::Relaxed) as c_int
+    } else {
+        result
+    }
+}
+
+#[test]
+fn execvp_uses_the_selected_candidate_and_interpreter_failure_ends_path_search() {
+    let _serial = SERIAL.lock().unwrap();
+    reset(c"/one:/two:/three".as_ptr(), &[2, ENOEXEC, 0]);
+    assert_eq!(call(false, c"tool".as_ptr()), 0);
+    assert_eq!(
+        *CALLS.lock().unwrap(),
+        [
+            b"/one/tool".to_vec(),
+            b"/two/tool".to_vec(),
+            b"/bin/sh".to_vec()
+        ]
+    );
+    assert_eq!(
+        *SHELL_ARGUMENTS.lock().unwrap(),
+        [b"sh".to_vec(), b"/two/tool".to_vec()]
+    );
+    assert_eq!(*SHELL_ENVIRONMENT.lock().unwrap(), [b"K=explicit".to_vec()]);
+    for error in [2, 13, ENOEXEC, EINVAL, ENOMEM] {
+        reset(c"/one:/two".as_ptr(), &[ENOEXEC, error]);
+        assert_eq!(call(false, c"tool".as_ptr()), error);
+        assert_eq!(
+            *CALLS.lock().unwrap(),
+            [b"/one/tool".to_vec(), b"/bin/sh".to_vec()]
+        );
+    }
+    // spawnp returns the format error; it must not introduce a shell process.
+    reset(c"/one:/two".as_ptr(), &[ENOEXEC]);
+    assert_eq!(call(true, c"tool".as_ptr()), ENOEXEC);
+    assert_eq!(*CALLS.lock().unwrap(), [b"/one/tool".to_vec()]);
+}
+
+#[test]
+fn non_format_failures_never_invoke_an_interpreter_and_slash_paths_do_not_search_path() {
+    let _serial = SERIAL.lock().unwrap();
+    for error in [EFAULT, EINVAL, ENOMEM, E2BIG, 13] {
+        reset(c"/one".as_ptr(), &[error]);
+        assert_eq!(call(false, c"tool".as_ptr()), error);
+        assert!(SHELL_ARGUMENTS.lock().unwrap().is_empty());
+        assert_eq!(*CALLS.lock().unwrap(), [b"/one/tool".to_vec()]);
+    }
+    reset(1usize as *const _, &[ENOEXEC, 0]);
+    assert_eq!(call(false, c"./tool".as_ptr()), 0);
+    assert_eq!(PATH_READS.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        *CALLS.lock().unwrap(),
+        [b"./tool".to_vec(), b"/bin/sh".to_vec()]
+    );
+}
+
+#[test]
+fn interpreter_arguments_are_owned_byte_strings_and_dash_filenames_are_not_options() {
+    let _serial = SERIAL.lock().unwrap();
+    let mut argument = b"value\0".to_vec();
+    let mut variable = b"K=value\0".to_vec();
+    let argv = [
+        c"ignored-argv0".as_ptr(),
+        argument.as_ptr().cast(),
+        c"".as_ptr(),
+        b"raw\xff\0".as_ptr().cast(),
+        ptr::null(),
+    ];
+    let environment = [
+        variable.as_ptr().cast(),
+        c"SHELL=/untrusted/interpreter".as_ptr(),
+        ptr::null(),
+    ];
+    reset(c"".as_ptr(), &[ENOEXEC, 0]);
+    *SHELL_MUTATIONS.lock().unwrap() = vec![
+        argument.as_mut_ptr() as usize,
+        variable.as_mut_ptr() as usize,
+    ];
+    assert_eq!(
+        call_exec(c"-command".as_ptr(), argv.as_ptr(), environment.as_ptr()),
+        0
+    );
+    assert_eq!(
+        *CALLS.lock().unwrap(),
+        [b"-command".to_vec(), b"/bin/sh".to_vec()]
+    );
+    assert_eq!(
+        *SHELL_ARGUMENTS.lock().unwrap(),
+        [
+            b"sh".to_vec(),
+            b"./-command".to_vec(),
+            b"value".to_vec(),
+            b"".to_vec(),
+            b"raw\xff".to_vec()
+        ]
+    );
+    assert_eq!(
+        *SHELL_ENVIRONMENT.lock().unwrap(),
+        [
+            b"K=value".to_vec(),
+            b"SHELL=/untrusted/interpreter".to_vec()
+        ]
+    );
+    assert_eq!(argument[0], b'z');
+    assert_eq!(variable[0], b'z');
+}
+
+#[test]
+fn interpreter_snapshot_checks_faultable_vectors_and_space_for_extra_operand() {
+    let _serial = SERIAL.lock().unwrap();
+    for (argv, envp) in [
+        (1usize as *const _, ptr::null()),
+        (ptr::null(), 1usize as *const _),
+    ] {
+        reset(c"/bin".as_ptr(), &[ENOEXEC]);
+        assert_eq!(call_exec(c"tool".as_ptr(), argv, envp), EFAULT);
+        assert_eq!(*CALLS.lock().unwrap(), [b"/bin/tool".to_vec()]);
+    }
+    let invalid = [1usize as *const c_char, ptr::null()];
+    reset(c"/bin".as_ptr(), &[ENOEXEC]);
+    assert_eq!(
+        call_exec(c"tool".as_ptr(), invalid.as_ptr(), ptr::null()),
+        EFAULT
+    );
+    let mut argv = [c"a".as_ptr(); MAX_EXEC_VECTOR_ENTRIES];
+    argv[MAX_EXEC_VECTOR_ENTRIES - 1] = ptr::null();
+    reset(c"/bin".as_ptr(), &[ENOEXEC]);
+    assert_eq!(
+        call_exec(c"tool".as_ptr(), argv.as_ptr(), ptr::null()),
+        E2BIG
+    );
+    assert_eq!(*CALLS.lock().unwrap(), [b"/bin/tool".to_vec()]);
+    argv[MAX_EXEC_VECTOR_ENTRIES - 2] = ptr::null();
+    reset(c"/bin".as_ptr(), &[ENOEXEC, 0]);
+    assert_eq!(call_exec(c"tool".as_ptr(), argv.as_ptr(), ptr::null()), 0);
+    assert_eq!(
+        SHELL_ARGUMENTS.lock().unwrap().len(),
+        MAX_EXEC_VECTOR_ENTRIES - 1
+    );
+    for argv in [ptr::null(), [ptr::null()].as_ptr()] {
+        reset(c"/bin".as_ptr(), &[ENOEXEC, 0]);
+        assert_eq!(call_exec(c"tool".as_ptr(), argv, ptr::null()), 0);
+        assert_eq!(
+            *SHELL_ARGUMENTS.lock().unwrap(),
+            [b"sh".to_vec(), b"/bin/tool".to_vec()]
+        );
+    }
 }
 fn call(spawn: bool, file: *const c_char) -> c_int {
     let argv = [c"custom-argv0".as_ptr(), std::ptr::null()];

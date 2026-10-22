@@ -17,6 +17,28 @@ const E2BIG: c_int = 7;
 const PAGE_SIZE: usize = 4096;
 const MAX_EXEC_VECTOR_ENTRIES: usize = 256;
 const MAX_EXECUTABLE_PATH_LEN: usize = 256;
+
+#[test]
+fn owned_c_vectors_are_terminated_even_when_reusing_a_longer_snapshot() {
+    use std::ffi::CStr;
+    let mut inputs = implementation::Inputs::new();
+    let long = [c"old argument padding".as_ptr(), std::ptr::null()];
+    inputs
+        .capture(c"/tool".as_ptr(), long.as_ptr(), long.as_ptr())
+        .unwrap();
+    let short = [c"x".as_ptr(), c"".as_ptr(), std::ptr::null()];
+    inputs
+        .capture(c"/new".as_ptr(), short.as_ptr(), short.as_ptr())
+        .unwrap();
+    let mut args = [1usize as *const c_char; MAX_EXEC_VECTOR_ENTRIES];
+    let mut env = args;
+    assert_eq!(inputs.c_vectors(&mut args, &mut env), (2, 2));
+    for vector in [args, env] {
+        assert_eq!(unsafe { CStr::from_ptr(vector[0]) }.to_bytes(), b"x");
+        assert_eq!(unsafe { CStr::from_ptr(vector[1]) }.to_bytes(), b"");
+        assert!(vector[2..].iter().all(|pointer| pointer.is_null()));
+    }
+}
 fn capture(
     path: *const c_char,
     args: *const *const c_char,
