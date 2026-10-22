@@ -28,6 +28,8 @@ pub mod filesystem_metadata;
 pub mod mutation_admission;
 mod open_flags;
 pub mod open_request;
+mod path_request;
+pub mod path_query;
 mod fault_signal;
 mod signal_origin;
 mod alarm;
@@ -3916,34 +3918,11 @@ impl<H: Copy> PosixService<H> {
                 };
                 open_request::dispatch(header.request_id, &prepared, paths, admission, filesystem)
             }
-            protocol::OP_CANONICAL_PATH_AT => {
-                let prepared = match self.prepare_stat_at(peer, payload, handles.len()) {
-                    Ok(prepared) if prepared.flags == 0 => prepared,
-                    Ok(_) => return object_error(header.request_id, STATUS_EINVAL),
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                let paths = match self.path_objects(peer.process_id, prepared.base, handles) {
-                    Ok(paths) => paths,
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                match filesystem.canonical_path_at(&prepared, paths) {
-                    Ok(path) => object_payload(header.request_id, path),
-                    Err(status) => object_error(header.request_id, status),
-                }
-            }
-            protocol::OP_STAT_AT => {
-                let prepared = match self.prepare_stat_at(peer, payload, handles.len()) {
-                    Ok(prepared) => prepared,
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                let paths = match self.path_objects(peer.process_id, prepared.base, handles) {
-                    Ok(paths) => paths,
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                match filesystem.stat_at(&prepared, paths) {
-                    Ok(status) => object_status(header.request_id, status),
-                    Err(status) => object_error(header.request_id, status),
-                }
+            protocol::OP_CANONICAL_PATH_AT
+            | protocol::OP_STAT_AT
+            | protocol::OP_ACCESS_AT
+            | protocol::OP_READLINK_AT => {
+                path_query::dispatch(self, peer, header, payload, handles, filesystem)
             }
             protocol::OP_FSTAT => {
                 if !payload.is_empty() || handles.len() != 1 {
@@ -3954,20 +3933,6 @@ impl<H: Copy> PosixService<H> {
                 }
                 match filesystem.fstat(handles[0]) {
                     Ok(status) => object_status(header.request_id, status),
-                    Err(status) => object_error(header.request_id, status),
-                }
-            }
-            protocol::OP_ACCESS_AT => {
-                let prepared = match self.prepare_access_at(peer, payload, handles.len()) {
-                    Ok(prepared) => prepared,
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                let paths = match self.path_objects(peer.process_id, prepared.base, handles) {
-                    Ok(paths) => paths,
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                match filesystem.access_at(&prepared, paths) {
-                    Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
                     Err(status) => object_error(header.request_id, status),
                 }
             }
@@ -4314,20 +4279,6 @@ impl<H: Copy> PosixService<H> {
                 };
                 match filesystem.symlink_at(&prepared, paths) {
                     Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
-                    Err(status) => object_error(header.request_id, status),
-                }
-            }
-            protocol::OP_READLINK_AT => {
-                let prepared = match self.prepare_readlink_at(peer, payload, handles.len()) {
-                    Ok(prepared) => prepared,
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                let paths = match self.path_objects(peer.process_id, prepared.base, handles) {
-                    Ok(paths) => paths,
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                match filesystem.readlink_at(&prepared, paths) {
-                    Ok(target) => object_payload(header.request_id, target),
                     Err(status) => object_error(header.request_id, status),
                 }
             }

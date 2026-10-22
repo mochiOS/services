@@ -90,6 +90,9 @@ mod byte_path_protocol;
 #[path = "support/open_request.rs"]
 mod open_request;
 
+#[path = "support/path_query.rs"]
+mod path_query;
+
 #[path = "support/file_time_protocol.rs"]
 mod file_time_protocol;
 
@@ -1402,6 +1405,8 @@ fn client_transfers_directory_handles_for_chdir_chroot_and_fchdir() {
 struct RecordingFilesystem {
     root_hook: Option<Box<dyn FnMut()>>,
     open_hook: Option<Box<dyn FnMut()>>,
+    query_hook: Option<Box<dyn FnMut() -> Result<(), i32>>>,
+    root_credentials: Option<(u32, u32, Vec<u32>)>,
     admission_calls: Vec<(u16, Option<AttachedObject<u32>>)>,
     admission_response: Option<Result<OpenedObject<u32>, i32>>,
     request: Option<PreparedOpen>,
@@ -1611,11 +1616,12 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
 
     fn open_session_root(
         &mut self,
-        _effective_uid: u32,
-        _effective_gid: u32,
-        _supplementary_groups: &[u32],
+        effective_uid: u32,
+        effective_gid: u32,
+        supplementary_groups: &[u32],
     ) -> Result<SessionDirectories<u32>, i32> {
         self.roots_opened += 1;
+        self.root_credentials = Some((effective_uid, effective_gid, supplementary_groups.to_vec()));
         if let Some(hook) = &mut self.root_hook {
             hook();
         }
@@ -1667,6 +1673,9 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         request: &PreparedStat,
         paths: PathObjects<u32>,
     ) -> Result<Vec<u8>, i32> {
+        if let Some(hook) = &mut self.query_hook {
+            hook()?;
+        }
         self.stat_request = Some(request.clone());
         self.root = Some(paths.root);
         self.directory = paths.base;
@@ -1678,6 +1687,9 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         request: &PreparedStat,
         paths: PathObjects<u32>,
     ) -> Result<protocol::FileStatus, i32> {
+        if let Some(hook) = &mut self.query_hook {
+            hook()?;
+        }
         self.stat_request = Some(request.clone());
         self.root = Some(paths.root);
         self.directory = paths.base;
@@ -1848,6 +1860,9 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         request: &posix_service::PreparedReadlink,
         paths: PathObjects<u32>,
     ) -> Result<Vec<u8>, i32> {
+        if let Some(hook) = &mut self.query_hook {
+            hook()?;
+        }
         self.readlink_request = Some(request.clone());
         self.root = Some(paths.root);
         self.directory = paths.base;
@@ -1877,6 +1892,9 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
     }
 
     fn access_at(&mut self, request: &PreparedAccess, paths: PathObjects<u32>) -> Result<(), i32> {
+        if let Some(hook) = &mut self.query_hook {
+            hook()?;
+        }
         self.access_request = Some(request.clone());
         self.root = Some(paths.root);
         self.directory = paths.base;

@@ -577,11 +577,20 @@ fn main() {
         } else {
             None
         };
-        let opened_file = if let (Some(peer), Some((header, payload)), true) =
+        let prepared_path = if let (Some(peer), Some((header, payload)), true) =
             (peer, decoded, attachments_valid)
         {
             if header.opcode == protocol::OP_OPEN_AT && request_image.is_some() {
                 Some(posix_service::open_request::execute(
+                    &service_state,
+                    peer,
+                    header,
+                    payload,
+                    &attachments,
+                    &mut filesystem,
+                ))
+            } else if posix_service::path_query::supports(header.opcode) && request_image.is_some() {
+                Some(posix_service::path_query::execute(
                     &service_state,
                     peer,
                     header,
@@ -605,7 +614,7 @@ fn main() {
         }
         let mut retained_handle = None;
         let object_response = match (peer, decoded, attachments_valid) {
-            (Some(peer), Some(_), true) if opened_file.is_some() => {
+            (Some(peer), Some(_), true) if prepared_path.is_some() => {
                 let validation = request_image
                     .ok_or(protocol::STATUS_EPERM)
                     .and_then(|image| {
@@ -614,7 +623,7 @@ fn main() {
                         )
                     });
                 Some(posix_service::open_request::finish(
-                    opened_file.unwrap(),
+                    prepared_path.unwrap(),
                     validation,
                     &mut filesystem,
                 ))
