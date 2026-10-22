@@ -19,6 +19,8 @@ mod implementation;
 mod io_resources;
 #[path = "../../../user/crates/newlib-runtime/src/terminal_memory.rs"]
 mod terminal_memory;
+#[path = "../../../user/crates/newlib-runtime/src/terminal_name.rs"]
+mod terminal_name;
 #[path = "../../../user/crates/newlib-runtime/src/user_copy.rs"]
 mod user_copy;
 #[path = "support/user_copy_native.rs"]
@@ -32,6 +34,7 @@ const ENAMETOOLONG: c_int = 91;
 const PAGE_SIZE: usize = 4096;
 const EMFILE: c_int = 24;
 const EIO: c_int = 5;
+const ERANGE: c_int = 34;
 const TCSANOW: c_int = 0;
 mod syscall {
     pub use super::user_copy_native::syscall::{SyscallNumber, raw_syscall3};
@@ -70,6 +73,9 @@ fn object_entry(handle: u64, rights: u64, kind: FdKind, flags: c_int) -> FdEntry
         rights,
         descriptor_flags: 0,
     }
+}
+fn with_fd_entry(fd: c_int) -> Result<Box<FdEntry>, c_int> {
+    state().fds.get(fd).map(Box::new).ok_or(9)
 }
 struct ThreadControl {
     callback_resources: callback_resources::Chain,
@@ -206,9 +212,32 @@ fn set_terminal_window_size(entry: FdEntry, window: NewlibWinSize) -> Result<(),
         Ok(())
     }
 }
+fn terminal_control(
+    entry: FdEntry,
+    code: u64,
+    input: &[u8],
+    output: &mut [u8],
+) -> Result<usize, c_int> {
+    assert_eq!(entry.handle.handle, 10);
+    assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
+    assert!(!CONTROL.callback_resources.is_empty());
+    assert!(state().fds.get(0).is_none() && state().fds.get(1).is_none());
+    assert!(state().fds.reserve_pair_from(0, 2).is_err());
+    assert_eq!(code, posix_protocol::PTY_CONTROL_GET_SLAVE_NAME);
+    assert!(input.is_empty());
+    CONFIGURED.lock().unwrap().push("name");
+    match CASE.load(Ordering::Relaxed) {
+        14 => Err(EIO),
+        15 => {
+            output[0] = 0;
+            Ok(1)
+        }
+        _ => posix_protocol::pty_name::encode(b"81-37", output).map_err(|_| EIO),
+    }
+}
 #[test]
 fn configuration_precedes_publication_and_failures_reclaim_both_references_and_slots() {
-    for case in 0..12 {
+    for case in 0..16 {
         state().fds = FdTable::new();
         CASE.store(case, Ordering::Relaxed);
         CREATES.store(0, Ordering::Relaxed);
@@ -216,6 +245,7 @@ fn configuration_precedes_publication_and_failures_reclaim_both_references_and_s
         CLOSED.lock().unwrap().clear();
         CONFIGURED.lock().unwrap().clear();
         let (mut master, mut slave) = (-123, -123);
+        let mut name = [0xcc; posix_protocol::pty_name::MAX_LEN];
         let attributes = NewlibTermios {
             c_iflag: 123,
             ..Default::default()
@@ -235,6 +265,13 @@ fn configuration_precedes_publication_and_failures_reclaim_both_references_and_s
             } else {
                 &mut slave
             },
+            if case == 13 {
+                1usize as *mut c_char
+            } else if case >= 12 {
+                name.as_mut_ptr().cast()
+            } else {
+                core::ptr::null_mut()
+            },
             if case == 1 {
                 std::ptr::null()
             } else if case == 8 {
@@ -250,11 +287,16 @@ fn configuration_precedes_publication_and_failures_reclaim_both_references_and_s
                 &window
             },
         );
-        if case < 2 {
+        if case < 2 || case == 12 {
             assert_eq!(result, Ok(0));
             assert_eq!((master, slave), (0, 1));
             assert_eq!(*LIVE.lock().unwrap(), [10, 11]);
             assert!(CLOSED.lock().unwrap().is_empty());
+            if case == 12 {
+                let expected = b"/dev/pts/81-37\0";
+                assert_eq!(&name[..expected.len()], expected);
+                assert!(name[expected.len()..].iter().all(|byte| *byte == 0xcc));
+            }
             for index in 0..2 {
                 let entry = state().fds.get(index).unwrap();
                 assert_eq!(
@@ -273,7 +315,7 @@ fn configuration_precedes_publication_and_failures_reclaim_both_references_and_s
                     2 => EMFILE,
                     3 => EAGAIN,
                     5 => EACCES,
-                    8..=11 => EFAULT,
+                    8..=11 | 13 => EFAULT,
                     _ => EIO,
                 })
             );
@@ -301,6 +343,7 @@ fn configuration_precedes_publication_and_failures_reclaim_both_references_and_s
             *CONFIGURED.lock().unwrap(),
             match case {
                 0 | 7 | 10 | 11 => vec!["attributes", "window"],
+                12..=15 => vec!["attributes", "window", "name"],
                 6 => vec!["attributes"],
                 _ => vec![],
             }

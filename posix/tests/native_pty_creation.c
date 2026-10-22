@@ -21,6 +21,7 @@ static unsigned mode;
 static volatile sig_atomic_t faulted;
 static sigjmp_buf destination;
 static int *retry_master, *retry_slave;
+static char *retry_name;
 static struct termios *retry_attributes;
 static struct winsize *retry_window;
 #define CHECK(x)                                                               \
@@ -43,7 +44,7 @@ static void fault_handler(int signal) {
     _exit(91);
   faulted = 1;
   int64_t baseline = native(680, 0, 0, 0);
-  if (openpty(retry_master, retry_slave, NULL, retry_attributes, retry_window) != -1 ||
+  if (openpty(retry_master, retry_slave, retry_name, retry_attributes, retry_window) != -1 ||
       errno != EFAULT || native(680, 0, 0, 0) != baseline)
     _exit(92);
   siglongjmp(destination, 37);
@@ -51,9 +52,11 @@ static void fault_handler(int signal) {
 int main(void) {
   int warm_master, warm_slave;
   struct termios raw;
-  CHECK(openpty(&warm_master, &warm_slave, NULL, NULL, NULL) == 0);
+  char created_name[64];
+  CHECK(openpty(&warm_master, &warm_slave, created_name, NULL, NULL) == 0);
   char name[64], short_name[1] = {'x'};
   CHECK(ptsname_r(warm_master, name, sizeof(name)) == 0);
+  CHECK(strcmp(name, created_name) == 0);
   CHECK(strncmp(name, "/dev/pts/", 9) == 0);
   CHECK(ptsname_r(warm_master, short_name, sizeof(short_name)) == ERANGE);
   CHECK(short_name[0] == 'x');
@@ -72,13 +75,14 @@ int main(void) {
   action.sa_handler = fault_handler;
   sigemptyset(&action.sa_mask);
   CHECK(sigaction(SIGSEGV, &action, NULL) == 0);
-  for (mode = 0; mode < 8; ++mode) {
-    unsigned char *page = mmap(NULL, 16384, PROT_READ | PROT_WRITE,
+  for (mode = 0; mode < 9; ++mode) {
+    unsigned char *page = mmap(NULL, 20480, PROT_READ | PROT_WRITE,
                                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     CHECK(page != MAP_FAILED);
     int *master = (int *)page, *slave = (int *)(page + 4096);
     struct termios *attributes = (struct termios *)(page + 8192);
     struct winsize *window = (struct winsize *)(page + 12288);
+    char *output_name = (char *)(page + 16384);
     *master = *slave = -123;
     *attributes = raw;
     *window = (struct winsize){40, 120, 1280, 800};
@@ -97,19 +101,25 @@ int main(void) {
       CHECK(mprotect(page + (mode == 2 ? 0 : 4096), 4096, PROT_READ) == 0);
     if (mode == 4 || mode == 5)
       CHECK(mprotect(page + (mode == 4 ? 8192 : 12288), 4096, PROT_NONE) == 0);
+    if (mode == 8)
+      CHECK(mprotect(page + 16384, 4096, PROT_NONE) == 0);
     if (mode == 6)
       attributes->c_lflag |= UINT32_C(0x80000000);
     retry_master = master;
     retry_slave = slave;
+    retry_name = output_name;
     retry_attributes = attributes;
     retry_window = window;
     faulted = 0;
     int jumped = sigsetjmp(destination, 1);
     if (!jumped) {
-      int result = openpty(master, slave, NULL, mode == 1 ? NULL : attributes,
+      int result = openpty(master, slave, output_name, mode == 1 ? NULL : attributes,
                            mode == 1 ? NULL : window);
       if (mode < 2) {
         CHECK(result == 0 && *master == expected[0] && *slave == expected[1]);
+        char actual_name[64];
+        CHECK(ptsname_r(*master, actual_name, sizeof(actual_name)) == 0 &&
+              strcmp(actual_name, output_name) == 0);
         if (mode == 0) {
           struct termios actual;
           struct winsize size;
@@ -127,24 +137,24 @@ int main(void) {
         CHECK(close(*master) == 0 && close(*slave) == 0);
       } else {
         CHECK(result == -1 &&
-              errno == (mode < 6 ? EFAULT : mode == 6 ? ENOTSUP : EMFILE));
+              errno == (mode < 6 || mode == 8 ? EFAULT : mode == 6 ? ENOTSUP : EMFILE));
         CHECK(*master == (mode == 3 ? expected[0] : -123) && *slave == -123);
         CHECK(native(680, 0, 0, 0) == baseline);
-        if (mode < 6) {
+        if (mode < 6 || mode == 8) {
           unsigned offset = mode == 2 ? 0 : mode == 3 ? 4096 :
-                            mode == 4 ? 8192 : 12288;
+                            mode == 4 ? 8192 : mode == 5 ? 12288 : 16384;
           *(volatile char *)(page + offset) = 1;
           CHECK(0);
         }
       }
     } else {
-      CHECK(jumped == 37 && faulted && mode >= 2 && mode <= 5);
+      CHECK(jumped == 37 && faulted && ((mode >= 2 && mode <= 5) || mode == 8));
       if (mode == 3) {
         CHECK(*master == expected[0] && *slave == -123);
         CHECK(fcntl(*master, F_GETFD) == -1 && errno == EBADF);
       }
     }
-    CHECK(faulted == (mode >= 2 && mode <= 5));
+    CHECK(faulted == ((mode >= 2 && mode <= 5) || mode == 8));
     CHECK(native(680, 0, 0, 0) == baseline);
     if (mode == 7)
       CHECK(setrlimit(RLIMIT_NOFILE, &original) == 0);
@@ -152,11 +162,11 @@ int main(void) {
     CHECK(pipe(reused) == 0 && reused[0] == expected[0] &&
           reused[1] == expected[1]);
     CHECK(close(reused[0]) == 0 && close(reused[1]) == 0);
-    CHECK(munmap(page, 16384) == 0);
+    CHECK(munmap(page, 20480) == 0);
     CHECK(native(680, 0, 0, 0) == baseline);
     fprintf(stderr, "pty-creation: mode=%u PASS\n", mode);
   }
-  puts("pty-creation: PASS 8 configuration, EFAULT input/output and FD-limit "
+  puts("pty-creation: PASS 9 configuration, name, EFAULT input/output and FD-limit "
        "cases including active handlers; both references and reservations reclaimed");
   return 0;
 }
