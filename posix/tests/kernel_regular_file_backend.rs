@@ -50,7 +50,9 @@ fn native_mapping_and_file_io_keep_the_provider_path_and_boot_loader_authority()
     let exec = include_str!("../../../core/src/syscall/exec.rs");
     assert!(!exec.contains("ensure_fs_path_executable_for_process"));
     assert!(!exec.contains("crate::init::fs::read_initfs(path)"));
-    assert!(exec.contains("mnu_abi::boot_module::decode(crate::init::fs::boot_module_bytes())"));
+    assert!(
+        exec.contains("mnu_abi::boot_module::decode(crate::init::boot_data::boot_module_bytes())")
+    );
     assert!(exec.contains("let data = selected.initial_image;"));
     for fallback in [
         "crate::cext::fs::read_all",

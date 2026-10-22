@@ -16,7 +16,7 @@ static STARTS:AtomicUsize=AtomicUsize::new(0);
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]struct CapabilitySet;
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]struct KernelAuthoritySet;
 mod task {#[derive(Clone,Copy,Debug,PartialEq,Eq)]pub enum PrivilegeLevel {Service}}
-mod init {pub mod fs {
+mod init {pub mod boot_data {
 pub static BYTES:std::sync::Mutex<&'static [u8]>=std::sync::Mutex::new(&[]);
 pub fn boot_module_bytes()->&'static [u8]{*BYTES.lock().unwrap()}
 }}
@@ -48,7 +48,7 @@ assert!(handles.is_empty()&&values.is_empty());assert!(matches!(launch,ImageLaun
     ));
     program.push_str(r#"
 fn launch(bytes:Vec<u8>)->u64{
-*init::fs::BYTES.lock().unwrap()=Box::leak(bytes.into_boxed_slice());
+*init::boot_data::BYTES.lock().unwrap()=Box::leak(bytes.into_boxed_slice());
 launch_bootstrap_image(CapabilitySet,KernelAuthoritySet,task::PrivilegeLevel::Service)
 }
 fn main(){

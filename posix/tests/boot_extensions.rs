@@ -86,14 +86,14 @@ fn module(extensions: &[u8]) -> Vec<u8> {
 }
 
 #[test]
-fn boot_module_v3_separates_config_modules_and_image_and_rejects_legacy_descriptors() {
+fn boot_module_separates_config_modules_and_image_and_rejects_legacy_descriptors() {
     let selected = table(&[(b"module", true)]);
     let bytes = module(&selected);
     let decoded = boot_module::decode(&bytes).unwrap();
     assert_eq!(decoded.kernel_configuration, b"cfg");
     assert_eq!(decoded.native_modules, selected);
     assert_eq!(decoded.initial_image, b"image");
-    for version in [1u32, 2, 4] {
+    for version in [1u32, 2, 3, 5] {
         let mut bad = bytes.clone();
         bad[8..12].copy_from_slice(&version.to_le_bytes());
         assert_eq!(
@@ -261,7 +261,7 @@ const MCX_CEXT_ABI:u16=4;
 #[macro_export]macro_rules! warn{{($($x:tt)*)=>{{}}}}
 #[macro_export]macro_rules! info{{($($x:tt)*)=>{{}}}}
 mod util{{pub mod log{{pub fn release_boot_marker(_:std::fmt::Arguments){{}}}}}}
-mod init{{pub mod fs{{pub static BYTES:std::sync::Mutex<&'static[u8]>=std::sync::Mutex::new(&[]);pub fn boot_module_bytes()->&'static[u8]{{*BYTES.lock().unwrap()}}}}}}
+mod init{{pub mod boot_data{{pub static BYTES:std::sync::Mutex<&'static[u8]>=std::sync::Mutex::new(&[]);pub fn boot_module_bytes()->&'static[u8]{{*BYTES.lock().unwrap()}}}}}}
 use std::sync::atomic::{{AtomicU32,Ordering}};
 static CALLS:AtomicU32=AtomicU32::new(0);static KEPT:AtomicU32=AtomicU32::new(0);
 struct LoadedSymbol{{address:u64}}
@@ -287,7 +287,7 @@ fn load_cext(name:&str,kind:CextKind,pid:Option<u64>){{assert_eq!(name,"opaque")
 fn main(){{
  for (bytes,expected,calls) in [(vec!{:?},true,1),(vec!{:?},false,0),(vec!{:?},true,1),(vec!{:?},false,0)]{{
   CALLS.store(0,Ordering::Relaxed);KEPT.store(0,Ordering::Relaxed);
-  *init::fs::BYTES.lock().unwrap()=Box::leak(bytes.into_boxed_slice());
+  *init::boot_data::BYTES.lock().unwrap()=Box::leak(bytes.into_boxed_slice());
   assert_eq!(load_boot_modules(),expected);assert_eq!(CALLS.load(Ordering::Relaxed),calls);assert_eq!(KEPT.load(Ordering::Relaxed),calls);
  }}
 }}

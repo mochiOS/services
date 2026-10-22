@@ -20,7 +20,7 @@ macro_rules! warn {
 }
 
 mod init {
-    pub mod fs {
+    pub mod boot_data {
         pub fn boot_module_bytes() -> &'static [u8] {
             static MODULE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
             MODULE.get_or_init(|| {
