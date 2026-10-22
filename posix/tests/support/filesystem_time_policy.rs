@@ -596,19 +596,16 @@ fn root_is_not_an_override_for_readonly_volumes_or_immutable_inodes() {
         )
         .unwrap();
     service.mount_devices(b"/dev", Default::default()).unwrap();
-    assert_eq!(
-        service
-            .set_times_at(
-                request(wire::OP_SET_TIMES_AT, 0),
-                b"/dev/null",
-                PathAnchors::default(),
-                credentials(0, 0, &[]),
-                current(),
-                never
-            )
-            .err(),
-        Some(30)
-    );
+    service
+        .set_times_at(
+            request(wire::OP_SET_TIMES_AT, 0),
+            b"/dev/null",
+            PathAnchors::default(),
+            credentials(0, 0, &[]),
+            current(),
+            now,
+        )
+        .unwrap();
     service
         .set_times_at(
             request(wire::OP_SET_TIMES_AT, 0),

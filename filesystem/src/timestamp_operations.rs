@@ -107,39 +107,14 @@ impl FilesystemService {
         } else {
             FollowSymlinks::All
         };
-        // Keep device nodes visible to an unchanged request, without pretending
-        // that their service-owned immutable metadata can be changed.
-        let (inode, filesystem, volume) = match self.resolve_namespace_path(
-            path,
-            anchors,
-            follow,
-            credentials.effective_uid,
-            credentials.effective_gid,
-            credentials.supplementary_groups(),
-        )? {
-            Some(path_walk::Resolution::Found { inode, .. }) => {
-                if inode.device_node().is_some() {
-                    return if times.unchanged() {
-                        Ok(self.success(request))
-                    } else {
-                        Err(EROFS)
-                    };
+        let (inode, filesystem, volume) =
+            match self.resolve_operation_target(path, anchors, follow, credentials)? {
+                OperationTarget::Device(node) => {
+                    self.set_device_times(&node, credentials, times, now)?;
+                    return Ok(self.success(request));
                 }
-                let namespace = self.namespace.as_ref().ok_or(EIO)?;
-                let filesystem = namespace.filesystem(&inode)?.clone();
-                let volume = u32::try_from(inode.id().volume).map_err(|_| EIO)?;
-                (inode.into_inode()?, filesystem, volume)
-            }
-            Some(path_walk::Resolution::Missing { .. }) => return Err(ENOENT),
-            None => self.resolve_scoped_inode(
-                path,
-                anchors,
-                follow,
-                credentials.effective_uid,
-                credentials.effective_gid,
-                credentials.supplementary_groups(),
-            )?,
-        };
+                OperationTarget::Disk(inode, filesystem, volume) => (inode, filesystem, volume),
+            };
         let node_id = scoped_node_id(volume, &inode);
         self.set_inode_times(inode, filesystem, node_id, credentials, times, now)?;
         Ok(self.success(request))
@@ -158,12 +133,10 @@ impl FilesystemService {
         if request.flags != 0 || !times.valid() {
             return Err(EINVAL);
         }
-        if self.opens.device(open_id).is_some() {
-            return if times.unchanged() {
-                Ok(self.success(request))
-            } else {
-                Err(EROFS)
-            };
+        if let Some(open) = self.opens.device(open_id) {
+            let node = open.node.clone();
+            self.set_device_times(&node, credentials, times, now)?;
+            return Ok(self.success(request));
         }
         let open = self.opens.get(&open_id).ok_or(EBADF)?;
         self.set_inode_times(
@@ -175,6 +148,25 @@ impl FilesystemService {
             now,
         )?;
         Ok(self.success(request))
+    }
+
+    fn set_device_times(
+        &mut self,
+        node: &Node,
+        credentials: protocol::Credentials,
+        times: FileTimeUpdate,
+        now: impl FnOnce() -> Result<InodeTimestamp, i32>,
+    ) -> Result<(), i32> {
+        self.namespace.as_mut().ok_or(EIO)?.set_device_times(
+            node,
+            times,
+            path_walk::Credentials {
+                uid: credentials.effective_uid,
+                gid: credentials.effective_gid,
+                groups: credentials.supplementary_groups(),
+            },
+            now,
+        )
     }
 
     fn set_inode_times(

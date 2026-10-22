@@ -314,6 +314,21 @@ impl Namespace {
         }
     }
 
+    pub(crate) fn set_device_times(
+        &mut self,
+        node: &Node,
+        times: protocol::FileTimeUpdate,
+        credentials: Credentials<'_>,
+        now: impl FnOnce() -> Result<ext4plus::inode::InodeTimestamp, i32>,
+    ) -> Result<(), i32> {
+        self.validate(node)?;
+        let device = node.device_node().ok_or(95)?;
+        match self.volumes.get_mut(node.volume as usize) {
+            Some(Volume::Device(filesystem)) => filesystem.set_times(device, times, credentials, now),
+            _ => Err(95),
+        }
+    }
+
     pub(crate) fn open_null(
         &self,
         node: &Node,

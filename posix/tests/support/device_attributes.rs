@@ -3,6 +3,9 @@ use ext4plus::inode::InodeTimestamp;
 use mochios_filesystem_protocol as wire;
 use std::cell::Cell;
 
+#[path = "device_times.rs"]
+mod times;
+
 thread_local! {
     static CLOCK_ERROR: Cell<i32> = const { Cell::new(0) };
     static CLOCK_CALLS: Cell<u32> = const { Cell::new(0) };

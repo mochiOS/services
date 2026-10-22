@@ -6,6 +6,7 @@ use std::sync::{Arc, RwLock};
 use crate::null_device::{self, NullDescription};
 use crate::path_walk::{Backend, Credentials};
 use crate::service::permission_allows;
+use ext4plus::inode::InodeTimestamp;
 use mochios_filesystem_protocol as protocol;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,6 +35,8 @@ struct Metadata {
     attributes: Attributes,
     links: u32,
     changed: ext4plus::inode::InodeTimestamp,
+    accessed: InodeTimestamp,
+    modified: InodeTimestamp,
 }
 
 pub(crate) enum AttributeChange {
@@ -143,6 +146,10 @@ impl DeviceFilesystem {
         attributes: Attributes,
         external: Option<ExternalDevice>,
     ) -> Node {
+        let initial = InodeTimestamp {
+            seconds: 0,
+            nanoseconds: 0,
+        };
         Node {
             owner: owner.clone(),
             record: Arc::new(Record {
@@ -152,10 +159,9 @@ impl DeviceFilesystem {
                 metadata: RwLock::new(Metadata {
                     attributes,
                     links: if kind == NodeKind::Directory { 2 } else { 1 },
-                    changed: ext4plus::inode::InodeTimestamp {
-                        seconds: 0,
-                        nanoseconds: 0,
-                    },
+                    changed: initial,
+                    accessed: initial,
+                    modified: initial,
                 }),
                 external,
             }),
@@ -370,6 +376,67 @@ impl DeviceFilesystem {
         Ok(())
     }
 
+    /// Timestamp requests retain inode identity and authorize against fresh
+    /// attributes. OMIT/OMIT never reads the clock or changes any timestamp.
+    pub(crate) fn set_times(
+        &mut self,
+        node: &Node,
+        times: protocol::FileTimeUpdate,
+        caller: Credentials<'_>,
+        now: impl FnOnce() -> Result<InodeTimestamp, i32>,
+    ) -> Result<(), i32> {
+        self.validate(node)?;
+        if !times.valid() {
+            return Err(22);
+        }
+        if times.unchanged() {
+            return Ok(());
+        }
+        let mut metadata = node.record.metadata.write().map_err(|_| 5)?;
+        let attributes = metadata.attributes;
+        if caller.uid != 0 && caller.uid != attributes.uid {
+            if !times.both_now() {
+                return Err(1);
+            }
+            let kind = if node.kind() == NodeKind::Directory {
+                protocol::NODE_TYPE_DIRECTORY
+            } else {
+                protocol::NODE_TYPE_SPECIAL
+            };
+            if !permission_allows(
+                attributes.mode,
+                kind,
+                attributes.uid,
+                attributes.gid,
+                caller.uid,
+                caller.gid,
+                caller.groups,
+                protocol::ACCESS_AT_WRITE,
+            ) {
+                return Err(13);
+            }
+        }
+        let current = now()?;
+        if current.nanoseconds >= 1_000_000_000 {
+            return Err(22);
+        }
+        let resolve = |update, old| match update {
+            protocol::TimestampUpdate::Set {
+                seconds,
+                nanoseconds,
+            } => InodeTimestamp {
+                seconds,
+                nanoseconds,
+            },
+            protocol::TimestampUpdate::Now => current,
+            protocol::TimestampUpdate::Omit => old,
+        };
+        metadata.accessed = resolve(times.access, metadata.accessed);
+        metadata.modified = resolve(times.modification, metadata.modified);
+        metadata.changed = current;
+        Ok(())
+    }
+
     pub fn parent(&self, node: &Node) -> Result<Node, i32> {
         self.validate(node)?;
         Ok(node.record.parent.clone().unwrap_or_else(|| node.clone()))
@@ -406,6 +473,10 @@ impl DeviceFilesystem {
         status.link_count = metadata.links;
         status.change_time_seconds = metadata.changed.seconds;
         status.change_time_nanoseconds = metadata.changed.nanoseconds;
+        status.access_time_seconds = metadata.accessed.seconds;
+        status.access_time_nanoseconds = metadata.accessed.nanoseconds;
+        status.modification_time_seconds = metadata.modified.seconds;
+        status.modification_time_nanoseconds = metadata.modified.nanoseconds;
         Ok(status)
     }
 
