@@ -107,7 +107,7 @@ fn main(){
     assert_ne!(Error::Unsupported,Error::NotReady);
     for value in [raw as i64,-(raw as i64)]{assert_eq!(mochios_posix_protocol::status::normalize_failure(value),-95);assert_eq!(newlib_errno::from_status(value),newlib_errno::ENOTSUP);}
     assert_eq!(platform_error::convert(error),95);
-    let unknown=(raw&!0xffff)|12;assert_eq!(Error::from_raw(unknown),None);assert!(RawSyscallResult::new(unknown).into_result().is_err());assert_eq!(newlib_errno::from_status(unknown as i64),newlib_errno::EIO);
+    let unknown=(raw&!0xffff)|13;assert_eq!(Error::from_raw(unknown),None);assert!(RawSyscallResult::new(unknown).into_result().is_err());assert_eq!(newlib_errno::from_status(unknown as i64),newlib_errno::EIO);
 }
 "#);
     // filesystem's production converter names the platform syscall module.

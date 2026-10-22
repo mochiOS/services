@@ -191,6 +191,7 @@ pub(crate) fn native_error(error: mochi_user_platform::syscall::SysError) -> i32
             Error::NotFound => 2,
             Error::PeerClosed => 32,
             Error::Unsupported => 95,
+            Error::InvalidFormat => 5,
         };
     }
     error

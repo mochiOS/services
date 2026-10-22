@@ -78,7 +78,7 @@ fn valid()->[u8;8192] {
     data
 }
 fn reject(data:&[u8]) {
-    MAPS.set(0);assert_eq!(image::map_elf_image(data,17,&mut ExecMeasurement).err(),Some(Error::InvalidArgument));
+    MAPS.set(0);assert_eq!(image::map_elf_image(data,17,&mut ExecMeasurement).err(),Some(Error::InvalidFormat));
     assert_eq!(MAPS.get(),0,"invalid ELF must not mutate any page table");
 }
 fn main() {

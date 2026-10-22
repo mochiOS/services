@@ -44,6 +44,7 @@ fn explicit_ceiling_and_all_native_errors_are_preserved_without_fallback() {
     for ceiling in [0, 4096, u64::MAX] {
         for error in [
             mnu_abi::status::Error::InvalidArgument.into_raw() as i64,
+            mnu_abi::status::Error::InvalidFormat.into_raw() as i64,
             mnu_abi::status::Error::AccessDenied.into_raw() as i64,
             mnu_abi::status::Error::NotReady.into_raw() as i64,
             mnu_abi::status::Error::ResourceUnavailable.into_raw() as i64,
