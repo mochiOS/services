@@ -577,6 +577,24 @@ fn main() {
         } else {
             None
         };
+        let opened_file = if let (Some(peer), Some((header, payload)), true) =
+            (peer, decoded, attachments_valid)
+        {
+            if header.opcode == protocol::OP_OPEN_AT && request_image.is_some() {
+                Some(posix_service::open_request::execute(
+                    &service_state,
+                    peer,
+                    header,
+                    payload,
+                    &attachments,
+                    &mut filesystem,
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let mut service = service_state.lock().unwrap();
         if attachments_valid
             && attachments.is_empty()
@@ -587,6 +605,20 @@ fn main() {
         }
         let mut retained_handle = None;
         let object_response = match (peer, decoded, attachments_valid) {
+            (Some(peer), Some(_), true) if opened_file.is_some() => {
+                let validation = request_image
+                    .ok_or(protocol::STATUS_EPERM)
+                    .and_then(|image| {
+                        validate_pending_request_image(
+                            sender, peer, image, &mut service, &mut processes,
+                        )
+                    });
+                Some(posix_service::open_request::finish(
+                    opened_file.unwrap(),
+                    validation,
+                    &mut filesystem,
+                ))
+            }
             (Some(peer), Some((header, _)), true) if inspected_file.is_some() => {
                 let result = request_image.ok_or(protocol::STATUS_EPERM)
                     .and_then(|image| validate_pending_request_image(

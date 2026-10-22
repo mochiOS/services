@@ -87,6 +87,9 @@ mod canonical_path_protocol;
 #[path = "support/byte_path_protocol.rs"]
 mod byte_path_protocol;
 
+#[path = "support/open_request.rs"]
+mod open_request;
+
 #[path = "support/file_time_protocol.rs"]
 mod file_time_protocol;
 
@@ -1397,6 +1400,8 @@ fn client_transfers_directory_handles_for_chdir_chroot_and_fchdir() {
 
 #[derive(Default)]
 struct RecordingFilesystem {
+    root_hook: Option<Box<dyn FnMut()>>,
+    open_hook: Option<Box<dyn FnMut()>>,
     admission_calls: Vec<(u16, Option<AttachedObject<u32>>)>,
     admission_response: Option<Result<OpenedObject<u32>, i32>>,
     request: Option<PreparedOpen>,
@@ -1611,6 +1616,9 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         _supplementary_groups: &[u32],
     ) -> Result<SessionDirectories<u32>, i32> {
         self.roots_opened += 1;
+        if let Some(hook) = &mut self.root_hook {
+            hook();
+        }
         Ok(SessionDirectories {
             root: AttachedObject {
                 handle: 100,
@@ -1629,6 +1637,9 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         paths: PathObjects<u32>,
     ) -> Result<OpenedObject<u32>, i32> {
         self.request = Some(request.clone());
+        if let Some(hook) = &mut self.open_hook {
+            hook();
+        }
         self.root = Some(paths.root);
         self.directory = paths.base;
         Ok(OpenedObject {

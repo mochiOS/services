@@ -27,6 +27,7 @@ pub mod filesystem_transport;
 pub mod filesystem_metadata;
 pub mod mutation_admission;
 mod open_flags;
+pub mod open_request;
 mod fault_signal;
 mod signal_origin;
 mod alarm;
@@ -456,6 +457,8 @@ pub trait FilesystemBackend<H: Copy> {
 
     /// Retains an attached object beyond the lifetime of the current IPC
     /// request, monotonically preserving or reducing its rights.
+    /// This must use local reference management, not a peer-service RPC:
+    /// callers may hold the POSIX state lock while retaining pathname anchors.
     fn retain_object(&mut self, object: AttachedObject<H>) -> Result<AttachedObject<H>, i32>;
 
     /// Releases one service-owned object reference.
@@ -3911,17 +3914,7 @@ impl<H: Copy> PosixService<H> {
                     Ok(paths) => paths,
                     Err(status) => return object_error(header.request_id, status),
                 };
-                let result = match admission {
-                    Some(ticket) => filesystem.open_at_admitted(&prepared, paths, ticket),
-                    None => filesystem.open_at(&prepared, paths).map_err(MutationError::Failed),
-                };
-                match result {
-                    Ok(opened) => ObjectResponse {
-                        response: status_response(header.request_id, protocol::STATUS_OK),
-                        handles: vec![opened],
-                    },
-                    Err(error) => object_mutation_error(header.request_id, error, admission.is_some(), filesystem),
-                }
+                open_request::dispatch(header.request_id, &prepared, paths, admission, filesystem)
             }
             protocol::OP_CANONICAL_PATH_AT => {
                 let prepared = match self.prepare_stat_at(peer, payload, handles.len()) {
