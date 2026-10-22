@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use mochios_posix_protocol as protocol;
 
 pub mod pty;
+pub mod pty_factory;
 pub mod named_semaphore;
 pub mod shared_memory;
 pub mod shared_memory_file;

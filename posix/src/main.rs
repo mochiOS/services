@@ -1242,6 +1242,12 @@ fn run_pty_provider(
         let length = (message & 0xffff_ffff) as usize;
         let request_length = length.min(request.len());
         let count = (attachments.count as usize).min(attachments.handles.len());
+        if request[..request_length].starts_with(&mochios_posix_protocol::pty_factory::MAGIC) {
+            posix_service::pty_factory::serve(
+                &ptys, endpoint, sender, &request[..request_length], attachments,
+            );
+            continue;
+        }
         if request[..request_length] == PTY_IDENTIFY_MAGIC {
             let status = if attachments.count == 1
                 && count == 1
