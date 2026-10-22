@@ -5,6 +5,7 @@ use std::sync::Mutex;
 
 #[derive(PartialEq, Eq)]
 enum Query {
+    Cwd,
     Stat(PreparedStat),
     Canonical(PreparedStat),
     Access(PreparedAccess),
@@ -15,6 +16,7 @@ pub fn supports(opcode: u16) -> bool {
     matches!(
         opcode,
         protocol::OP_STAT_AT
+            | protocol::OP_GETCWD
             | protocol::OP_CANONICAL_PATH_AT
             | protocol::OP_ACCESS_AT
             | protocol::OP_READLINK_AT
@@ -29,6 +31,15 @@ fn prepare<H: Copy>(
     count: usize,
 ) -> Result<(Query, protocol::OpenBase), i32> {
     match opcode {
+        protocol::OP_GETCWD => {
+            if !payload.is_empty() || count != 0 {
+                return Err(STATUS_EINVAL);
+            }
+            if !service.sessions.contains_key(&peer.process_id) {
+                return Err(protocol::STATUS_ESRCH);
+            }
+            Ok((Query::Cwd, protocol::OpenBase::ProcessCwd))
+        }
         protocol::OP_STAT_AT | protocol::OP_CANONICAL_PATH_AT => {
             let prepared = service.prepare_stat_at(peer, payload, count)?;
             let base = prepared.base;
@@ -103,6 +114,9 @@ fn run<H: Copy, F: FilesystemBackend<H>>(
     filesystem: &mut F,
 ) -> Result<ObjectResponse<H>, i32> {
     match query {
+        Query::Cwd => filesystem
+            .directory_path(paths.root, paths.base.ok_or(protocol::STATUS_EIO)?)
+            .map(|path| object_payload(request_id, path)),
         Query::Stat(prepared) => filesystem
             .stat_at(prepared, paths)
             .map(|status| object_status(request_id, status)),

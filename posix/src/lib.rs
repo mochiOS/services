@@ -32,6 +32,7 @@ mod path_request;
 pub mod path_query;
 pub mod path_mutation;
 pub mod path_pair;
+pub mod directory_request;
 mod fault_signal;
 mod signal_origin;
 mod alarm;
@@ -465,7 +466,7 @@ pub trait FilesystemBackend<H: Copy> {
     /// callers may hold the POSIX state lock while retaining pathname anchors.
     fn retain_object(&mut self, object: AttachedObject<H>) -> Result<AttachedObject<H>, i32>;
 
-    /// Releases one service-owned object reference.
+    /// Releases one service-owned object reference locally, without peer RPC.
     fn release_object(&mut self, object: AttachedObject<H>);
 
     /// Returns the live path of `directory` relative to `root`.
@@ -3922,6 +3923,7 @@ impl<H: Copy> PosixService<H> {
             }
             protocol::OP_CANONICAL_PATH_AT
             | protocol::OP_STAT_AT
+            | protocol::OP_GETCWD
             | protocol::OP_ACCESS_AT
             | protocol::OP_READLINK_AT => {
                 path_query::dispatch(self, peer, header, payload, handles, filesystem)
@@ -3938,58 +3940,8 @@ impl<H: Copy> PosixService<H> {
                     Err(status) => object_error(header.request_id, status),
                 }
             }
-            protocol::OP_CHDIR_AT => {
-                let prepared = match self.prepare_stat_at(peer, payload, handles.len()) {
-                    Ok(prepared) if prepared.flags == 0 => prepared,
-                    Ok(_) => return object_error(header.request_id, STATUS_EINVAL),
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                let paths = match self.path_objects(peer.process_id, prepared.base, handles) {
-                    Ok(paths) => paths,
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                match filesystem.open_directory_at(&prepared, paths) {
-                    Ok(opened) => {
-                        self.replace_cwd(
-                            peer.process_id,
-                            AttachedObject {
-                                handle: opened.handle,
-                                rights: opened.rights,
-                            },
-                            filesystem,
-                        );
-                        object_error(header.request_id, protocol::STATUS_OK)
-                    }
-                    Err(status) => object_error(header.request_id, status),
-                }
-            }
-            protocol::OP_CHROOT_AT => {
-                let prepared = match self.prepare_stat_at(peer, payload, handles.len()) {
-                    Ok(prepared) if prepared.flags == 0 => prepared,
-                    Ok(_) => return object_error(header.request_id, STATUS_EINVAL),
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                if prepared.effective_uid != 0 {
-                    return object_error(header.request_id, protocol::STATUS_EPERM);
-                }
-                let paths = match self.path_objects(peer.process_id, prepared.base, handles) {
-                    Ok(paths) => paths,
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                match filesystem.open_directory_at(&prepared, paths) {
-                    Ok(opened) => {
-                        self.replace_root(
-                            peer.process_id,
-                            AttachedObject {
-                                handle: opened.handle,
-                                rights: opened.rights,
-                            },
-                            filesystem,
-                        );
-                        object_error(header.request_id, protocol::STATUS_OK)
-                    }
-                    Err(status) => object_error(header.request_id, status),
-                }
+            protocol::OP_CHDIR_AT | protocol::OP_CHROOT_AT => {
+                directory_request::dispatch(self, peer, header, payload, handles, filesystem)
             }
             protocol::OP_FCHDIR => {
                 if !payload.is_empty() || handles.len() != 1 {
@@ -4009,19 +3961,6 @@ impl<H: Copy> PosixService<H> {
                 };
                 self.replace_cwd(peer.process_id, retained, filesystem);
                 object_error(header.request_id, protocol::STATUS_OK)
-            }
-            protocol::OP_GETCWD => {
-                if !payload.is_empty() || !handles.is_empty() {
-                    return object_error(header.request_id, STATUS_EINVAL);
-                }
-                let directories = match self.directories.get(&peer.process_id) {
-                    Some(directories) => *directories,
-                    None => return object_error(header.request_id, protocol::STATUS_ESRCH),
-                };
-                match filesystem.directory_path(directories.root, directories.cwd) {
-                    Ok(path) => object_payload(header.request_id, path),
-                    Err(status) => object_error(header.request_id, status),
-                }
             }
             protocol::OP_FTRUNCATE => {
                 if handles.len() != 1 {

@@ -622,6 +622,24 @@ fn main() {
         } else {
             None
         };
+        let prepared_directory = if let (Some(peer), Some((header, payload)), true) =
+            (peer, decoded, attachments_valid)
+        {
+            if posix_service::directory_request::supports(header.opcode) && request_image.is_some() {
+                Some(posix_service::directory_request::execute(
+                    &service_state,
+                    peer,
+                    header,
+                    payload,
+                    &attachments,
+                    &mut filesystem,
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let mut service = service_state.lock().unwrap();
         if attachments_valid
             && attachments.is_empty()
@@ -632,6 +650,22 @@ fn main() {
         }
         let mut retained_handle = None;
         let object_response = match (peer, decoded, attachments_valid) {
+            (Some(peer), Some(_), true) if prepared_directory.is_some() => {
+                let validation = request_image
+                    .ok_or(protocol::STATUS_EPERM)
+                    .and_then(|image| {
+                        validate_pending_request_image(
+                            sender, peer, image, &mut service, &mut processes,
+                        )
+                    });
+                Some(posix_service::directory_request::finish(
+                    &mut service,
+                    peer,
+                    prepared_directory.unwrap(),
+                    validation,
+                    &mut filesystem,
+                ))
+            }
             (Some(peer), Some(_), true) if prepared_path.is_some() => {
                 let validation = request_image
                     .ok_or(protocol::STATUS_EPERM)

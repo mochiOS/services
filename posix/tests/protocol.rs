@@ -99,6 +99,9 @@ mod path_mutation;
 #[path = "support/path_pair.rs"]
 mod path_pair;
 
+#[path = "support/directory_request.rs"]
+mod directory_request;
+
 #[path = "support/file_time_protocol.rs"]
 mod file_time_protocol;
 
@@ -1666,6 +1669,9 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         request: &PreparedStat,
         paths: PathObjects<u32>,
     ) -> Result<OpenedObject<u32>, i32> {
+        if let Some(hook) = &mut self.query_hook {
+            hook()?;
+        }
         self.directory_request = Some(request.clone());
         self.root = Some(paths.root);
         self.directory = paths.base;
@@ -1955,6 +1961,9 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         root: AttachedObject<u32>,
         directory: AttachedObject<u32>,
     ) -> Result<Vec<u8>, i32> {
+        if let Some(hook) = &mut self.query_hook {
+            hook()?;
+        }
         self.path_query = Some((root, directory));
         if self.directory_path.is_empty() {
             Ok(b"/".to_vec())
