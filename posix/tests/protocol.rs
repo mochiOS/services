@@ -24,6 +24,9 @@ mod process_group_image;
 #[path = "support/image_credentials.rs"]
 mod image_credentials;
 
+#[path = "support/image_signal_state.rs"]
+mod image_signal_state;
+
 #[path = "support/alarm.rs"]
 mod alarm;
 

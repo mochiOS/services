@@ -88,7 +88,7 @@ fn only_a_committed_image_replaces_saved_ids_and_revokes_old_saved_root() {
     );
     // Failed exec, or a client claiming startup without exec, cannot copy IDs.
     service
-        .refresh_image_credentials(peer, &mut processes)
+        .refresh_image_state(peer, &mut processes)
         .unwrap();
     assert_eq!(*service.session(peer.process_id).unwrap(), before);
     let response = service.handle_thread_signal_request(
@@ -105,7 +105,7 @@ fn only_a_committed_image_replaces_saved_ids_and_revokes_old_saved_root() {
     );
     assert_eq!(response.header.status, 0);
     service
-        .refresh_image_credentials(peer, &mut processes)
+        .refresh_image_state(peer, &mut processes)
         .unwrap();
     assert_eq!(*service.session(peer.process_id).unwrap(), before);
     assert_eq!(id(&mut service, peer, protocol::OP_SET_EFFECTIVE_UID, 0), 0);
@@ -115,7 +115,7 @@ fn only_a_committed_image_replaces_saved_ids_and_revokes_old_saved_root() {
     );
     revision(&mut processes, 1);
     service
-        .refresh_image_credentials(peer, &mut processes)
+        .refresh_image_state(peer, &mut processes)
         .unwrap();
     let after = *service.session(peer.process_id).unwrap();
     assert_eq!(
@@ -149,7 +149,7 @@ fn repeated_observation_preserves_later_changes_and_fork_has_its_own_revision() 
     );
     revision(&mut processes, 4);
     service
-        .refresh_image_credentials(peer, &mut processes)
+        .refresh_image_state(peer, &mut processes)
         .unwrap();
     assert_eq!(service.session(peer.process_id).unwrap().saved_uid, 502);
     assert_eq!(
@@ -157,7 +157,7 @@ fn repeated_observation_preserves_later_changes_and_fork_has_its_own_revision() 
         0
     );
     service
-        .refresh_image_credentials(peer, &mut processes)
+        .refresh_image_state(peer, &mut processes)
         .unwrap();
     assert_eq!(service.session(peer.process_id).unwrap().saved_uid, 502);
     let child = PeerIdentity {
@@ -183,7 +183,7 @@ fn repeated_observation_preserves_later_changes_and_fork_has_its_own_revision() 
         }),
     );
     service
-        .refresh_image_credentials(child, &mut processes)
+        .refresh_image_state(child, &mut processes)
         .unwrap();
     assert_eq!(service.session(child.process_id).unwrap().saved_uid, 502);
     processes
@@ -194,7 +194,7 @@ fn repeated_observation_preserves_later_changes_and_fork_has_its_own_revision() 
         .unwrap()
         .image_revision = 1;
     service
-        .refresh_image_credentials(child, &mut processes)
+        .refresh_image_state(child, &mut processes)
         .unwrap();
     assert_eq!(service.session(child.process_id).unwrap().saved_uid, 501);
     assert_eq!(service.session(peer.process_id).unwrap().saved_uid, 502);
@@ -205,7 +205,7 @@ fn failed_or_regressing_metadata_never_changes_credentials_or_consumes_revision(
     let (mut service, peer, mut processes) = setup();
     revision(&mut processes, 1);
     service
-        .refresh_image_credentials(peer, &mut processes)
+        .refresh_image_state(peer, &mut processes)
         .unwrap();
     let before = *service.session(peer.process_id).unwrap();
     let valid = processes.images[&2401].unwrap();
@@ -247,7 +247,7 @@ fn failed_or_regressing_metadata_never_changes_credentials_or_consumes_revision(
     ] {
         processes.images.insert(2401, value);
         assert_eq!(
-            service.refresh_image_credentials(peer, &mut processes),
+            service.refresh_image_state(peer, &mut processes),
             Err(error)
         );
         assert_eq!(*service.session(peer.process_id).unwrap(), before);
@@ -260,7 +260,7 @@ fn failed_or_regressing_metadata_never_changes_credentials_or_consumes_revision(
         }),
     );
     service
-        .refresh_image_credentials(peer, &mut processes)
+        .refresh_image_state(peer, &mut processes)
         .unwrap();
 }
 
@@ -323,7 +323,7 @@ fn broker_loaded_images_do_not_inherit_requesters_old_saved_root() {
         }),
     );
     service
-        .refresh_image_credentials(child, &mut processes)
+        .refresh_image_state(child, &mut processes)
         .unwrap();
     assert_eq!(
         id(&mut service, child, protocol::OP_SET_EFFECTIVE_UID, 0),
@@ -338,14 +338,14 @@ fn broker_loaded_images_do_not_inherit_requesters_old_saved_root() {
 #[test]
 fn native_dispatch_refreshes_before_provider_side_effects_and_keeps_cleanup() {
     let main = include_str!("../../src/main.rs");
-    let admission = main.find("let image_credentials_error =").unwrap();
+    let admission = main.find("let image_state_error =").unwrap();
     let resource = main[admission..].find("let opened_pty =").unwrap() + admission;
     let dispatch = main[admission..]
         .find("let object_response = match")
         .unwrap()
         + admission;
     assert!(admission < resource && resource < dispatch);
-    assert!(main[admission..resource].contains("refresh_image_credentials(peer, &mut processes)"));
+    assert!(main[admission..resource].contains("refresh_image_state(peer, &mut processes)"));
     assert!(main[admission..resource].contains("peer.is_some()"));
     let rejection = &main[admission..resource];
     assert!(rejection.contains("status_response(header.request_id, status)"));

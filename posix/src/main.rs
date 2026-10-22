@@ -359,17 +359,17 @@ fn main() {
         // Reconcile successful native image changes before any request can
         // apply credentials or open resources. Do not interpret a client
         // startup notification as proof that replacement committed.
-        let image_credentials_error = if let (Some(peer), Some(_), true) =
+        let image_state_error = if let (Some(peer), Some(_), true) =
             (peer, decoded, attachments_valid)
         {
             match service_state.lock() {
-                Ok(mut service) => service.refresh_image_credentials(peer, &mut processes).err(),
+                Ok(mut service) => service.refresh_image_state(peer, &mut processes).err(),
                 Err(_) => Some(protocol::STATUS_EIO),
             }
         } else {
             None
         };
-        if let (Some(status), Some((header, _))) = (image_credentials_error, decoded) {
+        if let (Some(status), Some((header, _))) = (image_state_error, decoded) {
             // Nothing has been retained or opened yet. Retire every incoming
             // reference and return the observation error without policy work.
             for attachment in received_handles.handles.iter().take(attached_count) {

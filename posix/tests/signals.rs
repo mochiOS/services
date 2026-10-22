@@ -5,6 +5,9 @@ use mochios_posix_client::{Client, ClientError, Transport};
 use mochios_posix_protocol as protocol;
 use posix_service::{AuthenticatedProcess, PeerIdentity, PosixService};
 
+#[path = "support/image_observation.rs"]
+mod image_observation;
+
 #[derive(Clone)]
 struct LocalTransport {
     service: Rc<RefCell<PosixService>>,
@@ -136,6 +139,7 @@ fn installed_image_preserves_ignore_and_pending_but_resets_caught_and_action_fla
         .unwrap();
     caller.send_signal(101, 12).unwrap();
     let pending = caller.pending_signals().unwrap();
+    image_observation::observe(&mut service.borrow_mut(), identity, 101, 1);
     assert_eq!(
         caller.signal_image_started().unwrap(),
         (1 << 9) | (1 << (protocol::SIGNAL_CHLD - 1))
@@ -148,6 +152,46 @@ fn installed_image_preserves_ignore_and_pending_but_resets_caught_and_action_fla
     );
     assert_eq!(caller.pending_signals().unwrap(), pending);
     assert_eq!(caller.dequeue_with_mask(0).unwrap(), 12);
+}
+
+#[test]
+fn startup_query_cannot_reset_actions_and_duplicate_queries_preserve_new_handlers() {
+    let identity = peer(101, 501);
+    let service = Rc::new(RefCell::new(PosixService::new()));
+    register(&mut service.borrow_mut(), identity);
+    let caller = client(&service, identity);
+    let action = protocol::SignalDisposition {
+        signal: protocol::SIGNAL_CHLD,
+        kind: protocol::SIGNAL_DISPOSITION_CAUGHT,
+        child_options: protocol::SIGNAL_CHILD_OPTION_NOCLDSTOP,
+    };
+    caller.set_signal_disposition(action).unwrap();
+    caller.set_signal_disposition(disposition(12, 2)).unwrap();
+    for _ in 0..2 {
+        caller.signal_image_started().unwrap();
+        assert_eq!(caller.signal_disposition(12).unwrap(), disposition(12, 2));
+        assert_eq!(
+            caller.signal_disposition(protocol::SIGNAL_CHLD).unwrap(),
+            action
+        );
+    }
+    image_observation::observe(&mut service.borrow_mut(), identity, 101, 1);
+    assert_eq!(caller.signal_disposition(12).unwrap(), disposition(12, 0));
+    assert_eq!(
+        caller.signal_disposition(protocol::SIGNAL_CHLD).unwrap(),
+        disposition(protocol::SIGNAL_CHLD, 0)
+    );
+    caller.set_signal_disposition(action).unwrap();
+    caller.set_signal_disposition(disposition(12, 2)).unwrap();
+    image_observation::observe(&mut service.borrow_mut(), identity, 101, 1);
+    for _ in 0..2 {
+        caller.signal_image_started().unwrap();
+        assert_eq!(caller.signal_disposition(12).unwrap(), disposition(12, 2));
+        assert_eq!(
+            caller.signal_disposition(protocol::SIGNAL_CHLD).unwrap(),
+            action
+        );
+    }
 }
 
 #[test]

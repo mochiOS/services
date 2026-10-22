@@ -30,7 +30,7 @@ pub mod resource_policy;
 pub mod cpu_limit;
 mod cpu_timer;
 mod process_group;
-mod image_credentials;
+mod image_state;
 pub mod filesystem_times;
 pub use fork_state::validate_fork_child;
 
@@ -475,7 +475,7 @@ struct ProcessWaitState {
     // Native image revisions count replacements only; initial loaded images
     // already cross the POSIX spawn/exec boundary without a replacement.
     fresh_image: bool,
-    credential_image_revision: u64,
+    observed_image_revision: u64,
     stopped: bool,
     stop_signal: u32,
     stop_reported: bool,
@@ -1586,6 +1586,7 @@ impl<H: Copy> PosixService<H> {
         child.saved_gid = gid;
         self.supplementary_groups
             .insert(process.process_id, groups.to_vec());
+        self.reset_image_signals(process.process_id);
         self.process_wait_states
             .get_mut(&process.process_id)
             .unwrap()
@@ -1629,6 +1630,7 @@ impl<H: Copy> PosixService<H> {
         let session = self.sessions.get_mut(&child.process_id).unwrap();
         session.saved_uid = session.effective_uid;
         session.saved_gid = session.effective_gid;
+        self.reset_image_signals(child.process_id);
         self.process_wait_states
             .get_mut(&child.process_id)
             .unwrap()
@@ -2771,23 +2773,13 @@ impl<H: Copy> PosixService<H> {
         let process_id = sender.process_id;
         let state = self
             .signals
-            .get_mut(&process_id)
+            .get(&process_id)
             .ok_or(protocol::STATUS_ESRCH)?;
         let mut output = vec![0; protocol::SIGNAL_MASK_LEN];
         protocol::encode_signal_mask(state.ignored, &mut output).map_err(|_| STATUS_EINVAL)?;
-        // Startup is reached only after native image replacement succeeds.
-        // Pending signals survive exec, unlike fork. Handler addresses and
-        // action flags do not survive, even for an ignored signal.
-        state.caught = 0;
-        self.signal_child_options.insert(process_id, 0);
-        // exec may replace an image while its signal handler is running.
-        // That handler cannot return to complete its delivery in the old image.
-        // Native image replacement retains this TID: thread-exit GC cannot
-        // reclaim these tokens. Keep other threads' tokens and the caller's mask.
-        if let Some(wait) = self.process_wait_states.get_mut(&process_id) {
-            wait.deliveries
-                .retain(|_, owner| owner.thread_id != sender.thread_id);
-        }
+        // Only an authenticated native image observation resets policy. A
+        // repeat or fabricated startup request cannot erase installed actions
+        // or abandon a still-live handler's completion token.
         Ok(output)
     }
 

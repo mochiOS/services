@@ -6,6 +6,9 @@ use mochios_posix_client::{Client, ClientError, Transport};
 use mochios_posix_protocol as protocol;
 use posix_service::{AuthenticatedProcess, PeerIdentity, PosixService};
 
+#[path = "support/image_observation.rs"]
+mod image_observation;
+
 #[test]
 fn signal_origin_keeps_first_coalesced_sender_and_uses_service_owned_real_uid() {
     let service = service();
@@ -1551,7 +1554,7 @@ fn reclaiming_abandoned_deliveries_frees_capacity_without_touching_live_owners()
 }
 
 #[test]
-fn image_start_reclaims_only_callers_deliveries_and_preserves_mask_and_pending() {
+fn committed_image_reclaims_old_process_deliveries_and_preserves_mask_and_pending() {
     let service = service();
     let caller = client(&service, 101, 501);
     let sibling = client(&service, 101, 502);
@@ -1586,6 +1589,15 @@ fn image_start_reclaims_only_callers_deliveries_and_preserves_mask_and_pending()
         sibling.thread_dequeue_signal_delivery(),
         Err(ClientError::Remote(protocol::STATUS_EAGAIN))
     );
+    // A fabricated startup notification cannot abandon active handlers.
+    assert_eq!(caller.signal_image_started().unwrap(), 0);
+    for delivery in [&old[0], &live[0]] {
+        assert!(
+            caller.signal_delivery_origin(*delivery).is_ok()
+                || sibling.signal_delivery_origin(*delivery).is_ok()
+        );
+    }
+    image_observation::observe(&mut service.borrow_mut(), peer(101), 101, 1);
     assert_eq!(caller.signal_image_started().unwrap(), 0);
     assert_eq!(
         caller
@@ -1600,11 +1612,17 @@ fn image_start_reclaims_only_callers_deliveries_and_preserves_mask_and_pending()
             Err(ClientError::Remote(protocol::STATUS_EAGAIN))
         );
     }
-    let pending = sibling.thread_dequeue_signal_delivery().unwrap();
+    caller
+        .thread_signal_mask(protocol::SIGNAL_MASK_SET, 0)
+        .unwrap();
+    let pending = caller.thread_dequeue_signal_delivery().unwrap();
     assert_eq!(pending.signal, 31);
-    sibling.complete_signal_delivery(pending).unwrap();
+    caller.complete_signal_delivery(pending).unwrap();
     for delivery in live {
-        sibling.complete_signal_delivery(delivery).unwrap();
+        assert_eq!(
+            sibling.complete_signal_delivery(delivery),
+            Err(ClientError::Remote(protocol::STATUS_EAGAIN))
+        );
     }
     other.complete_signal_delivery(foreign).unwrap();
     assert_eq!(caller.pending_signals().unwrap(), 0);
