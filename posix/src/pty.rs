@@ -126,6 +126,12 @@ impl PseudoTerminal {
         self.input.len() + self.canonical_input.len()
     }
 
+    fn has_input_capacity(&self) -> bool {
+        // VEOF can queue a zero-byte record. Bound metadata as well as data;
+        // leave a slot for any pending canonical line before accepting bytes.
+        self.input_occupancy() < BUFFER_CAPACITY && self.input_records.len() < BUFFER_CAPACITY
+    }
+
     fn canonical_erase_length(&self) -> usize {
         if self.attributes.input_flags & posix_protocol::TERMINAL_IFLAG_IUTF8 == 0 {
             return 1;
@@ -373,12 +379,15 @@ impl PseudoTerminal {
                     continue;
                 }
                 if eof != 0 && byte == eof {
+                    if self.input_records.len() >= BUFFER_CAPACITY {
+                        break;
+                    }
                     self.commit_canonical_input();
                     consumed += 1;
                     continue;
                 }
             }
-            if self.input_occupancy() == BUFFER_CAPACITY {
+            if !self.has_input_capacity() {
                 break;
             }
             let single = [byte];
@@ -815,7 +824,7 @@ impl PtyManager {
                     || !terminal.slave_open)
                     && !terminal.output.is_empty(),
                 terminal.slave_open
-                    && terminal.input_occupancy() < BUFFER_CAPACITY
+                    && terminal.has_input_capacity()
                     && (terminal.attributes.local_flags
                         & (posix_protocol::TERMINAL_LFLAG_ECHO
                             | posix_protocol::TERMINAL_LFLAG_ECHONL)
