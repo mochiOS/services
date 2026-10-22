@@ -4,26 +4,14 @@ extern crate alloc;
 mod actual;
 
 #[test]
-fn only_the_explicit_block_interface_selects_a_kernel_abi_adapter() {
+fn only_the_explicit_numeric_block_adapter_selects_a_kernel_abi() {
     use actual::{CextKind, provider_kind};
-    for valid in [vec!["block.device"], vec!["block.device", "block.device"]] {
-        let interfaces = valid.into_iter().map(String::from).collect::<Vec<_>>();
-        assert_eq!(provider_kind(&interfaces), Some(CextKind::BlockDevice));
-    }
-    for rejected in [
-        vec![],
-        vec![""],
-        vec!["filesystem.ext2"],
-        vec!["filesystem.ext4"],
-        vec!["disk"],
-        vec!["block.device.extra"],
-        vec!["device.service"],
-        vec!["block.device", "filesystem.ext2"],
-        vec!["filesystem.ext4", "block.device"],
-        vec!["block.device", "unknown.interface"],
-    ] {
-        let interfaces = rejected.into_iter().map(String::from).collect::<Vec<_>>();
-        assert_eq!(provider_kind(&interfaces), None);
+    assert_eq!(
+        provider_kind(mnu_abi::boot_extensions::ADAPTER_BLOCK),
+        Some(CextKind::BlockDevice)
+    );
+    for rejected in [0, 2, u32::MAX] {
+        assert_eq!(provider_kind(rejected), None);
     }
 }
 
@@ -57,11 +45,26 @@ fn filesystem_code_cannot_register_or_mount_inside_the_kernel() {
             .join("../../core/src/cext/fs.rs")
             .exists()
     );
-    let loader = cext.split("fn load_bundle_directories()").nth(1).unwrap();
+    let loader = cext.split("fn load_boot_modules()").nth(1).unwrap();
     assert!(
-        loader.find("provider_kind(&manifest.provides)").unwrap()
-            < loader.find("read_initfs(&entry_path)").unwrap()
+        loader
+            .find("boot_extensions::decode(module.native_modules)")
+            .unwrap()
+            < loader.find("load_elf_symbol(&meta.elf").unwrap()
     );
+    for removed in [
+        "manifest.toml",
+        "parse_bundle_manifest",
+        "initfs_readdir_path",
+        "read_initfs(",
+        "block.device",
+        "ends_with(\".cext\")",
+    ] {
+        assert!(
+            !cext.contains(removed),
+            "kernel retains userspace bundle policy: {removed}"
+        );
+    }
     assert!(loader.contains("register_provider(kind, module.address, meta.module_version)"));
     // Native block operations still serialize access to the surviving provider.
     assert!(disk.contains("let _guard = DISK_IO_LOCK.lock();"));

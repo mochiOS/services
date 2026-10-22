@@ -52,7 +52,7 @@ fn initial_image_is_a_checked_byte_range_not_a_filename() {
 
 #[test]
 fn descriptor_decoder_rejects_unknown_headers_without_guessing_ranges() {
-    for byte in [0, 7, 12, 48, 63] {
+    for byte in [0, 7, 12, 56, 63] {
         let mut bytes = descriptor(64, 64, 8);
         bytes[byte] ^= 1;
         assert_eq!(module::decode(&bytes), Err(module::Error::InvalidHeader));
