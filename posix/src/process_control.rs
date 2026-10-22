@@ -20,7 +20,7 @@ pub(crate) fn authenticated_tree_root(
         return Err(STATUS_EINVAL);
     }
     let status = platform::process::handle_status(root.handle)
-        .map_err(|error| mochios_posix_protocol::status::normalize_failure(error.raw()))?;
+        .map_err(|error| lifecycle_failure(error.raw()))?;
     if status.process_id == 0 {
         return Err(STATUS_EINVAL);
     }

@@ -26,6 +26,9 @@ pub mod process {
             57 => Err(crate::Error(
                 mnu_abi::status::Error::NotReady.into_raw() as i32
             )),
+            58 => Err(crate::Error(
+                mnu_abi::status::Error::NotFound.into_raw() as i32
+            )),
             _ => Err(crate::Error(-9)),
         }
     }
@@ -92,6 +95,7 @@ fn tree_root_rejects_missing_or_excess_rights_and_invalid_objects() {
         (55, -9),
         (56, -13),
         (57, -11),
+        (58, -3),
     ] {
         assert_eq!(
             production::authenticated_tree_root(root(object, required)),

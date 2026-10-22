@@ -772,7 +772,7 @@ fn main() {
                     Err(posix_service::STATUS_EINVAL)
                 } else {
                     platform::process::handle_status(attachments[0].handle)
-                        .map_err(|error| i32::try_from(error.raw()).unwrap_or(-5))
+                        .map_err(|error| process_control::lifecycle_failure(error.raw()))
                         .and_then(|status| {
                             service.abort_launched_child(
                                 peer,
@@ -1394,7 +1394,7 @@ fn notify_terminal_signal(
     }
     platform::ipc::send(u64::from(control_endpoint), &PTY_WAKE_MAGIC)
         .map(|_| ())
-        .map_err(|error| i32::try_from(error.raw()).unwrap_or(-5))
+        .map_err(|error| mochios_posix_protocol::status::normalize_failure(error.raw()))
 }
 
 #[cfg(target_os = "mochios")]
@@ -1415,7 +1415,7 @@ fn identify_pty_terminal(endpoint: u32, terminal: u32) -> Result<u64, i32> {
         &mut response,
         &mut attachments,
     )
-    .map_err(|error| i32::try_from(error.raw()).unwrap_or(-5))?;
+    .map_err(|error| mochios_posix_protocol::status::normalize_failure(error.raw()))?;
     let returned_count = (attachments.count as usize).min(attachments.handles.len());
     for attachment in attachments.handles.iter().take(returned_count) {
         if attachment.handle != 0 {
@@ -1426,8 +1426,11 @@ fn identify_pty_terminal(endpoint: u32, terminal: u32) -> Result<u64, i32> {
         return Err(-5);
     }
     let value = i64::from_le_bytes(response);
-    if value <= 0 {
-        return Err(i32::try_from(value).unwrap_or(-5));
+    if value == 0 {
+        return Err(mochios_posix_protocol::STATUS_EIO);
+    }
+    if value < 0 {
+        return Err(mochios_posix_protocol::status::normalize_failure(value));
     }
     u64::try_from(value).map_err(|_| -5)
 }
@@ -1486,15 +1489,17 @@ fn sync_pty_provider(endpoint: u32, pair: posix_service::pty::PtyPair) -> Result
     request[12..20].copy_from_slice(&pair.slave_object_id.to_le_bytes());
     let mut response = [0u8; 8];
     let message = platform::ipc::call(u64::from(endpoint), &request, &mut response)
-        .map_err(|error| i32::try_from(error.raw()).unwrap_or(-5))?;
+        .map_err(|error| mochios_posix_protocol::status::normalize_failure(error.raw()))?;
     if message & 0xffff_ffff != response.len() as u64 {
         return Err(-5);
     }
     let status = i64::from_le_bytes(response);
     if status == 0 {
         Ok(())
+    } else if status < 0 {
+        Err(mochios_posix_protocol::status::normalize_failure(status))
     } else {
-        Err(i32::try_from(status).unwrap_or(-5))
+        Err(mochios_posix_protocol::STATUS_EIO)
     }
 }
 
@@ -1527,7 +1532,10 @@ fn open_pty_response(
             Err(error) => {
                 ptys.lock().unwrap().discard(pair);
                 return posix_service::ObjectResponse {
-                    response: status_response(request_id, i32::try_from(error.raw()).unwrap_or(-5)),
+                    response: status_response(
+                        request_id,
+                        mochios_posix_protocol::status::normalize_failure(error.raw()),
+                    ),
                     handles: Vec::new(),
                 };
             }
@@ -1539,7 +1547,10 @@ fn open_pty_response(
                 let _ = platform::handle::close(master);
                 ptys.lock().unwrap().discard(pair);
                 return posix_service::ObjectResponse {
-                    response: status_response(request_id, i32::try_from(error.raw()).unwrap_or(-5)),
+                    response: status_response(
+                        request_id,
+                        mochios_posix_protocol::status::normalize_failure(error.raw()),
+                    ),
                     handles: Vec::new(),
                 };
             }
@@ -1583,6 +1594,8 @@ fn signal_thread_terminated(
 ) -> bool {
     use mochi_user_platform as platform;
 
+    // Retain native NotFound until retire_signal_thread authenticates the
+    // reclamation proof. A POSIX ESRCH is not equivalent evidence.
     let status = platform::thread::handle_status(thread.handle)
         .map_err(|error| i32::try_from(error.raw()).unwrap_or(-5));
     match service.retire_signal_thread(
@@ -2177,20 +2190,23 @@ impl posix_service::ProcessBackend<u32> for RuntimeProcesses {
 
     fn execution_usage(&mut self, process: u32) -> Result<mnu_abi::ProcessExecutionUsage, i32> {
         mochi_user_platform::process::execution_usage(Some(process))
-            .map_err(|error| i32::try_from(error.raw()).unwrap_or(-5))
+            .map_err(|error| process_control::lifecycle_failure(error.raw()))
     }
 
     fn status(&mut self, process: u32) -> Result<posix_service::ProcessLifecycle, i32> {
         use mochi_user_platform as platform;
 
         let status = platform::process::handle_status(process)
-            .map_err(|error| i32::try_from(error.raw()).unwrap_or(-5))?;
-        if status.state == platform::syscall::PROCESS_STATE_EXITED {
-            Ok(posix_service::ProcessLifecycle::Exited {
+            .map_err(|error| process_control::lifecycle_failure(error.raw()))?;
+        if status.process_id == 0 || status.reserved != 0 {
+            return Err(mochios_posix_protocol::STATUS_EIO);
+        }
+        match status.state {
+            platform::syscall::PROCESS_STATE_RUNNING => Ok(posix_service::ProcessLifecycle::Running),
+            platform::syscall::PROCESS_STATE_EXITED => Ok(posix_service::ProcessLifecycle::Exited {
                 exit_code: status.exit_code,
-            })
-        } else {
-            Ok(posix_service::ProcessLifecycle::Running)
+            }),
+            _ => Err(mochios_posix_protocol::STATUS_EIO),
         }
     }
 
@@ -3513,7 +3529,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             return Err(-13);
         }
         let handle = platform::handle::duplicate(object.handle, object.rights)
-            .map_err(|error| -(i32::try_from(error.raw().unsigned_abs()).unwrap_or(i32::MAX)))?;
+            .map_err(|error| mochios_posix_protocol::status::normalize_failure(error.raw()))?;
         Ok(posix_service::AttachedObject {
             handle,
             rights: object.rights,
