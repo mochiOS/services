@@ -33,6 +33,12 @@ pub struct Attributes {
 struct Metadata {
     attributes: Attributes,
     links: u32,
+    changed: ext4plus::inode::InodeTimestamp,
+}
+
+pub(crate) enum AttributeChange {
+    Mode(u16),
+    Owner { uid: u32, gid: u32 },
 }
 struct Record {
     id: u32,
@@ -146,6 +152,10 @@ impl DeviceFilesystem {
                 metadata: RwLock::new(Metadata {
                     attributes,
                     links: if kind == NodeKind::Directory { 2 } else { 1 },
+                    changed: ext4plus::inode::InodeTimestamp {
+                        seconds: 0,
+                        nanoseconds: 0,
+                    },
                 }),
                 external,
             }),
@@ -303,6 +313,63 @@ impl DeviceFilesystem {
         Ok(())
     }
 
+    /// Check fresh ownership and publish one atomic metadata update. The
+    /// service has already authenticated the attached CONTROL Handle and
+    /// credentials; this retained Node remains valid after unpublication.
+    pub(crate) fn change_attributes(
+        &mut self,
+        node: &Node,
+        change: AttributeChange,
+        caller: Credentials<'_>,
+        clock: crate::clock::Clock,
+    ) -> Result<(), i32> {
+        self.validate(node)?;
+        let mut metadata = node.record.metadata.write().map_err(|_| 5)?;
+        let old = metadata.attributes;
+        if caller.uid != 0 && caller.uid != old.uid {
+            return Err(1);
+        }
+        let mut updated = old;
+        match change {
+            AttributeChange::Mode(mode) => {
+                if mode & !0o7777 != 0 {
+                    return Err(22);
+                }
+                updated.mode = mode;
+                if caller.uid != 0 && caller.gid != old.gid && !caller.groups.contains(&old.gid) {
+                    updated.mode &= !0o2000;
+                }
+            }
+            AttributeChange::Owner { uid, gid } => {
+                if caller.uid != 0
+                    && (uid != u32::MAX && uid != old.uid
+                        || gid != u32::MAX
+                            && gid != old.gid
+                            && gid != caller.gid
+                            && !caller.groups.contains(&gid))
+                {
+                    return Err(1);
+                }
+                if uid != u32::MAX {
+                    updated.uid = uid;
+                }
+                if gid != u32::MAX {
+                    updated.gid = gid;
+                }
+                if uid != u32::MAX || gid != u32::MAX {
+                    updated.mode &= !0o6000;
+                }
+            }
+        }
+        let now = clock()?;
+        if now.nanoseconds >= 1_000_000_000 {
+            return Err(22);
+        }
+        metadata.attributes = updated;
+        metadata.changed = now;
+        Ok(())
+    }
+
     pub fn parent(&self, node: &Node) -> Result<Node, i32> {
         self.validate(node)?;
         Ok(node.record.parent.clone().unwrap_or_else(|| node.clone()))
@@ -337,6 +404,8 @@ impl DeviceFilesystem {
         status.uid = metadata.attributes.uid;
         status.gid = metadata.attributes.gid;
         status.link_count = metadata.links;
+        status.change_time_seconds = metadata.changed.seconds;
+        status.change_time_nanoseconds = metadata.changed.nanoseconds;
         Ok(status)
     }
 

@@ -3478,10 +3478,19 @@ impl FilesystemService {
         if request.flags != 0 || request.mode & !0o7777 != 0 {
             return Err(EINVAL);
         }
-        if self.opens.device(open_id).is_some() {
-            // Device nodes live on the immutable service-owned filesystem;
-            // their descriptions are valid, but their metadata is not mutable.
-            return Err(EROFS);
+        if let Some(open) = self.opens.device(open_id) {
+            let node = open.node.clone();
+            self.namespace.as_mut().ok_or(EIO)?.change_device_attributes(
+                &node,
+                crate::devfs::AttributeChange::Mode(request.mode as u16),
+                path_walk::Credentials {
+                    uid: credentials.effective_uid,
+                    gid: credentials.effective_gid,
+                    groups: credentials.supplementary_groups(),
+                },
+                self.clock,
+            )?;
+            return Ok(self.success(request));
         }
         let effective_uid = credentials.effective_uid;
         let effective_gid = credentials.effective_gid;
@@ -3514,8 +3523,22 @@ impl FilesystemService {
         if request.flags != 0 {
             return Err(EINVAL);
         }
-        if self.opens.device(open_id).is_some() {
-            return Err(EROFS);
+        if let Some(open) = self.opens.device(open_id) {
+            let node = open.node.clone();
+            self.namespace.as_mut().ok_or(EIO)?.change_device_attributes(
+                &node,
+                crate::devfs::AttributeChange::Owner {
+                    uid: request.node_id as u32,
+                    gid: (request.node_id >> 32) as u32,
+                },
+                path_walk::Credentials {
+                    uid: credentials.effective_uid,
+                    gid: credentials.effective_gid,
+                    groups: credentials.supplementary_groups(),
+                },
+                self.clock,
+            )?;
+            return Ok(self.success(request));
         }
         let effective_uid = credentials.effective_uid;
         let effective_gid = credentials.effective_gid;

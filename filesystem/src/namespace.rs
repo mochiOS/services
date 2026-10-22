@@ -297,6 +297,23 @@ impl Namespace {
         }
     }
 
+    pub(crate) fn change_device_attributes(
+        &mut self,
+        node: &Node,
+        change: crate::devfs::AttributeChange,
+        credentials: Credentials<'_>,
+        clock: crate::clock::Clock,
+    ) -> Result<(), i32> {
+        self.validate(node)?;
+        let device = node.device_node().ok_or(95)?;
+        match self.volumes.get_mut(node.volume as usize) {
+            Some(Volume::Device(filesystem)) => {
+                filesystem.change_attributes(device, change, credentials, clock)
+            }
+            _ => Err(95),
+        }
+    }
+
     pub(crate) fn open_null(
         &self,
         node: &Node,

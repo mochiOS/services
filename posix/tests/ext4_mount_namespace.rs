@@ -20,6 +20,8 @@ mod external_namespace;
 mod external_registration;
 #[path = "support/external_publication.rs"]
 mod external_publication;
+#[path = "support/device_attributes.rs"]
+mod device_attributes;
 
 #[derive(Clone)]
 struct Image(Arc<Mutex<Vec<u8>>>);
@@ -1179,10 +1181,6 @@ fn device_mutations_distinguish_valid_resources_from_closed_descriptions() {
         PathAnchors::default(),
     )
     .unwrap();
-    let before = service
-        .stat_handle(protocol::Header::default(), null)
-        .unwrap()
-        .payload;
     assert!(matches!(
         service.truncate_handle(protocol::Header::default(), null),
         Err(22)
@@ -1200,14 +1198,8 @@ fn device_mutations_distinguish_valid_resources_from_closed_descriptions() {
         ..protocol::Header::default()
     };
     for id in [null, directory] {
-        assert!(matches!(
-            service.chmod_handle(chmod, id, root_credentials()),
-            Err(30)
-        ));
-        assert!(matches!(
-            service.chown_handle(chown, id, root_credentials()),
-            Err(30)
-        ));
+        service.chmod_handle(chmod, id, root_credentials()).unwrap();
+        service.chown_handle(chown, id, root_credentials()).unwrap();
         assert!(matches!(
             service.chmod_handle(
                 protocol::Header {
@@ -1231,12 +1223,13 @@ fn device_mutations_distinguish_valid_resources_from_closed_descriptions() {
             Err(22)
         ));
     }
+    let changed = service
+        .stat_handle(protocol::Header::default(), null)
+        .unwrap();
+    let changed = protocol::decode_node_status(&changed.payload).unwrap();
     assert_eq!(
-        service
-            .stat_handle(protocol::Header::default(), null)
-            .unwrap()
-            .payload,
-        before
+        (changed.mode & 0o7777, changed.uid, changed.gid),
+        (0o600, 1001, 1001)
     );
     assert_eq!(service.provider_write(null, b"still usable"), Ok(12));
     service.provider_close(null).unwrap();
