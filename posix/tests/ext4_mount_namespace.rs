@@ -22,6 +22,8 @@ mod external_registration;
 mod external_publication;
 #[path = "support/device_attributes.rs"]
 mod device_attributes;
+#[path = "support/terminal_namespace_bootstrap.rs"]
+mod terminal_namespace_bootstrap;
 
 #[derive(Clone)]
 struct Image(Arc<Mutex<Vec<u8>>>);

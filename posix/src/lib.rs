@@ -8,6 +8,7 @@ pub mod pty_metadata;
 pub mod pty_metadata_ipc;
 pub mod pty_open;
 pub mod terminal_identity;
+pub mod terminal_namespace;
 pub mod named_semaphore;
 pub mod shared_memory;
 pub mod shared_memory_file;

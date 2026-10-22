@@ -41,6 +41,9 @@ mod socket_transfer_native;
 mod socket_gc_native;
 
 #[cfg(target_os = "mochios")]
+mod terminal_namespace_native;
+
+#[cfg(target_os = "mochios")]
 const PTY_SYNC_MAGIC: [u8; 4] = *b"PTYS";
 
 #[cfg(target_os = "mochios")]
@@ -149,6 +152,7 @@ fn main() {
             platform::process::exit(1);
         }
     }
+    drop(service);
     let filesystem_endpoint =
         match platform::handle::inherited(filesystem_protocol::CONTROL_HANDLE_KEY) {
             Ok(endpoint) => endpoint,
@@ -164,6 +168,14 @@ fn main() {
         endpoint: filesystem_endpoint,
         device_endpoint: Some(provider_endpoint_handle),
     };
+    let _pty_namespace = match terminal_namespace_native::prepare(&filesystem) {
+        Ok(directory) => directory,
+        Err(error) => {
+            platform::logln!("posix.service: terminal namespace setup failed errno={error}");
+            let _ = platform::service_ready::notify(ready_target, error);
+            platform::process::exit(1);
+        }
+    };
     let mut processes = RuntimeProcesses;
     if let Err(error) =
         platform::service_ready::notify_handle(ready_target, 0, endpoint_handle, delegated_rights)
@@ -175,7 +187,6 @@ fn main() {
         platform::process::exit(1);
     }
     platform::logln!("posix.service: endpoint ready");
-    drop(service);
     let mut pending_waits = Vec::new();
     let mut pending_signal_waits = Vec::new();
     let mut signal_threads = BTreeMap::new();
