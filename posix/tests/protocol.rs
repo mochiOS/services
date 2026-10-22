@@ -1470,6 +1470,42 @@ struct RecordingFilesystem {
     directory_path: Vec<u8>,
 }
 
+#[test]
+fn nonzero_request_status_cannot_bypass_fstat_preflight_into_locked_filesystem_io() {
+    let peer = PeerIdentity {
+        process_id: 109,
+        effective_uid: 501,
+        effective_gid: 20,
+    };
+    let mut service = service_for(peer);
+    for status in [-1, 1, i32::MIN, i32::MAX] {
+        let mut fs = RecordingFilesystem {
+            query_hook: Some(Box::new(|| panic!("malformed fstat reached FS"))),
+            root_hook: Some(Box::new(|| panic!("malformed request initialized roots"))),
+            ..Default::default()
+        };
+        let reply = service.handle_objects(
+            peer,
+            protocol::Header {
+                opcode: protocol::OP_FSTAT,
+                request_id: 111,
+                status,
+                ..Default::default()
+            },
+            &[],
+            &[AttachedObject {
+                handle: 84,
+                rights: mnu_abi::HANDLE_RIGHT_TRANSFER,
+            }],
+            &mut fs,
+        );
+        assert_eq!(reply.response.header.status, STATUS_EINVAL);
+        assert_eq!(reply.response.header.request_id, 111);
+        assert!(reply.handles.is_empty());
+        assert!(fs.stat_file.is_none() && fs.retained.is_empty() && fs.released.is_empty());
+    }
+}
+
 impl RecordingFilesystem {
     fn admit(
         &mut self,

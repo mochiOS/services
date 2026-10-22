@@ -3788,6 +3788,9 @@ impl<H: Copy> PosixService<H> {
         handles: &[AttachedObject<H>],
         filesystem: &mut F,
     ) -> ObjectResponse<H> {
+        if header.status != 0 {
+            return object_error(header.request_id, STATUS_EINVAL);
+        }
         let envelope = match mutation_admission::Request::decode(header, handles) {
             Ok(envelope) => envelope,
             Err(status) => return object_error(header.request_id, status),
