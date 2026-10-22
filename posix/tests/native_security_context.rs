@@ -21,24 +21,15 @@ fn cwd_is_not_kernel_process_or_launch_state() {
 }
 
 #[test]
-fn native_scoped_grants_require_absolute_paths_without_losing_authentication() {
+fn native_transfer_keeps_authentication_without_interpreting_filesystem_paths() {
     let kernel = include_str!("../../../core/src/syscall/capability.rs");
-    assert!(kernel.contains("if !selected_path.starts_with('/')"));
+    assert!(!kernel.contains("fs.scope."));
+    assert!(!kernel.contains("parse_scoped_path_grant"));
     assert!(kernel.contains("if can_manage_capabilities"));
     assert!(kernel.contains("proc.exe_path() == claimed_exe_path"));
-    assert!(
-        kernel.contains("path::grant_scoped_path(dest_process.as_u64(), selected_path, rights)")
-    );
     let service = include_str!("../../capability/src/dynamic_grant.rs");
-    let grant = service
-        .split("pub(crate) fn transfer_scoped_path_grant(")
-        .nth(1)
-        .unwrap()
-        .split("pub(crate) fn read_request_str(")
-        .next()
-        .unwrap();
-    assert!(grant.contains("!path.starts_with('/')"));
-    assert!(!grant.contains("cwd"));
+    assert!(service.contains("validate_grant_resource(capability, resource)?"));
+    assert!(!service.contains("fs.scope."));
 }
 
 #[test]
@@ -80,7 +71,6 @@ fn kernel_process_and_launch_no_longer_hold_or_inherit_posix_credentials() {
 #[test]
 fn native_image_authority_does_not_reintroduce_legacy_path_or_posix_mode_policy() {
     let fs = include_str!("../../../core/src/syscall/fs.rs");
-    let path = include_str!("../../../core/src/capability/path.rs");
     for removed in [
         "ensure_unix_",
         "unix_mode_allows",
@@ -89,7 +79,6 @@ fn native_image_authority_does_not_reintroduce_legacy_path_or_posix_mode_policy(
     ] {
         assert!(!fs.contains(removed), "kernel retains {removed}");
     }
-    assert!(!path.contains("User(u64)"));
     assert!(!fs.contains("ensure_fs_capability_access_for_process"));
     assert!(!fs.contains("path_owner_allows"));
     let exec = include_str!("../../../core/src/syscall/exec.rs");

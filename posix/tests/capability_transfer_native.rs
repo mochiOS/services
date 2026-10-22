@@ -98,7 +98,6 @@ mod task {pub mod process {
     pub fn remove_destination(){PROCESS_TABLE.0.lock().unwrap().processes.iter_mut().for_each(|p|if p.as_ref().is_some_and(|p|p.id==2){*p=None;});}
 }}
 use task::process;
-mod path {pub fn grant_scoped_path(_:u64,_:&str,_:u32)->Result<(),()>{panic!("ordinary transfer entered scoped grants")}}
 mod control {use super::*;pub static RACE:AtomicBool=AtomicBool::new(false);pub static MISSING:AtomicBool=AtomicBool::new(false);}
 fn current_process()->Option<u64>{(!control::MISSING.load(Ordering::Relaxed)).then_some(1)}
 fn resolve_destination_process(dest:u64)->Option<u64>{
@@ -109,7 +108,6 @@ fn resolve_destination_process(dest:u64)->Option<u64>{
 fn read_capability_spec_from_user(pointer:u64,length:u64)->Result<String,u64>{
     Ok(unsafe{std::str::from_utf8(std::slice::from_raw_parts(pointer as *const u8,length as usize)).unwrap()}.to_string())
 }
-fn parse_scoped_path_grant(_: &str)->Option<(&str,u32)>{None}
 fn intern_capability_token(name:&str)->Option<CapabilityToken>{parse_capability_token(name)}
 "#);
     let syscall = include_str!("../../../core/src/syscall/capability.rs");
@@ -169,6 +167,10 @@ fn main(){
     assert!(!owns(2,"fs.read.tmp"));assert!(owns(1,"capabilities.manage"));
     assert_eq!(transfer(2,"fs.read.tmp\x1funused"),SUCCESS);assert!(owns(2,"fs.read.tmp"));
     assert_eq!(transfer(2,"fs.read.tmp\x1fwrong"),Error::AccessDenied.into_raw());
+    for grant in ["fs.scope.read@/file\x1funused","fs.scope.read-write@/home/user/file\x1funused"] {
+        assert_eq!(transfer(2,grant),Error::InvalidArgument.into_raw());
+        assert!(!owns(2,"fs.read.all"));
+    }
     assert_eq!(transfer(99,"fs.read.tmp"),Error::NotFound.into_raw());
     control::MISSING.store(true,Ordering::Relaxed);
     assert_eq!(transfer(2,"fs.read.tmp"),Error::NotReady.into_raw());

@@ -7,7 +7,7 @@ use mochios_posix_client::directory::DirectoryEntries;
 use mochios_posix_client::{Client, ClientError, EndpointTransport, OpenAtBase, StatAtBase};
 use mochios_posix_protocol as posix;
 
-use crate::dynamic_grant::{read_request_str, transfer_scoped_path_grant, transfer_user_grant};
+use crate::dynamic_grant::{read_request_str, transfer_user_grant, validate_grant_resource};
 use crate::package_index::PackageIndex;
 use crate::policy::is_known_capability;
 use crate::resolver::application_identity;
@@ -473,13 +473,6 @@ pub(crate) fn authorize_persistent_capability(
         ));
     }
 
-    match (capability, resource) {
-        ("fs.read.user", Some(path)) => {
-            transfer_scoped_path_grant(requester_thread, path, false, executable)
-        }
-        ("fs.write.user", Some(path)) => {
-            transfer_scoped_path_grant(requester_thread, path, true, executable)
-        }
-        _ => transfer_user_grant(requester_thread, capability, executable),
-    }
+    validate_grant_resource(capability, resource)?;
+    transfer_user_grant(requester_thread, capability, executable)
 }

@@ -87,7 +87,7 @@ fn current_process()->Option<u64>{CONTEXT.get().then_some(23)}
     program.push_str(probe::between(
         source,
         "fn read_capability_spec_from_user(",
-        "fn parse_scoped_path_grant(",
+        "fn parse_capability_token(",
     ));
     program.push_str(probe::between(
         source,

@@ -87,13 +87,13 @@ mod util {pub mod object_snapshot {use alloc::vec::Vec;
         ("pub fn restrict_capability(", "fn current_process("),
         (
             "fn read_capability_spec_from_user(",
-            "fn parse_scoped_path_grant(",
+            "fn parse_capability_token(",
         ),
         ("fn parse_capability_token(", "fn intern_capability_token("),
-        ("fn read_capability_token_from_user(", "#[cfg(test)]"),
     ] {
         program.push_str(probe::between(syscall, start, end));
     }
+    program.push_str(&syscall[syscall.find("fn read_capability_token_from_user(").unwrap()..]);
     program.push_str(r#"
 fn set(parent:&str,also:Option<&str>){
     FAIL_AFTER.set(None);CONTEXT.set(true);COPY_ERROR.set(None);COPY_ERROR_AT.set(1);COPIES.set(0);

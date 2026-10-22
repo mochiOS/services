@@ -138,32 +138,20 @@ pub(crate) fn transfer_user_grant(
     .map(|_| ())
 }
 
-pub(crate) fn transfer_scoped_path_grant(
-    requester_thread: u64,
-    path: &str,
-    writable: bool,
-    executable: &str,
+pub(crate) fn validate_grant_resource(
+    capability: &str,
+    resource: Option<&str>,
 ) -> Result<(), mochi_user_syscall::SysError> {
-    if !path.starts_with('/') || path.len() > 4095 || path.as_bytes().contains(&0) {
+    // A path string is not object authority. The retired kernel registry had
+    // no access-control consumer; it must not report a fictitious grant or
+    // fall back to a process-wide file capability. A FileHandle broker is
+    // required before resource-scoped file permissions can be authorized.
+    if resource.is_some() && matches!(capability, "fs.read.user" | "fs.write.user") {
         return Err(mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::EINVAL as i64,
+            mochi_user_syscall::NativeError::Unsupported.into_raw() as i64,
         ));
     }
-    let mode = if writable { "read-write" } else { "read" };
-    let mut payload = Vec::with_capacity(16 + path.len() + executable.len());
-    payload.extend_from_slice(b"fs.scope.");
-    payload.extend_from_slice(mode.as_bytes());
-    payload.push(b'@');
-    payload.extend_from_slice(path.as_bytes());
-    payload.push(0x1f);
-    payload.extend_from_slice(executable.as_bytes());
-    platform::syscall::call3(
-        platform::syscall::SyscallNumber::CapTransfer,
-        requester_thread,
-        payload.as_ptr() as u64,
-        payload.len() as u64,
-    )
-    .map(|_| ())
+    Ok(())
 }
 
 pub(crate) fn read_request_str(
@@ -262,27 +250,6 @@ pub(crate) fn authorize_dynamic_capability(
             mochi_user_syscall::EACCES as i64,
         ));
     }
-    if matches!(
-        decision,
-        platform::capability::CapabilityDecision::AllowPersistently
-            | platform::capability::CapabilityDecision::AllowAllUserGrantable
-    ) {
-        let resource = if request.resource.path_len == 0 {
-            None
-        } else {
-            Some(read_request_str(
-                &request.resource.path,
-                request.resource.path_len,
-            )?)
-        };
-        append_persistent_grant(
-            &context,
-            capability,
-            resource,
-            decision == platform::capability::CapabilityDecision::AllowAllUserGrantable,
-        )?;
-    }
-
     let resource = if request.resource.path_len == 0 {
         None
     } else {
@@ -291,13 +258,18 @@ pub(crate) fn authorize_dynamic_capability(
             request.resource.path_len,
         )?)
     };
-    match (capability, resource) {
-        ("fs.read.user", Some(path)) => {
-            transfer_scoped_path_grant(requester_thread, path, false, executable)
-        }
-        ("fs.write.user", Some(path)) => {
-            transfer_scoped_path_grant(requester_thread, path, true, executable)
-        }
-        _ => transfer_user_grant(requester_thread, capability, executable),
+    validate_grant_resource(capability, resource)?;
+    if matches!(
+        decision,
+        platform::capability::CapabilityDecision::AllowPersistently
+            | platform::capability::CapabilityDecision::AllowAllUserGrantable
+    ) {
+        append_persistent_grant(
+            &context,
+            capability,
+            resource,
+            decision == platform::capability::CapabilityDecision::AllowAllUserGrantable,
+        )?;
     }
+    transfer_user_grant(requester_thread, capability, executable)
 }

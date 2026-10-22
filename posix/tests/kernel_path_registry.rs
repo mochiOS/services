@@ -1,103 +1,87 @@
-//! Host checks for removing the unused global kernel path-policy registry.
-//! The remaining legacy scoped-grant implementation is compiled unchanged;
-//! only interrupt masking and its mutex are replaced by host synchronization.
-extern crate self as spin;
-extern crate self as x86_64;
+//! Retiring dead kernel pathname policy must not turn scoped requests into
+//! broad capabilities or successful authorizations without an actual Handle.
+#[allow(dead_code)]
+#[path = "support/native_error_probe.rs"]
+mod probe;
 
-pub struct Mutex<T>(std::sync::Mutex<T>);
-impl<T> Mutex<T> {
-    pub const fn new(value: T) -> Self {
-        Self(std::sync::Mutex::new(value))
-    }
-
-    pub fn lock(&self) -> std::sync::MutexGuard<'_, T> {
-        self.0.lock().unwrap()
-    }
-}
-
-pub mod instructions {
-    pub mod interrupts {
-        pub fn without_interrupts<T>(operation: impl FnOnce() -> T) -> T {
-            operation()
+#[test]
+fn kernel_has_no_filesystem_path_grant_interpreter_registry_or_process_cleanup() {
+    assert!(
+        !std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../core/src/capability/path.rs")
+            .exists()
+    );
+    for source in [
+        include_str!("../../../core/src/capability/mod.rs"),
+        include_str!("../../../core/src/syscall/capability.rs"),
+        include_str!("../../../core/src/task/process.rs"),
+        include_str!("../../../core/src/init/mod.rs"),
+    ] {
+        for removed in [
+            "SCOPED_PATH_GRANTS",
+            "grant_scoped_path",
+            "scoped_path_allows",
+            "revoke_scoped_paths",
+            "parse_scoped_path_grant",
+            "fs.scope.",
+            "path::init_from_kernel_config",
+        ] {
+            assert!(!source.contains(removed), "kernel retains {removed}");
         }
     }
 }
 
-#[allow(dead_code)]
-#[path = "../../../core/src/capability/path.rs"]
-mod grants;
-
 #[test]
-fn kernel_no_longer_loads_or_resolves_global_filesystem_path_policy() {
-    let source = include_str!("../../../core/src/capability/path.rs");
-    for removed in [
-        "PATH_REGISTRY",
-        "PathOwner",
-        "PathCapability",
-        "fn lookup_path(",
-        "fn register_path(",
-        "fn register_service_paths(",
-        "fn parse_configured_path(",
-        "kernel_read_initfs",
-        "Capability::FsReadAll",
-    ] {
-        assert!(!source.contains(removed), "kernel retains {removed}");
-    }
-    let init = include_str!("../../../core/src/init/mod.rs");
-    assert!(!init.contains("path::init_from_kernel_config"));
+fn path_only_file_requests_are_explicitly_unsupported_not_broadened_or_falsely_granted() {
+    let source = include_str!("../../capability/src/dynamic_grant.rs");
+    let mut program = probe::program();
+    program.push_str(probe::between(
+        source,
+        "pub(crate) fn validate_grant_resource(",
+        "pub(crate) fn read_request_str(",
+    ));
+    program.push_str(
+        r#"
+fn main(){
+ for capability in ["fs.read.user","fs.write.user"] {
+  for path in ["/home/user/file","/","relative","/dir/../file"] {
+   let error=validate_grant_resource(capability,Some(path)).unwrap_err();
+   assert_eq!(NativeError::from_raw(error.raw()as u64),Some(NativeError::Unsupported));
+  }
+  assert!(validate_grant_resource(capability,None).is_ok());
+ }
+ // Non-file process grants retain their existing behavior.
+ assert!(validate_grant_resource("network.connect",Some("host")).is_ok());
+ assert!(validate_grant_resource("network.connect",None).is_ok());
+}
+"#,
+    );
+    probe::run(&program);
 }
 
 #[test]
-fn scoped_grants_are_exact_and_process_local() {
-    use grants::*;
-    let pid = 0xfeed_u64;
-    revoke_scoped_paths(pid);
-    grant_scoped_path(
-        pid,
-        "/home/alice/Documents/../note.txt",
-        PathRights::new(PATH_READ),
-    )
-    .unwrap();
-    assert!(scoped_path_allows(pid, "/home/alice/note.txt", PATH_READ));
-    assert!(!scoped_path_allows(pid, "/home/alice/other.txt", PATH_READ));
-    assert!(!scoped_path_allows(
-        pid + 1,
-        "/home/alice/note.txt",
-        PATH_READ
-    ));
-    assert!(!scoped_path_allows(pid, "/home/alice/note.txt", PATH_WRITE));
-    revoke_scoped_paths(pid);
-    assert!(!scoped_path_allows(pid, "/home/alice/note.txt", PATH_READ));
-}
-
-#[test]
-fn removing_registry_does_not_widen_existing_scoped_grants() {
-    use grants::{PATH_READ, PATH_WRITE, PathRights};
-    let pid = 0xf001;
-    for path in ["", "relative", "/", "/one/.."] {
-        assert!(grants::grant_scoped_path(pid, path, PathRights::new(PATH_READ)).is_err());
+fn both_grant_paths_validate_resources_before_transfer_and_dynamic_persistence() {
+    let dynamic = include_str!("../../capability/src/dynamic_grant.rs")
+        .split("pub(crate) fn authorize_dynamic_capability(")
+        .nth(1)
+        .unwrap();
+    let validation = dynamic
+        .find("validate_grant_resource(capability, resource)?")
+        .unwrap();
+    assert!(validation < dynamic.find("append_persistent_grant(").unwrap());
+    assert!(validation < dynamic.find("transfer_user_grant(").unwrap());
+    let persistent = include_str!("../../capability/src/persistent_grant.rs")
+        .split("pub(crate) fn authorize_persistent_capability(")
+        .nth(1)
+        .unwrap();
+    assert!(
+        persistent
+            .find("validate_grant_resource(capability, resource)?")
+            .unwrap()
+            < persistent.find("transfer_user_grant(").unwrap()
+    );
+    for source in [dynamic, persistent] {
+        assert!(!source.contains("transfer_scoped_path_grant"));
+        assert!(!source.contains("fs.scope."));
     }
-    assert!(grants::grant_scoped_path(0, "/file", PathRights::new(PATH_READ)).is_err());
-    assert!(grants::grant_scoped_path(pid, "/file", PathRights::new(0)).is_err());
-    grants::grant_scoped_path(pid, "/scope/./file", PathRights::new(PATH_READ)).unwrap();
-    assert!(grants::scoped_path_allows(pid, "/scope/file", PATH_READ));
-    assert!(!grants::scoped_path_allows(
-        pid,
-        "/scope/file/child",
-        PATH_READ
-    ));
-    assert!(!grants::scoped_path_allows(pid, "/scope/file", PATH_WRITE));
-    assert!(!grants::scoped_path_allows(
-        pid + 1,
-        "/scope/file",
-        PATH_READ
-    ));
-    grants::grant_scoped_path(pid, "/scope/file", PathRights::new(PATH_WRITE)).unwrap();
-    assert!(grants::scoped_path_allows(
-        pid,
-        "/scope/file",
-        PATH_READ | PATH_WRITE
-    ));
-    grants::revoke_scoped_paths(pid);
-    assert!(!grants::scoped_path_allows(pid, "/scope/file", PATH_READ));
 }
