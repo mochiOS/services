@@ -417,7 +417,19 @@ impl FilesystemService {
         }
         let access = request.flags & (protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE);
         let search = request.flags & protocol::OPEN_AT_SEARCH != 0;
+        let execute = request.flags & protocol::OPEN_AT_EXECUTE != 0;
         if access == 0 && !search
+            || execute
+                && (access != protocol::OPEN_AT_READ
+                    || request.flags
+                        & (protocol::OPEN_AT_CREATE
+                            | protocol::OPEN_AT_EXCLUSIVE
+                            | protocol::OPEN_AT_TRUNCATE
+                            | protocol::OPEN_AT_APPEND
+                            | protocol::OPEN_AT_DIRECTORY
+                            | protocol::OPEN_AT_SEARCH
+                            | protocol::OPEN_AT_CURSOR_RECORDS)
+                        != 0)
             || search
                 && (access != 0
                     || request.flags & protocol::OPEN_AT_DIRECTORY == 0
@@ -453,6 +465,9 @@ impl FilesystemService {
                 path_walk::Resolution::Missing { parent, .. } => parent,
             };
             if node.device_node().is_some() {
+                if execute {
+                    return Err(EACCES);
+                }
                 return self.open_device_at(request, resolution, credentials);
             }
         }
@@ -492,6 +507,9 @@ impl FilesystemService {
         }
         let metadata = inode.metadata();
         let kind = metadata.file_type();
+        if execute && !kind.is_regular_file() {
+            return Err(EACCES);
+        }
         if request.flags & protocol::OPEN_AT_DIRECTORY != 0 && !kind.is_dir() {
             return Err(ENOTDIR);
         }
@@ -504,7 +522,7 @@ impl FilesystemService {
             (u32::from(request.flags & protocol::OPEN_AT_READ != 0) * protocol::ACCESS_AT_READ)
                 | (u32::from(request.flags & protocol::OPEN_AT_WRITE != 0)
                     * protocol::ACCESS_AT_WRITE)
-        };
+        } | if execute { protocol::ACCESS_AT_EXECUTE } else { 0 };
         if !created
             && !permission_allows(
                 metadata.mode(),

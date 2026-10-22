@@ -22,6 +22,7 @@ pub mod socket_receive_wait;
 pub mod filesystem_transport;
 pub mod filesystem_metadata;
 pub mod mutation_admission;
+mod open_flags;
 mod fault_signal;
 mod signal_origin;
 mod alarm;
@@ -4502,6 +4503,16 @@ impl<H: Copy> PosixService<H> {
         }
         let access = request.options & (protocol::OPEN_READ | protocol::OPEN_WRITE);
         if access == 0
+            || request.options & protocol::OPEN_EXECUTE != 0
+                && (access != protocol::OPEN_READ
+                    || request.options
+                        & (protocol::OPEN_CREATE
+                            | protocol::OPEN_EXCLUSIVE
+                            | protocol::OPEN_TRUNCATE
+                            | protocol::OPEN_APPEND
+                            | protocol::OPEN_DIRECTORY
+                            | protocol::OPEN_CURSOR_RECORDS)
+                        != 0)
             || request.options & protocol::OPEN_EXCLUSIVE != 0
                 && request.options & protocol::OPEN_CREATE == 0
             || request.options & (protocol::OPEN_TRUNCATE | protocol::OPEN_APPEND) != 0

@@ -2245,28 +2245,7 @@ impl RuntimeFilesystem {
         paths: posix_service::PathObjects<mochi_user_platform::handle::Handle>,
     ) -> Result<FilesystemMutationRequest, i32> {
         use mochios_filesystem_protocol as filesystem;
-        use mochios_posix_protocol as posix;
-
-        let mut flags = filesystem::OPEN_AT_ROOT_ATTACHED;
-        if paths.base.is_some() {
-            flags |= filesystem::OPEN_AT_BASE_ATTACHED;
-        }
-        for (source, target) in [
-            (posix::OPEN_READ, filesystem::OPEN_AT_READ),
-            (posix::OPEN_WRITE, filesystem::OPEN_AT_WRITE),
-            (posix::OPEN_CREATE, filesystem::OPEN_AT_CREATE),
-            (posix::OPEN_EXCLUSIVE, filesystem::OPEN_AT_EXCLUSIVE),
-            (posix::OPEN_TRUNCATE, filesystem::OPEN_AT_TRUNCATE),
-            (posix::OPEN_APPEND, filesystem::OPEN_AT_APPEND),
-            (posix::OPEN_NONBLOCK, filesystem::OPEN_AT_NONBLOCK),
-            (posix::OPEN_DIRECTORY, filesystem::OPEN_AT_DIRECTORY),
-            (posix::OPEN_NOFOLLOW, filesystem::OPEN_AT_NOFOLLOW),
-            (posix::OPEN_CURSOR_RECORDS, filesystem::OPEN_AT_CURSOR_RECORDS),
-        ] {
-            if request.options & source != 0 {
-                flags |= target;
-            }
-        }
+        let flags = request.filesystem_flags(paths.base.is_some());
         let header = filesystem::Header {
             opcode: filesystem::OP_OPEN_AT,
             request_id: 1,
