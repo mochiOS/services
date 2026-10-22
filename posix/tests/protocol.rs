@@ -96,6 +96,9 @@ mod path_query;
 #[path = "support/path_mutation.rs"]
 mod path_mutation;
 
+#[path = "support/path_pair.rs"]
+mod path_pair;
+
 #[path = "support/file_time_protocol.rs"]
 mod file_time_protocol;
 
@@ -1831,6 +1834,9 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         request: &posix_service::PreparedRename,
         paths: posix_service::RenamePathObjects<u32>,
     ) -> Result<(), i32> {
+        if let Some(hook) = &mut self.mutation_hook {
+            hook()?;
+        }
         self.rename_request = Some(request.clone());
         self.rename_paths = Some(paths);
         Ok(())
@@ -1841,6 +1847,9 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         request: &posix_service::PreparedLink,
         paths: posix_service::RenamePathObjects<u32>,
     ) -> Result<(), i32> {
+        if let Some(hook) = &mut self.mutation_hook {
+            hook()?;
+        }
         self.link_request = Some(request.clone());
         self.link_paths = Some(paths);
         Ok(())

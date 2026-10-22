@@ -31,6 +31,7 @@ pub mod open_request;
 mod path_request;
 pub mod path_query;
 pub mod path_mutation;
+pub mod path_pair;
 mod fault_signal;
 mod signal_origin;
 mod alarm;
@@ -4194,43 +4195,8 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_CHOWN_AT => {
                 path_mutation::dispatch(self, peer, header, payload, handles, admission, filesystem)
             }
-            protocol::OP_RENAME_AT => {
-                let prepared = match self.prepare_rename_at(peer, payload, handles.len()) {
-                    Ok(prepared) => prepared,
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                let paths = match self.rename_path_objects(
-                    peer.process_id,
-                    prepared.old_base,
-                    prepared.new_base,
-                    handles,
-                ) {
-                    Ok(paths) => paths,
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                match filesystem.rename_at(&prepared, paths) {
-                    Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
-                    Err(status) => object_error(header.request_id, status),
-                }
-            }
-            protocol::OP_LINK_AT => {
-                let prepared = match self.prepare_link_at(peer, payload, handles.len()) {
-                    Ok(prepared) => prepared,
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                let paths = match self.rename_path_objects(
-                    peer.process_id,
-                    prepared.old_base,
-                    prepared.new_base,
-                    handles,
-                ) {
-                    Ok(paths) => paths,
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                match filesystem.link_at(&prepared, paths) {
-                    Ok(()) => object_error(header.request_id, protocol::STATUS_OK),
-                    Err(status) => object_error(header.request_id, status),
-                }
+            protocol::OP_RENAME_AT | protocol::OP_LINK_AT => {
+                path_pair::dispatch(self, peer, header, payload, handles, filesystem)
             }
             _ => unreachable!(),
         }

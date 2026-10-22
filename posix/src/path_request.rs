@@ -110,3 +110,59 @@ pub(crate) fn with_paths<H: Copy, F: FilesystemBackend<H>, P: PartialEq, R>(
     };
     Ok(operation(&prepared, paths, references.filesystem))
 }
+
+/// Resolve two bases from one retained root/cwd snapshot. Both cwd-relative
+/// paths share the same retained reference; explicit directories remain
+/// borrowed, in old-path/new-path attachment order.
+pub(crate) fn with_two_paths<H: Copy, F: FilesystemBackend<H>, P: PartialEq, R>(
+    state: &Mutex<PosixService<H>>,
+    peer: PeerIdentity,
+    handles: &[AttachedObject<H>],
+    filesystem: &mut F,
+    prepare: impl Fn(&PosixService<H>) -> Result<(P, [protocol::OpenBase; 2]), i32>,
+    operation: impl FnOnce(&P, RenamePathObjects<H>, &mut F) -> R,
+) -> Result<R, i32> {
+    with_paths(
+        state,
+        peer,
+        handles,
+        filesystem,
+        |service| {
+            let (prepared, bases) = prepare(service)?;
+            // The carrier only requests the service-owned anchors needed by
+            // either path, not an additional user-supplied directory.
+            let carrier = if bases.contains(&protocol::OpenBase::ProcessCwd) {
+                protocol::OpenBase::ProcessCwd
+            } else {
+                protocol::OpenBase::ProcessRoot
+            };
+            Ok(((prepared, bases), carrier))
+        },
+        |(prepared, bases), anchors, filesystem| {
+            let mut attached = handles.iter().copied();
+            let mut resolve = |base| match base {
+                protocol::OpenBase::ProcessRoot => Ok(None),
+                protocol::OpenBase::ProcessCwd => {
+                    anchors.base.map(Some).ok_or(protocol::STATUS_EIO)
+                }
+                protocol::OpenBase::AttachedDirectory => {
+                    attached.next().map(Some).ok_or(STATUS_EINVAL)
+                }
+            };
+            let old_base = resolve(bases[0])?;
+            let new_base = resolve(bases[1])?;
+            if attached.next().is_some() {
+                return Err(STATUS_EINVAL);
+            }
+            Ok(operation(
+                prepared,
+                RenamePathObjects {
+                    root: anchors.root,
+                    old_base,
+                    new_base,
+                },
+                filesystem,
+            ))
+        },
+    )?
+}
