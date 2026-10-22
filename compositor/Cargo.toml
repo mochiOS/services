@@ -15,3 +15,7 @@ path = "src/main.rs"
 test = false
 bench = false
 harness = false
+
+[[test]]
+name = "compositor"
+path = "src/main.rs"

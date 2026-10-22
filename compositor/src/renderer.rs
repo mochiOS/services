@@ -51,7 +51,8 @@ impl PresentFrame {
         let capacity = page_count
             .checked_mul(PAGE_SIZE)
             .ok_or_else(|| errno_status(crate::protocol::SIZE_LIMIT))?;
-        if self.buffer
+        if self
+            .buffer
             .as_ref()
             .is_none_or(|buffer| buffer.capacity() < capacity as u64)
         {
@@ -60,7 +61,8 @@ impl PresentFrame {
             self.cpu_contents_valid = false;
             self.gpu_contents_valid = false;
         }
-        let buffer = self.buffer
+        let buffer = self
+            .buffer
             .as_ref()
             .ok_or_else(|| errno_status(mochi_user_syscall::EIO))?;
         if buffer.capacity() / 4 < pixel_count as u64 {
@@ -852,52 +854,33 @@ fn rounded_rect_coverage(rect: Rect, radius: u32, x: i32, y: i32) -> u8 {
     {
         return 0;
     }
-    let radius = radius.min(rect.width / 2).min(rect.height / 2);
-    if radius == 0 {
+    let radius = (radius as f32).min(rect.width.min(rect.height) as f32 * 0.5);
+    if radius == 0.0 {
         return 255;
     }
-    let radius_i64 = i64::from(radius);
-    if i64::from(x) >= i64::from(rect.x) + radius_i64 && i64::from(x) < right - radius_i64
-        || i64::from(y) >= i64::from(rect.y) + radius_i64 && i64::from(y) < bottom - radius_i64
+    if (x as f32 >= rect.x as f32 + radius && x as f32 + 1.0 <= right as f32 - radius)
+        || (y as f32 >= rect.y as f32 + radius && y as f32 + 1.0 <= bottom as f32 - radius)
     {
         return 255;
     }
-    const SAMPLE_OFFSETS: [i64; 4] = [1, 3, 5, 7];
-    const SCALE: i64 = 8;
-    let left = i64::from(rect.x) * SCALE;
-    let top = i64::from(rect.y) * SCALE;
-    let right = (i64::from(rect.x) + i64::from(rect.width)) * SCALE;
-    let bottom = (i64::from(rect.y) + i64::from(rect.height)) * SCALE;
-    let radius = i64::from(radius) * SCALE;
+    let shape = mochios_viewkit_gpu_protocol::continuous_corner::RoundedRect::uniform(
+        [
+            rect.x as f32,
+            rect.y as f32,
+            rect.width as f32,
+            rect.height as f32,
+        ],
+        radius,
+    );
     let mut inside = 0u32;
-    for sample_y in SAMPLE_OFFSETS {
-        let py = i64::from(y) * SCALE + sample_y;
-        for sample_x in SAMPLE_OFFSETS {
-            let px = i64::from(x) * SCALE + sample_x;
-            if px < left || px >= right || py < top || py >= bottom {
-                continue;
-            }
-            let center_x = if px < left + radius {
-                left + radius
-            } else if px >= right - radius {
-                right - radius
-            } else {
-                px
-            };
-            let center_y = if py < top + radius {
-                top + radius
-            } else if py >= bottom - radius {
-                bottom - radius
-            } else {
-                py
-            };
-            let dx = px - center_x;
-            let dy = py - center_y;
-            if dx * dx + dy * dy <= radius * radius {
+    for sy in [0.125, 0.375, 0.625, 0.875] {
+        for sx in [0.125, 0.375, 0.625, 0.875] {
+            if shape.contains((x as f32 + sx, y as f32 + sy)) {
                 inside += 1;
             }
         }
     }
+
     ((inside * 255 + 8) / 16) as u8
 }
 
@@ -952,4 +935,48 @@ fn blend_premultiplied_argb_over_xrgb(dst: u32, src: u32) -> u32 {
     let g = sg + (dg * inv + 127) / 255;
     let b = sb + (db * inv + 127) / 255;
     0xff00_0000 | (r.min(255) << 16) | (g.min(255) << 8) | b.min(255)
+}
+
+#[cfg(test)]
+mod continuous_corner_tests {
+    use super::*;
+    #[test]
+    fn shadow_and_surface_coverage_use_shared_reference() {
+        for (w, h, r) in [
+            (1, 1, 0),
+            (1, 1, 999),
+            (31, 21, 999),
+            (17, 70, 999),
+            (31, 20, 10),
+            (100, 50, 1),
+            (75, 40, 17),
+        ] {
+            let rect = Rect {
+                x: 3,
+                y: 5,
+                width: w,
+                height: h,
+            };
+            let shape = mochios_viewkit_gpu_protocol::continuous_corner::RoundedRect::uniform(
+                [3.0, 5.0, w as f32, h as f32],
+                r as f32,
+            );
+            for y in 4..(6 + h as i32) {
+                for x in 2..(4 + w as i32) {
+                    let mut count = 0;
+                    for sy in [0.125, 0.375, 0.625, 0.875] {
+                        for sx in [0.125, 0.375, 0.625, 0.875] {
+                            if shape.contains((x as f32 + sx, y as f32 + sy)) {
+                                count += 1;
+                            }
+                        }
+                    }
+                    assert_eq!(
+                        rounded_rect_coverage(rect, r, x, y),
+                        ((count * 255 + 8) / 16) as u8
+                    );
+                }
+            }
+        }
+    }
 }

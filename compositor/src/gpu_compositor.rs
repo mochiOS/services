@@ -704,42 +704,34 @@ fn window_clip_polygon(
 }
 
 fn rounded_rect_polygon(rect: Rect, radius: f32) -> WindowClip {
-    const CORNER_SEGMENTS: usize = 8;
-    let radius = radius
-        .max(0.0)
-        .min(rect.width.min(rect.height) as f32 * 0.5);
+    use mochios_viewkit_gpu_protocol::continuous_corner::{RoundedRect, polygon_segments};
+    // The compositor operates in physical pixels. Cache the local contour so
+    // moving a window only translates points; resize keys are bounded to 64.
+    static CACHE: std::sync::Mutex<Vec<([u32; 3], Vec<(f32, f32)>)>> =
+        std::sync::Mutex::new(Vec::new());
+    let shape = RoundedRect::uniform([0.0, 0.0, rect.width as f32, rect.height as f32], radius);
+    let radius = shape.radii[0];
+    let key = [rect.width, rect.height, radius.to_bits()];
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let local = if let Some((_, points)) = cache.iter().find(|(k, _)| *k == key) {
+        points.clone()
+    } else {
+        let mut points = Vec::new();
+        shape.for_each_point(polygon_segments(radius), |p| points.push(p));
+        if cache.len() == 64 {
+            cache.remove(0);
+        }
+        cache.push((key, points.clone()));
+        points
+    };
     let left = rect.x as f32;
     let top = rect.y as f32;
     let right = left + rect.width as f32;
     let bottom = top + rect.height as f32;
-    let bounds = [left, top, right, bottom];
-    let interior = [left + radius, top + radius, right - radius, bottom - radius];
-    if radius == 0.0 {
-        return WindowClip {
-            polygon: vec![(left, top), (right, top), (right, bottom), (left, bottom)],
-            bounds,
-            interior,
-        };
-    }
-    let mut points = Vec::with_capacity(CORNER_SEGMENTS * 4 + 4);
-    for (center_x, center_y, start) in [
-        (right - radius, top + radius, -core::f32::consts::FRAC_PI_2),
-        (right - radius, bottom - radius, 0.0),
-        (left + radius, bottom - radius, core::f32::consts::FRAC_PI_2),
-        (left + radius, top + radius, core::f32::consts::PI),
-    ] {
-        for step in 0..=CORNER_SEGMENTS {
-            let angle = start + core::f32::consts::FRAC_PI_2 * step as f32 / CORNER_SEGMENTS as f32;
-            points.push((
-                center_x + angle.cos() * radius,
-                center_y + angle.sin() * radius,
-            ));
-        }
-    }
     WindowClip {
-        polygon: points,
-        bounds,
-        interior,
+        polygon: local.into_iter().map(|p| (p.0 + left, p.1 + top)).collect(),
+        bounds: [left, top, right, bottom],
+        interior: [left + radius, top + radius, right - radius, bottom - radius],
     }
 }
 
@@ -865,7 +857,7 @@ fn append_window_clipped_triangle(
         let end = window_clip[(index + 1) % window_clip.len()];
         let count = triangle
             .iter()
-            .filter(|vertex| edge_distance(**vertex, start, end) >= -0.001)
+            .filter(|vertex| edge_distance(**vertex, start, end) >= -edge_epsilon(start, end))
             .count();
         if count == 0 {
             return;
@@ -897,6 +889,10 @@ fn append_window_clipped_triangle(
     }
 }
 
+fn edge_epsilon(start: (f32, f32), end: (f32, f32)) -> f32 {
+    0.00001 * ((end.0 - start.0).abs() + (end.1 - start.1).abs())
+}
+
 fn edge_distance(vertex: Vertex, start: (f32, f32), end: (f32, f32)) -> f32 {
     (end.0 - start.0) * (vertex.y - start.1) - (end.1 - start.1) * (vertex.x - start.0)
 }
@@ -906,12 +902,13 @@ fn clip_convex_edge(
     edge_start: (f32, f32),
     edge_end: (f32, f32),
 ) -> Vec<Vertex> {
+    let epsilon = edge_epsilon(edge_start, edge_end);
     let signed_distance = |vertex| edge_distance(vertex, edge_start, edge_end);
     // Most edges do not cut this polygon. Keep its allocation and attributes
     // instead of copying it once for every edge of a rounded window.
     let inside_count = input
         .iter()
-        .filter(|&&vertex| signed_distance(vertex) >= -0.001)
+        .filter(|&&vertex| signed_distance(vertex) >= -epsilon)
         .count();
     if inside_count == input.len() {
         return input;
@@ -927,8 +924,8 @@ fn clip_convex_edge(
     let mut previous_distance = signed_distance(previous);
     for current in input.iter().copied() {
         let current_distance = signed_distance(current);
-        let previous_inside = previous_distance >= -0.001;
-        let current_inside = current_distance >= -0.001;
+        let previous_inside = previous_distance >= -epsilon;
+        let current_inside = current_distance >= -epsilon;
         if previous_inside != current_inside {
             let denominator = previous_distance - current_distance;
             let amount = if denominator.abs() <= f32::EPSILON {
@@ -1408,6 +1405,7 @@ mod tests {
                     step % 2 == 0,
                     &cursor,
                     None,
+                    None,
                 )
                 .unwrap();
             let actual = cached
@@ -1420,6 +1418,7 @@ mod tests {
                     step,
                     step % 2 == 0,
                     &cursor,
+                    None,
                     None,
                 )
                 .unwrap();
@@ -1449,6 +1448,7 @@ mod tests {
                     false,
                     &CursorImage::default(),
                     None,
+                    None,
                 )
                 .is_none()
         );
@@ -1468,6 +1468,7 @@ mod tests {
                 0,
                 false,
                 &CursorImage::default(),
+                None,
                 None,
             )
             .unwrap();
@@ -1503,6 +1504,7 @@ mod tests {
                     0,
                     false,
                     &CursorImage::default(),
+                    None,
                     dirty,
                 )
                 .unwrap();
@@ -1842,11 +1844,14 @@ mod tests {
         );
         assert!(!output.is_empty());
         assert!(output.iter().all(|vertex| {
-            let nearest_x = vertex.x.clamp(20.0, 80.0);
-            let nearest_y = vertex.y.clamp(20.0, 80.0);
-            let dx = vertex.x - nearest_x;
-            let dy = vertex.y - nearest_y;
-            dx * dx + dy * dy <= 20.5 * 20.5
+            mochios_viewkit_gpu_protocol::continuous_corner::RoundedRect::uniform(
+                [0.0, 0.0, 100.0, 100.0],
+                20.0,
+            )
+            .contains((
+                vertex.x + (50.0 - vertex.x) * 0.0001,
+                vertex.y + (50.0 - vertex.y) * 0.0001,
+            ))
         }));
         assert!(
             !output

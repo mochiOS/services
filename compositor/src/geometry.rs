@@ -32,42 +32,24 @@ impl Rect {
 }
 
 pub(crate) fn rounded_rect_contains(rect: Rect, radius: u32, x: i32, y: i32) -> bool {
-    let right = (rect.x as i64).saturating_add(rect.width as i64);
-    let bottom = (rect.y as i64).saturating_add(rect.height as i64);
-    if i64::from(x) < i64::from(rect.x)
-        || i64::from(y) < i64::from(rect.y)
-        || i64::from(x) >= right
-        || i64::from(y) >= bottom
+    // Input coordinates identify a physical pixel; sample its center like rendering.
+    if x < rect.x
+        || y < rect.y
+        || i64::from(x) >= i64::from(rect.x) + i64::from(rect.width)
+        || i64::from(y) >= i64::from(rect.y) + i64::from(rect.height)
     {
         return false;
     }
-    let radius = radius.min(rect.width / 2).min(rect.height / 2) as i64;
-    if radius == 0 {
-        return true;
-    }
-    let x = i64::from(x);
-    let y = i64::from(y);
-    let left = i64::from(rect.x);
-    let top = i64::from(rect.y);
-    if x >= left + radius && x < right - radius {
-        return true;
-    }
-    if y >= top + radius && y < bottom - radius {
-        return true;
-    }
-    let center_x = if x < left + radius {
-        left + radius
-    } else {
-        right - radius - 1
-    };
-    let center_y = if y < top + radius {
-        top + radius
-    } else {
-        bottom - radius - 1
-    };
-    let dx = x - center_x;
-    let dy = y - center_y;
-    dx * dx + dy * dy <= radius * radius
+    mochios_viewkit_gpu_protocol::continuous_corner::RoundedRect::uniform(
+        [
+            rect.x as f32,
+            rect.y as f32,
+            rect.width as f32,
+            rect.height as f32,
+        ],
+        radius as f32,
+    )
+    .contains((x as f32 + 0.5, y as f32 + 0.5))
 }
 
 #[allow(dead_code)]
@@ -178,4 +160,31 @@ pub(crate) fn clip_present_rect(
         width: right.saturating_sub(left) as u32,
         height: bottom.saturating_sub(top) as u32,
     })
+}
+
+#[cfg(test)]
+mod continuous_corner_tests {
+    use super::*;
+    #[test]
+    fn native_input_uses_reference_pixel_centers() {
+        use mochios_viewkit_gpu_protocol::continuous_corner::RoundedRect;
+        for (width, height, radius) in [(1, 1, 0), (100, 60, 20), (17, 70, 999), (90, 40, 1)] {
+            let rect = Rect {
+                x: 7,
+                y: 13,
+                width,
+                height,
+            };
+            let shape =
+                RoundedRect::uniform([7.0, 13.0, width as f32, height as f32], radius as f32);
+            for y in 12..(14 + height as i32) {
+                for x in 6..(8 + width as i32) {
+                    assert_eq!(
+                        rounded_rect_contains(rect, radius, x, y),
+                        shape.contains((x as f32 + 0.5, y as f32 + 0.5))
+                    );
+                }
+            }
+        }
+    }
 }
