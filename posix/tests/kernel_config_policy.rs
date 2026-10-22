@@ -21,8 +21,13 @@ macro_rules! warn {
 
 mod init {
     pub mod fs {
-        pub fn kernel_read_initfs(_: &str) -> Option<Vec<u8>> {
-            Some(include_bytes!("../../../core/examples/fs/rootfs/config/kernel.conf").to_vec())
+        pub fn boot_module_bytes() -> &'static [u8] {
+            static MODULE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+            MODULE.get_or_init(|| {
+                crate::module(include_bytes!(
+                    "../../../core/examples/fs/rootfs/config/kernel.conf"
+                ))
+            })
         }
     }
 }
@@ -42,6 +47,28 @@ mod config {
     pub fn apply(config: &mut KernelConfig, key: &str, value: &str) {
         apply_key_value(config, key, value);
     }
+
+    pub fn load(bytes: &[u8]) -> KernelConfig {
+        load_kernel_config(bytes)
+    }
+}
+
+fn module(configuration: &[u8]) -> Vec<u8> {
+    use mnu_abi::boot_module as abi;
+    let mut bytes = vec![0; abi::HEADER_LEN + configuration.len() + 8];
+    bytes[..8].copy_from_slice(&abi::MAGIC);
+    bytes[8..12].copy_from_slice(&abi::VERSION.to_le_bytes());
+    bytes[12..16].copy_from_slice(&(abi::HEADER_LEN as u32).to_le_bytes());
+    for (offset, value) in [
+        (16, abi::HEADER_LEN as u64),
+        (24, (abi::HEADER_LEN + configuration.len()) as u64),
+        (32, 8),
+        (40, configuration.len() as u64),
+    ] {
+        bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+    bytes[abi::HEADER_LEN..abi::HEADER_LEN + configuration.len()].copy_from_slice(configuration);
+    bytes
 }
 
 #[test]
@@ -72,4 +99,57 @@ fn generic_kernel_settings_still_load_and_validate_values() {
     assert_eq!(settings.ipc.mailbox_cap, 128);
     assert_eq!(settings.exec.stack_aslr_max_pages, 128);
     assert_eq!(settings.scheduler.low_priority_threshold, 255);
+}
+
+#[test]
+fn boot_configuration_is_selected_by_range_without_any_filesystem_lookup() {
+    let source = include_str!("../../../core/src/config.rs");
+    for removed in [
+        "kernel_read_initfs",
+        "read_initfs",
+        "/config/",
+        "String::from_utf8",
+    ] {
+        assert!(
+            !source.contains(removed),
+            "configuration retained {removed}"
+        );
+    }
+    let bytes = module(b"ipc.mailbox_cap=128\nexec.stack_aslr_max_pages=0x20\n");
+    let loaded = config::load(&bytes);
+    assert_eq!(loaded.ipc.mailbox_cap, 128);
+    assert_eq!(loaded.exec.stack_aslr_max_pages, 32);
+
+    // Even a plausible path or setting in the opaque resource prefix cannot
+    // replace the descriptor-selected native configuration.
+    let mut decoy = bytes;
+    decoy.splice(64..64, [0u8; 128]);
+    decoy[64..64 + b"/config/kernel.conf\nipc.mailbox_cap=999\n".len()]
+        .copy_from_slice(b"/config/kernel.conf\nipc.mailbox_cap=999\n");
+    decoy[16..24].copy_from_slice(&192u64.to_le_bytes());
+    let image_offset = decoy.len() as u64 - 8;
+    decoy[24..32].copy_from_slice(&image_offset.to_le_bytes());
+    assert_eq!(config::load(&decoy).ipc.mailbox_cap, 128);
+}
+
+#[test]
+fn absent_invalid_or_unrecognized_configuration_keeps_native_defaults() {
+    let expected = config::KernelConfig::default();
+    for bytes in [
+        vec![],
+        vec![0; 4096],
+        module(b""),
+        module(b"ipc.mailbox_cap=128\n\xff"),
+        module(b"capability.path=/home;fs.read.user;fs.write.user;none\n"),
+    ] {
+        let loaded = config::load(&bytes);
+        assert_eq!(loaded.ipc.mailbox_cap, expected.ipc.mailbox_cap);
+        assert_eq!(loaded.ipc.max_msg_size, expected.ipc.max_msg_size);
+    }
+    let mut invalid = module(b"ipc.mailbox_cap=128\n");
+    invalid[40..48].copy_from_slice(&u64::MAX.to_le_bytes());
+    assert_eq!(
+        config::load(&invalid).ipc.mailbox_cap,
+        expected.ipc.mailbox_cap
+    );
 }

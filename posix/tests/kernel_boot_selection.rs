@@ -59,7 +59,7 @@ assert_eq!(STARTS.load(Ordering::Relaxed),0);
 }
 let mut bytes=vec![0;136];
 bytes[..8].copy_from_slice(&mnu_abi::boot_module::MAGIC);
-bytes[8..12].copy_from_slice(&1u32.to_le_bytes());bytes[12..16].copy_from_slice(&64u32.to_le_bytes());
+bytes[8..12].copy_from_slice(&mnu_abi::boot_module::VERSION.to_le_bytes());bytes[12..16].copy_from_slice(&64u32.to_le_bytes());
 bytes[16..24].copy_from_slice(&128u64.to_le_bytes());bytes[24..32].copy_from_slice(&128u64.to_le_bytes());
 bytes[32..40].copy_from_slice(&8u64.to_le_bytes());
 // A pathname in the opaque resources does not select executable bytes.

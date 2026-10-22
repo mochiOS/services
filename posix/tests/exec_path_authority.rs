@@ -25,7 +25,7 @@ mod init { pub mod fs {
         MODULE.get_or_init(||{
             let mut bytes=vec![0;67];
             bytes[..8].copy_from_slice(&crate::mnu_abi::boot_module::MAGIC);
-            bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
+            bytes[8..12].copy_from_slice(&crate::mnu_abi::boot_module::VERSION.to_le_bytes());
             bytes[12..16].copy_from_slice(&64u32.to_le_bytes());
             bytes[16..24].copy_from_slice(&64u64.to_le_bytes());
             bytes[24..32].copy_from_slice(&64u64.to_le_bytes());
