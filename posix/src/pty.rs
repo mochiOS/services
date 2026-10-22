@@ -960,6 +960,42 @@ impl PtyManager {
         Ok(signals)
     }
 
+    /// Only explicitly read-only selectors are reachable through OP_QUERY.
+    pub fn query(
+        &self,
+        object_id: u64,
+        code: u64,
+        input: &[u8],
+        capacity: usize,
+    ) -> Result<Vec<u8>, i32> {
+        if code != posix_protocol::PTY_QUERY_READ_SETTINGS {
+            return Err(ENOTSUP);
+        }
+        if !input.is_empty() || capacity < posix_protocol::TERMINAL_READ_SETTINGS_LEN {
+            return Err(EINVAL);
+        }
+        let (id, side) = decode_object_id(object_id).ok_or(EBADF)?;
+        let terminal = self.terminals.get(&id).ok_or(EBADF)?;
+        let noncanonical = side == PtySide::Slave
+            && terminal.attributes.local_flags & posix_protocol::TERMINAL_LFLAG_ICANON == 0;
+        let settings = posix_protocol::TerminalReadSettings {
+            noncanonical,
+            minimum: if noncanonical {
+                terminal.attributes.control_characters[posix_protocol::TERMINAL_CC_VMIN]
+            } else {
+                0
+            },
+            deciseconds: if noncanonical {
+                terminal.attributes.control_characters[posix_protocol::TERMINAL_CC_VTIME]
+            } else {
+                0
+            },
+        };
+        let mut output = vec![0; posix_protocol::TERMINAL_READ_SETTINGS_LEN];
+        posix_protocol::encode_terminal_read_settings(settings, &mut output).map_err(|_| EIO)?;
+        Ok(output)
+    }
+
     fn allocate_id(&mut self) -> Option<u64> {
         const MAX_ID: u64 = (i64::MAX as u64) >> 1;
         for _ in 0..self.terminals.len().saturating_add(1) {
@@ -1000,6 +1036,9 @@ pub fn handle_provider_request(
                 payload,
                 header.length as usize,
             )
+            .map(|data| (data.len() as u64, data)),
+        provider::OP_QUERY => ptys
+            .query(header.object_id, header.basis, payload, header.length as usize)
             .map(|data| (data.len() as u64, data)),
         provider::OP_MEMORY_OBJECT => ptys
             .object_ids(header.object_id)

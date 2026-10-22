@@ -30,6 +30,7 @@ thread_local!{{
     static INPUT_COPIES:Cell<usize>=const{{Cell::new(0)}};
     static OUTPUT_COPIES:Cell<usize>=const{{Cell::new(0)}};
     static CODE:Cell<u64>=const{{Cell::new(0)}};
+    static QUERY:Cell<bool>=const{{Cell::new(false)}};
 }}
 struct Allocator;
 fn fail()->bool{{ALLOCATION.try_with(|slot|match slot.get(){{
@@ -41,12 +42,12 @@ unsafe impl std::alloc::GlobalAlloc for Allocator{{
     unsafe fn dealloc(&self,p:*mut u8,l:std::alloc::Layout){{unsafe{{std::alloc::System.dealloc(p,l)}}}}
 }}
 #[global_allocator]static ALLOCATOR:Allocator=Allocator;
-#[derive(Debug,PartialEq)]struct HandleRights;
-impl HandleRights{{const CONTROL:Self=Self;}}
+#[derive(Debug,PartialEq)]struct HandleRights(u8);
+impl HandleRights{{const CONTROL:Self=Self(1);const READ:Self=Self(2);}}
 struct ProviderObject{{endpoint_thread_id:u64,endpoint_slot:u16,endpoint_generation:u64,object_id:u64}}
 enum KernelObject{{Provider(ProviderObject),MemoryUpdate(u8),Other}}
 fn object_native(raw:u64,right:HandleRights)->Result<KernelObject,Error>{{
-    assert_eq!(right,HandleRights::CONTROL);
+    assert_eq!(right,if QUERY.get(){{HandleRights::READ}}else{{HandleRights::CONTROL}});
     if let Some(error)=ADMISSION.get(){{return Err(error);}}
     match raw{{7=>Ok(KernelObject::Provider(ProviderObject{{endpoint_thread_id:99,endpoint_slot:7,endpoint_generation:123,object_id:17}})),
         8=>Ok(KernelObject::MemoryUpdate(5)),9=>Ok(KernelObject::Other),_=>Err(Error::InvalidArgument)}}
@@ -72,7 +73,7 @@ mod syscall{{
             assert_eq!(endpoint,IpcEndpoint{{thread_id:99,slot:7,generation:123}});
             CALLS.set(CALLS.get()+1);
             let (header,data)=provider::RequestHeader::decode(request).unwrap();
-            assert_eq!((header.opcode,header.object_id,header.basis),(provider::OP_CONTROL,17,CODE.get()));
+            assert_eq!((header.opcode,header.object_id,header.basis),(if QUERY.get(){{provider::OP_QUERY}}else{{provider::OP_CONTROL}},17,CODE.get()));
             assert!(data.iter().all(|byte|*byte==0x5a));
             if TRANSPORT_ERROR.get()!=0{{return Err(TRANSPORT_ERROR.get());}}
             let status=PROVIDER_STATUS.get();
@@ -105,8 +106,9 @@ mod syscall{{
         "/// Reads from a provider object",
     ));
     program.push_str(r#"
-fn invoke()->u64{control(7,CODE.get(),11,2,12,3)}
+fn invoke()->u64{if QUERY.get(){query(7,CODE.get(),11,2,12,3)}else{control(7,CODE.get(),11,2,12,3)}}
 fn main(){
+ for query_mode in [false,true]{QUERY.set(query_mode);
     for code in [0,42,u64::MAX]{CODE.set(code);assert_eq!(invoke(),3);}
     for error in [Error::LimitExceeded,Error::InvalidAddress,Error::ResourceUnavailable,
         Error::BackingFailure,Error::InvalidArgument,Error::AccessDenied,Error::NotReady,
@@ -127,19 +129,21 @@ fn main(){
         assert_eq!(result,Error::ResourceUnavailable.into_raw());assert_eq!(CALLS.get(),before);
     }
     let before=CALLS.get();
+    let operation=if query_mode{query}else{control};
     for extent in [provider::MAX_DATA_LEN as u64+1,u64::MAX]{
-        assert_eq!(control(7,0,11,extent,12,3),Error::LimitExceeded.into_raw());
-        assert_eq!(control(7,0,11,2,12,extent),Error::LimitExceeded.into_raw());
+        assert_eq!(operation(7,0,11,extent,12,3),Error::LimitExceeded.into_raw());
+        assert_eq!(operation(7,0,11,2,12,extent),Error::LimitExceeded.into_raw());
     }
-    assert_eq!(control(0,0,0,0,0,0),Error::InvalidArgument.into_raw());
-    assert_eq!(control(9,0,0,0,0,0),Error::InvalidArgument.into_raw());
+    assert_eq!(operation(0,0,0,0,0,0),Error::InvalidArgument.into_raw());
+    assert_eq!(operation(9,0,0,0,0,0),Error::InvalidArgument.into_raw());
     assert_eq!(CALLS.get(),before);
     let before=OUTPUT_COPIES.get();MODE.set(1);assert_eq!(invoke(),Error::BackingFailure.into_raw());
     assert_eq!(OUTPUT_COPIES.get(),before);MODE.set(0);
     // Empty payloads must not dereference null pointers. The native update
     // object retains its distinct native control implementation.
-    MODE.set(4);assert_eq!(control(7,CODE.get(),0,0,0,0),0);MODE.set(0);
-    assert_eq!(control(8,42,11,2,12,3),43);
+    MODE.set(4);assert_eq!(operation(7,CODE.get(),0,0,0,0),0);MODE.set(0);
+    assert_eq!(operation(8,42,11,2,12,3),if query_mode{Error::InvalidArgument.into_raw()}else{43});
+ }
 }
 "#);
     probe::run(&program);

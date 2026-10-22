@@ -6,7 +6,7 @@
 mod probe;
 
 #[test]
-fn shared_options_require_local_control_authority_and_return_native_errors() {
+fn shared_options_are_observable_but_mutation_requires_local_control_authority() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
@@ -176,7 +176,7 @@ fn main(){
         assert_eq!(get(raw),Error::InvalidArgument.into_raw());assert_eq!(set(raw,1),Error::InvalidArgument.into_raw());
     }
     for raw in [2,5] {
-        assert_eq!(get(raw),Error::AccessDenied.into_raw());assert_eq!(set(raw,1),Error::AccessDenied.into_raw());
+        assert_eq!(get(raw),0);assert_eq!(set(raw,1),Error::AccessDenied.into_raw());
     }
     for raw in [6,7] {
         assert_eq!(get(raw),Error::InvalidArgument.into_raw());assert_eq!(set(raw,1),Error::InvalidArgument.into_raw());

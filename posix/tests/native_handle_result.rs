@@ -84,6 +84,7 @@ type Handle=u32;
         "pub fn read_at(",
         "pub fn write_at(",
         "pub fn control(",
+        "pub fn query(",
     ] {
         program.push_str(function(handles, name));
         program.push('\n');
@@ -154,18 +155,18 @@ fn main(){
     use syscall::{SysError,SysResult};
     use status::Error;
     let input=[0x71;3];
-    for operation in 0..5 {
+    for operation in 0..6 {
         for capacity in [0,1,8] {
             let mut buffer=[0x53;8];
             let pointer=buffer.as_ptr() as u64;
             let number=match operation {
                 0=>SyscallNumber::HandleRead,1=>SyscallNumber::HandleWrite,
                 2=>SyscallNumber::HandleReadAt,3=>SyscallNumber::HandleWriteAt,
-                _=>SyscallNumber::HandleControl,
+                4=>SyscallNumber::HandleControl,_=>SyscallNumber::HandleQuery,
             };
             let mut args=vec![17,pointer,capacity as u64];
             if operation==2 || operation==3 {args.push(u64::MAX);}
-            if operation==4 {args=vec![17,91,input.as_ptr() as u64,3,pointer,capacity as u64];}
+            if operation>=4 {args=vec![17,91,input.as_ptr() as u64,3,pointer,capacity as u64];}
             let mut invoke=||->SysResult<usize>{
                 let bytes=&mut buffer[..capacity];
                 match operation {
@@ -173,7 +174,8 @@ fn main(){
                     1=>production::write(17,bytes),
                     2=>production::read_at(17,bytes,u64::MAX),
                     3=>production::write_at(17,bytes,u64::MAX),
-                    _=>production::control(17,91,&input,bytes),
+                    4=>production::control(17,91,&input,bytes),
+                    _=>production::query(17,91,&input,bytes),
                 }
             };
             for raw in [0,capacity as u64/2,capacity as u64] {
