@@ -236,6 +236,28 @@ impl Namespace {
         })
     }
 
+    /// Owner configuration cannot follow a mount into another volume.
+    pub(crate) fn configured_device_child(&self, parent: &Node, name: &[u8]) -> Result<Node, i32> {
+        self.validate(parent)?;
+        if self.named_mounts.contains_key(&(parent.id(), name.to_vec())) {
+            return Err(EBUSY);
+        }
+        let device = parent.device_node().ok_or(95)?;
+        let child = match self.volumes.get(parent.volume as usize) {
+            Some(Volume::Device(filesystem)) => filesystem.child(device, name)?,
+            _ => return Err(95),
+        };
+        let node = Node {
+            owner: self.owner.clone(),
+            volume: parent.volume,
+            backing: NodeBacking::Device(child),
+        };
+        if self.mounts.contains_key(&node.id()) {
+            return Err(EBUSY);
+        }
+        Ok(node)
+    }
+
     pub fn set_device_attributes(
         &mut self,
         node: &Node,

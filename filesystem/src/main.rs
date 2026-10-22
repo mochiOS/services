@@ -296,6 +296,25 @@ fn main() {
                             continue;
                         }
                     }
+                } else if filesystem_service::device_namespace_ipc::requested(header) {
+                    match filesystem_service::device_namespace_ipc::handle(
+                        &mut service,
+                        header,
+                        payload,
+                        &attached,
+                        |handle| platform::handle::identify_provider_object(handle).map_err(|_| 9),
+                    ) {
+                        Ok(response) => response,
+                        Err(error) => filesystem_service::service::Response {
+                            header: protocol::Header {
+                                opcode: protocol::OP_STATUS,
+                                request_id: header.request_id,
+                                status: -error,
+                                ..protocol::Header::default()
+                            },
+                            payload: Vec::new(),
+                        },
+                    }
                 } else if matches!(
                     header.opcode,
                     protocol::OP_STAT_AT | protocol::OP_CANONICAL_PATH_AT

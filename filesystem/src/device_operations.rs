@@ -3,6 +3,45 @@
 use super::*;
 
 impl FilesystemService {
+    /// Parent is supplied only by native identification of an attachment, not
+    /// an inline caller-selected open ID. This is service-owner configuration.
+    pub(crate) fn configure_device_node(
+        &mut self,
+        request: protocol::Header,
+        payload: &[u8],
+        parent_open_id: u64,
+    ) -> Result<Response, i32> {
+        let config = protocol::device_namespace::decode(request.opcode, payload)
+            .map_err(|_| EINVAL)?;
+        let parent = self.retained_namespace_node(parent_open_id)?;
+        let namespace = self.namespace.as_mut().ok_or(ENOTSUP)?;
+        let attributes = crate::devfs::Attributes {
+            mode: config.mode,
+            uid: config.uid,
+            gid: config.gid,
+        };
+        let node = match request.opcode {
+            protocol::OP_DEVICE_NODE_CREATE => {
+                let kind = match config.kind {
+                    protocol::device_namespace::KIND_DIRECTORY => crate::devfs::NodeKind::Directory,
+                    protocol::device_namespace::KIND_NULL => crate::devfs::NodeKind::Null,
+                    _ => return Err(EINVAL),
+                };
+                namespace.register_device_node(&parent, config.name, kind, attributes)?
+            }
+            protocol::OP_DEVICE_NODE_SET_ATTRIBUTES => {
+                let node = namespace.configured_device_child(&parent, config.name)?;
+                namespace.set_device_attributes(&node, attributes)?;
+                node
+            }
+            protocol::OP_DEVICE_NODE_REMOVE => {
+                namespace.unregister_device_node(&parent, config.name)?
+            }
+            _ => return Err(ENOSYS),
+        };
+        self.device_status_response(request, &node)
+    }
+
     /// Startup-owned mount configuration; never accepts a caller-selected ID.
     pub fn mount_devices(
         &mut self,

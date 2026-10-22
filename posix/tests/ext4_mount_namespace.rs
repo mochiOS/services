@@ -155,6 +155,452 @@ fn device_open(
         .map(|response| response.header.open_id)
 }
 
+fn device_configuration(
+    opcode: u16,
+    config: protocol::device_namespace::Request<'_>,
+) -> (protocol::Header, Vec<u8>) {
+    let mut bytes = vec![0; protocol::device_namespace::HEADER_LEN + config.name.len()];
+    let length = protocol::device_namespace::encode(opcode, config, &mut bytes).unwrap();
+    bytes.truncate(length);
+    (
+        protocol::Header {
+            opcode,
+            request_id: 51,
+            length: length as u32,
+            ..Default::default()
+        },
+        bytes,
+    )
+}
+
+fn configure_received_device(
+    service: &mut FilesystemService,
+    parent: u64,
+    opcode: u16,
+    config: protocol::device_namespace::Request<'_>,
+) -> Result<filesystem_service::service::Response, i32> {
+    let (header, bytes) = device_configuration(opcode, config);
+    let attached = mnu_abi::IpcObjectHandles {
+        count: 1,
+        delivery_flags: mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE,
+        handles: [
+            mnu_abi::IpcObjectHandle {
+                handle: 29,
+                reserved: 0,
+                rights: mnu_abi::HANDLE_RIGHT_CONTROL | mnu_abi::HANDLE_RIGHT_TRANSFER,
+            },
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ],
+    };
+    filesystem_service::device_namespace_ipc::handle(service, header, &bytes, &attached, |handle| {
+        assert_eq!(handle, 29);
+        Ok(parent)
+    })
+}
+
+#[test]
+fn received_device_configuration_cannot_escape_parent_backend_or_cross_a_mount() {
+    use protocol::device_namespace::{KIND_DIRECTORY, Request};
+    let fixture = Fixture::new();
+    let mut service = FilesystemService::new(fixture.volume("device-config-scope"));
+    service
+        .mount_devices(
+            b"/managed",
+            filesystem_service::devfs::DeviceFilesystem::default(),
+        )
+        .unwrap();
+    let directory = protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY;
+    let parent = device_open(&mut service, b"/managed", directory, PathAnchors::default()).unwrap();
+    let create = Request {
+        kind: KIND_DIRECTORY,
+        mode: 0o755,
+        uid: 0,
+        gid: 0,
+        name: b"covered",
+    };
+    configure_received_device(
+        &mut service,
+        parent,
+        protocol::OP_DEVICE_NODE_CREATE,
+        create,
+    )
+    .unwrap();
+    service
+        .mount_devices(
+            b"/managed/covered",
+            filesystem_service::devfs::DeviceFilesystem::default(),
+        )
+        .unwrap();
+    let update = Request {
+        kind: 0,
+        mode: 0o777,
+        uid: 500,
+        gid: 20,
+        name: b"covered",
+    };
+    assert!(matches!(
+        configure_received_device(
+            &mut service,
+            parent,
+            protocol::OP_DEVICE_NODE_SET_ATTRIBUTES,
+            update
+        ),
+        Err(16)
+    ));
+    let remove = Request {
+        kind: 0,
+        mode: 0,
+        uid: 0,
+        gid: 0,
+        name: b"covered",
+    };
+    assert!(matches!(
+        configure_received_device(
+            &mut service,
+            parent,
+            protocol::OP_DEVICE_NODE_REMOVE,
+            remove
+        ),
+        Err(16)
+    ));
+    let root = device_open(&mut service, b"/", directory, PathAnchors::default()).unwrap();
+    assert!(matches!(
+        configure_received_device(&mut service, root, protocol::OP_DEVICE_NODE_CREATE, create),
+        Err(95)
+    ));
+    assert_eq!(
+        device_open(&mut service, b"/covered", directory, PathAnchors::default()),
+        Err(2)
+    );
+    let null = device_open(
+        &mut service,
+        b"/managed/null",
+        protocol::OPEN_AT_READ,
+        PathAnchors::default(),
+    )
+    .unwrap();
+    assert!(matches!(
+        configure_received_device(&mut service, null, protocol::OP_DEVICE_NODE_CREATE, create),
+        Err(20)
+    ));
+}
+
+#[test]
+fn received_device_configuration_drives_real_vfs_lifetime_and_permission_changes() {
+    use protocol::device_namespace::{KIND_DIRECTORY, KIND_NULL, Request};
+    let fixture = Fixture::new();
+    let mut service = FilesystemService::new(fixture.volume("received-device-config"));
+    service
+        .mount_devices(
+            b"/managed",
+            filesystem_service::devfs::DeviceFilesystem::default(),
+        )
+        .unwrap();
+    let directory_flags = protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY;
+    let parent = device_open(
+        &mut service,
+        b"/managed",
+        directory_flags,
+        PathAnchors::default(),
+    )
+    .unwrap();
+    let result = configure_received_device(
+        &mut service,
+        parent,
+        protocol::OP_DEVICE_NODE_CREATE,
+        Request {
+            kind: KIND_DIRECTORY,
+            mode: 0o755,
+            uid: 501,
+            gid: 20,
+            name: b"session",
+        },
+    )
+    .unwrap();
+    assert_eq!(result.header.request_id, 51);
+    assert_eq!(
+        protocol::decode_node_status(&result.payload).unwrap().kind,
+        protocol::NODE_TYPE_DIRECTORY
+    );
+    let child = device_open(
+        &mut service,
+        b"/managed/session",
+        directory_flags,
+        PathAnchors::default(),
+    )
+    .unwrap();
+    let create = Request {
+        kind: KIND_NULL,
+        mode: 0o600,
+        uid: 501,
+        gid: 20,
+        name: b"object",
+    };
+    let created =
+        configure_received_device(&mut service, child, protocol::OP_DEVICE_NODE_CREATE, create)
+            .unwrap();
+    let created = protocol::decode_node_status(&created.payload).unwrap();
+    assert!(matches!(
+        configure_received_device(&mut service, child, protocol::OP_DEVICE_NODE_CREATE, create),
+        Err(17)
+    ));
+    let mut owner = root_credentials();
+    owner.effective_uid = 501;
+    owner.effective_gid = 20;
+    let open = service
+        .open_at(
+            protocol::Header {
+                flags: protocol::OPEN_AT_READ
+                    | protocol::OPEN_AT_WRITE
+                    | protocol::OPEN_AT_BASE_ATTACHED,
+                ..Default::default()
+            },
+            b"object",
+            PathAnchors {
+                base_open_id: Some(child),
+                root_open_id: None,
+            },
+            owner,
+        )
+        .unwrap()
+        .header
+        .open_id;
+    let update = Request {
+        kind: 0,
+        mode: 0,
+        uid: 999,
+        gid: 999,
+        name: b"object",
+    };
+    configure_received_device(
+        &mut service,
+        child,
+        protocol::OP_DEVICE_NODE_SET_ATTRIBUTES,
+        update,
+    )
+    .unwrap();
+    assert!(matches!(
+        service.open_at(
+            protocol::Header {
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_BASE_ATTACHED,
+                ..Default::default()
+            },
+            b"object",
+            PathAnchors {
+                base_open_id: Some(child),
+                root_open_id: None
+            },
+            owner
+        ),
+        Err(13)
+    ));
+    assert_eq!(service.provider_write(open, b"retained"), Ok(8));
+    let remove = Request {
+        kind: 0,
+        mode: 0,
+        uid: 0,
+        gid: 0,
+        name: b"object",
+    };
+    let removed =
+        configure_received_device(&mut service, child, protocol::OP_DEVICE_NODE_REMOVE, remove)
+            .unwrap();
+    let removed = protocol::decode_node_status(&removed.payload).unwrap();
+    assert_eq!(
+        (removed.node_id, removed.link_count, removed.uid),
+        (created.node_id, 0, 999)
+    );
+    let status = service
+        .stat_handle(protocol::Header::default(), open)
+        .unwrap();
+    assert_eq!(
+        protocol::decode_node_status(&status.payload).unwrap(),
+        removed
+    );
+    let next =
+        configure_received_device(&mut service, child, protocol::OP_DEVICE_NODE_CREATE, create)
+            .unwrap();
+    assert_ne!(
+        protocol::decode_node_status(&next.payload).unwrap().node_id,
+        created.node_id
+    );
+    assert_eq!(service.provider_read(open, 10), Ok(vec![]));
+    let remove_parent = Request {
+        name: b"session",
+        ..remove
+    };
+    assert!(matches!(
+        configure_received_device(
+            &mut service,
+            parent,
+            protocol::OP_DEVICE_NODE_REMOVE,
+            remove_parent
+        ),
+        Err(39)
+    ));
+    configure_received_device(&mut service, child, protocol::OP_DEVICE_NODE_REMOVE, remove)
+        .unwrap();
+    configure_received_device(
+        &mut service,
+        parent,
+        protocol::OP_DEVICE_NODE_REMOVE,
+        remove_parent,
+    )
+    .unwrap();
+    assert!(matches!(
+        configure_received_device(&mut service, child, protocol::OP_DEVICE_NODE_CREATE, create),
+        Err(2)
+    ));
+}
+
+#[test]
+fn device_configuration_requires_received_control_authority_not_inline_ids_or_claimed_owner() {
+    use filesystem_service::device_namespace_ipc::handle;
+    use protocol::device_namespace::{KIND_DIRECTORY, Request};
+    let fixture = Fixture::new();
+    let mut service = FilesystemService::new(fixture.volume("device-config-admission"));
+    service
+        .mount_devices(
+            b"/managed",
+            filesystem_service::devfs::DeviceFilesystem::default(),
+        )
+        .unwrap();
+    let parent = device_open(
+        &mut service,
+        b"/managed",
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+        PathAnchors::default(),
+    )
+    .unwrap();
+    let (header, bytes) = device_configuration(
+        protocol::OP_DEVICE_NODE_CREATE,
+        Request {
+            kind: KIND_DIRECTORY,
+            mode: 0o777,
+            uid: 0,
+            gid: 0,
+            name: b"unadmitted",
+        },
+    );
+    let mut attached = mnu_abi::IpcObjectHandles::default();
+    attached.count = 1;
+    attached.delivery_flags = mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE;
+    attached.handles[0] = mnu_abi::IpcObjectHandle {
+        handle: 29,
+        reserved: 0,
+        rights: mnu_abi::HANDLE_RIGHT_CONTROL | mnu_abi::HANDLE_RIGHT_TRANSFER,
+    };
+    for flags in [0, mnu_abi::IPC_DELIVERY_NATIVE_OBJECT, 3, u32::MAX] {
+        let mut bad = attached;
+        bad.delivery_flags = flags;
+        assert!(matches!(
+            handle(&mut service, header, &bytes, &bad, |_| panic!(
+                "untrusted delivery"
+            )),
+            Err(13)
+        ));
+    }
+    for rights in [
+        0,
+        mnu_abi::HANDLE_RIGHT_CONTROL,
+        mnu_abi::HANDLE_RIGHT_TRANSFER,
+        mnu_abi::HANDLE_RIGHT_READ | mnu_abi::HANDLE_RIGHT_TRANSFER,
+    ] {
+        let mut bad = attached;
+        bad.handles[0].rights = rights;
+        assert!(matches!(
+            handle(&mut service, header, &bytes, &bad, |_| panic!(
+                "missing authority"
+            )),
+            Err(13)
+        ));
+    }
+    for count in [0, 2, u32::MAX] {
+        let mut bad = attached;
+        bad.count = count;
+        assert!(matches!(
+            handle(&mut service, header, &bytes, &bad, |_| panic!(
+                "wrong attachment count"
+            )),
+            Err(22)
+        ));
+    }
+    for field in [0, 1] {
+        let mut bad = attached;
+        if field == 0 {
+            bad.handles[0].handle = 0;
+        } else {
+            bad.handles[0].reserved = 1;
+        }
+        assert!(matches!(
+            handle(&mut service, header, &bytes, &bad, |_| panic!(
+                "invalid handle record"
+            )),
+            Err(13)
+        ));
+    }
+    for field in 0..8 {
+        let mut bad = header;
+        match field {
+            0 => bad.mount_id = 1,
+            1 => bad.node_id = 1,
+            2 => bad.open_id = parent,
+            3 => bad.offset = 1,
+            4 => bad.flags = 1,
+            5 => bad.status = 1,
+            6 => bad.mode = 1,
+            _ => bad.length += 1,
+        }
+        assert!(matches!(
+            handle(&mut service, bad, &bytes, &attached, |_| panic!(
+                "inline authority/unknown fields"
+            )),
+            Err(22)
+        ));
+    }
+    for error in [5, 9, 13] {
+        assert!(
+            matches!(handle(&mut service, header, &bytes, &attached, |raw| {assert_eq!(raw,29);Err(error)}), Err(value) if value == error)
+        );
+    }
+    assert!(matches!(
+        handle(
+            &mut service,
+            header,
+            &bytes[..bytes.len() - 1],
+            &attached,
+            |_| panic!("truncated payload")
+        ),
+        Err(22)
+    ));
+    let valid_header = protocol::Header {
+        opcode: protocol::OP_OPEN_AT,
+        ..header
+    };
+    assert!(matches!(
+        handle(&mut service, valid_header, &bytes, &attached, |_| panic!(
+            "unknown config opcode"
+        )),
+        Err(38)
+    ));
+    // No rejected operation published the supposedly root-owned directory.
+    assert_eq!(
+        device_open(
+            &mut service,
+            b"/managed/unadmitted",
+            protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+            PathAnchors::default()
+        ),
+        Err(2)
+    );
+    assert_eq!(attached.handles[0].handle, 29); // Borrowed attachments stay owned by receiver cleanup.
+    let source = include_str!("../../filesystem/src/main.rs");
+    assert!(source.contains("device_namespace_ipc::handle("));
+    assert!(source.contains("platform::handle::identify_provider_object(handle)"));
+}
+
 #[test]
 fn registered_device_subtrees_resolve_mount_parents_and_keep_removed_nodes_distinct() {
     use filesystem_service::devfs::{Attributes, DeviceFilesystem, NodeKind};
