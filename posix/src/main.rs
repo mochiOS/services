@@ -260,6 +260,12 @@ fn main() {
             platform::syscall::HANDLE_WAIT_INFINITE
         };
         deliver_process_resume_notifications(&mut service);
+        if let Err(error) = service.refresh_child_notifications(&mut processes) {
+            platform::logln!(
+                "posix.service: deferred child notification pending errno={}",
+                error
+            );
+        }
         complete_pending_signal_waits(&mut pending_signal_waits, &mut service);
         complete_pending_waits(
             &mut pending_waits,
@@ -296,10 +302,26 @@ fn main() {
                 }
             }
         };
+        // A failed image observation must retry even when no process exits or
+        // client sends another RPC. Use the existing native wait deadline.
+        let child_notification_deadline = if service.has_deferred_child_notifications() {
+            match platform::time::monotonic_nanoseconds() {
+                Ok(now) => now.saturating_add(10_000_000),
+                Err(_) => {
+                    clock_failed = true;
+                    platform::syscall::HANDLE_WAIT_INFINITE
+                }
+            }
+        } else {
+            platform::syscall::HANDLE_WAIT_INFINITE
+        };
         let deadline = pending_signal_waits
             .iter()
             .filter_map(|wait: &PendingSignalWait| wait.deadline)
-            .fold(deadline.min(cpu_deadline), u64::min)
+            .fold(
+                deadline.min(cpu_deadline).min(child_notification_deadline),
+                u64::min,
+            )
             .min(
                 service.next_alarm_deadline()
                     .unwrap_or(platform::syscall::HANDLE_WAIT_INFINITE),

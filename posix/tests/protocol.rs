@@ -36,6 +36,9 @@ mod child_exit_image;
 #[path = "support/child_stop_image.rs"]
 mod child_stop_image;
 
+#[path = "support/child_continue_image.rs"]
+mod child_continue_image;
+
 #[path = "support/alarm.rs"]
 mod alarm;
 
@@ -4731,6 +4734,7 @@ fn nocldstop_is_inherited_and_suppresses_only_stop_continue_notifications() {
     }
 
     send_signal(&mut service, parent, child, protocol::SIGNAL_CONT);
+    service.refresh_child_notifications(&mut processes).unwrap();
     assert_eq!(service.signal_state(parent.process_id).unwrap().pending(), 0);
 
     processes
@@ -5144,6 +5148,7 @@ fn wait_reports_authenticated_stop_and_continue_transitions_once() {
     );
 
     send_signal(&mut service, parent, child, protocol::SIGNAL_CONT);
+    service.refresh_child_notifications(&mut processes).unwrap();
     let child_change = dequeue_signal(&mut service, parent);
     assert_eq!(child_change.signal, protocol::SIGNAL_CHLD);
     protocol::encode_signal_delivery(child_change, &mut child_change_bytes).unwrap();

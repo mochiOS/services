@@ -31,6 +31,7 @@ pub mod cpu_limit;
 mod cpu_timer;
 mod process_group;
 mod image_state;
+mod child_notification;
 pub mod filesystem_times;
 pub use fork_state::validate_fork_child;
 
@@ -773,6 +774,7 @@ pub struct PosixService<H: Copy = u32> {
     next_signal_delivery_token: u64,
     signal_notifications: BTreeSet<u64>,
     process_resume_notifications: BTreeSet<u64>,
+    deferred_child_notifications: std::collections::VecDeque<child_notification::Deferred>,
 }
 
 impl PosixService<u32> {
@@ -813,6 +815,7 @@ impl PosixService<u32> {
             next_signal_delivery_token: 1,
             signal_notifications: BTreeSet::new(),
             process_resume_notifications: BTreeSet::new(),
+            deferred_child_notifications: std::collections::VecDeque::new(),
         }
     }
 }
@@ -1042,7 +1045,7 @@ impl<H: Copy> PosixService<H> {
             self.process_resume_notifications.insert(process_id);
         }
         if continued {
-            self.notify_parent_of_child_change(
+            self.defer_parent_of_child_change(
                 process_id,
                 protocol::signal_origin::ChildStatus {
                     event: protocol::signal_origin::CONTINUED,
@@ -1110,6 +1113,7 @@ impl<H: Copy> PosixService<H> {
         exit_code: u64,
         processes: &mut P,
     ) -> Result<bool, i32> {
+        self.refresh_child_notifications_for_child(child_id, processes)?;
         self.refresh_parent_image(child_id, processes)?;
         let wait_state = self
             .process_wait_states
@@ -1145,6 +1149,7 @@ impl<H: Copy> PosixService<H> {
         &mut self,
         processes: &mut P,
     ) -> Result<usize, i32> {
+        self.refresh_child_notifications(processes)?;
         let candidates: Vec<(u64, H)> = self
             .processes
             .keys()
@@ -1218,6 +1223,7 @@ impl<H: Copy> PosixService<H> {
         process_id: u64,
         processes: &mut P,
     ) -> Result<(), i32> {
+        self.refresh_child_notifications_for_child(process_id, processes)?;
         self.refresh_parent_image(process_id, processes)?;
         if self.parents.get(&process_id).is_some_and(|parent| self.discards_child_status(*parent)) {
             self.process_wait_states
@@ -2108,6 +2114,7 @@ impl<H: Copy> PosixService<H> {
         self.process_wait_states.remove(&child_id);
         self.signal_notifications.remove(&child_id);
         self.process_resume_notifications.remove(&child_id);
+        self.discard_child_notifications_to(child_id);
         self.sessions.remove(&child_id);
         self.real_timers.remove(&child_id);
         self.cpu_timers.retain(|&(owner, _), _| owner != child_id);
@@ -3332,6 +3339,7 @@ impl<H: Copy> PosixService<H> {
         // The parent may have committed exec without sending a new request.
         // Observe it before consuming the token or suspending the child, so a
         // failed observation leaves this authenticated stop retryable.
+        self.refresh_child_notifications_for_child(peer.process_id, processes)?;
         self.refresh_parent_image(peer.process_id, processes)?;
         processes.suspend(process)?;
         // Only commit delivery after the native operation succeeds. The

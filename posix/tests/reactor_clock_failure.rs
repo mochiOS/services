@@ -21,6 +21,8 @@ static LOGS:Cell<u32>=const{Cell::new(0)};
 static NOTIFICATIONS:Cell<u32>=const{Cell::new(0)};
 static CPU_ONLY:Cell<bool>=const{Cell::new(false)};
 static TIMER_SWEEPS:Cell<u32>=const{Cell::new(0)};
+static DEFERRED:Cell<bool>=const{Cell::new(false)};
+static DEFERRED_FAILURE:Cell<bool>=const{Cell::new(false)};
 }
 #[macro_export]macro_rules! logln{($($argument:tt)*)=>{crate::LOGS.set(crate::LOGS.get()+1)}}
 pub mod syscall{pub const HANDLE_WAIT_INFINITE:u64=u64::MAX;}
@@ -29,7 +31,9 @@ mod time{
 pub fn monotonic_milliseconds()->Result<u64,crate::Error>{
 let call=crate::CLOCK_CALLS.get()+1;crate::CLOCK_CALLS.set(call);
 if crate::FAIL.get()&(1<<call)!=0{Err(crate::Error)}else{Ok(2000)}
-}}
+}
+pub fn monotonic_nanoseconds()->Result<u64,crate::Error>{monotonic_milliseconds().map(|ms|ms*1_000_000)}
+}
 mod posix_service{pub mod cpu_limit{pub const SWEEP_INTERVAL_MS:u64=100;}}
 struct Service {deadline:u64,cpu_sweeps:u32}
 impl Service {
@@ -40,6 +44,11 @@ fn expire_cpu_timers(&mut self,_:&mut())->Result<usize,i32>{TIMER_SWEEPS.set(TIM
 fn enforce_cpu_limits(&mut self,_:&mut())->Result<(),i32>{self.cpu_sweeps+=1;Ok(())}
 fn next_alarm_deadline(&self)->Option<u64>{Some(self.deadline)}
 fn child_lifecycle_handles(&self)->Vec<u32>{vec![7]}
+fn has_deferred_child_notifications(&self)->bool{DEFERRED.get()}
+fn refresh_child_notifications(&mut self,_:&mut())->Result<usize,i32>{
+ if DEFERRED.get()&&DEFERRED_FAILURE.get(){return Err(-5)}
+ let count=usize::from(DEFERRED.get());DEFERRED.set(false);Ok(count)
+}
 }
 struct PendingSignalWait{deadline:Option<u64>}
 fn reap_signal_threads(_:&mut Service,_:&mut Vec<()>){ }
@@ -81,6 +90,20 @@ CPU_ONLY.set(true);FAIL.set(0);CLOCK_CALLS.set(0);TIMER_SWEEPS.set(0);
 let mut service=Service{deadline:5_000_000_000,cpu_sweeps:0};let mut reported=false;
 assert_eq!(plan(&mut service,&mut reported),(2_010_000_000,false));
 assert_eq!(TIMER_SWEEPS.get(),1);
+// Failed parent-image observation keeps a retry deadline without another RPC
+// or child exit. Failure of that deadline's ClockRead must still reach polling.
+CPU_ONLY.set(false);DEFERRED.set(true);DEFERRED_FAILURE.set(true);
+FAIL.set(0);CLOCK_CALLS.set(0);
+assert_eq!(plan(&mut service,&mut reported),(2_010_000_000,false));
+assert!(DEFERRED.get());
+FAIL.set(8);CLOCK_CALLS.set(0);
+assert!(plan(&mut service,&mut reported).1);assert!(DEFERRED.get());
+FAIL.set(0);CLOCK_CALLS.set(0);
+assert_eq!(plan(&mut service,&mut reported),(2_010_000_000,false));
+assert!(DEFERRED.get());
+DEFERRED_FAILURE.set(false);CLOCK_CALLS.set(0);
+assert_eq!(plan(&mut service,&mut reported),(2_100_000_000,false));
+assert!(!DEFERRED.get());
 }
 "#,
     );

@@ -4,7 +4,7 @@ use mochios_posix_client::signal_context::{
 };
 use protocol::signal_origin::*;
 
-fn notification(service: &mut PosixService, parent: PeerIdentity) -> Origin {
+pub(super) fn notification(service: &mut PosixService, parent: PeerIdentity) -> Origin {
     let delivery = dequeue_signal(service, parent);
     assert_eq!(delivery.signal, protocol::SIGNAL_CHLD);
     let mut bytes = [0; protocol::SIGNAL_DELIVERY_LEN];
@@ -97,6 +97,7 @@ fn coalescing_preserves_the_first_stop_event_and_a_fresh_continue_has_its_own_st
             .unwrap();
         if coalesce {
             send_signal(&mut service, parent, child, protocol::SIGNAL_CONT);
+            service.refresh_child_notifications(&mut processes).unwrap();
         }
         let origin = notification(&mut service, parent);
         assert_eq!(
@@ -113,6 +114,7 @@ fn coalescing_preserves_the_first_stop_event_and_a_fresh_continue_has_its_own_st
         );
     }
     send_signal(&mut service, parent, child, protocol::SIGNAL_CONT);
+    service.refresh_child_notifications(&mut processes).unwrap();
     let origin = notification(&mut service, parent);
     assert_eq!(
         origin.child,
