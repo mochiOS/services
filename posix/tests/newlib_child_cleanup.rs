@@ -147,11 +147,16 @@ fn runtime_uses_retained_cleanup_for_all_failed_clone_and_spawn_branches() {
         .find("pub extern \"C\" fn posix_spawn(")
         .unwrap()
         + start;
-    assert_eq!(
-        source[start..end]
-            .matches("cleanup_failed_child(u64::from(process_handle), true)")
-            .count(),
-        2
-    );
+    let spawn = &source[start..end];
+    assert!(spawn.contains("spawn_resources::with("));
+    assert!(spawn.contains("resources.clone_registered()"));
+    assert!(spawn.contains("match resources.wait()"));
+    let resources = include_str!("../../../user/crates/newlib-runtime/src/spawn_resources.rs");
+    assert!(resources.contains("impl Drop for Resources"));
+    assert!(resources.contains("cleanup_failed_child(handle, registered)"));
+    assert!(resources.contains("clone_registered_process_owned(self.startup.as_mut().ok_or(EIO)?"));
+    assert!(clone.contains("track_child(Some((handle, false)))"));
+    assert!(clone.contains("track_child(Some((u64::from(handle), true)))"));
+    assert!(clone.contains("track_child(None)"));
     assert!(!source.contains("fn finish_failed_spawn("));
 }

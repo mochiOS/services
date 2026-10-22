@@ -195,7 +195,7 @@ fn spawn_validates_captured_attributes_before_creating_native_resources() {
     let capture = source
         .find("spawn_attributes::read_optional(attrp)")
         .unwrap();
-    assert!(capture < source.find("create_spawn_status_stream()").unwrap());
-    assert!(capture < source.find("clone_registered_process()").unwrap());
+    assert!(capture < source.find("spawn_resources::with(").unwrap());
+    assert!(capture < source.find("resources.clone_registered()").unwrap());
     assert!(!source.contains("attrp.cast"));
 }

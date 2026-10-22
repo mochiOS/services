@@ -223,7 +223,9 @@ fn spawn_success_dispatch_uses_the_checked_owner_instead_of_a_raw_pid_store() {
     let source = &source[..source.find("pub extern \"C\" fn posix_spawn(").unwrap()];
     let start = source.find("ExecStatus::Succeeded) =>").unwrap();
     let end = source.find("ExecStatus::Failed(").unwrap();
-    assert!(source[start..end].contains("spawn_output::publish(child_pid, process_handle, pid)"));
+    assert!(source[start..end].contains("resources.publish(child_pid, pid)"));
+    let resources = include_str!("../../../user/crates/newlib-runtime/src/spawn_resources.rs");
+    assert!(resources.contains("spawn_output::publish(process_id, handle, output)"));
     assert!(!source[start..end].contains("close_object_handle("));
     assert!(!source.contains("*pid ="));
 }

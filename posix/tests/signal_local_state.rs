@@ -79,10 +79,10 @@ fn newlib_delivery_uses_service_masks_and_initializes_before_installing_upcalls(
     assert!(delivery.contains(".thread_dequeue_signal_delivery()"));
     assert!(!delivery.contains("signal_mask.load"));
     let fork = runtime
-        .split("fn clone_registered_process(")
+        .split("fn clone_registered_process_owned(")
         .nth(1)
         .unwrap()
-        .split("fn ")
+        .split("struct CloneStartup")
         .next()
         .unwrap();
     assert!(fork.find("SIGNAL_MASK_QUERY").unwrap() < fork.find("capture_native").unwrap());
