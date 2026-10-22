@@ -1,5 +1,6 @@
 //! Service-owned fork preparation. Tokens are scoped to authenticated process
-//! identity; they neither identify native objects nor grant native authority.
+//! identity and observed image revision; they neither identify native objects
+//! nor grant native authority.
 use super::*;
 
 const MAX_PREPARED_FORKS: usize = 1024;
@@ -31,6 +32,7 @@ pub fn validate_fork_child(
 #[derive(Debug)]
 pub(super) struct ForkState<H: Copy> {
     owner: u64,
+    image_revision: u64,
     session: Session,
     directories: Option<SessionDirectories<H>>,
     group: u64,
@@ -68,6 +70,14 @@ impl<H: Copy> PosixService<H> {
         if !self.processes.contains_key(&owner) {
             return Err(protocol::STATUS_ESRCH);
         }
+        let image_revision = self
+            .process_wait_states
+            .get(&owner)
+            .ok_or(protocol::STATUS_ESRCH)?
+            .observed_image_revision;
+        // Captures from an earlier image can never commit again. Reclaim them
+        // before quota/NPROC admission so they cannot block valid new forks.
+        self.reap_invalidated_forks(filesystem);
         if self.tree_teardown_owns(owner)
             || self
                 .process_wait_states
@@ -133,6 +143,7 @@ impl<H: Copy> PosixService<H> {
             token,
             ForkState {
                 owner,
+                image_revision,
                 session,
                 directories,
                 group,
@@ -169,10 +180,9 @@ impl<H: Copy> PosixService<H> {
                 .get(process)
                 .is_some_and(|other| other.real_uid == session.real_uid)
         });
-        let prepared = self
-            .prepared_forks
-            .iter()
-            .filter(|(_, state)| state.session.real_uid == session.real_uid);
+        let prepared = self.prepared_forks.iter().filter(|(_, state)| {
+            state.session.real_uid == session.real_uid && self.fork_matches_image(state)
+        });
         let count = processes.count() as u128 + prepared.count() as u128;
         if count >= u128::from(limit) {
             return Err(protocol::STATUS_EAGAIN);
@@ -206,8 +216,9 @@ impl<H: Copy> PosixService<H> {
     }
 
     /// Install exactly the prepared policy on an authenticated, stopped native
-    /// child. The caller validates the ProcessHandle and retains it on failure;
-    /// a failed commit keeps the preparation available for retry or cancel.
+    /// child. The caller validates the ProcessHandle and retains it on failure.
+    /// Failure does not consume the preparation: a current-image capture may
+    /// be retried, while a stale capture can only be canceled or reclaimed.
     pub fn commit_fork(
         &mut self,
         peer: PeerIdentity,
@@ -215,6 +226,11 @@ impl<H: Copy> PosixService<H> {
         process: AuthenticatedProcess<H>,
     ) -> Result<(), i32> {
         let index = self.fork_index(peer, token)?;
+        if !self.fork_matches_image(&self.prepared_forks[index].1) {
+            // Preserve ownership for cancellation or asynchronous reclamation;
+            // never install an old image's credentials or signal dispositions.
+            return Err(protocol::STATUS_ESRCH);
+        }
         if self.tree_teardown_owns(peer.process_id) {
             return Err(protocol::STATUS_EAGAIN);
         }
@@ -262,15 +278,15 @@ impl<H: Copy> PosixService<H> {
         Ok(())
     }
 
-    /// Reclaim abandoned preparations only after the native owner is confirmed
-    /// exited. A status failure never revokes a still-live owner's references.
+    /// Reclaim preparations invalidated by an observed image change, or after
+    /// native owner exit. A status failure never revokes a valid live capture.
     pub fn reap_abandoned_forks<F: FilesystemBackend<H>, P: ProcessBackend<H>>(
         &mut self,
         filesystem: &mut F,
         processes: &mut P,
     ) -> Result<usize, i32> {
         let mut index = 0;
-        let mut reaped = 0;
+        let mut reaped = self.reap_invalidated_forks(filesystem);
         while index < self.prepared_forks.len() {
             let owner = self.prepared_forks[index].1.owner;
             let handle = *self.processes.get(&owner).ok_or(protocol::STATUS_ESRCH)?;
@@ -282,6 +298,26 @@ impl<H: Copy> PosixService<H> {
             }
         }
         Ok(reaped)
+    }
+
+    fn fork_matches_image(&self, state: &ForkState<H>) -> bool {
+        self.process_wait_states
+            .get(&state.owner)
+            .is_some_and(|owner| owner.observed_image_revision == state.image_revision)
+    }
+
+    fn reap_invalidated_forks<F: FilesystemBackend<H>>(&mut self, filesystem: &mut F) -> usize {
+        let mut index = 0;
+        let mut reaped = 0;
+        while index < self.prepared_forks.len() {
+            if self.fork_matches_image(&self.prepared_forks[index].1) {
+                index += 1;
+            } else {
+                self.prepared_forks.swap_remove(index).1.release(filesystem);
+                reaped += 1;
+            }
+        }
+        reaped
     }
 
     pub(super) fn cancel_owned_forks<F: FilesystemBackend<H>>(

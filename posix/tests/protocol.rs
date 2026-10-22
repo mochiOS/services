@@ -27,6 +27,9 @@ mod image_credentials;
 #[path = "support/image_signal_state.rs"]
 mod image_signal_state;
 
+#[path = "support/fork_image_state.rs"]
+mod fork_image_state;
+
 #[path = "support/alarm.rs"]
 mod alarm;
 
