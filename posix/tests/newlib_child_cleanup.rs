@@ -134,10 +134,7 @@ fn failure_before_registration_needs_native_exit_but_no_posix_rpc() {
 fn runtime_uses_retained_cleanup_for_all_failed_clone_and_spawn_branches() {
     let source = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
     let start = source.find("fn clone_registered_process()").unwrap();
-    let end = source[start..]
-        .find("struct CloneStartup")
-        .unwrap()
-        + start;
+    let end = source[start..].find("struct CloneStartup").unwrap() + start;
     let clone = &source[start..end];
     assert!(clone.contains("registration_attempted = true;"));
     assert!(clone.contains("cleanup_failed_child(u64::from(handle), registration_attempted)"));
@@ -154,7 +151,11 @@ fn runtime_uses_retained_cleanup_for_all_failed_clone_and_spawn_branches() {
     let resources = include_str!("../../../user/crates/newlib-runtime/src/spawn_resources.rs");
     assert!(resources.contains("impl Drop for Resources"));
     assert!(resources.contains("cleanup_failed_child(handle, registered)"));
-    assert!(resources.contains("clone_registered_process_owned(self.startup.as_mut().ok_or(EIO)?"));
+    assert!(resources.contains("clone_registered_process_owned("));
+    assert!(resources.contains("self.startup.as_mut().ok_or(EIO)?"));
+    assert!(resources.contains("&mut self.preparation"));
+    assert!(resources.contains("drop(self.preparation.take())"));
+    assert!(clone.contains("policy.insert(fork_policy::Preparation::new(client)?)"));
     assert!(clone.contains("track_child(Some((handle, false)))"));
     assert!(clone.contains("track_child(Some((u64::from(handle), true)))"));
     assert!(clone.contains("track_child(None)"));

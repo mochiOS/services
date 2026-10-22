@@ -81,10 +81,14 @@ fn runtime_acknowledges_only_after_initialization_and_reaps_failed_children() {
         .split("struct CloneStartup")
         .next()
         .unwrap();
-    assert!(
-        clone.find("CloneStartup::new()?").unwrap()
-            < clone.find("snapshot::capture_native(").unwrap()
-    );
+    assert!(clone.contains("spawn_resources::fork()"));
+    let resources = include_str!("../../../user/crates/newlib-runtime/src/spawn_resources.rs");
+    let prepare = resources.split("fn for_fork()").nth(1).unwrap();
+    let prepare = prepare.split("fn new()").next().unwrap();
+    assert!(prepare.contains("startup: Some(CloneStartup::new()?)"));
+    let fork = resources.split("pub(super) fn fork()").nth(1).unwrap();
+    assert!(fork.contains("io_resources::with(Resources::for_fork,"));
+    assert!(fork.contains("resources.clone_registered()?"));
     assert!(
         clone
             .find("setup_signal_delivery(thread_control, None)")
