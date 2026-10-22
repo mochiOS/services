@@ -1092,7 +1092,7 @@ impl<H: Copy> PosixService<H> {
     }
 
     // The parent and its native Handle come only from service-owned state.
-    // Refresh before deciding whether an exit status may be discarded.
+    // Refresh before applying image-local child notification/exit policy.
     fn refresh_parent_image<P: ProcessBackend<H>>(
         &mut self,
         child_id: u64,
@@ -3297,11 +3297,13 @@ impl<H: Copy> PosixService<H> {
             return Err(protocol::STATUS_ESRCH);
         }
         if delivery.token == 0
-            || !self
+            || self
                 .process_wait_states
-                .get_mut(&peer.process_id)
+                .get(&peer.process_id)
                 .ok_or(protocol::STATUS_ESRCH)?
-                .consume_delivery(delivery)
+                .deliveries
+                .get(&delivery.token)
+                .map(|owner| owner.signal) != Some(signal)
         {
             return Err(protocol::STATUS_EAGAIN);
         }
@@ -3320,10 +3322,24 @@ impl<H: Copy> PosixService<H> {
                 .get(&peer.process_id)
                 .ok_or(protocol::STATUS_ESRCH)?;
             if !self.non_orphaned_groups().contains(&(session, group)) {
+                self.process_wait_states
+                    .get_mut(&peer.process_id)
+                    .unwrap()
+                    .consume_delivery(delivery);
                 return Ok(());
             }
         }
+        // The parent may have committed exec without sending a new request.
+        // Observe it before consuming the token or suspending the child, so a
+        // failed observation leaves this authenticated stop retryable.
+        self.refresh_parent_image(peer.process_id, processes)?;
         processes.suspend(process)?;
+        // Only commit delivery after the native operation succeeds. The
+        // service serializes this transition, so the validated token is stable.
+        self.process_wait_states
+            .get_mut(&peer.process_id)
+            .unwrap()
+            .consume_delivery(delivery);
         let stopped = self
             .process_wait_states
             .get_mut(&peer.process_id)

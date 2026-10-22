@@ -33,6 +33,9 @@ mod fork_image_state;
 #[path = "support/child_exit_image.rs"]
 mod child_exit_image;
 
+#[path = "support/child_stop_image.rs"]
+mod child_stop_image;
+
 #[path = "support/alarm.rs"]
 mod alarm;
 
@@ -4701,6 +4704,9 @@ fn nocldstop_is_inherited_and_suppresses_only_stop_continue_notifications() {
     let mut processes = RecordingProcesses::default();
     processes.states.insert(641, ProcessLifecycle::Running);
     processes.states.insert(642, ProcessLifecycle::Running);
+    processes
+        .identities
+        .extend([(641, child.process_id), (642, grandchild.process_id)]);
 
     for (sender, target, handle) in [
         (parent, child, 641),
