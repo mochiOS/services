@@ -354,7 +354,7 @@ fn getcwd_uses_retained_anchors_without_holding_state_and_propagates_backend_err
 #[test]
 fn runtime_observes_native_image_before_installing_a_prepared_directory() {
     assert!(posix_service::path_query::supports(protocol::OP_GETCWD));
-    assert!(!posix_service::directory_request::supports(
+    assert!(posix_service::directory_request::supports(
         protocol::OP_FCHDIR
     ));
     // Structural wiring only; actual native image/IPC behavior remains unverified.

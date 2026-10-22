@@ -3940,27 +3940,8 @@ impl<H: Copy> PosixService<H> {
                     Err(status) => object_error(header.request_id, status),
                 }
             }
-            protocol::OP_CHDIR_AT | protocol::OP_CHROOT_AT => {
+            protocol::OP_CHDIR_AT | protocol::OP_CHROOT_AT | protocol::OP_FCHDIR => {
                 directory_request::dispatch(self, peer, header, payload, handles, filesystem)
-            }
-            protocol::OP_FCHDIR => {
-                if !payload.is_empty() || handles.len() != 1 {
-                    return object_error(header.request_id, STATUS_EINVAL);
-                }
-                let directory = handles[0];
-                let status = match filesystem.fstat(directory) {
-                    Ok(status) => status,
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                if status.mode & 0o170000 != 0o040000 {
-                    return object_error(header.request_id, -20);
-                }
-                let retained = match filesystem.retain_object(directory) {
-                    Ok(retained) => retained,
-                    Err(status) => return object_error(header.request_id, status),
-                };
-                self.replace_cwd(peer.process_id, retained, filesystem);
-                object_error(header.request_id, protocol::STATUS_OK)
             }
             protocol::OP_FTRUNCATE => {
                 if handles.len() != 1 {

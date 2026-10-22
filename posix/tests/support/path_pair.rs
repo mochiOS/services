@@ -183,7 +183,9 @@ fn concurrent_cwd_change_cannot_mix_old_and_new_path_anchors() {
                     &[],
                     &[AttachedObject {
                         handle: 58,
-                        rights: 0x81,
+                        rights: mnu_abi::HANDLE_RIGHT_DUPLICATE
+                            | mnu_abi::HANDLE_RIGHT_TRANSFER
+                            | 0x81,
                     }],
                     &mut other_fs,
                 );

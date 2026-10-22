@@ -102,6 +102,9 @@ mod path_pair;
 #[path = "support/directory_request.rs"]
 mod directory_request;
 
+#[path = "support/fchdir_request.rs"]
+mod fchdir_request;
+
 #[path = "support/file_time_protocol.rs"]
 mod file_time_protocol;
 
@@ -1392,7 +1395,7 @@ impl ObjectTransport for DirectoryChangeTransport {
 fn client_transfers_directory_handles_for_chdir_chroot_and_fchdir() {
     let directory = ObjectHandleAttachment {
         handle: 77,
-        rights: 0x4000_0000_0000_0081,
+        rights: mnu_abi::HANDLE_RIGHT_DUPLICATE | mnu_abi::HANDLE_RIGHT_TRANSFER | 0x81,
     };
     let client = Client::new(DirectoryChangeTransport);
     client
@@ -1710,6 +1713,9 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
     }
 
     fn fstat(&mut self, file: AttachedObject<u32>) -> Result<protocol::FileStatus, i32> {
+        if let Some(hook) = &mut self.query_hook {
+            hook()?;
+        }
         self.stat_file = Some(file);
         let mut status = sample_status();
         if let Some(mode) = self.stat_mode {
@@ -2068,7 +2074,7 @@ fn prepared_fork_keeps_policy_and_directory_objects_from_preparation_not_commit(
     filesystem.stat_mode = Some(0o040755);
     assert_eq!(service.handle_objects(
         owner, protocol::Header { opcode: protocol::OP_FCHDIR, ..Default::default() },
-        &[], &[AttachedObject { handle: 58, rights: 0x4000_0000_0000_0081 }], &mut filesystem,
+        &[], &[AttachedObject { handle: 58, rights: mnu_abi::HANDLE_RIGHT_DUPLICATE | mnu_abi::HANDLE_RIGHT_TRANSFER | 0x81 }], &mut filesystem,
     ).response.header.status, 0);
     assert_eq!(service.session_directories(402).unwrap().cwd.handle, 1058);
     protocol::encode_resource_limit_request(
@@ -8592,7 +8598,7 @@ fn fchdir_retains_a_directory_handle_and_rejects_regular_files() {
     );
     let directory = AttachedObject {
         handle: 58,
-        rights: 0x4000_0000_0000_0081,
+        rights: mnu_abi::HANDLE_RIGHT_DUPLICATE | mnu_abi::HANDLE_RIGHT_TRANSFER | 0x81,
     };
     let mut filesystem = RecordingFilesystem {
         stat_mode: Some(0o040755),
