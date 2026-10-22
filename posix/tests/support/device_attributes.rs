@@ -305,3 +305,126 @@ fn removed_open_inode_can_change_without_touching_replacement_and_close_retires_
         );
     }
 }
+
+#[test]
+fn pathname_updates_share_fd_ownership_group_rules_and_atomic_clock_failure() {
+    let f = Fixture::new();
+    let (mut service, parent, file) = fixture(&f);
+    for relative in [false, true] {
+        configure(
+            &mut service,
+            parent,
+            wire::OP_DEVICE_NODE_SET_ATTRIBUTES,
+            0o660,
+            501,
+            20,
+        );
+        let (path, anchors, chmod_flags, chown_flags) = if relative {
+            (
+                b"null".as_slice(),
+                PathAnchors {
+                    root_open_id: Some(parent),
+                    base_open_id: Some(parent),
+                },
+                wire::CHMOD_AT_ROOT_ATTACHED | wire::CHMOD_AT_BASE_ATTACHED,
+                wire::CHOWN_AT_ROOT_ATTACHED | wire::CHOWN_AT_BASE_ATTACHED,
+            )
+        } else {
+            (b"/dev/null".as_slice(), PathAnchors::default(), 0, 0)
+        };
+        let chmod = wire::Header {
+            mode: 0o2660,
+            flags: chmod_flags,
+            ..Default::default()
+        };
+        service
+            .chmod_at(chmod, path, anchors, credentials(501, 30, &[]))
+            .unwrap();
+        assert_eq!(status(&service, file).mode & 0o7777, 0o660);
+        service
+            .chmod_at(chmod, path, anchors, credentials(501, 30, &[20]))
+            .unwrap();
+        assert_eq!(status(&service, file).mode & 0o7777, 0o2660);
+        let chown_request = wire::Header {
+            node_id: (30u64 << 32) | u64::from(u32::MAX),
+            flags: chown_flags,
+            ..Default::default()
+        };
+        let before = status(&service, file);
+        assert!(matches!(
+            service.chown_at(chown_request, path, anchors, credentials(501, 20, &[])),
+            Err(1)
+        ));
+        assert_eq!(status(&service, file), before);
+        service
+            .chown_at(chown_request, path, anchors, credentials(501, 20, &[30]))
+            .unwrap();
+        assert_eq!(
+            (
+                status(&service, file).gid,
+                status(&service, file).mode & 0o7777
+            ),
+            (30, 0o660)
+        );
+        let before = status(&service, file);
+        CLOCK_ERROR.set(5);
+        assert!(matches!(
+            service.chmod_at(chmod, path, anchors, credentials(501, 30, &[])),
+            Err(5)
+        ));
+        assert_eq!(status(&service, file), before);
+        CLOCK_ERROR.set(0);
+        chown(&mut service, file, 999, 99, credentials(0, 0, &[])).unwrap();
+        let before = status(&service, file);
+        assert!(matches!(
+            service.chmod_at(chmod, path, anchors, credentials(501, 30, &[])),
+            Err(1)
+        ));
+        assert_eq!(status(&service, file), before);
+    }
+}
+
+#[test]
+fn pathname_metadata_mutations_cannot_escape_a_retained_device_root() {
+    let f = Fixture::new();
+    let (mut service, parent, file) = fixture(&f);
+    let anchors = PathAnchors {
+        root_open_id: Some(parent),
+        base_open_id: Some(parent),
+    };
+    let chmod = wire::Header {
+        mode: 0o600,
+        flags: wire::CHMOD_AT_ROOT_ATTACHED | wire::CHMOD_AT_BASE_ATTACHED,
+        ..Default::default()
+    };
+    service
+        .chmod_at(chmod, b"../../null", anchors, credentials(501, 20, &[]))
+        .unwrap();
+    assert_eq!(status(&service, file).mode & 0o7777, 0o600);
+    for path in [b"../../file".as_slice(), b"/file"] {
+        assert!(matches!(
+            service.chmod_at(chmod, path, anchors, credentials(0, 0, &[])),
+            Err(2)
+        ));
+        assert!(matches!(
+            service.chown_at(
+                wire::Header {
+                    node_id: 0,
+                    flags: wire::CHOWN_AT_ROOT_ATTACHED | wire::CHOWN_AT_BASE_ATTACHED,
+                    ..Default::default()
+                },
+                path,
+                anchors,
+                credentials(0, 0, &[])
+            ),
+            Err(2)
+        ));
+    }
+    let before = status(&service, file);
+    service.provider_close(parent).unwrap();
+    assert!(matches!(
+        service.chmod_at(chmod, b"null", anchors, credentials(0, 0, &[])),
+        Err(9)
+    ));
+    assert_eq!(status(&service, file), before);
+}

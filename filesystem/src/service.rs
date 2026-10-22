@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use self::device_operations::OperationTarget;
 use crate::namespace::{Namespace, Node};
 use crate::open_table::{DeviceBacking, DeviceOpen, DirectoryOpen, OpenTable};
 use crate::path_walk;
@@ -1162,13 +1163,22 @@ impl FilesystemService {
         let uid = credentials.effective_uid;
         let gid = credentials.effective_gid;
         let groups = credentials.supplementary_groups();
-        let (inode, filesystem, volume) = self.resolve_disk_operation_inode(
+        let (inode, filesystem, volume) = match self.resolve_operation_target(
             payload,
             anchors,
             FollowSymlinks::All,
             credentials,
-            |_| EROFS,
-        )?;
+        )? {
+            OperationTarget::Disk(inode, filesystem, volume) => (inode, filesystem, volume),
+            OperationTarget::Device(node) => {
+                self.change_device_attributes(
+                    &node,
+                    crate::devfs::AttributeChange::Mode(request.mode as u16),
+                    credentials,
+                )?;
+                return Ok(self.success(request));
+            }
+        };
         let metadata = inode.metadata();
         if uid != 0 && uid != metadata.uid() {
             return Err(EPERM);
@@ -1209,13 +1219,25 @@ impl FilesystemService {
         } else {
             FollowSymlinks::All
         };
-        let (inode, filesystem, volume) = self.resolve_disk_operation_inode(
+        let (inode, filesystem, volume) = match self.resolve_operation_target(
             payload,
             anchors,
             follow,
             credentials,
-            |_| EROFS,
-        )?;
+        )? {
+            OperationTarget::Disk(inode, filesystem, volume) => (inode, filesystem, volume),
+            OperationTarget::Device(node) => {
+                self.change_device_attributes(
+                    &node,
+                    crate::devfs::AttributeChange::Owner {
+                        uid: requested_uid,
+                        gid: requested_gid,
+                    },
+                    credentials,
+                )?;
+                return Ok(self.success(request));
+            }
+        };
         let metadata = inode.metadata();
         if effective_uid != 0 {
             if effective_uid != metadata.uid()
@@ -3480,15 +3502,10 @@ impl FilesystemService {
         }
         if let Some(open) = self.opens.device(open_id) {
             let node = open.node.clone();
-            self.namespace.as_mut().ok_or(EIO)?.change_device_attributes(
+            self.change_device_attributes(
                 &node,
                 crate::devfs::AttributeChange::Mode(request.mode as u16),
-                path_walk::Credentials {
-                    uid: credentials.effective_uid,
-                    gid: credentials.effective_gid,
-                    groups: credentials.supplementary_groups(),
-                },
-                self.clock,
+                credentials,
             )?;
             return Ok(self.success(request));
         }
@@ -3525,18 +3542,13 @@ impl FilesystemService {
         }
         if let Some(open) = self.opens.device(open_id) {
             let node = open.node.clone();
-            self.namespace.as_mut().ok_or(EIO)?.change_device_attributes(
+            self.change_device_attributes(
                 &node,
                 crate::devfs::AttributeChange::Owner {
                     uid: request.node_id as u32,
                     gid: (request.node_id >> 32) as u32,
                 },
-                path_walk::Credentials {
-                    uid: credentials.effective_uid,
-                    gid: credentials.effective_gid,
-                    groups: credentials.supplementary_groups(),
-                },
-                self.clock,
+                credentials,
             )?;
             return Ok(self.success(request));
         }

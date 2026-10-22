@@ -2,6 +2,11 @@
 
 use super::*;
 
+pub(super) enum OperationTarget {
+    Device(Node),
+    Disk(Inode, Ext4, u32),
+}
+
 impl FilesystemService {
     pub(crate) fn register_external_device(
         &mut self,
@@ -120,6 +125,24 @@ impl FilesystemService {
         credentials: protocol::Credentials,
         device_error: fn(u32) -> i32,
     ) -> Result<(Inode, Ext4, u32), i32> {
+        match self.resolve_operation_target(path, anchors, follow, credentials)? {
+            OperationTarget::Disk(inode, filesystem, volume) => Ok((inode, filesystem, volume)),
+            OperationTarget::Device(node) => {
+                let namespace = self.namespace.as_ref().ok_or(EIO)?;
+                Err(device_error(namespace.device_status(&node)?.kind))
+            }
+        }
+    }
+
+    /// Resolve once and retain the resulting identity through the mutation.
+    /// Callers must not look up the same pathname again after authorization.
+    pub(super) fn resolve_operation_target(
+        &self,
+        path: &[u8],
+        anchors: PathAnchors,
+        follow: FollowSymlinks,
+        credentials: protocol::Credentials,
+    ) -> Result<OperationTarget, i32> {
         match self.resolve_namespace_path(
             path,
             anchors,
@@ -131,22 +154,42 @@ impl FilesystemService {
             Some(path_walk::Resolution::Found { inode, .. }) => {
                 let namespace = self.namespace.as_ref().ok_or(EIO)?;
                 if inode.device_node().is_some() {
-                    return Err(device_error(namespace.device_status(&inode)?.kind));
+                    return Ok(OperationTarget::Device(inode));
                 }
                 let filesystem = namespace.filesystem(&inode)?.clone();
                 let volume = u32::try_from(inode.id().volume).map_err(|_| EIO)?;
-                Ok((inode.into_inode()?, filesystem, volume))
+                Ok(OperationTarget::Disk(inode.into_inode()?, filesystem, volume))
             }
             Some(path_walk::Resolution::Missing { .. }) => Err(ENOENT),
-            None => self.resolve_scoped_inode(
-                path,
-                anchors,
-                follow,
-                credentials.effective_uid,
-                credentials.effective_gid,
-                credentials.supplementary_groups(),
-            ),
+            None => self
+                .resolve_scoped_inode(
+                    path,
+                    anchors,
+                    follow,
+                    credentials.effective_uid,
+                    credentials.effective_gid,
+                    credentials.supplementary_groups(),
+                )
+                .map(|(inode, filesystem, volume)| OperationTarget::Disk(inode, filesystem, volume)),
         }
+    }
+
+    pub(super) fn change_device_attributes(
+        &mut self,
+        node: &Node,
+        change: crate::devfs::AttributeChange,
+        credentials: protocol::Credentials,
+    ) -> Result<(), i32> {
+        self.namespace.as_mut().ok_or(EIO)?.change_device_attributes(
+            node,
+            change,
+            path_walk::Credentials {
+                uid: credentials.effective_uid,
+                gid: credentials.effective_gid,
+                groups: credentials.supplementary_groups(),
+            },
+            self.clock,
+        )
     }
 
     pub(super) fn resolve_namespace_path(

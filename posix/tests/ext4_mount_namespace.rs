@@ -886,27 +886,25 @@ fn device_path_operations_preserve_existing_missing_and_wrong_type_errors() {
         )
         .unwrap();
     for path in [b"/dev".as_slice(), b"/dev/null"] {
-        assert!(matches!(
-            service.chmod_at(
+        service
+            .chmod_at(
                 protocol::Header {
                     mode: 0o600,
                     ..protocol::Header::default()
                 },
                 path,
                 PathAnchors::default(),
-                root_credentials()
-            ),
-            Err(30)
-        ));
-        assert!(matches!(
-            service.chown_at(
+                root_credentials(),
+            )
+            .unwrap();
+        service
+            .chown_at(
                 protocol::Header::default(),
                 path,
                 PathAnchors::default(),
-                root_credentials()
-            ),
-            Err(30)
-        ));
+                root_credentials(),
+            )
+            .unwrap();
         assert!(matches!(
             service.readlink_at(
                 protocol::Header::default(),
@@ -993,7 +991,7 @@ fn device_path_operations_preserve_existing_missing_and_wrong_type_errors() {
 }
 
 #[test]
-fn device_metadata_errors_follow_nodes_but_nofollow_retains_disk_symlink_identity() {
+fn device_metadata_updates_follow_nodes_but_nofollow_retains_disk_symlink_identity() {
     let fixture = Fixture::new();
     let data = fixture.volume("device-path-symlink");
     let mut directory =
@@ -1014,24 +1012,28 @@ fn device_metadata_errors_follow_nodes_but_nofollow_retains_disk_symlink_identit
             filesystem_service::devfs::DeviceFilesystem::default(),
         )
         .unwrap();
-    assert!(matches!(
-        service.chmod_at(
-            protocol::Header::default(),
+    service
+        .chmod_at(
+            protocol::Header {
+                mode: 0o640,
+                ..Default::default()
+            },
             b"/alias",
             PathAnchors::default(),
-            root_credentials()
-        ),
-        Err(30)
-    ));
-    assert!(matches!(
-        service.chown_at(
-            protocol::Header::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    service
+        .chown_at(
+            protocol::Header {
+                node_id: (30u64 << 32) | 700,
+                ..Default::default()
+            },
             b"/alias",
             PathAnchors::default(),
-            root_credentials()
-        ),
-        Err(30)
-    ));
+            root_credentials(),
+        )
+        .unwrap();
     assert!(matches!(
         service.truncate_at(
             protocol::Header::default(),
@@ -1088,7 +1090,8 @@ fn device_metadata_errors_follow_nodes_but_nofollow_retains_disk_symlink_identit
         protocol::decode_node_status(&alias.payload).unwrap().uid,
         1001
     );
-    assert_eq!(protocol::decode_node_status(&null.payload).unwrap().uid, 0);
+    let null = protocol::decode_node_status(&null.payload).unwrap();
+    assert_eq!((null.uid, null.gid, null.mode & 0o7777), (700, 30, 0o640));
 }
 
 #[test]
@@ -1123,10 +1126,9 @@ fn device_path_mutations_keep_root_confinement_and_search_permission_checks() {
         flags: protocol::CHMOD_AT_ROOT_ATTACHED | protocol::CHMOD_AT_BASE_ATTACHED,
         ..protocol::Header::default()
     };
-    assert!(matches!(
-        service.chmod_at(chmod, b"../../null", scoped, root_credentials()),
-        Err(30)
-    ));
+    service
+        .chmod_at(chmod, b"../../null", scoped, root_credentials())
+        .unwrap();
     assert!(matches!(
         service.chmod_at(
             chmod,
