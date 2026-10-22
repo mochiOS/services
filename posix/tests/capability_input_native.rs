@@ -57,7 +57,7 @@ mod config {
     pub fn kernel()->Config{Config{capability:Limits{max_name_len:32}}}
 }
 #[derive(Clone,Copy)]enum Capability {MemoryPhysMap,Other}
-impl Capability {fn from_str(s:&str)->Option<Self>{match s{"memory.phys.map"=>Some(Self::MemoryPhysMap),"test.read"=>Some(Self::Other),_=>None}}}
+impl Capability {fn from_str(s:&str)->Option<Self>{match s{"memory.phys.map"=>Some(Self::MemoryPhysMap),"test.read"=>Some(Self::Other),_=>None}}fn valid_name(name:&str)->bool{valid_capability_name(name)}}
 #[derive(Clone,Copy)]struct KernelAuthority;
 enum KernelCapability {PhysMap}
 fn parse_kernel_authority_spec(s:&str)->Option<KernelAuthority>{(s=="kernel.phys.map").then_some(KernelAuthority)}
@@ -74,6 +74,11 @@ mod syscall {pub mod ipc {
 }}
 fn current_process()->Option<u64>{CONTEXT.get().then_some(23)}
 "#);
+    program.push_str(probe::between(
+        include_str!("../../../core/src/capability/mod.rs"),
+        "fn valid_capability_name(",
+        "fn builtin_capability(",
+    ));
     program.push_str(probe::between(
         source,
         "#[derive(Clone, Copy)]",
@@ -111,6 +116,10 @@ fn main(){
             reset();COPY_ERROR.set(Some(error));assert_eq!(operation(name.as_ptr() as u64,9),error.into_raw());assert_eq!(COPIES.get(),1);assert_eq!(LOOKUPS.get(),0);
         }
         for invalid in [b"unknown!!" as &[u8],&[0xff]] {reset();assert_eq!(operation(invalid.as_ptr() as u64,invalid.len() as u64),Error::InvalidArgument.into_raw());assert_eq!(LOOKUPS.get(),0);}
+        for absent in [b"fs.read.user" as &[u8],b"fs.read.all",b"not.registered"] {
+            reset();assert_eq!(operation(absent.as_ptr()as u64,absent.len()as u64),0);
+            assert_eq!(LOOKUPS.get(),0);assert_eq!(ALLOCS.get(),1);assert_eq!(COPIES.get(),1);
+        }
     }
     reset();assert_eq!(check_thread_capability(0,1,9),Error::InvalidArgument.into_raw());assert_eq!(ALLOCS.get(),0);
     reset();CONTEXT.set(false);assert_eq!(query_bytes(name),Error::NotReady.into_raw());assert_eq!(LOOKUPS.get(),0);
