@@ -33,6 +33,7 @@ const SUPPORTED_LOCAL_FLAGS: u32 = posix_protocol::TERMINAL_LFLAG_ICANON
     | posix_protocol::TERMINAL_LFLAG_ECHOK
     | posix_protocol::TERMINAL_LFLAG_ECHONL
     | posix_protocol::TERMINAL_LFLAG_TOSTOP
+    | posix_protocol::TERMINAL_LFLAG_IEXTEN
     | posix_protocol::TERMINAL_LFLAG_NOFLSH;
 
 fn terminal_attributes_supported(attributes: posix_protocol::TerminalAttributes) -> bool {
@@ -98,6 +99,7 @@ struct PseudoTerminal {
     window_size: posix_protocol::TerminalWindowSize,
     output_stopped: bool,
     output_manually_stopped: bool,
+    literal_next: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -119,6 +121,7 @@ impl PseudoTerminal {
             window_size: posix_protocol::TerminalWindowSize::default(),
             output_stopped: false,
             output_manually_stopped: false,
+            literal_next: false,
         }
     }
 
@@ -284,6 +287,7 @@ impl PseudoTerminal {
         self.input.clear();
         self.input_records.clear();
         self.canonical_input.clear();
+        self.literal_next = false;
         self.output.clear();
     }
 
@@ -295,6 +299,30 @@ impl PseudoTerminal {
         let mut consumed = 0;
         let mut signals = Vec::new();
         for source in bytes.iter().copied() {
+            if self.literal_next {
+                // Quote one byte across provider requests. ISTRIP still
+                // applies, but no CR/NL mapping, signal, flow, or delimiter
+                // recognition does. Retain the quote until the byte commits.
+                let byte = if self.attributes.input_flags
+                    & posix_protocol::TERMINAL_IFLAG_ISTRIP != 0
+                {
+                    source & 0x7f
+                } else {
+                    source
+                };
+                let single = [byte];
+                let echo: &[u8] = if self.should_echo(byte) { &single } else { b"" };
+                if !self.has_input_capacity() || !self.can_append_output(echo) {
+                    break;
+                }
+                self.canonical_input.push_back(byte);
+                for byte in echo.iter().copied() {
+                    self.append_output(byte);
+                }
+                self.literal_next = false;
+                consumed += 1;
+                continue;
+            }
             let Some(byte) = self.transformed_input_byte(source) else {
                 consumed += 1;
                 continue;
@@ -322,6 +350,31 @@ impl PseudoTerminal {
                 }
             }
             if canonical {
+                // IEXTEN currently enables literal-next; word erase/reprint
+                // and output-discard remain unimplemented extension functions.
+                let literal =
+                    self.attributes.control_characters[posix_protocol::TERMINAL_CC_VLNEXT];
+                if self.attributes.local_flags & posix_protocol::TERMINAL_LFLAG_IEXTEN != 0
+                    && literal != 0
+                    && byte == literal
+                {
+                    let echo: &[u8] = if self.attributes.local_flags
+                        & posix_protocol::TERMINAL_LFLAG_ECHO != 0
+                    {
+                        b"^\x08"
+                    } else {
+                        b""
+                    };
+                    if !self.has_input_capacity() || !self.can_append_output(echo) {
+                        break;
+                    }
+                    for byte in echo.iter().copied() {
+                        self.append_output(byte);
+                    }
+                    self.literal_next = true;
+                    consumed += 1;
+                    continue;
+                }
                 let erase = self.attributes.control_characters[posix_protocol::TERMINAL_CC_VERASE];
                 let kill = self.attributes.control_characters[posix_protocol::TERMINAL_CC_VKILL];
                 let eof = self.attributes.control_characters[posix_protocol::TERMINAL_CC_VEOF];
@@ -539,6 +592,9 @@ impl PtyManager {
             terminal.attributes.local_flags & posix_protocol::TERMINAL_LFLAG_ICANON != 0;
         let is_canonical = attributes.local_flags & posix_protocol::TERMINAL_LFLAG_ICANON != 0;
         terminal.attributes = attributes;
+        if !is_canonical || attributes.local_flags & posix_protocol::TERMINAL_LFLAG_IEXTEN == 0 {
+            terminal.literal_next = false;
+        }
         if attributes.input_flags & posix_protocol::TERMINAL_IFLAG_IXON == 0 {
             terminal.output_stopped = false;
         }
@@ -573,6 +629,7 @@ impl PtyManager {
                 terminal.input.clear();
                 terminal.input_records.clear();
                 terminal.canonical_input.clear();
+                terminal.literal_next = false;
             }
         }
         self.set_attributes(object_id, attributes)
@@ -597,6 +654,7 @@ impl PtyManager {
             terminal.input.clear();
             terminal.input_records.clear();
             terminal.canonical_input.clear();
+            terminal.literal_next = false;
         }
         if flags & posix_protocol::TERMINAL_FLUSH_OUTPUT != 0 {
             terminal.output.clear();
