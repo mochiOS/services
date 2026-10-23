@@ -332,3 +332,36 @@ fn global_preparation_quota_is_bounded_atomic_and_recovers_after_cancellation() 
     );
     service.cancel_record_lock_exec(last, fresh).unwrap();
 }
+
+#[test]
+fn batch_extension_quota_failure_is_atomic_even_if_older_selected_locks_have_been_unlocked() {
+    let (mut service, peers, mut processes) = setup(2);
+    let files: Vec<_> = (1..=posix_service::record_lock::MAX_LOCKS_PER_PROCESS as u64)
+        .map(file)
+        .collect();
+    for &file in &files {
+        lock(&mut service, peers[0], file);
+    }
+    let token = service
+        .prepare_record_lock_exec(peers[0], &files)
+        .unwrap()
+        .unwrap();
+    service
+        .record_locks(peers[0])
+        .unwrap()
+        .release_file(files[0]);
+    let extra = file(10_000);
+    lock(&mut service, peers[0], extra);
+    assert_eq!(
+        service.extend_record_lock_exec(peers[0], token, &[extra]),
+        Err(-37)
+    );
+    processes.images.insert(1, Ok(image(peers[0], 1)));
+    service
+        .refresh_record_lock_execs(&mut processes, None)
+        .unwrap();
+    assert_eq!(owner(&mut service, peers[1], extra), Some(1));
+    for &file in &files {
+        assert_eq!(owner(&mut service, peers[1], file), None);
+    }
+}

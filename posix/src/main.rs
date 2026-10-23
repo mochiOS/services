@@ -245,6 +245,9 @@ fn main() {
                 error
             );
         }
+        if let Err(error) = service.refresh_record_lock_execs(&mut processes, None) {
+            platform::logln!("posix.service: exec lock observation pending errno={}", error);
+        }
         service.release_unused_record_lock_files(&mut filesystem);
         if let Err(error) = service.expire_alarms() {
             if !clock_failure_reported {
@@ -363,6 +366,7 @@ fn main() {
         // a process exit or another RPC. Use the existing native wait deadline.
         let child_notification_deadline = if service.has_deferred_child_notifications()
             || service.process_resume_notification_processes().next().is_some()
+            || service.has_record_lock_execs()
         {
             match platform::time::monotonic_nanoseconds() {
                 Ok(now) => now.saturating_add(10_000_000),
@@ -525,6 +529,15 @@ fn main() {
                         ).map_err(|error| protocol::status::normalize_failure(error.raw()))?;
                         i64::try_from(position).map_err(|_| posix_service::STATUS_EOVERFLOW)
                     },
+                ))
+            } else { None }
+        } else { None };
+        let prepared_lock_exec = if let (Some(_), Some((header, payload)), true, Some(_)) =
+            (peer, decoded, attachments_valid, request_image)
+        {
+            if header.opcode == protocol::OP_RECORD_LOCK_EXEC {
+                Some(posix_service::record_lock_exec_request::inspect(
+                    header, payload, &attachments, &mut filesystem,
                 ))
             } else { None }
         } else { None };
@@ -782,15 +795,30 @@ fn main() {
         let mut retained_handle = None;
         let object_response = match (peer, decoded, attachments_valid) {
             (Some(peer), Some(_), true) if prepared_record_lock.is_some() => {
+                let prepared = prepared_record_lock.unwrap();
+                let validation = request_image.ok_or(protocol::STATUS_EPERM)
+                    .and_then(|image| validate_pending_request_image(
+                        sender, peer, image, &mut service, &mut processes,
+                    )).and_then(|()| {
+                        match prepared.file_key() {
+                            Some(file) => service.refresh_record_lock_execs(&mut processes, Some(file)).map(|_| ()),
+                            None => Ok(()),
+                        }
+                    });
+                let (response, retained) = posix_service::record_lock_request::finish(
+                    &mut service, peer, prepared, validation, &mut filesystem,
+                );
+                retained_handle = retained;
+                Some(response)
+            }
+            (Some(peer), Some(_), true) if prepared_lock_exec.is_some() => {
                 let validation = request_image.ok_or(protocol::STATUS_EPERM)
                     .and_then(|image| validate_pending_request_image(
                         sender, peer, image, &mut service, &mut processes,
                     ));
-                let (response, retained) = posix_service::record_lock_request::finish(
-                    &mut service, peer, prepared_record_lock.unwrap(), validation, &mut filesystem,
-                );
-                retained_handle = retained;
-                Some(response)
+                Some(posix_service::record_lock_exec_request::finish(
+                    &mut service, peer, prepared_lock_exec.unwrap(), validation,
+                ))
             }
             (Some(peer), Some(_), true) if prepared_directory.is_some() => {
                 let validation = request_image

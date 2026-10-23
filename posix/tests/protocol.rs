@@ -51,6 +51,9 @@ mod record_lock_request;
 #[path = "support/record_lock_exec.rs"]
 mod record_lock_exec;
 
+#[path = "support/record_lock_exec_request.rs"]
+mod record_lock_exec_request;
+
 #[path = "support/wait_reply.rs"]
 mod wait_reply;
 
@@ -1456,6 +1459,7 @@ struct RecordingFilesystem {
     roots_opened: usize,
     stat_file: Option<AttachedObject<u32>>,
     stat_mode: Option<u32>,
+    stat_statuses: BTreeMap<u32, Result<protocol::FileStatus, i32>>,
     truncated: Option<(AttachedObject<u32>, u64)>,
     truncate_ceiling: Option<u64>,
     chmod_file: Option<(AttachedObject<u32>, u32, u32, u32)>,
@@ -1781,6 +1785,9 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
             hook()?;
         }
         self.stat_file = Some(file);
+        if let Some(status) = self.stat_statuses.get(&file.handle) {
+            return *status;
+        }
         let mut status = sample_status();
         if let Some(mode) = self.stat_mode {
             status.mode = mode;

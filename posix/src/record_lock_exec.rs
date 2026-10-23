@@ -10,6 +10,15 @@ pub const MAX_PREPARATIONS: usize = 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Token(u64);
 
+impl Token {
+    pub fn from_raw(value: u64) -> Option<Self> {
+        (value != 0).then_some(Self(value))
+    }
+    pub fn as_raw(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Debug)]
 struct Preparation {
     owner: u64,
@@ -61,6 +70,78 @@ impl Preparations {
 }
 
 impl<H: Copy> PosixService<H> {
+    pub fn has_record_lock_execs(&self) -> bool {
+        !self.record_lock_execs.entries.is_empty()
+    }
+
+    /// Called periodically and immediately before a lock operation on `file`.
+    /// A different process must not see stale conflicts after completed exec.
+    /// Metadata failures do not prevent observing independent owners.
+    pub fn refresh_record_lock_execs<P: ProcessBackend<H>>(
+        &mut self,
+        processes: &mut P,
+        file: Option<FileKey>,
+    ) -> Result<usize, i32> {
+        let mut owners = Vec::new();
+        owners
+            .try_reserve(self.record_lock_execs.entries.len())
+            .map_err(|_| -12)?;
+        owners.extend(
+            self.record_lock_execs
+                .entries
+                .iter()
+                .filter(|entry| file.is_none_or(|file| entry.files.contains(&file)))
+                .map(|entry| entry.owner),
+        );
+        let mut completed = 0;
+        let mut failure = None;
+        for owner in owners {
+            let result = self
+                .registered_peer(owner)
+                .ok_or(protocol::STATUS_ESRCH)
+                .and_then(|peer| self.refresh_image_state(peer, processes));
+            match result {
+                Ok(()) => completed += usize::from(!self.record_lock_execs.has_owner(owner)),
+                Err(error) => {
+                    failure.get_or_insert(error);
+                }
+            }
+        }
+        failure.map_or(Ok(completed), Err)
+    }
+
+    /// Atomically append observations from another bounded Handle IPC batch.
+    pub fn extend_record_lock_exec(
+        &mut self,
+        peer: PeerIdentity,
+        token: Token,
+        files: &[FileKey],
+    ) -> Result<(), i32> {
+        self.record_locks(peer)?;
+        let entry = self
+            .record_lock_execs
+            .entries
+            .iter_mut()
+            .find(|entry| entry.owner == peer.process_id && entry.token == token)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let mut added = Vec::new();
+        for &file in files {
+            if self.record_locks.owns_file(peer.process_id, file)
+                && !entry.files.contains(&file)
+                && !added.contains(&file)
+            {
+                if entry.files.len() + added.len() >= record_lock::MAX_LOCKS_PER_PROCESS {
+                    return Err(-37);
+                }
+                added.try_reserve(1).map_err(|_| -37)?;
+                added.push(file);
+            }
+        }
+        entry.files.try_reserve(added.len()).map_err(|_| -37)?;
+        entry.files.extend(added);
+        Ok(())
+    }
+
     /// Internal API after native request admission and FileHandle observation.
     /// `files` is the trusted set of files closed by the proposed image's FD
     /// snapshot. The eventual runtime must serialize lock/FD mutations and

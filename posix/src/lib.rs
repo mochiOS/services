@@ -53,6 +53,7 @@ pub mod process_timer_delivery;
 pub mod timer_callback;
 pub mod record_lock;
 pub mod record_lock_exec;
+pub mod record_lock_exec_request;
 pub mod record_lock_request;
 mod fork_state;
 pub mod resource_policy;
@@ -3790,6 +3791,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_THREAD_CPU_SLEEP
             | protocol::OP_TIMER_THREAD_WAIT
             | protocol::OP_RECORD_LOCK
+            | protocol::OP_RECORD_LOCK_EXEC
             | protocol::OP_TIMER_CREATE_PROCESS_CPU
             | protocol::OP_PROCESS_SPAWNED
             | protocol::OP_PROCESS_SESSION_INFO

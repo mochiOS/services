@@ -32,6 +32,7 @@ static DEFERRED:Cell<bool>=const{Cell::new(false)};
 static DEFERRED_FAILURE:Cell<bool>=const{Cell::new(false)};
 static RESUME:Cell<bool>=const{Cell::new(false)};
 static RESUME_FAILURE:Cell<bool>=const{Cell::new(false)};
+static EXEC_LOCKS:Cell<bool>=const{Cell::new(false)};
 }
 #[macro_export]macro_rules! logln{($($argument:tt)*)=>{crate::LOGS.set(crate::LOGS.get()+1)}}
 pub mod syscall{pub const HANDLE_WAIT_INFINITE:u64=u64::MAX;}
@@ -51,7 +52,8 @@ struct Service {deadline:u64,cpu_sweeps:u32}
 struct Processes {signal_threads:Vec<()>}
 impl Service {
 fn expire_alarms(&mut self)->Result<usize,i32>{if FAIL.get()&1!=0{Err(-5)}else{Ok(0)}}
-fn has_finite_cpu_limits(&self)->bool{!CPU_ONLY.get()&&!PROCESS_TIMERS.get()&&!CPU_SLEEPS.get()}
+fn has_finite_cpu_limits(&self)->bool{!CPU_ONLY.get()&&!PROCESS_TIMERS.get()&&!CPU_SLEEPS.get()&&!EXEC_LOCKS.get()}
+fn has_record_lock_execs(&self)->bool{EXEC_LOCKS.get()}
 fn has_cpu_timers(&self)->bool{CPU_ONLY.get()}
 fn has_observable_process_timers(&self)->bool{PROCESS_TIMERS.get()}
 fn observe_process_timers(&mut self,_:&mut Processes)->Result<usize,i32>{
@@ -183,6 +185,16 @@ assert!(plan(&mut service,&mut reported).1);assert!(RESUME.get());
 FAIL.set(0);RESUME_FAILURE.set(false);CLOCK_CALLS.set(0);
 assert_eq!(plan(&mut service,&mut reported),(2_100_000_000,false));
 assert!(!RESUME.get());assert!(!DEFERRED.get());
+// Prepared exec cleanup alone must keep observation live after a native image
+// replacement, even with no timers, CPU budget, continuation or further RPC.
+EXEC_LOCKS.set(true);FAIL.set(0);CLOCK_CALLS.set(0);
+assert_eq!(plan(&mut service,&mut reported),(2_010_000_000,false));
+FAIL.set(4);CLOCK_CALLS.set(0);
+assert!(plan(&mut service,&mut reported).1);assert!(EXEC_LOCKS.get());
+FAIL.set(0);CLOCK_CALLS.set(0);
+assert_eq!(plan(&mut service,&mut reported),(2_010_000_000,false));
+EXEC_LOCKS.set(false);CLOCK_CALLS.set(0);
+assert_eq!(plan(&mut service,&mut reported),(2_100_000_000,false));
 }
 "#,
     );

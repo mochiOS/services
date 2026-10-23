@@ -17,6 +17,24 @@ fn main() {
         fn fork() -> i32;
         fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
         fn _exit(code: i32) -> !;
+        fn pipe(fds: *mut i32) -> i32;
+        fn read(fd: i32, bytes: *mut u8, length: usize) -> isize;
+        #[link_name = "write"]
+        fn pipe_write(fd: i32, bytes: *const u8, length: usize) -> isize;
+        fn close(fd: i32) -> i32;
+        fn execv(path: *const i8, argv: *const *const i8) -> i32;
+    }
+    let arguments: Vec<_> = std::env::args().collect();
+    if arguments
+        .get(1)
+        .is_some_and(|argument| argument == "--record-lock-after-exec")
+    {
+        let output: i32 = arguments[2].parse().unwrap();
+        let input: i32 = arguments[3].parse().unwrap();
+        assert_eq!(unsafe { pipe_write(output, b"E".as_ptr(), 1) }, 1);
+        let mut byte = 0;
+        assert_eq!(unsafe { read(input, &mut byte, 1) }, 1);
+        unsafe { _exit(0) }
     }
     fn request(operation: Operation) -> Request {
         Request {
@@ -188,4 +206,149 @@ fn main() {
     println!(
         "record-lock: PASS cursor snapshot, negative length, release through another open description"
     );
+
+    // Explicit preparation API, not yet libc's automatic CLOEXEC integration.
+    for fail_exec in [false, true] {
+        let mut paths = Vec::new();
+        let mut files = Vec::new();
+        for index in 0..3 {
+            let path = format!("/tmp/native-record-lock-exec-156-{index}");
+            let _ = std::fs::remove_file(&path);
+            let opened = client
+                .open_at(
+                    OpenAtBase::ProcessRoot,
+                    protocol::OPEN_READ
+                        | protocol::OPEN_WRITE
+                        | protocol::OPEN_CREATE
+                        | protocol::OPEN_EXCLUSIVE,
+                    0o600,
+                    &path,
+                )
+                .unwrap();
+            paths.push(path);
+            files.push(opened);
+        }
+        let mut ready = [0; 2];
+        let mut go = [0; 2];
+        assert_eq!(unsafe { pipe(ready.as_mut_ptr()) }, 0);
+        assert_eq!(unsafe { pipe(go.as_mut_ptr()) }, 0);
+        let pid = unsafe { fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            unsafe {
+                close(ready[0]);
+                close(go[1]);
+            }
+            let client = Client::from_launch_context().unwrap();
+            for &file in &files {
+                client
+                    .record_lock(file, request(Operation::Set(Kind::Write)))
+                    .unwrap();
+            }
+            let token = client
+                .prepare_record_lock_exec(&files[..1], None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                client
+                    .prepare_record_lock_exec(&files[1..2], Some(token))
+                    .unwrap(),
+                Some(token)
+            );
+            let executable = std::ffi::CString::new("/system/services/compositor.service").unwrap();
+            let argv = [
+                std::ffi::CString::new("record-lock-exec").unwrap(),
+                std::ffi::CString::new("--record-lock-after-exec").unwrap(),
+                std::ffi::CString::new(ready[1].to_string()).unwrap(),
+                std::ffi::CString::new(go[0].to_string()).unwrap(),
+            ];
+            let pointers = [
+                argv[0].as_ptr(),
+                argv[1].as_ptr(),
+                argv[2].as_ptr(),
+                argv[3].as_ptr(),
+                std::ptr::null(),
+            ];
+            if fail_exec {
+                let old = client.resource_limit(0, protocol::RLIMIT_AS, None).unwrap();
+                client
+                    .resource_limit(
+                        0,
+                        protocol::RLIMIT_AS,
+                        Some(protocol::ResourceLimit { soft: 0, ..old }),
+                    )
+                    .unwrap();
+                let result = unsafe { execv(executable.as_ptr(), pointers.as_ptr()) };
+                let error = std::io::Error::last_os_error().raw_os_error();
+                client
+                    .resource_limit(0, protocol::RLIMIT_AS, Some(old))
+                    .unwrap();
+                assert_eq!(
+                    (result, error),
+                    (-1, Some(12)),
+                    "native image replacement must fail atomically"
+                );
+                client.cancel_record_lock_exec(token).unwrap();
+                assert_eq!(unsafe { pipe_write(ready[1], b"F".as_ptr(), 1) }, 1);
+                let mut byte = 0;
+                assert_eq!(unsafe { read(go[0], &mut byte, 1) }, 1);
+                unsafe { _exit(0) }
+            }
+            unsafe {
+                execv(executable.as_ptr(), pointers.as_ptr());
+            }
+            panic!("exec failed: {}", std::io::Error::last_os_error());
+        }
+        unsafe {
+            close(ready[1]);
+            close(go[0]);
+        }
+        let mut byte = 0;
+        assert_eq!(unsafe { read(ready[0], &mut byte, 1) }, 1);
+        assert_eq!(byte, if fail_exec { b'F' } else { b'E' });
+        for (index, &file) in files.iter().enumerate() {
+            let result = client
+                .record_lock(file, request(Operation::Query(Kind::Read)))
+                .unwrap();
+            if fail_exec || index == 2 {
+                assert_eq!(
+                    result,
+                    Reply::Conflict {
+                        owner: pid as u64,
+                        kind: Kind::Write,
+                        start: 10,
+                        length: 20
+                    }
+                );
+            } else {
+                assert_eq!(result, Reply::Unlocked);
+            }
+        }
+        assert_eq!(unsafe { pipe_write(go[1], b"G".as_ptr(), 1) }, 1);
+        let mut status = -1;
+        assert_eq!(unsafe { waitpid(pid, &mut status, 0) }, pid);
+        assert_eq!(status, 0);
+        for (file, path) in files.iter().zip(&paths) {
+            assert_eq!(
+                client
+                    .record_lock(*file, request(Operation::Query(Kind::Read)))
+                    .unwrap(),
+                Reply::Unlocked
+            );
+            platform::handle::close(file.handle).unwrap();
+            std::fs::remove_file(path).unwrap();
+        }
+        unsafe {
+            close(ready[0]);
+            close(go[1]);
+        }
+        println!(
+            "record-lock: PASS {}",
+            if fail_exec {
+                "failed bounded native exec plus cancellation preserves all process locks"
+            } else {
+                "successful native exec consumes batched preparations and preserves unselected locks"
+            }
+        );
+    }
 }

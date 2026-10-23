@@ -9,6 +9,12 @@ pub struct Pending<H> {
     result: Result<Observation<H>, i32>,
 }
 
+impl<H> Pending<H> {
+    pub fn file_key(&self) -> Option<record_lock::FileKey> {
+        self.result.as_ref().ok().map(|observed| observed.key)
+    }
+}
+
 struct Observation<H> {
     file: AttachedObject<H>,
     key: record_lock::FileKey,
