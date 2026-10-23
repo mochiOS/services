@@ -15,18 +15,21 @@ use std::ffi::c_int;
 use std::sync::atomic::{{AtomicU32,Ordering}};
 extern crate self as mochios_posix_client;
 #[path={:?}]pub mod upcall_guard;
-const EINVAL:i32=22;const EAGAIN:i32=11;const ENOSYS:i32=88;
+const EINVAL:i32=22;const EAGAIN:i32=11;const ENOSYS:i32=88;const ENOTSUP:i32=134;
 const EFAULT:i32=14;const EIO:i32=5;const EOVERFLOW:i32=139;
 const PTHREAD_CANCEL_ENABLE:u32=0;const PTHREAD_CANCEL_DISABLE:u32=1;
 const PTHREAD_CANCEL_DEFERRED:u32=0;const PTHREAD_CANCEL_ASYNCHRONOUS:u32=1;
 struct ThreadControl{{
  cancel_state:AtomicU32,cancel_type:AtomicU32,cancel_pending:AtomicU32,
  native_delivery_defer:AtomicU32,
+ signal_upcall_stack:AtomicU32,
 }}
 static CONTROL:ThreadControl=ThreadControl{{
  cancel_state:AtomicU32::new(0),cancel_type:AtomicU32::new(0),
  cancel_pending:AtomicU32::new(1),native_delivery_defer:AtomicU32::new(0),
+ signal_upcall_stack:AtomicU32::new(4096),
 }};
+mod cancellation {{ pub fn test_async() {{}} }}
 static REGISTER:AtomicU32=AtomicU32::new(1);
 static COPY_ERROR:AtomicU32=AtomicU32::new(0);
 static COPIES:AtomicU32=AtomicU32::new(0);
@@ -103,7 +106,9 @@ fn main(){
  reset(1,0,0);let mut previous=77;
  assert_eq!(unsafe{pthread_setcancelstate(99,&mut previous)},EINVAL);
  assert_eq!(unsafe{pthread_setcanceltype(99,&mut previous)},EINVAL);
- assert_eq!(unsafe{pthread_setcanceltype(1,&mut previous)},ENOSYS);
+ CONTROL.signal_upcall_stack.store(0,Ordering::Release);
+ assert_eq!(unsafe{pthread_setcanceltype(1,&mut previous)},ENOTSUP);
+ CONTROL.signal_upcall_stack.store(4096,Ordering::Release);
  REGISTER.store(0,Ordering::Release);
  assert_eq!(unsafe{pthread_setcancelstate(0,&mut previous)},EAGAIN);
  assert_eq!(unsafe{pthread_setcanceltype(0,&mut previous)},EAGAIN);

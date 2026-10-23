@@ -64,6 +64,7 @@ mod process_timer {
     }
 }
 mod timer_callbacks { pub fn finish_if_last_application() {} }
+mod cancellation { pub fn test_async() {} }
 struct Resource;
 impl Drop for Resource {
     fn drop(&mut self) {

@@ -10,7 +10,10 @@ static void *await_cancellation(void *unused) {
   if (sem_post(&cancel_ready) || sem_wait(&cancel_gate)) return (void *)1;
   pthread_testcancel();return (void *)9;
 }
-int main(void) {
+#ifndef CANCEL_LIFETIME_ENTRY
+#define CANCEL_LIFETIME_ENTRY main
+#endif
+int CANCEL_LIFETIME_ENTRY(void) {
   CHECK(process_cpu_regression()==0);
   CHECK(sem_init(&cancel_ready,0,0)==0 && sem_init(&cancel_gate,0,0)==0);
   for (unsigned round=0;round<32;++round) {

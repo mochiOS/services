@@ -51,6 +51,10 @@ mod thread_reference {
         super::thread_control(thread).map(apply).ok_or(super::ESRCH)
     }
 }
+mod cancellation {
+ pub fn notify_async(_: &super::ThreadControl)->Result<(),super::c_int>{Ok(())}
+ pub fn test_async(){}
+}
 fn current_thread_control() -> Option<(Pthread, &'static ThreadControl)> { Some((1, &CALLER)) }
 fn native_mutex_wake_all(_: &AtomicU32) {}
 fn native_counter_wake_all(_: &AtomicU64) {}

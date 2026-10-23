@@ -46,6 +46,10 @@ mod thread_reference {{
         super::thread_control(thread).map(apply).ok_or(super::ESRCH)
     }}
 }}
+mod cancellation {{
+ pub fn notify_async(_: &super::ThreadControl)->Result<(),super::c_int>{{Ok(())}}
+ pub fn test_async(){{}}
+}}
 fn native_mutex_wake_all(address: &AtomicU32) {{
     assert!(std::ptr::eq(address, &CONTROL.state) || std::ptr::eq(address, &CONTROL.wait_generation));
 }}
