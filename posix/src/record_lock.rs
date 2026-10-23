@@ -15,11 +15,7 @@ pub struct FileKey {
     pub inode: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Kind {
-    Read,
-    Write,
-}
+pub use protocol::record_lock::Kind;
 
 /// Half-open interval within the signed off_t domain. END also represents
 /// locking through all future file growth, rather than today's file length.
@@ -242,6 +238,57 @@ pub struct OwnedLocks<'a> {
     registry: &'a mut Registry,
 }
 impl OwnedLocks<'_> {
+    /// Apply a decoded request after Handle, access-mode and image admission.
+    /// The adapter must keep the file alive and obtain position/size from that
+    /// same attached description, outside the service state lock. Neither
+    /// value, nor `file`, may be accepted as authority from request bytes.
+    pub fn apply(
+        &mut self,
+        file: FileKey,
+        request: protocol::record_lock::Request,
+        current_position: i64,
+        file_size: i64,
+    ) -> Result<protocol::record_lock::Reply, i32> {
+        use protocol::record_lock::{Operation, Origin, Reply};
+        if request.operation == Operation::ReleaseFile {
+            // Preserve the wire invariant for internal callers too.
+            if request.origin != Origin::Start || request.start != 0 || request.length != 0 {
+                return Err(STATUS_EINVAL);
+            }
+            self.release_file(file);
+            return Ok(Reply::Done);
+        }
+        let base = match request.origin {
+            Origin::Start => 0,
+            Origin::Current => current_position,
+            Origin::End => file_size,
+        };
+        let range = Range::normalize(base, request.start, request.length).map_err(lock_status)?;
+        match request.operation {
+            Operation::Query(kind) => Ok(match self.conflict(file, kind, range) {
+                Some(conflict) => {
+                    let (start, length) = conflict.range.offset_length();
+                    Reply::Conflict {
+                        owner: conflict.owner,
+                        kind: conflict.kind,
+                        start,
+                        length,
+                    }
+                }
+                None => Reply::Unlocked,
+            }),
+            Operation::Set(kind) => self
+                .set(file, kind, range)
+                .map(|()| Reply::Done)
+                .map_err(lock_status),
+            Operation::Unlock => self
+                .unlock(file, range)
+                .map(|()| Reply::Done)
+                .map_err(lock_status),
+            Operation::ReleaseFile => unreachable!(),
+        }
+    }
+
     pub fn conflict(&self, file: FileKey, kind: Kind, range: Range) -> Option<Conflict> {
         self.registry.conflict(self.owner, file, kind, range)
     }
@@ -257,6 +304,15 @@ impl OwnedLocks<'_> {
         self.registry
             .entries
             .retain(|lock| lock.owner != self.owner || lock.file != file);
+    }
+}
+
+fn lock_status(error: Error) -> i32 {
+    match error {
+        Error::InvalidRange => STATUS_EINVAL,
+        Error::Overflow => STATUS_EOVERFLOW,
+        Error::WouldBlock(_) => -11, // EAGAIN, nonblocking F_SETLK
+        Error::NoLocks => -37,       // ENOLCK
     }
 }
 

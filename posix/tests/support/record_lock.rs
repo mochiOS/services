@@ -62,6 +62,216 @@ fn conflict(
         .conflict(file, kind, range)
 }
 
+fn apply(
+    service: &mut PosixService,
+    owner: u64,
+    request: protocol::record_lock::Request,
+    position: i64,
+    size: i64,
+) -> Result<protocol::record_lock::Reply, i32> {
+    // Exercise the actual codec at both ends of the service-state adapter.
+    // Authentication and the retained file observation are supplied by this
+    // fixture; this is not a native FileHandle IPC test.
+    let mut bytes = [0; protocol::record_lock::REQUEST_LEN];
+    protocol::record_lock::encode_request(request, &mut bytes).unwrap();
+    let request = protocol::record_lock::decode_request(&bytes).unwrap();
+    let peer = peer(service, owner);
+    let reply = service
+        .record_locks(peer)?
+        .apply(file(1), request, position, size)?;
+    let mut bytes = [0; protocol::record_lock::REPLY_LEN];
+    protocol::record_lock::encode_reply(reply, &mut bytes).unwrap();
+    Ok(protocol::record_lock::decode_reply(&bytes).unwrap())
+}
+
+#[test]
+fn decoded_requests_resolve_origins_and_return_conflict_without_mutating_cursors() {
+    use protocol::record_lock::{Kind as WireKind, Operation, Origin, Reply, Request};
+    let mut service = setup(2);
+    let write = Request {
+        operation: Operation::Set(WireKind::Write),
+        origin: Origin::Current,
+        start: -10,
+        length: -20,
+    };
+    assert_eq!(apply(&mut service, 1, write, 100, 900), Ok(Reply::Done));
+    let query = Request {
+        operation: Operation::Query(WireKind::Read),
+        origin: Origin::End,
+        start: -40,
+        length: 20,
+    };
+    let expected = Reply::Conflict {
+        owner: 1,
+        kind: WireKind::Write,
+        start: 70,
+        length: 20,
+    };
+    assert_eq!(apply(&mut service, 2, query, 1234, 100), Ok(expected));
+    assert_eq!(
+        apply(&mut service, 1, query, 1234, 100),
+        Ok(Reply::Unlocked)
+    );
+    assert_eq!(
+        apply(
+            &mut service,
+            2,
+            Request {
+                operation: Operation::Set(WireKind::Write),
+                ..query
+            },
+            0,
+            100
+        ),
+        Err(-11)
+    );
+    assert_eq!(apply(&mut service, 2, query, 1234, 100), Ok(expected));
+    let unlock = Request {
+        operation: Operation::Unlock,
+        origin: Origin::Start,
+        start: 75,
+        length: 5,
+    };
+    assert_eq!(apply(&mut service, 1, unlock, -1, -1), Ok(Reply::Done));
+    assert_eq!(
+        apply(
+            &mut service,
+            2,
+            Request {
+                operation: Operation::Query(WireKind::Write),
+                ..unlock
+            },
+            0,
+            0
+        ),
+        Ok(Reply::Unlocked)
+    );
+}
+
+#[test]
+fn decoded_invalid_ranges_preserve_existing_locks_and_release_ignores_snapshots() {
+    use protocol::record_lock::{Kind as WireKind, Operation, Origin, Reply, Request};
+    let mut service = setup(2);
+    let write = Request {
+        operation: Operation::Set(WireKind::Write),
+        origin: Origin::Start,
+        start: 0,
+        length: 0,
+    };
+    assert_eq!(apply(&mut service, 1, write, -1, -1), Ok(Reply::Done));
+    for (request, position, size, error) in [
+        (
+            Request {
+                origin: Origin::Current,
+                ..write
+            },
+            -1,
+            0,
+            -22,
+        ),
+        (
+            Request {
+                origin: Origin::End,
+                ..write
+            },
+            0,
+            -1,
+            -22,
+        ),
+        (Request { start: -1, ..write }, 0, 0, -22),
+        (
+            Request {
+                start: i64::MAX,
+                length: 2,
+                ..write
+            },
+            0,
+            0,
+            -75,
+        ),
+    ] {
+        assert_eq!(apply(&mut service, 1, request, position, size), Err(error));
+    }
+    let query = Request {
+        operation: Operation::Query(WireKind::Read),
+        ..write
+    };
+    assert_eq!(
+        apply(&mut service, 2, query, 0, 0),
+        Ok(Reply::Conflict {
+            owner: 1,
+            kind: WireKind::Write,
+            start: 0,
+            length: 0
+        })
+    );
+    let release = Request {
+        operation: Operation::ReleaseFile,
+        ..write
+    };
+    assert_eq!(apply(&mut service, 2, release, -1, -1), Ok(Reply::Done));
+    assert!(matches!(
+        apply(&mut service, 2, query, 0, 0),
+        Ok(Reply::Conflict { .. })
+    ));
+    assert_eq!(apply(&mut service, 1, release, -1, -1), Ok(Reply::Done));
+    assert_eq!(apply(&mut service, 2, query, 0, 0), Ok(Reply::Unlocked));
+}
+
+#[test]
+fn decoded_operations_report_lock_quota_and_reject_internal_release_smuggling() {
+    use protocol::record_lock::{Kind as WireKind, Operation, Origin, Reply, Request};
+    let mut service = setup(2);
+    let request = Request {
+        operation: Operation::Set(WireKind::Read),
+        origin: Origin::Start,
+        start: 0,
+        length: 1,
+    };
+    for index in 0..MAX_LOCKS_PER_PROCESS {
+        assert_eq!(
+            apply(
+                &mut service,
+                1,
+                Request {
+                    start: (index * 2) as i64,
+                    ..request
+                },
+                0,
+                0
+            ),
+            Ok(Reply::Done)
+        );
+    }
+    assert_eq!(
+        apply(
+            &mut service,
+            1,
+            Request {
+                start: (MAX_LOCKS_PER_PROCESS * 2) as i64,
+                ..request
+            },
+            0,
+            0
+        ),
+        Err(-37)
+    );
+    let peer = peer(&service, 1);
+    assert_eq!(
+        service.record_locks(peer).unwrap().apply(
+            file(1),
+            Request {
+                operation: Operation::ReleaseFile,
+                ..request
+            },
+            0,
+            0
+        ),
+        Err(-22)
+    );
+    assert!(conflict(&mut service, 2, file(1), Kind::Write, range(0, 1)).is_some());
+}
+
 #[test]
 fn normalization_preserves_negative_lengths_future_growth_and_full_off_t_domain() {
     assert_eq!(
