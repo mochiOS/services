@@ -34,6 +34,8 @@ mod data_reads;
 mod rename_timestamps;
 #[path = "creation_policy.rs"]
 mod creation_policy;
+#[path = "fifo_namespace.rs"]
+mod fifo_namespace;
 
 const EIO: i32 = 5;
 const EXDEV: i32 = 18;
@@ -540,6 +542,11 @@ impl FilesystemService {
         {
             return Err(EACCES);
         }
+        // FIFO bytes belong to the userspace channel, never to disk extents.
+        // In particular reject before O_TRUNC, allocation or publication.
+        if kind.is_fifo() {
+            return Err(ENOTSUP);
+        }
         let node_id = scoped_node_id(volume, &inode);
         let open_id = self.next_open_id;
         let next_open_id = self.next_open_id.checked_add(1).ok_or(EIO)?;
@@ -643,7 +650,9 @@ impl FilesystemService {
         anchors: PathAnchors,
         credentials: protocol::Credentials,
     ) -> Result<Response, i32> {
-        self.create_socket_at_inner(request, payload, anchors, credentials, false)
+        self.create_special_at_inner(
+            request, payload, anchors, credentials, FileType::Socket, false,
+        )
     }
 
     /// Keep an inode description for binding lifetime. The native adapter must
@@ -656,10 +665,12 @@ impl FilesystemService {
         anchors: PathAnchors,
         credentials: protocol::Credentials,
     ) -> Result<Response, i32> {
-        self.create_socket_at_inner(request, payload, anchors, credentials, true)
+        self.create_special_at_inner(
+            request, payload, anchors, credentials, FileType::Socket, true,
+        )
     }
 
-    fn reserve_socket_description(&mut self) -> Result<u64, i32> {
+    fn reserve_inode_description(&mut self) -> Result<u64, i32> {
         if self.next_open_id > i64::MAX as u64 {
             return Err(EIO);
         }
@@ -712,11 +723,11 @@ impl FilesystemService {
         ) {
             return Err(EACCES);
         }
-        let next_open = self.reserve_socket_description()?;
-        self.retain_socket_description(request, filesystem, volume, inode, next_open)
+        let next_open = self.reserve_inode_description()?;
+        self.retain_inode_description(request, filesystem, volume, inode, next_open)
     }
 
-    fn retain_socket_description(
+    fn retain_inode_description(
         &mut self,
         request: protocol::Header,
         filesystem: Ext4,
@@ -750,18 +761,24 @@ impl FilesystemService {
         Ok(response)
     }
 
-    fn create_socket_at_inner(
+    fn create_special_at_inner(
         &mut self,
         request: protocol::Header,
         payload: &[u8],
         anchors: PathAnchors,
         credentials: protocol::Credentials,
+        kind: FileType,
         retain: bool,
     ) -> Result<Response, i32> {
+        let type_mode = match kind {
+            FileType::Socket => InodeMode::S_IFSOCK,
+            FileType::Fifo => InodeMode::S_IFIFO,
+            _ => return Err(EINVAL),
+        };
         // Reserve the identity before changing the namespace; a failed identity
         // allocation must not leave a published file without a description.
         let next_open = if retain {
-            Some(self.reserve_socket_description()?)
+            Some(self.reserve_inode_description()?)
         } else {
             None
         };
@@ -812,8 +829,8 @@ impl FilesystemService {
         let mut inode = filesystem
             .create_inode_with_timestamps(
                 InodeCreationOptions {
-                    file_type: FileType::Socket,
-                    mode: InodeMode::from_bits_retain(mode) | InodeMode::S_IFSOCK,
+                    file_type: kind,
+                    mode: InodeMode::from_bits_retain(mode) | type_mode,
                     uid,
                     gid,
                     time: Duration::default(),
@@ -825,7 +842,7 @@ impl FilesystemService {
         parent.link(name, &mut inode).map_err(errno)?;
         let node_id = scoped_node_id(volume, &inode);
         if let Some(next_open) = next_open {
-            self.retain_socket_description(request, filesystem, volume, inode, next_open)
+            self.retain_inode_description(request, filesystem, volume, inode, next_open)
         } else {
             Ok(self.node_status_response(request, node_id, &inode, &filesystem))
         }
@@ -1333,6 +1350,7 @@ impl FilesystemService {
         let node_id = open.node_id;
         let inode = if open.file.is_some()
             || open.inode.file_type().is_socket()
+            || open.inode.file_type().is_fifo()
             || open.inode.file_type().is_dir()
         {
             Inode::read(&open.filesystem, open.inode.index).map_err(errno)?
@@ -1611,6 +1629,9 @@ impl FilesystemService {
             return self.read_device(open_id, length.min(mnu_abi::provider::MAX_DATA_LEN));
         }
         let open = self.opens.get(&open_id).ok_or(EBADF)?;
+        if open.inode.file_type().is_fifo() {
+            return Err(ENOTSUP);
+        }
         if open.file.is_none() {
             let inode = open.inode.clone();
             let filesystem = open.filesystem.clone();
@@ -1858,6 +1879,9 @@ impl FilesystemService {
             return Ok(directory.offset);
         }
         let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
+        if open.inode.file_type().is_fifo() {
+            return Err(ENOTSUP);
+        }
         let current = i128::from(open.offset);
         let base = match basis {
             mnu_abi::HANDLE_SEEK_START => 0,
@@ -3336,6 +3360,9 @@ impl FilesystemService {
         // the authoritative size under this service's mutation serialization,
         // not in a separate stat RPC or from the cached open-time metadata.
         let mut current = Inode::read(&filesystem, inode.index).map_err(errno)?;
+        if current.file_type().is_fifo() {
+            return Err(EINVAL);
+        }
         // These are known non-mutating failures. Reject them before marking
         // native aliases in flight; immutable System reads must stay usable.
         if filesystem.is_read_only() {
@@ -3974,6 +4001,8 @@ fn node_type(file_type: FileType) -> u32 {
         protocol::NODE_TYPE_SYMLINK
     } else if file_type.is_socket() {
         protocol::NODE_TYPE_SOCKET
+    } else if file_type.is_fifo() {
+        protocol::NODE_TYPE_FIFO
     } else {
         protocol::NODE_TYPE_SPECIAL
     }

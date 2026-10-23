@@ -88,6 +88,7 @@ pub fn translate(status: filesystem::NodeStatus) -> Result<FileStatus, i32> {
         filesystem::NODE_TYPE_DIRECTORY => 0o040000,
         filesystem::NODE_TYPE_SYMLINK => 0o120000,
         filesystem::NODE_TYPE_SOCKET => 0o140000,
+        filesystem::NODE_TYPE_FIFO => 0o010000,
         filesystem::NODE_TYPE_SPECIAL => 0o020000,
         _ => return Err(-5),
     };

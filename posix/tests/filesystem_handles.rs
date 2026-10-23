@@ -4061,6 +4061,9 @@ mod trailing_lookup;
 #[path = "support/trailing_creation.rs"]
 mod trailing_creation;
 
+#[path = "support/fifo_namespace.rs"]
+mod fifo_namespace;
+
 #[path = "support/object_limits.rs"]
 mod object_limits;
 
