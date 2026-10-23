@@ -27,10 +27,12 @@ thread_local! {
     static CASE: Cell<u32> = const { Cell::new(0) };
     static PID: Cell<u64> = const { Cell::new(7) };
     static READS: Cell<usize> = const { Cell::new(0) };
+    static IDENTITIES: Cell<usize> = const { Cell::new(0) };
     static WAITS: Cell<usize> = const { Cell::new(0) };
     static CLOSED: Cell<usize> = const { Cell::new(0) };
     static CANCEL: Cell<bool> = const { Cell::new(false) };
     static SCOPED: Cell<bool> = const { Cell::new(false) };
+    static DEFERRED: Cell<bool> = const { Cell::new(false) };
     static REQUESTS: RefCell<Vec<posix_protocol::cpu_sleep::Request>> = const { RefCell::new(Vec::new()) };
     static SAMPLES: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
@@ -42,7 +44,22 @@ impl SysError {
     }
 }
 fn native_process_id() -> Result<u64, SysError> {
-    Ok(PID.get())
+    let identity = PID.get();
+    IDENTITIES.set(IDENTITIES.get() + 1);
+    if CASE.get() == 18 && IDENTITIES.get() == 2 {
+        PID.set(8);
+    }
+    Ok(identity)
+}
+struct Deferred;
+impl Drop for Deferred {
+    fn drop(&mut self) {
+        assert!(DEFERRED.replace(false));
+    }
+}
+fn defer_native_delivery() -> Deferred {
+    assert!(!DEFERRED.replace(true));
+    Deferred
 }
 fn map_kernel_errno(raw: i64) -> i32 {
     raw as i32
@@ -96,6 +113,9 @@ mod fd_lease {
     use super::*;
     pub(super) struct Lease(Entry);
     impl Lease {
+        pub fn is_current(&self) -> bool {
+            PID.get() == 7
+        }
         pub fn adopt_private(entry: Entry) -> Result<Self, i32> {
             assert!(SCOPED.get());
             Ok(Self(entry))
@@ -151,7 +171,11 @@ impl Client {
                 handle: 77,
                 rights: posix_protocol::cpu_sleep::COMPLETION_RIGHTS,
             },
-            deadline_ns: 300_000_000,
+            deadline_ns: if CASE.get() == 19 {
+                100_000_000 + request.nanoseconds
+            } else {
+                300_000_000
+            },
         })
     }
 }
@@ -192,18 +216,24 @@ mod syscall {
     ) -> Result<u64, i32> {
         use super::*;
         assert!(SCOPED.get());
+        assert!(DEFERRED.get());
         assert_eq!(handle, 77);
         assert_eq!(options, mnu_abi::STREAM_IO_TRY);
         let read = READS.get();
         READS.set(read + 1);
         match CASE.get() {
-            1 | 2 | 3 | 11 | 12 | 13 if read == 0 => return Err(EAGAIN),
+            1 | 2 | 3 | 11 | 12 | 13 | 19 if read == 0 => return Err(EAGAIN),
             4 => return Ok(0),
             5 => return Err(EIO),
             6 => {
                 CANCEL.set(true);
                 return Err(EIO);
             }
+            16 => {
+                PID.set(8);
+                return Err(EIO);
+            }
+            17 => PID.set(8),
             8 if read != 0 => return Ok(0),
             _ => {}
         }
@@ -235,30 +265,36 @@ mod syscall {
 fn syscall_errno(result: Result<u64, i32>) -> Result<u64, i32> {
     result
 }
-fn wait_for_multiplex(
+fn wait_for_multiplex_while(
     items: &mut [syscall::HandleWaitItem],
     deadline: u64,
     control: &ThreadControl,
     caught: u64,
+    valid: impl Fn() -> bool,
 ) -> Result<(), i32> {
+    assert!(!DEFERRED.get(), "callbacks must reopen before blocking");
     assert_eq!(deadline, syscall::HANDLE_WAIT_INFINITE);
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].handle, 77);
     mochios_posix_client::multiplex::wait_cancellable(
         caught,
         || control.caught_signal_generation.load(Ordering::Acquire),
-        || io_cancellation_requested(control),
+        || io_cancellation_requested(control) || !valid(),
         || 0,
         |_| {
             WAITS.set(WAITS.get() + 1);
             match CASE.get() {
-                1 | 11 | 12 => {
+                1 | 11 | 12 | 19 => {
                     control
                         .caught_signal_generation
                         .fetch_add(1, Ordering::AcqRel);
                 }
                 2 | 3 => CANCEL.set(true),
-                13 => PID.set(8),
+                13 => {
+                    assert_eq!(WAITS.get(), 1);
+                    PID.set(8);
+                    return Ok(false);
+                }
                 _ => panic!("unexpected native wait"),
             }
             Ok(true)
@@ -275,10 +311,11 @@ mod actual;
 
 #[test]
 fn production_cpu_sleep_preserves_completion_interruption_and_private_resource_lifetimes() {
-    for case in 0..=15 {
+    for case in 0..=19 {
         CASE.set(case);
         PID.set(7);
         READS.set(0);
+        IDENTITIES.set(0);
         WAITS.set(0);
         CLOSED.set(0);
         CANCEL.set(false);
@@ -315,7 +352,7 @@ fn production_cpu_sleep_preserves_completion_interruption_and_private_resource_l
             assert!(result.is_err());
         } else {
             let expected = match case {
-                1 | 13 => Err(EINTR),
+                1 | 13 | 16 | 17 | 18 | 19 => Err(EINTR),
                 4 | 5 | 7 | 8 => Err(EIO),
                 9 | 10 | 14 => Err(EINVAL),
                 11 => Err(EFAULT),
@@ -325,13 +362,16 @@ fn production_cpu_sleep_preserves_completion_interruption_and_private_resource_l
             assert_eq!(result.unwrap(), expected, "case {case}");
         }
         assert!(!SCOPED.get());
+        assert!(!DEFERRED.get());
         assert_eq!(
             CLOSED.get(),
             usize::from(case != 9 && case != 10),
             "case {case}"
         );
-        if matches!(case, 1 | 13) {
+        if matches!(case, 1 | 13 | 16 | 17 | 18) {
             assert_eq!((remaining.tv_sec, remaining.tv_nsec), (0, 200_000_000));
+        } else if case == 19 {
+            assert_eq!((remaining.tv_sec, remaining.tv_nsec), (1, 999_999_999));
         } else {
             assert_eq!((remaining.tv_sec, remaining.tv_nsec), (99, 99));
         }
@@ -348,6 +388,9 @@ fn production_cpu_sleep_preserves_completion_interruption_and_private_resource_l
         }
         if case == 3 {
             assert!(CANCEL.get());
+        }
+        if case == 18 {
+            assert_eq!(READS.get(), 0);
         }
     }
 }

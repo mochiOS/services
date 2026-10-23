@@ -2,7 +2,10 @@
 //! native dispatch, while another thread closes and reuses the descriptor.
 #![allow(non_camel_case_types)]
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, mpsc};
+
+static FORK_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 use mochios_posix_client::fd::{Entry, FdTable};
 use mochios_posix_client::handle_borrow::Book;
@@ -98,7 +101,7 @@ fn private_reference_admission_is_atomic_and_needs_no_descriptor_owner() {
 }
 
 #[test]
-fn fork_exclusions_apply_only_to_retired_references_without_surviving_pins() {
+fn fork_excludes_private_pins_and_retired_references_without_surviving_ordinary_pins() {
     use mochios_posix_client::inheritance;
     let mut book = Book::<4>::new();
     let foreign = book.pin_private(1, 2).unwrap();
@@ -107,7 +110,8 @@ fn fork_exclusions_apply_only_to_retired_references_without_surviving_pins() {
     let own_shared = book.pin_owned(3, 1).unwrap();
     assert_eq!(book.retire(3), Some(false));
     assert!(book.discarded_by_fork(1, 1));
-    for label in [0, 2, 3, 4, 5, u64::MAX] {
+    assert!(book.discarded_by_fork(2, 1));
+    for label in [0, 3, 4, 5, u64::MAX] {
         assert!(!book.discarded_by_fork(label, 1));
     }
     assert!(!book.discarded_by_fork(1, 0));
@@ -171,14 +175,24 @@ fn private_runtime_leases_close_on_return_and_child_discard_without_fd_installat
         .unwrap()
         .insert(28, "surviving private completion");
     let own = fd_lease::Lease::adopt_private(entry(28)).unwrap();
+    FORK_EPOCH.fetch_add(1, Ordering::AcqRel);
     fd_lease::BORROWS
         .lock()
         .discard_for_fork(1, |label| close_object_handle(label as u32))
         .unwrap();
-    assert_eq!(*CLOSED.lock().unwrap(), [27]);
-    assert!(NATIVE.lock().unwrap().contains_key(&28));
-    drop(own);
     assert_eq!(*CLOSED.lock().unwrap(), [27, 28]);
+    assert!(NATIVE.lock().unwrap().is_empty());
+    NATIVE
+        .lock()
+        .unwrap()
+        .insert(28, "reused native slot in child");
+    let replacement = fd_lease::Lease::new(entry(28)).unwrap();
+    drop(own);
+    assert!(NATIVE.lock().unwrap().contains_key(&28));
+    assert_eq!(*CLOSED.lock().unwrap(), [27, 28]);
+    fd_lease::retire(entry(28).handle).unwrap();
+    drop(replacement);
+    assert_eq!(*CLOSED.lock().unwrap(), [27, 28, 28]);
     assert!(NATIVE.lock().unwrap().is_empty());
 }
 

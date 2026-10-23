@@ -122,8 +122,10 @@ int main(void) {
     errno = EDOM;
     CHECK(clock_nanosleep(own, absolute ? TIMER_ABSTIME : 0, &request, &remaining) == EINTR);
     CHECK(errno == EDOM);
+    /* A process CPU quantum need not advance while both threads are asleep. */
     CHECK(absolute ? remaining.tv_sec == 99 && remaining.tv_nsec == 99
-                   : remaining.tv_sec >= 4 && remaining.tv_sec < 5);
+                   : remaining.tv_sec >= 4 && remaining.tv_nsec >= 0
+                     && remaining.tv_nsec < 1000000000 && nanos(remaining) <= 5000000000);
     void *result = (void *)1;
     CHECK(pthread_join(notifier, &result) == 0 && result == NULL);
   }
