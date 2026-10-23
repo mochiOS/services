@@ -60,6 +60,36 @@ mod thread_clock {
     }
 }
 static TARGET_PINNED: AtomicBool = AtomicBool::new(false);
+// The C-boundary fixture controls callback startup. The actual callback
+// importer/launcher is exercised separately by timer_callback_runtime.rs.
+mod timer_callbacks {
+    use super::*;
+    #[derive(Clone, Copy)]
+    pub struct Callback;
+    pub struct Book {
+        pub values: mochios_posix_client::timer_value::Registry<Callback, 128>,
+    }
+    impl Book {
+        pub const fn new() -> Self {
+            Self {
+                values: mochios_posix_client::timer_value::Registry::new(),
+            }
+        }
+    }
+    pub fn import(_: *const c_void, _: usize) -> Result<Callback, c_int> {
+        Err(EINVAL)
+    }
+    pub fn ensure_dispatcher() -> Result<(), c_int> {
+        panic!("fixture never admits callbacks")
+    }
+    pub fn reserve(
+        _: Callback,
+        _: Option<u64>,
+        _: u64,
+    ) -> Result<mochios_posix_client::timer_value::Token, c_int> {
+        unreachable!()
+    }
+}
 #[repr(C)]
 struct Timespec {
     tv_sec: i64,
@@ -80,11 +110,13 @@ struct RuntimeState {
     thread_clocks: mochios_posix_client::thread_clock::Registry<64>,
     timer_values: mochios_posix_client::timer_value::Registry<usize, 128>,
     timer_cleanup: implementation::CleanupBook,
+    timer_callbacks: timer_callbacks::Book,
 }
 static STATE: Mutex<RuntimeState> = Mutex::new(RuntimeState {
     thread_clocks: mochios_posix_client::thread_clock::Registry::new(),
     timer_values: mochios_posix_client::timer_value::Registry::new(),
     timer_cleanup: implementation::CleanupBook::new(),
+    timer_callbacks: timer_callbacks::Book::new(),
 });
 fn state() -> MutexGuard<'static, RuntimeState> {
     STATE.lock().unwrap()
@@ -219,6 +251,7 @@ fn reset() -> MutexGuard<'static, ()> {
         thread_clocks: Default::default(),
         timer_values: Default::default(),
         timer_cleanup: implementation::CleanupBook::new(),
+        timer_callbacks: timer_callbacks::Book::new(),
     };
     REGISTER.store(true, Ordering::Relaxed);
     CONTROL.native_delivery_defer.store(0, Ordering::Relaxed);
@@ -363,12 +396,7 @@ fn invalid_inputs_fail_before_creation_or_set_rpc() {
         -1
     );
     assert_eq!(ERRNO.load(Ordering::Relaxed), EFAULT);
-    for input in [
-        event(0, 0, 0),
-        event(2, 0, 0),
-        event(2, 65, 0),
-        event(3, 1, 0),
-    ] {
+    for input in [event(0, 0, 0), event(2, 0, 0), event(2, 65, 0)] {
         assert_eq!(
             implementation::timer_create(1, input.as_ptr().cast(), &mut id),
             -1

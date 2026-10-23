@@ -63,6 +63,7 @@ mod process_timer {
         publish_exit();
     }
 }
+mod timer_callbacks { pub fn finish_if_last_application() {} }
 struct Resource;
 impl Drop for Resource {
     fn drop(&mut self) {
