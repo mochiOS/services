@@ -174,9 +174,13 @@ fn independent_provider_descriptions_observe_current_data_size_and_extents() {
         .header
         .open_id;
     assert_eq!(fs.provider_write(a, b"abc"), Ok(3));
+    assert_eq!(fs.provider_byte_length(b), Ok(3));
+    assert_eq!(fs.provider_seek(b, 0, mnu_abi::HANDLE_SEEK_CURRENT), Ok(0));
     assert_eq!(fs.provider_write(b, b"def"), Ok(3));
     assert_eq!(fs.provider_read(a, 3).unwrap(), b"def");
     assert_eq!(fs.provider_write_at(b, 100, b"x"), Ok(1));
+    assert_eq!(fs.provider_byte_length(a), Ok(101));
+    assert_eq!(fs.provider_seek(a, 0, mnu_abi::HANDLE_SEEK_CURRENT), Ok(6));
     assert_eq!(fs.provider_seek(a, 0, mnu_abi::HANDLE_SEEK_END), Ok(101));
     assert_eq!(fs.provider_write_at(a, 0, b"X"), Ok(1));
     assert_eq!(fs.provider_read_at(b, 100, 1).unwrap(), b"x");

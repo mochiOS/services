@@ -33,6 +33,9 @@ thread_local! {
     static SEEKS:Cell<usize>=const {Cell::new(0)};
     static LOCKS:Cell<usize>=const {Cell::new(0)};
     static UNLOCKS:Cell<usize>=const {Cell::new(0)};
+    static EXTENT_QUERIES:Cell<usize>=const {Cell::new(0)};
+    static EXTENT_ERROR:Cell<Option<u64>>=const {Cell::new(None)};
+    static EXTENT_REPLY_LEN:Cell<usize>=const {Cell::new(8)};
 }
 static ALLOCATIONS:AtomicUsize=AtomicUsize::new(0);
 struct Allocator;
@@ -68,9 +71,9 @@ impl Memory {
         output.fill(b'x');Ok(if SHORT.get(){output.len().saturating_sub(1)}else{output.len()})
     }
 }
-struct Provider;
+struct Provider {object_id:u64}
 enum KernelObject {VmObject(Memory),Provider(Arc<Provider>),Other}
-thread_local! {static PROVIDER:Arc<Provider>=Arc::new(Provider);}
+thread_local! {static PROVIDER:Arc<Provider>=Arc::new(Provider{object_id:91});}
 fn object_native(raw:u64,rights:HandleRights)->Result<KernelObject,Error> {
     assert_eq!(raw,7);let query=QUERIES.get();QUERIES.set(query+1);
     assert_eq!(rights,HandleRights::READ);
@@ -89,6 +92,20 @@ mod mem {pub mod vm_object {
     }
 }}
 fn provider_cache_identity(_:&Provider)->Result<Option<u64>,u64> {Ok(IDENTITY.get())}
+fn provider_call(provider:&Provider,request:mnu_abi::provider::RequestHeader,input:&[u8],storage:&mut [u8])
+    ->Result<(mnu_abi::provider::ResponseHeader,usize),u64>{
+    use mnu_abi::provider as wire;
+    assert_eq!(provider.object_id,91);
+    assert_eq!((request.opcode,request.object_id,request.argument,request.basis,request.length,request.data_length),
+        (wire::OP_QUERY,91,0,wire::QUERY_BYTE_LENGTH,8,0));
+    assert!(input.is_empty());assert_eq!(LOCKS.get()-UNLOCKS.get(),1);
+    EXTENT_QUERIES.set(EXTENT_QUERIES.get()+1);
+    if let Some(error)=EXTENT_ERROR.get(){return Err(error)}
+    let length=EXTENT_REPLY_LEN.get();
+    let response=wire::ResponseHeader{opcode:wire::OP_QUERY,status:0,object_id:91,value:length as u64,data_length:length as u32};
+    response.encode(&LENGTH.get().to_le_bytes()[..length],storage).unwrap();
+    Ok((response,length))
+}
 fn provider_seek_result(_:&Provider,offset:i64,basis:syscall::fs::SeekBasis)->Result<u64,u64> {
     assert_eq!(offset,0);let count=SEEKS.get();SEEKS.set(count+1);
     if let Some(error)=BACKEND_ERROR.get(){return Err(error);}
@@ -120,6 +137,7 @@ fn provider_read_at(_: &Provider,offset:u64,bytes:&mut [u8])->Result<usize,u64> 
 fn reset(mode:u8) {
     FAIL_AFTER.set(None);MODE.set(mode);AUTH_ERROR.set(None);BACKEND_ERROR.set(None);
     LENGTH.set(5);SHORT.set(false);IDENTITY.set(Some(11));QUERIES.set(0);READS.set(0);SEEKS.set(0);LOCKS.set(0);UNLOCKS.set(0);
+    EXTENT_QUERIES.set(0);EXTENT_ERROR.set(None);EXTENT_REPLY_LEN.set(8);
 }
 fn error(expected:u64) {
     let allocations=ALLOCATIONS.load(Ordering::Relaxed);
@@ -137,7 +155,7 @@ fn main() {
         }
         for length in [6,u64::MAX] {
             reset(mode);LENGTH.set(length);error(Error::LimitExceeded.into_raw());
-            assert_eq!(READS.get()==0,mode==0);assert_eq!(SEEKS.get(),0);
+            assert_eq!(READS.get(),0);assert_eq!(SEEKS.get(),0);
         }
         reset(mode);SHORT.set(true);error(Error::BackingFailure.into_raw());
         for downstream in [Error::BackingFailure.into_raw(),Error::ResourceUnavailable.into_raw(),(-13i64) as u64,(-42i64) as u64] {
@@ -153,6 +171,12 @@ fn main() {
         }
         reset(mode);LENGTH.set(0);assert!(read_all(7,0).unwrap().is_empty());assert_eq!(LOCKS.get(),UNLOCKS.get());
     }
+    for length in [0,7] {
+        reset(1);EXTENT_REPLY_LEN.set(length);error(Error::BackingFailure.into_raw());
+        assert_eq!(READS.get(),0);assert_eq!(EXTENT_QUERIES.get(),1);
+    }
+    reset(1);EXTENT_ERROR.set(Some(Error::PeerClosed.into_raw()));error(Error::PeerClosed.into_raw());
+    assert_eq!(READS.get(),0);assert_eq!(EXTENT_QUERIES.get(),1);
     for mode in [2,3] {reset(mode);error(Error::InvalidArgument.into_raw());assert_eq!(READS.get(),0);assert_eq!(SEEKS.get(),0);}
 }
 "#,

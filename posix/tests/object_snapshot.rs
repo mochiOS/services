@@ -119,3 +119,53 @@ fn positional_snapshot_failure_after_progress_and_at_eof_probe_is_not_partial_su
         assert_eq!(positions.last(), Some(&failing_offset));
     }
 }
+
+#[test]
+fn extent_snapshot_handles_short_reads_and_rejects_forged_lengths() {
+    for declared in 0..=6u64 {
+        for actual in 0..=6usize {
+            let result = snapshot::read_extent(declared, 6, 3, |offset, output| {
+                let available = actual.saturating_sub(offset as usize);
+                let count = available.min(output.len()).min(2);
+                output[..count].fill(0x5a);
+                Ok(count)
+            });
+            if declared as usize == actual {
+                assert_eq!(result.unwrap(), vec![0x5a; actual]);
+            } else {
+                assert_eq!(result, Err(Error::BackingFailure.into_raw()));
+            }
+        }
+    }
+    assert_eq!(
+        snapshot::read_extent(7, 6, 3, |_, _| panic!("extent exceeds budget")),
+        Err(Error::LimitExceeded.into_raw())
+    );
+    assert_eq!(
+        snapshot::read_extent(0, 6, 0, |_, _| panic!("zero chunk")),
+        Err(Error::InvalidArgument.into_raw())
+    );
+}
+
+#[test]
+fn extent_snapshot_preserves_io_errors_and_rejects_invalid_counts() {
+    for fail_at in [0, 2, 4, 5] {
+        let error = Error::PeerClosed.into_raw();
+        assert_eq!(
+            snapshot::read_extent(5, 6, 2, |offset, output| {
+                if offset == fail_at {
+                    Err(error)
+                } else {
+                    Ok(output.len().min(5usize.saturating_sub(offset as usize)))
+                }
+            }),
+            Err(error)
+        );
+    }
+    for declared in [0, 5] {
+        assert_eq!(
+            snapshot::read_extent(declared, 6, 3, |_, bytes| Ok(bytes.len() + 1)),
+            Err(Error::BackingFailure.into_raw())
+        );
+    }
+}

@@ -1103,6 +1103,15 @@ fn handle_provider_request(
         return None;
     }
     let result = match header.opcode {
+        provider::OP_QUERY
+            if header.basis == provider::QUERY_BYTE_LENGTH
+                && payload.is_empty()
+                && header.length >= 8 =>
+        {
+            service
+                .provider_byte_length(header.object_id)
+                .map(|length| (8, length.to_le_bytes().to_vec()))
+        }
         provider::OP_READ_SHARED => read_provider_shared(service, header, attached, buffer),
         provider::OP_READ => service
             .provider_read(header.object_id, header.length as usize)

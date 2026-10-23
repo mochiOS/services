@@ -1797,6 +1797,13 @@ impl FilesystemService {
         open.filesystem.flush().map_err(errno)
     }
 
+    pub fn provider_byte_length(&mut self, open_id: u64) -> Result<u64, i32> {
+        let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
+        refresh_provider_file(open)?;
+        let file = open.file.as_ref().ok_or(EISDIR)?;
+        Ok(file.inode().metadata().len())
+    }
+
     pub fn provider_memory_object(&self, open_id: u64) -> Result<u64, i32> {
         if self.opens.device(open_id).is_some() {
             return Ok(0);

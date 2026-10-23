@@ -20,6 +20,11 @@ fn admission_preserves_authorization_order_and_native_failure_provenance() {
 use std::{cell::{Cell,RefCell},sync::atomic::{AtomicUsize,Ordering}};
 use mnu_abi::status::Error;
 use mnu_abi::exec::ExecutionClass;
+mod kernel {
+    pub fn early_serial(text:&str) {
+        assert_eq!(text,"ProcessCreate: image snapshot failed\n");
+    }
+}
 static ALLOCATIONS:AtomicUsize=AtomicUsize::new(0);
 thread_local! {
     static FAIL_AFTER:Cell<Option<usize>>=const {Cell::new(None)};
