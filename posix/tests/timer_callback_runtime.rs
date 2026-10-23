@@ -10,6 +10,8 @@ use std::{
         atomic::{AtomicU32, AtomicU64, Ordering},
     },
 };
+#[path = "../../../user/crates/newlib-runtime/src/pthread_attr.rs"]
+mod attr_api;
 #[path = "../../../user/crates/newlib-runtime/src/timer_callbacks.rs"]
 mod implementation;
 #[path = "../../../user/crates/newlib-runtime/src/user_copy.rs"]
@@ -28,6 +30,10 @@ const EINVAL: c_int = 22;
 const EAGAIN: c_int = 11;
 const EOVERFLOW: c_int = 139;
 const EIO: c_int = 5;
+const ENOTSUP: c_int = 134;
+struct SchedParam {
+    sched_priority: c_int,
+}
 const ENOENT: c_int = 2;
 const ENAMETOOLONG: c_int = 91;
 const PAGE_SIZE: usize = 4096;
@@ -116,7 +122,7 @@ fn state() -> MutexGuard<'static, State> {
     STATE.lock().unwrap()
 }
 type Start = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
-static JOBS: Mutex<Vec<(Start, usize, usize, usize, c_int)>> = Mutex::new(Vec::new());
+static JOBS: Mutex<Vec<(Start, usize, usize, usize, c_int, u32)>> = Mutex::new(Vec::new());
 static FAILURE: AtomicU32 = AtomicU32::new(0);
 static VALUE: AtomicU64 = AtomicU64::new(0);
 static SERIAL: Mutex<()> = Mutex::new(());
@@ -140,6 +146,7 @@ unsafe fn pthread_create(
         attr.stacksize,
         attr.guardsize,
         attr.detachstate,
+        attr.reserved[0],
     ));
     unsafe { thread.write(1) };
     0
@@ -175,7 +182,7 @@ fn bind(value: usize) -> posix_protocol::timer_callback::Event {
     }
 }
 fn run_next() {
-    let (start, arg, _, _, _) = JOBS.lock().unwrap().remove(0);
+    let (start, arg, _, _, _, _) = JOBS.lock().unwrap().remove(0);
     unsafe { start(arg as *mut c_void) };
 }
 
@@ -190,9 +197,17 @@ fn attributes_and_values_are_copied_and_jobs_are_released_before_application_cod
         guardsize: 8192,
         reserved: [0; 2],
     };
+    assert_eq!(
+        unsafe { attr_api::pthread_attr_setinheritsched(&mut attr, 2) },
+        0
+    );
     let cb = import(usize::MAX, &attr);
     attr.stacksize = 1;
     attr.guardsize = 0;
+    assert_eq!(
+        unsafe { attr_api::pthread_attr_setinheritsched(&mut attr, 1) },
+        0
+    );
     let token = implementation::reserve(cb, None, 4).unwrap();
     state().timer_callbacks.values.bind(token, 101).unwrap();
     let e = posix_protocol::timer_callback::Event {
@@ -204,6 +219,7 @@ fn attributes_and_values_are_copied_and_jobs_are_released_before_application_cod
     {
         let jobs = JOBS.lock().unwrap();
         assert_eq!((jobs[0].2, jobs[0].3, jobs[0].4), (65536, 8192, 0));
+        assert_eq!(jobs[0].5, 1, "the explicit scheduling selection was copied");
     }
     run_next();
     assert_eq!(VALUE.load(Ordering::Acquire), u64::MAX);
@@ -270,13 +286,14 @@ fn importer_rejects_faults_null_functions_and_invalid_attributes() {
         guardsize: 4096,
         reserved: [0; 2],
     };
-    for mode in 0..4 {
+    for mode in 0..5 {
         let old = attr;
         match mode {
             0 => attr.is_initialized = 0,
             1 => attr.detachstate = 7,
             2 => attr.stacksize = 1,
-            _ => attr.reserved[0] = 1,
+            3 => attr.reserved[0] = 2,
+            _ => attr.reserved[1] = 1,
         }
         assert!(matches!(
             implementation::import(event(0, &attr).as_ptr().cast(), 0),

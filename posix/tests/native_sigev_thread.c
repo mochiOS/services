@@ -40,6 +40,7 @@ int main(void) {
   CHECK(once(0,CLOCK_MONOTONIC,0,NULL)==0);
   pthread_attr_t attributes;
   CHECK(pthread_attr_init(&attributes)==0 && pthread_attr_setstacksize(&attributes,65536)==0);
+  CHECK(pthread_attr_setinheritsched(&attributes,PTHREAD_EXPLICIT_SCHED)==0);
   CHECK(once(1,CLOCK_MONOTONIC,1,&attributes)==0);
   CHECK(once(2,CLOCK_PROCESS_CPUTIME_ID,0,NULL)==0);
   CHECK(once(3,CLOCK_THREAD_CPUTIME_ID,0,NULL)==0);
