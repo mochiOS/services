@@ -62,7 +62,11 @@ fn one_received_reference_pins_a_file_across_owners_and_releases_after_the_last_
         let (response, owned) = finish(&mut service, peer, observed, Ok(()), &mut fs);
         assert_eq!(result(&response), Reply::Done);
         assert_eq!(owned, retained);
-        assert_eq!(fs.retained.len(), retained_count, "no DUPLICATE authority requested");
+        assert_eq!(
+            fs.retained.len(),
+            retained_count,
+            "no DUPLICATE authority requested"
+        );
         assert!(fs.released.is_empty());
     }
     let release = request(Operation::ReleaseFile);
@@ -279,4 +283,168 @@ fn directories_are_not_regular_file_locks_and_current_origin_requires_seek_autho
             .status,
         -13
     );
+}
+
+fn lock_present(service: &mut PosixService, observer: PeerIdentity, start: i64) -> bool {
+    let status = sample_status();
+    service
+        .record_locks(observer)
+        .unwrap()
+        .conflict(
+            posix_service::record_lock::FileKey {
+                device: status.device,
+                inode: status.inode,
+            },
+            Kind::Write,
+            posix_service::record_lock::Range::normalize(0, start, 1).unwrap(),
+        )
+        .is_some()
+}
+
+#[test]
+fn failed_status_preserves_unknown_owners_locks_but_does_not_block_a_later_native_exit() {
+    let (mut service, init, first, second, mut fs, mut processes) = orphan_family();
+    for (peer, handle, start) in [(first, 71, 0), (second, 72, 20)] {
+        let write = Request {
+            start,
+            length: 10,
+            ..request(Operation::Set(Kind::Write))
+        };
+        let observation = pending(write, &[object(handle, write)], &mut fs);
+        assert_eq!(
+            result(&finish(&mut service, peer, observation, Ok(()), &mut fs).0),
+            Reply::Done
+        );
+    }
+    processes.states.remove(&141);
+    processes
+        .states
+        .insert(142, ProcessLifecycle::Exited { exit_code: 0 });
+    assert_eq!(
+        service.refresh_child_exit_notifications(&mut processes),
+        Err(protocol::STATUS_ESRCH)
+    );
+    assert!(
+        lock_present(&mut service, init, 0),
+        "unknown exit must not release authority"
+    );
+    assert!(
+        !lock_present(&mut service, init, 20),
+        "later confirmed exit must still retire locks"
+    );
+    service.release_unused_record_lock_files(&mut fs);
+    assert!(
+        fs.released.is_empty(),
+        "the unknown owner still pins this file"
+    );
+    processes
+        .states
+        .insert(141, ProcessLifecycle::Exited { exit_code: 0 });
+    service
+        .refresh_child_exit_notifications(&mut processes)
+        .unwrap();
+    service.release_unused_record_lock_files(&mut fs);
+    assert_eq!(fs.released.len(), 1);
+}
+
+#[test]
+fn failed_parent_notification_does_not_starve_later_exited_owners_or_the_last_file_reference() {
+    let (mut service, init, first, second, mut fs, mut processes) = orphan_family();
+    for (peer, handle, start) in [(first, 71, 0), (second, 72, 20)] {
+        let write = Request {
+            start,
+            length: 10,
+            ..request(Operation::Set(Kind::Write))
+        };
+        let observation = pending(write, &[object(handle, write)], &mut fs);
+        assert_eq!(
+            result(&finish(&mut service, peer, observation, Ok(()), &mut fs).0),
+            Reply::Done
+        );
+    }
+    for handle in [141, 142] {
+        processes
+            .states
+            .insert(handle, ProcessLifecycle::Exited { exit_code: 0 });
+    }
+    processes.images.insert(140, Err(protocol::STATUS_EIO));
+    for _ in 0..3 {
+        assert_eq!(
+            service.refresh_child_exit_notifications(&mut processes),
+            Err(protocol::STATUS_EIO)
+        );
+        assert!(!lock_present(&mut service, init, 0));
+        assert!(!lock_present(&mut service, init, 20));
+        service.release_unused_record_lock_files(&mut fs);
+        assert_eq!(
+            fs.released.len(),
+            1,
+            "pin is retired once despite persistent notification failure"
+        );
+    }
+    processes.images.remove(&140);
+    service
+        .refresh_child_exit_notifications(&mut processes)
+        .unwrap();
+    service.release_unused_record_lock_files(&mut fs);
+    assert_eq!(fs.released.len(), 1);
+}
+
+#[test]
+fn a_failed_deferred_continue_notification_does_not_prevent_independent_exit_cleanup() {
+    let (mut service, init, parent, child, mut fs, mut processes) = orphan_family();
+    set_child_signal_policy(
+        &mut service,
+        parent,
+        protocol::SIGNAL_DISPOSITION_CAUGHT,
+        protocol::SIGNAL_CHILD_OPTION_NOCLDSTOP,
+    );
+    stop_job_member(&mut service, parent, child, &mut processes);
+    send_signal(&mut service, parent, child, protocol::SIGNAL_CONT);
+    service
+        .apply_process_resume(child.process_id, &mut processes)
+        .unwrap();
+    assert!(service.has_deferred_child_notifications());
+    service
+        .initialize_process(
+            init,
+            AuthenticatedProcess {
+                process_id: 1403,
+                handle: 143,
+            },
+            501,
+            20,
+            &[],
+        )
+        .unwrap();
+    let owner = service.registered_peer(1403).unwrap();
+    let write = request(Operation::Set(Kind::Write));
+    let observation = pending(write, &[object(71, write)], &mut fs);
+    assert_eq!(
+        finish(&mut service, owner, observation, Ok(()), &mut fs).1,
+        Some(71)
+    );
+    processes.identities.insert(143, 1403);
+    processes
+        .states
+        .insert(143, ProcessLifecycle::Exited { exit_code: 0 });
+    processes.images.insert(141, Err(protocol::STATUS_EIO));
+    assert_eq!(
+        service.refresh_child_exit_notifications(&mut processes),
+        Err(protocol::STATUS_EIO)
+    );
+    assert!(
+        service.has_deferred_child_notifications(),
+        "the failed notification remains retryable"
+    );
+    assert!(!lock_present(&mut service, init, 0));
+    service.release_unused_record_lock_files(&mut fs);
+    assert_eq!(fs.released.len(), 1);
+    processes.images.remove(&141);
+    service
+        .refresh_child_exit_notifications(&mut processes)
+        .unwrap();
+    assert!(!service.has_deferred_child_notifications());
+    service.release_unused_record_lock_files(&mut fs);
+    assert_eq!(fs.released.len(), 1);
 }

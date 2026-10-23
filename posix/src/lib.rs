@@ -1243,7 +1243,9 @@ impl<H: Copy> PosixService<H> {
         &mut self,
         processes: &mut P,
     ) -> Result<usize, i32> {
-        self.refresh_child_notifications(processes)?;
+        // Notification failures must remain retryable without preventing
+        // independent native exit observations and resource retirement.
+        let mut failure = self.refresh_child_notifications(processes).err();
         let candidates: Vec<(u64, H)> = self
             .processes
             .keys()
@@ -1271,16 +1273,25 @@ impl<H: Copy> PosixService<H> {
             .collect();
         let mut notified = 0;
         for (child_id, handle) in candidates {
-            if let ProcessLifecycle::Exited { exit_code } = processes.status(handle)? {
-                self.observe_process_exit(child_id, processes)?;
-                if self.parents.contains_key(&child_id)
-                    && self.note_child_exited(child_id, exit_code, processes)?
-                {
-                    notified += 1;
+            let result = (|| {
+                if let ProcessLifecycle::Exited { exit_code } = processes.status(handle)? {
+                    self.observe_process_exit(child_id, processes)?;
+                    if self.parents.contains_key(&child_id)
+                        && self.note_child_exited(child_id, exit_code, processes)?
+                    {
+                        return Ok(1);
+                    }
+                }
+                Ok(0)
+            })();
+            match result {
+                Ok(count) => notified += count,
+                Err(error) => {
+                    failure.get_or_insert(error);
                 }
             }
         }
-        Ok(notified)
+        failure.map_or(Ok(notified), Err)
     }
 
     fn needs_parent_exit_observation(&self, process_id: u64) -> bool {
