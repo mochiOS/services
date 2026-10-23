@@ -5,6 +5,7 @@ fn clocks(now: u128) -> Samples {
         realtime_ns: 1_000,
         monotonic_ns: now,
         process_cpu_ns: 2,
+        thread_cpu_ns: 0,
     }
 }
 fn bit(signal: u32) -> u64 {

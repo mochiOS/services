@@ -100,10 +100,42 @@ impl<H: Copy> PosixService<H> {
                     realtime_ns: 0,
                     monotonic_ns: 0,
                     process_cpu_ns: 0,
+                    thread_cpu_ns: 0,
                 };
+                let mut thread_samples = Vec::new();
+                thread_samples
+                    .try_reserve_exact(
+                        group
+                            .iter()
+                            .filter(|entry| entry.2 == Clock::ThreadCpu)
+                            .count(),
+                    )
+                    .map_err(|_| protocol::STATUS_ENOMEM)?;
                 let clocks = [Clock::Realtime, Clock::Monotonic, Clock::ProcessCpu];
                 let mut available = [false; 3];
                 let mut first_error = None;
+                for &(_, id, clock) in group {
+                    if clock != Clock::ThreadCpu {
+                        continue;
+                    }
+                    let thread = self
+                        .process_timers(peer)?
+                        .clock_thread(id)?
+                        .ok_or(protocol::STATUS_EIO)?;
+                    if thread_samples.iter().any(|(target, _)| *target == thread) {
+                        continue;
+                    }
+                    let reading = backend
+                        .timer_thread_clock(process, thread)
+                        .and_then(|reading| match reading {
+                            Reading::Counter(value) => Ok(value),
+                            _ => Err(protocol::STATUS_EIO),
+                        });
+                    if let Err(error) = reading {
+                        first_error.get_or_insert(error);
+                    }
+                    thread_samples.push((thread, reading));
+                }
                 for (index, clock) in clocks.into_iter().enumerate() {
                     if !group.iter().any(|&(_, _, basis)| basis == clock) {
                         continue;
@@ -136,6 +168,34 @@ impl<H: Copy> PosixService<H> {
                         Clock::Realtime => 0,
                         Clock::Monotonic => 1,
                         Clock::ProcessCpu => 2,
+                        Clock::ThreadCpu => {
+                            let thread = self
+                                .process_timers(peer)?
+                                .clock_thread(id)?
+                                .ok_or(protocol::STATUS_EIO)?;
+                            let Some((_, Ok(value))) =
+                                thread_samples.iter().find(|(target, _)| *target == thread)
+                            else {
+                                continue;
+                            };
+                            let mut per_thread = samples;
+                            per_thread.thread_cpu_ns = *value;
+                            match self
+                                .process_timers(peer)?
+                                .observe_new_signal(id, per_thread)
+                            {
+                                Ok(signal) => {
+                                    observed += 1;
+                                    if let Some(signal) = signal {
+                                        self.notify_timer_signal(owner, signal)?;
+                                    }
+                                }
+                                Err(error) => {
+                                    first_error.get_or_insert(error);
+                                }
+                            }
+                            continue;
+                        }
                     };
                     if !available[index] {
                         continue;

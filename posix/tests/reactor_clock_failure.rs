@@ -44,44 +44,45 @@ pub mod cpu_limit{pub const SWEEP_INTERVAL_MS:u64=100;}
 pub mod process_timer_reactor{pub const OBSERVATION_INTERVAL_MS:u64=10;}
 }
 struct Service {deadline:u64,cpu_sweeps:u32}
+struct Processes {signal_threads:Vec<()>}
 impl Service {
 fn expire_alarms(&mut self)->Result<usize,i32>{if FAIL.get()&1!=0{Err(-5)}else{Ok(0)}}
 fn has_finite_cpu_limits(&self)->bool{!CPU_ONLY.get()&&!PROCESS_TIMERS.get()}
 fn has_cpu_timers(&self)->bool{CPU_ONLY.get()}
 fn has_observable_process_timers(&self)->bool{PROCESS_TIMERS.get()}
-fn observe_process_timers(&mut self,_:&mut())->Result<usize,i32>{
+fn observe_process_timers(&mut self,_:&mut Processes)->Result<usize,i32>{
  if !PROCESS_TIMERS.get(){return Ok(0)}
  PROCESS_TIMER_SWEEPS.set(PROCESS_TIMER_SWEEPS.get()+1);
  if PROCESS_TIMER_FAILURE.get(){Err(-5)}else{Ok(1)}
 }
-fn expire_cpu_timers(&mut self,_:&mut())->Result<usize,i32>{TIMER_SWEEPS.set(TIMER_SWEEPS.get()+1);Ok(0)}
-fn enforce_cpu_limits(&mut self,_:&mut())->Result<(),i32>{self.cpu_sweeps+=1;Ok(())}
+fn expire_cpu_timers(&mut self,_:&mut Processes)->Result<usize,i32>{TIMER_SWEEPS.set(TIMER_SWEEPS.get()+1);Ok(0)}
+fn enforce_cpu_limits(&mut self,_:&mut Processes)->Result<(),i32>{self.cpu_sweeps+=1;Ok(())}
 fn next_alarm_deadline(&self)->Option<u64>{Some(self.deadline)}
 fn child_lifecycle_handles(&self)->Vec<u32>{vec![7]}
 fn has_deferred_child_notifications(&self)->bool{DEFERRED.get()}
 fn process_resume_notification_processes(&self)->impl Iterator<Item=u64>{
  RESUME.get().then_some(7).into_iter()
 }
-fn refresh_child_notifications(&mut self,_:&mut())->Result<usize,i32>{
+fn refresh_child_notifications(&mut self,_:&mut Processes)->Result<usize,i32>{
  if DEFERRED.get()&&DEFERRED_FAILURE.get(){return Err(-5)}
  let count=usize::from(DEFERRED.get());DEFERRED.set(false);Ok(count)
 }
 }
 struct PendingSignalWait{deadline:Option<u64>}
 fn reap_signal_threads(_:&mut Service,_:&mut Vec<()>){ }
-fn deliver_process_resume_notifications(_:&mut Service,_:&mut()){
+fn deliver_process_resume_notifications(_:&mut Service,_:&mut Processes){
  NOTIFICATIONS.set(NOTIFICATIONS.get()+1);
  if RESUME.get()&&!RESUME_FAILURE.get(){RESUME.set(false);}
 }
-fn complete_pending_signal_waits(_:&mut Vec<PendingSignalWait>,_:&mut Service,_:&mut()){}
-fn complete_pending_waits(_:&mut Vec<()>,_:&mut Service,_:&mut(),_:&mut()){}
+fn complete_pending_signal_waits(_:&mut Vec<PendingSignalWait>,_:&mut Service,_:&mut Processes){}
+fn complete_pending_waits(_:&mut Vec<()>,_:&mut Service,_:&mut(),_:&mut Processes){}
 fn deliver_signal_notifications(_:&mut Service,_:&mut Vec<()>){}
 fn plan(mut service:&mut Service,reported:&mut bool)->(u64,bool) {
 let mut clock_failure_reported=*reported;
 let mut clock_failed=false;
-let mut processes=();let mut filesystem=();
+let mut processes=Processes{signal_threads:vec![()]};let mut filesystem=();
 let mut cpu_sweep_deadline_ms=0;let mut thread_sweep_deadline_ms=0;
-let mut signal_threads=vec![()];let mut pending_waits=Vec::new();
+let mut pending_waits=Vec::new();
 let mut pending_signal_waits=vec![PendingSignalWait{deadline:Some(9_000_000_000)}];
 "#,
     );

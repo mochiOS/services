@@ -3071,6 +3071,8 @@ impl<H: Copy> PosixService<H> {
             }
         };
         if terminated {
+            self.process_timers.retire_thread(identity.process_id, identity.thread_id);
+            self.remove_empty_signal_notification(identity.process_id);
             self.signal_masks.remove(&(identity.process_id, identity.thread_id));
             self.signal_delivery_epochs.remove(&(identity.process_id, identity.thread_id));
             self.thread_pending_signals.remove(&(identity.process_id, identity.thread_id));

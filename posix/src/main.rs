@@ -192,7 +192,9 @@ fn main() {
             platform::process::exit(1);
         }
     };
-    let mut processes = RuntimeProcesses;
+    let mut processes = RuntimeProcesses {
+        signal_threads: BTreeMap::new(),
+    };
     if let Err(error) =
         platform::service_ready::notify_handle(ready_target, 0, endpoint_handle, delegated_rights)
     {
@@ -205,7 +207,6 @@ fn main() {
     platform::logln!("posix.service: endpoint ready");
     let mut pending_waits = Vec::new();
     let mut pending_signal_waits = Vec::new();
-    let mut signal_threads = BTreeMap::new();
     // Native ThreadHandles are not yet wait-many targets. Observe their
     // lifecycle periodically, not by scanning every handle on every RPC.
     let mut thread_sweep_deadline_ms = 0;
@@ -312,17 +313,17 @@ fn main() {
             &mut filesystem,
             &mut processes,
         );
-        deliver_signal_notifications(&mut service, &mut signal_threads);
-        let deadline = if signal_threads.is_empty() {
+        deliver_signal_notifications(&mut service, &mut processes.signal_threads);
+        let deadline = if processes.signal_threads.is_empty() {
             platform::syscall::HANDLE_WAIT_INFINITE
         } else {
             match platform::time::monotonic_milliseconds() {
                 Ok(now) => {
                     if now >= thread_sweep_deadline_ms {
-                        reap_signal_threads(&mut service, &mut signal_threads);
+                        reap_signal_threads(&mut service, &mut processes.signal_threads);
                         thread_sweep_deadline_ms = now.saturating_add(1_000);
                     }
-                    if signal_threads.is_empty() {
+                    if processes.signal_threads.is_empty() {
                         platform::syscall::HANDLE_WAIT_INFINITE
                     } else {
                         thread_sweep_deadline_ms.saturating_mul(1_000_000)
@@ -897,8 +898,14 @@ fn main() {
                     | protocol::OP_TIMER_GET | protocol::OP_TIMER_SET | protocol::OP_TIMER_OVERRUN) =>
             {
                 Some(match request_image {
-                    Some(image) => service.handle_process_timer_request(
-                        peer, image, header, payload, &attachments, &mut processes,
+                    Some(image) => service.handle_process_timer_request_from(
+                        peer,
+                        image,
+                        platform::ipc::endpoint_execution_identity(sender).ok(),
+                        header,
+                        payload,
+                        &attachments,
+                        &mut processes,
                     ),
                     None => posix_service::ObjectResponse {
                         response: status_response(header.request_id, protocol::STATUS_EPERM),
@@ -1141,7 +1148,7 @@ fn main() {
                         service.signal_thread_ready(peer, *context).ok().map(|_| context.thread_id)
                     });
                 if let Some(thread_id) = registered_thread {
-                    if let Some(previous) = signal_threads.insert(
+                    if let Some(previous) = processes.signal_threads.insert(
                         thread_id,
                         RegisteredSignalThread {
                             process_id: peer.process_id,
@@ -2503,10 +2510,28 @@ struct RuntimeFilesystem {
 }
 
 #[cfg(target_os = "mochios")]
-struct RuntimeProcesses;
+struct RuntimeProcesses {
+    signal_threads: std::collections::BTreeMap<u64, RegisteredSignalThread>,
+}
 
 #[cfg(target_os = "mochios")]
 impl posix_service::process_timer_request::ClockBackend<u32> for RuntimeProcesses {
+    fn timer_thread_clock(
+        &mut self,
+        process: u32,
+        target: u64,
+    ) -> Result<posix_service::process_timer_request::Reading, i32> {
+        let owner = mochi_user_platform::process::handle_status(process)
+            .map_err(|error| process_control::lifecycle_failure(error.raw()))?;
+        let thread = self
+            .signal_threads
+            .get(&target)
+            .ok_or(mochios_posix_protocol::STATUS_ESRCH)?;
+        if owner.process_id != thread.process_id {
+            return Err(mochios_posix_protocol::STATUS_EPERM);
+        }
+        process_timer_native::read_thread(owner.process_id, target, thread.handle)
+    }
     fn timer_clock(
         &mut self, process: u32, clock: posix_service::process_timer::Clock,
     ) -> Result<posix_service::process_timer_request::Reading, i32> {

@@ -7,15 +7,20 @@ extern crate self as mnu_abi;
 extern crate self as mochi_user_platform;
 extern crate self as mochios_posix_protocol;
 extern crate self as posix_service;
-pub use real_abi::{ClockId, ClockInstant, ProcessExecutionUsage};
-pub use real_protocol::STATUS_EIO;
+pub use real_abi::{
+    ClockId, ClockInstant, ProcessExecutionUsage, ThreadStatus, THREAD_STATE_READY,
+    THREAD_STATE_TERMINATED,
+};
+pub use real_protocol::{STATUS_EIO, STATUS_EPERM, STATUS_ESRCH};
+pub use real_service::STATUS_EINVAL;
 pub mod process_timer {
     pub use real_protocol::process_timer::Clock;
 }
 pub mod process_timer_request {
-    pub use real_service::process_timer_request::{Reading, cpu_nanoseconds};
+    pub use real_service::process_timer_request::{cpu_nanoseconds, Reading};
 }
 pub mod status {
+    pub use real_abi::status::Error;
     pub use real_protocol::status::*;
 }
 use std::cell::RefCell;
@@ -33,6 +38,8 @@ struct State {
     usage: Result<ProcessExecutionUsage, Failure>,
     owners: Vec<Option<u32>>,
     clocks: Vec<u64>,
+    thread_status: Result<ThreadStatus, Failure>,
+    thread_clocks: Vec<u32>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -50,6 +57,13 @@ impl Default for State {
             }),
             owners: Vec::new(),
             clocks: Vec::new(),
+            thread_status: Ok(ThreadStatus {
+                thread_id: 7,
+                process_id: 41,
+                state: real_abi::THREAD_STATE_RUNNING,
+                reserved: 0,
+            }),
+            thread_clocks: Vec::new(),
         }
     }
 }
@@ -85,8 +99,76 @@ pub mod process {
         })
     }
 }
+pub mod thread {
+    use super::*;
+    pub fn handle_status(handle: u32) -> Result<ThreadStatus, Failure> {
+        assert_eq!(handle, 81);
+        STATE.with(|state| state.borrow().thread_status)
+    }
+    pub fn cpu_clock(handle: u32) -> Result<ClockInstant, Failure> {
+        assert_eq!(handle, 81);
+        STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            state.thread_clocks.push(handle);
+            state.clock
+        })
+    }
+}
 use process_timer::Clock;
 use process_timer_request::Reading;
+
+#[test]
+fn thread_clock_adapter_authenticates_retained_target_and_never_uses_service_cpu() {
+    STATE.with(|state| *state.borrow_mut() = State::default());
+    for (owner, target) in [(0, 7), (41, 0), (99, 7), (41, 8)] {
+        assert_eq!(
+            native::read_thread(owner, target, 81).err(),
+            Some(STATUS_EPERM)
+        );
+    }
+    STATE.with(|state| assert!(state.borrow().thread_clocks.is_empty()));
+    for (state, reserved, error) in [
+        (0, 0, STATUS_EIO),
+        (99, 0, STATUS_EIO),
+        (2, 1, STATUS_EIO),
+        (5, 0, STATUS_ESRCH),
+    ] {
+        STATE.with(|control| {
+            control.borrow_mut().thread_status = Ok(ThreadStatus {
+                thread_id: 7,
+                process_id: 41,
+                state,
+                reserved,
+            })
+        });
+        assert_eq!(native::read_thread(41, 7, 81).err(), Some(error));
+    }
+    STATE.with(|state| *state.borrow_mut() = State::default());
+    assert!(matches!(
+        native::read_thread(41, 7, 81),
+        Ok(Reading::Counter(7_000_000_013))
+    ));
+    STATE.with(|state| {
+        let state = state.borrow();
+        assert_eq!(state.thread_clocks, [81]);
+        assert!(state.clocks.is_empty());
+        assert!(state.owners.is_empty());
+    });
+    STATE.with(|state| {
+        state.borrow_mut().thread_status =
+            Err(Failure(real_abi::status::Error::NotFound.into_raw() as i64))
+    });
+    assert_eq!(native::read_thread(41, 7, 81).err(), Some(STATUS_ESRCH));
+    STATE.with(|state| *state.borrow_mut() = State::default());
+    STATE.with(|state| {
+        state.borrow_mut().clock = Ok(ClockInstant {
+            seconds: 0,
+            nanoseconds: 1_000_000_000,
+            reserved: 0,
+        })
+    });
+    assert_eq!(native::read_thread(41, 7, 81).err(), Some(STATUS_EIO));
+}
 
 #[test]
 fn cpu_timer_reads_retained_owner_not_current_service_cpu_clock() {

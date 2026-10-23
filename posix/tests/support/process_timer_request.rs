@@ -14,10 +14,14 @@ mod wait;
 mod dequeue;
 #[path = "process_timer_wake.rs"]
 mod wake;
+#[path = "process_timer_thread.rs"]
+mod thread;
 
 struct Clocks {
     samples: Samples,
     reads: Vec<(u32, Clock)>,
+    thread_samples: Vec<(u32, u64, u128)>,
+    thread_reads: Vec<(u32, u64)>,
     fail: bool,
     fail_clock: Option<Clock>,
     fail_owner: Option<u32>,
@@ -25,11 +29,43 @@ struct Clocks {
 }
 thread_local! {
     static CLOCKS: RefCell<Clocks> = const { RefCell::new(Clocks {
-        samples: Samples { realtime_ns: 1_000, monotonic_ns: 10, process_cpu_ns: 2 },
-        reads: Vec::new(), fail: false, fail_clock: None, fail_owner: None, exec: false,
+        samples: Samples { realtime_ns: 1_000, monotonic_ns: 10, process_cpu_ns: 2, thread_cpu_ns: 0 },
+        reads: Vec::new(), thread_samples: Vec::new(), thread_reads: Vec::new(),
+        fail: false, fail_clock: None, fail_owner: None, exec: false,
     }) };
 }
 impl ClockBackend<u32> for RecordingProcesses {
+    fn timer_thread_clock(&mut self, process: u32, thread: u64) -> Result<Reading, i32> {
+        CLOCKS.with(|control| {
+            let mut control = control.borrow_mut();
+            control.thread_reads.push((process, thread));
+            if control.fail
+                || control.fail_clock == Some(Clock::ThreadCpu)
+                || control.fail_owner == Some(process)
+            {
+                return Err(protocol::STATUS_EIO);
+            }
+            let value = control
+                .thread_samples
+                .iter()
+                .find(|&&(owner, target, _)| owner == process && target == thread)
+                .map(|&(_, _, value)| value)
+                .ok_or(protocol::STATUS_ESRCH)?;
+            if control.exec {
+                control.exec = false;
+                self.images.insert(
+                    process,
+                    Ok(mnu_abi::ProcessStatus {
+                        process_id: self.identities.get(&process).copied().unwrap_or(u64::from(process)),
+                        state: mnu_abi::PROCESS_STATE_RUNNING,
+                        image_revision: 1,
+                        ..Default::default()
+                    }),
+                );
+            }
+            Ok(Reading::Counter(value))
+        })
+    }
     fn timer_clock(&mut self, process: u32, clock: Clock) -> Result<Reading, i32> {
         CLOCKS.with(|control| {
             let mut control = control.borrow_mut();
@@ -60,6 +96,7 @@ impl ClockBackend<u32> for RecordingProcesses {
                 Clock::Realtime => Reading::Realtime(control.samples.realtime_ns),
                 Clock::Monotonic => Reading::Counter(control.samples.monotonic_ns),
                 Clock::ProcessCpu => Reading::Counter(control.samples.process_cpu_ns),
+                Clock::ThreadCpu => panic!("thread clocks require a retained target"),
             })
         })
     }
@@ -100,7 +137,18 @@ impl ObjectTransport for TimerTransport {
             .map_err(|_| ())?;
         let image = service.capture_request_image(self.peer).unwrap();
         let mut reply = service
-            .handle_process_timer_request(self.peer, image, header, payload, &[], processes)
+            .handle_process_timer_request_from(
+                self.peer,
+                image,
+                Some(mnu_abi::ExecutionIdentity {
+                    process_id: self.peer.process_id,
+                    thread_id: 17,
+                }),
+                header,
+                payload,
+                &[],
+                processes,
+            )
             .response;
         match self.bad_reply.get() {
             1 => {
@@ -135,8 +183,11 @@ fn setup() -> (Client<TimerTransport>, Rc<RefCell<Environment>>) {
                 realtime_ns: 1_000,
                 monotonic_ns: 10,
                 process_cpu_ns: 2,
+                thread_cpu_ns: 0,
             },
             reads: Vec::new(),
+            thread_samples: vec![(2901, 17, 2), (2901, 18, 50)],
+            thread_reads: Vec::new(),
             fail: false,
             fail_clock: None,
             fail_owner: None,
@@ -480,6 +531,7 @@ fn arm_internal(
                 realtime_ns: 0,
                 monotonic_ns: 0,
                 process_cpu_ns: 0,
+                thread_cpu_ns: 0,
             },
             initial,
             interval,
@@ -549,6 +601,7 @@ fn reactor_observes_without_client_rpc_and_keeps_equal_signals_separate() {
                 realtime_ns: 1_000,
                 monotonic_ns: 39,
                 process_cpu_ns: 2,
+                thread_cpu_ns: 0,
             },
         )
         .unwrap();
@@ -906,6 +959,7 @@ fn reactor_does_not_wake_for_silent_disarmed_or_already_pending_one_shot_timers(
                 realtime_ns: 0,
                 monotonic_ns: 0,
                 process_cpu_ns: 0,
+                thread_cpu_ns: 0,
             },
             10,
             0,

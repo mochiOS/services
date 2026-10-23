@@ -5,6 +5,46 @@ use mochios_posix_client::timer_value::{Error, Registry, ResolveError};
 mod probe;
 
 #[test]
+fn owner_retirement_reclaims_capacity_without_reusing_tokens_or_retiring_other_lifetimes() {
+    let mut values = Registry::<usize, 3>::new();
+    assert_eq!(values.reserve_owned(1, 0), Err(Error::InvalidOwner));
+    let shared = values.reserve(10).unwrap();
+    values.bind(shared, 1).unwrap();
+    let other = values.reserve_owned(20, 18).unwrap();
+    values.bind(other, 2).unwrap();
+    let mut old = Vec::new();
+    for timer in 3..1003 {
+        let token = values.reserve_owned(timer as usize, 17).unwrap();
+        values.bind(token, timer).unwrap();
+        values.retire_owner(17);
+        assert_eq!(
+            values.resolve(timer, token.raw()),
+            Err(ResolveError::StaleToken)
+        );
+        old.push((timer, token));
+        assert_eq!(values.resolve(1, shared.raw()), Ok(10));
+        assert_eq!(values.resolve(2, other.raw()), Ok(20));
+    }
+    let token = values.reserve_owned(99, 17).unwrap();
+    values.bind(token, 1003).unwrap();
+    for (timer, token) in old {
+        assert_eq!(
+            values.resolve(timer, token.raw()),
+            Err(ResolveError::StaleToken)
+        );
+    }
+    values.retire_owner(0);
+    assert_eq!(values.resolve(1, shared.raw()), Ok(10));
+    let mut child = values.clone();
+    child.clear_for_fork();
+    assert_eq!(
+        child.resolve(1003, token.raw()),
+        Err(ResolveError::StaleToken)
+    );
+    assert_eq!(values.resolve(1003, token.raw()), Ok(99));
+}
+
+#[test]
 fn reserved_values_cannot_be_resolved_or_bound_to_duplicate_or_zero_timer_ids() {
     let mut values = Registry::<usize, 2>::new();
     let first = values.reserve(0x1234).unwrap();
@@ -132,7 +172,7 @@ fn fork_child_forgets_values_without_rewinding_tokens_or_affecting_the_parent() 
 fn only_a_local_snapshot_not_the_wire_token_becomes_a_c_signal_value() {
     use mochios_posix_protocol::{
         process_timer as wire,
-        signal_origin::{Origin, TIMER, TimerStatus},
+        signal_origin::{Origin, TimerStatus, TIMER},
     };
     let mut values = Registry::<usize, 1>::new();
     let raw_value = 0x1122334455667788usize;
@@ -147,11 +187,9 @@ fn only_a_local_snapshot_not_the_wire_token_becomes_a_c_signal_value() {
         &mut bytes,
     )
     .unwrap();
-    assert!(
-        !bytes
-            .windows(std::mem::size_of::<usize>())
-            .any(|bytes| bytes == raw_value.to_le_bytes())
-    );
+    assert!(!bytes
+        .windows(std::mem::size_of::<usize>())
+        .any(|bytes| bytes == raw_value.to_le_bytes()));
     values.bind(token, 71).unwrap();
     let origin = Origin {
         source: TIMER,

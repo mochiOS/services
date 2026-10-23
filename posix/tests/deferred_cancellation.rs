@@ -7,7 +7,7 @@ fn production_state_transition_defers_pending_request_and_exit_disables_cleanup_
     let mut program = String::from(
         r#"
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 type c_int = i32;
 const EINVAL: i32 = 22;
 const EAGAIN: i32 = 11;
@@ -20,16 +20,32 @@ struct ThreadControl {
     cancel_state: AtomicU32, cancel_type: AtomicU32, cancel_pending: AtomicU32,
     result: AtomicUsize, state: AtomicU32, cleanup_head: AtomicUsize,
     native_delivery_defer: AtomicU32, callback_resources: callback_resources::Chain,
+    native_id: AtomicU64,
 }
 static CONTROL: ThreadControl = ThreadControl {
     cancel_state: AtomicU32::new(PTHREAD_CANCEL_ENABLE),
     cancel_type: AtomicU32::new(PTHREAD_CANCEL_DEFERRED), cancel_pending: AtomicU32::new(0),
     result: AtomicUsize::new(0), state: AtomicU32::new(2), cleanup_head: AtomicUsize::new(0),
     native_delivery_defer: AtomicU32::new(0), callback_resources: callback_resources::Chain::new(),
+    native_id: AtomicU64::new(17),
 };
 static AFTER_ENABLE: AtomicU32 = AtomicU32::new(0);
 static DESTRUCTOR_RETURNED: AtomicU32 = AtomicU32::new(0);
 static RESOURCES_DROPPED: AtomicU32 = AtomicU32::new(0);
+static TIMERS_RETIRED: AtomicU32 = AtomicU32::new(0);
+fn defer_native_delivery()->Option<upcall_guard::Guard<'static>> {
+    upcall_guard::Guard::enter(&CONTROL.native_delivery_defer)
+}
+mod process_timer {
+    use super::*;
+    pub fn thread_exit(owner:u64) {
+        assert_eq!(owner,17);
+        assert_eq!(DESTRUCTOR_RETURNED.load(Ordering::Acquire),1);
+        assert_eq!(CONTROL.native_delivery_defer.load(Ordering::Acquire),1);
+        assert_ne!(CONTROL.state.load(Ordering::Acquire),THREAD_EXITED);
+        assert_eq!(TIMERS_RETIRED.fetch_add(1,Ordering::AcqRel),0);
+    }
+}
 struct Resource;
 impl Drop for Resource {
     fn drop(&mut self) {
@@ -74,6 +90,7 @@ mod syscall {
         assert_eq!(CONTROL.state.load(Ordering::Acquire), THREAD_EXITED);
         assert_eq!(CONTROL.result.load(Ordering::Acquire), usize::MAX);
         assert_eq!(RESOURCES_DROPPED.load(Ordering::Acquire), 1);
+        assert_eq!(TIMERS_RETIRED.load(Ordering::Acquire), 1);
         std::process::exit(0)
     }
 }

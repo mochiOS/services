@@ -6,7 +6,7 @@ use mochios_posix_protocol as posix_protocol;
 use posix_protocol::process_timer::{Clock, Notification, Value};
 use std::ffi::{c_char, c_int, c_void};
 use std::sync::{
-    atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering},
+    atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering},
     Mutex, MutexGuard,
 };
 
@@ -36,9 +36,11 @@ struct Timespec {
 }
 struct ThreadControl {
     native_delivery_defer: AtomicU32,
+    native_id: AtomicU64,
 }
 static CONTROL: ThreadControl = ThreadControl {
     native_delivery_defer: AtomicU32::new(0),
+    native_id: AtomicU64::new(17),
 };
 static REGISTER: AtomicBool = AtomicBool::new(true);
 static ERRNO: AtomicI32 = AtomicI32::new(0);
@@ -53,6 +55,9 @@ static STATE: Mutex<RuntimeState> = Mutex::new(RuntimeState {
 });
 fn state() -> MutexGuard<'static, RuntimeState> {
     STATE.lock().unwrap()
+}
+fn current_thread_control() -> Option<(u32, &'static ThreadControl)> {
+    Some((1, &CONTROL))
 }
 fn register_current_thread() -> Option<(u32, &'static ThreadControl)> {
     REGISTER.load(Ordering::Relaxed).then_some((1, &CONTROL))
@@ -168,6 +173,7 @@ fn reset() -> MutexGuard<'static, ()> {
     };
     REGISTER.store(true, Ordering::Relaxed);
     CONTROL.native_delivery_defer.store(0, Ordering::Relaxed);
+    CONTROL.native_id.store(17, Ordering::Relaxed);
     ERRNO.store(77, Ordering::Relaxed);
     serial
 }
@@ -236,7 +242,7 @@ fn invalid_inputs_fail_before_creation_or_set_rpc() {
     let _serial = reset();
     let mut id = 0;
     let none = event(1, 0, 0);
-    for (clock, error) in [(0, EINVAL), (3, ENOTSUP), (5, EINVAL), (u64::MAX, EINVAL)] {
+    for (clock, error) in [(0, EINVAL), (5, EINVAL), (u64::MAX, EINVAL)] {
         assert_eq!(
             implementation::timer_create(clock, none.as_ptr().cast(), &mut id),
             -1
@@ -280,6 +286,86 @@ fn invalid_inputs_fail_before_creation_or_set_rpc() {
         assert_eq!(ERRNO.load(Ordering::Relaxed), EINVAL);
     }
     assert!(RPC.lock().unwrap().sets.is_empty());
+}
+
+#[test]
+fn newlib_thread_clock_id_maps_to_thread_bound_timer_without_serializing_identity() {
+    let _serial = reset();
+    let event = event(1, 0, 0);
+    let mut id = 0;
+    assert_eq!(
+        implementation::timer_create(3, event.as_ptr().cast(), &mut id),
+        0
+    );
+    assert_eq!(
+        RPC.lock().unwrap().creates,
+        [(Clock::ThreadCpu, Notification::None)]
+    );
+    assert_ne!(id, 0);
+    assert_eq!(implementation::timer_delete(id), 0);
+}
+
+#[test]
+fn exiting_thread_retires_only_its_clock_bound_values_without_rpc() {
+    let _serial = reset();
+    let event = event(2, 10, 0x1234);
+    let mut first = 0;
+    let mut shared = 0;
+    let mut other = 0;
+    assert_eq!(
+        implementation::timer_create(3, event.as_ptr().cast(), &mut first),
+        0
+    );
+    assert_eq!(
+        implementation::timer_create(4, event.as_ptr().cast(), &mut shared),
+        0
+    );
+    CONTROL.native_id.store(18, Ordering::Release);
+    assert_eq!(
+        implementation::timer_create(3, event.as_ptr().cast(), &mut other),
+        0
+    );
+    let tokens: Vec<_> = RPC
+        .lock()
+        .unwrap()
+        .creates
+        .iter()
+        .map(|&(_, notification)| match notification {
+            Notification::Signal { value, .. } => value,
+            _ => panic!(),
+        })
+        .collect();
+    implementation::thread_exit(17);
+    assert_eq!(
+        state().timer_values.resolve(first as u64, tokens[0]),
+        Err(mochios_posix_client::timer_value::ResolveError::StaleToken)
+    );
+    assert_eq!(
+        state().timer_values.resolve(shared as u64, tokens[1]),
+        Ok(0x1234)
+    );
+    assert_eq!(
+        state().timer_values.resolve(other as u64, tokens[2]),
+        Ok(0x1234)
+    );
+    assert!(RPC.lock().unwrap().deletes.is_empty());
+    let runtime = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
+    let body = runtime
+        .split("fn finish_thread(")
+        .nth(1)
+        .unwrap()
+        .split("fn ")
+        .next()
+        .unwrap();
+    assert!(
+        body.find("run_thread_specific_destructors(control)")
+            .unwrap()
+            < body.find("process_timer::thread_exit(").unwrap()
+    );
+    assert!(
+        body.find("process_timer::thread_exit(").unwrap()
+            < body.find("control.state.store(THREAD_EXITED").unwrap()
+    );
 }
 
 #[test]

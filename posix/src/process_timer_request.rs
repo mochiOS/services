@@ -12,6 +12,11 @@ pub enum Reading {
 
 pub trait ClockBackend<H: Copy>: ProcessBackend<H> {
     fn timer_clock(&mut self, process: H, clock: Clock) -> Result<Reading, i32>;
+    /// Select only a registered native Thread Handle belonging to `process`.
+    /// IDs are service-internal bindings, never client-supplied authority.
+    fn timer_thread_clock(&mut self, _process: H, _thread: u64) -> Result<Reading, i32> {
+        Err(protocol::STATUS_ENOTSUP)
+    }
 }
 
 pub fn cpu_nanoseconds(usage: mnu_abi::ProcessExecutionUsage) -> Result<u128, i32> {
@@ -73,6 +78,30 @@ impl<H: Copy> PosixService<H> {
         attachments: &[AttachedObject<H>],
         backend: &mut B,
     ) -> ObjectResponse<H> {
+        self.handle_process_timer_request_from(
+            peer,
+            image,
+            None,
+            header,
+            payload,
+            attachments,
+            backend,
+        )
+    }
+
+    /// `sender` must be resolved from authenticated IPC endpoint metadata.
+    /// The owner-only entry without sender metadata cannot create a
+    /// thread-bound clock.
+    pub fn handle_process_timer_request_from<B: ClockBackend<H>>(
+        &mut self,
+        peer: PeerIdentity,
+        image: RequestImage,
+        sender: Option<mnu_abi::ExecutionIdentity>,
+        header: protocol::Header,
+        payload: &[u8],
+        attachments: &[AttachedObject<H>],
+        backend: &mut B,
+    ) -> ObjectResponse<H> {
         let result = (|| {
             let request = decode(header, payload)?;
             if !attachments.is_empty() {
@@ -91,6 +120,21 @@ impl<H: Copy> PosixService<H> {
                 .processes
                 .get(&peer.process_id)
                 .ok_or(protocol::STATUS_ESRCH)?;
+            let thread = if matches!(request, Request::Create(Clock::ThreadCpu, _)) {
+                let sender = sender
+                    .filter(|sender| sender.process_id == peer.process_id && sender.thread_id != 0)
+                    .ok_or(protocol::STATUS_EPERM)?;
+                if !matches!(
+                    backend.timer_thread_clock(process, sender.thread_id)?,
+                    Reading::Counter(_)
+                ) {
+                    return Err(protocol::STATUS_EIO);
+                }
+                self.validate_request_image(peer, image, backend)?;
+                Some(sender.thread_id)
+            } else {
+                None
+            };
             let mut output = Vec::new();
             // Allocate before any policy mutation, including timer creation.
             output
@@ -100,6 +144,7 @@ impl<H: Copy> PosixService<H> {
                 realtime_ns: 0,
                 monotonic_ns: 0,
                 process_cpu_ns: 0,
+                thread_cpu_ns: 0,
             };
             let query = match request {
                 Request::Get(id) => Some((id, None)),
@@ -107,17 +152,28 @@ impl<H: Copy> PosixService<H> {
                 _ => None,
             };
             if let Some((raw, replacement)) = query {
-                let clocks = {
+                let (clocks, target) = {
                     let timers = self.process_timers(peer)?;
                     let id = timers.resolve(raw)?;
-                    timers.clocks_for(id, replacement)?
+                    (
+                        timers.clocks_for(id, replacement)?,
+                        timers.clock_thread(id)?,
+                    )
                 };
                 for clock in clocks.into_iter().flatten() {
-                    match (clock, backend.timer_clock(process, clock)?) {
+                    let reading = if clock == Clock::ThreadCpu {
+                        backend.timer_thread_clock(process, target.ok_or(protocol::STATUS_EIO)?)?
+                    } else {
+                        backend.timer_clock(process, clock)?
+                    };
+                    match (clock, reading) {
                         (Clock::Realtime, Reading::Realtime(value)) => samples.realtime_ns = value,
                         (Clock::Monotonic, Reading::Counter(value)) => samples.monotonic_ns = value,
                         (Clock::ProcessCpu, Reading::Counter(value)) => {
                             samples.process_cpu_ns = value
+                        }
+                        (Clock::ThreadCpu, Reading::Counter(value)) => {
+                            samples.thread_cpu_ns = value
                         }
                         _ => return Err(protocol::STATUS_EIO),
                     }
@@ -130,7 +186,7 @@ impl<H: Copy> PosixService<H> {
             let mut timers = self.process_timers(peer)?;
             match request {
                 Request::Create(clock, notification) => {
-                    let id = timers.create(clock, notification)?;
+                    let id = timers.create_for_thread(clock, notification, thread)?;
                     output.extend_from_slice(&id.raw().to_le_bytes());
                 }
                 Request::Delete(raw) => {

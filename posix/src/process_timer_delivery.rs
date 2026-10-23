@@ -125,6 +125,7 @@ impl<H: Copy> PosixService<H> {
     ) -> Result<Samples, i32> {
         self.validate_request_image(peer, image, backend)?;
         let basis = self.process_timers(peer)?.selected_signal_basis(selected)?;
+        let target = self.process_timers(peer)?.clock_thread(selected.timer)?;
         let process = *self
             .processes
             .get(&peer.process_id)
@@ -133,11 +134,18 @@ impl<H: Copy> PosixService<H> {
             realtime_ns: 0,
             monotonic_ns: 0,
             process_cpu_ns: 0,
+            thread_cpu_ns: 0,
         };
-        match (basis, backend.timer_clock(process, basis)?) {
+        let reading = if basis == Clock::ThreadCpu {
+            backend.timer_thread_clock(process, target.ok_or(protocol::STATUS_EIO)?)?
+        } else {
+            backend.timer_clock(process, basis)?
+        };
+        match (basis, reading) {
             (Clock::Realtime, Reading::Realtime(value)) => samples.realtime_ns = value,
             (Clock::Monotonic, Reading::Counter(value)) => samples.monotonic_ns = value,
             (Clock::ProcessCpu, Reading::Counter(value)) => samples.process_cpu_ns = value,
+            (Clock::ThreadCpu, Reading::Counter(value)) => samples.thread_cpu_ns = value,
             _ => return Err(protocol::STATUS_EIO),
         }
         self.validate_request_image(peer, image, backend)?;

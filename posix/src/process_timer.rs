@@ -24,6 +24,7 @@ pub struct Samples {
     pub realtime_ns: i128,
     pub monotonic_ns: u128,
     pub process_cpu_ns: u128,
+    pub thread_cpu_ns: u128,
 }
 
 impl Samples {
@@ -35,6 +36,7 @@ impl Samples {
             Clock::Realtime => (self.realtime_ns as u128) ^ (1u128 << 127),
             Clock::Monotonic => self.monotonic_ns,
             Clock::ProcessCpu => self.process_cpu_ns,
+            Clock::ThreadCpu => self.thread_cpu_ns,
         }
     }
 }
@@ -85,6 +87,8 @@ struct Timer {
     id: TimerId,
     clock: Clock,
     basis: Clock,
+    // Native identity admitted by the service, never supplied on the wire.
+    thread: Option<u64>,
     notification: Notification,
     schedule: Schedule,
     pending: Option<Pending>,
@@ -151,6 +155,14 @@ impl Registry {
 
     pub(super) fn retire_owner(&mut self, owner: u64) {
         self.timers.retain(|timer| timer.owner != owner);
+    }
+
+    pub(super) fn retire_thread(&mut self, owner: u64, thread: u64) {
+        // This implementation invalidates clocks bound to a departed native
+        // thread. Process-clock timers created by that thread remain owned by
+        // the process and are deliberately not selected here.
+        self.timers
+            .retain(|timer| timer.owner != owner || timer.thread != Some(thread));
     }
 
     pub(super) fn pending_signal_mask(&self, owner: u64) -> u64 {
@@ -256,6 +268,10 @@ impl OwnedTimers<'_> {
         Ok([Some(timer.basis), next])
     }
 
+    pub(super) fn clock_thread(&self, id: TimerId) -> Result<Option<u64>, i32> {
+        Ok(self.registry.timers[self.index(id)?].thread)
+    }
+
     pub(super) fn preview_value(&self, id: TimerId, samples: Samples) -> Result<Value, i32> {
         let timer = &self.registry.timers[self.index(id)?];
         let now = samples.now(timer.basis);
@@ -278,6 +294,18 @@ impl OwnedTimers<'_> {
     }
 
     pub fn create(&mut self, clock: Clock, notification: Notification) -> Result<TimerId, i32> {
+        self.create_for_thread(clock, notification, None)
+    }
+
+    pub(super) fn create_for_thread(
+        &mut self,
+        clock: Clock,
+        notification: Notification,
+        thread: Option<u64>,
+    ) -> Result<TimerId, i32> {
+        if (clock == Clock::ThreadCpu) != thread.is_some() || thread == Some(0) {
+            return Err(STATUS_EINVAL);
+        }
         if let Notification::Signal { signal, .. } = notification {
             if !(1..=protocol::SIGNAL_MAX).contains(&signal) {
                 return Err(STATUS_EINVAL);
@@ -317,6 +345,7 @@ impl OwnedTimers<'_> {
             owner: self.owner,
             id,
             clock,
+            thread,
             basis: if clock == Clock::Realtime {
                 Clock::Monotonic
             } else {

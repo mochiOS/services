@@ -8,6 +8,7 @@ fn sample(now: u128) -> Samples {
         monotonic_ns: now,
         realtime_ns: now.min(i128::MAX as u128) as i128,
         process_cpu_ns: now,
+        thread_cpu_ns: 0,
     }
 }
 
@@ -259,6 +260,7 @@ fn relative_realtime_uses_monotonic_but_absolute_realtime_tracks_clock_adjustmen
         realtime_ns: 1_000,
         monotonic_ns: 10,
         process_cpu_ns: 2,
+        thread_cpu_ns: 0,
     };
     timers.set(id, clocks, 20, 0, false).unwrap();
     clocks.realtime_ns = 50_000;
@@ -297,6 +299,7 @@ fn absolute_realtime_handles_pre_epoch_clocks_without_treating_epoch_zero_as_arm
         realtime_ns: -50,
         monotonic_ns: 0,
         process_cpu_ns: 0,
+        thread_cpu_ns: 0,
     };
     timers.set(id, clocks, 50, 0, true).unwrap();
     assert_eq!(timers.value(id, clocks).unwrap().remaining_ns, 100);
