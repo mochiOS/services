@@ -138,3 +138,60 @@ fn removing_the_component_limit_does_not_remove_the_symlink_limit() {
     assert!(matches!(walk(&ns, b"alias", true), Err(40)));
     assert_eq!(ns.searches.get(), 41);
 }
+
+#[test]
+fn symlink_expansion_does_not_count_the_already_resolved_prefix() {
+    let ns = namespace(b"leaf".to_vec());
+    let mut path = b"./".repeat(2045);
+    path.extend_from_slice(b"alias");
+    assert_eq!(path.len(), MAX_PATH_LEN - 1);
+    assert_eq!(found(walk(&ns, &path, true)), Node::File);
+}
+
+#[test]
+fn final_symlink_target_can_use_the_full_path_budget() {
+    let mut target = b"./".repeat((MAX_PATH_LEN - 4) / 2);
+    target.extend_from_slice(b"leaf");
+    assert_eq!(target.len(), MAX_PATH_LEN);
+    let ns = namespace(target);
+    assert_eq!(found(walk(&ns, b"alias", true)), Node::File);
+}
+
+#[test]
+fn expanded_length_includes_the_exact_unresolved_separators_and_suffix() {
+    let mut target = b"./".repeat(2045);
+    target.extend_from_slice(b"d");
+    let ns = namespace(target);
+    assert_eq!(ns.target.len() + b"/leaf".len(), MAX_PATH_LEN);
+    assert_eq!(found(walk(&ns, b"alias/leaf", true)), Node::File);
+    for path in [b"alias//leaf".as_slice(), b"alias/leaf/", b"alias///leaf"] {
+        assert!(matches!(walk(&ns, path, true), Err(36)));
+    }
+}
+
+#[test]
+fn repeated_expansion_accounts_for_suffixes_left_by_prior_links() {
+    let mut target = b"alias/".to_vec();
+    target.extend_from_slice(&b"d/".repeat(1000));
+    let ns = namespace(target);
+    // Each expansion leaves another suffix behind. Reject the expanded length
+    // before reaching the independent 40-link limit.
+    assert!(matches!(walk(&ns, b"alias/leaf", true), Err(36)));
+    assert!(ns.searches.get() < 40);
+}
+
+#[test]
+fn oversized_targets_do_not_affect_nofollow_and_fail_with_name_too_long() {
+    let ns = namespace(vec![b'/'; MAX_PATH_LEN + 1]);
+    assert_eq!(found(walk(&ns, b"alias", false)), Node::Link);
+    assert!(matches!(walk(&ns, b"alias", true), Err(36)));
+}
+
+#[test]
+fn empty_link_target_never_resolves_to_its_parent_or_suffix() {
+    let ns = namespace(Vec::new());
+    assert_eq!(found(walk(&ns, b"alias", false)), Node::Link);
+    for path in [b"alias".as_slice(), b"alias/leaf"] {
+        assert!(matches!(walk(&ns, path, true), Err(2)));
+    }
+}

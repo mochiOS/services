@@ -88,7 +88,11 @@ pub fn resolve_visible<B: Backend>(
     let require_directory = path.last() == Some(&b'/');
     let mut symlinks = 0usize;
     let mut last_name = None;
-    while let Some(component) = pending.pop_front() {
+    while let Some(PendingComponent {
+        component,
+        trailing_separators,
+    }) = pending.pop_front()
+    {
         if component == OwnedComponent::DirectoryEnd {
             // This is a type requirement, not another pathname lookup. Keep
             // its parent identity and do not require final-directory search.
@@ -141,19 +145,37 @@ pub fn resolve_visible<B: Backend>(
                         return Err(ELOOP);
                     }
                     let target = backend.symlink(&child)?;
-                    if target.len().saturating_add(path.len()) > MAX_PATH_LEN {
-                        return Err(EINVAL);
+                    // Replace only this link's name. The resolved prefix is
+                    // gone, but every separator and suffix still pending
+                    // (including those from earlier expansions) remains.
+                    let remaining_len: usize = pending.iter().map(PendingComponent::len).sum();
+                    if target
+                        .len()
+                        .saturating_add(trailing_separators)
+                        .saturating_add(remaining_len)
+                        > MAX_PATH_LEN
+                    {
+                        return Err(ENAMETOOLONG);
+                    }
+                    if target.is_empty() {
+                        return Err(ENOENT);
                     }
                     let target = Path::try_from(target.as_slice()).map_err(path_errno)?;
                     if target.is_absolute() {
                         ancestors.truncate(1);
                     }
                     let mut target_components = components(target);
+                    if let Some(last) = target_components.back_mut() {
+                        last.trailing_separators += trailing_separators;
+                    }
                     // Parsing drops trailing separators. Keep the target's
                     // directory requirement inside the unresolved sequence:
                     // it applies before an original suffix, not to its leaf.
                     if target.as_ref().last() == Some(&b'/') {
-                        target_components.push_back(OwnedComponent::DirectoryEnd);
+                        target_components.push_back(PendingComponent {
+                            component: OwnedComponent::DirectoryEnd,
+                            trailing_separators: 0,
+                        });
                     }
                     while let Some(component) = target_components.pop_back() {
                         pending.push_front(component);
@@ -188,13 +210,48 @@ enum OwnedComponent {
     Parent,
     Normal(Vec<u8>),
 }
-fn components(path: Path<'_>) -> VecDeque<OwnedComponent> {
+struct PendingComponent {
+    component: OwnedComponent,
+    trailing_separators: usize,
+}
+
+impl PendingComponent {
+    fn len(&self) -> usize {
+        self.component.len() + self.trailing_separators
+    }
+}
+
+impl OwnedComponent {
+    fn len(&self) -> usize {
+        match self {
+            Self::DirectoryEnd => 0,
+            Self::Root | Self::Current => 1,
+            Self::Parent => 2,
+            Self::Normal(name) => name.len(),
+        }
+    }
+}
+
+fn components(path: Path<'_>) -> VecDeque<PendingComponent> {
+    let bytes = path.as_ref();
+    let mut offset = 0;
     path.components()
-        .map(|component| match component {
-            Component::RootDir => OwnedComponent::Root,
-            Component::CurDir => OwnedComponent::Current,
-            Component::ParentDir => OwnedComponent::Parent,
-            Component::Normal(name) => OwnedComponent::Normal(name.as_ref().to_vec()),
+        .map(|component| {
+            let component = match component {
+                Component::RootDir => OwnedComponent::Root,
+                Component::CurDir => OwnedComponent::Current,
+                Component::ParentDir => OwnedComponent::Parent,
+                Component::Normal(name) => OwnedComponent::Normal(name.as_ref().to_vec()),
+            };
+            offset += component.len();
+            let end = offset;
+            while bytes.get(offset) == Some(&b'/') {
+                offset += 1;
+            }
+            PendingComponent {
+                component,
+                trailing_separators: offset - end,
+            }
         })
         .collect()
 }

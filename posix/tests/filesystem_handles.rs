@@ -3975,3 +3975,82 @@ fn path_length_errors_and_long_component_sequences_reach_the_filesystem_boundary
         ));
     }
 }
+
+#[test]
+fn expanded_path_budget_uses_only_the_unresolved_suffix_on_ext4() {
+    let mut fs = test_filesystem();
+    fs.mkdir_at(
+        protocol::Header {
+            mode: 0o700,
+            ..Default::default()
+        },
+        b"/d",
+        PathAnchors::default(),
+        root_credentials(),
+    )
+    .unwrap();
+    for path in [b"/leaf".as_slice(), b"/d/leaf"] {
+        let file = fs
+            .open_at(
+                protocol::Header {
+                    flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_CREATE,
+                    mode: 0o600,
+                    ..Default::default()
+                },
+                path,
+                PathAnchors::default(),
+                root_credentials(),
+            )
+            .unwrap();
+        fs.provider_close(file.header.open_id).unwrap();
+    }
+    let mut long_target = b"./".repeat(2045);
+    long_target.extend_from_slice(b"d");
+    for (target, name) in [
+        (b"leaf".as_slice(), b"/alias".as_slice()),
+        (long_target.as_slice(), b"/long-expansion"),
+    ] {
+        fs.symlink_at(
+            protocol::Header {
+                mode: target.len() as u32,
+                ..Default::default()
+            },
+            &[target, name].concat(),
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    }
+    let mut path = b"./".repeat(2045);
+    path.extend_from_slice(b"alias");
+    for valid in [path.as_slice(), b"/long-expansion/leaf"] {
+        fs.stat_at(
+            protocol::Header::default(),
+            valid,
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+        let file = fs
+            .open_at(
+                protocol::Header {
+                    flags: protocol::OPEN_AT_READ,
+                    ..Default::default()
+                },
+                valid,
+                PathAnchors::default(),
+                root_credentials(),
+            )
+            .unwrap();
+        fs.provider_close(file.header.open_id).unwrap();
+    }
+    assert!(matches!(
+        fs.stat_at(
+            protocol::Header::default(),
+            b"/long-expansion//leaf",
+            PathAnchors::default(),
+            root_credentials(),
+        ),
+        Err(36)
+    ));
+}
