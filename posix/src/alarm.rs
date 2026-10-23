@@ -5,48 +5,34 @@ const SECOND: u64 = 1_000_000_000;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct RealTimer {
-    deadline: Option<u64>,
-    interval: u64,
+    schedule: timer_schedule::Schedule,
 }
 
 impl RealTimer {
     fn value(self, now: u64) -> protocol::interval_timer::Value {
         protocol::interval_timer::Value {
-            interval_ns: self.interval,
-            remaining_ns: self.deadline.map_or(0, |end| end.saturating_sub(now)),
+            interval_ns: self.schedule.interval() as u64,
+            remaining_ns: self.schedule.remaining(u128::from(now)) as u64,
         }
     }
 
     fn new(now: u64, value: protocol::interval_timer::Value) -> Result<Self, i32> {
-        let deadline = if value.remaining_ns == 0 {
-            None
-        } else {
-            Some(
-                now.checked_add(value.remaining_ns)
-                    .filter(|&end| end != mnu_abi::HANDLE_WAIT_INFINITE)
-                    .ok_or(STATUS_EOVERFLOW)?,
-            )
-        };
         Ok(Self {
-            deadline,
-            interval: value.interval_ns,
+            schedule: timer_schedule::Schedule::arm(
+                u128::from(now),
+                u128::from(value.remaining_ns),
+                u128::from(value.interval_ns),
+                false,
+                u128::from(mnu_abi::HANDLE_WAIT_INFINITE - 1),
+            )
+            .map_err(|_| STATUS_EOVERFLOW)?,
         })
     }
 
     fn after_expiration(self, now: u64) -> Self {
-        let deadline = self.deadline.and_then(|end| {
-            if self.interval == 0 {
-                return None;
-            }
-            // Advance from the scheduled deadline, not observation time. A
-            // delayed reactor coalesces missed expirations without phase drift
-            // or an unbounded replay loop. No finite deadline means disarmed.
-            let steps = u128::from(now - end) / u128::from(self.interval) + 1;
-            u64::try_from(u128::from(end) + steps * u128::from(self.interval))
-                .ok()
-                .filter(|&end| end != mnu_abi::HANDLE_WAIT_INFINITE)
-        });
-        Self { deadline, ..self }
+        Self {
+            schedule: self.schedule.observe(u128::from(now)).0,
+        }
     }
 }
 
@@ -61,7 +47,7 @@ impl<H: Copy> PosixService<H> {
     pub fn next_alarm_deadline(&self) -> Option<u64> {
         self.real_timers
             .values()
-            .filter_map(|timer| timer.deadline)
+            .filter_map(|timer| timer.schedule.deadline().map(|end| end as u64))
             .min()
     }
 
@@ -79,8 +65,9 @@ impl<H: Copy> PosixService<H> {
             .iter()
             .filter_map(|(&owner, timer)| {
                 timer
-                    .deadline
-                    .filter(|&deadline| deadline <= now)
+                    .schedule
+                    .deadline()
+                    .filter(|&deadline| deadline <= u128::from(now))
                     .map(|_| (owner, *timer))
             })
             .collect();
@@ -96,7 +83,7 @@ impl<H: Copy> PosixService<H> {
     }
 
     fn store_real_timer(&mut self, owner: u64, timer: RealTimer) {
-        if timer.deadline.is_none() && timer.interval == 0 {
+        if timer.schedule.deadline().is_none() && timer.schedule.interval() == 0 {
             self.real_timers.remove(&owner);
         } else {
             self.real_timers.insert(owner, timer);

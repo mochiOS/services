@@ -44,6 +44,7 @@ pub mod file_request;
 mod fault_signal;
 mod signal_origin;
 mod alarm;
+mod timer_schedule;
 mod fork_state;
 pub mod resource_policy;
 pub mod cpu_limit;

@@ -4,8 +4,7 @@ use protocol::interval_timer::{self, CpuClock, Value};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct CpuTimer {
-    deadline: Option<u128>,
-    interval: u64,
+    schedule: timer_schedule::Schedule,
     previous: mnu_abi::ProcessExecutionUsage,
 }
 
@@ -34,25 +33,16 @@ impl CpuTimer {
             return Err(protocol::STATUS_EIO);
         }
         let now = elapsed(usage, clock)?;
-        let due = self.deadline.is_some_and(|end| end <= now);
-        if due {
-            self.deadline = self.deadline.and_then(|end| {
-                if self.interval == 0 {
-                    return None;
-                }
-                let interval = u128::from(self.interval);
-                Some(end + ((now - end) / interval + 1) * interval)
-            });
-        }
+        let (schedule, expirations) = self.schedule.observe(now);
+        self.schedule = schedule;
         self.previous = usage;
-        let remaining_ns = self.deadline.map_or(Ok(0), |end| {
-            u64::try_from(end - now).map_err(|_| STATUS_EOVERFLOW)
-        })?;
+        let remaining_ns =
+            u64::try_from(self.schedule.remaining(now)).map_err(|_| STATUS_EOVERFLOW)?;
         let value = Value {
-            interval_ns: self.interval,
+            interval_ns: self.schedule.interval() as u64,
             remaining_ns,
         };
-        Ok((self, value, due))
+        Ok((self, value, expirations != 0))
     }
 }
 
@@ -66,7 +56,7 @@ impl<H: Copy> PosixService<H> {
 
     pub fn has_cpu_timers(&self) -> bool {
         self.cpu_timers.iter().any(|(&(owner, _), timer)| {
-            timer.deadline.is_some()
+            timer.schedule.deadline().is_some()
                 && self
                     .process_wait_states
                     .get(&owner)
@@ -76,7 +66,7 @@ impl<H: Copy> PosixService<H> {
 
     fn store_cpu_timer(&mut self, owner: u64, clock: CpuClock, timer: CpuTimer) {
         let key = (owner, clock as u32);
-        if timer.deadline.is_none() && timer.interval == 0 {
+        if timer.schedule.deadline().is_none() && timer.schedule.interval() == 0 {
             self.cpu_timers.remove(&key);
         } else {
             self.cpu_timers.insert(key, timer);
@@ -115,7 +105,7 @@ impl<H: Copy> PosixService<H> {
         let mut owners: Vec<_> = self
             .cpu_timers
             .iter()
-            .filter_map(|(&(owner, _), timer)| timer.deadline.is_some().then_some(owner))
+            .filter_map(|(&(owner, _), timer)| timer.schedule.deadline().is_some().then_some(owner))
             .collect();
         owners.dedup();
         let mut observed = 0;
@@ -195,17 +185,27 @@ impl<H: Copy> PosixService<H> {
             }
             let usage = processes.execution_usage(handle)?;
             let now = elapsed(usage, clock)?;
+            let replacement = replacement
+                .map(|value| {
+                    timer_schedule::Schedule::arm(
+                        now,
+                        u128::from(value.remaining_ns),
+                        u128::from(value.interval_ns),
+                        false,
+                        u128::MAX,
+                    )
+                    .map_err(|_| STATUS_EOVERFLOW)
+                })
+                .transpose()?;
             let previous = self.observe_cpu_timer(owner, clock, usage)?;
             let mut output = vec![0; interval_timer::LEN];
             interval_timer::encode(previous, &mut output).map_err(|_| STATUS_EINVAL)?;
-            if let Some(value) = replacement {
+            if let Some(schedule) = replacement {
                 self.store_cpu_timer(
                     owner,
                     clock,
                     CpuTimer {
-                        deadline: (value.remaining_ns != 0)
-                            .then_some(now + u128::from(value.remaining_ns)),
-                        interval: value.interval_ns,
+                        schedule,
                         previous: usage,
                     },
                 );
