@@ -28,7 +28,10 @@ static pid_t held_child(int *release) {
   return child;
 }
 
-int main(void) {
+#ifndef WAIT_ID_ENTRY
+#define WAIT_ID_ENTRY main
+#endif
+int WAIT_ID_ENTRY(void) {
   _Static_assert(sizeof(siginfo_t) == 40, "waitid siginfo ABI");
   siginfo_t info;
   int release;

@@ -25,18 +25,41 @@ static EPOCH:AtomicU32=AtomicU32::new(0);
 static DRAINS:AtomicU32=AtomicU32::new(0);
 static READ_ERROR:AtomicU32=AtomicU32::new(0);
 static WRITE_ERROR:AtomicU32=AtomicU32::new(0);
+static CANCEL_PENDING:AtomicU32=AtomicU32::new(0);
+static CANCEL_ENABLED:AtomicU32=AtomicU32::new(1);
+static CANCEL_PHASE:AtomicU32=AtomicU32::new(u32::MAX);
+fn pthread_testcancel(){
+ if CANCEL_PENDING.load(Ordering::Acquire)!=0&&CANCEL_ENABLED.load(Ordering::Acquire)!=0{
+  let phase=CANCEL_PHASE.load(Ordering::Acquire);
+  assert!(phase<=2,"a committed signal must remain visible");
+  assert_eq!(CALLS.lock().unwrap().len(),if phase==2{1}else{0});
+  assert!(COPIES.lock().unwrap().is_empty());
+  assert_eq!(QUEUE.lock().unwrap().len(),1,"cancellation must not accept the queued signal");
+  std::process::exit(0);
+ }
+}
 fn register_current_thread()->Option<(u32,())>{Some((1,()))}
 fn map_posix_client_error(error:PosixClientError)->i32{match error{PosixClientError::Remote(e)=>e}}
 fn drain_pending_signals()->Result<(),i32>{DRAINS.fetch_add(1,Ordering::Relaxed);Ok(())}
 struct Client;
 fn posix_client()->Result<&'static Client,PosixClientError>{Ok(&Client)}
 impl Client {
- fn thread_signal_epoch(&self)->Result<u64,PosixClientError>{Ok(EPOCH.fetch_add(1,Ordering::Relaxed) as u64+1)}
+ fn thread_signal_epoch(&self)->Result<u64,PosixClientError>{
+  if CANCEL_PHASE.load(Ordering::Acquire)==1{CANCEL_PENDING.store(1,Ordering::Release)}
+  Ok(EPOCH.fetch_add(1,Ordering::Relaxed) as u64+1)
+ }
  fn wait_thread_signal_info_until(&self,mask:u64,epoch:u64,deadline:u64)->Result<Accepted,PosixClientError>{self.receive(mask,epoch,Some(deadline))}
  fn wait_thread_signal_info_since(&self,mask:u64,epoch:u64)->Result<Accepted,PosixClientError>{self.receive(mask,epoch,None)}
  fn receive(&self,mask:u64,epoch:u64,deadline:Option<u64>)->Result<Accepted,PosixClientError>{
   CALLS.lock().unwrap().push((epoch,deadline,mask));
-  QUEUE.lock().unwrap().pop_front().expect("unexpected retry").map_err(PosixClientError::Remote)
+  let phase=CANCEL_PHASE.load(Ordering::Acquire);
+  if phase==2{
+   assert_eq!(CALLS.lock().unwrap().len(),1,"cancelled wait was retried");
+   CANCEL_PENDING.store(1,Ordering::Release);return Err(PosixClientError::Remote(EINTR))
+  }
+  let result=QUEUE.lock().unwrap().pop_front().expect("unexpected retry").map_err(PosixClientError::Remote);
+  if phase==3{CANCEL_PENDING.store(1,Ordering::Release)}
+  result
  }
 }
 mod signal_info {
@@ -64,6 +87,7 @@ mod signal_memory {
 fn reset(queue:Vec<Result<Accepted,i32>>){
  *QUEUE.lock().unwrap()=queue.into();CALLS.lock().unwrap().clear();COPIES.lock().unwrap().clear();
  for counter in [&EPOCH,&DRAINS,&READ_ERROR,&WRITE_ERROR]{counter.store(0,Ordering::Relaxed)}
+ CANCEL_PENDING.store(0,Ordering::Release);CANCEL_ENABLED.store(1,Ordering::Release);CANCEL_PHASE.store(u32::MAX,Ordering::Release);
 }
 fn accepted(origin:u32)->Result<Accepted,i32>{Ok(Accepted{signal:10,origin})}
 fn calls(deadline:Option<u64>,count:usize){
@@ -85,6 +109,21 @@ fn calls(deadline:Option<u64>,count:usize){
         r#"
 fn main(){
  let mask=0x200u64;let mut selected=0;
+ let args:Vec<_>=std::env::args().collect();
+ if args.len()==3{
+  let mode:u32=args[1].parse().unwrap();let phase:u32=args[2].parse().unwrap();
+  reset(vec![accepted(0)]);CANCEL_PHASE.store(phase,Ordering::Release);
+  if phase==0||phase==4{CANCEL_PENDING.store(1,Ordering::Release)}
+  if phase==4{CANCEL_ENABLED.store(0,Ordering::Release)}
+  if mode==0{assert_eq!(unsafe{sigwait(&mask,&mut selected)},0);assert_eq!(*COPIES.lock().unwrap(),[10])}
+  else{assert_eq!(wait_signal_info(&mask,std::ptr::null_mut(),(mode==2).then_some(123)),Ok(10));}
+  assert!(phase==3||phase==4,"pending cancellation returned from the API");
+  assert_eq!(COPIES.lock().unwrap().len(),1);assert!(QUEUE.lock().unwrap().is_empty());return;
+ }
+ for mode in 0..3{for phase in 0..5{
+  let result=std::process::Command::new(std::env::current_exe().unwrap()).args([mode.to_string(),phase.to_string()]).output().unwrap();
+  assert!(result.status.success(),"mode={mode},phase={phase}: {}",String::from_utf8_lossy(&result.stderr));
+ }}
  reset(vec![accepted(1),accepted(1),accepted(0)]);
  assert_eq!(wait_signal_info(&mask,std::ptr::null_mut(),Some(123)),Ok(10));
  calls(Some(123),3);assert_eq!(*COPIES.lock().unwrap(),[0]);
