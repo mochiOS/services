@@ -109,6 +109,9 @@ impl<H: Copy> PosixService<H> {
     // All maps are validated before native-image observation commits; fresh
     // launch paths call this only after their complete environment is installed.
     pub(super) fn reset_image_signals(&mut self, owner: u64) {
+        // POSIX per-process timers are image-local. Unlike alarm/setitimer,
+        // they do not survive exec; a startup claim alone cannot reach here.
+        self.process_timers.retire_owner(owner);
         self.signals.get_mut(&owner).unwrap().caught = 0;
         *self.signal_child_options.get_mut(&owner).unwrap() = 0;
         // The native replacement retires siblings as well as the caller's

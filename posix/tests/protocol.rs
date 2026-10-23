@@ -69,6 +69,9 @@ mod cpu_limit;
 #[path = "support/cpu_timer.rs"]
 mod cpu_timer;
 
+#[path = "support/process_timer.rs"]
+mod process_timer;
+
 #[path = "support/child_signal_info.rs"]
 mod child_signal_info;
 
