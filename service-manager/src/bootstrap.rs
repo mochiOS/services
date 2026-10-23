@@ -210,12 +210,13 @@ impl Runtime {
         service: ReadyService,
         process_id: impl Into<crate::process_watch::ProcessWatchTarget>,
     ) -> bool {
+        let process_target = process_id.into();
         platform::logln!(
             "service-manager.service: waiting for {} ready",
             service.name()
         );
         let result = match self.ready.as_mut() {
-            Some(handshake) => handshake.wait_for_service_ready(service, process_id),
+            Some(handshake) => handshake.wait_for_service_ready(service, process_target),
             None => Err(ReadyError::InvalidMessage),
         };
         if service == ReadyService::Network {
@@ -234,6 +235,18 @@ impl Runtime {
                 true
             }
             Err(error) => {
+                if let crate::process_watch::ProcessWatchTarget::RetainedHandle(handle) = process_target
+                {
+                    if let Ok(usage) = platform::process::execution_usage(Some(handle)) {
+                        eprintln!(
+                            "service-manager.service: {} startup CPU user_ticks={} kernel_ticks={} ticks_per_second={}",
+                            service.name(),
+                            usage.user_ticks,
+                            usage.kernel_ticks,
+                            usage.ticks_per_second
+                        );
+                    }
+                }
                 log_ready_error(service, error);
                 false
             }
