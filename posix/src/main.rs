@@ -7,6 +7,9 @@ mod process_control;
 mod process_timer_native;
 
 #[cfg(target_os = "mochios")]
+mod cpu_sleep_native;
+
+#[cfg(target_os = "mochios")]
 mod resource_policy_native;
 
 #[cfg(target_os = "mochios")]
@@ -207,6 +210,7 @@ fn main() {
     platform::logln!("posix.service: endpoint ready");
     let mut pending_waits = Vec::new();
     let mut pending_signal_waits = Vec::new();
+    let mut cpu_sleeps = cpu_sleep_native::Registry::new();
     // Native ThreadHandles are not yet wait-many targets. Observe their
     // lifecycle periodically, not by scanning every handle on every RPC.
     let mut thread_sweep_deadline_ms = 0;
@@ -245,7 +249,8 @@ fn main() {
             }
             clock_failed = true;
         }
-        let process_timer_observation = service.has_observable_process_timers();
+        let process_timer_observation = service.has_observable_process_timers()
+            || !cpu_sleeps.is_empty();
         let cpu_deadline = if service.has_finite_cpu_limits() || service.has_cpu_timers()
             || process_timer_observation {
             match platform::time::monotonic_milliseconds() {
@@ -275,6 +280,13 @@ fn main() {
                                 platform::logln!(
                                     "posix.service: process timer observation failed errno={}", error
                                 );
+                                clock_failure_reported = true;
+                            }
+                            clock_failed = true;
+                        }
+                        if let Err(error) = cpu_sleeps.observe(&mut service, &mut processes) {
+                            if !clock_failure_reported {
+                                platform::logln!("posix.service: CPU sleep observation failed errno={}", error);
                                 clock_failure_reported = true;
                             }
                             clock_failed = true;
@@ -891,6 +903,20 @@ fn main() {
                 Some(service.handle_process_group_request(
                     peer, header, payload, &attachments, &mut processes,
                 ))
+            }
+            (Some(peer), Some((header, payload)), true)
+                if header.opcode == protocol::OP_PROCESS_CPU_SLEEP =>
+            {
+                let result = request_image.ok_or(protocol::STATUS_EPERM).and_then(|image| {
+                    cpu_sleep_native::begin(&mut cpu_sleeps, &mut service, peer, image,
+                        header, payload, &attachments, &mut processes, sender)
+                });
+                match result {
+                    Ok(_) => None,
+                    Err(status) => Some(posix_service::ObjectResponse {
+                        response: status_response(header.request_id, status), handles: Vec::new(),
+                    }),
+                }
             }
             (Some(peer), Some((header, payload)), true)
                 if matches!(header.opcode, protocol::OP_TIMER_CREATE | protocol::OP_TIMER_CREATE_PROCESS_CPU) =>

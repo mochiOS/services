@@ -24,6 +24,9 @@ static TIMER_SWEEPS:Cell<u32>=const{Cell::new(0)};
 static PROCESS_TIMERS:Cell<bool>=const{Cell::new(false)};
 static PROCESS_TIMER_FAILURE:Cell<bool>=const{Cell::new(false)};
 static PROCESS_TIMER_SWEEPS:Cell<u32>=const{Cell::new(0)};
+static CPU_SLEEPS:Cell<bool>=const{Cell::new(false)};
+static CPU_SLEEP_FAILURE:Cell<bool>=const{Cell::new(false)};
+static CPU_SLEEP_SWEEPS:Cell<u32>=const{Cell::new(0)};
 static DEFERRED:Cell<bool>=const{Cell::new(false)};
 static DEFERRED_FAILURE:Cell<bool>=const{Cell::new(false)};
 static RESUME:Cell<bool>=const{Cell::new(false)};
@@ -47,7 +50,7 @@ struct Service {deadline:u64,cpu_sweeps:u32}
 struct Processes {signal_threads:Vec<()>}
 impl Service {
 fn expire_alarms(&mut self)->Result<usize,i32>{if FAIL.get()&1!=0{Err(-5)}else{Ok(0)}}
-fn has_finite_cpu_limits(&self)->bool{!CPU_ONLY.get()&&!PROCESS_TIMERS.get()}
+fn has_finite_cpu_limits(&self)->bool{!CPU_ONLY.get()&&!PROCESS_TIMERS.get()&&!CPU_SLEEPS.get()}
 fn has_cpu_timers(&self)->bool{CPU_ONLY.get()}
 fn has_observable_process_timers(&self)->bool{PROCESS_TIMERS.get()}
 fn observe_process_timers(&mut self,_:&mut Processes)->Result<usize,i32>{
@@ -69,6 +72,15 @@ fn refresh_child_notifications(&mut self,_:&mut Processes)->Result<usize,i32>{
 }
 }
 struct PendingSignalWait{deadline:Option<u64>}
+struct CpuSleeps;
+impl CpuSleeps {
+fn is_empty(&self)->bool{!CPU_SLEEPS.get()}
+fn observe(&mut self,_:&mut Service,_:&mut Processes)->Result<usize,i32>{
+ if !CPU_SLEEPS.get(){return Ok(0)}
+ CPU_SLEEP_SWEEPS.set(CPU_SLEEP_SWEEPS.get()+1);
+ if CPU_SLEEP_FAILURE.get(){Err(-5)}else{Ok(1)}
+}
+}
 fn reap_signal_threads(_:&mut Service,_:&mut Vec<()>){ }
 fn deliver_process_resume_notifications(_:&mut Service,_:&mut Processes){
  NOTIFICATIONS.set(NOTIFICATIONS.get()+1);
@@ -83,6 +95,7 @@ let mut clock_failed=false;
 let mut processes=Processes{signal_threads:vec![()]};let mut filesystem=();
 let mut cpu_sweep_deadline_ms=0;let mut thread_sweep_deadline_ms=0;
 let mut pending_waits=Vec::new();
+let mut cpu_sleeps=CpuSleeps;
 let mut pending_signal_waits=vec![PendingSignalWait{deadline:Some(9_000_000_000)}];
 "#,
     );
@@ -126,6 +139,20 @@ PROCESS_TIMER_FAILURE.set(false);CLOCK_CALLS.set(0);
 assert_eq!(plan(&mut service,&mut reported),(2_010_000_000,false));
 assert!(!reported);assert_eq!(LOGS.get(),1);
 PROCESS_TIMERS.set(false);
+// CPU sleepers alone also keep the reactor live. Completion observation
+// failures must reach IPC fallback planning and recover without a client RPC.
+CPU_SLEEPS.set(true);CPU_SLEEP_FAILURE.set(true);CPU_SLEEP_SWEEPS.set(0);
+LOGS.set(0);reported=false;
+for _ in 0..2 {
+ CLOCK_CALLS.set(0);
+ assert_eq!(plan(&mut service,&mut reported),(2_010_000_000,true));
+ assert!(reported);
+}
+assert_eq!(CPU_SLEEP_SWEEPS.get(),2);assert_eq!(LOGS.get(),1);
+CPU_SLEEP_FAILURE.set(false);CLOCK_CALLS.set(0);
+assert_eq!(plan(&mut service,&mut reported),(2_010_000_000,false));
+assert!(!reported);assert_eq!(LOGS.get(),1);
+CPU_SLEEPS.set(false);
 // Failed parent-image observation keeps a retry deadline without another RPC
 // or child exit. Failure of that deadline's ClockRead must still reach polling.
 CPU_ONLY.set(false);DEFERRED.set(true);DEFERRED_FAILURE.set(true);

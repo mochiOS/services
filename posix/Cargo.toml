@@ -41,6 +41,11 @@ ext4plus = { git = "https://github.com/arihant2math/ext4plus", rev = "382b9e0a65
 [lib]
 path = "src/lib.rs"
 
+[[test]]
+name = "native_cpu_sleep"
+path = "tests/native_cpu_sleep.rs"
+harness = false
+
 [[bin]]
 name = "posix-service"
 path = "src/main.rs"

@@ -3755,6 +3755,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_FORK_CANCEL
             | protocol::OP_RESOURCE_POLICY
             | protocol::OP_PROCESS_CPU_CLOCK
+            | protocol::OP_PROCESS_CPU_SLEEP
             | protocol::OP_TIMER_CREATE_PROCESS_CPU
             | protocol::OP_PROCESS_SPAWNED
             | protocol::OP_PROCESS_SESSION_INFO

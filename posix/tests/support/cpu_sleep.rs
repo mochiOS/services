@@ -648,3 +648,116 @@ fn global_quota_prevents_unbounded_waiters_across_independent_owners() {
     );
     assert_eq!(state.borrow().drops, 1);
 }
+
+#[test]
+fn ipc_admission_rejects_noncanonical_envelopes_and_attached_objects_before_publication() {
+    let (client, environment) = setup();
+    subject(&environment, 2902, 501);
+    let peer = client.transport().peer;
+    let mut registry = Registry::new();
+    let mut payload = [0; protocol::cpu_sleep::REQUEST_LEN];
+    protocol::cpu_sleep::encode_request(
+        protocol::cpu_sleep::Request {
+            process: 0,
+            absolute: false,
+            nanoseconds: 10,
+        },
+        &mut payload,
+    )
+    .unwrap();
+    for case in 0..7 {
+        let mut header = protocol::Header {
+            opcode: protocol::OP_PROCESS_CPU_SLEEP,
+            payload_len: payload.len() as u32,
+            ..Default::default()
+        };
+        let mut bytes = payload;
+        let mut attachments = Vec::new();
+        match case {
+            0 => header.opcode = u16::MAX,
+            1 => header.flags = 1,
+            2 => header.status = -5,
+            3 => header.payload_len -= 1,
+            4 => bytes[0] = 2,
+            5 => attachments.push(AttachedObject {
+                handle: 44,
+                rights: mnu_abi::HANDLE_RIGHT_WAIT,
+            }),
+            6 => bytes[4] = 1,
+            _ => unreachable!(),
+        }
+        let (endpoint, state) = channel();
+        let mut environment = environment.borrow_mut();
+        let Environment { service, processes } = &mut *environment;
+        let image = service.capture_request_image(peer).unwrap();
+        assert_eq!(
+            registry.begin_request_with_reply(
+                service,
+                peer,
+                image,
+                header,
+                &bytes,
+                &attachments,
+                endpoint,
+                processes,
+                |_| panic!("malformed IPC published")
+            ),
+            Err(if case == 0 {
+                protocol::STATUS_ENOSYS
+            } else {
+                STATUS_EINVAL
+            })
+        );
+        assert_eq!(state.borrow().drops, 1);
+        assert!(registry.is_empty());
+    }
+}
+
+#[test]
+fn canonical_ipc_admission_publishes_the_sampled_deadline_and_then_completes() {
+    let (client, environment) = setup();
+    subject(&environment, 2902, 501);
+    let peer = client.transport().peer;
+    clocks(&[(2901, 100)]);
+    let mut registry = Registry::new();
+    let mut payload = [0; protocol::cpu_sleep::REQUEST_LEN];
+    protocol::cpu_sleep::encode_request(
+        protocol::cpu_sleep::Request {
+            process: 0,
+            absolute: false,
+            nanoseconds: 10,
+        },
+        &mut payload,
+    )
+    .unwrap();
+    let (endpoint, state) = channel();
+    {
+        let mut environment = environment.borrow_mut();
+        let Environment { service, processes } = &mut *environment;
+        let image = service.capture_request_image(peer).unwrap();
+        assert_eq!(
+            registry.begin_request_with_reply(
+                service,
+                peer,
+                image,
+                protocol::Header {
+                    opcode: protocol::OP_PROCESS_CPU_SLEEP,
+                    payload_len: payload.len() as u32,
+                    ..Default::default()
+                },
+                &payload,
+                &[],
+                endpoint,
+                processes,
+                |deadline| {
+                    assert_eq!(deadline, 110);
+                    true
+                }
+            ),
+            Ok(true)
+        );
+    }
+    clocks(&[(2901, 110)]);
+    assert_eq!(observe(&mut registry, &environment), Ok(1));
+    assert_eq!(state.borrow().delivered, [Ok(())]);
+}

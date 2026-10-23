@@ -40,6 +40,44 @@ impl<C: Completion> Default for Registry<C> {
 }
 
 impl<C: Completion> Registry<C> {
+    /// IPC admission keeps the channel rollback-owned even for malformed
+    /// frames or unexpected attachments. No request byte supplies the owner.
+    pub fn begin_request_with_reply<H: Copy, B: ClockBackend<H>>(
+        &mut self,
+        service: &mut PosixService<H>,
+        peer: PeerIdentity,
+        image: RequestImage,
+        header: protocol::Header,
+        payload: &[u8],
+        attachments: &[AttachedObject<H>],
+        completion: C,
+        backend: &mut B,
+        reply: impl FnOnce(u128) -> bool,
+    ) -> Result<bool, i32> {
+        if header.opcode != protocol::OP_PROCESS_CPU_SLEEP {
+            return Err(protocol::STATUS_ENOSYS);
+        }
+        if header.flags != 0
+            || header.status != 0
+            || header.payload_len as usize != payload.len()
+            || !attachments.is_empty()
+        {
+            return Err(STATUS_EINVAL);
+        }
+        let request = protocol::cpu_sleep::decode_request(payload).map_err(|_| STATUS_EINVAL)?;
+        self.begin_with_reply(
+            service,
+            peer,
+            image,
+            request.process,
+            request.absolute,
+            request.nanoseconds,
+            completion,
+            backend,
+            reply,
+        )
+    }
+
     pub const fn new() -> Self {
         Self { waits: Vec::new() }
     }
