@@ -33,7 +33,7 @@ fn actual_thread_lookup_retries_identity_copied_across_a_handler_fork() {
     let mut program = String::from(
         r#"
 use core::sync::atomic::{AtomicU32,AtomicU64,Ordering};
-type Pthread=u64;
+type Pthread=u32;
 const THREAD_FREE:u32=0;const THREAD_REAPING:u32=4;const RUNNING:u32=2;
 struct ThreadControl{state:AtomicU32,native_id:AtomicU64,thread_local_base:AtomicU64}
 impl ThreadControl{const fn new()->Self{Self{state:AtomicU32::new(THREAD_FREE),native_id:AtomicU64::new(0),thread_local_base:AtomicU64::new(0)}}}
@@ -45,7 +45,12 @@ static MODE:AtomicU32=AtomicU32::new(0);
 static LOCAL_BASE:AtomicU64=AtomicU64::new(0);
 static LOCAL_CALLS:AtomicU32=AtomicU32::new(0);
 static TOKENS:AtomicU32=AtomicU32::new(0);
+static REVISION:AtomicU32=AtomicU32::new(1);
+mod thread_lifecycle {
+    pub fn stable_revision()->Option<u32>{Some(crate::REVISION.load(crate::Ordering::Acquire))}
+}
 mod thread_lookup{
+    pub(super) use crate::cache_implementation::TokenCache;
     pub fn local_base()->Option<u64>{
         crate::LOCAL_CALLS.fetch_add(1,crate::Ordering::Relaxed);
         let base=crate::LOCAL_BASE.load(crate::Ordering::Relaxed);
@@ -71,16 +76,30 @@ fn native_thread_id()->Result<u64,()>{
     // Its saved caller now resumes in the child holding that old result.
     Ok(observed)
 }
+fn thread_control(token:Pthread)->Option<&'static ThreadControl>{
+    let control=THREADS.get(token.checked_sub(1)? as usize)?;
+    (!matches!(control.state.load(Ordering::Acquire),THREAD_FREE|THREAD_REAPING)).then_some(control)
+}
 fn thread_token_for(index:usize,_:&ThreadControl)->Option<Pthread>{
-    if MODE.load(Ordering::Acquire)==6 && TOKENS.fetch_add(1,Ordering::Relaxed)==0 {child_snapshot()}
+    let lookups=TOKENS.fetch_add(1,Ordering::Relaxed);
+    if MODE.load(Ordering::Acquire)==6 && lookups==0 {child_snapshot()}
     if MODE.load(Ordering::Acquire)==3 && CALLS.load(Ordering::Acquire)==1 {child_snapshot()}
-    Some(index as u64+1)
+    Some(index as u32+1)
 }
 "#,
+    );
+    let cache_source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../user/crates/newlib-runtime/src/thread_lookup.rs")
+        .canonicalize()
+        .unwrap();
+    program.insert_str(
+        0,
+        &format!("#[path = {cache_source:?}] mod cache_implementation;\n"),
     );
     program.push_str(&runtime[start..end]);
     program.push_str(r#"
 fn reset(mode:u32){
+    REVISION.fetch_add(1,Ordering::AcqRel);
     CURRENT.store(11,Ordering::Release);FORK_EPOCH.store(0,Ordering::Release);
     CALLS.store(0,Ordering::Release);MODE.store(mode,Ordering::Release);
     THREADS[0].state.store(RUNNING,Ordering::Release);THREADS[0].native_id.store(11,Ordering::Release);
@@ -109,6 +128,13 @@ fn main(){
     reset(5);LOCAL_BASE.store(0x1000,Ordering::Relaxed);
     for _ in 0..1000 {assert_eq!(current_thread_control().unwrap().0,1)}
     assert_eq!(CALLS.load(Ordering::Acquire),0);
+    assert_eq!(TOKENS.load(Ordering::Relaxed),1,"steady-state lookups must reuse the validated token");
+    // A new ambiguous registration invalidates even an already populated
+    // cache. Resolve through native identity instead of trusting that hint.
+    REVISION.fetch_add(1,Ordering::AcqRel);
+    THREADS[1].thread_local_base.store(0x1000,Ordering::Release);
+    assert!(current_thread_control().is_none());
+    assert_eq!(CALLS.load(Ordering::Acquire),1);
     reset(5);LOCAL_BASE.store(0x2000,Ordering::Relaxed);
     assert_eq!(current_thread_control().unwrap().0,2);
     assert_eq!(CALLS.load(Ordering::Acquire),0);

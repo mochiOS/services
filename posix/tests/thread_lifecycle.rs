@@ -38,6 +38,55 @@ fn failure_paths_release_activity_and_capture() {
 }
 
 #[test]
+fn cached_observations_expire_on_mutation_and_snapshot() {
+    let gate = Gate::new();
+    let first = gate.stable_revision().unwrap();
+    let activity = gate.try_enter().unwrap();
+    assert_eq!(gate.stable_revision(), None);
+    let nested = gate.try_enter().unwrap();
+    drop(activity);
+    assert_eq!(gate.stable_revision(), None);
+    drop(nested);
+    let second = gate.stable_revision().unwrap();
+    assert!(second > first);
+    let capture = gate.try_freeze().unwrap();
+    assert_eq!(gate.stable_revision(), None);
+    drop(capture);
+    assert!(gate.stable_revision().unwrap() > second);
+}
+
+#[test]
+fn an_unchanged_stable_revision_never_covers_a_concurrent_mutation() {
+    let gate = Arc::new(Gate::new());
+    let value = Arc::new(AtomicUsize::new(0));
+    let workers: Vec<_> = (0..4)
+        .map(|_| {
+            let (gate, value) = (gate.clone(), value.clone());
+            std::thread::spawn(move || {
+                for _ in 0..10000 {
+                    let _activity = gate.try_enter().unwrap();
+                    value.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+        })
+        .collect();
+    for _ in 0..10000 {
+        if let Some(revision) = gate.stable_revision() {
+            let before = value.load(Ordering::SeqCst);
+            std::thread::yield_now();
+            let after = value.load(Ordering::SeqCst);
+            if gate.stable_revision() == Some(revision) {
+                assert_eq!(before, after);
+            }
+        }
+    }
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    assert_eq!(value.load(Ordering::SeqCst), 40000);
+}
+
+#[test]
 fn activity_count_never_wraps_into_the_frozen_bit() {
     let gate = Gate::new();
     gate.word().store((1 << 31) - 1, Ordering::Relaxed);
