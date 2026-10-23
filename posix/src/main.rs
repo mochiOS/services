@@ -841,10 +841,29 @@ fn main() {
                     &mut named_semaphore_native::NativeBacking))
             }
             (Some(peer), Some((header, payload)), true)
+                if header.opcode == protocol::OP_SIGNAL_THREAD_DEQUEUE && attachments.is_empty() =>
+            {
+                let result = (|| {
+                    if header.flags != 0 || header.status != 0 || !payload.is_empty() {
+                        return Err(posix_service::STATUS_EINVAL);
+                    }
+                    let image = request_image.ok_or(protocol::STATUS_EPERM)?;
+                    let identity = platform::ipc::endpoint_execution_identity(sender)
+                        .map_err(|_| protocol::STATUS_EPERM)?;
+                    service.dequeue_signal_with_timers(peer, image, identity, &mut processes,
+                        |delivery| reply_signal_dequeue(sender, header.request_id, delivery))
+                })();
+                match result {
+                    Ok(_) => None,
+                    Err(status) => Some(posix_service::ObjectResponse {
+                        response: status_response(header.request_id, status), handles: Vec::new(),
+                    }),
+                }
+            }
+            (Some(peer), Some((header, payload)), true)
                 if matches!(
                     header.opcode,
                     protocol::OP_SIGNAL_THREAD_MASK
-                        | protocol::OP_SIGNAL_THREAD_DEQUEUE
                         | protocol::OP_SIGNAL_THREAD_PENDING
                         | protocol::OP_SIGNAL_THREAD_RAISE
                         | protocol::OP_SIGNAL_THREAD_FAULT
@@ -2023,6 +2042,26 @@ fn validate_pending_request_image(
         return Err(mochios_posix_protocol::STATUS_EPERM);
     }
     service.validate_request_image(peer, image, processes)
+}
+
+#[cfg(target_os = "mochios")]
+fn reply_signal_dequeue(
+    sender: u64,
+    request_id: u64,
+    delivery: mochios_posix_protocol::SignalDelivery,
+) -> bool {
+    use mochios_posix_protocol as protocol;
+    let mut payload = [0; protocol::SIGNAL_DELIVERY_LEN];
+    if protocol::encode_signal_delivery(delivery, &mut payload).is_err() { return false }
+    let header = protocol::Header {
+        opcode: protocol::OP_STATUS, request_id, payload_len: payload.len() as u32,
+        ..Default::default()
+    };
+    let mut bytes = [0; protocol::HEADER_LEN + protocol::SIGNAL_DELIVERY_LEN];
+    match protocol::encode(header, &payload, &mut bytes) {
+        Ok(length) => mochi_user_platform::ipc::reply(sender, &bytes[..length]).is_ok(),
+        Err(_) => false,
+    }
 }
 
 #[cfg(target_os = "mochios")]

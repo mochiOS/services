@@ -10,6 +10,8 @@ use std::{cell::Cell, rc::Rc};
 mod delivery;
 #[path = "process_timer_wait.rs"]
 mod wait;
+#[path = "process_timer_dequeue.rs"]
+mod dequeue;
 
 struct Clocks {
     samples: Samples,

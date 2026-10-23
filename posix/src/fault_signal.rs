@@ -64,18 +64,15 @@ impl<H: Copy> PosixService<H> {
         if state.deliveries.len() >= MAX_OUTSTANDING_SIGNAL_DELIVERIES {
             return Err(protocol::STATUS_EAGAIN);
         }
-        let mut token = self.next_signal_delivery_token.max(1);
-        while state.contains_delivery_token(token) {
-            token = token.wrapping_add(1).max(1);
-        }
-        self.next_signal_delivery_token = token.wrapping_add(1).max(1);
-        let delivery = protocol::SignalDelivery { signal, token };
-        state.begin_delivery(delivery, sender.thread_id, origin);
         let epoch = self
             .signal_delivery_epochs
             .entry((sender.process_id, sender.thread_id))
             .or_insert(0);
-        *epoch = epoch.wrapping_add(1);
+        let next_epoch = epoch.checked_add(1).ok_or(STATUS_EOVERFLOW)?;
+        let token = signal_dequeue::allocate_token(&mut self.next_signal_delivery_token)?;
+        let delivery = protocol::SignalDelivery { signal, token };
+        state.begin_delivery(delivery, sender.thread_id, origin);
+        *epoch = next_epoch;
         Ok(delivery)
     }
 }

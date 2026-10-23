@@ -107,6 +107,14 @@ pub(super) struct Registry {
 }
 
 impl Registry {
+    // Internal field-split borrow, after the service has admitted the owner.
+    pub(super) fn for_owner(&mut self, owner: u64) -> OwnedTimers<'_> {
+        OwnedTimers {
+            owner,
+            registry: self,
+        }
+    }
+
     pub(super) fn has_observable(&self) -> bool {
         self.timers.iter().any(Timer::observable)
     }

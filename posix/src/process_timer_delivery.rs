@@ -106,6 +106,18 @@ impl<H: Copy> PosixService<H> {
         B: ClockBackend<H>,
         R: FnOnce(Pending) -> bool,
     {
+        let samples = self.timer_signal_samples(peer, image, selected, backend)?;
+        self.process_timers(peer)?
+            .accept_with_reply(selected, samples, reply)
+    }
+
+    pub(super) fn timer_signal_samples<B: ClockBackend<H>>(
+        &mut self,
+        peer: PeerIdentity,
+        image: RequestImage,
+        selected: Pending,
+        backend: &mut B,
+    ) -> Result<Samples, i32> {
         self.validate_request_image(peer, image, backend)?;
         let basis = self.process_timers(peer)?.selected_signal_basis(selected)?;
         let process = *self
@@ -124,7 +136,6 @@ impl<H: Copy> PosixService<H> {
             _ => return Err(protocol::STATUS_EIO),
         }
         self.validate_request_image(peer, image, backend)?;
-        self.process_timers(peer)?
-            .accept_with_reply(selected, samples, reply)
+        Ok(samples)
     }
 }

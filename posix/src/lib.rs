@@ -43,6 +43,7 @@ pub mod directory_request;
 pub mod file_request;
 mod fault_signal;
 mod signal_origin;
+mod signal_dequeue;
 mod alarm;
 mod timer_schedule;
 pub mod process_timer;
@@ -561,10 +562,6 @@ impl ProcessWaitState {
                 thread_id,
             },
         );
-    }
-
-    fn contains_delivery_token(&self, token: u64) -> bool {
-        self.deliveries.contains_key(&token)
     }
 
     fn cancel_stop_deliveries(&mut self) {
