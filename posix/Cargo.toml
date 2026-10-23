@@ -42,6 +42,11 @@ ext4plus = { git = "https://github.com/arihant2math/ext4plus", rev = "382b9e0a65
 path = "src/lib.rs"
 
 [[test]]
+name = "native_device_observation"
+path = "tests/native_device_observation.rs"
+harness = false
+
+[[test]]
 name = "native_cpu_sleep"
 path = "tests/native_cpu_sleep.rs"
 harness = false

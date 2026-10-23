@@ -693,6 +693,22 @@ impl PtyManager {
         self.reopen_slave(terminal.pair.master_object_id)
     }
 
+    /// Metadata uses an explicitly attached factory, never a new data open.
+    /// Only selectors reviewed as read-only may be added to this namespace.
+    pub fn observe_slave_factory(
+        &self,
+        factory_object_id: u64,
+        selector: u64,
+        capacity: usize,
+    ) -> Result<Vec<u8>, i32> {
+        let id = self.slave_factories.get(&factory_object_id).ok_or(EBADF)?;
+        let terminal = self.terminals.get(id).ok_or(EBADF)?;
+        if selector != posix_protocol::PTY_QUERY_LIMITS {
+            return Err(ENOTSUP);
+        }
+        self.observation(terminal.pair.master_object_id, selector, &[], capacity)
+    }
+
     /// Retain the admitted filesystem metadata reference for this independent
     /// open, not the terminal or factory lifetime. Failed native publication
     /// must release the returned open ID; dup/fork share that same native open.

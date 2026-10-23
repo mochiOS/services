@@ -8,12 +8,26 @@ use mnu_abi::{
 use mochi_user_platform as platform;
 use mochios_filesystem_protocol::device_open::Request;
 
+#[path = "device_observation.rs"]
+mod observation;
+pub use observation::observe_with;
+
 pub trait Factory: std::fmt::Debug + Send + Sync {
     /// Metadata is borrowed locally and explicitly attached to the creation
     /// request. Success returns one newly owned data reference, exact rights.
     /// Creation runs on the serialized filesystem worker: retain metadata
     /// without synchronously querying that same worker until creation returns.
     fn open(&self, metadata: IpcObjectHandle, request: Request) -> Result<IpcObjectHandle, i32>;
+    /// Observe owner-defined immutable/configuration metadata without opening
+    /// data, allocating an OFD, or borrowing a client's READ permission.
+    /// Like creation, this may run on the serialized filesystem worker: the
+    /// owner must answer locally without synchronously calling back into it.
+    fn observe(
+        &self,
+        _request: mochios_filesystem_protocol::device_observation::Request,
+    ) -> Result<Vec<u8>, i32> {
+        Err(95)
+    }
 }
 
 /// Owns a SEND endpoint and a resource-scoped factory grant. Neither a service
@@ -56,6 +70,23 @@ impl Drop for NativeFactory {
     }
 }
 impl Factory for NativeFactory {
+    fn observe(
+        &self,
+        request: mochios_filesystem_protocol::device_observation::Request,
+    ) -> Result<Vec<u8>, i32> {
+        observe_with(
+            self.endpoint,
+            self.factory,
+            request,
+            |endpoint, bytes, reply, objects| {
+                platform::ipc::call_object_handles(endpoint, bytes, reply, objects)
+                    .map_err(crate::memory_updates::native_error)
+            },
+            |handle| {
+                let _ = platform::handle::close(handle);
+            },
+        )
+    }
     fn open(&self, metadata: IpcObjectHandle, request: Request) -> Result<IpcObjectHandle, i32> {
         open_with(
             self.endpoint,

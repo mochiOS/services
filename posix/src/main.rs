@@ -1723,6 +1723,12 @@ fn run_pty_provider(
             );
             continue;
         }
+        if request[..request_length].starts_with(&mochios_filesystem_protocol::device_observation::MAGIC) {
+            posix_service::pty_observation::serve(
+                &ptys, sender, &request[..request_length], attachments,
+            );
+            continue;
+        }
         if request[..request_length].starts_with(&mochios_filesystem_protocol::device_open::MAGIC) {
             posix_service::pty_open::serve(
                 &ptys, endpoint, sender, &request[..request_length], attachments,
