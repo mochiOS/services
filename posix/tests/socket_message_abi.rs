@@ -13,7 +13,7 @@ fn host_stream_ancillary_boundaries_match_the_queue_contract() {
 fn run(source: &str) {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let directory = std::env::temp_dir().join(format!(
-        "mochios-socket-message-{}-{}",
+        "mochios-socket-message-{source}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
