@@ -23,6 +23,14 @@ fn actual_public_clock_getres_handles_null_full_width_ids_and_error_propagation(
         r#"
 type c_int = i32;
 const EINVAL: i32 = 22;
+mod thread_clock {
+    pub fn is_id(id:u64)->bool{id>=1<<32}
+    pub fn resolution(id:u64,output:*mut super::Timespec)->Result<i32,i32>{
+        if id!=1<<32{return Err(super::EINVAL)}
+        if !output.is_null(){unsafe{output.write(super::Timespec{tv_sec:0,tv_nsec:42})}}
+        Ok(0)
+    }
+}
 #[repr(C)] struct Timespec { tv_sec: i64, tv_nsec: i64 }
 static mut ERRNO: i32 = 123;
 static mut CALLS: usize = 0;
@@ -87,6 +95,9 @@ fn main() {
         assert_eq!((output.tv_sec, output.tv_nsec), (1, 3));
         assert_eq!(clock_getres(clock, std::ptr::null_mut()), 0);
     }
+    assert_eq!(clock_getres(1<<32,&mut output),0);
+    assert_eq!((output.tv_sec,output.tv_nsec),(0,42));
+    assert_eq!(clock_getres(1<<32,std::ptr::null_mut()),0);
     output = Timespec { tv_sec: 99, tv_nsec: 98 };
     unsafe { STATUS = (-11i64) as u64; }
     assert_eq!(clock_getres(4, &mut output), -1);

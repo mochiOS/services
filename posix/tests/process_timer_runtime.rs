@@ -29,6 +29,10 @@ const EOVERFLOW: c_int = 139;
 const ENOENT: c_int = 2;
 const ENAMETOOLONG: c_int = 91;
 const PAGE_SIZE: usize = 4096;
+mod thread_clock {
+    pub fn is_id(id:u64)->bool{id>=1<<32}
+    pub fn timer_source(_:u64)->Result<super::Clock,super::c_int>{Err(super::EINVAL)}
+}
 #[repr(C)]
 struct Timespec {
     tv_sec: i64,

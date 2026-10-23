@@ -33,6 +33,20 @@ static AFTER_ENABLE: AtomicU32 = AtomicU32::new(0);
 static DESTRUCTOR_RETURNED: AtomicU32 = AtomicU32::new(0);
 static RESOURCES_DROPPED: AtomicU32 = AtomicU32::new(0);
 static TIMERS_RETIRED: AtomicU32 = AtomicU32::new(0);
+static CLOCKS_RETIRED: AtomicU32 = AtomicU32::new(0);
+struct Clocks;
+impl Clocks {
+    fn retire_native(&mut self,owner:u64) {
+        assert_eq!(owner,17);
+        assert_eq!(DESTRUCTOR_RETURNED.load(Ordering::Acquire),1);
+        assert_eq!(CONTROL.native_delivery_defer.load(Ordering::Acquire),1);
+        assert_ne!(CONTROL.state.load(Ordering::Acquire),THREAD_EXITED);
+        assert_eq!(CLOCKS_RETIRED.fetch_add(1,Ordering::AcqRel),0);
+    }
+}
+struct RuntimeState {thread_clocks:Clocks}
+static STATE:std::sync::Mutex<RuntimeState>=std::sync::Mutex::new(RuntimeState{thread_clocks:Clocks});
+fn state()->std::sync::MutexGuard<'static,RuntimeState>{STATE.lock().unwrap()}
 fn defer_native_delivery()->Option<upcall_guard::Guard<'static>> {
     upcall_guard::Guard::enter(&CONTROL.native_delivery_defer)
 }
@@ -91,6 +105,7 @@ mod syscall {
         assert_eq!(CONTROL.result.load(Ordering::Acquire), usize::MAX);
         assert_eq!(RESOURCES_DROPPED.load(Ordering::Acquire), 1);
         assert_eq!(TIMERS_RETIRED.load(Ordering::Acquire), 1);
+        assert_eq!(CLOCKS_RETIRED.load(Ordering::Acquire), 1);
         std::process::exit(0)
     }
 }

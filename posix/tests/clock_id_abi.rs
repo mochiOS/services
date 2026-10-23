@@ -13,6 +13,13 @@ const EFAULT: i32 = 14;
 const EINVAL: i32 = 22;
 const EIO: i32 = 5;
 const EOVERFLOW: i32 = 75;
+mod thread_clock {
+    pub fn is_id(id:u64)->bool{id>=1<<32}
+    pub fn read(id:u64,output:*mut super::Timespec)->Result<i32,i32>{
+        if id!=1<<32{return Err(super::EINVAL)}
+        unsafe{output.write(super::Timespec{tv_sec:8,tv_nsec:9})};Ok(0)
+    }
+}
 #[repr(C)] struct Timespec { tv_sec: i64, tv_nsec: i64 }
 mod time_memory {
     pub fn write_timespec(output:*mut super::Timespec,value:super::Timespec)->Result<(),i32>{
@@ -67,6 +74,9 @@ fn main() {
     assert_eq!(unsafe { ERRNO }, 123);
     assert_eq!(unsafe { CALLS }, 1);
     assert_eq!((output.tv_sec, output.tv_nsec), (7, 5));
+    assert_eq!(clock_gettime(1<<32,&mut output),0);
+    assert_eq!((output.tv_sec, output.tv_nsec),(8,9));
+    assert_eq!(unsafe { CALLS },1);
 }
 "#);
     let directory = std::env::temp_dir().join(format!(
