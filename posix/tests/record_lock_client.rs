@@ -13,6 +13,7 @@ struct Backend {
     malformed: Cell<bool>,
     calls: RefCell<Vec<(Request, u64)>>,
     closed: RefCell<Vec<u32>>,
+    epochs: RefCell<Vec<u64>>,
 }
 impl Transport for Backend {
     type Error = ();
@@ -32,13 +33,18 @@ impl ObjectTransport for Backend {
         handles: &mut ObjectHandles<u32>,
     ) -> Result<usize, ()> {
         let (header, payload) = protocol::decode(bytes).unwrap();
-        assert_eq!(header.opcode, protocol::OP_RECORD_LOCK);
+        let request = if header.opcode == protocol::OP_RECORD_LOCK_WAIT {
+            let wait = protocol::record_lock_wait::decode(payload).unwrap();
+            self.epochs.borrow_mut().push(wait.epoch);
+            wait.lock
+        } else {
+            assert_eq!(header.opcode, protocol::OP_RECORD_LOCK);
+            wire::decode_request(payload).unwrap()
+        };
         assert_eq!(handles.len(), 1);
         let file = handles.get(0).unwrap();
         assert_eq!(file.handle, 71);
-        self.calls
-            .borrow_mut()
-            .push((wire::decode_request(payload).unwrap(), file.rights));
+        self.calls.borrow_mut().push((request, file.rights));
         handles.clear();
         if self.unexpected.get() {
             handles
@@ -73,6 +79,7 @@ fn client(reply: Reply) -> Client<Backend> {
         malformed: Cell::new(false),
         calls: RefCell::new(Vec::new()),
         closed: RefCell::new(Vec::new()),
+        epochs: RefCell::new(Vec::new()),
     })
 }
 fn request(operation: Operation) -> Request {
@@ -181,6 +188,49 @@ fn malformed_scalar_replies_and_unexpected_owned_handles_are_rejected_and_closed
     client.transport().unexpected.set(true);
     assert_eq!(
         client.record_lock(file(u64::MAX), request(Operation::Unlock)),
+        Err(ClientError::MismatchedResponse)
+    );
+    assert_eq!(*client.transport().closed.borrow(), [99]);
+}
+
+#[test]
+fn deferred_lock_preserves_epoch_and_attenuates_the_attached_file() {
+    let client = client(Reply::Done);
+    let request = Request {
+        origin: Origin::Current,
+        ..request(Operation::Set(Kind::Write))
+    };
+    client
+        .wait_record_lock_since(file(u64::MAX), request, u64::MAX)
+        .unwrap();
+    assert_eq!(*client.transport().epochs.borrow(), [u64::MAX]);
+    assert_eq!(
+        *client.transport().calls.borrow(),
+        [(request, wire::required_rights(request))]
+    );
+    assert_eq!(
+        client.wait_record_lock_since(file(0), request, 0),
+        Err(ClientError::Remote(-13))
+    );
+    assert_eq!(client.transport().calls.borrow().len(), 1);
+    assert!(matches!(
+        client.wait_record_lock_since(file(u64::MAX), self::request(Operation::Unlock), 0),
+        Err(ClientError::Protocol(_))
+    ));
+}
+
+#[test]
+fn deferred_lock_rejects_noncompletion_replies_and_closes_unexpected_handles() {
+    let client = client(Reply::Unlocked);
+    let request = request(Operation::Set(Kind::Read));
+    assert_eq!(
+        client.wait_record_lock_since(file(u64::MAX), request, 0),
+        Err(ClientError::MismatchedResponse)
+    );
+    client.transport().reply.set(Reply::Done);
+    client.transport().unexpected.set(true);
+    assert_eq!(
+        client.wait_record_lock_since(file(u64::MAX), request, 0),
         Err(ClientError::MismatchedResponse)
     );
     assert_eq!(*client.transport().closed.borrow(), [99]);

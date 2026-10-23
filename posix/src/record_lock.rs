@@ -100,6 +100,9 @@ struct Lock {
 pub(super) struct Registry {
     entries: Vec<Lock>,
 }
+
+/// Fully allocated replacement, committed only after a successful reply.
+pub(super) struct PreparedSet(Vec<Lock>);
 impl Registry {
     pub(super) const fn new() -> Self {
         Self {
@@ -170,11 +173,6 @@ impl Registry {
         range: Range,
         kind: Option<Kind>,
     ) -> Result<(), Error> {
-        if let Some(kind) = kind {
-            if let Some(conflict) = self.conflict(owner, file, kind, range) {
-                return Err(Error::WouldBlock(conflict));
-            }
-        }
         if kind.is_none()
             && !self.entries.iter().any(|lock| {
                 lock.owner == owner
@@ -200,6 +198,37 @@ impl Registry {
                 }
             });
             return Ok(());
+        }
+        self.entries = self.replacement(owner, file, range, kind)?;
+        Ok(())
+    }
+
+    pub(super) fn prepare_set(
+        &self,
+        owner: u64,
+        file: FileKey,
+        kind: Kind,
+        range: Range,
+    ) -> Result<PreparedSet, Error> {
+        self.replacement(owner, file, range, Some(kind))
+            .map(PreparedSet)
+    }
+
+    pub(super) fn commit_set(&mut self, prepared: PreparedSet) {
+        self.entries = prepared.0;
+    }
+
+    fn replacement(
+        &self,
+        owner: u64,
+        file: FileKey,
+        range: Range,
+        kind: Option<Kind>,
+    ) -> Result<Vec<Lock>, Error> {
+        if let Some(kind) = kind {
+            if let Some(conflict) = self.conflict(owner, file, kind, range) {
+                return Err(Error::WouldBlock(conflict));
+            }
         }
         // Build before mutation. Splitting, merging and quota failure leave
         // all prior locks intact, including a failed read-to-write upgrade.
@@ -260,8 +289,7 @@ impl Registry {
         {
             return Err(Error::NoLocks);
         }
-        self.entries = next;
-        Ok(())
+        Ok(next)
     }
 }
 

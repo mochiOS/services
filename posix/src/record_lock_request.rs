@@ -6,7 +6,7 @@ use protocol::record_lock::{self as wire, Operation, Origin};
 #[must_use = "finish must validate the image before applying lock policy"]
 pub struct Pending<H> {
     request_id: u64,
-    result: Result<Observation<H>, i32>,
+    pub(super) result: Result<Observation<H>, i32>,
 }
 
 impl<H> Pending<H> {
@@ -15,12 +15,12 @@ impl<H> Pending<H> {
     }
 }
 
-struct Observation<H> {
-    file: AttachedObject<H>,
-    key: record_lock::FileKey,
-    request: wire::Request,
-    position: i64,
-    size: i64,
+pub(super) struct Observation<H> {
+    pub(super) file: AttachedObject<H>,
+    pub(super) key: record_lock::FileKey,
+    pub(super) request: wire::Request,
+    pub(super) position: i64,
+    pub(super) size: i64,
 }
 
 /// Incoming references remain owned by the IPC receive until finish explicitly

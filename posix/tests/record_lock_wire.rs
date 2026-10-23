@@ -2,6 +2,49 @@
 //! resolve a FileHandle or mutate its process-owned lock registry.
 use mochios_posix_protocol::{ProtocolError, record_lock::*};
 
+#[test]
+fn deferred_codec_requires_set_preserves_epoch_and_does_not_modify_short_outputs() {
+    use mochios_posix_protocol::record_lock_wait as wait;
+    for kind in [Kind::Read, Kind::Write] {
+        let value = wait::Request {
+            lock: request(Operation::Set(kind)),
+            epoch: u64::MAX,
+        };
+        let mut bytes = [0; wait::LEN];
+        wait::encode(value, &mut bytes).unwrap();
+        assert_eq!(wait::decode(&bytes), Ok(value));
+        for length in 0..wait::LEN {
+            assert!(wait::decode(&bytes[..length]).is_err());
+        }
+        let mut short = [0xa5; wait::LEN - 1];
+        assert!(wait::encode(value, &mut short).is_err());
+        assert!(short.iter().all(|byte| *byte == 0xa5));
+        for index in [0, 2, 3, 4, 7, 24, 31] {
+            let mut corrupt = bytes;
+            corrupt[index] ^= 0xff;
+            assert!(wait::decode(&corrupt).is_err(), "corrupt offset {index}");
+        }
+    }
+    for operation in [
+        Operation::Unlock,
+        Operation::ReleaseFile,
+        Operation::Query(Kind::Read),
+    ] {
+        let mut bytes = [0xa5; wait::LEN];
+        assert!(
+            wait::encode(
+                wait::Request {
+                    lock: request(operation),
+                    epoch: 0
+                },
+                &mut bytes
+            )
+            .is_err()
+        );
+        assert!(bytes.iter().all(|byte| *byte == 0xa5));
+    }
+}
+
 fn request(operation: Operation) -> Request {
     Request {
         operation,

@@ -98,6 +98,52 @@ fn uncontended_shared_and_self_owned_requests_acquire_without_waiting() {
 }
 
 #[test]
+fn failed_replies_never_acquire_or_upgrade_a_range_or_keep_a_pending_token() {
+    use posix_service::record_lock_wait::Completion;
+    let (mut service, peers, _) = setup(2);
+    lock(&mut service, peers[0], 1, Kind::Read);
+    assert_eq!(
+        service.begin_record_lock_wait_with_reply(
+            peers[0],
+            file(1),
+            Kind::Write,
+            range(0, 0),
+            || false
+        ),
+        Ok(Completion::Undelivered)
+    );
+    assert_eq!(
+        service
+            .record_locks(peers[1])
+            .unwrap()
+            .conflict(file(1), Kind::Write, range(0, 0))
+            .unwrap()
+            .kind,
+        Kind::Read
+    );
+    let token = pending(begin(&mut service, peers[1], 1, Kind::Write));
+    assert_eq!(
+        service.retry_record_lock_wait_with_reply(peers[1], token, || panic!(
+            "blocked must not reply"
+        )),
+        Ok(Completion::Pending(token))
+    );
+    release(&mut service, peers[0], 1);
+    assert_eq!(
+        service.retry_record_lock_wait_with_reply(peers[1], token, || false),
+        Ok(Completion::Undelivered)
+    );
+    assert_eq!(
+        service.retry_record_lock_wait(peers[1], token),
+        Err(protocol::STATUS_ESRCH)
+    );
+    assert_eq!(
+        begin(&mut service, peers[0], 1, Kind::Write),
+        Ok(Outcome::Acquired)
+    );
+}
+
+#[test]
 fn retry_rechecks_current_conflicts_and_consumes_token_only_at_acquisition() {
     let (mut service, peers, _) = setup(3);
     lock(&mut service, peers[0], 1, Kind::Write);

@@ -211,6 +211,7 @@ fn main() {
     }
     platform::logln!("posix.service: endpoint ready");
     let mut pending_waits = Vec::new();
+    let mut pending_lock_waits = Vec::new();
     let mut pending_signal_waits = Vec::new();
     let mut callback_waits = timer_callback_native::Waits::default();
     let mut cpu_sleeps = cpu_sleep_native::Registry::new();
@@ -326,6 +327,8 @@ fn main() {
             );
         }
         complete_pending_signal_waits(&mut pending_signal_waits, &mut service, &mut processes);
+        complete_pending_lock_waits(&mut pending_lock_waits, &mut service, &mut processes);
+        service.release_unused_record_lock_files(&mut filesystem);
         callback_waits.observe(&mut service, &mut processes);
         complete_pending_waits(
             &mut pending_waits,
@@ -367,6 +370,7 @@ fn main() {
         let child_notification_deadline = if service.has_deferred_child_notifications()
             || service.process_resume_notification_processes().next().is_some()
             || service.has_record_lock_execs()
+            || !pending_lock_waits.is_empty()
         {
             match platform::time::monotonic_nanoseconds() {
                 Ok(now) => now.saturating_add(10_000_000),
@@ -522,6 +526,21 @@ fn main() {
         {
             if header.opcode == protocol::OP_RECORD_LOCK {
                 Some(posix_service::record_lock_request::inspect(
+                    header, payload, &attachments, &mut filesystem,
+                    |file| {
+                        let position = platform::handle::seek(
+                            file.handle, 0, platform::handle::HANDLE_SEEK_CURRENT,
+                        ).map_err(|error| protocol::status::normalize_failure(error.raw()))?;
+                        i64::try_from(position).map_err(|_| posix_service::STATUS_EOVERFLOW)
+                    },
+                ))
+            } else { None }
+        } else { None };
+        let prepared_lock_wait = if let (Some(_), Some((header, payload)), true, Some(_)) =
+            (peer, decoded, attachments_valid, request_image)
+        {
+            if header.opcode == protocol::OP_RECORD_LOCK_WAIT {
+                Some(posix_service::record_lock_wait_request::inspect(
                     header, payload, &attachments, &mut filesystem,
                     |file| {
                         let position = platform::handle::seek(
@@ -794,6 +813,42 @@ fn main() {
         }
         let mut retained_handle = None;
         let object_response = match (peer, decoded, attachments_valid) {
+            (Some(peer), Some((header, _)), true) if prepared_lock_wait.is_some() => {
+                let prepared = prepared_lock_wait.unwrap();
+                let epoch = prepared.epoch().unwrap_or(0);
+                let file = prepared.file_key();
+                let result = (|| {
+                    pending_lock_waits.try_reserve(1).map_err(|_| -37)?;
+                    let image = request_image.ok_or(protocol::STATUS_EPERM)?;
+                    let identity = platform::ipc::endpoint_execution_identity(sender)
+                        .map_err(|error| process_control::lifecycle_failure(error.raw()))?;
+                    let validation = validate_pending_request_image(
+                        sender, peer, image, &mut service, &mut processes,
+                    ).and_then(|()| match file {
+                        Some(file) => service.refresh_record_lock_execs(&mut processes, Some(file)).map(|_| ()),
+                        None => Ok(()),
+                    });
+                    let (completion, retained) = posix_service::record_lock_wait_request::finish(
+                        &mut service, peer, identity, prepared, validation, &mut filesystem,
+                        || reply_record_lock_wait(sender, header.request_id, Ok(())),
+                    );
+                    retained_handle = retained;
+                    if let posix_service::record_lock_wait::Completion::Pending(token) = completion? {
+                        pending_lock_waits.push(PendingLockWait {
+                            sender, peer, image, identity, epoch, token,
+                            request_id: header.request_id,
+                            file: file.expect("admitted lock wait has an observed file"),
+                        });
+                    }
+                    Ok::<(), i32>(())
+                })();
+                match result {
+                    Ok(()) => None,
+                    Err(error) => Some(posix_service::ObjectResponse {
+                        response: status_response(header.request_id, error), handles: Vec::new(),
+                    }),
+                }
+            }
             (Some(peer), Some(_), true) if prepared_record_lock.is_some() => {
                 let prepared = prepared_record_lock.unwrap();
                 let validation = request_image.ok_or(protocol::STATUS_EPERM)
@@ -2317,6 +2372,87 @@ struct PendingWait {
     guard: Option<(mnu_abi::ExecutionIdentity, u64)>,
     detailed: bool,
     image: posix_service::RequestImage,
+}
+
+#[cfg(target_os = "mochios")]
+#[derive(Clone, Copy)]
+struct PendingLockWait {
+    sender: u64,
+    peer: posix_service::PeerIdentity,
+    image: posix_service::RequestImage,
+    identity: mnu_abi::ExecutionIdentity,
+    epoch: u64,
+    token: posix_service::record_lock_wait::Token,
+    request_id: u64,
+    file: posix_service::record_lock::FileKey,
+}
+
+#[cfg(target_os = "mochios")]
+fn reply_record_lock_wait(sender: u64, request_id: u64, result: Result<(), i32>) -> bool {
+    use mochios_posix_protocol as protocol;
+    let mut body = [0; protocol::record_lock::REPLY_LEN];
+    let payload = if result.is_ok() {
+        if protocol::record_lock::encode_reply(protocol::record_lock::Reply::Done, &mut body)
+            .is_err()
+        {
+            return false;
+        }
+        &body[..]
+    } else {
+        &[]
+    };
+    let header = protocol::Header {
+        opcode: protocol::OP_STATUS,
+        request_id,
+        status: result.err().unwrap_or(0),
+        payload_len: payload.len() as u32,
+        ..Default::default()
+    };
+    let mut bytes = [0; protocol::HEADER_LEN + protocol::record_lock::REPLY_LEN];
+    match protocol::encode(header, payload, &mut bytes) {
+        Ok(length) => mochi_user_platform::ipc::reply(sender, &bytes[..length]).is_ok(),
+        Err(_) => false,
+    }
+}
+
+#[cfg(target_os = "mochios")]
+fn complete_pending_lock_waits(
+    pending: &mut Vec<PendingLockWait>,
+    service: &mut posix_service::PosixService<u32>,
+    processes: &mut RuntimeProcesses,
+) {
+    use posix_service::record_lock_wait::Completion;
+    let mut index = 0;
+    while index < pending.len() {
+        let job = pending[index];
+        let validation =
+            validate_pending_request_image(job.sender, job.peer, job.image, service, processes)
+                .and_then(|()| {
+                    service.validate_wait_delivery_epoch(job.peer, job.identity, job.epoch)
+                })
+                .and_then(|()| {
+                    service
+                        .refresh_record_lock_execs(processes, Some(job.file))
+                        .map(|_| ())
+                });
+        let result = match validation {
+            Ok(()) => service.retry_record_lock_wait_with_reply(job.peer, job.token, || {
+                reply_record_lock_wait(job.sender, job.request_id, Ok(()))
+            }),
+            Err(error) => {
+                let _ = service.cancel_record_lock_wait(job.peer, job.token);
+                Err(error)
+            }
+        };
+        if matches!(result, Ok(Completion::Pending(_))) {
+            index += 1;
+            continue;
+        }
+        if let Err(error) = result {
+            reply_record_lock_wait(job.sender, job.request_id, Err(error));
+        }
+        pending.swap_remove(index);
+    }
 }
 
 #[cfg(target_os = "mochios")]

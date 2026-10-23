@@ -23,6 +23,7 @@ fn main() {
         fn pipe_write(fd: i32, bytes: *const u8, length: usize) -> isize;
         fn close(fd: i32) -> i32;
         fn execv(path: *const i8, argv: *const *const i8) -> i32;
+        fn fcntl(fd: i32, command: i32, ...) -> i32;
     }
     let arguments: Vec<_> = std::env::args().collect();
     if arguments
@@ -115,6 +116,102 @@ fn main() {
     let owner = platform::process::current_execution_identity()
         .unwrap()
         .process_id;
+    // Exercise the deferred IPC path separately from the libc fcntl adapter.
+    let wait_path = "/tmp/native-record-lock-wait-160";
+    let _ = std::fs::remove_file(wait_path);
+    let wait_file = client
+        .open_at(
+            OpenAtBase::ProcessRoot,
+            protocol::OPEN_READ
+                | protocol::OPEN_WRITE
+                | protocol::OPEN_CREATE
+                | protocol::OPEN_EXCLUSIVE,
+            0o600,
+            wait_path,
+        )
+        .unwrap();
+    client
+        .thread_signal_mask(protocol::SIGNAL_MASK_INITIALIZE, 0)
+        .unwrap();
+    let epoch = client.thread_signal_epoch().unwrap();
+    let write = request(Operation::Set(Kind::Write));
+    assert!(matches!(
+        client.wait_record_lock_since(wait_file, write, epoch.wrapping_add(1)),
+        Err(ClientError::Remote(protocol::STATUS_EINTR))
+    ));
+    client
+        .wait_record_lock_since(wait_file, write, epoch)
+        .unwrap();
+    let mut ready = [-1; 2];
+    let mut go = [-1; 2];
+    assert_eq!(unsafe { pipe(ready.as_mut_ptr()) }, 0);
+    assert_eq!(unsafe { pipe(go.as_mut_ptr()) }, 0);
+    let child = unsafe { fork() };
+    assert!(child >= 0);
+    if child == 0 {
+        unsafe {
+            close(ready[0]);
+            close(go[1]);
+        }
+        let client = Client::from_launch_context().unwrap();
+        client
+            .thread_signal_mask(protocol::SIGNAL_MASK_INITIALIZE, 0)
+            .unwrap();
+        let epoch = client.thread_signal_epoch().unwrap();
+        let file = client
+            .open_at(OpenAtBase::ProcessRoot, protocol::OPEN_WRITE, 0, wait_path)
+            .unwrap();
+        assert_eq!(unsafe { pipe_write(ready[1], b"R".as_ptr(), 1) }, 1);
+        client.wait_record_lock_since(file, write, epoch).unwrap();
+        assert_eq!(unsafe { pipe_write(ready[1], b"A".as_ptr(), 1) }, 1);
+        let mut byte = 0;
+        assert_eq!(unsafe { read(go[0], &mut byte, 1) }, 1);
+        client.record_lock(file, release()).unwrap();
+        unsafe { _exit(0) }
+    }
+    unsafe {
+        close(ready[1]);
+        close(go[0]);
+    }
+    let mut byte = 0;
+    assert_eq!(unsafe { read(ready[0], &mut byte, 1) }, 1);
+    assert_eq!(byte, b'R');
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert_eq!(unsafe { fcntl(ready[0], 4, 0x4000i32) }, 0);
+    assert_eq!(
+        unsafe { read(ready[0], &mut byte, 1) },
+        -1,
+        "conflicting call must not complete early"
+    );
+    assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(11));
+    client.record_lock(wait_file, release()).unwrap();
+    assert_eq!(unsafe { fcntl(ready[0], 4, 0i32) }, 0);
+    assert_eq!(unsafe { read(ready[0], &mut byte, 1) }, 1);
+    assert_eq!(byte, b'A');
+    assert_eq!(
+        client
+            .record_lock(wait_file, request(Operation::Query(Kind::Read)))
+            .unwrap(),
+        Reply::Conflict {
+            owner: child as u64,
+            kind: Kind::Write,
+            start: 10,
+            length: 20
+        }
+    );
+    assert_eq!(unsafe { pipe_write(go[1], b"G".as_ptr(), 1) }, 1);
+    let mut status = -1;
+    assert_eq!(unsafe { waitpid(child, &mut status, 0) }, child);
+    assert_eq!(status, 0);
+    unsafe {
+        close(ready[0]);
+        close(go[1]);
+    }
+    platform::handle::close(wait_file.handle).unwrap();
+    std::fs::remove_file(wait_path).unwrap();
+    println!(
+        "record-lock: PASS deferred FileHandle IPC, stale epoch rejection, blocking conflict and delivered handoff"
+    );
     let path = "/tmp/native-record-lock-153";
     let renamed = "/tmp/native-record-lock-renamed-153";
     let _ = std::fs::remove_file(path);

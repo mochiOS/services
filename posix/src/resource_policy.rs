@@ -89,8 +89,14 @@ impl<H: Copy> PosixService<H> {
     }
 
     pub(super) fn publish_record_lock_state(&self, owner: u64) {
+        self.publish_record_lock_hint(owner, self.record_locks.has_owner(owner));
+    }
+
+    /// A prospective successful reply must never expose a false fast-close
+    /// hint. A transient true value only makes close consult serialized state.
+    pub(super) fn publish_record_lock_hint(&self, owner: u64, held: bool) {
         if let Some((_, page)) = self.resource_policies.iter().find(|(id, _)| *id == owner) {
-            page.publish_record_locks(self.record_locks.has_owner(owner));
+            page.publish_record_locks(held);
         }
     }
 }

@@ -26,6 +26,13 @@ pub enum Outcome {
     Pending(Token),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Completion {
+    Pending(Token),
+    Replied,
+    Undelivered,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Request {
     owner: u64,
@@ -160,8 +167,28 @@ impl<H: Copy> PosixService<H> {
         kind: Kind,
         range: Range,
     ) -> Result<Outcome, i32> {
-        match self.record_locks(peer)?.set(file, kind, range) {
-            Ok(()) => return Ok(Outcome::Acquired),
+        self.begin_record_lock_wait_with_reply(peer, file, kind, range, || true)
+            .map(local_outcome)
+    }
+
+    /// Reply runs under state synchronization and must not re-enter policy.
+    /// Stage every allocation first; publish only after delivery succeeds.
+    pub fn begin_record_lock_wait_with_reply(
+        &mut self,
+        peer: PeerIdentity,
+        file: FileKey,
+        kind: Kind,
+        range: Range,
+        reply: impl FnOnce() -> bool,
+    ) -> Result<Completion, i32> {
+        self.record_locks(peer)?;
+        match self
+            .record_locks
+            .prepare_set(peer.process_id, file, kind, range)
+        {
+            Ok(prepared) => {
+                return Ok(self.commit_record_lock_reply(peer.process_id, prepared, reply));
+            }
             Err(Error::WouldBlock(_)) => {}
             Err(error) => return Err(status(error)),
         }
@@ -178,7 +205,7 @@ impl<H: Copy> PosixService<H> {
                 },
                 &self.record_locks,
             )
-            .map(Outcome::Pending)
+            .map(Completion::Pending)
     }
 
     /// No speculative grant: a wake is only a reason to retry. Revalidation
@@ -189,18 +216,48 @@ impl<H: Copy> PosixService<H> {
         peer: PeerIdentity,
         token: Token,
     ) -> Result<Outcome, i32> {
+        self.retry_record_lock_wait_with_reply(peer, token, || true)
+            .map(local_outcome)
+    }
+
+    pub fn retry_record_lock_wait_with_reply(
+        &mut self,
+        peer: PeerIdentity,
+        token: Token,
+        reply: impl FnOnce() -> bool,
+    ) -> Result<Completion, i32> {
         let index = self.record_lock_wait_index(peer, token)?;
         let entry = self.record_lock_waits.entries[index];
         match self
-            .record_locks(peer)?
-            .set(entry.file, entry.kind, entry.range)
+            .record_locks
+            .prepare_set(peer.process_id, entry.file, entry.kind, entry.range)
         {
-            Err(Error::WouldBlock(_)) => Ok(Outcome::Pending(token)),
+            Err(Error::WouldBlock(_)) => Ok(Completion::Pending(token)),
             result => {
                 self.record_lock_waits.entries.remove(index);
-                result.map(|()| Outcome::Acquired).map_err(status)
+                result
+                    .map(|prepared| self.commit_record_lock_reply(peer.process_id, prepared, reply))
+                    .map_err(status)
             }
         }
+    }
+
+    fn commit_record_lock_reply(
+        &mut self,
+        owner: u64,
+        prepared: record_lock::PreparedSet,
+        reply: impl FnOnce() -> bool,
+    ) -> Completion {
+        // The receiver can close immediately after reply, before this thread
+        // resumes. Force its fast-close path to consult service state first.
+        self.publish_record_lock_hint(owner, true);
+        if !reply() {
+            self.publish_record_lock_state(owner);
+            return Completion::Undelivered;
+        }
+        self.record_locks.commit_set(prepared);
+        self.publish_record_lock_state(owner);
+        Completion::Replied
     }
 
     /// Called for interruption, cancellation or abandoned IPC. Never releases
@@ -221,6 +278,14 @@ impl<H: Copy> PosixService<H> {
                 entry.owner == peer.process_id && entry.revision == revision && entry.token == token
             })
             .ok_or(protocol::STATUS_ESRCH)
+    }
+}
+
+fn local_outcome(completion: Completion) -> Outcome {
+    match completion {
+        Completion::Pending(token) => Outcome::Pending(token),
+        Completion::Replied => Outcome::Acquired,
+        Completion::Undelivered => unreachable!("infallible local publication"),
     }
 }
 

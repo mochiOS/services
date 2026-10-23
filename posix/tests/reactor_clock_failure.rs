@@ -33,6 +33,7 @@ static DEFERRED_FAILURE:Cell<bool>=const{Cell::new(false)};
 static RESUME:Cell<bool>=const{Cell::new(false)};
 static RESUME_FAILURE:Cell<bool>=const{Cell::new(false)};
 static EXEC_LOCKS:Cell<bool>=const{Cell::new(false)};
+static LOCK_WAITS:Cell<bool>=const{Cell::new(false)};
 }
 #[macro_export]macro_rules! logln{($($argument:tt)*)=>{crate::LOGS.set(crate::LOGS.get()+1)}}
 pub mod syscall{pub const HANDLE_WAIT_INFINITE:u64=u64::MAX;}
@@ -52,7 +53,8 @@ struct Service {deadline:u64,cpu_sweeps:u32}
 struct Processes {signal_threads:Vec<()>}
 impl Service {
 fn expire_alarms(&mut self)->Result<usize,i32>{if FAIL.get()&1!=0{Err(-5)}else{Ok(0)}}
-fn has_finite_cpu_limits(&self)->bool{!CPU_ONLY.get()&&!PROCESS_TIMERS.get()&&!CPU_SLEEPS.get()&&!EXEC_LOCKS.get()}
+fn has_finite_cpu_limits(&self)->bool{!CPU_ONLY.get()&&!PROCESS_TIMERS.get()&&!CPU_SLEEPS.get()&&!EXEC_LOCKS.get()&&!LOCK_WAITS.get()}
+fn release_unused_record_lock_files(&mut self,_:&mut()){}
 fn has_record_lock_execs(&self)->bool{EXEC_LOCKS.get()}
 fn has_cpu_timers(&self)->bool{CPU_ONLY.get()}
 fn has_observable_process_timers(&self)->bool{PROCESS_TIMERS.get()}
@@ -95,6 +97,7 @@ fn deliver_process_resume_notifications(_:&mut Service,_:&mut Processes){
 }
 fn complete_pending_signal_waits(_:&mut Vec<PendingSignalWait>,_:&mut Service,_:&mut Processes){}
 fn complete_pending_waits(_:&mut Vec<()>,_:&mut Service,_:&mut(),_:&mut Processes){}
+fn complete_pending_lock_waits(_:&mut Vec<()>,_:&mut Service,_:&mut Processes){}
 fn deliver_signal_notifications(_:&mut Service,_:&mut Vec<()>){}
 fn plan(mut service:&mut Service,reported:&mut bool)->(u64,bool) {
 let mut clock_failure_reported=*reported;
@@ -102,6 +105,7 @@ let mut clock_failed=false;
 let mut processes=Processes{signal_threads:vec![()]};let mut filesystem=();
 let mut cpu_sweep_deadline_ms=0;let mut thread_sweep_deadline_ms=0;
 let mut pending_waits=Vec::new();
+let mut pending_lock_waits=if LOCK_WAITS.get(){vec![()]}else{Vec::new()};
 let mut cpu_sleeps=CpuSleeps;
 let mut callback_waits=CallbackWaits;
 let mut pending_signal_waits=vec![PendingSignalWait{deadline:Some(9_000_000_000)}];
@@ -127,6 +131,14 @@ for failure in [1,2,4,7] {
  FAIL.set(failure);CLOCK_CALLS.set(0);assert!(plan(&mut service,&mut reported).1);
  assert_eq!(LOGS.get(),2);
 }
+// Pending file-lock calls alone must revalidate endpoint/thread lifetime even
+// if their holders make no further RPC. Clock failure keeps fallback planning.
+LOCK_WAITS.set(true);FAIL.set(0);CLOCK_CALLS.set(0);
+let mut service=Service{deadline:5_000_000_000,cpu_sweeps:0};let mut reported=false;
+assert_eq!(plan(&mut service,&mut reported),(2_010_000_000,false));
+FAIL.set(2);CLOCK_CALLS.set(0);
+assert!(plan(&mut service,&mut reported).1);
+LOCK_WAITS.set(false);
 // CPU timers alone must keep the idle reactor's native wait deadline finite.
 CPU_ONLY.set(true);FAIL.set(0);CLOCK_CALLS.set(0);TIMER_SWEEPS.set(0);
 let mut service=Service{deadline:5_000_000_000,cpu_sweeps:0};let mut reported=false;

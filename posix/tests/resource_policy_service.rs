@@ -549,3 +549,38 @@ fn lock_publication_tracks_lazy_discovery_conflicts_partial_unlock_and_exit() {
     assert_eq!(parent.read_record_locks(), Ok(false));
     assert_eq!(child.read_record_locks(), Ok(false));
 }
+
+#[test]
+fn successful_reply_never_exposes_a_false_fast_close_hint_before_commit() {
+    use posix_service::record_lock::{FileKey, Kind, Range};
+    use posix_service::record_lock_wait::Completion;
+    let mut service = service();
+    let state = Arc::new(State::default());
+    let mut backend = Backend(Arc::clone(&state));
+    request(&mut service, &mut backend, 41);
+    let page = Arc::clone(&state.pages.lock().unwrap()[0]);
+    assert_eq!(page.read_record_locks(), Ok(false));
+    for delivered in [false, true] {
+        assert_eq!(
+            service.begin_record_lock_wait_with_reply(
+                peer(41),
+                FileKey {
+                    device: 7,
+                    inode: 11
+                },
+                Kind::Write,
+                Range::normalize(0, 0, 0).unwrap(),
+                || {
+                    assert_eq!(page.read_record_locks(), Ok(true));
+                    delivered
+                }
+            ),
+            Ok(if delivered {
+                Completion::Replied
+            } else {
+                Completion::Undelivered
+            })
+        );
+        assert_eq!(page.read_record_locks(), Ok(delivered));
+    }
+}
