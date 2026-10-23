@@ -13,7 +13,7 @@ pub(crate) use crate::launch_rollback::{has_failed_launch_cleanup, retry_failed_
 
 const SESSION_USER_ARG_PREFIX: &str = "--session-user=";
 const LOCK_USER_ARG_PREFIX: &str = "--lock-user=";
-use mnu_abi::exec::{ENVIRONMENT_PREFIX, INHERITED_HANDLE_PREFIX};
+use mochios_posix_client::launch_arguments::{ENVIRONMENT_PREFIX, INHERITED_HANDLE_PREFIX};
 
 const POSIX_CHILD_HANDLE_RIGHTS: u64 = platform::handle::HANDLE_RIGHT_SEND
     | platform::handle::HANDLE_RIGHT_DUPLICATE

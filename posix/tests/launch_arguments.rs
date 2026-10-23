@@ -3,7 +3,9 @@ extern crate alloc;
 #[path = "../../service-manager/src/launch_arguments.rs"]
 mod production;
 
-use mochios_posix_client::launch_arguments::EncodeError;
+use mochios_posix_client::launch_arguments::{
+    ENVIRONMENT_PREFIX, EncodeError, INHERITED_HANDLE_PREFIX, INHERITED_VALUE_PREFIX,
+};
 use production::encode_native_launch;
 
 fn native(items: &[String]) -> Result<Vec<u8>, EncodeError> {
@@ -26,7 +28,6 @@ fn stack_text(stack: &[u8], pointer: usize) -> &[u8] {
 
 #[test]
 fn native_launch_builds_argv_env_and_inheritance_in_user_space() {
-    use mnu_abi::exec::{ENVIRONMENT_PREFIX, INHERITED_HANDLE_PREFIX, INHERITED_VALUE_PREFIX};
     let rights = mnu_abi::HANDLE_RIGHT_SEND | mnu_abi::HANDLE_RIGHT_TRANSFER;
     let items = [
         "argument".into(),
@@ -72,9 +73,11 @@ fn native_launch_builds_argv_env_and_inheritance_in_user_space() {
 #[test]
 fn service_launcher_uses_the_shared_client_encoder_without_a_private_copy() {
     let source = include_str!("../../service-manager/src/launch_arguments.rs");
-    assert!(source.contains(
-        "pub(crate) use mochios_posix_client::launch_arguments::encode_native_launch"
-    ));
+    assert!(
+        source.contains(
+            "pub(crate) use mochios_posix_client::launch_arguments::encode_native_launch"
+        )
+    );
     assert!(!source.contains("fn encode_native_launch("));
     assert!(!source.contains("fn decimal("));
     let items = vec!["argument".into(), "".into()];
@@ -105,12 +108,12 @@ fn native_launch_rejects_invalid_or_duplicate_handle_grants() {
         " 1:2:1",
     ] {
         assert_eq!(
-            native(&[format!("{}{value}", mnu_abi::exec::INHERITED_HANDLE_PREFIX)]),
+            native(&[format!("{}{value}", INHERITED_HANDLE_PREFIX)]),
             Err(EncodeError::InvalidEntry),
             "{value}"
         );
     }
-    let grant = format!("{}1:2:1", mnu_abi::exec::INHERITED_HANDLE_PREFIX);
+    let grant = format!("{}1:2:1", INHERITED_HANDLE_PREFIX);
     assert_eq!(
         native(&[grant.clone(), grant]),
         Err(EncodeError::InvalidEntry)
@@ -121,29 +124,29 @@ fn native_launch_rejects_invalid_or_duplicate_handle_grants() {
 fn native_launch_rejects_invalid_values_and_environment_without_truncation() {
     for value in ["1", "1:2:3", "1:+2", "1:18446744073709551616"] {
         assert_eq!(
-            native(&[format!("{}{value}", mnu_abi::exec::INHERITED_VALUE_PREFIX)]),
+            native(&[format!("{}{value}", INHERITED_VALUE_PREFIX)]),
             Err(EncodeError::InvalidEntry)
         );
     }
-    let value = format!("{}1:2", mnu_abi::exec::INHERITED_VALUE_PREFIX);
+    let value = format!("{}1:2", INHERITED_VALUE_PREFIX);
     assert_eq!(
         native(&[value.clone(), value]),
         Err(EncodeError::InvalidEntry)
     );
     for value in ["", "HOME", "=value", "HOME=a\0b"] {
         assert_eq!(
-            native(&[format!("{}{value}", mnu_abi::exec::ENVIRONMENT_PREFIX)]),
+            native(&[format!("{}{value}", ENVIRONMENT_PREFIX)]),
             Err(EncodeError::InvalidEntry)
         );
     }
-    assert!(native(&[format!("{}HOME=", mnu_abi::exec::ENVIRONMENT_PREFIX)]).is_ok());
+    assert!(native(&[format!("{}HOME=", ENVIRONMENT_PREFIX)]).is_ok());
     assert_eq!(native(&["a\0b".into()]), Err(EncodeError::InvalidEntry));
 }
 
 #[test]
 fn native_launch_does_not_accept_security_policy_from_argument_strings() {
     for prefix in [
-        mnu_abi::exec::SECURITY_IDENTITY_PREFIX,
+        "__MNU_EXEC_SECURITY_IDENTITY=",
         mnu_abi::exec::APPLICATION_PACKAGE_ID_PREFIX,
         mnu_abi::exec::EXECUTABLE_DIGEST_PREFIX,
         mnu_abi::exec::EXEC_AUTHORIZATION_KIND_PREFIX,
@@ -159,24 +162,18 @@ fn native_launch_does_not_accept_security_policy_from_argument_strings() {
 #[test]
 fn native_launch_bounds_inheritance_and_startup_images() {
     let grants = (0..mnu_abi::process_create::MAX_HANDLES)
-        .map(|key| {
-            format!(
-                "{}{key}:{}:0",
-                mnu_abi::exec::INHERITED_HANDLE_PREFIX,
-                u32::MAX
-            )
-        })
+        .map(|key| format!("{}{key}:{}:0", INHERITED_HANDLE_PREFIX, u32::MAX))
         .collect::<Vec<_>>();
     assert!(native(&grants).is_ok());
     let mut grant_overflow = grants;
-    grant_overflow.push(format!("{}256:1:0", mnu_abi::exec::INHERITED_HANDLE_PREFIX));
+    grant_overflow.push(format!("{}256:1:0", INHERITED_HANDLE_PREFIX));
     assert_eq!(native(&grant_overflow), Err(EncodeError::TooLarge));
     let values = (0..mnu_abi::process_create::MAX_VALUES)
-        .map(|key| format!("{}{key}:0", mnu_abi::exec::INHERITED_VALUE_PREFIX))
+        .map(|key| format!("{}{key}:0", INHERITED_VALUE_PREFIX))
         .collect::<Vec<_>>();
     assert!(native(&values).is_ok());
     let mut overflow = values;
-    overflow.push(format!("{}256:0", mnu_abi::exec::INHERITED_VALUE_PREFIX));
+    overflow.push(format!("{}256:0", INHERITED_VALUE_PREFIX));
     assert_eq!(native(&overflow), Err(EncodeError::TooLarge));
     let oversized = "x".repeat(mnu_abi::process_image::MAX_STACK_BYTES + 1);
     assert!(matches!(native(&[oversized]), Err(EncodeError::Startup(_))));

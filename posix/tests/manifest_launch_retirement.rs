@@ -3,6 +3,7 @@ fn pathname_manifest_launch_has_no_abi_dispatch_handler_or_argument_parser() {
     let abi = include_str!("../../../core/crates/abi/src/lib.rs");
     let dispatch = include_str!("../../../core/src/syscall/mod.rs");
     let exec = include_str!("../../../core/src/syscall/exec.rs");
+    let exec_abi = include_str!("../../../core/crates/abi/src/exec.rs");
     let platform = include_str!("../../../user/crates/platform/src/lib.rs");
     let example = include_str!("../../../core/examples/user/src/lib.rs");
     for source in [abi, dispatch, exec, platform, example] {
@@ -40,6 +41,10 @@ fn pathname_manifest_launch_has_no_abi_dispatch_handler_or_argument_parser() {
         assert!(
             !exec.contains(parser),
             "kernel argv policy parser: {parser}"
+        );
+        assert!(
+            !exec_abi.contains(parser),
+            "kernel ABI exposes launcher policy: {parser}"
         );
     }
     assert!(dispatch.contains("_ => mnu_abi::status::Error::Unsupported.into_raw()"));

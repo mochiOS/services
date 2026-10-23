@@ -66,7 +66,7 @@ pub(crate) fn spawn(
         | mnu_abi::HANDLE_RIGHT_TRANSFER;
     arguments.push(alloc::format!(
         "{}{}:{posix_endpoint}:{rights}",
-        mnu_abi::exec::INHERITED_HANDLE_PREFIX,
+        mochios_posix_client::launch_arguments::INHERITED_HANDLE_PREFIX,
         mochios_posix_protocol::CONTROL_HANDLE_KEY
     ));
     let mut random = [0; 16];

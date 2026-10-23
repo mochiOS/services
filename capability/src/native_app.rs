@@ -1,6 +1,7 @@
 use alloc::{string::String, vec, vec::Vec};
 use mochi_user_platform as platform;
 use mochios_posix_client::{ObjectHandleAttachment, OpenAtBase};
+use mochios_posix_client::launch_arguments::ENVIRONMENT_PREFIX;
 
 type Error = platform::syscall::SysError;
 fn invalid() -> Error {
@@ -23,7 +24,7 @@ pub(crate) fn metadata(
         if item.as_bytes().contains(&0) {
             return Err(invalid());
         }
-        if let Some(entry) = item.strip_prefix(mnu_abi::exec::ENVIRONMENT_PREFIX) {
+        if let Some(entry) = item.strip_prefix(ENVIRONMENT_PREFIX) {
             let (name, _) = entry.split_once('=').ok_or_else(invalid)?;
             if name.is_empty() {
                 return Err(invalid());

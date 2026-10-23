@@ -312,7 +312,7 @@ fn spawn_capability_service(bootstrap: u32) -> Result<u64, mochi_user_syscall::S
     let mut args = vec![logger_endpoint.to_string()];
     args.push(alloc::format!(
         "{}{}:{}:{}",
-        mnu_abi::exec::INHERITED_HANDLE_PREFIX,
+        mochios_posix_client::launch_arguments::INHERITED_HANDLE_PREFIX,
         mochios_filesystem_protocol::BOOTSTRAP_READ_HANDLE_KEY,
         bootstrap,
         platform::handle::HANDLE_RIGHT_SEND

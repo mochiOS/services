@@ -13,7 +13,7 @@ use crate::resolver::{
 };
 
 pub(crate) const SPAWN_APP_OPCODE: u32 = 0x4150_5053;
-use mnu_abi::exec::ENVIRONMENT_PREFIX;
+use mochios_posix_client::launch_arguments::ENVIRONMENT_PREFIX;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
