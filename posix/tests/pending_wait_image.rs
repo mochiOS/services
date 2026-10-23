@@ -48,7 +48,7 @@ fn validate_wait_delivery_epoch(&self,_:PeerIdentity,_:mnu_abi::ExecutionIdentit
 fn wait_child_info_with_reply<R:FnOnce(i32)->bool>(&mut self,_:PeerIdentity,_:WaitRequest,_:&mut RuntimeFilesystem,_:&mut RuntimeProcesses,reply:R)->Result<Option<i32>,i32>{
  if reply(37){CONSUMED.set(CONSUMED.get()+1);Ok(Some(37))}else{Ok(None)}
 }
-fn poll_wait_signal_info_with_reply<R:FnOnce(u32)->bool>(&mut self,_:PeerIdentity,_:mnu_abi::ExecutionIdentity,_:u64,_:u64,_:Option<u64>,_:u64,reply:R)->Result<SignalWaitCompletion,i32>{
+fn poll_wait_signal_info_with_timers<R:FnOnce(u32)->bool>(&mut self,_:PeerIdentity,_:RequestImage,_:mnu_abi::ExecutionIdentity,_:u64,_:u64,_:Option<u64>,_:u64,_:&mut RuntimeProcesses,reply:R)->Result<SignalWaitCompletion,i32>{
  if reply(10){CONSUMED.set(CONSUMED.get()+1);Ok(SignalWaitCompletion::Replied)}else{Ok(SignalWaitCompletion::Undelivered)}
 }
 }

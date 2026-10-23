@@ -125,6 +125,11 @@ impl<H: Copy> PosixService<H> {
                 // Reject this request instead of creating/modifying new state.
                 self.validate_request_image(peer, image, backend)?;
             }
+            let ignored = self
+                .signals
+                .get(&peer.process_id)
+                .ok_or(protocol::STATUS_ESRCH)?
+                .ignored;
             let mut timers = self.process_timers(peer)?;
             match request {
                 Request::Create(clock, notification) => {
@@ -162,6 +167,8 @@ impl<H: Copy> PosixService<H> {
                     }
                 }
             }
+            self.process_timers
+                .discard_signals(peer.process_id, ignored);
             Ok(output)
         })();
         match result {

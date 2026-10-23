@@ -1114,6 +1114,7 @@ impl<H: Copy> PosixService<H> {
             .get_mut(&process_id)
             .ok_or(protocol::STATUS_ESRCH)?;
         state.pending &= !cancelled;
+        self.process_timers.discard_signals(process_id, cancelled);
         for ((process, _), pending) in &mut self.thread_pending_signals {
             if *process == process_id {
                 *pending &= !cancelled;
@@ -2863,7 +2864,7 @@ impl<H: Copy> PosixService<H> {
             .get(&process_id)
             .copied()
             .ok_or(protocol::STATUS_ESRCH)?
-            .pending();
+            .pending() | self.process_timers.pending_signal_mask(process_id);
         let mut output = vec![0; protocol::SIGNAL_MASK_LEN];
         protocol::encode_signal_mask(pending, &mut output).map_err(|_| STATUS_EINVAL)?;
         Ok(output)
@@ -2926,6 +2927,7 @@ impl<H: Copy> PosixService<H> {
                 || (request.kind == protocol::SIGNAL_DISPOSITION_DEFAULT
                     && default_signal_ignores(request.signal))
             {
+                self.process_timers.discard_signals(process_id, signal_bit(request.signal));
                 self.signal_origins.retain(|(process, _, signal), _| {
                     *process != process_id || *signal != request.signal
                 });
@@ -3241,7 +3243,8 @@ impl<H: Copy> PosixService<H> {
                     .thread_pending_signals
                     .get(&(sender.process_id, sender.thread_id))
                     .copied()
-                    .unwrap_or(0);
+                    .unwrap_or(0)
+                | self.process_timers.pending_signal_mask(sender.process_id);
             let pending = pending & blocked;
             let mut output = vec![0; protocol::SIGNAL_MASK_LEN];
             protocol::encode_signal_mask(pending, &mut output).map_err(|_| STATUS_EINVAL)?;
@@ -3455,7 +3458,9 @@ impl<H: Copy> PosixService<H> {
             .get(&sender.process_id)
             .ok_or(protocol::STATUS_ESRCH)?
             .pending()
-            | self.thread_pending_signals.get(&key).copied().unwrap_or(0);
+            | self.thread_pending_signals.get(&key).copied().unwrap_or(0)
+            | (self.process_timers.pending_signal_mask(sender.process_id)
+                & !self.signals[&sender.process_id].ignored);
         if epoch != expected || pending & !blocked != 0 {
             Err(protocol::STATUS_EINTR)
         } else {

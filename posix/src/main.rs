@@ -1209,8 +1209,8 @@ fn main() {
                     } else {
                         0
                     };
-                    match service.poll_wait_signal_info_with_reply(
-                        peer, identity, mask, epoch, deadline, now,
+                    match service.poll_wait_signal_info_with_timers(
+                        peer, image, identity, mask, epoch, deadline, now, &mut processes,
                         |accepted| reply_signal_wait(sender, header.request_id, Ok(accepted)),
                     ) {
                         Ok(posix_service::SignalWaitCompletion::Pending) => {
@@ -2067,8 +2067,8 @@ fn complete_pending_signal_waits(
             }
         })
         .and_then(|now| {
-            service.poll_wait_signal_info_with_reply(
-                wait.peer, wait.identity, wait.mask, wait.epoch, wait.deadline, now,
+            service.poll_wait_signal_info_with_timers(
+                wait.peer, wait.image, wait.identity, wait.mask, wait.epoch, wait.deadline, now, processes,
                 |accepted| reply_signal_wait(wait.sender, wait.request_id, Ok(accepted)),
             )
         });

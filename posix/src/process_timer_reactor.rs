@@ -71,6 +71,11 @@ impl<H: Copy> PosixService<H> {
                     }
                 }
                 self.validate_request_image(peer, image, backend)?;
+                let ignored = self
+                    .signals
+                    .get(&owner)
+                    .ok_or(protocol::STATUS_ESRCH)?
+                    .ignored;
                 let mut timers = self.process_timers(peer)?;
                 for &(_, id, clock) in group {
                     let index = match clock {
@@ -88,6 +93,9 @@ impl<H: Copy> PosixService<H> {
                         }
                     }
                 }
+                // SIG_IGN cannot resurrect old expirations when changed back
+                // to a handler. Preserve schedule and last accepted overrun.
+                self.process_timers.discard_signals(owner, ignored);
                 first_error.map_or(Ok(()), Err)
             })();
             if let Err(error) = result {

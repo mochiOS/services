@@ -144,6 +144,29 @@ impl Registry {
     pub(super) fn retire_owner(&mut self, owner: u64) {
         self.timers.retain(|timer| timer.owner != owner);
     }
+
+    pub(super) fn pending_signal_mask(&self, owner: u64) -> u64 {
+        self.timers
+            .iter()
+            .filter(|timer| timer.owner == owner)
+            .filter_map(|timer| timer.pending)
+            .fold(0, |mask, pending| match pending.notification {
+                Notification::Signal { signal, .. } => mask | signal_bit(signal),
+                _ => mask,
+            })
+    }
+
+    /// Disposition changes discard pending occurrences, not the timer's
+    /// schedule or the last accepted overrun. No native observation is needed.
+    pub(super) fn discard_signals(&mut self, owner: u64, mask: u64) {
+        for timer in &mut self.timers {
+            if timer.owner == owner && timer.pending.is_some_and(|pending| {
+                matches!(pending.notification, Notification::Signal { signal, .. } if mask & signal_bit(signal) != 0)
+            }) {
+                timer.pending = None;
+            }
+        }
+    }
 }
 
 /// A borrow scoped to one admitted process. An ID from another process,
