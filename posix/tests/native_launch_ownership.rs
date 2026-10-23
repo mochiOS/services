@@ -3,13 +3,11 @@ extern crate self as mochi_user_platform;
 use std::sync::Mutex;
 
 pub mod syscall {
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub struct SysError;
-    impl SysError {
-        pub fn from_raw(_: i64) -> Self {
-            Self
-        }
-    }
+    pub use mochi_user_syscall::SysError;
+}
+
+fn failure() -> syscall::SysError {
+    syscall::SysError::from_raw(mnu_abi::status::Error::BackingFailure.into_raw() as i64)
 }
 
 pub mod process_watch {
@@ -60,7 +58,7 @@ pub mod process {
         let mut state = crate::STATE.lock().unwrap();
         state.status_calls += 1;
         if state.fail_status {
-            Err(crate::syscall::SysError)
+            Err(crate::failure())
         } else {
             Ok(Status {
                 process_id: 70,
@@ -78,7 +76,7 @@ pub mod process {
         let mut state = crate::STATE.lock().unwrap();
         state.events.push("create-stopped");
         if state.fail_create {
-            Err(crate::syscall::SysError)
+            Err(crate::failure())
         } else {
             Ok(7)
         }
@@ -88,7 +86,7 @@ pub mod process {
         let mut state = crate::STATE.lock().unwrap();
         state.events.push("resume");
         if state.fail_resume {
-            Err(crate::syscall::SysError)
+            Err(crate::failure())
         } else {
             Ok(())
         }
@@ -98,7 +96,7 @@ pub mod process {
         let mut state = crate::STATE.lock().unwrap();
         state.events.push("terminate");
         if state.fail_terminate {
-            return Err(crate::syscall::SysError);
+            return Err(crate::failure());
         }
         if !state.termination_pending {
             state.exited = true;
@@ -136,7 +134,10 @@ fn display_launch_and_readiness_use_retained_handles_without_legacy_fallback() {
 fn mboot_agent_creation_inherits_posix_and_retains_the_native_owner() {
     let launcher = include_str!("../../service-manager/src/service_launcher.rs");
     let start = launcher.find("pub(crate) fn spawn_mboot_agent(").unwrap();
-    let end = launcher[start..].find("pub(crate) fn spawn_user_session(").unwrap() + start;
+    let end = launcher[start..]
+        .find("pub(crate) fn spawn_user_session(")
+        .unwrap()
+        + start;
     let launch = &launcher[start..end];
     assert!(launch.contains("Result<NativeProcess,"));
     assert!(launch.contains("append_posix_handle(&mut arguments, Some(posix_endpoint))"));
@@ -159,7 +160,10 @@ fn fixed_services_register_userspace_posix_state_before_resume_with_rollback() {
         .split("pub(crate) fn spawn_mboot_agent(")
         .next()
         .unwrap();
-    assert!(native.contains("resolve_execution_security(spec.path, spec.execution_class)?"));
+    let authorize = native
+        .find("resolve_execution_security(spec.path, spec.execution_class)")
+        .unwrap();
+    assert!(authorize < native.find("NativeProcess::create_with_rollback").unwrap());
     assert!(native.contains("NativeProcess::create_with_rollback"));
     assert!(!native.contains("create_and_resume"));
     assert!(!native.contains("thread_security_context"));
@@ -386,7 +390,7 @@ fn native_launch_transfers_failed_creation_owners_until_cleanup_is_confirmed() {
                 |_| {
                     STATE.lock().unwrap().events.push("register-posix-state");
                     if failure == 0 {
-                        Err(syscall::SysError)
+                        Err(crate::failure())
                     } else {
                         Ok(())
                     }
@@ -426,7 +430,7 @@ fn native_launch_transfers_failed_creation_owners_until_cleanup_is_confirmed() {
                 .retry_rollback(|handle| {
                     assert_eq!(handle, 7);
                     STATE.lock().unwrap().events.push("reclaim-failed");
-                    Err(syscall::SysError)
+                    Err(crate::failure())
                 })
                 .is_err()
         );
