@@ -41,6 +41,25 @@ impl FilesystemService {
         payload: &[u8],
         parent_open_id: u64,
     ) -> Result<Response, i32> {
+        if request.opcode == protocol::OP_DEVICE_NODE_SET_ATTRIBUTES_IF_SAME {
+            let config = protocol::device_attributes::decode(payload).map_err(|_| EINVAL)?;
+            let parent = self.retained_namespace_node(parent_open_id)?;
+            let node = self
+                .namespace
+                .as_mut()
+                .ok_or(ENOTSUP)?
+                .set_device_attributes_if_same(
+                    &parent,
+                    config.identity,
+                    crate::devfs::Attributes {
+                        mode: config.mode,
+                        uid: config.uid,
+                        gid: config.gid,
+                    },
+                    self.clock,
+                )?;
+            return self.device_status_response(request, &node);
+        }
         if request.opcode == protocol::OP_DEVICE_NODE_REMOVE_IF_SAME {
             let config = protocol::device_removal::decode(payload).map_err(|_| EINVAL)?;
             let parent = self.retained_namespace_node(parent_open_id)?;

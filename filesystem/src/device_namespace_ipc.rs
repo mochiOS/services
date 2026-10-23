@@ -12,6 +12,7 @@ pub fn requested(header: wire::Header) -> bool {
             | wire::OP_DEVICE_NODE_SET_ATTRIBUTES
             | wire::OP_DEVICE_NODE_REMOVE
             | wire::OP_DEVICE_NODE_REMOVE_IF_SAME
+            | wire::OP_DEVICE_NODE_SET_ATTRIBUTES_IF_SAME
     )
 }
 pub fn handle(
@@ -44,7 +45,9 @@ pub fn handle(
     if object.handle == 0 || object.reserved != 0 || object.rights & required != required {
         return Err(13);
     }
-    if header.opcode == wire::OP_DEVICE_NODE_REMOVE_IF_SAME {
+    if header.opcode == wire::OP_DEVICE_NODE_SET_ATTRIBUTES_IF_SAME {
+        wire::device_attributes::decode(payload).map_err(|_| 22)?;
+    } else if header.opcode == wire::OP_DEVICE_NODE_REMOVE_IF_SAME {
         wire::device_removal::decode(payload).map_err(|_| 22)?;
     } else {
         wire::device_namespace::decode(header.opcode, payload).map_err(|_| 22)?;

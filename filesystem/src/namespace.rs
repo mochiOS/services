@@ -324,6 +324,33 @@ impl Namespace {
         }
     }
 
+    /// One exclusive namespace operation retains the compared child through
+    /// mutation. Neither names nor expected IDs can escape the parent scope.
+    pub(crate) fn set_device_attributes_if_same(
+        &mut self,
+        parent: &Node,
+        expected: protocol::device_removal::Request<'_>,
+        attributes: crate::devfs::Attributes,
+        clock: crate::clock::Clock,
+    ) -> Result<Node, i32> {
+        let node = self.configured_device_child(parent, expected.name)?;
+        // NodeStatus exports the volume-prefixed inode ID, not the private
+        // device filesystem's local inode number.
+        let id = node.id();
+        let exported_id = (id.volume << 32) | u64::from(id.inode);
+        if (id.volume, exported_id) != (expected.device, expected.node_id) {
+            return Err(116); // ESTALE, without changing a replacement inode.
+        }
+        let device = node.device_node().ok_or(95)?;
+        match self.volumes.get_mut(node.volume as usize) {
+            Some(Volume::Device(filesystem)) => {
+                filesystem.set_attributes_timed(device, attributes, clock)?;
+            }
+            _ => return Err(95),
+        }
+        Ok(node)
+    }
+
     pub(crate) fn change_device_attributes(
         &mut self,
         node: &Node,

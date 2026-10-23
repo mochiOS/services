@@ -26,6 +26,8 @@ mod device_attributes;
 mod terminal_namespace_bootstrap;
 #[path = "support/device_removal.rs"]
 mod device_removal;
+#[path = "support/device_conditional_attributes.rs"]
+mod device_conditional_attributes;
 #[path = "support/terminal_publication.rs"]
 mod terminal_publication;
 

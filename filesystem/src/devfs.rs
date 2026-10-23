@@ -319,6 +319,28 @@ impl DeviceFilesystem {
         Ok(())
     }
 
+    /// Owner configuration with a provider-selected ctime. All fields change
+    /// under the same metadata lock; clock failure commits nothing.
+    pub(crate) fn set_attributes_timed(
+        &mut self,
+        node: &Node,
+        attributes: Attributes,
+        clock: crate::clock::Clock,
+    ) -> Result<(), i32> {
+        self.validate(node)?;
+        if attributes.mode & !0o7777 != 0 {
+            return Err(22);
+        }
+        let mut metadata = node.record.metadata.write().map_err(|_| 5)?;
+        let now = clock()?;
+        if now.nanoseconds >= 1_000_000_000 {
+            return Err(22);
+        }
+        metadata.attributes = attributes;
+        metadata.changed = now;
+        Ok(())
+    }
+
     /// Check fresh ownership and publish one atomic metadata update. The
     /// service has already authenticated the attached CONTROL Handle and
     /// credentials; this retained Node remains valid after unpublication.
