@@ -1472,6 +1472,46 @@ fn explicit_device_backings_keep_directory_cursor_and_null_flags_in_their_own_de
                 .flags,
             flags
         );
+        let header = mnu_abi::provider::RequestHeader {
+            opcode: mnu_abi::provider::OP_QUERY,
+            object_id: id,
+            argument: 0,
+            basis: protocol::description_flags::GET,
+            length: 4,
+            data_length: 0,
+        };
+        assert_eq!(
+            filesystem_service::provider_flags::handle(&mut service, header, &[], 0),
+            Ok((4, flags.to_le_bytes().to_vec()))
+        );
+        let update = mnu_abi::provider::RequestHeader {
+            opcode: mnu_abi::provider::OP_CONTROL,
+            basis: protocol::description_flags::UPDATE,
+            length: 0,
+            data_length: 8,
+            ..header
+        };
+        for value in [
+            protocol::OPEN_STATUS_NONBLOCK,
+            flags & protocol::OPEN_STATUS_NONBLOCK,
+        ] {
+            let bytes =
+                protocol::description_flags::encode_update(protocol::OPEN_STATUS_NONBLOCK, value)
+                    .unwrap();
+            assert_eq!(
+                filesystem_service::provider_flags::handle(&mut service, update, &bytes, 0),
+                Ok((0, vec![]))
+            );
+            assert_eq!(
+                filesystem_service::provider_flags::handle(&mut service, header, &[], 0),
+                Ok((
+                    4,
+                    ((flags & !protocol::OPEN_STATUS_NONBLOCK) | value)
+                        .to_le_bytes()
+                        .to_vec()
+                ))
+            );
+        }
     }
     assert_eq!(service.provider_read_with_offset(first, 1), Err(21));
     assert_eq!(service.provider_write(first, b"x"), Err(21));

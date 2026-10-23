@@ -1,10 +1,11 @@
 //! Execute production status adapters with a reentrant/failing provider.
+//! This fixture deliberately has no POSIX Client/endpoint implementation:
+//! regular files, directories and special files must use the native data path.
 #![allow(dead_code)]
 use std::ffi::c_int;
 use std::sync::{Mutex, MutexGuard};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use mochios_posix_client::{
-    ObjectHandleAttachment,
     fd::{Entry, FdTable},
     handle_borrow::Book,
     upcall_guard::Guard,
@@ -215,47 +216,6 @@ mod shared_memory {
 }
 mod posix_protocol {
     pub const OPEN_NONBLOCK: u32 = 0x4000;
-}
-struct Client;
-fn posix_client() -> Result<Client, c_int> {
-    Ok(Client)
-}
-fn map_posix_client_error(error: c_int) -> c_int {
-    error
-}
-fn newlib_mutable_status_flags(flags: u32) -> c_int {
-    flags as c_int
-}
-fn posix_mutable_status_flags(flags: c_int) -> u32 {
-    (flags & !3) as u32
-}
-impl Client {
-    fn get_status_flags(self, handle: ObjectHandleAttachment<u32>) -> Result<u32, c_int> {
-        assert_eq!(handle.rights, 7);
-        backend(handle.handle.into())?;
-        Ok(O_NONBLOCK as u32)
-    }
-    fn set_status_flags(
-        self,
-        handle: ObjectHandleAttachment<u32>,
-        flags: u32,
-    ) -> Result<(), c_int> {
-        assert_eq!(handle.rights, 7);
-        assert_eq!(flags, O_NONBLOCK as u32);
-        backend(handle.handle.into())
-    }
-    fn update_status_flags(
-        self,
-        handle: ObjectHandleAttachment<u32>,
-        mask: u32,
-        flags: u32,
-        _: fn(u32),
-    ) -> Result<(), c_int> {
-        assert_eq!(handle.rights, 7);
-        assert_eq!(mask, O_NONBLOCK as u32);
-        assert_eq!(flags, expected_flags() as u32);
-        backend(handle.handle.into())
-    }
 }
 mod syscall {
     pub use mnu_abi::HANDLE_RIGHT_READ;
