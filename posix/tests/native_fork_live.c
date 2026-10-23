@@ -1,4 +1,5 @@
-/* Real mochiOS integration. Link with the fresh runtime, then run on mochiOS;
+/* Real mochiOS integration. Run with no option (pipe), --socket (recv), and
+ * --socket-read (read). Link with the fresh runtime, then run on mochiOS;
  * host execution cannot validate native COW, Handle inheritance or exec. */
 #define _GNU_SOURCE 1
 #include <errno.h>
@@ -9,6 +10,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -23,6 +25,7 @@ extern char **environ;
 static atomic_int ready, cleaned, tls_cleaned, worker_error;
 static atomic_uint_fast64_t worker_handle;
 static int blocked_pipe[2];
+static int socket_wait;
 static int64_t native(uint64_t number, uint64_t a, uint64_t b) {
   __asm__ volatile("syscall"
                    : "+a"(number)
@@ -64,7 +67,9 @@ static void *worker(void *unused) {
   atomic_store(&worker_handle, (uint64_t)handle);
   atomic_store_explicit(&ready, 1, memory_order_release);
   char release = 0;
-  if (read(blocked_pipe[0], &release, 1) != 1 || release != 'R')
+  ssize_t count = socket_wait == 1 ? recv(blocked_pipe[0], &release, 1, 0)
+                                   : read(blocked_pipe[0], &release, 1);
+  if (count != 1 || release != 'R')
     atomic_store(&worker_error, 1);
   _REENT_CVTBUF(reent) = NULL; // parent exit/join may now reclaim normally
   return NULL;
@@ -73,8 +78,12 @@ int main(int argc, char **argv) {
   if (argc == 2 && strcmp(argv[1], "--fork-child") == 0)
     return 0;
   CHECK(argc >= 1 && argv[0] && *argv[0]);
+  socket_wait = argc == 2 && strcmp(argv[1], "--socket") == 0;
+  if (argc == 2 && strcmp(argv[1], "--socket-read") == 0)
+    socket_wait = 2;
   CHECK(pthread_key_create(&key, tls_cleanup) == 0);
-  CHECK(pipe(blocked_pipe) == 0);
+  CHECK((socket_wait ? socketpair(AF_UNIX, SOCK_STREAM, 0, blocked_pipe)
+                     : pipe(blocked_pipe)) == 0);
   pthread_t thread;
   CHECK(pthread_create(&thread, NULL, worker, NULL) == 0);
   while (!atomic_load_explicit(&ready, memory_order_acquire))
@@ -89,6 +98,7 @@ int main(int argc, char **argv) {
   uint64_t handle = atomic_load(&worker_handle);
   do {
     CHECK(native(658, handle, (uint64_t)&thread_status) == 0);
+    CHECK(!atomic_load(&worker_error) && thread_status.state != 5);
     if (thread_status.state != 3 && thread_status.state != 4)
       sched_yield();
   } while (thread_status.state != 3 && thread_status.state != 4);
@@ -136,7 +146,8 @@ int main(int argc, char **argv) {
   CHECK(atomic_load(&cleaned) == 1 && atomic_load(&tls_cleaned) == 1);
   CHECK(pthread_key_delete(key) == 0);
   CHECK(close(blocked_pipe[0]) == 0 && close(blocked_pipe[1]) == 0);
-  puts("fork-live: PASS pipe-wait sibling, opaque caches, parent-only destructors, "
+  puts("fork-live: PASS I/O-wait sibling, opaque caches, parent-only "
+       "destructors, "
        "inherited pipe and child exec");
   return 0;
 }
