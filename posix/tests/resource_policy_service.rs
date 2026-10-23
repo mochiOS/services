@@ -36,6 +36,9 @@ impl Drop for Page {
     }
 }
 impl Published<u32> for Page {
+    fn publish_record_locks(&self, held: bool) {
+        self.policy.publish_record_locks(held);
+    }
     fn publish(&self, resource: u32, limit: wire::ResourceLimit) -> Result<(), i32> {
         self.state.publishes.fetch_add(1, Ordering::SeqCst);
         match self.state.publish_error.load(Ordering::SeqCst) {
@@ -464,4 +467,85 @@ fn even_root_publishers_are_dropped_only_after_confirmed_native_exit() {
             .status,
         wire::STATUS_ESRCH
     );
+}
+
+#[test]
+fn lock_publication_tracks_lazy_discovery_conflicts_partial_unlock_and_exit() {
+    use posix_service::record_lock::{FileKey, Kind, Range};
+    let mut service = service();
+    service
+        .initialize_process(
+            peer(41),
+            AuthenticatedProcess {
+                process_id: 42,
+                handle: 142,
+            },
+            0,
+            0,
+            &[],
+        )
+        .unwrap();
+    let state = Arc::new(State::default());
+    let mut backend = Backend(Arc::clone(&state));
+    let file = FileKey {
+        device: 7,
+        inode: 11,
+    };
+    let range = Range::normalize(0, 10, 20).unwrap();
+    // A direct client can lock before libc discovers its shared page.
+    service
+        .record_locks(peer(41))
+        .unwrap()
+        .set(file, Kind::Write, range)
+        .unwrap();
+    assert_eq!(
+        request(&mut service, &mut backend, 41)
+            .response
+            .header
+            .status,
+        0
+    );
+    assert_eq!(
+        request(&mut service, &mut backend, 42)
+            .response
+            .header
+            .status,
+        0
+    );
+    let pages = state.pages.lock().unwrap();
+    let parent = Arc::clone(&pages[0]);
+    let child = Arc::clone(&pages[1]);
+    drop(pages);
+    assert_eq!(parent.read_record_locks(), Ok(true));
+    assert_eq!(child.read_record_locks(), Ok(false));
+    assert!(
+        service
+            .record_locks(peer(42))
+            .unwrap()
+            .set(file, Kind::Write, range)
+            .is_err()
+    );
+    assert_eq!(child.read_record_locks(), Ok(false));
+    service
+        .record_locks(peer(41))
+        .unwrap()
+        .unlock(file, Range::normalize(0, 10, 5).unwrap())
+        .unwrap();
+    assert_eq!(parent.read_record_locks(), Ok(true));
+    service.record_locks(peer(41)).unwrap().release_file(file);
+    assert_eq!(parent.read_record_locks(), Ok(false));
+    service
+        .record_locks(peer(42))
+        .unwrap()
+        .set(file, Kind::Read, range)
+        .unwrap();
+    assert_eq!(parent.read_record_locks(), Ok(false));
+    assert_eq!(child.read_record_locks(), Ok(true));
+    service
+        .refresh_child_exit_notifications(&mut Processes(Ok(ProcessLifecycle::Exited {
+            exit_code: 0,
+        })))
+        .unwrap();
+    assert_eq!(parent.read_record_locks(), Ok(false));
+    assert_eq!(child.read_record_locks(), Ok(false));
 }

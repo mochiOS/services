@@ -56,6 +56,12 @@ impl Factory<u32> for NativeFactory {
 }
 
 impl Published<u32> for Page {
+    fn publish_record_locks(&self, held: bool) {
+        // The constructor initialized this private writable view before any
+        // read-only reader was delegated; its lifetime is owned by this Page.
+        unsafe { &*(self.mapping.address() as *const ResourcePolicy) }.publish_record_locks(held);
+    }
+
     fn publish(&self, resource: u32, limit: protocol::ResourceLimit) -> Result<(), i32> {
         // This object retains its initialized mapping for the entire borrow.
         // All contents are accessed atomically; service state serializes policy.

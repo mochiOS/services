@@ -245,11 +245,17 @@ impl Registry {
 }
 
 /// Borrow tied to one service-admitted process, independent of its UID.
-pub struct OwnedLocks<'a> {
+pub struct OwnedLocks<'a, H: Copy = u32> {
     owner: u64,
     registry: &'a mut Registry,
+    publication: Option<&'a dyn resource_policy::Published<H>>,
 }
-impl OwnedLocks<'_> {
+impl<H: Copy> OwnedLocks<'_, H> {
+    fn publish(&self) {
+        if let Some(page) = self.publication {
+            page.publish_record_locks(self.registry.has_owner(self.owner));
+        }
+    }
     /// Apply a decoded request after Handle, access-mode and image admission.
     /// The adapter must keep the file alive and obtain position/size from that
     /// same attached description, outside the service state lock. Neither
@@ -305,15 +311,20 @@ impl OwnedLocks<'_> {
         self.registry.conflict(self.owner, file, kind, range)
     }
     pub fn set(&mut self, file: FileKey, kind: Kind, range: Range) -> Result<(), Error> {
-        self.registry.replace(self.owner, file, range, Some(kind))
+        let result = self.registry.replace(self.owner, file, range, Some(kind));
+        self.publish();
+        result
     }
     pub fn unlock(&mut self, file: FileKey, range: Range) -> Result<(), Error> {
-        self.registry.replace(self.owner, file, range, None)
+        let result = self.registry.replace(self.owner, file, range, None);
+        self.publish();
+        result
     }
     /// Closing ANY description of this file releases this process's locks.
     /// The FD/IPC adapter must call this, including dup2 replacement/exec close.
     pub fn release_file(&mut self, file: FileKey) {
         self.registry.release_file(self.owner, file);
+        self.publish();
     }
 }
 
@@ -328,7 +339,7 @@ fn lock_status(error: Error) -> i32 {
 
 impl<H: Copy> PosixService<H> {
     /// Internal API after native image/Handle admission, not a wire request.
-    pub fn record_locks(&mut self, peer: PeerIdentity) -> Result<OwnedLocks<'_>, i32> {
+    pub fn record_locks(&mut self, peer: PeerIdentity) -> Result<OwnedLocks<'_, H>, i32> {
         if !self.sessions.contains_key(&peer.process_id)
             || !self.processes.contains_key(&peer.process_id)
             || self
@@ -341,6 +352,11 @@ impl<H: Copy> PosixService<H> {
         Ok(OwnedLocks {
             owner: peer.process_id,
             registry: &mut self.record_locks,
+            publication: self
+                .resource_policies
+                .iter()
+                .find(|(owner, _)| *owner == peer.process_id)
+                .map(|(_, page)| page.as_ref()),
         })
     }
 }

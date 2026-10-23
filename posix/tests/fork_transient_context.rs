@@ -47,7 +47,7 @@ fn fork_labels_are_removed_without_closing_handles_and_only_explicit_control_key
         .split("fn clone_registered_process()")
         .nth(1)
         .unwrap();
-    let child = clone.split("if image == 0 {").nth(2).unwrap();
+    let child = clone.split("drop(lifecycle_guard);").nth(1).unwrap();
     assert!(
         child.find("clear_transient_context(").unwrap()
             < child.find("fds.clear_reservations()").unwrap()

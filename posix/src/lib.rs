@@ -1340,6 +1340,7 @@ impl<H: Copy> PosixService<H> {
         // Callers have already observed native exit. Record locks must not
         // survive merely because a later parent-notification step fails.
         self.record_locks.retire_owner(process_id);
+        self.publish_record_lock_state(process_id);
         self.record_lock_execs.retire_owner(process_id);
         self.refresh_child_notifications_for_child(process_id, processes)?;
         self.refresh_parent_image(process_id, processes)?;
@@ -2290,6 +2291,7 @@ impl<H: Copy> PosixService<H> {
         self.cpu_timers.retain(|&(owner, _), _| owner != child_id);
         self.process_timers.retire_owner(child_id);
         self.record_locks.retire_owner(child_id);
+        self.publish_record_lock_state(child_id);
         self.record_lock_execs.retire_owner(child_id);
         self.retire_process_clock_targets(child_id);
         if let Some(directories) = self.directories.remove(&child_id) {

@@ -200,9 +200,9 @@ mod syscall {
             return mochi_user_syscall::RawSyscallResult::new((-i64::from(EIO)) as u64);
         }
         backend.maps += 1;
-        mochi_user_syscall::RawSyscallResult::new(
-            std::ptr::from_ref(&backend.pages[backend.selected].policy) as u64,
-        )
+        mochi_user_syscall::RawSyscallResult::new(std::ptr::from_ref(
+            &backend.pages[backend.selected].policy,
+        ) as u64)
     }
     pub fn raw_syscall2(number: SyscallNumber, address: u64, length: u64) -> Result<u64, i32> {
         assert_eq!(number, SyscallNumber::MemoryUnmap);
@@ -388,6 +388,36 @@ fn discovery_once_live_updates_and_child_reset_drop_only_the_copied_view() {
 }
 
 #[test]
+fn record_lock_reads_observe_live_service_state_without_repeated_rpc() {
+    let _serial = start();
+    assert_eq!(resource_policy::record_locks(), Ok(false));
+    {
+        let backend = BACKEND.lock().unwrap();
+        backend.as_ref().unwrap().pages[0]
+            .policy
+            .publish_record_locks(true);
+    }
+    for _ in 0..100 {
+        assert_eq!(resource_policy::record_locks(), Ok(true));
+    }
+    {
+        let mut backend = BACKEND.lock().unwrap();
+        let backend = backend.as_mut().unwrap();
+        assert_eq!((backend.requests, backend.maps), (1, 1));
+        backend.pages[0].policy.publish_record_locks(false);
+        backend.selected = 1;
+    }
+    assert_eq!(resource_policy::record_locks(), Ok(false));
+    // Fork must discover the child's page, never retain a parent's bit.
+    let mut frozen = resource_policy::freeze_for_clone();
+    resource_policy::reset_child(&mut frozen);
+    drop(frozen);
+    assert_eq!(resource_policy::record_locks(), Ok(false));
+    assert_eq!(BACKEND.lock().unwrap().as_ref().unwrap().requests, 2);
+    reset();
+}
+
+#[test]
 fn concurrent_readers_discover_once_and_clone_freeze_excludes_reads() {
     let _serial = start();
     std::thread::scope(|scope| {
@@ -544,6 +574,12 @@ fn runtime_routes_own_reads_to_page_and_freezes_after_allocator_before_state() {
         .unwrap();
     assert!(
         duplicate.find("process_fd_limit()").unwrap()
-            < duplicate.find("let mut state = state()").unwrap()
+            < duplicate.find("record_lock::duplicate(").unwrap()
+    );
+    let locks = include_str!("../../../user/crates/newlib-runtime/src/record_lock.rs");
+    let duplicate = locks.split("pub(super) fn duplicate(").nth(1).unwrap();
+    assert!(
+        duplicate.find("let _gate = gate()").unwrap()
+            < duplicate.find("let mut table = state()").unwrap()
     );
 }

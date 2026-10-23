@@ -6,6 +6,8 @@ pub trait Published<H>: core::fmt::Debug + Send {
     /// Called under service state synchronization: no IPC, user callback or
     /// re-entry is allowed. A failure must leave the published value unchanged.
     fn publish(&self, resource: u32, limit: protocol::ResourceLimit) -> Result<(), i32>;
+    /// Infallible scalar publication on an initialized, service-owned page.
+    fn publish_record_locks(&self, held: bool);
     /// Return one independently owned temporary reference. Its actual native
     /// rights must permit IPC transfer; requested reply rights are READ|MAP
     /// only. The transport closes this temporary reference after reply.
@@ -80,8 +82,15 @@ impl<H: Copy> PosixService<H> {
                 .unwrap_or_default()
         });
         let page = backend.create(limits)?;
+        page.publish_record_locks(self.record_locks.has_owner(owner));
         let offered = page.delegate()?;
         self.resource_policies.push((owner, page));
         Ok(offered)
+    }
+
+    pub(super) fn publish_record_lock_state(&self, owner: u64) {
+        if let Some((_, page)) = self.resource_policies.iter().find(|(id, _)| *id == owner) {
+            page.publish_record_locks(self.record_locks.has_owner(owner));
+        }
     }
 }

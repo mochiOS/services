@@ -35,6 +35,30 @@ fn exact_versioned_atomic_layout_has_no_native_pointer_or_handle_fields() {
 }
 
 #[test]
+fn record_lock_extension_is_independent_and_rejects_unknown_state() {
+    use mochios_posix_protocol::resource_policy::BASE_BYTE_LEN;
+    let mut policy = page();
+    assert_eq!(BASE_BYTE_LEN, HEADER_LEN + RLIMIT_COUNT as usize * 16);
+    assert_eq!(policy.read_record_locks(), Ok(false));
+    policy.publish_record_locks(true);
+    assert_eq!(policy.read_record_locks(), Ok(true));
+    policy
+        .publish(0, ResourceLimit { soft: 7, hard: 9 })
+        .unwrap();
+    assert_eq!(policy.read_record_locks(), Ok(true));
+    policy.publish_record_locks(false);
+    assert_eq!(policy.read(0), Ok(ResourceLimit { soft: 7, hard: 9 }));
+    assert_eq!(policy.read_record_locks(), Ok(false));
+    word(&mut policy, BASE_BYTE_LEN / 8 + 1, 2);
+    assert_eq!(policy.read_record_locks(), Err(Error::InvalidLayout));
+    policy.publish_record_locks(true);
+    word(&mut policy, BASE_BYTE_LEN / 8, 0);
+    assert_eq!(policy.read_record_locks(), Err(Error::InvalidLayout));
+    // Readers of the original limit prefix need no lock extension support.
+    assert_eq!(policy.read(0), Ok(ResourceLimit { soft: 7, hard: 9 }));
+}
+
+#[test]
 fn invalid_publication_never_changes_any_limit_and_updates_are_independent() {
     let policy = page();
     let value = ResourceLimit { soft: 9, hard: 19 };
