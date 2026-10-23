@@ -1,5 +1,5 @@
 use mochios_posix_protocol as wire;
-use posix_service::pty::{BUFFER_CAPACITY, EAGAIN, PtyManager, PtyPair};
+use posix_service::pty::{BUFFER_CAPACITY, CANONICAL_LINE_CAPACITY, EAGAIN, PtyManager, PtyPair};
 
 fn terminal(echo: bool) -> (PtyManager, PtyPair) {
     let mut manager = PtyManager::new();
@@ -132,7 +132,10 @@ fn controls_are_ordinary_when_disabled_or_raw_and_literal_next_quotes_them() {
 fn long_word_echo_is_bounded_ordered_and_drains_in_multiple_reads() {
     let (mut manager, pair) = terminal(false);
     manager
-        .write(pair.master_object_id, &vec![b'x'; BUFFER_CAPACITY])
+        .write(
+            pair.master_object_id,
+            &vec![b'x'; CANONICAL_LINE_CAPACITY - 1],
+        )
         .unwrap();
     let mut attributes = manager.attributes(pair.slave_object_id).unwrap();
     attributes.local_flags |= wire::TERMINAL_LFLAG_ECHO;
@@ -144,7 +147,7 @@ fn long_word_echo_is_bounded_ordered_and_drains_in_multiple_reads() {
     assert_eq!(manager.write(pair.slave_object_id, b"after"), Err(EAGAIN));
     assert_eq!(manager.write(pair.master_object_id, b"later"), Err(EAGAIN));
     let mut expected = b"before".to_vec();
-    expected.extend(b"\x08 \x08".repeat(BUFFER_CAPACITY));
+    expected.extend(b"\x08 \x08".repeat(CANONICAL_LINE_CAPACITY - 1));
     assert_eq!(output(&mut manager, pair), expected);
     manager.write(pair.slave_object_id, b"after").unwrap();
     assert_eq!(output(&mut manager, pair), b"after");
@@ -155,7 +158,7 @@ fn long_word_echo_is_bounded_ordered_and_drains_in_multiple_reads() {
 #[test]
 fn reprint_larger_than_the_output_queue_preserves_every_byte_and_original_input() {
     let (mut manager, pair) = terminal(false);
-    let line = vec![b'x'; BUFFER_CAPACITY];
+    let line = vec![b'x'; CANONICAL_LINE_CAPACITY - 1];
     manager.write(pair.master_object_id, &line).unwrap();
     let mut attributes = manager.attributes(pair.slave_object_id).unwrap();
     attributes.local_flags |= wire::TERMINAL_LFLAG_ECHO;
@@ -179,7 +182,10 @@ fn reprint_larger_than_the_output_queue_preserves_every_byte_and_original_input(
 fn output_flush_retires_deferred_echo_and_releases_backpressure() {
     let (mut manager, pair) = terminal(false);
     manager
-        .write(pair.master_object_id, &vec![b'x'; BUFFER_CAPACITY])
+        .write(
+            pair.master_object_id,
+            &vec![b'x'; CANONICAL_LINE_CAPACITY - 1],
+        )
         .unwrap();
     let mut attributes = manager.attributes(pair.slave_object_id).unwrap();
     attributes.local_flags |= wire::TERMINAL_LFLAG_ECHO;
@@ -232,7 +238,10 @@ fn deferred_echo_obeys_flow_control_and_signal_flush_policy() {
     for no_flush in [false, true] {
         let (mut manager, pair) = terminal(false);
         manager
-            .write(pair.master_object_id, &vec![b'x'; BUFFER_CAPACITY])
+            .write(
+                pair.master_object_id,
+                &vec![b'x'; CANONICAL_LINE_CAPACITY - 1],
+            )
             .unwrap();
         let mut attributes = manager.attributes(pair.slave_object_id).unwrap();
         attributes.local_flags |= wire::TERMINAL_LFLAG_ECHO;
@@ -256,7 +265,7 @@ fn deferred_echo_obeys_flow_control_and_signal_flush_policy() {
             wire::SIGNAL_INT
         );
         let expected = if no_flush {
-            b"\x08 \x08".repeat(BUFFER_CAPACITY)
+            b"\x08 \x08".repeat(CANONICAL_LINE_CAPACITY - 1)
         } else {
             vec![]
         };
@@ -269,7 +278,10 @@ fn deferred_echo_survives_slave_close_and_dead_master_drain_discards_it() {
     for close_master in [false, true] {
         let (mut manager, pair) = terminal(false);
         manager
-            .write(pair.master_object_id, &vec![b'x'; BUFFER_CAPACITY])
+            .write(
+                pair.master_object_id,
+                &vec![b'x'; CANONICAL_LINE_CAPACITY - 1],
+            )
             .unwrap();
         let mut attributes = manager.attributes(pair.slave_object_id).unwrap();
         attributes.local_flags |= wire::TERMINAL_LFLAG_ECHO;
@@ -306,7 +318,7 @@ fn deferred_echo_survives_slave_close_and_dead_master_drain_discards_it() {
                 }
                 bytes.extend(part);
             }
-            assert_eq!(bytes, b"\x08 \x08".repeat(BUFFER_CAPACITY));
+            assert_eq!(bytes, b"\x08 \x08".repeat(CANONICAL_LINE_CAPACITY - 1));
         }
     }
 }

@@ -15,6 +15,9 @@ pub const ESPIPE: i32 = 29;
 pub const ENOTSUP: i32 = 95;
 
 pub const BUFFER_CAPACITY: usize = 64 * 1024;
+/// Maximum stored canonical line, including its byte delimiter. Ordinary
+/// data leaves one slot so a saturated unfinished line can still be read.
+pub const CANONICAL_LINE_CAPACITY: usize = BUFFER_CAPACITY;
 pub const READINESS_SIGNALS: u64 = mnu_abi::HANDLE_SIGNAL_READABLE
     | mnu_abi::HANDLE_SIGNAL_WRITABLE
     | mnu_abi::HANDLE_SIGNAL_PEER_CLOSED
@@ -148,6 +151,16 @@ impl PseudoTerminal {
         self.edit_echo.is_empty()
             && self.input_occupancy() < BUFFER_CAPACITY
             && self.input_records.len() < BUFFER_CAPACITY
+    }
+
+    fn canonical_data_full(&self) -> bool {
+        self.canonical_input.len() >= CANONICAL_LINE_CAPACITY - 1
+    }
+
+    fn canonical_delimiter(&self, byte: u8) -> bool {
+        let eol = self.attributes.control_characters[posix_protocol::TERMINAL_CC_VEOL];
+        let eol2 = self.attributes.control_characters[posix_protocol::TERMINAL_CC_VEOL2];
+        byte == b'\n' || (eol != 0 && byte == eol) || (eol2 != 0 && byte == eol2)
     }
 
     fn canonical_erase_length(&self, end: usize) -> usize {
@@ -325,6 +338,13 @@ impl PseudoTerminal {
         let mut signals = Vec::new();
         for source in bytes.iter().copied() {
             if self.literal_next {
+                if canonical && self.canonical_data_full() {
+                    // A quoted delimiter is data, not a line ending. Discard
+                    // the excess byte without echo and finish this quote.
+                    self.literal_next = false;
+                    consumed += 1;
+                    continue;
+                }
                 // Quote one byte across provider requests. ISTRIP still
                 // applies, but no CR/NL mapping, signal, flow, or delimiter
                 // recognition does. Retain the quote until the byte commits.
@@ -489,6 +509,13 @@ impl PseudoTerminal {
                     continue;
                 }
             }
+            if canonical && self.canonical_data_full() && !self.canonical_delimiter(byte) {
+                // Keep editing, signals and flow control above this policy.
+                // Discard only overlong pending-line data, never a short line
+                // blocked behind committed input the slave can already read.
+                consumed += 1;
+                continue;
+            }
             if !self.has_input_capacity() {
                 break;
             }
@@ -505,12 +532,8 @@ impl PseudoTerminal {
             for byte in echo.iter().copied() {
                 self.append_output(byte);
             }
-            if canonical {
-                let eol = self.attributes.control_characters[posix_protocol::TERMINAL_CC_VEOL];
-                let eol2 = self.attributes.control_characters[posix_protocol::TERMINAL_CC_VEOL2];
-                if byte == b'\n' || (eol != 0 && byte == eol) || (eol2 != 0 && byte == eol2) {
-                    self.commit_canonical_input();
-                }
+            if canonical && self.canonical_delimiter(byte) {
+                self.commit_canonical_input();
             }
             consumed += 1;
         }

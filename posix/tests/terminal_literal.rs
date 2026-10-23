@@ -182,15 +182,19 @@ fn remapped_literal_character_and_output_only_flush_keep_pending_input_state() {
 #[test]
 fn full_input_never_swallows_a_literal_prefix() {
     let (mut manager, pair) = terminal(false);
+    // Keep the queue truly full while the pending line remains below its
+    // own limit: committed input is readable and must not be discarded.
+    manager.write(pair.master_object_id, b"a\n").unwrap();
     manager
-        .write(pair.master_object_id, &vec![b'x'; BUFFER_CAPACITY])
+        .write(pair.master_object_id, &vec![b'x'; BUFFER_CAPACITY - 2])
         .unwrap();
     assert_eq!(manager.write(pair.master_object_id, &[22]), Err(EAGAIN));
     assert_eq!(manager.write(pair.master_object_id, &[127]), Ok(1));
     assert_eq!(manager.write(pair.master_object_id, &[22, 3]), Ok(2));
     assert_eq!(manager.take_terminal_signal(), None);
+    assert_eq!(manager.read(pair.slave_object_id, 2), Ok(b"a\n".to_vec()));
     manager.write(pair.master_object_id, &[4]).unwrap();
-    let mut expected = vec![b'x'; BUFFER_CAPACITY - 1];
+    let mut expected = vec![b'x'; BUFFER_CAPACITY - 3];
     expected.push(3);
     assert_eq!(
         manager.read(pair.slave_object_id, BUFFER_CAPACITY),

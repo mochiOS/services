@@ -200,19 +200,19 @@ fn noflsh_retains_full_records_until_an_explicit_input_flush() {
 }
 
 #[test]
-fn eof_can_publish_a_line_when_the_byte_queue_is_full() {
+fn eof_can_publish_a_saturated_line_without_consuming_the_delimiter_slot() {
     let (mut manager, pair) = terminal();
     let bytes = vec![b'x'; BUFFER_CAPACITY];
     assert_eq!(
         manager.write(pair.master_object_id, &bytes),
         Ok(BUFFER_CAPACITY)
     );
-    assert!(!writable(&manager, pair));
-    assert_eq!(manager.write(pair.master_object_id, b"extra"), Err(EAGAIN));
+    assert!(writable(&manager, pair));
+    assert_eq!(manager.write(pair.master_object_id, b"extra"), Ok(5));
     assert_eq!(manager.write(pair.master_object_id, &[4]), Ok(1));
     assert_eq!(
         manager.read(pair.slave_object_id, BUFFER_CAPACITY),
-        Ok(bytes)
+        Ok(bytes[..BUFFER_CAPACITY - 1].to_vec())
     );
     assert_eq!(manager.read(pair.slave_object_id, 1), Err(EAGAIN));
     assert!(writable(&manager, pair));
