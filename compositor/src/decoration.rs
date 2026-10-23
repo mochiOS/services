@@ -100,7 +100,7 @@ pub(crate) fn handle_request(
         return reply;
     };
     match opcode {
-        OP_DECOR_QUERY_OVERLAP => {
+        OP_DECOR_QUERY_OVERLAP | OP_DECOR_SAMPLE_BACKGROUND => {
             if !sender_has_decorate_capability(sender) {
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
                 return reply;
@@ -121,11 +121,18 @@ pub(crate) fn handle_request(
                 return reply;
             }
             put_u32(&mut reply, 0, 0);
-            put_u32(
-                &mut reply,
-                4,
-                u32::from(native_window_overlaps(windows, surfaces, area)),
-            );
+            if opcode == OP_DECOR_SAMPLE_BACKGROUND {
+                if let Some(color) = crate::backdrop::sample_background(surfaces, windows, area) {
+                    put_u32(&mut reply, 4, 1);
+                    put_u32(&mut reply, 8, color);
+                }
+            } else {
+                put_u32(
+                    &mut reply,
+                    4,
+                    u32::from(native_window_overlaps(windows, surfaces, area)),
+                );
+            }
         }
         OP_DECOR_SUBSCRIBE => {
             if !sender_has_decorate_capability(sender) {

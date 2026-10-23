@@ -505,6 +505,61 @@ pub(crate) fn read_current_pixel(surface: &Surface, sx: usize, sy: usize) -> Opt
     surface.current.get(src).copied()
 }
 
+// Color sampling is separate from alpha-only input testing and runs only on
+// sparse shell queries. Stop once front-to-back accumulation becomes opaque.
+pub(crate) fn read_background_pixel(surface: &Surface, sx: usize, sy: usize) -> Option<u32> {
+    if surface.current_format != PIXEL_FORMAT_GPU_SCENE {
+        return read_current_pixel(surface, sx, sy);
+    }
+    let gpu = surface.gpu.as_ref()?;
+    if sx >= gpu.width as usize || sy >= gpu.height as usize {
+        return None;
+    }
+    let x = sx as f32 / gpu.width as f32 * 2.0 - 1.0;
+    let y = sy as f32 / gpu.height as f32 * 2.0 - 1.0;
+    let stride = mochios_viewkit_gpu_protocol::VERTEX_STRIDE;
+    let mut result = [0.0f32; 4];
+    for triangle in gpu.vertices.rchunks_exact(stride * 3) {
+        let bytes = [
+            &triangle[..stride],
+            &triangle[stride..stride * 2],
+            &triangle[stride * 2..],
+        ];
+        let vertices = [
+            decode_gpu_hit_vertex(bytes[0])?,
+            decode_gpu_hit_vertex(bytes[1])?,
+            decode_gpu_hit_vertex(bytes[2])?,
+        ];
+        let Some(weights) = barycentric_weights(x, y, vertices[0], vertices[1], vertices[2]) else {
+            continue;
+        };
+        let interpolate = |offset| -> Option<f32> {
+            Some(
+                read_f32(bytes[0], offset)? * weights[0]
+                    + read_f32(bytes[1], offset)? * weights[1]
+                    + read_f32(bytes[2], offset)? * weights[2],
+            )
+        };
+        let tx = ((interpolate(12)?.clamp(0.0, 1.0) * gpu.atlas_width as f32) as usize)
+            .min(gpu.atlas_width.saturating_sub(1) as usize);
+        let ty = ((interpolate(16)?.clamp(0.0, 1.0) * gpu.atlas_height as f32) as usize)
+            .min(gpu.atlas_height.saturating_sub(1) as usize);
+        let offset = (ty.checked_mul(gpu.atlas_width as usize)?.checked_add(tx)?).checked_mul(4)?;
+        let texel = gpu.atlas.get(offset..offset + 4)?;
+        let remaining = 1.0 - result[3];
+        for (index, texel_index) in [2, 1, 0, 3].into_iter().enumerate() {
+            result[index] += f32::from(texel[texel_index]) / 255.0
+                * interpolate(20 + index * 4)?.clamp(0.0, 1.0)
+                * remaining;
+        }
+        if result[3] >= 0.999 {
+            break;
+        }
+    }
+    let channel = |index: usize| (result[index] * 255.0).round().clamp(0.0, 255.0) as u32;
+    Some((channel(3) << 24) | (channel(0) << 16) | (channel(1) << 8) | channel(2))
+}
+
 fn read_gpu_scene_pixel(surface: &Surface, sx: usize, sy: usize) -> Option<u32> {
     let gpu = surface.gpu.as_ref()?;
     if sx >= gpu.width as usize || sy >= gpu.height as usize {
@@ -657,6 +712,34 @@ mod gpu_hit_tests {
             atlas_dirty_height: 1,
         });
         surface
+    }
+
+    #[test]
+    fn background_sampling_reads_gpu_rgb_and_front_to_back_premultiplied_alpha() {
+        let mut surface = scene_surface(1.0);
+        let gpu = surface.gpu.as_mut().unwrap();
+        gpu.atlas = vec![20, 30, 200, 255];
+        assert_eq!(read_background_pixel(&surface, 10, 10), Some(0xffc81e14));
+        let gpu = surface.gpu.as_mut().unwrap();
+        for vertex in gpu
+            .vertices
+            .chunks_exact_mut(mochios_viewkit_gpu_protocol::VERTEX_STRIDE)
+        {
+            for offset in [20, 24, 28, 32] {
+                vertex[offset..offset + 4].copy_from_slice(&0.5f32.to_le_bytes());
+            }
+        }
+        assert_eq!(read_background_pixel(&surface, 10, 10), Some(0x80640f0a));
+        let gpu = surface.gpu.as_mut().unwrap();
+        let mut front = gpu.vertices.clone();
+        for vertex in front.chunks_exact_mut(mochios_viewkit_gpu_protocol::VERTEX_STRIDE) {
+            for offset in [20, 24, 28] {
+                vertex[offset..offset + 4].copy_from_slice(&0.0f32.to_le_bytes());
+            }
+            vertex[32..36].copy_from_slice(&1.0f32.to_le_bytes());
+        }
+        gpu.vertices.extend(front);
+        assert_eq!(read_background_pixel(&surface, 10, 10), Some(0xff000000));
     }
 
     #[test]
@@ -876,7 +959,10 @@ pub(crate) fn handle_shared_buffer(
     total: u64,
     mapping: Option<ReceivedBuffer>,
 ) -> bool {
-    if mapping.as_ref().is_none_or(|view| view.view() != (mapped_addr, total)) {
+    if mapping
+        .as_ref()
+        .is_none_or(|view| view.view() != (mapped_addr, total))
+    {
         return false;
     }
     let Some(index) = surfaces

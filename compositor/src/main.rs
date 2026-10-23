@@ -1,5 +1,6 @@
 extern crate alloc;
 
+mod backdrop;
 mod client;
 mod context_menu;
 mod cursor;

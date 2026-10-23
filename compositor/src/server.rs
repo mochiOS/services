@@ -288,7 +288,8 @@ fn handle_request(
         | OP_DECOR_MINIMIZE
         | OP_DECOR_TOGGLE_MAXIMIZE
         | OP_DECOR_CLOSE_REQUEST
-        | OP_DECOR_QUERY_OVERLAP => {
+        | OP_DECOR_QUERY_OVERLAP
+        | OP_DECOR_SAMPLE_BACKGROUND => {
             return crate::decoration::handle_request(
                 clients,
                 surfaces,
