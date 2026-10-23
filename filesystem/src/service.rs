@@ -777,7 +777,7 @@ impl FilesystemService {
         let gid = credentials.effective_gid;
         let groups = credentials.supplementary_groups();
         let (resolution, filesystem, volume) = self.resolve_open_path(
-            payload,
+            creation_destination(payload)?,
             anchors,
             FollowSymlinks::ExcludeFinalComponent,
             uid,
@@ -852,7 +852,7 @@ impl FilesystemService {
         let gid = credentials.effective_gid;
         let groups = credentials.supplementary_groups();
         let (resolution, filesystem, _) = self.resolve_open_path(
-            payload,
+            creation_destination(payload)?,
             anchors,
             FollowSymlinks::ExcludeFinalComponent,
             uid,
@@ -1058,17 +1058,18 @@ impl FilesystemService {
         let (target, link_path) = payload.split_at_checked(split).ok_or(EINVAL)?;
         if target.is_empty()
             || link_path.is_empty()
-            || target.len() > protocol::MAX_PATH_LEN
-            || link_path.len() > protocol::MAX_PATH_LEN
             || target.contains(&0)
         {
             return Err(EINVAL);
+        }
+        if target.len() > protocol::MAX_PATH_LEN || link_path.len() > protocol::MAX_PATH_LEN {
+            return Err(ENAMETOOLONG);
         }
         let uid = credentials.effective_uid;
         let gid = credentials.effective_gid;
         let groups = credentials.supplementary_groups();
         let (resolution, filesystem, _) = self.resolve_open_path(
-            link_path,
+            creation_destination(link_path)?,
             anchors,
             FollowSymlinks::ExcludeFinalComponent,
             uid,
@@ -2935,12 +2936,11 @@ impl FilesystemService {
         }
         let split = request.mode as usize;
         let (old_path, new_path) = payload.split_at_checked(split).ok_or(EINVAL)?;
-        if old_path.is_empty()
-            || new_path.is_empty()
-            || old_path.len() > protocol::MAX_PATH_LEN
-            || new_path.len() > protocol::MAX_PATH_LEN
-        {
+        if old_path.is_empty() || new_path.is_empty() {
             return Err(EINVAL);
+        }
+        if old_path.len() > protocol::MAX_PATH_LEN || new_path.len() > protocol::MAX_PATH_LEN {
+            return Err(ENAMETOOLONG);
         }
         let uid = credentials.effective_uid;
         let gid = credentials.effective_gid;
@@ -2962,7 +2962,7 @@ impl FilesystemService {
             return Err(EPERM);
         }
         let (resolution, filesystem, destination_volume) = self.resolve_open_path(
-            new_path,
+            creation_destination(new_path)?,
             PathAnchors {
                 root_open_id: anchors.root_open_id,
                 base_open_id: anchors.new_base_open_id,
@@ -3861,6 +3861,21 @@ fn lookup_symlinks(path: &[u8], nofollow: bool) -> FollowSymlinks {
     } else {
         FollowSymlinks::All
     }
+}
+
+// Exclusive entry creation first rejects an existing final entry, including a
+// symlink, without following it. Preserve the original path in the caller:
+// non-directory creation must still reject Missing when it ends in a slash.
+// Intermediate components and symlink-target directory markers are unchanged.
+fn creation_destination(path: &[u8]) -> Result<&[u8], i32> {
+    if path.len() > protocol::MAX_PATH_LEN {
+        return Err(ENAMETOOLONG);
+    }
+    let end = path
+        .iter()
+        .rposition(|byte| *byte != b'/')
+        .map_or(path.len(), |index| index + 1);
+    Ok(&path[..end])
 }
 
 fn decode_path(payload: &[u8]) -> Result<&str, i32> {

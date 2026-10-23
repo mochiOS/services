@@ -160,3 +160,270 @@ fn hard_link_source_separator_resolves_a_directory_without_linking_it() {
     );
     assert_eq!(status(&mut fs, b"/hard-result").node_id, before.node_id);
 }
+
+#[test]
+fn mkdir_existing_entry_with_slashes_never_follows_or_replaces_its_symlink() {
+    let mut fs = prepared(0o700);
+    for path in [
+        b"/dir-link".as_slice(),
+        b"/file-link",
+        b"/missing-link",
+        b"/target-file",
+        b"/target-dir",
+    ] {
+        let before = status(&mut fs, path);
+        assert_eq!(
+            fs.mkdir_at(
+                protocol::Header {
+                    mode: 0o700,
+                    ..Default::default()
+                },
+                &[path, b"///"].concat(),
+                PathAnchors::default(),
+                root_credentials()
+            )
+            .err(),
+            Some(17),
+            "{path:?}"
+        );
+        assert_eq!(status(&mut fs, path).node_id, before.node_id);
+        assert_eq!(status(&mut fs, path).link_count, before.link_count);
+    }
+    missing(&mut fs, b"/absent");
+}
+
+#[test]
+fn symlink_existing_destination_with_slashes_is_an_existing_entry() {
+    let mut fs = prepared(0o700);
+    let target = b"replacement";
+    for path in [
+        b"/dir-link".as_slice(),
+        b"/file-link",
+        b"/missing-link",
+        b"/target-file",
+    ] {
+        let before = status(&mut fs, path);
+        assert_eq!(
+            fs.symlink_at(
+                protocol::Header {
+                    mode: target.len() as u32,
+                    ..Default::default()
+                },
+                &[target.as_slice(), path, b"///"].concat(),
+                PathAnchors::default(),
+                root_credentials()
+            )
+            .err(),
+            Some(17),
+            "{path:?}"
+        );
+        assert_eq!(status(&mut fs, path).node_id, before.node_id);
+    }
+    missing(&mut fs, b"/replacement");
+    missing(&mut fs, b"/absent");
+}
+
+#[test]
+fn hard_link_existing_slash_destination_preserves_both_entries_and_source_links() {
+    let mut fs = prepared(0o700);
+    let source = status(&mut fs, b"/target-file");
+    for path in [
+        b"/dir-link".as_slice(),
+        b"/file-link",
+        b"/missing-link",
+        b"/target-file",
+    ] {
+        let before = status(&mut fs, path);
+        assert_eq!(
+            link(&mut fs, b"/target-file", &[path, b"///"].concat()),
+            Err(17),
+            "{path:?}"
+        );
+        assert_eq!(status(&mut fs, path).node_id, before.node_id);
+        assert_eq!(
+            status(&mut fs, b"/target-file").link_count,
+            source.link_count
+        );
+    }
+    missing(&mut fs, b"/absent");
+}
+
+#[test]
+fn socket_creation_rejects_existing_slash_destinations_without_allocating_a_description() {
+    let mut fs = prepared(0o700);
+    let open_directory = |fs: &mut FilesystemService| {
+        fs.open_at(
+            protocol::Header {
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+                ..Default::default()
+            },
+            b"/",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap()
+        .header
+        .open_id
+    };
+    let first = open_directory(&mut fs);
+    for retained in [false, true] {
+        for path in [
+            b"/dir-link".as_slice(),
+            b"/file-link",
+            b"/missing-link",
+            b"/target-file",
+        ] {
+            let destination = [path, b"///"].concat();
+            let header = protocol::Header {
+                mode: 0o600,
+                ..Default::default()
+            };
+            let result = if retained {
+                fs.create_socket_at_retained(
+                    header,
+                    &destination,
+                    PathAnchors::default(),
+                    root_credentials(),
+                )
+            } else {
+                fs.create_socket_at(
+                    header,
+                    &destination,
+                    PathAnchors::default(),
+                    root_credentials(),
+                )
+            };
+            assert_eq!(result.err(), Some(17), "{path:?}, retained={retained}");
+        }
+    }
+    let second = open_directory(&mut fs);
+    assert_eq!(second, first + 1);
+    fs.provider_close(first).unwrap();
+    fs.provider_close(second).unwrap();
+    missing(&mut fs, b"/absent");
+}
+
+#[test]
+fn creation_lookup_preserves_original_path_length_before_removing_trailing_separators() {
+    let mut fs = prepared(0o700);
+    let mut path = b"/file-link".to_vec();
+    path.resize(protocol::MAX_PATH_LEN + 1, b'/');
+    assert_eq!(
+        fs.mkdir_at(
+            protocol::Header {
+                mode: 0o700,
+                ..Default::default()
+            },
+            &path,
+            PathAnchors::default(),
+            root_credentials()
+        )
+        .err(),
+        Some(36)
+    );
+    assert_eq!(link(&mut fs, b"/target-file", &path), Err(36));
+    assert_eq!(link(&mut fs, &path, b"/long-source-result"), Err(36));
+    assert_eq!(
+        fs.create_socket_at(
+            Default::default(),
+            &path,
+            PathAnchors::default(),
+            root_credentials()
+        )
+        .err(),
+        Some(36)
+    );
+    assert_eq!(
+        fs.symlink_at(
+            protocol::Header {
+                mode: 1,
+                ..Default::default()
+            },
+            &[b"x".as_slice(), &path].concat(),
+            PathAnchors::default(),
+            root_credentials()
+        )
+        .err(),
+        Some(36)
+    );
+    let target = vec![b'x'; protocol::MAX_PATH_LEN + 1];
+    assert_eq!(
+        fs.symlink_at(
+            protocol::Header {
+                mode: target.len() as u32,
+                ..Default::default()
+            },
+            &[target.as_slice(), b"/long-target-result"].concat(),
+            PathAnchors::default(),
+            root_credentials()
+        )
+        .err(),
+        Some(36)
+    );
+    missing(&mut fs, b"/long-source-result");
+    missing(&mut fs, b"/long-target-result");
+    path.truncate(protocol::MAX_PATH_LEN);
+    assert_eq!(
+        fs.mkdir_at(
+            protocol::Header {
+                mode: 0o700,
+                ..Default::default()
+            },
+            &path,
+            PathAnchors::default(),
+            root_credentials()
+        )
+        .err(),
+        Some(17)
+    );
+}
+
+#[test]
+fn creation_lookup_keeps_parent_components_and_search_checks() {
+    let mut fs = prepared(0o700);
+    for (path, error) in [
+        (b"/file-link/./".as_slice(), 20),
+        (b"/missing-link/child/", 2),
+    ] {
+        assert_eq!(
+            fs.mkdir_at(
+                protocol::Header {
+                    mode: 0o700,
+                    ..Default::default()
+                },
+                path,
+                PathAnchors::default(),
+                root_credentials()
+            )
+            .err(),
+            Some(error)
+        );
+    }
+    assert_eq!(
+        fs.mkdir_at(
+            protocol::Header {
+                mode: 0o700,
+                ..Default::default()
+            },
+            b"/dir-link/new///",
+            PathAnchors::default(),
+            credentials(501, 20, &[])
+        )
+        .err(),
+        Some(13)
+    );
+    fs.mkdir_at(
+        protocol::Header {
+            mode: 0o700,
+            ..Default::default()
+        },
+        b"/dir-link/new///",
+        PathAnchors::default(),
+        root_credentials(),
+    )
+    .unwrap();
+    assert_eq!(
+        status(&mut fs, b"/target-dir/new").kind,
+        protocol::NODE_TYPE_DIRECTORY
+    );
+}
