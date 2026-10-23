@@ -3590,3 +3590,178 @@ fn root_anchor_confines_absolute_paths_symlinks_and_parent_components() {
     );
     assert!(matches!(escaped, Err(2)));
 }
+
+
+#[test]
+fn native_description_flags_share_the_real_ofd_and_preserve_atomic_masked_updates() {
+    use filesystem_service::provider_flags;
+    use mnu_abi::provider;
+    use protocol::description_flags as flags;
+    let mut filesystem = test_filesystem();
+    let open = |fs: &mut FilesystemService, path: &[u8], mode| {
+        fs.open_at(
+            protocol::Header {
+                opcode: protocol::OP_OPEN_AT,
+                flags: protocol::OPEN_AT_CREATE | mode,
+                mode: 0o600,
+                ..Default::default()
+            },
+            path,
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap()
+        .header
+        .open_id
+    };
+    let id = open(
+        &mut filesystem,
+        b"/native-flags",
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE,
+    );
+    let other = open(&mut filesystem, b"/native-flags", protocol::OPEN_AT_READ);
+    let get = provider::RequestHeader {
+        opcode: provider::OP_QUERY,
+        object_id: id,
+        argument: 0,
+        basis: flags::GET,
+        length: 4,
+        data_length: 0,
+    };
+    let update = provider::RequestHeader {
+        opcode: provider::OP_CONTROL,
+        basis: flags::UPDATE,
+        length: 0,
+        data_length: 8,
+        ..get
+    };
+    let mut expected = 0;
+    for (mask, value) in [
+        (
+            protocol::OPEN_STATUS_FLAGS_ALL,
+            protocol::OPEN_STATUS_APPEND,
+        ),
+        (
+            protocol::OPEN_STATUS_NONBLOCK,
+            protocol::OPEN_STATUS_NONBLOCK,
+        ),
+        (protocol::OPEN_STATUS_NONBLOCK, 0),
+        (protocol::OPEN_STATUS_APPEND, 0),
+    ] {
+        let bytes = flags::encode_update(mask, value).unwrap();
+        assert_eq!(
+            provider_flags::handle(&mut filesystem, update, &bytes, 0),
+            Ok((0, vec![]))
+        );
+        expected = (expected & !mask) | value;
+        assert_eq!(
+            provider_flags::handle(&mut filesystem, get, &[], 0),
+            Ok((4, expected.to_le_bytes().to_vec()))
+        );
+        assert_eq!(
+            filesystem
+                .get_flags_handle(protocol::Header::default(), id)
+                .unwrap()
+                .header
+                .flags,
+            expected
+        );
+        assert_eq!(
+            provider_flags::handle(
+                &mut filesystem,
+                provider::RequestHeader {
+                    opcode: provider::OP_CONTROL,
+                    ..get
+                },
+                &[],
+                0
+            ),
+            Ok((4, expected.to_le_bytes().to_vec()))
+        );
+        assert_eq!(
+            provider_flags::handle(
+                &mut filesystem,
+                provider::RequestHeader {
+                    object_id: other,
+                    ..get
+                },
+                &[],
+                0
+            ),
+            Ok((4, vec![0; 4]))
+        );
+    }
+    // Query must never reinterpret a mutation, nor accept forged attachment IDs.
+    let bytes = flags::encode_update(
+        protocol::OPEN_STATUS_FLAGS_ALL,
+        protocol::OPEN_STATUS_FLAGS_ALL,
+    )
+    .unwrap();
+    assert_eq!(
+        provider_flags::handle(
+            &mut filesystem,
+            provider::RequestHeader {
+                opcode: provider::OP_QUERY,
+                ..update
+            },
+            &bytes,
+            0
+        ),
+        Err(95)
+    );
+    for header in [
+        provider::RequestHeader {
+            argument: 1,
+            ..update
+        },
+        provider::RequestHeader {
+            length: 1,
+            ..update
+        },
+        provider::RequestHeader {
+            data_length: 7,
+            ..update
+        },
+    ] {
+        assert_eq!(
+            provider_flags::handle(&mut filesystem, header, &bytes, 0),
+            Err(22)
+        );
+    }
+    assert_eq!(
+        provider_flags::handle(&mut filesystem, update, &bytes, 1),
+        Err(22)
+    );
+    assert_eq!(
+        provider_flags::handle(&mut filesystem, update, &[0; 7], 0),
+        Err(22)
+    );
+    assert_eq!(
+        provider_flags::handle(&mut filesystem, update, &[255; 8], 0),
+        Err(22)
+    );
+    for capacity in [0, 3, 5] {
+        assert_eq!(
+            provider_flags::handle(
+                &mut filesystem,
+                provider::RequestHeader {
+                    length: capacity,
+                    ..get
+                },
+                &[],
+                0
+            ),
+            Err(22)
+        );
+    }
+    assert_eq!(
+        provider_flags::handle(&mut filesystem, get, &[], 0),
+        Ok((4, vec![0; 4]))
+    );
+    filesystem.provider_close(id).unwrap();
+    assert_eq!(provider_flags::handle(&mut filesystem, get, &[], 0), Err(9));
+    assert_eq!(
+        provider_flags::handle(&mut filesystem, update, &bytes, 0),
+        Err(9)
+    );
+}

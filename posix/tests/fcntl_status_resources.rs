@@ -13,6 +13,8 @@ use mochios_posix_client::{
 mod callback_resources;
 #[path = "../../../user/crates/newlib-runtime/src/fd_options.rs"]
 mod implementation;
+#[path = "../../../user/crates/newlib-runtime/src/file_description_flags.rs"]
+mod file_description_flags;
 #[path = "../../../user/crates/newlib-runtime/src/io_resources.rs"]
 mod io_resources;
 const EBADF: c_int = 9;
@@ -256,11 +258,68 @@ impl Client {
     }
 }
 mod syscall {
+    pub use mnu_abi::HANDLE_RIGHT_READ;
     pub const HANDLE_OPTION_NONBLOCKING: u64 = 1;
     pub const HANDLE_OPTIONS_ALL: u64 = 1;
     pub enum SyscallNumber {
         HandleOptionsGet,
         HandleOptionsSet,
+        HandleQuery,
+        HandleControl,
+    }
+    pub fn raw_syscall6(
+        operation: SyscallNumber,
+        handle: u64,
+        code: u64,
+        input: u64,
+        size: u64,
+        output: u64,
+        capacity: u64,
+    ) -> u64 {
+        use mochios_filesystem_protocol::{self as fs, description_flags as wire};
+        match code {
+            wire::GET => {
+                assert!(matches!(operation, SyscallNumber::HandleQuery));
+                assert_eq!((input, size, capacity), (0, 0, 4));
+            }
+            wire::UPDATE => {
+                assert!(matches!(operation, SyscallNumber::HandleControl));
+                assert_eq!((size, output, capacity), (8, 0, 0));
+                let bytes = unsafe { std::slice::from_raw_parts(input as *const u8, size as usize) };
+                let (mask, flags) = wire::decode_update(bytes).unwrap();
+                assert_eq!(
+                    mask,
+                    if super::OPTION_MODE.load(super::Ordering::Relaxed) == 2 {
+                        fs::OPEN_STATUS_FLAGS_ALL
+                    } else {
+                        fs::OPEN_STATUS_NONBLOCK
+                    }
+                );
+                assert_eq!(
+                    flags,
+                    if super::expected_flags() & super::O_NONBLOCK != 0 {
+                        fs::OPEN_STATUS_NONBLOCK
+                    } else {
+                        0
+                    }
+                );
+            }
+            _ => panic!("unknown provider selector"),
+        }
+        match super::backend(handle) {
+            Ok(()) if code == wire::GET => {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        fs::OPEN_STATUS_NONBLOCK.to_le_bytes().as_ptr(),
+                        output as *mut u8,
+                        4,
+                    )
+                };
+                4
+            }
+            Ok(()) => 0,
+            Err(_) => super::NATIVE_FAILURE.load(super::Ordering::Relaxed),
+        }
     }
     pub fn raw_syscall1(_: SyscallNumber, handle: u64) -> u64 {
         match super::backend(handle) {
