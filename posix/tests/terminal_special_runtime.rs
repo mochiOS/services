@@ -20,8 +20,9 @@ const ENOTTY:i32=25;const ENOTSUP:i32=95;const ENOSYS:i32=38;
 const EIO:i32=5;const EOVERFLOW:i32=75;const EFAULT:i32=14;
 #[derive(Clone,Copy,PartialEq)]enum FdKind{{Stdin,Stdout,Stderr,ObjectPty,ObjectSpecial,ObjectFile,ObjectTerminalFile}}
 #[derive(Clone,Copy)]struct Object{{kind:FdKind,lower_handle:u64}}
-#[derive(Clone,Copy)]struct FdEntry{{handle:Object}}
+#[derive(Clone,Copy)]struct FdEntry{{handle:Object,rights:u64}}
 thread_local!{{
+ static RIGHTS:std::cell::Cell<u64>=const{{std::cell::Cell::new(1)}};
  static KIND:std::cell::Cell<FdKind>=const{{std::cell::Cell::new(FdKind::ObjectSpecial)}};
  static ERROR:std::cell::Cell<i32>=const{{std::cell::Cell::new(0)}};
  static ERRNO:std::cell::Cell<i32>=const{{std::cell::Cell::new(0)}};
@@ -32,16 +33,17 @@ thread_local!{{
 struct Lease(FdEntry);
 impl std::ops::Deref for Lease{{type Target=FdEntry;fn deref(&self)->&FdEntry{{&self.0}}}}
 impl Drop for Lease{{fn drop(&mut self){{LEASES.set(LEASES.get()-1)}}}}
-fn with_fd_entry(fd:i32)->Result<Lease,i32>{{if fd!=4{{return Err(9)}}LEASES.set(LEASES.get()+1);Ok(Lease(FdEntry{{handle:Object{{kind:KIND.get(),lower_handle:41}}}}))}}
+fn with_fd_entry(fd:i32)->Result<Lease,i32>{{if fd!=4{{return Err(9)}}LEASES.set(LEASES.get()+1);Ok(Lease(FdEntry{{handle:Object{{kind:KIND.get(),lower_handle:41}},rights:RIGHTS.get()}}))}}
 mod io_resources{{pub fn with<T,R>(get:impl FnOnce()->Result<T,i32>,run:impl FnOnce(&T)->Result<R,i32>)->Result<R,i32>{{let owned=get()?;run(&owned)}}}}
 fn result_with_errno(result:Result<i32,i32>,failure:i32)->i32{{result.unwrap_or_else(|e|{{ERRNO.set(e);failure}})}}
 fn set_errno(error:i32){{ERRNO.set(error)}}
 fn retry_terminal_operation<T>(signal:u32,mut op:impl FnMut()->Result<T,i32>)->Result<T,i32>{{assert_eq!(signal,posix_protocol::SIGNAL_TTOU);op()}}
 fn syscall_errno(result:Result<u64,i32>)->Result<u64,i32>{{result}}
 mod syscall{{
- pub enum SyscallNumber{{HandleControl}}
- pub fn raw_syscall6(_:SyscallNumber,handle:u64,code:u64,_input:u64,input_len:u64,output:u64,capacity:u64)->Result<u64,i32>{{
-  assert_eq!(handle,41);assert_eq!(code,super::posix_protocol::PTY_CONTROL_GET_ATTRIBUTES);assert_eq!(input_len,0);
+ pub use super::HANDLE_RIGHT_READ;
+ pub enum SyscallNumber{{HandleControl,HandleQuery}}
+ pub fn raw_syscall6(operation:SyscallNumber,handle:u64,code:u64,_input:u64,input_len:u64,output:u64,capacity:u64)->Result<u64,i32>{{
+  assert_eq!(handle,41);assert_eq!(code,if super::RIGHTS.get()&1!=0{{assert!(matches!(operation,SyscallNumber::HandleQuery));super::posix_protocol::PTY_QUERY_ATTRIBUTES}}else{{assert!(matches!(operation,SyscallNumber::HandleControl));super::posix_protocol::PTY_CONTROL_GET_ATTRIBUTES}});assert_eq!(input_len,0);
   assert_eq!(capacity,super::posix_protocol::TERMINAL_ATTRIBUTES_LEN as u64);
   super::CALLS.set(super::CALLS.get()+1);
   if super::ERROR.get()!=0{{return Err(super::ERROR.get())}}
@@ -74,6 +76,8 @@ mod terminal_memory{{pub fn write_attributes(ptr:*mut super::NewlibTermios,value
     ));
     program.push_str(r#"
 fn main(){
+ for rights in [1,1<<8]{
+ RIGHTS.set(rights);
  for kind in [FdKind::ObjectSpecial,FdKind::ObjectPty,FdKind::ObjectTerminalFile]{
   KIND.set(kind);CALLS.set(0);ERROR.set(0);SHORT.set(false);
   assert_eq!(_isatty(4),1);assert_eq!(CALLS.get(),1);assert_eq!(LEASES.get(),0);
@@ -82,14 +86,15 @@ fn main(){
  }
  KIND.set(FdKind::ObjectSpecial);
  for (error,expected) in [(95,25),(38,25),(25,25),(13,13),(5,5),(32,32),(9,9)]{
-  ERROR.set(error);assert_eq!(_isatty(4),0);assert_eq!(ERRNO.get(),expected);assert_eq!(LEASES.get(),0);
+  ERROR.set(error);let before=CALLS.get();assert_eq!(_isatty(4),0);assert_eq!(ERRNO.get(),expected);assert_eq!(LEASES.get(),0);assert_eq!(CALLS.get(),before+1);
   let mut attributes=NewlibTermios::default();
-  assert_eq!(tcgetattr(4,&mut attributes),-1);assert_eq!(ERRNO.get(),expected);assert_eq!(LEASES.get(),0);
+  let before=CALLS.get();assert_eq!(tcgetattr(4,&mut attributes),-1);assert_eq!(ERRNO.get(),expected);assert_eq!(LEASES.get(),0);assert_eq!(CALLS.get(),before+1);
  }
  ERROR.set(0);SHORT.set(true);assert_eq!(_isatty(4),0);assert_eq!(ERRNO.get(),5);
  KIND.set(FdKind::ObjectFile);CALLS.set(0);assert_eq!(_isatty(4),0);assert_eq!(ERRNO.get(),25);assert_eq!(CALLS.get(),0);
  assert_eq!(_isatty(-1),0);assert_eq!(ERRNO.get(),9);assert_eq!(LEASES.get(),0);
  assert_eq!(tcgetattr(4,std::ptr::null_mut()),-1);assert_eq!(ERRNO.get(),14);
+ }
 }
 "#);
     probe::run(&program);

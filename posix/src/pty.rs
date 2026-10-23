@@ -961,19 +961,12 @@ impl PtyManager {
                 }
                 Ok(Vec::new())
             }
-            posix_protocol::PTY_CONTROL_GET_WINDOW_SIZE => {
-                if !input.is_empty()
-                    || output_capacity < posix_protocol::TERMINAL_WINDOW_SIZE_LEN
-                {
-                    return Err(EINVAL);
-                }
-                let (id, _) = self.endpoint(object_id)?;
-                let terminal = self.terminals.get(&id).ok_or(EBADF)?;
-                let mut output = vec![0; posix_protocol::TERMINAL_WINDOW_SIZE_LEN];
-                posix_protocol::encode_terminal_window_size(terminal.window_size, &mut output)
-                    .map_err(|_| EINVAL)?;
-                Ok(output)
-            }
+            posix_protocol::PTY_CONTROL_GET_WINDOW_SIZE => self.observation(
+                object_id,
+                posix_protocol::PTY_QUERY_WINDOW_SIZE,
+                input,
+                output_capacity,
+            ),
             posix_protocol::PTY_CONTROL_SET_WINDOW_SIZE => {
                 if output_capacity != 0 {
                     return Err(EINVAL);
@@ -990,18 +983,12 @@ impl PtyManager {
                 }
                 Ok(Vec::new())
             }
-            posix_protocol::PTY_CONTROL_GET_ATTRIBUTES => {
-                if !input.is_empty() || output_capacity < posix_protocol::TERMINAL_ATTRIBUTES_LEN {
-                    return Err(EINVAL);
-                }
-                let mut output = vec![0; posix_protocol::TERMINAL_ATTRIBUTES_LEN];
-                posix_protocol::encode_terminal_attributes(
-                    self.attributes(object_id)?,
-                    &mut output,
-                )
-                .map_err(|_| EINVAL)?;
-                Ok(output)
-            }
+            posix_protocol::PTY_CONTROL_GET_ATTRIBUTES => self.observation(
+                object_id,
+                posix_protocol::PTY_QUERY_ATTRIBUTES,
+                input,
+                output_capacity,
+            ),
             posix_protocol::PTY_CONTROL_SET_ATTRIBUTES_NOW
             | posix_protocol::PTY_CONTROL_SET_ATTRIBUTES_DRAIN
             | posix_protocol::PTY_CONTROL_SET_ATTRIBUTES_FLUSH => {
@@ -1208,6 +1195,36 @@ impl PtyManager {
         Ok(signals)
     }
 
+    fn observation(
+        &self,
+        object_id: u64,
+        code: u64,
+        input: &[u8],
+        capacity: usize,
+    ) -> Result<Vec<u8>, i32> {
+        if code == posix_protocol::PTY_QUERY_ATTRIBUTES {
+            if !input.is_empty() || capacity < posix_protocol::TERMINAL_ATTRIBUTES_LEN {
+                return Err(EINVAL);
+            }
+            let mut output = vec![0; posix_protocol::TERMINAL_ATTRIBUTES_LEN];
+            posix_protocol::encode_terminal_attributes(self.attributes(object_id)?, &mut output)
+                .map_err(|_| EINVAL)?;
+            return Ok(output);
+        }
+        if code == posix_protocol::PTY_QUERY_WINDOW_SIZE {
+            if !input.is_empty() || capacity < posix_protocol::TERMINAL_WINDOW_SIZE_LEN {
+                return Err(EINVAL);
+            }
+            let (id, _) = self.endpoint(object_id)?;
+            let terminal = self.terminals.get(&id).ok_or(EBADF)?;
+            let mut output = vec![0; posix_protocol::TERMINAL_WINDOW_SIZE_LEN];
+            posix_protocol::encode_terminal_window_size(terminal.window_size, &mut output)
+                .map_err(|_| EINVAL)?;
+            return Ok(output);
+        }
+        Err(ENOTSUP)
+    }
+
     /// Only explicitly read-only selectors are reachable through OP_QUERY.
     pub fn query(
         &self,
@@ -1216,6 +1233,12 @@ impl PtyManager {
         input: &[u8],
         capacity: usize,
     ) -> Result<Vec<u8>, i32> {
+        if matches!(
+            code,
+            posix_protocol::PTY_QUERY_ATTRIBUTES | posix_protocol::PTY_QUERY_WINDOW_SIZE
+        ) {
+            return self.observation(object_id, code, input, capacity);
+        }
         if code != posix_protocol::PTY_QUERY_READ_SETTINGS {
             return Err(ENOTSUP);
         }

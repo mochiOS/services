@@ -1,0 +1,134 @@
+#define main pty_master_regression
+#include "native_pty_master.c"
+#undef main
+#include <stdint.h>
+#include <sys/ioctl.h>
+#include <sys/wait.h>
+#include <termios.h>
+
+extern int tcgetwinsize(int, struct winsize *);
+extern int tcsetwinsize(int, const struct winsize *);
+struct observed_handle {
+  uint32_t handle, reserved;
+  uint64_t rights;
+};
+static struct observed_handle prior[256], current[256];
+#undef CHECK
+#define CHECK(x)                                                               \
+  do {                                                                         \
+    if (!(x)) {                                                                \
+      fprintf(stderr, "terminal-observation: FAIL line=%u errno=%d: %s\n",     \
+              __LINE__, errno, #x);                                            \
+      return 1;                                                                \
+    }                                                                          \
+  } while (0)
+static int64_t observe_native(uint64_t number, uint64_t a, uint64_t b,
+                              uint64_t c, uint64_t d, uint64_t e, uint64_t f) {
+  register uint64_t r10 __asm__("r10") = d;
+  register uint64_t r8 __asm__("r8") = e;
+  register uint64_t r9 __asm__("r9") = f;
+  __asm__ volatile("syscall"
+                   : "+a"(number)
+                   : "D"(a), "S"(b), "d"(c), "r"(r10), "r"(r8), "r"(r9)
+                   : "rcx", "r11", "memory");
+  return (int64_t)number;
+}
+static int snapshot(struct observed_handle *items) {
+  return (int)observe_native(680, (uintptr_t)items, 256, 0, 0, 0, 0);
+}
+static int observations(int mode, const char *name,
+                        const struct termios *expected,
+                        const struct winsize *size) {
+  int fd = open(name, mode | O_NOCTTY);
+  CHECK(fd >= 0);
+  errno = 123;
+  CHECK(isatty(fd) == 1 && errno == 123);
+  struct termios attrs;
+  CHECK(tcgetattr(fd, &attrs) == 0 && errno == 123);
+  CHECK(attrs.c_iflag == expected->c_iflag &&
+        attrs.c_oflag == expected->c_oflag &&
+        attrs.c_lflag == expected->c_lflag &&
+        attrs.c_cflag == expected->c_cflag);
+  CHECK(!memcmp(attrs.c_cc, expected->c_cc, NCCS));
+  struct winsize actual;
+  CHECK(tcgetwinsize(fd, &actual) == 0 &&
+        !memcmp(&actual, size, sizeof(actual)) && errno == 123);
+  if (mode != O_WRONLY) {
+    int baseline = snapshot(prior);
+    int alias = dup(fd);
+    int total = snapshot(current);
+    CHECK(alias >= 0 && baseline > 0 && total == baseline + 1 && total < 256);
+    uint32_t source = 0;
+    for (int i = 0; i < total; i++) {
+      int found = 0;
+      for (int j = 0; j < baseline; j++)
+        found |= prior[j].handle == current[i].handle;
+      if (!found) {
+        CHECK(source == 0);
+        source = current[i].handle;
+      }
+    }
+    CHECK(source != 0);
+    int64_t readonly = observe_native(627, source, 1, 0, 0, 0, 0);
+    CHECK(readonly > 0);
+    unsigned char encoded[56], old[56];
+    CHECK(observe_native(700, readonly, 0x5054595100000002ULL, 0, 0,
+                         (uintptr_t)encoded,
+                         sizeof(encoded)) == sizeof(encoded));
+    CHECK(observe_native(668, source, 0x5054590000000001ULL, 0, 0,
+                         (uintptr_t)old, sizeof(old)) == sizeof(old));
+    CHECK(!memcmp(old, encoded, sizeof(encoded)));
+    struct winsize native_size;
+    CHECK(observe_native(700, readonly, 0x5054595100000003ULL, 0, 0,
+                         (uintptr_t)&native_size,
+                         sizeof(native_size)) == sizeof(native_size));
+    CHECK(!memcmp(&native_size, size, sizeof(native_size)));
+    CHECK(observe_native(668, readonly, 0x5054590000000002ULL,
+                         (uintptr_t)encoded, sizeof(encoded), 0, 0) < 0);
+    CHECK(observe_native(700, readonly, 0x5054590000000002ULL,
+                         (uintptr_t)encoded, sizeof(encoded), 0, 0) < 0);
+    CHECK(observe_native(626, readonly, 0, 0, 0, 0, 0) == 0 &&
+          close(alias) == 0);
+    CHECK(snapshot(current) == baseline);
+  }
+  CHECK(close(fd) == 0);
+  fprintf(stderr,
+          "terminal-observation: PASS access=%d attributes/window query, "
+          "rights and cleanup\n",
+          mode);
+  return 0;
+}
+int main(void) {
+  alarm(60);
+  CHECK(pty_master_regression() == 0);
+  int master = posix_openpt(O_RDWR | O_NOCTTY);
+  CHECK(master >= 0 && grantpt(master) == 0 && unlockpt(master) == 0);
+  char name[64];
+  CHECK(ptsname_r(master, name, sizeof(name)) == 0);
+  struct termios attrs;
+  CHECK(tcgetattr(master, &attrs) == 0);
+  attrs.c_lflag &= ~ECHO;
+  attrs.c_cc[VMIN] = 7;
+  CHECK(tcsetattr(master, TCSANOW, &attrs) == 0);
+  struct winsize size = {37, 111, 900, 600};
+  CHECK(tcsetwinsize(master, &size) == 0);
+  for (int mode = O_RDONLY; mode <= O_RDWR; mode++)
+    CHECK(observations(mode, name, &attrs, &size) == 0);
+  pid_t child = fork();
+  CHECK(child >= 0);
+  if (child == 0) {
+    if (setsid() < 0)
+      _exit(41);
+    int fd = open(name, O_RDONLY | O_NOCTTY);
+    if (fd < 0 || tcgetsid(fd) != -1 || errno != ENOTTY)
+      _exit(42);
+    _exit(close(fd) == 0 ? 0 : 43);
+  }
+  int status;
+  CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) &&
+        WEXITSTATUS(status) == 0);
+  fprintf(stderr, "terminal-observation: PASS O_NOCTTY session leader remains "
+                  "without controlling terminal\n");
+  CHECK(close(master) == 0);
+  return 0;
+}
