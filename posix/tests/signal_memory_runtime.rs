@@ -36,6 +36,7 @@ fn origin() -> posix_protocol::signal_origin::Origin {
         process_id: 0x112233,
         real_uid: 0x5566,
         child: Default::default(),
+        timer: None,
     }
 }
 #[test]

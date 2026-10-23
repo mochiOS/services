@@ -47,6 +47,7 @@ impl<H: Copy> PosixService<H> {
                     event: protocol::signal_origin::CONTINUED,
                     status: protocol::SIGNAL_CONT,
                 },
+                timer: None,
             },
         }))
     }

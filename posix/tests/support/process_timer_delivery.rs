@@ -383,3 +383,59 @@ fn unwinding_before_publication_does_not_consume_a_timer_notification() {
         3
     );
 }
+
+#[test]
+fn serialized_timer_info_snapshots_the_accepted_attempt_not_an_earlier_failed_reply() {
+    let (client, environment) = setup();
+    let peer = client.transport().peer;
+    let mut environment = environment.borrow_mut();
+    let Environment { service, processes } = &mut *environment;
+    let id = arm_internal(
+        service,
+        peer,
+        Clock::Monotonic,
+        Notification::Default,
+        10,
+        10,
+        false,
+    );
+    service.observe_process_timers(processes).unwrap();
+    let selected = service
+        .process_timers(peer)
+        .unwrap()
+        .select_pending_signal(u64::MAX)
+        .unwrap();
+    let image = service.capture_request_image(peer).unwrap();
+    let attempts = RefCell::new(Vec::new());
+    for (now, published, overrun) in [(35, false, 2), (55, true, 4)] {
+        CLOCKS.with(|c| c.borrow_mut().samples.monotonic_ns = now);
+        let result = service
+            .accept_timer_signal_with_reply(peer, image, selected, processes, |pending| {
+                let origin = pending.signal_origin().unwrap();
+                let accepted = protocol::signal_wait::Accepted {
+                    signal: protocol::SIGNAL_ALRM,
+                    origin,
+                };
+                let mut bytes = vec![0; protocol::signal_wait::encoded_len(accepted)];
+                protocol::signal_wait::encode(accepted, &mut bytes).unwrap();
+                attempts.borrow_mut().push(bytes);
+                published
+            })
+            .unwrap();
+        assert_eq!(result.is_some(), published);
+        let accepted = protocol::signal_wait::decode(attempts.borrow().last().unwrap()).unwrap();
+        let timer = accepted.origin.timer.unwrap();
+        assert_eq!(
+            (timer.timer_id, timer.value_token, timer.overrun),
+            (id.raw(), id.raw(), overrun)
+        );
+    }
+    assert_eq!(service.process_timers(peer).unwrap().overrun(id), Ok(4));
+    assert!(
+        service
+            .process_timers(peer)
+            .unwrap()
+            .select_pending_signal(u64::MAX)
+            .is_none()
+    );
+}

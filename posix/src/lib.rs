@@ -1175,6 +1175,7 @@ impl<H: Copy> PosixService<H> {
                 real_uid,
                 process_id: child_id,
                 child,
+                timer: None,
             },
         )
     }

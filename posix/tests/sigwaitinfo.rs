@@ -16,6 +16,7 @@ fn accepted() -> Accepted {
                 event: EXITED,
                 status: 37,
             },
+            timer: None,
         },
     }
 }

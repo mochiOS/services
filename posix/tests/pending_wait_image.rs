@@ -28,7 +28,7 @@ static STATUS:Cell<i32>=const{Cell::new(0)};
 pub const STATUS_EAGAIN:i32=-11;pub const STATUS_ESRCH:i32=-3;
 pub const STATUS_EPERM:i32=-1;pub const STATUS_EIO:i32=-5;
 pub const HEADER_LEN:usize=24;pub const MAX_MESSAGE_LEN:usize=256;
-pub mod signal_wait {pub const LEN:usize=64;pub type Accepted=u32;}
+pub mod signal_wait {pub const MAX_LEN:usize=56;pub type Accepted=u32;}
 pub enum SignalWaitCompletion {Pending,Replied,Undelivered}
 pub mod mnu_abi {
 #[derive(Clone,Copy,PartialEq,Eq)]pub struct ExecutionIdentity{pub process_id:u64,pub thread_id:u64}

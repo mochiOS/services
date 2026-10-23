@@ -18,7 +18,7 @@ impl<H: Copy> PosixService<H> {
             .and_then(|state| state.deliveries.get(&delivery.token))
             .filter(|owner| owner.thread_id == sender.thread_id && owner.signal == delivery.signal)
             .ok_or(protocol::STATUS_EAGAIN)?;
-        let mut output = vec![0; protocol::signal_origin::LEN];
+        let mut output = vec![0; protocol::signal_origin::encoded_len(owner.origin)];
         protocol::signal_origin::encode(owner.origin, &mut output).map_err(|_| STATUS_EINVAL)?;
         Ok(output)
     }

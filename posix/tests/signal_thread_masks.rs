@@ -162,6 +162,7 @@ fn origin_wire_rejects_ambiguous_sources_and_noncanonical_lengths() {
             source: CHILD,
             real_uid: 502,
             process_id: 102,
+            timer: None,
             child: ChildStatus {
                 event: EXITED,
                 status: 37,
@@ -199,6 +200,7 @@ fn origin_wire_rejects_ambiguous_sources_and_noncanonical_lengths() {
         source: CHILD,
         real_uid: 501,
         process_id: 101,
+        timer: None,
         child: ChildStatus {
             event: EXITED,
             status: 37,

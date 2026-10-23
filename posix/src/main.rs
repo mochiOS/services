@@ -2037,7 +2037,7 @@ fn reply_signal_wait(
     let was_success = result.is_ok();
     let response = signal_wait_response(request_id, result);
     let publishes_signal = !was_success || response.header.status == 0;
-    let mut bytes = vec![0; protocol::HEADER_LEN + protocol::signal_wait::LEN];
+    let mut bytes = vec![0; protocol::HEADER_LEN + protocol::signal_wait::MAX_LEN];
     match protocol::encode(response.header, &response.payload, &mut bytes) {
         Ok(length) => platform::ipc::reply(sender, &bytes[..length]).is_ok() && publishes_signal,
         Err(_) => false,
@@ -2094,7 +2094,7 @@ fn signal_wait_response(
     use mochios_posix_protocol as protocol;
     match result {
         Ok(accepted) => {
-            let mut payload = vec![0; protocol::signal_wait::LEN];
+            let mut payload = vec![0; protocol::signal_wait::encoded_len(accepted)];
             if protocol::signal_wait::encode(accepted, &mut payload).is_err() {
                 return status_response(request_id, protocol::STATUS_EIO);
             }

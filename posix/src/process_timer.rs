@@ -50,6 +50,28 @@ pub struct Pending {
 }
 
 impl Pending {
+    /// Encode only a snapshot obtained at acceptance, not a caller's earlier
+    /// peek. Value tokens are process-local registry keys, never C pointers.
+    pub fn signal_origin(self) -> Result<protocol::signal_origin::Origin, i32> {
+        let value_token = match self.notification {
+            Notification::Signal { signal, value }
+                if (1..=protocol::SIGNAL_MAX).contains(&signal) =>
+            {
+                value
+            }
+            _ => return Err(STATUS_EINVAL),
+        };
+        Ok(protocol::signal_origin::Origin {
+            source: protocol::signal_origin::TIMER,
+            timer: Some(protocol::signal_origin::TimerStatus {
+                timer_id: self.timer.raw(),
+                value_token,
+                overrun: self.overrun(),
+            }),
+            ..protocol::signal_origin::Origin::system()
+        })
+    }
+
     pub fn overrun(self) -> u32 {
         self.expirations
             .saturating_sub(1)
