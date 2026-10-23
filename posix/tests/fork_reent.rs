@@ -81,7 +81,7 @@ int main(void) {{
 }
 
 #[test]
-fn child_reclamation_selects_no_callback_mode_only_for_quiescent_siblings() {
+fn child_reclamation_separates_quiescent_cache_cleanup_from_live_memory_retention() {
     let source = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
     let discard = source
         .split("fn discard_fork_thread_control(")
@@ -90,12 +90,9 @@ fn child_reclamation_selects_no_callback_mode_only_for_quiescent_siblings() {
         .split("fn reclaim_thread_control(")
         .next()
         .unwrap();
-    assert!(
-        discard.find("THREAD_EXITED | THREAD_REAPING").unwrap()
-            < discard
-                .find("reclaim_thread_control(control, ThreadReclamation::ForkChild)")
-                .unwrap()
-    );
+    assert!(discard.contains("THREAD_EXITED | THREAD_REAPING => ThreadReclamation::ForkChild"));
+    assert!(discard.contains("THREAD_RUNNING => ThreadReclamation::ForkLive"));
+    assert!(discard.contains("reclaim_thread_control(control, reason)"));
     assert!(discard.contains("process_exit(127)"));
     let child = source
         .split("fn clone_registered_process()")

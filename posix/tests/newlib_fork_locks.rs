@@ -38,8 +38,9 @@ fn fork_freezes_libc_bookkeeping_across_vm_capture_without_inverting_malloc() {
         "drop(lifecycle_guard)",
     ].map(|text| clone.find(text).unwrap());
     assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
-    assert!(clone.contains("THREAD_STARTING | THREAD_RUNNING"),
-        "libc locks alone do not make live sibling cache reclamation safe");
+    assert!(clone.contains("other.state.load(Ordering::Acquire) == THREAD_STARTING"));
+    assert!(!clone.contains("THREAD_STARTING | THREAD_RUNNING"),
+        "running siblings use the non-walking inherited-memory path");
 }
 
 #[test]

@@ -19,7 +19,7 @@ static _LOCK_RECURSIVE_T allocator_lock = &__lock___malloc_recursive_mutex;
 #define CHECK(x) do { if (!(x)) { printf("newlib-fork-locks: FAIL line=%d\n", __LINE__); return 1; } } while (0)
 
 #ifdef __mochios__
-static atomic_int arena_ready, fork_entered, arena_stop;
+static atomic_int arena_ready, fork_entered, arena_release, arena_stop;
 static atomic_int registration_error;
 static atomic_int policy_error;
 static void *arena_writer(void *unused) {
@@ -27,16 +27,16 @@ static void *arena_writer(void *unused) {
     __lock_acquire_recursive(allocator_lock);
     atomic_store(&arena_ready, 1);
     while (!atomic_load(&fork_entered)) sched_yield();
-    struct timespec delay = { .tv_nsec = 100000000 };
-    while (nanosleep(&delay, &delay) && errno == EINTR) {}
     /* Fork must not hold POLICY while waiting for this allocator lock.
      * This is also the lock order needed by future sbrk limit checks. */
     struct rlimit limit;
     atomic_store(&policy_error, getrlimit(RLIMIT_DATA, &limit));
     /* Fork must not hold REGISTRY while waiting for this allocator lock. */
     atomic_store(&registration_error, pthread_atfork(NULL, NULL, NULL));
+    while (!atomic_load(&arena_release)) sched_yield();
     __lock_release_recursive(allocator_lock);
-    /* Stay live so the runtime still rejects a multithreaded source. */
+    /* Remain live: rejection above must be due to the held libc lock, not
+     * simply to a second pthread existing. */
     while (!atomic_load(&arena_stop)) sched_yield();
     return NULL;
 }
@@ -48,6 +48,7 @@ static int serialized_arena(void) {
     pid_t child = fork();
     int error = errno;
     if (child == 0) _exit(48);
+    atomic_store(&arena_release, 1);
     atomic_store(&arena_stop, 1);
     void *result;
     CHECK(pthread_join(thread, &result) == 0 && result == NULL);
