@@ -59,11 +59,19 @@ mod terminal_memory{{pub fn write_attributes(ptr:*mut super::NewlibTermios,value
         root.join("core/crates/abi/src/lib.rs"),
         root.join("user/crates/posix-protocol/src/lib.rs")
     );
-    program.push_str(probe::between(
+    let terminal_functions = probe::between(
         runtime,
         "fn terminal_control(",
         "#[unsafe(no_mangle)]\npub unsafe extern \"C\" fn tcgetwinsize",
-    ));
+    )
+    .replace(
+        "mod terminal_observation;",
+        &format!(
+            "#[path={:?}] mod terminal_observation;",
+            root.join("user/crates/newlib-runtime/src/terminal_observation.rs")
+        ),
+    );
+    program.push_str(&terminal_functions);
     program.push_str(probe::between(
         runtime,
         "pub extern \"C\" fn _isatty(",

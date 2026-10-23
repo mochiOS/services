@@ -984,6 +984,12 @@ impl PtyManager {
                 }
                 Ok(Vec::new())
             }
+            posix_protocol::PTY_CONTROL_GET_LIMITS => self.observation(
+                object_id,
+                posix_protocol::PTY_QUERY_LIMITS,
+                input,
+                output_capacity,
+            ),
             posix_protocol::PTY_CONTROL_GET_WINDOW_SIZE => self.observation(
                 object_id,
                 posix_protocol::PTY_QUERY_WINDOW_SIZE,
@@ -1225,6 +1231,20 @@ impl PtyManager {
         input: &[u8],
         capacity: usize,
     ) -> Result<Vec<u8>, i32> {
+        if code == posix_protocol::PTY_QUERY_LIMITS {
+            use posix_protocol::terminal_limits::{Limits, RESPONSE_LEN};
+            if !input.is_empty() || capacity < RESPONSE_LEN {
+                return Err(EINVAL);
+            }
+            self.endpoint(object_id)?;
+            return Ok(Limits {
+                canonical_bytes: CANONICAL_LINE_CAPACITY as u32,
+                input_bytes: BUFFER_CAPACITY as u32,
+                disabled_character: 0,
+            }
+            .encode()
+            .to_vec());
+        }
         if code == posix_protocol::PTY_QUERY_ATTRIBUTES {
             if !input.is_empty() || capacity < posix_protocol::TERMINAL_ATTRIBUTES_LEN {
                 return Err(EINVAL);
@@ -1258,7 +1278,9 @@ impl PtyManager {
     ) -> Result<Vec<u8>, i32> {
         if matches!(
             code,
-            posix_protocol::PTY_QUERY_ATTRIBUTES | posix_protocol::PTY_QUERY_WINDOW_SIZE
+            posix_protocol::PTY_QUERY_ATTRIBUTES
+                | posix_protocol::PTY_QUERY_WINDOW_SIZE
+                | posix_protocol::PTY_QUERY_LIMITS
         ) {
             return self.observation(object_id, code, input, capacity);
         }

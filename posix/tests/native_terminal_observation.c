@@ -53,6 +53,9 @@ static int observations(int mode, const char *name,
   struct winsize actual;
   CHECK(tcgetwinsize(fd, &actual) == 0 &&
         !memcmp(&actual, size, sizeof(actual)) && errno == 123);
+  CHECK(fpathconf(fd, _PC_MAX_CANON) == 65536 && errno == 123);
+  CHECK(fpathconf(fd, _PC_MAX_INPUT) == 65536 && errno == 123);
+  CHECK(fpathconf(fd, _PC_VDISABLE) == 0 && errno == 123);
   if (mode != O_WRONLY) {
     int baseline = snapshot(prior);
     int alias = dup(fd);
@@ -83,6 +86,12 @@ static int observations(int mode, const char *name,
                          (uintptr_t)&native_size,
                          sizeof(native_size)) == sizeof(native_size));
     CHECK(!memcmp(&native_size, size, sizeof(native_size)));
+    unsigned char limits[12];
+    CHECK(observe_native(700, readonly, 0x5054595100000004ULL, 0, 0,
+                         (uintptr_t)limits, sizeof(limits)) == sizeof(limits));
+    const unsigned char expected_limits[12] = {0, 0, 1, 0, 0, 0,
+                                               1, 0, 0, 0, 0, 0};
+    CHECK(!memcmp(limits, expected_limits, sizeof(limits)));
     CHECK(observe_native(668, readonly, 0x5054590000000002ULL,
                          (uintptr_t)encoded, sizeof(encoded), 0, 0) < 0);
     CHECK(observe_native(700, readonly, 0x5054590000000002ULL,
@@ -94,7 +103,7 @@ static int observations(int mode, const char *name,
   CHECK(close(fd) == 0);
   fprintf(stderr,
           "terminal-observation: PASS access=%d attributes/window query, "
-          "rights and cleanup\n",
+          "terminal limits, rights and cleanup\n",
           mode);
   return 0;
 }
@@ -114,6 +123,33 @@ int main(void) {
   CHECK(tcsetwinsize(master, &size) == 0);
   for (int mode = O_RDONLY; mode <= O_RDWR; mode++)
     CHECK(observations(mode, name, &attrs, &size) == 0);
+  int slave = open(name, O_RDONLY | O_NOCTTY);
+  CHECK(slave >= 0);
+  unsigned char chunk[4096];
+  memset(chunk, 'x', sizeof(chunk));
+  long capacity = fpathconf(slave, _PC_MAX_CANON);
+  CHECK(capacity == 65536);
+  for (long left = capacity - 1; left > 0;) {
+    size_t amount = left < (long)sizeof(chunk) ? (size_t)left : sizeof(chunk);
+    CHECK(write(master, chunk, amount) == (ssize_t)amount);
+    left -= (long)amount;
+  }
+  CHECK(write(master, "overflow\n", 9) == 9);
+  for (long left = capacity; left > 0;) {
+    ssize_t got = read(slave, chunk, sizeof(chunk));
+    CHECK(got > 0 && got <= left);
+    for (ssize_t i = 0; i < got; ++i)
+      CHECK(chunk[i] == (left - i == 1 ? '\n' : 'x'));
+    left -= got;
+  }
+  CHECK(close(slave) == 0);
+  fprintf(stderr, "terminal-observation: PASS reported canonical capacity "
+                  "preserves newline after overflow\n");
+  int nonterminal = open("/dev/null", O_RDONLY);
+  CHECK(nonterminal >= 0);
+  CHECK(fpathconf(nonterminal, _PC_MAX_CANON) == -1 && errno == EINVAL);
+  CHECK(close(nonterminal) == 0);
+  CHECK(fpathconf(-1, _PC_MAX_CANON) == -1 && errno == EBADF);
   pid_t child = fork();
   CHECK(child >= 0);
   if (child == 0) {
