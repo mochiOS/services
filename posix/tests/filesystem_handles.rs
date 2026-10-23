@@ -3765,3 +3765,158 @@ fn native_description_flags_share_the_real_ofd_and_preserve_atomic_masked_update
         Err(9)
     );
 }
+
+#[test]
+fn trailing_symlink_targets_reject_file_access_before_creation_or_truncation() {
+    let mut fs = test_filesystem();
+    let anchors = PathAnchors::default;
+    fs.mkdir_at(
+        protocol::Header {
+            mode: 0o700,
+            ..Default::default()
+        },
+        b"/slash-dir",
+        anchors(),
+        root_credentials(),
+    )
+    .unwrap();
+    let file = fs
+        .open_at(
+            protocol::Header {
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+                mode: 0o600,
+                ..Default::default()
+            },
+            b"/slash-file",
+            anchors(),
+            root_credentials(),
+        )
+        .unwrap()
+        .header
+        .open_id;
+    fs.provider_write(file, b"preserved").unwrap();
+    for (target, name) in [
+        (b"slash-file/".as_slice(), b"/bad-slash".as_slice()),
+        (b"slash-dir/", b"/good-slash"),
+        (b"bad-slash", b"/chain-slash"),
+        (b"absent-slash/", b"/dangling-slash"),
+    ] {
+        let payload = [target, name].concat();
+        fs.symlink_at(
+            protocol::Header {
+                mode: target.len() as u32,
+                ..Default::default()
+            },
+            &payload,
+            anchors(),
+            root_credentials(),
+        )
+        .unwrap();
+    }
+    for path in [b"/bad-slash".as_slice(), b"/chain-slash"] {
+        assert!(matches!(
+            fs.stat_at(
+                protocol::Header::default(),
+                path,
+                anchors(),
+                root_credentials()
+            ),
+            Err(20)
+        ));
+        for flags in [
+            protocol::OPEN_AT_READ,
+            protocol::OPEN_AT_WRITE | protocol::OPEN_AT_TRUNCATE,
+            protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+        ] {
+            assert!(matches!(
+                fs.open_at(
+                    protocol::Header {
+                        flags,
+                        mode: 0o600,
+                        ..Default::default()
+                    },
+                    path,
+                    anchors(),
+                    root_credentials()
+                ),
+                Err(20)
+            ));
+        }
+    }
+    assert_eq!(fs.provider_read_at(file, 0, 9).unwrap(), b"preserved");
+    assert!(matches!(
+        fs.open_at(
+            protocol::Header {
+                flags: protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+                mode: 0o600,
+                ..Default::default()
+            },
+            b"/dangling-slash",
+            anchors(),
+            root_credentials()
+        ),
+        Err(2)
+    ));
+    assert!(matches!(
+        fs.stat_at(
+            protocol::Header::default(),
+            b"/absent-slash",
+            anchors(),
+            root_credentials()
+        ),
+        Err(2)
+    ));
+    let child = fs
+        .open_at(
+            protocol::Header {
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_CREATE,
+                mode: 0o600,
+                ..Default::default()
+            },
+            b"/good-slash/child",
+            anchors(),
+            root_credentials(),
+        )
+        .unwrap();
+    fs.provider_close(child.header.open_id).unwrap();
+    let raw = fs
+        .readlink_at(
+            protocol::Header::default(),
+            b"/bad-slash",
+            anchors(),
+            root_credentials(),
+        )
+        .unwrap();
+    assert_eq!(raw.payload, b"slash-file/");
+    let literal = fs
+        .stat_at(
+            protocol::Header {
+                flags: protocol::STAT_AT_NOFOLLOW,
+                ..Default::default()
+            },
+            b"/good-slash",
+            anchors(),
+            root_credentials(),
+        )
+        .unwrap();
+    assert_eq!(
+        protocol::decode_node_status(&literal.payload).unwrap().kind,
+        protocol::NODE_TYPE_SYMLINK
+    );
+    fs.unlink_at(
+        protocol::Header::default(),
+        b"/good-slash",
+        anchors(),
+        root_credentials(),
+    )
+    .unwrap();
+    assert!(fs
+        .stat_at(
+            protocol::Header::default(),
+            b"/slash-dir/child",
+            anchors(),
+            root_credentials()
+        )
+        .is_ok());
+    fs.provider_close(file).unwrap();
+}

@@ -86,6 +86,14 @@ pub fn resolve_visible<B: Backend>(
     let mut iterations = 0usize;
     let mut last_name = None;
     while let Some(component) = pending.pop_front() {
+        if component == OwnedComponent::DirectoryEnd {
+            // This is a type requirement, not another pathname lookup. Keep
+            // its parent identity and do not require final-directory search.
+            if !backend.is_directory(ancestors.last().ok_or(EIO)?) {
+                return Err(ENOTDIR);
+            }
+            continue;
+        }
         iterations = iterations.checked_add(1).ok_or(ELOOP)?;
         if iterations > 1024 {
             return Err(ELOOP);
@@ -101,6 +109,7 @@ pub fn resolve_visible<B: Backend>(
         }
         backend.search(current, credentials)?;
         match component {
+            OwnedComponent::DirectoryEnd => unreachable!("handled before search"),
             OwnedComponent::Root | OwnedComponent::Current => {
                 last_name = None;
             }
@@ -139,6 +148,12 @@ pub fn resolve_visible<B: Backend>(
                         ancestors.truncate(1);
                     }
                     let mut target_components = components(target);
+                    // Parsing drops trailing separators. Keep the target's
+                    // directory requirement inside the unresolved sequence:
+                    // it applies before an original suffix, not to its leaf.
+                    if target.as_ref().last() == Some(&b'/') {
+                        target_components.push_back(OwnedComponent::DirectoryEnd);
+                    }
                     while let Some(component) = target_components.pop_back() {
                         pending.push_front(component);
                     }
@@ -159,6 +174,7 @@ pub fn resolve_visible<B: Backend>(
 
 #[derive(PartialEq, Eq)]
 enum OwnedComponent {
+    DirectoryEnd,
     Root,
     Current,
     Parent,
