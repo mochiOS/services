@@ -453,10 +453,10 @@ impl FilesystemService {
         let exclusive_create = request.flags
             & (protocol::OPEN_AT_CREATE | protocol::OPEN_AT_EXCLUSIVE)
             == (protocol::OPEN_AT_CREATE | protocol::OPEN_AT_EXCLUSIVE);
-        let follow = if request.flags & protocol::OPEN_AT_NOFOLLOW != 0 || exclusive_create {
+        let follow = if exclusive_create {
             FollowSymlinks::ExcludeFinalComponent
         } else {
-            FollowSymlinks::All
+            lookup_symlinks(payload, request.flags & protocol::OPEN_AT_NOFOLLOW != 0)
         };
         if let Some(resolution) =
             self.resolve_namespace_path(payload, anchors, follow, uid, gid, groups)?
@@ -1123,7 +1123,7 @@ impl FilesystemService {
         let (inode, filesystem, _) = self.resolve_disk_operation_inode(
             payload,
             anchors,
-            FollowSymlinks::ExcludeFinalComponent,
+            lookup_symlinks(payload, true),
             credentials,
             |_| EINVAL,
         )?;
@@ -1214,11 +1214,7 @@ impl FilesystemService {
         let groups = credentials.supplementary_groups();
         let requested_uid = request.node_id as u32;
         let requested_gid = (request.node_id >> 32) as u32;
-        let follow = if request.flags & protocol::CHOWN_AT_NOFOLLOW != 0 {
-            FollowSymlinks::ExcludeFinalComponent
-        } else {
-            FollowSymlinks::All
-        };
+        let follow = lookup_symlinks(payload, request.flags & protocol::CHOWN_AT_NOFOLLOW != 0);
         let (inode, filesystem, volume) = match self.resolve_operation_target(
             payload,
             anchors,
@@ -1285,11 +1281,7 @@ impl FilesystemService {
         let uid = credentials.effective_uid;
         let gid = credentials.effective_gid;
         let groups = credentials.supplementary_groups();
-        let follow = if request.flags & protocol::STAT_AT_NOFOLLOW != 0 {
-            FollowSymlinks::ExcludeFinalComponent
-        } else {
-            FollowSymlinks::All
-        };
+        let follow = lookup_symlinks(payload, request.flags & protocol::STAT_AT_NOFOLLOW != 0);
         if let Some(resolution) =
             self.resolve_namespace_path(payload, anchors, follow, uid, gid, groups)?
         {
@@ -1389,11 +1381,7 @@ impl FilesystemService {
         let uid = credentials.effective_uid;
         let gid = credentials.effective_gid;
         let groups = credentials.supplementary_groups();
-        let follow = if request.flags & protocol::ACCESS_AT_NOFOLLOW != 0 {
-            FollowSymlinks::ExcludeFinalComponent
-        } else {
-            FollowSymlinks::All
-        };
+        let follow = lookup_symlinks(payload, request.flags & protocol::ACCESS_AT_NOFOLLOW != 0);
         if let Some(resolution) =
             self.resolve_namespace_path(payload, anchors, follow, uid, gid, groups)?
         {
@@ -3836,6 +3824,17 @@ impl FilesystemService {
             self.node_ids.insert(new.clone(), node_id);
             self.nodes.insert(node_id, new);
         }
+    }
+}
+
+// A trailing separator requires directory resolution even for a lookup
+// requested with NOFOLLOW. Entry mutations must keep their strict final-link
+// policy: resolving a referent here must never change an unlink/rename target.
+fn lookup_symlinks(path: &[u8], nofollow: bool) -> FollowSymlinks {
+    if nofollow && path.last() != Some(&b'/') {
+        FollowSymlinks::ExcludeFinalComponent
+    } else {
+        FollowSymlinks::All
     }
 }
 

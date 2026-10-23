@@ -4054,3 +4054,6 @@ fn expanded_path_budget_uses_only_the_unresolved_suffix_on_ext4() {
         Err(36)
     ));
 }
+
+#[path = "support/trailing_lookup.rs"]
+mod trailing_lookup;

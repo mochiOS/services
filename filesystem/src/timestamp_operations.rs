@@ -102,11 +102,7 @@ impl FilesystemService {
         {
             return Err(EINVAL);
         }
-        let follow = if request.flags & protocol::SET_TIMES_AT_NOFOLLOW != 0 {
-            FollowSymlinks::ExcludeFinalComponent
-        } else {
-            FollowSymlinks::All
-        };
+        let follow = lookup_symlinks(path, request.flags & protocol::SET_TIMES_AT_NOFOLLOW != 0);
         let (inode, filesystem, volume) =
             match self.resolve_operation_target(path, anchors, follow, credentials)? {
                 OperationTarget::Device(node) => {
