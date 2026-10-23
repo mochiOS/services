@@ -21,10 +21,40 @@ impl NativeProcess {
         rollback: impl FnOnce(Self),
     ) -> Result<Self, platform::syscall::SysError> {
         let (handle, process_id) = mochios_posix_client::process_creation::create_with_rollback(
-            || platform::process::create_stopped(image, metadata),
-            setup,
-            |handle| platform::process::handle_status(handle).map(|status| status.process_id),
-            platform::process::resume_handle,
+            || {
+                platform::process::create_stopped(image, metadata).inspect_err(|error| {
+                    eprintln!(
+                        "service-manager.service: native launch create failed status={}",
+                        error.raw()
+                    );
+                })
+            },
+            |handle| {
+                setup(handle).inspect_err(|error| {
+                    eprintln!(
+                        "service-manager.service: native launch registration failed status={}",
+                        error.raw()
+                    );
+                })
+            },
+            |handle| {
+                let result =
+                    platform::process::handle_status(handle).map(|status| status.process_id);
+                result.inspect_err(|error| {
+                    eprintln!(
+                        "service-manager.service: native launch identity query failed status={}",
+                        error.raw()
+                    );
+                })
+            },
+            |handle| {
+                platform::process::resume_handle(handle).inspect_err(|error| {
+                    eprintln!(
+                        "service-manager.service: native launch resume failed status={}",
+                        error.raw()
+                    );
+                })
+            },
             |handle| {
                 let _ = platform::process::terminate_handle(handle, 127);
             },

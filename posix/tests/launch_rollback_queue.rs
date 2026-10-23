@@ -16,6 +16,9 @@ pub mod syscall {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct SysError(pub i64);
     impl SysError {
+        pub fn raw(self) -> i64 {
+            self.0
+        }
         pub fn from_raw(raw: i64) -> Self {
             Self(raw)
         }

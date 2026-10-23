@@ -236,7 +236,12 @@ fn spawn_native(
     };
     // Endpoint possession is not a POSIX session. Register the authenticated
     // caller before asking the service to resolve a process-root pathname.
-    client.register_session().map_err(client_error)?;
+    client
+        .register_session()
+        .inspect_err(|error| {
+            eprintln!("service-manager.service: {label} session registration failed: {error:?}");
+        })
+        .map_err(client_error)?;
     let image = client
         .open_at(
             OpenAtBase::ProcessRoot,
@@ -244,11 +249,19 @@ fn spawn_native(
             0,
             spec.path,
         )
+        .inspect_err(|error| {
+            eprintln!("service-manager.service: {label} image open failed: {error:?}");
+        })
         .map_err(client_error)?;
     // The source reference comes only from this IPC attachment, not a PID/FD
     // capture API. Always release it, including authorization/create failure.
     let result = (|| {
-        resolve_execution_security(spec.path, spec.execution_class)?;
+        resolve_execution_security(spec.path, spec.execution_class).inspect_err(|error| {
+            eprintln!(
+                "service-manager.service: {label} execution authorization failed status={}",
+                error.raw()
+            );
+        })?;
         // Fixed system services run as POSIX root by userspace policy. Register
         // their environment and parent before execution; never derive it from
         // the new native task's default kernel credentials. Native capability

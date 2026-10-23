@@ -352,6 +352,7 @@ impl BootstrapOperations for Runtime {
             return None;
         }
         let target = self.ready.as_ref()?.target(ReadyService::SecureUi);
+        eprintln!("service-manager.service: creating secure-ui.service native process");
         match service_launcher::spawn_secure_ui(self.logger_endpoint, target, None, endpoint) {
             Ok(process) => {
                 eprintln!("service-manager.service: secure-ui.service native process created");
@@ -879,7 +880,10 @@ impl BootstrapOperations for Runtime {
     }
 
     fn installation_required(&self) -> bool {
-        std::fs::metadata("/system/.installed").is_err()
+        eprintln!("service-manager.service: checking installation state");
+        let required = std::fs::metadata("/system/.installed").is_err();
+        eprintln!("service-manager.service: installation required={required}");
+        required
     }
 }
 
