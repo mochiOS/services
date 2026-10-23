@@ -10,7 +10,7 @@ use mochi_user_platform as platform;
 use mochios_filesystem_protocol as wire;
 use std::sync::{Arc, Mutex, mpsc};
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Name {
     pub component: Vec<u8>,
     pub device: u64,
@@ -23,6 +23,9 @@ pub struct Lease {
     retire: mpsc::Sender<Name>,
 }
 impl Lease {
+    pub(crate) fn identity(&self) -> Option<&Name> {
+        self.name.as_ref()
+    }
     pub(crate) fn component(&self) -> Option<&[u8]> {
         self.name.as_ref().map(|name| name.component.as_slice())
     }
@@ -202,6 +205,12 @@ pub struct Publisher {
     process_id: u64,
 }
 impl Publisher {
+    pub fn grant(&self, name: &Name, uid: u32, gid: u32) -> Result<(), i32> {
+        grant_with(name, uid, gid, |payload| {
+            self.connections
+                .call(wire::OP_DEVICE_NODE_SET_ATTRIBUTES_IF_SAME, payload, None)
+        })
+    }
     /// Own attenuated duplicates so the worker does not borrow caller-local
     /// references. The caller retains its original bootstrap authorities.
     pub fn start(
@@ -291,7 +300,42 @@ impl Publisher {
     }
 }
 
-/// Apply service-owned naming/ownership policy. `peer` is a snapshot of the
+/// grantpt uses real IDs and owner read/write plus group write. This explicit
+/// operation differs from private 0600 initial publication.
+pub fn grant_with(
+    name: &Name,
+    uid: u32,
+    gid: u32,
+    call: impl FnOnce(&[u8]) -> Result<wire::NodeStatus, i32>,
+) -> Result<(), i32> {
+    let mut payload = vec![0; wire::device_attributes::HEADER_LEN + name.component.len()];
+    let length = wire::device_attributes::encode(
+        wire::device_attributes::Request {
+            mode: 0o620,
+            uid,
+            gid,
+            identity: wire::device_removal::Request {
+                device: name.device,
+                node_id: name.node_id,
+                name: &name.component,
+            },
+        },
+        &mut payload,
+    ).map_err(|_| -22)?;
+    let status = call(&payload[..length])?;
+    if (
+        status.device, status.node_id, status.uid, status.gid,
+        status.mode & 0o7777, status.kind,
+    ) != (
+        name.device, name.node_id, uid, gid, 0o620, wire::NODE_TYPE_SPECIAL,
+    )
+    {
+        return Err(-5);
+    }
+    Ok(())
+}
+
+/// Apply service-owned naming/ownership policy. peer is a snapshot of the
 /// registered POSIX environment, not client-supplied request credentials.
 pub fn register_with(
     process_id: u64,

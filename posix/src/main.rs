@@ -481,6 +481,22 @@ fn main() {
         } else {
             None
         };
+        let granted_pty = if let (Some(peer), Some((header, payload)), true, Some(_)) =
+            (peer, decoded, attachments_valid, request_image)
+        {
+            if header.opcode == protocol::OP_PTY_GRANT_MASTER {
+                Some(posix_service::pty_grant::execute(
+                    &service_state, peer, header, payload, &attachments,
+                    |source| posix_service::pty_grant_ipc::query(
+                        provider_endpoint_handle,
+                        platform::ipc::IpcObjectHandle {
+                            handle: source.handle, reserved: 0, rights: source.rights,
+                        },
+                    ),
+                    |name, uid, gid| pty_publisher.grant(name, uid, gid),
+                ))
+            } else { None }
+        } else { None };
         let opened_pty = if peer.is_some()
             && request_image.is_some()
             && attachments_valid
@@ -849,6 +865,16 @@ fn main() {
             {
                 Some(service.handle_cpu_timer_request(
                     peer, header, payload, &attachments, &mut processes,
+                ))
+            }
+            (Some(peer), Some(_), true) if granted_pty.is_some() =>
+            {
+                let validation = request_image.ok_or(protocol::STATUS_EPERM)
+                    .and_then(|image| validate_pending_request_image(
+                        sender, peer, image, &mut service, &mut processes,
+                    ));
+                Some(posix_service::open_request::finish(
+                    granted_pty.unwrap(), validation, &mut filesystem,
                 ))
             }
             (Some(peer), Some(_), true) if opened_pty.is_some() =>
@@ -1449,6 +1475,12 @@ fn run_pty_provider(
         if request[..request_length].starts_with(&mochios_posix_protocol::pty_factory::MAGIC) {
             posix_service::pty_factory::serve(
                 &ptys, endpoint, sender, &request[..request_length], attachments,
+            );
+            continue;
+        }
+        if request[..request_length].starts_with(&posix_service::pty_grant_ipc::MAGIC) {
+            posix_service::pty_grant_ipc::serve(
+                &ptys, sender, &request[..request_length], attachments,
             );
             continue;
         }

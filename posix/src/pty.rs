@@ -1116,6 +1116,19 @@ impl PtyManager {
         Ok([pair.master_object_id, pair.slave_object_id])
     }
 
+    /// Identify an explicitly received master on this provider's owner thread
+    /// before calling. Returned IDs compare identity, never supply authority.
+    pub fn master_name(&self, object_id: u64) -> Result<crate::terminal_publication::Name, i32> {
+        let (id, side) = self.endpoint(object_id)?;
+        if side != PtySide::Master {
+            return Err(EINVAL);
+        }
+        self.terminals.get(&id).ok_or(EBADF)?.name.as_ref()
+            .and_then(|lease| lease.identity())
+            .cloned()
+            .ok_or(6) // ENXIO
+    }
+
     pub fn slave_terminal_id(&self, object_id: u64) -> Result<u64, i32> {
         let (id, side) = self.endpoint(object_id)?;
         if side != PtySide::Slave || !self.terminals.contains_key(&id) {

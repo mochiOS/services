@@ -467,7 +467,31 @@ fn external_devices_use_updated_permissions_without_replacing_factory_or_old_met
             .map(|response| response.header.open_id)
     };
     assert_eq!(open(&mut service, 501, 20, protocol::OPEN_AT_READ), Err(13));
-    let changed = update(&mut service, parent, original, b"0").unwrap();
+    let name = posix_service::terminal_publication::Name {
+        component: b"0".to_vec(),
+        device: original.device,
+        node_id: original.node_id,
+    };
+    let mut changed = None;
+    posix_service::terminal_publication::grant_with(&name, 501, 20, |payload| {
+        let reply = filesystem_service::device_namespace_ipc::handle(
+            &mut service,
+            protocol::Header {
+                opcode: protocol::OP_DEVICE_NODE_SET_ATTRIBUTES_IF_SAME,
+                length: payload.len() as u32,
+                ..Default::default()
+            },
+            payload,
+            &attached(),
+            |_| Ok(parent),
+        )
+        .map_err(|error| -error)?;
+        let status = protocol::decode_node_status(&reply.payload).unwrap();
+        changed = Some(status);
+        Ok(status)
+    })
+    .unwrap();
+    let changed = changed.unwrap();
     assert_eq!(status(&service, retained), changed);
     assert_eq!(changed.special_device, 71);
     assert!(service.external_open(retained).unwrap().is_some());
