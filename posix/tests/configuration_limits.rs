@@ -38,3 +38,36 @@ fn selectors_match_the_sdk_headers() {
     assert!(runtime.contains("configuration::local_limit(name)"));
     assert!(runtime.contains("for _ in 0..mochios_posix_client::thread::DESTRUCTOR_ITERATIONS"));
 }
+
+#[test]
+fn unavailable_io_options_are_known_answers_not_size_limits() {
+    use mochios_posix_client::configuration::{file_option, system_option};
+    for selector in [21, 28, 32] {
+        assert_eq!(system_option(selector), Some(-1));
+    }
+    for selector in [9, 10, 11] {
+        assert_eq!(file_option(selector), Some(-1));
+    }
+    for selector in [-1, 0, 12, i32::MAX] {
+        assert_eq!(file_option(selector), None);
+    }
+    for selector in [-1, 9, 10, 22, 27, 33, i32::MAX] {
+        assert_eq!(system_option(selector), None);
+    }
+    let header = include_str!("../../../libraries/newlib/newlib/libc/include/sys/unistd.h");
+    for (name, selector) in [
+        ("_SC_ASYNCHRONOUS_IO", 21),
+        ("_SC_PRIORITIZED_IO", 28),
+        ("_SC_SYNCHRONIZED_IO", 32),
+        ("_PC_ASYNC_IO", 9),
+        ("_PC_PRIO_IO", 10),
+        ("_PC_SYNC_IO", 11),
+    ] {
+        assert!(
+            header
+                .lines()
+                .any(|line| line.split_whitespace().collect::<Vec<_>>()
+                    == ["#define", name, &selector.to_string()])
+        );
+    }
+}

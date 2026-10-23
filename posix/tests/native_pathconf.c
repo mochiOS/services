@@ -34,6 +34,11 @@ static int permissions(const char *file, const char *hidden) {
   errno = 83;
   CHECK(pathconf(file, _PC_NAME_MAX) == 255 && errno == 83);
   CHECK(pathconf(hidden, _PC_NAME_MAX) == -1 && errno == EACCES);
+  for (int name = _PC_ASYNC_IO; name <= _PC_SYNC_IO; ++name) {
+    errno = 84;
+    CHECK(pathconf(file, name) == -1 && errno == 84);
+    CHECK(pathconf(hidden, name) == -1 && errno == EACCES);
+  }
   return 0;
 }
 static int confinement(const char *root) {
@@ -80,6 +85,23 @@ int main(void) {
   fprintf(
       stderr,
       "pathconf: PASS checked caller memory and explicit selector errors\n");
+
+  int options[] = {_SC_ASYNCHRONOUS_IO, _SC_PRIORITIZED_IO,
+                   _SC_SYNCHRONIZED_IO};
+  int option_fd = open(file, O_RDONLY);
+  CHECK(option_fd >= 0);
+  for (unsigned i = 0; i < 3; ++i) {
+    errno = 85;
+    CHECK(sysconf(options[i]) == -1 && errno == 85);
+    CHECK(fpathconf(option_fd, _PC_ASYNC_IO + i) == -1 && errno == 85);
+    CHECK(pathconf(file, _PC_ASYNC_IO + i) == -1 && errno == 85);
+    CHECK(pathconf("/dev/null", _PC_ASYNC_IO + i) == -1 && errno == 85);
+    CHECK(pathconf(dangling, _PC_ASYNC_IO + i) == -1 && errno == ENOENT);
+  }
+  CHECK(fpathconf(-1, _PC_ASYNC_IO) == -1 && errno == EBADF);
+  CHECK(close(option_fd) == 0);
+  fprintf(stderr,
+          "pathconf: PASS unavailable IO answers preserve errno across APIs\n");
 
   pid_t child = fork();
   CHECK(child >= 0);

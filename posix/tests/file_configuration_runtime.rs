@@ -249,3 +249,25 @@ fn all_newlib_selector_numbers_match_the_headers() {
         );
     }
 }
+
+#[test]
+fn unavailable_io_is_a_negative_answer_after_fd_validation_without_owner_rpc() {
+    for kind in [
+        FdKind::ObjectFile,
+        FdKind::ObjectDirectory,
+        FdKind::ObjectSpecial,
+        FdKind::ObjectStreamRead,
+        FdKind::ObjectPty,
+        FdKind::ObjectSocket,
+    ] {
+        reset();
+        STATE.with_borrow_mut(|s| s.entry.handle.kind = kind);
+        for selector in [9, 10, 11] {
+            check(-1, selector);
+        }
+        STATE.with_borrow(|s| assert!(s.calls.is_empty()));
+    }
+    reset();
+    assert_eq!(actual::fpathconf(-1, 9), -1);
+    STATE.with_borrow(|s| assert_eq!(s.errno, EBADF));
+}

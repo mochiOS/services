@@ -61,6 +61,11 @@ mod mochios_posix_protocol{pub mod status{
         "pub fn processor_count(",
         "/// Process-local limits",
     ));
+    program.push_str(probe::between(
+        include_str!("../../../user/crates/posix-client/src/configuration.rs"),
+        "pub const fn system_option(",
+        "pub const fn file_option(",
+    ));
     program.push_str("pub fn local_limit(_:i32)->Option<usize>{None}\n}\npub mod newlib_errno{use crate::mochios_posix_protocol;\n");
     program.push_str(include_str!(
         "../../../user/crates/posix-client/src/newlib_errno.rs"
@@ -125,6 +130,10 @@ mod mochios_posix_protocol{pub mod status{
 fn reset(){BOOT.set(Some(GOOD));ONLINE.set(3);COPIES.set(0);COPY_ERROR.set(None);ERRNO.set(0)}
 fn main(){
     configuration_regression::run();
+    for selector in [21,28,32]{
+        reset();BOOT.set(None);ERRNO.set(81);
+        assert_eq!(sysconf(selector),-1);assert_eq!(ERRNO.get(),81);assert_eq!(COPIES.get(),0);
+    }
     let mut output=[0xcc_u8;16];let p=output.as_mut_ptr() as u64;
     for query in [processor_describe as fn(u64,u64)->u64,boot_esp_guid]{
         for n in [0,15,17,u64::MAX]{reset();assert_eq!(query(p,n),Error::InvalidArgument.into_raw());assert_eq!(COPIES.get(),0);assert_eq!(output,[0xcc;16]);}
