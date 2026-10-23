@@ -20,6 +20,8 @@ mod thread;
 mod wait;
 #[path = "process_timer_wake.rs"]
 mod wake;
+#[path = "timer_callback.rs"]
+mod callback;
 
 struct Clocks {
     samples: Samples,
@@ -198,6 +200,23 @@ impl ObjectTransport for TimerTransport {
                 },
                 payload: created,
             }
+        } else if header.opcode == protocol::OP_TIMER_THREAD_WAIT {
+            let mut bytes = Vec::new();
+            let result = service.poll_timer_callback(self.peer, image,
+                mnu_abi::ExecutionIdentity { process_id: self.peer.process_id, thread_id: 17 },
+                header, payload, &attachments, processes, |event| {
+                    bytes.resize(protocol::timer_callback::REPLY_LEN, 0);
+                    protocol::timer_callback::encode(event, &mut bytes).unwrap();
+                    true
+                });
+            let status = match result {
+                Ok(posix_service::timer_callback::Completion::Published) => 0,
+                Ok(_) => protocol::STATUS_EAGAIN,
+                Err(status) => status,
+            };
+            posix_service::Response { header: protocol::Header { opcode: protocol::OP_STATUS,
+                request_id: header.request_id, status, payload_len: bytes.len() as u32,
+                ..Default::default() }, payload: bytes }
         } else {
             service
                 .handle_process_timer_request(self.peer, image, header, payload, &[], processes)
@@ -445,20 +464,19 @@ fn unrepresentable_old_value_cannot_commit_a_replacement_with_an_error_reply() {
 }
 
 #[test]
-fn unavailable_thread_callbacks_are_explicit_without_rejecting_signal_notifications() {
+fn callback_cookies_are_admitted_without_reserving_a_signal_or_changing_other_notifications() {
     let (client, _) = setup();
     assert_eq!(
         client.timer_create(Clock::Monotonic, Notification::Thread { cookie: 1 }),
-        Err(ClientError::Remote(protocol::STATUS_ENOSYS))
-    );
-    // A rejected notification must not reserve an ID or slot.
-    assert_eq!(
-        client.timer_create(Clock::Monotonic, Notification::None),
         Ok(1)
     );
     assert_eq!(
-        client.timer_create(Clock::Monotonic, Notification::Default),
+        client.timer_create(Clock::Monotonic, Notification::None),
         Ok(2)
+    );
+    assert_eq!(
+        client.timer_create(Clock::Monotonic, Notification::Default),
+        Ok(3)
     );
     assert_eq!(
         client.timer_create(
@@ -468,7 +486,7 @@ fn unavailable_thread_callbacks_are_explicit_without_rejecting_signal_notificati
                 value: 17,
             }
         ),
-        Ok(3)
+        Ok(4)
     );
 }
 

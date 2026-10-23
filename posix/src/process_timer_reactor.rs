@@ -4,7 +4,7 @@ use super::*;
 use process_timer::{Clock, Samples};
 use process_timer_request::{ClockBackend, Reading};
 
-fn sample(clock: Clock, reading: Reading) -> Result<Samples, i32> {
+pub(super) fn sample(clock: Clock, reading: Reading) -> Result<Samples, i32> {
     let mut samples = Samples {
         realtime_ns: 0,
         monotonic_ns: 0,

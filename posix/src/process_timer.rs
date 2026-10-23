@@ -286,6 +286,23 @@ impl OwnedTimers<'_> {
             .map(|(_, pending)| pending)
     }
 
+    /// Oldest pending occurrence first. A rapidly rearming low-numbered timer
+    /// must not starve an older event from another timer.
+    pub(super) fn select_pending_thread(&self) -> Option<Pending> {
+        self.pending_notifications()
+            .filter(|pending| matches!(pending.notification, Notification::Thread { .. }))
+            .min_by_key(|pending| pending.sequence)
+    }
+
+    pub(super) fn selected_thread_clock(&self, selected: Pending) -> Result<(Clock, Target), i32> {
+        let (index, pending) = self.selected(selected)?;
+        if !matches!(pending.notification, Notification::Thread { .. }) {
+            return Err(STATUS_EINVAL);
+        }
+        let timer = &self.registry.timers[index];
+        Ok((timer.basis, timer.target))
+    }
+
     pub(super) fn selected_signal_basis(&self, selected: Pending) -> Result<Clock, i32> {
         let (index, pending) = self.selected(selected)?;
         if !matches!(pending.notification, Notification::Signal { .. }) {

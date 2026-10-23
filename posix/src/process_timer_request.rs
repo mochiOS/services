@@ -126,14 +126,11 @@ impl<H: Copy> PosixService<H> {
         image: RequestImage,
         sender: Option<mnu_abi::ExecutionIdentity>,
         clock: Clock,
-        notification: wire::Notification,
+        _notification: wire::Notification,
         selected_process: Option<u64>,
         attachment: Option<&AttachedObject<H>>,
         backend: &mut B,
     ) -> Result<Target, i32> {
-        if matches!(notification, wire::Notification::Thread { .. }) {
-            return Err(protocol::STATUS_ENOSYS);
-        }
         self.validate_request_image(peer, image, backend)?;
         if let Some(pid) = selected_process {
             let process = self.process_clock_target(peer, pid, backend)?;

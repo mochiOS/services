@@ -50,6 +50,7 @@ pub mod process_timer;
 pub mod process_timer_request;
 pub mod process_timer_reactor;
 pub mod process_timer_delivery;
+pub mod timer_callback;
 mod fork_state;
 pub mod resource_policy;
 pub mod cpu_limit;
@@ -3757,6 +3758,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_PROCESS_CPU_CLOCK
             | protocol::OP_PROCESS_CPU_SLEEP
             | protocol::OP_THREAD_CPU_SLEEP
+            | protocol::OP_TIMER_THREAD_WAIT
             | protocol::OP_TIMER_CREATE_PROCESS_CPU
             | protocol::OP_PROCESS_SPAWNED
             | protocol::OP_PROCESS_SESSION_INFO

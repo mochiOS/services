@@ -19,6 +19,7 @@ static FAIL:Cell<u32>=const{Cell::new(0)};
 static CLOCK_CALLS:Cell<u32>=const{Cell::new(0)};
 static LOGS:Cell<u32>=const{Cell::new(0)};
 static NOTIFICATIONS:Cell<u32>=const{Cell::new(0)};
+static CALLBACK_SWEEPS:Cell<u32>=const{Cell::new(0)};
 static CPU_ONLY:Cell<bool>=const{Cell::new(false)};
 static TIMER_SWEEPS:Cell<u32>=const{Cell::new(0)};
 static PROCESS_TIMERS:Cell<bool>=const{Cell::new(false)};
@@ -73,6 +74,10 @@ fn refresh_child_notifications(&mut self,_:&mut Processes)->Result<usize,i32>{
 }
 struct PendingSignalWait{deadline:Option<u64>}
 struct CpuSleeps;
+struct CallbackWaits;
+impl CallbackWaits {
+fn observe(&mut self,_:&mut Service,_:&mut Processes){CALLBACK_SWEEPS.set(CALLBACK_SWEEPS.get()+1);}
+}
 impl CpuSleeps {
 fn is_empty(&self)->bool{!CPU_SLEEPS.get()}
 fn observe(&mut self,_:&mut Service,_:&mut Processes)->Result<usize,i32>{
@@ -96,6 +101,7 @@ let mut processes=Processes{signal_threads:vec![()]};let mut filesystem=();
 let mut cpu_sweep_deadline_ms=0;let mut thread_sweep_deadline_ms=0;
 let mut pending_waits=Vec::new();
 let mut cpu_sleeps=CpuSleeps;
+let mut callback_waits=CallbackWaits;
 let mut pending_signal_waits=vec![PendingSignalWait{deadline:Some(9_000_000_000)}];
 "#,
     );
@@ -107,12 +113,12 @@ let mut pending_signal_waits=vec![PendingSignalWait{deadline:Some(9_000_000_000)
 fn main(){
 for failure in [1,2,4,7] {
  let mut service=Service{deadline:5_000_000_000,cpu_sweeps:0};let mut reported=false;
- LOGS.set(0);NOTIFICATIONS.set(0);FAIL.set(failure);
+ LOGS.set(0);NOTIFICATIONS.set(0);CALLBACK_SWEEPS.set(0);FAIL.set(failure);
  for _ in 0..2 {
   CLOCK_CALLS.set(0);assert!(plan(&mut service,&mut reported).1);assert!(reported);
   assert_eq!(service.deadline,5_000_000_000);
  }
- assert_eq!(LOGS.get(),1);assert_eq!(NOTIFICATIONS.get(),2);
+ assert_eq!(LOGS.get(),1);assert_eq!(NOTIFICATIONS.get(),2);assert_eq!(CALLBACK_SWEEPS.get(),2);
  FAIL.set(0);CLOCK_CALLS.set(0);
  assert_eq!(plan(&mut service,&mut reported),(2_100_000_000,false));assert!(!reported);
  assert_eq!(NOTIFICATIONS.get(),3);assert_eq!(service.deadline,5_000_000_000);

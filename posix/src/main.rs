@@ -5,6 +5,8 @@ mod process_control;
 
 #[cfg(target_os = "mochios")]
 mod process_timer_native;
+#[cfg(target_os = "mochios")]
+mod timer_callback_native;
 
 #[cfg(target_os = "mochios")]
 mod cpu_sleep_native;
@@ -210,6 +212,7 @@ fn main() {
     platform::logln!("posix.service: endpoint ready");
     let mut pending_waits = Vec::new();
     let mut pending_signal_waits = Vec::new();
+    let mut callback_waits = timer_callback_native::Waits::default();
     let mut cpu_sleeps = cpu_sleep_native::Registry::new();
     // Native ThreadHandles are not yet wait-many targets. Observe their
     // lifecycle periodically, not by scanning every handle on every RPC.
@@ -319,6 +322,7 @@ fn main() {
             );
         }
         complete_pending_signal_waits(&mut pending_signal_waits, &mut service, &mut processes);
+        callback_waits.observe(&mut service, &mut processes);
         complete_pending_waits(
             &mut pending_waits,
             &mut service,
@@ -916,6 +920,21 @@ fn main() {
                     Ok(_) => None,
                     Err(status) => Some(posix_service::ObjectResponse {
                         response: status_response(header.request_id, status), handles: Vec::new(),
+                    }),
+                }
+            }
+            (Some(peer), Some((header, payload)), true)
+                if header.opcode == protocol::OP_TIMER_THREAD_WAIT =>
+            {
+                let result = request_image.ok_or(protocol::STATUS_EPERM).and_then(|image| {
+                    callback_waits.begin(&mut service, &mut processes, sender, peer,
+                        image, header, payload, &attachments)
+                });
+                match result {
+                    Ok(()) => None,
+                    Err(status) => Some(posix_service::ObjectResponse {
+                        response: status_response(header.request_id, status),
+                        handles: Vec::new(),
                     }),
                 }
             }
