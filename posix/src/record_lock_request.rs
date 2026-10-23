@@ -147,7 +147,7 @@ impl<H: Copy> PosixService<H> {
         filesystem: &mut F,
     ) {
         self.record_lock_files.retain(|(file, object)| {
-            if self.record_locks.has_file(*file) {
+            if self.record_locks.has_file(*file) || self.record_lock_waits.has_file(*file) {
                 true
             } else {
                 filesystem.release_object(*object);

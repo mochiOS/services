@@ -104,6 +104,8 @@ impl<H: Copy> PosixService<H> {
             &mut self.record_locks,
         );
         self.publish_record_lock_state(owner);
+        // No old image's suspended lock call may acquire after replacement.
+        self.record_lock_waits.retire_owner(owner);
         self.reset_image_signals(owner);
         self.process_wait_states
             .get_mut(&owner)

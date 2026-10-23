@@ -89,6 +89,114 @@ fn one_received_reference_pins_a_file_across_owners_and_releases_after_the_last_
 }
 
 #[test]
+fn pending_lock_keeps_the_inode_pin_until_cancel_exec_or_native_exit() {
+    use posix_service::record_lock_wait::Outcome;
+    for retirement in 0..3 {
+        let (mut service, _, first, second, mut fs, mut processes) = orphan_family();
+        let write = request(Operation::Set(Kind::Write));
+        let observed = pending(write, &[object(71, write)], &mut fs);
+        assert_eq!(
+            finish(&mut service, first, observed, Ok(()), &mut fs).1,
+            Some(71)
+        );
+        let status = sample_status();
+        let file = posix_service::record_lock::FileKey {
+            device: status.device,
+            inode: status.inode,
+        };
+        let range = posix_service::record_lock::Range::normalize(0, 0, 0).unwrap();
+        let Outcome::Pending(token) = service
+            .begin_record_lock_wait(second, file, Kind::Read, range)
+            .unwrap()
+        else {
+            panic!()
+        };
+        service.record_locks(first).unwrap().release_file(file);
+        service.release_unused_record_lock_files(&mut fs);
+        assert!(
+            fs.released.is_empty(),
+            "waiting still pins the unlinked inode"
+        );
+        match retirement {
+            0 => service.cancel_record_lock_wait(second, token).unwrap(),
+            1 => {
+                processes.images.insert(
+                    142,
+                    Ok(mnu_abi::ProcessStatus {
+                        process_id: second.process_id,
+                        image_revision: 1,
+                        state: mnu_abi::PROCESS_STATE_RUNNING,
+                        ..Default::default()
+                    }),
+                );
+                service.refresh_image_state(second, &mut processes).unwrap();
+            }
+            _ => {
+                processes
+                    .states
+                    .insert(142, ProcessLifecycle::Exited { exit_code: 0 });
+                // Parent image failure cannot prevent the child's retirement.
+                processes.images.insert(141, Err(protocol::STATUS_EIO));
+                assert_eq!(
+                    service.refresh_child_exit_notifications(&mut processes),
+                    Err(protocol::STATUS_EIO)
+                );
+            }
+        }
+        service.release_unused_record_lock_files(&mut fs);
+        assert_eq!(
+            fs.released
+                .iter()
+                .filter(|item| **item == object(71, write))
+                .count(),
+            1
+        );
+        service.release_unused_record_lock_files(&mut fs);
+        assert_eq!(
+            fs.released
+                .iter()
+                .filter(|item| **item == object(71, write))
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn acquiring_a_pending_lock_hands_pin_lifetime_to_the_new_owner() {
+    use posix_service::record_lock_wait::Outcome;
+    let (mut service, _, first, second, mut fs, _) = orphan_family();
+    let write = request(Operation::Set(Kind::Write));
+    let observed = pending(write, &[object(71, write)], &mut fs);
+    assert_eq!(
+        finish(&mut service, first, observed, Ok(()), &mut fs).1,
+        Some(71)
+    );
+    let status = sample_status();
+    let file = posix_service::record_lock::FileKey {
+        device: status.device,
+        inode: status.inode,
+    };
+    let range = posix_service::record_lock::Range::normalize(0, 0, 0).unwrap();
+    let Outcome::Pending(token) = service
+        .begin_record_lock_wait(second, file, Kind::Read, range)
+        .unwrap()
+    else {
+        panic!()
+    };
+    service.record_locks(first).unwrap().release_file(file);
+    assert_eq!(
+        service.retry_record_lock_wait(second, token),
+        Ok(Outcome::Acquired)
+    );
+    service.release_unused_record_lock_files(&mut fs);
+    assert!(fs.released.is_empty());
+    service.record_locks(second).unwrap().release_file(file);
+    service.release_unused_record_lock_files(&mut fs);
+    assert_eq!(fs.released, [object(71, write)]);
+}
+
+#[test]
 fn insufficient_delegation_and_malformed_frames_never_reach_the_filesystem() {
     let (mut service, _, peer, _, _, _) = orphan_family();
     let write = request(Operation::Set(Kind::Write));

@@ -126,20 +126,41 @@ impl Registry {
     }
 
     fn conflict(&self, owner: u64, file: FileKey, kind: Kind, range: Range) -> Option<Conflict> {
-        self.entries
-            .iter()
-            .filter(|lock| {
-                lock.file == file
-                    && lock.owner != owner
-                    && range.overlaps(lock.range)
-                    && (kind == Kind::Write || lock.kind == Kind::Write)
-            })
+        self.blockers(owner, file, kind, range)
             .min_by_key(|lock| (lock.range.start, lock.owner))
             .map(|lock| Conflict {
                 owner: lock.owner,
                 kind: lock.kind,
                 range: lock.range,
             })
+    }
+
+    pub(super) fn for_each_blocker(
+        &self,
+        owner: u64,
+        file: FileKey,
+        kind: Kind,
+        range: Range,
+        mut visit: impl FnMut(u64),
+    ) {
+        for lock in self.blockers(owner, file, kind, range) {
+            visit(lock.owner);
+        }
+    }
+
+    fn blockers(
+        &self,
+        owner: u64,
+        file: FileKey,
+        kind: Kind,
+        range: Range,
+    ) -> impl Iterator<Item = &Lock> {
+        self.entries.iter().filter(move |lock| {
+            lock.file == file
+                && lock.owner != owner
+                && range.overlaps(lock.range)
+                && (kind == Kind::Write || lock.kind == Kind::Write)
+        })
     }
 
     fn replace(
