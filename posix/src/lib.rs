@@ -378,6 +378,15 @@ pub trait FilesystemBackend<H: Copy> {
         Err(protocol::STATUS_ENOSYS)
     }
 
+    /// Observe the actual device owner after one authenticated path resolution.
+    fn terminal_limits_at(
+        &mut self,
+        _request: &PreparedStat,
+        _paths: PathObjects<H>,
+    ) -> Result<protocol::terminal_limits::Limits, i32> {
+        Err(protocol::STATUS_ENOSYS)
+    }
+
     /// Resolves and reconstructs an existing pathname in one filesystem call.
     fn canonical_path_at(
         &mut self,
@@ -3788,6 +3797,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_STAT_AT
             | protocol::OP_CANONICAL_PATH_AT
             | protocol::OP_PATH_LIMITS_AT
+            | protocol::OP_TERMINAL_LIMITS_AT
             | protocol::OP_FSTAT
             | protocol::OP_ACCESS_AT
             | protocol::OP_CHDIR_AT
@@ -3934,6 +3944,7 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_STAT_AT
                 | protocol::OP_CANONICAL_PATH_AT
                 | protocol::OP_PATH_LIMITS_AT
+                | protocol::OP_TERMINAL_LIMITS_AT
                 | protocol::OP_FSTAT
                 | protocol::OP_ACCESS_AT
                 | protocol::OP_CHDIR_AT
@@ -3981,6 +3992,7 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_STAT_AT
                 | protocol::OP_CANONICAL_PATH_AT
                 | protocol::OP_PATH_LIMITS_AT
+                | protocol::OP_TERMINAL_LIMITS_AT
                 | protocol::OP_ACCESS_AT
                 | protocol::OP_CHDIR_AT
                 | protocol::OP_CHROOT_AT
@@ -4015,6 +4027,7 @@ impl<H: Copy> PosixService<H> {
             }
             protocol::OP_CANONICAL_PATH_AT
             | protocol::OP_PATH_LIMITS_AT
+            | protocol::OP_TERMINAL_LIMITS_AT
             | protocol::OP_STAT_AT
             | protocol::OP_GETCWD
             | protocol::OP_ACCESS_AT

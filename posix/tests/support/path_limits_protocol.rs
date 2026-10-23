@@ -2,6 +2,127 @@ use super::*;
 use mochios_filesystem_protocol::object_limits::Limits;
 
 #[test]
+fn terminal_limits_use_session_credentials_and_return_only_owner_metadata() {
+    let peer = PeerIdentity {
+        process_id: 992,
+        effective_uid: 501,
+        effective_gid: 20,
+    };
+    let mut service = service_for(peer);
+    let mut filesystem = RecordingFilesystem::default();
+    let mut payload = [0; 128];
+    let length = protocol::encode_stat_at(
+        protocol::StatAtRequest {
+            base: protocol::OpenBase::ProcessCwd,
+            flags: 0,
+            path: b"/dev/terminal",
+        },
+        &mut payload,
+    )
+    .unwrap();
+    let response = service.handle_objects(
+        PeerIdentity {
+            effective_uid: 0,
+            effective_gid: 0,
+            ..peer
+        },
+        protocol::Header {
+            opcode: protocol::OP_TERMINAL_LIMITS_AT,
+            request_id: 73,
+            ..Default::default()
+        },
+        &payload[..length],
+        &[],
+        &mut filesystem,
+    );
+    assert_eq!(response.response.header.status, 0);
+    assert!(response.handles.is_empty());
+    assert_eq!(
+        protocol::terminal_limits::Limits::decode(&response.response.payload)
+            .unwrap()
+            .input_bytes,
+        65536
+    );
+    let request = filesystem.stat_request.unwrap();
+    assert_eq!((request.effective_uid, request.effective_gid), (501, 20));
+    assert_eq!(request.path, b"/dev/terminal");
+}
+
+struct TerminalTransport {
+    bytes: Vec<u8>,
+}
+impl Transport for TerminalTransport {
+    type Error = ();
+    fn call(&self, _: &[u8], _: &mut [u8]) -> Result<usize, ()> {
+        panic!("object transport required")
+    }
+}
+impl ObjectTransport for TerminalTransport {
+    type Handle = u32;
+    fn close_received_handle(&self, _: u32) {
+        panic!("no response Handle expected")
+    }
+    fn call_with_handles(
+        &self,
+        request: &[u8],
+        output: &mut [u8],
+        handles: &mut ObjectHandles<u32>,
+    ) -> Result<usize, ()> {
+        let (header, payload) = protocol::decode(request).unwrap();
+        assert_eq!(header.opcode, protocol::OP_TERMINAL_LIMITS_AT);
+        let request = protocol::decode_stat_at(payload).unwrap();
+        assert_eq!(request.base, protocol::OpenBase::AttachedDirectory);
+        assert_eq!(request.flags, 0);
+        assert_eq!(request.path, b"terminal-\xff");
+        assert_eq!(handles.len(), 1);
+        assert_eq!(handles.get(0).unwrap().handle, 19);
+        handles.clear();
+        protocol::encode(
+            protocol::Header {
+                opcode: protocol::OP_STATUS,
+                request_id: header.request_id,
+                payload_len: self.bytes.len() as u32,
+                ..Default::default()
+            },
+            &self.bytes,
+            output,
+        )
+        .map_err(|_| ())
+    }
+}
+
+#[test]
+fn client_terminal_limits_preserve_directory_authority_and_validate_the_reply() {
+    let expected = protocol::terminal_limits::Limits {
+        canonical_bytes: 511,
+        input_bytes: 1024,
+        disabled_character: 255,
+    };
+    let mut malformed = expected.encode();
+    malformed[10] = 1;
+    for bytes in [
+        vec![],
+        expected.encode()[..11].to_vec(),
+        malformed.to_vec(),
+        expected.encode().to_vec(),
+    ] {
+        let valid = bytes == expected.encode();
+        let result = Client::new(TerminalTransport { bytes }).terminal_limits_at(
+            mochios_posix_client::StatAtBase::Directory(ObjectHandleAttachment {
+                handle: 19,
+                rights: mnu_abi::HANDLE_RIGHT_TRANSFER,
+            }),
+            b"terminal-\xff",
+        );
+        if valid {
+            assert_eq!(result.unwrap(), expected);
+        } else {
+            assert!(result.is_err());
+        }
+    }
+}
+
+#[test]
 fn limits_request_uses_stored_identity_not_peer_claims() {
     let peer = PeerIdentity {
         process_id: 991,

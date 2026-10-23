@@ -4063,3 +4063,6 @@ mod trailing_creation;
 
 #[path = "support/object_limits.rs"]
 mod object_limits;
+
+#[path = "support/device_observation_path.rs"]
+mod device_observation_path;

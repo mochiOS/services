@@ -547,6 +547,29 @@ impl DeviceFilesystem {
         NullDescription::new(read, write, flags)
     }
 
+    /// Observe the owner of a retained node after authenticated path traversal.
+    /// This creates no open and requires no final-component data permission.
+    pub fn observe_external(
+        &self,
+        node: &Node,
+        request: protocol::device_observation::Request,
+    ) -> Result<Vec<u8>, i32> {
+        self.validate(node)?;
+        protocol::device_observation::Request::decode(&request.encode())
+            .map_err(|status| -status)?;
+        if node.kind() != NodeKind::External {
+            return Err(95);
+        }
+        // Retain the registered owner, not the name. No final-component data
+        // permission is needed after the caller's namespace search succeeds.
+        let factory = node.record.external.as_ref().ok_or(5)?.factory.clone();
+        let bytes = factory.observe(request)?;
+        if bytes.len() > request.capacity as usize {
+            return Err(5);
+        }
+        Ok(bytes)
+    }
+
     /// Namespace traversal and native capability admission precede this call.
     /// Node owner, mode, uid/gid/groups and access mode are checked before the
     /// factory is exposed through the admitted open; no factory RPC occurs here.

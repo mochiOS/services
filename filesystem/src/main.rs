@@ -331,6 +331,7 @@ fn main() {
                     protocol::OP_STAT_AT
                         | protocol::OP_CANONICAL_PATH_AT
                         | protocol::OP_OBJECT_LIMITS_AT
+                        | protocol::OP_DEVICE_OBSERVATION_AT
                 ) {
                     let anchors = decode_path_anchors(
                         header.flags,
@@ -343,6 +344,9 @@ fn main() {
                         .and_then(|(credentials, payload)| {
                             anchors.and_then(|anchors| {
                                 match header.opcode {
+                                    protocol::OP_DEVICE_OBSERVATION_AT => {
+                                        service.device_observation_at(header, payload, anchors, credentials)
+                                    }
                                     protocol::OP_CANONICAL_PATH_AT => {
                                         service.canonical_path_at(header, payload, anchors, credentials)
                                     }

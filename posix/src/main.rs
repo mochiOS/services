@@ -3554,6 +3554,47 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         filesystem::object_limits::Limits::decode(&bytes).ok_or(-5)
     }
 
+    fn terminal_limits_at(
+        &mut self,
+        request: &posix_service::PreparedStat,
+        paths: posix_service::PathObjects<mochi_user_platform::handle::Handle>,
+    ) -> Result<mochios_posix_protocol::terminal_limits::Limits, i32> {
+        use mochios_filesystem_protocol as filesystem;
+        let flags = filesystem::STAT_AT_ROOT_ATTACHED
+            | if paths.base.is_some() {
+                filesystem::STAT_AT_BASE_ATTACHED
+            } else {
+                0
+            };
+        let handles = Self::path_handles(paths)?;
+        let mut body = filesystem::device_observation::Request {
+            selector: mochios_posix_protocol::PTY_QUERY_LIMITS,
+            capacity: mochios_posix_protocol::terminal_limits::RESPONSE_LEN as u32,
+        }
+        .encode()
+        .to_vec();
+        body.extend_from_slice(&request.path);
+        let payload = Self::credential_payload(
+            request.effective_uid,
+            request.effective_gid,
+            &request.supplementary_groups,
+            &body,
+        )?;
+        let bytes = self.payload_call(
+            filesystem::Header {
+                opcode: filesystem::OP_DEVICE_OBSERVATION_AT,
+                request_id: 22,
+                flags,
+                length: payload.len() as u32,
+                ..Default::default()
+            },
+            &payload,
+            handles,
+        )
+        .map_err(|status| if status == -95 { -22 } else { status })?;
+        mochios_posix_protocol::terminal_limits::Limits::decode(&bytes).map_err(|_| -5)
+    }
+
     fn canonical_path_at(
         &mut self,
         request: &posix_service::PreparedStat,

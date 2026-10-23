@@ -400,6 +400,22 @@ impl Namespace {
         }
     }
 
+    /// A retained namespace Node selects the owner after the caller has checked
+    /// authenticated root/base traversal. Never re-resolve its pathname here.
+    pub fn observe_external_device(
+        &self,
+        node: &Node,
+        request: protocol::device_observation::Request,
+    ) -> Result<Vec<u8>, i32> {
+        self.validate(node)?;
+        match (self.volumes.get(node.volume as usize), &node.backing) {
+            (Some(Volume::Device(filesystem)), NodeBacking::Device(device)) => {
+                filesystem.observe_external(device, request)
+            }
+            _ => Err(95),
+        }
+    }
+
     /// Service-internal credentials must already be authenticated. A retained
     /// namespace Node, not a numeric inode or a path prefix, selects the device.
     pub fn open_external_device(

@@ -1,8 +1,9 @@
 use super::*;
 use std::sync::{Arc, Mutex};
 
-const QUERIES: [u16; 5] = [
+const QUERIES: [u16; 6] = [
     protocol::OP_PATH_LIMITS_AT,
+    protocol::OP_TERMINAL_LIMITS_AT,
     protocol::OP_STAT_AT,
     protocol::OP_CANONICAL_PATH_AT,
     protocol::OP_ACCESS_AT,
@@ -93,6 +94,14 @@ fn all_readonly_queries_run_root_and_backend_rpc_without_state_lock() {
                         .unwrap()
                         .name_bytes_max,
                     255
+                );
+            }
+            protocol::OP_TERMINAL_LIMITS_AT => {
+                assert_eq!(
+                    protocol::terminal_limits::Limits::decode(&response.response.payload)
+                        .unwrap()
+                        .canonical_bytes,
+                    65536
                 );
             }
             protocol::OP_CANONICAL_PATH_AT => {
@@ -274,6 +283,7 @@ fn malformed_queries_never_initialize_roots_or_call_the_backend() {
     for opcode in [
         protocol::OP_CANONICAL_PATH_AT,
         protocol::OP_PATH_LIMITS_AT,
+        protocol::OP_TERMINAL_LIMITS_AT,
         protocol::OP_READLINK_AT,
     ] {
         let (header, payload) = request(

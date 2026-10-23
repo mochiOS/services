@@ -3,6 +3,7 @@
 #undef main
 #include <stdint.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <termios.h>
 
@@ -56,6 +57,9 @@ static int observations(int mode, const char *name,
   CHECK(fpathconf(fd, _PC_MAX_CANON) == 65536 && errno == 123);
   CHECK(fpathconf(fd, _PC_MAX_INPUT) == 65536 && errno == 123);
   CHECK(fpathconf(fd, _PC_VDISABLE) == 0 && errno == 123);
+  CHECK(pathconf(name, _PC_MAX_CANON) == 65536 && errno == 123);
+  CHECK(pathconf(name, _PC_MAX_INPUT) == 65536 && errno == 123);
+  CHECK(pathconf(name, _PC_VDISABLE) == 0 && errno == 123);
   if (mode != O_WRONLY) {
     int baseline = snapshot(prior);
     int alias = dup(fd);
@@ -150,6 +154,36 @@ int main(void) {
   CHECK(fpathconf(nonterminal, _PC_MAX_CANON) == -1 && errno == EINVAL);
   CHECK(close(nonterminal) == 0);
   CHECK(fpathconf(-1, _PC_MAX_CANON) == -1 && errno == EBADF);
+  CHECK(pathconf("/dev/null", _PC_MAX_CANON) == -1 && errno == EINVAL);
+  CHECK(pathconf("/missing-terminal", _PC_MAX_CANON) == -1 && errno == ENOENT);
+  CHECK(pathconf((const char *)(uintptr_t)1, _PC_MAX_CANON) == -1 &&
+        errno == EFAULT);
+  CHECK(chmod(name, 0) == 0);
+  pid_t observer = fork();
+  CHECK(observer >= 0);
+  if (observer == 0) {
+    char inside[64];
+    const char *leaf = strrchr(name, '/');
+    if (!leaf || snprintf(inside, sizeof(inside), "/%s", leaf + 1) <= 0 ||
+        chroot("/dev/pts") != 0 || chdir("/") != 0 || setuid(501) != 0)
+      _exit(51);
+    errno = 121;
+    if (pathconf(inside, _PC_MAX_CANON) != 65536 || errno != 121 ||
+        pathconf(inside, _PC_MAX_INPUT) != 65536 || errno != 121 ||
+        pathconf(inside, _PC_VDISABLE) != 0 || errno != 121)
+      _exit(52);
+    if (open(inside, O_RDONLY | O_NOCTTY) != -1 || errno != EACCES)
+      _exit(53);
+    if (pathconf(name, _PC_MAX_CANON) != -1 || errno != ENOENT)
+      _exit(54);
+    _exit(0);
+  }
+  int observed_status;
+  CHECK(waitpid(observer, &observed_status, 0) == observer &&
+        WIFEXITED(observed_status) && WEXITSTATUS(observed_status) == 0);
+  CHECK(chmod(name, 0600) == 0);
+  fprintf(stderr, "terminal-observation: PASS pathname owner query needs no "
+                  "data permission for mode 000 terminal inside chroot\n");
   pid_t child = fork();
   CHECK(child >= 0);
   if (child == 0) {

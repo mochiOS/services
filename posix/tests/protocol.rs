@@ -1780,6 +1780,20 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         })
     }
 
+    fn terminal_limits_at(
+        &mut self,
+        request: &PreparedStat,
+        paths: PathObjects<u32>,
+    ) -> Result<protocol::terminal_limits::Limits, i32> {
+        if let Some(hook) = &mut self.query_hook {
+            hook()?;
+        }
+        self.stat_request = Some(request.clone());
+        self.root = Some(paths.root);
+        self.directory = paths.base;
+        Ok(protocol::terminal_limits::Limits { canonical_bytes: 65536, input_bytes: 65536, disabled_character: 0 })
+    }
+
     fn canonical_path_at(
         &mut self,
         request: &PreparedStat,

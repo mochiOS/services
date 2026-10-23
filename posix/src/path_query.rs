@@ -9,6 +9,7 @@ enum Query {
     Stat(PreparedStat),
     Canonical(PreparedStat),
     Limits(PreparedStat),
+    TerminalLimits(PreparedStat),
     Access(PreparedAccess),
     Readlink(PreparedReadlink),
 }
@@ -20,6 +21,7 @@ pub fn supports(opcode: u16) -> bool {
             | protocol::OP_GETCWD
             | protocol::OP_CANONICAL_PATH_AT
             | protocol::OP_PATH_LIMITS_AT
+            | protocol::OP_TERMINAL_LIMITS_AT
             | protocol::OP_ACCESS_AT
             | protocol::OP_READLINK_AT
     )
@@ -42,17 +44,24 @@ fn prepare<H: Copy>(
             }
             Ok((Query::Cwd, protocol::OpenBase::ProcessCwd))
         }
-        protocol::OP_STAT_AT | protocol::OP_CANONICAL_PATH_AT | protocol::OP_PATH_LIMITS_AT => {
+        protocol::OP_STAT_AT
+        | protocol::OP_CANONICAL_PATH_AT
+        | protocol::OP_PATH_LIMITS_AT
+        | protocol::OP_TERMINAL_LIMITS_AT => {
             let prepared = service.prepare_stat_at(peer, payload, count)?;
             let base = prepared.base;
             let query = if matches!(
                 opcode,
-                protocol::OP_CANONICAL_PATH_AT | protocol::OP_PATH_LIMITS_AT
+                protocol::OP_CANONICAL_PATH_AT
+                    | protocol::OP_PATH_LIMITS_AT
+                    | protocol::OP_TERMINAL_LIMITS_AT
             ) {
                 if prepared.flags != 0 {
                     return Err(STATUS_EINVAL);
                 }
-                if opcode == protocol::OP_PATH_LIMITS_AT {
+                if opcode == protocol::OP_TERMINAL_LIMITS_AT {
+                    Query::TerminalLimits(prepared)
+                } else if opcode == protocol::OP_PATH_LIMITS_AT {
                     Query::Limits(prepared)
                 } else {
                     Query::Canonical(prepared)
@@ -134,6 +143,9 @@ fn run<H: Copy, F: FilesystemBackend<H>>(
             .map(|path| object_payload(request_id, path)),
         Query::Limits(prepared) => filesystem
             .path_limits_at(prepared, paths)
+            .map(|limits| object_payload(request_id, limits.encode().to_vec())),
+        Query::TerminalLimits(prepared) => filesystem
+            .terminal_limits_at(prepared, paths)
             .map(|limits| object_payload(request_id, limits.encode().to_vec())),
         Query::Access(prepared) => filesystem
             .access_at(prepared, paths)
