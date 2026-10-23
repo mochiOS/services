@@ -3,6 +3,38 @@
 use super::*;
 
 impl<H: Copy> PosixService<H> {
+    pub(super) fn process_clock_target<P: ProcessBackend<H>>(
+        &self,
+        peer: PeerIdentity,
+        target: u64,
+        processes: &mut P,
+    ) -> Result<H, i32> {
+        let caller = self
+            .sessions
+            .get(&peer.process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        if !self.processes.contains_key(&peer.process_id) {
+            return Err(protocol::STATUS_ESRCH);
+        }
+        let subject = self.sessions.get(&target).ok_or(protocol::STATUS_ESRCH)?;
+        if peer.process_id != target
+            && caller.effective_uid != 0
+            && ![subject.real_uid, subject.effective_uid].contains(&caller.effective_uid)
+            && ![subject.real_uid, subject.effective_uid].contains(&caller.real_uid)
+        {
+            return Err(protocol::STATUS_EPERM);
+        }
+        let handle = *self.processes.get(&target).ok_or(protocol::STATUS_ESRCH)?;
+        if self
+            .process_wait_states
+            .get(&target)
+            .is_some_and(|state| state.exit_observed)
+            || matches!(processes.status(handle)?, ProcessLifecycle::Exited { .. })
+        {
+            return Err(protocol::STATUS_ESRCH);
+        }
+        Ok(handle)
+    }
     pub fn handle_process_clock<P: ProcessBackend<H>>(
         &self,
         peer: PeerIdentity,
@@ -21,30 +53,7 @@ impl<H: Copy> PosixService<H> {
             }
             let target = protocol::process_clock::target(payload).map_err(|_| STATUS_EINVAL)?;
             let target = if target == 0 { peer.process_id } else { target };
-            let caller = self
-                .sessions
-                .get(&peer.process_id)
-                .ok_or(protocol::STATUS_ESRCH)?;
-            if !self.processes.contains_key(&peer.process_id) {
-                return Err(protocol::STATUS_ESRCH);
-            }
-            let subject = self.sessions.get(&target).ok_or(protocol::STATUS_ESRCH)?;
-            if peer.process_id != target
-                && caller.effective_uid != 0
-                && ![subject.real_uid, subject.effective_uid].contains(&caller.effective_uid)
-                && ![subject.real_uid, subject.effective_uid].contains(&caller.real_uid)
-            {
-                return Err(protocol::STATUS_EPERM);
-            }
-            let handle = *self.processes.get(&target).ok_or(protocol::STATUS_ESRCH)?;
-            if self
-                .process_wait_states
-                .get(&target)
-                .is_some_and(|state| state.exit_observed)
-                || matches!(processes.status(handle)?, ProcessLifecycle::Exited { .. })
-            {
-                return Err(protocol::STATUS_ESRCH);
-            }
+            let handle = self.process_clock_target(peer, target, processes)?;
             let usage = processes.execution_usage(handle)?;
             if usage.ticks_per_second == 0 || usage.reserved != 0 {
                 return Err(protocol::STATUS_EIO);

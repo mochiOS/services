@@ -4,9 +4,37 @@ use super::*;
 use process_timer::{Clock, Samples};
 use process_timer_request::{ClockBackend, Reading};
 
+fn sample(clock: Clock, reading: Reading) -> Result<Samples, i32> {
+    let mut samples = Samples {
+        realtime_ns: 0,
+        monotonic_ns: 0,
+        process_cpu_ns: 0,
+        thread_cpu_ns: 0,
+    };
+    match (clock, reading) {
+        (Clock::Realtime, Reading::Realtime(value)) => samples.realtime_ns = value,
+        (Clock::Monotonic, Reading::Counter(value)) => samples.monotonic_ns = value,
+        (Clock::ProcessCpu, Reading::Counter(value)) => samples.process_cpu_ns = value,
+        (Clock::ThreadCpu, Reading::Counter(value)) => samples.thread_cpu_ns = value,
+        _ => return Err(protocol::STATUS_EIO),
+    }
+    Ok(samples)
+}
+
 pub const OBSERVATION_INTERVAL_MS: u64 = 10;
 
 impl<H: Copy> PosixService<H> {
+    pub(super) fn retire_process_clock_targets(&mut self, subject: u64) {
+        self.process_timers.retire_process_target(subject);
+        // Retirement may remove the last pending timer event of a different
+        // owner. Preserve its unrelated ordinary/timer signal notifications.
+        self.signal_notifications.retain(|owner| {
+            self.signals
+                .get(owner)
+                .is_some_and(|state| state.pending() != 0)
+                || self.process_timers.pending_signal_mask(*owner) != 0
+        });
+    }
     /// Apply generation side effects without copying timer events into the
     /// coalesced ordinary-signal slot. Call once per new timer pending event.
     pub(super) fn notify_timer_signal(&mut self, owner: u64, signal: u32) -> Result<(), i32> {
@@ -71,7 +99,7 @@ impl<H: Copy> PosixService<H> {
         self.process_timers.has_observable()
     }
 
-    /// Cache each requested clock once per owner. A bad owner/clock does not
+    /// Cache each requested clock/subject once per owner. A bad owner/clock does not
     /// consume its expiration or prevent independent timers from advancing.
     /// Revalidate the native image after sampling and before policy mutation.
     pub fn observe_process_timers<B: ClockBackend<H>>(
@@ -96,111 +124,39 @@ impl<H: Copy> PosixService<H> {
                 }
                 let image = self.capture_request_image(peer)?;
                 let process = *self.processes.get(&owner).ok_or(protocol::STATUS_ESRCH)?;
-                let mut samples = Samples {
-                    realtime_ns: 0,
-                    monotonic_ns: 0,
-                    process_cpu_ns: 0,
-                    thread_cpu_ns: 0,
-                };
-                let mut thread_samples = Vec::new();
-                thread_samples
-                    .try_reserve_exact(
-                        group
-                            .iter()
-                            .filter(|entry| entry.2 == Clock::ThreadCpu)
-                            .count(),
-                    )
+                // Cache by clock and admitted subject, not notification owner
+                // alone. Legacy and selected-self process clocks share a key.
+                let mut readings = Vec::new();
+                readings
+                    .try_reserve_exact(group.len())
                     .map_err(|_| protocol::STATUS_ENOMEM)?;
-                let clocks = [Clock::Realtime, Clock::Monotonic, Clock::ProcessCpu];
-                let mut available = [false; 3];
                 let mut first_error = None;
                 for &(_, id, clock) in group {
-                    if clock != Clock::ThreadCpu {
+                    let target = self.process_timers(peer)?.clock_target(id)?;
+                    if readings
+                        .iter()
+                        .any(|(kind, subject, _)| *kind == clock && *subject == target)
+                    {
                         continue;
                     }
-                    let thread = self
-                        .process_timers(peer)?
-                        .clock_thread(id)?
-                        .ok_or(protocol::STATUS_EIO)?;
-                    if thread_samples.iter().any(|(target, _)| *target == thread) {
-                        continue;
-                    }
-                    let reading = backend
-                        .timer_thread_clock(process, thread)
-                        .and_then(|reading| match reading {
-                            Reading::Counter(value) => Ok(value),
-                            _ => Err(protocol::STATUS_EIO),
-                        });
+                    let reading = self
+                        .read_timer_clock(peer, process, clock, target, backend)
+                        .and_then(|reading| sample(clock, reading));
                     if let Err(error) = reading {
                         first_error.get_or_insert(error);
                     }
-                    thread_samples.push((thread, reading));
-                }
-                for (index, clock) in clocks.into_iter().enumerate() {
-                    if !group.iter().any(|&(_, _, basis)| basis == clock) {
-                        continue;
-                    }
-                    let result = backend.timer_clock(process, clock).and_then(|reading| {
-                        match (clock, reading) {
-                            (Clock::Realtime, Reading::Realtime(value)) => {
-                                samples.realtime_ns = value
-                            }
-                            (Clock::Monotonic, Reading::Counter(value)) => {
-                                samples.monotonic_ns = value
-                            }
-                            (Clock::ProcessCpu, Reading::Counter(value)) => {
-                                samples.process_cpu_ns = value
-                            }
-                            _ => return Err(protocol::STATUS_EIO),
-                        }
-                        Ok(())
-                    });
-                    match result {
-                        Ok(()) => available[index] = true,
-                        Err(error) => {
-                            first_error.get_or_insert(error);
-                        }
-                    }
+                    readings.push((clock, target, reading));
                 }
                 self.validate_request_image(peer, image, backend)?;
                 for &(_, id, clock) in group {
-                    let index = match clock {
-                        Clock::Realtime => 0,
-                        Clock::Monotonic => 1,
-                        Clock::ProcessCpu => 2,
-                        Clock::ThreadCpu => {
-                            let thread = self
-                                .process_timers(peer)?
-                                .clock_thread(id)?
-                                .ok_or(protocol::STATUS_EIO)?;
-                            let Some((_, Ok(value))) =
-                                thread_samples.iter().find(|(target, _)| *target == thread)
-                            else {
-                                continue;
-                            };
-                            let mut per_thread = samples;
-                            per_thread.thread_cpu_ns = *value;
-                            match self
-                                .process_timers(peer)?
-                                .observe_new_signal(id, per_thread)
-                            {
-                                Ok(signal) => {
-                                    observed += 1;
-                                    if let Some(signal) = signal {
-                                        self.notify_timer_signal(owner, signal)?;
-                                    }
-                                }
-                                Err(error) => {
-                                    first_error.get_or_insert(error);
-                                }
-                            }
-                            continue;
-                        }
-                    };
-                    if !available[index] {
+                    let target = self.process_timers(peer)?.clock_target(id)?;
+                    let Some((_, _, Ok(samples))) = readings
+                        .iter()
+                        .find(|(kind, subject, _)| *kind == clock && *subject == target)
+                    else {
                         continue;
-                    }
-                    match self.process_timers(peer)?.observe_new_signal(id, samples) {
+                    };
+                    match self.process_timers(peer)?.observe_new_signal(id, *samples) {
                         Ok(signal) => {
                             observed += 1;
                             if let Some(signal) = signal {

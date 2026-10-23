@@ -12,6 +12,8 @@ mod creation;
 mod delivery;
 #[path = "process_timer_dequeue.rs"]
 mod dequeue;
+#[path = "process_timer_process.rs"]
+mod process;
 #[path = "process_timer_thread.rs"]
 mod thread;
 #[path = "process_timer_wait.rs"]
@@ -22,6 +24,7 @@ mod wake;
 struct Clocks {
     samples: Samples,
     reads: Vec<(u32, Clock)>,
+    process_samples: Vec<(u32, u128)>,
     thread_samples: Vec<(u32, u64, u128)>,
     thread_reads: Vec<(u32, u64)>,
     fail: bool,
@@ -32,7 +35,7 @@ struct Clocks {
 thread_local! {
     static CLOCKS: RefCell<Clocks> = const { RefCell::new(Clocks {
         samples: Samples { realtime_ns: 1_000, monotonic_ns: 10, process_cpu_ns: 2, thread_cpu_ns: 0 },
-        reads: Vec::new(), thread_samples: Vec::new(), thread_reads: Vec::new(),
+        reads: Vec::new(), process_samples: Vec::new(), thread_samples: Vec::new(), thread_reads: Vec::new(),
         fail: false, fail_clock: None, fail_owner: None, exec: false,
     }) };
 }
@@ -108,7 +111,13 @@ impl ClockBackend<u32> for RecordingProcesses {
             Ok(match clock {
                 Clock::Realtime => Reading::Realtime(control.samples.realtime_ns),
                 Clock::Monotonic => Reading::Counter(control.samples.monotonic_ns),
-                Clock::ProcessCpu => Reading::Counter(control.samples.process_cpu_ns),
+                Clock::ProcessCpu => Reading::Counter(
+                    control
+                        .process_samples
+                        .iter()
+                        .find(|(owner, _)| *owner == process)
+                        .map_or(control.samples.process_cpu_ns, |(_, value)| *value),
+                ),
                 Clock::ThreadCpu => panic!("thread clocks require a retained target"),
             })
         })
@@ -156,7 +165,10 @@ impl ObjectTransport for TimerTransport {
             .refresh_image_state(self.peer, processes)
             .map_err(|_| ())?;
         let image = service.capture_request_image(self.peer).unwrap();
-        let mut reply = if header.opcode == protocol::OP_TIMER_CREATE {
+        let mut reply = if matches!(
+            header.opcode,
+            protocol::OP_TIMER_CREATE | protocol::OP_TIMER_CREATE_PROCESS_CPU
+        ) {
             let mut created = Vec::with_capacity(8);
             let result = service.create_process_timer_with_reply(
                 self.peer,
@@ -226,6 +238,7 @@ fn setup() -> (Client<TimerTransport>, Rc<RefCell<Environment>>) {
                 thread_cpu_ns: 0,
             },
             reads: Vec::new(),
+            process_samples: Vec::new(),
             thread_samples: vec![(2901, 17, 2), (2901, 18, 50)],
             thread_reads: Vec::new(),
             fail: false,

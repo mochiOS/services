@@ -71,8 +71,8 @@ fn main(){
     probe::run(&program);
     let branch = probe::between(
         main,
-        "if header.opcode == protocol::OP_TIMER_CREATE =>",
-        "if matches!(header.opcode,",
+        "if matches!(header.opcode, protocol::OP_TIMER_CREATE | protocol::OP_TIMER_CREATE_PROCESS_CPU) =>",
+        "protocol::OP_TIMER_DELETE",
     );
     assert!(branch.contains("service.create_process_timer_with_reply("));
     assert!(branch.contains("|id| reply_timer_created(sender, header.request_id, id)"));

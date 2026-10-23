@@ -893,7 +893,7 @@ fn main() {
                 ))
             }
             (Some(peer), Some((header, payload)), true)
-                if header.opcode == protocol::OP_TIMER_CREATE =>
+                if matches!(header.opcode, protocol::OP_TIMER_CREATE | protocol::OP_TIMER_CREATE_PROCESS_CPU) =>
             {
                 let result = request_image
                     .ok_or(protocol::STATUS_EPERM)

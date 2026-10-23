@@ -107,6 +107,7 @@ fn map_posix_client_error(error: c_int) -> c_int {
 
 #[derive(Default)]
 struct Rpc {
+    process_creates: Vec<u64>,
     next: u64,
     objects: Vec<u64>,
     creates: Vec<(Clock, Notification)>,
@@ -119,6 +120,7 @@ struct Rpc {
     overrun: u32,
 }
 static RPC: Mutex<Rpc> = Mutex::new(Rpc {
+    process_creates: Vec::new(),
     next: 100,
     objects: Vec::new(),
     creates: Vec::new(),
@@ -143,6 +145,10 @@ fn rpc() -> MutexGuard<'static, Rpc> {
     RPC.lock().unwrap()
 }
 impl FakeClient {
+    fn timer_create_for_process(&self, pid: u64, notification: Notification) -> Result<u64, c_int> {
+        rpc().process_creates.push(pid);
+        self.timer_create(Clock::ProcessCpu, notification)
+    }
     fn timer_create_for_thread(
         &self,
         handle: u32,
@@ -406,6 +412,25 @@ fn newlib_thread_clock_id_maps_to_thread_bound_timer_without_serializing_identit
     );
     assert_ne!(id, 0);
     assert_eq!(implementation::timer_delete(id), 0);
+}
+
+#[test]
+fn selected_process_clock_is_sent_as_a_subject_without_a_thread_handle() {
+    let _serial = reset();
+    let event = event(1, 0, 0);
+    let mut timer = 0;
+    let clock = mochios_posix_client::process_clock::clock_id(71).unwrap();
+    assert_eq!(
+        implementation::timer_create(clock, event.as_ptr().cast(), &mut timer),
+        0
+    );
+    assert_eq!(RPC.lock().unwrap().process_creates, [71]);
+    assert_eq!(
+        RPC.lock().unwrap().creates,
+        [(Clock::ProcessCpu, Notification::None)]
+    );
+    assert!(!TARGET_PINNED.load(Ordering::Acquire));
+    assert_eq!(implementation::timer_delete(timer), 0);
 }
 
 #[test]

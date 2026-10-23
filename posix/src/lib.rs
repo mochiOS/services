@@ -1250,6 +1250,7 @@ impl<H: Copy> PosixService<H> {
                     && !self.real_timers.contains_key(child_id)
                     && !self.has_cpu_timer_state(*child_id)
                     && !self.process_timers.has_owner(*child_id)
+                    && !self.process_timers.observes_process(*child_id)
                 {
                     return None;
                 }
@@ -1331,6 +1332,7 @@ impl<H: Copy> PosixService<H> {
         self.real_timers.remove(&process_id);
         self.cpu_timers.retain(|&(owner, _), _| owner != process_id);
         self.process_timers.retire_owner(process_id);
+        self.retire_process_clock_targets(process_id);
         self.resource_policies.retain(|(owner, _)| *owner != process_id);
         self.hangup_exited_controlling_process(process_id)?;
         self.process_wait_states
@@ -1579,7 +1581,8 @@ impl<H: Copy> PosixService<H> {
                         || self.controlling_terminals.contains_key(child_id)
                         || (!state.exit_observed && (self.real_timers.contains_key(child_id)
                             || self.has_cpu_timer_state(*child_id)
-                            || self.process_timers.has_owner(*child_id))) =>
+                            || self.process_timers.has_owner(*child_id)
+                            || self.process_timers.observes_process(*child_id))) =>
                 {
                     self.processes.get(child_id).copied()
                 }
@@ -2255,6 +2258,7 @@ impl<H: Copy> PosixService<H> {
         self.real_timers.remove(&child_id);
         self.cpu_timers.retain(|&(owner, _), _| owner != child_id);
         self.process_timers.retire_owner(child_id);
+        self.retire_process_clock_targets(child_id);
         if let Some(directories) = self.directories.remove(&child_id) {
             filesystem.release_object(directories.root);
             filesystem.release_object(directories.cwd);
@@ -3750,6 +3754,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_FORK_CANCEL
             | protocol::OP_RESOURCE_POLICY
             | protocol::OP_PROCESS_CPU_CLOCK
+            | protocol::OP_TIMER_CREATE_PROCESS_CPU
             | protocol::OP_PROCESS_SPAWNED
             | protocol::OP_PROCESS_SESSION_INFO
             | protocol::OP_PROCESS_LAUNCHED

@@ -2,7 +2,7 @@
 //! owner. A WAIT Thread Handle may select a clock in the authenticated owner.
 //! Backends perform native observations only, never provider RPC.
 use super::*;
-use process_timer::{Clock, Samples};
+use process_timer::{Clock, Samples, Target};
 use protocol::process_timer as wire;
 
 #[derive(Clone, Copy, Debug)]
@@ -38,7 +38,7 @@ pub fn cpu_nanoseconds(usage: mnu_abi::ProcessExecutionUsage) -> Result<u128, i3
 
 #[derive(Clone, Copy)]
 enum Request {
-    Create(Clock, wire::Notification),
+    Create(Clock, wire::Notification, Option<u64>),
     Delete(u64),
     Get(u64),
     Set(u64, bool, wire::Value),
@@ -49,6 +49,7 @@ fn decode(header: protocol::Header, payload: &[u8]) -> Result<Request, i32> {
     if !matches!(
         header.opcode,
         protocol::OP_TIMER_CREATE
+            | protocol::OP_TIMER_CREATE_PROCESS_CPU
             | protocol::OP_TIMER_DELETE
             | protocol::OP_TIMER_GET
             | protocol::OP_TIMER_SET
@@ -63,7 +64,11 @@ fn decode(header: protocol::Header, payload: &[u8]) -> Result<Request, i32> {
     Ok(match header.opcode {
         protocol::OP_TIMER_CREATE => {
             let (clock, notification) = wire::decode_create(payload).map_err(invalid)?;
-            Request::Create(clock, notification)
+            Request::Create(clock, notification, None)
+        }
+        protocol::OP_TIMER_CREATE_PROCESS_CPU => {
+            let (pid, notification) = wire::decode_process_create(payload).map_err(invalid)?;
+            Request::Create(Clock::ProcessCpu, notification, Some(pid))
         }
         protocol::OP_TIMER_SET => {
             let (id, absolute, value) = wire::decode_set(payload).map_err(invalid)?;
@@ -90,7 +95,8 @@ impl<H: Copy> PosixService<H> {
         backend: &mut B,
         reply: impl FnOnce(u64) -> bool,
     ) -> Result<bool, i32> {
-        let Request::Create(clock, notification) = decode(header, payload)? else {
+        let Request::Create(clock, notification, selected_process) = decode(header, payload)?
+        else {
             return Err(protocol::STATUS_ENOSYS);
         };
         if !attachments.is_empty()
@@ -106,6 +112,7 @@ impl<H: Copy> PosixService<H> {
             sender,
             clock,
             notification,
+            selected_process,
             attachments.first(),
             backend,
         )?;
@@ -120,15 +127,31 @@ impl<H: Copy> PosixService<H> {
         sender: Option<mnu_abi::ExecutionIdentity>,
         clock: Clock,
         notification: wire::Notification,
+        selected_process: Option<u64>,
         attachment: Option<&AttachedObject<H>>,
         backend: &mut B,
-    ) -> Result<Option<u64>, i32> {
+    ) -> Result<Target, i32> {
         if matches!(notification, wire::Notification::Thread { .. }) {
             return Err(protocol::STATUS_ENOSYS);
         }
         self.validate_request_image(peer, image, backend)?;
+        if let Some(pid) = selected_process {
+            let process = self.process_clock_target(peer, pid, backend)?;
+            if !matches!(
+                backend.timer_clock(process, Clock::ProcessCpu)?,
+                Reading::Counter(_)
+            ) {
+                return Err(protocol::STATUS_EIO);
+            }
+            self.validate_request_image(peer, image, backend)?;
+            return Ok(if pid == peer.process_id {
+                Target::Owner
+            } else {
+                Target::Process(pid)
+            });
+        }
         if clock != Clock::ThreadCpu {
-            return Ok(None);
+            return Ok(Target::Owner);
         }
         let process = *self
             .processes
@@ -151,7 +174,32 @@ impl<H: Copy> PosixService<H> {
             return Err(protocol::STATUS_EIO);
         }
         self.validate_request_image(peer, image, backend)?;
-        Ok(Some(target))
+        Ok(Target::Thread(target))
+    }
+
+    /// Every clock read uses a retained service object. A selected process
+    /// shares its CPU lifetime across exec; it never becomes the timer owner.
+    pub(super) fn read_timer_clock<B: ClockBackend<H>>(
+        &self,
+        peer: PeerIdentity,
+        process: H,
+        clock: Clock,
+        target: Target,
+        backend: &mut B,
+    ) -> Result<Reading, i32> {
+        match (clock, target) {
+            (Clock::ThreadCpu, Target::Thread(thread)) => {
+                backend.timer_thread_clock(process, thread)
+            }
+            (Clock::ProcessCpu, Target::Process(pid)) => {
+                let subject = self.process_clock_target(peer, pid, backend)?;
+                backend.timer_clock(subject, Clock::ProcessCpu)
+            }
+            (Clock::Realtime | Clock::Monotonic | Clock::ProcessCpu, Target::Owner) => {
+                backend.timer_clock(process, clock)
+            }
+            _ => Err(protocol::STATUS_EIO),
+        }
     }
 
     /// Non-creating controls. Creation requires synchronous publication through
@@ -200,15 +248,11 @@ impl<H: Copy> PosixService<H> {
                     let id = timers.resolve(raw)?;
                     (
                         timers.clocks_for(id, replacement)?,
-                        timers.clock_thread(id)?,
+                        timers.clock_target(id)?,
                     )
                 };
                 for clock in clocks.into_iter().flatten() {
-                    let reading = if clock == Clock::ThreadCpu {
-                        backend.timer_thread_clock(process, target.ok_or(protocol::STATUS_EIO)?)?
-                    } else {
-                        backend.timer_clock(process, clock)?
-                    };
+                    let reading = self.read_timer_clock(peer, process, clock, target, backend)?;
                     match (clock, reading) {
                         (Clock::Realtime, Reading::Realtime(value)) => samples.realtime_ns = value,
                         (Clock::Monotonic, Reading::Counter(value)) => samples.monotonic_ns = value,

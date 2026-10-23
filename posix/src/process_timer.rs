@@ -8,6 +8,14 @@ use timer_schedule::Schedule;
 pub const MAX_TIMERS_PER_PROCESS: usize = 128;
 pub const MAX_OVERRUN: u32 = i32::MAX as u32;
 
+/// A service-admitted clock binding, separate from notification ownership.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Target {
+    Owner,
+    Thread(u64),
+    Process(u64),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TimerId(u64);
 
@@ -88,7 +96,7 @@ struct Timer {
     clock: Clock,
     basis: Clock,
     // Native identity admitted by the service, never supplied on the wire.
-    thread: Option<u64>,
+    target: Target,
     notification: Notification,
     schedule: Schedule,
     pending: Option<Pending>,
@@ -162,7 +170,18 @@ impl Registry {
         // thread. Process-clock timers created by that thread remain owned by
         // the process and are deliberately not selected here.
         self.timers
-            .retain(|timer| timer.owner != owner || timer.thread != Some(thread));
+            .retain(|timer| timer.owner != owner || timer.target != Target::Thread(thread));
+    }
+
+    pub(super) fn observes_process(&self, process: u64) -> bool {
+        self.timers
+            .iter()
+            .any(|timer| timer.target == Target::Process(process))
+    }
+
+    pub(super) fn retire_process_target(&mut self, process: u64) {
+        self.timers
+            .retain(|timer| timer.target != Target::Process(process));
     }
 
     pub(super) fn pending_signal_mask(&self, owner: u64) -> u64 {
@@ -225,10 +244,10 @@ impl OwnedTimers<'_> {
         &mut self,
         clock: Clock,
         notification: Notification,
-        thread: Option<u64>,
+        target: Target,
         reply: impl FnOnce(u64) -> bool,
     ) -> Result<bool, i32> {
-        let id = self.create_for_thread(clock, notification, thread)?;
+        let id = self.create_for_target(clock, notification, target)?;
         let mut creation = Creation {
             registry: self.registry,
             id,
@@ -308,8 +327,8 @@ impl OwnedTimers<'_> {
         Ok([Some(timer.basis), next])
     }
 
-    pub(super) fn clock_thread(&self, id: TimerId) -> Result<Option<u64>, i32> {
-        Ok(self.registry.timers[self.index(id)?].thread)
+    pub(super) fn clock_target(&self, id: TimerId) -> Result<Target, i32> {
+        Ok(self.registry.timers[self.index(id)?].target)
     }
 
     pub(super) fn preview_value(&self, id: TimerId, samples: Samples) -> Result<Value, i32> {
@@ -334,16 +353,24 @@ impl OwnedTimers<'_> {
     }
 
     pub fn create(&mut self, clock: Clock, notification: Notification) -> Result<TimerId, i32> {
-        self.create_for_thread(clock, notification, None)
+        self.create_for_target(clock, notification, Target::Owner)
     }
 
-    pub(super) fn create_for_thread(
+    pub(super) fn create_for_target(
         &mut self,
         clock: Clock,
         notification: Notification,
-        thread: Option<u64>,
+        target: Target,
     ) -> Result<TimerId, i32> {
-        if (clock == Clock::ThreadCpu) != thread.is_some() || thread == Some(0) {
+        if !matches!(
+            (clock, target),
+            (Clock::ThreadCpu, Target::Thread(1..))
+                | (Clock::ProcessCpu, Target::Process(1..))
+                | (
+                    Clock::ProcessCpu | Clock::Realtime | Clock::Monotonic,
+                    Target::Owner
+                )
+        ) {
             return Err(STATUS_EINVAL);
         }
         if let Notification::Signal { signal, .. } = notification {
@@ -385,7 +412,7 @@ impl OwnedTimers<'_> {
             owner: self.owner,
             id,
             clock,
-            thread,
+            target,
             basis: if clock == Clock::Realtime {
                 Clock::Monotonic
             } else {
