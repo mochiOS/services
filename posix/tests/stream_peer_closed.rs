@@ -267,7 +267,10 @@ fn posix_conversion_generates_sigpipe_before_partial_progress_hides_peer_closure
                 "mochios_posix_protocol::",
             ),
     );
-    program.push_str("}\nmod stream{\n");
+    program.push_str(&format!(
+        "}}\nmod stream{{mod mochios_posix_protocol{{pub const PIPE_BUF:usize={};}}\n",
+        mochios_posix_protocol::PIPE_BUF,
+    ));
     program.push_str(include_str!(
         "../../../user/crates/posix-client/src/stream.rs"
     ));
