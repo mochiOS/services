@@ -77,6 +77,8 @@ mod process_timer_request;
 
 #[path = "support/child_signal_info.rs"]
 mod child_signal_info;
+#[path = "support/record_lock.rs"]
+mod record_lock;
 
 #[path = "support/default_ignored_signals.rs"]
 mod default_ignored_signals;
