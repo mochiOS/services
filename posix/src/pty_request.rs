@@ -7,7 +7,7 @@ pub fn execute<H: Copy>(
     handles: &[AttachedObject<H>],
     open: impl FnOnce() -> ObjectResponse<H>,
 ) -> ObjectResponse<H> {
-    if header.opcode != protocol::OP_PTY_OPEN
+    if !matches!(header.opcode, protocol::OP_PTY_OPEN | protocol::OP_PTY_OPEN_MASTER)
         || header.flags != 0
         || header.status != 0
         || header.payload_len != 0

@@ -485,7 +485,7 @@ fn main() {
             && request_image.is_some()
             && attachments_valid
             && decoded.is_some_and(|(header, _)| {
-                header.opcode == protocol::OP_PTY_OPEN
+                matches!(header.opcode, protocol::OP_PTY_OPEN | protocol::OP_PTY_OPEN_MASTER)
             })
         {
             let (header, payload) = decoded.unwrap();
@@ -494,18 +494,37 @@ fn main() {
                 payload,
                 &attachments,
                 || {
-                    open_pty_response(
-                        &ptys,
-                        provider_endpoint_handle,
-                        header.request_id,
-                        |pair| posix_service::terminal_publication::publish_created_pair(
+                    let publish = |pair| {
+                        posix_service::terminal_publication::publish_created_pair(
                             &ptys,
                             provider_endpoint_handle,
                             pair,
                             &pty_publisher,
                             peer.unwrap(),
-                        ),
-                    )
+                        )
+                    };
+                    if header.opcode == protocol::OP_PTY_OPEN_MASTER {
+                        posix_service::pty_master::open(
+                            &ptys,
+                            header.request_id,
+                            |object, rights| {
+                                platform::handle::create_provider_object(
+                                    provider_endpoint_handle, object, rights,
+                                )
+                                .map_err(|error| protocol::status::normalize_failure(error.raw()))
+                            },
+                            |pair| sync_pty_provider(provider_endpoint_handle, pair),
+                            publish,
+                            |handle| { let _ = platform::handle::close(handle); },
+                        )
+                    } else {
+                        open_pty_response(
+                            &ptys,
+                            provider_endpoint_handle,
+                            header.request_id,
+                            publish,
+                        )
+                    }
                 },
             ))
         } else {
@@ -1651,7 +1670,11 @@ fn handle_pty_sync_request(
     if manager.object_ids(master) != Ok([master, slave]) {
         return -9;
     }
-    for object_id in [master, slave] {
+    let live_objects = match manager.signal_object_ids(master) {
+        Ok(objects) => objects,
+        Err(error) => return -(i64::from(error)),
+    };
+    for object_id in live_objects {
         let signals = match manager.signals(object_id) {
             Ok(signals) => signals,
             Err(errno) => return -(i64::from(errno)),

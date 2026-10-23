@@ -8,6 +8,7 @@ pub mod pty_metadata;
 pub mod pty_metadata_ipc;
 pub mod pty_open;
 pub mod pty_request;
+pub mod pty_master;
 pub mod terminal_identity;
 pub mod terminal_namespace;
 pub mod terminal_publication;
