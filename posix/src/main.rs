@@ -244,13 +244,15 @@ fn main() {
             }
             clock_failed = true;
         }
-        let cpu_deadline = if service.has_finite_cpu_limits() || service.has_cpu_timers() {
+        let process_timer_observation = service.has_observable_process_timers();
+        let cpu_deadline = if service.has_finite_cpu_limits() || service.has_cpu_timers()
+            || process_timer_observation {
             match platform::time::monotonic_milliseconds() {
                 Ok(now) => {
                     // Timers use a 10 ms observation cadence even when no
                     // finite CPU budget or further client RPC exists.
-                    let interval = if service.has_cpu_timers() {
-                        10
+                    let interval = if service.has_cpu_timers() || process_timer_observation {
+                        posix_service::process_timer_reactor::OBSERVATION_INTERVAL_MS
                     } else {
                         posix_service::cpu_limit::SWEEP_INTERVAL_MS
                     };
@@ -266,6 +268,15 @@ fn main() {
                             platform::logln!(
                                 "posix.service: CPU timer observation failed errno={}", error
                             );
+                        }
+                        if let Err(error) = service.observe_process_timers(&mut processes) {
+                            if !clock_failure_reported {
+                                platform::logln!(
+                                    "posix.service: process timer observation failed errno={}", error
+                                );
+                                clock_failure_reported = true;
+                            }
+                            clock_failed = true;
                         }
                         cpu_sweep_deadline_ms = now.saturating_add(interval);
                     }

@@ -10,12 +10,14 @@ struct Clocks {
     samples: Samples,
     reads: Vec<(u32, Clock)>,
     fail: bool,
+    fail_clock: Option<Clock>,
+    fail_owner: Option<u32>,
     exec: bool,
 }
 thread_local! {
     static CLOCKS: RefCell<Clocks> = const { RefCell::new(Clocks {
         samples: Samples { realtime_ns: 1_000, monotonic_ns: 10, process_cpu_ns: 2 },
-        reads: Vec::new(), fail: false, exec: false,
+        reads: Vec::new(), fail: false, fail_clock: None, fail_owner: None, exec: false,
     }) };
 }
 impl ClockBackend<u32> for RecordingProcesses {
@@ -23,7 +25,10 @@ impl ClockBackend<u32> for RecordingProcesses {
         CLOCKS.with(|control| {
             let mut control = control.borrow_mut();
             control.reads.push((process, clock));
-            if control.fail {
+            if control.fail
+                || control.fail_clock == Some(clock)
+                || control.fail_owner == Some(process)
+            {
                 return Err(protocol::STATUS_EIO);
             }
             if control.exec {
@@ -124,6 +129,8 @@ fn setup() -> (Client<TimerTransport>, Rc<RefCell<Environment>>) {
             },
             reads: Vec::new(),
             fail: false,
+            fail_clock: None,
+            fail_owner: None,
             exec: false,
         };
     });
@@ -438,5 +445,476 @@ fn request_envelope_attachments_and_foreign_timer_ids_cannot_mutate_state() {
             .header
             .status,
         protocol::STATUS_ENOSYS
+    );
+}
+
+fn arm_internal(
+    service: &mut PosixService,
+    peer: PeerIdentity,
+    clock: Clock,
+    notification: Notification,
+    initial: u128,
+    interval: u128,
+    absolute: bool,
+) -> posix_service::process_timer::TimerId {
+    let mut timers = service.process_timers(peer).unwrap();
+    let id = timers.create(clock, notification).unwrap();
+    timers
+        .set(
+            id,
+            Samples {
+                realtime_ns: 0,
+                monotonic_ns: 0,
+                process_cpu_ns: 0,
+            },
+            initial,
+            interval,
+            absolute,
+        )
+        .unwrap();
+    id
+}
+
+#[test]
+fn reactor_observes_without_client_rpc_and_keeps_equal_signals_separate() {
+    let (client, environment) = setup();
+    let peer = client.transport().peer;
+    let mut environment = environment.borrow_mut();
+    let Environment { service, processes } = &mut *environment;
+    let mut ids = Vec::new();
+    for notification in [
+        Notification::Signal {
+            signal: protocol::SIGNAL_ALRM,
+            value: 17,
+        },
+        Notification::Signal {
+            signal: protocol::SIGNAL_ALRM,
+            value: 18,
+        },
+        Notification::Thread { cookie: 19 },
+    ] {
+        ids.push(arm_internal(
+            service,
+            peer,
+            Clock::Monotonic,
+            notification,
+            10,
+            10,
+            false,
+        ));
+    }
+    assert!(service.has_observable_process_timers());
+    assert_eq!(service.observe_process_timers(processes), Ok(3));
+    CLOCKS.with(|c| assert_eq!(c.borrow().reads, vec![(2901, Clock::Monotonic)]));
+    let mask = 1u64 << (protocol::SIGNAL_ALRM - 1);
+    let pending: Vec<_> = service
+        .process_timers(peer)
+        .unwrap()
+        .pending_signals(mask)
+        .collect();
+    assert_eq!(pending.len(), 2);
+    assert_ne!(pending[0].timer, pending[1].timer);
+    assert!(
+        service
+            .process_timers(peer)
+            .unwrap()
+            .pending_signals(0)
+            .next()
+            .is_none()
+    );
+    CLOCKS.with(|c| c.borrow_mut().samples.monotonic_ns = 35);
+    assert_eq!(service.observe_process_timers(processes), Ok(3));
+    let mut timers = service.process_timers(peer).unwrap();
+    let all: Vec<_> = timers.pending_notifications().collect();
+    assert_eq!(all.len(), 3);
+    assert!(all.iter().all(|pending| pending.overrun() == 2));
+    let accepted = timers
+        .accept(
+            pending[0],
+            Samples {
+                realtime_ns: 1_000,
+                monotonic_ns: 39,
+                process_cpu_ns: 2,
+            },
+        )
+        .unwrap();
+    assert_eq!(accepted.overrun(), 2);
+    assert_eq!(timers.pending_signals(mask).count(), 1);
+    assert_eq!(timers.pending_notifications().count(), 2);
+    assert_eq!(timers.clock(ids[2]), Ok(Clock::Monotonic));
+}
+
+#[test]
+fn reactor_clock_failure_leaves_its_timer_unconsumed_but_advances_other_clocks() {
+    let (client, environment) = setup();
+    let peer = client.transport().peer;
+    let mut environment = environment.borrow_mut();
+    let Environment { service, processes } = &mut *environment;
+    let real = arm_internal(
+        service,
+        peer,
+        Clock::Realtime,
+        Notification::Default,
+        1_000,
+        10,
+        true,
+    );
+    let mono = arm_internal(
+        service,
+        peer,
+        Clock::Monotonic,
+        Notification::Default,
+        10,
+        10,
+        false,
+    );
+    CLOCKS.with(|c| c.borrow_mut().fail_clock = Some(Clock::Realtime));
+    assert_eq!(
+        service.observe_process_timers(processes),
+        Err(protocol::STATUS_EIO)
+    );
+    let pending: Vec<_> = service
+        .process_timers(peer)
+        .unwrap()
+        .pending_notifications()
+        .collect();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].timer, mono);
+    CLOCKS.with(|c| {
+        c.borrow_mut().fail_clock = None;
+        c.borrow_mut().samples.realtime_ns = 1_020;
+    });
+    assert_eq!(service.observe_process_timers(processes), Ok(2));
+    let pending: Vec<_> = service
+        .process_timers(peer)
+        .unwrap()
+        .pending_notifications()
+        .collect();
+    let real_pending = pending
+        .iter()
+        .find(|pending| pending.timer == real)
+        .unwrap();
+    assert_eq!(real_pending.overrun(), 2); // Failed 1000 was not consumed.
+    assert_eq!(
+        pending
+            .iter()
+            .find(|pending| pending.timer == mono)
+            .unwrap()
+            .overrun(),
+        0
+    );
+}
+
+#[test]
+fn reactor_failure_for_one_owner_does_not_sample_the_service_or_block_another_owner() {
+    let _ = setup();
+    let (mut service, root, parent, _, _, mut processes) = orphan_family();
+    let root_timer = arm_internal(
+        &mut service,
+        root,
+        Clock::ProcessCpu,
+        Notification::Default,
+        1,
+        1,
+        false,
+    );
+    let parent_timer = arm_internal(
+        &mut service,
+        parent,
+        Clock::ProcessCpu,
+        Notification::Default,
+        1,
+        1,
+        false,
+    );
+    CLOCKS.with(|c| c.borrow_mut().fail_owner = Some(140));
+    assert_eq!(
+        service.observe_process_timers(&mut processes),
+        Err(protocol::STATUS_EIO)
+    );
+    assert_eq!(
+        service
+            .process_timers(root)
+            .unwrap()
+            .pending_notifications()
+            .count(),
+        0
+    );
+    let pending: Vec<_> = service
+        .process_timers(parent)
+        .unwrap()
+        .pending_notifications()
+        .collect();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].timer, parent_timer);
+    CLOCKS.with(|c| {
+        assert_eq!(
+            c.borrow().reads,
+            vec![(140, Clock::ProcessCpu), (141, Clock::ProcessCpu)]
+        );
+        c.borrow_mut().fail_owner = None;
+    });
+    assert_eq!(service.observe_process_timers(&mut processes), Ok(2));
+    let pending: Vec<_> = service
+        .process_timers(root)
+        .unwrap()
+        .pending_notifications()
+        .collect();
+    assert_eq!(pending[0].timer, root_timer);
+    assert_eq!(pending[0].overrun(), 1);
+}
+
+#[test]
+fn reactor_revalidates_each_image_after_samples_and_does_not_revive_old_plan_entries() {
+    let _ = setup();
+    let (mut service, root, parent, _, _, mut processes) = orphan_family();
+    let id = arm_internal(
+        &mut service,
+        root,
+        Clock::ProcessCpu,
+        Notification::Default,
+        1,
+        1,
+        false,
+    );
+    let other = arm_internal(
+        &mut service,
+        parent,
+        Clock::ProcessCpu,
+        Notification::Default,
+        1,
+        1,
+        false,
+    );
+    CLOCKS.with(|c| c.borrow_mut().exec = true);
+    assert_eq!(
+        service.observe_process_timers(&mut processes),
+        Err(protocol::STATUS_ESRCH)
+    );
+    assert_eq!(
+        service.process_timers(root).unwrap().clock(id),
+        Err(STATUS_EINVAL)
+    );
+    assert_eq!(
+        service
+            .process_timers(root)
+            .unwrap()
+            .pending_notifications()
+            .count(),
+        0
+    );
+    let pending: Vec<_> = service
+        .process_timers(parent)
+        .unwrap()
+        .pending_notifications()
+        .collect();
+    assert_eq!(pending[0].timer, other);
+    assert_eq!(service.observe_process_timers(&mut processes), Ok(1));
+}
+
+#[test]
+fn reactor_discards_a_preexisting_exec_plan_before_reading_any_old_timer_clock() {
+    let (client, environment) = setup();
+    let peer = client.transport().peer;
+    let mut environment = environment.borrow_mut();
+    let Environment { service, processes } = &mut *environment;
+    let id = arm_internal(
+        service,
+        peer,
+        Clock::Monotonic,
+        Notification::Default,
+        10,
+        10,
+        false,
+    );
+    processes.images.insert(
+        2901,
+        Ok(mnu_abi::ProcessStatus {
+            process_id: 2901,
+            state: mnu_abi::PROCESS_STATE_RUNNING,
+            image_revision: 1,
+            ..Default::default()
+        }),
+    );
+    assert_eq!(service.observe_process_timers(processes), Ok(0));
+    assert_eq!(
+        service.process_timers(peer).unwrap().clock(id),
+        Err(STATUS_EINVAL)
+    );
+    assert!(!service.has_observable_process_timers());
+    CLOCKS.with(|c| assert!(c.borrow().reads.is_empty()));
+}
+
+#[test]
+fn interleaved_owner_ids_remain_searchable_after_middle_deletion_and_image_retirement() {
+    let _ = setup();
+    let (mut service, root, parent, child, _, mut processes) = orphan_family();
+    let a = arm_internal(
+        &mut service,
+        root,
+        Clock::ProcessCpu,
+        Notification::Default,
+        1,
+        1,
+        false,
+    );
+    let removed = arm_internal(
+        &mut service,
+        parent,
+        Clock::Monotonic,
+        Notification::Default,
+        1,
+        1,
+        false,
+    );
+    let b = arm_internal(
+        &mut service,
+        child,
+        Clock::Realtime,
+        Notification::Default,
+        1_000,
+        10,
+        true,
+    );
+    let c = arm_internal(
+        &mut service,
+        root,
+        Clock::Monotonic,
+        Notification::Default,
+        10,
+        10,
+        false,
+    );
+    let d = arm_internal(
+        &mut service,
+        child,
+        Clock::ProcessCpu,
+        Notification::Default,
+        1,
+        1,
+        false,
+    );
+    service
+        .process_timers(parent)
+        .unwrap()
+        .delete(removed)
+        .unwrap();
+    let e = arm_internal(
+        &mut service,
+        parent,
+        Clock::ProcessCpu,
+        Notification::Default,
+        1,
+        1,
+        false,
+    );
+    assert_eq!(service.observe_process_timers(&mut processes), Ok(5));
+    for (owner, id, clock) in [
+        (root, a, Clock::ProcessCpu),
+        (child, b, Clock::Realtime),
+        (root, c, Clock::Monotonic),
+        (child, d, Clock::ProcessCpu),
+        (parent, e, Clock::ProcessCpu),
+    ] {
+        assert_eq!(service.process_timers(owner).unwrap().clock(id), Ok(clock));
+        let pending: Vec<_> = service
+            .process_timers(owner)
+            .unwrap()
+            .pending_notifications()
+            .collect();
+        assert!(pending.iter().any(|pending| pending.timer == id));
+    }
+    processes.images.insert(
+        140,
+        Ok(mnu_abi::ProcessStatus {
+            process_id: root.process_id,
+            state: mnu_abi::PROCESS_STATE_RUNNING,
+            image_revision: 1,
+            ..Default::default()
+        }),
+    );
+    assert_eq!(service.observe_process_timers(&mut processes), Ok(3));
+    assert_eq!(
+        service.process_timers(root).unwrap().clock(a),
+        Err(STATUS_EINVAL)
+    );
+    assert_eq!(
+        service.process_timers(root).unwrap().clock(c),
+        Err(STATUS_EINVAL)
+    );
+    assert_eq!(
+        service.process_timers(child).unwrap().clock(b),
+        Ok(Clock::Realtime)
+    );
+    assert_eq!(
+        service.process_timers(child).unwrap().clock(d),
+        Ok(Clock::ProcessCpu)
+    );
+    assert_eq!(
+        service.process_timers(parent).unwrap().clock(e),
+        Ok(Clock::ProcessCpu)
+    );
+}
+
+#[test]
+fn reactor_does_not_wake_for_silent_disarmed_or_already_pending_one_shot_timers() {
+    let (client, environment) = setup();
+    let peer = client.transport().peer;
+    let mut environment = environment.borrow_mut();
+    let Environment { service, processes } = &mut *environment;
+    arm_internal(
+        service,
+        peer,
+        Clock::Monotonic,
+        Notification::None,
+        1,
+        1,
+        false,
+    );
+    let id = arm_internal(
+        service,
+        peer,
+        Clock::Monotonic,
+        Notification::Default,
+        0,
+        1,
+        false,
+    );
+    assert!(!service.has_observable_process_timers());
+    assert_eq!(service.observe_process_timers(processes), Ok(0));
+    CLOCKS.with(|c| assert!(c.borrow().reads.is_empty()));
+    service
+        .process_timers(peer)
+        .unwrap()
+        .set(
+            id,
+            Samples {
+                realtime_ns: 0,
+                monotonic_ns: 0,
+                process_cpu_ns: 0,
+            },
+            10,
+            0,
+            false,
+        )
+        .unwrap();
+    assert_eq!(service.observe_process_timers(processes), Ok(1));
+    assert!(!service.has_observable_process_timers());
+    let pending: Vec<_> = service
+        .process_timers(peer)
+        .unwrap()
+        .pending_notifications()
+        .collect();
+    assert_eq!(pending.len(), 1);
+    CLOCKS.with(|c| c.borrow_mut().reads.clear());
+    assert_eq!(service.observe_process_timers(processes), Ok(0));
+    CLOCKS.with(|c| assert!(c.borrow().reads.is_empty()));
+    assert_eq!(
+        service
+            .process_timers(peer)
+            .unwrap()
+            .pending_notifications()
+            .next(),
+        Some(pending[0])
     );
 }

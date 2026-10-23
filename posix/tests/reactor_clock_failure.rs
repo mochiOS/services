@@ -21,6 +21,9 @@ static LOGS:Cell<u32>=const{Cell::new(0)};
 static NOTIFICATIONS:Cell<u32>=const{Cell::new(0)};
 static CPU_ONLY:Cell<bool>=const{Cell::new(false)};
 static TIMER_SWEEPS:Cell<u32>=const{Cell::new(0)};
+static PROCESS_TIMERS:Cell<bool>=const{Cell::new(false)};
+static PROCESS_TIMER_FAILURE:Cell<bool>=const{Cell::new(false)};
+static PROCESS_TIMER_SWEEPS:Cell<u32>=const{Cell::new(0)};
 static DEFERRED:Cell<bool>=const{Cell::new(false)};
 static DEFERRED_FAILURE:Cell<bool>=const{Cell::new(false)};
 static RESUME:Cell<bool>=const{Cell::new(false)};
@@ -36,12 +39,21 @@ if crate::FAIL.get()&(1<<call)!=0{Err(crate::Error)}else{Ok(2000)}
 }
 pub fn monotonic_nanoseconds()->Result<u64,crate::Error>{monotonic_milliseconds().map(|ms|ms*1_000_000)}
 }
-mod posix_service{pub mod cpu_limit{pub const SWEEP_INTERVAL_MS:u64=100;}}
+mod posix_service{
+pub mod cpu_limit{pub const SWEEP_INTERVAL_MS:u64=100;}
+pub mod process_timer_reactor{pub const OBSERVATION_INTERVAL_MS:u64=10;}
+}
 struct Service {deadline:u64,cpu_sweeps:u32}
 impl Service {
 fn expire_alarms(&mut self)->Result<usize,i32>{if FAIL.get()&1!=0{Err(-5)}else{Ok(0)}}
-fn has_finite_cpu_limits(&self)->bool{!CPU_ONLY.get()}
+fn has_finite_cpu_limits(&self)->bool{!CPU_ONLY.get()&&!PROCESS_TIMERS.get()}
 fn has_cpu_timers(&self)->bool{CPU_ONLY.get()}
+fn has_observable_process_timers(&self)->bool{PROCESS_TIMERS.get()}
+fn observe_process_timers(&mut self,_:&mut())->Result<usize,i32>{
+ if !PROCESS_TIMERS.get(){return Ok(0)}
+ PROCESS_TIMER_SWEEPS.set(PROCESS_TIMER_SWEEPS.get()+1);
+ if PROCESS_TIMER_FAILURE.get(){Err(-5)}else{Ok(1)}
+}
 fn expire_cpu_timers(&mut self,_:&mut())->Result<usize,i32>{TIMER_SWEEPS.set(TIMER_SWEEPS.get()+1);Ok(0)}
 fn enforce_cpu_limits(&mut self,_:&mut())->Result<(),i32>{self.cpu_sweeps+=1;Ok(())}
 fn next_alarm_deadline(&self)->Option<u64>{Some(self.deadline)}
@@ -98,6 +110,21 @@ CPU_ONLY.set(true);FAIL.set(0);CLOCK_CALLS.set(0);TIMER_SWEEPS.set(0);
 let mut service=Service{deadline:5_000_000_000,cpu_sweeps:0};let mut reported=false;
 assert_eq!(plan(&mut service,&mut reported),(2_010_000_000,false));
 assert_eq!(TIMER_SWEEPS.get(),1);
+// Process timers alone keep the same finite cadence, without CPU timers or
+// budgets. Native observation errors preserve that cadence, reach fallback
+// wait planning, and report only once until recovery.
+CPU_ONLY.set(false);PROCESS_TIMERS.set(true);PROCESS_TIMER_FAILURE.set(true);
+PROCESS_TIMER_SWEEPS.set(0);LOGS.set(0);reported=false;
+for _ in 0..2 {
+ CLOCK_CALLS.set(0);
+ assert_eq!(plan(&mut service,&mut reported),(2_010_000_000,true));
+ assert!(reported);
+}
+assert_eq!(PROCESS_TIMER_SWEEPS.get(),2);assert_eq!(LOGS.get(),1);
+PROCESS_TIMER_FAILURE.set(false);CLOCK_CALLS.set(0);
+assert_eq!(plan(&mut service,&mut reported),(2_010_000_000,false));
+assert!(!reported);assert_eq!(LOGS.get(),1);
+PROCESS_TIMERS.set(false);
 // Failed parent-image observation keeps a retry deadline without another RPC
 // or child exit. Failure of that deadline's ClockRead must still reach polling.
 CPU_ONLY.set(false);DEFERRED.set(true);DEFERRED_FAILURE.set(true);

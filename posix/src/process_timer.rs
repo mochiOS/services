@@ -69,14 +69,44 @@ struct Timer {
     last_overrun: u32,
 }
 
+impl Timer {
+    fn observable(&self) -> bool {
+        self.notification != Notification::None && self.schedule.deadline().is_some()
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct Registry {
+    // Strictly ordered by the non-reused global ID. Removal/retirement must
+    // preserve that order so a reactor sweep does not do one full scan per ID.
     timers: Vec<Timer>,
     next_id: u64,
     next_sequence: u64,
 }
 
 impl Registry {
+    pub(super) fn has_observable(&self) -> bool {
+        self.timers.iter().any(Timer::observable)
+    }
+
+    pub(super) fn observation_plan(&self) -> Result<Vec<(u64, TimerId, Clock)>, i32> {
+        let mut plan = Vec::new();
+        let count = self
+            .timers
+            .iter()
+            .filter(|timer| timer.observable())
+            .count();
+        plan.try_reserve_exact(count)
+            .map_err(|_| protocol::STATUS_ENOMEM)?;
+        for timer in &self.timers {
+            if timer.observable() {
+                plan.push((timer.owner, timer.id, timer.basis));
+            }
+        }
+        plan.sort_unstable_by_key(|&(owner, id, _)| (owner, id.raw()));
+        Ok(plan)
+    }
+
     pub(super) const fn new() -> Self {
         Self {
             timers: Vec::new(),
@@ -102,6 +132,24 @@ pub struct OwnedTimers<'a> {
 }
 
 impl OwnedTimers<'_> {
+    /// Service-local selection only. Distinct timers using the same signal
+    /// keep distinct pending events; selecting does not accept either event.
+    pub fn pending_notifications(&self) -> impl Iterator<Item = Pending> + '_ {
+        self.registry.timers.iter().filter_map(|timer| {
+            (timer.owner == self.owner)
+                .then_some(timer.pending)
+                .flatten()
+        })
+    }
+
+    pub fn pending_signals(&self, mask: u64) -> impl Iterator<Item = Pending> + '_ {
+        self.pending_notifications()
+            .filter(move |pending| match pending.notification {
+                Notification::Signal { signal, .. } => mask & (1u64 << (signal - 1)) != 0,
+                _ => false,
+            })
+    }
+
     pub(super) fn resolve(&self, raw: u64) -> Result<TimerId, i32> {
         let id = TimerId(raw);
         self.index(id)?;
@@ -136,11 +184,15 @@ impl OwnedTimers<'_> {
         })
     }
     fn index(&self, id: TimerId) -> Result<usize, i32> {
-        self.registry
+        let index = self
+            .registry
             .timers
-            .iter()
-            .position(|timer| timer.owner == self.owner && timer.id == id)
-            .ok_or(STATUS_EINVAL)
+            .binary_search_by_key(&id.raw(), |timer| timer.id.raw())
+            .map_err(|_| STATUS_EINVAL)?;
+        if self.registry.timers[index].owner != self.owner {
+            return Err(STATUS_EINVAL);
+        }
+        Ok(index)
     }
 
     pub fn create(&mut self, clock: Clock, notification: Notification) -> Result<TimerId, i32> {
@@ -199,7 +251,7 @@ impl OwnedTimers<'_> {
 
     pub fn delete(&mut self, id: TimerId) -> Result<(), i32> {
         let index = self.index(id)?;
-        self.registry.timers.swap_remove(index);
+        self.registry.timers.remove(index);
         Ok(())
     }
 

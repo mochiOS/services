@@ -47,6 +47,7 @@ mod alarm;
 mod timer_schedule;
 pub mod process_timer;
 pub mod process_timer_request;
+pub mod process_timer_reactor;
 mod fork_state;
 pub mod resource_policy;
 pub mod cpu_limit;
