@@ -20,7 +20,16 @@
     }                                                                          \
   } while (0)
 extern char **environ;
-static atomic_int ready, stop, cleaned, tls_cleaned, worker_error;
+static atomic_int ready, cleaned, tls_cleaned, worker_error;
+static atomic_uint_fast64_t worker_handle;
+static int blocked_pipe[2];
+static int64_t native(uint64_t number, uint64_t a, uint64_t b) {
+  __asm__ volatile("syscall"
+                   : "+a"(number)
+                   : "D"(a), "S"(b)
+                   : "rcx", "r11", "memory");
+  return (int64_t)number;
+}
 static pthread_key_t key;
 static struct _reent *foreign_reent;
 static void cleanup(struct _reent *unused) {
@@ -45,9 +54,18 @@ static void *worker(void *unused) {
   _REENT_CVTBUF(reent) = (char *)(uintptr_t)1;
   _REENT_CLEANUP(reent) = cleanup;
   foreign_reent = reent;
+  int64_t handle = native(656, 0, 0);
+  if (handle <= 0) {
+    _REENT_CVTBUF(reent) = NULL;
+    atomic_store(&worker_error, 1);
+    atomic_store(&ready, 1);
+    return NULL;
+  }
+  atomic_store(&worker_handle, (uint64_t)handle);
   atomic_store_explicit(&ready, 1, memory_order_release);
-  while (!atomic_load_explicit(&stop, memory_order_acquire))
-    sched_yield();
+  char release = 0;
+  if (read(blocked_pipe[0], &release, 1) != 1 || release != 'R')
+    atomic_store(&worker_error, 1);
   _REENT_CVTBUF(reent) = NULL; // parent exit/join may now reclaim normally
   return NULL;
 }
@@ -56,11 +74,25 @@ int main(int argc, char **argv) {
     return 0;
   CHECK(argc >= 1 && argv[0] && *argv[0]);
   CHECK(pthread_key_create(&key, tls_cleanup) == 0);
+  CHECK(pipe(blocked_pipe) == 0);
   pthread_t thread;
   CHECK(pthread_create(&thread, NULL, worker, NULL) == 0);
   while (!atomic_load_explicit(&ready, memory_order_acquire))
     sched_yield();
   CHECK(!atomic_load(&worker_error) && foreign_reent);
+  // Observe a real native blocked state, not just a flag before read(). The
+  // writer stays open and empty, so the foreign FD-only scope remains live.
+  struct {
+    uint64_t thread, process;
+    uint32_t state, reserved;
+  } thread_status;
+  uint64_t handle = atomic_load(&worker_handle);
+  do {
+    CHECK(native(658, handle, (uint64_t)&thread_status) == 0);
+    if (thread_status.state != 3 && thread_status.state != 4)
+      sched_yield();
+  } while (thread_status.state != 3 && thread_status.state != 4);
+  CHECK(native(626, handle, 0) == 0);
   for (unsigned round = 0; round < 3; ++round) {
     int channel[2];
     CHECK(pipe(channel) == 0);
@@ -98,12 +130,13 @@ int main(int argc, char **argv) {
     CHECK(WEXITSTATUS(status) == 0);
     CHECK(!atomic_load(&cleaned) && !atomic_load(&tls_cleaned));
   }
-  atomic_store_explicit(&stop, 1, memory_order_release);
+  CHECK(write(blocked_pipe[1], "R", 1) == 1);
   CHECK(pthread_join(thread, NULL) == 0);
   CHECK(!atomic_load(&worker_error));
   CHECK(atomic_load(&cleaned) == 1 && atomic_load(&tls_cleaned) == 1);
   CHECK(pthread_key_delete(key) == 0);
-  puts("fork-live: PASS live sibling, opaque caches, parent-only destructors, "
+  CHECK(close(blocked_pipe[0]) == 0 && close(blocked_pipe[1]) == 0);
+  puts("fork-live: PASS pipe-wait sibling, opaque caches, parent-only destructors, "
        "inherited pipe and child exec");
   return 0;
 }

@@ -7,6 +7,76 @@ use std::rc::Rc;
 mod production;
 use production::{Chain, Scope};
 
+#[test]
+fn only_explicit_fd_only_scopes_allow_fork_and_child_detaches_without_a_foreign_walk() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    };
+    struct Private(Arc<AtomicU32>);
+    impl Drop for Private {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+    let chain = Chain::new();
+    let drops = Arc::new(AtomicU32::new(0));
+    let mut source = Box::pin(Scope::new(&chain, 0, Private(drops.clone())));
+    unsafe {
+        source.as_mut().activate();
+    }
+    assert!(chain.capture_for_fork().is_none());
+    unsafe {
+        source.as_mut().allow_fork_opaque();
+    }
+    assert!(chain.capture_empty().is_none());
+    drop(chain.capture_for_fork().unwrap());
+    let mut complex = core::pin::pin!(Scope::new(&chain, 0, ()));
+    unsafe {
+        complex.as_mut().activate();
+    }
+    assert!(
+        chain.capture_for_fork().is_none(),
+        "a nested native Handle owner must still block"
+    );
+    assert!(!unsafe { chain.discard_fork_opaque() });
+    unsafe {
+        complex.as_mut().retire();
+    }
+    drop(chain.capture_for_fork().unwrap());
+    assert!(unsafe { chain.discard_fork_opaque() });
+    assert!(chain.is_empty());
+    assert!(chain.reset_empty());
+    assert_eq!(drops.load(Ordering::Acquire), 0);
+    // Model a foreign stack that does not resume in the child. Never drop or
+    // retire that source shell; native VM ownership lasts until exec/exit.
+    std::mem::forget(source);
+}
+
+#[test]
+fn opaque_scope_normal_retirement_and_handler_escape_still_release_the_resource_once() {
+    for abandon in [false, true] {
+        let chain = Chain::new();
+        let drops = Rc::new(RefCell::new(Vec::new()));
+        let mut source = core::pin::pin!(Scope::new(&chain, 0, tracked(17, &drops)));
+        unsafe {
+            source.as_mut().activate();
+            source.as_mut().allow_fork_opaque();
+        }
+        drop(chain.capture_for_fork().unwrap());
+        unsafe {
+            if abandon {
+                chain.abandon_from(0);
+            } else {
+                source.as_mut().retire();
+            }
+        }
+        assert_eq!(*drops.borrow(), [17]);
+        assert!(chain.reset_empty());
+        drop(chain.capture_for_fork().unwrap());
+    }
+}
+
 fn wait_for_thaw(word: &std::sync::atomic::AtomicU32, expected: u32) {
     use std::sync::atomic::Ordering;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -95,6 +165,62 @@ fn frozen_empty_chain_parks_publication_until_native_capture_finishes() {
         .unwrap();
     worker.join().unwrap();
     assert!(chain.capture_empty().is_some());
+}
+
+#[test]
+fn frozen_fd_only_chain_defers_retirement_and_handler_escape_until_snapshot_finishes() {
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::{Arc, mpsc};
+    static PARKED: AtomicBool = AtomicBool::new(false);
+    fn park(word: &AtomicU32, expected: u32) {
+        PARKED.store(true, Ordering::Release);
+        wait_for_thaw(word, expected);
+    }
+    struct Resource(Arc<AtomicU32>);
+    impl Drop for Resource {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+    for abandon in [false, true] {
+        PARKED.store(false, Ordering::Release);
+        let chain = Arc::new(Chain::with_wait(park, |_| {}));
+        let drops = Arc::new(AtomicU32::new(0));
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (finish_tx, finish_rx) = mpsc::channel();
+        let worker_chain = chain.clone();
+        let worker_drops = drops.clone();
+        let worker = std::thread::spawn(move || {
+            let mut scope = core::pin::pin!(Scope::new(&worker_chain, 0, Resource(worker_drops)));
+            unsafe {
+                scope.as_mut().activate();
+                scope.as_mut().allow_fork_opaque();
+            }
+            ready_tx.send(()).unwrap();
+            finish_rx.recv().unwrap();
+            unsafe {
+                if abandon {
+                    worker_chain.abandon_from(0);
+                } else {
+                    scope.as_mut().retire();
+                }
+            }
+        });
+        ready_rx.recv().unwrap();
+        let capture = chain.capture_for_fork().unwrap();
+        finish_tx.send(()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !PARKED.load(Ordering::Acquire) {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert!(!chain.is_empty());
+        assert_eq!(drops.load(Ordering::Acquire), 0);
+        drop(capture);
+        worker.join().unwrap();
+        assert!(chain.reset_empty());
+        assert_eq!(drops.load(Ordering::Acquire), 1);
+    }
 }
 
 #[test]
@@ -362,7 +488,8 @@ fn jump_cleanup_follows_destination_validation_and_thread_exit_precedes_user_cle
         exit.find("callback_resources.abandon_from(0)").unwrap()
             < exit.find("thread_cleanup::drain").unwrap()
     );
-    assert!(runtime.contains("if !control.callback_resources.reset_empty()"));
+    assert!(runtime.contains("control.callback_resources.reset_empty()"));
+    assert!(runtime.contains("control.callback_resources.discard_fork_opaque()"));
     assert!(jump.contains("size_of::<JumpBuffer>() == 120"));
 }
 

@@ -9,7 +9,12 @@ fn actual_stream_writer_handles_peer_closure_and_allocation_failure_without_muta
     probe::constants(
         &mut program,
         include_str!("../../../core/crates/abi/src/lib.rs"),
-        &["HANDLE_OPTION_NONBLOCKING","HANDLE_SIGNAL_READABLE","HANDLE_SIGNAL_WRITABLE","HANDLE_SIGNAL_PEER_CLOSED"],
+        &[
+            "HANDLE_OPTION_NONBLOCKING",
+            "HANDLE_SIGNAL_READABLE",
+            "HANDLE_SIGNAL_WRITABLE",
+            "HANDLE_SIGNAL_PEER_CLOSED",
+        ],
     );
     program.push_str(probe::between(
         source,
@@ -22,8 +27,10 @@ fn actual_stream_writer_handles_peer_closure_and_allocation_failure_without_muta
         "struct PipeState {",
         "impl PipeState {",
     ));
-    program.push_str(&probe::between(source,"impl PipeState {","static PIPE_TABLE:")
-        .replace("mnu_abi::HANDLE_","HANDLE_"));
+    program.push_str(
+        &probe::between(source, "impl PipeState {", "static PIPE_TABLE:")
+            .replace("mnu_abi::HANDLE_", "HANDLE_"),
+    );
     program.push_str(
         r#"
 use std::sync::Mutex;
@@ -264,14 +271,32 @@ fn posix_conversion_generates_sigpipe_before_partial_progress_hides_peer_closure
     program.push_str(include_str!(
         "../../../user/crates/posix-client/src/stream.rs"
     ));
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    program.push_str(&format!(
+        r#"
+}}
+extern crate self as mochios_posix_client;
+#[path = "{root}/user/crates/posix-client/src/upcall_guard.rs"] pub mod upcall_guard;
+#[path = "{root}/user/crates/newlib-runtime/src/callback_resources.rs"] mod callback_resources;
+#[path = "{root}/user/crates/newlib-runtime/src/io_resources.rs"] mod io_resources;
+use std::ffi::c_int;
+use std::sync::atomic::{{AtomicU32, AtomicU64, Ordering}};
+const EAGAIN:c_int=11;
+struct ThreadControl {{ callback_resources:callback_resources::Chain, native:AtomicU32, active_signal_scope_id:AtomicU64 }}
+static CONTROL:ThreadControl=ThreadControl {{callback_resources:callback_resources::Chain::new(), native:AtomicU32::new(0), active_signal_scope_id:AtomicU64::new(0)}};
+fn register_current_thread()->Option<(u32,&'static ThreadControl)>{{Some((1,&CONTROL))}}
+fn defer_native_delivery()->Option<upcall_guard::Guard<'static>>{{upcall_guard::Guard::enter(&CONTROL.native)}}
+"#,
+        root = root.display(),
+    ));
     program.push_str(
         r#"
-}
 use newlib_errno::{EPIPE,EIO};
 use std::cell::Cell;
 thread_local!{static SIGNALS:Cell<usize>=const{Cell::new(0)};}
 mod posix_protocol{pub const SIGNAL_PIPE:u32=13;}
 fn generate_thread_signal(signal:u32)->Result<(),i32>{
+    assert!(CONTROL.callback_resources.capture_for_fork().is_none());
     assert_eq!(signal,13);SIGNALS.set(SIGNALS.get()+1);Ok(())
 }
 fn observe(result:Result<u64,i32>)->Result<usize,i32>{
@@ -286,6 +311,9 @@ fn observe(result:Result<u64,i32>)->Result<usize,i32>{
         r#"
 }
 fn main(){
+    let mut scope=std::pin::pin!(callback_resources::Scope::new(&CONTROL.callback_resources,0,()));
+    unsafe{scope.as_mut().activate();scope.as_mut().allow_fork_opaque();}
+    drop(CONTROL.callback_resources.capture_for_fork().unwrap());
     let raw=mnu_abi::status::Error::PeerClosed.into_raw();
     assert_eq!(raw as i64,-262134);
     assert_eq!(wire_status::normalize_failure(raw as i64),-32);
@@ -299,6 +327,9 @@ fn main(){
     SIGNALS.set(0);
     assert_eq!(observe(Err(newlib_errno::EAGAIN)),Err(newlib_errno::EAGAIN));
     assert_eq!(observe(Ok(3)),Ok(3));assert_eq!(SIGNALS.get(),0);
+    drop(CONTROL.callback_resources.capture_for_fork().unwrap());
+    unsafe{scope.as_mut().retire();}
+    assert!(CONTROL.callback_resources.reset_empty());
 }
 "#,
     );

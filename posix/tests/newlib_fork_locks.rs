@@ -26,7 +26,7 @@ fn fork_freezes_libc_bookkeeping_across_vm_capture_without_inverting_malloc() {
     let clone = item(source, "fn clone_registered_process_owned(");
     let positions = [
         "let lifecycle_guard = thread_lifecycle::capture()?",
-        "other.callback_resources.capture_empty().ok_or(EAGAIN)?",
+        "other.callback_resources.capture_for_fork().ok_or(EAGAIN)?",
         "let libc_guard = libc_lock::capture()?",
         "let allocator_guard = atfork::freeze_allocator()",
         "let libc_registry = libc_guard.freeze_registry()",

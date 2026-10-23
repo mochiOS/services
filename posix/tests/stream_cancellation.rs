@@ -34,7 +34,9 @@ const ENAMETOOLONG:i32=91;
 const PAGE_SIZE:usize=4096;
 #[repr(C)] struct IoVec {{ iov_base: *const c_void, iov_len: usize }}
 #[repr(C)] struct IoVecMut {{ iov_base: *mut c_void, iov_len: usize }}
-#[derive(Clone, Copy)] struct FdEntry;
+#[derive(Clone, Copy, PartialEq)] enum FdKind {{ ObjectStreamRead, ObjectStreamWrite, File }}
+#[derive(Clone, Copy)] struct FdObject {{ kind: FdKind }}
+#[derive(Clone, Copy)] struct FdEntry {{ handle: FdObject }}
 struct Lease(FdEntry);
 impl std::ops::Deref for Lease {{ type Target = FdEntry; fn deref(&self)->&FdEntry {{ &self.0 }} }}
 impl Drop for Lease {{ fn drop(&mut self) {{
@@ -95,7 +97,7 @@ fn set_errno(error: i32) {{ LAST_ERRNO.store(error as u32,Ordering::Relaxed); }}
 fn result_with_errno(result: Result<isize, i32>, failed: isize) -> isize {{ match result {{Ok(value)=>value,Err(error)=>{{set_errno(error);failed}}}} }}
 fn with_fd_entry(_: i32) -> Result<Lease, i32> {{
     if CASE.load(Ordering::Relaxed) == 8 {{return Err(9)}}
-    PINS.fetch_add(1,Ordering::Relaxed); Ok(Lease(FdEntry))
+    PINS.fetch_add(1,Ordering::Relaxed); Ok(Lease(FdEntry {{ handle: FdObject {{ kind: FdKind::File }} }}))
 }}
 fn record_stdio_io(_: &Result<isize,i32>) {{}}
 fn positioned_file_io(fd:i32, _: *mut c_void, length:usize, offset:i64, writing:bool)->Result<isize,i32> {{

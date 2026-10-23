@@ -55,6 +55,52 @@ fn reset() {
     DROPS.store(0, Ordering::Relaxed);
     PREPARE_FAIL.store(0, Ordering::Relaxed);
 }
+
+#[test]
+fn fd_only_fork_admission_begins_after_preparation_and_never_covers_a_complex_nested_owner() {
+    let _lock = LOCK.lock().unwrap();
+    for allow in [false, true] {
+        reset();
+        let result = unsafe {
+            implementation::with_fork_opaque(
+                prepare,
+                |_| allow,
+                |resource| {
+                    assert_eq!(resource.0, 7);
+                    let capture = CONTROL.callback_resources.capture_for_fork();
+                    assert_eq!(capture.is_some(), allow);
+                    drop(capture);
+                    implementation::with(
+                        || Ok(()),
+                        |_| {
+                            assert!(CONTROL.callback_resources.capture_for_fork().is_none());
+                            Ok(())
+                        },
+                    )?;
+                    let capture = CONTROL.callback_resources.capture_for_fork();
+                    assert_eq!(capture.is_some(), allow);
+                    drop(capture);
+                    Ok(7)
+                },
+            )
+        };
+        assert_eq!(result, Ok(7));
+        assert_eq!(DROPS.load(Ordering::Acquire), 1);
+        assert!(CONTROL.callback_resources.reset_empty());
+    }
+    reset();
+    PREPARE_FAIL.store(1, Ordering::Release);
+    let result = unsafe {
+        implementation::with_fork_opaque(
+            prepare,
+            |_| panic!("failed resource cannot be admitted"),
+            |_| Ok(7),
+        )
+    };
+    assert_eq!(result, Err(9));
+    assert!(CONTROL.callback_resources.reset_empty());
+    assert_eq!(DROPS.load(Ordering::Acquire), 0);
+}
 #[test]
 fn success_and_error_retire_before_return_without_delaying_callbacks() {
     let _lock = LOCK.lock().unwrap();

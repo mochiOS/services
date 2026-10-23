@@ -54,7 +54,7 @@ static ALLOW_CACHE:AtomicBool=AtomicBool::new(false);
 static UNMAPS:std::sync::Mutex<Vec<(u64,u64)>>=std::sync::Mutex::new(Vec::new());
 static CALLBACKS:std::sync::Mutex<Vec<&str>>=std::sync::Mutex::new(Vec::new());
 static CLOSED:std::sync::Mutex<Vec<usize>>=std::sync::Mutex::new(Vec::new());
-struct Chain;impl Chain{{fn reset_empty(&self)->bool{{EMPTY.load(Ordering::Acquire)}}}}
+struct Chain;impl Chain{{fn reset_empty(&self)->bool{{EMPTY.load(Ordering::Acquire)}}unsafe fn discard_fork_opaque(&self)->bool{{EMPTY.load(Ordering::Acquire)}}}}
 struct Stdio;impl Stdio{{fn reset(&self){{}}}}
 struct ThreadControl{{{declarations}callback_resources:Chain,stdio_scope:Stdio,specific_values:[AtomicUsize;2],specific_generations:[AtomicUsize;2]}}
 impl ThreadControl{{fn new(state:usize)->Self{{
