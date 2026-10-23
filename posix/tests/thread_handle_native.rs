@@ -159,7 +159,7 @@ mod syscall {
     program.push_str(probe::between(
         upcall,
         "pub fn create_thread_handle()",
-        "pub fn return_from_context(",
+        "/// Sample a caller-owned thread object",
     ));
     program.push_str("}\npub use upcall::*;}\n");
     program.push_str(r#"

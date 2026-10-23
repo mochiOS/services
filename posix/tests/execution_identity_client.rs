@@ -1,5 +1,5 @@
 use mnu_abi::status::Error;
-pub use mnu_abi::{ExecutionIdentity, ProcessExecutionUsage, SyscallNumber};
+pub use mnu_abi::{ClockInstant, ExecutionIdentity, ProcessExecutionUsage, SyscallNumber};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct SysError(i64);
