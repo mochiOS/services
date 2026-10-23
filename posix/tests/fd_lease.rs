@@ -73,6 +73,116 @@ fn entry(handle: u64) -> FdEntry {
 }
 
 #[test]
+fn private_reference_admission_is_atomic_and_needs_no_descriptor_owner() {
+    use mochios_posix_client::handle_borrow::PinError;
+    let mut book = Book::<3>::new();
+    assert!(matches!(
+        book.pin_private(1, 0),
+        Err(PinError::InvalidOwner)
+    ));
+    let first = book.pin_owned(1, 1).unwrap();
+    let second = book.pin_owned(1, 2).unwrap();
+    let third = book.pin_owned(1, 3).unwrap();
+    assert!(matches!(book.pin_private(2, 4), Err(PinError::Capacity)));
+    assert!(matches!(book.pin_private(1, 1), Err(PinError::Retired)));
+    assert!(!book.release(third));
+    let private = book.pin_private(2, 4).unwrap();
+    assert!(book.pin(2).is_none());
+    assert_eq!(book.retain(2), None);
+    assert_eq!(book.retire(2), None);
+    assert!(book.release(private));
+    assert!(!book.release(first));
+    assert!(!book.release(second));
+    let replacement = book.pin_private(2, 1).unwrap();
+    assert!(book.release(replacement));
+}
+
+#[test]
+fn fork_exclusions_apply_only_to_retired_references_without_surviving_pins() {
+    use mochios_posix_client::inheritance;
+    let mut book = Book::<4>::new();
+    let foreign = book.pin_private(1, 2).unwrap();
+    let own = book.pin_private(2, 1).unwrap();
+    let foreign_shared = book.pin_owned(3, 2).unwrap();
+    let own_shared = book.pin_owned(3, 1).unwrap();
+    assert_eq!(book.retire(3), Some(false));
+    assert!(book.discarded_by_fork(1, 1));
+    for label in [0, 2, 3, 4, 5, u64::MAX] {
+        assert!(!book.discarded_by_fork(label, 1));
+    }
+    assert!(!book.discarded_by_fork(1, 0));
+    let records = [
+        mnu_abi::HandleInfo {
+            handle: 1,
+            reserved: 0,
+            rights: mnu_abi::HANDLE_RIGHT_READ | mnu_abi::HANDLE_RIGHT_WAIT,
+        },
+        mnu_abi::HandleInfo {
+            handle: 4,
+            reserved: 0,
+            rights: mnu_abi::HANDLE_RIGHT_TRANSFER | mnu_abi::HANDLE_RIGHT_READ,
+        },
+    ];
+    let exclusions: Vec<_> = records
+        .iter()
+        .filter(|record| book.discarded_by_fork(u64::from(record.handle), 1))
+        .map(|record| record.handle)
+        .collect();
+    let mut grants = [mnu_abi::process_create::HandleGrant {
+        key: 0,
+        source: 0,
+        target: 0,
+        rights: 0,
+    }; 2];
+    assert_eq!(
+        inheritance::prepare(&records, &exclusions, &mut grants),
+        Ok(1)
+    );
+    assert_eq!(grants[0].source, 4);
+    let mut unowned = records;
+    unowned[1].rights = mnu_abi::HANDLE_RIGHT_READ;
+    assert_eq!(
+        inheritance::prepare(&unowned, &exclusions, &mut grants),
+        Err(inheritance::Error::NonTransferable(4))
+    );
+    assert!(!book.release(own_shared));
+    assert!(book.discarded_by_fork(3, 1));
+    assert!(book.release(foreign_shared));
+    assert!(book.release(foreign));
+    assert!(book.release(own));
+}
+
+#[test]
+fn private_runtime_leases_close_on_return_and_child_discard_without_fd_installation() {
+    let _runtime = RUNTIME_TEST.lock().unwrap();
+    assert!(NATIVE.lock().unwrap().is_empty());
+    CLOSED.lock().unwrap().clear();
+    *fd_lease::BORROWS.lock() = Book::new();
+    OWNER.set(2);
+    NATIVE
+        .lock()
+        .unwrap()
+        .insert(27, "foreign private completion");
+    let foreign = fd_lease::Lease::adopt_private(entry(27)).unwrap();
+    std::mem::forget(foreign);
+    OWNER.set(1);
+    NATIVE
+        .lock()
+        .unwrap()
+        .insert(28, "surviving private completion");
+    let own = fd_lease::Lease::adopt_private(entry(28)).unwrap();
+    fd_lease::BORROWS
+        .lock()
+        .discard_for_fork(1, |label| close_object_handle(label as u32))
+        .unwrap();
+    assert_eq!(*CLOSED.lock().unwrap(), [27]);
+    assert!(NATIVE.lock().unwrap().contains_key(&28));
+    drop(own);
+    assert_eq!(*CLOSED.lock().unwrap(), [27, 28]);
+    assert!(NATIVE.lock().unwrap().is_empty());
+}
+
+#[test]
 fn book_checks_labels_and_defers_exactly_one_close_to_the_last_pin() {
     let mut book = Book::<3>::new();
     for label in [0, 4, u64::MAX] {

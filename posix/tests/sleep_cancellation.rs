@@ -67,6 +67,10 @@ fn monotonic_nanoseconds() -> Result<u64, i32> {{
     Ok(NOW.load(Ordering::Acquire))
 }}
 fn map_kernel_errno(raw: u64) -> i32 {{ raw as i32 }}
+mod cpu_sleep {{
+    pub fn target(_:u64)->Option<u64>{{None}}
+    pub fn sleep(_:u64,_:i32,_:super::Timespec,_:*mut super::Timespec)->Result<(),i32>{{unreachable!()}}
+}}
 fn syscall_errno(_: u64) -> Result<u64, i32> {{ unreachable!() }}
 mod mnu_abi {{
     #[derive(Default)] pub struct ClockInstant {{ pub seconds: u64, pub nanoseconds: u32, pub reserved: u32 }}
