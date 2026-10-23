@@ -13,6 +13,7 @@ pub mod path_walk;
 pub mod platform_storage;
 pub mod provider_buffer;
 pub mod provider_flags;
+pub mod provider_limits;
 pub mod positioned_io;
 pub mod memory_updates;
 pub mod admission_ipc;

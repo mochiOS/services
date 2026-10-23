@@ -4060,3 +4060,6 @@ mod trailing_lookup;
 
 #[path = "support/trailing_creation.rs"]
 mod trailing_creation;
+
+#[path = "support/object_limits.rs"]
+mod object_limits;

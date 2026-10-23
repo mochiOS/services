@@ -1307,6 +1307,21 @@ impl FilesystemService {
         Ok(self.node_status_response(request, node_id, &inode, &filesystem))
     }
 
+    /// Native object observation; open_id must come from authenticated provider
+    /// delivery. Device owners need their own limits, never ext4 defaults.
+    pub fn provider_limits(&self, open_id: u64) -> Result<protocol::object_limits::Limits, i32> {
+        if self.opens.device(open_id).is_some() {
+            return Err(95);
+        }
+        let open = self.opens.get(&open_id).ok_or(EBADF)?;
+        Ok(protocol::object_limits::Limits {
+            name_bytes_max: DirEntryName::MAX_LEN as u32,
+            path_bytes_max: protocol::MAX_PATH_LEN as u32,
+            link_count_max: u32::from(u16::MAX),
+            filesystem_block_bytes: open.filesystem.block_size_bytes(),
+        })
+    }
+
     /// Obtains metadata from an existing provider object. The caller must
     /// identify the attached Handle through the kernel before invoking this.
     pub fn stat_handle(&self, request: protocol::Header, open_id: u64) -> Result<Response, i32> {

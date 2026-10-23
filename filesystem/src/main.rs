@@ -1097,13 +1097,16 @@ fn handle_provider_request(
     buffer: &mut filesystem_service::provider_buffer::ProviderReadBuffer,
 ) -> Option<usize> {
     use mnu_abi::provider;
-    use mochios_filesystem_protocol::description_flags;
+    use mochios_filesystem_protocol::{description_flags, object_limits};
     let (header, payload) = provider::RequestHeader::decode(request).ok()?;
     if header.opcode == provider::OP_RELEASE {
         let _ = service.provider_close(header.object_id);
         return None;
     }
     let result = match header.opcode {
+        provider::OP_QUERY | provider::OP_CONTROL if header.basis == object_limits::GET => {
+            filesystem_service::provider_limits::handle(service, header, payload, attached.count)
+        }
         provider::OP_QUERY | provider::OP_CONTROL
             if matches!(header.basis, description_flags::GET | description_flags::UPDATE) =>
         {
