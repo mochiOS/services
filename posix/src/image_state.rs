@@ -98,6 +98,11 @@ impl<H: Copy> PosixService<H> {
             .ok_or(protocol::STATUS_ESRCH)?;
         session.saved_uid = session.effective_uid;
         session.saved_gid = session.effective_gid;
+        self.record_lock_execs.commit_observed(
+            owner,
+            image.image_revision,
+            &mut self.record_locks,
+        );
         self.reset_image_signals(owner);
         self.process_wait_states
             .get_mut(&owner)

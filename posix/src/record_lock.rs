@@ -112,6 +112,15 @@ impl Registry {
     pub(super) fn has_file(&self, file: FileKey) -> bool {
         self.entries.iter().any(|lock| lock.file == file)
     }
+    pub(super) fn owns_file(&self, owner: u64, file: FileKey) -> bool {
+        self.entries
+            .iter()
+            .any(|lock| lock.owner == owner && lock.file == file)
+    }
+    pub(super) fn release_file(&mut self, owner: u64, file: FileKey) {
+        self.entries
+            .retain(|lock| lock.owner != owner || lock.file != file);
+    }
     pub(super) fn retire_owner(&mut self, owner: u64) {
         self.entries.retain(|lock| lock.owner != owner);
     }
@@ -304,9 +313,7 @@ impl OwnedLocks<'_> {
     /// Closing ANY description of this file releases this process's locks.
     /// The FD/IPC adapter must call this, including dup2 replacement/exec close.
     pub fn release_file(&mut self, file: FileKey) {
-        self.registry
-            .entries
-            .retain(|lock| lock.owner != self.owner || lock.file != file);
+        self.registry.release_file(self.owner, file);
     }
 }
 

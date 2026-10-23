@@ -48,6 +48,9 @@ mod request_image;
 #[path = "support/record_lock_request.rs"]
 mod record_lock_request;
 
+#[path = "support/record_lock_exec.rs"]
+mod record_lock_exec;
+
 #[path = "support/wait_reply.rs"]
 mod wait_reply;
 

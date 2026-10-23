@@ -448,3 +448,49 @@ fn a_failed_deferred_continue_notification_does_not_prevent_independent_exit_cle
     service.release_unused_record_lock_files(&mut fs);
     assert_eq!(fs.released.len(), 1);
 }
+
+#[test]
+fn exec_preparation_releases_the_real_file_pin_only_after_an_uncancelled_native_image_change() {
+    for cancel in [false, true] {
+        let (mut service, _, peer, _, mut fs, mut processes) = orphan_family();
+        let write = request(Operation::Set(Kind::Write));
+        let observation = pending(write, &[object(71, write)], &mut fs);
+        assert_eq!(
+            finish(&mut service, peer, observation, Ok(()), &mut fs).1,
+            Some(71)
+        );
+        let status = sample_status();
+        let file = posix_service::record_lock::FileKey {
+            device: status.device,
+            inode: status.inode,
+        };
+        let token = service
+            .prepare_record_lock_exec(peer, &[file])
+            .unwrap()
+            .unwrap();
+        service.refresh_image_state(peer, &mut processes).unwrap();
+        service.release_unused_record_lock_files(&mut fs);
+        assert!(
+            fs.released.is_empty(),
+            "merely preparing an exec must not close the live file pin"
+        );
+        if cancel {
+            service.cancel_record_lock_exec(peer, token).unwrap();
+        }
+        processes.images.insert(
+            141,
+            Ok(mnu_abi::ProcessStatus {
+                process_id: peer.process_id,
+                image_revision: 1,
+                state: mnu_abi::PROCESS_STATE_RUNNING,
+                ..Default::default()
+            }),
+        );
+        service.refresh_image_state(peer, &mut processes).unwrap();
+        service.release_unused_record_lock_files(&mut fs);
+        assert_eq!(fs.released.len(), usize::from(!cancel));
+        service.refresh_image_state(peer, &mut processes).unwrap();
+        service.release_unused_record_lock_files(&mut fs);
+        assert_eq!(fs.released.len(), usize::from(!cancel));
+    }
+}

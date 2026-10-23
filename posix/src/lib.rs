@@ -52,6 +52,7 @@ pub mod process_timer_reactor;
 pub mod process_timer_delivery;
 pub mod timer_callback;
 pub mod record_lock;
+pub mod record_lock_exec;
 pub mod record_lock_request;
 mod fork_state;
 pub mod resource_policy;
@@ -786,6 +787,7 @@ pub struct PosixService<H: Copy = u32> {
     process_timers: process_timer::Registry,
     record_locks: record_lock::Registry,
     record_lock_files: Vec<(record_lock::FileKey, AttachedObject<H>)>,
+    record_lock_execs: record_lock_exec::Preparations,
     resource_policies: Vec<(u64, Box<dyn resource_policy::Published<H>>)>,
     prepared_forks: Vec<(u64, fork_state::ForkState<H>)>,
     next_fork_token: u64,
@@ -831,6 +833,7 @@ impl PosixService<u32> {
             process_timers: process_timer::Registry::new(),
             record_locks: record_lock::Registry::new(),
             record_lock_files: Vec::new(),
+            record_lock_execs: record_lock_exec::Preparations::new(),
             resource_policies: Vec::new(),
             prepared_forks: Vec::new(),
             next_fork_token: 1,
@@ -1261,6 +1264,7 @@ impl<H: Copy> PosixService<H> {
                     && !self.has_cpu_timer_state(*child_id)
                     && !self.process_timers.has_owner(*child_id)
                     && !self.record_locks.has_owner(*child_id)
+                    && !self.record_lock_execs.has_owner(*child_id)
                     && !self.process_timers.observes_process(*child_id)
                 {
                     return None;
@@ -1335,6 +1339,7 @@ impl<H: Copy> PosixService<H> {
         // Callers have already observed native exit. Record locks must not
         // survive merely because a later parent-notification step fails.
         self.record_locks.retire_owner(process_id);
+        self.record_lock_execs.retire_owner(process_id);
         self.refresh_child_notifications_for_child(process_id, processes)?;
         self.refresh_parent_image(process_id, processes)?;
         if self.parents.get(&process_id).is_some_and(|parent| self.discards_child_status(*parent)) {
@@ -1606,6 +1611,7 @@ impl<H: Copy> PosixService<H> {
                             || self.has_cpu_timer_state(*child_id)
                             || self.process_timers.has_owner(*child_id)
                             || self.record_locks.has_owner(*child_id)
+                            || self.record_lock_execs.has_owner(*child_id)
                             || self.process_timers.observes_process(*child_id))) =>
                 {
                     self.processes.get(child_id).copied()
@@ -2283,6 +2289,7 @@ impl<H: Copy> PosixService<H> {
         self.cpu_timers.retain(|&(owner, _), _| owner != child_id);
         self.process_timers.retire_owner(child_id);
         self.record_locks.retire_owner(child_id);
+        self.record_lock_execs.retire_owner(child_id);
         self.retire_process_clock_targets(child_id);
         if let Some(directories) = self.directories.remove(&child_id) {
             filesystem.release_object(directories.root);
