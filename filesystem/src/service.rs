@@ -784,6 +784,9 @@ impl FilesystemService {
         )?;
         let (parent, name) = match resolution {
             Resolution::Found { .. } => return Err(EEXIST),
+            Resolution::Missing { .. } if payload.last() == Some(&b'/') => {
+                return Err(ENOENT);
+            }
             Resolution::Missing { parent, name } => (parent, name),
         };
         let metadata = parent.metadata();
@@ -1072,6 +1075,9 @@ impl FilesystemService {
         )?;
         let (parent, name) = match resolution {
             Resolution::Found { .. } => return Err(EEXIST),
+            Resolution::Missing { .. } if link_path.last() == Some(&b'/') => {
+                return Err(ENOENT);
+            }
             Resolution::Missing { parent, name } => (parent, name),
         };
         let metadata = parent.metadata();
@@ -2699,6 +2705,13 @@ impl FilesystemService {
                 parent: Some((parent, name)),
             } => (parent, name, Some(inode)),
             Resolution::Found { parent: None, .. } => return Err(EINVAL),
+            Resolution::Missing { .. } if new_path.last() == Some(&b'/') => {
+                return Err(if source_inode.file_type().is_dir() {
+                    ENOENT
+                } else {
+                    ENOTDIR
+                });
+            }
             Resolution::Missing { parent, name } => (parent, name, None),
         };
         if destination_inode.as_ref().is_some_and(|inode| {
@@ -2920,11 +2933,8 @@ impl FilesystemService {
         let uid = credentials.effective_uid;
         let gid = credentials.effective_gid;
         let groups = credentials.supplementary_groups();
-        let source_follow = if request.flags & protocol::LINK_AT_FOLLOW_SOURCE != 0 {
-            FollowSymlinks::All
-        } else {
-            FollowSymlinks::ExcludeFinalComponent
-        };
+        let source_follow =
+            lookup_symlinks(old_path, request.flags & protocol::LINK_AT_FOLLOW_SOURCE == 0);
         let (mut source_inode, _, source_volume) = self.resolve_scoped_inode(
             old_path,
             PathAnchors {
@@ -2952,6 +2962,9 @@ impl FilesystemService {
         )?;
         let (new_parent_inode, new_name) = match resolution {
             Resolution::Found { .. } => return Err(EEXIST),
+            Resolution::Missing { .. } if new_path.last() == Some(&b'/') => {
+                return Err(ENOTDIR);
+            }
             Resolution::Missing { parent, name } => (parent, name),
         };
         if source_volume != destination_volume {

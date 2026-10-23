@@ -4057,3 +4057,6 @@ fn expanded_path_budget_uses_only_the_unresolved_suffix_on_ext4() {
 
 #[path = "support/trailing_lookup.rs"]
 mod trailing_lookup;
+
+#[path = "support/trailing_creation.rs"]
+mod trailing_creation;

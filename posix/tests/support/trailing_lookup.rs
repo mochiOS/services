@@ -1,6 +1,6 @@
 use super::*;
 
-fn prepared(mode: u32) -> FilesystemService {
+pub(super) fn prepared(mode: u32) -> FilesystemService {
     let mut fs = test_filesystem();
     fs.chmod_at(
         protocol::Header {
@@ -54,7 +54,7 @@ fn prepared(mode: u32) -> FilesystemService {
     fs
 }
 
-fn status(fs: &mut FilesystemService, path: &[u8]) -> protocol::NodeStatus {
+pub(super) fn status(fs: &mut FilesystemService, path: &[u8]) -> protocol::NodeStatus {
     let response = fs
         .stat_at(
             protocol::Header {
