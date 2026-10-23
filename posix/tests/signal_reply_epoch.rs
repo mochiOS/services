@@ -76,7 +76,7 @@ impl Client{
         let token=OWNER.load(Ordering::Acquire);
         if call==0 && matches!(mode,1|2|3){copied_child()}
         if (call==0&&mode==2)||mode==6 {return Err(5)}
-        let empty=(call==0&&matches!(mode,3|7))
+        let empty=(call==0&&matches!(mode,3|7)) || (mode==20&&call>0)
             || COMPLETIONS.load(Ordering::Acquire)>0 || DEFAULTS.load(Ordering::Acquire)>0;
         Ok(posix_protocol::SignalDelivery{signal:if empty{0}else{11},token})
     }
@@ -104,7 +104,7 @@ fn dispatch_signal(delivery:posix_protocol::SignalDelivery,info:Option<SigInfo>,
     preparation.started=!matches!(MODE.load(Ordering::Acquire),8|9|10|14|17);
     match MODE.load(Ordering::Acquire){
         4|5 if call==0=>{copied_child();if MODE.load(Ordering::Acquire)==5{Err(22)}else{Ok(0)}}
-        8|14|17=>Ok(1),9=>Ok(3),10=>Ok(2),_=>Ok(0)
+        8|14|17=>Ok(1),9=>Ok(3),10=>Ok(2),20=>Ok(4),_=>Ok(0)
     }
 }
 fn apply_default_signal_action(delivery:posix_protocol::SignalDelivery)->Result<(),i32>{
@@ -141,11 +141,11 @@ fn main(){
     assert_eq!(drain_pending_signals_with_context(&mut UContext,false),Ok(()));
     assert_eq!(COMPLETIONS.load(Ordering::Acquire),1);
     assert_eq!(NOTIFICATION.load(Ordering::Acquire),0);
-    for mode in [0,1,2,3,4,5,6,7,8,9,10,12,13,14,15,16,17,18,19] {
+    for mode in [0,1,2,3,4,5,6,7,8,9,10,12,13,14,15,16,17,18,19,20] {
         reset(mode,false);
         let result=drain_pending_signals_with_context(&mut UContext,false);
         assert_eq!(result,match mode{5|10=>Err(22),6|15|17|19=>Err(5),_=>Ok(())},"queued mode {mode}");
-        let completed=match mode{5|6|7|8|14|17=>0,_=>1};
+        let completed=match mode{5|6|7|8|14|17|20=>0,_=>1};
         assert_eq!(COMPLETIONS.load(Ordering::Acquire),completed,"queued mode {mode}");
         assert_eq!(DEFAULTS.load(Ordering::Acquire),if matches!(mode,8|14|17){1}else{0});
         if matches!(mode,1|2|3) {assert_eq!(DISPATCHES.load(Ordering::Acquire),1)}

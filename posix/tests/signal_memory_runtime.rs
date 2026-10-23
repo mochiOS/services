@@ -120,6 +120,28 @@ fn optional_info_still_validates_origin_and_overflow() {
         Ok(())
     );
 }
+
+#[test]
+fn resolved_timer_siginfo_uses_local_full_width_value_and_zeroes_c_padding() {
+    let origin = posix_protocol::signal_origin::Origin {
+        source: posix_protocol::signal_origin::TIMER,
+        timer: Some(posix_protocol::signal_origin::TimerStatus {
+            timer_id: 71,
+            value_token: 1,
+            overrun: 7,
+        }),
+        ..posix_protocol::signal_origin::Origin::system()
+    };
+    let value = SigInfo::from_timer_origin(TEST_SIGNAL, origin, usize::MAX - 1).unwrap();
+    let mut bytes = [0xa5; 42];
+    implementation::write_resolved_info(bytes[1..].as_mut_ptr().cast(), value).unwrap();
+    let mut expected = [0; 40];
+    expected[..4].copy_from_slice(&(TEST_SIGNAL as i32).to_ne_bytes());
+    expected[4..8].copy_from_slice(&3i32.to_ne_bytes());
+    expected[8..16].copy_from_slice(&(usize::MAX - 1).to_ne_bytes());
+    assert_eq!(&bytes[1..41], &expected);
+    assert_eq!((bytes[0], bytes[41]), (0xa5, 0xa5));
+}
 #[test]
 fn invalid_application_memory_returns_efault_for_each_metadata_format() {
     for address in [0, 1, usize::MAX] {

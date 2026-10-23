@@ -92,7 +92,8 @@ fn runtime_retries_unrelated_handlers_without_changing_mask_or_errno() {
         .next()
         .unwrap();
     assert!(implementation.contains(".thread_signal_epoch()"));
-    assert!(implementation.contains(".wait_thread_signal_since(mask, epoch)"));
+    assert!(implementation.contains(".wait_thread_signal_info_since(mask, epoch)"));
+    assert!(implementation.contains("signal_info::prepare(accepted.signal, accepted.origin)"));
     assert!(implementation.contains("drain_pending_signals()?"));
     assert!(implementation.contains("result.err().unwrap_or(0)"));
     assert!(!implementation.contains("set_errno("));

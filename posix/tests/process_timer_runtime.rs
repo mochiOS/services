@@ -1,6 +1,7 @@
 //! Actual runtime C entry points, checked user-copy and local registry, with
 //! controlled RPC outcomes. This does not substitute for native IPC tests.
 #![allow(dead_code)]
+use mochios_posix_client::signal_context::SigInfo;
 use mochios_posix_protocol as posix_protocol;
 use posix_protocol::process_timer::{Clock, Notification, Value};
 use std::ffi::{c_char, c_int, c_void};
@@ -11,6 +12,8 @@ use std::sync::{
 
 #[path = "../../../user/crates/newlib-runtime/src/process_timer.rs"]
 mod implementation;
+#[path = "../../../user/crates/newlib-runtime/src/signal_info.rs"]
+mod signal_info;
 #[path = "../../../user/crates/newlib-runtime/src/user_copy.rs"]
 mod user_copy;
 #[path = "support/user_copy_native.rs"]
@@ -468,4 +471,112 @@ fn registration_overflow_and_bad_outputs_do_not_panic_or_publish_unchecked_data(
     assert_eq!(implementation::timer_delete(0), -1);
     assert_eq!(ERRNO.load(Ordering::Relaxed), EINVAL);
     assert_eq!(CONTROL.native_delivery_defer.load(Ordering::Relaxed), 0);
+}
+
+fn timer_origin(id: u64, token: u64) -> posix_protocol::signal_origin::Origin {
+    use posix_protocol::signal_origin::{Origin, TimerStatus, TIMER};
+    Origin {
+        source: TIMER,
+        timer: Some(TimerStatus {
+            timer_id: id,
+            value_token: token,
+            overrun: 7,
+        }),
+        ..Origin::system()
+    }
+}
+
+#[test]
+fn actual_timer_creation_resolves_local_sigval_before_deletion_without_leaking_cookie_bits() {
+    let _serial = reset();
+    for raw in [0, 0x1122334455667788, usize::MAX] {
+        let event = event(2, 10, raw);
+        let mut id = 0;
+        assert_eq!(
+            implementation::timer_create(1, event.as_ptr().cast(), &mut id),
+            0
+        );
+        let (_, Notification::Signal { value: token, .. }) =
+            *RPC.lock().unwrap().creates.last().unwrap()
+        else {
+            panic!()
+        };
+        let origin = timer_origin(id as u64, token);
+        let prepared = signal_info::prepare(10, origin).unwrap().unwrap();
+        // A copied snapshot remains valid; it does not hold STATE or the slot.
+        assert_eq!(implementation::timer_delete(id), 0);
+        let info = prepared.into_info().unwrap();
+        assert_eq!((info.si_signo, info.si_code), (10, 3));
+        assert_eq!(unsafe { info.si_value.sival_ptr }, raw);
+        assert_eq!(
+            (
+                info.si_errno,
+                info.si_pid,
+                info.si_uid,
+                info.reserved_uid,
+                info.si_status,
+                info.si_addr
+            ),
+            (0, 0, 0, 0, 0, 0)
+        );
+        assert!(signal_info::prepare(10, origin).unwrap().is_none());
+        // Stale metadata must never resolve through the next occupied slot.
+        let new_id = create_none();
+        assert_ne!(new_id, id);
+        assert!(signal_info::prepare(10, origin).unwrap().is_none());
+        assert_eq!(implementation::timer_delete(new_id), 0);
+    }
+}
+
+#[test]
+fn malformed_unknown_unbound_and_wrong_timer_values_are_not_retired_notifications() {
+    let _serial = reset();
+    let token = state().timer_values.reserve(0x1234).unwrap();
+    assert!(matches!(
+        signal_info::prepare(10, timer_origin(101, token.raw())),
+        Err(EIO)
+    ));
+    state().timer_values.bind(token, 101).unwrap();
+    for (id, cookie) in [(101, 0), (101, token.raw() + 1), (102, token.raw())] {
+        assert!(matches!(
+            signal_info::prepare(10, timer_origin(id, cookie)),
+            Err(EIO)
+        ));
+    }
+    state().timer_values.retire(101);
+    let origin = timer_origin(101, token.raw());
+    assert!(signal_info::prepare(10, origin).unwrap().is_none());
+    let mut cases = vec![origin; 6];
+    cases[0].timer = None;
+    cases[1].timer.as_mut().unwrap().overrun = u32::MAX;
+    cases[2].timer.as_mut().unwrap().timer_id = 0;
+    cases[3].process_id = 9;
+    cases[4].real_uid = 7;
+    cases[5].child.status = 1;
+    for bad in cases {
+        assert!(matches!(signal_info::prepare(10, bad), Err(EIO)));
+    }
+    for signal in [0, 65, u32::MAX] {
+        assert!(matches!(signal_info::prepare(signal, origin), Err(EIO)));
+    }
+}
+
+#[test]
+fn ordinary_plain_delivery_does_not_narrow_identity_but_siginfo_still_checks_c_overflow() {
+    let _serial = reset();
+    use posix_protocol::signal_origin::{Origin, USER};
+    let origin = Origin {
+        source: USER,
+        process_id: i32::MAX as u64 + 1,
+        real_uid: 0,
+        ..Origin::system()
+    };
+    let prepared = signal_info::prepare(10, origin).unwrap().unwrap();
+    assert!(matches!(prepared.into_info(), Err(EOVERFLOW)));
+    let info = signal_info::prepare(10, Origin::system())
+        .unwrap()
+        .unwrap()
+        .into_info()
+        .unwrap();
+    assert_eq!((info.si_signo, info.si_code), (10, 128));
 }

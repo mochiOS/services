@@ -145,6 +145,7 @@ pub const SIGNAL_ILL:u32=4;pub const SIGNAL_TRAP:u32=5;
 pub const SIGNAL_CHLD:u32=20;
 pub const SIGNAL_CHILD_OPTION_NOCLDSTOP:u32=1;pub const SIGNAL_CHILD_OPTION_NOCLDWAIT:u32=2;
 pub const SIGNAL_DISPOSITION_DEFAULT:u32=0;
+pub const STATUS_EAGAIN:i32=11;
 pub struct SignalDisposition{pub signal:u32,pub kind:u32,pub child_options:u32}
 #[derive(Clone,Copy)]pub struct SignalDelivery{pub signal:u32}
 }
@@ -176,13 +177,30 @@ struct Preparation{control:&'static ThreadControl}
 mod signal_scope{pub struct Scope;}
 struct SigInfo;
 impl SigInfo {fn from_origin(_:u32,_:())->Result<Self,signal_context::InfoError>{Ok(Self)}}
+// The local-value adapter is tested with the actual registry separately in
+// process_timer_runtime. Here control its outcome while exercising the actual
+// dispatcher, one-shot action selection and mask restoration below.
+static RETIRED:AtomicU64=AtomicU64::new(0);
+mod signal_info {
+use super::*;
+pub enum Prepared{Ready(SigInfo)}
+impl Prepared{pub fn into_info(self)->Result<SigInfo,i32>{match self{Self::Ready(info)=>Ok(info)}}}
+pub fn prepare(_:u32,_:())->Result<Option<Prepared>,i32>{
+Ok(if RETIRED.load(Ordering::SeqCst)!=0{None}else{Some(Prepared::Ready(SigInfo))})}
+}
 struct Client;
+enum PosixClientError{Remote(i32),Transport(i32)}
+static ORIGIN_ERROR:AtomicU64=AtomicU64::new(0);
 fn posix_client()->Result<Client,i32>{Ok(Client)}
-impl Client{fn signal_delivery_origin(&self,_:posix_protocol::SignalDelivery)->Result<(),i32>{Ok(())}}
-impl Client{fn set_signal_disposition(&self,action:posix_protocol::SignalDisposition)->Result<(),i32>{
+impl Client{fn signal_delivery_origin(&self,_:posix_protocol::SignalDelivery)->Result<(),PosixClientError>{
+match ORIGIN_ERROR.load(Ordering::SeqCst){1=>Err(PosixClientError::Remote(11)),2=>Err(PosixClientError::Transport(11)),_=>Ok(())}}}
+impl Client{fn set_signal_disposition(&self,action:posix_protocol::SignalDisposition)->Result<(),PosixClientError>{
 assert_eq!(action.signal,30);assert_eq!(action.child_options,0);
 REMOTE_DISPOSITION.store(action.kind as u64,Ordering::SeqCst);Ok(())}}
-fn map_posix_client_error(value:i32)->i32{value}
+trait ErrorNumber{fn number(self)->i32;}
+impl ErrorNumber for i32{fn number(self)->i32{self}}
+impl ErrorNumber for PosixClientError{fn number(self)->i32{match self{Self::Remote(e)|Self::Transport(e)=>e}}}
+fn map_posix_client_error(value:impl ErrorNumber)->i32{value.number()}
 #[derive(Clone,Copy,Default)]struct Machine;
 impl Machine{fn checked_return(&self,_:&Self)->Option<Self>{Some(*self)}}
 #[derive(Default)]struct UContext{uc_sigmask:u64,uc_mcontext:Machine}
@@ -246,6 +264,30 @@ let mut context=UContext::default();let mut prep=Preparation{control:&CONTROL};l
 assert_eq!(dispatch_signal(posix_protocol::SignalDelivery{signal:30},None,&mut context,false,&mut prep,scope.as_mut()),Ok(0));
 assert_eq!(MASK.load(Ordering::SeqCst),ORIGINAL);assert_eq!(MAX_DEPTH.load(Ordering::SeqCst),1);
 assert_eq!(SIGNAL_ACTIONS.lock()[29].handler,0);
+}
+RETIRED.store(1,Ordering::SeqCst);
+for handler in [0,1,2,usize::MAX] {
+ for flags in [0,SA_RESETHAND|SA_SIGINFO|SA_RESTART] {
+  SIGNAL_ACTIONS.lock()[29]=Action{handler,sa_flags:flags,sa_mask:OTHER};
+  REMOTE_DISPOSITION.store(2,Ordering::SeqCst);
+  MASK.store(ORIGINAL,Ordering::SeqCst);
+  let before=CONTROL.caught_signal_generation.load(Ordering::SeqCst);
+  let mut context=UContext::default();let mut prep=Preparation{control:&CONTROL};let mut scope=std::pin::pin!(signal_scope::Scope);
+  assert_eq!(dispatch_signal(posix_protocol::SignalDelivery{signal:30},None,&mut context,false,&mut prep,scope.as_mut()),Ok(3));
+  assert_eq!(SIGNAL_ACTIONS.lock()[29].handler,handler);
+  assert_eq!(SIGNAL_ACTIONS.lock()[29].sa_flags,flags);
+  assert_eq!(REMOTE_DISPOSITION.load(Ordering::SeqCst),2);
+  assert_eq!(MASK.load(Ordering::SeqCst),ORIGINAL);
+  assert_eq!(CONTROL.caught_signal_generation.load(Ordering::SeqCst),before);
+ }
+}
+RETIRED.store(0,Ordering::SeqCst);
+for mode in [1,2] {
+ ORIGIN_ERROR.store(mode,Ordering::SeqCst);
+ SIGNAL_ACTIONS.lock()[29]=Action{handler:2,sa_flags:SA_RESETHAND|SA_SIGINFO,sa_mask:OTHER};
+ let mut context=UContext::default();let mut prep=Preparation{control:&CONTROL};let mut scope=std::pin::pin!(signal_scope::Scope);
+ assert_eq!(dispatch_signal(posix_protocol::SignalDelivery{signal:30},None,&mut context,false,&mut prep,scope.as_mut()),if mode==1{Ok(4)}else{Err(11)});
+ assert_eq!(SIGNAL_ACTIONS.lock()[29].handler,2);
 }
 }
 "#);
