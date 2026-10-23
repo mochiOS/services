@@ -1,8 +1,10 @@
 /* Real mochiOS integration. Run with no option (pipe), --socket (recv),
- * --socket-read, --readv, and --socket-readv. Link with the fresh runtime;
+ * --socket-read, --readv, --socket-readv, --poll, --select, --socket-poll,
+ * and --socket-select. Link with the fresh runtime;
  * host execution cannot validate native COW, Handle inheritance or exec. */
 #define _GNU_SOURCE 1
 #include <errno.h>
+#include <poll.h>
 #include <pthread.h>
 #include <reent.h>
 #include <sched.h>
@@ -10,6 +12,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
@@ -28,6 +31,7 @@ static atomic_uint_fast64_t worker_handle;
 static int blocked_pipe[2];
 static int socket_wait;
 static int vector_wait;
+static int multiplex_wait;
 static int64_t native(uint64_t number, uint64_t a, uint64_t b) {
   __asm__ volatile("syscall"
                    : "+a"(number)
@@ -70,6 +74,17 @@ static void *worker(void *unused) {
   atomic_store_explicit(&ready, 1, memory_order_release);
   char release[2] = {0};
   struct iovec vectors[2] = {{release, 1}, {release + 1, 1}};
+  if (multiplex_wait) {
+    struct pollfd descriptor = {blocked_pipe[0], POLLIN, 0};
+    fd_set readfds;
+    FD_ZERO(&readfds);
+    FD_SET(blocked_pipe[0], &readfds);
+    int status = multiplex_wait == 1
+                     ? poll(&descriptor, 1, -1)
+                     : select(blocked_pipe[0] + 1, &readfds, NULL, NULL, NULL);
+    if (status != 1)
+      atomic_store(&worker_error, 1);
+  }
   ssize_t count = vector_wait        ? readv(blocked_pipe[0], vectors, 2)
                   : socket_wait == 1 ? recv(blocked_pipe[0], release, 1, 0)
                                      : read(blocked_pipe[0], release, 1);
@@ -90,6 +105,15 @@ int main(int argc, char **argv) {
                               strcmp(argv[1], "--socket-readv") == 0);
   if (vector_wait && strcmp(argv[1], "--socket-readv") == 0)
     socket_wait = 2;
+  if (argc == 2) {
+    if (strcmp(argv[1], "--poll") == 0 || strcmp(argv[1], "--socket-poll") == 0)
+      multiplex_wait = 1;
+    if (strcmp(argv[1], "--select") == 0 ||
+        strcmp(argv[1], "--socket-select") == 0)
+      multiplex_wait = 2;
+    if (multiplex_wait && strncmp(argv[1], "--socket-", 9) == 0)
+      socket_wait = 2;
+  }
   CHECK(pthread_key_create(&key, tls_cleanup) == 0);
   CHECK((socket_wait ? socketpair(AF_UNIX, SOCK_STREAM, 0, blocked_pipe)
                      : pipe(blocked_pipe)) == 0);

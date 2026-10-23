@@ -353,10 +353,8 @@ fn multiplex_waits_own_partial_lease_arrays_and_snapshot_poll_inputs_before_call
             !body.contains("let mut leases ="),
             "untracked lease array: {name}"
         );
-        assert!(
-            body.contains("defer_native_delivery()"),
-            "publication gap: {name}"
-        );
+        assert!(body.contains("io_resources::with_initialized_fork_opaque"));
+        assert!(body.find("with_fd_entry(").unwrap() < body.find("|_| true").unwrap());
         if name == "poll_with_deadline" {
             assert!(body.contains("io_resources::with_initialized"));
             assert!(
