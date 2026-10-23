@@ -150,6 +150,35 @@ impl OwnedTimers<'_> {
             })
     }
 
+    /// Deterministic candidate for a joint signal selector. No event is
+    /// consumed here; ordinary/thread-pending signals may still take priority.
+    pub fn select_pending_signal(&self, mask: u64) -> Option<Pending> {
+        self.pending_signals(mask)
+            .filter_map(|pending| match pending.notification {
+                Notification::Signal { signal, .. } => Some((signal, pending)),
+                _ => None,
+            })
+            .min_by_key(|(signal, pending)| (*signal, pending.timer.raw()))
+            .map(|(_, pending)| pending)
+    }
+
+    pub(super) fn selected_signal_basis(&self, selected: Pending) -> Result<Clock, i32> {
+        let (index, pending) = self.selected(selected)?;
+        if !matches!(pending.notification, Notification::Signal { .. }) {
+            return Err(STATUS_EINVAL);
+        }
+        Ok(self.registry.timers[index].basis)
+    }
+
+    fn selected(&self, selected: Pending) -> Result<(usize, Pending), i32> {
+        let index = self.index(selected.timer)?;
+        let pending = self.registry.timers[index]
+            .pending
+            .filter(|pending| pending.sequence == selected.sequence)
+            .ok_or(protocol::STATUS_EAGAIN)?;
+        Ok((index, pending))
+    }
+
     pub(super) fn resolve(&self, raw: u64) -> Result<TimerId, i32> {
         let id = TimerId(raw);
         self.index(id)?;
@@ -351,39 +380,61 @@ impl OwnedTimers<'_> {
     /// reactor wakeup. Expirations during that gap belong to this delivery.
     /// A failed or old completion cannot consume a replacement notification.
     pub fn accept(&mut self, selected: Pending, samples: Samples) -> Result<Pending, i32> {
-        self.finish(selected, samples, true)
+        self.finish_with_reply(selected, samples, true, |_| true)?
+            .ok_or(protocol::STATUS_EIO)
+    }
+
+    /// Publish first, then commit acceptance. The synchronous reply closure
+    /// must not re-enter the registry or invoke application code. A failed
+    /// publication leaves this event pending and the last overrun unchanged.
+    /// False must mean nothing was published; no fallible work may follow a
+    /// successful publication inside the closure.
+    pub fn accept_with_reply<R>(
+        &mut self,
+        selected: Pending,
+        samples: Samples,
+        reply: R,
+    ) -> Result<Option<Pending>, i32>
+    where
+        R: FnOnce(Pending) -> bool,
+    {
+        self.finish_with_reply(selected, samples, true, reply)
     }
 
     /// Used when delivery is intentionally discarded, for example SIG_IGN.
     /// It must not change the last delivered overrun value.
     pub fn discard(&mut self, selected: Pending, samples: Samples) -> Result<(), i32> {
-        self.finish(selected, samples, false).map(|_| ())
+        self.finish_with_reply(selected, samples, false, |_| true)
+            .map(|_| ())
     }
 
-    fn finish(
+    fn finish_with_reply<R>(
         &mut self,
         selected: Pending,
         samples: Samples,
         accepted: bool,
-    ) -> Result<Pending, i32> {
-        let index = self.index(selected.timer)?;
+        reply: R,
+    ) -> Result<Option<Pending>, i32>
+    where
+        R: FnOnce(Pending) -> bool,
+    {
         // Validate before observation so a stale completion changes nothing,
         // including a replacement timer's deadline or overrun accounting.
-        self.registry.timers[index]
-            .pending
-            .filter(|pending| pending.sequence == selected.sequence)
-            .ok_or(protocol::STATUS_EAGAIN)?;
+        let (index, _) = self.selected(selected)?;
         self.observe(selected.timer, samples)?;
         let timer = &mut self.registry.timers[index];
         let pending = timer
             .pending
             .filter(|pending| pending.sequence == selected.sequence)
             .ok_or(protocol::STATUS_EAGAIN)?;
+        if !reply(pending) {
+            return Ok(None);
+        }
         timer.pending = None;
         if accepted {
             timer.last_overrun = pending.overrun();
         }
-        Ok(pending)
+        Ok(Some(pending))
     }
 }
 

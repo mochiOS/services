@@ -6,6 +6,9 @@ use posix_service::{
 use protocol::process_timer::{self as wire, Clock, Notification, Value};
 use std::{cell::Cell, rc::Rc};
 
+#[path = "process_timer_delivery.rs"]
+mod delivery;
+
 struct Clocks {
     samples: Samples,
     reads: Vec<(u32, Clock)>,
