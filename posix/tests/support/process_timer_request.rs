@@ -43,6 +43,7 @@ impl ClockBackend<u32> for RecordingProcesses {
     fn timer_thread_target(&mut self, process: u32, handle: u32) -> Result<u64, i32> {
         match (process, handle) {
             (2901, 818) => Ok(18),
+            (2901, 817) => Ok(17),
             (_, 899) => Err(protocol::STATUS_EPERM),
             _ => Err(protocol::STATUS_ESRCH),
         }

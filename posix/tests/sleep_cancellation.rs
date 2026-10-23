@@ -70,7 +70,9 @@ fn map_kernel_errno(raw: u64) -> i32 {{ raw as i32 }}
 mod cpu_sleep {{
     pub fn target(_:u64)->Option<u64>{{None}}
     pub fn sleep(_:u64,_:i32,_:super::Timespec,_:*mut super::Timespec)->Result<(),i32>{{unreachable!()}}
+    pub fn sleep_thread(_:u64,_:i32,_:super::Timespec,_:*mut super::Timespec)->Result<(),i32>{{unreachable!()}}
 }}
+mod thread_clock {{ pub fn is_id(_:u64)->bool{{false}} }}
 fn syscall_errno(_: u64) -> Result<u64, i32> {{ unreachable!() }}
 mod mnu_abi {{
     #[derive(Default)] pub struct ClockInstant {{ pub seconds: u64, pub nanoseconds: u32, pub reserved: u32 }}

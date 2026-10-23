@@ -905,10 +905,11 @@ fn main() {
                 ))
             }
             (Some(peer), Some((header, payload)), true)
-                if header.opcode == protocol::OP_PROCESS_CPU_SLEEP =>
+                if matches!(header.opcode, protocol::OP_PROCESS_CPU_SLEEP | protocol::OP_THREAD_CPU_SLEEP) =>
             {
                 let result = request_image.ok_or(protocol::STATUS_EPERM).and_then(|image| {
                     cpu_sleep_native::begin(&mut cpu_sleeps, &mut service, peer, image,
+                        platform::ipc::endpoint_execution_identity(sender).ok(),
                         header, payload, &attachments, &mut processes, sender)
                 });
                 match result {

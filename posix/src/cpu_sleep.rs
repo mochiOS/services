@@ -17,10 +17,16 @@ pub trait Completion {
     fn publish(&mut self, result: Result<(), i32>) -> Result<bool, i32>;
 }
 
+#[derive(Clone, Copy)]
+enum Subject {
+    Process(u64),
+    Thread(u64),
+}
+
 struct Wait<C> {
     owner: PeerIdentity,
     image: RequestImage,
-    subject: u64,
+    subject: Subject,
     deadline: u128,
     result: Option<Result<(), i32>>,
     completion: C,
@@ -40,6 +46,59 @@ impl<C: Completion> Default for Registry<C> {
 }
 
 impl<C: Completion> Registry<C> {
+    /// Select a thread only through a borrowed explicit WAIT attachment.
+    /// Sender identity is native endpoint metadata, never request payload.
+    pub fn begin_thread_request_with_reply<H: Copy, B: ClockBackend<H>>(
+        &mut self,
+        service: &mut PosixService<H>,
+        peer: PeerIdentity,
+        image: RequestImage,
+        sender: Option<mnu_abi::ExecutionIdentity>,
+        header: protocol::Header,
+        payload: &[u8],
+        attachments: &[AttachedObject<H>],
+        completion: C,
+        backend: &mut B,
+        reply: impl FnOnce(u128) -> bool,
+    ) -> Result<bool, i32> {
+        if header.opcode != protocol::OP_THREAD_CPU_SLEEP {
+            return Err(protocol::STATUS_ENOSYS);
+        }
+        if header.flags != 0
+            || header.status != 0
+            || header.payload_len as usize != payload.len()
+            || attachments.len() != 1
+            || attachments[0].rights != mnu_abi::HANDLE_RIGHT_WAIT
+        {
+            return Err(STATUS_EINVAL);
+        }
+        let request =
+            protocol::cpu_sleep::decode_thread_request(payload).map_err(|_| STATUS_EINVAL)?;
+        let sender = sender
+            .filter(|sender| sender.process_id == peer.process_id && sender.thread_id != 0)
+            .ok_or(protocol::STATUS_EPERM)?;
+        service.validate_request_image(peer, image, backend)?;
+        let process = service.process_clock_target(peer, peer.process_id, backend)?;
+        let thread = backend.timer_thread_target(process, attachments[0].handle)?;
+        if thread == 0 {
+            return Err(protocol::STATUS_EIO);
+        }
+        if thread == sender.thread_id {
+            return Err(STATUS_EINVAL);
+        }
+        self.admit(
+            service,
+            peer,
+            image,
+            Subject::Thread(thread),
+            request.absolute,
+            request.nanoseconds,
+            completion,
+            backend,
+            reply,
+        )
+    }
+
     /// IPC admission keeps the channel rollback-owned even for malformed
     /// frames or unexpected attachments. No request byte supplies the owner.
     pub fn begin_request_with_reply<H: Copy, B: ClockBackend<H>>(
@@ -112,6 +171,36 @@ impl<C: Completion> Registry<C> {
         if subject > i32::MAX as u64 || nanoseconds > protocol::process_timer::MAX_DURATION_NS {
             return Err(STATUS_EINVAL);
         }
+        let subject = if subject == 0 {
+            peer.process_id
+        } else {
+            subject
+        };
+        self.admit(
+            service,
+            peer,
+            image,
+            Subject::Process(subject),
+            absolute,
+            nanoseconds,
+            completion,
+            backend,
+            reply,
+        )
+    }
+
+    fn admit<H: Copy, B: ClockBackend<H>>(
+        &mut self,
+        service: &mut PosixService<H>,
+        peer: PeerIdentity,
+        image: RequestImage,
+        subject: Subject,
+        absolute: bool,
+        nanoseconds: u128,
+        completion: C,
+        backend: &mut B,
+        reply: impl FnOnce(u128) -> bool,
+    ) -> Result<bool, i32> {
         if self.waits.len() >= MAX_WAITS
             || self
                 .waits
@@ -125,11 +214,6 @@ impl<C: Completion> Registry<C> {
         self.waits
             .try_reserve(1)
             .map_err(|_| protocol::STATUS_ENOMEM)?;
-        let subject = if subject == 0 {
-            peer.process_id
-        } else {
-            subject
-        };
         let now = read(service, peer, image, subject, backend)?;
         // Unlike timer_settime, zero is an immediately satisfied sleep,
         // including an absolute deadline at the CPU clock's epoch.
@@ -207,15 +291,32 @@ fn read<H: Copy, B: ClockBackend<H>>(
     service: &mut PosixService<H>,
     peer: PeerIdentity,
     image: RequestImage,
-    subject: u64,
+    subject: Subject,
     backend: &mut B,
 ) -> Result<u128, i32> {
     service.validate_request_image(peer, image, backend)?;
-    let process = service.process_clock_target(peer, subject, backend)?;
-    let reading = backend.timer_clock(process, Clock::ProcessCpu);
+    let process = service.process_clock_target(
+        peer,
+        match subject {
+            Subject::Process(pid) => pid,
+            Subject::Thread(_) => peer.process_id,
+        },
+        backend,
+    )?;
+    let reading = match subject {
+        Subject::Process(_) => backend.timer_clock(process, Clock::ProcessCpu),
+        Subject::Thread(thread) => backend.timer_thread_clock(process, thread),
+    };
     service.validate_request_image(peer, image, backend)?;
     // Revalidate visibility and subject liveness after native observation.
-    service.process_clock_target(peer, subject, backend)?;
+    service.process_clock_target(
+        peer,
+        match subject {
+            Subject::Process(pid) => pid,
+            Subject::Thread(_) => peer.process_id,
+        },
+        backend,
+    )?;
     match reading? {
         Reading::Counter(now) => Ok(now),
         _ => Err(protocol::STATUS_EIO),

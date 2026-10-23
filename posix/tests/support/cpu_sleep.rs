@@ -1,6 +1,9 @@
 use super::*;
 use posix_service::cpu_sleep::{Completion, MAX_WAITS_PER_PROCESS, Registry};
 
+#[path = "thread_cpu_sleep.rs"]
+mod thread;
+
 #[derive(Default)]
 struct ChannelState {
     closed: bool,

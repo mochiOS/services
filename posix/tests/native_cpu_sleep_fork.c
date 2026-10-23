@@ -63,7 +63,10 @@ static void *notify_fork_wait(void *unused) {
   return (void *)(uintptr_t)(pthread_kill(main_thread, SIGUSR2) != 0);
 }
 
-int main(void) {
+#ifndef CPU_SLEEP_FORK_ENTRY
+#define CPU_SLEEP_FORK_ENTRY main
+#endif
+int CPU_SLEEP_FORK_ENTRY(void) {
   CHECK(cpu_sleep_baseline() == 0);
   struct sigaction action = {.sa_handler = fork_cpu_wait, .sa_flags = SA_RESTART};
   CHECK(sigemptyset(&action.sa_mask) == 0);

@@ -60,20 +60,27 @@ pub(super) fn begin<B: posix_service::process_timer_request::ClockBackend<u32>>(
     service: &mut PosixService<u32>,
     peer: PeerIdentity,
     image: RequestImage,
+    identity: Option<mnu_abi::ExecutionIdentity>,
     header: protocol::Header,
     payload: &[u8],
     attachments: &[AttachedObject<u32>],
     backend: &mut B,
     sender: u64,
 ) -> Result<bool, i32> {
-    if header.flags != 0
-        || header.status != 0
-        || header.payload_len as usize != payload.len()
-        || !attachments.is_empty()
-    {
+    if header.flags != 0 || header.status != 0 || header.payload_len as usize != payload.len() {
         return Err(posix_service::STATUS_EINVAL);
     }
-    wire::decode_request(payload).map_err(|_| posix_service::STATUS_EINVAL)?;
+    match header.opcode {
+        protocol::OP_PROCESS_CPU_SLEEP if attachments.is_empty() => {
+            wire::decode_request(payload).map_err(|_| posix_service::STATUS_EINVAL)?;
+        }
+        protocol::OP_THREAD_CPU_SLEEP
+            if attachments.len() == 1 && attachments[0].rights == mnu_abi::HANDLE_RIGHT_WAIT =>
+        {
+            wire::decode_thread_request(payload).map_err(|_| posix_service::STATUS_EINVAL)?;
+        }
+        _ => return Err(posix_service::STATUS_EINVAL),
+    }
     let mut pair = mnu_abi::StreamPair::default();
     platform::syscall::call1(
         platform::syscall::SyscallNumber::StreamPairCreate,
@@ -88,6 +95,20 @@ pub(super) fn begin<B: posix_service::process_timer_request::ClockBackend<u32>>(
         mnu_abi::HANDLE_OPTION_NONBLOCKING,
     )
     .map_err(failure)?;
+    if header.opcode == protocol::OP_THREAD_CPU_SLEEP {
+        return waits.begin_thread_request_with_reply(
+            service,
+            peer,
+            image,
+            identity,
+            header,
+            payload,
+            attachments,
+            writer,
+            backend,
+            |deadline| reply(sender, header.request_id, reader.0, deadline),
+        );
+    }
     waits.begin_request_with_reply(
         service,
         peer,

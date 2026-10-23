@@ -33,6 +33,8 @@ thread_local! {
     static CANCEL: Cell<bool> = const { Cell::new(false) };
     static SCOPED: Cell<bool> = const { Cell::new(false) };
     static DEFERRED: Cell<bool> = const { Cell::new(false) };
+    static REFERENCES: Cell<usize> = const { Cell::new(0) };
+    static THREAD_SAMPLES: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
     static REQUESTS: RefCell<Vec<posix_protocol::cpu_sleep::Request>> = const { RefCell::new(Vec::new()) };
     static SAMPLES: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
@@ -50,6 +52,9 @@ fn native_process_id() -> Result<u64, SysError> {
         PID.set(8);
     }
     Ok(identity)
+}
+fn native_thread_id() -> Result<u64, SysError> {
+    Ok(17)
 }
 struct Deferred;
 impl Drop for Deferred {
@@ -144,6 +149,11 @@ mod io_resources {
         assert!(!SCOPED.replace(true));
         let result = match prepare() {
             Ok(mut resources) => {
+                assert_eq!(
+                    REFERENCES.get(),
+                    0,
+                    "temporary Thread Handle entered fork-opaque wait"
+                );
                 assert!(allow(&resources));
                 operation(&mut resources)
             }
@@ -158,6 +168,23 @@ fn posix_client() -> Result<Client, PosixClientError<()>> {
     Ok(Client)
 }
 impl Client {
+    fn begin_thread_cpu_sleep(
+        &self,
+        thread: u32,
+        absolute: bool,
+        nanoseconds: u128,
+    ) -> Result<mochios_posix_client::cpu_sleep::Pending<u32>, PosixClientError<()>> {
+        assert_eq!(thread, 818);
+        assert_eq!(REFERENCES.get(), 1);
+        if CASE.get() == 24 {
+            return Err(PosixClientError::Remote(-3));
+        }
+        self.begin_process_cpu_sleep(posix_protocol::cpu_sleep::Request {
+            process: 0,
+            absolute,
+            nanoseconds,
+        })
+    }
     fn begin_process_cpu_sleep(
         &self,
         request: posix_protocol::cpu_sleep::Request,
@@ -184,6 +211,35 @@ mod process_clock {
     pub fn nanoseconds(pid: u64) -> Result<u128, i32> {
         assert_eq!(CLOSED.get(), 1);
         SAMPLES.with(|samples| samples.borrow_mut().push(pid));
+        Ok(100_000_000)
+    }
+}
+mod thread_clock {
+    use super::*;
+    pub struct Reference;
+    impl Reference {
+        pub fn handle(&self) -> u32 {
+            818
+        }
+    }
+    impl Drop for Reference {
+        fn drop(&mut self) {
+            assert!(SCOPED.get());
+            REFERENCES.set(REFERENCES.get() - 1);
+        }
+    }
+    pub fn timer_target(id: u64) -> Result<(Reference, u64), i32> {
+        assert_eq!(id, 1 << 32);
+        if CASE.get() == 23 {
+            return Err(EINVAL);
+        }
+        REFERENCES.set(REFERENCES.get() + 1);
+        Ok((Reference, if CASE.get() == 22 { 17 } else { 18 }))
+    }
+    pub fn nanoseconds(id: u64) -> Result<u128, i32> {
+        assert_eq!(CLOSED.get(), 1);
+        assert_eq!(REFERENCES.get(), 0);
+        THREAD_SAMPLES.with(|samples| samples.borrow_mut().push(id));
         Ok(100_000_000)
     }
 }
@@ -222,7 +278,7 @@ mod syscall {
         let read = READS.get();
         READS.set(read + 1);
         match CASE.get() {
-            1 | 2 | 3 | 11 | 12 | 13 | 19 if read == 0 => return Err(EAGAIN),
+            1 | 2 | 3 | 11 | 12 | 13 | 19 | 21 if read == 0 => return Err(EAGAIN),
             4 => return Ok(0),
             5 => return Err(EIO),
             6 => {
@@ -284,7 +340,7 @@ fn wait_for_multiplex_while(
         |_| {
             WAITS.set(WAITS.get() + 1);
             match CASE.get() {
-                1 | 11 | 12 | 19 => {
+                1 | 11 | 12 | 19 | 21 => {
                     control
                         .caught_signal_generation
                         .fetch_add(1, Ordering::AcqRel);
@@ -406,5 +462,52 @@ fn cpu_sleep_routes_only_process_clocks_without_narrowing_clock_ids() {
     }
     for id in [0, 1, 3, 4, 1 << 31, 1 << 32, u64::MAX] {
         assert_eq!(actual::target(id), None);
+    }
+}
+
+#[test]
+fn thread_sleep_releases_the_attachment_before_waiting_and_samples_only_the_selected_clock() {
+    for case in 20..=24 {
+        CASE.set(case);
+        PID.set(7);
+        CANCEL.set(false);
+        READS.set(0);
+        WAITS.set(0);
+        CLOSED.set(0);
+        REFERENCES.set(0);
+        CONTROL.with(|control| control.caught_signal_generation.store(0, Ordering::Release));
+        SAMPLES.with(|samples| samples.borrow_mut().clear());
+        THREAD_SAMPLES.with(|samples| samples.borrow_mut().clear());
+        let mut remaining = Timespec {
+            tv_sec: 99,
+            tv_nsec: 99,
+        };
+        assert_eq!(
+            actual::sleep_thread(
+                1 << 32,
+                0,
+                Timespec {
+                    tv_sec: 1,
+                    tv_nsec: 999_999_999
+                },
+                &mut remaining
+            ),
+            match case {
+                20 => Ok(()),
+                21 => Err(EINTR),
+                _ => Err(EINVAL),
+            }
+        );
+        assert_eq!(REFERENCES.get(), 0);
+        assert!(!SCOPED.get());
+        assert_eq!(CLOSED.get(), usize::from(case <= 21));
+        SAMPLES.with(|samples| assert!(samples.borrow().is_empty()));
+        if case == 21 {
+            assert_eq!((remaining.tv_sec, remaining.tv_nsec), (0, 200_000_000));
+            THREAD_SAMPLES.with(|samples| assert_eq!(*samples.borrow(), [1 << 32]));
+        } else {
+            assert_eq!((remaining.tv_sec, remaining.tv_nsec), (99, 99));
+            THREAD_SAMPLES.with(|samples| assert!(samples.borrow().is_empty()));
+        }
     }
 }

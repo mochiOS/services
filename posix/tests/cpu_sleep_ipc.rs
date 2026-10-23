@@ -138,9 +138,22 @@ impl ObjectTransport for Reply {
         output: &mut [u8],
         handles: &mut ObjectHandles<u32>,
     ) -> Result<usize, ()> {
-        assert!(handles.is_empty());
         let (header, payload) = protocol::decode(input).unwrap();
-        assert_eq!(header.opcode, protocol::OP_PROCESS_CPU_SLEEP);
+        if header.opcode == protocol::OP_THREAD_CPU_SLEEP {
+            assert_eq!(handles.len(), 1);
+            assert_eq!(
+                handles.get(0),
+                Some(ObjectHandleAttachment {
+                    handle: 88,
+                    rights: mnu_abi::HANDLE_RIGHT_WAIT
+                })
+            );
+            assert_eq!(wire::decode_thread_request(payload).unwrap().process, 0);
+        } else {
+            assert!(handles.is_empty());
+            assert_eq!(header.opcode, protocol::OP_PROCESS_CPU_SLEEP);
+        }
+        handles.clear();
         assert_eq!(header.flags, 0);
         self.requests
             .borrow_mut()
@@ -229,4 +242,63 @@ fn invalid_client_input_never_performs_a_transport_operation() {
     );
     assert!(client.transport().requests.borrow().is_empty());
     assert!(client.transport().closed.borrow().is_empty());
+}
+
+#[test]
+fn thread_client_delegates_only_wait_and_never_closes_the_borrowed_source() {
+    for case in 0..7 {
+        let mut reply = Reply::valid();
+        match case {
+            1 => reply.handles[0].handle = 88,
+            2 => reply.handles.push(ObjectHandleAttachment {
+                handle: 88,
+                rights: wire::COMPLETION_RIGHTS,
+            }),
+            3 => reply.status = protocol::STATUS_EPERM,
+            4 => reply.transport_error = true,
+            5 => reply.payload[0] = 2,
+            6 => reply.handles[0].rights |= mnu_abi::HANDLE_RIGHT_TRANSFER,
+            _ => {}
+        }
+        let client = Client::new(reply);
+        let result =
+            client.begin_thread_cpu_sleep(88, true, protocol::process_timer::MAX_DURATION_NS);
+        if case == 0 {
+            let pending = result.unwrap();
+            assert_eq!(pending.completion.handle, 77);
+            assert_eq!(pending.deadline_ns, u128::MAX);
+            assert!(client.transport().closed.borrow().is_empty());
+        } else {
+            assert!(result.is_err());
+            assert_eq!(
+                *client.transport().closed.borrow(),
+                if case == 1 { vec![] } else { vec![77] }
+            );
+        }
+    }
+    let client = Client::new(Reply::valid());
+    assert!(client.begin_thread_cpu_sleep(0, false, 1).is_err());
+    assert!(
+        client
+            .begin_thread_cpu_sleep(88, false, protocol::process_timer::MAX_DURATION_NS + 1)
+            .is_err()
+    );
+    assert!(client.transport().requests.borrow().is_empty());
+}
+
+#[test]
+fn thread_wire_has_no_caller_selected_process_or_thread_id() {
+    let mut bytes = [0; wire::REQUEST_LEN];
+    wire::encode_request(
+        wire::Request {
+            process: 0,
+            absolute: true,
+            nanoseconds: 1,
+        },
+        &mut bytes,
+    )
+    .unwrap();
+    assert!(wire::decode_thread_request(&bytes).is_ok());
+    bytes[8] = 1;
+    assert!(wire::decode_thread_request(&bytes).is_err());
 }
