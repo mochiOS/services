@@ -4,7 +4,7 @@ use mochi_user_platform as platform;
 use mochios_posix_protocol as protocol;
 use posix_service::{
     process_timer::Clock,
-    process_timer_request::{cpu_nanoseconds, Reading},
+    process_timer_request::{Reading, cpu_nanoseconds},
 };
 
 pub(super) fn read(process: u32, clock: Clock) -> Result<Reading, i32> {
@@ -68,4 +68,22 @@ fn thread_failure(raw: i64) -> i32 {
     } else {
         protocol::status::normalize_failure(raw)
     }
+}
+
+/// Resolve an explicitly received WAIT Handle, not a caller-supplied TID.
+pub(super) fn thread_target(owner: u64, handle: u32) -> Result<u64, i32> {
+    let status =
+        platform::thread::handle_status(handle).map_err(|error| thread_failure(error.raw()))?;
+    if owner == 0 || status.process_id != owner || status.thread_id == 0 {
+        return Err(protocol::STATUS_EPERM);
+    }
+    if status.reserved != 0
+        || !(mnu_abi::THREAD_STATE_READY..=mnu_abi::THREAD_STATE_TERMINATED).contains(&status.state)
+    {
+        return Err(protocol::STATUS_EIO);
+    }
+    if status.state == mnu_abi::THREAD_STATE_TERMINATED {
+        return Err(protocol::STATUS_ESRCH);
+    }
+    Ok(status.thread_id)
 }

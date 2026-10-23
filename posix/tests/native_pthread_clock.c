@@ -44,8 +44,9 @@ int main(void) {
     pthread_t thread;
     CHECK(pthread_create(&thread, NULL, worker, NULL) == 0);
     CHECK(pthread_getcpuclockid(thread, &other) == 0 && other != own);
-    errno = 0;
-    CHECK(timer_create(other, &none, &timer) == -1 && errno == ENOTSUP);
+    CHECK(timer_create(other, &none, &timer) == 0);
+    struct itimerspec armed = {.it_value = {.tv_nsec = 20000000}};
+    CHECK(timer_settime(timer, 0, &armed, NULL) == 0);
     struct timespec before, after;
     CHECK(clock_gettime(other, &before) == 0);
     struct timespec delay = {.tv_nsec = 10000000};
@@ -57,8 +58,19 @@ int main(void) {
         advanced = nanos(after) > nanos(before);
     }
     CHECK(advanced);
+    int expired = 0;
+    for (unsigned attempt = 0; attempt < 200 && !expired; ++attempt) {
+        struct itimerspec value;
+        CHECK(nanosleep(&delay, NULL) == 0);
+        CHECK(timer_gettime(timer, &value) == 0);
+        expired = nanos(value.it_value) == 0;
+    }
+    CHECK(expired);
     atomic_store_explicit(&stop, 1, memory_order_release);
     CHECK(pthread_join(thread, NULL) == 0);
+    errno = 0;
+    struct itimerspec value;
+    CHECK(timer_gettime(timer, &value) == -1 && errno == EINVAL);
     errno = 0;
     CHECK(clock_gettime(other, &after) == -1 && errno == EINVAL);
     errno = 0;
@@ -73,6 +85,6 @@ int main(void) {
     atomic_store_explicit(&stop, 1, memory_order_release);
     CHECK(pthread_join(thread, NULL) == 0);
     puts("pthread-clock: PASS stable full-width IDs, explicit worker CPU "
-         "clock, self-clock timer, exit/reuse invalidation");
+         "clock, self/foreign-clock timers, exit/reuse invalidation");
     return 0;
 }

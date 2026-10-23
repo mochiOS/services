@@ -6,18 +6,18 @@ use posix_service::{
 use protocol::process_timer::{self as wire, Clock, Notification, Value};
 use std::{cell::Cell, rc::Rc};
 
-#[path = "process_timer_delivery.rs"]
-mod delivery;
-#[path = "process_timer_wait.rs"]
-mod wait;
-#[path = "process_timer_dequeue.rs"]
-mod dequeue;
-#[path = "process_timer_wake.rs"]
-mod wake;
-#[path = "process_timer_thread.rs"]
-mod thread;
 #[path = "process_timer_creation.rs"]
 mod creation;
+#[path = "process_timer_delivery.rs"]
+mod delivery;
+#[path = "process_timer_dequeue.rs"]
+mod dequeue;
+#[path = "process_timer_thread.rs"]
+mod thread;
+#[path = "process_timer_wait.rs"]
+mod wait;
+#[path = "process_timer_wake.rs"]
+mod wake;
 
 struct Clocks {
     samples: Samples,
@@ -37,6 +37,13 @@ thread_local! {
     }) };
 }
 impl ClockBackend<u32> for RecordingProcesses {
+    fn timer_thread_target(&mut self, process: u32, handle: u32) -> Result<u64, i32> {
+        match (process, handle) {
+            (2901, 818) => Ok(18),
+            (_, 899) => Err(protocol::STATUS_EPERM),
+            _ => Err(protocol::STATUS_ESRCH),
+        }
+    }
     fn timer_thread_clock(&mut self, process: u32, thread: u64) -> Result<Reading, i32> {
         CLOCKS.with(|control| {
             let mut control = control.borrow_mut();
@@ -58,7 +65,11 @@ impl ClockBackend<u32> for RecordingProcesses {
                 self.images.insert(
                     process,
                     Ok(mnu_abi::ProcessStatus {
-                        process_id: self.identities.get(&process).copied().unwrap_or(u64::from(process)),
+                        process_id: self
+                            .identities
+                            .get(&process)
+                            .copied()
+                            .unwrap_or(u64::from(process)),
                         state: mnu_abi::PROCESS_STATE_RUNNING,
                         image_revision: 1,
                         ..Default::default()
@@ -131,7 +142,14 @@ impl ObjectTransport for TimerTransport {
         handles: &mut ObjectHandles<u32>,
     ) -> Result<usize, ()> {
         let (header, payload) = protocol::decode(input).map_err(|_| ())?;
-        assert!(handles.is_empty());
+        let attachments: Vec<_> = handles
+            .iter()
+            .map(|object| AttachedObject {
+                handle: object.handle,
+                rights: object.rights,
+            })
+            .collect();
+        handles.clear();
         let mut environment = self.environment.borrow_mut();
         let Environment { service, processes } = &mut *environment;
         service
@@ -149,7 +167,7 @@ impl ObjectTransport for TimerTransport {
                 }),
                 header,
                 payload,
-                &[],
+                &attachments,
                 processes,
                 |id| {
                     created.extend_from_slice(&id.to_le_bytes());

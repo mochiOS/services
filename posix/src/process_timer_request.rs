@@ -1,5 +1,6 @@
-//! Scalar timer IPC. No caller-supplied identity or transferred object selects
-//! an owner. Backends perform native observations only, never provider RPC.
+//! Timer IPC. No caller-supplied identity or transferred object selects an
+//! owner. A WAIT Thread Handle may select a clock in the authenticated owner.
+//! Backends perform native observations only, never provider RPC.
 use super::*;
 use process_timer::{Clock, Samples};
 use protocol::process_timer as wire;
@@ -12,6 +13,12 @@ pub enum Reading {
 
 pub trait ClockBackend<H: Copy>: ProcessBackend<H> {
     fn timer_clock(&mut self, process: H, clock: Clock) -> Result<Reading, i32>;
+    /// Validate the attached native Thread Handle against the retained process
+    /// and its registered threads. The returned identity is native observation,
+    /// not request data. Do not retain ownership of the borrowed attachment.
+    fn timer_thread_target(&mut self, _process: H, _thread: H) -> Result<u64, i32> {
+        Err(protocol::STATUS_ENOTSUP)
+    }
     /// Select only a registered native Thread Handle belonging to `process`.
     /// IDs are service-internal bindings, never client-supplied authority.
     fn timer_thread_clock(&mut self, _process: H, _thread: u64) -> Result<Reading, i32> {
@@ -86,11 +93,22 @@ impl<H: Copy> PosixService<H> {
         let Request::Create(clock, notification) = decode(header, payload)? else {
             return Err(protocol::STATUS_ENOSYS);
         };
-        if !attachments.is_empty() {
+        if !attachments.is_empty()
+            && (clock != Clock::ThreadCpu
+                || attachments.len() != 1
+                || attachments[0].rights != mnu_abi::HANDLE_RIGHT_WAIT)
+        {
             return Err(STATUS_EINVAL);
         }
-        let thread =
-            self.timer_creation_target(peer, image, sender, clock, notification, backend)?;
+        let thread = self.timer_creation_target(
+            peer,
+            image,
+            sender,
+            clock,
+            notification,
+            attachments.first(),
+            backend,
+        )?;
         self.process_timers(peer)?
             .create_with_reply(clock, notification, thread, reply)
     }
@@ -102,6 +120,7 @@ impl<H: Copy> PosixService<H> {
         sender: Option<mnu_abi::ExecutionIdentity>,
         clock: Clock,
         notification: wire::Notification,
+        attachment: Option<&AttachedObject<H>>,
         backend: &mut B,
     ) -> Result<Option<u64>, i32> {
         if matches!(notification, wire::Notification::Thread { .. }) {
@@ -118,14 +137,21 @@ impl<H: Copy> PosixService<H> {
         let sender = sender
             .filter(|sender| sender.process_id == peer.process_id && sender.thread_id != 0)
             .ok_or(protocol::STATUS_EPERM)?;
+        let target = match attachment {
+            Some(attachment) => backend.timer_thread_target(process, attachment.handle)?,
+            None => sender.thread_id,
+        };
+        if target == 0 {
+            return Err(protocol::STATUS_EIO);
+        }
         if !matches!(
-            backend.timer_thread_clock(process, sender.thread_id)?,
+            backend.timer_thread_clock(process, target)?,
             Reading::Counter(_)
         ) {
             return Err(protocol::STATUS_EIO);
         }
         self.validate_request_image(peer, image, backend)?;
-        Ok(Some(sender.thread_id))
+        Ok(Some(target))
     }
 
     /// Non-creating controls. Creation requires synchronous publication through

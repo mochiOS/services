@@ -6,8 +6,8 @@ use mochios_posix_protocol as posix_protocol;
 use posix_protocol::process_timer::{Clock, Notification, Value};
 use std::ffi::{c_char, c_int, c_void};
 use std::sync::{
-    atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering},
     Mutex, MutexGuard,
+    atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering},
 };
 
 #[path = "../../../user/crates/newlib-runtime/src/process_timer.rs"]
@@ -30,9 +30,36 @@ const ENOENT: c_int = 2;
 const ENAMETOOLONG: c_int = 91;
 const PAGE_SIZE: usize = 4096;
 mod thread_clock {
-    pub fn is_id(id:u64)->bool{id>=1<<32}
-    pub fn timer_source(_:u64)->Result<super::Clock,super::c_int>{Err(super::EINVAL)}
+    pub fn is_id(id: u64) -> bool {
+        id >= 1 << 32
+    }
+    pub fn timer_source(id: u64) -> Result<super::Clock, super::c_int> {
+        if id == 1 << 32 {
+            Ok(super::Clock::ThreadCpu)
+        } else {
+            Err(super::EINVAL)
+        }
+    }
+    pub struct Reference;
+    impl Reference {
+        pub fn handle(&self) -> u32 {
+            18
+        }
+    }
+    impl Drop for Reference {
+        fn drop(&mut self) {
+            assert!(super::TARGET_PINNED.swap(false, super::Ordering::AcqRel));
+        }
+    }
+    pub fn timer_target(id: u64) -> Result<(Reference, u64), super::c_int> {
+        if id != 1 << 32 {
+            return Err(super::EINVAL);
+        }
+        assert!(!super::TARGET_PINNED.swap(true, super::Ordering::AcqRel));
+        Ok((Reference, 18))
+    }
 }
+static TARGET_PINNED: AtomicBool = AtomicBool::new(false);
 #[repr(C)]
 struct Timespec {
     tv_sec: i64,
@@ -50,10 +77,12 @@ static REGISTER: AtomicBool = AtomicBool::new(true);
 static ERRNO: AtomicI32 = AtomicI32::new(0);
 static SERIAL: Mutex<()> = Mutex::new(());
 struct RuntimeState {
+    thread_clocks: mochios_posix_client::thread_clock::Registry<64>,
     timer_values: mochios_posix_client::timer_value::Registry<usize, 128>,
     timer_cleanup: implementation::CleanupBook,
 }
 static STATE: Mutex<RuntimeState> = Mutex::new(RuntimeState {
+    thread_clocks: mochios_posix_client::thread_clock::Registry::new(),
     timer_values: mochios_posix_client::timer_value::Registry::new(),
     timer_cleanup: implementation::CleanupBook::new(),
 });
@@ -114,6 +143,15 @@ fn rpc() -> MutexGuard<'static, Rpc> {
     RPC.lock().unwrap()
 }
 impl FakeClient {
+    fn timer_create_for_thread(
+        &self,
+        handle: u32,
+        notification: Notification,
+    ) -> Result<u64, c_int> {
+        assert_eq!(handle, 18);
+        assert!(TARGET_PINNED.load(Ordering::Acquire));
+        self.timer_create(Clock::ThreadCpu, notification)
+    }
     fn timer_create(&self, clock: Clock, notification: Notification) -> Result<u64, c_int> {
         let mut rpc = rpc();
         rpc.creates.push((clock, notification));
@@ -172,6 +210,7 @@ fn reset() -> MutexGuard<'static, ()> {
         ..Rpc::default()
     };
     *state() = RuntimeState {
+        thread_clocks: Default::default(),
         timer_values: Default::default(),
         timer_cleanup: implementation::CleanupBook::new(),
     };
@@ -187,6 +226,66 @@ fn event(kind: i32, signal: i32, value: usize) -> [u8; 16] {
     bytes[4..8].copy_from_slice(&signal.to_ne_bytes());
     bytes[8..].copy_from_slice(&value.to_ne_bytes());
     bytes
+}
+
+#[test]
+fn foreign_clock_notification_belongs_to_target_and_exit_publication_prevents_late_registration() {
+    let _serial = reset();
+    let target = mochios_posix_client::thread_clock::Target {
+        thread: 64,
+        native_thread: 18,
+    };
+    let clock = state().thread_clocks.get_or_insert(target).unwrap();
+    assert_eq!(clock, 1 << 32);
+    let event = event(2, 10, 0x1234);
+    let mut timer = 0;
+    assert_eq!(
+        implementation::timer_create(clock, event.as_ptr().cast(), &mut timer),
+        0
+    );
+    assert!(!TARGET_PINNED.load(Ordering::Acquire));
+    let token = match RPC.lock().unwrap().creates[0].1 {
+        Notification::Signal { value, .. } => value,
+        _ => panic!("signal expected"),
+    };
+    implementation::thread_exit(17, || {
+        assert!(
+            STATE.try_lock().is_err(),
+            "exit publication must hold registration lock"
+        );
+    });
+    assert_eq!(
+        state().timer_values.resolve(timer as u64, token),
+        Ok(0x1234)
+    );
+    assert_eq!(state().thread_clocks.resolve(clock), Some(target));
+    implementation::thread_exit(18, || {
+        assert!(STATE.try_lock().is_err());
+    });
+    assert!(state().timer_values.resolve(timer as u64, token).is_err());
+    assert_eq!(state().thread_clocks.resolve(clock), None);
+    let creates = RPC.lock().unwrap().creates.len();
+    assert_eq!(
+        implementation::timer_create(clock, event.as_ptr().cast(), &mut timer),
+        -1
+    );
+    assert_eq!(ERRNO.load(Ordering::Acquire), EINVAL);
+    assert_eq!(RPC.lock().unwrap().creates.len(), creates);
+    assert!(!TARGET_PINNED.load(Ordering::Acquire));
+
+    let clock = state().thread_clocks.get_or_insert(target).unwrap();
+    // The fixture selects just FIRST_ID; restore a fresh registry to exercise
+    // remote failure without making its fake selector accept arbitrary IDs.
+    assert!(clock > 1 << 32);
+    state().thread_clocks = Default::default();
+    let clock = state().thread_clocks.get_or_insert(target).unwrap();
+    RPC.lock().unwrap().create_error = Some(EIO);
+    assert_eq!(
+        implementation::timer_create(clock, event.as_ptr().cast(), &mut timer),
+        -1
+    );
+    assert_eq!(ERRNO.load(Ordering::Acquire), EIO);
+    assert!(!TARGET_PINNED.load(Ordering::Acquire));
 }
 fn create_none() -> usize {
     let event = event(1, -1, usize::MAX);
@@ -339,7 +438,7 @@ fn exiting_thread_retires_only_its_clock_bound_values_without_rpc() {
             _ => panic!(),
         })
         .collect();
-    implementation::thread_exit(17);
+    implementation::thread_exit(17, || {});
     assert_eq!(
         state().timer_values.resolve(first as u64, tokens[0]),
         Err(mochios_posix_client::timer_value::ResolveError::StaleToken)
@@ -564,7 +663,7 @@ fn registration_overflow_and_bad_outputs_do_not_panic_or_publish_unchecked_data(
 }
 
 fn timer_origin(id: u64, token: u64) -> posix_protocol::signal_origin::Origin {
-    use posix_protocol::signal_origin::{Origin, TimerStatus, TIMER};
+    use posix_protocol::signal_origin::{Origin, TIMER, TimerStatus};
     Origin {
         source: TIMER,
         timer: Some(TimerStatus {

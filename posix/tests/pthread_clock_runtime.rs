@@ -6,8 +6,8 @@ use mochios_posix_protocol as posix_protocol;
 use std::{
     ffi::c_int,
     sync::{
-        atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering},
         Mutex, MutexGuard,
+        atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering},
     },
 };
 type Pthread = u32;
@@ -95,7 +95,10 @@ mod thread_reference {
         }
     }
     pub fn snapshot(thread: Pthread, rights: u64) -> Result<Reference, c_int> {
-        assert_eq!(rights, mnu_abi::HANDLE_RIGHT_WAIT);
+        assert!(
+            rights == mnu_abi::HANDLE_RIGHT_WAIT
+                || rights == mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_TRANSFER
+        );
         let control = thread_control(thread).ok_or(ESRCH)?;
         if control.state.load(Ordering::Acquire) != 2 {
             return Err(ESRCH);
@@ -123,7 +126,7 @@ static NATIVE: Mutex<Native> = Mutex::new(Native {
     reads: Vec::new(),
 });
 mod syscall {
-    pub use mnu_abi::{SyscallNumber, ThreadStatus, HANDLE_RIGHT_WAIT};
+    pub use mnu_abi::{HANDLE_RIGHT_TRANSFER, HANDLE_RIGHT_WAIT, SyscallNumber, ThreadStatus};
     pub fn raw_syscall2(
         number: SyscallNumber,
         handle: u64,
@@ -263,12 +266,14 @@ fn actual_pthread_clock_creation_and_reads_use_the_bound_target_and_checked_outp
         }
     );
     assert_eq!(actual::resolution(id, std::ptr::null_mut()), Ok(0));
-    assert!(NATIVE
-        .lock()
-        .unwrap()
-        .reads
-        .iter()
-        .all(|&handle| handle == 18));
+    assert!(
+        NATIVE
+            .lock()
+            .unwrap()
+            .reads
+            .iter()
+            .all(|&handle| handle == 18)
+    );
     assert_eq!(actual::read(id, 1usize as *mut _), Err(EFAULT));
     assert_eq!(actual::pthread_getcpuclockid(65, 1usize as *mut _), EFAULT);
     assert_eq!(
@@ -280,7 +285,16 @@ fn actual_pthread_clock_creation_and_reads_use_the_bound_target_and_checked_outp
     CONTROLS[1].state.store(1, Ordering::Release);
     assert_eq!(create(65), id);
     assert!(WAITED.load(Ordering::Acquire));
-    assert_eq!(actual::timer_source(id), Err(ENOTSUP));
+    assert_eq!(
+        actual::timer_source(id),
+        Ok(posix_protocol::process_timer::Clock::ThreadCpu)
+    );
+    let (reference, native) = actual::timer_target(id).unwrap();
+    assert_eq!(reference.handle(), 18);
+    assert_eq!(native, 200);
+    assert_eq!(REFERENCES.load(Ordering::Acquire), 1);
+    drop(reference);
+    assert_eq!(REFERENCES.load(Ordering::Acquire), 0);
     let own = create(64);
     assert_eq!(
         actual::timer_source(own),

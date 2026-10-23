@@ -1,5 +1,84 @@
 use super::*;
 
+#[test]
+fn attached_wait_handle_selects_registered_target_not_the_creating_thread() {
+    let (client, environment) = setup();
+    let id = client
+        .timer_create_for_thread(818, Notification::Default)
+        .unwrap();
+    assert!(
+        client.transport().closed.borrow().is_empty(),
+        "source Handle is borrowed"
+    );
+    let peer = client.transport().peer;
+    client
+        .timer_set(
+            id,
+            false,
+            Value {
+                remaining_ns: 10,
+                interval_ns: 0,
+            },
+        )
+        .unwrap();
+    CLOCKS.with(|state| {
+        let mut state = state.borrow_mut();
+        state.thread_samples = vec![(2901, 17, 1_000_000), (2901, 18, 55)];
+        state.thread_reads.clear();
+    });
+    assert_eq!(client.timer_value(id).unwrap().remaining_ns, 5);
+    CLOCKS.with(|state| assert_eq!(state.borrow().thread_reads, [(2901, 18)]));
+    assert!(matches!(
+        client.timer_create_for_thread(899, Notification::None),
+        Err(ClientError::Remote(protocol::STATUS_EPERM))
+    ));
+    assert!(matches!(
+        client.timer_create_for_thread(999, Notification::None),
+        Err(ClientError::Remote(protocol::STATUS_ESRCH))
+    ));
+
+    let mut environment = environment.borrow_mut();
+    let Environment { service, processes } = &mut *environment;
+    let image = service.capture_request_image(peer).unwrap();
+    for (clock, rights, count) in [
+        (Clock::Monotonic, mnu_abi::HANDLE_RIGHT_WAIT, 1),
+        (Clock::ThreadCpu, 0, 1),
+        (
+            Clock::ThreadCpu,
+            mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_TRANSFER,
+            1,
+        ),
+        (Clock::ThreadCpu, mnu_abi::HANDLE_RIGHT_WAIT, 2),
+    ] {
+        let mut payload = [0; wire::CREATE_LEN];
+        wire::encode_create(clock, Notification::None, &mut payload).unwrap();
+        let attachments = vec![
+            AttachedObject {
+                handle: 818,
+                rights
+            };
+            count
+        ];
+        assert_eq!(
+            service.create_process_timer_with_reply(
+                peer,
+                image,
+                Some(identity(peer, 17)),
+                protocol::Header {
+                    opcode: protocol::OP_TIMER_CREATE,
+                    payload_len: payload.len() as u32,
+                    ..Default::default()
+                },
+                &payload,
+                &attachments,
+                processes,
+                |_| panic!("invalid authority cannot publish")
+            ),
+            Err(STATUS_EINVAL)
+        );
+    }
+}
+
 fn create_as(
     service: &mut PosixService,
     processes: &mut RecordingProcesses,
@@ -76,12 +155,14 @@ fn creation_binds_only_authenticated_registered_threads_and_rejects_no_identity(
             .create(Clock::ThreadCpu, Notification::None),
         Err(STATUS_EINVAL)
     );
-    assert!(service
-        .process_timers(peer)
-        .unwrap()
-        .pending_notifications()
-        .next()
-        .is_none());
+    assert!(
+        service
+            .process_timers(peer)
+            .unwrap()
+            .pending_notifications()
+            .next()
+            .is_none()
+    );
     assert!(create_as(service, processes, peer, Some(identity(peer, 17))).unwrap() > 0);
 }
 
@@ -190,11 +271,13 @@ fn confirmed_thread_exit_retires_only_its_timers_and_image_replacement_retires_a
     );
     drop(state);
     assert!(client.timer_value(a).is_ok());
-    assert!(environment
-        .borrow_mut()
-        .service
-        .retire_signal_thread(identity(peer, 17), Ok(status))
-        .unwrap());
+    assert!(
+        environment
+            .borrow_mut()
+            .service
+            .retire_signal_thread(identity(peer, 17), Ok(status))
+            .unwrap()
+    );
     // Inspect through the actual scalar protocol so retired raw IDs remain opaque.
     assert!(matches!(
         client.timer_value(a),
@@ -271,19 +354,23 @@ fn selected_signal_resamples_its_bound_thread_and_preserves_pending_on_failures(
             .overrun(),
         4
     );
-    assert!(service
-        .process_timers(peer)
-        .unwrap()
-        .pending_notifications()
-        .next()
-        .is_none());
+    assert!(
+        service
+            .process_timers(peer)
+            .unwrap()
+            .pending_notifications()
+            .next()
+            .is_none()
+    );
     CLOCKS.with(|state| {
         let state = state.borrow();
         assert!(state.reads.is_empty());
-        assert!(state
-            .thread_reads
-            .iter()
-            .all(|&target| target == (2901, 17)));
+        assert!(
+            state
+                .thread_reads
+                .iter()
+                .all(|&target| target == (2901, 17))
+        );
     });
 }
 

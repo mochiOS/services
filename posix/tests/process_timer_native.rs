@@ -8,8 +8,8 @@ extern crate self as mochi_user_platform;
 extern crate self as mochios_posix_protocol;
 extern crate self as posix_service;
 pub use real_abi::{
-    ClockId, ClockInstant, ProcessExecutionUsage, ThreadStatus, THREAD_STATE_READY,
-    THREAD_STATE_TERMINATED,
+    ClockId, ClockInstant, ProcessExecutionUsage, THREAD_STATE_READY, THREAD_STATE_TERMINATED,
+    ThreadStatus,
 };
 pub use real_protocol::{STATUS_EIO, STATUS_EPERM, STATUS_ESRCH};
 pub use real_service::STATUS_EINVAL;
@@ -17,7 +17,7 @@ pub mod process_timer {
     pub use real_protocol::process_timer::Clock;
 }
 pub mod process_timer_request {
-    pub use real_service::process_timer_request::{cpu_nanoseconds, Reading};
+    pub use real_service::process_timer_request::{Reading, cpu_nanoseconds};
 }
 pub mod status {
     pub use real_abi::status::Error;
@@ -120,6 +120,9 @@ use process_timer_request::Reading;
 #[test]
 fn thread_clock_adapter_authenticates_retained_target_and_never_uses_service_cpu() {
     STATE.with(|state| *state.borrow_mut() = State::default());
+    assert_eq!(native::thread_target(41, 81), Ok(7));
+    assert_eq!(native::thread_target(99, 81), Err(STATUS_EPERM));
+    assert_eq!(native::thread_target(0, 81), Err(STATUS_EPERM));
     for (owner, target) in [(0, 7), (41, 0), (99, 7), (41, 8)] {
         assert_eq!(
             native::read_thread(owner, target, 81).err(),
@@ -142,6 +145,7 @@ fn thread_clock_adapter_authenticates_retained_target_and_never_uses_service_cpu
             })
         });
         assert_eq!(native::read_thread(41, 7, 81).err(), Some(error));
+        assert_eq!(native::thread_target(41, 81), Err(error));
     }
     STATE.with(|state| *state.borrow_mut() = State::default());
     assert!(matches!(
@@ -159,6 +163,7 @@ fn thread_clock_adapter_authenticates_retained_target_and_never_uses_service_cpu
             Err(Failure(real_abi::status::Error::NotFound.into_raw() as i64))
     });
     assert_eq!(native::read_thread(41, 7, 81).err(), Some(STATUS_ESRCH));
+    assert_eq!(native::thread_target(41, 81), Err(STATUS_ESRCH));
     STATE.with(|state| *state.borrow_mut() = State::default());
     STATE.with(|state| {
         state.borrow_mut().clock = Ok(ClockInstant {

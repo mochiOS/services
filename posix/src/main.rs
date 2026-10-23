@@ -2557,6 +2557,15 @@ struct RuntimeProcesses {
 
 #[cfg(target_os = "mochios")]
 impl posix_service::process_timer_request::ClockBackend<u32> for RuntimeProcesses {
+    fn timer_thread_target(&mut self, process: u32, handle: u32) -> Result<u64, i32> {
+        let owner = mochi_user_platform::process::handle_status(process)
+            .map_err(|error| process_control::lifecycle_failure(error.raw()))?;
+        let target = process_timer_native::thread_target(owner.process_id, handle)?;
+        // Timers use the retained registration after the request attachment is
+        // closed. Never retain the numeric selector of a borrowed attachment.
+        self.timer_thread_clock(process, target)?;
+        Ok(target)
+    }
     fn timer_thread_clock(
         &mut self,
         process: u32,

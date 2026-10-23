@@ -52,12 +52,15 @@ fn defer_native_delivery()->Option<upcall_guard::Guard<'static>> {
 }
 mod process_timer {
     use super::*;
-    pub fn thread_exit(owner:u64) {
+    pub fn thread_exit(owner:u64, publish_exit:impl FnOnce()) {
         assert_eq!(owner,17);
         assert_eq!(DESTRUCTOR_RETURNED.load(Ordering::Acquire),1);
         assert_eq!(CONTROL.native_delivery_defer.load(Ordering::Acquire),1);
         assert_ne!(CONTROL.state.load(Ordering::Acquire),THREAD_EXITED);
         assert_eq!(TIMERS_RETIRED.fetch_add(1,Ordering::AcqRel),0);
+        let mut state=state();
+        state.thread_clocks.retire_native(owner);
+        publish_exit();
     }
 }
 struct Resource;
