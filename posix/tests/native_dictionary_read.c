@@ -1,9 +1,11 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
+#include <reent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -27,6 +29,75 @@ static long long elapsed_ms(struct timespec start, struct timespec end) {
         + (end.tv_nsec - start.tv_nsec) / 1000000;
 }
 
+extern void __malloc_lock(struct _reent *);
+extern void __malloc_unlock(struct _reent *);
+
+static int fresh_anonymous_pages(void) {
+    const size_t length = 4u * 1024u * 1024u;
+    for (unsigned round = 0; round < 3; ++round) {
+        volatile unsigned char *bytes = mmap(NULL, length, PROT_READ | PROT_WRITE,
+                                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if ((void *)bytes == MAP_FAILED) return 24;
+        for (size_t page = 0; page < length; page += 4096) {
+            size_t first = 0;
+            if (round == 1) {
+                bytes[page] = 0xa5; // First access writes; all other bytes stay zero.
+                first = 1;
+            }
+            for (size_t byte = first; byte < 4096; ++byte) {
+                if (bytes[page + byte] != 0) return 25;
+                bytes[page + byte] = 0xa5;
+            }
+        }
+        if (munmap((void *)bytes, length)) return 26;
+    }
+    fprintf(stderr, "allocator-path: PASS anonymous zero pages, read-first/write-first and reuse\n");
+    return 0;
+}
+
+static int allocator_path(void) {
+    enum { COUNT = 100000 };
+    struct timespec start, end;
+    struct _reent *reent = __getreent();
+    if (!reent || clock_gettime(CLOCK_MONOTONIC, &start)) return 20;
+    for (unsigned i = 0; i < COUNT; ++i) {
+        if (__getreent() != reent) return 21;
+    }
+    if (clock_gettime(CLOCK_MONOTONIC, &end)) return 20;
+    fprintf(stderr, "allocator-path: reent count=%u elapsed_ms=%lld\n",
+            COUNT, elapsed_ms(start, end));
+    if (clock_gettime(CLOCK_MONOTONIC, &start)) return 20;
+    for (unsigned i = 0; i < COUNT; ++i) {
+        __malloc_lock(reent);
+        __malloc_unlock(reent);
+    }
+    if (clock_gettime(CLOCK_MONOTONIC, &end)) return 20;
+    fprintf(stderr, "allocator-path: lock-pair count=%u elapsed_ms=%lld\n",
+            COUNT, elapsed_ms(start, end));
+    void **held = malloc(COUNT * sizeof(*held));
+    if (!held) return 22;
+    if (clock_gettime(CLOCK_MONOTONIC, &start)) return 20;
+    unsigned allocated = 0;
+    for (; allocated < COUNT; ++allocated) {
+        held[allocated] = malloc(32 + (allocated & 15));
+        if (!held[allocated]) break;
+        *(volatile unsigned char *)held[allocated] = 0x5a;
+    }
+    if (clock_gettime(CLOCK_MONOTONIC, &end)) return 20;
+    fprintf(stderr, "allocator-path: allocate-retained count=%u elapsed_ms=%lld\n",
+            allocated, elapsed_ms(start, end));
+    if (clock_gettime(CLOCK_MONOTONIC, &start)) return 20;
+    for (unsigned i = 0; i < allocated; ++i) {
+        if (*(volatile unsigned char *)held[i] != 0x5a) return 23;
+        free(held[i]);
+    }
+    if (clock_gettime(CLOCK_MONOTONIC, &end)) return 20;
+    fprintf(stderr, "allocator-path: free-retained count=%u elapsed_ms=%lld\n",
+            allocated, elapsed_ms(start, end));
+    free(held);
+    return allocated == COUNT ? 0 : 22;
+}
+
 int main(void) {
     fprintf(stderr, "dictionary-read: start\n");
     struct execution_identity first, second;
@@ -36,6 +107,10 @@ int main(void) {
     if (identity_read(&second, sizeof(second) - 1) != NATIVE_FAILURE(5)
         || identity_read(NULL, sizeof(second)) != NATIVE_FAILURE(2)) return 19;
     fprintf(stderr, "dictionary-read: native execution identity ok\n");
+    int allocation_result = allocator_path();
+    if (allocation_result) return allocation_result;
+    allocation_result = fresh_anonymous_pages();
+    if (allocation_result) return allocation_result;
     /* ext4plus's indirect-block reads allocate a zeroed filesystem block.
      * Measure that runtime cost independently of IPC and storage access. */
     struct timespec allocation_start, allocation_end;

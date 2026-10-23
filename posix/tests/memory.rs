@@ -76,7 +76,8 @@ fn newlib_heap_growth_commits_its_reserved_arena() {
     assert!(mapping.contains("size, size / 4096"));
     assert!(mapping.contains("VmObject::shared_memory(memory)"));
     assert!(!mapping.contains("map_and_copy_segment_to"));
-    assert!(kernel.contains("None => Some(Arc::new([0u8; crate::mem::vm_object::PAGE_BYTES]))"));
+    assert!(!kernel.contains("None => Some(Arc::new([0u8; crate::mem::vm_object::PAGE_BYTES]))"));
+    assert!(kernel.contains("(None, None) => &[]"));
 }
 
 #[test]
