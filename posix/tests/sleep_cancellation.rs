@@ -48,12 +48,16 @@ fn native_counter_wake_all(address: &AtomicU64) {{ assert!(std::ptr::eq(address,
 fn finish_thread(_: &ThreadControl, result: *mut c_void) -> ! {{
     assert_eq!(result as usize, usize::MAX);
     let case = CASE.load(Ordering::Acquire);
-    let expected = if case == 0 {{ 0 }} else {{ 1 }};
+    let expected = if case == 0 || case == 11 {{ 0 }} else {{ 1 }};
     assert_eq!(WAITS.load(Ordering::Acquire), expected);
     std::process::exit(73)
 }}
 fn monotonic_nanoseconds() -> Result<u64, i32> {{
     let read = READS.fetch_add(1, Ordering::AcqRel);
+    if read == 1 && (CASE.load(Ordering::Acquire) == 11 || CASE.load(Ordering::Acquire) == 12) {{
+        if CASE.load(Ordering::Acquire) == 11 {{ pthread_cancel(1); }}
+        return Err(EIO);
+    }}
     // Inject after the sleep's generation snapshot but before native admission.
     if read == 1 && CASE.load(Ordering::Acquire) == 1 {{ assert_eq!(pthread_cancel(1), 0); }}
     if read == 1 && CASE.load(Ordering::Acquire) == 4 {{
@@ -77,8 +81,8 @@ mod mochios_posix_client {{
     #[path = "{}"] pub mod time;
     pub mod synchronization {{
         use super::super::*;
-        pub struct Error;
-        impl Error {{ pub fn raw(&self) -> u64 {{ unreachable!() }} }}
+        pub struct Error(u64);
+        impl Error {{ pub fn raw(&self) -> u64 {{ self.0 }} }}
         pub fn wait_u32(address: &AtomicU32, expected: u32, deadline: u64) -> Result<(), Error> {{
             assert!(std::ptr::eq(address, &CONTROL.wait_generation));
             let count = WAITS.fetch_add(1, Ordering::AcqRel);
@@ -90,6 +94,9 @@ mod mochios_posix_client {{
                 5 if count == 0 => {{}}, // Harmless spurious native wake.
                 5 => {{ NOW.store(deadline, Ordering::Release); }},
                 6 => {{ NOW.store(deadline, Ordering::Release); pthread_cancel(1); }},
+                // A native failure may race with cancellation after admission.
+                8 | 10 => {{ pthread_cancel(1); return Err(Error(EIO as u64)); }},
+                9 => {{ return Err(Error(EIO as u64)); }},
                 _ => panic!("unexpected wait"),
             }}
             Ok(())
@@ -131,6 +138,7 @@ mod time_memory {
         "pub extern \"C\" fn sleep(",
         "pub extern \"C\" fn usleep(",
         "pub unsafe extern \"C\" fn nanosleep(",
+        "fn sleep_failure(",
         "pub unsafe extern \"C\" fn clock_nanosleep(",
         "pub extern \"C\" fn pthread_cancel(",
         "pub extern \"C\" fn pthread_testcancel(",
@@ -147,7 +155,7 @@ fn main() {
     let case: u32 = args[1].parse().unwrap();
     CASE.store(case, Ordering::Release);
     if case == 0 { pthread_cancel(1); }
-    if case == 3 { CONTROL.cancel_state.store(1, Ordering::Release); }
+    if case == 3 || case == 10 { CONTROL.cancel_state.store(1, Ordering::Release); }
     let request = Timespec { tv_sec: if case == 0 { 0 } else { 1 }, tv_nsec: 0 };
     let mut remaining = Timespec { tv_sec: 99, tv_nsec: 99 };
     if case == 7 {
@@ -169,7 +177,13 @@ fn main() {
             _ => nanosleep(&request, &mut remaining),
         }
     };
-    assert!(case == 3 || case == 4 || case == 5, "enabled cancellation returned");
+    assert!(matches!(case,3|4|5|9|10|12), "enabled cancellation returned");
+    if matches!(case,9|10|12) {
+        assert_eq!(result, match args[2].as_str() { "clock" => EIO, "sleep" => 1, _ => -1 });
+        assert_eq!(unsafe { ERRNO }, if args[2] == "clock" || args[2] == "sleep" {123} else {EIO});
+        if case == 10 { assert_eq!(CONTROL.cancel_pending.load(Ordering::Acquire),1); }
+        return;
+    }
     if case == 4 {
         assert_eq!(result, match args[2].as_str() {
             "clock" => EINTR, "sleep" => 1, _ => -1,
@@ -225,12 +239,12 @@ fn main() {
         String::from_utf8_lossy(&compiled.stderr)
     );
     for kind in ["nano", "clock", "sleep", "usleep"] {
-        for case in 0..7 {
+        for case in (0..7).chain(8..=12) {
             let executed = Command::new(&executable)
                 .args([&case.to_string(), kind])
                 .output()
                 .unwrap();
-            let expected = if matches!(case, 0 | 1 | 2 | 6) { 73 } else { 0 };
+            let expected = if matches!(case, 0 | 1 | 2 | 6 | 8 | 11) { 73 } else { 0 };
             assert_eq!(
                 executed.status.code(),
                 Some(expected),
