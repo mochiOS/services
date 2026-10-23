@@ -60,6 +60,10 @@ fn graphics_receivers_require_an_owned_mapping_instead_of_a_raw_address_packet()
     assert!(!compositor
         .contains("handle_shared_buffer(&mut state.surfaces, client, mapped_addr, total, None)"));
     assert!(
-        surface.contains("mapping.as_ref().is_none_or(|view| view.view() != (mapped_addr, total))")
+        surface
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>()
+            .contains("mapping.as_ref().is_none_or(|view|view.view()!=(mapped_addr,total))")
     );
 }
