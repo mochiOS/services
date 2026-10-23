@@ -1,6 +1,6 @@
 //! Inode-based path traversal shared by filesystem namespace backends.
 
-use ext4plus::path::{Component, Path};
+use ext4plus::path::{Component, Path, PathError};
 use mochios_filesystem_protocol::MAX_PATH_LEN;
 use std::collections::VecDeque;
 
@@ -8,6 +8,7 @@ const EIO: i32 = 5;
 const ENOENT: i32 = 2;
 const ENOTDIR: i32 = 20;
 const EINVAL: i32 = 22;
+const ENAMETOOLONG: i32 = 36;
 const ELOOP: i32 = 40;
 
 pub enum Resolution<N> {
@@ -71,10 +72,13 @@ pub fn resolve_visible<B: Backend>(
     credentials: Credentials<'_>,
     mut visible: impl FnMut(&B::Node, &[u8], &B::Node) -> bool,
 ) -> Result<Resolution<B::Node>, i32> {
-    if path.is_empty() || path.len() > MAX_PATH_LEN || path.contains(&0) {
+    if path.is_empty() || path.contains(&0) {
         return Err(EINVAL);
     }
-    let parsed = Path::try_from(path).map_err(|_| EINVAL)?;
+    if path.len() > MAX_PATH_LEN {
+        return Err(ENAMETOOLONG);
+    }
+    let parsed = Path::try_from(path).map_err(path_errno)?;
     let mut ancestors = if parsed.is_absolute() {
         vec![root]
     } else {
@@ -83,7 +87,6 @@ pub fn resolve_visible<B: Backend>(
     let mut pending = components(parsed);
     let require_directory = path.last() == Some(&b'/');
     let mut symlinks = 0usize;
-    let mut iterations = 0usize;
     let mut last_name = None;
     while let Some(component) = pending.pop_front() {
         if component == OwnedComponent::DirectoryEnd {
@@ -94,10 +97,8 @@ pub fn resolve_visible<B: Backend>(
             }
             continue;
         }
-        iterations = iterations.checked_add(1).ok_or(ELOOP)?;
-        if iterations > 1024 {
-            return Err(ELOOP);
-        }
+        // Every ordinary component consumes the finite input queue. Only
+        // symlink expansion can replenish it, and that has its own limit.
         if component == OwnedComponent::Root {
             ancestors.truncate(1);
             last_name = None;
@@ -143,7 +144,7 @@ pub fn resolve_visible<B: Backend>(
                     if target.len().saturating_add(path.len()) > MAX_PATH_LEN {
                         return Err(EINVAL);
                     }
-                    let target = Path::try_from(target.as_slice()).map_err(|_| EINVAL)?;
+                    let target = Path::try_from(target.as_slice()).map_err(path_errno)?;
                     if target.is_absolute() {
                         ancestors.truncate(1);
                     }
@@ -170,6 +171,13 @@ pub fn resolve_visible<B: Backend>(
         return Err(ENOTDIR);
     }
     Ok(Resolution::Found { inode, parent })
+}
+
+fn path_errno(error: PathError) -> i32 {
+    match error {
+        PathError::ComponentTooLong => ENAMETOOLONG,
+        _ => EINVAL,
+    }
 }
 
 #[derive(PartialEq, Eq)]

@@ -3920,3 +3920,58 @@ fn trailing_symlink_targets_reject_file_access_before_creation_or_truncation() {
         .is_ok());
     fs.provider_close(file).unwrap();
 }
+
+#[test]
+fn path_length_errors_and_long_component_sequences_reach_the_filesystem_boundary() {
+    let mut fs = test_filesystem();
+    let mut path = b"/".to_vec();
+    path.extend_from_slice(&b"./".repeat(1500));
+    path.extend_from_slice(&[b'x'; 255]);
+    let file = fs
+        .open_at(
+            protocol::Header {
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_CREATE,
+                mode: 0o600,
+                ..Default::default()
+            },
+            &path,
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    fs.provider_close(file.header.open_id).unwrap();
+    fs.stat_at(
+        protocol::Header::default(),
+        &path,
+        PathAnchors::default(),
+        root_credentials(),
+    )
+    .unwrap();
+    for invalid in [
+        [b"/".as_slice(), &[b'x'; 256]].concat(),
+        vec![b'/'; protocol::MAX_PATH_LEN + 1],
+    ] {
+        assert!(matches!(
+            fs.open_at(
+                protocol::Header {
+                    flags: protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+                    mode: 0o600,
+                    ..Default::default()
+                },
+                &invalid,
+                PathAnchors::default(),
+                root_credentials(),
+            ),
+            Err(36)
+        ));
+        assert!(matches!(
+            fs.stat_at(
+                protocol::Header::default(),
+                &invalid,
+                PathAnchors::default(),
+                root_credentials(),
+            ),
+            Err(36)
+        ));
+    }
+}
