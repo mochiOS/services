@@ -42,6 +42,13 @@ use std::{cell::Cell,sync::atomic::{AtomicU32,Ordering}};
 use std::ffi::c_int;
 const ESRCH:c_int=3;
 struct ThreadControl{native_handle:AtomicU32}
+mod thread_reference {
+    use super::*;
+    pub fn with_control<T>(control:&ThreadControl,observe:impl FnOnce(u32)->Result<T,c_int>)->Result<T,c_int>{
+        let handle=control.native_handle.load(Ordering::Acquire);
+        if handle==0{return Err(ESRCH)}observe(handle)
+    }
+}
 thread_local!{
     static RESULT:Cell<u64>=const{Cell::new(0)};
     static STATE:Cell<u32>=const{Cell::new(2)};
@@ -159,6 +166,8 @@ fn detached_reclamation_requires_native_retirement_and_closes_owned_handle() {
         .split("fn allocate_thread_reent(")
         .next()
         .unwrap();
-    assert!(release.contains("native_handle.swap(0, Ordering::AcqRel)"));
-    assert!(release.contains("SyscallNumber::HandleClose"));
+    assert!(release.contains("thread_reference::replace(control, 0)"));
+    let references = include_str!("../../../user/crates/newlib-runtime/src/thread_reference.rs");
+    assert!(references.contains("native_handle.swap(handle, Ordering::AcqRel)"));
+    assert!(references.contains("close_object_handle(previous)"));
 }

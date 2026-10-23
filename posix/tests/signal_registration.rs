@@ -22,6 +22,15 @@ struct ThreadControl{native_handle:AtomicU32,native_delivery_defer:AtomicU32,sig
     signal_upcall_stack:AtomicUsize,signal_upcall_stack_size:AtomicUsize}
 static CONTROL:ThreadControl=ThreadControl{native_handle:AtomicU32::new(61),native_delivery_defer:AtomicU32::new(0),
     signal_mask:AtomicU32::new(37),signal_upcall_stack:AtomicUsize::new(0x20000),signal_upcall_stack_size:AtomicUsize::new(8192)};
+// Registration owns this TCB. The separately exercised reference module
+// supplies the publication/close boundary, not registration policy.
+mod thread_reference {
+    use super::*;
+    pub fn replace(control:&ThreadControl,handle:u32){
+        let previous=control.native_handle.swap(handle,Ordering::AcqRel);
+        if previous!=0{let _=syscall::raw_syscall1(syscall::SyscallNumber::HandleClose,u64::from(previous));}
+    }
+}
 fn stage()->Result<(),i32>{
     assert_eq!(CONTROL.native_delivery_defer.load(Ordering::Acquire),DEPTH.load(Ordering::Acquire)+1);
     let stage=STAGE.fetch_add(1,Ordering::AcqRel)+1;

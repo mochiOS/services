@@ -81,7 +81,9 @@ fn runtime_publishes_readiness_after_handle_registration_and_uses_posix_return_c
         .next()
         .unwrap();
     assert!(send.contains(".send_thread_signal("));
-    assert!(send.contains("control.native_handle.load"));
+    assert!(send.contains("thread_reference::snapshot("));
+    assert!(send.contains("handle: reference.handle()"));
+    assert!(send.contains("syscall::HANDLE_RIGHT_TRANSFER"));
     assert!(send.contains("result.err().unwrap_or(0)"));
     assert!(!send.contains("set_errno("));
     let main = include_str!("../src/main.rs");
