@@ -368,6 +368,15 @@ pub trait FilesystemBackend<H: Copy> {
         paths: PathObjects<H>,
     ) -> Result<protocol::FileStatus, i32>;
 
+    /// Resolve the target once without opening its data or returning a Handle.
+    fn path_limits_at(
+        &mut self,
+        _request: &PreparedStat,
+        _paths: PathObjects<H>,
+    ) -> Result<mochios_filesystem_protocol::object_limits::Limits, i32> {
+        Err(protocol::STATUS_ENOSYS)
+    }
+
     /// Resolves and reconstructs an existing pathname in one filesystem call.
     fn canonical_path_at(
         &mut self,
@@ -3777,6 +3786,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_OPEN_AT
             | protocol::OP_STAT_AT
             | protocol::OP_CANONICAL_PATH_AT
+            | protocol::OP_PATH_LIMITS_AT
             | protocol::OP_FSTAT
             | protocol::OP_ACCESS_AT
             | protocol::OP_CHDIR_AT
@@ -3922,6 +3932,7 @@ impl<H: Copy> PosixService<H> {
             protocol::OP_OPEN_AT
                 | protocol::OP_STAT_AT
                 | protocol::OP_CANONICAL_PATH_AT
+                | protocol::OP_PATH_LIMITS_AT
                 | protocol::OP_FSTAT
                 | protocol::OP_ACCESS_AT
                 | protocol::OP_CHDIR_AT
@@ -3968,6 +3979,7 @@ impl<H: Copy> PosixService<H> {
             protocol::OP_OPEN_AT
                 | protocol::OP_STAT_AT
                 | protocol::OP_CANONICAL_PATH_AT
+                | protocol::OP_PATH_LIMITS_AT
                 | protocol::OP_ACCESS_AT
                 | protocol::OP_CHDIR_AT
                 | protocol::OP_CHROOT_AT
@@ -4001,6 +4013,7 @@ impl<H: Copy> PosixService<H> {
                 open_request::dispatch(header.request_id, &prepared, paths, admission, filesystem)
             }
             protocol::OP_CANONICAL_PATH_AT
+            | protocol::OP_PATH_LIMITS_AT
             | protocol::OP_STAT_AT
             | protocol::OP_GETCWD
             | protocol::OP_ACCESS_AT

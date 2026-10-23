@@ -1,7 +1,8 @@
 use super::*;
 use std::sync::{Arc, Mutex};
 
-const QUERIES: [u16; 4] = [
+const QUERIES: [u16; 5] = [
+    protocol::OP_PATH_LIMITS_AT,
     protocol::OP_STAT_AT,
     protocol::OP_CANONICAL_PATH_AT,
     protocol::OP_ACCESS_AT,
@@ -86,6 +87,14 @@ fn all_readonly_queries_run_root_and_backend_rpc_without_state_lock() {
                 protocol::decode_file_status(&response.response.payload).unwrap(),
                 sample_status()
             ),
+            protocol::OP_PATH_LIMITS_AT => {
+                assert_eq!(
+                    filesystem_protocol::object_limits::Limits::decode(&response.response.payload)
+                        .unwrap()
+                        .name_bytes_max,
+                    255
+                );
+            }
             protocol::OP_CANONICAL_PATH_AT => {
                 assert_eq!(response.response.payload, b"/resolved/target")
             }
@@ -262,7 +271,11 @@ fn malformed_queries_never_initialize_roots_or_call_the_backend() {
         assert_eq!(response.response.header.status, STATUS_EINVAL);
         assert_eq!(fs.roots_opened, 0);
     }
-    for opcode in [protocol::OP_CANONICAL_PATH_AT, protocol::OP_READLINK_AT] {
+    for opcode in [
+        protocol::OP_CANONICAL_PATH_AT,
+        protocol::OP_PATH_LIMITS_AT,
+        protocol::OP_READLINK_AT,
+    ] {
         let (header, payload) = request(
             opcode,
             protocol::OpenBase::ProcessRoot,

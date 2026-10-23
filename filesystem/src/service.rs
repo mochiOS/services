@@ -20,6 +20,8 @@ mod device_operations;
 mod removed_directories;
 #[path = "canonical_path.rs"]
 mod canonical_path;
+#[path = "path_limits.rs"]
+mod path_limits;
 #[path = "inode_time.rs"]
 mod inode_time;
 #[path = "timestamp_operations.rs"]
@@ -1314,12 +1316,7 @@ impl FilesystemService {
             return Err(95);
         }
         let open = self.opens.get(&open_id).ok_or(EBADF)?;
-        Ok(protocol::object_limits::Limits {
-            name_bytes_max: DirEntryName::MAX_LEN as u32,
-            path_bytes_max: protocol::MAX_PATH_LEN as u32,
-            link_count_max: u32::from(u16::MAX),
-            filesystem_block_bytes: open.filesystem.block_size_bytes(),
-        })
+        Ok(crate::provider_limits::filesystem_limits(&open.filesystem))
     }
 
     /// Obtains metadata from an existing provider object. The caller must

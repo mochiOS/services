@@ -4,6 +4,15 @@ use crate::service::FilesystemService;
 use mnu_abi::provider;
 use mochios_filesystem_protocol::object_limits as wire;
 
+pub(crate) fn filesystem_limits(filesystem: &ext4plus::Ext4) -> wire::Limits {
+    wire::Limits {
+        name_bytes_max: ext4plus::DirEntryName::MAX_LEN as u32,
+        path_bytes_max: mochios_filesystem_protocol::MAX_PATH_LEN as u32,
+        link_count_max: u32::from(u16::MAX),
+        filesystem_block_bytes: filesystem.block_size_bytes(),
+    }
+}
+
 pub fn handle(
     service: &FilesystemService,
     header: provider::RequestHeader,

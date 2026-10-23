@@ -328,7 +328,9 @@ fn main() {
                     }
                 } else if matches!(
                     header.opcode,
-                    protocol::OP_STAT_AT | protocol::OP_CANONICAL_PATH_AT
+                    protocol::OP_STAT_AT
+                        | protocol::OP_CANONICAL_PATH_AT
+                        | protocol::OP_OBJECT_LIMITS_AT
                 ) {
                     let anchors = decode_path_anchors(
                         header.flags,
@@ -340,10 +342,14 @@ fn main() {
                         .map_err(|_| 22)
                         .and_then(|(credentials, payload)| {
                             anchors.and_then(|anchors| {
-                                if header.opcode == protocol::OP_CANONICAL_PATH_AT {
-                                    service.canonical_path_at(header, payload, anchors, credentials)
-                                } else {
-                                    service.stat_at(header, payload, anchors, credentials)
+                                match header.opcode {
+                                    protocol::OP_CANONICAL_PATH_AT => {
+                                        service.canonical_path_at(header, payload, anchors, credentials)
+                                    }
+                                    protocol::OP_OBJECT_LIMITS_AT => {
+                                        service.object_limits_at(header, payload, anchors, credentials)
+                                    }
+                                    _ => service.stat_at(header, payload, anchors, credentials),
                                 }
                             })
                         });

@@ -211,6 +211,114 @@ fn retained_description_selects_its_own_mounted_volume_block_size() {
             wire::Limits::decode(&bytes).unwrap().filesystem_block_bytes,
             block_bytes
         );
+        let reply = fs
+            .object_limits_at(
+                Default::default(),
+                path,
+                PathAnchors::default(),
+                root_credentials(),
+            )
+            .unwrap();
+        assert_eq!(
+            wire::Limits::decode(&reply.payload)
+                .unwrap()
+                .filesystem_block_bytes,
+            block_bytes
+        );
         fs.provider_close(id).unwrap();
     }
+}
+
+#[test]
+fn pathname_limits_require_search_but_not_target_data_read_permission() {
+    let mut fs = super::trailing_lookup::prepared(0);
+    fs.chmod_at(
+        protocol::Header {
+            mode: 0,
+            ..Default::default()
+        },
+        b"/target-file",
+        PathAnchors::default(),
+        root_credentials(),
+    )
+    .unwrap();
+    let user = credentials(501, 20, &[]);
+    for path in [b"/target-file".as_slice(), b"/target-dir", b"/dir-link/"] {
+        let reply = fs
+            .object_limits_at(Default::default(), path, PathAnchors::default(), user)
+            .unwrap();
+        assert_eq!(
+            wire::Limits::decode(&reply.payload).unwrap().name_bytes_max,
+            255
+        );
+    }
+    assert_eq!(
+        fs.object_limits_at(
+            Default::default(),
+            b"/target-dir/child",
+            PathAnchors::default(),
+            user
+        )
+        .err(),
+        Some(13)
+    );
+    assert_eq!(
+        fs.object_limits_at(
+            Default::default(),
+            b"/missing",
+            PathAnchors::default(),
+            user
+        )
+        .err(),
+        Some(2)
+    );
+}
+
+#[test]
+fn pathname_limits_validate_anchor_flags_and_preserve_root_confinement() {
+    let mut fs = test_filesystem();
+    let root = open(
+        &mut fs,
+        b"/jail",
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+    );
+    let anchors = PathAnchors {
+        root_open_id: Some(root),
+        base_open_id: None,
+    };
+    let header = protocol::Header {
+        flags: protocol::STAT_AT_ROOT_ATTACHED,
+        ..Default::default()
+    };
+    fs.object_limits_at(header, b"/inside", anchors, root_credentials())
+        .unwrap();
+    assert_eq!(
+        fs.object_limits_at(header, b"/escape", anchors, root_credentials())
+            .err(),
+        Some(2)
+    );
+    assert_eq!(
+        fs.object_limits_at(Default::default(), b"/inside", anchors, root_credentials())
+            .err(),
+        Some(22)
+    );
+    assert_eq!(
+        fs.object_limits_at(
+            protocol::Header {
+                flags: protocol::STAT_AT_NOFOLLOW | header.flags,
+                ..header
+            },
+            b"/inside",
+            anchors,
+            root_credentials()
+        )
+        .err(),
+        Some(22)
+    );
+    fs.provider_close(root).unwrap();
+    assert_eq!(
+        fs.object_limits_at(header, b"/inside", anchors, root_credentials())
+            .err(),
+        Some(9)
+    );
 }

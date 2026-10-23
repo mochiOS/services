@@ -1761,6 +1761,25 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         })
     }
 
+    fn path_limits_at(
+        &mut self,
+        request: &PreparedStat,
+        paths: PathObjects<u32>,
+    ) -> Result<filesystem_protocol::object_limits::Limits, i32> {
+        if let Some(hook) = &mut self.query_hook {
+            hook()?;
+        }
+        self.stat_request = Some(request.clone());
+        self.root = Some(paths.root);
+        self.directory = paths.base;
+        Ok(filesystem_protocol::object_limits::Limits {
+            name_bytes_max: 255,
+            path_bytes_max: 4096,
+            link_count_max: 65535,
+            filesystem_block_bytes: 4096,
+        })
+    }
+
     fn canonical_path_at(
         &mut self,
         request: &PreparedStat,
@@ -8792,3 +8811,6 @@ fn terminal_flush_wire_format_is_fixed_and_rejects_unknown_flags() {
         Err(protocol::ProtocolError::InvalidLength)
     );
 }
+
+#[path = "support/path_limits_protocol.rs"]
+mod path_limits_protocol;
