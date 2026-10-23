@@ -45,6 +45,9 @@ mod process_resume;
 #[path = "support/request_image.rs"]
 mod request_image;
 
+#[path = "support/record_lock_request.rs"]
+mod record_lock_request;
+
 #[path = "support/wait_reply.rs"]
 mod wait_reply;
 

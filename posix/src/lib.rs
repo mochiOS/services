@@ -52,6 +52,7 @@ pub mod process_timer_reactor;
 pub mod process_timer_delivery;
 pub mod timer_callback;
 pub mod record_lock;
+pub mod record_lock_request;
 mod fork_state;
 pub mod resource_policy;
 pub mod cpu_limit;
@@ -784,6 +785,7 @@ pub struct PosixService<H: Copy = u32> {
     cpu_timers: BTreeMap<(u64, u32), cpu_timer::CpuTimer>,
     process_timers: process_timer::Registry,
     record_locks: record_lock::Registry,
+    record_lock_files: Vec<(record_lock::FileKey, AttachedObject<H>)>,
     resource_policies: Vec<(u64, Box<dyn resource_policy::Published<H>>)>,
     prepared_forks: Vec<(u64, fork_state::ForkState<H>)>,
     next_fork_token: u64,
@@ -828,6 +830,7 @@ impl PosixService<u32> {
             cpu_timers: BTreeMap::new(),
             process_timers: process_timer::Registry::new(),
             record_locks: record_lock::Registry::new(),
+            record_lock_files: Vec::new(),
             resource_policies: Vec::new(),
             prepared_forks: Vec::new(),
             next_fork_token: 1,
@@ -3768,6 +3771,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_PROCESS_CPU_SLEEP
             | protocol::OP_THREAD_CPU_SLEEP
             | protocol::OP_TIMER_THREAD_WAIT
+            | protocol::OP_RECORD_LOCK
             | protocol::OP_TIMER_CREATE_PROCESS_CPU
             | protocol::OP_PROCESS_SPAWNED
             | protocol::OP_PROCESS_SESSION_INFO

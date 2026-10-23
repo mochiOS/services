@@ -109,6 +109,9 @@ impl Registry {
     pub(super) fn has_owner(&self, owner: u64) -> bool {
         self.entries.iter().any(|lock| lock.owner == owner)
     }
+    pub(super) fn has_file(&self, file: FileKey) -> bool {
+        self.entries.iter().any(|lock| lock.file == file)
+    }
     pub(super) fn retire_owner(&mut self, owner: u64) {
         self.entries.retain(|lock| lock.owner != owner);
     }

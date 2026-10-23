@@ -245,6 +245,7 @@ fn main() {
                 error
             );
         }
+        service.release_unused_record_lock_files(&mut filesystem);
         if let Err(error) = service.expire_alarms() {
             if !clock_failure_reported {
                 platform::logln!("posix.service: alarm clock failed errno={}", error);
@@ -512,6 +513,21 @@ fn main() {
         } else {
             None
         };
+        let prepared_record_lock = if let (Some(_), Some((header, payload)), true, Some(_)) =
+            (peer, decoded, attachments_valid, request_image)
+        {
+            if header.opcode == protocol::OP_RECORD_LOCK {
+                Some(posix_service::record_lock_request::inspect(
+                    header, payload, &attachments, &mut filesystem,
+                    |file| {
+                        let position = platform::handle::seek(
+                            file.handle, 0, platform::handle::HANDLE_SEEK_CURRENT,
+                        ).map_err(|error| protocol::status::normalize_failure(error.raw()))?;
+                        i64::try_from(position).map_err(|_| posix_service::STATUS_EOVERFLOW)
+                    },
+                ))
+            } else { None }
+        } else { None };
         let granted_pty = if let (Some(peer), Some((header, payload)), true, Some(_)) =
             (peer, decoded, attachments_valid, request_image)
         {
@@ -765,6 +781,17 @@ fn main() {
         }
         let mut retained_handle = None;
         let object_response = match (peer, decoded, attachments_valid) {
+            (Some(peer), Some(_), true) if prepared_record_lock.is_some() => {
+                let validation = request_image.ok_or(protocol::STATUS_EPERM)
+                    .and_then(|image| validate_pending_request_image(
+                        sender, peer, image, &mut service, &mut processes,
+                    ));
+                let (response, retained) = posix_service::record_lock_request::finish(
+                    &mut service, peer, prepared_record_lock.unwrap(), validation, &mut filesystem,
+                );
+                retained_handle = retained;
+                Some(response)
+            }
             (Some(peer), Some(_), true) if prepared_directory.is_some() => {
                 let validation = request_image
                     .ok_or(protocol::STATUS_EPERM)

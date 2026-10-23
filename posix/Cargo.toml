@@ -51,6 +51,11 @@ name = "native_timer_callback"
 path = "tests/native_timer_callback.rs"
 harness = false
 
+[[test]]
+name = "native_record_lock"
+path = "tests/native_record_lock.rs"
+harness = false
+
 [[bin]]
 name = "posix-service"
 path = "src/main.rs"
