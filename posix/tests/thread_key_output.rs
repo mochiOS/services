@@ -1,6 +1,8 @@
 #[allow(dead_code)]
 #[path = "support/native_error_probe.rs"]
 mod probe;
+#[path = "support/thread_key_lifecycle.rs"]
+mod lifecycle;
 
 #[test]
 fn failed_key_output_releases_reservation_without_publishing_destructor() {
@@ -30,6 +32,7 @@ mod user_copy{{pub fn write(output:*mut u8,bytes:&[u8])->Result<(),i32>{{
  use super::*;
  assert_eq!(DEFER.load(Ordering::Acquire),1);
  assert_eq!(THREAD_KEYS[0].allocated.load(Ordering::Acquire),THREAD_KEY_INITIALIZING);
+ assert!(matches!(lifecycle_runtime::capture(),Err(EAGAIN)),"reserved key must exclude fork capture");
  COPIES.fetch_add(1,Ordering::Relaxed);
  let error=ERROR.load(Ordering::Acquire) as i32;
  if error!=0{{return Err(error)}}
@@ -39,6 +42,7 @@ mod user_copy{{pub fn write(output:*mut u8,bytes:&[u8])->Result<(),i32>{{
         root.join("user/crates/posix-client/src/thread.rs"),
         root.join("user/crates/posix-client/src/upcall_guard.rs"),
     );
+    lifecycle::append(&mut program);
     let source = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
     program.push_str(probe::between(
         source,
@@ -69,6 +73,7 @@ fn main(){
    assert_eq!(THREAD_KEYS[0].allocated.load(Ordering::Acquire),THREAD_KEY_FREE);
    assert_eq!(THREAD_KEYS[0].destructor.load(Ordering::Acquire),0);
    assert_eq!(DEFER.load(Ordering::Acquire),0);
+   assert!(lifecycle_runtime::capture().is_ok(),"failed output must release snapshot exclusion");
   }
  }
  ERROR.store(0,Ordering::Release);
@@ -84,6 +89,7 @@ fn main(){
  assert_eq!(COPIES.load(Ordering::Acquire),copies);
  assert_eq!(pthread_key_delete(key),0);
  assert_eq!(DEFER.load(Ordering::Acquire),0);
+ assert!(lifecycle_runtime::capture().is_ok());
 }
 "#,
     );

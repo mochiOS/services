@@ -1,6 +1,8 @@
 #[allow(dead_code)]
 #[path = "support/native_error_probe.rs"]
 mod probe;
+#[path = "support/thread_key_lifecycle.rs"]
+mod lifecycle;
 
 #[test]
 fn key_deletion_cannot_clear_a_destructor_installed_by_concurrent_slot_reuse() {
@@ -52,6 +54,7 @@ impl AtomicU32{{
         root.join("user/crates/posix-client/src/thread.rs"),
         root.join("user/crates/posix-client/src/upcall_guard.rs"),
     );
+    lifecycle::append(&mut program);
     program.push_str(probe::between(
         runtime,
         "struct ThreadKeyControl {",
@@ -94,12 +97,14 @@ fn main(){
    ARMED.set(true);assert_eq!(pthread_key_delete(old),0);
   });
   PAUSED.get().unwrap().wait();
+  assert!(matches!(lifecycle_runtime::capture(),Err(EAGAIN)),"retiring key must exclude fork capture");
   assert!(thread_key_control(old).is_none(),"key remains published while retiring");
   let mut unpublished=0xabcdef;
   let overlapping=unsafe{pthread_key_create(&mut unpublished,Some(new_destructor))};
   // Always resume/join, even when testing a regressed FREE-before-clear build.
   RESUME.get().unwrap().wait();deleting.join().unwrap();
   assert_eq!(DEFER.load(Ordering::Acquire),0);
+  assert!(lifecycle_runtime::capture().is_ok());
   // Either overlap is rejected until retirement completes, or an implementation
   // may safely reuse a slot whose old callback has already been cleared.
   let new=if overlapping==0 {
