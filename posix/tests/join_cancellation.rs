@@ -46,6 +46,11 @@ fn register_current_thread() -> Option<(Pthread, &'static ThreadControl)> {
     if CASE.load(Ordering::Acquire) == 8 { TARGET.state.store(THREAD_EXITED, Ordering::Release); notify_join_waiter(&TARGET); }
     Some((1, &CALLER))
 }
+mod thread_reference {
+    pub fn with_live_token<T>(thread:super::Pthread, apply:impl FnOnce(&super::ThreadControl)->T)->Result<T,super::c_int>{
+        super::thread_control(thread).map(apply).ok_or(super::ESRCH)
+    }
+}
 fn current_thread_control() -> Option<(Pthread, &'static ThreadControl)> { Some((1, &CALLER)) }
 fn native_mutex_wake_all(_: &AtomicU32) {}
 fn native_counter_wake_all(_: &AtomicU64) {}

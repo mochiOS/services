@@ -7,8 +7,8 @@ use std::{
     ffi::c_int,
     ops::{Deref, DerefMut},
     sync::{
-        atomic::{AtomicU32, Ordering},
         Barrier, Mutex,
+        atomic::{AtomicU32, AtomicU64, Ordering},
     },
 };
 
@@ -21,6 +21,7 @@ const THREAD_STARTING: u32 = 1;
 const THREAD_RUNNING: u32 = 2;
 const THREAD_REAPING: u32 = 4;
 const TOKEN: Pthread = 64;
+static SERIAL: Mutex<()> = Mutex::new(());
 const NEXT_TOKEN: Pthread = 128;
 const RIGHTS: u64 =
     mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_SIGNAL | mnu_abi::HANDLE_RIGHT_TRANSFER;
@@ -28,11 +29,15 @@ struct ThreadControl {
     state: AtomicU32,
     generation: AtomicU32,
     native_handle: AtomicU32,
+    native_id: AtomicU64,
+    cancel_pending: AtomicU32,
 }
 static CONTROL: ThreadControl = ThreadControl {
     state: AtomicU32::new(THREAD_RUNNING),
     generation: AtomicU32::new(1),
     native_handle: AtomicU32::new(7),
+    native_id: AtomicU64::new(17),
+    cancel_pending: AtomicU32::new(0),
 };
 thread_local! {
     static CURRENT: Cell<Option<Pthread>> = const { Cell::new(None) };
@@ -193,6 +198,8 @@ fn reset() {
     CONTROL.generation.store(1, Ordering::Release);
     CONTROL.state.store(THREAD_RUNNING, Ordering::Release);
     CONTROL.native_handle.store(7, Ordering::Release);
+    CONTROL.native_id.store(17, Ordering::Release);
+    CONTROL.cancel_pending.store(0, Ordering::Release);
     CURRENT.set(None);
 }
 fn target(handle: u32) -> u64 {
@@ -201,6 +208,7 @@ fn target(handle: u32) -> u64 {
 
 #[test]
 fn actual_reference_capture_keeps_old_target_and_excludes_fork_until_release() {
+    let _serial = SERIAL.lock().unwrap();
     reset();
     for token in [0, NEXT_TOKEN] {
         assert_eq!(production::snapshot(token, RIGHTS).err(), Some(ESRCH));
@@ -296,4 +304,98 @@ fn actual_reference_capture_keeps_old_target_and_excludes_fork_until_release() {
         1
     );
     assert!(GATE.try_freeze().is_some());
+}
+
+#[test]
+fn live_token_actions_reject_dead_stale_and_unpublished_startup_slots() {
+    let _serial = SERIAL.lock().unwrap();
+    reset();
+    for token in [0, NEXT_TOKEN] {
+        assert_eq!(
+            production::with_live_token(token, |_| panic!("invalid token")),
+            Err(ESRCH)
+        );
+    }
+    for state in [THREAD_FREE, 3, THREAD_REAPING] {
+        CONTROL.state.store(state, Ordering::Release);
+        assert_eq!(
+            production::with_live_token(TOKEN, |_| panic!("retired target")),
+            Err(ESRCH)
+        );
+    }
+    CONTROL.state.store(THREAD_STARTING, Ordering::Release);
+    CONTROL.native_id.store(0, Ordering::Release);
+    assert_eq!(
+        production::with_live_token(TOKEN, |_| panic!("unpublished startup")),
+        Err(ESRCH)
+    );
+    CONTROL.native_id.store(17, Ordering::Release);
+    for state in [THREAD_STARTING, THREAD_RUNNING] {
+        CONTROL.state.store(state, Ordering::Release);
+        assert_eq!(
+            production::with_live_token(TOKEN, |control| {
+                assert!(LOCKED.get() > 0 && DEFERRED.get() > 0);
+                assert!(GATE.try_freeze().is_none());
+                control.cancel_pending.store(1, Ordering::Release);
+                42
+            }),
+            Ok(42)
+        );
+    }
+    assert_eq!(LOCKED.get(), 0);
+    assert_eq!(DEFERRED.get(), 0);
+    assert!(GATE.try_freeze().is_some());
+}
+
+#[test]
+fn cancellation_action_finishes_before_retirement_can_publish_a_reused_tcb() {
+    let _serial = SERIAL.lock().unwrap();
+    reset();
+    let entered = std::sync::Arc::new(Barrier::new(2));
+    let resume = std::sync::Arc::new(Barrier::new(2));
+    let action_entered = entered.clone();
+    let action_resume = resume.clone();
+    let action = std::thread::spawn(move || {
+        production::with_live_token(TOKEN, |control| {
+            action_entered.wait();
+            action_resume.wait();
+            assert_eq!(control.generation.load(Ordering::Acquire), 1);
+            control.cancel_pending.store(1, Ordering::Release);
+        })
+        .unwrap();
+    });
+    entered.wait();
+    let (attempted_tx, attempted_rx) = std::sync::mpsc::channel();
+    let reaper = std::thread::spawn(move || {
+        CONTROL.state.store(THREAD_REAPING, Ordering::Release);
+        KERNEL.lock().unwrap().recycle = true;
+        attempted_tx.send(()).unwrap();
+        production::replace(&CONTROL, 0);
+        // Match actual reclamation: close source, reset, publish FREE,
+        // then claim STARTING and publish the next generation.
+        CONTROL.native_id.store(0, Ordering::Release);
+        CONTROL.cancel_pending.store(0, Ordering::Release);
+        CONTROL.state.store(THREAD_FREE, Ordering::Release);
+        CONTROL.state.store(THREAD_STARTING, Ordering::Release);
+        CONTROL.generation.store(2, Ordering::Release);
+        CONTROL.native_id.store(18, Ordering::Release);
+        production::replace(&CONTROL, 7);
+        CONTROL.state.store(THREAD_RUNNING, Ordering::Release);
+    });
+    attempted_rx.recv().unwrap();
+    assert_eq!(CONTROL.generation.load(Ordering::Acquire), 1);
+    assert!(KERNEL.lock().unwrap().closed.is_empty());
+    resume.wait();
+    action.join().unwrap();
+    reaper.join().unwrap();
+    assert_eq!(CONTROL.cancel_pending.load(Ordering::Acquire), 0);
+    assert_eq!(
+        production::with_live_token(TOKEN, |_| panic!("old generation")),
+        Err(ESRCH)
+    );
+    production::with_live_token(NEXT_TOKEN, |control| {
+        control.cancel_pending.store(1, Ordering::Release)
+    })
+    .unwrap();
+    assert_eq!(CONTROL.cancel_pending.load(Ordering::Acquire), 1);
 }

@@ -41,6 +41,11 @@ fn set_errno(value: i32) {{ unsafe {{ ERRNO = value; }} }}
 fn register_current_thread() -> Option<(usize, &'static ThreadControl)> {{ Some((1, &CONTROL)) }}
 fn current_thread_control() -> Option<(usize, &'static ThreadControl)> {{ register_current_thread() }}
 fn thread_control(thread: usize) -> Option<&'static ThreadControl> {{ (thread == 1).then_some(&CONTROL) }}
+mod thread_reference {{
+    pub fn with_live_token<T>(thread:usize,apply:impl FnOnce(&super::ThreadControl)->T)->Result<T,super::c_int>{{
+        super::thread_control(thread).map(apply).ok_or(super::ESRCH)
+    }}
+}}
 fn native_mutex_wake_all(address: &AtomicU32) {{
     assert!(std::ptr::eq(address, &CONTROL.state) || std::ptr::eq(address, &CONTROL.wait_generation));
 }}
