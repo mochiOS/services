@@ -309,6 +309,7 @@ fn dispatch_pointer_motion(
     pointer_y: i32,
     pointer_focus: &mut Option<usize>,
 ) {
+    let previous_focus = *pointer_focus;
     let next = modal_filtered_target(
         surfaces,
         windows,
@@ -384,6 +385,47 @@ fn dispatch_pointer_motion(
                 );
             }
         }
+    }
+    // Transparent shell chrome still needs hover motion before it can paint
+    // its backdrop. Observation does not change pointer/keyboard focus, and
+    // this function is bypassed while an application owns a pointer grab.
+    for (index, surface) in surfaces.iter().enumerate().filter(|(_, surface)| {
+        surface.live && surface.visible && surface.role == SurfaceRole::Panel
+    }) {
+        if let Some(kind) = panel_observer_event(
+            surface,
+            pointer_x,
+            pointer_y,
+            previous_focus == Some(index) || *pointer_focus == Some(index),
+        ) {
+            send_event(
+                surface.event_endpoint,
+                surface.token,
+                kind,
+                pointer_x - surface.x,
+                pointer_y - surface.y,
+                0,
+            );
+        }
+    }
+}
+
+fn panel_observer_event(surface: &Surface, x: i32, y: i32, already_notified: bool) -> Option<u32> {
+    let (width, height) = surface_extent(surface);
+    let inside = surface.y == 0
+        && x >= surface.x
+        && i64::from(x) < i64::from(surface.x) + i64::from(width)
+        && y >= 0
+        && y < height.min(54) as i32;
+    let previous = surface.panel_pointer_observed.replace(inside);
+    if already_notified {
+        None
+    } else if inside {
+        Some(EVENT_POINTER_MOTION)
+    } else if previous {
+        Some(EVENT_POINTER_LEAVE)
+    } else {
+        None
     }
 }
 
@@ -729,6 +771,7 @@ fn encode_key_event_detail(flags: u16, modifiers: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::hit_test;
+    use super::panel_observer_event;
     use super::{
         encode_key_event_detail, encode_surface_event, modal_filtered_target,
         pointer_keyboard_focus_target, surface_process,
@@ -750,6 +793,24 @@ mod tests {
         assert_eq!(&event[8..12], &3i32.to_le_bytes());
         assert_eq!(&event[12..16], &4u32.to_le_bytes());
         assert_eq!(&event[16..24], &0x0102_0304_0506_0708u64.to_le_bytes());
+    }
+
+    #[test]
+    fn shell_observes_transparent_top_strip_once_without_taking_focus() {
+        let mut panel = Surface::empty();
+        panel.width = 1280;
+        panel.height = 800;
+        assert_eq!(
+            panel_observer_event(&panel, 1100, 27, false),
+            Some(crate::protocol::EVENT_POINTER_MOTION)
+        );
+        assert_eq!(panel_observer_event(&panel, 1100, 28, true), None);
+        assert_eq!(
+            panel_observer_event(&panel, 1100, 100, false),
+            Some(crate::protocol::EVENT_POINTER_LEAVE)
+        );
+        assert_eq!(panel_observer_event(&panel, 1100, 120, false), None);
+        assert_eq!(panel_observer_event(&panel, 1300, 27, false), None);
     }
 
     #[test]

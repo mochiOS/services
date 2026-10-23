@@ -169,6 +169,7 @@ pub(crate) struct Surface {
     pub(crate) gpu: Option<GpuSurfaceState>,
     pub(crate) content_generation: u64,
     pub(crate) z: u32,
+    pub(crate) panel_pointer_observed: std::cell::Cell<bool>,
 }
 
 impl Surface {
@@ -209,10 +210,12 @@ impl Surface {
             gpu: None,
             content_generation: 0,
             z: 0,
+            panel_pointer_observed: std::cell::Cell::new(false),
         }
     }
 
     pub(crate) fn reset(&mut self) {
+        self.panel_pointer_observed.set(false);
         self.live = false;
         self.owner = ClientId(0);
         self.owner_process = 0;
