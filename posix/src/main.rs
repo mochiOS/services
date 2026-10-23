@@ -4,6 +4,9 @@
 mod process_control;
 
 #[cfg(target_os = "mochios")]
+mod process_timer_native;
+
+#[cfg(target_os = "mochios")]
 mod resource_policy_native;
 
 #[cfg(target_os = "mochios")]
@@ -857,6 +860,21 @@ fn main() {
                 Some(service.handle_process_group_request(
                     peer, header, payload, &attachments, &mut processes,
                 ))
+            }
+            (Some(peer), Some((header, payload)), true)
+                if matches!(header.opcode,
+                    protocol::OP_TIMER_CREATE | protocol::OP_TIMER_DELETE
+                    | protocol::OP_TIMER_GET | protocol::OP_TIMER_SET | protocol::OP_TIMER_OVERRUN) =>
+            {
+                Some(match request_image {
+                    Some(image) => service.handle_process_timer_request(
+                        peer, image, header, payload, &attachments, &mut processes,
+                    ),
+                    None => posix_service::ObjectResponse {
+                        response: status_response(header.request_id, protocol::STATUS_EPERM),
+                        handles: Vec::new(),
+                    },
+                })
             }
             (Some(peer), Some((header, payload)), true)
                 if matches!(
@@ -2434,6 +2452,15 @@ struct RuntimeFilesystem {
 
 #[cfg(target_os = "mochios")]
 struct RuntimeProcesses;
+
+#[cfg(target_os = "mochios")]
+impl posix_service::process_timer_request::ClockBackend<u32> for RuntimeProcesses {
+    fn timer_clock(
+        &mut self, process: u32, clock: posix_service::process_timer::Clock,
+    ) -> Result<posix_service::process_timer_request::Reading, i32> {
+        process_timer_native::read(process, clock)
+    }
+}
 
 #[cfg(target_os = "mochios")]
 impl posix_service::ProcessBackend<u32> for RuntimeProcesses {

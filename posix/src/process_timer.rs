@@ -2,6 +2,7 @@
 //! This is not an IPC API: clock samples and peer identity must come from the
 //! authenticated service dispatcher. No function pointer crosses this layer.
 use super::*;
+pub use protocol::process_timer::{Clock, Notification, Value};
 use timer_schedule::Schedule;
 
 pub const MAX_TIMERS_PER_PROCESS: usize = 128;
@@ -14,13 +15,6 @@ impl TimerId {
     pub const fn raw(self) -> u64 {
         self.0
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Clock {
-    Realtime,
-    Monotonic,
-    ProcessCpu,
 }
 
 /// Independent clock domains sampled by the trusted adapter before state
@@ -43,26 +37,6 @@ impl Samples {
             Clock::ProcessCpu => self.process_cpu_ns,
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Notification {
-    None,
-    Default,
-    Signal {
-        signal: u32,
-        value: u64,
-    },
-    /// A process-local callback registry cookie, never a callable address.
-    Thread {
-        cookie: u64,
-    },
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Value {
-    pub remaining_ns: u128,
-    pub interval_ns: u128,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,6 +102,39 @@ pub struct OwnedTimers<'a> {
 }
 
 impl OwnedTimers<'_> {
+    pub(super) fn resolve(&self, raw: u64) -> Result<TimerId, i32> {
+        let id = TimerId(raw);
+        self.index(id)?;
+        Ok(id)
+    }
+
+    pub(super) fn clocks_for(
+        &self,
+        id: TimerId,
+        replacement: Option<bool>,
+    ) -> Result<[Option<Clock>; 2], i32> {
+        let timer = &self.registry.timers[self.index(id)?];
+        let next = replacement
+            .map(|absolute| {
+                if timer.clock == Clock::Realtime && !absolute {
+                    Clock::Monotonic
+                } else {
+                    timer.clock
+                }
+            })
+            .filter(|clock| *clock != timer.basis);
+        Ok([Some(timer.basis), next])
+    }
+
+    pub(super) fn preview_value(&self, id: TimerId, samples: Samples) -> Result<Value, i32> {
+        let timer = &self.registry.timers[self.index(id)?];
+        let now = samples.now(timer.basis);
+        let schedule = timer.schedule.observe(now).0;
+        Ok(Value {
+            remaining_ns: schedule.remaining(now),
+            interval_ns: schedule.interval(),
+        })
+    }
     fn index(&self, id: TimerId) -> Result<usize, i32> {
         self.registry
             .timers

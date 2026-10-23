@@ -72,6 +72,9 @@ mod cpu_timer;
 #[path = "support/process_timer.rs"]
 mod process_timer;
 
+#[path = "support/process_timer_request.rs"]
+mod process_timer_request;
+
 #[path = "support/child_signal_info.rs"]
 mod child_signal_info;
 
