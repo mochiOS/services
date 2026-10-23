@@ -1,8 +1,10 @@
-/* Real mochiOS integration. Run with no option (pipe), --socket (recv),
+/* Real mochiOS integration. Run with no option for all modes, or --pipe,
+ * --socket (recv),
  * --socket-read, --readv, --socket-readv, --poll, --select, --socket-poll,
  * and --socket-select. Link with the fresh runtime;
  * host execution cannot validate native COW, Handle inheritance or exec. */
 #define _GNU_SOURCE 1
+#include <elf.h>
 #include <errno.h>
 #include <poll.h>
 #include <pthread.h>
@@ -16,6 +18,7 @@
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #define CHECK(x)                                                               \
@@ -94,10 +97,25 @@ static void *worker(void *unused) {
   _REENT_CVTBUF(reent) = NULL; // parent exit/join may now reclaim normally
   return NULL;
 }
-int main(int argc, char **argv) {
-  if (argc == 2 && strcmp(argv[1], "--fork-child") == 0)
-    return 0;
+static int run_mode(int argc, char **argv, char **envp) {
   CHECK(argc >= 1 && argv[0] && *argv[0]);
+  fprintf(stderr, "fork-live: BEGIN mode=%s\n", argv[1]);
+  // argv[0] is an application label, not necessarily an executable pathname.
+  // Resolve our image from the native initial stack before creating a thread.
+  while (*envp)
+    ++envp;
+  const uintptr_t *auxiliary = (const uintptr_t *)(envp + 1);
+  const char *executable = NULL;
+  for (; auxiliary[0] != AT_NULL; auxiliary += 2)
+    if (auxiliary[0] == AT_EXECFN)
+      executable = (const char *)auxiliary[1];
+  CHECK(executable && executable[0] == '/');
+  atomic_store(&ready, 0);
+  atomic_store(&cleaned, 0);
+  atomic_store(&tls_cleaned, 0);
+  atomic_store(&worker_error, 0);
+  atomic_store(&worker_handle, 0);
+  foreign_reent = NULL;
   socket_wait = argc == 2 && strcmp(argv[1], "--socket") == 0;
   if (argc == 2 && strcmp(argv[1], "--socket-read") == 0)
     socket_wait = 2;
@@ -129,13 +147,22 @@ int main(int argc, char **argv) {
     uint32_t state, reserved;
   } thread_status;
   uint64_t handle = atomic_load(&worker_handle);
+  struct timespec started, now;
+  CHECK(clock_gettime(CLOCK_MONOTONIC, &started) == 0);
   do {
     CHECK(native(658, handle, (uint64_t)&thread_status) == 0);
     CHECK(!atomic_load(&worker_error) && thread_status.state != 5);
     if (thread_status.state != 3 && thread_status.state != 4)
       sched_yield();
+    CHECK(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
+    if (now.tv_sec - started.tv_sec >= 10) {
+      fprintf(stderr, "fork-live: worker did not block mode=%s state=%u\n",
+              argv[1], thread_status.state);
+      return 1;
+    }
   } while (thread_status.state != 3 && thread_status.state != 4);
   CHECK(native(626, handle, 0) == 0);
+  fprintf(stderr, "fork-live: sibling blocked mode=%s\n", argv[1]);
   for (unsigned round = 0; round < 3; ++round) {
     int channel[2];
     CHECK(pipe(channel) == 0);
@@ -159,9 +186,20 @@ int main(int argc, char **argv) {
           close(channel[1]))
         _exit(53);
       char *arguments[] = {argv[0], "--fork-child", NULL};
-      execve(argv[0], arguments, environ);
+      execve(executable, arguments, environ);
+      // Preserve the full exec error without allocation, stdio, or truncating
+      // errno to the eight-bit child exit status. write is async-signal-safe.
+      unsigned error = (unsigned)errno;
+      char message[] = "fork-live: child exec errno=0000000000\n";
+      for (size_t digit = 0; digit < 10; ++digit) {
+        message[sizeof(message) - 3 - digit] = '0' + error % 10;
+        error /= 10;
+      }
+      (void)write(STDERR_FILENO, message, sizeof(message) - 1);
       _exit(54);
     }
+    fprintf(stderr, "fork-live: parent round=%u child=%d mode=%s\n", round,
+            child, argv[1]);
     CHECK(close(channel[1]) == 0);
     char marker = 0;
     CHECK(read(channel[0], &marker, 1) == 1 && marker == 'C');
@@ -180,8 +218,31 @@ int main(int argc, char **argv) {
   CHECK(atomic_load(&cleaned) == 1 && atomic_load(&tls_cleaned) == 1);
   CHECK(pthread_key_delete(key) == 0);
   CHECK(close(blocked_pipe[0]) == 0 && close(blocked_pipe[1]) == 0);
-  puts("fork-live: PASS I/O-wait sibling, opaque caches, parent-only "
-       "destructors, "
-       "inherited pipe and child exec");
+  fprintf(stderr,
+          "fork-live: PASS mode=%s, three forks, inherited pipe, "
+          "child exec and parent-only destructors\n",
+          argv[1]);
+  return 0;
+}
+
+int main(int argc, char **argv, char **envp) {
+  if (argc == 2 && strcmp(argv[1], "--fork-child") == 0)
+    return 0;
+  static const char *const modes[] = {
+      "--pipe", "--socket", "--socket-read", "--readv",        "--socket-readv",
+      "--poll", "--select", "--socket-poll", "--socket-select"};
+  for (size_t mode = 0; mode < sizeof(modes) / sizeof(modes[0]); ++mode) {
+    if (argc == 2 && strcmp(argv[1], modes[mode]) == 0)
+      return run_mode(argc, argv, envp);
+  }
+  // Service launchers may supply their own logger argument. Such an invocation
+  // runs the whole matrix; only explicit mode names select a single case.
+  for (size_t mode = 0; mode < sizeof(modes) / sizeof(modes[0]); ++mode) {
+    char *arguments[] = {argv[0], (char *)modes[mode], NULL};
+    int result = run_mode(2, arguments, envp);
+    if (result)
+      return result;
+  }
+  fputs("fork-live: PASS all nine I/O wait modes\n", stderr);
   return 0;
 }
