@@ -154,7 +154,13 @@ fn hit_test(surfaces: &[Surface], windows: &[Window], x: i32, y: i32) -> Option<
             if surface.role == SurfaceRole::Panel {
                 let sx = x.saturating_sub(surface.x) as usize;
                 let sy = y.saturating_sub(surface.y) as usize;
-                if read_current_pixel(surface, sx, sy).is_none_or(|pixel| pixel >> 24 == 0) {
+                // Keep the hidden shell's top-edge reveal target reachable.
+                // Match Binder StatusArea's 9px edge; active window grabs still
+                // bypass hit testing and retain their drag/resize ownership.
+                let reveal_edge = surface.y == 0 && sy < 9;
+                if !reveal_edge
+                    && read_current_pixel(surface, sx, sy).is_none_or(|pixel| pixel >> 24 == 0)
+                {
                     continue;
                 }
             }
@@ -722,6 +728,7 @@ fn encode_key_event_detail(flags: u16, modifiers: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use super::hit_test;
     use super::{
         encode_key_event_detail, encode_surface_event, modal_filtered_target,
         pointer_keyboard_focus_target, surface_process,
@@ -756,6 +763,30 @@ mod tests {
 
         assert_eq!(
             pointer_keyboard_focus_target(&[application, panel], &[], Some(1), Some(0)),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn transparent_shell_keeps_top_edge_reachable_but_passes_the_rest_to_windows() {
+        let mut app = Surface::empty();
+        app.live = true;
+        app.visible = true;
+        app.width = 1280;
+        app.height = 800;
+        app.role = SurfaceRole::Toplevel;
+        let mut panel = Surface::empty();
+        panel.live = true;
+        panel.visible = true;
+        panel.width = 1280;
+        panel.height = 800;
+        panel.role = SurfaceRole::Panel;
+        let surfaces = [app, panel];
+        assert_eq!(hit_test(&surfaces, &[], 500, 3), Some(1));
+        assert_eq!(hit_test(&surfaces, &[], 500, 20), Some(0));
+        assert_eq!(hit_test(&surfaces, &[], 500, 400), Some(0));
+        assert_eq!(
+            pointer_keyboard_focus_target(&surfaces, &[], Some(1), Some(0)),
             Some(0)
         );
     }
