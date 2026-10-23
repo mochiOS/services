@@ -184,7 +184,7 @@ fn runtime_pins_escaped_metadata_and_captures_the_book_with_native_handles() {
         .nth(1)
         .unwrap();
     let locked = fork
-        .find("let fd_borrows = fd_lease::BORROWS.lock();")
+        .find("let mut fd_borrows = fd_lease::BORROWS.lock();")
         .unwrap();
     assert!(fork.find("let guard = state();").unwrap() < locked);
     assert!(locked < fork.find("handle_capture::Capture::new()?").unwrap());
@@ -295,5 +295,49 @@ fn real_runtime_guard_survives_close_replacement_early_error_and_native_label_re
     };
     drop(fd_lease::Lease::new(stdio).unwrap());
     fd_lease::retire(stdio.handle).unwrap();
+    assert!(NATIVE.lock().unwrap().is_empty());
+}
+
+#[test]
+fn vanished_child_operations_release_retired_handles_without_revoking_surviving_fds_or_scopes() {
+    let _runtime = RUNTIME_TEST.lock().unwrap();
+    assert!(NATIVE.lock().unwrap().is_empty());
+    CLOSED.lock().unwrap().clear();
+    *fd_lease::BORROWS.lock() = Book::new();
+    for (label, name) in [
+        (17, "retired foreign"),
+        (18, "shared scope"),
+        (19, "open descriptor"),
+    ] {
+        NATIVE.lock().unwrap().insert(label, name);
+    }
+    OWNER.set(2);
+    let foreign_retired = fd_lease::Lease::new(entry(17)).unwrap();
+    let foreign_shared = fd_lease::Lease::new(entry(18)).unwrap();
+    let foreign_open = fd_lease::Lease::new(entry(19)).unwrap();
+    // Model stacks which exist in the snapshot but never resume in the child.
+    // Their guards must not later release the child's discarded pins.
+    std::mem::forget((foreign_retired, foreign_shared, foreign_open));
+    OWNER.set(1);
+    let own = fd_lease::Lease::new(entry(18)).unwrap();
+    fd_lease::retire(entry(17).handle).unwrap();
+    fd_lease::retire(entry(18).handle).unwrap();
+    assert!(CLOSED.lock().unwrap().is_empty());
+    fd_lease::BORROWS
+        .lock()
+        .discard_for_fork(1, |label| close_object_handle(label as u32))
+        .unwrap();
+    assert_eq!(*CLOSED.lock().unwrap(), [17]);
+    assert!(NATIVE.lock().unwrap().contains_key(&18));
+    assert!(NATIVE.lock().unwrap().contains_key(&19));
+    drop(own);
+    fd_lease::retire(entry(19).handle).unwrap();
+    assert_eq!(*CLOSED.lock().unwrap(), [17, 18, 19]);
+    NATIVE.lock().unwrap().insert(17, "new slot occupant");
+    let fresh = fd_lease::Lease::new(entry(17)).unwrap();
+    fd_lease::retire(entry(17).handle).unwrap();
+    assert!(NATIVE.lock().unwrap().contains_key(&17));
+    drop(fresh);
+    assert_eq!(*CLOSED.lock().unwrap(), [17, 18, 19, 17]);
     assert!(NATIVE.lock().unwrap().is_empty());
 }

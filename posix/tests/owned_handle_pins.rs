@@ -103,24 +103,124 @@ fn collision_wraparound_and_group_relocation_preserve_all_outstanding_pin_keys()
 }
 
 #[test]
-fn snapshot_guard_is_userspace_only_and_freezes_the_book_before_owner_check() {
+fn snapshot_transition_is_child_only_and_keeps_book_frozen_until_disposal() {
     let runtime = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
     let body = runtime
         .split("fn clone_registered_process_owned(")
         .nth(1)
         .unwrap()
-        .split("let inherited_fds =")
+        .split("drop(fd_borrows)")
         .next()
         .unwrap();
+    assert!(body.find("fd_lease::BORROWS.lock()").unwrap() < body.find("if image == 0").unwrap());
     assert!(
-        body.find("fd_lease::BORROWS.lock()").unwrap()
+        body.find("if image == 0").unwrap()
             < body
-                .find("has_foreign_pins(newlib_lock_identity())")
+                .find("discard_for_fork(newlib_lock_identity()")
                 .unwrap()
     );
+    assert!(!body.contains("has_foreign_pins(newlib_lock_identity())"));
     let lease = include_str!("../../../user/crates/newlib-runtime/src/fd_lease.rs");
     assert!(lease.contains("pin_owned(entry.handle.lower_handle, newlib_lock_identity())"));
     // No thread-by-Handle dense matrix: bookkeeping remains bounded by native
     // label capacity, not by label capacity times maximum pthread count.
     assert!(std::mem::size_of::<Book<{ mnu_abi::PROCESS_MAX_OBJECT_HANDLES }>>() <= 256 * 1024);
+}
+
+#[test]
+fn child_discard_preserves_survivor_and_descriptor_owners_and_closes_only_last_retired_pins() {
+    let mut book = Book::<8>::new();
+    let _foreign_retired = book.pin_owned(1, 72).unwrap();
+    assert_eq!(book.retire(1), Some(false));
+    let own = book.pin_owned(2, 71).unwrap();
+    let _foreign_shared = book.pin_owned(2, 72).unwrap();
+    assert_eq!(book.retire(2), Some(false));
+    let _foreign_open = book.pin_owned(3, 72).unwrap();
+    let _unattributed = book.pin(3).unwrap();
+    book.retain(4).unwrap();
+    let _alias_pin = book.pin_owned(4, 72).unwrap();
+    assert_eq!(book.retire(4), Some(false));
+    let mut closed = Vec::new();
+    assert_eq!(
+        book.discard_for_fork(0, |_| panic!("invalid owner must not mutate")),
+        Err(PinError::InvalidOwner)
+    );
+    assert!(book.has_foreign_pins(71));
+    book.discard_for_fork(71, |label| closed.push(label))
+        .unwrap();
+    assert_eq!(closed, [1]);
+    assert!(!book.has_foreign_pins(71));
+    assert!(book.release(own)); // native label 2 closes only on own scope exit
+    assert_eq!(book.retire(3), Some(true)); // descriptor survived its foreign operations
+    assert_eq!(book.retire(4), Some(true)); // remaining alias owner survived
+    book.discard_for_fork(71, |_| panic!("no repeated disposal"))
+        .unwrap();
+    // A retired label closed in the child may be reused immediately.
+    let fresh = book.pin_owned(1, 71).unwrap();
+    assert_eq!(book.retire(1), Some(false));
+    assert!(book.release(fresh));
+}
+
+#[test]
+fn fork_discard_handles_dense_wrapped_hash_groups_without_damaging_survivor_pins() {
+    const N: usize = 17;
+    for round in 0..200u64 {
+        let mut book = Book::<N>::new();
+        let mut own = Vec::new();
+        let mut expected_closes = Vec::new();
+        for label in 1..=N as u64 {
+            let owner = if (label + round) % 3 == 0 {
+                71
+            } else {
+                72 + round
+            };
+            let pin = book.pin_owned(label, owner).unwrap();
+            if owner == 71 {
+                own.push(pin);
+            } // foreign pins never resume in this image
+            assert_eq!(book.retire(label), Some(false));
+            if owner != 71 {
+                expected_closes.push(label);
+            }
+        }
+        let mut closes = Vec::new();
+        book.discard_for_fork(71, |label| closes.push(label))
+            .unwrap();
+        assert_eq!(closes, expected_closes);
+        assert!(!book.has_foreign_pins(71));
+        for pin in own {
+            assert!(book.release(pin));
+        }
+        let new: Vec<_> = (1..=N as u64)
+            .map(|label| book.pin_owned(label, 91).unwrap())
+            .collect();
+        for pin in new {
+            assert!(!book.release(pin));
+        }
+    }
+}
+
+#[test]
+fn fork_discard_commits_before_disposal_and_can_resume_without_double_close() {
+    let mut book = Book::<4>::new();
+    for label in 1..=4 {
+        let _ = book.pin_owned(label, 72).unwrap();
+        assert_eq!(book.retire(label), Some(false));
+    }
+    let mut closed = Vec::new();
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            book.discard_for_fork(71, |label| {
+                closed.push(label);
+                panic!("non-returning disposal");
+            })
+            .unwrap();
+        }))
+        .is_err()
+    );
+    assert_eq!(closed, [1]);
+    book.discard_for_fork(71, |label| closed.push(label))
+        .unwrap();
+    assert_eq!(closed, [1, 2, 3, 4]);
+    assert!(!book.has_foreign_pins(71));
 }
