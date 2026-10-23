@@ -1,11 +1,155 @@
-use std::cell::RefCell;
-use std::rc::Rc;
 use mochios_posix_client::fd::{FdReservation, FdTable};
 use mochios_posix_client::handle_borrow::{Book, Pin as HandlePin};
+use std::cell::RefCell;
+use std::rc::Rc;
 
 #[path = "../../../user/crates/newlib-runtime/src/callback_resources.rs"]
 mod production;
 use production::{Chain, Scope};
+
+fn wait_for_thaw(word: &std::sync::atomic::AtomicU32, expected: u32) {
+    use std::sync::atomic::Ordering;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while word.load(Ordering::Acquire) == expected {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "resource capture stranded its owner"
+        );
+        std::thread::yield_now();
+    }
+}
+
+#[test]
+fn snapshot_capture_excludes_unpublished_active_and_deferred_resources() {
+    let chain = Chain::new();
+    let mut scope = core::pin::pin!(Scope::new(&chain, 0, ()));
+    assert!(chain.is_empty());
+    assert!(
+        chain.capture_empty().is_none(),
+        "unpublished construction is not quiescent"
+    );
+    assert!(!chain.reset_empty());
+    unsafe {
+        scope.as_mut().activate();
+    }
+    assert!(chain.capture_empty().is_none());
+    unsafe {
+        scope.as_mut().retire();
+    }
+    let deferred = chain.defer_callbacks().unwrap();
+    assert!(chain.capture_empty().is_none());
+    drop(deferred);
+    let capture = chain.capture_empty().unwrap();
+    assert!(chain.capture_empty().is_none());
+    drop(capture);
+    assert!(chain.reset_empty());
+}
+
+#[test]
+fn frozen_empty_chain_parks_publication_until_native_capture_finishes() {
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::{Arc, mpsc};
+    static PARKED: AtomicBool = AtomicBool::new(false);
+    static WAKES: AtomicU32 = AtomicU32::new(0);
+    fn park(word: &AtomicU32, expected: u32) {
+        PARKED.store(true, Ordering::Release);
+        wait_for_thaw(word, expected);
+    }
+    fn wake(_: &AtomicU32) {
+        WAKES.fetch_add(1, Ordering::AcqRel);
+    }
+    let chain = Arc::new(Chain::with_wait(park, wake));
+    drop(chain.capture_empty().unwrap());
+    assert_eq!(
+        WAKES.load(Ordering::Acquire),
+        0,
+        "idle chains need no native wake syscall"
+    );
+    let capture = chain.capture_empty().unwrap();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (published_tx, published_rx) = mpsc::channel();
+    let worker_chain = chain.clone();
+    let worker = std::thread::spawn(move || {
+        entered_tx.send(()).unwrap();
+        let mut scope = core::pin::pin!(Scope::new(&worker_chain, 0, ()));
+        unsafe {
+            scope.as_mut().activate();
+        }
+        published_tx.send(()).unwrap();
+        unsafe {
+            scope.as_mut().retire();
+        }
+    });
+    entered_rx.recv().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !PARKED.load(Ordering::Acquire) {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    assert!(chain.is_empty());
+    assert!(published_rx.try_recv().is_err());
+    drop(capture);
+    assert_eq!(WAKES.load(Ordering::Acquire), 1);
+    published_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    worker.join().unwrap();
+    assert!(chain.capture_empty().is_some());
+}
+
+#[test]
+fn unlinking_the_last_scope_does_not_expose_a_partial_resource_destructor_to_fork() {
+    use std::sync::{Arc, mpsc};
+    struct Retiring {
+        entered: mpsc::Sender<()>,
+        finish: mpsc::Receiver<()>,
+    }
+    impl Drop for Retiring {
+        fn drop(&mut self) {
+            self.entered.send(()).unwrap();
+            self.finish
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+        }
+    }
+    for abandon in [false, true] {
+        let chain = Arc::new(Chain::with_wait(wait_for_thaw, |_| {}));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (finish_tx, finish_rx) = mpsc::channel();
+        let worker_chain = chain.clone();
+        let worker = std::thread::spawn(move || {
+            let mut scope = core::pin::pin!(Scope::new(
+                &worker_chain,
+                0,
+                Retiring {
+                    entered: entered_tx,
+                    finish: finish_rx
+                }
+            ));
+            unsafe {
+                scope.as_mut().activate();
+            }
+            unsafe {
+                if abandon {
+                    worker_chain.abandon_from(0);
+                } else {
+                    scope.as_mut().retire();
+                }
+            }
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert!(chain.is_empty());
+        assert!(
+            chain.capture_empty().is_none(),
+            "empty head still has an in-flight destructor"
+        );
+        finish_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(chain.capture_empty().is_some());
+    }
+}
 
 struct Tracked {
     name: u32,

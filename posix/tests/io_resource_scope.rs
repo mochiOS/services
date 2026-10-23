@@ -1,7 +1,7 @@
-use std::sync::Mutex;
-use std::ffi::c_int;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use mochios_posix_client::upcall_guard::Guard;
+use std::ffi::c_int;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 #[path = "../../../user/crates/newlib-runtime/src/callback_resources.rs"]
 mod callback_resources;
 #[path = "../../../user/crates/newlib-runtime/src/io_resources.rs"]
@@ -36,6 +36,11 @@ impl Drop for Resource {
 }
 fn prepare() -> Result<Resource, i32> {
     assert_ne!(CONTROL.native.load(Ordering::Relaxed), 0);
+    assert!(
+        !CONTROL.callback_resources.is_empty(),
+        "preparation must already have a tracked owner"
+    );
+    assert!(CONTROL.callback_resources.capture_empty().is_none());
     if PREPARE_FAIL.load(Ordering::Relaxed) != 0 {
         Err(9)
     } else {
@@ -45,6 +50,7 @@ fn prepare() -> Result<Resource, i32> {
 fn reset() {
     assert!(CONTROL.callback_resources.is_empty());
     assert_eq!(CONTROL.native.load(Ordering::Relaxed), 0);
+    assert!(CONTROL.callback_resources.capture_empty().is_some());
     CONTROL.active_signal_scope_id.store(0, Ordering::Relaxed);
     DROPS.store(0, Ordering::Relaxed);
     PREPARE_FAIL.store(0, Ordering::Relaxed);
