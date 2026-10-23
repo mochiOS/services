@@ -107,8 +107,13 @@ impl<H: Copy> PosixService<H> {
         R: FnOnce(Pending) -> bool,
     {
         let samples = self.timer_signal_samples(peer, image, selected, backend)?;
-        self.process_timers(peer)?
-            .accept_with_reply(selected, samples, reply)
+        let accepted = self
+            .process_timers(peer)?
+            .accept_with_reply(selected, samples, reply)?;
+        if accepted.is_some() {
+            self.remove_empty_signal_notification(peer.process_id);
+        }
+        Ok(accepted)
     }
 
     pub(super) fn timer_signal_samples<B: ClockBackend<H>>(

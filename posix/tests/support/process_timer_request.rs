@@ -12,6 +12,8 @@ mod delivery;
 mod wait;
 #[path = "process_timer_dequeue.rs"]
 mod dequeue;
+#[path = "process_timer_wake.rs"]
+mod wake;
 
 struct Clocks {
     samples: Samples,
@@ -338,25 +340,30 @@ fn unrepresentable_old_value_cannot_commit_a_replacement_with_an_error_reply() {
 }
 
 #[test]
-fn unavailable_async_delivery_is_explicit_instead_of_successfully_silent() {
+fn unavailable_thread_callbacks_are_explicit_without_rejecting_signal_notifications() {
     let (client, _) = setup();
-    for notification in [
-        Notification::Default,
-        Notification::Signal {
-            signal: protocol::SIGNAL_ALRM,
-            value: 17,
-        },
-        Notification::Thread { cookie: 1 },
-    ] {
-        assert_eq!(
-            client.timer_create(Clock::Monotonic, notification),
-            Err(ClientError::Remote(protocol::STATUS_ENOSYS))
-        );
-    }
+    assert_eq!(
+        client.timer_create(Clock::Monotonic, Notification::Thread { cookie: 1 }),
+        Err(ClientError::Remote(protocol::STATUS_ENOSYS))
+    );
     // A rejected notification must not reserve an ID or slot.
     assert_eq!(
         client.timer_create(Clock::Monotonic, Notification::None),
         Ok(1)
+    );
+    assert_eq!(
+        client.timer_create(Clock::Monotonic, Notification::Default),
+        Ok(2)
+    );
+    assert_eq!(
+        client.timer_create(
+            Clock::Monotonic,
+            Notification::Signal {
+                signal: protocol::SIGNAL_ALRM,
+                value: 17,
+            }
+        ),
+        Ok(3)
     );
 }
 

@@ -1137,7 +1137,9 @@ fn main() {
                             thread.rights,
                         )
                     })
-                    .map(|(context, _)| context.thread_id);
+                    .and_then(|(context, _)| {
+                        service.signal_thread_ready(peer, *context).ok().map(|_| context.thread_id)
+                    });
                 if let Some(thread_id) = registered_thread {
                     if let Some(previous) = signal_threads.insert(
                         thread_id,

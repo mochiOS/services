@@ -1092,7 +1092,8 @@ impl<H: Copy> PosixService<H> {
                 self.signal_origins.insert((process_id, 0, signal), origin);
             }
             self.signal_notifications.insert(process_id);
-        } else if self.signals[&process_id].pending() == 0 {
+        } else if self.signals[&process_id].pending() == 0
+            && self.process_timers.pending_signal_mask(process_id) == 0 {
             self.signal_notifications.remove(&process_id);
         }
         Ok(())
@@ -2937,7 +2938,7 @@ impl<H: Copy> PosixService<H> {
                     }
                 }
             }
-            if state.pending() == 0 {
+            if state.pending() == 0 && self.process_timers.pending_signal_mask(process_id) == 0 {
                 self.signal_notifications.remove(&process_id);
             }
             if request.signal == protocol::SIGNAL_CHLD {
@@ -3086,7 +3087,8 @@ impl<H: Copy> PosixService<H> {
             if self
                 .signals
                 .get(&identity.process_id)
-                .is_some_and(|state| state.pending() != 0)
+                .is_some_and(|state| state.pending() != 0
+                    || self.process_timers.pending_signal_mask(identity.process_id) != 0)
             {
                 self.signal_notifications.insert(identity.process_id);
             }
@@ -3126,10 +3128,12 @@ impl<H: Copy> PosixService<H> {
         if request.operation != protocol::SIGNAL_MASK_QUERY {
             self.signal_masks.insert(key, updated);
             self.signal_delivery_epochs.entry(key).or_insert(0);
-            if current & !updated & self.signals[&sender.process_id].pending() != 0 {
+            let newly_unblocked = previous.map_or(!updated, |current| current & !updated);
+            if newly_unblocked & (self.signals[&sender.process_id].pending()
+                | self.process_timers.pending_signal_mask(sender.process_id)) != 0 {
                 self.signal_notifications.insert(sender.process_id);
             }
-            if current & !updated & self.thread_pending_signals.get(&key).copied().unwrap_or(0) != 0 {
+            if newly_unblocked & self.thread_pending_signals.get(&key).copied().unwrap_or(0) != 0 {
                 self.thread_signal_notifications.insert(key);
             }
         }

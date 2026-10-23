@@ -78,11 +78,12 @@ impl<H: Copy> PosixService<H> {
             if !attachments.is_empty() {
                 return Err(STATUS_EINVAL);
             }
-            // The reactor/signal acceptance adapter is not connected yet.
-            // Do not report success for an asynchronous notification that
-            // cannot be delivered. Remove this gate with that integration.
-            if matches!(request, Request::Create(_, notification) if notification != wire::Notification::None)
-            {
+            // Thread callback creation still needs its own callback lifecycle.
+            // Signal/default notifications use the joint signal dispatcher.
+            if matches!(
+                request,
+                Request::Create(_, wire::Notification::Thread { .. })
+            ) {
                 return Err(protocol::STATUS_ENOSYS);
             }
             self.validate_request_image(peer, image, backend)?;
@@ -125,11 +126,7 @@ impl<H: Copy> PosixService<H> {
                 // Reject this request instead of creating/modifying new state.
                 self.validate_request_image(peer, image, backend)?;
             }
-            let ignored = self
-                .signals
-                .get(&peer.process_id)
-                .ok_or(protocol::STATUS_ESRCH)?
-                .ignored;
+            let mut generated = None;
             let mut timers = self.process_timers(peer)?;
             match request {
                 Request::Create(clock, notification) => {
@@ -162,13 +159,15 @@ impl<H: Copy> PosixService<H> {
                             )?;
                         }
                         _ => {
-                            timers.observe(id, samples)?;
+                            generated = timers.observe_new_signal(id, samples)?;
                         }
                     }
                 }
             }
-            self.process_timers
-                .discard_signals(peer.process_id, ignored);
+            if let Some(signal) = generated {
+                self.notify_timer_signal(peer.process_id, signal)?;
+            }
+            self.remove_empty_signal_notification(peer.process_id);
             Ok(output)
         })();
         match result {

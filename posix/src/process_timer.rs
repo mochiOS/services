@@ -387,6 +387,23 @@ impl OwnedTimers<'_> {
         Ok(previous)
     }
 
+    /// Report a signal only when a new pending event was created, not when an
+    /// already-pending event merely accumulated another overrun.
+    pub(super) fn observe_new_signal(
+        &mut self,
+        id: TimerId,
+        samples: Samples,
+    ) -> Result<Option<u32>, i32> {
+        let was_pending = self.registry.timers[self.index(id)?].pending.is_some();
+        Ok(match self.observe(id, samples)? {
+            Some(Pending {
+                notification: Notification::Signal { signal, .. },
+                ..
+            }) if !was_pending => Some(signal),
+            _ => None,
+        })
+    }
+
     /// Observation creates at most one pending event per timer, not one per
     /// missed period. Repeated polling returns the same token with updated
     /// accounting until it is accepted, discarded, reset or deleted.

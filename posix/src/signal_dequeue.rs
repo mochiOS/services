@@ -196,6 +196,21 @@ impl<H: Copy> PosixService<H> {
                 false
             }
         };
+        drop(publication);
+        if published {
+            self.remove_empty_signal_notification(sender.process_id);
+        } else {
+            // A previous interrupt may already have been acknowledged. Failed
+            // reply publication must request another wake, even for one-shots.
+            match candidate {
+                Candidate::Ordinary { origin_key, .. } if origin_key.1 != 0 => {
+                    self.thread_signal_notifications.insert(key);
+                }
+                _ => {
+                    self.signal_notifications.insert(sender.process_id);
+                }
+            }
+        }
         Ok(published.then_some(delivery))
     }
 }
