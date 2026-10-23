@@ -55,6 +55,9 @@ mod cancellation {
  pub fn notify_async(_: &super::ThreadControl)->Result<(),super::c_int>{Ok(())}
  pub fn test_async(){}
 }
+mod record_lock_blocking {
+ pub fn interrupt(_: super::Pthread)->Result<(),super::c_int>{Ok(())}
+}
 fn current_thread_control() -> Option<(Pthread, &'static ThreadControl)> { Some((1, &CALLER)) }
 fn native_mutex_wake_all(_: &AtomicU32) {}
 fn native_counter_wake_all(_: &AtomicU64) {}

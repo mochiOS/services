@@ -57,6 +57,9 @@ mod record_lock_wait;
 #[path = "support/record_lock_wait_request.rs"]
 mod record_lock_wait_request;
 
+#[path = "support/thread_wait_interrupt.rs"]
+mod thread_wait_interrupt;
+
 #[path = "support/record_lock_exec_request.rs"]
 mod record_lock_exec_request;
 

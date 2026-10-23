@@ -57,6 +57,7 @@ pub mod record_lock_exec_request;
 pub mod record_lock_request;
 pub mod record_lock_wait;
 pub mod record_lock_wait_request;
+pub mod thread_wait_interrupt;
 mod fork_state;
 pub mod resource_policy;
 pub mod cpu_limit;

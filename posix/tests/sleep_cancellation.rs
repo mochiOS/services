@@ -50,6 +50,9 @@ mod cancellation {{
  pub fn notify_async(_: &super::ThreadControl)->Result<(),super::c_int>{{Ok(())}}
  pub fn test_async(){{}}
 }}
+mod record_lock_blocking {{
+ pub fn interrupt(_: usize)->Result<(),super::c_int>{{Ok(())}}
+}}
 fn native_mutex_wake_all(address: &AtomicU32) {{
     assert!(std::ptr::eq(address, &CONTROL.state) || std::ptr::eq(address, &CONTROL.wait_generation));
 }}

@@ -551,6 +551,15 @@ fn main() {
                 ))
             } else { None }
         } else { None };
+        let prepared_wait_interrupt = if let (Some(peer), Some((header, payload)), true, Some(_)) =
+            (peer, decoded, attachments_valid, request_image)
+        {
+            if header.opcode == protocol::OP_THREAD_WAIT_INTERRUPT {
+                Some(posix_service::thread_wait_interrupt::inspect(peer, header, payload, &attachments,
+                    |handle| platform::thread::handle_status(handle)
+                        .map_err(|error| process_control::lifecycle_failure(error.raw()))))
+            } else { None }
+        } else { None };
         let prepared_lock_exec = if let (Some(_), Some((header, payload)), true, Some(_)) =
             (peer, decoded, attachments_valid, request_image)
         {
@@ -813,6 +822,12 @@ fn main() {
         }
         let mut retained_handle = None;
         let object_response = match (peer, decoded, attachments_valid) {
+            (Some(peer), Some(_), true) if prepared_wait_interrupt.is_some() => {
+                let validation = request_image.ok_or(protocol::STATUS_EPERM)
+                    .and_then(|image| validate_pending_request_image(sender, peer, image, &mut service, &mut processes));
+                Some(posix_service::thread_wait_interrupt::finish(&mut service, peer,
+                    prepared_wait_interrupt.unwrap(), validation))
+            }
             (Some(peer), Some((header, _)), true) if prepared_lock_wait.is_some() => {
                 let prepared = prepared_lock_wait.unwrap();
                 let epoch = prepared.epoch().unwrap_or(0);
