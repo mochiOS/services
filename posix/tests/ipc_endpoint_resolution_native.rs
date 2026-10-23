@@ -77,10 +77,10 @@ fn endpoint_is_valid(endpoint:IpcEndpoint)->bool{
 fn ensure_endpoint_for_thread(id:u64)->Option<u64>{assert_eq!(id,19);SENDER.get().then_some(5001)}
 struct EndpointRights(u8);
 impl EndpointRights{const RECV:Self=Self(1);fn contains(&self,required:Self)->bool{self.0&required.0==required.0}}
-struct Record{thread_id:u64,rights:EndpointRights}
+struct Record{thread_id:u64,slot:u16,generation:u64,rights:EndpointRights}
 fn endpoint_record_from_handle(raw:u64)->Option<Record>{
-    match raw{5001=>Some(Record{thread_id:19,rights:EndpointRights(1)}),
-        5002=>Some(Record{thread_id:20,rights:EndpointRights(0)}),_=>None}
+    match raw{5001=>Some(Record{thread_id:19,slot:3,generation:7,rights:EndpointRights(1)}),
+        5002=>Some(Record{thread_id:20,slot:4,generation:8,rights:EndpointRights(0)}),_=>None}
 }
 "#);
     let ipc = include_str!("../../../core/src/syscall/ipc.rs");
@@ -114,11 +114,11 @@ fn main(){
         reset();KIND.set(false);assert_eq!(process_local_endpoint(7,required),Err(Error::InvalidArgument.into_raw()));
         reset();VALID.set(false);assert_eq!(process_local_endpoint(7,required),Err(Error::NotFound.into_raw()));
     }
-    reset();assert_eq!(resolve_call_destination(7),Ok((19,5001,2)));
+    reset();assert_eq!(resolve_call_destination(7),Ok((IpcEndpoint{thread_id:19,slot:3,generation:7},5001,2)));
     SENDER.set(false);assert_eq!(resolve_call_destination(7),Err(Error::NotReady.into_raw()));
     reset();RIGHTS.set(HandleRights::RECEIVE.bits());
     assert_eq!(resolve_call_destination(7),Err(Error::AccessDenied.into_raw()));
-    reset();assert_eq!(resolve_call_destination(5001),Ok((19,5001,0)));
+    reset();assert_eq!(resolve_call_destination(5001),Ok((IpcEndpoint{thread_id:19,slot:3,generation:7},5001,0)));
     assert_eq!(resolve_call_destination(5002),Err(Error::AccessDenied.into_raw()));
     assert_eq!(resolve_call_destination(6000),Err(Error::NotFound.into_raw()));
     assert_eq!(resolve_receive_thread(7,19),Ok(19));

@@ -31,7 +31,9 @@ mod task{
     pub fn thread_slot_index_and_generation_by_u64(id:u64)->Option<(usize,u64)>{assert_eq!(id,7);crate::SLOT.get()}
 }
 fn ensure_endpoint_for_thread(id:u64)->Option<u64>{assert_eq!(id,7);REGISTER.get().then_some(6001)}
-fn resolve_endpoint_handle(handle:u64)->Option<u64>{assert_eq!(handle,5001);TARGET.get().then_some(19)}
+struct EndpointRecord{thread_id:u64,slot:u16,generation:u64}
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]struct IpcEndpoint{thread_id:u64,slot:u16,generation:u64}
+fn endpoint_record_from_handle(handle:u64)->Option<EndpointRecord>{assert_eq!(handle,5001);TARGET.get().then_some(EndpointRecord{thread_id:19,slot:1,generation:37})}
 fn decode_outgoing_object_handles(pointer:u64)->Result<ObjectHandleAttachments,u64>{
     assert_eq!(pointer,99);let error=DECODE_ERROR.get();if error!=0{return Err(error);}Ok(owned())
 }
@@ -57,9 +59,10 @@ impl Mailbox{
 }
 static MAILBOXES:Mutex<[Mailbox;MAX_THREADS]>=Mutex::new([const{Mailbox::new()};MAX_THREADS]);
 fn lock_mailboxes()->std::sync::MutexGuard<'static,[Mailbox;MAX_THREADS]>{MAILBOXES.lock().unwrap()}
-fn send_to_thread_id_with_attachments(dest:u64,sender:u64,id:u64,pointer:u64,length:u64,reply:bool,expects:bool,_attachments:ObjectHandleAttachments)->u64{
+fn send_to_endpoint_with_attachments(dest:IpcEndpoint,sender:u64,id:u64,pointer:u64,length:u64,reply:bool,expects:bool,_attachments:ObjectHandleAttachments)->u64{
     assert!(MAILBOXES.try_lock().is_ok(),"delivery ran under mailbox lock");
-    assert_eq!((dest,sender,id,pointer,length),(19,6001,42,11,3));assert!(reply&&!expects);
+    assert_eq!(dest,IpcEndpoint{thread_id:19,slot:1,generation:37});
+    assert_eq!((sender,id,pointer,length),(6001,42,11,3));assert!(reply&&!expects);
     SENDS.set(SENDS.get()+1);RESULT.get()
 }
 "#);

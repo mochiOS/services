@@ -29,11 +29,12 @@ thread_local!{
     static ATTACHED:Cell<bool>=const{Cell::new(false)};
     static EXPECTED_FLAGS:Cell<u32>=const{Cell::new(0)};
 }
-struct EndpointRecord{thread_id:u64,rights:EndpointRights}
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]struct IpcEndpoint{thread_id:u64,slot:u16,generation:u64}
+struct EndpointRecord{thread_id:u64,slot:u16,generation:u64,rights:EndpointRights}
 fn endpoint_record_from_handle(handle:u64)->Option<EndpointRecord>{
     match handle{
-        5001=>DESTINATION.get().then(||EndpointRecord{thread_id:19,rights:DEST_RIGHTS.get()}),
-        6001=>SENDER.get().then(||EndpointRecord{thread_id:7,rights:SEND_RIGHTS.get()}),
+        5001=>DESTINATION.get().then(||EndpointRecord{thread_id:19,slot:3,generation:7,rights:DEST_RIGHTS.get()}),
+        6001=>SENDER.get().then(||EndpointRecord{thread_id:7,slot:1,generation:2,rights:SEND_RIGHTS.get()}),
         _=>None,
     }
 }
@@ -51,22 +52,24 @@ mod syscall{pub mod security{
     }
 }}
 struct ObjectHandleAttachments{delivery_flags:u32}
-fn resolve_call_destination(handle:u64)->Result<(u64,u64,u32),u64>{
+fn resolve_call_destination(handle:u64)->Result<(IpcEndpoint,u64,u32),u64>{
     let error=RESOLVE_ERROR.get();if error!=0{return Err(error);}
-    match handle{7=>Ok((19,5001,2)),5001=>Ok((19,5001,0)),_=>Err(Error::NotFound.into_raw())}
+    let dest=IpcEndpoint{thread_id:19,slot:3,generation:7};
+    match handle{7=>Ok((dest,5001,2)),5001=>Ok((dest,5001,0)),_=>Err(Error::NotFound.into_raw())}
 }
 fn decode_outgoing_object_handles(pointer:u64)->Result<ObjectHandleAttachments,u64>{
     assert_eq!(pointer,99);DECODES.set(DECODES.get()+1);
     let error=DECODE_ERROR.get();if error!=0{return Err(error);}
     Ok(ObjectHandleAttachments{delivery_flags:0})
 }
-fn deliver(dest:u64,sender:u64,pointer:u64,length:u64)->u64{
-    assert_eq!((dest,sender,pointer,length),(19,6001,11,3));SENDS.set(SENDS.get()+1);RESULT.get()
+fn deliver(dest:IpcEndpoint,sender:u64,pointer:u64,length:u64)->u64{
+    assert_eq!(dest,IpcEndpoint{thread_id:19,slot:3,generation:7});
+    assert_eq!((sender,pointer,length),(6001,11,3));SENDS.set(SENDS.get()+1);RESULT.get()
 }
-fn send_to_thread_id(dest:u64,sender:u64,pointer:u64,length:u64)->u64{
+fn send_to_endpoint(dest:IpcEndpoint,sender:u64,pointer:u64,length:u64)->u64{
     assert!(!ATTACHED.get());deliver(dest,sender,pointer,length)
 }
-fn send_to_thread_id_with_attachments(dest:u64,sender:u64,id:u64,pointer:u64,length:u64,reply:bool,expects:bool,attachments:ObjectHandleAttachments)->u64{
+fn send_to_endpoint_with_attachments(dest:IpcEndpoint,sender:u64,id:u64,pointer:u64,length:u64,reply:bool,expects:bool,attachments:ObjectHandleAttachments)->u64{
     assert!(ATTACHED.get());assert_eq!(id,0);assert!(!reply&&!expects);
     assert_eq!(attachments.delivery_flags,EXPECTED_FLAGS.get());deliver(dest,sender,pointer,length)
 }

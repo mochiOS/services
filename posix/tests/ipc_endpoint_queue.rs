@@ -20,7 +20,7 @@ fn production_retirement_releases_only_exact_destinations_and_rejects_late_sends
     let retire = source.find("pub(crate) fn retire_endpoint(").unwrap();
     let retire_end = source[retire..].find("\n}\n").unwrap() + retire + 3;
     let send = source
-        .find("fn send_to_thread_id_with_attachments(")
+        .find("fn send_to_endpoint_with_attachments(")
         .unwrap();
     let send_end = source[send..].find("\n}\n").unwrap() + send + 3;
     let mut program = String::from(
@@ -33,6 +33,7 @@ const MAILBOX_CAP:usize=4;const MESSAGE_CACHE_CAP:usize=4;
 static COPY_RACE:AtomicBool=AtomicBool::new(false);
 static FAIL_ALLOC:AtomicBool=AtomicBool::new(false);
 static COPY_ERROR:AtomicUsize=AtomicUsize::new(0);
+static GENERATION_LOOKUPS:AtomicUsize=AtomicUsize::new(0);
 unsafe fn alloc(layout:Layout)->*mut u8{
  if FAIL_ALLOC.swap(false,Ordering::SeqCst){return std::ptr::null_mut();}
  unsafe{system_alloc(layout)}
@@ -50,7 +51,7 @@ fn record_ipc_copy(_:usize){}
 fn ipc_max_msg_size()->usize{MAX_MSG_SIZE}fn ipc_mailbox_cap()->usize{MAILBOX_CAP}
 static OWNERS:Mutex<BTreeMap<u64,(usize,u64)>>=Mutex::new(BTreeMap::new());
 mod task{
- pub fn thread_slot_index_and_generation_by_u64(id:u64)->Option<(usize,u64)>{crate::OWNERS.lock().unwrap().get(&id).copied()}
+ pub fn thread_slot_index_and_generation_by_u64(id:u64)->Option<(usize,u64)>{crate::GENERATION_LOOKUPS.fetch_add(1,crate::Ordering::SeqCst);crate::OWNERS.lock().unwrap().get(&id).copied()}
  pub struct ThreadId;impl ThreadId{pub fn from_u64(_:u64)->Self{Self}}
  pub fn wake_registered_waiter(_:ThreadId){}
 }
@@ -64,6 +65,8 @@ mod syscall{
   if crate::COPY_RACE.swap(false,crate::Ordering::SeqCst){
     crate::OWNERS.lock().unwrap().remove(&7);
     crate::retire_endpoint(crate::IpcEndpoint{thread_id:7,slot:0,generation:1});
+    // A replacement is already alive before the faultable copy returns.
+    crate::OWNERS.lock().unwrap().insert(7,(0,2));
   }
   unsafe{output.copy_from_slice(std::slice::from_raw_parts(input as*const u8,output.len()));}Ok(())
  }
@@ -150,15 +153,31 @@ fn main(){
  OWNERS.lock().unwrap().insert(7,(0,1));
  let(message,reference)=make_message(7,1,0,1);
  let attachments=message.object_handles;COPY_RACE.store(true,Ordering::SeqCst);
- let result=send_to_thread_id_with_attachments(7,99,1,b"x".as_ptr()as u64,1,false,true,attachments);
+ let result=send_to_endpoint_with_attachments(old,99,1,b"x".as_ptr()as u64,1,false,true,attachments);
  assert_eq!(result,Error::NotFound.into_raw());assert!(reference.upgrade().is_none());
  assert_eq!(MAILBOXES.lock()[0].count,0);
+
+ // A validated Endpoint must stay bound to its original generation even if
+ // replacement happened BEFORE entering the lower-level send. The old
+ // thread-ID-only helper re-looked up generation 2 and could publish there.
+ OWNERS.lock().unwrap().insert(7,(0,2));
+ GENERATION_LOOKUPS.store(0,Ordering::SeqCst);
+ let(message,reference)=make_message(7,1,0,704);
+ assert_eq!(send_to_endpoint_with_attachments(old,99,704,b"x".as_ptr()as u64,1,false,false,message.object_handles),Error::NotFound.into_raw());
+ assert_eq!(GENERATION_LOOKUPS.load(Ordering::SeqCst),0);
+ assert!(reference.upgrade().is_none());assert_eq!(MAILBOXES.lock()[0].count,0);
+ // A caller holding an actual new Endpoint can still use that generation.
+ let fresh=IpcEndpoint{generation:2,..old};
+ assert_eq!(send_to_endpoint_with_attachments(fresh,99,705,b"n".as_ptr()as u64,1,false,false,ObjectHandleAttachments::empty()),0);
+ let messages=drain(0);assert_eq!(messages.len(),1);
+ assert_eq!((messages[0].to,messages[0].to_generation,messages[0].call_id),(7,2,705));
+ for message in messages{release_message(message);}
 
  // A live destination still accepts normal messages without dropping their
  // delegated resource until a receiver takes it or the endpoint retires.
  OWNERS.lock().unwrap().insert(7,(0,1));
  let(message,reference)=make_message(7,1,0,2);
- let result=send_to_thread_id_with_attachments(7,99,2,b"y".as_ptr()as u64,1,false,false,message.object_handles);
+ let result=send_to_endpoint_with_attachments(old,99,2,b"y".as_ptr()as u64,1,false,false,message.object_handles);
  assert_eq!(result,0);assert!(reference.upgrade().is_some());
  OWNERS.lock().unwrap().remove(&7);retire_endpoint(old);assert!(reference.upgrade().is_none());
  assert!(RETIRED.load(Ordering::SeqCst)>=55);
@@ -172,7 +191,7 @@ fn main(){
    message.is_reply=false;enqueue(0,message);queued.push(reference);
  }
  let(message,rejected)=make_message(7,1,0,600);
- let result=send_to_thread_id_with_attachments(7,99,600,b"z".as_ptr()as u64,1,false,false,message.object_handles);
+ let result=send_to_endpoint_with_attachments(old,99,600,b"z".as_ptr()as u64,1,false,false,message.object_handles);
  assert_eq!(result,Error::NotReady.into_raw());assert!(rejected.upgrade().is_none());
  {let boxes=MAILBOXES.lock();assert_eq!((boxes[0].count,boxes[0].free_count),(MAILBOX_CAP-1,1));}
  assert!(queued.iter().all(|reference|reference.upgrade().is_some()));
@@ -181,11 +200,11 @@ fn main(){
  // can, but a fully occupied queue must reject both kinds without lock-held
  // destruction or disturbing any already enqueued authority.
  let(message,reply)=make_message(7,1,0,601);
- assert_eq!(send_to_thread_id_with_attachments(7,99,601,b"r".as_ptr()as u64,1,true,false,message.object_handles),0);
+ assert_eq!(send_to_endpoint_with_attachments(old,99,601,b"r".as_ptr()as u64,1,true,false,message.object_handles),0);
  assert!(reply.upgrade().is_some());
  for is_reply in [false,true]{
    let(message,rejected)=make_message(7,1,0,602);
-   assert_eq!(send_to_thread_id_with_attachments(7,99,602,b"f".as_ptr()as u64,1,is_reply,false,message.object_handles),Error::NotReady.into_raw());
+   assert_eq!(send_to_endpoint_with_attachments(old,99,602,b"f".as_ptr()as u64,1,is_reply,false,message.object_handles),Error::NotReady.into_raw());
    assert!(rejected.upgrade().is_none());
    let boxes=MAILBOXES.lock();assert_eq!((boxes[0].count,boxes[0].free_count),(MAILBOX_CAP,0));
  }
@@ -207,23 +226,23 @@ fn main(){
    (8,0,0,Error::BackingFailure),
  ]{
    let(message,reference)=make_message(to,1,0,700);
-   assert_eq!(send_to_thread_id_with_attachments(to,99,700,pointer,length,false,false,message.object_handles),error.into_raw());
+   assert_eq!(send_to_endpoint_with_attachments(IpcEndpoint{thread_id:to,slot:if to==8{MAX_THREADS as u16}else{0},generation:1},99,700,pointer,length,false,false,message.object_handles),error.into_raw());
    assert!(reference.upgrade().is_none());assert_eq!(MAILBOXES.lock()[0].count,0);
  }
  for(code,error)in[(1,Error::InvalidAddress),(2,Error::ResourceUnavailable),(3,Error::BackingFailure)]{
    COPY_ERROR.store(code,Ordering::SeqCst);
    let(message,reference)=make_message(7,1,0,701);
-   assert_eq!(send_to_thread_id_with_attachments(7,99,701,b"x".as_ptr()as u64,1,false,false,message.object_handles),error.into_raw());
+   assert_eq!(send_to_endpoint_with_attachments(old,99,701,b"x".as_ptr()as u64,1,false,false,message.object_handles),error.into_raw());
    assert!(reference.upgrade().is_none());assert_eq!(MAILBOXES.lock()[0].count,0);
  }
  while let Some(message)=MESSAGE_CACHE.lock().take(){drop(message);}
  FAIL_ALLOC.store(true,Ordering::SeqCst);
  let(message,reference)=make_message(7,1,0,702);
- assert_eq!(send_to_thread_id_with_attachments(7,99,702,0,0,false,false,message.object_handles),Error::ResourceUnavailable.into_raw());
+ assert_eq!(send_to_endpoint_with_attachments(old,99,702,0,0,false,false,message.object_handles),Error::ResourceUnavailable.into_raw());
  assert!(!FAIL_ALLOC.load(Ordering::SeqCst));assert!(reference.upgrade().is_none());
  assert_eq!(MAILBOXES.lock()[0].count,0);
  // A zero-length message accepts a null data pointer and publishes normally.
- assert_eq!(send_to_thread_id_with_attachments(7,99,703,0,0,false,false,ObjectHandleAttachments::empty()),0);
+ assert_eq!(send_to_endpoint_with_attachments(old,99,703,0,0,false,false,ObjectHandleAttachments::empty()),0);
  OWNERS.lock().unwrap().remove(&7);retire_endpoint(old);
 }
 "#);

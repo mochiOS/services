@@ -120,18 +120,18 @@ impl EndpointRights {
     const RECV: Self = Self(1);
     fn contains(&self, other: Self) -> bool { self.0 & other.0 == other.0 }
 }
-struct Endpoint { thread_id: u64 }
-struct Record { thread_id: u64, rights: EndpointRights }
-fn process_local_endpoint(raw: u64, _: HandleRights) -> Result<Endpoint, u64> {
-    if raw == 7 { Ok(Endpoint { thread_id: 19 }) } else { Err(EACCES) }
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]struct IpcEndpoint { thread_id: u64, slot:u16, generation:u64 }
+struct Record { thread_id: u64, slot:u16, generation:u64, rights: EndpointRights }
+fn process_local_endpoint(raw: u64, _: HandleRights) -> Result<IpcEndpoint, u64> {
+    if raw == 7 { Ok(IpcEndpoint { thread_id: 19, slot:3, generation:7 }) } else { Err(EACCES) }
 }
 fn ensure_endpoint_for_thread(thread: u64) -> Option<u64> {
     assert_eq!(thread, 19); Some(5001)
 }
 fn endpoint_record_from_handle(raw: u64) -> Option<Record> {
     match raw {
-        5001 => Some(Record { thread_id: 19, rights: EndpointRights(1) }),
-        5002 => Some(Record { thread_id: 20, rights: EndpointRights(0) }),
+        5001 => Some(Record { thread_id: 19, slot:3, generation:7, rights: EndpointRights(1) }),
+        5002 => Some(Record { thread_id: 20, slot:4, generation:8, rights: EndpointRights(0) }),
         _ => None,
     }
 }
@@ -141,9 +141,9 @@ fn endpoint_record_from_handle(raw: u64) -> Option<Record> {
     program.push_str(
         r#"
 fn main() {
-    assert_eq!(resolve_call_destination(7), Ok((19, 5001, 2)));
+    assert_eq!(resolve_call_destination(7), Ok((IpcEndpoint {thread_id:19,slot:3,generation:7}, 5001, 2)));
     assert_eq!(resolve_call_destination(8), Err(EACCES));
-    assert_eq!(resolve_call_destination(5001), Ok((19, 5001, 0)));
+    assert_eq!(resolve_call_destination(5001), Ok((IpcEndpoint {thread_id:19,slot:3,generation:7}, 5001, 0)));
     assert_eq!(resolve_call_destination(5002), Err(EACCES));
     assert_eq!(resolve_call_destination(6000), Err(NOT_FOUND));
 }
@@ -179,7 +179,7 @@ fn provider_dispatch_requires_native_origin_and_abi_layout_is_unchanged() {
     let generic = &ipc[ipc.find("pub fn call(").unwrap()
         ..ipc.find("pub fn call_object_handles(").unwrap()];
     assert!(!generic.contains("IPC_DELIVERY_NATIVE_OBJECT"));
-    assert!(generic.contains("send_call_to_thread_id("));
+    assert!(generic.contains("send_call_to_endpoint("));
     for retired in [
         "pub fn call_from_kernel(",
         "fn call_endpoint_from_kernel(",

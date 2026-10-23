@@ -85,7 +85,9 @@ mod lifetime{
         crate::OBSERVERS.set(crate::OBSERVERS.get()+1);Ok(Observation)
     }
 }
-fn resolve_call_destination(_:u64)->Result<(u64,u64,u32),u64>{Ok((8,88,2))}
+fn resolve_call_destination(_:u64)->Result<(IpcEndpoint,u64,u32),u64>{
+    if TARGET.get(){Ok((IpcEndpoint,88,2))}else{Err(mnu_abi::status::Error::NotFound.into_raw())}
+}
 fn ensure_endpoint_for_thread(_:u64)->Option<u64>{REGISTER.get().then_some(77)}
 fn endpoint_for_thread(_:u64)->Option<IpcEndpoint>{TARGET.get().then_some(IpcEndpoint)}
 fn endpoint_is_valid(_:IpcEndpoint)->bool{VALID.get()}
@@ -93,12 +95,12 @@ fn decode_outgoing_object_handles(pointer:u64)->Result<ObjectHandleAttachments,u
     assert_eq!(pointer,99);STATE.with_borrow_mut(|s|s.decodes+=1);
     let error=DECODE_ERROR.get();if error!=0{return Err(error);}Ok(ObjectHandleAttachments{delivery_flags:0})
 }
-fn send_call_to_thread_id(dest:u64,sender:u64,id:u64,pointer:u64,length:u64,flags:u32)->u64{
-    assert_eq!((dest,sender,pointer,length,flags),(8,77,11,3,2));assert!(id>0);
+fn send_call_to_endpoint(_:IpcEndpoint,sender:u64,id:u64,pointer:u64,length:u64,flags:u32)->u64{
+    assert_eq!((sender,pointer,length,flags),(77,11,3,2));assert!(id>0);
     STATE.with_borrow_mut(|s|{s.calls+=1;s.replies.pop_front().expect("unexpected send")})
 }
-fn send_to_thread_id_with_attachments(dest:u64,sender:u64,id:u64,pointer:u64,length:u64,reply:bool,expects:bool,attachments:ObjectHandleAttachments)->u64{
-    assert!(!reply&&expects);send_call_to_thread_id(dest,sender,id,pointer,length,attachments.delivery_flags)
+fn send_to_endpoint_with_attachments(dest:IpcEndpoint,sender:u64,id:u64,pointer:u64,length:u64,reply:bool,expects:bool,attachments:ObjectHandleAttachments)->u64{
+    assert!(!reply&&expects);send_call_to_endpoint(dest,sender,id,pointer,length,attachments.delivery_flags)
 }
 fn recv_blocking_reply_for_thread(caller:u64,receiver:u64,sender:u64,id:u64,pointer:u64,length:u64,handles:Option<u64>,_:IpcEndpoint)->u64{
     assert_eq!((caller,receiver,sender,pointer,length),(7,7,88,22,4));assert!(id>0);assert!(handles.is_none()||handles==Some(99));

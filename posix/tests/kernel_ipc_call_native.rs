@@ -121,7 +121,7 @@ mod lifetime{
     program.push_str(probe::between(
         include_str!("../../../core/src/syscall/ipc.rs"),
         "fn call_endpoint_with_attachments_from_kernel(",
-        "fn send_to_thread_id(",
+        "fn send_to_endpoint(",
     ));
     program.push_str(r#"
 fn reset(){
