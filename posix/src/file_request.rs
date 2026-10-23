@@ -15,9 +15,6 @@ enum Operation {
     Chmod(u32, Credentials),
     Chown(u32, u32, Credentials),
     Sync,
-    GetFlags,
-    SetFlags(u32),
-    UpdateFlags(u32, u32),
 }
 
 pub fn supports(opcode: u16) -> bool {
@@ -28,9 +25,6 @@ pub fn supports(opcode: u16) -> bool {
             | protocol::OP_FCHMOD
             | protocol::OP_FCHOWN
             | protocol::OP_FSYNC
-            | protocol::OP_FGETFL
-            | protocol::OP_FSETFL
-            | protocol::OP_FUPDATEFL
     )
 }
 
@@ -90,27 +84,11 @@ fn prepare<H: Copy>(
             let (uid, gid) = protocol::decode_file_owner(payload).map_err(|_| STATUS_EINVAL)?;
             Ok(Operation::Chown(uid, gid, credentials()))
         }
-        protocol::OP_FSYNC | protocol::OP_FGETFL => {
+        protocol::OP_FSYNC => {
             if !payload.is_empty() {
                 return Err(STATUS_EINVAL);
             }
-            Ok(if opcode == protocol::OP_FSYNC {
-                Operation::Sync
-            } else {
-                Operation::GetFlags
-            })
-        }
-        protocol::OP_FSETFL => {
-            let flags = protocol::decode_file_flags(payload).map_err(|_| STATUS_EINVAL)?;
-            if flags & !protocol::MUTABLE_STATUS_FLAGS != 0 {
-                return Err(STATUS_EINVAL);
-            }
-            Ok(Operation::SetFlags(flags))
-        }
-        protocol::OP_FUPDATEFL => {
-            let (mask, flags) =
-                protocol::decode_file_flags_update(payload).map_err(|_| STATUS_EINVAL)?;
-            Ok(Operation::UpdateFlags(mask, flags))
+            Ok(Operation::Sync)
         }
         _ => unreachable!(),
     }
@@ -194,20 +172,6 @@ fn run<H: Copy, F: FilesystemBackend<H>>(
         Operation::Chmod(mode, c) => filesystem.fchmod(file, mode, c.uid, c.gid, &c.groups),
         Operation::Chown(uid, gid, c) => filesystem.fchown(file, uid, gid, c.uid, c.gid, &c.groups),
         Operation::Sync => filesystem.fsync(file),
-        Operation::GetFlags => {
-            return match filesystem.get_status_flags(file) {
-                Ok(flags) => {
-                    let mut payload = vec![0; protocol::FILE_FLAGS_PAYLOAD_LEN];
-                    match protocol::encode_file_flags(flags, &mut payload) {
-                        Ok(()) => object_payload(request_id, payload),
-                        Err(_) => object_error(request_id, STATUS_EINVAL),
-                    }
-                }
-                Err(status) => object_error(request_id, status),
-            };
-        }
-        Operation::SetFlags(flags) => filesystem.set_status_flags(file, flags),
-        Operation::UpdateFlags(mask, flags) => filesystem.update_status_flags(file, mask, flags),
     };
     object_error(request_id, result.err().unwrap_or(protocol::STATUS_OK))
 }

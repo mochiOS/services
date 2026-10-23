@@ -1477,8 +1477,6 @@ struct RecordingFilesystem {
     time_request: Option<posix_service::PreparedFileTimes>,
     time_error: Option<i32>,
     synced: Option<AttachedObject<u32>>,
-    status_flags: u32,
-    flags_file: Option<AttachedObject<u32>>,
     mkdir_request: Option<posix_service::PreparedMkdir>,
     unlink_request: Option<posix_service::PreparedUnlink>,
     rename_request: Option<posix_service::PreparedRename>,
@@ -1918,37 +1916,6 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
             hook(protocol::OP_FSYNC)?;
         }
         self.synced = Some(file);
-        Ok(())
-    }
-
-    fn get_status_flags(&mut self, file: AttachedObject<u32>) -> Result<u32, i32> {
-        if let Some(hook) = &mut self.file_hook {
-            hook(protocol::OP_FGETFL)?;
-        }
-        self.flags_file = Some(file);
-        Ok(self.status_flags)
-    }
-
-    fn set_status_flags(&mut self, file: AttachedObject<u32>, flags: u32) -> Result<(), i32> {
-        if let Some(hook) = &mut self.file_hook {
-            hook(protocol::OP_FSETFL)?;
-        }
-        self.flags_file = Some(file);
-        self.status_flags = flags;
-        Ok(())
-    }
-
-    fn update_status_flags(
-        &mut self,
-        file: AttachedObject<u32>,
-        mask: u32,
-        flags: u32,
-    ) -> Result<(), i32> {
-        if let Some(hook) = &mut self.file_hook {
-            hook(protocol::OP_FUPDATEFL)?;
-        }
-        self.flags_file = Some(file);
-        self.status_flags = (self.status_flags & !mask) | flags;
         Ok(())
     }
 
@@ -7668,118 +7635,6 @@ fn file_mutation_capabilities_cannot_be_recovered_from_owner_or_root_credentials
 }
 
 #[test]
-fn file_status_flags_live_on_the_attached_open_description() {
-    let peer = PeerIdentity {
-        process_id: 118,
-        effective_uid: 506,
-        effective_gid: 25,
-    };
-    let mut service = service_for(peer);
-    service.handle(
-        peer,
-        protocol::Header {
-            opcode: protocol::OP_SESSION_REGISTER,
-            ..protocol::Header::default()
-        },
-        &[],
-    );
-    let file = AttachedObject {
-        handle: 60,
-        rights: mnu_abi::HANDLE_RIGHT_READ
-            | mnu_abi::HANDLE_RIGHT_CONTROL
-            | mnu_abi::HANDLE_RIGHT_TRANSFER,
-    };
-    let mut filesystem = RecordingFilesystem::default();
-    let wanted = protocol::OPEN_APPEND | protocol::OPEN_NONBLOCK;
-    let mut flags = [0; protocol::FILE_FLAGS_PAYLOAD_LEN];
-    protocol::encode_file_flags(wanted, &mut flags).unwrap();
-
-    let set = service.handle_objects(
-        peer,
-        protocol::Header {
-            opcode: protocol::OP_FSETFL,
-            ..protocol::Header::default()
-        },
-        &flags,
-        &[file],
-        &mut filesystem,
-    );
-    assert_eq!(set.response.header.status, protocol::STATUS_OK);
-    assert_eq!(filesystem.status_flags, wanted);
-    assert_eq!(filesystem.flags_file, Some(file));
-
-    let get = service.handle_objects(
-        peer,
-        protocol::Header {
-            opcode: protocol::OP_FGETFL,
-            ..protocol::Header::default()
-        },
-        &[],
-        &[file],
-        &mut filesystem,
-    );
-    assert_eq!(get.response.header.status, protocol::STATUS_OK);
-    assert_eq!(
-        protocol::decode_file_flags(&get.response.payload).unwrap(),
-        wanted
-    );
-    let mut update = [0; protocol::FILE_FLAGS_UPDATE_PAYLOAD_LEN];
-    protocol::encode_file_flags_update(protocol::OPEN_NONBLOCK, 0, &mut update).unwrap();
-    for (attachments, expected) in [(&[][..], STATUS_EINVAL), (&[file][..], protocol::STATUS_OK)] {
-        let response = service.handle_objects(
-            peer,
-            protocol::Header {
-                opcode: protocol::OP_FUPDATEFL,
-                ..Default::default()
-            },
-            &update,
-            attachments,
-            &mut filesystem,
-        );
-        assert_eq!(response.response.header.status, expected);
-    }
-    assert_eq!(filesystem.status_flags, protocol::OPEN_APPEND);
-    assert_eq!(filesystem.flags_file, Some(file));
-    let reduced = AttachedObject {
-        rights: file.rights & !mnu_abi::HANDLE_RIGHT_CONTROL,
-        ..file
-    };
-    for opcode in [protocol::OP_FSETFL, protocol::OP_FUPDATEFL] {
-        let payload = if opcode == protocol::OP_FSETFL {
-            &flags[..]
-        } else {
-            &update[..]
-        };
-        let response = service.handle_objects(
-            peer,
-            protocol::Header {
-                opcode,
-                ..Default::default()
-            },
-            payload,
-            &[reduced],
-            &mut filesystem,
-        );
-        assert_eq!(response.response.header.status, -13);
-        assert_eq!(filesystem.status_flags, protocol::OPEN_APPEND);
-    }
-    update[4..].copy_from_slice(&protocol::OPEN_APPEND.to_le_bytes());
-    let response = service.handle_objects(
-        peer,
-        protocol::Header {
-            opcode: protocol::OP_FUPDATEFL,
-            ..Default::default()
-        },
-        &update,
-        &[file],
-        &mut filesystem,
-    );
-    assert_eq!(response.response.header.status, STATUS_EINVAL);
-    assert_eq!(filesystem.status_flags, protocol::OPEN_APPEND);
-    assert_eq!(filesystem.roots_opened, 0);
-}
-
-#[test]
 fn mkdir_uses_session_umask_credentials_and_directory_handles() {
     let peer = PeerIdentity {
         process_id: 119,
@@ -8828,3 +8683,6 @@ fn terminal_flush_wire_format_is_fixed_and_rejects_unknown_flags() {
 
 #[path = "support/path_limits_protocol.rs"]
 mod path_limits_protocol;
+
+#[path = "support/removed_flag_relay.rs"]
+mod removed_flag_relay;

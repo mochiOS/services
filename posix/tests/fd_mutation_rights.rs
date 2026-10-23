@@ -61,12 +61,7 @@ impl ObjectTransport for &MutationTransport {
 
 #[test]
 fn client_rejects_missing_authority_without_rpc_and_forwards_only_required_rights() {
-    for opcode in [
-        posix::OP_FTRUNCATE,
-        posix::OP_FCHMOD,
-        posix::OP_FCHOWN,
-        posix::OP_FSETFL,
-    ] {
+    for opcode in [posix::OP_FTRUNCATE, posix::OP_FCHMOD, posix::OP_FCHOWN] {
         let required = posix::file_mutation_rights(opcode).unwrap();
         let transport = MutationTransport {
             opcode,
@@ -80,7 +75,6 @@ fn client_rejects_missing_authority_without_rpc_and_forwards_only_required_right
                 posix::OP_FTRUNCATE => client.ftruncate(file, 1),
                 posix::OP_FCHMOD => client.fchmod(file, 0o600),
                 posix::OP_FCHOWN => client.fchown(file, u32::MAX, u32::MAX),
-                posix::OP_FSETFL => client.set_status_flags(file, posix::OPEN_NONBLOCK),
                 _ => unreachable!(),
             };
             if rights == u64::MAX {
@@ -99,12 +93,6 @@ fn owner_and_policy_service_require_actual_mutation_authority_not_posix_identity
         (posix::OP_FTRUNCATE, filesystem::OP_TRUNCATE_HANDLE, WRITE),
         (posix::OP_FCHMOD, filesystem::OP_CHMOD_HANDLE, CONTROL),
         (posix::OP_FCHOWN, filesystem::OP_CHOWN_HANDLE, CONTROL),
-        (posix::OP_FSETFL, filesystem::OP_SET_FLAGS_HANDLE, CONTROL),
-        (
-            posix::OP_FUPDATEFL,
-            filesystem::OP_UPDATE_FLAGS_HANDLE,
-            CONTROL,
-        ),
     ] {
         assert_eq!(
             posix::file_mutation_rights(operation),

@@ -3139,45 +3139,6 @@ impl RuntimeFilesystem {
         Ok(encoded)
     }
 
-    fn flags_call(
-        &self,
-        header: mochios_filesystem_protocol::Header,
-        mut handles: mochi_user_platform::ipc::IpcObjectHandles,
-    ) -> Result<u32, i32> {
-        use mochios_filesystem_protocol as filesystem;
-
-        let mut request = [0u8; filesystem::HEADER_LEN];
-        let request_len = filesystem::encode(header, &[], &mut request).map_err(|_| -22)?;
-        let mut response = [0u8; filesystem::HEADER_LEN];
-        if self
-            .call(&request[..request_len], &mut response, &mut handles)
-            .is_err()
-        {
-            close_runtime_handles(&handles);
-            return Err(-5);
-        }
-        let (response, payload) = match filesystem::decode(&response) {
-            Ok(decoded) => decoded,
-            Err(_) => {
-                close_runtime_handles(&handles);
-                return Err(-5);
-            }
-        };
-        if handles.count != 0
-            || response.opcode != filesystem::OP_STATUS
-            || !payload.is_empty()
-            || response.status != 0
-        {
-            close_runtime_handles(&handles);
-            return Err(if response.status < 0 {
-                response.status
-            } else {
-                -5
-            });
-        }
-        Ok(response.flags)
-    }
-
     fn empty_call(
         &self,
         header: mochios_filesystem_protocol::Header,
@@ -3810,89 +3771,6 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             },
             &[],
             single_file_handle(file)?,
-        )
-    }
-
-    fn get_status_flags(
-        &mut self,
-        file: posix_service::AttachedObject<mochi_user_platform::handle::Handle>,
-    ) -> Result<u32, i32> {
-        use mochios_filesystem_protocol as filesystem;
-        use mochios_posix_protocol as posix;
-
-        let flags = self.flags_call(
-            filesystem::Header {
-                opcode: filesystem::OP_GET_FLAGS_HANDLE,
-                request_id: 8,
-                ..filesystem::Header::default()
-            },
-            single_file_handle(file)?,
-        )?;
-        let mut result = 0;
-        if flags & filesystem::OPEN_STATUS_APPEND != 0 {
-            result |= posix::OPEN_APPEND;
-        }
-        if flags & filesystem::OPEN_STATUS_NONBLOCK != 0 {
-            result |= posix::OPEN_NONBLOCK;
-        }
-        Ok(result)
-    }
-
-    fn set_status_flags(
-        &mut self,
-        file: posix_service::AttachedObject<mochi_user_platform::handle::Handle>,
-        flags: u32,
-    ) -> Result<(), i32> {
-        use mochios_filesystem_protocol as filesystem;
-        use mochios_posix_protocol as posix;
-
-        let mut filesystem_flags = 0;
-        if flags & posix::OPEN_APPEND != 0 {
-            filesystem_flags |= filesystem::OPEN_STATUS_APPEND;
-        }
-        if flags & posix::OPEN_NONBLOCK != 0 {
-            filesystem_flags |= filesystem::OPEN_STATUS_NONBLOCK;
-        }
-        self.empty_call(
-            filesystem::Header {
-                opcode: filesystem::OP_SET_FLAGS_HANDLE,
-                request_id: 9,
-                flags: filesystem_flags,
-                ..filesystem::Header::default()
-            },
-            &[],
-            controlled_file_handle(file)?,
-        )
-    }
-
-    fn update_status_flags(
-        &mut self,
-        file: posix_service::AttachedObject<mochi_user_platform::handle::Handle>,
-        mask: u32,
-        flags: u32,
-    ) -> Result<(), i32> {
-        use mochios_filesystem_protocol as filesystem;
-        let translate = |flags: u32| {
-            (if flags & mochios_posix_protocol::OPEN_APPEND != 0 {
-                filesystem::OPEN_STATUS_APPEND
-            } else {
-                0
-            }) | (if flags & mochios_posix_protocol::OPEN_NONBLOCK != 0 {
-                filesystem::OPEN_STATUS_NONBLOCK
-            } else {
-                0
-            })
-        };
-        self.empty_call(
-            filesystem::Header {
-                opcode: filesystem::OP_UPDATE_FLAGS_HANDLE,
-                request_id: 10,
-                flags: translate(flags),
-                length: 4,
-                ..filesystem::Header::default()
-            },
-            &translate(mask).to_le_bytes(),
-            controlled_file_handle(file)?,
         )
     }
 

@@ -55,7 +55,6 @@ impl ObjectTransport for &Replies {
             return Ok(1);
         }
         let payload = match header.opcode {
-            wire::OP_FGETFL => vec![0; wire::FILE_FLAGS_PAYLOAD_LEN],
             wire::OP_FSTAT | wire::OP_STAT_AT => vec![0; wire::FILE_STATUS_LEN],
             wire::OP_READLINK_AT => b"destination".to_vec(),
             _ => vec![],
@@ -89,8 +88,6 @@ fn invoke(client: &Client<&Replies>, opcode: u16) -> Result<(), ClientError<u8>>
         wire::OP_FSYNC => client.fsync(file),
         wire::OP_FCHMOD => client.fchmod(file, 0o600),
         wire::OP_FCHOWN => client.fchown(file, 1, 2),
-        wire::OP_FSETFL => client.set_status_flags(file, wire::OPEN_NONBLOCK),
-        wire::OP_FGETFL => client.get_status_flags(file).map(|_| ()),
         wire::OP_FSTAT => client.fstat(file).map(|_| ()),
         _ => unreachable!(),
     }
@@ -103,8 +100,6 @@ fn every_file_reply_is_drained_once_without_closing_the_borrowed_source_or_repla
         wire::OP_FSYNC,
         wire::OP_FCHMOD,
         wire::OP_FCHOWN,
-        wire::OP_FSETFL,
-        wire::OP_FGETFL,
         wire::OP_FSTAT,
     ] {
         for mode in 0..7 {

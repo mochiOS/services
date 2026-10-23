@@ -1,15 +1,12 @@
 use super::*;
 use std::sync::{Arc, Mutex};
 
-const OPS: [u16; 8] = [
+const OPS: [u16; 5] = [
     protocol::OP_FTRUNCATE,
     protocol::OP_FUTIMENS,
     protocol::OP_FCHMOD,
     protocol::OP_FCHOWN,
     protocol::OP_FSYNC,
-    protocol::OP_FGETFL,
-    protocol::OP_FSETFL,
-    protocol::OP_FUPDATEFL,
 ];
 
 fn setup() -> (Arc<Mutex<PosixService>>, PeerIdentity) {
@@ -60,20 +57,7 @@ fn request(opcode: u16) -> (protocol::Header, Vec<u8>) {
             payload.resize(protocol::FILE_OWNER_PAYLOAD_LEN, 0);
             protocol::encode_file_owner(700, 701, &mut payload).unwrap();
         }
-        protocol::OP_FSETFL => {
-            payload.resize(protocol::FILE_FLAGS_PAYLOAD_LEN, 0);
-            protocol::encode_file_flags(protocol::OPEN_NONBLOCK, &mut payload).unwrap();
-        }
-        protocol::OP_FUPDATEFL => {
-            payload.resize(protocol::FILE_FLAGS_UPDATE_PAYLOAD_LEN, 0);
-            protocol::encode_file_flags_update(
-                protocol::OPEN_NONBLOCK,
-                protocol::OPEN_NONBLOCK,
-                &mut payload,
-            )
-            .unwrap();
-        }
-        protocol::OP_FSYNC | protocol::OP_FGETFL => {}
+        protocol::OP_FSYNC => {}
         _ => unreachable!(),
     }
     (
@@ -95,7 +79,6 @@ fn every_operation_runs_one_unlocked_backend_call_using_only_the_borrowed_file()
         let calls = std::rc::Rc::new(std::cell::Cell::new(0));
         let operation_calls = calls.clone();
         let mut fs = RecordingFilesystem {
-            status_flags: protocol::OPEN_APPEND,
             file_hook: Some(Box::new(move |actual| {
                 assert_eq!(actual, opcode);
                 assert!(call_state.try_lock().is_ok());
@@ -136,24 +119,6 @@ fn every_operation_runs_one_unlocked_backend_call_using_only_the_borrowed_file()
                 assert_eq!(fs.chown_groups, [20, 42]);
             }
             protocol::OP_FSYNC => assert_eq!(fs.synced, Some(file)),
-            protocol::OP_FGETFL => {
-                assert_eq!(fs.flags_file, Some(file));
-                assert_eq!(
-                    protocol::decode_file_flags(&response.response.payload).unwrap(),
-                    protocol::OPEN_APPEND
-                );
-            }
-            protocol::OP_FSETFL => {
-                assert_eq!(fs.flags_file, Some(file));
-                assert_eq!(fs.status_flags, protocol::OPEN_NONBLOCK);
-            }
-            protocol::OP_FUPDATEFL => {
-                assert_eq!(fs.flags_file, Some(file));
-                assert_eq!(
-                    fs.status_flags,
-                    protocol::OPEN_APPEND | protocol::OPEN_NONBLOCK
-                );
-            }
             _ => unreachable!(),
         }
     }
@@ -381,8 +346,8 @@ fn truncate_ticket_retry_uses_latest_limit_and_keeps_input_references_borrowed()
 }
 
 #[test]
-fn rejected_image_discards_flags_or_owned_wait_ticket_without_replaying_operation() {
-    for opcode in [protocol::OP_FGETFL, protocol::OP_FTRUNCATE] {
+fn rejected_image_discards_empty_reply_or_owned_wait_ticket_without_replaying_operation() {
+    for opcode in [protocol::OP_FSYNC, protocol::OP_FTRUNCATE] {
         let (state, peer) = setup();
         let (mut header, payload) = request(opcode);
         let ticket = OpenedObject {
@@ -390,7 +355,6 @@ fn rejected_image_discards_flags_or_owned_wait_ticket_without_replaying_operatio
             rights: posix_service::mutation_admission::TICKET_RIGHTS,
         };
         let mut fs = RecordingFilesystem {
-            status_flags: protocol::OPEN_APPEND,
             admission_response: (opcode == protocol::OP_FTRUNCATE).then_some(Ok(ticket)),
             ..Default::default()
         };

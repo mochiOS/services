@@ -452,17 +452,6 @@ pub trait FilesystemBackend<H: Copy> {
 
     fn fsync(&mut self, file: AttachedObject<H>) -> Result<(), i32>;
 
-    fn get_status_flags(&mut self, file: AttachedObject<H>) -> Result<u32, i32>;
-
-    fn set_status_flags(&mut self, file: AttachedObject<H>, flags: u32) -> Result<(), i32>;
-
-    fn update_status_flags(
-        &mut self,
-        file: AttachedObject<H>,
-        mask: u32,
-        flags: u32,
-    ) -> Result<(), i32>;
-
     fn mkdir_at(&mut self, request: &PreparedMkdir, paths: PathObjects<H>) -> Result<(), i32>;
 
     fn unlink_at(&mut self, request: &PreparedUnlink, paths: PathObjects<H>) -> Result<(), i32>;
@@ -3850,9 +3839,6 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_SIGNAL_THREAD_PENDING
             | protocol::OP_FTRUNCATE
             | protocol::OP_FSYNC
-            | protocol::OP_FGETFL
-            | protocol::OP_FSETFL
-            | protocol::OP_FUPDATEFL
             | protocol::OP_MKDIR_AT
             | protocol::OP_UNLINK_AT
             | protocol::OP_RENAME_AT
@@ -3894,6 +3880,9 @@ impl<H: Copy> PosixService<H> {
     ) -> ObjectResponse<H> {
         if header.status != 0 {
             return object_error(header.request_id, STATUS_EINVAL);
+        }
+        if !protocol::is_request_opcode(header.opcode) {
+            return object_error(header.request_id, protocol::STATUS_ENOSYS);
         }
         let envelope = match mutation_admission::Request::decode(header, handles) {
             Ok(envelope) => envelope,
@@ -3953,9 +3942,6 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_GETCWD
                 | protocol::OP_FTRUNCATE
                 | protocol::OP_FSYNC
-                | protocol::OP_FGETFL
-                | protocol::OP_FSETFL
-                | protocol::OP_FUPDATEFL
                 | protocol::OP_MKDIR_AT
                 | protocol::OP_UNLINK_AT
                 | protocol::OP_RENAME_AT
@@ -4053,10 +4039,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_FUTIMENS
             | protocol::OP_FCHMOD
             | protocol::OP_FCHOWN
-            | protocol::OP_FSYNC
-            | protocol::OP_FGETFL
-            | protocol::OP_FSETFL
-            | protocol::OP_FUPDATEFL => {
+            | protocol::OP_FSYNC => {
                 file_request::dispatch(self, peer, header, payload, handles, admission, filesystem)
             }
             protocol::OP_MKDIR_AT
