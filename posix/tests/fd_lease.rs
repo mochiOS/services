@@ -9,6 +9,13 @@ use mochios_posix_client::handle_borrow::Book;
 
 type c_int = i32;
 const EBADF: c_int = 9;
+const ENOMEM: c_int = 12;
+thread_local! {
+    static OWNER: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+fn newlib_lock_identity() -> u64 {
+    OWNER.get()
+}
 const MAX_FDS: usize = 256;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -225,6 +232,7 @@ fn real_runtime_guard_survives_close_replacement_early_error_and_native_label_re
     std::thread::scope(|scope| {
         let table_ref = &table;
         scope.spawn(move || {
+            OWNER.set(2);
             let lease = {
                 let table = table_ref.lock().unwrap();
                 fd_lease::Lease::new(table.get(0).unwrap()).unwrap()
@@ -239,6 +247,7 @@ fn real_runtime_guard_survives_close_replacement_early_error_and_native_label_re
             );
         });
         ready_rx.recv().unwrap();
+        assert!(fd_lease::BORROWS.lock().has_foreign_pins(1));
         let second_pin = {
             let mut table = table.lock().unwrap();
             let old = table.get(0).unwrap();
@@ -254,6 +263,7 @@ fn real_runtime_guard_survives_close_replacement_early_error_and_native_label_re
         assert!(CLOSED.lock().unwrap().is_empty());
         go_tx.send(()).unwrap();
     });
+    assert!(!fd_lease::BORROWS.lock().has_foreign_pins(1));
     assert_eq!(*CLOSED.lock().unwrap(), [7]);
     // Error return drops an unretired pin without closing the descriptor.
     let operation = || -> Result<(), i32> {
