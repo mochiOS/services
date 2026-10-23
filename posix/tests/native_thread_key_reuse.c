@@ -7,6 +7,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 #define CHECK(condition) do { \
@@ -51,6 +52,24 @@ int main(void) {
     }
     CHECK(used > 0 && used < 4096);
     pthread_key_t current = held[--used];
+    /* Only one slot is free: repeated output faults must not consume it.
+     * These mappings exercise native MemoryCopy, not a host-side substitute. */
+    CHECK(pthread_key_delete(current) == 0);
+    long page_size = sysconf(_SC_PAGESIZE);
+    CHECK(page_size > 0);
+    void *output = mmap(NULL, (size_t)page_size, PROT_NONE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    CHECK(output != MAP_FAILED);
+    for (unsigned attempt = 0; attempt < 32; ++attempt) {
+        errno = EDOM;
+        CHECK(pthread_key_create(output, destroy) == EFAULT);
+        CHECK(errno == EDOM);
+    }
+    CHECK(mprotect(output, (size_t)page_size, PROT_READ) == 0);
+    CHECK(pthread_key_create(output, destroy) == EFAULT);
+    CHECK(munmap(output, (size_t)page_size) == 0);
+    CHECK(pthread_key_create(output, destroy) == EFAULT);
+    CHECK(pthread_key_create(&current, NULL) == 0);
     for (unsigned iteration = 0; iteration < 128; ++iteration) {
         struct cycle cycle = {.retiring = current};
         pthread_t thread;

@@ -22,6 +22,9 @@ static DEFER:RealAtomicU32=RealAtomicU32::new(0);
 fn defer_native_delivery()->Option<upcall_guard::Guard<'static>>{{
  Some(upcall_guard::Guard::enter(&DEFER).unwrap())
 }}
+mod user_copy{{pub fn write(output:*mut u8,bytes:&[u8])->Result<(),i32>{{
+ unsafe{{std::ptr::copy_nonoverlapping(bytes.as_ptr(),output,bytes.len())}};Ok(())
+}}}}
 type PthreadKey=u32;
 type PthreadKeyDestructor=unsafe extern "C" fn(*mut c_void);
 const EINVAL:i32=22;const EAGAIN:i32=11;
