@@ -3,6 +3,9 @@ use alloc::vec::Vec;
 use mochi_user_platform::service::ExecutionClass;
 
 pub(crate) const SERVICE_READY_TIMEOUT_TICKS: u64 = 5_000;
+// Input loads and validates the system IME dictionary before accepting events.
+// Its cold-start I/O and parsing can exceed the ordinary budget on a 2-vCPU VM.
+pub(crate) const INPUT_READY_TIMEOUT_TICKS: u64 = 15_000;
 pub(crate) const NETWORK_READY_TIMEOUT_TICKS: u64 = 30_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -341,6 +344,7 @@ mod tests {
     #[test]
     fn ready_timeout_matches_fixed_service_policy() {
         assert_eq!(SERVICE_READY_TIMEOUT_TICKS, 5_000);
+        assert_eq!(INPUT_READY_TIMEOUT_TICKS, 15_000);
         assert_eq!(NETWORK_READY_TIMEOUT_TICKS, 30_000);
     }
 }

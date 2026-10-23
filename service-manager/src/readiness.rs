@@ -3,7 +3,9 @@ use alloc::vec::Vec;
 use mochi_user_platform as platform;
 
 use crate::process_watch::{ProcessWatch, ProcessWatchTarget};
-use crate::service_config::{NETWORK_READY_TIMEOUT_TICKS, SERVICE_READY_TIMEOUT_TICKS};
+use crate::service_config::{
+    INPUT_READY_TIMEOUT_TICKS, NETWORK_READY_TIMEOUT_TICKS, SERVICE_READY_TIMEOUT_TICKS,
+};
 const BOOTSTRAP_MESSAGE_LEN: usize = 1024;
 
 pub(crate) struct DeferredMessage {
@@ -464,6 +466,7 @@ impl ReadyHandshake {
 
 const fn ready_timeout(service: ReadyService) -> u64 {
     match service {
+        ReadyService::Input => INPUT_READY_TIMEOUT_TICKS,
         ReadyService::Network => NETWORK_READY_TIMEOUT_TICKS,
         _ => SERVICE_READY_TIMEOUT_TICKS,
     }
@@ -632,13 +635,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn network_allows_for_dhcp_retries_without_extending_other_services() {
+    fn cold_input_and_dhcp_have_bounded_budgets_without_extending_other_services() {
         assert_eq!(ready_timeout(ReadyService::Network), 30_000);
-        assert_eq!(ready_timeout(ReadyService::Input), 5_000);
+        assert_eq!(ready_timeout(ReadyService::Input), 15_000);
+        assert_eq!(ready_timeout(ReadyService::Filesystem), 5_000);
+        assert_eq!(ready_timeout(ReadyService::Posix), 5_000);
         assert_eq!(ready_timeout(ReadyService::Display), 5_000);
         assert_eq!(ready_timeout(ReadyService::User), 5_000);
         assert_eq!(ready_timeout(ReadyService::SecureUi), 5_000);
         assert_eq!(ready_timeout(ReadyService::Workspace), 5_000);
+        assert_eq!(ready_timeout(ReadyService::Binder), 5_000);
     }
 
     #[test]
