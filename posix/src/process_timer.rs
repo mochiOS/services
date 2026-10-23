@@ -196,7 +196,47 @@ pub struct OwnedTimers<'a> {
     registry: &'a mut Registry,
 }
 
+/// A tentative ID is consumed even if publication fails. It must never become
+/// another timer later, and unwinding must not consume the owner's quota.
+struct Creation<'a> {
+    registry: &'a mut Registry,
+    id: TimerId,
+    published: bool,
+}
+
+impl Drop for Creation<'_> {
+    fn drop(&mut self) {
+        if !self.published {
+            if let Ok(index) = self
+                .registry
+                .timers
+                .binary_search_by_key(&self.id.raw(), |timer| timer.id.raw())
+            {
+                self.registry.timers.remove(index);
+            }
+        }
+    }
+}
+
 impl OwnedTimers<'_> {
+    /// Publish synchronously, with no application callback or registry
+    /// re-entry. False must mean that no successful reply was enqueued.
+    pub(super) fn create_with_reply(
+        &mut self,
+        clock: Clock,
+        notification: Notification,
+        thread: Option<u64>,
+        reply: impl FnOnce(u64) -> bool,
+    ) -> Result<bool, i32> {
+        let id = self.create_for_thread(clock, notification, thread)?;
+        let mut creation = Creation {
+            registry: self.registry,
+            id,
+            published: false,
+        };
+        creation.published = reply(id.raw());
+        Ok(creation.published)
+    }
     /// Service-local selection only. Distinct timers using the same signal
     /// keep distinct pending events; selecting does not accept either event.
     pub fn pending_notifications(&self) -> impl Iterator<Item = Pending> + '_ {

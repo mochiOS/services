@@ -18,25 +18,26 @@ fn create_as(
         &mut input,
     )
     .unwrap();
-    let reply = service
-        .handle_process_timer_request_from(
-            peer,
-            image,
-            sender,
-            protocol::Header {
-                opcode: protocol::OP_TIMER_CREATE,
-                payload_len: wire::CREATE_LEN as u32,
-                ..Default::default()
-            },
-            &input,
-            &[],
-            processes,
-        )
-        .response;
-    if reply.header.status != 0 {
-        return Err(reply.header.status);
-    }
-    Ok(wire::decode_id(&reply.payload).unwrap())
+    let mut created = None;
+    let published = service.create_process_timer_with_reply(
+        peer,
+        image,
+        sender,
+        protocol::Header {
+            opcode: protocol::OP_TIMER_CREATE,
+            payload_len: wire::CREATE_LEN as u32,
+            ..Default::default()
+        },
+        &input,
+        &[],
+        processes,
+        |id| {
+            created = Some(id);
+            true
+        },
+    )?;
+    assert!(published);
+    Ok(created.unwrap())
 }
 fn identity(peer: PeerIdentity, thread_id: u64) -> mnu_abi::ExecutionIdentity {
     mnu_abi::ExecutionIdentity {

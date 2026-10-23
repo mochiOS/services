@@ -893,15 +893,39 @@ fn main() {
                 ))
             }
             (Some(peer), Some((header, payload)), true)
+                if header.opcode == protocol::OP_TIMER_CREATE =>
+            {
+                let result = request_image
+                    .ok_or(protocol::STATUS_EPERM)
+                    .and_then(|image| {
+                        service.create_process_timer_with_reply(
+                            peer,
+                            image,
+                            platform::ipc::endpoint_execution_identity(sender).ok(),
+                            header,
+                            payload,
+                            &attachments,
+                            &mut processes,
+                            |id| reply_timer_created(sender, header.request_id, id),
+                        )
+                    });
+                match result {
+                    Ok(_) => None,
+                    Err(status) => Some(posix_service::ObjectResponse {
+                        response: status_response(header.request_id, status),
+                        handles: Vec::new(),
+                    }),
+                }
+            }
+            (Some(peer), Some((header, payload)), true)
                 if matches!(header.opcode,
-                    protocol::OP_TIMER_CREATE | protocol::OP_TIMER_DELETE
+                    protocol::OP_TIMER_DELETE
                     | protocol::OP_TIMER_GET | protocol::OP_TIMER_SET | protocol::OP_TIMER_OVERRUN) =>
             {
                 Some(match request_image {
-                    Some(image) => service.handle_process_timer_request_from(
+                    Some(image) => service.handle_process_timer_request(
                         peer,
                         image,
-                        platform::ipc::endpoint_execution_identity(sender).ok(),
                         header,
                         payload,
                         &attachments,
@@ -2067,6 +2091,23 @@ fn reply_signal_dequeue(
         ..Default::default()
     };
     let mut bytes = [0; protocol::HEADER_LEN + protocol::SIGNAL_DELIVERY_LEN];
+    match protocol::encode(header, &payload, &mut bytes) {
+        Ok(length) => mochi_user_platform::ipc::reply(sender, &bytes[..length]).is_ok(),
+        Err(_) => false,
+    }
+}
+
+#[cfg(target_os = "mochios")]
+fn reply_timer_created(sender: u64, request_id: u64, id: u64) -> bool {
+    use mochios_posix_protocol as protocol;
+    let payload = id.to_le_bytes();
+    let header = protocol::Header {
+        opcode: protocol::OP_STATUS,
+        request_id,
+        payload_len: payload.len() as u32,
+        ..Default::default()
+    };
+    let mut bytes = [0; protocol::HEADER_LEN + 8];
     match protocol::encode(header, &payload, &mut bytes) {
         Ok(length) => mochi_user_platform::ipc::reply(sender, &bytes[..length]).is_ok(),
         Err(_) => false,

@@ -69,34 +69,71 @@ fn decode(header: protocol::Header, payload: &[u8]) -> Result<Request, i32> {
 }
 
 impl<H: Copy> PosixService<H> {
-    pub fn handle_process_timer_request<B: ClockBackend<H>>(
-        &mut self,
-        peer: PeerIdentity,
-        image: RequestImage,
-        header: protocol::Header,
-        payload: &[u8],
-        attachments: &[AttachedObject<H>],
-        backend: &mut B,
-    ) -> ObjectResponse<H> {
-        self.handle_process_timer_request_from(
-            peer,
-            image,
-            None,
-            header,
-            payload,
-            attachments,
-            backend,
-        )
-    }
-
-    /// `sender` must be resolved from authenticated IPC endpoint metadata.
-    /// The owner-only entry without sender metadata cannot create a
-    /// thread-bound clock.
-    pub fn handle_process_timer_request_from<B: ClockBackend<H>>(
+    /// Atomic native-dispatch entry for creation. Retain the new object only
+    /// after an encoded success reply was synchronously enqueued. A false
+    /// reply or unwind retires the tentative ID without reusing its identity.
+    pub fn create_process_timer_with_reply<B: ClockBackend<H>>(
         &mut self,
         peer: PeerIdentity,
         image: RequestImage,
         sender: Option<mnu_abi::ExecutionIdentity>,
+        header: protocol::Header,
+        payload: &[u8],
+        attachments: &[AttachedObject<H>],
+        backend: &mut B,
+        reply: impl FnOnce(u64) -> bool,
+    ) -> Result<bool, i32> {
+        let Request::Create(clock, notification) = decode(header, payload)? else {
+            return Err(protocol::STATUS_ENOSYS);
+        };
+        if !attachments.is_empty() {
+            return Err(STATUS_EINVAL);
+        }
+        let thread =
+            self.timer_creation_target(peer, image, sender, clock, notification, backend)?;
+        self.process_timers(peer)?
+            .create_with_reply(clock, notification, thread, reply)
+    }
+
+    fn timer_creation_target<B: ClockBackend<H>>(
+        &mut self,
+        peer: PeerIdentity,
+        image: RequestImage,
+        sender: Option<mnu_abi::ExecutionIdentity>,
+        clock: Clock,
+        notification: wire::Notification,
+        backend: &mut B,
+    ) -> Result<Option<u64>, i32> {
+        if matches!(notification, wire::Notification::Thread { .. }) {
+            return Err(protocol::STATUS_ENOSYS);
+        }
+        self.validate_request_image(peer, image, backend)?;
+        if clock != Clock::ThreadCpu {
+            return Ok(None);
+        }
+        let process = *self
+            .processes
+            .get(&peer.process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let sender = sender
+            .filter(|sender| sender.process_id == peer.process_id && sender.thread_id != 0)
+            .ok_or(protocol::STATUS_EPERM)?;
+        if !matches!(
+            backend.timer_thread_clock(process, sender.thread_id)?,
+            Reading::Counter(_)
+        ) {
+            return Err(protocol::STATUS_EIO);
+        }
+        self.validate_request_image(peer, image, backend)?;
+        Ok(Some(sender.thread_id))
+    }
+
+    /// Non-creating controls. Creation requires synchronous publication through
+    /// `create_process_timer_with_reply`, never a detached response builder.
+    pub fn handle_process_timer_request<B: ClockBackend<H>>(
+        &mut self,
+        peer: PeerIdentity,
+        image: RequestImage,
         header: protocol::Header,
         payload: &[u8],
         attachments: &[AttachedObject<H>],
@@ -107,12 +144,7 @@ impl<H: Copy> PosixService<H> {
             if !attachments.is_empty() {
                 return Err(STATUS_EINVAL);
             }
-            // Thread callback creation still needs its own callback lifecycle.
-            // Signal/default notifications use the joint signal dispatcher.
-            if matches!(
-                request,
-                Request::Create(_, wire::Notification::Thread { .. })
-            ) {
+            if matches!(request, Request::Create(..)) {
                 return Err(protocol::STATUS_ENOSYS);
             }
             self.validate_request_image(peer, image, backend)?;
@@ -120,23 +152,8 @@ impl<H: Copy> PosixService<H> {
                 .processes
                 .get(&peer.process_id)
                 .ok_or(protocol::STATUS_ESRCH)?;
-            let thread = if matches!(request, Request::Create(Clock::ThreadCpu, _)) {
-                let sender = sender
-                    .filter(|sender| sender.process_id == peer.process_id && sender.thread_id != 0)
-                    .ok_or(protocol::STATUS_EPERM)?;
-                if !matches!(
-                    backend.timer_thread_clock(process, sender.thread_id)?,
-                    Reading::Counter(_)
-                ) {
-                    return Err(protocol::STATUS_EIO);
-                }
-                self.validate_request_image(peer, image, backend)?;
-                Some(sender.thread_id)
-            } else {
-                None
-            };
             let mut output = Vec::new();
-            // Allocate before any policy mutation, including timer creation.
+            // Allocate before any policy mutation.
             output
                 .try_reserve_exact(wire::VALUE_LEN)
                 .map_err(|_| protocol::STATUS_ENOMEM)?;
@@ -185,10 +202,7 @@ impl<H: Copy> PosixService<H> {
             let mut generated = None;
             let mut timers = self.process_timers(peer)?;
             match request {
-                Request::Create(clock, notification) => {
-                    let id = timers.create_for_thread(clock, notification, thread)?;
-                    output.extend_from_slice(&id.raw().to_le_bytes());
-                }
+                Request::Create(..) => return Err(protocol::STATUS_ENOSYS),
                 Request::Delete(raw) => {
                     let id = timers.resolve(raw)?;
                     timers.delete(id)?;

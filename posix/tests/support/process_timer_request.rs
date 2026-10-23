@@ -16,6 +16,8 @@ mod dequeue;
 mod wake;
 #[path = "process_timer_thread.rs"]
 mod thread;
+#[path = "process_timer_creation.rs"]
+mod creation;
 
 struct Clocks {
     samples: Samples,
@@ -136,8 +138,9 @@ impl ObjectTransport for TimerTransport {
             .refresh_image_state(self.peer, processes)
             .map_err(|_| ())?;
         let image = service.capture_request_image(self.peer).unwrap();
-        let mut reply = service
-            .handle_process_timer_request_from(
+        let mut reply = if header.opcode == protocol::OP_TIMER_CREATE {
+            let mut created = Vec::with_capacity(8);
+            let result = service.create_process_timer_with_reply(
                 self.peer,
                 image,
                 Some(mnu_abi::ExecutionIdentity {
@@ -148,8 +151,27 @@ impl ObjectTransport for TimerTransport {
                 payload,
                 &[],
                 processes,
-            )
-            .response;
+                |id| {
+                    created.extend_from_slice(&id.to_le_bytes());
+                    true
+                },
+            );
+            assert_ne!(result, Ok(false));
+            posix_service::Response {
+                header: protocol::Header {
+                    opcode: protocol::OP_STATUS,
+                    request_id: header.request_id,
+                    payload_len: created.len() as u32,
+                    status: result.err().unwrap_or(0),
+                    ..Default::default()
+                },
+                payload: created,
+            }
+        } else {
+            service
+                .handle_process_timer_request(self.peer, image, header, payload, &[], processes)
+                .response
+        };
         match self.bad_reply.get() {
             1 => {
                 for _ in 0..2 {
