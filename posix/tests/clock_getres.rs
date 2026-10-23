@@ -23,6 +23,14 @@ fn actual_public_clock_getres_handles_null_full_width_ids_and_error_propagation(
         r#"
 type c_int = i32;
 const EINVAL: i32 = 22;
+mod process_clock {
+    pub fn target(id:u64)->Option<u64>{(id==((1<<31)|7)).then_some(7)}
+    pub fn resolution(id:u64,output:*mut super::Timespec)->Result<i32,i32>{
+        assert_eq!(target(id),Some(7));
+        if !output.is_null(){unsafe{output.write(super::Timespec{tv_sec:0,tv_nsec:84})}}
+        Ok(0)
+    }
+}
 mod thread_clock {
     pub fn is_id(id:u64)->bool{id>=1<<32}
     pub fn resolution(id:u64,output:*mut super::Timespec)->Result<i32,i32>{
@@ -74,7 +82,7 @@ mod mochios_posix_client { pub mod time {
     program.push_str(include_str!(
         "../../../user/crates/posix-client/src/time.rs"
     ));
-    program.push_str("\n} }\n");
+    program.push_str("\n} pub mod process_clock {pub use crate::process_clock::target;} }\n");
     program.push_str(&source[start..end]);
     program.push_str(
         r#"
@@ -98,6 +106,9 @@ fn main() {
     assert_eq!(clock_getres(1<<32,&mut output),0);
     assert_eq!((output.tv_sec,output.tv_nsec),(0,42));
     assert_eq!(clock_getres(1<<32,std::ptr::null_mut()),0);
+    assert_eq!(clock_getres((1<<31)|7,&mut output),0);
+    assert_eq!((output.tv_sec,output.tv_nsec),(0,84));
+    assert_eq!(clock_getres((1<<31)|7,std::ptr::null_mut()),0);
     output = Timespec { tv_sec: 99, tv_nsec: 98 };
     unsafe { STATUS = (-11i64) as u64; }
     assert_eq!(clock_getres(4, &mut output), -1);

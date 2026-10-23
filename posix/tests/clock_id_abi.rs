@@ -13,6 +13,13 @@ const EFAULT: i32 = 14;
 const EINVAL: i32 = 22;
 const EIO: i32 = 5;
 const EOVERFLOW: i32 = 75;
+mod process_clock {
+    pub fn target(id:u64)->Option<u64>{(id==((1<<31)|7)).then_some(7)}
+    pub fn read(id:u64,output:*mut super::Timespec)->Result<i32,i32>{
+        assert_eq!(target(id),Some(7));
+        unsafe{output.write(super::Timespec{tv_sec:10,tv_nsec:11})};Ok(0)
+    }
+}
 mod thread_clock {
     pub fn is_id(id:u64)->bool{id>=1<<32}
     pub fn read(id:u64,output:*mut super::Timespec)->Result<i32,i32>{
@@ -54,7 +61,7 @@ mod mochios_posix_client { pub mod time {
         match id { 1 => Some(ClockKind::Realtime), 4 => Some(ClockKind::Monotonic),
             2 => Some(ClockKind::ProcessCpu), 3 => Some(ClockKind::ThreadCpu), _ => None }
     }
-} }
+} pub mod process_clock {pub use crate::process_clock::target;} }
 "#,
     );
     program.push_str(&source[start..end]);
@@ -76,6 +83,9 @@ fn main() {
     assert_eq!((output.tv_sec, output.tv_nsec), (7, 5));
     assert_eq!(clock_gettime(1<<32,&mut output),0);
     assert_eq!((output.tv_sec, output.tv_nsec),(8,9));
+    assert_eq!(unsafe { CALLS },1);
+    assert_eq!(clock_gettime((1<<31)|7,&mut output),0);
+    assert_eq!((output.tv_sec,output.tv_nsec),(10,11));
     assert_eq!(unsafe { CALLS },1);
 }
 "#);

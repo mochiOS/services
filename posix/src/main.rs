@@ -946,6 +946,11 @@ fn main() {
                     peer, header, payload, &attachments, &mut processes,
                 ))
             }
+            (Some(peer), Some((header, payload)), true)
+                if header.opcode == protocol::OP_PROCESS_CPU_CLOCK =>
+            {
+                Some(service.handle_process_clock(peer, header, payload, &attachments, &mut processes))
+            }
             (Some(peer), Some(_), true) if granted_pty.is_some() =>
             {
                 let validation = request_image.ok_or(protocol::STATUS_EPERM)

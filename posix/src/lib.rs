@@ -53,6 +53,7 @@ pub mod process_timer_delivery;
 mod fork_state;
 pub mod resource_policy;
 pub mod cpu_limit;
+pub mod process_clock;
 mod cpu_timer;
 mod process_group;
 mod image_state;
@@ -3748,6 +3749,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_FORK_COMMIT
             | protocol::OP_FORK_CANCEL
             | protocol::OP_RESOURCE_POLICY
+            | protocol::OP_PROCESS_CPU_CLOCK
             | protocol::OP_PROCESS_SPAWNED
             | protocol::OP_PROCESS_SESSION_INFO
             | protocol::OP_PROCESS_LAUNCHED
