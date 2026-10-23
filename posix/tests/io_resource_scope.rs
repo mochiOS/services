@@ -102,6 +102,40 @@ fn fd_only_fork_admission_begins_after_preparation_and_never_covers_a_complex_ne
     assert_eq!(DROPS.load(Ordering::Acquire), 0);
 }
 #[test]
+fn fork_admission_requires_successful_initialization_of_owned_private_buffers() {
+    let _lock = LOCK.lock().unwrap();
+    for fail in [false, true] {
+        reset();
+        let mut admitted = false;
+        let result = unsafe {
+            implementation::with_initialized_fork_opaque(
+                prepare,
+                |resource| {
+                    assert!(CONTROL.callback_resources.capture_for_fork().is_none());
+                    assert_ne!(CONTROL.native.load(Ordering::Acquire), 0);
+                    resource.0 = 23;
+                    if fail { Err(14) } else { Ok(()) }
+                },
+                |resource| {
+                    assert_eq!(resource.0, 23);
+                    admitted = true;
+                    true
+                },
+                |resource| {
+                    assert_eq!(resource.0, 23);
+                    assert!(CONTROL.callback_resources.capture_for_fork().is_some());
+                    Ok(7)
+                },
+            )
+        };
+        assert_eq!(result, if fail { Err(14) } else { Ok(7) });
+        assert_eq!(admitted, !fail);
+        assert_eq!(DROPS.load(Ordering::Acquire), 1);
+        assert!(CONTROL.callback_resources.reset_empty());
+    }
+}
+
+#[test]
 fn success_and_error_retire_before_return_without_delaying_callbacks() {
     let _lock = LOCK.lock().unwrap();
     for result in [Ok(7), Ok(0), Err(4)] {

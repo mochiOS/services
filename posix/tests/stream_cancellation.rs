@@ -72,6 +72,7 @@ fn rewrite_caller_metadata() {{
 }}
 static ALLOCATIONS: std::sync::Mutex<std::collections::BTreeMap<usize, usize>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
 unsafe fn malloc(length: usize) -> *mut c_void {{
+    assert!(CONTROL.callback_resources.capture_for_fork().is_none());
     let case = CASE.load(Ordering::Relaxed);
     if case == 7 || (case == 20 && length == 7) || (case == 21 && length == 16) {{ return std::ptr::null_mut(); }}
     if case == 23 && length == 7 {{ rewrite_caller_metadata(); }}
@@ -81,6 +82,7 @@ unsafe fn malloc(length: usize) -> *mut c_void {{
     pointer.cast()
 }}
 unsafe fn free(pointer: *mut c_void) {{
+    assert!(CONTROL.callback_resources.capture_for_fork().is_none());
     let length = ALLOCATIONS.lock().unwrap().remove(&(pointer as usize)).unwrap();
     unsafe {{ std::alloc::dealloc(pointer.cast(), std::alloc::Layout::from_size_align(length, 16).unwrap()) }};
 }}
@@ -96,8 +98,10 @@ fn pthread_testcancel() {{
 fn set_errno(error: i32) {{ LAST_ERRNO.store(error as u32,Ordering::Relaxed); }}
 fn result_with_errno(result: Result<isize, i32>, failed: isize) -> isize {{ match result {{Ok(value)=>value,Err(error)=>{{set_errno(error);failed}}}} }}
 fn with_fd_entry(_: i32) -> Result<Lease, i32> {{
+    assert!(CONTROL.callback_resources.capture_for_fork().is_none());
     if CASE.load(Ordering::Relaxed) == 8 {{return Err(9)}}
-    PINS.fetch_add(1,Ordering::Relaxed); Ok(Lease(FdEntry {{ handle: FdObject {{ kind: FdKind::File }} }}))
+    let kind=match CASE.load(Ordering::Relaxed){{47|53=>FdKind::ObjectStreamWrite,48|54=>FdKind::ObjectStreamRead,49|50|55|56=>FdKind::ObjectSocket,_=>FdKind::File}};
+    PINS.fetch_add(1,Ordering::Relaxed); Ok(Lease(FdEntry {{ handle: FdObject {{ kind }} }}))
 }}
 fn record_stdio_io(_: &Result<isize,i32>) {{}}
 fn positioned_file_io(fd:i32, _: *mut c_void, length:usize, offset:i64, writing:bool)->Result<isize,i32> {{
@@ -117,6 +121,11 @@ fn escape_if_requested() {{
 }}
 fn syscall_write(_: FdEntry, buffer: *const c_void, length: usize) -> Result<isize, i32> {{
     IO_CALLS.fetch_add(1,Ordering::Relaxed);
+    if CASE.load(Ordering::Relaxed)>=47 {{
+        observe_vector_fork();
+        assert_eq!(unsafe{{std::slice::from_raw_parts(buffer.cast::<u8>(),length)}},b"abcDEFG");
+        return Ok(7);
+    }}
     if CASE.load(Ordering::Relaxed)>=33 {{
         assert_eq!(unsafe{{std::slice::from_raw_parts(buffer.cast::<u8>(),length)}},b"abcDEFG");
         return Ok(length as isize);
@@ -131,6 +140,11 @@ fn syscall_write(_: FdEntry, buffer: *const c_void, length: usize) -> Result<isi
 }}
 fn syscall_read(_: FdEntry, buffer: *mut c_void, length: usize) -> Result<isize, i32> {{
     IO_CALLS.fetch_add(1,Ordering::Relaxed);
+    if CASE.load(Ordering::Relaxed)>=47 {{
+        observe_vector_fork();assert_eq!(length,7);
+        unsafe{{ptr::copy_nonoverlapping(b"abcDEFG".as_ptr(),buffer.cast::<u8>(),7)}};
+        return Ok(7);
+    }}
     if CASE.load(Ordering::Relaxed)>=33 {{
         assert_eq!(length,7);
         let case=CASE.load(Ordering::Relaxed);
@@ -203,6 +217,18 @@ fn message_entry(_: FdEntry, _: u64, length: usize, flags: i32, sending: bool) -
     program.push_str(
         r#"
 extern "C" fn operation(case: u32) {
+    if case>=47 {
+        let mut first=[0u8;3];let mut second=[0u8;4];
+        let writing=case%2==1;
+        let mut vectors=[const{IoVecMut{iov_base:ptr::null_mut(),iov_len:0}};9];
+        vectors[0]=IoVecMut{iov_base:if writing{b"abc".as_ptr().cast_mut().cast()}else{first.as_mut_ptr().cast()},iov_len:3};
+        vectors[1]=IoVecMut{iov_base:if writing{b"DEFG".as_ptr().cast_mut().cast()}else{second.as_mut_ptr().cast()},iov_len:4};
+        let count=if case>=53{9}else{2};
+        let result=unsafe{if writing{writev(3,vectors.as_ptr().cast(),count)}else{readv(3,vectors.as_ptr(),count)}};
+        assert_eq!(result,7);assert_eq!(CHECKS.load(Ordering::Acquire),1);
+        if !writing{assert_eq!(&first,b"abc");assert_eq!(&second,b"DEFG");}
+        return;
+    }
     if case>=33 {
         let page=unsafe{mmap(ptr::null_mut(),8192,3,0x22,-1,0)};
         assert_ne!(page as usize,usize::MAX);
@@ -347,6 +373,15 @@ fn main() {
         assert_eq!(PENDING.load(Ordering::Relaxed), u32::from(matches!(case, 9 | 14 | 18 | 31 | 32)));
     }
 }
+
+fn observe_vector_fork(){
+    let case=CASE.load(Ordering::Acquire);
+    assert_eq!(ALLOCATIONS.lock().unwrap().len(),if case>=53{2}else{1});
+    assert_eq!(PINS.load(Ordering::Acquire),1);
+    let capture=CONTROL.callback_resources.capture_for_fork();
+    assert_eq!(capture.is_some(),(case-47)%6<4);
+    drop(capture);
+}
 "#,
     );
     let directory = std::env::temp_dir().join(format!(
@@ -400,7 +435,7 @@ fn main() {
         "{}",
         String::from_utf8_lossy(&compiled.stderr)
     );
-    for case in 0..47 {
+    for case in 0..59 {
         let executed = Command::new(&executable)
             .arg(case.to_string())
             .output()

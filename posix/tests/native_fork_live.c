@@ -1,5 +1,5 @@
-/* Real mochiOS integration. Run with no option (pipe), --socket (recv), and
- * --socket-read (read). Link with the fresh runtime, then run on mochiOS;
+/* Real mochiOS integration. Run with no option (pipe), --socket (recv),
+ * --socket-read, --readv, and --socket-readv. Link with the fresh runtime;
  * host execution cannot validate native COW, Handle inheritance or exec. */
 #define _GNU_SOURCE 1
 #include <errno.h>
@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -26,6 +27,7 @@ static atomic_int ready, cleaned, tls_cleaned, worker_error;
 static atomic_uint_fast64_t worker_handle;
 static int blocked_pipe[2];
 static int socket_wait;
+static int vector_wait;
 static int64_t native(uint64_t number, uint64_t a, uint64_t b) {
   __asm__ volatile("syscall"
                    : "+a"(number)
@@ -66,10 +68,13 @@ static void *worker(void *unused) {
   }
   atomic_store(&worker_handle, (uint64_t)handle);
   atomic_store_explicit(&ready, 1, memory_order_release);
-  char release = 0;
-  ssize_t count = socket_wait == 1 ? recv(blocked_pipe[0], &release, 1, 0)
-                                   : read(blocked_pipe[0], &release, 1);
-  if (count != 1 || release != 'R')
+  char release[2] = {0};
+  struct iovec vectors[2] = {{release, 1}, {release + 1, 1}};
+  ssize_t count = vector_wait        ? readv(blocked_pipe[0], vectors, 2)
+                  : socket_wait == 1 ? recv(blocked_pipe[0], release, 1, 0)
+                                     : read(blocked_pipe[0], release, 1);
+  if (count != (vector_wait ? 2 : 1) || release[0] != 'R' ||
+      (vector_wait && release[1] != '!'))
     atomic_store(&worker_error, 1);
   _REENT_CVTBUF(reent) = NULL; // parent exit/join may now reclaim normally
   return NULL;
@@ -80,6 +85,10 @@ int main(int argc, char **argv) {
   CHECK(argc >= 1 && argv[0] && *argv[0]);
   socket_wait = argc == 2 && strcmp(argv[1], "--socket") == 0;
   if (argc == 2 && strcmp(argv[1], "--socket-read") == 0)
+    socket_wait = 2;
+  vector_wait = argc == 2 && (strcmp(argv[1], "--readv") == 0 ||
+                              strcmp(argv[1], "--socket-readv") == 0);
+  if (vector_wait && strcmp(argv[1], "--socket-readv") == 0)
     socket_wait = 2;
   CHECK(pthread_key_create(&key, tls_cleanup) == 0);
   CHECK((socket_wait ? socketpair(AF_UNIX, SOCK_STREAM, 0, blocked_pipe)
@@ -140,7 +149,8 @@ int main(int argc, char **argv) {
     CHECK(WEXITSTATUS(status) == 0);
     CHECK(!atomic_load(&cleaned) && !atomic_load(&tls_cleaned));
   }
-  CHECK(write(blocked_pipe[1], "R", 1) == 1);
+  CHECK(write(blocked_pipe[1], "R!", vector_wait ? 2 : 1) ==
+        (vector_wait ? 2 : 1));
   CHECK(pthread_join(thread, NULL) == 0);
   CHECK(!atomic_load(&worker_error));
   CHECK(atomic_load(&cleaned) == 1 && atomic_load(&tls_cleaned) == 1);
