@@ -54,6 +54,7 @@ mod fork_state;
 pub mod resource_policy;
 pub mod cpu_limit;
 pub mod process_clock;
+pub mod cpu_sleep;
 mod cpu_timer;
 mod process_group;
 mod image_state;

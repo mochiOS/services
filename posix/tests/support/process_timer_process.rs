@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "cpu_sleep.rs"]
+mod cpu_sleep;
+
 fn setup() -> (Client<TimerTransport>, Rc<RefCell<Environment>>) {
     let (client, environment) = super::setup();
     let root = PeerIdentity {
