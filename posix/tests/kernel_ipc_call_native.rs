@@ -98,7 +98,7 @@ mod task{
     #[derive(Clone,Copy)]pub struct ThreadId(u64);
     impl ThreadId{pub fn as_u64(self)->u64{self.0}pub fn from_u64(value:u64)->Self{Self(value)}}
     pub fn current_thread_id()->Option<ThreadId>{crate::CONTEXT.get().then_some(ThreadId(1))}
-    pub fn thread_slot_index_and_generation_by_u64(id:u64)->Option<(usize,u64)>{
+    pub fn ipc_slot_index_and_generation_by_u64(id:u64)->Option<(usize,u64)>{
         if id==1{return crate::CALLER.get().then_some((0,11));}
         assert_eq!(id,2);match crate::TARGET.get(){0=>Some((1,12)),1=>None,2=>Some((1,13)),_=>Some((2,12))}
     }

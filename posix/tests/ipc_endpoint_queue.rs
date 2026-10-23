@@ -33,6 +33,7 @@ const MAILBOX_CAP:usize=4;const MESSAGE_CACHE_CAP:usize=4;
 static COPY_RACE:AtomicBool=AtomicBool::new(false);
 static FAIL_ALLOC:AtomicBool=AtomicBool::new(false);
 static COPY_ERROR:AtomicUsize=AtomicUsize::new(0);
+static REMOVED_WAITERS:AtomicUsize=AtomicUsize::new(0);
 static GENERATION_LOOKUPS:AtomicUsize=AtomicUsize::new(0);
 unsafe fn alloc(layout:Layout)->*mut u8{
  if FAIL_ALLOC.swap(false,Ordering::SeqCst){return std::ptr::null_mut();}
@@ -41,7 +42,7 @@ unsafe fn alloc(layout:Layout)->*mut u8{
 static DROPPED:AtomicUsize=AtomicUsize::new(0);static RETIRED:AtomicUsize=AtomicUsize::new(0);
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]struct IpcEndpoint{thread_id:u64,slot:u16,generation:u64}
 #[derive(Debug)]struct Resource;
-impl Drop for Resource{fn drop(&mut self){assert!(MAILBOXES.0.try_lock().is_ok(),"resource destructor ran under mailbox lock");DROPPED.fetch_add(1,Ordering::SeqCst);}}
+impl Drop for Resource{fn drop(&mut self){assert!(MAILBOXES.0.try_lock().is_ok(),"resource destructor ran under mailbox lock");assert!(OWNERS.try_lock().is_ok(),"resource destructor ran under thread lock");DROPPED.fetch_add(1,Ordering::SeqCst);}}
 #[derive(Debug)]struct ObjectHandleEntry(Arc<Resource>);
 struct Lock<T>(Mutex<T>);impl<T>Lock<T>{const fn new(v:T)->Self{Self(Mutex::new(v))}fn lock(&self)->std::sync::MutexGuard<'_,T>{self.0.lock().unwrap()}}
 mod audit{pub enum AuditEventKind{Quarantine}pub fn log(_:AuditEventKind,reason:&str){panic!("unexpected quarantine: {}",reason);}}
@@ -51,9 +52,16 @@ fn record_ipc_copy(_:usize){}
 fn ipc_max_msg_size()->usize{MAX_MSG_SIZE}fn ipc_mailbox_cap()->usize{MAILBOX_CAP}
 static OWNERS:Mutex<BTreeMap<u64,(usize,u64)>>=Mutex::new(BTreeMap::new());
 mod task{
- pub fn thread_slot_index_and_generation_by_u64(id:u64)->Option<(usize,u64)>{crate::GENERATION_LOOKUPS.fetch_add(1,crate::Ordering::SeqCst);crate::OWNERS.lock().unwrap().get(&id).copied()}
- pub struct ThreadId;impl ThreadId{pub fn from_u64(_:u64)->Self{Self}}
+ pub fn ipc_slot_index_and_generation_by_u64(id:u64)->Option<(usize,u64)>{crate::GENERATION_LOOKUPS.fetch_add(1,crate::Ordering::SeqCst);crate::OWNERS.lock().unwrap().get(&id).copied()}
+ #[derive(Clone,Copy)]pub struct ThreadId(u64);impl ThreadId{pub fn from_u64(id:u64)->Self{Self(id)}pub fn as_u64(self)->u64{self.0}}
  pub fn wake_registered_waiter(_:ThreadId){}
+ pub mod ipc_generation{pub struct Reserved(pub u64);impl Reserved{pub fn into_raw(self)->u64{self.0}}}
+ pub mod thread{
+  pub fn replace_ipc_generation(thread:super::ThreadId,generation:u64)->Option<(usize,u64)>{
+   let mut owners=crate::OWNERS.lock().unwrap();let record=owners.get_mut(&thread.as_u64())?;
+   let previous=*record;record.1=generation;Some(previous)
+  }
+ }
 }
 mod syscall{
  pub fn copy_from_user_native(input:u64,output:&mut[u8])->Result<(),crate::Error>{
@@ -71,8 +79,12 @@ mod syscall{
   unsafe{output.copy_from_slice(std::slice::from_raw_parts(input as*const u8,output.len()));}Ok(())
  }
 }
-mod lifetime{pub fn retire(_:crate::IpcEndpoint){assert!(crate::MAILBOXES.0.try_lock().is_ok());crate::RETIRED.fetch_add(1,crate::Ordering::SeqCst);}}
+mod lifetime{
+pub fn retire(_:crate::IpcEndpoint){assert!(crate::MAILBOXES.0.try_lock().is_ok());crate::RETIRED.fetch_add(1,crate::Ordering::SeqCst);}
+pub fn remove_waiter(_:crate::task::ThreadId){assert!(crate::MAILBOXES.0.try_lock().is_ok());assert!(crate::OWNERS.try_lock().is_ok());crate::REMOVED_WAITERS.fetch_add(1,crate::Ordering::SeqCst);}
+}
 fn endpoint_is_valid(endpoint:IpcEndpoint)->bool{OWNERS.lock().unwrap().get(&endpoint.thread_id)==Some(&(endpoint.slot as usize,endpoint.generation))}
+fn retire_endpoint_records(_:IpcEndpoint){assert!(MAILBOXES.0.try_lock().is_ok());}
 "#,
     );
     let status = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -97,6 +109,9 @@ fn lock_mailboxes()->std::sync::MutexGuard<'static,[Mailbox;MAX_THREADS]>{MAILBO
 "#,
     );
     program.push_str(&source[retire..retire_end]);
+    let rotate = source.find("pub(crate) fn replace_thread_image_endpoint(").unwrap();
+    let rotate_end = rotate + source[rotate..].find("\n}\n").unwrap() + 3;
+    program.push_str(&source[rotate..rotate_end]);
     program.push_str(&source[send..send_end]);
     program.push_str(r#"
 fn make_message(to:u64,generation:u64,slot:u16,tag:u64)->(Box<Message>,std::sync::Weak<Resource>){
@@ -244,6 +259,26 @@ fn main(){
  // A zero-length message accepts a null data pointer and publishes normally.
  assert_eq!(send_to_endpoint_with_attachments(old,99,703,0,0,false,false,ObjectHandleAttachments::empty()),0);
  OWNERS.lock().unwrap().remove(&7);retire_endpoint(old);
+
+ // A native image replacement keeps TID/slot but revokes the old IPC epoch.
+ // Late cleanup must preserve any message already queued for the new epoch.
+ OWNERS.lock().unwrap().insert(7,(0,71));
+ let(old_message,old_resource)=make_message(7,71,0,800);
+ let(new_message,new_resource)=make_message(7,72,0,801);
+ enqueue(0,old_message);enqueue(0,new_message);
+ {let mut boxes=MAILBOXES.lock();boxes[0].reply_owner=Some((7,71));boxes[0].reply_targets.push(ReplyTarget{endpoint:99,call_id:42});boxes[0].waiter=7;}
+ replace_thread_image_endpoint(task::ThreadId::from_u64(7),task::ipc_generation::Reserved(72));
+ assert_eq!(OWNERS.lock().unwrap().get(&7),Some(&(0,72)));
+ assert!(old_resource.upgrade().is_none());assert!(new_resource.upgrade().is_some());
+ assert_eq!(REMOVED_WAITERS.load(Ordering::SeqCst),1);
+ {let boxes=MAILBOXES.lock();assert_eq!(boxes[0].count,1);assert!(boxes[0].reply_targets.is_empty());assert_eq!(boxes[0].reply_owner,None);assert_eq!(boxes[0].waiter,0);}
+ let obsolete=IpcEndpoint{thread_id:7,slot:0,generation:71};
+ assert_eq!(send_to_endpoint_with_attachments(obsolete,99,802,0,0,true,false,ObjectHandleAttachments::empty()),Error::NotFound.into_raw());
+ let current=IpcEndpoint{generation:72,..obsolete};
+ assert_eq!(send_to_endpoint_with_attachments(current,99,803,0,0,true,false,ObjectHandleAttachments::empty()),0);
+ let messages=drain(0);assert_eq!(messages.iter().map(|m|m.call_id).collect::<Vec<_>>(),[801,803]);
+ for message in messages{release_message(message);}
+ assert!(new_resource.upgrade().is_none());
 }
 "#);
     let directory = std::env::temp_dir().join(format!(

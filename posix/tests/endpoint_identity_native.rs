@@ -53,7 +53,7 @@ mod task {
         crate::STATE.with_borrow_mut(|s|{s.process_checks+=1;s.process.then_some(Id(90))})
     }
     pub mod thread {
-        pub fn live_thread_slot_index_and_generation_by_u64(thread:u64)->Option<(usize,u64)> {
+        pub fn live_ipc_slot_index_and_generation_by_u64(thread:u64)->Option<(usize,u64)> {
             assert_eq!(thread,9);
             crate::STATE.with_borrow_mut(|s|{s.thread_checks+=1;s.live})
         }

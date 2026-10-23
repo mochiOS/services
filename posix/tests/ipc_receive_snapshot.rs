@@ -36,7 +36,7 @@ fn endpoint_is_valid(e:IpcEndpoint)->bool{
 }
 mod task{
     pub struct ThreadId(u64);impl ThreadId{pub fn from_u64(id:u64)->Self{Self(id)}}
-    pub fn thread_slot_index_and_generation_by_u64(id:u64)->Option<(usize,u64)>{assert_eq!(id,7);Some((0,3))}
+    pub fn ipc_slot_index_and_generation_by_u64(id:u64)->Option<(usize,u64)>{assert_eq!(id,7);Some((0,3))}
     pub fn yield_now(){assert!(crate::MAILBOXES.try_lock().is_ok());crate::YIELDS.set(crate::YIELDS.get()+1);}
     pub fn sleep_thread_unless_woken(thread:ThreadId)->bool{
         assert_eq!(thread.0,7);assert!(crate::MAILBOXES.try_lock().is_ok(),"park held mailbox lock");

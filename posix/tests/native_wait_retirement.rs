@@ -132,7 +132,7 @@ impl Thread { fn state(&self)->ThreadState {
 } fn process_id(&self)->u64{90} }
 struct Queue(Vec<Thread>);
 impl Queue {
-    fn slot_index_and_generation(&self,id:ThreadId)->Option<(usize,u64)> {
+    fn ipc_slot_index_and_generation(&self,id:ThreadId)->Option<(usize,u64)> {
         self.0.iter().position(|t|t.id==id).map(|slot|(slot,123))
     }
     fn remove(&mut self,id:ThreadId)->Option<Thread> {

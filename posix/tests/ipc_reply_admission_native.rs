@@ -28,7 +28,7 @@ fn owned()->ObjectHandleAttachments{ObjectHandleAttachments{resource:Some(Arc::n
 mod task{
     pub struct ThreadId;impl ThreadId{pub fn as_u64(&self)->u64{7}}
     pub fn current_thread_id()->Option<ThreadId>{crate::CONTEXT.get().then_some(ThreadId)}
-    pub fn thread_slot_index_and_generation_by_u64(id:u64)->Option<(usize,u64)>{assert_eq!(id,7);crate::SLOT.get()}
+    pub fn ipc_slot_index_and_generation_by_u64(id:u64)->Option<(usize,u64)>{assert_eq!(id,7);crate::SLOT.get()}
 }
 fn ensure_endpoint_for_thread(id:u64)->Option<u64>{assert_eq!(id,7);REGISTER.get().then_some(6001)}
 struct EndpointRecord{thread_id:u64,slot:u16,generation:u64}
