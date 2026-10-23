@@ -5,7 +5,7 @@ use crate::fps_overlay;
 use crate::geometry::{Rect, clip_present_rect};
 use crate::protocol::{PIXEL_FORMAT_GPU_SCENE, PIXEL_FORMAT_XRGB8888};
 use crate::surface::{Surface, read_current_pixel, surface_has_current_pixels};
-use crate::window::{WINDOW_CORNER_RADIUS, Window, window_frame_rect, window_index_by_id};
+use crate::window::{Window, window_frame_rect, window_index_by_id};
 
 const CURSOR_TEXTURE_KEY: u64 = u64::MAX;
 const WHITE_TEXTURE_KEY: u64 = u64::MAX - 1;
@@ -700,7 +700,7 @@ fn window_clip_polygon(
         .iter()
         .find(|candidate| candidate.live && candidate.handle == window.content)?;
     let frame = window_frame_rect(content, window);
-    Some(rounded_rect_polygon(frame, WINDOW_CORNER_RADIUS as f32))
+    Some(rounded_rect_polygon(frame, window.corner_radius() as f32))
 }
 
 fn rounded_rect_polygon(rect: Rect, radius: f32) -> WindowClip {
@@ -1264,6 +1264,43 @@ fn encode_compositor_scene(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maximize_and_restore_change_both_window_clip_and_input_corners() {
+        let mut surface = Surface::empty();
+        surface.live = true;
+        surface.handle = crate::surface::SurfaceHandle(1);
+        surface.token = surface.handle.0;
+        surface.window = crate::window::WindowId(1);
+        surface.width = 640;
+        surface.height = 480;
+        let mut window = Window::empty();
+        window.live = true;
+        window.id = surface.window;
+        window.content = surface.handle;
+        window.decoration = Some(surface.handle);
+        for state in [
+            crate::protocol::WINDOW_STATE_NORMAL,
+            crate::protocol::WINDOW_STATE_MAXIMIZED,
+            crate::protocol::WINDOW_STATE_NORMAL,
+        ] {
+            window.state = state;
+            let clip =
+                window_clip_polygon(std::slice::from_ref(&surface), &[window], &surface).unwrap();
+            let square = state == crate::protocol::WINDOW_STATE_MAXIMIZED;
+            assert_eq!(clip.polygon.contains(&(0.0, 0.0)), square);
+            assert_eq!(
+                crate::window::point_inside_window_frame(
+                    std::slice::from_ref(&surface),
+                    &[window],
+                    &surface,
+                    0,
+                    0
+                ),
+                square
+            );
+        }
+    }
 
     #[test]
     fn repeated_damage_does_not_multiply_collapsed_triangles() {

@@ -56,6 +56,13 @@ impl Default for Window {
 }
 
 impl Window {
+    pub(crate) fn corner_radius(&self) -> u32 {
+        if self.state == crate::protocol::WINDOW_STATE_MAXIMIZED {
+            0
+        } else {
+            WINDOW_CORNER_RADIUS
+        }
+    }
     pub(crate) const fn empty() -> Self {
         Self {
             live: false,
@@ -237,7 +244,7 @@ pub(crate) fn point_inside_window_frame(
         return true;
     };
     let frame = window_frame_rect(&surfaces[content_index], window);
-    rounded_rect_contains(frame, WINDOW_CORNER_RADIUS, x, y)
+    rounded_rect_contains(frame, window.corner_radius(), x, y)
 }
 
 pub(crate) fn window_frame_rect(content: &Surface, window: &Window) -> Rect {

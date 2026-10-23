@@ -453,9 +453,11 @@ pub(crate) fn composite_and_present(
                         window_index,
                         window_frame_rect(&surfaces[content_index], window),
                         active_window == Some(window.id),
+                        window.corner_radius(),
                     ))
                 });
-            if let Some((window_index, frame_rect, active)) = window_style
+            if let Some((window_index, frame_rect, active, radius)) = window_style
+                && radius != 0
                 && !shadow_drawn[window_index]
             {
                 draw_window_shadow(frame, frame_w, frame_h, present_rect, frame_rect, active);
@@ -491,8 +493,8 @@ pub(crate) fn composite_and_present(
                     let Some(pixel) = read_current_pixel(surface, sx, sy) else {
                         continue;
                     };
-                    let coverage = window_style.map_or(255, |(_, frame, _)| {
-                        rounded_rect_coverage(frame, WINDOW_CORNER_RADIUS, dx as i32, dy as i32)
+                    let coverage = window_style.map_or(255, |(_, frame, _, radius)| {
+                        rounded_rect_coverage(frame, radius, dx as i32, dy as i32)
                     });
                     if coverage == 0 {
                         continue;
@@ -501,11 +503,11 @@ pub(crate) fn composite_and_present(
                         return errno_status(crate::protocol::SIZE_LIMIT);
                     };
                     *slot = blend_surface_pixel(*slot, pixel, surface.current_format, coverage);
-                    if let Some((_, window_frame, true)) = window_style {
+                    if let Some((_, window_frame, true, radius)) = window_style {
                         let inner = inset_rect(window_frame, 1);
                         let inner_coverage = rounded_rect_coverage(
                             inner,
-                            WINDOW_CORNER_RADIUS.saturating_sub(1),
+                            radius.saturating_sub(1),
                             dx as i32,
                             dy as i32,
                         );
@@ -940,6 +942,24 @@ fn blend_premultiplied_argb_over_xrgb(dst: u32, src: u32) -> u32 {
 #[cfg(test)]
 mod continuous_corner_tests {
     use super::*;
+    #[test]
+    fn maximized_cpu_surface_coverage_fills_the_corner_pixel() {
+        let mut window = Window::empty();
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            width: 640,
+            height: 480,
+        };
+        assert_eq!(rounded_rect_coverage(rect, window.corner_radius(), 0, 0), 0);
+        window.state = crate::protocol::WINDOW_STATE_MAXIMIZED;
+        assert_eq!(
+            rounded_rect_coverage(rect, window.corner_radius(), 0, 0),
+            255
+        );
+        window.state = crate::protocol::WINDOW_STATE_NORMAL;
+        assert_eq!(rounded_rect_coverage(rect, window.corner_radius(), 0, 0), 0);
+    }
     #[test]
     fn shadow_and_surface_coverage_use_shared_reference() {
         for (w, h, r) in [
