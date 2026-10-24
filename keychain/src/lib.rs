@@ -262,16 +262,39 @@ impl<S: Storage, R: Random> Service<S, R> {
                 self.save(uid, data)?;
                 Ok(Reply::Ok)
             }
-            Request::Applications => {
+            Request::Applications { offset, generation } => {
                 let v = self.unlocked.get(&uid).ok_or(Error::Locked)?;
                 let mut apps = data_applications(&v.data);
                 if let Some(known) = self.known.get(&uid) {
                     apps.extend(known.iter().cloned());
                 }
-                if apps.len() > MAX_ITEMS {
+                if apps.len() > wire::MAX_APPLICATIONS {
                     return Err(Error::Limit);
                 }
-                Ok(Reply::Applications(apps.into_iter().collect()))
+                // A newly authenticated identity can change ordering even when
+                // vault entries are unchanged. Include registry growth in the
+                // revision so a caller never combines inconsistent pages.
+                let revision = v
+                    .data
+                    .generation
+                    .checked_mul((MAX_ITEMS + 1) as u64)
+                    .and_then(|n| n.checked_add(self.known.get(&uid).map_or(0, |a| a.len()) as u64))
+                    .ok_or(Error::Limit)?;
+                if generation != 0 && generation != revision {
+                    return Err(Error::Conflict);
+                }
+                if usize::from(offset) > apps.len() {
+                    return Err(Error::Invalid);
+                }
+                Ok(Reply::Applications {
+                    generation: revision,
+                    total: apps.len() as u16,
+                    applications: apps
+                        .into_iter()
+                        .skip(usize::from(offset))
+                        .take(wire::APPLICATION_PAGE_SIZE)
+                        .collect(),
+                })
             }
             Request::ChangePassword { old, new } => {
                 self.reauthenticate(uid, &old)?;

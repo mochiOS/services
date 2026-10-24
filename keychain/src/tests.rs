@@ -255,6 +255,56 @@ fn malformed_frames_and_cross_user_file_swaps_fail_closed() {
         assert!(wire::Reply::decode(&s.dispatch(&a, &f), 0).is_err());
     }
 }
+
+#[test]
+fn largest_records_and_catalogue_fit_native_ipc_and_page_through_appcore() {
+    let admin = peer("org.mochios.keychain", 1000, true);
+    let mut service = Service::new(Memory::default(), Rng(11));
+    initialize(&mut service, &admin);
+    let mut data = Data::empty();
+    for n in 1..=4u8 {
+        data.entries.push(Entry {
+            meta: Item {
+                id: [n; 16],
+                owner: Application {
+                    package: "o".repeat(128),
+                    signer: [1; 32],
+                    provenance: 1,
+                },
+                service: format!("{}{}", "s".repeat(127), n),
+                account: "a".repeat(256),
+                label: "l".repeat(128),
+                grants: (0..MAX_GRANTS)
+                    .map(|i| Application {
+                        package: format!("{}{:02}{:02}", "g".repeat(124), n, i),
+                        signer: [2; 32],
+                        provenance: 2,
+                    })
+                    .collect(),
+            },
+            secret: Secret::new(vec![7; wire::MAX_SECRET]),
+        });
+    }
+    service.save(1000, data).unwrap();
+    struct Inline {
+        service: RefCell<Service<Memory, Rng>>,
+        peer: Peer,
+    }
+    impl appcore::keychain::Transport for Inline {
+        fn exchange(&self, frame: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+            assert!(frame.len() <= 8192);
+            let reply = self.service.borrow_mut().dispatch(&self.peer, frame);
+            assert!(reply.len() <= 8192);
+            Ok(reply)
+        }
+    }
+    let client = appcore::keychain::Keychain::with_transport(Inline {
+        service: RefCell::new(service),
+        peer: admin,
+    });
+    assert_eq!(client.manager().items().unwrap().len(), 4);
+    assert_eq!(client.manager().applications().unwrap().len(), 66);
+}
 #[test]
 fn entropy_failure_never_creates_a_vault() {
     struct NoRandom;
@@ -272,6 +322,7 @@ fn entropy_failure_never_creates_a_vault() {
     ));
     assert!(mem.files.borrow().is_empty());
 }
+
 #[cfg(target_os = "linux")]
 #[test]
 fn host_storage_refuses_a_second_writer_and_keeps_private_modes() {
