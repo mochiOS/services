@@ -6,6 +6,7 @@ use chacha20poly1305::{
 use mochios_keychain_protocol::{
     Application, Error, Item, ItemId, MAX_ITEMS, MAX_SECRET, Reader, Result, Secret, Writer,
 };
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 const MAGIC: &[u8; 8] = b"MKEYV001";
 const HEADER: usize = 64;
@@ -85,6 +86,7 @@ pub struct Unlocked {
     pub data: Data,
     key: Zeroizing<[u8; 32]>,
     salt: [u8; 16],
+    publication: Option<[u8; 32]>,
 }
 impl Unlocked {
     pub fn create(password: &[u8], salt: [u8; 16]) -> Result<Self> {
@@ -93,6 +95,7 @@ impl Unlocked {
             data: Data::empty(),
             key: derive(password, &salt)?,
             salt,
+            publication: None,
         })
     }
     pub fn open(uid: u32, password: &[u8], blob: &[u8]) -> Result<Self> {
@@ -111,7 +114,12 @@ impl Unlocked {
                 .map_err(|_| Error::Authentication)?,
         );
         let data = Data::decode(&plain).map_err(|_| Error::Corrupt)?;
-        Ok(Self { data, key, salt })
+        Ok(Self {
+            data,
+            key,
+            salt,
+            publication: Some(Sha256::digest(blob).into()),
+        })
     }
     pub fn seal(&self, uid: u32, data: &Data, nonce: [u8; 24]) -> Result<Vec<u8>> {
         let plain = data.encode()?;
@@ -145,7 +153,19 @@ impl Unlocked {
             data: self.data.clone(),
             key: derive(password, &salt)?,
             salt,
+            publication: None,
         })
+    }
+    pub(crate) fn record_publication(&mut self, blob: &[u8]) {
+        self.publication = Some(Sha256::digest(blob).into());
+    }
+    pub(crate) fn verify_publication(&self, blob: &[u8]) -> Result<()> {
+        // This digest covers ciphertext, not the password or a secret verifier.
+        // Reauthentication must apply to the exact vault currently in memory.
+        if self.publication != Some(Sha256::digest(blob).into()) {
+            return Err(Error::Corrupt);
+        }
+        Ok(())
     }
 }
 pub fn header(uid: u32, b: &[u8]) -> Result<[u8; 16]> {

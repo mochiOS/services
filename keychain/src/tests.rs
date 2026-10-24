@@ -374,3 +374,38 @@ fn storage_rejects_lock_symlinks_and_multiply_linked_vaults() {
     drop(disk);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn replacing_disk_vault_cannot_reauthenticate_a_different_unlocked_vault() {
+    let mem = Memory::default();
+    let admin = peer("org.mochios.keychain", 1000, true);
+    let mut s = Service::new(mem.clone(), Rng(21));
+    initialize(&mut s, &admin);
+    let old_file = mem.files.borrow()[&1000].clone();
+    let Reply::Id(id) = s.execute(&admin, put()).unwrap() else {
+        panic!()
+    };
+    s.execute(
+        &admin,
+        Request::ChangePassword {
+            old: pass(),
+            new: Secret::new(b"replacement vault password".to_vec()),
+        },
+    )
+    .unwrap();
+    mem.files.borrow_mut().insert(1000, old_file);
+    assert!(matches!(
+        s.execute(
+            &admin,
+            Request::Reveal {
+                id,
+                password: pass()
+            }
+        ),
+        Err(Error::Corrupt)
+    ));
+    assert!(matches!(
+        s.execute(&admin, Request::Get { id }),
+        Err(Error::Locked)
+    ));
+}

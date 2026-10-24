@@ -67,21 +67,28 @@ impl<S: Storage, R: Random> Service<S, R> {
         }
         let uid = peer.uid;
         match request {
-            Request::Status => Ok(Reply::Status {
-                initialized: self.storage.load(uid)?.is_some(),
-                unlocked: self.unlocked.contains_key(&uid),
-            }),
+            Request::Status => {
+                let blob = self.storage.load(uid)?;
+                if let Some(vault) = self.unlocked.get(&uid) {
+                    vault.verify_publication(blob.as_deref().ok_or(Error::Corrupt)?)?;
+                }
+                Ok(Reply::Status {
+                    initialized: blob.is_some(),
+                    unlocked: self.unlocked.contains_key(&uid),
+                })
+            }
             Request::Initialize { password } => {
                 if self.storage.load(uid)?.is_some() {
                     return Err(Error::Exists);
                 }
                 let mut salt = [0; 16];
                 self.random.fill(&mut salt)?;
-                let vault = Unlocked::create(password.expose(), salt)?;
+                let mut vault = Unlocked::create(password.expose(), salt)?;
                 let mut nonce = [0; 24];
                 self.random.fill(&mut nonce)?;
                 let b = vault.seal(uid, &vault.data, nonce)?;
                 self.storage.commit(uid, &b)?;
+                vault.record_publication(&b);
                 self.unlocked.insert(uid, vault);
                 Ok(Reply::Ok)
             }
@@ -313,6 +320,7 @@ impl<S: Storage, R: Random> Service<S, R> {
                     self.unlocked.remove(&uid);
                     return Err(e);
                 }
+                replacement.record_publication(&b);
                 self.unlocked.insert(uid, replacement);
                 Ok(Reply::Ok)
             }
@@ -320,14 +328,18 @@ impl<S: Storage, R: Random> Service<S, R> {
         }
     }
     fn reauthenticate(&mut self, uid: u32, password: &Secret) -> Result<()> {
-        if !self.unlocked.contains_key(&uid) {
-            return Err(Error::Locked);
-        }
-        let b = self.storage.load(uid)?.ok_or(Error::Missing)?;
+        let b = self.current_publication(uid)?;
         let _verified = Unlocked::open(uid, password.expose(), &b)?;
         Ok(())
     }
+    fn current_publication(&mut self, uid: u32) -> Result<Vec<u8>> {
+        let vault = self.unlocked.get(&uid).ok_or(Error::Locked)?;
+        let blob = self.storage.load(uid)?.ok_or(Error::Corrupt)?;
+        vault.verify_publication(&blob)?;
+        Ok(blob)
+    }
     fn save(&mut self, uid: u32, data: Data) -> Result<()> {
+        self.current_publication(uid)?;
         let mut nonce = [0; 24];
         self.random.fill(&mut nonce)?;
         let blob = self
@@ -339,7 +351,9 @@ impl<S: Storage, R: Random> Service<S, R> {
             self.unlocked.remove(&uid);
             return Err(e);
         }
-        self.unlocked.get_mut(&uid).ok_or(Error::Locked)?.data = data;
+        let vault = self.unlocked.get_mut(&uid).ok_or(Error::Locked)?;
+        vault.data = data;
+        vault.record_publication(&blob);
         Ok(())
     }
     pub fn dispatch(&mut self, peer: &Peer, frame: &[u8]) -> zeroize::Zeroizing<Vec<u8>> {
