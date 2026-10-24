@@ -181,3 +181,61 @@ fn service_error_branches_use_normalization_and_driver_checks_wire_status() {
     assert!(driver.contains("crate::status::receive_status(status)?"));
     assert!(driver.contains("crate::status::driver_result(status)"));
 }
+
+#[test]
+fn unavailable_service_returns_typed_transport_failures_without_live_streams() {
+    let mut bytes = [0u8; 8192];
+    for (op, id) in [
+        (wire::Opcode::TcpConnect, 11),
+        (wire::Opcode::TcpReceive, 12),
+        (wire::Opcode::TlsConnect, 13),
+        (wire::Opcode::HttpRequest, 14),
+    ] {
+        let n = network_status::unavailable(
+            wire::Header {
+                opcode: op,
+                request_id: id,
+                length: wire::HEADER_LEN,
+            },
+            -6,
+            &mut bytes,
+        )
+        .unwrap();
+        match op {
+            wire::Opcode::TcpConnect => {
+                let result = wire::decode_tcp_connect_result(&bytes[..n]).unwrap();
+                assert_eq!((result.0, result.1, result.2), (id, -6, 0));
+            }
+            wire::Opcode::TcpReceive => {
+                let result = wire::decode_tcp_receive_result(&bytes[..n]).unwrap();
+                assert_eq!((result.0, result.1), (id, -6));
+                assert!(result.3.is_empty());
+            }
+            wire::Opcode::TlsConnect => {
+                let result = wire::decode_tls_connect_result(&bytes[..n]).unwrap();
+                assert_eq!(
+                    (
+                        result.request_id,
+                        result.status,
+                        result.failure,
+                        result.handle
+                    ),
+                    (id, -6, wire::TlsFailure::Transport, 0)
+                );
+            }
+            wire::Opcode::HttpRequest => {
+                let result = wire::decode_http_request_result(&bytes[..n]).unwrap();
+                assert_eq!(
+                    (
+                        result.request_id,
+                        result.status,
+                        result.failure,
+                        result.handle
+                    ),
+                    (id, -6, wire::HttpFailure::InvalidState, 0)
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+}

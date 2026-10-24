@@ -8,7 +8,32 @@ use mochios_net_device_protocol::{
 };
 
 pub(crate) fn permission_denied(header: Header, reply: &mut [u8]) -> Option<usize> {
-    let status = syscall::EACCES as i32;
+    reply_error(
+        header,
+        syscall::EACCES as i32,
+        TlsFailure::PermissionDenied,
+        HttpFailure::PermissionDenied,
+        reply,
+    )
+}
+
+pub(crate) fn unavailable(header: Header, status: i32, reply: &mut [u8]) -> Option<usize> {
+    reply_error(
+        header,
+        status,
+        TlsFailure::Transport,
+        HttpFailure::InvalidState,
+        reply,
+    )
+}
+
+fn reply_error(
+    header: Header,
+    status: i32,
+    tls_failure: TlsFailure,
+    http_failure: HttpFailure,
+    reply: &mut [u8],
+) -> Option<usize> {
     match header.opcode {
         Opcode::Ping => encode_ping_result(header.request_id, status, 0, reply).ok(),
         Opcode::ResolveIpv4 => {
@@ -51,7 +76,7 @@ pub(crate) fn permission_denied(header: Header, reply: &mut [u8]) -> Option<usiz
         Opcode::TlsConnect => encode_tls_connect_result(
             header.request_id,
             status,
-            TlsFailure::PermissionDenied,
+            tls_failure,
             0,
             [0; 4],
             0,
@@ -69,27 +94,21 @@ pub(crate) fn permission_denied(header: Header, reply: &mut [u8]) -> Option<usiz
             Opcode::TlsSendResult,
             header.request_id,
             status,
-            TlsFailure::PermissionDenied,
+            tls_failure,
             0,
             0,
             &mut reply[..TLS_IO_RESULT_LEN],
         )
         .ok(),
-        Opcode::TlsReceive => encode_tls_receive_result(
-            header.request_id,
-            status,
-            TlsFailure::PermissionDenied,
-            0,
-            false,
-            &[],
-            reply,
-        )
-        .ok(),
+        Opcode::TlsReceive => {
+            encode_tls_receive_result(header.request_id, status, tls_failure, 0, false, &[], reply)
+                .ok()
+        }
         Opcode::TlsClose => encode_tls_io_result(
             Opcode::TlsCloseResult,
             header.request_id,
             status,
-            TlsFailure::PermissionDenied,
+            tls_failure,
             0,
             0,
             &mut reply[..TLS_IO_RESULT_LEN],
@@ -98,7 +117,7 @@ pub(crate) fn permission_denied(header: Header, reply: &mut [u8]) -> Option<usiz
         Opcode::HttpRequest => encode_http_request_result(
             header.request_id,
             status,
-            HttpFailure::PermissionDenied,
+            http_failure,
             0,
             0,
             0,
@@ -111,7 +130,7 @@ pub(crate) fn permission_denied(header: Header, reply: &mut [u8]) -> Option<usiz
             header.request_id,
             Opcode::HttpReadResult,
             status,
-            HttpFailure::PermissionDenied,
+            http_failure,
             0,
             false,
             &[],
@@ -122,7 +141,7 @@ pub(crate) fn permission_denied(header: Header, reply: &mut [u8]) -> Option<usiz
             header.request_id,
             Opcode::HttpCloseResult,
             status,
-            HttpFailure::PermissionDenied,
+            http_failure,
             0,
             false,
             &[],

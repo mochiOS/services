@@ -122,3 +122,8 @@ harness = false
 name = "native_object_exec"
 path = "tests/native_object_exec.rs"
 harness = false
+
+[[test]]
+name = "native_network_unavailable"
+path = "tests/native_network_unavailable.rs"
+harness = false

@@ -33,11 +33,7 @@ pub(crate) fn run() -> ! {
                 "network.service: virtio-net driver unavailable errno={}",
                 errno
             );
-            if let Some(target) = ready {
-                let _ =
-                    platform::service_ready::notify(target, crate::status::failure_status(errno));
-            }
-            idle()
+            unavailable(ready, errno)
         }
     };
     let xid = platform::service_ready::generate_token()
@@ -47,11 +43,7 @@ pub(crate) fn run() -> ! {
         Ok(stack) => stack,
         Err(errno) => {
             platform::logln!("network.service: interface query failed errno={}", errno);
-            if let Some(target) = ready {
-                let _ =
-                    platform::service_ready::notify(target, crate::status::failure_status(errno));
-            }
-            idle()
+            unavailable(ready, errno)
         }
     };
     let info = stack.info();
@@ -86,7 +78,7 @@ pub(crate) fn run() -> ! {
     let mut http = HttpManager::new();
 
     let mut request = [0u8; IPC_BUFFER_LEN];
-    let mut reply = [0u8; IPC_BUFFER_LEN];
+    let mut response = [0u8; IPC_BUFFER_LEN];
     loop {
         let now = platform::time::ticks().unwrap_or(0);
         stack.tick(now);
@@ -104,9 +96,15 @@ pub(crate) fn run() -> ! {
                     continue;
                 };
                 if let Some(length) = handle(
-                    &mut stack, &mut tls, &mut http, sender, bytes, &mut reply, now,
+                    &mut stack,
+                    &mut tls,
+                    &mut http,
+                    sender,
+                    bytes,
+                    &mut response,
+                    now,
                 ) {
-                    crate::reply::send(sender, &reply[..length]);
+                    crate::reply::send(sender, &response[..length]);
                 }
             }
             Err(error)
@@ -129,23 +127,7 @@ fn handle(
     now: u64,
 ) -> Option<usize> {
     let header = Header::decode(request).ok()?;
-    let capability = if matches!(
-        header.opcode,
-        Opcode::HttpRequest | Opcode::HttpRead | Opcode::HttpClose
-    ) {
-        "net.http.request"
-    } else if matches!(
-        header.opcode,
-        Opcode::TlsConnect | Opcode::TlsSend | Opcode::TlsReceive | Opcode::TlsClose
-    ) {
-        "net.tls.connect"
-    } else {
-        "net.connect"
-    };
-    if !matches!(
-        platform::capability::check_thread(sender, capability),
-        Ok(1)
-    ) {
+    if !authorized(sender, header.opcode) {
         return crate::status::permission_denied(header, reply);
     }
     match header.opcode {
@@ -468,8 +450,56 @@ fn random_value(sender: u64, request_id: u64, now: u64) -> u64 {
     })
 }
 
-fn idle() -> ! {
+fn authorized(sender: u64, opcode: Opcode) -> bool {
+    let capability = if matches!(
+        opcode,
+        Opcode::HttpRequest | Opcode::HttpRead | Opcode::HttpClose
+    ) {
+        "net.http.request"
+    } else if matches!(
+        opcode,
+        Opcode::TlsConnect | Opcode::TlsSend | Opcode::TlsReceive | Opcode::TlsClose
+    ) {
+        "net.tls.connect"
+    } else {
+        "net.connect"
+    };
+    platform::capability::check_thread(sender, capability) == Ok(1)
+}
+
+fn unavailable(ready: Option<platform::service_ready::Target>, errno: u64) -> ! {
+    let status = crate::status::failure_status(errno);
+    if let Some(target) = ready {
+        let _ = platform::service_ready::notify(target, status);
+    }
+    let mut request = [0u8; IPC_BUFFER_LEN];
+    let mut response = [0u8; IPC_BUFFER_LEN];
     loop {
-        platform::thread::yield_now()
+        match platform::ipc::try_wait(&mut request) {
+            Ok(message) => {
+                let length = (message & 0xffff_ffff) as usize;
+                let sender = message >> 32;
+                let Some(bytes) = request.get(..length) else {
+                    continue;
+                };
+                let Ok(header) = Header::decode(bytes) else {
+                    continue;
+                };
+                let length = if authorized(sender, header.opcode) {
+                    crate::status::unavailable(header, status, &mut response)
+                } else {
+                    crate::status::permission_denied(header, &mut response)
+                };
+                if let Some(length) = length {
+                    crate::reply::send(sender, &response[..length]);
+                }
+            }
+            Err(error)
+                if error.native_error() == Some(mochi_user_syscall::NativeError::NotReady) =>
+            {
+                platform::thread::yield_now()
+            }
+            Err(_) => platform::thread::yield_now(),
+        }
     }
 }

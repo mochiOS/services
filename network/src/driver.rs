@@ -53,6 +53,7 @@ impl DriverClient {
             .map_err(|_| mochi_user_syscall::EINVAL)?;
         let mut reply = [0; INTERFACE_INFO_LEN];
         let n = self.call(&request, &mut reply)?;
+        metadata_status(&reply[..n], Opcode::InterfaceInfo, id)?;
         let (reply_id, info) =
             decode_interface_info(&reply[..n]).map_err(|_| mochi_user_syscall::EIO)?;
         if reply_id != id {
@@ -104,6 +105,7 @@ impl DriverClient {
             .map_err(|_| mochi_user_syscall::EINVAL)?;
         let mut reply = [0; STATISTICS_LEN];
         let n = self.call(&request, &mut reply)?;
+        metadata_status(&reply[..n], Opcode::Statistics, id)?;
         let (reply_id, stats) = decode_statistics(Opcode::Statistics, &reply[..n])
             .map_err(|_| mochi_user_syscall::EIO)?;
         if reply_id != id {
@@ -111,4 +113,17 @@ impl DriverClient {
         }
         Ok(stats)
     }
+}
+
+// Metadata success has a fixed larger frame. A status-only reply is a failure;
+// zero/positive status, a wrong operation or another request ID is malformed.
+fn metadata_status(bytes: &[u8], opcode: Opcode, id: u64) -> Result<(), u64> {
+    if bytes.len() != STATUS_LEN {
+        return Ok(());
+    }
+    let (reply_id, status) = decode_status(opcode, bytes).map_err(|_| mochi_user_syscall::EIO)?;
+    if reply_id != id || status >= 0 || status == i32::MIN {
+        return Err(mochi_user_syscall::EIO);
+    }
+    Err(status as i64 as u64)
 }
