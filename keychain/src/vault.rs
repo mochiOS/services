@@ -101,19 +101,7 @@ impl Unlocked {
     pub fn open(uid: u32, password: &[u8], blob: &[u8]) -> Result<Self> {
         let salt = header(uid, blob)?;
         let key = derive(password, &salt)?;
-        let plain = Zeroizing::new(
-            XChaCha20Poly1305::new_from_slice(key.as_ref())
-                .map_err(|_| Error::Corrupt)?
-                .decrypt(
-                    XNonce::from_slice(&blob[32..56]),
-                    Payload {
-                        msg: &blob[HEADER..],
-                        aad: &blob[..HEADER],
-                    },
-                )
-                .map_err(|_| Error::Authentication)?,
-        );
-        let data = Data::decode(&plain).map_err(|_| Error::Corrupt)?;
+        let data = decrypt_data(uid, &key, blob)?;
         Ok(Self {
             data,
             key,
@@ -168,6 +156,22 @@ impl Unlocked {
         Ok(())
     }
 }
+fn decrypt_data(uid: u32, key: &[u8; 32], blob: &[u8]) -> Result<Data> {
+    header(uid, blob)?;
+    let plain = Zeroizing::new(
+        XChaCha20Poly1305::new_from_slice(key)
+            .map_err(|_| Error::Corrupt)?
+            .decrypt(
+                XNonce::from_slice(&blob[32..56]),
+                Payload {
+                    msg: &blob[HEADER..],
+                    aad: &blob[..HEADER],
+                },
+            )
+            .map_err(|_| Error::Authentication)?,
+    );
+    Data::decode(&plain).map_err(|_| Error::Corrupt)
+}
 pub fn header(uid: u32, b: &[u8]) -> Result<[u8; 16]> {
     if b.len() < HEADER + 16
         || b.len() > MAX_FILE
@@ -215,4 +219,52 @@ pub fn new_id(random: &mut impl crate::Random) -> Result<ItemId> {
         return Err(Error::Unavailable);
     }
     Ok(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn hex(s: &str) -> Vec<u8> {
+        s.as_bytes()
+            .chunks_exact(2)
+            .map(|b| u8::from_str_radix(core::str::from_utf8(b).unwrap(), 16).unwrap())
+            .collect()
+    }
+    #[test]
+    fn matches_independent_argon2_and_libsodium_fixture_and_rejects_tampering() {
+        // Public fixed test inputs, generated independently using libargon2
+        // argon2id_hash_raw and libsodium's XChaCha20-Poly1305 IETF API.
+        let password = b"correct horse battery staple";
+        let salt = core::array::from_fn(|i| i as u8);
+        let nonce = core::array::from_fn(|i| i as u8);
+        let key = derive(password, &salt).unwrap();
+        assert_eq!(
+            key.as_slice(),
+            hex("0d1a3c6523c8f06e4e0af9c515aa5b5448cfebd6838f2d52c3d8b6ef8ddc3c2e")
+        );
+        let blob = hex(
+            "4d4b455956303031e803000001000000000102030405060708090a0b0c0d0e0f000102030405060708090a0b0c0d0e0f10111213141516171a0000000000000074905bcea29376db13f9f3ab02122cfff766caa2364658180ae1",
+        );
+        let vault = Unlocked::create(password, salt).unwrap();
+        assert_eq!(vault.seal(1000, &vault.data, nonce).unwrap(), blob);
+        assert!(
+            Unlocked::open(1000, password, &blob)
+                .unwrap()
+                .data
+                .entries
+                .is_empty()
+        );
+        for n in 0..blob.len() {
+            assert!(Unlocked::open(1000, password, &blob[..n]).is_err());
+            let mut changed = blob.clone();
+            changed[n] ^= 1;
+            assert!(
+                decrypt_data(1000, &key, &changed).is_err(),
+                "unauthenticated byte {n}"
+            );
+        }
+        let mut extra = blob.clone();
+        extra.push(0);
+        assert!(Unlocked::open(1000, password, &extra).is_err());
+    }
 }
