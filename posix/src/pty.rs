@@ -572,7 +572,7 @@ pub struct PtyManager {
     objects: BTreeMap<u64, (u64, PtySide)>,
     // Separate provider objects: a factory keeps identity, not a data open.
     slave_factories: BTreeMap<u64, u64>,
-    metadata: BTreeMap<u64, crate::pty_metadata::Reference>,
+    metadata: BTreeMap<u64, crate::filesystem_reference::Reference>,
     pending_signals: VecDeque<TerminalSignal>,
 }
 
@@ -715,7 +715,7 @@ impl PtyManager {
     pub fn open_slave_with_metadata(
         &mut self,
         factory_object_id: u64,
-        metadata: crate::pty_metadata::Reference,
+        metadata: crate::filesystem_reference::Reference,
     ) -> Result<u64, i32> {
         let object_id = self.open_slave_from_factory(factory_object_id)?;
         self.metadata.insert(object_id, metadata);

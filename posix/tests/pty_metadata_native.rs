@@ -4,7 +4,7 @@ use std::cell::RefCell;
 pub mod pty {
     pub use posix_service::pty::{EACCES, EIO};
 }
-#[path = "../src/pty_metadata.rs"]
+#[path = "../src/filesystem_reference.rs"]
 mod implementation;
 use mnu_abi::{HANDLE_RIGHT_CONTROL as C, HANDLE_RIGHT_DUPLICATE as D, HANDLE_RIGHT_TRANSFER as T};
 

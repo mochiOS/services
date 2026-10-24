@@ -5,7 +5,7 @@ use mnu_abi::{
 use mochios_filesystem_protocol::device_metadata::Request;
 use posix_service::{
     pty::{EBADF, PtyManager},
-    pty_metadata::{Backend, Reference},
+    filesystem_reference::{Backend, Reference},
     pty_metadata_ipc::{lookup, query_with},
 };
 use std::{

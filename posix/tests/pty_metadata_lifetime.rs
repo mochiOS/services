@@ -1,7 +1,7 @@
 use mnu_abi::{HANDLE_RIGHT_CONTROL as C, HANDLE_RIGHT_DUPLICATE as D, HANDLE_RIGHT_TRANSFER as T};
 use posix_service::{
     pty::{EACCES, EBADF, ENOTSUP, PtyManager},
-    pty_metadata::{Backend, Reference},
+    filesystem_reference::{Backend, Reference},
 };
 use std::sync::{Arc, Mutex};
 

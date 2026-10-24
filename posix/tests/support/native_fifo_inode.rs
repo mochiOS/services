@@ -6,6 +6,9 @@ use mochi_user_platform as platform;
 use mochios_filesystem_protocol as wire;
 use posix_service::fifo_inode::{METADATA_RIGHTS, validate_reply};
 
+#[path = "native_fifo_manager.rs"]
+mod manager_probe;
+
 fn payload(path: &[u8], uid: u32) -> Vec<u8> {
     let mut payload = vec![0; wire::CREDENTIALS_MAX_LEN + path.len()];
     let length = wire::encode_credentials_payload(uid, uid, &[], path, &mut payload).unwrap();
@@ -140,4 +143,5 @@ pub fn run(fs: &RuntimeFilesystem) {
         b"fifo-inode: PASS retained Handle survives unlink, replacement and original close\n",
     )
     .unwrap();
+    manager_probe::run(fs);
 }

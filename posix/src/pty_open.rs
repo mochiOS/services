@@ -2,7 +2,7 @@
 use crate::{
     OpenedObject,
     pty::{EACCES, EINVAL, EIO, PtyManager},
-    pty_metadata::Reference,
+    filesystem_reference::Reference,
 };
 use mnu_abi::{
     HANDLE_RIGHT_CONTROL as CONTROL, HANDLE_RIGHT_DUPLICATE as DUPLICATE,

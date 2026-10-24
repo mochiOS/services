@@ -10,7 +10,7 @@ use std::sync::mpsc;
 // simulated here. Both services' real namespace/PTY logic runs unchanged.
 #[derive(Debug)]
 struct Metadata(u32);
-impl posix_service::pty_metadata::Backend for Metadata {
+impl posix_service::filesystem_reference::Backend for Metadata {
     fn duplicate(&self, _rights: u64) -> Result<u32, i32> {
         Ok(self.0 + 1000)
     }
@@ -28,7 +28,7 @@ impl filesystem_service::device_factory::Factory for Factory {
     ) -> Result<IpcObjectHandle, i32> {
         assert_ne!(metadata.handle, 0);
         assert_eq!(metadata.rights & (D | T), D | T);
-        let reference = posix_service::pty_metadata::Reference::new(
+        let reference = posix_service::filesystem_reference::Reference::new(
             Box::new(Metadata(metadata.handle)),
             metadata.rights,
         )?;

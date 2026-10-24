@@ -71,17 +71,9 @@ impl Channel {
     /// Admission/allocation failures leave all existing openings unchanged.
     /// O_RDWR is intentionally absent: its FIFO behavior is not portable POSIX.
     pub fn open(&mut self, access: Access, nonblocking: bool) -> Result<DescriptionId, Error> {
+        self.reserve_open(access, nonblocking)?;
         let opposite_present = self.descriptions.iter().any(|entry| entry.access != access);
-        if access == Access::Write && nonblocking && !opposite_present {
-            return Err(Error::NoReaders);
-        }
-        if self.descriptions.len() == MAX_OPEN_DESCRIPTIONS {
-            return Err(Error::ResourceLimit);
-        }
         let next = self.last_id.checked_add(1).ok_or(Error::ResourceLimit)?;
-        self.descriptions
-            .try_reserve(1)
-            .map_err(|_| Error::NoMemory)?;
         let id = DescriptionId(next);
         self.descriptions.push(Description {
             id,
@@ -99,6 +91,26 @@ impl Channel {
             }
         }
         Ok(id)
+    }
+
+    /// Allocate before native object creation without joining the rendezvous.
+    /// Repeating this under the same exclusive owner needs no allocation.
+    pub fn reserve_open(&mut self, access: Access, nonblocking: bool) -> Result<(), Error> {
+        if access == Access::Write
+            && nonblocking
+            && !self
+                .descriptions
+                .iter()
+                .any(|entry| entry.access == Access::Read)
+        {
+            return Err(Error::NoReaders);
+        }
+        if self.descriptions.len() == MAX_OPEN_DESCRIPTIONS || self.last_id == u64::MAX {
+            return Err(Error::ResourceLimit);
+        }
+        self.descriptions
+            .try_reserve(1)
+            .map_err(|_| Error::NoMemory)
     }
 
     pub fn observe(&self, id: DescriptionId) -> Result<Observation, Error> {

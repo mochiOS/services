@@ -17,7 +17,7 @@ use mnu_abi::{
     HANDLE_RIGHT_CONTROL as C, HANDLE_RIGHT_DUPLICATE as D, HANDLE_RIGHT_TRANSFER as T,
     IpcObjectHandle, IpcObjectHandles,
 };
-use posix_service::pty_metadata::{Backend, Reference};
+use posix_service::filesystem_reference::{Backend, Reference};
 #[derive(Debug)]
 pub struct Error;
 impl Error {

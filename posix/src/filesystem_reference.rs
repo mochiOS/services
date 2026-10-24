@@ -1,11 +1,12 @@
-//! A filesystem metadata reference retained by one independent PTY data open.
-//! Neither this reference nor its lookup proxies terminal data operations.
-use crate::pty::{EACCES, EIO};
+//! Owned filesystem metadata references for userspace data providers.
+//! Neither this reference nor its lookup proxies data operations.
+const EACCES: i32 = 13;
+const EIO: i32 = 5;
 use mnu_abi::{HANDLE_RIGHT_CONTROL, HANDLE_RIGHT_DUPLICATE, HANDLE_RIGHT_TRANSFER};
 
 /// An owned reference. Dropping the backend releases its local native Handle.
 /// Duplication and destruction must use native local Handle operations, not
-/// synchronous peer RPC: they can execute under the PTY manager lock.
+/// synchronous peer RPC: they can execute under a provider manager lock.
 pub trait Backend: std::fmt::Debug + Send {
     fn duplicate(&self, rights: u64) -> Result<u32, i32>;
 }
@@ -40,9 +41,9 @@ impl Reference {
         Ok(Self { backend, rights })
     }
 
-    /// Source rights are those of the explicitly attached PTY data Handle,
+    /// Source rights are those of the explicitly attached data Handle,
     /// not the provider's original full-authority local reference. A write-only
-    /// terminal can provide metadata; no READ right is required or manufactured.
+    /// description can provide metadata; no READ right is required or manufactured.
     pub fn duplicate(&self, source_rights: u64, requested_rights: u64) -> Result<u32, i32> {
         if requested_rights & HANDLE_RIGHT_TRANSFER == 0
             || requested_rights & !(HANDLE_RIGHT_TRANSFER | HANDLE_RIGHT_CONTROL) != 0
