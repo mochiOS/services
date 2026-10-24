@@ -1477,7 +1477,8 @@ struct RecordingFilesystem {
     time_request: Option<posix_service::PreparedFileTimes>,
     time_error: Option<i32>,
     synced: Option<AttachedObject<u32>>,
-    mkdir_request: Option<posix_service::PreparedMkdir>,
+    mkdir_request: Option<posix_service::PreparedNodeCreation>,
+    fifo_request: Option<posix_service::PreparedNodeCreation>,
     unlink_request: Option<posix_service::PreparedUnlink>,
     rename_request: Option<posix_service::PreparedRename>,
     rename_paths: Option<posix_service::RenamePathObjects<u32>>,
@@ -1921,13 +1922,27 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
 
     fn mkdir_at(
         &mut self,
-        request: &posix_service::PreparedMkdir,
+        request: &posix_service::PreparedNodeCreation,
         paths: PathObjects<u32>,
     ) -> Result<(), i32> {
         if let Some(hook) = &mut self.mutation_hook {
             hook()?;
         }
         self.mkdir_request = Some(request.clone());
+        self.root = Some(paths.root);
+        self.directory = paths.base;
+        Ok(())
+    }
+
+    fn mkfifo_at(
+        &mut self,
+        request: &posix_service::PreparedNodeCreation,
+        paths: PathObjects<u32>,
+    ) -> Result<(), i32> {
+        if let Some(hook) = &mut self.mutation_hook {
+            hook()?;
+        }
+        self.fifo_request = Some(request.clone());
         self.root = Some(paths.root);
         self.directory = paths.base;
         Ok(())

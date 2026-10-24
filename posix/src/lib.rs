@@ -148,7 +148,7 @@ pub struct PreparedOpen {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PreparedMkdir {
+pub struct PreparedNodeCreation {
     pub base: protocol::OpenBase,
     pub mode: u32,
     pub path: Vec<u8>,
@@ -453,7 +453,10 @@ pub trait FilesystemBackend<H: Copy> {
 
     fn fsync(&mut self, file: AttachedObject<H>) -> Result<(), i32>;
 
-    fn mkdir_at(&mut self, request: &PreparedMkdir, paths: PathObjects<H>) -> Result<(), i32>;
+    fn mkdir_at(&mut self, request: &PreparedNodeCreation, paths: PathObjects<H>) -> Result<(), i32>;
+    fn mkfifo_at(&mut self, _request: &PreparedNodeCreation, _paths: PathObjects<H>) -> Result<(), i32> {
+        Err(protocol::STATUS_ENOSYS)
+    }
 
     fn unlink_at(&mut self, request: &PreparedUnlink, paths: PathObjects<H>) -> Result<(), i32>;
 
@@ -3841,6 +3844,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_FTRUNCATE
             | protocol::OP_FSYNC
             | protocol::OP_MKDIR_AT
+            | protocol::OP_MKFIFO_AT
             | protocol::OP_UNLINK_AT
             | protocol::OP_RENAME_AT
             | protocol::OP_LINK_AT
@@ -3944,6 +3948,7 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_FTRUNCATE
                 | protocol::OP_FSYNC
                 | protocol::OP_MKDIR_AT
+                | protocol::OP_MKFIFO_AT
                 | protocol::OP_UNLINK_AT
                 | protocol::OP_RENAME_AT
                 | protocol::OP_LINK_AT
@@ -3986,6 +3991,7 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_FCHDIR
                 | protocol::OP_GETCWD
                 | protocol::OP_MKDIR_AT
+                | protocol::OP_MKFIFO_AT
                 | protocol::OP_UNLINK_AT
                 | protocol::OP_RENAME_AT
                 | protocol::OP_LINK_AT
@@ -4044,6 +4050,7 @@ impl<H: Copy> PosixService<H> {
                 file_request::dispatch(self, peer, header, payload, handles, admission, filesystem)
             }
             protocol::OP_MKDIR_AT
+            | protocol::OP_MKFIFO_AT
             | protocol::OP_UNLINK_AT
             | protocol::OP_TRUNCATE_AT
             | protocol::OP_SYMLINK_AT
@@ -4214,12 +4221,12 @@ impl<H: Copy> PosixService<H> {
         })
     }
 
-    pub fn prepare_mkdir_at(
+    pub fn prepare_node_creation(
         &self,
         peer: PeerIdentity,
         payload: &[u8],
         attached_handles: usize,
-    ) -> Result<PreparedMkdir, i32> {
+    ) -> Result<PreparedNodeCreation, i32> {
         let session = self
             .sessions
             .get(&peer.process_id)
@@ -4229,7 +4236,7 @@ impl<H: Copy> PosixService<H> {
         if attached_handles != expected_handles || request.options != 0 {
             return Err(STATUS_EINVAL);
         }
-        Ok(PreparedMkdir {
+        Ok(PreparedNodeCreation {
             base: request.base,
             mode: (request.mode & 0o7777) & !(session.umask & 0o777),
             path: request.path.to_owned(),

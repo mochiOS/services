@@ -261,6 +261,15 @@ impl Client {
         };
         self.mutation(base, path, (3, mode, 0, 0))
     }
+    fn mkfifo_at(&self, base: OpenAtBase<u32>, mode: u32, path: &[u8]) -> Result<(), c_int> {
+        let base = match base {
+            OpenAtBase::ProcessRoot => StatAtBase::ProcessRoot,
+            OpenAtBase::ProcessCwd => StatAtBase::ProcessCwd,
+            OpenAtBase::Directory(handle) => StatAtBase::Directory(handle),
+        };
+        self.mutation(base, path, (4, mode, 0, 0))
+    }
+
     fn readlink_at(
         &self,
         base: StatAtBase<u32>,
@@ -654,7 +663,7 @@ fn second_input_failures_release_the_first_directory_before_any_rpc() {
 #[test]
 fn mutations_keep_arguments_and_directory_authority_through_all_rpc_outcomes() {
     let _serial = SERIAL.lock().unwrap();
-    for operation in 0..4 {
+    for operation in 0..5 {
         for case in 0..4 {
             reset();
             *MUTATION.lock().unwrap() = None;
@@ -666,14 +675,16 @@ fn mutations_keep_arguments_and_directory_authority_through_all_rpc_outcomes() {
                 0 => implementation::chmod(7, path, 0o640),
                 1 => implementation::chown(7, path, u32::MAX, 20, 1),
                 2 => implementation::unlink(7, path, 1),
-                _ => implementation::mkdir(7, path, 0o750),
+                3 => implementation::mkdir(7, path, 0o750),
+                _ => implementation::mkfifo(7, path, 0o640),
             };
             assert_eq!(result, if case == 1 { Err(13) } else { Ok(()) });
             let expected = match operation {
                 0 => (0, 0o640, 0, 0),
                 1 => (1, u32::MAX, 20, 1),
                 2 => (2, 1, 0, 0),
-                _ => (3, 0o750, 0, 0),
+                3 => (3, 0o750, 0, 0),
+                _ => (4, 0o640, 0, 0),
             };
             assert_eq!(
                 *MUTATION.lock().unwrap(),

@@ -5,7 +5,8 @@ use std::sync::Mutex;
 
 #[derive(PartialEq, Eq)]
 enum Mutation {
-    Mkdir(PreparedMkdir),
+    Mkdir(PreparedNodeCreation),
+    Fifo(PreparedNodeCreation),
     Unlink(PreparedUnlink),
     Truncate(PreparedTruncate),
     Symlink(PreparedSymlink),
@@ -18,6 +19,7 @@ pub fn supports(opcode: u16) -> bool {
     matches!(
         opcode,
         protocol::OP_MKDIR_AT
+            | protocol::OP_MKFIFO_AT
             | protocol::OP_UNLINK_AT
             | protocol::OP_TRUNCATE_AT
             | protocol::OP_SYMLINK_AT
@@ -35,7 +37,12 @@ fn prepare<H: Copy>(
     count: usize,
 ) -> Result<(Mutation, protocol::OpenBase), i32> {
     let mutation = match opcode {
-        protocol::OP_MKDIR_AT => Mutation::Mkdir(service.prepare_mkdir_at(peer, payload, count)?),
+        protocol::OP_MKDIR_AT => {
+            Mutation::Mkdir(service.prepare_node_creation(peer, payload, count)?)
+        }
+        protocol::OP_MKFIFO_AT => {
+            Mutation::Fifo(service.prepare_node_creation(peer, payload, count)?)
+        }
         protocol::OP_UNLINK_AT => {
             Mutation::Unlink(service.prepare_unlink_at(peer, payload, count)?)
         }
@@ -53,7 +60,7 @@ fn prepare<H: Copy>(
         _ => return Err(protocol::STATUS_ENOSYS),
     };
     let base = match &mutation {
-        Mutation::Mkdir(p) => p.base,
+        Mutation::Mkdir(p) | Mutation::Fifo(p) => p.base,
         Mutation::Unlink(p) => p.base,
         Mutation::Truncate(p) => p.base,
         Mutation::Symlink(p) => p.base,
@@ -141,6 +148,9 @@ fn run<H: Copy, F: FilesystemBackend<H>>(
 ) -> ObjectResponse<H> {
     let result = match mutation {
         Mutation::Mkdir(p) => filesystem.mkdir_at(p, paths).map_err(MutationError::Failed),
+        Mutation::Fifo(p) => filesystem
+            .mkfifo_at(p, paths)
+            .map_err(MutationError::Failed),
         Mutation::Unlink(p) => filesystem
             .unlink_at(p, paths)
             .map_err(MutationError::Failed),

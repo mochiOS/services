@@ -3139,6 +3139,38 @@ impl RuntimeFilesystem {
         Ok(encoded)
     }
 
+    fn create_node_at(
+        &self,
+        opcode: u16,
+        request: &posix_service::PreparedNodeCreation,
+        paths: posix_service::PathObjects<mochi_user_platform::handle::Handle>,
+    ) -> Result<(), i32> {
+        use mochios_filesystem_protocol as filesystem;
+
+        let mut flags = filesystem::MKDIR_AT_ROOT_ATTACHED;
+        if paths.base.is_some() {
+            flags |= filesystem::MKDIR_AT_BASE_ATTACHED;
+        }
+        let payload = Self::credential_payload(
+            request.effective_uid,
+            request.effective_gid,
+            &request.supplementary_groups,
+            &request.path,
+        )?;
+        self.empty_call(
+            filesystem::Header {
+                opcode,
+                request_id: 10,
+                length: payload.len() as u32,
+                flags,
+                mode: request.mode,
+                ..filesystem::Header::default()
+            },
+            &payload,
+            Self::path_handles(paths)?,
+        )
+    }
+
     fn empty_call(
         &self,
         header: mochios_filesystem_protocol::Header,
@@ -3776,33 +3808,18 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
 
     fn mkdir_at(
         &mut self,
-        request: &posix_service::PreparedMkdir,
+        request: &posix_service::PreparedNodeCreation,
         paths: posix_service::PathObjects<mochi_user_platform::handle::Handle>,
     ) -> Result<(), i32> {
-        use mochios_filesystem_protocol as filesystem;
+        self.create_node_at(mochios_filesystem_protocol::OP_MKDIR_AT, request, paths)
+    }
 
-        let mut flags = filesystem::MKDIR_AT_ROOT_ATTACHED;
-        if paths.base.is_some() {
-            flags |= filesystem::MKDIR_AT_BASE_ATTACHED;
-        }
-        let payload = Self::credential_payload(
-            request.effective_uid,
-            request.effective_gid,
-            &request.supplementary_groups,
-            &request.path,
-        )?;
-        self.empty_call(
-            filesystem::Header {
-                opcode: filesystem::OP_MKDIR_AT,
-                request_id: 10,
-                length: payload.len() as u32,
-                flags,
-                mode: request.mode,
-                ..filesystem::Header::default()
-            },
-            &payload,
-            Self::path_handles(paths)?,
-        )
+    fn mkfifo_at(
+        &mut self,
+        request: &posix_service::PreparedNodeCreation,
+        paths: posix_service::PathObjects<mochi_user_platform::handle::Handle>,
+    ) -> Result<(), i32> {
+        self.create_node_at(mochios_filesystem_protocol::OP_CREATE_FIFO_AT, request, paths)
     }
 
     fn unlink_at(

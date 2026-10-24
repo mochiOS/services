@@ -509,7 +509,10 @@ fn main() {
                             payload: Vec::new(),
                         },
                     }
-                } else if header.opcode == protocol::OP_MKDIR_AT {
+                } else if matches!(
+                    header.opcode,
+                    protocol::OP_MKDIR_AT | protocol::OP_CREATE_FIFO_AT
+                ) {
                     let anchors = decode_path_anchors(
                         header.flags,
                         protocol::MKDIR_AT_ROOT_ATTACHED,
@@ -520,7 +523,18 @@ fn main() {
                         .map_err(|_| 22)
                         .and_then(|(credentials, payload)| {
                             anchors.and_then(|anchors| {
-                                service.mkdir_at(header, payload, anchors, credentials)
+                                if header.opcode == protocol::OP_CREATE_FIFO_AT {
+                                    service
+                                        .create_fifo_at(header, payload, anchors, credentials)
+                                        .map(|mut response| {
+                                            response.payload.clear();
+                                            response.header.length = 0;
+                                            response.header.node_id = 0;
+                                            response
+                                        })
+                                } else {
+                                    service.mkdir_at(header, payload, anchors, credentials)
+                                }
                             })
                         });
                     match result {

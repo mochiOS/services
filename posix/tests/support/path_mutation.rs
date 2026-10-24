@@ -1,8 +1,10 @@
 use super::*;
+use mochios_posix_client::OpenAtBase;
 use std::sync::{Arc, Mutex};
 
-const OPERATIONS: [u16; 7] = [
+const OPERATIONS: [u16; 8] = [
     protocol::OP_MKDIR_AT,
+    protocol::OP_MKFIFO_AT,
     protocol::OP_UNLINK_AT,
     protocol::OP_TRUNCATE_AT,
     protocol::OP_SYMLINK_AT,
@@ -11,6 +13,109 @@ const OPERATIONS: [u16; 7] = [
     protocol::OP_CHOWN_AT,
 ];
 const PATH: &[u8] = b"../file-\xff";
+
+struct FifoTransport {
+    base: protocol::OpenBase,
+    status: i32,
+    unexpected_handle: bool,
+    closed: std::cell::Cell<usize>,
+}
+
+impl Transport for FifoTransport {
+    type Error = ();
+    fn call(&self, _: &[u8], _: &mut [u8]) -> Result<usize, ()> {
+        panic!("FIFO creation requires object transport")
+    }
+}
+
+impl ObjectTransport for FifoTransport {
+    type Handle = u32;
+    fn close_received_handle(&self, handle: u32) {
+        assert_eq!(handle, 72);
+        self.closed.set(self.closed.get() + 1);
+    }
+    fn call_with_handles(
+        &self,
+        request: &[u8],
+        output: &mut [u8],
+        handles: &mut ObjectHandles<u32>,
+    ) -> Result<usize, ()> {
+        let (header, payload) = protocol::decode(request).unwrap();
+        assert_eq!(header.opcode, protocol::OP_MKFIFO_AT);
+        let request = protocol::decode_open_at(payload).unwrap();
+        assert_eq!(request.base, self.base);
+        assert_eq!((request.options, request.mode), (0, 0o660));
+        assert_eq!(request.path, PATH);
+        assert_eq!(
+            handles.len(),
+            usize::from(self.base == protocol::OpenBase::AttachedDirectory)
+        );
+        if let Some(directory) = handles.get(0) {
+            assert_eq!(
+                (directory.handle, directory.rights),
+                (19, mnu_abi::HANDLE_RIGHT_TRANSFER)
+            );
+        }
+        handles.clear();
+        if self.unexpected_handle {
+            handles
+                .push(ObjectHandleAttachment {
+                    handle: 72,
+                    rights: mnu_abi::HANDLE_RIGHT_TRANSFER,
+                })
+                .unwrap();
+        }
+        protocol::encode(
+            protocol::Header {
+                opcode: protocol::OP_STATUS,
+                request_id: header.request_id,
+                status: self.status,
+                ..Default::default()
+            },
+            &[],
+            output,
+        )
+        .map_err(|_| ())
+    }
+}
+
+#[test]
+fn fifo_client_preserves_raw_path_and_directory_authority_and_closes_unexpected_replies() {
+    for base in [
+        protocol::OpenBase::ProcessRoot,
+        protocol::OpenBase::ProcessCwd,
+        protocol::OpenBase::AttachedDirectory,
+    ] {
+        for (status, unexpected_handle) in [(0, false), (-13, false), (0, true)] {
+            let transport = FifoTransport {
+                base,
+                status,
+                unexpected_handle,
+                closed: std::cell::Cell::new(0),
+            };
+            let client = Client::new(transport);
+            let base = match base {
+                protocol::OpenBase::ProcessRoot => OpenAtBase::ProcessRoot,
+                protocol::OpenBase::ProcessCwd => OpenAtBase::ProcessCwd,
+                protocol::OpenBase::AttachedDirectory => {
+                    OpenAtBase::Directory(ObjectHandleAttachment {
+                        handle: 19,
+                        rights: mnu_abi::HANDLE_RIGHT_TRANSFER,
+                    })
+                }
+            };
+            let result = client.mkfifo_at(base, 0o660, PATH);
+            assert_eq!(result.is_ok(), status == 0 && !unexpected_handle);
+            if status == -13 {
+                assert!(matches!(result, Err(ClientError::Remote(-13))));
+            }
+            assert_eq!(
+                client.transport().closed.get(),
+                usize::from(unexpected_handle)
+            );
+        }
+    }
+}
 
 fn setup() -> (Arc<Mutex<PosixService>>, PeerIdentity) {
     // Incoming claims cannot replace credentials registered in service state.
@@ -48,15 +153,17 @@ fn setup() -> (Arc<Mutex<PosixService>>, PeerIdentity) {
 fn request(opcode: u16, base: protocol::OpenBase) -> (protocol::Header, Vec<u8>) {
     let mut payload = vec![0; 256];
     let length = match opcode {
-        protocol::OP_MKDIR_AT | protocol::OP_CHMOD_AT => protocol::encode_open_at(
-            protocol::OpenAtRequest {
-                base,
-                options: 0,
-                mode: 0o6777,
-                path: PATH,
-            },
-            &mut payload,
-        ),
+        protocol::OP_MKDIR_AT | protocol::OP_MKFIFO_AT | protocol::OP_CHMOD_AT => {
+            protocol::encode_open_at(
+                protocol::OpenAtRequest {
+                    base,
+                    options: 0,
+                    mode: 0o6777,
+                    path: PATH,
+                },
+                &mut payload,
+            )
+        }
         protocol::OP_UNLINK_AT => protocol::encode_stat_at(
             protocol::StatAtRequest {
                 base,
@@ -125,8 +232,12 @@ fn request(opcode: u16, base: protocol::OpenBase) -> (protocol::Header, Vec<u8>)
 
 fn check_policy(fs: &RecordingFilesystem, opcode: u16) {
     let (uid, gid, groups, path) = match opcode {
-        protocol::OP_MKDIR_AT => {
-            let p = fs.mkdir_request.as_ref().unwrap();
+        protocol::OP_MKDIR_AT | protocol::OP_MKFIFO_AT => {
+            let p = if opcode == protocol::OP_MKFIFO_AT {
+                fs.fifo_request.as_ref().unwrap()
+            } else {
+                fs.mkdir_request.as_ref().unwrap()
+            };
             assert_eq!(p.mode, 0o6750);
             (
                 p.effective_uid,
