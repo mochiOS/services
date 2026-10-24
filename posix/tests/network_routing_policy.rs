@@ -23,6 +23,13 @@ pub mod thread {
     }
 }
 
+#[path = "../../network/src/datagram.rs"]
+mod datagram;
+#[path = "../../network/src/status.rs"]
+mod status;
+pub mod syscall {
+    pub use mochi_user_syscall::*;
+}
 mod driver {
     use mochios_net_device_protocol::{DRIVER_NAME_LEN, DeviceStatistics, InterfaceInfo};
     pub(crate) struct DriverClient;

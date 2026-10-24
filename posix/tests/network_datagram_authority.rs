@@ -5,6 +5,8 @@ extern crate self as mochi_user_platform;
 use mnu_abi::provider;
 use mochios_net_device_protocol::datagram_authority as wire;
 use std::cell::RefCell;
+#[path = "../../network/src/datagram.rs"]
+mod datagram;
 #[path = "../../network/src/datagram_authority.rs"]
 mod server;
 #[derive(Default)]
@@ -13,6 +15,8 @@ struct State {
     endpoint_failed: bool,
     create_failed: bool,
     reply_failed: bool,
+    signal_failed: bool,
+    signals: Vec<(u64, u64, u64)>,
     created: Vec<(u64, u32, u64)>,
     closed: Vec<u32>,
     response: Vec<u8>,
@@ -64,6 +68,35 @@ pub mod ipc {
     }
 }
 pub mod handle {
+    pub fn identify_provider_object(handle: u32) -> Result<u64, mochi_user_syscall::SysError> {
+        crate::STATE.with_borrow(|s| {
+            s.created
+                .iter()
+                .find(|r| r.1 == handle)
+                .map(|r| r.0)
+                .ok_or_else(|| {
+                    mochi_user_syscall::SysError::from_raw(
+                        mochi_user_syscall::NativeError::AccessDenied.into_raw() as i64,
+                    )
+                })
+        })
+    }
+    pub fn signal_provider_object(
+        id: u64,
+        set: u64,
+        clear: u64,
+    ) -> Result<(), mochi_user_syscall::SysError> {
+        crate::STATE.with_borrow_mut(|s| {
+            s.signals.push((id, set, clear));
+            if s.signal_failed {
+                Err(mochi_user_syscall::SysError::from_raw(
+                    mochi_user_syscall::NativeError::ResourceUnavailable.into_raw() as i64,
+                ))
+            } else {
+                Ok(())
+            }
+        })
+    }
     pub fn create_provider_object(
         endpoint: u32,
         id: u64,
@@ -265,4 +298,564 @@ fn explicit_endpoint_delivery_and_strict_wire_metadata_are_supported() {
         assert!(wire::Limits::decode(&bad).is_err());
     }
     assert!(wire::Limits::decode(&limits[..11]).is_err());
+}
+
+fn open_packet(
+    s: &mut server::Server,
+    b: &mut impl datagram::Backend,
+    grant: u32,
+    local: mochios_net_device_protocol::datagram::Endpoint,
+) -> Result<(u64, u32), i32> {
+    use mochios_net_device_protocol::datagram as packet;
+    let mut bytes = [0; 16];
+    let n = packet::open(local, &mut bytes).unwrap();
+    let mut attached = ipc::IpcObjectHandles::default();
+    attached.count = 1;
+    attached.delivery_flags = mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE;
+    attached.handles[0] = ipc::IpcObjectHandle {
+        handle: grant,
+        reserved: 0,
+        rights: mnu_abi::HANDLE_RIGHT_CONTROL,
+    };
+    assert!(s.dispatch_datagram(77, &bytes[..n], &attached, b, 0));
+    STATE.with_borrow(|s| {
+        let status = wire::status_for(packet::OPEN_OPCODE, &s.response).unwrap();
+        if status != 0 {
+            assert!(s.attached.is_empty());
+            return Err(status);
+        }
+        if s.reply_failed {
+            assert!(s.attached.is_empty());
+            return Err(-5);
+        }
+        let h = s.attached[0];
+        assert_eq!(
+            h.rights & (mnu_abi::HANDLE_RIGHT_SEEK | mnu_abi::HANDLE_RIGHT_MAP),
+            0
+        );
+        Ok((s.created.last().unwrap().0, h.handle))
+    })
+}
+fn packet_request(
+    s: &mut server::Server,
+    b: &mut impl datagram::Backend,
+    id: u64,
+    opcode: u16,
+    code: u64,
+    input: &[u8],
+    capacity: u32,
+    native: bool,
+) -> (i64, u64, Vec<u8>) {
+    s.pump_datagrams(b, 0);
+    let header = provider::RequestHeader {
+        opcode,
+        object_id: id,
+        argument: 0,
+        basis: code,
+        length: if opcode == provider::OP_WRITE {
+            input.len() as u32
+        } else {
+            capacity
+        },
+        data_length: input.len() as u32,
+    };
+    let mut bytes = [0; provider::REQUEST_HEADER_LEN + provider::MAX_DATA_LEN];
+    let n = header.encode(input, &mut bytes).unwrap();
+    let handles = ipc::IpcObjectHandles {
+        delivery_flags: if native {
+            mnu_abi::IPC_DELIVERY_NATIVE_OBJECT
+        } else {
+            0
+        },
+        ..Default::default()
+    };
+    assert!(s.dispatch_datagram(77, &bytes[..n], &handles, b, 0));
+    if native && opcode == provider::OP_RELEASE {
+        return (0, 0, vec![]);
+    }
+    STATE.with_borrow(|s| {
+        let (header, data) = provider::ResponseHeader::decode(&s.response).unwrap();
+        (header.status, header.value, data.to_vec())
+    })
+}
+fn packet_local(
+    s: &mut server::Server,
+    b: &mut impl datagram::Backend,
+    id: u64,
+) -> mochios_net_device_protocol::datagram::Endpoint {
+    use mochios_net_device_protocol::datagram as packet;
+    let (status, _, bytes) =
+        packet_request(s, b, id, provider::OP_CONTROL, packet::LOCAL, &[], 8, true);
+    assert_eq!(status, 0);
+    packet::Endpoint::decode(&bytes).unwrap()
+}
+#[test]
+fn attached_authority_creates_real_loopback_records_with_peek_truncation_and_readiness() {
+    use mochios_net_device_protocol::datagram as packet;
+    reset();
+    let mut s = server::Server::new();
+    assert_eq!(acquire(&mut s), 0);
+    let grant = STATE.with_borrow(|s| s.attached[0].handle);
+    let mut b = datagram::Loopback::new();
+    let local = packet::Endpoint {
+        address: [127, 0, 0, 1],
+        port: 0,
+    };
+    let (a, _) = open_packet(&mut s, &mut b, grant, local).unwrap();
+    let (receiver, _) = open_packet(&mut s, &mut b, grant, local).unwrap();
+    let target = packet_local(&mut s, &mut b, receiver);
+    let mut send = [0; 64];
+    let n = packet::send(Some(target), b"message", &mut send).unwrap();
+    assert_eq!(
+        packet_request(
+            &mut s,
+            &mut b,
+            a,
+            provider::OP_WRITE,
+            0,
+            &send[..n],
+            0,
+            true
+        )
+        .0,
+        0
+    );
+    s.pump_datagrams(&mut b, 0);
+    STATE.with_borrow(|s| {
+        assert!(
+            s.signals
+                .iter()
+                .any(|(id, set, _)| *id == receiver && set & mnu_abi::HANDLE_SIGNAL_READABLE != 0)
+        )
+    });
+    for _ in 0..2 {
+        let (status, _, bytes) = packet_request(
+            &mut s,
+            &mut b,
+            receiver,
+            provider::OP_READ_AT,
+            0,
+            &[],
+            14,
+            true,
+        );
+        assert_eq!(status, 0);
+        let record = packet::decode_received(&bytes).unwrap();
+        assert_eq!(record.payload, b"me");
+        assert_eq!(record.original_length, 7);
+        assert!(record.truncated());
+    }
+    assert_eq!(
+        packet_request(
+            &mut s,
+            &mut b,
+            receiver,
+            provider::OP_READ,
+            0,
+            &[],
+            11,
+            true
+        )
+        .0,
+        -22
+    );
+    let (status, _, bytes) = packet_request(
+        &mut s,
+        &mut b,
+        receiver,
+        provider::OP_READ,
+        0,
+        &[],
+        14,
+        true,
+    );
+    assert_eq!(status, 0);
+    assert_eq!(packet::decode_received(&bytes).unwrap().payload, b"me");
+    assert_eq!(
+        packet_request(
+            &mut s,
+            &mut b,
+            receiver,
+            provider::OP_READ,
+            0,
+            &[],
+            64,
+            true
+        )
+        .0,
+        -11
+    );
+    s.pump_datagrams(&mut b, 0);
+    STATE.with_borrow(|s| {
+        assert!(
+            s.signals
+                .iter()
+                .rev()
+                .find(|(id, _, _)| *id == receiver)
+                .unwrap()
+                .2
+                & mnu_abi::HANDLE_SIGNAL_READABLE
+                != 0
+        )
+    });
+    let n = packet::send(Some(target), b"", &mut send).unwrap();
+    assert_eq!(
+        packet_request(
+            &mut s,
+            &mut b,
+            a,
+            provider::OP_WRITE,
+            0,
+            &send[..n],
+            0,
+            true
+        )
+        .0,
+        0
+    );
+    let (status, n, bytes) = packet_request(
+        &mut s,
+        &mut b,
+        receiver,
+        provider::OP_READ,
+        0,
+        &[],
+        64,
+        true,
+    );
+    assert_eq!((status, n), (0, 12));
+    assert!(packet::decode_received(&bytes).unwrap().payload.is_empty());
+}
+#[test]
+fn derived_packet_handles_outlive_factory_and_forged_requests_cannot_consume_or_close() {
+    use mochios_net_device_protocol::datagram as packet;
+    reset();
+    let mut s = server::Server::new();
+    assert_eq!(acquire(&mut s), 0);
+    let factory = STATE.with_borrow(|s| s.created[0]);
+    let mut b = datagram::Loopback::new();
+    let local = packet::Endpoint {
+        address: [127, 0, 0, 1],
+        port: 0,
+    };
+    let (a, _) = open_packet(&mut s, &mut b, factory.1, local).unwrap();
+    let (receiver, _) = open_packet(&mut s, &mut b, factory.1, local).unwrap();
+    let target = packet_local(&mut s, &mut b, receiver);
+    request(&mut s, factory.0, provider::OP_RELEASE, true);
+    assert_eq!(open_packet(&mut s, &mut b, factory.1, local), Err(-13));
+    STATE.with_borrow_mut(|s| s.allowed = false);
+    let mut frame = [0; 32];
+    let n = target.encode(&mut frame).unwrap();
+    assert_eq!(
+        packet_request(
+            &mut s,
+            &mut b,
+            a,
+            provider::OP_CONTROL,
+            packet::SET_PEER,
+            &frame[..n],
+            0,
+            true
+        )
+        .0,
+        0
+    );
+    let n = packet::send(None, b"owned", &mut frame).unwrap();
+    assert_eq!(
+        packet_request(
+            &mut s,
+            &mut b,
+            a,
+            provider::OP_WRITE,
+            0,
+            &frame[..n],
+            0,
+            true
+        )
+        .0,
+        0
+    );
+    assert_eq!(
+        packet_request(
+            &mut s,
+            &mut b,
+            receiver,
+            provider::OP_READ,
+            0,
+            &[],
+            64,
+            false
+        )
+        .0,
+        -13
+    );
+    assert_eq!(
+        packet_request(
+            &mut s,
+            &mut b,
+            receiver,
+            provider::OP_RELEASE,
+            0,
+            &[],
+            0,
+            false
+        )
+        .0,
+        -13
+    );
+    let (status, _, data) = packet_request(
+        &mut s,
+        &mut b,
+        receiver,
+        provider::OP_READ,
+        0,
+        &[],
+        64,
+        true,
+    );
+    assert_eq!(status, 0);
+    assert_eq!(packet::decode_received(&data).unwrap().payload, b"owned");
+    packet_request(
+        &mut s,
+        &mut b,
+        receiver,
+        provider::OP_RELEASE,
+        0,
+        &[],
+        0,
+        true,
+    );
+    assert_eq!(
+        packet_request(
+            &mut s,
+            &mut b,
+            receiver,
+            provider::OP_CONTROL,
+            packet::LOCAL,
+            &[],
+            8,
+            true
+        )
+        .0,
+        -9
+    );
+}
+#[test]
+fn packet_creation_checks_scope_and_rolls_back_bindings_on_every_publication_failure() {
+    use datagram::Backend;
+    use mochios_net_device_protocol::datagram as packet;
+    for mode in 0..3 {
+        reset();
+        let mut s = server::Server::new();
+        assert_eq!(acquire(&mut s), 0);
+        let grant = STATE.with_borrow(|s| s.attached[0].handle);
+        let mut b = datagram::Loopback::new();
+        let local = packet::Endpoint {
+            address: [127, 0, 0, 1],
+            port: 0,
+        };
+        assert_eq!(open_packet(&mut s, &mut b, 999, local), Err(-13));
+        assert_eq!(
+            open_packet(
+                &mut s,
+                &mut b,
+                grant,
+                packet::Endpoint { port: 53, ..local }
+            ),
+            Err(-13)
+        );
+        assert_eq!(
+            open_packet(
+                &mut s,
+                &mut b,
+                grant,
+                packet::Endpoint {
+                    address: [192, 0, 2, 1],
+                    ..local
+                }
+            ),
+            Err(-99)
+        );
+        STATE.with_borrow_mut(|s| {
+            s.create_failed = mode == 0;
+            s.signal_failed = mode == 1;
+            s.reply_failed = mode == 2;
+        });
+        for _ in 0..32 {
+            let result = open_packet(&mut s, &mut b, grant, local);
+            if mode != 2 {
+                assert_eq!(result, Err(-5));
+            }
+        }
+        STATE.with_borrow_mut(|s| {
+            s.create_failed = false;
+            s.signal_failed = false;
+            s.reply_failed = false;
+        });
+        let mut live = vec![];
+        for _ in 0..8 {
+            live.push(b.bind(local).unwrap());
+        }
+        assert_eq!(b.bind(local), Err(-24));
+        for id in live {
+            b.release(id);
+        }
+        assert!(open_packet(&mut s, &mut b, grant, local).is_ok());
+    }
+}
+
+#[test]
+fn transmit_backpressure_bounds_records_and_reports_completion_errors_once() {
+    use datagram::Backend;
+    use mochios_net_device_protocol::datagram as packet;
+    struct Congested {
+        sockets: mochios_network_stack::UdpSocketTable,
+        failure: i32,
+        sent: Vec<Vec<u8>>,
+    }
+    impl Backend for Congested {
+        fn sockets(&self) -> &mochios_network_stack::UdpSocketTable {
+            &self.sockets
+        }
+        fn sockets_mut(&mut self) -> &mut mochios_network_stack::UdpSocketTable {
+            &mut self.sockets
+        }
+        fn interface_address(&self) -> Option<[u8; 4]> {
+            Some([192, 0, 2, 1])
+        }
+        fn transmit(
+            &mut self,
+            _: u16,
+            _: packet::Endpoint,
+            data: &[u8],
+            _: u64,
+        ) -> Result<(), i32> {
+            if self.failure != 0 {
+                return Err(self.failure);
+            }
+            self.sent.push(data.to_vec());
+            Ok(())
+        }
+    }
+    reset();
+    let mut s = server::Server::new();
+    assert_eq!(acquire(&mut s), 0);
+    let grant = STATE.with_borrow(|s| s.attached[0].handle);
+    let mut b = Congested {
+        sockets: mochios_network_stack::UdpSocketTable::new(8, 8, 1472),
+        failure: -11,
+        sent: vec![],
+    };
+    let (id, _) = open_packet(
+        &mut s,
+        &mut b,
+        grant,
+        packet::Endpoint {
+            address: [0; 4],
+            port: 0,
+        },
+    )
+    .unwrap();
+    let mut frame = [0; 9];
+    for byte in 0..8 {
+        packet::send(
+            Some(packet::Endpoint {
+                address: [192, 0, 2, 2],
+                port: 8000,
+            }),
+            &[byte],
+            &mut frame,
+        )
+        .unwrap();
+        assert_eq!(
+            packet_request(&mut s, &mut b, id, provider::OP_WRITE, 0, &frame, 0, true).0,
+            0
+        );
+    }
+    assert_eq!(
+        packet_request(&mut s, &mut b, id, provider::OP_WRITE, 0, &frame, 0, true).0,
+        -11
+    );
+    s.pump_datagrams(&mut b, 0);
+    STATE.with_borrow(|s| assert_eq!(s.signals.iter().rev().find(|r| r.0 == id).unwrap().1, 0));
+    b.failure = 0;
+    s.pump_datagrams(&mut b, 0);
+    assert_eq!(b.sent, (0..8).map(|byte| vec![byte]).collect::<Vec<_>>());
+    STATE.with_borrow(|s| {
+        assert_eq!(
+            s.signals.iter().rev().find(|r| r.0 == id).unwrap().1,
+            mnu_abi::HANDLE_SIGNAL_WRITABLE
+        )
+    });
+    b.failure = -5;
+    assert_eq!(
+        packet_request(&mut s, &mut b, id, provider::OP_WRITE, 0, &frame, 0, true).0,
+        0
+    );
+    s.pump_datagrams(&mut b, 0);
+    STATE.with_borrow(|s| {
+        assert_ne!(
+            s.signals.last().unwrap().1 & mnu_abi::HANDLE_SIGNAL_READABLE,
+            0
+        )
+    });
+    assert_eq!(
+        packet_request(&mut s, &mut b, id, provider::OP_READ, 0, &[], 64, true).0,
+        -5
+    );
+    assert_eq!(
+        packet_request(&mut s, &mut b, id, provider::OP_READ, 0, &[], 64, true).0,
+        -11
+    );
+    assert_eq!(
+        packet_request(&mut s, &mut b, id, provider::OP_WRITE, 0, &frame, 0, true).0,
+        0
+    );
+    let (status, _, bytes) = packet_request(
+        &mut s,
+        &mut b,
+        id,
+        provider::OP_CONTROL,
+        packet::TAKE_STATUS,
+        &[],
+        4,
+        true,
+    );
+    assert_eq!(status, 0);
+    assert_eq!(i32::from_le_bytes(bytes.try_into().unwrap()), -5);
+    let (_, _, bytes) = packet_request(
+        &mut s,
+        &mut b,
+        id,
+        provider::OP_CONTROL,
+        packet::TAKE_STATUS,
+        &[],
+        4,
+        true,
+    );
+    assert_eq!(bytes, [0; 4]);
+}
+
+#[test]
+fn packet_wire_rejects_malformed_lengths_reserved_fields_and_truncation_flags() {
+    use mochios_net_device_protocol::datagram as p;
+    let endpoint = p::Endpoint {
+        address: [127, 0, 0, 1],
+        port: 8000,
+    };
+    let mut frame = [0; 32];
+    assert_eq!(p::open(endpoint, &mut frame).unwrap(), 16);
+    assert!(p::decode_open(&frame[..15]).is_err());
+    frame[14] = 1;
+    assert!(p::decode_open(&frame[..16]).is_err());
+    let n = p::received(endpoint, b"abc", &mut frame[..13]).unwrap();
+    let received = p::decode_received(&frame[..n]).unwrap();
+    assert!(received.truncated());
+    assert_eq!((received.original_length, received.payload), (3, &b"a"[..]));
+    frame[8] = 0;
+    assert!(p::decode_received(&frame[..n]).is_err());
+    frame[8] = 2;
+    assert!(p::decode_received(&frame[..n]).is_err());
+    assert!(p::decode_send(&[0; 7]).is_err());
+    assert!(p::send(Some(endpoint), &[0; 1473], &mut [0; 1481]).is_err());
 }

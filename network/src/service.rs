@@ -89,12 +89,14 @@ pub(crate) fn run() -> ! {
                 Ok(false) | Err(_) => break,
             }
         }
+        authority.pump_datagrams(&mut stack, now);
         let mut handles = platform::ipc::IpcObjectHandles::default();
         match platform::ipc::try_wait_object_handles(&mut request, &mut handles) {
             Ok(message) => {
                 let length = (message & 0xffff_ffff) as usize;
                 let sender = message >> 32;
                 if let Some(bytes) = request.get(..length)
+                    && !authority.dispatch_datagram(sender, bytes, &handles, &mut stack, now)
                     && !authority.dispatch(sender, bytes, &handles)
                     && handles.count == 0
                     && matches!(
@@ -485,15 +487,18 @@ fn unavailable(
     if let Some(target) = ready {
         let _ = platform::service_ready::notify(target, status);
     }
+    let mut backend = crate::datagram::Loopback::new();
     let mut request = [0u8; IPC_BUFFER_LEN];
     let mut response = [0u8; IPC_BUFFER_LEN];
     loop {
+        authority.pump_datagrams(&mut backend, 0);
         let mut handles = platform::ipc::IpcObjectHandles::default();
         match platform::ipc::try_wait_object_handles(&mut request, &mut handles) {
             Ok(message) => {
                 let length = (message & 0xffff_ffff) as usize;
                 let sender = message >> 32;
                 if let Some(bytes) = request.get(..length)
+                    && !authority.dispatch_datagram(sender, bytes, &handles, &mut backend, 0)
                     && !authority.dispatch(sender, bytes, &handles)
                     && handles.count == 0
                     && matches!(

@@ -4,6 +4,8 @@ use alloc::vec::Vec;
 use mnu_abi::provider;
 use mochi_user_platform as platform;
 use mochios_net_device_protocol::datagram_authority as wire;
+#[path = "datagram_provider.rs"]
+mod packets;
 const TAG: u64 = 1 << 60;
 const LIMIT: usize = 64;
 pub(crate) const RIGHTS: u64 = mnu_abi::HANDLE_RIGHT_CONTROL
@@ -13,6 +15,7 @@ pub(crate) struct Server {
     endpoint: Result<u32, mochi_user_syscall::SysError>,
     next: u64,
     live: Vec<u64>,
+    packets: Vec<packets::Row>,
 }
 impl Server {
     pub(crate) fn new() -> Self {
@@ -20,6 +23,7 @@ impl Server {
             endpoint: platform::ipc::create_handle(),
             next: 1,
             live: Vec::new(),
+            packets: Vec::new(),
         }
     }
     /// Returns true only for this protocol/Provider namespace. All attachments

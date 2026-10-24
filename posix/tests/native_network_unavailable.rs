@@ -218,6 +218,174 @@ fn main() {
         p::handle::control(alias, authority::QUERY_LIMITS, &[], &mut limits).unwrap(),
         limits.len()
     );
+    use w::datagram as packet;
+    fn open_packet(endpoint: u64, factory: u32, local: packet::Endpoint) -> Result<u32, i32> {
+        let mut request = [0; 16];
+        packet::open(local, &mut request).unwrap();
+        let mut response = [0; authority::REPLY_LEN];
+        let mut attached = p::ipc::IpcObjectHandles::default();
+        attached.count = 1;
+        attached.handles[0] = p::ipc::IpcObjectHandle {
+            handle: factory,
+            reserved: 0,
+            rights: mnu_abi::HANDLE_RIGHT_CONTROL,
+        };
+        let n = mochi_user_syscall::call6(
+            mnu_abi::SyscallNumber::IpcCallObjectHandles,
+            endpoint,
+            request.as_ptr() as u64,
+            request.len() as u64,
+            response.as_mut_ptr() as u64,
+            response.len() as u64,
+            core::ptr::addr_of_mut!(attached) as u64,
+        )
+        .unwrap() as u32 as usize;
+        let status = authority::status_for(packet::OPEN_OPCODE, &response[..n]).unwrap();
+        if status != 0 {
+            assert_eq!(attached.count, 0);
+            return Err(status);
+        }
+        assert_eq!(attached.count, 1);
+        assert_eq!(
+            attached.handles[0].rights,
+            mnu_abi::HANDLE_RIGHT_READ
+                | mnu_abi::HANDLE_RIGHT_WRITE
+                | mnu_abi::HANDLE_RIGHT_CONTROL
+                | mnu_abi::HANDLE_RIGHT_WAIT
+                | mnu_abi::HANDLE_RIGHT_DUPLICATE
+                | mnu_abi::HANDLE_RIGHT_TRANSFER
+        );
+        Ok(attached.handles[0].handle)
+    }
+    fn local(handle: u32) -> packet::Endpoint {
+        let mut bytes = [0; 8];
+        assert_eq!(
+            p::handle::control(handle, packet::LOCAL, &[], &mut bytes).unwrap(),
+            8
+        );
+        packet::Endpoint::decode(&bytes).unwrap()
+    }
+    fn readable(handle: u32) {
+        let mut items = [mnu_abi::HandleWaitItem {
+            handle,
+            interests: mnu_abi::HANDLE_SIGNAL_READABLE,
+            ..Default::default()
+        }];
+        p::process::wait_many(
+            &mut items,
+            p::time::monotonic_nanoseconds().unwrap() + 5_000_000_000,
+        )
+        .unwrap();
+    }
+    let automatic = packet::Endpoint {
+        address: [127, 0, 0, 1],
+        port: 0,
+    };
+    assert_eq!(
+        open_packet(
+            network,
+            alias,
+            packet::Endpoint {
+                port: 53,
+                ..automatic
+            }
+        ),
+        Err(-13)
+    );
+    assert_eq!(
+        open_packet(
+            network,
+            alias,
+            packet::Endpoint {
+                address: [192, 0, 2, 1],
+                port: 0
+            }
+        ),
+        Err(-99)
+    );
+    let sender = open_packet(network, alias, automatic).unwrap();
+    let receiver = open_packet(network, alias, automatic).unwrap();
+    let destination = local(receiver);
+    let source = local(sender);
+    assert_ne!(destination.port, 0);
+    assert_ne!(source.port, destination.port);
+    let narrowed = p::handle::duplicate(
+        receiver,
+        mnu_abi::HANDLE_RIGHT_READ | mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_TRANSFER,
+    )
+    .unwrap();
+    assert_eq!(
+        p::handle::write(narrowed, b"denied")
+            .unwrap_err()
+            .native_error(),
+        Some(mochi_user_syscall::NativeError::AccessDenied)
+    );
+    let mut frame = [0; 64];
+    let n = packet::send(Some(destination), b"record-one", &mut frame).unwrap();
+    assert_eq!(p::handle::write(sender, &frame[..n]).unwrap(), n);
+    readable(narrowed);
+    let mut peek = [0; 15];
+    for _ in 0..2 {
+        let n = p::handle::read_at(narrowed, &mut peek, 0).unwrap();
+        let r = packet::decode_received(&peek[..n]).unwrap();
+        assert_eq!(r.source, source);
+        assert_eq!(r.original_length, 10);
+        assert_eq!(r.payload, b"rec");
+        assert!(r.truncated());
+    }
+    let n = p::handle::read(narrowed, &mut peek).unwrap();
+    assert!(packet::decode_received(&peek[..n]).unwrap().truncated());
+    assert_eq!(
+        p::handle::read(narrowed, &mut frame).unwrap_err().raw(),
+        -11
+    );
+    p::handle::close(narrowed).unwrap();
+    p::io::stdout(b"network-datagram: PASS native Handle transfer, reduced rights, readiness, repeated peek and record truncation\n").unwrap();
+    let mut encoded = [0; 8];
+    destination.encode(&mut encoded).unwrap();
+    p::handle::control(sender, packet::SET_PEER, &encoded, &mut []).unwrap();
+    for _ in 0..32 {
+        let resource = open_packet(
+            network,
+            alias,
+            packet::Endpoint {
+                port: 60000,
+                ..automatic
+            },
+        )
+        .unwrap();
+        p::handle::close(resource).unwrap();
+    }
+    p::io::stdout(
+        b"network-datagram: PASS final-close releases binding across 32 same-port reopens\n",
+    )
+    .unwrap();
+    // Derived packet authority outlives the factory and ambient Capability.
     p::handle::close(alias).unwrap();
+    let n = packet::send(None, &[], &mut frame).unwrap();
+    assert_eq!(p::handle::write(sender, &frame[..n]).unwrap(), n);
+    readable(receiver);
+    let n = p::handle::read(receiver, &mut frame).unwrap();
+    assert_eq!(n, packet::RECEIVE_HEADER_LEN);
+    assert!(
+        packet::decode_received(&frame[..n])
+            .unwrap()
+            .payload
+            .is_empty()
+    );
+    let n = packet::send(
+        Some(packet::Endpoint {
+            address: [192, 0, 2, 2],
+            port: 8000,
+        }),
+        b"x",
+        &mut frame,
+    )
+    .unwrap();
+    assert_eq!(p::handle::write(sender, &frame[..n]).unwrap_err().raw(), -6);
+    p::handle::close(sender).unwrap();
+    p::handle::close(receiver).unwrap();
+    p::io::stdout(b"network-datagram: PASS empty records, default peer, factory independence and no-device rejection\n").unwrap();
+
     p::io::stdout(b"network-authority: PASS ambient Capability drop rejects new grants while explicit authority remains usable\n").unwrap();
 }

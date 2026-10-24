@@ -1100,3 +1100,30 @@ fn tcp_errno(error: TcpConnectionError) -> u64 {
         }
     }
 }
+
+impl crate::datagram::Backend for NetworkStack {
+    fn sockets(&self) -> &UdpSocketTable {
+        &self.udp
+    }
+    fn sockets_mut(&mut self) -> &mut UdpSocketTable {
+        &mut self.udp
+    }
+    fn interface_address(&self) -> Option<[u8; 4]> {
+        self.config.map(|c| c.address).filter(|a| *a != [0; 4])
+    }
+    fn transmit(
+        &mut self,
+        source: u16,
+        destination: mochios_net_device_protocol::datagram::Endpoint,
+        payload: &[u8],
+        now: u64,
+    ) -> Result<(), i32> {
+        self.send_udp(source, destination.port, destination.address, payload, now)
+            .map_err(|raw| match mochi_user_syscall::NativeError::from_raw(raw) {
+                Some(mochi_user_syscall::NativeError::NotReady) => -11,
+                Some(mochi_user_syscall::NativeError::AccessDenied) => -13,
+                Some(_) => -5,
+                None => crate::status::failure_status(raw),
+            })
+    }
+}
