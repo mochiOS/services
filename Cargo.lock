@@ -1889,6 +1889,7 @@ name = "network"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.2.17",
+ "mnu-abi",
  "mochi-user-platform",
  "mochi-user-syscall",
  "mochios-http-client",

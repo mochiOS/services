@@ -123,6 +123,81 @@ fn main() {
     );
     p::io::stdout(b"network-unavailable: PASS TLS and HTTP preserve typed unavailable failures\n")
         .unwrap();
+    use w::datagram_authority as authority;
+    fn acquire_authority(endpoint: u64) -> Result<u32, i32> {
+        let mut response = [0; authority::REPLY_LEN];
+        let mut attached = p::ipc::IpcObjectHandles::default();
+        // The diagnostic discovers the existing global endpoint. Production
+        // consumers will receive a process-local endpoint through bootstrap.
+        let n = mochi_user_syscall::call6(
+            mnu_abi::SyscallNumber::IpcCallObjectHandles,
+            endpoint,
+            authority::ACQUIRE.as_ptr() as u64,
+            authority::ACQUIRE.len() as u64,
+            response.as_mut_ptr() as u64,
+            response.len() as u64,
+            core::ptr::addr_of_mut!(attached) as u64,
+        )
+        .unwrap() as u32 as usize;
+        let status = authority::status(&response[..n]).unwrap();
+        if status != 0 {
+            assert_eq!(attached.count, 0);
+            return Err(status);
+        }
+        assert_eq!((attached.count, attached.delivery_flags), (1, 0));
+        let object = attached.handles[0];
+        assert_eq!(object.reserved, 0);
+        assert_eq!(
+            object.rights,
+            mnu_abi::HANDLE_RIGHT_CONTROL
+                | mnu_abi::HANDLE_RIGHT_DUPLICATE
+                | mnu_abi::HANDLE_RIGHT_TRANSFER
+        );
+        Ok(object.handle)
+    }
+    let authority = acquire_authority(network).unwrap();
+    let rights = mnu_abi::HANDLE_RIGHT_CONTROL
+        | mnu_abi::HANDLE_RIGHT_DUPLICATE
+        | mnu_abi::HANDLE_RIGHT_TRANSFER;
+    let alias = p::handle::duplicate(authority, rights).unwrap();
+    p::handle::close(authority).unwrap();
+    let mut limits = [0; authority::LIMITS_LEN];
+    assert_eq!(
+        p::handle::control(alias, authority::QUERY_LIMITS, &[], &mut limits).unwrap(),
+        limits.len()
+    );
+    assert_eq!(
+        authority::Limits::decode(&limits).unwrap().minimum_port,
+        1024
+    );
+    assert_eq!(
+        p::handle::read(alias, &mut [0; 1])
+            .unwrap_err()
+            .native_error(),
+        Some(mochi_user_syscall::NativeError::AccessDenied)
+    );
+    let forged = mnu_abi::provider::RequestHeader {
+        opcode: mnu_abi::provider::OP_CONTROL,
+        object_id: (1 << 60) | 1,
+        argument: 0,
+        basis: authority::QUERY_LIMITS,
+        length: authority::LIMITS_LEN as u32,
+        data_length: 0,
+    };
+    let n = forged.encode(&[], &mut request).unwrap();
+    let count = call(network, &request[..n], &mut reply);
+    assert_eq!(
+        mnu_abi::provider::ResponseHeader::decode(&reply[..count])
+            .unwrap()
+            .0
+            .status,
+        -13
+    );
+    for _ in 0..128 {
+        let object = acquire_authority(network).unwrap();
+        p::handle::close(object).unwrap();
+    }
+    p::io::stdout(b"network-authority: PASS transfer, duplication, narrow rights, forged request rejection and final-close cleanup\n").unwrap();
     let name = b"net.connect";
     mochi_user_syscall::call2(
         mnu_abi::SyscallNumber::CapDrop,
@@ -138,4 +213,11 @@ fn main() {
         b"network-unavailable: PASS failed service still authenticates caller capabilities\n",
     )
     .unwrap();
+    assert_eq!(acquire_authority(network), Err(-13));
+    assert_eq!(
+        p::handle::control(alias, authority::QUERY_LIMITS, &[], &mut limits).unwrap(),
+        limits.len()
+    );
+    p::handle::close(alias).unwrap();
+    p::io::stdout(b"network-authority: PASS ambient Capability drop rejects new grants while explicit authority remains usable\n").unwrap();
 }

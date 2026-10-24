@@ -1,5 +1,6 @@
 extern crate alloc;
 
+mod datagram_authority;
 mod driver;
 mod http;
 mod reply;

@@ -45,6 +45,7 @@ mochios-workspace-protocol = { path = "../user/crates/workspace-protocol" }
 mochios-posix-protocol = { path = "../user/crates/posix-protocol" }
 mochios-posix-client = { path = "../user/crates/posix-client" }
 mochios-network-stack = { path = "../user/crates/network-stack" }
+mochios-net-device-protocol = { path = "../user/crates/net-device-protocol" }
 
 [patch."https://github.com/arihant2math/ext4plus"]
 ext4plus = { path = "third_party/ext4plus" }

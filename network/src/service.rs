@@ -25,6 +25,7 @@ const IPC_BUFFER_LEN: usize =
 pub(crate) fn run() -> ! {
     platform::logln!("network.service: start");
     let ready = platform::service_ready::take_bootstrap_target();
+    let mut authority = crate::datagram_authority::Server::new();
     let now = platform::time::ticks().unwrap_or(0);
     let driver = match DriverClient::connect(now.saturating_add(START_TIMEOUT)) {
         Ok(driver) => driver,
@@ -33,7 +34,7 @@ pub(crate) fn run() -> ! {
                 "network.service: virtio-net driver unavailable errno={}",
                 errno
             );
-            unavailable(ready, errno)
+            unavailable(ready, errno, authority)
         }
     };
     let xid = platform::service_ready::generate_token()
@@ -43,7 +44,7 @@ pub(crate) fn run() -> ! {
         Ok(stack) => stack,
         Err(errno) => {
             platform::logln!("network.service: interface query failed errno={}", errno);
-            unavailable(ready, errno)
+            unavailable(ready, errno, authority)
         }
     };
     let info = stack.info();
@@ -88,24 +89,32 @@ pub(crate) fn run() -> ! {
                 Ok(false) | Err(_) => break,
             }
         }
-        match platform::ipc::try_wait(&mut request) {
+        let mut handles = platform::ipc::IpcObjectHandles::default();
+        match platform::ipc::try_wait_object_handles(&mut request, &mut handles) {
             Ok(message) => {
                 let length = (message & 0xffff_ffff) as usize;
                 let sender = message >> 32;
-                let Some(bytes) = request.get(..length) else {
-                    continue;
-                };
-                if let Some(length) = handle(
-                    &mut stack,
-                    &mut tls,
-                    &mut http,
-                    sender,
-                    bytes,
-                    &mut response,
-                    now,
-                ) {
-                    crate::reply::send(sender, &response[..length]);
+                if let Some(bytes) = request.get(..length)
+                    && !authority.dispatch(sender, bytes, &handles)
+                    && handles.count == 0
+                    && matches!(
+                        handles.delivery_flags,
+                        0 | mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE
+                    )
+                {
+                    if let Some(length) = handle(
+                        &mut stack,
+                        &mut tls,
+                        &mut http,
+                        sender,
+                        bytes,
+                        &mut response,
+                        now,
+                    ) {
+                        crate::reply::send(sender, &response[..length]);
+                    }
                 }
+                close_received(&handles);
             }
             Err(error)
                 if error.native_error() == Some(mochi_user_syscall::NativeError::NotReady) =>
@@ -467,7 +476,11 @@ fn authorized(sender: u64, opcode: Opcode) -> bool {
     platform::capability::check_thread(sender, capability) == Ok(1)
 }
 
-fn unavailable(ready: Option<platform::service_ready::Target>, errno: u64) -> ! {
+fn unavailable(
+    ready: Option<platform::service_ready::Target>,
+    errno: u64,
+    mut authority: crate::datagram_authority::Server,
+) -> ! {
     let status = crate::status::failure_status(errno);
     if let Some(target) = ready {
         let _ = platform::service_ready::notify(target, status);
@@ -475,24 +488,30 @@ fn unavailable(ready: Option<platform::service_ready::Target>, errno: u64) -> ! 
     let mut request = [0u8; IPC_BUFFER_LEN];
     let mut response = [0u8; IPC_BUFFER_LEN];
     loop {
-        match platform::ipc::try_wait(&mut request) {
+        let mut handles = platform::ipc::IpcObjectHandles::default();
+        match platform::ipc::try_wait_object_handles(&mut request, &mut handles) {
             Ok(message) => {
                 let length = (message & 0xffff_ffff) as usize;
                 let sender = message >> 32;
-                let Some(bytes) = request.get(..length) else {
-                    continue;
-                };
-                let Ok(header) = Header::decode(bytes) else {
-                    continue;
-                };
-                let length = if authorized(sender, header.opcode) {
-                    crate::status::unavailable(header, status, &mut response)
-                } else {
-                    crate::status::permission_denied(header, &mut response)
-                };
-                if let Some(length) = length {
-                    crate::reply::send(sender, &response[..length]);
+                if let Some(bytes) = request.get(..length)
+                    && !authority.dispatch(sender, bytes, &handles)
+                    && handles.count == 0
+                    && matches!(
+                        handles.delivery_flags,
+                        0 | mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE
+                    )
+                    && let Ok(header) = Header::decode(bytes)
+                {
+                    let length = if authorized(sender, header.opcode) {
+                        crate::status::unavailable(header, status, &mut response)
+                    } else {
+                        crate::status::permission_denied(header, &mut response)
+                    };
+                    if let Some(length) = length {
+                        crate::reply::send(sender, &response[..length]);
+                    }
                 }
+                close_received(&handles);
             }
             Err(error)
                 if error.native_error() == Some(mochi_user_syscall::NativeError::NotReady) =>
@@ -501,5 +520,11 @@ fn unavailable(ready: Option<platform::service_ready::Target>, errno: u64) -> ! 
             }
             Err(_) => platform::thread::yield_now(),
         }
+    }
+}
+
+fn close_received(handles: &platform::ipc::IpcObjectHandles) {
+    for item in handles.handles.iter().take(handles.count as usize) {
+        let _ = platform::handle::close(item.handle);
     }
 }
