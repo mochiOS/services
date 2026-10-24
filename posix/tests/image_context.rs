@@ -332,5 +332,6 @@ fn native_commit_orders_context_after_all_fallible_preparation_without_fd_policy
     assert!(!runtime.contains("stage_fd_launch_context"));
     let shared = include_str!("../../../user/crates/newlib-runtime/src/exec_handle.rs");
     assert!(shared.contains("attach_fd_launch_context(fds, &mut startup, length)?"));
-    assert!(runtime.contains("exec_handle::with_startup(&inputs, path_bytes, fds,"));
+    assert!(runtime.contains("exec_handle::replace_path(&inputs, fds)"));
+    assert!(shared.contains("with_startup(inputs, execfn, fds,"));
 }

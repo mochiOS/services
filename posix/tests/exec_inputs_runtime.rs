@@ -16,7 +16,6 @@ const ENAMETOOLONG: c_int = 91;
 const E2BIG: c_int = 7;
 const PAGE_SIZE: usize = 4096;
 const MAX_EXEC_VECTOR_ENTRIES: usize = 256;
-const MAX_EXECUTABLE_PATH_LEN: usize = 256;
 
 #[test]
 fn owned_c_vectors_are_terminated_even_when_reusing_a_longer_snapshot() {
@@ -153,26 +152,28 @@ fn vector_count_and_shared_text_budget_are_bounded() {
     ));
 }
 #[test]
-fn path_validation_and_null_vectors_preserve_existing_contract() {
+fn pathname_bytes_and_posix_limits_are_independent_of_authorization_keys() {
     assert!(matches!(
         capture(c"".as_ptr(), std::ptr::null(), std::ptr::null()),
         Err(ENOENT)
     ));
-    assert!(matches!(
+    assert_eq!(
         capture(
             b"\xff\0".as_ptr().cast(),
             std::ptr::null(),
             std::ptr::null()
-        ),
-        Err(EINVAL)
-    ));
-    let mut path = vec![b'a'; 257];
-    path[256] = 0;
+        )
+        .unwrap()
+        .path(),
+        b"\xff"
+    );
+    let mut path = vec![b'a'; posix_protocol::MAX_PATH_LEN + 1];
+    path[posix_protocol::MAX_PATH_LEN] = 0;
     assert!(matches!(
         capture(path.as_ptr().cast(), std::ptr::null(), std::ptr::null()),
         Err(ENAMETOOLONG)
     ));
-    path[255] = 0;
+    path[posix_protocol::MAX_PATH_LEN - 1] = 0;
     assert!(capture(path.as_ptr().cast(), std::ptr::null(), std::ptr::null()).is_ok());
     let mut empty = [];
     assert_eq!(
@@ -189,8 +190,8 @@ fn capture_precedes_every_policy_callback_and_fixture_limits_match_runtime() {
     let source = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
     assert!(source.contains("const MAX_EXEC_VECTOR_ENTRIES: usize = 256;"));
     assert!(
-        include_str!("../../../user/crates/capability-protocol/src/lib.rs")
-            .contains("pub const MAX_EXECUTABLE_PATH_LEN: usize = 256;")
+        include_str!("../../../user/crates/newlib-runtime/src/exec_inputs.rs")
+            .contains("path: [u8; posix_protocol::MAX_PATH_LEN]")
     );
     let start = source.find("fn replace_process_image(").unwrap();
     let end = start
@@ -198,7 +199,9 @@ fn capture_precedes_every_policy_callback_and_fixture_limits_match_runtime() {
             .find("fn execve_with_launch_context(")
             .unwrap();
     let body = &source[start..end];
-    assert!(body.find("inputs.capture(").unwrap() < body.find("absolute_exec_identity(").unwrap());
+    assert!(
+        body.find("inputs.capture(").unwrap() < body.find("exec_handle::replace_path(").unwrap()
+    );
     assert!(!body.contains("c_bytes("));
     assert!(!source.contains("read_exec_vector"));
 }

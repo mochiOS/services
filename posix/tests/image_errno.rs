@@ -35,16 +35,25 @@ fn exec_format_translation_is_operation_specific_not_a_global_errno_alias() {
     assert_eq!(newlib_errno::from_status(-8), ENOEXEC);
     // Apply the special mapping only to image admission, not path opening,
     // capability authorization or unrelated native calls.
-    let runtime = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
-    let call = runtime
-        .split("let result = match syscall::image::replace_bounded(")
+    let shared = include_str!("../../../user/crates/newlib-runtime/src/exec_handle.rs");
+    let call = shared
+        .split("match syscall::image::replace_bounded(")
         .nth(1)
         .unwrap();
     assert!(
-        call.split("close_object_handle(opened.handle)")
+        call.split("fn digest(")
             .next()
             .unwrap()
             .contains("image_error::errno(error.raw())")
     );
-    assert_eq!(runtime.matches("image_error::errno(").count(), 1);
+    assert_eq!(shared.matches("image_error::errno(").count(), 1);
+    let open = shared
+        .split("pub(super) fn replace_path(")
+        .nth(1)
+        .unwrap()
+        .split("fn replace_image(")
+        .next()
+        .unwrap();
+    assert!(open.contains("map_err(map_posix_client_error)"));
+    assert!(!open.contains("image_error::errno("));
 }

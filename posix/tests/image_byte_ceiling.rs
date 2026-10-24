@@ -162,17 +162,17 @@ fn bounded_preparation_precedes_all_old_image_mutations_and_uses_the_shared_auth
             "lost authority boundary: {authority}"
         );
     }
-    let runtime = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
+    let runtime = include_str!("../../../user/crates/newlib-runtime/src/exec_handle.rs");
     let replace = runtime
-        .split("fn replace_process_image(")
+        .split("fn replace_path(")
         .nth(1)
         .unwrap()
-        .split("fn execve_with_launch_context(")
+        .split("fn digest(")
         .next()
         .unwrap();
     assert!(replace.contains("address_space::snapshot()?.byte_ceiling()"));
     assert!(replace.contains("syscall::image::replace_bounded("));
     assert!(!replace.contains("SyscallNumber::ProcessImageReplace"));
-    assert!(replace.find("let identity_text =").unwrap() < replace.find("let opened =").unwrap());
-    assert!(replace.find("let byte_ceiling =").unwrap() < replace.find("let opened =").unwrap());
+    assert!(!replace.contains("absolute_exec_identity"));
+    assert!(replace.find("let ceiling =").unwrap() < replace.find("let opened =").unwrap());
 }

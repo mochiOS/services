@@ -74,7 +74,9 @@ fn image_open_is_admitted_read_only_with_authenticated_effective_credentials() {
         .split("fn execve_with_launch_context(")
         .next()
         .unwrap();
-    assert!(replace.contains("posix_protocol::OPEN_READ | posix_protocol::OPEN_EXECUTE"));
+    assert!(replace.contains("exec_handle::replace_path(&inputs, fds)"));
+    let path=include_str!("../../../user/crates/newlib-runtime/src/exec_handle.rs");
+    assert!(path.contains("posix_protocol::OPEN_READ | posix_protocol::OPEN_EXECUTE"));
     let adapter = include_str!("../src/main.rs");
     let open = adapter
         .split("    fn open_request(")

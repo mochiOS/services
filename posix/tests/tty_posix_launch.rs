@@ -21,6 +21,8 @@ fn tty_has_no_private_capability_or_path_launch_fallback() {
     }
     assert!(source.contains("let _shell = match shell_launch::spawn_shell"));
     let runtime = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
-    assert!(runtime.contains("authorize_exec_path("));
-    assert!(runtime.contains("syscall::image::replace_bounded("));
+    assert!(runtime.contains("exec_handle::replace_path(&inputs, fds)"));
+    let image=include_str!("../../../user/crates/newlib-runtime/src/exec_handle.rs");
+    assert!(image.contains("syscall::image::replace_bounded("));
+    assert!(!runtime.contains("authorize_exec_path("));
 }

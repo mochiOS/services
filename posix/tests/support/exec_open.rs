@@ -57,6 +57,10 @@ fn image_open_checks_effective_owner_group_other_and_root_execute_permissions() 
     for (mode, uid, gid, groups, allowed) in [
         (0o644, 501, 99, &[][..], false),
         (0o744, 501, 99, &[][..], true),
+        (0o100, 501, 99, &[][..], true), // execute-only image, no read mode
+        (0o010, 502, 77, &[][..], true),
+        (0o001, 502, 99, &[][..], true),
+        (0o010, 501, 77, &[][..], false), // owner still takes precedence
         (0o744, 502, 77, &[][..], false),
         (0o650, 502, 77, &[][..], true),
         (0o650, 501, 77, &[][..], false), // owner cannot borrow group bits

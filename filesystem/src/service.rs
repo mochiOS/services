@@ -521,13 +521,16 @@ impl FilesystemService {
         if kind.is_dir() && request.flags & protocol::OPEN_AT_WRITE != 0 {
             return Err(EISDIR);
         }
-        let requested_access = if search {
+        // Executable loading reads bytes through this retained object, but POSIX
+        // image admission requires execute mode, not read mode. Ambient native
+        // file authority is checked separately by the authenticated request.
+        let requested_access = if search || execute {
             protocol::ACCESS_AT_EXECUTE
         } else {
             (u32::from(request.flags & protocol::OPEN_AT_READ != 0) * protocol::ACCESS_AT_READ)
                 | (u32::from(request.flags & protocol::OPEN_AT_WRITE != 0)
                     * protocol::ACCESS_AT_WRITE)
-        } | if execute { protocol::ACCESS_AT_EXECUTE } else { 0 };
+        };
         if !created
             && !permission_allows(
                 metadata.mode(),

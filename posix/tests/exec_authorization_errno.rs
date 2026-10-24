@@ -3,7 +3,7 @@
 mod probe;
 
 #[test]
-fn exec_and_fork_authorization_replies_cross_the_real_wire_to_newlib_boundary() {
+fn captured_image_authorization_replies_cross_the_real_wire_to_newlib_boundary() {
     let runtime = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
     let mut program = String::from(
         "#![allow(dead_code)]\nextern crate alloc;\nextern crate self as mochios_posix_client;\nmod mnu_abi {pub mod status {\n",
@@ -37,8 +37,7 @@ fn exec_and_fork_authorization_replies_cross_the_real_wire_to_newlib_boundary() 
     program.push_str("}\n");
     program.push_str(r#"
 use core::ffi::c_int;
-use newlib_errno::{EIO,EINVAL,ENOENT,ENAMETOOLONG};
-use mochios_capability_protocol::{AUTHORIZE_EXEC_OPCODE,MAX_EXECUTABLE_PATH_LEN};
+use newlib_errno::{EIO,EINVAL,ENOENT};
 const CAPABILITY_SERVICE_NAME:&[u8]=b"capability.service";
 #[derive(Default)]struct State{status:u64,mode:u32,calls:usize}
 thread_local!{static STATE:std::cell::RefCell<State>=std::cell::RefCell::new(State::default());}
@@ -57,11 +56,9 @@ pub fn raw_syscall5(op:SyscallNumber,endpoint:u64,request:u64,length:u64,reply:u
 assert!(matches!(op,SyscallNumber::IpcCall));assert_eq!(endpoint,7);
 let request=unsafe{std::slice::from_raw_parts(request as *const u8,length as usize)};
 let opcode=u32::from_le_bytes(request[..4].try_into().unwrap());
-let clone=opcode==mochios_capability_protocol::AUTHORIZE_CAPTURED_IMAGE_OPCODE;
-if clone{
+assert_eq!(opcode,mochios_capability_protocol::AUTHORIZE_CAPTURED_IMAGE_OPCODE);
+{
 assert_eq!(mochios_capability_protocol::decode_authorize_captured_image_request(request).unwrap(),"opaque:unregistered");
-}else{
-assert_eq!(mochios_capability_protocol::decode_authorize_exec_request(request).unwrap(),"/bin/prog");
 }
 STATE.with_borrow_mut(|state|{
 state.calls+=1;
@@ -80,37 +77,33 @@ Ok((7u64<<32)|if state.mode==4{1}else{bytes.len() as u64})
     ));
     program.push_str(probe::between(
         runtime,
-        "fn authorize_exec_path(",
+        "fn authorize_captured_image(",
         "fn replace_process_image(",
     ));
     program.push_str(
         r#"
-fn call(clone:bool,status:u64,mode:u32)->Result<(),c_int>{
+fn call(status:u64,mode:u32)->Result<(),c_int>{
 STATE.set(State{status,mode,..Default::default()});
-let result=if clone{authorize_captured_image("opaque:unregistered")}else{authorize_exec_path(b"/bin/prog")};
+let result=authorize_captured_image("opaque:unregistered");
 STATE.with_borrow(|state|assert_eq!(state.calls,if mode==1||mode==2{1}else{2}));
 result
 }
 fn main(){
-for clone in [false,true]{
-assert_eq!(call(clone,0,0),Ok(()));
+assert_eq!(call(0,0),Ok(()));
 for (wire,expected) in [
 (13,newlib_errno::EACCES),(36,newlib_errno::ENAMETOOLONG),(38,newlib_errno::ENOSYS),
 (75,newlib_errno::EOVERFLOW),(95,newlib_errno::ENOTSUP),(35,newlib_errno::EDEADLK),
 (90,122),(91,107),(122,132),(139,newlib_errno::EIO),
 (i32::MAX as u64,newlib_errno::EIO),(u64::MAX,newlib_errno::EIO),
 ]{
-assert_eq!(call(clone,wire,0),Err(expected),"clone={clone} wire={wire}");
+assert_eq!(call(wire,0),Err(expected),"wire={wire}");
 }
-assert_eq!(call(clone,0,1),Err(ENOENT));
-assert_eq!(call(clone,0,2),Err(newlib_errno::EAGAIN));
-assert_eq!(call(clone,0,3),Err(newlib_errno::ENOTSUP));
-assert_eq!(call(clone,0,4),Err(EIO));
-}
+assert_eq!(call(0,1),Err(ENOENT));
+assert_eq!(call(0,2),Err(newlib_errno::EAGAIN));
+assert_eq!(call(0,3),Err(newlib_errno::ENOTSUP));
+assert_eq!(call(0,4),Err(EIO));
 STATE.set(State::default());
-assert_eq!(authorize_exec_path(b"relative"),Err(EINVAL));
 assert_eq!(authorize_captured_image(""),Err(EINVAL));
-assert_eq!(authorize_exec_path(&vec![b'/';MAX_EXECUTABLE_PATH_LEN]),Err(ENAMETOOLONG));
 STATE.with_borrow(|state|assert_eq!(state.calls,0));
 }
 "#,

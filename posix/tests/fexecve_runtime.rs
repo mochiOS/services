@@ -2,7 +2,7 @@
 use core::ffi::{c_char, c_int};
 use mochios_posix_client::newlib_errno::*;
 use mochios_posix_client::{
-    ObjectHandleAttachment,
+    ObjectHandleAttachment, OpenAtBase,
     fd::{Entry, FdTable},
 };
 use mochios_posix_protocol as posix_protocol;
@@ -27,6 +27,9 @@ struct FdObject {
 struct State {
     failure: u8,
     reads: usize,
+    opened: usize,
+    path: Vec<u8>,
+    open_rights: Option<u64>,
     checked: usize,
     drops: usize,
     closed: Vec<u32>,
@@ -113,6 +116,37 @@ fn posix_client() -> Result<Client, i32> {
     Ok(Client)
 }
 impl Client {
+    fn open_at(
+        &self,
+        base: OpenAtBase<u32>,
+        options: u32,
+        mode: u32,
+        path: impl AsRef<[u8]>,
+    ) -> Result<ObjectHandleAttachment<u32>, i32> {
+        assert_eq!(
+            options,
+            posix_protocol::OPEN_READ | posix_protocol::OPEN_EXECUTE
+        );
+        assert_eq!(mode, 0);
+        STATE.with_borrow_mut(|s| {
+            assert_eq!(path.as_ref(), s.path);
+            assert_eq!(
+                matches!(base, OpenAtBase::ProcessRoot),
+                s.path.first() == Some(&b'/')
+            );
+            s.opened += 1;
+            if s.failure == 1 {
+                return Err(EACCES);
+            }
+            Ok(ObjectHandleAttachment {
+                handle: 19,
+                rights: s
+                    .open_rights
+                    .unwrap_or(posix_protocol::CHECK_EXECUTABLE_RIGHTS),
+            })
+        })
+    }
+
     fn check_executable(&self, file: ObjectHandleAttachment<u32>) -> Result<(), i32> {
         assert_eq!(file.handle, 19);
         STATE.with_borrow_mut(|s| {
@@ -192,7 +226,16 @@ mod syscall {
         let request = unsafe { std::slice::from_raw_parts(request as *const u8, len as usize) };
         let (digest, key) =
             mochios_capability_protocol::decode_authorize_exec_object_request(request).unwrap();
-        assert_eq!(key, "fexecve");
+        super::STATE.with_borrow(|s| {
+            assert_eq!(
+                key,
+                if s.path.is_empty() {
+                    "fexecve"
+                } else {
+                    "execve"
+                }
+            )
+        });
         let objects = unsafe { &mut *(objects as *mut mnu_abi::IpcObjectHandles) };
         assert_eq!(objects.count, 1);
         assert_eq!(objects.handles[0].handle, 19);
@@ -226,12 +269,24 @@ mod syscall {
             startup: &[u8],
             ceiling: u64,
         ) -> Result<core::convert::Infallible, mochi_user_syscall::SysError> {
-            assert_eq!((h, key, ceiling), (19, "fexecve", 123456789));
+            assert_eq!((h, ceiling), (19, 123456789));
+            super::super::STATE.with_borrow(|s| {
+                assert_eq!(
+                    key,
+                    if s.path.is_empty() {
+                        "fexecve"
+                    } else {
+                        "execve"
+                    }
+                )
+            });
             assert_eq!(super::super::DEFER.get(), 0);
             mnu_abi::process_image::decode(startup).unwrap();
             super::super::STATE.with_borrow(|state| {
                 if state.mutate.is_some() {
                     assert!(startup.windows(9).any(|w| w == b"original\xff"));
+                } else if !state.path.is_empty() {
+                    assert!(startup.windows(state.path.len()).any(|w| w == state.path));
                 } else {
                     assert!(startup.windows(7).any(|w| w == b"fexecve"));
                 }
@@ -367,6 +422,64 @@ fn nonfile_writeonly_and_attenuated_sources_do_not_reach_io() {
             assert_eq!(s.checked, 0);
             assert_eq!(s.reads, 0);
             assert_eq!(s.entered, 0);
+        });
+    }
+}
+
+#[test]
+fn pathname_execution_owns_one_open_image_through_every_failure() {
+    for path in [&b"/tmp/unregistered\xff"[..], &b"relative-unregistered"[..]] {
+        for failure in 0..=8 {
+            reset(failure);
+            STATE.with_borrow_mut(|s| s.path = path.to_vec());
+            let mut cpath = path.to_vec();
+            cpath.push(0);
+            let mut inputs = exec_inputs::Inputs::new();
+            inputs
+                .capture(cpath.as_ptr().cast(), std::ptr::null(), std::ptr::null())
+                .unwrap();
+            let result = implementation::replace_path(&inputs, &FdTable::new());
+            assert!(result.is_err());
+            STATE.with_borrow(|s| {
+                assert_eq!(s.opened, 1);
+                assert_eq!(s.checked, 0);
+                assert_eq!(
+                    s.closed.iter().filter(|h| **h == 19).count(),
+                    usize::from(failure != 1)
+                );
+                assert_eq!(s.entered, usize::from(failure == 0));
+            });
+        }
+    }
+}
+
+#[test]
+fn executable_open_needs_read_and_transfer_but_no_shared_cursor_authority() {
+    for rights in [
+        0,
+        mnu_abi::HANDLE_RIGHT_READ,
+        mnu_abi::HANDLE_RIGHT_TRANSFER,
+        posix_protocol::CHECK_EXECUTABLE_RIGHTS,
+        posix_protocol::CHECK_EXECUTABLE_RIGHTS | mnu_abi::HANDLE_RIGHT_SEEK,
+    ] {
+        reset(0);
+        STATE.with_borrow_mut(|s| {
+            s.path = b"/tmp/program".to_vec();
+            s.open_rights = Some(rights);
+        });
+        let mut inputs = exec_inputs::Inputs::new();
+        inputs
+            .capture(c"/tmp/program".as_ptr(), std::ptr::null(), std::ptr::null())
+            .unwrap();
+        let allowed = rights & posix_protocol::CHECK_EXECUTABLE_RIGHTS
+            == posix_protocol::CHECK_EXECUTABLE_RIGHTS;
+        assert_eq!(
+            implementation::replace_path(&inputs, &FdTable::new()),
+            Err(if allowed { ENOEXEC } else { EACCES })
+        );
+        STATE.with_borrow(|s| {
+            assert_eq!(s.entered, usize::from(allowed));
+            assert_eq!(s.closed, [19]);
         });
     }
 }
