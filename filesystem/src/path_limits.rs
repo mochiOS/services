@@ -82,4 +82,43 @@ impl FilesystemService {
         response.header.length = response.payload.len() as u32;
         Ok(response)
     }
+    pub fn volume_status_at(
+        &self,
+        request: protocol::Header,
+        path: &[u8],
+        anchors: PathAnchors,
+        credentials: protocol::Credentials,
+    ) -> Result<Response, i32> {
+        let allowed = protocol::STAT_AT_ROOT_ATTACHED | protocol::STAT_AT_BASE_ATTACHED;
+        if request.opcode != protocol::OP_VOLUME_STATUS_AT
+            || request.flags & !allowed != 0
+            || (request.flags & protocol::STAT_AT_ROOT_ATTACHED != 0)
+                != anchors.root_open_id.is_some()
+            || (request.flags & protocol::STAT_AT_BASE_ATTACHED != 0)
+                != anchors.base_open_id.is_some()
+            || request.open_id != 0
+            || request.mount_id != 0
+            || request.node_id != 0
+            || request.offset != 0
+            || request.mode != 0
+        {
+            return Err(EINVAL);
+        }
+        if path.is_empty() {
+            return Err(ENOENT);
+        }
+        let (_, filesystem, volume) = self.resolve_disk_operation_inode(
+            path,
+            anchors,
+            FollowSymlinks::All,
+            credentials,
+            |_| ENOTSUP,
+        )?;
+        let mut response = self.success(request);
+        response.payload = crate::volume_status::filesystem_status(&filesystem, volume)?
+            .encode()
+            .to_vec();
+        response.header.length = response.payload.len() as u32;
+        Ok(response)
+    }
 }

@@ -329,6 +329,11 @@ impl Superblock {
         self.block_size
     }
 
+    /// The total inode slots recorded by this filesystem, including reserved slots.
+    pub fn inodes_count(&self) -> u32 {
+        read_u32le(&self.data, 0)
+    }
+
     /// The total number of blocks in the filesystem, including data blocks,
     /// metadata blocks, and reserved blocks.
     pub fn blocks_count(&self) -> u64 {

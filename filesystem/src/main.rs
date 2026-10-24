@@ -331,6 +331,7 @@ fn main() {
                     protocol::OP_STAT_AT
                         | protocol::OP_CANONICAL_PATH_AT
                         | protocol::OP_OBJECT_LIMITS_AT
+                        | protocol::OP_VOLUME_STATUS_AT
                         | protocol::OP_DEVICE_OBSERVATION_AT
                 ) {
                     let anchors = decode_path_anchors(
@@ -349,6 +350,9 @@ fn main() {
                                     }
                                     protocol::OP_CANONICAL_PATH_AT => {
                                         service.canonical_path_at(header, payload, anchors, credentials)
+                                    }
+                                    protocol::OP_VOLUME_STATUS_AT => {
+                                        service.volume_status_at(header, payload, anchors, credentials)
                                     }
                                     protocol::OP_OBJECT_LIMITS_AT => {
                                         service.object_limits_at(header, payload, anchors, credentials)
@@ -1121,13 +1125,16 @@ fn handle_provider_request(
     buffer: &mut filesystem_service::provider_buffer::ProviderReadBuffer,
 ) -> Option<usize> {
     use mnu_abi::provider;
-    use mochios_filesystem_protocol::{description_flags, object_limits};
+    use mochios_filesystem_protocol::{description_flags, object_limits, volume_status};
     let (header, payload) = provider::RequestHeader::decode(request).ok()?;
     if header.opcode == provider::OP_RELEASE {
         let _ = service.provider_close(header.object_id);
         return None;
     }
     let result = match header.opcode {
+        provider::OP_QUERY | provider::OP_CONTROL if header.basis == volume_status::GET => {
+            filesystem_service::volume_status::handle(service, header, payload, attached.count)
+        }
         provider::OP_QUERY | provider::OP_CONTROL if header.basis == object_limits::GET => {
             filesystem_service::provider_limits::handle(service, header, payload, attached.count)
         }

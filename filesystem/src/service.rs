@@ -1348,6 +1348,18 @@ impl FilesystemService {
         Ok(crate::provider_limits::filesystem_limits(&open.filesystem))
     }
 
+    /// The native provider dispatcher resolves this open ID from an owned Handle.
+    pub fn provider_volume_status(
+        &self,
+        open_id: u64,
+    ) -> Result<protocol::volume_status::Status, i32> {
+        if self.opens.device(open_id).is_some() {
+            return Err(ENOTSUP);
+        }
+        let open = self.opens.get(&open_id).ok_or(EBADF)?;
+        crate::volume_status::filesystem_status(&open.filesystem, open.volume)
+    }
+
     /// Obtains metadata from an existing provider object. The caller must
     /// identify the attached Handle through the kernel before invoking this.
     pub fn stat_handle(&self, request: protocol::Header, open_id: u64) -> Result<Response, i32> {

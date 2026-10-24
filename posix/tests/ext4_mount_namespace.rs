@@ -4604,3 +4604,6 @@ fn mounted_directory_rename_updates_virtual_parents_and_rejects_cross_volume_and
         service.provider_close(opened.open_id).unwrap();
     }
 }
+
+#[path = "support/volume_status.rs"]
+mod volume_status;
