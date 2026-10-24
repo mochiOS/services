@@ -15,6 +15,7 @@ enum Operation {
     Chmod(u32, Credentials),
     Chown(u32, u32, Credentials),
     Sync,
+    Executable(Credentials),
 }
 
 pub fn supports(opcode: u16) -> bool {
@@ -25,6 +26,7 @@ pub fn supports(opcode: u16) -> bool {
             | protocol::OP_FCHMOD
             | protocol::OP_FCHOWN
             | protocol::OP_FSYNC
+            | protocol::OP_CHECK_EXECUTABLE
     )
 }
 
@@ -41,7 +43,11 @@ fn prepare<H: Copy>(
     let [file] = handles else {
         return Err(STATUS_EINVAL);
     };
-    let required = protocol::file_mutation_rights(opcode).unwrap_or(mnu_abi::HANDLE_RIGHT_TRANSFER);
+    let required = if opcode == protocol::OP_CHECK_EXECUTABLE {
+        protocol::CHECK_EXECUTABLE_RIGHTS
+    } else {
+        protocol::file_mutation_rights(opcode).unwrap_or(mnu_abi::HANDLE_RIGHT_TRANSFER)
+    };
     if file.rights & required != required {
         return Err(-13);
     }
@@ -89,6 +95,12 @@ fn prepare<H: Copy>(
                 return Err(STATUS_EINVAL);
             }
             Ok(Operation::Sync)
+        }
+        protocol::OP_CHECK_EXECUTABLE => {
+            if !payload.is_empty() {
+                return Err(STATUS_EINVAL);
+            }
+            Ok(Operation::Executable(credentials()))
         }
         _ => unreachable!(),
     }
@@ -172,6 +184,25 @@ fn run<H: Copy, F: FilesystemBackend<H>>(
         Operation::Chmod(mode, c) => filesystem.fchmod(file, mode, c.uid, c.gid, &c.groups),
         Operation::Chown(uid, gid, c) => filesystem.fchown(file, uid, gid, c.uid, c.gid, &c.groups),
         Operation::Sync => filesystem.fsync(file),
+        Operation::Executable(c) => filesystem.fstat(file).and_then(|status| {
+            // Metadata comes from the retained object, never a pathname or an
+            // open-time mode snapshot. A directory's search bit is not execute
+            // permission for an image. Root also needs an execute bit on files.
+            let bits = if c.uid == 0 {
+                status.mode & 0o111
+            } else if c.uid == status.uid {
+                status.mode & 0o100
+            } else if c.gid == status.gid || c.groups.contains(&status.gid) {
+                status.mode & 0o010
+            } else {
+                status.mode & 0o001
+            };
+            if status.mode & 0o170000 == 0o100000 && bits != 0 {
+                Ok(())
+            } else {
+                Err(-13)
+            }
+        }),
     };
     object_error(request_id, result.err().unwrap_or(protocol::STATUS_OK))
 }

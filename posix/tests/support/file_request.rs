@@ -407,3 +407,242 @@ fn runtime_dispatches_only_the_supported_file_operations_outside_state() {
                 .unwrap()
     );
 }
+
+#[test]
+fn retained_image_checks_match_live_execute_modes_and_authenticated_credentials() {
+    let (state, peer) = setup();
+    let file = AttachedObject {
+        handle: 82,
+        rights: protocol::CHECK_EXECUTABLE_RIGHTS,
+    };
+    let header = protocol::Header {
+        opcode: protocol::OP_CHECK_EXECUTABLE,
+        request_id: 111,
+        ..Default::default()
+    };
+    let call_state = state.clone();
+    let mut fs = RecordingFilesystem {
+        query_hook: Some(Box::new(move || {
+            assert!(
+                call_state.try_lock().is_ok(),
+                "filesystem call holds POSIX state"
+            );
+            Ok(())
+        })),
+        ..Default::default()
+    };
+    // The peer advertises uid/gid zero; the registered session is 501:20 with
+    // supplementary group 42. Owner precedence must prevent borrowing group x.
+    for (owner, group) in [(501, 20), (501, 99), (700, 20), (700, 42), (700, 99)] {
+        for mode in 0..=0o777 {
+            fs.stat_statuses.insert(
+                file.handle,
+                Ok(protocol::FileStatus {
+                    mode: 0o100000 | mode,
+                    uid: owner,
+                    gid: group,
+                    ..Default::default()
+                }),
+            );
+            let allowed = filesystem_service::service::permission_allows(
+                mode as u16,
+                filesystem_protocol::NODE_TYPE_REGULAR,
+                owner,
+                group,
+                501,
+                20,
+                &[20, 42],
+                filesystem_protocol::ACCESS_AT_EXECUTE,
+            );
+            let response =
+                posix_service::file_request::execute(&state, peer, header, &[], &[file], &mut fs);
+            assert_eq!(
+                response.response.header.status,
+                if allowed { 0 } else { -13 },
+                "mode={mode:o} owner={owner} group={group}"
+            );
+            assert_eq!(fs.stat_file, Some(file));
+            assert!(response.handles.is_empty());
+        }
+    }
+    assert_eq!(fs.roots_opened, 0);
+    assert!(fs.retained.is_empty() && fs.released.is_empty());
+    // Inode errors are not rewritten as a permission denial or a path retry.
+    for error in [-9, -5, -13, -116] {
+        fs.stat_statuses.insert(file.handle, Err(error));
+        assert_eq!(
+            posix_service::file_request::execute(&state, peer, header, &[], &[file], &mut fs,)
+                .response
+                .header
+                .status,
+            error
+        );
+    }
+}
+
+#[test]
+fn image_checks_reject_nonfiles_and_cannot_invent_execute_authority_for_root() {
+    let peer = PeerIdentity {
+        process_id: 105,
+        effective_uid: 501,
+        effective_gid: 20,
+    };
+    let mut service = PosixService::new();
+    service
+        .initialize_bootstrap_process(
+            AuthenticatedProcess {
+                process_id: 105,
+                handle: 105,
+            },
+            0,
+            0,
+            &[],
+        )
+        .unwrap();
+    let state = Mutex::new(service);
+    let file = AttachedObject {
+        handle: 82,
+        rights: protocol::CHECK_EXECUTABLE_RIGHTS,
+    };
+    let header = protocol::Header {
+        opcode: protocol::OP_CHECK_EXECUTABLE,
+        ..Default::default()
+    };
+    let mut fs = RecordingFilesystem::default();
+    for (kind, executable) in [
+        (0o100000, true),
+        (0o040000, false),
+        (0o020000, false),
+        (0o060000, false),
+        (0o010000, false),
+        (0o140000, false),
+        (0o120000, false),
+        (0, false),
+    ] {
+        for mode in [0, 0o600, 0o001, 0o010, 0o100, 0o777, 0o6000] {
+            fs.stat_statuses.insert(
+                file.handle,
+                Ok(protocol::FileStatus {
+                    mode: kind | mode,
+                    uid: 700,
+                    gid: 42,
+                    ..Default::default()
+                }),
+            );
+            let response =
+                posix_service::file_request::execute(&state, peer, header, &[], &[file], &mut fs);
+            assert_eq!(
+                response.response.header.status,
+                if executable && mode & 0o111 != 0 {
+                    0
+                } else {
+                    -13
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn image_check_admission_rejects_malformed_or_unreadable_attachments_before_io() {
+    let (state, peer) = setup();
+    let file = AttachedObject {
+        handle: 82,
+        rights: protocol::CHECK_EXECUTABLE_RIGHTS,
+    };
+    let header = protocol::Header {
+        opcode: protocol::OP_CHECK_EXECUTABLE,
+        ..Default::default()
+    };
+    let mut fs = RecordingFilesystem {
+        query_hook: Some(Box::new(|| panic!("rejected request reached filesystem"))),
+        ..Default::default()
+    };
+    for rights in [
+        0,
+        mnu_abi::HANDLE_RIGHT_READ,
+        mnu_abi::HANDLE_RIGHT_TRANSFER,
+        mnu_abi::HANDLE_RIGHT_CONTROL | mnu_abi::HANDLE_RIGHT_TRANSFER,
+    ] {
+        assert_eq!(
+            posix_service::file_request::execute(
+                &state,
+                peer,
+                header,
+                &[],
+                &[AttachedObject { rights, ..file }],
+                &mut fs,
+            )
+            .response
+            .header
+            .status,
+            -13
+        );
+    }
+    for (header, body, handles) in [
+        (header, &[][..], vec![]),
+        (header, &[][..], vec![file, file]),
+        (
+            protocol::Header {
+                payload_len: 1,
+                ..header
+            },
+            &[0][..],
+            vec![file],
+        ),
+        (protocol::Header { flags: 1, ..header }, &[][..], vec![file]),
+        (
+            protocol::Header {
+                status: -1,
+                ..header
+            },
+            &[][..],
+            vec![file],
+        ),
+        (
+            protocol::Header {
+                payload_len: 1,
+                ..header
+            },
+            &[][..],
+            vec![file],
+        ),
+    ] {
+        assert_eq!(
+            posix_service::file_request::execute(&state, peer, header, body, &handles, &mut fs,)
+                .response
+                .header
+                .status,
+            -22
+        );
+    }
+    assert_eq!(
+        posix_service::file_request::execute(
+            &state,
+            PeerIdentity {
+                process_id: 106,
+                ..peer
+            },
+            header,
+            &[],
+            &[file],
+            &mut fs,
+        )
+        .response
+        .header
+        .status,
+        protocol::STATUS_ESRCH
+    );
+    let mut service = state.lock().unwrap();
+    let response = service.handle_objects(
+        peer,
+        header,
+        &[],
+        &[file],
+        &mut RecordingFilesystem {
+            stat_mode: Some(0o100755),
+            ..Default::default()
+        },
+    );
+    assert_eq!(response.response.header.status, 0);
+}

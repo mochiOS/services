@@ -112,3 +112,8 @@ harness = false
 name = "native_exec_authority"
 path = "tests/native_exec_authority.rs"
 harness = false
+
+[[test]]
+name = "native_executable_check"
+path = "tests/native_executable_check.rs"
+harness = false

@@ -3894,6 +3894,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_READLINK_AT
             | protocol::OP_CHMOD_AT
             | protocol::OP_CHOWN_AT
+            | protocol::OP_CHECK_EXECUTABLE
             | protocol::OP_FCHMOD
             | protocol::OP_FCHOWN
             | protocol::OP_FUTIMENS
@@ -4001,6 +4002,7 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_READLINK_AT
                 | protocol::OP_CHMOD_AT
                 | protocol::OP_CHOWN_AT
+                | protocol::OP_CHECK_EXECUTABLE
                 | protocol::OP_FCHMOD
                 | protocol::OP_FCHOWN
                 | protocol::OP_FUTIMENS
@@ -4105,6 +4107,7 @@ impl<H: Copy> PosixService<H> {
             }
             protocol::OP_FTRUNCATE
             | protocol::OP_FUTIMENS
+            | protocol::OP_CHECK_EXECUTABLE
             | protocol::OP_FCHMOD
             | protocol::OP_FCHOWN
             | protocol::OP_FSYNC => {
