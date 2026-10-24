@@ -1782,6 +1782,27 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         })
     }
 
+    fn volume_status_at(
+        &mut self,
+        request: &PreparedStat,
+        paths: PathObjects<u32>,
+    ) -> Result<filesystem_protocol::volume_status::Status, i32> {
+        if let Some(hook) = &mut self.query_hook {
+            hook()?;
+        }
+        self.stat_request = Some(request.clone());
+        self.root = Some(paths.root);
+        self.directory = paths.base;
+        Ok(volume_status_protocol::status())
+    }
+    fn volume_status(
+        &mut self,
+        file: AttachedObject<u32>,
+    ) -> Result<filesystem_protocol::volume_status::Status, i32> {
+        self.stat_file = Some(file);
+        Ok(volume_status_protocol::status())
+    }
+
     fn path_limits_at(
         &mut self,
         request: &PreparedStat,
@@ -8723,3 +8744,6 @@ mod path_limits_protocol;
 
 #[path = "support/removed_flag_relay.rs"]
 mod removed_flag_relay;
+
+#[path = "support/volume_status_protocol.rs"]
+mod volume_status_protocol;

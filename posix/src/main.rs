@@ -546,6 +546,30 @@ fn main() {
         } else {
             None
         };
+        let inspected_volume = if peer.is_some()
+            && request_image.is_some()
+            && attachments_valid
+            && attachments.len() == 1
+            && decoded.is_some_and(|(header, payload)| {
+                header.opcode == protocol::OP_VOLUME_STATUS_HANDLE && header.flags == 0
+                    && header.status == 0 && payload.is_empty()
+            })
+        {
+            let source = received_handles.handles[0];
+            Some(posix_service::filesystem_metadata::through_provider(
+                source,
+                |object| posix_service::FilesystemBackend::volume_status(
+                    &mut filesystem,
+                    AttachedObject { handle: object.handle, rights: object.rights },
+                ),
+                |object| query_provider_metadata(
+                    metadata_providers, object, platform::handle::HANDLE_RIGHT_TRANSFER,
+                ),
+                |handle| { let _ = platform::handle::close(handle); },
+            ))
+        } else {
+            None
+        };
         let prepared_record_lock = if let (Some(_), Some((header, payload)), true, Some(_)) =
             (peer, decoded, attachments_valid, request_image)
         {
@@ -979,6 +1003,14 @@ fn main() {
                     ))
                     .and_then(|()| inspected_file.unwrap());
                 Some(posix_service::filesystem_metadata::fstat_response(header.request_id, result))
+            }
+            (Some(peer), Some((header, _)), true) if inspected_volume.is_some() => {
+                let result = request_image.ok_or(protocol::STATUS_EPERM)
+                    .and_then(|image| validate_pending_request_image(
+                        sender, peer, image, &mut service, &mut processes,
+                    ))
+                    .and_then(|()| inspected_volume.unwrap());
+                Some(posix_service::filesystem_metadata::volume_status_response(header.request_id, result))
             }
             (Some(peer), Some(_), true) if opened_socket.is_some() => {
                 let validation = request_image
@@ -3653,6 +3685,39 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         )
     }
 
+    fn volume_status_at(
+        &mut self,
+        request: &posix_service::PreparedStat,
+        paths: posix_service::PathObjects<mochi_user_platform::handle::Handle>,
+    ) -> Result<mochios_filesystem_protocol::volume_status::Status, i32> {
+        use mochios_filesystem_protocol as filesystem;
+        let flags = filesystem::STAT_AT_ROOT_ATTACHED
+            | if paths.base.is_some() {
+                filesystem::STAT_AT_BASE_ATTACHED
+            } else {
+                0
+            };
+        let handles = Self::path_handles(paths)?;
+        let payload = Self::credential_payload(
+            request.effective_uid,
+            request.effective_gid,
+            &request.supplementary_groups,
+            &request.path,
+        )?;
+        let bytes = self.payload_call(
+            filesystem::Header {
+                opcode: filesystem::OP_VOLUME_STATUS_AT,
+                request_id: 22,
+                flags,
+                length: payload.len() as u32,
+                ..Default::default()
+            },
+            &payload,
+            handles,
+        )?;
+        filesystem::volume_status::Status::decode(&bytes).ok_or(-5)
+    }
+
     fn path_limits_at(
         &mut self,
         request: &posix_service::PreparedStat,
@@ -3821,6 +3886,33 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             handles,
         )?;
         filesystem_status_to_posix(status)
+    }
+
+    fn volume_status(
+        &mut self,
+        file: posix_service::AttachedObject<u32>,
+    ) -> Result<mochios_filesystem_protocol::volume_status::Status, i32> {
+        use mochios_filesystem_protocol as filesystem;
+        if file.rights & mnu_abi::HANDLE_RIGHT_TRANSFER == 0 {
+            return Err(-13);
+        }
+        let mut handles = mnu_abi::IpcObjectHandles::default();
+        handles.count = 1;
+        handles.handles[0] = mnu_abi::IpcObjectHandle {
+            handle: file.handle,
+            reserved: 0,
+            rights: mnu_abi::HANDLE_RIGHT_TRANSFER,
+        };
+        let bytes = self.payload_call(
+            filesystem::Header {
+                opcode: filesystem::OP_VOLUME_STATUS_HANDLE,
+                request_id: 23,
+                ..Default::default()
+            },
+            &[],
+            handles,
+        )?;
+        filesystem::volume_status::Status::decode(&bytes).ok_or(-5)
     }
 
     fn ftruncate(

@@ -373,7 +373,10 @@ fn main() {
                             payload: Vec::new(),
                         },
                     }
-                } else if header.opcode == protocol::OP_STAT_HANDLE {
+                } else if matches!(
+                    header.opcode,
+                    protocol::OP_STAT_HANDLE | protocol::OP_VOLUME_STATUS_HANDLE
+                ) {
                     let open_id = if attached.count == 1 {
                         let file = attached.handles[0];
                         if file.reserved != 0
@@ -386,7 +389,13 @@ fn main() {
                     } else {
                         Err(22)
                     };
-                    match open_id.and_then(|open_id| service.stat_handle(header, open_id)) {
+                    match open_id.and_then(|open_id| {
+                        if header.opcode == protocol::OP_VOLUME_STATUS_HANDLE {
+                            service.volume_status_handle(header, payload, open_id)
+                        } else {
+                            service.stat_handle(header, open_id)
+                        }
+                    }) {
                         Ok(response) => response,
                         Err(error) => filesystem_service::service::Response {
                             header: protocol::Header {

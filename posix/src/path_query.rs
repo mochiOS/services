@@ -9,6 +9,7 @@ enum Query {
     Stat(PreparedStat),
     Canonical(PreparedStat),
     Limits(PreparedStat),
+    VolumeStatus(PreparedStat),
     TerminalLimits(PreparedStat),
     Access(PreparedAccess),
     Readlink(PreparedReadlink),
@@ -21,6 +22,7 @@ pub fn supports(opcode: u16) -> bool {
             | protocol::OP_GETCWD
             | protocol::OP_CANONICAL_PATH_AT
             | protocol::OP_PATH_LIMITS_AT
+            | protocol::OP_VOLUME_STATUS_AT
             | protocol::OP_TERMINAL_LIMITS_AT
             | protocol::OP_ACCESS_AT
             | protocol::OP_READLINK_AT
@@ -47,6 +49,7 @@ fn prepare<H: Copy>(
         protocol::OP_STAT_AT
         | protocol::OP_CANONICAL_PATH_AT
         | protocol::OP_PATH_LIMITS_AT
+        | protocol::OP_VOLUME_STATUS_AT
         | protocol::OP_TERMINAL_LIMITS_AT => {
             let prepared = service.prepare_stat_at(peer, payload, count)?;
             let base = prepared.base;
@@ -54,12 +57,15 @@ fn prepare<H: Copy>(
                 opcode,
                 protocol::OP_CANONICAL_PATH_AT
                     | protocol::OP_PATH_LIMITS_AT
+                    | protocol::OP_VOLUME_STATUS_AT
                     | protocol::OP_TERMINAL_LIMITS_AT
             ) {
                 if prepared.flags != 0 {
                     return Err(STATUS_EINVAL);
                 }
-                if opcode == protocol::OP_TERMINAL_LIMITS_AT {
+                if opcode == protocol::OP_VOLUME_STATUS_AT {
+                    Query::VolumeStatus(prepared)
+                } else if opcode == protocol::OP_TERMINAL_LIMITS_AT {
                     Query::TerminalLimits(prepared)
                 } else if opcode == protocol::OP_PATH_LIMITS_AT {
                     Query::Limits(prepared)
@@ -141,6 +147,9 @@ fn run<H: Copy, F: FilesystemBackend<H>>(
         Query::Canonical(prepared) => filesystem
             .canonical_path_at(prepared, paths)
             .map(|path| object_payload(request_id, path)),
+        Query::VolumeStatus(prepared) => filesystem
+            .volume_status_at(prepared, paths)
+            .map(|status| object_payload(request_id, status.encode().to_vec())),
         Query::Limits(prepared) => filesystem
             .path_limits_at(prepared, paths)
             .map(|limits| object_payload(request_id, limits.encode().to_vec())),

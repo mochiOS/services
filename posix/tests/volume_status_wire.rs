@@ -60,3 +60,32 @@ fn rejects_truncated_extended_reserved_or_inconsistent_accounting() {
         assert_eq!(Status::decode(&bad.encode()), None);
     }
 }
+
+#[test]
+fn assigned_filesystem_and_posix_opcodes_have_no_numeric_aliases() {
+    // Independent constants do not get enum-style collision checks from rustc.
+    for source in [
+        include_str!("../../../user/crates/filesystem-protocol/src/lib.rs"),
+        include_str!("../../../user/crates/posix-protocol/src/lib.rs"),
+    ] {
+        let mut assigned = std::collections::BTreeMap::new();
+        for declaration in source
+            .lines()
+            .filter(|line| line.starts_with("pub const OP_"))
+        {
+            let (name, value) = declaration.split_once('=').unwrap();
+            let value = value.split(';').next().unwrap().trim().replace('_', "");
+            let number = if let Some(value) = value.strip_prefix("0x") {
+                u16::from_str_radix(value, 16).unwrap()
+            } else {
+                value.parse::<u16>().unwrap()
+            };
+            assert_eq!(
+                assigned.insert(number, name),
+                None,
+                "duplicate opcode {number}: {name}"
+            );
+        }
+        assert!(assigned.len() > 50);
+    }
+}

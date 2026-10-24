@@ -121,4 +121,27 @@ impl FilesystemService {
         response.header.length = response.payload.len() as u32;
         Ok(response)
     }
+    pub fn volume_status_handle(
+        &self,
+        request: protocol::Header,
+        payload: &[u8],
+        open_id: u64,
+    ) -> Result<Response, i32> {
+        if request.opcode != protocol::OP_VOLUME_STATUS_HANDLE
+            || request.flags != 0
+            || request.status != 0
+            || !payload.is_empty()
+            || request.open_id != 0
+            || request.mount_id != 0
+            || request.node_id != 0
+            || request.offset != 0
+            || request.mode != 0
+        {
+            return Err(EINVAL);
+        }
+        let mut response = self.success(request);
+        response.payload = self.provider_volume_status(open_id)?.encode().to_vec();
+        response.header.length = response.payload.len() as u32;
+        Ok(response)
+    }
 }

@@ -395,6 +395,21 @@ pub trait FilesystemBackend<H: Copy> {
     ) -> Result<protocol::FileStatus, i32>;
 
     /// Resolve the target once without opening its data or returning a Handle.
+    fn volume_status_at(
+        &mut self,
+        _request: &PreparedStat,
+        _paths: PathObjects<H>,
+    ) -> Result<mochios_filesystem_protocol::volume_status::Status, i32> {
+        Err(protocol::STATUS_ENOSYS)
+    }
+
+    fn volume_status(
+        &mut self,
+        _file: AttachedObject<H>,
+    ) -> Result<mochios_filesystem_protocol::volume_status::Status, i32> {
+        Err(protocol::STATUS_ENOSYS)
+    }
+
     fn path_limits_at(
         &mut self,
         _request: &PreparedStat,
@@ -3814,8 +3829,10 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_STAT_AT
             | protocol::OP_CANONICAL_PATH_AT
             | protocol::OP_PATH_LIMITS_AT
+                | protocol::OP_VOLUME_STATUS_AT
             | protocol::OP_TERMINAL_LIMITS_AT
             | protocol::OP_FSTAT
+                | protocol::OP_VOLUME_STATUS_HANDLE
             | protocol::OP_ACCESS_AT
             | protocol::OP_CHDIR_AT
             | protocol::OP_CHROOT_AT
@@ -3963,8 +3980,10 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_STAT_AT
                 | protocol::OP_CANONICAL_PATH_AT
                 | protocol::OP_PATH_LIMITS_AT
+                | protocol::OP_VOLUME_STATUS_AT
                 | protocol::OP_TERMINAL_LIMITS_AT
                 | protocol::OP_FSTAT
+                | protocol::OP_VOLUME_STATUS_HANDLE
                 | protocol::OP_ACCESS_AT
                 | protocol::OP_CHDIR_AT
                 | protocol::OP_CHROOT_AT
@@ -4009,6 +4028,7 @@ impl<H: Copy> PosixService<H> {
                 | protocol::OP_STAT_AT
                 | protocol::OP_CANONICAL_PATH_AT
                 | protocol::OP_PATH_LIMITS_AT
+                | protocol::OP_VOLUME_STATUS_AT
                 | protocol::OP_TERMINAL_LIMITS_AT
                 | protocol::OP_ACCESS_AT
                 | protocol::OP_CHDIR_AT
@@ -4045,12 +4065,28 @@ impl<H: Copy> PosixService<H> {
             }
             protocol::OP_CANONICAL_PATH_AT
             | protocol::OP_PATH_LIMITS_AT
+                | protocol::OP_VOLUME_STATUS_AT
             | protocol::OP_TERMINAL_LIMITS_AT
             | protocol::OP_STAT_AT
             | protocol::OP_GETCWD
             | protocol::OP_ACCESS_AT
             | protocol::OP_READLINK_AT => {
                 path_query::dispatch(self, peer, header, payload, handles, filesystem)
+            }
+            protocol::OP_VOLUME_STATUS_HANDLE => {
+                if !payload.is_empty() || handles.len() != 1 {
+                    return object_error(header.request_id, STATUS_EINVAL);
+                }
+                if !self.sessions.contains_key(&peer.process_id) {
+                    return object_error(header.request_id, protocol::STATUS_ESRCH);
+                }
+                if handles[0].rights & mnu_abi::HANDLE_RIGHT_TRANSFER == 0 {
+                    return object_error(header.request_id, -13);
+                }
+                match filesystem.volume_status(handles[0]) {
+                    Ok(status) => object_payload(header.request_id, status.encode().to_vec()),
+                    Err(status) => object_error(header.request_id, status),
+                }
             }
             protocol::OP_FSTAT => {
                 if !payload.is_empty() || handles.len() != 1 {

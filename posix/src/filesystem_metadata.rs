@@ -76,6 +76,16 @@ pub fn fstat_response<H>(
     }
 }
 
+pub fn volume_status_response<H>(
+    request_id: u64,
+    result: Result<filesystem::volume_status::Status, i32>,
+) -> crate::ObjectResponse<H> {
+    match result {
+        Ok(status) => crate::object_payload(request_id, status.encode().to_vec()),
+        Err(status) => crate::object_error(request_id, status),
+    }
+}
+
 pub fn translate(status: filesystem::NodeStatus) -> Result<FileStatus, i32> {
     // Filesystem node IDs are volume-scoped: high 32 bits are the volume,
     // low 32 bits are its inode. Keep both halves, without truncating either
