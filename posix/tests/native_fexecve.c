@@ -49,6 +49,15 @@ int main(int argc, char **argv) {
   CHECK(sigprocmask(SIG_SETMASK, NULL, &mask) == 0 &&
         sigismember(&mask, SIGUSR1) == 1);
   CHECK(sigpending(&pending) == 0 && sigismember(&pending, SIGUSR1) == 1);
+  pid_t nested = fork();
+  CHECK(nested >= 0);
+  if (nested == 0) {
+    _exit(42);
+  }
+  int nested_status = 0;
+  CHECK(waitpid(nested, &nested_status, 0) == nested &&
+        WIFEXITED(nested_status) && WEXITSTATUS(nested_status) == 42);
+  puts("fexecve: unlinked image fork/wait verified");
   CHECK(write(ready, "P", 1) == 1 && read(go, &c, 1) == 1 && c == 'G');
   CHECK(close(keep) == 0 && close(ready) == 0 && close(go) == 0);
   puts("fexecve: payload verified argv/env, CLOEXEC, shared offset and signal "

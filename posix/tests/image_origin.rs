@@ -44,6 +44,7 @@ mod task {
         #[derive(Clone, Copy, PartialEq, Eq)]
         pub enum PendingExecKind {
             Spawn,
+            SpawnInherit,
             ImageReplace,
         }
         pub struct PendingExecSecurity {
@@ -198,6 +199,22 @@ fn production_creation_replacement_and_vm_snapshot_preserve_measurement() {
     assert!(snapshot.contains("origin: self.origin"));
     assert!(exec.contains("consume_address_space_for_create(&image, &authorization, &context)"));
     assert!(
-        exec.contains("crate::task::with_process(pid, |_| image.consume(authorization, context))")
+        exec.contains("crate::task::with_process(pid, |process| {")
+            && exec.contains("process.permits_inherited_spawn_authorization(authorization)")
+            && exec.contains("image.consume(authorization, context)")
     );
+}
+
+#[test]
+fn inherited_spawn_is_bounded_by_captured_origin() {
+    let process = source();
+    let origin = ImageOrigin::capture(&process).unwrap().unwrap();
+    let mut permit = authorization(&process);
+    permit.kind = PendingExecKind::SpawnInherit;
+    assert!(origin.permits(&permit));
+    permit.capabilities.0 |= 1;
+    assert!(!origin.permits(&permit));
+    permit.capabilities.0 = process.capabilities.0;
+    permit.executable_digest[0] ^= 1;
+    assert!(!origin.permits(&permit));
 }

@@ -215,6 +215,11 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
             capability_reply(sender, mochi_user_syscall::EINVAL);
             continue;
         }
+        if opcode == platform::capability::AUTHORIZE_CAPTURED_IMAGE_OPCODE {
+            let result = crate::object_image::authorize_captured(sender, slice);
+            capability_reply(sender, result.err().map(error_status).unwrap_or(REPLY_OK));
+            continue;
+        }
         if opcode == platform::capability::RESOLVE_CAPABILITIES_OPCODE {
             let result = platform::capability::decode_resolve_capabilities_request(slice)
                 .map_err(|_| {

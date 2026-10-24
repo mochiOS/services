@@ -24,10 +24,10 @@ mod task {pub type ThreadId=u64;}
 // digest enforcement have separate read_all/image-admission runtime tests.
 #[derive(Clone,Copy,Debug)]struct Grants;
 impl Grants{fn is_subset_of(&self,_other:&Self)->bool{true}}
-#[derive(Debug,PartialEq,Eq)]enum PendingExecKind{ImageReplace}
+#[derive(Debug,PartialEq,Eq)]enum PendingExecKind{ImageReplace,SpawnInherit}
 #[derive(Debug)]
-struct PendingExecSecurity {path:String,authorized_thread:u64,digest:[u8;32],kind:PendingExecKind,capabilities:Grants,kernel_authorities:Grants}
-struct Process {pending_exec_security:Option<PendingExecSecurity>,capabilities:Grants,kernel_authorities:Grants}
+struct PendingExecSecurity {identity:u8,path:String,authorized_thread:u64,executable_digest:[u8;32],kind:PendingExecKind,capabilities:Grants,kernel_authorities:Grants}
+struct Process {application_identity:Option<u8>,image_digest:Option<[u8;32]>,pending_exec_security:Option<PendingExecSecurity>,capabilities:Grants,kernel_authorities:Grants}
 impl Process {
 "#,
     );
@@ -40,10 +40,10 @@ impl Process {
         r#"
 }
 fn main() {
-    let mut process=Process{pending_exec_security:None,capabilities:Grants,kernel_authorities:Grants};
+    let mut process=Process{application_identity:Some(1),image_digest:Some([1;32]),pending_exec_security:None,capabilities:Grants,kernel_authorities:Grants};
     assert!(process.take_exec_authorization("/bin/app",7).is_none());
     process.authorize_next_exec(PendingExecSecurity{
-        path:"/bin/app".into(),authorized_thread:7,digest:[1;32],kind:PendingExecKind::ImageReplace,capabilities:Grants,kernel_authorities:Grants,
+        identity:1,path:"/bin/app".into(),authorized_thread:7,executable_digest:[1;32],kind:PendingExecKind::ImageReplace,capabilities:Grants,kernel_authorities:Grants,
     });
     for wrong in ["/bin/other","/bin/./app","/bin/../bin/app","/bin/app/","app",""] {
         assert!(process.take_exec_authorization(wrong,7).is_none());
@@ -53,18 +53,18 @@ fn main() {
         assert!(process.take_exec_authorization("/bin/app",wrong_thread).is_none());
         assert!(process.pending_exec_security.is_some());
     }
-    assert_eq!(process.take_exec_authorization("/bin/app",7).unwrap().digest,[1;32]);
+    assert_eq!(process.take_exec_authorization("/bin/app",7).unwrap().executable_digest,[1;32]);
     assert!(process.take_exec_authorization("/bin/app",7).is_none());
 
     process.authorize_next_exec(PendingExecSecurity{
-        path:"/bin/old".into(),authorized_thread:7,digest:[2;32],kind:PendingExecKind::ImageReplace,capabilities:Grants,kernel_authorities:Grants,
+        identity:1,path:"/bin/old".into(),authorized_thread:7,executable_digest:[2;32],kind:PendingExecKind::ImageReplace,capabilities:Grants,kernel_authorities:Grants,
     });
     process.authorize_next_exec(PendingExecSecurity{
-        path:"opaque-image-identity".into(),authorized_thread:8,digest:[3;32],kind:PendingExecKind::ImageReplace,capabilities:Grants,kernel_authorities:Grants,
+        identity:1,path:"opaque-image-identity".into(),authorized_thread:8,executable_digest:[3;32],kind:PendingExecKind::ImageReplace,capabilities:Grants,kernel_authorities:Grants,
     });
     assert!(process.take_exec_authorization("/bin/old",7).is_none());
     assert!(process.take_exec_authorization("opaque-image-identity",7).is_none());
-    assert_eq!(process.take_exec_authorization("opaque-image-identity",8).unwrap().digest,[3;32]);
+    assert_eq!(process.take_exec_authorization("opaque-image-identity",8).unwrap().executable_digest,[3;32]);
     assert!(process.pending_exec_security.is_none());
 }
 "#,

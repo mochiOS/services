@@ -21,7 +21,9 @@ struct State {
 }
 thread_local! {static STATE:RefCell<State>=RefCell::new(State::default());}
 pub mod capability {
-    pub use mochios_capability_protocol::decode_authorize_exec_object_request;
+    pub use mochios_capability_protocol::{
+        decode_authorize_captured_image_request, decode_authorize_exec_object_request,
+    };
     pub fn check_thread(sender: u64, name: &str) -> Result<u64, crate::SysError> {
         assert_eq!((sender, name), (77, "process.spawn"));
         Ok(crate::STATE.with_borrow(|s| u64::from(s.allowed)))
@@ -148,5 +150,33 @@ fn native_errors_and_received_reference_cleanup_are_preserved() {
     );
     assert!(
         b.find("close_received_handles(&attached)").unwrap() < b.find("capability_reply").unwrap()
+    );
+}
+
+#[test]
+fn captured_image_authorization_never_accepts_overrides_or_looks_up_a_path() {
+    reset();
+    let mut request = [0u8; 64];
+    let n = mochios_capability_protocol::encode_authorize_captured_image_request(
+        "unregistered:key",
+        &mut request,
+    )
+    .unwrap();
+    object_image::authorize_captured(77, &request[..n]).unwrap();
+    STATE.with_borrow(|s| {
+        assert_eq!(s.issued.len(), 1);
+        assert_eq!(s.issued[0].1, "unregistered:key");
+        use mnu_abi::exec::*;
+        assert_eq!(s.issued[0].2, format!("{EXEC_AUTHORIZATION_KIND_PREFIX}{EXEC_AUTHORIZATION_KIND_SPAWN_INHERIT}\0{EXEC_AUTHORIZATION_CLASS_PREFIX}unprivileged\0\0").as_bytes());
+    });
+    STATE.with_borrow_mut(|s| s.allowed = false);
+    assert_eq!(
+        object_image::authorize_captured(77, &request[..n]),
+        Err(SysError::from_raw(EACCES as i64))
+    );
+    request[4] = 99;
+    assert_eq!(
+        object_image::authorize_captured(77, &request[..n]),
+        Err(SysError::from_raw(EINVAL as i64))
     );
 }

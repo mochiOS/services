@@ -57,22 +57,19 @@ pub fn raw_syscall5(op:SyscallNumber,endpoint:u64,request:u64,length:u64,reply:u
 assert!(matches!(op,SyscallNumber::IpcCall));assert_eq!(endpoint,7);
 let request=unsafe{std::slice::from_raw_parts(request as *const u8,length as usize)};
 let opcode=u32::from_le_bytes(request[..4].try_into().unwrap());
-let clone=opcode==mochios_capability_protocol::RESOLVE_EXECUTION_SECURITY_OPCODE;
+let clone=opcode==mochios_capability_protocol::AUTHORIZE_CAPTURED_IMAGE_OPCODE;
 if clone{
-assert_eq!(&request[4..12],&mnu_abi::exec::ExecutionClass::Unprivileged.as_raw().to_le_bytes());
-assert_eq!(&request[12..],b"/bin/prog");
+assert_eq!(mochios_capability_protocol::decode_authorize_captured_image_request(request).unwrap(),"opaque:unregistered");
 }else{
 assert_eq!(mochios_capability_protocol::decode_authorize_exec_request(request).unwrap(),"/bin/prog");
 }
 STATE.with_borrow_mut(|state|{
 state.calls+=1;
 if state.mode==3{return Err(newlib_errno::ENOTSUP)}
-let bytes=if clone{
-mochios_capability_protocol::encode_resolve_execution_security_reply(state.status,&[],&[]).unwrap()
-}else{state.status.to_le_bytes().to_vec()};
+let bytes=state.status.to_le_bytes().to_vec();
 assert!(bytes.len()<=capacity as usize);
 unsafe{std::ptr::copy_nonoverlapping(bytes.as_ptr(),reply as *mut u8,bytes.len());}
-Ok(if state.mode==4{1}else{bytes.len() as u64})
+Ok((7u64<<32)|if state.mode==4{1}else{bytes.len() as u64})
 })}
 }
 "#);
@@ -90,7 +87,7 @@ Ok(if state.mode==4{1}else{bytes.len() as u64})
         r#"
 fn call(clone:bool,status:u64,mode:u32)->Result<(),c_int>{
 STATE.set(State{status,mode,..Default::default()});
-let result=if clone{authorize_clone_path("/bin/prog")}else{authorize_exec_path(b"/bin/prog")};
+let result=if clone{authorize_captured_image("opaque:unregistered")}else{authorize_exec_path(b"/bin/prog")};
 STATE.with_borrow(|state|assert_eq!(state.calls,if mode==1||mode==2{1}else{2}));
 result
 }
@@ -112,7 +109,7 @@ assert_eq!(call(clone,0,4),Err(EIO));
 }
 STATE.set(State::default());
 assert_eq!(authorize_exec_path(b"relative"),Err(EINVAL));
-assert_eq!(authorize_clone_path("relative"),Err(EINVAL));
+assert_eq!(authorize_captured_image(""),Err(EINVAL));
 assert_eq!(authorize_exec_path(&vec![b'/';MAX_EXECUTABLE_PATH_LEN]),Err(ENAMETOOLONG));
 STATE.with_borrow(|state|assert_eq!(state.calls,0));
 }

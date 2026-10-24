@@ -55,7 +55,7 @@ unsafe impl std::alloc::GlobalAlloc for Allocator {
 #[global_allocator]static ALLOCATOR:Allocator=Allocator;
 mod task {
     pub mod process {
-        #[derive(PartialEq)]pub enum PendingExecKind {Spawn,ImageReplace}
+        #[derive(PartialEq)]pub enum PendingExecKind {Spawn,SpawnInherit,ImageReplace}
         pub struct PendingExecSecurity {
             pub kind:PendingExecKind,pub executable_digest:[u8;32],pub execution_class:crate::ExecutionClass,
             pub capabilities:(),pub kernel_authorities:(),pub identity:(),
@@ -175,6 +175,14 @@ fn main() {
     check(length,Error::AccessDenied.into_raw());assert_eq!(TAKES.get(),1);assert_eq!(EXPORTS.get(),0);
     let length=reset();BYTES.with_borrow_mut(|bytes|bytes[mnu_abi::process_create::HEADER_LEN]=b'x');
     check(length,Error::AccessDenied.into_raw());assert!(authorized());assert_eq!(EXPORTS.get(),0);
+    let length=reset();PROCESS.with_borrow_mut(|p|p.authorization.as_mut().unwrap().kind=task::process::PendingExecKind::SpawnInherit);
+    check(length,991);assert!(!authorized());assert_eq!(CREATES.get(),1);
+    // Inherited-domain permits are for owned captured images, never ELF reload.
+    reset();PROCESS.with_borrow_mut(|p|p.authorization.as_mut().unwrap().kind=task::process::PendingExecKind::SpawnInherit);
+    let mut startup=[0u8;128];let n=mnu_abi::process_image::encode(0,&[0u8;8],&[],&mut startup).unwrap();
+    let mut bytes=[0u8;512];let length=mnu_abi::process_create::encode("authorized","label",&startup[..n],&[],&[],&mut bytes).unwrap();
+    BYTES.with_borrow_mut(|s|*s=bytes[..length].to_vec());
+    check(length,Error::AccessDenied.into_raw());assert!(!authorized());assert_eq!(EXPORTS.get(),0);assert_eq!(CREATES.get(),0);
     let length=reset();PROCESS.with_borrow_mut(|p|p.authorization.as_mut().unwrap().kind=task::process::PendingExecKind::ImageReplace);
     check(length,Error::AccessDenied.into_raw());assert!(!authorized());assert_eq!(EXPORTS.get(),0);
     let length=reset();BYTES.with_borrow_mut(|bytes| {

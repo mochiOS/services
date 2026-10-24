@@ -24,6 +24,7 @@ use status::Error;
 thread_local! {
     static FAIL_AFTER:Cell<Option<usize>>=const {Cell::new(None)};
     static ALLOC_CALLS:Cell<usize>=const {Cell::new(0)};
+    static DIGEST_PRESENT:Cell<bool>=const {Cell::new(true)};
     static APP_PRESENT:Cell<bool>=const {Cell::new(true)};
     static CLONE_FAIL:Cell<u8>=const {Cell::new(0)};
     static INHERITING:Cell<bool>=const {Cell::new(false)};
@@ -109,14 +110,15 @@ mod task {
         pub enum ApplicationProvenance{BuiltIn,VerifiedPackage,Development}
         pub struct ApplicationIdentity;
         impl ApplicationIdentity{pub fn try_clone(&self)->Result<Self,crate::Error>{if crate::CLONE_FAIL.get()==1{Err(crate::Error::ResourceUnavailable)}else{Ok(Self)}}pub fn new(package:String,developer:String,_:[u8;32],_:ApplicationProvenance)->Self{assert_eq!((package.as_str(),developer.as_str()),("app.example","developer.example"));Self}}
-        #[derive(Clone,Copy)]pub enum PendingExecKind{ImageReplace,Spawn}
+        #[derive(Clone,Copy,PartialEq)]pub enum PendingExecKind{ImageReplace,Spawn,SpawnInherit}
         pub struct PendingExecSecurity{pub path:String,pub authorized_thread:super::ThreadId,pub executable_digest:[u8;32],pub capabilities:crate::CapabilitySet,pub kernel_authorities:crate::KernelAuthoritySet,pub identity:ApplicationIdentity,pub kind:PendingExecKind,pub execution_class:crate::ExecutionClass}
     }
     pub struct Process{caps:crate::CapabilitySet,authorities:crate::KernelAuthoritySet}
     impl Process{
+        pub fn image_digest(&self)->Option<[u8;32]>{crate::DIGEST_PRESENT.get().then_some([0x6b;32])}
         pub fn application_identity(&self)->Option<&process::ApplicationIdentity>{crate::APP_PRESENT.get().then_some(&process::ApplicationIdentity)}
         pub fn capabilities(&self)->&crate::CapabilitySet{&self.caps}pub fn kernel_authorities(&self)->&crate::KernelAuthoritySet{&self.authorities}
-        pub fn authorize_next_exec(&mut self,a:process::PendingExecSecurity){if crate::INHERITING.get(){assert_eq!(a.capabilities.0,crate::GRANTED.get());assert_eq!(a.kernel_authorities.0,0);assert_eq!(a.execution_class,crate::ExecutionClass::Unprivileged);}assert_eq!(a.path,"opaque:key");assert_eq!(a.authorized_thread.0,crate::TARGET.get());assert_eq!(a.executable_digest,[0;32]);crate::WRITES.set(crate::WRITES.get()+1);}
+        pub fn authorize_next_exec(&mut self,a:process::PendingExecSecurity){if crate::INHERITING.get(){assert_eq!(a.capabilities.0,crate::GRANTED.get());assert_eq!(a.kernel_authorities.0,0);assert_eq!(a.execution_class,crate::ExecutionClass::Unprivileged);}assert_eq!(a.path,"opaque:key");assert_eq!(a.authorized_thread.0,crate::TARGET.get());assert_eq!(a.executable_digest,if a.kind==process::PendingExecKind::SpawnInherit {[0x6b;32]}else{[0;32]});crate::WRITES.set(crate::WRITES.get()+1);}
     }
     fn process()->Process{Process{caps:crate::CapabilitySet(crate::GRANTED.get()),authorities:crate::KernelAuthoritySet(crate::AUTHORITY.get())}}
     pub fn with_process<T>(id:u64,body:impl FnOnce(&Process)->T)->Option<T>{assert!(id==19||id==31);crate::PRESENT.get().then(||body(&process()))}
@@ -144,7 +146,7 @@ mod task {
     program.push_str(
         r#"
 fn reset(kind:&str,caps:&[u8])->u64 {
-    APP_PRESENT.set(true);CLONE_FAIL.set(0);INHERITING.set(false);FAIL_AFTER.set(None);COPY_ERROR.set(None);MANAGE.set(true);THREAD.set(true);OWNER.set(true);PRESENT.set(true);WRITABLE.set(true);GRANTED.set(3);AUTHORITY.set(1);WRITES.set(0);TARGET.set(23);COPIES.set(0);
+    DIGEST_PRESENT.set(true);APP_PRESENT.set(true);CLONE_FAIL.set(0);INHERITING.set(false);FAIL_AFTER.set(None);COPY_ERROR.set(None);MANAGE.set(true);THREAD.set(true);OWNER.set(true);PRESENT.set(true);WRITABLE.set(true);GRANTED.set(3);AUTHORITY.set(1);WRITES.set(0);TARGET.set(23);COPIES.set(0);
     let fields=format!("{APPLICATION_PACKAGE_ID_PREFIX}app.example\0{APPLICATION_DEVELOPER_ID_PREFIX}developer.example\0{APPLICATION_SUBJECT_KEY_ID_PREFIX}{}\0{APPLICATION_PROVENANCE_PREFIX}built-in\0{EXECUTABLE_DIGEST_PREFIX}{}\0{EXEC_AUTHORIZATION_KIND_PREFIX}{kind}\0{EXEC_AUTHORIZATION_CLASS_PREFIX}unprivileged\0\0","0".repeat(64),"0".repeat(64));
     IDENTITY.with_borrow_mut(|s|*s=fields.into_bytes());CAPS.with_borrow_mut(|s|*s=caps.to_vec());caps.len() as u64
 }
@@ -154,6 +156,13 @@ fn inherit_fields(){ INHERITING.set(true);
  IDENTITY.with_borrow_mut(|s|*s=fields.into_bytes());
 }
 fn main(){
+    reset("spawn",b"");INHERITING.set(true);
+    IDENTITY.with_borrow_mut(|s|*s=format!("{EXEC_AUTHORIZATION_KIND_PREFIX}{EXEC_AUTHORIZATION_KIND_SPAWN_INHERIT}\0{EXEC_AUTHORIZATION_CLASS_PREFIX}unprivileged\0\0").into_bytes());
+    check(0,0,0);assert_eq!(WRITES.get(),1);
+    TARGET.set(41);check(123,0,0);assert_eq!(WRITES.get(),2);TARGET.set(23);
+    DIGEST_PRESENT.set(false);check(0,0,Error::AccessDenied.into_raw());assert_eq!(WRITES.get(),2);DIGEST_PRESENT.set(true);
+    IDENTITY.with_borrow_mut(|s|{let t=s.len();s.splice(t-1..t-1,format!("{EXECUTABLE_DIGEST_PREFIX}{}\0","0".repeat(64)).bytes());});
+    check(0,0,Error::InvalidArgument.into_raw());assert_eq!(WRITES.get(),2);
     reset("spawn",b"");inherit_fields();GRANTED.set(0xffff_fffd);check(0,0,0);assert_eq!(WRITES.get(),1);
     reset("spawn",b"");inherit_fields();APP_PRESENT.set(false);check(0,0,Error::AccessDenied.into_raw());assert_eq!(WRITES.get(),0);
     for failure in [1,2]{reset("spawn",b"");inherit_fields();CLONE_FAIL.set(failure);check(0,0,Error::ResourceUnavailable.into_raw());assert_eq!(WRITES.get(),0);}

@@ -15,9 +15,9 @@ extern crate self as mnu_abi;
 pub mod status{pub use super::Error;}
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]struct Grants(u8);
 impl Grants{fn is_subset_of(&self,held:&Self)->bool{(0..8).all(|bit|self.0&(1<<bit)==0 || held.0&(1<<bit)!=0)}}
-#[derive(Clone,Copy,Debug,PartialEq,Eq)]enum PendingExecKind{ImageReplace,Spawn}
-#[derive(Clone,Debug)]struct PendingExecSecurity{path:String,authorized_thread:u64,capabilities:Grants,kernel_authorities:Grants,kind:PendingExecKind}
-#[derive(Clone)]struct Process{pending_exec_security:Option<PendingExecSecurity>,capabilities:Grants,kernel_authorities:Grants}
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]enum PendingExecKind{ImageReplace,Spawn,SpawnInherit}
+#[derive(Clone,Debug)]struct PendingExecSecurity{identity:u8,executable_digest:[u8;32],path:String,authorized_thread:u64,capabilities:Grants,kernel_authorities:Grants,kind:PendingExecKind}
+#[derive(Clone)]struct Process{application_identity:Option<u8>,image_digest:Option<[u8;32]>,pending_exec_security:Option<PendingExecSecurity>,capabilities:Grants,kernel_authorities:Grants}
 mod task{
  pub type ThreadId=u64;pub type ProcessId=u64;
  pub mod process{pub(crate) use crate::PendingExecSecurity;}
@@ -39,16 +39,17 @@ impl Process{
         "fn replace_current_process_image(",
     ));
     program.push_str(r#"
-fn permit(caps:u8,authority:u8,kind:PendingExecKind)->PendingExecSecurity{PendingExecSecurity{path:"opaque-image-key".into(),authorized_thread:11,capabilities:Grants(caps),kernel_authorities:Grants(authority),kind}}
-fn process(caps:u8,authority:u8,permit:PendingExecSecurity)->Process{Process{capabilities:Grants(caps),kernel_authorities:Grants(authority),pending_exec_security:Some(permit)}}
+fn permit(caps:u8,authority:u8,kind:PendingExecKind)->PendingExecSecurity{PendingExecSecurity{identity:9,executable_digest:[7;32],path:"opaque-image-key".into(),authorized_thread:11,capabilities:Grants(caps),kernel_authorities:Grants(authority),kind}}
+fn process(caps:u8,authority:u8,permit:PendingExecSecurity)->Process{Process{application_identity:Some(9),image_digest:Some([7;32]),capabilities:Grants(caps),kernel_authorities:Grants(authority),pending_exec_security:Some(permit)}}
 fn main(){
+ for kind in [PendingExecKind::ImageReplace,PendingExecKind::SpawnInherit] {
  for held in 0..8 {for desired in 0..8 {for native_held in 0..8 {for native_desired in 0..8 {
   let expected=(desired&!held)==0 && (native_desired&!native_held)==0;
-  let mut p=process(held,native_held,permit(desired,native_desired,PendingExecKind::ImageReplace));
-  assert_eq!(p.permits_image_authorization(p.pending_exec_security.as_ref().unwrap()),expected);
+  let mut p=process(held,native_held,permit(desired,native_desired,kind));
+  assert_eq!(if kind==PendingExecKind::SpawnInherit {p.permits_inherited_spawn_authorization(p.pending_exec_security.as_ref().unwrap())}else{p.permits_image_authorization(p.pending_exec_security.as_ref().unwrap())},expected);
   assert_eq!(p.take_exec_authorization("opaque-image-key",11).is_some(),expected);
   assert!(p.pending_exec_security.is_none());
- }}}}
+ }}}}}
  for (caps,authority) in [(0,1),(1,0)]{
   let mut p=process(1,1,permit(1,1,PendingExecKind::ImageReplace));
   assert!(p.take_exec_authorization("different",11).is_none());assert!(p.pending_exec_security.is_some());
@@ -71,6 +72,12 @@ fn main(){
  assert_eq!(check_image_authorization(7,&permit(0,0,PendingExecKind::ImageReplace)),Err(Error::NotReady));
  let mut p=process(0,0,permit(7,7,PendingExecKind::Spawn));
  assert!(!p.permits_image_authorization(p.pending_exec_security.as_ref().unwrap()));
+ for (identity,digest) in [(Some(8),Some([7;32])),(Some(9),Some([6;32])),(None,Some([7;32])),(Some(9),None)] {
+  let mut p=process(7,7,permit(7,7,PendingExecKind::SpawnInherit));
+  p.application_identity=identity;p.image_digest=digest;
+  assert!(p.take_exec_authorization("opaque-image-key",11).is_none());
+  assert!(p.pending_exec_security.is_none());
+ }
  // Spawn keeps its existing trusted-broker policy; it cannot pass the image
  // replacement predicate or be mistaken for a replacement permit.
  assert!(p.take_exec_authorization("opaque-image-key",11).is_some());

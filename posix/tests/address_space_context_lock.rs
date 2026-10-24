@@ -19,11 +19,18 @@ mod syscall {
     pub mod security {pub fn current_process_id()->Option<u64> {crate::PID.with(|v|v.get())}}
 }
 mod task {
-    pub mod process {pub struct PendingExecSecurity;}
-    pub fn with_process<T>(pid:u64,f:impl FnOnce(&())->T)->Option<T> {
+    pub mod process {
+        #[derive(PartialEq)]pub enum PendingExecKind{Spawn,SpawnInherit}
+        pub struct PendingExecSecurity{pub kind:PendingExecKind}
+    }
+    pub struct Process;
+    impl Process{pub fn permits_inherited_spawn_authorization(&self,_:&process::PendingExecSecurity)->bool {
+        assert!(crate::LOCKED.with(|v|v.get()));crate::MODE.with(|v|v.get())!=9
+    }}
+    pub fn with_process<T>(pid:u64,f:impl FnOnce(&Process)->T)->Option<T> {
         assert_eq!(pid,7);if !crate::PRESENT.with(|v|v.get()) {return None;}
         crate::LOCKED.with(|v|assert!(!v.replace(true)));
-        let result=f(&());crate::LOCKED.with(|v|v.set(false));Some(result)
+        let result=f(&Process);crate::LOCKED.with(|v|v.set(false));Some(result)
     }
 }
 mod mnu_abi {pub struct ThreadCreateContext;pub mod status { @STATUS@ }}
@@ -56,7 +63,7 @@ mod mem {pub mod address_space {
 fn main() {
     use mnu_abi::status::Error;
     let image=mem::address_space::AddressSpaceObject;
-    let authorization=task::process::PendingExecSecurity;let context=mnu_abi::ThreadCreateContext;
+    let authorization=task::process::PendingExecSecurity{kind:task::process::PendingExecKind::SpawnInherit};let context=mnu_abi::ThreadCreateContext;
     assert_eq!(consume_address_space_for_create(&image,&authorization,&context),Ok(mem::address_space::AddressSpaceImage));
     for (mode,error) in [(1,Error::NotReady),(2,Error::AccessDenied),(3,Error::InvalidAddress),
         (4,Error::NotReady),(5,Error::BackingFailure),(6,Error::AccessDenied),
@@ -64,6 +71,9 @@ fn main() {
         MODE.with(|v|v.set(mode));
         assert_eq!(consume_address_space_for_create(&image,&authorization,&context),Err(error));
     }
+    MODE.with(|v|v.set(9));
+    assert_eq!(consume_address_space_for_create(&image,&authorization,&context),Err(Error::AccessDenied));
+    assert_eq!(CALLS.with(|v|v.get()),9);
     PRESENT.with(|v|v.set(false));
     assert_eq!(consume_address_space_for_create(&image,&authorization,&context),Err(Error::NotReady));
     PID.with(|v|v.set(None));
