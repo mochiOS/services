@@ -43,7 +43,7 @@ impl Data {
         }
         Ok(w.finish())
     }
-    fn decode(b: &[u8]) -> Result<Self> {
+    pub(crate) fn decode(b: &[u8]) -> Result<Self> {
         let mut r = Reader::new(b);
         let generation = r.u64()?;
         let n = r.u16()? as usize;
@@ -84,9 +84,10 @@ impl Data {
 }
 pub struct Unlocked {
     pub data: Data,
-    key: Zeroizing<[u8; 32]>,
-    salt: [u8; 16],
-    publication: Option<[u8; 32]>,
+    pub(crate) key: Zeroizing<[u8; 32]>,
+    pub(crate) salt: [u8; 16],
+    pub(crate) publication: Option<[u8; 32]>,
+    pub(crate) login: Option<crate::login_vault::Protection>,
 }
 impl Unlocked {
     pub fn create(password: &[u8], salt: [u8; 16]) -> Result<Self> {
@@ -96,6 +97,7 @@ impl Unlocked {
             key: derive(password, &salt)?,
             salt,
             publication: None,
+            login: None,
         })
     }
     pub fn open(uid: u32, password: &[u8], blob: &[u8]) -> Result<Self> {
@@ -107,9 +109,13 @@ impl Unlocked {
             key,
             salt,
             publication: Some(Sha256::digest(blob).into()),
+            login: None,
         })
     }
     pub fn seal(&self, uid: u32, data: &Data, nonce: [u8; 24]) -> Result<Vec<u8>> {
+        if self.login.is_some() {
+            return crate::login_vault::seal(self, uid, data, nonce);
+        }
         let plain = data.encode()?;
         let mut head = [0u8; HEADER];
         head[..8].copy_from_slice(MAGIC);
@@ -136,12 +142,16 @@ impl Unlocked {
         Ok(out)
     }
     pub fn rekey(&self, password: &[u8], salt: [u8; 16]) -> Result<Self> {
+        if self.login.is_some() {
+            return Err(Error::Denied);
+        }
         new_password(password)?;
         Ok(Self {
             data: self.data.clone(),
             key: derive(password, &salt)?,
             salt,
             publication: None,
+            login: None,
         })
     }
     pub(crate) fn record_publication(&mut self, blob: &[u8]) {
@@ -196,7 +206,13 @@ fn new_password(p: &[u8]) -> Result<()> {
     Ok(())
 }
 fn derive(p: &[u8], salt: &[u8; 16]) -> Result<Zeroizing<[u8; 32]>> {
-    if p.is_empty() || p.len() > 1024 {
+    if p.is_empty() {
+        return Err(Error::Authentication);
+    }
+    derive_login(p, salt)
+}
+pub(crate) fn derive_login(p: &[u8], salt: &[u8; 16]) -> Result<Zeroizing<[u8; 32]>> {
+    if p.len() > 1024 {
         return Err(Error::Authentication);
     }
     let params = Params::new(MEMORY_KIB, PASSES, 1, Some(32)).map_err(|_| Error::Corrupt)?;

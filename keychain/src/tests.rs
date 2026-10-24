@@ -38,6 +38,7 @@ fn peer(package: &str, uid: u32, manager: bool) -> Peer {
         access: true,
         manager,
         session_control: false,
+        login_broker: false,
     }
 }
 fn pass() -> Secret {
@@ -381,10 +382,22 @@ fn native_session_gate_rejects_unlocks_queued_before_lock_or_for_another_user() 
         ),
         Err(Error::Locked)
     ));
+    let mut broker = peer("org.mochios.user", 0, false);
+    broker.login_broker = true;
+    broker.access = false;
+    s.execute(
+        &broker,
+        Request::VerifiedLogin {
+            uid: 1000,
+            epoch: s.session_epoch,
+            tag: [1; 32],
+            password: pass(),
+        },
+    )
+    .unwrap();
     s.execute(&controller, Request::ActivateSession { uid: 1000 })
         .unwrap();
     let previous_epoch = s.session_epoch;
-    initialize(&mut s, &admin);
     s.execute(&controller, Request::LockAll).unwrap();
     assert!(matches!(
         s.execute(
@@ -422,13 +435,17 @@ fn native_session_gate_rejects_unlocks_queued_before_lock_or_for_another_user() 
     ));
     assert!(!s.unlocked.contains_key(&1000));
     s.execute(
-        &admin,
-        Request::Unlock {
+        &broker,
+        Request::VerifiedLogin {
+            uid: 1000,
             epoch: s.session_epoch,
+            tag: [1; 32],
             password: pass(),
         },
     )
     .unwrap();
+    s.execute(&controller, Request::ActivateSession { uid: 1000 })
+        .unwrap();
     assert!(s.unlocked.contains_key(&1000));
     for request in [
         Request::Reveal {
@@ -545,4 +562,300 @@ fn replacing_disk_vault_cannot_reauthenticate_a_different_unlocked_vault() {
         s.execute(&admin, Request::Get { id }),
         Err(Error::Locked)
     ));
+}
+
+fn broker() -> Peer {
+    let mut p = peer("org.mochios.user", 0, false);
+    p.access = false;
+    p.login_broker = true;
+    p
+}
+fn controller() -> Peer {
+    let mut p = peer("org.mochios.service-manager", 0, false);
+    p.access = false;
+    p.session_control = true;
+    p
+}
+fn login(s: &mut Service<Memory, Rng>, uid: u32, tag: [u8; 32], password: &[u8]) {
+    s.execute(
+        &broker(),
+        Request::VerifiedLogin {
+            uid,
+            epoch: s.session_epoch,
+            tag,
+            password: Secret::new(password.to_vec()),
+        },
+    )
+    .unwrap();
+    s.execute(&controller(), Request::ActivateSession { uid })
+        .unwrap();
+}
+#[test]
+fn login_auto_unlocks_only_the_verified_active_user_and_never_accepts_forged_proofs() {
+    let mem = Memory::default();
+    let admin = peer("org.mochios.keychain", 1000, true);
+    let mail = peer("org.mochios.mail", 1000, false);
+    let other = peer("org.mochios.mail", 1001, false);
+    let mut s = Service::session_controlled(mem.clone(), Rng(40)).unwrap();
+    assert!(matches!(
+        s.execute(
+            &admin,
+            Request::VerifiedLogin {
+                uid: 1000,
+                epoch: s.session_epoch,
+                tag: [1; 32],
+                password: pass()
+            }
+        ),
+        Err(Error::Denied)
+    ));
+    login(&mut s, 1000, [1; 32], b"OS login password");
+    let Reply::Id(id) = s.execute(&mail, put()).unwrap() else {
+        panic!()
+    };
+    let Reply::Secret(value) = s
+        .execute(
+            &admin,
+            Request::Reveal {
+                epoch: s.session_epoch,
+                id,
+                password: Secret::new(vec![]),
+            },
+        )
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(value.expose(), b"refresh-secret-never-on-disk");
+    assert!(matches!(
+        s.execute(&other, Request::Get { id }),
+        Err(Error::Locked)
+    ));
+    assert!(matches!(
+        s.execute(
+            &mail,
+            Request::Reveal {
+                epoch: s.session_epoch,
+                id,
+                password: Secret::new(vec![])
+            }
+        ),
+        Err(Error::Denied)
+    ));
+    assert!(
+        !mem.files.borrow()[&1000]
+            .windows(17)
+            .any(|b| b == b"OS login password")
+    );
+    let stale = s.session_epoch;
+    s.execute(&controller(), Request::LockAll).unwrap();
+    assert!(matches!(
+        s.execute(
+            &broker(),
+            Request::VerifiedLogin {
+                uid: 1000,
+                epoch: stale,
+                tag: [1; 32],
+                password: pass()
+            }
+        ),
+        Err(Error::Conflict)
+    ));
+    assert!(matches!(
+        s.execute(&mail, Request::Get { id }),
+        Err(Error::Locked)
+    ));
+    drop(s);
+    let mut s = Service::session_controlled(mem, Rng(61)).unwrap();
+    login(&mut s, 1000, [1; 32], b"OS login password");
+    assert_eq!(secret(&mut s, &mail, id), b"refresh-secret-never-on-disk");
+}
+#[test]
+fn legacy_migration_preserves_entries_and_never_overwrites_on_a_wrong_password() {
+    let mem = Memory::default();
+    let admin = peer("org.mochios.keychain", 1000, true);
+    let mail = peer("org.mochios.mail", 1000, false);
+    let mut old = Service::new(mem.clone(), Rng(70));
+    initialize(&mut old, &admin);
+    let Reply::Id(id) = old.execute(&mail, put()).unwrap() else {
+        panic!()
+    };
+    drop(old);
+    let mut s = Service::session_controlled(mem.clone(), Rng(80)).unwrap();
+    login(&mut s, 1000, [3; 32], b"different OS login");
+    assert!(s.recoveries.contains_key(&1000));
+    let before = mem.files.borrow()[&1000].clone();
+    assert!(matches!(
+        s.execute(
+            &admin,
+            Request::Unlock {
+                epoch: s.session_epoch,
+                password: Secret::new(b"wrong".to_vec())
+            }
+        ),
+        Err(Error::Authentication)
+    ));
+    assert_eq!(before, mem.files.borrow()[&1000]);
+    s.execute(
+        &admin,
+        Request::Unlock {
+            epoch: s.session_epoch,
+            password: pass(),
+        },
+    )
+    .unwrap();
+    assert!(crate::login_vault::is_login(&mem.files.borrow()[&1000]));
+    assert_eq!(secret(&mut s, &mail, id), b"refresh-secret-never-on-disk");
+    drop(s);
+    let mut s = Service::session_controlled(mem, Rng(90)).unwrap();
+    login(&mut s, 1000, [3; 32], b"different OS login");
+    assert_eq!(secret(&mut s, &mail, id), b"refresh-secret-never-on-disk");
+}
+#[test]
+fn failed_or_interrupted_account_password_changes_keep_the_authoritative_wrapper() {
+    let mem = Memory::default();
+    let admin = peer("org.mochios.keychain", 1000, true);
+    let mut s = Service::session_controlled(mem.clone(), Rng(100)).unwrap();
+    login(&mut s, 1000, [1; 32], b"old login password");
+    let Reply::Id(id) = s.execute(&admin, put()).unwrap() else {
+        panic!()
+    };
+    // The account DB fails to commit this proposal. A second attempt must keep
+    // tag 1, not the previously proposed tag 2.
+    s.execute(
+        &broker(),
+        Request::PrepareLoginPassword {
+            uid: 1000,
+            epoch: s.session_epoch,
+            current_tag: [1; 32],
+            next_tag: [2; 32],
+            password: Secret::new(b"failed proposal".to_vec()),
+        },
+    )
+    .unwrap();
+    s.execute(
+        &broker(),
+        Request::PrepareLoginPassword {
+            uid: 1000,
+            epoch: s.session_epoch,
+            current_tag: [1; 32],
+            next_tag: [3; 32],
+            password: Secret::new(b"committed new password".to_vec()),
+        },
+    )
+    .unwrap();
+    let blob = mem.files.borrow()[&1000].clone();
+    assert!(crate::login_vault::open(1000, b"old login password", Some([1; 32]), &blob).is_ok());
+    assert!(crate::login_vault::open(1000, b"failed proposal", Some([2; 32]), &blob).is_err());
+    // Crash after wrapping but before/after account DB publication: either
+    // authoritative DB generation can still open the same latest data.
+    assert!(
+        crate::login_vault::open(1000, b"committed new password", Some([3; 32]), &blob).is_ok()
+    );
+    drop(s);
+    let mut s = Service::session_controlled(mem.clone(), Rng(120)).unwrap();
+    login(&mut s, 1000, [3; 32], b"committed new password");
+    assert_eq!(secret(&mut s, &admin, id), b"refresh-secret-never-on-disk");
+    // A successful authoritative login consolidates the wrappers; old login
+    // credentials cannot decrypt subsequent publications.
+    assert!(
+        crate::login_vault::open(
+            1000,
+            b"old login password",
+            Some([1; 32]),
+            &mem.files.borrow()[&1000]
+        )
+        .is_err()
+    );
+    let before = mem.files.borrow()[&1000].clone();
+    mem.fail.set(true);
+    assert!(matches!(
+        s.execute(
+            &broker(),
+            Request::PrepareLoginPassword {
+                uid: 1000,
+                epoch: s.session_epoch,
+                current_tag: [3; 32],
+                next_tag: [4; 32],
+                password: Secret::new(b"write fails".to_vec())
+            }
+        ),
+        Err(Error::Storage)
+    ));
+    assert_eq!(before, mem.files.borrow()[&1000]);
+    assert!(!s.unlocked.contains_key(&1000));
+}
+
+#[test]
+fn verifying_a_new_login_while_session_is_active_does_not_invalidate_cached_publication() {
+    let mem = Memory::default();
+    let admin = peer("org.mochios.keychain", 1000, true);
+    let mut s = Service::session_controlled(mem.clone(), Rng(131)).unwrap();
+    login(&mut s, 1000, [1; 32], b"original login");
+    let Reply::Id(id) = s.execute(&admin, put()).unwrap() else {
+        panic!()
+    };
+    s.execute(
+        &broker(),
+        Request::PrepareLoginPassword {
+            uid: 1000,
+            epoch: s.session_epoch,
+            current_tag: [1; 32],
+            next_tag: [2; 32],
+            password: Secret::new(b"new login password".to_vec()),
+        },
+    )
+    .unwrap();
+    let dual = mem.files.borrow()[&1000].clone();
+    s.execute(
+        &broker(),
+        Request::VerifiedLogin {
+            uid: 1000,
+            epoch: s.session_epoch,
+            tag: [2; 32],
+            password: Secret::new(b"new login password".to_vec()),
+        },
+    )
+    .unwrap();
+    assert_eq!(dual, mem.files.borrow()[&1000]);
+    assert!(matches!(
+        s.execute(&admin, Request::Status),
+        Ok(Reply::Status { unlocked: true, .. })
+    ));
+    assert_eq!(secret(&mut s, &admin, id), b"refresh-secret-never-on-disk");
+}
+#[test]
+fn login_creation_never_persists_a_fallback_key_when_entropy_fails() {
+    struct Fail {
+        calls: usize,
+        limit: usize,
+    }
+    impl Random for Fail {
+        fn fill(&mut self, b: &mut [u8]) -> Result<()> {
+            self.calls += 1;
+            if self.calls > self.limit {
+                return Err(Error::Unavailable);
+            }
+            b.fill(42);
+            Ok(())
+        }
+    }
+    for limit in 1..5 {
+        let mem = Memory::default();
+        let mut s = Service::session_controlled(mem.clone(), Fail { calls: 0, limit }).unwrap();
+        assert!(matches!(
+            s.execute(
+                &broker(),
+                Request::VerifiedLogin {
+                    uid: 1000,
+                    epoch: s.session_epoch,
+                    tag: [1; 32],
+                    password: pass()
+                }
+            ),
+            Err(Error::Unavailable)
+        ));
+        assert!(mem.files.borrow().is_empty());
+        assert!(s.pending_logins.is_empty());
+    }
 }

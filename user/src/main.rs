@@ -1,4 +1,5 @@
 use std::path::Path;
+use zeroize::Zeroize;
 
 use mochi_user_platform as platform;
 use mochios_user_database::{DATABASE_PATH, UserDatabase, UserRecord};
@@ -22,6 +23,7 @@ fn diagnostic(message: &str) {
 struct UserService {
     database: UserDatabase,
     generation: u64,
+    healthy: bool,
 }
 
 impl UserService {
@@ -29,11 +31,16 @@ impl UserService {
         Ok(Self {
             database: storage::load(Path::new(DATABASE_PATH))?,
             generation: 1,
+            healthy: true,
         })
     }
 
     fn save_candidate(&mut self, operation: &str, candidate: UserDatabase) -> Result<(), u64> {
+        if !self.healthy {
+            return Err(mochi_user_syscall::EIO);
+        }
         storage::save(Path::new(DATABASE_PATH), &candidate).map_err(|error| {
+            self.healthy=false;
             let status = error.status();
             diagnostic(&format!(
                 "user.service: database save failed operation={} storage_operation={} status={} error={}",
@@ -158,6 +165,10 @@ impl UserService {
     }
 
     fn handle_set_password(&mut self, sender: u64, request: &[u8]) {
+        if !self.healthy {
+            self.reply_status(sender, 0, mochi_user_syscall::EIO);
+            return;
+        }
         let Ok(request) = SetPassword::decode(request) else {
             self.reply_status(sender, 0, mochi_user_syscall::EINVAL);
             return;
@@ -173,6 +184,20 @@ impl UserService {
                 return;
             }
         };
+        // Publish both old/new encrypted key wrappers before changing the
+        // account DB. A crash or failed save keeps the old login recoverable.
+        let prepared = user_service::keychain::Connection::connect().and_then(|c| {
+            c.prepare_password(
+                existing.uid,
+                &existing.password_hash,
+                &password_hash,
+                request.password,
+            )
+        });
+        if prepared.is_err() {
+            self.reply_status(sender, request.request_id, mochi_user_syscall::EIO);
+            return;
+        }
         let mut candidate = self.database.clone();
         let Some(user) = candidate.find_name_mut(&existing.name) else {
             self.reply_status(sender, request.request_id, mochi_user_syscall::ENOENT);
@@ -184,10 +209,26 @@ impl UserService {
             Ok(()) => 0,
             Err(status) => status,
         };
+        if status == 0 {
+            if let Some(user) = self.database.find_name(request.name) {
+                // Initial account setup can proceed straight to session
+                // activation without another password-entry screen.
+                if user_service::keychain::Connection::connect()
+                    .and_then(|c| c.verified_login(user.uid, &user.password_hash, request.password))
+                    .is_err()
+                {
+                    diagnostic("user.service: password saved; keychain login handoff unavailable");
+                }
+            }
+        }
         self.reply_status(sender, request.request_id, status);
     }
 
     fn handle_authenticate(&self, sender: u64, request: &[u8]) {
+        if !self.healthy {
+            self.reply_status(sender, 0, mochi_user_syscall::EIO);
+            return;
+        }
         let Ok(request) = Authenticate::decode(request) else {
             platform::logln!("user.service: rejected malformed authentication request");
             self.reply_status(sender, 0, mochi_user_syscall::EINVAL);
@@ -198,6 +239,7 @@ impl UserService {
             Some(user) if !user.locked => user.password_hash.as_str(),
             _ => "!",
         };
+        let keychain = user_service::keychain::Connection::connect();
         let verified = password::verify(request.password, stored_hash);
         let Some(user) = user else {
             platform::logln!(
@@ -215,6 +257,14 @@ impl UserService {
             );
             self.reply_status(sender, request.request_id, mochi_user_syscall::EACCES);
             return;
+        }
+        // A keychain failure must not claim false authentication or prevent
+        // account recovery. The vault stays unavailable without a valid proof.
+        if keychain
+            .and_then(|c| c.verified_login(user.uid, stored_hash, request.password))
+            .is_err()
+        {
+            diagnostic("user.service: authenticated user; keychain handoff unavailable");
         }
         let response = AuthenticationResult {
             request_id: request.request_id,
@@ -287,6 +337,7 @@ fn main() {
     );
     let mut buffer = [0u8; MAX_MESSAGE_LEN];
     loop {
+        buffer.zeroize();
         let message = match platform::ipc::wait(endpoint, &mut buffer) {
             Ok(message) => message,
             Err(_) => {
@@ -325,6 +376,6 @@ fn main() {
             _ => service.reply_status(sender, 0, mochi_user_syscall::EINVAL),
         }
         let used_length = length.min(buffer.len());
-        buffer[..used_length].fill(0);
+        buffer[..used_length].zeroize();
     }
 }

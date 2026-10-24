@@ -14,4 +14,6 @@ requires = [
     "ipc.client",
     "ipc.server",
     "system.random.read",
+    "process.inspect",
+    "keychain.authentication",
 ]

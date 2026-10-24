@@ -1,6 +1,8 @@
 //! A user-space vault. Authentication is injected only by trusted transport adapters.
 #[cfg(target_os = "linux")]
 pub mod host;
+mod login_session;
+pub mod login_vault;
 #[cfg(any(target_os = "mochios", test))]
 pub mod native;
 pub mod storage;
@@ -22,6 +24,7 @@ pub struct Peer {
     pub access: bool,
     pub manager: bool,
     pub session_control: bool,
+    pub login_broker: bool,
 }
 pub struct Service<S: Storage, R: Random> {
     storage: S,
@@ -31,6 +34,8 @@ pub struct Service<S: Storage, R: Random> {
     session_epoch: u64,
     session_user: Option<u32>,
     session_controlled: bool,
+    pending_logins: BTreeMap<u32, login_session::PendingLogin>,
+    recoveries: BTreeMap<u32, login_session::Recovery>,
 }
 impl<S: Storage, R: Random> Service<S, R> {
     pub fn new(storage: S, random: R) -> Self {
@@ -42,6 +47,8 @@ impl<S: Storage, R: Random> Service<S, R> {
             session_epoch: 1,
             session_user: None,
             session_controlled: false,
+            pending_logins: BTreeMap::new(),
+            recoveries: BTreeMap::new(),
         }
     }
     /// Native operation starts closed until service-manager authenticates a session.
@@ -59,14 +66,32 @@ impl<S: Storage, R: Random> Service<S, R> {
         })
     }
     pub fn execute(&mut self, peer: &Peer, request: Request) -> Result<Reply> {
+        self.pending_logins.retain(|_, pending| !pending.expired());
+        let affected = match &request {
+            Request::VerifiedLogin { uid, .. } | Request::PrepareLoginPassword { uid, .. } => *uid,
+            _ => peer.uid,
+        };
         let result = self.execute_inner(peer, request);
         if matches!(result, Err(Error::Storage | Error::Corrupt)) {
-            self.unlocked.remove(&peer.uid);
+            self.unlocked.remove(&affected);
+            self.pending_logins.remove(&affected);
+            self.recoveries.remove(&affected);
         }
         result
     }
     fn execute_inner(&mut self, peer: &Peer, request: Request) -> Result<Reply> {
         peer.application.validate().map_err(|_| Error::Denied)?;
+        match request {
+            Request::AuthenticationEpoch
+            | Request::VerifiedLogin { .. }
+            | Request::PrepareLoginPassword { .. } => {
+                if !peer.login_broker {
+                    return Err(Error::Denied);
+                }
+                return self.login_request(request);
+            }
+            _ => {}
+        }
         if matches!(request, Request::LockAll | Request::ActivateSession { .. }) {
             if !peer.session_control {
                 return Err(Error::Denied);
@@ -74,11 +99,16 @@ impl<S: Storage, R: Random> Service<S, R> {
             let epoch = self.session_epoch.checked_add(1).ok_or(Error::Limit)?;
             self.unlocked.clear();
             self.known.clear();
+            self.recoveries.clear();
             self.session_epoch = epoch;
             self.session_user = match request {
                 Request::ActivateSession { uid } => Some(uid),
                 _ => None,
             };
+            if let Some(uid) = self.session_user {
+                self.activate_login(uid)?;
+            }
+            self.pending_logins.clear();
             return Ok(Reply::Ok);
         }
         if !peer.access || request.manager() && !peer.manager {
@@ -108,9 +138,14 @@ impl<S: Storage, R: Random> Service<S, R> {
                     initialized: blob.is_some(),
                     unlocked: self.unlocked.contains_key(&uid),
                     session_epoch: self.session_epoch,
+                    login_managed: self.session_controlled,
+                    needs_recovery: self.recoveries.contains_key(&uid),
                 })
             }
             Request::Initialize { epoch, password } => {
+                if self.session_controlled {
+                    return Err(Error::Denied);
+                }
                 if epoch != self.session_epoch {
                     return Err(Error::Conflict);
                 }
@@ -131,6 +166,9 @@ impl<S: Storage, R: Random> Service<S, R> {
             Request::Unlock { epoch, password } => {
                 if epoch != self.session_epoch {
                     return Err(Error::Conflict);
+                }
+                if self.session_controlled {
+                    return self.recover_login(uid, password);
                 }
                 let b = self.storage.load(uid)?.ok_or(Error::Missing)?;
                 let v = Unlocked::open(uid, password.expose(), &b)?;
@@ -352,6 +390,12 @@ impl<S: Storage, R: Random> Service<S, R> {
                 })
             }
             Request::ChangePassword { epoch, old, new } => {
+                if epoch != self.session_epoch {
+                    return Err(Error::Conflict);
+                }
+                if self.session_controlled {
+                    return Err(Error::Denied);
+                }
                 self.reauthenticate(uid, epoch, &old)?;
                 let mut salt = [0; 16];
                 self.random.fill(&mut salt)?;
@@ -373,6 +417,9 @@ impl<S: Storage, R: Random> Service<S, R> {
                 Ok(Reply::Ok)
             }
             Request::LockAll | Request::ActivateSession { .. } => Err(Error::Denied),
+            Request::AuthenticationEpoch
+            | Request::VerifiedLogin { .. }
+            | Request::PrepareLoginPassword { .. } => Err(Error::Denied),
         }
     }
     fn reauthenticate(&mut self, uid: u32, epoch: u64, password: &Secret) -> Result<()> {
@@ -380,6 +427,15 @@ impl<S: Storage, R: Random> Service<S, R> {
             return Err(Error::Conflict);
         }
         let b = self.current_publication(uid)?;
+        if self.session_controlled {
+            if self.session_user != Some(uid)
+                || !password.expose().is_empty()
+                || self.unlocked.get(&uid).is_none_or(|v| v.login.is_none())
+            {
+                return Err(Error::Denied);
+            }
+            return Ok(());
+        }
         let _verified = Unlocked::open(uid, password.expose(), &b)?;
         Ok(())
     }

@@ -1,6 +1,9 @@
 //! Development-only Unix transport. Trusted launcher pins executable inodes;
 //! clients cannot declare their identity or administrator role in IPC payloads.
-use crate::{Peer, Random, Service, storage::Disk};
+use crate::{
+    Peer, Random, Service,
+    storage::{Disk, Storage},
+};
 use mochios_keychain_protocol::{Application, Error, MAX_FRAME, Result};
 use std::{
     fs,
@@ -112,6 +115,7 @@ impl Policy {
             access: true,
             manager: pin.manager,
             session_control: false,
+            login_broker: false,
         })
     }
 }
@@ -154,8 +158,10 @@ pub fn run() -> Result<()> {
     let mut socket = None;
     let mut root = None;
     let mut registrations = vec![];
+    let mut auto_session = false;
     while let Some(a) = args.next() {
         match a.as_str() {
+            "--auto-session" => auto_session = true,
             "--socket" => socket = args.next().map(PathBuf::from),
             "--data-root" => root = args.next().map(PathBuf::from),
             "--client" | "--manager" => {
@@ -186,7 +192,48 @@ pub fn run() -> Result<()> {
     // Do not unlink an existing endpoint: a second daemon must never replace the first.
     let listener = UnixListener::bind(&socket).map_err(|_| Error::Unavailable)?;
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).map_err(|_| Error::Storage)?;
-    let mut service = Service::new(disk, Entropy);
+    let mut service = if auto_session {
+        Service::session_controlled(disk, Entropy)?
+    } else {
+        Service::new(disk, Entropy)
+    };
+    if auto_session {
+        let uid = unsafe { libc::geteuid() };
+        // Never convert a persistent vault to a temporary preview credential.
+        if service.storage.load(uid)?.is_some() {
+            return Err(Error::Exists);
+        }
+        let mut bytes = zeroize::Zeroizing::new([0u8; 32]);
+        getrandom::getrandom(bytes.as_mut()).map_err(|_| Error::Unavailable)?;
+        use sha2::{Digest, Sha256};
+        let tag = Sha256::digest(bytes.as_ref()).into();
+        let mut authority = Peer {
+            uid,
+            application: Application {
+                package: "org.mochios.preview-session".into(),
+                signer: [0; 32],
+                provenance: 3,
+            },
+            access: false,
+            manager: false,
+            session_control: true,
+            login_broker: true,
+        };
+        service.execute(
+            &authority,
+            mochios_keychain_protocol::Request::VerifiedLogin {
+                uid,
+                epoch: service.session_epoch,
+                tag,
+                password: mochios_keychain_protocol::Secret::new(bytes.to_vec()),
+            },
+        )?;
+        authority.login_broker = false;
+        service.execute(
+            &authority,
+            mochios_keychain_protocol::Request::ActivateSession { uid },
+        )?;
+    }
     for stream in listener.incoming().flatten() {
         let _ = serve_one(stream, &policy, &mut service);
     }
@@ -229,16 +276,46 @@ mod tests {
         .unwrap();
         let disk = Disk::new(root.join("data")).unwrap();
         let worker = std::thread::spawn(move || {
-            let mut service = Service::new(disk, Entropy);
-            for _ in 0..6 {
+            let mut service = Service::session_controlled(disk, Entropy).unwrap();
+            let uid = unsafe { libc::geteuid() };
+            let authority = Peer {
+                uid,
+                application: Application {
+                    package: "org.mochios.preview-session".into(),
+                    signer: [0; 32],
+                    provenance: 3,
+                },
+                access: false,
+                manager: false,
+                session_control: true,
+                login_broker: true,
+            };
+            service
+                .execute(
+                    &authority,
+                    mochios_keychain_protocol::Request::VerifiedLogin {
+                        uid,
+                        epoch: service.session_epoch,
+                        tag: [1; 32],
+                        password: Secret::new(b"host-login-password".to_vec()),
+                    },
+                )
+                .unwrap();
+            service
+                .execute(
+                    &authority,
+                    mochios_keychain_protocol::Request::ActivateSession { uid },
+                )
+                .unwrap();
+            for _ in 0..5 {
                 serve_one(listener.accept().unwrap().0, &policy, &mut service).unwrap();
             }
         });
         let k = Keychain::with_transport(SocketTransport(socket));
-        assert!(!k.status().unwrap().initialized);
-        k.manager()
-            .initialize(Secret::new(b"host-test-master-password".to_vec()))
-            .unwrap();
+        let status = k.status().unwrap();
+        assert!(
+            status.initialized && status.unlocked && status.login_managed && !status.needs_recovery
+        );
         let id = k
             .put(
                 "test",
@@ -248,7 +325,18 @@ mod tests {
             )
             .unwrap();
         assert_eq!(k.get(id).unwrap().expose(), b"host-secret");
-        k.manager().lock().unwrap();
+        assert_eq!(
+            k.manager()
+                .at_epoch(status.session_epoch)
+                .reveal(id, Secret::new(vec![]))
+                .unwrap()
+                .expose(),
+            b"host-secret"
+        );
+        k.manager()
+            .at_epoch(status.session_epoch)
+            .delete(id, Secret::new(vec![]))
+            .unwrap();
         worker.join().unwrap();
         fs::remove_dir_all(root).unwrap();
     }

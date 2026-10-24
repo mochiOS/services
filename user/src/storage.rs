@@ -1,5 +1,5 @@
-use std::fs::{self, OpenOptions};
 use std::fmt;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -56,9 +56,9 @@ pub fn load(path: &Path) -> io::Result<UserDatabase> {
 }
 
 pub fn save(path: &Path, database: &UserDatabase) -> Result<(), SaveError> {
-    let bytes = database
-        .encode()
-        .map_err(|error| SaveError::new("encode", io::Error::new(io::ErrorKind::InvalidData, error)))?;
+    let bytes = database.encode().map_err(|error| {
+        SaveError::new("encode", io::Error::new(io::ErrorKind::InvalidData, error))
+    })?;
     let parent = path.parent().ok_or_else(|| {
         SaveError::new(
             "validate-path",
@@ -87,9 +87,15 @@ pub fn save(path: &Path, database: &UserDatabase) -> Result<(), SaveError> {
         }
         return Err(SaveError::new("install-database", error));
     }
+    fs::File::open(parent)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| SaveError::new("sync-installed-database", error))?;
     if had_database {
         remove_if_present(&backup).map_err(|error| SaveError::new("remove-backup", error))?;
     }
+    fs::File::open(parent)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| SaveError::new("sync-backup-removal", error))?;
     Ok(())
 }
 

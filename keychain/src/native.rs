@@ -8,7 +8,7 @@ impl Random for Entropy {
         platform::random::fill(out).map_err(|_| Error::Unavailable)
     }
 }
-fn peer(sender: u64, controller: u64) -> Result<Peer> {
+fn peer(sender: u64, controller: u64, broker: u64) -> Result<Peer> {
     let c = platform::process::thread_security_context(sender).map_err(|_| Error::Denied)?;
     let package = core::str::from_utf8(
         c.package_id
@@ -32,8 +32,12 @@ fn peer(sender: u64, controller: u64) -> Result<Peer> {
         && application.package == "org.mochios.service-manager"
         && platform::capability::check_thread(sender, wire::SESSION) == Ok(1);
     let access = platform::capability::check_thread(sender, wire::ACCESS) == Ok(1);
+    let login_broker = trusted
+        && c.process_id == broker
+        && application.package == "org.mochios.user"
+        && platform::capability::check_thread(sender, wire::AUTHENTICATION) == Ok(1);
     // Reject callers before invoking the privileged POSIX adapter for them.
-    if !access && !session_control {
+    if !access && !session_control && !login_broker {
         return Err(Error::Denied);
     }
     let ids = inspect_sender_handle(
@@ -68,6 +72,7 @@ fn peer(sender: u64, controller: u64) -> Result<Peer> {
         access,
         manager,
         session_control,
+        login_broker,
     })
 }
 
@@ -150,6 +155,16 @@ pub fn run() -> Result<()> {
         return Err(Error::Denied);
     }
     let disk = Disk::new("/var/lib/keychain".into())?;
+    let broker_endpoint =
+        platform::process::find_by_name("user.service").map_err(|_| Error::Denied)?;
+    let broker =
+        platform::process::thread_security_context(broker_endpoint).map_err(|_| Error::Denied)?;
+    if broker.provenance != 1
+        || broker.package_id.get(..broker.package_id_len as usize) != Some(b"org.mochios.user")
+        || platform::capability::check_thread(broker_endpoint, wire::AUTHENTICATION) != Ok(1)
+    {
+        return Err(Error::Denied);
+    }
     let mut service = Service::session_controlled(disk, Entropy)?;
     let ep = platform::ipc::create().map_err(|_| Error::Unavailable)?;
     platform::service_ready::notify(ready, 0).map_err(|_| Error::Unavailable)?;
@@ -161,7 +176,7 @@ pub fn run() -> Result<()> {
         if n > buffer.len() {
             continue;
         }
-        let response = match peer(sender, controller.process_id) {
+        let response = match peer(sender, controller.process_id, broker.process_id) {
             Ok(peer) => service.dispatch(&peer, &buffer[..n]),
             Err(e) => wire::Reply::error(
                 wire::Request::decode(&buffer[..n])
