@@ -981,3 +981,113 @@ fn source_query_uses_bound_port_and_route_without_changing_binding_or_peer() {
         -95
     );
 }
+
+#[test]
+fn validation_accepts_only_attached_live_factory_authority_and_never_rechecks_ambient_caps() {
+    reset();
+    let mut s = server::Server::new();
+    assert_eq!(acquire(&mut s), 0);
+    let factory = STATE.with_borrow(|s| s.attached[0].handle);
+    let id = STATE.with_borrow(|s| s.created.last().unwrap().0);
+    let created = STATE.with_borrow(|s| s.created.len());
+    STATE.with_borrow_mut(|s| s.allowed = false);
+    for handle in [factory, 999] {
+        let mut attached = ipc::IpcObjectHandles::default();
+        attached.delivery_flags = mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE;
+        attached.count = 1;
+        attached.handles[0] = ipc::IpcObjectHandle {
+            handle,
+            reserved: 0,
+            rights: mnu_abi::HANDLE_RIGHT_CONTROL,
+        };
+        assert!(s.dispatch(77, &wire::VALIDATE, &attached));
+        STATE.with_borrow(|s| {
+            assert_eq!(
+                wire::status_for(3, &s.response),
+                Ok(if handle == factory { 0 } else { -13 })
+            )
+        });
+    }
+    assert_eq!(STATE.with_borrow(|s| s.created.len()), created);
+    request(&mut s, id, provider::OP_RELEASE, true);
+    let mut attached = ipc::IpcObjectHandles::default();
+    attached.count = 1;
+    attached.handles[0] = ipc::IpcObjectHandle {
+        handle: factory,
+        reserved: 0,
+        rights: mnu_abi::HANDLE_RIGHT_CONTROL,
+    };
+    assert!(s.dispatch(77, &wire::VALIDATE, &attached));
+    STATE.with_borrow(|s| assert_eq!(wire::status_for(3, &s.response), Ok(-13)));
+}
+
+#[test]
+fn draining_a_record_clears_readiness_before_the_native_read_is_acknowledged() {
+    use mochios_net_device_protocol::datagram as packet;
+    reset();
+    let mut s = server::Server::new();
+    assert_eq!(acquire(&mut s), 0);
+    let grant = STATE.with_borrow(|s| s.attached[0].handle);
+    let mut b = datagram::Loopback::new();
+    let local = packet::Endpoint {
+        address: [127, 0, 0, 1],
+        port: 0,
+    };
+    let (receiver, _) = open_packet(&mut s, &mut b, grant, local).unwrap();
+    let destination = packet_local(&mut s, &mut b, receiver);
+    let (sender, _) = open_packet(&mut s, &mut b, grant, local).unwrap();
+    let mut frame = [0; 32];
+    let n = packet::send(Some(destination), b"record", &mut frame).unwrap();
+    assert_eq!(
+        packet_request(
+            &mut s,
+            &mut b,
+            sender,
+            provider::OP_WRITE,
+            0,
+            &frame[..n],
+            0,
+            true
+        )
+        .0,
+        0
+    );
+    STATE.with_borrow(|s| {
+        assert_ne!(
+            s.signals
+                .iter()
+                .rev()
+                .find(|(id, _, _)| *id == receiver)
+                .unwrap()
+                .1
+                & mnu_abi::HANDLE_SIGNAL_READABLE,
+            0
+        )
+    });
+    assert_eq!(
+        packet_request(
+            &mut s,
+            &mut b,
+            receiver,
+            provider::OP_READ,
+            0,
+            &[],
+            64,
+            true
+        )
+        .0,
+        0
+    );
+    STATE.with_borrow(|s| {
+        assert_eq!(
+            s.signals
+                .iter()
+                .rev()
+                .find(|(id, _, _)| *id == receiver)
+                .unwrap()
+                .1
+                & mnu_abi::HANDLE_SIGNAL_READABLE,
+            0
+        )
+    });
+}

@@ -51,6 +51,7 @@ pub fn create(
     process_id: u64,
     create: wire::Create,
     pair: bool,
+    factory: Option<posix_service::AttachedObject<u32>>,
 ) -> Result<Vec<posix_service::OpenedObject<u32>>, i32> {
     let mut request = [0; CREATE_LEN];
     request[..4].copy_from_slice(if pair {
@@ -61,10 +62,28 @@ pub fn create(
     request[4..12].copy_from_slice(&process_id.to_le_bytes());
     create.encode(&mut request[12..]).map_err(|_| -22)?;
     let mut attachments = platform::ipc::IpcObjectHandles::default();
+    if let Some(factory) = factory {
+        let rights = wire::inet_factory_rights();
+        if factory.handle == 0 || factory.rights & rights != rights {
+            return Err(-13);
+        }
+        attachments.count = 1;
+        attachments.handles[0] = platform::ipc::IpcObjectHandle {
+            handle: factory.handle,
+            reserved: 0,
+            rights,
+        };
+    }
+    let mut opened = Vec::new();
+    opened
+        .try_reserve_exact(if pair { 2 } else { 1 })
+        .map_err(|_| -12)?;
     let mut response = [0; 4];
     let length =
-        platform::ipc::call_object_handles(endpoint, &request, &mut response, &mut attachments)
-            .map_err(|error| error.raw() as i32)?;
+        posix_service::filesystem_transport::call_native(&mut attachments, |attachments| {
+            platform::ipc::call_object_handles(endpoint, &request, &mut response, attachments)
+        })
+        .map_err(|error| mochios_posix_protocol::status::normalize_failure(error.raw()))?;
     let result = (|| {
         if length as u32 != 4 || attachments.delivery_flags != 0 {
             return Err(-5);
@@ -83,13 +102,13 @@ pub fn create(
         {
             return Err(-5);
         }
-        Ok(attachments.handles[..count]
-            .iter()
-            .map(|attachment| posix_service::OpenedObject {
+        for attachment in &attachments.handles[..count] {
+            opened.push(posix_service::OpenedObject {
                 handle: attachment.handle,
                 rights: attachment.rights,
-            })
-            .collect())
+            });
+        }
+        Ok(opened)
     })();
     if result.is_err() {
         for attached in attachments.handles.iter().take(attachments.count as usize) {
@@ -107,7 +126,10 @@ pub(super) fn signal(
     const SIGNALS: u64 = mnu_abi::HANDLE_SIGNAL_READABLE
         | mnu_abi::HANDLE_SIGNAL_WRITABLE
         | mnu_abi::HANDLE_SIGNAL_PEER_CLOSED;
-    for id in ids.into_iter().flat_map(|id| std::iter::once(id).chain(streams.record_observers(id))) {
+    for id in ids
+        .into_iter()
+        .flat_map(|id| std::iter::once(id).chain(streams.record_observers(id)))
+    {
         if let Ok(ready) = streams.readiness(id) {
             let set = if jobs.is_pending(id) {
                 0
@@ -131,13 +153,15 @@ pub(super) fn notification_is_retired(raw: i64) -> bool {
     // Callers supply validated local IDs and constant supported signal masks.
     // InvalidArgument therefore means the last reference was already closed,
     // not a zero-readiness result or a reason to retry a foreign namespace.
-    mnu_abi::status::Error::from_raw(raw as u64)
-        == Some(mnu_abi::status::Error::InvalidArgument)
+    mnu_abi::status::Error::from_raw(raw as u64) == Some(mnu_abi::status::Error::InvalidArgument)
 }
 
 fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>>>) -> ! {
     use mnu_abi::provider;
     let mut streams = Streams::new();
+    let mut inet = posix_service::inet_socket::Registry::<
+        posix_service::inet_datagram_native::NetworkBackend,
+    >::new();
     let mut bindings = posix_service::socket_binding::Bindings::new();
     let mut jobs = posix_service::socket_connect::Connections::new();
     let mut receive_waits = posix_service::socket_receive_wait::ReceiveWaits::new();
@@ -164,25 +188,12 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                             // Failed observations never authorize queue deletion.
                             Err(-9 | -11) => (),
                             Err(error) => platform::logln!(
-                                "posix.service: socket cycle observation failed errno={}", error
+                                "posix.service: socket cycle observation failed errno={}",
+                                error
                             ),
                         }
                         super::socket_receive_wait_native::pump(&streams, &mut receive_waits);
                         super::socket_route_native::pump(&streams, &routes);
-                    }
-                    if streams.has_ancillary_records() {
-                        let mut wait = [mnu_abi::HandleWaitItem {
-                            handle: endpoint,
-                            minimum_write_bytes: 0,
-                            interests: mnu_abi::HANDLE_SIGNAL_READABLE,
-                            observed: 0,
-                        }];
-                        if let Err(error) = platform::process::wait_many(&mut wait, gc_deadline) {
-                            if error.native_error() != Some(mnu_abi::status::Error::NotReady) {
-                                platform::thread::yield_now();
-                            }
-                            continue;
-                        }
                     }
                 }
                 Err(error) => {
@@ -190,7 +201,8 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                     // collect using a fabricated timestamp or spin/log-flood.
                     if !gc_clock_error_reported {
                         platform::logln!(
-                            "posix.service: socket GC clock failed errno={}", error.raw()
+                            "posix.service: socket GC clock failed errno={}",
+                            error.raw()
                         );
                         gc_clock_error_reported = true;
                     }
@@ -198,6 +210,57 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
             }
         } else {
             gc_deadline = 0;
+        }
+        inet.pump(|id, set| {
+            let all = mnu_abi::HANDLE_SIGNAL_READABLE
+                | mnu_abi::HANDLE_SIGNAL_WRITABLE
+                | mnu_abi::HANDLE_SIGNAL_PEER_CLOSED;
+            platform::handle::signal_provider_object(id, set, all & !set)
+                .map_err(|error| mochios_posix_protocol::status::normalize_failure(error.raw()))
+        });
+        let mut watches = [mnu_abi::HandleWaitItem::default(); mnu_abi::HANDLE_WAIT_MANY_MAX_ITEMS];
+        watches[0] = mnu_abi::HandleWaitItem {
+            handle: endpoint,
+            interests: mnu_abi::HANDLE_SIGNAL_READABLE,
+            ..Default::default()
+        };
+        let mut count = 1;
+        let mut overflow = false;
+        inet.watches(|handle, interests| {
+            if count < watches.len() {
+                watches[count] = mnu_abi::HandleWaitItem {
+                    handle,
+                    interests,
+                    ..Default::default()
+                };
+                count += 1;
+            } else {
+                overflow = true;
+            }
+        });
+        if count > 1 || gc_deadline != 0 {
+            let mut deadline = if gc_deadline != 0 {
+                gc_deadline
+            } else {
+                mnu_abi::HANDLE_WAIT_INFINITE
+            };
+            if overflow {
+                let Ok(now) = platform::time::monotonic_nanoseconds() else {
+                    platform::thread::yield_now();
+                    continue;
+                };
+                deadline = deadline.min(now.saturating_add(10_000_000));
+            }
+            match platform::process::wait_many(&mut watches[..count], deadline) {
+                Ok(0) => (),
+                Ok(_) => continue,
+                Err(error) => {
+                    if error.native_error() != Some(mnu_abi::status::Error::NotReady) {
+                        platform::thread::yield_now();
+                    }
+                    continue;
+                }
+            }
         }
         let mut attachments = platform::ipc::IpcObjectHandles::default();
         let message = match platform::ipc::wait_object_handles(
@@ -231,11 +294,24 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
             }
         } else if bytes.starts_with(&mochios_posix_protocol::socket_route::MAGIC) {
             retained_receive_source = super::socket_route_native::prepare(
-                endpoint, &service, &streams, &bindings, &mut routes, sender, bytes, &attachments,
+                endpoint,
+                &service,
+                &streams,
+                &bindings,
+                &mut routes,
+                sender,
+                bytes,
+                &attachments,
             );
         } else if bytes.starts_with(&mochios_posix_protocol::socket_record::REQUEST_MAGIC) {
             let (affected, retained) = super::socket_record_native::dispatch(
-                endpoint, &mut streams, &mut receive_waits, &mut routes, sender, bytes, &attachments,
+                endpoint,
+                &mut streams,
+                &mut receive_waits,
+                &mut routes,
+                sender,
+                bytes,
+                &attachments,
             );
             retained_receive_source = retained;
             if let Some(ids) = affected {
@@ -259,6 +335,7 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                 &mut streams,
                 &bindings,
                 &mut jobs,
+                &mut inet,
                 sender,
                 bytes,
                 &attachments,
@@ -283,7 +360,6 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
             let result = (|| {
                 // Only the authenticated service dispatcher may nominate a process.
                 if bytes.len() != CREATE_LEN
-                    || attachments.count != 0
                     || attachments.delivery_flags != mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE
                 {
                     return Err(-22);
@@ -293,7 +369,39 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                 }
                 let process_id = u64::from_le_bytes(bytes[4..12].try_into().unwrap());
                 let create = wire::Create::decode(&bytes[12..]).map_err(|_| -22)?;
-                let ids = {
+                let inet_create = create.domain == wire::Domain::Ipv4
+                    && create.kind == wire::Kind::Datagram
+                    && !pair;
+                if (!inet_create && attachments.count != 0)
+                    || (inet_create && attachments.count != 1)
+                {
+                    return Err(-13);
+                }
+                let ids = if inet_create {
+                    let source = attachments.handles[0];
+                    if source.handle == 0
+                        || source.reserved != 0
+                        || source.rights != wire::inet_factory_rights()
+                    {
+                        return Err(-13);
+                    }
+                    let network = {
+                        let state = service.lock().map_err(|_| -5)?;
+                        state.registered_peer(process_id).ok_or(-1)?;
+                        state.network_endpoint().ok_or(-6)?
+                    };
+                    consumed_attachments = 1;
+                    let backend = posix_service::inet_datagram_native::NetworkBackend::new(
+                        network,
+                        posix_service::OpenedObject {
+                            handle: source.handle,
+                            rights: source.rights,
+                        },
+                    )?;
+                    backend.validate()?;
+                    let socket = posix_service::inet_datagram::Datagram::new(backend, create)?;
+                    [inet.insert(socket)?, 0]
+                } else {
                     let state = service.lock().map_err(|_| -5)?;
                     let peer = state.registered_peer(process_id).ok_or(-1)?;
                     if pair {
@@ -317,13 +425,31 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                                 }
                             }
                             for id in ids.into_iter().take(count) {
-                                let _ = streams.release(id);
+                                if posix_service::inet_socket::is_inet(id) {
+                                    let _ = inet.remove(id);
+                                } else {
+                                    let _ = streams.release(id);
+                                }
                             }
                             return Err(error.raw() as i32);
                         }
                     }
                 }
-                signal(&streams, &jobs, ids);
+                if inet_create {
+                    if let Err(error) = platform::handle::signal_provider_object(
+                        ids[0],
+                        mnu_abi::HANDLE_SIGNAL_WRITABLE,
+                        mnu_abi::HANDLE_SIGNAL_READABLE | mnu_abi::HANDLE_SIGNAL_PEER_CLOSED,
+                    ) {
+                        let _ = inet.remove(ids[0]);
+                        let _ = platform::handle::close(handles[0]);
+                        return Err(mochios_posix_protocol::status::normalize_failure(
+                            error.raw(),
+                        ));
+                    }
+                } else {
+                    signal(&streams, &jobs, ids);
+                }
                 Ok(handles)
             })();
             match result {
@@ -341,8 +467,17 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                             rights: wire::descriptor_rights(),
                         };
                     }
-                    let _ =
-                        platform::ipc::reply_object_handles(sender, &0i32.to_le_bytes(), &outgoing);
+                    if platform::ipc::reply_object_handles(sender, &0i32.to_le_bytes(), &outgoing)
+                        .is_err()
+                    {
+                        for handle in handles.into_iter().take(count) {
+                            if let Ok(id) = platform::handle::identify_provider_object(handle) {
+                                if posix_service::inet_socket::is_inet(id) {
+                                    let _ = inet.remove(id);
+                                }
+                            }
+                        }
+                    }
                     for handle in handles.into_iter().take(count) {
                         let _ = platform::handle::close(handle);
                     }
@@ -359,6 +494,28 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                 .filter(|(header, _)| native && header.opcode == provider::OP_RELEASE)
                 .and_then(|(header, _)| streams.release_observers(header.object_id).ok());
             if let Some((header, payload)) = decoded {
+                if posix_service::inet_socket::is_inet(header.object_id) {
+                    match inet.dispatch(
+                        bytes,
+                        attachments.delivery_flags,
+                        attachments.count,
+                        &mut response,
+                    ) {
+                        Ok(Some(n)) => {
+                            let _ = platform::ipc::reply(sender, &response[..n]);
+                        }
+                        Ok(None) | Err(-9) if native && header.opcode == provider::OP_RELEASE => (),
+                        Err(error) => platform::logln!(
+                            "posix.service: UDP Provider request rejected status={}",
+                            error
+                        ),
+                        _ => (),
+                    }
+                    for object in attachments.handles.iter().take(attachments.count as usize) {
+                        let _ = platform::handle::close(object.handle);
+                    }
+                    continue;
+                }
                 if posix_service::socket_transfer::job_id(header.object_id).is_ok() {
                     super::socket_transfer_native::provider_request(
                         &mut transfers,
@@ -374,7 +531,14 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                     continue;
                 }
                 if posix_service::socket_route::is_route(header.object_id) {
-                    super::socket_route_native::provider_request(&mut routes, sender, header, attachments.delivery_flags, attachments.count, &mut response);
+                    super::socket_route_native::provider_request(
+                        &mut routes,
+                        sender,
+                        header,
+                        attachments.delivery_flags,
+                        attachments.count,
+                        &mut response,
+                    );
                     for attached in attachments.handles.iter().take(attachments.count as usize) {
                         let _ = platform::handle::close(attached.handle);
                     }

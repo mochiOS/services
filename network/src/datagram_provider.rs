@@ -35,7 +35,7 @@ impl Server {
         bytes: &[u8],
         handles: &platform::ipc::IpcObjectHandles,
         backend: &mut impl Backend,
-        _now: u64,
+        now: u64,
     ) -> bool {
         if bytes.get(..8) == Some(&[b'N', b'U', b'D', b'P', 1, 0, 2, 0]) {
             let result = (|| {
@@ -241,6 +241,10 @@ impl Server {
         }
         .encode(&data[..length], &mut response)
         .unwrap();
+        // Publish level changes before acknowledging a draining read/write.
+        // An upper Provider must not cache old READABLE and then sleep while
+        // the lower level clears without a new positive readiness edge.
+        self.pump_datagrams(backend, now);
         let _ = platform::ipc::reply(sender, &response[..n]);
         true
     }

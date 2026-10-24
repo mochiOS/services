@@ -5,11 +5,11 @@ extern crate self as mochi_user_platform;
 use mochios_net_device_protocol::{datagram as packet, datagram_authority as authority};
 use mochios_posix_protocol::socket::{self as wire, Address, Domain, Kind};
 use posix_service::OpenedObject;
+pub use posix_service::filesystem_transport;
 use std::{cell::RefCell, collections::BTreeMap};
 #[path = "../../network/src/datagram.rs"]
 mod datagram;
-#[path = "../src/inet_datagram.rs"]
-mod inet_datagram;
+use posix_service::inet_datagram;
 #[path = "../src/inet_datagram_native.rs"]
 mod inet_datagram_native;
 use datagram::Backend as PacketBackend;
@@ -76,6 +76,12 @@ pub mod ipc {
         assert_eq!(handles.handles[0].rights, mnu_abi::HANDLE_RIGHT_CONTROL);
         crate::STATE.with_borrow_mut(|s| {
             s.last_attached = handles.handles[0].rights;
+            if request == crate::authority::VALIDATE {
+                *handles = IpcObjectHandles::default();
+                crate::authority::reply_for(3, if s.open_mode == 1 { -13 } else { 0 }, reply)
+                    .unwrap();
+                return Ok(crate::authority::REPLY_LEN as u64);
+            }
             let local = crate::packet::decode_open(request).unwrap();
             if s.open_mode == 4 {
                 return Err(crate::error(-5));
@@ -117,6 +123,24 @@ pub mod ipc {
             } else {
                 crate::authority::REPLY_LEN as u64
             })
+        })
+    }
+    use crate::PacketBackend;
+}
+pub mod process {
+    pub fn wait_many(
+        items: &mut [mnu_abi::HandleWaitItem],
+        _: u64,
+    ) -> Result<usize, crate::syscall::SysError> {
+        crate::STATE.with_borrow(|s| {
+            let id = s.id(items[0].handle).map_err(crate::error)?;
+            items[0].observed = mnu_abi::HANDLE_SIGNAL_WRITABLE
+                | if s.backend.readable(id).map_err(crate::error)? {
+                    mnu_abi::HANDLE_SIGNAL_READABLE
+                } else {
+                    0
+                };
+            Ok(0)
         })
     }
     use crate::PacketBackend;
@@ -449,4 +473,221 @@ fn malformed_source_reply_cannot_publish_a_connected_peer() {
     s.connect(ip(8000)).unwrap();
     STATE.with_borrow_mut(|s| s.source_bad = true);
     assert_eq!(s.local_address(), Err(-5));
+}
+
+fn provider_request(
+    registry: &mut posix_service::inet_socket::Registry<NetworkBackend>,
+    id: u64,
+    op: u16,
+    tag: u64,
+    input: &[u8],
+    capacity: u32,
+    native: bool,
+) -> (i64, u64, Vec<u8>) {
+    use mnu_abi::provider as p;
+    let header = p::RequestHeader {
+        opcode: op,
+        object_id: id,
+        argument: 0,
+        basis: tag,
+        length: if op == p::OP_WRITE {
+            input.len() as u32
+        } else {
+            capacity
+        },
+        data_length: input.len() as u32,
+    };
+    let mut request = [0; p::REQUEST_HEADER_LEN + p::MAX_DATA_LEN];
+    let n = header.encode(input, &mut request).unwrap();
+    let mut response = [0; p::RESPONSE_HEADER_LEN + p::MAX_DATA_LEN];
+    let n = registry
+        .dispatch(
+            &request[..n],
+            if native {
+                mnu_abi::IPC_DELIVERY_NATIVE_OBJECT
+            } else {
+                0
+            },
+            0,
+            &mut response,
+        )
+        .unwrap();
+    if let Some(n) = n {
+        let (header, data) = p::ResponseHeader::decode(&response[..n]).unwrap();
+        (header.status, header.value, data.to_vec())
+    } else {
+        (0, 0, vec![])
+    }
+}
+#[test]
+fn provider_registry_executes_native_controls_data_and_final_release_in_a_disjoint_namespace() {
+    use mnu_abi::provider as p;
+    reset();
+    let mut registry = posix_service::inet_socket::Registry::new();
+    let receiver = registry.insert(socket()).unwrap();
+    let sender = registry.insert(socket()).unwrap();
+    assert!(posix_service::inet_socket::is_inet(receiver));
+    assert!(receiver <= i64::MAX as u64);
+    assert!(!posix_service::inet_socket::is_inet(1 << 63));
+    assert!(posix_service::socket_connect::job_id(receiver).is_err());
+    assert!(posix_service::socket_transfer::job_id(receiver).is_err());
+    assert!(!posix_service::socket_route::is_route(receiver));
+    assert!(posix_service::socket_receive_wait::job_id(receiver).is_err());
+    let mut address = [0; wire::MAX_ADDRESS_LEN];
+    let n = ip(8000).encode(&mut address).unwrap();
+    assert_eq!(
+        provider_request(
+            &mut registry,
+            receiver,
+            p::OP_CONTROL,
+            wire::CONTROL_BIND,
+            &address[..n],
+            0,
+            true
+        )
+        .0,
+        0
+    );
+    registry.connect(sender, ip(8000)).unwrap();
+    assert_eq!(
+        provider_request(&mut registry, sender, p::OP_WRITE, 0, b"hello", 0, true),
+        (0, 5, vec![])
+    );
+    let mut notifications = vec![];
+    registry.pump(|id, set| {
+        notifications.push((id, set));
+        Ok(())
+    });
+    assert_ne!(
+        notifications
+            .iter()
+            .find(|(id, _)| *id == receiver)
+            .unwrap()
+            .1
+            & mnu_abi::HANDLE_SIGNAL_READABLE,
+        0
+    );
+    assert_eq!(
+        provider_request(&mut registry, receiver, p::OP_READ, 0, &[], 2, false).0,
+        -13
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            provider_request(&mut registry, receiver, p::OP_READ_AT, 0, &[], 2, true),
+            (0, 2, b"he".to_vec())
+        );
+    }
+    assert_eq!(
+        provider_request(&mut registry, receiver, p::OP_READ, 0, &[], 2, true),
+        (0, 2, b"he".to_vec())
+    );
+    assert_eq!(
+        provider_request(&mut registry, receiver, p::OP_READ, 0, &[], 32, true).0,
+        -11
+    );
+    registry.pump(|id, set| {
+        notifications.push((id, set));
+        Ok(())
+    });
+    assert_eq!(
+        notifications
+            .iter()
+            .rev()
+            .find(|(id, _)| *id == receiver)
+            .unwrap()
+            .1
+            & mnu_abi::HANDLE_SIGNAL_READABLE,
+        0
+    );
+    let (_, _, bytes) = provider_request(
+        &mut registry,
+        sender,
+        p::OP_CONTROL,
+        wire::CONTROL_LOCAL_ADDRESS,
+        &[],
+        wire::MAX_ADDRESS_LEN as u32,
+        true,
+    );
+    assert!(
+        matches!(wire::Address::decode(&bytes).unwrap(),Address::Ipv4{address:[127,0,0,1],port} if port!=0)
+    );
+    assert_eq!(
+        provider_request(
+            &mut registry,
+            sender,
+            p::OP_CONTROL,
+            wire::CONTROL_SET_OPTIONS,
+            &wire::NONBLOCKING.to_le_bytes(),
+            0,
+            true
+        )
+        .0,
+        0
+    );
+    let (_, _, options) = provider_request(
+        &mut registry,
+        sender,
+        p::OP_CONTROL,
+        wire::CONTROL_GET_OPTIONS,
+        &[],
+        4,
+        true,
+    );
+    assert_eq!(options, wire::NONBLOCKING.to_le_bytes());
+    assert_eq!(
+        provider_request(&mut registry, sender, p::OP_RELEASE, 0, &[], 0, false).0,
+        -13
+    );
+    assert_eq!(
+        provider_request(
+            &mut registry,
+            sender,
+            p::OP_CONTROL,
+            wire::CONTROL_KIND,
+            &[],
+            4,
+            true
+        )
+        .2,
+        (Kind::Datagram as u32).to_le_bytes()
+    );
+    provider_request(&mut registry, sender, p::OP_RELEASE, 0, &[], 0, true);
+    provider_request(&mut registry, receiver, p::OP_RELEASE, 0, &[], 0, true);
+    STATE.with_borrow(|s| assert!(s.bindings.is_empty()));
+    let replacement = registry.insert(socket()).unwrap();
+    assert_ne!(replacement, sender);
+    assert_ne!(replacement, receiver);
+    assert_eq!(registry.connect(sender, ip(8000)), Err(-9));
+}
+#[test]
+fn readiness_rearms_only_unforwarded_levels_and_failed_signal_does_not_lose_a_wake() {
+    reset();
+    let mut registry = posix_service::inet_socket::Registry::new();
+    let id = registry.insert(socket()).unwrap();
+    registry.connect(id, ip(8000)).unwrap();
+    registry.pump(|_, _| Err(-12));
+    let mut watches = vec![];
+    registry.watches(|h, bits| watches.push((h, bits)));
+    assert_eq!(watches.len(), 1);
+    assert_ne!(watches[0].1 & mnu_abi::HANDLE_SIGNAL_WRITABLE, 0);
+    registry.pump(|_, _| Ok(()));
+    watches.clear();
+    registry.watches(|h, bits| watches.push((h, bits)));
+    assert_eq!(watches[0].1 & mnu_abi::HANDLE_SIGNAL_WRITABLE, 0);
+    assert_ne!(watches[0].1 & mnu_abi::HANDLE_SIGNAL_READABLE, 0);
+    let mut called = false;
+    registry.pump(|_, _| {
+        called = true;
+        Ok(())
+    });
+    assert!(!called);
+}
+#[test]
+fn factory_validation_is_a_control_plane_request_without_creating_a_binding() {
+    reset();
+    let backend = backend();
+    backend.validate().unwrap();
+    STATE.with_borrow(|s| assert!(s.bindings.is_empty()));
+    STATE.with_borrow_mut(|s| s.open_mode = 1);
+    assert_eq!(backend.validate(), Err(-13));
 }

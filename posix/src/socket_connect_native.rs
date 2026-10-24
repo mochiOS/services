@@ -103,6 +103,9 @@ pub fn dispatch(
     streams: &mut Streams,
     bindings: &Bindings<u32>,
     jobs: &mut Connections<u32>,
+    inet: &mut posix_service::inet_socket::Registry<
+        posix_service::inet_datagram_native::NetworkBackend,
+    >,
     sender: u64,
     bytes: &[u8],
     attachments: &platform::ipc::IpcObjectHandles,
@@ -123,13 +126,26 @@ pub fn dispatch(
         {
             return Err(-13);
         }
-        let wire::Address::UnixPath(path) = wire::Address::decode(&bytes[12..]).map_err(|_| -22)?
-        else {
-            return Err(-95);
-        };
+        let address = wire::Address::decode(&bytes[12..]).map_err(|_| -22)?;
         let process_id = u64::from_le_bytes(bytes[4..12].try_into().map_err(|_| -22)?);
         let client = platform::handle::identify_provider_object(source.handle)
             .map_err(|e| e.raw() as i32)?;
+        if posix_service::inet_socket::is_inet(client) {
+            {
+                let state = state.lock().map_err(|_| -5)?;
+                state.registered_peer(process_id).ok_or(-1)?;
+            }
+            let mut response = [0; 4 + wire::CONNECT_REPLY_LEN];
+            wire::ConnectReply::Connected
+                .encode(&mut response[4..])
+                .map_err(|_| -5)?;
+            inet.connect(client, address)?;
+            let _ = platform::ipc::reply(sender, &response);
+            return Ok(None);
+        }
+        let wire::Address::UnixPath(path) = address else {
+            return Err(-95);
+        };
         if streams.kind(client)? == wire::Kind::Datagram {
             let old_peer = streams.affected(client)?[1];
             let mut response = [0; 4 + wire::CONNECT_REPLY_LEN];

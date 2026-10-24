@@ -783,17 +783,21 @@ fn main() {
                                 Ok((handles, address))
                             })
                     }
-                } else if !attachments.is_empty() {
-                    Err(-22)
                 } else {
                     protocol::socket::Create::decode(payload)
                         .map_err(|_| -22)
                         .and_then(|create| {
+                            let factory=if create.domain==protocol::socket::Domain::Ipv4
+                                && create.kind==protocol::socket::Kind::Datagram && header.opcode==protocol::OP_SOCKET_CREATE {
+                                if attachments.len()!=1 {return Err(-13);}
+                                Some(attachments[0])
+                            } else {if !attachments.is_empty(){return Err(-22);} None};
                             socket_native::create(
                                 socket_endpoint,
                                 peer.process_id,
                                 create,
                                 header.opcode == protocol::OP_SOCKET_PAIR,
+                                factory,
                             )
                         })
                         .map(|handles| (handles, Vec::new()))

@@ -24,7 +24,7 @@ pub fn job_id(object: u64) -> Result<u64, i32> {
     }
 }
 pub fn is_route(object: u64) -> bool {
-    object & TAG != 0
+    job_id(object).is_ok()
 }
 
 struct Route<H> {

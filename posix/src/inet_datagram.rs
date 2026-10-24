@@ -53,6 +53,9 @@ pub trait Backend {
         peek: bool,
         output: &mut [u8],
     ) -> Result<Received, i32>;
+    fn signals(&mut self, _handle: Self::Handle) -> Result<u64, i32> {
+        Err(-95)
+    }
     fn maximum_payload(&self) -> usize;
 }
 
@@ -88,6 +91,15 @@ impl<B: Backend> Datagram<B> {
             receive_timeout: 0,
             send_timeout: 0,
         })
+    }
+    pub fn binding_handle(&self) -> Option<B::Handle> {
+        self.binding
+    }
+    pub fn signals(&mut self) -> Result<u64, i32> {
+        match self.binding {
+            Some(handle) => self.backend.signals(handle),
+            None => Ok(mnu_abi::HANDLE_SIGNAL_WRITABLE),
+        }
     }
     pub fn options(&self) -> u32 {
         self.options

@@ -41,6 +41,51 @@ impl NetworkBackend {
             factory: factory.handle,
         })
     }
+    /// Authenticate at the trusted network endpoint, never by invoking an
+    /// arbitrary attached Provider that could block the shared socket worker.
+    pub fn validate(&self) -> Result<(), i32> {
+        let mut objects = platform::ipc::IpcObjectHandles::default();
+        objects.count = 1;
+        objects.handles[0] = platform::ipc::IpcObjectHandle {
+            handle: self.factory,
+            reserved: 0,
+            rights: mnu_abi::HANDLE_RIGHT_CONTROL,
+        };
+        let mut response = [0; authority::REPLY_LEN];
+        let n = super::filesystem_transport::call_native(&mut objects, |objects| {
+            platform::ipc::call_object_handles(
+                self.endpoint,
+                &authority::VALIDATE,
+                &mut response,
+                objects,
+            )
+        })
+        .map_err(failure)? as u32 as usize;
+        let status = authority::status_for(3, response.get(..n).ok_or(-5)?).map_err(|_| -5);
+        let valid = objects.count == 0 && objects.delivery_flags == 0;
+        for (index, object) in objects
+            .handles
+            .iter()
+            .take(objects.count as usize)
+            .enumerate()
+        {
+            if object.handle != 0
+                && object.handle != self.factory
+                && !objects.handles[..index]
+                    .iter()
+                    .any(|old| old.handle == object.handle)
+            {
+                let _ = platform::handle::close(object.handle);
+            }
+        }
+        if !valid {
+            return Err(-5);
+        }
+        match status? {
+            0 => Ok(()),
+            error => Err(error),
+        }
+    }
     fn control(&self, handle: u32, tag: u64, input: &[u8], output: &mut [u8]) -> Result<(), i32> {
         let n = platform::handle::control(handle, tag, input, output).map_err(failure)?;
         if n != output.len() {
@@ -169,6 +214,24 @@ impl Backend for NetworkBackend {
             copied: record.payload.len(),
             original: record.original_length,
         })
+    }
+    fn signals(&mut self, handle: u32) -> Result<u64, i32> {
+        let mut items = [mnu_abi::HandleWaitItem {
+            handle,
+            interests: mnu_abi::HANDLE_SIGNAL_READABLE
+                | mnu_abi::HANDLE_SIGNAL_WRITABLE
+                | mnu_abi::HANDLE_SIGNAL_PEER_CLOSED,
+            ..Default::default()
+        }];
+        match platform::process::wait_many(&mut items, 0) {
+            Ok(_) => Ok(items[0].observed),
+            Err(error)
+                if error.native_error() == Some(platform::syscall::NativeError::NotReady) =>
+            {
+                Ok(0)
+            }
+            Err(error) => Err(failure(error)),
+        }
     }
     fn maximum_payload(&self) -> usize {
         packet::MAX_PAYLOAD

@@ -249,6 +249,10 @@ impl Runtime {
                             _ => -5,
                         })
                 });
+                #[cfg(mochios_inet_socket_probe_213)]
+                if installed.is_ok() {
+                    crate::native_inet_socket_probe::run(self.posix_endpoint.unwrap(),endpoint);
+                }
                 let _ = platform::handle::close(endpoint);
                 match installed {
                     Ok(()) => {

@@ -103,8 +103,8 @@ fn socket_gc_wait_classifies_the_native_tag_not_an_errno_magnitude() {
     let source = include_str!("../src/socket_native.rs");
     let wait = probe::between(
         source,
-        "if let Err(error) = platform::process::wait_many(",
-        "                Err(error) => {",
+        "match platform::process::wait_many(",
+        "        let mut attachments = platform::ipc::IpcObjectHandles::default();",
     );
     assert!(wait.contains("error.native_error() != Some(mnu_abi::status::Error::NotReady)"));
     assert!(!wait.contains("error.raw()"));

@@ -37,6 +37,35 @@ impl Server {
         bytes: &[u8],
         handles: &platform::ipc::IpcObjectHandles,
     ) -> bool {
+        if bytes == wire::VALIDATE {
+            let result = (|| {
+                if handles.count != 1
+                    || !matches!(
+                        handles.delivery_flags,
+                        0 | mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE
+                    )
+                {
+                    return Err(-13);
+                }
+                let source = handles.handles[0];
+                if source.handle == 0
+                    || source.reserved != 0
+                    || source.rights != mnu_abi::HANDLE_RIGHT_CONTROL
+                {
+                    return Err(-13);
+                }
+                let id =
+                    platform::handle::identify_provider_object(source.handle).map_err(|_| -13)?;
+                if !self.live.contains(&id) {
+                    return Err(-13);
+                }
+                Ok(())
+            })();
+            let mut response = [0; wire::REPLY_LEN];
+            wire::reply_for(3, result.err().unwrap_or(0), &mut response).unwrap();
+            let _ = platform::ipc::reply(sender, &response);
+            return true;
+        }
         if bytes.starts_with(b"NUDP") {
             let result = (|| {
                 if bytes.len() != wire::ACQUIRE.len()

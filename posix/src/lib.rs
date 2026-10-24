@@ -30,6 +30,7 @@ pub mod shared_memory_file;
 pub mod socket;
 pub mod network_bootstrap;
 pub mod inet_datagram;
+pub mod inet_socket;
 #[cfg(target_os = "mochios")]
 pub mod inet_datagram_native;
 pub mod socket_record;
