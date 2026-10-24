@@ -1,6 +1,6 @@
 use crate::vault::MAX_FILE;
 use mochios_keychain_protocol::{Error, Result};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
@@ -12,18 +12,23 @@ pub trait Storage {
 }
 pub struct Disk {
     root: PathBuf,
+    owner: u32,
     #[cfg(target_os = "linux")]
     _writer_guard: std::fs::File,
 }
 impl Disk {
     pub fn new(root: PathBuf) -> Result<Self> {
-        fs::create_dir_all(&root).map_err(|_| Error::Storage)?;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&root)
+            .map_err(|_| Error::Storage)?;
         let m = fs::symlink_metadata(&root).map_err(|_| Error::Storage)?;
-        if !m.is_dir() || m.file_type().is_symlink() {
+        // SAFETY: geteuid has no pointer arguments or preconditions.
+        let owner = unsafe { libc::geteuid() };
+        if !m.is_dir() || m.file_type().is_symlink() || m.uid() != owner || m.mode() & 0o077 != 0 {
             return Err(Error::Storage);
         }
-        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
-            .map_err(|_| Error::Storage)?;
         #[cfg(target_os = "linux")]
         let writer = {
             let file = OpenOptions::new()
@@ -32,13 +37,16 @@ impl Disk {
                 .create(true)
                 .truncate(false)
                 .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
                 .open(root.join(".writer"))
                 .map_err(|_| Error::Storage)?;
+            validate_file(&file.metadata().map_err(|_| Error::Storage)?, owner)?;
             file.try_lock().map_err(|_| Error::Busy)?;
             file
         };
         Ok(Self {
             root,
+            owner,
             #[cfg(target_os = "linux")]
             _writer_guard: writer,
         })
@@ -50,19 +58,19 @@ impl Disk {
 impl Storage for Disk {
     fn load(&mut self, uid: u32) -> Result<Option<Vec<u8>>> {
         let p = self.path(uid);
-        match fs::symlink_metadata(&p) {
+        let file = match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&p)
+        {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Ok(m)
-                if m.is_file()
-                    && !m.file_type().is_symlink()
-                    && m.len() <= MAX_FILE as u64
-                    && m.permissions().mode() & 0o077 == 0 => {}
+            Ok(file) => file,
             _ => return Err(Error::Storage),
-        }
+        };
+        // Validate the opened object, not a pathname checked before open().
+        validate_file(&file.metadata().map_err(|_| Error::Storage)?, self.owner)?;
         let mut b = vec![];
-        fs::File::open(p)
-            .map_err(|_| Error::Storage)?
-            .take((MAX_FILE + 1) as u64)
+        file.take((MAX_FILE + 1) as u64)
             .read_to_end(&mut b)
             .map_err(|_| Error::Storage)?;
         if b.len() > MAX_FILE {
@@ -76,6 +84,17 @@ impl Storage for Disk {
         }
         publish(&self.path(uid), b).map_err(|_| Error::Storage)
     }
+}
+fn validate_file(m: &fs::Metadata, owner: u32) -> Result<()> {
+    if !m.is_file()
+        || m.uid() != owner
+        || m.nlink() != 1
+        || m.len() > MAX_FILE as u64
+        || m.permissions().mode() & 0o077 != 0
+    {
+        return Err(Error::Storage);
+    }
+    Ok(())
 }
 // Only ciphertext is written. The service locks its cached vault after ANY write error,
 // including a post-rename directory-sync failure, so uncertain publication cannot leave stale state.

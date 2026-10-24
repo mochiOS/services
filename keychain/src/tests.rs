@@ -300,3 +300,26 @@ fn host_storage_refuses_a_second_writer_and_keeps_private_modes() {
     drop(reopened);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn storage_rejects_lock_symlinks_and_multiply_linked_vaults() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let root = std::env::temp_dir().join(format!("keychain-links-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let target = root.join("other-file");
+    std::fs::write(&target, b"must not be used as a vault lock").unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+    symlink(&target, root.join(".writer")).unwrap();
+    assert!(matches!(
+        crate::storage::Disk::new(root.clone()),
+        Err(Error::Storage)
+    ));
+    std::fs::remove_file(root.join(".writer")).unwrap();
+    let mut disk = crate::storage::Disk::new(root.clone()).unwrap();
+    std::fs::hard_link(&target, root.join("1000.vault")).unwrap();
+    assert!(matches!(disk.load(1000), Err(Error::Storage)));
+    drop(disk);
+    std::fs::remove_dir_all(root).unwrap();
+}
