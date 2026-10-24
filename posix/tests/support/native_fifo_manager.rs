@@ -4,8 +4,10 @@ use mnu_abi::{IpcObjectHandles, SyscallNumber, provider};
 use mochi_user_platform as platform;
 use mochios_filesystem_protocol as wire;
 use posix_service::{
-    fifo::Access,
+    fifo::{Access, BUFFER_CAPACITY, WaitCondition},
     fifo_manager::{AdmittedInode, FilesystemScope, Manager},
+    fifo_wait::{Waits, is_notification},
+    fifo_wait_ipc,
     filesystem_reference::Reference,
 };
 
@@ -59,6 +61,43 @@ fn create(endpoint: u32, id: u64, rights: u64, options: u64) -> Result<u32, i32>
     Ok(handle)
 }
 
+fn notification(endpoint: u32, data: u32, condition: WaitCondition) -> u32 {
+    fifo_wait_ipc::query(
+        endpoint,
+        mnu_abi::IpcObjectHandle {
+            handle: data,
+            reserved: 0,
+            rights: platform::handle::rights(data).unwrap(),
+        },
+        condition,
+    )
+    .unwrap()
+    .handle
+}
+
+fn wait_ready(handle: u32, expected: bool) {
+    let mut items = [platform::syscall::HandleWaitItem {
+        handle,
+        minimum_write_bytes: 0,
+        interests: mnu_abi::HANDLE_SIGNAL_READABLE,
+        observed: 0,
+    }];
+    let deadline = if expected {
+        platform::time::monotonic_nanoseconds().unwrap() + 2_000_000_000
+    } else {
+        0
+    };
+    let result = platform::process::wait_many(&mut items, deadline);
+    if expected {
+        assert_eq!(result.unwrap(), 0);
+    } else {
+        assert_eq!(
+            result.unwrap_err().raw(),
+            mnu_abi::status::Error::NotReady.into_raw() as i64
+        );
+    }
+}
+
 pub fn run(fs: &RuntimeFilesystem) {
     let path = format!(
         "/tmp/fifo-manager-188-{}",
@@ -108,9 +147,11 @@ pub fn run(fs: &RuntimeFilesystem) {
     admitted.push(prepare(fs, scope, path.as_bytes(), Access::Write));
     let (opened_tx, opened_rx) = std::sync::mpsc::channel();
     let (released_tx, released_rx) = std::sync::mpsc::channel();
+    let (notification_tx, notification_rx) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
         let endpoint = platform::ipc::create_handle().unwrap();
         let mut manager = Manager::default();
+        let mut waits = Waits::default();
         let mut opened = Vec::new();
         let signal = |id, signals| {
             let mask = mnu_abi::HANDLE_SIGNAL_READABLE
@@ -143,7 +184,7 @@ pub fn run(fs: &RuntimeFilesystem) {
             manager.visit_signals(object.channel, signal).unwrap();
             opened.push((object.handle, object.object_id));
         }
-        opened_tx.send(opened).unwrap();
+        opened_tx.send((endpoint, opened)).unwrap();
         let mut released = 0;
         let mut request = [0; provider::REQUEST_HEADER_LEN + provider::MAX_DATA_LEN];
         let mut response = [0; provider::RESPONSE_HEADER_LEN + provider::MAX_DATA_LEN];
@@ -154,7 +195,29 @@ pub fn run(fs: &RuntimeFilesystem) {
                     .unwrap();
             let length = native as u32 as usize;
             assert!(length <= request.len());
+            if request[..length].starts_with(fifo_wait_ipc::MAGIC) {
+                fifo_wait_ipc::serve(
+                    endpoint,
+                    &manager,
+                    &mut waits,
+                    native >> 32,
+                    &request[..length],
+                    objects,
+                );
+                continue;
+            }
             let (header, _) = provider::RequestHeader::decode(&request[..length]).unwrap();
+            if is_notification(header.object_id) {
+                waits
+                    .handle_provider_request(
+                        &request[..length],
+                        objects.delivery_flags,
+                        objects.count,
+                    )
+                    .unwrap();
+                notification_tx.send(header.object_id).unwrap();
+                continue;
+            }
             let dispatch = manager
                 .handle_provider_request(
                     &request[..length],
@@ -166,6 +229,11 @@ pub fn run(fs: &RuntimeFilesystem) {
             assert_eq!(objects.count, 0);
             if let Some(key) = dispatch.changed {
                 manager.visit_signals(key, signal).unwrap();
+                waits
+                    .pump(&manager, key, |id| {
+                        signal(id, mnu_abi::HANDLE_SIGNAL_READABLE)
+                    })
+                    .unwrap();
             }
             if let Some(length) = dispatch.reply_length {
                 platform::ipc::reply(native >> 32, &response[..length]).unwrap();
@@ -177,10 +245,68 @@ pub fn run(fs: &RuntimeFilesystem) {
         }
         platform::handle::close(endpoint).unwrap();
     });
-    let opened = opened_rx.recv().unwrap();
+    let (endpoint, opened) = opened_rx.recv().unwrap();
     assert_eq!(opened.len(), 5);
+    // Same numeric ID on another endpoint cannot impersonate this owner's
+    // data object. No name/PID lookup or client-supplied object ID is used.
+    let (foreign_tx, foreign_rx) = std::sync::mpsc::channel();
+    let claimed_id = opened[0].1;
+    let foreign_worker = std::thread::spawn(move || {
+        let endpoint = platform::ipc::create_handle().unwrap();
+        let handle = platform::handle::create_provider_object(
+            endpoint,
+            claimed_id,
+            mnu_abi::HANDLE_RIGHT_READ | mnu_abi::HANDLE_RIGHT_TRANSFER,
+        )
+        .unwrap();
+        foreign_tx.send(handle).unwrap();
+        let mut request = [0; provider::REQUEST_HEADER_LEN];
+        let mut objects = IpcObjectHandles::default();
+        let native =
+            platform::ipc::wait_object_handles(u64::from(endpoint), &mut request, &mut objects)
+                .unwrap();
+        let (header, _) =
+            provider::RequestHeader::decode(&request[..native as u32 as usize]).unwrap();
+        assert_eq!(objects.delivery_flags, mnu_abi::IPC_DELIVERY_NATIVE_OBJECT);
+        assert_eq!(objects.count, 0);
+        assert_eq!(header.opcode, provider::OP_RELEASE);
+        platform::handle::close(endpoint).unwrap();
+    });
+    let foreign = foreign_rx.recv().unwrap();
+    assert_eq!(
+        fifo_wait_ipc::query(
+            endpoint,
+            mnu_abi::IpcObjectHandle {
+                handle: foreign,
+                reserved: 0,
+                rights: mnu_abi::HANDLE_RIGHT_READ | mnu_abi::HANDLE_RIGHT_TRANSFER,
+            },
+            WaitCondition::Read
+        )
+        .err(),
+        Some(-13)
+    );
+    platform::handle::close(foreign).unwrap();
+    foreign_worker.join().unwrap();
+    platform::io::stdout(b"fifo-wait: PASS foreign endpoint with matching object ID is rejected\n")
+        .unwrap();
     let mut output = [0; 16];
+    let read_job = notification(endpoint, opened[0].0, WaitCondition::Read);
+    assert_eq!(
+        platform::handle::rights(read_job).unwrap(),
+        fifo_wait_ipc::JOB_RIGHTS
+    );
+    assert_eq!(
+        mochios_posix_protocol::status::normalize_failure(
+            platform::handle::read(read_job, &mut output)
+                .unwrap_err()
+                .raw()
+        ),
+        -13
+    );
+    wait_ready(read_job, false);
     assert_eq!(platform::handle::write(opened[2].0, b"old").unwrap(), 3);
+    wait_ready(read_job, true);
     assert_eq!(
         platform::handle::read(opened[3].0, &mut output)
             .unwrap_err()
@@ -197,13 +323,84 @@ pub fn run(fs: &RuntimeFilesystem) {
     assert_eq!(&output[..2], b"ld");
     assert_eq!(platform::handle::read(opened[3].0, &mut output).unwrap(), 3);
     assert_eq!(&output[..3], b"new");
+    // Duplicating a notification keeps its one-shot signal and the source
+    // lease alive even after the original notification Handle is closed.
+    let alias = platform::handle::duplicate(read_job, fifo_wait_ipc::JOB_RIGHTS).unwrap();
+    platform::handle::close(read_job).unwrap();
+    wait_ready(alias, true);
+    platform::handle::close(alias).unwrap();
+    assert!(is_notification(notification_rx.recv().unwrap()));
+    let cancelled = notification(endpoint, opened[0].0, WaitCondition::Read);
+    wait_ready(cancelled, false);
+    platform::handle::close(cancelled).unwrap();
+    assert!(is_notification(notification_rx.recv().unwrap()));
+    assert_eq!(
+        platform::handle::read(opened[0].0, &mut output)
+            .unwrap_err()
+            .raw(),
+        -11
+    );
+    platform::io::stdout(
+        b"fifo-wait: PASS native notification wait, attenuation and dup lifetime\n",
+    )
+    .unwrap();
     platform::io::stdout(
         b"fifo-manager: PASS admitted filesystem references share only the same inode queue\n",
     )
     .unwrap();
+    let chunk = [7; provider::MAX_DATA_LEN];
+    for _ in 0..BUFFER_CAPACITY / chunk.len() {
+        assert_eq!(
+            platform::handle::write(opened[2].0, &chunk).unwrap(),
+            chunk.len()
+        );
+    }
+    let write_job = notification(endpoint, opened[2].0, WaitCondition::Write(512));
+    wait_ready(write_job, false);
+    assert_eq!(
+        platform::handle::read(opened[0].0, &mut output[..1]).unwrap(),
+        1
+    );
+    wait_ready(write_job, false);
+    let mut drain = [0; provider::MAX_DATA_LEN];
+    assert_eq!(
+        platform::handle::read(opened[0].0, &mut drain[..511]).unwrap(),
+        511
+    );
+    wait_ready(write_job, true);
+    platform::handle::close(write_job).unwrap();
+    assert!(is_notification(notification_rx.recv().unwrap()));
+    let mut remaining = BUFFER_CAPACITY - 512;
+    while remaining != 0 {
+        let count = platform::handle::read(
+            opened[0].0,
+            &mut drain[..remaining.min(provider::MAX_DATA_LEN)],
+        )
+        .unwrap();
+        assert!(count > 0);
+        remaining -= count;
+    }
+    platform::io::stdout(
+        b"fifo-wait: PASS native PIPE_BUF notification waits for complete capacity\n",
+    )
+    .unwrap();
+    let pin = notification(endpoint, opened[2].0, WaitCondition::Open);
+    wait_ready(pin, true);
     platform::handle::close(opened[2].0).unwrap();
+    assert_eq!(
+        platform::handle::read(opened[0].0, &mut output)
+            .unwrap_err()
+            .raw(),
+        -11
+    );
+    platform::handle::close(pin).unwrap();
+    assert!(is_notification(notification_rx.recv().unwrap()));
     assert_eq!(released_rx.recv().unwrap(), opened[2].1);
     assert_eq!(platform::handle::read(opened[0].0, &mut output).unwrap(), 0);
+    platform::io::stdout(
+        b"fifo-wait: PASS notification final release cancels lease before source EOF\n",
+    )
+    .unwrap();
     assert_eq!(
         platform::handle::read(opened[3].0, &mut output)
             .unwrap_err()
