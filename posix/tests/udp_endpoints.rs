@@ -149,3 +149,98 @@ fn impossible_queue_reservations_do_not_publish_a_binding_or_panic() {
 #[allow(dead_code)]
 #[path = "../../../user/crates/network-stack/src/udp.rs"]
 mod packet_regressions;
+
+#[test]
+fn selected_peer_filters_both_source_fields_before_queue_capacity_is_charged() {
+    use mochios_network_stack::UdpEndpoint;
+    let mut t = UdpSocketTable::new(1, 1, 8);
+    let id = t.bind_endpoint(A, 8000).unwrap();
+    let peer = UdpEndpoint {
+        address: B,
+        port: 53,
+    };
+    assert_eq!(t.peer(id), Ok(None));
+    t.set_peer(id, Some(peer)).unwrap();
+    for (address, port) in [(A, 53), (B, 54), (A, 54)] {
+        assert_eq!(
+            t.enqueue(
+                address,
+                A,
+                UdpDatagram {
+                    source_port: port,
+                    destination_port: 8000,
+                    payload: b"bad"
+                }
+            ),
+            Err(PacketError::Mismatch)
+        );
+        assert_eq!(t.queued_for(id), Ok(0));
+    }
+    t.enqueue(
+        B,
+        A,
+        UdpDatagram {
+            source_port: 53,
+            destination_port: 8000,
+            payload: b"ok",
+        },
+    )
+    .unwrap();
+    assert_eq!(t.receive_for(id).unwrap().unwrap().payload, b"ok");
+    assert_eq!(t.peer(id), Ok(Some(peer)));
+}
+
+#[test]
+fn changing_or_removing_peer_preserves_the_local_endpoint_and_prior_records() {
+    use mochios_network_stack::UdpEndpoint;
+    let mut t = UdpSocketTable::new(1, 3, 8);
+    let id = t.bind_endpoint(A, 8000).unwrap();
+    deliver(&mut t, A, 8000, b"before").unwrap();
+    let local = t.local_endpoint(id).unwrap();
+    let peer = UdpEndpoint {
+        address: B,
+        port: 53,
+    };
+    t.set_peer(id, Some(peer)).unwrap();
+    assert_eq!(t.queued_for(id), Ok(1));
+    assert_eq!(t.receive_for(id).unwrap().unwrap().payload, b"before");
+    t.enqueue(
+        B,
+        A,
+        UdpDatagram {
+            source_port: 53,
+            destination_port: 8000,
+            payload: b"peer",
+        },
+    )
+    .unwrap();
+    t.set_peer(id, None).unwrap();
+    assert_eq!(t.local_endpoint(id), Ok(local));
+    assert_eq!(t.peer(id), Ok(None));
+    deliver(&mut t, A, 8000, b"after").unwrap();
+    assert_eq!(t.receive_for(id).unwrap().unwrap().payload, b"peer");
+    assert_eq!(t.receive_for(id).unwrap().unwrap().payload, b"after");
+}
+
+#[test]
+fn stale_peer_updates_cannot_change_a_replacement_binding() {
+    use mochios_network_stack::UdpEndpoint;
+    let mut t = UdpSocketTable::new(1, 1, 8);
+    let old = t.bind_endpoint(A, 8000).unwrap();
+    t.unbind_endpoint(old);
+    let new = t.bind_endpoint(A, 8000).unwrap();
+    assert_eq!(
+        t.set_peer(
+            old,
+            Some(UdpEndpoint {
+                address: B,
+                port: 53
+            })
+        ),
+        Err(PacketError::Mismatch)
+    );
+    assert_eq!(t.peer(old), Err(PacketError::Mismatch));
+    assert_eq!(t.peer(new), Ok(None));
+    deliver(&mut t, A, 8000, b"new").unwrap();
+    assert_eq!(t.queued_for(new), Ok(1));
+}

@@ -10,7 +10,7 @@ use mochios_network_stack::{
     DhcpState, DnsCache, DnsError, DnsErrorKind, DnsName, DnsResponseCode, DnsRetry,
     DnsRetryAction, ETHERTYPE_ARP, ETHERTYPE_IPV4, EchoPacket, EthernetHeader, Ipv4Config,
     Ipv4Header, PacketError, TCP_PROTOCOL, TcpConnection, TcpConnectionError, TcpConnectionTable,
-    TcpReceiveResult, TcpSegment, TcpState, TcpTransmit, TcpTuple, UdpDatagram, UdpSocketId,
+    TcpReceiveResult, TcpSegment, TcpState, TcpTransmit, TcpTuple, UdpDatagram, UdpEndpoint, UdpSocketId,
     UdpSocketTable,
     decode_dns_response, decode_reply, encode_dns_query, encode_request, next_hop,
     parse_ipv4_literal,
@@ -648,6 +648,13 @@ impl NetworkStack {
         started: u64,
         timeout: u64,
     ) -> Result<[u8; 4], u64> {
+        let remote = UdpEndpoint {
+            address: dns_server,
+            port: DNS_PORT,
+        };
+        self.udp
+            .set_peer(socket, Some(remote))
+            .map_err(|_| mochi_user_syscall::EIO)?;
         let source_port = self
             .udp
             .local_endpoint(socket)
@@ -662,8 +669,8 @@ impl NetworkStack {
                 DnsRetryAction::Send => {
                     self.send_udp(
                         source_port,
-                        DNS_PORT,
-                        dns_server,
+                        remote.port,
+                        remote.address,
                         &query[..query_length],
                         now,
                     )?;

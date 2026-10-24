@@ -198,4 +198,70 @@ mod production {
         assert_eq!(stack.udp.receive_for(b).unwrap().unwrap().payload, [2]);
         assert_eq!(stack.udp.queued_for(stack.dhcp_socket), Ok(0));
     }
+    #[test]
+    fn dns_installs_the_server_filter_before_receive_and_rejects_foreign_packets() {
+        let mut stack = NetworkStack::new(DriverClient, 7).unwrap();
+        let local = [192, 0, 2, 1];
+        let server = [192, 0, 2, 53];
+        let socket = stack.udp.bind_endpoint(local, 8300).unwrap();
+        crate::MODE.with(|value| value.set(2));
+        assert!(
+            stack
+                .resolve_dns_query(
+                    &DnsName::parse("example.com").unwrap(),
+                    server,
+                    socket,
+                    9,
+                    0,
+                    100
+                )
+                .is_err()
+        );
+        crate::MODE.with(|value| value.set(0));
+        assert_eq!(
+            stack.udp.peer(socket),
+            Ok(Some(UdpEndpoint {
+                address: server,
+                port: DNS_PORT
+            }))
+        );
+        for (source, port, allowed) in [
+            ([192, 0, 2, 54], DNS_PORT, false),
+            (server, 1234, false),
+            (server, DNS_PORT, true),
+        ] {
+            let mut udp = [0; 32];
+            let n = UdpDatagram {
+                source_port: port,
+                destination_port: 8300,
+                payload: b"x",
+            }
+            .encode(source, local, &mut udp)
+            .unwrap();
+            let mut packet = [0; 64];
+            let n = Ipv4Header {
+                source,
+                destination: local,
+                protocol: 17,
+                ttl: 64,
+                identification: 1,
+            }
+            .encode(&udp[..n], &mut packet)
+            .unwrap();
+            assert_eq!(
+                stack.handle_ipv4(&packet[..n], 0),
+                if allowed {
+                    Ok(())
+                } else {
+                    Err(PacketError::Mismatch)
+                }
+            );
+            assert_eq!(stack.udp.queued_for(socket), Ok(usize::from(allowed)));
+        }
+        assert_eq!(
+            stack.udp.receive_for(socket).unwrap().unwrap().payload,
+            b"x"
+        );
+        assert!(stack.udp.unbind_endpoint(socket));
+    }
 }
