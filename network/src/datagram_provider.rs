@@ -189,6 +189,15 @@ impl Server {
                 }
                 provider::OP_MEMORY_OBJECT => Ok((0, 0)),
                 provider::OP_CONTROL => match header.basis {
+                    wire::SOURCE
+                        if input.len() == wire::ENDPOINT_LEN
+                            && header.length == wire::ENDPOINT_LEN as u32 =>
+                    {
+                        let destination = wire::Endpoint::decode(input).map_err(|_| -22)?;
+                        let source = backend.source(socket, destination)?;
+                        let n = source.encode(&mut data).map_err(|_| -5)?;
+                        Ok((n as u64, n))
+                    }
                     wire::TAKE_STATUS if input.is_empty() && header.length == 4 => {
                         data[..4].copy_from_slice(&core::mem::take(&mut row.error).to_le_bytes());
                         Ok((4, 4))

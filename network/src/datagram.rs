@@ -80,6 +80,18 @@ pub(crate) trait Backend {
         }
         Ok(peer)
     }
+    fn source(&self, id: UdpSocketId, destination: wire::Endpoint) -> Result<wire::Endpoint, i32> {
+        let destination = self.destination(id, Some(destination))?;
+        let mut local = self.local(id)?;
+        if local.address == [0; 4] {
+            local.address = if destination.address[0] == 127 {
+                [127, 0, 0, 1]
+            } else {
+                self.interface_address().ok_or(-6)?
+            };
+        }
+        Ok(local)
+    }
     fn send(
         &mut self,
         id: UdpSocketId,

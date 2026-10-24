@@ -859,3 +859,125 @@ fn packet_wire_rejects_malformed_lengths_reserved_fields_and_truncation_flags() 
     assert!(p::decode_send(&[0; 7]).is_err());
     assert!(p::send(Some(endpoint), &[0; 1473], &mut [0; 1481]).is_err());
 }
+
+#[test]
+fn source_query_uses_bound_port_and_route_without_changing_binding_or_peer() {
+    use mochios_net_device_protocol::datagram as packet;
+    reset();
+    let mut s = server::Server::new();
+    assert_eq!(acquire(&mut s), 0);
+    let grant = STATE.with_borrow(|s| s.attached[0].handle);
+    let mut b = datagram::Loopback::new();
+    let (id, _) = open_packet(
+        &mut s,
+        &mut b,
+        grant,
+        packet::Endpoint {
+            address: [0; 4],
+            port: 0,
+        },
+    )
+    .unwrap();
+    let before = packet_local(&mut s, &mut b, id);
+    let mut destination = [0; 8];
+    packet::Endpoint {
+        address: [127, 0, 0, 2],
+        port: 8000,
+    }
+    .encode(&mut destination)
+    .unwrap();
+    let (status, _, bytes) = packet_request(
+        &mut s,
+        &mut b,
+        id,
+        provider::OP_CONTROL,
+        packet::SOURCE,
+        &destination,
+        8,
+        true,
+    );
+    assert_eq!(status, 0);
+    assert_eq!(
+        packet::Endpoint::decode(&bytes).unwrap(),
+        packet::Endpoint {
+            address: [127, 0, 0, 1],
+            port: before.port
+        }
+    );
+    assert_eq!(packet_local(&mut s, &mut b, id), before);
+    let (status, _, peer) = packet_request(
+        &mut s,
+        &mut b,
+        id,
+        provider::OP_CONTROL,
+        packet::PEER,
+        &[],
+        8,
+        true,
+    );
+    assert_eq!(status, 0);
+    assert!(packet::Endpoint::decode(&peer).unwrap().unspecified());
+    packet::Endpoint {
+        address: [192, 0, 2, 1],
+        port: 8000,
+    }
+    .encode(&mut destination)
+    .unwrap();
+    assert_eq!(
+        packet_request(
+            &mut s,
+            &mut b,
+            id,
+            provider::OP_CONTROL,
+            packet::SOURCE,
+            &destination,
+            8,
+            true
+        )
+        .0,
+        -6
+    );
+    assert_eq!(
+        packet_request(
+            &mut s,
+            &mut b,
+            id,
+            provider::OP_CONTROL,
+            packet::SOURCE,
+            &destination,
+            8,
+            false
+        )
+        .0,
+        -13
+    );
+    destination[6] = 1;
+    assert_eq!(
+        packet_request(
+            &mut s,
+            &mut b,
+            id,
+            provider::OP_CONTROL,
+            packet::SOURCE,
+            &destination,
+            8,
+            true
+        )
+        .0,
+        -22
+    );
+    assert_eq!(
+        packet_request(
+            &mut s,
+            &mut b,
+            id,
+            provider::OP_CONTROL,
+            packet::SOURCE,
+            &[],
+            8,
+            true
+        )
+        .0,
+        -95
+    );
+}

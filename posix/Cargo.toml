@@ -7,6 +7,7 @@ edition = "2024"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mochios"))', 'cfg(mochios_fifo_inode_probe_187)'] }
 
 [dependencies]
+mochios-net-device-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-net-device-protocol" }
 mnu-abi = { git = "https://github.com/mochiOS/mnu", package = "mnu-abi" }
 mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }
 mochios-filesystem-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-filesystem-protocol" }
@@ -24,7 +25,6 @@ libc = { path = "../../libraries/libc" }
 async-trait = "0.1"
 mochios-capability-protocol = { path = "../../user/crates/capability-protocol" }
 mochios-viewkit-gpu-protocol = { path = "../../user/crates/viewkit-gpu-protocol" }
-mochios-net-device-protocol = { path = "../../user/crates/net-device-protocol" }
 mochios-user-protocol = { path = "../../user/crates/user-protocol" }
 mochios-workspace-protocol = { path = "../../user/crates/workspace-protocol" }
 mboot-protocol = { path = "../mboot-protocol" }

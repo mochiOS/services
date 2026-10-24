@@ -28,6 +28,9 @@ pub mod named_semaphore;
 pub mod shared_memory;
 pub mod shared_memory_file;
 pub mod socket;
+pub mod inet_datagram;
+#[cfg(target_os = "mochios")]
+pub mod inet_datagram_native;
 pub mod socket_record;
 pub mod socket_stream;
 pub mod socket_record_io;
