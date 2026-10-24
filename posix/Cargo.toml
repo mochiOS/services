@@ -107,3 +107,8 @@ harness = false
 name = "native_posix_times"
 path = "tests/native_posix_times.rs"
 harness = false
+
+[[test]]
+name = "native_exec_authority"
+path = "tests/native_exec_authority.rs"
+harness = false

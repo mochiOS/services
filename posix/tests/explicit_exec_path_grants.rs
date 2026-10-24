@@ -22,9 +22,12 @@ fn execution_authorization_is_exact_thread_bound_and_consumed_once() {
 mod task {pub type ThreadId=u64;}
 // Only the fields accessed by these methods are modeled. Image contents and
 // digest enforcement have separate read_all/image-admission runtime tests.
+#[derive(Clone,Copy,Debug)]struct Grants;
+impl Grants{fn is_subset_of(&self,_other:&Self)->bool{true}}
+#[derive(Debug,PartialEq,Eq)]enum PendingExecKind{ImageReplace}
 #[derive(Debug)]
-struct PendingExecSecurity {path:String,authorized_thread:u64,digest:[u8;32]}
-struct Process {pending_exec_security:Option<PendingExecSecurity>}
+struct PendingExecSecurity {path:String,authorized_thread:u64,digest:[u8;32],kind:PendingExecKind,capabilities:Grants,kernel_authorities:Grants}
+struct Process {pending_exec_security:Option<PendingExecSecurity>,capabilities:Grants,kernel_authorities:Grants}
 impl Process {
 "#,
     );
@@ -37,10 +40,10 @@ impl Process {
         r#"
 }
 fn main() {
-    let mut process=Process{pending_exec_security:None};
+    let mut process=Process{pending_exec_security:None,capabilities:Grants,kernel_authorities:Grants};
     assert!(process.take_exec_authorization("/bin/app",7).is_none());
     process.authorize_next_exec(PendingExecSecurity{
-        path:"/bin/app".into(),authorized_thread:7,digest:[1;32],
+        path:"/bin/app".into(),authorized_thread:7,digest:[1;32],kind:PendingExecKind::ImageReplace,capabilities:Grants,kernel_authorities:Grants,
     });
     for wrong in ["/bin/other","/bin/./app","/bin/../bin/app","/bin/app/","app",""] {
         assert!(process.take_exec_authorization(wrong,7).is_none());
@@ -54,10 +57,10 @@ fn main() {
     assert!(process.take_exec_authorization("/bin/app",7).is_none());
 
     process.authorize_next_exec(PendingExecSecurity{
-        path:"/bin/old".into(),authorized_thread:7,digest:[2;32],
+        path:"/bin/old".into(),authorized_thread:7,digest:[2;32],kind:PendingExecKind::ImageReplace,capabilities:Grants,kernel_authorities:Grants,
     });
     process.authorize_next_exec(PendingExecSecurity{
-        path:"opaque-image-identity".into(),authorized_thread:8,digest:[3;32],
+        path:"opaque-image-identity".into(),authorized_thread:8,digest:[3;32],kind:PendingExecKind::ImageReplace,capabilities:Grants,kernel_authorities:Grants,
     });
     assert!(process.take_exec_authorization("/bin/old",7).is_none());
     assert!(process.take_exec_authorization("opaque-image-identity",7).is_none());

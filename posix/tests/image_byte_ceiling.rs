@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 fn production_admission_counts_the_detached_images_union_and_propagates_failures() {
     let source = include_str!("../../../core/src/syscall/exec.rs");
     let start = source.find("fn check_image_byte_ceiling(").unwrap();
-    let end = source.find("fn replace_current_process_image(").unwrap();
+    let end = source.find("fn check_image_authorization(").unwrap();
     let usage = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../core/src/mem/mapping_usage.rs")
         .canonicalize()
