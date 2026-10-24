@@ -287,6 +287,13 @@ pub struct OpenedObject<H> {
     pub rights: u64,
 }
 
+/// Newly owned backend result. Pending FIFO registration has not completed a
+/// blocking POSIX open; both references must reach a continuation-aware caller.
+pub enum OpenCompletion<H> {
+    Ready(OpenedObject<H>),
+    FifoPending { data: OpenedObject<H>, notification: OpenedObject<H> },
+}
+
 /// A Wait reference is newly owned by this service, not borrowed from the
 /// request. It grants waiting/transfer only, never mutation authorization.
 pub enum MutationError<H> {
@@ -359,6 +366,15 @@ pub trait FilesystemBackend<H: Copy> {
         _ticket: Option<AttachedObject<H>>,
     ) -> Result<OpenedObject<H>, MutationError<H>> {
         Err(MutationError::Failed(-95))
+    }
+
+    fn open_at_continuation(
+        &mut self,
+        request: &PreparedOpen,
+        paths: PathObjects<H>,
+        ticket: Option<AttachedObject<H>>,
+    ) -> Result<OpenCompletion<H>, MutationError<H>> {
+        self.open_at_admitted(request, paths, ticket).map(OpenCompletion::Ready)
     }
 
 /// Resolves a directory and checks search permission without granting a
@@ -3902,6 +3918,7 @@ impl<H: Copy> PosixService<H> {
         let header = envelope.header;
         let handles = envelope.sources;
         let admission = envelope.admission;
+        let open_continuation = envelope.open_continuation;
         if matches!(
             header.opcode,
             protocol::OP_FORK_PREPARE | protocol::OP_FORK_CANCEL
@@ -4022,7 +4039,7 @@ impl<H: Copy> PosixService<H> {
                     Ok(paths) => paths,
                     Err(status) => return object_error(header.request_id, status),
                 };
-                open_request::dispatch(header.request_id, &prepared, paths, admission, filesystem)
+                open_request::dispatch(header.request_id, &prepared, paths, admission, open_continuation, filesystem)
             }
             protocol::OP_CANONICAL_PATH_AT
             | protocol::OP_PATH_LIMITS_AT

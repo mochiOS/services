@@ -3,7 +3,9 @@ use crate::{AttachedObject, STATUS_EINVAL};
 use mochios_posix_protocol as protocol;
 
 pub const TICKET_RIGHTS: u64 = mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_TRANSFER;
-const FLAGS: u32 = protocol::MUTATION_ADMISSION | protocol::MUTATION_ADMISSION_ATTACHED;
+const FLAGS: u32 = protocol::MUTATION_ADMISSION
+    | protocol::MUTATION_ADMISSION_ATTACHED
+    | protocol::fifo::OPEN_CONTINUATION;
 
 pub struct Request<'a, H> {
     pub header: protocol::Header,
@@ -11,6 +13,7 @@ pub struct Request<'a, H> {
     /// None: legacy operation; Some(None): queue a new position;
     /// Some(Some(ticket)): retry with the explicitly attached position.
     pub admission: Option<Option<AttachedObject<H>>>,
+    pub open_continuation: bool,
 }
 
 impl<'a, H: Copy> Request<'a, H> {
@@ -23,11 +26,14 @@ impl<'a, H: Copy> Request<'a, H> {
                 header,
                 sources: handles,
                 admission: None,
+                open_continuation: false,
             });
         }
         if header.status != 0
             || header.flags & !FLAGS != 0
             || header.flags & protocol::MUTATION_ADMISSION == 0
+            || (header.flags & protocol::fifo::OPEN_CONTINUATION != 0
+                && header.opcode != protocol::OP_OPEN_AT)
             || !matches!(
                 header.opcode,
                 protocol::OP_OPEN_AT | protocol::OP_FTRUNCATE | protocol::OP_TRUNCATE_AT
@@ -44,11 +50,13 @@ impl<'a, H: Copy> Request<'a, H> {
         } else {
             (handles, None)
         };
+        let open_continuation = header.flags & protocol::fifo::OPEN_CONTINUATION != 0;
         header.flags = 0;
         Ok(Self {
             header,
             sources,
             admission: Some(ticket),
+            open_continuation,
         })
     }
 }

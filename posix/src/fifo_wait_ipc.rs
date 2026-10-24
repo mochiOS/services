@@ -10,8 +10,7 @@ use mnu_abi::{IpcObjectHandle, IpcObjectHandles};
 
 pub const MAGIC: &[u8; 4] = b"FIWT";
 pub const REQUEST_LEN: usize = 16;
-pub const JOB_RIGHTS: u64 =
-    mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_DUPLICATE | mnu_abi::HANDLE_RIGHT_TRANSFER;
+pub const JOB_RIGHTS: u64 = mochios_posix_protocol::fifo::NOTIFICATION_RIGHTS;
 const DIRECTIONS: u64 = mnu_abi::HANDLE_RIGHT_READ | mnu_abi::HANDLE_RIGHT_WRITE;
 
 pub fn encode(condition: WaitCondition) -> Result<[u8; REQUEST_LEN], i32> {

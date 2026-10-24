@@ -68,10 +68,7 @@ pub fn admit_with(
 }
 
 pub fn data_rights(access: Access) -> u64 {
-    mnu_abi::HANDLE_RIGHT_CONTROL
-        | mnu_abi::HANDLE_RIGHT_DUPLICATE
-        | mnu_abi::HANDLE_RIGHT_TRANSFER
-        | mnu_abi::HANDLE_RIGHT_WAIT
+    mochios_posix_protocol::fifo::COMMON_DATA_RIGHTS
         | match access {
             Access::Read => mnu_abi::HANDLE_RIGHT_READ,
             Access::Write => mnu_abi::HANDLE_RIGHT_WRITE,

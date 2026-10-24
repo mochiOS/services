@@ -38,6 +38,7 @@ pub fn execute<H: Copy, F: FilesystemBackend<H>>(
                     prepared,
                     paths,
                     envelope.admission,
+                    envelope.open_continuation,
                     filesystem,
                 )
             },
@@ -51,19 +52,45 @@ pub(crate) fn dispatch<H: Copy, F: FilesystemBackend<H>>(
     prepared: &PreparedOpen,
     paths: PathObjects<H>,
     admission: Option<Option<AttachedObject<H>>>,
+    continuation: bool,
     filesystem: &mut F,
 ) -> ObjectResponse<H> {
-    let result = match admission {
-        Some(ticket) => filesystem.open_at_admitted(prepared, paths, ticket),
-        None => filesystem
+    let result = match (admission, continuation) {
+        (Some(ticket), true) => filesystem.open_at_continuation(prepared, paths, ticket),
+        (None, true) => Err(MutationError::Failed(STATUS_EINVAL)),
+        (Some(ticket), false) => filesystem
+            .open_at_admitted(prepared, paths, ticket)
+            .map(OpenCompletion::Ready),
+        (None, false) => filesystem
             .open_at(prepared, paths)
+            .map(OpenCompletion::Ready)
             .map_err(MutationError::Failed),
     };
     match result {
-        Ok(opened) => ObjectResponse {
+        Ok(OpenCompletion::Ready(opened)) => ObjectResponse {
             response: status_response(request_id, protocol::STATUS_OK),
             handles: vec![opened],
         },
+        Ok(OpenCompletion::FifoPending { data, notification }) => {
+            if protocol::fifo::data_rights(prepared.options) != Some(data.rights)
+                || notification.rights != protocol::fifo::NOTIFICATION_RIGHTS
+                || prepared.options & protocol::OPEN_NONBLOCK != 0
+            {
+                for object in [data, notification] {
+                    filesystem.release_object(AttachedObject {
+                        handle: object.handle,
+                        rights: object.rights,
+                    });
+                }
+                return object_error(request_id, protocol::STATUS_EIO);
+            }
+            let mut response = status_response(request_id, protocol::STATUS_OK);
+            response.header.flags = protocol::fifo::OPEN_PENDING_REPLY;
+            ObjectResponse {
+                response,
+                handles: vec![data, notification],
+            }
+        }
         Err(error) => object_mutation_error(request_id, error, admission.is_some(), filesystem),
     }
 }

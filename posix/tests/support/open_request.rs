@@ -169,6 +169,155 @@ fn setup(
 }
 
 #[test]
+fn fifo_continuation_is_explicit_owned_and_image_rejection_reclaims_both_handles() {
+    let flags = protocol::MUTATION_ADMISSION | protocol::fifo::OPEN_CONTINUATION;
+    for invalid_image in [false, true] {
+        let (state, peer, header, payload) = setup(protocol::OpenBase::ProcessCwd, flags);
+        let data = OpenedObject {
+            handle: 301,
+            rights: protocol::fifo::data_rights(protocol::OPEN_READ).unwrap(),
+        };
+        let notification = OpenedObject {
+            handle: 302,
+            rights: protocol::fifo::NOTIFICATION_RIGHTS,
+        };
+        let state_ref = state.clone();
+        let mut fs = RecordingFilesystem {
+            fifo_pending: Some((data, notification)),
+            open_hook: Some(Box::new(move || {
+                assert!(
+                    state_ref.try_lock().is_ok(),
+                    "no state lock across FIFO handoff"
+                );
+            })),
+            ..Default::default()
+        };
+        let result =
+            posix_service::open_request::execute(&state, peer, header, &payload, &[], &mut fs);
+        assert_eq!(result.response.header.status, 0);
+        assert_eq!(
+            result.response.header.flags,
+            protocol::fifo::OPEN_PENDING_REPLY
+        );
+        assert_eq!(result.handles, [data, notification]);
+        assert!(result.response.payload.is_empty());
+        let old = fs.released.len();
+        let result = posix_service::open_request::finish(
+            result,
+            if invalid_image { Err(-1) } else { Ok(()) },
+            &mut fs,
+        );
+        if invalid_image {
+            assert_eq!(result.response.header.status, -1);
+            assert_eq!(result.response.header.flags, 0);
+            assert!(result.handles.is_empty());
+            assert_eq!(
+                fs.released[old..]
+                    .iter()
+                    .map(|o| o.handle)
+                    .collect::<Vec<_>>(),
+                [301, 302]
+            );
+        } else {
+            assert_eq!(result.handles, [data, notification]);
+            assert_eq!(fs.released.len(), old);
+        }
+    }
+}
+
+#[test]
+fn invalid_pending_rights_or_nonblocking_open_release_both_instead_of_publishing() {
+    for mode in 0..3 {
+        let (state, peer, mut header, mut payload) = setup(
+            protocol::OpenBase::ProcessCwd,
+            protocol::MUTATION_ADMISSION | protocol::fifo::OPEN_CONTINUATION,
+        );
+        if mode == 2 {
+            let len = protocol::encode_open_at(
+                protocol::OpenAtRequest {
+                    base: protocol::OpenBase::ProcessCwd,
+                    options: protocol::OPEN_READ | protocol::OPEN_NONBLOCK,
+                    mode: 0,
+                    path: b"fifo",
+                },
+                &mut payload,
+            )
+            .unwrap();
+            payload.truncate(len);
+            header.payload_len = len as u32;
+        }
+        let data = OpenedObject {
+            handle: 301,
+            rights: protocol::fifo::data_rights(protocol::OPEN_READ).unwrap()
+                | if mode == 0 {
+                    mnu_abi::HANDLE_RIGHT_WRITE
+                } else {
+                    0
+                },
+        };
+        let notification = OpenedObject {
+            handle: 302,
+            rights: protocol::fifo::NOTIFICATION_RIGHTS
+                | if mode == 1 {
+                    mnu_abi::HANDLE_RIGHT_READ
+                } else {
+                    0
+                },
+        };
+        let mut fs = RecordingFilesystem {
+            fifo_pending: Some((data, notification)),
+            ..Default::default()
+        };
+        let result =
+            posix_service::open_request::execute(&state, peer, header, &payload, &[], &mut fs);
+        assert_eq!(result.response.header.status, protocol::STATUS_EIO);
+        assert!(result.handles.is_empty());
+        assert!(fs.released.iter().any(|o| o.handle == 301));
+        assert!(fs.released.iter().any(|o| o.handle == 302));
+    }
+}
+
+#[test]
+fn continuation_flag_requires_open_at_and_admission_and_preserves_borrowed_sources() {
+    for (opcode, flags, valid) in [
+        (
+            protocol::OP_OPEN_AT,
+            protocol::fifo::OPEN_CONTINUATION,
+            false,
+        ),
+        (
+            protocol::OP_FTRUNCATE,
+            protocol::MUTATION_ADMISSION | protocol::fifo::OPEN_CONTINUATION,
+            false,
+        ),
+        (
+            protocol::OP_TRUNCATE_AT,
+            protocol::MUTATION_ADMISSION | protocol::fifo::OPEN_CONTINUATION,
+            false,
+        ),
+        (
+            protocol::OP_OPEN_AT,
+            protocol::MUTATION_ADMISSION | protocol::fifo::OPEN_CONTINUATION,
+            true,
+        ),
+    ] {
+        let decoded = posix_service::mutation_admission::Request::<u32>::decode(
+            protocol::Header {
+                opcode,
+                flags,
+                ..Default::default()
+            },
+            &[],
+        );
+        if valid {
+            assert!(decoded.unwrap().open_continuation);
+        } else {
+            assert_eq!(decoded.err(), Some(-22));
+        }
+    }
+}
+
+#[test]
 fn root_and_open_rpc_release_state_lock_and_keep_owned_path_anchors() {
     let (state, peer, header, payload) = setup(protocol::OpenBase::ProcessCwd, 0);
     let root_state = state.clone();

@@ -50,6 +50,7 @@ impl ObjectTransport for &Replies {
         assert_eq!(
             header.flags,
             wire::MUTATION_ADMISSION
+                | if self.opcode == wire::OP_OPEN_AT { wire::fifo::OPEN_CONTINUATION } else { 0 }
                 | if attempt > 0 {
                     wire::MUTATION_ADMISSION_ATTACHED
                 } else {

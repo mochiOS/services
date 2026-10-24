@@ -1459,6 +1459,7 @@ struct RecordingFilesystem {
     root_base: Option<u32>,
     admission_calls: Vec<(u16, Option<AttachedObject<u32>>)>,
     admission_response: Option<Result<OpenedObject<u32>, i32>>,
+    fifo_pending: Option<(OpenedObject<u32>, OpenedObject<u32>)>,
     request: Option<PreparedOpen>,
     directory_request: Option<PreparedStat>,
     stat_request: Option<PreparedStat>,
@@ -1669,6 +1670,27 @@ impl ProcessBackend<u32> for RecordingProcesses {
 }
 
 impl FilesystemBackend<u32> for RecordingFilesystem {
+    fn open_at_continuation(
+        &mut self,
+        request: &PreparedOpen,
+        paths: PathObjects<u32>,
+        ticket: Option<AttachedObject<u32>>,
+    ) -> Result<posix_service::OpenCompletion<u32>, posix_service::MutationError<u32>> {
+        if let Some((data, notification)) = self.fifo_pending.take() {
+            self.admit(protocol::OP_OPEN_AT, ticket)?;
+            self.request = Some(request.clone());
+            self.root = Some(paths.root);
+            self.directory = paths.base;
+            if let Some(hook) = self.open_hook.as_mut() {
+                hook();
+            }
+            Ok(posix_service::OpenCompletion::FifoPending { data, notification })
+        } else {
+            self.open_at_admitted(request, paths, ticket)
+                .map(posix_service::OpenCompletion::Ready)
+        }
+    }
+
     fn open_at_admitted(
         &mut self,
         request: &PreparedOpen,

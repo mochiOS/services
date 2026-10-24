@@ -166,10 +166,7 @@ impl Manager {
             .filter(|id| *id <= MAX_DATA_OBJECT_ID)
             .ok_or(-75)?;
         self.last_id = id; // Never reuse an ID, even after native creation fails.
-        let rights = mnu_abi::HANDLE_RIGHT_CONTROL
-            | mnu_abi::HANDLE_RIGHT_DUPLICATE
-            | mnu_abi::HANDLE_RIGHT_TRANSFER
-            | mnu_abi::HANDLE_RIGHT_WAIT
+        let rights = mochios_posix_protocol::fifo::COMMON_DATA_RIGHTS
             | match admitted.access {
                 Access::Read => mnu_abi::HANDLE_RIGHT_READ,
                 Access::Write => mnu_abi::HANDLE_RIGHT_WRITE,
