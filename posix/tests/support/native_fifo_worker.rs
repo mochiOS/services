@@ -37,9 +37,15 @@ fn register(
         .unwrap();
     let (header, payload) =
         posix_service::filesystem_transport::reply_frame(&response, native, 91).unwrap();
-    worker
-        .register(header, payload, objects, access, nonblocking)
-        .unwrap()
+    Worker::register(
+        worker.endpoint(),
+        header,
+        payload,
+        objects,
+        access,
+        nonblocking,
+    )
+    .unwrap()
 }
 pub fn run(filesystem: &RuntimeFilesystem, worker: &mut Worker) {
     let path = format!(

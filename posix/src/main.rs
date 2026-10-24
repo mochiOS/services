@@ -182,6 +182,7 @@ fn main() {
     let mut filesystem = RuntimeFilesystem {
         endpoint: filesystem_endpoint,
         device_endpoint: Some(provider_endpoint_handle),
+        fifo_endpoint: None,
     };
     let mut _fifo_worker = match fifo_native::Worker::start(filesystem_endpoint) {
         Ok(worker) => worker,
@@ -191,8 +192,14 @@ fn main() {
             platform::process::exit(1);
         }
     };
+    filesystem.fifo_endpoint = Some(_fifo_worker.endpoint());
     #[cfg(mochios_fifo_inode_probe_187)]
-    native_fifo_inode::run(&filesystem, &mut _fifo_worker);
+    {
+        native_fifo_inode::run(&filesystem, &mut _fifo_worker);
+        _fifo_worker =
+            fifo_native::Worker::start(filesystem_endpoint).expect("restart diagnostic FIFO owner");
+        filesystem.fifo_endpoint = Some(_fifo_worker.endpoint());
+    }
     let _pty_namespace = match terminal_namespace_native::prepare(&filesystem) {
         Ok(directory) => directory,
         Err(error) => {
@@ -514,6 +521,7 @@ fn main() {
         };
         // Provider queries must not run under service_state: a queued native
         // terminal request can be waiting for that same mutex for job control.
+        let metadata_providers = [Some(provider_endpoint_handle), filesystem.fifo_endpoint];
         let inspected_file = if peer.is_some()
             && request_image.is_some()
             && attachments_valid
@@ -530,8 +538,8 @@ fn main() {
                     &mut filesystem,
                     AttachedObject { handle: object.handle, rights: object.rights },
                 ),
-                |object| posix_service::pty_metadata_ipc::query(
-                    provider_endpoint_handle, object, platform::handle::HANDLE_RIGHT_TRANSFER,
+                |object| query_provider_metadata(
+                    metadata_providers, object, platform::handle::HANDLE_RIGHT_TRANSFER,
                 ),
                 |handle| { let _ = platform::handle::close(handle); },
             ))
@@ -2828,6 +2836,22 @@ fn wait_response(
 struct RuntimeFilesystem {
     endpoint: mochi_user_platform::handle::Handle,
     device_endpoint: Option<mochi_user_platform::handle::Handle>,
+    fifo_endpoint: Option<mochi_user_platform::handle::Handle>,
+}
+
+#[cfg(target_os = "mochios")]
+fn query_provider_metadata(
+    providers: [Option<u32>; 2],
+    source: mnu_abi::IpcObjectHandle,
+    rights: u64,
+) -> Result<posix_service::OpenedObject<u32>, i32> {
+    for endpoint in providers.into_iter().flatten() {
+        match posix_service::pty_metadata_ipc::query(endpoint, source, rights) {
+            Err(-9) => continue,
+            result => return result,
+        }
+    }
+    Err(-9)
 }
 
 #[cfg(target_os = "mochios")]
@@ -2933,7 +2957,7 @@ impl RuntimeFilesystem {
         header: mochios_filesystem_protocol::Header,
         payload: &[u8],
     ) -> Result<(), i32> {
-        let endpoint = self.device_endpoint;
+        let providers = [self.device_endpoint, self.fifo_endpoint];
         posix_service::filesystem_metadata::mutate_through_provider(
             mnu_abi::IpcObjectHandle {
                 handle: file.handle,
@@ -2951,7 +2975,7 @@ impl RuntimeFilesystem {
                 )
             },
             |object| {
-                posix_service::pty_metadata_ipc::query(endpoint.ok_or(-9)?, object, object.rights)
+                query_provider_metadata(providers, object, object.rights)
             },
             |handle| {
                 let _ = mochi_user_platform::handle::close(handle);
@@ -3041,28 +3065,23 @@ impl RuntimeFilesystem {
         ))
     }
 
-    fn mutation_call(
-        &self,
-        (mut header, payload, mut handles): FilesystemMutationRequest,
+    fn append_admission(
+        header: &mut mochios_filesystem_protocol::Header,
+        handles: &mut mochi_user_platform::ipc::IpcObjectHandles,
         ticket: Option<posix_service::AttachedObject<u32>>,
-        success_objects: usize,
-    ) -> Result<Option<posix_service::OpenedObject<u32>>, posix_service::MutationError<u32>> {
+    ) -> Result<(), i32> {
         use mochi_user_platform as platform;
         use mochios_filesystem_protocol as filesystem;
-        use posix_service::{
-            MutationError, OpenedObject,
-            filesystem_transport::{MutationReply, mutation_status},
-        };
         header.flags |= filesystem::MUTATION_ADMISSION;
         if let Some(ticket) = ticket {
             if ticket.handle == 0
                 || ticket.rights != posix_service::mutation_admission::TICKET_RIGHTS
             {
-                return Err(MutationError::Failed(-13));
+                return Err(-13);
             }
             let index = handles.count as usize;
             if index >= handles.handles.len() {
-                return Err(MutationError::Failed(-22));
+                return Err(-22);
             }
             handles.handles[index] = platform::ipc::IpcObjectHandle {
                 handle: ticket.handle,
@@ -3072,6 +3091,62 @@ impl RuntimeFilesystem {
             handles.count += 1;
             header.flags |= filesystem::MUTATION_ADMISSION_ATTACHED;
         }
+        Ok(())
+    }
+
+    fn continuation_open(
+        &self,
+        prepared: &posix_service::PreparedOpen,
+        paths: posix_service::PathObjects<u32>,
+        ticket: Option<posix_service::AttachedObject<u32>>,
+    ) -> Result<posix_service::OpenCompletion<u32>, posix_service::MutationError<u32>> {
+        use mochios_filesystem_protocol as filesystem;
+        let (mut header, payload, mut handles) = self.open_request(prepared, paths)?;
+        header.flags |= filesystem::OPEN_AT_RETAIN_FIFO;
+        Self::append_admission(&mut header, &mut handles, ticket)?;
+        let mut request = vec![0; filesystem::HEADER_LEN + payload.len()];
+        let length = filesystem::encode(header, &payload, &mut request).map_err(|_| -22)?;
+        let mut response = vec![0; filesystem::HEADER_LEN + filesystem::NODE_STATUS_LEN];
+        let result = (|| {
+            let native = self
+                .call(&request[..length], &mut response, &mut handles)
+                .map_err(|error| mochios_posix_protocol::status::normalize_failure(error.raw()))?;
+            let (reply, payload) = posix_service::filesystem_transport::reply_frame(
+                &response,
+                native,
+                header.request_id,
+            )?;
+            posix_service::filesystem_open::finish(
+                reply,
+                header.request_id,
+                payload,
+                &mut handles,
+                prepared,
+                |reply, payload, metadata, access, nonblocking| {
+                    let Some(endpoint) = self.fifo_endpoint else {
+                        close_runtime_handles(&metadata);
+                        return Err(-5);
+                    };
+                    fifo_native::open(endpoint, reply, payload, metadata, access, nonblocking)
+                },
+            )
+        })();
+        close_runtime_handles(&handles);
+        result
+    }
+
+    fn mutation_call(
+        &self,
+        (mut header, payload, mut handles): FilesystemMutationRequest,
+        ticket: Option<posix_service::AttachedObject<u32>>,
+        success_objects: usize,
+    ) -> Result<Option<posix_service::OpenedObject<u32>>, posix_service::MutationError<u32>> {
+        use mochios_filesystem_protocol as filesystem;
+        use posix_service::{
+            MutationError, OpenedObject,
+            filesystem_transport::{MutationReply, mutation_status},
+        };
+        Self::append_admission(&mut header, &mut handles, ticket)?;
         let mut request = vec![0; filesystem::HEADER_LEN + payload.len()];
         let length = filesystem::encode(header, &payload, &mut request).map_err(|_| -22)?;
         let mut reply = [0; filesystem::HEADER_LEN];
@@ -3435,6 +3510,14 @@ fn controlled_file_handle(
 
 #[cfg(target_os = "mochios")]
 impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for RuntimeFilesystem {
+    fn open_at_continuation(
+        &mut self,
+        request: &posix_service::PreparedOpen,
+        paths: posix_service::PathObjects<u32>,
+        ticket: Option<posix_service::AttachedObject<u32>>,
+    ) -> Result<posix_service::OpenCompletion<u32>, posix_service::MutationError<u32>> {
+        self.continuation_open(request, paths, ticket)
+    }
     fn open_session_root(
         &mut self,
         effective_uid: u32,

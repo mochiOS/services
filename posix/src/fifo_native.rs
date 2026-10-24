@@ -19,10 +19,8 @@ fn status(error: platform::syscall::SysError) -> i32 {
     mochios_posix_protocol::status::normalize_failure(error.raw())
 }
 fn metadata_identity(handle: u32) -> Result<u64, i32> {
-    platform::handle::identify_provider_object(handle).map_err(|error| match error.native_error() {
-        Some(mnu_abi::status::Error::InvalidArgument | mnu_abi::status::Error::AccessDenied) => 9,
-        _ => -status(error),
-    })
+    platform::handle::identify_provider_object(handle)
+        .map_err(|error| pty_metadata_ipc::identity_error(error.raw()))
 }
 fn close_objects(objects: &IpcObjectHandles) {
     for (index, object) in objects
@@ -109,7 +107,7 @@ impl Worker {
     /// have validated it against a successful call on this worker's FS authority.
     /// Success registers data; ready=false is NOT a completed blocking open.
     pub fn register(
-        &self,
+        endpoint: u32,
         header: fs::Header,
         payload: &[u8],
         objects: IpcObjectHandles,
@@ -132,13 +130,8 @@ impl Worker {
             let mut response = [0; 8];
             let native =
                 posix_service::filesystem_transport::call_native(&mut received, |native| {
-                    platform::ipc::call_object_handles(
-                        self.endpoint,
-                        &request,
-                        &mut response,
-                        native,
-                    )
-                    .map_err(status)
+                    platform::ipc::call_object_handles(endpoint, &request, &mut response, native)
+                        .map_err(status)
                 })?;
             let result = (|| {
                 if native as u32 != 8 || received.delivery_flags != 0 {
@@ -221,6 +214,37 @@ fn reply(sender: u64, code: i32, ready: bool) {
     response[..4].copy_from_slice(&code.to_le_bytes());
     response[4..].copy_from_slice(&u32::from(ready).to_le_bytes());
     let _ = platform::ipc::reply(sender, &response);
+}
+
+/// Complete an admitted pathname open without keeping the dispatcher asleep.
+/// Pending registrations return their data and notification as owned references.
+pub fn open(
+    endpoint: u32,
+    header: fs::Header,
+    payload: &[u8],
+    objects: IpcObjectHandles,
+    access: Access,
+    nonblocking: bool,
+) -> Result<posix_service::OpenCompletion<u32>, i32> {
+    let registered = Worker::register(endpoint, header, payload, objects, access, nonblocking)?;
+    if registered.ready {
+        return Ok(posix_service::OpenCompletion::Ready(registered.object));
+    }
+    let source = IpcObjectHandle {
+        handle: registered.object.handle,
+        reserved: 0,
+        rights: registered.object.rights,
+    };
+    match fifo_wait_ipc::query(endpoint, source, posix_service::fifo::WaitCondition::Open) {
+        Ok(notification) => Ok(posix_service::OpenCompletion::FifoPending {
+            data: registered.object,
+            notification,
+        }),
+        Err(error) => {
+            let _ = platform::handle::close(registered.object.handle);
+            Err(error)
+        }
+    }
 }
 fn run(endpoint: u32, process: u64, scope: FilesystemScope) {
     let mut manager = Manager::default();

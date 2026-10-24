@@ -184,8 +184,23 @@ fn native_metadata_operations_use_the_shared_resolver_and_explicit_endpoint() {
         .next()
         .unwrap();
     assert!(helper.contains("mutate_through_provider("));
-    assert!(helper.contains("pty_metadata_ipc::query("));
+    assert!(helper.contains("query_provider_metadata("));
     assert!(!helper.contains(".lock()"));
+}
+
+#[test]
+fn only_native_identity_rejection_allows_fallback_to_another_provider() {
+    use mnu_abi::status::Error;
+    for error in [Error::InvalidArgument,Error::AccessDenied] {
+        assert_eq!(posix_service::pty_metadata_ipc::identity_error(error.into_raw() as i64),9);
+    }
+    for error in [Error::BackingFailure,Error::NotReady,Error::ResourceUnavailable,Error::NotFound,
+        Error::PeerClosed,Error::Unsupported,Error::LimitExceeded,Error::InvalidAddress,Error::AlreadyExists,Error::InvalidFormat] {
+        let raw=error.into_raw() as i64;
+        assert_eq!(posix_service::pty_metadata_ipc::identity_error(raw),-mochios_posix_protocol::status::normalize_failure(raw));
+        assert_ne!(posix_service::pty_metadata_ipc::identity_error(raw),9);
+    }
+    assert_eq!(posix_service::pty_metadata_ipc::identity_error(-5),5);
 }
 
 #[test]
@@ -207,12 +222,16 @@ struct AttachedObject<H>{handle:H,rights:u64}
 thread_local!{
  static CLOSED:std::cell::RefCell<Vec<u32>>=const{std::cell::RefCell::new(Vec::new())};
  static QUERIES:std::cell::Cell<u32>=const{std::cell::Cell::new(0)};
+ static FIRST_ERROR:std::cell::Cell<i32>=const{std::cell::Cell::new(0)};
+ static SEEN:std::cell::RefCell<Vec<u32>>=const{std::cell::RefCell::new(Vec::new())};
 }
 mod handle{pub fn close(handle:u32)->Result<(),i32>{super::CLOSED.with_borrow_mut(|v|v.push(handle));Ok(())}}
 mod pty_metadata_ipc{
  pub fn query(endpoint:u32,object:super::IpcObjectHandle,rights:u64)->Result<super::OpenedObject<u32>,i32>{
-  assert_eq!(endpoint,81);assert_eq!(object.handle,40);assert_eq!(object.rights,3);assert_eq!(rights,3);
-  super::QUERIES.set(super::QUERIES.get()+1);Ok(super::OpenedObject{handle:92,rights})
+  assert!([81,82].contains(&endpoint));assert_eq!(object.handle,40);assert_eq!(object.rights,3);assert_eq!(rights,3);
+  super::SEEN.with_borrow_mut(|v|v.push(endpoint));super::QUERIES.set(super::QUERIES.get()+1);
+  if endpoint==81 && super::FIRST_ERROR.get()!=0{return Err(super::FIRST_ERROR.get());}
+  Ok(super::OpenedObject{handle:92,rights})
  }
 }
 fn controlled_file_handle(file:AttachedObject<u32>)->Result<AttachedObject<u32>,i32>{assert_eq!(file.rights,3);Ok(file)}
@@ -227,7 +246,10 @@ mod filesystem_metadata{
     ));
     program.push_str(r#"
 }
-struct RuntimeFilesystem{device_endpoint:Option<u32>,result:Result<(),i32>,calls:Vec<u32>}
+"#);
+    program.push_str(probe::between(include_str!("../src/main.rs"),"fn query_provider_metadata(","#[cfg"));
+    program.push_str(r#"
+struct RuntimeFilesystem{device_endpoint:Option<u32>,fifo_endpoint:Option<u32>,result:Result<(),i32>,calls:Vec<u32>}
 impl RuntimeFilesystem{
  fn empty_call(&mut self,header:Header,payload:&[u8],file:AttachedObject<u32>)->Result<(),i32>{
   assert_eq!(header,Header{opcode:18,mode:0o620});assert_eq!(payload,b"stored credentials");
@@ -244,13 +266,23 @@ impl RuntimeFilesystem{
 fn main(){
  for result in [Ok(()),Err(-13),Err(-5)]{
   CLOSED.with_borrow_mut(Vec::clear);QUERIES.set(0);
-  let mut fs=RuntimeFilesystem{device_endpoint:Some(81),result,calls:Vec::new()};
+  let mut fs=RuntimeFilesystem{device_endpoint:Some(81),fifo_endpoint:None,result,calls:Vec::new()};
   assert_eq!(fs.metadata_call(AttachedObject{handle:40,rights:7},Header{opcode:18,mode:0o620},b"stored credentials"),result);
   assert_eq!(fs.calls,[40,92]);assert_eq!(QUERIES.get(),1);CLOSED.with_borrow(|v|assert_eq!(v,&[92]));
  }
- let mut fs=RuntimeFilesystem{device_endpoint:None,result:Ok(()),calls:Vec::new()};
+ let mut fs=RuntimeFilesystem{device_endpoint:None,fifo_endpoint:None,result:Ok(()),calls:Vec::new()};
  assert_eq!(fs.metadata_call(AttachedObject{handle:40,rights:3},Header{opcode:18,mode:0o620},b"stored credentials"),Err(-9));
  assert_eq!(fs.calls,[40]);
+ for error in [-9,-13,-5] {
+  CLOSED.with_borrow_mut(Vec::clear);SEEN.with_borrow_mut(Vec::clear);FIRST_ERROR.set(error);
+  let mut fs=RuntimeFilesystem{device_endpoint:Some(81),fifo_endpoint:Some(82),result:Ok(()),calls:Vec::new()};
+  let result=fs.metadata_call(AttachedObject{handle:40,rights:3},Header{opcode:18,mode:0o620},b"stored credentials");
+  if error==-9 {
+   assert_eq!(result,Ok(()));SEEN.with_borrow(|v|assert_eq!(v,&[81,82]));CLOSED.with_borrow(|v|assert_eq!(v,&[92]));
+  } else {
+   assert_eq!(result,Err(error));SEEN.with_borrow(|v|assert_eq!(v,&[81]));CLOSED.with_borrow(|v|assert!(v.is_empty()));
+  }
+ }
 }
 "#);
     probe::run(&program);

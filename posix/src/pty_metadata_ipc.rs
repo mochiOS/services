@@ -12,6 +12,17 @@ fn metadata_rights(rights: u64) -> bool {
     rights & T != 0 && rights & !(C | T) == 0
 }
 
+/// Positive errno for provider identification. Only an actual identity/type
+/// rejection permits trying another provider; backing failures stay errors.
+pub fn identity_error(raw: i64) -> i32 {
+    match mnu_abi::status::Error::from_raw(raw as u64) {
+        Some(mnu_abi::status::Error::InvalidArgument | mnu_abi::status::Error::AccessDenied) => {
+            crate::pty::EBADF
+        }
+        _ => -mochios_posix_protocol::status::normalize_failure(raw),
+    }
+}
+
 /// Receiver-side errors are positive POSIX wire errno. Identity and rights
 /// originate only in native identification and kernel attachment metadata.
 pub fn lookup(
@@ -67,7 +78,8 @@ pub fn serve(
     use mochi_user_platform as platform;
     let result = manager.lock().map_err(|_| EIO).and_then(|manager| {
         lookup(&manager, bytes, &attached, |handle| {
-            platform::handle::identify_provider_object(handle).map_err(|_| crate::pty::EBADF)
+            platform::handle::identify_provider_object(handle)
+                .map_err(|error| identity_error(error.raw()))
         })
     });
     reply_metadata(sender, result, attached);

@@ -59,6 +59,7 @@ pub(super) fn snapshot_process(
         let mut filesystem = super::RuntimeFilesystem {
             endpoint,
             device_endpoint: None,
+            fifo_endpoint: None,
         };
         posix_service::directory_request::initialize(state, peer, &mut filesystem)?;
     }
