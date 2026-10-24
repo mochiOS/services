@@ -261,6 +261,7 @@ impl Runtime {
         identity: platform::service_ready::SessionIdentity,
         session_id: u64,
     ) -> Option<u64> {
+        crate::keychain_control::activate(self.keychain.as_ref()?, identity.uid).ok()?;
         let owns_handshake = self.ready.is_none();
         if !self.ensure_ready_handshake() {
             return None;
@@ -1243,11 +1244,19 @@ fn resident(
         }
         match request.action {
             platform::session_control::Action::Lock => {
-                let status = match runtime.authenticate_session(Some(session.identity.uid)) {
-                    Some(identity) if identity == session.identity => 0,
-                    Some(_) => mochi_user_syscall::EACCES as i32,
-                    None => mochi_user_syscall::EIO as i32,
-                };
+                let status =
+                    match runtime.authenticate_session(Some(session.identity.uid)) {
+                        Some(identity) if identity == session.identity => {
+                            match runtime.keychain.as_ref().map(|process| {
+                                crate::keychain_control::activate(process, identity.uid)
+                            }) {
+                                Some(Ok(())) => 0,
+                                _ => mochi_user_syscall::EIO as i32,
+                            }
+                        }
+                        Some(_) => mochi_user_syscall::EACCES as i32,
+                        None => mochi_user_syscall::EIO as i32,
+                    };
                 reply_session_status(sender, request.action, session.id, status);
             }
             platform::session_control::Action::LogOut => {

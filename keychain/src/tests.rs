@@ -53,8 +53,14 @@ fn put() -> Request {
 }
 fn initialize(s: &mut Service<Memory, Rng>, p: &Peer) {
     assert!(
-        s.execute(p, Request::Initialize { password: pass() })
-            .is_ok()
+        s.execute(
+            p,
+            Request::Initialize {
+                epoch: s.session_epoch,
+                password: pass()
+            }
+        )
+        .is_ok()
     );
 }
 fn secret(s: &mut Service<Memory, Rng>, p: &Peer, id: wire::ItemId) -> Vec<u8> {
@@ -101,6 +107,7 @@ fn encrypted_storage_owner_user_signer_boundaries_and_grant_revocation() {
         s.execute(
             &mail,
             Request::Reveal {
+                epoch: s.session_epoch,
                 id,
                 password: pass()
             }
@@ -120,6 +127,7 @@ fn encrypted_storage_owner_user_signer_boundaries_and_grant_revocation() {
         s.execute(
             &admin,
             Request::Grant {
+                epoch: s.session_epoch,
                 id,
                 target: terra.application.clone(),
                 revoke: false,
@@ -136,6 +144,7 @@ fn encrypted_storage_owner_user_signer_boundaries_and_grant_revocation() {
     s.execute(
         &admin,
         Request::Grant {
+            epoch: s.session_epoch,
             id,
             target: terra.application.clone(),
             revoke: true,
@@ -167,17 +176,25 @@ fn restart_wrong_password_tampering_and_rekey_keep_data() {
         s.execute(
             &admin,
             Request::Unlock {
+                epoch: s.session_epoch,
                 password: Secret::new(b"wrong-password".to_vec())
             }
         ),
         Err(Error::Authentication)
     ));
-    s.execute(&admin, Request::Unlock { password: pass() })
-        .unwrap();
+    s.execute(
+        &admin,
+        Request::Unlock {
+            epoch: s.session_epoch,
+            password: pass(),
+        },
+    )
+    .unwrap();
     assert_eq!(secret(&mut s, &admin, id), b"refresh-secret-never-on-disk");
     s.execute(
         &admin,
         Request::ChangePassword {
+            epoch: s.session_epoch,
             old: pass(),
             new: Secret::new(b"new very long password".to_vec()),
         },
@@ -185,12 +202,19 @@ fn restart_wrong_password_tampering_and_rekey_keep_data() {
     .unwrap();
     s.execute(&admin, Request::Lock).unwrap();
     assert!(matches!(
-        s.execute(&admin, Request::Unlock { password: pass() }),
+        s.execute(
+            &admin,
+            Request::Unlock {
+                epoch: s.session_epoch,
+                password: pass()
+            }
+        ),
         Err(Error::Authentication)
     ));
     s.execute(
         &admin,
         Request::Unlock {
+            epoch: s.session_epoch,
             password: Secret::new(b"new very long password".to_vec()),
         },
     )
@@ -208,6 +232,7 @@ fn restart_wrong_password_tampering_and_rekey_keep_data() {
         s.execute(
             &admin,
             Request::Unlock {
+                epoch: s.session_epoch,
                 password: Secret::new(b"new very long password".to_vec())
             }
         ),
@@ -247,7 +272,13 @@ fn malformed_frames_and_cross_user_file_swaps_fail_closed() {
     mem.files.borrow_mut().insert(2, blob);
     let b = peer("org.mochios.keychain", 2, true);
     assert!(matches!(
-        s.execute(&b, Request::Unlock { password: pass() }),
+        s.execute(
+            &b,
+            Request::Unlock {
+                epoch: s.session_epoch,
+                password: pass()
+            }
+        ),
         Err(Error::Corrupt)
     ));
     for n in 0..32 {
@@ -317,10 +348,114 @@ fn entropy_failure_never_creates_a_vault() {
     let mut s = Service::new(mem.clone(), NoRandom);
     let p = peer("org.mochios.keychain", 1000, true);
     assert!(matches!(
-        s.execute(&p, Request::Initialize { password: pass() }),
+        s.execute(
+            &p,
+            Request::Initialize {
+                epoch: s.session_epoch,
+                password: pass()
+            }
+        ),
         Err(Error::Unavailable)
     ));
     assert!(mem.files.borrow().is_empty());
+}
+
+#[test]
+fn native_session_gate_rejects_unlocks_queued_before_lock_or_for_another_user() {
+    let mut s = Service::session_controlled(Memory::default(), Rng(31)).unwrap();
+    let admin = peer("org.mochios.keychain", 1000, true);
+    let mut controller = peer("org.mochios.service-manager", 0, false);
+    controller.session_control = true;
+    controller.access = false;
+    assert!(matches!(
+        s.execute(&admin, Request::ActivateSession { uid: 1000 }),
+        Err(Error::Denied)
+    ));
+    assert!(matches!(
+        s.execute(
+            &admin,
+            Request::Initialize {
+                epoch: 1,
+                password: pass()
+            }
+        ),
+        Err(Error::Locked)
+    ));
+    s.execute(&controller, Request::ActivateSession { uid: 1000 })
+        .unwrap();
+    let previous_epoch = s.session_epoch;
+    initialize(&mut s, &admin);
+    s.execute(&controller, Request::LockAll).unwrap();
+    assert!(matches!(
+        s.execute(
+            &admin,
+            Request::Unlock {
+                epoch: previous_epoch,
+                password: pass()
+            }
+        ),
+        Err(Error::Locked)
+    ));
+    s.execute(&controller, Request::ActivateSession { uid: 1001 })
+        .unwrap();
+    assert!(matches!(
+        s.execute(
+            &admin,
+            Request::Unlock {
+                epoch: s.session_epoch,
+                password: pass()
+            }
+        ),
+        Err(Error::Locked)
+    ));
+    s.execute(&controller, Request::ActivateSession { uid: 1000 })
+        .unwrap();
+    assert!(matches!(
+        s.execute(
+            &admin,
+            Request::Unlock {
+                epoch: previous_epoch,
+                password: pass()
+            }
+        ),
+        Err(Error::Conflict)
+    ));
+    assert!(!s.unlocked.contains_key(&1000));
+    s.execute(
+        &admin,
+        Request::Unlock {
+            epoch: s.session_epoch,
+            password: pass(),
+        },
+    )
+    .unwrap();
+    assert!(s.unlocked.contains_key(&1000));
+    for request in [
+        Request::Reveal {
+            epoch: previous_epoch,
+            id: [1; 16],
+            password: pass(),
+        },
+        Request::ManageDelete {
+            epoch: previous_epoch,
+            id: [1; 16],
+            password: pass(),
+        },
+        Request::Grant {
+            epoch: previous_epoch,
+            id: [1; 16],
+            target: admin.application.clone(),
+            revoke: false,
+            password: pass(),
+        },
+        Request::ChangePassword {
+            epoch: previous_epoch,
+            old: pass(),
+            new: pass(),
+        },
+    ] {
+        assert!(matches!(s.execute(&admin, request), Err(Error::Conflict)));
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -388,6 +523,7 @@ fn replacing_disk_vault_cannot_reauthenticate_a_different_unlocked_vault() {
     s.execute(
         &admin,
         Request::ChangePassword {
+            epoch: s.session_epoch,
             old: pass(),
             new: Secret::new(b"replacement vault password".to_vec()),
         },
@@ -398,6 +534,7 @@ fn replacing_disk_vault_cannot_reauthenticate_a_different_unlocked_vault() {
         s.execute(
             &admin,
             Request::Reveal {
+                epoch: s.session_epoch,
                 id,
                 password: pass()
             }

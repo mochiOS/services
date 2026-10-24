@@ -28,6 +28,9 @@ pub struct Service<S: Storage, R: Random> {
     random: R,
     unlocked: BTreeMap<u32, Unlocked>,
     known: BTreeMap<u32, BTreeSet<Application>>,
+    session_epoch: u64,
+    session_user: Option<u32>,
+    session_controlled: bool,
 }
 impl<S: Storage, R: Random> Service<S, R> {
     pub fn new(storage: S, random: R) -> Self {
@@ -36,7 +39,24 @@ impl<S: Storage, R: Random> Service<S, R> {
             random,
             unlocked: BTreeMap::new(),
             known: BTreeMap::new(),
+            session_epoch: 1,
+            session_user: None,
+            session_controlled: false,
         }
+    }
+    /// Native operation starts closed until service-manager authenticates a session.
+    pub fn session_controlled(storage: S, mut random: R) -> Result<Self> {
+        let mut bytes = [0; 8];
+        random.fill(&mut bytes)?;
+        let epoch = u64::from_le_bytes(bytes);
+        if epoch == 0 || epoch == u64::MAX {
+            return Err(Error::Unavailable);
+        }
+        Ok(Self {
+            session_controlled: true,
+            session_epoch: epoch,
+            ..Self::new(storage, random)
+        })
     }
     pub fn execute(&mut self, peer: &Peer, request: Request) -> Result<Reply> {
         let result = self.execute_inner(peer, request);
@@ -47,16 +67,28 @@ impl<S: Storage, R: Random> Service<S, R> {
     }
     fn execute_inner(&mut self, peer: &Peer, request: Request) -> Result<Reply> {
         peer.application.validate().map_err(|_| Error::Denied)?;
-        if matches!(request, Request::LockAll) {
+        if matches!(request, Request::LockAll | Request::ActivateSession { .. }) {
             if !peer.session_control {
                 return Err(Error::Denied);
             }
+            let epoch = self.session_epoch.checked_add(1).ok_or(Error::Limit)?;
             self.unlocked.clear();
             self.known.clear();
+            self.session_epoch = epoch;
+            self.session_user = match request {
+                Request::ActivateSession { uid } => Some(uid),
+                _ => None,
+            };
             return Ok(Reply::Ok);
         }
         if !peer.access || request.manager() && !peer.manager {
             return Err(Error::Denied);
+        }
+        if self.session_controlled
+            && self.session_user != Some(peer.uid)
+            && !matches!(request, Request::Status)
+        {
+            return Err(Error::Locked);
         }
         if self.known.len() >= 32 && !self.known.contains_key(&peer.uid) {
             return Err(Error::Limit);
@@ -75,9 +107,13 @@ impl<S: Storage, R: Random> Service<S, R> {
                 Ok(Reply::Status {
                     initialized: blob.is_some(),
                     unlocked: self.unlocked.contains_key(&uid),
+                    session_epoch: self.session_epoch,
                 })
             }
-            Request::Initialize { password } => {
+            Request::Initialize { epoch, password } => {
+                if epoch != self.session_epoch {
+                    return Err(Error::Conflict);
+                }
                 if self.storage.load(uid)?.is_some() {
                     return Err(Error::Exists);
                 }
@@ -92,7 +128,10 @@ impl<S: Storage, R: Random> Service<S, R> {
                 self.unlocked.insert(uid, vault);
                 Ok(Reply::Ok)
             }
-            Request::Unlock { password } => {
+            Request::Unlock { epoch, password } => {
+                if epoch != self.session_epoch {
+                    return Err(Error::Conflict);
+                }
                 let b = self.storage.load(uid)?.ok_or(Error::Missing)?;
                 let v = Unlocked::open(uid, password.expose(), &b)?;
                 self.unlocked.insert(uid, v);
@@ -203,8 +242,12 @@ impl<S: Storage, R: Random> Service<S, R> {
                 self.save(uid, data)?;
                 Ok(Reply::Ok)
             }
-            Request::Reveal { id, password } => {
-                self.reauthenticate(uid, &password)?;
+            Request::Reveal {
+                epoch,
+                id,
+                password,
+            } => {
+                self.reauthenticate(uid, epoch, &password)?;
                 let e = self
                     .unlocked
                     .get(&uid)
@@ -216,8 +259,12 @@ impl<S: Storage, R: Random> Service<S, R> {
                     .ok_or(Error::Missing)?;
                 Ok(Reply::Secret(e.secret.clone()))
             }
-            Request::ManageDelete { id, password } => {
-                self.reauthenticate(uid, &password)?;
+            Request::ManageDelete {
+                epoch,
+                id,
+                password,
+            } => {
+                self.reauthenticate(uid, epoch, &password)?;
                 let mut data = self.unlocked.get(&uid).ok_or(Error::Locked)?.data.clone();
                 let at = data
                     .entries
@@ -230,13 +277,14 @@ impl<S: Storage, R: Random> Service<S, R> {
                 Ok(Reply::Ok)
             }
             Request::Grant {
+                epoch,
                 id,
                 target,
                 revoke,
                 password,
             } => {
                 target.validate()?;
-                self.reauthenticate(uid, &password)?;
+                self.reauthenticate(uid, epoch, &password)?;
                 let mut data = self.unlocked.get(&uid).ok_or(Error::Locked)?.data.clone();
                 let e = data
                     .entries
@@ -303,8 +351,8 @@ impl<S: Storage, R: Random> Service<S, R> {
                         .collect(),
                 })
             }
-            Request::ChangePassword { old, new } => {
-                self.reauthenticate(uid, &old)?;
+            Request::ChangePassword { epoch, old, new } => {
+                self.reauthenticate(uid, epoch, &old)?;
                 let mut salt = [0; 16];
                 self.random.fill(&mut salt)?;
                 let mut replacement = self
@@ -324,10 +372,13 @@ impl<S: Storage, R: Random> Service<S, R> {
                 self.unlocked.insert(uid, replacement);
                 Ok(Reply::Ok)
             }
-            Request::LockAll => Err(Error::Denied),
+            Request::LockAll | Request::ActivateSession { .. } => Err(Error::Denied),
         }
     }
-    fn reauthenticate(&mut self, uid: u32, password: &Secret) -> Result<()> {
+    fn reauthenticate(&mut self, uid: u32, epoch: u64, password: &Secret) -> Result<()> {
+        if epoch != self.session_epoch {
+            return Err(Error::Conflict);
+        }
         let b = self.current_publication(uid)?;
         let _verified = Unlocked::open(uid, password.expose(), &b)?;
         Ok(())

@@ -230,7 +230,7 @@ mod tests {
         let disk = Disk::new(root.join("data")).unwrap();
         let worker = std::thread::spawn(move || {
             let mut service = Service::new(disk, Entropy);
-            for _ in 0..5 {
+            for _ in 0..6 {
                 serve_one(listener.accept().unwrap().0, &policy, &mut service).unwrap();
             }
         });

@@ -3725,6 +3725,7 @@ dependencies = [
  "unicode-script",
  "wgpu",
  "winit",
+ "zeroize",
 ]
 
 [[package]]
