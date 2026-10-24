@@ -10,6 +10,7 @@ path = "/system/services/service-manager.service"
 kind = "service"
 requires = [
     "system.random.read",
+    "keychain.session",
     "fs.read.all",
     "process.inspect",
     "process.kill",

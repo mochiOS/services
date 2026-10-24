@@ -164,6 +164,20 @@ pub(crate) fn spawn_network_service(
     )
 }
 
+pub(crate) fn spawn_keychain_service(
+    logger_endpoint: u64,
+    ready_target: platform::service_ready::Target,
+    posix_endpoint: platform::handle::Handle,
+) -> Result<NativeProcess, mochi_user_syscall::SysError> {
+    spawn_native_fixed(
+        FixedService::Keychain,
+        "keychain.service",
+        logger_endpoint,
+        ready_target,
+        posix_endpoint,
+    )
+}
+
 pub(crate) fn spawn_user_service(
     logger_endpoint: u64,
     ready_target: platform::service_ready::Target,

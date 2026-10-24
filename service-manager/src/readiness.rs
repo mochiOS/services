@@ -21,6 +21,7 @@ pub(crate) enum ReadyService {
     Display,
     Network,
     User,
+    Keychain,
     SecureUi,
     Workspace,
     Binder,
@@ -35,6 +36,7 @@ impl ReadyService {
             Self::Display => "display.driver",
             Self::Network => "network.service",
             Self::User => "user.service",
+            Self::Keychain => "keychain.service",
             Self::SecureUi => "secure-ui.service",
             Self::Workspace => "workspace.service",
             Self::Binder => "Binder.app",
@@ -61,6 +63,7 @@ pub(crate) struct ReadyHandshake {
     display_token: u64,
     network_token: u64,
     user_token: u64,
+    keychain_token: u64,
     secure_ui_token: u64,
     workspace_token: u64,
     binder_token: u64,
@@ -72,6 +75,7 @@ pub(crate) struct ReadyHandshake {
     display_status: platform::service_ready::OneShotStatus,
     network_status: platform::service_ready::OneShotStatus,
     user_status: platform::service_ready::OneShotStatus,
+    keychain_status: platform::service_ready::OneShotStatus,
     secure_ui_status: platform::service_ready::OneShotStatus,
     workspace_status: platform::service_ready::OneShotStatus,
     binder_status: platform::service_ready::OneShotStatus,
@@ -184,6 +188,31 @@ impl ReadyHandshake {
                 binder_token = 1;
             }
         }
+        let mut keychain_token = 0;
+        for _ in 0..32 {
+            let token = platform::service_ready::generate_token()
+                .map_err(|e| ReadyError::Ipc(e.raw().unsigned_abs()))?;
+            if token != 0
+                && ![
+                    filesystem_token,
+                    posix_token,
+                    input_token,
+                    display_token,
+                    network_token,
+                    user_token,
+                    secure_ui_token,
+                    workspace_token,
+                    binder_token,
+                ]
+                .contains(&token)
+            {
+                keychain_token = token;
+                break;
+            }
+        }
+        if keychain_token == 0 {
+            return Err(ReadyError::InvalidMessage);
+        }
         Ok(Self {
             endpoint,
             filesystem_token,
@@ -192,6 +221,7 @@ impl ReadyHandshake {
             display_token,
             network_token,
             user_token,
+            keychain_token,
             secure_ui_token,
             workspace_token,
             binder_token,
@@ -203,6 +233,7 @@ impl ReadyHandshake {
             display_status: platform::service_ready::OneShotStatus::new(),
             network_status: platform::service_ready::OneShotStatus::new(),
             user_status: platform::service_ready::OneShotStatus::new(),
+            keychain_status: platform::service_ready::OneShotStatus::new(),
             secure_ui_status: platform::service_ready::OneShotStatus::new(),
             workspace_status: platform::service_ready::OneShotStatus::new(),
             binder_status: platform::service_ready::OneShotStatus::new(),
@@ -222,6 +253,7 @@ impl ReadyHandshake {
             ReadyService::Display => self.display_token,
             ReadyService::Network => self.network_token,
             ReadyService::User => self.user_token,
+            ReadyService::Keychain => self.keychain_token,
             ReadyService::SecureUi => self.secure_ui_token,
             ReadyService::Workspace => self.workspace_token,
             ReadyService::Binder => self.binder_token,
@@ -240,6 +272,7 @@ impl ReadyHandshake {
             ReadyService::Display => self.display_status.get(),
             ReadyService::Network => self.network_status.get(),
             ReadyService::User => self.user_status.get(),
+            ReadyService::Keychain => self.keychain_status.get(),
             ReadyService::SecureUi => self.secure_ui_status.get(),
             ReadyService::Workspace => self.workspace_status.get(),
             ReadyService::Binder => self.binder_status.get(),
@@ -257,6 +290,8 @@ impl ReadyHandshake {
             &mut self.display_status
         } else if token == self.network_token {
             &mut self.network_status
+        } else if token == self.keychain_token {
+            &mut self.keychain_status
         } else if token == self.user_token {
             &mut self.user_status
         } else if token == self.secure_ui_token {
@@ -545,9 +580,7 @@ fn receive_notification() -> Result<Option<ReceivedNotification>, ReadyError> {
     let mut handles = platform::ipc::IpcObjectHandles::default();
     let received = match platform::ipc::try_wait_object_handles(&mut message, &mut handles) {
         Ok(received) => received,
-        Err(error)
-            if error.native_error() == Some(mochi_user_syscall::NativeError::NotReady) =>
-        {
+        Err(error) if error.native_error() == Some(mochi_user_syscall::NativeError::NotReady) => {
             return Ok(None);
         }
         Err(error) => return Err(ReadyError::Ipc(error.raw().unsigned_abs())),

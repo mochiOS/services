@@ -45,6 +45,7 @@ pub(crate) enum StopReason {
     InputReadyFailed,
     UserSpawnFailed,
     UserReadyFailed,
+    KeychainReadyFailed,
     SecureUiSpawnFailed,
     SecureUiLoginFailed,
     BinderSpawnFailed,
@@ -121,6 +122,7 @@ pub(crate) trait BootstrapOperations {
     fn spawn_secure_ui(&mut self) -> Option<Self::SecureUiProcess>;
     fn spawn_update(&mut self) -> Option<Self::UpdateProcess>;
     fn spawn_user(&mut self) -> Option<Self::UserProcess>;
+    fn start_keychain(&mut self) -> bool;
     fn spawn_network(&mut self) -> Option<Self::NetworkProcess>;
     fn spawn_compositor(&mut self) -> Option<Self::CompositorProcess>;
     fn spawn_input(&mut self) -> Option<Self::InputProcess>;
@@ -233,6 +235,9 @@ pub(crate) fn orchestrate<O: BootstrapOperations>(
         return outcome(children, StopReason::UserReadyFailed);
     }
 
+    if !operations.start_keychain() {
+        return outcome(children, StopReason::KeychainReadyFailed);
+    }
     let installation_required = operations.installation_required();
     let identity = if installation_required {
         FIRST_BOOT_IDENTITY
@@ -322,6 +327,7 @@ mod tests {
         WaitDiscovery,
         WaitNetwork,
         WaitUser,
+        StartKeychain,
         WaitSecureUiLogin,
         WaitBinder,
     }
@@ -340,6 +346,7 @@ mod tests {
         DiscoveryComplete,
         NetworkReady,
         UserReady,
+        KeychainReady,
         SecureUiLogin,
         BinderReady,
     }
@@ -438,6 +445,7 @@ mod tests {
                 FixedService::Compositor => 13,
                 FixedService::Network => 14,
                 FixedService::User => 15,
+                FixedService::Keychain => 25,
                 FixedService::SecureUi => 16,
                 FixedService::Linux => 20,
                 FixedService::Binder => 17,
@@ -502,6 +510,10 @@ mod tests {
             self.failure != Failure::NetworkReady
         }
 
+        fn start_keychain(&mut self) -> bool {
+            self.events.push(Event::StartKeychain);
+            self.failure != Failure::KeychainReady
+        }
         fn wait_user_ready(&mut self, _process: &Self::UserProcess) -> bool {
             self.events.push(Event::WaitUser);
             self.failure != Failure::UserReady
@@ -542,6 +554,7 @@ mod tests {
             Event::Spawn(FixedService::Update),
             Event::Spawn(FixedService::User),
             Event::WaitUser,
+            Event::StartKeychain,
             Event::Spawn(FixedService::SecureUi),
             Event::WaitSecureUiLogin,
             Event::SpawnUserSession(FixedService::Workspace, TEST_IDENTITY),
@@ -739,5 +752,12 @@ mod tests {
         assert_eq!(outcome.reason, StopReason::Running);
         assert_eq!(outcome.children.update, None);
         assert_eq!(update_failure.events.last(), Some(&Event::WaitNetwork));
+    }
+    #[test]
+    fn keychain_failure_stops_before_login() {
+        let mut operations = FakeOperations::new(Failure::KeychainReady);
+        let result = orchestrate(&mut operations);
+        assert_eq!(result.reason, StopReason::KeychainReadyFailed);
+        assert!(!operations.events.contains(&Event::WaitSecureUiLogin));
     }
 }

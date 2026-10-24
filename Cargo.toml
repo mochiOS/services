@@ -8,6 +8,7 @@ members = [
     "drivers",
     "filesystem",
     "input",
+    "keychain",
     "logger",
     "linux",
     "mboot-protocol",

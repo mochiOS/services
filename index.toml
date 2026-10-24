@@ -109,3 +109,10 @@ fs = "rootfs"
 description = "mochiOS user workspace service"
 autostart = false
 order = 14
+
+[keychain.service]
+dir = "keychain"
+fs = "rootfs"
+description = "mochiOS encrypted user keychain service"
+autostart = false
+order = 16

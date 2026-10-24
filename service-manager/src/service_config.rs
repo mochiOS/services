@@ -18,6 +18,7 @@ pub(crate) enum FixedService {
     Compositor,
     Network,
     User,
+    Keychain,
     SecureUi,
     Linux,
     Binder,
@@ -102,6 +103,10 @@ pub(crate) const fn fixed_service_spec(service: FixedService) -> ServiceSpec {
         FixedService::Network => ServiceSpec::privileged(
             "/system/services/network.service",
             "/system/packages/network/manifest.toml",
+        ),
+        FixedService::Keychain => ServiceSpec::privileged(
+            "/system/services/keychain.service",
+            "/system/packages/keychain/manifest.toml",
         ),
         FixedService::User => ServiceSpec::privileged(
             "/system/services/user.service",

@@ -19,6 +19,7 @@ struct Runtime {
     deferred_requests: VecDeque<DeferredMessage>,
     permission_prompt: crate::portal::PermissionPrompts,
     iommu_warning: Option<NativeProcess>,
+    keychain: Option<NativeProcess>,
     filesystem_endpoint: Option<platform::handle::Handle>,
     posix_endpoint: Option<platform::handle::Handle>,
     session_processes: alloc::collections::BTreeMap<u64, NativeProcess>,
@@ -178,6 +179,7 @@ impl Runtime {
             deferred_requests: VecDeque::new(),
             permission_prompt: crate::portal::PermissionPrompts::default(),
             iommu_warning: None,
+            keychain: None,
             filesystem_endpoint: None,
             posix_endpoint: None,
             session_processes: alloc::collections::BTreeMap::new(),
@@ -235,7 +237,8 @@ impl Runtime {
                 true
             }
             Err(error) => {
-                if let crate::process_watch::ProcessWatchTarget::RetainedHandle(handle) = process_target
+                if let crate::process_watch::ProcessWatchTarget::RetainedHandle(handle) =
+                    process_target
                 {
                     if let Ok(usage) = platform::process::execution_usage(Some(handle)) {
                         eprintln!(
@@ -585,6 +588,32 @@ impl BootstrapOperations for Runtime {
         }
     }
 
+    fn start_keychain(&mut self) -> bool {
+        let Some(endpoint) = self.posix_endpoint else {
+            return false;
+        };
+        let Some(target) = self
+            .ready
+            .as_ref()
+            .map(|ready| ready.target(ReadyService::Keychain))
+        else {
+            return false;
+        };
+        match service_launcher::spawn_keychain_service(self.logger_endpoint, target, endpoint) {
+            Ok(process) => {
+                let watch = process.watch_target();
+                self.keychain = Some(process);
+                self.wait_ready(ReadyService::Keychain, watch)
+            }
+            Err(error) => {
+                platform::logln!(
+                    "service-manager.service: keychain startup failed errno={}",
+                    error.raw()
+                );
+                false
+            }
+        }
+    }
     fn spawn_fixed(&mut self, service: FixedService) -> Option<u64> {
         let ready_target = match service {
             FixedService::Filesystem => {
@@ -640,6 +669,7 @@ impl BootstrapOperations for Runtime {
                     .map(|handshake| handshake.target(ReadyService::SecureUi))
             }
             FixedService::MbootAgent
+            | FixedService::Keychain
             | FixedService::Compositor
             | FixedService::Linux
             | FixedService::Binder
@@ -971,6 +1001,7 @@ fn service_name(service: FixedService) -> &'static str {
         FixedService::Compositor => "compositor.service",
         FixedService::Network => "network.service",
         FixedService::User => "user.service",
+        FixedService::Keychain => "keychain.service",
         FixedService::SecureUi => "secure-ui.service",
         FixedService::Linux => "linux.service",
         FixedService::Binder => "Binder.app",
@@ -1197,6 +1228,19 @@ fn resident(
             );
             continue;
         };
+        let locked = runtime
+            .keychain
+            .as_ref()
+            .is_some_and(|process| crate::keychain_control::lock(process).is_ok());
+        if !locked {
+            reply_session_status(
+                sender,
+                request.action,
+                session.id,
+                mochi_user_syscall::EIO as i32,
+            );
+            continue;
+        }
         match request.action {
             platform::session_control::Action::Lock => {
                 let status = match runtime.authenticate_session(Some(session.identity.uid)) {

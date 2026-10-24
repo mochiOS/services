@@ -1,0 +1,10 @@
+[package]
+provenance = "built-in"
+id = "org.mochios.keychain-service"
+name = "Keychain Service"
+version = "1"
+vendor = "mochiOS"
+[[binary]]
+path = "/system/services/keychain.service"
+kind = "service"
+requires = ["ipc.client", "ipc.server", "process.inspect", "system.random.read", "fs.read.all", "fs.write.all"]
