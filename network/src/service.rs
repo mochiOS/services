@@ -106,14 +106,7 @@ pub(crate) fn run() -> ! {
                 if let Some(length) = handle(
                     &mut stack, &mut tls, &mut http, sender, bytes, &mut reply, now,
                 ) {
-                    if let Err(error) = platform::ipc::reply(sender, &reply[..length])
-                        && error.raw() == mochi_user_syscall::EACCES as i64
-                    {
-                        // One-way clients use their default receive endpoint as
-                        // a completion queue. Synchronous callers retain the
-                        // ordinary reply path above.
-                        let _ = platform::ipc::send(sender, &reply[..length]);
-                    }
+                    crate::reply::send(sender, &reply[..length]);
                 }
             }
             Err(error)

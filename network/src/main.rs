@@ -2,6 +2,7 @@ extern crate alloc;
 
 mod driver;
 mod http;
+mod reply;
 mod service;
 mod stack;
 mod status;
