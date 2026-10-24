@@ -186,6 +186,7 @@ fn peek_codec_binds_mode_and_rejects_noncanonical_requests_and_receipts() {
     assert!(wire::peek(0, 65537, 0).is_err());
     assert!(wire::peek(0, 0, 254).is_err());
     let reply = wire::ReceiveReply {
+        end_of_record: false,
         copied: 3,
         length: 8,
         total_rights: 253,
@@ -227,6 +228,7 @@ fn receive_and_delivery_codecs_bind_limits_offsets_counts_and_reserved_fields() 
     invalid[22] = 1;
     assert!(wire::decode(&invalid).is_err());
     let reply = wire::ReceiveReply {
+        end_of_record: false,
         copied: 3,
         length: 8,
         total_rights: 253,
@@ -239,7 +241,7 @@ fn receive_and_delivery_codecs_bind_limits_offsets_counts_and_reserved_fields() 
     assert!(wire::ReceiveReply::decode(2, 2, &bytes[..count]).is_err());
     assert!(wire::ReceiveReply::decode(3, 1, &bytes[..count]).is_err());
     assert!(wire::ReceiveReply::decode(65537, 2, &bytes[..count]).is_err());
-    bytes[22] = 1;
+    bytes[22] = 2;
     assert!(wire::ReceiveReply::decode(3, 2, &bytes[..count]).is_err());
     for maximum in [0, 5, u16::MAX] {
         assert!(wire::deliver(0, maximum).is_err());

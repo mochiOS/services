@@ -176,6 +176,7 @@ pub fn dispatch(
                     .map_err(|_| -5)?;
                     let mut response = [0; wire::MAX_RECEIVE_REPLY_LEN];
                     let reply = wire::ReceiveReply {
+                        end_of_record: info.record.end_of_record,
                         copied: info.record.copied as u32,
                         length: info.record.length as u32,
                         total_rights: info.total_rights as u16,

@@ -2,20 +2,20 @@
 //! This fixture deliberately has no POSIX Client/endpoint implementation:
 //! regular files, directories and special files must use the native data path.
 #![allow(dead_code)]
-use std::ffi::c_int;
-use std::sync::{Mutex, MutexGuard};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use mochios_posix_client::{
     fd::{Entry, FdTable},
     handle_borrow::Book,
     upcall_guard::Guard,
 };
+use std::ffi::c_int;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 #[path = "../../../user/crates/newlib-runtime/src/callback_resources.rs"]
 mod callback_resources;
-#[path = "../../../user/crates/newlib-runtime/src/fd_options.rs"]
-mod implementation;
 #[path = "../../../user/crates/newlib-runtime/src/file_description_flags.rs"]
 mod file_description_flags;
+#[path = "../../../user/crates/newlib-runtime/src/fd_options.rs"]
+mod implementation;
 #[path = "../../../user/crates/newlib-runtime/src/io_resources.rs"]
 mod io_resources;
 const EBADF: c_int = 9;
@@ -40,6 +40,7 @@ enum FdKind {
     ObjectSharedMemory,
     ObjectSocket,
     ObjectDatagram,
+    ObjectSeqPacket,
     ObjectStreamRead,
     ObjectStreamWrite,
     ObjectPty,
@@ -246,7 +247,8 @@ mod syscall {
             wire::UPDATE => {
                 assert!(matches!(operation, SyscallNumber::HandleControl));
                 assert_eq!((size, output, capacity), (8, 0, 0));
-                let bytes = unsafe { std::slice::from_raw_parts(input as *const u8, size as usize) };
+                let bytes =
+                    unsafe { std::slice::from_raw_parts(input as *const u8, size as usize) };
                 let (mask, flags) = wire::decode_update(bytes).unwrap();
                 assert_eq!(
                     mask,
@@ -328,6 +330,7 @@ fn provider_status_calls_run_without_state_lock_and_retain_the_original_referenc
         FdKind::ObjectSharedMemory,
         FdKind::ObjectSocket,
         FdKind::ObjectDatagram,
+        FdKind::ObjectSeqPacket,
         FdKind::ObjectStreamRead,
         FdKind::ObjectStreamWrite,
         FdKind::ObjectPty,
@@ -512,6 +515,7 @@ fn nonblocking_updates_retain_source_authority_and_release_it_on_every_result() 
         FdKind::ObjectSharedMemory,
         FdKind::ObjectSocket,
         FdKind::ObjectDatagram,
+        FdKind::ObjectSeqPacket,
         FdKind::ObjectStreamRead,
         FdKind::ObjectStreamWrite,
         FdKind::ObjectPty,

@@ -378,9 +378,10 @@ fn invalid_creation_and_capacity_limits_do_not_publish_partial_pairs() {
         (
             Create {
                 kind: Kind::SequencedPacket,
+                protocol: 1,
                 ..request
             },
-            -95,
+            -93,
         ),
         (
             Create {

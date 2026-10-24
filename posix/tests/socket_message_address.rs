@@ -54,8 +54,8 @@ thread_local! {
 }
 mod socket {
     use super::*;
-    pub fn is_datagram(entry: FdEntry) -> Result<bool, c_int> {
-        Ok(matches!(entry.handle.kind, Kind::Datagram))
+    pub fn is_record(entry: FdEntry) -> bool {
+        matches!(entry.handle.kind, Kind::Datagram)
     }
     pub fn message_entry(
         entry: FdEntry,

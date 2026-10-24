@@ -63,6 +63,7 @@ impl SocketName {
 
 struct Endpoint {
     id: u64,
+    kind: Kind,
     // None means never connected, not a previously connected peer's close.
     peer: Option<u64>,
     credentials: (u32, u32),
@@ -143,7 +144,11 @@ impl Streams {
         if request.options & !NONBLOCKING != 0 {
             return Err(-22);
         }
-        if request.domain != Domain::Unix || !matches!(request.kind, Kind::Stream | Kind::Datagram)
+        if request.domain != Domain::Unix
+            || !matches!(
+                request.kind,
+                Kind::Stream | Kind::Datagram | Kind::SequencedPacket
+            )
         {
             return Err(-95);
         }
@@ -162,10 +167,11 @@ impl Streams {
         let id = self.next;
         self.entries.push(Endpoint {
             id,
+            kind: request.kind,
             peer: None,
             credentials,
             incoming: crate::socket_stream::StreamQueue::new(),
-            records: (request.kind == Kind::Datagram).then(crate::socket_record::RecordQueue::new),
+            records: (request.kind != Kind::Stream).then(crate::socket_record::RecordQueue::new),
             receive_capacity: RECEIVE_CAPACITY,
             send_capacity: SEND_CAPACITY,
             receive_timeout: 0,
@@ -200,10 +206,11 @@ impl Streams {
         for (id, peer) in [(ids[0], ids[1]), (ids[1], ids[0])] {
             self.entries.push(Endpoint {
                 id,
+                kind: request.kind,
                 peer: Some(peer),
                 credentials,
                 incoming: crate::socket_stream::StreamQueue::new(),
-                records: (request.kind == Kind::Datagram)
+                records: (request.kind != Kind::Stream)
                     .then(crate::socket_record::RecordQueue::new),
                 receive_capacity: RECEIVE_CAPACITY,
                 send_capacity: SEND_CAPACITY,
@@ -410,7 +417,7 @@ impl Streams {
     /// Wait for at least one byte and one ancillary marker on a stream; retain
     /// full-record capacity semantics for datagrams. No FD enters this policy.
     pub fn ancillary_send_ready(&self, id: u64, length: usize) -> Result<bool, i32> {
-        if self.kind(id)? == Kind::Datagram {
+        if self.kind(id)? != Kind::Stream {
             return self.record_send_ready(id, length);
         }
         match self.stream_send_length(id, length, true) {
@@ -475,7 +482,13 @@ impl Streams {
         }
         let entry = self.endpoint(id)?;
         if let Some(records) = &entry.records {
-            return Ok(records.is_readable() || entry.read_shutdown || entry.error != 0);
+            if entry.kind == Kind::SequencedPacket && entry.peer.is_none() {
+                return Err(-107);
+            }
+            return Ok(records.is_readable()
+                || entry.read_shutdown
+                || entry.error != 0
+                || (entry.kind == Kind::SequencedPacket && self.readiness(id)?.read_closed));
         }
         if entry.peer.is_none() {
             return Err(-107);
@@ -543,7 +556,7 @@ impl Streams {
     /// transition. Allocate pending capacity before publishing or changing it.
     pub fn listen(&mut self, id: u64, backlog: u32) -> Result<(), i32> {
         let entry = self.endpoint_mut(id)?;
-        if entry.records.is_some() {
+        if entry.kind == Kind::Datagram {
             return Err(-95);
         }
         if entry.peer.is_some() {
@@ -567,7 +580,7 @@ impl Streams {
     /// Reject invalid state before a potentially costly filesystem lookup.
     pub fn check_connect(&self, client: u64) -> Result<(), i32> {
         let source = self.endpoint(client)?;
-        if source.records.is_some() {
+        if source.kind == Kind::Datagram {
             return Err(-95);
         }
         if source.peer.is_some() {
@@ -580,11 +593,31 @@ impl Streams {
     }
 
     pub fn kind(&self, id: u64) -> Result<Kind, i32> {
-        Ok(if self.endpoint(id)?.records.is_some() {
-            Kind::Datagram
-        } else {
-            Kind::Stream
-        })
+        Ok(self.endpoint(id)?.kind)
+    }
+
+    fn record_read_terminal(&mut self, id: u64) -> Result<bool, i32> {
+        let entry = self.endpoint(id)?;
+        if entry.read_shutdown {
+            return Ok(true);
+        }
+        if entry.kind != Kind::SequencedPacket {
+            return Ok(false);
+        }
+        if entry.peer.is_none() {
+            return Err(-107);
+        }
+        if entry
+            .records
+            .as_ref()
+            .is_some_and(|queue| queue.is_readable())
+        {
+            return Ok(false);
+        }
+        if entry.error != 0 {
+            return Err(-(std::mem::take(&mut self.endpoint_mut(id)?.error) as i32));
+        }
+        Ok(self.readiness(id)?.read_closed)
     }
 
     /// Direct record transport only; the native adapter has authenticated and
@@ -609,10 +642,20 @@ impl Streams {
         }
         let send_capacity = entry.send_capacity;
         let source = crate::socket_record::SourceAddress::new(self.address(id)?)?;
+        let terminal = request.operation != Operation::Send && self.record_read_terminal(id)?;
         let destination = if request.operation == Operation::Send {
             self.record_destination(id)?
         } else {
-            if entry.read_shutdown {
+            if terminal {
+                request.validate().map_err(|_| -22)?;
+                if request
+                    .offset
+                    .checked_add(u64::from(request.length))
+                    .ok_or(-22)?
+                    > buffer.extent()?
+                {
+                    return Err(-22);
+                }
                 return mochios_posix_protocol::socket_record::Reply {
                     copied: 0,
                     length: 0,
@@ -628,7 +671,15 @@ impl Streams {
             .records
             .as_mut()
             .ok_or(-91)?;
-        crate::socket_record_io::transfer_from(queue, request, source, send_capacity, buffer, response, Some(id))
+        crate::socket_record_io::transfer_from(
+            queue,
+            request,
+            source,
+            send_capacity,
+            buffer,
+            response,
+            Some(id),
+        )
     }
 
     /// Shared connected-datagram policy. An adapter supplies only a socket ID
@@ -641,10 +692,19 @@ impl Streams {
         if entry.write_shutdown {
             return Err(-32);
         }
-        let peer = entry.peer.ok_or(-89)?;
-        let target = self.endpoint(peer).map_err(|_| -111)?;
+        let broken = if entry.kind == Kind::SequencedPacket {
+            -32
+        } else {
+            -111
+        };
+        let peer = entry.peer.ok_or(if entry.kind == Kind::SequencedPacket {
+            -107
+        } else {
+            -89
+        })?;
+        let target = self.endpoint(peer).map_err(|_| broken)?;
         if target.read_shutdown {
-            return Err(-111);
+            return Err(broken);
         }
         if target.peer.is_some_and(|sender| sender != id) {
             return Err(-1);
@@ -862,6 +922,7 @@ impl Streams {
         queue.peek(0, &mut data);
         buffer.write(offset, &data)?;
         let record = crate::socket_record::ReceivedRecord {
+            end_of_record: false,
             copied: count,
             length: count,
             source: crate::socket_record::SourceAddress::new(
@@ -920,7 +981,13 @@ impl Streams {
         peek_maximum: Option<usize>,
         buffer: &mut impl crate::socket_record_io::RecordBuffer,
         publish: impl FnOnce(crate::socket_record::ReceivedRecord, usize) -> Result<(), i32>,
-    ) -> Result<(crate::socket_record::ReceivedRecord, Option<crate::socket_rights::Bundle>), i32> {
+    ) -> Result<
+        (
+            crate::socket_record::ReceivedRecord,
+            Option<crate::socket_rights::Bundle>,
+        ),
+        i32,
+    > {
         if length as usize > crate::socket_record::MAX_RECORD_SIZE {
             return Err(-22);
         }
@@ -932,8 +999,9 @@ impl Streams {
         if end > buffer.extent()? {
             return Err(-22);
         }
-        if entry.read_shutdown {
+        if self.record_read_terminal(id)? {
             let record = crate::socket_record::ReceivedRecord {
+                end_of_record: false,
                 copied: 0,
                 length: 0,
                 source: crate::socket_record::SourceAddress::new(
@@ -952,7 +1020,10 @@ impl Streams {
         buffer.write(offset, &data[..record.copied])?;
         let snapshot = peek_maximum
             .map(|maximum| {
-                queue.front_rights().map(|rights| rights.snapshot(maximum)).transpose()
+                queue
+                    .front_rights()
+                    .map(|rights| rights.snapshot(maximum))
+                    .transpose()
             })
             .transpose()?;
         publish(record, rights)?;
@@ -974,15 +1045,26 @@ impl Streams {
         length: usize,
     ) -> Result<bool, i32> {
         let entry = self.endpoint(source)?;
-        if entry.records.is_none() {
+        if entry.kind == Kind::Stream {
             return Err(-91);
+        }
+        if entry.kind == Kind::SequencedPacket && entry.peer != Some(destination) {
+            return Err(-106);
         }
         if entry.write_shutdown {
             return Err(-32);
         }
-        let target = self.endpoint(destination).map_err(|_| -111)?;
+        let broken = if entry.kind == Kind::SequencedPacket {
+            -32
+        } else {
+            -111
+        };
+        let target = self.endpoint(destination).map_err(|_| broken)?;
+        if target.kind != entry.kind {
+            return Err(-91);
+        }
         if target.read_shutdown {
-            return Err(-111);
+            return Err(broken);
         }
         if target.peer.is_some_and(|sender| sender != source) {
             return Err(-1);
@@ -1029,15 +1111,29 @@ impl Streams {
     /// One-way datagram peer selection. The adapter has authorized a retained
     /// target inode; names are reporting snapshots only. All checks precede
     /// publication so a failed reconnect leaves peer and receive queue intact.
-    pub fn connect_datagram_named(&mut self, client: u64, target: u64, client_path: Option<&[u8]>, target_path: &[u8]) -> Result<(), i32> {
+    pub fn connect_datagram_named(
+        &mut self,
+        client: u64,
+        target: u64,
+        client_path: Option<&[u8]>,
+        target_path: &[u8],
+    ) -> Result<(), i32> {
         let local_name = client_path.map(SocketName::new).transpose()?;
         let peer_name = SocketName::new(target_path)?;
         let source = self.endpoint(client)?;
-        if source.records.is_none() { return Err(-91); }
+        if source.kind != Kind::Datagram {
+            return Err(-91);
+        }
         let destination = self.endpoint(target).map_err(|_| -111)?;
-        if destination.records.is_none() { return Err(-91); }
-        if destination.read_shutdown { return Err(-111); }
-        if destination.peer.is_some_and(|peer| peer != client) { return Err(-1); }
+        if destination.kind != Kind::Datagram {
+            return Err(-91);
+        }
+        if destination.read_shutdown {
+            return Err(-111);
+        }
+        if destination.peer.is_some_and(|peer| peer != client) {
+            return Err(-1);
+        }
         let source = self.endpoint_mut(client)?;
         source.peer = Some(target);
         source.local_name = local_name;
@@ -1057,6 +1153,9 @@ impl Streams {
     /// received datagrams: a repeated disconnect is an idempotent no-op.
     pub fn disconnect_datagram(&mut self, id: u64) -> Result<(), i32> {
         let entry = self.endpoint_mut(id)?;
+        if entry.kind != Kind::Datagram {
+            return Err(-95);
+        }
         let records = entry.records.as_mut().ok_or(-95)?;
         if entry.peer.take().is_some() {
             records.clear();
@@ -1097,6 +1196,10 @@ impl Streams {
             return Err(-22);
         }
         let target = self.endpoint(listener)?;
+        if self.kind(client)? != target.kind {
+            return Err(-91);
+        }
+        let kind = target.kind;
         let queue = target.listener.as_ref().ok_or(-111)?;
         if queue.pending.len() >= queue.backlog {
             return Err(-11);
@@ -1131,10 +1234,11 @@ impl Streams {
             .push_back(id);
         self.entries.push(Endpoint {
             id,
+            kind,
             peer: Some(client),
             credentials,
             incoming: crate::socket_stream::StreamQueue::new(),
-            records: None,
+            records: (kind == Kind::SequencedPacket).then(crate::socket_record::RecordQueue::new),
             receive_capacity,
             send_capacity,
             receive_timeout,
@@ -1264,10 +1368,36 @@ impl Streams {
     pub fn readiness(&self, id: u64) -> Result<Readiness, i32> {
         let entry = self.endpoint(id)?;
         if let Some(records) = &entry.records {
+            if entry.kind == Kind::SequencedPacket {
+                if let Some(listener) = &entry.listener {
+                    return Ok(Readiness {
+                        readable: !listener.pending.is_empty(),
+                        writable: false,
+                        read_closed: false,
+                        write_closed: false,
+                        write_error: false,
+                    });
+                }
+                if entry.peer.is_none() {
+                    return Ok(Readiness {
+                        readable: true,
+                        writable: true,
+                        read_closed: true,
+                        write_closed: true,
+                        write_error: false,
+                    });
+                }
+            }
             let peer = entry.peer.and_then(|peer| self.endpoint(peer).ok());
-            let write_error = entry.peer.is_some() && peer.is_none_or(|peer| peer.read_shutdown || peer.peer.is_some_and(|sender| sender != id));
+            let write_error = entry.peer.is_some()
+                && peer.is_none_or(|peer| {
+                    peer.read_shutdown || peer.peer.is_some_and(|sender| sender != id)
+                });
             return Ok(Readiness {
-                readable: records.is_readable() || entry.read_shutdown,
+                readable: records.is_readable()
+                    || entry.read_shutdown
+                    || (entry.kind == Kind::SequencedPacket
+                        && (peer.is_none_or(|peer| peer.write_shutdown) || entry.error != 0)),
                 writable: !entry.write_shutdown
                     && !write_error
                     && peer.is_none_or(|peer| {
@@ -1275,7 +1405,9 @@ impl Streams {
                             queue.can_push(0, entry.send_capacity).unwrap_or(false)
                         })
                     }),
-                read_closed: entry.read_shutdown,
+                read_closed: entry.read_shutdown
+                    || (entry.kind == Kind::SequencedPacket
+                        && peer.is_none_or(|peer| peer.write_shutdown)),
                 write_closed: entry.write_shutdown || write_error,
                 write_error,
             });
@@ -1369,7 +1501,14 @@ impl Streams {
     }
 
     fn notify_peer_release(&mut self, removed: &Endpoint, unaccepted: bool) {
-        if unaccepted || !removed.incoming.is_empty() {
+        if unaccepted
+            || !removed.incoming.is_empty()
+            || (removed.kind == Kind::SequencedPacket
+                && removed
+                    .records
+                    .as_ref()
+                    .is_some_and(|queue| queue.is_readable()))
+        {
             if let Some(peer) = removed.peer.and_then(|id| self.endpoint_mut(id).ok()) {
                 if peer.peer == Some(removed.id) && peer.error == 0 {
                     peer.error = 104; // ECONNRESET: unread or unaccepted data lost.

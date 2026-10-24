@@ -89,7 +89,7 @@ impl Transfers {
             return Err(-9);
         }
         let kind = streams.kind(socket)?;
-        if kind == mochios_posix_protocol::socket::Kind::Datagram
+        if kind != mochios_posix_protocol::socket::Kind::Stream
             && length as usize > crate::socket_record::MAX_RECORD_SIZE
         {
             return Err(-90);

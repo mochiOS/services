@@ -1,4 +1,4 @@
-//! Bounded UNIX datagram receive records. This is service-side state, not a
+//! Bounded UNIX datagram and sequenced-packet receive records. This is service-side state, not a
 //! native stream Provider: splitting HandleRead/HandleWrite would destroy the
 //! record boundary. The adapter must authenticate socket authority and resolve
 //! the destination before calling `push`; source names are captured by that
@@ -53,6 +53,8 @@ impl Record {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReceivedRecord {
+    /// A real record, including an empty one; false for stream data or EOF.
+    pub end_of_record: bool,
     pub copied: usize,
     pub length: usize,
     pub source: SourceAddress,
@@ -235,6 +237,7 @@ impl RecordQueue {
         let copied = output.len().min(record.payload.len());
         output[..copied].copy_from_slice(&record.payload[..copied]);
         let received = ReceivedRecord {
+            end_of_record: true,
             copied,
             length: record.payload.len(),
             source: record.source,

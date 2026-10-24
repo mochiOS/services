@@ -36,8 +36,8 @@ const POLLNVAL:i16=32;const POLLHUP:i16=16;const POLLERR:i16=8;
 #[repr(C)]struct FdSet{{bits:[u64;1]}}
 #[repr(C)]struct Timeval{{tv_sec:i64,tv_usec:i64}}
 #[repr(C)]struct NewlibTimespec{{tv_sec:i64,tv_nsec:i64}}
-#[derive(Clone,Copy,PartialEq,Debug)]enum FdKind{{Unused,ObjectStreamRead,ObjectStreamWrite,ObjectPty,ObjectTerminalFile,ObjectSocket,ObjectDatagram,ObjectFile,ObjectFifo}}
-impl FdKind{{fn is_socket(self)->bool{{matches!(self,Self::ObjectSocket|Self::ObjectDatagram)}}}}
+#[derive(Clone,Copy,PartialEq,Debug)]enum FdKind{{Unused,ObjectStreamRead,ObjectStreamWrite,ObjectPty,ObjectTerminalFile,ObjectSocket,ObjectDatagram,ObjectSeqPacket,ObjectFile,ObjectFifo}}
+impl FdKind{{fn is_socket(self)->bool{{matches!(self,Self::ObjectSocket|Self::ObjectDatagram|Self::ObjectSeqPacket)}}}}
 #[derive(Clone,Copy)]struct Object{{kind:FdKind,lower_handle:u64,open_flags:i32}}
 #[derive(Clone,Copy)]struct FdEntry{{handle:Object}}
 struct Lease(FdEntry);

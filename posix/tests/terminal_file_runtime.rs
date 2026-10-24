@@ -66,7 +66,7 @@ fn main(){
   let encoded=encode_inherited_fd_metadata(metadata).unwrap();let decoded=decode_inherited_fd_metadata(encoded).unwrap();
   assert_eq!(metadata,decoded);assert!(fd_kind_from_inherited(decoded.kind)==Some(FdKind::ObjectTerminalFile));
  }}
- assert!(encode_inherited_fd_metadata(InheritedFdMetadata{kind:16,open_flags:0,descriptor_flags:0}).is_none());
+ assert!(encode_inherited_fd_metadata(InheritedFdMetadata{kind:17,open_flags:0,descriptor_flags:0}).is_none());
 }
 "#);
     probe::run(&program);

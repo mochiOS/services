@@ -58,6 +58,7 @@ fn metadata() -> InheritedFdMetadata {
 }
 fn receive_mock(total: u16, maximum: u16) -> Mock {
     let message = wire::ReceiveReply {
+        end_of_record: false,
         copied: 3,
         length: 8,
         total_rights: total,

@@ -23,8 +23,8 @@ const EAGAIN:c_int=11; const EINVAL:c_int=22; const EFAULT:c_int=14;
 const EIO:c_int=5; const EPIPE:c_int=32; const EINTR:c_int=4;
 pub mod newlib_errno{{pub const EOPNOTSUPP:i32=95;pub fn from_status(value:i64)->i32{{-value as i32}}}}
 mod posix_protocol{{pub const SIGNAL_PIPE:u32=13;}}
-mod wire{{pub const CONTROL_GET_RECEIVE_TIMEOUT:u64=1;pub const CONTROL_GET_SEND_TIMEOUT:u64=2;}}
-#[derive(Clone,Copy,PartialEq,Debug)] enum FdKind{{ObjectSocket,ObjectDatagram,ObjectStreamRead,ObjectStreamWrite,ObjectFifo}}
+mod wire{{pub enum Kind{{Stream,Datagram,SequencedPacket}}pub const CONTROL_GET_RECEIVE_TIMEOUT:u64=1;pub const CONTROL_GET_SEND_TIMEOUT:u64=2;}}
+#[derive(Clone,Copy,PartialEq,Debug)] enum FdKind{{ObjectSocket,ObjectDatagram,ObjectSeqPacket,ObjectStreamRead,ObjectStreamWrite,ObjectFifo}}
 impl FdKind{{fn is_socket(self)->bool{{true}}}}
 #[derive(Clone,Copy)] struct Object{{kind:FdKind,lower_handle:u64}}
 #[derive(Clone,Copy)] struct FdEntry{{handle:Object}}
@@ -44,7 +44,7 @@ fn defer_native_delivery()->Option<upcall_guard::Guard<'static>>{{upcall_guard::
 fn with_fd_entry(fd:i32)->Result<Lease,i32>{{
     assert!(CONTROL.callback_resources.capture_for_fork().is_none());
     assert_eq!(fd,3);PINS.fetch_add(1,Ordering::AcqRel);
-    Ok(Lease(FdEntry{{handle:Object{{kind:if KIND.load(Ordering::Acquire)==0{{FdKind::ObjectSocket}}else{{FdKind::ObjectDatagram}},lower_handle:17}}}}))
+    Ok(Lease(FdEntry{{handle:Object{{kind:match KIND.load(Ordering::Acquire){{0=>FdKind::ObjectSocket,1=>FdKind::ObjectDatagram,_=>FdKind::ObjectSeqPacket}},lower_handle:17}}}}))
 }}
 fn monotonic_nanoseconds()->Result<u64,i32>{{Ok(100)}}
 fn io_cancellation_requested(_: &ThreadControl)->bool{{false}}
@@ -129,8 +129,8 @@ fn set_errno(_:i32){}
 fn record_stdio_io(_: &Result<isize,i32>){}
 fn result_with_errno(result:Result<isize,i32>,failed:isize)->isize{result.unwrap_or(failed)}
 pub fn run(){
-    for scalar in [false,true]{for datagram in [false,true]{for sending in [false,true]{for broken in [false,true]{
-        KIND.store(u32::from(datagram),Ordering::Release);BROKEN.store(u32::from(broken),Ordering::Release);
+    for scalar in [false,true]{for kind in 0..3{let datagram=kind!=0;for sending in [false,true]{for broken in [false,true]{
+        KIND.store(kind,Ordering::Release);BROKEN.store(u32::from(broken),Ordering::Release);
         CALLS.store(0,Ordering::Release);WAITS.store(0,Ordering::Release);SIGNALS.store(0,Ordering::Release);
         let expected=if broken&&!datagram{Err(EPIPE)}else{Ok(1)};
         if scalar{
