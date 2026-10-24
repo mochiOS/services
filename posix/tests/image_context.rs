@@ -330,5 +330,7 @@ fn native_commit_orders_context_after_all_fallible_preparation_without_fd_policy
     assert!(quiesce < prepare && prepare < revoke && revoke < commit && commit < retain);
     let runtime = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
     assert!(!runtime.contains("stage_fd_launch_context"));
-    assert!(runtime.contains("attach_fd_launch_context(fds, &mut startup_image, startup_length)?"));
+    let shared = include_str!("../../../user/crates/newlib-runtime/src/exec_handle.rs");
+    assert!(shared.contains("attach_fd_launch_context(fds, &mut startup, length)?"));
+    assert!(runtime.contains("exec_handle::with_startup(&inputs, path_bytes, fds,"));
 }
