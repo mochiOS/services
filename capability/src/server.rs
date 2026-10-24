@@ -204,6 +204,12 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
             reply_spawn(sender, result);
             continue;
         }
+        if opcode == platform::capability::AUTHORIZE_EXEC_OBJECT_OPCODE {
+            let result = crate::object_image::authorize(sender, slice, &attached);
+            close_received_handles(&attached);
+            capability_reply(sender, result.err().map(error_status).unwrap_or(REPLY_OK));
+            continue;
+        }
         if attached.count != 0 || !attached.is_user_delivery() {
             close_received_handles(&attached);
             capability_reply(sender, mochi_user_syscall::EINVAL);

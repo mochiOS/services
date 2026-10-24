@@ -117,3 +117,8 @@ harness = false
 name = "native_executable_check"
 path = "tests/native_executable_check.rs"
 harness = false
+
+[[test]]
+name = "native_object_exec"
+path = "tests/native_object_exec.rs"
+harness = false

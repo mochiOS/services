@@ -24,6 +24,9 @@ use status::Error;
 thread_local! {
     static FAIL_AFTER:Cell<Option<usize>>=const {Cell::new(None)};
     static ALLOC_CALLS:Cell<usize>=const {Cell::new(0)};
+    static APP_PRESENT:Cell<bool>=const {Cell::new(true)};
+    static CLONE_FAIL:Cell<u8>=const {Cell::new(0)};
+    static INHERITING:Cell<bool>=const {Cell::new(false)};
     static MANAGE:Cell<bool>=const {Cell::new(true)};
     static THREAD:Cell<bool>=const {Cell::new(true)};
     static OWNER:Cell<bool>=const {Cell::new(true)};
@@ -60,6 +63,7 @@ pub mod capability {
     }
     pub struct CapabilitySet(pub u64);
     impl CapabilitySet {
+        pub fn try_clone(&self)->Result<Self,crate::Error>{if crate::CLONE_FAIL.get()==2{Err(crate::Error::ResourceUnavailable)}else{Ok(Self(self.0))}}
         pub fn empty()->Self{Self(0)}pub fn try_insert(&mut self,c:Capability)->Result<(),crate::Error>{self.0|=c.bit();Ok(())}
         pub fn contains(&self,c:Capability)->bool{self.0&c.bit()!=0}pub fn is_subset_of(&self,other:&Self)->bool{self.0&!other.0==0}
     }
@@ -100,17 +104,19 @@ mod task {
     pub fn current_thread_id()->Option<ThreadId>{crate::THREAD.get().then_some(ThreadId(23))}
     pub struct Thread;impl Thread{pub fn process_id(&self)->u64{31}}
     pub fn with_thread<T>(id:ThreadId,body:impl FnOnce(&Thread)->T)->Option<T>{assert_eq!(id.0,41);crate::THREAD.get().then(||body(&Thread))}
+    pub type ProcessId=u64;
     pub mod process {
         pub enum ApplicationProvenance{BuiltIn,VerifiedPackage,Development}
         pub struct ApplicationIdentity;
-        impl ApplicationIdentity{pub fn new(package:String,developer:String,_:[u8;32],_:ApplicationProvenance)->Self{assert_eq!((package.as_str(),developer.as_str()),("app.example","developer.example"));Self}}
+        impl ApplicationIdentity{pub fn try_clone(&self)->Result<Self,crate::Error>{if crate::CLONE_FAIL.get()==1{Err(crate::Error::ResourceUnavailable)}else{Ok(Self)}}pub fn new(package:String,developer:String,_:[u8;32],_:ApplicationProvenance)->Self{assert_eq!((package.as_str(),developer.as_str()),("app.example","developer.example"));Self}}
         #[derive(Clone,Copy)]pub enum PendingExecKind{ImageReplace,Spawn}
         pub struct PendingExecSecurity{pub path:String,pub authorized_thread:super::ThreadId,pub executable_digest:[u8;32],pub capabilities:crate::CapabilitySet,pub kernel_authorities:crate::KernelAuthoritySet,pub identity:ApplicationIdentity,pub kind:PendingExecKind,pub execution_class:crate::ExecutionClass}
     }
     pub struct Process{caps:crate::CapabilitySet,authorities:crate::KernelAuthoritySet}
     impl Process{
+        pub fn application_identity(&self)->Option<&process::ApplicationIdentity>{crate::APP_PRESENT.get().then_some(&process::ApplicationIdentity)}
         pub fn capabilities(&self)->&crate::CapabilitySet{&self.caps}pub fn kernel_authorities(&self)->&crate::KernelAuthoritySet{&self.authorities}
-        pub fn authorize_next_exec(&mut self,a:process::PendingExecSecurity){assert_eq!(a.path,"opaque:key");assert_eq!(a.authorized_thread.0,crate::TARGET.get());assert_eq!(a.executable_digest,[0;32]);crate::WRITES.set(crate::WRITES.get()+1);}
+        pub fn authorize_next_exec(&mut self,a:process::PendingExecSecurity){if crate::INHERITING.get(){assert_eq!(a.capabilities.0,crate::GRANTED.get());assert_eq!(a.kernel_authorities.0,0);assert_eq!(a.execution_class,crate::ExecutionClass::Unprivileged);}assert_eq!(a.path,"opaque:key");assert_eq!(a.authorized_thread.0,crate::TARGET.get());assert_eq!(a.executable_digest,[0;32]);crate::WRITES.set(crate::WRITES.get()+1);}
     }
     fn process()->Process{Process{caps:crate::CapabilitySet(crate::GRANTED.get()),authorities:crate::KernelAuthoritySet(crate::AUTHORITY.get())}}
     pub fn with_process<T>(id:u64,body:impl FnOnce(&Process)->T)->Option<T>{assert!(id==19||id==31);crate::PRESENT.get().then(||body(&process()))}
@@ -138,12 +144,25 @@ mod task {
     program.push_str(
         r#"
 fn reset(kind:&str,caps:&[u8])->u64 {
-    FAIL_AFTER.set(None);COPY_ERROR.set(None);MANAGE.set(true);THREAD.set(true);OWNER.set(true);PRESENT.set(true);WRITABLE.set(true);GRANTED.set(3);AUTHORITY.set(1);WRITES.set(0);TARGET.set(23);COPIES.set(0);
+    APP_PRESENT.set(true);CLONE_FAIL.set(0);INHERITING.set(false);FAIL_AFTER.set(None);COPY_ERROR.set(None);MANAGE.set(true);THREAD.set(true);OWNER.set(true);PRESENT.set(true);WRITABLE.set(true);GRANTED.set(3);AUTHORITY.set(1);WRITES.set(0);TARGET.set(23);COPIES.set(0);
     let fields=format!("{APPLICATION_PACKAGE_ID_PREFIX}app.example\0{APPLICATION_DEVELOPER_ID_PREFIX}developer.example\0{APPLICATION_SUBJECT_KEY_ID_PREFIX}{}\0{APPLICATION_PROVENANCE_PREFIX}built-in\0{EXECUTABLE_DIGEST_PREFIX}{}\0{EXEC_AUTHORIZATION_KIND_PREFIX}{kind}\0{EXEC_AUTHORIZATION_CLASS_PREFIX}unprivileged\0\0","0".repeat(64),"0".repeat(64));
     IDENTITY.with_borrow_mut(|s|*s=fields.into_bytes());CAPS.with_borrow_mut(|s|*s=caps.to_vec());caps.len() as u64
 }
 fn check(endpoint:u64,length:u64,expected:u64){let live=LIVE.load(Ordering::Relaxed);assert_eq!(authorize_exec_syscall(endpoint,100,200,300,length),expected);assert_eq!(LIVE.load(Ordering::Relaxed),live);}
+fn inherit_fields(){ INHERITING.set(true);
+ let fields=format!("{EXECUTABLE_DIGEST_PREFIX}{}\0{EXEC_AUTHORIZATION_KIND_PREFIX}{EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE_INHERIT}\0{EXEC_AUTHORIZATION_CLASS_PREFIX}unprivileged\0\0","0".repeat(64));
+ IDENTITY.with_borrow_mut(|s|*s=fields.into_bytes());
+}
 fn main(){
+    reset("spawn",b"");inherit_fields();GRANTED.set(0xffff_fffd);check(0,0,0);assert_eq!(WRITES.get(),1);
+    reset("spawn",b"");inherit_fields();APP_PRESENT.set(false);check(0,0,Error::AccessDenied.into_raw());assert_eq!(WRITES.get(),0);
+    for failure in [1,2]{reset("spawn",b"");inherit_fields();CLONE_FAIL.set(failure);check(0,0,Error::ResourceUnavailable.into_raw());assert_eq!(WRITES.get(),0);}
+    reset("spawn",b"");inherit_fields();TARGET.set(41);check(123,0,0);assert_eq!(WRITES.get(),1);
+    reset("spawn",b"");inherit_fields();GRANTED.set(2);check(0,0,Error::AccessDenied.into_raw());assert_eq!(WRITES.get(),0);
+    reset("spawn",b"");inherit_fields();check(99,0,Error::InvalidArgument.into_raw());assert_eq!(WRITES.get(),0);
+    reset("spawn",b"");inherit_fields();check(0,1,Error::InvalidArgument.into_raw());assert_eq!(WRITES.get(),0);
+    reset("spawn",b"");inherit_fields();IDENTITY.with_borrow_mut(|s|{let t=String::from_utf8(s.clone()).unwrap().replace("unprivileged","privileged");*s=t.into_bytes()});check(0,0,Error::InvalidArgument.into_raw());assert_eq!(WRITES.get(),0);
+    reset("image-replace-inherit",b"");check(0,0,Error::InvalidArgument.into_raw());assert_eq!(WRITES.get(),0);
     let n=reset("spawn",b"process.spawn\0");MANAGE.set(false);check(0,n,Error::AccessDenied.into_raw());assert_eq!(COPIES.get(),0);assert_eq!(WRITES.get(),0);
     for error in [Error::InvalidAddress,Error::BackingFailure,Error::ResourceUnavailable]{let n=reset("spawn",b"");COPY_ERROR.set(Some(error));check(0,n,error.into_raw());assert_eq!(WRITES.get(),0);}
     for field in ["unknown=bad","__MNU_EXEC_AUTH_KIND=bad"]{let n=reset("spawn",b"");IDENTITY.with_borrow_mut(|s|*s=field.as_bytes().to_vec());check(0,n,Error::InvalidArgument.into_raw());assert_eq!(WRITES.get(),0);}
