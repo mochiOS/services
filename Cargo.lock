@@ -1737,11 +1737,6 @@ name = "mochios-network-stack"
 version = "0.1.0"
 
 [[package]]
-name = "mochios-network-stack"
-version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#38b10ca1d8b95d8ad638e24a2f83adae6aa17034"
-
-[[package]]
 name = "mochios-package-protocol"
 version = "0.1.0"
 
@@ -1898,7 +1893,7 @@ dependencies = [
  "mochi-user-syscall",
  "mochios-http-client",
  "mochios-net-device-protocol",
- "mochios-network-stack 0.1.0 (git+https://github.com/mochiOS/syscalls)",
+ "mochios-network-stack",
  "mochios-tls-client",
 ]
 
@@ -2567,7 +2562,7 @@ dependencies = [
  "mochios-filesystem-protocol",
  "mochios-linux-gui-protocol",
  "mochios-net-device-protocol",
- "mochios-network-stack 0.1.0",
+ "mochios-network-stack",
  "mochios-posix-client",
  "mochios-posix-protocol",
  "mochios-signature-protocol",

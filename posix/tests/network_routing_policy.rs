@@ -2,6 +2,26 @@
 //! Only device I/O is replaced; failed configuration must not reach hardware.
 #![allow(dead_code)]
 extern crate alloc;
+extern crate self as mochi_user_platform;
+thread_local! { static MODE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
+#[macro_export]
+macro_rules! logln { ($($arg:tt)*) => {{ let _ = format_args!($($arg)*); }}; }
+pub mod time {
+    pub fn ticks() -> Result<u64, mochi_user_syscall::SysError> {
+        if crate::MODE.with(|mode| mode.get()) == 2 {
+            Err(mochi_user_syscall::SysError::from_raw(
+                mochi_user_syscall::NativeError::PeerClosed.into_raw() as i64,
+            ))
+        } else {
+            Ok(0)
+        }
+    }
+}
+pub mod thread {
+    pub fn yield_now() {
+        panic!("unexpected blocking network loop")
+    }
+}
 
 mod driver {
     use mochios_net_device_protocol::{DRIVER_NAME_LEN, DeviceStatistics, InterfaceInfo};
@@ -19,6 +39,9 @@ mod driver {
             })
         }
         pub(crate) fn transmit(&mut self, _: &[u8]) -> Result<(), u64> {
+            if crate::MODE.with(|mode| mode.get()) == 1 {
+                return Err(mochi_user_syscall::EIO);
+            }
             panic!("configuration failure must not transmit")
         }
         pub(crate) fn receive(&mut self) -> Result<Option<Vec<u8>>, u64> {
@@ -95,5 +118,84 @@ mod production {
         );
         assert!(stack.pending_ipv4.is_empty());
         assert_eq!(stack.stats.tx_packets, 0);
+    }
+    #[test]
+    fn dns_clock_and_transmit_failures_release_exactly_the_query_binding() {
+        for mode in [1, 2] {
+            crate::MODE.with(|value| value.set(mode));
+            let mut stack = NetworkStack::new(DriverClient, 7).unwrap();
+            stack.config = Some(Ipv4Config {
+                address: [192, 0, 2, 1],
+                subnet_mask: [255, 255, 255, 0],
+                gateway: [0; 4],
+                dns: [192, 0, 2, 53],
+            });
+            stack.arp.insert(ArpEntry {
+                ip: [192, 0, 2, 53],
+                mac: [2, 0, 0, 0, 0, 53],
+                expires_at: 10000,
+            });
+            for _ in 0..32 {
+                assert!(stack.resolve_ipv4("example.com", 0, 100, 19).is_err());
+                assert_eq!(
+                    stack.udp.local_endpoint(stack.dhcp_socket).unwrap().port,
+                    DHCP_CLIENT_PORT
+                );
+                let mut probes = Vec::new();
+                for _ in 1..UDP_SOCKET_LIMIT {
+                    probes.push(stack.udp.bind_endpoint([192, 0, 2, 1], 0).unwrap());
+                }
+                assert_eq!(
+                    stack.udp.bind_endpoint([192, 0, 2, 1], 0),
+                    Err(PacketError::Capacity)
+                );
+                for id in probes {
+                    assert!(stack.udp.unbind_endpoint(id));
+                }
+            }
+            crate::MODE.with(|value| value.set(0));
+        }
+    }
+
+    #[test]
+    fn real_ipv4_udp_packets_route_to_the_exact_local_binding() {
+        let mut stack = NetworkStack::new(DriverClient, 7).unwrap();
+        let a = stack.udp.bind_endpoint([192, 0, 2, 1], 9000).unwrap();
+        let b = stack.udp.bind_endpoint([192, 0, 2, 2], 9000).unwrap();
+        for (address, byte) in [
+            ([192, 0, 2, 1], 1),
+            ([192, 0, 2, 2], 2),
+            ([192, 0, 2, 3], 3),
+        ] {
+            let mut udp = [0; 32];
+            let n = UdpDatagram {
+                source_port: 1234,
+                destination_port: 9000,
+                payload: &[byte],
+            }
+            .encode([198, 51, 100, 1], address, &mut udp)
+            .unwrap();
+            let mut packet = [0; 64];
+            let n = Ipv4Header {
+                source: [198, 51, 100, 1],
+                destination: address,
+                protocol: 17,
+                ttl: 64,
+                identification: 1,
+            }
+            .encode(&udp[..n], &mut packet)
+            .unwrap();
+            assert_eq!(
+                stack.handle_ipv4(&packet[..n], 0),
+                if byte == 3 {
+                    Err(PacketError::Mismatch)
+                } else {
+                    Ok(())
+                }
+            );
+        }
+        assert_eq!(stack.udp.receive_for(a).unwrap().unwrap().payload, [1]);
+        assert_eq!(stack.udp.receive_for(b).unwrap().unwrap().payload, [2]);
+        assert_eq!(stack.udp.queued_for(stack.dhcp_socket), Ok(0));
     }
 }

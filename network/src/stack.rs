@@ -10,7 +10,8 @@ use mochios_network_stack::{
     DhcpState, DnsCache, DnsError, DnsErrorKind, DnsName, DnsResponseCode, DnsRetry,
     DnsRetryAction, ETHERTYPE_ARP, ETHERTYPE_IPV4, EchoPacket, EthernetHeader, Ipv4Config,
     Ipv4Header, PacketError, TCP_PROTOCOL, TcpConnection, TcpConnectionError, TcpConnectionTable,
-    TcpReceiveResult, TcpSegment, TcpState, TcpTransmit, TcpTuple, UdpDatagram, UdpSocketTable,
+    TcpReceiveResult, TcpSegment, TcpState, TcpTransmit, TcpTuple, UdpDatagram, UdpSocketId,
+    UdpSocketTable,
     decode_dns_response, decode_reply, encode_dns_query, encode_request, next_hop,
     parse_ipv4_literal,
 };
@@ -45,6 +46,7 @@ pub(crate) struct NetworkStack {
     config: Option<Ipv4Config>,
     dhcp: DhcpClient,
     udp: UdpSocketTable,
+    dhcp_socket: UdpSocketId,
     dns_cache: DnsCache,
     tcp: TcpConnectionTable,
     arp: ArpCache,
@@ -63,7 +65,8 @@ impl NetworkStack {
     pub(crate) fn new(mut driver: DriverClient, xid: u32) -> Result<Self, u64> {
         let info = driver.info()?;
         let mut udp = UdpSocketTable::new(UDP_SOCKET_LIMIT, UDP_QUEUE_LIMIT, UDP_PAYLOAD_LIMIT);
-        udp.bind(DHCP_CLIENT_PORT)
+        let dhcp_socket = udp
+            .bind_endpoint([0; 4], DHCP_CLIENT_PORT)
             .map_err(|_| mochi_user_syscall::EINVAL)?;
         Ok(Self {
             driver,
@@ -71,6 +74,7 @@ impl NetworkStack {
             config: None,
             dhcp: DhcpClient::new(xid, info.mac),
             udp,
+            dhcp_socket,
             dns_cache: DnsCache::new(DNS_CACHE_LIMIT),
             tcp: TcpConnectionTable::new(TCP_CONNECTION_LIMIT),
             arp: ArpCache::new(32),
@@ -222,7 +226,7 @@ impl NetworkStack {
         if header.protocol == 17 {
             let udp = UdpDatagram::decode(header.source, header.destination, payload)?;
             self.udp.enqueue(header.source, header.destination, udp)?;
-            if let Some(packet) = self.udp.receive(DHCP_CLIENT_PORT)
+            if let Some(packet) = self.udp.receive_for(self.dhcp_socket)?
                 && packet.source_port == DHCP_SERVER_PORT
             {
                 return self.handle_dhcp(&packet.payload, now);
@@ -620,16 +624,18 @@ impl NetworkStack {
             return Ok((address, true));
         }
         self.stats.dns_cache_misses = self.stats.dns_cache_misses.saturating_add(1);
-        let source_port = self.udp.bind(0).map_err(|_| mochi_user_syscall::EAGAIN)?;
-        let result = self.resolve_dns_query(
-            &name,
-            dns_server,
-            source_port,
-            random as u16,
-            started,
-            timeout,
-        );
-        self.udp.unbind(source_port);
+        let local_address = self
+            .config
+            .map(|config| config.address)
+            .filter(|address| *address != [0; 4])
+            .ok_or(mochios_net_device_protocol::STATUS_NETWORK_UNAVAILABLE as i64 as u64)?;
+        let socket = self
+            .udp
+            .bind_endpoint(local_address, 0)
+            .map_err(|_| mochi_user_syscall::EAGAIN)?;
+        let result =
+            self.resolve_dns_query(&name, dns_server, socket, random as u16, started, timeout);
+        self.udp.unbind_endpoint(socket);
         result.map(|address| (address, false))
     }
 
@@ -637,11 +643,16 @@ impl NetworkStack {
         &mut self,
         name: &DnsName,
         dns_server: [u8; 4],
-        source_port: u16,
+        socket: UdpSocketId,
         transaction_id: u16,
         started: u64,
         timeout: u64,
     ) -> Result<[u8; 4], u64> {
+        let source_port = self
+            .udp
+            .local_endpoint(socket)
+            .map_err(|_| mochi_user_syscall::EIO)?
+            .port;
         let mut query = [0u8; DNS_MAX_MESSAGE_LEN];
         let query_length = encode_dns_query(transaction_id, name, &mut query).map_err(dns_errno)?;
         let mut retry = DnsRetry::new(started, timeout, DNS_RETRY_DELAY, DNS_RETRY_LIMIT);
@@ -675,7 +686,11 @@ impl NetworkStack {
             }
             self.tick(now);
             while self.poll_receive(now)? {}
-            while let Some(packet) = self.udp.receive(source_port) {
+            while let Some(packet) = self
+                .udp
+                .receive_for(socket)
+                .map_err(|_| mochi_user_syscall::EIO)?
+            {
                 if packet.source_address != dns_server
                     || packet.source_port != DNS_PORT
                     || packet.destination_port != source_port
