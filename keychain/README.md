@@ -9,10 +9,12 @@ in the shared capability catalogue: `keychain.access`, `keychain.manage` and
 ## Authority
 
 Native requests derive application package, signing-key ID and provenance from
-`GetThreadSecurityContext`. A WAIT-only ProcessHandle is opened for the actual
-IPC sender and passed to POSIX `process_session_info`; request fields cannot
+`GetThreadSecurityContext`. A WAIT|TRANSFER ProcessHandle is opened for the
+actual IPC sender; only WAIT is exported to POSIX `process_session_info`. The
+source is closed on both success and error; request fields cannot
 select the caller UID/PID or Bundle ID. Only the authenticated session controller
-may select the active UID through the separate `ActivateSession` operation. Set-ID callers are rejected. Each user's file
+may select the active UID through the separate `ActivateSession` operation.
+Set-ID callers are rejected. Each user's file
 and in-memory key is separate. An item's owner is the complete verified
 application identity, including signing key and provenance. Grants permit reads,
 not mutation or deletion. Replacement signing keys require a new grant.
@@ -29,8 +31,8 @@ authentication (or the trusted first-boot installer path) activates an OS user.
 Locking disables access until another authenticated activation. Session epochs
 start from the CSPRNG and advance on lock/activation. Password-authorized
 operations carry the epoch captured before queuing UI work, so stale approvals
-cannot unlock, reveal, delete, grant/revoke, or rekey a later session. A confirmed dead
-vault process already has no live keys; an unconfirmed failure blocks the
+cannot unlock, reveal, delete, grant/revoke, or rekey a later session.
+A confirmed dead vault process already has no live keys; an unconfirmed failure blocks the
 acknowledgement. No app-grant can authorize crossing the OS-user boundary.
 
 Native AppCore clients also require `process.inspect` to verify the actual
@@ -113,6 +115,7 @@ certification. Concrete weaknesses were reproduced and corrected:
 | Secure input retained editing/rendering copies | ViewKit's secure display alone did not guarantee buffer erasure; protect stored and temporary values, erase superseded editing buffers, move input ownership | Allocator verifies editing, extraction and destruction; accessibility/clipboard masking remains intact |
 | A late reveal reappeared after focus loss | Background RPC completion could restore a secret even after blur/refocus; reject the old exposure generation and clear secret inputs on blur | Delayed-channel completion test failed before the fix |
 | Storage trusted pathname metadata and insufficient ownership/link checks | Refuse foreign/non-private directories, use NOFOLLOW/NONBLOCK, validate the opened file's owner/type/mode/link count, and validate the preview lock file | Symlink lock and hard-linked vault were accepted before the fix; regression rejects both |
+| Native credential inspection lacked source TRANSFER authority | Correct requests would be denied by the real kernel; open WAIT\|TRANSFER locally, export WAIT only, and close on success/error | A backend contract test enforces the kernel export rule and failed before the fix; native build also passes |
 | Metadata replies exceeded the real kernel IPC limit | Native availability failure, hidden by Linux transport; enforce 8 KiB, paginate worst-case item/catalogue replies | Full-size records and catalogue cross AppCore transport under the native size limit |
 | Reauthentication was not bound to the cached vault | With storage-write authority, replacing disk data with an older vault could let its password authorize newer cached secrets | Replacement-file test failed before the fix; publication fingerprint now rejects/locks |
 | Locking did not invalidate delayed privileged work | A pre-lock unlock/grant request could arrive after locking; disable native access until authenticated activation, bind all password-authorized work to the captured epoch | Tests cover disabled startup, forged activation, stale unlock, cross-user activation and stale reveal/delete/grant/rekey |
@@ -155,3 +158,11 @@ Residual boundaries requiring care:
 - Native startup accepts only the authenticated launching service-manager;
   restarting that manager requires coordinated service restart. Restart begins
   locked and does not silently restore a previous session's authority.
+
+Final regression results for this review: protocol 4, service 14, AppCore 28,
+service-manager 22, Keychain UI 5 and ViewKit 142 tests passed (215 total;
+one pre-existing ViewKit test ignored). `mmake ui-check` passed. Native release
+builds of keychain-service, service-manager and Keychain succeeded using the
+existing SDK. The ordinary `mmake keychain-service` dependency path is still
+blocked by the pre-existing SDK `sys/wait.h` include_next failure; a successful
+direct build is not evidence of OS runtime correctness.

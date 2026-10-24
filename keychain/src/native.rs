@@ -36,25 +36,29 @@ fn peer(sender: u64, controller: u64) -> Result<Peer> {
     if !access && !session_control {
         return Err(Error::Denied);
     }
-    let h =
-        platform::process::open_handle_for_endpoint(sender, platform::handle::HANDLE_RIGHT_WAIT)
-            .map_err(|_| Error::Denied)?;
-    let result = (|| {
-        let retained = platform::process::handle_status(h).map_err(|_| Error::Denied)?;
-        if retained.process_id != c.process_id {
-            return Err(Error::Denied);
-        }
-        let transport = mochios_posix_client::SyscallEndpointTransport::from_launch_context()
-            .map_err(|_| Error::Denied)?;
-        mochios_posix_client::Client::new(transport)
-            .process_session_info(mochios_posix_client::ObjectHandleAttachment {
-                handle: h,
-                rights: platform::handle::HANDLE_RIGHT_WAIT,
-            })
-            .map_err(|_| Error::Denied)
-    })();
-    let _ = platform::handle::close(h);
-    let ids = result?;
+    let ids = inspect_sender_handle(
+        sender,
+        |sender, rights| {
+            platform::process::open_handle_for_endpoint(sender, rights).map_err(|_| Error::Denied)
+        },
+        |h, delegated| {
+            let retained = platform::process::handle_status(h).map_err(|_| Error::Denied)?;
+            if retained.process_id != c.process_id {
+                return Err(Error::Denied);
+            }
+            let transport = mochios_posix_client::SyscallEndpointTransport::from_launch_context()
+                .map_err(|_| Error::Denied)?;
+            mochios_posix_client::Client::new(transport)
+                .process_session_info(mochios_posix_client::ObjectHandleAttachment {
+                    handle: h,
+                    rights: delegated,
+                })
+                .map_err(|_| Error::Denied)
+        },
+        |h| {
+            let _ = platform::handle::close(h);
+        },
+    )?;
     if ids.real_uid != ids.effective_uid {
         return Err(Error::Denied);
     }
@@ -65,6 +69,69 @@ fn peer(sender: u64, controller: u64) -> Result<Peer> {
         manager,
         session_control,
     })
+}
+
+fn inspect_sender_handle<T>(
+    sender: u64,
+    open: impl FnOnce(u64, u64) -> Result<u32>,
+    inspect: impl FnOnce(u32, u64) -> Result<T>,
+    close: impl FnOnce(u32),
+) -> Result<T> {
+    let handle = open(
+        sender,
+        platform::handle::HANDLE_RIGHT_WAIT | platform::handle::HANDLE_RIGHT_TRANSFER,
+    )?;
+    let result = inspect(handle, platform::handle::HANDLE_RIGHT_WAIT);
+    close(handle);
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    #[test]
+    fn sender_inspection_can_export_only_wait_and_always_closes_the_source() {
+        for failure in [false, true] {
+            let source_rights = Cell::new(0);
+            let closed = Cell::new(false);
+            let result = inspect_sender_handle(
+                19,
+                |sender, rights| {
+                    assert_eq!(sender, 19);
+                    source_rights.set(rights);
+                    Ok(7)
+                },
+                |handle, delegated| {
+                    assert_eq!(handle, 7);
+                    assert_eq!(delegated, platform::handle::HANDLE_RIGHT_WAIT);
+                    // The real kernel's export_object_handle requires TRANSFER
+                    // on the source even when only WAIT is exported.
+                    if source_rights.get() & platform::handle::HANDLE_RIGHT_TRANSFER == 0 {
+                        return Err(Error::Denied);
+                    }
+                    if failure {
+                        Err(Error::Unavailable)
+                    } else {
+                        Ok(1000u32)
+                    }
+                },
+                |handle| {
+                    assert_eq!(handle, 7);
+                    closed.set(true);
+                },
+            );
+            assert!(closed.get());
+            assert_eq!(
+                result,
+                if failure {
+                    Err(Error::Unavailable)
+                } else {
+                    Ok(1000)
+                }
+            );
+        }
+    }
 }
 pub fn run() -> Result<()> {
     let _ = platform::logger::init_from_env();
