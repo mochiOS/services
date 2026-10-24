@@ -9,6 +9,9 @@ use posix_service::fifo_inode::{METADATA_RIGHTS, validate_reply};
 #[path = "native_fifo_manager.rs"]
 mod manager_probe;
 
+#[path = "native_fifo_worker.rs"]
+mod worker_probe;
+
 fn payload(path: &[u8], uid: u32) -> Vec<u8> {
     let mut payload = vec![0; wire::CREDENTIALS_MAX_LEN + path.len()];
     let length = wire::encode_credentials_payload(uid, uid, &[], path, &mut payload).unwrap();
@@ -67,7 +70,7 @@ fn stat(fs: &RuntimeFilesystem, handle: u32) -> wire::NodeStatus {
     .unwrap()
 }
 
-pub fn run(fs: &RuntimeFilesystem) {
+pub fn run(fs: &RuntimeFilesystem, worker: &mut super::fifo_native::Worker) {
     let identity = platform::process::current_execution_identity().unwrap();
     let path = format!("/tmp/fifo-inode-187-{}", identity.process_id);
     let encoded_path = payload(path.as_bytes(), 0);
@@ -144,4 +147,5 @@ pub fn run(fs: &RuntimeFilesystem) {
     )
     .unwrap();
     manager_probe::run(fs);
+    worker_probe::run(fs, worker);
 }

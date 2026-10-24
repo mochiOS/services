@@ -27,6 +27,9 @@ mod shared_memory_provider;
 mod socket_native;
 
 #[cfg(target_os = "mochios")]
+mod fifo_native;
+
+#[cfg(target_os = "mochios")]
 mod socket_path_native;
 
 #[cfg(target_os = "mochios")]
@@ -180,8 +183,16 @@ fn main() {
         endpoint: filesystem_endpoint,
         device_endpoint: Some(provider_endpoint_handle),
     };
+    let mut _fifo_worker = match fifo_native::Worker::start(filesystem_endpoint) {
+        Ok(worker) => worker,
+        Err(error) => {
+            platform::logln!("posix.service: FIFO provider startup failed errno={error}");
+            let _ = platform::service_ready::notify(ready_target, error);
+            platform::process::exit(1);
+        }
+    };
     #[cfg(mochios_fifo_inode_probe_187)]
-    native_fifo_inode::run(&filesystem);
+    native_fifo_inode::run(&filesystem, &mut _fifo_worker);
     let _pty_namespace = match terminal_namespace_native::prepare(&filesystem) {
         Ok(directory) => directory,
         Err(error) => {

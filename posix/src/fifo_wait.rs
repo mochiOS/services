@@ -49,6 +49,9 @@ pub struct Registered {
 }
 
 impl<H> Waits<H> {
+    pub fn is_empty(&self) -> bool {
+        self.jobs.is_empty()
+    }
     /// Takes ownership of lease on both success and failure. Its Drop must
     /// close a local reference without RPC. The adapter owns the returned
     /// notification Handle, sets its READABLE signal if ready, and transfers

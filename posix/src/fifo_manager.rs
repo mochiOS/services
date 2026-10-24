@@ -122,6 +122,9 @@ fn open_error(error: Error) -> i32 {
 }
 
 impl Manager {
+    pub fn is_empty(&self) -> bool {
+        self.opens.is_empty()
+    }
     /// Create/initialize one owned native reference before changing peer state.
     /// `create` performs only local native calls and must close any partially
     /// created reference before returning an error. Publication failure AFTER

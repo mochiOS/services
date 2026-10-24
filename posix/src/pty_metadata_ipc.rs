@@ -20,6 +20,19 @@ pub fn lookup(
     attached: &IpcObjectHandles,
     identify: impl FnOnce(u32) -> Result<u64, i32>,
 ) -> Result<OpenedObject<u32>, i32> {
+    lookup_with(bytes, attached, identify, |object, source, requested| {
+        manager.duplicate_slave_metadata(object, source, requested)
+    })
+}
+
+/// Shared by userspace data providers retaining filesystem metadata. Callback
+/// errors are positive errno; the returned reference is newly owned.
+pub fn lookup_with(
+    bytes: &[u8],
+    attached: &IpcObjectHandles,
+    identify: impl FnOnce(u32) -> Result<u64, i32>,
+    duplicate: impl FnOnce(u64, u64, u64) -> Result<u32, i32>,
+) -> Result<OpenedObject<u32>, i32> {
     if attached.delivery_flags != mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE {
         return Err(EACCES);
     }
@@ -36,7 +49,7 @@ pub fn lookup(
         return Err(EACCES);
     }
     let object = identify(source.handle)?;
-    let handle = manager.duplicate_slave_metadata(object, source.rights, request.rights)?;
+    let handle = duplicate(object, source.rights, request.rights)?;
     Ok(OpenedObject {
         handle,
         rights: request.rights,
@@ -57,6 +70,15 @@ pub fn serve(
             platform::handle::identify_provider_object(handle).map_err(|_| crate::pty::EBADF)
         })
     });
+    reply_metadata(sender, result, attached);
+}
+
+pub fn reply_metadata(
+    sender: u64,
+    result: Result<OpenedObject<u32>, i32>,
+    attached: IpcObjectHandles,
+) {
+    use mochi_user_platform as platform;
     for source in attached.handles.iter().take(attached.count as usize) {
         if source.handle != 0 {
             let _ = platform::handle::close(source.handle);
