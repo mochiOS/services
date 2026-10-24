@@ -543,9 +543,20 @@ impl FilesystemService {
             return Err(EACCES);
         }
         // FIFO bytes belong to the userspace channel, never to disk extents.
-        // In particular reject before O_TRUNC, allocation or publication.
+        // Opted-in callers receive retained metadata before any disk data edit.
         if kind.is_fifo() {
-            return Err(ENOTSUP);
+            if request.flags & protocol::OPEN_AT_RETAIN_FIFO == 0 {
+                return Err(ENOTSUP);
+            }
+            if access == (protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE) {
+                return Err(EINVAL);
+            }
+            let next_open = self.reserve_inode_description()?;
+            let mut response = self.retain_inode_description(
+                request, filesystem, volume, inode, next_open,
+            )?;
+            response.header.flags = protocol::OPEN_REPLY_FIFO;
+            return Ok(response);
         }
         let node_id = scoped_node_id(volume, &inode);
         let open_id = self.next_open_id;
@@ -1917,6 +1928,21 @@ impl FilesystemService {
             });
         }
         self.opens.get(&open_id).map(|_| None).ok_or(EBADF)
+    }
+
+    /// Identity from the retained description, never from a caller's path or
+    /// reply flags. Publication uses this to prevent granting disk I/O rights.
+    pub(crate) fn is_fifo_description(&self, open_id: u64) -> Result<bool, i32> {
+        if self.opens.device(open_id).is_some() {
+            return Ok(false);
+        }
+        Ok(self
+            .opens
+            .get(&open_id)
+            .ok_or(EBADF)?
+            .inode
+            .file_type()
+            .is_fifo())
     }
 
     pub fn provider_close(&mut self, open_id: u64) -> Result<(), i32> {

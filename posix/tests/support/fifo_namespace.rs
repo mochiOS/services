@@ -468,3 +468,156 @@ fn read_only_volume_cannot_publish_a_fifo_entry() {
         Some(2)
     );
 }
+
+#[test]
+fn opted_in_normal_open_retains_the_authorized_inode_without_disk_io_or_truncate() {
+    let mut fs = test_filesystem();
+    create(&mut fs, b"/fifo", 0o600).unwrap();
+    let before = status(&mut fs, b"/fifo");
+    let response = fs
+        .open_at(
+            protocol::Header {
+                flags: protocol::OPEN_AT_WRITE
+                    | protocol::OPEN_AT_TRUNCATE
+                    | protocol::OPEN_AT_RETAIN_FIFO,
+                ..Default::default()
+            },
+            b"/fifo",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    assert_eq!(response.header.flags, protocol::OPEN_REPLY_FIFO);
+    assert_eq!(
+        protocol::decode_node_status(&response.payload).unwrap(),
+        before
+    );
+    assert_eq!(fs.provider_memory_object(response.header.open_id), Ok(0));
+    assert_eq!(status(&mut fs, b"/fifo"), before);
+    // The same path can change, but this description cannot change identity.
+    fs.unlink_at(
+        protocol::Header::default(),
+        b"/fifo",
+        PathAnchors::default(),
+        root_credentials(),
+    )
+    .unwrap();
+    let replacement = create(&mut fs, b"/fifo", 0o660).unwrap();
+    assert_ne!(replacement.node_id, before.node_id);
+    assert_eq!(
+        retained_status(&fs, response.header.open_id).node_id,
+        before.node_id
+    );
+    fs.provider_close(response.header.open_id).unwrap();
+}
+
+#[test]
+fn opted_in_fifo_publication_never_grants_requested_disk_io_and_failed_creation_releases_the_pin() {
+    use filesystem_service::open_publication::{self, METADATA_RIGHTS, Publisher};
+    #[derive(Default)]
+    struct Native {
+        created: Vec<(u64, u64)>,
+        fail: bool,
+    }
+    impl Publisher for Native {
+        fn create(&mut self, id: u64, rights: u64) -> Result<u32, i32> {
+            self.created.push((id, rights));
+            if self.fail { Err(12) } else { Ok(900) }
+        }
+        fn close(&mut self, _: u32) {
+            panic!("successful local reference belongs to caller");
+        }
+    }
+    assert_eq!(METADATA_RIGHTS, posix_service::fifo_inode::METADATA_RIGHTS);
+    let mut fs = test_filesystem();
+    create(&mut fs, b"/fifo", 0o600).unwrap();
+    for fail in [false, true] {
+        let response = fs
+            .open_at(
+                protocol::Header {
+                    flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_RETAIN_FIFO,
+                    ..Default::default()
+                },
+                b"/fifo",
+                PathAnchors::default(),
+                root_credentials(),
+            )
+            .unwrap();
+        let mut native = Native {
+            fail,
+            ..Default::default()
+        };
+        let excessive = mnu_abi::HANDLE_RIGHT_READ
+            | mnu_abi::HANDLE_RIGHT_WRITE
+            | mnu_abi::HANDLE_RIGHT_SEEK
+            | mnu_abi::HANDLE_RIGHT_MAP;
+        let published =
+            open_publication::publish(&mut fs, response.header.open_id, excessive, &mut native);
+        assert_eq!(native.created, [(response.header.open_id, METADATA_RIGHTS)]);
+        if fail {
+            assert_eq!(published, Err(12));
+            assert_eq!(
+                fs.stat_handle(protocol::Header::default(), response.header.open_id)
+                    .err(),
+                Some(9)
+            );
+        } else {
+            let object = published.unwrap();
+            let mut objects = mnu_abi::IpcObjectHandles::default();
+            objects.count = 1;
+            objects.handles[0] = object;
+            assert_eq!(
+                posix_service::fifo_inode::validate_reply(
+                    response.header,
+                    response.header.request_id,
+                    &response.payload,
+                    &objects
+                )
+                .unwrap()
+                .kind,
+                protocol::NODE_TYPE_FIFO
+            );
+            fs.provider_close(response.header.open_id).unwrap();
+        }
+    }
+}
+
+#[test]
+fn fifo_opt_in_preserves_ordinary_open_and_rejects_invalid_fifo_access() {
+    let mut fs = super::trailing_lookup::prepared(0o700);
+    create(&mut fs, b"/fifo", 0o600).unwrap();
+    for extra in [protocol::OPEN_AT_DIRECTORY, protocol::OPEN_AT_WRITE] {
+        let expected = if extra == protocol::OPEN_AT_DIRECTORY {
+            20
+        } else {
+            22
+        };
+        assert_eq!(
+            fs.open_at(
+                protocol::Header {
+                    flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_RETAIN_FIFO | extra,
+                    ..Default::default()
+                },
+                b"/fifo",
+                PathAnchors::default(),
+                root_credentials()
+            )
+            .err(),
+            Some(expected)
+        );
+    }
+    let response = fs
+        .open_at(
+            protocol::Header {
+                flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_RETAIN_FIFO,
+                ..Default::default()
+            },
+            b"/target-file",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    assert_eq!(response.header.flags, 0);
+    assert!(response.payload.is_empty());
+    fs.provider_close(response.header.open_id).unwrap();
+}

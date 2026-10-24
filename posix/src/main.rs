@@ -51,6 +51,10 @@ mod socket_gc_native;
 #[cfg(target_os = "mochios")]
 mod terminal_namespace_native;
 
+#[cfg(all(target_os = "mochios", mochios_fifo_inode_probe_187))]
+#[path = "../tests/support/native_fifo_inode.rs"]
+mod native_fifo_inode;
+
 #[cfg(target_os = "mochios")]
 const PTY_SYNC_MAGIC: [u8; 4] = *b"PTYS";
 
@@ -176,6 +180,8 @@ fn main() {
         endpoint: filesystem_endpoint,
         device_endpoint: Some(provider_endpoint_handle),
     };
+    #[cfg(mochios_fifo_inode_probe_187)]
+    native_fifo_inode::run(&filesystem);
     let _pty_namespace = match terminal_namespace_native::prepare(&filesystem) {
         Ok(directory) => directory,
         Err(error) => {

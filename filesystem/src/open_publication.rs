@@ -25,7 +25,7 @@ pub fn publish(
     publisher: &mut impl Publisher,
 ) -> Result<IpcObjectHandle, i32> {
     let external = service.external_open(open_id)?;
-    let rights = if external.is_some() {
+    let rights = if external.is_some() || service.is_fifo_description(open_id)? {
         METADATA_RIGHTS
     } else {
         ordinary_rights
